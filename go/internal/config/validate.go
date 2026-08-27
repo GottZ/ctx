@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
@@ -69,14 +70,15 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
-	issues = append(issues, validateDistill(c)...)       // V22, V23, V24, V25
+	issues = append(issues, validateDistill(c)...)       // V22, V23, V24, V25, V27
 	return issues
 }
 
-// validateDistill holds the four cross-field invariants of the distiller group
-// (design/03 §5.4, §5.5, §6.4; wave A03-W03-3). All four are fatal: boot drops
-// the offending override, a settings PUT is a 422 — the class every "renders as
-// configured, acts as something else" knob in this file gets.
+// validateDistill holds the cross-field invariants of the distiller group
+// (design/03 §5.4, §5.5, §6.4; wave A03-W03-3, plus V27 from wave C2-8). All of
+// them are fatal: boot drops the offending override, a settings PUT is a 422 —
+// the class every "renders as configured, acts as something else" knob in this
+// file gets.
 //
 // The group has no consumer yet. That is deliberate and it is exactly why the
 // checks come WITH the keys rather than after them: the arm that will read
@@ -134,6 +136,45 @@ func validateDistill(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "distill.block_sensitivity", Severity: SeverityError,
 			Msg: fmt.Sprintf("distill.block_sensitivity %q is below the %q floor — insight blocks carry raw foreign tool output, and every later consumer (embed backfill, dream, digest, synthesis) derives which backends may see a block from this value alone",
 				d.BlockSensitivity, backends.SensInternal)})
+	}
+
+	// V27 — distill.category must name a category the derived layer OWNS.
+	// Normalized in place first (trim + lower), for the V22 reason one line up
+	// and for a second one that is specific to this key: the value is half of
+	// the arm's upsert identity, so " Session-Insights " would not merely walk
+	// past a check, it would CREATE a category that differs byte-wise from the
+	// reserved one while reading as the same word.
+	//
+	// THIS IS THE RECONCILIATION derived/reserved.go:24-30 delegates to the arm
+	// wave, and it takes the SECOND of the two ways that comment names ("either
+	// by pinning the key to this value or by refusing a distill.category outside
+	// this list"). Refusing, not pinning, for four reasons:
+	//
+	//  1. Pinning means deleting an operator-visible, hot-mutable, documented
+	//     settings key. A key that renders in GET /api/settings and is silently
+	//     ignored is the "renders as configured, acts as something else" class
+	//     this file exists to refuse; deleting it outright breaks a surface that
+	//     is contract, and A03/A02-4 add further distill.* keys around it.
+	//  2. Refusing keeps the security list where §4.3.1 puts it — code-owned in
+	//     internal/derived, "Mechanismus, nicht Politik". The key stays a CHOICE
+	//     AMONG reserved values and never a way OUT of the reservation, which is
+	//     exactly the property the comment asks for.
+	//  3. A pin could only ever pin ONE arm. ReservedCategories carries two
+	//     entries because two arms write into it; the refusal covers both shapes
+	//     with one rule.
+	//  4. It is the same shape as V22/V23 right above — same 422 surface, same
+	//     boot-time attribution by Field, testable without a running arm.
+	//
+	// EMPTY IS REFUSED TOO, and that is not pedantry: the type default is
+	// "session-insights", so an empty value can only come from an operator
+	// override, and it would put the arm's blocks into the category "" — outside
+	// every reservation, invisible to reservedCategoryReject, and free for any
+	// client to upsert onto.
+	d.Category = strings.ToLower(strings.TrimSpace(d.Category))
+	if !derived.IsReservedCategory(d.Category) {
+		issues = append(issues, Issue{Field: "distill.category", Severity: SeverityError,
+			Msg: fmt.Sprintf("distill.category %q is not a category of the derived layer (%s) — the arm's category is half of its upsert identity AND the reservation that keeps clients out of it (403 reserved_category), so a value outside this list would move the arm out of its own protection",
+				d.Category, strings.Join(derived.ReservedCategories, ", "))})
 	}
 
 	issues = append(issues, validateDistillBudget(d)...) // V24

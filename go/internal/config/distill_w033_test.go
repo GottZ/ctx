@@ -248,6 +248,57 @@ func TestDistillKeysAreGlobalOnly(t *testing.T) {
 	}
 }
 
+// TestDistillCategoryStaysReserved is V27, the reconciliation wave C2-8 owes
+// derived/reserved.go ("the arm wave is where the key and the reservation have
+// to be reconciled — either by pinning the key to this value or by refusing a
+// distill.category outside this list"). It takes the refusing way.
+//
+// THE GAP IT CLOSES, measured on the pre-wave tree (2026-08-27): every value
+// below — "knowledge", "beliebig", " Session-Insights " and "" — passed Validate
+// with ZERO issues on the field and reached the arm unchanged. The arm's
+// category is BOTH half of its upsert identity AND the reservation that answers
+// 403 reserved_category to a client (handler.reservedCategoryReject over
+// derived.IsReservedCategory), so an operator who moved the key moved the arm
+// out of its own protection: its blocks would land in a category any key may
+// upsert onto.
+//
+// The DIRECTION of the coupling is the point, and the accepts assert it: both
+// reserved categories are legal values, so the key stays an operator's choice
+// AMONG reserved names. It is never a list an operator can extend — config
+// reads derived.ReservedCategories, and nothing an operator writes adds to it.
+func TestDistillCategoryStaysReserved(t *testing.T) {
+	for _, tc := range []struct {
+		category string
+		want     Severity
+	}{
+		{"knowledge", SeverityError}, // a real, client-writable category
+		{"beliebig", SeverityError},  // any unreserved name
+		{"", SeverityError},          // the empty category: outside every reservation
+		{"session-insights", -1},     // the default, the insight arm's own
+		{"catalog", -1},              // the catalogue arm's own
+		{"  Session-Insights  ", -1}, // normalization, not a bypass
+	} {
+		c := validCfg(t, map[string]string{"distill.category": tc.category})
+		issues := Validate(c)
+		if got := severityFor(issues, "distill.category"); got != tc.want {
+			t.Errorf("distill.category %q severity = %v, want %v: %v",
+				tc.category, got, tc.want, issuesOn(issues, "distill.category"))
+		}
+	}
+
+	// Normalization IN PLACE (the V22 pattern), and here it carries more than
+	// tidiness: the value becomes the block's category verbatim, so a padded or
+	// shift-keyed spelling would create a category that READS reserved and is
+	// not — byte-exactly the state IsReservedCategory folds case to prevent on
+	// the client side.
+	c := validCfg(t, map[string]string{"distill.category": "  Session-Insights  "})
+	Validate(c)
+	if c.Distill.Category != "session-insights" {
+		t.Errorf("distill.category after Validate = %q, want %q (normalized in place)",
+			c.Distill.Category, "session-insights")
+	}
+}
+
 // issuesOnPrefix collects every issue whose field starts with prefix — the
 // group-wide form of issuesOn, used to assert that a whole group validates
 // clean rather than one key at a time.

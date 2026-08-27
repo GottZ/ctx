@@ -213,9 +213,19 @@ func TestMigration143UntrustedSplit(t *testing.T) {
 
 // TestDerivedSeedsMatchBuiltin is the unit-level half of the lockstep gate: the
 // migration's config literals must decode to EXACTLY the compiled-in policies.
-// Unlike TestToolSeedsMatchBuiltin there is no carve-out here — 143 seeds the
-// END state, so a single field of drift in either direction is a bug, not a
-// later migration's business.
+//
+// SCOPE, since wave C2-8: 143 is the SEED state, not the end state — migration
+// 148 adds write.internal_only to both rows afterwards, exactly as 138 added
+// retrieval.untrusted to 136's rows. TestToolSeedsMatchBuiltin carries the same
+// carve-out in the same shape, and for the same reason: exactly one field may
+// differ between these literals and builtin.go, in exactly one direction (seed
+// false, builtin true). Everything else still has to match field for field.
+//
+// The carve-out is ASSERTED, not assumed, on BOTH sides — if either moves, the
+// carve-out itself is what goes red instead of silently widening into
+// "write.internal_only never matters here". The end state after the WHOLE chain
+// is TestRegistryGolden_Integration's business, and that stays the lockstep
+// authority.
 func TestDerivedSeedsMatchBuiltin(t *testing.T) {
 	s := builtinTestSet(t)
 	for name, raw := range migration143Configs(t) {
@@ -223,14 +233,26 @@ func TestDerivedSeedsMatchBuiltin(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode seed %q: %v", name, err)
 		}
+		if seed.Write.InternalOnly {
+			t.Errorf("migration 143 seed %q already carries write.internal_only — 148 would be a "+
+				"no-op and this normalisation is now hiding a real drift", name)
+		}
 		got, ok := s.Resolve(name)
 		if !ok {
 			t.Fatalf("builtin set carries no %q — migration/builtin drift (a builtin.go entry "+
 				"without a migration makes the registry golden red, and the reverse leaves the "+
 				"compiled-in fallback blind to a type the DB serves)", name)
 		}
+		if !got.Write.InternalOnly {
+			t.Errorf("builtin %q lost write.internal_only — migration 148 sets it, so the registry "+
+				"golden would go red against the compiled-in set, and the type would be claimable "+
+				"the moment the compiled derived name list is refactored", name)
+		}
+		got.Write.InternalOnly = false
+
 		if diff := policyDiff(seed, got); diff != "" {
-			t.Errorf("seed/builtin drift for %q:\n%s", name, diff)
+			t.Errorf("seed/builtin drift for %q (write.internal_only normalised away — "+
+				"migration 148 owns that field):\n%s", name, diff)
 		}
 	}
 }

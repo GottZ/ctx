@@ -1,0 +1,139 @@
+-- =============================================================================
+-- 148_write_internal_only.sql — write.internal_only auf 'insight' + 'catalog'
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Wissens-Ebenen, Welle C2-8 (Entscheid E2-1 Lane A). design/02 §3.1 (das Feld
+-- Feld-für-Feld), §5.1 Bruchpfad BA14 ("Der neue Typ ist ein guard- und
+-- dedup-freier Schreibkanal für jeden Key"), §7 A02-1 (die Negativ-Proben
+-- "Zero-Value-Registry" und "Schreibkanal"), Masterplan K3 (Typ heißt 'insight',
+-- nicht 'session-insight').
+--
+-- NUMMER: Masterplan §2 K1 — "wer zuerst landet, nimmt die nächste freie".
+-- Gelandet sind 146 (audit-trail-Damping) und 147 (FTS-Id-Tiebreak), also ist
+-- 148 die nächste freie. Der Design-Text führt das Feld noch unter der
+-- vorläufigen Nummer 140; verbindlich ist die Nummer hier.
+--
+-- WAS DIESE MIGRATION IST: reine Registry-DATEN. Ein jsonb-Pfad auf zwei
+-- Zeilen, kein Schema, kein Index, kein Trigger, kein Schreiber. Kein
+-- Bestandsblock wird angefasst.
+--
+-- WAS DAS FELD BEDEUTET:
+-- write.internal_only = true heißt "diese Typ-Zeile ist ein SERVER-Schreibziel".
+-- Der abgeleitete Schreiber ruft store.UpsertBlock direkt und passiert dabei
+-- KEIN Handler-Tor — genau die Naht, die S1/S2/S3 aus W01-2a schon offenlassen
+-- (store/blocks.go, S3-Guard). Auf den Client-Oberflächen dagegen antwortet
+-- handler.validateTypeNameAgainstSet ab dieser Welle mit 422 auf einen solchen
+-- Namen, auf REST /api/store, auf beiden MCP-store-Armen, auf manage-update und
+-- im confirm-Kern — alle fünf hängen an derselben Funktion. (/api/ingest führt
+-- kein type-Feld: IngestChunk hat keins, und claimReject steigt bei leerem
+-- Typnamen vor der Prüfung aus — die Oberfläche gibt es auf dieser Achse nicht.)
+--
+-- WARUM DAS FELD, OBWOHL W01-2a DIE BEIDEN NAMEN SCHON SPERRT:
+-- Die Sperre aus W01-2a hängt an derived.StratumOf, einer einkompilierten
+-- Namensliste, und sie bleibt die ERSTE Prüfung — sie trägt auch dann, wenn
+-- diese Zeile gelöscht, umbenannt oder aus einem degradierten Snapshot
+-- serviert wird (Bruchpfad B15). Das Feld hier ist die allgemeine Hälfte
+-- derselben Antwort und kauft drei Dinge, die die Liste nicht kann:
+--   1. Die Eigenschaft ist über GET /api/types SICHTBAR. Ein Operator, der
+--      wissen will, welche Typen er nicht beanspruchen kann, liest sie in der
+--      Registry statt im Go-Quelltext.
+--   2. Ein künftiges Server-Schreibziel, das NICHT zur Ableitungsordnung
+--      gehört (StratumOf > 0), bekommt die Sperre ohne Code-Änderung.
+--   3. Sie gibt dem TYP-Schreibpfad einen Boden, gegen den er abweisen kann
+--      (handler.internalOnlyWriteViolation) — und das ist der Teil, der ein
+--      OFFENES Loch schließt statt einen bestehenden Mechanismus zu
+--      verbreitern. Gemessen am unveränderten Baum, 2026-08-27:
+--      `PUT /api/types/insight` mit dem Rumpf `{"config":{"v":1}}` antwortete
+--      200 und ließ die Zeile als `{"v":1}` stehen — retrieval=full-pass,
+--      guard.check=true, guard.candidate=true, dream.linkable=true,
+--      digest=true, overview=true, untrusted=false, classify.priority=100:
+--      jede Zusage aus 143 in EINEM Schreibvorgang umgedreht, weil eine Config
+--      eine VOLLSTÄNDIGE Policy ist und applyEnvelope nur VORHANDENE Felder
+--      über die weiten Defaults legt. Die Namensliste deckt das nicht ab: sie
+--      regelt, wer den Typ auf einem BLOCK beanspruchen darf, nie was die
+--      POLICY des Typs sagt.
+--      Der Boden ist die EINKOMPILIERTE Zeile (blocktype.BuiltinPolicy), nicht
+--      die Tabellenzeile — sonst wäre die Regel selbstreferenziell: eine Zeile,
+--      die das Flag einmal verloren hat, senkte den Maßstab für jeden weiteren
+--      Schreibvorgang. Diese Migration zieht die Tabellenzeile auf denselben
+--      Wert nach, damit Registry-Ansicht und Boden übereinstimmen.
+--
+-- WARUM BEIDE ZEILEN IN EINER MIGRATION:
+-- Dieselbe Begründung wie in 143 (Masterplan K2) und derselbe Satz aus §3.1:
+-- "catalog braucht dieselbe Eigenschaft, und das Feld sollte einmal für beide
+-- definiert werden". Beide sind arm-interne Schreibziele mit identischer
+-- guard-freier, dedup-freier Haltung; eine Zeile ohne die andere wäre eine
+-- Asymmetrie ohne Grund.
+--
+-- WARUM EINE EIGENE MIGRATION UND KEIN EDIT AN 143:
+-- Die Historie ist forward-only, und die Grenze ist der Commit, nicht der
+-- Applikationszustand einer Instanz (138er/146er-Doktrin). .hooks/pre-commit
+-- Gate 3 verlangt für jede Nicht-Kommentar-Änderung an einer Migration eine
+-- mitgestagte Manifest-Regeneration, die für eine reine Datenzeile
+-- byte-identisch und damit unstagebar wäre. 143 ist außerdem seit dem
+-- v5.8.0-Schnitt LIVE ANGEWANDT (live geprüft 2026-08-27: 11 Zeilen in
+-- context_block_types, darunter 'insight' und 'catalog', alle ohne
+-- config ? 'write') — der Merker in 143 ("bleibt bis zum nächsten RC-Schnitt
+-- UNDEPLOYT") ist eingelöst und überholt.
+--
+-- WARUM jsonb_set MIT EXISTENZ-GUARD UND KEIN CONFIG-NEUSCHREIBEN:
+-- Muster aus 138 (`NOT (config->'retrieval' ? 'untrusted')`), eine Ebene höher
+-- angesetzt, weil der Abschnitt 'write' auf diesen Zeilen komplett fehlt.
+-- jsonb_set(..., create_missing => true) legt genau diesen einen Pfad an und
+-- lässt retrieval, guard, dream, digest, overview, parent und classify
+-- unangetastet — ein vollständiges Neuschreiben würde jedes Operator-Tuning
+-- überschreiben, das seit dem 143er-Seed in der laufenden Registry nachgezogen
+-- wurde (M107-Doktrin: Faktoren und Muster sind ohne Deploy nachziehbar).
+-- Der Guard ist ein EXISTENZ-Guard, kein Wert-Guard: er greift genau dann
+-- nicht mehr, wenn der Abschnitt da ist, egal mit welchem Inhalt. Damit ist ein
+-- Operator, der 'write' bewusst gesetzt hat, unberührt — und der zweite Lauf
+-- trifft null Zeilen.
+--
+-- WARUM ALLE SCOPES UND NICHT NUR '_global' (Abweichung vom 146er-Muster):
+-- Die Bedingung hängt am NAMEN, nicht am Scope, weil der Riegel es auch tut:
+-- handler.internalOnlyWriteViolation läuft in JEDEM Scope, und der Boden ist
+-- der einkompilierte, nicht die Basis-Zeile. Eine Tenant-Overlay-Zeile
+-- gleichen Namens, die den Schlüssel nicht trägt, wäre für ihren Tenant ein
+-- beanspruchbarer 'insight' — dieselbe Lücke eine Merge-Ebene tiefer
+-- (buildTenantSet lässt die Tenant-Zeile GEWINNEN). Der Wert, den diese
+-- Migration schreibt, IST der Boden für diese beiden Namen; ihn überall
+-- nachzuziehen hält Registry-Ansicht und Boden deckungsgleich. Live existiert
+-- heute keine solche Zeile (read-only geprüft 2026-08-27: alle 11 Zeilen stehen
+-- auf scope='_global'); die Bedingung ist für den Bestand anderer Instanzen da,
+-- nicht für diesen. Aus demselben Grund fehlt auch `builtin = true`: eine
+-- Overlay-Zeile trägt builtin=false.
+-- Der Test TestMigration148SetsWriteInternalOnly ASSERTIERT das Fehlen beider
+-- Prädikate, damit ein späteres "Aufräumen" nach 146er-Muster diese Zusage
+-- nicht still mitnimmt.
+--
+-- WARUM OHNE DEPLOY WIRKSAM: trg_block_types_notify (113_baseline.sql, aus 072)
+-- feuert auf diesen UPDATE den ctx_settings_write-Kanal; der SettingsWrite-
+-- Handler lädt die Registry neu. Die REIHENFOLGE ist trotzdem tragend und
+-- stimmt: cmd/ctxd/main.go fährt store.RunMigrations (:367) VOR
+-- blocktype.NewRegistry (:400), also ist diese Migration angewandt, bevor der
+-- erste Reload die Zeilen dekodiert. Ein Binary dieser Welle sieht die Zeilen
+-- nie ohne den Schlüssel.
+--
+-- LOCKSTEP MIT internal/blocktype/builtin.go: dort tragen 'insight' und
+-- 'catalog' im selben Commit Write{InternalOnly: true}. Der Drift-Gate ist
+-- TestRegistryGolden_Integration — er appliziert die ECHTE Kette (143 seedet
+-- ohne 'write', 148 zieht nach) und vergleicht den ENDZUSTAND der Zeilen gegen
+-- builtinPolicies(); ein Drift in beide Richtungen ist rot.
+-- TestMigration148SetsWriteInternalOnly ist der container-freie Vorposten
+-- darauf: er liest diese Datei aus migrations.FS und pinnt Namen, Pfad, Wert
+-- und Guard, ohne eine Datenbank zu brauchen. TestDerivedSeedsMatchBuiltin
+-- trägt seit dieser Welle die passende, ASSERTIERTE Ausnahme (143 ist der
+-- Seed-, nicht der Endzustand — Muster aus TestToolSeedsMatchBuiltin/138).
+--
+-- NICHT IN DIESER MIGRATION: die E-4-Sichtbarkeitsschaltung (excluded ->
+-- damped mit dem gemessenen Faktor aus M-W8) und jede andere Registry-Zeile.
+-- Die neun übrigen Typen bleiben unberührt und claimable — 'checkpoint' zum
+-- Beispiel wird ausdrücklich von einem Client (dem Plugin) geschrieben.
+-- =============================================================================
+
+SET LOCAL lock_timeout = '2s';
+
+UPDATE context_block_types
+   SET config = jsonb_set(config, '{write}', '{"internal_only": true}'::jsonb, true)
+ WHERE name IN ('insight', 'catalog')
+   AND NOT (config ? 'write');

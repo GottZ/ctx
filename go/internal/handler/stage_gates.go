@@ -122,7 +122,7 @@ func runStageWriteGates(
 // claim this type" is decided, so a fourth write surface cannot grow a fifth
 // answer.
 //
-// Two refusals, in this order:
+// Three refusals, in this order (the third since C2-8):
 //
 //  1. I7/S1 (design D-01 §4.3.1, §5.2 B14): a type of the DERIVED layer is
 //     never client-claimable. It is checked FIRST, before the registry is even
@@ -134,9 +134,31 @@ func runStageWriteGates(
 //     (the classifier never touches the block again), guard.check=false,
 //     guard.candidate=false, untrusted=false and the optics of a proven
 //     derivative — none of which a client may hand itself.
+//
 //  2. the registry membership check (WF T10), fail-closed on a nil set: an
 //     unvalidated name must never reach the manual-provenance write path
 //     (§5.1(b)).
+//
+//  3. BA14/C2-8 (design D-02 §3.1, §5.1 BA14): the resolved policy's
+//     write.internal_only. Same verdict CLASS as (1) — 422 reserved_type — and
+//     that is deliberate: the two checks answer the same question ("is this
+//     type the client's to claim?") from two authorities, and splitting the
+//     code would ask a client to branch on WHICH authority refused, a
+//     distinction with no consequence on its side. Only the message differs,
+//     which is exactly what rejectClass.reject is for.
+//
+//     It runs AFTER the membership check, not before, and that order is what
+//     makes it fail-closed without a fail-open predicate: an unknown name is
+//     already gone at (2), so the policy read below is always a policy that
+//     actually resolved. Reading a not-ok Resolve here would hand back the zero
+//     Policy — write.internal_only=false — and answer "claimable" for a name the
+//     registry never heard of.
+//
+//     (1) still stands in front of it and is not redundant: the derived name
+//     list is compiled in, so it refuses insight/catalog even when the registry
+//     row is dropped, renamed or served from a degraded snapshot (bruchpfad
+//     B15) — the state in which the row-carried flag below is exactly what is
+//     missing.
 func validateTypeNameAgainstSet(set *blocktype.Set, name string) *writeReject {
 	if derived.IsDerivedType(name) {
 		return classReservedType.reject(fmt.Sprintf(
@@ -145,8 +167,13 @@ func validateTypeNameAgainstSet(set *blocktype.Set, name string) *writeReject {
 	if set == nil {
 		return classUnknownType.reject("type: block-type registry not wired — cannot validate type names")
 	}
-	if _, ok := set.Resolve(name); !ok {
+	pol, ok := set.Resolve(name)
+	if !ok {
 		return classUnknownType.reject(fmt.Sprintf("type: unknown block type %q (see manage type-list)", name))
+	}
+	if pol.Write.InternalOnly {
+		return classReservedType.reject(fmt.Sprintf(
+			"type: %q is an internal write target (write.internal_only) — its blocks are written by the server, not claimed by a client", name))
 	}
 	return nil
 }

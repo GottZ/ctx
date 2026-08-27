@@ -21,13 +21,26 @@ import "strings"
 //   - "session-insights" is the DEFAULT of distill.category (config.go:1831),
 //     which is the insight arm's category and half of its upsert identity.
 //
-// The second entry is the one honest gap in this list, and it is named rather
-// than papered over: distill.category is an operator-settable key, so an
-// operator who moves the insight arm to another category moves it OUT of this
-// reservation. Following the key here would make a security list configurable,
-// which §4.3.1 rejects ("Mechanismus, nicht Politik"); the arm wave (D-02) is
-// where the key and the reservation have to be reconciled — either by pinning
-// the key to this value or by refusing a distill.category outside this list.
+// The second entry USED TO BE the one honest gap in this list: distill.category
+// is an operator-settable key, so an operator who moved the insight arm to
+// another category moved it OUT of this reservation. Following the key here
+// would have made a security list configurable, which §4.3.1 rejects
+// ("Mechanismus, nicht Politik").
+//
+// RECONCILED in wave C2-8 (D-02 arm wave), by the second of the two ways this
+// comment offered — REFUSING a distill.category outside this list, not pinning
+// the key to a value. The rule is V27 in config/validate.go: the key is
+// normalized (trim + lower) and then has to be a member of THIS slice, so it
+// stays an operator's choice AMONG reserved categories and can never become a
+// way out of the reservation. Pinning was rejected there for four reasons the
+// rule carries at its own site; the one that decides it is that a pin means
+// deleting an operator-visible, hot-mutable settings key, and a key that
+// renders in GET /api/settings while being ignored is the very breakage class
+// that file exists to refuse.
+//
+// The direction of the coupling is what matters: config reads this list, this
+// list never reads config. Adding an entry here widens what an operator may
+// choose; nothing an operator writes can add an entry.
 var ReservedCategories = []string{
 	"catalog",
 	"session-insights",

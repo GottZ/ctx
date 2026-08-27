@@ -166,8 +166,34 @@ func (h *ManageHandler) handleTypeCreate(w http.ResponseWriter, r *http.Request,
 	}
 	// THE validation authority (§3.3): name format, envelope version, strict
 	// keys, cross-field rules, caps — same code path as the reload decoder.
-	if _, err := blocktype.DecodePolicy(p.Name, store.GlobalScope, false, p.IsDefault, cfg); err != nil {
+	pol, err := blocktype.DecodePolicy(p.Name, store.GlobalScope, false, p.IsDefault, cfg)
+	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	// D6 overlay gate (E2-6, wave C2-4) — the THIRD site of the same write
+	// logic, added in C2-8's review round 2 (finding #1). Being pinned to
+	// '_global' (:202) exempts this action from the ten NARROWING axes — those
+	// compare an overlay against a base row and overlayWriteViolation returns
+	// early for the base namespace itself — but NOT from the write.internal_only
+	// clause, which measures against the COMPILED floor and therefore runs in
+	// every scope (types_write.go internalOnlyWriteViolation).
+	//
+	// The state it covers is the one bruchpfad B15 names: while the '_global'
+	// row of a builtin exists, CreateBlockType answers ErrBlockTypeExists (409)
+	// and this path is unreachable for that name — but the tree treats the
+	// missing row as a real state (registry.go logs "builtin row missing from
+	// table — compiled-in default stays active"), and there this action
+	// RE-CREATED the row from a zero-value body, dropping the lock the sibling
+	// transport refuses to drop. Measured before the fix: 200, config `{"v": 1}`,
+	// write.internal_only=false. A gate on only the REST seam would be the
+	// divergent-gate anti-pattern the types_write.go header names (§5.1).
+	if msg, err := overlayWriteViolation(ctx, h.pool, p.Name, store.GlobalScope, pol); err != nil {
+		slog.Error("manage: type-create overlay base", "error", err, "request_id", reqID)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
+		return
+	} else if msg != "" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 		return
 	}
 
@@ -237,7 +263,7 @@ func (h *ManageHandler) handleTypeUpdate(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		// D6 overlay gate (E2-6, wave C2-4) — the SECOND transport of the same
-		// write logic. type-create is pinned to '_global' (:176) and cannot
+		// write logic. type-create is pinned to '_global' (:202) and cannot
 		// produce an overlay, but this action patches through
 		// typeVisibleScopes(ar), which carries ar.TenantID: a server-admin key
 		// with a tenant id reaches the tenant row from here. A gate on only the

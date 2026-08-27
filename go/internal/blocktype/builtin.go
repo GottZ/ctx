@@ -370,6 +370,17 @@ func builtinPolicies() []Policy {
 		// silently become the START value the moment the policy flips, which is
 		// exactly the "Startwert" K7 refused.
 		//
+		// BOTH CARRY write.internal_only=true since C2-8 (D-02 §3.1, bruchpfad
+		// BA14; the migration half is 148). It is the REGISTRY half of the write
+		// lock whose compiled half is derived.StratumOf: these two types are the
+		// only ones in the set that are simultaneously guard.check=false,
+		// guard.candidate=false and retrieval-eligible once E-4 flips them to
+		// damped, so a client that could name them would own a corpus channel
+		// that never enters the dedup queue and never gets archived as a
+		// near-duplicate. The field additionally gives DecodePolicy a floor to
+		// refuse against, which is what stops a `{"v":1}` PUT on these two rows
+		// from resetting the whole posture above to its wide defaults.
+		//
 		// The rest of the posture is shared and total: guard.check=false AND
 		// guard.candidate=false (a derivative must neither archive its ORIGINAL
 		// nor itself — the second would orphan its own regeneration),
@@ -401,6 +412,7 @@ func builtinPolicies() []Policy {
 			Digest:   DigestPolicy{Include: false},
 			Overview: OverviewPolicy{Include: false},
 			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Write:    WritePolicy{InternalOnly: true},
 			Classify: ClassifyRules{Priority: 17, TitlePatterns: []string{"session insights "}},
 		},
 		// catalog: anchored on a cluster topic — which drifts, dies and merges —
@@ -426,6 +438,7 @@ func builtinPolicies() []Policy {
 			Digest:   DigestPolicy{Include: false},
 			Overview: OverviewPolicy{Include: false},
 			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Write:    WritePolicy{InternalOnly: true},
 			Classify: ClassifyRules{Priority: 16, TitlePatterns: []string{"katalog #"}},
 		},
 	}

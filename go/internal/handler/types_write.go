@@ -122,17 +122,78 @@ func forbidTypeWrite(w http.ResponseWriter) {
 // return is a genuine failure to RESOLVE the base (DB error, corrupt '_global'
 // row) and must fail the request closed — never fall through to the write.
 func overlayWriteViolation(ctx context.Context, pool *pgxpool.Pool, name, scope string, overlay blocktype.Policy) (string, error) {
-	if scope == store.GlobalScope {
-		return "", nil // the '_global' namespace IS the base; it has nothing to narrow against
+	// The narrowing clauses first, unchanged, and ONLY outside the base
+	// namespace: '_global' IS the base, it has nothing to narrow against.
+	if scope != store.GlobalScope {
+		if msg := hardDenyOverlayViolation(name, overlay); msg != "" {
+			return msg, nil
+		}
+		base, ok, err := overlayBasePolicy(ctx, pool, name)
+		if err != nil {
+			return "", err
+		}
+		// no base = a genuinely tenant-own type; the narrowing rule does not
+		// apply — but the C2-8 clause below still does, and it is a no-op for
+		// such a name (no compiled floor, nothing to keep).
+		if ok {
+			if msg := blocktype.NarrowingViolation(base, overlay); msg != "" {
+				return msg, nil
+			}
+		}
 	}
-	if msg := hardDenyOverlayViolation(name, overlay); msg != "" {
-		return msg, nil
+	// C2-8, LAST and in EVERY scope. Last, because it would otherwise rename
+	// the axis of an already-covered refusal: the C2-4 gate probes a tenant
+	// overlay that lifts `insight` to full-pass and asserts the answer names
+	// retrieval.policy — such a body drops the write lock as well, and this
+	// clause running first turned that 422 into a write.internal_only verdict
+	// (measured: TestC24OverlayWriteGate/A2 red on exactly that string). Every
+	// scope, because unlike the axes above its base is COMPILED IN rather than
+	// a row, so the base namespace is the one place it has something to say.
+	return internalOnlyWriteViolation(name, overlay), nil
+}
+
+// internalOnlyWriteViolation is the Zero-Value bolt of wave C2-8 (design D-02
+// §3.1 "Zero-Value-Falle in DecodePolicy", §7 A02-1 negative probe
+// "Zero-Value-Registry"). Empty string = admissible.
+//
+// THE HOLE, measured on the pre-wave tree (2026-08-27): a server-admin
+// `PUT /api/types/insight` with the body `{"config":{"v":1}}` answered 200 and
+// left the row at retrieval=full-pass, guard.check=true, guard.candidate=true,
+// dream.linkable=true, digest=true, overview=true, untrusted=false,
+// classify.priority=100 — every promise of migration 143 inverted in ONE write.
+// Two properties combined into it: a config is a COMPLETE policy and
+// DecodePolicy default-fills every absent section with its WIDE value
+// (policy.go), and overlayWriteViolation left a '_global' write ungated
+// entirely, because there is no base ROW to narrow against. The I7/S1 name lock
+// does not cover it either — that one
+// governs who may CLAIM the type on a BLOCK write, never what the type's policy
+// says.
+//
+// WHY THE BASE IS THE COMPILED FLOOR AND NOT THE ROW. Reading the current row
+// would make the rule self-referential: once a row had lost the flag, every
+// later write would be measured against the loosened value and the bolt would
+// never fire again. blocktype.BuiltinPolicy is the one base an API write cannot
+// have moved. It is also why this clause is NOT an eleventh axis in
+// NarrowingViolation: that function compares an overlay against a BASE ROW, and
+// on the '_global' row itself there is no such base.
+//
+// ONE AXIS, DELIBERATELY. This is not "a '_global' builtin may only narrow its
+// floor", and it must not grow into one: masterplan K7 / board decision E-4
+// plan exactly one WIDENING data position on these two rows (retrieval
+// excluded -> damped with the swept factor from M-W8), and a floor check over
+// the retrieval axis would take that reversible setting away from the API. The
+// remaining axes of a zero-value body stay reachable for a server-admin on a
+// '_global' row; that is the general narrowing doctrine, which overlay_
+// narrowing.go names as D-01's decision rather than this wave's.
+func internalOnlyWriteViolation(name string, overlay blocktype.Policy) string {
+	floor, ok := blocktype.BuiltinPolicy(name)
+	if !ok || !floor.Write.InternalOnly || overlay.Write.InternalOnly {
+		return ""
 	}
-	base, ok, err := overlayBasePolicy(ctx, pool, name)
-	if err != nil || !ok {
-		return "", err // no base = a genuinely tenant-own type; the rule does not apply
-	}
-	return blocktype.NarrowingViolation(base, overlay), nil
+	return fmt.Sprintf("write.internal_only: %q is a server write target and stays "+
+		"write.internal_only=true in every scope — its blocks are written by ctxd through the "+
+		"internal path, never claimed by a client; send the complete policy including "+
+		`{"write":{"internal_only":true}}`, name)
 }
 
 // hardDenyOverlayViolation is the one clause that does NOT depend on the base.

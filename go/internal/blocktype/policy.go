@@ -193,6 +193,41 @@ type DreamPolicy struct {
 	LinkClasses []string // allowed semantic link classes; nil = all
 }
 
+// WritePolicy — who may CLAIM this type on a write surface (design D-02 §3.1,
+// bruchpfad BA14; merge point D-01 "catalog braucht dieselbe Eigenschaft, und
+// das Feld sollte einmal für beide definiert werden").
+//
+// InternalOnly marks a type whose blocks are written by ctxd itself — through
+// store.UpsertBlock, past every handler — and never by a client naming it in
+// `type`. The write surfaces answer 422 for such a name
+// (handler.validateTypeNameAgainstSet); the internal path is untouched, because
+// it never passes a handler gate.
+//
+// WHY IT IS A REGISTRY FIELD AND NOT ONLY A NAME LIST. The compiled-in list in
+// internal/derived (StratumOf) already refuses the two derived names, and it
+// stays FIRST in the gate because it holds even when the registry row is gone
+// (bruchpfad B15). This field is the general half of the same answer, and it
+// buys three things the list cannot:
+//
+//   - the property is VISIBLE on GET /api/types instead of being invisible in
+//     Go, so an operator can read which types are not theirs to claim;
+//   - a server write target that does NOT belong to the derivation order (a
+//     future arm) gets the lock without a code change;
+//   - and — the part that closes a hole rather than widening a mechanism — it
+//     gives handler.internalOnlyWriteViolation something to refuse against, so
+//     a type write that drops the lock is answered 422. Measured on the
+//     pre-wave tree: a `PUT /api/types/insight` with `{"v":1}` reset the row to
+//     full-pass, guard-checked, guard-candidate, dream-linkable and trusted in
+//     ONE write. The name list does not cover that at all — it governs who may
+//     CLAIM the type on a block, never what the type's policy says.
+//
+// The lock is a WRITE rule, not a read rule; applyWrite carries the measurement
+// behind that split.
+//
+// FALSE IS THE DEFAULT and stays it for every other type: absent = claimable,
+// which is what the eleven existing types are.
+type WritePolicy struct{ InternalOnly bool }
+
 // DigestPolicy — inclusion in the topic-map source.
 type DigestPolicy struct{ Include bool }
 
@@ -253,6 +288,7 @@ type Policy struct {
 	Digest    DigestPolicy
 	Overview  OverviewPolicy
 	Parent    ParentPolicy
+	Write     WritePolicy
 	Workflow  WorkflowPolicy
 	// StructuralLinkClasses is the allowlist of link classes writable into
 	// context_structural_links FOR blocks of this type (design/02 §4.1). The
@@ -282,6 +318,7 @@ type cfgEnvelope struct {
 	Digest    *cfgDigest    `json:"digest"`
 	Overview  *cfgOverview  `json:"overview"`
 	Parent    *cfgParent    `json:"parent"`
+	Write     *cfgWrite     `json:"write"`
 	Workflow  *cfgWorkflow  `json:"workflow"`
 	// StructuralLinkClasses is a plain top-level array (not a section) — a bare
 	// []string, absent = nil = no restriction. json.Decoder with
@@ -330,6 +367,24 @@ type cfgOverview struct {
 type cfgParent struct {
 	Mode         *string `json:"mode"`
 	Relationship *string `json:"relationship"`
+}
+
+type cfgWrite struct {
+	// InternalOnly is a pointer for FORM: the same shape cfgDigest, cfgOverview
+	// and the other section fields carry, so applyWrite reads like its siblings.
+	// The present/absent distinction the pointer preserves during decoding is
+	// NOT carried any further — applyWrite maps nil and *false onto the same
+	// plain bool (WritePolicy.InternalOnly, :229), so no consumer can tell "not
+	// set" from "set false"; both gates read the resolved bool
+	// (handler.validateTypeNameAgainstSet, handler.internalOnlyWriteViolation).
+	// Absent is false, which is what every type without the key is.
+	//
+	// The strict-key surface inside this sub-object comes from the decoder, not
+	// from the pointer: DisallowUnknownFields applies at every nesting level, so
+	// {"write":{"internal-only":true}} rejects with its key path
+	// (TestWritePolicyVocabulary/unknown_key_inside_write_rejects_with_its_path)
+	// rather than silently decoding to false.
+	InternalOnly *bool `json:"internal_only"`
 }
 
 type cfgWorkflow struct {
@@ -452,6 +507,7 @@ func applyEnvelope(p *Policy, env *cfgEnvelope) error {
 			p.Parent.Relationship = *pa.Relationship
 		}
 	}
+	applyWrite(p, env.Write)
 	if err := checkStrings(p.Name, "structural_link_classes", env.StructuralLinkClasses); err != nil {
 		return err
 	}
@@ -460,6 +516,34 @@ func applyEnvelope(p *Policy, env *cfgEnvelope) error {
 		return err
 	}
 	return applyClassify(p, env.Classify)
+}
+
+// applyWrite overlays the write section (absent = keep the wide default, i.e.
+// claimable — which is what the eleven pre-C2-8 types are).
+//
+// NO floor magic here, and that is a decision with a measured reason. An
+// earlier cut of this wave made DecodePolicy REFUSE a config that omitted the
+// key on a name whose builtin floor carries it. It works, and it costs too
+// much: registry.go turns ONE undecodable row into a failed reload for the
+// whole set (builtin-fallback for all eleven types), so every database whose
+// migration chain stops between 143 and 148 — which is what testdb.
+// SetupTestDBUpTo builds, at three call sites today — would serve a degraded
+// registry. Production cannot reach that state (cmd/ctxd/main.go runs
+// RunMigrations at :367 before NewRegistry at :400), but the facility that
+// proves a migration against its pre-state would have been lost for good.
+//
+// The lock is enforced where C2-4 put the same class of rule one wave earlier:
+// on the WRITE path (overlay_narrowing.go's opening comment, "WHY IT IS A WRITE
+// RULE AND NOT A READ RULE"). handler.overlayWriteViolation refuses a type
+// write that drops it; handler.validateTypeNameAgainstSet refuses a BLOCK write
+// that claims it. What the read path does with a row that lost the key is
+// visible rather than papered over — the golden test diffs the decoded row
+// against the compiled set, and it could not see a missing key if this function
+// silently supplied one.
+func applyWrite(p *Policy, w *cfgWrite) {
+	if w != nil && w.InternalOnly != nil {
+		p.Write.InternalOnly = *w.InternalOnly
+	}
 }
 
 // applyWorkflow overlays the workflow section (absent = keep zero = no workflow)
