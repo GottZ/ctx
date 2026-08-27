@@ -314,6 +314,9 @@ services:
     build: ./db-image
     image: pgvector-timescaledb:pg18
     restart: unless-stopped
+    # 0b-1 (E-15, 2026-08-27): parallel HNSW builds need DSM headroom; the
+    # Docker default of 64 MB starves them (plan corpus F-27/M39).
+    shm_size: 4gb
     networks:
       - n8nintern
     environment:
