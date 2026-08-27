@@ -72,11 +72,22 @@ var shadowChainRoles = []string{backends.RoleEmbed, backends.RoleTranslate}
 // registry generation, and a plain append writes into its spare capacity when
 // there is any. That failure mode shows up only for some capacities, which is
 // precisely the kind that survives a review and ships.
+// It also DEDUPLICATES (review finding #7). `= ANY(array)` does not care about
+// repeats, but the array is bound into two statements per request and its length
+// is caller-controlled, so the request list is normalised before it becomes SQL.
+// A name already in the visible slice is dropped as well: the widening is a set
+// union, not a concatenation.
 func measureVisibleTypesFor(visible, shadow []string) []string {
 	if len(shadow) == 0 {
 		return visible
 	}
-	return append(slices.Clone(visible), shadow...)
+	out := slices.Clone(visible)
+	for _, name := range shadow {
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // forceRerankOffForShadow is G6. The reranker is not merely expected to be off
@@ -150,6 +161,20 @@ func shadowGate(req *queryRequest, isAdmin, armRanks bool, typeSet *blocktype.Se
 	// rerank judge out, and only the two together mean "no LLM sees a block".
 	if req.Synthesize == nil || *req.Synthesize {
 		return http.StatusBadRequest, "shadow_types requires synthesize:false", "synthesize not false"
+	}
+	// Length cap (review finding #7). Every entry of the list is bound into
+	// p_types_visible for BOTH measurement statements, and the list is
+	// caller-controlled — a legal name repeated 10^6 times is a legal request
+	// today and a 10^6-element text[] in two statements plus an equally large
+	// map in dropShadowResults.
+	//
+	// The registry size is the natural ceiling and needs no tuning knob: a list
+	// longer than the registry cannot name that many DISTINCT registered types,
+	// so past this bound the request is a resource claim and not a measurement.
+	// Checked BEFORE the per-name loop so an oversized list costs one comparison.
+	if len(req.ShadowTypes) > len(typeSet.Names()) {
+		return http.StatusBadRequest, "shadow_types is longer than the block-type registry",
+			fmt.Sprintf("list length %d exceeds the registry size %d", len(req.ShadowTypes), len(typeSet.Names()))
 	}
 	const typeMsg = "shadow_types names a type that is not shadow-measurable"
 	for _, name := range req.ShadowTypes {

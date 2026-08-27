@@ -812,9 +812,26 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Ensures freshly stored blocks are immediately searchable. Per block the
 	// chain resolves with THAT block's floor-adjusted sensitivity (F3 §2.3
 	// gate table, embed-backfill row).
+	//
+	// M-W2 (design/05 §4.2, review finding #1): NOT on the shadow path. The
+	// chain-locality obligation resolves Chain(role, querySens, ar.HomeScope);
+	// this loop resolves Chain(RoleEmbed, floor.Apply(blockSensitivity,
+	// blockScope), blockScope) — a second chain under two different keys, both
+	// of which can WIDEN it past what the gate inspected (a lower required level
+	// admits backends Trust.Allows had excluded, a foreign block scope changes
+	// the VisibleTo set outright), and title+content travel over it.
+	//
+	// Skipping is the smaller correction of the two the review offered, and it
+	// is the better measurement besides: a write in the middle of a read-only
+	// measurement request contradicts the B-W2 determinism doctrine, and an
+	// embedding created DURING a sweep changes the corpus the sweep is
+	// measuring. Nothing is lost — the pending block keeps its place in the
+	// scheduler's own backfill and in the next ordinary query.
 	floor := cfg.Pool.ScopeSensitivityFloor
-	if backfilled := h.backfillPending(ctx, floor, ar.HomeScope, h.embedAdmission(), cfg); backfilled > 0 {
-		slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
+	if len(req.ShadowTypes) == 0 {
+		if backfilled := h.backfillPending(ctx, floor, ar.HomeScope, h.embedAdmission(), cfg); backfilled > 0 {
+			slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
+		}
 	}
 
 	// Step 4: Embed the search query with query prefix. Cached by (hash(prefix||text), model) —

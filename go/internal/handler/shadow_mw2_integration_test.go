@@ -183,6 +183,16 @@ func mw2IDs(t *testing.T, v any) []string {
 	return out
 }
 
+// mw2RepeatedList builds a JSON array naming one type n times — the shape of
+// review finding #7: every entry passes G4 and G5, and only a cap stops it.
+func mw2RepeatedList(name string, n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = `"` + name + `"`
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
 func mw2Contains(hay []string, needle string) bool {
 	for _, h := range hay {
 		if h == needle {
@@ -249,6 +259,15 @@ func TestMW2GateTable(t *testing.T) {
 			mw2Body(`,"shadow_types":["knowledge"]`), http.StatusBadRequest},
 		{"(g) G7 with include_content", true,
 			mw2Body(`,"shadow_types":["` + mw2ShadowType + `"],"include_content":true`), http.StatusBadRequest},
+		// Review finding #7: a list longer than the registry cannot name that
+		// many DISTINCT registered types, so past the cap it is a resource claim
+		// and not a measurement.
+		{"a list longer than the registry", true,
+			mw2Body(`,"shadow_types":` + mw2RepeatedList(mw2ShadowType, 500)), http.StatusBadRequest},
+		// Duplicates below the cap stay legal — caller sloppiness, not an attack —
+		// but they must not reach p_types_visible twice (pinned separately).
+		{"duplicates are accepted", true,
+			mw2Body(`,"shadow_types":["` + mw2ShadowType + `","` + mw2ShadowType + `"]`), http.StatusOK},
 		// Precedence: a non-admin never learns from the status code whether the
 		// rest of the body would have been well-formed.
 		{"(a) G1 beats every later gate", false,
@@ -270,6 +289,88 @@ func TestMW2GateTable(t *testing.T) {
 				t.Fatalf("status %d, want %d; body %s", rec.Code, tc.want, rec.Body.String())
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Review finding #3: the F-1 core — no flag can override the deny-list
+// ---------------------------------------------------------------------------
+
+// TestMW2DenyListBeatsAFlippedFlag pins the scenario changelog F-1 exists for,
+// and it is the ONLY test that can: everywhere else `checkpoint` is refused by
+// the flag half (it carries no retrieval.shadow_measurable), so the deny-list
+// could be deleted as "redundant" and every other probe would stay green — with
+// the 5 955-block pile one registry write away from being measurable.
+//
+// The registry write is not hypothetical: a `_global` row overrides a builtin
+// (blocktype/registry.go, merged[p.Name] = p), and a tenant overlay can do the
+// same for its own scope.
+//
+// The test carries BOTH halves so neither can be removed unnoticed:
+//
+//	Fall A  checkpoint/system-meta WITH the flag flipped on ⇒ 400
+//	        — only the deny-list can answer this one.
+//	Fall B  an excluded type WITHOUT the flag ⇒ 400
+//	        — only the flag half can answer this one (the deny-list never
+//	          heard of mw2-plain).
+//
+// RED (deny-list gutted, flag flipped): 200 with a full pipeline response.
+// RED (flag half gutted): Fall B answers 200.
+func TestMW2DenyListBeatsAFlippedFlag(t *testing.T) {
+	pool := mw2Setup(t)
+	ctx := context.Background()
+
+	// Flip retrieval.shadow_measurable on the two protected builtins, exactly
+	// the way an operator (or a bug) would: an UPDATE on the _global registry
+	// row, leaving every other field of the policy untouched.
+	for _, name := range []string{"checkpoint", "system-meta"} {
+		tag, err := pool.Exec(ctx,
+			`UPDATE context_block_types
+			    SET config = jsonb_set(config, '{retrieval,shadow_measurable}', 'true'::jsonb, true)
+			  WHERE name = $1 AND scope = '_global'`, name)
+		if err != nil {
+			t.Fatalf("flip flag on %s: %v", name, err)
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("flip flag on %s: %d rows affected, want 1", name, tag.RowsAffected())
+		}
+	}
+
+	// Non-vacuity: the flip must actually have reached the resolved policy. If
+	// it had not, the 400s below would prove nothing at all.
+	reg := blocktype.NewRegistry()
+	if err := reg.Reload(ctx, pool); err != nil {
+		t.Fatalf("registry reload: %v", err)
+	}
+	for _, name := range []string{"checkpoint", "system-meta"} {
+		if !reg.Snapshot().IsShadowMeasurable(name) {
+			t.Fatalf("fixture is vacuous: %q does not carry shadow_measurable after the flip", name)
+		}
+	}
+
+	h := mw2Handler(t, pool, bw2NewBackend(t), bw2Config())
+
+	for _, tc := range []struct{ name, body string }{
+		// Fall A — deny-list half.
+		{"checkpoint with the flag ON", mw2Body(`,"shadow_types":["checkpoint"]`)},
+		{"system-meta with the flag ON", mw2Body(`,"shadow_types":["system-meta"]`)},
+		{"checkpoint beside a legal shadow type", mw2Body(`,"shadow_types":["` + mw2ShadowType + `","checkpoint"]`)},
+		// Fall B — flag half. The deny-list does not know this name, so only
+		// the flag check can refuse it.
+		{"an excluded type WITHOUT the flag", mw2Body(`,"shadow_types":["` + mw2PlainType + `"]`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := bw2Do(t, h, bw2AdminKeyID, true, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status %d, want 400; body %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	// And the legal type still works with the flipped builtins in the registry —
+	// the deny-list refuses two names, it does not disable the seam.
+	if rec := bw2Do(t, h, bw2AdminKeyID, true, mw2ShadowRequest()); rec.Code != http.StatusOK {
+		t.Fatalf("the legal shadow type was refused too: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -328,6 +429,74 @@ func TestMW2ShadowRowsNeverBecomeSources(t *testing.T) {
 	if rows := mw2IDs(t, bw2Block(t, rec2)["rows"]); mw2Contains(rows, mw2ShadowBlockID) {
 		t.Errorf("a plain measurement request sees the shadow block: %v", rows)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Review finding #1: the embed backfill is a SECOND chain on the same request
+// ---------------------------------------------------------------------------
+
+// TestMW2SkipsEmbedBackfill closes the hole the adversarial review found in the
+// chain-locality obligation.
+//
+// shadowChainLocality checks Chain(role, querySens, ar.HomeScope). Step 3d runs
+// backfillPending on the SAME request, which resolves Chain(RoleEmbed,
+// floor.Apply(blockSensitivity, blockScope), blockScope) — both keys differ from
+// the ones the gate checked, and both differences can WIDEN the chain: a lower
+// required sensitivity lets Trust.Allows admit backends the gate never saw, and
+// a foreign block scope changes the VisibleTo set entirely. Over that chain goes
+// title + content of a block (query.go, embedText).
+//
+// The fix is to skip the backfill on the shadow path rather than to re-check it
+// there: a write in the middle of a read-only measurement contradicts the B-W2
+// determinism doctrine anyway, and an embedding written during a measurement
+// changes the corpus the measurement is measuring.
+//
+// RED before the fix: the block gets an embedding from the shadow request
+// (`the shadow request embedded a pending block`), and the fake backend counts
+// two embed calls instead of one.
+func TestMW2SkipsEmbedBackfill(t *testing.T) {
+	pool := mw2Setup(t)
+	b := bw2NewBackend(t)
+	h := mw2Handler(t, pool, b, bw2Config())
+
+	const pendingID = "019fa500-0000-7000-9000-0000000003b1"
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO context_blocks (id, category, title, content, scope, type_name)
+		 VALUES ($1::uuid, 'knowledge', 'pending block', 'pending body', $2, 'knowledge')`,
+		pendingID, bw2Scope,
+	); err != nil {
+		t.Fatalf("insert pending block: %v", err)
+	}
+
+	// 1) The shadow request must not touch it.
+	if rec := bw2Do(t, h, bw2AdminKeyID, true, mw2ShadowRequest()); rec.Code != http.StatusOK {
+		t.Fatalf("shadow status %d, body %s", rec.Code, rec.Body.String())
+	}
+	if mw2HasEmbedding(t, pool, pendingID) {
+		t.Error("the shadow request embedded a pending block — a second embed chain ran unchecked")
+	}
+	if got := b.embedHits.Load(); got != 1 {
+		t.Errorf("shadow request made %d embed-wire calls, want 1 (query embed only)", got)
+	}
+
+	// 2) Non-regression: the SAME request without the field still backfills.
+	//    Same block, so this cannot pass by measuring a different fixture.
+	if rec := bw2Do(t, h, bw2AdminKeyID, true, mw2Body(``)); rec.Code != http.StatusOK {
+		t.Fatalf("plain status %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !mw2HasEmbedding(t, pool, pendingID) {
+		t.Error("an ordinary measurement request no longer backfills — the skip is too wide")
+	}
+}
+
+func mw2HasEmbedding(t *testing.T, pool *pgxpool.Pool, id string) bool {
+	t.Helper()
+	var present bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT embedding IS NOT NULL FROM context_blocks WHERE id = $1::uuid`, id).Scan(&present); err != nil {
+		t.Fatalf("read embedding state: %v", err)
+	}
+	return present
 }
 
 // ---------------------------------------------------------------------------
@@ -550,5 +719,29 @@ func TestMW2MeasureSliceIsACopy(t *testing.T) {
 	same := measureVisibleTypesFor(visible, nil)
 	if len(same) != len(visible) || &same[0] != &visible[0] {
 		t.Error("without shadow types the measure slice is not the visible slice itself")
+	}
+}
+
+// TestMW2MeasureSliceDeduplicates is review finding #7 on the slice side: a
+// repeated name must reach p_types_visible ONCE. `= ANY(array)` does not care,
+// but the array is bound into two statements per request and its length is
+// caller-controlled — so the request list is normalised before it becomes SQL.
+// A name already in the visible slice is dropped too: the widening is a set
+// union, not a concatenation.
+//
+// RED before the fix: `measure slice = [knowledge reference mw2-shadow
+// mw2-shadow knowledge]`.
+func TestMW2MeasureSliceDeduplicates(t *testing.T) {
+	visible := []string{"knowledge", "reference"}
+	got := measureVisibleTypesFor(visible, []string{mw2ShadowType, mw2ShadowType, "knowledge"})
+
+	want := []string{"knowledge", "reference", mw2ShadowType}
+	if len(got) != len(want) {
+		t.Fatalf("measure slice = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("measure slice = %v, want %v", got, want)
+		}
 	}
 }

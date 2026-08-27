@@ -73,9 +73,14 @@ func writeEnvSection(b *strings.Builder, env EnvStamp) {
 	}
 	b.WriteString("\n")
 	fmt.Fprintf(b, "- Pfad-Guard-Override `--allow-outside-goldset`: %s\n", yesNo(env.AllowOutsideGoldset))
-	if len(env.ShadowTypes) > 0 || env.InstanceKind != "" {
+	// The override alone is enough to render the section (M-W2 review finding
+	// #2). It used to hang on the two other fields, and while those were read
+	// off dump A only, a pair whose SHADOW dump was B printed nothing while
+	// carrying allow_live_instance=true — the one state gate (l) exists to make
+	// impossible. Now any of the three brings the whole block.
+	if len(env.ShadowTypes) > 0 || env.InstanceKind != "" || env.AllowLiveInstance {
 		fmt.Fprintf(b, "- Instanz-Art (`%s`): `%s`\n", SettingInstanceKind, orDash(env.InstanceKind))
-		fmt.Fprintf(b, "- Schatten-Typen der Messung: `%s`\n", strings.Join(env.ShadowTypes, "`, `"))
+		fmt.Fprintf(b, "- Schatten-Typen der Messung: %s\n", orDash(joinTicked(env.ShadowTypes)))
 		fmt.Fprintf(b, "- Mess-Kopie-Override `-allow-live-instance`: %s\n", yesNo(env.AllowLiveInstance))
 	}
 	for _, d := range env.Dumps {
@@ -90,6 +95,15 @@ func writeEnvSection(b *strings.Builder, env EnvStamp) {
 		}
 	}
 	b.WriteString("\n")
+}
+
+// joinTicked renders a name list as inline code, empty list as the empty string
+// so orDash can turn it into a dash — `` in a report reads as a rendering bug.
+func joinTicked(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return "`" + strings.Join(names, "`, `") + "`"
 }
 
 func abortSuffix(v DriftVerdict) string {

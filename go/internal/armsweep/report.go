@@ -328,6 +328,38 @@ func compareAll(cfgs []ConfigResult, setsA map[string]map[string]*caseSet, v0B m
 	return cmps, wins
 }
 
+// mergeInstanceKinds names every instance kind the pair was measured against,
+// in dump order, without repeating one. Empty stamps contribute nothing — a
+// dump that named no shadow types makes no claim about its instance, and
+// inventing "live" for it would be a statement the driver never took.
+func mergeInstanceKinds(a DumpStamp, b *DumpStamp) string {
+	kinds := appendDistinct(nil, a.InstanceKind)
+	if b != nil {
+		kinds = appendDistinct(kinds, b.InstanceKind)
+	}
+	return strings.Join(kinds, " / ")
+}
+
+// mergeShadowTypes is the union of both dumps' shadow lists, dump order kept,
+// duplicates dropped.
+func mergeShadowTypes(a DumpStamp, b *DumpStamp) []string {
+	types := appendDistinct(nil, a.ShadowTypes...)
+	if b != nil {
+		types = appendDistinct(types, b.ShadowTypes...)
+	}
+	return types
+}
+
+func appendDistinct(out []string, vals ...string) []string {
+	for _, v := range vals {
+		if v == "" || contains(out, v) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 // buildEnv assembles the provenance block from the dump stamps and the gold
 // stamp — never from the driver's own environment.
 func buildEnv(in ScoreInput) EnvStamp {
@@ -344,11 +376,20 @@ func buildEnv(in ScoreInput) EnvStamp {
 		MigrationsMax:       in.StampA.MigrationsMax,
 		PostFusionStages:    in.StampA.PostFusionStages,
 		AllowOutsideGoldset: in.StampA.AllowOutsideGoldset || (in.StampB != nil && in.StampB.AllowOutsideGoldset),
-		InstanceKind:        in.StampA.InstanceKind,
-		ShadowTypes:         in.StampA.ShadowTypes,
-		// Both overrides are OR-ed across the dump pair for the same reason: a
-		// report over two dumps inherits the weakest provenance of the two, and
-		// stating otherwise would let one clean dump launder the other.
+		// All THREE shadow-provenance fields are merged across the dump pair,
+		// not read off A. A report over two dumps inherits the weakest
+		// provenance of the two, and stating otherwise would let one clean dump
+		// launder the other — which is exactly what happened while only the
+		// boolean was OR-ed: a pair whose SHADOW dump was B carried
+		// allow_live_instance=true and named neither the instance nor the types
+		// (M-W2 review finding #2).
+		//
+		// Differing kinds are BOTH named rather than resolved. F-32 forbids the
+		// mixed pair, but `score` does not enforce that rule (M-W3d's compare
+		// does), so the honest rendering of an incongruent pair is to show the
+		// incongruence.
+		InstanceKind:      mergeInstanceKinds(in.StampA, in.StampB),
+		ShadowTypes:       mergeShadowTypes(in.StampA, in.StampB),
 		AllowLiveInstance: in.StampA.AllowLiveInstance || (in.StampB != nil && in.StampB.AllowLiveInstance),
 	}
 	env.GoldSHA256 = CombinedDigest(in.StampA.SliceFiles)
