@@ -136,6 +136,50 @@ func w6Explain(t *testing.T, pool *pgxpool.Pool, name, q string, args ...any) (s
 	return plan, ms
 }
 
+// w6GenericPlan PREPAREs a production statement, forces the GENERIC plan and
+// returns the text plan of the EXECUTE. `SET LOCAL plan_cache_mode` plus PREPARE
+// have to share one transaction, and the rollback is a defer: a t.Fatalf with an
+// open transaction would leave the pool connection checked out and deadlock the
+// pool's Close in the cleanup.
+func w6GenericPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label, decl, stmt, execArgs string) string {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("%s: begin: %v", label, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatalf("%s: force_generic_plan: %v", label, err)
+	}
+	if _, err := tx.Exec(ctx, "PREPARE "+decl+" AS "+stmt); err != nil {
+		t.Fatalf("%s: prepare: %v", label, err)
+	}
+	name := decl
+	if i := strings.IndexByte(decl, '('); i >= 0 {
+		name = decl[:i]
+	}
+	rows, err := tx.Query(ctx, "EXPLAIN EXECUTE "+name+execArgs)
+	if err != nil {
+		t.Fatalf("%s: explain execute: %v", label, err)
+	}
+	var b strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			rows.Close()
+			t.Fatalf("%s: scan: %v", label, err)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("%s: rows: %v", label, err)
+	}
+	t.Logf("%s (force_generic_plan):\n%s", label, b.String())
+	return b.String()
+}
+
 // w6LatencyBudget is the P95 wall-clock budget for the live-endpoint gate (F).
 // Lokal strikt 100ms (design/03 §7-W6). Auf geteilten CI-Runnern (env CI, 4
 // vCPU, noisy neighbor) ×3 Headroom: Die Wall-Clock misst dort primär
@@ -208,6 +252,28 @@ func TestW6Explain_Integration(t *testing.T) {
 		}
 		if ms >= 100 {
 			t.Errorf("q exec %.2fms ≥ 100ms", ms)
+		}
+	})
+
+	// (B2) The same q path under a GENERIC plan (OPS-W1 review #2 / auflage A3).
+	// Gate (B) EXPLAINs the CUSTOM form, where the planner folds $2 into the
+	// constant 'issue' and can prove the predicate of the partial FTS GIN
+	// (migration 145) itself. Production does not always get that plan: pgx runs
+	// the extended protocol with a statement cache, so from the 6th execution per
+	// connection the generic plan is live (plancache.c choose_custom_plan), and
+	// there `type_name = $2` proves nothing. Measured by the review at 100k rows:
+	// 774 → 14 126 (18,2×), both FTS indexes gone from the plan. (B) is
+	// structurally blind to that class — this sub-test is the eye.
+	t.Run("q_fts_gin_index_generic_plan", func(t *testing.T) {
+		plan := w6GenericPlan(t, ctx, pool, "q-fts-generic",
+			"w6_q_generic(text,text,text,text,timestamptz,uuid,text[],int)",
+			store.IssueSearchUpdatedSQL,
+			"('"+w6Scope+"','issue','','kanbanoid','2999-01-01'::timestamptz,'"+w6TopID+"'::uuid,NULL::text[],50)")
+		if !strings.Contains(plan, "idx_context_ts_de") && !strings.Contains(plan, "idx_context_ts_en") {
+			t.Errorf("generic plan names neither FTS GIN index — the partial index is unreachable without a provable type predicate:\n%s", plan)
+		}
+		if strings.Contains(plan, "Seq Scan on context_blocks") {
+			t.Errorf("generic plan seq-scans context_blocks:\n%s", plan)
 		}
 	})
 

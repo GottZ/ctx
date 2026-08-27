@@ -1347,6 +1347,29 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 		))
 		args = append(args, query)
 		argIdx++
+		// C2-2 / OPS-W1 review A2: the two FTS GIN indexes are PARTIAL since
+		// migration 145, and a partial index is only used when the planner can
+		// PROVE its predicate. The type filters below are bind parameters, which
+		// prove nothing under a generic plan — and pgx makes that plan
+		// production-reachable. Measured at 100 000 rows, this seam
+		// (/api/context/search, `ctx search`) under force_generic_plan: with
+		// types=[knowledge,reference] 37 713 (idx_blocks_type_name, FTS demoted
+		// to a filter) against 1 634 over both GIN indexes once the predicate is
+		// declared; with types_exclude covering the deny-list 40 203 (full Seq
+		// Scan) against 1 432.
+		//
+		// So when the caller's own opt-in already implies the index predicate,
+		// the statement DECLARES it as constant text. Redundant by construction
+		// — it never removes a row the type filter would have kept
+		// (impliesHardFTSDeny, partial_fts_optin.go) — and it consumes no
+		// $-index, so the FTS ORDER BY at $2 and the grant array stay in place.
+		// Without a type opt-in nothing is declared and the branch keeps the Seq
+		// Scan the review measured (721 → 8 304): deny-listed blocks stay
+		// browseable (the D5 asymmetry above), and whether that trade holds at
+		// corpus scale is a D-01/D-05 decision, not a statement detail.
+		if impliesHardFTSDeny(types, typesExclude) {
+			whereClauses = append(whereClauses, hardFTSDenyConjunct)
+		}
 	}
 
 	if category != "" {

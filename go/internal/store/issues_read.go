@@ -63,11 +63,23 @@ type IssueReadQuery struct {
 // type_name, status, the keyset boundary and the label set are rechecked on the
 // bitmap result, then a Top-N Sort orders the (selective) FTS set. Exported so
 // the W6 EXPLAIN gate EXPLAINs THESE exact strings (no SQL copy, M072/M075 line).
+//
+// The deny-list conjunct (C2-2 / OPS-W1 review A3) is what keeps the FTS bitmap
+// reachable: since migration 145 both GIN indexes are PARTIAL over
+// `type_name NOT IN ('checkpoint','system-meta')`, and `b.type_name = $2` is a
+// PARAMETER — it proves the index predicate only while the plan cache serves a
+// custom plan. Under the generic plan (pgx statement cache, from the 6th
+// execution per connection) the proof fails and both FTS indexes drop out of the
+// plan: measured 774 → 14 126 at 100 000 rows, the FTS predicate demoted to a
+// heap filter. The conjunct is a strict no-op on the row set — $2 is bound to
+// IssueTypeName at the only call site (SearchIssues, below), which is not a
+// deny-listed name (pinned by TestC22IssueFTSConjunctIsRedundant).
 const IssueSearchUpdatedSQL = `
 	SELECT b.id::text, b.scope, b.type_name, b.title, b.workflow_status, b.updated_at, b.created_at
 	FROM context_blocks b
 	WHERE b.scope = $1::text
 	  AND b.type_name = $2
+	  AND b.type_name NOT IN ` + hardFTSDenyValues + `
 	  AND NOT b.is_archived
 	  AND ($3::text = '' OR b.workflow_status = $3)
 	  AND (b.ts_de @@ plainto_tsquery('german', $4) OR b.ts_en @@ plainto_tsquery('english', $4))
@@ -77,12 +89,14 @@ const IssueSearchUpdatedSQL = `
 	LIMIT $8`
 
 // IssueSearchCreatedSQL is IssueSearchUpdatedSQL with the immutable (created_at,
-// id) keyset + ordering (the q + ?sort=created combination).
+// id) keyset + ordering (the q + ?sort=created combination) — including its
+// deny-list conjunct, for the same reason and with the same no-op argument.
 const IssueSearchCreatedSQL = `
 	SELECT b.id::text, b.scope, b.type_name, b.title, b.workflow_status, b.updated_at, b.created_at
 	FROM context_blocks b
 	WHERE b.scope = $1::text
 	  AND b.type_name = $2
+	  AND b.type_name NOT IN ` + hardFTSDenyValues + `
 	  AND NOT b.is_archived
 	  AND ($3::text = '' OR b.workflow_status = $3)
 	  AND (b.ts_de @@ plainto_tsquery('german', $4) OR b.ts_en @@ plainto_tsquery('english', $4))
