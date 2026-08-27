@@ -126,3 +126,23 @@ func StratumOf(typeName string) Stratum {
 func IsDerivedType(typeName string) bool {
 	return StratumOf(typeName) > StratumSource
 }
+
+// derivedTypeNames is the ENUMERATION of what StratumOf decides one name at a
+// time. StratumOf answers "is this name derived?"; a coverage report has to ask
+// the opposite question — "which names are derived?" — and a switch cannot be
+// iterated. Kept next to StratumOf so the two are read and edited together, and
+// pinned against it by TestDerivedTypeNames_Integration: every entry here must
+// have a level > 0, and both type constants must appear.
+//
+// Order is deliberate and stable: insight before catalog, the order design/01
+// §3.3/§3.4 and migration 143 introduce them in. The status surface renders in
+// this order, so a reader's eye lands on the same row between polls.
+var derivedTypeNames = []string{TypeInsight, TypeCatalog}
+
+// DerivedTypeNames returns the type names of the derived layer — the population
+// a coverage figure (§4.7.4) is computed over. It returns a COPY: the slice
+// decides which rows /api/status shows, and a caller that sorts or truncates it
+// in place would silently shrink the operating surface it was asked to report.
+func DerivedTypeNames() []string {
+	return append([]string(nil), derivedTypeNames...)
+}

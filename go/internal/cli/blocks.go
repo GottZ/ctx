@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -201,6 +202,54 @@ func runBlocksClassifyStart(getClient func() (*Client, error), dryRun bool, limi
 	return printClassifyStatus(resp)
 }
 
+// bySourceOrder is the reading order of the sensitivity_source classes, and the
+// ONE list both status renderers use. It mirrors the CHECK constraint on
+// context_blocks.sensitivity_source (113_baseline.sql, extended by migration 144
+// with 'derived') in the order an operator reads the pipeline: unclassified
+// first, then the two automatic classes, then the untouchable manual verdict,
+// then the folded value a derived block inherits from its sources.
+//
+// It used to be two copies of a four-name literal, one per renderer, and the
+// W01-4 review found what that costs: the server had been counting five classes
+// since migration 144, the wire carried all five, and 'derived' fell off the TTY
+// path in both places without a trace. Two copies also meant a fix could land in
+// one and not the other.
+var bySourceOrder = []string{"default", "llm-audit", "pattern", "manual", "derived"}
+
+// formatBySource renders the by-source counts as "class=n  class=n", known
+// classes in bySourceOrder, then anything else sorted after them. It returns ""
+// for an empty or nil map, so a caller can decide whether to print a line at all.
+//
+// The trailing sorted remainder is the actual repair. Listing 'derived' fixes
+// today's symptom; the DEFECT was a renderer that silently drops whatever it
+// does not recognise, which turns the next class somebody adds into the same
+// invisible bug. Now an unknown class shows up — out of the reading order, which
+// is the honest signal that this list wants updating — instead of vanishing.
+func formatBySource(bySource map[string]int) string {
+	if len(bySource) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(bySource))
+	known := make(map[string]bool, len(bySourceOrder))
+	for _, k := range bySourceOrder {
+		known[k] = true
+		if n, ok := bySource[k]; ok {
+			parts = append(parts, fmt.Sprintf("%s=%d", k, n))
+		}
+	}
+	rest := make([]string, 0, len(bySource))
+	for k := range bySource {
+		if !known[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	for _, k := range rest {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, bySource[k]))
+	}
+	return strings.Join(parts, "  ")
+}
+
 func printClassifyStatus(resp json.RawMessage) error {
 	if !StdoutIsTTY() {
 		PrintJSON(resp)
@@ -225,14 +274,8 @@ func printClassifyStatus(resp json.RawMessage) error {
 	}
 	fmt.Printf("scope: %s   run: %s\n", v.Scope, state)
 
-	if len(v.BySource) > 0 {
-		parts := make([]string, 0, len(v.BySource))
-		for _, k := range []string{"default", "llm-audit", "pattern", "manual"} {
-			if n, ok := v.BySource[k]; ok {
-				parts = append(parts, fmt.Sprintf("%s=%d", k, n))
-			}
-		}
-		fmt.Printf("by-source: %s\n", strings.Join(parts, "  "))
+	if line := formatBySource(v.BySource); line != "" {
+		fmt.Printf("by-source: %s\n", line)
 	}
 
 	if v.Run.Scanned > 0 || v.Run.Running {
@@ -314,14 +357,8 @@ func printAuditStatus(resp json.RawMessage) error {
 	}
 	fmt.Printf("scope: %s   pending: %d   run: %s\n", v.Scope, v.Pending, state)
 
-	if len(v.BySource) > 0 {
-		parts := make([]string, 0, len(v.BySource))
-		for _, k := range []string{"default", "llm-audit", "pattern", "manual"} {
-			if n, ok := v.BySource[k]; ok {
-				parts = append(parts, fmt.Sprintf("%s=%d", k, n))
-			}
-		}
-		fmt.Printf("by-source: %s\n", strings.Join(parts, "  "))
+	if line := formatBySource(v.BySource); line != "" {
+		fmt.Printf("by-source: %s\n", line)
 	}
 
 	if v.Run.Processed > 0 || v.Run.Running {

@@ -20,6 +20,7 @@ import (
 	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/recall"
 	"github.com/GottZ/ctx/internal/schemacontract"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/topiclabel"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -182,6 +183,19 @@ type statusResponse struct {
 	// recall metrics reveal scope existence/size and go tenants nothing, §5.3) and
 	// when no recallRunSource is wired (test fakes).
 	Recall *recallStatus `json:"recall,omitempty"`
+	// DerivedCoverage is the server-admin-only Achse-01 coverage figure (design/01
+	// §4.7.4, W01-6): per derived type, how many blocks exist and how many of them
+	// miss their drift anchor. Pointer + omitempty, the Profiles/DB/GraphCache/
+	// Recall convention (:80/:96/:110/:124): PRESENT on the server-admin path
+	// whenever the read answered — INCLUDING on an empty corpus, where it renders
+	// one row per derived type with both numbers 0. That case is the point of the
+	// section and not an omission candidate: an absent gap and a zero gap must
+	// never look alike, which is exactly the confusion §4.7.4 was written against.
+	// ABSENT on the per-tenant path (SnapshotForTenant never sets it — per-type
+	// corpus sizes are the same server-global signal §5.3 keeps off tenant
+	// surfaces, the ClusterMap posture) and when the read failed with no earlier
+	// stand to carry over.
+	DerivedCoverage *[]derivedCoverageRow `json:"derived_coverage,omitempty"`
 	// ClusterMap is the server-admin-only Cluster-Topic-Map C4 section (design/03
 	// §4.6/§4.7). Same Profiles/DB/GraphCache/Recall convention: PRESENT on the
 	// server-admin path when a clusterMapSource is wired (even before the first
@@ -334,6 +348,23 @@ type recallStratumRow struct {
 	Valid        bool     `json:"valid"`
 	AgeMs        int64    `json:"age_ms"`
 	ScopeChanged bool     `json:"scope_changed"`
+}
+
+// derivedCoverageRow is one derived type's line in the derived_coverage section
+// (design/01 §4.7.4). blocks is the population, anchor_missed the part of it
+// that cannot be shown to still hang on what it was derived from — the coverage
+// GAP the abort rule demands as an operating figure rather than as something an
+// operator reconstructs from four columns after the fact (the label arm's 42 %
+// dead-end went unnoticed for weeks precisely because it had no such number).
+//
+// Both numbers ride together on purpose: a gap of 40 means something different
+// over 50 blocks than over 50 000, and a ratio alone would hide an arm that
+// stopped writing entirely. The covered count is left implicit (blocks minus
+// anchor_missed) so the two wire numbers cannot contradict each other.
+type derivedCoverageRow struct {
+	Type         string `json:"type"`
+	Blocks       int    `json:"blocks"`
+	AnchorMissed int    `json:"anchor_missed"`
 }
 
 // graphCacheStatus is the /api/status graph_cache block wire shape (design/05
@@ -562,6 +593,16 @@ type cheapSnapshot struct {
 	// read + the 7d invalid count, assembled at the tick. nil when no
 	// recallRunSource is wired (test fakes) — no section emitted.
 	recall *recallStatus
+	// derivedCoverage is the Achse-01 coverage figure (design/01 §4.7.4), and it
+	// is the ONE cheap section with its own slower clock: unlike its neighbours
+	// it is O(derived blocks) rather than a handful of indexed rows, so at target
+	// scale it must not ride the tick. derivedCoverageAt stamps when the numbers
+	// were actually measured; every pass in between carries THESE values forward
+	// unchanged (derivedCoverageIfDue), which is also what keeps a failed read
+	// from erasing a stand that was once real. nil = never measured (no pool, or
+	// the first read failed) — no section emitted.
+	derivedCoverage   []derivedCoverageRow
+	derivedCoverageAt time.Time
 	// embedMigration is the Achse-04 re-embed-migration section (design/04 §7
 	// W04-7): a SINGLE-ROW read over idx_embed_migration_single_active at the
 	// tick, arithmetic pending derived from the row's own counters. nil when no
@@ -1074,6 +1115,11 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	if src, ok := c.dreams.(recallRunSource); ok {
 		snap.recall = c.buildRecallStatus(ctx, src.LastRecallRun())
 	}
+	// Achse-01 coverage figure (design/01 §4.7.4). Bound to NO scheduler slice —
+	// it reads the corpus, not an arm, and the whole point of the rule is that the
+	// gap is visible before any arm exists to report it. Its own slow clock, see
+	// derivedCoverageIfDue.
+	snap.derivedCoverage, snap.derivedCoverageAt = c.derivedCoverageIfDue(ctx)
 	// Cluster-Topic-Map C4 section (design/03 §4.6/§4.7): the per-scope liveness
 	// read plus the in-memory failure counter. Own narrow assertion, so a fake
 	// dreamMode source simply yields no section.
@@ -1242,6 +1288,53 @@ func (c *StatusCollector) buildRecallStatus(ctx context.Context, lastRun time.Ti
 	return rs
 }
 
+// derivedCoverageInterval is how often the coverage figure is actually measured
+// (design/01 §4.7.4). A CONSTANT, not a settings key, and for the reason the
+// gate constants in derived/derived.go give: a knob here is a way to switch the
+// figure off — set it high enough and the number freezes at a comfortable value
+// while nothing turns red. The abort rule exists because a gap stayed invisible
+// for weeks; a configurable staleness would hand that failure mode back.
+//
+// Five minutes is chosen against the two costs it sits between. The read is
+// O(derived blocks) — at 1M+ blocks that is the one cheap-path source big enough
+// to matter, and once per tick (5 s default) would be ~60x this load for a number
+// that changes on an arm's regeneration cadence, i.e. minutes at best. In the
+// other direction it stays far below the operator response time this figure
+// serves: a gap that opens is visible within one refresh of a dashboard someone
+// is already watching.
+const derivedCoverageInterval = 5 * time.Minute
+
+// derivedCoverageIfDue returns the coverage rows plus the stamp of when they
+// were measured, re-reading only when the previous measurement has aged past
+// derivedCoverageInterval. Everything else carries the previous pass's values
+// forward — including on a failed read, where dropping to nil would turn a
+// transient DB hiccup into a VANISHED section and read, to anyone watching, like
+// a layer that no longer has a gap.
+func (c *StatusCollector) derivedCoverageIfDue(ctx context.Context) ([]derivedCoverageRow, time.Time) {
+	prev := c.cache.Load()
+	if prev != nil && prev.derivedCoverage != nil &&
+		time.Since(prev.derivedCoverageAt) < derivedCoverageInterval {
+		return prev.derivedCoverage, prev.derivedCoverageAt
+	}
+	rows, err := store.DerivedCoverage(ctx, c.pool)
+	if err != nil {
+		c.noteDBFail("status: derived coverage query failed", err)
+		if prev != nil {
+			return prev.derivedCoverage, prev.derivedCoverageAt
+		}
+		return nil, time.Time{}
+	}
+	out := make([]derivedCoverageRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, derivedCoverageRow{
+			Type:         r.TypeName,
+			Blocks:       r.Blocks,
+			AnchorMissed: r.AnchorMissed,
+		})
+	}
+	return out, time.Now()
+}
+
 // queryInvalidRecallRuns7d counts the invalid (valid=false) recall runs of the
 // last 7 days — plan-assertion violations + demand/budget aborts surfaced
 // fail-closed (design/01 §4.2.4/§4.3). A small ran_at-index-bound count; 0 on
@@ -1362,6 +1455,16 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 	if len(be) == 0 {
 		adv = []advisoryRow{{Subject: backends.AdvisorySubjectPool, State: backends.AdvisoryStateEmpty}}
 	}
+	// derived_coverage rides the Profiles pointer convention (:80): a measured
+	// stand is PRESENT even when every number in it is 0, and only "never
+	// measured" (nil) omits the key. Local variable, not &cheap.derivedCoverage:
+	// the snapshot is shared across concurrent pollers and must not hand any of
+	// them a pointer into itself.
+	var dcov *[]derivedCoverageRow
+	if cheap.derivedCoverage != nil {
+		rows := cheap.derivedCoverage
+		dcov = &rows
+	}
 	return statusResponse{
 		Success:        true,
 		AsOf:           cheap.asOf,
@@ -1383,6 +1486,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// omitted when no recallRunSource is wired). The per-tenant
 		// SnapshotForTenant never calls assemble, so its field stays nil → absent.
 		Recall: cheap.recall,
+		// derived_coverage is server-admin-only and PRESENT whenever a measurement
+		// exists (pointer; nil → omitted only when none was ever taken). The
+		// per-tenant SnapshotForTenant never calls assemble, so its field stays
+		// nil → absent (§5.3: per-type corpus sizes are server-global).
+		DerivedCoverage: dcov,
 		// cluster_map is server-admin-only and PRESENT when captured (pointer;
 		// nil → omitted when no clusterMapSource is wired). Per-scope corpus
 		// sizes and cluster counts are server-global observability and go tenants
