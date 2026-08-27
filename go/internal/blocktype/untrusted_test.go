@@ -92,6 +92,14 @@ func TestSet_UntrustedLookup(t *testing.T) {
 		// V-W7: foreign text by construction (transcript prose that quotes
 		// tool output and foreign prompts), inert while excluded.
 		"checkpoint": true,
+		// M143: insight distils exactly that transcript and tool material, so
+		// it inherits the framing — summarising attacker-shapable output does
+		// not launder it. catalog distils corpus blocks somebody wrote as
+		// knowledge and stays false; a single untrusted SOURCE is framed per
+		// block (design D-01 §4.8.3), never by flipping the type. Both inert
+		// while the two types are excluded (K7/E-4).
+		"insight": true,
+		"catalog": false,
 		// Unknown names resolve to false, mirroring GuardSameScopeOnly: an
 		// unregistered name cannot reach the prompt in the first place (the
 		// visibility allowlist comes from the SAME snapshot, fail-closed), and
@@ -106,7 +114,7 @@ func TestSet_UntrustedLookup(t *testing.T) {
 	}
 
 	got := s.UntrustedTypes()
-	want := []string{"checkpoint", "tool-evidence", "tool-overview"}
+	want := []string{"checkpoint", "insight", "tool-evidence", "tool-overview"}
 	if !slices.Equal(got, want) {
 		t.Errorf("UntrustedTypes() = %v, want %v (sorted, derived at NewSet)", got, want)
 	}

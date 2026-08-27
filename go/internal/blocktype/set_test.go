@@ -16,11 +16,14 @@ func builtinTestSet(t *testing.T) *Set {
 
 func TestBuiltinSetShape(t *testing.T) {
 	s := builtinTestSet(t)
-	// Nine builtins since M136: the four M035 enum classes + issue/comment
+	// Eleven builtins since M143: the four M035 enum classes + issue/comment
 	// (Welle I-C) + checkpoint (ID-anchored evidence, out of every pipeline) +
 	// the two tool-evidence axes (query-anchored evidence, damped instead of
-	// excluded — that difference IS why they are not checkpoint).
-	want := []string{"audit-trail", "checkpoint", "comment", "issue", "knowledge", "reference", "system-meta", "tool-evidence", "tool-overview"}
+	// excluded — that difference IS why they are not checkpoint) + the two
+	// derived knowledge layers insight/catalog (blocks written ABOUT other
+	// blocks; excluded until the E-4 visibility switch, out of every autonomous
+	// pipeline permanently).
+	want := []string{"audit-trail", "catalog", "checkpoint", "comment", "insight", "issue", "knowledge", "reference", "system-meta", "tool-evidence", "tool-overview"}
 	if got := s.Names(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Names() = %v, want %v", got, want)
 	}
@@ -32,7 +35,10 @@ func TestBuiltinSetShape(t *testing.T) {
 	// folds onto its parent issue). system-meta + checkpoint stay excluded
 	// (checkpoint evidence resolves over exact IDs only, M107); the two M136
 	// tool types are damped and therefore VISIBLE — a query-anchored evidence
-	// block that never ranks would be pointless.
+	// block that never ranks would be pointless. insight + catalog are excluded
+	// too and therefore absent: M143 seeds them that way on purpose (K7/E-4,
+	// excluded until the pilots), which is what makes that wave deployable —
+	// p_types_visible stays byte-identical and ctx_rrf sees no change.
 	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "comment", "issue", "knowledge", "reference", "tool-evidence", "tool-overview"}) {
 		t.Errorf("VisibleTypes() = %v (system-meta + checkpoint must be excluded; comment is aggregate-visible, the tool types damped-visible)", got)
 	}

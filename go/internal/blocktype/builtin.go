@@ -70,6 +70,37 @@ var toolOverviewPatterns = []string{
 	"was wurde bearbeitet",
 }
 
+// insightPatterns / catalogPatterns are the compiled-in mirrors of the M143
+// intent-pattern seeds (auditPatterns precedent above). They are INERT while
+// both types are retrieval=excluded — Set.DampedTypesFor only ever walks damped
+// types — and they are carried anyway, so the later visibility switch (E-4,
+// after the pilots) is a one-field data change over a list whose false-lift
+// rate against the 47 eval questions has already been measured
+// (derived_types_test.go), rather than the moment somebody first thinks about
+// patterns. Same multi-word reasoning as the tool lists: MatchesAny is a
+// case-insensitive SUBSTRING test with no partial lift.
+var insightPatterns = []string{
+	"session insight",
+	"sitzungs-erkenntnis",
+	"was haben wir gelernt",
+	"erkenntnisse der session",
+	"was lief schief",
+	"was ist passiert",
+	"lessons learned",
+	"befunde der sitzung",
+}
+
+var catalogPatterns = []string{
+	"katalog",
+	"überblick über",
+	"übersicht über",
+	"worum geht es bei",
+	"was gibt es zu",
+	"themenübersicht",
+	"welche themen",
+	"gib mir einen überblick",
+}
+
 // toolEvidenceDamping is sharper than auditTrailDamping: the tool-index
 // population grows with every compaction and is near-duplicate BY
 // CONSTRUCTION. toolOverviewDamping is milder because the overview axis is
@@ -80,9 +111,10 @@ const (
 	toolOverviewDamping = 0.35
 )
 
-// builtinPolicies returns fresh copies of the nine builtin type policies (the
+// builtinPolicies returns fresh copies of the eleven builtin type policies (the
 // four M035 enum classes + the issue/comment workflow types, Welle I-C +
-// checkpoint, M107 + the two tool-evidence axes, M136). Fresh
+// checkpoint, M107 + the two tool-evidence axes, M136 + the two derived
+// knowledge layers, M143). Fresh
 // slices per call: Policies end up in immutable
 // Sets — shared backing arrays between generations would let one Set's
 // consumer observe another's mutation.
@@ -310,6 +342,82 @@ func builtinPolicies() []Policy {
 			Overview: OverviewPolicy{Include: false},
 			Parent:   ParentPolicy{Mode: ParentModeNone},
 			Classify: ClassifyRules{Priority: 30, TitlePatterns: []string{"compaction source", "compaction checkpoint"}},
+		},
+		// ── Derived knowledge layers (design D-01 §3.3/§3.4 + §4.2, M143) ────
+		// insight + catalog are the two first-order derivatives: blocks written
+		// ABOUT other blocks in this store. Both are seeded by ONE migration
+		// (masterplan K2) because they share the type counters and the schema
+		// contract manifest, and neither is a knob the other could be tuned
+		// without.
+		//
+		// BOTH START retrieval=excluded, and that is a decision, not an
+		// oversight. D-01 proposed damped at 0.50/0.60, D-02 0.35, D-03
+		// "excluded until measured"; masterplan K7 — user-confirmed as board
+		// decision E-4 — resolves it to excluded for both until the pilots
+		// (X-W4/X-W5), after which the swept factor (M-W8 over {0.25…1.0})
+		// arrives as a REGISTRY DATA update. Both excluded and damped are
+		// reversible data positions; full-pass would not be. No damping_factor
+		// is carried: a factor on an excluded row is inert today and would
+		// silently become the START value the moment the policy flips, which is
+		// exactly the "Startwert" K7 refused.
+		//
+		// The rest of the posture is shared and total: guard.check=false AND
+		// guard.candidate=false (a derivative must neither archive its ORIGINAL
+		// nor itself — the second would orphan its own regeneration),
+		// dream.linkable=false (dream links are the ONLY input Louvain reads, so
+		// a linkable derivative would shape the partition it is derived from),
+		// digest.include=false, overview.include=false (§0/K1 — a catalogue in
+		// the topic map derives the topic map from itself), parent.mode=none
+		// (parent_id is ON DELETE CASCADE and carries ONE parent; a derivative
+		// has N sources).
+		//
+		// insight: anchored on root session × watermark — strictly monotonic,
+		// never dies, append-only. retrieval.untrusted=true because it distils
+		// transcript and tool material, and M138's doctrine is verbatim that
+		// summarising attacker-shapable output does not launder it; M141 flagged
+		// checkpoint precisely so this layer can read the property AT ITS
+		// SOURCE. Classify priority 17 is BELOW audit-trail's 20 for the same
+		// first-match-wins reason as the tool types, and here it is not
+		// hypothetical: measured on the pre-wave tree, "Session insights <root>
+		// ab #<watermark>" classified to audit-trail — which guards AND dreams.
+		{
+			Name: "insight", Scope: globalScope, Builtin: true,
+			Retrieval: RetrievalPolicy{
+				Kind:           RetrievalExcluded,
+				IntentPatterns: fresh(insightPatterns),
+				Untrusted:      true,
+			},
+			Guard:    GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
+			Dream:    DreamPolicy{Linkable: false},
+			Digest:   DigestPolicy{Include: false},
+			Overview: OverviewPolicy{Include: false},
+			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Classify: ClassifyRules{Priority: 17, TitlePatterns: []string{"session insights "}},
+		},
+		// catalog: anchored on a cluster topic — which drifts, dies and merges —
+		// and overwritten in place, one block per living topic.
+		// retrieval.untrusted stays FALSE and is written explicitly: this type
+		// distils corpus blocks somebody wrote as knowledge, and a single
+		// untrusted SOURCE is framed per block via the inheritance clause
+		// (§4.8.3) instead of flipping the whole type. The explicit false is
+		// also what an existence-guarded blanket backfill of the M138/M141 shape
+		// would have to step over deliberately. Classify priority 16 sits below
+		// insight's 17 because catalog is the larger population at target scale;
+		// the two title patterns are disjoint, so their relative order is
+		// inconsequential.
+		{
+			Name: "catalog", Scope: globalScope, Builtin: true,
+			Retrieval: RetrievalPolicy{
+				Kind:           RetrievalExcluded,
+				IntentPatterns: fresh(catalogPatterns),
+				Untrusted:      false,
+			},
+			Guard:    GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
+			Dream:    DreamPolicy{Linkable: false},
+			Digest:   DigestPolicy{Include: false},
+			Overview: OverviewPolicy{Include: false},
+			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Classify: ClassifyRules{Priority: 16, TitlePatterns: []string{"katalog #"}},
 		},
 	}
 }
