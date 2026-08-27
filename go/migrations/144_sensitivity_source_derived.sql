@@ -1,0 +1,108 @@
+-- =============================================================================
+-- 144_sensitivity_source_derived.sql — sensitivity_source darf 'derived' sein
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Wissens-Ebenen, Welle W01-4 (≡ V-W9 nach Masterplan K6 — eine Welle, beide
+-- Anteile). design/01 §3.5 (diese Migration, Feld für Feld hergeleitet),
+-- §4.8.1 (die Faltung, die den Wert erzeugt), §7 W01-4 (die Gates);
+-- design/05 §7 V-W9 + Changelog F-6 (der Sicherheits-Befund, aus dem die
+-- Welle entstanden ist).
+--
+-- NUMMER: Masterplan §2 K1 — „wer zuerst landet, nimmt die nächste freie".
+-- Gelandet sind 141, 142 und 143, also ist 144 die nächste freie. Keine zweite
+-- Migrations-Welle läuft parallel (K1). Die Design-Texte führen diese Datei
+-- noch als „142 (vorläufig)"; verbindlich ist die Nummer hier.
+--
+-- WAS DIESE MIGRATION IST: der einzige SCHEMA-Eingriff der ganzen Achse — eine
+-- CHECK-Constraint wird um EINEN Wert erweitert. Keine Spalte, keine Tabelle,
+-- kein Index, kein Trigger, keine Zeile Bestandsdaten.
+--
+-- WAS SIE NICHT IST: sie legt keinen Schreiber an. Kein Pfad im Baum setzt
+-- 'derived' — der erste kommt mit W01-5 (SensitivityWrite{Derived}, die
+-- Faltung über die Quellen). Diese Migration macht den Wert ZULÄSSIG und
+-- damit vom Korrektur-Sweep ERFASSBAR, mehr nicht. Deshalb ist sie allein
+-- deploybar: eine Wertemenge, die niemand benutzt, ändert kein Verhalten.
+--
+-- WARUM ÜBERHAUPT EIN NEUER WERT UND NICHT 'manual' (design/01 §3.5):
+-- 'manual' bedeutet im ganzen System „ein Mensch hat das entschieden" und ist
+-- im Upsert-Zweig STÄRKER als der Detektor ('manual' schreibt bei >=, der
+-- Detektor nur bei strikt >, store/blocks.go:277-292). Eine Faltung über
+-- Quellblöcke ist keine menschliche Entscheidung.
+-- Sie unter 'manual' zu verbuchen hätte einen konkreten Sicherheitspreis, und
+-- genau der ist der Grund für diese Datei (design/05 F-6): der G40-Pattern-
+-- Sweep überspringt 'manual' per Prädikat (store/sensitivity.go:246, :284) und
+-- der G41-LLM-Audit fasst nur 'default' an (:124, :166, :180) — ein als
+-- 'manual' verbuchter abgeleiteter Block wäre dauerhaft aus BEIDEN Korrektur-
+-- pfaden heraus und damit unkorrigierbar. 'derived' ist der ehrliche Wert und
+-- fällt, weil das Sweep-Prädikat eine AUSSCHLUSS-Liste ist, ab dieser
+-- Migration automatisch in den Pattern-Sweep. Der LLM-Audit bleibt bewusst bei
+-- 'default': eine gefaltete Einstufung ist eine Einstufung mit Provenienz,
+-- keine fehlende. Beide Richtungen sind in
+-- TestDerivedSweepCoverage_Integration festgenagelt, die Sweep-Seite zusätzlich
+-- gegen ein mutiertes Prädikat gegengeprobt.
+--
+-- KEIN VALIDATE — DIE WICHTIGSTE ZEILE DIESER MIGRATION (design/01 §3.5):
+-- 1. Anweisung ist nicht Transaktion. Der Runner fährt die GANZE Datei in EINER
+--    Transaktion: pool.Begin -> tx.Exec(ganze Datei) -> tx.Commit
+--    (store/migrations.go:132-156). DROP CONSTRAINT und ADD … NOT VALID nehmen
+--    beide ACCESS EXCLUSIVE auf context_blocks, und dieser Lock wird bis zum
+--    Commit gehalten — also über einen etwaigen VALIDATE-Scan hinweg. Am
+--    Ziel-Scale (1M+ Blöcke, organisch 10M+) ist das ein minutenlanger
+--    Totalausfall der Tabelle für Leser UND Schreiber. SET LOCAL lock_timeout
+--    schützt den Lock-ERWERB, nie seine Haltedauer. Wer convalidated = true aus
+--    Hygienegründen will, nimmt eine EIGENE Migrationsdatei — dann ist es eine
+--    eigene Transaktion. Nie dieselbe.
+-- 2. Der Scan wäre beweisbar leer. Die neue Wertemenge ist eine echte
+--    OBERMENGE der alten ('default','llm-audit','pattern','manual' PLUS
+--    'derived'). Jede Bestandszeile erfüllt sie per Konstruktion; ein Scan
+--    kann nichts finden. Eine NOT VALID CHECK-Constraint wird für ALLE
+--    künftigen INSERT und UPDATE voll erzwungen — der einzige Verlust ist
+--    convalidated = false im Katalog, für eine Wert-Enum ohne Planer-Relevanz.
+-- Damit ist diese Migration zwei Katalog-Updates in Millisekunden, unabhängig
+-- von der Korpusgröße. Das Gate misst deshalb auch nicht die Laufzeit (die
+-- wäre am heutigen Korpus grün und würde die Falle verbergen), sondern die
+-- LOCKS der Transaktion und den Katalog-Zustand convalidated = false:
+-- TestMigration144LockFootprint_Integration, gegengeprobt gegen dieselbe Datei
+-- MIT angehängtem VALIDATE, die convalidated auf true kippt, während der
+-- ACCESS-EXCLUSIVE-Lock unverändert gehalten wird.
+--
+-- WARUM DROP + ADD UND NICHT ALTER CONSTRAINT:
+-- Postgres kann eine CHECK-Constraint nicht in place erweitern. Das Fenster
+-- zwischen DROP und ADD ist innerhalb EINER Transaktion für jede andere Sitzung
+-- unsichtbar — der Katalogeintrag ist nie halb weg. IF EXISTS hält die Datei
+-- re-runnable und trägt eine von Hand reparierte Datenbank mit.
+--
+-- WARUM EINE EIGENE MIGRATION UND KEIN EDIT AN 113_baseline.sql:
+-- Die Constraint stammt aus M055 und liegt seit dem Migrations-Fold in
+-- 113_baseline.sql:5477. Gelandete Migrationen werden nicht editiert; die
+-- Grenze ist der Commit, nicht der Applikationszustand irgendeiner Instanz.
+-- .hooks/pre-commit Gate 3 zieht dieselbe Linie. Der Nebeneffekt ist der
+-- eigentliche Gewinn: eine bereits laufende Instanz bekommt die Erweiterung
+-- über denselben Weg wie eine frische Datenbank.
+--
+-- BESTANDSDATEN-BACKFILL: keiner. Kein Bestandsblock bekommt 'derived'; der
+-- Wert entsteht erst beim ersten abgeleiteten Write (W01-5, scharf ab X-W4).
+--
+-- RÜCKWÄRTS (design/05, Migrations-Notiz zu V-W9): die zulässige Wertemenge
+-- wächst nur, kein Bestandswert wird ungültig. Ein Rückbau dieser Migration ist
+-- genau so lange unkritisch, wie keine 'derived'-Zeile existiert — also bis
+-- X-W4. Danach wäre er ein Datenverlust-Vorgang und braucht eine eigene
+-- Entscheidung.
+--
+-- CONTAINERFREIER VORPOSTEN: TestMigration144WidensSensitivitySource liest
+-- DIESE Datei aus migrations.FS und pinnt Wertemenge, Constraint-Namen,
+-- Anweisungszahl und vor allem die ABWESENHEIT von VALIDATE — ohne Datenbank,
+-- in `go test -short`. TestMigration144ShapeProbesAreRed fährt dieselben Regeln
+-- gegen absichtlich kaputte Scratch-Varianten, damit ein Pin, der nie feuern
+-- kann, auffällt.
+-- =============================================================================
+
+SET LOCAL lock_timeout = '2s';
+
+ALTER TABLE context_blocks
+    DROP CONSTRAINT IF EXISTS context_blocks_sensitivity_source_check;
+
+ALTER TABLE context_blocks
+    ADD CONSTRAINT context_blocks_sensitivity_source_check
+    CHECK (sensitivity_source IN ('default','llm-audit','pattern','manual','derived'))
+    NOT VALID;

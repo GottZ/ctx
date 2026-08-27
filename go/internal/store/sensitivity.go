@@ -84,6 +84,12 @@ func FetchSensitivities(ctx context.Context, pool *pgxpool.Pool, ids []string) (
 // manual classification between pick and verdict makes the verdict UPDATE
 // match zero rows. 'llm-audit'/'pattern' rows are already classified and
 // never re-enter the pick set (re-audit = an explicit source reset).
+//
+// 'derived' (migration 144, W01-4) deliberately does NOT join that inclusion
+// list. A folded classification carries provenance — it is a decision over the
+// source blocks, not a missing one — and the audit re-deciding it would drop
+// the fold on the floor. The correction path for a derived row is the G40
+// pattern sweep below, whose predicate excludes rather than includes.
 
 // AuditBlock is one pick-set row handed to the classifier.
 type AuditBlock struct {
@@ -220,8 +226,14 @@ type ClassifyBlock struct {
 
 // PickClassifyCandidates keyset-paginates (by id) the home-scope blocks the
 // detector may still raise: sensitivity <> 'credentials' AND source <> 'manual'
-// (manual is untantastbar, already-credentials needs no raise). afterID "" =
-// start at the beginning. Keyset over OFFSET is drain-safe under concurrent
+// (manual is untantastbar, already-credentials needs no raise). The source
+// predicate EXCLUDES rather than includes, so every source class that is not
+// 'manual' stays sweepable — 'derived' (migration 144) included, without a
+// predicate change. That is what keeps a folded block correctable for
+// EXISTING rows; the write-time detector (ApplyWriteDetector) only ever sees
+// writes. Pinned in both directions by TestDerivedSweepCoverage_Integration.
+//
+// afterID "" = start at the beginning. Keyset over OFFSET is drain-safe under concurrent
 // upgrades: a row that turns credentials drops out of the predicate, but its id
 // is already behind the cursor so it is never re-picked or skipped.
 func PickClassifyCandidates(ctx context.Context, pool *pgxpool.Pool, homeScope, afterID string, limit int) ([]ClassifyBlock, error) {
