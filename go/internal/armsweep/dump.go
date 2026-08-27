@@ -1,7 +1,6 @@
 package armsweep
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -154,6 +153,10 @@ func percentileIdx(q float64, n int) int {
 // WriteRecords writes dump records as JSONL at mode 0600, sorted by case key so
 // two runs over the same case set produce the same file regardless of the
 // completion order of concurrent workers.
+//
+// A path ending in GzipSuffix is written compressed (design/05 §6.1, M-W3d):
+// the suffix decides, never a flag, so an artefact's name cannot disagree with
+// its content.
 func WriteRecords(path string, recs []Record) error {
 	sorted := append([]Record(nil), recs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Key() < sorted[j].Key() })
@@ -163,21 +166,31 @@ func WriteRecords(path string, recs []Record) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	w := bufio.NewWriter(f)
-	enc := json.NewEncoder(w)
+	w, err := NewRecordWriter(f, path)
+	if err != nil {
+		return err
+	}
 	for i := range sorted {
-		if err := enc.Encode(sorted[i]); err != nil {
-			return fmt.Errorf("encode record %d: %w", i, err)
+		if err := w.Write(sorted[i]); err != nil {
+			return err
 		}
 	}
-	if err := w.Flush(); err != nil {
+	if err := w.Close(); err != nil {
 		return err
 	}
 	return f.Close()
 }
 
-// ReadRecords loads a dump file.
+// ReadRecords loads a dump file whole. A compressed artefact is read through
+// the record stream instead — the same bytes, without a second gzip path.
+//
+// Whole-file loading is right for `score`, which re-fuses one dump under 16
+// configurations and therefore needs every record repeatedly; `compare` pairs
+// four dumps once and streams (compare.go).
 func ReadRecords(path string) ([]Record, error) {
+	if strings.HasSuffix(path, GzipSuffix) {
+		return readRecordsStreamed(path)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

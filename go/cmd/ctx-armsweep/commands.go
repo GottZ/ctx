@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -266,6 +267,113 @@ func cmdScore(c *common, dumpA, dumpB, outDir, name, dampingType string) error {
 	return nil
 }
 
+// cmdCompare is the conditional comparison (design/05 §4.3, wave M-W3d):
+// offline like `score`, but over FOUR dumps — the two conditions and the
+// replicate pair that measures the noise floor they are read against.
+//
+// The report is written BEFORE a refusal is propagated, the same shape `dump`
+// uses for an aborted run: a refused comparison is a finding about the
+// instrument, and the artefact is the evidence for it.
+func cmdCompare(c *common, base, cond, noisePair, outDir, name string) error {
+	if base == "" || cond == "" {
+		return fmt.Errorf("-dump-base und -dump-cond sind Pflicht")
+	}
+	noise, err := splitNoisePair(noisePair)
+	if err != nil {
+		return err
+	}
+	gold, err := c.goldGuard()
+	if err != nil {
+		return err
+	}
+	dumps, err := c.dumpGuard(gold)
+	if err != nil {
+		return err
+	}
+	goldStamp, err := loadGoldStamp(gold)
+	if err != nil {
+		return err
+	}
+
+	in := armsweep.CompareInput{Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp}
+	if in.Base, err = loadDumpRef(dumps, armsweep.RoleBase, base); err != nil {
+		return err
+	}
+	if in.Cond, err = loadDumpRef(dumps, armsweep.RoleCond, cond); err != nil {
+		return err
+	}
+	for i, n := range noise {
+		role := armsweep.RoleNoiseA
+		if i == 1 {
+			role = armsweep.RoleNoiseB
+		}
+		ref, rerr := loadDumpRef(dumps, role, n)
+		if rerr != nil {
+			return rerr
+		}
+		in.NoisePair = append(in.NoisePair, ref)
+	}
+
+	body, cmpErr := armsweep.Compare(in)
+	if cmpErr != nil && !errors.Is(cmpErr, armsweep.ErrGateRefused) {
+		return cmpErr
+	}
+
+	reports, err := c.reportGuard(outDir)
+	if err != nil {
+		return err
+	}
+	base2 := name
+	if base2 == "" {
+		base2 = "compare-" + in.Cond.Stamp.RunID
+	}
+	jsonPath, err := reports.Resolve(base2 + ".json")
+	if err != nil {
+		return err
+	}
+	mdPath, err := reports.Resolve(base2 + ".md")
+	if err != nil {
+		return err
+	}
+	generatedAt := time.Now().UTC().Format(time.RFC3339)
+	if err := armsweep.WriteCompareReport(jsonPath, generatedAt, body); err != nil {
+		return err
+	}
+	if err := armsweep.WriteCompareMarkdown(mdPath, generatedAt, body); err != nil {
+		return err
+	}
+	fmt.Printf("compare: %d gepaarte Fälle, %d ungepaart, %d Slices, G-NOISE %s → %s\n",
+		body.Paired, body.UnpairedTotal, len(body.Effects), interpretable(!body.Refused), jsonPath)
+	return cmpErr
+}
+
+// splitNoisePair parses -noise-pair. Exactly two names: the pair IS the noise
+// floor, and one dump measures nothing about repeat disagreement.
+func splitNoisePair(csv string) ([]string, error) {
+	var out []string
+	for _, s := range strings.Split(csv, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) != 2 {
+		return nil, fmt.Errorf(
+			"%w: -noise-pair braucht genau zwei Dumps derselben Kampagne (V0,V0'), bekommen: %d",
+			armsweep.ErrGateRefused, len(out))
+	}
+	return out, nil
+}
+
+// loadDumpRef resolves a dump and its stamp WITHOUT reading the records: the
+// comparison streams them itself (design/05 §6.1).
+func loadDumpRef(dumps *goldset.Guard, role, name string) (armsweep.DumpRef, error) {
+	path, stamp, err := loadDumpStamp(dumps, name)
+	if err != nil {
+		return armsweep.DumpRef{}, err
+	}
+	return armsweep.DumpRef{Role: role, Path: path, Stamp: stamp}, nil
+}
+
 // dampingNote names the second family in the summary line. Silent when no
 // damping type was swept, so the line of a plain run is the line it always was.
 func dampingNote(body armsweep.ReportBody) string {
@@ -334,7 +442,7 @@ func latestPinFile(root string) (string, error) {
 // carries the exclusion list, the drift verdict and the instance provenance,
 // and a report built without it would silently claim a clean run.
 func loadDump(dumps *goldset.Guard, name string) ([]armsweep.Record, armsweep.DumpStamp, error) {
-	p, err := dumps.Resolve(filepath.Base(name))
+	p, stamp, err := loadDumpStamp(dumps, name)
 	if err != nil {
 		return nil, armsweep.DumpStamp{}, err
 	}
@@ -342,16 +450,29 @@ func loadDump(dumps *goldset.Guard, name string) ([]armsweep.Record, armsweep.Du
 	if err != nil {
 		return nil, armsweep.DumpStamp{}, err
 	}
-	stampName := strings.TrimSuffix(strings.TrimSuffix(filepath.Base(p), ".aborted"), ".jsonl") + ".stamp.json"
+	return recs, stamp, nil
+}
+
+// loadDumpStamp resolves a dump path and reads its sibling stamp WITHOUT the
+// records. `compare` needs exactly this: the stamps decide congruence before a
+// single record is read, and the records are then streamed rather than loaded.
+func loadDumpStamp(dumps *goldset.Guard, name string) (string, armsweep.DumpStamp, error) {
+	p, err := dumps.Resolve(filepath.Base(name))
+	if err != nil {
+		return "", armsweep.DumpStamp{}, err
+	}
+	stem := strings.TrimSuffix(filepath.Base(p), ".aborted")
+	stem = strings.TrimSuffix(strings.TrimSuffix(stem, armsweep.GzipSuffix), ".jsonl")
+	stampName := stem + ".stamp.json"
 	sp, err := dumps.Resolve(stampName)
 	if err != nil {
-		return nil, armsweep.DumpStamp{}, err
+		return "", armsweep.DumpStamp{}, err
 	}
 	var stamp armsweep.DumpStamp
 	if err := armsweep.ReadJSONFile(sp, &stamp); err != nil {
-		return nil, armsweep.DumpStamp{}, fmt.Errorf("kein lesbarer Dump-Stempel %s: %w", stampName, err)
+		return "", armsweep.DumpStamp{}, fmt.Errorf("kein lesbarer Dump-Stempel %s: %w", stampName, err)
 	}
-	return recs, stamp, nil
+	return p, stamp, nil
 }
 
 func loadGoldStamp(g *goldset.Guard) (goldset.Stamp, error) {
@@ -394,6 +515,12 @@ func fillInstanceStamp(ctx context.Context, c *common, stamp *armsweep.DumpStamp
 	}
 	if stamp.PostFusionStages, err = cl.PostStageState(ctx); err != nil {
 		return fmt.Errorf("Post-Fusion-Stufen: %w", err)
+	}
+	// The ANN window of the measured instance (M-W3d gate (h), design/05 §4.4b).
+	// Recorded here for the same reason as the two above: `compare` is offline
+	// and can only know what the dump wrote down while the instance was up.
+	if stamp.EfSearch, err = cl.EfSearchEffective(ctx); err != nil {
+		return fmt.Errorf("hnsw.ef_search der Instanz: %w", err)
 	}
 	return nil
 }

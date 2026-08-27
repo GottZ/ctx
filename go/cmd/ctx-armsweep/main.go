@@ -15,12 +15,18 @@
 //	       Mit -damping-type zusätzlich die Damping-Kurve eines Blocktyps über
 //	       zehn Stützstellen — eigene Report-Sektion, kein G-WIN-Urteil, und
 //	       nur über Dumps ab Migration 142 (sonst Exit 4).
+//	compare zwei BEDINGUNGEN gegeneinander (design/05 §4.3, M-W3d), gegen den
+//	       Rauschboden des V0/V0'-Paars derselben Kampagne. Eigenes
+//	       Unterkommando, weil -dump-b in `score` das REPLIKAT ist: dort ist
+//	       eine Differenz Rauschen, hier ist sie das Signal.
 //
 //	go build ./cmd/ctx-armsweep
 //	./ctx-armsweep prime -slices G-KI,G-Q,G-REAL
 //	./ctx-armsweep dump  -pins pins-20260826T090000Z.jsonl
 //	./ctx-armsweep score -dump dumps/A.jsonl -dump-b dumps/B.jsonl
 //	./ctx-armsweep score -dump dumps/A.jsonl -damping-type checkpoint
+//	./ctx-armsweep compare -dump-base B0.jsonl -dump-cond B1.jsonl \
+//	    -noise-pair V0.jsonl,V0p.jsonl
 //
 // Jeder Schreibvorgang ist auf `dumps/` bzw. `reports/` eingegrenzt; Override
 // ist -allow-outside-goldset, und er steht im Report.
@@ -55,21 +61,33 @@ import (
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "ctx-armsweep:", err)
-		switch {
-		case errors.Is(err, goldset.ErrOutsideGoldset):
-			os.Exit(2)
-		case errors.Is(err, armsweep.ErrGateRefused):
-			os.Exit(3)
-		case errors.Is(err, errDumpAborted), errors.Is(err, armsweep.ErrDumpPredatesTypeName):
-			os.Exit(4)
-		case errors.Is(err, armsweep.ErrNotMeasureCopy):
-			// Its own code, not 3: the seam did not refuse anything here — the
-			// DRIVER refused to point a shadow dump at a production corpus, and
-			// a scheduler that retries on a gate refusal must not retry on this.
-			os.Exit(5)
-		}
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// exitCodeFor is the exit cascade of the whole driver, in one testable place.
+//
+//	2 outside the gold roots · 3 a gate refused · 4 a dump was discarded ·
+//	5 a shadow dump was aimed at a production instance · 1 everything else.
+func exitCodeFor(err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, goldset.ErrOutsideGoldset):
+		return 2
+	case errors.Is(err, armsweep.ErrGateRefused):
+		return 3
+	case errors.Is(err, errDumpAborted),
+		errors.Is(err, armsweep.ErrDumpPredatesTypeName),
+		errors.Is(err, armsweep.ErrStampIncongruent):
+		return 4
+	case errors.Is(err, armsweep.ErrNotMeasureCopy):
+		// Its own code, not 3: the seam did not refuse anything here — the
+		// DRIVER refused to point a shadow dump at a production corpus, and
+		// a scheduler that retries on a gate refusal must not retry on this.
+		return 5
+	}
+	return 1
 }
 
 // errDumpAborted signals that the drift protocol discarded a dump. Its own exit
@@ -80,6 +98,9 @@ func main() {
 // armsweep.ErrDumpPredatesTypeName shares exit 4: it is the same class of
 // verdict — the run was well-formed and the DUMP was rejected, here because a
 // damping curve was asked of an artefact measured before migration 142.
+// armsweep.ErrStampIncongruent shares it for the third time (M-W3d): the four
+// dumps of a comparison were readable and were rejected as a SET, because their
+// stamps do not describe one campaign.
 var errDumpAborted = errors.New("dump verworfen (Drift-Protokoll)")
 
 // common carries the flags every subcommand shares.
@@ -159,6 +180,17 @@ func run() error {
 			return err
 		}
 		return cmdDump(ctx, &c, *pins)
+	case "compare":
+		base := fs.String("dump-base", "", "Basis-Dump (Pflicht)")
+		cond := fs.String("dump-cond", "", "Bedingungs-Dump (Pflicht)")
+		noise := fs.String("noise-pair", "",
+			"V0/V0'-Dump-Paar DERSELBEN Kampagne als CSV (Pflicht — ohne gemessenen Rauschboden verweigert der Vergleich)")
+		outDir := fs.String("reports", defaultReportDir(), "Report-Verzeichnis")
+		name := fs.String("name", "", "Basisname der Report-Dateien (Vorgabe: compare-<Lauf-ID des Bedingungs-Dumps>)")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdCompare(&c, *base, *cond, *noise, *outDir, *name)
 	case "score":
 		dumpA := fs.String("dump", "", "Dump-Datei (Pflicht)")
 		dumpB := fs.String("dump-b", "", "zweiter Dump für die V0'-Replikate (ohne ihn ist G-NOISE nicht auswertbar)")

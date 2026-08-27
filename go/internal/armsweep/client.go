@@ -166,6 +166,39 @@ func (c *Client) MigrationsMax(ctx context.Context) (int, error) {
 	return resp.DB.MigrationsMax, nil
 }
 
+// EfSearchEffective reads hnsw.ef_search off the status surface — the value the
+// MEASURED instance's backends run under, marked "(default)" when it is the
+// compiled-in one (handler/status_db.go:422-455).
+//
+// Read from the instance rather than from a ctx setting because no ctx setting
+// drives it on the query path: the arm statement sets iterative_scan and
+// max_scan_tuples per call (142:216-220) and leaves ef_search to the server. It
+// is stamped so a campaign whose halves ran under different ANN windows can be
+// refused instead of compared (design/05 §4.4b, F-23).
+func (c *Client) EfSearchEffective(ctx context.Context) (string, error) {
+	body, status, err := c.do(ctx, http.MethodGet, "/api/status", nil)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("status: HTTP %d: %s", status, apiError(body))
+	}
+	var resp struct {
+		DB *struct {
+			HNSW struct {
+				EfSearchEffective string `json:"ef_search_effective"`
+			} `json:"hnsw"`
+		} `json:"db"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("status: decode: %w", err)
+	}
+	if resp.DB == nil {
+		return "", fmt.Errorf("status: response carries no db section (server-admin key required)")
+	}
+	return resp.DB.HNSW.EfSearchEffective, nil
+}
+
 // Setting reads ONE effective setting value. The post-fusion stage state is
 // read this way and not from the driver's environment: the stages that touch a
 // delivered ranking are configured in the database, and an env variable on the

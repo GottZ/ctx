@@ -177,6 +177,20 @@ type DumpStamp struct {
 	// written down while the instance was being measured.
 	MigrationsMax    int            `json:"migrations_max"`
 	PostFusionStages map[string]any `json:"post_fusion_stages"`
+	// EfSearch is hnsw.ef_search as the MEASURED instance reported it
+	// (/api/status, db.hnsw.ef_search_effective — handler/status_db.go:422-455,
+	// which probes pg_settings after loading the pgvector library and marks the
+	// compiled-in default). It is the one of the three ANN determinism knobs of
+	// §4.4b/F-23 that is a property of the INSTANCE rather than of a single
+	// measured query: iterative_scan and max_scan_tuples are set per statement
+	// on the ann path (142:216-220) and are therefore recorded per record in
+	// Selector. `compare` refuses a dump set whose halves disagree on any of the
+	// three (M-W3d gate (h)).
+	//
+	// Empty on a dry run and on every dump written before wave M-W3d. Empty
+	// compares equal to empty, so an old campaign still compares — the report
+	// says the knob was not stamped instead of inventing a value for it.
+	EfSearch string `json:"hnsw_ef_search,omitempty"`
 	// AllowOutsideGoldset records the path-guard override for the report.
 	AllowOutsideGoldset bool `json:"allow_outside_goldset"`
 

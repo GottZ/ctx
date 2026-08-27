@@ -42,6 +42,10 @@ Ergebnis ist `dumps/<Lauf>.jsonl` plus `dumps/<Lauf>.stamp.json`.
 **`score`** ist offline. Es fasst keinen Server an und keine Uhr außer der
 Kopfzeile: zwei Läufe über denselben Dump erzeugen dieselben Bytes.
 
+**`compare`** ist die vierte Stufe und beantwortet eine andere Frage: nicht
+„welches Gewichts-Vektor ist besser", sondern „was tut diese Bedingung".
+Siehe „Der Bedingungs-Vergleich" weiter unten.
+
 ## Warum zwei Dumps
 
 `V0` und `V0′` sind dieselbe Konfiguration auf zwei unabhängigen Läufen. Ihre
@@ -56,6 +60,59 @@ seed-basierten 50/50-Splits, auf der nicht abgeleitet wurde. V1 ist die eine
 vorab festgelegte Primärvergleichung und wird bei 95 % gelesen; die übrigen 13
 laufen bei 1 − 0,05/13 und heißen, wenn sie durchkommen, „Kandidat,
 unbestätigt".
+
+## Der Bedingungs-Vergleich (`compare`, Welle M-W3d)
+
+```bash
+./ctx-armsweep compare -dump-base dumps/B0.jsonl -dump-cond dumps/B1.jsonl \
+    -noise-pair dumps/V0.jsonl,dumps/V0p.jsonl
+```
+
+`score` vergleicht **Gewichte** auf einem Dump. `compare` vergleicht **zwei
+Bedingungen**: Dump A ohne einen Blocktyp, Dump B mit ihm. Dieselbe gepaarte
+Mechanik, aber die umgekehrte Lesart — bei V0/V0′ ist eine Differenz Rauschen,
+hier ist sie das Signal. Deshalb ein eigenes Unterkommando und nicht ein zweites
+Flag: `-dump-b` ist im Code das **Replikat** („the noise floor, not a variant"),
+und beide Rollen auf einem Flag würden dem Report seine eigene Rausch-Definition
+entziehen.
+
+**Was `compare` verweigert, und mit welchem Code:**
+
+| Lage | Exit |
+|---|---|
+| `-noise-pair` fehlt oder nennt nicht genau zwei Dumps | 3 |
+| G-NOISE des Paars ist rot | 3 (Report wird trotzdem geschrieben) |
+| Stempel nicht kongruent: `pin_run_id`/`pin_sha256`, Gold-Bytes, `migrations_max`, Post-Fusion-Stufen, `instance_kind`, `hnsw.ef_search` | 4 |
+| GUC-Zustand je Fall abweichend: `hnsw.iterative_scan`, `hnsw.max_scan_tuples` | 4 |
+
+Die drei GUCs sind die Determinismus-Schrauben des schwersten Arms (Design 05
+§4.4b, F-23). `hnsw.ef_search` kommt aus dem Dump-Stempel (`/api/status`,
+`db.hnsw.ef_search_effective`); `iterative_scan` und `max_scan_tuples` setzt
+`ctx_rrf_arms` je Anfrage **nur** auf dem ann-Pfad (142:216-220) — sie werden
+deshalb aus dem aufgezeichneten Selector-Zustand je Fall gelesen, nicht aus einem
+Konfigurations-Schnappschuss. Der `instance_kind`-Vergleich läuft auf den ROHEN
+Dump-Stempeln: der Report-Env führt die Arten eines Paars seit M-W2 zu einem
+String zusammen, und ein Gate auf dieser Zusammenführung sähe einen Wert, wo zwei
+stehen.
+
+**Was der Report zeigt:** ΔnDCG@10, ΔRecall@5 und ΔMRR@10 je Slice mit
+gepaartem Bootstrap-CI und McNemar auf Hit@5; die **Verdrängungs-Tabelle** (wie
+viele Top-5-Plätze die Schatten-Typen belegen, welche Typen Plätze verlieren, wie
+viele verdrängte Blöcke gelabelt waren — ohne Labels bleibt die Spalte leer und
+der Report sagt es); und den **Auflösungs-Report**: die halbe CI-Breite von
+ΔnDCG@10 zwischen den beiden identischen Läufen IST die kleinste Differenz, die
+eine Slice zeigen kann (MDE). Über 2 pp gilt die Slice vorab als „für Effekte in
+Literatur-Größenordnung nicht auflösbar".
+
+Ein Effekt heißt nur dann **lesbar**, wenn sein CI die 0 ausschließt, er über der
+MDE seiner Slice liegt **und** seine Diskordanz die des Replikat-Paars übersteigt
+(F-32). Eine Bedingung, die weniger Fälle bewegt als das Instrument von selbst,
+ist kein Befund.
+
+Dumps werden **streamend** gelesen und dürfen gzip-komprimiert sein
+(`.jsonl.gz`): ein Vergleich hält vier Dumps gleichzeitig, und bei 290 000
+Datensätzen je Dump ist das der Unterschied zwischen ~40 MB und über 1 GB
+Arbeitsspeicher.
 
 ## Die Damping-Kurve (Welle M-W8)
 

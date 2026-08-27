@@ -426,8 +426,8 @@ repository walk can land on the enclosing checkout. Reports cite a query as
 (semantic 0.45, `fts_de` 0.20, `fts_en` 0.25, trigram 0.10, k = 60) against the
 gold set `ctx-goldset` builds. It rides the admin-gated `arm_ranks` seam on
 `POST /api/query`, records the per-arm ranks a real request produced, and
-re-fuses them offline under 16 configurations. Three subcommands, deliberately
-separate runs:
+re-fuses them offline under 16 configurations. Four subcommands, deliberately
+separate runs (`compare` is described further down):
 
 ```bash
 cd go && go build ./cmd/ctx-armsweep
@@ -485,6 +485,45 @@ fixed 13-comparison Bonferroni level. Asking for a curve over a dump measured
 before migration 142 is a hard refusal (exit 4), not a fallback — such a dump has
 no type names, so the curve would come out flat by construction rather than by
 measurement.
+
+`compare` is the fourth subcommand and answers a different question: not "which
+weight vector is better" but "what does this CONDITION do" — dump A measured
+without a block type, dump B measured with it.
+
+```bash
+./ctx-armsweep compare -dump-base dumps/B0.jsonl -dump-cond dumps/B1.jsonl \
+    -noise-pair dumps/V0.jsonl,dumps/V0p.jsonl
+```
+
+It is a subcommand of its own rather than a second flag on `score`, because
+`score -dump-b` is the V0′ **replicate**: there a difference is noise, here it is
+the signal, and carrying both roles on one flag would take the report's own
+definition of noise away from it. Five properties:
+
+- **No noise floor, no comparison.** `-noise-pair` is mandatory and must name the
+  V0/V0′ pair of the SAME campaign; a missing pair or a red G-NOISE refuses with
+  exit 3. The refused run still writes its report — the evidence is what an
+  operator needs to find the determinism source.
+- **Campaign congruence, or exit 4.** All four dumps must share the priming run
+  (`pin_run_id`/`pin_sha256`), the gold bytes, `migrations_max`, the post-fusion
+  stage state, `instance_kind` (read off the RAW stamps, never off the merged
+  report env) and the three ANN knobs of the semantic arm: `hnsw.ef_search` from
+  the dump stamp, `hnsw.iterative_scan` and `hnsw.max_scan_tuples` from the
+  per-case selector state, which is where migration 142 decides them.
+- **Three deltas and two admission rules.** ΔnDCG@10, ΔRecall@5 and ΔMRR@10 per
+  slice, each with a paired bootstrap CI, plus McNemar on Hit@5. An effect counts
+  as readable only if its CI excludes 0, it exceeds the slice's own MDE, and its
+  discordance exceeds that of the replicate pair — a condition that moves fewer
+  cases than the instrument moves on its own is not separable from noise.
+- **Displacement table.** Per slice: how many top-5 places the shadow types hold,
+  which types lost places, and how many displaced blocks were labelled relevant.
+  Without labels on a slice the last column stays empty and the report says so.
+- **Resolution report.** The half CI width of ΔnDCG@10 between the two identical
+  runs IS the smallest difference a slice can show (MDE). Above 2 pp the slice is
+  declared "not resolvable for effects of literature size" before any effect is
+  read. Dumps are read **streamed** and may be gzip-compressed (`.jsonl.gz`): a
+  comparison holds four dumps at once, and at 290 000 records each that is the
+  difference between ~40 MB and over 1 GB of resident memory.
 
 The census reaches the driver as an **additive, opt-in, server-admin-only**
 `drift` section of the existing `POST /api/manage` `stats` action — not as a new
