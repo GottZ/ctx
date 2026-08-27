@@ -452,8 +452,19 @@ cd go && go build ./cmd/ctx-armsweep
 ./ctx-armsweep score -dump dumps/<A>.jsonl -regime-labels x-w0-labels.jsonl
 ```
 
-Four properties are enforced by the tool, not by discipline:
+Five properties are enforced by the tool, not by discipline:
 
+- **The named slices, or a refusal.** `-slices` defaults to the whole registry
+  (`G-KI,G-Q,G-REAL,G-SESS,G-MH,G-GLOB,G-GLOB-KONSTR`, 1 000 cases) and loads
+  exactly the names it is given, always in that artefact order. A name the
+  registry does not know, an empty list, or a named slice whose file carries no
+  cases each abort the run and name the offender. Until wave X-W1a the loader
+  walked a three-entry table of its own instead of the names, so the four
+  multi-gold slices of M-W5 were dropped in silence: a `prime` over all seven
+  names primed 650 of 1 000 cases and exited 0. The stamp follows the loader —
+  `prime-<run>.json` names the slices actually loaded, and `gold_sha256` covers
+  exactly their files, so a three-slice noise pair and a seven-slice conditional
+  dump are refused as incongruent instead of compared.
 - **Pins, or nothing.** `prime` captures the translation and temporal-expansion
   results as pins; `dump` refuses a case without one instead of falling back to
   the unpinned path. A partly pinned run is neither a pinned nor an unpinned

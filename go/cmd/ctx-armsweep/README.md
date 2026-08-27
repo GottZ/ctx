@@ -25,6 +25,11 @@ cd go && go build ./cmd/ctx-armsweep
 `pool-<Lauf>.jsonl`: die Top-20 je Arm, Eingabe für die Relevanz-Urteile in
 Welle B-W6. Nichts wird gescort.
 
+**Offen:** seit Welle M-W5 ist G-GLOB der zweite ungelabelte Slice, und `prime`
+poolt ihn **nicht** — `buildPool` sammelt die Arm-Köpfe ausschließlich für
+G-REAL (`internal/armsweep/run.go`, `buildPool`). Ob G-GLOB denselben Pool
+bekommt, ist ein offener Entscheid und keine Eigenschaft des Werkzeugs.
+
 Aus dieser Datei baut `ctx-goldset pool` die blinde Urteils-Vorlage (Vereinigung
 der vier Arm-Köpfe plus fünf gleichverteilt gezogene Kontroll-Blöcke, dedupliziert,
 seed-permutiert, ohne Score, Arm oder Rang), ein Mensch urteilt, und
@@ -45,6 +50,29 @@ Kopfzeile: zwei Läufe über denselben Dump erzeugen dieselben Bytes.
 **`compare`** ist die vierte Stufe und beantwortet eine andere Frage: nicht
 „welches Gewichts-Vektor ist besser", sondern „was tut diese Bedingung".
 Siehe „Der Bedingungs-Vergleich" weiter unten.
+
+## Welche Slices gefahren werden (`-slices`, Welle X-W1a)
+
+`-slices` nimmt Registry-Namen als CSV. **Vorgabe sind alle sieben:**
+`G-KI,G-Q,G-REAL,G-SESS,G-MH,G-GLOB,G-GLOB-KONSTR` — zusammen 1 000 Fälle. Die
+Reihenfolge im Artefakt ist immer diese, unabhängig davon, wie die Namen
+übergeben wurden.
+
+Ein Name, den die Registry nicht kennt, **bricht den Lauf ab** und wird mit den
+bekannten Namen zurückgemeldet; dasselbe gilt für eine leere Nennung und für
+einen benannten Slice, dessen Datei keine Fälle enthält. Bis Welle X-W1a war das
+anders: die Schleife lief über eine eigene Drei-Slice-Tabelle statt über die
+übergebenen Namen, ein unbekannter Name fiel **wortlos** heraus, und ein `prime`
+über alle sieben Namen zog 650 statt 1 000 Fälle bei Exit 0. Eine Messung, die
+35 % ihrer Grundgesamtheit still verliert, ist schlimmer als eine, die abbricht —
+jede Zahl danach bleibt plausibel.
+
+Der Stempel trägt die Folge: `prime-<Lauf>.json` nennt unter `slices` die
+tatsächlich geladenen Slices, und `gold_sha256` im Dump-Stempel deckt genau
+deren Dateien ab. Ein Rausch-Paar über drei Slices und ein Bedingungs-Dump über
+sieben sind damit **nicht** eine Kampagne — `compare` weist das Paar als
+inkongruent ab (Exit 4), statt zwei verschiedene Grundgesamtheiten zu
+vergleichen.
 
 ## Warum zwei Dumps
 
@@ -183,7 +211,7 @@ Report-Env unter `regime_labels`.
 
 - **Off-Peak fahren, nicht parallel zu Dream.** Das ist eine Betriebsnotiz,
   keine technische Garantie — das Werkzeug erzwingt nichts. Die Messung läuft in
-  einer RepeatableRead/ReadOnly-Transaktion, die einen Snapshot hält; 650
+  einer RepeatableRead/ReadOnly-Transaktion, die einen Snapshot hält; 1 000
   Queries davon neben einem Dream-Lauf belasten dieselbe GPU und dieselbe
   Datenbank, die gerade gemessen werden.
 - **`-concurrency` bleibt bei 1.** Höhere Werte stapeln Snapshots auf einer

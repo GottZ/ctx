@@ -149,7 +149,11 @@ func (c *common) bind(fs *flag.FlagSet) {
 	fs.IntVar(&c.concurrency, "concurrency", 1, "parallele Messanfragen (Vorgabe 1 — die Mess-Tx ist RepeatableRead, Off-Peak)")
 	fs.BoolVar(&c.dryRun, "dry-run", false, "kein HTTP; prüft Laden, Pfad-Guard und Artefakt-Schreiben")
 	fs.IntVar(&c.timeout, "timeout", 120, "HTTP-Timeout je Anfrage in Sekunden")
-	fs.StringVar(&c.slices, "slices", "G-KI,G-Q,G-REAL", "zu fahrende Slices als CSV")
+	// The default is the WHOLE registry. A default that measures a subset makes
+	// the undercount the omission case — the one nobody checks — and that is
+	// precisely how wave X-W1 ended up priming 650 of 1000 cases.
+	fs.StringVar(&c.slices, "slices", strings.Join(armsweep.CanonicalSlices(), ","),
+		"zu fahrende Slices als CSV (Vorgabe: alle Registry-Slices; ein unbekannter Name wird abgewiesen)")
 	fs.IntVar(&c.limit, "limit", 0, "limit je Query (0 = Server-Vorgabe)")
 	fs.StringVar(&c.runID, "run-id", "", "Lauf-Kennung (Vorgabe: UTC-Zeitstempel)")
 	fs.IntVar(&c.retries, "retries", armsweep.DefaultRetries, "Retry-Budget je Query; danach Ausschluss")

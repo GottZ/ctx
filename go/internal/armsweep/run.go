@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,14 +79,53 @@ type outcome struct {
 // and readable — the three properties a directory of dumps needs.
 func NewRunID(now time.Time) string { return now.UTC().Format("20060102T150405Z") }
 
-// LoadCases reads the gold slices named in names ("G-KI", "G-Q", "G-REAL") in
-// the canonical slice order, so a run over all three always visits them in the
-// same sequence.
+// sliceFiles maps every registry slice to its file in the gold directory. It is
+// the ONE place the measurement path learns where gold lives — the driver's
+// stamp reads it through SliceFileOf rather than keeping a second copy, because
+// two copies of this table is exactly how wave M-W5 could add four slices that
+// `prime` and `dump` then never loaded.
+func sliceFiles() map[string]string {
+	return map[string]string{
+		goldset.SliceKI:         goldset.FileKI,
+		goldset.SliceQ:          goldset.FileQ,
+		goldset.SliceReal:       goldset.FileReal,
+		goldset.SliceSess:       goldset.FileSess,
+		goldset.SliceMH:         goldset.FileMH,
+		goldset.SliceGlob:       goldset.FileGlob,
+		goldset.SliceGlobKonstr: goldset.FileGlobKonstr,
+	}
+}
+
+// SliceFileOf resolves the gold file of one slice. ok is false for a name the
+// registry does not know, and every caller is expected to REFUSE on that rather
+// than skip the slice.
+func SliceFileOf(slice string) (string, bool) {
+	f, ok := sliceFiles()[slice]
+	return f, ok
+}
+
+// LoadCases reads the gold slices NAMED IN names, in the canonical slice order,
+// so a run over the same set always visits it in the same sequence.
+//
+// It is fail-closed on three counts, and all three were live defects rather
+// than hypotheticals (wave X-W1): a name the registry does not know, a name
+// list that is empty, and a named slice whose file carries no case are each a
+// refusal. The predecessor walked its own three-entry table instead of names
+// and therefore DROPPED the four slices of M-W5 without a word — a `prime` over
+// all seven names primed 650 of 1000 cases and exited 0. A measurement that
+// silently loses 35 % of its population is worse than one that fails: every
+// figure computed from it stays plausible.
 func LoadCases(g *goldset.Guard, names []string) ([]goldset.Case, error) {
-	files := map[string]string{
-		goldset.SliceKI:   goldset.FileKI,
-		goldset.SliceQ:    goldset.FileQ,
-		goldset.SliceReal: goldset.FileReal,
+	files := sliceFiles()
+	if len(names) == 0 {
+		return nil, fmt.Errorf("kein Gold-Slice genannt — bekannt sind: %s",
+			strings.Join(CanonicalSlices(), ", "))
+	}
+	for _, n := range names {
+		if _, ok := files[n]; !ok {
+			return nil, fmt.Errorf("unbekannter Gold-Slice %q — bekannt sind: %s",
+				n, strings.Join(CanonicalSlices(), ", "))
+		}
 	}
 	var out []goldset.Case
 	for _, n := range CanonicalSlices() {
@@ -100,14 +140,25 @@ func LoadCases(g *goldset.Guard, names []string) ([]goldset.Case, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load slice %s: %w", n, err)
 		}
+		if len(cases) == 0 {
+			return nil, fmt.Errorf("Gold-Slice %s (%s) enthält keine Fälle — ein benannter Slice, der nichts beiträgt, wird nicht stillschweigend übergangen",
+				n, files[n])
+		}
 		out = append(out, cases...)
 	}
 	return out, nil
 }
 
-// CanonicalSlices is the fixed slice order of every artefact and report.
+// CanonicalSlices is the fixed slice order of every artefact and report: the
+// five rollout slices, the aggregating slice and the floor check, in the order
+// the report registry lists them (score.go, ReportSlices/FloorSlices). G-Q is
+// ONE measured file that fans out into two report rows, so the two lists differ
+// in length by one — TestCanonicalSlicesIsTheWholeRegistry pins that mapping.
 func CanonicalSlices() []string {
-	return []string{goldset.SliceKI, goldset.SliceQ, goldset.SliceReal}
+	return []string{
+		goldset.SliceKI, goldset.SliceQ, goldset.SliceReal,
+		goldset.SliceSess, goldset.SliceMH, goldset.SliceGlob, goldset.SliceGlobKonstr,
+	}
 }
 
 func contains(hay []string, needle string) bool {

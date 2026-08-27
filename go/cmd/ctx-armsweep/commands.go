@@ -559,12 +559,11 @@ func fillInstanceStamp(ctx context.Context, c *common, stamp *armsweep.DumpStamp
 }
 
 // fillGoldDigests binds the stamp to the exact slice bytes measured.
+//
+// The slice→file table is NOT repeated here: armsweep.SliceFileOf is the single
+// source of truth, because a second copy is what let wave M-W5 add four slices
+// that the stamp then described as if they had never been measured.
 func fillGoldDigests(g *goldset.Guard, cases []goldset.Case, stamp *armsweep.DumpStamp) error {
-	files := map[string]string{
-		goldset.SliceKI:   goldset.FileKI,
-		goldset.SliceQ:    goldset.FileQ,
-		goldset.SliceReal: goldset.FileReal,
-	}
 	counts := map[string]int{}
 	for _, c := range cases {
 		counts[c.Slice]++
@@ -573,7 +572,11 @@ func fillGoldDigests(g *goldset.Guard, cases []goldset.Case, stamp *armsweep.Dum
 		if counts[slice] == 0 {
 			continue
 		}
-		p, err := g.Resolve(files[slice])
+		file, ok := armsweep.SliceFileOf(slice)
+		if !ok {
+			return fmt.Errorf("Gold-Slice %s hat keine Datei in der Registry — der Stempel könnte den Lauf nicht beschreiben", slice)
+		}
+		p, err := g.Resolve(file)
 		if err != nil {
 			return err
 		}
@@ -582,7 +585,7 @@ func fillGoldDigests(g *goldset.Guard, cases []goldset.Case, stamp *armsweep.Dum
 			return err
 		}
 		stamp.SliceFiles = append(stamp.SliceFiles,
-			armsweep.SliceDigest{Slice: slice, File: files[slice], SHA256: digest, N: counts[slice]})
+			armsweep.SliceDigest{Slice: slice, File: file, SHA256: digest, N: counts[slice]})
 	}
 	sp, err := g.Resolve(goldset.FileStamp)
 	if err != nil {
