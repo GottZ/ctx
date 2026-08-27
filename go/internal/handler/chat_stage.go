@@ -145,6 +145,16 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
 		return nil, msg, nil
 	}
+	// I7 claim gates, the same call the MCP update twin makes (W01-2a
+	// Nachbesserung, review finding #2 — blocker): this runner had none, so a
+	// chat-staged move into a reserved category was written by the confirm.
+	// The chat surface is a harness WITHOUT its own gating layer running the
+	// smallest model (file header), which makes a missing gate here worse than
+	// anywhere else, not better. The tool carries no `type` (chat/tools.go
+	// updateToolDef), so that arm is inert.
+	if rej := claimReject(nil, strOrEmpty(data.Category), "", data.Metadata); rej != nil {
+		return nil, rej.Msg, nil
+	}
 
 	var ttl time.Duration
 	rateLimit := 0
@@ -211,12 +221,26 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 		preview = previewOf(*content)
 		previewChars = len(*content)
 	}
+	// The card shows what the confirm will DO, not what the block is today
+	// (W01-2a Nachbesserung, review finding #2): on a category or title move
+	// it showed block.Category/block.Title — the OLD values — so the human
+	// approved a move that was invisible on the card. The ConfirmCard IS this
+	// harness's human-in-the-loop mechanism; a card that hides the change is
+	// the mechanism failing quietly. Unchanged fields still show the current
+	// value, which is what makes the card readable at all.
+	cardCategory, cardTitle := block.Category, block.Title
+	if category != nil {
+		cardCategory = *category
+	}
+	if title != nil {
+		cardTitle = *title
+	}
 	return &chat.StagedWrite{
 		PayloadHash:    hash,
 		Op:             "update",
 		Scope:          block.Scope,
-		Category:       block.Category,
-		Title:          block.Title,
+		Category:       cardCategory,
+		Title:          cardTitle,
 		ContentPreview: preview,
 		ContentChars:   previewChars,
 		ExpiresAt:      pw.ExpiresAt,

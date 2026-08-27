@@ -952,6 +952,46 @@ func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, a
 	})
 }
 
+// updateClaimReject is the manage-update entry into the I7 claim gates: the
+// category it moves the block INTO (S2), the provenance key it would plant
+// (S3) and the type it asserts (S1 + the WF T10 registry check, fail-closed on
+// an unwired registry). nil = admissible.
+//
+// It exists because manage-update is a claim surface that D-01 §4.3.1 does not
+// name — `data.Type`, `data.Category` and `data.Metadata` reach
+// store.UpdateBlock from the same client JSON that /api/store takes them from,
+// so leaving the gates off this path would have made the invariant a property
+// of the verb a client picks.
+//
+// It DELEGATES rather than re-implements (W01-2a Nachbesserung, review finding
+// #6): its own copy ran type-before-category and answered 422 where
+// /api/store answered 403 for the identical payload. An absent pointer becomes
+// the empty value, which claimReject reads as "not part of this write".
+func (h *ManageHandler) updateClaimReject(ctx context.Context, data store.UpdateBlockData) *writeReject {
+	var set *blocktype.Set
+	if h.blocktypes != nil {
+		set = h.blocktypes.SnapshotForRequest(ctx)
+	}
+	return claimReject(set, strOrEmpty(data.Category), strOrEmpty(data.Type), data.Metadata)
+}
+
+// writeUpdateFailure renders a failed by-id block write on the manage surface
+// (update, delete, guard-resolve): the I7/S3 sentinel as 403
+// provenance_protected (a coded envelope, because the class is new), every
+// other fault as the surface's historical uncoded 500 — recoding the manage
+// handlers' existing envelopes is explicitly out of scope (errcode.go's SCOPE
+// note).
+func writeUpdateFailure(w http.ResponseWriter, err error, reqID string) {
+	if rej := provenanceRejectOr(err, nil); rej != nil {
+		writeJSONReject(w, rej)
+		return
+	}
+	slog.Error("manage: block write error", "error", err, "request_id", reqID)
+	writeJSON(w, http.StatusInternalServerError, map[string]any{
+		"success": false, "error": "Internal server error",
+	})
+}
+
 func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
@@ -986,17 +1026,15 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	// Type re-classification (WF T10, D4: REST only): registry-validated,
-	// fail-closed — an unwired registry rejects instead of writing an
-	// unvalidated name (422). The store then sets type_source='manual',
-	// which permanently overrides the auto-classifier (T4 semantics).
-	if data.Type != nil {
-		if msg := h.validateBlockTypeName(ctx, *data.Type); msg != "" {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
-				"success": false, "error": msg,
-			})
-			return
-		}
+	// What this update may CLAIM: the type (WF T10, D4: REST only —
+	// registry-validated, fail-closed, an unwired registry rejects instead of
+	// writing an unvalidated name; the store then sets type_source='manual',
+	// which permanently overrides the auto-classifier) and, since W01-2a, the
+	// two I7 gates riding on the same two fields (S1 derived type, S2 derived
+	// category).
+	if rej := h.updateClaimReject(ctx, data); rej != nil {
+		writeJSONReject(w, rej)
+		return
 	}
 
 	// Scope write restriction on update — the target scope must be one the key
@@ -1052,10 +1090,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 
 	block, needsReEmbed, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, writableBlockScopes(ar))
 	if err != nil {
-		slog.Error("manage: update error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
+		writeUpdateFailure(w, err, reqID)
 		return
 	}
 	if block == nil {
@@ -1194,10 +1229,9 @@ func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar 
 
 	block, err := store.DeleteBlock(ctx, h.pool, resolvedID, writableBlockScopes(ar))
 	if err != nil {
-		slog.Error("manage: delete error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
+		// I7/S3: a derivative is not client-archivable either — 403, decided in
+		// the store's WHERE. Same renderer as the update path.
+		writeUpdateFailure(w, err, reqID)
 		return
 	}
 	if block == nil {
@@ -1335,10 +1369,9 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 
 	block, err := store.GuardResolve(ctx, h.pool, req.ID, resolveData.Resolution, writableBlockScopes(ar))
 	if err != nil {
-		slog.Error("manage: guard-resolve error", "error", err, "request_id", reqID)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Internal server error",
-		})
+		// I7/S3: guard-resolve 'archive' is the second archive verb — a
+		// derivative is not archivable through it either (403, not 500).
+		writeUpdateFailure(w, err, reqID)
 		return
 	}
 	if block == nil {

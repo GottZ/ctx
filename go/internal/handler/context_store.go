@@ -92,14 +92,16 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Explicit type (WF T10): validate against the registry snapshot BEFORE
-	// any write. Fail-closed on a nil registry (test wiring): an unvalidated
-	// name must never reach the manual-provenance write path.
-	if req.Type != "" {
-		if msg := h.validateStoreTypeName(ctx, req.Type); msg != "" {
-			writeJSONReject(w, classUnknownType.reject(msg))
-			return
-		}
+	// What the client may CLAIM about this block, BEFORE any write: the
+	// category it occupies (I7/S2), the provenance key it carries (I7/S3) and
+	// the type it names (I7/S1 + the WF T10 registry check, fail-closed on a
+	// nil registry — an unvalidated name must never reach the manual-provenance
+	// write path). Same function, same order and same position as the MCP
+	// surfaces' gate chain (runStageWriteGates): that is what makes it ONE
+	// chain. Raw request metadata, before the detector adds its own key.
+	if rej := claimReject(h.classifySet(ctx), req.Category, req.Type, req.Metadata); rej != nil {
+		writeJSONReject(w, rej)
+		return
 	}
 
 	// G40 credentials detector: a content pattern hit forces credentials
@@ -162,8 +164,9 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// Execute upsert.
 	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, req.Metadata, writeScope, scopeExplicit, sens, req.Type)
 	if err != nil {
-		slog.Error("store: upsert error", "error", err, "request_id", reqID)
-		writeJSONReject(w, classInternal.reject("Internal server error"))
+		// I7/S3: the conflicting row is a derivative. The refusal is decided in
+		// the store (atomic with the row lock) and answered here as 403.
+		writeJSONReject(w, upsertFailureReject(err, reqID))
 		return
 	}
 
@@ -353,14 +356,19 @@ func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
 	return h.blocktypes.SnapshotForRequest(ctx)
 }
 
-// validateStoreTypeName checks an explicit store `type` value against the
-// registry snapshot (WF T10). Empty msg = registered. Fail-closed on a nil
-// registry: an unvalidated name must never reach the manual write path
-// (§5.1(b) — Go-side write validation is verification layer b). Delegates to
-// validateTypeNameAgainstSet — the same check the stage gates run (D-W2).
-func (h *StoreHandler) validateStoreTypeName(ctx context.Context, name string) string {
-	if h.blocktypes == nil {
-		return "type: block-type registry not wired — cannot validate type names"
+// upsertFailureReject renders a failed store.UpsertBlock: the I7/S3 sentinel
+// becomes 403 provenance_protected, every other fault stays the opaque 500 and
+// is logged. Split out of HandleStore so the refusal and the fault do not share
+// a branch at the call site — and so the MCP arm can answer the identical class
+// through provenanceRejectOr.
+//
+// Note the asymmetry that is deliberate: a refusal is NOT logged at error
+// level. It is a client being told no, not a server fault, and at the target
+// corpus scale a rejected write must not be able to fill the error log.
+func upsertFailureReject(err error, reqID string) *writeReject {
+	if rej := provenanceRejectOr(err, nil); rej != nil {
+		return rej
 	}
-	return validateTypeNameAgainstSet(h.blocktypes.SnapshotForRequest(ctx), name)
+	slog.Error("store: upsert error", "error", err, "request_id", reqID)
+	return classInternal.reject("Internal server error")
 }

@@ -90,6 +90,10 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": confirmNotFoundMsg})
 	case confirmScopeRejected:
 		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": confirmScopeRejectMsg(out.Scope)})
+	case confirmClaimRejected:
+		// The class the stage gates would have answered — same status, same
+		// code. The stage row is intact; the client re-stages a legal payload.
+		writeJSONReject(w, out.Reject)
 	case confirmTOCTOUGone:
 		// 409: the stage is intact but the world moved — re-read and re-stage.
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUGoneMsg})

@@ -48,6 +48,12 @@ const (
 	// right shrunk since staging). Rejects on the UN-consumed row, like its
 	// D1-M1/D1-M3 neighbours; Outcome.BlockID carries the referenced block.
 	confirmBlockRefGone
+	// confirmClaimRejected — W01-2a Nachbesserung: the staged payload claims a
+	// derived type, a reserved category or the provenance key. Rejects on the
+	// UN-consumed row like its D1-M1/D1-M3 neighbours; Outcome.Reject carries
+	// the class, so the surfaces answer the same status and the same code they
+	// would have answered at stage time.
+	confirmClaimRejected
 	// confirmUnreadable — the server-held payload failed to unmarshal.
 	confirmUnreadable
 	// confirmInfraErr — lookup/TOCTOU-read/consume infrastructure error
@@ -71,6 +77,24 @@ type confirmOutcome struct {
 	Scope   string          // on confirmScopeRejected
 	BlockID string          // on confirmTOCTOUDrift (the update target) / confirmBlockRefGone (the referenced block)
 	Err     error           // on confirmInfraErr / confirmExecErr
+	Reject  *writeReject    // on confirmClaimRejected
+}
+
+// confirmClaimReject re-runs the I7 claim gates over a staged payload. nil =
+// admissible, and nil for the blob ops, which carry no block claim.
+//
+// Split out of executeConfirm only to keep that function under the cyclop
+// budget; the placement (before the consume) and the reasoning live at the
+// call site.
+func confirmClaimReject(ctx context.Context, blocktypes *blocktype.Registry, cw store.CanonicalWrite) *writeReject {
+	if cw.Op != "store" && cw.Op != "update" {
+		return nil
+	}
+	var set *blocktype.Set
+	if blocktypes != nil {
+		set = blocktypes.SnapshotForRequest(ctx)
+	}
+	return claimReject(set, cw.Category, cw.Type, cw.Metadata)
 }
 
 // executeConfirm runs the complete confirm sequence for one payload hash,
@@ -118,6 +142,27 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 		if !visible {
 			return confirmOutcome{Kind: confirmBlockRefGone, Op: cw.Op, BlockID: cw.ContextBlockID}
 		}
+	}
+
+	// I7 claim gates, re-validated on the un-consumed row (W01-2a
+	// Nachbesserung, review finding #4 — major). The gates ran at STAGE time
+	// only, and a card outlives its staging: `writes.confirm_ttl` defaults to
+	// 600 s and is documented as "0 = never expires", so every card issued
+	// before this wave deployed would have executed after it — a block in a
+	// reserved category, a block with type_source='manual' on a derived type,
+	// the full B14 outcome the wave exists to prevent. The same holds whenever
+	// the reservation list itself moves (D-02's distill.category
+	// reconciliation): old cards must not execute under the old list.
+	//
+	// Placed with D1-M1/D1-M3, i.e. BEFORE the consume: a claim rejection is
+	// the server refusing, not the client spending — the token survives, and a
+	// client that fixes the payload re-stages instead of losing the write.
+	//
+	// For op 'update' the empty-value convention does the field selection: a
+	// field the card does not carry is "" / nil and claimReject reads that as
+	// "not part of this write". The blob ops carry no block claim at all.
+	if rej := confirmClaimReject(ctx, blocktypes, cw); rej != nil {
+		return confirmOutcome{Kind: confirmClaimRejected, Op: cw.Op, Reject: rej}
 	}
 
 	// D1-M3 TOCTOU guard for staged updates: the confirm executes only

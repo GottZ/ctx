@@ -11,6 +11,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -161,6 +162,45 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 
 	writeScope := authResult.HomeScope
 
+	// The I7 gates for the batch (design D-01 §4.3.1). Ingest is the write
+	// surface with TWO write paths — store.UpsertBlock in block mode and
+	// store.InsertChunk in chunk mode, which never touches UpsertBlock at all —
+	// so both the claim gates and the S3 identity check run HERE, on the
+	// REQUEST, ahead of either.
+	//
+	// The whole batch is refused rather than the offending chunk: this endpoint
+	// reports per-chunk outcomes with a 200, and a partial success would leave
+	// the reserved namespace occupied (or a derivative overwritten) while
+	// telling the caller the request succeeded. Fail-closed on the batch is the
+	// only answer that keeps the reservation true — and it is what makes the
+	// documented contract (403 for every I7 refusal, docs/api.md) hold on this
+	// endpoint too. The chunk-level S3 fallback in processChunk stays as the
+	// backstop for the race between this sweep and the write.
+	//
+	// Scale: one indexed EXISTS per chunk, bounded by maxIngestChunks = 200 and
+	// by the number of derivatives (store.ProvenanceClaimed leads with the GIN
+	// metadata predicate), alongside the per-chunk hash check this endpoint
+	// already runs.
+	for i, chunk := range req.Chunks {
+		if rej := claimReject(nil, chunk.Category, "", chunk.Metadata); rej != nil {
+			writeJSONReject(w, rej.prefixed(fmt.Sprintf("chunk[%d]: ", i)))
+			return
+		}
+		claimed, err := store.ProvenanceClaimed(ctx, h.pool, chunk.Category, chunk.Title, writeScope)
+		if err != nil {
+			slog.Error("ingest: provenance claim probe failed", "error", err, "index", i, "request_id", reqID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false, "error": "Internal server error",
+			})
+			return
+		}
+		if claimed {
+			writeJSONReject(w, classProvenanceProtected.reject(fmt.Sprintf(
+				"chunk[%d]: block carries derived provenance — a client write cannot replace its content or metadata", i)))
+			return
+		}
+	}
+
 	// Process each chunk.
 	resp := IngestResponse{
 		Total:   len(req.Chunks),
@@ -225,6 +265,14 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			chunk.Tags, chunk.Metadata, scope, false, store.SensitivityWrite{}, "",
 		)
 		if err != nil {
+			// I7/S3: a chunk can hit a derivative's identity in a category that
+			// is NOT reserved, so the batch-level S2 sweep above cannot see it.
+			// The store refuses it; this arm keeps the per-chunk report shape
+			// and names the reason instead of filing it under "upsert failed".
+			if errors.Is(err, store.ErrProvenanceProtected) {
+				return IngestResult{Index: index, Status: "failed",
+					Error: "block carries derived provenance — not client-writable"}
+			}
 			slog.Error("ingest: upsert block error",
 				"error", err, "index", index, "request_id", reqID)
 			return IngestResult{Index: index, Status: "failed", Error: "upsert failed"}

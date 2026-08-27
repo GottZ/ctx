@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/derived"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -63,7 +64,35 @@ var (
 	// ErrCommentParentRequired — a comment write carried no parent (a comment is
 	// a required-parent block; creating one orphaned is the §9.1a orphan case).
 	ErrCommentParentRequired = errors.New("store: comment requires a parent issue")
+	// ErrReservedMetadata — the write carries the derived layer's provenance key
+	// in client-supplied metadata (I7/S3b, design D-01 §4.3.1).
+	//
+	// The gate lives HERE and not only at the seven issue entry points
+	// (handler/context_manage_issues.go ×3, handler/project_issues_write.go ×3,
+	// handler/mcp_issues.go ×2) because this domain has already cost two review
+	// rounds exactly that way: a gate on N of N+1 doors is a convention. Every
+	// issue write in the tree passes InsertIssueBlock, InsertCommentBlock or
+	// UpdateIssueBlock, so three checks cover eight entries and the ninth that
+	// has not been written yet.
+	//
+	// Why it matters on THIS domain in particular: issue metadata is the only
+	// client-supplied map in the tree that is MERGED into an existing row
+	// (`metadata = metadata || $n::jsonb`), and since the archive verbs learned
+	// the provenance exclusion, a planted key made the block unremovable by any
+	// client verb — the issue domain has no delete, and manage-delete and
+	// guard-resolve both answer 403. Client-creatable and client-unremovable is
+	// a class this store must not have.
+	ErrReservedMetadata = errors.New("store: 'provenance' is the derived layer's metadata key — not client-writable")
 )
+
+// rejectReservedMetadata is the one guard behind ErrReservedMetadata, sharing
+// its predicate with the handler gate through derived.HasProvenance.
+func rejectReservedMetadata(metadata map[string]any) error {
+	if derived.HasProvenance(metadata) {
+		return ErrReservedMetadata
+	}
+	return nil
+}
 
 // issuePrefixRe matches the leading ctx number prefix of an issue title:
 // "#L<seq>" (local, this wave) or "#<nr>" (forge, I-F). Group 1 is the prefix
@@ -157,6 +186,9 @@ func InsertIssueBlock(ctx context.Context, tx pgx.Tx, f IssueFields, writableSco
 	if !scopeIn(f.Scope, writableScopes) {
 		return nil, ErrIssueScope
 	}
+	if err := rejectReservedMetadata(f.Metadata); err != nil { // I7/S3b
+		return nil, err
+	}
 	if len(f.Content) > maxIssueBodyBytes {
 		return nil, ErrIssueBody
 	}
@@ -203,6 +235,9 @@ func InsertIssueBlock(ctx context.Context, tx pgx.Tx, f IssueFields, writableSco
 func InsertCommentBlock(ctx context.Context, tx pgx.Tx, parentID string, f CommentFields, writableScopes []string) (*Block, error) {
 	if parentID == "" {
 		return nil, ErrCommentParentRequired
+	}
+	if err := rejectReservedMetadata(f.Metadata); err != nil { // I7/S3b
+		return nil, err
 	}
 	if len(f.Content) > maxIssueBodyBytes {
 		return nil, ErrIssueBody
@@ -361,10 +396,33 @@ func ListIssues(ctx context.Context, pool *pgxpool.Pool, q IssueListQuery) ([]Wo
 // keeps its "#L<seq>" prefix; metadata is JSONB-merged (local_seq survives);
 // a content/title change clears the embedding so the scheduler re-embeds.
 func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, set *blocktype.Set, writableScopes []string) (*Block, error) {
+	// I7/S3b, ahead of the lookup: this is the one client-supplied metadata map
+	// in the tree that is MERGED (`metadata = metadata || $n::jsonb`) rather
+	// than replaced, so the key would survive on a row it was never written to.
+	if err := rejectReservedMetadata(u.Metadata); err != nil {
+		return nil, err
+	}
 	var typeName, curStatus, curTitle, scope string
+	// The type restriction is part of the lookup, exactly as in GetIssue
+	// (:278-285): this is an issue-domain surface, not a general block writer.
+	//
+	// W01-2a Nachbesserung (review finding #1, blocker): without it this was
+	// the SIXTH write surface and the only one that walks past S3 completely —
+	// it never touches store.UpdateBlock, so that function's provenance
+	// exclusion cannot see it, and `typeName` was consulted only when a status
+	// transition was requested. A PATCH carrying just content/metadata
+	// therefore replaced a derivative's content AND its provenance
+	// (`metadata = metadata || $n::jsonb`) and answered 200 — the Gate-4 vector
+	// through a different verb. Restricting by TYPE closes the derived case and
+	// the wider pre-existing class ("an issue verb writes arbitrary blocks") in
+	// the same conjunct, and it keeps the no-oracle contract: a non-issue id is
+	// ErrIssueNotFound, like a foreign one.
 	err := tx.QueryRow(ctx,
 		`SELECT type_name, COALESCE(workflow_status,''), title, scope
-		 FROM context_blocks WHERE id = $1 AND NOT is_archived FOR UPDATE`,
+		 FROM context_blocks
+		 WHERE id = $1 AND NOT is_archived
+		   AND type_name = ANY(ARRAY['`+IssueTypeName+`','`+CommentTypeName+`'])
+		 FOR UPDATE`,
 		id).Scan(&typeName, &curStatus, &curTitle, &scope)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrIssueNotFound

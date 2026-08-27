@@ -57,6 +57,24 @@ var (
 	classSizeCap = rejectClass{http.StatusRequestEntityTooLarge, "size_cap"}
 	// classUnknownType — explicit `type` is not in the block-type registry.
 	classUnknownType = rejectClass{http.StatusUnprocessableEntity, "unknown_type"}
+	// classReservedType — explicit `type` names a DERIVED type (I7/S1,
+	// design D-01 §4.3.1). 422 like unknown_type, because the client's
+	// assertion about the entity is what is unprocessable — but a separate
+	// code: the type exists, it is simply not the client's to claim, and a
+	// client that branches on "typo" must not treat this as one.
+	classReservedType = rejectClass{http.StatusUnprocessableEntity, "reserved_type"}
+	// classReservedCategory — the write targets a category reserved for the
+	// derived layer (I7/S2). 403, not 422: the payload is well-formed, the
+	// caller is simply not authorised for that namespace.
+	classReservedCategory = rejectClass{http.StatusForbidden, "reserved_category"}
+	// classProvenanceProtected — the write would overwrite a block carrying a
+	// derived provenance object (I7/S3). 403 for the same reason.
+	classProvenanceProtected = rejectClass{http.StatusForbidden, "provenance_protected"}
+	// classReservedMetadata — the write carries the derived layer's provenance
+	// key in its own metadata (I7/S3, second half). 403, and deliberately NOT a
+	// silent strip: a client that believes it wrote provenance and got a 200
+	// would be told a lie about the block's standing.
+	classReservedMetadata = rejectClass{http.StatusForbidden, "reserved_metadata"}
 	// classUnknownAction — the dispatcher has no handler for `action`.
 	classUnknownAction = rejectClass{http.StatusBadRequest, "unknown_action"}
 	// classConstraint — the payload violates a DB integrity constraint. The
@@ -84,6 +102,14 @@ type writeReject struct {
 // message may differ per surface — the code may not.
 func (c rejectClass) reject(msg string) *writeReject {
 	return &writeReject{Status: c.status, Code: c.code, Msg: msg}
+}
+
+// prefixed returns the same rejection (status AND code unchanged) with a
+// prefix on the message. It exists for the batch surface: /api/ingest refuses
+// the whole request for one bad chunk and has to say WHICH chunk, without
+// inventing a second code for the class it is re-rendering.
+func (r *writeReject) prefixed(prefix string) *writeReject {
+	return &writeReject{Status: r.Status, Code: r.Code, Msg: prefix + r.Msg}
 }
 
 // rejectStatus is reject for the one class whose HTTP status depends on the

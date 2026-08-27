@@ -460,6 +460,11 @@ func writeIssueStoreError(w http.ResponseWriter, action string, err error, reqID
 		writeBadRequest(w, "comment requires a parent_id")
 	case errors.Is(err, store.ErrIssueBody):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": "body exceeds 50 KB cap"})
+	case errors.Is(err, store.ErrReservedMetadata):
+		// I7/S3b: the same 403 and the same code the block write surfaces
+		// answer for a client-set provenance key — one class, one code, on
+		// every domain (the other issue verdicts keep their uncoded envelopes).
+		writeJSONReject(w, classReservedMetadata.reject(store.ErrReservedMetadata.Error()))
 	case errors.Is(err, blocktype.ErrInvalidTransition),
 		errors.Is(err, blocktype.ErrNoWorkflow),
 		errors.Is(err, blocktype.ErrUnknownType):

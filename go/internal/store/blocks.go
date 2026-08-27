@@ -12,6 +12,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/clustersql"
+	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/redact"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -206,6 +207,46 @@ func HashNOOPCheck(ctx context.Context, pool *pgxpool.Pool, content, scope, cate
 	return id, nil
 }
 
+// ErrProvenanceProtected is the S3 refusal (design D-01 §4.3.1, invariant I7):
+// the write would replace a block that carries a derived provenance object. It
+// is a SENTINEL and not a message because the write surfaces have to answer it
+// with 403 rather than with the generic 500 of an unexpected store error —
+// errors.Is is what keeps that mapping out of string matching.
+var ErrProvenanceProtected = errors.New("store: block carries derived provenance — not client-writable")
+
+// ProvenanceClaimed reports whether the upsert identity (category, title, scope)
+// is claimed by a derivative — INCLUDING an archived one.
+//
+// The archived half is the point (W01-2a Nachbesserung, review finding #5): the
+// unique index behind the ON CONFLICT target is partial on `NOT is_archived`, so
+// archiving a derivative FREES its identity. Two client calls — manage delete,
+// then an upsert — would otherwise walk around S3 entirely. The archive verbs
+// now refuse a provenance row as well (DeleteBlock, GuardResolve 'archive'), so
+// this probe is the second line: it also covers a row archived before this wave
+// or by a path outside the Go code.
+//
+// Scale: the predicate leads with `metadata ? 'provenance'`, which the GIN index
+// on metadata (idx_context_metadata, 113_baseline.sql:236) serves directly, so
+// the scan is bounded by the number of DERIVATIVES rather than by the corpus.
+// The upsert calls it only on the INSERT path (no live conflicting row), never
+// on the hot conflict path.
+//
+// q is the rowQuerier of api_keys.go — satisfied by both *pgxpool.Pool (the
+// ingest pre-flight) and pgx.Tx (inside the upsert's own transaction), so the
+// statement exists once.
+func ProvenanceClaimed(ctx context.Context, q rowQuerier, category, title, scope string) (bool, error) {
+	var claimed bool
+	if err := q.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM context_blocks
+		    WHERE metadata ? '`+derived.MetadataKey+`'
+		      AND category = $1 AND title = $2 AND scope = $3
+		 )`, category, title, scope).Scan(&claimed); err != nil {
+		return false, fmt.Errorf("store: provenance claim probe: %w", err)
+	}
+	return claimed, nil
+}
+
 // UpsertBlock inserts or updates a block by (category, title).
 // content_hash is a GENERATED COLUMN and must not be set manually.
 // If scopeExplicit is true, scope is included in the ON CONFLICT UPDATE.
@@ -351,17 +392,54 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	// never carries an embedding yet (StoreEmbedding is always a separate,
 	// later call), so there is nothing stale to clear in that window.
 	var oldContent string
+	var hadProvenance bool
 	hadRow := true
 	if err := tx.QueryRow(ctx,
-		`SELECT content FROM context_blocks
+		`SELECT content, metadata ? '`+derived.MetadataKey+`' FROM context_blocks
 		 WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
 		 FOR UPDATE`,
 		category, title, scope,
-	).Scan(&oldContent); err != nil {
+	).Scan(&oldContent, &hadProvenance); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("store: upsert block: pre-read: %w", err)
 		}
 		hadRow = false
+	}
+
+	// I7 / S3 (design D-01 §4.3.1, §5.2 B14): the conflicting row carries a
+	// provenance object, so this upsert would replace a derivative's content
+	// AND its metadata — the whole provenance — through an identity that is
+	// three free strings. It is refused HERE rather than in the handlers
+	// because this pre-read holds the row under FOR UPDATE: the check and the
+	// write are one transaction, so there is no window between them. A guard at
+	// the five client call sites would have that window and would have to be
+	// repeated at the sixth.
+	//
+	// Deliberately unconditional, and deliberately a SEAM rather than a
+	// bypass: today NO writer in this tree puts a provenance object into
+	// metadata (live count: 0 blocks with the key), so the refusal cannot reach
+	// digest, dream, rootmap or ingest. The arm that will write derivatives
+	// (D-02/D-03, waves after W01-5) is the one caller that must legitimately
+	// rewrite its own block on the next run — §4.3.1 gives it the OTHER half of
+	// S3 ("der Arm-Upsert trägt einen Provenienz-Guard"), and it has to declare
+	// itself here when it lands. Fail-closed until then: an unknown writer that
+	// reaches a provenance block is refused, not admitted.
+	if hadRow && hadProvenance {
+		return nil, ErrProvenanceProtected
+	}
+	// The INSERT path needs its own look, and it has to see ARCHIVED rows: the
+	// unique index behind the ON CONFLICT target is partial on NOT is_archived,
+	// so archiving a derivative frees its identity and this write would create a
+	// fresh block wearing it (review finding #5). Only on this path — the
+	// conflict path was just answered above by the locked row itself.
+	if !hadRow {
+		claimed, err := ProvenanceClaimed(ctx, tx, category, title, scope)
+		if err != nil {
+			return nil, err
+		}
+		if claimed {
+			return nil, ErrProvenanceProtected
+		}
 	}
 
 	b := &Block{}
@@ -665,16 +743,25 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []s
 
 // DeleteBlock archives a block (sets is_archived = true). The block must live in
 // one of the caller's write-eligible scopes (home_scope ∪ shared-if-allowed).
+//
+// I7 / S3, third door (W01-2a Nachbesserung, review finding #5): a derivative is
+// not client-ARCHIVABLE either. Archiving it is damage in its own right — the
+// block falls out of every read path (bruchpfad B1's damage class) — and it is
+// also step one of a two-call bypass, because the partial unique index frees the
+// (category, title, scope) identity for a fresh upsert. The exclusion rides in
+// the WHERE, atomic with the archive; the 0-row case is diagnosed afterwards to
+// tell "protected" apart from "not found".
 func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (*Block, error) {
 	b := &Block{}
 	err := pool.QueryRow(ctx,
 		`UPDATE context_blocks SET is_archived = true, updated_at = now()
 		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
+		   AND NOT (metadata ? '`+derived.MetadataKey+`')
 		 RETURNING id, category, title, scope, created_at, updated_at`,
 		id, writeScopes,
 	).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+		return nil, updateBlockMissReason(ctx, pool, id, writeScopes)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: delete block: %w", err)
@@ -799,9 +886,21 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	args = append(args, writeScopes)
 	scopeIdx := argIdx
 
+	// I7 / S3, second door (design D-01 §4.3.1): update-by-id reaches the same
+	// derivative WITHOUT naming its (category, title, scope) identity, so the
+	// upsert-side guard alone would leave the invariant to the choice of verb.
+	// The exclusion rides in the WHERE — atomic with the update itself, no
+	// separate read to race against — and the 0-row case is then diagnosed
+	// below to tell "protected" apart from "not found".
+	//
+	// UpdateBlock has exactly three callers, all of them client surfaces
+	// (handler/context_manage.go, handler/mcp_update.go, handler/confirm_core.go);
+	// no arm or scheduler writes through it. The guard is therefore
+	// client-only by construction rather than by a flag.
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
+		   AND NOT (metadata ? '`+derived.MetadataKey+`')
 		 RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
 		strings.Join(setClauses, ", "), idIdx, scopeIdx,
 	)
@@ -817,7 +916,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, false, nil
+			return nil, false, updateBlockMissReason(ctx, pool, id, writeScopes)
 		}
 		if err != nil {
 			return nil, false, fmt.Errorf("store: update block: %w", err)
@@ -831,10 +930,40 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		return nil, false, err
 	}
 	if !ok {
-		return nil, false, nil
+		return nil, false, updateBlockMissReason(ctx, pool, id, writeScopes)
 	}
 	needsReEmbed := contentChanged || data.Title != nil
 	return b, needsReEmbed, nil
+}
+
+// updateBlockMissReason turns the 0-row outcome of a by-id block write into the
+// reason for it — shared by UpdateBlock and DeleteBlock, whose WHERE clauses
+// carry the same three conditions a caller can miss: the id, the write-scope
+// filter and, since W01-2a, the S3 provenance exclusion. Only the last one is a
+// REFUSAL rather than a miss: it must reach the caller as 403 and not as "Block
+// not found", which would be an oracle-free but also information-free answer
+// about a block the key can see.
+//
+// It runs only on the 0-row path, so the ordinary update keeps its single
+// statement. Returning nil (= "not found", the pre-wave contract) is the
+// fail-open direction here on purpose: this function decides the MESSAGE, never
+// the outcome — the write itself was already refused by the WHERE.
+func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) error {
+	var protected bool
+	if err := pool.QueryRow(ctx,
+		`SELECT metadata ? '`+derived.MetadataKey+`' FROM context_blocks
+		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived`,
+		id, writeScopes,
+	).Scan(&protected); err != nil {
+		// No row (the ordinary miss) or a read fault: both leave the pre-wave
+		// answer in place. Not an error return — the outcome was already
+		// decided by the UPDATE that wrote nothing.
+		protected = false
+	}
+	if protected {
+		return ErrProvenanceProtected
+	}
+	return nil
 }
 
 // updateBlockScopeMove runs a scope-carrying block update as ONE transaction:
@@ -1505,6 +1634,13 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string
 	var query string
 	switch resolution {
 	case "archive":
+		// I7 / S3 (W01-2a Nachbesserung, review finding #5): guard-resolve is
+		// the SECOND archive verb a client can reach, and the single-id path
+		// deliberately does not require a flagged status (see the batch
+		// comment below) — so without this conjunct it is manage-delete's twin
+		// for freeing a derivative's identity. Derived types carry
+		// guard.candidate=false and can never be flagged legitimately, which
+		// makes the exclusion free in practice and load-bearing on paper.
 		query = `UPDATE context_blocks SET
 			is_archived = true,
 			guard_status = 'archived_dup',
@@ -1514,6 +1650,7 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string
 			),
 			updated_at = now()
 		WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
+		  AND NOT (metadata ? '` + derived.MetadataKey + `')
 		RETURNING id, title, category, scope, guard_status, created_at, updated_at`
 	case "keep":
 		query = `UPDATE context_blocks SET
@@ -1534,7 +1671,10 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string
 		&b.ID, &b.Title, &b.Category, &b.Scope, &b.GuardStatus, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+		// 'keep' cannot be refused by the S3 conjunct (it does not carry one),
+		// so this diagnosis only ever fires for 'archive' — the same shape
+		// UpdateBlock and DeleteBlock use.
+		return nil, updateBlockMissReason(ctx, pool, id, writeScopes)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: guard resolve: %w", err)

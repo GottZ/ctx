@@ -549,7 +549,10 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		// Upsert.
 		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, input.Type)
 		if err != nil {
-			return classInternal.errResult(fmt.Sprintf("store failed: %v", err)), nil, nil
+			// I7/S3: same sentinel, same 403 class as REST — the store decided
+			// it, this arm only renders it.
+			return errResultReject(provenanceRejectOr(err,
+				classInternal.reject(fmt.Sprintf("store failed: %v", err)))), nil, nil
 		}
 
 		// Welle 44 / WF T4: Auto-classify type_name from the registry

@@ -325,17 +325,22 @@ func decodeStrict(data json.RawMessage, into any) string {
 }
 
 // validateBlockTypeName checks a block-write `type` value against the
-// registry snapshot (WF T10). Empty msg = registered. Fail-closed: a nil
-// registry (test wiring without blocktype consumers) REJECTS — writing an
-// unvalidated type name past a missing registry would be the §5.1(b) hole.
-func (h *ManageHandler) validateBlockTypeName(ctx context.Context, name string) string {
+// registry snapshot (WF T10). nil = admissible. Fail-closed: a nil registry
+// (test wiring without blocktype consumers) REJECTS — writing an unvalidated
+// type name past a missing registry would be the §5.1(b) hole.
+//
+// W01-2a folded this into validateTypeNameAgainstSet instead of leaving it a
+// second copy of the same three lines. manage-update is a type-CLAIMING
+// surface — D-01 §4.3.1 names only /api/store and the MCP store tool and calls
+// them "die eine Stelle", which the code contradicted: `data.Type` here reached
+// store.UpdateBlock through its own validator. Two validators mean two answers
+// to "may this caller claim this type", and I7/S1 is only an invariant if the
+// answer is one.
+func (h *ManageHandler) validateBlockTypeName(ctx context.Context, name string) *writeReject {
 	if h.blocktypes == nil {
-		return "type: block-type registry not wired — cannot validate type names"
+		return validateTypeNameAgainstSet(nil, name)
 	}
-	if _, ok := h.blocktypes.SnapshotForRequest(ctx).Resolve(name); !ok {
-		return fmt.Sprintf("type: unknown block type %q (see manage type-list)", name)
-	}
-	return ""
+	return validateTypeNameAgainstSet(h.blocktypes.SnapshotForRequest(ctx), name)
 }
 
 // unionExcludes merges the canonical types_exclude with its legacy alias

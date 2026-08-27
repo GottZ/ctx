@@ -11,7 +11,10 @@
 // This file deliberately does NOT test the write LOCK (I7/S1-S3). That is wave
 // W01-2a; between the registry row landing and that lock the type is
 // client-claimable, which is why the migration stays undeployed until the lock
-// lands with it.
+// lands with it. W01-2a landed since, and it touched TWO subtests here — the
+// classify net now refuses to grant a derived type on any path (seed-review
+// finding #3). Each carries the reason at its own site; the surface-side probes
+// of the lock live in handler/derived_write_lock_integration_test.go.
 //
 //	go test -tags=integration ./internal/store/ -run TestDerivedManual -count=1 -v
 package store_test
@@ -103,6 +106,13 @@ func TestDerivedManualType_Integration(t *testing.T) {
 	t.Run("negative_probe_auto_row_is_reclassified", func(t *testing.T) {
 		// Without the manual stamp the very same call DOES move the row. The
 		// guarantee lives in the predicate, not in the classifier being shy.
+		//
+		// W01-2a changed the SUBJECT of this probe, not its purpose: the wave
+		// closed the classify path for DERIVED type names (store/classify.go),
+		// so a derived title can no longer show that `AND type_source = 'auto'`
+		// is what protects the manual row above — it would decline for the new
+		// reason. The probe therefore drives a non-derived claimable title
+		// (audit-trail), which is the type the pre-143 tree put on these rows.
 		var id string
 		if err := pool.QueryRow(ctx,
 			`INSERT INTO context_blocks (category, title, content, scope)
@@ -112,29 +122,46 @@ func TestDerivedManualType_Integration(t *testing.T) {
 		if _, source := derivedTypeState(t, pool, id); source != "auto" {
 			t.Fatalf("seeded row is not type_source='auto' — the negative probe has no subject")
 		}
-		applied, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, id,
-			"Katalog #0123456789abcdef0123456789abcdef", nil)
+		const auditTitle = "Audit of the retrieval lane"
+		want, matched := set.Classify(auditTitle, nil)
+		if !matched || derived.IsDerivedType(want) {
+			t.Fatalf("fixture: %q classifies to (%q, %v) — this probe needs a claimable NON-derived "+
+				"title, otherwise the derived decline answers instead of the auto predicate",
+				auditTitle, want, matched)
+		}
+		applied, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, id, auditTitle, nil)
 		if err != nil {
 			t.Fatalf("classify auto row: %v", err)
 		}
-		if applied != derived.TypeCatalog {
-			t.Fatalf("classify applied %q to an auto row, want catalog — the probe cannot show that "+
-				"the manual predicate is what protects the row above", applied)
+		if applied != want {
+			t.Fatalf("classify applied %q to an auto row, want %q — the probe cannot show that "+
+				"the manual predicate is what protects the row above", applied, want)
 		}
-		if name, source := derivedTypeState(t, pool, id); name != derived.TypeCatalog || source != "auto" {
-			t.Errorf("auto row ended at type_name=%q type_source=%q, want catalog/auto", name, source)
+		if name, source := derivedTypeState(t, pool, id); name != want || source != "auto" {
+			t.Errorf("auto row ended at type_name=%q type_source=%q, want %s/auto", name, source, want)
 		}
 	})
 
-	t.Run("net_catches_a_writer_that_forgot_the_type", func(t *testing.T) {
-		// The net, end to end through the real registry: an anchor-titled block
-		// written WITHOUT a type is classified onto the derived type — and away
-		// from audit-trail, which is where it landed before this wave and which
-		// would have sent it into guard AND dream.
-		for title, want := range map[string]string{
+	t.Run("net_never_grants_a_derived_type", func(t *testing.T) {
+		// W01-2a, seed-review finding #3. This subtest asserted the OPPOSITE
+		// before the wave ("net_catches_a_writer_that_forgot_the_type"): an
+		// anchor-titled block written WITHOUT a type was classified onto the
+		// derived type. That is precisely the hole S1/S2/S3 do not cover — the
+		// level came from a title, on a path where every client write surface
+		// ends up (9 production callers of ClassifyBlockAfterUpsert, all on
+		// client writes). The assertion is inverted deliberately and visibly:
+		// the registry patterns stay seeded and stay matchable (asserted
+		// below), but the hook refuses to APPLY them.
+		for title, pattern := range map[string]string{
 			"Session insights 019d25d8b8aa7f028ad0e0bba7b7cfcf ab #1000": derived.TypeInsight,
 			"Katalog #fedcba9876543210fedcba9876543210":                  derived.TypeCatalog,
 		} {
+			// Premise: the registry rule still matches. Without it the decline
+			// below would be indistinguishable from an unmatched title.
+			if got, matched := set.Classify(title, nil); !matched || got != pattern {
+				t.Fatalf("registry no longer classifies %q to %q (got %q, matched %v) — the decline "+
+					"under test would then prove nothing", title, pattern, got, matched)
+			}
 			b, err := store.UpsertBlock(ctx, pool, "learnings", title, "body", nil, nil, "private", false,
 				store.SensitivityWrite{}, "")
 			if err != nil {
@@ -147,11 +174,12 @@ func TestDerivedManualType_Integration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("classify %q: %v", title, err)
 			}
-			if applied != want {
-				t.Errorf("classify(%q) applied %q, want %q", title, applied, want)
+			if applied != "" {
+				t.Errorf("classify(%q) applied %q — a title may not grant a derivation level", title, applied)
 			}
-			if name, _ := derivedTypeState(t, pool, b.ID); name != want {
-				t.Errorf("%q ended on type_name=%q, want %q", title, name, want)
+			if name, source := derivedTypeState(t, pool, b.ID); derived.IsDerivedType(name) {
+				t.Errorf("%q ended on type_name=%q (source %q) — the row entered the derived layer "+
+					"through its title", title, name, source)
 			}
 		}
 	})

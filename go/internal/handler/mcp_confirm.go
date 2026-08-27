@@ -187,6 +187,10 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			return errResult(confirmNotFoundMsg), nil, nil
 		case confirmScopeRejected:
 			return errResult(confirmScopeRejectMsg(out.Scope)), nil, nil
+		case confirmClaimRejected:
+			// Same code the stage gates carry on this surface
+			// (structuredContent.code), same prose. The card survives.
+			return errResultReject(out.Reject), nil, nil
 		case confirmTOCTOUGone:
 			return errResult(confirmTOCTOUGoneMsg), nil, nil
 		case confirmTOCTOUDrift:

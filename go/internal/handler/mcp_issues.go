@@ -231,6 +231,10 @@ func mcpIssueError(tool string, err error) *mcp.CallToolResult {
 		return errResult("comment requires an issue_id")
 	case errors.Is(err, store.ErrIssueBody):
 		return errResult("body exceeds 50 KB cap")
+	case errors.Is(err, store.ErrReservedMetadata):
+		// I7/S3b, with the machine code the block write tools carry for the
+		// same class (structuredContent.code).
+		return classReservedMetadata.errResult(store.ErrReservedMetadata.Error())
 	case errors.Is(err, blocktype.ErrInvalidTransition),
 		errors.Is(err, blocktype.ErrNoWorkflow),
 		errors.Is(err, blocktype.ErrUnknownType):

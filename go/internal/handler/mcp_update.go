@@ -171,6 +171,14 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
 			return errResult(msg), nil, nil
 		}
+		// I7 claim gates (design D-01 §4.3.1): MOVING a block into a reserved
+		// category occupies it exactly as creating one there does, and a
+		// metadata replacement can plant the provenance key just as a create
+		// can. The tool carries no `type`, so that arm of claimReject is inert
+		// here. Ahead of the stage branch, so a flagged key gets no card either.
+		if rej := claimReject(nil, strOrEmpty(data.Category), "", data.Metadata); rej != nil {
+			return errResultReject(rej), nil, nil
+		}
 
 		if ar.ConfirmWrites {
 			return mcpStageUpdate(ctx, cfg, ar, input, fields)
@@ -182,6 +190,10 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		}
 		block, needsReEmbed, err := store.UpdateBlock(ctx, cfg.Pool, resolvedID, data, writableBlockScopes(ar))
 		if err != nil {
+			// I7/S3: the target is a derivative — 403 class, not a 500.
+			if rej := provenanceRejectOr(err, nil); rej != nil {
+				return errResultReject(rej), nil, nil
+			}
 			slog.Error("mcp: update error", "error", err, "block_id", resolvedID)
 			return errResult("update failed: internal error"), nil, nil
 		}

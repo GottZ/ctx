@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/derived"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -48,6 +50,35 @@ func ClassifyBlockAfterUpsert(ctx context.Context, pool *pgxpool.Pool, set *bloc
 
 	name, matched := set.Classify(title, metadata)
 	if !matched {
+		return "", nil
+	}
+
+	// I7, fourth door (design D-01 §4.3.1 principle; seed-review finding #3):
+	// the classifier may not GRANT a derivation level. S1 refuses a client that
+	// NAMES a derived type, S2 its category, S3 its identity — none of them sees
+	// a write that simply carries a title matching a derived type's
+	// classify.title_patterns, and the registry rules would then hand it
+	// type_name='catalog' with type_source='auto', i.e. guard.check=false,
+	// guard.candidate=false, dream.linkable=false and, after the E-4 visibility
+	// switch, the catalogue damping factor. The level would come from a title.
+	//
+	// §4.3.1 is a statement about the mechanism, not about a surface: the level
+	// of a block is assigned by the system, never by a client, and a title
+	// pattern is a client-supplied string on every write surface in this tree.
+	// A derived writer is unaffected because it names its type on the write —
+	// that stamps type_source='manual' and takes the row out of this hook for
+	// good (the UPDATE below carries AND type_source = 'auto'). What the seed
+	// wave called the "net for a writer that forgot the type" would produce a
+	// derivative WITHOUT a provenance object, which §3.2/§4.5.3 forbid anyway,
+	// so the net could only ever have caught malformed blocks.
+	//
+	// Refused, not applied: the block keeps the type it has (the no-op path
+	// above is the same one an unmatched title takes). Logged because an
+	// attempt is an I7 signal, and the write rate limit bounds how often a
+	// single key can produce one.
+	if derived.IsDerivedType(name) {
+		slog.Warn("store: classify declined a derived type — the level is assigned by the writer, never by a title (I7/S4)",
+			"block_id", blockID, "declined_type", name)
 		return "", nil
 	}
 
