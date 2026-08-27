@@ -156,6 +156,14 @@ type Scheduler struct {
 	// Same seam shape as dreamCycleFunc and backgroundTenantsFn.
 	distillSource distillSourceBuilder
 
+	// distillBreak is the distiller's in-process circuit breaker (A02-8,
+	// design/02 §4.6.3), keyed on the backend name from OnServed. It lives on
+	// the scheduler and not in a tick because that is what "in-process" means:
+	// three failures inside one tick and three spread over three ticks are the
+	// same statement about the backend. Not durable on purpose — a restart may
+	// well have fixed what it locked out; the DURABLE brake is the spend guard.
+	distillBreak *distillBreaker
+
 	// Dream mode control (atomic for lock-free reads in hot loop).
 	dreamMode             atomic.Int32 // DreamModeOn | DreamModeThrottled | DreamModeOff
 	dreamThrottleInterval atomic.Int64 // nanoseconds; 0 = dreamThrottleDefault
@@ -385,6 +393,7 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 		runDone:      make(chan struct{}),
 		graphCache:   graphcache.NewManager(),
 		overviewKick: make(chan struct{}, 1),
+		distillBreak: &distillBreaker{},
 	}
 	s.backgroundTenantsFn = s.backgroundTenants
 	return s

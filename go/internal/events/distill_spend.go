@@ -97,6 +97,14 @@ type distillPlan struct {
 	perSource int
 	clamped   bool // the call axis is armed
 	tripped   bool // the window is over budget on at least one armed axis
+	// gpuRemainingMS is the GPU ceiling MINUS what the window already consumed,
+	// in milliseconds — the number the in-run meter of A02-8 counts down
+	// (distill_extract.go, distillGPUMeter). 0 means the axis is off.
+	//
+	// It is derived from the SAME window read as tripped, which is the point:
+	// the between-tick ceiling and the in-tick ceiling are then one budget seen
+	// from two sides, not two policies that can disagree.
+	gpuRemainingMS int64
 	// refused stops every eligible source for this tick WITHOUT starting a
 	// back-off: the window query itself failed.
 	refused bool
@@ -208,6 +216,7 @@ func (s *Scheduler) distillBudget(ctx context.Context, d config.DistillConfig, l
 		return plan
 	}
 	plan.perSource = distillClamp(spend.calls, d.SpendMaxCalls, eligible)
+	plan.gpuRemainingMS = distillGPURemaining(spend, d.SpendMaxGPUSeconds)
 	return plan
 }
 

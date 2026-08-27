@@ -302,6 +302,12 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 	// clamp so the arithmetic is checkable once there is one.
 	plan := s.distillBudget(ctx, d, d.CtxSourceLabel, scope, refs)
 
+	// The in-run half of the GPU ceiling (A02-8, the gap distillTripped names at
+	// distill_spend.go:222-239). ONE meter for the whole tick: the overshoot the
+	// review measured came from several sources each spending a clamp the window
+	// read could not yet see, so a per-source meter would reproduce it.
+	gpu := &distillGPUMeter{remainingMS: plan.gpuRemainingMS}
+
 	for _, ref := range refs {
 		if ctx.Err() != nil {
 			return true // shutdown mid-tick; the remaining roots wait for the next one
@@ -358,6 +364,18 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 			scope:    scope,
 			dumpDir:  dumpDir,
 			maxItems: d.RowsPerRead,
+			// The call's values (A02-8), and the tick's own GPU meter. The meter
+			// is built from the SAME window read the plan rests on, so the
+			// in-run ceiling and the between-tick ceiling are one number seen
+			// from two sides (distill_spend.go:222-239).
+			opts: distillCallOpts{
+				numPredict:      d.NumPredict,
+				timeout:         d.CallTimeout,
+				rowsPerCall:     d.RowsPerCall,
+				breakerFailures: d.BreakerFailures,
+				breakerCooldown: d.BreakerCooldown,
+			},
+			gpu: gpu,
 			// The clamp of THIS tick, carried to the journal rather than
 			// enforced: the call it bounds arrives with A02-8.
 			callBudget: plan.perSource,
@@ -393,6 +411,20 @@ type distillTick struct {
 	// mid-tick. It is written to distill_run.call_budget and consumed by the
 	// call of A02-8; 0 is "unclamped", never "no calls" (distill_spend.go).
 	callBudget int
+
+	// opts are the call's snapshot values (A02-8), resolved with the rest.
+	opts distillCallOpts
+
+	// gpu is the in-run GPU meter of THIS TICK — shared by every session of the
+	// tick, which is what makes it a tick ceiling rather than a per-source one.
+	// A pointer because distillTick travels by value; nil is "no ceiling".
+	gpu *distillGPUMeter
+
+	// calls is the PER-SOURCE call clamp, counted over every batch of one root
+	// session (round-2 blocker-class #7). distillSession creates it from
+	// callBudget; a pointer for the same reason gpu is one, and its scope is the
+	// difference: gpu is the tick, this is one source inside it.
+	calls *distillCallMeter
 }
 
 // distillSession runs gate 4 and the regression check for ONE root session,
@@ -410,6 +442,23 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 		// The journal is unreadable: there is nothing truthful to write, and a
 		// row derived from a watermark of "unknown" would be worse than none.
 		slog.Error("scheduler: distiller watermark unreadable", "source_key", key, "error", err)
+		return
+	}
+
+	// GATE 7 — the breaker, and it stands BEFORE the source is touched (§4.5.3;
+	// round-2 blocker #3). The first version only consulted the breaker inside
+	// the batch loop, i.e. after Read, selection, dedup, dump and the ledger: a
+	// tick inside the cooldown read a whole batch, dumped raw session prose,
+	// marked it seen and moved the watermark — without making one call. Measured:
+	// calls=0, rows_seen=2, watermark_to=100, skip_reason NULL.
+	//
+	// always=true, the posture of gates 5-7: an open breaker is an
+	// operator-visible state, not background noise, and §4.5.3 says the row is
+	// written every tick. The state-change rule still throttles the repetition
+	// (distillSkip), so a long cooldown leaves one row, not one per tick.
+	if s.distillBreak.open(time.Now()) {
+		slog.Warn("scheduler: distiller breaker open, source skipped", "source_key", key)
+		s.distillSkip(ctx, key, sess, distillSkipBreaker, true)
 		return
 	}
 
@@ -458,12 +507,18 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 	dump, err := distillOpenDump(t.dumpDir, runID)
 	if err != nil {
 		slog.Error("scheduler: distiller could not open its dry-run dump", "run_id", runID, "error", err)
-		s.distillClose(ctx, runID, distillOutcomeFailed, distillErrBlockWriteFailed)
+		s.distillClose(ctx, runID, distillOutcomeFailed, distillErrBlockWriteFailed, "")
 		return
 	}
 	defer dump.close()
 
-	outcome, class := s.distillBatches(ctx, t, key, sess, runID, dump, wm)
+	// The per-source call clamp, one meter for every batch of THIS root session
+	// (round-2 blocker-class #7). Created here and not in distillOnce because
+	// call_budget is per source: distillTick travels by value, so the pointer is
+	// what makes the count survive the batch loop.
+	t.calls = &distillCallMeter{budget: t.callBudget}
+
+	outcome, class, skipReason := s.distillBatches(ctx, t, key, sess, runID, dump, wm)
 	if outcome == "" {
 		// Shutdown mid-run. The row STAYS 'running' with the watermark of the
 		// last durable batch on it: the startup sweep turns it into 'killed'
@@ -472,12 +527,12 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 		// cancelled — the update would fail and the value would be lost.
 		return
 	}
-	s.distillClose(ctx, runID, outcome, class)
+	s.distillClose(ctx, runID, outcome, class, skipReason)
 }
 
 // distillClose closes an open run row and logs a failure to do so.
-func (s *Scheduler) distillClose(ctx context.Context, runID, outcome, class string) {
-	if err := s.distillFinishRun(ctx, runID, outcome, class); err != nil {
+func (s *Scheduler) distillClose(ctx context.Context, runID, outcome, class, skipReason string) {
+	if err := s.distillFinishRun(ctx, runID, outcome, class, skipReason); err != nil {
 		slog.Error("scheduler: distiller could not close run row", "run_id", runID, "error", err)
 	}
 }
@@ -498,21 +553,22 @@ func (s *Scheduler) distillClose(ctx context.Context, runID, outcome, class stri
 // there is the spend guard of A02-7 (it is what makes the loop expensive in the
 // first place); until then the cost is database reads and file writes, and the
 // arm yields on ctx.Done between batches.
-func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess, runID string, dump *distillDump, wm int64) (string, string) {
+func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess, runID string, dump *distillDump, wm int64) (string, string, string) {
 	for {
 		if ctx.Err() != nil {
-			return "", ""
+			return "", "", ""
 		}
 		b, err := t.src.Read(ctx, sess, wm, t.maxItems, t.maxRunes)
 		if err != nil {
 			slog.Error("scheduler: distiller source error", "source_key", key, "op", "read", "error", err)
-			return distillRunError(err)
+			outcome, class := distillRunError(err)
+			return outcome, class, ""
 		}
 		// Checked AGAIN after the read: a cancellation during Read is the
 		// SIGTERM case, and continuing into the write order with a dead context
 		// would fail every statement of it anyway.
 		if ctx.Err() != nil {
-			return "", ""
+			return "", "", ""
 		}
 		// INCOMPLETE FIRST, exhaustion second, and the order is the point
 		// (review #3). A batch that delivers nothing while reporting
@@ -526,18 +582,36 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 			if !b.Complete {
 				slog.Warn("scheduler: distiller read an incomplete empty batch",
 					"source_key", key, "watermark", wm)
-				return distillOutcomePartial, ""
+				return distillOutcomePartial, "", ""
 			}
 			if b.Watermark <= wm {
-				return distillOutcomeOk, "" // the range is exhausted
+				return distillOutcomeOk, "", "" // the range is exhausted
 			}
 		}
-		if err := s.distillBatch(ctx, t, key, runID, dump, b); err != nil {
+		stop, err := s.distillBatch(ctx, t, key, runID, dump, b)
+		if err != nil {
 			slog.Error("scheduler: distiller batch failed", "source_key", key, "error", err)
 			if ctx.Err() != nil {
-				return "", ""
+				return "", "", ""
 			}
-			return distillRunError(err)
+			outcome, class := distillRunError(err)
+			return outcome, class, ""
+		}
+		if stop != "" {
+			// An in-run brake ended the tick (A02-8): the breaker, the in-run GPU
+			// ceiling or the per-source call clamp. The chunks that reached a call
+			// are marked seen and everything above them stays BELOW the watermark
+			// (distillBatch), so the next tick reads the remainder again and drops
+			// only what was already extracted — postponed, and this time actually
+			// so (round-2 blocker #1).
+			//
+			// The word travels with the outcome instead of being folded away:
+			// §4.5.3 gives gates 6 and 7 their own vocabulary, and a `partial` with
+			// a NULL skip_reason would answer "the run did not finish" without ever
+			// saying why (round-2 blocker #3).
+			slog.Warn("scheduler: distiller ended its tick early",
+				"source_key", key, "reason", stop, "watermark", b.Watermark)
+			return distillOutcomePartial, "", stop
 		}
 		if b.Watermark <= wm {
 			// A batch that covered nothing while delivering something is a
@@ -548,24 +622,53 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 			// it as a duplicate — an endless tick would be the alternative.
 			slog.Warn("scheduler: distiller batch made no progress",
 				"source_key", key, "watermark", wm, "items", len(b.Items))
-			return distillOutcomePartial, ""
+			return distillOutcomePartial, "", ""
 		}
 		wm = b.Watermark
 		if !b.Complete {
 			// The reader's window ended inside a watermark group. Everything
 			// delivered is covered and the watermark stands on it, but the run
 			// did not finish its range — which is exactly what 'partial' says.
-			return distillOutcomePartial, ""
+			return distillOutcomePartial, "", ""
 		}
 	}
 }
 
-// distillBatch runs one batch through selection, dedup, dump and ledger.
-func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID string, dump *distillDump, b distillsource.Batch) error {
+// distillBatch runs one batch through selection, dedup, dump, extraction and
+// ledger, and reports a tick-ending condition ("" = none).
+//
+// THE WRITE ORDER IS DUMP → EXTRACT → LEDGER → WATERMARK, and the last two
+// steps are SCOPED TO WHAT REACHED A CALL (§4.5.4; round-2 blocker #1).
+//
+// The first version marked the whole batch seen BEFORE extracting and advanced
+// the watermark unconditionally afterwards. An in-run stop — the GPU ceiling,
+// the call clamp, the breaker — then left the untouched remainder of the batch
+// both in distill_seen and below a watermark claiming to cover it: measured,
+// three of four selected chunks fell out of the extraction PERMANENTLY, and the
+// three places claiming the range was "postponed, not lost" were wrong at all
+// three.
+//
+// The invariant this restores is the one the migration writes out: the
+// watermark stands for material that is COVERED. Covered means "reached a call,
+// or was deliberately discarded" (credential drop, substance floor, duplicate)
+// — never "was read while the arm was already stopping". So:
+//
+//   - distill_seen takes the prefix ex.processed, i.e. exactly the chunks a call
+//     saw. The deliberately discarded ones need no ledger row: they are dropped
+//     again deterministically on the next read.
+//   - the watermark moves only when the batch ran to its end. On a stop it stays
+//     put, because a watermark is per manifest and cannot be advanced by half a
+//     batch — GREATEST in distillAdvance keeps the row's own value.
+//
+// The cost is named rather than hidden: the next tick re-reads the batch, the
+// already-called chunks drop out as duplicates (rows_dropped_dup), and the dump
+// repeats them. That is the same recoverable repetition the crash paths of A02-6
+// already carry, and it is the direction that loses nothing.
+func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID string, dump *distillDump, b distillsource.Batch) (string, error) {
 	kept, l := distillSelect(b.Items, t.minRunes)
 	kept, hashes, dropped, err := s.distillDedup(ctx, key, kept)
 	if err != nil {
-		return err
+		return "", err
 	}
 	l.droppedDup = dropped
 	l.selected = len(kept)
@@ -573,12 +676,23 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 		l.chars += int64(utf8.RuneCountInString(it.Text))
 	}
 	if err := dump.write(kept, hashes); err != nil {
-		return err
+		return "", err
 	}
-	if err := s.distillMarkSeen(ctx, key, hashes); err != nil {
-		return err
+	ex := s.distillExtract(ctx, t, kept)
+	l.calls, l.insightsKept, l.insightsRejected = ex.calls, ex.kept, ex.rejected
+
+	seen := hashes
+	wm := b.Watermark
+	if ex.stop != "" {
+		seen = hashes[:min(ex.processed, len(hashes))]
+		// 0 leaves watermark_to where it is (GREATEST), which is what "the range
+		// was not covered" has to mean on a column that only moves forward.
+		wm = 0
 	}
-	return s.distillAdvance(ctx, runID, l, b.Watermark)
+	if err := s.distillMarkSeen(ctx, key, seen); err != nil {
+		return "", err
+	}
+	return ex.stop, s.distillAdvance(ctx, runID, l, wm)
 }
 
 // distillAdvance folds one batch's counters into the run row and moves the
@@ -596,9 +710,13 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		       rows_dropped_cred = rows_dropped_cred + $4,
 		       rows_dropped_dup  = rows_dropped_dup + $5,
 		       chars_selected    = chars_selected + $6,
+		       calls             = calls + $8,
+		       insights_kept     = insights_kept + $9,
+		       insights_rejected = insights_rejected + $10,
 		       watermark_to      = GREATEST(watermark_to, $7)
 		 WHERE run_id = $1::uuid`,
-		runID, l.seen, l.selected, l.droppedCred, l.droppedDup, l.chars, wm)
+		runID, l.seen, l.selected, l.droppedCred, l.droppedDup, l.chars, wm,
+		l.calls, l.insightsKept, l.insightsRejected)
 	if err != nil {
 		return fmt.Errorf("distill: advancing run row %s: %w", runID, err)
 	}
@@ -824,15 +942,20 @@ func (s *Scheduler) distillStartRun(ctx context.Context, key, sess string, wm in
 // distillFinishRun closes the running row (phase two). An empty runID is a
 // no-op, matching overview.FinishRun: a missing row is better than an invented
 // one.
-func (s *Scheduler) distillFinishRun(ctx context.Context, runID, outcome, errClass string) error {
+func (s *Scheduler) distillFinishRun(ctx context.Context, runID, outcome, errClass, skipReason string) error {
 	if runID == "" {
 		return nil
 	}
+	// skip_reason on a `partial` row is DELIBERATE and the CHECK allows it:
+	// dr_skip_reason_known constrains the VALUE, never the outcome it sits on
+	// (135:147-150), and the trip row already carries both columns at once. It is
+	// how an in-run brake says WHY the run stopped (round-2 blocker #3) — without
+	// it, `partial` answers "did not finish" and nothing else.
 	_, err := s.pool.Exec(ctx, `
 		UPDATE distill_run
-		   SET outcome = $2, error = $3, finished_at = now()
+		   SET outcome = $2, error = $3, skip_reason = $4, finished_at = now()
 		 WHERE run_id = $1::uuid`,
-		runID, outcome, distillNull(errClass))
+		runID, outcome, distillNull(errClass), distillNull(skipReason))
 	if err != nil {
 		return fmt.Errorf("distill: closing run row %s: %w", runID, err)
 	}

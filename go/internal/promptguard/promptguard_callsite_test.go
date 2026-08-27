@@ -48,10 +48,18 @@ import (
 // carrier of OTHER pipelines' names, not a pipeline of its own.
 const pipelineMarker = "Pipeline:"
 
-// wantPipelineSites pins the number of production Pipeline: string-literal
-// sites. It is a tripwire, not a budget — see the failure message for what to
-// do when it moves.
-const wantPipelineSites = 12
+// wantPipelineSites pins the number of production Pipeline: sites. It is a
+// tripwire, not a budget — see the failure message for what to do when it moves.
+//
+// 14 since wave A02-8, and the jump from 12 is TWO pipelines rather than one.
+// The scan used to read string LITERALS only, so every site whose value is a
+// package constant was invisible to it — and the tree had two: cluster-label
+// (topiclabel.go:651, `Pipeline: Pipeline`) since the label arm was built, and
+// distill-insights (events/distill_extract.go, `Pipeline: distillPipeline`) as
+// of this wave. Both build prompts out of foreign text, so a gate that could
+// not see them described a smaller world than it claimed, exactly the way the
+// module-root cut below exists to prevent. constPipelineSites closes it.
+const wantPipelineSites = 14
 
 // noPromptGuard is the CLOSED list of pipelines whose site carries no guard
 // and needs none. One justification line each; a reason that does not survive
@@ -80,6 +88,64 @@ var guardedElsewhere = map[string]string{
 	// tools.go by wave H7.
 	"web-chat": "internal/chat/tools.go",
 }
+
+// constPipelineSite is one closed-list entry: the pipeline an identifier names
+// and the file whose declaration has to carry that value.
+type constPipelineSite struct {
+	pipeline string
+	declIn   string
+}
+
+// constPipelineSites is the CLOSED list of Pipeline: sites whose value is a
+// package CONSTANT rather than a string literal — the shape the doctrine
+// actually prefers, because one constant is one authority for a name three
+// consumers must agree about (promptguard/budget.go:82-96).
+//
+// KEYED BY (PACKAGE DIRECTORY, IDENTIFIER), not by the bare identifier
+// (round-2 note #19). `Pipeline` is a name any package may declare; keyed
+// globally, a second package's `Pipeline` constant with a different value would
+// have been mapped onto cluster-label at its own call site as long as SOME
+// declaration in the tree carried the claimed string. The directory makes the
+// key as local as the constant is.
+//
+// distill-insights binds to PipelineDistill at COMPILE TIME, so that half can
+// never drift; cluster-label is a literal because topiclabel imports this
+// package and the reverse edge would be a cycle. Its value AND the file that
+// declares it are pinned by checkConstPipelines against the tree.
+var constPipelineSites = map[string]constPipelineSite{
+	"internal/events:distillPipeline": {PipelineDistill, "internal/events/distill.go"},
+	"internal/topiclabel:Pipeline":    {"cluster-label", "internal/topiclabel/topiclabel.go"},
+}
+
+// passthroughPipelineIdents is the counter-list: Pipeline: values that name NO
+// pipeline of their own because they carry another one's name through.
+// internal/llm/chain.go is the generic carrier of every pipeline above. Keyed
+// the same way, for the same reason.
+//
+// Together the two lists are exhaustive by assertion — an identifier in neither
+// makes the test red instead of silently vanishing from the count, which is the
+// property the literal-only scan lacked.
+var passthroughPipelineIdents = map[string]bool{
+	"internal/llm:pipeline":   true, // ChatChain / rejection helpers
+	"internal/llm:c.Pipeline": true, // ChainCall.Do onto llmlog.Entry
+}
+
+// constIdentAt matches an identifier (optionally one selector deep) at the
+// start of a Pipeline: value.
+var constIdentAt = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?`)
+
+// constDecl finds the declaration of a constant whose value is a string
+// literal, so an entry in constPipelineSites cannot claim a name the tree does
+// not give it. Both spellings the tree uses are covered: `const X = "…"` and a
+// name inside a const block.
+var constDecl = regexp.MustCompile(`(?m)^\s*(?:const\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"`)
+
+// constAlias finds a constant declared as ANOTHER constant — the shape the arm
+// uses so the name has one authority (`const distillPipeline =
+// promptguard.PipelineDistill`, events/distill.go:117). One level of
+// indirection is resolved; a longer chain would be a shape nothing in the tree
+// has, and guessing at it would make the check assert less than it reads.
+var constAlias = regexp.MustCompile(`(?m)^\s*(?:const\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*$`)
 
 var (
 	directGuardCall = regexp.MustCompile(`promptguard\.[A-Z][A-Za-z0-9_]*\(`)
@@ -144,8 +210,17 @@ func TestPromptPipelineCallSitesAreGuarded(t *testing.T) {
 		}
 	}
 
+	// An identifier in neither closed list: counted above, named here.
+	for _, s := range sites {
+		if name, found := strings.CutPrefix(s.pipeline, unknownIdentPrefix); found {
+			t.Errorf("%s:%d: Pipeline: %s is neither in constPipelineSites (it names a pipeline) nor in passthroughPipelineIdents (it carries another one's name) — decide which",
+				s.rel, s.line, name)
+		}
+	}
+
 	checkClosedList(t, byPipeline, noPromptGuard, "noPromptGuard", nil)
 	checkClosedList(t, byPipeline, guardedElsewhere, "guardedElsewhere", guardedFiles)
+	checkConstPipelines(t, root, byPipeline)
 }
 
 // checkClosedList holds each excused pipeline to its own claim: the site still
@@ -227,7 +302,7 @@ func scanModuleForPipelines(t *testing.T, root string) (map[string]bool, []pipel
 	var sites []pipelineSite
 	for _, f := range files {
 		guarded := guardFiles[f.rel] || (pkgHelper[f.dir] && helperGuardCall.MatchString(f.text))
-		for _, p := range pipelineLiterals(f.text) {
+		for _, p := range pipelineLiterals(f.text, f.dir) {
 			sites = append(sites, pipelineSite{rel: f.rel, pipeline: p.name, line: p.line, guarded: guarded})
 		}
 	}
@@ -237,7 +312,7 @@ func scanModuleForPipelines(t *testing.T, root string) (map[string]bool, []pipel
 // pipelineLiterals returns every `Pipeline: "…"` occurrence with its 1-based
 // line. A value that is not a string literal (chain.go's pass-through variable)
 // is skipped — it names no pipeline of its own.
-func pipelineLiterals(text string) []struct {
+func pipelineLiterals(text, dir string) []struct {
 	name string
 	line int
 } {
@@ -255,12 +330,112 @@ func pipelineLiterals(text string) []struct {
 		rest := strings.TrimLeft(text[start:], " \t")
 		name, ok := stringLiteralAt(rest)
 		if !ok {
-			continue
+			// Not a literal: a constant reference names a pipeline just as much
+			// (constPipelineSites), a pass-through names none.
+			ident := constIdentAt.FindString(rest)
+			var site constPipelineSite
+			site, ok = constPipelineSites[dir+":"+ident]
+			name = site.pipeline
+			if !ok {
+				if !passthroughPipelineIdents[dir+":"+ident] {
+					out = append(out, struct {
+						name string
+						line int
+					}{unknownIdentPrefix + dir + ":" + ident, 1 + strings.Count(text[:start], "\n")})
+				}
+				continue
+			}
 		}
 		out = append(out, struct {
 			name string
 			line int
 		}{name, 1 + strings.Count(text[:start], "\n")})
+	}
+}
+
+// unknownIdentPrefix marks a site whose value is an identifier in neither
+// closed list. It enters the count under a name that cannot collide with a real
+// pipeline, so the site is both counted and reported rather than skipped.
+const unknownIdentPrefix = "UNKNOWN-IDENT:"
+
+// checkConstPipelines holds constPipelineSites to the tree, the way
+// checkClosedList holds the other two lists to theirs: the identifier must be
+// declared somewhere as a constant with exactly the claimed string value.
+//
+// Without it the map would be a second authority for a name — the failure
+// class PipelineDistill's own doc names (budget.go:88-95): two spellings do not
+// fail loudly, they leave a guard pointing at nothing.
+func checkConstPipelines(t *testing.T, root string, sites map[string]pipelineSite) {
+	t.Helper()
+	// values maps a constant name onto its literal values; declFile records which
+	// file declared each of them, so an entry cannot claim a value some OTHER
+	// file in the tree happens to carry.
+	values := map[string][]string{}
+	declFile := map[string]string{} // "<name>=<value>" → rel path
+	alias := map[string][]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return err
+		}
+		src, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		rel = filepath.ToSlash(rel)
+		text := stripLineComments(string(src))
+		for _, m := range constDecl.FindAllStringSubmatch(text, -1) {
+			values[m[1]] = append(values[m[1]], m[2])
+			declFile[m[1]+"="+m[2]] = rel
+		}
+		for _, m := range constAlias.FindAllStringSubmatch(text, -1) {
+			alias[m[1]] = append(alias[m[1]], m[2])
+			declFile[m[1]+"@alias"] = rel
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s for constant declarations: %v", root, err)
+	}
+	// One level of alias resolution: distillPipeline = promptguard.PipelineDistill
+	// = "distill-insights". The qualifier is dropped for the LOOKUP — but the
+	// declaring file recorded above is the alias' own, which is what the entry
+	// has to name.
+	for name, targets := range alias {
+		for _, target := range targets {
+			if i := strings.LastIndex(target, "."); i >= 0 {
+				target = target[i+1:]
+			}
+			for _, v := range values[target] {
+				values[name] = append(values[name], v)
+				if _, seen := declFile[name+"="+v]; !seen {
+					declFile[name+"="+v] = declFile[name+"@alias"]
+				}
+			}
+		}
+	}
+	for key, entry := range constPipelineSites {
+		ident := key
+		if i := strings.LastIndex(key, ":"); i >= 0 {
+			ident = key[i+1:]
+		}
+		if !slices.Contains(values[ident], entry.pipeline) {
+			t.Errorf("constPipelineSites[%q] claims %q, but no constant of that name in the tree carries it (found %v) — the entry is stale",
+				key, entry.pipeline, values[ident])
+			continue
+		}
+		// The DECLARATION has to sit where the entry says. Without this the value
+		// check alone would accept a same-named constant declared anywhere.
+		if got := declFile[ident+"="+entry.pipeline]; got != entry.declIn {
+			t.Errorf("constPipelineSites[%q] says the constant is declared in %s, but it is in %s",
+				key, entry.declIn, got)
+		}
+		if _, ok := sites[entry.pipeline]; !ok {
+			t.Errorf("constPipelineSites[%q] is stale: no Pipeline: site carries %q any more", key, entry.pipeline)
+		}
 	}
 }
 

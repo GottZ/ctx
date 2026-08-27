@@ -94,6 +94,13 @@ type distillLedger struct {
 	droppedCred int   // rows_dropped_cred — §4.2.5 rule 2
 	droppedDup  int   // rows_dropped_dup — §4.2.4, within the batch and across runs
 	chars       int64 // chars_selected — runes of the selected chunks
+
+	// The extraction's three columns (135:121-124, wave A02-8). insights_kept
+	// counts what survived G1-G7; insights_rejected is the W18 gate — everything
+	// the model offered and the gate refused, the schema's own drops included.
+	calls            int
+	insightsKept     int
+	insightsRejected int
 }
 
 // distillParts groups a batch's items into the parts they were chunked from.
