@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -72,13 +73,13 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
-	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V30
+	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V31
 	return issues
 }
 
 // validateDistill holds the cross-field invariants of the distiller group
-// (design/03 §5.4, §5.5, §6.4; wave A03-W03-3, plus V27 from wave C2-8 and
-// V28-V30 from wave A02-4). All of them are fatal: boot drops the offending
+// (design/03 §5.4, §5.5, §6.4; wave A03-W03-3, plus V27 from wave C2-8,
+// V28-V30 from wave A02-4 and V31 from wave A02-6). All of them are fatal: boot drops the offending
 // override, a settings PUT is a 422 — the class every "renders as configured,
 // acts as something else" knob in this file gets.
 //
@@ -182,7 +183,47 @@ func validateDistill(c *Config) []Issue {
 	issues = append(issues, validateDistillBudget(d)...) // V24
 	issues = append(issues, validateDistillCounters(d)...)
 	issues = append(issues, validateDistillCtxSource(d)...) // V28, V29, V30
+	issues = append(issues, validateDistillDryRunDir(d)...) // V31
 	return issues
+}
+
+// validateDistillDryRunDir is V31: the dry-run dump target must be an absolute
+// path, or empty.
+//
+// THE KEY IS AN EGRESS TARGET, not a convenience path (§5 BA13). It receives the
+// raw session prose the credential detector did NOT catch, so a value that lands
+// in a git working copy is one `git push` away from publishing it. It shipped in
+// wave A02-6 as the only key of this group with no rule at all, on the reasoning
+// that a validator sees only the /api/settings path — which is wrong at the code
+// and was measured to be wrong: cmd/ctxd/main.go runs FromEnv + Validate and
+// exits on SeverityError, build.go validates the assembled config, store.go the
+// settings write. All three writers pass through here.
+//
+// EMPTY STAYS LEGAL and is not an oversight: it is the documented "no plaintext
+// dump" setting, the one BA13's own resolution asks for (counted figures and
+// chunk hashes stay in the journal, plaintext only on an explicit operator
+// request).
+//
+// THE RULE IS DELIBERATELY SYNTACTIC. Whether a path lies inside a working copy
+// is a fact about the file system at the moment of use — a symlink, a mount or a
+// `git init` changes the answer without the value changing — and Validate is
+// parameter-pure and runs at boot and on every settings write. That half belongs
+// to the arm and is enforced there (events.distillDumpDir, which resolves
+// symlinks and walks the ancestors before every tick, and again after the
+// directory is created). Two layers, one question each; neither covers the
+// other's case.
+//
+// A relative path is the one shape that is wrong under every file system: it
+// resolves against the daemon's working directory, which in a development
+// install IS the repository.
+func validateDistillDryRunDir(d *DistillConfig) []Issue {
+	dir := strings.TrimSpace(d.DryRunDir)
+	if dir == "" || filepath.IsAbs(dir) {
+		return nil
+	}
+	return []Issue{{Field: "distill.dryrun_dir", Severity: SeverityError,
+		Msg: fmt.Sprintf("distill.dryrun_dir %q is not an absolute path — the dry-run dump carries raw session prose, and a relative target resolves against the daemon's working directory (in a development install: the repository). Give an absolute path outside every git working copy, or leave the key empty to switch the plaintext dump off",
+			d.DryRunDir)}}
 }
 
 // builtinTypeSet is the COMPILED block-type registry — the fail-safe floor

@@ -1,8 +1,13 @@
 // distill.go — the distiller arm over ctx's own compaction checkpoints
-// (design/02 §4.5 + §4.8, wave A02-5). This is the SKELETON: cadence, gates,
-// journal and startup sweep. There is no selection, no LLM call, no spend guard
-// and no block write in it — those are A02-6/7/8/9, and each of them fills a
-// place this file deliberately leaves open.
+// (design/02 §4.5 + §4.8). Cadence, gates, journal and startup sweep are wave
+// A02-5; the batch loop below them is A02-6, and the selection it runs each
+// batch through lives in distill_select.go.
+//
+// STILL ABSENT, and each has its own wave: the LLM call and the citation gate
+// (A02-8), the spend guard (A02-7), the block write (A02-9) and gate 3, session
+// quiet (A02-10). Until they land, a batch's durable artifact is the dry-run
+// dump, and the ledger counters plus the watermark are everything a run leaves
+// behind.
 //
 // OWN GOROUTINE, never a case in Run's central select. The reason is the one
 // runTopicLabeling writes out (scheduler.go:706-707): once A02-8 lands, one
@@ -36,6 +41,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/distillsource"
@@ -62,11 +68,22 @@ const (
 	distillErrQueryFailed     = "query_failed"
 	distillErrSchemaUntrusted = "schema_untrusted"
 	distillErrDaemonRestart   = "daemon_restart"
+	// block_write_failed is the class of a DURABLE WRITE that did not happen.
+	// Until A02-9 the durable artifact of a batch is the dry-run dump, so a
+	// refused or unwritable dump target answers with this class — the journal's
+	// vocabulary is fixed by a CHECK (135:151-155) and inventing a closer word
+	// would mean a migration for a state that already has one.
+	distillErrBlockWriteFailed = "block_write_failed"
 )
 
 // The outcomes this wave writes, from dr_outcome_known (135:146-148).
 const (
 	distillOutcomeRunning = "running"
+	// ok is the run that walked its range to the end. It says nothing about
+	// INSIGHTS — those are A02-8/9 and the ledger columns calls, insights_kept
+	// and blocks_written stay 0 until then; it says the range (from, to] was
+	// covered, which is exactly what the watermark on the same row claims.
+	distillOutcomeOk      = "ok"
 	distillOutcomePartial = "partial"
 	distillOutcomeSkipped = "skipped"
 	distillOutcomeFailed  = "failed"
@@ -214,6 +231,19 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 		return false
 	}
 
+	// The dry-run sink, resolved ONCE per tick and before any material is read
+	// (§5 BA13). A dump target inside a git working copy is refused here rather
+	// than at the file, because the answer is the same for every session of the
+	// tick and because a refusal must not first read a corpus it may not dump.
+	// The row goes under the TICK key and through distillFail, so a permanently
+	// misconfigured target journals once and not four times per tick.
+	dumpDir, err := distillDumpDir(d.DryRunDir)
+	if err != nil {
+		slog.Error("scheduler: distiller dry-run target refused", "error", err)
+		s.distillFail(ctx, tickKey, "", distillErrBlockWriteFailed)
+		return false
+	}
+
 	// Stamp the actual-run marker PAST every gate that defers (the guard/digest/
 	// recall discipline, MW12): a tick a gate stopped does NOT advance it, so the
 	// AGE of this stamp is the observable statement "the arm is reaching its
@@ -265,20 +295,50 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 			s.distillFail(ctx, tickKey, "", distillErrSchemaUntrusted)
 			continue
 		}
-		s.distillSession(ctx, src, d.CtxSourceLabel, scope, ref.Session)
+		s.distillSession(ctx, distillTick{
+			src:      src,
+			label:    d.CtxSourceLabel,
+			scope:    scope,
+			dumpDir:  dumpDir,
+			maxItems: d.RowsPerRead,
+			// Taken as configured, never clamped: the sizing keys are
+			// config.validateDistillCounters' authority (validate.go:409-429),
+			// and a clamp here would be a second one with the opposite policy.
+			maxRunes: d.MaxRowRunes,
+			minRunes: d.MinRowRunes,
+		}, ref.Session)
 	}
 	return true
 }
 
-// distillSession runs gate 4 and the regression check for ONE root session and
-// journals the answer.
+// distillTick is what one tick hands every session it processes: the reader and
+// the four values of the selection stage, resolved once from the snapshot so a
+// hot config change cannot take effect halfway through a tick.
+type distillTick struct {
+	src distillsource.Source
+
+	label   string
+	scope   string
+	dumpDir string // "" = no plaintext dump (§5 BA13)
+
+	// maxItems and maxRunes are the caller's two caps on Read. maxItems is an
+	// ATOM SELECTION bound, not a ceiling — the reader delivers a manifest
+	// whole and says so in its contract (distillsource.go, Read).
+	maxItems int
+	maxRunes int
+	minRunes int
+}
+
+// distillSession runs gate 4 and the regression check for ONE root session,
+// walks its material in batches and journals the answer.
 //
 // A02-3 review #6 binds the loop shape: a root whose ids do not parse answers
 // schema_untrusted, and the arm must SKIP that root for this tick rather than
 // hang on it. It therefore never returns an error — every outcome is a journal
 // row plus a log line, and the caller continues with the next candidate.
-func (s *Scheduler) distillSession(ctx context.Context, src distillsource.Source, label, scope, sess string) {
-	key := distillSourceKey(label, scope, sess)
+func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess string) {
+	src := t.src
+	key := distillSourceKey(t.label, t.scope, sess)
 	wm, err := s.distillWatermark(ctx, key)
 	if err != nil {
 		// The journal is unreadable: there is nothing truthful to write, and a
@@ -323,19 +383,180 @@ func (s *Scheduler) distillSession(ctx context.Context, src distillsource.Source
 	}
 
 	// Material above the watermark ⇒ the two-phase row (135:20-27): INSERT
-	// running first, UPDATE at the end. This wave processes nothing, so the run
-	// closes as PARTIAL with the watermark unmoved. Partial is the journal's
-	// word for "covered material, did not finish it" (§4.7) and it is the
-	// truthful one here: 'ok' would claim a completed range, and advancing
-	// watermark_to without durable insights is exactly the loss the two-phase
-	// order exists to prevent. A02-6 fills the middle.
+	// running first, UPDATE per batch, UPDATE at the end.
 	runID, err := s.distillStartRun(ctx, key, sess, wm)
 	if err != nil {
 		slog.Error("scheduler: distiller could not open run row", "source_key", key, "error", err)
 		return
 	}
-	if err := s.distillFinishRun(ctx, runID, distillOutcomePartial, ""); err != nil {
+	dump, err := distillOpenDump(t.dumpDir, runID)
+	if err != nil {
+		slog.Error("scheduler: distiller could not open its dry-run dump", "run_id", runID, "error", err)
+		s.distillClose(ctx, runID, distillOutcomeFailed, distillErrBlockWriteFailed)
+		return
+	}
+	defer dump.close()
+
+	outcome, class := s.distillBatches(ctx, t, key, sess, runID, dump, wm)
+	if outcome == "" {
+		// Shutdown mid-run. The row STAYS 'running' with the watermark of the
+		// last durable batch on it: the startup sweep turns it into 'killed'
+		// without discarding that value (135:20-27), and the next run resumes
+		// exactly there. Closing it here would need a context that is already
+		// cancelled — the update would fail and the value would be lost.
+		return
+	}
+	s.distillClose(ctx, runID, outcome, class)
+}
+
+// distillClose closes an open run row and logs a failure to do so.
+func (s *Scheduler) distillClose(ctx context.Context, runID, outcome, class string) {
+	if err := s.distillFinishRun(ctx, runID, outcome, class); err != nil {
 		slog.Error("scheduler: distiller could not close run row", "run_id", runID, "error", err)
+	}
+}
+
+// distillBatches walks the material above wm in batches and returns the outcome
+// the run closes with — "" meaning "do not close it at all" (shutdown).
+//
+// THE WRITE ORDER PER BATCH is §4.5.4 in the shape this wave has: dump, then
+// the dedup ledger, then the watermark. The block write of step 3 does not
+// exist yet, and the dump takes its place as the durable artifact — a crash
+// between dump and ledger re-dumps a batch, a crash between ledger and
+// watermark re-reads it and drops it as a duplicate. Both are recoverable; the
+// reverse order would mark material as seen or covered that nothing holds.
+//
+// THE PER-TICK WORK IS NOT BOUNDED HERE, and that is named rather than hidden:
+// the loop runs until the source has nothing above the watermark left, so a
+// first run over a large backlog reads it in one tick. The bound that belongs
+// there is the spend guard of A02-7 (it is what makes the loop expensive in the
+// first place); until then the cost is database reads and file writes, and the
+// arm yields on ctx.Done between batches.
+func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess, runID string, dump *distillDump, wm int64) (string, string) {
+	for {
+		if ctx.Err() != nil {
+			return "", ""
+		}
+		b, err := t.src.Read(ctx, sess, wm, t.maxItems, t.maxRunes)
+		if err != nil {
+			slog.Error("scheduler: distiller source error", "source_key", key, "op", "read", "error", err)
+			return distillRunError(err)
+		}
+		// Checked AGAIN after the read: a cancellation during Read is the
+		// SIGTERM case, and continuing into the write order with a dead context
+		// would fail every statement of it anyway.
+		if ctx.Err() != nil {
+			return "", ""
+		}
+		// INCOMPLETE FIRST, exhaustion second, and the order is the point
+		// (review #3). A batch that delivers nothing while reporting
+		// Complete=false is not an exhausted range — it is a read the source
+		// could not finish, and the hermes adapter produces exactly that shape
+		// for a window whose every row was undecodable
+		// (hermesadapter.go:149). Judged as `ok` it would journal a covered
+		// range every tick while covering nothing: the silent null operation
+		// D-02 §4.2.1(b) wants to see red.
+		if len(b.Items) == 0 {
+			if !b.Complete {
+				slog.Warn("scheduler: distiller read an incomplete empty batch",
+					"source_key", key, "watermark", wm)
+				return distillOutcomePartial, ""
+			}
+			if b.Watermark <= wm {
+				return distillOutcomeOk, "" // the range is exhausted
+			}
+		}
+		if err := s.distillBatch(ctx, t, key, runID, dump, b); err != nil {
+			slog.Error("scheduler: distiller batch failed", "source_key", key, "error", err)
+			if ctx.Err() != nil {
+				return "", ""
+			}
+			return distillRunError(err)
+		}
+		if b.Watermark <= wm {
+			// A batch that covered nothing while delivering something is a
+			// contract violation (Read names the watermark of the last manifest
+			// it handed out, and only manifests above `after` are read). It ends
+			// the run instead of repeating it: the material of this batch is
+			// dumped and marked seen, so the next tick reads it again and drops
+			// it as a duplicate — an endless tick would be the alternative.
+			slog.Warn("scheduler: distiller batch made no progress",
+				"source_key", key, "watermark", wm, "items", len(b.Items))
+			return distillOutcomePartial, ""
+		}
+		wm = b.Watermark
+		if !b.Complete {
+			// The reader's window ended inside a watermark group. Everything
+			// delivered is covered and the watermark stands on it, but the run
+			// did not finish its range — which is exactly what 'partial' says.
+			return distillOutcomePartial, ""
+		}
+	}
+}
+
+// distillBatch runs one batch through selection, dedup, dump and ledger.
+func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID string, dump *distillDump, b distillsource.Batch) error {
+	kept, l := distillSelect(b.Items, t.minRunes)
+	kept, hashes, dropped, err := s.distillDedup(ctx, key, kept)
+	if err != nil {
+		return err
+	}
+	l.droppedDup = dropped
+	l.selected = len(kept)
+	for _, it := range kept {
+		l.chars += int64(utf8.RuneCountInString(it.Text))
+	}
+	if err := dump.write(kept, hashes); err != nil {
+		return err
+	}
+	if err := s.distillMarkSeen(ctx, key, hashes); err != nil {
+		return err
+	}
+	return s.distillAdvance(ctx, runID, l, b.Watermark)
+}
+
+// distillAdvance folds one batch's counters into the run row and moves the
+// watermark — the LAST step of the batch, after everything it counts is
+// durable.
+//
+// GREATEST guards dr_watermark_forward (135:166): a batch that reports a
+// watermark below the row's own is a source-side bug, and the CHECK would kill
+// the whole run over it rather than the batch.
+func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillLedger, wm int64) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE distill_run
+		   SET rows_seen         = rows_seen + $2,
+		       rows_selected     = rows_selected + $3,
+		       rows_dropped_cred = rows_dropped_cred + $4,
+		       rows_dropped_dup  = rows_dropped_dup + $5,
+		       chars_selected    = chars_selected + $6,
+		       watermark_to      = GREATEST(watermark_to, $7)
+		 WHERE run_id = $1::uuid`,
+		runID, l.seen, l.selected, l.droppedCred, l.droppedDup, l.chars, wm)
+	if err != nil {
+		return fmt.Errorf("distill: advancing run row %s: %w", runID, err)
+	}
+	return nil
+}
+
+// distillRunError maps a mid-run error onto the outcome an ALREADY OPEN row
+// closes with. It is the counterpart of distillSourceError, which writes its own
+// row and therefore may answer with a skip; a run that has a row cannot.
+//
+// ErrSourceUnavailable closes as PARTIAL without an error class: the source
+// became unreadable mid-run, the batches before it are durable, and 'failed'
+// would call a postponement a defect. Everything else is a failure, and an
+// unclassified one is query_failed for the reason distillSourceError gives.
+func distillRunError(err error) (string, string) {
+	switch {
+	case errors.Is(err, distillsource.ErrSourceUnavailable):
+		return distillOutcomePartial, ""
+	case errors.Is(err, distillsource.ErrSchemaUntrusted):
+		return distillOutcomeFailed, distillErrSchemaUntrusted
+	case errors.Is(err, errDistillDump):
+		return distillOutcomeFailed, distillErrBlockWriteFailed
+	default:
+		return distillOutcomeFailed, distillErrQueryFailed
 	}
 }
 

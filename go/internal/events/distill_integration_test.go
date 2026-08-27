@@ -18,7 +18,6 @@ package events
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -55,6 +54,12 @@ type fakeDistillSource struct {
 	errOn    string // "sessions" | "head" | "hasnew"
 	closed   bool
 	reads    int // Sessions/Head/HasNew calls, for the "null read queries" probe
+
+	// readFn steers Read (A02-6). nil means "no material": an empty, complete
+	// batch at the caller's own watermark, which is the answer that ends a
+	// batch loop without pretending to have covered anything.
+	readFn    func(after int64) (distillsource.Batch, error)
+	lastAfter int64 // the watermark the last Read was asked from
 }
 
 func (f *fakeDistillSource) Label() string { return dfLabel }
@@ -84,8 +89,12 @@ func (f *fakeDistillSource) Head(_ context.Context, sess string) (int64, error) 
 	return f.head[sess], nil
 }
 
-func (f *fakeDistillSource) Read(context.Context, string, int64, int, int) (distillsource.Batch, error) {
-	return distillsource.Batch{}, errors.New("A02-5 never reads material")
+func (f *fakeDistillSource) Read(_ context.Context, _ string, after int64, _, _ int) (distillsource.Batch, error) {
+	f.lastAfter = after
+	if f.readFn == nil {
+		return distillsource.Batch{Watermark: after, Complete: true}, nil
+	}
+	return f.readFn(after)
 }
 
 func (f *fakeDistillSource) QuietFor(context.Context, string, time.Time) (time.Duration, error) {
@@ -104,6 +113,15 @@ func dfConfig() *config.Config {
 	c.Distill.CheckpointCategory = dfCategory
 	c.Distill.MaxSessionsPerRun = 4
 	c.Distill.RowsPerRead = 400
+	// The two sizing keys of the selection stage, at their registry defaults.
+	// They are set EXPLICITLY because the arm takes them as configured: the
+	// clamp that used to substitute a default for a non-positive value is gone
+	// (review #4 — config.validateDistillCounters is the one authority, and it
+	// refuses a non-positive value with SeverityError), so a test config that
+	// leaves them at the Go zero value would be a config the daemon refuses to
+	// start with.
+	c.Distill.MaxRowRunes = 4000
+	c.Distill.MinRowRunes = 200
 	c.Distill.CtxSessionHorizon = 30 * 24 * time.Hour
 	c.Distill.Interval = time.Second
 	c.Scheduler.HomeScope = dfScope
@@ -213,7 +231,15 @@ func TestDistillArm(t *testing.T) {
 	// GREEN, production path: the REAL reader over seeded checkpoint material.
 	// Everything below steers a fake; this subtest is the one that proves the
 	// wiring the fake stands in for.
-	t.Run("RealReaderWritesPartialRow", func(t *testing.T) {
+	//
+	// A02-6 MOVED THIS ASSERTION, and the move is the wave, not a weakening:
+	// while the arm processed nothing, the truthful row was 'partial' at 0..0
+	// ("covered material, did not finish it"). With the selection stage in
+	// place the run walks its range to the end, so the row is 'ok' and the
+	// watermark stands on the manifest it covered. Everything else this probe
+	// held — one row, the three-part identity, finished_at, no skip and no
+	// error class — is unchanged.
+	t.Run("RealReaderCoversItsRange", func(t *testing.T) {
 		dfTruncate(t, pool)
 		wm, _, _ := dfSeedCheckpoint(t, pool, dfRoot, time.Now().Add(-2*time.Hour))
 
@@ -229,19 +255,17 @@ func TestDistillArm(t *testing.T) {
 		if r.sourceKey != sessionKey || r.root != dfRoot {
 			t.Fatalf("identity = %q / %q, want %q / %q", r.sourceKey, r.root, sessionKey, dfRoot)
 		}
-		if r.outcome != "partial" || r.skipReason != "" || r.errClass != "" {
-			t.Fatalf("outcome/skip/error = %q/%q/%q, want partial//", r.outcome, r.skipReason, r.errClass)
+		if r.outcome != "ok" || r.skipReason != "" || r.errClass != "" {
+			t.Fatalf("outcome/skip/error = %q/%q/%q, want ok//", r.outcome, r.skipReason, r.errClass)
 		}
 		if !r.finished {
 			t.Fatal("finished_at is NULL on a closed row — the two-phase update did not run")
 		}
-		// The watermark did NOT move: this wave writes no insights, and the
-		// journal must not claim a covered range (§4.5.4).
-		if r.from != 0 || r.to != 0 {
-			t.Fatalf("watermark %d..%d, want 0..0 — nothing was processed", r.from, r.to)
+		if r.from != 0 || r.to != wm {
+			t.Fatalf("watermark %d..%d, want 0..%d — the manifest was covered", r.from, r.to, wm)
 		}
-		if got := dfDerive(t, pool, sessionKey); got != 0 {
-			t.Fatalf("derived watermark = %d, want 0 (head is %d but no batch covered it)", got, wm)
+		if got := dfDerive(t, pool, sessionKey); got != wm {
+			t.Fatalf("derived watermark = %d, want %d", got, wm)
 		}
 	})
 
@@ -654,16 +678,32 @@ func TestDistillArm(t *testing.T) {
 		}
 		// Only the first root fails: errOn is global, so instead the first root
 		// answers head 0 == watermark 0 (no_new_rows) and the SECOND must still
-		// reach the two-phase path.
+		// reach the two-phase path — and, since A02-6, walk it to the end.
+		src.readFn = func(after int64) (distillsource.Batch, error) {
+			if after >= 900 {
+				return distillsource.Batch{Watermark: after, Complete: true}, nil
+			}
+			return distillsource.Batch{
+				Items: []distillsource.Item{{
+					Text:   strings.Repeat("material ", 40),
+					Origin: distillsource.Origin{BlockID: "good-part", ChunkIndex: 1},
+				}},
+				Watermark: 900,
+				Complete:  true,
+			}, nil
+		}
 		dfScheduler(pool, dfConfig(), src).distillOnce(ctx, dfNoDemand)
-		var partials int
+		var done int
 		for _, r := range dfRows(t, pool) {
-			if r.sourceKey == goodKey && r.outcome == "partial" {
-				partials++
+			if r.sourceKey == goodKey && r.outcome == "ok" {
+				done++
+				if r.to != 900 {
+					t.Fatalf("the healthy root closed at watermark %d, want 900", r.to)
+				}
 			}
 		}
-		if partials != 1 {
-			t.Fatalf("second root produced %d partial rows, want 1: %+v", partials, dfRows(t, pool))
+		if done != 1 {
+			t.Fatalf("second root produced %d ok rows, want 1: %+v", done, dfRows(t, pool))
 		}
 	})
 

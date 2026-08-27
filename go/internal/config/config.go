@@ -1840,6 +1840,28 @@ type DistillConfig struct {
 	// second input of the V24 budget coupling, which is what makes it a real
 	// key with a test instead of a number in a comment.
 	RowsPerCall int `key:"distill.rows_per_call" env:"CTX_DISTILL_ROWS_PER_CALL" default:"5" mut:"hot" tenancy:"global-only"`
+	// DryRunDir is where the arm writes the DRY-RUN dump of the chunks its
+	// selection kept, one file per run, while there is no LLM call and no block
+	// write yet (wave A02-6).
+	//
+	// THE DUMP IS AN EGRESS CHANNEL, and the default is chosen against that
+	// (§5 BA13). It carries exactly the material the credential detector did
+	// NOT catch — label-adjacent hex runs, partial secrets next to [REDACTED],
+	// paraphrases — for up to 165 MB of private session prose. The first draft
+	// of the design put it under .project/, which is a git submodule with a
+	// GitHub remote that is routinely pushed; the target therefore has to lie
+	// OUTSIDE every git working copy, and the arm refuses one that does not
+	// (a relative path and a path inside a working tree are both refused at
+	// the point of use, not only in this validator's half).
+	//
+	// EMPTY TURNS THE PLAINTEXT DUMP OFF, and that is a supported setting
+	// rather than a broken one: BA13's own resolution is that the auditability
+	// argument runs primarily over the COUNTED figures and the chunk hashes —
+	// both of which stay in the run journal and the dedup ledger — and that
+	// plaintext is for an explicit operator request. An operator who wants the
+	// numbers without the prose empties this key.
+	DryRunDir string `key:"distill.dryrun_dir" env:"CTX_DISTILL_DRYRUN_DIR" default:"/var/lib/ctx/distill-dryrun" mut:"hot" tenancy:"global-only"`
+
 	// InitialBackfillRows is the cold-start depth when a source is seen for
 	// the first time and the journal derives watermark 0: the arm starts N
 	// ARCHIVED ROWS OF THAT SESSION below its head. 0 (the default) = start at
