@@ -17,6 +17,7 @@ func RenderCompareMarkdown(generatedAt string, body CompareBody) string {
 	b.WriteString("# ctx-armsweep — Bedingungs-Vergleich\n\n")
 
 	writeCompareVerdict(&b, body)
+	writeCompareCondition(&b, body.Condition)
 	writeCompareEnv(&b, body.Env)
 	writeCompareSlices(&b, body.Slices, body.Paired, body.UnpairedTotal, body.Unpaired)
 	writeCompareNoise(&b, body.Noise)
@@ -24,8 +25,33 @@ func RenderCompareMarkdown(generatedAt string, body CompareBody) string {
 	writeCompareEffects(&b, body.Effects)
 	writeCompareDisplacement(&b, body.Displacement)
 	writeNotesSection(&b, body.Notes)
-	writeCompareScope(&b)
+	writeCompareScope(&b, body.Condition)
 	return b.String()
+}
+
+// writeCompareCondition renders the declared condition directly beneath the
+// verdict and above everything else — it is the interpretation of every number
+// that follows, not a footnote to them (wave X-W3a). Absent without a
+// declaration, and then the report is the one M-W3d wrote.
+func writeCompareCondition(b *strings.Builder, d *ConditionDeclaration) {
+	if d == nil {
+		return
+	}
+	b.WriteString("## Deklarierte Bedingung\n\n")
+	fmt.Fprintf(b, "**Feld `%s` — Basis der Kennzahlen: `%s`. Bedingung eingetreten: %s.**\n\n",
+		d.Field, d.Basis, jaNein(d.Applies))
+	b.WriteString("| Rolle | Wert des deklarierten Feldes |\n|---|---|\n")
+	fmt.Fprintf(b, "| %s | `%s` |\n", RoleBase, d.BaseValue)
+	fmt.Fprintf(b, "| %s | `%s` |\n", RoleCond, d.CondValue)
+	fmt.Fprintf(b, "| Rausch-Paar | `%s` |\n", d.NoiseValue)
+	b.WriteString("\n")
+	if d.DeliveredMaxLen > 0 {
+		fmt.Fprintf(b, "Längste gemessene Lieferliste: **%d** Einträge.\n\n", d.DeliveredMaxLen)
+	}
+	for _, n := range d.Notes {
+		fmt.Fprintf(b, "- %s\n", n)
+	}
+	b.WriteString("\n")
 }
 
 func writeCompareVerdict(b *strings.Builder, body CompareBody) {
@@ -199,9 +225,13 @@ func typeHisto(counts []TypeCount) string {
 	return strings.Join(parts, ", ")
 }
 
-func writeCompareScope(b *strings.Builder) {
+func writeCompareScope(b *strings.Builder, d *ConditionDeclaration) {
 	b.WriteString("## Geltungsbereich\n\n")
-	b.WriteString("- Gewertet ist die OFFLINE-Fusion unter den Live-Gewichten, nicht die ausgelieferte Reihenfolge.\n")
+	if d != nil && d.Basis == RankingBasisDelivered {
+		b.WriteString("- Gewertet ist die AUSGELIEFERTE Reihenfolge, nicht die Offline-Fusion — so verlangt es die deklarierte Bedingung (siehe oben).\n")
+	} else {
+		b.WriteString("- Gewertet ist die OFFLINE-Fusion unter den Live-Gewichten, nicht die ausgelieferte Reihenfolge.\n")
+	}
 	b.WriteString("- Der Rauschboden stammt aus dem V0/V0'-Paar DERSELBEN Kampagne; ohne ihn verweigert dieses Unterkommando (§4.3).\n")
 	b.WriteString("- Ein Effekt gilt nur als lesbar, wenn sein CI die 0 ausschließt, er über der MDE seiner Slice liegt und seine Diskordanz die des Rauschbodens übersteigt (F-32).\n")
 	b.WriteString("- Boden-Slices sind ausgewiesen und tragen nie ein Rollout-Urteil.\n")

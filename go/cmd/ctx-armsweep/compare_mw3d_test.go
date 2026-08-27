@@ -90,10 +90,10 @@ func TestCompareCLIWritesBothReports(t *testing.T) {
 	c := dryCommon(gold)
 	reports := filepath.Join(t.TempDir(), armsweep.ReportDirName)
 
-	if err := cmdCompare(c, "BASE.jsonl", "COND.jsonl", "V0.jsonl,V0P.jsonl", reports, "one"); err != nil {
+	if err := cmdCompare(c, "BASE.jsonl", "COND.jsonl", "V0.jsonl,V0P.jsonl", reports, "one", ""); err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if err := cmdCompare(c, "BASE.jsonl", "COND.jsonl", "V0.jsonl,V0P.jsonl", reports, "two"); err != nil {
+	if err := cmdCompare(c, "BASE.jsonl", "COND.jsonl", "V0.jsonl,V0P.jsonl", reports, "two", ""); err != nil {
 		t.Fatalf("compare (second run): %v", err)
 	}
 	for _, name := range []string{"one.json", "one.md", "two.json", "two.md"} {
@@ -122,7 +122,7 @@ func TestCompareCLIExitCodes(t *testing.T) {
 	reports := filepath.Join(t.TempDir(), armsweep.ReportDirName)
 
 	t.Run("gate (a): no noise pair", func(t *testing.T) {
-		err := cmdCompare(dryCommon(gold), "BASE.jsonl", "COND.jsonl", "", reports, "a")
+		err := cmdCompare(dryCommon(gold), "BASE.jsonl", "COND.jsonl", "", reports, "a", "")
 		if !errors.Is(err, armsweep.ErrGateRefused) {
 			t.Fatalf("compare without -noise-pair returned %v, want ErrGateRefused", err)
 		}
@@ -132,7 +132,7 @@ func TestCompareCLIExitCodes(t *testing.T) {
 	})
 
 	t.Run("gate (a): one dump is not a pair", func(t *testing.T) {
-		err := cmdCompare(dryCommon(gold), "BASE.jsonl", "COND.jsonl", "V0.jsonl", reports, "a1")
+		err := cmdCompare(dryCommon(gold), "BASE.jsonl", "COND.jsonl", "V0.jsonl", reports, "a1", "")
 		if got := exitCodeFor(err); got != 3 {
 			t.Errorf("exit code = %d for a single noise dump, want 3 (%v)", got, err)
 		}
@@ -148,7 +148,7 @@ func TestCompareCLIExitCodes(t *testing.T) {
 		if err := armsweep.WriteJSONFile(filepath.Join(dumps, "COND.stamp.json"), stamp); err != nil {
 			t.Fatalf("write stamp: %v", err)
 		}
-		err := cmdCompare(dryCommon(gold), "BASE.jsonl", "COND.jsonl", "V0.jsonl,V0P.jsonl", reports, "c")
+		err := cmdCompare(dryCommon(gold), "BASE.jsonl", "COND.jsonl", "V0.jsonl,V0P.jsonl", reports, "c", "")
 		if !errors.Is(err, armsweep.ErrStampIncongruent) {
 			t.Fatalf("compare over an incongruent stamp returned %v, want ErrStampIncongruent", err)
 		}
@@ -173,7 +173,7 @@ func TestCompareCLIRefusedNoiseStillWritesTheReport(t *testing.T) {
 		t.Fatalf("rewrite replicate: %v", err)
 	}
 	reports := filepath.Join(t.TempDir(), armsweep.ReportDirName)
-	err := cmdCompare(dryCommon(gold), "BASE.jsonl", "COND.jsonl", "V0.jsonl,V0P.jsonl", reports, "b")
+	err := cmdCompare(dryCommon(gold), "BASE.jsonl", "COND.jsonl", "V0.jsonl,V0P.jsonl", reports, "b", "")
 	if !errors.Is(err, armsweep.ErrGateRefused) {
 		t.Fatalf("compare over a red noise floor returned %v, want ErrGateRefused", err)
 	}

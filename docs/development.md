@@ -551,6 +551,41 @@ definition of noise away from it. Five properties:
   comparison holds four dumps at once, and at 290 000 records each that is the
   difference between ~40 MB and over 1 GB of resident memory.
 
+Two of those congruence fields have a history worth knowing, because both were
+measured as holes rather than reasoned about.
+
+**`instance_kind` is stamped on every dump, not only on shadow dumps.** The
+driver reads `server.instance_kind` off the measured instance before the first
+measurement request of any non-dry run; an instance that answers the key but
+says nothing is stamped `unknown`, never empty. Until wave X-W3a the label was
+read only when the run also named `-shadow-types`, so the campaign rule it
+serves — F-32, all dumps of one campaign come from ONE instance — guarded none
+of the dumps a campaign is actually built from: an empty field compares equal to
+an empty field, and a comparison of two measure-copy dumps against a **live**
+noise pair ran through with exit 0. Empty now means a dry run or a dump written
+before X-W3a. Such a dump still LOADS; a campaign that mixes it with a stamped
+one is refused, and the refusal says which side was never stamped.
+
+**A comparison may DECLARE one congruence field as its own condition**
+(`-condition-field`). Some measurement waves have as their condition exactly
+what the congruence rule forbids — wave X-W2b writes `cluster.inject_max` from 3
+to 0, and `post_fusion_stages` is a congruence field, so the contract step of
+that wave exited 4. The declaration is deliberately not a generic allow flag: it
+names ONE field out of a closed list (today: `post_fusion_stages`), an unknown
+name is refused with exit 3 and writes no report, every other field stays as hard
+as it was, and the declaration is printed as its own report block with the values
+of base, cond and the noise pair. Two consequences ride with it: the replicate
+pair must not straddle the declared field (a replicate is a replicate in every
+field, or the noise floor measures the condition), and `post_fusion_stages`
+switches the metric basis from the offline fusion to the **delivered** ranking.
+That switch is the substance of the declaration, not a convenience — the
+post-fusion stages run after `ctx_rrf`, so the arm ranks a fusion is recomputed
+from cannot carry them (X-W2b measured byte-identical arm signatures across
+`inject_max` 0, 3 and 20). Computed on the fusion, such a comparison would return
+exactly zero with a full bootstrap CI around it: a tautology in the shape of a
+measurement. The delivered window is capped at the server's limit, so the report
+names the longest one it saw — `nDCG@10` over a five-entry list is `nDCG@5`.
+
 The census reaches the driver as an **additive, opt-in, server-admin-only**
 `drift` section of the existing `POST /api/manage` `stats` action — not as a new
 endpoint. A stats request that does not ask for it gets the byte-identical

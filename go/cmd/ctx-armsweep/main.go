@@ -111,6 +111,18 @@ var errDumpAborted = errors.New("dump verworfen (Drift-Protokoll)")
 
 // regimeLabelsUsage is the one wording of the X-W0b flag, shared by `score` and
 // `compare` so the two subcommands cannot describe the same file differently.
+// conditionFieldUsage names the closed list in the usage text, so an operator
+// never has to guess (wave X-W3a). Not a constant: the list lives in the
+// armsweep package next to the congruence table it is derived from.
+func conditionFieldUsage() string {
+	return "EIN Kongruenz-Feld als deklarierte BEDINGUNG dieses Vergleichs (deklarierbar: " +
+		strings.Join(armsweep.DeclarableConditionFields(), ", ") + "). " +
+		"Kein Freibrief: das genannte Feld darf zwischen Basis und Bedingung abweichen, jedes andere " +
+		"verwirft den Dump-Satz weiterhin (Exit 4). Die Deklaration entscheidet mit, WORAUF gerechnet " +
+		"wird — " + armsweep.ConditionFieldPostFusionStages + " misst die AUSGELIEFERTE Rangliste, " +
+		"weil eine Post-Fusion-Stufe in den Arm-Rängen nicht existiert"
+}
+
 const regimeLabelsUsage = "X-W0-Label-Datei im Gold-Verzeichnis (üblich: " + goldset.FileRegimeLabels +
 	"); trägt G-REAL zusätzlich als -local/-global-Zeilen aus. Ohne sie ist der Report der bisherige; " +
 	"ein G-REAL-Fall ohne Label bricht ab (Exit 4) statt still eine Rest-Hälfte zu bilden"
@@ -207,11 +219,12 @@ func run() error {
 			"V0/V0'-Dump-Paar DERSELBEN Kampagne als CSV (Pflicht — ohne gemessenen Rauschboden verweigert der Vergleich)")
 		outDir := fs.String("reports", defaultReportDir(), "Report-Verzeichnis")
 		name := fs.String("name", "", "Basisname der Report-Dateien (Vorgabe: compare-<Lauf-ID des Bedingungs-Dumps>)")
+		condField := fs.String("condition-field", "", conditionFieldUsage())
 		fs.StringVar(&c.regimeLabels, "regime-labels", "", regimeLabelsUsage)
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			return err
 		}
-		return cmdCompare(&c, *base, *cond, *noise, *outDir, *name)
+		return cmdCompare(&c, *base, *cond, *noise, *outDir, *name, *condField)
 	case "score":
 		dumpA := fs.String("dump", "", "Dump-Datei (Pflicht)")
 		dumpB := fs.String("dump-b", "", "zweiter Dump für die V0'-Replikate (ohne ihn ist G-NOISE nicht auswertbar)")

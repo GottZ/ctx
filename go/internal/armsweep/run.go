@@ -246,11 +246,19 @@ type DumpStamp struct {
 	AllowOutsideGoldset bool `json:"allow_outside_goldset"`
 
 	// InstanceKind is what the MEASURED instance said it is (§5 B4b): "live" or
-	// "measure-copy", read off server.instance_kind at dump time. Empty on a
-	// dump that named no shadow types — such a run makes no claim about the
-	// instance and none should be invented for it. It is a stamp field rather
-	// than a report footnote because the campaign rule "all dumps of one
-	// campaign come from ONE instance" (F-32) has to be gateable later.
+	// "measure-copy", read off server.instance_kind at dump time — on EVERY
+	// non-dry run since wave X-W3a, shadow types or not. It is a stamp field
+	// rather than a report footnote because the campaign rule "all dumps of one
+	// campaign come from ONE instance" (F-32) has to be gateable later, and a
+	// rule that only guards shadow dumps guards none of the dumps a campaign is
+	// actually built from (X-W2b §4.2 measured a Live/measure-copy mix passing
+	// with exit 0). An instance that answers the key but says nothing is stamped
+	// InstanceKindUnknown — never empty.
+	//
+	// Empty means exactly two things now: a dry run, and a dump written before
+	// X-W3a. Such a dump stays READABLE — `score` and `compare` load it — but a
+	// campaign that mixes it with a stamped one is refused, fail-closed, and the
+	// refusal says which side was never stamped (compare.go, stampHint).
 	InstanceKind string `json:"instance_kind,omitempty"`
 	// ShadowTypes records which shadow types the dump was measured WITH — the
 	// difference between a base dump and a conditional one, in the artefact

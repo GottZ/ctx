@@ -110,8 +110,10 @@ entziehen.
 |---|---|
 | `-noise-pair` fehlt oder nennt nicht genau zwei Dumps | 3 |
 | G-NOISE des Paars ist rot | 3 (Report wird trotzdem geschrieben) |
+| `-condition-field` nennt ein Feld, das nicht deklarierbar ist | 3 (**kein** Report — es wurde nichts gemessen) |
 | Stempel nicht kongruent: `pin_run_id`/`pin_sha256`, Gold-Bytes, `migrations_max`, Post-Fusion-Stufen, `instance_kind`, `hnsw.ef_search` | 4 |
 | GUC-Zustand je Fall abweichend: `hnsw.iterative_scan`, `hnsw.max_scan_tuples` | 4 |
+| Auf Basis `delivered` deklariert, ein Dump trägt aber keine gelieferte Rangliste | 4 |
 
 Die drei GUCs sind die Determinismus-Schrauben des schwersten Arms (Design 05
 §4.4b, F-23). `hnsw.ef_search` kommt aus dem Dump-Stempel (`/api/status`,
@@ -122,6 +124,46 @@ Konfigurations-Schnappschuss. Der `instance_kind`-Vergleich läuft auf den ROHEN
 Dump-Stempeln: der Report-Env führt die Arten eines Paars seit M-W2 zu einem
 String zusammen, und ein Gate auf dieser Zusammenführung sähe einen Wert, wo zwei
 stehen.
+
+### Die deklarierte Bedingung (`-condition-field`, X-W3a)
+
+Manche Messwellen haben als **Bedingung** genau das, was die Kongruenz-Regel
+verbietet: X-W2b legt `cluster.inject_max` von 3 auf 0 um, und `post_fusion_stages`
+ist ein Kongruenz-Feld. Design 05 widerspricht sich an dieser Stelle selbst
+(§4.3 gegen §7 X-W2b), und der Vergleich lief in Exit 4.
+
+`-condition-field <name>` löst das **ohne** generisches Aufweichen: es erklärt
+**genau ein benanntes** Kongruenz-Feld zur Bedingung dieses Vergleichs. Alles
+andere bleibt hart — eine zweite Abweichung verwirft den Dump-Satz weiterhin mit
+Exit 4. Die Deklaration steht als eigener Block im Report, mit den Werten von
+Basis, Bedingung und Rausch-Paar. Deklarierbar ist heute genau:
+`post_fusion_stages`; ein anderer Name wird abgewiesen (Exit 3), nicht ignoriert.
+
+Zwei Konsequenzen, die zur Deklaration gehören:
+
+- **Das Rausch-Paar darf die Bedingung nicht überspannen.** Ein Replikat ist ein
+  Replikat in JEDEM Feld, auch im deklarierten — sonst misst der Rauschboden die
+  Bedingung statt des Instruments. Exit 4.
+- **`post_fusion_stages` schaltet die Rechenbasis auf `delivered` um.** Die
+  Post-Fusion-Stufen laufen *nach* `ctx_rrf`; in den Arm-Rängen, aus denen die
+  Offline-Fusion neu gerechnet wird, existieren sie nicht (X-W2b maß byte-gleiche
+  Arm-Signaturen über `inject_max` 0, 3 und 20). Auf der Fusion gerechnet wäre so
+  ein Vergleich eine **Tautologie**: exakt 0 mit vollem Bootstrap-CI drumherum.
+  Deshalb rechnet er auf der ausgelieferten Rangliste — Kennzahlen, MDE, Rausch-
+  boden und Verdrängungs-Tabelle gemeinsam, und der Report sagt es in der
+  Kopfzeile, im Bedingungs-Block und im Geltungsbereich.
+
+Die Lieferliste ist auf das Server-Limit gekappt (in der X-W2b-Kampagne 5). Der
+Report nennt die längste gemessene Länge: `nDCG@10` über eine 5er-Liste ist
+faktisch `nDCG@5`, und Arm- und Lieferebene sind nicht gegeneinander lesbar.
+Eine gelieferte ID, die in keinem Arm stand, erscheint in der Verdrängungs-
+Tabelle als `(in keinem Arm — Post-Stufe)`.
+
+```bash
+ctx-armsweep compare -condition-field post_fusion_stages \
+  -dump-base xw2b-b1.jsonl -dump-cond xw2b-b0.jsonl \
+  -noise-pair xw2b-v0kp.jsonl,xw2b-v0kpp.jsonl
+```
 
 **Was der Report zeigt:** ΔnDCG@10, ΔRecall@5 und ΔMRR@10 je Slice mit
 gepaartem Bootstrap-CI und McNemar auf Hit@5; die **Verdrängungs-Tabelle** (wie
@@ -255,9 +297,21 @@ excluded` **plus** `retrieval.shadow_measurable = true`): sie werden für
 `ctx_rrf` und `ctx_rrf_arms` dieser Anfrage sichtbar geschaltet und für nichts
 sonst. So misst ein Cond-Dump einen Korpus, der noch nicht live sein darf.
 
-Das Instrument verweigert einen solchen Dump gegen eine Instanz, die sich nicht
-als Mess-Kopie ausweist (`server.instance_kind = measure-copy`, gelesen von der
-gemessenen Instanz) — **Exit 5**. Grund: ein Schatten-Block ist eine echte
+**Die Instanz-Art steht seit X-W3a in JEDEM Dump-Stempel**, nicht nur bei
+`-shadow-types`: `dump` liest `server.instance_kind` vor der ersten Messanfrage
+und stempelt, was die Instanz gesagt hat. Grund ist die Kampagnenregel F-32
+(„alle Dumps einer Kampagne kommen von EINER Instanz") — sie bewachte vorher
+gerade die Dumps nicht, aus denen eine Kampagne besteht: X-W2b maß einen
+Vergleich aus zwei Kopie-Dumps und einem **Live**-Rausch-Paar, der mit Exit 0
+durchlief, weil leer gleich leer vergleicht. Eine Instanz, die den Schlüssel
+beantwortet, aber nichts sagt, wird als `unknown` gestempelt — nie leer. Leer
+heißt jetzt genau zweierlei: Trockenlauf, oder Dump aus einem Lauf **vor**
+X-W3a. Solche Alt-Dumps bleiben **lesbar**; eine Kampagne, die sie mit
+gestempelten mischt, wird verworfen (Exit 4), und die Abweisung sagt, welche
+Seite nie gestempelt wurde.
+
+Das Instrument verweigert einen Schatten-Dump gegen eine Instanz, die sich nicht
+als Mess-Kopie ausweist — **Exit 5**. Grund: ein Schatten-Block ist eine echte
 Zeile mit Embedding und tsvector, und weder der HNSW- noch die beiden
 GIN-Indexe sind partiell; er kostet also auf **jeder Produktionsanfrage**
 Scan-Budget. Deshalb gehört der Schatten-Korpus in eine wiederhergestellte

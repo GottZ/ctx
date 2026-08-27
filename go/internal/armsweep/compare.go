@@ -68,6 +68,68 @@ const maxNamedUnpaired = 25
 // the same incongruence — that needs a new measurement, not a retry.
 var ErrStampIncongruent = errors.New("Dump-Satz verworfen: inkongruente Stempel")
 
+// ConditionFieldPostFusionStages is the one congruence field a comparison may
+// declare as its own condition (wave X-W3a, X-W2b N-A).
+//
+// The collision it resolves is inside design/05 itself: §4.3 makes the
+// post-fusion stage state a congruence field ("sonst Exit 4"), and §7 X-W2b
+// defines the CONDITION of a whole measurement wave as a settings write on
+// cluster.inject_max — one of those very stages. X-W2b measured the outcome:
+// exit 4, and the contract step of that wave was unexecutable.
+//
+// The resolution is deliberately NOT a generic override. An allow-flag would
+// buy passage for every field at once and turn a campaign rule into a habit.
+// A declaration names ONE field, says what it means, and leaves every other
+// field exactly as hard as it was.
+const ConditionFieldPostFusionStages = "post_fusion_stages"
+
+// conditionFields is the closed list of declarable fields and the ranking basis
+// each declaration implies.
+//
+// post_fusion_stages implies the DELIVERED ranking, and that implication is the
+// substance of the declaration rather than a convenience: the stages it names
+// run after ctx_rrf, so the arm ranks a fusion is recomputed from cannot carry
+// them (fuse.go:22-27 — X-W2b measured byte-identical arm signatures across
+// cluster.inject_max 0, 3 and 20). Declared and scored on the fusion, such a
+// comparison would return exactly zero with a full bootstrap CI around it: a
+// tautology in the shape of a measurement, which is worse than the refusal it
+// replaced.
+func conditionFields() map[string]string {
+	return map[string]string{ConditionFieldPostFusionStages: RankingBasisDelivered}
+}
+
+// DeclarableConditionFields names every value -condition-field accepts, sorted.
+func DeclarableConditionFields() []string {
+	out := make([]string, 0, len(conditionFields()))
+	for name := range conditionFields() {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ConditionDeclaration is the declared condition of one comparison, rendered
+// prominently in both report halves: it is the whole interpretation of every
+// number below it.
+type ConditionDeclaration struct {
+	Field string `json:"field"`
+	Basis string `json:"ranking_basis"`
+	// Applies is whether the declared field actually differs between base and
+	// cond. A declaration of a field that did not move is not an error — but it
+	// is never a silent success either: the comparison then measures a
+	// replicate, and the report says so.
+	Applies    bool   `json:"applies"`
+	BaseValue  string `json:"base_value"`
+	CondValue  string `json:"cond_value"`
+	NoiseValue string `json:"noise_value"`
+	// DeliveredMaxLen is the longest delivered window the walk saw. On the
+	// delivered basis it is the real cut-off of every @k metric in the report
+	// (X-W2b N-D: 5 000 delivered places over 1 000 cases means nDCG@10 is
+	// nDCG@5).
+	DeliveredMaxLen int      `json:"delivered_max_len,omitempty"`
+	Notes           []string `json:"notes"`
+}
+
 // DumpRef is one measured artefact as `compare` consumes it: where the records
 // are, and what the run said about itself.
 type DumpRef struct {
@@ -88,6 +150,13 @@ type CompareInput struct {
 	// rows (wave X-W0b). Inactive by default; an inactive split leaves the
 	// report exactly as it was before the wave.
 	RegimeSplit RegimeSplit
+
+	// ConditionField declares ONE congruence field as the condition of this
+	// comparison (wave X-W3a). Empty is the default and leaves every field
+	// hard; a name outside DeclarableConditionFields is a refusal, never a
+	// no-op. See ConditionFieldPostFusionStages for why this is a declaration
+	// and not an override.
+	ConditionField string
 
 	Seed        int64
 	GitRevision string
@@ -213,6 +282,10 @@ type DisplacementRow struct {
 type CompareBody struct {
 	Version int        `json:"version"`
 	Env     CompareEnv `json:"env"`
+	// Condition is the declared condition of this comparison, absent when none
+	// was declared — and then the bytes of the report are the bytes it always
+	// had (wave X-W3a).
+	Condition *ConditionDeclaration `json:"condition,omitempty"`
 	// Refused is true when G-NOISE did not pass. The tables below are still
 	// written: suppressing them would hide the evidence an operator needs to
 	// find the determinism source.
@@ -244,15 +317,25 @@ func Compare(in CompareInput) (CompareBody, error) {
 			ErrGateRefused)
 	}
 	refs := compareRefs(in)
-	if err := checkStampCongruence(refs); err != nil {
-		return CompareBody{}, err
-	}
-	shadow := shadowTypeSet(in.Cond.Stamp.ShadowTypes)
-	acc, err := streamPairs(refs, shadow, in.RegimeSplit)
+	decl, err := resolveCondition(in, refs)
 	if err != nil {
 		return CompareBody{}, err
 	}
+	if err := checkStampCongruence(refs, decl); err != nil {
+		return CompareBody{}, err
+	}
+	basis := RankingBasisFused
+	if decl != nil {
+		basis = decl.Basis
+	}
+	shadow := shadowTypeSet(in.Cond.Stamp.ShadowTypes)
+	acc, err := streamPairs(refs, shadow, in.RegimeSplit, basis)
+	if err != nil {
+		return CompareBody{}, err
+	}
+	finishCondition(decl, acc)
 	body := buildCompareBody(in, refs, acc)
+	body.Condition = decl
 	if body.Refused {
 		return body, fmt.Errorf("%w: %s", ErrGateRefused, strings.Join(body.RefusalReasons, "; "))
 	}
@@ -290,6 +373,44 @@ func shadowTypeSet(types []string) map[string]bool {
 
 // ------------------------------------------------------------- congruence.
 
+// stampField is one congruence field: the name a refusal prints and a
+// declaration names, and how the value is read off a stamp.
+type stampField struct {
+	name string
+	of   func(DumpStamp) string
+}
+
+// stampFields is the congruence table, in the order a refusal lists it.
+//
+// The campaign anchor is the PRIMING run, not the dump run id: `prime` collects
+// the pins for BOTH conditions and refuses -shadow-types for exactly that
+// reason (cmd/ctx-armsweep/commands.go:19-26). Two dumps pinned from different
+// priming runs measured two different question texts.
+func stampFields() []stampField {
+	return []stampField{
+		{"run_id-Stamm (pin_run_id)", func(s DumpStamp) string { return s.PinRunID }},
+		{"pin_sha256", func(s DumpStamp) string { return s.PinSHA256 }},
+		{"gold_stamp_sha256", func(s DumpStamp) string { return s.GoldStamp }},
+		{"gold_sha256", func(s DumpStamp) string { return CombinedDigest(s.SliceFiles) }},
+		{"migrations_max", func(s DumpStamp) string { return strconv.Itoa(s.MigrationsMax) }},
+		{ConditionFieldPostFusionStages, func(s DumpStamp) string { return canonicalJSON(s.PostFusionStages) }},
+		{"instance_kind", func(s DumpStamp) string { return s.InstanceKind }},
+		{"hnsw.ef_search", func(s DumpStamp) string { return s.EfSearch }},
+	}
+}
+
+// stampFieldValue reads one named congruence field. ok is false for a name the
+// table does not carry — which only DeclarableConditionFields can produce, and
+// that list is derived from this same table.
+func stampFieldValue(s DumpStamp, name string) (string, bool) {
+	for _, f := range stampFields() {
+		if f.name == name {
+			return f.of(s), true
+		}
+	}
+	return "", false
+}
+
 // checkStampCongruence is gates (c) and the stamp half of (h): every dump of a
 // campaign must describe the same measurement setup.
 //
@@ -299,10 +420,22 @@ func shadowTypeSet(types []string) map[string]bool {
 // which is the honest rendering for `score` but useless as a gate input: a
 // merged "live / measure-copy" is one value where the campaign rule of F-32
 // needs two.
-func checkStampCongruence(refs []DumpRef) error {
+//
+// A declared condition (wave X-W3a) exempts exactly ONE field from the walk
+// below — and buys it back on the replicate pair: the noise floor a comparison
+// is read against has to be a replicate in EVERY field, the declared one
+// included, or it measures the condition instead of the instrument.
+func checkStampCongruence(refs []DumpRef, decl *ConditionDeclaration) error {
+	declared := ""
+	if decl != nil {
+		declared = decl.Field
+	}
 	var reasons []string
 	for _, r := range refs[1:] {
-		reasons = append(reasons, stampMismatches(refs[0], r)...)
+		reasons = append(reasons, stampMismatches(refs[0], r, declared)...)
+	}
+	if declared != "" && len(refs) == 4 {
+		reasons = append(reasons, declaredMismatch(refs[2], refs[3], declared)...)
 	}
 	if len(reasons) == 0 {
 		return nil
@@ -310,26 +443,117 @@ func checkStampCongruence(refs []DumpRef) error {
 	return fmt.Errorf("%w: %s", ErrStampIncongruent, strings.Join(reasons, "; "))
 }
 
-func stampMismatches(a, b DumpRef) []string {
+func stampMismatches(a, b DumpRef, skip string) []string {
 	var out []string
-	add := func(field, want, got string) {
-		if want != got {
-			out = append(out, fmt.Sprintf("%s: %s=%q gegen %s=%q", b.Role, field, got, a.Role, want))
+	for _, f := range stampFields() {
+		if f.name == skip {
+			continue
+		}
+		if reason := fieldMismatch(a, b, f); reason != "" {
+			out = append(out, reason)
 		}
 	}
-	// The campaign anchor is the PRIMING run, not the dump run id: `prime`
-	// collects the pins for BOTH conditions and refuses -shadow-types for
-	// exactly that reason (cmd/ctx-armsweep/commands.go:19-26). Two dumps pinned
-	// from different priming runs measured two different question texts.
-	add("run_id-Stamm (pin_run_id)", a.Stamp.PinRunID, b.Stamp.PinRunID)
-	add("pin_sha256", a.Stamp.PinSHA256, b.Stamp.PinSHA256)
-	add("gold_stamp_sha256", a.Stamp.GoldStamp, b.Stamp.GoldStamp)
-	add("gold_sha256", CombinedDigest(a.Stamp.SliceFiles), CombinedDigest(b.Stamp.SliceFiles))
-	add("migrations_max", strconv.Itoa(a.Stamp.MigrationsMax), strconv.Itoa(b.Stamp.MigrationsMax))
-	add("post_fusion_stages", canonicalJSON(a.Stamp.PostFusionStages), canonicalJSON(b.Stamp.PostFusionStages))
-	add("instance_kind", a.Stamp.InstanceKind, b.Stamp.InstanceKind)
-	add("hnsw.ef_search", a.Stamp.EfSearch, b.Stamp.EfSearch)
 	return out
+}
+
+// declaredMismatch checks the ONE declared field between the two halves of the
+// replicate pair.
+func declaredMismatch(a, b DumpRef, name string) []string {
+	for _, f := range stampFields() {
+		if f.name != name {
+			continue
+		}
+		if reason := fieldMismatch(a, b, f); reason != "" {
+			return []string{reason + " — das Rausch-Paar ist ein Replikat in JEDEM Feld, auch im deklarierten"}
+		}
+	}
+	return nil
+}
+
+func fieldMismatch(a, b DumpRef, f stampField) string {
+	want, got := f.of(a.Stamp), f.of(b.Stamp)
+	if want == got {
+		return ""
+	}
+	return fmt.Sprintf("%s: %s=%q gegen %s=%q%s", b.Role, f.name, got, a.Role, want, stampHint(f.name, want, got))
+}
+
+// stampHint appends what a reader of the refusal needs and cannot derive from
+// the two values in front of them.
+func stampHint(name, want, got string) string {
+	switch {
+	case name == "instance_kind" && (want == "" || got == ""):
+		return " (eine Seite ist nicht gestempelt — ein Dump aus einem Lauf vor Welle X-W3a;" +
+			" er bleibt lesbar, ist aber kein Kampagnen-Partner)"
+	case name == ConditionFieldPostFusionStages:
+		return " (ist das die BEDINGUNG dieses Vergleichs, deklariere sie: -condition-field " +
+			ConditionFieldPostFusionStages + ")"
+	}
+	return ""
+}
+
+// ------------------------------------------------------------- declaration.
+
+// resolveCondition turns the declared field name into the semantics of this
+// comparison, or refuses the name.
+func resolveCondition(in CompareInput, refs []DumpRef) (*ConditionDeclaration, error) {
+	name := strings.TrimSpace(in.ConditionField)
+	if name == "" {
+		return nil, nil
+	}
+	basis, ok := conditionFields()[name]
+	if !ok {
+		return nil, fmt.Errorf(
+			"%w: -condition-field %q ist kein deklarierbares Kongruenz-Feld — deklarierbar ist genau: %s."+
+				" Eine Deklaration nimmt EIN benanntes Feld aus der Kampagnen-Kongruenz und lässt jedes andere hart;"+
+				" ein Feld, dessen Bedeutung als Bedingung niemand ausgearbeitet hat, ist keins (§4.3, X-W2b N-A)",
+			ErrGateRefused, name, strings.Join(DeclarableConditionFields(), ", "))
+	}
+	base, _ := stampFieldValue(refs[0].Stamp, name)
+	cond, _ := stampFieldValue(refs[1].Stamp, name)
+	noise, _ := stampFieldValue(refs[2].Stamp, name)
+	decl := &ConditionDeclaration{
+		Field: name, Basis: basis, Applies: base != cond,
+		BaseValue: base, CondValue: cond, NoiseValue: noise,
+	}
+	decl.Notes = conditionNotes(decl)
+	return decl, nil
+}
+
+// conditionNotes are the sentences a reader needs before the first number. In a
+// fixed order — the report body has to stay byte-identical across runs.
+func conditionNotes(d *ConditionDeclaration) []string {
+	out := []string{fmt.Sprintf(
+		"Deklariert: %q ist die BEDINGUNG dieses Vergleichs und wird nicht auf Kongruenz geprüft."+
+			" Jedes andere Kongruenz-Feld bleibt hart — eine zweite Abweichung verwirft den Dump-Satz (Exit 4).",
+		d.Field)}
+	if !d.Applies {
+		out = append(out, "Die deklarierte Bedingung ist NICHT eingetreten: Basis und Bedingung tragen"+
+			" denselben Wert. Dieser Vergleich misst hier ein Replikat, keine Bedingung.")
+	}
+	if d.Basis == RankingBasisDelivered {
+		out = append(out,
+			"Die Kennzahlen sind auf der GELIEFERTEN Rangliste gerechnet, nicht auf der Offline-Fusion:"+
+				" eine Post-Fusion-Stufe läuft nach ctx_rrf und ist in den Arm-Rängen konstruktionsbedingt"+
+				" unsichtbar (fuse.go:22-27; X-W2b maß byte-gleiche Arm-Signaturen über cluster.inject_max"+
+				" 0, 3 und 20). Auf der Fusion gerechnet wäre dieser Vergleich eine Tautologie.",
+			"Die Verdrängungs-Tabelle benennt Typen aus den Arm-Zeilen; eine über eine Post-Stufe"+
+				" gelieferte ID steht in keinem Arm und erscheint deshalb ohne Typnamen.")
+	}
+	return out
+}
+
+// finishCondition adds what only the walk knows: how long the delivered window
+// actually was.
+func finishCondition(d *ConditionDeclaration, acc *compareAcc) {
+	if d == nil || d.Basis != RankingBasisDelivered {
+		return
+	}
+	d.DeliveredMaxLen = acc.deliveredMax
+	d.Notes = append(d.Notes, fmt.Sprintf(
+		"Die längste gemessene Lieferliste hat %d Einträge (Server-Limit). nDCG@%d über eine kürzere Liste"+
+			" ist faktisch nDCG@%d; Arm- und Lieferebene sind deshalb nicht gegeneinander lesbar (X-W2b N-D).",
+		acc.deliveredMax, NDCGCut, acc.deliveredMax))
 }
 
 // canonicalJSON renders a stamp map in a stable form. json.Marshal sorts map
@@ -423,6 +647,10 @@ type compareAcc struct {
 	// value describes the whole campaign — and the report prints it once.
 	guc      caseGUC
 	gucKnown bool
+	// deliveredMax is the longest delivered window seen on the walk. Tracked
+	// only on the delivered basis, where it is the real cut-off of every @k
+	// metric in the report (wave X-W3a).
+	deliveredMax int
 }
 
 func newCompareAcc() *compareAcc {
@@ -449,7 +677,7 @@ func (a *compareAcc) noteUnpaired(key string) {
 // in ALL of them. A case missing from one dump is counted, never paired by
 // position: an exclusion that hit one run and not the other would otherwise
 // pair case i of one dump with a different case of the next.
-func streamPairs(refs []DumpRef, shadow map[string]bool, regime RegimeSplit) (*compareAcc, error) {
+func streamPairs(refs []DumpRef, shadow map[string]bool, regime RegimeSplit, basis string) (*compareAcc, error) {
 	streams := make([]*RecordStream, len(refs))
 	defer func() {
 		for _, s := range streams {
@@ -478,7 +706,7 @@ func streamPairs(refs []DumpRef, shadow map[string]bool, regime RegimeSplit) (*c
 			return acc, nil
 		}
 		if allAt(cur, live, key) {
-			if err := foldPair(acc, refs, cur, shadow, regime); err != nil {
+			if err := foldPair(acc, refs, cur, shadow, regime, basis); err != nil {
 				return nil, err
 			}
 			acc.paired++
@@ -521,7 +749,7 @@ func allAt(cur []Record, live []bool, key string) bool {
 
 // foldPair reduces one paired case to its contributions. The records leave
 // scope with the next iteration — nothing but the folded numbers survives.
-func foldPair(acc *compareAcc, refs []DumpRef, cur []Record, shadow map[string]bool, regime RegimeSplit) error {
+func foldPair(acc *compareAcc, refs []DumpRef, cur []Record, shadow map[string]bool, regime RegimeSplit, basis string) error {
 	base, cond, na, nb := cur[0], cur[1], cur[2], cur[3]
 	key := base.Key()
 	for i := 1; i < len(cur); i++ {
@@ -531,6 +759,11 @@ func foldPair(acc *compareAcc, refs []DumpRef, cur []Record, shadow map[string]b
 		if !sameIDs(base.GoldIDs, cur[i].GoldIDs) {
 			return fmt.Errorf("%w: Fall %s: Gold-Menge in %s weicht von %s ab",
 				ErrStampIncongruent, key, refs[i].Role, refs[0].Role)
+		}
+	}
+	if basis == RankingBasisDelivered {
+		if err := trackDelivered(acc, refs, cur, key); err != nil {
+			return err
 		}
 	}
 
@@ -547,19 +780,44 @@ func foldPair(acc *compareAcc, refs []DumpRef, cur []Record, shadow map[string]b
 	}
 
 	cfg := ConfigV0()
-	bs, cs := ScoreCase(base, cfg), ScoreCase(cond, cfg)
-	as, bs2 := ScoreCase(na, cfg), ScoreCase(nb, cfg)
+	bs, cs := ScoreCaseOn(base, cfg, basis), ScoreCaseOn(cond, cfg, basis)
+	as, bs2 := ScoreCaseOn(na, cfg, basis), ScoreCaseOn(nb, cfg, basis)
 	// A stratified G-REAL case is folded into TWO accumulators: its total row
 	// and its regime half. Scored once, filed twice — the halves cannot drift
 	// from the total they partition.
 	for _, k := range SliceKeysOf(base) {
-		foldInto(acc.slice(k), base, cond, bs, cs, as, bs2, cfg, shadow)
+		foldInto(acc.slice(k), base, cond, bs, cs, as, bs2, cfg, shadow, basis)
+	}
+	return nil
+}
+
+// trackDelivered is the fail-closed edge of the delivered basis and the source
+// of the cut-off the report prints.
+//
+// A record whose arms produced candidates but whose delivered window is empty
+// cannot answer a question declared on that window — it comes from a run that
+// never recorded one. Scored anyway it would contribute a zero that reads like
+// a measurement, which is exactly the failure the declaration exists to avoid.
+// A case whose arms are empty too is a query that genuinely found nothing and
+// is folded like any other.
+func trackDelivered(acc *compareAcc, refs []DumpRef, cur []Record, key string) error {
+	for i := range cur {
+		n := len(cur[i].Delivered)
+		if n == 0 && len(cur[i].Rows) > 0 {
+			return fmt.Errorf(
+				"%w: Fall %s: %s trägt keine gelieferte Rangliste, der Vergleich ist aber auf die Basis %q"+
+					" deklariert — ein Dump ohne delivered-Block kann diese Frage nicht beantworten",
+				ErrStampIncongruent, key, refs[i].Role, RankingBasisDelivered)
+		}
+		if n > acc.deliveredMax {
+			acc.deliveredMax = n
+		}
 	}
 	return nil
 }
 
 // foldInto adds one paired case to one slice accumulator.
-func foldInto(s *sliceAcc, base, cond Record, bs, cs, as, bs2 CaseScore, cfg Config, shadow map[string]bool) {
+func foldInto(s *sliceAcc, base, cond Record, bs, cs, as, bs2 CaseScore, cfg Config, shadow map[string]bool, basis string) {
 	s.n++
 	if len(base.GoldIDs) > 0 {
 		s.labelled++
@@ -578,7 +836,7 @@ func foldInto(s *sliceAcc, base, cond Record, bs, cs, as, bs2 CaseScore, cfg Con
 	s.noiseAHit = append(s.noiseAHit, as.Hit5)
 	s.noiseBHit = append(s.noiseBHit, bs2.Hit5)
 
-	foldDisplacement(&s.displacement, base, cond, cfg, shadow)
+	foldDisplacement(&s.displacement, base, cond, cfg, shadow, basis)
 }
 
 func sameIDs(a, b []string) bool {
@@ -595,9 +853,9 @@ func sameIDs(a, b []string) bool {
 
 // foldDisplacement compares the two top-K windows of one case: who entered, who
 // was pushed out, and whether the pushed-out block carried a judgement.
-func foldDisplacement(d *dispAcc, base, cond Record, cfg Config, shadow map[string]bool) {
-	baseTop := topIDs(base, cfg)
-	condTop := topIDs(cond, cfg)
+func foldDisplacement(d *dispAcc, base, cond Record, cfg Config, shadow map[string]bool, basis string) {
+	baseTop := topIDs(base, cfg, basis)
+	condTop := topIDs(cond, cfg, basis)
 	types := typeIndex(base.Rows, cond.Rows)
 	gold := make(map[string]bool, len(base.GoldIDs))
 	for _, id := range base.GoldIDs {
@@ -611,7 +869,7 @@ func foldDisplacement(d *dispAcc, base, cond Record, cfg Config, shadow map[stri
 	inCond := make(map[string]bool, len(condTop))
 	for i, id := range condTop {
 		inCond[id] = true
-		if shadow[types[id]] {
+		if shadow[typeOf(types, id)] {
 			d.shadowTopK++
 			if i == 0 {
 				d.shadowRank1++
@@ -629,14 +887,14 @@ func foldDisplacement(d *dispAcc, base, cond Record, cfg Config, shadow map[stri
 		}
 		out++
 		d.displaced++
-		d.byTypeOut[types[id]]++
+		d.byTypeOut[typeOf(types, id)]++
 		if gold[id] {
 			d.labelledOut++
 		}
 	}
 	for _, id := range condTop {
 		if !inBase[id] {
-			d.byTypeIn[types[id]]++
+			d.byTypeIn[typeOf(types, id)]++
 		}
 	}
 	if out > 0 {
@@ -650,10 +908,13 @@ func foldDisplacement(d *dispAcc, base, cond Record, cfg Config, shadow map[stri
 	}
 }
 
-// topIDs is the offline fusion's top-K ranking of one case — the same ranking
-// the metrics are scored on (score.go:95-98), never the delivered one.
-func topIDs(rec Record, cfg Config) []string {
-	ids := FusedIDs(Fuse(rec.Rows, cfg))
+// topIDs is the top-K window of one case on the SAME basis the metrics are
+// scored on — the offline fusion by default, the delivered ranking under a
+// declared post-fusion condition (wave X-W3a). One basis for both, or a
+// displacement row and a recall row in one report would describe two different
+// rankings.
+func topIDs(rec Record, cfg Config, basis string) []string {
+	ids := RankedIDs(rec, cfg, basis)
 	if len(ids) > DisplacementCut {
 		ids = ids[:DisplacementCut]
 	}
@@ -682,6 +943,21 @@ func typeIndex(rowSets ...[]rrf.ArmRow) map[string]string {
 
 // typeNameUnknown stands for a candidate out of a pre-142 dump.
 const typeNameUnknown = "(kein type_name im Dump)"
+
+// typeNameNotInArms stands for a DELIVERED id that appears in no arm at all
+// — a post-fusion stage put it there (dump.go:41-49). Reachable only on the
+// delivered basis; on the offline fusion every id comes out of the arms. Named
+// rather than blank for the reason gucUnset is named: an empty cell in a
+// report reads as missing data, and this cell is a measurement.
+const typeNameNotInArms = "(in keinem Arm — Post-Stufe)"
+
+// typeOf reads the type index with that fallback.
+func typeOf(types map[string]string, id string) string {
+	if name, ok := types[id]; ok {
+		return name
+	}
+	return typeNameNotInArms
+}
 
 // ------------------------------------------------------------------ body.
 

@@ -182,16 +182,31 @@ func cmdDump(ctx context.Context, c *common, pinFile string) error {
 	return nil
 }
 
-// gateInstance runs gate (l) and reports what it found. A dry run asks nothing:
-// it never touches an instance, so there is no instance to make a claim about —
-// and the stamp of a dry run says so by carrying no kind at all.
+// gateInstance reads the instance's provenance label and runs gate (l) on it.
+//
+// Two things that used to be one (wave X-W3a): the LABEL goes into EVERY dump
+// stamp, because the campaign rule it serves — F-32, all dumps of one campaign
+// come from one instance — is about every dump; the REFUSAL still belongs only
+// to a run that builds a shadow corpus. Before X-W3a the label was read only
+// when the refusal was, so ordinary dumps carried nothing and a mixed
+// Live/measure-copy campaign compared clean (X-W2b §4.2, exit 0 measured).
+//
+// A dry run asks nothing: it never touches an instance, so there is no instance
+// to make a claim about — and the stamp of a dry run says so by carrying no
+// kind at all.
 func (c *common) gateInstance(ctx context.Context, r *armsweep.Runner) (string, error) {
-	if c.dryRun || len(r.ShadowTypes) == 0 {
+	if c.dryRun {
 		return "", nil
 	}
-	kind, err := armsweep.GateInstanceKind(ctx, r.Client, r.ShadowTypes, c.allowLive)
+	kind, err := armsweep.StampInstanceKind(ctx, r.Client)
 	if err != nil {
+		return "", err
+	}
+	if err := armsweep.CheckInstanceKind(kind, r.ShadowTypes, c.allowLive); err != nil {
 		return kind, err
+	}
+	if len(r.ShadowTypes) == 0 {
+		return kind, nil
 	}
 	if c.allowLive && kind != armsweep.InstanceKindMeasureCopy {
 		fmt.Fprintf(os.Stderr,
@@ -278,7 +293,7 @@ func cmdScore(c *common, dumpA, dumpB, outDir, name, dampingType string) error {
 // The report is written BEFORE a refusal is propagated, the same shape `dump`
 // uses for an aborted run: a refused comparison is a finding about the
 // instrument, and the artefact is the evidence for it.
-func cmdCompare(c *common, base, cond, noisePair, outDir, name string) error {
+func cmdCompare(c *common, base, cond, noisePair, outDir, name, conditionField string) error {
 	if base == "" || cond == "" {
 		return fmt.Errorf("-dump-base und -dump-cond sind Pflicht")
 	}
@@ -303,7 +318,10 @@ func cmdCompare(c *common, base, cond, noisePair, outDir, name string) error {
 		return err
 	}
 
-	in := armsweep.CompareInput{Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp, RegimeSplit: split}
+	in := armsweep.CompareInput{
+		Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp, RegimeSplit: split,
+		ConditionField: conditionField,
+	}
 	if in.Base, err = loadDumpRef(dumps, armsweep.RoleBase, base); err != nil {
 		return err
 	}
@@ -323,7 +341,13 @@ func cmdCompare(c *common, base, cond, noisePair, outDir, name string) error {
 	}
 
 	body, cmpErr := armsweep.Compare(in)
-	if cmpErr != nil && !errors.Is(cmpErr, armsweep.ErrGateRefused) {
+	// A refusal that still carries a body is a VERDICT about the measurement
+	// (gate (b), a red noise floor): the artefact is the evidence for it and
+	// gets written. A refusal WITHOUT one — a declaration this comparison
+	// cannot honour — walked no dump at all, and writing its empty body would
+	// put a report of zeros under a green "G-NOISE bestanden" line: the silent
+	// success this wave exists to prevent (X-W3a).
+	if cmpErr != nil && (!errors.Is(cmpErr, armsweep.ErrGateRefused) || body.Version == 0) {
 		return cmpErr
 	}
 
@@ -350,9 +374,24 @@ func cmdCompare(c *common, base, cond, noisePair, outDir, name string) error {
 	if err := armsweep.WriteCompareMarkdown(mdPath, generatedAt, body); err != nil {
 		return err
 	}
-	fmt.Printf("compare: %d gepaarte Fälle, %d ungepaart, %d Slices, G-NOISE %s → %s\n",
-		body.Paired, body.UnpairedTotal, len(body.Effects), interpretable(!body.Refused), jsonPath)
+	fmt.Printf("compare: %d gepaarte Fälle, %d ungepaart, %d Slices, G-NOISE %s%s → %s\n",
+		body.Paired, body.UnpairedTotal, len(body.Effects), interpretable(!body.Refused),
+		conditionNote(body.Condition), jsonPath)
 	return cmpErr
+}
+
+// conditionNote puts the declaration into the one line an operator reads on the
+// terminal. A comparison whose basis is not the fusion must never look like one
+// that is.
+func conditionNote(d *armsweep.ConditionDeclaration) string {
+	if d == nil {
+		return ""
+	}
+	out := fmt.Sprintf(", Bedingung `%s` auf Basis `%s`", d.Field, d.Basis)
+	if !d.Applies {
+		out += " (NICHT eingetreten — Basis und Bedingung tragen denselben Wert)"
+	}
+	return out
 }
 
 // splitNoisePair parses -noise-pair. Exactly two names: the pair IS the noise

@@ -103,6 +103,43 @@ type CaseScore struct {
 	Hit5    bool    `json:"hit_5"`
 }
 
+// The two rankings a case can be measured on (wave X-W3a).
+//
+// RankingBasisFused is the offline re-fusion under a weight vector — the entire
+// construction of this instrument and the default of every report.
+//
+// RankingBasisDelivered is what the caller actually received, after gravity,
+// cluster injection, graph expansion, fold and truncation. It is not an
+// alternative view of the same thing: it is the ONLY view in which a
+// post-fusion stage exists at all (fuse.go:22-27), and it is capped at the
+// server's delivery limit, so an @10 metric computed on it is really an @len
+// metric. Reached only through a declared condition whose semantics require it
+// (compare.go, ConditionDeclaration) — never as a free-standing option, because
+// a report that quietly switched basis would compare two different questions.
+const (
+	RankingBasisFused     = "fused"
+	RankingBasisDelivered = "delivered"
+)
+
+// DeliveredIDs projects the recorded delivered window to its ranking.
+func DeliveredIDs(rec Record) []string {
+	out := make([]string, len(rec.Delivered))
+	for i := range rec.Delivered {
+		out[i] = rec.Delivered[i].ID
+	}
+	return out
+}
+
+// RankedIDs is one case's ranking on one basis. An unknown basis is the fused
+// one: the default has to be the safe direction, since it is the basis every
+// gate of this instrument was calibrated on.
+func RankedIDs(rec Record, cfg Config, basis string) []string {
+	if basis == RankingBasisDelivered {
+		return DeliveredIDs(rec)
+	}
+	return FusedIDs(Fuse(rec.Rows, cfg))
+}
+
 // ScoreCase re-fuses one dump record under one configuration and measures it.
 //
 // The ranking scored is the OFFLINE fusion, not the delivered one: that is the
@@ -110,11 +147,17 @@ type CaseScore struct {
 // delivered order is recorded in the dump and reported in the stamp, but it is
 // not what a weight vector is judged on.
 func ScoreCase(rec Record, cfg Config) CaseScore {
+	return ScoreCaseOn(rec, cfg, RankingBasisFused)
+}
+
+// ScoreCaseOn measures one case on a named ranking basis (wave X-W3a). Same
+// four metrics, same cut-offs; only the ranking they are read off changes.
+func ScoreCaseOn(rec Record, cfg Config, basis string) CaseScore {
 	gold := make(map[string]bool, len(rec.GoldIDs))
 	for _, id := range rec.GoldIDs {
 		gold[id] = true
 	}
-	ranked := FusedIDs(Fuse(rec.Rows, cfg))
+	ranked := RankedIDs(rec, cfg, basis)
 	return CaseScore{
 		Key:     rec.Key(),
 		NDCG10:  evalscore.NDCGRanked(ranked, gold, NDCGCut),
