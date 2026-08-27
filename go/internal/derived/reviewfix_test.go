@@ -28,7 +28,7 @@ import (
 func TestReviewFix1_ProvenanceStratumIsBoundToTheCheckedLevel(t *testing.T) {
 	t.Run("written level below the checked level", func(t *testing.T) {
 		facts := validFacts(26)
-		facts.Strata[srcID(7)] = StratumDerived // needs a level-2 target to pass V6
+		facts.strata[srcID(7)] = StratumDerived // needs a level-2 target to pass V6
 		tgt := validTarget()
 		tgt.Stratum = StratumSuper
 
@@ -53,7 +53,7 @@ func TestReviewFix1_ProvenanceStratumIsBoundToTheCheckedLevel(t *testing.T) {
 
 	t.Run("level 2 validates when the block says so", func(t *testing.T) {
 		facts := validFacts(26)
-		facts.Strata[srcID(7)] = StratumDerived
+		facts.strata[srcID(7)] = StratumDerived
 		tgt := validTarget()
 		tgt.Stratum = StratumSuper
 		p := validProvenance(26)
@@ -75,10 +75,10 @@ func TestReviewFix2_FactsMustAccountForEveryDeclaredSource(t *testing.T) {
 
 	t.Run("empty facts against 26 declared sources", func(t *testing.T) {
 		empty := SourceFacts{
-			Strata:      map[string]Stratum{},
-			Untrusted:   map[string]bool{},
-			Sensitivity: map[string]string{},
-			FlooredMax:  SensitivityInternal,
+			strata:      map[string]Stratum{},
+			untrusted:   map[string]bool{},
+			sensitivity: map[string]string{},
+			flooredMax:  SensitivityInternal,
 		}
 		wantClause(t, p, keptClaims(3), validTarget(), empty, "V5")
 	})
@@ -90,9 +90,9 @@ func TestReviewFix2_FactsMustAccountForEveryDeclaredSource(t *testing.T) {
 		name string
 		drop func(f *SourceFacts, id string)
 	}{
-		{"no stratum (V6 blind)", func(f *SourceFacts, id string) { delete(f.Strata, id) }},
-		{"no untrusted flag (V11 blind)", func(f *SourceFacts, id string) { delete(f.Untrusted, id) }},
-		{"no sensitivity (V13 blind)", func(f *SourceFacts, id string) { delete(f.Sensitivity, id) }},
+		{"no stratum (V6 blind)", func(f *SourceFacts, id string) { delete(f.strata, id) }},
+		{"no untrusted flag (V11 blind)", func(f *SourceFacts, id string) { delete(f.untrusted, id) }},
+		{"no sensitivity (V13 blind)", func(f *SourceFacts, id string) { delete(f.sensitivity, id) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := validFacts(26)
@@ -103,10 +103,10 @@ func TestReviewFix2_FactsMustAccountForEveryDeclaredSource(t *testing.T) {
 
 	t.Run("reported unresolvable is the legal way to carry no facts", func(t *testing.T) {
 		f := validFacts(26)
-		delete(f.Strata, srcID(7))
-		delete(f.Untrusted, srcID(7))
-		delete(f.Sensitivity, srcID(7))
-		f.MissingInScope = []string{srcID(7)}
+		delete(f.strata, srcID(7))
+		delete(f.untrusted, srcID(7))
+		delete(f.sensitivity, srcID(7))
+		f.missingInScope = []string{srcID(7)}
 		if err := Validate(p, keptClaims(3), validTarget(), f); err != nil {
 			t.Fatalf("a source reported as MissingInScope must not need facts, got %v", err)
 		}

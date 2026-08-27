@@ -103,15 +103,15 @@ func validTarget() Target {
 // validFacts builds source facts matching validProvenance(sourceCount).
 func validFacts(sourceCount int) SourceFacts {
 	f := SourceFacts{
-		Strata:      map[string]Stratum{},
-		Untrusted:   map[string]bool{},
-		Sensitivity: map[string]string{},
-		FlooredMax:  SensitivityInternal,
+		strata:      map[string]Stratum{},
+		untrusted:   map[string]bool{},
+		sensitivity: map[string]string{},
+		flooredMax:  SensitivityInternal,
 	}
 	for _, id := range srcIDs(sourceCount) {
-		f.Strata[id] = StratumSource
-		f.Untrusted[id] = false
-		f.Sensitivity[id] = SensitivityInternal
+		f.strata[id] = StratumSource
+		f.untrusted[id] = false
+		f.sensitivity[id] = SensitivityInternal
 	}
 	return f
 }

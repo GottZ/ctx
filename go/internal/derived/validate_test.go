@@ -51,7 +51,7 @@ func TestValidateAcceptsTheReferenceBlock(t *testing.T) {
 // level-1 block validates and this test fails.
 func TestGate5_ValidateRefusesLevelOneOverLevelOne(t *testing.T) {
 	facts := validFacts(26)
-	facts.Strata[srcID(7)] = StratumDerived // a level-1 source under a level-1 target
+	facts.strata[srcID(7)] = StratumDerived // a level-1 source under a level-1 target
 	wantClause(t, validProvenance(26), keptClaims(3), validTarget(), facts, "V6")
 
 	// Control: the same source set under a level-2 target is legal — the rule
@@ -78,7 +78,7 @@ func TestGate5_ValidateRefusesLevelOneOverLevelOne(t *testing.T) {
 // source passes into a trusted target and this test fails.
 func TestGate6_ValidateRefusesUntrustedSourceForTrustedTarget(t *testing.T) {
 	facts := validFacts(26)
-	facts.Untrusted[srcID(4)] = true
+	facts.untrusted[srcID(4)] = true
 	wantClause(t, validProvenance(26), keptClaims(3), validTarget(), facts, "V11")
 
 	// Control: the same source under an untrusted target type (insight,
@@ -120,7 +120,7 @@ func TestValidateClauses(t *testing.T) {
 			p.SourceDigest = "sha256:" + "00"
 		}},
 		{"V5 foreign source", "V5", func(_ *Provenance, _ *[]Claim, _ *Target, src *SourceFacts) {
-			src.ForeignOrUnknown = []string{srcID(99)}
+			src.foreignOrUnknown = []string{srcID(99)}
 		}},
 		{"V7 anchor kind unknown", "V7", func(p *Provenance, _ *[]Claim, _ *Target, _ *SourceFacts) {
 			p.Anchor.Kind = "topic"
@@ -169,7 +169,7 @@ func TestValidateClauses(t *testing.T) {
 			p.SensitivityMax = SensitivityPublic
 		}},
 		{"V13 a source is above the floored maximum", "V13", func(_ *Provenance, _ *[]Claim, _ *Target, src *SourceFacts) {
-			src.Sensitivity[srcID(2)] = SensitivityCredentials
+			src.sensitivity[srcID(2)] = SensitivityCredentials
 		}},
 		{"V14 kept claim cites an undeclared source", "V14", func(_ *Provenance, kept *[]Claim, _ *Target, _ *SourceFacts) {
 			(*kept)[1].SourceID = srcID(99)
@@ -217,7 +217,7 @@ func TestValidateAcceptsTheOtherAnchorForms(t *testing.T) {
 // the scope check into a silent swallow in the first draft.
 func TestMissingInScopeIsNotAV5Case(t *testing.T) {
 	facts := validFacts(26)
-	facts.MissingInScope = []string{srcID(9), srcID(10)}
+	facts.missingInScope = []string{srcID(9), srcID(10)}
 	if err := Validate(validProvenance(26), keptClaims(3), validTarget(), facts); err != nil {
 		t.Fatalf("MissingInScope must not fail the write, got %v", err)
 	}

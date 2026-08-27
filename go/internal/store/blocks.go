@@ -3,10 +3,12 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,10 +67,60 @@ type Block struct {
 // only re-touches source='default'), value forced to credentials. On conflict
 // it re-stamps only on a STRICT elevation (>), so an already-credentials block
 // — manual or not — is left untouched (manual stays untantastbar).
+// Derived=true = the write comes from the derived layer (design/01 §4.8.1):
+// sensitivity_source='derived', value = the folded source maximum. See the
+// field's own comment — it is the SERVER-path badge as well.
 type SensitivityWrite struct {
 	Value    backends.Sensitivity
 	Manual   bool
 	Detector bool
+
+	// Derived marks a write of the derived layer (Wissens-Ebenen W01-5). It
+	// does TWO things, and they are one decision rather than two:
+	//
+	//  1. sensitivity_source='derived' with the STRICT '>' on conflict
+	//     (§4.8.2). Not '>=' like Manual: value and source sit in the SAME
+	//     CASE expression below, so at an equal level '>=' would re-stamp
+	//     source='derived' over an existing 'manual' — a human classification
+	//     lost silently, without the value moving at all. With '>' a
+	//     regeneration that loses its credentials source lowers nothing (B6),
+	//     and manual survives.
+	//
+	//  2. It is the ARM's badge at the I7/S3 provenance guard further down
+	//     (§4.3.1). That guard is unconditional today, which is why W01-2a
+	//     wrote "the arm has to declare itself here when it lands" into it.
+	//     This is that declaration. Its scope is exactly the arm's own need:
+	//     rewrite a block that already carries a provenance, and re-create one
+	//     whose identity is held by an ARCHIVED provenance block (§4.7.5 makes
+	//     revival a fresh upsert, never is_archived=false, so without the
+	//     second half an archived derivative would be a permanent tombstone on
+	//     its own title).
+	//
+	// It is NOT client-reachable and must not become so. Three properties carry
+	// that, and the first version of this comment named the wrong one: it said
+	// "it carries no json tag", which is the OPPOSITE of a protection —
+	// encoding/json decodes an exported field WITHOUT a tag under its own name,
+	// case-insensitively, so `{"derived":true}` set it (W01-5 review #3a).
+	// The properties that actually hold:
+	//
+	//  1. `json:"-"` — the only spelling that makes the field invisible to both
+	//     Unmarshal and Marshal.
+	//  2. Nothing decodes into a SensitivityWrite anywhere in the tree. The
+	//     staged, HASH-BOUND payload is store.CanonicalWrite, which has no
+	//     counterpart field, and the handlers build Value/Manual/Detector by
+	//     hand (storeSensitivity, confirm_core).
+	//  3. No production package outside internal/store sets it, in any form —
+	//     composite key or assignment.
+	//
+	// resolve_sources_pin_test.go pins all three; (3) is checked over the parsed
+	// syntax tree, not by grepping for a literal.
+	//
+	// Detector wins over Derived for the SOURCE value: a scanner hit is a
+	// statement about this block's content, the fold is a statement about its
+	// sources, and the content is the sharper evidence. The badge in (2) is
+	// unaffected — who writes does not change because what was written scanned
+	// positive.
+	Derived bool `json:"-"`
 }
 
 // sensRankSQL renders the sensitivity rank of a SQL expression — must mirror
@@ -247,6 +299,182 @@ func ProvenanceClaimed(ctx context.Context, q rowQuerier, category, title, scope
 	return claimed, nil
 }
 
+// provenanceIdentity is WHO a derivative belongs to: the arm that produced it
+// and the level it was produced at (§3.2 `arm` and `stratum`).
+//
+// It exists because the badge alone said nothing about ownership. W01-5's first
+// version let any badged write take over any provenance row — a second arm
+// could claim the first one's (category, title, scope), and "whoever writes
+// last wins" would have been the semantics the moment D-02 and D-03 both ran
+// (review finding #2). Both fields are compared as TEXT: the stratum is read
+// out of JSON, where a non-numeric value is representable, and a ::int cast on
+// that path would answer 22P02 instead of a contract refusal.
+type provenanceIdentity struct {
+	arm     string
+	stratum string
+}
+
+// named reports whether the identity is usable as one. An empty arm is NOT: two
+// unnamed derivatives would compare equal, and the whole point of the pair is
+// that they do not. §3.2 makes `arm` a field of every provenance, so this asks
+// the writer for nothing new — it only stops treating "absent" as "matches".
+func (p provenanceIdentity) named() bool { return p.arm != "" }
+
+// writeProvenanceIdentity extracts the identity from the metadata the caller is
+// about to write. It goes through derived.Provenance rather than reading the
+// map by hand, which makes the contract version a precondition of the badge:
+// UnmarshalJSON refuses anything that is not ContractVersion (§3.2 "Decode
+// lehnt Unbekanntes ab"), so a struct from another build cannot pass here.
+//
+// ok=false is the fail-closed answer for every shape that is not a v=1
+// provenance — absent key, wrong version, unparseable — and the guard turns it
+// into ErrProvenanceProtected.
+func writeProvenanceIdentity(metadata map[string]any) (provenanceIdentity, bool) {
+	raw, present := metadata[derived.MetadataKey]
+	if !present {
+		return provenanceIdentity{}, false
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return provenanceIdentity{}, false
+	}
+	var p derived.Provenance
+	if err := json.Unmarshal(encoded, &p); err != nil {
+		return provenanceIdentity{}, false
+	}
+	return provenanceIdentity{arm: p.Arm, stratum: strconv.Itoa(int(p.Stratum))}, true
+}
+
+// foreignProvenanceClaim reports whether the upsert identity is claimed — live
+// or ARCHIVED — by a derivative that does NOT belong to the given writer.
+//
+// It is the revival half of the ownership binding. §4.7.5 archives a derivative
+// whose topic died and forbids reviving it with is_archived=false (B11: that
+// collides on the partial unique index), so revival is a fresh upsert; without
+// this probe the fresh upsert would let ANY arm take a title that another arm's
+// archived block still holds. The predicate is ProvenanceClaimed's, plus the
+// identity mismatch — same GIN-served leading term, same scale properties.
+func foreignProvenanceClaim(ctx context.Context, q rowQuerier, category, title, scope string, id provenanceIdentity) (bool, error) {
+	var claimed bool
+	if err := q.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM context_blocks
+		    WHERE metadata ? '`+derived.MetadataKey+`'
+		      AND category = $1 AND title = $2 AND scope = $3
+		      AND NOT (COALESCE(metadata->'`+derived.MetadataKey+`'->>'arm', '') = $4
+		           AND COALESCE(metadata->'`+derived.MetadataKey+`'->>'stratum', '') = $5)
+		 )`, category, title, scope, id.arm, id.stratum).Scan(&claimed); err != nil {
+		return false, fmt.Errorf("store: foreign provenance claim probe: %w", err)
+	}
+	return claimed, nil
+}
+
+// guardProvenanceClaim is I7 / S3 (design D-01 §4.3.1, §5.2 B14) for one
+// upsert, both halves, and the ONE place the derived layer's server-path badge
+// opens it.
+//
+// It is refused HERE rather than in the handlers because the caller's pre-read
+// holds the conflicting row under FOR UPDATE: the check and the write are one
+// transaction, so there is no window between them. A guard at the client call
+// sites would have that window and would have to be repeated at the next
+// surface — there are seven (W01-2a review finding #1).
+//
+// derivedWriter is SensitivityWrite.Derived, and this is the declaration W01-2a
+// asked for when it wrote "the arm has to declare itself here when it lands"
+// into the unconditional guard. The seam stayed a seam: it is still
+// unconditional for every caller without the badge, and the badge is a Go
+// struct field no request body can reach (see SensitivityWrite.Derived for the
+// properties that keep it server-side, all pinned in
+// resolve_sources_pin_test.go). Why the arm needs it: a derivative is
+// regenerated by upserting on its own (category, title, scope) identity (§4.7.2
+// — regeneration is an upsert, not a supersede), so without the badge the
+// second run of every arm would die on its own first run's provenance.
+//
+// THE BADGE IS NOT A BYPASS, and W01-5's first version made it one in two ways
+// the review found:
+//
+//   - #1: the badge did not require the write to carry a provenance of its own.
+//     The ON CONFLICT clause replaces metadata WHOLESALE (there is no merge), so
+//     a badged write with empty metadata DELETED the target's provenance — and
+//     from that moment the title was client-writable again, because S3 hangs on
+//     `metadata ? 'provenance'`. One aborted arm run reopened B14; no attacker
+//     needed. A badged write must therefore name itself.
+//   - #2: the badge opened EVERY provenance row, not the writer's own. D-02 and
+//     D-03 are two arms. The identity pair (arm, stratum) is the minimal binding
+//     that makes "a derivative it owns" a statement about the code rather than
+//     about the documentation.
+//
+// Both halves of S3 are opened, and both are bound:
+//
+//   - the CONFLICT path, answered by the locked row itself;
+//   - the INSERT path, which has to see ARCHIVED rows: the unique index behind
+//     the ON CONFLICT target is partial on NOT is_archived, so archiving a
+//     derivative frees its identity and an unguarded write would create a fresh
+//     block wearing it (W01-2a review finding #5). §4.7.5 archives a derivative
+//     whose topic died or whose source set fell below MinSourceCount and
+//     forbids reviving it with is_archived=false (B11), so revival is a new
+//     upsert and an arm locked out here would be locked out of its own title
+//     forever, by its own archived block.
+//
+// What it deliberately does NOT do: bind the CONTENT of the provenance beyond
+// the identity pair, or check that the writer is entitled to the arm name it
+// claims. The arm name is trusted the way this layer trusts its caller for
+// sensitivity levels and type names — it is a server-path value, and the badge
+// that carries it is unreachable from any client.
+//
+// The client form of the very same write stays refused:
+// handler/derived_write_lock_integration_test.go j_S3_Upsert/k_S3_Update answer
+// 403 provenance_protected across the surfaces, and W01-5 adds the direct pair
+// — same category, title and scope, once with the badge (accepted) and once
+// without (refused) — in handler/derived_server_path_integration_test.go.
+func guardProvenanceClaim(ctx context.Context, tx pgx.Tx, sens SensitivityWrite, metadata map[string]any,
+	hadRow, hadProvenance bool, existing provenanceIdentity, category, title, scope string,
+) error {
+	if !sens.Derived {
+		return guardUnbadged(ctx, tx, hadRow, hadProvenance, category, title, scope)
+	}
+	writer, ok := writeProvenanceIdentity(metadata)
+	if !ok || !writer.named() {
+		// #1: a badged write that names no v=1 provenance is treated exactly
+		// like any other caller. It cannot strip what it does not carry.
+		return guardUnbadged(ctx, tx, hadRow, hadProvenance, category, title, scope)
+	}
+	if hadRow {
+		if hadProvenance && existing != writer {
+			return ErrProvenanceProtected
+		}
+		return nil
+	}
+	claimed, err := foreignProvenanceClaim(ctx, tx, category, title, scope, writer)
+	if err != nil {
+		return err
+	}
+	if claimed {
+		return ErrProvenanceProtected
+	}
+	return nil
+}
+
+// guardUnbadged is S3 as every caller without the badge sees it — unchanged
+// since W01-2a, and the answer a badged write falls back to when it names no
+// provenance of its own.
+func guardUnbadged(ctx context.Context, tx pgx.Tx, hadRow, hadProvenance bool, category, title, scope string) error {
+	if hadRow {
+		if hadProvenance {
+			return ErrProvenanceProtected
+		}
+		return nil
+	}
+	claimed, err := ProvenanceClaimed(ctx, tx, category, title, scope)
+	if err != nil {
+		return err
+	}
+	if claimed {
+		return ErrProvenanceProtected
+	}
+	return nil
+}
+
 // UpsertBlock inserts or updates a block by (category, title).
 // content_hash is a GENERATED COLUMN and must not be set manually.
 // If scopeExplicit is true, scope is included in the ON CONFLICT UPDATE.
@@ -311,18 +539,21 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 			source = "pattern"
 		case sens.Manual:
 			source = "manual"
+		case sens.Derived:
+			source = "derived"
 		}
 		insertCols += ", sensitivity, sensitivity_source"
 		insertVals += ", $7, $8"
 		args = append(args, string(sens.Value), source)
-		if sens.Manual || sens.Detector {
+		if sens.Manual || sens.Detector || sens.Derived {
 			// Upgrade-only on conflict: a write-path downgrade would bypass the
 			// confirm-gated update path (F3 §3.5). Manual uses >= (re-asserting
 			// the same level re-stamps source='manual'); the pattern detector
-			// uses strict > so it re-stamps only on a real elevation and never
-			// flips an already-credentials block's source (manual stays intact).
+			// and the derived fold use strict > so they re-stamp only on a real
+			// elevation and never flip an already-credentials block's source
+			// (manual stays intact — design/01 §4.8.2).
 			op := ">="
-			if sens.Detector {
+			if sens.Detector || sens.Derived {
 				op = ">"
 			}
 			upgrades := fmt.Sprintf("%s %s %s",
@@ -393,53 +624,29 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	// later call), so there is nothing stale to clear in that window.
 	var oldContent string
 	var hadProvenance bool
+	var existing provenanceIdentity
 	hadRow := true
+	// The identity columns ride along on the row this SELECT already locks — no
+	// extra query, and they are read as TEXT (see provenanceIdentity for why a
+	// ::int cast on the stratum would be an availability bug, not a check).
 	if err := tx.QueryRow(ctx,
-		`SELECT content, metadata ? '`+derived.MetadataKey+`' FROM context_blocks
+		`SELECT content,
+		        metadata ? '`+derived.MetadataKey+`',
+		        COALESCE(metadata->'`+derived.MetadataKey+`'->>'arm', ''),
+		        COALESCE(metadata->'`+derived.MetadataKey+`'->>'stratum', '')
+		   FROM context_blocks
 		 WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
 		 FOR UPDATE`,
 		category, title, scope,
-	).Scan(&oldContent, &hadProvenance); err != nil {
+	).Scan(&oldContent, &hadProvenance, &existing.arm, &existing.stratum); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("store: upsert block: pre-read: %w", err)
 		}
 		hadRow = false
 	}
 
-	// I7 / S3 (design D-01 §4.3.1, §5.2 B14): the conflicting row carries a
-	// provenance object, so this upsert would replace a derivative's content
-	// AND its metadata — the whole provenance — through an identity that is
-	// three free strings. It is refused HERE rather than in the handlers
-	// because this pre-read holds the row under FOR UPDATE: the check and the
-	// write are one transaction, so there is no window between them. A guard at
-	// the five client call sites would have that window and would have to be
-	// repeated at the sixth.
-	//
-	// Deliberately unconditional, and deliberately a SEAM rather than a
-	// bypass: today NO writer in this tree puts a provenance object into
-	// metadata (live count: 0 blocks with the key), so the refusal cannot reach
-	// digest, dream, rootmap or ingest. The arm that will write derivatives
-	// (D-02/D-03, waves after W01-5) is the one caller that must legitimately
-	// rewrite its own block on the next run — §4.3.1 gives it the OTHER half of
-	// S3 ("der Arm-Upsert trägt einen Provenienz-Guard"), and it has to declare
-	// itself here when it lands. Fail-closed until then: an unknown writer that
-	// reaches a provenance block is refused, not admitted.
-	if hadRow && hadProvenance {
-		return nil, ErrProvenanceProtected
-	}
-	// The INSERT path needs its own look, and it has to see ARCHIVED rows: the
-	// unique index behind the ON CONFLICT target is partial on NOT is_archived,
-	// so archiving a derivative frees its identity and this write would create a
-	// fresh block wearing it (review finding #5). Only on this path — the
-	// conflict path was just answered above by the locked row itself.
-	if !hadRow {
-		claimed, err := ProvenanceClaimed(ctx, tx, category, title, scope)
-		if err != nil {
-			return nil, err
-		}
-		if claimed {
-			return nil, ErrProvenanceProtected
-		}
+	if err := guardProvenanceClaim(ctx, tx, sens, metadata, hadRow, hadProvenance, existing, category, title, scope); err != nil {
+		return nil, err
 	}
 
 	b := &Block{}

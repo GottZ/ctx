@@ -28,37 +28,129 @@ type Target struct {
 // DB-facing half of the contract can produce (store.ResolveSources, §4.5.4,
 // wave W01-5). They are handed in rather than fetched, because derived is a
 // leaf package that must not import store.
+//
+// EVERY field is unexported, and that is the mechanism rather than a style
+// choice — it is the structural half of W01-1 review note N4.
+//
+// N4 says: MissingInScope and ForeignOrUnknown must not be caller CLAIMS,
+// because checkFactsCoverDeclared accepts "reported unresolvable" as the legal
+// way to carry no facts. A caller who declares every source missing therefore
+// switches V6, V11 and the monotonicity half of V13 off, while FlooredMax stays
+// correct and the first V13 clause still passes. W01-5's first version answered
+// that with a text pin over `SourceFacts{` and `.FlooredMax =` — and its review
+// walked straight past it: a production file that MUTATES a fact set
+// (`f.MissingInScope = append(…)`, `delete(f.Strata, id)`) needs neither of
+// those spellings, and both pins stayed green.
+//
+// So the fields are closed instead of watched. Outside this package the only
+// way to obtain a populated SourceFacts is NewSourceFacts, which copies every
+// map and slice it is given; the accessors hand out copies too, so a consumer
+// cannot reach back into the resolve result. Inside this package the fields
+// stay directly addressable — the V-clause tests build and mutate them on
+// purpose, and they are the code that is under test.
+//
+// One producer remains the rule (store.ResolveSources), and it is pinned over
+// the syntax tree at store/resolve_sources_pin_test.go. NewSourceFacts is what
+// that pin now watches: one call site instead of five field spellings.
 type SourceFacts struct {
-	// Strata is the resolved level per source id (V6).
-	Strata map[string]Stratum
+	// strata is the resolved level per source id (V6).
+	strata map[string]Stratum
 
-	// Untrusted is retrieval.untrusted of each source's TYPE (V11). It falls
+	// untrusted is retrieval.untrusted of each source's TYPE (V11). It falls
 	// out of the registry snapshot ResolveSources already reads, without a
 	// second query.
-	Untrusted map[string]bool
+	untrusted map[string]bool
 
-	// Sensitivity is the raw per-source sensitivity (V13's monotonicity half).
-	Sensitivity map[string]string
+	// sensitivity is the raw per-source sensitivity (V13's monotonicity half).
+	sensitivity map[string]string
 
-	// FlooredMax is config.ScopeFloor.Apply(max(sensitivity(sources)), scope)
+	// flooredMax is config.ScopeFloor.Apply(max(sensitivity(sources)), scope)
 	// — computed by the caller, because ScopeFloor lives in internal/config
 	// and derived may not import it. Validate re-checks that this value really
 	// is at or above the raw maximum, so the floor's raise-only property is
 	// verified here even though it is applied elsewhere.
-	FlooredMax string
+	flooredMax string
 
-	// ForeignOrUnknown are declared sources that resolve in a FOREIGN scope or
+	// foreignOrUnknown are declared sources that resolve in a FOREIGN scope or
 	// nowhere at all. V5, fail-closed: the write dies (B7).
-	ForeignOrUnknown []string
+	foreignOrUnknown []string
 
-	// MissingInScope are declared sources that are provably archived or gone
+	// missingInScope are declared sources that are provably archived or gone
 	// in the OWN scope. Explicitly NOT a V5 case (§4.5.4): the arm drops them,
 	// sources_covered falls, and the run continues. Kept in the struct so the
 	// distinction is visible at the type and cannot collapse back into one
 	// "missing" set — that collapse is what turned the scope check B7 into a
 	// silent swallow in the first draft.
-	MissingInScope []string
+	missingInScope []string
 }
+
+// NewSourceFacts is the ONE way to build a populated SourceFacts from outside
+// this package. Every map and slice is COPIED, so the resolve result the caller
+// keeps and the facts the validator sees cannot drift apart afterwards — not by
+// a later append, not by a delete on a shared map.
+//
+// It takes no responsibility for the CONTENT being a real resolution: that is
+// what the one-producer pin in store is for. What it guarantees is that the
+// content cannot change after the fact.
+func NewSourceFacts(
+	strata map[string]Stratum,
+	untrusted map[string]bool,
+	sensitivity map[string]string,
+	flooredMax string,
+	missingInScope, foreignOrUnknown []string,
+) SourceFacts {
+	f := SourceFacts{
+		strata:           make(map[string]Stratum, len(strata)),
+		untrusted:        make(map[string]bool, len(untrusted)),
+		sensitivity:      make(map[string]string, len(sensitivity)),
+		flooredMax:       flooredMax,
+		missingInScope:   append([]string(nil), missingInScope...),
+		foreignOrUnknown: append([]string(nil), foreignOrUnknown...),
+	}
+	for id, s := range strata {
+		f.strata[id] = s
+	}
+	for id, u := range untrusted {
+		f.untrusted[id] = u
+	}
+	for id, s := range sensitivity {
+		f.sensitivity[id] = s
+	}
+	return f
+}
+
+// FlooredMax is the floored source maximum (§4.8.1a) — one value, three uses
+// (the written column, provenance.sensitivity_max, ChainCall.Required).
+func (f SourceFacts) FlooredMax() string { return f.flooredMax }
+
+// MissingInScope returns a copy of the droppable set (§4.7.5 case 1).
+func (f SourceFacts) MissingInScope() []string { return append([]string(nil), f.missingInScope...) }
+
+// ForeignOrUnknown returns a copy of the fail-closed set (V5, B7).
+func (f SourceFacts) ForeignOrUnknown() []string {
+	return append([]string(nil), f.foreignOrUnknown...)
+}
+
+// StratumOf reports the resolved level of one source (V6's input).
+func (f SourceFacts) StratumOf(id string) (Stratum, bool) {
+	s, ok := f.strata[id]
+	return s, ok
+}
+
+// IsUntrusted reports retrieval.untrusted of one source's TYPE (V11's input).
+func (f SourceFacts) IsUntrusted(id string) (bool, bool) {
+	u, ok := f.untrusted[id]
+	return u, ok
+}
+
+// SensitivityOf reports the raw sensitivity of one source (V13's input).
+func (f SourceFacts) SensitivityOf(id string) (string, bool) {
+	s, ok := f.sensitivity[id]
+	return s, ok
+}
+
+// Len is the number of sources that carry facts.
+func (f SourceFacts) Len() int { return len(f.sensitivity) }
 
 // ViolationError names the violated clause. Typed so a caller (and a test) can
 // assert WHICH check fired instead of matching on message text.
@@ -143,7 +235,7 @@ func checkContract(p Provenance) error {
 // checkSources covers V5 (foreign or unresolvable sources kill the write, and
 // the declared set must be fully accounted for) and V12 (the source-set floor).
 func checkSources(p Provenance, src SourceFacts) error {
-	if n := len(src.ForeignOrUnknown); n > 0 {
+	if n := len(src.foreignOrUnknown); n > 0 {
 		return fail("V5", "%d source(s) resolve in a foreign scope or nowhere", n)
 	}
 	if p.SourceCount < MinSourceCount {
@@ -167,24 +259,24 @@ func checkSources(p Provenance, src SourceFacts) error {
 // closed, in the V5 class: the write dies rather than validating a source set
 // nobody looked at.
 func checkFactsCoverDeclared(p Provenance, src SourceFacts) error {
-	unresolvable := make(map[string]struct{}, len(src.MissingInScope)+len(src.ForeignOrUnknown))
-	for _, id := range src.MissingInScope {
+	unresolvable := make(map[string]struct{}, len(src.missingInScope)+len(src.foreignOrUnknown))
+	for _, id := range src.missingInScope {
 		unresolvable[id] = struct{}{}
 	}
-	for _, id := range src.ForeignOrUnknown {
+	for _, id := range src.foreignOrUnknown {
 		unresolvable[id] = struct{}{}
 	}
 	for _, id := range p.SourceBlockIDs {
 		if _, gone := unresolvable[id]; gone {
 			continue
 		}
-		if _, ok := src.Strata[id]; !ok {
+		if _, ok := src.strata[id]; !ok {
 			return fail("V5", "declared source %s carries no stratum and is not reported unresolvable", id)
 		}
-		if _, ok := src.Untrusted[id]; !ok {
+		if _, ok := src.untrusted[id]; !ok {
 			return fail("V5", "declared source %s carries no untrusted flag and is not reported unresolvable", id)
 		}
-		if _, ok := src.Sensitivity[id]; !ok {
+		if _, ok := src.sensitivity[id]; !ok {
 			return fail("V5", "declared source %s carries no sensitivity and is not reported unresolvable", id)
 		}
 	}
@@ -220,7 +312,7 @@ func checkStrata(p Provenance, t Target, src SourceFacts) error {
 		return fail("V6", "provenance.stratum=%d is not a derived level (%d or %d)",
 			p.Stratum, StratumDerived, StratumSuper)
 	}
-	for id, s := range src.Strata {
+	for id, s := range src.strata {
 		if s >= t.Stratum {
 			return fail("V6", "source %s has stratum %d, target stratum is %d", id, s, t.Stratum)
 		}
@@ -363,23 +455,23 @@ func checkSensitivity(p Provenance, t Target, src SourceFacts) error {
 	if _, ok := sensitivityRank[p.SensitivityMax]; !ok {
 		return fail("V10", "sensitivity_max %q is not one of credentials|personal|internal|public", p.SensitivityMax)
 	}
-	if t.Required != src.FlooredMax {
-		return fail("V13", "call.Required=%q but floored source maximum is %q", t.Required, src.FlooredMax)
+	if t.Required != src.flooredMax {
+		return fail("V13", "call.Required=%q but floored source maximum is %q", t.Required, src.flooredMax)
 	}
-	if p.SensitivityMax != src.FlooredMax {
-		return fail("V13", "sensitivity_max=%q but floored source maximum is %q", p.SensitivityMax, src.FlooredMax)
+	if p.SensitivityMax != src.flooredMax {
+		return fail("V13", "sensitivity_max=%q but floored source maximum is %q", p.SensitivityMax, src.flooredMax)
 	}
-	floored, ok := sensitivityRank[src.FlooredMax]
+	floored, ok := sensitivityRank[src.flooredMax]
 	if !ok {
-		return fail("V13", "floored source maximum %q is not a sensitivity level", src.FlooredMax)
+		return fail("V13", "floored source maximum %q is not a sensitivity level", src.flooredMax)
 	}
-	for id, s := range src.Sensitivity {
+	for id, s := range src.sensitivity {
 		r, ok := sensitivityRank[s]
 		if !ok {
 			return fail("V13", "source %s carries sensitivity %q", id, s)
 		}
 		if r > floored {
-			return fail("V13", "source %s is %q, above the floored maximum %q", id, s, src.FlooredMax)
+			return fail("V13", "source %s is %q, above the floored maximum %q", id, s, src.flooredMax)
 		}
 	}
 	return nil
@@ -398,7 +490,7 @@ func checkUntrusted(t Target, src SourceFacts) error {
 	if t.Untrusted {
 		return nil
 	}
-	for id, u := range src.Untrusted {
+	for id, u := range src.untrusted {
 		if u {
 			return fail("V11", "source %s is untrusted but the target type is not", id)
 		}
