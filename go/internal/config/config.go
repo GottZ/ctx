@@ -1759,6 +1759,34 @@ type DistillConfig struct {
 	// (381 min); much above ~60 min the gate would never fire in a continuous
 	// session.
 	CtxQuietFor time.Duration `key:"distill.ctx_quiet_for" env:"CTX_DISTILL_CTX_QUIET_FOR" default:"1800" mut:"hot" tenancy:"global-only"`
+	// CtxSessionHorizon caps the ctx source's CANDIDATE aggregation to roots
+	// whose newest manifest falls inside this window, in SECONDS. It is the
+	// arm's half of a reader option (ctxcheckpoint.Options.SessionHorizon):
+	// A02-4 deliberately shipped the reader's other values without this one,
+	// because the reader reads no configuration — the arm hands it every value
+	// (F1 layering rule), and the key belongs to the wave that wires them.
+	//
+	// It exists because the candidate query is the one query of this source
+	// whose cost tracks the corpus rather than the session: GROUP BY … ORDER BY
+	// max(created_at) DESC LIMIT n has no skip-scan behaviour in PostgreSQL, so
+	// without a window it degenerates into a recurring full scan as the
+	// checkpoint corpus grows — and that corpus has no retention path.
+	//
+	// 30 days, and the number is a measured margin rather than a round one: on
+	// a one-million-row fixture derived from the live ingest rate (140.1
+	// checkpoint blocks/day) the planner's crossover sits between 1.26 % and
+	// 0.42 % selectivity, and the 30-day window selects 0.42 % — the first
+	// value below the crossover, where the plan switches to idx_context_created
+	// and the cost falls by two orders of magnitude (A02-3 gate, measured
+	// series). What the cap buys therefore depends on the ingest RATE, not on
+	// the row count. 0 means no cap and is legal: it is the pre-horizon
+	// behaviour and the honest setting for a corpus small enough not to need
+	// one.
+	//
+	// THE COST IS EXPLICIT: a root whose newest manifest is older than the
+	// window disappears from the CANDIDATE list. Reading it still works — Head,
+	// HasNew and Read take a session id and never consult the horizon.
+	CtxSessionHorizon time.Duration `key:"distill.ctx_session_horizon" env:"CTX_DISTILL_CTX_SESSION_HORIZON" default:"2592000" mut:"hot" tenancy:"global-only"`
 
 	// ── Cadence and gates (§4.2) ───────────────────────────────────────────
 	//

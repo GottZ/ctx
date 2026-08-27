@@ -147,6 +147,15 @@ type Scheduler struct {
 	// without a database (the dreamCycleFunc/classify seam pattern).
 	backgroundTenantsFn func(ctx context.Context) []backgroundTenant
 
+	// distillSource builds the distiller arm's reader for one tick (A02-5,
+	// design/02 §4.8). nil is production: newDistillSource then constructs a
+	// ctxcheckpoint reader over this pool from the hot config. The gate suite
+	// substitutes a source it can steer — one that fails, that reports no new
+	// material, or whose head fell below the stored watermark — because those
+	// three answers would otherwise need a database that misbehaves on command.
+	// Same seam shape as dreamCycleFunc and backgroundTenantsFn.
+	distillSource distillSourceBuilder
+
 	// Dream mode control (atomic for lock-free reads in hot loop).
 	dreamMode             atomic.Int32 // DreamModeOn | DreamModeThrottled | DreamModeOff
 	dreamThrottleInterval atomic.Int64 // nanoseconds; 0 = dreamThrottleDefault
@@ -168,6 +177,19 @@ type Scheduler struct {
 	// overview stamps from /api/status without a compile error (the armRunSource
 	// trap). W01-4 asserts its own narrow recallRunSource interface.
 	lastRecallNs atomic.Int64
+	// lastDistillNs is the ADDITIVE A02-5 stamp, in the lastRecallNs cut and for
+	// the same reason: its own narrow LastDistillRun() method, never folded into
+	// LastArmRuns() (the armRunSource trap above).
+	//
+	// The distiller needs it more than the arms above do, and that is why it is
+	// here rather than deferred: this arm has one state that writes NO journal
+	// row on purpose — enabled, scope resolved, candidate list empty (a wrong
+	// distill.checkpoint_category, or a scope holding no checkpoints). Writing a
+	// row there would key it on a session that does not exist. So the stamp is
+	// the only thing separating "reaching the source, finding nothing" from "not
+	// running at all", and without it that pair is indistinguishable from
+	// outside the process.
+	lastDistillNs atomic.Int64
 
 	// Cluster-map freshness (Cluster-Topic-Map C4, design/03 §4.7): the
 	// process-local per-scope graph_overview_meta.computed_at, so the retrieval
@@ -313,6 +335,25 @@ func (s *Scheduler) LastArmRuns() (guard, digest, overview time.Time) {
 // that feeds guard/digest/overview into /api/status — stays untouched.
 func (s *Scheduler) LastRecallRun() time.Time {
 	return nsToTime(s.lastRecallNs.Load())
+}
+
+// LastDistillRun returns the last-run wall-clock time of the A02-5 distiller arm.
+// Zero time.Time = no tick reached the source this process — either the arm is
+// disabled or a gate stopped every tick, and the two are told apart by the
+// journal, not by this stamp.
+//
+// Stamped PAST the gates (distill.go), the guard/digest/recall discipline: a
+// deferred tick does not advance it, so the age of the stamp is the real gap.
+// A SEPARATE method for the documented armRunSource reason — folding it into
+// LastArmRuns would silently drop the guard/digest/overview stamps from
+// /api/status without a compile error.
+//
+// No /api/status projection yet: that surface is a wire shape with its own
+// admin gating (handler/status.go:55-65 shows the recall precedent), and it
+// belongs to the wave that gives this arm an operator surface. The method is the
+// half A02-5 owes.
+func (s *Scheduler) LastDistillRun() time.Time {
+	return nsToTime(s.lastDistillNs.Load())
 }
 
 // nsToTime converts a stored unix-nano stamp to wall-clock time; 0 → zero time.
@@ -719,6 +760,15 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// expensive strata on the off-peak hour — with per-run config snapshot,
 	// mid-run demand park and touch/time budget rotation.
 	go s.runRecallCheck(ctx)
+
+	// Achse A02 wave A02-5: the distiller arm (design/02 §4.8). Own goroutine
+	// for the runTopicLabeling reason — a distill run is minutes of sequential
+	// inference once A02-8 lands, and a ticker case would hold this select and
+	// with it guard and digest (BA10). Inert while distill.enabled or
+	// distill.ctx_enabled is false, which is the default for both; the startup
+	// sweep runs first regardless, because an orphaned running row hides its own
+	// watermark from the derivation.
+	go s.runDistiller(ctx)
 
 	for {
 		select {

@@ -1,0 +1,653 @@
+// distill.go — the distiller arm over ctx's own compaction checkpoints
+// (design/02 §4.5 + §4.8, wave A02-5). This is the SKELETON: cadence, gates,
+// journal and startup sweep. There is no selection, no LLM call, no spend guard
+// and no block write in it — those are A02-6/7/8/9, and each of them fills a
+// place this file deliberately leaves open.
+//
+// OWN GOROUTINE, never a case in Run's central select. The reason is the one
+// runTopicLabeling writes out (scheduler.go:706-707): once A02-8 lands, one
+// tick is minutes of sequential inference, and a ticker arm would hold the
+// select that also drives guard and digest. BA10 probes exactly that.
+//
+// THE JOURNAL IS THE ONLY STATE. The watermark of a source is
+// max(watermark_to) over its non-running rows (135_distill_run.sql:29-42); the
+// "same reason as last tick?" decision reads the newest row of the same
+// source_key; the startup sweep re-derives both after a crash. Nothing here
+// lives in a struct field, and that is the migration's own contract: "Es gibt
+// keine zweite Zustandsquelle — kein Settings-Key, keine _state-Zeile, keine
+// Datei" (135:42).
+//
+// THE ERROR MAPPING IS THIS FILE'S JOB. internal/distillsource carries four
+// sentinels, migration 135 carries two CHECK-enforced vocabularies, and they do
+// not line up: source_unavailable is no error class at all but a skip, and a
+// driver's own text must never reach a persisted field (135:131-135). This file
+// is the only place the two meet, which is why the class strings are constants
+// here rather than in the contract package.
+//
+// Source: https://github.com/GottZ/ctx
+package events
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"runtime/debug"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/distillsource"
+	"github.com/GottZ/ctx/internal/distillsource/ctxcheckpoint"
+	"github.com/GottZ/ctx/internal/store"
+)
+
+// The journal's skip vocabulary, verbatim from dr_skip_reason_known
+// (135_distill_run.sql:151-155). Only the reasons this wave can produce are
+// named; budget/breaker/session_live belong to A02-7/8/10.
+const (
+	distillSkipSourceUnreachable = "source_unreachable"
+	distillSkipNoNewRows         = "no_new_rows"
+	distillSkipDemand            = "demand"
+	distillSkipScopeForbidden    = "scope_forbidden"
+	//nolint:gosec // G101 false positive: a skip-reason CLASS from the journal's dr_skip_reason_known CHECK, not a credential value (webhookSecretPrefix precedent).
+	distillSkipWatermarkRegression = "watermark_regression"
+)
+
+// The journal's error vocabulary, verbatim from dr_error_class_known
+// (135_distill_run.sql:156-159). A value outside this set is refused by the
+// CHECK, which is the enforcement of "only a class, never foreign text".
+const (
+	distillErrQueryFailed     = "query_failed"
+	distillErrSchemaUntrusted = "schema_untrusted"
+	distillErrDaemonRestart   = "daemon_restart"
+)
+
+// The outcomes this wave writes, from dr_outcome_known (135:146-148).
+const (
+	distillOutcomeRunning = "running"
+	distillOutcomePartial = "partial"
+	distillOutcomeSkipped = "skipped"
+	distillOutcomeFailed  = "failed"
+	distillOutcomeKilled  = "killed"
+)
+
+// distillForbiddenScope is the one scope name gate 5 refuses outright, and it
+// is refused even when the operator owns it. V22 (config/validate.go:118-122)
+// covers the EXPLICITLY configured half with a 422; this is the inherited half
+// the validator names as missing in its own comment — scheduler.home_scope
+// resolving to shared would carry foreign transcript content across the tenant
+// border without anyone having configured it.
+const distillForbiddenScope = "shared"
+
+// distillDefaultInterval clamps a non-positive distill.interval, matching
+// recallInterval's shape (recall_check.go:105-110).
+const distillDefaultInterval = 15 * time.Minute
+
+// distillSourceBuilder is the reader seam (dreamCycleFunc / backgroundTenantsFn
+// pattern): production builds a ctxcheckpoint reader over the daemon pool, the
+// gate suite substitutes a source it can steer — a source that fails, that has
+// no new material, or that regresses below the stored watermark. Without the
+// seam those three gates would need a database that misbehaves on command.
+type distillSourceBuilder func(cfg *config.Config, scope string) (distillsource.Source, error)
+
+// runDistiller is the distiller goroutine (§4.8). It owns its cadence; there is
+// no boot run (topic_label.go pattern) and no wall-clock anchor — compaction is
+// event-driven, and a night window would mean the insights of a working session
+// reach the corpus after the context cut they exist for.
+func (s *Scheduler) runDistiller(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in distiller", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+
+	// BEFORE the first tick, and a correctness condition rather than hygiene
+	// (§4.5.5): the derivation excludes running rows, so an orphan left by a
+	// killed daemon hides its own watermark_to — the arm would re-process a
+	// range whose insights are already durable. Unconditional over every
+	// source_key, because at boot no run of THIS process can be live and the
+	// journal has exactly one writer.
+	s.distillStartupSweep(ctx)
+	slog.Info("scheduler: distiller arm started")
+
+	for {
+		cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: every distill.* key is tenancy:global-only (config.go:1699-2021) — the arm reads one operator's session material and writes into exactly one scope (§4.8).
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(distillInterval(cfg.Distill.Interval)):
+		}
+		s.distillOnce(ctx, s.interactiveDemand)
+	}
+}
+
+// distillInterval clamps a non-positive interval to the 15-minute default.
+func distillInterval(d time.Duration) time.Duration {
+	if d <= 0 {
+		return distillDefaultInterval
+	}
+	return d
+}
+
+// distillStartupSweep closes orphaned running rows (§4.5.5). Never fatal: a
+// journal that cannot be swept is a diagnosis problem, and refusing to start the
+// arm over it would trade a wrong outcome value for no arm at all.
+func (s *Scheduler) distillStartupSweep(ctx context.Context) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE distill_run
+		   SET outcome = $1, finished_at = now(), error = $2
+		 WHERE outcome = $3`,
+		distillOutcomeKilled, distillErrDaemonRestart, distillOutcomeRunning)
+	if err != nil {
+		slog.Error("scheduler: distiller startup sweep failed", "error", err)
+		return
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		slog.Warn("scheduler: distiller closed orphaned run rows", "rows", n)
+	}
+}
+
+// distillOnce is the testable tick (recallCheckOnce pattern). demand is the
+// interactive-demand source — s.interactiveDemand in production, a steerable
+// func in the gate suite. It reports whether the arm reached the per-session
+// work; every gate that stopped it earlier returns false.
+func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("scheduler: panic in distiller tick", "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+
+	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: the distill.* group is global-only, see runDistiller.
+	d := cfg.Distill
+
+	// Gate 0 — master gate, BOTH switches, and no journal row at all: an
+	// install that never asked for a distiller must not accumulate a journal
+	// (§4.5.3, the one gate whose answer is a debug log).
+	if !d.Enabled || !d.CtxEnabled {
+		slog.Debug("scheduler: distiller disabled",
+			"distill_enabled", d.Enabled, "ctx_enabled", d.CtxEnabled)
+		return false
+	}
+
+	// Gate 5 runs FIRST (§4.2.1). A write-path guard has to stand before the
+	// arm touches foreign material, so the scope is resolved and refused BEFORE
+	// the reader exists and before one row of context_blocks is read. The only
+	// query on this path is the tenant register — the authority on what the
+	// operator owns, never the material itself.
+	scope, owned := s.distillScope(ctx, cfg)
+	tickKey := distillSourceKey(d.CtxSourceLabel, scope, "")
+	if !distillScopeAllowed(scope, owned) {
+		slog.Warn("scheduler: distiller scope refused", "scope", scope, "owned", owned)
+		s.distillSkip(ctx, tickKey, "", distillSkipScopeForbidden, true)
+		return false
+	}
+
+	// Gate 1 — source reachable. The registry half is the nil check every arm
+	// makes; the construction half is where the reader refuses caps that would
+	// silently make it read nothing forever (ctxcheckpoint.go:146-168).
+	if s.blocktypes == nil {
+		slog.Error("scheduler: distiller skipped — block-type registry not wired")
+		s.distillSkip(ctx, tickKey, "", distillSkipSourceUnreachable, false)
+		return false
+	}
+	src, err := s.newDistillSource(cfg, scope)
+	if err != nil {
+		slog.Error("scheduler: distiller source unavailable", "error", err)
+		s.distillSkip(ctx, tickKey, "", distillSkipSourceUnreachable, false)
+		return false
+	}
+	defer func() {
+		if cerr := src.Close(); cerr != nil {
+			slog.Warn("scheduler: distiller source close failed", "error", cerr)
+		}
+	}()
+
+	// Gate 2 — interactive demand, BEFORE the run (guard/digest pattern): load
+	// at launch means no launch at all. The mid-run park that covers load
+	// arriving after a launch is A02-10.
+	if n := demand(); n > 0 {
+		slog.Debug("scheduler: distiller deferred, interactive demand", "count", n)
+		s.distillSkip(ctx, tickKey, "", distillSkipDemand, false)
+		return false
+	}
+
+	// Stamp the actual-run marker PAST every gate that defers (the guard/digest/
+	// recall discipline, MW12): a tick a gate stopped does NOT advance it, so the
+	// AGE of this stamp is the observable statement "the arm is reaching its
+	// source". It is the only surface the state "enabled, scope fine, candidate
+	// list empty" has — that state writes no journal row on purpose (see below),
+	// and without the stamp it would be indistinguishable from an arm that never
+	// runs at all (review #4).
+	s.lastDistillNs.Store(time.Now().UnixNano())
+
+	refs, err := src.Sessions(ctx)
+	if err != nil {
+		s.distillSourceError(ctx, tickKey, "", "sessions", err)
+		return false
+	}
+	if len(refs) == 0 {
+		// No candidate root is not a per-session answer: there is no session id
+		// to key a row on, and writing one under the tick key would open a
+		// watermark series for a source that does not exist. Debug log, no row
+		// — the same posture gate 0 takes for the same reason. The stamp above
+		// is what makes this state visible without inventing an identity.
+		slog.Debug("scheduler: distiller found no candidate sessions", "scope", scope)
+		return false
+	}
+
+	for _, ref := range refs {
+		if ctx.Err() != nil {
+			return true // shutdown mid-tick; the remaining roots wait for the next one
+		}
+		// A ROOT MUST BE NAMEABLE. Sessions filters
+		// (metadata->>'root_session_id') IS NOT NULL (ctxcheckpoint.go:194) —
+		// the EMPTY string passes that filter, and metadata.root_session_id is
+		// writable over the public store path (the checkpoint type stays
+		// claimable after migration 148, and compaction-checkpoints is not a
+		// reserved category). An empty root would key its per-session row on
+		// "<label>:<scope>:" — byte-identical to the TICK key, whose series the
+		// gates before the candidate list write under. Today every row of this
+		// wave is 0..0 so nothing moves; from A02-6 that same key carries a
+		// PROGRESSING watermark, and the dedup ledger distill_seen is keyed on
+		// it too (PK (source_key, row_hash)). That is the "two sources, one
+		// watermark series" failure class V25/V28 refuse on the config side,
+		// reached here through corpus data instead — so it is refused here.
+		//
+		// schema_untrusted, not a skip: the source handed out a unit whose shape
+		// this arm agreed to be able to address, and it cannot. The row goes to
+		// the TICK key with root_session_id NULL — a diagnosis, never a series.
+		if strings.TrimSpace(ref.Session) == "" {
+			slog.Warn("scheduler: distiller skipped an unnameable root session",
+				"scope", scope, "reason", "empty root_session_id")
+			s.distillFail(ctx, tickKey, "", distillErrSchemaUntrusted)
+			continue
+		}
+		s.distillSession(ctx, src, d.CtxSourceLabel, scope, ref.Session)
+	}
+	return true
+}
+
+// distillSession runs gate 4 and the regression check for ONE root session and
+// journals the answer.
+//
+// A02-3 review #6 binds the loop shape: a root whose ids do not parse answers
+// schema_untrusted, and the arm must SKIP that root for this tick rather than
+// hang on it. It therefore never returns an error — every outcome is a journal
+// row plus a log line, and the caller continues with the next candidate.
+func (s *Scheduler) distillSession(ctx context.Context, src distillsource.Source, label, scope, sess string) {
+	key := distillSourceKey(label, scope, sess)
+	wm, err := s.distillWatermark(ctx, key)
+	if err != nil {
+		// The journal is unreadable: there is nothing truthful to write, and a
+		// row derived from a watermark of "unknown" would be worse than none.
+		slog.Error("scheduler: distiller watermark unreadable", "source_key", key, "error", err)
+		return
+	}
+
+	head, err := src.Head(ctx, sess)
+	if err != nil {
+		s.distillSourceError(ctx, key, sess, "head", err)
+		return
+	}
+
+	// Watermark regression (§4.5.3, last row of the gate table). For this source
+	// it means the manifests of this root were archived or deleted — Read
+	// filters NOT is_archived, so an archived manifest drops out of Head. The
+	// arm never touches the source to "repair" it; distill_reset (A02-12) is the
+	// way out. Always a row: this is a state an operator has to see.
+	if head < wm {
+		slog.Warn("scheduler: distiller watermark regression",
+			"source_key", key, "head", head, "watermark", wm)
+		s.distillSkip(ctx, key, sess, distillSkipWatermarkRegression, true)
+		return
+	}
+
+	// Gate 4 — new material. Head answers the cheap half (is the range empty at
+	// all), HasNew the existence half; both are asked, because Head alone would
+	// pass a range whose only rows the reader cannot address.
+	if head == wm {
+		s.distillSkip(ctx, key, sess, distillSkipNoNewRows, false)
+		return
+	}
+	has, err := src.HasNew(ctx, sess, wm)
+	if err != nil {
+		s.distillSourceError(ctx, key, sess, "hasnew", err)
+		return
+	}
+	if !has {
+		s.distillSkip(ctx, key, sess, distillSkipNoNewRows, false)
+		return
+	}
+
+	// Material above the watermark ⇒ the two-phase row (135:20-27): INSERT
+	// running first, UPDATE at the end. This wave processes nothing, so the run
+	// closes as PARTIAL with the watermark unmoved. Partial is the journal's
+	// word for "covered material, did not finish it" (§4.7) and it is the
+	// truthful one here: 'ok' would claim a completed range, and advancing
+	// watermark_to without durable insights is exactly the loss the two-phase
+	// order exists to prevent. A02-6 fills the middle.
+	runID, err := s.distillStartRun(ctx, key, sess, wm)
+	if err != nil {
+		slog.Error("scheduler: distiller could not open run row", "source_key", key, "error", err)
+		return
+	}
+	if err := s.distillFinishRun(ctx, runID, distillOutcomePartial, ""); err != nil {
+		slog.Error("scheduler: distiller could not close run row", "run_id", runID, "error", err)
+	}
+}
+
+// distillSourceError maps a reader error onto the journal's taxonomy.
+//
+// THE RAW ERROR NEVER LEAVES THE LOG. distill_run.error carries a class string
+// and nothing else (135:131-135, enforced by dr_error_class_known), because the
+// journal is readable over /api and lives for 90 days — a driver message can
+// carry a row of foreign material with it.
+//
+// The mapping is not a pass-through, and two of the four sentinels prove why
+// (distillsource.go:41-47): ErrSourceUnavailable is NOT in dr_error_class_known
+// at all and is a SKIP — a source that cannot be read produces no new material
+// to miss, so the range is postponed rather than failed. ErrNoActiveRows is a
+// gate answer and never reaches here at all: only QuietFor returns it, and
+// QuietFor belongs to gate 3 (A02-10).
+func (s *Scheduler) distillSourceError(ctx context.Context, key, sess, op string, err error) {
+	slog.Error("scheduler: distiller source error", "source_key", key, "op", op, "error", err)
+	switch {
+	case errors.Is(err, distillsource.ErrSourceUnavailable):
+		s.distillSkip(ctx, key, sess, distillSkipSourceUnreachable, false)
+	case errors.Is(err, distillsource.ErrSchemaUntrusted):
+		s.distillFail(ctx, key, sess, distillErrSchemaUntrusted)
+	default:
+		// ErrQueryFailed and everything the contract did not classify. The
+		// catch-all is a real class rather than a guess: from the journal's
+		// point of view an unnamed reader error IS a failed query, and the
+		// alternative — no row — would hide the failure entirely.
+		s.distillFail(ctx, key, sess, distillErrQueryFailed)
+	}
+}
+
+// distillSkip writes ONE skip row, subject to the state-change rule (§4.5.3).
+//
+// always=true is the posture of gates 5–7: they write every tick, because their
+// answers are operator-visible states, not background noise. always=false is
+// gates 1–4, where an unchanged reason is only logged — at a 900-second cadence
+// and four roots per tick, an unconditional no_new_rows row would be ~140 000
+// rows a year and would bury every diagnostically interesting line.
+//
+// The "last reason" comes from the journal, not from a field: it then survives a
+// restart, and the table stays the only state (135:42).
+func (s *Scheduler) distillSkip(ctx context.Context, key, sess, reason string, always bool) {
+	if !always && s.distillSameAnswer(ctx, key, distillOutcomeSkipped, reason) {
+		slog.Debug("scheduler: distiller skip unchanged", "source_key", key, "reason", reason)
+		return
+	}
+	wm, err := s.distillWatermark(ctx, key)
+	if err != nil {
+		slog.Error("scheduler: distiller watermark unreadable for skip",
+			"source_key", key, "reason", reason, "error", err)
+		return
+	}
+	// A skip row is watermark-INVARIANT (135:44-48): from = to = the value
+	// derived at skip time — never 0, never NULL — so max() over the series is
+	// untouched and the next tick derives exactly what this one did.
+	if err := s.distillWriteRow(ctx, key, sess, distillOutcomeSkipped, reason, "", wm, wm); err != nil {
+		slog.Error("scheduler: distiller skip row failed",
+			"source_key", key, "reason", reason, "error", err)
+	}
+}
+
+// distillFail writes one terminal failed row carrying only the error class.
+//
+// IT OBEYS THE SAME STATE-CHANGE RULE AS A SKIP, which extends §4.5.3 rather
+// than reading it literally, and the extension is deliberate. §4.5.3 writes the
+// rule for skips because that is where the first draft's flood came from, but
+// its argument — a repeated answer buries the diagnostically interesting lines —
+// does not care which column carries the answer. Without the extension the same
+// reader error journals at two different rates depending only on which sentinel
+// it wrapped: ErrSourceUnavailable becomes a throttled skip, ErrQueryFailed an
+// unthrottled failure at 384 rows/day (4 roots × 96 ticks) against a permanently
+// broken source. That asymmetry is not a property anyone chose.
+//
+// What the rule does NOT throttle is a failure that alternates with anything
+// else: a run that recovers writes a partial row, so the next failure sees a
+// different newest row and writes again. Only an unchanging failure is silent,
+// and its first row stands in the journal with its timestamp.
+func (s *Scheduler) distillFail(ctx context.Context, key, sess, class string) {
+	if s.distillSameAnswer(ctx, key, distillOutcomeFailed, class) {
+		slog.Debug("scheduler: distiller failure unchanged", "source_key", key, "class", class)
+		return
+	}
+	wm, err := s.distillWatermark(ctx, key)
+	if err != nil {
+		slog.Error("scheduler: distiller watermark unreadable for failure",
+			"source_key", key, "class", class, "error", err)
+		return
+	}
+	// Nothing was processed, so the range stays empty — a failed row that moved
+	// the watermark would hand the next tick a range it never covered.
+	if err := s.distillWriteRow(ctx, key, sess, distillOutcomeFailed, "", class, wm, wm); err != nil {
+		slog.Error("scheduler: distiller failure row failed",
+			"source_key", key, "class", class, "error", err)
+	}
+}
+
+// distillSameAnswer answers whether the newest row of this source_key already
+// says exactly what the arm is about to say: same outcome, and same reason in
+// the column that outcome uses (skip_reason for a skip, error for a failure).
+//
+// An unreadable journal answers false: the arm then writes, because a missing
+// diagnostic row is worse than a duplicate one.
+func (s *Scheduler) distillSameAnswer(ctx context.Context, key, outcome, reason string) bool {
+	var lastOutcome, lastSkip, lastErr string
+	err := s.pool.QueryRow(ctx, `
+		SELECT outcome, COALESCE(skip_reason, ''), COALESCE(error, '')
+		  FROM distill_run
+		 WHERE source_key = $1
+		 ORDER BY started_at DESC
+		 LIMIT 1`, key).Scan(&lastOutcome, &lastSkip, &lastErr)
+	if err != nil || lastOutcome != outcome {
+		return false
+	}
+	switch outcome {
+	case distillOutcomeSkipped:
+		return lastSkip == reason
+	case distillOutcomeFailed:
+		return lastErr == reason
+	default:
+		// running/partial/ok/killed carry no repeated answer to suppress; a
+		// caller asking about them is asking the wrong question, and answering
+		// "same" would silence a row nobody meant to throttle.
+		return false
+	}
+}
+
+// distillWatermark is THE derivation (135:29-42), and there is exactly one:
+// max(watermark_to) over the source's non-running rows. Running rows are
+// excluded because an in-flight run's watermark is not durable yet — which is
+// precisely why the startup sweep has to run before the first tick.
+func (s *Scheduler) distillWatermark(ctx context.Context, key string) (int64, error) {
+	var wm int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(max(watermark_to), 0)
+		  FROM distill_run
+		 WHERE source_key = $1
+		   AND outcome <> $2`, key, distillOutcomeRunning).Scan(&wm)
+	if err != nil {
+		return 0, fmt.Errorf("distill: deriving watermark for %q: %w", key, err)
+	}
+	return wm, nil
+}
+
+// distillWriteRow inserts one already-finished row. finished_at = now() is not
+// cosmetic: dr_finished_iff_done (135:167) makes "outcome = running" and
+// "finished_at IS NULL" the same statement, so a terminal row without a
+// timestamp would be refused by the CHECK.
+func (s *Scheduler) distillWriteRow(ctx context.Context, key, sess, outcome, skipReason, errClass string, from, to int64) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO distill_run
+		    (source_key, root_session_id, outcome, skip_reason, error,
+		     watermark_from, watermark_to, finished_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+		key, distillNull(sess), outcome, distillNull(skipReason), distillNull(errClass), from, to)
+	if err != nil {
+		return fmt.Errorf("distill: writing %s row for %q: %w", outcome, key, err)
+	}
+	return nil
+}
+
+// distillStartRun opens the running row (phase one). watermark_to starts EQUAL
+// to watermark_from — "nothing achieved yet" — and only a batch whose insights
+// are durable may raise it (A02-6).
+func (s *Scheduler) distillStartRun(ctx context.Context, key, sess string, wm int64) (string, error) {
+	var runID string
+	// gen stays at its column DEFAULT of 0: it is the generation number of the
+	// WRITTEN block (135:107-112, "reine Lesbarkeit"), and this wave writes no
+	// block. Counting it here would invent a number nothing refers to.
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO distill_run
+		    (source_key, root_session_id, outcome, watermark_from, watermark_to)
+		VALUES ($1, $2, $3, $4, $4)
+		RETURNING run_id::text`,
+		key, distillNull(sess), distillOutcomeRunning, wm).Scan(&runID)
+	if err != nil {
+		return "", fmt.Errorf("distill: opening run row for %q: %w", key, err)
+	}
+	return runID, nil
+}
+
+// distillFinishRun closes the running row (phase two). An empty runID is a
+// no-op, matching overview.FinishRun: a missing row is better than an invented
+// one.
+func (s *Scheduler) distillFinishRun(ctx context.Context, runID, outcome, errClass string) error {
+	if runID == "" {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE distill_run
+		   SET outcome = $2, error = $3, finished_at = now()
+		 WHERE run_id = $1::uuid`,
+		runID, outcome, distillNull(errClass))
+	if err != nil {
+		return fmt.Errorf("distill: closing run row %s: %w", runID, err)
+	}
+	return nil
+}
+
+// distillSourceKey builds the journal identity "<label>:<scope>:<session>"
+// (§4.5.1) — THREE parts, not the two the field table sketches.
+//
+// The scope belongs in the key because neither distill_run nor distill_seen has
+// a scope column. With a two-part key the cross-run dedup ledger would be
+// scope-BLIND: a chunk seen once in scope A would be dropped in scope B, where
+// it was never distilled, and the only trace would be a rows_dropped_dup
+// counter. It would also turn distill_seen into an existence oracle across
+// scope borders. Today one scope is live; at target scale that is not a
+// property to rely on.
+//
+// The TICK-LEVEL key (empty session) is what the gates ahead of the candidate
+// list write under — gate 5 has no session yet and must still leave a row.
+//
+// It does not collide with a session key because distillOnce REFUSES an empty
+// root before it ever reaches distillSession, not because the corpus guarantees
+// a non-empty root_session_id. It does not: Sessions only filters IS NOT NULL,
+// and the value is writable over the public store path. An earlier version of
+// this comment asserted the guarantee instead of enforcing it, and a review
+// probe produced the collision it denied. Every row under the tick key is
+// therefore watermark-invariant (a skip or a failure), and the key's derived
+// watermark is 0 and stays 0.
+//
+// sess is carried VERBATIM from metadata->>'root_session_id' of a corpus block
+// and reaches distill_run.source_key and .root_session_id unchanged. That is
+// what §4.5.2 asks for, and it is the reason the "only class strings" promise is
+// scoped to the error column: these two columns carry corpus text by contract.
+func distillSourceKey(label, scope, sess string) string {
+	return label + ":" + scope + ":" + sess
+}
+
+// distillScope resolves THE one scope of the arm plus the operator's
+// entitlements.
+//
+// One value for read and write, never two (§4.2.1): a second key would let the
+// arm read from scope A and write into scope B — the propagation path V22
+// exists to close — and a read scope that no material lives in would journal
+// no_new_rows forever, a silent null operation with no diagnosis.
+//
+// The entitlements come from the tenant register through the same seam every
+// other arm uses. distill.* is global-only, so the arm never iterates tenants
+// (§4.8); it takes the DEFAULT tenant's entry, the one whose config generation
+// _global is the very snapshot this arm reads.
+func (s *Scheduler) distillScope(ctx context.Context, cfg *config.Config) (string, []string) {
+	var owned []string
+	for _, bt := range s.backgroundTenantsFn(ctx) {
+		if bt.scope == store.GlobalScope {
+			owned = bt.owned
+			break
+		}
+	}
+	if sc := strings.TrimSpace(cfg.Distill.Scope); sc != "" {
+		return sc, owned
+	}
+	return effectiveHomeScope(cfg.Scheduler.HomeScope, owned), owned
+}
+
+// distillScopeAllowed is gate 5's decision (§4.5.3): the resolved scope must be
+// neither empty nor "shared", and it must be one the operator owns.
+//
+// FAIL-CLOSED ON AN UNRESOLVED ENTITLEMENT SET. owned == nil does not mean "no
+// restriction", it means the arm could not establish what the operator owns —
+// store.ListTenants failed, even transiently (scheduler.go:425-428), or the
+// default tenant is not active and the register yields no _global entry at all.
+// This gate does NOT copy effectiveHomeScope's owned==nil passthrough, and the
+// difference is the two functions' jobs: that one preserves a byte-identical
+// pre-multi-tenant reading path, this one guards a WRITE path for foreign
+// transcript content. D-02 §4.2.1 states the requirement without an exception
+// ("jeder Scope, den der Betreiber nicht besitzt, ist scope_forbidden"), and the
+// config-side V30 that would catch an explicitly set foreign scope earlier is
+// still unbuilt — a passthrough here would let one through BOTH halves.
+//
+// The cost is named rather than hidden: while the register is unreachable the
+// arm journals scope_forbidden and reads nothing. That is the correct direction
+// for a gate whose failure mode on the other side is writing foreign material
+// into a scope nobody verified.
+func distillScopeAllowed(scope string, owned []string) bool {
+	if scope == "" || scope == distillForbiddenScope {
+		return false
+	}
+	return slices.Contains(owned, scope)
+}
+
+// newDistillSource builds the reader for this tick, or calls the test seam.
+//
+// Per tick rather than per arm, because every value it takes is a hot key: a
+// scope, category or cap changed through /api/settings takes effect on the next
+// tick instead of on the next restart. The construction is free — the pool is
+// borrowed, no handle is opened (ctxcheckpoint.go:138-144).
+func (s *Scheduler) newDistillSource(cfg *config.Config, scope string) (distillsource.Source, error) {
+	if s.distillSource != nil {
+		return s.distillSource(cfg, scope)
+	}
+	return ctxcheckpoint.New(s.pool, ctxcheckpoint.Options{
+		Label:          cfg.Distill.CtxSourceLabel,
+		Scope:          scope,
+		Category:       cfg.Distill.CheckpointCategory,
+		MaxSessions:    cfg.Distill.MaxSessionsPerRun,
+		SessionHorizon: cfg.Distill.CtxSessionHorizon,
+		// The manifest window rides distill.rows_per_read, the group's one
+		// "mandatory LIMIT on every read" key (config.go:1789-1794). It bounds
+		// the cheap query; the item cap that bounds the expensive one is the
+		// caller's argument to Read and arrives with A02-6.
+		MaxManifests: cfg.Distill.RowsPerRead,
+	})
+}
+
+// distillNull maps the empty string onto SQL NULL. The distinction is load-
+// bearing on three columns: skip_reason, error and root_session_id all carry
+// CHECKs or meaning that an empty string would violate or falsify.
+func distillNull(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}

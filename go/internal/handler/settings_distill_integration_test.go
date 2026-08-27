@@ -113,11 +113,19 @@ func TestSettingsDistill_Integration(t *testing.T) {
 		// them in wave A02-4: it is the second source's master switch, and an
 		// install that never asked for a distiller must not start deriving
 		// blocks from its own session transcripts either.
+		// distill.ctx_session_horizon joined in A02-5, and it belongs here for a
+		// different reason than the switches: it is the one key of this source
+		// whose default decides whether the candidate query stays off a full
+		// scan. 30 days (configured as 2 592 000 seconds, served as the duration
+		// string) is the first window measured BELOW the planner's crossover, so
+		// a silent drift of this number is a performance posture change, not a
+		// tuning detail.
 		for key, want := range map[string]string{
-			"distill.enabled":           `false`,
-			"distill.ctx_enabled":       `false`,
-			"distill.block_sensitivity": `"credentials"`,
-			"distill.scope":             `""`,
+			"distill.enabled":             `false`,
+			"distill.ctx_enabled":         `false`,
+			"distill.block_sensitivity":   `"credentials"`,
+			"distill.scope":               `""`,
+			"distill.ctx_session_horizon": `"720h0m0s"`,
 		} {
 			if got[key] != want {
 				t.Errorf("GET /api/settings %s = %s, want %s", key, got[key], want)

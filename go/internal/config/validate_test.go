@@ -373,14 +373,14 @@ func TestV17bIsAdvisoryOnly(t *testing.T) {
 // at the basis stand (38, dream.cycle_timeout and graph_overview.label_timeout
 // included) plus the six the distiller group added in A03-W03-3
 // (distill.interval, session_quiet_for, call_timeout, spend_window,
-// spend_backoff, breaker_cooldown) plus distill.ctx_quiet_for from A02-4. It is
-// a DRIFT GUARD,
+// spend_backoff, breaker_cooldown) plus distill.ctx_quiet_for from A02-4 plus
+// distill.ctx_session_horizon from A02-5. It is a DRIFT GUARD,
 // not a fact worth asserting for its own sake: V17 is a generic walk, so a
 // duration key added later is covered automatically — but a key that silently
 // changes TYPE (seconds → int, or a struct field that stops being a
 // time.Duration) would leave the walk without anyone noticing. Raise this
 // number in the same commit that adds a duration key.
-const wantDurationKeys = 45
+const wantDurationKeys = 46
 
 // TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
 // V17 (issue #29): before it, exactly two of the seconds keys had a sign check
