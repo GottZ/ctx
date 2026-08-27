@@ -132,6 +132,19 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 				return nil, parseErr
 			}
 			if len(kws) < MinKeywords {
+				// Ornith 1.5 (prod 2026-08-27) liefert oft valide, aber zu
+				// wenige Keywords (2 statt 5-8). Statt den ganzen Versuch zu
+				// verwerfen (3 Retries + Fallback), die LLM-Keywords BEHALTEN
+				// und mit dem deterministischen Tokenizer auffuellen — so geht
+				// kein LLM-Ergebnis verloren und der Block wird trotzdem
+				// verarbeitet. Nur bei 0 LLM-Keywords bleibt es beim Fehler
+				// (Retry-Pfad), da nichts aufzufuellen waere.
+				if len(kws) > 0 {
+					filled := fillKeywords(block.Title, block.Content, kws)
+					if len(filled) >= MinKeywords {
+						return filled, nil
+					}
+				}
 				countErr := fmt.Errorf("dream: keywords too few (%d)", len(kws))
 				entry.Err = countErr
 				return nil, countErr
@@ -164,6 +177,40 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 		return nil, fmt.Errorf("dream: keyword generation failed after %d attempts: %w", KeywordsMaxRetries, lastErr)
 	}
 	return fallback, nil
+}
+
+// fillKeywords ergaenzt eine zu kurze LLM-Keyword-Liste mit deterministischen
+// Tokenizer-Keywords (ExtractKeywords) bis MinKeywords — ohne Duplikate und
+// ohne die LLM-Keywords zu verlieren. Die Reihenfolge der LLM-Keywords bleibt
+// erhalten (sie sind semantisch staerker); der Tokenizer fuellt nur auf.
+// Gibt die urspruengliche Liste zurueck, wenn das Auffuellen MinKeywords nicht
+// erreicht (der Caller behandelt das dann als too-few-Fehler).
+func fillKeywords(title, content string, llmKeywords []string) []string {
+	if len(llmKeywords) >= MinKeywords {
+		return llmKeywords
+	}
+	seen := make(map[string]bool, len(llmKeywords)+MaxKeywords)
+	out := make([]string, 0, MinKeywords)
+	for _, k := range llmKeywords {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	// Tokenizer-Keywords als Ergaenzung — stoppt sobald MinKeywords erreicht.
+	for _, k := range ExtractKeywords(title, content, MaxKeywords) {
+		if len(out) >= MinKeywords {
+			break
+		}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
 }
 
 // buildKeywordPrompt wraps the block in the XML-escaped template the prompt expects.
