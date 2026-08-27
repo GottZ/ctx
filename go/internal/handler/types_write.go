@@ -32,6 +32,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -40,6 +41,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // typeWritePayload is the strict PUT body. name comes from the URL, scope is
@@ -91,6 +93,92 @@ func forbidTypeWrite(w http.ResponseWriter) {
 		"success": false,
 		"error":   "global block types are managed by the server operator",
 	})
+}
+
+// ── D6 overlay write gate (board decision E2-6, wave C2-4) ───────────────────
+//
+// A tenant overlay may only NARROW the '_global' base policy of the same name.
+// The rule itself lives in blocktype.NarrowingViolation (overlay_narrowing.go,
+// with the per-axis provenance); this seam resolves the base and turns a
+// violation into the handler's 422.
+//
+// It closes ONE finding with two sites: reports/bau/ops-w1-review.md #3 / A4
+// (an overlay lifting `checkpoint` to full-pass puts the name into
+// p_types_visible, where migration 145's static deny conjunct cuts its FTS
+// contribution — measured 67 -> 0 rows) and reports/bau/w01-7.md §6 finding 3
+// ("on the write path there is NO lock against a type-update that overwrites a
+// derived row per tenant").
+//
+// 422 and not 403: the refusal is a property of the CONFIG, not of the caller.
+// A server-admin writing into a tenant namespace through the manage transport
+// gets the same answer, and DecodePolicy's own rejections — the other reason a
+// well-authorized write fails on its content — already answer 422.
+//
+// The gate is on CREATE and UPDATE only. DELETE returns the tenant to the base,
+// which is by definition the widest ADMISSIBLE position, so it cannot violate
+// the rule.
+
+// overlayWriteViolation is the gate. Empty message = admissible. The error
+// return is a genuine failure to RESOLVE the base (DB error, corrupt '_global'
+// row) and must fail the request closed — never fall through to the write.
+func overlayWriteViolation(ctx context.Context, pool *pgxpool.Pool, name, scope string, overlay blocktype.Policy) (string, error) {
+	if scope == store.GlobalScope {
+		return "", nil // the '_global' namespace IS the base; it has nothing to narrow against
+	}
+	if msg := hardDenyOverlayViolation(name, overlay); msg != "" {
+		return msg, nil
+	}
+	base, ok, err := overlayBasePolicy(ctx, pool, name)
+	if err != nil || !ok {
+		return "", err // no base = a genuinely tenant-own type; the rule does not apply
+	}
+	return blocktype.NarrowingViolation(base, overlay), nil
+}
+
+// hardDenyOverlayViolation is the one clause that does NOT depend on the base.
+//
+// shadowDenyTypes (query_shadow.go:50) is the hard deny-list — the SAME map,
+// not a second copy: `checkpoint` carries 5 955 blocks, 13 of them
+// sensitivity=credentials, and §5 B3 rests their protection on "not
+// retrievable". Migration 145's index predicate and the static FTS conjunct are
+// literals over exactly these two names, so their invisibility may not hang on
+// what the '_global' row happens to say at write time.
+func hardDenyOverlayViolation(name string, overlay blocktype.Policy) string {
+	if !shadowDenyTypes[name] {
+		return ""
+	}
+	if overlay.Retrieval.Kind != blocktype.RetrievalExcluded {
+		return fmt.Sprintf("retrieval.policy: %q is on the hard deny-list and stays retrieval.policy=%q "+
+			"in every tenant overlay (got %q)", name, blocktype.RetrievalExcluded, overlay.Retrieval.Kind)
+	}
+	if overlay.Retrieval.ShadowMeasurable {
+		return fmt.Sprintf("retrieval.shadow_measurable: %q is on the hard deny-list and can never be "+
+			"measurable, in any scope", name)
+	}
+	return ""
+}
+
+// overlayBasePolicy resolves the '_global' base policy of name the way Reload
+// composes it: the compiled-in floor with the '_global' TABLE row over it
+// (registry.go:393-411, the row wins wholesale). Deliberately read from the
+// pool rather than from a *blocktype.Registry — the registry may be nil (test
+// wiring, read-only deployments) or degraded to builtin-fallback, and a write
+// gate that silently loosens in either state would be the fail-open class.
+// false = the name has no '_global' base at all: a tenant-own type, unrestricted.
+func overlayBasePolicy(ctx context.Context, pool *pgxpool.Pool, name string) (blocktype.Policy, bool, error) {
+	row, err := store.GetBlockType(ctx, pool, name, []string{store.GlobalScope})
+	if err != nil {
+		return blocktype.Policy{}, false, err
+	}
+	if row == nil {
+		p, ok := blocktype.BuiltinPolicy(name)
+		return p, ok, nil
+	}
+	p, err := blocktype.DecodePolicy(row.Name, row.Scope, row.Builtin, row.IsDefault, row.Config)
+	if err != nil {
+		return blocktype.Policy{}, false, err
+	}
+	return p, true, nil
 }
 
 // HandlePut implements PUT /api/types/{name} — an upsert. The row is resolved
@@ -148,8 +236,19 @@ func (h *TypesHandler) putCreate(w http.ResponseWriter, r *http.Request, ar *aut
 	}
 	// THE validation authority (§3.3): name format, envelope version, strict
 	// keys, cross-field rules, caps — the SAME code path the reload decoder runs.
-	if _, err := blocktype.DecodePolicy(name, ws, false, isDefault, cfg); err != nil {
+	pol, err := blocktype.DecodePolicy(name, ws, false, isDefault, cfg)
+	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	// D6 overlay gate: this is the create path that reaches a '_global' name
+	// whenever its TABLE row is absent (HandlePut resolves against the table,
+	// the registry resolves off the compiled-in floor too).
+	if msg, err := overlayWriteViolation(ctx, h.pool, name, ws, pol); err != nil {
+		internalTypesError(w, ctx, "types: put-create overlay base", err)
+		return
+	} else if msg != "" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 		return
 	}
 	bt, err := store.CreateBlockType(ctx, h.pool, store.BlockTypeWrite{
@@ -193,8 +292,18 @@ func (h *TypesHandler) putUpdate(w http.ResponseWriter, r *http.Request, ar *aut
 	if len(p.Config) > 0 {
 		// Config validates against the ROW's identity (name/scope/builtin/
 		// is_default feed the cross-field rules) — same as manage type-update.
-		if _, err := blocktype.DecodePolicy(cur.Name, cur.Scope, cur.Builtin, cur.IsDefault, p.Config); err != nil {
+		pol, err := blocktype.DecodePolicy(cur.Name, cur.Scope, cur.Builtin, cur.IsDefault, p.Config)
+		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		// D6 overlay gate on the row's OWN scope: this is the path an existing
+		// tenant row takes, whatever put it there.
+		if msg, err := overlayWriteViolation(ctx, h.pool, cur.Name, cur.Scope, pol); err != nil {
+			internalTypesError(w, ctx, "types: put-update overlay base", err)
+			return
+		} else if msg != "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 			return
 		}
 		upd.Config = p.Config

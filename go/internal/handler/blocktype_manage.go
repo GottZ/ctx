@@ -231,8 +231,24 @@ func (h *ManageHandler) handleTypeUpdate(w http.ResponseWriter, r *http.Request,
 	}
 	upd := store.BlockTypeUpdate{DisplayName: p.DisplayName, Description: p.Description}
 	if len(p.Config) > 0 {
-		if _, err := blocktype.DecodePolicy(cur.Name, cur.Scope, cur.Builtin, cur.IsDefault, p.Config); err != nil {
+		pol, err := blocktype.DecodePolicy(cur.Name, cur.Scope, cur.Builtin, cur.IsDefault, p.Config)
+		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		// D6 overlay gate (E2-6, wave C2-4) — the SECOND transport of the same
+		// write logic. type-create is pinned to '_global' (:176) and cannot
+		// produce an overlay, but this action patches through
+		// typeVisibleScopes(ar), which carries ar.TenantID: a server-admin key
+		// with a tenant id reaches the tenant row from here. A gate on only the
+		// REST seam would be the divergent-gate anti-pattern the types_write.go
+		// header names (§5.1).
+		if msg, err := overlayWriteViolation(ctx, h.pool, cur.Name, cur.Scope, pol); err != nil {
+			slog.Error("manage: type-update overlay base", "error", err, "request_id", reqID)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
+			return
+		} else if msg != "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 			return
 		}
 		upd.Config = p.Config
