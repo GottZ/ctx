@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 144,
-    "migration_count": 32,
+    "migration_max": 145,
+    "migration_count": 33,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -4553,10 +4553,10 @@
       "def_hash": "1e9ab8e85a0fdabfded48e74c9dc66747aea3b6b8dafe1548b7ff89cfd9bbf7a"
     },
     "idx_context_ts_de": {
-      "def_hash": "30e4e2a296e869e2ee4a75adf6fc0b53ac007141a1c73a6ac13ef12fe85bced0"
+      "def_hash": "2c70c6b9d38bc7d77d4e69ee5a82f86ea6409fa043cf4b1886e2a005ebec1ed3"
     },
     "idx_context_ts_en": {
-      "def_hash": "bf74ac9715e82e8452e3f44f1df317a3b9ad9bf3768f8ed9f7c3bd50eb5375d6"
+      "def_hash": "080b2407636b6f9e89e8140d80ee4dbf579a80d157b4b2df69a05569a51db9f3"
     },
     "idx_distill_run_running": {
       "def_hash": "3175786738dcb952be04b622aefd6b4ffad9075e02a1eef8de3c44eb5eec54ac"
@@ -4937,10 +4937,10 @@
       "src_hash": "979a26794c4f6b5d723c9065d848cb1e715987fc6b8778174d974661da727ec7"
     },
     "ctx_rrf(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer)": {
-      "src_hash": "7c7fc1f7be121fd37cdd652754f66df62a0f1d1e045946deb414512f7b23a1ca"
+      "src_hash": "9a401e2b86d35007d2d99ac21b78182b540bee49569f80438233b84ef5173c88"
     },
     "ctx_rrf_arms(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer, p_cap_semantic integer, p_cap_fts_de integer, p_cap_fts_en integer, p_cap_trigram integer, p_trgm_threshold double precision)": {
-      "src_hash": "ba70bc07ba98cd4dd00491e28b4b72f292af020ac0b613fd5fde52d6b6f38558"
+      "src_hash": "ec19f3853dbf515fe05d137fa898d363f7097e9b64ffeebf0b2a4495702b60db"
     },
     "mark_guard_dirty()": {
       "src_hash": "bb49dcca30b0f002ce40fd258d63330f6c62cd3de3d09740520cfb1f15bae09d"

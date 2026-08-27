@@ -270,10 +270,17 @@ func resolveMCPVisibleTypes(set *blocktype.Set, requested []string) ([]string, s
 // /api/query already speaks: types_exclude → p_types_exclude.
 //
 // ctx_rrf applies `type_name = ANY(p_types_visible) AND type_name !=
-// ALL(p_types_exclude)` (139:180-181) and p_types_visible is the handler's own
-// Set.VisibleTypes(), so excluding the COMPLEMENT of the cut inside that set IS
-// the cut — one filter mechanism, no second one, and no positive `types` on the
-// REST request (queryRequest stays restrict-only by decision, query.go).
+// ALL(p_types_exclude)` (145:435-436, the CURRENT definition — the body moved
+// 139 → 140 → 145) and p_types_visible is the handler's own Set.VisibleTypes(),
+// so excluding the COMPLEMENT of the cut inside that set IS the cut — one
+// filter mechanism, no second one, and no positive `types` on the REST request
+// (queryRequest stays restrict-only by decision, query.go).
+//
+// Since migration 145 the two FTS arms carry a THIRD conjunct,
+// `type_name NOT IN ('checkpoint','system-meta')` (145:500, 536), so the planner
+// can use the partial FTS GIN indexes. It does not affect this seam: both names
+// are retrieval.policy='excluded' and therefore never in Set.VisibleTypes(), so
+// neither the cut nor its complement can ever contain them.
 //
 // cut is non-empty only after resolveMCPVisibleTypes accepted it, which implies
 // set != nil.
