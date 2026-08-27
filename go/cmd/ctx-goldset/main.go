@@ -12,6 +12,7 @@
 //	glob         build G-GLOB: aggregating questions over corpus tags, gold judged later
 //	glob-konstr  build the G-GLOB floor check with gold from graph_cluster_member
 //	pool         build the blind judgement template for G-REAL from the pooling dump
+//	judge        machine-judge the open cells on-prem (-llm) and calibrate them (-kappa)
 //	ingest       read the filled-in judgements back in as G-REAL relevance labels
 //	stamp        refresh file digests and the corpus contamination stamp
 //
@@ -34,6 +35,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -104,7 +106,7 @@ func (c *common) bind(fs *flag.FlagSet) {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: ctx-goldset <ki|q|qfinal|real|sess|mh|glob|glob-konstr|pool|ingest|stamp> [flags]")
+		return fmt.Errorf("usage: ctx-goldset <ki|q|qfinal|real|sess|mh|glob|glob-konstr|pool|judge|ingest|stamp> [flags]")
 	}
 	cmd := os.Args[1]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -178,6 +180,26 @@ func run() error {
 		}
 		return cmdPool(&c, poolOpts{poolFile: *poolFile, out: *out,
 			control: *control, excerpt: *excerpt, dryRun: *dry})
+	case "judge":
+		llm := fs.Bool("llm", false, "Urteilslauf über die on-prem-Kette (resume-fähig über das Journal)")
+		kappa := fs.Bool("kappa", false, "Cohens κ + Kipp-Report aus dem ausgefüllten Kontrollbogen")
+		tpl := fs.String("template", "", "Urteils-Vorlage aus `ctx-goldset pool`")
+		key := fs.String("key", "", "Schlüsseldatei der Vorlage (Vorgabe: "+keyPrefix+"<Lauf-ID>.json)")
+		controls := fs.String("controls", "", "ausgefüllter Kontrollbogen (bei -kappa)")
+		out := fs.String("out", "", "Basisname der Ausgaben (Vorgabe: judged-<Lauf-ID> bzw. kappa-<Lauf-ID>)")
+		backend := fs.String("backend", "spark-chat", "context_backends-Zeile, die den Urteiler stellt")
+		model := fs.String("model", "", "Modell-ID (Vorgabe: model_map.default)")
+		timeout := fs.Int("timeout", 180, "Zeitlimit je Aufruf in Sekunden")
+		// No default: the threshold is a rule stated BEFORE the run, and a
+		// default would be this tool inventing the rule it measures against.
+		kappaMin := fs.Float64("kappa-min", math.NaN(), "κ-Schranke — PFLICHTANGABE bei -kappa, kein Vorgabewert (D-05 §4.5 (3))")
+		stampName := fs.String("stamp", goldset.FileStamp, "Stempel, in den die Urteils-Provenienz gemischt wird")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdJudge(&c, judgeOpts{llm: *llm, kappa: *kappa, template: *tpl, key: *key,
+			controls: *controls, out: *out, backend: *backend, model: *model,
+			timeoutSec: *timeout, kappaMin: *kappaMin, stampName: *stampName})
 	case "ingest":
 		judged := fs.String("judged", "", "ausgefüllte Urteils-Vorlage (JSONL oder Markdown)")
 		key := fs.String("key", "", "Schlüsseldatei der Vorlage (Vorgabe: "+keyPrefix+"<Lauf-ID>.json)")

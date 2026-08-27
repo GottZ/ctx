@@ -348,6 +348,8 @@ cd go && go build ./cmd/ctx-goldset
 ./ctx-goldset glob        -n 80             # aggregating tag questions, gold judged later
 ./ctx-goldset glob-konstr -n 50             # the same question family with cluster gold — FLOOR CHECK
 ./ctx-goldset pool   -control 5             # blind pooled judgement template for G-REAL (stage 2)
+./ctx-goldset judge  -llm   -template judge-<run>.jsonl        # machine verdicts on-prem, resumable
+./ctx-goldset judge  -kappa -controls judged-<run>-controls.jsonl -kappa-min 0.6
 ./ctx-goldset ingest -judged judge-<run>.md # the filled-in judgements back in as labels
 ./ctx-goldset stamp                         # refresh digests + corpus contamination stamp
 ```
@@ -355,6 +357,23 @@ cd go && go build ./cmd/ctx-goldset
 `-dry-run` draws and counts the candidates of the four multi-gold generators
 without a single model call — the way to check a construction before spending
 the one generation run a slice gets.
+
+**A machine verdict is admissible only as far as kappa says it is.** `judge -llm`
+sends the pooled candidates through the same on-prem chain the generators use and
+appends every verdict to a journal, so an aborted run continues where it stopped
+and no cell is judged twice. Beside the filled template it writes a *calibration
+sheet*: the mandatory control draws of `pool -control`, each carrying the machine
+verdict and an empty `control_judgement` column. A second judge fills that column;
+`judge -kappa` then reports Cohen's kappa per slice and overall, and per gate
+whether the machine verdicts carry the decision at all. Three things leave a gate
+`nicht entschieden` — no calibrated pair, kappa below the threshold, or a marginal
+shift between the two judges (exact McNemar, alpha 0.05, the flip case). That
+verdict is neither a pass nor a failure: it says the decision may not rest on
+these labels yet. `-kappa-min` has **no default** on purpose — a threshold named
+after seeing the data describes the result instead of testing it. An endpoint
+that is not on-prem aborts the run before the first cell, on both axes the
+registry offers (declared locality and the actual host), and model, endpoint and
+prompt digest reach the stamp.
 
 **Why the multi-gold slices exist.** G-KI, G-Q and G-REAL carry exactly one gold
 id per case. A one-gold slice cannot show the use of an aggregating layer; it can
