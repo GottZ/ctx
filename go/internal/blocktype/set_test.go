@@ -119,7 +119,11 @@ func dampedFactorFor(s *Set, query, typeName string) (float64, bool) {
 // TestDampedTypesForAuditTrailGolden pins the generalized damping against
 // FIXED expectations captured from rrf.AuditTrailFactor before T4 retired it
 // (lift ⇔ the old factor was 1.0). The old function is gone — these literals
-// are the frozen contract.
+// are the frozen contract. The WHICH-queries-lift half is frozen since T4; the
+// factor literal moved 0.3 → 0.6 with migration 146 (wave C2-1, measured in
+// W01-M1) and is deliberately spelled out rather than read from
+// auditTrailDamping: a pin that tracks the constant cannot catch the constant
+// moving.
 func TestDampedTypesForAuditTrailGolden(t *testing.T) {
 	s := builtinTestSet(t)
 	cases := []struct {
@@ -143,9 +147,9 @@ func TestDampedTypesForAuditTrailGolden(t *testing.T) {
 			}
 			continue
 		}
-		if !damped || factor != 0.3 {
+		if !damped || factor != 0.6 {
 			names, factors := s.DampedTypesFor(tc.query)
-			t.Errorf("query %q: (%v, %v), want audit-trail damped at 0.3", tc.query, names, factors)
+			t.Errorf("query %q: (%v, %v), want audit-trail damped at 0.6", tc.query, names, factors)
 		}
 	}
 }

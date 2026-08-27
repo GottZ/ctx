@@ -27,9 +27,18 @@ var auditPatterns = []string{
 	"baseline",
 }
 
-// auditTrailDamping mirrors the historical Welle-41 damped factor (0.3),
-// seeded as data in M072.
-const auditTrailDamping = 0.3
+// auditTrailDamping is the MEASURED damped factor, not the historical one. The
+// Welle-41 value 0.3 (seeded as data in M072, folded into 113_baseline.sql) was
+// last scored in Welle 40 under the UNIFORM damping regime — an unpaired
+// eval-cyclic bench with no declared noise floor (M036/M037/M038 in
+// 113_baseline.sql:3646-3658, :3865-3868) — and never again once Welle 41 put
+// the query-aware intent lift around it; W01-M1 (2026-08-27) scored the world
+// at 0.6 against it on 1 000 paired gold cases and found +0.035954 nDCG@10 on
+// G-KI, 95-% CI [+0.018784, +0.055984], 11.2x the X-W1 noise floor, McNemar
+// 13/0 with p = 0.000244 — and across all five slices 22 cases gained their
+// Hit@5 while not one lost it. Migration 146 lifts the row to match; the two
+// move in lockstep or TestRegistryGolden_Integration goes red.
+const auditTrailDamping = 0.6
 
 // toolEvidencePatterns / toolOverviewPatterns are the compiled-in mirrors of
 // the M136 intent-pattern seeds (auditPatterns precedent above). Deliberately

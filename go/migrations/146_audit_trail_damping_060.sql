@@ -1,0 +1,109 @@
+-- =============================================================================
+-- 146_audit_trail_damping_060.sql — audit-trail-Dämpfung 0.3 → 0.6
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Wissens-Ebenen, Welle C2-1. design/01-ebenen-modell.md §7 W01-8
+-- (Damping-Faktoren scharf schalten) + Board-Entscheid E2-3 vom 2026-08-27.
+--
+-- NUMMER: Masterplan §2 K1 — "wer zuerst landet, nimmt die nächste freie". 145
+-- (partielle FTS-GIN-Indexe) ist gelandet, also ist 146 die nächste freie. K1
+-- gilt hier wörtlich: nie zwei Migrations-Wellen gleichzeitig im
+-- Schema-Contract-Manifest — die Nummer wird vergeben, nicht verhandelt.
+--
+-- WAS DIESE MIGRATION IST: reine Registry-DATEN, wie 136 und 138. Ein UPDATE
+-- auf EINE Zeile in context_block_types, kein Schema, kein Index, kein
+-- Schreiber. Das Manifest bewegt sich um migration_max/migration_count, sonst
+-- byte-identisch.
+--
+-- WARUM 0.6 UND NICHT WEITER:
+-- Der Faktor steht seit Welle 41 auf 0.3. Gescort wurde diese Zahl zuletzt in
+-- Welle 40 — M036 (0.3) und M037 (0.5) tragen ein eval-cyclic-Bench-Verdikt im
+-- Kopf, M038 hält fest, dass beide identisch ausfielen (mean_pass 0.8728, 0/70
+-- Fälle mit unterschiedlichen top5; 113_baseline.sql:3646-3658 und :3865-3868).
+-- Das war aber das UNIFORME Damping-Regime vor dem Intent-Lift, ein ungepaarter
+-- Bench ohne ausgewiesenen Rauschboden — und die Kombination aus 0.3 UND
+-- query-aware Lift, die Welle 41 gebaut hat, ist danach nie wieder gescort
+-- worden. Die Mess-Welle W01-M1 (reports/bau/w01-m1.md) ist die erste GEPAARTE
+-- Messung dieses Faktors gegen einen ausgewiesenen Rauschboden: sie hat die
+-- Welt mit Registry-Faktor
+-- 0.6 gegen den Ist-Stand 0.3 auf denselben 1 000 Gold-Fällen gescort, gepaart,
+-- gegen den Rauschboden des X-W1-Replikatpaars V0/V0′ im selben Report:
+--
+--   G-KI    (n=300): ΔnDCG@10 +0,035954, 95-%-CI [+0,018784, +0,055984],
+--                    11,2 × MDE, McNemar Hit@5 13/0, p = 0,000244
+--   G-SESS  (n=120): ΔnDCG@10 +0,022690, CI [+0,004841, +0,044996], 1,70 × MDE
+--   G-MH    (n=100): ΔnDCG@10 +0,017123, CI [+0,001772, +0,035205], 5,05 × MDE
+--   G-Q-DERIV/-HOLD: gleiches Vorzeichen, ein Achtel der Größe, vom Rauschen
+--                    nicht trennbar (CI enthält 0) — kein Gegenbefund
+--
+-- Über alle fünf Slices gewinnen 22 Fälle ihren Hit@5 und KEIN einziger
+-- verliert ihn (c = 0 in jeder Slice). Die Kurve läuft über 0.6 hinaus weiter
+-- nach oben; 0.6 ist der exakt gemessene Punkt, nicht das berichtete Optimum.
+-- Der Entscheid E2-3 nimmt bewusst den gemessenen Punkt und nicht die
+-- Extrapolation: was hier landet, ist belegt, nicht interpoliert.
+--
+-- WARUM EINE EIGENE MIGRATION UND KEIN EDIT AN 113/136/143:
+-- Dieselbe Doktrin wie in 138: die Historie ist forward-only, und die Grenze
+-- ist der Commit, nicht der Applikationszustand irgendeiner Instanz. Das
+-- Werkzeug zieht dieselbe Linie — .hooks/pre-commit Gate 3 verlangt für JEDE
+-- Nicht-Kommentar-Änderung an einer Migration eine mitgestagte Regeneration des
+-- Schema-Contract-Manifests, und für eine reine Datenzeile wäre diese
+-- Regeneration byte-identisch, also unstagebar. Gelandete Migrationen werden
+-- nicht editiert, Nachträge bekommen eine eigene Nummer.
+--
+-- WARUM jsonb_set MIT WERT-GUARD UND KEIN CONFIG-NEUSCHREIBEN:
+-- jsonb_set(config, '{retrieval,damping_factor}', '0.6') setzt genau einen Pfad
+-- und lässt intent_patterns, structural_link_classes, guard und classify
+-- unangetastet. Ein vollständiges Neuschreiben (wie es der 113-Abschnitt für
+-- den 085-Lockstep noch tat) würde jedes Operator-Tuning überschreiben, das
+-- seit dem Seed in der laufenden Registry nachgezogen wurde — Faktoren sind
+-- ausdrücklich ohne Deploy nachziehbar (M107-Doktrin).
+--
+-- Der Guard ist hier ein WERT-Guard, nicht der Existenz-Guard aus 138: das Feld
+-- EXISTIERT auf dieser Zeile (0.3), es fehlt nicht. Gehoben wird jede Zeile,
+-- die noch den Wert 0.3 trägt —
+--   * zweiter Lauf: findet 0.6, trifft null Zeilen (Idempotenz),
+--   * getunte Instanz: findet z. B. 0.45, trifft null Zeilen (Operator behält
+--     seine Entscheidung),
+--   * umgeschalteter Typ: policy != 'damped' ⇒ null Zeilen (kein Faktor wird
+--     auf einem excluded/full-pass-Typ wiederbelebt).
+-- Die Grenze dieser Zusage ist ausdrücklich benannt: der Guard vergleicht einen
+-- WERT, keine Herkunft. Eine Instanz, deren Operator den Faktor bewusst auf 0.3
+-- gestellt hat, ist vom unberührten Seed nicht unterscheidbar und wird
+-- mitgehoben; jeder ANDERE Operator-Wert bleibt stehen. Ein zusätzliches
+-- `updated_by IS NULL` würde das nicht heilen, sondern verschlimmern: der
+-- Stempel hängt an der ZEILE, nicht am Feld (internal/store/blocktypes.go:246),
+-- also verlöre eine Instanz, die je nur den display_name über die API geändert
+-- hat, den Lift dauerhaft.
+-- ::numeric statt Textvergleich, weil die jsonb-Textdarstellung einer Zahl
+-- nichts ist, worauf ein Guard sich verlassen sollte.
+--
+-- WARUM OHNE DEPLOY WIRKSAM: trg_block_types_notify (113_baseline.sql, aus 072)
+-- feuert auf diesen UPDATE den ctx_settings_write-Kanal; der SettingsWrite-
+-- Handler lädt die Registry neu und der Snapshot serviert 0.6 ohne
+-- Prozess-Neustart (internal/events/blocktype_reload_integration_test.go).
+-- Genau das ist Gate 1 aus W01-8 und wird in
+-- blocktype/damping146_integration_test.go gegen die reale Kette geprüft.
+--
+-- LOCKSTEP MIT internal/blocktype/builtin.go: dort steht auditTrailDamping im
+-- selben Commit auf 0.6. Der Drift-Gate ist TestRegistryGolden_Integration — er
+-- appliziert die ECHTE Kette (113 seedet 0.3, 146 hebt) und vergleicht den
+-- ENDZUSTAND der Zeilen gegen builtinPolicies(); ein Drift in beide Richtungen
+-- ist rot. TestMigration146SetsAuditTrailDamping ist der container-freie
+-- Vorposten darauf: er liest diese Datei aus migrations.FS und pinnt Namen,
+-- Scope, Pfad, neuen Wert und beide Guards, ohne eine Datenbank zu brauchen.
+--
+-- NICHT IN DIESER MIGRATION: der FTS-Id-Tiebreak (eigene Welle, eigene Nummer)
+-- und jede andere Registry-Zeile. tool-evidence (0.15) und tool-overview (0.35)
+-- bleiben unberührt — gemessen wurde audit-trail, sonst nichts.
+-- =============================================================================
+
+SET LOCAL lock_timeout = '2s';
+
+UPDATE context_block_types
+   SET config = jsonb_set(config, '{retrieval,damping_factor}', '0.6'::jsonb)
+ WHERE scope = '_global'
+   AND name = 'audit-trail'
+   AND builtin = true
+   AND config->'retrieval'->>'policy' = 'damped'
+   AND (config->'retrieval'->>'damping_factor')::numeric = 0.3;

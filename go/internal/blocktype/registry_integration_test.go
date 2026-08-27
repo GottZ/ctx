@@ -103,7 +103,9 @@ func dampingOf(t *testing.T, s *blocktype.Set) float64 {
 // the migration 072 seeds come from the embedded migrations.FS (testdb applies
 // the real chain), the expectation is the compiled-in builtin set — NO
 // test-local JSON copy. RED when either side drifts (probed: builtin damping
-// 0.3→0.35 flips golden_rows_match_builtin red).
+// 0.3→0.35 flips golden_rows_match_builtin red; probed again in wave C2-1 with
+// migration 146 landed and auditTrailDamping still at 0.3 — same gate, other
+// direction).
 func TestRegistryGolden_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -237,8 +239,8 @@ func TestRegistryGolden_Integration(t *testing.T) {
 		if capture.has(slog.LevelError, "", "") {
 			t.Errorf("healthy boot emitted ERROR records: %+v", capture.records)
 		}
-		if got := dampingOf(t, reg.Snapshot()); got != 0.3 {
-			t.Errorf("damping after healthy boot = %v, want 0.3", got)
+		if got := dampingOf(t, reg.Snapshot()); got != 0.6 {
+			t.Errorf("damping after healthy boot = %v, want 0.6", got)
 		}
 	})
 }
@@ -275,8 +277,8 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 		if !capture.has(slog.LevelError, "boot reload failed", "") {
 			t.Errorf("no ERROR record for the corrupt-row boot — degradation is silent: %+v", capture.records)
 		}
-		if got := dampingOf(t, reg.Snapshot()); got != 0.3 {
-			t.Errorf("builtin fallback damping = %v, want 0.3", got)
+		if got := dampingOf(t, reg.Snapshot()); got != 0.6 {
+			t.Errorf("builtin fallback damping = %v, want 0.6", got)
 		}
 
 		// Retry heal WITHOUT restart (§4.3 b): fix the row, the 100ms retry
@@ -297,10 +299,11 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 		if got := dampingOf(t, reg.Snapshot()); got != 0.4 {
 			t.Errorf("damping after heal = %v, want DB value 0.4 (retry did not load DB rows)", got)
 		}
-		// Restore the seed value for the following subtests.
+		// Restore the chain's end-state value for the following subtests (0.6
+		// since migration 146, not the 113 seed 0.3).
 		if _, err := pool.Exec(ctx,
 			`UPDATE context_block_types
-			    SET config = jsonb_set(config, '{retrieval,damping_factor}', '0.3')
+			    SET config = jsonb_set(config, '{retrieval,damping_factor}', '0.6')
 			  WHERE name = 'audit-trail'`); err != nil {
 			t.Fatalf("restore row: %v", err)
 		}
@@ -389,8 +392,8 @@ func TestRegistryDegradation_Integration(t *testing.T) {
 		if capture.has(slog.LevelError, "", "") {
 			t.Errorf("pre-072 boot emitted ERROR records (class split broken): %+v", capture.records)
 		}
-		if got := dampingOf(t, reg.Snapshot()); got != 0.3 {
-			t.Errorf("builtin damping = %v, want 0.3", got)
+		if got := dampingOf(t, reg.Snapshot()); got != 0.6 {
+			t.Errorf("builtin damping = %v, want 0.6", got)
 		}
 	})
 }

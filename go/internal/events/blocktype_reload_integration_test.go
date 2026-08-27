@@ -68,14 +68,14 @@ func TestBlocktypeNotifyDispatch_Integration(t *testing.T) {
 	bctx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
 	reg.Boot(bctx, pool)
-	if got := dampedFactor(t, reg.Snapshot()); got != 0.3 {
-		t.Fatalf("boot damping = %v, want seed 0.3", got)
+	if got := dampedFactor(t, reg.Snapshot()); got != 0.6 {
+		t.Fatalf("boot damping = %v, want the chain end state 0.6 (113 seeds 0.3, 146 lifts it)", got)
 	}
 
 	cfg := config.NewStore(&config.Config{})
 	h := NewSettingsWriteHandler(pool, cfg, nil, reg)
 
-	// Hot-reload probe: psql-style UPDATE damping 0.3→0.5, then the NOTIFY
+	// Hot-reload probe: psql-style UPDATE damping 0.6→0.5, then the NOTIFY
 	// payload through the handler ⇒ Snapshot() serves 0.5 without restart.
 	t.Run("hot_reload_updates_snapshot", func(t *testing.T) {
 		if _, err := pool.Exec(ctx,
