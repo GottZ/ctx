@@ -242,7 +242,13 @@ if ! command -v golangci-lint >/dev/null 2>&1; then
     exit 0
 fi
 
-golangci-lint run --timeout=2m
+# Hook-owned, per-worktree cache: the shared default cache gets poisoned by
+# parallel agent worktrees (phantom issues pointing at deleted trees; 11
+# documented cases). rev-parse resolves to the worktree the hook runs in, so
+# each tree lints against its own cache and contamination dies with the tree.
+GLCI_CACHE_DIR="$(git rev-parse --show-toplevel)/.gotmp/glci-precommit"
+mkdir -p "$GLCI_CACHE_DIR"
+GOLANGCI_LINT_CACHE="$GLCI_CACHE_DIR" golangci-lint run --timeout=2m
 RESULT=$?
 
 if [ $RESULT -ne 0 ]; then
