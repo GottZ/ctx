@@ -42,10 +42,14 @@ type EnvStamp struct {
 	// (§5 B4b): which instance the numbers came from, which shadow types were
 	// measured, and whether the measure-copy requirement was overridden. The
 	// override is only ever legitimate when it is visible.
-	InstanceKind      string           `json:"instance_kind,omitempty"`
-	ShadowTypes       []string         `json:"shadow_types,omitempty"`
-	AllowLiveInstance bool             `json:"allow_live_instance,omitempty"`
-	Dumps             []DumpProvenance `json:"dumps"`
+	InstanceKind      string   `json:"instance_kind,omitempty"`
+	ShadowTypes       []string `json:"shadow_types,omitempty"`
+	AllowLiveInstance bool     `json:"allow_live_instance,omitempty"`
+	// RegimeLabels is the X-W0 label file the G-REAL strata were cut from
+	// (wave X-W0b). Absent — and, being omitempty, absent from the bytes as
+	// well — when no split was asked for.
+	RegimeLabels *RegimeStamp     `json:"regime_labels,omitempty"`
+	Dumps        []DumpProvenance `json:"dumps"`
 }
 
 // DumpProvenance is one measured dump as the report cites it.
@@ -124,6 +128,11 @@ type ScoreInput struct {
 	// produced before the wave, and a pre-142 dump stays scorable.
 	DampingType string
 
+	// RegimeSplit carries the X-W0 labels that cut G-REAL into its two regime
+	// rows (wave X-W0b). The zero value is inactive and the report is then
+	// byte-identical to the one this instrument produced before the wave.
+	RegimeSplit RegimeSplit
+
 	Seed        int64
 	GitRevision string
 	GoldStamp   goldset.Stamp
@@ -153,6 +162,17 @@ func Score(in ScoreInput) (ReportBody, error) {
 	excluded := unionExcluded(in.StampA, in.StampB)
 	recsA := dropExcluded(in.RecordsA, excluded)
 	recsB := dropExcluded(in.RecordsB, excluded)
+
+	// The stratification runs AFTER the exclusions: a case that left the report
+	// needs no label, and demanding one for it would refuse a run over a fact
+	// the report does not state.
+	var err error
+	if recsA, err = applyRegime(recsA, in.RegimeSplit); err != nil {
+		return ReportBody{}, err
+	}
+	if recsB, err = applyRegime(recsB, in.RegimeSplit); err != nil {
+		return ReportBody{}, err
+	}
 
 	body := ReportBody{
 		Version: ReportVersion,
@@ -270,6 +290,15 @@ func scoreConfigs(cfgs []Config, recsA, recsB []Record, unlabelled map[string]bo
 			}
 			res.Slices = append(res.Slices, metricsOf(slice, sets[slice], unlabelled[slice], seed))
 		}
+		// The strata are appended only where records for them exist. Unlike the
+		// rollout slices they get NO empty row on a missing dump: an absent
+		// split is absent, and a zero row would read as a measured half.
+		for _, slice := range StratumSlices() {
+			if sets[slice] == nil {
+				continue
+			}
+			res.Slices = append(res.Slices, metricsOf(slice, sets[slice], unlabelled[slice], seed))
+		}
 		out = append(out, res)
 	}
 	return out
@@ -294,26 +323,26 @@ func compareAll(cfgs []ConfigResult, setsA map[string]map[string]*caseSet, v0B m
 
 		var hold, holdRef *Comparison
 		var others []Comparison
-		for _, slice := range ReportSlices() {
+		// The strata are walked in the same loop and produce the same rows — but
+		// they never enter `others`. A stratum is a SUBSET of G-REAL, which
+		// already votes there; letting both vote would give the same cases two
+		// regression vetoes over one win (§4.4b asks for the row, not the vote).
+		for _, slice := range append(ReportSlices(), StratumSlices()...) {
 			if unlabelled[slice] {
 				continue
 			}
-			variant := setsA[name][slice]
-			if name == NameV0Prime {
-				variant = nil
-				if v0B != nil {
-					variant = v0B[slice]
-				}
-			}
-			c, ok := compare(name, slice, setsA[NameV0][slice], variant, level, seed)
+			c, ok := compare(name, slice, setsA[NameV0][slice],
+				variantSet(name, slice, setsA, v0B), level, seed)
 			if !ok {
 				continue
 			}
 			cmps = append(cmps, c)
-			if slice == SliceQHold {
+			switch {
+			case slice == SliceQHold:
 				cc := c
 				hold = &cc
-			} else {
+			case IsStratum(slice):
+			default:
 				others = append(others, c)
 			}
 		}
@@ -326,6 +355,18 @@ func compareAll(cfgs []ConfigResult, setsA map[string]map[string]*caseSet, v0B m
 		wins = append(wins, evaluateWin(name, primary, hold, holdRef, others))
 	}
 	return cmps, wins
+}
+
+// variantSet resolves the case set a configuration is read off. V0' is the only
+// one taken from the second dump — that is what makes it the replicate.
+func variantSet(name, slice string, setsA map[string]map[string]*caseSet, v0B map[string]*caseSet) *caseSet {
+	if name != NameV0Prime {
+		return setsA[name][slice]
+	}
+	if v0B == nil {
+		return nil
+	}
+	return v0B[slice]
 }
 
 // mergeInstanceKinds names every instance kind the pair was measured against,
@@ -391,6 +432,7 @@ func buildEnv(in ScoreInput) EnvStamp {
 		InstanceKind:      mergeInstanceKinds(in.StampA, in.StampB),
 		ShadowTypes:       mergeShadowTypes(in.StampA, in.StampB),
 		AllowLiveInstance: in.StampA.AllowLiveInstance || (in.StampB != nil && in.StampB.AllowLiveInstance),
+		RegimeLabels:      in.RegimeSplit.Stamp(),
 	}
 	env.GoldSHA256 = CombinedDigest(in.StampA.SliceFiles)
 	env.Dumps = append(env.Dumps, dumpProvenance("A", in.StampA))
@@ -427,7 +469,9 @@ func BuildSliceProfiles(recs []Record) []SliceProfile {
 	temporal := map[string]int{}
 	for _, rec := range recs {
 		if rec.EffectiveTemporal != "" {
-			temporal[SliceKeyOf(rec)]++
+			for _, k := range SliceKeysOf(rec) {
+				temporal[k]++
+			}
 		}
 	}
 	floor := map[string]bool{}
@@ -442,10 +486,12 @@ func BuildSliceProfiles(recs []Record) []SliceProfile {
 		}
 		p := SliceProfile{Slice: slice, N: c[0], Labelled: c[1],
 			Unlabelled: c[1] == 0, TemporalShare: TemporalShare(c[0], temporal[slice]),
-			RolloutCriterion: !floor[slice]}
+			RolloutCriterion: !floor[slice] && !IsStratum(slice)}
 		switch {
 		case floor[slice]:
 			p.Note = "floor check: gold is constructive and circular against the layer it would judge — never a rollout criterion"
+		case IsStratum(slice):
+			p.Note = StratumNote
 		case c[1] == 0:
 			p.Note = "unlabelled, skipped — relevance judgements land in wave B-W6"
 		case c[1] < c[0]:

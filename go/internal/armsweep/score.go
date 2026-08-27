@@ -50,6 +50,12 @@ const (
 	SliceGlob = goldset.SliceGlob
 	// SliceGlobKonstr is a FLOOR slice: reported, never a rollout criterion.
 	SliceGlobKonstr = goldset.SliceGlobKonstr
+	// SliceRealLocal and SliceRealGlobal are the X-W0 regime STRATA of G-REAL
+	// (wave X-W0b, design/05 §4.4b). They are a re-partition of SliceRealName,
+	// not new cases: every G-REAL case appears in the total row and in exactly
+	// one stratum row. See StratumSlices for why they never gate.
+	SliceRealLocal  = goldset.SliceReal + "-" + goldset.RegimeLocal
+	SliceRealGlobal = goldset.SliceReal + "-" + goldset.RegimeGlobal
 )
 
 // ReportSlices is the canonical slice order of every report, and it is exactly
@@ -70,8 +76,15 @@ func ReportSlices() []string {
 func FloorSlices() []string { return []string{SliceGlobKonstr} }
 
 // CensusSlices is the row order of the report's slice census: the rollout
-// slices plus the floor checks, each with its own row.
-func CensusSlices() []string { return append(ReportSlices(), FloorSlices()...) }
+// slices, the G-REAL regime strata and the floor checks, each with its own row.
+//
+// The strata sit BEHIND the rollout slices so the prefix of every existing
+// report stays where it was; a run without X-W0 labels produces no stratum
+// records at all and the census walks past them.
+func CensusSlices() []string {
+	out := append(ReportSlices(), StratumSlices()...)
+	return append(out, FloorSlices()...)
+}
 
 // SliceKeyOf maps a record to its report slice.
 func SliceKeyOf(rec Record) string {
@@ -159,14 +172,19 @@ type caseSet struct {
 func scoreSlices(recs []Record, cfg Config) map[string]*caseSet {
 	out := map[string]*caseSet{}
 	for _, rec := range recs {
-		k := SliceKeyOf(rec)
-		cs, ok := out[k]
-		if !ok {
-			cs = &caseSet{scores: map[string]CaseScore{}}
-			out[k] = cs
+		score := ScoreCase(rec, cfg)
+		// A stratified G-REAL case lands in TWO sets: its total row and its
+		// regime half. The case is scored once and the same value is filed
+		// twice, so the halves cannot drift from the total they partition.
+		for _, k := range SliceKeysOf(rec) {
+			cs, ok := out[k]
+			if !ok {
+				cs = &caseSet{scores: map[string]CaseScore{}}
+				out[k] = cs
+			}
+			cs.keys = append(cs.keys, rec.Key())
+			cs.scores[rec.Key()] = score
 		}
-		cs.keys = append(cs.keys, rec.Key())
-		cs.scores[rec.Key()] = ScoreCase(rec, cfg)
 	}
 	for _, cs := range out {
 		sort.Strings(cs.keys)
@@ -178,13 +196,14 @@ func scoreSlices(recs []Record, cfg Config) map[string]*caseSet {
 func labelledCounts(recs []Record) map[string][2]int {
 	out := map[string][2]int{}
 	for _, rec := range recs {
-		k := SliceKeyOf(rec)
-		c := out[k]
-		c[0]++
-		if len(rec.GoldIDs) > 0 {
-			c[1]++
+		for _, k := range SliceKeysOf(rec) {
+			c := out[k]
+			c[0]++
+			if len(rec.GoldIDs) > 0 {
+				c[1]++
+			}
+			out[k] = c
 		}
-		out[k] = c
 	}
 	return out
 }

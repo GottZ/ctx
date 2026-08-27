@@ -60,7 +60,13 @@ type Record struct {
 	// Split is DERIV or HOLD for G-Q, empty elsewhere. Carried INTO the dump so
 	// the score step never has to re-derive a partition from a seed and risk
 	// scoring the hold-out half it was supposed to leave alone.
-	Split   string   `json:"split,omitempty"`
+	Split string `json:"split,omitempty"`
+	// Regime is local or global for G-REAL, empty elsewhere (wave X-W0b). It is
+	// the ONE field the DUMP does not write: the X-W0 labels are a later
+	// artefact than the dumps they stratify, so the offline steps stamp it from
+	// the label file (regime.go) instead of re-measuring it. Empty means no
+	// split was asked for, and the report is then the one it always was.
+	Regime  string   `json:"regime,omitempty"`
 	GoldIDs []string `json:"gold_ids,omitempty"`
 
 	Rows        []rrf.ArmRow `json:"rows"`

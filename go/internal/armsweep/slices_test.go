@@ -114,8 +114,12 @@ func TestGlobKonstrIsFloorOnlyNeverRollout(t *testing.T) {
 	if !seen {
 		t.Fatalf("CensusSlices() = %v does not carry %s as its own row", census, armsweep.SliceGlobKonstr)
 	}
-	if len(census) != len(armsweep.ReportSlices())+len(floor) {
-		t.Errorf("CensusSlices() = %v, want ReportSlices() plus FloorSlices()", census)
+	// Wave X-W0b added a THIRD category to the registry: the G-REAL regime
+	// strata, reported like the floor check and, like it, never a rollout
+	// criterion. The invariant is tightened rather than relaxed — the census is
+	// still exactly the three registry lists and nothing else.
+	if len(census) != len(armsweep.ReportSlices())+len(armsweep.StratumSlices())+len(floor) {
+		t.Errorf("CensusSlices() = %v, want ReportSlices() plus StratumSlices() plus FloorSlices()", census)
 	}
 }
 

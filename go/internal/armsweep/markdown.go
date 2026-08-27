@@ -117,16 +117,20 @@ func writeSliceSection(b *strings.Builder, slices []SliceProfile) {
 	b.WriteString("## Slices\n\n| Slice | n | gelabelt | temporal | Rollout-Kriterium | Hinweis |\n|---|---:|---:|---:|---|---|\n")
 	for _, s := range slices {
 		fmt.Fprintf(b, "| %s | %d | %d | %.1f %% | %s | %s |\n",
-			s.Slice, s.N, s.Labelled, 100*s.TemporalShare, rolloutMark(s.RolloutCriterion), orDash(s.Note))
+			s.Slice, s.N, s.Labelled, 100*s.TemporalShare, rolloutMark(s.Slice, s.RolloutCriterion), orDash(s.Note))
 	}
 	b.WriteString("\n")
 }
 
-// rolloutMark spells the floor-check role out in the table rather than leaving
-// it to whoever remembers which slice name is a floor.
-func rolloutMark(ok bool) string {
-	if ok {
+// rolloutMark spells the role out in the table rather than leaving it to
+// whoever remembers which slice name is a floor and which is a stratum. The two
+// reasons for "nein" are different and the table says which one applies.
+func rolloutMark(slice string, ok bool) string {
+	switch {
+	case ok:
 		return "ja"
+	case IsStratum(slice):
+		return "**nein (Regime-Stratum)**"
 	}
 	return "**nein (Boden-Check)**"
 }

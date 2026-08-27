@@ -369,6 +369,20 @@ therefore reported as its own row (`rollout_criterion: false`) and left out of
 `armsweep.ReportSlices()`, which is the set every gate walks. `FloorSlices()`
 names it; `CensusSlices()` is what the report census iterates.
 
+**`G-REAL-local` / `G-REAL-global` are regime strata, not slices of their own.**
+With `-regime-labels <file>` on `score` or `compare`, the X-W0 label file
+(`query_sha256` → `local`/`global`) splits G-REAL into the two regimes the
+literature measures *opposite* winners in — 131/19 on the 150 real queries — and
+the report carries each half as its own census, metric, effect and (in `compare`)
+MDE row. The total row stays where it is and keeps every figure it had; without
+the flag the report is byte-identical to the one before the split existed. The
+halves are `rollout_criterion: false` for a reason sharper than the floor one: a
+stratum is a *subset* of a row that already votes, so letting both vote would
+count the same cases twice in G-NOISE's interpretability conjunction and in
+G-WIN's regression veto. `StratumSlices()` names them, and every gate keeps
+walking `ReportSlices()`. A G-REAL case the label file does not cover aborts the
+run (exit 4) instead of falling into a "rest" half nothing in the report names.
+
 Two construction rules are stated in the stamp rather than in a commit message.
 The **session window** is half-open `[day 00:00Z, day+1 00:00Z)` over the date in
 the daily report's TITLE (a report written after midnight still belongs to the
@@ -435,6 +449,7 @@ cd go && go build ./cmd/ctx-armsweep
 ./ctx-armsweep dump  -pins pins-<run>.jsonl            # measurement run V0
 ./ctx-armsweep dump  -pins pins-<run>.jsonl            # measurement run V0' (same pins)
 ./ctx-armsweep score -dump dumps/<A>.jsonl -dump-b dumps/<B>.jsonl
+./ctx-armsweep score -dump dumps/<A>.jsonl -regime-labels x-w0-labels.jsonl
 ```
 
 Four properties are enforced by the tool, not by discipline:

@@ -143,6 +143,42 @@ Zeilen tragen keinen Typnamen; die Kurve käme flach heraus, und zwar per
 Konstruktion statt per Messung. Läufe **ohne** `-damping-type` sind von alledem
 unberührt und über Alt-Dumps unverändert lauffähig.
 
+## Der G-REAL-Regime-Split (Welle X-W0b)
+
+```bash
+./ctx-armsweep score   -dump dumps/<A>.jsonl -dump-b dumps/<B>.jsonl \
+    -regime-labels x-w0-labels.jsonl
+./ctx-armsweep compare -dump-base <B0> -dump-cond <B1> -noise-pair <V0>,<V0'> \
+    -regime-labels x-w0-labels.jsonl
+```
+
+`-regime-labels` nimmt die X-W0-Label-Datei aus dem Gold-Verzeichnis
+(`query_sha256` → `local`/`global`, gemessen 131/19 auf den 150 G-REAL-Queries)
+und trägt G-REAL **zusätzlich** als `G-REAL-local` und `G-REAL-global` aus:
+Zensus-Zeile, Metrik-Zeile je Konfiguration, Vergleichs-/Effekt-Zeile,
+Verdrängungs-Zeile und — in `compare` — eine eigene MDE-Zeile. Die
+Gesamt-Zeile bleibt daneben stehen und Zahl für Zahl unverändert; ohne das Flag
+ist der Report exakt der bisherige.
+
+Der Grund steht in `design/05 §4.4b`: die Literatur misst in beiden Regimen
+**gegenläufige** Sieger, also ist jede Uplift-Aussage über eine ungeteilte
+G-REAL-Zeile ein Mittel über zwei Regime, die sich gegenseitig aufheben. Mit
+n=19 auf der globalen Hälfte fällt deren MDE entsprechend groß aus — das ist
+eine Eigenschaft der Slice und steht als Zahl im Report, nicht als Fußnote.
+
+Die beiden Hälften sind **Melde-Zeilen, nie Gatter-Eingang** — schärfer
+begründet als der Boden-Check G-GLOB-KONSTR: ein Stratum ist eine **Teilmenge**
+einer Zeile, die bereits abstimmt. Ließe man beide abstimmen, zählten dieselben
+Fälle zweimal — in der Auswertbarkeits-Konjunktion von G-NOISE und im
+Regressions-Veto von G-WIN. Beide laufen deshalb weiter über `ReportSlices()`.
+
+Ein G-REAL-Fall ohne Label bricht den Lauf ab (**Exit 4**) statt still eine
+Rest-Hälfte zu bilden: die Hälften addierten sich sonst zu einer Zahl über eine
+Menge, die niemand definiert hat, und kein Feld im Report würde das sagen. Die
+Label-Datei wird nicht in `STAMP.json` registriert (sie enthält keine Fälle,
+sondern partitioniert vorhandene) — ihr Name und ihr sha256 stehen im
+Report-Env unter `regime_labels`.
+
 ## Betrieb
 
 - **Off-Peak fahren, nicht parallel zu Dream.** Das ist eine Betriebsnotiz,

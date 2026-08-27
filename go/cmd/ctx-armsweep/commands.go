@@ -218,13 +218,17 @@ func cmdScore(c *common, dumpA, dumpB, outDir, name, dampingType string) error {
 	if err != nil {
 		return err
 	}
+	split, err := loadRegimeSplit(gold, c.regimeLabels)
+	if err != nil {
+		return err
+	}
 
 	recsA, stampA, err := loadDump(dumps, dumpA)
 	if err != nil {
 		return err
 	}
 	in := armsweep.ScoreInput{
-		RecordsA: recsA, StampA: stampA, DampingType: dampingType,
+		RecordsA: recsA, StampA: stampA, DampingType: dampingType, RegimeSplit: split,
 		Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp,
 	}
 	if dumpB != "" {
@@ -294,8 +298,12 @@ func cmdCompare(c *common, base, cond, noisePair, outDir, name string) error {
 	if err != nil {
 		return err
 	}
+	split, err := loadRegimeSplit(gold, c.regimeLabels)
+	if err != nil {
+		return err
+	}
 
-	in := armsweep.CompareInput{Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp}
+	in := armsweep.CompareInput{Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp, RegimeSplit: split}
 	if in.Base, err = loadDumpRef(dumps, armsweep.RoleBase, base); err != nil {
 		return err
 	}
@@ -473,6 +481,31 @@ func loadDumpStamp(dumps *goldset.Guard, name string) (string, armsweep.DumpStam
 		return "", armsweep.DumpStamp{}, fmt.Errorf("kein lesbarer Dump-Stempel %s: %w", stampName, err)
 	}
 	return p, stamp, nil
+}
+
+// loadRegimeSplit resolves the X-W0 label file, or returns the INACTIVE split.
+//
+// Opt-in by name rather than "use the file if it happens to be there": the file
+// is untracked private data, and a report whose slice rows depended on whether a
+// file existed at scoring time would not be reproducible from its own flags.
+// The name is resolved through the gold guard like every other gold artefact.
+func loadRegimeSplit(g *goldset.Guard, name string) (armsweep.RegimeSplit, error) {
+	if name == "" {
+		return armsweep.RegimeSplit{}, nil
+	}
+	p, err := g.Resolve(filepath.Base(name))
+	if err != nil {
+		return armsweep.RegimeSplit{}, err
+	}
+	regimes, err := goldset.ReadRegimeLabels(p)
+	if err != nil {
+		return armsweep.RegimeSplit{}, fmt.Errorf("Regime-Labels %s: %w", filepath.Base(name), err)
+	}
+	digest, err := goldset.FileDigest(p)
+	if err != nil {
+		return armsweep.RegimeSplit{}, err
+	}
+	return armsweep.RegimeSplit{File: filepath.Base(p), SHA256: digest, Regimes: regimes}, nil
 }
 
 func loadGoldStamp(g *goldset.Guard) (goldset.Stamp, error) {

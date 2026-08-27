@@ -14,7 +14,9 @@
 //	       fusioniert, je Slice gescort, über G-NOISE und G-WIN gegattert.
 //	       Mit -damping-type zusätzlich die Damping-Kurve eines Blocktyps über
 //	       zehn Stützstellen — eigene Report-Sektion, kein G-WIN-Urteil, und
-//	       nur über Dumps ab Migration 142 (sonst Exit 4).
+//	       nur über Dumps ab Migration 142 (sonst Exit 4). Mit -regime-labels
+//	       trägt der Report G-REAL zusätzlich als -local/-global-Zeilen aus
+//	       (X-W0b); ein Fall ohne Label bricht ab (Exit 4).
 //	compare zwei BEDINGUNGEN gegeneinander (design/05 §4.3, M-W3d), gegen den
 //	       Rauschboden des V0/V0'-Paars derselben Kampagne. Eigenes
 //	       Unterkommando, weil -dump-b in `score` das REPLIKAT ist: dort ist
@@ -25,6 +27,7 @@
 //	./ctx-armsweep dump  -pins pins-20260826T090000Z.jsonl
 //	./ctx-armsweep score -dump dumps/A.jsonl -dump-b dumps/B.jsonl
 //	./ctx-armsweep score -dump dumps/A.jsonl -damping-type checkpoint
+//	./ctx-armsweep score -dump dumps/A.jsonl -regime-labels x-w0-labels.jsonl
 //	./ctx-armsweep compare -dump-base B0.jsonl -dump-cond B1.jsonl \
 //	    -noise-pair V0.jsonl,V0p.jsonl
 //
@@ -79,6 +82,7 @@ func exitCodeFor(err error) int {
 		return 3
 	case errors.Is(err, errDumpAborted),
 		errors.Is(err, armsweep.ErrDumpPredatesTypeName),
+		errors.Is(err, armsweep.ErrRegimeLabelMissing),
 		errors.Is(err, armsweep.ErrStampIncongruent):
 		return 4
 	case errors.Is(err, armsweep.ErrNotMeasureCopy):
@@ -100,8 +104,16 @@ func exitCodeFor(err error) int {
 // damping curve was asked of an artefact measured before migration 142.
 // armsweep.ErrStampIncongruent shares it for the third time (M-W3d): the four
 // dumps of a comparison were readable and were rejected as a SET, because their
-// stamps do not describe one campaign.
+// stamps do not describe one campaign. armsweep.ErrRegimeLabelMissing is the
+// fourth (X-W0b): the artefacts were fine and the requested G-REAL split was
+// refused, because the X-W0 labels do not cover every case of the dump.
 var errDumpAborted = errors.New("dump verworfen (Drift-Protokoll)")
+
+// regimeLabelsUsage is the one wording of the X-W0b flag, shared by `score` and
+// `compare` so the two subcommands cannot describe the same file differently.
+const regimeLabelsUsage = "X-W0-Label-Datei im Gold-Verzeichnis (üblich: " + goldset.FileRegimeLabels +
+	"); trägt G-REAL zusätzlich als -local/-global-Zeilen aus. Ohne sie ist der Report der bisherige; " +
+	"ein G-REAL-Fall ohne Label bricht ab (Exit 4) statt still eine Rest-Hälfte zu bilden"
 
 // common carries the flags every subcommand shares.
 type common struct {
@@ -122,6 +134,10 @@ type common struct {
 	// instance-kind override (design/05 §4.2/§5 B4b).
 	shadowTypes string
 	allowLive   bool
+	// regimeLabels is the X-W0b stratification (design/05 §4.4b). Bound ONLY by
+	// the two offline subcommands: `prime` and `dump` measure, they do not
+	// report slices, and a flag they accept but ignore is a lie in the usage.
+	regimeLabels string
 }
 
 func (c *common) bind(fs *flag.FlagSet) {
@@ -187,6 +203,7 @@ func run() error {
 			"V0/V0'-Dump-Paar DERSELBEN Kampagne als CSV (Pflicht — ohne gemessenen Rauschboden verweigert der Vergleich)")
 		outDir := fs.String("reports", defaultReportDir(), "Report-Verzeichnis")
 		name := fs.String("name", "", "Basisname der Report-Dateien (Vorgabe: compare-<Lauf-ID des Bedingungs-Dumps>)")
+		fs.StringVar(&c.regimeLabels, "regime-labels", "", regimeLabelsUsage)
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			return err
 		}
@@ -197,6 +214,7 @@ func run() error {
 		outDir := fs.String("reports", defaultReportDir(), "Report-Verzeichnis")
 		name := fs.String("name", "", "Basisname der Report-Dateien (Vorgabe: armsweep-<Lauf-ID>)")
 		damping := fs.String("damping-type", "", "Blocktyp, dessen Damping-Kurve zusätzlich gefahren wird (10 Stützstellen; verlangt Dumps ab Migration 142)")
+		fs.StringVar(&c.regimeLabels, "regime-labels", "", regimeLabelsUsage)
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			return err
 		}

@@ -84,6 +84,11 @@ type CompareInput struct {
 	// entries; anything else is gate (a) and refuses.
 	NoisePair []DumpRef
 
+	// RegimeSplit carries the X-W0 labels that cut G-REAL into its two regime
+	// rows (wave X-W0b). Inactive by default; an inactive split leaves the
+	// report exactly as it was before the wave.
+	RegimeSplit RegimeSplit
+
 	Seed        int64
 	GitRevision string
 	GoldStamp   goldset.Stamp
@@ -110,6 +115,9 @@ type CompareEnv struct {
 	ShadowTypes         []string           `json:"shadow_types,omitempty"`
 	AllowLiveInstance   bool               `json:"allow_live_instance,omitempty"`
 	AllowOutsideGoldset bool               `json:"allow_outside_goldset,omitempty"`
+	// RegimeLabels is the X-W0 label file the G-REAL strata were cut from
+	// (wave X-W0b), absent from the bytes when no split was asked for.
+	RegimeLabels *RegimeStamp `json:"regime_labels,omitempty"`
 	// GUCs are the three ANN determinism knobs of §4.4b/F-23, as the campaign
 	// ran them: hnsw.ef_search off the instance stamp, iterative_scan and
 	// max_scan_tuples off the per-case selector state.
@@ -240,7 +248,7 @@ func Compare(in CompareInput) (CompareBody, error) {
 		return CompareBody{}, err
 	}
 	shadow := shadowTypeSet(in.Cond.Stamp.ShadowTypes)
-	acc, err := streamPairs(refs, shadow)
+	acc, err := streamPairs(refs, shadow, in.RegimeSplit)
 	if err != nil {
 		return CompareBody{}, err
 	}
@@ -441,7 +449,7 @@ func (a *compareAcc) noteUnpaired(key string) {
 // in ALL of them. A case missing from one dump is counted, never paired by
 // position: an exclusion that hit one run and not the other would otherwise
 // pair case i of one dump with a different case of the next.
-func streamPairs(refs []DumpRef, shadow map[string]bool) (*compareAcc, error) {
+func streamPairs(refs []DumpRef, shadow map[string]bool, regime RegimeSplit) (*compareAcc, error) {
 	streams := make([]*RecordStream, len(refs))
 	defer func() {
 		for _, s := range streams {
@@ -470,7 +478,7 @@ func streamPairs(refs []DumpRef, shadow map[string]bool) (*compareAcc, error) {
 			return acc, nil
 		}
 		if allAt(cur, live, key) {
-			if err := foldPair(acc, refs, cur, shadow); err != nil {
+			if err := foldPair(acc, refs, cur, shadow, regime); err != nil {
 				return nil, err
 			}
 			acc.paired++
@@ -513,7 +521,7 @@ func allAt(cur []Record, live []bool, key string) bool {
 
 // foldPair reduces one paired case to its contributions. The records leave
 // scope with the next iteration — nothing but the folded numbers survives.
-func foldPair(acc *compareAcc, refs []DumpRef, cur []Record, shadow map[string]bool) error {
+func foldPair(acc *compareAcc, refs []DumpRef, cur []Record, shadow map[string]bool, regime RegimeSplit) error {
 	base, cond, na, nb := cur[0], cur[1], cur[2], cur[3]
 	key := base.Key()
 	for i := 1; i < len(cur); i++ {
@@ -530,7 +538,28 @@ func foldPair(acc *compareAcc, refs []DumpRef, cur []Record, shadow map[string]b
 		acc.guc, acc.gucKnown = gucOf(base), true
 	}
 
-	s := acc.slice(SliceKeyOf(base))
+	// Fail-closed BEFORE the fold: an uncovered G-REAL case would otherwise
+	// contribute to the total row and to neither half, and the halves would
+	// still add up to something the report cannot name (regime.go).
+	base, err := stampRegime(base, regime)
+	if err != nil {
+		return err
+	}
+
+	cfg := ConfigV0()
+	bs, cs := ScoreCase(base, cfg), ScoreCase(cond, cfg)
+	as, bs2 := ScoreCase(na, cfg), ScoreCase(nb, cfg)
+	// A stratified G-REAL case is folded into TWO accumulators: its total row
+	// and its regime half. Scored once, filed twice — the halves cannot drift
+	// from the total they partition.
+	for _, k := range SliceKeysOf(base) {
+		foldInto(acc.slice(k), base, cond, bs, cs, as, bs2, cfg, shadow)
+	}
+	return nil
+}
+
+// foldInto adds one paired case to one slice accumulator.
+func foldInto(s *sliceAcc, base, cond Record, bs, cs, as, bs2 CaseScore, cfg Config, shadow map[string]bool) {
 	s.n++
 	if len(base.GoldIDs) > 0 {
 		s.labelled++
@@ -539,21 +568,17 @@ func foldPair(acc *compareAcc, refs []DumpRef, cur []Record, shadow map[string]b
 		s.temporal++
 	}
 
-	cfg := ConfigV0()
-	bs, cs := ScoreCase(base, cfg), ScoreCase(cond, cfg)
 	s.dNDCG = append(s.dNDCG, cs.NDCG10-bs.NDCG10)
 	s.dRecall = append(s.dRecall, cs.Recall5-bs.Recall5)
 	s.dMRR = append(s.dMRR, cs.MRR10-bs.MRR10)
 	s.baseHit = append(s.baseHit, bs.Hit5)
 	s.condHit = append(s.condHit, cs.Hit5)
 
-	as, bs2 := ScoreCase(na, cfg), ScoreCase(nb, cfg)
 	s.noiseDelta = append(s.noiseDelta, bs2.NDCG10-as.NDCG10)
 	s.noiseAHit = append(s.noiseAHit, as.Hit5)
 	s.noiseBHit = append(s.noiseBHit, bs2.Hit5)
 
 	foldDisplacement(&s.displacement, base, cond, cfg, shadow)
-	return nil
 }
 
 func sameIDs(a, b []string) bool {
@@ -689,8 +714,27 @@ func buildCompareBody(in CompareInput, refs []DumpRef, acc *compareAcc) CompareB
 		body.MDE = append(body.MDE, mdeOf(slice, s, cmp))
 	}
 
+	// The refusal is decided on the rollout slices ALONE, before the strata are
+	// measured: a stratum is a subset of G-REAL, so a red half would refuse the
+	// comparison a second time for cases that already voted. Their MDE row is
+	// what §4.4b asks for and it is written either way — with n=19 on the global
+	// half that row will be large, and that is a fact ABOUT the slice, not a
+	// verdict about the instrument.
 	body.Refused, body.RefusalReasons = noiseVerdict(body.Noise)
-	for _, slice := range ReportSlices() {
+	for _, slice := range StratumSlices() {
+		s := acc.slices[slice]
+		if s == nil || s.n == 0 || s.labelled == 0 {
+			continue
+		}
+		cmp, ok := noiseComparison(slice, s, in.Seed)
+		if !ok {
+			continue
+		}
+		noiseBySlice[slice] = evaluateNoise(cmp)
+		body.MDE = append(body.MDE, mdeOf(slice, s, cmp))
+	}
+
+	for _, slice := range append(ReportSlices(), StratumSlices()...) {
 		s := acc.slices[slice]
 		if s == nil || s.n == 0 {
 			continue
@@ -827,7 +871,7 @@ func displacementRows(acc *compareAcc) []DisplacementRow {
 		}
 		d := s.displacement
 		row := DisplacementRow{
-			Slice: slice, RolloutCriterion: !floor[slice], Cases: d.cases,
+			Slice: slice, RolloutCriterion: !floor[slice] && !IsStratum(slice), Cases: d.cases,
 			CasesWithDisplacement: d.casesWith, Cut: DisplacementCut,
 			ShadowInTopK: d.shadowTopK, ShadowAtRank1: d.shadowRank1,
 			Displaced: d.displaced, MaxPerCase: d.maxPerCase,
@@ -842,6 +886,8 @@ func displacementRows(acc *compareAcc) []DisplacementRow {
 			row.Note = "ohne Labels auf dieser Slice bleibt die Spalte „verdrängt & gelabelt\" leer (§4.3)"
 		case floor[slice]:
 			row.Note = "Boden-Check: konstruktives Gold, nie Rollout-Kriterium"
+		case IsStratum(slice):
+			row.Note = StratumNote
 		}
 		out = append(out, row)
 	}
@@ -877,11 +923,14 @@ func compareSliceProfiles(acc *compareAcc) []SliceProfile {
 		}
 		p := SliceProfile{
 			Slice: slice, N: s.n, Labelled: s.labelled, Unlabelled: s.labelled == 0,
-			TemporalShare: TemporalShare(s.n, s.temporal), RolloutCriterion: !floor[slice],
+			TemporalShare:    TemporalShare(s.n, s.temporal),
+			RolloutCriterion: !floor[slice] && !IsStratum(slice),
 		}
 		switch {
 		case floor[slice]:
 			p.Note = "floor check: gold is constructive and circular against the layer it would judge — never a rollout criterion"
+		case IsStratum(slice):
+			p.Note = StratumNote
 		case s.labelled == 0:
 			p.Note = "unlabelled, skipped — relevance judgements land in wave B-W6"
 		case s.labelled < s.n:
@@ -904,6 +953,7 @@ func buildCompareEnv(in CompareInput, refs []DumpRef, acc *compareAcc) CompareEn
 		CampaignPinRunID:   in.Base.Stamp.PinRunID,
 		InstanceKind:       in.Base.Stamp.InstanceKind,
 		ShadowTypes:        in.Cond.Stamp.ShadowTypes,
+		RegimeLabels:       in.RegimeSplit.Stamp(),
 		GUCs:               campaignGUCs(in, acc),
 	}
 	// The provenance cites each dump by the RELATIVE name its stamp carries, not
