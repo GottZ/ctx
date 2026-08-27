@@ -17,7 +17,7 @@ func TestReservedCategories_Golden(t *testing.T) {
 		}
 	}
 	// The insight arm's category is the DEFAULT of distill.category
-	// (config/config.go:1831). derived may not import config (leaf package), so
+	// (config/config.go:1886). derived may not import config (leaf package), so
 	// the coupling is asserted by value here and named in reserved.go.
 	if ReservedCategories[1] != "session-insights" {
 		t.Errorf("the insight category drifted from the distill.category default")

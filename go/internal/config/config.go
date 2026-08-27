@@ -1718,6 +1718,48 @@ type DistillConfig struct {
 	// is on the key's description, because it is the operator-visible half.
 	SourceLabel string `key:"distill.source_label" env:"CTX_DISTILL_SOURCE_LABEL" default:"hermes" mut:"hot" tenancy:"global-only"`
 
+	// ── The ctx-checkpoint source (design D-02, wave A02-4) ────────────────
+	//
+	// The arm's SECOND source, and the one that needs no foreign file: the
+	// compaction checkpoints this store writes about its own sessions. It gets
+	// its own switch, its own label and its own quiet gate rather than reusing
+	// the three above, because the two sources differ in every property those
+	// keys carry — one is a read-only SQLite file of an agent runtime, the
+	// other is rows of context_blocks — and a single set of keys would force
+	// one number to mean two things.
+	//
+	// LIKE THE GROUP AROUND IT, THIS HALF HAS NO CONSUMER YET (A02-4 ships the
+	// schema and the rules; the reader is A02-3, the arm A02-5). The rules come
+	// WITH the keys for the reason the group doc gives one screen up: a rule
+	// added after the key would be a rule added against an already-configurable
+	// value.
+	//
+	// CtxEnabled is the per-source master switch, default OFF for the same
+	// load-bearing reason distill.enabled is: an install that has never asked
+	// for a distiller must not start deriving blocks from its own transcripts.
+	CtxEnabled bool `key:"distill.ctx_enabled" env:"CTX_DISTILL_CTX_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	// CtxSourceLabel is the stable half of THIS source's journal source_key,
+	// exactly what SourceLabel is for the state.db source. The two must never
+	// be the same word: one source_key means one watermark series, and two
+	// sources sharing it would advance each other's watermark — the ranges in
+	// between are then skipped in silence, not re-read. The validator refuses
+	// the collision (case- and space-folded) before it can happen.
+	CtxSourceLabel string `key:"distill.ctx_source_label" env:"CTX_DISTILL_CTX_SOURCE_LABEL" default:"ctx-checkpoint" mut:"hot" tenancy:"global-only"`
+	// CtxQuietFor is this source's quiet gate in SECONDS — the counterpart of
+	// SessionQuietFor, and a separate key because the two measure different
+	// things: SessionQuietFor reads the age of the youngest live row in the
+	// foreign state.db, this one the age of the youngest checkpoint of a root
+	// session.
+	//
+	// 30 min, derived rather than inherited (decision EA-5): the inherited
+	// 10 min was reasoned against a compaction distance of "~2 h 27 min", but
+	// the measured median distance is 11.0 min (n = 157). At 10 min the gate
+	// would open right before the next compaction in half the cases — i.e.
+	// during active work. 30 min sits well above that p50 and far below p95
+	// (381 min); much above ~60 min the gate would never fire in a continuous
+	// session.
+	CtxQuietFor time.Duration `key:"distill.ctx_quiet_for" env:"CTX_DISTILL_CTX_QUIET_FOR" default:"1800" mut:"hot" tenancy:"global-only"`
+
 	// ── Cadence and gates (§4.2) ───────────────────────────────────────────
 	//
 	// Interval is the tick cadence in SECONDS (house convention:
@@ -1811,6 +1853,19 @@ type DistillConfig struct {
 	// still a fifth of the default interval, i.e. a hung call can never
 	// outlast its own cadence.
 	CallTimeout time.Duration `key:"distill.call_timeout" env:"CTX_DISTILL_CALL_TIMEOUT" default:"180" mut:"hot" tenancy:"global-only"`
+	// NumPredict is the answer budget of one distill call, in tokens. A KEY and
+	// not a constant, and the distinction is the group's own doctrine: the
+	// number is a COST POLICY, never a security floor. The predecessor design
+	// carried 640 as a Go constant; 512 is the value decision EA-8 settled on —
+	// enough for 4-6 insights with their quotes, and whoever wants more raises
+	// the key.
+	//
+	// The ceiling does not buy tokens (generated tokens are what is paid), it
+	// bounds the WORST CASE — and ~82 % of a call's cost is decode, so the
+	// worst case is where the money is. A02-M2 measures the actual yield and
+	// may correct the number; that it CAN be corrected without a build is
+	// exactly why it is a key.
+	NumPredict int `key:"distill.num_predict" env:"CTX_DISTILL_NUM_PREDICT" default:"512" mut:"hot" tenancy:"global-only"`
 
 	// ── The write path (§4.5) ──────────────────────────────────────────────
 	//
@@ -1829,6 +1884,25 @@ type DistillConfig struct {
 	// half of the upsert identity (category, title, scope), so changing it
 	// starts a new series rather than rewriting the old one.
 	Category string `key:"distill.category" env:"CTX_DISTILL_CATEGORY" default:"session-insights" mut:"hot" tenancy:"global-only"`
+	// BlockType is the block-type registry row every insight block is written
+	// under. Explicit and not inherited from the classifier, because the type
+	// decides three properties of the block that the arm itself cannot: whether
+	// it is retrievable at all, whether it is retrievable UNDAMPED, and whether
+	// the dedup guard may archive the very originals it quotes.
+	//
+	// Default "insight" — the derived layer's own type name (masterplan K3
+	// shortened it from "session-insight"; derived.TypeInsight is the code-side
+	// constant). A key rather than a constant for the reason distill.category
+	// is one: the operator surface stays honest about what the arm writes, and
+	// the validator keeps the value inside the derived layer instead of the key
+	// being a way out of it.
+	//
+	// The value is normalized (trim + lower) and then checked against the
+	// COMPILED registry: it must name a type, that type must not guard, must
+	// not be full-pass, and may only be excluded if it belongs to the derived
+	// layer. The exception exists because the derived types start excluded by
+	// board decision E-4 until the visibility pilots flip them.
+	BlockType string `key:"distill.block_type" env:"CTX_DISTILL_BLOCK_TYPE" default:"insight" mut:"hot" tenancy:"global-only"`
 	// CheckpointCategory is where the arm LOOKS for the checkpoint manifest it
 	// links its blocks to (metadata.manifest_id, §4.5). A neighbour's category,
 	// not its own — hence a key: if that neighbour renames its default, this

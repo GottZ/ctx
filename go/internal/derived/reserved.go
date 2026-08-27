@@ -18,7 +18,7 @@ import "strings"
 // Client writes into them are refused with 403 (S2, §4.3.1).
 //
 //   - "catalog" is the catalogue arm's category (design D-01 §4.7.1, D-03).
-//   - "session-insights" is the DEFAULT of distill.category (config.go:1831),
+//   - "session-insights" is the DEFAULT of distill.category (config.go:1886),
 //     which is the insight arm's category and half of its upsert identity.
 //
 // The second entry USED TO BE the one honest gap in this list: distill.category

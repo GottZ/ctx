@@ -108,10 +108,14 @@ func TestSettingsDistill_Integration(t *testing.T) {
 		if len(got) == 0 {
 			t.Fatal("no distill.* key in GET /api/settings — the group never reached the registry")
 		}
-		// The three values whose drift would be a posture change, asserted as
-		// the SERVED value rather than as a struct field.
+		// The values whose drift would be a posture change, asserted as the
+		// SERVED value rather than as a struct field. distill.ctx_enabled joined
+		// them in wave A02-4: it is the second source's master switch, and an
+		// install that never asked for a distiller must not start deriving
+		// blocks from its own session transcripts either.
 		for key, want := range map[string]string{
 			"distill.enabled":           `false`,
+			"distill.ctx_enabled":       `false`,
 			"distill.block_sensitivity": `"credentials"`,
 			"distill.scope":             `""`,
 		} {

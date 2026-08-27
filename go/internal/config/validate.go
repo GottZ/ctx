@@ -5,9 +5,11 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/promptguard"
@@ -70,15 +72,15 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
-	issues = append(issues, validateDistill(c)...)       // V22, V23, V24, V25, V27
+	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V30
 	return issues
 }
 
 // validateDistill holds the cross-field invariants of the distiller group
-// (design/03 §5.4, §5.5, §6.4; wave A03-W03-3, plus V27 from wave C2-8). All of
-// them are fatal: boot drops the offending override, a settings PUT is a 422 —
-// the class every "renders as configured, acts as something else" knob in this
-// file gets.
+// (design/03 §5.4, §5.5, §6.4; wave A03-W03-3, plus V27 from wave C2-8 and
+// V28-V30 from wave A02-4). All of them are fatal: boot drops the offending
+// override, a settings PUT is a 422 — the class every "renders as configured,
+// acts as something else" knob in this file gets.
 //
 // The group has no consumer yet. That is deliberate and it is exactly why the
 // checks come WITH the keys rather than after them: the arm that will read
@@ -179,7 +181,186 @@ func validateDistill(c *Config) []Issue {
 
 	issues = append(issues, validateDistillBudget(d)...) // V24
 	issues = append(issues, validateDistillCounters(d)...)
+	issues = append(issues, validateDistillCtxSource(d)...) // V28, V29, V30
 	return issues
+}
+
+// builtinTypeSet is the COMPILED block-type registry — the fail-safe floor
+// blocktype.NewRegistry() serves before any DB generation overlays it
+// (blocktype/registry.go:126-132: no pool, no query, no goroutine). V29
+// validates against THIS set and never against the live one, for exactly the
+// reason V27 keeps derived.ReservedCategories code-owned: context_block_types
+// is a table an operator can edit with SQL, so a rule that read the live rows
+// could be satisfied by INSERTing the very row it exists to refuse. The list
+// stays a mechanism, and the key stays a choice among compiled names.
+//
+// It is also the only shape available here: Validate is parameter-pure — no
+// context, no pool, no request scope — so a tenant-resolved generation has no
+// meaning at this call site. Every distill.* key is tenancy:"global-only"
+// anyway, so the base generation IS the arm's world.
+//
+// OnceValue because Validate runs at every boot and on every settings write
+// while the compiled set is a constant of the build.
+var builtinTypeSet = sync.OnceValue(func() *blocktype.Set {
+	return blocktype.NewRegistry().Snapshot()
+})
+
+// validateDistillCtxSource holds the three cross-field invariants the
+// ctx-checkpoint source brings with it (design D-02 §7.1, wave A02-4). All
+// three are fatal, the class of the group around them: boot drops the
+// offending override, a settings PUT is a 422.
+//
+// The source has no reader and the arm has no code yet. The rules ship WITH
+// the keys for the group's stated reason — a rule added later would be a rule
+// added against an already-configurable key — and because two of the three
+// describe a state that is not recoverable after the fact: a merged watermark
+// series has silently skipped ranges, and blocks written under the wrong type
+// carry that type until somebody notices.
+func validateDistillCtxSource(d *DistillConfig) []Issue {
+	var issues []Issue
+	issues = append(issues, validateDistillCtxLabel(d)...)       // V28
+	issues = append(issues, validateDistillBlockType(d)...)      // V29
+	issues = append(issues, validateDistillCtxSensitivity(d)...) // V30
+	return issues
+}
+
+// validateDistillCtxLabel is V28: the two source labels must name two
+// different sources.
+//
+// A label is the stable half of a journal source_key ("<label>:<session>",
+// §3.1) and therefore of the DERIVED watermark. Two sources under one label
+// share one series: each run advances the other's watermark, and the ranges in
+// between are not re-read but silently skipped. That is the same failure the
+// empty-label refusal in V25 names for a single source — "an empty label would
+// merge the watermark series of every configured source into one" — one level
+// up, which is why the empty case is refused here too rather than left to a
+// second reading of V25's message.
+//
+// THE COMPARISON FOLDS CASE AND SURROUNDING SPACE, and the values are NOT
+// normalized in place. Both halves are deliberate:
+//
+//   - Folding: byte-wise " Hermes " and "hermes" are two different source_keys,
+//     so a strict comparison would walk past them. But nobody sets two labels
+//     that differ only in a shift key WITH THE INTENT of separating two series,
+//     and the direction of the error is the safe one — it can only refuse more,
+//     never less.
+//   - No normalization: distill.source_label has been operator-visible since
+//     A03-W03-3 and goes into the source_key verbatim. Trimming it here would
+//     RENAME a live source (new key, no journal history, restart at
+//     initial_backfill_rows — the consequence its own doc comment carries), and
+//     that is not a validator's decision to make. V27 normalizes
+//     distill.category because the value is half an upsert identity that would
+//     otherwise CREATE a divergent category; a label creates nothing.
+func validateDistillCtxLabel(d *DistillConfig) []Issue {
+	ctxLabel := strings.TrimSpace(d.CtxSourceLabel)
+	if ctxLabel == "" {
+		return []Issue{{Field: "distill.ctx_source_label", Severity: SeverityError,
+			Msg: "distill.ctx_source_label must not be empty — it is the stable half of the ctx-checkpoint source's journal key, and an empty label would merge the watermark series of every configured source into one"}}
+	}
+	if !strings.EqualFold(ctxLabel, strings.TrimSpace(d.SourceLabel)) {
+		return nil
+	}
+	return []Issue{{Field: "distill.ctx_source_label", Severity: SeverityError,
+		Msg: fmt.Sprintf("distill.ctx_source_label %q and distill.source_label %q name the same source — one label is one watermark series, so the two sources would advance each other's watermark and the ranges in between would be skipped rather than re-read",
+			d.CtxSourceLabel, d.SourceLabel)}}
+}
+
+// validateDistillBlockType is V29: distill.block_type must name a COMPILED
+// block type that the arm may actually write under.
+//
+// The key decides three properties of every written block that the arm's own
+// code cannot: whether the block is retrievable at all, whether it is
+// retrievable UNDAMPED, and whether the dedup guard may archive the originals
+// the block quotes. Four refusals, each closing a different failure:
+//
+//  1. an unknown name (the empty string included): the write would name no
+//     registry row and fall through to the DEFAULT type, which is full-pass
+//     knowledge — the widest posture in the set, reached by a typo.
+//  2. guard.check: a derivative that takes part in the dedup guard archives
+//     the very originals it quotes, and it can archive itself.
+//  3. full-pass: distilled transcript and tool material would enter every
+//     query's candidate pool at full weight. M138's doctrine is verbatim that
+//     summarising attacker-shapable output does not launder it.
+//  4. excluded OUTSIDE the derived layer: the arm would write blocks nobody
+//     can retrieve — the silent null decision EA-10 names.
+//
+// WHY (4) CARRIES AN EXCEPTION, and why it is not a hole: the derived types are
+// excluded TODAY by masterplan K7 / board decision E-4 — a declared, reversible
+// DATA position held until the visibility pilots (X-W4/X-W5) measure a damping
+// factor, at which point the registry rows flip to damped. D-02 §7.1 wrote the
+// rule as "Kind not in {full-pass, excluded}" at a time when the type was
+// planned as damped from the start; K7 moved the start state afterwards, so the
+// literal rule would now refuse its OWN default and turn every boot into a
+// validation failure. The exception restores what the rule meant: excluded is
+// refused wherever it is the type's PERMANENT shape (checkpoint, system-meta),
+// and admitted only for the layer whose exclusion is a dated decision with a
+// scheduled reversal.
+//
+// The exception is read from CODE on both sides — derived.IsDerivedType and the
+// compiled set — never from a config value, so nothing an operator writes can
+// move a type into it.
+func validateDistillBlockType(d *DistillConfig) []Issue {
+	// Normalized in place for the V27 reason, sharpened by what this value
+	// becomes: the block's type_name verbatim. A padded or shift-keyed spelling
+	// would name no row at write time and take path (1) above at runtime,
+	// AFTER the settings write was accepted.
+	d.BlockType = strings.ToLower(strings.TrimSpace(d.BlockType))
+	fail := func(format string, args ...any) []Issue {
+		return []Issue{{Field: "distill.block_type", Severity: SeverityError, Msg: fmt.Sprintf(format, args...)}}
+	}
+	p, ok := builtinTypeSet().Resolve(d.BlockType)
+	switch {
+	case !ok:
+		return fail("distill.block_type %q is not a compiled block type (%s) — a name the registry does not know falls through to the default type at write time, which is the widest retrieval posture in the set",
+			d.BlockType, strings.Join(builtinTypeSet().Names(), ", "))
+	case p.Guard.Check:
+		return fail("distill.block_type %q takes part in the dedup guard (guard.check) — a derived block that guards would archive the very originals it quotes, and eventually itself",
+			d.BlockType)
+	case p.Retrieval.Kind == blocktype.RetrievalFullPass:
+		return fail("distill.block_type %q is retrieval %q — distilled transcript and tool material would enter every query's candidate pool at full weight, and summarising foreign output does not make it first-party",
+			d.BlockType, p.Retrieval.Kind)
+	case p.Retrieval.Kind == blocktype.RetrievalExcluded && !derived.IsDerivedType(d.BlockType):
+		return fail("distill.block_type %q is retrieval %q and does not belong to the derived layer (%s) — the arm would write blocks no query can ever return, which is a null decision rather than a setting",
+			d.BlockType, p.Retrieval.Kind, strings.Join(derived.DerivedTypeNames(), ", "))
+	}
+	return nil
+}
+
+// validateDistillCtxSensitivity is V30 (decision EA-4): the block sensitivity
+// may not be lowered while the ctx-checkpoint source is switched on.
+//
+// V23 puts the hard floor at "internal", which leaves TWO steps of descent
+// below the "credentials" default — and this axis CREATES the pressure to take
+// them. Because llm.MaxSensitivity folds over the final prompt set
+// (llm/synthesize.go), a SINGLE retrieved insight block at "credentials" locks
+// every query out of external synthesis; at the corpus rates this arm produces,
+// external synthesis would be off nearly always. The obvious relief is to lower
+// this key — and that relief opens the distilled session text, the most
+// sensitive material the store holds about its own operator, to every external
+// backend the pool has.
+//
+// So the descent stays legal exactly while the source is OFF: lowering it is an
+// act BEFORE switching the arm on, never a knob during operation. The
+// availability price (external synthesis effectively disabled) is a named cost
+// in the operating report, not a silent side effect.
+//
+// THE OFFENDER IS THE SENSITIVITY KEY, not the switch, and that decides how a
+// bad boot recovers: build.go's dropOffenders withdraws the override it can
+// attribute, and withdrawing the sensitivity restores "credentials" — the
+// fail-closed direction. Attributing the switch instead would leave the lowered
+// value standing under an arm that is merely off.
+//
+// The counter-precedent the design names explicitly: rootmap/run.go:184-188
+// decided the OTHER way for its derived block (explicit "internal", so external
+// backends stay reachable). It is a different trade — that block is a map of
+// the operator's own corpus structure, not a distillate of their transcripts.
+func validateDistillCtxSensitivity(d *DistillConfig) []Issue {
+	if !d.CtxEnabled || d.BlockSensitivity.Rank() >= backends.SensCredentials.Rank() {
+		return nil
+	}
+	return []Issue{{Field: "distill.block_sensitivity", Severity: SeverityError,
+		Msg: fmt.Sprintf("distill.block_sensitivity %q is below %q while distill.ctx_enabled is on — the distillate of this operator's own sessions would become eligible for every external backend the pool has; lower it only with the ctx source switched off",
+			d.BlockSensitivity, backends.SensCredentials)}}
 }
 
 // validateDistillBudget is V24: the prompt-budget coupling. One distill batch
@@ -249,6 +430,11 @@ func validateDistillCounters(d *DistillConfig) []Issue {
 		{"distill.rows_per_read", d.RowsPerRead, 1, "every read of the source would return nothing"},
 		{"distill.max_sessions_per_run", d.MaxSessionsPerRun, 1, "no source would ever be considered"},
 		{"distill.max_block_runes", d.MaxBlockRunes, 1, "every written block would be empty"},
+		// num_predict joins the sizing half rather than the zero-is-documented
+		// half (wave A02-4): 0 predict tokens is not "no ceiling", it is a call
+		// that can produce no answer — a second, silent off-switch next to
+		// distill.ctx_enabled that the settings surface renders as a budget.
+		{"distill.num_predict", d.NumPredict, 1, "a call with no answer budget can produce no insight"},
 		{"distill.breaker_failures", d.BreakerFailures, 1, "the breaker would stand open before the first attempt"},
 		{"distill.min_row_runes", d.MinRowRunes, 0, "a negative substance threshold has no reading"},
 		{"distill.initial_backfill_rows", d.InitialBackfillRows, 0, "0 is the documented cold start at the head of the source"},
