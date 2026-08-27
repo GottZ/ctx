@@ -112,6 +112,12 @@ func (a *adapter) QuietFor(ctx context.Context, sess string, now time.Time) (tim
 // Read returns at most maxItems archived tool results above after, each capped
 // to maxRunes runes.
 //
+// maxItems is honoured EXACTLY here, with none of the atom overshoot the
+// contract allows: this source's indivisible unit is a single archived row, so
+// a row count is also an item count and the cap can always be met. The
+// exception in the contract exists for sources whose atom spans several rows —
+// a manifest with its parts — and it does not apply to this one.
+//
 // Three properties are worth naming, because each one is a decision rather
 // than a translation:
 //

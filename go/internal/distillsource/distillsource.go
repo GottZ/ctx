@@ -184,6 +184,28 @@ type Source interface {
 	// Read returns at most maxItems items, each at most maxRunes runes, from
 	// the range above after. Both caps are the caller's; a non-positive cap
 	// yields an empty, incomplete batch rather than a source-chosen default.
+	//
+	// maxRunes is absolute. maxItems has ONE exception, and it is a property of
+	// this contract rather than of any implementation: when a source's smallest
+	// INDIVISIBLE unit exceeds the cap, that unit is delivered whole and the
+	// cap is overshot. A source whose atom is a single row never reaches this
+	// case — the hermes adapter reads one archived row at a time and honours
+	// maxItems exactly. A source whose atom is a group of rows does: the ctx
+	// checkpoint source reads a manifest with all of its parts, and the largest
+	// manifest in the live corpus yields 558 items against a rows_per_read of
+	// 400 (measured, A02-3).
+	//
+	// The alternative is worse than the overshoot, and that is why the contract
+	// bends rather than the implementation: a batch that can never cover its
+	// first atom never advances its watermark, so the caller re-reads the same
+	// range every tick, pays for it every time, and progresses never. A cap
+	// that produces a permanent stall is not a budget, it is a deadlock.
+	//
+	// Consequences a caller must plan for: a batch may exceed maxItems, so
+	// buffers and per-call budgets are dimensioned from the ATOM SIZE, not from
+	// the cap; and the overshoot is bounded by one atom, never by the corpus.
+	// A caller that needs a hard ceiling has to bound the material itself,
+	// because no source can honour one without losing the material outright.
 	Read(ctx context.Context, sess string, after int64, maxItems, maxRunes int) (Batch, error)
 
 	// QuietFor reports how long the session's newest LIVE material has been
