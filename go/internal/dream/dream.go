@@ -895,6 +895,57 @@ func SetDreamCooldownMinutes(ctx context.Context, pool *pgxpool.Pool, blockID st
 	return err
 }
 
+// dreamCandidateTypes is the dream keyword search's type allowlist:
+// intersect(VisibleTypes, DreamLinkableTypes) — BA15 (design/02 §5.1,
+// Vor-Welle V-9). Both lists are read from the SAME cycle snapshot, so the
+// result describes one policy generation and never a mix of two. Order follows
+// VisibleTypes (sorted at NewSet); the returned slice is freshly allocated and
+// owned by the caller.
+//
+// WHY THE INTERSECTION AND NOT THE DAMPING ARRAYS. BA15 offers both. Damping is
+// a ranking multiplier inside ctx_rrf's fusion, never an exclusion: with the
+// M146-shaped factor 0.60 a damped type still wins the slot whenever it beats
+// the best linkable type by ~42 ranks in an arm (0.60/(60+1) > 1.0/(60+r) holds
+// for r >= 42), and at the 1M+ target scale a large derived-block population
+// supplies that margin routinely. The hit would then be discarded by the
+// type-policy sieve below all the same — the slot is spent either way, which is
+// precisely the BA15 defect. The intersection removes the class of hits the
+// loop can NEVER use, so the whole MaxCandidatesPerKeyword budget goes to
+// blocks that can become link targets, and it puts the candidate side on the
+// same allowlist the pick side already binds (RunDreamCycle → PickBlock). That
+// is what "dream.linkable acts on BOTH sides" (§3.3 R1) has to mean once a
+// non-linkable type is retrievable at all.
+//
+// WHAT THIS DELIBERATELY DOES NOT CHANGE: a type that is damped AND linkable —
+// today only audit-trail (0.60 since M146) — keeps factor 1.0 in the dream
+// candidate search, unchanged from the pre-T5 semantics. Damping it here would
+// need a query to evaluate the intent patterns against, and the dream loop has
+// none; an empty query would damp audit-trail in every cycle. That is a
+// retrieval-policy decision about the dream loop, not part of closing BA15.
+//
+// The type-policy sieve after the keyword loop stays: it is the fail-closed
+// answer for a candidate whose type is unregistered or was deleted between the
+// RRF call and the lookup, and it carries the per-candidate sensitivity the
+// eval gate folds.
+func dreamCandidateTypes(typeSet *blocktype.Set) []string {
+	linkable := typeSet.DreamLinkableTypes()
+	if len(linkable) == 0 {
+		return nil
+	}
+	admitted := make(map[string]struct{}, len(linkable))
+	for _, name := range linkable {
+		admitted[name] = struct{}{}
+	}
+	visible := typeSet.VisibleTypes()
+	out := make([]string, 0, len(visible))
+	for _, name := range visible {
+		if _, ok := admitted[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // searchByKeywords runs one RRF search per keyword, deduplicates results,
 // and returns candidate blocks (excluding the source block and cross-scope
 // blocks), each annotated with its floor-adjusted sensitivity for the eval
@@ -930,7 +981,23 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 	if typeSet == nil {
 		return nil, 0, fmt.Errorf("dream: no block-type policy set (registry not wired)")
 	}
-	visibleTypes := typeSet.VisibleTypes()
+	candidateTypes := dreamCandidateTypes(typeSet)
+	if len(candidateTypes) == 0 {
+		// Policy, not a corpus fact: no retrievable type is dream-linkable.
+		// Left to the keyword loop this would hand rrf.Search an empty
+		// allowlist on every keyword, collect nothing, and let the caller book
+		// the source block INERT — a "nothing relates to it" verdict worth up
+		// to dream.backoff_cap days of silence, caused by a registry
+		// configuration rather than by the block. The transient park the error
+		// path takes is the honest booking for that. Unreachable on the seed
+		// registry (knowledge is full-pass AND linkable) and unreachable
+		// through an empty linkable list alone (PickBlock binds
+		// DreamLinkableTypes, so there would be no source block); the case this
+		// guards is the tenant overlay that leaves both lists non-empty and
+		// their intersection empty.
+		return nil, 0, fmt.Errorf("dream: no retrievable dream-linkable type (visible=%d, linkable=%d)",
+			len(typeSet.VisibleTypes()), len(typeSet.DreamLinkableTypes()))
+	}
 
 	for _, kw := range keywords {
 		// Embed the keyword for semantic search. Cached by (hash(prefix||kw), model) —
@@ -960,16 +1027,18 @@ func searchByKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, typeSe
 			continue
 		}
 
-		// RRF search with keyword as query. WF T5: visibility allowlist from
-		// the registry snapshot; damping arrays EMPTY (no lift needed — the
-		// dream-cycle keyword search wants the full retrieval pool at factor
-		// 1.0, exactly the pre-T5 audit-trail-factor 1.0 semantics; user-query
-		// pattern-aware damping stays handler-layer only).
-		// v2.0.0 C2 (M048): no exclude-lists for dream — dream sees every
-		// visible type. T40b: nil grant set — dream-cycle is an internal,
-		// scope-only retrieval pass (no per-tenant grantee identity), so the
-		// block-grant OR-arm is a no-op here.
-		results, _, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", visibleTypes, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
+		// RRF search with keyword as query. WF T5 / BA15: the allowlist is the
+		// candidate allowlist from the registry snapshot — intersect(visible,
+		// dream-linkable), see dreamCandidateTypes — NOT the plain visibility
+		// list; damping arrays stay EMPTY, so every type that survives the
+		// allowlist ranks at factor 1.0, exactly the pre-T5 audit-trail
+		// semantics (user-query pattern-aware damping stays handler-layer only,
+		// and there is no user query here to lift a type back out with).
+		// v2.0.0 C2 (M048): still no exclude-lists — the allowlist carries the
+		// whole type decision. T40b: nil grant set — dream-cycle is an
+		// internal, scope-only retrieval pass (no per-tenant grantee identity),
+		// so the block-grant OR-arm is a no-op here.
+		results, _, err := rrf.Search(ctx, pool, kwEmbedding, kw, kw, scopes, nil, nil, MaxCandidatesPerKeyword, "", "", candidateTypes, nil, nil, nil, nil, nil, rrf.SelectorPolicy{})
 		if err != nil {
 			slog.Debug("dream: rrf search failed", "keyword", kw, "error", err)
 			continue
