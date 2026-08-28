@@ -2,7 +2,7 @@
 // §3.1 envelope verbatim; edges arrive as RESPONSE-LOCAL index tuples into
 // nodes/rels — resolve them immediately on merge, never store indices.
 
-import { apiFetch } from '../api'
+import { ApiError, apiFetch } from '../api'
 
 // Source: go/internal/handler/graph.go (egoResponse), wire format pinned by
 // the §3.1 example + handler golden test.
@@ -202,11 +202,22 @@ export interface BlockDetail {
   sensitivity?: string
 }
 
-export function getBlock(id: string): Promise<{ success: true; block: BlockDetail }> {
-  return apiFetch<{ success: true; block: BlockDetail }>('/api/manage', {
+export function getBlock(id: string): Promise<{ success: true; block: BlockDetail; graph_visible?: boolean }> {
+  return apiFetch<{ success: true; block: BlockDetail; graph_visible?: boolean }>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'get', id }),
   })
+}
+
+/**
+ * True when an ego fetch failed with the graph route's 404 — the focus block
+ * does not exist or is not graph-visible (archived, retrieval-excluded type,
+ * foreign scope). The handler deliberately answers one identical 404 for all
+ * three (no existence oracle), so the client cannot distinguish them and must
+ * treat them alike: fall back to the topic map instead of a hard error banner.
+ */
+export function isEgoFocusNotFound(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404
 }
 
 // Source: go/internal/handler/overview.go (overviewResponse), wire format

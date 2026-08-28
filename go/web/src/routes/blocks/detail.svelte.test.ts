@@ -33,14 +33,14 @@ interface Call {
   id: string
 }
 
-function fakeApi(detail: BlockDetail, fail?: ApiError): DetailApi & { calls: Call[] } {
+function fakeApi(detail: BlockDetail, fail?: ApiError, graphVisible?: boolean): DetailApi & { calls: Call[] } {
   const calls: Call[] = []
   return {
     calls,
-    get: (id: string): Promise<{ success: true; block: BlockDetail }> => {
+    get: (id: string): Promise<{ success: true; block: BlockDetail; graph_visible?: boolean }> => {
       calls.push({ m: 'get', id })
       if (fail) return Promise.reject(fail)
-      return Promise.resolve({ success: true, block: { ...detail, id } })
+      return Promise.resolve({ success: true, block: { ...detail, id }, ...(graphVisible !== undefined ? { graph_visible: graphVisible } : {}) })
     },
   }
 }
@@ -102,6 +102,32 @@ describe('BlockDetailModel load', () => {
     expect(m.status).toBe('error')
     expect(m.loadError?.status).toBe(403)
   })
+
+  it('defaults graphVisible to true when the server omits the flag (older topology)', async () => {
+    // Pre-flag servers never send graph_visible — the "open in graph" link
+    // must not disappear (the graph page itself falls back on a 404).
+    const api = fakeApi(block('b1'))
+    const m = new BlockDetailModel(api)
+    await m.load('b1')
+    expect(m.graphVisible).toBe(true)
+  })
+
+  it('keeps graphVisible true for a retrieval-visible type', async () => {
+    const api = fakeApi(block('b1'), undefined, true)
+    const m = new BlockDetailModel(api)
+    await m.load('b1')
+    expect(m.graphVisible).toBe(true)
+  })
+
+  it('marks a retrieval-excluded type (system-meta) as not graph-visible', async () => {
+    // system-meta/checkpoint/… are searchable but excluded from the graph
+    // allowlist — a focus on them would 404 "Block not found". The model
+    // records the server verdict so the panel hides "open in graph".
+    const api = fakeApi(block('b1'), undefined, false)
+    const m = new BlockDetailModel(api)
+    await m.load('b1')
+    expect(m.graphVisible).toBe(false)
+  })
 })
 
 describe('BlockDetailModel close', () => {
@@ -124,5 +150,15 @@ describe('BlockDetailModel close', () => {
     expect(m.loadError).not.toBeNull()
     m.close()
     expect(m.loadError).toBeNull()
+  })
+
+  it('resets graphVisible to true on close', async () => {
+    const api = fakeApi(block('b1'), undefined, false)
+    const m = new BlockDetailModel(api)
+    await m.load('b1')
+    expect(m.graphVisible).toBe(false)
+    m.close()
+    // The next open starts from the neutral default, not the last verdict.
+    expect(m.graphVisible).toBe(true)
   })
 })

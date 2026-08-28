@@ -309,3 +309,35 @@ func TestSetStructuralClasses(t *testing.T) {
 		t.Errorf("StructuralClasses = %v, want [references] (reserved filtered)", got)
 	}
 }
+
+// GraphVisible is the retrieval-allowlist mirror of the graph routes: a block
+// is graph-focusable (ego/all focus) iff its type is registered and NOT
+// excluded — the same set the VisibilityPredicate type arm serves. Unknown or
+// empty names answer false (fail-closed, byte-identical to `type_name =
+// ANY($types)` in hydrateFocus). system-meta/checkpoint/catalog/insight are
+// searchable but never graph-focusable.
+func TestSetGraphVisible(t *testing.T) {
+	s := builtinTestSet(t)
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"knowledge", true},     // default, full-pass
+		{"reference", true},     // full-pass
+		{"issue", true},         // full-pass
+		{"audit-trail", true},   // damped
+		{"tool-evidence", true}, // damped (query-anchored evidence, M143)
+		{"comment", true},       // aggregate-to-parent
+		{"system-meta", false},  // excluded
+		{"checkpoint", false},   // excluded
+		{"catalog", false},      // excluded (derived layer, E-4 off)
+		{"insight", false},      // excluded (derived layer, E-4 off)
+		{"", false},             // unclassified — fail-closed wie type_name = ANY
+		{"no-such-type", false}, // unregistered — fail-closed
+	}
+	for _, c := range cases {
+		if got := s.GraphVisible(c.name); got != c.want {
+			t.Errorf("GraphVisible(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

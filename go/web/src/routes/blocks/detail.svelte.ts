@@ -23,6 +23,14 @@ export class BlockDetailModel {
   loadError = $state<ApiError | null>(null)
   /** The id currently open in the panel (drives the ?focus= graph link); null when closed. */
   openId = $state<string | null>(null)
+  /**
+   * Whether the open block can be focused in the graph (server's
+   * `graph_visible` — false for retrieval-excluded types like system-meta).
+   * Defaults true (older servers omit the field) so the "open in graph" link
+   * never disappears on a pre-flag topology; the graph page itself falls back
+   * to the topic map on a 404 regardless.
+   */
+  graphVisible = $state<boolean>(true)
 
   #api: DetailApi
 
@@ -44,6 +52,7 @@ export class BlockDetailModel {
     try {
       const res = await this.#api.get(id)
       this.block = res.block
+      this.graphVisible = res.graph_visible ?? true
       this.status = 'ready'
     } catch (err) {
       this.loadError = toApiError(err)
@@ -57,6 +66,7 @@ export class BlockDetailModel {
     this.block = null
     this.openId = null
     this.loadError = null
+    this.graphVisible = true
     this.status = 'idle'
   }
 }

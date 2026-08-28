@@ -80,7 +80,7 @@
       <dd>{b.updated_at.slice(0, 10)}</dd>
     </dl>
 
-    {#if model.openId}
+    {#if model.openId && model.graphVisible}
       <div class="actions">
         <a href={`/graph?focus=${model.openId}`}>Open in graph</a>
         {#if onedit}
