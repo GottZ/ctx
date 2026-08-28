@@ -214,6 +214,42 @@ func a8AnswerFromPrompt(req a8Request) (string, int) {
 	}), http.StatusOK
 }
 
+// a8CutAnswer renders the shape an answer cut at the output ceiling really has:
+// the objects the model already finished, then one the cut caught mid-string,
+// and after it neither the array nor the envelope ever closes.
+//
+// The shape is not invented. A02-M2 recorded 97 real calls against spark-chat;
+// 51 came back with finish_reason="length" at completion_tokens =
+// distill.num_predict = 512, and a rescan of exactly those 51 answers finds 243
+// complete insight objects in front of the cut and NOT ONE answer that was cut
+// before its first object closed.
+//
+// The two complete objects sit at DIFFERENT blocks of the same prompt, so the
+// number the gate keeps is a count of objects and not one line read twice.
+func a8CutAnswer(req a8Request) (string, int) {
+	addrs := a8Addrs(req.User)
+	if len(addrs) < 2 {
+		return a8Answer(), http.StatusOK
+	}
+	var b strings.Builder
+	b.WriteString(`{"insights":[`)
+	for i, a := range addrs[:2] {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		line, err := json.Marshal(map[string]any{
+			"claim": a8Claim, "quote": a8QuoteFrom(req.User, a),
+			"block": a.block, "chunk": a.chunk, "kind": "finding",
+		})
+		if err != nil {
+			panic(err)
+		}
+		b.Write(line)
+	}
+	b.WriteString(`,{"claim":"` + a8Claim + `","quote":"Der Retrieval-Pfad faltet vier`)
+	return b.String(), http.StatusOK
+}
+
 // Below: the pool — a LOCAL stub row plus a LIVE-SHAPED external row.
 
 // a8Pool seeds the backend pool the way the live registry looks: the serving
@@ -996,6 +1032,60 @@ func TestDistillExtractRound2(t *testing.T) {
 				"a value that is fixed in code", backend, cerr)
 		}
 	})
+}
+
+// Below: the output-ceiling defect (wave A02-8c).
+
+// TestDistillExtractTruncatedAnswer is A02-8c's gate: an answer the output
+// ceiling cut must cost its LAST object, never the whole call — and never a
+// breaker fault.
+//
+// THE RED STATE IS MEASURED, not described. A02-M2 ran the landed arm against
+// spark-chat over a live excerpt: 51 of 97 calls returned finish_reason="length"
+// at completion_tokens = distill.num_predict, the strict json.Unmarshal in
+// distillDecode refused every one of them, and the arm booked each as a breaker
+// FAULT for an answer the model had actually delivered. 62 of 97 calls counted
+// as faults, longest consecutive streak 7 — with the production breaker of 3 the
+// arm would have locked its own serving backend over a ceiling it sets itself.
+// Counted in yield: 243 complete objects thrown away, more than half of what the
+// run produced.
+//
+// Two properties, and they are separate claims: the complete objects survive,
+// AND the cut does not feed the breaker. A fix that only stopped the fault would
+// still lose the objects; one that only kept the objects would still lock the
+// backend on the next long answer.
+func TestDistillExtractTruncatedAnswer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	key := distillSourceKey(dfLabel, dfScope, dfRoot)
+
+	a8Truncate(t, pool)
+	cfg := a8Config()
+	// ONE failure locks. That turns "did the cut feed the breaker?" into a
+	// question open() answers outright, instead of a reach into the counter map.
+	cfg.Distill.BreakerFailures = 1
+	stub := a8NewStub(t, a8CutAnswer)
+	s := a8Scheduler(pool, cfg, a8Source([]string{a8Block1, a8Block2}), a8Pool(stub.srv.URL))
+	s.distillOnce(ctx, dfNoDemand)
+
+	if n := len(stub.seen()); n != 1 {
+		t.Fatalf("the stub was called %d times, want 1 — rows_per_call = 5 puts both chunks in one call", n)
+	}
+	calls, kept, rejected, outcome := a8Ledger(t, pool, key)
+	if calls != 1 || kept != 2 || rejected != 0 {
+		t.Fatalf("ledger calls/kept/rejected = %d/%d/%d, want 1/2/0 — the two objects the model FINISHED "+
+			"in front of the cut are what it delivered, and the evidence gate accepted both", calls, kept, rejected)
+	}
+	if s.distillBreak.open(time.Now()) {
+		t.Fatal("the breaker opened on a cut answer — the arm's own output ceiling is not a backend fault, " +
+			"and booking it as one is what would have locked spark-chat in the A02-M2 run")
+	}
+	if outcome != distillOutcomeOk {
+		t.Fatalf("outcome = %q, want ok — a salvaged call is a partial success, not a failed run", outcome)
+	}
 }
 
 // a8MultiBatchSource hands out `batches` batches of `perBatch` chunks each,

@@ -489,20 +489,18 @@ type distillAnswer struct {
 }
 
 // distillDecode parses one model answer into the five known fields and reports
-// how many lines were offered and how many the SCHEMA refused.
+// how many lines were offered, how many the SCHEMA refused, and whether the
+// answer had to be read out of a TRUNCATED envelope.
 //
 // Strict per line, not per payload: a model that adds a sixth key loses that
 // line, never the call.
-func distillDecode(raw string) (ins []distillInsight, offered, refused int, err error) {
-	var env distillAnswer
-	if uerr := json.Unmarshal([]byte(raw), &env); uerr != nil {
-		return nil, 0, 0, fmt.Errorf("distill: decoding the answer: %w", uerr)
+func distillDecode(raw string) (ins []distillInsight, offered, refused int, truncated bool, err error) {
+	lines, truncated, err := distillLines(raw)
+	if err != nil {
+		return nil, 0, 0, false, err
 	}
-	if env.Insights == nil {
-		return nil, 0, 0, errors.New("distill: answer carries no insights array")
-	}
-	offered = len(*env.Insights)
-	for _, line := range *env.Insights {
+	offered = len(lines)
+	for _, line := range lines {
 		dec := json.NewDecoder(bytes.NewReader(line))
 		dec.DisallowUnknownFields()
 		var in distillInsight
@@ -527,7 +525,105 @@ func distillDecode(raw string) (ins []distillInsight, offered, refused int, err 
 		}
 		ins = append(ins, in)
 	}
-	return ins, offered, refused, nil
+	return ins, offered, refused, truncated, nil
+}
+
+// distillLines returns the raw insight lines of ONE answer and reports whether
+// they had to be read out of a truncated envelope.
+//
+// The strict parse is untouched and stays the primary path: a well-formed
+// answer is unmarshalled exactly as before and truncated is false. Only when
+// that parse fails does the salvage below run, and if the salvage finds no
+// complete object the caller sees the ORIGINAL parse error — an answer that
+// delivered nothing is still a fault.
+func distillLines(raw string) ([]json.RawMessage, bool, error) {
+	var env distillAnswer
+	uerr := json.Unmarshal([]byte(raw), &env)
+	if uerr == nil {
+		if env.Insights == nil {
+			return nil, false, errors.New("distill: answer carries no insights array")
+		}
+		return *env.Insights, false, nil
+	}
+	lines, closed := distillSalvage(raw)
+	if len(lines) == 0 {
+		return nil, false, fmt.Errorf("distill: decoding the answer: %w", uerr)
+	}
+	return lines, !closed, nil
+}
+
+// distillSalvage reads the COMPLETE elements of the insights array out of a
+// payload the strict parser refused, and reports whether the array closed.
+//
+// THE CASE IT EXISTS FOR IS MEASURED, not hypothetical. A02-M2 ran this arm
+// against spark-chat over a live excerpt: 51 of 97 calls came back with
+// finish_reason="length" at completion_tokens = distill.num_predict, the strict
+// json.Unmarshal above refused every one of them, and with them 243 complete
+// insight objects that stood in front of the cut. Worse than the yield: each of
+// those answers was booked as a breaker FAULT, so the arm was on course to lock
+// its own serving backend over a ceiling it sets itself.
+//
+// Streaming, and no repair of the text. json.Decoder consumes one array element
+// at a time, so every element returned here is a value the STRICT parser
+// accepted on its own — the cut element is simply where reading stops. Nothing
+// is patched shut, nothing is guessed, and the screening loop above sees exactly
+// the same shape of line it always saw.
+//
+// A CLOSED array behind a refused strict parse is NOT truncated, and the
+// distinction is kept rather than folded away: bytes trailing a whole envelope
+// are a wrapper defect, not a ceiling hit, and reporting them as one would send
+// an operator to raise a key that was never the problem.
+//
+// Errors fold into "no lines" on purpose. Every failure in here means one thing
+// to the caller — the salvage could not read the array — and the error it then
+// reports is the strict one, which names the actual defect.
+func distillSalvage(raw string) ([]json.RawMessage, bool) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, false
+	}
+	for {
+		key, kerr := dec.Token()
+		if kerr != nil {
+			return nil, false
+		}
+		if _, isDelim := key.(json.Delim); isDelim {
+			return nil, false // the object closed without ever naming insights
+		}
+		if name, _ := key.(string); name == "insights" {
+			return distillSalvageArray(dec)
+		}
+		var skip json.RawMessage
+		if serr := dec.Decode(&skip); serr != nil {
+			return nil, false
+		}
+	}
+}
+
+// distillSalvageArray drains the array the decoder is positioned on and reports
+// whether it reached the closing bracket.
+func distillSalvageArray(dec *json.Decoder) ([]json.RawMessage, bool) {
+	open, err := dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	if d, ok := open.(json.Delim); !ok || d != '[' {
+		return nil, false
+	}
+	var lines []json.RawMessage
+	for dec.More() {
+		var line json.RawMessage
+		if derr := dec.Decode(&line); derr != nil {
+			return lines, false // the cut element; everything before it stands
+		}
+		lines = append(lines, line)
+	}
+	_, cerr := dec.Token() // the ']' — missing exactly when the answer was cut
+	return lines, cerr == nil
 }
 
 // distillHasControlRunes reports whether s carries a C0/C1 control character
@@ -880,10 +976,28 @@ func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []d
 		return s.distillFault(backend, t.opts)
 	}
 
-	ins, offered, refused, derr := distillDecode(answer)
+	ins, offered, refused, truncated, derr := distillDecode(answer)
 	if derr != nil {
 		slog.Error("scheduler: distiller could not decode the answer", "backend", backend, "error", derr)
 		return s.distillFault(backend, t.opts)
+	}
+	if truncated {
+		// THE CUT IS NOT A BACKEND FAULT — that is A02-8c's whole point. The
+		// model delivered; the arm's OWN output ceiling stopped it mid-array.
+		// Booking it as a failure is what put the A02-M2 run on course to lock
+		// spark-chat (62 of 97 calls faulted, longest consecutive streak 7,
+		// against a production breaker_failures of 3), and it would have locked
+		// it out of a healthy backend answering healthy answers.
+		//
+		// What the call still loses — the cut object, plus whatever the model had
+		// not written yet — is a SIZING signal and therefore belongs in front of
+		// an operator. The warning is the whole signal, and that is a DECLARED
+		// deviation for rep.Cut()'s reason above: distill_run has no column for
+		// it and this wave writes no migration. The other half is already durable
+		// — completion_tokens on this call's context_llm_log row equals
+		// distill.num_predict exactly when the ceiling was what stopped it.
+		slog.Warn("scheduler: distiller answer was cut at the output ceiling",
+			"backend", backend, "num_predict", t.opts.numPredict, "salvaged", offered)
 	}
 	kept, rejects := distillGate(ins, shown)
 	for k, v := range rejects {

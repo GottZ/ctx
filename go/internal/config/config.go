@@ -1906,16 +1906,35 @@ type DistillConfig struct {
 	// NumPredict is the answer budget of one distill call, in tokens. A KEY and
 	// not a constant, and the distinction is the group's own doctrine: the
 	// number is a COST POLICY, never a security floor. The predecessor design
-	// carried 640 as a Go constant; 512 is the value decision EA-8 settled on —
-	// enough for 4-6 insights with their quotes, and whoever wants more raises
-	// the key.
+	// carried 640 as a Go constant; EA-8 settled on 512 as "enough for 4-6
+	// insights with their quotes".
+	//
+	// 1536 SINCE A02-8c, AND THE CORRECTION IS THE MEASUREMENT EA-8 DID NOT
+	// HAVE. A02-M2 ran the arm against spark-chat over a live excerpt: 51 of 97
+	// calls stopped AT the ceiling (finish_reason="length", completion_tokens =
+	// 512) and lost 243 complete insight objects with the broken envelope. What
+	// that run could NOT show is the true need — a censored sample says nothing
+	// above its own cap — so A02-8c replayed 20 of those recorded prompts
+	// against the same endpoint with the cap raised out of the way: every one
+	// came back "stop" and parsed, needing 438…1357 tokens (p50 699, p90 1158).
+	// 1536 clears the measured maximum with ~13 % of head room; extrapolated
+	// over the 97-call population the length quote falls from 47,3 % to 0 %.
+	// The extrapolation validates itself — it reproduces 47,3 % where the run
+	// measured 52,6 %.
 	//
 	// The ceiling does not buy tokens (generated tokens are what is paid), it
 	// bounds the WORST CASE — and ~82 % of a call's cost is decode, so the
-	// worst case is where the money is. A02-M2 measures the actual yield and
-	// may correct the number; that it CAN be corrected without a build is
-	// exactly why it is a key.
-	NumPredict int `key:"distill.num_predict" env:"CTX_DISTILL_NUM_PREDICT" default:"512" mut:"hot" tenancy:"global-only"`
+	// worst case is where the money is. Both sides of raising it are measured:
+	// the AVERAGE call decodes ~29 % more (439 → 568 tokens, because answers now
+	// finish instead of being cut), while the worst case goes from ~17 to ~42
+	// GPU-s per call (§6.2 constants as A02-M2 remeasured them). Both stay far
+	// inside distill.call_timeout; what an operator sees is fewer calls per
+	// distill.spend_max_gpu_seconds window, against roughly twice the yield per
+	// call. That the number CAN be corrected without a build is exactly why it
+	// is a key — and it is also why the arm no longer DEPENDS on it being right:
+	// since A02-8c a cut answer keeps the objects the model finished
+	// (distillSalvage) instead of losing the call.
+	NumPredict int `key:"distill.num_predict" env:"CTX_DISTILL_NUM_PREDICT" default:"1536" mut:"hot" tenancy:"global-only"`
 
 	// ── The write path (§4.5) ──────────────────────────────────────────────
 	//

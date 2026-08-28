@@ -35,7 +35,11 @@ func TestDistillCtxKeysReachSettings(t *testing.T) {
 		{"distill.ctx_enabled", "bool", false},
 		{"distill.ctx_source_label", "string", "ctx-checkpoint"},
 		{"distill.ctx_quiet_for", "seconds", "30m0s"},
-		{"distill.num_predict", "int", 512},
+		// 1536 since A02-8c. 512 was EA-8's estimate ("enough for 4-6 insights
+		// with their quotes"); A02-M2 measured it against real calls and it was
+		// not — 51 of 97 stopped AT the ceiling. The replacement is measured too,
+		// and the measurement is in the config comment.
+		{"distill.num_predict", "int", 1536},
 		{"distill.block_type", "string", derived.TypeInsight},
 	} {
 		ki, ok := KeyByName(tc.key)
