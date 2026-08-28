@@ -3,7 +3,7 @@
   // GC1 §4.2: edge-curve-Import nur in Svelte-Komponenten (vitest-node-frei).
   import { DEFAULT_EDGE_CURVATURE, indexParallelEdgesIndex } from '@sigma/edge-curve'
   import { toApiError, type ApiError } from '../../lib/api'
-  import { fetchCategoryHues, fetchEgo, fetchGraphAll } from '../../lib/graph/api'
+  import { fetchCategoryHues, fetchEgo, fetchGraphAll, isEgoFocusNotFound } from '../../lib/graph/api'
   import { LayoutRunner } from '../../lib/graph/fa2'
   import { defaultFilters, toEgoQuery } from '../../lib/graph/filters'
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
@@ -43,6 +43,9 @@
   const rendererCaps = $derived(RENDERERS[rendererId].caps)
   let busy = $state(false)
   let error = $state<ApiError | null>(null)
+  // Soft fallback notice (fix C): a focus/expand 404 drops back to the topic
+  // map with this banner instead of a hard error — see isEgoFocusNotFound.
+  let notice = $state<string | null>(null)
   let truncated = $state(false)
   // Explicit counters: graph.order/size are non-reactive by design.
   let nodeCount = $state(0)
@@ -215,6 +218,7 @@
     if (busy) return
     busy = true
     error = null
+    notice = null
     try {
       const resp = await fetchEgo(id, { hops: 2, ...toEgoQuery(filters, loadedStructClasses) })
       focus = id
@@ -238,7 +242,18 @@
         store.open(id, opts.openTrigger ?? null)
       }
     } catch (err) {
-      error = toApiError(err)
+      const apiErr = toApiError(err)
+      if (isEgoFocusNotFound(apiErr)) {
+        // The focus block does not exist or is not graph-visible (archived,
+        // retrieval-excluded type like system-meta, foreign scope) — the ego
+        // route answers one identical 404 for all three (no existence
+        // oracle). A hard error banner would be a dead end for a shareable
+        // deep link; fall back to the topic map with a soft notice instead.
+        backToOverview()
+        notice = 'Block is not visible in the graph — showing the topic map.'
+      } else {
+        error = apiErr
+      }
     } finally {
       busy = false
     }
@@ -249,6 +264,7 @@
     if (busy) return
     busy = true
     error = null
+    notice = null
     try {
       touch(graph, id)
       const resp = await fetchEgo(id, { hops: 1, ...toEgoQuery(filters, loadedStructClasses) })
@@ -256,7 +272,16 @@
       truncated = resp.stats.truncated
       settle()
     } catch (err) {
-      error = toApiError(err)
+      const apiErr = toApiError(err)
+      if (isEgoFocusNotFound(apiErr)) {
+        // Same fallback as setFocus: the expanded block vanished from the
+        // visible graph mid-session (archived/scope-shifted) — back to the
+        // topic map instead of a dead-end banner.
+        backToOverview()
+        notice = 'Block is not visible in the graph — showing the topic map.'
+      } else {
+        error = apiErr
+      }
     } finally {
       busy = false
     }
@@ -271,6 +296,7 @@
     if (busy) return
     busy = true
     error = null
+    notice = null
     try {
       const resp = await fetchGraphAll(toEgoQuery(filters, loadedStructClasses))
       mergeEgo(graph, resp, palette, categoryHues)
@@ -289,6 +315,7 @@
     focus = null
     store.closeAll()
     error = null
+    notice = null
     const url = new URL(location.href)
     url.searchParams.delete('focus')
     history.replaceState(null, '', url)
@@ -358,6 +385,13 @@
       {#if error.requestId}
         <p class="request-id">request {error.requestId}</p>
       {/if}
+    </div>
+  {/if}
+
+  {#if notice}
+    <div class="notice" role="status">
+      <p>{notice}</p>
+      <button type="button" class="notice-close" aria-label="dismiss" onclick={() => (notice = null)}>×</button>
     </div>
   {/if}
 
@@ -518,6 +552,41 @@
   .error p {
     margin: 0;
     color: var(--danger);
+  }
+  /* Soft fallback notice (fix C): same overlay slot as .error, but neutral
+     info tone — a focus 404 is not a failure of the graph, just a block the
+     map cannot open. Dismissible; also cleared by any next focus/expand. */
+  .notice {
+    position: absolute;
+    top: var(--space-3);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: var(--z-overlay);
+    max-width: min(40rem, calc(100% - 2 * var(--space-3)));
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--fs-sm);
+  }
+  .notice p {
+    margin: 0;
+    color: var(--text);
+  }
+  .notice-close {
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    font-size: var(--fs-lg);
+    line-height: var(--lh-solid);
+    cursor: pointer;
+    padding: 0 var(--space-1);
+  }
+  .notice-close:hover {
+    color: var(--text);
   }
   .request-id {
     font-family: var(--font-mono);
