@@ -438,7 +438,23 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		"action":  "get",
 		"success": true,
 		"block":   block,
+		// Graph-focusable? Mirrors the retrieval allowlist the ego route
+		// serves (Set.GraphVisible). The UI hides "open in graph" for
+		// excluded types (system-meta, checkpoint, …) — a focus on those
+		// would 404 with "Block not found".
+		"graph_visible": h.graphVisible(ctx, block.TypeName),
 	})
+}
+
+// graphVisible reports whether a block of the given type can be the focus of
+// the graph routes. An unwired registry is treated as fully visible (the
+// pre-flag behavior) so the envelope stays additive and old topologies never
+// lose the link; once wired, excluded types answer false.
+func (h *ManageHandler) graphVisible(ctx context.Context, typeName string) bool {
+	if h.blocktypes == nil {
+		return true
+	}
+	return h.blocktypes.SnapshotForRequest(ctx).GraphVisible(typeName)
 }
 
 func (h *ManageHandler) handleListCategories(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
