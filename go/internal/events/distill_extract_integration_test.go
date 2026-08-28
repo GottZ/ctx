@@ -537,7 +537,7 @@ func TestDistillExtractGate(t *testing.T) {
 		// The arm's call sets LocalOnly fixed, so the whole chain is dropped and
 		// the call fails rather than leaving the house.
 		s := a8Scheduler(pool, a8Config(), a8Source([]string{a8Block1}), fullTrustExternal)
-		_, backend, cerr := s.distillCall(ctx, distillCallOpts{numPredict: 8, timeout: time.Second},
+		_, backend, _, cerr := s.distillCall(ctx, distillCallOpts{numPredict: 8, timeout: time.Second},
 			"s", "u", []string{a8Block1})
 		if cerr == nil {
 			t.Fatal("the call succeeded against a chain of only external rows — LocalOnly is not set")
@@ -1025,7 +1025,7 @@ func TestDistillExtractRound2(t *testing.T) {
 		}
 
 		s := a8Scheduler(pool, cfg, a8Source([]string{a8Block1}), bpool)
-		_, backend, cerr := s.distillCall(ctx, distillCallOpts{numPredict: 8, timeout: time.Second},
+		_, backend, _, cerr := s.distillCall(ctx, distillCallOpts{numPredict: 8, timeout: time.Second},
 			"s", "u", []string{a8Block1})
 		if cerr == nil || backend != "" {
 			t.Fatalf("with distill.local_only = false the call reached backend %q (err %v) — the key lowered "+

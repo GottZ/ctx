@@ -35,9 +35,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -226,12 +228,23 @@ func TestDerivedBadgeIsServerPathOnly(t *testing.T) {
 	}
 
 	// (4) The call sites, over the AST: composite key `Derived:` AND assignment
-	// `x.Derived = …`. Only internal/store may, until the arm lands (D-02/D-03)
-	// and is named here.
+	// `x.Derived = …`. The allowlist is what this test exists for — it is an
+	// ALLOWLIST and not a ban, and the comment it carried since W01-5 said so:
+	// "only internal/store may, UNTIL THE ARM LANDS (D-02/D-03) and is named
+	// here". The distiller arm (D-02, wave A02-9) landed, so internal/events is
+	// named. Every further entry is the same visible decision: a package that
+	// sets the badge acquires BOTH of its effects — sensitivity_source='derived'
+	// and the S3 server-path opening — and the second one is the reason a new
+	// name belongs in a diff rather than in a comment.
+	allowed := map[string]string{
+		"internal/store":  "the badge's own package",
+		"internal/events": "D-02, the distiller arm's block write (A02-9)",
+	}
 	for _, site := range derivedBadgeSites(t) {
-		if dir := filepath.ToSlash(filepath.Dir(site.file)); dir != "internal/store" {
-			t.Errorf("%s:%d sets .Derived (%s) — only internal/store may, until the arm lands (D-02/D-03) and is named here",
-				site.file, site.line, site.form)
+		dir := filepath.ToSlash(filepath.Dir(site.file))
+		if _, ok := allowed[dir]; !ok {
+			t.Errorf("%s:%d sets .Derived (%s) — only %v may; a new arm is named here in the same commit that starts setting it",
+				site.file, site.line, site.form, slices.Sorted(maps.Keys(allowed)))
 		}
 	}
 }

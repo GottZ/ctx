@@ -100,6 +100,18 @@ type Item struct {
 	// Origin is the provenance, carried verbatim into the written block.
 	Origin Origin
 
+	// Manifest is the READ UNIT this item belongs to — the compaction whose
+	// part list produced it. It is separate from Origin because Origin is the
+	// CITATION anchor (the exact text a gate verified against) while this is
+	// the coverage anchor: several items of several parts share one manifest,
+	// and the block a caller writes cites the parts but is ABOUT the
+	// compaction.
+	//
+	// A source whose read unit is not a manifest leaves it zero, which is the
+	// honest answer rather than a synthesized one — the hermes adapter reads
+	// one archived row at a time and has no such unit at all.
+	Manifest Manifest
+
 	// Sensitivity is the SOURCE's classification of this item. A source
 	// without a classification reports the highest rank, because the empty
 	// value is normatively rank 3 anyway (backends/trust.go:29-41) and an
@@ -109,6 +121,34 @@ type Item struct {
 	// Untrusted answers whether the source's own type carries
 	// retrieval.untrusted. It is the source's answer, not the arm's guess.
 	Untrusted bool
+}
+
+// Manifest names the compaction an item was read out of, in the four values a
+// derived block needs for its provenance. EVERY field is FOREIGN TEXT lifted
+// out of plugin-written metadata (the id excepted: it is a corpus uuid the
+// reader itself selected), so a consumer must re-type it before writing it
+// anywhere — the arm validates the three string fields against a character
+// class and drops what fails (design/02 §4.4.3).
+//
+// A zero Manifest means "this source has no such unit", never "the unit was
+// empty": absent is representable, and a caller must be able to tell the two
+// apart before it stamps a provenance.
+type Manifest struct {
+	// ID is the manifest block's corpus uuid.
+	ID string
+
+	// SHA256 is the transcript digest the plugin recorded on the manifest —
+	// metadata.sha256, present on every live manifest.
+	SHA256 string
+
+	// ParentID is the preceding manifest of the same root, "" for the first
+	// one of a chain (live: 282 of 319 manifests carry the key at all).
+	ParentID string
+
+	// ActiveSessionID is the session that produced the compaction, which is
+	// NOT the root: a root outlives its compactions and the plugin records
+	// both.
+	ActiveSessionID string
 }
 
 // Origin is the citation anchor. It must identify the exact text the gate

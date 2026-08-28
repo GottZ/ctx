@@ -3,12 +3,13 @@
 // it built the scaffolding for: A02-5 the cadence and the journal, A02-6 the
 // selection, A02-7 the spend guard that bewacht a call which did not exist yet.
 //
-// WHAT LANDS AND WHAT DOES NOT. The answer of a call reaches the run journal
-// (calls, insights_kept, insights_rejected) and context_llm_log, and nothing
-// else. No block is written — that is A02-9 — so a claim that survives all
-// seven gates here still leaves the process without ever becoming corpus text.
-// That split is deliberate: it lets the gate be measured (A02-M2) before it
-// gains the authority a written block would give it.
+// WHAT LANDS. The answer of a call reaches the run journal (calls,
+// insights_kept, insights_rejected), context_llm_log — and, since A02-9, the
+// SURVIVORS THEMSELVES: res.insights carries them out, resolved onto the corpus
+// ids the prompt-local numbers stand for, and distill_block.go turns them into
+// a block. The split that used to sit here — gate measured (A02-M2) before it
+// gains the authority of a written block — did its work: the measurement ran
+// first, and this file's counters are what it read.
 //
 // THE GATE IS THIS FILE'S REASON TO EXIST. G1-G7 (§4.3) are seven independent
 // screens, cheap before expensive, and every one of them is negatively probed
@@ -178,6 +179,51 @@ type distillShown struct {
 	blockIDs []string
 }
 
+// distillKept is ONE insight that survived G1-G7, resolved back onto the corpus.
+//
+// It exists because distillInsight is what the MODEL said — its Block field is
+// the prompt-local number, which means nothing outside the call that rendered
+// it. What the block write needs is the corpus identity, and resolving it here
+// keeps the resolution next to the shown map that is the only authority for it.
+//
+// Claim and Quote stay FOREIGN TEXT the whole way (§5 BA2): they reach the
+// block CONTENT, which is what this arm exists to produce, and never a
+// metadata key, a tag or a title.
+type distillKept struct {
+	claim   string
+	quote   string
+	blockID string
+	chunk   int
+}
+
+// distillResolveKept maps one call's survivors onto the corpus and reports how
+// many had to be dropped for want of an id (R2-2).
+//
+// A FUNCTION AND NOT A LOOP INSIDE distillOneCall, because the loop was the
+// only thing a unit test could reproduce rather than call: round 1's R2-2 unit
+// probe re-implemented this rule in the test file and stayed green with the
+// production path disarmed (round-2 minor #6). It is the same code now.
+//
+// The drop is NOT folded into the gate's reject counters: an insight the gate
+// kept but this arm cannot cite failed no screen. distillsource allows
+// Origin.BlockID == "" for non-ctx sources, and an uncitable insight would
+// leave the block claiming a provenance it does not have.
+func distillResolveKept(kept []distillInsight, shown distillShown) ([]distillKept, int) {
+	out := make([]distillKept, 0, len(kept))
+	unanchored := 0
+	for _, in := range kept {
+		id := shown.uuid[in.Block]
+		if id == "" {
+			unanchored++
+			continue
+		}
+		out = append(out, distillKept{
+			claim: in.Claim, quote: in.Quote, blockID: id, chunk: in.Chunk,
+		})
+	}
+	return out, unanchored
+}
+
 // distillExtractResult is one batch's accounting, folded into the run row.
 type distillExtractResult struct {
 	calls    int
@@ -195,6 +241,27 @@ type distillExtractResult struct {
 	// unseen and below the watermark, so the next tick reads it again
 	// (round-2 blocker #1).
 	processed int
+
+	// insights are the survivors, resolved onto the corpus (A02-9). Until this
+	// wave the gate's output was counted and dropped on the floor — the file
+	// header said so in as many words — and the whole point of the wave is that
+	// it now leaves the process.
+	insights []distillKept
+
+	// unanchored counts survivors DISCARDED here because their part carries no
+	// corpus id (R2-2). distillsource allows Origin.BlockID == "" for non-ctx
+	// sources, and an insight without one cannot be cited, cannot enter
+	// source_block_ids and would leave the block claiming provenance it does not
+	// have. Counted rather than silently absorbed: the honest failure of a
+	// source that is not wired here yet is a number, not an empty list.
+	unanchored int
+
+	// model is the model name of the LAST call that answered — the OnServed
+	// value the llm log stamps on its own row. One value and not a set: every
+	// call of a tick resolves the same chain under the same required
+	// sensitivity, so a second name would mean the chain moved mid-run, and the
+	// last one is then the one that produced the insights standing at the end.
+	model string
 }
 
 // Below: the in-run GPU meter (A02-7 review #2, assigned to this wave).
@@ -814,8 +881,8 @@ func distillCoverage(claim, chunk string) float64 {
 //
 // The dispatch class is background through s.backgroundAdmission()
 // (scheduler.go:598-604), which is what stamps dispatch_class on the row.
-func (s *Scheduler) distillCall(ctx context.Context, d distillCallOpts, system, user string, blockIDs []string) (answer, backend string, err error) {
-	var served string
+func (s *Scheduler) distillCall(ctx context.Context, d distillCallOpts, system, user string, blockIDs []string) (answer, backend, model string, err error) {
+	var served, servedModel string
 	resp, err := llm.ChainCall{
 		Pool:     s.backendPool,
 		Role:     backends.RoleDigest,
@@ -833,15 +900,19 @@ func (s *Scheduler) distillCall(ctx context.Context, d distillCallOpts, system, 
 		// A02-M2's, together with the prefill-rate probe of §7.2.
 		DefTimeout: d.timeout,
 		LocalOnly:  true,
-		OnServed:   func(name, _ string) { served = name },
+		// The MODEL comes with the backend name since A02-9: metadata.model of
+		// the written block names what produced its insights, and llmlog stamps
+		// the same value on its own row (chain.go:700-701), so the block and
+		// the log row can be read against each other.
+		OnServed: func(name, m string) { served, servedModel = name, m },
 	}.Do(ctx, s.pool, s.backgroundAdmission())
 	if err != nil {
-		return "", served, err
+		return "", served, servedModel, err
 	}
 	if resp == nil {
-		return "", served, errors.New("distill: empty chain response")
+		return "", served, servedModel, errors.New("distill: empty chain response")
 	}
-	return resp.Message.Content, served, nil
+	return resp.Message.Content, served, servedModel, nil
 }
 
 // distillCallOpts are the snapshot values one tick's calls run under, resolved
@@ -964,7 +1035,7 @@ func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []d
 	}
 
 	started := time.Now()
-	answer, backend, err := s.distillCall(ctx, t.opts, system, user, shown.blockIDs)
+	answer, backend, model, err := s.distillCall(ctx, t.opts, system, user, shown.blockIDs)
 	t.gpu.add(time.Since(started))
 	t.calls.add()
 	res.calls++
@@ -1006,8 +1077,17 @@ func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []d
 	res.rejects["schema"] += refused
 	res.kept += len(kept)
 	res.rejected += offered - len(kept)
+	if model != "" {
+		res.model = model
+	}
+	// THE SURVIVORS LEAVE THE CALL (A02-9), resolved against shown — the only
+	// authority for what a prompt-local number meant.
+	resolved, unanchored := distillResolveKept(kept, shown)
+	res.insights = append(res.insights, resolved...)
+	res.unanchored += unanchored
 	slog.Debug("scheduler: distiller call screened",
-		"backend", backend, "offered", offered, "kept", len(kept), "rejects", rejects)
+		"backend", backend, "offered", offered, "kept", len(kept),
+		"unanchored", res.unanchored, "rejects", rejects)
 
 	if offered > 0 && len(kept) == 0 {
 		return s.distillFault(backend, t.opts)

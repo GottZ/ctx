@@ -124,6 +124,15 @@ func dfConfig() *config.Config {
 	c.Distill.MinRowRunes = 200
 	c.Distill.CtxSessionHorizon = 30 * 24 * time.Hour
 	c.Distill.Interval = time.Second
+	// The write side (A02-9), at its registry defaults. EXPLICIT for the reason
+	// the two sizing keys above are: the arm refuses an incomplete write
+	// identity rather than writing an untyped block, and a test config that left
+	// them at the Go zero value would be a config the daemon refuses to start
+	// with (config.validateDistill*, 422 on an empty category or block type).
+	c.Distill.Category = "session-insights"
+	c.Distill.BlockType = "insight"
+	c.Distill.BlockSensitivity = backends.SensCredentials
+	c.Distill.MaxBlockRunes = 6000
 	c.Scheduler.HomeScope = dfScope
 	return c
 }

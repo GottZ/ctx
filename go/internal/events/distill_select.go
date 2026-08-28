@@ -101,6 +101,12 @@ type distillLedger struct {
 	calls            int
 	insightsKept     int
 	insightsRejected int
+
+	// blocksWritten is the block write's own column (135:125, wave A02-9). It is
+	// 0 or 1 per batch and NOT a count of insights: the run writes ONE block and
+	// re-writes it per batch, so the column answers "how many durable writes did
+	// this run make", which is the number the write order is checkable against.
+	blocksWritten int
 }
 
 // distillParts groups a batch's items into the parts they were chunked from.

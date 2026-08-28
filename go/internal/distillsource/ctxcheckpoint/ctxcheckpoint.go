@@ -310,7 +310,27 @@ type manifestHead struct {
 	id      string
 	wm      int64
 	partIDs []string
+
+	// The three provenance values of the manifest itself (A02-9). They are
+	// FOREIGN TEXT — plugin-written metadata, writable over the public store
+	// path — and are handed on VERBATIM: this reader's job is to report what
+	// the manifest says, and re-typing a value it did not produce would hide
+	// a corrupt manifest behind a clean-looking block. The consumer validates
+	// (design/02 §4.4.3). COALESCE'd to "" so an absent key is an empty
+	// string rather than a scan error: parent_manifest_id is absent on 37 of
+	// 319 live manifests, which is the first compaction of a chain and not a
+	// defect.
+	sha256    string
+	parentID  string
+	activeSID string
 }
+
+// manifestCols is the provenance half of both head queries, spelled once. The
+// SELECT list was three columns until A02-9; the note at manifestHeads called
+// the absence a decision and named this wave as the one that would need them.
+const manifestCols = `COALESCE(metadata->>'sha256', ''),
+       COALESCE(metadata->>'parent_manifest_id', ''),
+       COALESCE(metadata->>'active_session_id', '')`
 
 // Read returns the material of the session above after.
 //
@@ -400,13 +420,15 @@ func (s *Source) Read(ctx context.Context, sess string, after int64, maxItems, m
 // rounding can only ever let too much through, never too little. The BIGINT
 // comparison then does the fine cut.
 //
-// The SELECT list is narrower than D-02 §4.2.1, and deliberately so: the design
-// reads five columns, this reads three. metadata->>'sha256' and
-// metadata->>'parent_manifest_id' are not selected because nothing in this wave
-// consumes them — the citation anchor is (BlockID, ChunkIndex) per §0.1, and no
-// parent chain is walked. A02-9 will want sha256 for its evidence gate; it is
-// one column away, and this note exists so that absence reads as a decision
-// rather than an oversight.
+// The SELECT list carried three columns until A02-9, and the note that stood
+// here said sha256 and parent_manifest_id were "one column away" for the wave
+// that would write a block. That wave arrived: it needs the manifest's own
+// provenance in the block it writes (design/02 §4.4.3), so the list is five
+// values wide now — plus active_session_id, which the same metadata block
+// carries and which distinguishes the compacting session from the root it
+// belongs to. The predicate, the ordering and the overflow arithmetic are
+// untouched: adding projected expressions to a query whose WHERE is unchanged
+// costs no extra row and no extra index.
 //
 // It asks for one row more than the cap. If that extra row shares the last
 // kept row's watermark, the group is split, and the split is resolved by
@@ -417,10 +439,11 @@ func (s *Source) Read(ctx context.Context, sess string, after int64, maxItems, m
 // A group that fills the entire window is the one case where dropping it would
 // stall, so it is kept whole and the cap is exceeded instead.
 func (s *Source) manifestHeads(ctx context.Context, sess string, after int64) ([]manifestHead, bool, error) {
-	const q = `
+	q := `
 SELECT id::text,
        (EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT AS wm,
-       ARRAY(SELECT jsonb_array_elements_text(metadata->'source_block_ids'))
+       ARRAY(SELECT jsonb_array_elements_text(metadata->'source_block_ids')),
+       ` + manifestCols + `
   FROM context_blocks
  WHERE (metadata->>'root_session_id') IS NOT NULL
    AND metadata->>'root_session_id' = $1
@@ -444,7 +467,7 @@ SELECT id::text,
 	var heads []manifestHead
 	for rows.Next() {
 		var h manifestHead
-		if err := rows.Scan(&h.id, &h.wm, &h.partIDs); err != nil {
+		if err := rows.Scan(&h.id, &h.wm, &h.partIDs, &h.sha256, &h.parentID, &h.activeSID); err != nil {
 			return nil, false, mapErr(err)
 		}
 		heads = append(heads, h)
@@ -480,10 +503,11 @@ SELECT id::text,
 // case manifestHeads cannot resolve by shrinking, and it is bounded by the group
 // itself rather than by a cap.
 func (s *Source) watermarkGroup(ctx context.Context, sess string, after, wm int64) ([]manifestHead, bool, error) {
-	const q = `
+	q := `
 SELECT id::text,
        (EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT AS wm,
-       ARRAY(SELECT jsonb_array_elements_text(metadata->'source_block_ids'))
+       ARRAY(SELECT jsonb_array_elements_text(metadata->'source_block_ids')),
+       ` + manifestCols + `
   FROM context_blocks
  WHERE (metadata->>'root_session_id') IS NOT NULL
    AND metadata->>'root_session_id' = $1
@@ -504,7 +528,7 @@ SELECT id::text,
 	var heads []manifestHead
 	for rows.Next() {
 		var h manifestHead
-		if err := rows.Scan(&h.id, &h.wm, &h.partIDs); err != nil {
+		if err := rows.Scan(&h.id, &h.wm, &h.partIDs, &h.sha256, &h.parentID, &h.activeSID); err != nil {
 			return nil, false, mapErr(err)
 		}
 		heads = append(heads, h)
@@ -576,6 +600,17 @@ SELECT b.id::text, b.content
 					ChunkIndex: i + 1,
 					Ordinal:    ch.Ordinal,
 					Role:       ch.Role,
+				},
+				// The coverage anchor (A02-9). Stamped on every chunk of the
+				// manifest rather than handed out once per batch, because a
+				// batch spans several manifests and a consumer that keeps
+				// insights has to know which compaction each one came from —
+				// the batch is a read window, the manifest is the unit.
+				Manifest: distillsource.Manifest{
+					ID:              h.id,
+					SHA256:          h.sha256,
+					ParentID:        h.parentID,
+					ActiveSessionID: h.activeSID,
 				},
 				// The corpus carries no per-block classification this reader
 				// could trust, so it reports the highest rank explicitly
