@@ -242,7 +242,7 @@ type Source struct {
 	// block, and every citation-fidelity metric taken over the API measures
 	// that offset instead of the model.
 	//
-	// Serialized (unlike Sensitivity and Untrusted) precisely because it is
+	// Serialized (unlike Sensitivity) precisely because it is
 	// the resolution key a consumer needs; a pointer so "not in the prompt" is
 	// distinguishable from an ordinal, and omitempty so a response without a
 	// synthesis step keeps its pre-wave bytes.
@@ -264,10 +264,18 @@ type Source struct {
 	//
 	// The type NAME deliberately does not travel with it. The prompt renders
 	// only the trust class — a type name in an attribute would be registry
-	// vocabulary leaking into the model's input for no decision it can make —
-	// and Source rides into the API response, where an unserialized field is
-	// the smaller surface. Not serialized for the same reason as Sensitivity.
-	Untrusted bool `json:"-"`
+	// vocabulary leaking into the model's input for no decision it can make.
+	//
+	// SERIALIZED since V-11 (design/02 §5.1 BA7 layer 3), and that reverses the
+	// original `json:"-"` reasoning, which read "an unserialized field is the
+	// smaller surface". BA7's measurement is that the surface was the wrong
+	// thing to minimise: the framing had exactly ONE consumption site in the
+	// tree (the synthesis prompt), so every consumer that reads the ANSWER
+	// rather than writes the prompt lost the fact that a source was foreign
+	// text. It is not a secret like Sensitivity — it is the one property a
+	// downstream reader most needs to see. omitempty keeps a first-party
+	// source's bytes exactly as they were.
+	Untrusted bool `json:"untrusted,omitempty"`
 }
 
 // SynthesisResult holds the outcome of the LLM synthesis step.

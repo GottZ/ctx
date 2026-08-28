@@ -118,7 +118,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 			t.Fatalf("GrantedBlockIDs (pre-grant): %v", err)
 		}
 		// Pre-grant: B is NOT granted yet → invisible to A.
-		got, err := store.GetBlock(ctx, pool, blockB, granteeScopes, grants)
+		got, err := store.GetBlock(ctx, pool, nil, blockB, granteeScopes, grants)
 		if err != nil {
 			t.Fatalf("GetBlock pre-grant: %v", err)
 		}
@@ -135,7 +135,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 		if !slices.Contains(grants, blockB) {
 			t.Fatalf("GrantedBlockIDs = %v, want it to contain %s", grants, blockB)
 		}
-		got, err = store.GetBlock(ctx, pool, blockB, granteeScopes, grants)
+		got, err = store.GetBlock(ctx, pool, nil, blockB, granteeScopes, grants)
 		if err != nil {
 			t.Fatalf("GetBlock post-grant: %v", err)
 		}
@@ -150,7 +150,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 			t.Fatalf("GrantedBlockIDs: %v", err)
 		}
 		// With grant: B appears in A's browse (empty query).
-		withGrant, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, grants, nil, nil, nil)
+		withGrant, err := store.SearchBlocks(ctx, pool, nil, "", granteeScopes, "", nil, 50, true, nil, grants, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("SearchBlocks with grant: %v", err)
 		}
@@ -158,7 +158,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 			t.Fatalf("SearchBlocks(grants=[B]) results %v, want it to contain %s", previewIDs(withGrant), blockB)
 		}
 		// Without grant (empty set): B is gone.
-		noGrant, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, []string{}, nil, nil, nil)
+		noGrant, err := store.SearchBlocks(ctx, pool, nil, "", granteeScopes, "", nil, 50, true, nil, []string{}, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("SearchBlocks no grant: %v", err)
 		}
@@ -180,7 +180,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 		}
 		// GetBlock inline path: NOT is_archived stands BEFORE the (scope OR id)
 		// parentheses, so the archived granted block must NOT come back.
-		got, err := store.GetBlock(ctx, pool, archB, granteeScopes, grants)
+		got, err := store.GetBlock(ctx, pool, nil, archB, granteeScopes, grants)
 		if err != nil {
 			t.Fatalf("GetBlock archived granted: %v", err)
 		}
@@ -188,7 +188,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 			t.Fatalf("GetBlock returned ARCHIVED granted block %s — the mandatory parentheses leaked (G3)", got.ID)
 		}
 		// SearchBlocks browse path: same guarantee.
-		res, err := store.SearchBlocks(ctx, pool, "", granteeScopes, "", nil, 50, true, nil, grants, nil, nil, nil)
+		res, err := store.SearchBlocks(ctx, pool, nil, "", granteeScopes, "", nil, 50, true, nil, grants, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("SearchBlocks archived granted: %v", err)
 		}
@@ -211,7 +211,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 		if err != nil || !slices.Contains(grants, revBlock) {
 			t.Fatalf("pre-revoke GrantedBlockIDs=%v err=%v, want it to contain %s", grants, err, revBlock)
 		}
-		got, err := store.GetBlock(ctx, pool, revBlock, []string{revScope}, grants)
+		got, err := store.GetBlock(ctx, pool, nil, revBlock, []string{revScope}, grants)
 		if err != nil || got == nil {
 			t.Fatalf("pre-revoke GetBlock = (%v,%v), want visible", got, err)
 		}
@@ -227,7 +227,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 		if slices.Contains(grants, revBlock) {
 			t.Fatalf("post-revoke GrantedBlockIDs still has %s, want it gone", revBlock)
 		}
-		got, err = store.GetBlock(ctx, pool, revBlock, []string{revScope}, grants)
+		got, err = store.GetBlock(ctx, pool, nil, revBlock, []string{revScope}, grants)
 		if err != nil {
 			t.Fatalf("post-revoke GetBlock: %v", err)
 		}
@@ -240,10 +240,10 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 	// with a non-empty grant set — fail-closed, NOT the block.
 	t.Run("G5_empty_scope_still_fails_closed_with_grant", func(t *testing.T) {
 		grants := []string{blockB}
-		if _, err := store.GetBlock(ctx, pool, blockB, []string{}, grants); !errors.Is(err, store.ErrNoScopes) {
+		if _, err := store.GetBlock(ctx, pool, nil, blockB, []string{}, grants); !errors.Is(err, store.ErrNoScopes) {
 			t.Fatalf("GetBlock(empty scopes, grants=[B]) err = %v, want store.ErrNoScopes (G5 conservative pin)", err)
 		}
-		if _, err := store.SearchBlocks(ctx, pool, "", []string{}, "", nil, 50, true, nil, grants, nil, nil, nil); !errors.Is(err, store.ErrNoScopes) {
+		if _, err := store.SearchBlocks(ctx, pool, nil, "", []string{}, "", nil, 50, true, nil, grants, nil, nil, nil); !errors.Is(err, store.ErrNoScopes) {
 			t.Fatalf("SearchBlocks(empty scopes, grants=[B]) err = %v, want store.ErrNoScopes (G5)", err)
 		}
 	})
@@ -253,12 +253,12 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 	t.Run("ByteIdentical_nil_grants_is_scope_only", func(t *testing.T) {
 		ownerOwnBlock := t40Block(t, pool, scopeC, "t40-owner-own", false)
 		// Owner (scope C) sees its own block with nil grants.
-		got, err := store.GetBlock(ctx, pool, ownerOwnBlock, []string{scopeC}, nil)
+		got, err := store.GetBlock(ctx, pool, nil, ownerOwnBlock, []string{scopeC}, nil)
 		if err != nil || got == nil || got.ID != ownerOwnBlock {
 			t.Fatalf("GetBlock(scope C, nil grants) = (%v,%v), want the in-scope block %s", got, err, ownerOwnBlock)
 		}
 		// Grantee (scope A) does NOT see C's block with nil grants (no-op OR-arm).
-		got, err = store.GetBlock(ctx, pool, ownerOwnBlock, granteeScopes, nil)
+		got, err = store.GetBlock(ctx, pool, nil, ownerOwnBlock, granteeScopes, nil)
 		if err != nil {
 			t.Fatalf("GetBlock(scope A, nil grants): %v", err)
 		}

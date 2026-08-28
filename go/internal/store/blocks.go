@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/clustersql"
 	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/redact"
@@ -52,6 +53,19 @@ type Block struct {
 	// (InsertIssueBlock/GetIssue/UpdateIssueBlock/ListWorkflowBlocks); every
 	// other SELECT leaves it "" (omitempty), so no existing wire shape changes.
 	WorkflowStatus string `json:"workflow_status,omitempty"`
+	// Untrusted is retrieval.untrusted of the block's TYPE (V-11, design/02
+	// §5.1 BA7 layer 3): the block carries FOREIGN TEXT — captured tool output,
+	// a session transcript, material a third party authored — and a reader must
+	// treat it as observation data, never as instruction or as a first-party
+	// fact. Filled from the registry snapshot the CALLER holds, never from a
+	// type-name list here (the framing belongs to the type, so a second
+	// foreign-text type must not require a change in this package).
+	//
+	// A nil set means "this caller has no registry" and leaves the field false,
+	// which omitempty turns into an ABSENT key: no statement, rather than the
+	// positive claim "trusted". Write paths pass nil for exactly that reason —
+	// their answer keeps its pre-V-11 bytes.
+	Untrusted      bool   `json:"untrusted,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
@@ -123,6 +137,31 @@ type SensitivityWrite struct {
 	Derived bool `json:"-"`
 }
 
+// untrustedOf resolves retrieval.untrusted of one type name against the
+// registry snapshot the CALLER holds (V-11, design/02 §5.1 BA7 layer 3).
+//
+// The set is a PARAMETER of the read functions rather than something resolved
+// in here, and that is the point of the wave: BA7's finding was that the
+// untrusted framing had exactly one consumption site in the whole tree, so
+// every other reader lost it silently. Making the snapshot part of the
+// signature means a new reader cannot get a BlockPreview or a Block without
+// deciding about the framing — the compiler asks the question.
+//
+// nil answers false: "no registry, no statement". Combined with omitempty on
+// both fields that yields an ABSENT key, never the positive claim "trusted".
+//
+// The framing's own fail-open direction — an UNKNOWN type name resolves to
+// false inside blocktype.Set.IsUntrusted, with the empty name as its real
+// caller — is a property of the registry lookup and is deliberately left
+// untouched here: it is a separately tracked axis (BA7), not something this
+// seam may quietly re-decide.
+func untrustedOf(set *blocktype.Set, typeName string) bool {
+	if set == nil {
+		return false
+	}
+	return set.IsUntrusted(typeName)
+}
+
 // sensRankSQL renders the sensitivity rank of a SQL expression — must mirror
 // backends.sensRank (credentials=3 … public=0).
 func sensRankSQL(expr string) string {
@@ -151,6 +190,9 @@ type BlockPreview struct {
 	TypeName       string    `json:"type,omitempty"`
 	LifecycleState string    `json:"lifecycle_state,omitempty"`
 	TypeSource     string    `json:"type_source,omitempty"`
+	// Untrusted is retrieval.untrusted of TypeName — see Block.Untrusted for
+	// what it means and why a nil registry set leaves the key absent.
+	Untrusted      bool      `json:"untrusted,omitempty"`
 	Score          float64   `json:"score,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	CreatedAt      time.Time `json:"created_at,omitempty"`
@@ -923,7 +965,10 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 // additive OR-arm is a deterministic no-op (byte-identical to scope-only). The
 // mandatory parentheses keep the NOT is_archived guard OUTSIDE the scope/grant
 // OR — a granted archived block must NOT surface.
-func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []string, grantedBlockIDs []string) (*Block, error) {
+// set is the caller's block-type registry snapshot; it fills Block.Untrusted
+// (V-11). nil ⇒ the field stays absent from the response (write/confirm paths
+// pass nil — see untrustedOf).
+func GetBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id string, readScopes []string, grantedBlockIDs []string) (*Block, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
@@ -945,6 +990,7 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, id string, readScopes []s
 	if err != nil {
 		return nil, fmt.Errorf("store: get block: %w", err)
 	}
+	b.Untrusted = untrustedOf(set, b.TypeName) // V-11
 	return b, nil
 }
 
@@ -1285,7 +1331,10 @@ type SearchCursor struct {
 // empty = no restriction. The caller is responsible for the FORM check (a
 // malformed handle is a 400 before this call, never a 22P02 from the cast) and
 // for the cluster.facet_enabled gate — this layer only binds the resolution.
-func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string, cluster *string) ([]BlockPreview, error) {
+//
+// set is the caller's block-type registry snapshot; it fills
+// BlockPreview.Untrusted per row (V-11). nil ⇒ the field stays absent.
+func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string, cluster *string) ([]BlockPreview, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
@@ -1294,7 +1343,7 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, query string, readSco
 		Limit: limit, Compact: compact, After: after, GrantedBlockIDs: grantedBlockIDs,
 		Types: types, TypesExclude: typesExclude, Cluster: cluster,
 	})
-	return runSearchBlocks(ctx, pool, sql, args, compact)
+	return runSearchBlocks(ctx, pool, set, sql, args, compact)
 }
 
 // searchParams is the input of the statement builder. It exists so the §6.6
@@ -1481,7 +1530,7 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 // runSearchBlocks executes a statement built by searchBlocksSQL and scans it
 // into the preview rows. Split from the builder purely so the builder stays
 // pure; the scan shape is unchanged.
-func runSearchBlocks(ctx context.Context, pool *pgxpool.Pool, sql string, args []any, compact bool) ([]BlockPreview, error) {
+func runSearchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, sql string, args []any, compact bool) ([]BlockPreview, error) {
 	rows, err := pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: search blocks: %w", err)
@@ -1500,6 +1549,7 @@ func runSearchBlocks(ctx context.Context, pool *pgxpool.Pool, sql string, args [
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		}
+		bp.Untrusted = untrustedOf(set, bp.TypeName) // V-11
 		results = append(results, bp)
 	}
 	if err := rows.Err(); err != nil {
@@ -1515,7 +1565,10 @@ func runSearchBlocks(ctx context.Context, pool *pgxpool.Pool, sql string, args [
 // category filter; limit <= 0 falls back to 10, capped at 50.
 // types / typesExclude (WF T10): opt-in server-side type filters as bind
 // parameters, nil/empty = no filter (see SearchBlocks).
-func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category string, limit int, types []string, typesExclude []string) ([]BlockPreview, error) {
+//
+// set is the caller's block-type registry snapshot; it fills
+// BlockPreview.Untrusted per row (V-11). nil ⇒ the field stays absent.
+func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, readScopes []string, category string, limit int, types []string, typesExclude []string) ([]BlockPreview, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
@@ -1556,6 +1609,7 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, readScopes []string, 
 		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: recent blocks scan: %w", err)
 		}
+		bp.Untrusted = untrustedOf(set, bp.TypeName) // V-11
 		results = append(results, bp)
 	}
 	if err := rows.Err(); err != nil {

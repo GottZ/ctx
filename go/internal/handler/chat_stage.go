@@ -183,7 +183,8 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	}
 	// TOCTOU pin (D1-M3): read through the SAME write-eligible filter the
 	// execute will use, capture updated_at as the base fingerprint.
-	block, err := store.GetBlock(ctx, s.pool, resolvedID, writableBlockScopes(ar), nil)
+	// nil type set (V-11): a TOCTOU fingerprint, not a read answer.
+	block, err := store.GetBlock(ctx, s.pool, nil, resolvedID, writableBlockScopes(ar), nil)
 	if err != nil {
 		slog.Error("chat: stage update base read failed", "error", err, "block_id", resolvedID, "request_id", reqID)
 		return nil, "", err

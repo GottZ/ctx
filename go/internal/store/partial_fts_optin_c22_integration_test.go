@@ -395,7 +395,7 @@ func c22SearchBlocksGates(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 		if strings.Contains(stmt, c22SearchRemove) {
 			t.Fatalf("unfiltered browse statement declares the deny conjunct — result set would change:\n%s", stmt)
 		}
-		rows, err := store.SearchBlocks(ctx, pool, c22Needle, []string{c22Scope}, "", nil, 50, true, nil, nil, nil, nil, nil)
+		rows, err := store.SearchBlocks(ctx, pool, nil, c22Needle, []string{c22Scope}, "", nil, 50, true, nil, nil, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}
@@ -418,7 +418,7 @@ func c22SearchBlocksGates(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 		if strings.Contains(stmt, c22SearchRemove) {
 			t.Fatalf("types=[checkpoint] declares the deny conjunct — the result set collapses to empty:\n%s", stmt)
 		}
-		rows, err := store.SearchBlocks(ctx, pool, c22Needle, []string{c22Scope}, "", nil, 50, true, nil, nil,
+		rows, err := store.SearchBlocks(ctx, pool, nil, c22Needle, []string{c22Scope}, "", nil, 50, true, nil, nil,
 			[]string{"checkpoint"}, nil, nil)
 		if err != nil {
 			t.Fatalf("search: %v", err)

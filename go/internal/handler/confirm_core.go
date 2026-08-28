@@ -169,7 +169,9 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	// against the exact block state the card was rendered for. Also on the
 	// un-consumed row — drift rejects, the client re-reads and re-stages.
 	if cw.Op == "update" {
-		base, err := store.GetBlock(ctx, pool, cw.ID, writableBlockScopes(ar), nil)
+		// nil type set (V-11): this read is a TOCTOU fingerprint, not a read
+		// ANSWER — the block never reaches a consumer, so it carries no framing.
+		base, err := store.GetBlock(ctx, pool, nil, cw.ID, writableBlockScopes(ar), nil)
 		if err != nil {
 			return confirmOutcome{Kind: confirmInfraErr, Op: cw.Op, Err: err}
 		}

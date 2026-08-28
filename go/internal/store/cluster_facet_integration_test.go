@@ -58,7 +58,7 @@ func c6Fixture(t *testing.T, pool *pgxpool.Pool) (privateTopic, workTopic string
 
 func c6Search(t *testing.T, pool *pgxpool.Pool, handle string, scopes []string) []store.BlockPreview {
 	t.Helper()
-	res, err := store.SearchBlocks(context.Background(), pool, "", scopes, "", nil, 50, true, nil, nil, nil, nil, &handle)
+	res, err := store.SearchBlocks(context.Background(), pool, nil, "", scopes, "", nil, 50, true, nil, nil, nil, nil, &handle)
 	if err != nil {
 		t.Fatalf("SearchBlocks(cluster=%s): %v", handle, err)
 	}
@@ -129,7 +129,7 @@ func TestClusterFacetUnknownHandleIsEmptyNotError(t *testing.T) {
 
 	const unknown = "ffffffff-0000-4000-8000-0000000000ff"
 	for _, h := range []string{unknown, workTopic} {
-		res, err := store.SearchBlocks(ctx, pool, "", []string{"private"}, "", nil, 50, true, nil, nil, nil, nil, &h)
+		res, err := store.SearchBlocks(ctx, pool, nil, "", []string{"private"}, "", nil, 50, true, nil, nil, nil, nil, &h)
 		if err != nil {
 			t.Fatalf("handle %s: unresolvable must be empty, not an error: %v", h, err)
 		}

@@ -238,7 +238,8 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	}
 	// The TOCTOU pin reads the block through the SAME write-eligible filter
 	// the execute will use — and captures updated_at as the base fingerprint.
-	block, err := store.GetBlock(ctx, cfg.Pool, resolvedID, writableBlockScopes(ar), nil)
+	// nil type set (V-11): a TOCTOU fingerprint, not a read answer.
+	block, err := store.GetBlock(ctx, cfg.Pool, nil, resolvedID, writableBlockScopes(ar), nil)
 	if err != nil {
 		slog.Error("mcp: stage update base read failed", "error", err, "block_id", resolvedID)
 		return errResult("stage failed: internal error"), nil, nil

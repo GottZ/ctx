@@ -44,7 +44,7 @@ func TestSearchTypeFilter_Integration(t *testing.T) {
 
 	ar := &auth.AuthResult{IsValid: true, ApiKeyID: "00000000-0000-7000-8000-000000000000",
 		HomeScope: "private", ReadScopes: []string{"private"}}
-	h := NewSearchHandler(pool, staticConfigStore{cfg: &config.Config{}})
+	h := NewSearchHandler(pool, staticConfigStore{cfg: &config.Config{}}, nil)
 
 	search := func(body map[string]any) map[string]any {
 		t.Helper()

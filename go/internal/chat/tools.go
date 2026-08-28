@@ -287,7 +287,13 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 	// cluster nil (C6): the chat tool has no facet argument — a model that cannot
 	// see the graph surfaces has no way to learn a handle, so exposing one here
 	// would be a knob nothing can turn.
-	previews, err := store.SearchBlocks(ctx, ex.pool, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, nil, nil, nil)
+	// set nil (V-11): the executor holds no block-type registry, and the three
+	// chat renderers below project into their OWN local DTOs — the framing does
+	// not ride BlockPreview onto this wire even with a set. Framing the chat
+	// tools is therefore a wiring change of its own (registry into
+	// chat.Executor + a field per DTO), tracked as the V-11 follow-up. nil is
+	// "no statement", never "trusted".
+	previews, err := store.SearchBlocks(ctx, ex.pool, nil, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, nil, nil, nil)
 	if err != nil {
 		return errOutcome("search failed")
 	}
@@ -336,7 +342,7 @@ func (ex *Executor) runGet(ctx context.Context, readScopes []string, apiKeyID st
 	if resolvedID == "" {
 		return errOutcome("block not found")
 	}
-	block, err := store.GetBlock(ctx, ex.pool, resolvedID, readScopes, nil)
+	block, err := store.GetBlock(ctx, ex.pool, nil, resolvedID, readScopes, nil) // set nil: V-11 follow-up, see runSearch
 	if err != nil || block == nil {
 		return errOutcome("block not found") // scope-miss laundered to not-found (no oracle)
 	}
@@ -378,7 +384,7 @@ func (ex *Executor) runRecent(ctx context.Context, readScopes []string, raw json
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return errOutcome("invalid arguments: " + err.Error())
 	}
-	previews, err := store.RecentBlocks(ctx, ex.pool, readScopes, a.Category, a.Limit, nil, nil)
+	previews, err := store.RecentBlocks(ctx, ex.pool, nil, readScopes, a.Category, a.Limit, nil, nil) // set nil: V-11 follow-up, see runSearch
 	if err != nil {
 		return errOutcome("recent failed")
 	}

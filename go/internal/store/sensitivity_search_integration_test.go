@@ -60,7 +60,7 @@ func TestSearchBlocksSensitivity_Integration(t *testing.T) {
 
 	// Compact search is the /blocks list path (compact=true → preview shape).
 	// Empty query → updated_at DESC over the home scope.
-	got, err := store.SearchBlocks(ctx, pool, "", []string{"private"}, "", nil, 50, true, nil, nil, nil, nil, nil)
+	got, err := store.SearchBlocks(ctx, pool, nil, "", []string{"private"}, "", nil, 50, true, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("search blocks: %v", err)
 	}

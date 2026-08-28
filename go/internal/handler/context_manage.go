@@ -90,6 +90,15 @@ func (h *ManageHandler) SetAdmitter(a dispatch.Admitter) {
 // wiring — production always passes it, cmd/ctxd/server.go) degrades
 // fail-closed to an empty allowlist with a WARN: the counters then read 0
 // instead of silently falling back to a compiled-in policy.
+// typeSnapshot is the per-request registry view the `get` action's untrusted
+// framing reads (V-11). nil registry ⇒ nil set ⇒ no untrusted key on the block.
+func (h *ManageHandler) typeSnapshot(ctx context.Context) *blocktype.Set {
+	if h.blocktypes == nil {
+		return nil
+	}
+	return h.blocktypes.SnapshotForRequest(ctx)
+}
+
 func (h *ManageHandler) dreamLinkableTypes(ctx context.Context) []string {
 	if h.blocktypes == nil {
 		slog.Warn("manage: block-type registry not wired — dream counters run fail-closed empty")
@@ -875,7 +884,7 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		return
 	}
 
-	block, err := store.GetBlock(ctx, h.pool, resolvedID, ar.ReadScopes, grants)
+	block, err := store.GetBlock(ctx, h.pool, h.typeSnapshot(ctx), resolvedID, ar.ReadScopes, grants)
 	if err != nil {
 		slog.Error("manage: get error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{

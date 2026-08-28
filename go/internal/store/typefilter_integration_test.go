@@ -54,7 +54,7 @@ func TestTypeFilter_Integration(t *testing.T) {
 	}
 
 	t.Run("search_types_only_knowledge", func(t *testing.T) {
-		res, err := store.SearchBlocks(ctx, pool, "", scopes, "typefilter", nil, 50, true, nil, nil, []string{"knowledge"}, nil, nil)
+		res, err := store.SearchBlocks(ctx, pool, nil, "", scopes, "typefilter", nil, 50, true, nil, nil, []string{"knowledge"}, nil, nil)
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}
@@ -65,7 +65,7 @@ func TestTypeFilter_Integration(t *testing.T) {
 	})
 
 	t.Run("search_types_exclude_inverts", func(t *testing.T) {
-		res, err := store.SearchBlocks(ctx, pool, "", scopes, "typefilter", nil, 50, true, nil, nil, nil, []string{"knowledge"}, nil)
+		res, err := store.SearchBlocks(ctx, pool, nil, "", scopes, "typefilter", nil, 50, true, nil, nil, nil, []string{"knowledge"}, nil)
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}
@@ -76,7 +76,7 @@ func TestTypeFilter_Integration(t *testing.T) {
 	})
 
 	t.Run("search_no_filter_returns_all_with_type_fields", func(t *testing.T) {
-		res, err := store.SearchBlocks(ctx, pool, "", scopes, "typefilter", nil, 50, true, nil, nil, nil, nil, nil)
+		res, err := store.SearchBlocks(ctx, pool, nil, "", scopes, "typefilter", nil, 50, true, nil, nil, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}
@@ -91,14 +91,14 @@ func TestTypeFilter_Integration(t *testing.T) {
 	})
 
 	t.Run("recent_filters", func(t *testing.T) {
-		res, err := store.RecentBlocks(ctx, pool, scopes, "typefilter", 50, []string{"audit-trail"}, nil)
+		res, err := store.RecentBlocks(ctx, pool, nil, scopes, "typefilter", 50, []string{"audit-trail"}, nil)
 		if err != nil {
 			t.Fatalf("recent: %v", err)
 		}
 		if got := typesOf(res); got["audit-trail"] != 1 || len(got) != 1 {
 			t.Errorf("recent types=[audit-trail] returned %v", got)
 		}
-		res, err = store.RecentBlocks(ctx, pool, scopes, "typefilter", 50, nil, []string{"audit-trail", "reference"})
+		res, err = store.RecentBlocks(ctx, pool, nil, scopes, "typefilter", 50, nil, []string{"audit-trail", "reference"})
 		if err != nil {
 			t.Fatalf("recent: %v", err)
 		}

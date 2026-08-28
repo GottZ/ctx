@@ -388,6 +388,16 @@ type sourceResponse struct {
 	// low-confidence cap or the prompt budget kept out of the prompt, so the
 	// retrieval-only / eval.sh response bytes are unchanged.
 	CitationIndex *int `json:"citation_index,omitempty"`
+	// Untrusted is retrieval.untrusted of the source block's TYPE (V-11,
+	// design/02 §5.1 BA7 layer 3): the source is FOREIGN TEXT — captured tool
+	// output or a session transcript — and a consumer must read it as
+	// observation data, never as instruction.
+	//
+	// It is a field of its own rather than a passthrough of llm.Source, because
+	// llm.Source never reaches the wire: buildSourceResponses maps into THIS
+	// DTO, so fixing the tag over there alone would have left /api/query
+	// unchanged. omitempty keeps a first-party source byte-identical.
+	Untrusted bool `json:"untrusted,omitempty"`
 }
 
 // buildSourceResponses maps retrieval sources to the API response shape,
@@ -405,6 +415,7 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 			RerankScore:      s.RerankScore,
 			RRFScoreOriginal: s.RRFScoreOriginal,
 			CitationIndex:    s.CitationIndex,
+			Untrusted:        s.Untrusted, // V-11
 		}
 		if includeContent && s.Content != "" {
 			if r := []rune(s.Content); len(r) > maxRetrievalSnippet {

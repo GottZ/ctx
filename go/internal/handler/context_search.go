@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -14,12 +16,27 @@ import (
 type SearchHandler struct {
 	pool *pgxpool.Pool
 	cfg  ConfigStore
+	// blocktypes resolves the untrusted framing of each result row (V-11,
+	// design/02 §5.1 BA7 layer 3). nil (test wiring) leaves the field absent
+	// from every row — no statement, never the positive claim "trusted".
+	blocktypes *blocktype.Registry
 }
 
 // NewSearchHandler creates a new SearchHandler. The read rate limit comes
-// from a config snapshot per request (F1-W7), not a boot copy.
-func NewSearchHandler(pool *pgxpool.Pool, cfg ConfigStore) *SearchHandler {
-	return &SearchHandler{pool: pool, cfg: cfg}
+// from a config snapshot per request (F1-W7), not a boot copy. blocktypes is
+// the block-type registry whose per-request snapshot frames untrusted result
+// rows (V-11).
+func NewSearchHandler(pool *pgxpool.Pool, cfg ConfigStore, blocktypes *blocktype.Registry) *SearchHandler {
+	return &SearchHandler{pool: pool, cfg: cfg, blocktypes: blocktypes}
+}
+
+// typeSnapshot is the per-request registry view the result framing reads.
+// nil registry ⇒ nil set ⇒ no untrusted key on any row (store.untrustedOf).
+func (h *SearchHandler) typeSnapshot(ctx context.Context) *blocktype.Set {
+	if h.blocktypes == nil {
+		return nil
+	}
+	return h.blocktypes.SnapshotForRequest(ctx)
 }
 
 type searchRequest struct {
@@ -146,7 +163,7 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	// grants in T40a (its grant wiring is T40b/a later wave) — nil ⇒ no-op OR-arm.
 	// Type filters (WF T10): types_exclude ∪ block_roles_exclude (legacy alias).
 	typesExclude := unionExcludes(req.TypesExclude, req.BlockRolesExclude)
-	results, err := store.SearchBlocks(ctx, h.pool, req.Query, authResult.ReadScopes, req.Category, req.Tags, limit, compact, after, nil, req.Types, typesExclude, clusterFacet)
+	results, err := store.SearchBlocks(ctx, h.pool, h.typeSnapshot(ctx), req.Query, authResult.ReadScopes, req.Category, req.Tags, limit, compact, after, nil, req.Types, typesExclude, clusterFacet)
 	if err != nil {
 		slog.Error("search: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{

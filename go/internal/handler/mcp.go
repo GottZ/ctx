@@ -333,6 +333,20 @@ type mcpQuerySource struct {
 // text, and it has to survive transports that drop non-ASCII runes.
 const mcpNoCitationMarker = "[n/a]"
 
+// untrustedMarker frames a row of a `retrieval.untrusted` type in a TEXT
+// rendering (V-11, design/02 §5.1 BA7 layer 3).
+//
+// The JSON-rendering tools (`search`, `get`) carry the framing as the
+// serialized `untrusted` field of the response type. `recent` renders prose,
+// so it needs a token — and it is the one retrieval tool that does not go
+// through store.RecentBlocks at all (it runs its own statement below), which is
+// exactly the kind of second path BA7 was written about.
+//
+// ASCII and bracketed like mcpNoCitationMarker: it must survive transports that
+// drop non-ASCII runes, and it must not read as part of the block's own title
+// or preview text.
+const untrustedMarker = "[untrusted]"
+
 // renderMCPQuerySources writes the tool's "Sources:" section.
 //
 // The number in front of a source is the <source id="N"> ordinal it carried in
@@ -605,8 +619,11 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		scopes := ar.ReadScopes
 
 		// V-W6 type filter, ahead of every pool touch: a rejected filter must
-		// not cost a grant lookup or a search statement.
-		cut, rejection := resolveMCPVisibleTypes(cfg.mcpTypeSnapshot(ctx), input.Types)
+		// not cost a grant lookup or a search statement. The SAME snapshot then
+		// frames the untrusted rows (V-11) — flag and admission to retrieval can
+		// never come from two registry generations.
+		typeSet := cfg.mcpTypeSnapshot(ctx)
+		cut, rejection := resolveMCPVisibleTypes(typeSet, input.Types)
 		if rejection != "" {
 			return errResult(rejection), nil, nil
 		}
@@ -633,7 +650,7 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		// cut/TypesExclude ride the store layer's EXISTING type parameters (WF
 		// T10) — the same bind parameters /api/search fills. nil/nil when the
 		// caller named neither field, i.e. the pre-V-W6 call.
-		results, err := store.SearchBlocks(ctx, cfg.Pool, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants, cut, input.TypesExclude, clusterFacet)
+		results, err := store.SearchBlocks(ctx, cfg.Pool, typeSet, input.Query, scopes, input.Category, input.Tags, limit, true, nil, grants, cut, input.TypesExclude, clusterFacet)
 		if err != nil {
 			return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
 		}
@@ -674,7 +691,7 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 			return errResult("block not found"), nil, nil
 		}
 
-		block, err := store.GetBlock(ctx, cfg.Pool, resolvedID, scopes, grants)
+		block, err := store.GetBlock(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), resolvedID, scopes, grants)
 		if err != nil {
 			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
 		}
@@ -709,7 +726,11 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 		// $1=scopes, $2=grants (block-grant OR-arm, T40a). The mandatory
 		// parentheses keep NOT is_archived OUTSIDE the scope/grant OR (a granted
 		// archived block must not leak). category, if present, shifts to $3.
-		query := `SELECT id, title, category, LEFT(content, 200) AS preview, updated_at
+		// type_name rides along for the V-11 untrusted framing only; it is not
+		// rendered as a name (registry vocabulary is not the model's decision),
+		// just resolved to the trust class through the registry snapshot.
+		typeSet := cfg.mcpTypeSnapshot(ctx)
+		query := `SELECT id, title, category, LEFT(content, 200) AS preview, updated_at, COALESCE(type_name, '')
 			FROM context_blocks
 			WHERE NOT is_archived AND ( scope = ANY($1::text[]) OR id = ANY($2::uuid[]) )`
 		args := []any{scopes, grants}
@@ -739,13 +760,17 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 		var sb strings.Builder
 		i := 0
 		for rows.Next() {
-			var id, title, category, preview string
+			var id, title, category, preview, typeName string
 			var updatedAt time.Time
-			if err := rows.Scan(&id, &title, &category, &preview, &updatedAt); err != nil {
+			if err := rows.Scan(&id, &title, &category, &preview, &updatedAt, &typeName); err != nil {
 				continue
 			}
 			i++
-			fmt.Fprintf(&sb, "[%d] %s (%s, %s) id:%s\n    %s\n", i, title, category, updatedAt.Format("2006-01-02"), id, preview)
+			trust := ""
+			if typeSet != nil && typeSet.IsUntrusted(typeName) {
+				trust = " " + untrustedMarker
+			}
+			fmt.Fprintf(&sb, "[%d] %s (%s, %s) id:%s%s\n    %s\n", i, title, category, updatedAt.Format("2006-01-02"), id, trust, preview)
 		}
 
 		if i == 0 {

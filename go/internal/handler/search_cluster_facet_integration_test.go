@@ -73,7 +73,7 @@ func c6Seed(t *testing.T, pool *pgxpool.Pool) {
 func c6Handler(pool *pgxpool.Pool, facet bool) *SearchHandler {
 	return NewSearchHandler(pool, staticConfigStore{cfg: &config.Config{
 		ClusterOps: config.ClusterOpsConfig{FacetEnabled: facet},
-	}})
+	}}, nil)
 }
 
 func c6Do(t *testing.T, h *SearchHandler, body map[string]any) (int, string) {

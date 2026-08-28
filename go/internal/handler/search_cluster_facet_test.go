@@ -34,7 +34,7 @@ func c6Post(t *testing.T, facetEnabled bool, body string) *httptest.ResponseReco
 	t.Helper()
 	h := NewSearchHandler(nil, ovStubConfig{&config.Config{
 		ClusterOps: config.ClusterOpsConfig{FacetEnabled: facetEnabled},
-	}})
+	}}, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/search", strings.NewReader(body))
 	req = req.WithContext(context.WithValue(req.Context(), authResultKey, c6Auth()))
 	rec := httptest.NewRecorder()

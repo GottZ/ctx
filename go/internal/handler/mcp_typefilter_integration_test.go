@@ -145,6 +145,13 @@ func TestMCPTypeFilterSearchCutsToRequestedVisibleTypes_Integration(t *testing.T
 		// Non-regression at the seam: with neither field the tool must answer
 		// exactly what the store call it wraps answers with nil/nil filters —
 		// the arguments the handler passed before the fields existed.
+		//
+		// V-11 note: the reference call now takes the tool's OWN registry
+		// snapshot, because that is what the wrapped call takes since V-11. The
+		// TYPE FILTER arguments stay nil/nil — the invariant under test — and
+		// the snapshot is the untrusted framing input, not a filter. Passing
+		// nil here instead would compare the tool against a DIFFERENT store
+		// call than the one it makes.
 		var in searchInput
 		if err := json.Unmarshal([]byte(`{"category":"`+vw6Category+`"}`), &in); err != nil {
 			t.Fatalf("decode: %v", err)
@@ -154,7 +161,7 @@ func TestMCPTypeFilterSearchCutsToRequestedVisibleTypes_Integration(t *testing.T
 			t.Fatalf("search: err=%v result=%s", err, mcpTextOf(res))
 		}
 		ctx := vw6Ctx()
-		want, err := store.SearchBlocks(ctx, pool, "", []string{"private"}, vw6Category, nil, 10, true,
+		want, err := store.SearchBlocks(ctx, pool, cfg.mcpTypeSnapshot(ctx), "", []string{"private"}, vw6Category, nil, 10, true,
 			nil, resolveGrants(ctx, pool, AuthResultFromContext(ctx)), nil, nil, nil)
 		if err != nil {
 			t.Fatalf("reference search: %v", err)
@@ -232,7 +239,7 @@ func TestMCPTypeFilterSearchGateSelfProbe_Integration(t *testing.T) {
 	if !ok {
 		t.Fatalf("existence-only variant rejected checkpoint — the fixture premise is wrong")
 	}
-	rows, err := store.SearchBlocks(ctx, pool, "", []string{"private"}, vw6Category, nil, 10, true,
+	rows, err := store.SearchBlocks(ctx, pool, nil, "", []string{"private"}, vw6Category, nil, 10, true,
 		nil, nil, cut, nil, nil)
 	if err != nil {
 		t.Fatalf("existence-only search: %v", err)

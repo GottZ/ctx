@@ -108,7 +108,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
 	queryHandler := handler.NewQueryHandler(pool, cfgStore, backendPool, quota, blocktypeReg, dispatcher)
 	storeH := handler.NewStoreHandler(pool, cfgStore, blocktypeReg)
-	searchH := handler.NewSearchHandler(pool, cfgStore)
+	searchH := handler.NewSearchHandler(pool, cfgStore, blocktypeReg)
 	graphH := handler.NewGraphHandler(pool, cfgStore, blocktypeReg)
 	// W05.5: the ego cache arm reads the snapshot through the scheduler's state
 	// gate (Fresh only, design/05 §4.6). Wiring it does NOT switch anything on —
