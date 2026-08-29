@@ -482,25 +482,34 @@ jobs:
           retention-days: 7
 
   # ─── Stage 3: Integration Tests ───────────────────────────────────────────────
-  # Sharded 5-way (2026-08-20): the un-sharded job serially ran ~22m and was
-  # the whole pipeline's critical path (next-longest job: web at ~4.5m).
+  # Sharded 5-way (2026-08-20), 6-way since 2026-08-29 (`distill`): the
+  # un-sharded job serially ran ~22m and was the whole pipeline's critical path
+  # (next-longest job: web at ~4.5m).
   # Public repo ⇒ parallel standard runners are free, so the shards cost
   # nothing and the wall-clock drops to the slowest shard. Cut by measured
   # package runtimes UNDER THE TEMPLATE HARNESS + -p 1 (2026-08-20, local:
   # guard 211s, overview 167s, events 55s, dream 35s, rrf 25s — the original
   # 4-way cut predated the template harness, which shrank handler/store and
   # left guard+overview carrying ~77% of the old heavy shard). guard runs
-  # alone; heavy keeps overview/events/rrf/dream; `rest` is the COMPLEMENT
-  # computed via go list at run time, so a NEW package with integration tests
-  # always lands in a shard automatically — never silently untested. The
-  # chosen package list is echoed into the log so every run shows what it
-  # actually covered.
+  # alone; heavy keeps overview/events/rrf/dream; distill carries
+  # internal/distillsource, whose ctxcheckpoint package has needed 615s locally
+  # since the TestSessionsHorizonCrossoverAtScale scale test landed (ddb6c2a9)
+  # — it used to ride in `rest`, where it threatened BOTH budgets at once: its
+  # own 15m per-package -timeout, and — as one more serial package under -p 1 —
+  # the job cap of a shard that already ran every remaining package.
+  # `rest` is the COMPLEMENT computed via go list at run time, so a NEW package
+  # with integration tests always lands in a shard automatically — never
+  # silently untested. The chosen package list is echoed into the log so every
+  # run shows what it actually covered.
+  # Budgets are PER SHARD (matrix.pkg_timeout / matrix.job_timeout) so one slow
+  # shard never has to weaken the hang detection of the fast ones.
   integration-tests:
     name: Integration Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # 25 (was 20): the handler package alone may take up to its 15m package
-    # budget on slow nightly runners — see the -timeout note below.
-    timeout-minutes: 25
+    # 25 for the standard shards (was 20): the handler package alone may take up
+    # to its 15m package budget on slow nightly runners — see the -timeout note
+    # below. distill runs on 40; the reasoning sits in its matrix entry.
+    timeout-minutes: ${{ matrix.job_timeout }}
     needs: [unit-tests]
     permissions:
       contents: read
@@ -510,15 +519,47 @@ jobs:
         include:
           - shard: handler
             packages: "./internal/handler/..."
+            pkg_timeout: 15m
+            job_timeout: 25
           - shard: store
             packages: "./internal/store/..."
+            pkg_timeout: 15m
+            job_timeout: 25
           - shard: guard
             packages: "./internal/guard/..."
+            pkg_timeout: 15m
+            job_timeout: 25
           - shard: heavy
             packages: "./internal/overview/... ./internal/events/... ./internal/rrf/... ./internal/dream/..."
+            pkg_timeout: 15m
+            job_timeout: 25
+          - shard: distill
+            # ctxcheckpoint: 615s locally, isolated and green (2026-08-29). The
+            # 30m package budget is 2.9x that — it survives a runner up to 2.9x
+            # slower than that host, while a real hang still fails inside the
+            # job. For scale: the measured CI/local ratio of the other shards in
+            # run 33230621555 was 1.03-1.09 (guard 218s CI vs 211s local; heavy
+            # 306s vs 282s), but that ratio comes from many short,
+            # container-bound tests — not from one long seed-heavy scale test on
+            # a 7GB runner — so this budget is sized for the pessimistic ~2x
+            # envelope (1231s), not for 1.1x.
+            # job_timeout 40 > 30m + the 37-64s of per-job overhead measured in
+            # that same run (+ headroom for a cold image cache, whose key is the
+            # manifest hash, and for the post-mortem step). Keeping the job cap
+            # ABOVE the package budget is deliberate: the package timeout fires
+            # first and dumps every goroutine, whereas a job kill leaves nothing
+            # to diagnose.
+            # The two sibling packages carry no integration-tagged tests and
+            # cost 0.09s together (measured 2026-08-29), so this shard's budget
+            # is effectively ctxcheckpoint's alone.
+            packages: "./internal/distillsource/..."
+            pkg_timeout: 30m
+            job_timeout: 40
           - shard: rest
             # Complement of the explicit shards above — computed at run time.
             packages: ""
+            pkg_timeout: 15m
+            job_timeout: 25
 
     env:
       TESTCONTAINERS_RYUK_DISABLED: "false"
@@ -580,10 +621,14 @@ jobs:
           # path — the union of all shards is ./... BY CONSTRUCTION, so a new
           # package can never fall between the shards. The list is echoed so
           # each run documents its actual coverage.
+          # The alternation below is that construction's ONLY moving part and
+          # must name every explicitly-sharded path: a missing entry runs its
+          # package TWICE (once in its own shard, once here), a stale entry
+          # drops it from every shard and it goes silently untested.
           if [ -n "${{ matrix.packages }}" ]; then
             PKGS="${{ matrix.packages }}"
           else
-            PKGS=$(go list ./... | grep -vE '/internal/(handler|store|overview|guard|events|rrf|dream)(/|$)' | tr '\n' ' ')
+            PKGS=$(go list ./... | grep -vE '/internal/(handler|store|overview|guard|events|rrf|dream|distillsource)(/|$)' | tr '\n' ' ')
           fi
           echo "Shard '${{ matrix.shard }}' packages: ${PKGS}"
           echo "packages=${PKGS}" >> "$GITHUB_OUTPUT"
@@ -591,13 +636,15 @@ jobs:
       - name: Run integration tests
         working-directory: go
         run: |
-          # -timeout is PER PACKAGE. Historically internal/handler exceeded
-          # 10m on nightly runners twice (2026-07-26 + 2026-08-02) when the
-          # suite still booted ~500 containers; since the template-database
-          # harness (internal/testdb, 2026-08-20) each package boots ONE
-          # container and copies a migrated template per test, so packages
-          # run far below the budget. 15m stays as weather headroom; a REAL
-          # hang still fails.
+          # -timeout is PER PACKAGE, and since 2026-08-29 per shard
+          # (matrix.pkg_timeout): 15m everywhere, 30m for distill — see that
+          # matrix entry for the measurement the 30m comes from.
+          # Historically internal/handler exceeded 10m on nightly runners twice
+          # (2026-07-26 + 2026-08-02) when the suite still booted ~500
+          # containers; since the template-database harness (internal/testdb,
+          # 2026-08-20) each package boots ONE container and copies a migrated
+          # template per test, so packages run far below the budget. 15m stays
+          # as weather headroom; a REAL hang still fails.
           # Coverage + -v only on nightly/dispatch — same rationale as the
           # unit job: unconsumed on push runs, atomic instrumentation costs
           # real minutes on the pipeline's critical path.
@@ -617,7 +664,7 @@ jobs:
             -tags=integration \
             -count=1 \
             -p 1 \
-            -timeout=15m \
+            -timeout=${{ matrix.pkg_timeout }} \
             ${{ steps.shard.outputs.packages }}
 
       - name: Container post-mortem (on failure)
