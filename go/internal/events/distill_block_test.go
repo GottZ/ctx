@@ -1495,3 +1495,628 @@ func TestDistillShardHoldState(t *testing.T) {
 		}
 	})
 }
+
+// Below: wave W-L4 — the shard chain in the block text (amendment C4-2 A.6,
+// design/02-destillat-arm.md:3310-3321).
+
+// wl4ChainFrame is the chain line's cost WITHOUT the predecessor title and
+// without the ordinal's digits, in runes.
+//
+// Pinned as a number because the wave's price is exactly this frame plus a
+// title the identity already fixes: the line is charged to the 1500-rune prompt
+// window and to distill.max_block_runes alike, so a later hand that adds half a
+// sentence to it must see a test move.
+const wl4ChainFrame = 45
+
+// wl4RuneIndex is the offset of sub in s, counted in RUNES — the unit both
+// llm.MaxBlockChars and the S7 measurement are written in. strings.Index alone
+// answers bytes and would flatter every umlaut in the head.
+func wl4RuneIndex(t *testing.T, s, sub string) int {
+	t.Helper()
+	i := strings.Index(s, sub)
+	if i < 0 {
+		return -1
+	}
+	return utf8.RuneCountInString(s[:i])
+}
+
+// wl4Line returns the block's chain line as it stands in the text, or "".
+//
+// IT LOOKS FOR A LINE, NOT FOR A SUBSTRING, and that is the whole difference
+// between a probe and a self-fulfilling one: the shard-2 title IS the shard-1
+// title plus " — Teil 2", so strings.Contains(content, predecessorTitle) is
+// true on a tree that has no chain line at all — through the block's own H1
+// line. Measured before the wave (report §3, red probe).
+func wl4Line(content string) string {
+	for _, ln := range strings.Split(content, "\n") {
+		if strings.HasPrefix(ln, "Teil ") {
+			return ln
+		}
+	}
+	return ""
+}
+
+// TestDistillShardChainLine pins the line itself: its form, its silence at
+// shard 1 and the origin of the name it carries.
+func TestDistillShardChainLine(t *testing.T) {
+	t.Run("shard 1 and everything below it carries no chain line", func(t *testing.T) {
+		for _, n := range []int{-1, 0, 1} {
+			if got := distillChainLine(a9Root, a9WMFrom, n); got != "" {
+				t.Errorf("ordinal %d renders %q, want the empty string — the stock is shard 1 by "+
+					"construction and has no predecessor", n, got)
+			}
+		}
+	})
+
+	t.Run("a shard names its predecessor by the arm's own derived title", func(t *testing.T) {
+		for _, n := range []int{2, 3, 10, distillShardMaxOrdinal} {
+			line := distillChainLine(a9Root, a9WMFrom, n)
+			pred := distillBlockTitle(a9Root, a9WMFrom, n-1)
+			want := "\nTeil " + strconv.Itoa(n) + " dieses Bereichs — Fortsetzung von „" + pred + "“.\n"
+			if line != want {
+				t.Fatalf("ordinal %d renders\n got %q\nwant %q", n, line, want)
+			}
+			// The predecessor of shard 2 is the STOCK title — the coexistence path
+			// of A.3 (c) read from the other end: the name the chain line hands a
+			// reader is exactly the row that exists.
+			if n == 2 && !strings.Contains(line, distillBlockTitle(a9Root, a9WMFrom, 1)+"“") {
+				t.Error("shard 2 does not name the stock title as its predecessor")
+			}
+			if got, want := utf8.RuneCountInString(line),
+				wl4ChainFrame+len(strconv.Itoa(n))+utf8.RuneCountInString(pred); got != want {
+				t.Errorf("ordinal %d: the chain line is %d runes, want %d (frame %d + digits + title) — "+
+					"the line's price in the prompt window is pinned, not free", n, got, want, wl4ChainFrame)
+			}
+		}
+	})
+
+	// It must never be readable as a per-insight line, on EITHER of the two paths
+	// that parse this arm's bodies: the running shard's carry and the cross-shard
+	// dedup set (distillReadShardGroup builds both with distillSplitCarry).
+	t.Run("the chain line is not a bullet and cannot be read as a claim", func(t *testing.T) {
+		line := distillChainLine(a9Root, a9WMFrom, 2)
+		if strings.HasPrefix(strings.TrimSpace(line), "- ") {
+			t.Error("the chain line opens like a rendered insight line")
+		}
+		if got := distillBulletLines(line); len(got) != 0 {
+			t.Errorf("distillBulletLines reads %d line(s) out of the chain line: %q", len(got), got)
+		}
+	})
+}
+
+// TestDistillShardChainInRenderedBlock is the wave's red gate turned green at
+// the real render: "ein Shard-2-Block nennt seinen Vorgänger nirgends"
+// (design/02:3311).
+func TestDistillShardChainInRenderedBlock(t *testing.T) {
+	t.Run("shard 1 renders no chain line at all", func(t *testing.T) {
+		content, over := distillRenderBlock(a9State(6), a9Opts())
+		if over != 0 {
+			t.Fatalf("%d insights dropped — the fixture is not the standard one", over)
+		}
+		if got := wl4Line(content); got != "" {
+			t.Errorf("the shard-1 block carries a chain line: %q — the stock body must not move", got)
+		}
+	})
+
+	for _, n := range []int{2, 3, 7} {
+		t.Run(fmt.Sprintf("shard %d names part and predecessor in its head", n), func(t *testing.T) {
+			st := a9State(6)
+			st.ordinal = n
+			content, over := distillRenderBlock(st, a9Opts())
+			if over != 0 {
+				t.Fatalf("%d insights dropped — the fixture would not be comparable", over)
+			}
+			line := wl4Line(content)
+			if line == "" {
+				t.Fatal("no chain line in the rendered block")
+			}
+			if !strings.HasPrefix(line, fmt.Sprintf("Teil %d dieses Bereichs", n)) {
+				t.Errorf("the chain line does not say which part this is: %q", line)
+			}
+			if pred := distillBlockTitle(a9Root, a9WMFrom, n-1); !strings.Contains(line, pred) {
+				t.Errorf("the chain line does not name the predecessor %q: %q", pred, line)
+			}
+			// Position: head, not body. Between the trust paragraph and the claims.
+			trust := strings.Index(content, "**UNTRUSTED, abgeleitet.**")
+			chain := strings.Index(content, distillChainLine(a9Root, a9WMFrom, n))
+			claims := strings.Index(content, distillSecClaims)
+			if trust < 0 || trust >= chain || chain >= claims {
+				t.Errorf("the chain line stands outside the head (trust=%d chain=%d claims=%d)",
+					trust, chain, claims)
+			}
+		})
+	}
+}
+
+// TestDistillShardChainPromptWindow is the wave's green gate and its head-length
+// probe, measured AT THE CUT and not on the source text (design/02:3313-3318).
+func TestDistillShardChainPromptWindow(t *testing.T) {
+	st := a9State(6)
+	st.ordinal = 2
+	content, over := distillRenderBlock(st, a9Opts())
+	if over != 0 {
+		t.Fatalf("%d insights dropped — the fixture is not the standard one", over)
+	}
+	cut := util.TruncateRunesWithSuffix(content, redact.Truncated, llm.MaxBlockChars)
+	chain := distillChainLine(a9Root, a9WMFrom, 2)
+
+	// GREEN GATE: the line the synthesis prompt sees. Whole, predecessor title
+	// included — a chain line cut in half names no block.
+	if !strings.Contains(cut, chain) {
+		t.Fatalf("the chain line is not complete inside the first %d runes:\n%s",
+			llm.MaxBlockChars, cut)
+	}
+
+	// NEGATIVE PROBE, half 1: the trust sentence stays the FIRST paragraph and
+	// stays whole. Both halves measured, because a paragraph that is first but
+	// truncated tells a reader nothing.
+	trust := wl4RuneIndex(t, cut, "**UNTRUSTED, abgeleitet.**")
+	if trust < 0 || trust > 200 {
+		t.Errorf("UNTRUSTED starts at rune %d, want inside the first 200 (S7, 16/16 blocks in the pilots)",
+			trust)
+	}
+	if !strings.Contains(cut, "lebenden Fenster stand.\n") {
+		t.Error("the trust paragraph is not complete inside the window")
+	}
+	if c := wl4RuneIndex(t, cut, chain); c < trust {
+		t.Errorf("the chain line stands at rune %d, before the trust paragraph at %d", c, trust)
+	}
+
+	// THE COUNTER-VERSION, spelled out so the red is checked and not remembered:
+	// the same block with the chain line in front of the trust paragraph. Both
+	// orders keep the line inside the window — only this one pushes UNTRUSTED
+	// past the 200-rune mark the pilots measured on every block.
+	head := "# " + distillBlockTitle(a9Root, a9WMFrom, 2) + "\n"
+	counter := head + chain + strings.TrimPrefix(strings.Replace(content, chain, "", 1), head)
+	ccut := util.TruncateRunesWithSuffix(counter, redact.Truncated, llm.MaxBlockChars)
+	if i := wl4RuneIndex(t, ccut, "**UNTRUSTED, abgeleitet.**"); i <= 200 {
+		t.Errorf("the counter-version puts UNTRUSTED at rune %d — the probe measures nothing", i)
+	}
+	if i := wl4RuneIndex(t, ccut, chain); i > trust {
+		t.Error("the counter-version did not move the chain line in front of the trust paragraph")
+	}
+
+	// NEGATIVE PROBE, half 2, at this fixture: no claim leaves the window, and
+	// every claim that stands in it keeps its inline anchor. The general form of
+	// the price is TestDistillShardChainWindowCost.
+	without := util.TruncateRunesWithSuffix(strings.Replace(content, chain, "", 1),
+		redact.Truncated, llm.MaxBlockChars)
+	for i := 1; i <= 6; i++ {
+		claim := fmt.Sprintf("Kernaussage %d ueber den Retrieval-Pfad und seine vier Arme.", i)
+		if !strings.Contains(cut, claim) {
+			t.Errorf("claim %d left the window with the chain line (it stood in it without: %v)",
+				i, strings.Contains(without, claim))
+		}
+		anchor := "[" + distillShort8(a9Part1) + "#" + fmt.Sprint(i) + "]"
+		if !strings.Contains(cut, anchor) {
+			t.Errorf("claim %d carries no inline anchor %s inside the window", i, anchor)
+		}
+	}
+}
+
+// TestDistillShardChainWindowCost is the general form of the head-length probe,
+// and it states the price instead of hoping a fixture hides it.
+//
+// WHAT THE GATE ASKS AND WHAT IS PROVABLE. design/02:3316 asks that the chain
+// line displace NO claim from the 1500-rune window. In CONJUNCTION with the
+// green gate — the line stands COMPLETE inside the window — that is unreachable
+// whenever the dead space d = (1500 − head) mod claim-line is smaller than the
+// line's length L: the window is a hard rune cut, claim lines are atomic, and
+// the arm does not choose d. It is not unreachable in general (the review
+// measured two geometries with d ≥ L where the head placement displaces
+// nothing, and one placement — the line behind the last whole claim line —
+// that displaces nothing anywhere but leaves only a cut half-line in the
+// window, naming no block).
+//
+// WHAT THIS TEST PINS, and it is the strongest form that is true: the chain
+// line costs EXACTLY its own length in the window and NOTHING ELSE. The number
+// of whole claim lines inside the cut equals what the rune arithmetic predicts
+// from the head plus L — no reflow, no second-order loss.
+//
+// WHAT IT DOES NOT PIN, corrected after the review (finding #3): the LENGTH of
+// the line. This test computes its expectation from the same L it measures, so
+// a longer line stays green here even though it displaces more — the length is
+// pinned by the identity wl4ChainFrame + digits + predecessor title in
+// TestDistillShardChainLine, and the assertion below re-states that identity so
+// the numbers of this fan cannot drift away from it unnoticed.
+func TestDistillShardChainWindowCost(t *testing.T) {
+	// The dead space of the fixture in TestDistillShardChainPromptWindow is
+	// larger than the line, which is why no claim moves there. The fan below
+	// covers both sides of that threshold.
+	for _, claimLen := range []int{60, 120, 200, 340} {
+		t.Run(fmt.Sprintf("claim lines of %d runes", claimLen), func(t *testing.T) {
+			st := a9State(0)
+			st.ordinal = 2
+			for i := 1; i <= 40; i++ {
+				st.insights = append(st.insights, distillKept{
+					claim:   fmt.Sprintf("A%02d ", i) + strings.Repeat("x", claimLen-4),
+					quote:   strings.Repeat("q", 160),
+					blockID: a9Part1, chunk: i,
+				})
+			}
+			content, _ := distillRenderBlock(st, a9Opts())
+			chain := distillChainLine(a9Root, a9WMFrom, 2)
+			l := utf8.RuneCountInString(chain)
+			without := strings.Replace(content, chain, "", 1)
+
+			// The measured length against the pinned identity (review #3): this
+			// fan's numbers are only meaningful for the line the wave decided on,
+			// and a longer line must not pass here as "no effect".
+			if want := wl4ChainFrame + 1 + utf8.RuneCountInString(
+				distillBlockTitle(a9Root, a9WMFrom, 1)); l != want {
+				t.Fatalf("the chain line measures %d runes against the pinned %d — the fan below "+
+					"would report the cost of a line nobody decided on", l, want)
+			}
+
+			// The rune arithmetic: how many whole claim lines fit behind the head.
+			line, _ := distillInsightLine(st.insights[0])
+			per := utf8.RuneCountInString(line)
+			fits := func(s string) int {
+				head := utf8.RuneCountInString(s[:strings.Index(s, distillSecClaims)+len(distillSecClaims)])
+				n := (llm.MaxBlockChars - head) / per
+				return min(max(n, 0), len(st.writtenClaims))
+			}
+			count := func(s string) int {
+				c := util.TruncateRunesWithSuffix(s, redact.Truncated, llm.MaxBlockChars)
+				k := 0
+				for i := 1; i <= 40; i++ {
+					if strings.Contains(c, fmt.Sprintf("A%02d ", i)+strings.Repeat("x", claimLen-4)+"**") {
+						k++
+					}
+				}
+				return k
+			}
+			got, base := count(content), count(without)
+			if want := fits(content); got != want {
+				t.Errorf("%d claims inside the window, the arithmetic says %d — the chain line has an "+
+					"effect beyond its own %d runes", got, want, l)
+			}
+			if want := fits(without); base != want {
+				t.Errorf("without the chain line: %d claims inside the window, arithmetic says %d",
+					base, want)
+			}
+			// The loss is bounded by the line's own length: never more claims than
+			// fit into L runes.
+			if lost := base - got; lost < 0 || lost > (l+per-1)/per {
+				t.Errorf("the chain line moved %d claim(s) out of the window; %d runes can displace at "+
+					"most %d line(s) of %d runes", lost, l, (l+per-1)/per, per)
+			}
+			t.Logf("claim line %d runes: %d claims in the window with the chain line, %d without "+
+				"(chain %d runes)", per, got, base, l)
+		})
+	}
+}
+
+// TestDistillShardChainCarryRoundTrip is the wave's carry probe (design/02:3319):
+// the new head text changes distillSplitCarry NOT — neither the running shard's
+// carry nor the cross-shard dedup set may ever see the chain line.
+func TestDistillShardChainCarryRoundTrip(t *testing.T) {
+	st := a9State(3)
+	st.ordinal = 2
+	content, over := distillRenderBlock(st, a9Opts())
+	if over != 0 {
+		t.Fatalf("%d insights dropped — the round trip would be partial", over)
+	}
+	chain := distillChainLine(a9Root, a9WMFrom, 2)
+
+	carry, ok := distillSplitCarry(content)
+	if !ok {
+		t.Fatal("the arm cannot read back a body carrying its own chain line")
+	}
+	// The same body without the chain line — the shape every stock block and
+	// every shard 1 has. Both must split into the SAME carry.
+	plain, ok2 := distillSplitCarry(strings.Replace(content, chain, "", 1))
+	if !ok2 {
+		t.Fatal("the arm cannot read back the body without the chain line")
+	}
+	if !slices.Equal(carry.claims, plain.claims) || !slices.Equal(carry.evidence, plain.evidence) {
+		t.Errorf("the chain line changed the carry:\n with %q\nwithout %q", carry.claims, plain.claims)
+	}
+	if carry.count() != 3 {
+		t.Errorf("carry holds %d claims, want 3", carry.count())
+	}
+	for _, l := range append(append([]string{}, carry.claims...), carry.evidence...) {
+		if strings.Contains(l, "Fortsetzung von") || strings.Contains(l, "dieses Bereichs") {
+			t.Errorf("the chain line was read as a per-insight line: %q", l)
+		}
+	}
+
+	// The dedup set of the sealed shards is built from exactly this carry
+	// (distillReadShardGroup), so the same body must not contribute the chain
+	// line there either — probed on the set the state actually uses.
+	next := a9State(0)
+	for _, l := range carry.claims {
+		next.groupClaims[l] = struct{}{}
+	}
+	if _, bad := next.groupClaims[strings.TrimPrefix(chain, "\n")]; bad {
+		t.Error("the chain line entered the cross-shard dedup set")
+	}
+	if len(next.groupClaims) != 3 {
+		t.Errorf("the dedup set holds %d lines, want 3", len(next.groupClaims))
+	}
+
+	// A body a previous wave wrote — no chain line anywhere — is still read.
+	old := a9State(2)
+	oldContent, _ := distillRenderBlock(old, a9Opts())
+	if c, ok := distillSplitCarry(oldContent); !ok || c.count() != 2 {
+		t.Errorf("a stock body without a chain line no longer reads back (ok=%v, claims=%d)",
+			ok, c.count())
+	}
+}
+
+// TestDistillShardChainCapHandover is the cap interaction the briefing asks for:
+// a block that sits exactly at distill.max_block_runes WITH the chain line rolls
+// the material on instead of losing it.
+//
+// The line is charged to the frame automatically — distillFrameRunes measures
+// distillRenderN, which is where the line is written — so the call loop's meter
+// and the render cut at the same number. The probe measures both halves: the
+// charge, and the handover it causes.
+func TestDistillShardChainCapHandover(t *testing.T) {
+	opts := a9Opts()
+	one, two := a9State(0), a9State(0)
+	two.ordinal = 2
+	chain := utf8.RuneCountInString(distillChainLine(a9Root, a9WMFrom, 2))
+
+	t.Run("the chain line is charged to max_block_runes", func(t *testing.T) {
+		got := distillFrameRunes(two, opts, 0) - distillFrameRunes(one, opts, 0)
+		// The shard-2 title also carries the suffix; the difference of the two
+		// frames is the chain line plus that suffix, and nothing else.
+		suffix := utf8.RuneCountInString(distillBlockTitle(a9Root, a9WMFrom, 2)) -
+			utf8.RuneCountInString(distillBlockTitle(a9Root, a9WMFrom, 1))
+		if want := chain + suffix; got != want {
+			t.Errorf("the shard-2 frame is %d runes larger than the shard-1 frame, want %d "+
+				"(chain %d + title suffix %d)", got, want, chain, suffix)
+		}
+	})
+
+	t.Run("an insight the chain line no longer leaves room for rolls on", func(t *testing.T) {
+		st := a9State(4)
+		st.ordinal = 2
+		st.shardCalls = 3
+		claim, ev := distillInsightLine(st.insights[0])
+		pair := utf8.RuneCountInString(claim) + utf8.RuneCountInString(ev)
+		// A cap the shard-1 frame would fit THREE insights into — exactly, to the
+		// rune. With the chain line the third no longer fits.
+		opts.maxRunes = utf8.RuneCountInString(distillRenderN(one, opts, nil, nil, 0)) + 3*pair
+
+		content, over := distillRenderBlock(st, opts)
+		if over == 0 {
+			t.Fatalf("nothing rolled at a cap of %d runes — the probe measures nothing", opts.maxRunes)
+		}
+		if n := utf8.RuneCountInString(content); n > opts.maxRunes {
+			t.Errorf("the block renders %d runes over a cap of %d — the chain line is not in the "+
+				"cap arithmetic", n, opts.maxRunes)
+		}
+		if len(st.writtenClaims)+len(st.overflowInsights) != 4 {
+			t.Fatalf("%d written + %d handed over, want 4 in total — material was dropped",
+				len(st.writtenClaims), len(st.overflowInsights))
+		}
+		want := append([]distillKept(nil), st.overflowInsights...)
+
+		st.rollover()
+		if st.ordinal != 3 {
+			t.Errorf("ordinal = %d, want 3", st.ordinal)
+		}
+		if len(st.insights) != len(want) {
+			t.Fatalf("the next shard opens with %d insights, want the %d the cap could not take",
+				len(st.insights), len(want))
+		}
+		next, _ := distillRenderBlock(st, opts)
+		for _, in := range want {
+			c, _ := distillInsightLine(in)
+			if !strings.Contains(next, strings.TrimSuffix(c, "\n")) {
+				t.Errorf("an insight the chain line displaced is in no shard: %q", in.claim)
+			}
+		}
+		if line := wl4Line(next); !strings.Contains(line, distillBlockTitle(a9Root, a9WMFrom, 2)) {
+			t.Errorf("the next shard does not name shard 2 as its predecessor: %q", line)
+		}
+	})
+}
+
+// TestDistillRollShardHoldsPaidMaterial pins WHICH EXITS of the shard handover
+// hold a batch back — the answer distillBatch turns into "do not book these
+// chunks and do not move the watermark" (W-L3 review, blocker #1).
+//
+// WAVE W-L4 ADDS THE THIRD AND FOURTH EXIT. The chain line takes runes out of
+// every shard above the first, so a handover can now place fewer insights than
+// it moved, and a shard opened by one can be full without ever having been
+// called. Both states hold paid material that no shard took; booking their
+// batches marks the chunks seen and moves the watermark past them, which is the
+// loss the reviewer measured at another cut (10 of 12 claims, ledger 12).
+//
+// The exits that write (the successful handover) are probed in
+// distill_cap_integration_test.go and distill_chain_integration_test.go, because
+// their answer depends on a rendered, stored block.
+func TestDistillRollShardHoldsPaidMaterial(t *testing.T) {
+	// The state of a shard that is full through the RENDER (not through the rune
+	// meter) and holds insights nothing took.
+	held := func(ordinal int) *distillBlockState {
+		st := a9State(0)
+		st.ordinal = ordinal
+		st.overflow = 1
+		st.overflowInsights = []distillKept{{
+			claim: "Eine bezahlte Aussage, die kein Shard genommen hat.",
+			quote: "Zitat", blockID: a9Part1, chunk: 7,
+		}}
+		return st
+	}
+	var s *Scheduler
+
+	for _, tc := range []struct {
+		name      string
+		ordinal   int
+		maxShards int
+		maxRunes  int // 0 keeps the fixture's own cap
+		back      bool
+		wantHeld  bool
+	}{
+		{name: "the shard cap holds the batch back", ordinal: 2, maxShards: 2, back: true, wantHeld: true},
+		{name: "the shard cap without unplaced material books normally",
+			ordinal: 2, maxShards: 2, back: false, wantHeld: false},
+		{name: "the hard bound holds the batch back",
+			ordinal: distillShardGroupMaxRows, maxShards: 0, back: true, wantHeld: true},
+		{name: "an empty shard that is still full holds the batch back",
+			ordinal: 2, maxShards: 0, back: true, wantHeld: true},
+		{name: "an empty shard that is still full and placed everything books normally",
+			ordinal: 2, maxShards: 0, back: false, wantHeld: false},
+		// The band between the two floors (wave W-L4 fix round): a successor that
+		// could place nothing is not opened, and the material it would have
+		// carried is held back exactly like at the cap.
+		{name: "a successor that could place nothing is not opened",
+			ordinal: 2, maxShards: 0, maxRunes: 1700, back: true, wantHeld: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := held(tc.ordinal)
+			if !tc.back {
+				st.overflowInsights = nil
+			}
+			opts := a9Opts()
+			opts.maxShards = tc.maxShards
+			if tc.maxRunes > 0 {
+				opts.maxRunes = tc.maxRunes
+			}
+			var l distillLedger
+			stop, rolled, gotHeld, err := s.distillRollShard(t.Context(),
+				distillTick{block: st, write: opts}, "probe", distillExtractResult{}, &l)
+			if err != nil {
+				t.Fatalf("roll: %v", err)
+			}
+			if stop != distillSkipBudget {
+				t.Errorf("stop = %q, want %q — every exit here ends the run",
+					stop, distillSkipBudget)
+			}
+			if rolled {
+				t.Error("the exit reports a handover although it refused one")
+			}
+			if gotHeld != tc.wantHeld {
+				t.Errorf("held = %v, want %v — paid material that no shard took must never be "+
+					"booked as covered", gotHeld, tc.wantHeld)
+			}
+			if l.blocksWritten != 0 {
+				t.Errorf("blocksWritten = %d, want 0 — a refused handover writes nothing",
+					l.blocksWritten)
+			}
+		})
+	}
+}
+
+// TestDistillShardSuccessorPlaces pins the predicate the hand-over refusal rests
+// on (wave W-L4 fix round, review finding #1): would opening the next shard
+// place anything at all?
+//
+// THE TWO FLOORS ARE THE SUBJECT. A shard above the first carries the title
+// suffix and the chain line, so `distill.max_block_runes` has a higher floor for
+// a successor than for shard 1 — and in the band between them the old code
+// opened one empty shard per tick (measured: 9 shards after 8 ticks, 8 empty).
+func TestDistillShardSuccessorPlaces(t *testing.T) {
+	// The two floors, measured against the production arithmetic rather than
+	// written down as literals: they move with every render change.
+	floor := func(ordinal, need int) int {
+		st := a9State(0)
+		st.ordinal = ordinal
+		return distillFrameRunes(st, distillWriteOpts{maxRunes: 1 << 20}, 1) + need
+	}
+	first := floor(1, distillMinInsightRunes)
+	second := floor(2, distillMinInsightRunes)
+	if second <= first {
+		t.Fatalf("the successor floor (%d) is not above shard 1's (%d) — the chain line would cost "+
+			"nothing and this probe would measure nothing", second, first)
+	}
+	t.Logf("floors: shard 1 needs %d runes, its successor %d (delta %d)", first, second, second-first)
+
+	t.Run("no cap never refuses", func(t *testing.T) {
+		st := a9State(0)
+		if !st.successorPlaces(distillWriteOpts{maxRunes: 0}) {
+			t.Error("max_block_runes 0 is the off switch and must never refuse a hand-over")
+		}
+	})
+
+	t.Run("inside the band the successor is refused, above it opened", func(t *testing.T) {
+		st := a9State(0)
+		st.ordinal = 1
+		if st.successorPlaces(distillWriteOpts{maxRunes: second - 1}) {
+			t.Errorf("a cap of %d admits a successor that cannot hold the smallest possible insight",
+				second-1)
+		}
+		if !st.successorPlaces(distillWriteOpts{maxRunes: second}) {
+			t.Errorf("a cap of %d is exactly the successor's floor and must open it", second)
+		}
+	})
+
+	// With material moving, the question is not the theoretical floor but the
+	// first insight that would move — the render admits in order and stops at the
+	// first line that does not fit, so a successor that cannot take that one
+	// takes none of them.
+	t.Run("moving material is measured by its first insight, not by the minimum", func(t *testing.T) {
+		st := a9State(1)
+		st.ordinal = 1
+		st.overflowInsights = []distillKept{st.insights[0]}
+		c, e := distillInsightLine(st.insights[0])
+		pair := utf8.RuneCountInString(c) + utf8.RuneCountInString(e)
+		if pair <= distillMinInsightRunes {
+			t.Fatalf("the fixture insight (%d runes) is not larger than the minimum (%d) — the two "+
+				"halves would be indistinguishable", pair, distillMinInsightRunes)
+		}
+		withMaterial := floor(2, pair)
+		if st.successorPlaces(distillWriteOpts{maxRunes: withMaterial - 1}) {
+			t.Errorf("a cap of %d opens a successor that cannot take the insight it would receive",
+				withMaterial-1)
+		}
+		if !st.successorPlaces(distillWriteOpts{maxRunes: withMaterial}) {
+			t.Errorf("a cap of %d fits the moved insight exactly and must open the successor",
+				withMaterial)
+		}
+		// And the minimum alone would have said yes at that cap — which is the
+		// whole reason the predicate looks at the material.
+		empty := a9State(0)
+		empty.ordinal = 1
+		if !empty.successorPlaces(distillWriteOpts{maxRunes: withMaterial - 1}) {
+			t.Error("the fixture cap is below the theoretical floor too — the probe cannot tell the " +
+				"two halves apart")
+		}
+	})
+
+	// R2 #1: the overflow note counts its insights, and "10" is one rune wider
+	// than "9" — a reserve sized for one note under-counts from the tenth moved
+	// insight on, and the predicate would open the very empty shard it refuses.
+	t.Run("ten moved insights reserve a two-digit overflow note", func(t *testing.T) {
+		st := a9State(10)
+		st.ordinal = 1
+		st.overflowInsights = st.insights
+		c, e := distillInsightLine(st.insights[0])
+		pair := utf8.RuneCountInString(c) + utf8.RuneCountInString(e)
+		tight := floor(2, pair) // floor reserves a ONE-digit note by construction
+		if st.successorPlaces(distillWriteOpts{maxRunes: tight}) {
+			t.Errorf("a cap of %d admits ten moved insights although their overflow note is one "+
+				"rune wider than a one-note reserve", tight)
+		}
+		if !st.successorPlaces(distillWriteOpts{maxRunes: tight + 1}) {
+			t.Errorf("a cap of %d fits the two-digit note and must open the successor", tight+1)
+		}
+	})
+
+	// It asks about a shard that does not exist yet, so it works on a copy — and
+	// a predicate that quietly raised the ordinal of the running block would
+	// rename it at the next write.
+	t.Run("the predicate does not move the state it asks about", func(t *testing.T) {
+		st := a9State(2)
+		st.ordinal = 3
+		st.carry = distillCarry{claims: []string{"- **eine getragene Aussage** [aaaaaaaa#1]\n"},
+			evidence: []string{"- [aaaaaaaa#1] im Transkript geäußert: „x“ — Block `b`, Abschnitt 1.\n"}}
+		before, _ := distillRenderBlock(st, a9Opts())
+		st.successorPlaces(a9Opts())
+		after, _ := distillRenderBlock(st, a9Opts())
+		if before != after {
+			t.Error("the rendered block changed after asking the predicate")
+		}
+		if st.ordinal != 3 {
+			t.Errorf("ordinal = %d, want 3 — the predicate moved the running shard", st.ordinal)
+		}
+		if st.carry.count() != 1 {
+			t.Errorf("carry holds %d claims, want 1 — the predicate cleared the running carry",
+				st.carry.count())
+		}
+	})
+}

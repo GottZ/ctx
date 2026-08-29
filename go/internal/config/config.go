@@ -1983,6 +1983,22 @@ type DistillConfig struct {
 	// zettelkasten doctrine on purpose (decision E03-4): an insight block is an
 	// EVIDENCE COLLECTION (claim plus quote per line), not one concept. E03-4
 	// settled the number as revisable, which is exactly what a key is.
+	//
+	// ITS LOWER END IS TWO FLOORS, NOT ONE (wave W-L4). A shard above the first
+	// carries a longer frame than shard 1: the title suffix " — Teil <n>" and
+	// the chain line naming its predecessor, together ~133 runes at today's
+	// title length. The smallest value at which a range can still grow is
+	// therefore HIGHER for shard 2 than for shard 1, and in the band between the
+	// two floors shard 1 takes an insight while none of its successors can. The
+	// arm answers that band by RESTING — it refuses a hand-over whose successor
+	// could place nothing, ends the run partial/budget and holds the material
+	// back, so the range stands still (measured at 1 900 runes: one hand-over,
+	// then no further block) and resumes the moment this key is raised. Before
+	// that refusal the same band wrote ONE EMPTY SHARD PER TICK up to the chain
+	// bound of 256, and a written block stays corpus. Nothing in the band is
+	// lost; what it costs is one read plus the first blind call per tick, which
+	// is C3-1's irreducible boundary and the spend guard's business.
+	// At the default 6 000 no shard of any ordinal comes near either floor.
 	MaxBlockRunes int `key:"distill.max_block_runes" env:"CTX_DISTILL_MAX_BLOCK_RUNES" default:"6000" mut:"hot" tenancy:"global-only"`
 	// MaxBlocksPerRoot is the shard cap of amendment C4-2 A.4 (b): how many
 	// blocks ONE (root, watermark_from) range may grow to. Since wave W-L2 a

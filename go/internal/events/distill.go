@@ -1019,12 +1019,58 @@ func (s *Scheduler) distillRollShard(ctx context.Context, t distillTick, key str
 			"max_blocks_per_root", t.write.maxShards, "dropped", t.block.overflow,
 			"held_back", back, "max_block_runes", t.write.maxRunes)
 		return distillSkipBudget, false, back > 0, nil
+	case !t.block.successorPlaces(t.write):
+		// THE SUCCESSOR WOULD PLACE NOTHING, so it is not opened (wave W-L4 fix
+		// round, review finding #1). A shard above the first carries a longer
+		// frame — title suffix and chain line — and where max_block_runes sits
+		// between "shard 1 fits an insight" and "shard 2 does not", the hand-over
+		// used to open a shard that could take nothing: measured 9 shards after 8
+		// ticks, 8 of them empty at ~1 726 runes of pure frame, one per tick up to
+		// the hard bound of 256.
+		//
+		// The answer is the one the cap and the hard bound already give — end with
+		// `budget`, hold the batch back, leave the watermark standing — so the
+		// range RESTS instead of growing blocks nobody removes, and it resumes the
+		// moment max_block_runes is raised. The empty shard is the part that
+		// cannot be taken back: a written block stays corpus and every later group
+		// read carries it.
+		back := len(t.block.overflowInsights)
+		slog.Warn("scheduler: distiller does not open the next shard — max_block_runes leaves it "+
+			"no room for a single insight",
+			"source_key", key, "shard", t.block.ordinal, "held_back", back,
+			"dropped", t.block.overflow, "max_block_runes", t.write.maxRunes)
+		return distillSkipBudget, false, back > 0, nil
 	case t.block.shardCalls == 0 && !t.block.shardCarries():
+		// THE THIRD EXIT HOLDS BACK LIKE THE TWO ABOVE (wave W-L4). The progress
+		// condition itself is unchanged — a shard that is empty and still full
+		// stays a run end, because another shard would be full again the moment
+		// it opened. What changes is the ANSWER TO distillBatch: a render
+		// overflow here is paid material with nowhere to live, exactly as at the
+		// cap and at the hard bound, and booking the batch anyway marks its
+		// chunks seen and moves the watermark past them.
+		//
+		// IT WAS THE ONE EXIT W-L3's BLOCKER #1 DID NOT REACH, and the comment on
+		// shardCarries said why it seemed not to need it: "the remainder of such a
+		// batch is not lost either way — it stays unseen and the next tick reads it
+		// again". That holds for the RUNE METER's brake (ex.blockFull), where
+		// distillBatch keeps the unprocessed suffix itself, and not for the
+		// RENDER's overflow, whose insights were called and paid for. Wave W-L4
+		// makes the difference reachable: the chain line takes runes out of every
+		// shard above the first, so a shard opened by a rollover can drop material
+		// again — measured on the W-L3 fan, cut max_block_runes 2200 / cap 4:
+		// 10 of 12 claims, source at rest afterwards.
+		//
+		// WHAT THE HOLD COSTS: the held-back chunks are read and called again on
+		// the next tick, and there they land in a shard that now CARRIES lines,
+		// so the carry-driven handover of A.4 (c) opens the next shard for them.
+		// The re-buy is the same price the cap exit pays, and the direction is
+		// the recoverable one.
+		back := len(t.block.overflowInsights)
 		slog.Warn("scheduler: distiller ends the run, the shard is empty and still full — "+
 			"a rollover would not make progress",
 			"source_key", key, "shard", t.block.ordinal, "dropped", t.block.overflow,
-			"max_block_runes", t.write.maxRunes)
-		return distillSkipBudget, false, false, nil
+			"held_back", back, "max_block_runes", t.write.maxRunes)
+		return distillSkipBudget, false, back > 0, nil
 	}
 
 	sealed, moved := t.block.ordinal, len(t.block.overflowInsights)
@@ -1036,6 +1082,34 @@ func (s *Scheduler) distillRollShard(ctx context.Context, t distillTick, key str
 		return "", false, false, err
 	}
 	l.blocksWritten++
+	if back := len(t.block.overflowInsights); back > 0 {
+		// THE HANDOVER ITSELF CAN OVERFLOW (wave W-L4). The write above renders
+		// the fresh shard, and that render has LESS room than the shard it
+		// relieves: the successor's frame carries the title suffix and, since
+		// this wave, the chain line. So a handover of k insights can place fewer
+		// than k, and the rest is paid material that this tick has nowhere to
+		// put.
+		//
+		// WHY IT MUST BE ANSWERED HERE. The overflow is created by this write,
+		// after the batch's hold decision would otherwise be taken; the run used
+		// to continue, the batch was booked whole, and the difference was lost —
+		// measured on the W-L3 material-fidelity fan, cut max_block_runes 2200 /
+		// cap 4: 10 of 12 claims, ledger 12, source at rest afterwards. Before
+		// this wave the same hole was 9 runes wide (the title suffix alone) and
+		// no cut of the fan reached it.
+		//
+		// THE ANSWER IS THE ONE THE PROGRESS CONDITION WOULD GIVE ONE TURN LATER,
+		// only in the batch that owns the chunks: the fresh shard has seen no
+		// call and carries nothing, so it may not hand over again — the run ends
+		// with `budget`, the batch is cut at the first held-back insight, and the
+		// watermark stands. On the next tick that shard CARRIES lines, so A.4 (c)'s
+		// carry-driven handover opens the next one and the material lands there.
+		slog.Warn("scheduler: distiller handed over into a shard that is full again — the rest "+
+			"of the batch waits",
+			"source_key", key, "shard", t.block.ordinal, "held_back", back,
+			"dropped", t.block.overflow, "max_block_runes", t.write.maxRunes)
+		return distillSkipBudget, true, true, nil
+	}
 	return "", true, false, nil
 }
 

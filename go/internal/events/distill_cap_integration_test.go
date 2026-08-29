@@ -242,9 +242,15 @@ func TestDistillShardCap(t *testing.T) {
 	// is not a property.
 	//
 	// WHAT THE PROBE PINS NOW, over every cut of the reviewer's sweep that
-	// showed the loss: the multiset of claims under a cap equals the one without
-	// it, no range grows past the cap, nothing is bought twice, and no chunk of
-	// the fixture is left both unclaimed and covered.
+	// showed the loss: every bought claim stands in a shard (claims == ledger),
+	// the multiset of claims under a cap equals the one without it wherever the
+	// range covered its material, no range grows past the cap, nothing is bought
+	// twice, and no chunk of the fixture is left both unclaimed and covered.
+	//
+	// WAVE W-L4 SPLIT THE COMPARISON, and the reason is in the body: a cap that
+	// truly binds leaves material WAITING, which the first version could not tell
+	// from material LOST. The loss half is now measured directly against the
+	// dedup ledger and therefore in both resting states.
 	t.Run("no cut of the cap loses paid material", func(t *testing.T) {
 		a9Truncate(t, pool)
 		free := wl3RunUntilQuiet(t, pool, key, 2600, 0, 12)
@@ -272,15 +278,59 @@ func TestDistillShardCap(t *testing.T) {
 							from, n, tc.cap)
 					}
 				}
-				if len(capped) != len(freeClaims) {
-					t.Errorf("%d claims under the cap against %d without it — the cap lost paid material",
-						len(capped), len(freeClaims))
+				// THE DIRECT FORM OF THE PROPERTY, and it holds in both resting
+				// states (wave W-L4): every claim the arm bought is in some shard.
+				// The reviewer's failure signature — 10 claims against a ledger of
+				// 12, watermark past them — is red here without any assumption about
+				// how much a capped chain can hold.
+				ledger := wl3Seen(t, pool, key)
+				if len(capped) != ledger {
+					t.Errorf("%d claims over the shards against %d ledger rows — material was bought "+
+						"and thrown away", len(capped), ledger)
 				}
-				for i := range freeClaims {
-					if i >= len(capped) || capped[i] != freeClaims[i] {
-						t.Errorf("claim %d differs.\ncapped: %q\nfree:   %q",
-							i, wl2At(capped, i), freeClaims[i])
-						break
+
+				// TWO RESTING STATES, TOLD APART (wave W-L4). A range that COVERED
+				// its material must hold exactly the claims the uncapped run holds.
+				// A range the cap STALLED holds fewer — and that is not a loss but
+				// the not-aus doing its job (design/02:3304: "das Wasserzeichen
+				// steht, der Rest wartet"): what it holds must be part of the
+				// baseline, and nothing it did not buy may sit below the watermark.
+				//
+				// The distinction became necessary with the chain line: it takes
+				// runes out of every shard above the first, and the 2200-rune cut
+				// had 22 runes of slack, so four shards no longer hold this fixture
+				// and the cap binds for real (measured: 5 claims, ledger 5,
+				// watermark 0, against 12/12 before the line).
+				if rest.stalled {
+					inFree := map[string]struct{}{}
+					for _, c := range freeClaims {
+						inFree[c] = struct{}{}
+					}
+					for _, c := range capped {
+						if _, ok := inFree[c]; !ok {
+							t.Errorf("the stalled range holds a claim the uncapped run never wrote: %q",
+								strings.TrimSpace(c))
+						}
+					}
+					if len(capped) >= len(freeClaims) {
+						t.Errorf("the range rests stalled with %d of %d claims — a range that holds "+
+							"everything must rest covered, not waiting", len(capped), len(freeClaims))
+					}
+					if missing := wl2Unseen(t, pool, key, 2, 6, rest.totals.wmTo); len(missing) > 0 {
+						t.Errorf("the stalled range covers %d chunk(s) that never reached a call: %v — "+
+							"the waiting material is not readable again", len(missing), missing)
+					}
+				} else {
+					if len(capped) != len(freeClaims) {
+						t.Errorf("%d claims under the cap against %d without it — the cap lost paid material",
+							len(capped), len(freeClaims))
+					}
+					for i := range freeClaims {
+						if i >= len(capped) || capped[i] != freeClaims[i] {
+							t.Errorf("claim %d differs.\ncapped: %q\nfree:   %q",
+								i, wl2At(capped, i), freeClaims[i])
+							break
+						}
 					}
 				}
 				seen := map[string]int{}
