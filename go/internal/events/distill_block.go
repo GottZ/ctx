@@ -88,6 +88,7 @@ import (
 	"log/slog"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -154,7 +155,15 @@ var errDistillBlockWrite = errors.New("distill: block write refused")
 // WHICH type is squatting, which is the difference between a diagnosable and an
 // undiagnosable standing state: after a shadow retype the refusal repeats on
 // every tick, and the operator's next step depends entirely on that name.
-type distillTypeHeld struct{ have, want string }
+//
+// WAVE W-L1 ADDS THE TITLE, and it is the same argument one axis further: with
+// several shards per range the source key no longer names the block. The
+// operator's remedy below is "archive the squatting block or set its type back"
+// — an instruction that needs an address, and after the identity gained the
+// ordinal the address is no longer derivable from the log line. The value is
+// the arm's OWN derived title (prefix, root, stamp, ordinal), never foreign
+// text, and Error() is deliberately left byte-identical.
+type distillTypeHeld struct{ have, want, title string }
 
 func (e *distillTypeHeld) Error() string {
 	return fmt.Sprintf("%s: the identity is held by type %q, not %q", errDistillBlockWrite, e.have, e.want)
@@ -196,6 +205,18 @@ type distillBlockState struct {
 	wmFrom int64
 	wmTo   int64
 	runID  string
+
+	// ordinal is the CAPACITY axis of the identity (amendment C4-2 A.2 a): the
+	// how-many-th block of this (root, watermark_from) range the run is writing.
+	// It opens at 1 and distillSeedBlock raises it to the running shard; wave
+	// W-L1 never raises it further, because a rollover is W-L2's one change.
+	//
+	// It is DERIVED AND NEVER STORED as run state (A.8 einwand 3): the seed
+	// re-reads it from context_blocks on every run, which is what keeps it
+	// correct across a crash, a restore and an archived shard — and what keeps
+	// migration 135's "no second source of run state" contract intact, since the
+	// block state has always been read from the block (distillSeedBlock's carry).
+	ordinal int
 
 	// createdAt is the RUN's stamp, taken once, and it is the freshness date the
 	// block text carries (Leitplanke 2j: a consumer sees the content, never the
@@ -297,12 +318,19 @@ type distillCarry struct {
 func (c distillCarry) count() int { return len(c.claims) }
 
 // newDistillBlockState opens the accumulator for one run.
+//
+// THE ORDINAL OPENS AT 1 rather than at 0, and that is the type's invariant
+// rather than a default: a state is shard 1 until the seed has read the group
+// and found a higher one. A zero value here would make every caller that builds
+// a state directly — every unit fixture, every hand-built probe — render a
+// title the arm can never write.
 func newDistillBlockState(root, runID string, wmFrom int64) *distillBlockState {
 	return &distillBlockState{
 		root:      root,
 		runID:     runID,
 		wmFrom:    wmFrom,
 		wmTo:      wmFrom,
+		ordinal:   1,
 		createdAt: time.Now(),
 		parts:     map[string]struct{}{},
 	}
@@ -377,6 +405,16 @@ func distillInsightSecret(in distillKept) (sensitivity.Match, bool) {
 	return sensitivity.Match{}, false
 }
 
+// distillShardSuffix opens the third identity axis in the title (amendment
+// C4-2 A.2 d). The form is fixed by that section: em dash with spaces, German
+// word, arabic number without leading zeros.
+//
+// It is COLLISION-FREE against every title written before this wave, and that
+// is a property of the base title rather than of taste: the base ends without
+// exception on an RFC3339-µs stamp (distillMicroRFC3339), never on a word, so
+// no pre-wave title can be read as a shard title of some other range.
+const distillShardSuffix = " — Teil "
+
 // distillBlockTitle is the block's identity half (§4.4.1), anchored on the
 // watermark and NOT on a counter: watermark_from is strictly monotone per
 // source, constant within a run and describes exactly the range the block
@@ -389,8 +427,68 @@ func distillInsightSecret(in distillKept) (sensitivity.Match, bool) {
 // not at target scale (ctxcheckpoint.go), so a shortened id plus a colliding
 // microsecond is a structural — not hypothetical — collision at 1M+ blocks.
 // The short form stays where it is readability rather than identity: the head.
-func distillBlockTitle(root string, wmFrom int64) string {
-	return distillTitlePrefix + root + " ab " + distillMicroRFC3339(wmFrom)
+//
+// THE ORDINAL IS THE CAPACITY AXIS (amendment C4-2 A.2 a): watermark_from
+// answers "which material does this block describe", the ordinal answers "the
+// how-many-th block of that range is this". The two are orthogonal on purpose —
+// letting the watermark move instead would book unread material as covered,
+// which is fail-open and the one alternative A.2 (b) rules out by name.
+//
+// n = 1 CARRIES NO SUFFIX, and that sonderregel is the wave's price rather than
+// an oversight (A.2 c): every block written before this wave is shard 1 by
+// construction, the title IS the upsert identity, and renaming the stock would
+// orphan it — the exact damage class Festlegung 4 builds the type guard against.
+// The sonderregel is not defended by this comment but by a digest gate
+// (TestDistillShardTitleNonRegression), the same instrument C3-1 chose for the
+// render seam.
+//
+// AN ORDINAL BELOW 1 RENDERS AS SHARD 1 rather than as a title no reader could
+// parse back. It cannot occur: the ordinal is code-computed, the state opens at
+// 1 (newDistillBlockState) and only distillSeedBlock ever raises it. Pinned in
+// TestDistillShardTitle so the total behaviour stays a decision.
+func distillBlockTitle(root string, wmFrom int64, ordinal int) string {
+	title := distillTitlePrefix + root + " ab " + distillMicroRFC3339(wmFrom)
+	if ordinal <= 1 {
+		return title
+	}
+	return title + distillShardSuffix + strconv.Itoa(ordinal)
+}
+
+// distillShardOrdinal is distillBlockTitle read backwards: which shard of
+// (root, wmFrom) is this title, if any.
+//
+// IT IS THE AUTHORITY ON THE ORDINAL, and metadata.shard_ordinal is not. The
+// reason is the one §4.4.1 gives for everything else in this file: the title is
+// the upsert identity, so the shard a row IS follows from its title and from
+// nothing else. Deriving the number from the metadata instead would make a
+// jsonb field decide which row the arm writes into — a value anyone with a
+// write key can set, on a row whose title says something different.
+//
+// It also removes the W-L0 measurement's NULL trap at the root rather than
+// patching it (w-l0-messvorwelle.md, recommendation 3): the 16 stock blocks
+// carry no shard_ordinal key at all, and `ORDER BY (metadata->>'shard_ordinal')::int`
+// sorts them AGAINST the shards (ASC puts NULL last, DESC puts it first — both
+// measured). A title-derived ordinal reads the stock as shard 1 because its
+// title is the shard-1 title, with no NULL anywhere in the decision.
+//
+// THE FORM IS CANONICAL OR IT IS NOT A SHARD: " — Teil 02", " — Teil +2" and
+// " — Teil 1" are rejected, because each of them is a title this arm can never
+// have written, and admitting one would mean two distinct titles claim one
+// ordinal.
+func distillShardOrdinal(root string, wmFrom int64, title string) (int, bool) {
+	base := distillBlockTitle(root, wmFrom, 1)
+	if title == base {
+		return 1, true
+	}
+	rest, ok := strings.CutPrefix(title, base+distillShardSuffix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 2 || strconv.Itoa(n) != rest {
+		return 0, false
+	}
+	return n, true
 }
 
 // distillMicroRFC3339 renders a microsecond watermark as UTC RFC3339 with
@@ -619,7 +717,12 @@ func distillOverflowNote(drop int) string {
 // ones.
 func distillRenderN(st *distillBlockState, opts distillWriteOpts, claims, evidence []string, drop int) string {
 	var b strings.Builder
-	b.WriteString("# " + distillBlockTitle(st.root, st.wmFrom) + "\n")
+	// THE HEAD CARRIES THE SHARD TITLE, suffix included: the head is the block's
+	// own name, and a shard 2 that heads itself with the shard-1 title would tell
+	// a reader it is a block it is not. What it does NOT do is name its
+	// predecessor — the chain line is W-L4's one change, deliberately not this
+	// wave's (amendment C4-2 A.6).
+	b.WriteString("# " + distillBlockTitle(st.root, st.wmFrom, st.ordinal) + "\n")
 
 	// THE TRUST SENTENCE IS THE FIRST PARAGRAPH and stays under ~330 runes, so
 	// it survives every cut that leaves the block recognisable at all. The
@@ -752,6 +855,23 @@ func distillBlockMetadata(st *distillBlockState, opts distillWriteOpts, written 
 		"watermark_from":     st.wmFrom,
 		"watermark_to":       st.wmTo,
 		"run_id":             distillMetaUUID(st.runID),
+		// The two shard keys of amendment C4-2 A.3 (d). Both are CODE-COMPUTED,
+		// like gen and insight_count and unlike everything distillMetaValue has to
+		// re-type — they carry no foreign value and need no typing check.
+		//
+		// shard_ordinal is the block's own statement about which shard it is. It
+		// is a PUBLICATION, not the authority: the seed derives the ordinal from
+		// the title (distillShardOrdinal) and cross-checks this key against it, so
+		// a hand-edited value is a logged divergence rather than a moved identity.
+		//
+		// shard_of_watermark is redundant to watermark_from by construction and
+		// stays anyway, because A.3 (d) names it as the group's second half key
+		// and W-L2/W-L3 read the group. The GROUP QUERY of this wave deliberately
+		// does not use it: the 16 stock blocks carry watermark_from and not this
+		// key, so a query over it would miss exactly the rows the coexistence path
+		// of A.3 (c) exists to keep.
+		distillMetaShardOrdinal: st.ordinal,
+		distillMetaShardOfWM:    st.wmFrom,
 		// gen is READABILITY, never identity (135_distill_run.sql says so of its
 		// own column): the number of compactions this block covers. The journal
 		// column stays 0 — it is written at INSERT time, before any of this is
@@ -887,19 +1007,150 @@ func distillTypeGuard(ctx context.Context, pool *pgxpool.Pool, category, title, 
 	case err != nil:
 		return fmt.Errorf("%w: reading the target row: %w", errDistillBlockWrite, err)
 	case have != want:
-		return &distillTypeHeld{have: have, want: want}
+		return &distillTypeHeld{have: have, want: want, title: title}
 	}
 	return nil
+}
+
+// The two metadata keys of amendment C4-2 A.3 (d). Constants and not literals,
+// because shard_ordinal is written in one place and read in another and the two
+// have to stay the same word.
+const (
+	distillMetaShardOrdinal = "shard_ordinal"
+	distillMetaShardOfWM    = "shard_of_watermark"
+)
+
+// distillShardGroupQuery is A.3 (a)'s primary variant: every non-archived block
+// of one (root, watermark_from) range, found over the arm's OWN metadata.
+//
+// WHY THIS SHAPE AND NOT THE TWO MEASURED ALTERNATIVES. Wave W-L0 ran
+// EXPLAIN (ANALYZE, BUFFERS) over seven data sets (w-l0-messvorwelle.md,
+// measuring point 1): the `@>` containment lands on idx_context_metadata as an
+// Index Cond from ~149 category rows upward and stays FLAT at 49-54 buffers
+// across a factor 40 in size, while ascending point probing costs 17 buffers
+// PER PROBE (119-170 per seed at the expected 6-9 shards) and the `->>`
+// rewrite over idx_blocks_checkpoint_root collapses to 216 buffers on the
+// largest real group. The forced sequential scan — the rollback edge — costs
+// 1 088. The probing fallback of A.3 (a) is therefore not built at all, and its
+// gap trap does not exist in this variable.
+//
+// IT SELECTS NO CONTENT, which is the one deviation from the amendment's sketch
+// and the reason is scale rather than taste: the group is read on every tick of
+// every root, and the content column of a shard is up to max_block_runes. The
+// arm needs exactly one body — the running shard's — and fetches it by title
+// afterwards, which is a single index point lookup and, not incidentally, the
+// byte-identical read this function performed before the wave.
+//
+// IT ALSO DROPS THE ORDER BY of the sketch. The ordinal that decides is derived
+// from the title (distillShardOrdinal), so ordering on a jsonb value the
+// function does not trust would be work whose result is thrown away — and it is
+// exactly the expression W-L0 measured as the NULL trap on the stock blocks.
+// Removing the Sort node takes work out of the measured plan; the index path is
+// decided by the WHERE clause, which is unchanged.
+const distillShardGroupQuery = `
+	SELECT title, metadata->>'` + distillMetaShardOrdinal + `'
+	  FROM context_blocks
+	 WHERE NOT is_archived
+	   AND category = $1 AND scope = $2
+	   AND metadata @> jsonb_build_object('root_session_id', $3::text,
+	                                      'watermark_from',  $4::bigint)`
+
+// distillRunningShard answers which shard of (root, wmFrom) the arm is writing
+// into — the highest one that exists, or 1 when the range is untouched.
+//
+// THE STOCK IS SHARD 1 WITHOUT CARRYING A SINGLE NEW KEY (A.3 c, coexistence):
+// its title is the shard-1 title, so it is found, read as ordinal 1 and grown
+// exactly as before. That is the whole reason the suffix starts at 2.
+//
+// A ROW WHOSE TITLE IS NOT A SHARD TITLE OF THIS RANGE IS NOT PART OF THE
+// CHAIN. The metadata half of the query is a discovery key over an index, not
+// an identity: `metadata @> {root_session_id, watermark_from}` can be set by
+// anyone who may write a block, and a row that carries it while its title says
+// something else has no claim on the arm's name. It is logged and skipped —
+// never refused, because refusing would let one planted row stop the arm on a
+// root forever, and never opened, because opening it would let the same row
+// redirect the arm's write.
+func (s *Scheduler) distillRunningShard(ctx context.Context, opts distillWriteOpts, root string, wmFrom int64) (int, error) {
+	// A ROOT THAT DOES NOT SURVIVE distillMetaValue IS NOT ADDRESSABLE HERE.
+	// §4.4.3 re-types every foreign string before it enters metadata, so such a
+	// root stands in the block as "" while the title carries it verbatim — the
+	// group query would find nothing and the arm would replace its own shard 1,
+	// which is precisely the loss round-2 blocker #1 closed. The arm stays on
+	// shard 1 for that root: single-shard behaviour, byte-identical to the tree
+	// before this wave, and loud rather than silent.
+	if distillMetaValue(root) != root {
+		slog.Warn("scheduler: distiller cannot address its shard group — the root id does not "+
+			"survive the metadata type check, so the arm stays on shard 1",
+			"source_root", root, "category", opts.category, "scope", opts.scope)
+		return 1, nil
+	}
+
+	rows, err := s.pool.Query(ctx, distillShardGroupQuery, opts.category, opts.scope, root, wmFrom)
+	if err != nil {
+		return 0, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
+	}
+	defer rows.Close()
+
+	highest, members, strangers := 1, 0, 0
+	for rows.Next() {
+		var title string
+		var hint *string
+		if err := rows.Scan(&title, &hint); err != nil {
+			return 0, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
+		}
+		n, ok := distillShardOrdinal(root, wmFrom, title)
+		if !ok {
+			strangers++
+			continue
+		}
+		members++
+		// The published ordinal is cross-checked against the derived one. A
+		// divergence changes no decision — the title decides — but it is the only
+		// signal that something rewrote the arm's own bookkeeping, and a silent
+		// one would be a state nobody can diagnose.
+		switch {
+		case hint == nil && n != 1:
+			// n = 1 without the key is the STOCK and says nothing: every block
+			// written before this wave is in exactly that state (A.3 c).
+			slog.Warn("scheduler: distiller shard carries no shard_ordinal key",
+				"title", title, "derived_ordinal", n)
+		case hint != nil && *hint != strconv.Itoa(n):
+			slog.Warn("scheduler: distiller shard disagrees with its own shard_ordinal key",
+				"title", title, "derived_ordinal", n, "metadata_ordinal", *hint)
+		}
+		if n > highest {
+			highest = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
+	}
+	if strangers > 0 {
+		slog.Warn("scheduler: distiller found rows carrying its group keys under a foreign title — "+
+			"they are not shards of this range and are left alone",
+			"source_root", root, "watermark_from", wmFrom, "strangers", strangers, "shards", members)
+	}
+	return highest, nil
 }
 
 // distillSeedBlock opens the accumulator for one run and loads what a PREVIOUS
 // run over the same identity already made durable (round-2 blocker #1).
 //
-// It is the one read that decides three things at once, which is why it is one
-// query and not three: whether the identity is free, whether it is held by a
-// foreign type (Festlegung 4b, refused), and what the arm's own earlier block
-// already carries. Called ONCE per run — a second seed after the first batch
-// would carry the run's own new lines a second time.
+// It decides four things, which is why the reads are ordered rather than one
+// query: which shard of the range is the running one (amendment C4-2 A.2),
+// whether that shard's identity is free, whether it is held by a foreign type
+// (Festlegung 4b, refused), and what the arm's own earlier block already
+// carries. Called ONCE per run — a second seed after the first batch would
+// carry the run's own new lines a second time.
+//
+// THE TYPE GATE RUNS ON THE SHARD THE ARM OPENS, and only on it. Festlegung
+// 4(b) is a statement about the row that is about to be WRITTEN: it exists so
+// transcript prose never lands under someone else's type policy. This wave
+// writes exactly one shard per run, so the shard it opens is the whole surface.
+// A foreign type on a LOWER shard is left standing on purpose — the arm neither
+// reads nor writes it here, and refusing over it would let one planted row kill
+// a grown chain. When W-L2 starts reading every shard for the cross-shard
+// dedup, that row becomes material and the gate has to grow with it.
 //
 // A body whose sections this arm does not recognise is a REFUSAL, never a
 // replacement: the alternative is to overwrite a block whose shape is unknown,
@@ -910,10 +1161,15 @@ func (s *Scheduler) distillSeedBlock(ctx context.Context, opts distillWriteOpts,
 		return nil, fmt.Errorf("%w: incomplete write identity (category=%q type=%q scope=%q)",
 			errDistillBlockWrite, opts.category, opts.typeName, opts.scope)
 	}
-	title := distillBlockTitle(root, wmFrom)
+	ordinal, err := s.distillRunningShard(ctx, opts, root, wmFrom)
+	if err != nil {
+		return nil, err
+	}
+	st.ordinal = ordinal
+	title := distillBlockTitle(root, wmFrom, ordinal)
 
 	var haveType, content string
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`SELECT type_name, content FROM context_blocks
 		  WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived`,
 		opts.category, title, opts.scope).Scan(&haveType, &content)
@@ -923,7 +1179,7 @@ func (s *Scheduler) distillSeedBlock(ctx context.Context, opts distillWriteOpts,
 	case err != nil:
 		return nil, fmt.Errorf("%w: reading the target row: %w", errDistillBlockWrite, err)
 	case haveType != opts.typeName:
-		return nil, &distillTypeHeld{have: haveType, want: opts.typeName}
+		return nil, &distillTypeHeld{have: haveType, want: opts.typeName, title: title}
 	}
 
 	carry, ok := distillSplitCarry(content)
@@ -1121,7 +1377,12 @@ func (s *Scheduler) distillWriteBlock(ctx context.Context, opts distillWriteOpts
 			errDistillBlockWrite, opts.category, opts.typeName, opts.scope)
 	}
 
-	title := distillBlockTitle(st.root, st.wmFrom)
+	// THE RUNNING SHARD IS THE ONE THE SEED OPENED, and this wave never moves
+	// off it: st.ordinal is set once per run and the rollover — the point at
+	// which a full shard hands over to the next — is W-L2's one change
+	// (amendment C4-2 A.6). Every batch of this run therefore upserts the same
+	// title, exactly as before.
+	title := distillBlockTitle(st.root, st.wmFrom, st.ordinal)
 	if err := distillTypeGuard(ctx, s.pool, opts.category, title, opts.scope, opts.typeName); err != nil {
 		return err
 	}

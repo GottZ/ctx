@@ -151,12 +151,35 @@ func TestDistillBlockRuneCap(t *testing.T) {
 
 // GATE 5 — the metadata is exactly the pinned key set, in both cases.
 func TestDistillBlockMetadataIsWhite(t *testing.T) {
+	// Two keys longer than before wave W-L1: amendment C4-2 A.3 (d) adds
+	// shard_ordinal and shard_of_watermark to the pinned set. Both are
+	// code-computed, so the §4.4.3 typing rule has nothing to check on them —
+	// what this gate checks is that the set grew by exactly two and by nothing
+	// else.
 	base := []string{
 		"active_session_id", "coverage", "evidence_date", "gen", "insight_count",
 		"invalidated_by", "manifest_id", "manifest_sha256", "model",
-		"parent_manifest_id", "root_session_id", "run_id", "source_block_ids",
-		"source_kind", "source_label", "warnings", "watermark_from", "watermark_to",
+		"parent_manifest_id", "root_session_id", "run_id", "shard_of_watermark",
+		"shard_ordinal", "source_block_ids", "source_kind", "source_label",
+		"warnings", "watermark_from", "watermark_to",
 	}
+
+	t.Run("the two shard keys carry the code-computed values", func(t *testing.T) {
+		st := a9State(2)
+		st.ordinal = 3
+		md := distillBlockMetadata(st, a9Opts(), 2)
+		if md[distillMetaShardOrdinal] != 3 {
+			t.Errorf("shard_ordinal = %v, want 3", md[distillMetaShardOrdinal])
+		}
+		if md[distillMetaShardOfWM] != a9WMFrom {
+			t.Errorf("shard_of_watermark = %v, want %d", md[distillMetaShardOfWM], a9WMFrom)
+		}
+		// The default is shard 1, so a block written without a seed is a shard-1
+		// block — the state every stock block is in.
+		if plain := distillBlockMetadata(a9State(2), a9Opts(), 2); plain[distillMetaShardOrdinal] != 1 {
+			t.Errorf("shard_ordinal = %v on a fresh state, want 1", plain[distillMetaShardOrdinal])
+		}
+	})
 
 	t.Run("without a detector hit the key set is exactly the base", func(t *testing.T) {
 		md := distillBlockMetadata(a9State(2), a9Opts(), 2)
@@ -551,7 +574,7 @@ func TestDistillBlockCarry(t *testing.T) {
 
 // GATE 2's other half and §4.4.1: the title.
 func TestDistillBlockTitle(t *testing.T) {
-	title := distillBlockTitle(a9Root, a9WMFrom)
+	title := distillBlockTitle(a9Root, a9WMFrom, 1)
 	if !strings.HasPrefix(title, distillTitlePrefix) {
 		t.Errorf("title %q does not open with the namespace prefix", title)
 	}
@@ -563,12 +586,208 @@ func TestDistillBlockTitle(t *testing.T) {
 	}
 	// Two ranges of the same root are two identities; two runs over the same
 	// range are one.
-	if distillBlockTitle(a9Root, a9WMFrom) != title {
+	if distillBlockTitle(a9Root, a9WMFrom, 1) != title {
 		t.Error("the title is not deterministic")
 	}
-	if distillBlockTitle(a9Root, a9WMFrom+1) == title {
+	if distillBlockTitle(a9Root, a9WMFrom+1, 1) == title {
 		t.Error("two watermarks share one title — a second run would overwrite the first range")
 	}
+}
+
+// Below: wave W-L1 — the identity's third axis (amendment C4-2 A.2).
+
+// TestDistillShardTitle is the green half of the wave's first red point: on the
+// tree before it, a call with three arguments did not compile.
+//
+// The RED of the sonderregel is recorded in the wave report and machine-checked
+// in TestDistillShardTitleNonRegression: a version that suffixes n = 1 as well
+// renames every existing block, which the measured stock (16 blocks, none of
+// them carrying a suffix) turns into 16 orphans plus 16 new blocks.
+func TestDistillShardTitle(t *testing.T) {
+	base := distillBlockTitle(a9Root, a9WMFrom, 1)
+
+	t.Run("shard 1 carries no suffix at all", func(t *testing.T) {
+		if strings.Contains(base, distillShardSuffix) {
+			t.Fatalf("title %q carries a shard suffix at n=1 — the whole stock would be renamed", base)
+		}
+		// The collision-freedom argument of A.2 (d), checked rather than asserted:
+		// the base ends on the stamp, so no pre-wave title can read as a shard.
+		if !strings.HasSuffix(base, distillMicroRFC3339(a9WMFrom)) {
+			t.Errorf("title %q does not end on the RFC3339-µs stamp", base)
+		}
+	})
+
+	t.Run("shard 2 and above carry the suffix in its canonical form", func(t *testing.T) {
+		for n, want := range map[int]string{2: " — Teil 2", 3: " — Teil 3", 10: " — Teil 10", 1430: " — Teil 1430"} {
+			got := distillBlockTitle(a9Root, a9WMFrom, n)
+			if got != base+want {
+				t.Errorf("n=%d: title = %q, want %q", n, got, base+want)
+			}
+		}
+	})
+
+	t.Run("no two ordinals share one title", func(t *testing.T) {
+		seen := map[string]int{}
+		for n := 1; n <= 64; n++ {
+			title := distillBlockTitle(a9Root, a9WMFrom, n)
+			if prev, dup := seen[title]; dup {
+				t.Fatalf("n=%d and n=%d share the title %q", prev, n, title)
+			}
+			seen[title] = n
+		}
+	})
+
+	// The ordinal is code-computed and opens at 1, so a value below it cannot
+	// occur. Pinned anyway: a total function whose out-of-range behaviour is
+	// undefined is the kind of identity trap A.2 (c) names by its own price.
+	t.Run("an ordinal below 1 renders as shard 1", func(t *testing.T) {
+		for _, n := range []int{0, -1, -1430} {
+			if got := distillBlockTitle(a9Root, a9WMFrom, n); got != base {
+				t.Errorf("n=%d: title = %q, want the shard-1 title %q", n, got, base)
+			}
+		}
+	})
+
+	// The other two axes keep working across ordinals: a shard of one range is
+	// never a shard of another.
+	t.Run("the ordinal does not collide across ranges or roots", func(t *testing.T) {
+		if distillBlockTitle(a9Root, a9WMFrom, 2) == distillBlockTitle(a9Root, a9WMFrom+1, 2) {
+			t.Error("two watermarks share one shard-2 title")
+		}
+		if distillBlockTitle(a9Root, a9WMFrom, 2) == distillBlockTitle(a9Root+"x", a9WMFrom, 2) {
+			t.Error("two roots share one shard-2 title")
+		}
+	})
+}
+
+// wl1TitleFixtures are the (root, watermark) shapes the digest below pins: the
+// unit fixture, the epoch watermark every seed run of the measure copy carries,
+// a preflight root, and a root at the length the metadata check still admits.
+var wl1TitleFixtures = []struct {
+	root string
+	wm   int64
+}{
+	{"20260712_205012_837f2c", 0},
+	{"20260712_205012_837f2c", 1787892725313110},
+	{"20260819_115828_ecbc1118", 1787892999999999},
+	{"preflight-20260809T174528Z", 0},
+	{"20260729_081118_9f9fb1", 1234567890123456},
+	{strings.Repeat("a", 64), 999999999999999},
+}
+
+// TestDistillShardTitleNonRegression is the gate amendment C4-2 A.2 (c) asks
+// for by name: `distillBlockTitle(root, wm, 1)` is BYTE-IDENTICAL to the
+// two-parameter function this wave replaced.
+//
+// A digest over a fixture set and not a prose assertion, for the reason
+// TestDistillInsightLineNonRegression gives for the render seam: the property
+// under probe is "not one byte moved", and every weaker formulation would pass
+// a title that quietly gained a space.
+//
+// THE PIN WAS TAKEN ON THE UNCHANGED TREE, before the ordinal existed, with the
+// two-parameter function and the same fixture list (command and output in the
+// wave report). It is therefore evidence and not a self-fulfilling recording.
+//
+// The negative side is in the same test, because it is the whole reason for the
+// sonderregel: the counter-version — suffix at n = 1 as well — produces a
+// DIFFERENT digest, and every one of its titles misses the stock row it was
+// supposed to grow.
+func TestDistillShardTitleNonRegression(t *testing.T) {
+	var b strings.Builder
+	for _, f := range wl1TitleFixtures {
+		b.WriteString(distillBlockTitle(f.root, f.wm, 1))
+		b.WriteString("\n")
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	const want = "a6dd8eab1c5339cebf13c954d2abba9901ca48f78ee0dcdb9918af7a8ceb6430"
+	if got := hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("the shard-1 title moved against the pre-wave tree:\n got %s\nwant %s\n%s",
+			got, want, b.String())
+	}
+
+	// The counter-version, spelled out so the red is checked rather than
+	// remembered: with a suffix at n = 1 not one of the fixtures keeps its name.
+	var c strings.Builder
+	for _, f := range wl1TitleFixtures {
+		c.WriteString(distillBlockTitle(f.root, f.wm, 1) + distillShardSuffix + "1")
+		c.WriteString("\n")
+	}
+	if csum := sha256.Sum256([]byte(c.String())); hex.EncodeToString(csum[:]) == want {
+		t.Fatal("the counter-version digests identically — the probe measures nothing")
+	}
+	for _, f := range wl1TitleFixtures {
+		if distillBlockTitle(f.root, f.wm, 1)+distillShardSuffix+"1" == distillBlockTitle(f.root, f.wm, 1) {
+			t.Errorf("counter-version title equals the stock title for %q", f.root)
+		}
+	}
+}
+
+// TestDistillShardOrdinalFromTitle pins the inverse: which shard a title IS.
+//
+// It is the function that replaces the amendment's `ORDER BY
+// (metadata->>'shard_ordinal')::int`, and the W-L0 measurement is why: the 16
+// stock blocks carry no such key, so the SQL expression sorts them against the
+// shards (measured: ASC puts NULL last, DESC first — both open the stock block
+// instead of the highest shard). A title-derived ordinal has no NULL in the
+// decision at all.
+func TestDistillShardOrdinalFromTitle(t *testing.T) {
+	base := distillBlockTitle(a9Root, a9WMFrom, 1)
+
+	t.Run("the stock title is shard 1", func(t *testing.T) {
+		n, ok := distillShardOrdinal(a9Root, a9WMFrom, base)
+		if !ok || n != 1 {
+			t.Fatalf("(%d, %v), want (1, true) — the whole coexistence path rests on this", n, ok)
+		}
+	})
+
+	t.Run("every written shard reads back as itself", func(t *testing.T) {
+		for i := 1; i <= 64; i++ {
+			title := distillBlockTitle(a9Root, a9WMFrom, i)
+			n, ok := distillShardOrdinal(a9Root, a9WMFrom, title)
+			if !ok || n != i {
+				t.Errorf("%q -> (%d, %v), want (%d, true)", title, n, ok, i)
+			}
+		}
+	})
+
+	// A title this arm can never have written is NOT a shard of this chain. Each
+	// of these would otherwise let a second title claim an ordinal that already
+	// belongs to one.
+	t.Run("non-canonical and foreign forms are refused", func(t *testing.T) {
+		for _, title := range []string{
+			base + distillShardSuffix + "1",   // the counter-version's shard 1
+			base + distillShardSuffix + "01",  // leading zero
+			base + distillShardSuffix + "+2",  // signed
+			base + distillShardSuffix + "-2",  // negative
+			base + distillShardSuffix + "2 ",  // trailing space
+			base + distillShardSuffix + " 2",  // leading space
+			base + distillShardSuffix + "2.0", // not an integer
+			base + distillShardSuffix,         // no number at all
+			base + " — Teil2",                 // suffix without the space
+			base + " - Teil 2",                // hyphen instead of the em dash
+			base + "x",
+			distillBlockTitle(a9Root, a9WMFrom+1, 2), // another range
+			distillBlockTitle(a9Root+"x", a9WMFrom, 2),
+			"Destillat aus Compaction",
+			"",
+		} {
+			if n, ok := distillShardOrdinal(a9Root, a9WMFrom, title); ok {
+				t.Errorf("%q was read as shard %d", title, n)
+			}
+		}
+	})
+
+	// Round trip against the identity function, over both axes.
+	t.Run("the inverse holds for every fixture", func(t *testing.T) {
+		for _, f := range wl1TitleFixtures {
+			for _, i := range []int{1, 2, 9, 1430} {
+				n, ok := distillShardOrdinal(f.root, f.wm, distillBlockTitle(f.root, f.wm, i))
+				if !ok || n != i {
+					t.Errorf("%q/%d: (%d, %v)", f.root, i, n, ok)
+				}
+			}
+		}
+	})
 }
 
 // GATE 7 — the untrusted framing (BA7), as a Go test. The red state is
@@ -596,7 +815,7 @@ func TestDistillBlockUntrustedFraming(t *testing.T) {
 	}
 
 	src := llm.Source{
-		Title: distillBlockTitle(a9Root, a9WMFrom), Category: "session-insights",
+		Title: distillBlockTitle(a9Root, a9WMFrom, 1), Category: "session-insights",
 		Content: "irgendein Destillat", Untrusted: set.IsUntrusted(blockType),
 	}
 	sys, user := llm.BuildPrompt("frage", []llm.Source{src}, nil, llm.SynthesisSettings{})

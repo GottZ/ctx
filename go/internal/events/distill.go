@@ -921,7 +921,7 @@ func (s *Scheduler) distillLogSeedRefusal(key string, w distillWriteOpts, err er
 		remedy = "measure copy: ctx-distillreset -from-type " + held.have + " -apply"
 	}
 	slog.Error("scheduler: distiller cannot use its block identity — a foreign type holds it",
-		"source_key", key, "category", w.category, "scope", w.scope,
+		"source_key", key, "category", w.category, "scope", w.scope, "title", held.title,
 		"have_type", held.have, "want_type", held.want, "remedy", remedy, "error", err)
 }
 

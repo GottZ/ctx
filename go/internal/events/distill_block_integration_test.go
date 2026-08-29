@@ -195,8 +195,9 @@ func TestDistillBlockWrite(t *testing.T) {
 	base := []string{
 		"active_session_id", "coverage", "evidence_date", "gen", "insight_count",
 		"invalidated_by", "manifest_id", "manifest_sha256", "model",
-		"parent_manifest_id", "root_session_id", "run_id", "source_block_ids",
-		"source_kind", "source_label", "warnings", "watermark_from", "watermark_to",
+		"parent_manifest_id", "root_session_id", "run_id", "shard_of_watermark",
+		"shard_ordinal", "source_block_ids", "source_kind", "source_label",
+		"warnings", "watermark_from", "watermark_to",
 	}
 
 	// GATE 1 — the arm writes a block, and it carries the seven properties
@@ -223,8 +224,8 @@ func TestDistillBlockWrite(t *testing.T) {
 		if b.manifestID == "" {
 			t.Error("metadata.manifest_id is empty — the block names no compaction")
 		}
-		if b.title != distillBlockTitle(dfRoot, 0) {
-			t.Errorf("title = %q, want %q", b.title, distillBlockTitle(dfRoot, 0))
+		if b.title != distillBlockTitle(dfRoot, 0, 1) {
+			t.Errorf("title = %q, want %q", b.title, distillBlockTitle(dfRoot, 0, 1))
 		}
 		if b.insightCount < 1 {
 			t.Errorf("insight_count = %d, want at least one", b.insightCount)
@@ -351,7 +352,7 @@ func TestDistillBlockWrite(t *testing.T) {
 	// failed/block_write_failed"); which one applies follows from whether the
 	// arm can tell that the body is its own.
 	t.Run("title squatting", func(t *testing.T) {
-		title := distillBlockTitle(dfRoot, 0)
+		title := distillBlockTitle(dfRoot, 0, 1)
 
 		// (a) A FOREIGN TYPE on the arm's identity: refused before a single call.
 		// The refusal moved in front of the run in round 2 (the seed reads the
@@ -510,7 +511,7 @@ func TestDistillBlockWrite(t *testing.T) {
 				`UPDATE context_blocks SET embedding = array_fill(0.1::real, ARRAY[1024])::vector,
 				        embed_model = 'probe'
 				  WHERE category='session-insights' AND title=$1 AND scope=$2`,
-				distillBlockTitle(dfRoot, 0), dfScope); err != nil {
+				distillBlockTitle(dfRoot, 0, 1), dfScope); err != nil {
 				t.Fatalf("seed embedding: %v", err)
 			}
 			if err := s.distillWriteBlock(ctx, opts, st); err != nil {
@@ -520,7 +521,7 @@ func TestDistillBlockWrite(t *testing.T) {
 			if err := pool.QueryRow(ctx,
 				`SELECT COALESCE(embed_model,'') FROM context_blocks
 				  WHERE category='session-insights' AND title=$1 AND scope=$2`,
-				distillBlockTitle(dfRoot, 0), dfScope).Scan(&model); err != nil {
+				distillBlockTitle(dfRoot, 0, 1), dfScope).Scan(&model); err != nil {
 				t.Fatalf("read embed_model: %v", err)
 			}
 			if model != "probe" {
@@ -539,7 +540,7 @@ func TestDistillBlockWrite(t *testing.T) {
 			if err := pool.QueryRow(ctx,
 				`SELECT COALESCE(embed_model,'') FROM context_blocks
 				  WHERE category='session-insights' AND title=$1 AND scope=$2`,
-				distillBlockTitle(dfRoot, 0), dfScope).Scan(&model); err != nil {
+				distillBlockTitle(dfRoot, 0, 1), dfScope).Scan(&model); err != nil {
 				t.Fatalf("read embed_model: %v", err)
 			}
 			if model != "" {
