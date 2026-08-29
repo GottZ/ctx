@@ -141,6 +141,27 @@ var distillMetaString = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 // distillRunError has to map it onto an outcome without reading text.
 var errDistillBlockWrite = errors.New("distill: block write refused")
 
+// distillTypeHeld names BOTH sides of Festlegung 4(b)'s refusal: the type that
+// holds the arm's identity, and the type the arm wanted. It exists so the
+// operator log can carry the two names as FIELDS rather than only inside a
+// wrapped message (wave C4-5, re-pilot finding N-15).
+//
+// It changes no decision. The refusal is the same refusal, the message text is
+// byte-identical to the fmt.Errorf it grew out of, and Unwrap keeps
+// distillRunError's errors.Is mapping onto block_write_failed intact — the
+// journal still learns a class and nothing else (135:131-135). What is new is
+// only that a reader of the log no longer has to parse the message to learn
+// WHICH type is squatting, which is the difference between a diagnosable and an
+// undiagnosable standing state: after a shadow retype the refusal repeats on
+// every tick, and the operator's next step depends entirely on that name.
+type distillTypeHeld struct{ have, want string }
+
+func (e *distillTypeHeld) Error() string {
+	return fmt.Sprintf("%s: the identity is held by type %q, not %q", errDistillBlockWrite, e.have, e.want)
+}
+
+func (e *distillTypeHeld) Unwrap() error { return errDistillBlockWrite }
+
 // distillWriteOpts are the write-side snapshot values of one tick, resolved
 // once with everything else so a hot config change cannot move the identity of
 // a block halfway through the run that is writing it.
@@ -866,8 +887,7 @@ func distillTypeGuard(ctx context.Context, pool *pgxpool.Pool, category, title, 
 	case err != nil:
 		return fmt.Errorf("%w: reading the target row: %w", errDistillBlockWrite, err)
 	case have != want:
-		return fmt.Errorf("%w: the identity is held by type %q, not %q",
-			errDistillBlockWrite, have, want)
+		return &distillTypeHeld{have: have, want: want}
 	}
 	return nil
 }
@@ -903,8 +923,7 @@ func (s *Scheduler) distillSeedBlock(ctx context.Context, opts distillWriteOpts,
 	case err != nil:
 		return nil, fmt.Errorf("%w: reading the target row: %w", errDistillBlockWrite, err)
 	case haveType != opts.typeName:
-		return nil, fmt.Errorf("%w: the identity is held by type %q, not %q",
-			errDistillBlockWrite, haveType, opts.typeName)
+		return nil, &distillTypeHeld{have: haveType, want: opts.typeName}
 	}
 
 	carry, ok := distillSplitCarry(content)

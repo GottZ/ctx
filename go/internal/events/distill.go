@@ -547,8 +547,7 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 	// and UpsertBlock's conflict branch writes the content wholesale.
 	block, err := s.distillSeedBlock(ctx, t.write, sess, wm)
 	if err != nil {
-		slog.Error("scheduler: distiller cannot use its block identity",
-			"source_key", key, "error", err)
+		s.distillLogSeedRefusal(key, t.write, err)
 		s.distillFail(ctx, key, sess, distillErrBlockWriteFailed)
 		return
 	}
@@ -890,6 +889,56 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		return fmt.Errorf("distill: advancing run row %s: %w", runID, err)
 	}
 	return nil
+}
+
+// distillLogSeedRefusal is the LOUD half of the seed gate (wave C4-5, re-pilot
+// finding N-15).
+//
+// The journal takes a CLASS and nothing else — it is readable over /api for 90
+// days, so it must not carry material from the row it refused. The operator log
+// is the other side of that cut, and until this wave it carried the type
+// conflict only inside a wrapped message: the one failure of this gate an
+// operator can actually act on looked, at a glance, exactly like a driver error
+// under the same sentinel. After a shadow retype the refusal is not an event
+// but a STANDING STATE, repeated on every tick, and what to do about it depends
+// entirely on the name that is squatting.
+//
+// The remedy line follows the REGISTRY rather than a guess. A type carrying
+// retrieval.shadow_measurable is a measurement type (design/05 §4.2 gate G5),
+// its blocks live on a measure copy and their retype has a documented way back.
+// Every other name is a foreign type on the arm's identity — Festlegung 4(b) in
+// its original sense — where a retype tool is the wrong advice and the block
+// itself is the thing to move.
+func (s *Scheduler) distillLogSeedRefusal(key string, w distillWriteOpts, err error) {
+	var held *distillTypeHeld
+	if !errors.As(err, &held) {
+		slog.Error("scheduler: distiller cannot use its block identity",
+			"source_key", key, "error", err)
+		return
+	}
+	remedy := "archive the squatting block or set its type back"
+	if s.distillShadowMeasurable(held.have) {
+		remedy = "measure copy: ctx-distillreset -from-type " + held.have + " -apply"
+	}
+	slog.Error("scheduler: distiller cannot use its block identity — a foreign type holds it",
+		"source_key", key, "category", w.category, "scope", w.scope,
+		"have_type", held.have, "want_type", held.want, "remedy", remedy, "error", err)
+}
+
+// distillShadowMeasurable asks the block-type registry whether a name is a
+// measurement type. A missing registry, a snapshot that has not booted yet and
+// an unknown name all answer false — the conservative side, where the remedy
+// line stays generic rather than pointing at a tool that would refuse the name
+// anyway.
+func (s *Scheduler) distillShadowMeasurable(name string) bool {
+	if s.blocktypes == nil {
+		return false
+	}
+	set := s.blocktypes.Snapshot()
+	if set == nil {
+		return false
+	}
+	return set.IsShadowMeasurable(name)
 }
 
 // distillRunError maps a mid-run error onto the outcome an ALREADY OPEN row

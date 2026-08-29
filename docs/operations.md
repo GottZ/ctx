@@ -287,6 +287,46 @@ only for an arm whose attribution rule is implemented — nothing is written and
 touched) · `3` count gate violated · `4` the non-disruption metric broke its threshold. The table and
 the JSON file are written on `3` and `4` as well — they are the evidence.
 
+### Shadow-retype reset: ctx-distillreset
+
+The shadow measurement programme builds its corpus by re-typing the distiller's insight blocks to a
+shadow type on a **measure copy** (a registry row carrying `retrieval.shadow_measurable`; the
+re-type itself is one `UPDATE`, content and metadata untouched). The arm finds its block identity
+over `(category, title, scope)` **without** the type, so afterwards it refuses every run that covers
+the same watermark range again — `outcome=failed`, `error=block_write_failed`, on every tick. That
+is correct behaviour (Festlegung 4b: a foreign type on the arm's identity is never overwritten), but
+it left the measurement with no documented way back. `ctx-distillreset` is that way back.
+
+```bash
+cd go && go build ./cmd/ctx-distillreset
+set -a; . .env; set +a
+CONTEXT_DB_HOST=<copy> ./ctx-distillreset -from-type session-insight-shadow          # shows
+CONTEXT_DB_HOST=<copy> ./ctx-distillreset -from-type session-insight-shadow -apply   # writes
+```
+
+It sets `type_name` back to the arm's configured block type and touches **no other column** — not
+`updated_at` (the anchor a campaign's drift stamp reads: a reset that moves it turns the restoration
+of a state into corpus movement, which is exactly what the stamp hunts as contamination), not
+`type_source`, not content, metadata, sensitivity or the archive flag. It is the exact inverse of
+the documented forward `UPDATE`, and nothing else. Without `-apply` it lists what it would write;
+run twice with `-apply`, the second run finds nothing.
+
+Three gates, all of them before any write: the instance must label itself `measure-copy` over
+`server.instance_kind` (**no override** — unlike the dump driver's `-allow-live-instance`, because a
+live corpus never gets into this state in the first place); the source type must be in the registry
+**and** carry `retrieval.shadow_measurable`, so the tool is not a general re-type hammer and a
+genuinely foreign type on the arm's identity stays refused by the tool as well as by the guard; and
+the target type is the arm's configured `distill.block_type`, not a free parameter, and must be
+registered too. Derived blocks (`metadata.provenance`) in the same space are listed as skipped and
+never touched. Every affected row is printed with id and title.
+
+Exit codes: `0` clean · `2` misuse (missing `-from-type`, before any DB contact) · `3` a gate
+refused · `5` the instance is not a measure copy · `1` everything else.
+
+The refusal itself is diagnosable from the server log since the same wave: the type conflict leaves
+`have_type`, `want_type`, `category`, `scope` and a `remedy` hint as fields on one ERROR line. The
+run journal is unchanged and still carries the class `block_write_failed` and nothing else.
+
 ## Backends
 
 The backend pool (`context_backends`) is the living LLM configuration — `ctx backends` lists and manages it, the web UI at `/settings/backends` does the same visually.
