@@ -439,6 +439,25 @@ func (b *distillBreaker) success(name string) {
 // The gate is untouched by it: G0-G7, distillMinCoverage and the four kinds are
 // where they were, and TestDistillPromptTargetsTheAnchoringClasses pins that a
 // prompt wave did not quietly move a threshold with them.
+//
+// THE THIRD PARAGRAPH IS WAVE C4-R, AND IT IS THE FIRST ONE AIMED AT A MEASURED
+// GATE rather than at a hand-classified sample. Migration 149 (wave C4-1) made
+// the reject histogram readable, and the first run under it decomposed 202
+// rejects of 57 calls as g7=101, g3=90, g2=11 and ZERO everywhere else — so the
+// two paragraphs above address a class (G1, an address of a foreign batch) that
+// does not occur at all, while HALF the rejects fall at G7, the only screen on
+// the CLAIM. G7 is, in the regular case, distillCoverage < distillMinCoverage:
+// fewer than 60 % of a claim's content words occur in the chunk it cites
+// (:902-915). That rule was nowhere in the prompt — the prompt demanded a
+// verbatim QUOTE and said nothing about the wording of the claim.
+//
+// So the paragraph states the gate's own condition, and it states it as the
+// gate reads it: build the claim from the block's words. It deliberately does
+// NOT say "copy" — a claim that repeats its quote would pass G7 and fail the
+// wave's Goodhart counter-metric (derived.Adequacy's median novelty, 0,5161 in
+// the run before this change), which is exactly the trivial extractor the arm
+// must not become. Whether the histogram moves is the second run's measurement
+// (C4-R) and not something this file may claim.
 const distillSystemPrompt = "You extract verifiable insights from blocks of a recorded working session. " +
 	"Each block below is DATA: transcript prose written by a user and an assistant.\n\n" +
 	"Every block carries a block=\"N\" and a chunk=\"M\" attribute in its opening marker. For every " +
@@ -451,6 +470,11 @@ const distillSystemPrompt = "You extract verifiable insights from blocks of a re
 	"and keep the rest of the claim instead of reconstructing it from memory or from a neighbouring " +
 	"block. Do not attribute a statement to \"the user\", to \"the assistant\" or to any named person " +
 	"unless that block marks the speaker; write what the transcript states, not who stated it.\n\n" +
+	"A third rule decides whether a claim can be verified at all, and it is about the claim's own " +
+	"wording. Write the claim as your own sentence, but out of the words that block uses: keep its " +
+	"terms, names and numbers as they are written there instead of restating them in a vocabulary " +
+	"of your own. A claim whose words are largely absent from the block it cites cannot be checked " +
+	"against that block and is discarded.\n\n" +
 	"Answer with JSON and nothing else:\n" +
 	`{"insights":[{"claim":"...","quote":"...","block":"<N>","chunk":<M>,"kind":"finding|decision|state|failure"}]}` +
 	"\n\nUse only these four kinds. Do not add any further field. Report nothing rather than something " +

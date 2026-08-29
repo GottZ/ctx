@@ -1069,6 +1069,29 @@ func TestDistillPromptTargetsTheAnchoringClasses(t *testing.T) {
 		}
 	})
 
+	t.Run("class 3: the claim is built from the cited block's words", func(t *testing.T) {
+		// C4-R's paragraph states G7's condition. The keyword alone would be
+		// decoration (same reasoning as class 2): the SENTENCE has to carry
+		// both halves of the rule — an own sentence, out of the block's words.
+		sentence := strings.ToLower(distillPromptSentence(t, "vocabulary"))
+		if !strings.Contains(sentence, "your own sentence") {
+			t.Errorf("the wording rule drops the own-sentence half — without it the rule "+
+				"licenses copying, which G7 passes and the adequacy counter-metric fails: %q", sentence)
+		}
+		if !strings.Contains(sentence, "out of the words") {
+			t.Errorf("the wording rule drops the chunk-vocabulary half — the G7 condition "+
+				"(lexical coverage against the cited chunk) is then unstated again: %q", sentence)
+		}
+		// And it must not flip into the trivial extractor: a rule that says
+		// "copy" would raise the anchoring rate by killing novelty.
+		for _, forbidden := range []string{"copy the", "repeat the quote", "quote as the claim"} {
+			if strings.Contains(sentence, forbidden) {
+				t.Errorf("the wording rule contains %q — that is the trivial extractor, "+
+					"not the remedy: %q", forbidden, sentence)
+			}
+		}
+	})
+
 	// THE GATE IS NOT TOUCHED BY A PROMPT CHANGE, and that is the wave's own
 	// leitplanke: G0-G7 and their thresholds stay where they are.
 	t.Run("no gate or threshold moved with the prompt", func(t *testing.T) {
