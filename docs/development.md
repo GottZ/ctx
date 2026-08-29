@@ -672,7 +672,7 @@ list. The tooling is `ctx-goldset pool` and `ctx-goldset ingest`; the judging in
 between is a human act and is deliberately not automated.
 
 ```bash
-./ctx-armsweep prime                                   # writes pool-<run>.jsonl (top-20 per arm, G-REAL)
+./ctx-armsweep prime                                   # writes pool-<run>.jsonl (top-20 per arm; G-REAL + G-GLOB)
 ./ctx-goldset  pool   -control 5                       # judge-<run>.jsonl + judge-<run>.md + pool-key-<run>.json
 #              … a human fills in the first column …
 ./ctx-goldset  ingest -judged judge-<run>.md           # labels g-real.jsonl, merges the G-REAL profile
@@ -683,7 +683,11 @@ The construction is pre-registered (design 04 §4.5) and enforced by the tool:
 
 - **Pool.** Per query the union of the top-20 of all four solo arms, taken per
   arm rather than from the fused order, so the pool does not inherit the very
-  weighting under measurement.
+  weighting under measurement. `prime` pools the two slices whose gold is
+  JUDGED rather than constructed: G-REAL, and G-GLOB since wave C4-3a. Both
+  land in the SAME `pool-<run>.jsonl`, keyed by slice/index/query digest, so a
+  consumer selects a slice by reading the entries. `ctx-goldset pool` itself
+  still builds its template from `g-real.jsonl` only.
 - **Control sample.** Plus five blocks drawn uniformly (seeded) from the
   retrievable set, excluding what is already pooled. Pooling bias is the
   declared residual of this method; the control sample is what makes it a

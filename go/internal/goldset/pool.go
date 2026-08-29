@@ -14,10 +14,12 @@ import (
 )
 
 // PoolEntry is one arm's candidate list for a pooling judgement (design 04
-// §4.5, G-REAL). Top-PoolDepth per arm BY RANK — the union of four solo-arm
-// heads is the standard pooling construction, and taking it per arm rather than
-// from the fused order is what keeps the pool from inheriting the very
-// weighting under test.
+// §4.5, G-REAL; design/05a §C3-2-D05-8 k added G-GLOB in wave C4-3a — the two
+// slices whose gold is judged rather than constructed, pooled by the same
+// construction so their judgement figures stay comparable). Top-PoolDepth per
+// arm BY RANK — the union of four solo-arm heads is the standard pooling
+// construction, and taking it per arm rather than from the fused order is what
+// keeps the pool from inheriting the very weighting under test.
 //
 // The type lives here rather than in the sweep driver that writes it because
 // the dependency runs armsweep -> goldset: this package cannot import the

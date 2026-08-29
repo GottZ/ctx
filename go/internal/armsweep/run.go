@@ -172,7 +172,8 @@ func contains(hay []string, needle string) bool {
 
 // Prime runs every case ONCE without pins (§4.6): it captures the translation
 // and temporal results as pins, warms the embed cache, and — for the unlabelled
-// G-REAL slice — collects the per-arm pooling candidates wave B-W6 judges.
+// slices G-REAL and G-GLOB (pooledSlice) — collects the per-arm pooling
+// candidates waves B-W6 and C3-4b judge.
 //
 // Nothing is scored here. The run exists so the two dumps that ARE scored can
 // be identical in everything except the corpus underneath them.
@@ -496,11 +497,11 @@ func buildPin(c goldset.Case, resp *QueryResponse) Pin {
 	}
 }
 
-// buildPool collects the per-arm heads for the unlabelled slice only. Building
-// them for a labelled slice would be wasted bytes: G-KI and G-Q carry
-// constructive labels and need no pooling.
+// buildPool collects the per-arm heads for the UNLABELLED slices only. Building
+// them for a labelled slice would be wasted bytes: G-KI, G-Q, G-SESS, G-MH and
+// G-GLOB-KONSTR carry constructive labels and need no pooling.
 func buildPool(c goldset.Case, resp *QueryResponse) PoolEntry {
-	if c.Slice != goldset.SliceReal {
+	if !pooledSlice(c.Slice) {
 		return PoolEntry{}
 	}
 	rows := resp.ArmRanks.Rows
@@ -511,6 +512,29 @@ func buildPool(c goldset.Case, resp *QueryResponse) PoolEntry {
 		FTSEn:    topByArm(rows, func(r rrf.ArmRow) *int { return r.RankFTSEn }),
 		Trigram:  topByArm(rows, func(r rrf.ArmRow) *int { return r.RankTrigram }),
 	}
+}
+
+// pooledSlice reports whether a slice is JUDGED from a pool rather than
+// labelled by construction — the one property that decides whether a priming
+// run has to carry its arm heads out of the instance.
+//
+// Two slices qualify. G-REAL has since design 04 §4.5. G-GLOB joined in wave
+// C4-3a (design/05a §C3-2-D05-8 k): its gold is judged, not constructed (E-9),
+// so its cases were generated with a pool reference and an EMPTY gold list —
+// and until this predicate existed, `buildPool` answered every slice but
+// G-REAL with an empty PoolEntry, `sweep` dropped it, and the pool file of a
+// seven-slice priming run held 150 G-REAL cases and nothing else. That is
+// Nebenbefund N1 (reports/bau/x-w1a.md, fortgeschrieben in c2-6.md), and it is
+// why B-Substanz on G-GLOB was structurally "nicht entschieden": no pool, no
+// judgement template, no labels, no metric.
+//
+// The list is closed on purpose rather than derived from "GoldIDs is empty":
+// gold is empty at generation time for slices that get their labels later too,
+// and a predicate that read the DATA would start pooling a slice the moment a
+// labelling step was still pending. Which slices are judged is a decision of
+// the design, so it is written here as one.
+func pooledSlice(slice string) bool {
+	return slice == goldset.SliceReal || slice == goldset.SliceGlob
 }
 
 // topByArm returns the PoolDepth best ids of one arm, by that arm's own rank —

@@ -52,8 +52,11 @@ type PrimeStamp struct {
 	Pins       int      `json:"pins"`
 	PinFile    string   `json:"pin_file"`
 	PinSHA256  string   `json:"pin_sha256"`
-	// PoolFile holds the per-arm top-20 candidates of the unlabelled G-REAL
-	// slice — the pooling input wave B-W6 turns into relevance judgements.
+	// PoolFile holds the per-arm top-20 candidates of the unlabelled slices
+	// G-REAL and — since wave C4-3a — G-GLOB: the pooling input waves B-W6 and
+	// C3-4b turn into relevance judgements. One file for both, keyed by case,
+	// so a consumer selects a slice by reading the entries rather than by
+	// being handed a different file.
 	PoolFile     string         `json:"pool_file,omitempty"`
 	Excluded     []ExcludedCase `json:"excluded"`
 	Latency      Latency        `json:"latency"`
@@ -61,10 +64,11 @@ type PrimeStamp struct {
 	TemporalHits int            `json:"temporal_queries"`
 }
 
-// PoolEntry is one arm's candidate list for a pooling judgement (§4.5, G-REAL).
-// Top-20 per arm BY RANK — the union of four solo-arm heads is the standard
-// pooling construction, and taking it per arm rather than from the fused order
-// is what keeps the pool from inheriting the very weighting under test.
+// PoolEntry is one arm's candidate list for a pooling judgement (§4.5; G-REAL,
+// and G-GLOB since wave C4-3a). Top-20 per arm BY RANK — the union of four
+// solo-arm heads is the standard pooling construction, and taking it per arm
+// rather than from the fused order is what keeps the pool from inheriting the
+// very weighting under test.
 //
 // The definition moved to internal/goldset in wave B-W6, where the judgement
 // template that consumes this file is built. The dependency runs armsweep ->
