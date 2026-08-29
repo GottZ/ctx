@@ -227,6 +227,45 @@ func WriteJSONL(path string, cases []Case) error {
 	return os.Chmod(path, fileMode)
 }
 
+// WriteJSONLKeepIndex writes cases WITHOUT reassigning their index (wave
+// C3-4a, design/05a §C3-2-D05-7 step 4).
+//
+// WriteJSONL renumbers, which is right for a freshly drawn slice and wrong for
+// a labelled SUBSET of one: the Fable core is 20 of the 150 G-REAL cases, and
+// renumbering them 0..19 would give every one of them a case key that matches
+// no dump record — the flip test would then silently compare an empty
+// intersection instead of the core. The digest is still verified against the
+// query text, so a file this writes is as self-consistent as one WriteJSONL
+// produces; only the identity is taken from the case instead of from its
+// position.
+func WriteJSONLKeepIndex(path string, cases []Case) error {
+	for i := range cases {
+		if want := SHA256Hex(cases[i].Query); cases[i].QuerySHA256 != want {
+			return fmt.Errorf("case %d (%s #%d): query_sha256 %q passt nicht zum Fragetext (%q)",
+				i, cases[i].Slice, cases[i].Index, cases[i].QuerySHA256, want)
+		}
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	w := bufio.NewWriter(f)
+	enc := json.NewEncoder(w)
+	for i := range cases {
+		if err := enc.Encode(cases[i]); err != nil {
+			return fmt.Errorf("encode case %d: %w", i, err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(path, fileMode)
+}
+
 // ReadJSONL reads a slice file back.
 func ReadJSONL(path string) ([]Case, error) {
 	b, err := os.ReadFile(path)

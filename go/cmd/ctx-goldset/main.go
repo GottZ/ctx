@@ -197,6 +197,8 @@ func run() error {
 		// Wave C3-4a (design/05a §C3-2-D05-8 l).
 		draw := fs.Bool("draw", false, "C3-4a: Kern + Schicht-Stichprobe ziehen, blinden Bogen und Ziehungs-Schlüssel schreiben")
 		calibrate := fs.Bool("calibrate", false, "C3-4a: ausgefüllten blinden Bogen zurückführen (κ, κ_w, ρ, π, `?`-Rate, Kipp-Report)")
+		gold := fs.Bool("gold", false, "C3-4a: die zwei benannten Gold-Varianten schreiben (fable-kern + judge-uebertragen)")
+		sliceFile := fs.String("slice", "", "zu labelnde Slice-Datei bei -gold (Vorgabe: "+goldset.FileReal+"); sie wird NUR gelesen")
 		judged := fs.String("judged", "", "geurteilter Bestand aus `judge -llm` (bei -draw)")
 		poolFile := fs.String("pool", "", "Pool-Datei zur Schichtung (Vorgabe: pool-<Lauf-ID>.jsonl)")
 		labels := fs.String("labels", "", "X-W0-Regime-Labels (Vorgabe: "+goldset.FileRegimeLabels+")")
@@ -216,7 +218,8 @@ func run() error {
 		return cmdJudge(&c, judgeOpts{llm: *llm, kappa: *kappa, template: *tpl, key: *key,
 			controls: *controls, out: *out, backend: *backend, model: *model,
 			timeoutSec: *timeout, kappaMin: *kappaMin, stampName: *stampName,
-			draw: *draw, calibrate: *calibrate, judged: *judged, pool: *poolFile,
+			draw: *draw, calibrate: *calibrate, gold: *gold, slice: *sliceFile,
+			judged: *judged, pool: *poolFile,
 			labels: *labels, sheet: *sheet, drawKey: *drawKeyName, flip: *flip,
 			coreQueries: *coreQueries, strata: *strata, drawSeed: *drawSeed,
 			rhoMin: *rhoMin, piMin: *piMin, unsureMax: *unsureMax})

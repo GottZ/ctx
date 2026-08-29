@@ -190,7 +190,7 @@ func (c *common) shadowTypeNames() []string {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("kein Unterkommando — Aufruf: ctx-armsweep <prime|dump|score> [flags]")
+		return errors.New("kein Unterkommando — Aufruf: ctx-armsweep <prime|dump|compare|score|goldflip> [flags]")
 	}
 	cmd := os.Args[1]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -225,6 +225,19 @@ func run() error {
 			return err
 		}
 		return cmdCompare(&c, *base, *cond, *noise, *outDir, *name, *condField)
+	case "goldflip":
+		dump := fs.String("dump", "", "Dump-Datei unter dumps/ (Pflicht)")
+		goldA := fs.String("gold-a", "", "erste Gold-Variante im Gold-Verzeichnis (Pflicht — C3-4a: fable-kern)")
+		goldB := fs.String("gold-b", "", "zweite Gold-Variante (Pflicht — C3-4a: judge-uebertragen)")
+		base := fs.String("base", "V0", "Basis-Konfiguration der Gate-Rechnung")
+		variant := fs.String("variant", "V1", "Varianten-Konfiguration — V1 ist die EINE vorregistrierte Primär-Vergleichung (§4.9)")
+		slice := fs.String("slice", "", "Slice-Name im Kipp-JSON (Vorgabe: "+goldset.SliceReal+")")
+		out := fs.String("out", "flip-greal.json", "Kipp-JSON im Gold-Verzeichnis")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return cmdGoldFlip(&c, goldflipOpts{dump: *dump, goldA: *goldA, goldB: *goldB,
+			base: *base, variant: *variant, slice: *slice, out: *out, seed: c.seed})
 	case "score":
 		dumpA := fs.String("dump", "", "Dump-Datei (Pflicht)")
 		dumpB := fs.String("dump-b", "", "zweiter Dump für die V0'-Replikate (ohne ihn ist G-NOISE nicht auswertbar)")

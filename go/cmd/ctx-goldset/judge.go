@@ -39,6 +39,8 @@ type judgeOpts struct {
 	// The C3-4a runs (design/05a §C3-2-D05-7, -8 l).
 	draw        bool
 	calibrate   bool
+	gold        bool
+	slice       string
 	judged      string
 	pool        string
 	labels      string
@@ -62,7 +64,8 @@ func cmdJudge(c *common, o judgeOpts) error {
 	for _, m := range []struct {
 		on   bool
 		name string
-	}{{o.llm, "-llm"}, {o.kappa, "-kappa"}, {o.draw, "-draw"}, {o.calibrate, "-calibrate"}} {
+	}{{o.llm, "-llm"}, {o.kappa, "-kappa"}, {o.draw, "-draw"},
+		{o.gold, "-gold"}, {o.calibrate, "-calibrate"}} {
 		if m.on {
 			picked = append(picked, m.name)
 		}
@@ -77,11 +80,14 @@ func cmdJudge(c *common, o judgeOpts) error {
 		return judgeKappa(c, o)
 	case o.draw:
 		return judgeDraw(c, o)
+	case o.gold:
+		return judgeGold(c, o)
 	case o.calibrate:
 		return judgeCalibrate(c, o)
 	default:
 		return fmt.Errorf("kein Lauf genannt: judge urteilt (-llm), kalibriert nach E2-4 (-kappa), " +
-			"zieht den C3-4a-Bogen (-draw) oder rechnet ihn zurück (-calibrate)")
+			"zieht den C3-4a-Bogen (-draw), baut die zwei Gold-Varianten (-gold) " +
+			"oder rechnet den Bogen zurück (-calibrate)")
 	}
 }
 

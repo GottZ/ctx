@@ -211,6 +211,119 @@ func reportDraw(key goldset.DrawKey, keyPath, sheetPath string) {
 	fmt.Printf("Urteiler: %s\n", goldset.FableJudge)
 }
 
+// ----------------------------------------------------------------- -gold.
+
+// The two gold sources of §C3-2-D05-7 step 4. They live side by side rather
+// than one replacing the other, because the flip test needs BOTH over the same
+// queries — that is the whole construction.
+const (
+	GoldSourceFableCore   = "fable-kern"
+	GoldSourceJudgeCarry  = "judge-uebertragen"
+	goldCoreSuffix        = "-kern.jsonl"
+	goldCarrySuffix       = "-uebertragen.jsonl"
+	goldDefaultBasePrefix = "gold-"
+)
+
+// judgeGold writes the two named gold variants.
+//
+// Neither of them touches the slice file: `ingest` rewrites g-real.jsonl in
+// place and backs it up, which is right for the one canonical labelling and
+// wrong for two variants that exist to be compared against each other. These
+// are new files, and the slice file stays what it was.
+func judgeGold(c *common, o judgeOpts) error {
+	g, err := c.guard()
+	if err != nil {
+		return err
+	}
+	if o.sheet == "" || o.judged == "" {
+		return fmt.Errorf("-sheet und -judged werden beide gebraucht: der ausgefüllte blinde Bogen " +
+			"stellt das Fable-Gold des Kerns, der Maschinen-Bestand das übertragene Gold")
+	}
+	key, answers, err := readFilledSheet(g, o)
+	if err != nil {
+		return err
+	}
+	sliceName := o.slice
+	if sliceName == "" {
+		sliceName = goldset.FileReal
+	}
+	cases, err := readSlice(g, sliceName, goldset.SliceReal)
+	if err != nil {
+		return err
+	}
+	base := o.out
+	if base == "" {
+		base = goldDefaultBasePrefix + drawRunIDOf(o.sheet)
+	}
+
+	coreJudged, err := goldset.FableJudgements(key, answers, goldset.StratumCore)
+	if err != nil {
+		return err
+	}
+	if werr := writeGoldVariant(g, base+goldCoreSuffix, cases, coreJudged, GoldSourceFableCore, true); werr != nil {
+		return werr
+	}
+	judgedPath, err := g.Resolve(o.judged)
+	if err != nil {
+		return err
+	}
+	machine, err := goldset.ParseJudgements(judgedPath)
+	if err != nil {
+		return err
+	}
+	return writeGoldVariant(g, base+goldCarrySuffix, cases, machine, GoldSourceJudgeCarry, false)
+}
+
+// writeGoldVariant labels one variant and reports its profile.
+func writeGoldVariant(g *goldset.Guard, name string, cases []goldset.Case,
+	judged map[string][]goldset.Judgement, source string, restrict bool,
+) error {
+	labelled, st, err := goldset.ApplyLabelsNamed(cases, judged, source, restrict)
+	if err != nil {
+		return fmt.Errorf("%s: %w", source, err)
+	}
+	p, err := g.Resolve(name)
+	if err != nil {
+		return err
+	}
+	if werr := goldset.WriteJSONLKeepIndex(p, labelled); werr != nil {
+		return werr
+	}
+	digest, err := goldset.FileDigest(p)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s: n=%d gelabelt=%d ohne_Relevante=%d Urteile=%d relevant=%d p50=%d max=%d → %s (%s)\n",
+		source, st.Cases, st.Labelled, st.NoRelevant, st.Judged, st.Relevant,
+		st.PoolP50, st.PoolMax, filepath.Base(p), digest[:12])
+	return nil
+}
+
+// readFilledSheet loads the draw key and the filled sheet that belongs to it.
+func readFilledSheet(g *goldset.Guard, o judgeOpts) (goldset.DrawKey, []goldset.FableJudgement, error) {
+	keyName := o.drawKey
+	if keyName == "" {
+		keyName = drawKeyPrefix + drawRunIDOf(o.sheet) + ".json"
+	}
+	keyPath, err := g.Resolve(keyName)
+	if err != nil {
+		return goldset.DrawKey{}, nil, err
+	}
+	key, err := goldset.ReadDrawKey(keyPath)
+	if err != nil {
+		return goldset.DrawKey{}, nil, err
+	}
+	sheetPath, err := g.Resolve(o.sheet)
+	if err != nil {
+		return goldset.DrawKey{}, nil, err
+	}
+	answers, err := goldset.ParseFableSheet(sheetPath)
+	if err != nil {
+		return goldset.DrawKey{}, nil, err
+	}
+	return key, answers, nil
+}
+
 // ------------------------------------------------------------- -calibrate.
 
 // judgeCalibrate joins the filled sheet back to the key and writes the

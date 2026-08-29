@@ -351,6 +351,7 @@ cd go && go build ./cmd/ctx-goldset
 ./ctx-goldset judge  -llm   -template judge-<run>.jsonl        # machine verdicts on-prem, resumable
 ./ctx-goldset judge  -kappa -controls judged-<run>-controls.jsonl -kappa-min 0.6
 ./ctx-goldset judge  -draw  -judged judged-<run>.jsonl -draw-seed <seed>  # stratified draw + blind sheet
+./ctx-goldset judge  -gold  -sheet fable-sheet-<run>-filled.jsonl -judged judged-<run>.jsonl
 ./ctx-goldset judge  -calibrate -sheet fable-sheet-<run>.jsonl -kappa-min 0.6 -flip flip.json
 ./ctx-goldset ingest -judged judge-<run>.md # the filled-in judgements back in as labels
 ./ctx-goldset stamp                         # refresh digests + corpus contamination stamp
@@ -403,6 +404,17 @@ gate, but the REACH of the machine labels (`voll` / `nur-kern`). The gate
 authority is the metric flip — the same comparison scored against both gold
 sources on the core (`armsweep.GoldFlip`) — and an absent flip computation leaves
 the gate `nicht entschieden` rather than passing it.
+
+`judge -gold` writes the two gold variants the flip test needs side by side:
+`fable-kern` over the core queries and `judge-uebertragen` over the whole slice.
+Neither rewrites the slice file — they are new files, so the two readings stay
+comparable instead of one replacing the other. `ctx-armsweep goldflip` then
+scores one baseline/variant pair twice over one dump, once against each variant,
+and writes the paired interval of the per-case difference in the shape
+`judge -calibrate -flip` reads. Both variants keep the case indices of the slice
+they came from (`WriteJSONLKeepIndex`): a subset renumbered 0..n would carry case
+keys that match no dump record, and the flip test would compare an empty
+intersection while reporting a clean zero.
 
 **Why the multi-gold slices exist.** G-KI, G-Q and G-REAL carry exactly one gold
 id per case. A one-gold slice cannot show the use of an aggregating layer; it can

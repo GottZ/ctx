@@ -645,6 +645,78 @@ func TestApplyLabelsNamedC34A(t *testing.T) {
 	}
 }
 
+// TestFableJudgementsC34A is the projection step 4 of §C3-2-D05-7 rests on:
+// the filled sheet becomes Judgement rows, restricted to one stratum, with `?`
+// carried through as 0 rather than dropped.
+func TestFableJudgementsC34A(t *testing.T) {
+	fx := buildDrawFixture()
+	key, err := goldset.Draw(fx.input(goldset.DefaultDrawSpec(20260829)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One core cell gets `?`; which one is taken from the key rather than
+	// guessed, since the core queries depend on the seed.
+	unsureBlock := ""
+	for _, c := range key.Cells {
+		if c.Stratum == goldset.StratumCore && c.LLMRelevant {
+			unsureBlock = c.BlockID
+			break
+		}
+	}
+	if unsureBlock == "" {
+		t.Fatal("Vorbedingung: keine judge-positive Kern-Zelle in der Fixture")
+	}
+	unsure := 0
+	answers := filled(t, key, fx.cells, func(c goldset.DrawCell) string {
+		if c.CoreQuery && c.BlockID == unsureBlock {
+			unsure++
+			return "?"
+		}
+		if c.LLMRelevant {
+			return "1"
+		}
+		return "0"
+	})
+	core, err := goldset.FableJudgements(key, answers, goldset.StratumCore)
+	if err != nil {
+		t.Fatalf("FableJudgements: %v", err)
+	}
+	cells := 0
+	for _, js := range core {
+		cells += len(js)
+	}
+	if len(core) != 20 || cells != 20*fxCandidates {
+		t.Errorf("Kern-Projektion: %d Queries / %d Zellen, erwartet 20 / %d", len(core), cells, 20*fxCandidates)
+	}
+	// Every stratum but the core must be absent — the carried variant comes
+	// from the machine run, not from a partly judged sheet.
+	all, err := goldset.FableJudgements(key, answers, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, js := range all {
+		total += len(js)
+	}
+	if total != len(key.Cells) {
+		t.Errorf("Voll-Projektion: %d Zellen, erwartet %d", total, len(key.Cells))
+	}
+	if unsure == 0 {
+		t.Fatal("Vorbedingung: keine `?`-Zelle gesetzt")
+	}
+	for _, js := range core {
+		for _, j := range js {
+			if j.BlockID == unsureBlock && j.Relevant {
+				t.Error("`?` wurde als Gold projiziert")
+			}
+		}
+	}
+	// A stratum the key does not hold is an error, not an empty gold set.
+	if _, err := goldset.FableJudgements(key, answers, "S9"); err == nil {
+		t.Error("unbekannte Schicht lieferte eine Gold-Menge statt eines Fehlers")
+	}
+}
+
 func verdictOf(gates []goldset.GateVerdict, name string) string {
 	for _, g := range gates {
 		if g.Name == name {

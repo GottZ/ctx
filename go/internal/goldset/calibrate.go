@@ -88,6 +88,45 @@ func JoinCalibration(k DrawKey, filled []FableJudgement) ([]CalibrationPair, err
 	return out, nil
 }
 
+// FableJudgements projects a filled sheet onto the Judgement form ApplyLabels
+// reads, so the human verdicts can build a gold variant through exactly the
+// path the machine verdicts use (§C3-2-D05-7, step 4).
+//
+// `stratum` restricts the projection; the core variant passes StratumCore. A
+// verdict of `?` becomes `relevant = false` here rather than being dropped: the
+// rule was declared before the run (§C3-2-D05-5), and a dropped cell would
+// silently shrink the pool a Recall@5 denominator is computed over — which is a
+// different error from the one the rule avoids.
+func FableJudgements(k DrawKey, filled []FableJudgement, stratum string) (map[string][]Judgement, error) {
+	pairs, err := JoinCalibration(k, filled)
+	if err != nil {
+		return nil, err
+	}
+	byCell := make(map[string]CalibrationPair, len(pairs))
+	for _, p := range pairs {
+		byCell[p.QuerySHA256+"/"+p.BlockID] = p
+	}
+	out := map[string][]Judgement{}
+	for _, c := range k.Cells {
+		if stratum != "" && c.Stratum != stratum {
+			continue
+		}
+		p := byCell[c.joinKey()]
+		key := CaseKey(c.Slice, c.Index, c.QuerySHA256)
+		out[key] = append(out[key], Judgement{
+			Slice: c.Slice, Index: c.Index, QuerySHA256: c.QuerySHA256,
+			BlockID: c.BlockID, Relevant: p.Fable.Relevant(),
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s: keine Zelle im Ziehungs-Schlüssel — die Gold-Variante wäre leer", stratum)
+	}
+	for key := range out {
+		sort.Slice(out[key], func(i, j int) bool { return out[key][i].BlockID < out[key][j].BlockID })
+	}
+	return out, nil
+}
+
 // WeightedKappaResult is Cohen's kappa on the Horvitz-Thompson weighted table.
 type WeightedKappaResult struct {
 	Slice string  `json:"slice,omitempty"`
