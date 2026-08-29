@@ -535,11 +535,8 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 	//
 	//   - the identity is held by a FOREIGN type, or by a body this arm did not
 	//     write ⇒ block_write_failed without opening a run at all;
-	//   - the block is already FULL ⇒ every call this run could make would
-	//     produce insights the rune cap drops, so the arm answers skipped/budget
-	//     and spends nothing (review #4). The throttled skip path is deliberate:
-	//     a full block is a standing state, and one row per tick would bury the
-	//     journal.
+	//   - the running shard is already FULL ⇒ it is a SEALED shard, and the run
+	//     opens the next one (see below).
 	//
 	// What it loads is what an earlier run over the SAME identity already made
 	// durable. Without it the arm replaces its own yield: a brake inside the
@@ -551,12 +548,15 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 		s.distillFail(ctx, key, sess, distillErrBlockWriteFailed)
 		return
 	}
-	if block.full(t.write) {
-		slog.Warn("scheduler: distiller block is full — no call is made",
-			"source_key", key, "carried", block.carry.count(), "max_block_runes", t.write.maxRunes)
-		s.distillSkip(ctx, key, sess, distillSkipBudget, false)
-		return
-	}
+	// NO FULL-BLOCK GATE ANY MORE, and its absence is wave W-L2's headline. Until
+	// this wave the seed's answer "the block is full" ended the tick with
+	// skipped/budget: the watermark stood, the next tick derived the same value,
+	// the same title, the same full block — "ab Schritt 6 ist die Wurzel dauerhaft
+	// still" (amendment C4-2 A.1). The seed now hands back the first shard of the
+	// range that HAS room, so the state this gate answered no longer exists here.
+	// The cost argument it rested on is untouched and lives one level down: a run
+	// whose shard fills up mid-way rolls over instead of buying yield the render
+	// would discard (distillRollShard).
 
 	// Material above the watermark ⇒ the two-phase row (135:20-27): INSERT
 	// running first, UPDATE per batch, UPDATE at the end.
@@ -654,7 +654,7 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 				return distillOutcomeOk, "", "" // the range is exhausted
 			}
 		}
-		stop, err := s.distillBatch(ctx, t, key, runID, dump, b)
+		out, err := s.distillBatch(ctx, t, key, runID, dump, b)
 		if err != nil {
 			slog.Error("scheduler: distiller batch failed", "source_key", key, "error", err)
 			if ctx.Err() != nil {
@@ -663,7 +663,7 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 			outcome, class := distillRunError(err)
 			return outcome, class, ""
 		}
-		if stop != "" {
+		if stop := out.stop; stop != "" {
 			// An in-run brake ended the tick (A02-8): the breaker, the in-run GPU
 			// ceiling or the per-source call clamp. The chunks that reached a call
 			// are marked seen and everything above them stays BELOW the watermark
@@ -679,7 +679,24 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 				"source_key", key, "reason", stop, "watermark", b.Watermark)
 			return distillOutcomePartial, "", stop
 		}
-		if b.Watermark <= wm {
+		if out.covered <= wm {
+			if out.rollover {
+				// THE MID-BATCH ROLLOVER (wave W-L2). The rune meter stopped this
+				// batch before it was through, so the batch covered nothing and the
+				// watermark stays exactly where it was — the fail-open A.2 (b) rules
+				// out. The run continues on the next shard and READS THE SAME RANGE
+				// AGAIN; the chunks that reached a call are in distill_seen and drop
+				// out as duplicates (A.4 d: "ein Rollover verwirft nichts und kauft
+				// nichts nach").
+				//
+				// IT TERMINATES, and the argument is the progress condition one level
+				// down: a rollover requires at least one call on the shard being
+				// left, a call marks its chunks seen, and a batch is finite — so
+				// every turn of this loop removes at least one chunk from the next
+				// read. A shard that saw no call does not roll over and ends the tick
+				// instead (distillBatch).
+				continue
+			}
 			// A batch that covered nothing while delivering something is a
 			// contract violation (Read names the watermark of the last manifest
 			// it handed out, and only manifests above `after` are read). It ends
@@ -690,7 +707,7 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 				"source_key", key, "watermark", wm, "items", len(b.Items))
 			return distillOutcomePartial, "", ""
 		}
-		wm = b.Watermark
+		wm = out.covered
 		if !b.Complete {
 			// The reader's window ended inside a watermark group. Everything
 			// delivered is covered and the watermark stands on it, but the run
@@ -730,11 +747,12 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 // already-called chunks drop out as duplicates (rows_dropped_dup), and the dump
 // repeats them. That is the same recoverable repetition the crash paths of A02-6
 // already carry, and it is the direction that loses nothing.
-func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID string, dump *distillDump, b distillsource.Batch) (string, error) {
+func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID string, dump *distillDump, b distillsource.Batch) (distillBatchOutcome, error) {
+	var out distillBatchOutcome
 	kept, l := distillSelect(b.Items, t.minRunes)
 	kept, hashes, dropped, err := s.distillDedup(ctx, key, kept)
 	if err != nil {
-		return "", err
+		return out, err
 	}
 	l.droppedDup = dropped
 	l.selected = len(kept)
@@ -742,7 +760,7 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 		l.chars += int64(utf8.RuneCountInString(it.Text))
 	}
 	if err := dump.write(kept, hashes); err != nil {
-		return "", err
+		return out, err
 	}
 	ex := s.distillExtract(ctx, t, kept)
 	l.calls, l.insightsKept, l.insightsRejected = ex.calls, ex.kept, ex.rejected
@@ -790,7 +808,7 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 			slog.Error("scheduler: distiller could not book a failed batch's counters",
 				"run_id", runID, "error", aerr)
 		}
-		return "", werr
+		return out, werr
 	}
 	// blocks_written counts DURABLE WRITES, not blocks: a run of three batches
 	// books 3 while exactly ONE block exists. The column is the checkable side of
@@ -800,6 +818,28 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 	// say so (a landed migration is not editable), which is round-2 note #11 and
 	// belongs to whichever wave next touches the journal schema.
 	l.blocksWritten = 1
+
+	// THE SECOND ROLLOVER POINT (wave W-L2, amendment C4-2 A.6). The shard that
+	// was just made durable is full; the run hands over to the next one instead
+	// of ending, and the handover is itself a durable write — the insights the
+	// cap could not admit are already bought, and leaving them in memory until
+	// the next batch would lose them if the run ended first.
+	//
+	// IT STANDS BEFORE THE BARRIER, i.e. before anything claims the range was
+	// handled. A crash between the two writes and the ledger leaves BOTH shards
+	// on disk with their chunks unmarked; the restart re-reads them, re-extracts
+	// identical claims and drops every one of them against the group dedup set
+	// (A.3 b). The reverse order would leave the moved insights durable nowhere
+	// while their chunks are marked seen.
+	stop, rolled, werr := s.distillRollShard(ctx, t, key, ex, &l)
+	if werr != nil {
+		if aerr := s.distillAdvance(ctx, runID, l, 0); aerr != nil {
+			slog.Error("scheduler: distiller could not book a failed rollover's counters",
+				"run_id", runID, "error", aerr)
+		}
+		return out, werr
+	}
+	out.stop, out.rollover = stop, rolled
 
 	// THE ORDERING SEAM (§4.5.4, round-2 major #2). Everything durable has
 	// happened; the ledger and the watermark have not. A test makes this return
@@ -812,25 +852,88 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 	// moved behind it (the reviewer's S5 mutation), which anchoring it to the
 	// write would not.
 	if berr := distillWriteBarrier(ctx); berr != nil {
-		return "", berr
+		return out, berr
 	}
 
 	if err := s.distillMarkSeen(ctx, key, seen); err != nil {
-		return "", err
+		return out, err
 	}
-	stop := ex.stop
-	if stop == "" && t.block.overflow > 0 {
-		// THE BLOCK IS FULL, so the run ends here (review #4). Every further call
-		// would produce insights the cap drops, and a paid GPU second for
-		// guaranteed-discarded yield is a cost nothing in the journal would show.
-		// `budget` is the closest word dr_skip_reason_known has — max_block_runes
-		// IS a budget — and the vocabulary is a CHECK this wave may not extend
-		// (no migration). The log line carries the exact reason.
-		slog.Warn("scheduler: distiller ends the run, the block is full",
-			"run_id", runID, "dropped", t.block.overflow)
-		stop = distillSkipBudget
+	out.covered = wm
+	return out, s.distillAdvance(ctx, runID, l, wm)
+}
+
+// distillBatchOutcome is what one batch reports back to the loop.
+//
+// BEFORE WAVE W-L2 A BATCH HAD TWO ANSWERS — a tick-ending word, or nothing —
+// and the loop derived everything else from the batch it had read itself. The
+// rollover adds a third: "the run continues, but this batch covered nothing".
+// Deriving that from b.Watermark in the loop would be exactly the fail-open
+// A.2 (b) rules out, because the batch's own watermark says what the reader
+// delivered and not what reached a call.
+type distillBatchOutcome struct {
+	// stop is the journal word the run ends with, or "" when it continues.
+	stop string
+	// covered is the watermark this batch made durable — 0 when it stopped or
+	// rolled over MID-way, which is what leaves distillAdvance's GREATEST at
+	// the row's own value. A rollover that only the render tripped — every
+	// chunk of the batch reached its call — carries the batch's watermark
+	// instead: that material is covered, only the block handed over (W-L2
+	// review #4).
+	covered int64
+	// rollover reports that the run moved to the next shard. Together with a
+	// covered of 0 it is the loop's instruction to read the same range again.
+	rollover bool
+}
+
+// distillRollShard is wave W-L2's one decision (amendment C4-2 A.6): the shard
+// is full — does the run hand over to the next one, or end?
+//
+// It answers the word the batch closes with ("" = the run continues) and whether
+// a rollover happened. It is called AFTER the durable write of the shard it may
+// seal, because only the render knows whether the cap had to drop anything.
+//
+// THREE ANSWERS, in this order:
+//
+//  1. the shard has room ⇒ nothing to decide, the batch's own stop word stands;
+//  2. the shard is full but ANOTHER brake ended the tick — the breaker, the GPU
+//     ceiling, the per-source call clamp — ⇒ that brake wins and the full shard
+//     is the next seed's business. Rolling over here would open a shard the run
+//     cannot fill anyway;
+//  3. the shard is full and nothing else stopped the tick ⇒ roll over, unless
+//     the progress condition of A.4 (c) forbids it.
+//
+// THE PROGRESS CONDITION IS THE WHOLE TERMINATION ARGUMENT. A shard that has not
+// seen a single call since it opened is full for a reason another shard would
+// not fix — a max_block_runes below the demand of one insight — and rolling over
+// would produce a new empty shard on every turn of the batch loop, forever.
+// Measured as the wave's counter-version. The run then ends exactly as it did
+// before this wave, with `budget`: the closest word dr_skip_reason_known has,
+// and the vocabulary is a CHECK no wave of this amendment may extend.
+func (s *Scheduler) distillRollShard(ctx context.Context, t distillTick, key string,
+	ex distillExtractResult, l *distillLedger,
+) (string, bool, error) {
+	switch {
+	case !t.block.shardFull(ex):
+		return ex.stop, false, nil
+	case ex.stop != "" && !ex.blockFull:
+		return ex.stop, false, nil
+	case t.block.shardCalls == 0:
+		slog.Warn("scheduler: distiller ends the run, the shard is full without a single call — "+
+			"a rollover would not make progress",
+			"source_key", key, "shard", t.block.ordinal, "dropped", t.block.overflow,
+			"max_block_runes", t.write.maxRunes)
+		return distillSkipBudget, false, nil
 	}
-	return stop, s.distillAdvance(ctx, runID, l, wm)
+
+	sealed, moved := t.block.ordinal, len(t.block.overflowInsights)
+	t.block.rollover()
+	slog.Info("scheduler: distiller rolls over to the next shard",
+		"source_key", key, "sealed_shard", sealed, "shard", t.block.ordinal, "moved", moved)
+	if err := s.distillWriteBlock(ctx, t.write, t.block); err != nil {
+		return "", false, err
+	}
+	l.blocksWritten++
+	return "", true, nil
 }
 
 // distillWriteBarrier is the test seam of §4.5.4's ordering probe — the point
@@ -910,6 +1013,20 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 // its original sense — where a retype tool is the wrong advice and the block
 // itself is the thing to move.
 func (s *Scheduler) distillLogSeedRefusal(key string, w distillWriteOpts, err error) {
+	// THE SECOND STANDING REFUSAL GETS THE SAME ADDRESS (wave W-L2; W-L1 review,
+	// minor #3). A body the arm cannot read repeats on every tick exactly like a
+	// squatted type, and the remedy needs to name a block — which the source key
+	// stopped doing when the identity gained the shard ordinal. It is a separate
+	// branch and not a shared one, because the two states want different remedies:
+	// a foreign type is moved or retyped, an unreadable body is repaired or
+	// archived.
+	var unreadable *distillBodyUnreadable
+	if errors.As(err, &unreadable) {
+		slog.Error("scheduler: distiller cannot use its block identity — the body is not one it wrote",
+			"source_key", key, "category", w.category, "scope", w.scope, "title", unreadable.title,
+			"remedy", "archive the block or restore its section headings", "error", err)
+		return
+	}
 	var held *distillTypeHeld
 	if !errors.As(err, &held) {
 		slog.Error("scheduler: distiller cannot use its block identity",

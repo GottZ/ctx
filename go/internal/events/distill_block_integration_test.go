@@ -820,40 +820,47 @@ func TestDistillBlockWrite(t *testing.T) {
 			t.Fatalf("the cap never struck (over_budget=0) — the probe measures the clamp, not the cap")
 		}
 
-		// The FOLLOW-UP over the same identity buys nothing: every insight it
-		// could produce would be dropped by the same cap.
+		// THE FOLLOW-UP OVER THE SAME IDENTITY — and this is where wave W-L2
+		// changed the answer. Until then the full block ended the tick with
+		// skipped/budget and the root fell silent for good (the deadlock of
+		// amendment C4-2 A.1). Now the full shard is SEALED and the run opens the
+		// next one, so what "not paid for twice" means moves with it: the sealed
+		// shard is neither re-bought nor re-written, and nothing the follow-up buys
+		// is discarded.
+		sealed := blocks[0].content
 		a8ClearWindow(t, pool)
-		before := len(a8Rows(t, pool))
 		stub2 := a8NewStub(t, a9Stub)
 		s2 := a8Scheduler(pool, tight, a9Source(1, 10, 0), a8Pool(stub2.srv.URL))
 		s2.distillOnce(ctx, dfNoDemand)
-		if got := len(a8Rows(t, pool)); got != before {
-			t.Errorf("%d llm-log rows after the follow-up run, want %d — a full block must buy nothing",
-				got, before)
+
+		after := a9Blocks(t, pool)
+		if len(after) < 2 {
+			t.Fatalf("%d block(s) after the follow-up — the full shard is still a standing state",
+				len(after))
 		}
+		if after[0].content != sealed {
+			t.Error("the sealed shard was written into a second time")
+		}
+		var reBought int
+		if err := pool.QueryRow(ctx,
+			`SELECT (metadata->'coverage'->>'insights_over_budget')::int FROM context_blocks WHERE id=$1`,
+			after[0].id).Scan(&reBought); err != nil {
+			t.Fatalf("read coverage: %v", err)
+		}
+		if reBought != overBudget {
+			t.Errorf("the sealed shard's insights_over_budget moved from %d to %d — its cap was "+
+				"paid for a second time", overBudget, reBought)
+		}
+		// And no skipped/budget row is written at all any more: the state the row
+		// used to make visible does not exist.
 		var skipped int
 		if err := pool.QueryRow(ctx, `
 			SELECT count(*) FROM distill_run
 			 WHERE source_key=$1 AND outcome='skipped' AND skip_reason='budget'`, key).Scan(&skipped); err != nil {
 			t.Fatalf("journal: %v", err)
 		}
-		if skipped == 0 {
-			t.Error("the follow-up run left no skipped/budget row — the state is invisible to an operator")
-		}
-		// And the state is THROTTLED: a third tick adds no second row.
-		a8ClearWindow(t, pool)
-		stub3 := a8NewStub(t, a9Stub)
-		s3 := a8Scheduler(pool, tight, a9Source(1, 10, 0), a8Pool(stub3.srv.URL))
-		s3.distillOnce(ctx, dfNoDemand)
-		var skipped2 int
-		if err := pool.QueryRow(ctx, `
-			SELECT count(*) FROM distill_run
-			 WHERE source_key=$1 AND outcome='skipped' AND skip_reason='budget'`, key).Scan(&skipped2); err != nil {
-			t.Fatalf("journal: %v", err)
-		}
-		if skipped2 != skipped {
-			t.Errorf("a standing full block writes one row per tick (%d → %d) — the state-change rule "+
-				"is what keeps a permanent state from burying the journal", skipped, skipped2)
+		if skipped != 0 {
+			t.Errorf("%d skipped/budget row(s) — a full shard is no longer a standing state", skipped)
 		}
 	})
 
@@ -1010,9 +1017,23 @@ type c31Run struct {
 	outcome, skip                  string
 	wmTo                           int64
 	blockID                        string
+	// Wave W-L2: a run may seal a shard and open the next, so the three numbers
+	// that used to be block-local become group-local. published is the claim
+	// count over ALL shards, lost is the sum of their insights_over_budget — the
+	// yield that reached no block at all, which is the number N-3 is about — and
+	// shrunk is the journal's call_groups_shrunk (wave C4-1).
+	shards, published, lost, shrunk int
 }
 
 // c31Tick drives one tick and collects journal and block state.
+//
+// IT READS THE SHARD THE CAP ACTED ON, which is shard 1 here — before wave W-L2
+// a run wrote exactly one block, and this helper asserted that. The rollover
+// makes the number of blocks an OUTCOME of the steering rather than a constant,
+// so the count travels in c31Run instead of being a Fatal: every property these
+// probes pin (how many calls before the brake, what the render had to drop, how
+// often the meter stopped a call loop) is a property of ONE shard, and shard 1
+// is the one the calibrated cap was written for.
 func c31Tick(t *testing.T, pool *pgxpool.Pool, cfg *config.Config, src distillsource.Source) c31Run {
 	t.Helper()
 	ctx := context.Background()
@@ -1023,11 +1044,29 @@ func c31Tick(t *testing.T, pool *pgxpool.Pool, cfg *config.Config, src distillso
 	var r c31Run
 	r.calls, r.kept, _, r.outcome = a8Ledger(t, pool, key)
 	blocks := a9Blocks(t, pool)
-	if len(blocks) != 1 {
-		t.Fatalf("%d blocks, want 1", len(blocks))
+	if len(blocks) == 0 {
+		t.Fatal("the run wrote no block at all")
 	}
+	r.shards = len(blocks)
+	// a9Blocks orders by title, and the shard-1 title is a strict prefix of every
+	// other shard's, so the first row is shard 1.
 	r.blockID = blocks[0].id
 	r.held = strings.Count(blocks[0].content, "- **")
+	for _, b := range blocks {
+		r.published += strings.Count(b.content, "- **")
+		var over int
+		if err := pool.QueryRow(ctx,
+			`SELECT (metadata->'coverage'->>'insights_over_budget')::int
+			   FROM context_blocks WHERE id = $1`, b.id).Scan(&over); err != nil {
+			t.Fatalf("read coverage: %v", err)
+		}
+		r.lost += over
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT call_groups_shrunk FROM distill_run
+		 WHERE source_key=$1 ORDER BY started_at DESC LIMIT 1`, key).Scan(&r.shrunk); err != nil {
+		t.Fatalf("journal: %v", err)
+	}
 	if err := pool.QueryRow(ctx, `
 		SELECT (metadata->'coverage'->>'insights_over_budget')::int,
 		       COALESCE((metadata->'coverage'->>'calls_stopped_block_full')::int, -1)
@@ -1039,8 +1078,8 @@ func c31Tick(t *testing.T, pool *pgxpool.Pool, cfg *config.Config, src distillso
 		 WHERE source_key=$1 ORDER BY started_at DESC LIMIT 1`, key).Scan(&r.wmTo, &r.skip); err != nil {
 		t.Fatalf("journal: %v", err)
 	}
-	t.Logf("calls=%d kept=%d held=%d over_budget=%d stops=%d outcome=%s skip=%s wm=%d",
-		r.calls, r.kept, r.held, r.over, r.stops, r.outcome, r.skip, r.wmTo)
+	t.Logf("calls=%d kept=%d held=%d over_budget=%d stops=%d outcome=%s skip=%s wm=%d shards=%d",
+		r.calls, r.kept, r.held, r.over, r.stops, r.outcome, r.skip, r.wmTo, r.shards)
 	return r
 }
 
@@ -1079,41 +1118,46 @@ func TestDistillRuneBudget(t *testing.T) {
 		a9Truncate(t, pool)
 		r := c31Tick(t, pool, cfg, a9Source(1, c31Chunks, 0))
 
-		// (1) THE CALLS. The unsteered arm pays for every chunk of the batch; the
-		// steered one stops as soon as the block has no room left.
-		if r.calls >= c31Chunks {
-			t.Errorf("the arm made %d calls for %d chunks — every call past the cap is paid for "+
-				"yield that the render then discards (pilot N-3)", r.calls, c31Chunks)
+		// (1) THE YIELD OF EVERY CALL IS PUBLISHED. Before wave W-L2 the assertion
+		// here was "fewer calls than chunks", because a call past the cap bought
+		// yield the render then discarded (pilot N-3). With the rollover there is
+		// no "past the cap" — the shard hands over — so the property the wave
+		// asks for is the one N-3 actually cares about: nothing that was paid for
+		// is thrown away.
+		if r.lost != 0 {
+			t.Errorf("%d insight(s) reached no shard at all — the arm still pays for yield that is "+
+				"discarded (pilot N-3)", r.lost)
 		}
-		if r.calls < 2 {
-			t.Errorf("the arm made %d calls — the cap holds two insights, so a brake before the "+
-				"second call throws away yield the block could carry", r.calls)
+		if r.published != r.calls {
+			t.Errorf("%d published insights against %d calls — at one chunk per call every call "+
+				"has to leave exactly one insight standing", r.published, r.calls)
 		}
-		// (2) THE DISCARDED YIELD. This is the number N-3 is about.
-		if r.over != 0 {
-			t.Errorf("insights_over_budget = %d, want 0 — the arm still pays for insights the "+
-				"render discards", r.over)
+		// (2) THE STEERING STILL ACTS PER SHARD. The calibrated cap holds two
+		// insights, so shard 1 holds exactly two and the rest went to its
+		// successors.
+		if r.held != 2 {
+			t.Errorf("shard 1 holds %d insights, want the 2 its cap admits — the meter no longer "+
+				"steers the shard it is measured against", r.held)
 		}
-		// (3) THE BLOCK IS ACTUALLY FILLED. A brake that stops before the first
-		// call would satisfy (1) and (2) while producing nothing at all.
-		if r.held == 0 {
-			t.Fatal("the block holds no insight — the probe measures a brake, not a steering")
+		if r.shards < 2 {
+			t.Errorf("%d shard(s) — the cap held two of %d chunks, so the run had to roll over",
+				r.shards, c31Chunks)
 		}
-		// (4) NOT A SILENT SKIP.
-		if r.outcome != distillOutcomePartial {
-			t.Errorf("outcome = %q, want partial — a run the cap ended did not cover its range", r.outcome)
-		}
-		if r.skip != distillSkipBudget {
-			t.Errorf("skip_reason = %q, want %q — the brake is invisible to an operator",
-				r.skip, distillSkipBudget)
-		}
+		// (3) NOT A SILENT SKIP: the meter's stop is still counted in the block it
+		// stopped, which is the observable side of the steering.
 		if r.stops < 1 {
 			t.Errorf("coverage.calls_stopped_block_full = %d, want at least 1 — the block does not "+
-				"say that its own cap stopped the run", r.stops)
+				"say that its own cap stopped a call loop", r.stops)
 		}
-		// (5) THE MATERIAL IS POSTPONED, NOT COVERED.
-		if r.wmTo != 0 {
-			t.Errorf("watermark_to = %d, want 0 — the unshown remainder of the batch must stay readable", r.wmTo)
+		// (4) AND THE RANGE IS COVERED. Before this wave the cap ended the run
+		// with partial/budget at watermark 0 and the remainder waited for the next
+		// tick; the rollover reads it to the end, which is exactly the deadlock of
+		// amendment A.1 being gone.
+		if r.outcome != distillOutcomeOk {
+			t.Errorf("outcome = %q, want ok — the run walked its range to the end", r.outcome)
+		}
+		if r.wmTo == 0 {
+			t.Error("watermark_to = 0 although the batch ran through")
 		}
 	})
 
@@ -1151,27 +1195,30 @@ func TestDistillRuneBudget(t *testing.T) {
 		cfg.Distill.MaxBlockRunes = frame + note + 3*pair + pair/2
 		r := c31Tick(t, pool, cfg, a9Source(1, c31Chunks, 0))
 
-		if r.over != 0 {
-			t.Errorf("insights_over_budget = %d at rows_per_call=%d, want 0 — the call planner did "+
-				"not size the group to the room the block has left", r.over, cfg.Distill.RowsPerCall)
+		if r.lost != 0 {
+			t.Errorf("%d insight(s) reached no shard at rows_per_call=%d — the call planner did "+
+				"not size the group to the room the block has left", r.lost, cfg.Distill.RowsPerCall)
 		}
-		if r.kept > 2 {
-			t.Errorf("the call bought %d insights although only two fit — the group was not "+
-				"sized to the remaining room", r.kept)
+		// THE GROUP WAS SIZED, and since wave W-L2 that is read off the planner's
+		// own counter rather than off `insights_kept`: the run continues after the
+		// rollover, so the journal's kept/calls are run totals and no longer
+		// describe the ONE call the cap steered.
+		if r.shrunk < 1 {
+			t.Errorf("call_groups_shrunk = %d, want at least 1 — the planner never sized a group "+
+				"down to the block's remaining room", r.shrunk)
 		}
-		if r.held < 3 {
-			t.Errorf("the block holds %d insights (1 carried + %d new), want 3 — the planner "+
-				"under-filled the block it was steering", r.held, r.kept)
-		}
-		if r.calls != 1 {
-			t.Errorf("calls = %d, want 1 — one sized group fills the block, and the brake ends "+
-				"the loop before a second one", r.calls)
+		if r.held != 3 {
+			t.Errorf("shard 1 holds %d insights (1 carried + 2 new), want 3 — the planner "+
+				"under- or over-filled the block it was steering", r.held)
 		}
 		if r.stops < 1 {
 			t.Errorf("coverage.calls_stopped_block_full = %d, want at least 1", r.stops)
 		}
-		if r.wmTo != 0 {
-			t.Errorf("watermark_to = %d, want 0", r.wmTo)
+		// The remainder is no longer postponed to the next tick but carried into
+		// the next shard, so the range is covered and the watermark moves (wave
+		// W-L2; before it, this assertion read `wmTo != 0`).
+		if r.wmTo == 0 {
+			t.Error("watermark_to = 0 although the batch ran through")
 		}
 	})
 

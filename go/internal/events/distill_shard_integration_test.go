@@ -6,11 +6,13 @@
 // The half that needs no database — the title function, its inverse and the
 // metadata key set — is in distill_block_test.go.
 //
-// WHAT THIS WAVE DOES NOT DO, and what therefore has no green probe here: it
-// never MOVES from one shard to the next. The rollover at the blockFull point
-// is W-L2's one change, so every run below writes exactly the shard its seed
-// opened. Fixtures for the higher shards are therefore laid down through the
-// production write path and not produced by a run.
+// WHAT THIS WAVE DID NOT DO: it never MOVED from one shard to the next. Wave
+// W-L2 added exactly that (distill_rollover_integration_test.go), so two probes
+// below carry its footprint — a full running shard is sealed rather than left
+// standing, and a foreign type on a lower shard now also has a READ side. Every
+// other probe here is unchanged and still pins the identity axis alone.
+// Fixtures for the higher shards are laid down through the production write
+// path and not produced by a run.
 //
 //	go test -tags=integration ./internal/events/ -run TestDistillShard -count=1 -v
 package events
@@ -543,9 +545,9 @@ func TestDistillShardWrite(t *testing.T) {
 
 	// The deliberate SCOPE of the guard, made visible rather than left implicit:
 	// a foreign type on a LOWER shard does not stop the arm. It writes the shard
-	// it opened and leaves the squatter standing. When W-L2 starts reading every
-	// shard of the group for the cross-shard dedup, that row becomes material
-	// and this probe has to be revisited.
+	// it opened and leaves the squatter standing. Wave W-L2 grew the READ half of
+	// that decision — such a row is now left out of the cross-shard dedup set,
+	// probed in TestDistillShardRollover — and left this half unchanged.
 	t.Run("a foreign type on a lower shard does not kill the chain", func(t *testing.T) {
 		a9Truncate(t, pool)
 		shard1 := distillBlockTitle(dfRoot, 0, 1)
@@ -566,19 +568,24 @@ func TestDistillShardWrite(t *testing.T) {
 		}
 	})
 
-	// NEGATIVE PROBE, THE STANDING STATE MOVES WITH THE CHAIN. A full RUNNING
-	// shard answers skipped/budget exactly as a full block did before the wave —
-	// this wave moves the state one shard up, it does not resolve it. Resolving
-	// it is W-L2.
-	t.Run("a full running shard still answers skipped budget", func(t *testing.T) {
+	// THE STANDING STATE IS GONE — and this probe is the place where wave W-L2's
+	// arrival is visible in W-L1's own test file.
+	//
+	// Until W-L2 a full RUNNING shard answered skipped/budget exactly as a full
+	// block did before W-L1: the wave moved the state one shard up without
+	// resolving it, and this probe pinned that. The rollover resolves it, so the
+	// probe now pins the OTHER half of the identity axis — the sealed shard is
+	// not written into, and the material goes to a new one.
+	t.Run("a full running shard is sealed and the next one is opened", func(t *testing.T) {
 		a9Truncate(t, pool)
 		shard1 := distillBlockTitle(dfRoot, 0, 1)
 		shard2 := distillBlockTitle(dfRoot, 0, 2)
 		wl1Put(t, pool, shard1, wl1Body(t, "SHARD1", 2), "insight", wl1Meta(dfRoot, 1))
 		wl1Put(t, pool, shard2, wl1FullBody(t, "SHARD2"), "insight", wl1Meta(dfRoot, 2))
-		st := wl1Seed(t, pool, dfRoot)
-		if st.ordinal != 2 || !st.full(wl1Opts()) {
-			t.Fatalf("ordinal=%d full=%v — the fixture is not the state under probe", st.ordinal, st.full(wl1Opts()))
+		wl2AssertSealed(t, pool, shard2)
+		if st := wl1Seed(t, pool, dfRoot); st.ordinal != 3 || st.carry.count() != 0 {
+			t.Fatalf("the seed opened shard %d with %d carried claims, want an empty shard 3",
+				st.ordinal, st.carry.count())
 		}
 		before := wl1Content(t, pool, shard2)
 
@@ -588,18 +595,23 @@ func TestDistillShardWrite(t *testing.T) {
 		if err := pool.QueryRow(ctx, `
 			SELECT outcome, COALESCE(skip_reason,'') FROM distill_run
 			 WHERE source_key=$1 ORDER BY started_at DESC LIMIT 1`, key).Scan(&outcome, &reason); err != nil {
-			// A skip that is throttled writes no row at all; then the block must be
-			// untouched and no call may have been made, which the assertions below
-			// carry on their own.
-			t.Logf("no journal row for the throttled skip: %v", err)
-		} else if outcome != distillOutcomeSkipped || reason != distillSkipBudget {
-			t.Errorf("journal = %q/%q, want skipped/budget", outcome, reason)
+			t.Fatalf("journal: %v", err)
+		}
+		if outcome != distillOutcomeOk || reason != "" {
+			t.Errorf("journal = %q/%q, want ok/\"\" — the full shard still ends the run", outcome, reason)
 		}
 		if now := wl1Content(t, pool, shard2); now != before {
-			t.Error("the full running shard was written into")
+			t.Error("the sealed shard was written into")
 		}
-		if rows := a8Rows(t, pool); len(rows) != 0 {
-			t.Errorf("%d llm calls although the running shard is full", len(rows))
+		if blocks := a9Blocks(t, pool); len(blocks) != 3 {
+			t.Fatalf("%d blocks, want 3 — the run did not open shard 3", len(blocks))
+		}
+		grown := wl1Content(t, pool, distillBlockTitle(dfRoot, 0, 3))
+		if !strings.Contains(grown, a8Claim) {
+			t.Error("shard 3 carries none of the run's insights")
+		}
+		if rows := a8Rows(t, pool); len(rows) == 0 {
+			t.Error("no llm call although the run had a shard with room")
 		}
 	})
 }

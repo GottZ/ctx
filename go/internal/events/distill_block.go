@@ -171,6 +171,28 @@ func (e *distillTypeHeld) Error() string {
 
 func (e *distillTypeHeld) Unwrap() error { return errDistillBlockWrite }
 
+// distillBodyUnreadable is the SECOND standing refusal of the seed, given the
+// same address distillTypeHeld got in W-L1 (that wave's review, minor #3).
+//
+// The two are the same class of state and were diagnosable to different degrees:
+// a body whose sections the arm cannot read is refused on every tick, forever,
+// exactly like a squatted type — and until this wave it reached the operator log
+// through the generic branch, which carries source_key and the wrapped message
+// and nothing else. With several shards per range that is not an address: the
+// operator has to know WHICH block to repair.
+//
+// It changes no decision and no message. Error() is byte-identical to the
+// fmt.Errorf it grew out of, Unwrap keeps distillRunError's errors.Is mapping
+// onto block_write_failed intact, and the title it carries is the arm's OWN
+// derived title, never foreign text.
+type distillBodyUnreadable struct{ title string }
+
+func (e *distillBodyUnreadable) Error() string {
+	return fmt.Sprintf("%s: the existing block does not carry this arm's sections", errDistillBlockWrite)
+}
+
+func (e *distillBodyUnreadable) Unwrap() error { return errDistillBlockWrite }
+
 // distillWriteOpts are the write-side snapshot values of one tick, resolved
 // once with everything else so a hot config change cannot move the identity of
 // a block halfway through the run that is writing it.
@@ -208,8 +230,8 @@ type distillBlockState struct {
 
 	// ordinal is the CAPACITY axis of the identity (amendment C4-2 A.2 a): the
 	// how-many-th block of this (root, watermark_from) range the run is writing.
-	// It opens at 1 and distillSeedBlock raises it to the running shard; wave
-	// W-L1 never raises it further, because a rollover is W-L2's one change.
+	// It opens at 1, distillSeedBlock raises it to the running shard, and since
+	// wave W-L2 rollover() raises it again whenever the running shard is full.
 	//
 	// It is DERIVED AND NEVER STORED as run state (A.8 einwand 3): the seed
 	// re-reads it from context_blocks on every run, which is what keeps it
@@ -217,6 +239,45 @@ type distillBlockState struct {
 	// migration 135's "no second source of run state" contract intact, since the
 	// block state has always been read from the block (distillSeedBlock's carry).
 	ordinal int
+
+	// shardCalls is the FORTSCHRITTS-BEDINGUNG of amendment C4-2 A.4 (c), in
+	// data form: how many calls the RUNNING shard has seen since it was opened.
+	//
+	// "Ein Rollover ist nur zulässig, wenn der laufende Shard seit seiner
+	// Eröffnung mindestens einen Call gesehen hat." Without it the batch loop is
+	// unbounded in exactly one reachable configuration — a max_block_runes below
+	// the demand of a single insight — because a fresh shard is then full again
+	// the moment it opens, and the arm would answer that by opening another one.
+	// Measured as the wave's counter-version.
+	//
+	// It needs NO key and no counter in the journal: a shard that is full without
+	// ever having been called can only be full through its carry, and such a
+	// shard is not the running one — the seed would have opened the next.
+	shardCalls int
+
+	// groupClaims are the rendered claim lines of every OTHER shard of this
+	// (root, watermark_from) group — the cross-shard dedup set of A.3 (b).
+	//
+	// WHY IT EXISTS. distillRenderBlock deduplicates new lines against the block
+	// this run LOADED. After a rollover that is the empty shard n+1, while the
+	// identical lines stand in the sealed shard n; a run that re-reads the same
+	// range after a crash between the block write and the dedup ledger would then
+	// write the same claim into two shards. The set is built once by the seed
+	// (all lower shards) and grows by one shard at every rollover.
+	//
+	// IT IS NEVER RENDERED, only compared against: the sealed shards keep their
+	// own lines, and this state only has to know that it must not repeat them.
+	groupClaims map[string]struct{}
+
+	// writtenClaims are the per-insight claim lines the LAST render actually put
+	// into the block — the lines that become group material at the next rollover.
+	writtenClaims []string
+
+	// overflowInsights are the insights the last render could not admit under
+	// distill.max_block_runes. Before W-L2 they were simply lost (the pilot's
+	// insights_over_budget); with the rollover they are what the next shard opens
+	// with, which is the half of material fidelity the cap used to break.
+	overflowInsights []distillKept
 
 	// createdAt is the RUN's stamp, taken once, and it is the freshness date the
 	// block text carries (Leitplanke 2j: a consumer sees the content, never the
@@ -326,14 +387,70 @@ func (c distillCarry) count() int { return len(c.claims) }
 // title the arm can never write.
 func newDistillBlockState(root, runID string, wmFrom int64) *distillBlockState {
 	return &distillBlockState{
-		root:      root,
-		runID:     runID,
-		wmFrom:    wmFrom,
-		wmTo:      wmFrom,
-		ordinal:   1,
-		createdAt: time.Now(),
-		parts:     map[string]struct{}{},
+		root:        root,
+		runID:       runID,
+		wmFrom:      wmFrom,
+		wmTo:        wmFrom,
+		ordinal:     1,
+		createdAt:   time.Now(),
+		parts:       map[string]struct{}{},
+		groupClaims: map[string]struct{}{},
 	}
+}
+
+// rollover is wave W-L2's one state change: the running shard is full, so the
+// run seals it and continues on the next one (amendment C4-2 A.6, "W-L2").
+//
+// FOUR THINGS MOVE AND NOTHING ELSE DOES, and the split is the whole decision:
+//
+//  1. the ORDINAL, i.e. the identity — never the watermark. Letting the
+//     watermark carry the rollover would book unread material as covered, which
+//     A.2 (b) rules out by name as fail-open;
+//  2. the CARRY is dropped: shard n+1 opens empty, and what shard n carries stays
+//     durable in shard n;
+//  3. the lines the sealed shard holds — its carry plus what this run wrote into
+//     it — become GROUP material, so a re-extraction after a crash cannot write
+//     them a second time into the new shard (the idempotency seam of A.3 b);
+//  4. the insights the cap could NOT admit open the new shard. They are already
+//     bought and paid for; dropping them here would re-create exactly the loss
+//     the rollover exists to end.
+//
+// WHAT DELIBERATELY STAYS: every accumulated counter, the part set, the manifest
+// list and the run's stamp. They describe THIS RUN's coverage of the range
+// (wmFrom, wmTo], and both shards describe the same range — the ordinal is a
+// capacity axis, not a coverage one. Two properties rest on that: the last
+// shard's coverage block equals the run row's counters, so block and journal
+// stay checkable against each other; and metadata.source_block_ids keeps
+// covering the anchors of the insights that just moved over. A.3 (d)'s second
+// sentence ("wer die Abdeckung einer Wurzel wissen will, summiert über ihre
+// Shards") is therefore not literally true for the chunk counters — named as a
+// deviation in the wave report, and the per-shard accounting belongs to W-L3,
+// which owns the coverage block.
+func (st *distillBlockState) rollover() {
+	for _, l := range st.carry.claims {
+		st.groupClaims[l] = struct{}{}
+	}
+	for _, l := range st.writtenClaims {
+		st.groupClaims[l] = struct{}{}
+	}
+	st.ordinal++
+	st.carry = distillCarry{}
+	st.writtenClaims = nil
+	st.insights = st.overflowInsights
+	st.overflowInsights = nil
+	st.overflow = 0
+	st.shardCalls = 0
+}
+
+// shardFull reports whether the running shard has no room left for another
+// insight — the point wave W-L2 turns from a run end into a handover.
+//
+// TWO SOURCES, ONE ANSWER. The rune meter refuses the next CALL before it is
+// paid for (ex.blockFull, wave C3-1), and the render refuses the next LINE after
+// it was (st.overflow). Both say the same thing about the block, and before this
+// wave both ended the run at distill.go's stop computation.
+func (st *distillBlockState) shardFull(ex distillExtractResult) bool {
+	return ex.blockFull || st.overflow > 0
 }
 
 // addBatch folds one batch's outcome into the accumulator and applies the
@@ -352,6 +469,10 @@ func (st *distillBlockState) addBatch(ex distillExtractResult, l distillLedger, 
 	st.droppedCred += l.droppedCred
 	st.droppedDup += l.droppedDup
 	st.unanchored += ex.unanchored
+	// The progress condition of A.4 (c) counts on the SHARD, not on the run: it
+	// is reset by rollover(), and only that reset makes it the answer to "has the
+	// shard the arm is about to leave ever been called".
+	st.shardCalls += ex.calls
 	if ex.blockFull {
 		st.blockFullStops++
 	}
@@ -476,7 +597,18 @@ func distillBlockTitle(root string, wmFrom int64, ordinal int) string {
 // have written, and admitting one would mean two distinct titles claim one
 // ordinal.
 func distillShardOrdinal(root string, wmFrom int64, title string) (int, bool) {
-	base := distillBlockTitle(root, wmFrom, 1)
+	return distillShardOrdinalFrom(distillBlockTitle(root, wmFrom, 1), title)
+}
+
+// distillShardOrdinalFrom is distillShardOrdinal with the base title already
+// rendered — the form the group loop uses.
+//
+// SPLIT OUT BECAUSE THE BASE IS A CONSTANT OF THE GROUP (W-L1 review, note #6).
+// Rendering it per row means a time.Format per row on a path that runs once per
+// tick and root; with W-L2 reading every shard of the group that is k formats
+// where one suffices. Behaviour is unchanged: distillShardOrdinal is the same
+// function with the same argument.
+func distillShardOrdinalFrom(base, title string) (int, bool) {
 	if title == base {
 		return 1, true
 	}
@@ -602,12 +734,23 @@ func distillRenderBlock(st *distillBlockState, opts distillWriteOpts) (string, i
 	// lines are byte-identical, which is what makes the equality the right test:
 	// same part, same chunk, same claim, same line. Measured before this: the
 	// restart probe found batch 1's claim twice in one block.
-	carried := make(map[string]struct{}, len(st.carry.claims))
+	//
+	// SINCE WAVE W-L2 THE SET SPANS THE WHOLE SHARD GROUP (amendment A.3 b).
+	// After a rollover the loaded block is the empty shard n+1 while the
+	// identical lines stand in the sealed shard n, so a carry-only comparison
+	// would let the same claim into two shards. st.groupClaims carries the other
+	// shards' lines; they are compared against and never rendered, because they
+	// are already durable where they belong.
+	carried := make(map[string]struct{}, len(st.carry.claims)+len(st.groupClaims))
+	for l := range st.groupClaims {
+		carried[l] = struct{}{}
+	}
 	for _, l := range st.carry.claims {
 		carried[l] = struct{}{}
 	}
 	claims := make([]string, 0, len(st.insights))
 	evidence := make([]string, 0, len(st.insights))
+	kept := make([]distillKept, 0, len(st.insights))
 	duplicates := 0
 	for _, in := range st.insights {
 		c, e := distillInsightLine(in)
@@ -618,6 +761,7 @@ func distillRenderBlock(st *distillBlockState, opts distillWriteOpts) (string, i
 		carried[c] = struct{}{}
 		claims = append(claims, c)
 		evidence = append(evidence, e)
+		kept = append(kept, in)
 	}
 	st.duplicates = duplicates
 
@@ -634,6 +778,13 @@ func distillRenderBlock(st *distillBlockState, opts distillWriteOpts) (string, i
 			n++
 		}
 	}
+	// WHAT THE RENDER KEPT AND WHAT IT COULD NOT TAKE, both recorded for the
+	// rollover (wave W-L2). The kept lines become the sealed shard's contribution
+	// to the group dedup set; the insights beyond the cut open the next shard
+	// instead of being dropped on the floor, which is what turns
+	// insights_over_budget from a loss into a handover.
+	st.writtenClaims = claims[:n]
+	st.overflowInsights = kept[n:]
 	return distillRenderN(st, opts, claims[:n], evidence[:n], len(claims)-n), len(claims) - n
 }
 
@@ -1034,12 +1185,22 @@ const (
 // 1 088. The probing fallback of A.3 (a) is therefore not built at all, and its
 // gap trap does not exist in this variable.
 //
-// IT SELECTS NO CONTENT, which is the one deviation from the amendment's sketch
-// and the reason is scale rather than taste: the group is read on every tick of
-// every root, and the content column of a shard is up to max_block_runes. The
-// arm needs exactly one body — the running shard's — and fetches it by title
-// afterwards, which is a single index point lookup and, not incidentally, the
-// byte-identical read this function performed before the wave.
+// IT SELECTS THE BODIES SINCE WAVE W-L2, and that reverses W-L1's one scale
+// deviation on purpose. The cross-shard dedup of A.3 (b) needs the rendered
+// claim lines of every shard of the group — "die Dedup-Menge wird aus allen
+// Shards der (root, wmFrom)-Gruppe aufgebaut, die der Seed ohnehin schon
+// gelesen hat" — and there is no cheaper source for them: a line is a render,
+// not a column. What that costs is bounded and named: k bodies of at most
+// max_block_runes each instead of one, on a path that runs once per tick and
+// root, i.e. the "Menge gerenderter Zeilen, linear in der Ebene je Wurzel,
+// nicht im Korpus" the amendment budgets for.
+//
+// IT COSTS NOTHING WHERE NOTHING IS SHARDED, which is the whole stock (A.3 c)
+// and every root until its first rollover: at k = 1 this query moves the same
+// bytes W-L1 moved in TWO queries, because the one body it fetches is the one
+// the seed needed anyway. And it closes W-L1's NB-2 by construction — group and
+// body are one read, so the running shard can no longer be archived between
+// them and hand the arm an empty carry under a title that has one.
 //
 // IT ALSO DROPS THE ORDER BY of the sketch. The ordinal that decides is derived
 // from the title (distillShardOrdinal), so ordering on a jsonb value the
@@ -1048,15 +1209,30 @@ const (
 // Removing the Sort node takes work out of the measured plan; the index path is
 // decided by the WHERE clause, which is unchanged.
 const distillShardGroupQuery = `
-	SELECT title, metadata->>'` + distillMetaShardOrdinal + `'
+	SELECT title, metadata->>'` + distillMetaShardOrdinal + `', type_name, content
 	  FROM context_blocks
 	 WHERE NOT is_archived
 	   AND category = $1 AND scope = $2
 	   AND metadata @> jsonb_build_object('root_session_id', $3::text,
 	                                      'watermark_from',  $4::bigint)`
 
-// distillRunningShard answers which shard of (root, wmFrom) the arm is writing
-// into — the highest one that exists, or 1 when the range is untouched.
+// distillShardGroup is one read of a (root, wmFrom) range: which shard the arm
+// writes into, what that shard holds, and what the SEALED shards below it
+// already say.
+//
+// running is the highest shard title found, or 1 when the range is untouched.
+// found reports whether that shard exists as a row at all; haveType and content
+// are its type and body. lower is the cross-shard dedup set of A.3 (b): the
+// rendered claim lines of every other shard the arm itself wrote.
+type distillShardGroup struct {
+	running  int
+	found    bool
+	haveType string
+	content  string
+	lower    map[string]struct{}
+}
+
+// distillReadShardGroup reads the whole group in one query.
 //
 // THE STOCK IS SHARD 1 WITHOUT CARRYING A SINGLE NEW KEY (A.3 c, coexistence):
 // its title is the shard-1 title, so it is found, read as ordinal 1 and grown
@@ -1070,40 +1246,50 @@ const distillShardGroupQuery = `
 // never refused, because refusing would let one planted row stop the arm on a
 // root forever, and never opened, because opening it would let the same row
 // redirect the arm's write.
-func (s *Scheduler) distillRunningShard(ctx context.Context, opts distillWriteOpts, root string, wmFrom int64) (int, error) {
-	// A ROOT THAT DOES NOT SURVIVE distillMetaValue IS NOT ADDRESSABLE HERE.
-	// §4.4.3 re-types every foreign string before it enters metadata, so such a
-	// root stands in the block as "" while the title carries it verbatim — the
-	// group query would find nothing and the arm would replace its own shard 1,
-	// which is precisely the loss round-2 blocker #1 closed. The arm stays on
-	// shard 1 for that root: single-shard behaviour, byte-identical to the tree
-	// before this wave, and loud rather than silent.
-	if distillMetaValue(root) != root {
-		slog.Warn("scheduler: distiller cannot address its shard group — the root id does not "+
-			"survive the metadata type check, so the arm stays on shard 1",
-			"source_root", root, "category", opts.category, "scope", opts.scope)
-		return 1, nil
-	}
-
+//
+// FESTLEGUNG 4(b) GROWS WITH THE DEDUP HERE (wave W-L2, W-L1's E-4 handover).
+// A lower shard was invisible to W-L1; from this wave it is READ, and read
+// material under a foreign type is exactly what 4(b) exists to keep out of this
+// arm's world. So a lower shard enters the dedup set only under the arm's own
+// type and only if its body splits into the arm's own sections — everything
+// else is logged and contributes nothing.
+//
+// IT DOES NOT REFUSE THE RUN OVER A LOWER SHARD, and that half of E-4 is
+// unchanged for the reason it was decided: the arm neither writes nor quotes
+// that row, and a refusal would let ONE planted line kill a grown chain
+// permanently. The refusal stays where the WRITE is — the shard the arm opens
+// (distillSeedBlock) and every upsert (distillTypeGuard). The cost of the
+// milder answer is named: a squatted lower shard can no longer suppress a
+// repeated claim, so a crash-repeat over its range writes a duplicate instead
+// of nothing. A duplicate is recoverable; a dead chain is not.
+func (s *Scheduler) distillReadShardGroup(ctx context.Context, opts distillWriteOpts,
+	root string, wmFrom int64,
+) (distillShardGroup, error) {
+	g := distillShardGroup{running: 1, lower: map[string]struct{}{}}
 	rows, err := s.pool.Query(ctx, distillShardGroupQuery, opts.category, opts.scope, root, wmFrom)
 	if err != nil {
-		return 0, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
+		return g, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
 	}
 	defer rows.Close()
 
-	highest, members, strangers := 1, 0, 0
+	// The base title is a CONSTANT of the group, rendered once (W-L1 review note
+	// #6): it carries a time.Format, and this loop runs per shard.
+	base := distillBlockTitle(root, wmFrom, 1)
+	type member struct{ typeName, content string }
+	members := map[int]member{}
+	strangers := 0
 	for rows.Next() {
-		var title string
+		var title, typeName, content string
 		var hint *string
-		if err := rows.Scan(&title, &hint); err != nil {
-			return 0, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
+		if err := rows.Scan(&title, &hint, &typeName, &content); err != nil {
+			return g, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
 		}
-		n, ok := distillShardOrdinal(root, wmFrom, title)
+		n, ok := distillShardOrdinalFrom(base, title)
 		if !ok {
 			strangers++
 			continue
 		}
-		members++
+		members[n] = member{typeName: typeName, content: content}
 		// The published ordinal is cross-checked against the derived one. A
 		// divergence changes no decision — the title decides — but it is the only
 		// signal that something rewrote the arm's own bookkeeping, and a silent
@@ -1118,82 +1304,200 @@ func (s *Scheduler) distillRunningShard(ctx context.Context, opts distillWriteOp
 			slog.Warn("scheduler: distiller shard disagrees with its own shard_ordinal key",
 				"title", title, "derived_ordinal", n, "metadata_ordinal", *hint)
 		}
-		if n > highest {
-			highest = n
+		if n > g.running {
+			g.running = n
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
+		return g, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
 	}
 	if strangers > 0 {
 		slog.Warn("scheduler: distiller found rows carrying its group keys under a foreign title — "+
 			"they are not shards of this range and are left alone",
-			"source_root", root, "watermark_from", wmFrom, "strangers", strangers, "shards", members)
+			"source_root", root, "watermark_from", wmFrom, "strangers", strangers, "shards", len(members))
 	}
-	return highest, nil
+
+	if m, ok := members[g.running]; ok {
+		g.found, g.haveType, g.content = true, m.typeName, m.content
+	}
+	for n, m := range members {
+		if n == g.running {
+			continue
+		}
+		if m.typeName != opts.typeName {
+			slog.Warn("scheduler: distiller leaves a sealed shard out of its dedup set — a foreign "+
+				"type holds it",
+				"title", distillBlockTitle(root, wmFrom, n), "have_type", m.typeName,
+				"want_type", opts.typeName)
+			continue
+		}
+		carry, split := distillSplitCarry(m.content)
+		if !split {
+			slog.Warn("scheduler: distiller leaves a sealed shard out of its dedup set — its body "+
+				"does not carry this arm's sections",
+				"title", distillBlockTitle(root, wmFrom, n))
+			continue
+		}
+		for _, l := range carry.claims {
+			g.lower[l] = struct{}{}
+		}
+	}
+	return g, nil
 }
 
 // distillSeedBlock opens the accumulator for one run and loads what a PREVIOUS
 // run over the same identity already made durable (round-2 blocker #1).
 //
-// It decides four things, which is why the reads are ordered rather than one
-// query: which shard of the range is the running one (amendment C4-2 A.2),
-// whether that shard's identity is free, whether it is held by a foreign type
-// (Festlegung 4b, refused), and what the arm's own earlier block already
-// carries. Called ONCE per run — a second seed after the first batch would
-// carry the run's own new lines a second time.
+// It decides five things: which shard of the range is the running one
+// (amendment C4-2 A.2), whether that shard's identity is free, whether it is
+// held by a foreign type (Festlegung 4b, refused), what the arm's own earlier
+// block already carries, and — since wave W-L2 — what the SEALED shards below it
+// already say (A.3 b). Called ONCE per run: a second seed after the first batch
+// would carry the run's own new lines a second time.
 //
-// THE TYPE GATE RUNS ON THE SHARD THE ARM OPENS, and only on it. Festlegung
-// 4(b) is a statement about the row that is about to be WRITTEN: it exists so
-// transcript prose never lands under someone else's type policy. This wave
-// writes exactly one shard per run, so the shard it opens is the whole surface.
-// A foreign type on a LOWER shard is left standing on purpose — the arm neither
-// reads nor writes it here, and refusing over it would let one planted row kill
-// a grown chain. When W-L2 starts reading every shard for the cross-shard
-// dedup, that row becomes material and the gate has to grow with it.
+// THE TYPE GATE RUNS ON THE SHARD THE ARM OPENS. Festlegung 4(b) is a statement
+// about the row that is about to be WRITTEN: it exists so transcript prose never
+// lands under someone else's type policy, and the shard the seed opens is the
+// row every batch of this run upserts (after a rollover, the one the rollover
+// opened — distillWriteBlock asks the guard again for every upsert).
+//
+// ON A LOWER SHARD THE SAME FESTLEGUNG ANSWERS IN THE READ DIRECTION, which is
+// W-L1's E-4 handover cashed in: a lower shard is dedup material from this wave
+// on, and material under a foreign type does not enter the set
+// (distillReadShardGroup). It still does not refuse the run — see there for why
+// the milder answer is the right one and what it costs.
 //
 // A body whose sections this arm does not recognise is a REFUSAL, never a
 // replacement: the alternative is to overwrite a block whose shape is unknown,
-// and that is the very loss this function exists to prevent.
+// and that is the very loss this function exists to prevent. The refusal names
+// the shard it refused (W-L1 review, minor #3) — with several shards per range
+// the source key is no longer an address.
 func (s *Scheduler) distillSeedBlock(ctx context.Context, opts distillWriteOpts, root string, wmFrom int64) (*distillBlockState, error) {
 	st := newDistillBlockState(root, "", wmFrom)
 	if opts.category == "" || opts.typeName == "" || opts.scope == "" {
 		return nil, fmt.Errorf("%w: incomplete write identity (category=%q type=%q scope=%q)",
 			errDistillBlockWrite, opts.category, opts.typeName, opts.scope)
 	}
-	ordinal, err := s.distillRunningShard(ctx, opts, root, wmFrom)
+
+	var g distillShardGroup
+	var err error
+	if distillMetaValue(root) != root {
+		// A ROOT THAT DOES NOT SURVIVE distillMetaValue IS NOT ADDRESSABLE BY THE
+		// GROUP QUERY. §4.4.3 re-types every foreign string before it enters
+		// metadata, so such a root stands in the block as "" while the title
+		// carries it verbatim — the group query would find nothing and the arm
+		// would replace its own shard 1, which is precisely the loss round-2
+		// blocker #1 closed. The arm therefore reads such a root by TITLE, one
+		// shard at a time — and since W-L2 the seed loop below follows that
+		// title chain and rolls over like any other root (review #5: "stays
+		// single-shard" was W-L1's wording and is no longer true). What such a
+		// root lacks is only the METADATA discovery path, and with it the
+		// cross-shard dedup set: lower shards are invisible to the group query,
+		// so their claims are not in groupClaims. Loud rather than silent.
+		slog.Warn("scheduler: distiller cannot address its shard group — the root id does not "+
+			"survive the metadata type check, so the arm stays on shard 1",
+			"source_root", root, "category", opts.category, "scope", opts.scope)
+		g, err = s.distillReadShardRow(ctx, opts, distillBlockTitle(root, wmFrom, 1))
+	} else {
+		g, err = s.distillReadShardGroup(ctx, opts, root, wmFrom)
+	}
 	if err != nil {
 		return nil, err
 	}
-	st.ordinal = ordinal
-	title := distillBlockTitle(root, wmFrom, ordinal)
+	st.ordinal = g.running
+	st.groupClaims = g.lower
 
-	var haveType, content string
-	err = s.pool.QueryRow(ctx,
+	// THE SEED OPENS THE FIRST SHARD OF THE RANGE THAT HAS ROOM (wave W-L2). The
+	// group's highest shard is the candidate; if its carry alone leaves no room
+	// for another insight it is not the running shard but a SEALED one, and the
+	// run continues on the next — which is amendment A.4 (c)'s own argument read
+	// forwards ("dann ist er nicht der laufende, sondern schon versiegelt — der
+	// Seed hätte den nächsten geöffnet").
+	//
+	// THE ROLLOVER LIVES HERE AND NOT IN THE CALLER because both gates of this
+	// function have to apply to the shard the run actually opens: a foreign type
+	// on it must refuse BEFORE the first call is paid for, and a body it already
+	// carries must be loaded as carry rather than replaced. A rollover outside
+	// this function would target a title neither gate has seen.
+	//
+	// IT TERMINATES WITHOUT A COUNTER: every further turn needs a row that
+	// EXISTS under the next shard title, so the loop is bounded by the chain that
+	// is actually there, and the first absent title ends it with an empty carry.
+	// The configurable bound on how long such a chain may grow is
+	// distill.max_blocks_per_root and belongs to W-L3.
+	for {
+		title := distillBlockTitle(root, wmFrom, st.ordinal)
+		if !g.found {
+			// THE TITLE IS THE IDENTITY; THE GROUP QUERY IS ONLY A DISCOVERY KEY. A
+			// row can hold a shard title while carrying none of the arm's metadata —
+			// a squatter writes what it likes — and such a row is invisible to the
+			// `@>` containment. Before this wave the seed looked the title up
+			// unconditionally and therefore saw it; without this lookup a squatted
+			// identity would pass the seed, the run would pay for its calls and the
+			// upsert would replace a body the arm cannot read (measured: gate A02-9
+			// "title squatting", both halves, and it is round-2 blocker #1's loss).
+			//
+			// It costs a query only where the group MISSED the title, i.e. never in
+			// ordinary operation for the running shard: every block the arm writes
+			// carries the two discovery keys itself.
+			row, rerr := s.distillReadShardRow(ctx, opts, title)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if !row.found {
+				return st, nil // an untouched shard: empty carry, room by construction
+			}
+			g.haveType, g.content = row.haveType, row.content
+		}
+		if g.haveType != opts.typeName {
+			return nil, &distillTypeHeld{have: g.haveType, want: opts.typeName, title: title}
+		}
+		carry, ok := distillSplitCarry(g.content)
+		if !ok {
+			return nil, &distillBodyUnreadable{title: title}
+		}
+		st.carry = carry
+		if !st.full(opts) {
+			return st, nil
+		}
+		slog.Info("scheduler: distiller shard is full at seed time — the run opens the next one",
+			"title", title, "sealed_shard", st.ordinal, "carried", st.carry.count(),
+			"max_block_runes", opts.maxRunes)
+		st.rollover()
+		g.found = false
+	}
+}
+
+// distillReadShardRow is the single-shard read for a root the group query cannot
+// address. It is the query distillSeedBlock ran before wave W-L1, unchanged.
+func (s *Scheduler) distillReadShardRow(ctx context.Context, opts distillWriteOpts,
+	title string,
+) (distillShardGroup, error) {
+	g := distillShardGroup{running: 1, lower: map[string]struct{}{}}
+	err := s.pool.QueryRow(ctx,
 		`SELECT type_name, content FROM context_blocks
 		  WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived`,
-		opts.category, title, opts.scope).Scan(&haveType, &content)
+		opts.category, title, opts.scope).Scan(&g.haveType, &g.content)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return st, nil
+		return g, nil
 	case err != nil:
-		return nil, fmt.Errorf("%w: reading the target row: %w", errDistillBlockWrite, err)
-	case haveType != opts.typeName:
-		return nil, &distillTypeHeld{have: haveType, want: opts.typeName, title: title}
+		return g, fmt.Errorf("%w: reading the target row: %w", errDistillBlockWrite, err)
 	}
-
-	carry, ok := distillSplitCarry(content)
-	if !ok {
-		return nil, fmt.Errorf("%w: the existing block does not carry this arm's sections", errDistillBlockWrite)
-	}
-	st.carry = carry
-	return st, nil
+	g.found = true
+	return g, nil
 }
 
 // full reports whether the carried material alone leaves no room for a new
-// insight (round-2 major #4). A run that starts full makes no call at all: every
-// insight it could produce would be dropped by the cap, and a paid GPU second
-// for guaranteed-discarded yield is the one cost the spend guard cannot see.
+// insight (round-2 major #4).
+//
+// UNTIL WAVE W-L2 THIS ENDED THE RUN — the answer was skipped/budget and the
+// root fell silent forever (the chain of amendment A.1). It is now the SEED's
+// rollover condition instead: a shard that is full through its carry alone is
+// not the running one but a sealed one, so distillSession opens the next and the
+// run proceeds. The cost argument behind the predicate is untouched — a paid GPU
+// second for yield the cap would discard is still the one cost the spend guard
+// cannot see; what changed is that the arm now has somewhere to put the yield.
 func (st *distillBlockState) full(opts distillWriteOpts) bool {
 	if opts.maxRunes <= 0 || st.carry.count() == 0 {
 		return false
@@ -1377,11 +1681,11 @@ func (s *Scheduler) distillWriteBlock(ctx context.Context, opts distillWriteOpts
 			errDistillBlockWrite, opts.category, opts.typeName, opts.scope)
 	}
 
-	// THE RUNNING SHARD IS THE ONE THE SEED OPENED, and this wave never moves
-	// off it: st.ordinal is set once per run and the rollover — the point at
-	// which a full shard hands over to the next — is W-L2's one change
-	// (amendment C4-2 A.6). Every batch of this run therefore upserts the same
-	// title, exactly as before.
+	// THE RUNNING SHARD IS WHATEVER st.ordinal SAYS RIGHT NOW. The seed sets it,
+	// and since wave W-L2 rollover() raises it whenever the shard filled up — so
+	// the title is re-derived on every upsert rather than resolved once per run.
+	// The type guard below therefore runs against the shard this write actually
+	// targets, including the one a rollover has just opened.
 	title := distillBlockTitle(st.root, st.wmFrom, st.ordinal)
 	if err := distillTypeGuard(ctx, s.pool, opts.category, title, opts.scope, opts.typeName); err != nil {
 		return err
@@ -1390,9 +1694,14 @@ func (s *Scheduler) distillWriteBlock(ctx context.Context, opts distillWriteOpts
 	content, over := distillRenderBlock(st, opts)
 	st.overflow = over
 	if over > 0 {
-		slog.Warn("scheduler: distiller block hit its rune cap — the run ends here",
-			"run_id", st.runID, "dropped", over, "max_block_runes", opts.maxRunes,
-			"carried", st.carry.count(), "kept", len(st.insights)-over)
+		// "the run ends here" until wave W-L2; now the caller decides, and the
+		// insights beyond the cut are the ones the next shard opens with
+		// (st.overflowInsights). The line stays a WARN because a shard filling up
+		// is the event the rollover is built around.
+		slog.Warn("scheduler: distiller block hit its rune cap",
+			"run_id", st.runID, "shard", st.ordinal, "dropped", over,
+			"max_block_runes", opts.maxRunes, "carried", st.carry.count(),
+			"kept", len(st.insights)-over)
 	}
 	sens := distillBlockSensitivity(st, opts.sensitivity)
 	md := distillBlockMetadata(st, opts, st.carry.count()+len(st.insights)-over)

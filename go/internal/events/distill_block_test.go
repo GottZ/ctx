@@ -1180,3 +1180,117 @@ func TestDistillRenderCutAfterTheCarryFix(t *testing.T) {
 	t.Logf("carry=%d runes, kept %d of 20 new insights, %d runes left under the cap",
 		carryRunes, kept, rest)
 }
+
+// TestDistillShardRolloverState is wave W-L2's database-free half: what the
+// rollover moves, what it leaves behind, and that the dedup set it builds
+// actually suppresses a repeated line (amendment C4-2 A.3 b, A.4 c, A.6).
+//
+// The behavioural half — the run that rolls over, the watermark, the crash and
+// the cost — is in distill_rollover_integration_test.go.
+func TestDistillShardRolloverState(t *testing.T) {
+	// The rendered lines of the fixture's insights, which is what the group set
+	// and the carry are both made of.
+	line := func(in distillKept) string {
+		c, _ := distillInsightLine(in)
+		return c
+	}
+
+	t.Run("the rollover seals the shard and opens the next", func(t *testing.T) {
+		st := a9State(4)
+		opts := a9Opts()
+		// A cap that admits two of the four — the render then hands the other two
+		// to the rollover instead of dropping them.
+		opts.maxRunes = utf8.RuneCountInString(distillRenderN(a9State(0), opts, nil, nil, 0)) +
+			2*utf8.RuneCountInString(line(st.insights[0])) +
+			2*utf8.RuneCountInString(func() string { _, e := distillInsightLine(st.insights[0]); return e }())
+		st.carry = distillCarry{claims: []string{"- **carried claim** [aaaaaaaa#1]\n"},
+			evidence: []string{"- [aaaaaaaa#1] im Transkript geäußert: „x“ — Block `b`, Abschnitt 1.\n"}}
+		st.shardCalls = 3
+
+		_, over := distillRenderBlock(st, opts)
+		if over == 0 {
+			t.Fatalf("the fixture cap admits everything — nothing would move (maxRunes=%d)", opts.maxRunes)
+		}
+		want := append([]distillKept(nil), st.overflowInsights...)
+		written := append([]string(nil), st.writtenClaims...)
+		carried := st.carry.claims[0]
+
+		st.rollover()
+
+		if st.ordinal != 2 {
+			t.Errorf("ordinal = %d, want 2", st.ordinal)
+		}
+		if st.carry.count() != 0 {
+			t.Errorf("the new shard opens with %d carried claims, want 0", st.carry.count())
+		}
+		if st.shardCalls != 0 {
+			t.Errorf("shardCalls = %d, want 0 — the progress condition must restart", st.shardCalls)
+		}
+		if len(st.insights) != len(want) {
+			t.Fatalf("the new shard opens with %d insights, want the %d the cap could not take",
+				len(st.insights), len(want))
+		}
+		for i := range want {
+			if st.insights[i].claim != want[i].claim {
+				t.Errorf("insight %d is %q, want %q", i, st.insights[i].claim, want[i].claim)
+			}
+		}
+		if st.overflow != 0 {
+			t.Errorf("overflow = %d, want 0 — the new shard has dropped nothing yet", st.overflow)
+		}
+		// The sealed shard's lines — its own carry AND what this run wrote into it
+		// — are the group set of the new one.
+		if _, ok := st.groupClaims[carried]; !ok {
+			t.Error("the sealed shard's carried claim is not in the dedup set")
+		}
+		for _, l := range written {
+			if _, ok := st.groupClaims[l]; !ok {
+				t.Errorf("a line written into the sealed shard is not in the dedup set: %q", l)
+			}
+		}
+	})
+
+	t.Run("a line of another shard is not written a second time", func(t *testing.T) {
+		st := a9State(2)
+		opts := a9Opts()
+		st.groupClaims[line(st.insights[0])] = struct{}{}
+
+		content, over := distillRenderBlock(st, opts)
+		if over != 0 {
+			t.Fatalf("the cap dropped %d insights — the probe would be ambiguous", over)
+		}
+		if st.duplicates != 1 {
+			t.Errorf("duplicates = %d, want 1 — the group set did not suppress the repeated line",
+				st.duplicates)
+		}
+		if strings.Contains(content, "Kernaussage 1 ") {
+			t.Error("the claim of another shard was written a second time")
+		}
+		if !strings.Contains(content, "Kernaussage 2 ") {
+			t.Error("the group set suppressed a line no other shard carries")
+		}
+	})
+
+	t.Run("the group set is never rendered into the block", func(t *testing.T) {
+		st := a9State(0)
+		st.groupClaims["- **eine Aussage aus einem anderen Shard** [aaaaaaaa#1]\n"] = struct{}{}
+		content, _ := distillRenderBlock(st, a9Opts())
+		if strings.Contains(content, "einem anderen Shard") {
+			t.Error("the dedup set of the other shards was rendered into this one")
+		}
+	})
+
+	t.Run("shardFull answers both brakes", func(t *testing.T) {
+		st := a9State(0)
+		if st.shardFull(distillExtractResult{}) {
+			t.Error("an untouched shard is reported full")
+		}
+		if !st.shardFull(distillExtractResult{blockFull: true}) {
+			t.Error("the rune meter's brake is not read as a full shard")
+		}
+		st.overflow = 1
+		if !st.shardFull(distillExtractResult{}) {
+			t.Error("a render that had to drop is not read as a full shard")
+		}
+	})
+}
