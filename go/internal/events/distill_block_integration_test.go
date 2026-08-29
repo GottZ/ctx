@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/distillsource"
 	"github.com/GottZ/ctx/internal/distillsource/ctxcheckpoint"
 	"github.com/GottZ/ctx/internal/store"
@@ -954,6 +955,256 @@ func TestDistillBlockWrite(t *testing.T) {
 		if m.ID != manifestID || m.SHA256 != a9SHA || m.ParentID != a9Man1 ||
 			m.ActiveSessionID != "20260712_205012_active" {
 			t.Errorf("manifest provenance = %+v, want the four values of the manifest row", m)
+		}
+	})
+}
+
+// Below: wave C3-1, part B — N-3, the cap that discards two thirds of the paid
+// yield (pilot report §10 N-3).
+
+// c31Calibrate runs one clamped tick and reports what THIS fixture's block
+// costs: the rune length of one insight's two rendered lines, and the frame
+// everything else needs.
+//
+// MEASURED AND NOT GUESSED, for the reason the neighbouring major-#4 probe
+// gives: a literal cap stops measuring the gate the day the block format
+// changes by twenty runes, and a frame derived from an EMPTY probe state is
+// wrong by the length of the provenance line, which depends on the run's own
+// counters.
+func c31Calibrate(t *testing.T, pool *pgxpool.Pool) (pair, frame, note int) {
+	t.Helper()
+	a9Truncate(t, pool)
+	calib := a8Config()
+	calib.Distill.RowsPerCall = 1
+	calib.Distill.SpendMaxCalls = 1
+	stub := a8NewStub(t, a9Stub)
+	a8Scheduler(pool, calib, a9Source(1, c31Chunks, 0), a8Pool(stub.srv.URL)).
+		distillOnce(context.Background(), dfNoDemand)
+
+	blocks := a9Blocks(t, pool)
+	if len(blocks) != 1 {
+		t.Fatalf("calibration run left %d blocks, want 1", len(blocks))
+	}
+	nIns := strings.Count(blocks[0].content, "- **")
+	if nIns != 1 {
+		t.Fatalf("the calibration run held %d insights, want exactly 1 (one call, one chunk)", nIns)
+	}
+	c, e := distillInsightLine(distillKept{
+		claim: a8Claim + " Beleg 1-100", quote: a8Quote, blockID: a8Block1, chunk: 100,
+	})
+	pair = len([]rune(c)) + len([]rune(e))
+	frame = len([]rune(blocks[0].content)) - nIns*pair
+	note = len([]rune(distillOverflowNote(nIns)))
+	return pair, frame, note
+}
+
+// c31Chunks is how many chunks the fixture batch carries. With rows_per_call =
+// 1 that is exactly how many calls the UNSTEERED arm makes — the number the
+// probe below reads as its red state.
+const c31Chunks = 6
+
+// c31Run is one tick plus everything the probes below read back from it.
+type c31Run struct {
+	calls, kept, held, over, stops int
+	outcome, skip                  string
+	wmTo                           int64
+	blockID                        string
+}
+
+// c31Tick drives one tick and collects journal and block state.
+func c31Tick(t *testing.T, pool *pgxpool.Pool, cfg *config.Config, src distillsource.Source) c31Run {
+	t.Helper()
+	ctx := context.Background()
+	key := distillSourceKey(dfLabel, dfScope, dfRoot)
+	stub := a8NewStub(t, a9Stub)
+	a8Scheduler(pool, cfg, src, a8Pool(stub.srv.URL)).distillOnce(ctx, dfNoDemand)
+
+	var r c31Run
+	r.calls, r.kept, _, r.outcome = a8Ledger(t, pool, key)
+	blocks := a9Blocks(t, pool)
+	if len(blocks) != 1 {
+		t.Fatalf("%d blocks, want 1", len(blocks))
+	}
+	r.blockID = blocks[0].id
+	r.held = strings.Count(blocks[0].content, "- **")
+	if err := pool.QueryRow(ctx, `
+		SELECT (metadata->'coverage'->>'insights_over_budget')::int,
+		       COALESCE((metadata->'coverage'->>'calls_stopped_block_full')::int, -1)
+		  FROM context_blocks WHERE id = $1`, blocks[0].id).Scan(&r.over, &r.stops); err != nil {
+		t.Fatalf("read coverage: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT watermark_to, COALESCE(skip_reason,'') FROM distill_run
+		 WHERE source_key=$1 ORDER BY started_at DESC LIMIT 1`, key).Scan(&r.wmTo, &r.skip); err != nil {
+		t.Fatalf("journal: %v", err)
+	}
+	t.Logf("calls=%d kept=%d held=%d over_budget=%d stops=%d outcome=%s skip=%s wm=%d",
+		r.calls, r.kept, r.held, r.over, r.stops, r.outcome, r.skip, r.wmTo)
+	return r
+}
+
+// TestDistillRuneBudget is part B's gate.
+//
+// THE RED STATE, measured in the X-W4 pilot and reproduced here: the cap is
+// enforced at RENDER time, i.e. after every call of the batch has been paid
+// for. Four of sixteen pilot blocks stood at 5 271–5 934 runes against a cap of
+// 6 000, coverage.insights_over_budget was 106 against 69 insights actually in
+// the blocks, and the arm paid 24,70 GPU-s per PUBLISHED insight instead of the
+// 5,41 it paid per gate-kept one.
+//
+// The steering is a rune meter in the call loop, the same shape the GPU meter
+// and the call clamp already have (distill_extract.go): it answers "does the
+// block still have room for one more insight" BEFORE the next call is made, and
+// ends the tick with the journal's own `budget` word when it does not.
+//
+//	go test -tags=integration ./internal/events/ -run TestDistillRuneBudget -count=1 -v
+func TestDistillRuneBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+
+	pair, frame, note := c31Calibrate(t, pool)
+	t.Logf("calibrated: pair=%d frame=%d note=%d chunks=%d", pair, frame, note, c31Chunks)
+
+	// ONE CALL PER CHUNK — the shape that isolates the BRAKE: every call is a
+	// decision point, so the loop must stop at the exact insight the cap can no
+	// longer hold. Room for two insights plus half of a third.
+	t.Run("rows_per_call=1: the brake stops the call loop", func(t *testing.T) {
+		cfg := a8Config()
+		cfg.Distill.RowsPerCall = 1
+		cfg.Distill.MaxBlockRunes = frame + note + 2*pair + pair/2
+
+		a9Truncate(t, pool)
+		r := c31Tick(t, pool, cfg, a9Source(1, c31Chunks, 0))
+
+		// (1) THE CALLS. The unsteered arm pays for every chunk of the batch; the
+		// steered one stops as soon as the block has no room left.
+		if r.calls >= c31Chunks {
+			t.Errorf("the arm made %d calls for %d chunks — every call past the cap is paid for "+
+				"yield that the render then discards (pilot N-3)", r.calls, c31Chunks)
+		}
+		if r.calls < 2 {
+			t.Errorf("the arm made %d calls — the cap holds two insights, so a brake before the "+
+				"second call throws away yield the block could carry", r.calls)
+		}
+		// (2) THE DISCARDED YIELD. This is the number N-3 is about.
+		if r.over != 0 {
+			t.Errorf("insights_over_budget = %d, want 0 — the arm still pays for insights the "+
+				"render discards", r.over)
+		}
+		// (3) THE BLOCK IS ACTUALLY FILLED. A brake that stops before the first
+		// call would satisfy (1) and (2) while producing nothing at all.
+		if r.held == 0 {
+			t.Fatal("the block holds no insight — the probe measures a brake, not a steering")
+		}
+		// (4) NOT A SILENT SKIP.
+		if r.outcome != distillOutcomePartial {
+			t.Errorf("outcome = %q, want partial — a run the cap ended did not cover its range", r.outcome)
+		}
+		if r.skip != distillSkipBudget {
+			t.Errorf("skip_reason = %q, want %q — the brake is invisible to an operator",
+				r.skip, distillSkipBudget)
+		}
+		if r.stops < 1 {
+			t.Errorf("coverage.calls_stopped_block_full = %d, want at least 1 — the block does not "+
+				"say that its own cap stopped the run", r.stops)
+		}
+		// (5) THE MATERIAL IS POSTPONED, NOT COVERED.
+		if r.wmTo != 0 {
+			t.Errorf("watermark_to = %d, want 0 — the unshown remainder of the batch must stay readable", r.wmTo)
+		}
+	})
+
+	// THE PRODUCTION SHAPE (round 2, review major #2). distill.rows_per_call
+	// defaults to 5 (internal/config/config.go:1842) and a8Config() — the base of
+	// every other probe in this package — sets 5 too. A gate that only ever runs
+	// at 1 measures a configuration nobody deploys.
+	//
+	// It is also the PILOT's shape rather than an empty block with a tiny cap:
+	// X-W4 measured N-3 on blocks that already CARRIED material and stood at
+	// 5 271–5 934 runes against 6 000. A carried block is exactly the state in
+	// which the meter has a real size estimate — the mean of the insights the
+	// block already holds — so the call planner can size the group before the
+	// first call of the run instead of after it.
+	t.Run("production rows_per_call over a block that carries material", func(t *testing.T) {
+		// Run 1 seeds the identity with one insight and leaves the watermark
+		// standing (spend clamp inside the first batch), so run 2 meets the same
+		// title and reads it back as carry.
+		seed := a8Config()
+		seed.Distill.RowsPerCall = 1
+		seed.Distill.SpendMaxCalls = 1
+		a9Truncate(t, pool)
+		first := c31Tick(t, pool, seed, a9Source(1, c31Chunks, 0))
+		if first.held != 1 || first.wmTo != 0 {
+			t.Fatalf("seed run held %d insights at watermark %d, want 1/0 — run 2 would not meet "+
+				"the same identity", first.held, first.wmTo)
+		}
+
+		// Run 2 at the PRODUCTION call size, with room for two more insights.
+		cfg := a8Config()
+		if cfg.Distill.RowsPerCall != config.Defaults().Distill.RowsPerCall {
+			t.Fatalf("a8Config rows_per_call = %d, production default = %d — the probe would not "+
+				"measure the deployed shape", cfg.Distill.RowsPerCall, config.Defaults().Distill.RowsPerCall)
+		}
+		cfg.Distill.MaxBlockRunes = frame + note + 3*pair + pair/2
+		r := c31Tick(t, pool, cfg, a9Source(1, c31Chunks, 0))
+
+		if r.over != 0 {
+			t.Errorf("insights_over_budget = %d at rows_per_call=%d, want 0 — the call planner did "+
+				"not size the group to the room the block has left", r.over, cfg.Distill.RowsPerCall)
+		}
+		if r.kept > 2 {
+			t.Errorf("the call bought %d insights although only two fit — the group was not "+
+				"sized to the remaining room", r.kept)
+		}
+		if r.held < 3 {
+			t.Errorf("the block holds %d insights (1 carried + %d new), want 3 — the planner "+
+				"under-filled the block it was steering", r.held, r.kept)
+		}
+		if r.calls != 1 {
+			t.Errorf("calls = %d, want 1 — one sized group fills the block, and the brake ends "+
+				"the loop before a second one", r.calls)
+		}
+		if r.stops < 1 {
+			t.Errorf("coverage.calls_stopped_block_full = %d, want at least 1", r.stops)
+		}
+		if r.wmTo != 0 {
+			t.Errorf("watermark_to = %d, want 0", r.wmTo)
+		}
+	})
+
+	// THE DOCUMENTED LIMIT (round 2, review major #2). The FIRST call of a run
+	// over an EMPTY block is structurally blind: there is no insight of this
+	// block to take a size from, so distillNextInsightRunes falls back to the
+	// theoretical minimum (its own doc says so) and the planner cannot size the
+	// group below rows_per_call. Whatever that one call buys above the cap is the
+	// irreducible remainder of this design — an atomic call cannot be cut in half.
+	//
+	// It is pinned as a NUMBER rather than described, so a regression that makes
+	// it worse is visible: at most one call's worth, never more.
+	t.Run("the blind first call over an empty block is the documented limit", func(t *testing.T) {
+		cfg := a8Config()
+		cfg.Distill.MaxBlockRunes = frame + note + 2*pair + pair/2
+
+		a9Truncate(t, pool)
+		r := c31Tick(t, pool, cfg, a9Source(1, c31Chunks, 0))
+
+		if r.calls != 1 {
+			t.Errorf("calls = %d, want 1 — after the blind first call the meter has a measurement "+
+				"and must stop", r.calls)
+		}
+		if r.over > cfg.Distill.RowsPerCall-r.held {
+			t.Errorf("insights_over_budget = %d, want at most %d — the loss must stay inside the "+
+				"ONE call that had no size estimate", r.over, cfg.Distill.RowsPerCall-r.held)
+		}
+		if r.over == 0 {
+			t.Logf("no overshoot at all in this fixture — the limit is an upper bound, not a floor")
+		}
+		// The unsteered arm made TWO calls here and discarded four insights
+		// (reviewer measurement at the same cap). One call is the steering.
+		if r.held < 2 {
+			t.Errorf("the block holds %d insights, want the two the cap can carry", r.held)
 		}
 	})
 }

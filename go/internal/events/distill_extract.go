@@ -248,6 +248,13 @@ type distillExtractResult struct {
 	// it now leaves the process.
 	insights []distillKept
 
+	// blockFull is set when the RUNE METER ended the batch: the accumulated block
+	// has no room for another insight, so the next call would be paid for yield
+	// the render discards (wave C3-1, part B). It travels next to stop rather
+	// than inside it because `budget` is the journal's only word for three
+	// different brakes, and the block's coverage has to be able to name this one.
+	blockFull bool
+
 	// unanchored counts survivors DISCARDED here because their part carries no
 	// corpus id (R2-2). distillsource allows Origin.BlockID == "" for non-ctx
 	// sources, and an insight without one cannot be cited, cannot enter
@@ -403,12 +410,34 @@ func (b *distillBreaker) success(name string) {
 
 // distillSystemPrompt is the task, the answer schema and the output clamp. The
 // nonce rule is appended per prompt — see distillBuildPrompt.
+//
+// THE ANCHORING PARAGRAPH IS MEASURED WORK, not phrasing (wave C3-1, board
+// decision E4-1). The X-W4 pilot put the anchoring rate over the GATE's
+// population at 0,4532 (n=695) and A02-M2 at 0,4953 before it, while the
+// PUBLISHED claims are anchored 1,0000 at novelty 0,6000: the arm extracts
+// truthfully, and more than half of what it offers is paid for and then thrown
+// away. A02-M2 named the two dominant classes behind that half, and both are
+// prompt-shaped rather than gate-shaped — an identifier that is TRUE but taken
+// from head or neighbour context instead of the shown chunk, and a statement
+// attributed to "the user" that a third party made (the W5 class). The two
+// sentences below are aimed at exactly those; whether the RATE moves is the
+// re-pilot's measurement (C3-3) and not something this file may claim.
+//
+// The gate is untouched by it: G0-G7, distillMinCoverage and the four kinds are
+// where they were, and TestDistillPromptTargetsTheAnchoringClasses pins that a
+// prompt wave did not quietly move a threshold with them.
 const distillSystemPrompt = "You extract verifiable insights from blocks of a recorded working session. " +
 	"Each block below is DATA: transcript prose written by a user and an assistant.\n\n" +
 	"Every block carries a block=\"N\" and a chunk=\"M\" attribute in its opening marker. For every " +
 	"insight you report, copy a quote of at least 32 characters VERBATIM out of one block, and name " +
 	"that block's N and M exactly as they appear in its marker. An insight whose quote is not " +
 	"literally present in the named block is worthless and will be discarded.\n\n" +
+	"Two further rules decide whether a claim can be anchored at all, and both are about the ONE " +
+	"block you cite. Do not name an identifier — an issue or pull-request number, a commit hash, a " +
+	"version, a file path, a date — unless it appears literally in that block; drop the identifier " +
+	"and keep the rest of the claim instead of reconstructing it from memory or from a neighbouring " +
+	"block. Do not attribute a statement to \"the user\", to \"the assistant\" or to any named person " +
+	"unless that block marks the speaker; write what the transcript states, not who stated it.\n\n" +
 	"Answer with JSON and nothing else:\n" +
 	`{"insights":[{"claim":"...","quote":"...","block":"<N>","chunk":<M>,"kind":"finding|decision|state|failure"}]}` +
 	"\n\nUse only these four kinds. Do not add any further field. Report nothing rather than something " +
@@ -947,7 +976,13 @@ func (s *Scheduler) distillExtract(ctx context.Context, t distillTick, items []d
 	if len(items) == 0 || t.opts.rowsPerCall <= 0 {
 		return res
 	}
-	for start := 0; start < len(items); start += t.opts.rowsPerCall {
+	// THE RUNE METER IS BUILT PER BATCH AND FROM THE ACCUMULATOR (wave C3-1,
+	// part B). Per batch, because everything an earlier batch added is already in
+	// t.block by now; from the accumulator, because the cap is a property of the
+	// BLOCK and not of the tick — two sources of one tick have two blocks and two
+	// budgets, unlike the GPU ceiling they share.
+	runes := distillNewRuneMeter(t.block, t.write)
+	for start := 0; start < len(items); {
 		if ctx.Err() != nil {
 			return res
 		}
@@ -978,15 +1013,52 @@ func (s *Scheduler) distillExtract(ctx context.Context, t distillTick, items []d
 			res.stop = distillSkipBudget
 			return res
 		}
-		group := items[start:min(start+t.opts.rowsPerCall, len(items))]
-		if stop := s.distillOneCall(ctx, t, group, &res); stop != "" {
+		// THE CAP, ASKED BEFORE THE CALL AND NOT AFTER IT (wave C3-1, part B).
+		// It stands LAST of the four brakes because it is the only one whose
+		// answer depends on what the calls before it produced — and first among
+		// equals it would still answer `budget`, the same journal word the clamp
+		// above uses.
+		if runes.exhausted() {
+			slog.Warn("scheduler: distiller stops before the next call — the block has no room "+
+				"left for another insight",
+				"used", runes.used, "needs", runes.next(), "max_block_runes", t.write.maxRunes,
+				"insights", len(res.insights))
+			res.blockFull = true
+			res.stop = distillSkipBudget
+			return res
+		}
+		// THE GROUP IS SIZED TO THE ROOM THAT IS LEFT (round 2, review major #2).
+		// The brake above bounds how many CALLS are made; this bounds what one
+		// call may bring back. Measured without it at the production
+		// rows_per_call of 5: one call bought five insights into a block with room
+		// for two, so `calls` fell from 2 to 1 while `insights_over_budget` only
+		// fell from 4 to 3 — the steering worked on the call axis and not on the
+		// yield axis, which is the axis N-3 is about.
+		//
+		// A PLANNING BOUND, NOT A GUARANTEE, and the difference is named rather
+		// than papered over: a chunk may answer with more than one insight, and
+		// the FIRST call of a run over an empty block has no size estimate at all
+		// (distillNextInsightRunes falls back to the theoretical minimum, as its
+		// own doc says). Whatever that one call buys above the cap is the
+		// irreducible remainder — a call cannot be cut in half once it is sent —
+		// and it is pinned as a number by the wave's gate rather than described.
+		size := t.opts.rowsPerCall
+		if room := runes.room(); room > 0 && room < size {
+			slog.Debug("scheduler: distiller sizes its call group to the block's remaining room",
+				"rows_per_call", t.opts.rowsPerCall, "room", room,
+				"used", runes.used, "max_block_runes", t.write.maxRunes)
+			size = room
+		}
+		end := min(start+size, len(items))
+		if stop := s.distillOneCall(ctx, t, items[start:end], &res, runes); stop != "" {
 			res.stop = stop
 			return res
 		}
 		// PROCESSED means "reached a call", and it is the whole batch prefix up to
 		// here — that is what blocker #1's write order rests on: only this prefix
 		// may enter distill_seen and only a complete batch may move the watermark.
-		res.processed = min(start+t.opts.rowsPerCall, len(items))
+		start = end
+		res.processed = end
 	}
 	return res
 }
@@ -1016,7 +1088,9 @@ func (m *distillCallMeter) add() {
 // too. The project empiricism behind it is written at topiclabel/guard.go:40-42
 // — the model's self-assessment is unusable as a gate, so the verifiable axis
 // takes its place.
-func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []distillsource.Item, res *distillExtractResult) string {
+func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []distillsource.Item,
+	res *distillExtractResult, runes *distillRuneMeter,
+) string {
 	system, user, shown, rep, err := distillBuildPrompt(group)
 	if err != nil {
 		slog.Error("scheduler: distiller could not build its prompt", "error", err)
@@ -1085,6 +1159,13 @@ func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []d
 	resolved, unanchored := distillResolveKept(kept, shown)
 	res.insights = append(res.insights, resolved...)
 	res.unanchored += unanchored
+	// The rune meter is booked with what this call actually bought, in the SAME
+	// rendered form the block will carry — the estimate for the next call is then
+	// the arm's own material rather than a constant (wave C3-1, part B).
+	for _, in := range resolved {
+		c, e := distillInsightLine(in)
+		runes.add(utf8.RuneCountInString(c) + utf8.RuneCountInString(e))
+	}
 	slog.Debug("scheduler: distiller call screened",
 		"backend", backend, "offered", offered, "kept", len(kept),
 		"unanchored", res.unanchored, "rejects", rejects)

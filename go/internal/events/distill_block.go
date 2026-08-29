@@ -228,6 +228,12 @@ type distillBlockState struct {
 	written                                 int // upserts this run performed
 	overflow                                int // insights above max_block_runes
 	duplicates                              int // re-extracted after a crash, already carried
+	// blockFullStops counts how often the RUNE METER stopped a batch's call loop
+	// because the block had no room for another insight (wave C3-1, part B). It
+	// is the observable side of the steering: `budget` in the journal is the one
+	// word three different brakes share, and this number says which of them it
+	// was — without it the arm would skip silently, which the wave forbids.
+	blockFullStops int
 
 	// detector is the first per-insight or content hit of the run. One and not
 	// a list: the metadata key is a VERDICT ("this block was raised, and by
@@ -251,8 +257,12 @@ type distillBlockState struct {
 // THE READ IS NOT PROSE PARSING, and two properties carry that. The row's
 // `type_name` is verified to be the arm's own before anything is read from it,
 // and the section headings are constants THIS FILE writes. A claim can never
-// span two lines: distillDecode refuses any claim or quote carrying a C0/C1
-// control rune (distill_extract.go:573), so `\n` cannot reach a rendered line.
+// span two lines — and the reason is the RENDER, not the gate: distillDecode
+// refuses the C0/C1 control runes but admits tab, LF and CR on purpose
+// (distill_extract.go:611-619), so distillOneLine is what keeps `\n` out of a
+// rendered line. This comment used to name the gate as the guarantee, and the
+// X-W4 pilot measured what that cost: 12 of 69 evidence lines cut at their
+// first LF and one identity permanently block_write_failed (wave C3-1, N-1).
 // A body whose sections are missing or out of order is NOT interpreted — the
 // write is refused (see distillSplitCarry), because replacing a body the arm
 // does not recognise would destroy exactly what this type exists to keep.
@@ -293,6 +303,9 @@ func (st *distillBlockState) addBatch(ex distillExtractResult, l distillLedger, 
 	st.droppedCred += l.droppedCred
 	st.droppedDup += l.droppedDup
 	st.unanchored += ex.unanchored
+	if ex.blockFull {
+		st.blockFullStops++
+	}
 	if ex.model != "" {
 		st.model = ex.model
 	}
@@ -395,11 +408,47 @@ const (
 	distillSecEvidence   = "\n## Belege\n\n"
 )
 
+// distillLineBreaks is the render seam's normaliser (wave C3-1, board decision
+// E4-2 "render-escape"): every maximal run of tab, LF and CR becomes ONE space.
+//
+// Exactly those three runes and nothing else, because they are exactly the
+// three distillDecode admits inside a claim or a quote — deliberately, since
+// "a quote out of transcript prose legitimately carries them"
+// (distill_extract.go:611-619). Ordinary spaces are NOT collapsed: a quote
+// without a control rune then renders byte-identically to the tree before this
+// wave, which is what makes the non-regression a digest comparison rather than
+// an argument (TestDistillInsightLineNonRegression).
+var distillLineBreaks = regexp.MustCompile(`[\t\n\r]+`)
+
+// distillOneLine folds a foreign string onto a single rendered line.
+//
+// WHY THE RENDER AND NOT THE GATE. A LF inside a quote is legitimate evidence;
+// what cannot survive is a BULLET LIST whose entries silently continue on a
+// second line. distillInsightLine writes one line per claim and one per
+// evidence entry, and distillBulletLines reads them back by their "- " prefix
+// (:662-669) — so a continuation line opening with "- " is read as a second
+// evidence entry, distillSplitCarry finds len(evidence) != len(claims) and
+// REFUSES the body (:654-656). The identity then answers block_write_failed for
+// every later run, permanently. Measured in the X-W4 pilot: 12 of 69 evidence
+// lines (17,4 %) cut at their first LF, and 1 of 16 blocks dead.
+//
+// The decode gate is left byte-unchanged on purpose (E4-2): tightening it would
+// drop legitimate transcript evidence, and the visible ␊ the other option would
+// render is not what the decision asked for.
+func distillOneLine(s string) string {
+	return distillLineBreaks.ReplaceAllString(s, " ")
+}
+
 // distillInsightLine renders one insight's claim line and its evidence line.
+//
+// BOTH FIELDS go through distillOneLine, not only the quote. The claim is
+// rendered as a bullet too, distillDecode admits the same three runes in it,
+// and the carry parser cannot tell which of the two produced a stray "- " line
+// — a fix on one half would leave the block-killing path open on the other.
 func distillInsightLine(in distillKept) (claim, evidence string) {
 	anchor := "[" + distillShort8(in.blockID) + "#" + fmt.Sprint(in.chunk) + "]"
-	claim = "- **" + in.claim + "** " + anchor + "\n"
-	evidence = "- " + anchor + " im Transkript geäußert: „" + in.quote + "“ — Block `" +
+	claim = "- **" + distillOneLine(in.claim) + "** " + anchor + "\n"
+	evidence = "- " + anchor + " im Transkript geäußert: „" + distillOneLine(in.quote) + "“ — Block `" +
 		in.blockID + "`, Abschnitt " + fmt.Sprint(in.chunk) + ".\n"
 	return claim, evidence
 }
@@ -455,13 +504,7 @@ func distillRenderBlock(st *distillBlockState, opts distillWriteOpts) (string, i
 
 	n := len(claims)
 	if opts.maxRunes > 0 {
-		used := distillFrameRunes(st, opts, len(claims))
-		for _, l := range st.carry.claims {
-			used += utf8.RuneCountInString(l) + 1
-		}
-		for _, l := range st.carry.evidence {
-			used += utf8.RuneCountInString(l) + 1
-		}
+		used := distillUsedRunes(st, opts, len(claims))
 		n = 0
 		for i := range claims {
 			cost := utf8.RuneCountInString(claims[i]) + utf8.RuneCountInString(evidence[i])
@@ -475,9 +518,53 @@ func distillRenderBlock(st *distillBlockState, opts distillWriteOpts) (string, i
 	return distillRenderN(st, opts, claims[:n], evidence[:n], len(claims)-n), len(claims) - n
 }
 
-// distillFrameRunes is the length of everything that is not a per-insight line:
-// head, framing, the three section headings, the provenance paragraph and — for
-// a non-empty run — the reserve for the overflow note.
+// distillUsedRunes is what the block costs BEFORE the new lines of this run are
+// added: the frame plus everything a previous run already made durable.
+//
+// EXTRACTED SO THE CALL LOOP CAN ASK THE SAME QUESTION (wave C3-1, part B).
+// distillRenderBlock used to be the only place that knew this arithmetic, which
+// is why the cap could only ever be enforced AFTER every call of a batch was
+// paid for. distillRuneMeter reads it before each call; a second, independently
+// written copy of the same sum would drift and brake at a different point than
+// the render cuts.
+//
+// newLines is how many per-insight lines the caller intends to add — it decides
+// nothing but the reserve for the overflow note, which distillFrameRunes sizes.
+//
+// THE CARRY IS COUNTED EXACTLY ONCE, and it took a second review to see that it
+// was not (round 2, review major #3). distillFrameRunes measures
+// distillRenderN(st, opts, nil, nil, 0), and that render writes the CARRIED
+// LINES ITSELF into its buffer — the two loops over st.carry.claims and
+// st.carry.evidence in distillRenderN. Adding them again here counted the whole
+// existing block twice: measured on a three-insight carry, 3 856 runes reported
+// against 2 596 rendered, an overshoot of exactly the carry sum (1 260).
+//
+// It was INHERITED rather than introduced — the identical two loops sat inside
+// distillRenderBlock before this wave (cc1fe320:458-464) — but wave C3-1 turned
+// the same sum into a STEERING value, and there a wrong number is not a
+// conservative cut but a purchase decision: at five carried insights the meter
+// reported 5 697 against a limit of 6 000 and stopped buying, while the block
+// really stood at 3 432 with room for roughly six more. The effective ceiling
+// was `max_block_runes − carry length`, i.e. the cap change the briefing rules
+// out, in the direction nobody chose.
+//
+// REMOVING THE LOOPS CHANGES THE RENDER TOO, and that is the visible
+// consequence: a block that CARRIES material now admits the insights it always
+// had room for. The carry-free path is byte-identical (the loops summed zero
+// there), which TestDistillInsightLineNonRegression pins as a digest.
+func distillUsedRunes(st *distillBlockState, opts distillWriteOpts, newLines int) int {
+	return distillFrameRunes(st, opts, newLines)
+}
+
+// distillFrameRunes is the length of everything that is not a NEW per-insight
+// line: head, framing, the three section headings, the provenance paragraph and
+// — for a non-empty run — the reserve for the overflow note.
+//
+// IT ALREADY INCLUDES THE CARRY, and saying so is the point (round 2, review
+// major #3). distillRenderN writes the carried lines into the very buffer this
+// function measures, so "everything that is not a per-insight line" was false
+// for exactly the lines a previous run made durable — and a caller who read it
+// literally added them a second time. That caller existed for one commit.
 func distillFrameRunes(st *distillBlockState, opts distillWriteOpts, total int) int {
 	n := utf8.RuneCountInString(distillRenderN(st, opts, nil, nil, 0))
 	if total > 0 {
@@ -665,6 +752,10 @@ func distillBlockMetadata(st *distillBlockState, opts distillWriteOpts, written 
 			"insights_over_budget": st.overflow,
 			"insights_duplicate":   st.duplicates,
 			"insights_carried":     st.carry.count(),
+			// The steering's own number (wave C3-1, part B), next to the loss it
+			// exists to prevent: insights_over_budget is what the cap still had to
+			// discard, this is how often it stopped a call from being made.
+			"calls_stopped_block_full": st.blockFullStops,
 		},
 		"model":          distillMetaValue(st.model),
 		"evidence_date":  distillMicroRFC3339(st.wmTo),
@@ -861,6 +952,122 @@ func distillNextInsightRunes(st *distillBlockState) int {
 		return mean
 	}
 	return distillMinInsightRunes
+}
+
+// distillRuneMeter is the CAP AS A STEERING RATHER THAN A VERDICT (wave C3-1,
+// part B; pilot report §10 N-3).
+//
+// WHAT IT FIXES. distill.max_block_runes was enforced at render time only, i.e.
+// after every call of a batch had been paid for: the X-W4 pilot left four of
+// sixteen blocks at 5 271–5 934 runes against a cap of 6 000 while
+// coverage.insights_over_budget stood at 106 against 69 insights actually in the
+// blocks — two thirds of the paid yield discarded, 24,70 GPU-s per published
+// insight against 5,41 per gate-kept one. block.full() already answered the
+// question ONCE per run, before the first call; between the calls of a run
+// nothing asked it again, and that is exactly the window the pilot measured.
+//
+// WHAT IT IS NOT. It does not raise the cap, and it does not squeeze discarded
+// insights back in — E-7's "upper bound … immer sinnvollen headroom" is a
+// measurement question and belongs to its own wave. It stops the arm from
+// BUYING what the render will throw away, which is the half that costs GPU
+// seconds.
+//
+// ITS ERROR DIRECTION IS DELIBERATE. The meter counts every insight a call
+// produced, including the ones the render will later drop as a carry duplicate
+// and the ones addBatch drops on a credential hit; it therefore believes the
+// block is fuller than it is and brakes EARLIER. The opposite error would be
+// the one N-3 is about.
+type distillRuneMeter struct {
+	// limit is opts.maxRunes; 0 is "no cap", the same off-switch the two window
+	// ceilings use.
+	limit int
+	// used is the render's own arithmetic (distillUsedRunes) plus every insight
+	// line booked since.
+	used int
+	// count and cost are the MEASURED insights behind used — the arm's own
+	// material, which is the only size estimate that needs no second measurement
+	// (the argument distillNextInsightRunes makes for the carry).
+	count, cost int
+	// floor is the estimate before anything has been measured: the carry's mean,
+	// or the theoretical minimum on an empty block.
+	floor int
+}
+
+// distillNewRuneMeter opens the meter for one batch over the accumulated block.
+func distillNewRuneMeter(st *distillBlockState, opts distillWriteOpts) *distillRuneMeter {
+	if st == nil {
+		return &distillRuneMeter{}
+	}
+	m := &distillRuneMeter{limit: opts.maxRunes, floor: distillNextInsightRunes(st)}
+	// The reserve for the overflow note is sized for one more line than the run
+	// already holds — the render sizes it for what it actually keeps, and the
+	// difference is at most the width of a decimal number.
+	m.used = distillUsedRunes(st, opts, len(st.insights)+1)
+	for _, in := range st.insights {
+		c, e := distillInsightLine(in)
+		m.add(utf8.RuneCountInString(c) + utf8.RuneCountInString(e))
+	}
+	return m
+}
+
+// add books the rendered lines of one insight the arm just bought.
+func (m *distillRuneMeter) add(runes int) {
+	if m == nil {
+		return
+	}
+	m.used += runes
+	m.cost += runes
+	m.count++
+}
+
+// next is the room ONE more insight would need — the mean of what this block's
+// insights actually cost, never below the floor.
+func (m *distillRuneMeter) next() int {
+	if m == nil {
+		return 0
+	}
+	if m.count == 0 {
+		return m.floor
+	}
+	if mean := m.cost / m.count; mean > m.floor {
+		return mean
+	}
+	return m.floor
+}
+
+// exhausted reports whether the block has no room left for another insight.
+func (m *distillRuneMeter) exhausted() bool {
+	return m != nil && m.limit > 0 && m.used+m.next() > m.limit
+}
+
+// room is how many further insights the block can still hold — the number the
+// CALL PLANNER sizes its group with (round 2, review major #2).
+//
+// WHY THE BRAKE ALONE WAS NOT ENOUGH. exhausted() answers between calls, so it
+// bounds how many calls are made but not how much ONE call brings back. At the
+// production distill.rows_per_call of 5 the reviewer measured a single call
+// buying five insights into a block with room for two: `calls` fell from 2 to 1,
+// but `insights_over_budget` only from 4 to 3. Sizing the GROUP is the other
+// half — the briefing's "Rest-Budget in die Call-Planung einbeziehen" — and it
+// is a planning bound, never a promise: a chunk may answer with more than one
+// insight, and a call cannot be cut in half once it is sent.
+//
+// 0 MEANS "DO NOT BOUND THE GROUP", and it is reachable in exactly two states
+// that both want that answer: no cap configured (limit <= 0), or no room left.
+// The second one is already the caller's stop condition — room() == 0 and
+// exhausted() are the same predicate, because rest < next is what makes the
+// integer division zero — so the loop has ended before a group of 0 could be
+// built.
+func (m *distillRuneMeter) room() int {
+	if m == nil || m.limit <= 0 {
+		return 0
+	}
+	next := m.next()
+	rest := m.limit - m.used
+	if next <= 0 || rest <= 0 {
+		return 0
+	}
+	return rest / next
 }
 
 // distillMinInsightRunes is the room the shortest possible insight needs — the

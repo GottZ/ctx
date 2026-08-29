@@ -9,6 +9,8 @@
 package events
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
@@ -613,4 +615,349 @@ func TestDistillBlockUntrustedFraming(t *testing.T) {
 	if strings.Contains(plainUser, `trust="untrusted"`) {
 		t.Error("a first-party type is framed as untrusted")
 	}
+}
+
+// Below: wave C3-1, part A — N-1, the line break inside a quote (pilot report
+// §10 N-1, board decision E4-2 "render-escape").
+
+// c31MultilineQuote is the shape the pilot measured: transcript prose whose
+// quote carries a hard line break. distillDecode admits it deliberately
+// (distill_extract.go:611-619, "a quote out of transcript prose legitimately
+// carries them"), so the render is the only place that can still be wrong.
+const c31MultilineQuote = "Die Migration 147 hat einen Tiebreak eingebaut.\n" +
+	"Der Retrieval-Pfad faltet vier Arme per Reciprocal Rank Fusion zusammen."
+
+// c31BulletQuote is the KILLER PATH of N-1: the continuation line opens with
+// "- ", which is exactly distillBulletLines' prefix, so the evidence section
+// reads back one line more than the claims one and distillSplitCarry refuses
+// the whole body. Measured in the pilot: one of sixteen blocks ended
+// permanently failed/block_write_failed.
+const c31BulletQuote = "Der Entscheid steht in zwei Zeilen:\n" +
+	"- der Deckel bleibt, die Steuerung kommt davor."
+
+// c31MultilineClaim and c31BulletClaim are the SAME two shapes on the claim
+// side (round 2, review major #1). distillDecode admits tab, LF and CR in the
+// claim exactly as it does in the quote, the claim is rendered into the same
+// bullet list, and distillBulletLines cannot tell which of the two lines
+// produced a stray "- " — so the block-killing path exists twice and a fixture
+// that only ever breaks the quote leaves half of it unmeasured. Round 1 shipped
+// the claim normalisation without a red state for it; the reviewer's mutation
+// "claim not normalised" stayed silent across the whole suite.
+const c31MultilineClaim = "Die Cap-Steuerung setzt vor der Call-Auswahl an.\n" +
+	"Der Deckel selbst bleibt unveraendert."
+
+const c31BulletClaim = "Der Entscheid nennt zwei Haelften:\n" +
+	"- die Steuerung kommt vor den Call."
+
+// c31TabCRQuote carries the two control runes the LF fixtures never exercise:
+// a tab between two columns and a CRLF pair as the line break (round 2, review
+// minor #5a). Without it the regex may shrink to `[\n]+` unnoticed.
+const c31TabCRQuote = "Spalte A\tSpalte B ist die zweite Haelfte der Zeile.\r\n" +
+	"Und hier steht die Fortsetzung des Zitats."
+
+// TestDistillInsightLineIsOneLine is part A's gate 1.
+//
+// RED against the unchanged tree: distillInsightLine splices claim and quote
+// into single-line bullets, so the first \n inside either of them ends its line
+// and the block uuid tail — the part that makes the citation checkable at all —
+// moves onto a line of its own.
+//
+// TABLE-DRIVEN OVER BOTH FIELDS (round 2, review major #1 and minor #5): every
+// shape is probed once with the break in the QUOTE and once with it in the
+// CLAIM, so removing the normalisation from either half turns a case red.
+func TestDistillInsightLineIsOneLine(t *testing.T) {
+	const plainClaim = "Der Retrieval-Pfad faltet vier Arme per Reciprocal Rank Fusion zusammen."
+	const plainQuote = "Ein Zitat aus dem Roh-Transkript, wortgetreu uebernommen und lang genug."
+
+	for _, tc := range []struct {
+		name         string
+		claim, quote string
+		// words must survive in the rendered line the break was planted in.
+		words []string
+	}{
+		{"LF in the quote", plainClaim, c31MultilineQuote, []string{"Migration 147", "Reciprocal Rank Fusion"}},
+		{"LF in the claim", c31MultilineClaim, plainQuote, []string{"Cap-Steuerung", "Deckel selbst bleibt"}},
+		{"bullet continuation in the quote", plainClaim, c31BulletQuote, []string{"zwei Zeilen", "die Steuerung kommt davor"}},
+		{"bullet continuation in the claim", c31BulletClaim, plainQuote, []string{"zwei Haelften", "vor den Call"}},
+		{"tab and CRLF in the quote", plainClaim, c31TabCRQuote, []string{"Spalte A", "Spalte B", "Fortsetzung des Zitats"}},
+		{"tab and CRLF in the claim", strings.ReplaceAll(c31TabCRQuote, "Zitats", "Claims"), plainQuote,
+			[]string{"Spalte A", "Spalte B", "Fortsetzung des Claims"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim, evidence := distillInsightLine(distillKept{
+				claim: tc.claim, quote: tc.quote, blockID: a9Part1, chunk: 7,
+			})
+			for _, ln := range []struct {
+				name, line string
+			}{{"claim", claim}, {"evidence", evidence}} {
+				if n := strings.Count(ln.line, "\n"); n != 1 {
+					t.Errorf("%s line carries %d newlines, want exactly the closing one:\n%q",
+						ln.name, n, ln.line)
+				}
+				if strings.ContainsAny(strings.TrimSuffix(ln.line, "\n"), "\n\r\t") {
+					t.Errorf("%s line still carries a control whitespace rune:\n%q", ln.name, ln.line)
+				}
+			}
+			// The uuid tail is what makes the evidence line checkable — it must
+			// stand in the SAME line as the anchor it belongs to.
+			head := strings.SplitN(evidence, "\n", 2)[0]
+			if !strings.Contains(head, a9Part1) {
+				t.Errorf("the block uuid fell out of the evidence line:\n%q", head)
+			}
+			if !strings.Contains(head, "Abschnitt 7.") {
+				t.Errorf("the section number fell out of the evidence line:\n%q", head)
+			}
+			// The words around the break survive in the line that carried it —
+			// normalisation replaces the break, it does not truncate.
+			carrier := head
+			if tc.quote == plainQuote {
+				carrier = strings.SplitN(claim, "\n", 2)[0]
+			}
+			for _, w := range tc.words {
+				if !strings.Contains(carrier, w) {
+					t.Errorf("the line lost %q — the text was cut, not normalised:\n%q", w, carrier)
+				}
+			}
+		})
+	}
+}
+
+// TestDistillOneLineSeparatesWithASpace is part A's gate 1b (round 2, review
+// minor #5b).
+//
+// E4-2 says the break becomes a SPACE. Replacing it with the empty string would
+// glue the two words around it together ("eingebaut.Der"), which destroys
+// exactly what the evidence line is for: checking the quote against the raw
+// transcript word for word. The probe pins the separator itself, and it pins
+// that a MULTI-RUNE break (CRLF, LF+tab) still becomes exactly one space.
+func TestDistillOneLineSeparatesWithASpace(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"LF", "eingebaut.\nDer Pfad", "eingebaut. Der Pfad"},
+		{"CRLF is one separator", "eingebaut.\r\nDer Pfad", "eingebaut. Der Pfad"},
+		{"CR alone", "eingebaut.\rDer Pfad", "eingebaut. Der Pfad"},
+		{"tab", "Spalte A\tSpalte B", "Spalte A Spalte B"},
+		{"LF plus tab is one separator", "eingebaut.\n\tDer Pfad", "eingebaut. Der Pfad"},
+		{"a run of newlines is one separator", "Absatz eins.\n\n\nAbsatz zwei.", "Absatz eins. Absatz zwei."},
+		{"ordinary double spaces are untouched", "zwei  Leerzeichen", "zwei  Leerzeichen"},
+		{"nothing to do", "eine ganz gewoehnliche Zeile", "eine ganz gewoehnliche Zeile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := distillOneLine(tc.in); got != tc.want {
+				t.Errorf("distillOneLine(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	// And the same property THROUGH the render, so a caller that stops using the
+	// helper is caught too.
+	_, evidence := distillInsightLine(distillKept{
+		claim: "egal", quote: c31MultilineQuote, blockID: a9Part1, chunk: 1,
+	})
+	if !strings.Contains(evidence, "eingebaut. Der Retrieval-Pfad") {
+		t.Errorf("the rendered evidence line does not separate the two halves with a single space:\n%q",
+			evidence)
+	}
+}
+
+// TestDistillCarrySurvivesABulletQuote is part A's gate 2 — the killer path.
+//
+// RED against the unchanged tree: the rendered block's evidence section holds
+// one line more than its claims section, distillSplitCarry answers ok=false,
+// and distillSeedBlock turns that into errDistillBlockWrite — the identity ends
+// permanently failed/block_write_failed and no later run can write it again.
+//
+// BOTH HALVES (round 2, review major #1): the continuation line is planted once
+// in the quote and once in the claim. The claim case lands in the CLAIMS
+// section, so it desynchronises the two sections in the opposite direction —
+// two claim lines against one evidence line — and hits the same refusal.
+func TestDistillCarrySurvivesABulletQuote(t *testing.T) {
+	for _, tc := range []struct {
+		name, claim, quote string
+	}{
+		{
+			"continuation in the quote",
+			"Der Deckel bleibt bestehen und die Steuerung setzt davor an.",
+			c31BulletQuote,
+		},
+		{
+			"continuation in the claim",
+			c31BulletClaim,
+			"Ein Zitat aus dem Roh-Transkript, wortgetreu uebernommen und lang genug.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := a9State(0)
+			st.insights = []distillKept{{
+				claim: tc.claim, quote: tc.quote, blockID: a9Part1, chunk: 4,
+			}}
+			content, over := distillRenderBlock(st, a9Opts())
+			if over != 0 {
+				t.Fatalf("%d insights dropped although the block holds one — the probe would measure the cap", over)
+			}
+
+			carry, ok := distillSplitCarry(content)
+			if !ok {
+				t.Fatalf("the arm cannot read back its own block — a follow-up run over this identity "+
+					"answers block_write_failed forever:\n%s", content)
+			}
+			if carry.count() != 1 || len(carry.evidence) != 1 {
+				t.Fatalf("carry = %d claims / %d evidence lines, want 1/1 — the continuation line was read "+
+					"as a second insight", carry.count(), len(carry.evidence))
+			}
+			// And the round trip is exact: the carried lines are the rendered ones.
+			c, e := distillInsightLine(st.insights[0])
+			if carry.claims[0] != c || carry.evidence[0] != e {
+				t.Errorf("round trip differs:\n got claim %q\nwant claim %q\n got ev %q\nwant ev %q",
+					carry.claims[0], c, carry.evidence[0], e)
+			}
+		})
+	}
+}
+
+// TestDistillInsightLineNonRegression is part A's negative probe 3: an insight
+// WITHOUT a control whitespace rune renders byte-identically to the tree before
+// the fix.
+//
+// The pin is a digest of the whole rendered block of the standard fixture,
+// taken from the UNCHANGED tree (recorded in the wave report next to the
+// command that produced it). A digest and not a prose assertion, because the
+// property under probe is "not one byte moved" and every weaker formulation
+// would pass a render that quietly reflowed a line.
+func TestDistillInsightLineNonRegression(t *testing.T) {
+	content, over := distillRenderBlock(a9State(6), a9Opts())
+	if over != 0 {
+		t.Fatalf("%d dropped at n=6 — the fixture changed and the pin below is meaningless", over)
+	}
+	sum := sha256.Sum256([]byte(content))
+	const want = "79edd335790b9a5a35fc9801d31783800b09fa248fece02065be6a21c4d7194e"
+	if got := hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("the rendered block moved:\n got %s\nwant %s\n%s", got, want, content)
+	}
+}
+
+// Below: wave C3-1 round 2, part B — the carry was counted twice (review
+// major #3).
+
+// c31CarryState builds an accumulator whose CARRY is a previously rendered
+// block of n insights — the state the arm is in on every run after the first.
+func c31CarryState(t *testing.T, n int) *distillBlockState {
+	t.Helper()
+	old := a9State(n)
+	content, over := distillRenderBlock(old, a9Opts())
+	if over != 0 {
+		t.Fatalf("%d of %d insights fell out of the cap — the carry would not be the whole block", over, n)
+	}
+	carry, ok := distillSplitCarry(content)
+	if !ok {
+		t.Fatal("the arm cannot read back its own block")
+	}
+	if carry.count() != n {
+		t.Fatalf("carry holds %d claims, want %d", carry.count(), n)
+	}
+	st := a9State(0)
+	st.carry = carry
+	return st
+}
+
+// TestDistillUsedRunesCountsTheCarryOnce is round 2's gate for review major #3.
+//
+// THE DEFECT, as a number. distillFrameRunes measures distillRenderN(st, opts,
+// nil, nil, 0), and distillRenderN writes the CARRY LINES ITSELF into that
+// buffer (the two loops over st.carry.claims / st.carry.evidence). distillUsedRunes
+// then added the same lines a second time. Measured by the reviewer on a real
+// block: 2 596 runes rendered, 3 856 reported — the overshoot is exactly the
+// carry sum (1 260).
+//
+// WHY IT MATTERS NOW rather than before. The double count is INHERITED: the
+// same two loops sat inside distillRenderBlock before this wave (cc1fe320,
+// distill_block.go:458-464), and the render cut with that sum, so the block
+// CONTENT was consistent with itself. Wave C3-1 made the same sum a STEERING
+// value for the call loop, and there it is not a cut but a purchase decision:
+// with five carried insights the meter reported 5 697 against a limit of 6 000
+// and braked, while the block really stood at 3 432 and had room for roughly
+// six more. The effective ceiling became `max_block_runes − carry length`,
+// which is the cap change the briefing rules out, only in the other direction.
+//
+// The probe is the render itself: for zero new lines, "what the block costs"
+// must equal "what the block renders".
+func TestDistillUsedRunesCountsTheCarryOnce(t *testing.T) {
+	opts := a9Opts()
+	for _, n := range []int{0, 1, 3, 6} {
+		t.Run(fmt.Sprintf("carry of %d", n), func(t *testing.T) {
+			st := c31CarryState(t, n)
+			real := utf8.RuneCountInString(distillRenderN(st, opts, nil, nil, 0))
+			used := distillUsedRunes(st, opts, 0)
+			if used != real {
+				t.Errorf("distillUsedRunes = %d against a rendered %d — the carry is counted "+
+					"%.1f times (overshoot %d runes)", used, real, float64(used)/float64(real), used-real)
+			}
+		})
+	}
+
+	// AND THE CONSEQUENCE THE DEFECT HAD, measured on the meter: a block whose
+	// carry leaves plenty of room must not report itself exhausted.
+	st := c31CarryState(t, 5)
+	real := utf8.RuneCountInString(distillRenderN(st, opts, nil, nil, 0))
+	m := distillNewRuneMeter(st, opts)
+	if m.exhausted() {
+		t.Errorf("the meter is exhausted at used=%d/limit=%d although the block renders %d runes "+
+			"and holds room for ~%d more insights", m.used, m.limit, real, (opts.maxRunes-real)/m.next())
+	}
+	// full() and the meter must answer the same question the same way. They are
+	// allowed to differ by the overflow note the meter reserves and full() does
+	// not — never by the length of the carry.
+	if slack := m.used - real; slack > utf8.RuneCountInString(distillOverflowNote(1)) {
+		t.Errorf("the meter stands %d runes above the rendered block; only the overflow-note "+
+			"reserve (%d) may separate them from full()'s arithmetic",
+			slack, utf8.RuneCountInString(distillOverflowNote(1)))
+	}
+	if st.full(opts) {
+		t.Error("full() reports a block with five carried insights as full under a cap of 6000")
+	}
+}
+
+// TestDistillRenderCutAfterTheCarryFix is the VISIBLE CONSEQUENCE of the fix on
+// the render path (round 2, review major #3).
+//
+// The cut is now driven by the same, correct sum, so a block that CARRIES
+// material admits more new insights under an unchanged cap than it did before.
+// That is a behaviour change of the render and it is deliberate: the previous
+// number was wrong, the block never came close to the cap it was cut against,
+// and the arm discarded gate-verified insights over an arithmetic error. The
+// carry-free path is untouched — TestDistillInsightLineNonRegression pins that
+// byte for byte.
+func TestDistillRenderCutAfterTheCarryFix(t *testing.T) {
+	opts := a9Opts()
+	st := c31CarryState(t, 3)
+	carryRunes := 0
+	for _, l := range st.carry.claims {
+		carryRunes += utf8.RuneCountInString(l) + 1
+	}
+	for _, l := range st.carry.evidence {
+		carryRunes += utf8.RuneCountInString(l) + 1
+	}
+
+	// Twenty candidates against the standard cap: how many does the cut admit?
+	fresh := a9State(20)
+	st.insights = fresh.insights
+	content, over := distillRenderBlock(st, opts)
+	kept := len(st.insights) - over
+	if n := utf8.RuneCountInString(content); n > opts.maxRunes {
+		t.Fatalf("the block is %d runes over a cap of %d — the cut is not a cut", n, opts.maxRunes)
+	}
+	if kept <= 0 {
+		t.Fatalf("the cut admitted nothing at all (over=%d)", over)
+	}
+	// The block really uses the room it was given: what is left under the cap is
+	// less than one more insight. Before the fix the cut stopped `carryRunes`
+	// runes early — with three carried insights of this fixture that is over a
+	// thousand runes, i.e. two to three whole insights.
+	rest := opts.maxRunes - utf8.RuneCountInString(content)
+	if rest >= carryRunes {
+		t.Errorf("the cut left %d runes unused under a cap of %d while the carry measures %d — "+
+			"the block is still cut against a sum that counts the carry twice", rest, opts.maxRunes, carryRunes)
+	}
+	t.Logf("carry=%d runes, kept %d of 20 new insights, %d runes left under the cap",
+		carryRunes, kept, rest)
 }

@@ -1001,3 +1001,143 @@ func TestDistillSkipBreakerIsJournalVocabulary(t *testing.T) {
 		t.Fatalf("skip reason = %q, want %q — dr_skip_reason_known is a CHECK, not a convention", distillSkipBreaker, "breaker")
 	}
 }
+
+// Below: wave C3-1, part C — the extraction prompt's two anchoring classes.
+
+// TestDistillPromptTargetsTheAnchoringClasses is part C's gate.
+//
+// WHAT IT PINS AND WHY IT IS STRUCTURAL. The X-W4 pilot measured an anchoring
+// rate of 0,4532 over the gate's population (n=695) and A02-M2 measured 0,4953
+// before it — the published claims are anchored 1,0000, so the arm extracts
+// truthfully, but more than half of what it OFFERS cannot be anchored and is
+// paid for before it is discarded. A02-M2 named the two dominant failure
+// classes, and both are prompt-shaped rather than gate-shaped:
+//
+//  1. an identifier (PR/issue number and the like) that is TRUE but not in the
+//     shown chunk — carried over from head or neighbour context;
+//  2. speaker misattribution — "the user" for an utterance of a third party
+//     (the W5 class).
+//
+// Whether the RATE rises is the re-pilot's measurement (C3-3), never this
+// test's. What is testable here is that the prompt names both classes at all:
+// the red state is a prompt that asks for verbatim quotes and says nothing
+// about identifiers or speakers, which is exactly the tree before this wave.
+func TestDistillPromptTargetsTheAnchoringClasses(t *testing.T) {
+	prompt := strings.ToLower(distillSystemPrompt)
+
+	t.Run("class 1: identifiers only when the shown chunk carries them", func(t *testing.T) {
+		if !strings.Contains(prompt, "identifier") {
+			t.Fatal(`the prompt never says "identifier" — the dominant failure class ` +
+				"(an id that is true but chunk-foreign) is unaddressed")
+		}
+		// The word alone would be decoration: the sentence carrying it has to
+		// state the VERBATIM condition, which is the whole rule.
+		sentence := distillPromptSentence(t, "identifier")
+		if !strings.Contains(strings.ToLower(sentence), "literally") &&
+			!strings.Contains(strings.ToLower(sentence), "verbatim") {
+			t.Errorf("the identifier rule states no verbatim condition: %q", sentence)
+		}
+	})
+
+	t.Run("class 2: no speaker attribution the chunk does not carry", func(t *testing.T) {
+		for _, want := range []string{"the user", "speaker"} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("the prompt never says %q — the W5 misattribution class is unaddressed", want)
+			}
+		}
+		// THE KEYWORDS ARE NOT THE RULE (round 2, review minor #4). The reviewer
+		// inverted the sentence — "Always attribute … reconstructing that when
+		// the block is silent" — while keeping every keyword, and the sub-gate
+		// stayed green. So the SENTENCE is asserted, in the same shape class 1
+		// already used: a prohibition with a chunk-bound exception.
+		sentence := strings.ToLower(distillPromptSentence(t, "the user"))
+		if !strings.Contains(sentence, "do not attribute") {
+			t.Errorf("the speaker rule is not a prohibition — an inverted rule keeps every "+
+				"keyword and would pass: %q", sentence)
+		}
+		if !strings.Contains(sentence, "unless") {
+			t.Errorf("the speaker rule states no chunk-bound exception (\"unless … marks the "+
+				"speaker\"), so it forbids attribution outright instead of anchoring it: %q", sentence)
+		}
+		// And it must not license the very move A02-M2 measured: filling the
+		// speaker in when the chunk is silent about it.
+		for _, forbidden := range []string{"always attribute", "reconstruct", "likely speaker", "assume"} {
+			if strings.Contains(sentence, forbidden) {
+				t.Errorf("the speaker rule contains %q — that is the W5 failure class, not its remedy: %q",
+					forbidden, sentence)
+			}
+		}
+	})
+
+	// THE GATE IS NOT TOUCHED BY A PROMPT CHANGE, and that is the wave's own
+	// leitplanke: G0-G7 and their thresholds stay where they are.
+	t.Run("no gate or threshold moved with the prompt", func(t *testing.T) {
+		if distillMinCoverage != 0.60 {
+			t.Errorf("G7's floor is %v, want 0.60 — a prompt wave may not move a threshold", distillMinCoverage)
+		}
+		if distillContentWordRunes != 4 {
+			t.Errorf("G7's content-word length is %d, want 4", distillContentWordRunes)
+		}
+		if len(distillKinds) != 4 {
+			t.Errorf("G7 admits %d kinds, want 4", len(distillKinds))
+		}
+	})
+
+	// The prompt stays a small share of the call's budget: it is a PriorityRule
+	// part, so every rune it grows takes a rune of chunk text away.
+	t.Run("the prompt stays small against BudgetDistill", func(t *testing.T) {
+		n := utf8.RuneCountInString(distillSystemPrompt)
+		if n > promptguard.BudgetDistill/10 {
+			t.Errorf("the system prompt is %d runes against a budget of %d — it is eating the evidence",
+				n, promptguard.BudgetDistill)
+		}
+		t.Logf("system prompt = %d runes, %.2f%% of BudgetDistill",
+			n, 100*float64(n)/float64(promptguard.BudgetDistill))
+	})
+}
+
+// distillPromptSentence returns the first sentence of the system prompt that
+// carries the given word — so a probe can assert what a rule SAYS rather than
+// only that a keyword occurs somewhere in 700 runes.
+func distillPromptSentence(t *testing.T, word string) string {
+	t.Helper()
+	for _, s := range strings.Split(distillSystemPrompt, ". ") {
+		if strings.Contains(strings.ToLower(s), strings.ToLower(word)) {
+			return s
+		}
+	}
+	t.Fatalf("no sentence of the system prompt carries %q", word)
+	return ""
+}
+
+// TestDistillDecodeStillAdmitsAQuoteNewline is part A's negative probe 4: the
+// DECODE gate is not quietly rebuilt by the render fix.
+//
+// distill_extract.go:611-619 admits tab, LF and CR inside a claim or a quote on
+// purpose ("a quote out of transcript prose legitimately carries them"), and
+// board decision E4-2 chose the render seam precisely so that this stays true.
+// A fix that tightened distillDecode instead would drop legitimate evidence at
+// the gate and would be a different decision than the one that was taken.
+func TestDistillDecodeStillAdmitsAQuoteNewline(t *testing.T) {
+	ins, offered, refused, truncated, err := distillDecode(
+		`{"insights":[{"claim":"Der Tiebreak ist deterministisch.",` +
+			`"quote":"erste Zeile\n- zweite Zeile\tmit Tab\r\n","block":"1","chunk":1,"kind":"finding"}]}`)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if offered != 1 || refused != 0 || len(ins) != 1 || truncated {
+		t.Fatalf("offered=%d refused=%d decoded=%d truncated=%v, want 1/0/1/false — "+
+			"the decode gate was tightened, which E4-2 explicitly did not choose",
+			offered, refused, len(ins), truncated)
+	}
+	if !strings.Contains(ins[0].Quote, "\n") || !strings.Contains(ins[0].Quote, "\t") ||
+		!strings.Contains(ins[0].Quote, "\r") {
+		t.Errorf("the decoded quote lost its control whitespace: %q — decode must hand the "+
+			"value on unchanged, the render is what normalises", ins[0].Quote)
+	}
+	// The hard fault the gate DOES refuse stays refused: a NUL would break the
+	// block write with SQLSTATE 22021.
+	if !distillHasControlRunes("a\x00b") {
+		t.Error("a NUL no longer counts as a control rune — the decode gate lost its actual job")
+	}
+}
