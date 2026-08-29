@@ -1984,6 +1984,56 @@ type DistillConfig struct {
 	// EVIDENCE COLLECTION (claim plus quote per line), not one concept. E03-4
 	// settled the number as revisable, which is exactly what a key is.
 	MaxBlockRunes int `key:"distill.max_block_runes" env:"CTX_DISTILL_MAX_BLOCK_RUNES" default:"6000" mut:"hot" tenancy:"global-only"`
+	// MaxBlocksPerRoot is the shard cap of amendment C4-2 A.4 (b): how many
+	// blocks ONE (root, watermark_from) range may grow to. Since wave W-L2 a
+	// full block hands over to the next shard instead of ending the run, so
+	// MaxBlockRunes bounds one BLOCK and no longer the layer — this key is the
+	// only thing that bounds the chain itself.
+	//
+	// 0 IS "NO CAP", NEVER "NO BLOCKS", exactly like SpendMaxCalls' 0 is the
+	// guard off and not a zero budget, and it is the default because decision
+	// E5-2 says the layer "öffnet sich mit dem Material". The cost brake lives
+	// in the spend guard, which counts GPU seconds; a block-count cap cannot see
+	// cost and would brake the productive roots first (A.8 einwand 2). V25
+	// refuses the negative for the house reason: it renders as a configured size
+	// while acting as an off-switch.
+	//
+	// It is a NOT-AUS, not a steering knob, and E-7 applies to whoever sets it:
+	// at the 6-9 shards per range the backfill projection expects (A.7 b) a cap
+	// has to sit far above that to never bind in ordinary operation — A.4 (b)
+	// names 64 as the smallest number that does, not 10.
+	//
+	// WHAT BINDING LOOKS LIKE, because a not-aus that binds should be recognised
+	// rather than guessed: at run start the arm answers skipped/budget and reads
+	// nothing; mid-run it answers partial/budget and HOLDS the material back —
+	// the chunks whose insights found no shard stay out of the dedup ledger and
+	// the watermark does not advance over them. Such a range then repeats that
+	// answer on every tick until the cap is raised. Nothing is lost, and nothing
+	// progresses either.
+	//
+	// A HOLDING TICK IS FREE ONLY WHERE max_block_runes CARRIES AN INSIGHT. Above
+	// that threshold the rune meter refuses the next call before it is paid for,
+	// so the tick costs a read and nothing else. Below it — a cap under the yield
+	// of one blind first call — the batch is re-read and re-bought every tick
+	// (measured: 20 ticks, 20 calls, no claim, at 1 800 runes). That is C3-1's
+	// irreducible first-call boundary and not a property of this key: the
+	// uncapped run pays the same rate on the same material, and the backstop is
+	// the spend guard, which counts GPU seconds.
+	//
+	// IT IS ALSO THE KEY TO THE CHAIN'S UNCONDITIONAL BOUND. Reading a range,
+	// walking its title chain and writing it are all bounded at 256 shards even
+	// with this key at 0; setting it ABOVE 256 raises all three together, so a
+	// range that legitimately needs a longer chain is a settings change rather
+	// than a deletion.
+	//
+	// The name says "per root", the axis is the RANGE. That is the amendment's
+	// own use of it (A.3 a makes it the search bound of the ascending probe over
+	// distillBlockTitle(root, wm, n), which is per (root, watermark_from)), and
+	// it is the only reading that does not turn the not-aus into a regular
+	// brake: a cap over ALL ranges of a root would silence a root permanently as
+	// soon as its watermark had moved often enough, which is the deadlock W-L2
+	// exists to end.
+	MaxBlocksPerRoot int `key:"distill.max_blocks_per_root" env:"CTX_DISTILL_MAX_BLOCKS_PER_ROOT" default:"0" mut:"hot" tenancy:"global-only"`
 	// BlockSensitivity is the sensitivity stamped on every insight block, and
 	// the only lever over the block's LIFE CYCLE (§5.5, bruch path B11): every
 	// later consumer — embed backfill, dream, digest, query synthesis — derives

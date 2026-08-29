@@ -126,6 +126,12 @@ func TestSettingsDistill_Integration(t *testing.T) {
 			"distill.block_sensitivity":   `"credentials"`,
 			"distill.scope":               `""`,
 			"distill.ctx_session_horizon": `"720h0m0s"`,
+			// Wave W-L3 (amendment C4-2 A.4 b): the shard cap's default is a
+			// DECISION, not a tuning detail — 0 means "the chain opens with the
+			// material", which is what E5-2 asked for, and the key exists as the
+			// operator's not-aus. A drift to any other number would silence roots
+			// that today keep distilling.
+			"distill.max_blocks_per_root": `0`,
 		} {
 			if got[key] != want {
 				t.Errorf("GET /api/settings %s = %s, want %s", key, got[key], want)
@@ -178,6 +184,48 @@ func TestSettingsDistill_Integration(t *testing.T) {
 			t.Errorf("snapshot distill.block_sensitivity = %q, want personal (hot effect)", got)
 		}
 		api.do(t, http.MethodDelete, "/api/settings/distill.block_sensitivity", "")
+	})
+
+	// WAVE W-L3, V25 on the wire for the shard cap (amendment C4-2 A.4 b, gate
+	// design/02:3304-3308). The two ends of the off semantics are asserted next
+	// to each other on purpose: 0 is the documented "no cap" and has to be a
+	// plain 200 — reading it as "no blocks" would be the silent second
+	// off-switch next to distill.enabled — while a negative renders as a
+	// configured size and acts as an off-switch, which is the house reason V25
+	// refuses it. Same convention as distill.spend_max_calls.
+	t.Run("CapNegativeIs422_ZeroAndCeilingAccepted", func(t *testing.T) {
+		rec := api.do(t, http.MethodPut, "/api/settings/distill.max_blocks_per_root", `{"value":-1}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("PUT distill.max_blocks_per_root=-1 = %d, want 422; body=%s", rec.Code, rec.Body.String())
+		}
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM context_settings WHERE key = 'distill.max_blocks_per_root'`).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("422 persisted a row — validation must run BEFORE persist")
+		}
+
+		rec = api.do(t, http.MethodPut, "/api/settings/distill.max_blocks_per_root", `{"value":0}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT distill.max_blocks_per_root=0 = %d, want 200 (0 is no cap, never no blocks); body=%s",
+				rec.Code, rec.Body.String())
+		}
+		if got := cfgStore.Snapshot().Distill.MaxBlocksPerRoot; got != 0 {
+			t.Errorf("snapshot distill.max_blocks_per_root = %d, want 0", got)
+		}
+
+		// 64 is the number A.4 (b) names as the smallest cap that still honours
+		// E-7 ("nie streifen") at the expected 6-9 shards per range.
+		rec = api.do(t, http.MethodPut, "/api/settings/distill.max_blocks_per_root", `{"value":64}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT distill.max_blocks_per_root=64 = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if got := cfgStore.Snapshot().Distill.MaxBlocksPerRoot; got != 64 {
+			t.Errorf("snapshot distill.max_blocks_per_root = %d, want 64 (hot effect)", got)
+		}
+		api.do(t, http.MethodDelete, "/api/settings/distill.max_blocks_per_root", "")
 	})
 
 	// V24 on the wire: the budget coupling refuses an OVERRIDE that the

@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1291,6 +1292,206 @@ func TestDistillShardRolloverState(t *testing.T) {
 		st.overflow = 1
 		if !st.shardFull(distillExtractResult{}) {
 			t.Error("a render that had to drop is not read as a full shard")
+		}
+	})
+}
+
+// TestDistillShardCapState is wave W-L3's database-free half: the off semantics
+// of distill.max_blocks_per_root, the row bound it puts on the group read, and
+// the handover counter it publishes (amendment C4-2 A.4 b, A.6 "W-L3").
+//
+// The behavioural half — the capped run, the capped seed, the bytes the group
+// read moves and the counter on the written block — is in
+// distill_cap_integration_test.go.
+func TestDistillShardCapState(t *testing.T) {
+	// The whole off semantics in one table, because it is the one property of
+	// this key that a reader has to be able to check at a glance: 0 never
+	// refuses, a cap refuses AT its own number, and a chain that is already
+	// longer than a lowered cap is refused further growth rather than declared
+	// invalid.
+	t.Run("zero never caps, a cap binds at its own number", func(t *testing.T) {
+		for _, tc := range []struct {
+			maxShards, ordinal int
+			want               bool
+		}{
+			{0, 1, false}, {0, 9, false}, {0, 1024, false}, // 0 = off, on every ordinal
+			{2, 1, false}, {2, 2, true}, {2, 3, true}, // binds AT the cap, and above it
+			{1, 1, true},   // a cap of 1 is "one block per range", not "no block"
+			{64, 9, false}, // the A.4 (b) headroom shape: never binds at the expected size
+		} {
+			if got := distillShardCapReached(tc.maxShards, tc.ordinal); got != tc.want {
+				t.Errorf("distillShardCapReached(%d, %d) = %v, want %v",
+					tc.maxShards, tc.ordinal, got, tc.want)
+			}
+		}
+	})
+
+	// The group read's row bound follows the cap where there is one — plus the
+	// one row of head room that makes an over-long chain VISIBLE instead of
+	// silently truncated — and falls back to the named constant where there is
+	// none.
+	t.Run("the group limit follows the cap and falls back to the named bound", func(t *testing.T) {
+		if got := distillShardGroupLimit(0); got != distillShardGroupMaxRows {
+			t.Errorf("distillShardGroupLimit(0) = %d, want %d", got, distillShardGroupMaxRows)
+		}
+		for _, tc := range []struct{ cap, want int }{
+			{1, 2}, {2, 3}, {64, 65},
+			// Clamped to the same form limit the hard bound uses (re-review R3,
+			// note #2): a chain cannot hold more than shard 1 plus the ordinals
+			// 2…distillShardMaxOrdinal, so the two ceilings must not drift apart.
+			{distillShardMaxOrdinal, distillShardMaxOrdinal + 1},
+			{distillShardMaxOrdinal + 1, distillShardMaxOrdinal + 1},
+			{1 << 20, distillShardMaxOrdinal + 1},
+		} {
+			if got := distillShardGroupLimit(tc.cap); got != tc.want {
+				t.Errorf("distillShardGroupLimit(%d) = %d, want %d", tc.cap, got, tc.want)
+			}
+		}
+		// The constant is a decision, not a detail: it has to stay far above the
+		// smallest cap A.4 (b) calls sensible, or it would silently bind a
+		// configuration an operator deliberately chose.
+		if distillShardGroupMaxRows <= 64 {
+			t.Errorf("distillShardGroupMaxRows = %d — at or below the smallest sensible cap (64), "+
+				"so the fallback bound would truncate a configured chain", distillShardGroupMaxRows)
+		}
+	})
+
+	// The counter is defined as an ordinal STEP, and this is where that
+	// definition is pinned: it grows with the ordinal in one statement, so
+	// `ordinal − rollovers` is the ordinal the run opened on and stays constant
+	// over the whole run. That is the property the coverage key rests on, and it
+	// is the one the W-L2 review's note #9 asks for instead of another summable
+	// counter.
+	t.Run("the handover counter is an ordinal step, not a sum", func(t *testing.T) {
+		st := a9State(0)
+		st.ordinal = 3 // a run that opened over two sealed shards
+		start := st.ordinal - st.rollovers
+		if st.rollovers != 0 {
+			t.Fatalf("a fresh state states %d handovers, want 0", st.rollovers)
+		}
+		for i := 0; i < 3; i++ {
+			st.rollover()
+			if got := st.ordinal - st.rollovers; got != start {
+				t.Errorf("after %d handover(s): ordinal − rollovers = %d, want the opening ordinal %d",
+					i+1, got, start)
+			}
+		}
+		if st.rollovers != 3 || st.ordinal != 6 {
+			t.Errorf("ordinal/rollovers = %d/%d, want 6/3", st.ordinal, st.rollovers)
+		}
+	})
+
+	// And the key reaches the block: the coverage object carries the count as a
+	// number, next to the counters it must not be added to.
+	t.Run("the coverage block carries the handover count", func(t *testing.T) {
+		st := a9State(2)
+		st.rollover()
+		md := distillBlockMetadata(st, a9Opts(), 2)
+		cov, ok := md["coverage"].(map[string]any)
+		if !ok {
+			t.Fatalf("coverage is %T, want a map", md["coverage"])
+		}
+		if got, ok := cov["shard_rollovers"]; !ok || got != 1 {
+			t.Errorf("coverage.shard_rollovers = %v (present=%v), want 1", got, ok)
+		}
+		if got := md[distillMetaShardOrdinal]; got != 2 {
+			t.Errorf("shard_ordinal = %v, want 2 — the axis the counter is read against", got)
+		}
+	})
+
+	// The bounds of the chain, after the re-review: a form limit that no title may
+	// exceed, an operating bound that the operator's cap can RAISE, and the
+	// clamp between them.
+	t.Run("the hard bound is the larger of the constant and the cap, clamped to the form limit",
+		func(t *testing.T) {
+			for _, tc := range []struct{ maxShards, want int }{
+				{0, distillShardGroupMaxRows}, // no cap: the constant
+				{2, distillShardGroupMaxRows}, // a small cap binds earlier anyway
+				{300, 300},                    // a cap above the constant RAISES the bound
+				{distillShardMaxOrdinal + 5, distillShardMaxOrdinal}, // clamped to the form
+			} {
+				if got := distillShardHardBound(tc.maxShards); got != tc.want {
+					t.Errorf("distillShardHardBound(%d) = %d, want %d", tc.maxShards, got, tc.want)
+				}
+			}
+		})
+
+	// The form limit at the parser, which is what keeps a planted title from
+	// setting the group's running ordinal to an arbitrary number (re-review note
+	// #7: " — Teil 99999999993" produced exactly that).
+	t.Run("an ordinal beyond the form limit is not a shard title", func(t *testing.T) {
+		base := distillBlockTitle(a9Root, a9WMFrom, 1)
+		for _, tc := range []struct {
+			name, suffix string
+			want         int
+		}{
+			{"canonical", "2", 2},
+			{"at the form limit", strconv.Itoa(distillShardMaxOrdinal), distillShardMaxOrdinal},
+			{"one past the form limit", strconv.Itoa(distillShardMaxOrdinal + 1), 0},
+			{"absurd", "99999999993", 0},
+			{"very long digits", strings.Repeat("9", 40), 0},
+			{"trailing garbage", "2x", 0},
+			{"leading zero", "007", 0},
+		} {
+			got, ok := distillShardOrdinalFrom(base, base+distillShardSuffix+tc.suffix)
+			if tc.want == 0 {
+				if ok {
+					t.Errorf("%s: parsed as ordinal %d, want rejected", tc.name, got)
+				}
+				continue
+			}
+			if !ok || got != tc.want {
+				t.Errorf("%s: got %d/%v, want %d/true", tc.name, got, ok, tc.want)
+			}
+		}
+	})
+}
+
+// TestDistillShardHoldState is the database-free half of the W-L3 fix round: the
+// two predicates the cap's material fidelity rests on (review blocker #1 and
+// finding #2).
+func TestDistillShardHoldState(t *testing.T) {
+	// The progress condition asks whether the shard was ALREADY full when this
+	// run found it — carry, not the lines this run wrote. The distinction is
+	// load-bearing: counting this run's own lines reaches into C3-1's brake and
+	// turned the measured "one blind first call" into two.
+	t.Run("shardCarries counts the carry, not this run's own lines", func(t *testing.T) {
+		st := a9State(0)
+		if st.shardCarries() {
+			t.Error("a fresh shard reports carried material")
+		}
+		st.writtenClaims = []string{"- **eine Zeile dieses Laufs** [aaaaaaaa#1]\n"}
+		if st.shardCarries() {
+			t.Error("lines this run wrote are read as carry — that is C3-1's brake, not the seed's gap")
+		}
+		st.carry = distillCarry{claims: []string{"- **eine Zeile eines frueheren Laufs** [aaaaaaaa#1]\n"}}
+		if !st.shardCarries() {
+			t.Error("a shard holding an earlier run's lines does not report them")
+		}
+	})
+
+	// The ledger cut of the held-back batch: the prefix up to the first chunk
+	// whose insight found no shard.
+	t.Run("distillHeldFrom cuts at the first held-back insight", func(t *testing.T) {
+		items := []distillsource.Item{
+			{Origin: distillsource.Origin{BlockID: "b1", ChunkIndex: 10}},
+			{Origin: distillsource.Origin{BlockID: "b1", ChunkIndex: 11}},
+			{Origin: distillsource.Origin{BlockID: "b2", ChunkIndex: 12}},
+			{Origin: distillsource.Origin{BlockID: "b2", ChunkIndex: 13}},
+		}
+		if got := distillHeldFrom(items, nil); got != len(items) {
+			t.Errorf("no overflow: cut = %d, want %d — a batch that placed everything is booked whole",
+				got, len(items))
+		}
+		over := []distillKept{{blockID: "b2", chunk: 12}, {blockID: "b2", chunk: 13}}
+		if got := distillHeldFrom(items, over); got != 2 {
+			t.Errorf("cut = %d, want 2 — the prefix the shard took must stay booked", got)
+		}
+		// An anchor naming no chunk of this batch (R2-1 allows that) is answered
+		// conservatively: nothing is booked, which costs a re-purchase and loses
+		// nothing.
+		if got := distillHeldFrom(items, []distillKept{{blockID: "b9", chunk: 99}}); got != 0 {
+			t.Errorf("unmatched anchor: cut = %d, want 0 (book nothing rather than book too much)", got)
 		}
 	})
 }

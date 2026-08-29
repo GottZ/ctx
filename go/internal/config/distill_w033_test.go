@@ -187,6 +187,11 @@ func TestDistillCounterFloors(t *testing.T) {
 		{"distill.min_row_runes", "-1", "0"},
 		{"distill.initial_backfill_rows", "-1", "0"},
 		{"distill.spend_max_calls", "-1", "0"}, // 0 = documented kill switch
+		// Wave W-L3 (amendment C4-2 A.4 b): the shard cap reads its 0 exactly
+		// like spend_max_calls reads its own — the axis is off, the chain opens
+		// with the material. A negative is refused for the house reason: it
+		// renders as a configured size while acting as an off-switch.
+		{"distill.max_blocks_per_root", "-1", "0"},
 		{"distill.retention_days", "-1", "0"},  // 0 = documented keep-forever
 		{"distill.seen_retention_days", "-1", "0"},
 	} {

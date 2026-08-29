@@ -203,6 +203,117 @@ type distillWriteOpts struct {
 	sensitivity backends.Sensitivity
 	maxRunes    int
 	sourceLabel string
+	// maxShards is distill.max_blocks_per_root (wave W-L3, amendment C4-2
+	// A.4 b): how many shards ONE (root, watermark_from) range may grow to.
+	// 0 is "no cap", never "no shards" — the same reading spend_max_calls gives
+	// its own zero, and the reason the seed and the rollover both ask
+	// distillShardCapReached rather than comparing against this field directly.
+	//
+	// It belongs to the WRITE snapshot and not to the tick's other values
+	// because it bounds the block IDENTITY: a hot change may not move the shard
+	// a run is writing halfway through, exactly like category, scope and type.
+	maxShards int
+}
+
+// distillShardCapReached answers whether a range that is standing on shard
+// `ordinal` may open another one.
+//
+// The whole off semantics of distill.max_blocks_per_root is in this one
+// function, so no caller can spell it differently: 0 means the axis is off, and
+// a cap only ever refuses the NEXT shard — it never invalidates a chain that is
+// already longer, because a lowered cap must not orphan blocks that exist.
+func distillShardCapReached(maxShards, ordinal int) bool {
+	return maxShards > 0 && ordinal >= maxShards
+}
+
+// distillShardGroupMaxRows is the row bound of the group read when no cap is
+// configured (wave W-L3, W-L2 review finding #2).
+//
+// THE QUERY NEEDS A CEILING EVEN WITH THE CAP OFF, because "no cap" is a
+// statement about how long a chain may GROW and not about how many rows may be
+// planted under its group keys. Without one, Σ(content) over every row carrying
+// (root_session_id, watermark_from) is the seed's memory bill, and both factors
+// are unbounded (measured on the unchanged tree: 8 390 671 B for three rows).
+//
+// 256 IS THE NUMBER AND HERE IS THE ARITHMETIC. The backfill projection expects
+// 6-9 shards per range (A.7 b), and A.4 (b) names 64 as the smallest cap that
+// still honours E-7 ("nie streifen") at that size. 256 is 28x the expectation
+// and 4x that smallest sensible cap, so it cannot bind a configuration anyone
+// would deliberately choose.
+//
+// WHAT IT BOUNDS, PRECISELY (corrected after the W-L3 review, major #3): 256
+// ROWS OF THE CHAIN — rows whose title is a shard title of this range, which is
+// what the query's title predicate enforces. It does NOT bound bytes: a row the
+// arm wrote is at most max_block_runes, but a row someone else wrote under the
+// arm's own type and a chain title is not size-limited DB-side (see the query's
+// own note). The earlier wording here — "256 bodies of the arm's own making,
+// i.e. 256 x max_block_runes" — was wrong on both halves and is replaced by this
+// one.
+//
+// IT IS ALSO THE SEED WALK'S HARD BOUND (review major #4): the title-driven
+// loop in distillSeedBlock stops here even when no cap is configured, so k point
+// lookups per tick and root is bounded by 256 in every configuration rather than
+// only where an operator set distill.max_blocks_per_root.
+//
+// WHAT IT COSTS WHERE IT DOES BIND: the read keeps the HIGHEST shards (the
+// ORDER BY above), so g.running stays correct and only the lowest members drop
+// out of the cross-shard dedup set — a crash-repeat over that range can then
+// write a duplicate instead of nothing. That is the recoverable direction, and
+// the read logs when it hits the bound.
+const distillShardGroupMaxRows = 256
+
+// distillShardMaxOrdinal is the FORM limit of the identity — the largest ordinal
+// a shard title may carry at all, independent of any operating bound (wave W-L3,
+// re-review note #7).
+//
+// It is not a policy number but a shape: four digits, so a title can never claim
+// an ordinal the arm has no way to reach, and no parse of a planted title can
+// hand the group read a running ordinal of 99 999 999 993 (measured). Every
+// operating bound below is clamped to it, so "the arm never writes what it
+// cannot read back" holds by construction.
+const (
+	distillShardMaxOrdinal    = 9999
+	distillShardOrdinalDigits = 4
+)
+
+// distillShardHardBound is how long a chain may grow when nothing else stops it
+// — and the KEY that lifts it (re-review major #2).
+//
+// THE CONSTANT ALONE WAS AN END STATION. distillShardGroupMaxRows bounds the
+// seed walk, but a bound with no key means an operator whose range legitimately
+// needs more shards can only resolve it by deleting blocks. So the bound is the
+// LARGER of the constant and the operator's own cap: setting
+// distill.max_blocks_per_root above 256 raises the ceiling for reading, walking
+// and writing at once, and leaving it at 0 keeps the constant.
+//
+// Clamped to the form limit, because a bound the title cannot express would let
+// the arm write a chain its own parser rejects.
+func distillShardHardBound(maxShards int) int {
+	b := distillShardGroupMaxRows
+	if maxShards > b {
+		b = maxShards
+	}
+	return min(b, distillShardMaxOrdinal)
+}
+
+// distillShardGroupLimit is the row limit of one group read, tied to the cap
+// where there is one: cap + 1.
+//
+// THE +1 IS THE POINT. Reading exactly `cap` rows would make a chain that is
+// already longer than the cap invisible to the arm, which is the shape in which
+// a lowered cap silently orphans blocks; one row of head room lets the read see
+// that there is more than the cap allows, and the seed's own answer to that is
+// to stop rather than to write into the middle of a chain.
+func distillShardGroupLimit(maxShards int) int {
+	if maxShards > 0 {
+		// Clamped to the same form limit distillShardHardBound uses (re-review R3,
+		// note #2): one bound, one number. A chain can hold at most shard 1 plus
+		// the ordinals 2…distillShardMaxOrdinal, so a larger LIMIT would describe
+		// rows that cannot exist — and two ceilings that drift apart invite a
+		// later reader to treat this one as unbounded.
+		return min(maxShards, distillShardMaxOrdinal) + 1
+	}
+	return distillShardGroupMaxRows
 }
 
 // distillBlockState is the ACCUMULATED state of one run's block. It lives on
@@ -239,6 +350,41 @@ type distillBlockState struct {
 	// migration 135's "no second source of run state" contract intact, since the
 	// block state has always been read from the block (distillSeedBlock's carry).
 	ordinal int
+
+	// rollovers is how often THIS RUN moved on to the next shard — the
+	// observability half of wave W-L3 (amendment C4-2 A.6, "coverage.
+	// shard_rollovers"; the N-6 class, where a decision the arm makes silently
+	// gets a number).
+	//
+	// IT COUNTS EVERY ORDINAL STEP, both rollover points: the seed walking over
+	// shards that are already sealed, and the run handing over a shard it filled
+	// itself. rollover() is the one place the ordinal grows, so a counter sitting
+	// there cannot drift from the axis it describes.
+	//
+	// IT IS NOT A SUMMABLE FIGURE, and that is the answer to the W-L2 review's
+	// note #9 rather than a repetition of it: the chunk counters stand on every
+	// shard of a run and would overcount if added up, so this one is defined not
+	// to be added at all. It is a POSITION — each shard carries the count as of
+	// its last write, and because ordinal and this counter grow in the same
+	// statement, `shard_ordinal − shard_rollovers` is the ordinal this run
+	// OPENED on and is identical on every shard the run wrote. That identity is
+	// what makes the number checkable instead of merely present.
+	//
+	// "OPENED ON" IS THE RUNNING SHARD THE SEED FOUND, not the first shard of the
+	// range, and the difference is measurable rather than academic: the group
+	// query hands the seed the HIGHEST existing shard in one read, so a run over
+	// a chain of five sealed shards starts on five and states one handover, not
+	// five. The sealed shards below it were never opened by this run and cost it
+	// nothing (probe: "a run that opens on a sealed chain counts from the shard
+	// it found").
+	rollovers int
+
+	// capped reports that distill.max_blocks_per_root refused the next shard at
+	// SEED time (wave W-L3, amendment C4-2 A.4 b). The seed answers it instead
+	// of an error because the run has to end as skipped/budget — a not-aus the
+	// operator armed is not a failure, and the material is untouched: nothing
+	// was read, no call was made, the watermark stands.
+	capped bool
 
 	// shardCalls is the FORTSCHRITTS-BEDINGUNG of amendment C4-2 A.4 (c), in
 	// data form: how many calls the RUNNING shard has seen since it was opened.
@@ -421,7 +567,18 @@ func newDistillBlockState(root, runID string, wmFrom int64) *distillBlockState {
 // capacity axis, not a coverage one. Two properties rest on that: the last
 // shard's coverage block equals the run row's counters, so block and journal
 // stay checkable against each other; and metadata.source_block_ids keeps
-// covering the anchors of the insights that just moved over. A.3 (d)'s second
+// covering the anchors of the insights that just moved over.
+//
+// THE FIRST OF THOSE TWO HAS ONE EXCEPTION SINCE WAVE W-L3 (re-review, minor
+// #3): where a cap or the hard bound HOLDS a batch back, the block was already
+// written with that batch's watermark while the journal deliberately does not
+// book it. The block then states MORE coverage than the run row — never less,
+// and never more MATERIAL than it holds. The direction is the conservative one
+// and both halves are pinned rather than asserted in prose: "the block never
+// claims less coverage than the journal" and "insight_count equals the claim
+// lines the body renders" (R3, note #4). The alternative, feeding the
+// accumulator only after the hold decision, would mean rendering the block twice
+// per batch. A.3 (d)'s second
 // sentence ("wer die Abdeckung einer Wurzel wissen will, summiert über ihre
 // Shards") is therefore not literally true for the chunk counters — named as a
 // deviation in the wave report, and the per-shard accounting belongs to W-L3,
@@ -434,12 +591,86 @@ func (st *distillBlockState) rollover() {
 		st.groupClaims[l] = struct{}{}
 	}
 	st.ordinal++
+	// Wave W-L3: the ordinal and its run-local step counter move in one
+	// statement, which is what keeps `ordinal − rollovers` the ordinal this run
+	// opened on (see the field's own doc).
+	st.rollovers++
 	st.carry = distillCarry{}
 	st.writtenClaims = nil
 	st.insights = st.overflowInsights
 	st.overflowInsights = nil
 	st.overflow = 0
 	st.shardCalls = 0
+}
+
+// distillHeldFrom answers how much of a batch may be booked as SEEN when the cap
+// held paid insights back — the prefix up to the first chunk whose insight found
+// no shard (wave W-L3, review blocker #1).
+//
+// WHY A PREFIX AND NOT THE WHOLE BATCH. Holding the batch back completely was
+// the first fix of that blocker and it traded a loss for a DUPLICATE: the
+// already-written claims were re-bought on the next tick, and because a run
+// writes into the range it STARTED on, they landed in the next range's chain
+// where the cross-shard dedup set (which is per range) cannot see them —
+// measured 15 claims where 12 exist, three of them twice.
+//
+// THE PREFIX IS THE SAME SHAPE THE IN-RUN BRAKES USE (distillBatch's
+// `hashes[:ex.processed]`): what was placed is booked, what was not stays
+// readable. It is the render's own order that makes it correct — the cap drops
+// the YOUNGEST insights (wave C3-1, so the published prefix stays stable), so
+// the held-back insights are a suffix of the batch, and the first of them is the
+// cut. An anchor that names no chunk of this batch (R2-1 allows an anchor to
+// name A part carrying the quote, not THE part it came from) is answered
+// conservatively with 0: nothing is booked, which costs a re-purchase and loses
+// nothing.
+func distillHeldFrom(items []distillsource.Item, overflow []distillKept) int {
+	if len(overflow) == 0 {
+		return len(items)
+	}
+	held := make(map[distillChunkKey]struct{}, len(overflow))
+	for _, in := range overflow {
+		held[distillChunkKey{block: in.blockID, chunk: in.chunk}] = struct{}{}
+	}
+	for i, it := range items {
+		if _, ok := held[distillChunkKey{block: it.Origin.BlockID, chunk: it.Origin.ChunkIndex}]; ok {
+			return i
+		}
+	}
+	return 0
+}
+
+// shardCarries reports whether the running shard was ALREADY FULL when this run
+// found it — i.e. whether it carries lines an EARLIER run made durable.
+//
+// IT IS THE SECOND HALF OF THE PROGRESS CONDITION (A.4 c, corrected after the
+// W-L3 review's finding #2). The amendment argues that a shard which is full
+// without ever having been called "can only be full through its carry — and then
+// it is not the running one but a sealed one, the seed would have opened the
+// next". That argument rests on the seed and the rune meter agreeing on what
+// "full" means, and they do NOT: the seed measures a FRESH accumulator (no parts
+// line, no manifest line), the meter measures the RUN's accumulator, and the
+// frame of the second is longer. Measured on the reviewed commit: a shard the
+// run left as full comes back not-full at the next seed, the meter then refuses
+// the first call, the old condition refused the handover — and the range stood
+// still for good, with or without a cap. Raising the cap did not release it.
+//
+// So the condition names the case the amendment meant: a shard that is full
+// through its CARRY is a sealed one and may be handed over even without a call.
+//
+// IT IS DELIBERATELY NOT "carries anything at all". The first fix here also
+// counted the lines THIS run had just written into the shard, and that reaches
+// into C3-1's brake, which A.4 (a) puts out of scope for this amendment: a shard
+// filled by the insights a rollover just moved into it would then hand over
+// again inside the same tick, and the measured C3-1 property "after the blind
+// first call the meter has a measurement and must stop" went from 1 call to 2
+// (TestDistillRuneBudget/the blind first call…). The remainder of such a batch
+// is not lost either way — it stays unseen and the next tick reads it again.
+//
+// TERMINATION: a carry-driven handover opens a shard whose carry is empty by
+// construction (rollover() clears it), so it can happen at most once per shard
+// the seed hands over, and every other handover still requires a call.
+func (st *distillBlockState) shardCarries() bool {
+	return st.carry.count() > 0
 }
 
 // shardFull reports whether the running shard has no room left for another
@@ -616,8 +847,16 @@ func distillShardOrdinalFrom(base, title string) (int, bool) {
 	if !ok {
 		return 0, false
 	}
+	// The length gate stands BEFORE the parse, and it is not cosmetic: without
+	// it a planted " — Teil 99999999993" parses fine and sets the group's running
+	// ordinal to 99 999 999 993 (W-L3 re-review, note #7 — measured). Atoi on a
+	// 400-digit string is not a crash but it is work, and the number it produces
+	// is not an ordinal this arm could ever have written.
+	if len(rest) > distillShardOrdinalDigits {
+		return 0, false
+	}
 	n, err := strconv.Atoi(rest)
-	if err != nil || n < 2 || strconv.Itoa(n) != rest {
+	if err != nil || n < 2 || n > distillShardMaxOrdinal || strconv.Itoa(n) != rest {
 		return 0, false
 	}
 	return n, true
@@ -1048,6 +1287,25 @@ func distillBlockMetadata(st *distillBlockState, opts distillWriteOpts, written 
 			// exists to prevent: insights_over_budget is what the cap still had to
 			// discard, this is how often it stopped a call from being made.
 			"calls_stopped_block_full": st.blockFullStops,
+			// How often THIS RUN moved on to the next shard (wave W-L3, amendment
+			// C4-2 A.6). Before it, the only trace of a handover was a log line,
+			// and a reader holding the block could not tell whether it was the run's
+			// first shard or its fifth.
+			//
+			// READ IT AS A POSITION, NOT AS A SUM. Like every other counter in this
+			// object it describes the RUN, so adding it up over the shards of a
+			// range overcounts (the W-L2 review's note #9, deliberately not
+			// repeated here). What it supports instead is a subtraction that holds
+			// on every shard of one run: shard_ordinal − shard_rollovers is the
+			// ordinal this run OPENED on, i.e. the running shard its seed found.
+			//
+			// THE RUN'S OWN HANDOVER COUNT IS THE NUMBER ON ITS HIGHEST SHARD
+			// (W-L3 review, minor #6). A sealed shard keeps the value it had when
+			// it was sealed, so shard 2 of a four-shard run states 1 and not 3 —
+			// which is the point of a position, but it means "how often did this
+			// run hand over" is a max over the run's shards, not a value any one
+			// of them carries.
+			"shard_rollovers": st.rollovers,
 		},
 		"model":          distillMetaValue(st.model),
 		"evidence_date":  distillMicroRFC3339(st.wmTo),
@@ -1202,19 +1460,151 @@ const (
 // body are one read, so the running shard can no longer be archived between
 // them and hand the arm an empty carry under a title that has one.
 //
-// IT ALSO DROPS THE ORDER BY of the sketch. The ordinal that decides is derived
-// from the title (distillShardOrdinal), so ordering on a jsonb value the
-// function does not trust would be work whose result is thrown away — and it is
-// exactly the expression W-L0 measured as the NULL trap on the stock blocks.
-// Removing the Sort node takes work out of the measured plan; the index path is
-// decided by the WHERE clause, which is unchanged.
+// IT ORDERS BY TITLE LENGTH, DESCENDING, AND THAT IS A CORRECTION OF THIS
+// WAVE'S FIRST FASSUNG (W-L3 review note #8). W-L1 dropped the ORDER BY for a
+// good reason — the deciding ordinal comes from the title, so sorting on a jsonb
+// value the function does not trust is work thrown away, and `(metadata->>…)::int`
+// is exactly the NULL trap W-L0 measured on the stock blocks. But a LIMIT without
+// an order leaves the PLANNER deciding which rows survive a truncated read, and
+// that decision can change between ticks as the corpus grows: g.running and the
+// dedup set would then wobble without anything in the data changing.
+//
+// `length(title) DESC, title DESC` is the shard order without touching metadata:
+// the base title is the shortest, `— Teil 2…9` are equal length, `— Teil 10…`
+// longer, and the ordinals carry no leading zeros (A.2 d). So a truncated read
+// keeps the HIGHEST shards — the running one the seed needs plus its nearest
+// neighbours for the dedup set — instead of an arbitrary slice. The price is
+// named: a Top-N sort materialises every matching row before the LIMIT applies,
+// so the read costs the chain's length rather than the limit. The title
+// predicate below is what keeps that chain from being anything but the chain.
+//
+// THE BODY IS BOUND TO THE ARM'S OWN TYPE AND THE READ TO A ROW LIMIT (wave
+// W-L3, W-L2 review finding #2, measured 8 390 671 B for three rows). Two
+// separate bounds for two separate factors:
+//
+//   - $5 is the arm's own type_name, and a row that does not carry it comes
+//     back with an EMPTY body. That is where the bytes were: `content` is
+//     unbounded DB-side, max_block_runes only ever bound rows the arm wrote
+//     itself, and a planted 4 MiB row under a foreign type was read in full
+//     before anything could discard it. Both places that use a body check the
+//     type FIRST — the seed refuses a foreign type on the running shard before
+//     splitting its carry, and the dedup loop skips a foreign lower shard
+//     before reading it — so the empty string is never interpreted;
+//   - $6 is distillShardGroupLimit, i.e. the cap plus one where a cap is
+//     configured and distillShardGroupMaxRows where it is not.
+//
+// THE TYPE PREDICATE IS IN THE PROJECTION AND NOT IN THE WHERE CLAUSE, and that
+// is a correction to the review's own suggestion, made at the code: a foreign
+// type on the RUNNING shard has to stay VISIBLE. Filtering it out server-side
+// would hide the highest shard from g.running, the seed would open a lower one
+// and write into it, and the W-L1 gate "a foreign type on the shard-2 title
+// refuses the run and leaves shard 1 alone" would go from a refusal to a silent
+// write past the squatter. The projection form moves the same bytes as a WHERE
+// predicate would while keeping the identity intact.
+//
+// THE TITLE PREDICATE IS WHAT THE LIMIT COUNTS AGAINST (W-L3 review, major #3),
+// AND IT CHECKS THE ORDINAL'S FORM, NOT ONLY THE PREFIX (re-review, major #1).
+//
+// The first Fassung limited rows without saying WHICH rows: three planted rows
+// under a foreign title filled all three slots of a `LIMIT 3` read and both real
+// shards became invisible. The second Fassung filtered the PREFIX, which closed
+// exactly the class its own probe planted — the re-review planted the hostile
+// one instead (`— Teil ZZZZ…`, `— Teil 2x`, `— Teil 99999999993`, `— Teil 007`)
+// and reproduced the eviction byte for byte, with `length(title) DESC` even
+// putting the long junk first. So the predicate now describes a canonical shard
+// title end to end:
+//
+//	title = $6                                   the range's shard 1, verbatim
+//	title LIKE $7 ESCAPE '\'                     the escaped prefix, then
+//	substring(title from $8::int) ~ '^[1-9][0-9]{0,3}$'   digits only, no leading zero
+//	substring(title from $8::int)::int BETWEEN 2 AND $9   inside the reachable range
+//
+// $8 is the ordinal's character position (the prefix is a constant of the
+// group), and the regex bounds the digit count BEFORE the cast, so the cast can
+// never see a number it cannot hold.
+//
+// $9 IS THE FORM LIMIT, NOT ANY OPERATING BOUND (corrected after re-review R3,
+// major #1). It was distillShardHardBound, which is cap-dependent above 256 —
+// and that made a LOWERED cap hide the chain above it with no signal at all: the
+// truncation warning hangs on `read >= limit`, and four visible rows never reach
+// a limit of 256. Measured on the previous Fassung with a planted chain
+// 1/2/200/256/257/300/400: at cap 0 the read answered `running = 256`, the seed
+// opened a NEW shard 3 under the orphaned 300, and the chain forked silently
+// while shard 300's lines were in no dedup set.
+//
+// READING IS BOUNDED BY THE IDENTITY'S FORM, WRITING BY THE OPERATING BOUND, and
+// keeping those apart is what makes a cap change reversible: the seed still
+// refuses to GROW past distillShardHardBound, but it sees the whole chain, so a
+// range above the bound answers `capped` — loud and lossless — instead of
+// forking below its own head. A shard above the bound that still has room is
+// opened and written as before: the bound refuses the next shard, it never
+// invalidates one that exists (distillShardCapReached says the same).
+//
+// WHAT REMAINS, named and measured rather than argued away (re-review R3, note
+// #3): a row under a CANONICAL chain title with the group keys is
+// indistinguishable from a shard the arm wrote, and the two halves of that end
+// differently. Under a FOREIGN type the seed refuses (distillTypeHeld, the run
+// ends failed/block_write_failed) — that half the type guard does answer. Under
+// the arm's OWN type there is no guard at all: the seed reads such a row as its
+// running shard and writes into it. Planting one needs the reserved category and
+// the arm's own type, i.e. the rights the arm itself has, and the honest
+// statement is that this is a KNOWN OPEN EDGE of the identity, not something
+// this filter or the guard closes. The Go side still has the final say
+// (distillShardOrdinalFrom); the SQL is a filter, never the identity.
+//
+// WHAT IS NOT BOUNDED, named rather than promised away: a row under the arm's
+// OWN type and under a CHAIN title, with an oversized body. Writing one needs
+// the reserved category, the arm's type and its title — i.e. the rights and the
+// name of the arm itself — and the single-shard read (distillReadShardRow) has
+// carried exactly that exposure since A02-9, so it is not a property of the
+// group read. The row limit bounds how many such rows one seed can pull, and the
+// byte bound is per row `max_block_runes` only for rows the arm wrote itself.
 const distillShardGroupQuery = `
-	SELECT title, metadata->>'` + distillMetaShardOrdinal + `', type_name, content
+	SELECT title, metadata->>'` + distillMetaShardOrdinal + `', type_name,
+	       CASE WHEN type_name = $5 THEN content ELSE '' END
 	  FROM context_blocks
 	 WHERE NOT is_archived
 	   AND category = $1 AND scope = $2
 	   AND metadata @> jsonb_build_object('root_session_id', $3::text,
-	                                      'watermark_from',  $4::bigint)`
+	                                      'watermark_from',  $4::bigint)
+	   AND (title = $6
+	        OR (title LIKE $7 ESCAPE '\'
+	            AND substring(title from $8::int) ~ '^[1-9][0-9]{0,3}$'
+	            AND substring(title from $8::int)::int BETWEEN 2 AND $9))
+	 ORDER BY length(title) DESC, title DESC
+	 LIMIT $10`
+
+// distillShardLikeEscape escapes a literal for use inside a LIKE pattern.
+//
+// It exists because the base title carries the ROOT verbatim, and a root may
+// contain `_` — a LIKE wildcard. Without escaping the pattern would be LOOSER
+// than intended (never stricter, since `%` cannot occur in a root that survives
+// distillMetaValue), and a looser filter is exactly the slot eviction major #3
+// is about. The backslash is escaped first so the escape character itself cannot
+// be smuggled in.
+func distillShardLikeEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	return strings.ReplaceAll(s, "_", `\_`)
+}
+
+// distillShardGroupArgs are the arguments of distillShardGroupQuery, in one
+// place so a probe measures the query the arm actually runs rather than a copy
+// of it. The row limit is returned alongside because the reader has to know
+// whether it hit it, and deriving it twice would be two sources for one number.
+func distillShardGroupArgs(opts distillWriteOpts, root string, wmFrom int64) (args []any, limit int) {
+	limit = distillShardGroupLimit(opts.maxShards)
+	base := distillBlockTitle(root, wmFrom, 1)
+	// The ordinal starts one character after the prefix, counted in CHARACTERS
+	// because Postgres' substring() and this arm's own suffix both are: the
+	// suffix carries an em dash, so a byte offset would cut inside it.
+	ordinalAt := utf8.RuneCountInString(base+distillShardSuffix) + 1
+	// The FORM limit, never the operating bound — see the query's own note: a
+	// cap-dependent ceiling here hides the chain above a lowered cap.
+	return []any{opts.category, opts.scope, root, wmFrom, opts.typeName,
+		base, distillShardLikeEscape(base) + distillShardSuffix + "%",
+		ordinalAt, distillShardMaxOrdinal, limit}, limit
+}
 
 // distillShardGroup is one read of a (root, wmFrom) range: which shard the arm
 // writes into, what that shard holds, and what the SEALED shards below it
@@ -1266,7 +1656,8 @@ func (s *Scheduler) distillReadShardGroup(ctx context.Context, opts distillWrite
 	root string, wmFrom int64,
 ) (distillShardGroup, error) {
 	g := distillShardGroup{running: 1, lower: map[string]struct{}{}}
-	rows, err := s.pool.Query(ctx, distillShardGroupQuery, opts.category, opts.scope, root, wmFrom)
+	args, limit := distillShardGroupArgs(opts, root, wmFrom)
+	rows, err := s.pool.Query(ctx, distillShardGroupQuery, args...)
 	if err != nil {
 		return g, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
 	}
@@ -1277,13 +1668,14 @@ func (s *Scheduler) distillReadShardGroup(ctx context.Context, opts distillWrite
 	base := distillBlockTitle(root, wmFrom, 1)
 	type member struct{ typeName, content string }
 	members := map[int]member{}
-	strangers := 0
+	strangers, read := 0, 0
 	for rows.Next() {
 		var title, typeName, content string
 		var hint *string
 		if err := rows.Scan(&title, &hint, &typeName, &content); err != nil {
 			return g, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
 		}
+		read++
 		n, ok := distillShardOrdinalFrom(base, title)
 		if !ok {
 			strangers++
@@ -1310,6 +1702,17 @@ func (s *Scheduler) distillReadShardGroup(ctx context.Context, opts distillWrite
 	}
 	if err := rows.Err(); err != nil {
 		return g, fmt.Errorf("%w: reading the shard group: %w", errDistillBlockWrite, err)
+	}
+	if read >= limit {
+		// THE BOUND IS A STATE, NOT A DETAIL (wave W-L3). A truncated group read
+		// still produces a correct run — the seed walks the title chain from
+		// whatever it found — but it costs point lookups and leaves the
+		// cross-shard dedup set incomplete, so it is exactly the kind of silent
+		// degradation N-6 exists to make visible.
+		slog.Warn("scheduler: distiller read its shard group up to the row limit — the group may be "+
+			"incomplete",
+			"source_root", root, "watermark_from", wmFrom, "rows", read, "limit", limit,
+			"max_blocks_per_root", opts.maxShards)
 	}
 	if strangers > 0 {
 		slog.Warn("scheduler: distiller found rows carrying its group keys under a foreign title — "+
@@ -1423,8 +1826,21 @@ func (s *Scheduler) distillSeedBlock(ctx context.Context, opts distillWriteOpts,
 	// IT TERMINATES WITHOUT A COUNTER: every further turn needs a row that
 	// EXISTS under the next shard title, so the loop is bounded by the chain that
 	// is actually there, and the first absent title ends it with an empty carry.
-	// The configurable bound on how long such a chain may grow is
-	// distill.max_blocks_per_root and belongs to W-L3.
+	//
+	// SINCE WAVE W-L3 IT IS BOUNDED TWICE, and the second bound is what the W-L3
+	// review's major #4 asked for. W-L2's note #8 named the open flank: a planted
+	// chain of full, own-typed rows WITHOUT the group keys is invisible to the
+	// group read, so the seed walks it one point lookup at a time, per tick and
+	// per root, and nothing bounded k.
+	//
+	//   - distill.max_blocks_per_root bounds it wherever an operator set one —
+	//     from this loop's side "may the chain grow" and "may I walk further" are
+	//     the same question;
+	//   - distillShardGroupMaxRows bounds it ALWAYS, including at the shipped
+	//     default 0. The first Fassung of this wave claimed note #8 was closed by
+	//     the key alone; measured at cap 0, a 260-link chain produced 260 lookups.
+	//     The hard bound is the answer, and it uses the same number as the group
+	//     read because it answers the same question about the same chain.
 	for {
 		title := distillBlockTitle(root, wmFrom, st.ordinal)
 		if !g.found {
@@ -1458,6 +1874,38 @@ func (s *Scheduler) distillSeedBlock(ctx context.Context, opts distillWriteOpts,
 		}
 		st.carry = carry
 		if !st.full(opts) {
+			return st, nil
+		}
+		if bound := distillShardHardBound(opts.maxShards); st.ordinal >= bound {
+			// THE HARD BOUND, and since the re-review (major #2) it has a key: it is
+			// the LARGER of the constant and distill.max_blocks_per_root, so an
+			// operator whose range legitimately needs a longer chain raises it
+			// instead of deleting blocks. A chain beyond it is a planted or broken
+			// state, not an operating one; walking it costs a point lookup per link
+			// on every tick of every root. The run stops the same way the cap stops
+			// it — nothing read, nothing bought, the watermark untouched.
+			//
+			// The WRITE path carries the same bound (distillRollShard), so the arm
+			// cannot grow a chain here that it would refuse to walk next tick.
+			slog.Warn("scheduler: distiller stops at the hard shard bound — the chain of this range "+
+				"is longer than the arm walks",
+				"title", title, "shard", st.ordinal, "hard_bound", bound,
+				"max_blocks_per_root", opts.maxShards)
+			st.capped = true
+			return st, nil
+		}
+		if distillShardCapReached(opts.maxShards, st.ordinal) {
+			// THE NOT-AUS, AND IT ANSWERS BEFORE ANYTHING IS BOUGHT. The range is
+			// standing on its last allowed shard and that shard is full, so there is
+			// nowhere to put another insight. Ending here is what makes the cap
+			// LOSSLESS: no read, no call, no write, and the watermark is untouched,
+			// so the material above it waits for the operator to raise the cap
+			// rather than being booked as covered (amendment C4-2 A.4 b).
+			slog.Warn("scheduler: distiller stops at its shard cap — the range is full and may not "+
+				"open another shard",
+				"title", title, "shard", st.ordinal, "max_blocks_per_root", opts.maxShards,
+				"carried", st.carry.count(), "max_block_runes", opts.maxRunes)
+			st.capped = true
 			return st, nil
 		}
 		slog.Info("scheduler: distiller shard is full at seed time — the run opens the next one",

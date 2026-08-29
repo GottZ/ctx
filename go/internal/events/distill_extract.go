@@ -1058,10 +1058,13 @@ func (s *Scheduler) distillExtract(ctx context.Context, t distillTick, items []d
 		// equals it would still answer `budget`, the same journal word the clamp
 		// above uses.
 		if runes.exhausted() {
+			// The shard is part of the address since wave W-L3 (W-L1 review NB-3):
+			// this line is the arm's most frequent run-time statement about a
+			// block, and without the ordinal it names a range rather than a block.
 			slog.Warn("scheduler: distiller stops before the next call — the block has no room "+
 				"left for another insight",
 				"used", runes.used, "needs", runes.next(), "max_block_runes", t.write.maxRunes,
-				"insights", len(res.insights))
+				"insights", len(res.insights), "shard", t.block.ordinal)
 			res.blockFull = true
 			res.stop = distillSkipBudget
 			return res

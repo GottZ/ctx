@@ -474,8 +474,9 @@ func validateDistillSpendWindow(d *DistillConfig) []Issue {
 // Two readings of zero, deliberately kept apart:
 //
 //   - spend_max_calls 0 is the DOCUMENTED kill switch (guard off, effective
-//     from the next tick because the snapshot is re-read per iteration), and
-//     the retention pairs' 0 is the recall_check no-op ("keep forever"). Those
+//     from the next tick because the snapshot is re-read per iteration), the
+//     retention pairs' 0 is the recall_check no-op ("keep forever"), and
+//     max_blocks_per_root's 0 is the shard cap being off (wave W-L3). Those
 //     stay legal; only their negatives are refused, on the house grounds that a
 //     negative renders as a configured number while acting as the off-switch.
 //   - the sizing keys have NO safe zero. rows_per_call 0 or max_row_runes 0
@@ -511,6 +512,14 @@ func validateDistillCounters(d *DistillConfig) []Issue {
 		{"distill.min_row_runes", d.MinRowRunes, 0, "a negative substance threshold has no reading"},
 		{"distill.initial_backfill_rows", d.InitialBackfillRows, 0, "0 is the documented cold start at the head of the source"},
 		{"distill.spend_max_calls", d.SpendMaxCalls, 0, "0 is the documented kill switch that disables the guard"},
+		// The shard cap reads its 0 like the call ceiling reads its own (wave
+		// W-L3, amendment C4-2 A.4 b): the axis is off and the chain opens with
+		// the material, which is decision E5-2's own wording. Only the negative
+		// is refused, on the same house grounds as every other documented zero
+		// above — it renders as a configured number while acting as an
+		// off-switch, and here the off-switch would be a silent "no more shards"
+		// on top of a key whose 0 says the opposite.
+		{"distill.max_blocks_per_root", d.MaxBlocksPerRoot, 0, "0 is the documented no-cap default, so a negative would be a second, silent off-switch under a key that already has one reading for 0"},
 		// The GPU axis reads its 0 exactly like the call axis reads its own
 		// (wave A02-7): each ceiling is armed on its own, both at 0 is the guard
 		// off. A negative is refused for the house reason — it renders as a

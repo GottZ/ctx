@@ -398,6 +398,10 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 				sensitivity: d.BlockSensitivity,
 				maxRunes:    d.MaxBlockRunes,
 				sourceLabel: d.CtxSourceLabel,
+				// The shard cap travels with the identity values (wave W-L3): it
+				// decides which shard a run may open, so a hot change must not move
+				// it mid-run any more than a changed category may.
+				maxShards: d.MaxBlocksPerRoot,
 			},
 			// The clamp of THIS tick, carried to the journal rather than
 			// enforced: the call it bounds arrives with A02-8.
@@ -548,6 +552,18 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 		s.distillFail(ctx, key, sess, distillErrBlockWriteFailed)
 		return
 	}
+	// THE SHARD CAP IS THE ONE GATE THE SEED STILL ANSWERS WITH A SKIP (wave
+	// W-L3, amendment C4-2 A.4 b). It is the state W-L2 removed — a full range
+	// that cannot grow — with the difference that an OPERATOR put it there, and
+	// it is the only reading of a cap that loses nothing: the run stops before
+	// the source is read, so the material above the watermark is postponed
+	// rather than covered. `budget` is the journal word, exactly as for every
+	// other ceiling of this arm; the CHECK vocabulary of migration 135 is not
+	// extended by any wave of this amendment.
+	if block.capped {
+		s.distillSkip(ctx, key, sess, distillSkipBudget, false)
+		return
+	}
 	// NO FULL-BLOCK GATE ANY MORE, and its absence is wave W-L2's headline. Until
 	// this wave the seed's answer "the block is full" ended the tick with
 	// skipped/budget: the watermark stood, the next tick derived the same value,
@@ -675,8 +691,13 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 			// §4.5.3 gives gates 6 and 7 their own vocabulary, and a `partial` with
 			// a NULL skip_reason would answer "the run did not finish" without ever
 			// saying why (round-2 blocker #3).
+			// The shard this run was writing when the brake hit (wave W-L3,
+			// W-L1 review NB-3): with several blocks per range the source key
+			// names the ROOT, not the block, so a run's own log line could not
+			// say which shard its numbers belong to.
 			slog.Warn("scheduler: distiller ended its tick early",
-				"source_key", key, "reason", stop, "watermark", b.Watermark)
+				"source_key", key, "reason", stop, "watermark", b.Watermark,
+				"shard", t.block.ordinal, "shard_rollovers", t.block.rollovers)
 			return distillOutcomePartial, "", stop
 		}
 		if out.covered <= wm {
@@ -704,7 +725,8 @@ func (s *Scheduler) distillBatches(ctx context.Context, t distillTick, key, sess
 			// dumped and marked seen, so the next tick reads it again and drops
 			// it as a duplicate — an endless tick would be the alternative.
 			slog.Warn("scheduler: distiller batch made no progress",
-				"source_key", key, "watermark", wm, "items", len(b.Items))
+				"source_key", key, "watermark", wm, "items", len(b.Items),
+				"shard", t.block.ordinal, "shard_rollovers", t.block.rollovers)
 			return distillOutcomePartial, "", ""
 		}
 		wm = out.covered
@@ -831,7 +853,7 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 	// identical claims and drops every one of them against the group dedup set
 	// (A.3 b). The reverse order would leave the moved insights durable nowhere
 	// while their chunks are marked seen.
-	stop, rolled, werr := s.distillRollShard(ctx, t, key, ex, &l)
+	stop, rolled, held, werr := s.distillRollShard(ctx, t, key, ex, &l)
 	if werr != nil {
 		if aerr := s.distillAdvance(ctx, runID, l, 0); aerr != nil {
 			slog.Error("scheduler: distiller could not book a failed rollover's counters",
@@ -840,6 +862,31 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 		return out, werr
 	}
 	out.stop, out.rollover = stop, rolled
+	if held {
+		// THE CAP MAY NOT COVER WHAT NO SHARD HOLDS (W-L3 review, blocker #1).
+		// A render overflow means insights were bought that this shard could not
+		// admit; without a cap they open the next one, with a cap they have
+		// nowhere to go. Booking the batch anyway marks their chunks seen and
+		// moves the watermark past them — measured on the reviewed commit: 10 of
+		// 12 claims, permanently, with the source at rest afterwards.
+		//
+		// So the batch is cut at the first held-back insight: what the shard took
+		// is booked, the rest stays readable and the watermark does not move. That
+		// is the same shape the in-run brakes use above (`hashes[:ex.processed]`)
+		// and the same recoverable direction the failed-write path takes — and the
+		// prefix matters rather than being tidy: holding the WHOLE batch back
+		// re-buys claims that are already durable, and since a run writes into the
+		// range it started on, the re-bought copies land in the NEXT range where
+		// the per-range dedup set cannot see them (measured: 15 claims where 12
+		// exist).
+		//
+		// The block keeps the coverage line it was written with and states in its
+		// own text how many insights it had to leave out — the same statement the
+		// cap-less overflow has always made.
+		cut := distillHeldFrom(shown, t.block.overflowInsights)
+		seen = seen[:min(cut, len(seen))]
+		wm = 0
+	}
 
 	// THE ORDERING SEAM (§4.5.4, round-2 major #2). Everything durable has
 	// happened; the ledger and the watermark have not. A test makes this return
@@ -900,40 +947,96 @@ type distillBatchOutcome struct {
 //     is the next seed's business. Rolling over here would open a shard the run
 //     cannot fill anyway;
 //  3. the shard is full and nothing else stopped the tick ⇒ roll over, unless
-//     the progress condition of A.4 (c) forbids it.
+//     the SHARD CAP or the progress condition of A.4 (c) forbids it.
 //
-// THE PROGRESS CONDITION IS THE WHOLE TERMINATION ARGUMENT. A shard that has not
-// seen a single call since it opened is full for a reason another shard would
-// not fix — a max_block_runes below the demand of one insight — and rolling over
-// would produce a new empty shard on every turn of the batch loop, forever.
-// Measured as the wave's counter-version. The run then ends exactly as it did
-// before this wave, with `budget`: the closest word dr_skip_reason_known has,
-// and the vocabulary is a CHECK no wave of this amendment may extend.
+// THE CAP IS ASKED BEFORE THE PROGRESS CONDITION (wave W-L3) because the two
+// answer different questions and only one of them is actionable: "the operator
+// allows no further shard" is a setting that can be raised, "another shard
+// would not help" is a property of max_block_runes. Where both hold, the
+// configured limit is the one an operator can act on.
+//
+// WHAT THE CAP STOPS COSTS NOTHING THAT WAS BOUGHT in the ordinary case, and the
+// exception is named: the rune meter refuses the next CALL before it is paid for
+// (ex.blockFull), so a run stopped there leaves the remaining chunks unread,
+// unmarked and below the watermark. Only a render overflow — insights already
+// paid for that no shard can take — loses material at the cap, and that is the
+// same irreducible first-call remainder the progress condition below leaves
+// standing (W-L2 report NB-3).
+//
+// THE PROGRESS CONDITION IS THE WHOLE TERMINATION ARGUMENT, and wave W-L3
+// corrected WHAT it measures (review finding #2). A shard that is EMPTY and
+// still full is full for a reason another shard would not fix — a
+// max_block_runes below the demand of one insight — and rolling over would
+// produce a new empty shard on every turn of the batch loop, forever. A shard
+// that CARRIES something is a different case entirely: sealing it gives the run
+// an empty successor with room, which is progress by construction.
+//
+// The first Fassung asked only "has this shard seen a call", relying on the
+// amendment's argument that the seed would already have opened the successor of
+// a carry-full shard. That argument does not hold at the code: seed and rune
+// meter measure "full" against different frames (distillBlockState.shardCarries
+// spells the measurement out), so a shard the run left as full comes back
+// not-full at the next seed — and the run then ended with `budget` for good,
+// with or without a cap. Measured: raising the cap did not release such a range.
+//
+// The run still ends with `budget` where the condition refuses: the closest word
+// dr_skip_reason_known has, and the vocabulary is a CHECK no wave of this
+// amendment may extend.
+// It answers three things: the word the batch closes with ("" = the run
+// continues), whether a rollover happened, and whether the cap HELD paid
+// material back — the last one is what tells distillBatch not to cover a batch
+// whose insights have nowhere to live (W-L3 review, blocker #1).
 func (s *Scheduler) distillRollShard(ctx context.Context, t distillTick, key string,
 	ex distillExtractResult, l *distillLedger,
-) (string, bool, error) {
+) (stop string, rolled, held bool, err error) {
 	switch {
 	case !t.block.shardFull(ex):
-		return ex.stop, false, nil
+		return ex.stop, false, false, nil
 	case ex.stop != "" && !ex.blockFull:
-		return ex.stop, false, nil
-	case t.block.shardCalls == 0:
-		slog.Warn("scheduler: distiller ends the run, the shard is full without a single call — "+
+		return ex.stop, false, false, nil
+	case distillShardCapReached(t.write.maxShards, t.block.ordinal):
+		// held is the render overflow, and ONLY the render overflow: material the
+		// arm has already paid for and cannot place. Where the rune meter braked
+		// instead (ex.blockFull), nothing was bought beyond the shard and the
+		// watermark is already held back by distillBatch itself.
+		back := len(t.block.overflowInsights)
+		slog.Warn("scheduler: distiller ends the run at its shard cap — the range may not open "+
+			"another shard",
+			"source_key", key, "shard", t.block.ordinal, "max_blocks_per_root", t.write.maxShards,
+			"dropped", t.block.overflow, "held_back", back, "max_block_runes", t.write.maxRunes)
+		return distillSkipBudget, false, back > 0, nil
+	case t.block.ordinal >= distillShardHardBound(t.write.maxShards):
+		// THE SAME BOUND THE SEED WALKS BY (re-review major #2). Without it here
+		// the arm could write past a chain length it then refuses to seed — one
+		// tick with four calls grew a planted 254-chain to 258, and the next seed
+		// answered `capped` with no key to lift it. The answer is the cap's: hold
+		// the material back rather than drop it, and say which bound bound.
+		back := len(t.block.overflowInsights)
+		slog.Warn("scheduler: distiller ends the run at the hard shard bound — the chain of this "+
+			"range may not grow further",
+			"source_key", key, "shard", t.block.ordinal,
+			"hard_bound", distillShardHardBound(t.write.maxShards),
+			"max_blocks_per_root", t.write.maxShards, "dropped", t.block.overflow,
+			"held_back", back, "max_block_runes", t.write.maxRunes)
+		return distillSkipBudget, false, back > 0, nil
+	case t.block.shardCalls == 0 && !t.block.shardCarries():
+		slog.Warn("scheduler: distiller ends the run, the shard is empty and still full — "+
 			"a rollover would not make progress",
 			"source_key", key, "shard", t.block.ordinal, "dropped", t.block.overflow,
 			"max_block_runes", t.write.maxRunes)
-		return distillSkipBudget, false, nil
+		return distillSkipBudget, false, false, nil
 	}
 
 	sealed, moved := t.block.ordinal, len(t.block.overflowInsights)
 	t.block.rollover()
 	slog.Info("scheduler: distiller rolls over to the next shard",
-		"source_key", key, "sealed_shard", sealed, "shard", t.block.ordinal, "moved", moved)
+		"source_key", key, "sealed_shard", sealed, "shard", t.block.ordinal, "moved", moved,
+		"handovers", t.block.rollovers)
 	if err := s.distillWriteBlock(ctx, t.write, t.block); err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	l.blocksWritten++
-	return "", true, nil
+	return "", true, false, nil
 }
 
 // distillWriteBarrier is the test seam of §4.5.4's ordering probe — the point
