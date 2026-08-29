@@ -102,6 +102,17 @@ type distillLedger struct {
 	insightsKept     int
 	insightsRejected int
 
+	// rejects is insightsRejected DECOMPOSED by gate — the eight buckets of
+	// distillRejectKeys, written to the histogram columns of 149 (wave C4-1,
+	// finding N-6). A nil map is legal and reads as all-zero: distillSelect
+	// builds a ledger long before an extraction has happened, and a Go map read
+	// on nil yields the zero value, so the write path needs no second branch.
+	rejects map[string]int
+
+	// groupsShrunk is distill_run.call_groups_shrunk — how often the call
+	// planner sized a group down to the block's remaining room.
+	groupsShrunk int
+
 	// blocksWritten is the block write's own column (135:125, wave A02-9). It is
 	// 0 or 1 per batch and NOT a count of insights: the run writes ONE block and
 	// re-writes it per batch, so the column answers "how many durable writes did

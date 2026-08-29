@@ -747,6 +747,11 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 	}
 	ex := s.distillExtract(ctx, t, kept)
 	l.calls, l.insightsKept, l.insightsRejected = ex.calls, ex.kept, ex.rejected
+	// The two observability counters of wave C4-1 (finding N-6). They travel the
+	// SAME path as the three above — the batch ledger — so they are subject to
+	// the same §4.5.4 scoping: a batch that stopped mid-way books what its calls
+	// actually produced, and nothing about the remainder it never reached.
+	l.rejects, l.groupsShrunk = ex.rejects, ex.groupsShrunk
 
 	seen := hashes
 	shown := kept
@@ -843,6 +848,12 @@ var distillWriteBarrier = func(context.Context) error { return nil }
 // GREATEST guards dr_watermark_forward (135:166): a batch that reports a
 // watermark below the row's own is a source-side bug, and the CHECK would kill
 // the whole run over it rather than the batch.
+//
+// THE HISTOGRAM IS FOLDED THE SAME WAY THE AGGREGATE IS (wave C4-1): the nine
+// counters of 149 are `col = col + $n` like every other ledger column, so a
+// run's row stays the sum over its batches and insights_rejected keeps its own
+// decomposition next to it. l.rejects may be nil — a Go map read on nil yields
+// 0, which is exactly what a batch without an extraction contributes.
 func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillLedger, wm int64) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE distill_run
@@ -855,10 +866,26 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		       insights_kept     = insights_kept + $9,
 		       insights_rejected = insights_rejected + $10,
 		       blocks_written    = blocks_written + $11,
+		       rej_g1            = rej_g1 + $12,
+		       rej_g2            = rej_g2 + $13,
+		       rej_g3            = rej_g3 + $14,
+		       rej_g4            = rej_g4 + $15,
+		       rej_g5            = rej_g5 + $16,
+		       rej_g6            = rej_g6 + $17,
+		       rej_g7            = rej_g7 + $18,
+		       rej_schema        = rej_schema + $19,
+		       call_groups_shrunk = call_groups_shrunk + $20,
 		       watermark_to      = GREATEST(watermark_to, $7)
 		 WHERE run_id = $1::uuid`,
 		runID, l.seen, l.selected, l.droppedCred, l.droppedDup, l.chars, wm,
-		l.calls, l.insightsKept, l.insightsRejected, l.blocksWritten)
+		l.calls, l.insightsKept, l.insightsRejected, l.blocksWritten,
+		// SPELLED OUT RATHER THAN INDEXED OVER distillRejectKeys: the key sits
+		// next to the column of the same name two dozen lines up, so the
+		// mapping is verifiable by reading. An index into the slice would make
+		// a reordering there silently swap two columns here.
+		l.rejects["g1"], l.rejects["g2"], l.rejects["g3"], l.rejects["g4"],
+		l.rejects["g5"], l.rejects["g6"], l.rejects["g7"], l.rejects["schema"],
+		l.groupsShrunk)
 	if err != nil {
 		return fmt.Errorf("distill: advancing run row %s: %w", runID, err)
 	}

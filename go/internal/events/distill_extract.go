@@ -230,8 +230,21 @@ type distillExtractResult struct {
 	kept     int
 	rejected int
 	// rejects counts per gate key (g1…g7) plus "schema" for lines the parser
-	// refused. Log-only in this wave; A02-M2 reads it as the instrument.
+	// refused. Since wave C4-1 it reaches the JOURNAL (149_distill_reject_
+	// histogram.sql) and is no longer log-only: it is the decomposition of
+	// `rejected`, and the two are checkable against each other because every
+	// refused line falls into exactly one bucket.
 	rejects map[string]int
+
+	// groupsShrunk counts how often the call planner sized a group DOWN to the
+	// block's remaining room (distillExtract, min(rows_per_call, room())).
+	//
+	// EVENTS AND NOT SAVED ROWS, and the difference is the point of the number:
+	// the rune meter already WARNs when it stops the tick, so "the cap bit at
+	// all" was observable. What was not is how often the cap steered the yield
+	// axis WITHOUT stopping anything — the axis N-3 is about. A count of rows
+	// saved would mix that with the batch's own size.
+	groupsShrunk int
 	// stop is "" for a batch that ran to its end, or the journal word of the
 	// condition that ended the TICK early: budget (the in-run GPU ceiling or the
 	// per-source call clamp) or breaker.
@@ -738,6 +751,32 @@ func distillHasControlRunes(s string) bool {
 
 // Below: the evidence gate G1-G7 (§4.3).
 
+// distillRejectKeys are the histogram's buckets in JOURNAL COLUMN ORDER — the
+// one place that says which key belongs to which column of 149 (wave C4-1).
+//
+// THE ARM HAS NO g0, and the omission is deliberate rather than an oversight:
+// derived.GateKeys carries one, but its G0 asks whether a claim's source stands
+// in provenance.source_block_ids, and the arm has no such question — it resolves
+// prompt-local addresses against `shown`, which is the only authority for what
+// one of them meant. A rej_g0 column would be zero by construction.
+//
+// "schema" is likewise not a gate but the PARSER's bucket (distillDecode). It
+// belongs in the same histogram because insights_rejected counts it: without it
+// the sum would not be the decomposition of that column.
+var distillRejectKeys = []string{"g1", "g2", "g3", "g4", "g5", "g6", "g7", "schema"}
+
+// distillNewRejects returns the zeroed histogram. ALL eight keys, always — a
+// zero and an absent key must not be distinguishable (the rule
+// derived.newRejects states for the same reason, and the one
+// TestDistillGateKeepsAGroundedInsight pins).
+func distillNewRejects() map[string]int {
+	m := make(map[string]int, len(distillRejectKeys))
+	for _, k := range distillRejectKeys {
+		m[k] = 0
+	}
+	return m
+}
+
 // distillGate runs the seven screens over every insight of ONE call and returns
 // the survivors plus the per-gate reject counts.
 //
@@ -747,7 +786,7 @@ func distillHasControlRunes(s string) bool {
 // The rejected TEXTS are deliberately not returned and never logged: a line may
 // have failed G5 precisely because it carries a secret (derived/citegate.go:123).
 func distillGate(ins []distillInsight, shown distillShown) ([]distillInsight, map[string]int) {
-	rejects := map[string]int{"g1": 0, "g2": 0, "g3": 0, "g4": 0, "g5": 0, "g6": 0, "g7": 0}
+	rejects := distillNewRejects()
 	kept := make([]distillInsight, 0, len(ins))
 	for _, in := range ins {
 		if key, bad := distillScreen(in, shown); bad {
@@ -965,7 +1004,7 @@ type distillCallOpts struct {
 // What it CAN do is end the tick: the breaker and the in-run GPU meter both
 // answer through res.stop.
 func (s *Scheduler) distillExtract(ctx context.Context, t distillTick, items []distillsource.Item) distillExtractResult {
-	res := distillExtractResult{rejects: map[string]int{}}
+	res := distillExtractResult{rejects: distillNewRejects()}
 	// A non-positive rows_per_call makes no call at all, and it is NOT clamped
 	// here — the same decision distill_select.go states for the sizing keys
 	// (review #4): config.validateDistillCounters refuses a value below 1 with
@@ -1047,6 +1086,11 @@ func (s *Scheduler) distillExtract(ctx context.Context, t distillTick, items []d
 			slog.Debug("scheduler: distiller sizes its call group to the block's remaining room",
 				"rows_per_call", t.opts.rowsPerCall, "room", room,
 				"used", runes.used, "max_block_runes", t.write.maxRunes)
+			// COUNTED NEXT TO THE LOG LINE, NOT INSTEAD OF IT (wave C4-1, N-6):
+			// the line keeps the shape of ONE decision for a reader who has
+			// Debug on, the counter is what survives into the journal and can
+			// be summed over a run.
+			res.groupsShrunk++
 			size = room
 		}
 		end := min(start+size, len(items))

@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 148,
-    "migration_count": 36,
+    "migration_max": 149,
+    "migration_count": 37,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3504,6 +3504,60 @@
           "type": "text",
           "not_null": false,
           "storage": "x"
+        },
+        {
+          "name": "rej_g1",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g2",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g3",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g4",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g5",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g6",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g7",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_schema",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "call_groups_shrunk",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
         }
       ],
       "row_security": false
