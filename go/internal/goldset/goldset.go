@@ -95,6 +95,11 @@ type Case struct {
 	QuerySHA256 string `json:"query_sha256"`
 	// GoldIDs are the constructive labels (G-KI, G-Q). Empty for G-REAL.
 	GoldIDs []string `json:"gold_ids,omitempty"`
+	// GoldSource names where GoldIDs came from when a slice carries more than
+	// one gold variant side by side (wave C3-4a: "fable-kern" on the 20 core
+	// queries, "judge-uebertragen" on all 150). Empty everywhere else, so a
+	// slice file written before C3-4a round-trips byte-identically.
+	GoldSource string `json:"gold_source,omitempty"`
 	// Split is DERIV or HOLD, G-Q only.
 	Split string `json:"split,omitempty"`
 	// Origin names how the query was constructed: title-paraphrase,

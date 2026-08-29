@@ -534,7 +534,34 @@ type LabelStats struct {
 // afterwards would be computed over a population selected by the thing under
 // measurement.
 func ApplyLabels(cases []Case, judged map[string][]Judgement) ([]Case, LabelStats, error) {
-	out := append([]Case(nil), cases...)
+	return ApplyLabelsNamed(cases, judged, "", false)
+}
+
+// ApplyLabelsNamed is the C3-4a form (design/05a §C3-2-D05-8 i): the same
+// labelling, plus the name of the gold source and the option to build a gold
+// variant that covers only PART of the slice.
+//
+// `restrict` is what makes the core variant legitimate. Dropping unjudged cases
+// is normally the selection trap ApplyLabels exists to prevent — but the core
+// is not a selection ON the measurement, it is a pre-declared, hash-drawn set of
+// 20 queries, and the variant carries its own name so no reader can mistake it
+// for the full slice. Without `restrict` an unjudged case is still an abort.
+func ApplyLabelsNamed(cases []Case, judged map[string][]Judgement,
+	source string, restrict bool,
+) ([]Case, LabelStats, error) {
+	out := make([]Case, 0, len(cases))
+	for _, c := range cases {
+		if restrict {
+			if js, ok := judged[c.Key()]; !ok || len(js) == 0 {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	if len(out) == 0 {
+		return nil, LabelStats{}, fmt.Errorf("keine der %d Fälle trägt Urteile — "+
+			"die Gold-Variante %q wäre leer", len(cases), source)
+	}
 	st := LabelStats{Cases: len(out)}
 	sizes := make([]int, 0, len(out))
 	for i := range out {
@@ -544,6 +571,7 @@ func ApplyLabels(cases []Case, judged map[string][]Judgement) ([]Case, LabelStat
 			return nil, st, fmt.Errorf("no judgements for case %s — the template covers the whole slice, "+
 				"and a partial file would label a subset without saying so", k)
 		}
+		out[i].GoldSource = source
 		rel := make([]string, 0, len(js))
 		for _, j := range js {
 			st.Judged++

@@ -17,6 +17,7 @@ import (
 	"math"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/goldset"
@@ -34,24 +35,58 @@ type judgeOpts struct {
 	timeoutSec int
 	kappaMin   float64
 	stampName  string
+
+	// The C3-4a runs (design/05a §C3-2-D05-7, -8 l).
+	draw        bool
+	calibrate   bool
+	judged      string
+	pool        string
+	labels      string
+	sheet       string
+	drawKey     string
+	flip        string
+	coreQueries string
+	strata      string
+	drawSeed    int64
+	rhoMin      float64
+	piMin       float64
+	unsureMax   float64
 }
 
-// cmdJudge dispatches the two runs and refuses everything else. Doing both in
-// one invocation is refused rather than sequenced: the calibration column is
-// filled by a judge between them.
+// cmdJudge dispatches the runs and refuses everything else. Doing two of them
+// in one invocation is refused rather than sequenced: a judge fills a sheet
+// between every pair of them, and a command that drew and calibrated in one
+// breath would report a number nobody could have contradicted in between.
 func cmdJudge(c *common, o judgeOpts) error {
+	picked := []string{}
+	for _, m := range []struct {
+		on   bool
+		name string
+	}{{o.llm, "-llm"}, {o.kappa, "-kappa"}, {o.draw, "-draw"}, {o.calibrate, "-calibrate"}} {
+		if m.on {
+			picked = append(picked, m.name)
+		}
+	}
 	switch {
-	case o.llm && o.kappa:
-		return fmt.Errorf("-llm und -kappa sind zwei Läufe: erst urteilen, dann — nach dem Befüllen " +
-			"der Kontrolleur-Spalte — kalibrieren")
+	case len(picked) > 1:
+		return fmt.Errorf("%s sind getrennte Läufe: zwischen je zweien wird ein Bogen von Hand gefüllt",
+			strings.Join(picked, ", "))
 	case o.llm:
 		return judgeLLM(c, o)
 	case o.kappa:
 		return judgeKappa(c, o)
+	case o.draw:
+		return judgeDraw(c, o)
+	case o.calibrate:
+		return judgeCalibrate(c, o)
 	default:
-		return fmt.Errorf("weder -llm noch -kappa genannt: judge urteilt (-llm) oder kalibriert (-kappa)")
+		return fmt.Errorf("kein Lauf genannt: judge urteilt (-llm), kalibriert nach E2-4 (-kappa), " +
+			"zieht den C3-4a-Bogen (-draw) oder rechnet ihn zurück (-calibrate)")
 	}
 }
+
+// isNaN keeps the NaN check of the two thresholds in one place.
+func isNaN(f float64) bool { return math.IsNaN(f) }
 
 // ------------------------------------------------------------------- -llm.
 

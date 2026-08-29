@@ -350,6 +350,8 @@ cd go && go build ./cmd/ctx-goldset
 ./ctx-goldset pool   -control 5             # blind pooled judgement template for G-REAL (stage 2)
 ./ctx-goldset judge  -llm   -template judge-<run>.jsonl        # machine verdicts on-prem, resumable
 ./ctx-goldset judge  -kappa -controls judged-<run>-controls.jsonl -kappa-min 0.6
+./ctx-goldset judge  -draw  -judged judged-<run>.jsonl -draw-seed <seed>  # stratified draw + blind sheet
+./ctx-goldset judge  -calibrate -sheet fable-sheet-<run>.jsonl -kappa-min 0.6 -flip flip.json
 ./ctx-goldset ingest -judged judge-<run>.md # the filled-in judgements back in as labels
 ./ctx-goldset stamp                         # refresh digests + corpus contamination stamp
 ```
@@ -374,6 +376,33 @@ after seeing the data describes the result instead of testing it. An endpoint
 that is not on-prem aborts the run before the first cell, on both axes the
 registry offers (declared locality and the actual host), and model, endpoint and
 prompt digest reach the stamp.
+
+**`-draw` / `-calibrate`: calibrating on the population that decides.** The
+control draws `judge -kappa` reads are, by construction, disjoint from the pooled
+candidates — the run above calibrated the noise probe rather than the judgement
+set, and at judge/second-judge positive rates of 0.0200/0.0027 the kappa
+denominator is 0.0226, which capped the achievable kappa at 0.2317 whatever the
+verdicts were. `judge -draw` replaces the sample: a fully judged CORE of 20
+queries (14 local + 6 global, drawn by hash rank so an auditor can reproduce the
+selection with sha256sum and sort), a stratified calibration sample over the
+remaining queries — S1/S2 split the machine-positive cells by arm overlap, S3/S4
+the machine-negative ones by best arm rank — and 60 of the old control cells,
+which keep feeding `ControlHitRate` and nothing else. It writes a blind sheet and
+a separate answer key: stratum, weight, core membership and machine verdict live
+only in the key, because a stratum label *is* the machine verdict. The key
+carries no timestamp, so two draws of one seed are byte-identical. `-draw-seed`
+has **no default**, for the same reason `-kappa-min` has none.
+
+`judge -calibrate` joins the filled sheet back by `(query_sha256, block_id)` and
+reports weighted and unweighted kappa, the judge's sensitivity and precision as
+stratified ratio estimates with intervals, the `?`-rate per stratum, and the
+control hit rate. The verdict vocabulary gains `?` = "not decidable on this
+excerpt", which counts as 0 and is reported as a rubric quality figure. Under the
+second-judge-as-gold reading the kappa threshold changes what it decides: not the
+gate, but the REACH of the machine labels (`voll` / `nur-kern`). The gate
+authority is the metric flip — the same comparison scored against both gold
+sources on the core (`armsweep.GoldFlip`) — and an absent flip computation leaves
+the gate `nicht entschieden` rather than passing it.
 
 **Why the multi-gold slices exist.** G-KI, G-Q and G-REAL carry exactly one gold
 id per case. A one-gold slice cannot show the use of an aggregating layer; it can

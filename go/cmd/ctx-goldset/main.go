@@ -192,14 +192,34 @@ func run() error {
 		timeout := fs.Int("timeout", 180, "Zeitlimit je Aufruf in Sekunden")
 		// No default: the threshold is a rule stated BEFORE the run, and a
 		// default would be this tool inventing the rule it measures against.
-		kappaMin := fs.Float64("kappa-min", math.NaN(), "κ-Schranke — PFLICHTANGABE bei -kappa, kein Vorgabewert (D-05 §4.5 (3))")
+		kappaMin := fs.Float64("kappa-min", math.NaN(), "κ-Schranke — PFLICHTANGABE bei -kappa/-calibrate, kein Vorgabewert (D-05 §4.5 (3))")
 		stampName := fs.String("stamp", goldset.FileStamp, "Stempel, in den die Urteils-Provenienz gemischt wird")
+		// Wave C3-4a (design/05a §C3-2-D05-8 l).
+		draw := fs.Bool("draw", false, "C3-4a: Kern + Schicht-Stichprobe ziehen, blinden Bogen und Ziehungs-Schlüssel schreiben")
+		calibrate := fs.Bool("calibrate", false, "C3-4a: ausgefüllten blinden Bogen zurückführen (κ, κ_w, ρ, π, `?`-Rate, Kipp-Report)")
+		judged := fs.String("judged", "", "geurteilter Bestand aus `judge -llm` (bei -draw)")
+		poolFile := fs.String("pool", "", "Pool-Datei zur Schichtung (Vorgabe: pool-<Lauf-ID>.jsonl)")
+		labels := fs.String("labels", "", "X-W0-Regime-Labels (Vorgabe: "+goldset.FileRegimeLabels+")")
+		sheet := fs.String("sheet", "", "ausgefüllter blinder Bogen (bei -calibrate)")
+		drawKeyName := fs.String("draw-key", "", "Ziehungs-Schlüssel (Vorgabe: "+drawKeyPrefix+"<Lauf-ID>.json)")
+		flip := fs.String("flip", "", "Metrik-Kipp-Ergebnisse je Slice aus `ctx-armsweep compare` (JSON); fehlt sie, ist das Gate nicht entschieden")
+		coreQueries := fs.String("core-queries", "", "Kern-Ziehung als local,global (Vorgabe: 14,6)")
+		strata := fs.String("strata", "", "Schicht-Ziehung als S1,S2,S3,S4,S0 (Vorgabe: 120,140,140,80,60)")
+		// No default: the seed fixes which queries become the metric anchor.
+		drawSeed := fs.Int64("draw-seed", 0, "Ziehungs-Seed — PFLICHTANGABE bei -draw, sichtbare Lead-Entscheidung (§C3-2-D05-3)")
+		rhoMin := fs.Float64("rho-min", -1, "ρ-Schranke (Vorgabe: 0.80)")
+		piMin := fs.Float64("pi-min", -1, "π-Schranke (Vorgabe: 0.70)")
+		unsureMax := fs.Float64("unsure-max", -1, "höchste zulässige `?`-Rate je Schicht (Vorgabe: 0.10)")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			return err
 		}
 		return cmdJudge(&c, judgeOpts{llm: *llm, kappa: *kappa, template: *tpl, key: *key,
 			controls: *controls, out: *out, backend: *backend, model: *model,
-			timeoutSec: *timeout, kappaMin: *kappaMin, stampName: *stampName})
+			timeoutSec: *timeout, kappaMin: *kappaMin, stampName: *stampName,
+			draw: *draw, calibrate: *calibrate, judged: *judged, pool: *poolFile,
+			labels: *labels, sheet: *sheet, drawKey: *drawKeyName, flip: *flip,
+			coreQueries: *coreQueries, strata: *strata, drawSeed: *drawSeed,
+			rhoMin: *rhoMin, piMin: *piMin, unsureMax: *unsureMax})
 	case "ingest":
 		judged := fs.String("judged", "", "ausgefüllte Urteils-Vorlage (JSONL oder Markdown)")
 		key := fs.String("key", "", "Schlüsseldatei der Vorlage (Vorgabe: "+keyPrefix+"<Lauf-ID>.json)")

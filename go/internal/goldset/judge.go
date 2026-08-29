@@ -131,6 +131,13 @@ type JudgeCell struct {
 	// Control marks a cell of the mandatory calibration sample. It is set from
 	// the SEPARATE key file, never from the template — the template stays blind.
 	Control bool
+	// Stratum, Weight and CoreQuery are the C3-4a draw facts (design/05a
+	// §C3-2-D05-8 a). Like Control they come from a key file and never from the
+	// template: a stratum name IS the machine verdict (S1/S2 mean "relevant"),
+	// so a cell that carried its own stratum would carry its own answer.
+	Stratum   string
+	Weight    float64
+	CoreQuery bool
 }
 
 // Key is the cross-artefact case key.
@@ -658,6 +665,13 @@ type GateVerdict struct {
 	Verdict string                 `json:"verdict"`
 	Reasons []string               `json:"reasons,omitempty"`
 	Kappa   map[string]KappaResult `json:"kappa"`
+	// GoldReach and Notes are the C3-4a additions (design/05a §C3-2-D05-6).
+	// They stay empty on the E2-4 path, which is what keeps the older report
+	// byte-identical: the kappa threshold decided a GATE there, and it decides
+	// the REACH of the judge labels here — two different statements that must
+	// not share one field.
+	GoldReach string   `json:"gold_reach,omitempty"`
+	Notes     []string `json:"notes,omitempty"`
 }
 
 // JudgeGateReport is the Kipp-Report: for every gate, whether the machine
