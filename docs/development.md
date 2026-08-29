@@ -347,7 +347,7 @@ cd go && go build ./cmd/ctx-goldset
 ./ctx-goldset mh          -n 100            # dream-link bridges at confidence >= 0.7, gold = both ends
 ./ctx-goldset glob        -n 80             # aggregating tag questions, gold judged later
 ./ctx-goldset glob-konstr -n 50             # the same question family with cluster gold — FLOOR CHECK
-./ctx-goldset pool   -control 5             # blind pooled judgement template for G-REAL (stage 2)
+./ctx-goldset pool   -control 5             # blind pooled judgement template, -slice glob for G-GLOB
 ./ctx-goldset judge  -llm   -template judge-<run>.jsonl        # machine verdicts on-prem, resumable
 ./ctx-goldset judge  -kappa -controls judged-<run>-controls.jsonl -kappa-min 0.6
 ./ctx-goldset judge  -draw  -judged judged-<run>.jsonl -draw-seed <seed>  # stratified draw + blind sheet
@@ -663,21 +663,34 @@ re-simulated. Details, the operating notes (off-peak, `-concurrency 1`, not
 alongside dream) and the `via_post_stage` caveat live in
 [`go/cmd/ctx-armsweep/README.md`](../go/cmd/ctx-armsweep/README.md).
 
-### Blind relevance judgements for G-REAL: `pool` / `ingest`
+### Blind relevance judgements: `pool` / `ingest`
 
-G-REAL is drawn from the access log and therefore has no constructive label —
-nobody wrote down which block answers a question a user once asked. Stage 2
-supplies the labels from a human judgement over a **pooled, blinded** candidate
-list. The tooling is `ctx-goldset pool` and `ctx-goldset ingest`; the judging in
-between is a human act and is deliberately not automated.
+Two slices have no constructive label. G-REAL is drawn from the access log —
+nobody wrote down which block answers a question a user once asked — and G-GLOB
+is an aggregating question whose gold is judged rather than constructed (E-9).
+Stage 2 supplies the labels for both from a judgement over a **pooled, blinded**
+candidate list. The tooling is `ctx-goldset pool` and `ctx-goldset ingest`; the
+judging in between is deliberately not part of the tool.
 
 ```bash
 ./ctx-armsweep prime                                   # writes pool-<run>.jsonl (top-20 per arm; G-REAL + G-GLOB)
 ./ctx-goldset  pool   -control 5                       # judge-<run>.jsonl + judge-<run>.md + pool-key-<run>.json
-#              … a human fills in the first column …
+./ctx-goldset  pool   -control 5 -slice glob           # judge-glob-<run>.* + pool-key-glob-<run>.json
+#              … the open column is filled in …
 ./ctx-goldset  ingest -judged judge-<run>.md           # labels g-real.jsonl, merges the G-REAL profile
+./ctx-goldset  ingest -judged judge-glob-<run>.jsonl -out g-glob.jsonl   # the same for G-GLOB
 ./ctx-goldset  stamp                                   # refresh digests, STAMP.json final
 ```
+
+`-slice` takes a judged slice (`glob`, `g-glob` and `G-GLOB` are the same
+request) and defaults to G-REAL, so an invocation without it writes exactly what
+it wrote before wave C4-3b. A slice whose gold is CONSTRUCTIVE is refused rather
+than resolved to a default. Both judged slices come out of one priming run and
+share its run id, so every template but the G-REAL one carries its slice in the
+artefact name — otherwise the second build would overwrite the first template
+and its control key, and both writes would succeed. `ingest` reads the slice off
+the case file it labels and stamps that slice's profile; it refuses a file whose
+gold is constructive, because pooled judgements would overwrite it.
 
 The construction is pre-registered (design 04 §4.5) and enforced by the tool:
 
@@ -686,8 +699,10 @@ The construction is pre-registered (design 04 §4.5) and enforced by the tool:
   weighting under measurement. `prime` pools the two slices whose gold is
   JUDGED rather than constructed: G-REAL, and G-GLOB since wave C4-3a. Both
   land in the SAME `pool-<run>.jsonl`, keyed by slice/index/query digest, so a
-  consumer selects a slice by reading the entries. `ctx-goldset pool` itself
-  still builds its template from `g-real.jsonl` only.
+  consumer selects a slice by reading the entries — which is what `ctx-goldset
+  pool -slice` does since wave C4-3b. A pool file from an older priming run
+  carries no G-GLOB entries at all, and the tool says so instead of failing on
+  the first case.
 - **Control sample.** Plus five blocks drawn uniformly (seeded) from the
   retrievable set, excluding what is already pooled. Pooling bias is the
   declared residual of this method; the control sample is what makes it a

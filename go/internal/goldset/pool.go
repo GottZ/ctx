@@ -38,6 +38,51 @@ type PoolEntry struct {
 // PoolDepth is the per-arm pooling depth.
 const PoolDepth = 20
 
+// judgedSlices is the ONE table of slices whose gold is JUDGED from a pool
+// instead of set by construction, together with the gold file each of them
+// lives in. G-REAL has been judged since design 04 §4.5; G-GLOB joined in wave
+// C4-3a (design/05a §C3-2-D05-8 k) — its cases were generated with a pool
+// reference and an EMPTY gold list (E-9), so a pool is the only way it ever
+// gets labels.
+//
+// The sweep driver decides which slices it POOLS (armsweep.pooledSlice); this
+// table decides which slices a template can be BUILT for, and the two must name
+// the same set or the tooling would pool a slice nobody can judge, or offer a
+// template for a slice nobody pooled. They are pinned against each other by
+// TestPrimePoolsExactlyTheJudgedSlices (internal/armsweep), which drives the
+// production priming path rather than comparing two lists.
+//
+// The order is the canonical slice order and is what PooledSlices reports, so
+// an error message naming the alternatives always names them in the same order.
+var judgedSlices = []struct{ Slice, File string }{
+	{SliceReal, FileReal},
+	{SliceGlob, FileGlob},
+}
+
+// PooledSlices names, in canonical order, the slices a judgement template
+// exists for.
+func PooledSlices() []string {
+	out := make([]string, 0, len(judgedSlices))
+	for _, s := range judgedSlices {
+		out = append(out, s.Slice)
+	}
+	return out
+}
+
+// PoolSliceFile resolves the gold file of a judged slice. ok is false for every
+// other slice, and a caller is expected to REFUSE on that rather than fall back
+// to a default: a template built for the wrong slice looks exactly like a
+// correct one, and the mistake would only surface as labels written into the
+// wrong file.
+func PoolSliceFile(slice string) (file string, ok bool) {
+	for _, s := range judgedSlices {
+		if s.Slice == slice {
+			return s.File, true
+		}
+	}
+	return "", false
+}
+
 // Key is the cross-artefact case key.
 func (e PoolEntry) Key() string { return CaseKey(e.Slice, e.Index, e.QuerySHA256) }
 
@@ -325,7 +370,7 @@ func RenderTemplateJSONL(pooled []PooledCase, blocks map[string]Block, excerpt i
 // so one case is one keystroke per row at a fixed offset.
 func RenderTemplateMarkdown(pooled []PooledCase, blocks map[string]Block, excerpt int) []byte {
 	var b strings.Builder
-	b.WriteString("# Relevanz-Urteile G-REAL\n\n")
+	b.WriteString("# Relevanz-Urteile " + templateSliceName(pooled) + "\n\n")
 	b.WriteString("Ein Urteil je Zeile, erste Spalte: `1` = relevant, `0` = nicht relevant.\n")
 	b.WriteString("`" + UnjudgedMark + "` heißt ungeurteilt und wird beim Einlesen als Fehler abgewiesen.\n")
 	b.WriteString("Geurteilt wird gegen die Frage, nicht gegen eine erwartete Reihenfolge.\n\n")
@@ -344,6 +389,29 @@ func RenderTemplateMarkdown(pooled []PooledCase, blocks map[string]Block, excerp
 		b.WriteString("\n")
 	}
 	return []byte(b.String())
+}
+
+// templateSliceName names the slice a template covers. `ctx-goldset pool`
+// builds one slice at a time, so this is one name.
+//
+// It is DERIVED from the rows rather than passed in: the heading is what tells
+// a human judge which instrument they are filling in, and a template headed
+// "G-REAL" over G-GLOB rows would be worse than an unheaded one. An empty
+// template keeps the historical name, so the byte form of every G-REAL
+// template written before wave C4-3b stays reproducible.
+func templateSliceName(pooled []PooledCase) string {
+	seen := map[string]bool{}
+	names := make([]string, 0, 1)
+	for _, p := range pooled {
+		if p.Slice != "" && !seen[p.Slice] {
+			seen[p.Slice] = true
+			names = append(names, p.Slice)
+		}
+	}
+	if len(names) == 0 {
+		return SliceReal
+	}
+	return strings.Join(names, " + ")
 }
 
 // mdCell makes foreign text safe for one table cell: no newlines, and no pipe

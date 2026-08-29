@@ -1,0 +1,2 @@
+Pool-Vorlage: Fälle=3 Kandidaten=36 p50=12 max=12 Kontrolle=5 Seed=20260829 Lauf=20260829T000000Z fehlende_Blöcke=0
+geschrieben: judge-20260829T000000Z.jsonl judge-20260829T000000Z.md pool-key-20260829T000000Z.json

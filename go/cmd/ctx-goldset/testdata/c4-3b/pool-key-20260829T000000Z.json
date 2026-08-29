@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "created_at": "2026-08-29T00:00:00Z",
+  "pool_run_id": "20260829T000000Z",
+  "seed": 20260829,
+  "controls_per_query": 5,
+  "control_ids": {
+    "G-REAL/0/d270d2dfbcafb70ea4b2e849e6ae884b98bf642f79cdafb9940db9133ff9e808": [
+      "c11",
+      "c23",
+      "c26",
+      "c28",
+      "c30"
+    ],
+    "G-REAL/1/9281225acc2162c652ffa7bcff3efefad89fb1d6a6ce4bc020afe50dcf777ef9": [
+      "c01",
+      "c13",
+      "c17",
+      "c20",
+      "c22"
+    ],
+    "G-REAL/2/18f8bfb5581c83a00122dcc55ec0279557afa60225c6faa921fab39872f0cdca": [
+      "c06",
+      "c26",
+      "c29",
+      "c30",
+      "c35"
+    ]
+  }
+}

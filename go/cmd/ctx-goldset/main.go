@@ -11,9 +11,9 @@
 //	mh           build G-MH: multi-hop questions over dream links at confidence >= 0.7
 //	glob         build G-GLOB: aggregating questions over corpus tags, gold judged later
 //	glob-konstr  build the G-GLOB floor check with gold from graph_cluster_member
-//	pool         build the blind judgement template for G-REAL from the pooling dump
+//	pool         build the blind judgement template of a judged slice (-slice; default G-REAL)
 //	judge        machine-judge the open cells on-prem (-llm) and calibrate them (-kappa)
-//	ingest       read the filled-in judgements back in as G-REAL relevance labels
+//	ingest       read the filled-in judgements back in as relevance labels of that slice
 //	stamp        refresh file digests and the corpus contamination stamp
 //
 // The four multi-gold slices (design/05 §4.5) exist because a one-gold slice
@@ -173,12 +173,15 @@ func run() error {
 		poolFile := fs.String("pool", "", "Pool-Datei aus `ctx-armsweep prime` (Vorgabe: die einzige pool-*.jsonl im Gold-Verzeichnis)")
 		control := fs.Int("control", 5, "gleichverteilt gezogene Kontroll-Blöcke je Query (deklarierte Rest-Verzerrungs-Sonde)")
 		excerpt := fs.Int("excerpt", 600, "Zeichen Blockinhalt je Kandidat in der Vorlage")
-		out := fs.String("out", "", "Basisname der Urteils-Vorlage (Vorgabe: judge-<Lauf-ID>)")
+		out := fs.String("out", "", "Basisname der Urteils-Vorlage (Vorgabe: judge-<Lauf-ID>, "+
+			"bei anderen Slices judge-<slice>-<Lauf-ID>)")
+		slice := fs.String("slice", "", "geurteilter Slice, für den die Vorlage gebaut wird "+
+			"(Vorgabe: "+goldset.SliceReal+"; poolbar außerdem: "+goldset.SliceGlob+")")
 		dry := fs.Bool("dry-run", false, "nur die Kennzahlen melden, nichts schreiben")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			return err
 		}
-		return cmdPool(&c, poolOpts{poolFile: *poolFile, out: *out,
+		return cmdPool(&c, poolOpts{poolFile: *poolFile, out: *out, slice: *slice,
 			control: *control, excerpt: *excerpt, dryRun: *dry})
 	case "judge":
 		llm := fs.Bool("llm", false, "Urteilslauf über die on-prem-Kette (resume-fähig über das Journal)")
