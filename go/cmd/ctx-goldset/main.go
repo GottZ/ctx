@@ -208,7 +208,7 @@ func run() error {
 		sheet := fs.String("sheet", "", "ausgefüllter blinder Bogen (bei -calibrate)")
 		drawKeyName := fs.String("draw-key", "", "Ziehungs-Schlüssel (Vorgabe: "+drawKeyPrefix+"<Lauf-ID>.json)")
 		flip := fs.String("flip", "", "Metrik-Kipp-Ergebnisse je Slice aus `ctx-armsweep compare` (JSON); fehlt sie, ist das Gate nicht entschieden")
-		coreQueries := fs.String("core-queries", "", "Kern-Ziehung als local,global (Vorgabe: 14,6)")
+		coreQueries := fs.String("core-queries", "", "Kern-Ziehung als local,global (Vorgabe: 14,6; 0 zulässig für genau EIN Regime — Ein-Regime-Slices wie G-GLOB)")
 		strata := fs.String("strata", "", "Schicht-Ziehung als S1,S2,S3,S4,S0 (Vorgabe: 120,140,140,80,60)")
 		// No default: the seed fixes which queries become the metric anchor.
 		drawSeed := fs.Int64("draw-seed", 0, "Ziehungs-Seed — PFLICHTANGABE bei -draw, sichtbare Lead-Entscheidung (§C3-2-D05-3)")

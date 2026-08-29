@@ -99,6 +99,34 @@ func DefaultDrawSpec(seed int64) DrawSpec {
 	return DrawSpec{Seed: seed, CoreLocal: 14, CoreGlobal: 6, S1: 120, S2: 140, S3: 140, S4: 80, S0: 60}
 }
 
+// ValidateCore checks the core allocation before it is drawn from.
+//
+// Exactly ONE of the two regimes may ask for 0. A slice can genuinely have no
+// population in one of them: the local/global partition is an X-W0 property of
+// G-REAL (regime.go), while G-GLOB is 80 corpus aggregations that carry `global`
+// throughout — demanding a positive number from `local` there would make the
+// draw impossible rather than careful. A regime asked for 0 is skipped, and its
+// population, empty or not, never enters the key.
+//
+// Both at 0 stays refused, and that is the load-bearing half of this rule. The
+// core is the CENSUS the metric anchor and every weight-1 row rest on; a key
+// without one carries strata whose Horvitz-Thompson estimates have nothing to
+// be anchored against, and it would be written without a single complaint.
+//
+// A negative number is refused here rather than further down, where it reaches
+// a slice expression and panics — a crash is not a rejection.
+func (s DrawSpec) ValidateCore() error {
+	if s.CoreLocal < 0 || s.CoreGlobal < 0 {
+		return fmt.Errorf("Kern-Anforderung negativ (local=%d, global=%d) — "+
+			"eine Ziehung zieht keine negative Anzahl Queries", s.CoreLocal, s.CoreGlobal)
+	}
+	if s.CoreLocal == 0 && s.CoreGlobal == 0 {
+		return errors.New("Kern-Anforderung in beiden Regimen 0 — der Kern ist der Zensus, auf dem " +
+			"die Metrik-Verankerung und die Hochrechnung ruhen; ein Schlüssel ohne ihn misst nichts")
+	}
+	return nil
+}
+
 func (s DrawSpec) allocation() map[string]int {
 	return map[string]int{StratumS1: s.S1, StratumS2: s.S2, StratumS3: s.S3, StratumS4: s.S4}
 }
@@ -304,6 +332,9 @@ func Draw(in DrawInput) (DrawKey, error) {
 
 // drawCore picks the fully judged queries, per regime, by hash rank.
 func drawCore(in DrawInput) ([]CoreQuery, map[string]bool, error) {
+	if err := in.Spec.ValidateCore(); err != nil {
+		return nil, nil, err
+	}
 	type q struct {
 		slice  string
 		index  int
@@ -331,6 +362,14 @@ func drawCore(in DrawInput) ([]CoreQuery, map[string]bool, error) {
 	set := map[string]bool{}
 	var out []CoreQuery
 	for _, regime := range []string{RegimeLocal, RegimeGlobal} {
+		// A regime asked for 0 is skipped whole — no ranking, no selection, no
+		// row in the key. That is the single-regime case (ValidateCore), and it
+		// is deliberately independent of whether the regime HAS a population:
+		// "draw nothing here" is a stated allocation, not a consequence of an
+		// empty half.
+		if want[regime] == 0 {
+			continue
+		}
 		var pool []*q
 		for _, sha := range order {
 			if seen[sha].regime == regime {

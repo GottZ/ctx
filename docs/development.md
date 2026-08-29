@@ -394,6 +394,16 @@ only in the key, because a stratum label *is* the machine verdict. The key
 carries no timestamp, so two draws of one seed are byte-identical. `-draw-seed`
 has **no default**, for the same reason `-kappa-min` has none.
 
+`-core-queries local,global` re-allocates that core, and it accepts a **0 for
+exactly one of the two regimes**. The local/global partition is a property of
+G-REAL; G-GLOB is 80 corpus aggregations that carry `global` throughout, so
+`-core-queries 0,12` states "draw nothing from local" instead of asking the tool
+to guess it. The regime asked for 0 is skipped whole — no selection, no row in
+the key — whether or not it has a population. Both at 0 is refused: the core is
+the census the metric anchor and the projection rest on. `-strata` stays strictly
+positive, because its five numbers are sample sizes inside strata that are drawn
+from by construction, and a 0 there would be a stratum weight of N/0.
+
 `judge -calibrate` joins the filled sheet back by `(query_sha256, block_id)` and
 reports weighted and unweighted kappa, the judge's sensitivity and precision as
 stratified ratio estimates with intervals, the `?`-rate per stratum, and the

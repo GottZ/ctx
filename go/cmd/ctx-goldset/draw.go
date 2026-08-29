@@ -162,14 +162,21 @@ func readDrawInput(g *goldset.Guard, c *common, o judgeOpts, spec goldset.DrawSp
 func drawSpecOf(o judgeOpts) (goldset.DrawSpec, error) {
 	spec := goldset.DefaultDrawSpec(o.drawSeed)
 	if o.coreQueries != "" {
-		v, err := intList(o.coreQueries, 2, "-core-queries", "local,global")
+		// Lower bound 0: the two numbers name POPULATIONS, and a single-regime
+		// slice has none in one of them (goldset.DrawSpec.ValidateCore). Which
+		// combinations of 0 are admissible is decided there, once, for every
+		// caller of Draw — this is only where the flag text becomes numbers.
+		v, err := intList(o.coreQueries, 2, 0, "-core-queries", "local,global")
 		if err != nil {
 			return spec, err
 		}
 		spec.CoreLocal, spec.CoreGlobal = v[0], v[1]
+		if verr := spec.ValidateCore(); verr != nil {
+			return spec, fmt.Errorf("-core-queries %q: %w", o.coreQueries, verr)
+		}
 	}
 	if o.strata != "" {
-		v, err := intList(o.strata, 5, "-strata", "S1,S2,S3,S4,S0")
+		v, err := intList(o.strata, 5, 1, "-strata", "S1,S2,S3,S4,S0")
 		if err != nil {
 			return spec, err
 		}
@@ -178,7 +185,12 @@ func drawSpecOf(o judgeOpts) (goldset.DrawSpec, error) {
 	return spec, nil
 }
 
-func intList(s string, want int, flag, shape string) ([]int, error) {
+// intList parses one comma-separated allocation flag. `low` is the smallest
+// admissible value, and the two flags differ in it on purpose: `-strata` names
+// five SAMPLE SIZES inside strata that are drawn from by construction, where a 0
+// would be a stratum weight of N/0 and takeByHash refuses it anyway;
+// `-core-queries` names two populations of which a slice may have only one.
+func intList(s string, want, low int, flag, shape string) ([]int, error) {
 	parts := strings.Split(s, ",")
 	if len(parts) != want {
 		return nil, fmt.Errorf("%s erwartet %d Zahlen (%s), bekam %q", flag, want, shape, s)
@@ -186,8 +198,11 @@ func intList(s string, want int, flag, shape string) ([]int, error) {
 	out := make([]int, 0, want)
 	for _, p := range parts {
 		n, err := strconv.Atoi(strings.TrimSpace(p))
-		if err != nil || n <= 0 {
-			return nil, fmt.Errorf("%s: %q ist keine positive Zahl", flag, p)
+		if err != nil || n < low {
+			if low > 0 {
+				return nil, fmt.Errorf("%s: %q ist keine positive Zahl", flag, p)
+			}
+			return nil, fmt.Errorf("%s: %q ist keine Zahl ≥ %d", flag, p, low)
 		}
 		out = append(out, n)
 	}
