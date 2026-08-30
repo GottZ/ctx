@@ -208,12 +208,18 @@ func TestDistillConcurrency(t *testing.T) {
 	t.Run("PerSourceSerial", func(t *testing.T) {
 		dfTruncate(t, pool)
 		probe := newDCProbe(hold)
-		// The same four roots three times over, interleaved — the shape a source
-		// implementation outside ctxcheckpoint (whose GROUP BY cannot produce a
-		// duplicate) is free to hand over.
+		// The same four roots three times over, GROUPED (a a a b b b …) — the
+		// shape a source implementation outside ctxcheckpoint (whose GROUP BY
+		// cannot produce a duplicate) is free to hand over. Grouped rather than
+		// interleaved is load-bearing (review C6-A major 1): with interleaved
+		// duplicates and four workers over four roots the collision this test
+		// exists for cannot arise, and a chain gate reduced to "one ref, one
+		// chain" stays green. Grouped, that regression turns the assertion red.
 		var refs []distillsource.Ref
-		for range 3 {
-			refs = append(refs, dcRefs(4)...)
+		for _, r := range dcRefs(4) {
+			for range 3 {
+				refs = append(refs, r)
+			}
 		}
 		src := &dcSource{refs: refs, probe: probe}
 		cfg := dfConfig()

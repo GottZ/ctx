@@ -1663,6 +1663,24 @@ type SelectorConfig struct {
 	StatsTTL       time.Duration `key:"retrieval.selector.stats_ttl" env:"CTX_RETRIEVAL_SELECTOR_STATS_TTL" default:"60" mut:"hot" tenancy:"global-only"`
 }
 
+// DistillMaxConcurrency is the upper bound of distill.concurrency (wave C6-A),
+// exported because the arm clamps an UNVALIDATED snapshot against the same
+// number V34 refuses on.
+//
+// 16 is the DATABASE's number, not the GPU's. Every worker of a tick holds at
+// most one pooled connection at a time and never across its LLM call (the
+// distill path opens no transaction at all), but the pool is 20 connections for
+// the WHOLE daemon (store.NewPool) — guard, digest, dream, recall, the HTTP
+// surface and the NOTIFY listener share it. A ceiling above that would let one
+// background arm queue every other one behind itself, which is a starvation
+// mode rather than a throughput gain. It is also the bound dream.parallelism
+// has carried since V10, for the same pool.
+//
+// The GPU side is deliberately NOT encoded here: what a serving backend takes
+// in parallel is a property of the deployment, and the operator sets the key
+// against it. This constant only says where the ARM stops being able to help.
+const DistillMaxConcurrency = 16
+
 // DistillConfig is the ctxd distiller arm (Achse A03, design/03): a scheduler
 // arm that reads a FOREIGN, read-only SQLite state.db of an agent runtime,
 // selects archived tool output from it and distills it into insight blocks.
@@ -1693,23 +1711,6 @@ type SelectorConfig struct {
 // vanilla ctx install has no agent runtime next to it, and E03-1 requires that
 // ctx stays complete without one. A default-on arm would accumulate a journal
 // of "source unreachable" on every install that never asked for a distiller.
-// DistillMaxConcurrency is the upper bound of distill.concurrency (wave C6-A),
-// exported because the arm clamps an UNVALIDATED snapshot against the same
-// number V34 refuses on.
-//
-// 16 is the DATABASE's number, not the GPU's. Every worker of a tick holds at
-// most one pooled connection at a time and never across its LLM call (the
-// distill path opens no transaction at all), but the pool is 20 connections for
-// the WHOLE daemon (store.NewPool) — guard, digest, dream, recall, the HTTP
-// surface and the NOTIFY listener share it. A ceiling above that would let one
-// background arm queue every other one behind itself, which is a starvation
-// mode rather than a throughput gain. It is also the bound dream.parallelism
-// has carried since V10, for the same pool.
-//
-// The GPU side is deliberately NOT encoded here: what a serving backend takes
-// in parallel is a property of the deployment, and the operator sets the key
-// against it. This constant only says where the ARM stops being able to help.
-const DistillMaxConcurrency = 16
 
 type DistillConfig struct {
 	// Enabled is gate 0 (§4.2). A disabled arm writes NO journal row at all —
