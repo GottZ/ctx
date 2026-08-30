@@ -358,3 +358,87 @@ func TestDistillRetentionN13(t *testing.T) {
 		}
 	})
 }
+
+// TestDistillRetentionKeepsActiveBackoffTrips ist der permanente Nachzug zu
+// Review-Auflage 1: das Journal hat einen DRITTEN Leser. distillResting leitet
+// den Budget-Back-off aus den Trip-Zeilen im spend_backoff-Fenster ab — ein
+// Retention-Horizont, der kürzer ist als der Back-off, hob vor der
+// Trip-Klausel eine aktive Ruhepause auf (gemessen: distillResting
+// true -> false über einen Janitor-Lauf). Erreichbar nicht nur über einen
+// langen Back-off, sondern über das SENKEN von retention_days — genau den
+// Knopf, den diese Welle scharf macht; validate.go koppelt die beiden
+// Schlüssel nicht.
+//
+// Die Gegenrichtung gehört zur selben Sonde: jenseits des Back-off-Fensters
+// ist eine Trip-Zeile eine gewöhnliche Journal-Zeile und fällt.
+func TestDistillRetentionKeepsActiveBackoffTrips(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	pool := testdb.SetupTestDB(t)
+	a8Truncate(t, pool)
+	const root = "20260830_150000_c5btrip"
+	key := distillSourceKey(dfLabel, dfScope, root)
+	a6Clean(t, pool, root, key)
+
+	cfg := c5bConfig(t, 90, 30)
+	cfg.Distill.SpendBackoff = 200 * 24 * time.Hour
+	s := dfScheduler(pool, cfg, nil)
+
+	base := time.Now().Add(-6 * time.Hour)
+	c5bTicks(t, pool, cfg, root, base, []string{"alpha", "beta"})
+
+	// Der Trip entsteht über den Produktions-Schreibpfad und wird dann auf
+	// 100 Tage gealtert: jenseits retention_days=90, innerhalb
+	// spend_backoff=200 Tage. Die übrigen alten Zeilen altern über beide
+	// Fenster und verlieren mit dem jungen Lauf unten beide Schutzregeln.
+	s.distillTrip(ctx, key, "c5b-trip-sonde")
+	if _, err := pool.Exec(ctx, `UPDATE distill_run SET started_at = now() - interval '100 days'
+		 WHERE source_key = $1 AND outcome = 'budget_tripped'`, key); err != nil {
+		t.Fatalf("Trip altern: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE distill_run SET started_at = now() - interval '400 days'
+		 WHERE source_key = $1 AND outcome <> 'budget_tripped'`, key); err != nil {
+		t.Fatalf("Journal altern: %v", err)
+	}
+	c5bTicks(t, pool, cfg, root, base.Add(10*time.Minute), []string{"delta"})
+
+	restBefore, err := s.distillResting(ctx, key, cfg.Distill.SpendBackoff)
+	if err != nil {
+		t.Fatalf("resting vorher: %v", err)
+	}
+	if !restBefore {
+		t.Fatal("Fixture verfehlt: kein aktiver Back-off vor dem Purge — die Sonde misst nichts")
+	}
+
+	s.runSixHourJanitor(ctx)
+
+	restAfter, err := s.distillResting(ctx, key, cfg.Distill.SpendBackoff)
+	if err != nil {
+		t.Fatalf("resting nachher: %v", err)
+	}
+	trips := 0
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM distill_run
+		 WHERE source_key = $1 AND outcome = 'budget_tripped'`, key).Scan(&trips); err != nil {
+		t.Fatalf("Trips zählen: %v", err)
+	}
+	t.Logf("Trip im Back-off-Fenster: Zeilen %d, distillResting %v -> %v", trips, restBefore, restAfter)
+	if !restAfter || trips != 1 {
+		t.Fatalf("der Purge hat den aktiven Back-off angetastet: distillResting %v -> %v, "+
+			"Trip-Zeilen %d (want 1) — Review-Auflage 1", restBefore, restAfter, trips)
+	}
+
+	// Gegenrichtung: 300 Tage alt liegt AUSSERHALB des 200-Tage-Fensters; ohne
+	// aktiven Leser ist die Trip-Zeile gewöhnlich und fällt am Horizont.
+	if _, err := pool.Exec(ctx, `UPDATE distill_run SET started_at = now() - interval '300 days'
+		 WHERE source_key = $1 AND outcome = 'budget_tripped'`, key); err != nil {
+		t.Fatalf("Trip weiter altern: %v", err)
+	}
+	s.runSixHourJanitor(ctx)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM distill_run
+		 WHERE source_key = $1 AND outcome = 'budget_tripped'`, key).Scan(&trips); err != nil {
+		t.Fatalf("Trips zählen: %v", err)
+	}
+	if trips != 0 {
+		t.Fatalf("eine Trip-Zeile jenseits des Back-off-Fensters überlebt den Horizont: %d Zeilen", trips)
+	}
+}

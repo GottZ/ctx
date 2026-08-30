@@ -40,10 +40,17 @@
 //     watermark_to. Keeping it keeps max(watermark_to), which IS the watermark.
 //   - the NEWEST row of any outcome, because distillSameAnswer reads exactly
 //     that row (distill.go:1366-1373) to decide whether a diagnostic row would
-//     repeat what the journal already says. Losing it does not cost
-//     correctness — an ancient trip row is outside every back-off window
-//     (distillResting) — but it would let the janitor change what the arm
-//     WRITES, and a retention sweep may change what is stored and nothing else.
+//     repeat what the journal already says. Losing it would let the janitor
+//     change what the arm WRITES, and a retention sweep may change what is
+//     stored and nothing else.
+//   - every budget-trip row still inside distill.spend_backoff, because there
+//     is a THIRD journal reader: distillResting derives the active back-off
+//     from exactly those rows (distill_spend.go). A retention horizon shorter
+//     than the back-off would otherwise lift an active rest and change what
+//     the arm SPENDS — review C5-B condition 1 measured that lift
+//     (distillResting true -> false across one janitor run) before this
+//     clause existed. Nothing couples the two keys in validation, so the
+//     clause, not the operator, carries the invariant.
 //
 // Running rows are exempt from the sweep entirely. Their watermark_to is not in
 // the derivation yet, but the startup sweep turns them into killed rows WITHOUT
@@ -61,6 +68,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"time"
 )
 
 // runDistillRetention is the ninth line of the 6h janitor bundle (§6.2,
@@ -83,7 +91,7 @@ func (s *Scheduler) runDistillRetention(ctx context.Context) {
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: distiller retention is a server-global janitor policy over two process-wide bookkeeping tables, not tenant-scoped.
 	runDays, seenDays := cfg.Distill.RetentionDays, cfg.Distill.SeenRetentionDays
 
-	runs, err := s.distillPurgeRuns(ctx, runDays)
+	runs, err := s.distillPurgeRuns(ctx, runDays, cfg.Distill.SpendBackoff)
 	if err != nil {
 		slog.Warn("scheduler: distiller journal retention failed", "error", err)
 	}
@@ -128,13 +136,17 @@ func (s *Scheduler) distillPurgeSeen(ctx context.Context, days int) (int64, erro
 // started_at, keeping the two rows per source_key the arm still reads (see the
 // file header for which two and why).
 //
-// The two EXISTS clauses ARE those two statements, one each, in the only form
-// that needs no aggregate and no window: a row may go when a STRICTLY BETTER
-// watermark carrier and a STRICTLY NEWER row of the same source both still
-// stand. Both orders are total — the row constructors break every tie on
-// run_id, which is the primary key — so exactly one row is unbeatable per
-// order, and that row is the one that survives. A source whose whole journal is
-// older than the horizon therefore keeps one or two rows, never zero.
+// The two EXISTS clauses and the trip clause ARE those three statements, one
+// each. The EXISTS pair needs no aggregate and no window: a row may go when a
+// STRICTLY BETTER watermark carrier and a STRICTLY NEWER row of the same
+// source both still stand. Both orders are total — the row constructors break
+// every tie on run_id, which is the primary key — so exactly one row is
+// unbeatable per order, and that row is the one that survives. A source whose
+// whole journal is older than the horizon therefore keeps one or two rows,
+// never zero. The trip clause shields what distillResting still reads: a
+// budget-trip row younger than the back-off window stays regardless of the
+// horizon. A backoff of zero or less builds an empty window and leaves the
+// clause inert, consistent with that half's documented off-switch.
 //
 // The cost is a self-join over the source's own rows rather than a plain time
 // scan, and the migration sized that deliberately: it declined a full
@@ -142,7 +154,7 @@ func (s *Scheduler) distillPurgeSeen(ctx context.Context, days int) (int64, erro
 // Quelle" and a second complete time axis would be write load without a reader
 // (135:194-199). idx_distill_run_source (source_key, watermark_to DESC) serves
 // the first EXISTS; the wave report carries the measured plan.
-func (s *Scheduler) distillPurgeRuns(ctx context.Context, days int) (int64, error) {
+func (s *Scheduler) distillPurgeRuns(ctx context.Context, days int, backoff time.Duration) (int64, error) {
 	if days <= 0 {
 		return 0, nil
 	}
@@ -150,6 +162,8 @@ func (s *Scheduler) distillPurgeRuns(ctx context.Context, days int) (int64, erro
 		DELETE FROM distill_run d
 		 WHERE d.started_at < now() - make_interval(days => $1)
 		   AND d.outcome <> $2
+		   AND NOT (d.outcome = $3
+		            AND d.started_at > now() - make_interval(secs => $4))
 		   AND EXISTS (
 		           SELECT 1 FROM distill_run w
 		            WHERE w.source_key = d.source_key
@@ -160,7 +174,7 @@ func (s *Scheduler) distillPurgeRuns(ctx context.Context, days int) (int64, erro
 		           SELECT 1 FROM distill_run n
 		            WHERE n.source_key = d.source_key
 		              AND (n.started_at, n.run_id) > (d.started_at, d.run_id))`,
-		days, distillOutcomeRunning)
+		days, distillOutcomeRunning, distillOutcomeBudgetTripped, backoff.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("distill: run journal retention delete: %w", err)
 	}
