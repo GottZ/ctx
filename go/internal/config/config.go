@@ -1693,6 +1693,24 @@ type SelectorConfig struct {
 // vanilla ctx install has no agent runtime next to it, and E03-1 requires that
 // ctx stays complete without one. A default-on arm would accumulate a journal
 // of "source unreachable" on every install that never asked for a distiller.
+// DistillMaxConcurrency is the upper bound of distill.concurrency (wave C6-A),
+// exported because the arm clamps an UNVALIDATED snapshot against the same
+// number V34 refuses on.
+//
+// 16 is the DATABASE's number, not the GPU's. Every worker of a tick holds at
+// most one pooled connection at a time and never across its LLM call (the
+// distill path opens no transaction at all), but the pool is 20 connections for
+// the WHOLE daemon (store.NewPool) — guard, digest, dream, recall, the HTTP
+// surface and the NOTIFY listener share it. A ceiling above that would let one
+// background arm queue every other one behind itself, which is a starvation
+// mode rather than a throughput gain. It is also the bound dream.parallelism
+// has carried since V10, for the same pool.
+//
+// The GPU side is deliberately NOT encoded here: what a serving backend takes
+// in parallel is a property of the deployment, and the operator sets the key
+// against it. This constant only says where the ARM stops being able to help.
+const DistillMaxConcurrency = 16
+
 type DistillConfig struct {
 	// Enabled is gate 0 (§4.2). A disabled arm writes NO journal row at all —
 	// only a debug log — which is what keeps a vanilla install's journal empty.
@@ -1812,6 +1830,42 @@ type DistillConfig struct {
 	// not the call budget — those are two mechanisms (spend_max_calls is the
 	// other one), and the design names conflating them as a first-draft error.
 	MaxSessionsPerRun int `key:"distill.max_sessions_per_run" env:"CTX_DISTILL_MAX_SESSIONS_PER_RUN" default:"4" mut:"hot" tenancy:"global-only"`
+	// Concurrency is how many SOURCES of one tick may run at the same time
+	// (wave C6-A). It sits next to MaxSessionsPerRun because the two bound the
+	// same list from two sides: that one says how many candidates a tick takes,
+	// this one how many of them are in flight at once.
+	//
+	// THE UNIT IS THE SOURCE, NEVER THE CALL, and that is the whole shape of the
+	// key rather than an implementation note. Inside one root session everything
+	// stays strictly sequential, because the watermark of a run is only moved by
+	// a COMPLETE batch prefix ("PROCESSED means reached a call",
+	// distill_extract.go): two calls of one source in flight would either move a
+	// watermark over material no call covered, or need a second state source to
+	// remember which parts of the prefix are still open — and "es gibt keine
+	// zweite Zustandsquelle" (135:42) is this arm's contract. Between two root
+	// sessions none of that applies: their journal rows, their dedup ledgers and
+	// their blocks are keyed on the root, so they share nothing but the tick's
+	// own ceilings.
+	//
+	// DEFAULT 1 IS TODAY'S BEHAVIOUR EXACTLY, not "a pool of one": at 1 no
+	// goroutine is started at all and the tick walks its candidates in the
+	// calling goroutine, under the same recover and in the same order as before
+	// this wave. Raising it is the operator's decision about their serving side,
+	// which is where the number belongs — the arm cannot see how many parallel
+	// requests the backend behind the digest role will take.
+	//
+	// WHAT IT COSTS ON THE CEILINGS is named rather than left to be measured
+	// (§4.6.2's own posture): both spend axes count what has LANDED — the window
+	// query over context_llm_log between ticks, the in-run GPU meter after each
+	// call — so with N sources in flight up to N-1 calls can be paid for that no
+	// ceiling had seen yet when they were licensed. That overshoot is bounded by
+	// the concurrency, it does not grow with the backlog, and it is the same
+	// class the guard already documents for its once-per-tick window read.
+	//
+	// The upper bound is DistillMaxConcurrency; V34 refuses both ends rather
+	// than clamping, for the house reason (a value that renders as configured
+	// and acts as something else).
+	Concurrency int `key:"distill.concurrency" env:"CTX_DISTILL_CONCURRENCY" default:"1" mut:"hot" tenancy:"global-only"`
 
 	// ── Selection (§4.3) ───────────────────────────────────────────────────
 	//

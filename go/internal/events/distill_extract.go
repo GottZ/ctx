@@ -53,6 +53,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -315,15 +316,30 @@ type distillExtractResult struct {
 //
 // A meter with remainingMS <= 0 is OFF, matching the two window ceilings whose
 // 0 is their own kill switch.
+//
+// SINCE WAVE C6-A THE COUNTER IS ATOMIC, because the meter is the one piece of
+// a tick that every source worker shares — that sharing is what makes it a TICK
+// ceiling rather than a per-source one (distill.go), and with
+// distill.concurrency > 1 the sources booking into it are goroutines.
+// remainingMS stays a plain field: it is written once, before the first worker
+// exists, and only read afterwards.
+//
+// WHAT PARALLELISM COSTS THE CEILING is the same class the spend guard already
+// documents for its once-per-tick window read, one level down: the brake is
+// asked BEFORE a call and booked AFTER it, so with N sources in flight up to
+// N-1 calls can already be running when the meter reaches its ceiling. The
+// overshoot is bounded by the concurrency and by one call's duration, it does
+// not grow with the backlog, and it stays on the conservative side of the same
+// wall-clock measurement the doc above describes.
 type distillGPUMeter struct {
 	remainingMS int64
-	spentMS     int64
+	spentMS     atomic.Int64
 }
 
 // exhausted reports whether the ceiling is reached. >= rather than >, the same
 // reading distillTripped takes: a budget of 240 means 240 seconds have been had.
 func (m *distillGPUMeter) exhausted() bool {
-	return m != nil && m.remainingMS > 0 && m.spentMS >= m.remainingMS
+	return m != nil && m.remainingMS > 0 && m.spentMS.Load() >= m.remainingMS
 }
 
 // add books one call's elapsed time.
@@ -331,7 +347,7 @@ func (m *distillGPUMeter) add(d time.Duration) {
 	if m == nil {
 		return
 	}
-	m.spentMS += d.Milliseconds()
+	m.spentMS.Add(d.Milliseconds())
 }
 
 // distillGPURemaining is what the plan hands the meter: the ceiling minus what
@@ -1324,7 +1340,7 @@ func (s *Scheduler) distillExtract(ctx context.Context, t distillTick, items []d
 		}
 		if t.gpu.exhausted() {
 			slog.Warn("scheduler: distiller reached its in-run GPU ceiling",
-				"spent_ms", t.gpu.spentMS, "remaining_ms", t.gpu.remainingMS)
+				"spent_ms", t.gpu.spentMS.Load(), "remaining_ms", t.gpu.remainingMS)
 			res.stop = distillSkipBudget
 			return res
 		}

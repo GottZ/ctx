@@ -79,7 +79,8 @@ func Validate(c *Config) []Issue {
 
 // validateDistill holds the cross-field invariants of the distiller group
 // (design/03 §5.4, §5.5, §6.4; wave A03-W03-3, plus V27 from wave C2-8,
-// V28-V30 from wave A02-4, V31 from wave A02-6 and V33 from wave C5-E).
+// V28-V30 from wave A02-4, V31 from wave A02-6, V33 from wave C5-E and V34 from
+// wave C6-A).
 // All of them are fatal: boot drops the offending
 // override, a settings PUT is a 422 — the class every "renders as configured,
 // acts as something else" knob in this file gets.
@@ -184,6 +185,7 @@ func validateDistill(c *Config) []Issue {
 	issues = append(issues, validateDistillBudget(d)...) // V24
 	issues = append(issues, validateDistillCounters(d)...)
 	issues = append(issues, validateDistillNoveltyFloor(d)...) // V33
+	issues = append(issues, validateDistillConcurrency(d)...)  // V34
 	issues = append(issues, validateDistillSpendWindow(d)...)  // V32
 	issues = append(issues, validateDistillCtxSource(d)...)    // V28, V29, V30
 	issues = append(issues, validateDistillDryRunDir(d)...)    // V31
@@ -572,6 +574,40 @@ func validateDistillNoveltyFloor(d *DistillConfig) []Issue {
 	return []Issue{{Field: "distill.novelty_floor", Severity: SeverityError,
 		Msg: fmt.Sprintf("distill.novelty_floor %v must be within [0, 1] — novelty is a share of a claim's token set (derived.Adequacy), so a negative value would be a second, silent off-switch next to the documented 0, and a value above 1 would let the arm keep calling while every claim it produces is discarded",
 			d.NoveltyFloor)}}
+}
+
+// validateDistillConcurrency is V34 (wave C6-A): the tick's source fan-out has
+// to stay inside the range the arm can actually serve.
+//
+// BOTH ENDS ARE REFUSED RATHER THAN CLAMPED, which is the V33 shape and not the
+// V10 one, and the difference is the mutability class. dream.parallelism is
+// mut:"restart" and its clamp is a boot-time WARN an operator reads in the same
+// log line as the start-up; this key is hot, so a clamp would answer a settings
+// PUT with 200 and then run a number the surface never shows. That is the
+// "renders as configured, acts as something else" class this file refuses.
+//
+//   - BELOW 1 is the off-switch shape: 0 would be a tick that touches no source
+//     at all while every gate reports healthy — the silent null operation D-02
+//     §4.2.1(b) wants to see red — and the arm HAS an off-switch, distill.enabled,
+//     which journals its answer.
+//   - ABOVE DistillMaxConcurrency is the starvation shape: the pool is 20
+//     connections for the whole daemon (store.NewPool), so a fan-out beyond the
+//     bound queues guard, digest, dream and the HTTP surface behind one
+//     background arm. The ceiling is the arm's, never the serving side's — what
+//     a backend takes in parallel is the operator's number, and it is capped
+//     here only where the DATABASE stops.
+//
+// The runtime keeps its own clamp for the unvalidated snapshot (events.
+// distillConcurrency, the distillInterval shape) — not as a second policy, but
+// because a hand-built Config that never passed this function must not turn a
+// zero into an arm that silently does nothing.
+func validateDistillConcurrency(d *DistillConfig) []Issue {
+	if d.Concurrency >= 1 && d.Concurrency <= DistillMaxConcurrency {
+		return nil
+	}
+	return []Issue{{Field: "distill.concurrency", Severity: SeverityError,
+		Msg: fmt.Sprintf("distill.concurrency %d must be within [1, %d] — it counts the SOURCES of one tick that may run at the same time, so a value below 1 would be a silent second off-switch next to distill.enabled (a tick that touches no source while every gate reports healthy), and a value above %d would queue every other arm behind the distiller on a %d-connection pool; inside one source the arm stays sequential either way, because only a complete batch prefix may move a watermark",
+			d.Concurrency, DistillMaxConcurrency, DistillMaxConcurrency, 20)}}
 }
 
 // validateEmbedBackoff is V21 (issue #38): the two embed back-off bases must

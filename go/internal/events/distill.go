@@ -39,6 +39,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -307,6 +308,17 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 	// read could not yet see, so a per-source meter would reproduce it.
 	gpu := &distillGPUMeter{remainingMS: plan.gpuRemainingMS}
 
+	// THE UNNAMEABLE ROOTS ARE ANSWERED HERE, IN THE TICK'S OWN GOROUTINE, and
+	// since wave C6-A that placement is load-bearing rather than incidental:
+	// their journal row goes under the TICK key (see below), which is the ONE
+	// key of this tick that is not per source. Answering them inside the fan-out
+	// would put two workers on one watermark series — the very state the arm
+	// refuses on the corpus side one paragraph down — and the state-change rule
+	// of §4.5.3 would read a row another worker had not written yet. Everything
+	// past this filter is keyed on a root and therefore disjoint.
+	//
+	// The order of the runnable candidates is untouched.
+	runnable := make([]distillsource.Ref, 0, len(refs))
 	for _, ref := range refs {
 		if ctx.Err() != nil {
 			return true // shutdown mid-tick; the remaining roots wait for the next one
@@ -346,78 +358,200 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 			s.distillFail(ctx, tickKey, "", distillErrSchemaUntrusted)
 			continue
 		}
-		// The guard's dispatch, and it distinguishes a POLICY answer from a
-		// FAULT. A trip writes the transition row that starts the back-off; a
-		// rest is the ordinary skip that follows it; a fault is a failure row
-		// carrying an error class, because "budget" on the journal's only
-		// surface would name a policy where a database outage stood (review #6).
-		// All three are throttled by the state-change rule of §4.5.3 — a
-		// permanently braked or permanently broken arm would otherwise write 96
-		// identical rows a day per source, and the first row already carries the
-		// timestamp that makes the state visible.
-		switch plan.verdict(ref.Session) {
-		case distillVerdictTrip:
-			s.distillTrip(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session), ref.Session)
-			continue
-		case distillVerdictRest:
-			s.distillSkip(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session),
-				ref.Session, distillSkipBudget, false)
-			continue
-		case distillVerdictFail:
-			s.distillFail(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session),
-				ref.Session, distillErrQueryFailed)
-			continue
-		case distillVerdictRun:
-		}
-		s.distillSession(ctx, distillTick{
-			src:      src,
-			label:    d.CtxSourceLabel,
-			scope:    scope,
-			dumpDir:  dumpDir,
-			maxItems: d.RowsPerRead,
-			// The call's values (A02-8), and the tick's own GPU meter. The meter
-			// is built from the SAME window read the plan rests on, so the
-			// in-run ceiling and the between-tick ceiling are one number seen
-			// from two sides (distill_spend.go:222-239).
-			opts: distillCallOpts{
-				numPredict:      d.NumPredict,
-				timeout:         d.CallTimeout,
-				rowsPerCall:     d.RowsPerCall,
-				breakerFailures: d.BreakerFailures,
-				breakerCooldown: d.BreakerCooldown,
-				// The substance floor of C5-E travels with the call values: it
-				// screens inside distillOneCall, and a hot change must not move
-				// it between two calls of one run any more than num_predict may.
-				noveltyFloor: d.NoveltyFloor,
-			},
-			gpu: gpu,
-			// The write side (A02-9). The scope is the ALREADY RESOLVED one of
-			// gate 5, never re-read from the config here: the gate refused a
-			// forbidden scope for this tick, and a second resolution could
-			// answer differently after a hot change.
-			write: distillWriteOpts{
-				category:    d.Category,
-				scope:       scope,
-				typeName:    d.BlockType,
-				sensitivity: d.BlockSensitivity,
-				maxRunes:    d.MaxBlockRunes,
-				sourceLabel: d.CtxSourceLabel,
-				// The shard cap travels with the identity values (wave W-L3): it
-				// decides which shard a run may open, so a hot change must not move
-				// it mid-run any more than a changed category may.
-				maxShards: d.MaxBlocksPerRoot,
-			},
-			// The clamp of THIS tick, carried to the journal rather than
-			// enforced: the call it bounds arrives with A02-8.
-			callBudget: plan.perSource,
-			// Taken as configured, never clamped: the sizing keys are
-			// config.validateDistillCounters' authority (validate.go:409-429),
-			// and a clamp here would be a second one with the opposite policy.
-			maxRunes: d.MaxRowRunes,
-			minRunes: d.MinRowRunes,
-		}, ref.Session)
+		runnable = append(runnable, ref)
 	}
+
+	// THE FAN-OUT (wave C6-A). Everything below one worker is unchanged; what
+	// distill.concurrency decides is only how many of these run at the same
+	// time, and the chains distillChains builds are what keeps one root inside
+	// one worker.
+	distillFanOut(ctx, distillConcurrency(d.Concurrency), distillChains(runnable),
+		func(ctx context.Context, ref distillsource.Ref) {
+			// The guard's dispatch, and it distinguishes a POLICY answer from a
+			// FAULT. A trip writes the transition row that starts the back-off; a
+			// rest is the ordinary skip that follows it; a fault is a failure row
+			// carrying an error class, because "budget" on the journal's only
+			// surface would name a policy where a database outage stood (review #6).
+			// All three are throttled by the state-change rule of §4.5.3 — a
+			// permanently braked or permanently broken arm would otherwise write 96
+			// identical rows a day per source, and the first row already carries the
+			// timestamp that makes the state visible.
+			//
+			// EVERY ROW OF THIS DISPATCH IS KEYED ON THE ROOT, which is why the
+			// state-change rule survives the fan-out: distillSameAnswer reads the
+			// newest row of the SAME source_key, and no two workers of a tick
+			// share one.
+			switch plan.verdict(ref.Session) {
+			case distillVerdictTrip:
+				s.distillTrip(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session), ref.Session)
+				return
+			case distillVerdictRest:
+				s.distillSkip(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session),
+					ref.Session, distillSkipBudget, false)
+				return
+			case distillVerdictFail:
+				s.distillFail(ctx, distillSourceKey(d.CtxSourceLabel, scope, ref.Session),
+					ref.Session, distillErrQueryFailed)
+				return
+			case distillVerdictRun:
+			}
+			s.distillSession(ctx, distillTick{
+				src:      src,
+				label:    d.CtxSourceLabel,
+				scope:    scope,
+				dumpDir:  dumpDir,
+				maxItems: d.RowsPerRead,
+				// The call's values (A02-8), and the tick's own GPU meter. The meter
+				// is built from the SAME window read the plan rests on, so the
+				// in-run ceiling and the between-tick ceiling are one number seen
+				// from two sides (distill_spend.go:222-239).
+				opts: distillCallOpts{
+					numPredict:      d.NumPredict,
+					timeout:         d.CallTimeout,
+					rowsPerCall:     d.RowsPerCall,
+					breakerFailures: d.BreakerFailures,
+					breakerCooldown: d.BreakerCooldown,
+					// The substance floor of C5-E travels with the call values: it
+					// screens inside distillOneCall, and a hot change must not move
+					// it between two calls of one run any more than num_predict may.
+					noveltyFloor: d.NoveltyFloor,
+				},
+				gpu: gpu,
+				// The write side (A02-9). The scope is the ALREADY RESOLVED one of
+				// gate 5, never re-read from the config here: the gate refused a
+				// forbidden scope for this tick, and a second resolution could
+				// answer differently after a hot change.
+				write: distillWriteOpts{
+					category:    d.Category,
+					scope:       scope,
+					typeName:    d.BlockType,
+					sensitivity: d.BlockSensitivity,
+					maxRunes:    d.MaxBlockRunes,
+					sourceLabel: d.CtxSourceLabel,
+					// The shard cap travels with the identity values (wave W-L3): it
+					// decides which shard a run may open, so a hot change must not move
+					// it mid-run any more than a changed category may.
+					maxShards: d.MaxBlocksPerRoot,
+				},
+				// The clamp of THIS tick, carried to the journal rather than
+				// enforced: the call it bounds arrives with A02-8.
+				callBudget: plan.perSource,
+				// Taken as configured, never clamped: the sizing keys are
+				// config.validateDistillCounters' authority (validate.go:409-429),
+				// and a clamp here would be a second one with the opposite policy.
+				maxRunes: d.MaxRowRunes,
+				minRunes: d.MinRowRunes,
+			}, ref.Session)
+		})
 	return true
+}
+
+// distillConcurrency clamps the tick's fan-out, and it is distillInterval's
+// shape rather than the "no clamp next to a validator" of the sizing keys
+// (distill_select.go, review #4). The difference is what the two zeros DO: a
+// rows_per_call of 0 makes a run that visibly journals no call, while a
+// concurrency of 0 would be a tick that touches no source at all while every
+// gate reports healthy. config.validateDistillConcurrency (V34) is the one
+// authority an operator meets — this is the defence against a Config that never
+// passed it, and it clamps to the same range.
+func distillConcurrency(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return min(n, config.DistillMaxConcurrency)
+}
+
+// distillChains groups the tick's candidates so that ONE ROOT IS ONE CHAIN,
+// walked by one worker in the order it arrived.
+//
+// The invariant it buys is the one the watermark rests on: two workers on one
+// root would be two runs on one source_key — two `running` rows, two writers on
+// one dedup ledger, and two derivations of a watermark that is defined as the
+// maximum over non-running rows (135:29-42). The production source cannot hand
+// out a duplicate (its candidate query is a GROUP BY over the root,
+// ctxcheckpoint.go:191-203), which is exactly why the guarantee belongs here
+// rather than in a comment about it: the arm reads through the distillsource
+// interface, and the interface promises no such thing.
+//
+// Nothing is dropped and nothing is reordered that was not already the same
+// root: the chains come out in order of first appearance, so a duplicate-free
+// list — every production list — walks in its original order at concurrency 1.
+func distillChains(refs []distillsource.Ref) [][]distillsource.Ref {
+	chains := make([][]distillsource.Ref, 0, len(refs))
+	at := make(map[string]int, len(refs))
+	for _, ref := range refs {
+		// The key is the session VERBATIM, because that is what
+		// distillSourceKey interpolates — a trimmed key would merge two roots
+		// the journal keeps apart.
+		if i, ok := at[ref.Session]; ok {
+			chains[i] = append(chains[i], ref)
+			continue
+		}
+		at[ref.Session] = len(chains)
+		chains = append(chains, []distillsource.Ref{ref})
+	}
+	return chains
+}
+
+// distillFanOut runs the tick's chains over at most `workers` goroutines and
+// returns when the last of them is done.
+//
+// THE POOL IS workers-1 GOROUTINES PLUS THE CALLER'S OWN. At concurrency 1 no
+// goroutine is started at all: the tick walks its chains in the goroutine that
+// called it, under distillOnce's own recover and in the same order as every
+// wave before C6-A. The default is therefore not "a pool of one" but literally
+// the loop that stood here.
+//
+// EVERY WORKER RECOVERS FOR ITSELF, because a panic in a goroutine takes the
+// process down past the two recovers this arm already has (runDistiller,
+// distillOnce). The caller's own share deliberately does NOT recover here — its
+// panic still unwinds into distillOnce, which is where it landed before.
+//
+// The join is DEFERRED rather than called at the end: it must also happen when
+// the caller's share panics, because distillOnce's deferred src.Close() runs
+// right after and a worker still reading the source would be reading a closed
+// one.
+func distillFanOut(ctx context.Context, workers int, chains [][]distillsource.Ref,
+	work func(context.Context, distillsource.Ref),
+) {
+	// Buffered to the full length and closed up front, so there is no producer
+	// goroutine to shut down: a worker that stops early leaves its chains in a
+	// closed channel nobody has to drain.
+	queue := make(chan []distillsource.Ref, len(chains))
+	for _, chain := range chains {
+		queue <- chain
+	}
+	close(queue)
+
+	drain := func() {
+		for chain := range queue {
+			for _, ref := range chain {
+				if ctx.Err() != nil {
+					return // shutdown mid-tick; the remaining roots wait for the next one
+				}
+				work(ctx, ref)
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+	// Never more workers than chains: an idle goroutine would still be one the
+	// shutdown has to join.
+	for range min(workers, len(chains)) - 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("scheduler: panic in a distiller source worker",
+						"error", r, "stack", string(debug.Stack()))
+				}
+			}()
+			drain()
+		}()
+	}
+	defer wg.Wait()
+	drain()
 }
 
 // distillTick is what one tick hands every session it processes: the reader and
