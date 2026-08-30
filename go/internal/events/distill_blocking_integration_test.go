@@ -89,6 +89,20 @@ func TestDistillBlockingArm(t *testing.T) {
 	cfg.Distill.Interval = time.Second // park almost immediately
 	cfg.Scheduler.HomeScope = "private"
 
+	// Run() starts the NOTIFY listener, and its boot backlog REPLACES this
+	// programmatic snapshot with one rebuilt from env + settings rows
+	// (settings.Reload → store.Replace). Whether that replace happens depends
+	// on the environment: with CONTEXT_DB_PASSWORD present (CI, ci.yml:569)
+	// the rebuild validates and the arm boots DISABLED from the env defaults;
+	// without it (a bare dev shell) the rebuild is rejected and this snapshot
+	// stays. The test must not depend on which of the two happens, so the env
+	// carries the same three values that differ from the defaults — both paths
+	// converge on the same effective config. Everything else the test sets
+	// (source label, category, sessions, rows, home scope) IS the default.
+	t.Setenv("CTX_DISTILL_ENABLED", "true")
+	t.Setenv("CTX_DISTILL_CTX_ENABLED", "true")
+	t.Setenv("CTX_DISTILL_INTERVAL", "1")
+
 	// A REAL backend pool over the test database: Run starts the NOTIFY
 	// listener, and its settings-write handler reloads the pool on the boot
 	// backlog — a pool without a database dereferences nil there.
