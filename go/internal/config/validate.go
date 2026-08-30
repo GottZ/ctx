@@ -73,13 +73,14 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
-	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V32
+	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
 	return issues
 }
 
 // validateDistill holds the cross-field invariants of the distiller group
 // (design/03 §5.4, §5.5, §6.4; wave A03-W03-3, plus V27 from wave C2-8,
-// V28-V30 from wave A02-4 and V31 from wave A02-6). All of them are fatal: boot drops the offending
+// V28-V30 from wave A02-4, V31 from wave A02-6 and V33 from wave C5-E).
+// All of them are fatal: boot drops the offending
 // override, a settings PUT is a 422 — the class every "renders as configured,
 // acts as something else" knob in this file gets.
 //
@@ -182,9 +183,10 @@ func validateDistill(c *Config) []Issue {
 
 	issues = append(issues, validateDistillBudget(d)...) // V24
 	issues = append(issues, validateDistillCounters(d)...)
-	issues = append(issues, validateDistillSpendWindow(d)...) // V32
-	issues = append(issues, validateDistillCtxSource(d)...)   // V28, V29, V30
-	issues = append(issues, validateDistillDryRunDir(d)...)   // V31
+	issues = append(issues, validateDistillNoveltyFloor(d)...) // V33
+	issues = append(issues, validateDistillSpendWindow(d)...)  // V32
+	issues = append(issues, validateDistillCtxSource(d)...)    // V28, V29, V30
+	issues = append(issues, validateDistillDryRunDir(d)...)    // V31
 	return issues
 }
 
@@ -544,6 +546,32 @@ func validateDistillCounters(d *DistillConfig) []Issue {
 			Msg: "distill.source_label must not be empty — it is the stable half of the journal's source key, and an empty label would merge the watermark series of every configured source into one"})
 	}
 	return issues
+}
+
+// validateDistillNoveltyFloor is V33 (wave C5-E): the per-claim substance floor
+// has to stay inside the range its own quantity has.
+//
+// novelty is |claim tokens \ quote tokens| / |claim tokens| (derived.Adequacy),
+// so it lives in [0, 1] by construction. Both ends are refused for the SAME
+// house reason and with different consequences:
+//
+//   - A NEGATIVE floor renders as a configured threshold and acts as an
+//     off-switch, which the group already has one documented reading for (0).
+//   - A floor ABOVE 1 is the sharper failure: no claim can reach it, so the arm
+//     keeps calling, keeps paying GPU seconds and writes NOTHING, while the
+//     settings surface still shows a threshold. That is not "the arm is off",
+//     it is "the arm is silently empty" — the shape the arm's own error class
+//     for a permanently braked run cannot distinguish from a bad generator.
+//
+// Exactly 1 stays legal: it says "every token of the claim must be the model's
+// own", which is a defensible, extreme policy and not a nonsense value.
+func validateDistillNoveltyFloor(d *DistillConfig) []Issue {
+	if d.NoveltyFloor >= 0 && d.NoveltyFloor <= 1 {
+		return nil
+	}
+	return []Issue{{Field: "distill.novelty_floor", Severity: SeverityError,
+		Msg: fmt.Sprintf("distill.novelty_floor %v must be within [0, 1] — novelty is a share of a claim's token set (derived.Adequacy), so a negative value would be a second, silent off-switch next to the documented 0, and a value above 1 would let the arm keep calling while every claim it produces is discarded",
+			d.NoveltyFloor)}}
 }
 
 // validateEmbedBackoff is V21 (issue #38): the two embed back-off bases must

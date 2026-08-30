@@ -88,11 +88,11 @@ func g3Assert(t *testing.T, name string, in distillInsight, want string) {
 		t.Fatalf("%s: faellt an %v, want genau {g3} — ein anderes Tor maskiert die Sonde",
 			name, dxKeys(fails))
 	}
-	if got, bad := distillScreen(in, shown); !bad || got != "g3" {
+	if got, bad := distillScreen(in, shown, dxFloorOff); !bad || got != "g3" {
 		t.Fatalf("%s: distillScreen = (%q, %v), want (\"g3\", true)", name, got, bad)
 	}
 
-	kept, rejects, g3 := distillGate([]distillInsight{in}, shown)
+	kept, rejects, g3 := distillGate([]distillInsight{in}, shown, dxFloorOff)
 	if len(kept) != 0 || rejects["g3"] != 1 {
 		t.Fatalf("%s: distillGate kept %d, rejects %v", name, len(kept), rejects)
 	}
@@ -182,7 +182,7 @@ func TestDistillG3PrecedenceIsTheSmallestErrorFirst(t *testing.T) {
 		Claim: g3Claim1, Quote: dup,
 		Block: "1", Chunk: 1, Kind: derived.KindFinding,
 	}
-	_, rejects, g3 := distillGate([]distillInsight{in}, shown)
+	_, rejects, g3 := distillGate([]distillInsight{in}, shown, dxFloorOff)
 	if rejects["g3"] != 1 {
 		t.Fatalf("die Sonde trifft G3 nicht: %v", rejects)
 	}
@@ -223,7 +223,7 @@ func TestDistillG3DecompositionIsExact(t *testing.T) {
 		{Claim: g3Claim1, Quote: "zu kurz", Block: "1", Chunk: 1, Kind: derived.KindFinding},
 	}
 
-	kept, rejects, g3 := distillGate(batch, shown)
+	kept, rejects, g3 := distillGate(batch, shown, dxFloorOff)
 	t.Logf("kept=%d rejects=%v g3=%v", len(kept), rejects, g3)
 
 	if len(kept) != 1 {
@@ -300,7 +300,7 @@ func TestDistillG3ForeignChunkIsSearchedBeforeItsComposedRun(t *testing.T) {
 	if !fails["g3"] || len(fails) != 1 {
 		t.Fatalf("die Sonde fällt an %v, want genau {g3}", dxKeys(fails))
 	}
-	_, rejects, g3 := distillGate([]distillInsight{in}, shown)
+	_, rejects, g3 := distillGate([]distillInsight{in}, shown, dxFloorOff)
 	if rejects["g3"] != 1 {
 		t.Fatalf("die Sonde trifft G3 nicht: %v", rejects)
 	}

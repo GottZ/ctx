@@ -793,7 +793,20 @@ func distillHasControlRunes(s string) bool {
 // "schema" is likewise not a gate but the PARSER's bucket (distillDecode). It
 // belongs in the same histogram because insights_rejected counts it: without it
 // the sum would not be the decomposition of that column.
-var distillRejectKeys = []string{"g1", "g2", "g3", "g4", "g5", "g6", "g7", "schema"}
+//
+// "novelty" IS THE NINTH KEY AND IT EXTENDS THE EQUATION (wave C5-E,
+// 151_distill_novelty_floor.sql). It is not an evidence gate either but the
+// SUBSTANCE floor that runs after G7, and it belongs here for "schema"'s reason
+// exactly: insights_rejected counts a line the floor discarded, so leaving the
+// key out would turn the histogram from a decomposition into a subset. The
+// equation the journal carries is therefore
+//
+//	sum(g1..g7) + schema + novelty == insights_rejected
+//
+// and its eight-term predecessor is, from this wave on, a gap rather than a
+// statement — distill_novelty_integration_test.go's Sonde 6 asserts both halves
+// so nobody can restore the old form and stay green.
+var distillRejectKeys = []string{"g1", "g2", "g3", "g4", "g5", "g6", "g7", "schema", "novelty"}
 
 // distillNewRejects returns the zeroed histogram. ALL eight keys, always — a
 // zero and an absent key must not be distinguishable (the rule
@@ -968,23 +981,29 @@ func (ix distillG3Index) classify(in distillInsight) string {
 	return "none"
 }
 
-// distillGate runs the seven screens over every insight of ONE call and returns
-// the survivors, the per-gate reject counts, and G3's sub-histogram.
+// distillGate runs the seven evidence screens plus the substance floor over
+// every insight of ONE call and returns the survivors, the per-gate reject
+// counts, and G3's sub-histogram.
 //
 // Cheap before expensive, and each screen is reachable on its own — that is
 // what makes the eleven negative probes of §7.2 nameable one at a time.
 //
+// floor is distill.novelty_floor out of the tick's snapshot; 0 is the
+// documented off-switch and makes this function byte-for-byte the pre-C5-E gate
+// (the screen is not reached, and derived.Adequacy is not even computed).
+//
 // The rejected TEXTS are deliberately not returned and never logged: a line may
 // have failed G5 precisely because it carries a secret (derived/citegate.go:123).
 // The G3 sub-histogram keeps that posture: it counts WHERE a quote stands, never
-// what it says.
-func distillGate(ins []distillInsight, shown distillShown) ([]distillInsight, map[string]int, map[string]int) {
+// what it says — and the novelty counter keeps it too: it counts HOW MANY claims
+// fell under the floor and never which words they used.
+func distillGate(ins []distillInsight, shown distillShown, floor float64) ([]distillInsight, map[string]int, map[string]int) {
 	rejects := distillNewRejects()
 	g3 := distillNewG3()
 	var ix *distillG3Index
 	kept := make([]distillInsight, 0, len(ins))
 	for _, in := range ins {
-		if key, bad := distillScreen(in, shown); bad {
+		if key, bad := distillScreen(in, shown, floor); bad {
 			rejects[key]++
 			if key == "g3" {
 				if ix == nil {
@@ -1001,7 +1020,7 @@ func distillGate(ins []distillInsight, shown distillShown) ([]distillInsight, ma
 }
 
 // distillScreen returns the key of the FIRST gate one insight fails.
-func distillScreen(in distillInsight, shown distillShown) (string, bool) {
+func distillScreen(in distillInsight, shown distillShown, floor float64) (string, bool) {
 	chunk, ok := shown.text[distillChunkKey{block: in.Block, chunk: in.Chunk}]
 	switch {
 	case !ok:
@@ -1032,8 +1051,52 @@ func distillScreen(in distillInsight, shown distillShown) (string, bool) {
 		// G7 — the only screen on the claim: lexical coverage, the four kinds,
 		// and the instruction negative list.
 		return "g7", true
+	case floor > 0 && distillBelowNoveltyFloor(in, floor):
+		// THE SUBSTANCE FLOOR (wave C5-E) — and it is LAST on purpose, in three
+		// separate senses:
+		//
+		//  1. It needs a claim AND a verified quote. Before G3 the quote is not
+		//     yet known to be the shown material at all, and a floor measured
+		//     against a fabricated quote would answer about a text nobody has.
+		//  2. It must not take mass out of an existing bucket. The g1..g7 series
+		//     of the measurement waves (X-W4, A02-M2, C3-3, C4-R, C5-A-M) is the
+		//     comparison base of every prompt iteration; a line that fails G7
+		//     books g7 exactly as it did before this wave, and only a line that
+		//     passed all seven can reach the floor.
+		//  3. It is the only screen an operator can switch off, so it is also the
+		//     only one whose position must be irrelevant to the others. With
+		//     floor = 0 the switch is not evaluated and the gate is the old gate.
+		//
+		// The rejected line is DISCARDED, never re-prompted and never fed back:
+		// there is NO feedback path from this floor into the prompt (W19). The
+		// arm learns nothing from it; it only stops paying for it in the corpus.
+		return "novelty", true
 	}
 	return "", false
+}
+
+// distillBelowNoveltyFloor is the substance floor's predicate: the share of the
+// claim's tokens that do NOT stand in its quote, strictly under the floor.
+//
+// IT DELEGATES TO derived.Adequacy AND DOES NOT RE-IMPLEMENT IT. That is the
+// load-bearing property of this wave rather than tidiness: derived.Report's
+// novelty quantiles — the numbers entscheid C5-2 states the wave criterion in,
+// and the numbers C5-A-M measured the case for this floor with — come from the
+// same function over the same tokeniser (evalscore.TokenSet). A second
+// implementation would give the gate and the instrument two different orderings
+// of the same claims, and every comparison between "what the floor discards"
+// and "what below_floor_share reports" would silently be a comparison of two
+// quantities.
+//
+// STRICTLY UNDER, not "at or under": a claim whose novelty EQUALS the floor has
+// met it. The distinction is not cosmetic at the value that matters — novelty 0
+// is reached exactly and never approached (adequacy.go returns a literal 0 for
+// the empty claim set, and an integer ratio 0/n is exact), so every floor above
+// 0 discards every verbatim copy, and no floor discards a claim that stands
+// precisely on the policy.
+func distillBelowNoveltyFloor(in distillInsight, floor float64) bool {
+	_, novelty := derived.Adequacy(in.Claim, in.Quote)
+	return novelty < floor
 }
 
 // distillBreaksOut is G4: promptguard.Neutralize had to break at least one
@@ -1193,6 +1256,16 @@ type distillCallOpts struct {
 	rowsPerCall     int
 	breakerFailures int
 	breakerCooldown time.Duration
+	// noveltyFloor is distill.novelty_floor (wave C5-E), resolved here for the
+	// reason the whole struct exists: the gate of a call must not change while
+	// the tick that opened it is still running, or two calls of one run would be
+	// screened against two different policies and their journal row would be the
+	// sum of both.
+	//
+	// It sits with the CALL values and not with the write values because the
+	// screen runs inside distillOneCall — before anything is resolved onto the
+	// corpus and long before a block is rendered.
+	noveltyFloor float64
 }
 
 // Below: the batch's extraction.
@@ -1337,6 +1410,16 @@ func (m *distillCallMeter) add() {
 // too. The project empiricism behind it is written at topiclabel/guard.go:40-42
 // — the model's self-assessment is unusable as a gate, so the verifiable axis
 // takes its place.
+//
+// SINCE C5-E THE SUBSTANCE FLOOR CAN TRIP THAT DEFINITION, and it is named here
+// rather than discovered in an incident: a call that answers with nothing but
+// verbatim quote copies now ends with kept == 0 and books a fault, where before
+// this wave it ended with a full set of perfectly anchored copies. That is the
+// intended reading — a generator that only copies IS failing at this arm's task,
+// and the same three-strikes rest applies to it as to a generator that quotes
+// material it never saw. The measured lower bound on how often that happens is
+// C5-A-M's zero_share of 5,85 % PER CLAIM; a whole call of them is far rarer,
+// and the cooldown is 15 minutes, not a lockout.
 func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []distillsource.Item,
 	res *distillExtractResult, runes *distillRuneMeter,
 ) string {
@@ -1393,7 +1476,7 @@ func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []d
 		slog.Warn("scheduler: distiller answer was cut at the output ceiling",
 			"backend", backend, "num_predict", t.opts.numPredict, "salvaged", offered)
 	}
-	kept, rejects, g3 := distillGate(ins, shown)
+	kept, rejects, g3 := distillGate(ins, shown, t.opts.noveltyFloor)
 	for k, v := range rejects {
 		res.rejects[k] += v
 	}

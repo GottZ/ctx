@@ -108,6 +108,15 @@ func dxShown() distillShown {
 	}
 }
 
+// dxFloorOff is the substance floor of wave C5-E, switched off — the value
+// every probe of the seven EVIDENCE gates runs under, and it is passed
+// explicitly rather than defaulted so each of them says which policy it
+// measured. The floor has its own probes (distill_novelty_test.go and, over the
+// production write path, distill_novelty_integration_test.go); mixing it in here
+// would change what the eleven cases below are about, because dxOK's claim is
+// itself a shortened copy of dxQuote and would fall at any floor above 0.
+const dxFloorOff = 0.0
+
 // dxOK is the insight every case below mutates: it passes all seven gates.
 func dxOK() distillInsight {
 	return distillInsight{Claim: dxClaim, Quote: dxQuote, Block: dxBlock, Chunk: 1, Kind: derived.KindFinding}
@@ -156,12 +165,12 @@ func dxAssert(t *testing.T, name string, in distillInsight, want string) {
 		t.Fatalf("%s: fails %v, want exactly {%s} — another gate masks the probe, so it does not show %s is load-bearing",
 			name, dxKeys(fails), want, want)
 	}
-	got, bad := distillScreen(in, shown)
+	got, bad := distillScreen(in, shown, dxFloorOff)
 	if !bad || got != want {
 		t.Fatalf("%s: distillScreen = (%q, %v), want (%q, true)", name, got, bad, want)
 	}
 	// The counting surface must book it under the same key.
-	kept, rejects, g3 := distillGate([]distillInsight{in}, shown)
+	kept, rejects, g3 := distillGate([]distillInsight{in}, shown, dxFloorOff)
 	if len(kept) != 0 || rejects[want] != 1 {
 		t.Fatalf("%s: distillGate kept %d, rejects %v", name, len(kept), rejects)
 	}
@@ -201,7 +210,7 @@ func TestDistillGateKeepsAGroundedInsight(t *testing.T) {
 	if fails := distillGateFailures(dxOK(), shown); len(fails) != 0 {
 		t.Fatalf("the grounded reference insight fails %v — the fixture, not the gate, is wrong", dxKeys(fails))
 	}
-	kept, rejects, g3 := distillGate([]distillInsight{dxOK()}, shown)
+	kept, rejects, g3 := distillGate([]distillInsight{dxOK()}, shown, dxFloorOff)
 	if len(kept) != 1 {
 		t.Fatalf("kept %d insights, want 1 (rejects %v)", len(kept), rejects)
 	}
@@ -392,7 +401,7 @@ func TestDistillGateRejectsProseInstructions(t *testing.T) {
 	if fails := distillGateFailures(in, dxShown()); fails["g4"] {
 		t.Fatal("G4 fired on prose — then the probe is not BA2b's case")
 	}
-	got, bad := distillScreen(in, dxShown())
+	got, bad := distillScreen(in, dxShown(), dxFloorOff)
 	if !bad || got != "g7" {
 		t.Fatalf("distillScreen = (%q, %v), want (\"g7\", true)", got, bad)
 	}
@@ -458,7 +467,7 @@ func TestDistillProseInjectionResidue(t *testing.T) {
 			Block: dxBlock, Chunk: 1, Kind: derived.KindFinding,
 		}
 		cov := distillCoverage(derived.Normalize(c.claim), derived.Normalize(dxChunk))
-		gate, bad := distillScreen(in, shown)
+		gate, bad := distillScreen(in, shown, dxFloorOff)
 		verdict := "kept"
 		if bad {
 			verdict = "rejected at " + gate
@@ -589,7 +598,7 @@ func TestDistillPromptCarriesTheBlockAddress(t *testing.T) {
 
 	// An insight addressed the way the prompt shows it survives the gate.
 	in := distillInsight{Claim: dxClaim, Quote: dxQuote, Block: "1", Chunk: 1, Kind: derived.KindFinding}
-	if gate, bad := distillScreen(in, shown); bad {
+	if gate, bad := distillScreen(in, shown, dxFloorOff); bad {
 		t.Fatalf("an insight using the rendered address failed %s — G1 is unreachable in production", gate)
 	}
 }
@@ -666,7 +675,7 @@ func TestDistillG3VerifiesTheAssembledPayload(t *testing.T) {
 	if !strings.Contains(long, in.Quote) {
 		t.Fatal("fixture error: the quote is not verbatim in the reader's item")
 	}
-	if gate, bad := distillScreen(in, shown); !bad || gate != "g3" {
+	if gate, bad := distillScreen(in, shown, dxFloorOff); !bad || gate != "g3" {
 		t.Fatalf("distillScreen = (%q, %v), want (\"g3\", true) — a quote from the cut-away part is not evidence",
 			gate, bad)
 	}
@@ -827,7 +836,7 @@ func TestDistillDecode(t *testing.T) {
 		in := ins[0]
 		in.Block, in.Chunk = dxBlock, 1
 		in.Quote = dxQuote
-		if gate, bad := distillScreen(in, dxShown()); !bad || gate != "g7" {
+		if gate, bad := distillScreen(in, dxShown(), dxFloorOff); !bad || gate != "g7" {
 			t.Fatalf("the smuggled claim screens as (%q, %v), want a g7 rejection", gate, bad)
 		}
 	})

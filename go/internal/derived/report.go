@@ -19,6 +19,13 @@ import (
 // a POLICY and are named as one — 0,15 says "at least one claim token in seven
 // has to be the model's own wording", and §4.8 puts the target at 0,30 with
 // 0,15 as the refusal floor.
+//
+// THE KEY distill.novelty_floor IS NOT A COUNTER-EXAMPLE TO THAT (wave C5-E).
+// It configures the ARM's write-path screen, whose default IS
+// GoodhartMinNovelty, and its 0 does not soften this verdict — it only returns
+// the arm to writing what it wrote before the floor existed. The number a run
+// is JUDGED by stays here, uneditable, whatever the arm was configured to
+// discard.
 const (
 	GoodhartMinGrounding = 0.95
 	GoodhartMinNovelty   = 0.15
@@ -108,11 +115,29 @@ type GateReport struct {
 	// here so that criterion can be read off the instrument instead of
 	// recomputed beside it.
 	//
-	// THEY ARE OUTPUT AND NOT A GATE. judge() is untouched: a per-claim novelty
-	// floor in the write path is a decision that belongs AFTER the diagnosis,
-	// and building the workaround before the cause is known is how a measurement
-	// wave loses its own subject. Whoever installs the floor will find the
-	// numbers already measured here.
+	// THEY ARE OUTPUT AND NOT A GATE — in THIS package, and that has not
+	// changed: judge() is untouched, and the five values below are computed and
+	// reported, never enforced here.
+	//
+	// THE ARM'S WRITE PATH NOW HAS ONE (wave C5-E, migration 151). The diagnosis
+	// this wave waited for was made: C5-A-M measured p10 = 0,0385, 27,1 % of
+	// published claims below GoodhartMinNovelty and 5,85 % at exactly 0 on the
+	// root stand, and the E-6 full backfill would have written that tail into
+	// the corpus once and for good. The distiller therefore screens each claim
+	// against distill.novelty_floor (default GoodhartMinNovelty, 0 = off) after
+	// its seven evidence gates and books the discard in distill_run.rej_novelty.
+	//
+	// WHICH MOVES WHAT THESE FIVE NUMBERS DESCRIBE, and it is stated here rather
+	// than left to be discovered: they are computed over the claims a charge
+	// KEPT (see the type comment), so for a run of the armed arm they describe
+	// the distribution AFTER the floor — the C5-2 wave criterion ("p10 ≥ 0,15
+	// UND Anteil novelty 0 ≤ 1 %") is from that wave on a statement about the
+	// published layer, not about what the generator offered. The BEFORE-picture
+	// did not disappear with it: rej_novelty counts, per run, exactly how many
+	// claims the floor removed from this distribution, so the pre-gate lage
+	// stays readable next to the post-gate one instead of being replaced by it.
+	// A report over an UNARMED run (floor 0, and every measurement up to and
+	// including C5-A-M) is unchanged in meaning.
 	//
 	// NoveltyN is the size of the set all five describe. It equals ClaimsKept by
 	// construction — the medians and quantiles are over the SURVIVORS (see the

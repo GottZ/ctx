@@ -2072,6 +2072,53 @@ type DistillConfig struct {
 	// explicitly requires to be a plain accept.
 	BlockSensitivity backends.Sensitivity `key:"distill.block_sensitivity" env:"CTX_DISTILL_BLOCK_SENSITIVITY" default:"credentials" mut:"hot" tenancy:"global-only"`
 
+	// ── The substance floor (§4.4, wave C5-E) ──────────────────────────────
+	//
+	// NoveltyFloor is the per-claim minimum of derived.Adequacy's `novelty` —
+	// the share of a claim's tokens that do NOT stand in the quote it cites.
+	// A claim below it is discarded in the write path instead of written, and
+	// the discard is counted in distill_run.rej_novelty (migration 151).
+	//
+	// WHY THIS IS A KEY AND THE GOODHART THRESHOLDS ARE NOT. derived's own
+	// comment refuses a config key for GoodhartMinNovelty in as many words: "a
+	// gate whose threshold is a settings write is not a gate (W19)". That
+	// refusal is about the REPORT's verdict — the instrument by which the arm
+	// is judged, which an operator must not be able to soften. This key is the
+	// opposite direction: it makes the write path STRICTER than the report's
+	// verdict, and its 0 does not soften a verdict but restores the behaviour
+	// every measurement so far ran under. The report keeps judging at
+	// GoodhartMinNovelty either way.
+	//
+	// DEFAULT 0,15 IS derived.GoodhartMinNovelty, deliberately and not by
+	// coincidence: the report's below_floor_share counts exactly the claims
+	// this floor discards, so the gate and the instrument measure ONE border
+	// rather than two. The coupling is pinned by a test rather than left to
+	// this sentence (distill_c5e_test.go), because a struct tag cannot carry a
+	// constant. Wave C5-A-M measured what that border holds on the root stand:
+	// p10 = 0,0385, 27,1 % of published claims below 0,15 and 5,85 % at exactly
+	// 0 — verbatim quote copies that every one of G1-G7 passes, because each of
+	// them is a perfectly anchored citation (adequacy.go: "G0-G7 cannot catch
+	// that").
+	//
+	// 0 IS THE DOCUMENTED OFF-SWITCH, the same reading distill.retention_days
+	// and the two spend ceilings give their own zero: the floor is not applied,
+	// the counter stays 0, and the arm behaves exactly as it did before this
+	// wave. It is fail-safe in the direction that matters — an unset value
+	// yields the registry default and therefore the floor, and only an explicit
+	// 0 turns it off.
+	//
+	// The upper bound is 1 and V33 refuses anything above it: novelty is a
+	// share of a token set, so a floor above 1 rejects every claim the arm
+	// ever produces while the settings surface keeps rendering it as a
+	// threshold — the "renders as configured, acts as an off-switch" class this
+	// file refuses everywhere else, here in its sharpest form (it would not
+	// disable the arm, it would silently empty it).
+	//
+	// Hot like the rest of the group: the arm resolves it into the tick's
+	// snapshot (distillCallOpts), so a change reaches the next tick and never
+	// the one in flight.
+	NoveltyFloor float64 `key:"distill.novelty_floor" env:"CTX_DISTILL_NOVELTY_FLOOR" default:"0.15" mut:"hot" tenancy:"global-only"`
+
 	// ── The spend guard (§4.6) ─────────────────────────────────────────────
 	//
 	// The division of labor is explicit and taken from the reference

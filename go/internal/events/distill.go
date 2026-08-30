@@ -385,6 +385,10 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 				rowsPerCall:     d.RowsPerCall,
 				breakerFailures: d.BreakerFailures,
 				breakerCooldown: d.BreakerCooldown,
+				// The substance floor of C5-E travels with the call values: it
+				// screens inside distillOneCall, and a hot change must not move
+				// it between two calls of one run any more than num_predict may.
+				noveltyFloor: d.NoveltyFloor,
 			},
 			gpu: gpu,
 			// The write side (A02-9). The scope is the ALREADY RESOLVED one of
@@ -1141,6 +1145,11 @@ var distillWriteBarrier = func(context.Context) error { return nil }
 // they decompose rej_g3 the way rej_g3 decomposes insights_rejected, so the row
 // carries two nested equalities and both are summable over a retention window
 // without a join.
+//
+// THE NINTH OF 151 (wave C5-E) JOINS THE OUTER EQUATION, not a third level: the
+// substance floor is a reason a line was rejected, so its counter belongs beside
+// rej_g1..rej_schema and the equation reads sum(g1..g7)+schema+novelty =
+// insights_rejected from this wave on.
 func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillLedger, wm int64) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE distill_run
@@ -1166,6 +1175,7 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		       rej_g3_span       = rej_g3_span + $22,
 		       rej_g3_part       = rej_g3_part + $23,
 		       rej_g3_none       = rej_g3_none + $24,
+		       rej_novelty       = rej_novelty + $25,
 		       watermark_to      = GREATEST(watermark_to, $7)
 		 WHERE run_id = $1::uuid`,
 		runID, l.seen, l.selected, l.droppedCred, l.droppedDup, l.chars, wm,
@@ -1179,7 +1189,11 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		l.groupsShrunk,
 		// The four of 150, in the same spelled-out form and in the order the
 		// classification asks its questions (distillG3Index.classify).
-		l.g3["chunk"], l.g3["span"], l.g3["part"], l.g3["none"])
+		l.g3["chunk"], l.g3["span"], l.g3["part"], l.g3["none"],
+		// The ninth bucket of the FIRST histogram (151, wave C5-E) — it stands
+		// here and not next to rej_schema above because the column order of the
+		// UPDATE follows the migrations, not the equation.
+		l.rejects["novelty"])
 	if err != nil {
 		return fmt.Errorf("distill: advancing run row %s: %w", runID, err)
 	}

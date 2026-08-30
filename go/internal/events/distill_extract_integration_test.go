@@ -315,6 +315,14 @@ func a8Config() *config.Config {
 	// test config bypasses the validator.
 	c.Distill.SpendWindow = time.Hour
 	c.Distill.SpendBackoff = 2 * time.Hour
+	// THE SUBSTANCE FLOOR OF C5-E STAYS OFF HERE, and that is a named decision
+	// rather than the Go zero value going unnoticed: a8Claim is a shortened copy
+	// of a8Quote, i.e. novelty exactly 0, so every probe that answers with the
+	// default stub would keep nothing at the registry default of 0,15 and would
+	// measure the floor instead of its own subject. The floor is measured where
+	// it belongs — nvConfig in distill_novelty_integration_test.go sets it
+	// explicitly, including a probe on the registry default itself.
+	c.Distill.NoveltyFloor = 0
 	return c
 }
 

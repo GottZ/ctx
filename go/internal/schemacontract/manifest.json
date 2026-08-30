@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 150,
-    "migration_count": 38,
+    "migration_max": 151,
+    "migration_count": 39,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3579,6 +3579,12 @@
         },
         {
           "name": "rej_g3_none",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_novelty",
           "type": "integer",
           "not_null": true,
           "storage": "p"

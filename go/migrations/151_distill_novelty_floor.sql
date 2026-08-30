@@ -1,0 +1,109 @@
+-- =============================================================================
+-- 151_distill_novelty_floor.sql — der Zaehler des Per-Claim-Novelty-Floors
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- Wissens-Ebenen, Welle C5-E (Entscheide C5-1/C5-2, Checkpoint #5). Setzt den
+-- Befund aus reports/bau/c5-a-m-messung.md §7.4 um.
+--
+-- NUMMER: Masterplan §2 K1 — "wer zuerst landet, nimmt die naechste freie".
+-- Gelandet ist 150 (G3-Zerlegung), also ist 151 die naechste freie; sie ist fuer
+-- diese Welle reserviert, und K1 ist geprueft (keine zweite Migrations-Welle
+-- laeuft parallel).
+--
+-- ── DER BEFUND ───────────────────────────────────────────────────────────────
+-- novelty — der Anteil der Claim-Tokens, die NICHT im zitierten Text stehen —
+-- existierte im Baum ausschliesslich als REPORT-Groesse (derived.Adequacy, seit
+-- C5-A auch als Verteilung in derived.Report). Im Schreibpfad hielt sie nichts
+-- auf. Die Mess-Welle C5-A-M hat das auf dem root-Stand beziffert:
+--
+--   p10 = 0,0385 · Anteil novelty < 0,15 = 27,1 % · Anteil novelty = 0 = 5,85 %
+--
+-- Das ist kein Randphaenomen, sondern die Klasse, gegen die die Kennzahl gebaut
+-- wurde: drei der Null-novelty-Claims waren woertliche Zitat-Kopien
+-- (compression 1,0). Die sieben Tore koennen sie nicht sehen — jede einzelne von
+-- ihnen ist eine PERFEKT VERANKERTE Zitation, und genau das sagt der
+-- Modul-Kommentar von derived/adequacy.go seit seiner ersten Fassung:
+-- "G0-G7 cannot catch that". Ohne Floor haette der E-6-Voll-Backfill bei
+-- unveraenderter Verteilung projizierte ~4 970 Claims unter 0,15 und ~1 070 bei
+-- exakt 0 dauerhaft in den Bestand geschrieben (Hochrechnung ebd. §8, Basis
+-- ~18 300 veroeffentlichte Insights) — und einen Re-Distill-Pfad gibt es nicht.
+--
+-- ── WAS DIESE MIGRATION IST ──────────────────────────────────────────────────
+-- EINE additive Zaehlerspalte auf distill_run, NOT NULL DEFAULT 0, kein Index,
+-- kein Trigger, kein Constraint auf Bestandszeilen, keine Datenzeile angefasst.
+-- Sie ist der ACHTE EIMER der Zerlegung von insights_rejected und damit die
+-- sichtbare Erweiterung der Gleichung, die 149 eingefuehrt hat:
+--
+--   ALT (149):  sum(rej_g1..rej_g7) + rej_schema                 = insights_rejected
+--   NEU (151):  sum(rej_g1..rej_g7) + rej_schema + rej_novelty   = insights_rejected
+--
+-- Die alte Form ist ab dieser Migration NICHT MEHR die Zerlegung: ein
+-- Floor-Verwurf zaehlt in insights_rejected (distillOneCall bucht
+-- offered - len(kept)), erscheint aber in keiner der acht alten Spalten. Wer die
+-- alte Summe weiterrechnet, misst ab hier eine Luecke statt einer Gleichung —
+-- deshalb steht die Erweiterung hier und nicht in einem Report.
+--
+-- KEIN BACKFILL, aus demselben Grund wie bei 149 und 150: die frueheren Laeufe
+-- hatten dieses Tor nicht, ihre Claims sind geschrieben, und eine nachtraeglich
+-- berechnete Zahl waere eine Behauptung ueber ein Gate, das nie lief. Der neue
+-- Summand ist auf jeder Bestandszeile 0, und die erweiterte Gleichung erbt die
+-- alten Zeilen deshalb unveraendert, statt sie zu brechen.
+--
+-- ── WARUM EIN EIGENES TOR UND NICHT g7 ───────────────────────────────────────
+-- G7 fragt, ob die AUSSAGE vom Chunk getragen wird (lexikalische Deckung, Art,
+-- Imperativ-Negativliste). Der Floor fragt das Gegenteil: ob die Aussage GENUG
+-- EIGENES gegenueber ihrem Zitat traegt. Beide in einen Eimer zu buchen waere
+-- die Vermengung, die 150 fuer g3 gerade aufgeloest hat — und sie waere teurer
+-- als dort: die g1..g7-Reihe der Mess-Wellen X-W4 / A02-M2 / C3-3 / C4-R /
+-- C5-A-M ist die Vergleichsbasis, an der jede Prompt-Iteration gemessen wird,
+-- und ein Tor, das ploetzlich fremde Masse traegt, macht sie unlesbar. Der Floor
+-- laeuft deshalb NACH G7 und bucht in eine eigene Spalte: kein Verwurf wandert
+-- aus einem bestehenden Eimer in den neuen.
+--
+-- ── WARUM KEIN CHECK AUF DIE SUMME ───────────────────────────────────────────
+-- Unveraendert die drei Gruende von 149/150, und der erste gilt hier mit
+-- doppelter Kraft: JEDE Zeile aus der Zeit vor dieser Welle verletzt die neue
+-- Form nicht, wohl aber jede Zeile, deren Buchung reisst — und ein CHECK
+-- muesste zur schwachen Form "<=" abgeschwaecht werden, die den stillen
+-- Nullfall nicht faengt (0 <= n ist immer wahr). Ein verletzter CHECK toetet
+-- ausserdem den GANZEN Lauf ueber einen Buchungsfehler in einer
+-- Beobachtungsgroesse. Die Invariante wird dort durchgesetzt, wo sie den stillen
+-- Nullfall faengt: als Gate-Sonde ueber den echten Schreibpfad
+-- (internal/events/distill_novelty_integration_test.go, Sonde 6, die die neue
+-- Form prueft UND die alte als unzureichend belegt).
+--
+-- ── KOSTEN ───────────────────────────────────────────────────────────────────
+-- Eine INTEGER-Spalte mit nicht-volatilem DEFAULT: PostgreSQL schreibt die
+-- Tabelle dafuer seit 11 nicht neu (der Default landet in
+-- pg_attribute.attmissingval), der ADD COLUMN ist ein Katalog-Eintrag. Kein
+-- Leser bekommt eine neue Index-Last, weil kein Index entsteht.
+--
+-- Die LAUFZEIT-Kosten stehen im Arm und sind eine Token-Menge je Claim, der
+-- alle sieben Tore passiert hat (derived.Adequacy ueber evalscore.TokenSet) —
+-- also nur auf dem schmalsten Teil des Stroms und nur, solange der Floor
+-- ueberhaupt scharf ist: bei distill.novelty_floor = 0 wird die Groesse nicht
+-- berechnet.
+--
+-- Additiv, forward-only, IF NOT EXISTS (Muster 119/130/135/149/150). Ein Re-Run
+-- ist folgenlos.
+-- =============================================================================
+
+SET LOCAL lock_timeout = '2s';
+
+-- ── Der achte Eimer (§4.3, das Tor NACH G7) ──────────────────────────────────
+-- Der Schluessel ist der des Arms (distillRejectKeys: "novelty"). Er zaehlt
+-- WIEVIELE Claims unter dem Floor lagen und NIE, welche — der verworfene Text
+-- verlaesst den Arm nicht (distill_extract.go, Kopf von distillGate), und ein
+-- Zaehler haelt diese Haltung.
+ALTER TABLE distill_run ADD COLUMN IF NOT EXISTS rej_novelty INTEGER NOT NULL DEFAULT 0;
+
+COMMENT ON COLUMN distill_run.rej_novelty IS
+    'Kein Tor der Evidenz, sondern der Substanz-Floor NACH G7: die novelty des Claims (Anteil der Claim-Tokens ausserhalb seines Zitats, derived.Adequacy) lag unter distill.novelty_floor. Bei novelty_floor = 0 ist das Tor aus und die Spalte bleibt 0. sum(rej_g1..rej_g7) + rej_schema + rej_novelty = insights_rejected.';
+
+-- Und die Gleichung, die auf rej_schema steht, wird auf denselben Stand
+-- gebracht. 149 ist dafuer NICHT editiert worden — gelandete Migrationen bleiben
+-- byte-identisch; der Kommentar ist Datenbank-Zustand, und ihn stehen zu lassen
+-- hiesse, im System eine Gleichung zu fuehren, die ab dieser Migration falsch
+-- ist.
+COMMENT ON COLUMN distill_run.rej_schema IS
+    'Kein Tor, sondern der Parser: von distillDecode abgewiesene Zeilen (unbekanntes Feld, leeres Pflichtfeld, Steuerzeichen). sum(rej_g1..rej_g7) + rej_schema + rej_novelty = insights_rejected (seit 151; bis dahin ohne rej_novelty).';
