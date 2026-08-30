@@ -33,6 +33,7 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -275,6 +276,12 @@ func distillRowHash(text string) []byte {
 // The ledger is keyed (source_key, row_hash) (135:208-213) and source_key
 // carries the scope (§4.5.1), so a hash seen in one scope never silences a
 // chunk in another.
+//
+// IT ALSO WRITES, and that is wave C5-B rather than a side effect that crept
+// in: a ledger hit IS the sighting last_seen is named after, and this is the
+// only place in the arm where one is observed. distillMarkSeen cannot do it —
+// it books the prefix that reached a CALL (§4.5.4), and a repeat never gets
+// that far because the loop below drops it first. See distillTouchSeen.
 func (s *Scheduler) distillDedup(ctx context.Context, key string, items []distillsource.Item) ([]distillsource.Item, [][]byte, int, error) {
 	if len(items) == 0 {
 		return nil, nil, 0, nil
@@ -298,16 +305,23 @@ func (s *Scheduler) distillDedup(ctx context.Context, key string, items []distil
 	}
 	defer rows.Close()
 	seen := make(map[string]bool, len(probe))
+	// The ledger hits, kept as bytes for the touch below. Only these: the
+	// in-batch repeats marked further down have no row yet, and an UPDATE
+	// against them would be a statement about nothing.
+	met := make([][]byte, 0, len(probe))
 	for rows.Next() {
 		var h []byte
 		if err := rows.Scan(&h); err != nil {
 			return nil, nil, 0, fmt.Errorf("distill: scanning dedup ledger: %w", err)
 		}
 		seen[string(h)] = true
+		met = append(met, bytes.Clone(h))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, 0, fmt.Errorf("distill: reading dedup ledger for %q: %w", key, err)
 	}
+	rows.Close()
+	s.distillTouchSeen(ctx, key, met)
 
 	keptItems := make([]distillsource.Item, 0, len(items))
 	keptHashes := make([][]byte, 0, len(items))
@@ -328,12 +342,48 @@ func (s *Scheduler) distillDedup(ctx context.Context, key string, items []distil
 	return keptItems, keptHashes, dropped, nil
 }
 
+// distillTouchSeen slides last_seen forward for the hashes this batch met
+// again — the producing half of the horizon distill.seen_retention_days
+// deletes on (wave C5-B).
+//
+// IT IS NOT COSMETIC BOOKKEEPING. The design's horizon is "a hash is useful for
+// as long as the same output keeps coming back" (135:49-50), and the ON CONFLICT
+// DO UPDATE in distillMarkSeen was written to carry it. It cannot: a returning
+// chunk is dropped by distillDedup BEFORE anything reaches distillMarkSeen, so
+// the conflict branch never fires on a repeat and last_seen stood at INSERT
+// time for the life of the row. Measured before this line existed: a chunk
+// re-listed by a later manifest fell as a duplicate while its ledger row stayed
+// 400 days old (wave report, red probe 2) — which under a consumer on that
+// column is the cyclic test run "payable again every 30 days" that the comment
+// promised to prevent, and at 1M+ blocks the arm's dominant cost item
+// (135:222-227).
+//
+// The existing gate could not see it: it asserts last_seen > now() - 1 minute
+// with the INSERTING run seconds earlier in the same test
+// (distill_select_integration_test.go:342-355), which is true either way.
+//
+// Failure is logged and dropped, deliberately. This is housekeeping on the read
+// path of a batch that is about to be selected, dumped and extracted; a ledger
+// that could not be touched costs at worst one re-purchase after the horizon,
+// while failing the batch would cost the whole tick.
+func (s *Scheduler) distillTouchSeen(ctx context.Context, key string, hashes [][]byte) {
+	if len(hashes) == 0 {
+		return
+	}
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE distill_seen SET last_seen = now()
+		 WHERE source_key = $1 AND row_hash = ANY($2::bytea[])`, key, hashes); err != nil {
+		slog.Warn("scheduler: distiller dedup ledger touch failed",
+			"source_key", key, "hashes", len(hashes), "error", err)
+	}
+}
+
 // distillMarkSeen records the hashes of a durable batch.
 //
-// last_seen is a SLIDING window (ON CONFLICT DO UPDATE, §4.2.4): the retention
-// horizon of this ledger is "a hash is useful for as long as the same output
-// keeps coming back" (135:50), and a fixed window would make a cyclic test run
-// payable again every 30 days.
+// It INSERTS the sightings; distillTouchSeen slides them. The ON CONFLICT
+// branch here stays for the writer it actually has — two batches of one run
+// that carry the same hash, and the crash window between a mark and the next
+// read — and is no longer the file's answer to the sliding window (§4.2.4).
 func (s *Scheduler) distillMarkSeen(ctx context.Context, key string, hashes [][]byte) error {
 	if len(hashes) == 0 {
 		return nil

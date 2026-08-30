@@ -807,14 +807,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			}
 
 		case <-embedCacheTicker.C:
-			s.runEmbedCacheEviction(ctx)
-			s.runLLMLogRetention(ctx)
-			s.runWebChatRetention(ctx)
-			s.runWebhookRetention(ctx)
-			s.runOAuthCodeGC(ctx)
-			s.runOAuthTokenGC(ctx)
-			s.runSSOStateGC(ctx)
-			s.runRecallRetention(ctx)
+			s.runSixHourJanitor(ctx)
 
 		case <-webhookInboxTicker.C:
 			s.runWebhookInbox(ctx)
@@ -1581,6 +1574,27 @@ func (s *Scheduler) runEmbedCacheEviction(ctx context.Context) {
 	if removed > 0 {
 		slog.Info("scheduler: embed cache evicted", "rows", removed)
 	}
+}
+
+// runSixHourJanitor is the housekeeping bundle that shares the embed-cache
+// tick — the lines that used to sit inline in the ticker case above.
+//
+// It became a named method with the ninth line (wave C5-B, finding N-13): a
+// retention consumer that is built but never fired is the failure mode this
+// arm has already had, and the bundle can only be probed as the thing the
+// TICKER runs if it has a name. Every member logs its own failure and returns;
+// none may abort the bundle, so the order carries no meaning beyond
+// readability.
+func (s *Scheduler) runSixHourJanitor(ctx context.Context) {
+	s.runEmbedCacheEviction(ctx)
+	s.runLLMLogRetention(ctx)
+	s.runWebChatRetention(ctx)
+	s.runWebhookRetention(ctx)
+	s.runOAuthCodeGC(ctx)
+	s.runOAuthTokenGC(ctx)
+	s.runSSOStateGC(ctx)
+	s.runRecallRetention(ctx)
+	s.runDistillRetention(ctx)
 }
 
 // runLLMLogRetention NULLs context_llm_log prompt/response bodies older than
