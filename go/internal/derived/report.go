@@ -199,6 +199,12 @@ func Report(items []Item) GateReport {
 	r.NoveltyN = len(novelties)
 	r.NoveltyP10 = quantile(novelties, 0.10)
 	r.NoveltyP25 = quantile(novelties, 0.25)
+	// AGAINST THE CONSTANT, not the configured gate floor (review C5-E finding
+	// 4): this report is a pure function without config access, so the share
+	// counts against GoodhartMinNovelty — which equals the gate's DEFAULT.
+	// Under a non-default distill.novelty_floor the two measure different
+	// lines, and the gate's truth is the journal's rej_novelty counter, not
+	// this display share.
 	r.NoveltyBelowFloorShare = share(novelties, func(n float64) bool { return n < GoodhartMinNovelty })
 	// EXACT EQUALITY, not a tolerance. Adequacy computes novelty as
 	// unsupported/len(claimSet) and returns a literal 0 for the empty claim set,

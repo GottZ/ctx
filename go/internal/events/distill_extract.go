@@ -60,6 +60,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/distillsource"
+	"github.com/GottZ/ctx/internal/evalscore"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/redact"
@@ -808,7 +809,7 @@ func distillHasControlRunes(s string) bool {
 // so nobody can restore the old form and stay green.
 var distillRejectKeys = []string{"g1", "g2", "g3", "g4", "g5", "g6", "g7", "schema", "novelty"}
 
-// distillNewRejects returns the zeroed histogram. ALL eight keys, always — a
+// distillNewRejects returns the zeroed histogram. ALL nine keys, always — a
 // zero and an absent key must not be distinguishable (the rule
 // derived.newRejects states for the same reason, and the one
 // TestDistillGateKeepsAGroundedInsight pins).
@@ -829,7 +830,7 @@ func distillNewRejects() map[string]int {
 // g3 line twice. Kept apart, the two carry two checkable equalities instead of
 // one broken one:
 //
-//	sum(g1..g7) + schema == insights_rejected
+//	sum(g1..g7) + schema + novelty == insights_rejected   (since wave C5-E)
 //	sum(chunk, span, part, none) == g3
 //
 // WHY FOUR AND NOT THE TWO THE BEFUND NAMES. §15 of the C4-R report asks to
@@ -1094,7 +1095,21 @@ func distillScreen(in distillInsight, shown distillShown, floor float64) (string
 // the empty claim set, and an integer ratio 0/n is exact), so every floor above
 // 0 discards every verbatim copy, and no floor discards a claim that stands
 // precisely on the policy.
+//
+// AN EMPTY CLAIM TOKEN SET IS NOT EVIDENCE OF A COPY (review C5-E finding 1).
+// evalscore.TokenSet knows only [a-z0-9äöüß]; a claim written in Cyrillic,
+// Greek, CJK or Arabic script tokenises to the empty set, Adequacy answers its
+// literal 0, and the floor would delete substance as a "verbatim copy" whose
+// tokens never stood in the quote. The gate therefore fires only on claims the
+// tokeniser can SEE — same posture as classify's empty-needle guard ("an empty
+// needle is not evidence of anything"). The report deliberately keeps counting
+// such claims in zero_share: it displays, the gate deletes, and only the
+// deletion needs positive evidence. TestDistillNoveltyFloorSkipsClaims-
+// OutsideTheTokenAlphabet pins the guard.
 func distillBelowNoveltyFloor(in distillInsight, floor float64) bool {
+	if len(evalscore.TokenSet(in.Claim)) == 0 {
+		return false
+	}
 	_, novelty := derived.Adequacy(in.Claim, in.Quote)
 	return novelty < floor
 }
