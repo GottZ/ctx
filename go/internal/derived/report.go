@@ -274,7 +274,17 @@ func quantile(xs []float64, q float64) float64 {
 	if lo >= len(sorted)-1 {
 		return sorted[len(sorted)-1]
 	}
-	return sorted[lo] + (h-float64(lo))*(sorted[lo+1]-sorted[lo])
+	frac := h - float64(lo)
+	if frac == 0.5 {
+		// The exact half-step is the plain mean. The general form below rounds
+		// twice and differs from (a+b)/2 by one ULP on a measurable share of
+		// neighbour pairs (review C5-A finding 2) — and the half-step is the
+		// one fraction the median delegation above promises to reproduce
+		// EXACTLY. The median of an even count always lands here: h is an odd
+		// integer times 0.5, which IEEE-754 represents without error.
+		return (sorted[lo] + sorted[lo+1]) / 2
+	}
+	return sorted[lo] + frac*(sorted[lo+1]-sorted[lo])
 }
 
 // String renders the report for a human reader — the eval log, a wave report,

@@ -17,6 +17,7 @@
 package events
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/derived"
@@ -255,5 +256,56 @@ func TestDistillG3EmptyQuoteIsNotEvidence(t *testing.T) {
 		if got := ix.classify(in); got != "none" {
 			t.Errorf("classify(%q) = %q, want none", quote, got)
 		}
+	}
+}
+
+// TestDistillG3ForeignChunkIsSearchedBeforeItsComposedRun ist der permanente
+// Nachzug zu Review-Finding 1 (Sonde RV4): Normalize ist über die
+// Naht-Konkatenation NICHT distributiv — NFKC verschmilzt ein kombinierendes
+// Zeichen am Anfang eines Chunks mit dem letzten Zeichen seines Vorgängers zu
+// einer Rune, die kein einzelner Chunk trug. Ein Zitat, das unter G3s eigener
+// Vergleichsform wörtlich in einem Chunk eines FREMDEN Parts steht, muss
+// deshalb „part" heißen, auch wenn der zusammengesetzt-normalisierte Lauf es
+// versteckt. Vor dem Nachzug buchte die Zerlegung genau diesen Fall als
+// „none" — ein Adressierungsfehler wäre als Halluzination gezählt worden, im
+// Widerspruch zur Zusage der Migration (150:42-45).
+func TestDistillG3ForeignChunkIsSearchedBeforeItsComposedRun(t *testing.T) {
+	foreign1 := "### Message 40 — assistant\n\nDer Selektor zieht die Kandidaten in zwei Stufe"
+	foreign2 := "́n aus dem Korpus.\n"
+	quote := "Der Selektor zieht die Kandidaten in zwei Stufe"
+
+	// Beide Vorbedingungen der Konstruktion werden gemessen statt angenommen:
+	// (1) das Zitat steht unter G3s Vergleichsform im einzelnen fremden Chunk,
+	// (2) der komponierte Lauf versteckt es — sonst prüfte die Sonde nichts.
+	if !strings.Contains(derived.Normalize(foreign1), derived.Normalize(quote)) {
+		t.Fatalf("Fixture-Fehler: das Zitat steht nicht im fremden Chunk")
+	}
+	if strings.Contains(derived.Normalize(foreign1+foreign2), derived.Normalize(quote)) {
+		t.Fatalf("Fixture-Fehler: der Lauf versteckt das Zitat nicht — die NFKC-Naht ist wirkungslos")
+	}
+
+	shown := distillShown{
+		text: map[distillChunkKey]string{
+			{block: "1", chunk: 1}: g3P1C1,
+			{block: "4", chunk: 1}: foreign1,
+			{block: "4", chunk: 2}: foreign2,
+		},
+		blockIDs: []string{"1", "4"},
+	}
+	in := distillInsight{
+		Claim: g3Claim1, Quote: quote,
+		Block: "1", Chunk: 1, Kind: derived.KindFinding,
+	}
+	fails := distillGateFailures(in, shown)
+	if !fails["g3"] || len(fails) != 1 {
+		t.Fatalf("die Sonde fällt an %v, want genau {g3}", dxKeys(fails))
+	}
+	_, rejects, g3 := distillGate([]distillInsight{in}, shown)
+	if rejects["g3"] != 1 {
+		t.Fatalf("die Sonde trifft G3 nicht: %v", rejects)
+	}
+	if g3["part"] != 1 {
+		t.Fatalf("G3-Zerlegung = %v, want part=1 — der fremde Chunk wurde nur über den "+
+			"komponierten Lauf gesucht", g3)
 	}
 }

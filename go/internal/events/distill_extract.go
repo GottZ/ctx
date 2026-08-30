@@ -880,7 +880,7 @@ type distillG3Index struct {
 // manufacture a seam the material never had — a quote matching only there would
 // be booked as "the model quoted across a boundary" when nothing was there to
 // cross. The run boundary is the same rule distillParts uses for the same
-// reason (distill_select.go:123-131).
+// reason (distill_select.go:134-135).
 func distillNewG3Index(shown distillShown) distillG3Index {
 	ix := distillG3Index{
 		chunks: make(map[distillChunkKey]string, len(shown.text)),
@@ -922,6 +922,16 @@ func distillNewG3Index(shown distillShown) distillG3Index {
 // was built. Both sides therefore stand in exactly the form G3 itself compared
 // (distillScreen's G3 arm), which is what makes "the gate said no, and here is
 // where it does stand" a statement about the same texts.
+//
+// FOREIGN PARTS ARE SEARCHED CHUNK-FIRST, THEN RUN. Normalize is not
+// distributive over concatenation: NFKC composes across the seam, so a chunk
+// ending in a base letter glued to a successor starting with a combining mark
+// yields a rune neither chunk had, and a quote standing verbatim in one
+// foreign chunk — under G3's own comparison form — can be invisible in that
+// part's composed run. Only the chunk pass asks in exactly that form; the runs
+// answer the remaining question, whether the quote crossed a seam. Review
+// C5-A finding 1 constructed the miss (an addressing error booked as "none");
+// TestDistillG3ForeignChunkIsSearchedBeforeItsComposedRun pins the order.
 func (ix distillG3Index) classify(in distillInsight) string {
 	quote := derived.Normalize(in.Quote)
 	if quote == "" {
@@ -938,6 +948,11 @@ func (ix distillG3Index) classify(in distillInsight) string {
 	for _, run := range ix.runs[in.Block] {
 		if strings.Contains(run, quote) {
 			return "span"
+		}
+	}
+	for key, text := range ix.chunks {
+		if key.block != in.Block && strings.Contains(text, quote) {
+			return "part"
 		}
 	}
 	for _, block := range ix.blocks {

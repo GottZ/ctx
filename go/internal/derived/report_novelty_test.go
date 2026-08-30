@@ -184,11 +184,30 @@ func TestMedianIsTheHalfQuantile(t *testing.T) {
 	}
 	for _, xs := range sets {
 		want := legacyMedian(xs)
-		if got := median(xs); !closeTo(got, want) {
+		if got := median(xs); got != want {
 			t.Errorf("median(%v) = %v, alte Formel %v", xs, got, want)
 		}
-		if got := quantile(xs, 0.5); !closeTo(got, want) {
+		if got := quantile(xs, 0.5); got != want {
 			t.Errorf("quantile(%v, 0.5) = %v, alte Formel %v", xs, got, want)
+		}
+	}
+
+	// Die Behauptung ist BYTE-EXAKTHEIT, nicht Nähe — also wird sie ohne
+	// Toleranz und erschöpfend über kleine Brüche geprüft. Die allgemeine
+	// Interpolationsform a+0,5·(b−a) weicht von (a+b)/2 auf einem messbaren
+	// Anteil solcher Paare um 1 ULP ab (Review C5-A Finding 2); der
+	// Halbschritt-Zweig in quantile macht die Delegation exakt, und dieser
+	// Sweep fällt rot, wenn ihn jemand entfernt.
+	for d := 1; d <= 24; d++ {
+		for i := 0; i <= d; i++ {
+			for j := i; j <= d; j++ {
+				a, b := float64(i)/float64(d), float64(j)/float64(d)
+				want := (a + b) / 2
+				if got := median([]float64{a, b}); got != want {
+					t.Fatalf("median([%v %v]) = %v, alte Formel %v (Abweichung %g)",
+						a, b, got, want, got-want)
+				}
+			}
 		}
 	}
 }
