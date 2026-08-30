@@ -110,6 +110,14 @@ type distillLedger struct {
 	// on nil yields the zero value, so the write path needs no second branch.
 	rejects map[string]int
 
+	// g3 is that histogram's g3 bucket DECOMPOSED once more — the four columns
+	// of 150 (wave C5-A, entscheid C5-3): a quote the gate could not find in the
+	// chunk the model named either stands in another chunk of the same part
+	// ("chunk"), across a chunk boundary of that part ("span"), in a different
+	// part of the same call ("part"), or nowhere in what the call showed
+	// ("none"). Nil reads as all-zero for the same reason rejects does.
+	g3 map[string]int
+
 	// groupsShrunk is distill_run.call_groups_shrunk — how often the call
 	// planner sized a group down to the block's remaining room.
 	groupsShrunk int

@@ -791,6 +791,9 @@ func (s *Scheduler) distillBatch(ctx context.Context, t distillTick, key, runID 
 	// the same §4.5.4 scoping: a batch that stopped mid-way books what its calls
 	// actually produced, and nothing about the remainder it never reached.
 	l.rejects, l.groupsShrunk = ex.rejects, ex.groupsShrunk
+	// The G3 sub-histogram of wave C5-A travels the same path for the same
+	// reason — it is a decomposition of a number the batch already books.
+	l.g3 = ex.g3
 
 	seen := hashes
 	shown := kept
@@ -1133,6 +1136,11 @@ var distillWriteBarrier = func(context.Context) error { return nil }
 // run's row stays the sum over its batches and insights_rejected keeps its own
 // decomposition next to it. l.rejects may be nil — a Go map read on nil yields
 // 0, which is exactly what a batch without an extraction contributes.
+//
+// THE FOUR OF 150 (wave C5-A) ARE FOLDED THE SAME WAY AGAIN, one level down:
+// they decompose rej_g3 the way rej_g3 decomposes insights_rejected, so the row
+// carries two nested equalities and both are summable over a retention window
+// without a join.
 func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillLedger, wm int64) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE distill_run
@@ -1154,6 +1162,10 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		       rej_g7            = rej_g7 + $18,
 		       rej_schema        = rej_schema + $19,
 		       call_groups_shrunk = call_groups_shrunk + $20,
+		       rej_g3_chunk      = rej_g3_chunk + $21,
+		       rej_g3_span       = rej_g3_span + $22,
+		       rej_g3_part       = rej_g3_part + $23,
+		       rej_g3_none       = rej_g3_none + $24,
 		       watermark_to      = GREATEST(watermark_to, $7)
 		 WHERE run_id = $1::uuid`,
 		runID, l.seen, l.selected, l.droppedCred, l.droppedDup, l.chars, wm,
@@ -1164,7 +1176,10 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		// a reordering there silently swap two columns here.
 		l.rejects["g1"], l.rejects["g2"], l.rejects["g3"], l.rejects["g4"],
 		l.rejects["g5"], l.rejects["g6"], l.rejects["g7"], l.rejects["schema"],
-		l.groupsShrunk)
+		l.groupsShrunk,
+		// The four of 150, in the same spelled-out form and in the order the
+		// classification asks its questions (distillG3Index.classify).
+		l.g3["chunk"], l.g3["span"], l.g3["part"], l.g3["none"])
 	if err != nil {
 		return fmt.Errorf("distill: advancing run row %s: %w", runID, err)
 	}

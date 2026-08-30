@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 149,
-    "migration_count": 37,
+    "migration_max": 150,
+    "migration_count": 38,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3555,6 +3555,30 @@
         },
         {
           "name": "call_groups_shrunk",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g3_chunk",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g3_span",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g3_part",
+          "type": "integer",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rej_g3_none",
           "type": "integer",
           "not_null": true,
           "storage": "p"

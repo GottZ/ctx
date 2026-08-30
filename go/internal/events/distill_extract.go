@@ -236,6 +236,12 @@ type distillExtractResult struct {
 	// refused line falls into exactly one bucket.
 	rejects map[string]int
 
+	// g3 decomposes the g3 bucket of `rejects` further (wave C5-A, entscheid
+	// C5-3): WHERE the quote of a refused line does stand in the material the
+	// call showed. Its four keys are distillG3Keys and their sum is
+	// rejects["g3"] — a second equality NEXT TO the first, never part of it.
+	g3 map[string]int
+
 	// groupsShrunk counts how often the call planner sized a group DOWN to the
 	// block's remaining room (distillExtract, min(rows_per_call, room())).
 	//
@@ -801,25 +807,182 @@ func distillNewRejects() map[string]int {
 	return m
 }
 
+// distillG3Keys are the four SUB-buckets of G3 (wave C5-A, entscheid C5-3).
+//
+// THEY ARE A SECOND HISTOGRAM AND NOT FOUR MORE KEYS IN THE FIRST. The eight
+// keys above are the decomposition of insights_rejected, an invariant the gate
+// suite asserts as an equality (distill_reject_n6_integration_test.go, Sonde 2);
+// mixing a sub-decomposition into the same map would make that sum count every
+// g3 line twice. Kept apart, the two carry two checkable equalities instead of
+// one broken one:
+//
+//	sum(g1..g7) + schema == insights_rejected
+//	sum(chunk, span, part, none) == g3
+//
+// WHY FOUR AND NOT THE TWO THE BEFUND NAMES. §15 of the C4-R report asks to
+// separate "das Modell adressiert falsch" from "das Modell zitiert über
+// Segmentgrenzen", and its operational cut is "Nachbar-Chunk desselben Parts
+// vs. nirgends im gezeigten Material". That cut answers only half of its own
+// question: a quote that STRADDLES the boundary between chunk M and M+1 stands
+// in no single chunk, so a two-way split books it under "nirgends" — next to
+// genuine hallucination, from which it differs in the remedy. Spanning is a
+// property of the CHUNKING (the fix is overlap, or a part-level containment
+// test); hallucination is a property of the GENERATOR (the fix is the prompt or
+// the model). One bucket that holds both would leave the next step exactly as
+// undecidable as the single g3 counter leaves it today.
+//
+// The fourth bucket is what makes the fourth one TRUE. "none" is only "nowhere
+// in the shown material" if the search covered the whole shown material,
+// foreign parts included — a quote copied out of part 3 and addressed as part 2
+// is an addressing error too, and booking it as hallucination would be a wrong
+// measurement, not a coarse one. Each of the four names a different next step,
+// which is the whole point of the wave.
+var distillG3Keys = []string{"chunk", "span", "part", "none"}
+
+// distillNewG3 returns the zeroed sub-histogram — ALL four keys, always, for
+// distillNewRejects' reason: a zero and an absent key must not be
+// distinguishable.
+func distillNewG3() map[string]int {
+	m := make(map[string]int, len(distillG3Keys))
+	for _, k := range distillG3Keys {
+		m[k] = 0
+	}
+	return m
+}
+
+// distillG3Index is one call's material in G3's own comparison form, built ONCE
+// per gate run and only if a line actually fails G3.
+//
+// Built once, because the classification asks the same question of the same
+// chunks for every refused line, and derived.Normalize is NFKC over the whole
+// payload. Built LAZILY, because the good case — no g3 reject in the call — must
+// not pay for the instrument at all.
+type distillG3Index struct {
+	// chunks is every shown chunk, normalised.
+	chunks map[distillChunkKey]string
+	// runs is, per prompt-local part number, the normalised text of each
+	// MAXIMAL RUN of consecutive chunk indexes that part had shown.
+	runs map[string][]string
+	// blocks are the part numbers of runs, sorted — iteration order of a Go map
+	// is randomised, and an instrument may not answer differently on two runs
+	// over the same material.
+	blocks []string
+}
+
+// distillNewG3Index builds that view.
+//
+// WHY RUNS AND NOT "ALL CHUNKS OF THE PART, JOINED". The chunks of one part
+// concatenate byte-identically to the stripped part body (ctxcheckpoint/
+// parse.go:121-125, the contract distill_select.go's stage (a) already rests
+// on), so joining CONSECUTIVE indexes reconstructs text that really stood in
+// the source. Joining ACROSS a gap does not: distillBuildPrompt drops a chunk
+// the budget could not seat (:574-580), and gluing chunk 2 to chunk 4 would
+// manufacture a seam the material never had — a quote matching only there would
+// be booked as "the model quoted across a boundary" when nothing was there to
+// cross. The run boundary is the same rule distillParts uses for the same
+// reason (distill_select.go:123-131).
+func distillNewG3Index(shown distillShown) distillG3Index {
+	ix := distillG3Index{
+		chunks: make(map[distillChunkKey]string, len(shown.text)),
+		runs:   make(map[string][]string),
+	}
+	byBlock := make(map[string][]int, len(shown.text))
+	for key, text := range shown.text {
+		ix.chunks[key] = derived.Normalize(text)
+		byBlock[key.block] = append(byBlock[key.block], key.chunk)
+	}
+	for block, idx := range byBlock {
+		slices.Sort(idx)
+		var b strings.Builder
+		for i, n := range idx {
+			if i > 0 && n != idx[i-1]+1 {
+				ix.runs[block] = append(ix.runs[block], derived.Normalize(b.String()))
+				b.Reset()
+			}
+			b.WriteString(shown.text[distillChunkKey{block: block, chunk: n}])
+		}
+		ix.runs[block] = append(ix.runs[block], derived.Normalize(b.String()))
+		ix.blocks = append(ix.blocks, block)
+	}
+	slices.Sort(ix.blocks)
+	return ix
+}
+
+// classify answers, for a line G3 has just refused, WHERE its quote stands in
+// the material this call showed. Exactly one of distillG3Keys, always.
+//
+// THE ORDER OF THE THREE TESTS IS THE CLASSIFICATION, not an optimisation. A
+// quote inside a single chunk is inside that chunk's run too, and a quote in the
+// addressed part is in "some part" too — so the most specific finding has to be
+// asked first, or every line would land in the widest bucket that still matches.
+// The precedence reads: wrong chunk index before crossed boundary before wrong
+// part number, i.e. the smallest addressing error first.
+//
+// The quote is normalised ONCE here; the chunks were normalised when the index
+// was built. Both sides therefore stand in exactly the form G3 itself compared
+// (distillScreen's G3 arm), which is what makes "the gate said no, and here is
+// where it does stand" a statement about the same texts.
+func (ix distillG3Index) classify(in distillInsight) string {
+	quote := derived.Normalize(in.Quote)
+	if quote == "" {
+		// G2 keeps this unreachable (32 runes minimum), and a whitespace-only
+		// quote would match EVERY chunk under strings.Contains. Named rather
+		// than left to the loop: an empty needle is not evidence of anything.
+		return "none"
+	}
+	for key, text := range ix.chunks {
+		if key.block == in.Block && key.chunk != in.Chunk && strings.Contains(text, quote) {
+			return "chunk"
+		}
+	}
+	for _, run := range ix.runs[in.Block] {
+		if strings.Contains(run, quote) {
+			return "span"
+		}
+	}
+	for _, block := range ix.blocks {
+		if block == in.Block {
+			continue
+		}
+		for _, run := range ix.runs[block] {
+			if strings.Contains(run, quote) {
+				return "part"
+			}
+		}
+	}
+	return "none"
+}
+
 // distillGate runs the seven screens over every insight of ONE call and returns
-// the survivors plus the per-gate reject counts.
+// the survivors, the per-gate reject counts, and G3's sub-histogram.
 //
 // Cheap before expensive, and each screen is reachable on its own — that is
 // what makes the eleven negative probes of §7.2 nameable one at a time.
 //
 // The rejected TEXTS are deliberately not returned and never logged: a line may
 // have failed G5 precisely because it carries a secret (derived/citegate.go:123).
-func distillGate(ins []distillInsight, shown distillShown) ([]distillInsight, map[string]int) {
+// The G3 sub-histogram keeps that posture: it counts WHERE a quote stands, never
+// what it says.
+func distillGate(ins []distillInsight, shown distillShown) ([]distillInsight, map[string]int, map[string]int) {
 	rejects := distillNewRejects()
+	g3 := distillNewG3()
+	var ix *distillG3Index
 	kept := make([]distillInsight, 0, len(ins))
 	for _, in := range ins {
 		if key, bad := distillScreen(in, shown); bad {
 			rejects[key]++
+			if key == "g3" {
+				if ix == nil {
+					built := distillNewG3Index(shown)
+					ix = &built
+				}
+				g3[ix.classify(in)]++
+			}
 			continue
 		}
 		kept = append(kept, in)
 	}
-	return kept, rejects
+	return kept, rejects, g3
 }
 
 // distillScreen returns the key of the FIRST gate one insight fails.
@@ -1028,7 +1191,7 @@ type distillCallOpts struct {
 // What it CAN do is end the tick: the breaker and the in-run GPU meter both
 // answer through res.stop.
 func (s *Scheduler) distillExtract(ctx context.Context, t distillTick, items []distillsource.Item) distillExtractResult {
-	res := distillExtractResult{rejects: distillNewRejects()}
+	res := distillExtractResult{rejects: distillNewRejects(), g3: distillNewG3()}
 	// A non-positive rows_per_call makes no call at all, and it is NOT clamped
 	// here — the same decision distill_select.go states for the sizing keys
 	// (review #4): config.validateDistillCounters refuses a value below 1 with
@@ -1215,9 +1378,12 @@ func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []d
 		slog.Warn("scheduler: distiller answer was cut at the output ceiling",
 			"backend", backend, "num_predict", t.opts.numPredict, "salvaged", offered)
 	}
-	kept, rejects := distillGate(ins, shown)
+	kept, rejects, g3 := distillGate(ins, shown)
 	for k, v := range rejects {
 		res.rejects[k] += v
+	}
+	for k, v := range g3 {
+		res.g3[k] += v
 	}
 	res.rejects["schema"] += refused
 	res.kept += len(kept)
@@ -1239,7 +1405,7 @@ func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []d
 	}
 	slog.Debug("scheduler: distiller call screened",
 		"backend", backend, "offered", offered, "kept", len(kept),
-		"unanchored", res.unanchored, "rejects", rejects)
+		"unanchored", res.unanchored, "rejects", rejects, "g3_class", g3)
 
 	if offered > 0 && len(kept) == 0 {
 		return s.distillFault(backend, t.opts)

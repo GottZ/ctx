@@ -2,6 +2,7 @@ package derived
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
@@ -93,6 +94,43 @@ type GateReport struct {
 	MedianNovelty     float64 `json:"median_novelty"`
 	MedianCompression float64 `json:"median_compression"`
 
+	// THE NOVELTY DISTRIBUTION (wave C5-A, entscheid C5-2). The median above is
+	// one number about a set, and wave C4-R measured what it cannot see: run 2
+	// wrote 7 claims at novelty 0 and 18,8 % below GoodhartMinNovelty while the
+	// median stood at 0,4286 — comfortably above the 0,30 the wave had fixed as
+	// its criterion in advance. The median was not wrong; it was silent about
+	// exactly the tail that carries the cost, and the report was the instrument
+	// that had to be re-read by hand out of the raw answers to see it.
+	//
+	// So the shape of the set travels WITH the set's middle. The five values
+	// below are what entscheid C5-2 makes the criterion of the following
+	// measurement waves — "p10 ≥ 0,15 UND Anteil novelty 0 ≤ 1 %" — and they are
+	// here so that criterion can be read off the instrument instead of
+	// recomputed beside it.
+	//
+	// THEY ARE OUTPUT AND NOT A GATE. judge() is untouched: a per-claim novelty
+	// floor in the write path is a decision that belongs AFTER the diagnosis,
+	// and building the workaround before the cause is known is how a measurement
+	// wave loses its own subject. Whoever installs the floor will find the
+	// numbers already measured here.
+	//
+	// NoveltyN is the size of the set all five describe. It equals ClaimsKept by
+	// construction — the medians and quantiles are over the SURVIVORS (see the
+	// type comment) — and it is a field anyway, because a distribution reported
+	// without its n is a shape without a scale, and the two drifting apart is
+	// exactly the kind of wiring fault a reader should see rather than assume
+	// away.
+	NoveltyN   int     `json:"novelty_n"`
+	NoveltyP10 float64 `json:"novelty_p10"`
+	NoveltyP25 float64 `json:"novelty_p25"`
+
+	// NoveltyBelowFloorShare is the share of kept claims under
+	// GoodhartMinNovelty, NoveltyZeroShare the share at exactly 0 — a claim
+	// whose every token stands in its own quote, i.e. a copy that the anchoring
+	// rate rewards. Both are 0 on an empty charge, like the rates above.
+	NoveltyBelowFloorShare float64 `json:"novelty_below_floor_share"`
+	NoveltyZeroShare       float64 `json:"novelty_zero_share"`
+
 	// Measured is always MeasuredQuantity. It is a field and not a comment
 	// because a consumer that reads this JSON has to be able to see, in the
 	// data, which quantity the numbers are.
@@ -133,8 +171,34 @@ func Report(items []Item) GateReport {
 	}
 	r.MedianNovelty = median(novelties)
 	r.MedianCompression = median(compressions)
+	r.NoveltyN = len(novelties)
+	r.NoveltyP10 = quantile(novelties, 0.10)
+	r.NoveltyP25 = quantile(novelties, 0.25)
+	r.NoveltyBelowFloorShare = share(novelties, func(n float64) bool { return n < GoodhartMinNovelty })
+	// EXACT EQUALITY, not a tolerance. Adequacy computes novelty as
+	// unsupported/len(claimSet) and returns a literal 0 for the empty claim set,
+	// so a value of 0 is arrived at exactly and never approached — a tolerance
+	// here would fold the smallest genuine novelty in with the copies, which is
+	// the one distinction this share exists to make.
+	r.NoveltyZeroShare = share(novelties, func(n float64) bool { return n == 0 })
 	r.Passed, r.Reason = judge(r)
 	return r
+}
+
+// share is the fraction of xs satisfying pred, and 0 on an empty set — the same
+// answer the rates above give, for the same reason: an empty charge measured
+// nothing, and Reason says so in words.
+func share(xs []float64, pred func(float64) bool) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	n := 0
+	for _, x := range xs {
+		if pred(x) {
+			n++
+		}
+	}
+	return float64(n) / float64(len(xs))
 }
 
 // judge applies the Goodhart rule and names WHICH of the failure modes was
@@ -162,10 +226,36 @@ func judge(r GateReport) (bool, string) {
 }
 
 // median returns the middle value of xs, the mean of the two middle values on
-// an even count, and 0 on an empty set. It sorts a COPY: a fold that reorders
-// its caller's slice would make the report's determinism depend on how often
-// it was called.
-func median(xs []float64) float64 {
+// an even count, and 0 on an empty set.
+//
+// It is quantile at q = 0,5 and NOT a second implementation, so the median and
+// the quantiles of the same report cannot describe two different orderings of
+// one set. That the delegation preserves the old behaviour exactly — including
+// the mean of the two middles on an even count — is a property of the
+// interpolation quantile uses, and TestMedianIsTheHalfQuantile pins it rather
+// than leaving it to be re-derived from the formula.
+func median(xs []float64) float64 { return quantile(xs, 0.5) }
+
+// quantile returns the q-quantile of xs by LINEAR INTERPOLATION between the two
+// neighbouring order statistics — h = (n-1)·q, then x[⌊h⌋] plus the fraction of
+// the step to the next value. It sorts a COPY: a fold that reorders its
+// caller's slice would make the report's determinism depend on how often it was
+// called.
+//
+// WHY INTERPOLATION AND NOT NEAREST RANK. The report already publishes a median
+// defined as the mean of the two middle values, and this is the definition that
+// reproduces it for every n — a nearest-rank quantile would answer a different
+// number at q = 0,5 than the field beside it, and a reader comparing p25 to the
+// median would be comparing two conventions. It is also the definition of the
+// tooling the measurement waves cross-check against (numpy's default, R's type
+// 7), so a p10 read here and a p10 recomputed there are the same quantity.
+//
+// The value is CLAMPED to the sample, never extrapolated: on a small charge the
+// p10 of ten claims is the smallest one, and saying so is the honest answer —
+// inventing a value below the sample would put a number under the C5-2
+// criterion that no claim ever had. 0 on an empty set, like every other value
+// of an empty charge.
+func quantile(xs []float64, q float64) float64 {
 	if len(xs) == 0 {
 		return 0
 	}
@@ -173,11 +263,18 @@ func median(xs []float64) float64 {
 	copy(sorted, xs)
 	sort.Float64s(sorted)
 
-	mid := len(sorted) / 2
-	if len(sorted)%2 == 1 {
-		return sorted[mid]
+	if q <= 0 {
+		return sorted[0]
 	}
-	return (sorted[mid-1] + sorted[mid]) / 2
+	if q >= 1 {
+		return sorted[len(sorted)-1]
+	}
+	h := float64(len(sorted)-1) * q
+	lo := int(math.Floor(h))
+	if lo >= len(sorted)-1 {
+		return sorted[len(sorted)-1]
+	}
+	return sorted[lo] + (h-float64(lo))*(sorted[lo+1]-sorted[lo])
 }
 
 // String renders the report for a human reader — the eval log, a wave report,
@@ -192,6 +289,14 @@ func (r GateReport) String() string {
 		r.GroundingRate, r.RejectionRate)
 	fmt.Fprintf(&b, "Median-novelty %.4f · Median-compression %.4f\n",
 		r.MedianNovelty, r.MedianCompression)
+	// The distribution line (wave C5-A). It stands NEXT TO the median rather
+	// than replacing it: the median is what the earlier waves were judged on,
+	// and a report that silently swapped the quantity would make two runs
+	// incomparable across the wave that changed it.
+	fmt.Fprintf(&b, "novelty-Verteilung (n=%d) p10 %.4f · p25 %.4f · Median %.4f · "+
+		"Anteil < %.2f: %.4f · Anteil = 0: %.4f\n",
+		r.NoveltyN, r.NoveltyP10, r.NoveltyP25, r.MedianNovelty,
+		GoodhartMinNovelty, r.NoveltyBelowFloorShare, r.NoveltyZeroShare)
 	fmt.Fprintf(&b, "Verwürfe %s\n", rejectLine(r.Rejects))
 	fmt.Fprintf(&b, "Gemessene Größe: %s — %s\n", r.Measured, DualRoleNote)
 	fmt.Fprintf(&b, "Ergebnis: %s — %s\n", verdictWord(r.Passed), r.Reason)

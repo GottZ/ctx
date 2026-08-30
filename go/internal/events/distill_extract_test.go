@@ -161,10 +161,26 @@ func dxAssert(t *testing.T, name string, in distillInsight, want string) {
 		t.Fatalf("%s: distillScreen = (%q, %v), want (%q, true)", name, got, bad, want)
 	}
 	// The counting surface must book it under the same key.
-	kept, rejects := distillGate([]distillInsight{in}, shown)
+	kept, rejects, g3 := distillGate([]distillInsight{in}, shown)
 	if len(kept) != 0 || rejects[want] != 1 {
 		t.Fatalf("%s: distillGate kept %d, rejects %v", name, len(kept), rejects)
 	}
+	// And the SECOND equality of wave C5-A holds for every one of the eleven
+	// cases, not only the g3 one: the sub-histogram decomposes rejects["g3"]
+	// exactly — a case that fires another gate must leave it at zero.
+	if sum := dxSum(g3); sum != rejects["g3"] {
+		t.Fatalf("%s: G3-Zerlegung summiert %d, rejects[g3] = %d (%v)",
+			name, sum, rejects["g3"], g3)
+	}
+}
+
+// dxSum totals a histogram.
+func dxSum(m map[string]int) int {
+	total := 0
+	for _, v := range m {
+		total += v
+	}
+	return total
 }
 
 func dxKeys(m map[string]bool) []string {
@@ -185,13 +201,22 @@ func TestDistillGateKeepsAGroundedInsight(t *testing.T) {
 	if fails := distillGateFailures(dxOK(), shown); len(fails) != 0 {
 		t.Fatalf("the grounded reference insight fails %v — the fixture, not the gate, is wrong", dxKeys(fails))
 	}
-	kept, rejects := distillGate([]distillInsight{dxOK()}, shown)
+	kept, rejects, g3 := distillGate([]distillInsight{dxOK()}, shown)
 	if len(kept) != 1 {
 		t.Fatalf("kept %d insights, want 1 (rejects %v)", len(kept), rejects)
 	}
 	for _, k := range []string{"g1", "g2", "g3", "g4", "g5", "g6", "g7"} {
 		if _, ok := rejects[k]; !ok {
 			t.Errorf("rejects is missing key %q — a zero and an absent key must not be distinguishable", k)
+		}
+	}
+	// The G3 sub-histogram carries its four keys under the same rule, and a run
+	// without a g3 reject leaves every one of them at zero.
+	for _, k := range distillG3Keys {
+		if v, ok := g3[k]; !ok {
+			t.Errorf("g3 is missing key %q — a zero and an absent key must not be distinguishable", k)
+		} else if v != 0 {
+			t.Errorf("g3[%q] = %d bei null Verwuerfen", k, v)
 		}
 	}
 }
