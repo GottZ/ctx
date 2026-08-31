@@ -136,20 +136,35 @@ const distillDefaultInterval = 15 * time.Minute
 //     consecutive writes of one compaction is 0.032 s at p50 and 0.20 s at p99
 //     over 5504 measured gaps — the burst is sub-second dense.
 //   - Replaying the whole write history (5796 checkpoint writes, 292 compaction
-//     groups) against candidate values shows the tick economy is FLAT across the
-//     sub-second-to-3 s range: 309 ticks at 0.5 s, 307 at 2 s, 307 at 3 s. It
-//     only starts paying above that — 277 at 10 s, 214 at 60 s.
+//     groups) against candidate values UNDER THE FIXED WINDOW BUILT BELOW (the
+//     review of this wave caught the first replay simulating a re-armed one):
+//     637 ticks at 0.5 s, 451 at 1 s, 328 at 2 s, 311 at 3 s, 299 at 5 s, 285 at
+//     10 s, 227 at 60 s. The curve bends at 2 s — below it every split
+//     compaction buys a second tick, above it the savings are single digits.
+//   - The burst SPAN (first to last write of one compaction) is 1.97 s at p90
+//     and 10.85 s at p95: a long tail of slow compactions, not a cliff. 2 s
+//     closes 263 of 292 measured bursts (90.1 %) in one tick; the other 29 are
+//     read in two ticks, never torn (see distillAwait).
 //
-// So the 93 ticks that 60 s would save over two months of real use cost 58 s of
+// So the 101 ticks that 60 s would save over two months of real use cost 58 s of
 // latency on every single compaction, and latency is the scarce resource: the
 // insights of a compaction must stand in the corpus before the user's NEXT
-// query, not before the one after it. The value therefore sits at the burst's
-// own p95 (2.11 s). digestDebounce's 60 s answers a different question — "has
-// the corpus stopped moving" — and is not a precedent here.
+// query, not before the one after it. The value therefore sits at the knee of
+// the fixed-window curve, which is also the burst's p90. digestDebounce's 60 s
+// answers a different question — "has the corpus stopped moving" — and is not a
+// precedent here.
 //
 // A var, not a const, for the dreamYieldWait reason: the gate suite must be able
 // to observe a settle without spending two seconds per assertion.
 var distillWakeDebounce = 2 * time.Second
+
+// distillDemandRetry is how long a tick turned away by gate 2 (interactive
+// demand) waits before it tries again (see distillTick). 5 s: short enough
+// that a compaction's insights still land within one breath of the user's
+// query finishing, long enough that a busy interactive session is not probed
+// every debounce window. A var for the same gate-suite reason as
+// distillWakeDebounce.
+var distillDemandRetry = 5 * time.Second
 
 // distillWakeIDCap bounds the id set of one wake window. At the live write rate
 // (360 blocks/day) it is never approached; what it exists for is the bulk write
@@ -203,14 +218,46 @@ func (s *Scheduler) runDistiller(ctx context.Context) {
 	// deploy the slowest path in the system. The tick is cheap when there is
 	// nothing to do: gate 0 returns on two booleans, and an empty candidate list
 	// writes no journal row at all (§4.5.3).
-	s.distillOnce(ctx, s.interactiveDemand)
+	if !s.distillTick(ctx, s.interactiveDemand) {
+		return
+	}
 
 	for {
 		cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: every distill.* key is tenancy:global-only (config.go:1699-2021) — the arm reads one operator's session material and writes into exactly one scope (§4.8).
 		if !s.distillAwait(ctx, distillInterval(cfg.Distill.Interval)) {
 			return
 		}
-		s.distillOnce(ctx, s.interactiveDemand)
+		if !s.distillTick(ctx, s.interactiveDemand) {
+			return
+		}
+	}
+}
+
+// distillTick runs one tick and, when gate 2 turned it away for interactive
+// demand, retries after distillDemandRetry until the tick runs or the context
+// ends. It reports false only on shutdown.
+//
+// WHY A RETRY AND NOT A RE-ARMED WAKE: the wake window is drained before gate 2
+// answers, so re-posting the signal would cost a 2 s settle plus a filter query
+// per attempt and would say "a checkpoint was written" about a window that is
+// empty. A plain retry says what is true — "the tick is owed" — and the journal
+// stays quiet meanwhile: the demand skip obeys the state-change rule, so a
+// retry that is deferred again writes no second row.
+//
+// The retry loop is unbounded on purpose. Demand is interactive traffic; while
+// it lasts the arm must stay out of the way (gate 2's reason), and the moment it
+// ends the owed tick must run — not a fallback interval later.
+func (s *Scheduler) distillTick(ctx context.Context, demand func() int) bool {
+	for {
+		s.distillOnce(ctx, demand)
+		if !s.distillDemandDeferred.Swap(false) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(distillDemandRetry):
+		}
 	}
 }
 
@@ -476,6 +523,9 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 	if n := demand(); n > 0 {
 		slog.Debug("scheduler: distiller deferred, interactive demand", "count", n)
 		s.distillSkip(ctx, tickKey, "", distillSkipDemand, false)
+		// The wake window that summoned this tick is already drained; flag the
+		// deferral so runDistiller retries shortly instead of after the fallback.
+		s.distillDemandDeferred.Store(true)
 		return false
 	}
 

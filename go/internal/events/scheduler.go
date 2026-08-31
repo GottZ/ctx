@@ -182,6 +182,14 @@ type Scheduler struct {
 	// are fail-OPEN by design — the expensive answer is one extra tick, the cheap
 	// one would be a silently missed compaction.
 	distillWakeOverflow bool
+	// distillDemandDeferred is set by gate 2 when a tick was turned away for
+	// interactive demand. runDistiller reads-and-clears it to retry the tick
+	// after distillDemandRetry instead of waiting for the idle fallback: by the
+	// time gate 2 answers, the wake window that summoned the tick is already
+	// drained, so without the retry the very case this arm exists for — a
+	// compaction followed at once by the user's next query — would fall back
+	// to distill.interval (review C6-B, m4).
+	distillDemandDeferred atomic.Bool
 	// distillWakeFilter answers "was one of these ids checkpoint material?".
 	// nil is production (distillWakeQuery over this pool); the C6-B gate
 	// substitutes it to pin the three answers a database cannot be told to give
