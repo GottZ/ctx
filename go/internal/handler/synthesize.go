@@ -135,7 +135,24 @@ func (h *SynthesizeHandler) dailyRouter(ctx context.Context) *dream.Router {
 		Admit:      h.dailyAdmission(),
 		Blocktypes: h.blocktypes,
 		Language:   h.reportLanguage(ctx),
+		// C6-C: read per request from the caller's tenant generation, exactly
+		// like Language above and for the same reason — tenant.devmode is
+		// mut:"hot" and the scheduler's newRouter reads it per iteration, so
+		// the two trigger paths of one pipeline must not disagree about how hot
+		// a hot key is. Router.Tenant stays unset on this path (the daily
+		// report is scoped by its explicit scope argument), which is precisely
+		// why the flag must arrive resolved rather than be looked up from it.
+		Devmode: h.devmode(ctx),
 	}
+}
+
+// devmode is the caller tenant's resolved tenant.devmode (C6-C). Nil-safe like
+// reportLanguage: a handler without config wiring seals.
+func (h *SynthesizeHandler) devmode(ctx context.Context) bool {
+	if h.cfg == nil {
+		return false
+	}
+	return h.cfg.SnapshotForRequest(ctx).Tenant.Devmode
 }
 
 // HandleDaily triggers a single daily synthesis run for the caller's

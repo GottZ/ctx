@@ -92,8 +92,20 @@ type Entry struct {
 // bodies — no plaintext shadow corpus of the hottest tier in context_llm_log.
 // Trade-off (user decision E4): loses debug plaintext for local
 // credentials-class calls. No-op for every other sensitivity class.
-func (e Entry) Slimmed() Entry {
-	if e.RequiredSensitivity == "credentials" {
+//
+// devmode is the CALLER'S RESOLVED tenant devmode (settings key
+// tenant.devmode, C6-C): false — the default, and the only value a caller
+// without a resolvable tenant may pass — seals exactly as before; true keeps
+// the bodies, so a tenant that opted into developer transparency can read its
+// OWN credentials-class prompts back on the status page.
+//
+// It is a PARAMETER on purpose, not a package var and not an Entry field. A
+// field would default to the zero value at every construction site and the
+// seal would then be one forgotten assignment away from silently correct;
+// a parameter makes the compiler ask each caller which tenant it is writing
+// for, and "I cannot tell" has exactly one spelling here: false.
+func (e Entry) Slimmed(devmode bool) Entry {
+	if e.RequiredSensitivity == "credentials" && !devmode {
 		e.RequestSystem = ""
 		e.RequestUser = ""
 		e.ResponseContent = ""

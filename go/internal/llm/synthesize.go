@@ -104,6 +104,18 @@ type SynthesisSettings struct {
 	// openrouter row with NULL num_ctx then falls back to
 	// ExternalNumCtxFallback and, without one, refuses (the H12 floor).
 	OpenRouterWindowTTL int
+
+	// Devmode is the calling tenant's resolved tenant.devmode (C6-C). It rides
+	// this struct rather than a new parameter for the same reason the
+	// thresholds do: the llm package holds no config state, and the value must
+	// arrive already resolved for THIS request's tenant — the handler derives
+	// it from SnapshotForRequest, so the key stays as hot as it is tagged.
+	//
+	// Its ONLY effect is the llmlog body seal of a credentials-class row
+	// (llmlog.Entry.Slimmed). The zero value false is the sealing default, so
+	// a caller that builds this struct literally — a bench harness, a test —
+	// seals without having to know the flag exists.
+	Devmode bool
 }
 
 // selectSystemPrompt resolves the active system prompt from the settings.
@@ -879,8 +891,12 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	// row-defining attempt (§4.4a — same derivation as ChainCall.Do).
 	applyDispatchTelemetry(&entry, attempts, adm.Class)
 	// E4/8b body slim for credentials-class rows (request AND response — the
-	// synthesized answer derives from the credentials blocks).
-	llmlog.Record(db, entry.Slimmed())
+	// synthesized answer derives from the credentials blocks). settings.Devmode
+	// is THIS request's tenant (query.go resolves it via SnapshotForRequest, the
+	// same generation that produced the thresholds above) — the row it unseals
+	// is the row that tenant's own key is attributed with (entry.APIKeyID), so
+	// the seal and the read gate agree on whose data this is.
+	llmlog.Record(db, entry.Slimmed(settings.Devmode))
 
 	if err != nil {
 		return nil, fmt.Errorf("llm: synthesize: %w", err)

@@ -708,6 +708,14 @@ func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 		CapRetryFactor:  cfg.Dream.EvalCapRetryFactor,
 		TemporalTimeout: cfg.Dream.TemporalTimeout,
 		CycleTimeout:    cfg.Dream.CycleTimeout,
+		// C6-C: cfg is the ITERATED tenant's generation (SnapshotForTenant at
+		// the two dream call sites), so this is that tenant's own devmode and
+		// the llmlog rows this router writes are unsealed only for the tenant
+		// that asked for it. The two _global-scoped callers (embed migration,
+		// recall check) resolve to the base generation and therefore to the
+		// operator's server-wide value — correct by construction: a _global
+		// arm has no other tenant to be.
+		Devmode: cfg.Tenant.Devmode,
 	}
 }
 

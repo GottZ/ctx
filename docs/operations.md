@@ -171,6 +171,33 @@ Invalid configurations abort the boot **after logging every finding** with field
 
 Its younger sibling `pool.blob_scan_max_bytes` (tenant-overridable, default `16777216`) bounds a different cost on the same write path: how much of a **decoded** payload the credentials detector reads before the upsert. The block path needs no such key — a block is capped at 50 KB and its scan is free — while a blob is capped at 50 MB and the scan is regex work over every byte of it, synchronously, before the write returns. A payload above the cap, or one that is not valid UTF-8, is **stored anyway**, carrying `metadata.sensitivity = "unscanned"`. That is deliberately not fail-closed: the live corpus is binary uploads and blobs that predate any Go write path, and a scanner that refused them — or called them credentials — would be an outage rather than a net. The unscanned state is written into the row rather than left implicit, so the limit is visible where the data is instead of inferred from an absent field. `0` here means the scan is OFF (everything stored `unscanned`) — unlike `pool.blob_stage_max_bytes`, where `0` is the fail-closed reading, there is no payload size at which "scan nothing" protects anything. A negative value is a boot abort / `422` on the settings write (**V9e**) for the same reason V9d gives: `0` is already the switch, so anything below it would render as a configured byte count while the runtime read it as off. Raising the cap costs write latency on large payloads; lowering it moves payloads into the `unscanned` state, where `blob_fetch` will deliver them.
 
+## `tenant.devmode`: developer transparency in one tenant
+
+`tenant.devmode` is the umbrella flag a tenant working **on** ctx turns on to see its own machinery instead of the production-hardened summary of it. It is a `bool`, `hot`, **tenant-overridable**, defaults to **false**, and carries **no env var** on purpose: it lowers a privacy default, so the only way to raise it is a settings write, which leaves an audit row in `context_settings_audit`. An env would let the same change ride in on a compose edit that no audit can reconstruct.
+
+**Every consumer of devmode is listed here.** The list is the point of the flag being an umbrella rather than one switch per surface; a wave that adds a consumer adds it to this list, to the `TenantConfig.Devmode` comment, and to nothing else.
+
+| Consumer | `false` (default) | `true` |
+| --- | --- | --- |
+| llmlog body sealing (E4/8b) | A `credentials`-class LLM call keeps its telemetry and `block_ids` — the egress trace stays ID-exact — but its prompt/reply bodies are dropped at **write** time (`llmlog.Entry.Slimmed`): no plaintext shadow corpus of the hottest tier in `context_llm_log`. `GET /api/llmlog/{id}` renders `body_state: "sealed"`. | This tenant's `credentials`-class calls are stored **with** bodies; the detail endpoint renders `body_state: "present"` and the status page marks the card `credentials-class · unsealed by tenant devmode`, so the class is never mistaken for a harmless one. |
+
+**Turning it on for exactly one tenant.** There is one settings API and it derives its target scope from the caller, never from the body ([api](api.md#settings-api)): a **server-admin** key writes `_global`, a **tenant-admin** key writes only its own tenant scope. So the per-tenant override is a PUT with that tenant's admin key:
+
+```bash
+curl -sS -X PUT https://<host>/api/settings/tenant.devmode \
+  -H 'Authorization: Bearer <TENANT-ADMIN-KEY>' \
+  -H 'Content-Type: application/json' \
+  -d '{"value": true}'
+```
+
+The response echoes `previous` and the new effective value; the write is hot (a NOTIFY rebuilds that tenant's generation — no restart, no deploy). `DELETE` on the same path removes the override and restores sealing. The same PUT with a **server-admin** key lands at `_global` instead and means something much larger: the operator has decided against E4 for **every** tenant on this server, present and future. Both are legitimate; only one of them is per-tenant.
+
+**The switch is not retroactive in either direction.** Turning it on creates no bodies for calls that already happened — their columns hold empty strings and stay that way, which is why an old row keeps reading `sealed`. Turning it off removes nothing already written: those bodies live out their `scheduler.llmlog_retention_days` like every other body and are then NULLed by the retention janitor. **Retention is untouched by this key** — an unsealed `credentials` body is evicted on exactly the same horizon as an `internal` one.
+
+**It does not widen the tenant boundary.** The llmlog read gate is attribution-based (`api_key_id = ANY(<the tenant's keys>)`, uniform `404` otherwise) and `tenant.devmode` appears nowhere in that query. A tenant that switches it on gains its own bodies and cannot reach a neighbour's row; background rows carry no `api_key_id` and stay server-admin-only either way. That is also why this key is tenant-overridable while its two `tenant.allow_*` siblings are not: those **grant reach outside** the tenant and must stay operator-set, whereas devmode only decides how much of its own machinery a tenant sees.
+
+`GET /api/llmlog/{id}` reports `body_state` from the **row**, not from the sensitivity class, so an unsealed row renders as what it is. `required_sensitivity` stays on the card in every state.
+
 ## Backups & disaster recovery
 
 `backup.sh` archives only the pg_dumps — the sealed-secret ciphertexts are in every dump, the master key (`CTX_SECRETS_KEY`) is in **none**, by design. Disaster recovery needs both the dump and the separately-stored master key. See [security](security.md#sealed-secrets--break-glass) for master-key setup, rotation and break-glass extraction.

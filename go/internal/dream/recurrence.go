@@ -191,7 +191,7 @@ func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts 
 		BlockIDs:      []string{source.ID, c.TargetID},
 		DreamVersion:  &dreamVer,
 	}
-	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
+	defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 
 	start := time.Now()
 	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, required,

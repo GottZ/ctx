@@ -292,7 +292,7 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		RequestUser:   userPrompt,
 		DreamVersion:  &dreamVer,
 	}
-	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
+	defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 
 	start := time.Now()
 	// chatPlain, NOT chat: this stage asks for continuous prose ("Schreibe als

@@ -160,9 +160,12 @@ const (
 	// bodyPresent — at least one of request_system/request_user/response_content
 	// is non-empty and is returned.
 	bodyPresent = "present"
-	// bodySealed — the row is a credentials-class call: bodies were never stored
-	// (Entry.Slimmed at write time, E4). Not a loss — a deliberate no-shadow-
-	// corpus policy for the hottest tier.
+	// bodySealed — the row is a credentials-class call WITHOUT bodies: they were
+	// never stored (Entry.Slimmed at write time, E4). Not a loss — a deliberate
+	// no-shadow-corpus policy for the hottest tier. A credentials row whose
+	// tenant had tenant.devmode on at write time carries bodies and reports
+	// bodyPresent instead (C6-C); the class stays in required_sensitivity so the
+	// client can flag it rather than read it as harmless.
 	bodySealed = "sealed"
 	// bodyEvicted — a non-credentials row with a NULL body column: only
 	// llmlog.EvictBodies writes NULL (the insert path stores Go strings, so an
@@ -270,20 +273,29 @@ func (h *LLMLogHandler) HandleLLMLogDetail(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "detail": d})
 }
 
-// classifyBodies decides the body_state and which bodies to return. A
-// credentials-class row is SEALED (bodies never stored — Entry.Slimmed, E4);
-// otherwise a row with any non-empty body is PRESENT and returns them. For the
-// rest, NULL vs '' is the discriminator (llmlog W1): the insert path stores Go
-// strings and therefore never writes NULL, so a nil column is EvictBodies'
-// signature — EVICTED. All-empty-but-not-nil means the pipeline never recorded
-// a wire body — BODYLESS. Returning nil pointers for a non-present row keeps
-// the wire bodies null, never "".
+// classifyBodies decides the body_state and which bodies to return. It reads
+// the ROW, never the sensitivity CLASS as a proxy for it (C6-C): a row with any
+// non-empty body is PRESENT and returns them, whatever its class. The seal is a
+// WRITE-time policy (Entry.Slimmed, E4) — once a body IS in the column, calling
+// it "sealed" would tell an operator that no plaintext exists while it sits in
+// the table, which is the wrong direction for an audit surface and would also
+// make a tenant.devmode row unreadable for the very tenant that unsealed it.
+//
+// For a row WITHOUT bodies the reason is asked in the order the reasons rank.
+// A credentials-class row is SEALED — the class is why its bodies are absent,
+// whether the write path dropped them ('') or retention NULLed the empties on
+// top later; this check stays AHEAD of the NULL split so no existing row
+// changes its label. For every other class NULL vs '' is the discriminator
+// (llmlog W1): the insert path stores Go strings and therefore never writes
+// NULL, so a nil column is EvictBodies' signature — EVICTED. All-empty-but-not-
+// nil means the pipeline never recorded a wire body — BODYLESS. Returning nil
+// pointers for a non-present row keeps the wire bodies null, never "".
 func classifyBodies(sensitivity string, sys, user, resp *string) (state string, outSys, outUser, outResp *string) {
-	if sensitivity == "credentials" {
-		return bodySealed, nil, nil, nil
-	}
 	if nonEmpty(sys) || nonEmpty(user) || nonEmpty(resp) {
 		return bodyPresent, sys, user, resp
+	}
+	if sensitivity == "credentials" {
+		return bodySealed, nil, nil, nil
 	}
 	if sys == nil || user == nil || resp == nil {
 		return bodyEvicted, nil, nil, nil

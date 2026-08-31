@@ -109,6 +109,24 @@ type Router struct {
 	// evaluateRelationships, which hands it to llm.Options.NumPredictScale so
 	// the scaling lands on the RESOLVED cap inside the chain walk.
 	CapRetryFactor float64
+	// Devmode is the resolved tenant.devmode of the tenant this router runs
+	// for (C6-C), and its ONLY effect is the llmlog body seal of a
+	// credentials-class row (llmlog.Entry.Slimmed at each stage's Record).
+	//
+	// It rides the ROUTER because the router is already the per-tenant object
+	// of the background arm: the scheduler builds one per iterated tenant from
+	// that tenant's SnapshotForTenant generation (newRouter), and the daily
+	// API handler builds one per request from SnapshotForRequest — the same
+	// two seams Language and JSONMode use, so the hot key is hot on both
+	// trigger paths of one pipeline.
+	//
+	// Deliberately NOT read from r.Tenant + a config lookup: this package is
+	// parameter-pure (depguard forbids importing config), and r.Tenant is the
+	// tenant-register key while a settings generation is what actually
+	// resolves the flag — a router without config wiring (tests, the daily
+	// HTTP router, which leaves Tenant empty) must still seal, and the zero
+	// value false does exactly that.
+	Devmode bool
 }
 
 // TypeSet resolves the tenant's block-type policy set for this router's

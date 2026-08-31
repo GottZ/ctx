@@ -122,7 +122,7 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 		// Closure-scoped defer so parse/count failures land in entry.Err
 		// before Record fires (analogous to evaluate.go and validate_temporal.go).
 		keywords, iterErr := func() ([]string, error) {
-			defer func() { llmlog.Record(pool, entry.Slimmed()) }()
+			defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 			if err != nil {
 				return nil, err
 			}

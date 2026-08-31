@@ -177,7 +177,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 		BlockIDs:      []string{block.ID},
 		DreamVersion:  &dreamVer,
 	}
-	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
+	defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 
 	start := time.Now()
 	resp, served, attempts, err := r.temporalReview(ctx, block, userPrompt, validateOpts)

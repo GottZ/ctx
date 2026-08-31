@@ -131,17 +131,24 @@ func TestLLMLogDetailGoldenKeys(t *testing.T) {
 	})
 }
 
-// TestClassifyBodies pins the body_state decision: credentials ⇒ sealed (bodies
-// dropped), any body ⇒ present (bodies returned), a NULL column ⇒ evicted
+// TestClassifyBodies pins the body_state decision: any body ⇒ present (bodies
+// returned), then credentials without bodies ⇒ sealed, a NULL column ⇒ evicted
 // (retention's signature), all-empty-not-NULL ⇒ bodyless (never recorded).
 // A regression that leaked a sealed/evicted body would turn this red.
+//
+// C6-C moved the credentials branch BEHIND the content check: the state
+// describes the row, not the class, so a credentials row whose bodies were
+// actually stored (tenant devmode, or predating the E4/8b slim) renders them
+// instead of claiming a seal that is not there. The absent-body branches are
+// unchanged, which is why every row in the live corpus keeps its label. The
+// content-driven half has its own probe, TestClassifyBodiesIsContentDriven.
 func TestClassifyBodies(t *testing.T) {
 	s := "sys"
 	u := "user"
 	empty := ""
 
-	// credentials-class: SEALED, every body nil regardless of stored content.
-	if state, os, ou, or := classifyBodies("credentials", &s, &u, &s); state != bodySealed || os != nil || ou != nil || or != nil {
+	// credentials-class WITHOUT stored bodies: SEALED, every body nil.
+	if state, os, ou, or := classifyBodies("credentials", &empty, &empty, &empty); state != bodySealed || os != nil || ou != nil || or != nil {
 		t.Fatalf("credentials: got state=%q os=%v ou=%v or=%v; want sealed + all nil", state, os, ou, or)
 	}
 	// non-credentials with content: PRESENT, bodies passed through.

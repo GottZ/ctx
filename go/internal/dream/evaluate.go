@@ -303,7 +303,7 @@ func evalAttempt(ctx context.Context, pool *pgxpool.Pool, r *Router, req *evalRe
 		}
 		entry.Metadata["cap_retry"] = true
 	}
-	defer func() { llmlog.Record(pool, entry.Slimmed()) }()
+	defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 
 	start := time.Now()
 	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, req.required,

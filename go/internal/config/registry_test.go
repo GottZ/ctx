@@ -278,6 +278,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"pool.openrouter_window_ttl":            true, // E10-W2: AUTO-window discovery TTL, born in settings like its pool siblings
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
 		"tenant.allow_cross_tenant_block_grant": true, // MT T43 (07-W6): operator-set per-tenant cross-tenant block-grant opt-in (global-only)
+		"tenant.devmode":                        true, // C6-C: developer-transparency umbrella; settings-only ON PURPOSE — an env would let the privacy default fall without an audit row
 	}
 	seen := map[string]string{}
 	for _, e := range registry() {
@@ -392,6 +393,14 @@ func TestRegistryTenancySet(t *testing.T) {
 		"webchat.completion_budget": true, "webchat.tool_result_max_chars": true,
 		"webchat.history_budget_chars": true, "webchat.llm_timeout": true,
 		"webchat.concurrent_turns": true, "webchat.session_retention": true,
+		// C6-C developer-transparency umbrella. It is the ONLY tenant.* key in
+		// this list, and deliberately so: its two allow_* siblings GRANT reach
+		// outside the tenant (a shared secret, a foreign reader) and must stay
+		// operator-set, while devmode only decides how much of its OWN machinery
+		// a tenant sees. The llmlog read gate is api_key_id-based and this key
+		// appears nowhere in it, so switching it on cannot widen the tenant
+		// boundary by a single row.
+		"tenant.devmode": true,
 	}
 	for _, e := range registry() {
 		gotOverridable := e.Tenancy == TenancyOverridable
@@ -403,8 +412,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 66 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 66 (change it with intent)", got)
+	if got := len(overridable); got != 67 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 67 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the

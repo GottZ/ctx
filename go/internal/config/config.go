@@ -1309,14 +1309,21 @@ func (c *Config) BlobWriteLimit() int {
 	return c.Query.RateLimitWrite
 }
 
-// TenantConfig holds per-tenant POLICY switches the OPERATOR sets, never the
-// tenant itself — hence global-only (a tenant-scope row is dropped by the
-// toOverrides gate, so a tenant cannot self-grant). The value lives in the
-// tenant's OWN context_settings scope and is read DIRECTLY at that scope
-// (store.TenantAllowsSharedSecrets), NOT through this snapshot field — the
-// snapshot value is server-global by the global-only classification and is not
-// the per-tenant truth. The field exists so the key is a known registry entry
-// (write-gate + GET visibility), not as a consumed snapshot value.
+// TenantConfig holds the per-tenant POLICY switches. Two shapes live here and
+// the tenancy tag is what separates them — read it before adding a key:
+//
+//   - The two allow_* GRANTS widen what a tenant may reach OUTSIDE itself
+//     (a shared _global secret, a foreign tenant's reader). Only the OPERATOR
+//     may set those, hence global-only: a tenant-scope row is dropped by the
+//     toOverrides gate, so a tenant cannot self-grant. Their value lives in the
+//     tenant's OWN context_settings scope and is read DIRECTLY at that scope
+//     (store.TenantAllowsSharedSecrets), NOT through this snapshot field — the
+//     snapshot value is server-global by the global-only classification and is
+//     not the per-tenant truth. The field exists so the key is a known registry
+//     entry (write-gate + GET visibility), not as a consumed snapshot value.
+//   - Devmode grants a tenant nothing outside itself — only a fuller view of
+//     its own data — and is therefore tenant-overridable and read as a normal
+//     snapshot value. See its own comment.
 type TenantConfig struct {
 	// AllowSharedSecrets opts a tenant INTO the shared _global secret fallback
 	// (design 03 §4.3/D2): false (default = STRICT isolation) resolves a tenant
@@ -1340,6 +1347,45 @@ type TenantConfig struct {
 	// TENANT-DECISION(allow-cross-tenant-block-grant): default false (opt-in), analog
 	// E5 — Alt default true, umentscheidbar weil additiver Settings-Gate.
 	AllowCrossTenantBlockGrant bool `key:"tenant.allow_cross_tenant_block_grant" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
+
+	// Devmode is the tenant's DEVELOPER-TRANSPARENCY umbrella (C6-C): the one
+	// switch a tenant working ON ctx flips to see its own machinery instead of
+	// the production-hardened summary of it. It is an umbrella by intent, not
+	// by accident — every consumer of it is listed HERE and in
+	// docs/operations.md, so it never decays into a private second switch per
+	// surface.
+	//
+	// Consumers (exactly one today):
+	//   - llmlog body sealing (E4/8b). Off: a credentials-class LLM call keeps
+	//     its telemetry + block_ids but its prompt/reply bodies are dropped at
+	//     WRITE time (llmlog.Entry.Slimmed) — no plaintext shadow corpus of the
+	//     hottest tier. On: this tenant's credentials-class calls are stored
+	//     with bodies and GET /api/llmlog/{id} renders them (body_state
+	//     "present" with a credentials-class warning, never a silent unseal).
+	//
+	// tenant-overridable, and that class is the whole design. Devmode widens
+	// NOTHING outside the tenant: the llmlog read gate is api_key_id-based
+	// (handler/llmlog.go) and this key appears nowhere in that query, so a
+	// tenant switching it on gains its own bodies and cannot reach a
+	// neighbour's row. It is also the only class that WORKS — a global-only key
+	// has its tenant-scope row dropped before config.Build, so it could never
+	// carry a per-tenant answer, and a server-admin PUT lands at _global
+	// (handler.writeScope) for every tenant at once.
+	//
+	// Setting it at _global is allowed and means exactly what it says: the
+	// OPERATOR decided against E4 for EVERY tenant on this server, present and
+	// future. That is a deliberate, audited settings write (context_settings
+	// _global + the audit trigger), which is also why the key carries NO env
+	// var: an env would let the privacy default fall by a compose edit that
+	// leaves no trace in the audit trail.
+	//
+	// The switch is not retroactive in either direction. Turning it on creates
+	// no bodies for calls that already happened (their columns are empty
+	// strings and stay that way); turning it off removes none — the bodies
+	// already written live out their scheduler.llmlog_retention_days like every
+	// other body and are then NULLed by llmlog.EvictBodies. Retention is
+	// untouched by this key.
+	Devmode bool `key:"tenant.devmode" env:"-" default:"false" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // DispatchConfig is the internal/dispatch admission-layer surface (Vorhaben
@@ -2411,6 +2457,7 @@ func (c *Config) SynthesisSettings() llm.SynthesisSettings {
 		PromptVersion:          c.Query.PromptVersion,
 		ExternalNumCtxFallback: c.Pool.ExternalNumCtxFallback,
 		OpenRouterWindowTTL:    c.Pool.OpenRouterWindowTTL,
+		Devmode:                c.Tenant.Devmode,
 	}
 }
 

@@ -2,9 +2,10 @@ package llmlog
 
 import "testing"
 
-// TestSlimmed pins the E4/8b body-slim contract: credentials-class rows drop
-// all three prompt bodies but keep every telemetry field; other classes pass
-// through untouched.
+// TestSlimmed pins the E4/8b body-slim contract at the DEFAULT (devmode off,
+// C6-C): credentials-class rows drop all three prompt bodies but keep every
+// telemetry field; other classes pass through untouched. The devmode-on half
+// lives in TestSlimmedDevmode.
 func TestSlimmed(t *testing.T) {
 	base := Entry{
 		Pipeline:            "dream-eval",
@@ -19,7 +20,7 @@ func TestSlimmed(t *testing.T) {
 		RequiredSensitivity: "credentials",
 	}
 
-	slim := base.Slimmed()
+	slim := base.Slimmed(false)
 	if slim.RequestSystem != "" || slim.RequestUser != "" || slim.ResponseContent != "" {
 		t.Errorf("credentials row must drop all bodies, got %+v", slim)
 	}
@@ -30,7 +31,7 @@ func TestSlimmed(t *testing.T) {
 	for _, sens := range []string{"personal", "internal", "public", ""} {
 		e := base
 		e.RequiredSensitivity = sens
-		got := e.Slimmed()
+		got := e.Slimmed(false)
 		if got.RequestSystem != "sys" || got.RequestUser != "user" || got.ResponseContent != "resp" {
 			t.Errorf("sensitivity %q must keep bodies, got %+v", sens, got)
 		}

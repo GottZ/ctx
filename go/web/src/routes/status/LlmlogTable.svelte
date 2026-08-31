@@ -14,6 +14,7 @@
   import Modal from '../../lib/ui/Modal.svelte'
   import Table from '../../lib/ui/Table.svelte'
   import { fmtMs } from './dispatch'
+  import { bodyStateReason, unsealedCredentialsNote } from './llmlog-body-state'
   import { LlmlogDetailModel } from './llmlog-detail.svelte'
 
   // `live` carries SSE-pushed llmcall rows (G34); merged on top of the fetched
@@ -53,15 +54,6 @@
       e.preventDefault()
       void detail.open(id)
     }
-  }
-  // The human-readable reason a body is absent (sealed = credentials-class row,
-  // never stored; evicted = retention removed once-stored bodies; bodyless =
-  // this pipeline never records prompt/reply — llmlog W1 split).
-  function bodyStateReason(state: string): string {
-    if (state === 'sealed') return 'sealed — credentials-class call, prompt/reply never stored'
-    if (state === 'evicted') return 'evicted — bodies removed by retention'
-    if (state === 'bodyless') return 'bodyless — this pipeline never records prompt/reply (embed, translate, rejection lines)'
-    return ''
   }
 
   const entries = $derived.by(() => {
@@ -201,6 +193,10 @@
         {#if d.body_state !== 'present'}
           <p class="state note" role="status">{bodyStateReason(d.body_state)}</p>
         {:else}
+          {@const unsealed = unsealedCredentialsNote(d.body_state, d.required_sensitivity)}
+          {#if unsealed}
+            <p class="state note" role="status">{unsealed}</p>
+          {/if}
           <section class="body">
             <h4>system prompt</h4>
             <pre>{d.request_system ?? '—'}</pre>
