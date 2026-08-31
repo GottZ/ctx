@@ -1809,13 +1809,21 @@ type DistillConfig struct {
 
 	// ── Cadence and gates (§4.2) ───────────────────────────────────────────
 	//
-	// Interval is the tick cadence in SECONDS (house convention:
-	// parseDurationSeconds, unitless seconds). 15 min, and deliberately NOT
-	// anchored to a wall clock the way runDailySynthesis (03:00) and
-	// runRecallCheck (offpeak_hour) are: compaction is event-driven, and a
-	// night window would mean the insights of a working session reach the
-	// corpus the next morning — after the context cut they exist for. The
-	// off-peak behavior comes from the gates, not from the clock.
+	// Interval is the IDLE FALLBACK in SECONDS (house convention:
+	// parseDurationSeconds, unitless seconds) — since C6-B no longer the
+	// taktgeber. The arm is woken by the ctx_block_write NOTIFY of a checkpoint
+	// write and ticks a debounce later (distillWakeDebounce, 2 s); this value
+	// only bounds how long it may sleep with NO event at all: a reconnect gap,
+	// a checkpoint un-archived by hand, a notification lost between Postgres and
+	// the listener. Lowering it does not make the arm faster on the path that
+	// matters and only buys empty ticks.
+	//
+	// 15 min, and deliberately NOT anchored to a wall clock the way
+	// runDailySynthesis (03:00) and runRecallCheck (offpeak_hour) are:
+	// compaction is event-driven, and a night window would mean the insights of
+	// a working session reach the corpus the next morning — after the context
+	// cut they exist for. The off-peak behavior comes from the gates, not from
+	// the clock.
 	Interval time.Duration `key:"distill.interval" env:"CTX_DISTILL_INTERVAL" default:"900" mut:"hot" tenancy:"global-only"`
 	// SessionQuietFor is gate 3 (§4.2), in seconds: how long the youngest live
 	// row of a session must have been quiet before the arm touches that

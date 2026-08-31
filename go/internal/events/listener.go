@@ -50,6 +50,16 @@ type WriteHandler struct {
 	scheduler *Scheduler
 }
 
+// blockNotifyPayload mirrors notify_block_write() (113_baseline.sql:684-690).
+// The trigger publishes IDENTITY ONLY — no type, no category, no scope — which
+// is why the distiller's wake filter is a query on the arm's goroutine rather
+// than a branch here (C6-B; widening the payload would be a migration, and the
+// id is enough).
+type blockNotifyPayload struct {
+	ID string `json:"id"`
+	Op string `json:"op"`
+}
+
 // HandleNotification is called by pgxlisten for each NOTIFY on ctx_block_write.
 func (h *WriteHandler) HandleNotification(ctx context.Context, notification *pgconn.Notification, conn *pgx.Conn) error {
 	// Rune-aware payload truncation for the debug log (Issue #4 defensive —
@@ -61,14 +71,33 @@ func (h *WriteHandler) HandleNotification(ctx context.Context, notification *pgc
 		"payload", payload,
 	)
 	h.scheduler.NotifyWrite()
+	// C6-B: the same notification arms the distiller, but only for an INSERT —
+	// the source's watermark is created_at, so an UPDATE adds no material a tick
+	// could find. An unparsable payload is NOT an error the connection should
+	// see (pgxlisten treats a returned error as connection-level): guard and
+	// digest were already signalled above, and the arm keeps its idle fallback.
+	var p blockNotifyPayload
+	if err := json.Unmarshal([]byte(notification.Payload), &p); err != nil {
+		slog.Warn("listener: unparsable ctx_block_write payload — distiller not armed", "error", err)
+		return nil
+	}
+	if p.Op == "INSERT" {
+		h.scheduler.NotifyBlockInsert(p.ID)
+	}
 	return nil
 }
 
 // HandleBacklog processes any writes that occurred while the listener was disconnected.
 // On reconnect, we unconditionally signal guard+digest to pick up missed events.
 func (h *WriteHandler) HandleBacklog(ctx context.Context, channel string, conn *pgx.Conn) error {
-	slog.Info("listener: processing backlog, signaling guard+digest")
+	slog.Info("listener: processing backlog, signaling guard+digest+distill")
 	h.scheduler.NotifyWrite()
+	// The distiller needs the same unconditional signal, and it needs its OWN
+	// entry point: the ids of the disconnect window are gone with the dropped
+	// notifications, so the wake filter has nothing to ask about and the arm must
+	// wake without asking (C6-B, fail-open). Without this a compaction written
+	// during a reconnect gap waits for the idle fallback.
+	h.scheduler.NotifyDistillBacklog()
 	return nil
 }
 

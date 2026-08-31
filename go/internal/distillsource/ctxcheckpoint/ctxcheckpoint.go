@@ -52,11 +52,18 @@ import (
 	"github.com/GottZ/ctx/internal/promptguard"
 )
 
-// typeName is the block type of both manifests and parts. It is a property of
+// TypeName is the block type of both manifests and parts. It is a property of
 // the source, not a setting: an operator who points this reader at another type
 // is not reading checkpoints any more, and the manifest/part shape this file
 // parses would not be there.
-const typeName = "checkpoint"
+//
+// EXPORTED since C6-B, and for the promptguard.PipelineDistill reason rather
+// than for reach: the arm's wake filter has to decide "was that write one of
+// MINE?" from a NOTIFY payload that carries only an id, and it must decide it
+// with the very predicate every query below uses. A second spelling in
+// internal/events would not fail loudly — it would leave the arm deaf to its own
+// material after a rename here, with the idle fallback quietly covering it up.
+const TypeName = "checkpoint"
 
 // sourceUntrusted is this source's answer about its own material, and it is a
 // constant because the answer is a property of the type rather than of a row.
@@ -207,7 +214,7 @@ SELECT metadata->>'root_session_id' AS root
 	// but A02-6 asks for two runs over the same range to produce identical
 	// ledger numbers, and a non-deterministic candidate order would defeat that
 	// before the ledger ever sees a row.
-	rows, err := s.pool.Query(ctx, q, typeName, s.opt.Scope, s.opt.Category, s.horizonCutoff(), s.opt.MaxSessions)
+	rows, err := s.pool.Query(ctx, q, TypeName, s.opt.Scope, s.opt.Category, s.horizonCutoff(), s.opt.MaxSessions)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -252,7 +259,7 @@ SELECT EXISTS (
      AND (EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT > $5)`
 
 	var ok bool
-	err := s.pool.QueryRow(ctx, q, sess, typeName, s.opt.Scope, s.opt.Category, after).Scan(&ok)
+	err := s.pool.QueryRow(ctx, q, sess, TypeName, s.opt.Scope, s.opt.Category, after).Scan(&ok)
 	return ok, mapErr(err)
 }
 
@@ -270,7 +277,7 @@ SELECT COALESCE(max((EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT), 0)
    AND metadata ? 'source_block_ids'`
 
 	var head int64
-	err := s.pool.QueryRow(ctx, q, sess, typeName, s.opt.Scope, s.opt.Category).Scan(&head)
+	err := s.pool.QueryRow(ctx, q, sess, TypeName, s.opt.Scope, s.opt.Category).Scan(&head)
 	return head, mapErr(err)
 }
 
@@ -291,7 +298,7 @@ SELECT max(created_at)
    AND NOT is_archived`
 
 	var newest *time.Time
-	if err := s.pool.QueryRow(ctx, q, sess, typeName, s.opt.Scope, s.opt.Category).Scan(&newest); err != nil {
+	if err := s.pool.QueryRow(ctx, q, sess, TypeName, s.opt.Scope, s.opt.Category).Scan(&newest); err != nil {
 		return 0, mapErr(err)
 	}
 	if newest == nil {
@@ -458,7 +465,7 @@ SELECT id::text,
 	// No fallback for a non-positive cap: New refuses to build a source with
 	// one, so a silent window of 1 can no longer arise here.
 	limit := s.opt.MaxManifests
-	rows, err := s.pool.Query(ctx, q, sess, typeName, s.opt.Scope, s.opt.Category, after, limit+1)
+	rows, err := s.pool.Query(ctx, q, sess, TypeName, s.opt.Scope, s.opt.Category, after, limit+1)
 	if err != nil {
 		return nil, false, mapErr(err)
 	}
@@ -519,7 +526,7 @@ SELECT id::text,
    AND (EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT = $6
  ORDER BY id ASC`
 
-	rows, err := s.pool.Query(ctx, q, sess, typeName, s.opt.Scope, s.opt.Category, after, wm)
+	rows, err := s.pool.Query(ctx, q, sess, TypeName, s.opt.Scope, s.opt.Category, after, wm)
 	if err != nil {
 		return nil, false, mapErr(err)
 	}
@@ -558,7 +565,7 @@ SELECT b.id::text, b.content
  WHERE b.type_name = $2 AND b.scope = $3 AND NOT b.is_archived
  ORDER BY s.ord`
 
-	rows, err := s.pool.Query(ctx, q, h.partIDs, typeName, s.opt.Scope)
+	rows, err := s.pool.Query(ctx, q, h.partIDs, TypeName, s.opt.Scope)
 	if err != nil {
 		return nil, mapErr(err)
 	}

@@ -128,6 +128,37 @@ const distillForbiddenScope = "shared"
 // recallInterval's shape (recall_check.go:105-110).
 const distillDefaultInterval = 15 * time.Minute
 
+// distillWakeDebounce is how long the arm lets a write burst settle before it
+// asks whether the burst concerned it. MEASURED against the live corpus rather
+// than borrowed from the digest arm:
+//
+//   - A compaction writes ~20 blocks (max 114) in one go. The gap between two
+//     consecutive writes of one compaction is 0.032 s at p50 and 0.20 s at p99
+//     over 5504 measured gaps — the burst is sub-second dense.
+//   - Replaying the whole write history (5796 checkpoint writes, 292 compaction
+//     groups) against candidate values shows the tick economy is FLAT across the
+//     sub-second-to-3 s range: 309 ticks at 0.5 s, 307 at 2 s, 307 at 3 s. It
+//     only starts paying above that — 277 at 10 s, 214 at 60 s.
+//
+// So the 93 ticks that 60 s would save over two months of real use cost 58 s of
+// latency on every single compaction, and latency is the scarce resource: the
+// insights of a compaction must stand in the corpus before the user's NEXT
+// query, not before the one after it. The value therefore sits at the burst's
+// own p95 (2.11 s). digestDebounce's 60 s answers a different question — "has
+// the corpus stopped moving" — and is not a precedent here.
+//
+// A var, not a const, for the dreamYieldWait reason: the gate suite must be able
+// to observe a settle without spending two seconds per assertion.
+var distillWakeDebounce = 2 * time.Second
+
+// distillWakeIDCap bounds the id set of one wake window. At the live write rate
+// (360 blocks/day) it is never approached; what it exists for is the bulk write
+// — an import, a re-embed migration — where the honest answer is not a longer
+// list but "stop counting and ask the source". Overflow therefore wakes
+// unconditionally: one extra tick during an import is proportionate, a missed
+// compaction is not.
+const distillWakeIDCap = 4096
+
 // distillSourceBuilder is the reader seam (dreamCycleFunc / backgroundTenantsFn
 // pattern): production builds a ctxcheckpoint reader over the daemon pool, the
 // gate suite substitutes a source it can steer — a source that fails, that has
@@ -135,10 +166,18 @@ const distillDefaultInterval = 15 * time.Minute
 // seam those three gates would need a database that misbehaves on command.
 type distillSourceBuilder func(cfg *config.Config, scope string) (distillsource.Source, error)
 
-// runDistiller is the distiller goroutine (§4.8). It owns its cadence; there is
-// no boot run (topic_label.go pattern) and no wall-clock anchor — compaction is
-// event-driven, and a night window would mean the insights of a working session
-// reach the corpus after the context cut they exist for.
+// runDistiller is the distiller goroutine (§4.8). It owns its cadence, and since
+// C6-B that cadence is an EVENT rather than a clock: the arm sleeps until a
+// checkpoint block is written and distill.interval is only the idle fallback
+// underneath. No wall-clock anchor either — compaction is event-driven, and a
+// night window would mean the insights of a working session reach the corpus
+// after the context cut they exist for.
+//
+// What forced the change is the same sentence one level down: a poll answers a
+// write after interval/2 on average, 450 s at the default. The insights of a
+// compaction exist for the queries that follow it, so an arm that hands them
+// over a poll interval later hands them over too late — the follow-up query has
+// already been answered without them.
 func (s *Scheduler) runDistiller(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -153,17 +192,200 @@ func (s *Scheduler) runDistiller(ctx context.Context) {
 	// source_key, because at boot no run of THIS process can be live and the
 	// journal has exactly one writer.
 	s.distillStartupSweep(ctx)
-	slog.Info("scheduler: distiller arm started")
+	slog.Info("scheduler: distiller arm started", "wake_debounce", distillWakeDebounce)
+
+	// THE BOOT TICK IS IMMEDIATE (C6-B), which reverses the topic_label.go "no
+	// boot run" this arm used to copy. The reason is what a restart means for an
+	// event-driven arm: every NOTIFY fired while the process was down is gone —
+	// Postgres does not queue for an absent listener — so at boot the arm is
+	// blind to exactly the material a restart is most likely to have left
+	// behind, and waiting a fallback interval to discover it would make a
+	// deploy the slowest path in the system. The tick is cheap when there is
+	// nothing to do: gate 0 returns on two booleans, and an empty candidate list
+	// writes no journal row at all (§4.5.3).
+	s.distillOnce(ctx, s.interactiveDemand)
 
 	for {
 		cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: every distill.* key is tenancy:global-only (config.go:1699-2021) — the arm reads one operator's session material and writes into exactly one scope (§4.8).
-		select {
-		case <-ctx.Done():
+		if !s.distillAwait(ctx, distillInterval(cfg.Distill.Interval)) {
 			return
-		case <-time.After(distillInterval(cfg.Distill.Interval)):
 		}
 		s.distillOnce(ctx, s.interactiveDemand)
 	}
+}
+
+// NotifyBlockInsert records an inserted block id in the distiller's wake window
+// and arms the arm (C6-B). It runs on the pgxlisten goroutine, once per
+// ctx_block_write notification carrying op=INSERT.
+//
+// ONLY INSERT, and that is a statement about the watermark rather than an
+// optimisation: the source derives it from created_at in microseconds
+// (ctxcheckpoint.go:18-22), so an UPDATE of a row a tick has already covered
+// carries nothing a later tick could find. The one case it gives up is a
+// checkpoint block being UN-archived — the source filters NOT is_archived, and
+// that flip arrives as an UPDATE — which is a rare operator action and precisely
+// what the idle fallback is still there for.
+//
+// It does no query and takes no decision: the trigger payload carries only
+// {id, op} (113_baseline.sql:684-690), so "was that one of mine?" needs the
+// database, and the listener thread is the one place that question must not be
+// asked — it feeds guard and digest too.
+func (s *Scheduler) NotifyBlockInsert(id string) {
+	if id == "" {
+		return
+	}
+	s.distillWakeMu.Lock()
+	defer s.distillWakeMu.Unlock()
+	if len(s.distillWakeIDs) < distillWakeIDCap {
+		s.distillWakeIDs = append(s.distillWakeIDs, id)
+	} else {
+		s.distillWakeOverflow = true
+	}
+	s.armDistillWake()
+}
+
+// NotifyDistillBacklog wakes the arm for writes it cannot name: the pgxlisten
+// reconnect path, whose notifications Postgres dropped while the connection was
+// down. Without it every compaction of the disconnect window waits for the idle
+// fallback — the same gap guard, digest and the graph cache each close with
+// their own backlog entry point.
+func (s *Scheduler) NotifyDistillBacklog() {
+	s.distillWakeMu.Lock()
+	defer s.distillWakeMu.Unlock()
+	s.distillWakeOverflow = true
+	s.armDistillWake()
+}
+
+// armDistillWake is the non-blocking send (overviewKick shape): a signal while
+// one is already pending coalesces, and a listener thread is never blocked by an
+// arm that happens to be inside a minutes-long tick.
+//
+// CALLER HOLDS distillWakeMu. Signal and payload are published under one lock so
+// the drain can clear both atomically — see drainDistillWake.
+func (s *Scheduler) armDistillWake() {
+	select {
+	case s.distillWake <- struct{}{}:
+	default:
+	}
+}
+
+// drainDistillWake takes the window's ids and clears payload AND pending signal
+// under the same lock the append side holds. The two must not disagree: a token
+// left without ids costs a pointless settle, ids left without a token are a
+// compaction the arm forgot until the fallback.
+func (s *Scheduler) drainDistillWake() ([]string, bool) {
+	s.distillWakeMu.Lock()
+	defer s.distillWakeMu.Unlock()
+	ids, overflow := s.distillWakeIDs, s.distillWakeOverflow
+	s.distillWakeIDs, s.distillWakeOverflow = nil, false
+	select {
+	case <-s.distillWake:
+	default:
+	}
+	return ids, overflow
+}
+
+// distillAwait blocks until the arm should tick: a settled wake window that
+// concerned it, or the idle fallback. It reports false only on shutdown.
+//
+// THE FALLBACK DEADLINE SPANS THE WHOLE WAIT, every settle inside it included,
+// and that is what keeps a busy corpus from starving the arm: a window whose
+// writes were all foreign returns to the SAME deadline it started with, so the
+// guarantee "never more than one interval without a tick" survives any amount of
+// unrelated traffic.
+func (s *Scheduler) distillAwait(ctx context.Context, fallback time.Duration) bool {
+	fb := time.NewTimer(fallback)
+	defer fb.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-fb.C:
+			return true
+		case <-s.distillWake:
+			// THE SETTLE IS FIXED FROM THE FIRST SIGNAL of a burst, never
+			// re-armed by the ones that follow. A re-armed settle is unbounded
+			// under a steady write stream — the normal state at the 10M-block
+			// target — and would hand back exactly the "insights arrive after
+			// the follow-up query" behaviour this wave removes. The fixed
+			// window's cost is measured and small: 263 of 292 live compactions
+			// finish inside it, and one that does not is split across two ticks
+			// rather than read torn. Torn is impossible by construction anyway
+			// — the manifest is written last (292/292 measured), so a tick that
+			// lands between parts finds no manifest and reads nothing.
+			settle := time.NewTimer(distillWakeDebounce)
+			select {
+			case <-ctx.Done():
+				settle.Stop()
+				return false
+			case <-settle.C:
+			}
+			ids, overflow := s.drainDistillWake()
+			if s.distillWakeHit(ctx, ids, overflow) {
+				return true
+			}
+			// Foreign writes only. Back to the same deadline — no tick, and no
+			// extension of the fallback the arm is entitled to.
+		}
+	}
+}
+
+// distillWakeHit answers whether a settled wake window concerned this arm.
+//
+// ONE indexed query per WINDOW, and that placement is the whole of the C6-B
+// design. The two alternatives both scale with the system's write rate instead
+// of with the compaction rate: a per-notification PK lookup puts a round trip on
+// the listener thread for every block anything writes, and waking
+// unconditionally pays a full tick — source enumeration plus N-34's re-scan of
+// every source still standing at watermark 0 — per write burst anywhere in the
+// corpus. At the 10M-block target that is the difference between at most one
+// cheap query per debounce window and a permanent tick every two seconds.
+//
+// FAIL OPEN on an unanswerable filter. Being wrong in this direction costs one
+// tick that journals no_new_rows; being wrong in the other costs an insight that
+// reaches the corpus a fallback interval late — after the query it exists for.
+func (s *Scheduler) distillWakeHit(ctx context.Context, ids []string, overflow bool) bool {
+	if overflow {
+		return true
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	filter := s.distillWakeFilter
+	if filter == nil {
+		filter = s.distillWakeQuery
+	}
+	hit, err := filter(ctx, ids)
+	if err != nil {
+		slog.Warn("scheduler: distiller wake filter failed — waking anyway",
+			"error", err, "ids", len(ids))
+		return true
+	}
+	return hit
+}
+
+// distillWakeQuery is the production filter: the source's OWN predicate over the
+// window's ids, narrowed by the hot category key.
+//
+// Scope is deliberately absent. Resolving it means the tenant-register query
+// gate 5 makes a moment later anyway (distillScope), and a checkpoint written
+// into a scope this arm does not read is rare enough that one tick answering
+// no_new_rows is the cheaper of the two mistakes.
+func (s *Scheduler) distillWakeQuery(ctx context.Context, ids []string) (bool, error) {
+	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: distill.checkpoint_category is tenancy:global-only, exactly like every key runDistiller reads (§4.8).
+	var hit bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		    SELECT 1
+		      FROM context_blocks
+		     WHERE id = ANY($1::uuid[])
+		       AND type_name = $2
+		       AND category = $3)`,
+		ids, ctxcheckpoint.TypeName, cfg.Distill.CheckpointCategory).Scan(&hit)
+	if err != nil {
+		return false, fmt.Errorf("distill: wake filter over %d ids: %w", len(ids), err)
+	}
+	return hit, nil
 }
 
 // distillInterval clamps a non-positive interval to the 15-minute default.

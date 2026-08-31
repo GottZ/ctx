@@ -156,6 +156,39 @@ type Scheduler struct {
 	// Same seam shape as dreamCycleFunc and backgroundTenantsFn.
 	distillSource distillSourceBuilder
 
+	// distillWake carries the "a block was INSERTed" signal from the pgxlisten
+	// goroutine to the distiller arm (C6-B). Buffered(1) + non-blocking send, the
+	// overviewKick shape: a signal while one is pending coalesces, and the
+	// listener thread — which also feeds guard and digest — is never blocked by
+	// an arm that happens to be inside a minutes-long tick.
+	//
+	// The channel is the SIGNAL; distillWakeIDs below is the payload it refers
+	// to. They are separate because the trigger's payload carries only
+	// {id, op} (113_baseline.sql:684-690) — no type, no category — so "does this
+	// concern the distiller?" is a question only a query can answer, and that
+	// query belongs on the arm's own goroutine rather than on the listener's.
+	distillWake chan struct{}
+
+	// distillWakeMu guards the wake window's id set. Its OWN mutex, not s.mu:
+	// that one is held by guard/digest bookkeeping on the same listener thread,
+	// and widening its scope to a per-write append would couple two arms that
+	// have nothing to say to each other.
+	distillWakeMu sync.Mutex
+	// distillWakeIDs are the block ids inserted since the arm last drained the
+	// window, capped at distillWakeIDCap.
+	distillWakeIDs []string
+	// distillWakeOverflow means "wake without asking": the id set overflowed its
+	// cap, or a listener reconnect replayed a backlog whose ids are gone. Both
+	// are fail-OPEN by design — the expensive answer is one extra tick, the cheap
+	// one would be a silently missed compaction.
+	distillWakeOverflow bool
+	// distillWakeFilter answers "was one of these ids checkpoint material?".
+	// nil is production (distillWakeQuery over this pool); the C6-B gate
+	// substitutes it to pin the three answers a database cannot be told to give
+	// on command — no, yes, and a failing query (the SettingsWriteHandler.flush
+	// seam pattern).
+	distillWakeFilter func(ctx context.Context, ids []string) (bool, error)
+
 	// distillBreak is the distiller's in-process circuit breaker (A02-8,
 	// design/02 §4.6.3), keyed on the backend name from OnServed. It lives on
 	// the scheduler and not in a tick because that is what "in-process" means:
@@ -393,6 +426,7 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 		runDone:      make(chan struct{}),
 		graphCache:   graphcache.NewManager(),
 		overviewKick: make(chan struct{}, 1),
+		distillWake:  make(chan struct{}, 1),
 		distillBreak: &distillBreaker{},
 	}
 	s.backgroundTenantsFn = s.backgroundTenants
