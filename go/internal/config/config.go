@@ -1363,6 +1363,17 @@ type TenantConfig struct {
 	//     with bodies and GET /api/llmlog/{id} renders them (body_state
 	//     "present" with a credentials-class warning, never a silent unseal).
 	//
+	// WHICH WRITE SITES A TENANT-SCOPED OVERRIDE REACHES (review C6-C, F1/F2):
+	// the interactive query path resolves the caller's tenant (SnapshotForRequest)
+	// and follows the override. The five dream stages resolve the scope they run
+	// under (SnapshotForTenant), and for the DEFAULT tenant that scope is
+	// `_global` (events/scheduler.go backgroundScope) — a scope the overlay
+	// skips by design (store.go, `_`-prefix). So on the default tenant only a
+	// `_global` setting reaches the dream write sites; a named tenant's dream
+	// stages follow that tenant's override. Independently of sealing, dream rows
+	// carry no api_key_id and are therefore visible to the server-admin only —
+	// devmode changes what is STORED for them, not who may read them.
+	//
 	// tenant-overridable, and that class is the whole design. Devmode widens
 	// NOTHING outside the tenant: the llmlog read gate is api_key_id-based
 	// (handler/llmlog.go) and this key appears nowhere in that query, so a
