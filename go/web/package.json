@@ -57,6 +57,7 @@
     "three": "0.185.1"
   },
   "overrides": {
+    "playwright-core": "1.61.1",
     "undici": "7.28.0",
     "uuid": "11.1.1",
     "tmp": "0.2.7"
