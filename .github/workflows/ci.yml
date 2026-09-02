@@ -481,6 +481,78 @@ jobs:
           path: go/coverage.out
           retention-days: 7
 
+  # ─── Stage 2b: Cross-compile gate ────────────────────────────────────────────
+  # Issue #40 (bug 4): the release matrix builds only cmd/ctx, whose import
+  # graph skips embedmigration and goldbench, so a unix-only syscall in either
+  # package broke `go build ./...` on Windows for months without a single CI
+  # job noticing. This gate compiles AND vets every package (tests included)
+  # for the non-Linux targets the release ships — on a Linux runner, since a
+  # cross-compile needs no emulator; it is exactly what a developer on those
+  # platforms hits first.
+  cross-compile:
+    name: Cross-compile (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go/go.sum
+
+      - name: Build + vet every package for ${{ matrix.goos }}/${{ matrix.goarch }}
+        working-directory: go
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build ./...
+          go vet ./...
+
+  # Native Windows run of the two packages that carry a windows-tagged
+  # implementation (embedmigration/disk_windows.go, goldbench/dumpfile_windows.go):
+  # the cross-compile above proves they build, only a Windows runner proves
+  # GetDiskFreeSpaceEx and LockFileEx behave like their unix counterparts
+  # under the packages' own tests. autocrlf is forced off before checkout so
+  # golden fixtures keep their bytes.
+  windows-unit-tests:
+    name: Unit Tests (windows, tagged packages)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Keep checkout bytes intact (no CRLF conversion)
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go/go.sum
+
+      - name: Run the windows-relevant package tests
+        working-directory: go
+        shell: bash
+        run: go test -short -count=1 -timeout=5m ./internal/embedmigration/ ./internal/goldbench/
+
   # ─── Stage 3: Integration Tests ───────────────────────────────────────────────
   # Sharded 5-way (2026-08-20), 6-way since 2026-08-29 (`distill`): the
   # un-sharded job serially ran ~22m and was the whole pipeline's critical path
