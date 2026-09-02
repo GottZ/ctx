@@ -12,6 +12,9 @@ import (
 // content, and a planted link could redirect them).
 const openNoFollow = syscall.O_NOFOLLOW
 
+// openAppend makes every write land at end-of-file regardless of the offset.
+const openAppend = os.O_APPEND
+
 // lockDumpExclusive takes a non-blocking exclusive flock(2) on the open dump
 // file so a second driver on the same file fails fast (ErrDumpLocked) instead
 // of interleaving records.

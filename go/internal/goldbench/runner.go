@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"sort"
@@ -950,7 +951,7 @@ type dumpAppender struct {
 // Duplikate zu schreiben, Review KW3 F7) und schneidet eine abgerissene
 // Schlusszeile ab (validLen aus loadDumpDone; 0 = neue/leere Datei).
 func openDumpAppender(path string, validLen int64) (*dumpAppender, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|openNoFollow, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|openAppend|openNoFollow, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("goldbench: dump-append: %w", err)
 	}
@@ -967,6 +968,13 @@ func openDumpAppender(path string, validLen int64) (*dumpAppender, error) {
 			_ = f.Close()
 			return nil, fmt.Errorf("goldbench: dump-append: truncate torn tail: %w", err)
 		}
+	}
+	// Explicit end-of-file positioning: a no-op under O_APPEND (unix), the
+	// actual append semantics where openAppend is 0 (windows, see
+	// dumpfile_windows.go).
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("goldbench: dump-append: seek end: %w", err)
 	}
 	a := &dumpAppender{f: f, path: path}
 	a.buf = bufio.NewWriterSize(f, 1<<20)

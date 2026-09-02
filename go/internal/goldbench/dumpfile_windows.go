@@ -15,6 +15,14 @@ import (
 // its own dump directory; the trade-off is documented rather than emulated.
 const openNoFollow = 0
 
+// openAppend is 0 on Windows: Go opens an O_APPEND file with FILE_APPEND_DATA
+// access only (no GENERIC_WRITE), and LockFileEx refuses such a handle with
+// ERROR_ACCESS_DENIED — the first appender would look "locked by another
+// process" (seen on windows-latest, TestDumpAppendLoaderGates). The appender
+// seeks to end-of-file explicitly instead; it is the only writer once the
+// lock is held, so the O_APPEND atomicity is not needed.
+const openAppend = 0
+
 // lockDumpExclusive takes a non-blocking exclusive LockFileEx over the whole
 // file — the Windows counterpart of flock(LOCK_EX|LOCK_NB). The lock is
 // released when the handle is closed, exactly like the flock it mirrors.
