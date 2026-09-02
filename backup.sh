@@ -6,11 +6,27 @@
 # =============================================================================
 # Part of ctx by GottZ (github.com/GottZ/ctx/graphs/contributors)
 # Source: https://github.com/GottZ/ctx
+#
+# Extension points (site-local, NOT tracked — see .gitignore `backup.d/`):
+#   Every `backup.d/*.sh` is sourced after the core dumps, in name order, with
+#   these helpers in scope:
+#     backup_dump   LABEL USER PASSWORD DB [pg_dump-args...]
+#                   → dumps DB as LABEL-<DATE>.dump, registers it for the
+#                     integrity check, counts a failure into ERRORS
+#     backup_rotate GLOB DAYS
+#                   → registers an extra rotation rule (evaluated in step 4)
+#     backup_require_var NAME...
+#                   → [FATAL] exit 1 when a variable is unset/empty
+#   The core script keeps the public shape (context_store + n8n); everything
+#   deployment-specific (extra databases, table exclusions, shorter retention)
+#   lives in the hooks. A hook that fails does not abort the run — it counts
+#   as an error in the summary.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_DIR="${SCRIPT_DIR}/backups"
 ENV_FILE="${SCRIPT_DIR}/.env"
+HOOKS_DIR="${BACKUP_HOOKS_DIR:-${SCRIPT_DIR}/backup.d}"
 CONTAINER="${CTX_DB_CONTAINER:-n8n-db-1}"
 RETENTION_DAYS=7
 DATE=$(date +%Y%m%d-%H%M%S)
@@ -28,13 +44,48 @@ set -a
 source "$ENV_FILE"
 set +a
 
-# Validate required vars
-for var in POSTGRES_USER POSTGRES_PASSWORD CONTEXT_DB CONTEXT_DB_USER CONTEXT_DB_PASSWORD; do
-    if [[ -z "${!var:-}" ]]; then
-        echo "[FATAL] $(date -Iseconds) — Missing required variable: $var"
-        exit 1
+# ---------------------------------------------------------------------------
+# Helpers (also the hook API — keep signatures stable)
+# ---------------------------------------------------------------------------
+ERRORS=0
+DUMP_FILES=()
+ROTATIONS=()   # entries "GLOB|DAYS"
+
+backup_require_var() {
+    local var
+    for var in "$@"; do
+        if [[ -z "${!var:-}" ]]; then
+            echo "[FATAL] $(date -Iseconds) — Missing required variable: $var"
+            exit 1
+        fi
+    done
+}
+
+# backup_dump LABEL USER PASSWORD DB [pg_dump-args...]
+backup_dump() {
+    local label="$1" user="$2" pass="$3" db="$4"
+    shift 4
+    local file="${BACKUP_DIR}/${label}-${DATE}.dump"
+    echo ""
+    echo "[STEP]  Dumping ${db} database (${label})..."
+    if docker exec -e PGPASSWORD="$pass" "$CONTAINER" \
+        pg_dump -U "$user" -d "$db" -Fc "$@" \
+        > "$file" 2>/dev/null; then
+        echo "[OK]    ${label} → $file ($(du -h "$file" | cut -f1))"
+        DUMP_FILES+=("$file")
+    else
+        echo "[ERROR] ${label} dump failed!"
+        ERRORS=$((ERRORS + 1))
     fi
-done
+}
+
+# backup_rotate GLOB DAYS — extra rotation rule, evaluated in step 4
+backup_rotate() {
+    ROTATIONS+=("$1|$2")
+}
+
+# Validate required vars
+backup_require_var POSTGRES_USER POSTGRES_PASSWORD CONTEXT_DB CONTEXT_DB_USER CONTEXT_DB_PASSWORD
 
 # n8n DB uses the non-root user if available, else admin
 N8N_DB="n8n"
@@ -48,51 +99,41 @@ echo "==========================================================================
 echo "[INFO]  $(date -Iseconds) — Backup started"
 echo "[INFO]  Container: $CONTAINER"
 echo "[INFO]  Target dir: $BACKUP_DIR"
+echo "[INFO]  Hooks dir:  $HOOKS_DIR"
 echo "==========================================================================="
-
-ERRORS=0
 
 # ---------------------------------------------------------------------------
 # 1. Backup context_store database
 # ---------------------------------------------------------------------------
-CTX_FILE="${BACKUP_DIR}/context_store-${DATE}.dump"
-echo ""
-echo "[STEP]  Dumping context_store database..."
-
-if docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" "$CONTAINER" \
-    pg_dump -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -Fc \
-    > "$CTX_FILE" 2>/dev/null; then
-    CTX_SIZE=$(du -h "$CTX_FILE" | cut -f1)
-    echo "[OK]    context_store → $CTX_FILE ($CTX_SIZE)"
-else
-    echo "[ERROR] context_store dump failed!"
-    ERRORS=$((ERRORS + 1))
-fi
+backup_dump context_store "$CONTEXT_DB_USER" "$CONTEXT_DB_PASSWORD" "$CONTEXT_DB"
 
 # ---------------------------------------------------------------------------
 # 2. Backup n8n database
 # ---------------------------------------------------------------------------
-N8N_FILE="${BACKUP_DIR}/n8n-${DATE}.dump"
-echo ""
-echo "[STEP]  Dumping n8n database..."
+backup_dump n8n "$N8N_USER" "$N8N_PASS" "$N8N_DB"
 
-if docker exec -e PGPASSWORD="$N8N_PASS" "$CONTAINER" \
-    pg_dump -U "$N8N_USER" -d "$N8N_DB" -Fc \
-    > "$N8N_FILE" 2>/dev/null; then
-    N8N_SIZE=$(du -h "$N8N_FILE" | cut -f1)
-    echo "[OK]    n8n → $N8N_FILE ($N8N_SIZE)"
-else
-    echo "[ERROR] n8n dump failed!"
-    ERRORS=$((ERRORS + 1))
+# ---------------------------------------------------------------------------
+# 2b. Site-local hooks (backup.d/*.sh) — extra dumps + rotation rules
+# ---------------------------------------------------------------------------
+if [[ -d "$HOOKS_DIR" ]]; then
+    for hook in "$HOOKS_DIR"/*.sh; do
+        [[ -f "$hook" ]] || continue
+        echo ""
+        echo "[HOOK]  $(basename "$hook")"
+        # `|| …` keeps set -e from aborting the whole run on a hook error;
+        # backup_dump does its own error accounting, anything else counts once.
+        # shellcheck disable=SC1090
+        source "$hook" || { echo "[ERROR] hook $(basename "$hook") failed"; ERRORS=$((ERRORS + 1)); }
+    done
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Integrity check — pg_restore --list on both dumps
+# 3. Integrity check — pg_restore --list on every dump
 # ---------------------------------------------------------------------------
 echo ""
 echo "[STEP]  Running integrity checks (pg_restore --list)..."
 
-for dump_file in "$CTX_FILE" "$N8N_FILE"; do
+for dump_file in "${DUMP_FILES[@]}"; do
     if [[ ! -f "$dump_file" || ! -s "$dump_file" ]]; then
         echo "[WARN]  Skipping integrity check for missing/empty: $dump_file"
         ERRORS=$((ERRORS + 1))
@@ -111,17 +152,27 @@ for dump_file in "$CTX_FILE" "$N8N_FILE"; do
 done
 
 # ---------------------------------------------------------------------------
-# 4. Rotation — delete backups older than RETENTION_DAYS
+# 4. Rotation — core dumps after RETENTION_DAYS, hook rules with their own age.
+#    Patterns are explicit (no `*.dump`) so a hook's files never fall under
+#    the core rule and vice versa.
 # ---------------------------------------------------------------------------
 echo ""
-echo "[STEP]  Rotating backups older than ${RETENTION_DAYS} days..."
+echo "[STEP]  Rotating backups (core: ${RETENTION_DAYS} days; hook rules: ${#ROTATIONS[@]})..."
 
 DELETED=0
-while IFS= read -r -d '' old_file; do
-    echo "[DEL]   $(basename "$old_file")"
-    rm -f "$old_file"
-    DELETED=$((DELETED + 1))
-done < <(find "$BACKUP_DIR" -maxdepth 1 -name "*.dump" -mtime +${RETENTION_DAYS} -print0 2>/dev/null)
+rotate_glob() {
+    local glob="$1" days="$2" old_file
+    while IFS= read -r -d '' old_file; do
+        echo "[DEL]   $(basename "$old_file") (${glob}, ${days}d)"
+        rm -f "$old_file"
+        DELETED=$((DELETED + 1))
+    done < <(find "$BACKUP_DIR" -maxdepth 1 -name "$glob" -mtime +"${days}" -print0 2>/dev/null)
+}
+rotate_glob "context_store-*.dump" "$RETENTION_DAYS"
+rotate_glob "n8n-*.dump" "$RETENTION_DAYS"
+for rule in "${ROTATIONS[@]}"; do
+    rotate_glob "${rule%%|*}" "${rule##*|}"
+done
 
 echo "[INFO]  Deleted $DELETED old backup(s)"
 

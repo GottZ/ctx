@@ -204,6 +204,29 @@ The response echoes `previous` and the new effective value; the write is hot (a 
 
 `backup.sh` archives only the pg_dumps — the sealed-secret ciphertexts are in every dump, the master key (`CTX_SECRETS_KEY`) is in **none**, by design. Disaster recovery needs both the dump and the separately-stored master key. See [security](security.md#sealed-secrets--break-glass) for master-key setup, rotation and break-glass extraction.
 
+### Site-local backup hooks: backup.d/
+
+`backup.sh` dumps `context_store` and `n8n`, verifies every dump with `pg_restore --list`
+and rotates by explicit file patterns (`context_store-*.dump`, `n8n-*.dump`, 7 days). Everything
+deployment-specific — extra databases in the same Postgres instance, table-data exclusions,
+a shorter retention — lives outside the tracked script: every `backup.d/*.sh` (gitignored,
+sourced in name order after the core dumps) sees three helpers:
+
+| Helper | Effect |
+|---|---|
+| `backup_dump LABEL USER PASSWORD DB [pg_dump-args…]` | dumps `DB` as `LABEL-<date>.dump`, registers it for the integrity check, counts a failure |
+| `backup_rotate GLOB DAYS` | adds a rotation rule for the hook's own files (evaluated in the rotation step) |
+| `backup_require_var NAME…` | `[FATAL]` exit when a variable is unset or empty |
+
+A hook that fails counts as one error in the summary (exit 1) but does not abort the run.
+`BACKUP_HOOKS_DIR` overrides the directory. Example hook:
+
+```bash
+# backup.d/10-graph.sh — extra database, embeddings excluded, 3-day retention
+backup_dump graph "$POSTGRES_USER" "$POSTGRES_PASSWORD" graph --exclude-table-data=node_embedding
+backup_rotate "graph-*.dump" 3
+```
+
 ### LLM-log body export: ctx-llmlog-export
 
 `ctx-llmlog-export` is a SELECT-only bulk export of `context_llm_log` as JSONL — one line per

@@ -11,6 +11,9 @@
 # Local overrides
 docker-compose.override.yml
 
+# Site-local backup hooks (sourced by backup.sh; here a symlink into the private .project submodule)
+backup.d
+
 # Data & backups
 db/
 backups/
