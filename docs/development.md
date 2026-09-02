@@ -10,6 +10,29 @@ go test ./... -short                  # Unit tests
 
 The CLI (`cmd/ctx`) never depends on the frontend. Plain `go build` / `go install .../cmd/ctxd` need no Bun and produce a binary that serves a 503 placeholder instead of the UI — `docker compose build ctx` is the channel that ships the real UI.
 
+## Platforms
+
+ctx ships and runs as a Linux container image (`go/Dockerfile`, docker-compose);
+that is the only supported runtime. The source tree nevertheless cross-compiles
+for every target the release matrix publishes — `linux`, `darwin` and `windows`
+on `amd64`/`arm64` — and CI gates it: the `cross-compile` job runs
+`go build ./... && go vet ./...` for `windows/amd64` and `darwin/arm64` on a
+Linux runner, and `windows-unit-tests` runs the two packages with a
+windows-tagged implementation natively on `windows-latest` (issue #40, bug 4).
+
+Platform-specific code lives behind `//go:build unix` / `//go:build windows`
+file pairs, not behind runtime checks: `internal/embedmigration/disk_{unix,windows}.go`
+(statfs vs. `GetDiskFreeSpaceEx`) and `internal/goldbench/dumpfile_{unix,windows}.go`
+(`O_NOFOLLOW` + `flock` vs. `LockFileEx`). Tests that need Unix signals carry the
+`unix` tag as well. One documented gap: Windows has no `O_NOFOLLOW`, so the
+goldbench dump-file symlink guard is a unix-only property.
+
+To check a change locally before pushing:
+
+```bash
+cd go && GOOS=windows GOARCH=amd64 go build ./... && GOOS=windows GOARCH=amd64 go vet ./...
+```
+
 ## Web UI (Svelte 5 + TypeScript + Vite, Bun)
 
 The admin SPA lives in `go/web/` and is embedded into the ctxd binary via `go:embed`. The Docker image builds it in its own stage (`oven/bun:1.3-alpine`, `bun install --frozen-lockfile`, `svelte-check` gate).
