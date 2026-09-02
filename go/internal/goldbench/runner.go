@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -721,7 +720,7 @@ func dumpOutputs(path string, axes []string, axisRuns map[string][]caseRun, gen 
 	// O_NOFOLLOW: nie einem Symlink am Dump-Pfad folgen; Chmod nach dem Open:
 	// der Modus im OpenFile gilt nur bei Neuanlage — eine vorhandene 0644-Datei
 	// (Bestands-Dumps aus regen.sh) bliebe sonst welt-lesbar mit Volltext-Prompts.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|openNoFollow, 0o600)
 	if err != nil {
 		return fmt.Errorf("goldbench: dump-outputs: %w", err)
 	}
@@ -841,7 +840,7 @@ func recComplete(rec dumpRecord) bool {
 // (Review KW3 F4); jeder andere Parse-Fehler bleibt fail-closed.
 func loadDumpDone(path string, gen *GenStamp) (*dumpDone, error) {
 	d := &dumpDone{recs: map[string]map[string]doneRec{}}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return d, nil
 	}
@@ -951,7 +950,7 @@ type dumpAppender struct {
 // Duplikate zu schreiben, Review KW3 F7) und schneidet eine abgerissene
 // Schlusszeile ab (validLen aus loadDumpDone; 0 = neue/leere Datei).
 func openDumpAppender(path string, validLen int64) (*dumpAppender, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|openNoFollow, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("goldbench: dump-append: %w", err)
 	}
@@ -959,7 +958,7 @@ func openDumpAppender(path string, validLen int64) (*dumpAppender, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("goldbench: dump-append: chmod: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockDumpExclusive(f); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("%w: %s: %w", ErrDumpLocked, path, err)
 	}
@@ -1018,7 +1017,7 @@ func (a *dumpAppender) Close() error {
 // dem Lauf. Eine neu angelegte leere Datei ist der dokumentierte Zustand
 // „Lauf begonnen, kein Dump" (design/02 §4.3 ROT-Probe b).
 func preflightDumpPath(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|openNoFollow, 0o600)
 	if err != nil {
 		return fmt.Errorf("goldbench: dump-outputs (preflight): %w", err)
 	}
