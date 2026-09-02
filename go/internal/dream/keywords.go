@@ -91,6 +91,9 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 	opts := keywordOptions()
 
 	var lastErr error
+	// Longest valid-but-short keyword list seen across the attempts; feeds
+	// the deterministic fill once the retries are exhausted.
+	var bestShort []string
 	for attempt := 1; attempt <= KeywordsMaxRetries; attempt++ {
 		// Honour parent cancellation between retries.
 		if ctx.Err() != nil {
@@ -132,18 +135,14 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 				return nil, parseErr
 			}
 			if len(kws) < MinKeywords {
-				// Ornith 1.5 (prod 2026-08-27) liefert oft valide, aber zu
-				// wenige Keywords (2 statt 5-8). Statt den ganzen Versuch zu
-				// verwerfen (3 Retries + Fallback), die LLM-Keywords BEHALTEN
-				// und mit dem deterministischen Tokenizer auffuellen — so geht
-				// kein LLM-Ergebnis verloren und der Block wird trotzdem
-				// verarbeitet. Nur bei 0 LLM-Keywords bleibt es beim Fehler
-				// (Retry-Pfad), da nichts aufzufuellen waere.
-				if len(kws) > 0 {
-					filled := fillKeywords(block.Title, block.Content, kws)
-					if len(filled) >= MinKeywords {
-						return filled, nil
-					}
+				// Too few is still an attempt failure (the llmlog row keeps
+				// the "too few" signal, and a sparse model gets its retries),
+				// but the valid keywords are remembered: if every attempt
+				// comes back short they seed the deterministic fill below
+				// instead of being thrown away (PR #42, Ornith 1.5 returning
+				// 2 keywords where 5-8 were asked).
+				if len(kws) > len(bestShort) {
+					bestShort = kws
 				}
 				countErr := fmt.Errorf("dream: keywords too few (%d)", len(kws))
 				entry.Err = countErr
@@ -168,6 +167,17 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 	// skipped on its next picks until content changes. ExtractKeywords is
 	// stopword-filtered, deterministic, and title-biased — good enough for
 	// the RRF candidate search that follows.
+	if len(bestShort) > 0 {
+		// Every attempt parsed but stayed below MinKeywords. Keep the LLM
+		// keywords (they embed on meaning, which is the whole point of the
+		// LLM path) and top the list up with the deterministic tokenizer
+		// rather than discarding them for a tokenizer-only list.
+		if filled := fillKeywords(block.Title, block.Content, bestShort); len(filled) >= MinKeywords {
+			slog.Warn("dream: LLM keywords too few on all attempts, filled with deterministic ExtractKeywords",
+				"block_id", block.ID, "llm_count", len(bestShort), "count", len(filled), "error", lastErr)
+			return filled, nil
+		}
+	}
 	slog.Warn("dream: LLM keyword generation exhausted retries, falling back to deterministic ExtractKeywords",
 		"block_id", block.ID, "error", lastErr)
 	fallback := ExtractKeywords(block.Title, block.Content, MaxKeywords)
@@ -179,29 +189,41 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 	return fallback, nil
 }
 
-// fillKeywords ergaenzt eine zu kurze LLM-Keyword-Liste mit deterministischen
-// Tokenizer-Keywords (ExtractKeywords) bis MinKeywords — ohne Duplikate und
-// ohne die LLM-Keywords zu verlieren. Die Reihenfolge der LLM-Keywords bleibt
-// erhalten (sie sind semantisch staerker); der Tokenizer fuellt nur auf.
-// Gibt die urspruengliche Liste zurueck, wenn das Auffuellen MinKeywords nicht
-// erreicht (der Caller behandelt das dann als too-few-Fehler).
+// fillKeywords tops a short LLM keyword list up to MaxKeywords with
+// deterministic ExtractKeywords terms. The LLM keywords come first, in their
+// original order and spelling (they are the semantically stronger ones); the
+// tokenizer only appends. Deduplication is case-insensitive and token-aware:
+// ExtractKeywords emits lower-cased single tokens, so "Traefik" would otherwise
+// be followed by "traefik", and "Reverse Proxy" by its own "reverse"/"proxy"
+// fragments — none of which adds a search the LLM keyword does not already run.
+// The result may stay below MinKeywords when the content yields too few terms;
+// the caller then treats it as a failed fill.
 func fillKeywords(title, content string, llmKeywords []string) []string {
-	if len(llmKeywords) >= MinKeywords {
-		return llmKeywords
-	}
-	seen := make(map[string]bool, len(llmKeywords)+MaxKeywords)
-	out := make([]string, 0, MinKeywords)
+	seen := make(map[string]bool, 2*(len(llmKeywords)+MaxKeywords))
+	out := make([]string, 0, MaxKeywords)
 	for _, k := range llmKeywords {
 		k = strings.TrimSpace(k)
-		if k == "" || seen[k] {
+		if k == "" {
 			continue
 		}
-		seen[k] = true
+		key := strings.ToLower(k)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		for _, tok := range tokenize(k) {
+			seen[tok] = true
+		}
 		out = append(out, k)
 	}
-	// Tokenizer-Keywords als Ergaenzung — stoppt sobald MinKeywords erreicht.
-	for _, k := range ExtractKeywords(title, content, MaxKeywords) {
-		if len(out) >= MinKeywords {
+	if len(out) >= MaxKeywords {
+		return out[:MaxKeywords]
+	}
+	// Ask for more terms than the free slots: a term that collides with an
+	// LLM keyword (or one of its tokens) is skipped, and the tokenizer has no
+	// way of knowing which ones will.
+	for _, k := range ExtractKeywords(title, content, MaxKeywords+len(out)) {
+		if len(out) >= MaxKeywords {
 			break
 		}
 		if seen[k] {
