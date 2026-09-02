@@ -163,7 +163,15 @@ else's environment — that led to a fix landing in the repository.
   path-splitting tokenizer and an object-drift keyword parse — hardened
   with a deterministic, capped drift salvage, a synthetic-fixture test and
   a truthful park log, plus a web editor for per-row `model_map` params
-  the passthrough made meaningful.
+  the passthrough made meaningful. Also PR
+  [#42](https://github.com/GottZ/ctx/pull/42): a sparse model (Ornith 1.5
+  returning 2 keywords where 5-8 were asked) hit the "too few" path on most
+  blocks, burning the retries and then replacing its valid keywords with a
+  tokenizer-only list; the shipped fix keeps his idea of topping the LLM
+  keywords up with the deterministic tokenizer, hardened to run after the
+  retries instead of short-circuiting them, to fill up to `MaxKeywords`, and
+  to deduplicate case-insensitively and against the tokens of multi-word
+  keywords, with mutation-tested pins for each rule.
 
 ## How to be listed
 
