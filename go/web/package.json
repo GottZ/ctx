@@ -23,7 +23,7 @@
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
     "@lhci/cli": "0.15.1",
-    "@playwright/test": "1.62.1",
+    "@playwright/test": "1.61.1",
     "@sveltejs/vite-plugin-svelte": "7.3.0",
     "@tsconfig/svelte": "5.0.8",
     "@types/markdown-it": "14.2.0",
