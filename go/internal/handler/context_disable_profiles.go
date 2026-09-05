@@ -10,6 +10,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -146,23 +147,22 @@ func (h *ManageHandler) handleDisableProfileCreate(w http.ResponseWriter, r *htt
 		p.Active = *spec.Active
 	}
 
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-create: begin failed", err)
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-create: set request id failed", err)
-		return
-	}
-	id, err := store.CreateDisableProfile(ctx, tx, p, memberIDs, actorID(r))
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-create: commit failed", err)
+	var id string
+	if !answeredTx(ctx, h.pool, func(stage string, err error) {
+		h.gamingInternalError(w, ctx, "disable-profile-create: "+stage+" failed", err)
+	}, func(tx pgx.Tx) bool {
+		if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
+			h.gamingInternalError(w, ctx, "disable-profile-create: set request id failed", err)
+			return false
+		}
+		var err error
+		id, err = store.CreateDisableProfile(ctx, tx, p, memberIDs, actorID(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			return false
+		}
+		return true
+	}) {
 		return
 	}
 	p.ID = id
@@ -199,27 +199,24 @@ func (h *ManageHandler) handleDisableProfileUpdate(w http.ResponseWriter, r *htt
 		memberIDsPtr = &memberIDs
 	}
 
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-update: begin failed", err)
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-update: set request id failed", err)
-		return
-	}
-	found, err := store.UpdateDisableProfile(ctx, tx, scope, name, spec.Label, spec.Description, memberIDsPtr, actorID(r), profileWriteScopes(ar))
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-	if !found {
-		writeProfileNotFound(w)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-update: commit failed", err)
+	if !answeredTx(ctx, h.pool, func(stage string, err error) {
+		h.gamingInternalError(w, ctx, "disable-profile-update: "+stage+" failed", err)
+	}, func(tx pgx.Tx) bool {
+		if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
+			h.gamingInternalError(w, ctx, "disable-profile-update: set request id failed", err)
+			return false
+		}
+		found, err := store.UpdateDisableProfile(ctx, tx, scope, name, spec.Label, spec.Description, memberIDsPtr, actorID(r), profileWriteScopes(ar))
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			return false
+		}
+		if !found {
+			writeProfileNotFound(w)
+			return false
+		}
+		return true
+	}) {
 		return
 	}
 	h.reloadAfterMutation(ctx, "disable-profile-update")
@@ -247,36 +244,33 @@ func (h *ManageHandler) handleDisableProfileDelete(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-delete: begin failed", err)
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-delete: set request id failed", err)
-		return
-	}
-	reserved, found, err := store.DeleteDisableProfile(ctx, tx, scope, name, actorID(r), profileWriteScopes(ar))
-	if err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-delete: delete failed", err)
-		return
-	}
-	if !found {
-		writeProfileNotFound(w)
-		return
-	}
-	if reserved {
-		// Break-glass guard (§4.3): the eject alias (ctx eject / ctx gaming)
-		// hangs off this profile — deletion would strand the alias.
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
-			"success": false,
-			"error":   "Reserviertes Profil — Alias ctx eject/ctx gaming hängt daran; nicht löschbar",
-		})
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-delete: commit failed", err)
+	if !answeredTx(ctx, h.pool, func(stage string, err error) {
+		h.gamingInternalError(w, ctx, "disable-profile-delete: "+stage+" failed", err)
+	}, func(tx pgx.Tx) bool {
+		if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
+			h.gamingInternalError(w, ctx, "disable-profile-delete: set request id failed", err)
+			return false
+		}
+		reserved, found, err := store.DeleteDisableProfile(ctx, tx, scope, name, actorID(r), profileWriteScopes(ar))
+		if err != nil {
+			h.gamingInternalError(w, ctx, "disable-profile-delete: delete failed", err)
+			return false
+		}
+		if !found {
+			writeProfileNotFound(w)
+			return false
+		}
+		if reserved {
+			// Break-glass guard (§4.3): the eject alias (ctx eject / ctx gaming)
+			// hangs off this profile — deletion would strand the alias.
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"success": false,
+				"error":   "Reserviertes Profil — Alias ctx eject/ctx gaming hängt daran; nicht löschbar",
+			})
+			return false
+		}
+		return true
+	}) {
 		return
 	}
 	h.reloadAfterMutation(ctx, "disable-profile-delete")
@@ -342,27 +336,24 @@ func (h *ManageHandler) handleDisableProfileToggle(w http.ResponseWriter, r *htt
 		return
 	}
 
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-toggle: begin failed", err)
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-toggle: set request id failed", err)
-		return
-	}
-	found, err := store.SetDisableProfileActive(ctx, tx, scope, name, *spec.Active, actorID(r), profileWriteScopes(ar))
-	if err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-toggle: write failed", err)
-		return
-	}
-	if !found {
-		writeProfileNotFound(w)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		h.gamingInternalError(w, ctx, "disable-profile-toggle: commit failed", err)
+	if !answeredTx(ctx, h.pool, func(stage string, err error) {
+		h.gamingInternalError(w, ctx, "disable-profile-toggle: "+stage+" failed", err)
+	}, func(tx pgx.Tx) bool {
+		if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
+			h.gamingInternalError(w, ctx, "disable-profile-toggle: set request id failed", err)
+			return false
+		}
+		found, err := store.SetDisableProfileActive(ctx, tx, scope, name, *spec.Active, actorID(r), profileWriteScopes(ar))
+		if err != nil {
+			h.gamingInternalError(w, ctx, "disable-profile-toggle: write failed", err)
+			return false
+		}
+		if !found {
+			writeProfileNotFound(w)
+			return false
+		}
+		return true
+	}) {
 		return
 	}
 	// Synchronous reload so the flip hits the next chain in THIS process; as_of

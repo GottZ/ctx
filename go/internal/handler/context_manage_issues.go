@@ -26,6 +26,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -423,19 +424,22 @@ func (h *ManageHandler) inIssueTx(ctx context.Context, fn func(tx pgx.Tx) (*stor
 // error. Returns fn's block (nil for link/void writes). Shared by the manage
 // transport (inIssueTx) and the REST W7 write handlers.
 func issueTx(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) (*store.Block, error)) (*store.Block, error) {
-	tx, err := pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
+	// Stages{} keeps begin, fn and commit errors UNWRAPPED: writeIssueStoreError
+	// and mcpIssueError map ~8 store sentinels with errors.Is, and a label would
+	// not break that — but the tx errors travel into the same default branch as
+	// before, and the slog line stays byte-identical.
+	var out *store.Block
+	if err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		b, err := fn(tx)
+		if err != nil {
+			return err
+		}
+		out = b
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-	b, err := fn(tx)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return b, nil
+	return out, nil
 }
 
 // writeIssueError is the manage-transport alias for writeIssueStoreError (kept so

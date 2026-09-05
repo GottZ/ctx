@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -431,13 +432,26 @@ func parseIndexRelOptions(opts []string) map[string]string {
 // an operator who has explicitly SET ef_search to 40.
 func queryEfSearchEffective(ctx context.Context, pool *pgxpool.Pool) string {
 	const fallback = "40 (default)"
-	tx, err := pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
+	effective := fallback
+	// pgxdb.Probe is the bracket whose RESULT is the rollback (never a commit —
+	// a probe whose ordinary outcome is a failed statement cannot commit). Its
+	// only own failure is the BeginTx below; every step inside reports itself.
+	if err := pgxdb.Probe(ctx, pool, "", func(tx pgx.Tx) error {
+		effective = efSearchProbeSteps(ctx, tx, fallback)
+		return nil
+	}); err != nil {
 		slog.Warn("status: db-section ef_search probe begin failed", "error", err)
 		return fallback
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	return effective
+}
 
+// efSearchProbeSteps runs the two statements of the ef_search probe inside the
+// caller's transaction: load the pgvector library, then read hnsw.ef_search
+// from pg_settings. It returns no error on purpose — a failing step IS a
+// possible outcome here, it reports itself and yields the fallback, and the
+// transaction is rolled back either way.
+func efSearchProbeSteps(ctx context.Context, tx pgx.Tx, fallback string) string {
 	if _, err := tx.Exec(ctx, `SELECT ('[0]'::vector)::text`); err != nil {
 		slog.Warn("status: db-section ef_search probe library load failed", "error", err)
 		return fallback
@@ -621,13 +635,26 @@ func runChannelProbe(ctx context.Context, pool *pgxpool.Pool, embedModel string,
 
 	hv := pgvec.NewHalfVector(raw.Slice())
 
-	tx, err := pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
+	// Read-only throughout, and the rollback pgxdb.Probe defers is cleanup, not
+	// a correctness requirement — but it is the only ending this transaction
+	// has: the four channels are measured, never written.
+	var row *probeRow
+	if err := pgxdb.Probe(ctx, pool, "", func(tx pgx.Tx) error {
+		row = channelProbeSteps(ctx, tx, hv, text, scopes, visibleTypes)
+		return nil
+	}); err != nil {
 		slog.Warn("status: channel probe begin failed", "error", err)
 		return nil
 	}
-	defer func() { _ = tx.Rollback(ctx) }() // read-only throughout; rollback is cleanup, not a correctness requirement
+	return row
+}
 
+// channelProbeSteps measures the four retrieval channels inside the caller's
+// transaction (SET LOCAL first, so the relaxed iterative scan dies with it). It
+// returns no error for the same reason efSearchProbeSteps does not: a failed
+// SET LOCAL reports itself and yields nil, the established best-effort posture
+// of this file.
+func channelProbeSteps(ctx context.Context, tx pgx.Tx, hv pgvec.HalfVector, text string, scopes, visibleTypes []string) *probeRow {
 	if _, err := tx.Exec(ctx, `SET LOCAL hnsw.iterative_scan = 'relaxed_order'`); err != nil {
 		slog.Warn("status: channel probe SET LOCAL failed", "error", err)
 		return nil

@@ -16,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 )
 
 // Backend pool manage actions (F3-P1, design 03 §3.4). All five are
@@ -301,6 +302,18 @@ func writeBackendValidation(w http.ResponseWriter, errs []backends.FieldError) {
 	})
 }
 
+// writeBackendTxFailure answers the two failures the transaction bracket owns
+// with the wording the backend surface has always used: a failed BeginTx is
+// "transaction begin failed", a failed Commit is "commit failed" — both a 500
+// carrying only that text, never the driver's own (§2.9: no wire detail).
+func writeBackendTxFailure(w http.ResponseWriter, stage string) {
+	msg := "commit failed"
+	if stage == "begin" {
+		msg = "transaction begin failed"
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": msg})
+}
+
 // reloadAfterMutation is the synchronous half of the snapshot propagation.
 // The mutation is committed — a reload failure must not turn it into a
 // client error; the NOTIFY path retries momentarily.
@@ -399,26 +412,23 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 	}
 
 	by := actorID(r)
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "transaction begin failed"})
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	id, err := store.CreateBackend(ctx, tx, b, by)
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-	// Join-sync in the SAME tx as the backend insert (per-backend atomic).
-	if syncProfiles {
-		if err := store.SyncBackendDisableProfiles(ctx, tx, id, profileIDs, by); err != nil {
+	var id string
+	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+		var err error
+		id, err = store.CreateBackend(ctx, tx, b, by)
+		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
-			return
+			return false
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "commit failed"})
+		// Join-sync in the SAME tx as the backend insert (per-backend atomic).
+		if syncProfiles {
+			if err := store.SyncBackendDisableProfiles(ctx, tx, id, profileIDs, by); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+				return false
+			}
+		}
+		return true
+	}) {
 		return
 	}
 	b.ID = id
@@ -516,33 +526,28 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 	}
 
 	by := actorID(r)
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "transaction begin failed"})
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	// Store-layer scope gate (fail-closed backstop, §5.5): nil for a server-
-	// admin, []string{ar.HomeScope} for a tenant-admin. A foreign row matches
-	// zero rows atomically → found=false → 404 (no TOCTOU, no second call path).
-	found, err := store.UpdateBackend(ctx, tx, &next, by, backendWriteScopes(ar))
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-	if !found {
-		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "backend not found"})
-		return
-	}
-	// Join-sync in the SAME tx as the backend update (per-backend atomic).
-	if syncProfiles {
-		if err := store.SyncBackendDisableProfiles(ctx, tx, next.ID, profileIDs, by); err != nil {
+	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+		// Store-layer scope gate (fail-closed backstop, §5.5): nil for a server-
+		// admin, []string{ar.HomeScope} for a tenant-admin. A foreign row matches
+		// zero rows atomically → found=false → 404 (no TOCTOU, no second call path).
+		found, err := store.UpdateBackend(ctx, tx, &next, by, backendWriteScopes(ar))
+		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
-			return
+			return false
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "commit failed"})
+		if !found {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "backend not found"})
+			return false
+		}
+		// Join-sync in the SAME tx as the backend update (per-backend atomic).
+		if syncProfiles {
+			if err := store.SyncBackendDisableProfiles(ctx, tx, next.ID, profileIDs, by); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+				return false
+			}
+		}
+		return true
+	}) {
 		return
 	}
 	h.reloadAfterMutation(ctx, "backend-update")
@@ -563,25 +568,22 @@ func (h *ManageHandler) handleBackendDelete(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	by := actorID(r)
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "transaction begin failed"})
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	// Store-layer scope gate (§4.6/§5.5): a tenant-admin deleting a foreign/
-	// _global id matches zero rows → found=false → 404 (no oracle, no TOCTOU).
-	name, found, err := store.DeleteBackend(ctx, tx, req.ID, by, backendWriteScopes(ar))
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete failed"})
-		return
-	}
-	if !found {
-		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "backend not found"})
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "commit failed"})
+	var name string
+	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+		// Store-layer scope gate (§4.6/§5.5): a tenant-admin deleting a foreign/
+		// _global id matches zero rows → found=false → 404 (no oracle, no TOCTOU).
+		deleted, found, err := store.DeleteBackend(ctx, tx, req.ID, by, backendWriteScopes(ar))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete failed"})
+			return false
+		}
+		if !found {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "backend not found"})
+			return false
+		}
+		name = deleted
+		return true
+	}) {
 		return
 	}
 	h.reloadAfterMutation(ctx, "backend-delete")

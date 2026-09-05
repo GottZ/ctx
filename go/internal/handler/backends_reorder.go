@@ -8,6 +8,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 )
 
 // backend-reorder (Web-Admin UX): rewrites the priority ladder of the caller's
@@ -124,50 +125,44 @@ func (h *ManageHandler) handleBackendReorder(w http.ResponseWriter, r *http.Requ
 	}
 
 	by := actorID(r)
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "transaction begin failed"})
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Lock the whole writable set (scope-gated in the statement, T37) — the
-	// coverage and staleness checks below read a stable snapshot, and a
-	// concurrent reorder/update serializes behind the lock instead of racing.
-	rows, err := store.LockBackendPriorities(ctx, tx, by, backendWriteScopes(ar))
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "reorder lock failed"})
-		return
-	}
-	if errResp := checkReorderCoverage(spec.Order, rows); errResp != nil {
-		errResp.write(w)
-		return
-	}
-	if current := staleReorderState(spec.Expected, rows); current != nil {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"success": false, "error": "stale", "current": current,
-		})
-		return
-	}
-
-	// Descending 10-steps over the full sequence: top = n*10, bottom = 10.
-	// No-op rows are skipped so the 053 audit trail records only actual moves.
-	current := make(map[string]int, len(rows))
-	for _, row := range rows {
-		current[row.ID] = row.Priority
-	}
-	for i, id := range spec.Order {
-		want := (len(spec.Order) - i) * 10
-		if current[id] == want {
-			continue
+	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+		// Lock the whole writable set (scope-gated in the statement, T37) — the
+		// coverage and staleness checks below read a stable snapshot, and a
+		// concurrent reorder/update serializes behind the lock instead of racing.
+		rows, err := store.LockBackendPriorities(ctx, tx, by, backendWriteScopes(ar))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "reorder lock failed"})
+			return false
 		}
-		if err := store.UpdateBackendPriority(ctx, tx, id, want); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "reorder write failed"})
-			return
+		if errResp := checkReorderCoverage(spec.Order, rows); errResp != nil {
+			errResp.write(w)
+			return false
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "commit failed"})
+		if current := staleReorderState(spec.Expected, rows); current != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"success": false, "error": "stale", "current": current,
+			})
+			return false
+		}
+
+		// Descending 10-steps over the full sequence: top = n*10, bottom = 10.
+		// No-op rows are skipped so the 053 audit trail records only actual moves.
+		current := make(map[string]int, len(rows))
+		for _, row := range rows {
+			current[row.ID] = row.Priority
+		}
+		for i, id := range spec.Order {
+			want := (len(spec.Order) - i) * 10
+			if current[id] == want {
+				continue
+			}
+			if err := store.UpdateBackendPriority(ctx, tx, id, want); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "reorder write failed"})
+				return false
+			}
+		}
+		return true
+	}) {
 		return
 	}
 	h.reloadAfterMutation(ctx, "backend-reorder")

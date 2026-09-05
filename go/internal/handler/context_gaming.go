@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 )
 
 // ejectProfileName / ejectProfileScope identify the break-glass profile the
@@ -133,27 +135,27 @@ func (h *ManageHandler) handleGamingMode(w http.ResponseWriter, r *http.Request,
 // missing eject profile aborts the tx (errEjectProfileMissing).
 func (h *ManageHandler) writeEjectActive(r *http.Request, active bool) error {
 	ctx := r.Context()
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		return err
-	}
-	found, err := store.SetDisableProfileActive(ctx, tx, ejectProfileScope, ejectProfileName, active, actorID(r), nil)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return errEjectProfileMissing
-	}
-	if beforeGamingCommit != nil {
-		if err := beforeGamingCommit(); err != nil {
+	// Stages{} keeps begin, body and commit errors UNWRAPPED — the caller
+	// distinguishes them with errors.Is(err, errEjectProfileMissing), and the
+	// beforeGamingCommit seam still fires as the last step before the commit.
+	return pgxdb.Write(ctx, h.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
 			return err
 		}
-	}
-	return tx.Commit(ctx)
+		found, err := store.SetDisableProfileActive(ctx, tx, ejectProfileScope, ejectProfileName, active, actorID(r), nil)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errEjectProfileMissing
+		}
+		if beforeGamingCommit != nil {
+			if err := beforeGamingCommit(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ejectShapeView renders the eject profile in the legacy gaming shape: active +

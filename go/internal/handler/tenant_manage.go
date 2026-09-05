@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -324,51 +325,53 @@ const bootstrapScopeName = "main"
 // own scope). It returns the tenant (with seeded limits echoed), the owner key
 // record, and its plaintext (shown once).
 func (h *ManageHandler) bootstrapTenant(ctx context.Context, slug, displayName, initialScope string, seedScopes, seedKeys *int) (*store.Tenant, store.ApiKey, string, error) {
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		return nil, store.ApiKey{}, "", fmt.Errorf("bootstrap begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
+	// The two labels are the caller's own words, not At("bootstrap"): the texts
+	// have always been "bootstrap begin"/"bootstrap commit" without the colon,
+	// and %w keeps writeBootstrapError's errors.As(&pgErr) path intact.
+	var (
+		tn        *store.Tenant
+		key       store.ApiKey
+		plaintext string
+	)
+	err := pgxdb.Write(ctx, h.pool, pgxdb.Stages{Begin: "bootstrap begin", Commit: "bootstrap commit"}, func(tx pgx.Tx) error {
+		// (a) Tenant row. A duplicate slug surfaces as ErrTenantSlugExists (→ 409).
+		var err error
+		tn, err = store.CreateTenantTx(ctx, tx, slug, displayName)
+		if err != nil {
+			return err
+		}
 
-	// (a) Tenant row. A duplicate slug surfaces as ErrTenantSlugExists (→ 409).
-	tn, err := store.CreateTenantTx(ctx, tx, slug, displayName)
+		// (b) Seed only the dimensions the payload supplied, merged over tn's 069
+		// DEFAULTs (25/50) so an absent dimension keeps its default — inside this tx, so
+		// the caps commit with the tenant (no uncapped window, design/04 §D-B S3).
+		if seedScopes != nil || seedKeys != nil {
+			newScopes, newKeys := tn.MaxScopes, tn.MaxKeys
+			if seedScopes != nil {
+				newScopes = seedScopes
+			}
+			if seedKeys != nil {
+				newKeys = seedKeys
+			}
+			if err := store.SetTenantLimitsTx(ctx, tx, tn.ID, newScopes, newKeys); err != nil {
+				return err
+			}
+			tn.MaxScopes, tn.MaxKeys = newScopes, newKeys
+		}
+
+		// (c) Register the initial scope CAP-FREE (maxScopes=-1), BEFORE the owner key.
+		capFree := -1
+		if _, err := store.AssignTenantScopeTx(ctx, tx, tn.ID, initialScope, &capFree); err != nil {
+			return err
+		}
+
+		// (d) Owner key: the single sanctioned path to role='owner' (MintOwnerKey), home
+		// + allowed pinned to the just-registered scope. A 22001 here (over-long scope)
+		// is mapped to a clean 400 by writeBootstrapError, not an anonymous 500.
+		key, plaintext, err = store.MintOwnerKey(ctx, tx, slug+" owner", initialScope, []string{initialScope}, tn.ID)
+		return err
+	})
 	if err != nil {
 		return nil, store.ApiKey{}, "", err
-	}
-
-	// (b) Seed only the dimensions the payload supplied, merged over tn's 069
-	// DEFAULTs (25/50) so an absent dimension keeps its default — inside this tx, so
-	// the caps commit with the tenant (no uncapped window, design/04 §D-B S3).
-	if seedScopes != nil || seedKeys != nil {
-		newScopes, newKeys := tn.MaxScopes, tn.MaxKeys
-		if seedScopes != nil {
-			newScopes = seedScopes
-		}
-		if seedKeys != nil {
-			newKeys = seedKeys
-		}
-		if err := store.SetTenantLimitsTx(ctx, tx, tn.ID, newScopes, newKeys); err != nil {
-			return nil, store.ApiKey{}, "", err
-		}
-		tn.MaxScopes, tn.MaxKeys = newScopes, newKeys
-	}
-
-	// (c) Register the initial scope CAP-FREE (maxScopes=-1), BEFORE the owner key.
-	capFree := -1
-	if _, err := store.AssignTenantScopeTx(ctx, tx, tn.ID, initialScope, &capFree); err != nil {
-		return nil, store.ApiKey{}, "", err
-	}
-
-	// (d) Owner key: the single sanctioned path to role='owner' (MintOwnerKey), home
-	// + allowed pinned to the just-registered scope. A 22001 here (over-long scope)
-	// is mapped to a clean 400 by writeBootstrapError, not an anonymous 500.
-	key, plaintext, err := store.MintOwnerKey(ctx, tx, slug+" owner", initialScope, []string{initialScope}, tn.ID)
-	if err != nil {
-		return nil, store.ApiKey{}, "", err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, store.ApiKey{}, "", fmt.Errorf("bootstrap commit: %w", err)
 	}
 	return tn, key, plaintext, nil
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/rrf"
 	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/store"
@@ -1556,44 +1557,56 @@ type armSweepParams struct {
 //     call (migration 137 header). Only inside one transaction do both
 //     functions search the same ANN candidate space.
 //   - READ ONLY is the fail-closed half: this path exists to observe, and the
-//     transaction is structurally incapable of writing. The rollback in the
-//     defer therefore has nothing to undo — it just releases the snapshot.
+//     transaction is structurally incapable of writing. The rollback the
+//     bracket defers therefore has nothing to undo — it just releases the
+//     snapshot.
 //
 // Errors are NOT fail-open. A measurement that silently degraded to whatever
 // the pool happened to return would be worse than no measurement, so a failing
 // statement fails the request; the caller maps it onto the same 500 the
 // ordinary search error takes.
 func (h *QueryHandler) armSweepSearch(ctx context.Context, p armSweepParams) ([]rrf.SearchResult, rrf.SelectorDecision, []rrf.ArmRow, error) {
-	tx, err := h.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		return nil, rrf.SelectorDecision{}, nil, fmt.Errorf("arm_ranks: begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // read-only tx: nothing to lose, and rollback after return is a no-op
+	var (
+		results []rrf.SearchResult
+		dec     rrf.SelectorDecision
+		rows    []rrf.ArmRow
+	)
+	// WriteOpts, not Read: the isolation level is this caller's decision and
+	// Read would discard it. The seam still ends in a ROLLBACK — pgxdb.ErrRollback
+	// is the bracket's "leave without committing, no error" (K37), so the
+	// statement sequence on the wire is the one this function has always sent.
+	err := pgxdb.WriteOpts(ctx, h.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		pgxdb.Stages{Begin: "arm_ranks: begin tx"}, func(tx pgx.Tx) error {
+			// SET LOCAL, so both bounds die with the transaction and never leak onto
+			// the pooled connection's next user.
+			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+armSweepTimeout+"'"); err != nil {
+				return fmt.Errorf("arm_ranks: set statement_timeout: %w", err)
+			}
+			if _, err := tx.Exec(ctx, "SET LOCAL idle_in_transaction_session_timeout = '"+armSweepTimeout+"'"); err != nil {
+				return fmt.Errorf("arm_ranks: set idle_in_transaction_session_timeout: %w", err)
+			}
 
-	// SET LOCAL, so both bounds die with the transaction and never leak onto
-	// the pooled connection's next user.
-	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+armSweepTimeout+"'"); err != nil {
-		return nil, rrf.SelectorDecision{}, nil, fmt.Errorf("arm_ranks: set statement_timeout: %w", err)
-	}
-	if _, err := tx.Exec(ctx, "SET LOCAL idle_in_transaction_session_timeout = '"+armSweepTimeout+"'"); err != nil {
-		return nil, rrf.SelectorDecision{}, nil, fmt.Errorf("arm_ranks: set idle_in_transaction_session_timeout: %w", err)
-	}
+			// pool stays the pool (poolStatsEstimator is a pool property); the probe
+			// and the ctx_rrf statement travel through tx.
+			var err error
+			results, dec, err = rrf.SearchTx(ctx, h.pool, tx, p.embedding, p.query, p.querySpaced, p.scopes,
+				p.category, p.tags, p.limit, p.temporal, p.queryOR, p.measureVisibleTypes, p.dampedTypes, p.dampedFactors,
+				p.categoriesExclude, p.typesExclude, p.grantedBlockIDs, p.policy)
+			if err != nil {
+				return err
+			}
 
-	// pool stays the pool (poolStatsEstimator is a pool property); the probe
-	// and the ctx_rrf statement travel through tx.
-	results, dec, err := rrf.SearchTx(ctx, h.pool, tx, p.embedding, p.query, p.querySpaced, p.scopes,
-		p.category, p.tags, p.limit, p.temporal, p.queryOR, p.measureVisibleTypes, p.dampedTypes, p.dampedFactors,
-		p.categoriesExclude, p.typesExclude, p.grantedBlockIDs, p.policy)
-	if err != nil {
-		return nil, dec, nil, err
-	}
-
-	// dec is post-retry: after an exact_cap_hit runSelected rewrote Mode, so
-	// the arms call reproduces the arguments the fusion ACTUALLY ran with.
-	rows, err := rrf.ArmRanksTx(ctx, tx, dec, p.policy, p.embedding, p.query, p.querySpaced, p.scopes,
-		p.category, p.tags, p.limit, p.temporal, p.queryOR, p.measureVisibleTypes, p.dampedTypes, p.dampedFactors,
-		p.categoriesExclude, p.typesExclude, p.grantedBlockIDs)
-	if err != nil {
+			// dec is post-retry: after an exact_cap_hit runSelected rewrote Mode, so
+			// the arms call reproduces the arguments the fusion ACTUALLY ran with.
+			rows, err = rrf.ArmRanksTx(ctx, tx, dec, p.policy, p.embedding, p.query, p.querySpaced, p.scopes,
+				p.category, p.tags, p.limit, p.temporal, p.queryOR, p.measureVisibleTypes, p.dampedTypes, p.dampedFactors,
+				p.categoriesExclude, p.typesExclude, p.grantedBlockIDs)
+			if err != nil {
+				return err
+			}
+			return pgxdb.ErrRollback
+		})
+	if err != nil && !errors.Is(err, pgxdb.ErrRollback) {
 		return nil, dec, nil, err
 	}
 	return results, dec, rows, nil

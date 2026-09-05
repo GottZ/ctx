@@ -30,6 +30,7 @@ import (
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -93,26 +94,23 @@ func (h *WebhookSecretHandler) HandleCreate(w http.ResponseWriter, r *http.Reque
 
 	// Persist the sealed secret AND the register ref in ONE tx: the column and the
 	// secret row are consistent by construction (no half-configured project).
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		h.fail(w, r, "webhook-secret: begin", err)
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		h.fail(w, r, "webhook-secret: tx meta", err)
-		return
-	}
-	if _, err := store.PutSecret(ctx, tx, name, row.Scope, nonce, ct, 1, actorID(r)); err != nil {
-		h.fail(w, r, "webhook-secret: persist", err)
-		return
-	}
-	if err := store.SetProjectWebhookSecretRef(ctx, tx, row.ID, name); err != nil {
-		h.fail(w, r, "webhook-secret: set ref", err)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		h.fail(w, r, "webhook-secret: commit", err)
+	if !answeredTx(ctx, h.pool, func(stage string, err error) {
+		h.fail(w, r, "webhook-secret: "+stage, err)
+	}, func(tx pgx.Tx) bool {
+		if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
+			h.fail(w, r, "webhook-secret: tx meta", err)
+			return false
+		}
+		if _, err := store.PutSecret(ctx, tx, name, row.Scope, nonce, ct, 1, actorID(r)); err != nil {
+			h.fail(w, r, "webhook-secret: persist", err)
+			return false
+		}
+		if err := store.SetProjectWebhookSecretRef(ctx, tx, row.ID, name); err != nil {
+			h.fail(w, r, "webhook-secret: set ref", err)
+			return false
+		}
+		return true
+	}) {
 		return
 	}
 
@@ -130,26 +128,23 @@ func (h *WebhookSecretHandler) HandleDelete(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
-	if err != nil {
-		h.fail(w, r, "webhook-secret: delete begin", err)
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		h.fail(w, r, "webhook-secret: delete tx meta", err)
-		return
-	}
-	if _, err := store.DeleteSecret(ctx, tx, store.WebhookSecretName(row.ID), row.Scope, actorID(r)); err != nil {
-		h.fail(w, r, "webhook-secret: delete secret", err)
-		return
-	}
-	if err := store.ClearProjectWebhookSecretRef(ctx, tx, row.ID); err != nil {
-		h.fail(w, r, "webhook-secret: clear ref", err)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		h.fail(w, r, "webhook-secret: delete commit", err)
+	if !answeredTx(ctx, h.pool, func(stage string, err error) {
+		h.fail(w, r, "webhook-secret: delete "+stage, err)
+	}, func(tx pgx.Tx) bool {
+		if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
+			h.fail(w, r, "webhook-secret: delete tx meta", err)
+			return false
+		}
+		if _, err := store.DeleteSecret(ctx, tx, store.WebhookSecretName(row.ID), row.Scope, actorID(r)); err != nil {
+			h.fail(w, r, "webhook-secret: delete secret", err)
+			return false
+		}
+		if err := store.ClearProjectWebhookSecretRef(ctx, tx, row.ID); err != nil {
+			h.fail(w, r, "webhook-secret: clear ref", err)
+			return false
+		}
+		return true
+	}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
