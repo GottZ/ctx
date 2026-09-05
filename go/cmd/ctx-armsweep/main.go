@@ -51,7 +51,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -349,28 +348,3 @@ func (c *common) id() string {
 }
 
 func (c *common) sliceNames() []string { return splitCSV(c.slices) }
-
-// buildRev reads the VCS stamp Go embedded at build time, dirty flag appended.
-// Deliberately NOT `git rev-parse` in a subprocess: spawning one is an argued
-// exception in this module (internal/llm/exec_ban_test.go) and a provenance
-// field does not argue it. In a linked worktree Go's repository walk can land
-// on the enclosing checkout, so the value identifies the BUILD.
-func buildRev() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return ""
-	}
-	rev, dirty := "", false
-	for _, s := range info.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			rev = s.Value
-		case "vcs.modified":
-			dirty = s.Value == "true"
-		}
-	}
-	if rev != "" && dirty {
-		return rev + "-dirty"
-	}
-	return rev
-}

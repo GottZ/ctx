@@ -19,11 +19,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/GottZ/ctx/internal/goldbench"
+	"github.com/GottZ/ctx/internal/provenance"
 )
 
 func main() {
@@ -81,10 +81,7 @@ func run() error {
 		}
 	}
 
-	key := *apiKey
-	if key == "" {
-		key = os.Getenv("GOLDBENCH_API_KEY")
-	}
+	key := resolveAPIKey(*apiKey)
 
 	dir := *dataDir
 	if dir == "" {
@@ -103,6 +100,14 @@ func run() error {
 		}
 	}
 
+	// Der Env-Stamp nennt die Revision des ARBEITSVERZEICHNISSES (7 Zeichen,
+	// ohne Dirty-Flag) — nicht die des Builds. Ist das cwd nicht ermittelbar,
+	// bleibt der Stempel leer, wie bisher.
+	wd, wdErr := os.Getwd()
+	if wdErr != nil {
+		wd = ""
+	}
+
 	cfg := goldbench.Config{
 		DataDir:       dir,
 		Endpoint:      *endpoint,
@@ -116,7 +121,7 @@ func run() error {
 		TimeoutSec:    *timeoutSec,
 		Verbose:       *verbose,
 		ServerNote:    *serverNote,
-		GitRev:        gitRev(),
+		GitRev:        provenance.WorktreeRev(wd),
 		MaxTokensMult: *maxTokMult,
 		ExtraBody:     *extraBody,
 		TempOverride:  *tempOv,
@@ -191,107 +196,15 @@ func run() error {
 	return nil
 }
 
-// gitRev liefert die kurze Revision für den Env-Stamp ("" wenn nicht
-// ermittelbar) — dateibasiert statt per git-Subprozess (exec-Ban-Gate):
-// .git/HEAD lesen, symbolische Refs über die Ref-Datei bzw. packed-refs
-// auflösen. Worktrees (".git"-DATEI mit gitdir:-Zeile) werden verfolgt.
-func gitRev() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
+// resolveAPIKey löst den API-Key auf: -api-key schlägt GOLDBENCH_API_KEY, und
+// ohne beides bleibt er leer (der Endpoint entscheidet dann, ob er das
+// akzeptiert). Der Key steht bewusst nicht in einem Flag-Default, damit er
+// nicht in der Prozessliste landet.
+func resolveAPIKey(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
 	}
-	for {
-		if rev := revFromGitDir(filepath.Join(dir, ".git")); rev != "" {
-			return rev
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
-}
-
-// revFromGitDir löst HEAD eines .git-Pfads (Verzeichnis oder Worktree-Datei) auf.
-func revFromGitDir(gitPath string) string {
-	st, err := os.Stat(gitPath)
-	if err != nil {
-		return ""
-	}
-	if !st.IsDir() {
-		// Worktree/Submodule: Datei mit "gitdir: <pfad>".
-		b, err := os.ReadFile(gitPath)
-		if err != nil {
-			return ""
-		}
-		line := strings.TrimSpace(string(b))
-		if !strings.HasPrefix(line, "gitdir:") {
-			return ""
-		}
-		target := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(gitPath), target)
-		}
-		gitPath = target
-	}
-	head, err := os.ReadFile(filepath.Join(gitPath, "HEAD")) //nolint:gosec // G703: repo-lokale git-Metadaten für den Env-Stamp, Pfad aus cwd-Aufstieg
-	if err != nil {
-		return ""
-	}
-	ref := strings.TrimSpace(string(head))
-	if !strings.HasPrefix(ref, "ref:") {
-		return shortRev(ref)
-	}
-	refName := strings.TrimSpace(strings.TrimPrefix(ref, "ref:"))
-	// Direkte Ref-Datei (auch commondir-Fälle für Worktrees prüfen).
-	for _, base := range []string{gitPath, commonGitDir(gitPath)} {
-		if base == "" {
-			continue
-		}
-		if b, err := os.ReadFile(filepath.Join(base, filepath.FromSlash(refName))); err == nil { //nolint:gosec // G703: repo-lokale Ref-Datei, refName aus HEAD des eigenen Repos
-			return shortRev(strings.TrimSpace(string(b)))
-		}
-		if rev := revFromPackedRefs(filepath.Join(base, "packed-refs"), refName); rev != "" {
-			return rev
-		}
-	}
-	return ""
-}
-
-// commonGitDir liest die commondir-Datei eines Worktree-gitdirs ("" wenn keine).
-func commonGitDir(gitPath string) string {
-	b, err := os.ReadFile(filepath.Join(gitPath, "commondir")) //nolint:gosec // G703: repo-lokale git-Metadaten, Pfad aus cwd-Aufstieg
-	if err != nil {
-		return ""
-	}
-	common := strings.TrimSpace(string(b))
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(gitPath, common)
-	}
-	return common
-}
-
-// revFromPackedRefs sucht refName in einer packed-refs-Datei.
-func revFromPackedRefs(path, refName string) string {
-	b, err := os.ReadFile(path) //nolint:gosec // G703: repo-lokale packed-refs, Pfad aus cwd-Aufstieg
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[1] == refName {
-			return shortRev(fields[0])
-		}
-	}
-	return ""
-}
-
-// shortRev kürzt eine Commit-Hash auf die üblichen 7 Zeichen.
-func shortRev(rev string) string {
-	if len(rev) < 7 || strings.ContainsAny(rev, " \t") {
-		return ""
-	}
-	return rev[:7]
+	return os.Getenv("GOLDBENCH_API_KEY")
 }
 
 // parseEngLog implementiert -parse-englog: Datei lesen, SpecStats-JSON auf

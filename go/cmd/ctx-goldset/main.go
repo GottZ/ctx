@@ -37,11 +37,11 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/goldset"
+	"github.com/GottZ/ctx/internal/provenance"
 )
 
 func main() {
@@ -318,36 +318,6 @@ func urlEscape(s string) string {
 	return r.Replace(s)
 }
 
-// buildRev reads the VCS stamp Go embedded at build time, with the dirty flag
-// appended. Deliberately NOT `git rev-parse` in a subprocess: spawning one is
-// an argued exception in this module (internal/llm/exec_ban_test.go) and a
-// provenance field does not argue it.
-//
-// Caveat the stamp must not hide: Go resolves the repository by walking up from
-// the package directory, and in a linked git worktree that walk can land on the
-// enclosing checkout instead of the worktree. The value therefore identifies
-// the BUILD, not necessarily the commit the gold set was drawn under — which is
-// why the field is named for the build and carries "-dirty" verbatim.
-func buildRev() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return ""
-	}
-	rev, dirty := "", false
-	for _, s := range info.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			rev = s.Value
-		case "vcs.modified":
-			dirty = s.Value == "true"
-		}
-	}
-	if rev != "" && dirty {
-		return rev + "-dirty"
-	}
-	return rev
-}
-
 // updateStamp applies fn to the stamp on disk and writes it back.
 func updateStamp(g *goldset.Guard, fn func(*goldset.Stamp)) error {
 	p, err := g.Resolve(goldset.FileStamp)
@@ -365,7 +335,7 @@ func updateStamp(g *goldset.Guard, fn func(*goldset.Stamp)) error {
 		s.Slices = map[string]goldset.SliceStamp{}
 	}
 	s.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.BuildRev = buildRev()
+	s.BuildRev = provenance.BuildRev()
 	s.AllowOutsideGoldset = s.AllowOutsideGoldset || g.AllowOutside()
 	fn(&s)
 	return goldset.WriteStamp(p, s)

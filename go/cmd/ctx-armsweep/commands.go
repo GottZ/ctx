@@ -12,6 +12,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/armsweep"
 	"github.com/GottZ/ctx/internal/goldset"
+	"github.com/GottZ/ctx/internal/provenance"
 )
 
 // cmdPrime runs the unpinned pass and writes pins, the prime stamp and — for
@@ -244,7 +245,7 @@ func cmdScore(c *common, dumpA, dumpB, outDir, name, dampingType string) error {
 	}
 	in := armsweep.ScoreInput{
 		RecordsA: recsA, StampA: stampA, DampingType: dampingType, RegimeSplit: split,
-		Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp,
+		Seed: c.seed, GitRevision: provenance.BuildRev(), GoldStamp: goldStamp,
 	}
 	if dumpB != "" {
 		recsB, stampB, berr := loadDump(dumps, dumpB)
@@ -319,7 +320,7 @@ func cmdCompare(c *common, base, cond, noisePair, outDir, name, conditionField s
 	}
 
 	in := armsweep.CompareInput{
-		Seed: c.seed, GitRevision: buildRev(), GoldStamp: goldStamp, RegimeSplit: split,
+		Seed: c.seed, GitRevision: provenance.BuildRev(), GoldStamp: goldStamp, RegimeSplit: split,
 		ConditionField: conditionField,
 	}
 	if in.Base, err = loadDumpRef(dumps, armsweep.RoleBase, base); err != nil {
