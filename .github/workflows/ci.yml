@@ -772,6 +772,13 @@ jobs:
           retention-days: 7
 
   # ─── Stage 4: Build Binary ────────────────────────────────────────────────────
+  # This job is a flag-parity pre-probe, not a release build: it is the only
+  # place that compiles ./cmd/ctxd for linux/amd64 with CGO_ENABLED=0 AND
+  # -trimpath -s -w, one stage before the docker job builds the same target
+  # inside the image (go/Dockerfile:18, `context: ./go`) — a flag or toolchain
+  # breakage goes red here instead of inside the image build. The binary stays
+  # in this job; the image always builds its own (no COPY ctxd). The effective
+  # release flags are elsewhere: release.yml, -X main.* against ./cmd/ctx.
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -808,13 +815,6 @@ jobs:
         run: |
           file ctxd
 
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: ctxd-linux-amd64
-          path: ctxd
-          retention-days: 1
-
   # ─── Stage 5: Docker Build + Push ─────────────────────────────────────────────
   docker:
     name: Docker Build + Push
@@ -838,14 +838,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Download binary artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ctxd-linux-amd64
-
-      - name: Make binary executable
-        run: chmod +x ctxd
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
