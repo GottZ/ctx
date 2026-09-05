@@ -160,28 +160,3 @@ func TestHashNOOPCheck_RequiresDB(t *testing.T) {
 	// Test: archived block is not returned.
 	// Test: wrong scope/category/title returns empty.
 }
-
-func TestUpsertBlock_RequiresDB(t *testing.T) {
-	t.Skip("requires database connection")
-	// Test: insert new block returns populated Block.
-	// Test: upsert existing (same category+title+scope) updates content.
-	// Test: nil tags/metadata are set to empty defaults.
-	// Test: scopeExplicit=true updates scope on conflict.
-}
-
-func TestSearchBlocks_RequiresDB(t *testing.T) {
-	t.Skip("requires database connection")
-	// Test: FTS query returns matching blocks ranked by score.
-	// Test: category filter limits results.
-	// Test: tags filter with array overlap.
-	// Test: compact=true returns preview instead of full content.
-	// Test: empty query returns by updated_at DESC.
-}
-
-func TestGuardResolve_RequiresDB(t *testing.T) {
-	t.Skip("requires database connection")
-	// Test: "archive" sets is_archived=true and guard_status='archived_dup'.
-	// Test: "keep" sets guard_status='active'.
-	// Test: invalid resolution returns error.
-	// Test: wrong scope returns nil (not found).
-}

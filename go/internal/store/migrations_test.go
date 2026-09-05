@@ -90,12 +90,3 @@ func TestMigrationVersionsUnique(t *testing.T) {
 //   - "_leading.sql" -> skip (empty prefix -> Atoi fails)
 //   - "0_zero.sql" -> 0
 //   - "-1_negative.sql" -> -1 (valid parse, questionable semantics)
-
-func TestRunMigrations_RequiresDB(t *testing.T) {
-	t.Skip("requires database connection — RunMigrations needs pgxpool.Pool")
-	// Integration test plan:
-	// 1. Create a test database with _migrations table.
-	// 2. Run migrations — verify all .sql files are applied in version order.
-	// 3. Run again — verify no migrations are re-applied (idempotent).
-	// 4. Add a new migration — verify only the new one is applied.
-}

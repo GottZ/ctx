@@ -91,14 +91,6 @@ func TestLogPgNoticeSeverityIsLocaleIndependent(t *testing.T) {
 	logPgNotice(nil, nil)
 }
 
-func TestNewPool_RequiresDB(t *testing.T) {
-	t.Skip("requires database connection — NewPool connects to PostgreSQL")
-	// Integration test plan:
-	// 1. Test with valid DSN — verify pool is created and ping succeeds.
-	// 2. Test with invalid DSN — verify error after maxRetries.
-	// 3. Test with context cancellation during retry — verify clean abort.
-}
-
 func TestSleepCtx_CancelledContext(t *testing.T) {
 	// sleepCtx is unexported but we can test it indirectly since we're
 	// in the same package.
