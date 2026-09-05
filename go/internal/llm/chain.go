@@ -364,6 +364,26 @@ func StampServed(entry *llmlog.Entry, role string, served *backends.Backend) {
 	entry.BackendLocality = served.Locality
 }
 
+// newChainEntry builds the slim llmlog row the three chained call sites share:
+// pipeline, walk error, block ids, required class, attempt count and caller
+// attribution (T35a/b — background backfill and dream pass "", which nullUUID
+// drops to NULL). metadata.chain stays with the CALLER on purpose: the embed
+// row writes the key only for a non-empty walk, the two chat rows write it
+// unconditionally, so an empty walk persists metadata {} on one path and
+// {"chain": null} on the other — a difference in stored JSONB, not in style.
+func newChainEntry(pipeline string, err error, blockIDs []string,
+	required backends.Sensitivity, attempts []ChainAttempt, apiKeyID string,
+) llmlog.Entry {
+	return llmlog.Entry{
+		Pipeline:            pipeline,
+		Err:                 err,
+		BlockIDs:            blockIDs,
+		RequiredSensitivity: string(required),
+		Attempt:             len(attempts),
+		APIKeyID:            apiKeyID,
+	}
+}
+
 // applyModelParams merges ModelSpec.Params field-wise over the code-default
 // options and resolves the think toggle (params.think wins over the row's
 // legacy Think field). NumCtx always comes from the row.
@@ -506,14 +526,7 @@ func embedWireEntry(pipeline, role string, required backends.Sensitivity,
 			promptTokens = a.PromptTokens
 		}
 	}
-	entry := llmlog.Entry{
-		Pipeline:            pipeline,
-		Err:                 err,
-		BlockIDs:            blockIDs,
-		RequiredSensitivity: string(required),
-		Attempt:             len(attempts),
-		APIKeyID:            apiKeyID, // T35b: caller attribution (NULL for background backfill/dream)
-	}
+	entry := newChainEntry(pipeline, err, blockIDs, required, attempts, apiKeyID)
 	if promptTokens > 0 {
 		entry.PromptTokens = promptTokens
 	}
@@ -643,15 +656,8 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 		return nil, err
 	}
 
-	entry := llmlog.Entry{
-		Pipeline:            c.Pipeline,
-		Err:                 err,
-		BlockIDs:            c.BlockIDs,
-		RequiredSensitivity: string(c.Required),
-		Attempt:             len(attempts),
-		Metadata:            map[string]any{"chain": attempts},
-		APIKeyID:            c.APIKeyID, // T35b: caller attribution (NULL for background)
-	}
+	entry := newChainEntry(c.Pipeline, err, c.BlockIDs, c.Required, attempts, c.APIKeyID)
+	entry.Metadata = map[string]any{"chain": attempts}
 	StampServed(&entry, c.Role, served)
 	// Caller policy, not provenance: fires once, after the walk, only when a
 	// backend answered — and reads the model back off the stamped row.

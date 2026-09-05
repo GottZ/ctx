@@ -280,13 +280,12 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 	userPrompt := buildDailyPrompt(date, decisions, dreamLinks, structLinks, newBlocks, guardQueue)
 
 	sysPrompt := dailySynthesisPromptFor(r.Language)
-	dreamVer := int16(Version)
-	entry := &llmlog.Entry{
-		Pipeline:      "dream-daily-synthesis",
-		RequestSystem: sysPrompt,
-		RequestUser:   userPrompt,
-		DreamVersion:  &dreamVer,
-	}
+	// nil block ids on purpose: the row is about the report block this run is
+	// about to write, and that block does not exist yet — its id lands on the
+	// entry after the write, further down. A nil slice persists as a NULL
+	// block_ids column, an empty one as an empty array; they are not the same
+	// row, so the daily-synthesis entry is constructed WITHOUT the field.
+	entry := newDreamEntry("dream-daily-synthesis", sysPrompt, userPrompt, nil)
 	defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 
 	start := time.Now()

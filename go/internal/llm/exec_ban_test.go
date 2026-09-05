@@ -142,21 +142,41 @@ func importsOsExec(file *ast.File) bool {
 	return false
 }
 
-// pipelineLiteralCount counts `Pipeline: "…"` composite-literal fields — the
-// same anchor design/04 §7-H11 uses to enumerate the prompt pipelines.
+// entryConstructors are the row builders that take the pipeline name as their
+// FIRST argument instead of a struct field: llm.newChainEntry (slim chain row)
+// and dream.newDreamEntry (body row). Both spell the pipeline exactly like the
+// literals they replaced, so the anchor below counts them the same way.
+var entryConstructors = map[string]bool{
+	"newChainEntry": true,
+	"newDreamEntry": true,
+}
+
+// pipelineLiteralCount counts the prompt pipelines a file NAMES — the anchor
+// design/04 §7-H11 uses to enumerate them. Two spellings carry the same fact:
+// the `Pipeline: "…"` composite-literal field, and a string literal in the
+// pipeline slot of an entry constructor. Counting only the first would let a
+// package drop off the derived pipeline-owner list by moving its row into a
+// constructor, which is a refactor, not a change of what it builds.
 func pipelineLiteralCount(file *ast.File) int {
 	n := 0
 	ast.Inspect(file, func(node ast.Node) bool {
-		kv, ok := node.(*ast.KeyValueExpr)
-		if !ok {
-			return true
-		}
-		key, ok := kv.Key.(*ast.Ident)
-		if !ok || key.Name != "Pipeline" {
-			return true
-		}
-		if lit, ok := kv.Value.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-			n++
+		switch node := node.(type) {
+		case *ast.KeyValueExpr:
+			key, ok := node.Key.(*ast.Ident)
+			if !ok || key.Name != "Pipeline" {
+				return true
+			}
+			if lit, ok := node.Value.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				n++
+			}
+		case *ast.CallExpr:
+			fn, ok := node.Fun.(*ast.Ident)
+			if !ok || !entryConstructors[fn.Name] || len(node.Args) == 0 {
+				return true
+			}
+			if lit, ok := node.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				n++
+			}
 		}
 		return true
 	})

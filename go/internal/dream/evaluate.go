@@ -278,19 +278,11 @@ func buildEvalRequest(source BlockInfo, candidates []BlockInfo, capped int) *eva
 //
 // retry only marks the row; the widened cap travels in opts.NumPredictScale.
 func evalAttempt(ctx context.Context, pool *pgxpool.Pool, r *Router, req *evalRequest, opts llm.Options, retry bool) attemptResult {
-	dreamVer := int16(Version)
-
 	// Log entry mutated through the function; deferred Record (closure deref at
 	// trigger time) captures final state including parse errors that surface
 	// after the LLM call. Reached only past the caller's empty-candidates
 	// early-return, so no zero-duration no-op rows pollute the log.
-	entry := &llmlog.Entry{
-		Pipeline:      "dream-eval",
-		RequestSystem: req.system,
-		RequestUser:   req.user,
-		BlockIDs:      req.blockIDs,
-		DreamVersion:  &dreamVer,
-	}
+	entry := newDreamEntry("dream-eval", req.system, req.user, req.blockIDs)
 	// Stamped BEFORE the call, not next to links_capped after it: the cap
 	// fired during retrieval, so the count belongs on the row even when the
 	// eval times out or the answer fails to parse — those are exactly the

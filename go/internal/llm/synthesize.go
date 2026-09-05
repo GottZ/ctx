@@ -850,17 +850,10 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	// Provenance: the backend that ACTUALLY answered (the pre-pool code
 	// logged host=primary even when the fallback served — the llm.md §5
 	// blind spot this fixes); metadata.chain carries every attempt.
-	entry := llmlog.Entry{
-		Pipeline:            "query-synthesize",
-		Err:                 err,
-		RequestSystem:       systemPrompt,
-		RequestUser:         userPrompt,
-		BlockIDs:            blockIDs,
-		RequiredSensitivity: string(required),
-		Attempt:             len(attempts),
-		Metadata:            map[string]any{"chain": attempts},
-		APIKeyID:            apiKeyID, // T35a: caller attribution (NULL for background)
-	}
+	entry := newChainEntry("query-synthesize", err, blockIDs, required, attempts, apiKeyID)
+	entry.RequestSystem = systemPrompt
+	entry.RequestUser = userPrompt
+	entry.Metadata = map[string]any{"chain": attempts}
 	applyBudgetTelemetry(&entry, budgetReport)
 	StampServed(&entry, backends.RoleSynthesis, served)
 	// Read back BEFORE applyProviderTelemetry may overwrite the column with the

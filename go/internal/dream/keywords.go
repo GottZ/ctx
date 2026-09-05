@@ -106,17 +106,13 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 			keywordSystemPrompt, userPrompt, opts, KeywordsTimeout)
 		duration := time.Since(start)
 
-		dreamVer := int16(Version)
-		entry := &llmlog.Entry{
-			Pipeline:      "dream-keywords",
-			Duration:      duration,
-			Err:           err,
-			RequestSystem: keywordSystemPrompt,
-			RequestUser:   userPrompt,
-			BlockIDs:      []string{block.ID},
-			DreamVersion:  &dreamVer,
-			Metadata:      map[string]any{"attempt": attempt},
-		}
+		entry := newDreamEntry("dream-keywords", keywordSystemPrompt, userPrompt, []string{block.ID})
+		entry.Duration = duration
+		entry.Err = err
+		// BEFORE applyChainTelemetry, which writes metadata.chain into whatever
+		// map it finds: the retry counter is this row's own key and must not
+		// depend on which of the two writers creates the map.
+		entry.Metadata = map[string]any{"attempt": attempt}
 		r.applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts, err)
 		if resp != nil {
 			entry.ResponseContent = resp.Message.Content

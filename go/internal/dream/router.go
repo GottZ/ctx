@@ -233,6 +233,26 @@ func (r *Router) EmbedAdmit() embedcache.Admission {
 	return embedcache.Admission(r.Admit)
 }
 
+// newDreamEntry builds the body-carrying llmlog row the five dream chat
+// pipelines share: pipeline name, both prompt bodies, the block ids the row is
+// about and the dream schema version (a fresh int16 per row — the column is a
+// pointer and must not alias across entries).
+//
+// blockIDs of nil STAYS nil and persists as a NULL block_ids column, never an
+// empty array: the daily-synthesis row is about no block at construction time.
+// Duration, error and metadata stay with the caller; applyChainTelemetry adds
+// the walk telemetry once the chain has been walked.
+func newDreamEntry(pipeline, system, user string, blockIDs []string) *llmlog.Entry {
+	dreamVer := int16(Version)
+	return &llmlog.Entry{
+		Pipeline:      pipeline,
+		RequestSystem: system,
+		RequestUser:   user,
+		BlockIDs:      blockIDs,
+		DreamVersion:  &dreamVer,
+	}
+}
+
 // applyChainTelemetry stamps the chained-call provenance onto a dream llmlog
 // entry: the answering backend (name/trust/locality + role-resolved model),
 // the required sensitivity, the attempt count and the full chain in

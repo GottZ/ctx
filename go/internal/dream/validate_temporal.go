@@ -170,14 +170,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 		validateOpts.NumCtx = opts.NumCtx
 	}
 
-	dreamVer := int16(Version)
-	entry := &llmlog.Entry{
-		Pipeline:      "dream-temporal",
-		RequestSystem: temporalValidationPrompt,
-		RequestUser:   userPrompt,
-		BlockIDs:      []string{block.ID},
-		DreamVersion:  &dreamVer,
-	}
+	entry := newDreamEntry("dream-temporal", temporalValidationPrompt, userPrompt, []string{block.ID})
 	defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 
 	start := time.Now()

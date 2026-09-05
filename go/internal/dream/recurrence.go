@@ -182,15 +182,8 @@ func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts 
 	// together so the rule can never name a different id than the markers do.
 	systemPrompt, userPrompt := buildRecurrencePrompt(source, c)
 	required := backends.MaxSensitivity(source.Sensitivity, c.TargetSens)
-	dreamVer := int16(Version)
 
-	entry := &llmlog.Entry{
-		Pipeline:      "dream-recurrence",
-		RequestSystem: systemPrompt,
-		RequestUser:   userPrompt,
-		BlockIDs:      []string{source.ID, c.TargetID},
-		DreamVersion:  &dreamVer,
-	}
+	entry := newDreamEntry("dream-recurrence", systemPrompt, userPrompt, []string{source.ID, c.TargetID})
 	defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 
 	start := time.Now()

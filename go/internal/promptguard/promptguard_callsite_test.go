@@ -14,8 +14,10 @@
 // the handler site is IN the scanned set.
 //
 // Heuristic, spelled out here because it is the part a reader must be able to
-// challenge: a `Pipeline:` STRING LITERAL marks a pipeline, and the FILE
-// carrying it must show a real promptguard call — either directly
+// challenge: a STRING LITERAL in a pipeline slot marks a pipeline — the
+// `Pipeline:` field or, since T04-9, the first argument of an entry
+// constructor (pipelineMarkers) — and the FILE carrying it must show a real
+// promptguard call — either directly
 // (promptguard.Wrap(, promptguard.Neutralize(, …) or through a package-local
 // wrapper (guardText/guardLine), which counts only if the same package
 // declares that wrapper in a file that itself calls promptguard. Whole-line
@@ -42,11 +44,16 @@ import (
 	"testing"
 )
 
-// pipelineMarker is the llmlog.Entry field that names a pipeline. Only STRING
-// LITERAL values are call sites: internal/llm/chain.go passes the name through
-// as a variable (Pipeline: pipeline / c.Pipeline) and is therefore the generic
-// carrier of OTHER pipelines' names, not a pipeline of its own.
-const pipelineMarker = "Pipeline:"
+// pipelineMarkers are the spellings that name a pipeline in production code:
+// the llmlog.Entry field, and the pipeline slot of the two row constructors
+// (llm.newChainEntry, dream.newDreamEntry — since T04-9 six sites spell their
+// name as the first argument instead of a struct field; the pipelines they
+// name did not change). Only STRING LITERAL values are call sites under either
+// spelling: internal/llm/chain.go passes the name through as a variable
+// (Pipeline: pipeline / c.Pipeline) and is therefore the generic carrier of
+// OTHER pipelines' names, not a pipeline of its own — the constructor bodies
+// in chain.go and dream/router.go are carriers for the same reason.
+var pipelineMarkers = []string{"Pipeline:", "newChainEntry(", "newDreamEntry("}
 
 // wantPipelineSites pins the number of production Pipeline: sites. It is a
 // tripwire, not a budget — see the failure message for what to do when it moves.
@@ -126,8 +133,9 @@ var constPipelineSites = map[string]constPipelineSite{
 // makes the test red instead of silently vanishing from the count, which is the
 // property the literal-only scan lacked.
 var passthroughPipelineIdents = map[string]bool{
-	"internal/llm:pipeline":   true, // ChatChain / rejection helpers
-	"internal/llm:c.Pipeline": true, // ChainCall.Do onto llmlog.Entry
+	"internal/llm:pipeline":   true, // ChatChain / rejection / newChainEntry helpers
+	"internal/llm:c.Pipeline": true, // ChainCall.Do into newChainEntry
+	"internal/dream:pipeline": true, // newDreamEntry's own parameter (router.go)
 }
 
 // constIdentAt matches an identifier (optionally one selector deep) at the
@@ -309,48 +317,47 @@ func scanModuleForPipelines(t *testing.T, root string) (map[string]bool, []pipel
 	return guardFiles, sites
 }
 
-// pipelineLiterals returns every `Pipeline: "…"` occurrence with its 1-based
-// line. A value that is not a string literal (chain.go's pass-through variable)
-// is skipped — it names no pipeline of its own.
-func pipelineLiterals(text, dir string) []struct {
+// pipelineName is one resolved occurrence with its 1-based line.
+type pipelineName struct {
 	name string
 	line int
-} {
-	var out []struct {
-		name string
-		line int
-	}
-	for idx := 0; ; {
-		pos := strings.Index(text[idx:], pipelineMarker)
-		if pos < 0 {
-			return out
-		}
-		start := idx + pos + len(pipelineMarker)
-		idx = start
-		rest := strings.TrimLeft(text[start:], " \t")
-		name, ok := stringLiteralAt(rest)
-		if !ok {
-			// Not a literal: a constant reference names a pipeline just as much
-			// (constPipelineSites), a pass-through names none.
-			ident := constIdentAt.FindString(rest)
-			var site constPipelineSite
-			site, ok = constPipelineSites[dir+":"+ident]
-			name = site.pipeline
-			if !ok {
-				if !passthroughPipelineIdents[dir+":"+ident] {
-					out = append(out, struct {
-						name string
-						line int
-					}{unknownIdentPrefix + dir + ":" + ident, 1 + strings.Count(text[:start], "\n")})
-				}
+}
+
+// pipelineLiterals returns every pipeline a file names, under either spelling
+// of pipelineMarkers. Value resolution is the SAME for both, so the closed
+// lists stay exhaustive for the constructor form too: a string literal names
+// the pipeline, a constant in constPipelineSites names it just as much, a
+// pass-through names none, and anything else is reported by name instead of
+// silently vanishing from the count.
+func pipelineLiterals(text, dir string) []pipelineName {
+	var out []pipelineName
+	for _, marker := range pipelineMarkers {
+		for idx := 0; ; {
+			pos := strings.Index(text[idx:], marker)
+			if pos < 0 {
+				break
+			}
+			start := idx + pos + len(marker)
+			idx = start
+			line := 1 + strings.Count(text[:start], "\n")
+			rest := strings.TrimLeft(text[start:], " \t")
+			if name, ok := stringLiteralAt(rest); ok {
+				out = append(out, pipelineName{name, line})
 				continue
 			}
+			ident := constIdentAt.FindString(rest)
+			if site, ok := constPipelineSites[dir+":"+ident]; ok {
+				out = append(out, pipelineName{site.pipeline, line})
+				continue
+			}
+			if passthroughPipelineIdents[dir+":"+ident] {
+				continue
+			}
+			out = append(out, pipelineName{unknownIdentPrefix + dir + ":" + ident, line})
 		}
-		out = append(out, struct {
-			name string
-			line int
-		}{name, 1 + strings.Count(text[:start], "\n")})
 	}
+	slices.SortFunc(out, func(a, b pipelineName) int { return a.line - b.line })
+	return out
 }
 
 // unknownIdentPrefix marks a site whose value is an identifier in neither
