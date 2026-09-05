@@ -12,6 +12,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/distillsource"
+	"github.com/GottZ/ctx/internal/safepath"
 	"github.com/GottZ/ctx/internal/sensitivity"
 )
 
@@ -256,15 +257,15 @@ func TestDistillDumpSealsItsDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := st.Mode().Perm(); got != distillDumpDirMode {
-		t.Fatalf("dump directory mode = %v, want %v", got, distillDumpDirMode)
+	if got := st.Mode().Perm(); got != safepath.DirMode {
+		t.Fatalf("dump directory mode = %v, want %v", got, safepath.DirMode)
 	}
 	fi, err := os.Stat(filepath.Join(dir, "0198f9d2-0000-7000-8000-00000000abcd.ndjson"))
 	if err != nil {
 		t.Fatalf("dump file: %v", err)
 	}
-	if got := fi.Mode().Perm(); got != distillDumpFileMode {
-		t.Fatalf("dump file mode = %v, want %v", got, distillDumpFileMode)
+	if got := fi.Mode().Perm(); got != safepath.FileMode {
+		t.Fatalf("dump file mode = %v, want %v", got, safepath.FileMode)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/jsonl"
+	"github.com/GottZ/ctx/internal/safepath"
 )
 
 // PoolEntry is one arm's candidate list for a pooling judgement (design 04
@@ -254,10 +255,10 @@ func streamOf(querySHA string) uint64 {
 // judgement. The explicit chmod is what makes the mode a property of the
 // writer instead of a property of whoever created the file first.
 func writeOwnerOnly(path string, b []byte) error {
-	if err := os.WriteFile(path, b, fileMode); err != nil { //nolint:gosec // G703: every caller passes a path Guard.Resolve produced
+	if err := os.WriteFile(path, b, safepath.FileMode); err != nil { //nolint:gosec // G703: every caller passes a path Guard.Resolve produced
 		return err
 	}
-	return os.Chmod(path, fileMode)
+	return os.Chmod(path, safepath.FileMode)
 }
 
 // WritePoolKey persists the control key at mode 0600.

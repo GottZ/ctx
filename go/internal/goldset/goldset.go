@@ -25,6 +25,7 @@ import (
 	"sort"
 
 	"github.com/GottZ/ctx/internal/jsonl"
+	"github.com/GottZ/ctx/internal/safepath"
 )
 
 // Slice identifiers (design 04 §4.5, design 05 §4.5). Never pooled across
@@ -80,10 +81,6 @@ const (
 // DirName is the mandated gold directory name (§3.3). It lives under the
 // private .project submodule, is untracked in the ctx repo and CI skips it.
 const DirName = "goldset-retrieval-2026-08"
-
-// fileMode keeps gold data owner-readable only — the slices carry real query
-// texts and block ids of a private corpus.
-const fileMode = 0o600
 
 // Case is one gold query. GoldIDs is empty for G-REAL until B-W6 supplies the
 // pooled relevance judgements; that is a documented stage boundary, not a gap.
@@ -203,7 +200,7 @@ func SHA256Hex(s string) string {
 // WriteJSONL writes cases as one JSON object per line at mode 0600. Index and
 // QuerySHA256 are (re)assigned here so a slice file is always self-consistent.
 func WriteJSONL(path string, cases []Case) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, safepath.FileMode)
 	if err != nil {
 		return err
 	}
@@ -223,9 +220,9 @@ func WriteJSONL(path string, cases []Case) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	// O_CREATE applies fileMode only when the file did not exist, so a rewrite
+	// O_CREATE applies the mode only when the file did not exist, so a rewrite
 	// of an already world-readable slice would keep it that way.
-	return os.Chmod(path, fileMode)
+	return os.Chmod(path, safepath.FileMode)
 }
 
 // WriteJSONLKeepIndex writes cases WITHOUT reassigning their index (wave
@@ -246,7 +243,7 @@ func WriteJSONLKeepIndex(path string, cases []Case) error {
 				i, cases[i].Slice, cases[i].Index, cases[i].QuerySHA256, want)
 		}
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, safepath.FileMode)
 	if err != nil {
 		return err
 	}
@@ -264,7 +261,7 @@ func WriteJSONLKeepIndex(path string, cases []Case) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Chmod(path, fileMode)
+	return os.Chmod(path, safepath.FileMode)
 }
 
 // ReadJSONL reads a slice file back.
@@ -309,7 +306,7 @@ func WriteStamp(path string, s Stamp) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), fileMode)
+	return os.WriteFile(path, append(b, '\n'), safepath.FileMode)
 }
 
 // ReadStamp loads an existing stamp, or returns a zero stamp if absent.

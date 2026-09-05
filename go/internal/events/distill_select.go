@@ -49,6 +49,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/GottZ/ctx/internal/distillsource"
+	"github.com/GottZ/ctx/internal/safepath"
 	"github.com/GottZ/ctx/internal/sensitivity"
 	"github.com/GottZ/ctx/internal/util"
 )
@@ -70,14 +71,6 @@ import (
 // and the ledger shows rows_seen 0: visible, not absorbed. Both halves are
 // pinned by tests (TestDistillSizingIsTheValidatorsAuthority and
 // TestDistillSelection/ANonPositiveRuneCapProcessesNothing).
-
-// The dump's file modes. MkdirAll and OpenFile both take the process umask off
-// these, so the directory mode is re-applied with Chmod (a 022 umask would
-// otherwise leave 0755 on a directory of raw session prose).
-const (
-	distillDumpDirMode  os.FileMode = 0o700
-	distillDumpFileMode os.FileMode = 0o600
-)
 
 // errDistillDump marks every failure of the dry-run sink — a refused target, a
 // directory that cannot be created or sealed, a write that did not land. The
@@ -429,36 +422,12 @@ func distillDumpDir(dir string) (string, error) {
 	if !filepath.IsAbs(dir) {
 		return "", fmt.Errorf("%w: dryrun_dir %q is not absolute", errDistillDump, dir)
 	}
-	resolved := distillResolve(filepath.Clean(dir))
+	resolved := safepath.ResolvePrefixLenient(filepath.Clean(dir))
 	if root, ok := distillGitWorkTree(resolved); ok {
 		return "", fmt.Errorf("%w: dryrun_dir %q (resolved to %q) lies inside the git working copy %q",
 			errDistillDump, dir, resolved, root)
 	}
 	return resolved, nil
-}
-
-// distillResolve answers dir with every symlink on it resolved, as far as the
-// path exists. A path whose leaf is not created yet resolves its deepest
-// existing ancestor and keeps the remainder — the remainder cannot be a symlink
-// precisely because it does not exist.
-//
-// An unresolvable path is answered unchanged rather than refused: the caller's
-// next step (MkdirAll) is the one that decides whether the path is usable at
-// all, and the git walk over the lexical form is still strictly better than no
-// walk.
-func distillResolve(dir string) string {
-	rest := ""
-	for p := dir; ; {
-		if resolved, err := filepath.EvalSymlinks(p); err == nil {
-			return filepath.Join(resolved, rest)
-		}
-		parent := filepath.Dir(p)
-		if parent == p {
-			return dir
-		}
-		rest = filepath.Join(filepath.Base(p), rest)
-		p = parent
-	}
 }
 
 // distillGitWorkTree walks dir and its ancestors and names the first one
@@ -518,25 +487,25 @@ func distillOpenDump(dir, runID string) (*distillDump, error) {
 	if !distillHexID(runID) {
 		return nil, fmt.Errorf("%w: run id %q is not a uuid — refusing to build a dump path from it", errDistillDump, runID)
 	}
-	if err := os.MkdirAll(dir, distillDumpDirMode); err != nil {
+	if err := os.MkdirAll(dir, safepath.DirMode); err != nil {
 		return nil, fmt.Errorf("%w: creating dryrun_dir %q: %w", errDistillDump, dir, err)
 	}
 	// RE-CHECKED AFTER THE DIRECTORY EXISTS. distillDumpDir ran on a path whose
 	// leaf may not have existed yet; now it does, so the resolution is complete
 	// and a link that appeared between the two calls — or one the earlier
 	// resolution could not follow — is caught before the first byte is written.
-	if root, ok := distillGitWorkTree(distillResolve(dir)); ok {
+	if root, ok := distillGitWorkTree(safepath.ResolvePrefixLenient(dir)); ok {
 		return nil, fmt.Errorf("%w: dryrun_dir %q resolves into the git working copy %q after creation",
 			errDistillDump, dir, root)
 	}
 	// MkdirAll applies the umask, so the mode is asserted afterwards. An
 	// existing directory keeps whatever it had otherwise — this dump is raw
 	// session prose, and 0755 on it would be the leak the target path avoids.
-	if err := os.Chmod(dir, distillDumpDirMode); err != nil {
+	if err := os.Chmod(dir, safepath.DirMode); err != nil {
 		return nil, fmt.Errorf("%w: sealing dryrun_dir %q: %w", errDistillDump, dir, err)
 	}
 	path := filepath.Join(dir, runID+".ndjson")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, distillDumpFileMode)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, safepath.FileMode)
 	if err != nil {
 		return nil, fmt.Errorf("%w: opening dump %q: %w", errDistillDump, path, err)
 	}

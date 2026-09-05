@@ -12,6 +12,7 @@ import (
 	"github.com/GottZ/ctx/internal/evalscore"
 	"github.com/GottZ/ctx/internal/goldset"
 	"github.com/GottZ/ctx/internal/rrf"
+	"github.com/GottZ/ctx/internal/safepath"
 )
 
 // The conditional comparison (design/05 §4.3, wave M-W3d).
@@ -1310,5 +1311,5 @@ func WriteCompareReport(path, generatedAt string, body CompareBody) error {
 
 // WriteCompareMarkdown writes the human-readable half.
 func WriteCompareMarkdown(path, generatedAt string, body CompareBody) error {
-	return os.WriteFile(path, []byte(RenderCompareMarkdown(generatedAt, body)), fileMode)
+	return os.WriteFile(path, []byte(RenderCompareMarkdown(generatedAt, body)), safepath.FileMode)
 }

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/safepath"
 )
 
 // ErrOutsideGoldset is returned when a write target escapes the gold directory
@@ -73,11 +75,11 @@ func (g *Guard) Resolve(name string) (string, error) {
 	if g.allowOutside {
 		return p, nil
 	}
-	real, err := resolveExistingPrefix(p)
+	real, err := safepath.ResolvePrefix(p)
 	if err != nil {
 		return "", err
 	}
-	root, err := resolveExistingPrefix(g.root)
+	root, err := safepath.ResolvePrefix(g.root)
 	if err != nil {
 		return "", err
 	}
@@ -86,25 +88,4 @@ func (g *Guard) Resolve(name string) (string, error) {
 		return "", fmt.Errorf("%w: %q is not under %q", ErrOutsideGoldset, p, g.root)
 	}
 	return p, nil
-}
-
-// resolveExistingPrefix expands symlinks over the longest existing prefix of p
-// and re-appends the missing tail. filepath.EvalSymlinks fails outright on a
-// path that does not exist yet, which every fresh output file is.
-func resolveExistingPrefix(p string) (string, error) {
-	tail := ""
-	cur := p
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			return filepath.Join(resolved, tail), nil
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return p, nil
-		}
-		tail = filepath.Join(filepath.Base(cur), tail)
-		cur = parent
-	}
 }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/safepath"
 )
 
 // RenderMarkdown renders the human-readable half of a report.
@@ -277,7 +279,7 @@ func writeScopeSection(b *strings.Builder) {
 
 // WriteMarkdown persists the rendered report at mode 0600.
 func WriteMarkdown(path, generatedAt string, body ReportBody) error {
-	return os.WriteFile(path, []byte(RenderMarkdown(generatedAt, body)), fileMode)
+	return os.WriteFile(path, []byte(RenderMarkdown(generatedAt, body)), safepath.FileMode)
 }
 
 func orDash(s string) string {

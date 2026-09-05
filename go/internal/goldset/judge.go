@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/jsonl"
+	"github.com/GottZ/ctx/internal/safepath"
 )
 
 // ErrJudgeIncomplete marks a rendering attempt over a run that still has open
@@ -283,12 +284,12 @@ func RunJudge(ctx context.Context, j Judge, cells []JudgeCell, journalPath strin
 	if err != nil {
 		return st, err
 	}
-	f, err := os.OpenFile(journalPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, fileMode)
+	f, err := os.OpenFile(journalPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, safepath.FileMode)
 	if err != nil {
 		return st, err
 	}
 	defer func() { _ = f.Close() }()
-	if err := os.Chmod(journalPath, fileMode); err != nil {
+	if err := os.Chmod(journalPath, safepath.FileMode); err != nil {
 		return st, err
 	}
 	for _, c := range cells {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/goldset"
 	"github.com/GottZ/ctx/internal/jsonl"
+	"github.com/GottZ/ctx/internal/safepath"
 )
 
 // Pin freezes the two non-deterministic stages of the query path for one gold
@@ -116,7 +117,7 @@ func WritePool(path string, entries []PoolEntry) error {
 
 // writeJSONL is the shared 0600 JSONL writer.
 func writeJSONL(path string, n int, encode func(*json.Encoder, int) error) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, safepath.FileMode)
 	if err != nil {
 		return err
 	}

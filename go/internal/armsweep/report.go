@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/goldset"
+	"github.com/GottZ/ctx/internal/safepath"
 )
 
 // ReportVersion is the report schema generation.
@@ -575,7 +576,7 @@ func writeReportFile(path, tool, generatedAt string, b []byte) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(append(hdr, '\n'), b...), fileMode)
+	return os.WriteFile(path, append(append(hdr, '\n'), b...), safepath.FileMode)
 }
 
 // WriteReport writes the score report in that shape.

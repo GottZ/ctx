@@ -9,12 +9,8 @@ import (
 	"github.com/GottZ/ctx/internal/goldset"
 	"github.com/GottZ/ctx/internal/jsonl"
 	"github.com/GottZ/ctx/internal/rrf"
+	"github.com/GottZ/ctx/internal/safepath"
 )
-
-// fileMode keeps every artefact of this instrument owner-readable only. Dumps
-// carry the effective query texts of a private corpus — the same class of data
-// the gold slices carry, and they live under the same root-only directory.
-const fileMode = 0o600
 
 // DumpDirName is the sink beneath the gold directory. Dumps NEVER land next to
 // the slice files: a stray `g-*.jsonl` glob would otherwise pick up a dump and
@@ -167,7 +163,7 @@ func WriteRecords(path string, recs []Record) error {
 	sorted := append([]Record(nil), recs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Key() < sorted[j].Key() })
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, safepath.FileMode)
 	if err != nil {
 		return err
 	}
@@ -206,7 +202,7 @@ func WriteJSONFile(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), fileMode)
+	return os.WriteFile(path, append(b, '\n'), safepath.FileMode)
 }
 
 // ReadJSONFile loads an artefact written by WriteJSONFile.
