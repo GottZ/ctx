@@ -9,8 +9,6 @@
 package handler
 
 import (
-	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 
@@ -22,48 +20,15 @@ import (
 // — dry_run scans WITHOUT writing (the gate: see what WOULD be raised on the
 // real corpus first), limit 0 on a live run scans the whole candidate set.
 func (h *ManageHandler) handleBlocksClassifyStart(w http.ResponseWriter, r *http.Request, req manageRequest) {
-	if h.auditController == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"success": false, "error": "Scheduler not enabled",
-		})
-		return
-	}
-
-	var params struct {
-		DryRun bool `json:"dry_run"`
-		Limit  int  `json:"limit"`
-	}
-	if len(req.Data) > 0 && string(req.Data) != "null" {
-		if err := json.Unmarshal(req.Data, &params); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"success": false, "error": "Invalid data: expected {\"dry_run\":bool,\"limit\":int}",
-			})
-			return
-		}
-	}
-	if params.Limit < 0 {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
-			"success": false, "error": "limit must be >= 0",
-		})
-		return
-	}
-
-	if err := h.auditController.StartCredentialsClassify(params.DryRun, params.Limit); err != nil {
-		if errors.Is(err, events.ErrClassifyRunning) {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"success": false, "error": "Credentials classify already running",
-			})
-			return
-		}
-		slog.Error("manage: blocks-classify-start failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"success": false, "error": "Failed to start classify",
-		})
-		return
-	}
-
-	slog.Info("manage: credentials classify started", "dry_run", params.DryRun, "limit", params.Limit)
-	h.writeBlocksClassifyStatus(w, r)
+	h.handleBlocksRunStart(w, r, req, blocksRunSpec{
+		action:  "blocks-classify-start",
+		running: events.ErrClassifyRunning,
+		busyMsg: "Credentials classify already running",
+		failMsg: "Failed to start classify",
+		logNoun: "credentials classify",
+		start:   AuditController.StartCredentialsClassify,
+		render:  h.writeBlocksClassifyStatus,
+	})
 }
 
 // handleBlocksClassifyStatus reports run state + live per-source DB breakdown.

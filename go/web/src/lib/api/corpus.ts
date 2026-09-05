@@ -8,7 +8,7 @@
 import { apiFetch } from '../api'
 import type { BlocksAuditStatusResponse, BlocksClassifyStatusResponse } from './types'
 
-/** start payload (blocks_audit.go:42 / blocks_classify.go:32). Both fields are
+/** start payload (blocks_run.go:53 — one parse for both families). Both fields are
  * optional — an empty object is a live run over the full set (dry_run=false,
  * limit=0). The dry-run-default policy lives in the UI (A7), not here. */
 export interface CorpusRunParams {

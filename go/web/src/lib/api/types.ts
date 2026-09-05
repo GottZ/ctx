@@ -882,7 +882,7 @@ export interface TenantQuotaResponse {
   quota: TenantQuotaView
 }
 
-// Source: go/internal/handler/blocks_audit.go:103 (writeBlocksAuditStatus) —
+// Source: go/internal/handler/blocks_audit.go:68 (writeBlocksAuditStatus) —
 // blocks-audit-start/status share this. by_source is sensitivity_source → count
 // (store.AuditProgress, sensitivity.go:166); scope is the tenant-LESS Scheduler
 // home_scope snapshot (per-tenant audit is a later backend cut, §6.6).
@@ -894,7 +894,7 @@ export interface BlocksAuditStatusResponse {
   run: AuditStatus
 }
 
-// Source: go/internal/handler/blocks_classify.go:93 (writeBlocksClassifyStatus) —
+// Source: go/internal/handler/blocks_classify.go:58 (writeBlocksClassifyStatus) —
 // blocks-classify-start/status share this. NO `pending` (classify reports only
 // by_source + run, unlike audit).
 export interface BlocksClassifyStatusResponse {

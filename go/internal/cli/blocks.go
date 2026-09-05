@@ -71,7 +71,7 @@ func blocksCmd(getClient func() (*Client, error)) *cobra.Command {
   ctx blocks audit start            # full live run
   ctx blocks audit start --limit 50 # live run, stop after 50 blocks`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBlocksAuditStatus(getClient)
+			return runBlocksAuditStatus(getClient, nil)
 		},
 	}
 
@@ -79,7 +79,7 @@ func blocksCmd(getClient func() (*Client, error)) *cobra.Command {
 		Use:   "status",
 		Short: "Show audit progress (pending, by-source, current/last run)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBlocksAuditStatus(getClient)
+			return runBlocksAuditStatus(getClient, nil)
 		},
 	})
 
@@ -88,7 +88,7 @@ func blocksCmd(getClient func() (*Client, error)) *cobra.Command {
 		Use:   "sample",
 		Short: "Dry-run N random pending blocks — verdicts WITHOUT writes (sample gate)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBlocksAuditStart(getClient, true, sampleN)
+			return runBlocksAuditStart(getClient, blocksStartData(true, sampleN))
 		},
 	}
 	sampleCmd.Flags().IntVar(&sampleN, "n", 30, "sample size")
@@ -99,7 +99,7 @@ func blocksCmd(getClient func() (*Client, error)) *cobra.Command {
 		Use:   "start",
 		Short: "Start the live audit run (writes verdicts; 'manual' stays untouched)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBlocksAuditStart(getClient, false, startLimit)
+			return runBlocksAuditStart(getClient, blocksStartData(false, startLimit))
 		},
 	}
 	startCmd.Flags().IntVar(&startLimit, "limit", 0, "stop after N blocks (0 = drain)")
@@ -148,7 +148,7 @@ func classifyCmd(getClient func() (*Client, error)) *cobra.Command {
   ctx blocks classify start          # live run, raise every hit
   ctx blocks classify start --limit 100`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBlocksClassifyStatus(getClient)
+			return runBlocksClassifyStatus(getClient, nil)
 		},
 	}
 
@@ -156,7 +156,7 @@ func classifyCmd(getClient func() (*Client, error)) *cobra.Command {
 		Use:   "status",
 		Short: "Show classify progress (by-source, current/last run)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBlocksClassifyStatus(getClient)
+			return runBlocksClassifyStatus(getClient, nil)
 		},
 	})
 
@@ -165,7 +165,7 @@ func classifyCmd(getClient func() (*Client, error)) *cobra.Command {
 		Use:   "dry-run",
 		Short: "Scan WITHOUT writing — list what would be raised (FP gate)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBlocksClassifyStart(getClient, true, dryLimit)
+			return runBlocksClassifyStart(getClient, blocksStartData(true, dryLimit))
 		},
 	}
 	dryCmd.Flags().IntVar(&dryLimit, "limit", 0, "stop after N blocks scanned (0 = all)")
@@ -176,30 +176,13 @@ func classifyCmd(getClient func() (*Client, error)) *cobra.Command {
 		Use:   "start",
 		Short: "Live run: raise every pattern hit to credentials (upgrade-only)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBlocksClassifyStart(getClient, false, startLimit)
+			return runBlocksClassifyStart(getClient, blocksStartData(false, startLimit))
 		},
 	}
 	startCmd.Flags().IntVar(&startLimit, "limit", 0, "stop after N blocks scanned (0 = all)")
 	cmd.AddCommand(startCmd)
 
 	return cmd
-}
-
-func runBlocksClassifyStatus(getClient func() (*Client, error)) error {
-	resp, err := blocksManageCall(getClient, "blocks-classify-status", nil)
-	if err != nil {
-		return err
-	}
-	return printClassifyStatus(resp)
-}
-
-func runBlocksClassifyStart(getClient func() (*Client, error), dryRun bool, limit int) error {
-	data, _ := json.Marshal(map[string]any{"dry_run": dryRun, "limit": limit})
-	resp, err := blocksManageCall(getClient, "blocks-classify-start", data)
-	if err != nil {
-		return err
-	}
-	return printClassifyStatus(resp)
 }
 
 // bySourceOrder is the reading order of the sensitivity_source classes, and the
@@ -297,22 +280,34 @@ func printClassifyStatus(resp json.RawMessage) error {
 	return nil
 }
 
-func runBlocksAuditStatus(getClient func() (*Client, error)) error {
-	resp, err := blocksManageCall(getClient, "blocks-audit-status", nil)
-	if err != nil {
-		return err
+// blocksRun binds one blocks-* manage action to the renderer of its family:
+// start and status answer through one envelope per family (server side:
+// design 03 §4.5), so the action name and the printer are the whole difference
+// between the four legs. data is nil for a status leg and the start payload
+// for a start leg.
+func blocksRun(action string, print func(json.RawMessage) error) func(func() (*Client, error), json.RawMessage) error {
+	return func(getClient func() (*Client, error), data json.RawMessage) error {
+		resp, err := blocksManageCall(getClient, action, data)
+		if err != nil {
+			return err
+		}
+		return print(resp)
 	}
-	return printAuditStatus(resp)
 }
 
-func runBlocksAuditStart(getClient func() (*Client, error), dryRun bool, limit int) error {
+// blocksStartData is the {"dry_run","limit"} body both start actions take.
+func blocksStartData(dryRun bool, limit int) json.RawMessage {
 	data, _ := json.Marshal(map[string]any{"dry_run": dryRun, "limit": limit})
-	resp, err := blocksManageCall(getClient, "blocks-audit-start", data)
-	if err != nil {
-		return err
-	}
-	return printAuditStatus(resp)
+	return data
 }
+
+// The four CLI legs, one per blocks-* manage action.
+var (
+	runBlocksAuditStatus    = blocksRun("blocks-audit-status", printAuditStatus)
+	runBlocksAuditStart     = blocksRun("blocks-audit-start", printAuditStatus)
+	runBlocksClassifyStatus = blocksRun("blocks-classify-status", printClassifyStatus)
+	runBlocksClassifyStart  = blocksRun("blocks-classify-start", printClassifyStatus)
+)
 
 func blocksManageCall(getClient func() (*Client, error), action string, data json.RawMessage) (json.RawMessage, error) {
 	c, err := getClient()
