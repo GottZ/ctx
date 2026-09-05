@@ -107,6 +107,13 @@ linters:
             - "!**/go/internal/events/**"
             - "!**/go/internal/settings/**"
             - "!**/go/internal/config/**"
+            # T04-11: a sixth consumer, and a deliberate one — the package
+            # named below IS the boot sequence the cmd/** entry points used to
+            # carry inline (FromEnv → Validate → report → HasErrors →
+            # store.NewPool, contract G14). It is not a domain package: it
+            # hands the config straight back to its caller and reads no value
+            # of its own.
+            - "!**/go/internal/toolboot/**"
           deny:
             - pkg: "github.com/GottZ/ctx/internal/config"
               desc: "internal/config may only be imported by cmd/**, internal/handler, internal/events, internal/settings (F1 layering rule — pass values as parameters instead)"

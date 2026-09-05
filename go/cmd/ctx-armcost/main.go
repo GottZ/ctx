@@ -43,7 +43,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/llmlog"
-	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/toolboot"
 )
 
 func main() {
@@ -106,25 +106,28 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return fail("perimeter", err)
 	}
 
-	cc, issues := config.FromEnv()
-	issues = append(issues, config.Validate(cc)...)
-	if config.HasErrors(issues) {
-		for _, is := range issues {
-			say("ctx-armcost: config:", is.Field+":", is.Msg)
-		}
-		return 1
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := store.NewPool(ctx, cc.DSN())
-	if err != nil {
-		return fail("db", err)
+	// Config und Pool in der Reihenfolge des Boot-Vertrags (G14,
+	// internal/toolboot). Issues erreichen stderr nur, wenn sie den Lauf auch
+	// beenden — ein Messwerkzeug, das bei jeder WARN-Zeile zu reden anfängt,
+	// verrauscht die Ausgabe, die der Aufrufer auswertet. fail() druckt und
+	// liefert 1; der Exit-Code steht darum eine Zeile darunter.
+	sess, ok := toolboot.Open(ctx, func(issues []config.Issue, aborting bool) {
+		if !aborting {
+			return
+		}
+		for _, is := range issues {
+			say("ctx-armcost: config:", is.Field+":", is.Msg)
+		}
+	}, func(err error) { _ = fail("db", err) })
+	if !ok {
+		return 1
 	}
-	defer pool.Close()
+	defer sess.Stop()
 
-	rep, repErr := buildReport(ctx, pool, opts)
+	rep, repErr := buildReport(ctx, sess.Pool, opts)
 	if repErr != nil && !errors.Is(repErr, errCountGate) {
 		return fail("report", repErr)
 	}

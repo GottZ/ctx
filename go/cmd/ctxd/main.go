@@ -22,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/toolboot"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -334,38 +335,42 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	// Parse + validate (internal/config), log EVERY issue, then fail fast on
-	// any SeverityError — a misconfigured boot dies with field + reason for
-	// each finding, never with just the first one. config.Config is the only
-	// config type since F1-W7 (the cmd/ctxd bridge struct died).
-	cc, issues := config.FromEnv()
-	issues = append(issues, config.Validate(cc)...)
-	for _, is := range issues {
-		if is.Severity == config.SeverityError {
-			slog.Error("config: invalid", "field", is.Field, "msg", is.Msg)
-		} else {
-			slog.Warn("config: issue", "field", is.Field, "msg", is.Msg)
-		}
-	}
-	if config.HasErrors(issues) {
-		slog.Error("config: refusing to start — fix the fields above in .env and restart")
-		os.Exit(1)
-	}
-
-	// Root context cancelled on SIGINT/SIGTERM
+	// Root context cancelled on SIGINT/SIGTERM. Derived before the boot so the
+	// pool's connect retries answer to the same two signals the rest of the
+	// daemon does; nothing between here and the pool writes a line.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Database pool with pgvector support. The DSN comes from the env-layer
-	// config: the settings overlay below needs this pool to even load, and the
+	// Parse + validate + open the pool (internal/toolboot, contract G14): log
+	// EVERY issue, then fail fast on any SeverityError — a misconfigured boot
+	// dies with field + reason for each finding, never with just the first
+	// one. config.Config is the only config type since F1-W7 (the cmd/ctxd
+	// bridge struct died). The DSN comes from the env-layer config: the
+	// settings overlay below needs this pool to even load, and the
 	// CONTEXT_DB_* group is restart-only — the effective snapshot can never
-	// carry a different DSN than the one we boot with.
-	pool, err := store.NewPool(ctx, cc.DSN())
-	if err != nil {
+	// carry a different DSN than the one we boot with. That overlay also wants
+	// the env issues, and the report callback is where they pass by.
+	var issues []config.Issue
+	sess, ok := toolboot.Open(ctx, func(found []config.Issue, aborting bool) {
+		issues = found
+		for _, is := range found {
+			if is.Severity == config.SeverityError {
+				slog.Error("config: invalid", "field", is.Field, "msg", is.Msg)
+			} else {
+				slog.Warn("config: issue", "field", is.Field, "msg", is.Msg)
+			}
+		}
+		if aborting {
+			slog.Error("config: refusing to start — fix the fields above in .env and restart")
+		}
+	}, func(err error) {
 		slog.Error("failed to create database pool", "error", err)
+	})
+	if !ok {
 		os.Exit(1)
 	}
-	defer pool.Close()
+	defer sess.Stop()
+	cc, pool := sess.Cfg, sess.Pool
 
 	slog.Info("database pool created", "host", cc.Server.DBHost, "db", cc.Server.DB)
 

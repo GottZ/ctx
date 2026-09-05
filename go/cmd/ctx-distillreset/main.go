@@ -47,7 +47,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/distillreset"
 	"github.com/GottZ/ctx/internal/settings"
-	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/toolboot"
 )
 
 func main() {
@@ -93,30 +93,34 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	cc, issues := config.FromEnv()
-	issues = append(issues, config.Validate(cc)...)
-	if config.HasErrors(issues) {
-		for _, is := range issues {
-			say("ctx-distillreset: config:", is.Field+":", is.Msg)
-		}
-		return 1
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := store.NewPool(ctx, cc.DSN())
-	if err != nil {
-		say("ctx-distillreset: db:", err)
+	// Config und Pool in der Reihenfolge des Boot-Vertrags (G14,
+	// internal/toolboot). Issues erreichen stderr nur, wenn sie den Lauf auch
+	// beenden; die Liste selbst wird unten gebraucht — settings.Bootstrap
+	// diffed sie gegen die Overlay-Zeilen, und der report-Callback ist die
+	// eine Stelle, an der sie vorbeikommt.
+	var issues []config.Issue
+	sess, ok := toolboot.Open(ctx, func(found []config.Issue, aborting bool) {
+		issues = found
+		if !aborting {
+			return
+		}
+		for _, is := range found {
+			say("ctx-distillreset: config:", is.Field+":", is.Msg)
+		}
+	}, func(err error) { say("ctx-distillreset: db:", err) })
+	if !ok {
 		return 1
 	}
-	defer pool.Close()
+	defer sess.Stop()
 
 	// Die AUFGELÖSTE Konfiguration, wie der Daemon sie liest: Env zuerst, das
 	// Settings-Overlay darüber. Ein Werkzeug, das server.instance_kind oder die
 	// Schreib-Identität des Arms selbst zusammenreimt, würde eine zweite
 	// Meinung über dieselben Schlüssel pflegen.
-	cfg, issues := settings.Bootstrap(ctx, pool, cc, issues)
+	cfg, issues := settings.Bootstrap(ctx, sess.Pool, sess.Cfg, issues)
 	if config.HasErrors(issues) {
 		for _, is := range issues {
 			say("ctx-distillreset: config:", is.Field+":", is.Msg)
@@ -124,7 +128,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	res, err := distillreset.Run(ctx, pool, identityFrom(cfg, *scope), distillreset.Options{
+	res, err := distillreset.Run(ctx, sess.Pool, identityFrom(cfg, *scope), distillreset.Options{
 		FromType: *fromType, Apply: *apply,
 	})
 	if err != nil {

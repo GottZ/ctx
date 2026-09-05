@@ -27,7 +27,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/overview"
-	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/toolboot"
 )
 
 // dispatchOverviewWorkerMode routes `ctxd overview-rebuild-worker` into the
@@ -106,34 +106,36 @@ func runOverviewWorker(stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Env-DSN config (design/05 §4.7): validate like the daemon boot does —
-	// the env is inherited from a daemon that already fail-fasted on real
-	// config errors, so errors here mean a genuinely broken spawn context.
-	cc, issues := config.FromEnv()
-	issues = append(issues, config.Validate(cc)...)
-	if config.HasErrors(issues) {
-		for _, is := range issues {
-			if is.Severity == config.SeverityError {
-				_, _ = fmt.Fprintf(stderr, "overview-worker: config: %s: %s\n", is.Field, is.Msg)
-			}
-		}
-		return 1
-	}
-
 	// SIGINT/SIGTERM abort the rebuild; the parent's timeout arrives as a
 	// hard kill (exec.CommandContext), which the persist tx survives as a
 	// clean rollback — E-B pins that with its own probes.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	pool, err := store.NewPool(ctx, cc.DSN())
-	if err != nil {
+	// Env-DSN config (design/05 §4.7, contract G14 via internal/toolboot):
+	// validate like the daemon boot does — the env is inherited from a daemon
+	// that already fail-fasted on real config errors, so errors here mean a
+	// genuinely broken spawn context. Only errors are worth a line, and only
+	// when they are what ends this process; the daemon has already seen and
+	// logged whatever warnings this env carries.
+	sess, ok := toolboot.Open(ctx, func(issues []config.Issue, aborting bool) {
+		if !aborting {
+			return
+		}
+		for _, is := range issues {
+			if is.Severity == config.SeverityError {
+				_, _ = fmt.Fprintf(stderr, "overview-worker: config: %s: %s\n", is.Field, is.Msg)
+			}
+		}
+	}, func(err error) {
 		_, _ = fmt.Fprintf(stderr, "overview-worker: db pool: %v\n", err)
+	})
+	if !ok {
 		return 1
 	}
-	defer pool.Close()
+	defer sess.Stop()
 
-	if err := overview.RunWorker(ctx, pool, opts, stdout); err != nil {
+	if err := overview.RunWorker(ctx, sess.Pool, opts, stdout); err != nil {
 		_, _ = fmt.Fprintf(stderr, "overview-worker: %v\n", err)
 		return 1
 	}

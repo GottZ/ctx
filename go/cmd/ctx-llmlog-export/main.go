@@ -35,7 +35,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/llmlog"
-	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/toolboot"
 )
 
 func main() {
@@ -105,23 +105,26 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 
-	cc, issues := config.FromEnv()
-	issues = append(issues, config.Validate(cc)...)
-	if config.HasErrors(issues) {
-		for _, is := range issues {
-			say("ctx-llmlog-export: config:", is.Field+":", is.Msg)
-		}
-		return 1
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := store.NewPool(ctx, cc.DSN())
-	if err != nil {
-		return fail("db", err)
+	// Config und Pool in der Reihenfolge des Boot-Vertrags (G14,
+	// internal/toolboot). Issues erreichen stderr nur, wenn sie den Lauf auch
+	// beenden — ein Export, der bei jeder WARN-Zeile zu reden anfängt,
+	// verrauscht die Ausgabe, die der Aufrufer auswertet. fail() druckt und
+	// liefert 1; der Exit-Code steht darum eine Zeile darunter.
+	sess, ok := toolboot.Open(ctx, func(issues []config.Issue, aborting bool) {
+		if !aborting {
+			return
+		}
+		for _, is := range issues {
+			say("ctx-llmlog-export: config:", is.Field+":", is.Msg)
+		}
+	}, func(err error) { _ = fail("db", err) })
+	if !ok {
+		return 1
 	}
-	defer pool.Close()
+	defer sess.Stop()
 
 	out, err := llmlog.CreateExportFile(*outPath)
 	if err != nil {
@@ -129,7 +132,7 @@ func run(args []string, stderr io.Writer) int {
 	}
 	defer func() { _ = out.Close() }()
 
-	sum, exportErr := llmlog.Export(ctx, pool, out, opts)
+	sum, exportErr := llmlog.Export(ctx, sess.Pool, out, opts)
 	syncErr := out.Sync()
 
 	// Zähl-Kontrakt IMMER zuerst — gerade auf Fehlerpfaden ist er der Beleg.
