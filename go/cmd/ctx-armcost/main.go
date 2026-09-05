@@ -107,6 +107,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	cc, issues := config.FromEnv()
+	issues = append(issues, config.Validate(cc)...)
 	if config.HasErrors(issues) {
 		for _, is := range issues {
 			say("ctx-armcost: config:", is.Field+":", is.Msg)

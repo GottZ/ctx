@@ -106,6 +106,7 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	cc, issues := config.FromEnv()
+	issues = append(issues, config.Validate(cc)...)
 	if config.HasErrors(issues) {
 		for _, is := range issues {
 			say("ctx-llmlog-export: config:", is.Field+":", is.Msg)

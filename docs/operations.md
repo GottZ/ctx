@@ -242,6 +242,10 @@ CONTEXT_DB_HOST=<db> ./ctx-llmlog-export -out /secure/dir/llmlog-$(date +%F).jso
   [-batch 5000] [-strict] [-summary <path>]
 ```
 
+The config is validated in full before the first database contact: an error-severity issue from
+`internal/config` — the cross-field rules included — is printed and ends the run with exit ≠ 0
+before any pool is opened.
+
 It reads the DSN from the same config source as `ctxd` (`CONTEXT_DB*`). Every page and the
 final `count(*)` gate run in their own short `READ ONLY` transaction (no write path by
 construction; no hours-long snapshot pinning the database's xmin horizon on large tables). The
@@ -288,6 +292,10 @@ CONTEXT_DB_HOST=<db> ./ctx-armcost -out /secure/dir/armcost-$(date +%F).json \
   [-since <RFC3339>] [-until <RFC3339>] [-days 7] [-by-class=false] \
   [-arm cluster-label -per-topic]
 ```
+
+The config is validated in full before the first database contact: an error-severity issue from
+`internal/config` — the cross-field rules included — is printed and ends the run with exit ≠ 0
+before any pool is opened.
 
 Per group it reports `n`, the occupancy sum in seconds, `wire_s` (Σ `duration_ms`), p50/p95
 duration, prompt/completion token sums with the count of rows where they are NULL, the error
@@ -357,6 +365,10 @@ set -a; . .env; set +a
 CONTEXT_DB_HOST=<copy> ./ctx-distillreset -from-type session-insight-shadow          # shows
 CONTEXT_DB_HOST=<copy> ./ctx-distillreset -from-type session-insight-shadow -apply   # writes
 ```
+
+The config is validated in full before the first database contact: an error-severity issue from
+`internal/config` — the cross-field rules included — is printed and ends the run with exit ≠ 0
+before any pool is opened.
 
 It sets `type_name` back to the arm's configured block type and touches **no other column** — not
 `updated_at` (the anchor a campaign's drift stamp reads: a reset that moves it turns the restoration
