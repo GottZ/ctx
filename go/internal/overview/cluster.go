@@ -41,10 +41,6 @@ const (
 	// a global run (nil ScopeFilter) locks exactly this value, a partition run
 	// XORs a process-stable hash of its scope set on top (lockKeyForScopes).
 	overviewLockKey int64 = 0x6f76727677 // "ovrvw"
-
-	// memberBatch caps the per-INSERT unnest array size (1M+ members → batched,
-	// not one giant bind parameter).
-	memberBatch = 5000
 )
 
 // persistTempBuffers dimensions the temp-table working set of the W3 identity

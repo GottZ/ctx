@@ -321,8 +321,8 @@ func TestDerivedWriteLock(t *testing.T) {
 
 	t.Run("d_S1_ManageUpdate", func(t *testing.T) {
 		// The fourth type-claiming surface, which D-01 §4.3.1 does not name:
-		// manage update carries its own `type` and its own validator
-		// (blocktype_manage.go validateBlockTypeName).
+		// manage update carries its own `type` and reaches the shared claim
+		// gates through updateClaimReject (context_manage.go).
 		const title = "w012a manage update claims catalog"
 		keyCtx := mkKey("wl-d-manage", false)
 		if status, resp := restStore(keyCtx, map[string]any{

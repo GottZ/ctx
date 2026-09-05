@@ -41,7 +41,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// purgeBatch caps one DELETE. Same value as memberBatch, for the same reason.
+// purgeBatch caps one DELETE, so the statement cannot grow an unbounded row
+// set at the node cap.
 const purgeBatch = 5000
 
 // purgeMaxRounds bounds the loop. A declared resource limit, not a semantic

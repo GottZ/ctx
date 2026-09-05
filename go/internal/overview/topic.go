@@ -78,10 +78,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// coreBatch caps the per-INSERT unnest array size of the ov_core fill, like
-// memberBatch does for the member insert. The row count is the CLUSTER count,
-// not the member count, so this batch is reached far later — it exists so the
-// bind parameter cannot grow unbounded at the node cap either.
+// coreBatch caps the per-INSERT unnest array size of the ov_core fill. The row
+// count is the CLUSTER count, not the member count, so this batch is reached
+// far later than a member-sized one would be — it exists so the bind parameter
+// cannot grow unbounded at the node cap either.
 const coreBatch = 5000
 
 // coreOf returns the SUBSTANZ-KERN of one (cluster, scope) group and its hash
@@ -148,8 +148,8 @@ func coreOf(members []string, deg map[string]float64) (ids []string, hash string
 	return ids, hex.EncodeToString(sum[:])
 }
 
-// coreArrays is the ov_core payload as four parallel arrays — the same
-// unnest-bind shape the member insert uses.
+// coreArrays is the ov_core payload as four parallel arrays — the bind shape
+// the unnest INSERT of coreInsertSQL expects.
 type coreArrays struct {
 	clusters []string
 	scopes   []string

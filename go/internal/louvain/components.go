@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sort"
 )
 
 // Der Komponenten-Vorpass mit γ-Reskalierung (Achse 04 / S8, design/04 §4.4).
@@ -225,15 +224,4 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// componentSizes liefert die Komponentengrössen absteigend — die Form, in der
-// der Riesenkomponenten-Anteil ablesbar ist.
-func componentSizes(compOf []int32, count int) []int {
-	sizes := make([]int, count)
-	for _, c := range compOf {
-		sizes[c]++
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
-	return sizes
 }

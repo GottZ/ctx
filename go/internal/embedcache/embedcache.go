@@ -355,23 +355,3 @@ func Evict(ctx context.Context, pool *pgxpool.Pool, ttlDays int, maxRows int) (i
 
 	return removed, nil
 }
-
-// Stats returns aggregate cache metrics for observability.
-type CacheStats struct {
-	Entries   int64
-	TotalHits int64
-	Models    int
-}
-
-// Stats returns aggregate metrics for observability (size, hit counters, model count).
-func Stats(ctx context.Context, pool *pgxpool.Pool) (CacheStats, error) {
-	var s CacheStats
-	err := pool.QueryRow(ctx,
-		`SELECT
-			count(*)::bigint,
-			COALESCE(sum(hit_count), 0)::bigint,
-			count(DISTINCT model)::int
-		FROM context_embed_cache`,
-	).Scan(&s.Entries, &s.TotalHits, &s.Models)
-	return s, err
-}

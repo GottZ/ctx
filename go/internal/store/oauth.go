@@ -147,7 +147,8 @@ func RegisterOAuthClient(ctx context.Context, pool *pgxpool.Pool, spec RegisterO
 
 // GetOAuthClientByClientID returns the full client row (design 02 §4a) —
 // the lookup 03 uses at /authorize + /token. Inactive clients report
-// found=false (fail-closed, same semantics as ValidateOAuthClient).
+// found=false (fail-closed): the WHERE clause carries `active = true`, so a
+// deactivated row is indistinguishable from a missing one for every caller.
 func GetOAuthClientByClientID(ctx context.Context, pool *pgxpool.Pool, clientID string) (*OAuthClient, bool, error) {
 	var client OAuthClient
 	err := pool.QueryRow(ctx,
@@ -224,16 +225,6 @@ func DeleteOAuthClient(ctx context.Context, pool *pgxpool.Pool, clientID string)
 		return false, fmt.Errorf("oauth: delete client: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
-}
-
-// ValidateOAuthClient checks if a client_id exists and is active.
-func ValidateOAuthClient(ctx context.Context, pool *pgxpool.Pool, clientID string) (bool, error) {
-	var exists bool
-	err := pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM context_oauth_clients WHERE client_id = $1 AND active = true)`,
-		clientID,
-	).Scan(&exists)
-	return exists, err
 }
 
 // ValidateOAuthClientSecret checks a client_id + secret pair (wired at

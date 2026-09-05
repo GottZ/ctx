@@ -122,11 +122,6 @@ func WritePool(path string, entries []PoolEntry) error {
 	return writeJSONL(path, len(sorted), func(enc *json.Encoder, i int) error { return enc.Encode(sorted[i]) })
 }
 
-// ReadPool loads a pooling file. One reader, in the package that owns the
-// format — the judgement tooling of B-W6 must not be able to disagree with the
-// driver about what a pool file says.
-func ReadPool(path string) ([]PoolEntry, error) { return goldset.ReadPool(path) }
-
 // writeJSONL is the shared 0600 JSONL writer.
 func writeJSONL(path string, n int, encode func(*json.Encoder, int) error) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)

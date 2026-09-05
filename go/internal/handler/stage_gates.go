@@ -116,10 +116,9 @@ func runStageWriteGates(
 }
 
 // validateTypeNameAgainstSet checks an explicit `type` value a CLIENT asserted.
-// nil = admissible. Shared by the direct REST path (validateStoreTypeName), the
-// stage gates and, since W01-2a, the manage-update path
-// (ManageHandler.validateBlockTypeName) — the one place where "may this caller
-// claim this type" is decided, so a fourth write surface cannot grow a fifth
+// nil = admissible. It has exactly one caller — claimReject below — and every
+// write surface reaches it through that one function, so "may this caller claim
+// this type" is decided in a single place and no write surface can grow its own
 // answer.
 //
 // Three refusals, in this order (the third since C2-8):
