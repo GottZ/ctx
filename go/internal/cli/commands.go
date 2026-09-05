@@ -10,12 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/clientconfig"
 	"github.com/spf13/cobra"
 )
 
 // RegisterCommands adds all subcommands to the root command.
 func RegisterCommands(root *cobra.Command) {
-	cfg, cfgErr := LoadConfig()
+	cfg, cfgErr := clientconfig.Load()
 	// Lazy client — only created if a command actually runs.
 	var client *Client
 	getClient := func() (*Client, error) {

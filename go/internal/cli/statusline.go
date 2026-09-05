@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/clientconfig"
 	"github.com/spf13/cobra"
 )
 
@@ -331,7 +332,7 @@ PROTOCOL:
 			}
 
 			// Load config (best effort — statusline should not crash)
-			cfg, cfgErr := LoadConfig()
+			cfg, cfgErr := clientconfig.Load()
 
 			// Fetch backend data (cached, 500ms timeout)
 			var backend *statusCache

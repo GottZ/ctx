@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/clientconfig"
 )
 
 // provisionResult mirrors the flat handleProjectProvision response. The two key
@@ -42,7 +44,7 @@ type provisionResult struct {
 // projectKeyDir is the directory holding per-project repo-agent keys, UNDER the
 // ctx config dir (never the CWD). Created 0700 on first write.
 func projectKeyDir() string {
-	return filepath.Join(configBaseDir(), "projects")
+	return filepath.Join(clientconfig.BaseDir(), "projects")
 }
 
 // projectKeyPath maps an identity to its stable 0600 key-file path. The filename

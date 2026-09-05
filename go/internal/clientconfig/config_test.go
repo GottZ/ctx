@@ -1,4 +1,4 @@
-package cli
+package clientconfig
 
 import (
 	"os"
@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-func TestLoadConfig_EnvOverride(t *testing.T) {
+func TestLoad_EnvOverride(t *testing.T) {
 	t.Setenv("CTX_BASE_URL", "https://test.example.com")
 	t.Setenv("CTX_KEY", "test-key-123")
 
-	cfg, err := LoadConfig()
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("LoadConfig() error: %v", err)
+		t.Fatalf("Load() error: %v", err)
 	}
 	if cfg.BaseURL != "https://test.example.com" {
 		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "https://test.example.com")
@@ -22,7 +22,7 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_FileOnly(t *testing.T) {
+func TestLoad_FileOnly(t *testing.T) {
 	// Clear env vars
 	t.Setenv("CTX_BASE_URL", "")
 	t.Setenv("CTX_KEY", "")
@@ -45,9 +45,9 @@ CTX_KEY=file-key-456
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("LoadConfig() error: %v", err)
+		t.Fatalf("Load() error: %v", err)
 	}
 	if cfg.BaseURL != "https://file.example.com" {
 		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "https://file.example.com")
@@ -57,7 +57,7 @@ CTX_KEY=file-key-456
 	}
 }
 
-func TestLoadConfig_EnvOverridesFile(t *testing.T) {
+func TestLoad_EnvOverridesFile(t *testing.T) {
 	t.Setenv("CTX_BASE_URL", "https://env.example.com")
 	t.Setenv("CTX_KEY", "env-key-789")
 
@@ -78,9 +78,9 @@ CTX_KEY=file-key-should-not-be-used
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("LoadConfig() error: %v", err)
+		t.Fatalf("Load() error: %v", err)
 	}
 	if cfg.BaseURL != "https://env.example.com" {
 		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "https://env.example.com")
@@ -90,7 +90,7 @@ CTX_KEY=file-key-should-not-be-used
 	}
 }
 
-func TestLoadConfig_MissingBaseURL(t *testing.T) {
+func TestLoad_MissingBaseURL(t *testing.T) {
 	t.Setenv("CTX_BASE_URL", "")
 	t.Setenv("CTX_KEY", "")
 	t.Setenv("WEBHOOK_BASE_URL", "")
@@ -99,13 +99,13 @@ func TestLoadConfig_MissingBaseURL(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	_, err := LoadConfig()
+	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for missing config, got nil")
 	}
 }
 
-func TestLoadConfig_MissingKey(t *testing.T) {
+func TestLoad_MissingKey(t *testing.T) {
 	t.Setenv("CTX_BASE_URL", "https://test.example.com")
 	t.Setenv("CTX_KEY", "")
 
@@ -123,13 +123,13 @@ func TestLoadConfig_MissingKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := LoadConfig()
+	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for missing key, got nil")
 	}
 }
 
-func TestLoadConfig_QuotedValues(t *testing.T) {
+func TestLoad_QuotedValues(t *testing.T) {
 	t.Setenv("CTX_BASE_URL", "")
 	t.Setenv("CTX_KEY", "")
 	t.Setenv("WEBHOOK_BASE_URL", "")
@@ -150,9 +150,9 @@ CTX_KEY='single-quoted-key'
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("LoadConfig() error: %v", err)
+		t.Fatalf("Load() error: %v", err)
 	}
 	if cfg.BaseURL != "https://quoted.example.com" {
 		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "https://quoted.example.com")
@@ -162,7 +162,7 @@ CTX_KEY='single-quoted-key'
 	}
 }
 
-func TestLoadConfig_CommentsAndBlanks(t *testing.T) {
+func TestLoad_CommentsAndBlanks(t *testing.T) {
 	t.Setenv("CTX_BASE_URL", "")
 	t.Setenv("CTX_KEY", "")
 	t.Setenv("WEBHOOK_BASE_URL", "")
@@ -187,9 +187,9 @@ CTX_KEY=comments-key
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("LoadConfig() error: %v", err)
+		t.Fatalf("Load() error: %v", err)
 	}
 	if cfg.BaseURL != "https://comments.example.com" {
 		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "https://comments.example.com")
@@ -199,7 +199,7 @@ CTX_KEY=comments-key
 	}
 }
 
-func TestLoadConfig_WebhookBaseURLFallback(t *testing.T) {
+func TestLoad_WebhookBaseURLFallback(t *testing.T) {
 	t.Setenv("CTX_BASE_URL", "")
 	t.Setenv("CTX_KEY", "")
 	t.Setenv("WEBHOOK_BASE_URL", "https://webhook-fallback.example.com")
@@ -220,9 +220,9 @@ func TestLoadConfig_WebhookBaseURLFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("LoadConfig() error: %v", err)
+		t.Fatalf("Load() error: %v", err)
 	}
 	if cfg.BaseURL != "https://webhook-fallback.example.com" {
 		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "https://webhook-fallback.example.com")

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/clientconfig"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -134,10 +135,10 @@ func initSummaryOK(r initResult) bool {
 }
 
 func stepConfig() (Config, bool) {
-	cfgPath := configFilePath()
+	cfgPath := clientconfig.FilePath()
 	displayPath := displayConfigPath(cfgPath)
 
-	cfg, err := LoadConfig()
+	cfg, err := clientconfig.Load()
 	if err == nil {
 		fmt.Println(label("Config", "%s exists %s", displayPath, okMark()))
 		return cfg, true

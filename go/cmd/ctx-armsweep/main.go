@@ -57,7 +57,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/armsweep"
-	"github.com/GottZ/ctx/internal/cli"
+	"github.com/GottZ/ctx/internal/clientconfig"
 	"github.com/GottZ/ctx/internal/goldset"
 )
 
@@ -303,7 +303,7 @@ func (c *common) reportGuard(dir string) (*goldset.Guard, error) {
 func (c *common) client() (*armsweep.Client, error) {
 	base, key := c.baseURL, c.apiKey
 	if base == "" || key == "" {
-		cfg, err := cli.LoadConfig()
+		cfg, err := clientconfig.Load()
 		if err != nil && !c.dryRun {
 			return nil, err
 		}
