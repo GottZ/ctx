@@ -22,6 +22,9 @@ import (
 	"time"
 )
 
+// The three names below guard the very API a settings row would be written
+// through, so they are env-only by decision (E05-D4 = B) —
+// internal/config/envonly.go carries the reason for each and gates the class.
 const (
 	// EnvDCRMaxClients caps the context_oauth_clients row count (hard
 	// backstop, default 10000). At/over the cap /register answers 403.

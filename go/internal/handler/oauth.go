@@ -39,6 +39,8 @@ type OAuthHandler struct {
 }
 
 // EnvCanonicalIssuer names the canonical-issuer environment variable (S2).
+// It is env-only by decision (E05-D4 = B), like the other oauth names in this
+// file; internal/config/envonly.go carries the reason for each.
 const EnvCanonicalIssuer = "CTX_CANONICAL_ISSUER"
 
 // NewOAuthHandler creates a new OAuthHandler.

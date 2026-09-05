@@ -36,7 +36,10 @@ import (
 	"time"
 )
 
-// Environment variables (design §3). All default-safe.
+// Environment variables (design §3). All default-safe. All three camo names
+// bypass the settings registry by decision (E05-D3 = B); the reason for each
+// is written down in internal/config/envonly.go, which is also the gate that
+// keeps a fourth one from appearing here unclassified.
 const (
 	EnvEnabled       = "CTX_CAMO_ENABLED"     // feature flag, default false (fail-closed)
 	EnvTTL           = "CTX_CAMO_TTL"         // signature + cache lifetime, default 24h

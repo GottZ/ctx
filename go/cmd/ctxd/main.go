@@ -287,6 +287,9 @@ func normalizeInterruptedSyncsBoot(ctx context.Context, pool *pgxpool.Pool) {
 //
 // The plaintext is NEVER logged — only the created flag, the label and the
 // minted key id (an already-public identity, neither hash nor plaintext).
+//
+// Both names are env-only by decision; internal/config/envonly.go carries the
+// reason and gates the class.
 func bootstrapAdminKeyBoot(ctx context.Context, pool *pgxpool.Pool) {
 	plaintext := os.Getenv("CTX_BOOTSTRAP_ADMIN_KEY")
 	if plaintext == "" {
