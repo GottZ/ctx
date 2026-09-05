@@ -144,28 +144,6 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, require
 	return applyRerankScores(results, scores, len(docsToRerank), RerankWeight), nil
 }
 
-// guardText is the wiring order for foreign text inside a judge block (design
-// 04 §4.2): Neutralize FIRST, EscapeXml second — reversed, Neutralize would run
-// against "&lt;|" and never see "<|", a silent no-op with nothing turning red
-// (pinned by TestRerankJudgePrompt_NeutralizeRunsBeforeEscape).
-//
-// EscapeXml STAYS: this is an additive wiring wave. Whether Neutralize replaces
-// it for content positions is the eval-backed decision 04 §8-E1.
-func guardText(s string) string {
-	n, _ := promptguard.Neutralize(s)
-	return llm.EscapeXml(n)
-}
-
-// guardLine is guardText for a LINE-BASED position — the "Query:" line and the
-// "Doc n [category/title]:" header, which sit outside every block. A bare
-// newline there opens a line that reads as a doc header, and EscapeXml provably
-// does not touch it; ClampLine does, and it runs FIRST so the turn markers are
-// inert regardless of what Neutralize can still match.
-func guardLine(s string) string {
-	n, _ := promptguard.Neutralize(promptguard.ClampLine(s))
-	return llm.EscapeXml(n)
-}
-
 // rerankDocKind is the rendered kind attribute of a judged document block.
 const rerankDocKind = "doc"
 
@@ -196,10 +174,10 @@ func truncRunes(s string, n int) string {
 // Block metadata stays OUTSIDE the wrap on that header line: a category and a
 // title carry spaces and arbitrary punctuation, so neither survives the
 // marker-attribute clamp — and it is the clamp that keeps the marker line
-// unforgeable. Those positions are line-based, hence guardLine; the content
-// inside a block is not, hence guardText (newlines are legitimate there).
+// unforgeable. Those positions are line-based, hence GuardLine; the content
+// inside a block is not, hence GuardText (newlines are legitimate there).
 //
-// The query runs through guardLine as well. It sits outside every block and is
+// The query runs through GuardLine as well. It sits outside every block and is
 // the most reachable field in the whole prompt — at 1M+ blocks with autonomous
 // writers it arrives from bindings and webhooks, not only from a human.
 //
@@ -211,13 +189,13 @@ func buildRerankJudgePrompt(query string, docsToRerank []SearchResult) (system, 
 
 	var sb strings.Builder
 	sb.WriteString("Query: ")
-	sb.WriteString(guardLine(query))
+	sb.WriteString(promptguard.GuardLine(query))
 	sb.WriteString("\n\n")
 
 	for i, r := range docsToRerank {
-		fmt.Fprintf(&sb, "Doc %d [%s/%s]:\n", i+1, guardLine(r.Category), guardLine(r.Title))
+		fmt.Fprintf(&sb, "Doc %d [%s/%s]:\n", i+1, promptguard.GuardLine(r.Category), promptguard.GuardLine(r.Title))
 		sb.WriteString(promptguard.Wrap(nonce, rerankDocKind,
-			guardText(truncRunes(r.Content, RerankContentLimit)),
+			promptguard.GuardText(truncRunes(r.Content, RerankContentLimit)),
 			promptguard.Attr{Name: "ref", Value: strconv.Itoa(i + 1)}))
 		sb.WriteString("\n\n")
 	}

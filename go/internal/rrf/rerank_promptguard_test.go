@@ -198,7 +198,7 @@ func TestRerankJudgePrompt_NeutralizeRunsBeforeEscape(t *testing.T) {
 	}
 }
 
-// TestRerankJudgePrompt_TurnMarkersDoNotSurvive covers the positions EscapeXml
+// TestRerankJudgePrompt_TurnMarkersDoNotSurvive covers the positions the escape
 // provably does not reach: a turn marker carries no "<" at all, so before H3 it
 // travelled into the chat wire byte for byte — from the doc content AND from
 // the query, which sits outside every block.

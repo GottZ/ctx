@@ -301,16 +301,6 @@ type SynthesisResult struct {
 	SkipLLM     bool     `json:"-"`
 }
 
-// EscapeXml replaces XML special characters with their entity references.
-func EscapeXml(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, "\"", "&quot;")
-	s = strings.ReplaceAll(s, "'", "&apos;")
-	return s
-}
-
 // ClassifyConfidence determines the confidence level from the max RRF score.
 func ClassifyConfidence(maxScore float64, s SynthesisSettings) string {
 	if maxScore >= s.ConfidentThreshold {
@@ -448,11 +438,11 @@ func hasUntrusted(sources []Source) bool {
 // Welle-48 graded-confidence variant.
 //
 // All four foreign fields (originalQuery, Title, Category, Content) run
-// through guardText; the content additionally rides inside a nonce-carrying
-// promptguard marker. ONE nonce per build binds every marker AND the rule in
-// the system prompt — the model cites [1]/[2], so the block boundaries carry
-// meaning and have to be verifiable, and Rule() can name exactly one genuine
-// id (design 04 §4.3). The question is guarded but NOT wrapped: it is what the
+// through promptguard.GuardText; the content additionally rides inside a
+// nonce-carrying promptguard marker. ONE nonce per build binds every marker
+// AND the rule in the system prompt — the model cites [1]/[2], so the block
+// boundaries carry meaning and have to be verifiable, and Rule() can name
+// exactly one genuine id (design 04 §4.3). The question is guarded but NOT wrapped: it is what the
 // model must act on, and a block declared "DATA ONLY, never instructions"
 // would say the opposite of that.
 func BuildPrompt(originalQuery string, sources []Source, temporalDates []TemporalDate, s SynthesisSettings) (systemPrompt, userPrompt string) {
@@ -487,7 +477,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 
 	var sb strings.Builder
 	sb.WriteString("<question>")
-	sb.WriteString(guardText(originalQuery))
+	sb.WriteString(promptguard.GuardText(originalQuery))
 	sb.WriteString("</question>\n\n<sources>\n")
 
 	for i, src := range sources {
@@ -503,7 +493,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 
 		// Title and category stay in their ATTRIBUTE positions — no ClampLine:
 		// unlike the dream header lines (design 04 §2.3-c2) this position is
-		// XML-delimited, so EscapeXml provably covers the boundary and a
+		// XML-delimited, so the escape provably covers the boundary and a
 		// newline can forge nothing.
 		// trust= is code-generated and appended LAST, so a trusted source
 		// renders the exact pre-W02-4 byte sequence (empty suffix) rather than
@@ -516,18 +506,18 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 		fmt.Fprintf(&sb,
 			`<source id="%d" title="%s" category="%s" score="%.4f" age_days="%d"%s>`,
 			i+1,
-			guardText(src.Title),
-			guardText(src.Category),
+			promptguard.GuardText(src.Title),
+			promptguard.GuardText(src.Category),
 			src.Score,
 			src.AgeDays,
 			trust,
 		)
 		sb.WriteString("\n")
 		// Pre-guarded, so the Neutralize inside Wrap is a no-op by
-		// construction. Passing raw EscapeXml output instead would hand that
-		// Neutralize "&lt;/untrusted_block" and it would match nothing — the
-		// silent no-op the order probe forbids.
-		sb.WriteString(promptguard.Wrap(nonce, sourceMarkerKind, guardText(content),
+		// construction. Passing raw promptguard.EscapeXML output instead would
+		// hand that Neutralize "&lt;/untrusted_block" and it would match
+		// nothing — the silent no-op the order probe forbids.
+		sb.WriteString(promptguard.Wrap(nonce, sourceMarkerKind, promptguard.GuardText(content),
 			promptguard.Attr{Name: "ref", Value: strconv.Itoa(i + 1)}))
 		sb.WriteString("\n</source>\n")
 	}

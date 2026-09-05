@@ -16,35 +16,6 @@ var testSettings = SynthesisSettings{
 	PromptVersion:      PromptVersionV52,
 }
 
-// --- EscapeXml ---.
-
-func TestEscapeXml(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"ampersand", "AT&T", "AT&amp;T"},
-		{"less than", "a < b", "a &lt; b"},
-		{"greater than", "a > b", "a &gt; b"},
-		{"double quote", `say "hello"`, "say &quot;hello&quot;"},
-		{"single quote", "it's", "it&apos;s"},
-		{"all entities combined", `<b>"Tom & Jerry's"</b>`, "&lt;b&gt;&quot;Tom &amp; Jerry&apos;s&quot;&lt;/b&gt;"},
-		{"no special chars", "plain text 123", "plain text 123"},
-		{"empty string", "", ""},
-		{"ampersand not double escaped", "&amp;", "&amp;amp;"},
-		{"xml tag injection", `<script>alert("xss")</script>`, "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := EscapeXml(tt.in)
-			if got != tt.want {
-				t.Errorf("EscapeXml(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
 // --- ClassifyConfidence ---.
 
 func TestClassifyConfidence(t *testing.T) {

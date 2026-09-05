@@ -246,25 +246,14 @@ func Canonicalize(s string) string {
 // the allowlist is ever widened. Consequence worth knowing: on an admissible
 // value the whole chain is a no-op.
 //
-// The XML escape is package-local on purpose — importing internal/llm here
-// would invert the dependency direction of the wiring waves.
+// The escape step is EscapeXML (guard_wire.go) — the same body the call sites
+// reach through GuardText and GuardLine.
 func clampAttr(s string) string {
 	s = ClampLine(s)
 	s, _ = Neutralize(s)
-	s = escapeXMLAttr(s)
+	s = EscapeXML(s)
 	if !attrAllow.MatchString(s) {
 		return ""
 	}
-	return s
-}
-
-// escapeXMLAttr replaces XML special characters with their entity references.
-// Package-local twin of the escaper used at the call sites; see clampAttr.
-func escapeXMLAttr(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, `"`, "&quot;")
-	s = strings.ReplaceAll(s, "'", "&apos;")
 	return s
 }

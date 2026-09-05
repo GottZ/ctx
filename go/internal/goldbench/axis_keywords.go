@@ -6,7 +6,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/dream"
-	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
 
@@ -199,31 +198,18 @@ func axisTitle() axisDef {
 }
 
 // buildTitleUser baut den User-Prompt strukturgleich zu den dream-Buildern:
-// <block>-Wrap mit line-geclampter Metadaten-Zeile und Neutralize+EscapeXml
-// über dem Content (Muster: keywords.go:150 buildKeywordPrompt +
-// promptguard_wire.go guardText/guardLine).
+// <block>-Wrap mit line-geclampter Metadaten-Zeile und Neutralize+Escape
+// über dem Content (Muster: keywords.go:150 buildKeywordPrompt). Seit T04-6
+// dieselben promptguard.GuardText/GuardLine wie dream — der Bench-Pfad
+// spiegelt die Prod-Wiring-Reihenfolge nicht mehr, er IST sie.
 func buildTitleUser(category, content string) string {
 	var b strings.Builder
 	b.WriteString("<block>\nCategory: ")
-	b.WriteString(benchGuardLine(category))
+	b.WriteString(promptguard.GuardLine(category))
 	b.WriteString("\n\nContent: ")
-	b.WriteString(benchGuardText(content))
+	b.WriteString(promptguard.GuardText(content))
 	b.WriteString("\n</block>")
 	return b.String()
-}
-
-// benchGuardText spiegelt dream.guardText (dream/promptguard_wire.go:21):
-// Neutralize ZUERST, EscapeXml danach.
-func benchGuardText(s string) string {
-	n, _ := promptguard.Neutralize(s)
-	return llm.EscapeXml(n)
-}
-
-// benchGuardLine spiegelt dream.guardLine (dream/promptguard_wire.go:35):
-// ClampLine, Neutralize, EscapeXml.
-func benchGuardLine(s string) string {
-	n, _ := promptguard.Neutralize(promptguard.ClampLine(s))
-	return llm.EscapeXml(n)
 }
 
 // scoreTitle: Token-F1 (lowercase [a-z0-9äöüß]+) gegen gold.title; ein Titel

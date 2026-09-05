@@ -228,7 +228,7 @@ func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts 
 // header line: a uuid is 36 characters and a title carries spaces, so neither
 // survives the marker-attribute clamp of promptguard.Wrap — and it is the
 // clamp that keeps the marker line unforgeable. That header is a LINE-BASED
-// position, so the title runs through guardLine, not guardText: XML escaping
+// position, so the title runs through GuardLine, not GuardText: XML escaping
 // stops "<block_b" but not a bare newline, and this line needs no "<" to be
 // forged. The payloads are pre-neutralised, so the Neutralize inside Wrap is
 // a no-op by construction.
@@ -237,14 +237,14 @@ func buildRecurrencePrompt(source BlockInfo, c recurrenceCandidate) (system, use
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "block_a: id=%s title=\"%s\" updated=\"%s\"\n",
-		source.ID, guardLine(source.Title), source.UpdatedAt.Format("2006-01-02"))
+		source.ID, promptguard.GuardLine(source.Title), source.UpdatedAt.Format("2006-01-02"))
 	b.WriteString(promptguard.Wrap(nonce, "block_a",
-		guardText(truncate(source.Content, MaxContentLen))))
+		promptguard.GuardText(truncate(source.Content, MaxContentLen))))
 	b.WriteString("\n\n")
 	fmt.Fprintf(&b, "block_b: id=%s title=\"%s\" title_sim=\"%.2f\"\n",
-		c.TargetID, guardLine(c.TargetTitle), c.TitleSim)
+		c.TargetID, promptguard.GuardLine(c.TargetTitle), c.TitleSim)
 	b.WriteString(promptguard.Wrap(nonce, "block_b",
-		guardText(truncate(c.TargetText, MaxContentLen))))
+		promptguard.GuardText(truncate(c.TargetText, MaxContentLen))))
 
 	return recurrenceSystemPrompt + "\n\n" + promptguard.Rule(nonce), b.String()
 }

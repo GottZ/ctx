@@ -537,10 +537,10 @@ func TestClampAttr_RejectsEverythingTheChainCouldIntroduce(t *testing.T) {
 	}
 }
 
-func TestEscapeXMLAttr(t *testing.T) {
+func TestEscapeXMLAttrChain(t *testing.T) {
 	in := `a&b<c>d"e'f`
 	want := "a&amp;b&lt;c&gt;d&quot;e&apos;f"
-	if got := escapeXMLAttr(in); got != want {
-		t.Errorf("escapeXMLAttr(%q) = %q, want %q", in, got, want)
+	if got := EscapeXML(in); got != want {
+		t.Errorf("EscapeXML(%q) = %q, want %q", in, got, want)
 	}
 }

@@ -10,55 +10,6 @@ import (
 // These tests supplement the existing tests in llm_test.go with boundary
 // values, unusual inputs, and encoding edge cases for the synthesize functions.
 
-// --- EscapeXml edge cases ---.
-
-func TestEscapeXml_NullByte(t *testing.T) {
-	input := "before\x00after"
-	got := EscapeXml(input)
-	if got != input {
-		t.Errorf("EscapeXml with null byte = %q, want %q (pass through)", got, input)
-	}
-}
-
-func TestEscapeXml_UTF8BOM(t *testing.T) {
-	input := "\xef\xbb\xbfhello"
-	got := EscapeXml(input)
-	if got != input {
-		t.Errorf("EscapeXml with BOM = %q, want unchanged", got)
-	}
-}
-
-func TestEscapeXml_RepeatedAmpersands(t *testing.T) {
-	if got := EscapeXml("&&&"); got != "&amp;&amp;&amp;" {
-		t.Errorf("EscapeXml(%q) = %q, want %q", "&&&", got, "&amp;&amp;&amp;")
-	}
-}
-
-func TestEscapeXml_Unicode(t *testing.T) {
-	input := "\u00e4\u00f6\u00fc\u00df \u2603 \U0001F600"
-	got := EscapeXml(input)
-	if got != input {
-		t.Errorf("EscapeXml(unicode) = %q, want unchanged", got)
-	}
-}
-
-func TestEscapeXml_VeryLongString(t *testing.T) {
-	input := strings.Repeat("<&>", 10000)
-	got := EscapeXml(input)
-	expected := strings.Repeat("&lt;&amp;&gt;", 10000)
-	if got != expected {
-		t.Errorf("EscapeXml length mismatch: got %d, want %d", len(got), len(expected))
-	}
-}
-
-func TestEscapeXml_AllSpecialMixed(t *testing.T) {
-	input := `"'<>&`
-	want := "&quot;&apos;&lt;&gt;&amp;"
-	if got := EscapeXml(input); got != want {
-		t.Errorf("EscapeXml(%q) = %q, want %q", input, got, want)
-	}
-}
-
 // --- ClassifyConfidence edge cases ---.
 
 func TestClassifyConfidence_NaN(t *testing.T) {

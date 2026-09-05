@@ -568,7 +568,7 @@ func capHit(entry *llmlog.Entry, resp *llm.ChatResponse, opts llm.Options) bool 
 //   - source side: the value sits on a LINE-BASED key:value line, where a bare
 //     newline forges the next line without needing a single "<". XML escaping
 //     provably does not cover this one, which is why both positions run through
-//     guardLine (ClampLine AND EscapeXml), not through EscapeXml alone.
+//     promptguard.GuardLine (ClampLine AND escape), not through the escape alone.
 //
 // The ids stay raw: they are DB uuids, not foreign text, and the answer path
 // re-checks them against the candidate set anyway (filterValidCandidates) —
@@ -579,17 +579,17 @@ func buildEvalPrompt(source BlockInfo, candidates []BlockInfo) (system, user str
 	var b strings.Builder
 	b.WriteString("<source>\n")
 	fmt.Fprintf(&b, "ID: %s\nTitle: %s\nCategory: %s\nUpdated: %s\n",
-		source.ID, guardLine(source.Title), guardLine(source.Category),
+		source.ID, promptguard.GuardLine(source.Title), promptguard.GuardLine(source.Category),
 		source.UpdatedAt.Format("2006-01-02"))
 	b.WriteString(promptguard.Wrap(nonce, "source",
-		guardText(truncate(source.Content, MaxContentLen))))
+		promptguard.GuardText(truncate(source.Content, MaxContentLen))))
 	b.WriteString("\n</source>\n\n<candidates>\n")
 
 	for _, c := range candidates {
 		fmt.Fprintf(&b, "<block id=\"%s\" title=\"%s\" category=\"%s\" updated=\"%s\">\n",
-			c.ID, guardLine(c.Title), guardLine(c.Category), c.UpdatedAt.Format("2006-01-02"))
+			c.ID, promptguard.GuardLine(c.Title), promptguard.GuardLine(c.Category), c.UpdatedAt.Format("2006-01-02"))
 		b.WriteString(promptguard.Wrap(nonce, "candidate",
-			guardText(truncate(c.Content, MaxContentLen/2))))
+			promptguard.GuardText(truncate(c.Content, MaxContentLen/2))))
 		b.WriteString("\n</block>\n")
 	}
 	b.WriteString("</candidates>")
