@@ -95,7 +95,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"cluster.ego_annotate":                           "Adds cluster-membership annotation to ego-graph responses via one extra DB probe; probe failures degrade to no annotation, never a 500",
 	"cluster.ego_annotate_max_nodes":                 "Node-count ceiling for ego-graph cluster annotation; larger responses return empty annotations plus a budget trip instead of probing",
 	"cluster.facet_enabled":                          "Enables the cluster facet on context search, restricting results to members of one cluster given by UUID",
-	"cluster.route_enabled":                          "Gates the /api/graph/clusters route; while off (or the graph overview is off) the endpoint answers an indistinguishable 404",
+	"cluster.route_enabled":                          "Gates the /api/graph/cluster route; while off (or the graph overview is off) the endpoint answers an indistinguishable 404",
 	"cluster.centroid_build":                         "Enables the background centroid build that runs in its own transaction after each cluster-map rebuild commits",
 	"cluster.centroid_timeout":                       "Time budget in seconds for one background centroid build run, clamped independently of the rebuild's own timeout",
 	"cluster.centroid_batch":                         "Number of topic centroids recomputed per transaction chunk during the background build; smaller chunks shorten lock windows",
