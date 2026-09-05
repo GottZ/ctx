@@ -5,11 +5,29 @@
 package forge
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/GottZ/ctx/internal/store"
 )
+
+// TestProjection_IssueFieldCount pins the SHAPE of issueProjection. Both
+// generations that map onto it write the field list out by hand — ForgeIssueBase
+// from the fetched IssueRemote, CtxIssueBase from the stored block — so a field
+// added to the struct silently enters the hash on one side only unless someone
+// mirrors it in both. Catching that was the sole job of a second, hash-only
+// generation of the same mapping this package used to carry purely as a
+// differential oracle; the pin binds the check to the CAUSE (the struct) instead
+// of to a hand-kept copy of the mapping. When it goes red: add the new field to
+// BOTH *IssueBase mappings and to the projection tests below, then bump want.
+func TestProjection_IssueFieldCount(t *testing.T) {
+	const want = 6 // title, body, state, labels, assignees, milestone
+	if got := reflect.TypeOf(issueProjection{}).NumField(); got != want {
+		t.Fatalf("issueProjection has %d fields, want %d — mirror the new field in "+
+			"ForgeIssueBase AND CtxIssueBase before bumping this pin", got, want)
+	}
+}
 
 // TestProjection_TimestampIndependent (W16): two payloads that differ ONLY in
 // updated_at hash identically — a projection that folded the timestamp in would
@@ -20,8 +38,8 @@ func TestProjection_TimestampIndependent(t *testing.T) {
 	a.UpdatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	b := iss
 	b.UpdatedAt = time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
-	ha, _, _ := ForgeIssueHash(a)
-	hb, _, _ := ForgeIssueHash(b)
+	_, ha, _, _ := ForgeIssueBase(a)
+	_, hb, _, _ := ForgeIssueBase(b)
 	if ha != hb {
 		t.Fatalf("projection is timestamp-dependent (W16): %s != %s", ha, hb)
 	}
@@ -31,27 +49,27 @@ func TestProjection_TimestampIndependent(t *testing.T) {
 // "#12 Fix bug" projects to the SAME hash as the prefix-free forge title
 // "Fix bug". A raw-block-title projection would make ctxH != forgeH forever.
 func TestProjection_PrefixStripped(t *testing.T) {
-	forgeH, _, _ := ForgeIssueHash(IssueRemote{Number: 12, Title: "Fix bug", Body: "x", State: "open"})
+	_, forgeH, _, _ := ForgeIssueBase(IssueRemote{Number: 12, Title: "Fix bug", Body: "x", State: "open"})
 	b := &store.Block{
 		Title: "#12 Fix bug", Content: "x", WorkflowStatus: "backlog",
 		Metadata: map[string]any{"forge_state": "open"},
 	}
-	ctxH := CtxIssueHash(b, []string{"done"}, true)
+	_, ctxH := CtxIssueBase(b, []string{"done"}, true)
 	if ctxH != forgeH {
 		t.Fatalf("prefix not stripped ⇒ drift: ctxH=%s forgeH=%s", ctxH, forgeH)
 	}
 	// The local draft prefix "#L7 " must strip too.
 	b.Title = "#L7 Fix bug"
-	if got := CtxIssueHash(b, []string{"done"}, true); got != forgeH {
+	if _, got := CtxIssueBase(b, []string{"done"}, true); got != forgeH {
 		t.Fatalf("local #L prefix not stripped: %s != %s", got, forgeH)
 	}
 }
 
 // TestProjection_LabelsAssigneesSorted: set order does not change the hash.
 func TestProjection_LabelsAssigneesSorted(t *testing.T) {
-	h1, _, _ := ForgeIssueHash(IssueRemote{Number: 1, Title: "T", State: "open",
+	_, h1, _, _ := ForgeIssueBase(IssueRemote{Number: 1, Title: "T", State: "open",
 		Labels: []string{"b", "a"}, Assignees: []string{"y", "x"}})
-	h2, _, _ := ForgeIssueHash(IssueRemote{Number: 1, Title: "T", State: "open",
+	_, h2, _, _ := ForgeIssueBase(IssueRemote{Number: 1, Title: "T", State: "open",
 		Labels: []string{"a", "b"}, Assignees: []string{"x", "y"}})
 	if h1 != h2 {
 		t.Fatalf("label/assignee order changed the hash: %s != %s", h1, h2)
@@ -62,10 +80,10 @@ func TestProjection_LabelsAssigneesSorted(t *testing.T) {
 // the ctx state comes from metadata.forge_state — so a freshly-pulled block still
 // projects to its forge state (§4.5.4 fail-safe), matching forgeH.
 func TestProjection_StateFallback(t *testing.T) {
-	forgeH, _, _ := ForgeIssueHash(IssueRemote{Number: 3, Title: "T", Body: "B", State: "closed"})
+	_, forgeH, _, _ := ForgeIssueBase(IssueRemote{Number: 3, Title: "T", Body: "B", State: "closed"})
 	b := &store.Block{Title: "#3 T", Content: "B", WorkflowStatus: "",
 		Metadata: map[string]any{"forge_state": "closed"}}
-	if got := CtxIssueHash(b, nil, false); got != forgeH {
+	if _, got := CtxIssueBase(b, nil, false); got != forgeH {
 		t.Fatalf("fallback state projection mismatch: %s != %s", got, forgeH)
 	}
 }
@@ -73,14 +91,14 @@ func TestProjection_StateFallback(t *testing.T) {
 // TestProjection_TerminalMeansClosed: a terminal workflow_status projects to
 // "closed", a non-terminal to "open" (§4.5.4 binary forge state).
 func TestProjection_TerminalMeansClosed(t *testing.T) {
-	closedH, _, _ := ForgeIssueHash(IssueRemote{Number: 4, Title: "T", State: "closed"})
-	openH, _, _ := ForgeIssueHash(IssueRemote{Number: 4, Title: "T", State: "open"})
+	_, closedH, _, _ := ForgeIssueBase(IssueRemote{Number: 4, Title: "T", State: "closed"})
+	_, openH, _, _ := ForgeIssueBase(IssueRemote{Number: 4, Title: "T", State: "open"})
 	done := &store.Block{Title: "#4 T", WorkflowStatus: "done", Metadata: map[string]any{"forge_state": "open"}}
-	if got := CtxIssueHash(done, []string{"done"}, true); got != closedH {
+	if _, got := CtxIssueBase(done, []string{"done"}, true); got != closedH {
 		t.Fatalf("terminal status did not project to closed: %s != %s", got, closedH)
 	}
 	prog := &store.Block{Title: "#4 T", WorkflowStatus: "in-progress", Metadata: map[string]any{"forge_state": "closed"}}
-	if got := CtxIssueHash(prog, []string{"done"}, true); got != openH {
+	if _, got := CtxIssueBase(prog, []string{"done"}, true); got != openH {
 		t.Fatalf("non-terminal status did not project to open: %s != %s", got, openH)
 	}
 }

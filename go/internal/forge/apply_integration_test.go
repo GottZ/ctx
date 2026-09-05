@@ -77,11 +77,16 @@ func TestApply_PullCreateAndGolden(t *testing.T) {
 	if b.WorkflowStatus != "backlog" {
 		t.Fatalf("workflow_status = %q, want backlog (open→backlog)", b.WorkflowStatus)
 	}
-	forgeH, _, _ := ForgeIssueHash(iss)
+	// These re-project with the SAME generation the applier used (*IssueBase), so
+	// they pin the WIRING — that the mapping row carries the hash of this issue and
+	// that the written block re-projects onto it. The shape of the projection is
+	// pinned separately by TestProjection_IssueFieldCount (projection_test.go);
+	// do not re-introduce a second, hash-only generation as an oracle here.
+	_, forgeH, _, _ := ForgeIssueBase(iss)
 	if base != forgeH {
 		t.Fatalf("base %s != forgeH %s", base, forgeH)
 	}
-	ctxH := CtxIssueHash(b, []string{"done"}, true)
+	_, ctxH := CtxIssueBase(b, []string{"done"}, true)
 	if ctxH != base {
 		t.Fatalf("GOLDEN violated: ctxH %s != base %s", ctxH, base)
 	}
@@ -145,7 +150,7 @@ func TestApply_ForgeAhead(t *testing.T) {
 	if b.Title != "#1 New title" || b.WorkflowStatus != "done" {
 		t.Fatalf("block not pulled: title=%q status=%q", b.Title, b.WorkflowStatus)
 	}
-	forgeH, _, _ := ForgeIssueHash(iss2)
+	_, forgeH, _, _ := ForgeIssueBase(iss2)
 	if base != forgeH {
 		t.Fatalf("base not advanced to forgeH: %s != %s", base, forgeH)
 	}
@@ -215,7 +220,7 @@ func TestApply_Converged(t *testing.T) {
 		t.Fatalf("converged wrote the block: %v → %v (should advance base only)", before.UpdatedAt, after.UpdatedAt)
 	}
 	base, _, _, _ := readMapping(t, pool, proj.ID, "issue", 1)
-	ctxH := CtxIssueHash(after, []string{"done"}, true)
+	_, ctxH := CtxIssueBase(after, []string{"done"}, true)
 	if base != ctxH {
 		t.Fatalf("converged did not advance base to ctxH: %s != %s", base, ctxH)
 	}
@@ -378,7 +383,7 @@ func TestApply_FallbackNoRegistry(t *testing.T) {
 	if fs, _ := b.Metadata["forge_state"].(string); fs != "closed" {
 		t.Fatalf("metadata.forge_state = %q, want closed", fs)
 	}
-	if ctxH := CtxIssueHash(b, nil, false); ctxH != base {
+	if _, ctxH := CtxIssueBase(b, nil, false); ctxH != base {
 		t.Fatalf("fallback golden violated: ctxH %s != base %s", ctxH, base)
 	}
 }

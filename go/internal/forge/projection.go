@@ -75,48 +75,10 @@ func issueProjectionJSON(p issueProjection) (json.RawMessage, string) {
 	return raw, hex.EncodeToString(sum[:])
 }
 
-func hashIssueProjection(p issueProjection) string {
-	_, h := issueProjectionJSON(p)
-	return h
-}
-
 func commentProjectionJSON(body string) (json.RawMessage, string) {
 	raw, _ := json.Marshal(commentProjection{Body: body})
 	sum := sha256.Sum256(raw)
 	return raw, hex.EncodeToString(sum[:])
-}
-
-// ForgeIssueHash builds forge_hash from a fetched IssueRemote and returns the
-// capped body (+truncated flag) so the caller stores EXACTLY the bytes that were
-// hashed (§5.5 truncation runs before the hash, else a >50 KB issue drifts).
-func ForgeIssueHash(iss IssueRemote) (hash, cappedBody string, truncated bool) {
-	cappedBody, truncated = store.CapForgeBody(iss.Body)
-	hash = hashIssueProjection(issueProjection{
-		Title:     iss.Title,
-		Body:      cappedBody,
-		State:     iss.State,
-		Labels:    iss.Labels,
-		Assignees: iss.Assignees,
-		Milestone: iss.Milestone,
-	})
-	return hash, cappedBody, truncated
-}
-
-// CtxIssueHash builds ctx_hash from a stored issue block. terminalSet is the
-// type's terminal status set and registryOK reports whether the registry resolved
-// the issue workflow — together they pick the state-derivation rule (see the
-// package doc). Title is prefix-stripped; body is (defensively) re-capped so a
-// block that predates the cap still projects to the capped bytes.
-func CtxIssueHash(b *store.Block, terminalSet []string, registryOK bool) string {
-	body, _ := store.CapForgeBody(b.Content)
-	return hashIssueProjection(issueProjection{
-		Title:     stripIssuePrefix(b.Title),
-		Body:      body,
-		State:     ctxForgeState(b, terminalSet, registryOK),
-		Labels:    metaStrings(b.Metadata, "labels"),
-		Assignees: metaStrings(b.Metadata, "assignees"),
-		Milestone: metaString(b.Metadata, "milestone"),
-	})
 }
 
 // ── base-field snapshots (Welle I-H push field-diff, §4.5.2) ─────────────────
@@ -129,7 +91,9 @@ func CtxIssueHash(b *store.Block, terminalSet []string, registryOK bool) string 
 // base_hash by construction. issueBase/commentBase parse a stored snapshot back.
 
 // ForgeIssueBase returns the forge issue's canonical field snapshot + hash (base
-// after a pull) alongside the capped body/truncated flag ForgeIssueHash reports.
+// after a pull) alongside the capped body (+truncated flag), so the caller stores
+// EXACTLY the bytes that were hashed (§5.5: the cap runs BEFORE the hash, else a
+// >50 KB issue drifts).
 func ForgeIssueBase(iss IssueRemote) (fields []byte, hash, cappedBody string, truncated bool) {
 	cappedBody, truncated = store.CapForgeBody(iss.Body)
 	raw, h := issueProjectionJSON(issueProjection{
@@ -140,7 +104,11 @@ func ForgeIssueBase(iss IssueRemote) (fields []byte, hash, cappedBody string, tr
 }
 
 // CtxIssueBase returns the stored issue block's canonical field snapshot + hash
-// (base after a push/convergence). Same state-derivation rule as CtxIssueHash.
+// (base after a push/convergence). terminalSet is the type's terminal status set
+// and registryOK reports whether the registry resolved the issue workflow —
+// together they pick the state-derivation rule (see the package doc). Title is
+// prefix-stripped; body is (defensively) re-capped so a block that predates the
+// cap still projects to the capped bytes.
 func CtxIssueBase(b *store.Block, terminalSet []string, registryOK bool) (fields []byte, hash string) {
 	body, _ := store.CapForgeBody(b.Content)
 	return issueProjectionJSON(issueProjection{
