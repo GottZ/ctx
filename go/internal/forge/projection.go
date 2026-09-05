@@ -34,20 +34,13 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 )
 
-// issuePrefixRe / commentPrefixRe strip the ctx number prefix before hashing
-// (§3.6). Issues: "#L?<n> "; comments: "#<n>.cL?<n> ". "#L?" matches both the
-// forge "#12" and the local-draft "#L12" forms.
-var (
-	issuePrefixRe   = regexp.MustCompile(`^#L?\d+\s`)
-	commentPrefixRe = regexp.MustCompile(`^#\d+\.cL?\d+\s`)
-)
+// issuePrefixRe strips the ctx number prefix from an issue title before hashing
+// (§3.6): "#L?<n> " — "#L?" matches both the forge "#12" and the local-draft
+// "#L12" forms.
+var issuePrefixRe = regexp.MustCompile(`^#L?\d+\s`)
 
 func stripIssuePrefix(title string) string {
 	return issuePrefixRe.ReplaceAllString(title, "")
-}
-
-func stripCommentPrefix(title string) string {
-	return commentPrefixRe.ReplaceAllString(title, "")
 }
 
 // issueProjection is the ordered, canonical shape hashed for an issue. Struct
@@ -93,11 +86,6 @@ func commentProjectionJSON(body string) (json.RawMessage, string) {
 	return raw, hex.EncodeToString(sum[:])
 }
 
-func hashCommentProjection(body string) string {
-	_, h := commentProjectionJSON(body)
-	return h
-}
-
 // ForgeIssueHash builds forge_hash from a fetched IssueRemote and returns the
 // capped body (+truncated flag) so the caller stores EXACTLY the bytes that were
 // hashed (§5.5 truncation runs before the hash, else a >50 KB issue drifts).
@@ -112,13 +100,6 @@ func ForgeIssueHash(iss IssueRemote) (hash, cappedBody string, truncated bool) {
 		Milestone: iss.Milestone,
 	})
 	return hash, cappedBody, truncated
-}
-
-// ForgeCommentHash builds forge_hash for a comment (projection {body}) and
-// returns the capped body it hashed.
-func ForgeCommentHash(body string) (hash, cappedBody string, truncated bool) {
-	cappedBody, truncated = store.CapForgeBody(body)
-	return hashCommentProjection(cappedBody), cappedBody, truncated
 }
 
 // CtxIssueHash builds ctx_hash from a stored issue block. terminalSet is the
@@ -136,12 +117,6 @@ func CtxIssueHash(b *store.Block, terminalSet []string, registryOK bool) string 
 		Assignees: metaStrings(b.Metadata, "assignees"),
 		Milestone: metaString(b.Metadata, "milestone"),
 	})
-}
-
-// CtxCommentHash builds ctx_hash for a stored comment block ({body}).
-func CtxCommentHash(b *store.Block) string {
-	body, _ := store.CapForgeBody(b.Content)
-	return hashCommentProjection(body)
 }
 
 // ── base-field snapshots (Welle I-H push field-diff, §4.5.2) ─────────────────
@@ -190,23 +165,12 @@ func CtxCommentBase(b *store.Block) (fields []byte, hash string) {
 	return commentProjectionJSON(body)
 }
 
-// parseIssueProjection / parseCommentProjection decode a stored base-field
+// parseIssueProjection decodes a stored base-field
 // snapshot; a missing/garbled snapshot yields ok=false (the push then falls back
 // to a full-projection push, and refuses to push a truncated body it cannot prove
 // unchanged — the fail-closed side of §4.5.2).
 func parseIssueProjection(fields []byte) (issueProjection, bool) {
 	var p issueProjection
-	if len(fields) == 0 {
-		return p, false
-	}
-	if err := json.Unmarshal(fields, &p); err != nil {
-		return p, false
-	}
-	return p, true
-}
-
-func parseCommentProjection(fields []byte) (commentProjection, bool) {
-	var p commentProjection
 	if len(fields) == 0 {
 		return p, false
 	}
