@@ -17,8 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -179,18 +181,12 @@ func (m *SyncManager) SetToken(ctx context.Context, project store.ProjectRow, pl
 	if err != nil {
 		return fmt.Errorf("seal token: %w", err)
 	}
-	tx, err := m.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := store.PutSecret(ctx, tx, name, project.Scope, nonce, ct, 1, nzp(project.CreatedBy)); err != nil {
-		return fmt.Errorf("persist token: %w", err)
-	}
-	if err := store.SetProjectToken(ctx, tx, project.ID, name); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return pgxdb.Write(ctx, m.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		if _, err := store.PutSecret(ctx, tx, name, project.Scope, nonce, ct, 1, nzp(project.CreatedBy)); err != nil {
+			return fmt.Errorf("persist token: %w", err)
+		}
+		return store.SetProjectToken(ctx, tx, project.ID, name)
+	})
 }
 
 func nzp(s *string) *string {

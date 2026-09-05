@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -191,26 +192,19 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
 	writable []string, iss IssueRemote, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	b, err := store.PullCreateIssueBlock(ctx, tx, project.Scope, content)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	if err := store.InsertSyncMap(ctx, tx, store.SyncMap{
-		ProjectID: project.ID, EntityKind: entityKindIssue, ForgeID: iss.Number,
-		BlockID: b.ID, BaseHash: forgeH, BaseFields: forgeFields, ForgeUpdatedAt: fUpdated,
+	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		b, err := store.PullCreateIssueBlock(ctx, tx, project.Scope, content)
+		if err != nil {
+			return err
+		}
+		if err := store.InsertSyncMap(ctx, tx, store.SyncMap{
+			ProjectID: project.ID, EntityKind: entityKindIssue, ForgeID: iss.Number,
+			BlockID: b.ID, BaseHash: forgeH, BaseFields: forgeFields, ForgeUpdatedAt: fUpdated,
+		}); err != nil {
+			return err
+		}
+		return a.applyReferences(ctx, tx, project, pol, writable, b.ID, iss.Number, iss.Body)
 	}); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := a.applyReferences(ctx, tx, project, pol, writable, b.ID, iss.Number, iss.Body); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return ApplyResult{}, err
 	}
 	return ApplyResult{Applied: 1}, nil
@@ -219,22 +213,15 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
 	writable []string, iss IssueRemote, blockID string, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if _, err := store.PullUpdateIssueBlock(ctx, tx, blockID, content); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, forgeFields, fUpdated); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := a.applyReferences(ctx, tx, project, pol, writable, blockID, iss.Number, iss.Body); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		if _, err := store.PullUpdateIssueBlock(ctx, tx, blockID, content); err != nil {
+			return err
+		}
+		if err := store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, forgeFields, fUpdated); err != nil {
+			return err
+		}
+		return a.applyReferences(ctx, tx, project, pol, writable, blockID, iss.Number, iss.Body)
+	}); err != nil {
 		return ApplyResult{}, err
 	}
 	return ApplyResult{Applied: 1}, nil
@@ -243,27 +230,15 @@ func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow,
 // txBaseUpdate rewrites base_hash + the base-field snapshot alone (convergence)
 // — 0 block writes.
 func (a *Applier) txBaseUpdate(ctx context.Context, blockID, baseHash string, baseFields json.RawMessage, fUpdated *time.Time) error {
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.UpdateSyncMapBase(ctx, tx, blockID, baseHash, baseFields, fUpdated); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		return store.UpdateSyncMapBase(ctx, tx, blockID, baseHash, baseFields, fUpdated)
+	})
 }
 
 func (a *Applier) flagConflict(ctx context.Context, blockID string) (ApplyResult, error) {
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.FlagSyncMapConflict(ctx, tx, blockID, a.clock()); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		return store.FlagSyncMapConflict(ctx, tx, blockID, a.clock())
+	}); err != nil {
 		return ApplyResult{}, err
 	}
 	return ApplyResult{Conflicts: 1}, nil
@@ -357,44 +332,31 @@ func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, wr
 func (a *Applier) pullCreateComment(ctx context.Context, project store.ProjectRow, c CommentRemote,
 	parentBlockID, cappedBody, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time, writable []string) (ApplyResult, error) {
 
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	b, err := store.InsertCommentBlock(ctx, tx, parentBlockID, store.CommentFields{
-		Content:  cappedBody,
-		Metadata: map[string]any{"forge_comment_id": c.ID},
-	}, writable)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	if err := store.InsertSyncMap(ctx, tx, store.SyncMap{
-		ProjectID: project.ID, EntityKind: entityKindComment, ForgeID: c.ID,
-		BlockID: b.ID, BaseHash: forgeH, BaseFields: forgeFields, ForgeUpdatedAt: fUpdated,
+	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		b, err := store.InsertCommentBlock(ctx, tx, parentBlockID, store.CommentFields{
+			Content:  cappedBody,
+			Metadata: map[string]any{"forge_comment_id": c.ID},
+		}, writable)
+		if err != nil {
+			return err
+		}
+		return store.InsertSyncMap(ctx, tx, store.SyncMap{
+			ProjectID: project.ID, EntityKind: entityKindComment, ForgeID: c.ID,
+			BlockID: b.ID, BaseHash: forgeH, BaseFields: forgeFields, ForgeUpdatedAt: fUpdated,
+		})
 	}); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return ApplyResult{}, err
 	}
 	return ApplyResult{Applied: 1}, nil
 }
 
 func (a *Applier) pullUpdateComment(ctx context.Context, blockID, body, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := store.PullUpdateCommentBlock(ctx, tx, blockID, body); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, forgeFields, fUpdated); err != nil {
-		return ApplyResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		if _, err := store.PullUpdateCommentBlock(ctx, tx, blockID, body); err != nil {
+			return err
+		}
+		return store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, forgeFields, fUpdated)
+	}); err != nil {
 		return ApplyResult{}, err
 	}
 	return ApplyResult{Applied: 1}, nil
