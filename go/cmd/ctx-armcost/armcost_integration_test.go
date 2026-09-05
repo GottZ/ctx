@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -378,11 +379,11 @@ func TestInteractiveP95Vergleich(t *testing.T) {
 }
 
 // TestReadOnlyTxWeistSchreibenAb belegt den SELECT-only-Perimeter dort, wo er
-// wirkt: in der Datenbank. Jede Abfrage des Werkzeugs läuft durch readOnly.
+// wirkt: in der Datenbank. Jede Abfrage des Werkzeugs läuft durch pgxdb.Read.
 func TestReadOnlyTxWeistSchreibenAb(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
-	err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		_, e := tx.Exec(ctx, "CREATE TABLE armcost_write_probe (x int)")
 		return e
 	})

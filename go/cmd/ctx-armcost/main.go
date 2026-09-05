@@ -41,9 +41,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
@@ -187,20 +184,4 @@ func writeReportFile(path string, rep Report) error {
 		return err
 	}
 	return f.Close()
-}
-
-// readOnly führt fn in einer kurzen READ ONLY-Transaktion aus — dieselbe Form
-// wie llmlog.Export sie fährt (dort unexportiert). Damit ist ein Schreibpfad
-// dieses Werkzeugs by construction unmöglich: die Datenbank selbst weist ihn
-// mit SQLSTATE 25006 ab.
-func readOnly(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := fn(tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
 }

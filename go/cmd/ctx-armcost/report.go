@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // occupancyExpr ist der Belegungs-Term aus design/05 §4.7 — die Währung des
@@ -165,7 +167,7 @@ func buildReport(ctx context.Context, pool *pgxpool.Pool, opts Options) (Report,
 	rep.GeneratedAt = time.Now().UTC()
 
 	var pin time.Time
-	if err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	if err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, pinUntilSQL, untilMargin).Scan(&pin)
 	}); err != nil {
 		return rep, fmt.Errorf("armcost: pin until: %w", err)
@@ -199,7 +201,7 @@ func buildReport(ctx context.Context, pool *pgxpool.Pool, opts Options) (Report,
 	}
 
 	var costRows int64
-	if err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	if err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, windowStatsSQL, since, until).Scan(&rep.CountGate, &costRows)
 	}); err != nil {
 		return rep, fmt.Errorf("armcost: window stats: %w", err)
@@ -234,7 +236,7 @@ func buildReport(ctx context.Context, pool *pgxpool.Pool, opts Options) (Report,
 // Gruppen absteigend nach Belegung (Kosten-Sicht), Gleichstand nach Namen.
 func queryBuckets(ctx context.Context, pool *pgxpool.Pool, q string, since, until time.Time) ([]Bucket, error) {
 	var out []Bucket
-	err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, q, since, until)
 		if err != nil {
 			return err
@@ -273,7 +275,7 @@ func queryInteractive(ctx context.Context, pool *pgxpool.Pool, since, until time
 	var ip InteractiveP95
 	ip.Threshold = abortThreshold
 	ip.PriorSince = since.Add(-until.Sub(since))
-	err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, interactiveP95SQL, since, until).Scan(&ip.WindowN, &ip.WindowMs); err != nil {
 			return err
 		}

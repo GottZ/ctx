@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/topiclabel"
 )
 
@@ -262,7 +263,7 @@ func buildPerTopic(ctx context.Context, pool *pgxpool.Pool, arm string, until ti
 	pt := PerTopicReport{Arm: arm, Until: until, JoinRule: joinRuleText, ExhaustedAttempts: exhaustedAttempts}
 
 	var first *time.Time
-	if err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	if err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, firstLivingTopicSQL).Scan(&first)
 	}); err != nil {
 		return pt, fmt.Errorf("armcost: erstes lebendes Topic: %w", err)
@@ -284,7 +285,7 @@ func buildPerTopic(ctx context.Context, pool *pgxpool.Pool, arm string, until ti
 	}
 	pt.Topics = topics
 
-	if err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	if err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		a := &pt.Assignment
 		return tx.QueryRow(ctx, perTopicStatsSQL, arm, pt.Since, pt.Until).Scan(
 			&a.ArmRows, &a.RowsWithoutBlockIDs, &a.RowsBeforeWindow,
@@ -304,7 +305,7 @@ func buildPerTopic(ctx context.Context, pool *pgxpool.Pool, arm string, until ti
 // fahren können, statt sie nachzubauen — Muster queryBuckets (M-W7).
 func queryTopics(ctx context.Context, pool *pgxpool.Pool, q, arm string, since, until time.Time) ([]TopicCalls, error) {
 	var out []TopicCalls
-	err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, q, arm, since, until)
 		if err != nil {
 			return err

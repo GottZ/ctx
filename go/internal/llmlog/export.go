@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // ExportOptions steuert einen SELECT-only-Bulk-Export von context_llm_log
@@ -277,7 +279,7 @@ func Export(ctx context.Context, pool *pgxpool.Pool, w io.Writer, opts ExportOpt
 		}
 	}
 
-	if err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	if err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, "SELECT count(*) FROM context_llm_log WHERE "+where, args...).Scan(&sum.CountGate)
 	}); err != nil {
 		return sum, fmt.Errorf("llmlog export: count gate: %w", err)
@@ -291,26 +293,13 @@ func Export(ctx context.Context, pool *pgxpool.Pool, w io.Writer, opts ExportOpt
 	return sum, nil
 }
 
-// readOnly führt fn in einer kurzen READ ONLY-Transaktion aus.
-func readOnly(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := fn(tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
 // exportPage streamt eine Keyset-Seite in den Writer und zählt. Rückgabe =
 // gelesene Zeilen der Seite (< BatchSize ⇒ letzte Seite).
 func exportPage(ctx context.Context, pool *pgxpool.Pool, cw io.Writer, q string, args []any,
 	strict bool, sum *ExportSummary, lastTS *time.Time, lastID *string,
 ) (int, error) {
 	n := 0
-	err := readOnly(ctx, pool, func(tx pgx.Tx) error {
+	err := pgxdb.Read(ctx, pool, pgxdb.Stages{Begin: "begin"}, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, q, args...)
 		if err != nil {
 			return fmt.Errorf("llmlog export: page: %w", err)
