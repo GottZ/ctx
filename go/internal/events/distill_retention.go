@@ -67,7 +67,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
 	"time"
 )
 
@@ -83,11 +82,7 @@ import (
 // that age on different clocks, and a journal purge that fails must not cost
 // the ledger its sweep — the ledger is the half that grows without bound.
 func (s *Scheduler) runDistillRetention(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in distill retention", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("distill retention")
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: distiller retention is a server-global janitor policy over two process-wide bookkeeping tables, not tenant-scoped.
 	runDays, seenDays := cfg.Distill.RetentionDays, cfg.Distill.SeenRetentionDays
 

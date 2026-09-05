@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"runtime/debug"
 	"time"
 
 	"github.com/GottZ/ctx/internal/config"
@@ -39,11 +38,7 @@ var (
 // (serving begins only after the swap — Current()==nil keeps consumers on SQL
 // until then, so the boot is never blocked), then rebuilds on the §4.3 condition.
 func (s *Scheduler) runGraphCacheRebuild(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in graph cache rebuild", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("graph cache rebuild")
 	if s.graphCache == nil {
 		return // pre-wire boot / direct-struct tests: no manager, nothing to run.
 	}

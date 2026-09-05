@@ -21,7 +21,6 @@ package events
 import (
 	"context"
 	"log/slog"
-	"runtime/debug"
 	"time"
 
 	"github.com/GottZ/ctx/internal/topiclabel"
@@ -54,11 +53,7 @@ func (s *Scheduler) LabelingState() (topiclabel.Stats, time.Time, bool) {
 
 // runTopicLabeling is the arm goroutine.
 func (s *Scheduler) runTopicLabeling(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in topic labeling", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("topic labeling")
 
 	var tenantCursor uint64
 	for {

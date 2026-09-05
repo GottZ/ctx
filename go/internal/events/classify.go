@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -98,15 +97,13 @@ func (s *Scheduler) CredentialsClassifyStatus() ClassifyStatus {
 // mid-run.
 func (s *Scheduler) runCredentialsClassify(dryRun bool, limit int) {
 	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in credentials classify", "error", r, "stack", string(debug.Stack()))
-		}
 		s.credClassify.mu.Lock()
 		s.credClassify.running = false
 		s.credClassify.status.Running = false
 		s.credClassify.status.FinishedAt = time.Now()
 		s.credClassify.mu.Unlock()
 	}()
+	defer guardPanic("credentials classify")
 
 	ctx := s.lifecycleCtx()
 

@@ -25,7 +25,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -53,11 +52,7 @@ const recallLatestScanLimit = 64
 // first cheap run lands one interval after start, the first expensive run at
 // the next off-peak boundary.
 func (s *Scheduler) runRecallCheck(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in recall check", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("recall check")
 
 	var expensiveCursor uint64
 	rc := s.cfg.Snapshot().RecallCheck //nolint:forbidigo // MT 06 background: recall_check is global-only (one shared HNSW index + one buffer pool, §3.2) — never tenant-scoped.
@@ -132,11 +127,7 @@ func nextHourBoundary(now time.Time, hour int) time.Time {
 // disabled, unwired, or deferred before start). Testable in isolation — the
 // goroutine above only supplies cadence.
 func (s *Scheduler) recallCheckOnce(ctx context.Context, includeExpensive bool, cursor *uint64, demand func() int) bool {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in recall check run", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("recall check run")
 
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: recall_check is global-only (one shared physical resource, §3.2).
 	rc := cfg.RecallCheck
@@ -350,18 +341,10 @@ func unitBytes(unit string) int64 {
 // the 8th line of the 6h janitor bundle (§3.3). retention=0 is a no-op (kept
 // forever). Same failure discipline as its neighbours: log, never fatal.
 func (s *Scheduler) runRecallRetention(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in recall retention", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("recall retention")
 	days := s.cfg.Snapshot().RecallCheck.RetentionDays //nolint:forbidigo // MT 06 background: recall retention is a server-global janitor policy over a process-wide table, not tenant-scoped.
-	deleted, err := recall.DeleteOlderThan(ctx, s.pool, days)
-	if err != nil {
-		slog.Warn("scheduler: recall retention failed", "error", err)
-		return
-	}
-	if deleted > 0 {
-		slog.Info("scheduler: recall runs evicted", "rows", deleted, "retention_days", days)
-	}
+	janitorArm(ctx, "recall retention", "scheduler: recall runs evicted", "rows",
+		func(ctx context.Context) (int64, error) {
+			return recall.DeleteOlderThan(ctx, s.pool, days)
+		}, "retention_days", days)
 }

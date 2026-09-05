@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
-	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -252,11 +251,7 @@ func (s *Scheduler) maybeStartEmbedVerify(ctx context.Context, mig *embedmigrati
 	}
 	run := func() {
 		defer s.embedVerifyActive.Store(false)
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("scheduler: panic in embed verify", "error", r, "stack", string(debug.Stack()))
-			}
-		}()
+		defer guardPanic("embed verify")
 		if err := s.runEmbedVerify(ctx, mig, cfg); err != nil {
 			slog.Error("scheduler: embed verify run failed — no verdict stored, next cycle retries",
 				"migration_id", mig.ID, "error", err)

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -881,11 +880,7 @@ const dailySynthesisHour = 3
 // boundary, then sleeps a fixed 24h. On error: log + retry next day (no
 // in-day retry to avoid double-summary on transient Ollama hiccups).
 func (s *Scheduler) runDailySynthesis(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in daily synthesis", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("daily synthesis")
 
 	for {
 		wait := timeUntilNextDailySynthesis(time.Now())
@@ -966,11 +961,7 @@ func timeUntilNextDailySynthesis(now time.Time) time.Duration {
 // build runs only when the tables were never populated (fresh deploy), not on
 // every restart.
 func (s *Scheduler) runOverviewRebuild(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in overview rebuild", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("overview rebuild")
 
 	var tenantCursor uint64 // round-robin position over the tenant list (B-W1 foundation)
 
@@ -1611,19 +1602,11 @@ func (s *Scheduler) purgeOverviewRuns(ctx context.Context, retention time.Durati
 // above embedCacheMaxRows). Runs every embedCacheEvictInterval; failures log but
 // never propagate — cache is an optimisation, not load-bearing.
 func (s *Scheduler) runEmbedCacheEviction(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in embed cache eviction", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
-	removed, err := embedcache.Evict(ctx, s.pool, embedCacheTTLDays, embedCacheMaxRows)
-	if err != nil {
-		slog.Warn("scheduler: embed cache eviction failed", "error", err)
-		return
-	}
-	if removed > 0 {
-		slog.Info("scheduler: embed cache evicted", "rows", removed)
-	}
+	defer guardPanic("embed cache eviction")
+	janitorArm(ctx, "embed cache eviction", "scheduler: embed cache evicted", "rows",
+		func(ctx context.Context) (int64, error) {
+			return embedcache.Evict(ctx, s.pool, embedCacheTTLDays, embedCacheMaxRows)
+		})
 }
 
 // runSixHourJanitor is the housekeeping bundle that shares the embed-cache
@@ -1652,20 +1635,12 @@ func (s *Scheduler) runSixHourJanitor(ctx context.Context) {
 // survives). Shares the embed-cache janitor tick. retention=0 makes
 // EvictBodies a no-op (bodies kept forever).
 func (s *Scheduler) runLLMLogRetention(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in llmlog retention", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("llmlog retention")
 	days := s.cfg.Snapshot().Scheduler.LLMLogRetentionDays //nolint:forbidigo // MT 06 background: llmlog retention is a server-global janitor policy over a process-wide table, not tenant-scoped.
-	nulled, err := llmlog.EvictBodies(ctx, s.pool, days)
-	if err != nil {
-		slog.Warn("scheduler: llmlog retention failed", "error", err)
-		return
-	}
-	if nulled > 0 {
-		slog.Info("scheduler: llmlog bodies evicted", "rows", nulled, "retention_days", days)
-	}
+	janitorArm(ctx, "llmlog retention", "scheduler: llmlog bodies evicted", "rows",
+		func(ctx context.Context) (int64, error) {
+			return llmlog.EvictBodies(ctx, s.pool, days)
+		}, "retention_days", days)
 }
 
 // runWebChatRetention deletes web-chat sessions whose updated_at is older than
@@ -1673,21 +1648,13 @@ func (s *Scheduler) runLLMLogRetention(ctx context.Context) {
 // tick. retention=0 makes DeleteExpiredSessions a no-op (sessions kept forever
 // — the shipped default; the operator opts in to retention, 06 §3.1).
 func (s *Scheduler) runWebChatRetention(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in webchat retention", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("webchat retention")
 	hours := float64(s.cfg.Snapshot().WebChat.SessionRetention) //nolint:forbidigo // MT 06 background: webchat session retention is a server-global janitor policy over a process-wide table, not tenant-scoped.
 	ttl := time.Duration(hours * float64(time.Hour))
-	deleted, err := store.DeleteExpiredSessions(ctx, s.pool, ttl)
-	if err != nil {
-		slog.Warn("scheduler: webchat retention failed", "error", err)
-		return
-	}
-	if deleted > 0 {
-		slog.Info("scheduler: webchat sessions deleted", "rows", deleted, "retention_hours", hours)
-	}
+	janitorArm(ctx, "webchat retention", "scheduler: webchat sessions deleted", "rows",
+		func(ctx context.Context) (int64, error) {
+			return store.DeleteExpiredSessions(ctx, s.pool, ttl)
+		}, "retention_hours", hours)
 }
 
 // runOAuthCodeGC sweeps expired OAuth authorization codes (098, design 03 §4;
@@ -1695,19 +1662,11 @@ func (s *Scheduler) runWebChatRetention(ctx context.Context) {
 // sweep — TakeOAuthCode rejects stale codes regardless; the GC only keeps the
 // table from accumulating dead 5-minute rows.
 func (s *Scheduler) runOAuthCodeGC(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in oauth code gc", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
-	deleted, err := store.EvictExpiredOAuthCodes(ctx, s.pool)
-	if err != nil {
-		slog.Warn("scheduler: oauth code gc failed", "error", err)
-		return
-	}
-	if deleted > 0 {
-		slog.Info("scheduler: oauth codes evicted", "rows", deleted)
-	}
+	defer guardPanic("oauth code gc")
+	janitorArm(ctx, "oauth code gc", "scheduler: oauth codes evicted", "rows",
+		func(ctx context.Context) (int64, error) {
+			return store.EvictExpiredOAuthCodes(ctx, s.pool)
+		})
 }
 
 // runOAuthTokenGC sweeps opaque-token rows 7 days past expiry (099, design 03
@@ -1715,19 +1674,11 @@ func (s *Scheduler) runOAuthCodeGC(ctx context.Context) {
 // sweep — LookupAccessToken rejects stale tokens regardless; the long grace
 // deliberately preserves expired refresh rows as S4 reuse-detection evidence.
 func (s *Scheduler) runOAuthTokenGC(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in oauth token gc", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
-	deleted, err := store.EvictExpiredOAuthTokens(ctx, s.pool)
-	if err != nil {
-		slog.Warn("scheduler: oauth token gc failed", "error", err)
-		return
-	}
-	if deleted > 0 {
-		slog.Info("scheduler: oauth tokens evicted", "rows", deleted)
-	}
+	defer guardPanic("oauth token gc")
+	janitorArm(ctx, "oauth token gc", "scheduler: oauth tokens evicted", "rows",
+		func(ctx context.Context) (int64, error) {
+			return store.EvictExpiredOAuthTokens(ctx, s.pool)
+		})
 }
 
 // runSSOStateGC sweeps expired SSO login states (101, design 04 §3.3; shares
@@ -1735,19 +1686,11 @@ func (s *Scheduler) runOAuthTokenGC(ctx context.Context) {
 // ConsumeSSOState checks expires_at itself; the GC only keeps abandoned
 // logins from accumulating dead rows.
 func (s *Scheduler) runSSOStateGC(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in sso state gc", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
-	deleted, err := store.EvictExpiredSSOStates(ctx, s.pool)
-	if err != nil {
-		slog.Warn("scheduler: sso state gc failed", "error", err)
-		return
-	}
-	if deleted > 0 {
-		slog.Info("scheduler: sso states evicted", "rows", deleted)
-	}
+	defer guardPanic("sso state gc")
+	janitorArm(ctx, "sso state gc", "scheduler: sso states evicted", "rows",
+		func(ctx context.Context) (int64, error) {
+			return store.EvictExpiredSSOStates(ctx, s.pool)
+		})
 }
 
 // runPendingWriteEviction drops aged context_pending_writes chunks
@@ -1756,30 +1699,18 @@ func (s *Scheduler) runSSOStateGC(ctx context.Context) {
 // retention=0 makes EvictPendingWrites a no-op (stages kept forever, D-E3:
 // eviction stays decoupled from the confirm_ttl expiry clock).
 func (s *Scheduler) runPendingWriteEviction(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in pending-write eviction", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("pending-write eviction")
 	hours := float64(s.cfg.Snapshot().Writes.ConfirmRetention) //nolint:forbidigo // MT 06 background: staging-store retention is a server-global janitor policy over a process-wide table, not tenant-scoped.
 	retention := time.Duration(hours * float64(time.Hour))
-	dropped, err := store.EvictPendingWrites(ctx, s.pool, retention)
-	if err != nil {
-		slog.Warn("scheduler: pending-write eviction failed", "error", err)
-		return
-	}
-	if dropped > 0 {
-		slog.Info("scheduler: pending-write chunks dropped", "chunks", dropped, "retention_hours", hours)
-	}
+	janitorArm(ctx, "pending-write eviction", "scheduler: pending-write chunks dropped", "chunks",
+		func(ctx context.Context) (int64, error) {
+			return store.EvictPendingWrites(ctx, s.pool, retention)
+		}, "retention_hours", hours)
 }
 
 // runGuard executes a guard batch, yielding if queries are active.
 func (s *Scheduler) runGuard(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in guard", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("guard")
 
 	// Demand interruption: wait if interactive demand is present.
 	if demand := s.interactiveDemand(); demand > 0 {
@@ -1960,11 +1891,7 @@ func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router, read
 	s.dreamWg.Add(1)
 	defer s.dreamWg.Done()
 
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in dream", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("dream")
 
 	// Dream gets its own context with the cycle timeout, independent of parent ctx.
 	// Register the cancel fn so SetDreamMode(Off) can abort in-flight work.
@@ -2019,11 +1946,7 @@ func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router, read
 
 // runDigest executes the digest, yielding if queries are active.
 func (s *Scheduler) runDigest(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in digest", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("digest")
 
 	// Demand interruption: wait if interactive demand is present.
 	if demand := s.interactiveDemand(); demand > 0 {

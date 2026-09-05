@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -141,11 +140,7 @@ var errMigrationServedModelMismatch = errors.New("embed-migrate: served backend 
 // scope-free (§5 Bruchpfad 9) — the migration is never a per-tenant
 // iteration.
 func (s *Scheduler) runEmbedMigration(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in embed migration", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("embed migration")
 
 	if demand := s.interactiveDemand(); demand > 0 {
 		slog.Debug("scheduler: embed migration deferred, interactive demand", "count", demand)

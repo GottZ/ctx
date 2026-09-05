@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -140,15 +139,13 @@ func (s *Scheduler) SensitivityAuditStatus() AuditStatus {
 // process. cfg snapshot per batch (§2.3).
 func (s *Scheduler) runSensitivityAudit(dryRun bool, limit int) {
 	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in sensitivity audit", "error", r, "stack", string(debug.Stack()))
-		}
 		s.audit.mu.Lock()
 		s.audit.running = false
 		s.audit.status.Running = false
 		s.audit.status.FinishedAt = time.Now()
 		s.audit.mu.Unlock()
 	}()
+	defer guardPanic("sensitivity audit")
 
 	ctx := s.lifecycleCtx()
 	slog.Info("scheduler: sensitivity audit started", "dry_run", dryRun, "limit", limit)

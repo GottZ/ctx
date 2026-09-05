@@ -36,7 +36,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -194,11 +193,7 @@ type distillSourceBuilder func(cfg *config.Config, scope string) (distillsource.
 // over a poll interval later hands them over too late — the follow-up query has
 // already been answered without them.
 func (s *Scheduler) runDistiller(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in distiller", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("distiller")
 
 	// BEFORE the first tick, and a correctness condition rather than hygiene
 	// (§4.5.5): the derivation excludes running rows, so an orphan left by a
@@ -466,11 +461,7 @@ func (s *Scheduler) distillStartupSweep(ctx context.Context) {
 // func in the gate suite. It reports whether the arm reached the per-session
 // work; every gate that stopped it earlier returns false.
 func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in distiller tick", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("distiller tick")
 
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: the distill.* group is global-only, see runDistiller.
 	d := cfg.Distill
@@ -813,12 +804,7 @@ func distillFanOut(ctx context.Context, workers int, chains [][]distillsource.Re
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("scheduler: panic in a distiller source worker",
-						"error", r, "stack", string(debug.Stack()))
-				}
-			}()
+			defer guardPanic("a distiller source worker")
 			drain()
 		}()
 	}

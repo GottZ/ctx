@@ -19,7 +19,6 @@ package events
 import (
 	"context"
 	"log/slog"
-	"runtime/debug"
 	"time"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -59,11 +58,7 @@ func (s *Scheduler) SetWebhookSyncTrigger(fn WebhookSyncTrigger) {
 // runWebhookInbox drains one page of pending deliveries and fires one sync per
 // distinct project. Inert (no drain) until a trigger is wired.
 func (s *Scheduler) runWebhookInbox(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in webhook inbox", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("webhook inbox")
 	s.mu.Lock()
 	fn := s.webhookSync
 	s.mu.Unlock()
@@ -115,19 +110,14 @@ func DrainWebhookInbox(ctx context.Context, pool *pgxpool.Pool, batch int, trigg
 // is a no-op (kept forever — operator opt-out). The DELETE rides idx_webhook_done
 // (design/03 §3.4). global-only, like the llmlog body-NULLing janitor.
 func (s *Scheduler) runWebhookRetention(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("scheduler: panic in webhook retention", "error", r, "stack", string(debug.Stack()))
-		}
-	}()
+	defer guardPanic("webhook retention")
 	hours := float64(s.cfg.Snapshot().Project.Webhook.Retention) //nolint:forbidigo // MT 06 background: webhook retention is a server-global janitor policy over a process-wide queue table, not tenant-scoped.
 	ttl := time.Duration(hours * float64(time.Hour))
-	evicted, err := store.EvictWebhookEvents(ctx, s.pool, ttl)
-	if err != nil {
-		slog.Warn("scheduler: webhook retention failed", "error", err)
-		return
-	}
-	if evicted > 0 {
-		slog.Info("scheduler: webhook events evicted", "rows", evicted, "retention_hours", hours)
-	}
+	janitorArm(ctx, "webhook retention", "scheduler: webhook events evicted", "rows",
+		func(ctx context.Context) (int64, error) {
+			// EvictWebhookEvents is the only one of the nine that counts in
+			// int; slog renders both widths identically.
+			evicted, err := store.EvictWebhookEvents(ctx, s.pool, ttl)
+			return int64(evicted), err
+		}, "retention_hours", hours)
 }
