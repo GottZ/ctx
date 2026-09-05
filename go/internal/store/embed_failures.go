@@ -130,12 +130,12 @@ func OversizeEstimateMessage(estimatedTokens, maxTokens int) string {
 //
 // The backoff itself is computed SERVER-SIDE (base * 2^(attempts-1), capped)
 // so a read-then-write race across concurrent pickers can never desync the
-// exponent from the persisted attempts count. class==EmbedFailureOversize
+// exponent from the persisted attempts count. An isInfinityClass match
 // short-circuits to next_attempt_at='infinity' regardless of attempts
 // (design/04 §4.4: a capped exponential backoff would still be "retry
 // forever in slow motion" for a block that cannot structurally succeed).
 func RecordEmbedFailure(ctx context.Context, q execQuerier, blockID string, class EmbedFailureClass, normalizedErr string, backoffBase, backoffCap time.Duration) error {
-	if class == EmbedFailureOversize {
+	if isInfinityClass(class) {
 		_, err := q.Exec(ctx,
 			`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
 			 VALUES ($1, NULL, 1, $2, $3, 'infinity')
