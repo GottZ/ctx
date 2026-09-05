@@ -61,7 +61,6 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/distillsource"
-	"github.com/GottZ/ctx/internal/evalscore"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/redact"
@@ -1099,7 +1098,7 @@ func distillScreen(in distillInsight, shown distillShown, floor float64) (string
 // load-bearing property of this wave rather than tidiness: derived.Report's
 // novelty quantiles — the numbers entscheid C5-2 states the wave criterion in,
 // and the numbers C5-A-M measured the case for this floor with — come from the
-// same function over the same tokeniser (evalscore.TokenSet). A second
+// same function over the same tokeniser (util.TokenSet). A second
 // implementation would give the gate and the instrument two different orderings
 // of the same claims, and every comparison between "what the floor discards"
 // and "what below_floor_share reports" would silently be a comparison of two
@@ -1113,7 +1112,7 @@ func distillScreen(in distillInsight, shown distillShown, floor float64) (string
 // precisely on the policy.
 //
 // AN EMPTY CLAIM TOKEN SET IS NOT EVIDENCE OF A COPY (review C5-E finding 1).
-// evalscore.TokenSet knows only [a-z0-9äöüß]; a claim written in Cyrillic,
+// util.TokenSet knows only [a-z0-9äöüß]; a claim written in Cyrillic,
 // Greek, CJK or Arabic script tokenises to the empty set, Adequacy answers its
 // literal 0, and the floor would delete substance as a "verbatim copy" whose
 // tokens never stood in the quote. The gate therefore fires only on claims the
@@ -1123,7 +1122,7 @@ func distillScreen(in distillInsight, shown distillShown, floor float64) (string
 // deletion needs positive evidence. TestDistillNoveltyFloorSkipsClaims-
 // OutsideTheTokenAlphabet pins the guard.
 func distillBelowNoveltyFloor(in distillInsight, floor float64) bool {
-	if len(evalscore.TokenSet(in.Claim)) == 0 {
+	if len(util.TokenSet(in.Claim)) == 0 {
 		return false
 	}
 	_, novelty := derived.Adequacy(in.Claim, in.Quote)

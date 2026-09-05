@@ -20,9 +20,10 @@ package evalscore
 
 import (
 	"math"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/util"
 )
 
 // MicroF1 rechnet Precision/Recall/F1 aus micro-aggregierten Zählern.
@@ -56,21 +57,9 @@ func SetCounts(pred, gold map[string]bool) (tp, fp, fn int) {
 	return tp, fp, fn
 }
 
-// titleTokenRe zerlegt Titel in Score-Tokens: lowercase [a-z0-9äöüß]+.
-var titleTokenRe = regexp.MustCompile(`[a-z0-9äöüß]+`)
-
-// TokenSet liefert die Token-Menge eines Strings (lowercase, [a-z0-9äöüß]+).
-func TokenSet(s string) map[string]bool {
-	out := map[string]bool{}
-	for _, t := range titleTokenRe.FindAllString(strings.ToLower(s), -1) {
-		out[t] = true
-	}
-	return out
-}
-
-// TokenF1 ist der Token-Overlap-F1 zweier Strings über TokenSet.
+// TokenF1 ist der Token-Overlap-F1 zweier Strings über util.TokenSet.
 func TokenF1(pred, gold string) float64 {
-	tp, fp, fn := SetCounts(TokenSet(pred), TokenSet(gold))
+	tp, fp, fn := SetCounts(util.TokenSet(pred), util.TokenSet(gold))
 	_, _, f1 := MicroF1(tp, fp, fn)
 	return f1
 }

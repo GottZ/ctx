@@ -43,9 +43,6 @@ func TestTokenF1(t *testing.T) {
 	if TokenF1("läuft", "lauft") != 0 {
 		t.Error("umlaut and its ASCII spelling must not share a token")
 	}
-	if got := len(TokenSet("A-b c1")); got != 3 {
-		t.Errorf("token set size %d, want 3", got)
-	}
 }
 
 // TestNDCGBinary pins the ranking metric and its stable tie order.

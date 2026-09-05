@@ -63,7 +63,7 @@ const nvBody = "### Message 12 — user\n\n" +
 // wie viel eigenes Wort ihr Claim gegenueber diesem Zitat traegt.
 const nvQuote = "Die Migration 147 hat einen deterministischen Tiebreak in die FTS-Arme eingebaut."
 
-// Die vier Claims und ihre novelty. Die Token-Menge ist evalscore.TokenSet
+// Die vier Claims und ihre novelty. Die Token-Menge ist util.TokenSet
 // (lowercase [a-z0-9äöüß]+, eine MENGE), novelty ist der Anteil der
 // Claim-Tokens, die NICHT im Zitat stehen:
 //

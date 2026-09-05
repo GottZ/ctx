@@ -1,4 +1,12 @@
-// Package util provides small, dependency-free helpers shared across packages.
+// Package util provides small, dependency-free helpers shared across packages:
+// text primitives over runes and tokens.
+//
+// THE BOUNDARY: this package imports the standard library and NOTHING ELSE —
+// no github.com/GottZ/ctx/... and no third-party module. That is what lets any
+// package take a primitive from here without dragging a dependency along, and
+// it is the reason TokenSet could leave internal/evalscore for the production
+// path (T01-4). A helper that needs a ctx package does not belong here; it
+// belongs next to the thing it needs.
 package util
 
 import "unicode/utf8"

@@ -1,7 +1,7 @@
 // Nachzug zu Review C5-E Finding 1: der Novelty-Floor darf nur auf Claims
 // feuern, die der Tokenisierer SIEHT.
 //
-// evalscore.TokenSet kennt nur [a-z0-9äöüß]. Ein Claim in kyrillischer (oder
+// util.TokenSet kennt nur [a-z0-9äöüß]. Ein Claim in kyrillischer (oder
 // griechischer, CJK-, arabischer) Schrift tokenisiert zur leeren Menge,
 // derived.Adequacy antwortet mit dem literalen 0 des Leere-Mengen-Kontrakts,
 // und ohne den Guard löschte der Floor Substanz als „wörtliche Kopie", von der
@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/GottZ/ctx/internal/derived"
-	"github.com/GottZ/ctx/internal/evalscore"
+	"github.com/GottZ/ctx/internal/util"
 )
 
 const (
@@ -37,7 +37,7 @@ func TestDistillNoveltyFloorSkipsClaimsOutsideTheTokenAlphabet(t *testing.T) {
 	// Vorbedingungen der Konstruktion, gemessen statt angenommen: die
 	// Claim-Token-Menge ist leer, und Adequacy antwortet mit der literalen 0,
 	// die den Fehlbuchungs-Pfad überhaupt erst öffnet.
-	if n := len(evalscore.TokenSet(nfClaim)); n != 0 {
+	if n := len(util.TokenSet(nfClaim)); n != 0 {
 		t.Fatalf("Fixture-Fehler: der kyrillische Claim tokenisiert zu %d Tokens, want 0", n)
 	}
 	if _, novelty := derived.Adequacy(nfClaim, nfQuote); novelty != 0 {

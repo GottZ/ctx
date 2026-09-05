@@ -1,6 +1,6 @@
 package derived
 
-import "github.com/GottZ/ctx/internal/evalscore"
+import "github.com/GottZ/ctx/internal/util"
 
 // Adequacy measures whether a claim is MORE than a copy of its quote:
 //
@@ -14,8 +14,8 @@ import "github.com/GottZ/ctx/internal/evalscore"
 // perfectly anchored citation. Report folds both numbers into the SAME verdict
 // for that reason; a footnote nobody reads would leave the gate gameable.
 //
-// The tokeniser is evalscore.TokenSet (evalscore/evalscore.go:63), the one the
-// eval side already scores title overlap with: lower-cased runs of
+// The tokeniser is util.TokenSet (util/tokens.go), the one the eval side
+// already scores title overlap with (evalscore.TokenF1): lower-cased runs of
 // [a-z0-9äöüß]. Reusing it keeps a claim's novelty here and its token F1 there
 // on the same word boundaries — two tokenisers would drift, and the Goodhart
 // threshold is calibrated against measured values, not against a definition.
@@ -36,8 +36,8 @@ import "github.com/GottZ/ctx/internal/evalscore"
 // division artefact. In the gate path an empty quote cannot occur anyway —
 // G2 (MinQuoteRunes) rejects it first.
 func Adequacy(claim, quote string) (compression, novelty float64) {
-	claimSet := evalscore.TokenSet(claim)
-	quoteSet := evalscore.TokenSet(quote)
+	claimSet := util.TokenSet(claim)
+	quoteSet := util.TokenSet(quote)
 
 	if len(quoteSet) > 0 {
 		compression = float64(len(claimSet)) / float64(len(quoteSet))

@@ -4,11 +4,11 @@ import (
 	"math"
 	"testing"
 
-	"github.com/GottZ/ctx/internal/evalscore"
+	"github.com/GottZ/ctx/internal/util"
 )
 
 // tokenQuote20 carries exactly twenty distinct scoring tokens of
-// evalscore.TokenSet, so compression against a four-token claim is a number
+// util.TokenSet, so compression against a four-token claim is a number
 // the test can name instead of approximate.
 const tokenQuote20 = "alpha beta gamma delta epsilon zeta eta theta iota kappa " +
 	"lambda mu nu xi omicron pi rho sigma tau upsilon"
@@ -34,7 +34,7 @@ func closeTo(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
 // token count would keep passing while measuring something else.
 func wantTokens(t *testing.T, s string, n int) {
 	t.Helper()
-	if got := len(evalscore.TokenSet(s)); got != n {
+	if got := len(util.TokenSet(s)); got != n {
 		t.Fatalf("fixture error: %q has %d tokens, the case is built on %d", s, got, n)
 	}
 }
