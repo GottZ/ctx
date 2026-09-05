@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -54,20 +53,9 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	// corpus-wide artefact and, until this wave, was the ONE such endpoint
 	// without a bucket while its read-only sibling GET /api/graph/overview has
 	// carried one for waves. 0 = disabled, same convention as everywhere else.
-	if limit := cfg.Query.RateLimitWrite; limit > 0 {
-		count, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "digest")
-		if err != nil {
-			slog.Error("digest: rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
-			return
-		}
-		if count >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d digest runs per 60 seconds", limit),
-			})
-			return
-		}
+	// The WRITE budget, deliberately — the read surfaces pass RateLimitRead.
+	if rateLimitBlocked(w, ctx, h.pool, authResult.ApiKeyID, "digest", "digest: rate limit check error", "digest runs", cfg.Query.RateLimitWrite) {
+		return
 	}
 
 	// Run digest. The request path resolves the policy overlay against the

@@ -232,20 +232,8 @@ func (h *GraphHandler) HandleAll(w http.ResponseWriter, r *http.Request) {
 	cfgSnap := h.cfg.SnapshotForRequest(ctx)
 
 	// Same "graph" action bucket as ego — a load-all IS a graph read.
-	if limit := cfgSnap.Query.RateLimitRead; limit > 0 {
-		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "graph")
-		if err != nil {
-			slog.Error("graph: read rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
-			return
-		}
-		if readCount >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d graph reads per 60 seconds", limit),
-			})
-			return
-		}
+	if rateLimitBlocked(w, ctx, h.pool, authResult.ApiKeyID, "graph", "graph: read rate limit check error", "graph reads", cfgSnap.Query.RateLimitRead) {
+		return
 	}
 
 	snap := h.blocktypes.SnapshotForRequest(ctx)
@@ -299,20 +287,8 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 	// Read rate limit check (0 = disabled) — own action bucket "graph". MT
 	// 06-C5: per-tenant via the request context (tenant's own RateLimitRead
 	// override, else _global).
-	if limit := cfgSnap.Query.RateLimitRead; limit > 0 {
-		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "graph")
-		if err != nil {
-			slog.Error("graph: read rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
-			return
-		}
-		if readCount >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d graph reads per 60 seconds", limit),
-			})
-			return
-		}
+	if rateLimitBlocked(w, ctx, h.pool, authResult.ApiKeyID, "graph", "graph: read rate limit check error", "graph reads", cfgSnap.Query.RateLimitRead) {
+		return
 	}
 
 	// ONE registry snapshot per request feeds both the structural vocabulary

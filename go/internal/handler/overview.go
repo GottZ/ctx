@@ -131,20 +131,8 @@ func (h *GraphOverviewHandler) HandleOverview(w http.ResponseWriter, r *http.Req
 	}
 
 	// Read rate limit (0 = disabled) — own action bucket "graph-overview".
-	if limit := cfg.Query.RateLimitRead; limit > 0 {
-		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "graph-overview")
-		if err != nil {
-			slog.Error("overview: rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
-			return
-		}
-		if readCount >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d graph reads per 60 seconds", limit),
-			})
-			return
-		}
+	if rateLimitBlocked(w, ctx, h.pool, authResult.ApiKeyID, "graph-overview", "overview: rate limit check error", "graph reads", cfg.Query.RateLimitRead) {
+		return
 	}
 
 	params, err := parseOverviewParams(r.URL.Query())

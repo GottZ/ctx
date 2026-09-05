@@ -17,7 +17,6 @@ package handler
 
 import (
 	"errors"
-	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -130,20 +129,8 @@ func (h *GraphClusterHandler) HandleCluster(w http.ResponseWriter, r *http.Reque
 
 	// Read rate limit (0 = disabled) — own action bucket, like every other graph
 	// surface. The bucket name matches the access-log action.
-	if limit := cfg.Query.RateLimitRead; limit > 0 {
-		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "graph-cluster")
-		if err != nil {
-			slog.Error("cluster: rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
-			return
-		}
-		if readCount >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d graph reads per 60 seconds", limit),
-			})
-			return
-		}
+	if rateLimitBlocked(w, ctx, h.pool, authResult.ApiKeyID, "graph-cluster", "cluster: rate limit check error", "graph reads", cfg.Query.RateLimitRead) {
+		return
 	}
 
 	params, err := parseClusterParams(r.URL.Query())

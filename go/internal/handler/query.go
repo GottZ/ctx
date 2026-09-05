@@ -645,20 +645,8 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	rerankCfg = forceRerankOffForShadow(rerankCfg, req.ShadowTypes)
 
 	// Read rate limit check (0 = disabled).
-	if rateLimitRead := cfg.Query.RateLimitRead; rateLimitRead > 0 {
-		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, ar.ApiKeyID, "query")
-		if err != nil {
-			slog.Error("query: read rate limit check error", "error", err, "request_id", requestID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
-			return
-		}
-		if readCount >= rateLimitRead {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d reads per 60 seconds", rateLimitRead),
-			})
-			return
-		}
+	if rateLimitBlocked(w, ctx, h.pool, ar.ApiKeyID, "query", "query: read rate limit check error", "reads", cfg.Query.RateLimitRead) {
+		return
 	}
 
 	// Query sensitivity: request > setting (F3 §2.3b). Feeds every chain

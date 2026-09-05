@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -89,20 +88,8 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// Read rate limit check (0 = disabled). MT 06-C5: per-tenant via the
 	// request context (tenant's own RateLimitRead override, else _global).
-	if limit := cfgSnap.Query.RateLimitRead; limit > 0 {
-		readCount, err := store.CheckRateLimitByAction(ctx, h.pool, authResult.ApiKeyID, "query")
-		if err != nil {
-			slog.Error("search: read rate limit check error", "error", err, "request_id", reqID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
-			return
-		}
-		if readCount >= limit {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Rate limit exceeded: max %d reads per 60 seconds", limit),
-			})
-			return
-		}
+	if rateLimitBlocked(w, ctx, h.pool, authResult.ApiKeyID, "query", "search: read rate limit check error", "reads", cfgSnap.Query.RateLimitRead) {
+		return
 	}
 
 	// Parse body.
