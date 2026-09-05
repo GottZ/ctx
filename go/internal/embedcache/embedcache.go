@@ -41,40 +41,29 @@ func HashKey(prefix embed.Prefix, text string) []byte {
 	return h.Sum(nil)
 }
 
-// ReportFunc mirrors the llm-side health feedback without importing llm —
-// wired to Pool.ReportSuccess/ReportFailure by the caller.
-type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.Duration)
+// ReportFunc is the pool health feedback — see backends.ReportFunc. The
+// embed path takes it as a parameter and stays free of pool state; naming
+// the pool's own type is what lets a reporter cross between the chat and the
+// embed family without a conversion.
+type ReportFunc = backends.ReportFunc
 
-// Admission mirrors llm.Admission without importing llm (same decoupling
-// decision as ReportFunc above): the ONE process-wide dispatch admitter
-// (I-D1) bound to the CALLER's class — query embed interactive, query-path
-// backfill interactive per E-U5(a), scheduler backfill and dream keyword
-// embeds background (design/01 §4.6 N3). The principal is ctx-derived since
-// MW4 (design/03 §4.1.1) — carrying it as a field would reopen the stored-
-// principal replay. Target and per-attempt binding happen inside EmbedChain;
-// a zero Admission fails the acquire loudly instead of passing an unadmitted
-// wire call (MW5).
-type Admission struct {
-	Admitter dispatch.Admitter
-	Class    dispatch.Class
-}
+// Admission is the embed sequence's name for dispatch.Admission — the ONE
+// process-wide dispatch admitter (I-D1) bound to the CALLER's class: query
+// embed interactive, query-path backfill interactive per E-U5(a), scheduler
+// backfill and dream keyword embeds background (design/01 §4.6 N3). It is a
+// defined type, not an alias, because acquire below belongs to the embed
+// sequence: it deliberately carries NO deadline hint and names embedcache in
+// the nil-admitter error. Go allows methods only in the package that defines
+// the type; the struct shape lives in dispatch and is therefore identical to
+// llm.Admission by construction — embedcache still does not import llm.
+type Admission dispatch.Admission
 
-// AdmissionError mirrors llm.AdmissionError without importing llm (same
-// decoupling as Admission/ReportFunc above): a failed embed acquire carries
+// AdmissionError is dispatch.AdmissionError: a failed embed acquire carries
 // the K9 rejection telemetry — the rejected target and the futile wait — so
 // llm.RecordRejection can attribute the rejection line (MW11, design/05
-// §3.2). Unwrap keeps errors.Is against the dispatch sentinels intact.
-type AdmissionError struct {
-	Err error
-	// Backend/Host/WaitMs are zero-valued for the nil-admitter error
-	// (nothing waited anywhere) — the mirror of llm.AdmissionError.
-	Backend string
-	Host    string
-	WaitMs  int64
-}
-
-func (e *AdmissionError) Error() string { return e.Err.Error() }
-func (e *AdmissionError) Unwrap() error { return e.Err }
+// §3.2). Since it is the SAME type the chat walk raises, that attribution
+// needs one extraction branch instead of one per pipeline family.
+type AdmissionError = dispatch.AdmissionError
 
 // acquire leases one wire attempt on the backend's physical origin. The
 // embed path deliberately carries NO deadline hint (embed.go: wire timeout
@@ -98,41 +87,12 @@ func (a Admission) acquire(ctx context.Context, b *backends.Backend, role string
 	return lease, runCtx, nil
 }
 
-// WireAttempt is one tried backend of an embed wire-call sequence — the
-// embed mirror of llm.ChainAttempt with the SAME JSON keys (metadata.chain
-// stays ONE vocabulary across pipelines). llm.LogEmbedWire derives the MW10
-// telemetry columns from the row-defining attempt (design/05 §3.2) and
-// stores the full slice as metadata.chain (Σ single-case forensics).
-type WireAttempt struct {
-	Backend string `json:"backend"`
-	Class   string `json:"err_class"`
-	Ms      int64  `json:"ms"`
-	WaitMs  int64  `json:"wait_ms"`
-	// PromptTokens is the embed backend's reported prompt-token usage of a
-	// SUCCESSFUL attempt (0 otherwise). It is the D1(a) embed-token metric
-	// substrate: llm.LogEmbedWire copies the serving attempt's count onto the
-	// llmlog row (prompt_tokens), so the status page can aggregate embed tokens
-	// per target/window from llmlog — the SAME column the chat path already
-	// fills. Distinct from the dispatcher usage window (C1/MW22), which the
-	// lease.ReportUsage call feeds independently.
-	PromptTokens int `json:"prompt_tokens,omitempty"`
-}
-
-// abortClass classifies a dispatcher-caused cancel of one attempt's runCtx —
-// the embed-loop mirror of llm's §4.4c discrimination (MW11, design/05
-// §4.4c/B-R9): "preempted"/"reaped" via errors.Is over context.Cause
-// (wrap-safe, never sentinel identity), everything else "".
-func abortClass(runCtx context.Context) string {
-	cause := context.Cause(runCtx)
-	switch {
-	case errors.Is(cause, dispatch.ErrPreempted):
-		return llmlog.AbortPreempted
-	case errors.Is(cause, dispatch.ErrReaped):
-		return llmlog.AbortReaped
-	default:
-		return ""
-	}
-}
+// WireAttempt is one tried backend of an embed wire-call sequence — see
+// llmlog.WireAttempt. The chat walk names the same type (as ChainAttempt),
+// which is what keeps metadata.chain ONE vocabulary across pipelines.
+// llm.LogEmbedWire derives the MW10 telemetry columns from the row-defining
+// attempt (design/05 §3.2) and stores the slice as metadata.chain.
+type WireAttempt = llmlog.WireAttempt
 
 // cacheProbe is the cache fast-path lookup, a package var as a test seam
 // (pattern: the dream package's chatJSON seam): the I-D1 cache-hit clause —
@@ -290,7 +250,7 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 		lastErr = werr
 		// §4.4c abort rule (MW11 — BEFORE the generic Classify): terminal,
 		// no health report, abort kind instead of the generic class.
-		if abort := abortClass(runCtx); abort != "" {
+		if abort := llmlog.AbortClass(runCtx); abort != "" {
 			attempts = append(attempts, WireAttempt{Backend: b.Name, Class: abort, Ms: elapsed, WaitMs: waitMs})
 			return nil, nil, attempts, true, lastErr
 		}

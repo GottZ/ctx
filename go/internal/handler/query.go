@@ -189,12 +189,12 @@ func (h *QueryHandler) admission() llm.Admission {
 	}
 }
 
-// embedAdmission is admission in embedcache's mirror type (the embed chain
-// does not import llm — same decoupling as embedcache.ReportFunc). The
-// principal is ctx-derived since MW4, so the mirror carries class only.
+// embedAdmission is the same admission under the embed sequence's name (the
+// embed chain does not import llm). Both types are defined over
+// dispatch.Admission, so this is a conversion, not a field-by-field rebuild
+// that could quietly drop one.
 func (h *QueryHandler) embedAdmission() embedcache.Admission {
-	adm := h.admission()
-	return embedcache.Admission{Admitter: adm.Admitter, Class: adm.Class}
+	return embedcache.Admission(h.admission())
 }
 
 // queryRequest is the JSON body for the query endpoint.

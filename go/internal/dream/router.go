@@ -223,13 +223,14 @@ func (r *Router) EmbedChain(required backends.Sensitivity) ([]backends.Backend, 
 	return chain, role, err
 }
 
-// EmbedAdmit is Admit in embedcache's mirror type (MW5, design/01 §4.6 N3 —
-// embedcache does not import llm): the router's class binding carries
+// EmbedAdmit is Admit under the embed sequence's name (MW5, design/01 §4.6
+// N3 — embedcache does not import llm): the router's class binding carries
 // unchanged onto its embed wire calls (scheduler backfill + dream keyword
 // embeds = background; the principal is ctx-derived since MW4 and detached
-// scheduler ctx resolve to the zero principal).
+// scheduler ctx resolve to the zero principal). Both types are defined over
+// dispatch.Admission, so this is a conversion, not a rebuild.
 func (r *Router) EmbedAdmit() embedcache.Admission {
-	return embedcache.Admission{Admitter: r.Admit.Admitter, Class: r.Admit.Class}
+	return embedcache.Admission(r.Admit)
 }
 
 // applyChainTelemetry stamps the chained-call provenance onto a dream llmlog

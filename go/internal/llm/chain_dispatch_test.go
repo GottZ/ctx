@@ -41,7 +41,9 @@ func TestDispatchAbortVocabulary(t *testing.T) {
 
 // TestDispatchAbortClass pins the wrap-safe cause discrimination (B-R8): the
 // sentinels match through arbitrary decoration via errors.Is, a parent
-// cancel and an un-canceled ctx yield "".
+// cancel and an un-canceled ctx yield "". The classifier itself lives in
+// llmlog next to the vocabulary it returns; the probe stays here with the
+// pipeline probes that drive the same rule through the real chain walk.
 func TestDispatchAbortClass(t *testing.T) {
 	mk := func(cause error) context.Context {
 		ctx, cancel := context.WithCancelCause(context.Background())
@@ -67,8 +69,8 @@ func TestDispatchAbortClass(t *testing.T) {
 		{"live ctx", context.Background(), ""},
 	}
 	for _, tc := range cases {
-		if got := dispatchAbortClass(tc.ctx); got != tc.want {
-			t.Errorf("%s: dispatchAbortClass = %q, want %q", tc.name, got, tc.want)
+		if got := llmlog.AbortClass(tc.ctx); got != tc.want {
+			t.Errorf("%s: llmlog.AbortClass = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

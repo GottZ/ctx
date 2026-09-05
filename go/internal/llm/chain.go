@@ -9,29 +9,20 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
-	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Admission binds the ONE process-wide dispatch admitter (I-D1) to a call
-// site's class (Vorhaben E wave MW3, design/01 §4.6 N1): the CLASS is bound
-// by the caller — the query pipeline binds interactive, scheduler arms bind
-// background — while target and deadline hint are bound per attempt inside
-// the chain walk. The PRINCIPAL is deliberately NOT a field (MW4, design/03
-// §4.1.1): the dispatcher derives it exclusively from the Acquire ctx via
-// the boot-installed hook, so a stored AuthResult held in a variable cannot
-// buy interactive — an interactive class on a ctx without an authenticated
-// principal runs into the B8 downgrade. Admission travels as a mandatory
-// positional parameter (pattern: the report ReportFunc parameter; llm stays
-// parameter-pure): a call site without an admitter does not compile, and a
-// zero Admission fails the acquire loudly instead of passing an unadmitted
-// wire call.
-type Admission struct {
-	Admitter dispatch.Admitter
-	Class    dispatch.Class
-}
+// Admission is the chat chain walk's name for dispatch.Admission — see there
+// for the class/principal doctrine (MW3/MW4). It is a defined type, not an
+// alias, because Acquire below belongs to the chat walk: it carries the
+// admission-anchored deadline hint the embed walk deliberately omits, and it
+// names llm in the nil-admitter error. Go allows methods only in the package
+// that defines the type; the struct shape itself lives in dispatch and is
+// therefore identical to the embed sequence's Admission by construction, not
+// by two declarations kept in step by hand.
+type Admission dispatch.Admission
 
 // Acquire leases one attempt on the backend's physical origin (per attempt,
 // after chain resolution — I-D1). The deadline hint travels admission-
@@ -67,55 +58,26 @@ func (a Admission) Acquire(ctx context.Context, b *backends.Backend, role string
 	return lease, runCtx, nil
 }
 
-// AdmissionError marks a chain walk ended by a failed Acquire. Acquire-error
-// doctrine (design/01 §4.3, binding): a failed acquire is NOT an attempt —
-// no ChainAttempt entry, no Classify, no health report, and the walk ends
-// TERMINALLY (no failover spill onto a following chain link, e.g. openrouter
-// under local saturation). The ONE deliberate exception is the K9 rejection
-// TELEMETRY line (MW10, design/05 §3.2): RecordRejection persists a
-// never-admitted background acquire_expired/queue_full — everything else
-// about the doctrine stays. Unwrap keeps errors.Is against the dispatch
-// sentinels (IsRejection) and ctx errors intact.
-type AdmissionError struct {
-	Err error
-	// Backend/Host/WaitMs are the K9 rejection telemetry (MW10): the
-	// target of the failed acquire and the futile wait before rejection.
-	// Zero-valued for the nil-admitter error (nothing waited anywhere).
-	Backend string
-	Host    string
-	WaitMs  int64
-}
-
-func (e *AdmissionError) Error() string { return e.Err.Error() }
-func (e *AdmissionError) Unwrap() error { return e.Err }
+// AdmissionError marks a chain walk ended by a failed Acquire — see
+// dispatch.AdmissionError for the acquire-error doctrine (design/01 §4.3)
+// and the K9 telemetry payload. The embed sequence raises the SAME type, so
+// the rejection line needs one extraction branch, not one per family.
+type AdmissionError = dispatch.AdmissionError
 
 // IsAdmissionError reports whether err is a chain walk ended by a failed
 // acquire (no wire contact of its own) — the ONE check point for the
 // telemetry sites honoring the no-llmlog-line doctrine.
-func IsAdmissionError(err error) bool {
-	var ae *AdmissionError
-	return errors.As(err, &ae)
-}
+func IsAdmissionError(err error) bool { return dispatch.IsAdmissionError(err) }
 
-// ChainAttempt is one tried backend for llmlog's metadata.chain — the full
-// provenance of a chained call (the row's backend_name alone only names the
-// winner). Since MW10 it also carries the per-attempt lease wait (WaitMs) and
-// — for dispatcher-aborted attempts — the abort kind ("preempted"/"reaped")
-// as Class instead of the generic "canceled" (design/05 §3.2): the Σ view
-// over ALL attempts (incl. waits on failover predecessors) lives here as
-// single-case forensics; the row columns carry only the row-defining attempt.
-type ChainAttempt struct {
-	Backend string `json:"backend"`
-	Class   string `json:"err_class"`
-	Ms      int64  `json:"ms"`
-	WaitMs  int64  `json:"wait_ms"`
-}
+// ChainAttempt is the chat walk's name for llmlog.WireAttempt — one tried
+// backend in the row's metadata.chain. The embed sequence names the same
+// type, which is what keeps the persisted chain vocabulary single.
+type ChainAttempt = llmlog.WireAttempt
 
-// ReportFunc feeds attempt outcomes back into the pool's health state.
-// ClassOK clears the failure streak; everything else earns the class
-// cooldown. Wired to Pool.ReportSuccess/ReportFailure by the caller — llm
-// stays free of pool state.
-type ReportFunc func(backendID string, class backends.ErrClass, retryAfter time.Duration)
+// ReportFunc feeds attempt outcomes back into the pool's health state — see
+// backends.ReportFunc. llm stays free of pool state and takes it as a
+// parameter.
+type ReportFunc = backends.ReportFunc
 
 // ChatFunc is the wire call one chain attempt makes. The backend arrives
 // fully resolved for the role: Model from ModelFor, Think/Options merged from
@@ -231,7 +193,7 @@ func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, 
 		// kind instead of the generic "canceled". Classify's own
 		// context.Canceled match would only cover an UNwrapped cause — this
 		// rule is errors.Is over context.Cause and therefore wrap-safe.
-		if abort := dispatchAbortClass(runCtx); abort != "" {
+		if abort := llmlog.AbortClass(runCtx); abort != "" {
 			attempts = append(attempts, ChainAttempt{Backend: b.Name, Class: abort, Ms: elapsed.Milliseconds(), WaitMs: waitMs})
 			slog.Warn("llm: chain attempt aborted by dispatcher", "role", role,
 				"backend", b.Name, "attempt", i+1, "abort", abort, "error", err)
@@ -261,24 +223,6 @@ func ChatChainVia(ctx context.Context, call ChatFunc, chain []backends.Backend, 
 		}
 	}
 	return nil, nil, attempts, fmt.Errorf("llm: chain exhausted for role %q: %w", role, lastErr)
-}
-
-// dispatchAbortClass classifies a dispatcher-caused cancel of one attempt's
-// runCtx (MW10, design/05 §4.4c/B-R8): "preempted"/"reaped" via errors.Is
-// over context.Cause — wrap-safe, NEVER sentinel identity (a decorated
-// cause, e.g. fmt.Errorf with %w plus target origin, would silently fall to
-// "" under ==) and never generic ctx.Err(). Everything else — parent cancel
-// (shutdown, dream-off, client disconnect), plain wire errors — returns "".
-func dispatchAbortClass(runCtx context.Context) string {
-	cause := context.Cause(runCtx)
-	switch {
-	case errors.Is(cause, dispatch.ErrPreempted):
-		return llmlog.AbortPreempted
-	case errors.Is(cause, dispatch.ErrReaped):
-		return llmlog.AbortReaped
-	default:
-		return ""
-	}
 }
 
 // applyDispatchTelemetry derives the MW10 telemetry columns of one llmlog
@@ -322,8 +266,9 @@ func applyDispatchTelemetry(entry *llmlog.Entry, attempts []ChainAttempt, class 
 // interactive rejections (cap ladder — the error goes to the caller, the
 // class invariant keeps scheduler traces out of tenant-visible rows) and
 // parent cancels (shutdown/dream-off are lifecycle, not admission verdicts).
-// Since MW11 the embed walk's mirror error type is recognized too — the K9
-// line has ONE shape regardless of which pipeline family was rejected.
+// Since MW11 the embed walk's rejections are recognized too — both families
+// raise dispatch.AdmissionError, so the K9 line has ONE shape regardless of
+// which pipeline family was rejected and needs ONE extraction branch.
 func rejectionEntry(pipeline string, err error, class dispatch.Class) (llmlog.Entry, bool) {
 	if class != dispatch.ClassBackground {
 		return llmlog.Entry{}, false
@@ -337,18 +282,14 @@ func rejectionEntry(pipeline string, err error, class dispatch.Class) (llmlog.En
 	default:
 		return llmlog.Entry{}, false
 	}
-	var host, backend string
-	var w int64
+	// A rejection without acquire provenance carries no target and no futile
+	// wait — nothing worth attributing, so it writes nothing (the branch the
+	// bare-sentinel cases in TestRejectionEntry pin).
 	var ae *AdmissionError
-	var eae *embedcache.AdmissionError
-	switch {
-	case errors.As(err, &ae):
-		host, backend, w = ae.Host, ae.Backend, ae.WaitMs
-	case errors.As(err, &eae):
-		host, backend, w = eae.Host, eae.Backend, eae.WaitMs
-	default:
+	if !errors.As(err, &ae) {
 		return llmlog.Entry{}, false
 	}
+	host, backend, w := ae.Host, ae.Backend, ae.WaitMs
 	return llmlog.Entry{
 		Pipeline:      pipeline,
 		Host:          host,
@@ -516,7 +457,7 @@ func thinkModeOf(think *bool) backends.ThinkMode {
 // per-attempt slice lands in metadata.chain, and class travels from the
 // caller's admission binding.
 func LogEmbedWire(db *pgxpool.Pool, pipeline, role string, required backends.Sensitivity,
-	served *backends.Backend, attempts []embedcache.WireAttempt, blockIDs []string, err error,
+	served *backends.Backend, attempts []llmlog.WireAttempt, blockIDs []string, err error,
 	apiKeyID string, class dispatch.Class,
 ) {
 	llmlog.Record(db, embedWireEntry(pipeline, role, required, served, attempts, blockIDs, err, apiKeyID, class))
@@ -525,9 +466,14 @@ func LogEmbedWire(db *pgxpool.Pool, pipeline, role string, required backends.Sen
 // embedWireEntry builds the embed row (split from LogEmbedWire so the column
 // derivation is probe-able without a DB — Record is fire-and-forget).
 func embedWireEntry(pipeline, role string, required backends.Sensitivity,
-	served *backends.Backend, attempts []embedcache.WireAttempt, blockIDs []string, err error,
+	served *backends.Backend, attempts []llmlog.WireAttempt, blockIDs []string, err error,
 	apiKeyID string, class dispatch.Class,
 ) llmlog.Entry {
+	// Copied field by field ON PURPOSE — never `chain := attempts`. The embed
+	// sequence sets PromptTokens on its serving attempt, but metadata.chain is
+	// a persisted JSON contract carrying the four walk keys only: the embed
+	// token count belongs to the ROW column (D1(a), set below), and a shared
+	// backing slice would start emitting prompt_tokens inside the chain.
 	chain := make([]ChainAttempt, len(attempts))
 	var promptTokens int
 	for i, a := range attempts {
