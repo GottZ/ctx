@@ -6,8 +6,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -88,15 +90,11 @@ func ReencryptSweep(ctx context.Context, pool *pgxpool.Pool) {
 }
 
 // reencryptRow writes one re-seal in its own transaction — a single broken
-// row must not roll back the rest of the sweep.
+// row must not roll back the rest of the sweep. Empty pgxdb.Stages: this
+// caller labels nothing, every stage error travels back untouched into the
+// WARN line above.
 func reencryptRow(ctx context.Context, pool *pgxpool.Pool, row store.SealedSecret, nonce, ct []byte) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-	if err := store.UpdateSecretSeal(ctx, tx, row.Name, row.Scope, nonce, ct); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		return store.UpdateSecretSeal(ctx, tx, row.Name, row.Scope, nonce, ct)
+	})
 }
