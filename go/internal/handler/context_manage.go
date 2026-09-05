@@ -2079,7 +2079,7 @@ func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Reques
 	// admin pass), so the Last-Owner + Owner-Protection riegel must gate it here too.
 	// An admin (callerMayManageOwner=false) may not revoke an owner key, and no
 	// caller may revoke the last active owner (design/04 §D-D, AM6).
-	callerMayManageOwner := ar.IsServerAdmin() || ar.TenantRole == auth.RoleOwner
+	callerMayManageOwner := ar.IsServerAdmin() || ar.TenantRole.Delegates()
 	deleted, err := store.DeleteApiKey(r.Context(), h.pool, data.ID, ar.TenantID, ar.IsServerAdmin(), callerMayManageOwner)
 	if err != nil {
 		switch {
@@ -2208,11 +2208,11 @@ func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Reques
 // server-admin or an OWNER of its tenant. A non-owner tenant-admin (it cleared the
 // tierTenantAdmin gate) is rejected 403, so admin→owner self-elevation is
 // structurally impossible. The returned callerMayManageOwner (server-admin OR
-// owner — the exported equivalent of Role.delegates(), identical to
-// handleApiKeyDelete) is the SAME authority store.UpdateApiKey needs to mutate an
-// OWNER key (R-OWNERKEY). handled=true means a 4xx was already written.
+// owner — exactly what auth.Role.Delegates reports, identical to
+// handleApiKeyDelete) is the SAME authority store.UpdateApiKey needs to mutate
+// an OWNER key (R-OWNERKEY). handled=true means a 4xx was already written.
 func apiKeyUpdateAuthorize(w http.ResponseWriter, ar *auth.AuthResult, tenantRole string) (callerMayManageOwner, handled bool) {
-	callerMayManageOwner = ar.IsServerAdmin() || ar.TenantRole == auth.RoleOwner
+	callerMayManageOwner = ar.IsServerAdmin() || ar.TenantRole.Delegates()
 	if tenantRole == "" {
 		return callerMayManageOwner, false
 	}

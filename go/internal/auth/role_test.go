@@ -98,7 +98,7 @@ func TestIsTenantAdminOf(t *testing.T) {
 	}
 }
 
-// TestDelegates pins delegates() to OWNER-ONLY — strictly narrower than
+// TestDelegates pins Delegates() to OWNER-ONLY — strictly narrower than
 // administers() (owner+admin). An admin administers but must NOT delegate
 // (no admin→owner self-elevation, no admin-touch of owner keys); member and
 // any unknown/zero value are fail-closed. The owner≠admin split is the entire
@@ -116,11 +116,11 @@ func TestDelegates(t *testing.T) {
 		{Role("root"), false},
 	}
 	for _, c := range cases {
-		if got := c.role.delegates(); got != c.want {
-			t.Errorf("Role(%q).delegates() = %v, want %v", c.role, got, c.want)
+		if got := c.role.Delegates(); got != c.want {
+			t.Errorf("Role(%q).Delegates() = %v, want %v", c.role, got, c.want)
 		}
 		// Sanity: delegates ⊆ administers (every delegator also administers).
-		if c.role.delegates() && !c.role.administers() {
+		if c.role.Delegates() && !c.role.administers() {
 			t.Errorf("Role(%q) delegates but does not administer — lattice violated", c.role)
 		}
 	}

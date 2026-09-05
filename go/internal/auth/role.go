@@ -26,13 +26,15 @@ func (r Role) administers() bool {
 	return r == RoleOwner || r == RoleAdmin
 }
 
-// delegates reports whether a tenant Role may DELEGATE roles — appoint or
+// Delegates reports whether a tenant Role may DELEGATE roles — appoint or
 // revoke admins and mutate owner keys (OE-2). ONLY owner delegates; admin
 // administers (administers() == true) but does NOT delegate (059 header:
 // "admin: administer, no delegation"). This is strictly narrower than
 // administers(): owner→true, admin→false, member→false, and any unknown or
 // empty value, including the Go zero value "", → false (fail-closed mirror).
-func (r Role) delegates() bool {
+// This is the exported form of the rule: the owner-key paths in
+// internal/handler call it instead of restating r == RoleOwner per call site.
+func (r Role) Delegates() bool {
 	return r == RoleOwner
 }
 
