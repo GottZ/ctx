@@ -176,17 +176,19 @@ func (c *common) bind(fs *flag.FlagSet) {
 		"Schatten-Dump gegen eine NICHT als Mess-Kopie gestempelte Instanz erlauben (wird im Report ausgewiesen)")
 }
 
-// shadowTypeNames splits the CSV, dropping empty entries — an empty flag is
-// simply "no shadow types" and must not become a request naming "".
-func (c *common) shadowTypeNames() []string {
+// splitCSV splits a comma-separated flag value, dropping empty entries — an
+// empty flag simply names nothing and must not become an entry naming "".
+func splitCSV(s string) []string {
 	var out []string
-	for _, s := range strings.Split(c.shadowTypes, ",") {
-		if s = strings.TrimSpace(s); s != "" {
-			out = append(out, s)
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
 	}
 	return out
 }
+
+func (c *common) shadowTypeNames() []string { return splitCSV(c.shadowTypes) }
 
 func run() error {
 	if len(os.Args) < 2 {
@@ -346,15 +348,7 @@ func (c *common) id() string {
 	return c.runID
 }
 
-func (c *common) sliceNames() []string {
-	var out []string
-	for _, s := range strings.Split(c.slices, ",") {
-		if s = strings.TrimSpace(s); s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
+func (c *common) sliceNames() []string { return splitCSV(c.slices) }
 
 // buildRev reads the VCS stamp Go embedded at build time, dirty flag appended.
 // Deliberately NOT `git rev-parse` in a subprocess: spawning one is an argued

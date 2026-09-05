@@ -1299,21 +1299,13 @@ func MarshalCompareBody(body CompareBody) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
-// WriteCompareReport writes header line + body, the same split `score` uses:
-// the only volatile field is in the header, so a diff of two reports over the
-// same dump set is empty from line 2 on (gate (d)).
+// WriteCompareReport writes the compare report in the same shape `score` uses.
 func WriteCompareReport(path, generatedAt string, body CompareBody) error {
 	b, err := MarshalCompareBody(body)
 	if err != nil {
 		return err
 	}
-	hdr, err := json.Marshal(ReportHeader{
-		Tool: "ctx-armsweep compare", GeneratedAt: generatedAt, BodySHA256: goldset.SHA256Hex(string(b)),
-	})
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(append(hdr, '\n'), b...), fileMode)
+	return writeReportFile(path, "ctx-armsweep compare", generatedAt, b)
 }
 
 // WriteCompareMarkdown writes the human-readable half.

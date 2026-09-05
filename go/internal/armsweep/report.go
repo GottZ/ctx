@@ -565,20 +565,26 @@ func MarshalBody(body ReportBody) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
-// WriteReport writes header line + body. The header carries the only volatile
-// field, so a diff of two reports over the same dump is empty from line 2 on.
-func WriteReport(path, generatedAt string, body ReportBody) error {
-	b, err := MarshalBody(body)
-	if err != nil {
-		return err
-	}
+// writeReportFile writes header line + body — the one file shape every report
+// of this instrument has. The header carries the only volatile field, so a diff
+// of two reports over the same input is empty from line 2 on (gate (c)/(d)).
+func writeReportFile(path, tool, generatedAt string, b []byte) error {
 	hdr, err := json.Marshal(ReportHeader{
-		Tool: "ctx-armsweep", GeneratedAt: generatedAt, BodySHA256: goldset.SHA256Hex(string(b)),
+		Tool: tool, GeneratedAt: generatedAt, BodySHA256: goldset.SHA256Hex(string(b)),
 	})
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, append(append(hdr, '\n'), b...), fileMode)
+}
+
+// WriteReport writes the score report in that shape.
+func WriteReport(path, generatedAt string, body ReportBody) error {
+	b, err := MarshalBody(body)
+	if err != nil {
+		return err
+	}
+	return writeReportFile(path, "ctx-armsweep", generatedAt, b)
 }
 
 // ReadReportBody reads back the body of a report file, skipping the header

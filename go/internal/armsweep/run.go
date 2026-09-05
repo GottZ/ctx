@@ -38,8 +38,9 @@ type Runner struct {
 	DryRun      bool
 	// ShadowTypes rides every measurement request of this run (M-W2). Empty is
 	// the ordinary dump, and then the request body carries no such key at all.
-	// The caller is responsible for having passed GateInstanceKind first — the
-	// runner measures, it does not decide where it may measure.
+	// The caller is responsible for having read and refused first —
+	// StampInstanceKind + CheckInstanceKind (cmd/ctx-armsweep gateInstance) —
+	// the runner measures, it does not decide where it may measure.
 	ShadowTypes []string
 	// Logf is the progress sink. It NEVER receives a query text: a sweep log on
 	// a shared host would otherwise carry the private corpus' queries.
