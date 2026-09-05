@@ -1,8 +1,10 @@
 package guard
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -371,6 +373,67 @@ func TestRunGuardBatch_BeginTxFails(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("expectations: %v", err)
+	}
+}
+
+// TestRunGuardBatch_BatchCompleteLogOnlyWithWork pins WHERE the batch line is
+// written: after the transaction closed successfully, and ONLY for a batch
+// that actually picked blocks. The empty batch closes its transaction too (it
+// clears the dirty state) but stays silent — the scheduler calls this per
+// tick, so an unconditional line would turn an idle guard into one log record
+// per tick at 1M+ blocks. Since the Tx rollout the closing sits inside the
+// pgxdb helper and the line sits behind it, which is exactly the place a
+// later edit can get wrong; this test goes red for both mistakes (silent when
+// work happened, loud when none did).
+func TestRunGuardBatch_BatchCompleteLogOnlyWithWork(t *testing.T) {
+	capture := func(t *testing.T, setup func(pgxmock.PgxPoolIface), wantProcessed int) string {
+		t.Helper()
+		mock := newMockPool(t)
+		defer mock.Close()
+		setup(mock)
+
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(prev)
+
+		processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if processed != wantProcessed {
+			t.Errorf("processed = %d, want %d", processed, wantProcessed)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("expectations: %v", err)
+		}
+		return buf.String()
+	}
+
+	const batchLine = "guard: batch complete"
+
+	empty := capture(t, func(mock pgxmock.PgxPoolIface) {
+		mock.ExpectBegin()
+		mock.ExpectQuery(`SELECT id, type_name FROM context_blocks`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(mock.NewRows([]string{"id", "type_name"}))
+		mock.ExpectExec(`UPDATE context_guard_state`).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectCommit()
+	}, 0)
+	if strings.Contains(empty, batchLine) {
+		t.Errorf("empty batch logged the batch line, want silence: %s", empty)
+	}
+
+	worked := capture(t, func(mock pgxmock.PgxPoolIface) {
+		mock.ExpectBegin()
+		expectPendingFetch(mock, blockA)
+		expectFullBlockSuccess(mock, blockA)
+		expectGuardStateUpdate(mock)
+		mock.ExpectCommit()
+	}, 1)
+	if !strings.Contains(worked, batchLine) {
+		t.Errorf("processed batch did not log the batch line: %s", worked)
 	}
 }
 

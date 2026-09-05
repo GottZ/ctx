@@ -109,96 +109,111 @@ func RunGuardBatch(ctx context.Context, pool interface {
 
 	// Wrap entire batch in a transaction so FOR UPDATE SKIP LOCKED row locks
 	// are held until all blocks are processed, preventing race conditions.
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return 0, fmt.Errorf("guard: begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-
-	// Fetch pending blocks (the shared guardPendingWhere fragment: unchecked,
-	// not archived, not index, has embedding, knowledge lifecycle, policy
-	// type allowlist). ORDER BY created_at ASC rides idx_guard_pending (M074).
-	// FOR UPDATE SKIP LOCKED prevents concurrent guard runs from processing
-	// the same blocks; row locks are held for the duration of the transaction.
-	rows, err := tx.Query(ctx,
-		`SELECT id, type_name FROM context_blocks
-		WHERE `+guardPendingWhere("$1")+`
-		ORDER BY created_at ASC
-		LIMIT $2
-		FOR UPDATE SKIP LOCKED`,
-		checkTypes, limit,
+	// The bracket itself — open, deferred rollback, close — belongs to
+	// pgxdb.Write; the two stage labels stay HERE and keep their wording,
+	// because the pair is asymmetric (a tx suffix on both stages) and
+	// pgxdb.At would rewrite it.
+	//
+	// blocks and processed outlive the closure: the batch line below is
+	// logged only after a successful close, exactly as before, and the
+	// caller still gets the number of processed blocks alongside an error.
+	var (
+		blocks    []pendingBlock
+		processed int
 	)
-	if err != nil {
-		return 0, fmt.Errorf("guard: fetch pending: %w", err)
-	}
-
-	var blocks []pendingBlock
-	for rows.Next() {
-		var b pendingBlock
-		if err := rows.Scan(&b.id, &b.typeName); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("guard: scan block id: %w", err)
+	err := pgxdb.Write(ctx, pool, pgxdb.Stages{
+		Begin:  "guard: begin tx",
+		Commit: "guard: commit tx",
+	}, func(tx pgx.Tx) error {
+		// Fetch pending blocks (the shared guardPendingWhere fragment: unchecked,
+		// not archived, not index, has embedding, knowledge lifecycle, policy
+		// type allowlist). ORDER BY created_at ASC rides idx_guard_pending (M074).
+		// FOR UPDATE SKIP LOCKED prevents concurrent guard runs from processing
+		// the same blocks; row locks are held for the duration of the transaction.
+		rows, err := tx.Query(ctx,
+			`SELECT id, type_name FROM context_blocks
+			WHERE `+guardPendingWhere("$1")+`
+			ORDER BY created_at ASC
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED`,
+			checkTypes, limit,
+		)
+		if err != nil {
+			return fmt.Errorf("guard: fetch pending: %w", err)
 		}
-		blocks = append(blocks, b)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("guard: rows error: %w", err)
-	}
 
-	if len(blocks) == 0 {
-		// No pending blocks. Clear dirty state.
-		_, _ = tx.Exec(ctx,
+		for rows.Next() {
+			var b pendingBlock
+			if err := rows.Scan(&b.id, &b.typeName); err != nil {
+				rows.Close()
+				return fmt.Errorf("guard: scan block id: %w", err)
+			}
+			blocks = append(blocks, b)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("guard: rows error: %w", err)
+		}
+
+		if len(blocks) == 0 {
+			// No pending blocks. Clear dirty state.
+			_, _ = tx.Exec(ctx,
+				`UPDATE context_guard_state SET
+					last_guard_at = now(),
+					dirty_since = NULL,
+					pending_count = 0
+				WHERE id = true`,
+			)
+			// Nothing to process: the state update above is all this batch
+			// writes, and the helper persists it — a nil return closes the
+			// transaction exactly where the explicit call used to sit.
+			return nil
+		}
+
+		for _, block := range blocks {
+			// Check for context cancellation (demand interruption).
+			select {
+			case <-ctx.Done():
+				slog.Info("guard: interrupted by context cancellation", "processed", processed)
+				return ctx.Err()
+			default:
+			}
+
+			if processBlock(ctx, tx, block, set) {
+				processed++
+			}
+		}
+
+		// Update guard state — both count subqueries reuse the SAME pending
+		// fragment as the pick ($1 = the type allowlist).
+		_, err = tx.Exec(ctx,
 			`UPDATE context_guard_state SET
 				last_guard_at = now(),
-				dirty_since = NULL,
-				pending_count = 0
-			WHERE id = true`,
-		)
-		return 0, tx.Commit(ctx)
-	}
-
-	processed := 0
-	for _, block := range blocks {
-		// Check for context cancellation (demand interruption).
-		select {
-		case <-ctx.Done():
-			slog.Info("guard: interrupted by context cancellation", "processed", processed)
-			return processed, ctx.Err()
-		default:
-		}
-
-		if processBlock(ctx, tx, block, set) {
-			processed++
-		}
-	}
-
-	// Update guard state — both count subqueries reuse the SAME pending
-	// fragment as the pick ($1 = the type allowlist).
-	_, err = tx.Exec(ctx,
-		`UPDATE context_guard_state SET
-			last_guard_at = now(),
-			dirty_since = CASE
-				WHEN (SELECT count(*) FROM context_blocks
+				dirty_since = CASE
+					WHEN (SELECT count(*) FROM context_blocks
+						WHERE `+guardPendingWhere("$1")+`
+					) = 0 THEN NULL
+					ELSE dirty_since
+				END,
+				pending_count = (SELECT count(*)::int FROM context_blocks
 					WHERE `+guardPendingWhere("$1")+`
-				) = 0 THEN NULL
-				ELSE dirty_since
-			END,
-			pending_count = (SELECT count(*)::int FROM context_blocks
-				WHERE `+guardPendingWhere("$1")+`
-			)
-		WHERE id = true`,
-		checkTypes,
-	)
+				)
+			WHERE id = true`,
+			checkTypes,
+		)
+		if err != nil {
+			slog.Error("guard: update state failed", "error", err)
+		}
+		return nil
+	})
+
 	if err != nil {
-		slog.Error("guard: update state failed", "error", err)
+		return processed, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return processed, fmt.Errorf("guard: commit tx: %w", err)
+	if len(blocks) > 0 {
+		slog.Info("guard: batch complete", "processed", processed, "total_pending", len(blocks))
 	}
-
-	slog.Info("guard: batch complete", "processed", processed, "total_pending", len(blocks))
 	return processed, nil
 }
 
