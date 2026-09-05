@@ -321,21 +321,6 @@ func captureStdout(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-// ── scope-name derivation ─────────────────────────────────────────────────────.
-
-func TestDeriveScopeName(t *testing.T) {
-	cases := []struct{ id, want string }{
-		{"github:acme/My.Widget", "my-widget"},
-		{"manual:Internal Docs!", "internal-docs"},
-		{"git-root:abcdef0123456789", "repo-abcdef012345"},
-	}
-	for _, c := range cases {
-		if got := deriveScopeName(c.id); got != c.want {
-			t.Errorf("deriveScopeName(%q) = %q, want %q", c.id, got, c.want)
-		}
-	}
-}
-
 // ── checkAPIEnvelope ──────────────────────────────────────────────────────────.
 
 func TestCheckAPIEnvelope(t *testing.T) {

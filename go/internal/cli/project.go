@@ -8,6 +8,11 @@
 //	ctx project show                  # detect, then show the registered project
 //	ctx project list                  # every project your key can read
 //
+// `--scope` on init is accepted but CURRENTLY WITHOUT EFFECT: the server derives
+// the corpus scope from the identity and creates '<tenant-slug>:main'
+// (handler/project_provision.go:101). The registering path that honors an
+// explicit scope name is `ctx api POST /api/project`.
+//
 // Identity precedence (§4.3): a GitHub `origin` remote → github:owner/repo; else
 // a single-root git repo → git-root:<sha> (survives clones); else a manual slug
 // (interactive on a TTY, an error when piped). The `.ctx-project` file is a
@@ -262,43 +267,6 @@ func (stdinPrompter) askSlug() (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// ── scope-name derivation ─────────────────────────────────────────────────────.
-
-var scopeCharRe = regexp.MustCompile(`[^a-z0-9-]+`)
-
-// deriveScopeName suggests a scope NAME (the part after the tenant slug) from an
-// identity: the repo name for github:, "repo-<sha12>" for git-root:, the slug for
-// manual:. The result is sanitized to the server's scope charset and length; ""
-// means "cannot derive, require --scope".
-func deriveScopeName(identity string) string {
-	var base string
-	switch {
-	case strings.HasPrefix(identity, "github:"):
-		parts := strings.SplitN(strings.TrimPrefix(identity, "github:"), "/", 2)
-		base = parts[len(parts)-1]
-	case strings.HasPrefix(identity, "git-root:"):
-		sha := strings.TrimPrefix(identity, "git-root:")
-		if len(sha) > 12 {
-			sha = sha[:12]
-		}
-		base = "repo-" + sha
-	case strings.HasPrefix(identity, "manual:"):
-		base = strings.TrimPrefix(identity, "manual:")
-	}
-	return sanitizeScopeName(base)
-}
-
-// sanitizeScopeName lowercases, maps invalid runs to '-', trims leading/trailing
-// '-', and caps at 24 chars (the server rejects anything else, handler/project.go).
-func sanitizeScopeName(s string) string {
-	s = scopeCharRe.ReplaceAllString(strings.ToLower(s), "-")
-	s = strings.Trim(s, "-")
-	if len(s) > 24 {
-		s = strings.Trim(s[:24], "-")
-	}
-	return s
-}
-
 // ── output helpers ────────────────────────────────────────────────────────────.
 
 // emitIdentity prints a resolved identity: JSON when piped (the golden shape),
@@ -431,12 +399,13 @@ func projectInitCmd(getClient func() (*Client, error)) *cobra.Command {
 			"--identity / --repo), then create the project via the server (idempotent —\n" +
 			"re-running with the same identity returns the existing project, never a\n" +
 			"duplicate). On success .ctx-project is written to the repo root (the identity\n" +
-			"only, never a secret). The scope defaults to a name derived from the identity;\n" +
-			"override with --scope.",
+			"only, never a secret). The server derives the corpus scope from the identity\n" +
+			"and creates '<tenant-slug>:main'; --scope is accepted but currently has no\n" +
+			"effect.",
 		Example: `  ctx project init
-  ctx project init --scope backend
   ctx project init --repo https://github.com/acme/api
-  ctx project init --identity manual:internal-docs --scope docs`,
+  ctx project init --identity manual:internal-docs
+  ctx project init --scope backend   # accepted, currently no effect`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runProjectInit(getClient, identity, repo, scope)
@@ -444,10 +413,12 @@ func projectInitCmd(getClient func() (*Client, error)) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&identity, "identity", "", "explicit project identity (github:o/r | git-root:sha | manual:slug); skips detection")
 	cmd.Flags().StringVar(&repo, "repo", "", "GitHub repo URL to derive the identity from (overrides local detection)")
-	// The --scope flag names a scope; a scope belongs to ONE tenant (the server
-	// prefixes it with the tenant slug), so this help must reference tenants
-	// (help_consistency rule b).
-	cmd.Flags().StringVar(&scope, "scope", "", "scope NAME for the project corpus; a scope belongs to one tenant, so the server prefixes it with your tenant slug (default: derived from the identity)")
+	// The --scope flag stays registered (accepting it keeps the CLI contract:
+	// exit code and flag acceptance are unchanged), but it is a no-op — the help
+	// says so instead of promising a derivation that does not happen. A scope
+	// belongs to ONE tenant (the server prefixes it with the tenant slug), so
+	// this help must still reference tenants (help_consistency rule b).
+	cmd.Flags().StringVar(&scope, "scope", "", "accepted but currently WITHOUT EFFECT: the server derives the corpus scope from the identity and creates '<tenant-slug>:main' (a scope belongs to one tenant)")
 	return cmd
 }
 
