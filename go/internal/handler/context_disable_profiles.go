@@ -146,7 +146,7 @@ func (h *ManageHandler) handleDisableProfileCreate(w http.ResponseWriter, r *htt
 		p.Active = *spec.Active
 	}
 
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		h.gamingInternalError(w, ctx, "disable-profile-create: begin failed", err)
 		return
@@ -199,7 +199,7 @@ func (h *ManageHandler) handleDisableProfileUpdate(w http.ResponseWriter, r *htt
 		memberIDsPtr = &memberIDs
 	}
 
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		h.gamingInternalError(w, ctx, "disable-profile-update: begin failed", err)
 		return
@@ -247,7 +247,7 @@ func (h *ManageHandler) handleDisableProfileDelete(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		h.gamingInternalError(w, ctx, "disable-profile-delete: begin failed", err)
 		return
@@ -342,7 +342,7 @@ func (h *ManageHandler) handleDisableProfileToggle(w http.ResponseWriter, r *htt
 		return
 	}
 
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		h.gamingInternalError(w, ctx, "disable-profile-toggle: begin failed", err)
 		return

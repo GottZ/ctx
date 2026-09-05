@@ -54,6 +54,41 @@ linters:
             telemetry, settings-API owner, gated audit/classify, background
             retention) annotate it: //nolint:forbidigo // MT 06 BLIND/OWNER/gated/background: <reason>.
 
+        # T04-4 Rest-Schutz: eine handgebaute Transaktions-Klammer
+        # (Begin/Rollback/Commit von Hand) ist die Form, die Achse 04 nach
+        # internal/pgxdb zusammengezogen hat — pgxdb.Write/WriteOpts/Read/Probe
+        # sind der eine Ort dafür. Das Muster ist bewusst NICHT auf konkrete
+        # Empfänger-Typen verengt: analyze-types prüft den aufgelösten Namen
+        # (pgxpool.Pool.Begin, pgx.Tx.Begin, <pkg>.<NamedIface>.BeginTx), und
+        # eine Verengung auf pgxpool.Pool/pgx.Conn verfehlt jedes Handle, das
+        # pgxdb.Beginner einbettet (design/04-kern.md §4.4).
+        #
+        # Warum zwei Punkte im Muster (\.\w+\.) statt nur \.(Begin|BeginTx)$:
+        # ein Feld-Schlüssel in pgxdb.Stages{Begin: "…"} löst zu <pkg>.<Feld>
+        # auf — also pgxdb.Begin mit EINEM Punkt. Das rein generische Muster
+        # meldet deshalb jede korrekte pgxdb.Write/Read-Aufrufstelle als
+        # Verstoß (T04-4j gemessen: 38 solcher Treffer). Der zweite Punkt
+        # verlangt ein Empfänger-Segment und trennt Aufruf von Feld, ohne
+        # Reichweite zu kosten (T04-4j: konkrete Empfänger und benannte
+        # Interface-Typen feuern unverändert). Ein LESENDER Feldzugriff auf
+        # eine Stages-Variable (st.Begin) löst dagegen zu pgxdb.Stages.Begin
+        # auf und würde melden — außerhalb von internal/pgxdb gibt es heute
+        # keinen (T04-4j gemessen), innerhalb greift die Exklusion unten.
+        #
+        # Der Linter ist ein ZUSATZ-Gate, kein vollständiges: Aufrufe über ein
+        # ANONYMES Interface (db interface{ pgxdb.Beginner; … }) liefern gar
+        # keinen auflösbaren Namen und feuern unter KEINEM Muster — an einer
+        # Wegwerf-Sonde belegt (reports/bau/T04-4j.md). Primärer Rest-Schutz
+        # ist deshalb die baumweite Zählung von .Begin( / .BeginTx( über
+        # internal und cmd ohne _test und ohne internal/pgxdb. Das Paket
+        # internal/pgxdb selbst ist unten ausgenommen — dort stehen die echten
+        # BeginTx-Aufrufe (tx.go).
+        - pattern: '\.\w+\.(Begin|BeginTx)$'
+          msg: >-
+            handgebaute Transaktions-Klammer — pgxdb.Write/WriteOpts/Read/Probe benutzen
+            (ein Ort für Begin/Rollback/Commit). Wenn diese Stelle wirklich eine
+            eigene Klammer braucht, annotieren: //nolint:forbidigo // <Grund>.
+
     # F1 layering rule (design/01-config-core.md §2.1): internal/config is
     # consumed ONLY by cmd/**, internal/handler, internal/events and
     # internal/settings (the F2 reload owner: settings.Reload = LoadOverrides
@@ -190,6 +225,12 @@ linters:
       - path: "testutil/"
         linters:
           - gosec
+      # internal/pgxdb IST der eine Ort für Begin/Rollback/Commit (Achse 04):
+      # die echten BeginTx-Aufrufe von Write/WriteOpts/Read/Probe stehen dort
+      # und dürfen nicht gegen die eigene Regel laufen.
+      - path: "internal/pgxdb/"
+        linters:
+          - forbidigo
 
 issues:
   max-issues-per-linter: 50

@@ -133,7 +133,7 @@ func (h *ManageHandler) handleGamingMode(w http.ResponseWriter, r *http.Request,
 // missing eject profile aborts the tx (errEjectProfileMissing).
 func (h *ManageHandler) writeEjectActive(r *http.Request, active bool) error {
 	ctx := r.Context()
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		return err
 	}

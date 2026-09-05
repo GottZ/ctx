@@ -1564,7 +1564,7 @@ type armSweepParams struct {
 // statement fails the request; the caller maps it onto the same 500 the
 // ordinary search error takes.
 func (h *QueryHandler) armSweepSearch(ctx context.Context, p armSweepParams) ([]rrf.SearchResult, rrf.SelectorDecision, []rrf.ArmRow, error) {
-	tx, err := h.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := h.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		return nil, rrf.SelectorDecision{}, nil, fmt.Errorf("arm_ranks: begin tx: %w", err)
 	}

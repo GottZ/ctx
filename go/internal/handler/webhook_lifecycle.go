@@ -93,7 +93,7 @@ func (h *WebhookSecretHandler) HandleCreate(w http.ResponseWriter, r *http.Reque
 
 	// Persist the sealed secret AND the register ref in ONE tx: the column and the
 	// secret row are consistent by construction (no half-configured project).
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		h.fail(w, r, "webhook-secret: begin", err)
 		return
@@ -130,7 +130,7 @@ func (h *WebhookSecretHandler) HandleDelete(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		h.fail(w, r, "webhook-secret: delete begin", err)
 		return

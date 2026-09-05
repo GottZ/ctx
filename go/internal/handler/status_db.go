@@ -431,7 +431,7 @@ func parseIndexRelOptions(opts []string) map[string]string {
 // an operator who has explicitly SET ef_search to 40.
 func queryEfSearchEffective(ctx context.Context, pool *pgxpool.Pool) string {
 	const fallback = "40 (default)"
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		slog.Warn("status: db-section ef_search probe begin failed", "error", err)
 		return fallback
@@ -621,7 +621,7 @@ func runChannelProbe(ctx context.Context, pool *pgxpool.Pool, embedModel string,
 
 	hv := pgvec.NewHalfVector(raw.Slice())
 
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		slog.Warn("status: channel probe begin failed", "error", err)
 		return nil

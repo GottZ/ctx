@@ -324,7 +324,7 @@ const bootstrapScopeName = "main"
 // own scope). It returns the tenant (with seeded limits echoed), the owner key
 // record, and its plaintext (shown once).
 func (h *ManageHandler) bootstrapTenant(ctx context.Context, slug, displayName, initialScope string, seedScopes, seedKeys *int) (*store.Tenant, store.ApiKey, string, error) {
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		return nil, store.ApiKey{}, "", fmt.Errorf("bootstrap begin: %w", err)
 	}

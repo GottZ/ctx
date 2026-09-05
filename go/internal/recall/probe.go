@@ -234,7 +234,7 @@ func runLeg(ctx context.Context, pool *pgxpool.Pool, sql string, gucs []string, 
 // list. All settings are transaction-local — the pool connection returns
 // clean at rollback, no session GUC pollution (§5.7).
 func beginLegTx(ctx context.Context, pool *pgxpool.Pool, gucs []string) (pgx.Tx, error) {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly}) //nolint:forbidigo // Tx-Herausgabe: Leg-Lebenszyklus über mehrere Funktionen (probe.go:233-235)
 	if err != nil {
 		return nil, fmt.Errorf("begin read-only tx: %w", err)
 	}

@@ -124,7 +124,7 @@ func (h *ManageHandler) handleBackendReorder(w http.ResponseWriter, r *http.Requ
 	}
 
 	by := actorID(r)
-	tx, err := h.pool.Begin(ctx)
+	tx, err := h.pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "transaction begin failed"})
 		return

@@ -423,7 +423,7 @@ func (h *ManageHandler) inIssueTx(ctx context.Context, fn func(tx pgx.Tx) (*stor
 // error. Returns fn's block (nil for link/void writes). Shared by the manage
 // transport (inIssueTx) and the REST W7 write handlers.
 func issueTx(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) (*store.Block, error)) (*store.Block, error) {
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.Begin(ctx) //nolint:forbidigo // handgebaute Tx-Klammer, fällt in T03-4b (K27)
 	if err != nil {
 		return nil, err
 	}
