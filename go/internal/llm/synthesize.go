@@ -862,15 +862,11 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		APIKeyID:            apiKeyID, // T35a: caller attribution (NULL for background)
 	}
 	applyBudgetTelemetry(&entry, budgetReport)
-	servedModel := ""
-	if served != nil {
-		servedModel = served.ModelFor(backends.RoleSynthesis).Model
-		entry.Model = servedModel
-		entry.Host = served.Host
-		entry.BackendName = served.Name
-		entry.BackendTrust = string(served.Trust)
-		entry.BackendLocality = served.Locality
-	}
+	StampServed(&entry, backends.RoleSynthesis, served)
+	// Read back BEFORE applyProviderTelemetry may overwrite the column with the
+	// provider's models-fallback pick: the result reports the model this pool
+	// resolved, "" when no backend answered.
+	servedModel := entry.Model
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount

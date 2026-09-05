@@ -343,6 +343,27 @@ func ApplyDispatchOutcome(entry *llmlog.Entry, attempts []ChainAttempt, err erro
 	applyDispatchTelemetry(entry, attempts, class)
 }
 
+// StampServed writes the provenance of the backend that ACTUALLY answered onto
+// the llmlog row: the role-resolved model, host, name, trust and locality. The
+// model is resolved per ROLE (ModelFor), never taken from Backend.Model — a
+// fallback tuple inherits the primary's model there, which would log a name the
+// caller never reached.
+//
+// A nil backend leaves the row untouched: no wire contact means no provenance,
+// and the columns stay NULL exactly as the hand-written blocks left them.
+// Caller policy (ChainCall.OnServed, synthesize's returned model name) stays
+// OUTSIDE — this stamps the row and nothing else.
+func StampServed(entry *llmlog.Entry, role string, served *backends.Backend) {
+	if served == nil {
+		return
+	}
+	entry.Model = served.ModelFor(role).Model
+	entry.Host = served.Host
+	entry.BackendName = served.Name
+	entry.BackendTrust = string(served.Trust)
+	entry.BackendLocality = served.Locality
+}
+
 // applyModelParams merges ModelSpec.Params field-wise over the code-default
 // options and resolves the think toggle (params.think wins over the row's
 // legacy Think field). NumCtx always comes from the row.
@@ -499,13 +520,7 @@ func embedWireEntry(pipeline, role string, required backends.Sensitivity,
 	if len(chain) > 0 {
 		entry.Metadata = map[string]any{"chain": chain}
 	}
-	if served != nil {
-		entry.Model = served.ModelFor(role).Model
-		entry.Host = served.Host
-		entry.BackendName = served.Name
-		entry.BackendTrust = string(served.Trust)
-		entry.BackendLocality = served.Locality
-	}
+	StampServed(&entry, role, served)
 	applyDispatchTelemetry(&entry, chain, class)
 	return entry
 }
@@ -637,15 +652,11 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 		Metadata:            map[string]any{"chain": attempts},
 		APIKeyID:            c.APIKeyID, // T35b: caller attribution (NULL for background)
 	}
-	if served != nil {
-		entry.Model = served.ModelFor(c.Role).Model
-		entry.Host = served.Host
-		entry.BackendName = served.Name
-		entry.BackendTrust = string(served.Trust)
-		entry.BackendLocality = served.Locality
-		if c.OnServed != nil {
-			c.OnServed(served.Name, entry.Model)
-		}
+	StampServed(&entry, c.Role, served)
+	// Caller policy, not provenance: fires once, after the walk, only when a
+	// backend answered — and reads the model back off the stamped row.
+	if served != nil && c.OnServed != nil {
+		c.OnServed(served.Name, entry.Model)
 	}
 	if resp != nil {
 		entry.CompletionTokens = resp.EvalCount

@@ -260,13 +260,7 @@ func (r *Router) applyChainTelemetry(entry *llmlog.Entry, role string, required 
 		}
 		entry.Metadata["chain"] = attempts
 	}
-	if served != nil {
-		entry.Model = served.ModelFor(role).Model
-		entry.Host = served.Host
-		entry.BackendName = served.Name
-		entry.BackendTrust = string(served.Trust)
-		entry.BackendLocality = served.Locality
-	}
+	llm.StampServed(entry, role, served)
 	// LAST on purpose: the K9/blank fold replaces the entry wholesale — the
 	// provenance stamped above only survives on rows that reached the wire.
 	llm.ApplyDispatchOutcome(entry, attempts, err, r.Admit.Class)
