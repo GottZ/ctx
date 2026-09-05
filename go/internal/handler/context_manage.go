@@ -1109,36 +1109,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	// WF T4 (design/01 §4.5, seam 5): re-run the auto-classifier when title or
-	// metadata changed — safe because ClassifyBlockAfterUpsert only writes
-	// type_source='auto' blocks (manual wins permanently, sensitivity_source
-	// pattern). Deliberately match-only: a block whose new title stops matching
-	// keeps its current type (the hook promotes, never demotes). Non-fatal.
-	if h.blocktypes != nil && (data.Title != nil || data.Metadata != nil) {
-		set := h.blocktypes.SnapshotForRequest(ctx)
-		if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, set, block.ID, block.Title, block.Metadata); err != nil {
-			slog.Warn("manage: re-classify on update failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		}
-	}
-
-	// Re-extract temporal data when content changes.
-	if data.Content != nil {
-		times := store.ExtractDates(block.Content)
-		if err := store.UpdateContentTimes(ctx, h.pool, block.ID, times); err != nil {
-			slog.Error("manage: content_times update failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		}
-		// Always populate: createdAt is included as meta-anchor even without content times.
-		if err := store.PopulateTemporal(ctx, h.pool, block.ID, times, block.CreatedAt); err != nil {
-			slog.Error("manage: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		}
-	}
-
-	// Clear embedding so scheduler backfill regenerates it.
-	if needsReEmbed {
-		if err := store.ClearEmbedding(ctx, h.pool, block.ID); err != nil {
-			slog.Error("manage: clear embedding failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		}
-	}
+	finishBlockUpdate(ctx, h.pool, h.blocktypes, data, block, needsReEmbed, reqID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"action":  "update",

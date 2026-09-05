@@ -208,7 +208,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 			// consumed (rejected finding D1-m2 behaviour sentence).
 			return confirmOutcome{Kind: confirmExecGone, Op: cw.Op, BlockID: cw.ID}
 		}
-		finishBlockUpdate(ctx, pool, blocktypes, data, block, needsReEmbed)
+		finishBlockUpdate(ctx, pool, blocktypes, data, block, needsReEmbed, RequestIDFromContext(ctx))
 		return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block}
 	}
 
