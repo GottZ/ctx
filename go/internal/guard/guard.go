@@ -25,9 +25,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // GuardResult holds the outcome of processing a single block. The two
@@ -71,17 +71,14 @@ func guardPendingWhere(typesParam string) string {
 		  AND type_name = ANY(` + typesParam + `::text[])`
 }
 
-// guardPool is the minimum *pgxpool.Pool surface that RunGuardBatch needs.
-// The interface lets tests pass a pgxmock-backed pool without exercising a
-// real database. *pgxpool.Pool implicitly satisfies it.
-type guardPool interface {
-	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
 // RunGuardBatch processes pending blocks through the duplicate detection guard.
 // Uses the ctx_guard_check PG function for each block.
 // Returns the number of blocks processed and any error.
+//
+// pool is the minimum *pgxpool.Pool surface this function needs, composed from
+// the two pgxdb handles it actually uses. Naming the SHAPE rather than the
+// pool type is what lets tests pass a pgxmock-backed pool without exercising a
+// real database; *pgxpool.Pool implicitly satisfies it.
 //
 // set is the resolved block-type policy snapshot (WF T7): the pick predicate
 // consumes GuardCheckTypes, the per-block call resolves GuardThresholds by
@@ -98,7 +95,10 @@ type guardPool interface {
 // statement fails — losing all later block updates. With per-block savepoints,
 // a failure is ROLLBACK'd back to its savepoint, the outer tx stays clean, and
 // the loop continues to the next block.
-func RunGuardBatch(ctx context.Context, pool guardPool, set *blocktype.Set, limit int) (int, error) {
+func RunGuardBatch(ctx context.Context, pool interface {
+	pgxdb.Beginner
+	pgxdb.Execer
+}, set *blocktype.Set, limit int) (int, error) {
 	if set == nil {
 		return 0, fmt.Errorf("guard: nil block-type policy set (registry not wired?)")
 	}

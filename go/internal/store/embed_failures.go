@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/httpx"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // EmbedFailureClass is the last_class column of context_embed_failures
@@ -121,7 +122,7 @@ func OversizeEstimateMessage(estimatedTokens, maxTokens int) string {
 
 // RecordEmbedFailure upserts the block's context_embed_failures row for the
 // REGULAR backfill paths (migration_id IS NULL — Pfad A/B, Achse 04 W04-2;
-// the migration-scoped counterpart is W04-3+). It accepts any execQuerier so
+// the migration-scoped counterpart is W04-3+). It accepts any pgxdb.Execer so
 // callers can run it standalone on the pool (query.go) or inside the SAME
 // tx that holds the FOR UPDATE SKIP LOCKED pick (scheduler.go) — the memo
 // write must be atomic with the pick the same way StoreEmbedding's write is
@@ -134,7 +135,7 @@ func OversizeEstimateMessage(estimatedTokens, maxTokens int) string {
 // short-circuits to next_attempt_at='infinity' regardless of attempts
 // (design/04 §4.4: a capped exponential backoff would still be "retry
 // forever in slow motion" for a block that cannot structurally succeed).
-func RecordEmbedFailure(ctx context.Context, q execQuerier, blockID string, class EmbedFailureClass, normalizedErr string, backoffBase, backoffCap time.Duration) error {
+func RecordEmbedFailure(ctx context.Context, q pgxdb.Execer, blockID string, class EmbedFailureClass, normalizedErr string, backoffBase, backoffCap time.Duration) error {
 	if isInfinityClass(class) {
 		_, err := q.Exec(ctx,
 			`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
@@ -186,12 +187,12 @@ func isInfinityClass(class EmbedFailureClass) bool {
 // idx_embed_failures_migration from migration 113 — so one block can carry
 // an independent memo per migration AND per regular backfill (migration_id
 // NULL) without the two bookkeeping streams overwriting each other.
-// Same execQuerier doctrine as RecordEmbedFailure: the migration worker
+// Same pgxdb.Execer doctrine as RecordEmbedFailure: the migration worker
 // passes the SAME tx that holds its FOR UPDATE SKIP LOCKED pick, so the
 // memo commit is atomic with the pick. Same server-side backoff exponent
 // (base * 2^(attempts-1), capped); oversize AND sensitivity_ineligible
 // short-circuit to next_attempt_at='infinity' (permanent park, §4.4).
-func RecordEmbedFailureForMigration(ctx context.Context, q execQuerier, blockID, migrationID string, class EmbedFailureClass, normalizedErr string, backoffBase, backoffCap time.Duration) error {
+func RecordEmbedFailureForMigration(ctx context.Context, q pgxdb.Execer, blockID, migrationID string, class EmbedFailureClass, normalizedErr string, backoffBase, backoffCap time.Duration) error {
 	if migrationID == "" {
 		return fmt.Errorf("store: record embed failure (migration): migration id is required (block %s)", blockID)
 	}

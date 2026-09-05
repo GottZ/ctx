@@ -103,7 +103,7 @@ func StatfsChecker(path string) DiskChecker {
 	}
 }
 
-// Querier already declared in state.go covers Exec/QueryRow/Query for both
+// Querier, declared in state.go, covers Exec/Query/QueryRow for both
 // *pgxpool.Pool and pgx.Tx.
 
 // Create validates the requested migration against the full v1 rule set and,

@@ -19,6 +19,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
@@ -118,13 +119,6 @@ var cacheProbe = func(ctx context.Context, pool *pgxpool.Pool, key []byte, model
 	return cached.Slice(), true
 }
 
-// RowQuerier is the minimal read surface PeekByHash needs — satisfied by
-// *pgxpool.Pool, *pgx.Conn and pgx.Tx alike (recall's probe transactions
-// included).
-type RowQuerier interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
 // PeekByHash is the TOUCH-FREE cache read for the recall_check sampler
 // (design/01 §4.2.2): a plain SELECT, deliberately NOT the cacheProbe
 // UPDATE...RETURNING path above. Two reasons the probe must never touch:
@@ -136,7 +130,7 @@ type RowQuerier interface {
 // measurement distorting the measured). Returns (nil, false, nil) on a miss;
 // a non-ErrNoRows failure is surfaced, not swallowed, because the sampler
 // (unlike the hot query path) wants to know when the cache is unreadable.
-func PeekByHash(ctx context.Context, q RowQuerier, hash []byte, model string) ([]float32, bool, error) {
+func PeekByHash(ctx context.Context, q pgxdb.Rower, hash []byte, model string) ([]float32, bool, error) {
 	var cached pgvector.Vector
 	err := q.QueryRow(ctx,
 		`SELECT embedding FROM context_embed_cache WHERE text_hash = $1 AND model = $2`,

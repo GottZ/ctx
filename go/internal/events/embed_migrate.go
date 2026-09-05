@@ -526,7 +526,7 @@ func (s *Scheduler) migrateOneEmbedding(ctx context.Context, router *dream.Route
 			errMigrationServedModelMismatch, servedModel, mig.ToModel, served.Name)
 	}
 
-	// StoreEmbeddingNext within the pick tx (execQuerier). The serving
+	// StoreEmbeddingNext within the pick tx (pgxdb.Execer). The serving
 	// pair (embedding/embed_model) is untouched — the live space stays
 	// byte-identical until the cutover (§4.5 option c).
 	if err := store.StoreEmbeddingNext(ctx, tx, blockID, servedModel, vec); err != nil {

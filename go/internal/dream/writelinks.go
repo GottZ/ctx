@@ -9,17 +9,9 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
-
-// linkPool is the minimum *pgxpool.Pool surface that WriteLinks needs.
-// The interface lets tests pass a pgxmock-backed pool without exercising a
-// real database. *pgxpool.Pool implicitly satisfies it.
-type linkPool interface {
-	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
 
 // deletedLink captures what a stale-link DELETE returned, so the caller can
 // revert side-effects (e.g. lifecycle_state='snapshot' set by ApplySupersedes
@@ -142,8 +134,16 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 // filter chain in one loop body — extracting them would obscure the per-link
 // decision flow without reducing real complexity.
 //
+// pool is the minimum *pgxpool.Pool surface this function needs, composed from
+// the two pgxdb handles it actually uses. Naming the SHAPE rather than the
+// pool type is what lets tests pass a pgxmock-backed pool without exercising a
+// real database; *pgxpool.Pool implicitly satisfies it.
+//
 //nolint:cyclop,gocognit // pipeline function with linear V5/V6/V8/V9/V10 + T8 policy filter chain
-func WriteLinks(ctx context.Context, pool linkPool, set *blocktype.Set, sourceID, sourceScope string, sourceQuality float64, links []Link) (int, error) {
+func WriteLinks(ctx context.Context, pool interface {
+	pgxdb.Beginner
+	pgxdb.Execer
+}, set *blocktype.Set, sourceID, sourceScope string, sourceQuality float64, links []Link) (int, error) {
 	if len(links) == 0 {
 		return 0, nil
 	}

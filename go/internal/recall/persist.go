@@ -12,8 +12,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // Run mirrors one row of context_recall_runs (migration 110). Pointer fields
@@ -91,24 +90,15 @@ func validateMeta(meta map[string]any) error {
 	return nil
 }
 
-// Querier is the minimal interface Insert needs — satisfied by both
-// *pgxpool.Pool and pgx.Tx, mirroring store.execQuerier's shape without
-// importing the store package (avoids a cross-package import cycle: store
-// may one day want to call into recall for scheduler wiring).
-type Querier interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
-// RowsQuerier is the minimal interface LatestByStratum needs — satisfied by
-// both *pgxpool.Pool and pgx.Tx.
-type RowsQuerier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
 // Insert writes one recall-run row. It validates Meta against the allowlist
 // (fail-closed — rejected keys/values abort before any DB round-trip, no
 // partial write) and lets the DB fill ID and ran_at via their defaults.
-func Insert(ctx context.Context, q Querier, run Run) error {
+//
+// q is a pgxdb.Execer, satisfied by both *pgxpool.Pool and pgx.Tx, so the
+// insert runs standalone or inside a caller's transaction (store may one day
+// call into recall for scheduler wiring — the handle keeps that edge free of
+// an import).
+func Insert(ctx context.Context, q pgxdb.Execer, run Run) error {
 	if err := validateMeta(run.Meta); err != nil {
 		return err
 	}
@@ -138,7 +128,7 @@ func Insert(ctx context.Context, q Querier, run Run) error {
 // opt-out convention as the other janitor retentions. Returns the deleted row
 // count. context_recall_runs is aggregate-only, so this is a plain bounded
 // DELETE, never a hypertable drop.
-func DeleteOlderThan(ctx context.Context, q Querier, retentionDays int) (int64, error) {
+func DeleteOlderThan(ctx context.Context, q pgxdb.Execer, retentionDays int) (int64, error) {
 	if retentionDays <= 0 {
 		return 0, nil
 	}
@@ -155,7 +145,7 @@ func DeleteOlderThan(ctx context.Context, q Querier, retentionDays int) (int64, 
 // group first, capped at limit. DISTINCT ON rides idx_recall_runs_stratum
 // (stratum, scope, k, ran_at DESC) directly — no separate window-function
 // pass needed.
-func LatestByStratum(ctx context.Context, q RowsQuerier, limit int) ([]Run, error) {
+func LatestByStratum(ctx context.Context, q pgxdb.Querier, limit int) ([]Run, error) {
 	rows, err := q.Query(ctx,
 		`SELECT id, ran_at, run_group, stratum, scope, corpus_embedded, k, n_queries,
 		        query_source, ef_search, iterative_scan, valid,

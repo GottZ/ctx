@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 )
@@ -495,14 +496,22 @@ func TestWriteLinks_UnknownSourceType_RejectsBatchFailClosed(t *testing.T) {
 	}
 }
 
-// Compile-time guard: pgxmock's pool implementation satisfies our linkPool
-// interface. The underscore-assignment fails to build if the contract drifts.
-var _ linkPool = pgxmock.PgxPoolIface(nil)
+// Compile-time guard: pgxmock's pool implementation satisfies the handle
+// WriteLinks asks for. The underscore-assignment fails to build if the
+// contract drifts.
+var _ interface {
+	pgxdb.Beginner
+	pgxdb.Execer
+} = pgxmock.PgxPoolIface(nil)
 
-// Compile-time guard: linkPool is sufficient for WriteLinks (the production
-// caller passes *pgxpool.Pool which implicitly satisfies linkPool — covered
-// by the wider build).
-var _ = (func(_ context.Context, _ linkPool, _ *blocktype.Set, _, _ string, _ float64, _ []Link) (int, error))(WriteLinks)
+// Compile-time guard: that same handle IS WriteLinks' second parameter — the
+// conversion only compiles while the two shapes are identical (the production
+// caller passes *pgxpool.Pool, which implicitly satisfies it — covered by the
+// wider build).
+var _ = (func(_ context.Context, _ interface {
+	pgxdb.Beginner
+	pgxdb.Execer
+}, _ *blocktype.Set, _, _ string, _ float64, _ []Link) (int, error))(WriteLinks)
 
 // silence "unused" for pgx import in some build configurations.
 var _ = pgx.TxOptions{}

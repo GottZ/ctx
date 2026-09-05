@@ -215,7 +215,7 @@ func TestMintOwnerKey_Integration(t *testing.T) {
 		}
 	})
 
-	// Composable in a caller-owned transaction: MintOwnerKey takes a rowQuerier, so
+	// Composable in a caller-owned transaction: MintOwnerKey takes a pgxdb.Rower, so
 	// the bootstrap can mint the owner key on the SAME tx as the tenant create — the
 	// row is visible only after the caller commits (atomicity), and a rollback mints
 	// nothing.

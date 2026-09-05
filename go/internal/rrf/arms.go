@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // Querier is the minimum statement surface the retrieval calls need. Both
@@ -13,11 +13,13 @@ import (
 // or inside a caller-owned transaction (the B-W2 measurement seam), without a
 // second code path and without the rrf package learning about transactions.
 //
-// The pattern is guard.guardPool (internal/guard/guard.go:74-80) one level
-// narrower — read-only, so no Exec.
+// Read-only, so no Execer. The composition carries a NAME because it is part
+// of this package's exported surface — SearchTx and ArmRanksTx take it, the
+// B-W2 seam wraps it (arms_seam_bw2_integration_test.go) and docs/architecture
+// names it — while the method signatures themselves live once, in pgxdb.
 type Querier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	pgxdb.Querier
+	pgxdb.Rower
 }
 
 // ArmRow is one ctx_rrf_arms output row (migration 137, ninth column added in

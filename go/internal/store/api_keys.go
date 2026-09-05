@@ -46,15 +46,6 @@ type ApiKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
-// rowQuerier is the minimal querier satisfied by BOTH *pgxpool.Pool and pgx.Tx
-// — each exposes QueryRow with this exact signature. It lets insertApiKeyTx run
-// standalone on the pool (CreateApiKey) or compose into a larger bootstrap
-// transaction (the upcoming owner-key / quota-gated mint paths) without the
-// primitive caring which it received.
-type rowQuerier interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
 // ErrWriteScopeNotAllowed is returned by the mint/update paths when a requested
 // write_scope is not a subset of allowed_scopes ∪ {home_scope} (078, E4b invariant,
 // enforcement path (a)). A write_scope with no matching read right would be a
@@ -92,15 +83,15 @@ func validateWriteScopes(homeScope string, allowedScopes, writeScopes []string) 
 // insertApiKeyTx is the single INSERT path for a new api key: it validates the
 // inputs, applies the tenant-aware {shared} default (R-LEAK5), generates and
 // hashes the key, and inserts the row with an EXPLICIT tenant_role. q may be a
-// *pgxpool.Pool or a pgx.Tx (rowQuerier), so the primitive runs standalone or
-// composes into a tenant-bootstrap transaction.
+// *pgxpool.Pool or a pgx.Tx (both are a pgxdb.Rower), so the primitive runs
+// standalone or composes into a tenant-bootstrap transaction.
 //
 // role MUST be a member of the 059 CHECK domain ('owner'|'admin'|'member'); the
 // caller passes a fixed store-side string, never raw user input. The INSERT and
 // RETURNING now carry tenant_role — additive vs v4.0.1 (whose create path
 // omitted the column and returned TenantRole==""); the column has existed since
 // 059, so this is SQL-only, NO migration.
-func insertApiKeyTx(ctx context.Context, q rowQuerier, label, homeScope string, allowedScopes, writeScopes []string, tenantID, role string) (ApiKey, string, error) {
+func insertApiKeyTx(ctx context.Context, q pgxdb.Rower, label, homeScope string, allowedScopes, writeScopes []string, tenantID, role string) (ApiKey, string, error) {
 	if label == "" {
 		return ApiKey{}, "", fmt.Errorf("api_keys: label is required")
 	}
@@ -278,9 +269,9 @@ func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope 
 
 // MintOwnerKey mints an OWNER key bound to tenantID with NO quota check and NO
 // transaction of its own — the single sanctioned path to role='owner'. q may be a
-// *pgxpool.Pool OR a pgx.Tx (rowQuerier), so the server-admin tenant-create
-// bootstrap can compose it INTO its own CreateTenant transaction: the tenant row
-// and its first owner key then commit together or not at all.
+// *pgxpool.Pool OR a pgx.Tx (both are a pgxdb.Rower), so the server-admin
+// tenant-create bootstrap can compose it INTO its own CreateTenant transaction:
+// the tenant row and its first owner key then commit together or not at all.
 //
 // It deliberately bypasses MintKeyWithQuota's cap: the bootstrap owner key is the
 // tenant's FIRST key and would otherwise wedge on a max_keys=0 default. This is the
@@ -288,7 +279,7 @@ func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope 
 // (MintKeyWithQuota), so an owner role can arise only here or via the owner-gated
 // api-key-update (design/04 §D-B point 4, closing AM3). No cap, no tenant-row lock:
 // the caller owns the transaction scope.
-func MintOwnerKey(ctx context.Context, q rowQuerier, label, homeScope string, allowedScopes []string, tenantID string) (ApiKey, string, error) {
+func MintOwnerKey(ctx context.Context, q pgxdb.Rower, label, homeScope string, allowedScopes []string, tenantID string) (ApiKey, string, error) {
 	// Owner keys mint with empty write_scopes (nil): an owner's home_scope IS the
 	// tenant's first scope and covers the bootstrap corpus; explicit write_scopes
 	// are a later, per-key concern via api-key-update.
@@ -665,7 +656,7 @@ func enforceOwnerInvariantsTx(ctx context.Context, tx pgx.Tx, rk resolvedKey, id
 // found=false so the caller cannot distinguish a foreign key from a nonexistent one
 // (no oracle, mirrors DeleteApiKey). Split out of UpdateApiKey to keep its cyclomatic
 // complexity under the cyclop limit.
-func resolveKeyForUpdate(ctx context.Context, q rowQuerier, id string, isServerAdmin bool, tenantArg *string) (r resolvedKey, found bool, err error) {
+func resolveKeyForUpdate(ctx context.Context, q pgxdb.Rower, id string, isServerAdmin bool, tenantArg *string) (r resolvedKey, found bool, err error) {
 	err = q.QueryRow(ctx,
 		`SELECT tenant_id::text, tenant_role, active, home_scope, allowed_scopes
 		   FROM context_api_keys

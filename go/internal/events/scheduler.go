@@ -2161,7 +2161,7 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 		return false, nil
 	}
 
-	// StoreEmbedding within tx (execQuerier: pgx.Tx satisfies it too).
+	// StoreEmbedding within tx (pgxdb.Execer: pgx.Tx satisfies it too).
 	// Atomic with the FOR UPDATE SKIP LOCKED pick: lock holds until commit.
 	// Model is the ACTUALLY SERVING backend's role model (served, not the
 	// configured/requested one — W04-1 provenance).

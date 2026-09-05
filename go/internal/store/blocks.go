@@ -16,10 +16,10 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/clustersql"
 	"github.com/GottZ/ctx/internal/derived"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/redact"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
 )
@@ -325,10 +325,10 @@ var ErrProvenanceProtected = errors.New("store: block carries derived provenance
 // The upsert calls it only on the INSERT path (no live conflicting row), never
 // on the hot conflict path.
 //
-// q is the rowQuerier of api_keys.go — satisfied by both *pgxpool.Pool (the
-// ingest pre-flight) and pgx.Tx (inside the upsert's own transaction), so the
+// q is a one-row handle — satisfied by both *pgxpool.Pool (the ingest
+// pre-flight) and pgx.Tx (inside the upsert's own transaction), so the
 // statement exists once.
-func ProvenanceClaimed(ctx context.Context, q rowQuerier, category, title, scope string) (bool, error) {
+func ProvenanceClaimed(ctx context.Context, q pgxdb.Rower, category, title, scope string) (bool, error) {
 	var claimed bool
 	if err := q.QueryRow(ctx,
 		`SELECT EXISTS (
@@ -396,7 +396,7 @@ func writeProvenanceIdentity(metadata map[string]any) (provenanceIdentity, bool)
 // this probe the fresh upsert would let ANY arm take a title that another arm's
 // archived block still holds. The predicate is ProvenanceClaimed's, plus the
 // identity mismatch — same GIN-served leading term, same scale properties.
-func foreignProvenanceClaim(ctx context.Context, q rowQuerier, category, title, scope string, id provenanceIdentity) (bool, error) {
+func foreignProvenanceClaim(ctx context.Context, q pgxdb.Rower, category, title, scope string, id provenanceIdentity) (bool, error) {
 	var claimed bool
 	if err := q.QueryRow(ctx,
 		`SELECT EXISTS (
@@ -721,25 +721,19 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	return b, nil
 }
 
-// execQuerier is the minimal querier satisfied by BOTH *pgxpool.Pool and pgx.Tx
-// — each exposes Exec with this exact signature. It lets StoreEmbedding run
-// standalone on the pool (query.go re-embed path) or compose into a caller-owned
-// transaction (scheduler backfill: the write must be atomic with the
-// FOR UPDATE SKIP LOCKED pick so the row lock holds until commit).
-type execQuerier interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
 // StoreEmbedding updates the embedding vector for a block, together with the
 // model that produced it (Achse 04 W04-1: embed_model is the provenance
 // trail the re-embed statemachine builds on — "NULL = no vector" only holds
-// if every write is attributed). It accepts any execQuerier so callers can
-// run it on the pool or inside their own tx.
+// if every write is attributed). It accepts any pgxdb.Execer, which BOTH
+// *pgxpool.Pool and pgx.Tx satisfy: the write runs standalone on the pool
+// (query.go re-embed path) or composes into a caller-owned transaction
+// (scheduler backfill, where it must be atomic with the FOR UPDATE SKIP
+// LOCKED pick so the row lock holds until commit).
 //
 // Fail-closed on model=="": a vector without provenance is worse than no
 // vector at all (it would silently re-inherit the DDL default or a stale
 // value) — rejected before the DB round-trip, no partial write.
-func StoreEmbedding(ctx context.Context, q execQuerier, blockID, model string, vec []float32) error {
+func StoreEmbedding(ctx context.Context, q pgxdb.Execer, blockID, model string, vec []float32) error {
 	if model == "" {
 		return fmt.Errorf("store: store embedding: model is required (block %s)", blockID)
 	}
@@ -757,11 +751,11 @@ func StoreEmbedding(ctx context.Context, q execQuerier, blockID, model string, v
 // design/04 §4.3 Store row): the migration worker writes the NEW space into
 // embedding_next/embed_model_next while the serving pair stays byte-identical
 // untouched until the cutover swap (§4.5 option c — zero retrieval
-// degradation during the whole backfill). Same execQuerier signature so the
+// degradation during the whole backfill). Same pgxdb.Execer signature so the
 // write composes into the worker's pick-holding tx (doctrine c80869c), same
 // fail-closed model=="" rule: an unattributed _next vector would be invisible
 // to the verify gate's embed_model_next check and could cutover silently.
-func StoreEmbeddingNext(ctx context.Context, q execQuerier, blockID, model string, vec []float32) error {
+func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model string, vec []float32) error {
 	if model == "" {
 		return fmt.Errorf("store: store embedding next: model is required (block %s)", blockID)
 	}
@@ -801,7 +795,7 @@ func StoreEmbeddingNext(ctx context.Context, q execQuerier, blockID, model strin
 //     belong to a specific migration's bookkeeping, not the regular
 //     backfill, and are the migration worker's (W04-4+) concern.
 //
-// This is the execQuerier-parameterized primitive (same pattern as
+// This is the pgxdb.Execer-parameterized primitive (same pattern as
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
 // clear to be atomic with another write — UpsertBlock's content-change path,
 // W04-8 — passes its own pgx.Tx. ClearEmbedding (below) is the pool-owned
@@ -809,7 +803,7 @@ func StoreEmbeddingNext(ctx context.Context, q execQuerier, blockID, model strin
 // (manage-update, MCP update). Kept as ONE implementation so future
 // extensions of the clear semantics (e.g. a migration-scoped memo delete)
 // land in both call shapes automatically, never just one.
-func ClearEmbeddingTx(ctx context.Context, q execQuerier, blockID string) error {
+func ClearEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) error {
 	if _, err := q.Exec(ctx,
 		`UPDATE context_blocks
 		 SET embedding = NULL, embed_model = NULL,

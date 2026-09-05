@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // Querier is the minimal read surface Introspect needs — satisfied by
@@ -18,9 +18,12 @@ import (
 // unwrapped (Check's normal path) or pinned to one rolled-back transaction
 // (not currently exercised by Introspect itself, but kept generic per
 // design/03 §4.1's exact Introspect(ctx, q Querier) signature).
+//
+// The composition keeps its NAME because ten signatures in this package carry
+// it, Introspect's among them; the method signatures live once, in pgxdb.
 type Querier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	pgxdb.Querier
+	pgxdb.Rower
 }
 
 func sha256Hex(s string) string {

@@ -14,8 +14,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // Status mirrors context_embed_migrations.status (migration 114's CHECK
@@ -81,15 +80,18 @@ var (
 	ErrReasonRequired = errors.New("embedmigration: reason is required for this transition")
 )
 
-// Querier is the minimal interface satisfied by both *pgxpool.Pool and
-// pgx.Tx — mirrors internal/store's unexported execQuerier so Transition and
-// Create can run standalone on the pool or inside a caller's transaction
-// (e.g. the future cutover swap-tx, W04-6, wants the status CAS in the SAME
-// tx as the column renames).
+// Querier is the full statement surface, satisfied by both *pgxpool.Pool and
+// pgx.Tx, so Transition and Create can run standalone on the pool or inside a
+// caller's transaction (e.g. the future cutover swap-tx, W04-6, wants the
+// status CAS in the SAME tx as the column renames).
+//
+// The composition keeps its NAME because internal/events spells it in six
+// signatures of its own (embed_cutover.go); the method signatures live once,
+// in pgxdb.
 type Querier interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	pgxdb.Execer
+	pgxdb.Querier
+	pgxdb.Rower
 }
 
 // TransitionOption sets an additional column atomically with the CAS

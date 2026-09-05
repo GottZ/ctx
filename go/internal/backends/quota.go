@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // Per-tenant quota enforcement (MT T36, 04-W4, design/04 §4.5/§6.2). Two budgets,
@@ -69,7 +71,7 @@ type tenantState struct {
 // swapped on a CAS-guarded TTL refresh. Construct with NewQuotaAccountant; the
 // zero value is not usable.
 type QuotaAccountant struct {
-	q       Querier
+	q       pgxdb.Querier
 	ttl     time.Duration
 	nowFn   func() time.Time // injectable clock for tests (real: time.Now)
 	cache   atomic.Pointer[map[string]tenantState]
@@ -79,7 +81,7 @@ type QuotaAccountant struct {
 
 // NewQuotaAccountant builds an accountant over q (a *pgxpool.Pool in production)
 // with the given cache TTL. A TTL <= 0 falls back to 30s (§6.2 guidance).
-func NewQuotaAccountant(q Querier, ttl time.Duration) *QuotaAccountant {
+func NewQuotaAccountant(q pgxdb.Querier, ttl time.Duration) *QuotaAccountant {
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}

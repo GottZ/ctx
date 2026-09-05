@@ -6,21 +6,12 @@ import (
 	"sort"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/derived"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
-
-// rowsQuerier is the minimal pgx surface ResolveSources reads through —
-// satisfied by BOTH *pgxpool.Pool and pgx.Tx, so the arm can resolve inside the
-// transaction that later writes the derivative (the resolve result and the
-// write then see the same snapshot) or stand alone on the pool. Read-only, so
-// no Exec: the same one-level-narrower shape rrf.Querier (arms.go:18-20) uses.
-type rowsQuerier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
 
 // SensitivityFloor is config.ScopeFloor.Apply, handed in as a function value.
 //
@@ -212,6 +203,11 @@ const resolveRestSQL = `
 // §4.5.4): it turns a declared id list into the ONE result that feeds both
 // derived.CiteGate and derived.Validate.
 //
+// q is read-only on purpose (a pgxdb.Querier, no Exec), and BOTH *pgxpool.Pool
+// and pgx.Tx satisfy it: the arm can resolve inside the transaction that later
+// writes the derivative — resolve result and write then see the same snapshot
+// — or stand alone on the pool.
+//
 // set resolves retrieval.untrusted per source TYPE for V11 — it falls out of
 // the registry snapshot without a second query (§4.8.3).
 //
@@ -222,7 +218,7 @@ const resolveRestSQL = `
 // would silently reproduce exactly the gap W01-1 review #6 describes — a
 // FlooredMax that equals the raw maximum and passes all three V13 clauses
 // without the floor ever having run. Fail-closed instead.
-func ResolveSources(ctx context.Context, q rowsQuerier, set *blocktype.Set, floor SensitivityFloor, ids []string, scope string) (SourceSet, error) {
+func ResolveSources(ctx context.Context, q pgxdb.Querier, set *blocktype.Set, floor SensitivityFloor, ids []string, scope string) (SourceSet, error) {
 	if floor == nil {
 		return SourceSet{}, fmt.Errorf("store: resolve sources: no sensitivity floor (design/01 §4.8.1a)")
 	}
@@ -293,7 +289,7 @@ func ResolveSources(ctx context.Context, q rowsQuerier, set *blocktype.Set, floo
 }
 
 // readFound runs query one and fills s.found.
-func (s *SourceSet) readFound(ctx context.Context, q rowsQuerier, set *blocktype.Set, ids []string, scope string) error {
+func (s *SourceSet) readFound(ctx context.Context, q pgxdb.Querier, set *blocktype.Set, ids []string, scope string) error {
 	rows, err := q.Query(ctx, resolveFoundSQL, ids, scope)
 	if err != nil {
 		return fmt.Errorf("store: resolve sources: read sources: %w", err)
@@ -318,7 +314,7 @@ func (s *SourceSet) readFound(ctx context.Context, q rowsQuerier, set *blocktype
 
 // classifyRest runs query two and splits the leftovers per §4.5.4. Both returned
 // slices are sorted, so a violation message and a test assertion are stable.
-func classifyRest(ctx context.Context, q rowsQuerier, rest []string, scope string) (missing, foreign []string, err error) {
+func classifyRest(ctx context.Context, q pgxdb.Querier, rest []string, scope string) (missing, foreign []string, err error) {
 	rows, err := q.Query(ctx, resolveRestSQL, rest)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store: resolve sources: classify unresolved: %w", err)

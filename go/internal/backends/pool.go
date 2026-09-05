@@ -11,14 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 )
-
-// Querier is the minimal pgx surface the pool reads rows through.
-// *pgxpool.Pool satisfies it; tests inject fakes.
-type Querier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
 
 // SecretResolver resolves an F2 secret name to its plaintext. Errors must be
 // value-free (store.ResolveSecret contract). The pool never persists the
@@ -100,7 +95,7 @@ type snapshot struct {
 // context_backends (atomic pointer swap, F1 store pattern) plus in-memory
 // per-backend health that survives reloads and dies with the process.
 type Pool struct {
-	q       Querier
+	q       pgxdb.Querier
 	secrets SecretResolver
 	snap    atomic.Pointer[snapshot]
 	version atomic.Int64
@@ -112,7 +107,7 @@ type Pool struct {
 // NewPool creates an empty pool bound to its row source and secret resolver.
 // Call Reload to publish the first snapshot. secrets may be nil (keyless
 // stub, P1–P4): api_key_refs then resolve to empty keys with a warning.
-func NewPool(q Querier, secrets SecretResolver) *Pool {
+func NewPool(q pgxdb.Querier, secrets SecretResolver) *Pool {
 	p := &Pool{q: q, secrets: secrets, health: make(map[string]*healthState)}
 	p.snap.Store(&snapshot{})
 	return p

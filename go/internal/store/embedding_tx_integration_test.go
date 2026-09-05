@@ -1,7 +1,7 @@
 //go:build integration
 
-// Integration test for Welle M-2 (W49 altlast): StoreEmbedding accepts an
-// execQuerier (satisfied by both *pgxpool.Pool and pgx.Tx), so the scheduler
+// Integration test for Welle M-2 (W49 altlast): StoreEmbedding accepts a
+// pgxdb.Execer (satisfied by both *pgxpool.Pool and pgx.Tx), so the scheduler
 // backfill can run the embedding write INSIDE its FOR-UPDATE-SKIP-LOCKED tx
 // instead of duplicating the raw UPDATE inline. The invariant that matters is
 // atomicity: if the surrounding tx rolls back, the embedding write must roll
