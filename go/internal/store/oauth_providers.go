@@ -35,6 +35,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/oidc"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/sealbox"
 )
 
@@ -235,56 +236,51 @@ func CreateOAuthProvider(ctx context.Context, pool *pgxpool.Pool, box *sealbox.B
 		algs = []string{"RS256"}
 	}
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("oauth provider: begin: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-
-	// Row first, secret second: an invalid slug then fails on the migration-100
-	// CHECK (mapped above) before ValidSecretName inside PutSecret could ever
-	// see it — one authoritative error surface for the slug format.
 	var p OAuthProvider
-	var claimRaw []byte
-	err = tx.QueryRow(ctx,
-		`INSERT INTO context_oauth_providers
-		    (slug, type, display_name, issuer, client_id, token_auth, redirect_base,
-		     scopes, auth_url, token_url, userinfo_url, id_token_algs,
-		     single_tenant_issuer, allowed_claim, created_by, created_by_principal)
-		 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''),
-		         $8, NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), $12,
-		         $13, $14, NULLIF($15, '')::uuid,
-		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = NULLIF($15, '')::uuid))
-		 RETURNING id, slug, type, display_name, issuer, client_id, token_auth,
-		           redirect_base, scopes, auth_url, token_url, userinfo_url,
-		           id_token_algs, single_tenant_issuer, allowed_claim, active,
-		           created_at, created_by`,
-		spec.Slug, spec.Type, spec.DisplayName, spec.Issuer, spec.ClientID, tokenAuth, spec.RedirectBase,
-		scopes, spec.AuthURL, spec.TokenURL, spec.UserinfoURL, algs,
-		spec.SingleTenantIssuer, claimJSON, spec.CreatedBy,
-	).Scan(&p.ID, &p.Slug, &p.Type, &p.DisplayName, &p.Issuer, &p.ClientID, &p.TokenAuth,
-		&p.RedirectBase, &p.Scopes, &p.AuthURL, &p.TokenURL, &p.UserinfoURL,
-		&p.IDTokenAlgs, &p.SingleTenantIssuer, &claimRaw, &p.Active,
-		&p.CreatedAt, &p.CreatedBy)
-	if err != nil {
-		return nil, mapOAuthProviderPgError(err, spec.Slug)
-	}
-	if p.AllowedClaim, err = decodeAllowedClaim(claimRaw); err != nil {
+	if err := pgxdb.Write(ctx, pool, pgxdb.At("oauth provider"), func(tx pgx.Tx) error {
+		// Row first, secret second: an invalid slug then fails on the migration-100
+		// CHECK (mapped above) before ValidSecretName inside PutSecret could ever
+		// see it — one authoritative error surface for the slug format.
+		var claimRaw []byte
+		err := tx.QueryRow(ctx,
+			`INSERT INTO context_oauth_providers
+			    (slug, type, display_name, issuer, client_id, token_auth, redirect_base,
+			     scopes, auth_url, token_url, userinfo_url, id_token_algs,
+			     single_tenant_issuer, allowed_claim, created_by, created_by_principal)
+			 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''),
+			         $8, NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), $12,
+			         $13, $14, NULLIF($15, '')::uuid,
+			         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = NULLIF($15, '')::uuid))
+			 RETURNING id, slug, type, display_name, issuer, client_id, token_auth,
+			           redirect_base, scopes, auth_url, token_url, userinfo_url,
+			           id_token_algs, single_tenant_issuer, allowed_claim, active,
+			           created_at, created_by`,
+			spec.Slug, spec.Type, spec.DisplayName, spec.Issuer, spec.ClientID, tokenAuth, spec.RedirectBase,
+			scopes, spec.AuthURL, spec.TokenURL, spec.UserinfoURL, algs,
+			spec.SingleTenantIssuer, claimJSON, spec.CreatedBy,
+		).Scan(&p.ID, &p.Slug, &p.Type, &p.DisplayName, &p.Issuer, &p.ClientID, &p.TokenAuth,
+			&p.RedirectBase, &p.Scopes, &p.AuthURL, &p.TokenURL, &p.UserinfoURL,
+			&p.IDTokenAlgs, &p.SingleTenantIssuer, &claimRaw, &p.Active,
+			&p.CreatedAt, &p.CreatedBy)
+		if err != nil {
+			return mapOAuthProviderPgError(err, spec.Slug)
+		}
+		if p.AllowedClaim, err = decodeAllowedClaim(claimRaw); err != nil {
+			return err
+		}
+
+		if secretRequired {
+			var by *string
+			if spec.CreatedBy != "" {
+				by = &spec.CreatedBy
+			}
+			if _, err := PutSecret(ctx, tx, secretName, GlobalScope, nonce, ciphertext, 1, by); err != nil {
+				return fmt.Errorf("oauth provider: persist secret: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
 		return nil, err
-	}
-
-	if secretRequired {
-		var by *string
-		if spec.CreatedBy != "" {
-			by = &spec.CreatedBy
-		}
-		if _, err := PutSecret(ctx, tx, secretName, GlobalScope, nonce, ciphertext, 1, by); err != nil {
-			return nil, fmt.Errorf("oauth provider: persist secret: %w", err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("oauth provider: commit: %w", err)
 	}
 	p.HasSecret = secretRequired
 	return &p, nil
@@ -378,24 +374,25 @@ func DeleteOAuthProvider(ctx context.Context, pool *pgxpool.Pool, slug string) (
 	if slug == "" {
 		return false, invalidf("slug is required")
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("oauth provider: begin: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-
-	tag, err := tx.Exec(ctx, `DELETE FROM context_oauth_providers WHERE slug = $1`, slug)
-	if err != nil {
-		return false, fmt.Errorf("oauth provider: delete %s: %w", slug, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return false, nil
-	}
-	if _, err := DeleteSecret(ctx, tx, OAuthProviderSecretName(slug), GlobalScope, nil); err != nil {
-		return false, fmt.Errorf("oauth provider: sweep secret for %s: %w", slug, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("oauth provider: commit: %w", err)
+	if err := pgxdb.Write(ctx, pool, pgxdb.At("oauth provider"), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM context_oauth_providers WHERE slug = $1`, slug)
+		if err != nil {
+			return fmt.Errorf("oauth provider: delete %s: %w", slug, err)
+		}
+		if tag.RowsAffected() == 0 {
+			// (false, nil) before the commit in the straight-line form —
+			// pgxdb.ErrRollback keeps that miss a rollback instead of a commit.
+			return pgxdb.ErrRollback
+		}
+		if _, err := DeleteSecret(ctx, tx, OAuthProviderSecretName(slug), GlobalScope, nil); err != nil {
+			return fmt.Errorf("oauth provider: sweep secret for %s: %w", slug, err)
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, pgxdb.ErrRollback) {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }

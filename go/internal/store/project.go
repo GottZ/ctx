@@ -169,68 +169,75 @@ type CreateProjectParams struct {
 // atomicity gate goes RED for any two-call (pool-scope-assign then pool-insert)
 // implementation, where the scope would survive the failed insert.
 func CreateProject(ctx context.Context, pool *pgxpool.Pool, p CreateProjectParams) (row *ProjectRow, created bool, err error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, false, fmt.Errorf("store: create project begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// 1: idempotency on (tenant_id, identity). FOR UPDATE serialises a concurrent
-	// re-init of the same identity so two callers can not both pass the check and
-	// both assign a scope.
-	existing, err := scanProject(tx.QueryRow(ctx,
-		`SELECT `+projectSelect+` FROM context_projects
-		  WHERE tenant_id = $1::uuid AND identity = $2 FOR UPDATE`, p.TenantID, p.Identity))
-	if err != nil {
-		return nil, false, err
-	}
-	if existing != nil {
-		if err := tx.Commit(ctx); err != nil {
-			return nil, false, fmt.Errorf("store: create project idempotent commit: %w", err)
-		}
-		return existing, false, nil
-	}
-
-	// 2: assign the scope (fail-closed quota threaded through). Errors are the
-	// tenant-layer sentinels, surfaced unchanged.
-	if _, err = AssignTenantScopeTx(ctx, tx, p.TenantID, p.ScopeName, p.MaxScopes); err != nil {
-		return nil, false, err
-	}
-
-	// 3: insert the register row IN THE SAME TX. created_by '' → NULL (NULLIF +
-	// ::uuid); a non-live created_by → 23503 rolls back the scope from step 2.
-	var createdBy any
-	if p.CreatedBy != "" {
-		createdBy = p.CreatedBy
-	}
-	forge := p.Forge
-	if len(forge) == 0 {
-		forge = json.RawMessage(`{}`)
-	}
-	inserted, err := scanProject(tx.QueryRow(ctx,
-		`INSERT INTO context_projects (tenant_id, scope, identity, display_name, forge, created_by, created_by_principal)
-		 VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::uuid,
-		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $6::uuid))
-		 RETURNING `+projectSelect,
-		p.TenantID, p.ScopeName, p.Identity, p.DisplayName, forge, createdBy))
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			switch pgErr.Code {
-			case "23505":
-				// uq_projects_scope / uq_projects_identity: the scope from step 2 is
-				// fresh, so this is an identity race lost after the FOR UPDATE window.
-				return nil, false, ErrProjectExists
-			case "23503":
-				// created_by → context_api_keys FK: the acting key vanished mid-create.
-				return nil, false, fmt.Errorf("store: create project insert fk: %w", err)
+	var existing, inserted *ProjectRow
+	if err = pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: create project begin", Commit: "store: create project commit"},
+		func(tx pgx.Tx) error {
+			// 1: idempotency on (tenant_id, identity). FOR UPDATE serialises a concurrent
+			// re-init of the same identity so two callers can not both pass the check and
+			// both assign a scope.
+			var err error
+			existing, err = scanProject(tx.QueryRow(ctx,
+				`SELECT `+projectSelect+` FROM context_projects
+				  WHERE tenant_id = $1::uuid AND identity = $2 FOR UPDATE`, p.TenantID, p.Identity))
+			if err != nil {
+				return err
 			}
+			if existing != nil {
+				// The idempotent exit commits HERE: its commit failure carries its
+				// own wording, which one Stages pair cannot hold beside the tail
+				// commit's. errTxCommitted then stops the helper from committing again;
+				// its deferred rollback on the committed tx is the same no-op the
+				// deferred rollback in this function always was.
+				if cerr := tx.Commit(ctx); cerr != nil {
+					return fmt.Errorf("store: create project idempotent commit: %w", cerr)
+				}
+				return errTxCommitted
+			}
+
+			// 2: assign the scope (fail-closed quota threaded through). Errors are the
+			// tenant-layer sentinels, surfaced unchanged.
+			if _, err = AssignTenantScopeTx(ctx, tx, p.TenantID, p.ScopeName, p.MaxScopes); err != nil {
+				return err
+			}
+
+			// 3: insert the register row IN THE SAME TX. created_by '' → NULL (NULLIF +
+			// ::uuid); a non-live created_by → 23503 rolls back the scope from step 2.
+			var createdBy any
+			if p.CreatedBy != "" {
+				createdBy = p.CreatedBy
+			}
+			forge := p.Forge
+			if len(forge) == 0 {
+				forge = json.RawMessage(`{}`)
+			}
+			inserted, err = scanProject(tx.QueryRow(ctx,
+				`INSERT INTO context_projects (tenant_id, scope, identity, display_name, forge, created_by, created_by_principal)
+				 VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::uuid,
+				         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $6::uuid))
+				 RETURNING `+projectSelect,
+				p.TenantID, p.ScopeName, p.Identity, p.DisplayName, forge, createdBy))
+			if err != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) {
+					switch pgErr.Code {
+					case "23505":
+						// uq_projects_scope / uq_projects_identity: the scope from step 2 is
+						// fresh, so this is an identity race lost after the FOR UPDATE window.
+						return ErrProjectExists
+					case "23503":
+						// created_by → context_api_keys FK: the acting key vanished mid-create.
+						return fmt.Errorf("store: create project insert fk: %w", err)
+					}
+				}
+				return err
+			}
+			return nil
+		}); err != nil {
+		if errors.Is(err, errTxCommitted) {
+			return existing, false, nil
 		}
 		return nil, false, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("store: create project commit: %w", err)
 	}
 	return inserted, true, nil
 }
@@ -278,41 +285,47 @@ func DeleteProject(ctx context.Context, pool *pgxpool.Pool, id string) (bool, er
 	if id == "" {
 		return false, nil
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("store: delete project begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	var affected bool
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: delete project begin", Commit: "store: delete project commit"},
+		func(tx pgx.Tx) error {
+			// Resolve the scope the credentials live in (the project's own scope). A
+			// vanished/malformed id ⇒ nothing to delete (idempotent, no oracle).
+			var scope string
+			err := tx.QueryRow(ctx, `SELECT scope FROM context_projects WHERE id = $1::uuid`, id).Scan(&scope)
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Both "nothing to delete" exits committed HERE and handed the
+				// commit error back UNWRAPPED — a form the tail commit does not
+				// share, so each keeps its own commit and stops the helper.
+				return commitThenStop(ctx, tx)
+			}
+			if err != nil {
+				if pgxdb.MalformedUUID(err) {
+					return commitThenStop(ctx, tx) // malformed id → no row
+				}
+				return fmt.Errorf("store: delete project scope load: %w", err)
+			}
 
-	// Resolve the scope the credentials live in (the project's own scope). A
-	// vanished/malformed id ⇒ nothing to delete (idempotent, no oracle).
-	var scope string
-	err = tx.QueryRow(ctx, `SELECT scope FROM context_projects WHERE id = $1::uuid`, id).Scan(&scope)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, tx.Commit(ctx)
-	}
-	if err != nil {
-		if pgxdb.MalformedUUID(err) {
-			return false, tx.Commit(ctx) // malformed id → no row
+			// Drain the project-scoped credentials by their deterministic names BEFORE
+			// the register-delete (order is cosmetic — different table, no FK — but keeps
+			// the drain readable next to the row it belongs to).
+			if _, err := tx.Exec(ctx,
+				`DELETE FROM context_secrets WHERE scope = $1 AND name = ANY($2::text[])`,
+				scope, []string{WebhookSecretName(id), "forge.token." + id}); err != nil {
+				return fmt.Errorf("store: delete project secrets: %w", err)
+			}
+
+			tag, err := tx.Exec(ctx, `DELETE FROM context_projects WHERE id = $1::uuid`, id)
+			if err != nil {
+				return fmt.Errorf("store: delete project: %w", err)
+			}
+			affected = tag.RowsAffected() > 0
+			return nil
+		}); err != nil {
+		if errors.Is(err, errTxCommitted) {
+			return false, nil
 		}
-		return false, fmt.Errorf("store: delete project scope load: %w", err)
+		return false, err
 	}
-
-	// Drain the project-scoped credentials by their deterministic names BEFORE
-	// the register-delete (order is cosmetic — different table, no FK — but keeps
-	// the drain readable next to the row it belongs to).
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM context_secrets WHERE scope = $1 AND name = ANY($2::text[])`,
-		scope, []string{WebhookSecretName(id), "forge.token." + id}); err != nil {
-		return false, fmt.Errorf("store: delete project secrets: %w", err)
-	}
-
-	tag, err := tx.Exec(ctx, `DELETE FROM context_projects WHERE id = $1::uuid`, id)
-	if err != nil {
-		return false, fmt.Errorf("store: delete project: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("store: delete project commit: %w", err)
-	}
-	return tag.RowsAffected() > 0, nil
+	return affected, nil
 }

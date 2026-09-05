@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -123,46 +125,41 @@ func ListCommentPushCandidates(ctx context.Context, pool *pgxpool.Pool, projectI
 // this commit fails the forge issue exists without a local number and a re-run
 // would create a duplicate — the documented dual-write window (v1; §4.5.3).
 func FinalizePushCreateIssue(ctx context.Context, pool *pgxpool.Pool, blockID string, number int64, ctxHash string, ctxFields json.RawMessage) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("store: finalize push create begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Mapping: forge_id 0→number, base := ctxH (+ snapshot). Keyed on block_id
-	// (the per-block unique index) so the PK forge_id change is a plain UPDATE.
-	if _, err := tx.Exec(ctx, `
-		UPDATE context_project_sync_map
-		   SET forge_id = $2, base_hash = $3, synced_at = now(),
-		       conflict = false, conflict_at = NULL,
-		       metadata = metadata || $4::jsonb
-		 WHERE block_id = $1::uuid AND entity_kind = 'issue'`,
-		blockID, number, ctxHash, baseFieldsMeta(ctxFields)); err != nil {
-		return fmt.Errorf("store: finalize push create mapping: %w", err)
-	}
-	// Block title rename "#L<seq>"→"#<nr>" ($2 is the fully built "#<nr>" prefix,
-	// passed as text to avoid an int→text concat encode).
-	newPrefix := fmt.Sprintf("#%d", number)
-	if _, err := tx.Exec(ctx, `
-		UPDATE context_blocks
-		   SET title = regexp_replace(title, '^#L?\d+', $2), updated_at = now()
-		 WHERE id = $1::uuid`, blockID, newPrefix); err != nil {
-		return fmt.Errorf("store: finalize push create rename: %w", err)
-	}
-	// Comment-title cascade — ONE UPDATE over all comments of this issue. Comment
-	// base_hash is title-INDEPENDENT (projection {body}, §3.6), so only the titles
-	// cascade; the "defensiv base rewrite" of §4.5.2 is a no-op for comments by
-	// construction (the issue's own base was rewritten above).
-	if _, err := tx.Exec(ctx, `
-		UPDATE context_blocks
-		   SET title = regexp_replace(title, '^#L?\d+', $2), updated_at = now()
-		 WHERE parent_id = $1::uuid AND type_name = 'comment'`, blockID, newPrefix); err != nil {
-		return fmt.Errorf("store: finalize push create comment cascade: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("store: finalize push create commit: %w", err)
-	}
-	return nil
+	return pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: finalize push create begin", Commit: "store: finalize push create commit"},
+		func(tx pgx.Tx) error {
+			// Mapping: forge_id 0→number, base := ctxH (+ snapshot). Keyed on block_id
+			// (the per-block unique index) so the PK forge_id change is a plain UPDATE.
+			if _, err := tx.Exec(ctx, `
+			UPDATE context_project_sync_map
+			   SET forge_id = $2, base_hash = $3, synced_at = now(),
+			       conflict = false, conflict_at = NULL,
+			       metadata = metadata || $4::jsonb
+			 WHERE block_id = $1::uuid AND entity_kind = 'issue'`,
+				blockID, number, ctxHash, baseFieldsMeta(ctxFields)); err != nil {
+				return fmt.Errorf("store: finalize push create mapping: %w", err)
+			}
+			// Block title rename "#L<seq>"→"#<nr>" ($2 is the fully built "#<nr>" prefix,
+			// passed as text to avoid an int→text concat encode).
+			newPrefix := fmt.Sprintf("#%d", number)
+			if _, err := tx.Exec(ctx, `
+			UPDATE context_blocks
+			   SET title = regexp_replace(title, '^#L?\d+', $2), updated_at = now()
+			 WHERE id = $1::uuid`, blockID, newPrefix); err != nil {
+				return fmt.Errorf("store: finalize push create rename: %w", err)
+			}
+			// Comment-title cascade — ONE UPDATE over all comments of this issue. Comment
+			// base_hash is title-INDEPENDENT (projection {body}, §3.6), so only the titles
+			// cascade; the "defensiv base rewrite" of §4.5.2 is a no-op for comments by
+			// construction (the issue's own base was rewritten above).
+			if _, err := tx.Exec(ctx, `
+			UPDATE context_blocks
+			   SET title = regexp_replace(title, '^#L?\d+', $2), updated_at = now()
+			 WHERE parent_id = $1::uuid AND type_name = 'comment'`, blockID, newPrefix); err != nil {
+				return fmt.Errorf("store: finalize push create comment cascade: %w", err)
+			}
+			return nil
+		})
 }
 
 // FinalizePushCreateComment closes a comment push-create: forge_id 0→id, base :=
@@ -203,13 +200,7 @@ func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, ctxHash s
 // content, §4.5.2 data-loss guard). Reuses the 3-way conflict primitive so the
 // surface (forge-sync-status/CLI/UI) is identical to a pull-side conflict.
 func FlagPushConflict(ctx context.Context, pool *pgxpool.Pool, blockID string, at time.Time) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := FlagSyncMapConflict(ctx, tx, blockID, at); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		return FlagSyncMapConflict(ctx, tx, blockID, at)
+	})
 }

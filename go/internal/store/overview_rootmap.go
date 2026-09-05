@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -352,25 +353,29 @@ func cappedCount(ctx context.Context, pool *pgxpool.Pool, what string, timeout t
 // has a transaction block to be local to. The tx is read-only in effect and
 // always rolled back — nothing here needs to commit.
 func cappedCountTx(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration, sql string, args ...any) (int, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-
-	if timeout > 0 {
-		ms := timeout.Milliseconds()
-		if ms < 1 {
-			ms = 1 // a sub-millisecond budget must not round down to "no cap"
-		}
-		if _, err := tx.Exec(ctx, `SELECT set_config('statement_timeout', $1, true)`,
-			fmt.Sprintf("%dms", ms)); err != nil {
-			return 0, err
-		}
-	}
-
 	var n int
-	if err := tx.QueryRow(ctx, sql, args...).Scan(&n); err != nil {
+	// A SONDE, not a write: the straight-line form ended this transaction with
+	// its deferred rollback and never committed at all (zero tx.Commit in the
+	// pre-wave function). pgxdb.Probe is exactly that bracket — BeginTx, fn,
+	// always the detached rollback, never a commit — so the count needs no
+	// commit-less exit of its own. The rollback keeps the detached form it
+	// always had (context.WithoutCancel) and gains pgxdb's grace bound. An
+	// empty begin label means a failed BeginTx travels back unwrapped, as it
+	// did before.
+	if err := pgxdb.Probe(ctx, pool, "", func(tx pgx.Tx) error {
+		if timeout > 0 {
+			ms := timeout.Milliseconds()
+			if ms < 1 {
+				ms = 1 // a sub-millisecond budget must not round down to "no cap"
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('statement_timeout', $1, true)`,
+				fmt.Sprintf("%dms", ms)); err != nil {
+				return err
+			}
+		}
+
+		return tx.QueryRow(ctx, sql, args...).Scan(&n)
+	}); err != nil {
 		return 0, err
 	}
 	return n, nil

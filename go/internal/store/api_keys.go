@@ -226,43 +226,44 @@ var ErrKeyQuotaExceeded = errors.New("store: tenant key quota exceeded")
 // count and the insert are one atomic unit. role MUST be a member of the 059 CHECK
 // domain; self-service passes a fixed "member" (owner is the MintOwnerKey path).
 func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes, writeScopes []string, tenantID, role string, maxKeys *int) (ApiKey, string, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return ApiKey{}, "", fmt.Errorf("api_keys: mint begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	var (
+		key       ApiKey
+		plaintext string
+	)
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "api_keys: mint begin", Commit: "api_keys: mint commit"},
+		func(tx pgx.Tx) error {
 
-	// Lock the owning tenant row: per-tenant serialisation + existence check in one
-	// step. No row (or a malformed id → 22P02) → ErrTenantNotFound (404, no oracle).
-	var lockedID string
-	if err = tx.QueryRow(ctx,
-		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&lockedID); err != nil {
-		if pgxdb.AbsentOrMalformed(err) {
-			return ApiKey{}, "", ErrTenantNotFound
-		}
-		return ApiKey{}, "", fmt.Errorf("api_keys: mint tenant lock: %w", err)
-	}
+			// Lock the owning tenant row: per-tenant serialisation + existence check in one
+			// step. No row (or a malformed id → 22P02) → ErrTenantNotFound (404, no oracle).
+			var lockedID string
+			if err := tx.QueryRow(ctx,
+				`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&lockedID); err != nil {
+				if pgxdb.AbsentOrMalformed(err) {
+					return ErrTenantNotFound
+				}
+				return fmt.Errorf("api_keys: mint tenant lock: %w", err)
+			}
 
-	// Quota cap (nil / negative = unlimited). ACTIVE-only count under the lock so it
-	// observes any competing mint's committed insert — race-tight — AND so revoked
-	// keys do not permanently consume the budget (S3b).
-	if maxKeys != nil && *maxKeys >= 0 {
-		var cnt int
-		if err = tx.QueryRow(ctx,
-			`SELECT count(*) FROM context_api_keys WHERE tenant_id = $1::uuid AND active = true`, tenantID).Scan(&cnt); err != nil {
-			return ApiKey{}, "", fmt.Errorf("api_keys: mint count: %w", err)
-		}
-		if cnt >= *maxKeys {
-			return ApiKey{}, "", ErrKeyQuotaExceeded
-		}
-	}
+			// Quota cap (nil / negative = unlimited). ACTIVE-only count under the lock so it
+			// observes any competing mint's committed insert — race-tight — AND so revoked
+			// keys do not permanently consume the budget (S3b).
+			if maxKeys != nil && *maxKeys >= 0 {
+				var cnt int
+				if err := tx.QueryRow(ctx,
+					`SELECT count(*) FROM context_api_keys WHERE tenant_id = $1::uuid AND active = true`, tenantID).Scan(&cnt); err != nil {
+					return fmt.Errorf("api_keys: mint count: %w", err)
+				}
+				if cnt >= *maxKeys {
+					return ErrKeyQuotaExceeded
+				}
+			}
 
-	key, plaintext, err := insertApiKeyTx(ctx, tx, label, homeScope, allowedScopes, writeScopes, tenantID, role)
-	if err != nil {
+			var err error
+			key, plaintext, err = insertApiKeyTx(ctx, tx, label, homeScope, allowedScopes, writeScopes, tenantID, role)
+			return err
+		}); err != nil {
 		return ApiKey{}, "", err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return ApiKey{}, "", fmt.Errorf("api_keys: mint commit: %w", err)
 	}
 	return key, plaintext, nil
 }
@@ -375,89 +376,93 @@ func TenantAPIKeyIDs(ctx context.Context, pool *pgxpool.Pool, tenantID string) (
 func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string,
 	isServerAdmin, callerMayManageOwner bool) (bool, error) {
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("api_keys: delete begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
+	var affected bool
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "api_keys: delete begin", Commit: "api_keys: delete commit"},
+		func(tx pgx.Tx) error {
 
-	// NULL-on-empty inline idiom (ListApiKeys / UpdateApiKey house style): a
-	// non-server-admin with an empty callerTenant yields a NULL tenant arg →
-	// fail-closed in the ($isServerAdmin OR tenant_id=$callerTenant) constraint.
-	var tenantArg *string
-	if !isServerAdmin && callerTenant != "" {
-		tenantArg = &callerTenant
-	}
+			// NULL-on-empty inline idiom (ListApiKeys / UpdateApiKey house style): a
+			// non-server-admin with an empty callerTenant yields a NULL tenant arg →
+			// fail-closed in the ($isServerAdmin OR tenant_id=$callerTenant) constraint.
+			var tenantArg *string
+			if !isServerAdmin && callerTenant != "" {
+				tenantArg = &callerTenant
+			}
 
-	// (1) Resolve the target's tenant + current role/active WITH the tenant
-	// constraint (the shared helper with UpdateApiKey). Zero rows — wrong tenant,
-	// absent, or a malformed id (22P02) — collapses to (false, nil): no row is
-	// touched and the caller cannot tell a foreign key from a nonexistent one.
-	rk, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
-	if err != nil {
+			// (1) Resolve the target's tenant + current role/active WITH the tenant
+			// constraint (the shared helper with UpdateApiKey). Zero rows — wrong tenant,
+			// absent, or a malformed id (22P02) — collapses to (false, nil): no row is
+			// touched and the caller cannot tell a foreign key from a nonexistent one.
+			rk, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return pgxdb.ErrRollback // foreign / absent / malformed id — no oracle (L2)
+			}
+			targetTenant, curRole, curActive := rk.tenant, rk.role, rk.active
+
+			// (2) Serialisation point: lock the target key's TENANT row (see UpdateApiKey's
+			// lock-target rationale). tenant_id is a NOT NULL FK, so the row is guaranteed.
+			var lockedTenant string
+			if err = tx.QueryRow(ctx,
+				`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, targetTenant).Scan(&lockedTenant); err != nil {
+				return fmt.Errorf("api_keys: delete tenant lock: %w", err)
+			}
+
+			const ownerRole = "owner"
+			// A revoke removes owner power only when the target is currently active (active
+			// true→false); re-revoking an already-inactive key removes nothing → no guard.
+			removesOwnerPower := curActive
+
+			// (3) Owner-Protection (AM6(b)): only an owner / server-admin may revoke an
+			// OWNER key. An admin (callerMayManageOwner=false) → ErrOwnerProtected. Fires
+			// only for a same-tenant owner target — a foreign target already collapsed to
+			// (false, nil) in (1), before the role was known (no cross-tenant oracle).
+			if curRole == ownerRole && removesOwnerPower && !callerMayManageOwner {
+				return ErrOwnerProtected
+			}
+
+			// (4) Last-Owner (AM6(a)) under the lock: revoking an ACTIVE owner key may drop
+			// the active-owner count below one. Count the OTHER active owners (id <> target)
+			// — "does >= 1 owner remain after the revoke". Read under the lock, a serialised
+			// concurrent revoke of a DIFFERENT owner key is already committed → the second
+			// call sees zero others → ErrLastOwner (the race riegel).
+			if curRole == ownerRole && curActive {
+				var others int
+				if err = tx.QueryRow(ctx,
+					`SELECT count(*) FROM context_api_keys
+					  WHERE tenant_id = $1::uuid AND tenant_role = 'owner' AND active = true AND id <> $2::uuid`,
+					targetTenant, id).Scan(&others); err != nil {
+					return fmt.Errorf("api_keys: delete owner count: %w", err)
+				}
+				if others < 1 {
+					return ErrLastOwner
+				}
+			}
+
+			// (5) Soft-delete. Tenant constraint repeated in the WHERE (no cross-tenant
+			// revoke); `active = true` keeps re-deletes idempotent (already-inactive → 0
+			// rows → false). The 22P02 case is already absorbed by resolveKeyForUpdate, so
+			// this Exec runs only on a well-formed, resolved id.
+			tag, err := tx.Exec(ctx,
+				`UPDATE context_api_keys SET active = false, updated_at = now()
+				  WHERE id = $1::uuid AND active = true
+				    AND ($2::boolean OR tenant_id = $3::uuid)`,
+				id, isServerAdmin, tenantArg,
+			)
+			if err != nil {
+				return fmt.Errorf("api_keys: delete: %w", err)
+			}
+			affected = tag.RowsAffected() > 0
+			return nil
+		}); err != nil {
+		if errors.Is(err, pgxdb.ErrRollback) {
+			return false, nil
+		}
 		return false, err
 	}
-	if !found {
-		return false, nil // foreign / absent / malformed id — no oracle (L2)
-	}
-	targetTenant, curRole, curActive := rk.tenant, rk.role, rk.active
-
-	// (2) Serialisation point: lock the target key's TENANT row (see UpdateApiKey's
-	// lock-target rationale). tenant_id is a NOT NULL FK, so the row is guaranteed.
-	var lockedTenant string
-	if err = tx.QueryRow(ctx,
-		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, targetTenant).Scan(&lockedTenant); err != nil {
-		return false, fmt.Errorf("api_keys: delete tenant lock: %w", err)
-	}
-
-	const ownerRole = "owner"
-	// A revoke removes owner power only when the target is currently active (active
-	// true→false); re-revoking an already-inactive key removes nothing → no guard.
-	removesOwnerPower := curActive
-
-	// (3) Owner-Protection (AM6(b)): only an owner / server-admin may revoke an
-	// OWNER key. An admin (callerMayManageOwner=false) → ErrOwnerProtected. Fires
-	// only for a same-tenant owner target — a foreign target already collapsed to
-	// (false, nil) in (1), before the role was known (no cross-tenant oracle).
-	if curRole == ownerRole && removesOwnerPower && !callerMayManageOwner {
-		return false, ErrOwnerProtected
-	}
-
-	// (4) Last-Owner (AM6(a)) under the lock: revoking an ACTIVE owner key may drop
-	// the active-owner count below one. Count the OTHER active owners (id <> target)
-	// — "does >= 1 owner remain after the revoke". Read under the lock, a serialised
-	// concurrent revoke of a DIFFERENT owner key is already committed → the second
-	// call sees zero others → ErrLastOwner (the race riegel).
-	if curRole == ownerRole && curActive {
-		var others int
-		if err = tx.QueryRow(ctx,
-			`SELECT count(*) FROM context_api_keys
-			  WHERE tenant_id = $1::uuid AND tenant_role = 'owner' AND active = true AND id <> $2::uuid`,
-			targetTenant, id).Scan(&others); err != nil {
-			return false, fmt.Errorf("api_keys: delete owner count: %w", err)
-		}
-		if others < 1 {
-			return false, ErrLastOwner
-		}
-	}
-
-	// (5) Soft-delete. Tenant constraint repeated in the WHERE (no cross-tenant
-	// revoke); `active = true` keeps re-deletes idempotent (already-inactive → 0
-	// rows → false). The 22P02 case is already absorbed by resolveKeyForUpdate, so
-	// this Exec runs only on a well-formed, resolved id.
-	tag, err := tx.Exec(ctx,
-		`UPDATE context_api_keys SET active = false, updated_at = now()
-		  WHERE id = $1::uuid AND active = true
-		    AND ($2::boolean OR tenant_id = $3::uuid)`,
-		id, isServerAdmin, tenantArg,
-	)
-	if err != nil {
-		return false, fmt.Errorf("api_keys: delete: %w", err)
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("api_keys: delete commit: %w", err)
-	}
-	return tag.RowsAffected() > 0, nil
+	return affected, nil
 }
 
 // ErrLastOwner is returned by UpdateApiKey when a patch would remove the LAST
@@ -509,97 +514,101 @@ var ErrOwnerProtected = errors.New("store: owner key may only be managed by an o
 func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string,
 	isServerAdmin, callerMayManageOwner bool, role *string, active *bool, writeScopes *[]string) (updated ApiKey, changed bool, err error) {
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return ApiKey{}, false, fmt.Errorf("api_keys: update begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
-
-	// NULL-on-empty inline idiom (ListApiKeys / DeleteApiKey house style): a
-	// non-server-admin with an empty callerTenant yields a NULL tenant arg, which
-	// matches nothing in the ($isServerAdmin OR tenant_id=$callerTenant) constraint
-	// → fail-closed.
-	var tenantArg *string
-	if !isServerAdmin && callerTenant != "" {
-		tenantArg = &callerTenant
-	}
-
-	// (1) Resolve the target's tenant + current role/active WITH the tenant
-	// constraint. Zero rows — wrong tenant, absent, or a malformed id (22P02) —
-	// collapses to (false, nil): no row is touched and the caller cannot tell a
-	// foreign key from a nonexistent one (no oracle, mirrors DeleteApiKey:218-242).
-	rk, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
-	if err != nil {
-		return ApiKey{}, false, err
-	}
-	if !found {
-		return ApiKey{}, false, nil // foreign / absent / malformed id — no oracle (mirrors DeleteApiKey)
-	}
-	targetTenant := rk.tenant
-
-	// (2a) write_scopes ⊆ allowed_scopes ∪ {home_scope} (078, E4b, enforcement path
-	// (a) on update). Validated against the key's EXISTING read set — home_scope and
-	// allowed_scopes are NOT mutable via this action, so the resolved row is the
-	// authority. A write_scope with no read right is a blind-writer → rejected; the
-	// '_'-reserved namespace is rejected too (same rule as home/allowed). nil = leave
-	// unchanged → passes trivially. Checked under the tenant lock, before the write.
-	if writeScopes != nil {
-		if verr := validateWriteScopes(rk.homeScope, rk.allowedScopes, *writeScopes); verr != nil {
-			return ApiKey{}, false, verr
-		}
-	}
-
-	// (2) Serialisation point: lock the target key's TENANT row (see the lock-target
-	// rationale in the doc comment). tenant_id is a NOT NULL FK to context_tenants,
-	// so the row is guaranteed to exist.
-	var lockedTenant string
-	if err = tx.QueryRow(ctx,
-		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, targetTenant).Scan(&lockedTenant); err != nil {
-		return ApiKey{}, false, fmt.Errorf("api_keys: update tenant lock: %w", err)
-	}
-
-	// (3)+(4) AM6 owner guards under the tenant lock: Owner-Protection (an admin may
-	// not strip owner power) and Last-Owner (never drop the tenant's active-owner count
-	// below one). Extracted to keep this function under the cyclop ceiling.
-	if err = enforceOwnerInvariantsTx(ctx, tx, rk, id, role, active, callerMayManageOwner); err != nil {
-		return ApiKey{}, false, err
-	}
-
-	// Apply. Tenant constraint repeated in the WHERE (no cross-tenant patch);
-	// COALESCE keeps the existing value for a nil patch field. Writes ONLY
-	// tenant_role + active — the SQL names neither is_admin nor any other column.
-	// RETURNING hands the patched row straight back so the handler need not re-read
-	// it for the {success, key} response. The row was resolved (found) and its
-	// tenant locked above, so this UPDATE matches exactly one row; an ErrNoRows
-	// (the row vanished post-resolve — impossible under the lock) degrades to the
-	// same no-oracle miss as !found: (ApiKey{}, false, nil).
-	// write_scopes patch: nil → COALESCE keeps the existing value (unchanged); a
-	// non-nil slice (incl. empty, to CLEAR the set) replaces it. pgx encodes a nil
-	// *[]string as NULL and a non-nil *[]string as the array, so COALESCE($6,…)
-	// distinguishes "leave" from "set/clear" cleanly.
-	var wsArg any
-	if writeScopes != nil {
-		wsArg = *writeScopes
-	}
 	var row ApiKey
-	err = tx.QueryRow(ctx,
-		`UPDATE context_api_keys
-		    SET tenant_role  = COALESCE($2::text, tenant_role),
-		        active       = COALESCE($3::boolean, active),
-		        write_scopes = COALESCE($6::text[], write_scopes),
-		        updated_at   = now()
-		  WHERE id = $1::uuid AND ($4::boolean OR tenant_id = $5::uuid)
-		  RETURNING id, label, home_scope, allowed_scopes, write_scopes, tenant_role, active, last_used_at, created_at`,
-		id, role, active, isServerAdmin, tenantArg, wsArg,
-	).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.WriteScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+	if err = pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "api_keys: update begin", Commit: "api_keys: update commit"},
+		func(tx pgx.Tx) error {
+
+			// NULL-on-empty inline idiom (ListApiKeys / DeleteApiKey house style): a
+			// non-server-admin with an empty callerTenant yields a NULL tenant arg, which
+			// matches nothing in the ($isServerAdmin OR tenant_id=$callerTenant) constraint
+			// → fail-closed.
+			var tenantArg *string
+			if !isServerAdmin && callerTenant != "" {
+				tenantArg = &callerTenant
+			}
+
+			// (1) Resolve the target's tenant + current role/active WITH the tenant
+			// constraint. Zero rows — wrong tenant, absent, or a malformed id (22P02) —
+			// collapses to (false, nil): no row is touched and the caller cannot tell a
+			// foreign key from a nonexistent one (no oracle, mirrors DeleteApiKey:218-242).
+			rk, found, err := resolveKeyForUpdate(ctx, tx, id, isServerAdmin, tenantArg)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return pgxdb.ErrRollback // foreign / absent / malformed id — no oracle (mirrors DeleteApiKey)
+			}
+			targetTenant := rk.tenant
+
+			// (2a) write_scopes ⊆ allowed_scopes ∪ {home_scope} (078, E4b, enforcement path
+			// (a) on update). Validated against the key's EXISTING read set — home_scope and
+			// allowed_scopes are NOT mutable via this action, so the resolved row is the
+			// authority. A write_scope with no read right is a blind-writer → rejected; the
+			// '_'-reserved namespace is rejected too (same rule as home/allowed). nil = leave
+			// unchanged → passes trivially. Checked under the tenant lock, before the write.
+			if writeScopes != nil {
+				if verr := validateWriteScopes(rk.homeScope, rk.allowedScopes, *writeScopes); verr != nil {
+					return verr
+				}
+			}
+
+			// (2) Serialisation point: lock the target key's TENANT row (see the lock-target
+			// rationale in the doc comment). tenant_id is a NOT NULL FK to context_tenants,
+			// so the row is guaranteed to exist.
+			var lockedTenant string
+			if err = tx.QueryRow(ctx,
+				`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, targetTenant).Scan(&lockedTenant); err != nil {
+				return fmt.Errorf("api_keys: update tenant lock: %w", err)
+			}
+
+			// (3)+(4) AM6 owner guards under the tenant lock: Owner-Protection (an admin may
+			// not strip owner power) and Last-Owner (never drop the tenant's active-owner count
+			// below one). Extracted to keep this function under the cyclop ceiling.
+			if err = enforceOwnerInvariantsTx(ctx, tx, rk, id, role, active, callerMayManageOwner); err != nil {
+				return err
+			}
+
+			// Apply. Tenant constraint repeated in the WHERE (no cross-tenant patch);
+			// COALESCE keeps the existing value for a nil patch field. Writes ONLY
+			// tenant_role + active — the SQL names neither is_admin nor any other column.
+			// RETURNING hands the patched row straight back so the handler need not re-read
+			// it for the {success, key} response. The row was resolved (found) and its
+			// tenant locked above, so this UPDATE matches exactly one row; an ErrNoRows
+			// (the row vanished post-resolve — impossible under the lock) degrades to the
+			// same no-oracle miss as !found: (ApiKey{}, false, nil).
+			// write_scopes patch: nil → COALESCE keeps the existing value (unchanged); a
+			// non-nil slice (incl. empty, to CLEAR the set) replaces it. pgx encodes a nil
+			// *[]string as NULL and a non-nil *[]string as the array, so COALESCE($6,…)
+			// distinguishes "leave" from "set/clear" cleanly.
+			var wsArg any
+			if writeScopes != nil {
+				wsArg = *writeScopes
+			}
+			err = tx.QueryRow(ctx,
+				`UPDATE context_api_keys
+				    SET tenant_role  = COALESCE($2::text, tenant_role),
+				        active       = COALESCE($3::boolean, active),
+				        write_scopes = COALESCE($6::text[], write_scopes),
+				        updated_at   = now()
+				  WHERE id = $1::uuid AND ($4::boolean OR tenant_id = $5::uuid)
+				  RETURNING id, label, home_scope, allowed_scopes, write_scopes, tenant_role, active, last_used_at, created_at`,
+				id, role, active, isServerAdmin, tenantArg, wsArg,
+			).Scan(&row.ID, &row.Label, &row.HomeScope, &row.AllowedScopes, &row.WriteScopes, &row.TenantRole, &row.Active, &row.LastUsedAt, &row.CreatedAt)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					// The row vanished post-resolve (impossible under the lock):
+					// the same no-oracle miss as !found, and the same rollback.
+					return pgxdb.ErrRollback
+				}
+				return fmt.Errorf("api_keys: update: %w", err)
+			}
+			return nil
+		}); err != nil {
+		if errors.Is(err, pgxdb.ErrRollback) {
 			return ApiKey{}, false, nil
 		}
-		return ApiKey{}, false, fmt.Errorf("api_keys: update: %w", err)
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return ApiKey{}, false, fmt.Errorf("api_keys: update commit: %w", err)
+		return ApiKey{}, false, err
 	}
 	return row, true, nil
 }

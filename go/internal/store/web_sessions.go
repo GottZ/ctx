@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -119,24 +120,21 @@ func DestroyWebSession(ctx context.Context, pool *pgxpool.Pool, sessionID string
 	if uuid.Validate(sessionID) != nil {
 		return nil //nolint:nilerr // deliberate: logout of a malformed id is a no-op, not an oracle
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("web sessions: begin destroy: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
-		`UPDATE context_access_tokens
-		    SET revoked_at = now()
-		  WHERE revoked_at IS NULL
-		    AND refresh_family = (SELECT refresh_family FROM context_web_sessions WHERE id = $1)`,
-		sessionID,
-	); err != nil {
-		return fmt.Errorf("web sessions: revoke family: %w", err)
-	}
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM context_web_sessions WHERE id = $1`, sessionID,
-	); err != nil {
-		return fmt.Errorf("web sessions: delete overlay: %w", err)
-	}
-	return tx.Commit(ctx)
+	return pgxdb.Write(ctx, pool, pgxdb.Stages{Begin: "web sessions: begin destroy"}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`UPDATE context_access_tokens
+			    SET revoked_at = now()
+			  WHERE revoked_at IS NULL
+			    AND refresh_family = (SELECT refresh_family FROM context_web_sessions WHERE id = $1)`,
+			sessionID,
+		); err != nil {
+			return fmt.Errorf("web sessions: revoke family: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM context_web_sessions WHERE id = $1`, sessionID,
+		); err != nil {
+			return fmt.Errorf("web sessions: delete overlay: %w", err)
+		}
+		return nil
+	})
 }

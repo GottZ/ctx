@@ -186,17 +186,15 @@ func CreateTenantTx(ctx context.Context, tx pgx.Tx, slug, displayName string) (*
 // CreateTenantTx (begin → insert → commit), so the standalone path and the
 // bootstrap-composed path share one INSERT body (no logic drift).
 func CreateTenant(ctx context.Context, pool *pgxpool.Pool, slug, displayName string) (*Tenant, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("store: create tenant begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	t, err := CreateTenantTx(ctx, tx, slug, displayName)
-	if err != nil {
+	var t *Tenant
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: create tenant begin", Commit: "store: create tenant commit"},
+		func(tx pgx.Tx) error {
+			var err error
+			t, err = CreateTenantTx(ctx, tx, slug, displayName)
+			return err
+		}); err != nil {
 		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("store: create tenant commit: %w", err)
 	}
 	return t, nil
 }
@@ -227,18 +225,14 @@ func CreateTenant(ctx context.Context, pool *pgxpool.Pool, slug, displayName str
 // row lock is held, kept for defence in depth). created is true on a committed
 // insert (always true on the nil-error path, since there is no ON CONFLICT).
 func AssignTenantScope(ctx context.Context, pool *pgxpool.Pool, tenantID, scope string, maxScopes *int) (created bool, err error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("store: assign scope begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	created, err = AssignTenantScopeTx(ctx, tx, tenantID, scope, maxScopes)
-	if err != nil {
+	if err = pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: assign scope begin", Commit: "store: assign scope commit"},
+		func(tx pgx.Tx) error {
+			var terr error
+			created, terr = AssignTenantScopeTx(ctx, tx, tenantID, scope, maxScopes)
+			return terr
+		}); err != nil {
 		return false, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("store: assign scope commit: %w", err)
 	}
 	return created, nil
 }

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -196,26 +197,26 @@ type BlockTypeWrite struct {
 // transaction (audit via='api'). Unique violations map onto the sentinel
 // errors above.
 func CreateBlockType(ctx context.Context, pool *pgxpool.Pool, in BlockTypeWrite, by *string, requestID string) (*BlockTypeRow, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("store: create block type begin: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-
-	if err := stampBlockTypeTx(ctx, tx, by, requestID); err != nil {
+	var bt *BlockTypeRow
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: create block type begin", Commit: "store: create block type commit"},
+		func(tx pgx.Tx) error {
+			if err := stampBlockTypeTx(ctx, tx, by, requestID); err != nil {
+				return err
+			}
+			var err error
+			bt, err = scanBlockType(tx.QueryRow(ctx,
+				`INSERT INTO context_block_types
+				    (name, scope, display_name, description, builtin, is_default, config, updated_by)
+				 VALUES ($1, $2, $3, $4, false, $5, $6::jsonb, $7::uuid)
+				 RETURNING `+blockTypeCols,
+				in.Name, in.Scope, in.DisplayName, in.Description, in.IsDefault, string(in.Config), by))
+			if err != nil {
+				return mapBlockTypeUnique(err)
+			}
+			return nil
+		}); err != nil {
 		return nil, err
-	}
-	bt, err := scanBlockType(tx.QueryRow(ctx,
-		`INSERT INTO context_block_types
-		    (name, scope, display_name, description, builtin, is_default, config, updated_by)
-		 VALUES ($1, $2, $3, $4, false, $5, $6::jsonb, $7::uuid)
-		 RETURNING `+blockTypeCols,
-		in.Name, in.Scope, in.DisplayName, in.Description, in.IsDefault, string(in.Config), by))
-	if err != nil {
-		return nil, mapBlockTypeUnique(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("store: create block type commit: %w", err)
 	}
 	return bt, nil
 }
@@ -233,51 +234,54 @@ type BlockTypeUpdate struct {
 // UpdateBlockType patches one row by id inside an attributed transaction.
 // nil result = no row with that id in the given scopes (404-no-oracle).
 func UpdateBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes []string, in BlockTypeUpdate, by *string, requestID string) (*BlockTypeRow, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("store: update block type begin: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+	var bt *BlockTypeRow
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: update block type begin", Commit: "store: update block type commit"},
+		func(tx pgx.Tx) error {
+			if err := stampBlockTypeTx(ctx, tx, by, requestID); err != nil {
+				return err
+			}
 
-	if err := stampBlockTypeTx(ctx, tx, by, requestID); err != nil {
+			set := []string{"updated_at = now()", "updated_by = $1::uuid"}
+			args := []any{by}
+			idx := 2
+			if in.DisplayName != nil {
+				set = append(set, fmt.Sprintf("display_name = $%d", idx))
+				args = append(args, *in.DisplayName)
+				idx++
+			}
+			if in.Description != nil {
+				set = append(set, fmt.Sprintf("description = $%d", idx))
+				args = append(args, *in.Description)
+				idx++
+			}
+			if in.Config != nil {
+				set = append(set, fmt.Sprintf("config = $%d::jsonb", idx))
+				args = append(args, string(in.Config))
+				idx++
+			}
+			args = append(args, id)
+			idIdx := idx
+			args = append(args, scopes)
+
+			var err error
+			bt, err = scanBlockType(tx.QueryRow(ctx, fmt.Sprintf(
+				`UPDATE context_block_types SET %s
+				  WHERE id = $%d::uuid AND scope = ANY($%d::text[])
+				  RETURNING `+blockTypeCols,
+				strings.Join(set, ", "), idIdx, idIdx+1), args...))
+			if err != nil {
+				return err
+			}
+			if bt == nil {
+				return pgxdb.ErrRollback // not found — no audit row, rollback is a no-op
+			}
+			return nil
+		}); err != nil {
+		if errors.Is(err, pgxdb.ErrRollback) {
+			return nil, nil
+		}
 		return nil, err
-	}
-
-	set := []string{"updated_at = now()", "updated_by = $1::uuid"}
-	args := []any{by}
-	idx := 2
-	if in.DisplayName != nil {
-		set = append(set, fmt.Sprintf("display_name = $%d", idx))
-		args = append(args, *in.DisplayName)
-		idx++
-	}
-	if in.Description != nil {
-		set = append(set, fmt.Sprintf("description = $%d", idx))
-		args = append(args, *in.Description)
-		idx++
-	}
-	if in.Config != nil {
-		set = append(set, fmt.Sprintf("config = $%d::jsonb", idx))
-		args = append(args, string(in.Config))
-		idx++
-	}
-	args = append(args, id)
-	idIdx := idx
-	args = append(args, scopes)
-
-	bt, err := scanBlockType(tx.QueryRow(ctx, fmt.Sprintf(
-		`UPDATE context_block_types SET %s
-		  WHERE id = $%d::uuid AND scope = ANY($%d::text[])
-		  RETURNING `+blockTypeCols,
-		strings.Join(set, ", "), idIdx, idIdx+1), args...))
-	if err != nil {
-		return nil, err
-	}
-	if bt == nil {
-		return nil, nil // not found — no audit row, rollback is a no-op
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("store: update block type commit: %w", err)
 	}
 	return bt, nil
 }
@@ -288,48 +292,53 @@ func UpdateBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 // ALL rows, archived included — ⇒ *BlockTypeInUseError naming the split.
 // found=false ⇒ no row with that id in the given scopes.
 func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes []string, by *string, requestID string) (found bool, err error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("store: delete block type begin: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+	if err = pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: delete block type begin", Commit: "store: delete block type commit"},
+		func(tx pgx.Tx) error {
+			if err := stampBlockTypeTx(ctx, tx, by, requestID); err != nil {
+				return err
+			}
 
-	if err := stampBlockTypeTx(ctx, tx, by, requestID); err != nil {
-		return false, err
-	}
+			var name string
+			var builtin bool
+			err := tx.QueryRow(ctx,
+				`SELECT name, builtin FROM context_block_types
+				  WHERE id = $1::uuid AND scope = ANY($2::text[]) FOR UPDATE`,
+				id, scopes).Scan(&name, &builtin)
+			if errors.Is(err, pgx.ErrNoRows) {
+				// (false, nil) before the commit in the straight-line form —
+				// pgxdb.ErrRollback keeps that a rollback instead of a commit.
+				return pgxdb.ErrRollback
+			}
+			if err != nil {
+				return fmt.Errorf("store: delete block type lookup: %w", err)
+			}
+			if builtin {
+				found = true
+				return ErrBlockTypeBuiltin
+			}
 
-	var name string
-	var builtin bool
-	err = tx.QueryRow(ctx,
-		`SELECT name, builtin FROM context_block_types
-		  WHERE id = $1::uuid AND scope = ANY($2::text[]) FOR UPDATE`,
-		id, scopes).Scan(&name, &builtin)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("store: delete block type lookup: %w", err)
-	}
-	if builtin {
-		return true, ErrBlockTypeBuiltin
-	}
+			var active, archived int
+			if err := tx.QueryRow(ctx,
+				`SELECT count(*) FILTER (WHERE NOT is_archived)::int,
+				        count(*) FILTER (WHERE is_archived)::int
+				   FROM context_blocks WHERE type_name = $1`, name).Scan(&active, &archived); err != nil {
+				return fmt.Errorf("store: delete block type ref count: %w", err)
+			}
+			if active > 0 || archived > 0 {
+				found = true
+				return &BlockTypeInUseError{Active: active, Archived: archived}
+			}
 
-	var active, archived int
-	if err := tx.QueryRow(ctx,
-		`SELECT count(*) FILTER (WHERE NOT is_archived)::int,
-		        count(*) FILTER (WHERE is_archived)::int
-		   FROM context_blocks WHERE type_name = $1`, name).Scan(&active, &archived); err != nil {
-		return false, fmt.Errorf("store: delete block type ref count: %w", err)
-	}
-	if active > 0 || archived > 0 {
-		return true, &BlockTypeInUseError{Active: active, Archived: archived}
-	}
-
-	if _, err := tx.Exec(ctx, `DELETE FROM context_block_types WHERE id = $1::uuid`, id); err != nil {
-		return false, fmt.Errorf("store: delete block type: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("store: delete block type commit: %w", err)
+			if _, err := tx.Exec(ctx, `DELETE FROM context_block_types WHERE id = $1::uuid`, id); err != nil {
+				return fmt.Errorf("store: delete block type: %w", err)
+			}
+			return nil
+		}); err != nil {
+		if errors.Is(err, pgxdb.ErrRollback) {
+			return false, nil
+		}
+		return found, err
 	}
 	return true, nil
 }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -101,51 +102,55 @@ func DrainPendingWebhookEvents(ctx context.Context, pool *pgxpool.Pool, limit in
 	if limit <= 0 {
 		limit = 100
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("webhook: drain begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	rows, err := tx.Query(ctx,
-		`SELECT id, project_id::text FROM context_webhook_events
-		  WHERE processed_at IS NULL
-		  ORDER BY received_at
-		  LIMIT $1
-		  FOR UPDATE SKIP LOCKED`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("webhook: drain pick: %w", err)
-	}
-	var ids []string
-	seen := map[string]struct{}{}
 	var projects []string
-	for rows.Next() {
-		var ref WebhookEventRef
-		if err := rows.Scan(&ref.ID, &ref.ProjectID); err != nil {
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "webhook: drain begin", Commit: "webhook: drain commit"},
+		func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx,
+				`SELECT id, project_id::text FROM context_webhook_events
+				  WHERE processed_at IS NULL
+				  ORDER BY received_at
+				  LIMIT $1
+				  FOR UPDATE SKIP LOCKED`, limit)
+			if err != nil {
+				return fmt.Errorf("webhook: drain pick: %w", err)
+			}
+			var ids []string
+			seen := map[string]struct{}{}
+			for rows.Next() {
+				var ref WebhookEventRef
+				if err := rows.Scan(&ref.ID, &ref.ProjectID); err != nil {
+					rows.Close()
+					return fmt.Errorf("webhook: drain scan: %w", err)
+				}
+				ids = append(ids, ref.ID)
+				if _, ok := seen[ref.ProjectID]; !ok {
+					seen[ref.ProjectID] = struct{}{}
+					projects = append(projects, ref.ProjectID)
+				}
+			}
 			rows.Close()
-			return nil, fmt.Errorf("webhook: drain scan: %w", err)
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("webhook: drain rows: %w", err)
+			}
+			if len(ids) == 0 {
+				// The empty drain committed HERE and returned that commit error
+				// UNWRAPPED — a form the tail commit does not share, so this exit
+				// keeps its own commit and stops the helper from committing twice.
+				return commitThenStop(ctx, tx)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE context_webhook_events
+				    SET processed_at = now(), status = 'done'
+				  WHERE id = ANY($1::uuid[])`, ids); err != nil {
+				return fmt.Errorf("webhook: drain mark: %w", err)
+			}
+			return nil
+		}); err != nil {
+		if errors.Is(err, errTxCommitted) {
+			return nil, nil
 		}
-		ids = append(ids, ref.ID)
-		if _, ok := seen[ref.ProjectID]; !ok {
-			seen[ref.ProjectID] = struct{}{}
-			projects = append(projects, ref.ProjectID)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("webhook: drain rows: %w", err)
-	}
-	if len(ids) == 0 {
-		return nil, tx.Commit(ctx)
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE context_webhook_events
-		    SET processed_at = now(), status = 'done'
-		  WHERE id = ANY($1::uuid[])`, ids); err != nil {
-		return nil, fmt.Errorf("webhook: drain mark: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("webhook: drain commit: %w", err)
+		return nil, err
 	}
 	return projects, nil
 }

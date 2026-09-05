@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -149,29 +150,28 @@ func MintTokenPair(ctx context.Context, pool *pgxpool.Pool, t OAuthToken, access
 	if t.Scope != "" {
 		scope = t.Scope
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("oauth tokens: begin mint pair: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	for _, row := range []struct {
-		hash, typ string
-		expires   time.Time
-	}{
-		{TokenHash(access), "access", pair.AccessExpires},
-		{TokenHash(refresh), "refresh", pair.RefreshExpires},
-	} {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO context_access_tokens
-			     (token_hash, token_type, api_key_id, principal_id, client_id, audiences, scope, refresh_family, issued_via, expires_at)
-			 VALUES ($1, $2, $3::uuid, $4::uuid, $5, $6, $7, $8::uuid, $9, $10)`,
-			row.hash, row.typ, t.APIKeyID, t.PrincipalID, clientID, t.Audiences, scope, family, t.IssuedVia, row.expires,
-		); err != nil {
-			return nil, fmt.Errorf("oauth tokens: mint pair (%s): %w", row.typ, err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("oauth tokens: commit mint pair: %w", err)
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "oauth tokens: begin mint pair", Commit: "oauth tokens: commit mint pair"},
+		func(tx pgx.Tx) error {
+			for _, row := range []struct {
+				hash, typ string
+				expires   time.Time
+			}{
+				{TokenHash(access), "access", pair.AccessExpires},
+				{TokenHash(refresh), "refresh", pair.RefreshExpires},
+			} {
+				if _, err := tx.Exec(ctx,
+					`INSERT INTO context_access_tokens
+					     (token_hash, token_type, api_key_id, principal_id, client_id, audiences, scope, refresh_family, issued_via, expires_at)
+					 VALUES ($1, $2, $3::uuid, $4::uuid, $5, $6, $7, $8::uuid, $9, $10)`,
+					row.hash, row.typ, t.APIKeyID, t.PrincipalID, clientID, t.Audiences, scope, family, t.IssuedVia, row.expires,
+				); err != nil {
+					return fmt.Errorf("oauth tokens: mint pair (%s): %w", row.typ, err)
+				}
+			}
+			return nil
+		}); err != nil {
+		return nil, err
 	}
 	return pair, nil
 }
@@ -194,137 +194,147 @@ func MintTokenPair(ctx context.Context, pool *pgxpool.Pool, t OAuthToken, access
 // created_at) bounds how long rolling rotation can keep a family alive: a
 // capped-out family is revoked (hygiene) and the attempt is a miss.
 func RotateRefreshToken(ctx context.Context, pool *pgxpool.Pool, presented, clientID string, accessTTL, refreshTTL, capAge time.Duration) (*TokenPair, RotateOutcome, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, RotateMiss, fmt.Errorf("oauth tokens: begin rotate: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var presentedClient any
-	if clientID != "" {
-		presentedClient = clientID
-	}
-
-	// Atomic take: of two racing rotations exactly one gets the row. The
-	// client binding sits IN the predicate (see doc above).
 	var (
-		oldID, apiKeyID, principalID, family string
-		rowClient, scope                     *string
-		audiences                            []string
-		issuedVia                            string
+		pair    *TokenPair
+		outcome = RotateMiss
 	)
-	err = tx.QueryRow(ctx,
-		`UPDATE context_access_tokens
-		    SET revoked_at = now()
-		  WHERE token_hash = $1
-		    AND token_type = 'refresh'
-		    AND client_id IS NOT DISTINCT FROM $2
-		    AND revoked_at IS NULL
-		    AND expires_at > now()
-		 RETURNING id, api_key_id, principal_id, client_id, audiences, scope, refresh_family, issued_via`,
-		TokenHash(presented), presentedClient,
-	).Scan(&oldID, &apiKeyID, &principalID, &rowClient, &audiences, &scope, &family, &issuedVia)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// No live take — distinguish theft (already rotated/revoked) from a
-		// plain miss. The reuse probe carries the SAME client binding.
-		var reuseFamily string
-		err = tx.QueryRow(ctx,
-			`SELECT refresh_family
-			   FROM context_access_tokens
-			  WHERE token_hash = $1
-			    AND token_type = 'refresh'
-			    AND client_id IS NOT DISTINCT FROM $2
-			    AND revoked_at IS NOT NULL`,
-			TokenHash(presented), presentedClient,
-		).Scan(&reuseFamily)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, RotateMiss, nil // unknown/expired/wrong client — no signal
-		}
-		if err != nil {
-			return nil, RotateMiss, fmt.Errorf("oauth tokens: reuse probe: %w", err)
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE context_access_tokens SET revoked_at = now()
-			  WHERE refresh_family = $1::uuid AND revoked_at IS NULL`, reuseFamily); err != nil {
-			return nil, RotateMiss, fmt.Errorf("oauth tokens: family revoke: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, RotateMiss, fmt.Errorf("oauth tokens: commit family revoke: %w", err)
-		}
-		return nil, RotateReuse, nil
-	}
-	if err != nil {
-		return nil, RotateMiss, fmt.Errorf("oauth tokens: take refresh: %w", err)
-	}
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "oauth tokens: begin rotate", Commit: "oauth tokens: commit rotate"},
+		func(tx pgx.Tx) error {
+			var presentedClient any
+			if clientID != "" {
+				presentedClient = clientID
+			}
 
-	// Family absolute cap (E-TTL 90d): anchored at the family's first row.
-	var familyStart time.Time
-	if err := tx.QueryRow(ctx,
-		`SELECT min(created_at) FROM context_access_tokens WHERE refresh_family = $1::uuid`,
-		family,
-	).Scan(&familyStart); err != nil {
-		return nil, RotateMiss, fmt.Errorf("oauth tokens: family anchor: %w", err)
-	}
-	capEnd := familyStart.Add(capAge)
-	if !time.Now().Before(capEnd) {
-		if _, err := tx.Exec(ctx,
-			`UPDATE context_access_tokens SET revoked_at = now()
-			  WHERE refresh_family = $1::uuid AND revoked_at IS NULL`, family); err != nil {
-			return nil, RotateMiss, fmt.Errorf("oauth tokens: cap revoke: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, RotateMiss, fmt.Errorf("oauth tokens: commit cap revoke: %w", err)
-		}
-		return nil, RotateMiss, nil // capped out — re-authorize; no theft signal
-	}
+			// Atomic take: of two racing rotations exactly one gets the row. The
+			// client binding sits IN the predicate (see doc above).
+			var (
+				oldID, apiKeyID, principalID, family string
+				rowClient, scope                     *string
+				audiences                            []string
+				issuedVia                            string
+			)
+			err := tx.QueryRow(ctx,
+				`UPDATE context_access_tokens
+				    SET revoked_at = now()
+				  WHERE token_hash = $1
+				    AND token_type = 'refresh'
+				    AND client_id IS NOT DISTINCT FROM $2
+				    AND revoked_at IS NULL
+				    AND expires_at > now()
+				 RETURNING id, api_key_id, principal_id, client_id, audiences, scope, refresh_family, issued_via`,
+				TokenHash(presented), presentedClient,
+			).Scan(&oldID, &apiKeyID, &principalID, &rowClient, &audiences, &scope, &family, &issuedVia)
+			if errors.Is(err, pgx.ErrNoRows) {
+				// No live take — distinguish theft (already rotated/revoked) from a
+				// plain miss. The reuse probe carries the SAME client binding.
+				var reuseFamily string
+				err = tx.QueryRow(ctx,
+					`SELECT refresh_family
+					   FROM context_access_tokens
+					  WHERE token_hash = $1
+					    AND token_type = 'refresh'
+					    AND client_id IS NOT DISTINCT FROM $2
+					    AND revoked_at IS NOT NULL`,
+					TokenHash(presented), presentedClient,
+				).Scan(&reuseFamily)
+				if errors.Is(err, pgx.ErrNoRows) {
+					// (nil, RotateMiss, nil) before any commit — pgxdb.ErrRollback
+					// keeps that miss a rollback, and outcome stays RotateMiss.
+					return pgxdb.ErrRollback
+				}
+				if err != nil {
+					return fmt.Errorf("oauth tokens: reuse probe: %w", err)
+				}
+				if _, err := tx.Exec(ctx,
+					`UPDATE context_access_tokens SET revoked_at = now()
+					  WHERE refresh_family = $1::uuid AND revoked_at IS NULL`, reuseFamily); err != nil {
+					return fmt.Errorf("oauth tokens: family revoke: %w", err)
+				}
+				// The reuse exit commits HERE: its commit failure carries its own
+				// wording, which one Stages pair cannot hold beside the tail
+				// commit's. errTxCommitted stops the helper committing again.
+				if cerr := tx.Commit(ctx); cerr != nil {
+					return fmt.Errorf("oauth tokens: commit family revoke: %w", cerr)
+				}
+				outcome = RotateReuse
+				return errTxCommitted
+			}
+			if err != nil {
+				return fmt.Errorf("oauth tokens: take refresh: %w", err)
+			}
 
-	access, err := newOpaqueToken(AccessTokenPrefix)
-	if err != nil {
+			// Family absolute cap (E-TTL 90d): anchored at the family's first row.
+			var familyStart time.Time
+			if err := tx.QueryRow(ctx,
+				`SELECT min(created_at) FROM context_access_tokens WHERE refresh_family = $1::uuid`,
+				family,
+			).Scan(&familyStart); err != nil {
+				return fmt.Errorf("oauth tokens: family anchor: %w", err)
+			}
+			capEnd := familyStart.Add(capAge)
+			if !time.Now().Before(capEnd) {
+				if _, err := tx.Exec(ctx,
+					`UPDATE context_access_tokens SET revoked_at = now()
+					  WHERE refresh_family = $1::uuid AND revoked_at IS NULL`, family); err != nil {
+					return fmt.Errorf("oauth tokens: cap revoke: %w", err)
+				}
+				// Same shape as the reuse exit: own commit wording, own stop.
+				if cerr := tx.Commit(ctx); cerr != nil {
+					return fmt.Errorf("oauth tokens: commit cap revoke: %w", cerr)
+				}
+				return errTxCommitted // capped out — re-authorize; no theft signal
+			}
+
+			access, err := newOpaqueToken(AccessTokenPrefix)
+			if err != nil {
+				return err
+			}
+			refresh, err := newOpaqueToken(RefreshTokenPrefix)
+			if err != nil {
+				return err
+			}
+			now := time.Now()
+			refreshExpires := now.Add(refreshTTL)
+			if refreshExpires.After(capEnd) {
+				refreshExpires = capEnd // rolling TTL never outlives the family cap
+			}
+			pair = &TokenPair{
+				AccessToken:    access,
+				RefreshToken:   refresh,
+				AccessTTL:      accessTTL,
+				AccessExpires:  now.Add(accessTTL),
+				RefreshExpires: refreshExpires,
+			}
+			var scopeVal, clientVal any
+			if rowClient != nil {
+				clientVal = *rowClient
+			}
+			if scope != nil {
+				scopeVal = *scope
+			}
+			for _, row := range []struct {
+				hash, typ string
+				expires   time.Time
+			}{
+				{TokenHash(access), "access", pair.AccessExpires},
+				{TokenHash(refresh), "refresh", pair.RefreshExpires},
+			} {
+				if _, err := tx.Exec(ctx,
+					`INSERT INTO context_access_tokens
+					     (token_hash, token_type, api_key_id, principal_id, client_id, audiences, scope, refresh_family, parent_id, issued_via, expires_at)
+					 VALUES ($1, $2, $3::uuid, $4::uuid, $5, $6, $7, $8::uuid, $9::uuid, $10, $11)`,
+					row.hash, row.typ, apiKeyID, principalID, clientVal, audiences, scopeVal, family, oldID, issuedVia, row.expires,
+				); err != nil {
+					return fmt.Errorf("oauth tokens: mint rotated (%s): %w", row.typ, err)
+				}
+			}
+			outcome = Rotated
+			return nil
+		}); err != nil && !errors.Is(err, pgxdb.ErrRollback) && !errors.Is(err, errTxCommitted) {
 		return nil, RotateMiss, err
 	}
-	refresh, err := newOpaqueToken(RefreshTokenPrefix)
-	if err != nil {
-		return nil, RotateMiss, err
-	}
-	now := time.Now()
-	refreshExpires := now.Add(refreshTTL)
-	if refreshExpires.After(capEnd) {
-		refreshExpires = capEnd // rolling TTL never outlives the family cap
-	}
-	pair := &TokenPair{
-		AccessToken:    access,
-		RefreshToken:   refresh,
-		AccessTTL:      accessTTL,
-		AccessExpires:  now.Add(accessTTL),
-		RefreshExpires: refreshExpires,
-	}
-	var scopeVal, clientVal any
-	if rowClient != nil {
-		clientVal = *rowClient
-	}
-	if scope != nil {
-		scopeVal = *scope
-	}
-	for _, row := range []struct {
-		hash, typ string
-		expires   time.Time
-	}{
-		{TokenHash(access), "access", pair.AccessExpires},
-		{TokenHash(refresh), "refresh", pair.RefreshExpires},
-	} {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO context_access_tokens
-			     (token_hash, token_type, api_key_id, principal_id, client_id, audiences, scope, refresh_family, parent_id, issued_via, expires_at)
-			 VALUES ($1, $2, $3::uuid, $4::uuid, $5, $6, $7, $8::uuid, $9::uuid, $10, $11)`,
-			row.hash, row.typ, apiKeyID, principalID, clientVal, audiences, scopeVal, family, oldID, issuedVia, row.expires,
-		); err != nil {
-			return nil, RotateMiss, fmt.Errorf("oauth tokens: mint rotated (%s): %w", row.typ, err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, RotateMiss, fmt.Errorf("oauth tokens: commit rotate: %w", err)
-	}
-	return pair, Rotated, nil
+	return pair, outcome, nil
 }
 
 // EvictExpiredOAuthTokens deletes token rows 7 days past expiry (scheduler

@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // ErrSessionNotFound collapses "does not exist", "wrong tenant scope" and
@@ -266,71 +267,72 @@ func AppendMessage(ctx context.Context, pool *pgxpool.Pool, sessionID string, m 
 		toolCalls = m.ToolCalls
 	}
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, "", fmt.Errorf("store: append message begin: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	var (
+		msg    *ChatMessage
+		newHWM backends.Sensitivity
+	)
+	if err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: append message begin", Commit: "store: append message commit"},
+		func(tx pgx.Tx) error {
+			// Lock the session row: serializes concurrent appends on the same session
+			// (seq race) and reads the current HWM. UNIQUE(session_id,seq) is the net.
+			var curHWM string
+			err := tx.QueryRow(ctx,
+				`SELECT max_sensitivity FROM context_chat_sessions WHERE id = $1 FOR UPDATE`, sessionID).Scan(&curHWM)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrSessionNotFound
+			}
+			if err != nil {
+				return fmt.Errorf("store: append message lock session: %w", err)
+			}
 
-	// Lock the session row: serializes concurrent appends on the same session
-	// (seq race) and reads the current HWM. UNIQUE(session_id,seq) is the net.
-	var curHWM string
-	err = tx.QueryRow(ctx,
-		`SELECT max_sensitivity FROM context_chat_sessions WHERE id = $1 FOR UPDATE`, sessionID).Scan(&curHWM)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, "", ErrSessionNotFound
-	}
-	if err != nil {
-		return nil, "", fmt.Errorf("store: append message lock session: %w", err)
-	}
+			var nextSeq int
+			if err := tx.QueryRow(ctx,
+				`SELECT COALESCE(MAX(seq), 0) + 1 FROM context_chat_messages WHERE session_id = $1`,
+				sessionID).Scan(&nextSeq); err != nil {
+				return fmt.Errorf("store: append message next seq: %w", err)
+			}
 
-	var nextSeq int
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(seq), 0) + 1 FROM context_chat_messages WHERE session_id = $1`,
-		sessionID).Scan(&nextSeq); err != nil {
-		return nil, "", fmt.Errorf("store: append message next seq: %w", err)
-	}
+			msg = &ChatMessage{
+				SessionID:        sessionID,
+				Seq:              nextSeq,
+				Role:             m.Role,
+				Content:          m.Content,
+				Sensitivity:      msgSens,
+				ToolCalls:        m.ToolCalls,
+				ToolCallID:       m.ToolCallID,
+				ToolName:         m.ToolName,
+				Backend:          m.Backend,
+				Model:            m.Model,
+				PromptTokens:     m.PromptTokens,
+				CompletionTokens: m.CompletionTokens,
+				DurationMs:       m.DurationMs,
+				Metadata:         metadata,
+			}
+			if err := tx.QueryRow(ctx,
+				`INSERT INTO context_chat_messages
+				   (session_id, seq, role, content, sensitivity, tool_calls, tool_call_id,
+				    tool_name, backend, model, prompt_tokens, completion_tokens, duration_ms, metadata)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+				 RETURNING id, created_at`,
+				sessionID, nextSeq, m.Role, m.Content, string(msgSens), toolCalls,
+				m.ToolCallID, m.ToolName, m.Backend, m.Model,
+				m.PromptTokens, m.CompletionTokens, m.DurationMs, metadata).
+				Scan(&msg.ID, &msg.CreatedAt); err != nil {
+				return fmt.Errorf("store: append message insert: %w", err)
+			}
 
-	msg := &ChatMessage{
-		SessionID:        sessionID,
-		Seq:              nextSeq,
-		Role:             m.Role,
-		Content:          m.Content,
-		Sensitivity:      msgSens,
-		ToolCalls:        m.ToolCalls,
-		ToolCallID:       m.ToolCallID,
-		ToolName:         m.ToolName,
-		Backend:          m.Backend,
-		Model:            m.Model,
-		PromptTokens:     m.PromptTokens,
-		CompletionTokens: m.CompletionTokens,
-		DurationMs:       m.DurationMs,
-		Metadata:         metadata,
-	}
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO context_chat_messages
-		   (session_id, seq, role, content, sensitivity, tool_calls, tool_call_id,
-		    tool_name, backend, model, prompt_tokens, completion_tokens, duration_ms, metadata)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		 RETURNING id, created_at`,
-		sessionID, nextSeq, m.Role, m.Content, string(msgSens), toolCalls,
-		m.ToolCallID, m.ToolName, m.Backend, m.Model,
-		m.PromptTokens, m.CompletionTokens, m.DurationMs, metadata).
-		Scan(&msg.ID, &msg.CreatedAt); err != nil {
-		return nil, "", fmt.Errorf("store: append message insert: %w", err)
-	}
-
-	// HWM is monotone (MaxSensitivity never lowers) — set unconditionally and
-	// bump updated_at in the same TX.
-	newHWM := backends.MaxSensitivity(backends.Sensitivity(curHWM), msgSens)
-	if _, err := tx.Exec(ctx,
-		`UPDATE context_chat_sessions SET max_sensitivity = $2, updated_at = now() WHERE id = $1`,
-		sessionID, string(newHWM)); err != nil {
-		return nil, "", fmt.Errorf("store: append message raise hwm: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, "", fmt.Errorf("store: append message commit: %w", err)
+			// HWM is monotone (MaxSensitivity never lowers) — set unconditionally and
+			// bump updated_at in the same TX.
+			newHWM = backends.MaxSensitivity(backends.Sensitivity(curHWM), msgSens)
+			if _, err := tx.Exec(ctx,
+				`UPDATE context_chat_sessions SET max_sensitivity = $2, updated_at = now() WHERE id = $1`,
+				sessionID, string(newHWM)); err != nil {
+				return fmt.Errorf("store: append message raise hwm: %w", err)
+			}
+			return nil
+		}); err != nil {
+		return nil, "", err
 	}
 	return msg, newHWM, nil
 }

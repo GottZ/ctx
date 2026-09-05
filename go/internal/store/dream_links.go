@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -60,93 +61,97 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 	// Malformed ids degrade to not-found instead of a SQLSTATE 22P02 error —
 	// uniform with foreign/absent (dedupeGuardBatchIDs pattern).
 	if _, err := uuid.Parse(sourceID); err != nil {
-		return nil, nil
+		return nil, nil //nolint:nilerr // deliberate: a malformed id is not-found, not an error (see above)
 	}
 	if _, err := uuid.Parse(targetID); err != nil {
-		return nil, nil
+		return nil, nil //nolint:nilerr // deliberate: a malformed id is not-found, not an error (see above)
 	}
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("store: dream link resolve: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Lock the link row so a concurrent dream replace sweep cannot delete it
-	// between classification and update (classifyGuardBatch pattern).
-	var storedRel string
-	var pinned bool
-	var storedRationale *string
-	err = tx.QueryRow(ctx,
-		`SELECT dl.relationship, dl.pinned, dl.rationale
-		 FROM context_dream_links dl
-		 JOIN context_blocks s ON s.id = dl.source_block_id
-		 WHERE dl.source_block_id = $1::uuid
-		   AND dl.target_block_id = $2::uuid
-		   AND dl.relationship = $3
-		   AND s.scope = ANY($4::text[])
-		 FOR UPDATE OF dl`,
-		sourceID, targetID, relationship, writeScopes,
-	).Scan(&storedRel, &pinned, &storedRationale)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: dream link resolve: select: %w", err)
-	}
-
-	res := &DreamLinkResolution{
-		SourceID:     sourceID,
-		TargetID:     targetID,
-		Relationship: storedRel,
-		Resolution:   resolution,
-	}
-	switch resolution {
-	case "confirm":
-		// rationale only overwrites when provided — confirm without text
-		// keeps an earlier justification instead of blanking it.
-		err = tx.QueryRow(ctx,
-			`UPDATE context_dream_links
-			 SET pinned = true,
-			     rationale = COALESCE(NULLIF($3, ''), rationale)
-			 WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid
-			 RETURNING pinned, rationale`,
-			sourceID, targetID, rationale,
-		).Scan(&res.Pinned, &res.Rationale)
+	// storedRel outlives the transaction: the audit row below quotes it.
+	var (
+		res       *DreamLinkResolution
+		storedRel string
+	)
+	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: dream link resolve"), func(tx pgx.Tx) error {
+		// Lock the link row so a concurrent dream replace sweep cannot delete it
+		// between classification and update (classifyGuardBatch pattern).
+		var pinned bool
+		var storedRationale *string
+		err := tx.QueryRow(ctx,
+			`SELECT dl.relationship, dl.pinned, dl.rationale
+			 FROM context_dream_links dl
+			 JOIN context_blocks s ON s.id = dl.source_block_id
+			 WHERE dl.source_block_id = $1::uuid
+			   AND dl.target_block_id = $2::uuid
+			   AND dl.relationship = $3
+			   AND s.scope = ANY($4::text[])
+			 FOR UPDATE OF dl`,
+			sourceID, targetID, relationship, writeScopes,
+		).Scan(&storedRel, &pinned, &storedRationale)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// (nil, nil) before the commit in the straight-line form —
+			// pgxdb.ErrRollback keeps that miss a rollback instead of a commit.
+			return pgxdb.ErrRollback
+		}
 		if err != nil {
-			return nil, fmt.Errorf("store: dream link resolve: confirm: %w", err)
+			return fmt.Errorf("store: dream link resolve: select: %w", err)
 		}
-	case "delete":
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM context_dream_links
-			 WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid`,
-			sourceID, targetID,
-		); err != nil {
-			return nil, fmt.Errorf("store: dream link resolve: delete: %w", err)
-		}
-		if storedRel == "supersedes" {
-			// Mirror of replaceStaleLinks' revert (dream/writelinks.go):
-			// Welle-46 convention "A supersedes B" → the TARGET was marked
-			// snapshot with superseded_by=source; undo only while that
-			// marking still points at THIS source (a supersedes by another
-			// block must not be reverted).
-			tag, err := tx.Exec(ctx,
-				`UPDATE context_blocks
-				 SET lifecycle_state = 'knowledge', superseded_by = NULL
-				 WHERE id = $1::uuid
-				   AND lifecycle_state = 'snapshot'
-				   AND superseded_by = $2::uuid`,
-				targetID, sourceID,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("store: dream link resolve: supersedes revert: %w", err)
-			}
-			res.SupersedesReverted = tag.RowsAffected() > 0
-		}
-	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("store: dream link resolve: commit: %w", err)
+		res = &DreamLinkResolution{
+			SourceID:     sourceID,
+			TargetID:     targetID,
+			Relationship: storedRel,
+			Resolution:   resolution,
+		}
+		switch resolution {
+		case "confirm":
+			// rationale only overwrites when provided — confirm without text
+			// keeps an earlier justification instead of blanking it.
+			err = tx.QueryRow(ctx,
+				`UPDATE context_dream_links
+				 SET pinned = true,
+				     rationale = COALESCE(NULLIF($3, ''), rationale)
+				 WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid
+				 RETURNING pinned, rationale`,
+				sourceID, targetID, rationale,
+			).Scan(&res.Pinned, &res.Rationale)
+			if err != nil {
+				return fmt.Errorf("store: dream link resolve: confirm: %w", err)
+			}
+		case "delete":
+			if _, err := tx.Exec(ctx,
+				`DELETE FROM context_dream_links
+				 WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid`,
+				sourceID, targetID,
+			); err != nil {
+				return fmt.Errorf("store: dream link resolve: delete: %w", err)
+			}
+			if storedRel == "supersedes" {
+				// Mirror of replaceStaleLinks' revert (dream/writelinks.go):
+				// Welle-46 convention "A supersedes B" → the TARGET was marked
+				// snapshot with superseded_by=source; undo only while that
+				// marking still points at THIS source (a supersedes by another
+				// block must not be reverted).
+				tag, err := tx.Exec(ctx,
+					`UPDATE context_blocks
+					 SET lifecycle_state = 'knowledge', superseded_by = NULL
+					 WHERE id = $1::uuid
+					   AND lifecycle_state = 'snapshot'
+					   AND superseded_by = $2::uuid`,
+					targetID, sourceID,
+				)
+				if err != nil {
+					return fmt.Errorf("store: dream link resolve: supersedes revert: %w", err)
+				}
+				res.SupersedesReverted = tag.RowsAffected() > 0
+			}
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, pgxdb.ErrRollback) {
+			return nil, nil
+		}
+		return nil, err
 	}
 
 	// Audit outside the tx (WriteLinks pattern — a log failure never rolls
