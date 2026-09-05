@@ -1804,11 +1804,15 @@ type DistillConfig struct {
 	// other is rows of context_blocks — and a single set of keys would force
 	// one number to mean two things.
 	//
-	// LIKE THE GROUP AROUND IT, THIS HALF HAS NO CONSUMER YET (A02-4 ships the
-	// schema and the rules; the reader is A02-3, the arm A02-5). The rules come
-	// WITH the keys for the reason the group doc gives one screen up: a rule
-	// added after the key would be a rule added against an already-configurable
-	// value.
+	// THREE OF THE FOUR KEYS BELOW ARE WIRED. distill.ctx_enabled gates the run
+	// (events/distill.go:481) and carries the credential-rank rule in
+	// config/validate.go:404; distill.ctx_source_label and
+	// distill.ctx_session_horizon reach ctxcheckpoint.New through
+	// Scheduler.newDistillSource (events/distill.go:2013, :2017). Only
+	// distill.ctx_quiet_for still has no reader — gate 3 (A02-10) is the wave
+	// that consumes it. The rules came WITH the keys for the reason the group
+	// doc gives one screen up: a rule added after the key would be a rule added
+	// against an already-configurable value.
 	//
 	// CtxEnabled is the per-source master switch, default OFF for the same
 	// load-bearing reason distill.enabled is: an install that has never asked

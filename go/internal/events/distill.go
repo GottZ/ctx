@@ -2016,7 +2016,7 @@ func (s *Scheduler) newDistillSource(cfg *config.Config, scope string) (distills
 		MaxSessions:    cfg.Distill.MaxSessionsPerRun,
 		SessionHorizon: cfg.Distill.CtxSessionHorizon,
 		// The manifest window rides distill.rows_per_read, the group's one
-		// "mandatory LIMIT on every read" key (config.go:1789-1794). It bounds
+		// "mandatory LIMIT on every read" key (config.go:1942-1946). It bounds
 		// the cheap query; the item cap that bounds the expensive one is the
 		// caller's argument to Read and arrives with A02-6.
 		MaxManifests: cfg.Distill.RowsPerRead,

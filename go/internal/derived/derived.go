@@ -12,17 +12,37 @@
 //
 // # Leaf package
 //
-// derived imports only promptguard and sensitivity (both of which import only
-// util). It must NOT import store, llm, blocktype or topiclabel: the DB-facing
-// half of the contract (store.ResolveSources) lives in store and calls INTO
-// this package, exactly the cut internal/visibility uses. The echo index in
-// echo.go is therefore an independent implementation of the one in
-// topiclabel/guard.go rather than an import.
+// The leaf property is a RULE, not the current import list: derived must NOT
+// import store, llm, blocktype or topiclabel. The DB-facing half of the
+// contract (store.ResolveSources) lives in store and calls INTO this package,
+// exactly the cut internal/visibility uses. The echo index in echo.go is
+// therefore an independent implementation of the one in topiclabel/guard.go
+// rather than an import.
 //
-// # No callers
+// # Callers
 //
-// This package has no production caller yet, by design (wave W01-1). Precedent
-// in the tree: internal/hermesstate has lain callerless since migration 135.
+// Ten non-test files in five packages import this package: config/validate.go,
+// distillreset/reset.go, events/distill_block.go, events/distill_extract.go,
+// handler/stage_gates.go, and five files under store (blocks.go, classify.go,
+// derived_coverage.go, issues.go, resolve_sources.go).
+//
+// Nine of the ten reach the surface the live distiller and the write path use:
+// the type and metadata vocabulary (IsDerivedType, DerivedTypeNames,
+// ReservedCategories, IsReservedCategory, MetadataKey, Provenance,
+// HasProvenance, ContractVersion), the gate constants (MinQuoteRunes), the
+// outcome kinds (Kind*), Normalize, and
+// the adequacy counter-metric (Adequacy). The two Goodhart thresholds in
+// report.go stand on that live side too: GoodhartMinNovelty is the value
+// distill.novelty_floor defaults to, and config/distill_c5e_test.go pins the
+// two to each other.
+//
+// The tenth is store/resolve_sources.go, and it reaches the W01-1 generation
+// only for its data types (Source, SourceFacts, NewSourceFacts, Stratum). The
+// gate entry points themselves — CiteGate, Validate, MinSourceCount — have no
+// production reader anywhere: resolve_sources.go names them in comments, it
+// does not call them, and store.ResolveSources in turn has no production caller
+// either. That half is what a later decision is about; the rest of the package
+// is wired.
 //
 // # StratumOf and the level-2 question
 //

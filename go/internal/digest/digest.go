@@ -291,8 +291,10 @@ func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, home
 // truncateTitle caps a topic-map row title at 70 runes (rune-aware). A byte
 // slice can split a multi-byte rune (em-dash, ellipsis, CJK, emoji), leaving
 // invalid UTF-8 that PostgreSQL rejects on upsert with SQLSTATE 22021 —
-// regression target of Issue #4. Re-uses the shared util.TruncateRunes via
-// an inline path so this package stays free of additional internal deps.
+// regression target of Issue #4. This is an inline COPY of the shared helper,
+// not a call into it: digest imports no internal package besides blocktype and
+// store, and truncateTitle(t) returns byte for byte what util.TruncateRunes(t,
+// 70) returns (util/strings.go:19-30, same 70/67 arithmetic).
 func truncateTitle(title string) string {
 	if utf8.RuneCountInString(title) > 70 {
 		return string([]rune(title)[:67]) + "..."

@@ -4,8 +4,8 @@
 // direction decision over the canonical hash projection (§3.6) and applies the
 // PULL side only — push (ctx-ahead) is Welle I-H.
 //
-// 3-way matrix (§4.5.2), base = mapping.base_hash, ctxH = CtxIssueHash(block),
-// forgeH = ForgeIssueHash(fetch):
+// 3-way matrix (§4.5.2), base = mapping.base_hash, ctxH = the hash CtxIssueBase
+// returns for the block, forgeH = the hash ForgeIssueBase returns for the fetch:
 //
 //	no mapping           ⇒ pull-CREATE  (block + mapping + base := forgeH)
 //	(=,=)                ⇒ noop
