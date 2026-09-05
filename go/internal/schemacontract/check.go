@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/migrations"
 )
 
@@ -325,9 +327,10 @@ func checkMigrationIntegrity(ctx context.Context, pool *pgxpool.Pool) ([]Drift, 
 
 // checkGUCProbes runs the three-step library-load + set_config +
 // pg_settings probe (design/03 §4.3) for every Manifest-declared GUC, each
-// in its own rolled-back transaction (a probe failure must never leak
-// transaction-local state, and each probe needs a single pinned connection
-// — library-load and set_config must land on the SAME backend).
+// in its own rolled-back transaction — pgxdb.Probe, the bracket that never
+// commits (a probe failure must never leak transaction-local state, and each
+// probe needs a single pinned connection — library-load and set_config must
+// land on the SAME backend).
 func checkGUCProbes(ctx context.Context, pool *pgxpool.Pool, probes []GucProbe) ([]Drift, error) {
 	var drifts []Drift
 	for _, p := range probes {
@@ -343,35 +346,47 @@ func checkGUCProbes(ctx context.Context, pool *pgxpool.Pool, probes []GucProbe) 
 }
 
 func probeOneGUC(ctx context.Context, pool *pgxpool.Pool, p GucProbe) (*Drift, error) {
-	tx, err := pool.Begin(ctx)
+	var drift *Drift
+	err := pgxdb.Probe(ctx, pool, "begin guc probe tx", func(tx pgx.Tx) error {
+		drift = gucProbeSteps(ctx, tx, p)
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("begin guc probe tx: %w", err)
+		return nil, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	return drift, nil
+}
 
+// gucProbeSteps runs the three probe statements on the ONE pinned backend the
+// transaction holds and answers with the Drift they found, or nil for a GUC
+// the backend recognizes. It returns no error on purpose: a failing statement
+// IS the finding here, not a failure of the check — hoisting that fact into a
+// return type keeps it out of the transaction bracket, which now only opens
+// and rolls back.
+func gucProbeSteps(ctx context.Context, tx pgx.Tx, p GucProbe) *Drift {
 	// Step 1: load the pgvector library into THIS backend (a cheap cast,
 	// cast to ::text so no pgvector Go-type registration is required on the
 	// caller's pool — design/03 §4.3 "billig, katalog-nah", no table read).
 	if _, err := tx.Exec(ctx, `SELECT ('[0]'::vector)::text`); err != nil {
 		return &Drift{Class: ClassGucProbeFailed, Severity: SeverityBreaking,
-			Object: "guc:" + p.Name, Detail: "library load failed: " + err.Error()}, nil
+			Object: "guc:" + p.Name, Detail: "library load failed: " + err.Error()}
 	}
 
 	// Step 2: set the exact production value, transaction-local only.
 	if _, err := tx.Exec(ctx, `SELECT set_config($1, $2, true)`, p.Name, p.ProbeValue); err != nil {
 		return &Drift{Class: ClassGucProbeFailed, Severity: SeverityBreaking,
-			Object: "guc:" + p.Name, Detail: "set_config failed: " + err.Error()}, nil
+			Object: "guc:" + p.Name, Detail: "set_config failed: " + err.Error()}
 	}
 
 	// Step 3: assert the backend now recognizes the GUC.
 	var count int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_settings WHERE name = $1`, p.Name).Scan(&count); err != nil {
 		return &Drift{Class: ClassGucProbeFailed, Severity: SeverityBreaking,
-			Object: "guc:" + p.Name, Detail: "pg_settings assert query failed: " + err.Error()}, nil
+			Object: "guc:" + p.Name, Detail: "pg_settings assert query failed: " + err.Error()}
 	}
 	if count != 1 {
 		return &Drift{Class: ClassGucProbeFailed, Severity: SeverityBreaking,
-			Object: "guc:" + p.Name, Detail: fmt.Sprintf("pg_settings count=%d, want 1", count)}, nil
+			Object: "guc:" + p.Name, Detail: fmt.Sprintf("pg_settings count=%d, want 1", count)}
 	}
-	return nil, nil
+	return nil
 }
