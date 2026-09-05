@@ -1,4 +1,4 @@
-// Package rrf — Post-RRF Temporal Gravity Reranker
+// gravity.go — Post-RRF Temporal Gravity Reranker
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // Two gravity formulas:

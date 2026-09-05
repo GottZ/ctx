@@ -1,4 +1,4 @@
-// Package dream — Bench-Export-Shims für ctx-goldbench.
+// bench_exports.go — Bench-Export-Shims für ctx-goldbench.
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // Diese Datei enthält AUSSCHLIESSLICH exportierte Accessoren auf unexportierte

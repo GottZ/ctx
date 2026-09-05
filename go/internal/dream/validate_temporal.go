@@ -1,4 +1,4 @@
-// Package dream — Temporal Validation Step.
+// validate_temporal.go — Temporal Validation Step.
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // ValidateTemporal runs after PickBlock and before keyword extraction.

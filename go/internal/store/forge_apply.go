@@ -1,4 +1,4 @@
-// Package store — I-G Pull-APPLY block writes (Achse 02, Welle I-G; design/02
+// forge_apply.go — I-G Pull-APPLY block writes (Achse 02, Welle I-G; design/02
 // §3.1/§3.6/§4.5.2/§4.5.4). These primitives materialise a FETCHED forge issue
 // as a context_block and keep it in sync. They are deliberately SEPARATE from the
 // I-D InsertIssueBlock/UpdateIssueBlock local-write path:

@@ -1,4 +1,4 @@
-// ctx-armsweep — der Treiber des Arm-Gewichts-Sweeps (Design 04 §4.6-§4.9,
+// Package main — ctx-armsweep: der Treiber des Arm-Gewichts-Sweeps (Design 04 §4.6-§4.9,
 // Welle B-W5).
 //
 // Drei Unterkommandos, absichtlich getrennte Läufe statt eines langen Jobs:

@@ -1,4 +1,4 @@
-// Package store — ego-subgraph traversal over context_dream_links (F5-W1).
+// graph.go — ego-subgraph traversal over context_dream_links (F5-W1).
 //
 // EgoGraph implements the server side of the graph viewer: a BFS hop loop in
 // Go (fetchNeighbors discipline, rrf/graph.go) with the canonical visibility

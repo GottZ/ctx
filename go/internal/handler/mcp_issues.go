@@ -1,4 +1,4 @@
-// Package handler — MCP issue-content write tools (workflow W12, design/03 §7-W12,
+// mcp_issues.go — MCP issue-content write tools (workflow W12, design/03 §7-W12,
 // E5 decision (a): create + comment + state, NO delete). These three tools expose
 // the SAME store primitives as the REST W7 surface and the manage transport — one
 // logic, three transports (the §4.1 house pattern). No new store logic ships here.

@@ -1,4 +1,8 @@
-// Package rrf — Bench-Export-Shims für ctx-goldbench.
+// Package rrf — the retrieval pipeline of ctx: it drives the SQL-side 4-arm
+// RRF fusion (ctx_rrf) through a strategy selector and applies the post-RRF
+// stages — temporal gravity, dream-graph expansion, cluster boost, rerank.
+//
+// bench_exports.go — Bench-Export-Shims für ctx-goldbench.
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // Diese Datei enthält AUSSCHLIESSLICH exportierte Accessoren auf unexportierte

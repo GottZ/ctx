@@ -1,4 +1,4 @@
-// Package store — canonical block-visibility predicate (F5-W1, typ-param T6).
+// visibility.go — canonical block-visibility predicate (F5-W1, typ-param T6).
 //
 // This file is the store-side entry to THE single shared SQL fragment for
 // "this block is visible to the caller" (internal/visibility since WF T6).

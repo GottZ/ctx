@@ -1,4 +1,4 @@
-// Package store — Date Extraction for content_dates enrichment
+// dates.go — Date Extraction for content_dates enrichment
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // ExtractDates extracts all recognizable dates from text content

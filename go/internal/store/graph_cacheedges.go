@@ -1,4 +1,4 @@
-// Package store — the W05.6 post-traversal cache stages: Q2/Q2s (induced edges)
+// graph_cacheedges.go — the W05.6 post-traversal cache stages: Q2/Q2s (induced edges)
 // and Q3 (degrees) served from the CSR snapshot (design/05 §3.2 Nr. 3, §4.2,
 // §8 E-05-3).
 //

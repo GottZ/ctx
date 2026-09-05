@@ -1,4 +1,4 @@
-// Package chat — engine.go is the server-side harness loop (design 06 §3.6).
+// Package chat — the server-side harness loop (design 06 §3.6).
 //
 // RunTurn drives the tool loop headless: it claims the session turn, persists
 // the user message, then iterates model call → tool execution → next call,

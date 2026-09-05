@@ -1,4 +1,4 @@
-// Package handler — Ingest endpoint for bulk block import.
+// ingest.go — Ingest endpoint for bulk block import.
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // POST /api/ingest accepts up to 200 chunks per request.

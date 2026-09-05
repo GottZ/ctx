@@ -1,4 +1,4 @@
-// Package forge — the I-H PUSH pass (Achse 02, Welle I-H; design/02 §4.5.2,
+// push.go — the I-H PUSH pass (Achse 02, Welle I-H; design/02 §4.5.2,
 // §5.6, §6.1). It is the mirror of the I-G Pull-APPLY: I-G reconciles forge→ctx
 // and leaves the ctx-ahead branch untouched (apply.go: "push is I-H"); this pass
 // drains exactly those ctx-ahead entities back onto the forge.

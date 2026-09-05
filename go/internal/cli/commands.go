@@ -1,3 +1,6 @@
+// Package cli — the ctx command tree: RegisterCommands wires every subcommand
+// onto the cobra root, and each one reaches a ctxd through this package's HTTP
+// Client; only init opts out of the shared lazy instance and builds its own.
 package cli
 
 import (

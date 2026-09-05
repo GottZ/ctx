@@ -1,4 +1,4 @@
-// Package handler — web-chat HTTP surface (F6-C4/G37).
+// chat.go — web-chat HTTP surface (F6-C4/G37).
 //
 // POST /api/chat/stream runs ONE turn through the headless chat.Engine and
 // streams its events as SSE; the session routes (list / detail / delete) are

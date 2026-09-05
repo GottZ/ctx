@@ -1,4 +1,4 @@
-// Package llm — Temporal Normalization
+// temporal.go — Temporal Normalization
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // GottZ Temporal Gravity: Physics-inspired temporal scoring where knowledge

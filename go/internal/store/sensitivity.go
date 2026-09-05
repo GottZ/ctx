@@ -1,4 +1,4 @@
-// Package store — block sensitivity lookup (F3-P3 trust gating).
+// sensitivity.go — block sensitivity lookup (F3-P3 trust gating).
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // Source: https://github.com/GottZ/ctx

@@ -1,4 +1,4 @@
-// Package rrf — the W05.7 GraphExpand cache arm (design/05 §4.2/§4.4/§5.1).
+// graph_cache.go — the W05.7 GraphExpand cache arm (design/05 §4.2/§4.4/§5.1).
 //
 // What moves to the snapshot: the EDGE FETCH of fetchNeighbors — the edge_dir
 // UNION, the per-type raw_confidence gate, the per-seed cap and the hub-damping

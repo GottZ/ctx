@@ -1,4 +1,4 @@
-// Package llm — deterministic DimensionWeights post-derivation for the LLM
+// dimweights_fallback.go — deterministic DimensionWeights post-derivation for the LLM
 // temporal fallback (Vorhaben A, wave W2, mechanism D-B).
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //

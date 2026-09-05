@@ -1,4 +1,4 @@
-// Package llm — block sensitivity classification (G41 LLM audit).
+// classify.go — block sensitivity classification (G41 LLM audit).
 //
 // Two SEPARATE yes/no questions per block (user wording, masterplan G41):
 // credentials and personal data. Answers are strict JSON booleans — there is

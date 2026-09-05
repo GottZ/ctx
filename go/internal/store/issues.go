@@ -1,4 +1,4 @@
-// Package store — issue/comment write + read primitives (Achse 02, Welle I-D,
+// issues.go — issue/comment write + read primitives (Achse 02, Welle I-D,
 // K2 "Store+Tier" form). Issues and comments are ordinary context_blocks
 // (type_name issue/comment, migration 084 seeds) — they inherit scope
 // isolation, RRF, guard and dream for free (vision 019e83df-9666). This file is

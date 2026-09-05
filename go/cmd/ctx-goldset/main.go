@@ -1,4 +1,4 @@
-// ctx-goldset — builds stage 1 of the retrieval gold set (design 04 §4.5):
+// Package main — ctx-goldset: builds stage 1 of the retrieval gold set (design 04 §4.5):
 // the query sets G-KI, G-Q and G-REAL plus the provenance stamp.
 //
 // Subcommands:

@@ -1,4 +1,4 @@
-// Package handler — Minimal OAuth 2.1 PKCE server for MCP remote auth.
+// oauth.go — Minimal OAuth 2.1 PKCE server for MCP remote auth.
 // Maps existing ctx API keys to OAuth Bearer tokens. No external OAuth provider needed.
 //
 // Flow: claude.ai → /authorize → user enters API key → redirect with code →

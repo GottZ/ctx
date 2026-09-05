@@ -1,4 +1,4 @@
-// Package handler — MCP (Model Context Protocol) server for ctx.
+// mcp.go — MCP (Model Context Protocol) server for ctx.
 // Exposes ctx tools (query, store, search, get, dream) via the
 // Streamable HTTP transport for remote MCP clients like Claude Code.
 package handler

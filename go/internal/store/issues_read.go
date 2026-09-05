@@ -1,4 +1,4 @@
-// Package store — issue READ access paths for the REST /api/project issue surface
+// issues_read.go — issue READ access paths for the REST /api/project issue surface
 // (Achse 03, Welle W6, design/03-workflow-api-cli.md §4.2/§4.3/§6.1). These sit
 // beside the shipped I-B board primitive (ListWorkflowBlocks / WorkflowStatusListSQL)
 // and the I-D issue store (issues.go). The REST list endpoint routes to one of

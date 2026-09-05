@@ -1,4 +1,4 @@
-// Package store — deterministic structural link layer (Achse 02, Welle I-A).
+// structlinks.go — deterministic structural link layer (Achse 02, Welle I-A).
 //
 // context_structural_links (migration 076) carries FACT edges between blocks:
 // confidence 1.0 by definition, forge-/system-/manual-derived, STRICTLY

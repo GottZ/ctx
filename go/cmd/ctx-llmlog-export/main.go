@@ -1,4 +1,4 @@
-// ctx-llmlog-export — SELECT-only-Sicherung von context_llm_log als JSONL.
+// Package main — ctx-llmlog-export: SELECT-only-Sicherung von context_llm_log als JSONL.
 //
 // Drafter-Training design/02 §4.1 (KW1): rettet die Prompt-/Response-Bodies
 // VOR jeder Retention-Aktivierung (EvictBodies ist hot-mutable). Eine Zeile

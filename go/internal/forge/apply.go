@@ -1,4 +1,4 @@
-// Package forge — the I-G Pull-APPLY hook (Achse 02, Welle I-G; design/02 §4.5.2,
+// apply.go — the I-G Pull-APPLY hook (Achse 02, Welle I-G; design/02 §4.5.2,
 // §4.5.4, §4.5.7). Applier.ApplyIssues is the IssueApplyFunc the I-F sync shell
 // wires (SetApplyIssues): for every fetched forge issue it runs the 3-way
 // direction decision over the canonical hash projection (§3.6) and applies the

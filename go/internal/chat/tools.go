@@ -1,4 +1,4 @@
-// Package chat — server-side web-chat harness (F6-C3/G36).
+// tools.go — server-side web-chat harness (F6-C3/G36).
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // Source: https://github.com/GottZ/ctx

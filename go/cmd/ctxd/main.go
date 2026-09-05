@@ -1,3 +1,6 @@
+// Package main — ctxd, the ctx daemon: it boots config, pgx pool and
+// migrations, then runs three things — the event scheduler, the SSE project
+// hub and the HTTP server carrying the REST, MCP and SPA routes.
 package main
 
 import (

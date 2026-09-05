@@ -1,4 +1,4 @@
-// Package store — the W05.5 EgoGraph cache arm (design/05 §4.2/§4.4/§5.1).
+// graph_cachearm.go — the W05.5 EgoGraph cache arm (design/05 §4.2/§4.4/§5.1).
 //
 // What moves to the cache: Q1 (hopNeighbors) and Q1s (structuralHopNeighbors) —
 // the two per-hop adjacency queries. What does NOT move, by design:

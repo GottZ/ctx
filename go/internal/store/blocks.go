@@ -1,4 +1,4 @@
-// Package store provides block CRUD operations against the context_blocks table.
+// blocks.go — block CRUD operations against the context_blocks table.
 package store
 
 import (

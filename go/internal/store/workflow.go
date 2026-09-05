@@ -1,4 +1,4 @@
-// Package store — workflow board listing primitives (Achse 02, Welle I-B).
+// workflow.go — workflow board listing primitives (Achse 02, Welle I-B).
 //
 // context_blocks.workflow_status (migration 077) is the per-block workflow VALUE;
 // the SET of valid states is Achse-01 type-config policy (blocktype registry).

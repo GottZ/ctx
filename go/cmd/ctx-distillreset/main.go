@@ -1,4 +1,4 @@
-// ctx-distillreset — der Rückweg des Schatten-Retype im Mess-Werkzeugkasten.
+// Package main — ctx-distillreset: der Rückweg des Schatten-Retype im Mess-Werkzeugkasten.
 //
 // Wissens-Ebenen, Welle C4-5 (Nebenbefund N-15 des C3-3-Re-Piloten, Entscheid
 // E5-6): eine X-W-Messreihe typisiert die Insight-Blöcke des Destillat-Arms auf

@@ -1,3 +1,7 @@
+// Package handler — the HTTP surface of ctxd: per-domain handler structs that
+// serve the REST, MCP and SSE routes on a shared chi middleware chain (auth,
+// tenant scope, body caps) with one machine-readable rejection vocabulary.
+//
 // Web-session lifecycle (OAuth R3, design 05 §4.3/§4.4):
 //
 //	POST /auth/login   → key → login token pair + overlay row + cookies

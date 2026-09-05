@@ -1,4 +1,4 @@
-// Package forge — the canonical 3-way hash projection (design/02 §3.6, W16).
+// projection.go — the canonical 3-way hash projection (design/02 §3.6, W16).
 //
 // base_hash / ctx_hash / forge_hash are sha256 over a CANONICAL JSON projection,
 // NEVER over raw payloads: volatile fields (reactions, updated_at) would drift

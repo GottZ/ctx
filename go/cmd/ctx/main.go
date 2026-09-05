@@ -1,3 +1,5 @@
+// Package main — ctx, the CLI client: it builds the cobra root command,
+// hands the command tree to internal/cli and speaks plain HTTP to a ctxd.
 package main
 
 import (

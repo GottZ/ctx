@@ -1,4 +1,4 @@
-// Package rrf — pattern match engine for intent detection and write-side
+// pattern.go — pattern match engine for intent detection and write-side
 // classification (Welle 41; WF T4 design/01 §4.4 #16 / §4.5).
 //
 // History: Welle 41 introduced HasAuditTrailIntent/AuditTrailFactor with a

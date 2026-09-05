@@ -1,4 +1,4 @@
-// Package events implements PG LISTEN/NOTIFY for event-driven guard and digest.
+// listener.go — PG LISTEN/NOTIFY for event-driven guard and digest.
 // Uses pgxlisten for auto-reconnect and backlog handling.
 package events
 

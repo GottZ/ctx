@@ -1,4 +1,4 @@
-// Package store — Temporal EAV Dimension Functions
+// temporal.go — Temporal EAV Dimension Functions
 // Part of ctx by GottZ — The memory your LLM pretends to have.
 //
 // Manages the context_temporal table (block_id, dimension, value, source_time)

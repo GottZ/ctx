@@ -1,4 +1,8 @@
-// Package store — blob CRUD operations against the context_blobs table.
+// Package store — the PostgreSQL data-access layer of ctx: package-level
+// functions over a shared *pgxpool.Pool, one file per domain table, plus the
+// pool constructor (pool.go) and the embedded migration runner (migrations.go).
+//
+// blobs.go — blob CRUD operations against the context_blobs table.
 package store
 
 import (

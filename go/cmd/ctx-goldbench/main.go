@@ -1,4 +1,4 @@
-// ctx-goldbench — Benchmark-Harness für die ctx-LLM-Pipelines.
+// Package main — ctx-goldbench: Benchmark-Harness für die ctx-LLM-Pipelines.
 //
 // Spielt die echten ctx-Prompts (via bench_exports.go-Shims) gegen ein
 // beliebiges OpenAI-kompatibles Modell ab, parst mit den ctx-treuen Parsern

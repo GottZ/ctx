@@ -1,4 +1,4 @@
-// Package store — I-H push-side writes (Achse 02, Welle I-H; design/02 §4.5.2,
+// forge_push.go — I-H push-side writes (Achse 02, Welle I-H; design/02 §4.5.2,
 // lines 416/565). The push materialises ctx-ahead entities back onto the forge:
 // it ENUMERATES push candidates (mappings whose block changed since the last base
 // write, or local-only forge_id=0 drafts), FINALISES a create (forge_id 0→number,

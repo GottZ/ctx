@@ -1,4 +1,4 @@
-// ctx-armcost — SELECT-only-Kostenreport über context_llm_log in GPU-Sekunden.
+// Package main — ctx-armcost: SELECT-only-Kostenreport über context_llm_log in GPU-Sekunden.
 //
 // Wissens-Ebenen design/05 §4.7 (Welle M-W7): die Währung des Mess-Programms
 // ist die Belegungs-Sekunde, nicht der Dollar. cost_usd ist auf einem

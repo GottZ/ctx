@@ -1,4 +1,4 @@
-// Package rrf — Post-RRF Dream-Graph Expansion (GottZ Graph Expansion, Wave 1).
+// graph.go — Post-RRF Dream-Graph Expansion (GottZ Graph Expansion, Wave 1).
 //
 // ctx infers a five-type link graph over blocks (topical / factual / causal /
 // recurrent / supersedes, table context_dream_links) at high local-LLM cost,
