@@ -113,7 +113,7 @@ func GenerateKeywords(ctx context.Context, pool *pgxpool.Pool, r *Router, block 
 		// map it finds: the retry counter is this row's own key and must not
 		// depend on which of the two writers creates the map.
 		entry.Metadata = map[string]any{"attempt": attempt}
-		r.applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts, err)
+		r.applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, resp, attempts, err)
 		if resp != nil {
 			entry.ResponseContent = resp.Message.Content
 			entry.CompletionTokens = resp.EvalCount

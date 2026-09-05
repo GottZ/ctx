@@ -302,7 +302,7 @@ func evalAttempt(ctx context.Context, pool *pgxpool.Pool, r *Router, req *evalRe
 		req.system, req.user, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
-	r.applyChainTelemetry(entry, backends.RoleDream, req.required, served, attempts, err)
+	r.applyChainTelemetry(entry, backends.RoleDream, req.required, served, resp, attempts, err)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content

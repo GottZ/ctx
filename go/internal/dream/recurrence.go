@@ -191,7 +191,7 @@ func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts 
 		systemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
-	r.applyChainTelemetry(entry, backends.RoleDream, required, served, attempts, err)
+	r.applyChainTelemetry(entry, backends.RoleDream, required, served, resp, attempts, err)
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount

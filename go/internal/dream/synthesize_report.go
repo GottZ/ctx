@@ -303,7 +303,7 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 		sysPrompt, userPrompt, dailySynthesisOptions(), DailySynthesisTimeout)
 	entry.Duration = time.Since(start)
 	entry.Err = err
-	r.applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, served, attempts, err)
+	r.applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, served, resp, attempts, err)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content

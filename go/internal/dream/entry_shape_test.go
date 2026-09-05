@@ -95,7 +95,7 @@ func TestDreamRowFixture(t *testing.T) {
 	t.Run("body row (dream-eval)", func(t *testing.T) {
 		entry := newDreamEntry("dream-eval", "SYS", "USR", []string{"b1", "b2"})
 		entry.Duration = 5 * time.Second
-		r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, nil, attempts, nil)
+		r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, nil, nil, attempts, nil)
 		got := dreamRow(t, entry.Slimmed(false))
 		want := `{"pipeline":"dream-eval","request_system":"SYS","request_user":"USR","block_ids":["b1","b2"],"dream_version":5,"metadata":{"chain":[{"backend":"gpu-a","err_class":"ok","ms":200,"wait_ms":7}]},"attempt":1,"duration_ms":200}`
 		if got != want {
@@ -105,7 +105,7 @@ func TestDreamRowFixture(t *testing.T) {
 
 	t.Run("no block ids (dream-daily-synthesis)", func(t *testing.T) {
 		entry := newDreamEntry("dream-daily-synthesis", "SYS", "USR", nil)
-		r.applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, nil, attempts, nil)
+		r.applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, nil, nil, attempts, nil)
 		if entry.BlockIDs != nil {
 			t.Fatalf("block_ids = %#v, want nil (NULL column, not an empty array)", entry.BlockIDs)
 		}
@@ -120,7 +120,7 @@ func TestDreamRowFixture(t *testing.T) {
 		entry := newDreamEntry("dream-keywords", "SYS", "USR", []string{"b1"})
 		entry.Duration = 1500 * time.Millisecond
 		entry.Metadata = map[string]any{"attempt": 2}
-		r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, nil, attempts, nil)
+		r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, nil, nil, attempts, nil)
 		if entry.Metadata["attempt"] != 2 {
 			t.Errorf("metadata.attempt = %v, want 2 (the retry counter must survive the funnel)", entry.Metadata["attempt"])
 		}

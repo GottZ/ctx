@@ -230,11 +230,12 @@ func TestOpenRouterExtraHeaders(t *testing.T) {
 
 // TestApplyProviderTelemetry: the llmlog row picks up cost_usd, the served
 // model overwrite and metadata.provider_request_id; zero-value responses
-// (local backends) leave the entry untouched.
+// (local backends) and a nil response (the walk never got an answer) leave
+// the entry untouched.
 func TestApplyProviderTelemetry(t *testing.T) {
 	cost := 0.0123
 	entry := llmlog.Entry{Model: "row-model", Metadata: map[string]any{"chain": "x"}}
-	applyProviderTelemetry(&entry, &ChatResponse{
+	ApplyProviderTelemetry(&entry, &ChatResponse{
 		CostUSD: &cost, ServedModel: "served-model", ProviderRequestID: "gen-1",
 	})
 	if entry.CostUSD == nil || *entry.CostUSD != cost {
@@ -248,8 +249,16 @@ func TestApplyProviderTelemetry(t *testing.T) {
 	}
 
 	local := llmlog.Entry{Model: "row-model"}
-	applyProviderTelemetry(&local, &ChatResponse{})
+	ApplyProviderTelemetry(&local, &ChatResponse{})
 	if local.CostUSD != nil || local.Model != "row-model" || local.Metadata != nil {
 		t.Errorf("zero-value response mutated the entry: %+v", local)
+	}
+
+	// nil response: the error path of every unconditional caller. Without the
+	// guard this line dereferences nil instead of leaving the row alone.
+	failed := llmlog.Entry{Model: "row-model"}
+	ApplyProviderTelemetry(&failed, nil)
+	if failed.CostUSD != nil || failed.Model != "row-model" || failed.Metadata != nil {
+		t.Errorf("nil response mutated the entry: %+v", failed)
 	}
 }

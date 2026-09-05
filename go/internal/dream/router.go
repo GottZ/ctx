@@ -259,6 +259,12 @@ func newDreamEntry(pipeline, system, user string, blockIDs []string) *llmlog.Ent
 // metadata. Body slim for credentials-class rows happens at Record time via
 // Entry.Slimmed — telemetry is never slimmed.
 //
+// resp carries the PROVIDER's side of the same walk (T04-12): cost_usd,
+// metadata.provider_request_id and — on a models-fallback — the model that
+// actually answered. It arrives here so the five pipelines share the one
+// funnel instead of five copies of the same three assignments; nil is the
+// ordinary error path and llm.ApplyProviderTelemetry guards it.
+//
 // Since MW11 this is ALSO the ONE dispatch-outcome funnel of the five dream
 // chat pipelines (design/05 §4.4b: one place, five pipelines — a Router
 // method because the class binding lives on r.Admit): queue_wait_ms/
@@ -270,7 +276,7 @@ func newDreamEntry(pipeline, system, user string, blockIDs []string) *llmlog.Ent
 // (the MW3 gap): background queue_full/acquire_expired becomes the uniform
 // K9 rejection line, everything else becomes no row at all.
 func (r *Router) applyChainTelemetry(entry *llmlog.Entry, role string, required backends.Sensitivity,
-	served *backends.Backend, attempts []llm.ChainAttempt, err error,
+	served *backends.Backend, resp *llm.ChatResponse, attempts []llm.ChainAttempt, err error,
 ) {
 	entry.RequiredSensitivity = string(required)
 	entry.Attempt = len(attempts)
@@ -281,6 +287,10 @@ func (r *Router) applyChainTelemetry(entry *llmlog.Entry, role string, required 
 		entry.Metadata["chain"] = attempts
 	}
 	llm.StampServed(entry, role, served)
+	// AFTER the pool's stamp, BEFORE the fold — the exact order ChainCall.Do
+	// walks. The provider's models-fallback pick must overwrite the model this
+	// pool resolved, not the other way round.
+	llm.ApplyProviderTelemetry(entry, resp)
 	// LAST on purpose: the K9/blank fold replaces the entry wholesale — the
 	// provenance stamped above only survives on rows that reached the wire.
 	llm.ApplyDispatchOutcome(entry, attempts, err, r.Admit.Class)

@@ -667,7 +667,7 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 	if resp != nil {
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
-		applyProviderTelemetry(&entry, resp)
+		ApplyProviderTelemetry(&entry, resp)
 	}
 	// MW10: queue_wait_ms/class/abort plus the wait-free Duration from the
 	// row-defining attempt (§4.4a — replaces the old chain-walk span).
@@ -677,12 +677,20 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 	return resp, err
 }
 
-// applyProviderTelemetry copies the OpenRouter provenance of a response into
+// ApplyProviderTelemetry copies the OpenRouter provenance of a response into
 // the llmlog row (G29, design 03 §2.7.4): cost_usd from usage.cost, the model
 // column overwritten with the model that ACTUALLY answered (models-fallback),
 // response.id as metadata.provider_request_id for async audit. Local backends
 // carry zero values — the entry stays untouched.
-func applyProviderTelemetry(entry *llmlog.Entry, resp *ChatResponse) {
+//
+// A nil response leaves the row untouched, exactly as StampServed does for a
+// nil backend: the callers that stamp UNCONDITIONALLY (dream's telemetry
+// funnel, one call per pipeline, also on the timeout/wire-error path) need the
+// guard here, not around every call site.
+func ApplyProviderTelemetry(entry *llmlog.Entry, resp *ChatResponse) {
+	if resp == nil {
+		return
+	}
 	entry.CostUSD = resp.CostUSD
 	if resp.ServedModel != "" {
 		entry.Model = resp.ServedModel

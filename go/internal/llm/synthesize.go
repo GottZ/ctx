@@ -856,7 +856,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	entry.Metadata = map[string]any{"chain": attempts}
 	applyBudgetTelemetry(&entry, budgetReport)
 	StampServed(&entry, backends.RoleSynthesis, served)
-	// Read back BEFORE applyProviderTelemetry may overwrite the column with the
+	// Read back BEFORE ApplyProviderTelemetry may overwrite the column with the
 	// provider's models-fallback pick: the result reports the model this pool
 	// resolved, "" when no backend answered.
 	servedModel := entry.Model
@@ -864,7 +864,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		entry.ResponseContent = resp.Message.Content
 		entry.CompletionTokens = resp.EvalCount
 		entry.PromptTokens = resp.PromptTokens
-		applyProviderTelemetry(&entry, resp)
+		ApplyProviderTelemetry(&entry, resp)
 	}
 	// MW10: queue_wait_ms/class/abort plus the wait-free Duration from the
 	// row-defining attempt (§4.4a — same derivation as ChainCall.Do).

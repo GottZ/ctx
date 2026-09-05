@@ -40,7 +40,7 @@ func TestApplyChainTelemetryDispatchColumns(t *testing.T) {
 		{Backend: "fallback", Class: "ok", Ms: 200, WaitMs: 7},
 	}
 	served := &backends.Backend{Name: "fallback", Host: "http://f:1"}
-	r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, served, attempts, nil)
+	r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, served, nil, attempts, nil)
 
 	if entry.DispatchClass != dispatch.ClassBackground.String() {
 		t.Errorf("dispatch_class = %q, want background", entry.DispatchClass)
@@ -84,7 +84,7 @@ func TestApplyChainTelemetryRejectionBecomesK9(t *testing.T) {
 				BlockIDs:      []string{"b1"},
 				Err:           rejErr,
 			}
-			r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, nil, nil, rejErr)
+			r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, nil, nil, nil, rejErr)
 
 			if entry.Pipeline != "dream-eval" {
 				t.Fatalf("pipeline = %q, want kept (the K9 line attributes the pipeline)", entry.Pipeline)
@@ -131,7 +131,7 @@ func TestApplyChainTelemetryNonK9RejectionWritesNothing(t *testing.T) {
 			r := telemetryRouter(tc.class)
 			rejErr := &llm.AdmissionError{Err: tc.cause, Backend: "gpu", Host: "http://gpu:8089", WaitMs: 5}
 			entry := &llmlog.Entry{Pipeline: "dream-daily-synthesis", RequestUser: "u", Err: rejErr}
-			r.applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, nil, nil, rejErr)
+			r.applyChainTelemetry(entry, backends.RoleDigest, backends.SensInternal, nil, nil, nil, rejErr)
 			if entry.Pipeline != "" {
 				t.Fatalf("pipeline = %q, want blanked — the deferred Record must become a no-op (doctrine §4.3)", entry.Pipeline)
 			}
@@ -148,7 +148,7 @@ func TestApplyChainTelemetryWireErrorKeepsRow(t *testing.T) {
 	rejErr := &llm.AdmissionError{Err: dispatch.ErrQueueFull, Backend: "b2", Host: "http://b2:1", WaitMs: 3}
 	entry := &llmlog.Entry{Pipeline: "dream-recurrence", Err: rejErr}
 	attempts := []llm.ChainAttempt{{Backend: "gpu", Class: llmlog.AbortPreempted, Ms: 90, WaitMs: 11}}
-	r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, nil, attempts, rejErr)
+	r.applyChainTelemetry(entry, backends.RoleDream, backends.SensInternal, nil, nil, attempts, rejErr)
 
 	if entry.Pipeline != "dream-recurrence" {
 		t.Fatalf("pipeline = %q, want kept (wire contact happened)", entry.Pipeline)

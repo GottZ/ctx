@@ -177,7 +177,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 	resp, served, attempts, err := r.temporalReview(ctx, block, userPrompt, validateOpts)
 	entry.Duration = time.Since(start)
 	entry.Err = err
-	r.applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, attempts, err)
+	r.applyChainTelemetry(entry, backends.RoleDream, block.Sensitivity, served, resp, attempts, err)
 
 	if resp != nil {
 		entry.ResponseContent = resp.Message.Content
