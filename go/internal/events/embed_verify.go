@@ -16,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedmigration"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	pgvec "github.com/pgvector/pgvector-go"
 )
@@ -786,30 +787,34 @@ func (s *Scheduler) finishVerifyRed(ctx context.Context, mig *embedmigration.Mig
 	if err != nil {
 		return fmt.Errorf("embed-verify: marshal red report: %w", err)
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("embed-verify: begin red tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-	if _, err := tx.Exec(ctx,
-		`UPDATE context_embed_migrations SET verify_report = $2
-		 WHERE id = $1::uuid AND status = 'verifying'`,
-		mig.ID, string(body)); err != nil {
-		return fmt.Errorf("embed-verify: store red report: %w", err)
-	}
-	err = embedmigration.Transition(ctx, tx, mig.ID,
-		embedmigration.StatusVerifying, embedmigration.StatusPaused,
-		embedmigration.WithLastError(summary))
+	err = pgxdb.Write(ctx, s.pool, pgxdb.Stages{
+		Begin:  "embed-verify: begin red tx",
+		Commit: "embed-verify: commit red verdict",
+	}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`UPDATE context_embed_migrations SET verify_report = $2
+			 WHERE id = $1::uuid AND status = 'verifying'`,
+			mig.ID, string(body)); err != nil {
+			return fmt.Errorf("embed-verify: store red report: %w", err)
+		}
+		terr := embedmigration.Transition(ctx, tx, mig.ID,
+			embedmigration.StatusVerifying, embedmigration.StatusPaused,
+			embedmigration.WithLastError(summary))
+		if terr != nil && !errors.Is(terr, embedmigration.ErrTransitionRaceLost) {
+			return fmt.Errorf("embed-verify: pause transition: %w", terr)
+		}
+		// A lost race leaves the closure UNWRAPPED: pgxdb.Write rolls the
+		// report write back with it and the caller below reads the sentinel
+		// as "no verdict", exactly as the deferred rollback did before.
+		return terr
+	})
 	if errors.Is(err, embedmigration.ErrTransitionRaceLost) {
 		slog.Warn("scheduler: embed verify red verdict discarded — row left verifying concurrently",
 			"migration_id", mig.ID)
-		return nil // deferred rollback drops the report write too
+		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("embed-verify: pause transition: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("embed-verify: commit red verdict: %w", err)
+		return err
 	}
 	slog.Warn("scheduler: embed verify RED — migration paused", "migration_id", mig.ID, "detail", summary)
 	return nil

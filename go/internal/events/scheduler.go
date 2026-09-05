@@ -25,6 +25,7 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/overview"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/rootmap"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -1985,6 +1986,61 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 	slog.Info("scheduler: digest complete")
 }
 
+// errPickReleased ends a pick transaction WITHOUT a commit: the picked block
+// goes back to the queue untouched and the arm answers "nothing done" — an
+// empty pick, a block another worker took, a chain that no longer resolves, a
+// follow-up embed target that is busy under the held tx (Q-I3). Before the
+// bracket moved into pgxdb.Write these paths simply returned and let the
+// deferred rollback fire; a closure needs a value for the same thing. It
+// never leaves backfillOneEmbedding or its migration sibling
+// migrateOneEmbedding (embed_migrate.go).
+var errPickReleased = errors.New("pick released")
+
+// txTail carries the two things a pick path decides INSIDE the transaction
+// but can only act on outside it, now that pgxdb.Write owns begin, rollback
+// and commit:
+//
+//   - commitAs is the wording of the commit that path ends on. The memo paths
+//     keep their own texts — one per exit, none of them the wording of the
+//     final write — and a Stages value is fixed before the closure runs, so
+//     the label has to travel back out. It is set on the paths that return
+//     nil and only on those, which makes it the discriminator afterwards: an
+//     error out of pgxdb.Write with an EMPTY commitAs came from the closure
+//     and already carries its own label; with a non-empty one it came from
+//     the commit.
+//   - postCommit is the log line that must not be written before the memo is
+//     durable. It runs after Write returned nil — exactly where the line sat
+//     when the commit was still in the function body.
+type txTail struct {
+	commitAs   string
+	postCommit func()
+}
+
+// end records how a path leaves the transaction — the commit wording it wants
+// and, optionally, the line to log once that commit is durable — and returns
+// the nil that makes pgxdb.Write commit.
+func (t *txTail) end(commitAs string, postCommit func()) error {
+	t.commitAs = commitAs
+	t.postCommit = postCommit
+	return nil
+}
+
+// wrap labels an error that came out of pgxdb.Write with the commit wording
+// of the path that ended the transaction; a closure error stays untouched.
+func (t *txTail) wrap(err error) error {
+	if err == nil || t.commitAs == "" {
+		return err
+	}
+	return fmt.Errorf("%s: %w", t.commitAs, err)
+}
+
+// done writes the log line the path deferred until after its commit.
+func (t *txTail) done() {
+	if t.postCommit != nil {
+		t.postCommit()
+	}
+}
+
 // backfillOneEmbedding finds one block with missing embedding, generates it, and stores it.
 // Returns true if a block was backfilled, false if none needed.
 // The embed chains over the pool (G28): role dream-embed when configured,
@@ -2044,135 +2100,136 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 	// never claims it (empty pick, chain mismatch, pre-wire error).
 	defer releaseLease()
 
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return false, fmt.Errorf("backfill: begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+	var (
+		tail       txTail
+		backfilled bool
+	)
+	err = pgxdb.Write(ctx, s.pool, pgxdb.Stages{Begin: "backfill: begin tx"}, func(tx pgx.Tx) error {
+		var blockID, title, content, sens, scope string
+		err := tx.QueryRow(ctx,
+			`SELECT id, title, content, sensitivity, scope FROM context_blocks
+			WHERE embedding IS NULL AND NOT is_archived`+
+				store.EmbedFailureExcludedPredicate+store.RetrievalExcludedTypePredicate+`
+			ORDER BY created_at ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED`,
+		).Scan(&blockID, &title, &content, &sens, &scope)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Another worker took the peeked block during the admission wait.
+			return errPickReleased
+		}
+		if err != nil {
+			return fmt.Errorf("backfill: pick: %w", err)
+		}
 
-	var blockID, title, content, sens, scope string
-	err = tx.QueryRow(ctx,
-		`SELECT id, title, content, sensitivity, scope FROM context_blocks
-		WHERE embedding IS NULL AND NOT is_archived`+
-			store.EmbedFailureExcludedPredicate+store.RetrievalExcludedTypePredicate+`
-		ORDER BY created_at ASC
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED`,
-	).Scan(&blockID, &title, &content, &sens, &scope)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Another worker took the peeked block during the admission wait.
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("backfill: pick: %w", err)
-	}
+		slog.Info("scheduler: backfilling embedding", "block_id", blockID, "title", title)
 
-	slog.Info("scheduler: backfilling embedding", "block_id", blockID, "title", title)
+		// Re-resolve for THE picked block (it may differ from the peeked one):
+		// the gate table (design 03, embed-backfill row) binds the chain to the
+		// block's floor-adjusted sensitivity, never the peek's.
+		required := router.FloorSens(backends.Sensitivity(sens), scope)
+		chain, role, err := router.EmbedChain(required)
+		if err != nil {
+			slog.Warn("scheduler: backfill has no eligible embed backend — block stays unembedded",
+				"block_id", blockID, "error", err)
+			return errPickReleased
+		}
 
-	// Re-resolve for THE picked block (it may differ from the peeked one):
-	// the gate table (design 03, embed-backfill row) binds the chain to the
-	// block's floor-adjusted sensitivity, never the peek's.
-	required := router.FloorSens(backends.Sensitivity(sens), scope)
-	chain, role, err := router.EmbedChain(required)
-	if err != nil {
-		slog.Warn("scheduler: backfill has no eligible embed backend — block stays unembedded",
-			"block_id", blockID, "error", err)
-		return false, nil
-	}
+		embedText := title + "\n\n" + content
 
-	embedText := title + "\n\n" + content
+		// Oversize-Gate (Achse 04 W04-2, design/04 §4.4): a conservative
+		// pre-wire token estimate skips a block that cannot fit the backend's
+		// slot window WITHOUT spending a wire call — memoized with
+		// next_attempt_at='infinity' (permanently parked, never a blind
+		// 24h-in-slow-motion retry; see store.RecordEmbedFailure). MaxTokens<=0
+		// disables the check (explicit opt-out, same convention as SyncCap).
+		if maxTokens := cfg.EmbedBackfill.MaxTokens; maxTokens > 0 {
+			if estimated := len(embedText) / 4; estimated > maxTokens {
+				msg := store.NormalizeEmbedError(store.EmbedFailureOversize, store.OversizeEstimateMessage(estimated, maxTokens))
+				slog.Warn("scheduler: backfill oversize pre-check — skipped, memoized",
+					"block_id", blockID, "estimated_tokens", estimated, "max_tokens", maxTokens)
+				if ferr := store.RecordEmbedFailure(ctx, tx, blockID, store.EmbedFailureOversize, msg,
+					cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
+					return fmt.Errorf("backfill: oversize memo: %w", ferr)
+				}
+				return tail.end("backfill: commit oversize memo", nil)
+			}
+		}
 
-	// Oversize-Gate (Achse 04 W04-2, design/04 §4.4): a conservative
-	// pre-wire token estimate skips a block that cannot fit the backend's
-	// slot window WITHOUT spending a wire call — memoized with
-	// next_attempt_at='infinity' (permanently parked, never a blind
-	// 24h-in-slow-motion retry; see store.RecordEmbedFailure). MaxTokens<=0
-	// disables the check (explicit opt-out, same convention as SyncCap).
-	if maxTokens := cfg.EmbedBackfill.MaxTokens; maxTokens > 0 {
-		if estimated := len(embedText) / 4; estimated > maxTokens {
-			msg := store.NormalizeEmbedError(store.EmbedFailureOversize, store.OversizeEstimateMessage(estimated, maxTokens))
-			slog.Warn("scheduler: backfill oversize pre-check — skipped, memoized",
-				"block_id", blockID, "estimated_tokens", estimated, "max_tokens", maxTokens)
-			if ferr := store.RecordEmbedFailure(ctx, tx, blockID, store.EmbedFailureOversize, msg,
+		// pool=nil: document embeddings land in the block row, not the cache.
+		// MW5: background admission per attempt (design/01 §4.6 N3) — the
+		// scheduler backfill waits AT THE TARGET and any interactive embed
+		// enqueued meanwhile overtakes it between two blocks (fresh seq per
+		// acquire, E-U5(a) structural relief). MW9: the wait happens in
+		// acquireBackfillLease above; under the tx the guard hands the held
+		// lease through and answers follow-ups non-blocking (Q-I3). MW11: the
+		// telemetry rows below take their class from the SAME guarded admission.
+		vec, served, attempts, wired, err := embedcache.EmbedChain(
+			ctx, nil, chain, role, embedText, embed.PrefixDocument,
+			embedcache.ReportFunc(router.Report), guarded)
+		if wired {
+			// "" → NULL: scheduler backfill is background, no request-bound caller (T35b).
+			// MW11: duration/queue_wait derive from the attempts (§4.4a).
+			llm.LogEmbedWire(s.pool, "embed-backfill", role, required, served, attempts,
+				[]string{blockID}, err, "", guarded.Class)
+		} else if err != nil {
+			// K9 rejection line (MW11, design/05 §3.2): a never-admitted
+			// background acquire (queue_full/acquire_expired) persists its
+			// futile wait — without it, backfill starvation under permanent
+			// interactive demand would produce exactly zero rows. Every other
+			// no-wire failure is filtered inside RecordRejection (doctrine §4.3).
+			llm.RecordRejection(s.pool, "embed-backfill", err, guarded.Class)
+		}
+		if err != nil {
+			if errors.Is(err, dispatch.ErrWouldBlock) {
+				// Mechanical Q-I3 defer (design/03 §4.4): a follow-up target
+				// under the held tx is busy — never wait here. Roll back and
+				// let a later cycle (or the query-path backfill) retry the
+				// block; not an error, so the loop proceeds to the dream cycle
+				// instead of hot-looping on the busy target.
+				slog.Info("scheduler: backfill deferred — follow-up embed target busy under held tx (Q-I3)",
+					"block_id", blockID)
+				return errPickReleased
+			}
+			// Fehler-Memo statt Blind-Retry (Achse 04 W04-2, design/04 §4.3/§4.4):
+			// pre-W04-2 this returned the raw error and let the deferred
+			// tx.Rollback discard the pick — the NEXT cycle's peek re-picked the
+			// SAME oldest block (Vorfall 2026-07-10, an oversize block looped
+			// every cycle and starved every younger pending block behind it).
+			// The memo is written IN THE SAME tx that holds the row lock (so no
+			// other worker can grab the row between the failed attempt and the
+			// memo commit) and the path ends on a COMMIT — never on a rollback
+			// — so the memo persists even though the embed itself failed.
+			class, normalized := store.ClassifyEmbedError(err)
+			if ferr := store.RecordEmbedFailure(ctx, tx, blockID, class, normalized,
 				cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
-				return false, fmt.Errorf("backfill: oversize memo: %w", ferr)
+				return fmt.Errorf("backfill: embed: %w (memo write also failed: %w)", err, ferr)
 			}
-			if cerr := tx.Commit(ctx); cerr != nil {
-				return false, fmt.Errorf("backfill: commit oversize memo: %w", cerr)
-			}
-			return false, nil
+			return tail.end("backfill: commit failure memo", func() {
+				slog.Warn("scheduler: backfill embed failed — memoized",
+					"block_id", blockID, "class", class, "error", err)
+			})
 		}
-	}
 
-	// pool=nil: document embeddings land in the block row, not the cache.
-	// MW5: background admission per attempt (design/01 §4.6 N3) — the
-	// scheduler backfill waits AT THE TARGET and any interactive embed
-	// enqueued meanwhile overtakes it between two blocks (fresh seq per
-	// acquire, E-U5(a) structural relief). MW9: the wait happens in
-	// acquireBackfillLease above; under the tx the guard hands the held
-	// lease through and answers follow-ups non-blocking (Q-I3). MW11: the
-	// telemetry rows below take their class from the SAME guarded admission.
-	vec, served, attempts, wired, err := embedcache.EmbedChain(
-		ctx, nil, chain, role, embedText, embed.PrefixDocument,
-		embedcache.ReportFunc(router.Report), guarded)
-	if wired {
-		// "" → NULL: scheduler backfill is background, no request-bound caller (T35b).
-		// MW11: duration/queue_wait derive from the attempts (§4.4a).
-		llm.LogEmbedWire(s.pool, "embed-backfill", role, required, served, attempts,
-			[]string{blockID}, err, "", guarded.Class)
-	} else if err != nil {
-		// K9 rejection line (MW11, design/05 §3.2): a never-admitted
-		// background acquire (queue_full/acquire_expired) persists its
-		// futile wait — without it, backfill starvation under permanent
-		// interactive demand would produce exactly zero rows. Every other
-		// no-wire failure is filtered inside RecordRejection (doctrine §4.3).
-		llm.RecordRejection(s.pool, "embed-backfill", err, guarded.Class)
-	}
-	if err != nil {
-		if errors.Is(err, dispatch.ErrWouldBlock) {
-			// Mechanical Q-I3 defer (design/03 §4.4): a follow-up target
-			// under the held tx is busy — never wait here. Roll back and
-			// let a later cycle (or the query-path backfill) retry the
-			// block; not an error, so the loop proceeds to the dream cycle
-			// instead of hot-looping on the busy target.
-			slog.Info("scheduler: backfill deferred — follow-up embed target busy under held tx (Q-I3)",
-				"block_id", blockID)
-			return false, nil
+		// StoreEmbedding within tx (pgxdb.Execer: pgx.Tx satisfies it too).
+		// Atomic with the FOR UPDATE SKIP LOCKED pick: lock holds until commit.
+		// Model is the ACTUALLY SERVING backend's role model (served, not the
+		// configured/requested one — W04-1 provenance).
+		if err := store.StoreEmbedding(ctx, tx, blockID, served.ModelFor(role).Model, vec); err != nil {
+			return fmt.Errorf("backfill: store: %w", err)
 		}
-		// Fehler-Memo statt Blind-Retry (Achse 04 W04-2, design/04 §4.3/§4.4):
-		// pre-W04-2 this returned the raw error and let the deferred
-		// tx.Rollback discard the pick — the NEXT cycle's peek re-picked the
-		// SAME oldest block (Vorfall 2026-07-10, an oversize block looped
-		// every cycle and starved every younger pending block behind it).
-		// The memo is written IN THE SAME tx that holds the row lock (so no
-		// other worker can grab the row between the failed attempt and the
-		// memo commit) and the tx is COMMITTED here — never rolled back —
-		// so the memo persists even though the embed itself failed.
-		class, normalized := store.ClassifyEmbedError(err)
-		if ferr := store.RecordEmbedFailure(ctx, tx, blockID, class, normalized,
-			cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
-			return false, fmt.Errorf("backfill: embed: %w (memo write also failed: %w)", err, ferr)
-		}
-		if cerr := tx.Commit(ctx); cerr != nil {
-			return false, fmt.Errorf("backfill: commit failure memo: %w", cerr)
-		}
-		slog.Warn("scheduler: backfill embed failed — memoized",
-			"block_id", blockID, "class", class, "error", err)
+
+		backfilled = true
+		return tail.end("backfill: commit", func() {
+			slog.Info("scheduler: embedding backfilled", "block_id", blockID, "title", title)
+		})
+	})
+	if errors.Is(err, errPickReleased) {
 		return false, nil
 	}
-
-	// StoreEmbedding within tx (pgxdb.Execer: pgx.Tx satisfies it too).
-	// Atomic with the FOR UPDATE SKIP LOCKED pick: lock holds until commit.
-	// Model is the ACTUALLY SERVING backend's role model (served, not the
-	// configured/requested one — W04-1 provenance).
-	if err := store.StoreEmbedding(ctx, tx, blockID, served.ModelFor(role).Model, vec); err != nil {
-		return false, fmt.Errorf("backfill: store: %w", err)
+	if err != nil {
+		return false, tail.wrap(err)
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("backfill: commit: %w", err)
-	}
-
-	slog.Info("scheduler: embedding backfilled", "block_id", blockID, "title", title)
-	return true, nil
+	tail.done()
+	return backfilled, nil
 }

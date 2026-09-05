@@ -10,6 +10,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/embedmigration"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -353,78 +354,73 @@ func confirmPreflight(ctx context.Context, db *pgxpool.Pool, migrationID string)
 
 // runConfirmSwapTx is the ONE §4.8 transaction (steps 1-5 of the sketch).
 func runConfirmSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID string, row *cutoverRow, targets []string) error {
-	tx, err := db.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("embed-cutover: begin swap tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-
-	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+cutoverLockTimeout+`'`); err != nil {
-		return fmt.Errorf("embed-cutover: set lock_timeout: %w", err)
-	}
-	// (1) Cache flush FIRST (§4.9): the up-to-50k row deletes must not run
-	// under the later ACCESS-EXCLUSIVE lock on context_blocks — locks are
-	// taken at first touch, so ordering IS the lock-window control.
-	if _, err := tx.Exec(ctx, `DELETE FROM context_embed_cache`); err != nil {
-		return fmt.Errorf("embed-cutover: cache flush: %w", err)
-	}
-	// (2) Completeness re-check under the tx — the IDENTICAL predicate as
-	// §4.7 Stufe 1 (watermark scoping keeps this reachable under write
-	// traffic — no livelock; the memo exception keeps declared skips from
-	// blocking forever). >0 → the deferred rollback undoes the flush too.
-	var pending int64
-	if err := tx.QueryRow(ctx,
-		`SELECT count(*) FROM context_blocks WHERE `+verifyCompletenessWhere(true),
-		migrationID, *row.watermark).Scan(&pending); err != nil {
-		return fmt.Errorf("embed-cutover: completeness re-check: %w", err)
-	}
-	if pending > 0 {
-		return fmt.Errorf("%w (%d pending)", ErrConfirmIncomplete, pending)
-	}
-	// (3)+(3b) Catalog swap.
-	for _, r := range cutoverColumnRenames {
-		if _, err := tx.Exec(ctx, fmt.Sprintf(
-			`ALTER TABLE context_blocks RENAME COLUMN %s TO %s`, r[0], r[1])); err != nil {
-			return fmt.Errorf("embed-cutover: rename column %s -> %s: %w", r[0], r[1], err)
+	return pgxdb.Write(ctx, db, pgxdb.Stages{
+		Begin:  "embed-cutover: begin swap tx",
+		Commit: "embed-cutover: commit swap tx",
+	}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+cutoverLockTimeout+`'`); err != nil {
+			return fmt.Errorf("embed-cutover: set lock_timeout: %w", err)
 		}
-	}
-	for _, r := range cutoverIndexRenames {
-		if _, err := tx.Exec(ctx, fmt.Sprintf(
-			`ALTER INDEX %s RENAME TO %s`, r[0], r[1])); err != nil {
-			return fmt.Errorf("embed-cutover: rename index %s -> %s: %w", r[0], r[1], err)
+		// (1) Cache flush FIRST (§4.9): the up-to-50k row deletes must not run
+		// under the later ACCESS-EXCLUSIVE lock on context_blocks — locks are
+		// taken at first touch, so ordering IS the lock-window control.
+		if _, err := tx.Exec(ctx, `DELETE FROM context_embed_cache`); err != nil {
+			return fmt.Errorf("embed-cutover: cache flush: %w", err)
 		}
-	}
-	// Fresh dual pair (documented deviation, see function comment).
-	if _, err := tx.Exec(ctx,
-		`ALTER TABLE context_blocks ADD COLUMN embedding_next vector(1024),
-		                            ADD COLUMN embed_model_next TEXT`); err != nil {
-		return fmt.Errorf("embed-cutover: re-add fresh _next pair: %w", err)
-	}
-	if _, err := tx.Exec(ctx,
-		`ALTER TABLE context_blocks ALTER COLUMN embedding_next SET STORAGE EXTERNAL`); err != nil {
-		return fmt.Errorf("embed-cutover: fresh _next storage: %w", err)
-	}
-	// (4) model_map flip as a data write IN the tx (§4.8 choreography
-	// decision — no operator-paced mixed-space window).
-	tag, err := tx.Exec(ctx, flipEmbedModelMapSQL, targets, row.toModel)
-	if err != nil {
-		return fmt.Errorf("embed-cutover: model_map flip: %w", err)
-	}
-	if tag.RowsAffected() != int64(len(targets)) {
-		return fmt.Errorf("%w (%d of %d)", ErrConfirmFlipRowCountMismatch, tag.RowsAffected(), len(targets))
-	}
-	// (5) Statemachine CAS — 0 rows = a concurrent transition won; the
-	// deferred rollback aborts the whole cutover (§4.8).
-	if err := embedmigration.Transition(ctx, tx, migrationID,
-		embedmigration.StatusVerifying, embedmigration.StatusDone,
-		embedmigration.WithFinishedAt()); err != nil {
-		return fmt.Errorf("embed-cutover: confirm CAS: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("embed-cutover: commit swap tx: %w", err)
-	}
-
-	return nil
+		// (2) Completeness re-check under the tx — the IDENTICAL predicate as
+		// §4.7 Stufe 1 (watermark scoping keeps this reachable under write
+		// traffic — no livelock; the memo exception keeps declared skips from
+		// blocking forever). >0 → the deferred rollback undoes the flush too.
+		var pending int64
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM context_blocks WHERE `+verifyCompletenessWhere(true),
+			migrationID, *row.watermark).Scan(&pending); err != nil {
+			return fmt.Errorf("embed-cutover: completeness re-check: %w", err)
+		}
+		if pending > 0 {
+			return fmt.Errorf("%w (%d pending)", ErrConfirmIncomplete, pending)
+		}
+		// (3)+(3b) Catalog swap.
+		for _, r := range cutoverColumnRenames {
+			if _, err := tx.Exec(ctx, fmt.Sprintf(
+				`ALTER TABLE context_blocks RENAME COLUMN %s TO %s`, r[0], r[1])); err != nil {
+				return fmt.Errorf("embed-cutover: rename column %s -> %s: %w", r[0], r[1], err)
+			}
+		}
+		for _, r := range cutoverIndexRenames {
+			if _, err := tx.Exec(ctx, fmt.Sprintf(
+				`ALTER INDEX %s RENAME TO %s`, r[0], r[1])); err != nil {
+				return fmt.Errorf("embed-cutover: rename index %s -> %s: %w", r[0], r[1], err)
+			}
+		}
+		// Fresh dual pair (documented deviation, see function comment).
+		if _, err := tx.Exec(ctx,
+			`ALTER TABLE context_blocks ADD COLUMN embedding_next vector(1024),
+			                            ADD COLUMN embed_model_next TEXT`); err != nil {
+			return fmt.Errorf("embed-cutover: re-add fresh _next pair: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`ALTER TABLE context_blocks ALTER COLUMN embedding_next SET STORAGE EXTERNAL`); err != nil {
+			return fmt.Errorf("embed-cutover: fresh _next storage: %w", err)
+		}
+		// (4) model_map flip as a data write IN the tx (§4.8 choreography
+		// decision — no operator-paced mixed-space window).
+		tag, err := tx.Exec(ctx, flipEmbedModelMapSQL, targets, row.toModel)
+		if err != nil {
+			return fmt.Errorf("embed-cutover: model_map flip: %w", err)
+		}
+		if tag.RowsAffected() != int64(len(targets)) {
+			return fmt.Errorf("%w (%d of %d)", ErrConfirmFlipRowCountMismatch, tag.RowsAffected(), len(targets))
+		}
+		// (5) Statemachine CAS — 0 rows = a concurrent transition won; the
+		// deferred rollback aborts the whole cutover (§4.8).
+		if err := embedmigration.Transition(ctx, tx, migrationID,
+			embedmigration.StatusVerifying, embedmigration.StatusDone,
+			embedmigration.WithFinishedAt()); err != nil {
+			return fmt.Errorf("embed-cutover: confirm CAS: %w", err)
+		}
+		return nil
+	})
 }
 
 // confirmPostCommit runs the §4.8 step-(6) convergence nets after the swap
@@ -549,52 +545,48 @@ func rollbackPreflight(ctx context.Context, db *pgxpool.Pool, migrationID string
 
 // runRollbackSwapTx is the §4.10 mirror transaction of runConfirmSwapTx.
 func runRollbackSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID, reason string, row *cutoverRow, targets []string) error {
-	tx, err := db.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("embed-cutover: begin rollback tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-
-	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+cutoverLockTimeout+`'`); err != nil {
-		return fmt.Errorf("embed-cutover: set lock_timeout: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM context_embed_cache`); err != nil {
-		return fmt.Errorf("embed-cutover: rollback cache flush: %w", err)
-	}
-	// Vacate the _next names for the inverse renames (pair proven empty).
-	if _, err := tx.Exec(ctx,
-		`ALTER TABLE context_blocks DROP COLUMN IF EXISTS embedding_next,
-		                            DROP COLUMN IF EXISTS embed_model_next`); err != nil {
-		return fmt.Errorf("embed-cutover: drop fresh _next pair: %w", err)
-	}
-	for i := len(cutoverColumnRenames) - 1; i >= 0; i-- {
-		r := cutoverColumnRenames[i]
-		if _, err := tx.Exec(ctx, fmt.Sprintf(
-			`ALTER TABLE context_blocks RENAME COLUMN %s TO %s`, r[1], r[0])); err != nil {
-			return fmt.Errorf("embed-cutover: rename column %s -> %s: %w", r[1], r[0], err)
+	return pgxdb.Write(ctx, db, pgxdb.Stages{
+		Begin:  "embed-cutover: begin rollback tx",
+		Commit: "embed-cutover: commit rollback tx",
+	}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+cutoverLockTimeout+`'`); err != nil {
+			return fmt.Errorf("embed-cutover: set lock_timeout: %w", err)
 		}
-	}
-	for i := len(cutoverIndexRenames) - 1; i >= 0; i-- {
-		r := cutoverIndexRenames[i]
-		if _, err := tx.Exec(ctx, fmt.Sprintf(
-			`ALTER INDEX %s RENAME TO %s`, r[1], r[0])); err != nil {
-			return fmt.Errorf("embed-cutover: rename index %s -> %s: %w", r[1], r[0], err)
+		if _, err := tx.Exec(ctx, `DELETE FROM context_embed_cache`); err != nil {
+			return fmt.Errorf("embed-cutover: rollback cache flush: %w", err)
 		}
-	}
-	if len(targets) > 0 {
-		if _, err := tx.Exec(ctx, unflipEmbedModelMapSQL, targets, row.fromModel, row.toModel); err != nil {
-			return fmt.Errorf("embed-cutover: model_map un-flip: %w", err)
+		// Vacate the _next names for the inverse renames (pair proven empty).
+		if _, err := tx.Exec(ctx,
+			`ALTER TABLE context_blocks DROP COLUMN IF EXISTS embedding_next,
+			                            DROP COLUMN IF EXISTS embed_model_next`); err != nil {
+			return fmt.Errorf("embed-cutover: drop fresh _next pair: %w", err)
 		}
-	}
-	if err := embedmigration.Transition(ctx, tx, migrationID,
-		embedmigration.StatusDone, embedmigration.StatusRolledBack,
-		embedmigration.WithRollbackReason(reason)); err != nil {
-		return fmt.Errorf("embed-cutover: rollback CAS: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("embed-cutover: commit rollback tx: %w", err)
-	}
-	return nil
+		for i := len(cutoverColumnRenames) - 1; i >= 0; i-- {
+			r := cutoverColumnRenames[i]
+			if _, err := tx.Exec(ctx, fmt.Sprintf(
+				`ALTER TABLE context_blocks RENAME COLUMN %s TO %s`, r[1], r[0])); err != nil {
+				return fmt.Errorf("embed-cutover: rename column %s -> %s: %w", r[1], r[0], err)
+			}
+		}
+		for i := len(cutoverIndexRenames) - 1; i >= 0; i-- {
+			r := cutoverIndexRenames[i]
+			if _, err := tx.Exec(ctx, fmt.Sprintf(
+				`ALTER INDEX %s RENAME TO %s`, r[1], r[0])); err != nil {
+				return fmt.Errorf("embed-cutover: rename index %s -> %s: %w", r[1], r[0], err)
+			}
+		}
+		if len(targets) > 0 {
+			if _, err := tx.Exec(ctx, unflipEmbedModelMapSQL, targets, row.fromModel, row.toModel); err != nil {
+				return fmt.Errorf("embed-cutover: model_map un-flip: %w", err)
+			}
+		}
+		if err := embedmigration.Transition(ctx, tx, migrationID,
+			embedmigration.StatusDone, embedmigration.StatusRolledBack,
+			embedmigration.WithRollbackReason(reason)); err != nil {
+			return fmt.Errorf("embed-cutover: rollback CAS: %w", err)
+		}
+		return nil
+	})
 }
 
 // CleanupEmbedMigration drops the rollback anchor (§4.8 Alt-Bestand): the
@@ -621,28 +613,27 @@ func CleanupEmbedMigration(ctx context.Context, db *pgxpool.Pool, migrationID st
 		return fmt.Errorf("%w: %s", ErrCleanupOldResourcesMissing, strings.Join(missing, ", "))
 	}
 
-	tx, err := db.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("embed-cutover: begin cleanup tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-
-	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+cutoverLockTimeout+`'`); err != nil {
-		return fmt.Errorf("embed-cutover: set lock_timeout: %w", err)
-	}
-	// Named drops first (documented, never the silent DROP-COLUMN cascade
-	// — §4.8: "die _old-Exemplare fallen DOKUMENTIERT, nicht still").
-	for _, name := range cutoverOldIndexNames {
-		if _, err := tx.Exec(ctx, `DROP INDEX `+name); err != nil {
-			return fmt.Errorf("embed-cutover: drop index %s: %w", name, err)
+	if err := pgxdb.Write(ctx, db, pgxdb.Stages{
+		Begin:  "embed-cutover: begin cleanup tx",
+		Commit: "embed-cutover: commit cleanup tx",
+	}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+cutoverLockTimeout+`'`); err != nil {
+			return fmt.Errorf("embed-cutover: set lock_timeout: %w", err)
 		}
-	}
-	if _, err := tx.Exec(ctx,
-		`ALTER TABLE context_blocks DROP COLUMN embedding_old, DROP COLUMN embed_model_old`); err != nil {
-		return fmt.Errorf("embed-cutover: drop _old columns: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("embed-cutover: commit cleanup tx: %w", err)
+		// Named drops first (documented, never the silent DROP-COLUMN cascade
+		// — §4.8: "die _old-Exemplare fallen DOKUMENTIERT, nicht still").
+		for _, name := range cutoverOldIndexNames {
+			if _, err := tx.Exec(ctx, `DROP INDEX `+name); err != nil {
+				return fmt.Errorf("embed-cutover: drop index %s: %w", name, err)
+			}
+		}
+		if _, err := tx.Exec(ctx,
+			`ALTER TABLE context_blocks DROP COLUMN embedding_old, DROP COLUMN embed_model_old`); err != nil {
+			return fmt.Errorf("embed-cutover: drop _old columns: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	slog.Info("embed-cutover: cleanup done — rollback anchor dropped, storage returns via vacuum",
 		"migration_id", migrationID,

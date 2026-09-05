@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/embedcache"
 	"github.com/GottZ/ctx/internal/embedmigration"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 )
@@ -430,146 +431,151 @@ func (s *Scheduler) migrateOneEmbedding(ctx context.Context, router *dream.Route
 	// never claims it (lost pick, skip memo, pre-wire error).
 	defer release()
 
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return deferred, fmt.Errorf("embed-migrate: begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+	var (
+		tail txTail
+		res  = deferred
+	)
+	err = pgxdb.Write(ctx, s.pool, pgxdb.Stages{Begin: "embed-migrate: begin tx"}, func(tx pgx.Tx) error {
+		var blockID, title, content, sens, scope string
+		var pickedAt time.Time
+		err := tx.QueryRow(ctx, migratePickSQL(cursor != nil), args...).
+			Scan(&blockID, &title, &content, &sens, &scope, &pickedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The peeked block vanished under us (concurrent ClearEmbedding /
+			// archive / lock) — defer, don't advance.
+			return errPickReleased
+		}
+		if err != nil {
+			return fmt.Errorf("embed-migrate: pick: %w", err)
+		}
 
-	var blockID, title, content, sens, scope string
-	var pickedAt time.Time
-	err = tx.QueryRow(ctx, migratePickSQL(cursor != nil), args...).
-		Scan(&blockID, &title, &content, &sens, &scope, &pickedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The peeked block vanished under us (concurrent ClearEmbedding /
-		// archive / lock) — defer, don't advance.
+		// Chain re-resolve for THE picked block with its floor-adjusted
+		// sensitivity (identical to backfill — the gate table binds the chain
+		// to the block, never the peek). An empty chain is the
+		// sensitivity_ineligible skip (§4.4/§5 Bruchpfad 3): memo with
+		// infinity, NEVER escalation across the trust border. The pool-outage
+		// look-alike ("no backend at all") cannot reach this branch in
+		// production: the per-cycle Model-Guard resolves the SensPublic chain
+		// first and pauses the migration when even that is empty — so an empty
+		// chain HERE is genuinely the block's sensitivity.
+		required := router.FloorSens(backends.Sensitivity(sens), scope)
+		chain, _, chainErr := router.EmbedChain(required)
+		if chainErr != nil {
+			msg := store.NormalizeEmbedError(store.EmbedFailureSensitivityIneligible,
+				fmt.Sprintf("no eligible embed backend for sensitivity %q", required))
+			if ferr := store.RecordEmbedFailureForMigration(ctx, tx, blockID, mig.ID,
+				store.EmbedFailureSensitivityIneligible, msg,
+				cfg.EmbedMigration.BackoffBase, cfg.EmbedMigration.BackoffCap); ferr != nil {
+				return fmt.Errorf("embed-migrate: sensitivity memo: %w", ferr)
+			}
+			res = migrateResult{kind: migrateOutcomeSkipped, pickedAt: pickedAt}
+			return tail.end("embed-migrate: commit sensitivity memo", func() {
+				slog.Warn("scheduler: embed migration skip — no eligible backend for block sensitivity, memoized",
+					"block_id", blockID, "sensitivity", string(required))
+			})
+		}
+
+		embedText := title + "\n\n" + content
+
+		// Oversize-Gate VOR dem Wire-Call (§4.4): conservative len/4 estimate,
+		// skip WITHOUT spending a wire call, memo with infinity. MaxTokens<=0
+		// disables (explicit opt-out).
+		if maxTokens := cfg.EmbedMigration.MaxTokens; maxTokens > 0 {
+			if estimated := len(embedText) / 4; estimated > maxTokens {
+				msg := store.NormalizeEmbedError(store.EmbedFailureOversize,
+					store.OversizeEstimateMessage(estimated, maxTokens))
+				if ferr := store.RecordEmbedFailureForMigration(ctx, tx, blockID, mig.ID,
+					store.EmbedFailureOversize, msg,
+					cfg.EmbedMigration.BackoffBase, cfg.EmbedMigration.BackoffCap); ferr != nil {
+					return fmt.Errorf("embed-migrate: oversize memo: %w", ferr)
+				}
+				res = migrateResult{kind: migrateOutcomeSkipped, pickedAt: pickedAt}
+				return tail.end("embed-migrate: commit oversize memo", func() {
+					slog.Warn("scheduler: embed migration oversize pre-check — skipped, memoized",
+						"block_id", blockID, "estimated_tokens", estimated, "max_tokens", maxTokens)
+				})
+			}
+		}
+
+		// pool=nil: document embeddings never enter the query cache (§4.3).
+		// Role parameter is the model_map KEY embed_next — the chain itself was
+		// resolved over RoleEmbed above (§4.2 Rollensemantik).
+		vec, served, attempts, wired, err := embedcache.EmbedChain(
+			ctx, nil, chain, embedmigration.ModelMapKeyEmbedNext, embedText, embed.PrefixDocument,
+			embedcache.ReportFunc(router.Report), guarded)
+		if wired {
+			// "" → NULL: background, no request-bound caller (T35b).
+			llm.LogEmbedWire(s.pool, "embed-migrate", embedmigration.ModelMapKeyEmbedNext, required, served, attempts,
+				[]string{blockID}, err, "", guarded.Class)
+		} else if err != nil {
+			llm.RecordRejection(s.pool, "embed-migrate", err, guarded.Class)
+		}
+		if err != nil {
+			var werr error
+			res, werr = s.migrateWireFailure(ctx, tx, &tail, cfg, mig, blockID, pickedAt, err)
+			return werr
+		}
+
+		servedModel := served.ModelFor(embedmigration.ModelMapKeyEmbedNext).Model
+		if servedModel != mig.ToModel {
+			// Per-block net behind the per-cycle guard: a FAILOVER link that
+			// resolves a foreign model under embed_next (the cycle guard only
+			// pins the chain head). Never store — the cycle pauses the
+			// migration with this message (fail-closed, §4.2).
+			return fmt.Errorf("%w: model guard: resolved %q, expected %q (serving backend %s)",
+				errMigrationServedModelMismatch, servedModel, mig.ToModel, served.Name)
+		}
+
+		// StoreEmbeddingNext within the pick tx (pgxdb.Execer). The serving
+		// pair (embedding/embed_model) is untouched — the live space stays
+		// byte-identical until the cutover (§4.5 option c).
+		if err := store.StoreEmbeddingNext(ctx, tx, blockID, servedModel, vec); err != nil {
+			return fmt.Errorf("embed-migrate: store: %w", err)
+		}
+		res = migrateResult{kind: migrateOutcomeMigrated, pickedAt: pickedAt}
+		return tail.end("embed-migrate: commit", func() {
+			slog.Info("scheduler: embedding migrated", "block_id", blockID, "model", servedModel)
+		})
+	})
+	if errors.Is(err, errPickReleased) {
 		return deferred, nil
 	}
 	if err != nil {
-		return deferred, fmt.Errorf("embed-migrate: pick: %w", err)
+		return deferred, tail.wrap(err)
 	}
-
-	// Chain re-resolve for THE picked block with its floor-adjusted
-	// sensitivity (identical to backfill — the gate table binds the chain
-	// to the block, never the peek). An empty chain is the
-	// sensitivity_ineligible skip (§4.4/§5 Bruchpfad 3): memo with
-	// infinity, NEVER escalation across the trust border. The pool-outage
-	// look-alike ("no backend at all") cannot reach this branch in
-	// production: the per-cycle Model-Guard resolves the SensPublic chain
-	// first and pauses the migration when even that is empty — so an empty
-	// chain HERE is genuinely the block's sensitivity.
-	required := router.FloorSens(backends.Sensitivity(sens), scope)
-	chain, _, chainErr := router.EmbedChain(required)
-	if chainErr != nil {
-		msg := store.NormalizeEmbedError(store.EmbedFailureSensitivityIneligible,
-			fmt.Sprintf("no eligible embed backend for sensitivity %q", required))
-		if ferr := store.RecordEmbedFailureForMigration(ctx, tx, blockID, mig.ID,
-			store.EmbedFailureSensitivityIneligible, msg,
-			cfg.EmbedMigration.BackoffBase, cfg.EmbedMigration.BackoffCap); ferr != nil {
-			return deferred, fmt.Errorf("embed-migrate: sensitivity memo: %w", ferr)
-		}
-		if cerr := tx.Commit(ctx); cerr != nil {
-			return deferred, fmt.Errorf("embed-migrate: commit sensitivity memo: %w", cerr)
-		}
-		slog.Warn("scheduler: embed migration skip — no eligible backend for block sensitivity, memoized",
-			"block_id", blockID, "sensitivity", string(required))
-		return migrateResult{kind: migrateOutcomeSkipped, pickedAt: pickedAt}, nil
-	}
-
-	embedText := title + "\n\n" + content
-
-	// Oversize-Gate VOR dem Wire-Call (§4.4): conservative len/4 estimate,
-	// skip WITHOUT spending a wire call, memo with infinity. MaxTokens<=0
-	// disables (explicit opt-out).
-	if maxTokens := cfg.EmbedMigration.MaxTokens; maxTokens > 0 {
-		if estimated := len(embedText) / 4; estimated > maxTokens {
-			msg := store.NormalizeEmbedError(store.EmbedFailureOversize,
-				store.OversizeEstimateMessage(estimated, maxTokens))
-			if ferr := store.RecordEmbedFailureForMigration(ctx, tx, blockID, mig.ID,
-				store.EmbedFailureOversize, msg,
-				cfg.EmbedMigration.BackoffBase, cfg.EmbedMigration.BackoffCap); ferr != nil {
-				return deferred, fmt.Errorf("embed-migrate: oversize memo: %w", ferr)
-			}
-			if cerr := tx.Commit(ctx); cerr != nil {
-				return deferred, fmt.Errorf("embed-migrate: commit oversize memo: %w", cerr)
-			}
-			slog.Warn("scheduler: embed migration oversize pre-check — skipped, memoized",
-				"block_id", blockID, "estimated_tokens", estimated, "max_tokens", maxTokens)
-			return migrateResult{kind: migrateOutcomeSkipped, pickedAt: pickedAt}, nil
-		}
-	}
-
-	// pool=nil: document embeddings never enter the query cache (§4.3).
-	// Role parameter is the model_map KEY embed_next — the chain itself was
-	// resolved over RoleEmbed above (§4.2 Rollensemantik).
-	vec, served, attempts, wired, err := embedcache.EmbedChain(
-		ctx, nil, chain, embedmigration.ModelMapKeyEmbedNext, embedText, embed.PrefixDocument,
-		embedcache.ReportFunc(router.Report), guarded)
-	if wired {
-		// "" → NULL: background, no request-bound caller (T35b).
-		llm.LogEmbedWire(s.pool, "embed-migrate", embedmigration.ModelMapKeyEmbedNext, required, served, attempts,
-			[]string{blockID}, err, "", guarded.Class)
-	} else if err != nil {
-		llm.RecordRejection(s.pool, "embed-migrate", err, guarded.Class)
-	}
-	if err != nil {
-		return s.migrateWireFailure(ctx, tx, cfg, mig, blockID, pickedAt, err)
-	}
-
-	servedModel := served.ModelFor(embedmigration.ModelMapKeyEmbedNext).Model
-	if servedModel != mig.ToModel {
-		// Per-block net behind the per-cycle guard: a FAILOVER link that
-		// resolves a foreign model under embed_next (the cycle guard only
-		// pins the chain head). Never store — the cycle pauses the
-		// migration with this message (fail-closed, §4.2).
-		return deferred, fmt.Errorf("%w: model guard: resolved %q, expected %q (serving backend %s)",
-			errMigrationServedModelMismatch, servedModel, mig.ToModel, served.Name)
-	}
-
-	// StoreEmbeddingNext within the pick tx (pgxdb.Execer). The serving
-	// pair (embedding/embed_model) is untouched — the live space stays
-	// byte-identical until the cutover (§4.5 option c).
-	if err := store.StoreEmbeddingNext(ctx, tx, blockID, servedModel, vec); err != nil {
-		return deferred, fmt.Errorf("embed-migrate: store: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return deferred, fmt.Errorf("embed-migrate: commit: %w", err)
-	}
-
-	slog.Info("scheduler: embedding migrated", "block_id", blockID, "model", servedModel)
-	return migrateResult{kind: migrateOutcomeMigrated, pickedAt: pickedAt}, nil
+	tail.done()
+	return res, nil
 }
 
 // migrateWireFailure handles a failed EmbedChain walk under the held pick
 // tx: Q-I3 defer on a busy follow-up target, otherwise Fehler-Memo statt
 // Blind-Retry (§4.4) — the memo lands in the SAME tx that holds the row
-// lock and the tx is COMMITTED (never rolled back) so it persists although
-// the embed failed. exceed_context_size 400s classify as oversize →
+// lock and the path ends on a COMMIT (never on a rollback) so it persists
+// although the embed failed. exceed_context_size 400s classify as oversize →
 // infinity park + skipped outcome (the estimate gate's net); everything
 // else is a transient wire failure → exponential backoff + failed outcome.
-func (s *Scheduler) migrateWireFailure(ctx context.Context, tx pgx.Tx, cfg *config.Config, mig *embedmigration.Migration, blockID string, pickedAt time.Time, wireErr error) (migrateResult, error) {
+func (s *Scheduler) migrateWireFailure(ctx context.Context, tx pgx.Tx, tail *txTail, cfg *config.Config, mig *embedmigration.Migration, blockID string, pickedAt time.Time, wireErr error) (migrateResult, error) {
 	deferred := migrateResult{kind: migrateOutcomeDeferred}
 	if errors.Is(wireErr, dispatch.ErrWouldBlock) {
 		// Mechanical Q-I3 defer: busy follow-up target under the held tx —
 		// never wait here, retry in a later cycle.
 		slog.Info("scheduler: embed migration deferred — follow-up embed target busy under held tx (Q-I3)",
 			"block_id", blockID)
-		return deferred, nil
+		return deferred, errPickReleased
 	}
 	class, normalized := store.ClassifyEmbedError(wireErr)
 	if ferr := store.RecordEmbedFailureForMigration(ctx, tx, blockID, mig.ID, class, normalized,
 		cfg.EmbedMigration.BackoffBase, cfg.EmbedMigration.BackoffCap); ferr != nil {
 		return deferred, fmt.Errorf("embed-migrate: embed: %w (memo write also failed: %w)", wireErr, ferr)
 	}
-	if cerr := tx.Commit(ctx); cerr != nil {
-		return deferred, fmt.Errorf("embed-migrate: commit failure memo: %w", cerr)
-	}
-	slog.Warn("scheduler: embed migration embed failed — memoized",
-		"block_id", blockID, "class", class, "error", wireErr)
+	out := migrateResult{kind: migrateOutcomeFailed, pickedAt: pickedAt}
 	if class == store.EmbedFailureOversize {
-		return migrateResult{kind: migrateOutcomeSkipped, pickedAt: pickedAt}, nil
+		out = migrateResult{kind: migrateOutcomeSkipped, pickedAt: pickedAt}
 	}
-	return migrateResult{kind: migrateOutcomeFailed, pickedAt: pickedAt}, nil
+	return out, tail.end("embed-migrate: commit failure memo", func() {
+		slog.Warn("scheduler: embed migration embed failed — memoized",
+			"block_id", blockID, "class", class, "error", wireErr)
+	})
 }
 
 // ensureConcurrentIndexValid is the shared CIC lifecycle helper (design
