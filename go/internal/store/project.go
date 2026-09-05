@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -97,8 +98,7 @@ func GetProjectByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Projec
 	p, err := scanProject(pool.QueryRow(ctx,
 		`SELECT `+projectSelect+` FROM context_projects WHERE id = $1::uuid`, id))
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+		if pgxdb.MalformedUUID(err) {
 			return nil, nil // malformed id → 404, not 500 (no oracle)
 		}
 		return nil, err
@@ -292,8 +292,7 @@ func DeleteProject(ctx context.Context, pool *pgxpool.Pool, id string) (bool, er
 		return false, tx.Commit(ctx)
 	}
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+		if pgxdb.MalformedUUID(err) {
 			return false, tx.Commit(ctx) // malformed id → no row
 		}
 		return false, fmt.Errorf("store: delete project scope load: %w", err)

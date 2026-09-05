@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -111,7 +112,7 @@ func CreateDisableProfile(ctx context.Context, tx pgx.Tx, p *DisableProfile, mem
 		VALUES ($1,$2,$3,$4,$5) RETURNING id`,
 		p.Scope, p.Name, p.Label, p.Description, p.Active).Scan(&id)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgxdb.UniqueViolation(err) {
 			return "", fmt.Errorf("disable profile %q already exists in scope %q", p.Name, p.Scope)
 		}
 		return "", fmt.Errorf("store: create disable profile: %w", err)

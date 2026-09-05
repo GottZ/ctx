@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -122,8 +123,7 @@ func ListTenantGrants(ctx context.Context, pool *pgxpool.Pool, granteeFilter str
 // grantListErr maps a malformed-uuid filter (22P02, which pgx may surface at
 // Query or at rows.Err depending on protocol timing) to ErrGrantUnknownTarget.
 func grantListErr(err error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+	if pgxdb.MalformedUUID(err) {
 		return ErrGrantUnknownTarget
 	}
 	return fmt.Errorf("store: list tenant grants: %w", err)
@@ -138,8 +138,7 @@ func DeleteTenantGrant(ctx context.Context, pool *pgxpool.Pool, id string) error
 	}
 	tag, err := pool.Exec(ctx, `DELETE FROM context_tenant_grants WHERE id = $1::uuid`, id)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+		if pgxdb.MalformedUUID(err) {
 			return ErrGrantNotFound // malformed id → same 404 as absent (no oracle)
 		}
 		return fmt.Errorf("store: delete tenant grant: %w", err)

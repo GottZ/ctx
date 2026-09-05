@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -226,7 +226,7 @@ var ErrKeyQuotaExceeded = errors.New("store: tenant key quota exceeded")
 // mints of THIS tenant. The count→insert then runs under that lock, so two parallel
 // mints can NOT both observe count < max_keys and both commit (no TOCTOU). The lock
 // doubles as the existence check: no row (or a malformed id → 22P02) collapses to
-// ErrTenantNotFound, reusing tenantNotFound's no-oracle 404 contract.
+// ErrTenantNotFound, reusing pgxdb.AbsentOrMalformed's no-oracle 404 contract.
 //
 // Quota: maxKeys == nil OR *maxKeys < 0 means UNLIMITED (cap skipped). Otherwise
 // count(*) of the tenant's ACTIVE keys is read under the lock; cnt >= *maxKeys →
@@ -246,7 +246,7 @@ func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope 
 	var lockedID string
 	if err = tx.QueryRow(ctx,
 		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&lockedID); err != nil {
-		if tenantNotFound(err) {
+		if pgxdb.AbsentOrMalformed(err) {
 			return ApiKey{}, "", ErrTenantNotFound
 		}
 		return ApiKey{}, "", fmt.Errorf("api_keys: mint tenant lock: %w", err)
@@ -678,8 +678,7 @@ func resolveKeyForUpdate(ctx context.Context, q rowQuerier, id string, isServerA
 	if errors.Is(err, pgx.ErrNoRows) {
 		return resolvedKey{}, false, nil
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+	if pgxdb.MalformedUUID(err) {
 		return resolvedKey{}, false, nil // malformed id → indistinguishable from absent
 	}
 	return resolvedKey{}, false, fmt.Errorf("api_keys: update resolve: %w", err)

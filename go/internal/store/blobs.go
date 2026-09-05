@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -145,8 +145,8 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 // GetBlock reads as gone, and "visible" has to mean one thing in this tree.
 //
 // A MALFORMED id answers false, not an error — it must be indistinguishable
-// from a well-formed id that is out of reach (the tenantNotFound pattern,
-// tenant.go). The 22P02 comes from the ::uuid cast, server-side, which is why
+// from a well-formed id that is out of reach (the pgxdb.AbsentOrMalformed
+// pattern). The 22P02 comes from the ::uuid cast, server-side, which is why
 // the parameter is cast rather than bound as a uuid directly.
 func BlockVisible(ctx context.Context, pool *pgxpool.Pool, id string, scopes []string) (bool, error) {
 	if err := RequireScopes(scopes); err != nil { // T07 fail-closed (design/01 sec. 5.4)
@@ -164,20 +164,12 @@ func BlockVisible(ctx context.Context, pool *pgxpool.Pool, id string, scopes []s
 		id, scopes,
 	).Scan(&visible)
 	if err != nil {
-		if isMalformedUUID(err) {
+		if pgxdb.MalformedUUID(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("store: block visible: %w", err)
 	}
 	return visible, nil
-}
-
-// isMalformedUUID reports the 22P02 a ::uuid cast raises on a non-UUID string.
-// Same reading as tenantNotFound (tenant.go): malformed and absent must not be
-// distinguishable, or the error class itself becomes the side channel.
-func isMalformedUUID(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "22P02"
 }
 
 // UpdateBlobBlockRef sets context_blobs.context_block_id on an existing blob —
@@ -217,7 +209,7 @@ func UpdateBlobBlockRef(ctx context.Context, pool *pgxpool.Pool, id, contextBloc
 		&bm.FileSize, &bm.Checksum, &bm.StorageType, &bm.Tags, &bm.Metadata,
 		&bm.Scope, &bm.CreatedAt, &bm.UpdatedAt,
 	)
-	if errors.Is(err, pgx.ErrNoRows) || isMalformedUUID(err) {
+	if pgxdb.AbsentOrMalformed(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -246,7 +238,7 @@ func BlobWriteScope(ctx context.Context, pool *pgxpool.Pool, id string, writeSco
 		`SELECT scope FROM context_blobs WHERE id = $1::uuid AND scope = ANY($2::text[]) LIMIT 1`,
 		id, writeScopes,
 	).Scan(&scope)
-	if errors.Is(err, pgx.ErrNoRows) || isMalformedUUID(err) {
+	if pgxdb.AbsentOrMalformed(err) {
 		return "", nil
 	}
 	if err != nil {

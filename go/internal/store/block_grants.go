@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -103,8 +104,7 @@ func BlockScope(ctx context.Context, pool *pgxpool.Pool, blockID string) (string
 		return "", ErrBlockNotFound
 	}
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+		if pgxdb.MalformedUUID(err) {
 			return "", ErrBlockNotFound // malformed id → same miss as absent (no oracle)
 		}
 		return "", fmt.Errorf("store: block scope: %w", err)
@@ -185,8 +185,7 @@ func ListBlockGrants(ctx context.Context, pool *pgxpool.Pool, grantingTenant, bl
 		  ORDER BY bg.created_at DESC`,
 		grantingTenant, filter)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+		if pgxdb.MalformedUUID(err) {
 			return nil, ErrBlockGrantUnknownTarget // malformed tenant/block filter → 400, not 500
 		}
 		return nil, fmt.Errorf("store: list block grants: %w", err)
@@ -222,8 +221,7 @@ func RevokeBlockGrant(ctx context.Context, pool *pgxpool.Pool, blockID, granteeT
 		`DELETE FROM context_block_grants WHERE block_id = $1::uuid AND grantee_tenant = $2::uuid`,
 		blockID, granteeTenant)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+		if pgxdb.MalformedUUID(err) {
 			return ErrBlockGrantNotFound // malformed id → same 404 as absent (no oracle)
 		}
 		return fmt.Errorf("store: revoke block grant: %w", err)

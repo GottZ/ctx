@@ -6,16 +6,10 @@ import (
 	"fmt"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// isUniqueViolation reports a 23505 unique-constraint error (duplicate name).
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
-}
 
 // Backend pool CRUD (F3-P1). Write paths run inside a caller transaction
 // with setTxActor, mirroring the settings store: the 053 audit trigger reads
@@ -94,7 +88,7 @@ func CreateBackend(ctx context.Context, tx pgx.Tx, b *backends.Backend, by *stri
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING id`, backendWriteArgs(b)...).Scan(&id)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgxdb.UniqueViolation(err) {
 			return "", fmt.Errorf("backend name %q already exists", b.Name)
 		}
 		return "", fmt.Errorf("store: create backend: %w", err)
@@ -126,7 +120,7 @@ func UpdateBackend(ctx context.Context, tx pgx.Tx, b *backends.Backend, by *stri
 		    scope=$18, updated_at=now()
 		WHERE id=$19 AND ($20::text[] IS NULL OR scope = ANY($20))`, args...)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgxdb.UniqueViolation(err) {
 			return false, fmt.Errorf("backend name %q already exists", b.Name)
 		}
 		return false, fmt.Errorf("store: update backend: %w", err)

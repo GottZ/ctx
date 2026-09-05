@@ -6,9 +6,9 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // CreateParams is the caller-supplied intent for a new re-embed migration
@@ -180,7 +180,7 @@ func Create(ctx context.Context, q Querier, p CreateParams, disk DiskChecker) (i
 		p.FromModel, p.ToModel, p.ToBackend, totalBlocks,
 	).Scan(&id)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgxdb.UniqueViolation(err) {
 			return "", ErrActiveMigrationExists
 		}
 		return "", fmt.Errorf("embedmigration: create: insert: %w", err)
@@ -298,14 +298,4 @@ func countEligibleBlocks(ctx context.Context, q Querier) (int64, error) {
 		`SELECT count(*) FROM context_blocks WHERE embedding IS NOT NULL AND NOT is_archived`,
 	).Scan(&n)
 	return n, err
-}
-
-// isUniqueViolation reports a 23505 unique-constraint error — mirrors
-// internal/store's unexported helper of the same name (not importable: the
-// store package's version is a lower-case, package-private function, and
-// pulling in all of internal/store here for one predicate would invert the
-// intended dependency direction — store is the lower layer).
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }

@@ -17,12 +17,11 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -160,8 +159,7 @@ func ProvisionProject(ctx context.Context, pool *pgxpool.Pool, p ProvisionParams
 		 RETURNING `+projectSelect,
 		tn.ID, p.Scope, p.Identity, p.DisplayName, forge, createdBy))
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if pgxdb.UniqueViolation(err) {
 			return nil, ErrProjectExists
 		}
 		return nil, fmt.Errorf("store: provision insert project: %w", err)

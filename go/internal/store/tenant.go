@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -171,8 +172,7 @@ func CreateTenantTx(ctx context.Context, tx pgx.Tx, slug, displayName string) (*
 		 VALUES ($1, $2)
 		 RETURNING `+tenantCols, slug, displayName))
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if pgxdb.UniqueViolation(err) {
 			return nil, ErrTenantSlugExists
 		}
 		return nil, fmt.Errorf("store: create tenant: %w", err)
@@ -258,7 +258,7 @@ func AssignTenantScopeTx(ctx context.Context, tx pgx.Tx, tenantID, scope string,
 	var lockedID string
 	if err = tx.QueryRow(ctx,
 		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&lockedID); err != nil {
-		if tenantNotFound(err) {
+		if pgxdb.AbsentOrMalformed(err) {
 			return false, ErrTenantNotFound
 		}
 		return false, fmt.Errorf("store: assign scope lock: %w", err)
@@ -317,23 +317,10 @@ func ListTenants(ctx context.Context, pool *pgxpool.Pool) ([]Tenant, error) {
 	return tenants, nil
 }
 
-// tenantNotFound maps BOTH "no such tenant" cases to ErrTenantNotFound: a
-// well-formed-but-absent id (pgx.ErrNoRows) AND a MALFORMED id (22P02 from the
-// ::uuid cast on a non-UUID string). Both must surface as the SAME 404 — a raw
-// 22P02 → 500 would distinguish "malformed" from "well-formed-but-absent", a
-// (weak) existence side-channel and an inconsistent contract.
-func tenantNotFound(err error) bool {
-	if errors.Is(err, pgx.ErrNoRows) {
-		return true
-	}
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "22P02"
-}
-
 // GetTenant returns one tenant by id, or ErrTenantNotFound. An empty, absent, OR
 // malformed id all collapse to ErrTenantNotFound (404, no oracle). The empty
 // short-circuit avoids a needless round-trip + the ”::uuid 22P02; a non-empty
-// malformed id is caught by tenantNotFound after the cast.
+// malformed id is caught by pgxdb.AbsentOrMalformed after the cast.
 func GetTenant(ctx context.Context, pool *pgxpool.Pool, id string) (*Tenant, error) {
 	if id == "" {
 		return nil, ErrTenantNotFound
@@ -341,7 +328,7 @@ func GetTenant(ctx context.Context, pool *pgxpool.Pool, id string) (*Tenant, err
 	t, err := scanTenant(pool.QueryRow(ctx,
 		`SELECT `+tenantCols+` FROM context_tenants WHERE id = $1::uuid`, id))
 	if err != nil {
-		if tenantNotFound(err) {
+		if pgxdb.AbsentOrMalformed(err) {
 			return nil, ErrTenantNotFound
 		}
 		return nil, fmt.Errorf("store: get tenant: %w", err)
@@ -354,10 +341,10 @@ func GetTenant(ctx context.Context, pool *pgxpool.Pool, id string) (*Tenant, err
 // (the 063 NULL-unlimited contract); a non-NULL column is always a CHECK-bounded
 // non-negative int, so the read needs no defensive cast. An empty, absent, OR
 // malformed id all collapse to ErrTenantNotFound (404, no oracle), reusing
-// GetTenant's tenantNotFound mapping (well-formed-but-absent pgx.ErrNoRows AND
-// the 22P02 from the ::uuid cast on a non-UUID string). This is a pure read — it
-// touches no other tenant column. Validation of the returned caps is the caller's
-// job; this function is the storage accessor only.
+// GetTenant's pgxdb.AbsentOrMalformed mapping (well-formed-but-absent
+// pgx.ErrNoRows AND the 22P02 from the ::uuid cast on a non-UUID string). This
+// is a pure read — it touches no other tenant column. Validation of the returned
+// caps is the caller's job; this function is the storage accessor only.
 func TenantLimits(ctx context.Context, pool *pgxpool.Pool, tenantID string) (maxScopes, maxKeys *int, err error) {
 	if tenantID == "" {
 		return nil, nil, ErrTenantNotFound
@@ -365,7 +352,7 @@ func TenantLimits(ctx context.Context, pool *pgxpool.Pool, tenantID string) (max
 	if err = pool.QueryRow(ctx,
 		`SELECT max_scopes, max_keys FROM context_tenants WHERE id = $1::uuid`, tenantID).
 		Scan(&maxScopes, &maxKeys); err != nil {
-		if tenantNotFound(err) {
+		if pgxdb.AbsentOrMalformed(err) {
 			return nil, nil, ErrTenantNotFound
 		}
 		return nil, nil, fmt.Errorf("store: tenant limits: %w", err)
@@ -391,7 +378,7 @@ func SetTenantLimits(ctx context.Context, pool *pgxpool.Pool, tenantID string, m
 		    SET max_scopes = $2, max_keys = $3, updated_at = now()
 		  WHERE id = $1::uuid`, tenantID, maxScopes, maxKeys)
 	if err != nil {
-		if tenantNotFound(err) {
+		if pgxdb.AbsentOrMalformed(err) {
 			return ErrTenantNotFound
 		}
 		return fmt.Errorf("store: set tenant limits: %w", err)
@@ -419,7 +406,7 @@ func SetTenantLimitsTx(ctx context.Context, tx pgx.Tx, tenantID string, maxScope
 		    SET max_scopes = $2, max_keys = $3, updated_at = now()
 		  WHERE id = $1::uuid`, tenantID, maxScopes, maxKeys)
 	if err != nil {
-		if tenantNotFound(err) {
+		if pgxdb.AbsentOrMalformed(err) {
 			return ErrTenantNotFound
 		}
 		return fmt.Errorf("store: set tenant limits: %w", err)
@@ -582,7 +569,7 @@ func UpdateTenant(ctx context.Context, pool *pgxpool.Pool, id, status, displayNa
 		  WHERE id = $1::uuid
 		 RETURNING `+tenantCols, id, status, displayName))
 	if err != nil {
-		if tenantNotFound(err) {
+		if pgxdb.AbsentOrMalformed(err) {
 			return nil, ErrTenantNotFound
 		}
 		return nil, fmt.Errorf("store: update tenant: %w", err)
