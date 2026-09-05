@@ -76,6 +76,88 @@ linters:
             - pkg: "github.com/GottZ/ctx/internal/config"
               desc: "internal/config may only be imported by cmd/**, internal/handler, internal/events, internal/settings (F1 layering rule — pass values as parameters instead)"
 
+        # Leaf doctrine (design/01-schnitt.md §4.5, masterplan K7/K11 + A-4).
+        # Five packages are leaves BY DESIGN; until now the doctrine lived only
+        # in their package comments, and a comment is not a gate. Every rule
+        # below matches today's import graph exactly — nothing in the tree
+        # changes, the NEXT violation just becomes a CI failure instead of a
+        # review finding. Globs match absolute paths (same as config-layering
+        # above), and a deny prefix ending in "$" is an EXACT match in depguard
+        # v2 — without it "…/internal/llm" would also block "…/internal/llmlog".
+        #
+        # 1/5 — internal/util. The K11 wording verbatim: "sprachnahe
+        # Text-Primitiven — Runen, Tokens, Wörter-Tabellen; ausschließlich
+        # stdlib." The package comment (util/strings.go:1-9) states the same
+        # boundary in English — the standard library and NOTHING ELSE, no
+        # github.com/GottZ/ctx/… and no third-party module — which is what lets
+        # any package take a primitive from here without dragging a dependency
+        # along (and what let TokenSet leave internal/evalscore in T01-4). Hence
+        # allow = $gostd, with the ctx half of the boundary carrying the message.
+        util-leaf:
+          files:
+            - "**/go/internal/util/**"
+          allow:
+            - "$gostd"
+          deny:
+            - pkg: "github.com/GottZ/ctx"
+              desc: "internal/util is the stdlib-only leaf of language-near text primitives — runes, tokens, word tables (K11). A helper that needs a ctx package does not belong here; it belongs next to the thing it needs (util/strings.go:4-9)"
+
+        # 2/5 — internal/clientconfig: the ONE resolution rule for base URL and
+        # API key, shared by internal/cli and cmd/ctx-armsweep (T01-6).
+        # Stdlib-only on purpose (clientconfig/config.go:6-10): a tool that
+        # merely needs those two values must not link the command tree, and with
+        # it cobra and the whole charm stack, to get them.
+        clientconfig-leaf:
+          files:
+            - "**/go/internal/clientconfig/**"
+          allow:
+            - "$gostd"
+          deny:
+            - pkg: "github.com/GottZ/ctx"
+              desc: "internal/clientconfig is the stdlib-only leaf that resolves base URL and API key for every ctx client — importing a ctx package here drags the command tree back into the tools that only wanted those two values (T01-6, clientconfig/config.go:6-10)"
+
+        # 3/5 — internal/visibility: THE shared "this block is visible" SQL
+        # fragment (WF T6). It lives OUTSIDE internal/store because rrf cannot
+        # import store (store → blocktype → rrf would cycle); store, rrf and
+        # overview all embed this package directly (visibility.go:4-11).
+        visibility-leaf:
+          files:
+            - "**/go/internal/visibility/**"
+          deny:
+            - pkg: "github.com/GottZ/ctx/internal/store$"
+              desc: "internal/visibility is a leaf so store, rrf and overview can share ONE visibility predicate — an import of store here re-creates the cycle the package exists to break (visibility.go:4-11)"
+
+        # 4/5 — internal/clustersql: THE shared "cluster membership, scope-pure"
+        # SQL fragment, a leaf for exactly the reason visibility is one — rrf
+        # cannot import store, and the filter is needed by rrf, store and
+        # potentially handler (clustersql.go:4-9).
+        clustersql-leaf:
+          files:
+            - "**/go/internal/clustersql/**"
+          deny:
+            - pkg: "github.com/GottZ/ctx/internal/store$"
+              desc: "internal/clustersql is a leaf so rrf, store and handler can share ONE cluster-membership fragment — an import of store here re-creates the cycle the package exists to break (clustersql.go:4-9)"
+            - pkg: "github.com/GottZ/ctx/internal/rrf$"
+              desc: "internal/clustersql is a leaf so rrf, store and handler can share ONE cluster-membership fragment — rrf imports clustersql, so the reverse import is the cycle itself (clustersql.go:4-9)"
+
+        # 5/5 — internal/derived: the leaf property is a RULE, not the current
+        # import list (derived.go:14-20). The DB-facing half of the contract
+        # (store.ResolveSources) lives in store and calls INTO this package —
+        # the same cut internal/visibility uses — and echo.go is an independent
+        # implementation of the topiclabel/guard.go index rather than an import.
+        derived-leaf:
+          files:
+            - "**/go/internal/derived/**"
+          deny:
+            - pkg: "github.com/GottZ/ctx/internal/store$"
+              desc: "internal/derived must not import store, llm, blocktype or topiclabel — store calls INTO derived (store.ResolveSources), so the reverse import inverts the contract cut (derived.go:14-20)"
+            - pkg: "github.com/GottZ/ctx/internal/llm$"
+              desc: "internal/derived must not import store, llm, blocktype or topiclabel — the derived contract is checked without a model in the loop (derived.go:14-20)"
+            - pkg: "github.com/GottZ/ctx/internal/blocktype$"
+              desc: "internal/derived must not import store, llm, blocktype or topiclabel — the derived type vocabulary stays independent of the registry package (derived.go:14-20)"
+            - pkg: "github.com/GottZ/ctx/internal/topiclabel$"
+              desc: "internal/derived must not import store, llm, blocktype or topiclabel — echo.go is deliberately an independent implementation of the topiclabel/guard.go index, not an import (derived.go:14-20)"
+
     gosec:
       excludes:
         - G115
