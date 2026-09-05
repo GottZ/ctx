@@ -58,7 +58,6 @@ func main() {
 type common struct {
 	dir          string
 	allowOutside bool
-	envFile      string
 	dsn          string
 	seed         int64
 	splitSeed    int64
@@ -98,7 +97,6 @@ func bindSlices(fs *flag.FlagSet, o *slicesOpts, cmd string) {
 func (c *common) bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.dir, "dir", "", "gold directory (default: .project/"+goldset.DirName+" next to the repo)")
 	fs.BoolVar(&c.allowOutside, "allow-outside-goldset", false, "permit writes outside the gold directory (recorded in the stamp)")
-	fs.StringVar(&c.envFile, "env-file", "/compose/n8n/.env", "env file supplying CONTEXT_DB_*")
 	fs.StringVar(&c.dsn, "dsn", "", "postgres DSN (default: built from CONTEXT_DB_*)")
 	fs.Int64Var(&c.seed, "seed", 20260812, "sampling seed")
 	fs.Int64Var(&c.splitSeed, "split-seed", 20260825, "seed for the G-Q DERIV/HOLD partition")
@@ -269,45 +267,40 @@ func (c *common) open(ctx context.Context) (*goldset.DB, error) {
 	dsn := c.dsn
 	if dsn == "" {
 		var err error
-		if dsn, err = dsnFromEnv(c.envFile); err != nil {
+		if dsn, err = dsnFromProcessEnv(); err != nil {
 			return nil, err
 		}
 	}
 	return goldset.Open(ctx, dsn)
 }
 
-// dsnFromEnv builds the read-only DSN from CONTEXT_DB_*, preferring the process
-// environment and falling back to the env file.
-func dsnFromEnv(envFile string) (string, error) {
-	vals := map[string]string{}
-	if b, err := os.ReadFile(envFile); err == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			k, v, ok := strings.Cut(line, "=")
-			if !ok {
-				continue
-			}
-			vals[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
-		}
+// dsnFromProcessEnv builds the read-only DSN from the CONTEXT_DB_* process
+// environment — the one source ctxd and the three neighbouring DB-direct tools
+// read (ctx-llmlog-export, ctx-armcost, ctx-distillreset). The caller sources
+// the env file itself, the way docs/operations.md documents it:
+//
+//	set -a; . .env; set +a
+//
+// CONTEXT_GOLDSET_DB_HOST was a tool-local second name for CONTEXT_DB_HOST and
+// is retired. It is answered fail-closed rather than ignored: silently reading
+// CONTEXT_DB_HOST instead would connect to a different database than the one
+// named on the command line.
+func dsnFromProcessEnv() (string, error) {
+	if os.Getenv("CONTEXT_GOLDSET_DB_HOST") != "" {
+		return "", fmt.Errorf("CONTEXT_GOLDSET_DB_HOST ist entfallen — CONTEXT_DB_HOST setzen")
 	}
 	get := func(key, def string) string {
 		if v := os.Getenv(key); v != "" {
-			return v
-		}
-		if v := vals[key]; v != "" {
 			return v
 		}
 		return def
 	}
 	user, pass := get("CONTEXT_DB_USER", ""), get("CONTEXT_DB_PASSWORD", "")
 	db := get("CONTEXT_DB", "context_store")
-	host := get("CONTEXT_GOLDSET_DB_HOST", get("CONTEXT_DB_HOST", "localhost"))
+	host := get("CONTEXT_DB_HOST", "localhost")
 	port := get("CONTEXT_DB_PORT", "5432")
 	if user == "" || pass == "" {
-		return "", fmt.Errorf("CONTEXT_DB_USER/CONTEXT_DB_PASSWORD missing (env or %s)", envFile)
+		return "", fmt.Errorf("CONTEXT_DB_USER/CONTEXT_DB_PASSWORD missing (env)")
 	}
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
 		urlEscape(user), urlEscape(pass), host, port, db), nil

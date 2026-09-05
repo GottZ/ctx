@@ -236,6 +236,7 @@ the raw source of a replay corpus.
 
 ```bash
 cd go && go build ./cmd/ctx-llmlog-export
+set -a; . .env; set +a
 CONTEXT_DB_HOST=<db> ./ctx-llmlog-export -out /secure/dir/llmlog-$(date +%F).jsonl \
   [-since <RFC3339> [-since-id <uuid>]] [-until <RFC3339>] [-pipeline a,b] \
   [-batch 5000] [-strict] [-summary <path>]
@@ -282,6 +283,7 @@ live-counted numbers and nothing else.
 
 ```bash
 cd go && go build ./cmd/ctx-armcost
+set -a; . .env; set +a
 CONTEXT_DB_HOST=<db> ./ctx-armcost -out /secure/dir/armcost-$(date +%F).json \
   [-since <RFC3339>] [-until <RFC3339>] [-days 7] [-by-class=false] \
   [-arm cluster-label -per-topic]

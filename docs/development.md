@@ -362,6 +362,8 @@ would transfer a figure between instruments that do not share one:
 
 ```bash
 cd go && go build ./cmd/ctx-goldset
+set -a; . .env; set +a                      # CONTEXT_DB_* into the environment
+export CONTEXT_DB_HOST=<db-ip>              # only when the store is not on localhost
 ./ctx-goldset ki     -n 300                 # query = paraphrased title, gold = that block
 ./ctx-goldset q      -n 225 -concurrency 2  # content-derived questions, on-prem generator
 ./ctx-goldset qfinal -n 200 -drop 12,77     # hand-check rejects out, seeded DERIV/HOLD split
@@ -379,6 +381,11 @@ cd go && go build ./cmd/ctx-goldset
 ./ctx-goldset ingest -judged judge-<run>.md # the filled-in judgements back in as labels
 ./ctx-goldset stamp                         # refresh digests + corpus contamination stamp
 ```
+
+The DSN comes from `-dsn`, or without it from `CONTEXT_DB_*` in the environment —
+the same source `ctxd` and the DB-direct operator tools read. The tool parses no
+env file of its own, so the sourcing line above is what puts the credentials
+there.
 
 `-dry-run` draws and counts the candidates of the four multi-gold generators
 without a single model call — the way to check a construction before spending
