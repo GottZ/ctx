@@ -1483,7 +1483,22 @@ func (s *Scheduler) distillOneCall(ctx context.Context, t distillTick, group []d
 		return s.distillFault(backend, t.opts)
 	}
 
-	ins, offered, refused, truncated, derr := distillDecode(answer)
+	// THE ANSWER PASSES THE SHARED FENCE TRIM OF T04-13 FIRST (T04-14, E04-2 = A).
+	// This arm was the last LLM pipeline that demanded a bare payload, and the
+	// demand was never earned: the sibling label pipeline sets the same
+	// Format: "json" on its own chat call (topiclabel.go:658, and :1259 above)
+	// and STILL had to strip fences, measured at 13 of 23 answers
+	// (topiclabel/guard.go:55-57, gemma-4, 2026-08-16). A fenced answer died
+	// here twice over — the insights were lost AND the call was booked as a
+	// breaker fault below, so a model habit could close the arm on a backend
+	// that answered correctly.
+	//
+	// The trim is a trim, not an extraction: an answer that merely ENDS in a
+	// fence without opening one is model content and travels untouched, and a
+	// bare payload comes back byte-identical apart from surrounding whitespace.
+	// Everything salvaged here still runs the full eight-stage evidence gate
+	// including the novelty floor — the tolerance widens the input, never the gate.
+	ins, offered, refused, truncated, derr := distillDecode(llm.StripJSONFence(answer))
 	if derr != nil {
 		slog.Error("scheduler: distiller could not decode the answer", "backend", backend, "error", derr)
 		return s.distillFault(backend, t.opts)

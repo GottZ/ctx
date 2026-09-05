@@ -20,6 +20,9 @@
 package events
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"regexp"
 	"strconv"
 	"strings"
@@ -29,6 +32,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/distillsource"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/sensitivity"
 )
@@ -1196,5 +1200,191 @@ func TestDistillDecodeStillAdmitsAQuoteNewline(t *testing.T) {
 	// block write with SQLSTATE 22021.
 	if !distillHasControlRunes("a\x00b") {
 		t.Error("a NUL no longer counts as a control rune — the decode gate lost its actual job")
+	}
+}
+
+// Below: the fence tolerance of the answer hand-off (T04-14, E04-2 = A).
+
+// distillDecodeCallSites names, for every call to distillDecode in
+// distill_extract.go, the function its single argument comes out of —
+// "llm.StripJSONFence" when the answer is trimmed, "" when it is handed over
+// raw. AST-based in the style of internal/chat/tool_result_guard_callsite_test.go
+// so a comment or a string mentioning the helper cannot produce a finding, and
+// so a pure line shift cannot produce a failure.
+func distillDecodeCallSites(t *testing.T) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "distill_extract.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse distill_extract.go: %v", err)
+	}
+	var sites []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, isIdent := call.Fun.(*ast.Ident); !isIdent || id.Name != "distillDecode" {
+			return true
+		}
+		if len(call.Args) != 1 {
+			sites = append(sites, "<arity>")
+			return true
+		}
+		sites = append(sites, distillCalleeName(call.Args[0]))
+		return true
+	})
+	return sites
+}
+
+// distillCalleeName returns "pkg.Fn" for a package-qualified call expression and
+// "" for everything else, a bare identifier included.
+func distillCalleeName(e ast.Expr) string {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	return pkg.Name + "." + sel.Sel.Name
+}
+
+// TestDistillAnswerFenceTolerance pins the ONE production line this wave changed:
+// the answer now passes llm.StripJSONFence before distillDecode sees it.
+//
+// WHY EVERY ROW CARRIES BOTH VERDICTS. The trim sits at a call site inside a
+// scheduler method that a -short probe cannot drive (it wants a backend and a
+// pool), so the behaviour is measured on the two functions the line composes and
+// the composition itself is pinned structurally by the guard above. Each row
+// therefore also asserts what the UNTRIMMED answer did — the red state stays
+// in-test and re-runnable instead of being a claim about a tree that is gone.
+// Turning the production line back into distillDecode(answer) turns the guard
+// red; loosening distillDecode itself turns the wantOldErr column red.
+//
+// The measured reason this is worth a behaviour change: the sibling label
+// pipeline sets the same Format: "json" on its chat call and still had to strip
+// fences, measured at 13 of 23 answers (topiclabel/guard.go:55-57, gemma-4,
+// 2026-08-16). On this arm a fenced answer cost the insights AND counted as a
+// breaker fault, so a model habit could lock a healthy backend out of its own
+// pipeline.
+func TestDistillAnswerFenceTolerance(t *testing.T) {
+	const body = `{"insights":[{"claim":"c","quote":"q","block":"b","chunk":2,"kind":"finding"}]}`
+
+	t.Run("the call site runs the answer through the shared trim", func(t *testing.T) {
+		sites := distillDecodeCallSites(t)
+		if len(sites) != 1 {
+			t.Fatalf("distillDecode has %d call sites in distill_extract.go (%q), want exactly 1 — "+
+				"a second one needs the same trim, and this guard needs the second entry", len(sites), sites)
+		}
+		if sites[0] != "llm.StripJSONFence" {
+			t.Fatalf("the answer reaches distillDecode as %q, want llm.StripJSONFence(...) — without it "+
+				"every fenced answer below is lost AND booked as a breaker fault", sites[0])
+		}
+	})
+
+	for _, tc := range []struct {
+		name          string
+		raw           string
+		wantOldErr    bool // what distillDecode alone made of it before this wave
+		wantErr       bool
+		wantIns       int
+		wantTruncated bool
+	}{
+		{
+			name:       "a ```json fence is peeled and the answer survives",
+			raw:        "```json\n" + body + "\n```",
+			wantOldErr: true,
+			wantIns:    1,
+		},
+		{
+			name:       "a bare ``` fence is peeled too",
+			raw:        "```\n" + body + "\n```",
+			wantOldErr: true,
+			wantIns:    1,
+		},
+		{
+			name:       "whitespace around the fence does not save it from being peeled",
+			raw:        "  ```json\n" + body + "\n```  ",
+			wantOldErr: true,
+			wantIns:    1,
+		},
+		{
+			name:    "a bare payload travels unchanged",
+			raw:     body,
+			wantIns: 1,
+		},
+		// A02-8c meets the tolerance: a fenced answer cut at the output ceiling
+		// has an OPENING fence and no closing one, so the trim peels the opener
+		// and the salvage reads the objects in front of the cut. Before this wave
+		// the same answer was a total loss AND a fault.
+		{
+			name:          "a fenced answer cut at the ceiling keeps what the model finished",
+			raw:           "```json\n" + `{"insights":[{"claim":"c1","quote":"q1","block":"b","chunk":1,"kind":"finding"},{"claim":"c2","quote":"q2 reisst`,
+			wantOldErr:    true,
+			wantIns:       1,
+			wantTruncated: true,
+		},
+		// A trailing ``` WITHOUT an opener is model content, not fence syntax, and
+		// llm.StripJSONFence leaves it in place by design. Its fate here is
+		// unchanged by this wave and decided one layer down: the strict parse
+		// refuses the trailing bytes and distillSalvage reads the closed array
+		// behind them — the "wrapper defect, not a ceiling hit" case that
+		// distill_extract.go:730 spells out. Pinned so the trim cannot quietly
+		// start eating it.
+		{
+			name:    "a trailing ``` without an opener is left to the salvage, as before",
+			raw:     body + "\n```",
+			wantIns: 1,
+		},
+		// THE TRIM IS A TRIM, NOT AN EXTRACTION. An answer that wraps the payload
+		// in prose stays a fault: reading a JSON object out of surrounding text is
+		// llm.jsonFenceRe's job on a different pipeline, and widening this line
+		// into a search would widen the arm's input far past what E04-2 chose.
+		{
+			name:       "prose in front of the payload stays a fault",
+			raw:        "Sicher, hier:\n" + body + "\n```",
+			wantOldErr: true,
+			wantErr:    true,
+		},
+		// Pinned as the IST, not as a wish (hand-off from T04-13): an upper-case
+		// language tag is stripped by no variant, old or new, and the payload
+		// stays unparsable. Changing that is a change to the shared helper in
+		// internal/llm and belongs to whichever wave owns it, not here.
+		{
+			name:       "an upper-case ```JSON tag stays unparsable, exactly as before",
+			raw:        "```JSON\n" + body + "\n```",
+			wantOldErr: true,
+			wantErr:    true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, _, _, err := distillDecode(tc.raw); (err != nil) != tc.wantOldErr {
+				t.Fatalf("the UNTRIMMED answer decodes with err=%v, want an error: %v — the fixture no "+
+					"longer shows what this wave changed", err, tc.wantOldErr)
+			}
+			ins, offered, refused, truncated, err := distillDecode(llm.StripJSONFence(tc.raw))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want an error: %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if len(ins) != tc.wantIns || offered != tc.wantIns || refused != 0 {
+				t.Fatalf("ins=%d offered=%d refused=%d, want %d/%d/0",
+					len(ins), offered, refused, tc.wantIns, tc.wantIns)
+			}
+			if truncated != tc.wantTruncated {
+				t.Fatalf("truncated = %v, want %v — the ceiling signal is what tells an operator "+
+					"distill.num_predict is undersized", truncated, tc.wantTruncated)
+			}
+			if ins[0].Kind == "" || ins[0].Claim == "" {
+				t.Fatalf("the peeled answer decoded to %+v — the body did not survive the trim", ins[0])
+			}
+		})
 	}
 }
