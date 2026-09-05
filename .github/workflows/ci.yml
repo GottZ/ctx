@@ -800,17 +800,13 @@ jobs:
         run: |
           go build \
             -trimpath \
-            -ldflags="-s -w \
-              -X main.Version=${{ github.ref_name }} \
-              -X main.Commit=${{ github.sha }} \
-              -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -ldflags="-s -w" \
             -o ../ctxd \
             ./cmd/ctxd/
 
       - name: Verify binary
         run: |
           file ctxd
-          ./ctxd --version 2>/dev/null || ./ctxd version 2>/dev/null || true
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
