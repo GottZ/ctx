@@ -46,6 +46,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/visibility"
 )
 
@@ -329,32 +330,36 @@ func centroidWorkList(ctx context.Context, pool *pgxpool.Pool, scopeFilter []str
 
 // upsertCentroidBatch recomputes one chunk in its own transaction.
 func upsertCentroidBatch(ctx context.Context, pool *pgxpool.Pool, topicIDs, scopeFilter []string, scoped bool, opts CentroidOptions) (int, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("overview: centroid batch begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
-
-	if opts.WorkMem != "" {
-		// Validated against centroidWorkMemRe in BuildCentroids — the literal
-		// cannot be a bind parameter (GUC assignment), so the whitelist IS the
-		// injection barrier.
-		if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL work_mem = '%s'`, opts.WorkMem)); err != nil {
-			return 0, fmt.Errorf("overview: centroid work_mem: %w", err)
-		}
-	}
-
+	// The tag is read AFTER the commit, so it lives outside the closure. Both
+	// stage texts stay exactly what they were — pgxdb owns the order of
+	// begin/rollback/commit, never the wording (pgxdb/tx.go Stages).
 	var tag pgconn.CommandTag
-	if scoped {
-		tag, err = tx.Exec(ctx, centroidUpsertScopedSQL, opts.VisibleTypes, topicIDs, scopeFilter)
-	} else {
-		tag, err = tx.Exec(ctx, centroidUpsertSQL, opts.VisibleTypes, topicIDs)
-	}
+	err := pgxdb.Write(ctx, pool, pgxdb.Stages{
+		Begin:  "overview: centroid batch begin",
+		Commit: "overview: centroid batch commit",
+	}, func(tx pgx.Tx) error {
+		if opts.WorkMem != "" {
+			// Validated against centroidWorkMemRe in BuildCentroids — the literal
+			// cannot be a bind parameter (GUC assignment), so the whitelist IS the
+			// injection barrier.
+			if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL work_mem = '%s'`, opts.WorkMem)); err != nil {
+				return fmt.Errorf("overview: centroid work_mem: %w", err)
+			}
+		}
+
+		var err error
+		if scoped {
+			tag, err = tx.Exec(ctx, centroidUpsertScopedSQL, opts.VisibleTypes, topicIDs, scopeFilter)
+		} else {
+			tag, err = tx.Exec(ctx, centroidUpsertSQL, opts.VisibleTypes, topicIDs)
+		}
+		if err != nil {
+			return fmt.Errorf("overview: centroid upsert: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("overview: centroid upsert: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("overview: centroid batch commit: %w", err)
+		return 0, err
 	}
 	return int(tag.RowsAffected()), nil
 }

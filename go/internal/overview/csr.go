@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/visibility"
 )
 
@@ -83,34 +84,46 @@ type csrGraph struct {
 // damit S3 gegen die Vorwelle byte-vergleichbar bleibt: dieselbe
 // UUID-Reihenfolge, dieselben Scopes, dieselben Kantengewichte.
 func loadCSR(ctx context.Context, pool *pgxpool.Pool, nodeTypes []string, scopeFilter []string) ([]string, map[string]string, *csrGraph, error) {
-	tx, err := pool.BeginTx(ctx, txRepeatableReadReadOnly())
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("csr: begin repeatable read: %w", err)
-	}
-	// Read-only + Rollback: es gibt nichts zu committen, und ein Rollback
-	// beendet die Snapshot-Haltung sofort — das ist der Punkt, an dem der
-	// Vacuum-Block endet.
-	defer func() { _ = tx.Rollback(ctx) }()
+	// Die Isolationsstufe bleibt AUFRUFER-SACHE: pgxdb besitzt die Reihenfolge
+	// Begin/Rollback/Commit, nicht die Optionen — deshalb WriteOpts mit der
+	// Stufe von unten und nicht pgxdb.Read, das allein den Zugriffsmodus setzt
+	// und die Stufe offen liesse, auf der der Zwei-Pass-Build steht.
+	//
+	// Read-only: der Abschluss ist hier ein COMMIT statt des früheren Rollbacks.
+	// Auf einer READ-ONLY-Transaktion ist das wirkungsgleich — beide geben den
+	// Snapshot im selben Moment frei, und genau das ist der Punkt, an dem der
+	// Vacuum-Block endet. Der Unterschied liegt allein im Fehlerpfad: ein
+	// abgerissener Kanal wird jetzt gemeldet statt verschluckt.
+	var uuids []string
+	var scopeMap map[string]string
+	var g *csrGraph
+	if err := pgxdb.WriteOpts(ctx, pool, txRepeatableReadReadOnly(),
+		pgxdb.Stages{Begin: "csr: begin repeatable read"},
+		func(tx pgx.Tx) error {
+			raw, scopes, err := csrLoadNodes(ctx, tx, nodeTypes, scopeFilter)
+			if err != nil {
+				return err
+			}
+			g, err = csrLoadEdges(ctx, tx, raw, scopeFilter)
+			if err != nil {
+				return err
+			}
 
-	raw, scopes, err := csrLoadNodes(ctx, tx, nodeTypes, scopeFilter)
-	if err != nil {
+			// Die String-Form entsteht ERST HIER und genau einmal. Sie ist
+			// unvermeidbar: persist bindet block_id als Text, und
+			// blockToCluster/intraDegree sind string-geschlüsselt. Der Gewinn
+			// dieser Welle liegt auf der KANTEN-Seite — die Knoten-Seite bleibt
+			// bis S9 wie sie ist.
+			uuids = make([]string, len(raw))
+			scopeMap = make(map[string]string, len(raw))
+			for i, b := range raw {
+				u := formatUUID(b)
+				uuids[i] = u
+				scopeMap[u] = scopes[i]
+			}
+			return nil
+		}); err != nil {
 		return nil, nil, nil, err
-	}
-	g, err := csrLoadEdges(ctx, tx, raw, scopeFilter)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	// Die String-Form entsteht ERST HIER und genau einmal. Sie ist unvermeidbar:
-	// persist bindet block_id als Text, und blockToCluster/intraDegree sind
-	// string-geschlüsselt. Der Gewinn dieser Welle liegt auf der KANTEN-Seite —
-	// die Knoten-Seite bleibt bis S9 wie sie ist.
-	uuids := make([]string, len(raw))
-	scopeMap := make(map[string]string, len(raw))
-	for i, b := range raw {
-		u := formatUUID(b)
-		uuids[i] = u
-		scopeMap[u] = scopes[i]
 	}
 	return uuids, scopeMap, g, nil
 }

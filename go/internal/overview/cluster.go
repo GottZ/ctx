@@ -9,6 +9,7 @@ package overview
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/simple"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/visibility"
 )
 
@@ -1387,6 +1389,16 @@ func writeMeta(ctx context.Context, tx pgx.Tx, scoped bool, opts Options, stats 
 	return writeSuperMeta(ctx, tx, super)
 }
 
+// errPersistLockSkipped verlässt die persist-Transaktion, ohne sie zu
+// committen. Er ist der einzige Ausgang ihrer Closure, der kein echter Fehler
+// ist: pgxdb.Write committet genau dann, wenn die Closure nil liefert, und der
+// Advisory-Lock-Skip darf nicht committen — bis dorthin steht die halb
+// gefüllte ov_new in der Transaktion (TEMP, ON COMMIT DROP), und ein
+// fehlschlagender COMMIT würde aus einem Skip einen Fehler machen, wo der
+// Aufrufer Stats{Skipped: true} erwartet. Der Sentinel verlässt persist nie; er
+// wird direkt hinter der Klammer abgefangen.
+var errPersistLockSkipped = errors.New("overview: persist skipped — advisory lock held")
+
 // persist replaces the 057 tables in one advisory-locked transaction —
 // globally (nil ScopeFilter: TRUNCATE + unscoped aggregation, the pre-B
 // behaviour) or for ONE partition (B-W3: scoped DELETE + scoped aggregation,
@@ -1413,159 +1425,173 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		filterSet[s] = struct{}{}
 	}
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return Stats{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
-
-	// W3: FIRST statement of the tx — temp_buffers is only settable while the
-	// session has not touched a temp table yet (see persistTempBuffers). The
-	// value is a code-owned constant, never input.
-	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL temp_buffers = '%s'`, persistTempBuffers)); err != nil {
-		return Stats{}, fmt.Errorf("temp_buffers: %w", err)
-	}
-
-	// S9a: ov_new wird VOR dem Lock-Erwerb gefuellt (design/04 §4.8 Punkt 1).
-	//
-	// Der CopyFrom ist der VOLLE Strom ueber alle N Member — die einzige Zeile
-	// der §6.4-Bilanz, die nicht deltaproportional ist. Laege er nach dem
-	// Lock, wanderte er bei 9,8M Membern vollstaendig in lock_held_ms.
-	//
-	// ABWEICHUNG VOM ENTWURF, mit Grund: der Entwurf verlangt den Aufbau "vor
-	// Begin". Das geht hier NICHT — persistTempBuffers wird als SET LOCAL als
-	// erste Anweisung der Tx gesetzt, und PostgreSQL verweigert eine AENDERUNG
-	// von temp_buffers (SQLSTATE 22023), sobald die Session eine TEMP-Tabelle
-	// beruehrt hat. Ein Aufbau vor Begin wuerde also entweder temp_buffers
-	// unwirksam machen oder die naechste Transaktion auf derselben
-	// Pool-Verbindung vergiften. INNERHALB der Tx, aber VOR dem Lock, erfuellt
-	// die eigentliche Anforderung exakt (der Lock-Zaehler laeuft seit S2 ab der
-	// ERTEILUNG) und bindet die Lebensdauer der Tabelle sauber an ON COMMIT
-	// DROP, statt sie in den Pool zu vererben.
-	copyStart := time.Now()
-	if err := buildOvNew(ctx, tx, cl, opts, nodeScopes, scoped, filterSet); err != nil {
-		return Stats{}, err
-	}
-	copyMS := int(time.Since(copyStart).Milliseconds())
+	// Die Klammer selbst liegt seit T04-1 in pgxdb; hier bleiben die Fehlertexte
+	// (Begin unverpackt wie bisher, das Commit-Präfix unverändert) und die
+	// Reihenfolge der Phasen. Was die Klammer ÜBERLEBEN muss, steht davor: stats
+	// trägt das Ergebnis nach draußen, und lock_held_ms/copy_ms werden bewusst
+	// NACH dem Commit gelesen (siehe unten) — deshalb sind ihre Träger äußere
+	// Variablen und keine Rückgabewerte der Closure.
+	var stats Stats
+	var copyMS int
 	var deltaWritten int64
-
-	// B-W4: the lock is per-partition — two different tenants persist in
-	// parallel, the same tenant (and the global run against old binaries)
-	// keeps serializing. See lockKeyForScopes.
-	lockKey := lockKeyForScopes(opts.ScopeFilter)
-	var locked bool
-	// S2: die Lock-Uhr laeuft von der ERTEILUNG bis zum Commit — nicht ab
-	// Begin. Der Unterschied ist die Wartezeit auf den Lock selbst, und die ist
-	// keine Haltezeit: sie blockiert niemanden, sie wird blockiert. Wer beides
-	// zusammenwirft, meldet unter Konkurrenz eine Haltezeit, die nie stattfand.
-	lockAcquired := time.Now()
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, lockKey).Scan(&locked); err != nil {
-		return Stats{}, fmt.Errorf("advisory lock: %w", err)
-	}
-	if !locked {
-		slog.Info("overview: rebuild skipped — advisory lock held by another instance",
-			"lock_key", lockKey, "scope_filter", opts.ScopeFilter)
-		return Stats{Skipped: true, SkipReason: "advisory-lock", CandidateCount: candidates}, nil
-	}
-
-	// W3, K5 order: the predecessor snapshot has to be taken BEFORE the
-	// teardown — graph_cluster_member is the only record of the old block→
-	// topic assignment and the teardown deletes it.
-	phase := topicPhase{
-		scoped: scoped, scopeFilter: opts.ScopeFilter,
-		tombstone: opts.TombstoneRetention, members: len(cl.blockToCluster),
-	}
-	if err := phase.snapshotPrevTopics(ctx, tx); err != nil {
-		return Stats{}, err
-	}
-
-	// S9b: bei aktivem Delta-Persist bleibt graph_cluster_member stehen und
-	// wird gejoint statt geleert; alles andere wird weiterhin voll geraeumt,
-	// weil die Aggregationen voll laufen (die inkrementelle Variante ist S9c
-	// und haengt an UD-11-04).
-	clusterSet, written, err := writeMembers(ctx, tx, cl, opts, scoped)
-	if err != nil {
-		return Stats{}, err
-	}
-	deltaWritten = written
-
-	// W3 identity phase — between members and aggregation (K5). Everything in
-	// here works on TEMP tables; no Louvain, no resolution search.
-	topics, err := assignTopics(ctx, tx, phase, buildCores(cl, nodeScopes))
-	if err != nil {
-		return Stats{}, err
-	}
-
-	// Aggregation — ALWAYS the variant matching the teardown above (B1-C1:
-	// scoped DELETE + unscoped aggregation = resurrected foreign rows ⇒ 23505).
-	var edgeTag, nodeTag pgconn.CommandTag
-	if !scoped {
-		if nodeTag, err = tx.Exec(ctx, nodeAggSQL, opts.VisibleTypes); err != nil {
-			return Stats{}, fmt.Errorf("node aggregation: %w", err)
+	var labelled int64
+	var lockAcquired time.Time
+	err := pgxdb.Write(ctx, pool, pgxdb.Stages{Commit: "commit"}, func(tx pgx.Tx) error {
+		// W3: FIRST statement of the tx — temp_buffers is only settable while the
+		// session has not touched a temp table yet (see persistTempBuffers). The
+		// value is a code-owned constant, never input.
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL temp_buffers = '%s'`, persistTempBuffers)); err != nil {
+			return fmt.Errorf("temp_buffers: %w", err)
 		}
-		edgeTag, err = tx.Exec(ctx, edgeAggSQL, opts.VisibleTypes)
+
+		// S9a: ov_new wird VOR dem Lock-Erwerb gefuellt (design/04 §4.8 Punkt 1).
+		//
+		// Der CopyFrom ist der VOLLE Strom ueber alle N Member — die einzige Zeile
+		// der §6.4-Bilanz, die nicht deltaproportional ist. Laege er nach dem
+		// Lock, wanderte er bei 9,8M Membern vollstaendig in lock_held_ms.
+		//
+		// ABWEICHUNG VOM ENTWURF, mit Grund: der Entwurf verlangt den Aufbau "vor
+		// Begin". Das geht hier NICHT — persistTempBuffers wird als SET LOCAL als
+		// erste Anweisung der Tx gesetzt, und PostgreSQL verweigert eine AENDERUNG
+		// von temp_buffers (SQLSTATE 22023), sobald die Session eine TEMP-Tabelle
+		// beruehrt hat. Ein Aufbau vor Begin wuerde also entweder temp_buffers
+		// unwirksam machen oder die naechste Transaktion auf derselben
+		// Pool-Verbindung vergiften. INNERHALB der Tx, aber VOR dem Lock, erfuellt
+		// die eigentliche Anforderung exakt (der Lock-Zaehler laeuft seit S2 ab der
+		// ERTEILUNG) und bindet die Lebensdauer der Tabelle sauber an ON COMMIT
+		// DROP, statt sie in den Pool zu vererben.
+		copyStart := time.Now()
+		if err := buildOvNew(ctx, tx, cl, opts, nodeScopes, scoped, filterSet); err != nil {
+			return err
+		}
+		copyMS = int(time.Since(copyStart).Milliseconds())
+
+		// B-W4: the lock is per-partition — two different tenants persist in
+		// parallel, the same tenant (and the global run against old binaries)
+		// keeps serializing. See lockKeyForScopes.
+		lockKey := lockKeyForScopes(opts.ScopeFilter)
+		var locked bool
+		// S2: die Lock-Uhr laeuft von der ERTEILUNG bis zum Commit — nicht ab
+		// Begin. Der Unterschied ist die Wartezeit auf den Lock selbst, und die ist
+		// keine Haltezeit: sie blockiert niemanden, sie wird blockiert. Wer beides
+		// zusammenwirft, meldet unter Konkurrenz eine Haltezeit, die nie stattfand.
+		lockAcquired = time.Now()
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, lockKey).Scan(&locked); err != nil {
+			return fmt.Errorf("advisory lock: %w", err)
+		}
+		if !locked {
+			slog.Info("overview: rebuild skipped — advisory lock held by another instance",
+				"lock_key", lockKey, "scope_filter", opts.ScopeFilter)
+			stats = Stats{Skipped: true, SkipReason: "advisory-lock", CandidateCount: candidates}
+			return errPersistLockSkipped
+		}
+
+		// W3, K5 order: the predecessor snapshot has to be taken BEFORE the
+		// teardown — graph_cluster_member is the only record of the old block→
+		// topic assignment and the teardown deletes it.
+		phase := topicPhase{
+			scoped: scoped, scopeFilter: opts.ScopeFilter,
+			tombstone: opts.TombstoneRetention, members: len(cl.blockToCluster),
+		}
+		if err := phase.snapshotPrevTopics(ctx, tx); err != nil {
+			return err
+		}
+
+		// S9b: bei aktivem Delta-Persist bleibt graph_cluster_member stehen und
+		// wird gejoint statt geleert; alles andere wird weiterhin voll geraeumt,
+		// weil die Aggregationen voll laufen (die inkrementelle Variante ist S9c
+		// und haengt an UD-11-04).
+		clusterSet, written, err := writeMembers(ctx, tx, cl, opts, scoped)
 		if err != nil {
-			return Stats{}, fmt.Errorf("edge aggregation: %w", err)
+			return err
 		}
-	} else {
-		if nodeTag, err = tx.Exec(ctx, nodeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter); err != nil {
-			return Stats{}, fmt.Errorf("scoped node aggregation: %w", err)
-		}
-		edgeTag, err = tx.Exec(ctx, edgeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter)
+		deltaWritten = written
+
+		// W3 identity phase — between members and aggregation (K5). Everything in
+		// here works on TEMP tables; no Louvain, no resolution search.
+		topics, err := assignTopics(ctx, tx, phase, buildCores(cl, nodeScopes))
 		if err != nil {
-			return Stats{}, fmt.Errorf("scoped edge aggregation: %w", err)
+			return err
 		}
-	}
 
-	// W3 completeness check.
-	assigned := topics.carried + topics.reattached + topics.born + topics.split
-	if err := checkNodeCoverage(ctx, tx, opts, scoped, int(nodeTag.RowsAffected()), assigned); err != nil {
-		return Stats{}, err
-	}
+		// Aggregation — ALWAYS the variant matching the teardown above (B1-C1:
+		// scoped DELETE + unscoped aggregation = resurrected foreign rows ⇒ 23505).
+		var edgeTag, nodeTag pgconn.CommandTag
+		if !scoped {
+			if nodeTag, err = tx.Exec(ctx, nodeAggSQL, opts.VisibleTypes); err != nil {
+				return fmt.Errorf("node aggregation: %w", err)
+			}
+			edgeTag, err = tx.Exec(ctx, edgeAggSQL, opts.VisibleTypes)
+			if err != nil {
+				return fmt.Errorf("edge aggregation: %w", err)
+			}
+		} else {
+			if nodeTag, err = tx.Exec(ctx, nodeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter); err != nil {
+				return fmt.Errorf("scoped node aggregation: %w", err)
+			}
+			edgeTag, err = tx.Exec(ctx, edgeAggScopedSQL, opts.VisibleTypes, opts.ScopeFilter)
+			if err != nil {
+				return fmt.Errorf("scoped edge aggregation: %w", err)
+			}
+		}
 
-	// W-F, in the §9.1 order: the topic edge projection reads the edge rows the
-	// aggregation just wrote AND the identity the node rows just got, so it can
-	// only run here; the meta level then writes the grouping that was computed
-	// back in Rebuild's compute window.
-	if err := writeTopicEdges(ctx, tx, scoped, opts.ScopeFilter); err != nil {
-		return Stats{}, err
-	}
-	if err := writeSuperLevel(ctx, tx, super); err != nil {
-		return Stats{}, err
-	}
+		// W3 completeness check.
+		assigned := topics.carried + topics.reattached + topics.born + topics.split
+		if err := checkNodeCoverage(ctx, tx, opts, scoped, int(nodeTag.RowsAffected()), assigned); err != nil {
+			return err
+		}
 
-	// W5: the deterministic fallback label plus the materialized drift state.
-	// It runs AFTER the node aggregation because it reads core_blocks,
-	// category_counts and repr_title off the rows that aggregation just wrote,
-	// and INSIDE this transaction because "the map is never unnamed" has to be
-	// as atomic as the identity it names (design/01 §4.6).
-	labelled, err := phase.writeFallbackLabels(ctx, tx)
+		// W-F, in the §9.1 order: the topic edge projection reads the edge rows the
+		// aggregation just wrote AND the identity the node rows just got, so it can
+		// only run here; the meta level then writes the grouping that was computed
+		// back in Rebuild's compute window.
+		if err := writeTopicEdges(ctx, tx, scoped, opts.ScopeFilter); err != nil {
+			return err
+		}
+		if err := writeSuperLevel(ctx, tx, super); err != nil {
+			return err
+		}
+
+		// W5: the deterministic fallback label plus the materialized drift state.
+		// It runs AFTER the node aggregation because it reads core_blocks,
+		// category_counts and repr_title off the rows that aggregation just wrote,
+		// and INSIDE this transaction because "the map is never unnamed" has to be
+		// as atomic as the identity it names (design/01 §4.6).
+		labelled, err = phase.writeFallbackLabels(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		stats = Stats{
+			NodeCount:         len(cl.blockToCluster),
+			ClusterCount:      len(clusterSet),
+			EdgeRows:          int(edgeTag.RowsAffected()),
+			Modularity:        cl.modularity,
+			CandidateCount:    candidates,
+			TopicsCarried:     topics.carried,
+			TopicsReattached:  topics.reattached,
+			TopicsBorn:        topics.born,
+			TopicsSplit:       topics.split,
+			TopicsRetired:     topics.retired,
+			MembersChanged:    topics.membersChanged,
+			MembersReassigned: topics.membersReassigned,
+			SuperN:            len(super.Groups),
+			SuperCapped:       len(super.Capped) > 0,
+		}
+		if err := writeMeta(ctx, tx, scoped, opts, stats, candidates, super); err != nil {
+			return err
+		}
+		return nil
+	})
 	if err != nil {
+		// Der Lock-Skip ist ein ABBRUCH, kein Ergebnis: pgxdb.Write committet
+		// genau dann, wenn die Closure nil liefert, und ein nil an dieser Stelle
+		// hätte aus dem Skip einen COMMIT gemacht. Der Sentinel hält den Ausgang
+		// beim ROLLBACK, den die Stelle vor der Klammer hatte.
+		if errors.Is(err, errPersistLockSkipped) {
+			return stats, nil
+		}
 		return Stats{}, err
-	}
-
-	stats := Stats{
-		NodeCount:         len(cl.blockToCluster),
-		ClusterCount:      len(clusterSet),
-		EdgeRows:          int(edgeTag.RowsAffected()),
-		Modularity:        cl.modularity,
-		CandidateCount:    candidates,
-		TopicsCarried:     topics.carried,
-		TopicsReattached:  topics.reattached,
-		TopicsBorn:        topics.born,
-		TopicsSplit:       topics.split,
-		TopicsRetired:     topics.retired,
-		MembersChanged:    topics.membersChanged,
-		MembersReassigned: topics.membersReassigned,
-		SuperN:            len(super.Groups),
-		SuperCapped:       len(super.Capped) > 0,
-	}
-	if err := writeMeta(ctx, tx, scoped, opts, stats, candidates, super); err != nil {
-		return Stats{}, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return Stats{}, fmt.Errorf("commit: %w", err)
 	}
 	// Nach dem Commit gelesen, nicht davor: der Commit selbst haelt den Lock
 	// noch (pg_try_advisory_XACT_lock gibt ihn erst beim Transaktionsende frei),
