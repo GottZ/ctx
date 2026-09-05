@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -290,11 +291,12 @@ func TestValidateTable(t *testing.T) {
 			"graph_overview.label_timeout": "0", "graph_overview.label_interval": "30",
 		}, "graph_overview.label_timeout", -1},
 
-		// V18 — dream.num_predict (issue #28). Unlike V16/V16c the sign half
-		// is NOT V17's: the generic walk is typed and visits duration fields
-		// only, so a typInt key needs its own check — the negative row below
-		// is the one that goes red if it is dropped, and no other check in
-		// the tree would catch it.
+		// V18 — dream.num_predict (issue #28). The sign half is no longer
+		// V18's own: it was folded into V35 (validateIntSigns) when that walk
+		// was widened from durations to every int key, so the negative row
+		// below is now the walk's report, and the registry-wide int test
+		// further down is what goes red if the walk is dropped. What stayed
+		// here is the FLOOR half, which no generic walk can state.
 		//
 		// 0 is the package-default sentinel and stays clean; raising is a
 		// plain ok; below the built-in default warns (truncation the default
@@ -443,6 +445,143 @@ func TestValidateFoldedSignChecksReportOnce(t *testing.T) {
 	})), "dream.temporal_timeout")
 	if len(got) != 1 || got[0].Severity != SeverityError {
 		t.Fatalf("temporal -30 under a 60s cycle produced %v, want exactly one SeverityError", got)
+	}
+}
+
+// wantIntKeys is the number of typInt keys in the registry, MEASURED on the
+// stand this wave was built against (90, the same number design/05 §2 Naht 5
+// counted from config.go's field tags). Like wantDurationKeys above it is a
+// DRIFT GUARD, not a fact worth asserting for its own sake: V35 is a generic
+// walk, so an int key added later is covered without an edit here — but a key
+// that silently changes TYPE (int → float, or a leaf that stops being an int)
+// would leave the walk without anyone noticing. Raise this number in the same
+// commit that adds an int key.
+const wantIntKeys = 90
+
+// intSignWarnKeys is the OTHER half of the classification, and the reason V35
+// runs last. These three keys are served by NORMALIZING passes that write the
+// value back into the struct before V35 ever looks: v6() resets
+// dream.backoff_grace and dream.backoff_inert_offset to their registry
+// defaults, V10 clamps dream.parallelism to 1. For them a negative value is a
+// WARN and the boot continues — legitimately, because after the pass the
+// surface and the consumer agree again, which is the divergence V35 exists to
+// refuse.
+//
+// The set is asserted EXACTLY, in both directions: a fourth normalizing pass
+// becomes visible here instead of silently widening the WARN class, and a pass
+// that stops normalizing shows up as a key that moved to the error class.
+var intSignWarnKeys = map[string]bool{
+	"dream.backoff_grace":        true,
+	"dream.backoff_inert_offset": true,
+	"dream.parallelism":          true,
+}
+
+// TestValidateRejectsNegativeOnEveryIntKey is the registry-wide form of V35 and
+// carries all three gates of the wave that introduced it.
+//
+// Before V35, 62 of the 90 int keys had no sign check at all: -1 parsed
+// (parseIntValue is a bare strconv.Atoi), landed in the struct, and rendered as
+// a configured number in the settings surface while the consumer read it as
+// unset or off — recall_check.leg_timeout_ms, recall_check.park_max_ms and
+// scheduler.llmlog_retention_days among them. The other 28 were covered by
+// sixteen hand-written sign checks plus three normalizing passes.
+//
+// "Exactly one issue on the field, none anywhere else" is the fold statement,
+// same as V17's: the sixteen hand checks were FOLDED into the walk rather than
+// exempted from it, and the three checks that kept a floor (graph.hop_depth,
+// V25's min:1 rows, V34's concurrency range) were narrowed to ">= 0 && < floor".
+// Re-introducing any of them double-reports here. It is ALSO the order pin: if
+// V35 ran before validateDream, it would see the not-yet-normalized -1 on the
+// three WARN keys, file an error, and validateDream would add its WARN on top —
+// two issues on the same field, and this test goes red.
+func TestValidateRejectsNegativeOnEveryIntKey(t *testing.T) {
+	seen, warns := 0, map[string]bool{}
+	for _, e := range registry() {
+		if e.typ != typInt {
+			continue
+		}
+		seen++
+		t.Run(e.Key, func(t *testing.T) {
+			// Production write path: the value rides the same typed parser a
+			// settings row or an env var would (fromSources), never a
+			// hand-built struct.
+			cfg := validCfg(t, map[string]string{e.Key: "-1"})
+			issues := Validate(cfg)
+
+			got := issuesOn(issues, e.Key)
+			if len(got) != 1 {
+				t.Fatalf("%s = -1 produced %d issues on the field, want exactly 1: %v", e.Key, len(got), got)
+			}
+			for _, is := range issues {
+				if is.Field != e.Key {
+					t.Errorf("%s = -1 also produced an issue on %s: %v", e.Key, is.Field, is)
+				}
+			}
+
+			// Gate 3, the class half: a negative is an ERROR unless a
+			// normalizing pass already repaired the value.
+			if want := SeverityError; !intSignWarnKeys[e.Key] && got[0].Severity != want {
+				t.Errorf("%s = -1 severity = %v, want %v (boot abort / 422 on the settings write): %v",
+					e.Key, got[0].Severity, want, got[0])
+			}
+			if intSignWarnKeys[e.Key] {
+				if got[0].Severity != SeverityWarn {
+					t.Errorf("%s = -1 severity = %v, want SeverityWarn — the key is served by a normalizing pass: %v",
+						e.Key, got[0].Severity, got[0])
+				}
+				warns[e.Key] = true
+			}
+
+			// Gate 2, the invariant this wave states: after a Validate without
+			// SeverityError, no int field of the registry is negative. Either a
+			// normalizing pass corrected it, or V35 filed the error.
+			if n := reflect.ValueOf(cfg).Elem().FieldByIndex(e.path).Interface().(int); n < 0 && got[0].Severity != SeverityError {
+				t.Errorf("%s survived Validate as %d without a SeverityError — the surface would render %d while the consumer serves its own default",
+					e.Key, n, n)
+			}
+		})
+	}
+	if seen != wantIntKeys {
+		t.Errorf("registry holds %d typInt keys, want %d — an int key was added or changed type; "+
+			"confirm V35 still covers it and update wantIntKeys", seen, wantIntKeys)
+	}
+	if len(warns) != len(intSignWarnKeys) {
+		t.Errorf("keys whose -1 is only a WARN = %v, want exactly %v — a normalizing pass was added or removed",
+			warns, intSignWarnKeys)
+	}
+}
+
+// TestValidateIntSignsLeavesZeroAlone pins the limit V35 gives itself, the same
+// one V17 gives itself: 0 is NOT checked, because what zero means is per key.
+// distill.spend_max_calls 0 is the documented kill switch, dream.num_predict 0
+// is the package-default sentinel, pool.blob_stage_max_bytes 0 disables
+// staging. A walk that refused zeros would break all three.
+func TestValidateIntSignsLeavesZeroAlone(t *testing.T) {
+	for _, key := range []string{
+		"distill.spend_max_calls", "dream.num_predict", "pool.blob_stage_max_bytes",
+		"pool.blob_scan_max_bytes", "pool.external_num_ctx_fallback", "pool.openrouter_window_ttl",
+		"distill.retention_days", "distill.seen_retention_days", "distill.max_blocks_per_root",
+	} {
+		t.Run(key, func(t *testing.T) {
+			if got := issuesOn(Validate(validCfg(t, map[string]string{key: "0"})), key); len(got) != 0 {
+				t.Errorf("%s = 0 produced %v, want no issue — the zero of this key is documented", key, got)
+			}
+		})
+	}
+}
+
+// TestValidateIntFloorsKeepTheirZero is the counter-statement: the three checks
+// that gave up their SIGN kept their FLOOR, and the floor is what a generic
+// walk cannot know. Each of these zeros is refused by its own check, with its
+// own reason, and each files exactly one issue.
+func TestValidateIntFloorsKeepTheirZero(t *testing.T) {
+	for _, key := range []string{"graph.hop_depth", "distill.rows_per_call", "distill.concurrency"} {
+		t.Run(key, func(t *testing.T) {
+			got := issuesOn(Validate(validCfg(t, map[string]string{key: "0"})), key)
+			if len(got) != 1 || got[0].Severity != SeverityError {
+				t.Fatalf("%s = 0 produced %v, want exactly one SeverityError from its own floor check", key, got)
+			}
+		})
 	}
 }
 

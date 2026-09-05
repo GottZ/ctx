@@ -74,6 +74,18 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
 	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
+	// V35 runs LAST, and the position is the mechanism, not a style choice.
+	// Three of the int keys are served by NORMALIZING passes that write the
+	// value back into the struct (v6 for dream.backoff_grace and
+	// dream.backoff_inert_offset, V10's clamp for dream.parallelism), and
+	// validateDream stands third in this list. Running last, V35 sees what
+	// those passes left behind, so a normalized value is no longer negative
+	// and gets no second, contradicting report. The invariant that follows is
+	// the statement of the walk: after a Validate without SeverityError, no
+	// int field of the registry is negative — either a normalizing pass
+	// corrected it (WARN, boot continues, surface == consumer) or V35 filed
+	// the error (boot abort / 422).
+	issues = append(issues, validateIntSigns(c)...) // V35
 	return issues
 }
 
@@ -472,17 +484,26 @@ func validateDistillSpendWindow(d *DistillConfig) []Issue {
 		Msg: "distill.spend_window must be > 0 — it is the window BOTH spend ceilings are counted in, so 0 makes the guard count an empty range and pass every budget while the settings surface keeps rendering spend_max_calls and spend_max_gpu_seconds as configured limits; switch the guard off with spend_max_calls = 0 and spend_max_gpu_seconds = 0 instead"}}
 }
 
-// validateDistillCounters is V25: the range half of the group — the counted
-// keys, since the generic V17 walk is typed and visits duration keys only.
+// validateDistillCounters is V25: the FLOOR half of the group — the counted
+// keys whose zero is not a legal value. The SIGN half went to V35
+// (validateIntSigns) in the wave that made that walk generic over every int
+// key, which is why the loop condition below reads ">= 0 && < min" and why
+// the seven keys with a documented zero have no row here any more.
 //
 // Two readings of zero, deliberately kept apart:
 //
 //   - spend_max_calls 0 is the DOCUMENTED kill switch (guard off, effective
 //     from the next tick because the snapshot is re-read per iteration), the
-//     retention pairs' 0 is the recall_check no-op ("keep forever"), and
-//     max_blocks_per_root's 0 is the shard cap being off (wave W-L3). Those
-//     stay legal; only their negatives are refused, on the house grounds that a
-//     negative renders as a configured number while acting as the off-switch.
+//     retention pairs' 0 is the recall_check no-op ("keep forever"),
+//     max_blocks_per_root's 0 is the shard cap being off (wave W-L3),
+//     spend_max_gpu_seconds' 0 is the GPU axis off, initial_backfill_rows' 0
+//     is the documented cold start at the head of the source, and
+//     min_row_runes' 0 is no substance threshold at all. Those seven stay
+//     legal and are therefore NOT listed below: with no floor to enforce,
+//     their rows would have been pure sign checks, and a pure sign check next
+//     to V35's walk double-reports the field. Their negatives are refused by
+//     V35 on the same house grounds this group always gave — a negative
+//     renders as a configured number while acting as the off-switch.
 //   - the sizing keys have NO safe zero. rows_per_call 0 or max_row_runes 0
 //     means no batch can ever be built, rows_per_read 0 means every read
 //     returns nothing, max_sessions_per_run 0 means no source is ever
@@ -513,26 +534,8 @@ func validateDistillCounters(d *DistillConfig) []Issue {
 		// distill.ctx_enabled that the settings surface renders as a budget.
 		{"distill.num_predict", d.NumPredict, 1, "a call with no answer budget can produce no insight"},
 		{"distill.breaker_failures", d.BreakerFailures, 1, "the breaker would stand open before the first attempt"},
-		{"distill.min_row_runes", d.MinRowRunes, 0, "a negative substance threshold has no reading"},
-		{"distill.initial_backfill_rows", d.InitialBackfillRows, 0, "0 is the documented cold start at the head of the source"},
-		{"distill.spend_max_calls", d.SpendMaxCalls, 0, "0 is the documented kill switch that disables the guard"},
-		// The shard cap reads its 0 like the call ceiling reads its own (wave
-		// W-L3, amendment C4-2 A.4 b): the axis is off and the chain opens with
-		// the material, which is decision E5-2's own wording. Only the negative
-		// is refused, on the same house grounds as every other documented zero
-		// above — it renders as a configured number while acting as an
-		// off-switch, and here the off-switch would be a silent "no more shards"
-		// on top of a key whose 0 says the opposite.
-		{"distill.max_blocks_per_root", d.MaxBlocksPerRoot, 0, "0 is the documented no-cap default, so a negative would be a second, silent off-switch under a key that already has one reading for 0"},
-		// The GPU axis reads its 0 exactly like the call axis reads its own
-		// (wave A02-7): each ceiling is armed on its own, both at 0 is the guard
-		// off. A negative is refused for the house reason — it renders as a
-		// configured budget while acting as an off-switch.
-		{"distill.spend_max_gpu_seconds", d.SpendMaxGPUSeconds, 0, "0 is the documented kill switch of the GPU-second axis"},
-		{"distill.retention_days", d.RetentionDays, 0, "0 is the documented no-op that keeps rows forever"},
-		{"distill.seen_retention_days", d.SeenRetentionDays, 0, "0 is the documented no-op that keeps hashes forever"},
 	} {
-		if k.val < k.min {
+		if k.val >= 0 && k.val < k.min {
 			issues = append(issues, Issue{Field: k.key, Severity: SeverityError,
 				Msg: fmt.Sprintf("%s %d must be >= %d — %s, and the settings surface would still render it as a configured value",
 					k.key, k.val, k.min, k.note)})
@@ -589,7 +592,10 @@ func validateDistillNoveltyFloor(d *DistillConfig) []Issue {
 //   - BELOW 1 is the off-switch shape: 0 would be a tick that touches no source
 //     at all while every gate reports healthy — the silent null operation D-02
 //     §4.2.1(b) wants to see red — and the arm HAS an off-switch, distill.enabled,
-//     which journals its answer.
+//     which journals its answer. The NEGATIVE half of that range belongs to V35
+//     (validateIntSigns), the generic sign walk over every int key, so the guard
+//     below reads "< 0 is not mine": the floor is this check's statement, the
+//     sign is the walk's, and no value is reported twice.
 //   - ABOVE DistillMaxConcurrency is the starvation shape: the pool is 20
 //     connections for the whole daemon (store.NewPool), so a fan-out beyond the
 //     bound queues guard, digest, dream and the HTTP surface behind one
@@ -602,7 +608,7 @@ func validateDistillNoveltyFloor(d *DistillConfig) []Issue {
 // because a hand-built Config that never passed this function must not turn a
 // zero into an arm that silently does nothing.
 func validateDistillConcurrency(d *DistillConfig) []Issue {
-	if d.Concurrency >= 1 && d.Concurrency <= DistillMaxConcurrency {
+	if d.Concurrency < 0 || (d.Concurrency >= 1 && d.Concurrency <= DistillMaxConcurrency) {
 		return nil
 	}
 	return []Issue{{Field: "distill.concurrency", Severity: SeverityError,
@@ -725,6 +731,63 @@ func validateDurations(c *Config) []Issue {
 	return issues
 }
 
+// validateIntSigns is V35: the sign check over EVERY count-typed key (typInt)
+// in the registry — the second half of the statement V17 makes for durations,
+// and built exactly like it.
+//
+// The failure mode is the same one V17 names, one type over: a negative count
+// PARSES (parseIntValue is a bare strconv.Atoi, load.go), lands in the struct,
+// and renders as a configured number in the settings surface, while every
+// consumer that reads "<= 0" as "unset"/"off" serves something else. Before
+// this walk, 62 of the 90 int keys had no sign check at all — among them
+// recall_check.leg_timeout_ms, recall_check.park_max_ms and
+// scheduler.llmlog_retention_days, where the divergence is a silently
+// different retention or a leg that never times out.
+//
+// Generic on purpose, and for the reason V17 states above: the 16 hand-written
+// sign checks this wave FOLDED into the walk (V9's rate-limit loop, V9b-V9e,
+// rerank.max_docs, V25's seven min:0 rows, V18's sign half) would otherwise
+// have to live on an allowlist maintained in lockstep with every future
+// per-key check, and forgetting one double-reports the same field. The three
+// checks that kept a FLOOR (graph.hop_depth's 1, V25's min:1 rows, V34's
+// [1, DistillMaxConcurrency] range) were narrowed to ">= 0 && < floor"
+// instead: the floor is theirs, the sign is this walk's.
+//
+// 0 is NOT checked — the same limit V17 gives itself. What zero means is per
+// key (the documented kill switch of distill.spend_max_calls, "no blob
+// staging" for pool.blob_stage_max_bytes, "unset" for
+// pool.external_num_ctx_fallback, the package-default sentinel of
+// dream.num_predict), and those readings live in the field docs in config.go,
+// not here.
+//
+// NOT covered, deliberately: the three typHours keys (parseCooldownHours
+// refuses a negative in both branches, load.go — the value never lands) and
+// typFloat, whose members are thresholds in [0,1] with their own range checks
+// (V19, rerank.blend_weight, the graph weights).
+//
+// The type assertion is safe by construction, like V17's: typInt is
+// reflect.TypeOf(int(0)) (registry.go), so every entry carrying it has an int
+// leaf field.
+//
+// Field MUST stay the canonical registry key: build.go's dropOffenders
+// attributes a failing override by Field, and an error it cannot attribute
+// withdraws ALL DB overrides of that generation instead of just the offender.
+func validateIntSigns(c *Config) []Issue {
+	var issues []Issue
+	rv := reflect.ValueOf(c).Elem()
+	for _, e := range registry() {
+		if e.typ != typInt {
+			continue
+		}
+		if n := rv.FieldByIndex(e.path).Interface().(int); n < 0 {
+			issues = append(issues, Issue{Field: e.Key, Severity: SeverityError,
+				Msg: fmt.Sprintf("%s %d must be >= 0 — a negative count renders as a configured value in the settings surface while the consumer reads it as unset or off and serves its own default (what 0 means stays per key)",
+					e.Key, n)})
+		}
+	}
+	return issues
+}
+
 // validateBackendTuples and validateHostURL retired with the chat tuple in β8
 // (design/01 §7 W7), the last of the six they read. What each check said, and
 // where its statement lives now — none of them was dropped without a successor
@@ -786,53 +849,19 @@ func validateQuery(c *Config) []Issue {
 		c.Query.PromptVersion = promptVersionV52
 	}
 
-	// V9 (rate-limit part) — negative limits are range garbage.
-	for _, r := range []struct {
-		key string
-		val int
-	}{
-		{"query.rate_limit_write", c.Query.RateLimitWrite},
-		{"query.rate_limit_read", c.Query.RateLimitRead},
-		{"pool.blob_rate_limit_write", c.Pool.BlobRateLimitWrite},
-	} {
-		if r.val < 0 {
-			issues = append(issues, Issue{Field: r.key, Severity: SeverityError,
-				Msg: fmt.Sprintf("rate limit %d must be >= 0", r.val)})
-		}
-	}
-
-	// V9d (W02-8) — a negative staging cap has no reading at all: 0 already
-	// carries the "no blob staging" meaning, so anything below it would render
-	// as a configured byte count while the runtime treated it as the switch.
-	if c.Pool.BlobStageMaxBytes < 0 {
-		issues = append(issues, Issue{Field: "pool.blob_stage_max_bytes", Severity: SeverityError,
-			Msg: fmt.Sprintf("staged blob payload cap %d must be >= 0 (0 = blob staging disabled)", c.Pool.BlobStageMaxBytes)})
-	}
-
-	// V9e (W02-9) — same shape as V9d, one step further: 0 already means "scan
-	// nothing", so a negative scan cap would present as a configured byte count
-	// while the runtime read it as the switch.
-	if c.Pool.BlobScanMaxBytes < 0 {
-		issues = append(issues, Issue{Field: "pool.blob_scan_max_bytes", Severity: SeverityError,
-			Msg: fmt.Sprintf("blob scan cap %d must be >= 0 (0 = payload scan disabled)", c.Pool.BlobScanMaxBytes)})
-	}
-
-	// V9b (H12) — a negative context-window fallback is range garbage in the
-	// one direction that matters: ChainRuneBudget reads <= 0 as "unset" and
-	// refuses, so a negative value would silently mean "off" while reading as
-	// a configured number in the settings surface.
-	if c.Pool.ExternalNumCtxFallback < 0 {
-		issues = append(issues, Issue{Field: "pool.external_num_ctx_fallback", Severity: SeverityError,
-			Msg: fmt.Sprintf("context window fallback %d must be >= 0 (0 = unset)", c.Pool.ExternalNumCtxFallback)})
-	}
-
-	// V9c (E10-W2) — same shape as V9b for the same reason: the discovery TTL
-	// reads <= 0 as "discovery off", so a negative value would silently mean
-	// off while presenting as a configured duration.
-	if c.Pool.OpenRouterWindowTTL < 0 {
-		issues = append(issues, Issue{Field: "pool.openrouter_window_ttl", Severity: SeverityError,
-			Msg: fmt.Sprintf("endpoint discovery TTL %d must be >= 0 (0 = off)", c.Pool.OpenRouterWindowTTL)})
-	}
+	// V9's rate-limit loop (query.rate_limit_write, query.rate_limit_read,
+	// pool.blob_rate_limit_write) and the four single-key sign checks V9d
+	// (pool.blob_stage_max_bytes), V9e (pool.blob_scan_max_bytes), V9b
+	// (pool.external_num_ctx_fallback) and V9c (pool.openrouter_window_ttl)
+	// were FOLDED into V35 (validateIntSigns) — the generic sign walk over
+	// every int key, for the reason V17 gives for the same fold on durations:
+	// a per-key allowlist next to a generic walk double-reports the field.
+	// None of them said anything the walk does not say; what each said about
+	// its own ZERO (staging off, scan off, "unset", discovery off) is a
+	// statement about the key, not about the check, and now lives in the field
+	// docs of the four PoolConfig fields in config.go, where descriptions.go
+	// mirrors it. The three rate limits said nothing about their zero — the
+	// 0-is-off convention is already in their own field docs.
 
 	return issues
 }
@@ -845,11 +874,15 @@ func validateRerankGraph(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "rerank.blend_weight", Severity: SeverityError,
 			Msg: fmt.Sprintf("blend_weight %g must be in [0,1]", c.Rerank.BlendWeight)})
 	}
-	if c.Rerank.MaxDocs < 0 {
-		issues = append(issues, Issue{Field: "rerank.max_docs", Severity: SeverityError,
-			Msg: fmt.Sprintf("max_docs %d must be >= 0", c.Rerank.MaxDocs)})
-	}
-	if c.Graph.HopDepth < 1 {
+	// rerank.max_docs was a pure sign check and folded into V35
+	// (validateIntSigns) with the other fifteen.
+	//
+	// graph.hop_depth keeps its FLOOR and gives up its sign: 0 hops is a
+	// traversal that never leaves the seed while the surface renders it as a
+	// configured depth, which is this check's own statement and not something
+	// a generic walk can know. The negative belongs to V35, so the condition
+	// is narrowed to ">= 0 && < 1" — one issue per value, never two.
+	if c.Graph.HopDepth >= 0 && c.Graph.HopDepth < 1 {
 		issues = append(issues, Issue{Field: "graph.hop_depth", Severity: SeverityError,
 			Msg: fmt.Sprintf("hop_depth %d must be >= 1", c.Graph.HopDepth)})
 	}
@@ -1024,14 +1057,13 @@ func validateDream(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "dream.temporal_timeout", Severity: SeverityWarn, Msg: msg})
 	}
 
-	// V18 — dream.num_predict sign and floor. The sign half is NOT V17's:
-	// that walk is typed, it visits typDuration fields only, and this key is
-	// a plain token count (typInt). Same failure mode though — a negative
-	// value renders as a configured cap in the settings surface while
-	// DreamOptionsFor serves the package default — so it gets the same ERROR
-	// class, on its own check rather than by widening the duration walk to a
-	// type whose zero and negative values mean something different per key.
-	// 0 stays legal: it IS the documented "package default" sentinel.
+	// V18 — dream.num_predict floor. The SIGN half was folded into V35
+	// (validateIntSigns) when that walk was widened from durations to every
+	// int key: it made exactly the statement V35 makes generically (a negative
+	// renders as a configured cap in the settings surface while DreamOptionsFor
+	// serves the package default), and keeping both would double-report the
+	// field. 0 stays legal here and there: it IS the documented "package
+	// default" sentinel, and V35 does not check zeros.
 	//
 	// The floor half is a WARN in the V16b/V16c spirit, never a clamp. Below
 	// dream.DefaultNumPredict the operator reopens exactly the regression the
@@ -1043,11 +1075,7 @@ func validateDream(c *Config) []Issue {
 	// metadata.cap_hit in the llmlog to say why. It stays a WARN because an
 	// install whose backend answers compactly may knowingly buy latency with
 	// a shorter cap.
-	if n := c.Dream.NumPredict; n < 0 {
-		issues = append(issues, Issue{Field: "dream.num_predict", Severity: SeverityError,
-			Msg: fmt.Sprintf("num_predict %d must be >= 0 — 0 is the package-default sentinel (%d tokens), a negative value renders as a configured cap while the default is served",
-				n, dream.DefaultNumPredict)})
-	} else if n > 0 && n < dream.DefaultNumPredict {
+	if n := c.Dream.NumPredict; n > 0 && n < dream.DefaultNumPredict {
 		issues = append(issues, Issue{Field: "dream.num_predict", Severity: SeverityWarn,
 			Msg: fmt.Sprintf("num_predict %d is below the built-in default of %d tokens — five links in the object-map drift form cost ~500 tokens pretty-printed, so answers can be truncated mid-JSON and are then indistinguishable from malformed output (parse error, transient cooldown, re-pick; metadata.cap_hit is the only signal)",
 				n, dream.DefaultNumPredict)})

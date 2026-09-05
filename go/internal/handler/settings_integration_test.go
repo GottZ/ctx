@@ -272,6 +272,63 @@ func TestSettingsAPI_Integration(t *testing.T) {
 		}
 	})
 
+	// NegativeCountKey422 is V35 at the surface an operator actually touches.
+	// The unit gate in internal/config states the walk; this one states what
+	// the walk MEANS for the API, and it is the half that changed behavior:
+	// each of these three int keys had no sign check at all before, so a PUT
+	// with -1 answered 200, stored the row, served it — and rendered it as a
+	// configured number while the consumer read it as unset and used its own
+	// default. Now it is a 422 with nothing persisted, on the ordinary
+	// dropOffenders path (build.go): the offending override is withdrawn, the
+	// key never reaches appliedFromDB, and the handler refuses.
+	//
+	// The positive leg is not decoration — it is what makes the refusal a
+	// statement about the VALUE rather than about the key: the same key with
+	// an ordinary value is written, read back from the snapshot and removed
+	// again, so a future "the key stopped being writable" regression cannot
+	// hide behind a green 422.
+	t.Run("NegativeCountKey422", func(t *testing.T) {
+		for _, tc := range []struct {
+			key  string
+			good string
+		}{
+			{"recall_check.leg_timeout_ms", "45000"},
+			{"llmlog.max_limit", "150"},
+			{"scheduler.llmlog_retention_days", "30"},
+		} {
+			t.Run(tc.key, func(t *testing.T) {
+				before := auditCount(tc.key)
+				rec := api.do(t, http.MethodPut, "/api/settings/"+tc.key, `{"value":-1}`)
+				if rec.Code != http.StatusUnprocessableEntity {
+					t.Fatalf("PUT %s = -1 status = %d, want 422; body=%s", tc.key, rec.Code, rec.Body.String())
+				}
+				var n int
+				if err := pool.QueryRow(ctx,
+					`SELECT count(*) FROM context_settings WHERE key = $1`, tc.key).Scan(&n); err != nil {
+					t.Fatalf("count: %v", err)
+				}
+				if n != 0 {
+					t.Errorf("422 on %s persisted a row — validation must run BEFORE persist", tc.key)
+				}
+				if got := auditCount(tc.key); got != before {
+					t.Errorf("422 on %s grew the audit trail (%d → %d)", tc.key, before, got)
+				}
+
+				rec = api.do(t, http.MethodPut, "/api/settings/"+tc.key, `{"value":`+tc.good+`}`)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("PUT %s = %s status = %d, want 200; body=%s", tc.key, tc.good, rec.Code, rec.Body.String())
+				}
+				if resp := api.envelope(t, rec); resp["source"] != "db" {
+					t.Errorf("PUT %s source = %v, want db", tc.key, resp["source"])
+				}
+				rec = api.do(t, http.MethodDelete, "/api/settings/"+tc.key, "")
+				if rec.Code != http.StatusOK {
+					t.Fatalf("DELETE %s status = %d body=%s", tc.key, rec.Code, rec.Body.String())
+				}
+			})
+		}
+	})
+
 	t.Run("InvalidValue422BeforePersist", func(t *testing.T) {
 		before := auditCount("rerank.blend_weight")
 		snapBefore := cfgStore.Snapshot()

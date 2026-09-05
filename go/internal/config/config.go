@@ -1203,6 +1203,12 @@ type PoolConfig struct {
 	// buffer into the switch that unbounds it. The rate-limit siblings' 0-is-
 	// off convention does not carry — it governs a counter, not a buffer.
 	//
+	// Because 0 already carries that meaning, a NEGATIVE value has no reading
+	// left at all: it would render as a configured byte count while the runtime
+	// read it as the switch. It is refused (boot abort / 422) by V35, the
+	// generic sign walk over every int key in validate.go — this key had its
+	// own check (V9d, wave W02-8) until that walk absorbed it.
+	//
 	// Default 1 MiB: it holds the ~180 kB of one externalized tool-payload
 	// batch with room to spare, and 1 MiB of base64 in a JSONB column is a
 	// bounded cost per staged write. Settings-only and tenant-overridable like
@@ -1227,7 +1233,9 @@ type PoolConfig struct {
 	// staging), 0 here can only ever mean "do not look" — there is no payload
 	// size at which "scan nothing" protects anything. Negative is range garbage
 	// in the only direction that matters (it would read as a configured byte
-	// count while the runtime treated it as off), so it is a boot abort / 422.
+	// count while the runtime treated it as off), so it is a boot abort / 422 —
+	// filed by V35, the generic sign walk in validate.go, which absorbed this
+	// key's own check (V9e, wave W02-9).
 	//
 	// Default 16 MiB: it covers every payload this surface is built for by
 	// three orders of magnitude (an externalized tool-payload batch is ~180 kB)
@@ -1248,6 +1256,12 @@ type PoolConfig struct {
 	// overflows on every provider below the top. An operator who knows which
 	// floor their routing actually guarantees can declare it here (or, better,
 	// put num_ctx on the row itself, which is per-backend rather than global).
+	//
+	// A NEGATIVE value is refused (boot abort / 422) by V35, the generic sign
+	// walk over every int key in validate.go, which absorbed this key's own
+	// check (V9b, H12). The reason is the consumer's reading: ChainRuneBudget
+	// treats <= 0 as "unset" and refuses, so a negative would silently mean
+	// "no fallback" while the settings surface rendered it as a declared window.
 	//
 	// tenant-overridable like its pool siblings and for the same reason: the
 	// value only ever bounds the tenant's OWN prompts, and a tenant on a
@@ -1270,7 +1284,10 @@ type PoolConfig struct {
 	// 0 = OFF, following the 0-is-off convention of its rate-limit siblings:
 	// discovery stops, and a NULL window falls back to
 	// pool.external_num_ctx_fallback — or refuses, which is the H12 floor this
-	// key can raise but never lower.
+	// key can raise but never lower. Since <= 0 already reads as "discovery
+	// off", a NEGATIVE value would mean off while presenting as a configured
+	// TTL; it is refused (boot abort / 422) by V35, the generic sign walk in
+	// validate.go, which absorbed this key's own check (V9c, wave E10-W2).
 	//
 	// tenant-overridable like its pool siblings: the value only affects how
 	// often the tenant's OWN requests re-read a public metadata route.
