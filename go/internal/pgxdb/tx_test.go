@@ -218,3 +218,136 @@ func TestWriteOptsReichtDieOptionenDurch(t *testing.T) {
 		t.Fatalf("TxOptions = %+v, erwartet %+v", db.gotOpts, opts)
 	}
 }
+
+// TestErrRollbackVerlaesstDieTxUnverpacktUndOhneCommit ist die Zusage des
+// Sentinels in einem Test: kein Commit, genau ein Rollback — und der Fehler
+// kommt IDENTISCH zurück. Wird er geschluckt (Rückgabe nil nach dem
+// Rollback), fällt dieser Test, weil „nil" sonst zwei Dinge hieße.
+func TestErrRollbackVerlaesstDieTxUnverpacktUndOhneCommit(t *testing.T) {
+	db := newFake()
+	err := Write(context.Background(), db, At("dream"), func(pgx.Tx) error { return ErrRollback })
+	if !errors.Is(err, ErrRollback) {
+		t.Fatalf("errors.Is(err, ErrRollback) = false, Fehler = %v", err)
+	}
+	if err != ErrRollback { //nolint:errorlint // Identität ist genau die Zusage: kein %w, kein Schlucken
+		t.Fatalf("Fehler = %v (%T), erwartet exakt ErrRollback", err, err)
+	}
+	if db.tx.commits != 0 {
+		t.Fatalf("commits = %d, erwartet 0 — ErrRollback darf nie committen", db.tx.commits)
+	}
+	if db.tx.rollbacks != 1 {
+		t.Fatalf("rollbacks = %d, erwartet 1", db.tx.rollbacks)
+	}
+}
+
+// TestProbeCommittetNieUndLiefertNil pinnt die Form, an der die Rollback-only
+// Sonden hängen: fn läuft, danach rollt der Helfer zurück — auch wenn nichts
+// schiefging. Ein versehentlicher Commit färbt genau hier rot.
+func TestProbeCommittetNieUndLiefertNil(t *testing.T) {
+	db := newFake()
+	laeufe := 0
+	err := Probe(context.Background(), db, "begin guc probe tx", func(pgx.Tx) error {
+		laeufe++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Probe lieferte %v, erwartet nil", err)
+	}
+	if laeufe != 1 {
+		t.Fatalf("fn lief %dx, erwartet genau 1x", laeufe)
+	}
+	if db.tx.commits != 0 {
+		t.Fatalf("commits = %d, erwartet 0 — Probe committet nie", db.tx.commits)
+	}
+	if db.tx.rollbacks != 1 {
+		t.Fatalf("rollbacks = %d, erwartet 1", db.tx.rollbacks)
+	}
+	if db.gotOpts != (pgx.TxOptions{}) {
+		t.Fatalf("Probe TxOptions = %+v, erwartet den Nullwert", db.gotOpts)
+	}
+}
+
+func TestProbeReichtDenFnFehlerUnveraendertDurch(t *testing.T) {
+	db := newFake()
+	err := Probe(context.Background(), db, "begin guc probe tx", func(pgx.Tx) error { return errBoom })
+	if err != errBoom { //nolint:errorlint // Identität ist genau die Zusage
+		t.Fatalf("Fehler = %v (%T), erwartet exakt errBoom — kein %%w-Wrapping um fn", err, err)
+	}
+	if db.tx.commits != 0 {
+		t.Fatal("Probe darf auch im Fehlerfall nicht committen")
+	}
+	if db.tx.rollbacks != 1 {
+		t.Fatalf("rollbacks = %d, erwartet 1", db.tx.rollbacks)
+	}
+}
+
+// TestProbeBeginFehlerTraegtDenAufruferText hält den Wortlaut, mit dem
+// schemacontract seinen Begin-Fehler beschriftet ("begin guc probe tx: %w").
+func TestProbeBeginFehlerTraegtDenAufruferText(t *testing.T) {
+	db := newFake()
+	db.beginErr = errBoom
+	err := Probe(context.Background(), db, "begin guc probe tx", func(pgx.Tx) error {
+		t.Fatal("fn darf bei einem Begin-Fehler nicht laufen")
+		return nil
+	})
+	if err == nil || err.Error() != "begin guc probe tx: boom" {
+		t.Fatalf("Fehlertext = %v, erwartet \"begin guc probe tx: boom\"", err)
+	}
+	if !errors.Is(err, errBoom) {
+		t.Fatal("errors.Is über die Verpackung hinweg gebrochen")
+	}
+}
+
+func TestProbeLeeresBeginFeldReichtUnverpacktDurch(t *testing.T) {
+	db := newFake()
+	db.beginErr = errBoom
+	err := Probe(context.Background(), db, "", func(pgx.Tx) error { return nil })
+	if err != errBoom { //nolint:errorlint // Identität ist genau die Zusage
+		t.Fatalf("Fehler = %v (%T), erwartet exakt errBoom", err, err)
+	}
+}
+
+// TestProbeRollbacktAufEinemLebendenContext ist das Gegenstück zu
+// TestRollbackLaeuftAufEinemLebendenContext für die Sonde: dieselbe
+// Rollback-Politik, weil beide Klammern denselben Ausgang teilen.
+func TestProbeRollbacktAufEinemLebendenContext(t *testing.T) {
+	db := newFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	err := Probe(ctx, db, "begin guc probe tx", func(pgx.Tx) error {
+		cancel()
+		return errBoom
+	})
+	if err != errBoom { //nolint:errorlint // Identität ist genau die Zusage
+		t.Fatalf("Fehler = %v, erwartet exakt errBoom", err)
+	}
+	if db.tx.rollbacks != 1 {
+		t.Fatalf("rollbacks = %d, erwartet 1", db.tx.rollbacks)
+	}
+	if db.tx.rollbackErr != nil {
+		t.Fatalf("Rollback fuhr auf einem toten Context: %v", db.tx.rollbackErr)
+	}
+	if !db.tx.rollbackHadFrist {
+		t.Fatal("Rollback-Context ohne Frist — rollbackGrace greift nicht")
+	}
+	if rest := time.Until(db.tx.rollbackDeadline); rest <= 0 || rest > rollbackGrace {
+		t.Fatalf("Rollback-Frist = %v, erwartet (0, %v]", rest, rollbackGrace)
+	}
+}
+
+func TestPanikInProbeRollbacktUndPropagiert(t *testing.T) {
+	db := newFake()
+	defer func() {
+		r := recover()
+		if r != "boom-panic" {
+			t.Fatalf("recover() = %v, erwartet \"boom-panic\" — die Panik muss unverändert durch", r)
+		}
+		if db.tx.commits != 0 {
+			t.Fatal("nach einer Panik darf nicht committet werden")
+		}
+		if db.tx.rollbacks != 1 {
+			t.Fatalf("rollbacks = %d, erwartet 1", db.tx.rollbacks)
+		}
+	}()
+	_ = Probe(context.Background(), db, "begin guc probe tx", func(pgx.Tx) error { panic("boom-panic") })
+	t.Fatal("die Panik wurde verschluckt")
+}
