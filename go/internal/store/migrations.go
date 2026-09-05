@@ -13,8 +13,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/migrations"
 )
 
@@ -129,30 +131,37 @@ func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) 
 			return fmt.Errorf("reading migration %s: %w", m.filename, err)
 		}
 
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("beginning transaction for migration %d: %w", m.version, err)
-		}
+		// One migration, one transaction, one commit exit — the shape
+		// pgxdb.Write brackets. The stage labels carry the version exactly as
+		// the hand-written fmt.Errorf pair did (the helper appends the ": %w");
+		// the body's own two errors travel back unwrapped. The rollback that
+		// stood before each of those returns is the bracket's deferred one now,
+		// which also covers what the explicit calls never did (failed commit,
+		// panic). It runs detached from ctx, which buys nothing for a SIGTERM
+		// mid-statement (cmd/ctxd/main.go:353 NotifyContext, :370): pgx's deadline
+		// watcher has closed the connection before the rollback runs, on the old
+		// form and this one alike — and the process exits right after anyway.
+		if err := pgxdb.Write(ctx, pool, pgxdb.Stages{
+			Begin:  fmt.Sprintf("beginning transaction for migration %d", m.version),
+			Commit: fmt.Sprintf("committing migration %d", m.version),
+		}, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, string(sql)); err != nil {
+				return fmt.Errorf("executing migration %d (%s): %w", m.version, m.filename, err)
+			}
 
-		if _, err := tx.Exec(ctx, string(sql)); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("executing migration %d (%s): %w", m.version, m.filename, err)
-		}
-
-		// ON CONFLICT DO NOTHING tolerates migrations that record themselves
-		// in the file body (M031+ pattern). Without it, the file's INSERT and
-		// this INSERT collide on the version primary key.
-		sum := sha256.Sum256(sql)
-		if _, err := tx.Exec(ctx,
-			"INSERT INTO _migrations (version, filename, checksum) VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
-			m.version, m.filename, hex.EncodeToString(sum[:]),
-		); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("recording migration %d: %w", m.version, err)
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("committing migration %d: %w", m.version, err)
+			// ON CONFLICT DO NOTHING tolerates migrations that record
+			// themselves in the file body (M031+ pattern). Without it, the
+			// file's INSERT and this INSERT collide on the version primary key.
+			sum := sha256.Sum256(sql)
+			if _, err := tx.Exec(ctx,
+				"INSERT INTO _migrations (version, filename, checksum) VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
+				m.version, m.filename, hex.EncodeToString(sum[:]),
+			); err != nil {
+				return fmt.Errorf("recording migration %d: %w", m.version, err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 
 		slog.Info("migration applied", "version", m.version, "file", m.filename)
