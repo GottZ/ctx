@@ -3,6 +3,7 @@ package dream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -105,6 +106,14 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 	return nil
 }
 
+// errUnregisteredSourceType leaves the link transaction WITHOUT committing
+// for the one exit that is not an error to the caller: an unregistered
+// source type rejects the whole batch fail-closed and returns (0, nil).
+// pgxdb.Write commits on a nil return, so the exit needs an error to travel
+// on; it is translated back to (0, nil) directly behind the closure.
+// writelinks_test.go:476 is the probe: that test sets NO commit expectation.
+var errUnregisteredSourceType = errors.New("dream: source type not registered")
+
 // WriteLinks persists dream links to the database within a transaction.
 // Enforces same-scope rule: only creates links between blocks of the same scope.
 // Checks is_archived on target blocks (Race condition mitigation V6).
@@ -151,177 +160,180 @@ func WriteLinks(ctx context.Context, pool interface {
 		return 0, fmt.Errorf("dream: write links: nil block-type policy set (registry not wired?)")
 	}
 
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return 0, fmt.Errorf("dream: begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	// Fetch source block metadata for structural checks. updated_at is no
-	// longer consulted (Welle 46: supersedes uses created_at, causal uses
-	// created_at) — kept in the SELECT for column-stability but discarded.
-	var srcCategory string
-	var srcUpdatedAt, srcCreatedAt time.Time
-	var srcTitle, srcTypeName string
-	_ = tx.QueryRow(ctx,
-		`SELECT category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = $1`,
-		sourceID,
-	).Scan(&srcCategory, &srcUpdatedAt, &srcCreatedAt, &srcTitle, &srcTypeName)
-	_ = srcUpdatedAt
-
-	// WF T8 (§4.4 #20): resolve the SOURCE type's link-class policy. An
-	// unregistered source type (incl. a vanished source row — the ignored
-	// scan above leaves "") is fail-closed: no class allowed, whole batch
-	// rejected loudly. nil/empty link_classes = all classes allowed.
-	srcPolicy, srcKnown := set.Resolve(srcTypeName)
-	if !srcKnown {
-		slog.Warn("dream: write links rejected — source type not registered (fail-closed)",
-			"source", sourceID, "type_name", srcTypeName)
-		return 0, nil
-	}
-	var allowedClasses map[string]bool
-	if len(srcPolicy.Dream.LinkClasses) > 0 {
-		allowedClasses = make(map[string]bool, len(srcPolicy.Dream.LinkClasses))
-		for _, c := range srcPolicy.Dream.LinkClasses {
-			allowedClasses[c] = true
-		}
-	}
-
 	written := 0
-	keptTargets := make([]string, 0, len(links))
-	for _, link := range links {
-		// Fetch target block scope + archived status + metadata for structural checks.
-		// updated_at is no longer consulted (Welle 46: supersedes/causal use
+	err := pgxdb.Write(ctx, pool, pgxdb.Stages{
+		Begin:  "dream: begin tx",
+		Commit: "dream: commit links",
+	}, func(tx pgx.Tx) error {
+		// Fetch source block metadata for structural checks. updated_at is no
+		// longer consulted (Welle 46: supersedes uses created_at, causal uses
 		// created_at) — kept in the SELECT for column-stability but discarded.
-		var targetScope string
-		var targetArchived bool
-		var targetQuality float64
-		var targetCategory, targetTypeName string
-		var targetUpdatedAt, targetCreatedAt time.Time
-		var targetTitle string
-		err := tx.QueryRow(ctx,
-			`SELECT scope, is_archived, quality_score, category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = $1`,
-			link.TargetID,
-		).Scan(&targetScope, &targetArchived, &targetQuality, &targetCategory, &targetUpdatedAt, &targetCreatedAt, &targetTitle, &targetTypeName)
-		if err != nil {
-			slog.Warn("dream: target block not found", "target_id", link.TargetID)
-			continue
-		}
-		_ = targetUpdatedAt
+		var srcCategory string
+		var srcUpdatedAt, srcCreatedAt time.Time
+		var srcTitle, srcTypeName string
+		_ = tx.QueryRow(ctx,
+			`SELECT category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = $1`,
+			sourceID,
+		).Scan(&srcCategory, &srcUpdatedAt, &srcCreatedAt, &srcTitle, &srcTypeName)
+		_ = srcUpdatedAt
 
-		// V5/V6: scope + archived gate.
-		if ok, reason := acceptScopeAndArchived(targetScope, sourceScope, targetArchived); !ok {
-			slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason)
-			continue
+		// WF T8 (§4.4 #20): resolve the SOURCE type's link-class policy. An
+		// unregistered source type (incl. a vanished source row — the ignored
+		// scan above leaves "") is fail-closed: no class allowed, whole batch
+		// rejected loudly. nil/empty link_classes = all classes allowed.
+		srcPolicy, srcKnown := set.Resolve(srcTypeName)
+		if !srcKnown {
+			slog.Warn("dream: write links rejected — source type not registered (fail-closed)",
+				"source", sourceID, "type_name", srcTypeName)
+			return errUnregisteredSourceType
 		}
-
-		// WF T8 target gate: dream.linkable acts on the target side too
-		// (§3.3 R1). Unknown type = fail-closed (§5.1).
-		if tp, known := set.Resolve(targetTypeName); !known || !tp.Dream.Linkable {
-			slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID,
-				"reason", "target type not dream-linkable", "type_name", targetTypeName)
-			continue
-		}
-
-		// V10: factual same-category coerce → topical.
-		if newRel := coerceCategoryFactual(link.Relationship, srcCategory, targetCategory); newRel != link.Relationship {
-			slog.Debug("dream: factual coerced to topical (same-category sibling)",
-				"category", srcCategory, "src", sourceID, "tgt", link.TargetID)
-			link.Relationship = newRel
-		}
-
-		// WF T8 link-class gate (post-coerce: the class as persisted): the
-		// source type's dream.link_classes must carry the relationship.
-		if allowedClasses != nil && !allowedClasses[link.Relationship] {
-			slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID,
-				"reason", "link class not allowed for source type", "class", link.Relationship)
-			continue
-		}
-
-		// V8 / Welle 46 (2026-05-22): supersedes structural pre-filter (same cat +
-		// src NEWER than tgt by created_at + title sim). Direction inverted from
-		// pre-Welle-46 ("src older") based on Sub-Agent 2 Semantic-Stichprobe:
-		// natural-language "A supersedes B" requires A to be the authoritative
-		// replacement (newer). Migration 043 swapped the persisted 15 inverted
-		// records; this filter prevents new ones.
-		if link.Relationship == "supersedes" {
-			var sim float64
-			_ = tx.QueryRow(ctx, `SELECT similarity($1, $2)`, srcTitle, targetTitle).Scan(&sim)
-			if ok, reason := acceptSupersedes(srcCategory, targetCategory, srcCreatedAt, targetCreatedAt, sim); !ok {
-				slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason, "similarity", sim)
-				continue
+		var allowedClasses map[string]bool
+		if len(srcPolicy.Dream.LinkClasses) > 0 {
+			allowedClasses = make(map[string]bool, len(srcPolicy.Dream.LinkClasses))
+			for _, c := range srcPolicy.Dream.LinkClasses {
+				allowedClasses[c] = true
 			}
 		}
 
-		// V9: causal predates check (created_at).
-		if link.Relationship == "causal" {
-			if ok, reason := acceptCausal(srcCreatedAt, targetCreatedAt); !ok {
-				slog.Debug("dream: causal rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason)
+		keptTargets := make([]string, 0, len(links))
+		for _, link := range links {
+			// Fetch target block scope + archived status + metadata for structural checks.
+			// updated_at is no longer consulted (Welle 46: supersedes/causal use
+			// created_at) — kept in the SELECT for column-stability but discarded.
+			var targetScope string
+			var targetArchived bool
+			var targetQuality float64
+			var targetCategory, targetTypeName string
+			var targetUpdatedAt, targetCreatedAt time.Time
+			var targetTitle string
+			err := tx.QueryRow(ctx,
+				`SELECT scope, is_archived, quality_score, category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = $1`,
+				link.TargetID,
+			).Scan(&targetScope, &targetArchived, &targetQuality, &targetCategory, &targetUpdatedAt, &targetCreatedAt, &targetTitle, &targetTypeName)
+			if err != nil {
+				slog.Warn("dream: target block not found", "target_id", link.TargetID)
 				continue
 			}
-		}
+			_ = targetUpdatedAt
 
-		// Weighted confidence: relationship_strength × source_quality × target_quality.
-		// Persisted as `confidence` for downstream ranking signals.
-		// Gates operate on `raw_confidence` (LLM self-assessment).
-		weightedConfidence := link.Confidence * sourceQuality * targetQuality
-		if math.IsNaN(weightedConfidence) || math.IsInf(weightedConfidence, 0) {
-			weightedConfidence = 0.5
-		}
+			// V5/V6: scope + archived gate.
+			if ok, reason := acceptScopeAndArchived(targetScope, sourceScope, targetArchived); !ok {
+				slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason)
+				continue
+			}
 
-		_, err = tx.Exec(ctx,
-			`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, raw_confidence, dream_version, scope, metadata)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb)
-			ON CONFLICT (source_block_id, target_block_id) DO UPDATE SET
-				relationship = EXCLUDED.relationship,
-				confidence = EXCLUDED.confidence,
-				raw_confidence = EXCLUDED.raw_confidence,
-				dream_version = EXCLUDED.dream_version,
-				metadata = EXCLUDED.metadata,
-				created_at = now()`,
-			sourceID, link.TargetID, link.Relationship, weightedConfidence, link.Confidence, Version, sourceScope,
-			`{}`,
-		)
-		if err != nil {
-			slog.Warn("dream: write link failed", "source", sourceID, "target", link.TargetID, "error", err)
-			break // TX is in failed state after PG error — cannot continue.
-		}
-		written++
-		keptTargets = append(keptTargets, link.TargetID)
+			// WF T8 target gate: dream.linkable acts on the target side too
+			// (§3.3 R1). Unknown type = fail-closed (§5.1).
+			if tp, known := set.Resolve(targetTypeName); !known || !tp.Dream.Linkable {
+				slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID,
+					"reason", "target type not dream-linkable", "type_name", targetTypeName)
+				continue
+			}
 
-		// ApplySupersedes: mark target block as snapshot — source supersedes target.
-		// Welle 46 Convention-Switch (2026-05-22): "A supersedes B" → A=source=newer
-		// authoritative, B=target=outdated. The TARGET is the block to retire as
-		// snapshot, with superseded_by pointing to the source (the replacement).
-		// Only apply at high confidence to prevent false-positive snapshot marking.
-		if link.Relationship == "supersedes" && weightedConfidence >= 0.7 {
+			// V10: factual same-category coerce → topical.
+			if newRel := coerceCategoryFactual(link.Relationship, srcCategory, targetCategory); newRel != link.Relationship {
+				slog.Debug("dream: factual coerced to topical (same-category sibling)",
+					"category", srcCategory, "src", sourceID, "tgt", link.TargetID)
+				link.Relationship = newRel
+			}
+
+			// WF T8 link-class gate (post-coerce: the class as persisted): the
+			// source type's dream.link_classes must carry the relationship.
+			if allowedClasses != nil && !allowedClasses[link.Relationship] {
+				slog.Debug("dream: link rejected", "src", sourceID, "tgt", link.TargetID,
+					"reason", "link class not allowed for source type", "class", link.Relationship)
+				continue
+			}
+
+			// V8 / Welle 46 (2026-05-22): supersedes structural pre-filter (same cat +
+			// src NEWER than tgt by created_at + title sim). Direction inverted from
+			// pre-Welle-46 ("src older") based on Sub-Agent 2 Semantic-Stichprobe:
+			// natural-language "A supersedes B" requires A to be the authoritative
+			// replacement (newer). Migration 043 swapped the persisted 15 inverted
+			// records; this filter prevents new ones.
+			if link.Relationship == "supersedes" {
+				var sim float64
+				_ = tx.QueryRow(ctx, `SELECT similarity($1, $2)`, srcTitle, targetTitle).Scan(&sim)
+				if ok, reason := acceptSupersedes(srcCategory, targetCategory, srcCreatedAt, targetCreatedAt, sim); !ok {
+					slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason, "similarity", sim)
+					continue
+				}
+			}
+
+			// V9: causal predates check (created_at).
+			if link.Relationship == "causal" {
+				if ok, reason := acceptCausal(srcCreatedAt, targetCreatedAt); !ok {
+					slog.Debug("dream: causal rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason)
+					continue
+				}
+			}
+
+			// Weighted confidence: relationship_strength × source_quality × target_quality.
+			// Persisted as `confidence` for downstream ranking signals.
+			// Gates operate on `raw_confidence` (LLM self-assessment).
+			weightedConfidence := link.Confidence * sourceQuality * targetQuality
+			if math.IsNaN(weightedConfidence) || math.IsInf(weightedConfidence, 0) {
+				weightedConfidence = 0.5
+			}
+
 			_, err = tx.Exec(ctx,
-				`UPDATE context_blocks SET lifecycle_state = 'snapshot', superseded_by = $1::uuid
-				WHERE id = $2::uuid AND lifecycle_state != 'snapshot'`,
-				sourceID, link.TargetID,
+				`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, raw_confidence, dream_version, scope, metadata)
+				VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb)
+				ON CONFLICT (source_block_id, target_block_id) DO UPDATE SET
+					relationship = EXCLUDED.relationship,
+					confidence = EXCLUDED.confidence,
+					raw_confidence = EXCLUDED.raw_confidence,
+					dream_version = EXCLUDED.dream_version,
+					metadata = EXCLUDED.metadata,
+					created_at = now()`,
+				sourceID, link.TargetID, link.Relationship, weightedConfidence, link.Confidence, Version, sourceScope,
+				`{}`,
 			)
 			if err != nil {
-				slog.Warn("dream: apply supersedes failed", "source", sourceID, "target", link.TargetID, "error", err)
-				break
+				slog.Warn("dream: write link failed", "source", sourceID, "target", link.TargetID, "error", err)
+				break // TX is in failed state after PG error — cannot continue.
 			}
-			slog.Info("dream: marked target block as snapshot",
-				"target_block_id", link.TargetID,
-				"superseded_by_source", sourceID,
-			)
-		}
-	}
+			written++
+			keptTargets = append(keptTargets, link.TargetID)
 
-	// Replace-Semantik: only when at least one link was successfully written.
-	// 0-written cycles preserve old links (LLM stochastic empty/all-filtered must
-	// not be destructive — see Pessimist M1).
-	if written > 0 {
-		if err := replaceStaleLinks(ctx, tx, sourceID, keptTargets); err != nil {
-			return 0, err
+			// ApplySupersedes: mark target block as snapshot — source supersedes target.
+			// Welle 46 Convention-Switch (2026-05-22): "A supersedes B" → A=source=newer
+			// authoritative, B=target=outdated. The TARGET is the block to retire as
+			// snapshot, with superseded_by pointing to the source (the replacement).
+			// Only apply at high confidence to prevent false-positive snapshot marking.
+			if link.Relationship == "supersedes" && weightedConfidence >= 0.7 {
+				_, err = tx.Exec(ctx,
+					`UPDATE context_blocks SET lifecycle_state = 'snapshot', superseded_by = $1::uuid
+					WHERE id = $2::uuid AND lifecycle_state != 'snapshot'`,
+					sourceID, link.TargetID,
+				)
+				if err != nil {
+					slog.Warn("dream: apply supersedes failed", "source", sourceID, "target", link.TargetID, "error", err)
+					break
+				}
+				slog.Info("dream: marked target block as snapshot",
+					"target_block_id", link.TargetID,
+					"superseded_by_source", sourceID,
+				)
+			}
 		}
-	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("dream: commit links: %w", err)
+		// Replace-Semantik: only when at least one link was successfully written.
+		// 0-written cycles preserve old links (LLM stochastic empty/all-filtered must
+		// not be destructive — see Pessimist M1).
+		if written > 0 {
+			if err := replaceStaleLinks(ctx, tx, sourceID, keptTargets); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if errors.Is(err, errUnregisteredSourceType) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
 	}
 
 	// Audit log outside TX — failure here doesn't roll back links.

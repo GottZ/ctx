@@ -13,9 +13,11 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/util"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -459,34 +461,30 @@ func writeReportSourceLinks(ctx context.Context, pool *pgxpool.Pool, set *blockt
 		return 0, nil
 	}
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	written := 0
-	for _, src := range sources {
-		if src.ID == reportID {
-			continue
+	if err := pgxdb.Write(ctx, pool, pgxdb.Stages{Begin: "begin", Commit: "commit"}, func(tx pgx.Tx) error {
+		for _, src := range sources {
+			if src.ID == reportID {
+				continue
+			}
+			err := store.PutStructuralLink(ctx, tx, store.StructuralLink{
+				SourceID:  reportID,
+				TargetID:  src.ID,
+				LinkClass: "references",
+				Origin:    "system",
+				Metadata:  map[string]any{"source": "dream-synthesis"},
+			}, []string{scope})
+			if errors.Is(err, store.ErrLinkScopeViolation) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			written++
 		}
-		err := store.PutStructuralLink(ctx, tx, store.StructuralLink{
-			SourceID:  reportID,
-			TargetID:  src.ID,
-			LinkClass: "references",
-			Origin:    "system",
-			Metadata:  map[string]any{"source": "dream-synthesis"},
-		}, []string{scope})
-		if errors.Is(err, store.ErrLinkScopeViolation) {
-			continue
-		}
-		if err != nil {
-			return 0, err
-		}
-		written++
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
+		return nil
+	}); err != nil {
+		return 0, err
 	}
 	return written, nil
 }
