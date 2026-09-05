@@ -8,7 +8,7 @@
 // scope-injection class): a server-admin writes the shipped '_global'
 // namespace, a tenant-admin writes ONLY its own tenant namespace. This is the
 // backendWriteScopes precedent named in §9.5(c) — the same two-write-worlds
-// split writeScope() applies to settings/secrets (tenant_scope.go:20-28).
+// split mutationScope() applies to settings/secrets (tenant_scope.go:20-28).
 // A tenant-admin that targets a '_global' type is refused 403, NOT 404: global
 // types are member-visible via GET /api/types, so there is no existence oracle
 // to protect — the honest "operator-only" answer is correct.
@@ -255,7 +255,7 @@ func (h *TypesHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		internalTypesError(w, ctx, "types: put read body", err)
+		internalError(w, ctx, "types: put read body", err)
 		return
 	}
 	var p typeWritePayload
@@ -272,7 +272,7 @@ func (h *TypesHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 
 	cur, err := store.GetBlockType(ctx, h.pool, name, typeVisibleScopes(ar))
 	if err != nil {
-		internalTypesError(w, ctx, "types: put lookup", err)
+		internalError(w, ctx, "types: put lookup", err)
 		return
 	}
 	if cur != nil {
@@ -306,7 +306,7 @@ func (h *TypesHandler) putCreate(w http.ResponseWriter, r *http.Request, ar *aut
 	// whenever its TABLE row is absent (HandlePut resolves against the table,
 	// the registry resolves off the compiled-in floor too).
 	if msg, err := overlayWriteViolation(ctx, h.pool, name, ws, pol); err != nil {
-		internalTypesError(w, ctx, "types: put-create overlay base", err)
+		internalError(w, ctx, "types: put-create overlay base", err)
 		return
 	} else if msg != "" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
@@ -361,7 +361,7 @@ func (h *TypesHandler) putUpdate(w http.ResponseWriter, r *http.Request, ar *aut
 		// D6 overlay gate on the row's OWN scope: this is the path an existing
 		// tenant row takes, whatever put it there.
 		if msg, err := overlayWriteViolation(ctx, h.pool, cur.Name, cur.Scope, pol); err != nil {
-			internalTypesError(w, ctx, "types: put-update overlay base", err)
+			internalError(w, ctx, "types: put-update overlay base", err)
 			return
 		} else if msg != "" {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
@@ -399,7 +399,7 @@ func (h *TypesHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 	cur, err := store.GetBlockType(ctx, h.pool, name, typeVisibleScopes(ar))
 	if err != nil {
-		internalTypesError(w, ctx, "types: delete lookup", err)
+		internalError(w, ctx, "types: delete lookup", err)
 		return
 	}
 	if cur == nil {

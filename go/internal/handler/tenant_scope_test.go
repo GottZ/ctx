@@ -13,17 +13,17 @@ import (
 // is a cross-tenant write-path bug, so it is pinned independently of the
 // integration probes.
 
-func TestWriteScope(t *testing.T) {
+func TestMutationScope(t *testing.T) {
 	op := &auth.AuthResult{IsValid: true, IsAdmin: true, HomeScope: "opscope"}
-	if got := writeScope(op); got != store.GlobalScope {
-		t.Errorf("operator writeScope = %q, want %q", got, store.GlobalScope)
+	if got := mutationScope(op); got != store.GlobalScope {
+		t.Errorf("operator mutationScope = %q, want %q", got, store.GlobalScope)
 	}
 	ten := &auth.AuthResult{IsValid: true, HomeScope: "tenanta", TenantID: "tid-a", TenantRole: auth.RoleAdmin}
-	if got := writeScope(ten); got != "tenanta" {
-		t.Errorf("tenant-admin writeScope = %q, want %q (its OWN scope, never _global)", got, "tenanta")
+	if got := mutationScope(ten); got != "tenanta" {
+		t.Errorf("tenant-admin mutationScope = %q, want %q (its OWN scope, never _global)", got, "tenanta")
 	}
-	if got := writeScope(nil); got != "" {
-		t.Errorf("nil writeScope = %q, want \"\" (fail-closed)", got)
+	if got := mutationScope(nil); got != "" {
+		t.Errorf("nil mutationScope = %q, want \"\" (fail-closed)", got)
 	}
 }
 

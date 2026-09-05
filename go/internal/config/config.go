@@ -1381,7 +1381,7 @@ type TenantConfig struct {
 	// neighbour's row. It is also the only class that WORKS — a global-only key
 	// has its tenant-scope row dropped before config.Build, so it could never
 	// carry a per-tenant answer, and a server-admin PUT lands at _global
-	// (handler.writeScope) for every tenant at once.
+	// (handler.mutationScope) for every tenant at once.
 	//
 	// Setting it at _global is allowed and means exactly what it says: the
 	// OPERATOR decided against E4 for EVERY tenant on this server, present and

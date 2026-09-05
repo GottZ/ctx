@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/dispatch"
-	"github.com/GottZ/ctx/internal/embedcache"
-	"github.com/GottZ/ctx/internal/llm"
 )
 
 // Rejection → 429 mapping helpers (MW8, D3-W4, DECISIONS amendment B1).
@@ -32,17 +30,17 @@ func rejectionBody() map[string]any {
 }
 
 // admissionHost extracts the rejected target origin from a chain-walk
-// AdmissionError (the llm form on the synthesis/rerank path, the embedcache
-// mirror on the embed path). "" when the error carries no host ⇒ the caller
-// omits the header rather than guessing.
+// AdmissionError — the synthesis/rerank path and the embed path alike. ONE
+// branch, because llm.AdmissionError and embedcache.AdmissionError are type
+// ALIASES of dispatch.AdmissionError (llm/chain.go, embedcache/embedcache.go)
+// and not distinct types: MW11's "one type for both wire families" is what
+// makes a second branch unreachable rather than merely redundant.
+// "" when the error carries no host ⇒ the caller omits the header rather than
+// guessing.
 func admissionHost(err error) string {
-	var lae *llm.AdmissionError
-	if errors.As(err, &lae) {
-		return lae.Host
-	}
-	var eae *embedcache.AdmissionError
-	if errors.As(err, &eae) {
-		return eae.Host
+	var ae *dispatch.AdmissionError
+	if errors.As(err, &ae) {
+		return ae.Host
 	}
 	return ""
 }

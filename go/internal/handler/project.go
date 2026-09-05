@@ -21,10 +21,8 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -105,7 +103,7 @@ func (h *ProjectHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	identity := strings.TrimSpace(r.URL.Query().Get("identity"))
 	rows, err := store.ListProjects(ctx, h.pool, ar.ReadScopes, identity)
 	if err != nil {
-		internalProjectError(w, ctx, "project: list error", err)
+		internalError(w, ctx, "project: list error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "projects": rows})
@@ -119,7 +117,7 @@ func (h *ProjectHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(ctx)
 	row, err := store.GetProjectByID(ctx, h.pool, chi.URLParam(r, "id"))
 	if err != nil {
-		internalProjectError(w, ctx, "project: get error", err)
+		internalError(w, ctx, "project: get error", err)
 		return
 	}
 	if row == nil || !slices.Contains(ar.ReadScopes, row.Scope) {
@@ -142,7 +140,7 @@ type projectCreateRequest struct {
 // HandleCreate implements POST /api/project — the compound create. Binding-tenant
 // resolution mirrors handleScopeCreate/resolveKeyMintTenant: a tenant-admin is
 // ALWAYS bound to its own ar.TenantID (a tenant_id field ⇒ 403, no self-escalation);
-// a server-admin MUST pass tenant_id (its writeScope is _global, §4.2). The scope
+// a server-admin MUST pass tenant_id (its mutationScope is _global, §4.2). The scope
 // is server-built from the DB slug (no injection), TenantLimits is loaded
 // FAIL-CLOSED (a lookup error is 500, never silent unlimited — the quota-bypass
 // gate), and the scope-assign + register-insert are ONE tx in store.CreateProject.
@@ -186,7 +184,7 @@ func (h *ProjectHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 			return
 		}
-		internalProjectError(w, ctx, "project: get tenant error", err)
+		internalError(w, ctx, "project: get tenant error", err)
 		return
 	}
 	if !slugPattern.MatchString(tn.Slug) {
@@ -237,7 +235,7 @@ func (h *ProjectHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrTenantNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		default:
-			internalProjectError(w, ctx, "project: create error", err)
+			internalError(w, ctx, "project: create error", err)
 		}
 		return
 	}
@@ -291,7 +289,7 @@ func (h *ProjectHandler) HandlePatch(w http.ResponseWriter, r *http.Request) {
 	// exists in another tenant).
 	row, err := store.GetProjectByID(ctx, h.pool, chi.URLParam(r, "id"))
 	if err != nil {
-		internalProjectError(w, ctx, "project: patch load error", err)
+		internalError(w, ctx, "project: patch load error", err)
 		return
 	}
 	if row == nil || !ownsProject(ar, row) {
@@ -318,7 +316,7 @@ func (h *ProjectHandler) HandlePatch(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := store.UpdateProject(ctx, h.pool, row.ID, req.DisplayName, req.Forge)
 	if err != nil {
-		internalProjectError(w, ctx, "project: patch error", err)
+		internalError(w, ctx, "project: patch error", err)
 		return
 	}
 	if updated == nil {
@@ -337,7 +335,7 @@ func (h *ProjectHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(ctx)
 	row, err := store.GetProjectByID(ctx, h.pool, chi.URLParam(r, "id"))
 	if err != nil {
-		internalProjectError(w, ctx, "project: delete load error", err)
+		internalError(w, ctx, "project: delete load error", err)
 		return
 	}
 	if row == nil || !ownsProject(ar, row) {
@@ -345,7 +343,7 @@ func (h *ProjectHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := store.DeleteProject(ctx, h.pool, row.ID); err != nil {
-		internalProjectError(w, ctx, "project: delete error", err)
+		internalError(w, ctx, "project: delete error", err)
 		return
 	}
 	// Drop the deleted scope→project mapping from the SSE hub cache so a stale
@@ -429,11 +427,4 @@ func isDeniedHost(host string) bool {
 // malformed id, foreign scope, foreign tenant all share this body).
 func projectNotFound(w http.ResponseWriter) {
 	writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "Project not found"})
-}
-
-// internalProjectError logs a store failure with the request id and writes the
-// generic 500 envelope (no internal detail on the wire).
-func internalProjectError(w http.ResponseWriter, ctx context.Context, msg string, err error) {
-	slog.Error(msg, "error", err, "request_id", RequestIDFromContext(ctx))
-	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 }

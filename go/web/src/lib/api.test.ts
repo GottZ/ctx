@@ -172,11 +172,11 @@ describe('apiFetch', () => {
   })
 
   it('maps 5xx to server with the envelope message', async () => {
-    stubFetch(jsonResponse(500, { success: false, error: 'internal error' }))
+    stubFetch(jsonResponse(500, { success: false, error: 'Internal server error' }))
     await expect(apiFetch('/api/whoami')).rejects.toMatchObject({
       status: 500,
       code: 'server',
-      message: 'internal error',
+      message: 'Internal server error',
     })
   })
 

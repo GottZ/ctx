@@ -123,7 +123,7 @@ const DEFAULT_ERROR: Record<number, string> = {
   403: 'admin key required', // tier gate (context_manage.go:325/351)
   409: 'cannot remove the last active owner of the tenant', // last-owner guard
   429: 'tenant scope quota exceeded', // max_scopes/max_keys — FE-render only (RF-1)
-  500: 'internal error',
+  500: 'Internal server error',
 }
 
 /** Tenant context threaded into manageFixture so auto-prefix + scope-list are deterministic. */
@@ -840,7 +840,7 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
         path.startsWith('/api/graph/') ||
         path.startsWith('/api/chat/sessions'))
     ) {
-      return route.fulfill({ status: 500, json: { success: false, error: 'internal error' } })
+      return route.fulfill({ status: 500, json: { success: false, error: 'Internal server error' } })
     }
 
     if (path === '/api/status') return route.fulfill({ json: statusFixture() })

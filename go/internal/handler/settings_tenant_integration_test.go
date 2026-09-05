@@ -71,7 +71,7 @@ func (s *tenantAPI) envelope(t *testing.T, rec *httptest.ResponseRecorder) map[s
 
 // operatorAR is a server-admin whose HomeScope is a scope with NO own rows, so
 // its SnapshotForRequest resolves to the _global base (the operator administers
-// _global). writeScope(operator) == _global regardless.
+// _global). mutationScope(operator) == _global regardless.
 func operatorAR() *auth.AuthResult {
 	return &auth.AuthResult{HomeScope: "opscope", ReadScopes: []string{"opscope"}, IsValid: true, IsAdmin: true}
 }
@@ -176,7 +176,7 @@ func TestSettingsTenantAPI_Integration(t *testing.T) {
 		gA := api.envelope(t, api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/settings/rerank.blend_weight", ""))
 		sA, _ := gA["setting"].(map[string]any)
 		if sA["value"] != 0.6 {
-			t.Errorf("A GET value = %v, want 0.6 (red if writeScope is forced to _global)", sA["value"])
+			t.Errorf("A GET value = %v, want 0.6 (red if mutationScope is forced to _global)", sA["value"])
 		}
 		gB := api.envelope(t, api.as(tenantAdmin("tenantb")).do(t, http.MethodGet, "/api/settings/rerank.blend_weight", ""))
 		sB, _ := gB["setting"].(map[string]any)
@@ -227,7 +227,7 @@ func TestSettingsTenantAPI_Integration(t *testing.T) {
 	t.Run("Gate3_OperatorGlobalOnlyWritesGlobal", func(t *testing.T) {
 		rec := api.as(operatorAR()).do(t, http.MethodPut, "/api/settings/tenant.allow_shared_secrets", `{"value":"true"}`)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("operator tenant.allow_shared_secrets PUT = %d, want 200 (red if operator writeScope is a tenant scope: global-only gate would 422) body=%s",
+			t.Fatalf("operator tenant.allow_shared_secrets PUT = %d, want 200 (red if operator mutationScope is a tenant scope: global-only gate would 422) body=%s",
 				rec.Code, rec.Body.String())
 		}
 		if v, ok := scopeRowValue(t, pool, "tenant.allow_shared_secrets", store.GlobalScope); !ok || v != "true" {

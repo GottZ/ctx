@@ -62,7 +62,7 @@ func (h *ManageHandler) loadOwnedProject(w http.ResponseWriter, r *http.Request,
 	ar := AuthResultFromContext(r.Context())
 	row, err := store.GetProjectByID(r.Context(), h.pool, projectID)
 	if err != nil {
-		internalProjectError(w, r.Context(), "forge: project load error", err)
+		internalError(w, r.Context(), "forge: project load error", err)
 		return nil, false
 	}
 	if row == nil || !ownsProject(ar, row) {
@@ -167,12 +167,12 @@ func (h *ManageHandler) handleForgeSyncStatus(w http.ResponseWriter, r *http.Req
 	}
 	last, err := store.LatestSyncRun(r.Context(), h.pool, row.ID)
 	if err != nil {
-		internalProjectError(w, r.Context(), "forge: latest run error", err)
+		internalError(w, r.Context(), "forge: latest run error", err)
 		return
 	}
 	conflicts, err := store.ConflictCount(r.Context(), h.pool, row.ID)
 	if err != nil {
-		internalProjectError(w, r.Context(), "forge: conflict count error", err)
+		internalError(w, r.Context(), "forge: conflict count error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

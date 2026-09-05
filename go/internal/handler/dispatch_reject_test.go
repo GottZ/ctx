@@ -89,6 +89,36 @@ func TestSetRejectRetryAfterUnknownHost(t *testing.T) {
 	}
 }
 
+// TestAdmissionHostAcrossAliases is the guard for the ONE errors.As branch in
+// admissionHost: llm.AdmissionError and embedcache.AdmissionError are type
+// ALIASES of dispatch.AdmissionError (MW11), so the same host must come out no
+// matter which spelling the raising package used — and a wrapped error must
+// still be unwrapped. It goes red the moment one of the aliases becomes a
+// distinct type again: the branch would then stop covering that family, which
+// is exactly the condition under which a second branch would be needed.
+func TestAdmissionHostAcrossAliases(t *testing.T) {
+	const host = "http://gpu:8089"
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"llm alias", &llm.AdmissionError{Err: dispatch.ErrTargetSaturated, Host: host}},
+		{"embedcache alias", &embedcache.AdmissionError{Err: dispatch.ErrTargetSaturated, Host: host}},
+		{"dispatch base type", &dispatch.AdmissionError{Err: dispatch.ErrTargetSaturated, Host: host}},
+		{"wrapped llm alias", fmt.Errorf("llm: synthesize: %w", &llm.AdmissionError{Err: dispatch.ErrQueueFull, Host: host})},
+	}
+	for _, c := range cases {
+		if got := admissionHost(c.err); got != host {
+			t.Errorf("%s: admissionHost = %q, want %q (one branch covers every alias)", c.name, got, host)
+		}
+	}
+	// A non-admission error carries no host: the caller must omit the header,
+	// never fabricate one.
+	if got := admissionHost(errors.New("boom: a real 500-class fault")); got != "" {
+		t.Errorf("plain error: admissionHost = %q, want \"\"", got)
+	}
+}
+
 func TestRetryAfterSeconds(t *testing.T) {
 	cases := []struct {
 		in   time.Duration

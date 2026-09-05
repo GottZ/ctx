@@ -12,12 +12,12 @@ import (
 // ever address its OWN tenant namespace, an operator addresses _global — there is
 // no path to a foreign tenant scope by construction (§5.1).
 
-// writeScope resolves the scope a MUTATION targets: a server-admin (operator)
+// mutationScope resolves the scope a MUTATION targets: a server-admin (operator)
 // writes the server-wide _global config; a tenant-admin writes ONLY its own
 // tenant namespace (its HomeScope, the scope string — NOT the tenant UUID,
 // §11.1). A nil/invalid ar is fail-closed to "" (the store layer then rejects the
 // write with "scope is required").
-func writeScope(ar *auth.AuthResult) string {
+func mutationScope(ar *auth.AuthResult) string {
 	if ar == nil {
 		return ""
 	}

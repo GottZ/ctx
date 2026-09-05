@@ -99,7 +99,7 @@ func (h *ProjectSyncHandler) HandleStart(w http.ResponseWriter, r *http.Request)
 			count, retryAfter, err := store.CountSyncRunsSince(ctx, h.pool, row.ID, syncRateWindow)
 			if err != nil {
 				slog.Error("project-sync: rate count", "error", err, "request_id", RequestIDFromContext(ctx))
-				internalProjectError(w, ctx, "project-sync: rate count", err)
+				internalError(w, ctx, "project-sync: rate count", err)
 				return
 			}
 			if count >= limit {
@@ -129,7 +129,7 @@ func (h *ProjectSyncHandler) HandleStart(w http.ResponseWriter, r *http.Request)
 		case errors.Is(err, forge.ErrIssuePolicy):
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 		default:
-			internalProjectError(w, ctx, "project-sync: start", err)
+			internalError(w, ctx, "project-sync: start", err)
 		}
 		return
 	}
@@ -144,7 +144,7 @@ func (h *ProjectSyncHandler) HandleStatus(w http.ResponseWriter, r *http.Request
 	ar := AuthResultFromContext(ctx)
 	row, err := store.GetProjectByID(ctx, h.pool, chi.URLParam(r, "id"))
 	if err != nil {
-		internalProjectError(w, ctx, "project-sync: status load", err)
+		internalError(w, ctx, "project-sync: status load", err)
 		return
 	}
 	if row == nil || ar == nil || !slices.Contains(ar.ReadScopes, row.Scope) {
@@ -153,17 +153,17 @@ func (h *ProjectSyncHandler) HandleStatus(w http.ResponseWriter, r *http.Request
 	}
 	last, err := store.LatestSyncRun(ctx, h.pool, row.ID)
 	if err != nil {
-		internalProjectError(w, ctx, "project-sync: latest run", err)
+		internalError(w, ctx, "project-sync: latest run", err)
 		return
 	}
 	recent, err := store.ListSyncRuns(ctx, h.pool, row.ID, 10)
 	if err != nil {
-		internalProjectError(w, ctx, "project-sync: list runs", err)
+		internalError(w, ctx, "project-sync: list runs", err)
 		return
 	}
 	conflicts, err := store.ConflictCount(ctx, h.pool, row.ID)
 	if err != nil {
-		internalProjectError(w, ctx, "project-sync: conflict count", err)
+		internalError(w, ctx, "project-sync: conflict count", err)
 		return
 	}
 	var run forge.SyncStatus
@@ -196,7 +196,7 @@ func (h *ProjectSyncHandler) resolveWritableProject(w http.ResponseWriter, r *ht
 	ar := AuthResultFromContext(ctx)
 	row, err := store.GetProjectByID(ctx, h.pool, chi.URLParam(r, "id"))
 	if err != nil {
-		internalProjectError(w, ctx, "project-sync: write scope load", err)
+		internalError(w, ctx, "project-sync: write scope load", err)
 		return nil, false
 	}
 	if row == nil || ar == nil || !slices.Contains(ar.ReadScopes, row.Scope) {

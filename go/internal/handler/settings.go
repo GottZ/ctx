@@ -66,7 +66,7 @@ func NewSettingsHandler(pool *pgxpool.Pool, cfg *config.Store) *SettingsHandler 
 // MountSettings mounts the /api/settings routes behind RequireAdminOrTenantAdmin
 // (03-W5): a tenant-admin manages its OWN tenant scope, an operator manages
 // _global; a member or unauthenticated caller still gets 403. The gate only
-// ADMITS — the handler scopes every read/write to writeScope/readScopes, so the
+// ADMITS — the handler scopes every read/write to mutationScope/readScopes, so the
 // looser gate never leaks a foreign tenant's config (the §4.1a fail-closed
 // order). ONE function used by server.go and the gate tests, so the 403 probe
 // exercises exactly the chain production mounts.
@@ -166,7 +166,7 @@ func (h *SettingsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(r.Context())
 	overrides, err := h.loadOverrideMap(r, readScopes(ar))
 	if err != nil {
-		h.internalError(w, r, "settings: list overrides failed", err)
+		internalError(w, r.Context(), "settings: list overrides failed", err)
 		return
 	}
 	c := h.cfg.SnapshotForRequest(r.Context()) // effective tenant>global view (03-W5 §4.5)
@@ -200,14 +200,14 @@ func (h *SettingsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(r.Context())
 	overrides, err := h.loadOverrideMap(r, readScopes(ar))
 	if err != nil {
-		h.internalError(w, r, "settings: load overrides failed", err)
+		internalError(w, r.Context(), "settings: load overrides failed", err)
 		return
 	}
-	// Audit reads the history of the LEVEL one writes (writeScope): a tenant-admin
+	// Audit reads the history of the LEVEL one writes (mutationScope): a tenant-admin
 	// its own scope, an operator _global (§4.5). The trigger spiegelt the scope.
-	audit, err := store.ListSettingAudit(r.Context(), h.pool, key, writeScope(ar), auditLimit)
+	audit, err := store.ListSettingAudit(r.Context(), h.pool, key, mutationScope(ar), auditLimit)
 	if err != nil {
-		h.internalError(w, r, "settings: load audit failed", err)
+		internalError(w, r.Context(), "settings: load audit failed", err)
 		return
 	}
 	c := h.cfg.SnapshotForRequest(r.Context()) // effective tenant>global view (03-W5 §4.5)
@@ -268,20 +268,20 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 			"success": false, "error": fmt.Sprintf("validation: %s must be true or false", key)})
 		return
 	}
-	// Two-write-worlds scope resolution (§4.1a/§4.5): the write targets writeScope
+	// Two-write-worlds scope resolution (§4.1a/§4.5): the write targets mutationScope
 	// (operator → _global, tenant-admin → own scope), the candidate validates the
 	// effective readScopes view, and secret_refs resolve at the write scope with
 	// the tenant's gated _global fallback. allowShared is read at the tenant scope
 	// (operator never needs it — _global resolution ignores it).
 	ar := AuthResultFromContext(r.Context())
-	ws := writeScope(ar)
+	ws := mutationScope(ar)
 	rs := readScopes(ar)
 	allowShared := false
 	if ws != store.GlobalScope {
 		var serr error
 		allowShared, serr = store.TenantAllowsSharedSecrets(r.Context(), h.pool, ws)
 		if serr != nil {
-			h.internalError(w, r, "settings: shared-secrets opt-in check failed", serr)
+			internalError(w, r.Context(), "settings: shared-secrets opt-in check failed", serr)
 			return
 		}
 	}
@@ -303,7 +303,7 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	// → 422: the fail-closed self-grant block.
 	baseRows, err := store.LoadSettingOverridesMulti(r.Context(), h.pool, rs)
 	if err != nil {
-		h.internalError(w, r, "settings: load overrides failed", err)
+		internalError(w, r.Context(), "settings: load overrides failed", err)
 		return
 	}
 	candRows := upsertRow(baseRows, key, normalized, ws)
@@ -353,12 +353,12 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.writeSetting(r, key, normalized, ws); err != nil {
-		h.internalError(w, r, "settings: persist failed", err)
+		internalError(w, r.Context(), "settings: persist failed", err)
 		return
 	}
 	if err := h.reload(r); err != nil {
 		// Persisted but not live — never report that as plain success.
-		h.internalError(w, r, "settings: persisted but reload failed", err)
+		internalError(w, r.Context(), "settings: persisted but reload failed", err)
 		return
 	}
 
@@ -391,9 +391,9 @@ func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found, err := h.deleteSetting(r, key, writeScope(AuthResultFromContext(r.Context())))
+	found, err := h.deleteSetting(r, key, mutationScope(AuthResultFromContext(r.Context())))
 	if err != nil {
-		h.internalError(w, r, "settings: delete failed", err)
+		internalError(w, r.Context(), "settings: delete failed", err)
 		return
 	}
 	if !found {
@@ -402,7 +402,7 @@ func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.reload(r); err != nil {
-		h.internalError(w, r, "settings: deleted but reload failed", err)
+		internalError(w, r.Context(), "settings: deleted but reload failed", err)
 		return
 	}
 
@@ -446,7 +446,7 @@ func (h *SettingsHandler) checkSecretRef(r *http.Request, key, raw string, ar *a
 }
 
 // writeSetting persists one override in an attributed transaction (the 051
-// triggers emit audit + NOTIFY atomically with the row). scope is writeScope(ar)
+// triggers emit audit + NOTIFY atomically with the row). scope is mutationScope(ar)
 // — operator _global or the tenant's own scope, NEVER the request body.
 func (h *SettingsHandler) writeSetting(r *http.Request, key string, value json.RawMessage, scope string) error {
 	_, err := attributedTx(r.Context(), h.pool, func(tx pgx.Tx) (struct{}, error) {
@@ -456,7 +456,7 @@ func (h *SettingsHandler) writeSetting(r *http.Request, key string, value json.R
 }
 
 // deleteSetting removes one override in an attributed transaction. scope is
-// writeScope(ar) — a tenant-admin deletes only its own row, never _global.
+// mutationScope(ar) — a tenant-admin deletes only its own row, never _global.
 func (h *SettingsHandler) deleteSetting(r *http.Request, key, scope string) (bool, error) {
 	return attributedTx(r.Context(), h.pool, func(tx pgx.Tx) (bool, error) {
 		return store.DeleteSetting(r.Context(), tx, key, scope, actorID(r))
@@ -525,8 +525,8 @@ func normalizedJSON(info config.KeyInfo, raw string) json.RawMessage {
 	}
 }
 
-// upsertRow returns rows with the (key, writeScope) row's value replaced or a new
-// row at writeScope appended. It matches on BOTH key and scope: a tenant write
+// upsertRow returns rows with the (key, mutationScope) row's value replaced or a new
+// row at mutationScope appended. It matches on BOTH key and scope: a tenant write
 // must add/replace the TENANT-scope row and leave any _global row of the same key
 // in place (so the candidate build sees both and the tenant precedence wins),
 // never silently overwrite the _global row.
@@ -576,9 +576,4 @@ func newWarnings(cand, base []config.Issue) []string {
 func (h *SettingsHandler) unknownKey(w http.ResponseWriter, key string) {
 	writeJSON(w, http.StatusNotFound, map[string]any{
 		"success": false, "error": fmt.Sprintf("unknown settings key %q — GET /api/settings lists the registry", key)})
-}
-
-func (h *SettingsHandler) internalError(w http.ResponseWriter, r *http.Request, msg string, err error) {
-	slog.Error(msg, "error", err, "request_id", RequestIDFromContext(r.Context()))
-	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 }

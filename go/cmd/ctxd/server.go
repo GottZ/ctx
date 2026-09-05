@@ -297,7 +297,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// /api/project/{id}/webhook-secret, tenant-admin inside the mount (§5.1). The
 		// secret is server-generated (crypto/rand, reveal-once) and sealed in the
 		// PROJECT scope under the server-fixed name — NOT via /api/secrets, whose
-		// writeScope could never reach the project scope (§5.6).
+		// mutationScope could never reach the project scope (§5.6).
 		handler.MountProjectWebhookSecret(r, handler.NewWebhookSecretHandler(pool))
 		// Project SSE domain-event stream (workflow W9): GET /api/project/events,
 		// member-gated inside the mount, scope-filtered at the projectHub fan-out

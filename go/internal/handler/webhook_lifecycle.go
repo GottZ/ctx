@@ -3,7 +3,7 @@
 // ONE name, ONE verwaltungspfad:
 //
 //   - Scope: the PROJECT scope, pinned SERVER-SIDE from the project row — NOT the
-//     caller's writeScope. This is why the lifecycle is a dedicated endpoint and
+//     caller's mutationScope. This is why the lifecycle is a dedicated endpoint and
 //     NOT `ctx secrets set` / PUT /api/secrets: that path maps a tenant-admin to
 //     its HomeScope (tenant_scope.go:20-28) and could never reach the project
 //     scope, so the secret it wrote would be invisible to the verifier and
@@ -158,7 +158,7 @@ func (h *WebhookSecretHandler) ownedProject(w http.ResponseWriter, r *http.Reque
 	ar := AuthResultFromContext(ctx)
 	row, err := store.GetProjectByID(ctx, h.pool, chi.URLParam(r, "id"))
 	if err != nil {
-		internalProjectError(w, ctx, "webhook-secret: project load", err)
+		internalError(w, ctx, "webhook-secret: project load", err)
 		return nil, false
 	}
 	if row == nil || ar == nil || !ownsProject(ar, row) {

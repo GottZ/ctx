@@ -19,8 +19,6 @@
 package handler
 
 import (
-	"context"
-	"log/slog"
 	"net/http"
 	"sort"
 
@@ -106,7 +104,7 @@ func (h *TypesHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(ctx)
 	rows, err := store.ListBlockTypes(ctx, h.pool, typeVisibleScopes(ar))
 	if err != nil {
-		internalTypesError(w, ctx, "types: list error", err)
+		internalError(w, ctx, "types: list error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -152,7 +150,7 @@ func (h *TypesHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	bt, err := store.GetBlockType(ctx, h.pool, name, typeVisibleScopes(ar))
 	if err != nil {
-		internalTypesError(w, ctx, "types: get error", err)
+		internalError(w, ctx, "types: get error", err)
 		return
 	}
 	if bt == nil {
@@ -164,14 +162,5 @@ func (h *TypesHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"type":    typeView{BlockTypeRow: *bt, Source: typeSourceForScope(bt.Scope)},
-	})
-}
-
-// internalTypesError logs a store failure with the request id and writes the
-// generic 500 envelope (no internal detail leaks to the wire).
-func internalTypesError(w http.ResponseWriter, ctx context.Context, msg string, err error) {
-	slog.Error(msg, "error", err, "request_id", RequestIDFromContext(ctx))
-	writeJSON(w, http.StatusInternalServerError, map[string]any{
-		"success": false, "error": "Internal server error",
 	})
 }

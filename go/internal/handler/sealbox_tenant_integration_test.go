@@ -295,7 +295,7 @@ func TestSecretsTenantAPI_Integration(t *testing.T) {
 	// Gate 11 (04-W5 §5.7, the fail-open half the scoped scan left open) — a
 	// pool row of a NON-opt-in tenant references a _global secret. Because the
 	// resolver reads _global for every api_key_ref, that row genuinely depends
-	// on the operator's secret; the old scan (writeScope + opt-in tenants) did
+	// on the operator's secret; the old scan (mutationScope + opt-in tenants) did
 	// not see the row, answered 200 and left the backend keyless at the next
 	// resolver pass. The all-scopes pool scan closes it.
 	//

@@ -24,6 +24,8 @@
 package handler
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -180,4 +182,20 @@ func errResultCoded(code, msg string) *mcp.CallToolResult {
 // construction rather than of discipline.
 func errResultReject(rej *writeReject) *mcp.CallToolResult {
 	return errResultCoded(rej.Code, rej.Msg)
+}
+
+// internalError is the ONE way a REST handler answers a server-side failure it
+// wants in the log: it writes the log line (message, cause, request id) and
+// then the generic 500 envelope through writeInternal — never a second body of
+// its own. Two helpers exist for this class and their difference is nameable:
+// writeInternal is the SILENT writer (the caller already logged, or has nothing
+// to add), internalError is its LOGGING wrapper. It replaced four per-file
+// copies that differed only in receiver and, in two of them, in the prose they
+// put on the wire.
+//
+// The cause never reaches the client: it lives in the log line alone, and the
+// wire text is the fixed one writeInternal owns.
+func internalError(w http.ResponseWriter, ctx context.Context, logMsg string, err error) {
+	slog.Error(logMsg, "error", err, "request_id", RequestIDFromContext(ctx))
+	writeInternal(w)
 }

@@ -11,7 +11,7 @@
 // GET would make members render the seed instead of their tenant's colours,
 // hiding AM-2 from the majority. Isolation comes from readScopes (the effective
 // {_global, tenant} view), NOT from the tier. ONLY PUT/DELETE are
-// RequireAdminOrTenantAdmin, and they write writeScope (operator → _global,
+// RequireAdminOrTenantAdmin, and they write mutationScope (operator → _global,
 // tenant-admin → own scope), NEVER a body/URL scope (02a §A5-MT).
 
 package handler
@@ -19,7 +19,6 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"unicode"
 
@@ -69,14 +68,14 @@ func (h *GraphCategoryHuesHandler) HandleList(w http.ResponseWriter, r *http.Req
 	}
 	hues, err := store.LoadCategoryHues(r.Context(), h.pool, readScopes(ar))
 	if err != nil {
-		h.internalError(w, r, "graph hues: load failed", err)
+		internalError(w, r.Context(), "graph hues: load failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "hues": hues})
 }
 
 // HandlePut implements PUT /api/graph/category-hues/{category}. The target scope
-// is writeScope(ar) — NEVER a body/URL scope. The hue must be an INTEGER 0..359
+// is mutationScope(ar) — NEVER a body/URL scope. The hue must be an INTEGER 0..359
 // (a non-integer or out-of-range value is 422, never a silent clamp).
 func (h *GraphCategoryHuesHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	category := chi.URLParam(r, "category")
@@ -106,9 +105,9 @@ func (h *GraphCategoryHuesHandler) HandlePut(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	scope := writeScope(AuthResultFromContext(r.Context()))
+	scope := mutationScope(AuthResultFromContext(r.Context()))
 	if err := h.upsert(r, scope, category, int16(n)); err != nil {
-		h.internalError(w, r, "graph hues: persist failed", err)
+		internalError(w, r.Context(), "graph hues: persist failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -120,7 +119,7 @@ func (h *GraphCategoryHuesHandler) HandlePut(w http.ResponseWriter, r *http.Requ
 }
 
 // HandleDelete implements DELETE /api/graph/category-hues/{category} — remove the
-// override in the caller's writeScope, reverting the category to its seed. An
+// override in the caller's mutationScope, reverting the category to its seed. An
 // absent override is a 404 (the settings-DELETE shape).
 func (h *GraphCategoryHuesHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	category := chi.URLParam(r, "category")
@@ -128,10 +127,10 @@ func (h *GraphCategoryHuesHandler) HandleDelete(w http.ResponseWriter, r *http.R
 		writeJSON(w, code, map[string]any{"success": false, "error": msg})
 		return
 	}
-	scope := writeScope(AuthResultFromContext(r.Context()))
+	scope := mutationScope(AuthResultFromContext(r.Context()))
 	found, err := h.delete(r, scope, category)
 	if err != nil {
-		h.internalError(w, r, "graph hues: delete failed", err)
+		internalError(w, r.Context(), "graph hues: delete failed", err)
 		return
 	}
 	if !found {
@@ -177,9 +176,4 @@ func (h *GraphCategoryHuesHandler) delete(r *http.Request, scope, category strin
 	return attributedTx(ctx, h.pool, func(tx pgx.Tx) (bool, error) {
 		return store.DeleteCategoryHue(ctx, tx, scope, category, actorID(r))
 	})
-}
-
-func (h *GraphCategoryHuesHandler) internalError(w http.ResponseWriter, r *http.Request, msg string, err error) {
-	slog.Error(msg, "error", err, "request_id", RequestIDFromContext(r.Context()))
-	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 }

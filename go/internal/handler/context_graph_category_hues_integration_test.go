@@ -8,7 +8,7 @@
 //   - member-key GET is 200 + the resolved map (RED against a naive admin-gated
 //     GET, which would 403 a member — proven by mounting the GET both ways)
 //   - member PUT/DELETE are 403 (RequireAdminOrTenantAdmin), tenant-admin admits
-//   - PUT ignores a body/URL scope and writes writeScope (RED against a naive
+//   - PUT ignores a body/URL scope and writes mutationScope (RED against a naive
 //     body-scope handler: the row lands in the tenant's own scope, never _global)
 //   - hue 360 / non-integer ⇒ 422; round-trip PUT → GET → DELETE → GET(empty)
 //   - GET precedence per category through the HTTP surface
@@ -127,7 +127,7 @@ func TestCategoryHuesAPI_Integration(t *testing.T) {
 		t.Errorf("member DELETE = %d, want 403", rec.Code)
 	}
 
-	// ── writeScope: tenant-admin PUT with a body scope field is IGNORED — the row
+	// ── mutationScope: tenant-admin PUT with a body scope field is IGNORED — the row
 	//    lands in the tenant's OWN scope, NEVER _global. RED against a body-scope
 	//    handler (which would honour the "_global" in the body). ──
 	rec = api.as(admin).do(t, http.MethodPut, "/api/graph/category-hues/decisions",
