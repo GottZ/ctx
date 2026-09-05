@@ -17,8 +17,7 @@ func ProbeWithGUCs(ctx context.Context, pool *pgxpool.Pool, spec ProbeSpec, exac
 	return probeWithGUCs(ctx, pool, spec, exactSet, annSet)
 }
 
-func ExactGUCs(timeout time.Duration) []string       { return exactGUCs(timeout) }
-func AnnGUCs(timeout time.Duration, ef int) []string { return annGUCs(timeout, ef) }
+func ExactGUCs(timeout time.Duration) []string { return exactGUCs(timeout) }
 func BeginLegTx(ctx context.Context, pool *pgxpool.Pool, gucs []string) (pgx.Tx, error) {
 	return beginLegTx(ctx, pool, gucs)
 }

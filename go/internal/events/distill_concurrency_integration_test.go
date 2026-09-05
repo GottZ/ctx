@@ -43,15 +43,14 @@ import (
 // because the property under test is observable from outside: whoever holds the
 // source is doing that root's work.
 type dcProbe struct {
-	mu       sync.Mutex
-	cur      int
-	max      int
-	perRoot  map[string]int
-	maxRoot  int
-	order    []string
-	hold     time.Duration
-	entered  chan struct{}
-	sessions int
+	mu      sync.Mutex
+	cur     int
+	max     int
+	perRoot map[string]int
+	maxRoot int
+	order   []string
+	hold    time.Duration
+	entered chan struct{}
 }
 
 func newDCProbe(hold time.Duration) *dcProbe {

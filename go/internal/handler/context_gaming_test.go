@@ -48,16 +48,6 @@ func gamingReq(t *testing.T, h *ManageHandler, ar *auth.AuthResult, data string)
 	return rec
 }
 
-type gamingResp struct {
-	Success bool `json:"success"`
-	Gaming  struct {
-		Active           bool     `json:"active"`
-		DisabledBackends []string `json:"disabled_backends"`
-		UnknownBackends  []string `json:"unknown_backends"`
-		Note             string   `json:"note"`
-	} `json:"gaming"`
-}
-
 // NOTE (U01-W3, AM-7): the eject/gaming-mode READ now renders the '_global'
 // 'eject' profile's live state (active + member names), not the old
 // config-derived list — so unknown_backends is gone structurally (FK membership

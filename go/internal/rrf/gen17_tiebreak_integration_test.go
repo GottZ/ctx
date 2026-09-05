@@ -183,20 +183,6 @@ func bw1bExactTieGroups(rows []fusedRow) [][2]int {
 	return groups
 }
 
-// bw1bInstall replaces ctx_rrf with the body of the named migration file. The
-// file text is executed verbatim out of the embedded FS — never a paraphrase,
-// so a drifted migration cannot be papered over by the test.
-func bw1bInstall(t *testing.T, ctx context.Context, pool *pgxpool.Pool, file string) {
-	t.Helper()
-	raw, err := migrations.Section(file)
-	if err != nil {
-		t.Fatalf("read embedded %s: %v", file, err)
-	}
-	if _, err := pool.Exec(ctx, string(raw)); err != nil {
-		t.Fatalf("install %s: %v", file, err)
-	}
-}
-
 // bw1bInstalledOrderBy reads the ORDER BY of the live function body back out
 // of the catalog, so every assertion below is anchored to what the database
 // actually runs rather than to which file the test believes it ran.

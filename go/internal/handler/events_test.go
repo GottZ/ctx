@@ -65,12 +65,6 @@ func (f *fakeStatus) set(s statusResponse) {
 	f.snap = s
 }
 
-func (f *fakeStatus) setLive(l livenessStamp) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.live = l
-}
-
 func (f *fakeStatus) loopCount() int   { f.mu.Lock(); defer f.mu.Unlock(); return f.loops }
 func (f *fakeStatus) refreshCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.refreshes }
 
