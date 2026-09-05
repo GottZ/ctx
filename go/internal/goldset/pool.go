@@ -2,6 +2,7 @@ package goldset
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/jsonl"
 )
 
 // PoolEntry is one arm's candidate list for a pooling judgement (design 04
@@ -99,22 +102,7 @@ func (c Case) Key() string { return CaseKey(c.Slice, c.Index, c.QuerySHA256) }
 
 // ReadPool loads a pooling file written by the sweep driver.
 func ReadPool(path string) ([]PoolEntry, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var out []PoolEntry
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var e PoolEntry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, err)
-		}
-		out = append(out, e)
-	}
-	return out, nil
+	return jsonl.All[PoolEntry](path)
 }
 
 // PooledCase is one judgement unit: a query plus the blinded, permuted list of
@@ -468,33 +456,29 @@ func ParseJudgements(path string) (map[string][]Judgement, error) {
 // parseJudgementsJSONL reads the machine form.
 func parseJudgementsJSONL(path string, b []byte) (map[string][]Judgement, error) {
 	out := map[string][]Judgement{}
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var l templateLine
-		if err := json.Unmarshal([]byte(line), &l); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, err)
-		}
+	if err := jsonl.EachReader(bytes.NewReader(b), path, func(n int, l templateLine) error {
 		switch l.Kind {
 		case "query":
-			continue
+			return nil
 		case "candidate":
 		default:
-			return nil, fmt.Errorf("%s:%d: unknown row kind %q", path, n+1, l.Kind)
+			return fmt.Errorf("%s:%d: unknown row kind %q", path, n, l.Kind)
 		}
 		if l.Judgement == nil {
-			return nil, fmt.Errorf("%s:%d: block %s: %w", path, n+1, l.BlockID, ErrUnjudged)
+			return fmt.Errorf("%s:%d: block %s: %w", path, n, l.BlockID, ErrUnjudged)
 		}
-		rel, err := verdict(*l.Judgement)
-		if err != nil {
-			return nil, fmt.Errorf("%s:%d: block %s: %w", path, n+1, l.BlockID, err)
+		rel, verr := verdict(*l.Judgement)
+		if verr != nil {
+			return fmt.Errorf("%s:%d: block %s: %w", path, n, l.BlockID, verr)
 		}
 		k := CaseKey(l.Slice, l.Index, l.QuerySHA256)
 		out[k] = append(out[k], Judgement{
 			Slice: l.Slice, Index: l.Index, QuerySHA256: l.QuerySHA256,
 			BlockID: l.BlockID, Relevant: rel,
 		})
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

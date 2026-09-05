@@ -18,6 +18,12 @@ import (
 // pair) — 0,5–1 GB RSS if they are read in. Every figure the comparison
 // computes is paired PER QUERY, so nothing needs two records of one dump at the
 // same time: the artefact is written compressed and read one record at a time.
+//
+// This is one of the two readers internal/jsonl's boundary rule names as NOT
+// its business, and the reason is right here: it counts RECORDS rather than
+// lines, decodes through a json.Decoder, and gates on sortedness. Folding it
+// into the line reader would drop that gate. The other one is
+// internal/goldbench/runner.go loadDumpDone.
 
 // GzipSuffix is the extension that switches both the writer and the reader to
 // gzip. Extension-driven rather than a flag on either side, so a dump cannot

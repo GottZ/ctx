@@ -30,6 +30,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/GottZ/ctx/internal/jsonl"
 )
 
 // ErrJudgeIncomplete marks a rendering attempt over a run that still has open
@@ -149,20 +151,9 @@ func (c JudgeCell) cellKey() string { return c.Key() + "/" + c.BlockID }
 // separate reader from ParseJudgements on purpose: that one refuses an empty
 // judgement cell, which is exactly what every row of a fresh template has.
 func ReadTemplateCells(path string) ([]JudgeCell, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	queries := map[string]string{}
 	var out []JudgeCell
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var l templateLine
-		if uerr := json.Unmarshal([]byte(line), &l); uerr != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, uerr)
-		}
+	if err := jsonl.Each(path, func(n int, l templateLine) error {
 		k := CaseKey(l.Slice, l.Index, l.QuerySHA256)
 		switch l.Kind {
 		case "query":
@@ -170,15 +161,18 @@ func ReadTemplateCells(path string) ([]JudgeCell, error) {
 		case "candidate":
 			q, ok := queries[k]
 			if !ok {
-				return nil, fmt.Errorf("%s:%d: candidate row before its query row (case %s)", path, n+1, k)
+				return fmt.Errorf("%s:%d: candidate row before its query row (case %s)", path, n, k)
 			}
 			out = append(out, JudgeCell{
 				Slice: l.Slice, Index: l.Index, QuerySHA256: l.QuerySHA256, Query: q,
 				BlockID: l.BlockID, Title: l.Title, Excerpt: l.Excerpt,
 			})
 		default:
-			return nil, fmt.Errorf("%s:%d: unknown row kind %q", path, n+1, l.Kind)
+			return fmt.Errorf("%s:%d: unknown row kind %q", path, n, l.Kind)
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -247,25 +241,18 @@ func (d JudgeDecision) cellKey() string {
 // them would hide it.
 func ReadJudgeJournal(path string) (map[string]JudgeDecision, error) {
 	out := map[string]JudgeDecision{}
-	b, err := os.ReadFile(path)
+	err := jsonl.Each(path, func(n int, d JudgeDecision) error {
+		if prev, dup := out[d.cellKey()]; dup && prev.Relevant != d.Relevant {
+			return fmt.Errorf("%s:%d: cell %s judged twice with different verdicts", path, n, d.cellKey())
+		}
+		out[d.cellKey()] = d
+		return nil
+	})
 	if os.IsNotExist(err) {
 		return out, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var d JudgeDecision
-		if uerr := json.Unmarshal([]byte(line), &d); uerr != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, uerr)
-		}
-		if prev, dup := out[d.cellKey()]; dup && prev.Relevant != d.Relevant {
-			return nil, fmt.Errorf("%s:%d: cell %s judged twice with different verdicts", path, n+1, d.cellKey())
-		}
-		out[d.cellKey()] = d
 	}
 	return out, nil
 }
@@ -467,29 +454,18 @@ type JudgePair struct {
 // the same closed vocabulary as a human template cell, so an unfilled control
 // column is ErrUnjudged — never a silent 0 that would inflate agreement.
 func ParseControlSheet(path string) ([]JudgePair, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	var out []JudgePair
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var r controlRow
-		if uerr := json.Unmarshal([]byte(line), &r); uerr != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, uerr)
-		}
+	if err := jsonl.Each(path, func(n int, r controlRow) error {
 		switch r.Kind {
 		case "header":
-			continue
+			return nil
 		case "control":
 		default:
-			return nil, fmt.Errorf("%s:%d: unknown row kind %q", path, n+1, r.Kind)
+			return fmt.Errorf("%s:%d: unknown row kind %q", path, n, r.Kind)
 		}
 		llm, lerr := verdict(r.LLMJudgement)
 		if lerr != nil {
-			return nil, fmt.Errorf("%s:%d: block %s: llm_judgement: %w", path, n+1, r.BlockID, lerr)
+			return fmt.Errorf("%s:%d: block %s: llm_judgement: %w", path, n, r.BlockID, lerr)
 		}
 		ctrl := ""
 		if r.ControlJudgement != nil {
@@ -497,9 +473,12 @@ func ParseControlSheet(path string) ([]JudgePair, error) {
 		}
 		cv, cerr := verdict(ctrl)
 		if cerr != nil {
-			return nil, fmt.Errorf("%s:%d: block %s: control_judgement: %w", path, n+1, r.BlockID, cerr)
+			return fmt.Errorf("%s:%d: block %s: control_judgement: %w", path, n, r.BlockID, cerr)
 		}
 		out = append(out, JudgePair{Slice: r.Slice, LLM: llm, Control: cv})
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	if len(out) == 0 {
 		return nil, errors.New("control sheet holds no calibrated row")

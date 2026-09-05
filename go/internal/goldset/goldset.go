@@ -23,7 +23,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
+
+	"github.com/GottZ/ctx/internal/jsonl"
 )
 
 // Slice identifiers (design 04 §4.5, design 05 §4.5). Never pooled across
@@ -268,22 +269,7 @@ func WriteJSONLKeepIndex(path string, cases []Case) error {
 
 // ReadJSONL reads a slice file back.
 func ReadJSONL(path string) ([]Case, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var out []Case
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var c Case
-		if err := json.Unmarshal([]byte(line), &c); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, err)
-		}
-		out = append(out, c)
-	}
-	return out, nil
+	return jsonl.All[Case](path)
 }
 
 // FileDigest is the sha256 of a file's bytes, for the stamp.

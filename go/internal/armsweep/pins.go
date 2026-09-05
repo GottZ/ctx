@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 
 	"github.com/GottZ/ctx/internal/goldset"
+	"github.com/GottZ/ctx/internal/jsonl"
 )
 
 // Pin freezes the two non-deterministic stages of the query path for one gold
@@ -91,23 +91,15 @@ func WritePins(path string, pins []Pin) error {
 // concatenated, and silently picking one of them would pin a measurement to an
 // arbitrary half of a mixed file.
 func ReadPins(path string) (map[string]Pin, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	out := map[string]Pin{}
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var p Pin
-		if err := json.Unmarshal([]byte(line), &p); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, err)
-		}
+	if err := jsonl.Each(path, func(n int, p Pin) error {
 		if _, dup := out[p.Key()]; dup {
-			return nil, fmt.Errorf("%s:%d: duplicate pin for case %s", path, n+1, p.Key())
+			return fmt.Errorf("%s:%d: duplicate pin for case %s", path, n, p.Key())
 		}
 		out[p.Key()] = p
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

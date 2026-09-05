@@ -839,6 +839,12 @@ func recComplete(rec dumpRecord) bool {
 // Newline (Abbruch mitten im Write) wird toleriert — validLen zeigt auf das
 // Ende der letzten vollständigen Zeile, der Appender schneidet dort ab
 // (Review KW3 F4); jeder andere Parse-Fehler bleibt fail-closed.
+//
+// Einer der zwei Leser, die die Grenzregel von internal/jsonl ausdrücklich
+// NICHT bei sich haben will: er führt einen Byte-Offset (validLen) und muss
+// eine abgerissene Schlusszeile tolerieren. Der Zeilen-Leser kann beides
+// nicht, und ihm beides beizubringen hieße, den Torn-Tail-Fall in jeden
+// anderen Leser zu tragen. Der zweite ist internal/armsweep/stream.go.
 func loadDumpDone(path string, gen *GenStamp) (*dumpDone, error) {
 	d := &dumpDone{recs: map[string]map[string]doneRec{}}
 	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)

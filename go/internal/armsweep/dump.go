@@ -2,12 +2,12 @@ package armsweep
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"sort"
 	"strings"
 
 	"github.com/GottZ/ctx/internal/goldset"
+	"github.com/GottZ/ctx/internal/jsonl"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
@@ -197,22 +197,7 @@ func ReadRecords(path string) ([]Record, error) {
 	if strings.HasSuffix(path, GzipSuffix) {
 		return readRecordsStreamed(path)
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var out []Record
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var r Record
-		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, err)
-		}
-		out = append(out, r)
-	}
-	return out, nil
+	return jsonl.All[Record](path)
 }
 
 // WriteJSONFile persists any artefact as indented JSON at mode 0600.

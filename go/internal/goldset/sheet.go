@@ -18,12 +18,15 @@ package goldset
 // Source: https://github.com/GottZ/ctx
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/jsonl"
 )
 
 // UnsureMark is the third verdict of §C3-2-D05-5: "not decidable on the excerpt
@@ -165,21 +168,25 @@ func RenderFableSheetJSONL(k DrawKey, cells []JudgeCell) ([]byte, error) {
 // typed round trip would drop it silently instead of reporting it.
 func AssertSheetBlind(b []byte) error {
 	rows := 0
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			return fmt.Errorf("ungültiges JSON in Bogenzeile %d: %w", n+1, err)
-		}
+	// The sheet is named "" on purpose: this check reports "Bogenzeile <n>"
+	// rather than "<file>:<n>", and it also runs on a sheet that has only been
+	// rendered, never written. The line number is lifted out of the LineError.
+	err := jsonl.EachReader(bytes.NewReader(b), "", func(n int, raw map[string]json.RawMessage) error {
 		for _, f := range forbiddenSheetFields {
 			if _, bad := raw[f]; bad {
 				return fmt.Errorf("verbotenes Feld %q in Bogenzeile %d — es verrät das "+
-					"Maschinen-Urteil oder die Verwendung der Zelle (§C3-2-D05-5)", f, n+1)
+					"Maschinen-Urteil oder die Verwendung der Zelle (§C3-2-D05-5)", f, n)
 			}
 		}
 		rows++
+		return nil
+	})
+	var le *jsonl.LineError
+	if errors.As(err, &le) {
+		return fmt.Errorf("ungültiges JSON in Bogenzeile %d: %w", le.Line, le.Err)
+	}
+	if err != nil {
+		return err
 	}
 	if rows == 0 {
 		return errors.New("der Bogen hält keine Zeile")
@@ -206,20 +213,13 @@ func ParseFableSheet(path string) ([]FableJudgement, error) {
 	}
 	var out []FableJudgement
 	seen := map[string]SheetVerdict{}
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var r fableRow
-		if uerr := json.Unmarshal([]byte(line), &r); uerr != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, uerr)
-		}
+	if perr := jsonl.EachReader(bytes.NewReader(b), path, func(n int, r fableRow) error {
 		switch r.Kind {
 		case "header":
-			continue
+			return nil
 		case "cell":
 		default:
-			return nil, fmt.Errorf("%s:%d: unbekannte Zeilenart %q", path, n+1, r.Kind)
+			return fmt.Errorf("%s:%d: unbekannte Zeilenart %q", path, n, r.Kind)
 		}
 		cell := ""
 		if r.Verdict != nil {
@@ -227,14 +227,17 @@ func ParseFableSheet(path string) ([]FableJudgement, error) {
 		}
 		v, verr := ParseSheetVerdict(cell)
 		if verr != nil {
-			return nil, fmt.Errorf("%s:%d: Block %s: %w", path, n+1, r.BlockID, verr)
+			return fmt.Errorf("%s:%d: Block %s: %w", path, n, r.BlockID, verr)
 		}
 		k := r.QuerySHA256 + "/" + r.BlockID
 		if prev, dup := seen[k]; dup && prev != v {
-			return nil, fmt.Errorf("%s:%d: Zelle %s zweimal mit verschiedenen Urteilen", path, n+1, k)
+			return fmt.Errorf("%s:%d: Zelle %s zweimal mit verschiedenen Urteilen", path, n, k)
 		}
 		seen[k] = v
 		out = append(out, FableJudgement{QuerySHA256: r.QuerySHA256, BlockID: r.BlockID, Verdict: v})
+		return nil
+	}); perr != nil {
+		return nil, perr
 	}
 	if len(out) == 0 {
 		return nil, errors.New("der Bogen hält keine geurteilte Zeile")

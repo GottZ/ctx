@@ -15,15 +15,17 @@
 package goldbench
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/GottZ/ctx/internal/jsonl"
 )
 
 // Axes ist die kanonische Achsen-Liste — ein Eintrag pro Gold-Datei.
@@ -130,6 +132,11 @@ type GenStamp struct {
 	Model string `json:"model,omitempty"`
 }
 
+// caseLineMaxBytes ist der Zeilendeckel einer Fall-Datei: einzelne Fälle
+// (links, rerank) überschreiten das 64-KiB-Default-Token-Limit, 4 MiB deckelt
+// stattdessen die Datei, die versehentlich ohne Zeilenumbrüche entstanden ist.
+const caseLineMaxBytes = 4 * 1024 * 1024
+
 // LoadCases lädt die Gold-Fälle einer Achse aus <dir>/<axis>.jsonl und
 // validiert das axis-Feld jeder Zeile.
 func LoadCases(dir, axis string) ([]*Case, error) {
@@ -141,32 +148,41 @@ func LoadCases(dir, axis string) ([]*Case, error) {
 	defer func() { _ = f.Close() }()
 
 	var cases []*Case
-	sc := bufio.NewScanner(f)
-	// Einzelne Fälle (links, rerank) überschreiten das 64-KiB-Default-Token-Limit.
-	sc.Buffer(make([]byte, 0, 256*1024), 4*1024*1024)
-	line := 0
-	for sc.Scan() {
-		line++
-		raw := sc.Bytes()
-		if len(raw) == 0 {
-			continue
-		}
-		var c Case
-		if err := json.Unmarshal(raw, &c); err != nil {
-			return nil, fmt.Errorf("goldbench: %s:%d: %w", path, line, err)
-		}
+	// invalid trennt die Zeilen-Befunde dieses Lesers von den Lesefehlern, die
+	// aus jsonl kommen — beide verlassen EachReader als error, tragen aber
+	// verschiedene Einkleidungen.
+	var invalid error
+	collect := func(line int, c Case) error {
 		if c.Axis != axis {
-			return nil, fmt.Errorf("goldbench: %s:%d: axis %q erwartet, %q gefunden", path, line, axis, c.Axis)
+			invalid = fmt.Errorf("goldbench: %s:%d: axis %q erwartet, %q gefunden", path, line, axis, c.Axis)
+			return invalid
 		}
 		if c.ID == "" || len(c.Input) == 0 || len(c.Gold) == 0 {
-			return nil, fmt.Errorf("goldbench: %s:%d: unvollständiger Fall (id/input/gold)", path, line)
+			invalid = fmt.Errorf("goldbench: %s:%d: unvollständiger Fall (id/input/gold)", path, line)
+			return invalid
 		}
 		cases = append(cases, &c)
+		return nil
 	}
-	if err := sc.Err(); err != nil {
+	// Die drei Optionen sind zusammen exakt der bufio.Scanner, der hier vorher
+	// stand — er war in allen drei Punkten strenger als die übrigen elf
+	// JSONL-Leser des Baums, und das ist Absicht: nur die wirklich leere Zeile
+	// wird übersprungen (eine aus Leerzeichen ist ein Fall-Fehler), ein
+	// terminales CR gehört nicht zur Zeile, und caseLineMaxBytes deckelt sie.
+	err = jsonl.EachReader(f, path, collect,
+		jsonl.SkipBlank(false), jsonl.TrimCR(true), jsonl.MaxLine(caseLineMaxBytes))
+	switch {
+	case err == nil:
+		return cases, nil
+	case invalid != nil:
+		return nil, invalid
+	default:
+		var le *jsonl.LineError
+		if errors.As(err, &le) {
+			return nil, fmt.Errorf("goldbench: %w", err)
+		}
 		return nil, fmt.Errorf("goldbench: scan %s: %w", path, err)
 	}
-	return cases, nil
 }
 
 // SampleCases begrenzt eine Fall-Liste deterministisch auf n Fälle: Shuffle

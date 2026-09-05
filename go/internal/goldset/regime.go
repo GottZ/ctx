@@ -17,10 +17,9 @@ package goldset
 // Source: https://github.com/GottZ/ctx
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"strings"
+
+	"github.com/GottZ/ctx/internal/jsonl"
 )
 
 // FileRegimeLabels is the conventional name of the X-W0 label file inside the
@@ -51,31 +50,23 @@ type RegimeLabel struct {
 // into the wrong half, and a half that is wrong by a handful of cases is not
 // visible in any figure the report prints.
 func ReadRegimeLabels(path string) (map[string]string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	out := map[string]string{}
-	for n, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var l RegimeLabel
-		if err := json.Unmarshal([]byte(line), &l); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, n+1, err)
-		}
+	if err := jsonl.Each(path, func(n int, l RegimeLabel) error {
 		if l.QuerySHA256 == "" {
-			return nil, fmt.Errorf("%s:%d: Label ohne query_sha256 — es ließe sich keinem Fall zuordnen", path, n+1)
+			return fmt.Errorf("%s:%d: Label ohne query_sha256 — es ließe sich keinem Fall zuordnen", path, n)
 		}
 		if l.Regime != RegimeLocal && l.Regime != RegimeGlobal {
-			return nil, fmt.Errorf("%s:%d: regime=%q, erwartet %q oder %q",
-				path, n+1, l.Regime, RegimeLocal, RegimeGlobal)
+			return fmt.Errorf("%s:%d: regime=%q, erwartet %q oder %q",
+				path, n, l.Regime, RegimeLocal, RegimeGlobal)
 		}
 		if prev, seen := out[l.QuerySHA256]; seen {
-			return nil, fmt.Errorf("%s:%d: query_sha256 doppelt gelabelt (%q und %q)",
-				path, n+1, prev, l.Regime)
+			return fmt.Errorf("%s:%d: query_sha256 doppelt gelabelt (%q und %q)",
+				path, n, prev, l.Regime)
 		}
 		out[l.QuerySHA256] = l.Regime
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("%s: keine Labels gelesen", path)
