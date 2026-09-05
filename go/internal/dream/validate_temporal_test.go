@@ -105,7 +105,7 @@ func TestTemporalReviewParse_Empty(t *testing.T) {
 // json.Unmarshal on the raw content reported "invalid character '`'" — and the
 // failure is invisible in production: it is non-fatal, and
 // dream_temporal_validated_at is stamped anyway, so the block is not re-dreamed
-// for it. Reverting the stripCodeFence call turns these rows red.
+// for it. Reverting the llm.StripJSONFence call turns these rows red.
 func TestParseTemporalReviewFences(t *testing.T) {
 	const payload = `{"dates":[{"date":"2026-03-15","source":"explicit"}]}`
 

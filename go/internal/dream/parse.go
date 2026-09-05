@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/llm"
 )
 
 // Format tokens for parseLinks, persisted in context_llm_log.metadata.parse_format
@@ -77,7 +79,7 @@ func normalizeLinks(links []Link) []Link {
 func parseLinksRaw(raw string) ([]Link, string, error) {
 	trimmed := strings.TrimSpace(raw)
 	wasFenced := strings.HasPrefix(trimmed, "```")
-	body := stripCodeFence(trimmed)
+	body := llm.StripJSONFence(trimmed)
 	if body == "" || body == "[]" || body == "{}" {
 		return nil, "", nil
 	}
@@ -380,18 +382,6 @@ func isEmptyJSONArray(v json.RawMessage) bool {
 	}
 	var arr []json.RawMessage
 	return json.Unmarshal([]byte(s), &arr) == nil && len(arr) == 0
-}
-
-// stripCodeFence removes a leading ```json (or ```) fence and trailing ```
-// from LLM responses that wrap their JSON output. Idempotent on plain JSON.
-func stripCodeFence(raw string) string {
-	if !strings.HasPrefix(raw, "```") {
-		return raw
-	}
-	raw = strings.TrimPrefix(raw, "```json")
-	raw = strings.TrimPrefix(raw, "```")
-	raw = strings.TrimSuffix(raw, "```")
-	return strings.TrimSpace(raw)
 }
 
 // parseObjectMapLinks handles drift form 2 (Welle-25, qwen3.6:27b ollama):

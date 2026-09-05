@@ -73,9 +73,9 @@ type TemporalReview struct {
 }
 
 // parseTemporalReview decodes ONE Phase-2 answer, tolerating a ```json (or
-// bare ```) fence around it — the same stripCodeFence the link parser applies
-// (parse.go), idempotent on bare JSON, so nothing changes for a backend that
-// answers plainly.
+// bare ```) fence around it — the same llm.StripJSONFence the link parser
+// applies (parse.go), idempotent on bare JSON, so nothing changes for a
+// backend that answers plainly.
 //
 // The fence tolerance is not cosmetic. This decode is the only consumer of the
 // Phase-2 answer, and its failure path is NON-FATAL: ValidateTemporal logs a
@@ -87,7 +87,7 @@ type TemporalReview struct {
 // costs a block its temporal findings for good, and says so only in a WARN.
 func parseTemporalReview(raw string) (*TemporalReview, error) {
 	var review TemporalReview
-	if err := json.Unmarshal([]byte(stripCodeFence(strings.TrimSpace(raw))), &review); err != nil {
+	if err := json.Unmarshal([]byte(llm.StripJSONFence(strings.TrimSpace(raw))), &review); err != nil {
 		return nil, err
 	}
 	return &review, nil

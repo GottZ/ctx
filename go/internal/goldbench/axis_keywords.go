@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
 
@@ -102,7 +103,7 @@ func axisTagging() axisDef {
 // parseTagsOutput parst {"tags":[...]} mit Fence-Toleranz.
 func parseTagsOutput(raw string) ([]string, bool) {
 	var g taggingGold
-	if err := json.Unmarshal([]byte(stripFence(raw)), &g); err != nil || g.Tags == nil {
+	if err := json.Unmarshal([]byte(llm.StripJSONFence(raw)), &g); err != nil || g.Tags == nil {
 		return nil, false
 	}
 	return g.Tags, true
@@ -224,7 +225,7 @@ func scoreTitle(runs []caseRun) (AxisResult, []CaseScore) {
 
 		cs := CaseScore{ID: r.c.ID}
 		var out titleGold
-		if err := json.Unmarshal([]byte(stripFence(firstOutput(r))), &out); err != nil || strings.TrimSpace(out.Title) == "" {
+		if err := json.Unmarshal([]byte(llm.StripJSONFence(firstOutput(r))), &out); err != nil || strings.TrimSpace(out.Title) == "" {
 			f1s = append(f1s, 0)
 			perCase = append(perCase, cs)
 			continue
@@ -252,17 +253,4 @@ func scoreTitle(runs []caseRun) (AxisResult, []CaseScore) {
 			"constraint_pass_rate": ratioOrZero(constraintPass, len(runs)),
 		},
 	}, perCase
-}
-
-// stripFence entfernt einen führenden ```json-/```-Fence und den
-// abschließenden ``` (Toleranz für Fence-Drift, analog dream/parse.go:243).
-func stripFence(raw string) string {
-	s := strings.TrimSpace(raw)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	return strings.TrimSpace(s)
 }

@@ -242,14 +242,16 @@ func buildRecurrencePrompt(source BlockInfo, c recurrenceCandidate) (system, use
 	return recurrenceSystemPrompt + "\n\n" + promptguard.Rule(nonce), b.String()
 }
 
-// parseRecurrenceResponse tolerates code-fence wrapping and whitespace.
-// Single object output — no array form (Phase 2 evaluates one pair at a time).
+// parseRecurrenceResponse tolerates code-fence wrapping and whitespace through
+// the one shared strip (llm.StripJSONFence). Single object output — no array
+// form (Phase 2 evaluates one pair at a time).
+//
+// Welle T04-13 narrowed that tolerance by exactly one case: this parser ran its
+// trims UNCONDITIONALLY and therefore also cut a trailing ``` off an answer
+// that never opened a fence. It no longer does — those backticks are model
+// content, and TestParseRecurrenceResponse_UnopenedTrailingFence pins it.
 func parseRecurrenceResponse(raw string) (recurrenceVerdict, error) {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	s = strings.TrimSpace(s)
+	s := llm.StripJSONFence(raw)
 
 	var v recurrenceVerdict
 	if err := json.Unmarshal([]byte(s), &v); err != nil {

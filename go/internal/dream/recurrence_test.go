@@ -41,6 +41,26 @@ func TestParseRecurrenceResponse_BareFence(t *testing.T) {
 	}
 }
 
+// TestParseRecurrenceResponse_UnopenedTrailingFence is the pinned expectation
+// of Welle T04-13 — the ONE behaviour change of that wave.
+//
+// BEFORE the wave this exact input returned a verdict: the parser ran its
+// TrimPrefix/TrimSuffix chain unconditionally, so it cut the trailing ``` off
+// an answer that never opened a fence. The old expectation was
+//
+//	v, err := parseRecurrenceResponse(raw)  // err == nil, v.Verdict == "recurrent"
+//
+// and the line below replaces it. dream's link parser and the goldbench axis
+// never had that tolerance (both guard on HasPrefix); recurrence was the
+// outlier, and llm.StripJSONFence aligns it. Backticks that open nothing are
+// model content, not fence syntax, and an answer carrying them is malformed.
+func TestParseRecurrenceResponse_UnopenedTrailingFence(t *testing.T) {
+	raw := "{\"verdict\":\"recurrent\",\"pattern\":\"parallel\",\"confidence\":0.85} ```"
+	if _, err := parseRecurrenceResponse(raw); err == nil {
+		t.Fatal("expected parse error: a trailing ``` without an opening fence is content, not syntax")
+	}
+}
+
 func TestParseRecurrenceResponse_Whitespace(t *testing.T) {
 	raw := "   \n  {\"verdict\":\"recurrent\",\"pattern\":\"sequence\",\"confidence\":0.82}  \n"
 	v, err := parseRecurrenceResponse(raw)
