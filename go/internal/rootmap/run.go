@@ -332,10 +332,10 @@ func gather(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, cfg Con
 	}, nil
 }
 
-// rowsFrom projects the store nodes onto topic rows. StableID and Label stay
-// empty until axis 01 puts the topic identity on the read path (W7): the
-// renderer degrades to D2/D3 and the line keeps repr= as its resolvable handle,
-// which is precisely why the format carries BOTH identifiers.
+// rowsFrom projects the store nodes onto topic rows, StableID and Label
+// included (W7 landed). Both are empty only on the legacy read path, whose
+// scan omits the two columns (store/overview.go:275): there the renderer
+// degrades to D2/D3 and repr= is the handle — why the format carries BOTH.
 func rowsFrom(nodes []store.OverviewNode) []Row {
 	rows := make([]Row, 0, len(nodes))
 	for _, n := range nodes {

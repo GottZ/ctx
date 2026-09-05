@@ -655,9 +655,9 @@ type RootMapConfig struct {
 	// the cap that seam would import 8.400–84.000 inference calls per cycle at
 	// the target scale.
 	LabelBudget int `key:"root_map.label_budget" env:"CTX_ROOT_MAP_LABEL_BUDGET" default:"0" mut:"hot" tenancy:"global-only"`
-	// The three super_* knobs belong to the meta-cluster level (W-F, P3) and
-	// ship declared-without-consumer, exactly like the C0 precedent: the
-	// namespace is complete from the first wave that owns it.
+	// The three super_* knobs are consumed: events/scheduler.go:1264, :1423-1427
+	// and handler/digest.go:125 carry them into rootmap/run.go:283 and
+	// overview/cluster.go:606-609. label_budget above has 0 non-test readers.
 	SuperEnabled       bool    `key:"root_map.super_enabled" env:"CTX_ROOT_MAP_SUPER_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
 	SuperMinResolution float64 `key:"root_map.super_min_resolution" env:"CTX_ROOT_MAP_SUPER_MIN_RESOLUTION" default:"0.2" mut:"hot" tenancy:"global-only"`
 	SuperMaxNodes      int     `key:"root_map.super_max_nodes" env:"CTX_ROOT_MAP_SUPER_MAX_NODES" default:"20000" mut:"hot" parse:"strict" tenancy:"global-only"`

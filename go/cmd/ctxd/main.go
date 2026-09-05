@@ -448,10 +448,10 @@ func main() {
 	// the _global base (the overlay needs the pool + secret resolver, hence the
 	// settings layer supplies it). Set here at boot, before the scheduler and
 	// HTTP server start, so the happens-before holds and the field needs no
-	// synchronization. Behavior-neutral until a caller actually resolves a
-	// tenant: SnapshotForRequest stays on base until C5 wires the scope hook,
-	// SnapshotForTenant has no caller until the C6 background iteration, and a
-	// single-tenant deployment (no per-tenant rows) inherits the base anyway.
+	// synchronization. Both consumers are wired: SnapshotForRequest gets its
+	// scope from the C5 hook (config.SetRequestScopeHook, server.go:48), and
+	// config.Store.SnapshotForTenant has nine non-test callers, among them
+	// events/scheduler.go:921. A single-tenant deployment inherits the base.
 	cfgStore.SetOverlay(settings.TenantOverlay(pool))
 
 	// F3-P1: backend pool. context_backends is the ONLY source of backend

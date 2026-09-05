@@ -288,12 +288,12 @@ func fromSources(lookup func(key string) (string, bool)) (*Config, []Issue) {
 // settings: what an installation on which nobody set anything runs on.
 //
 // It was introduced (A02-W5) as the comparison base of the conditional env
-// backend seed; β1 removed that seed, so the function currently has no
-// caller. It is kept rather than deleted because the surface it exposes —
-// "the registry defaults as a Config" — is the one design/02 §9 hands to the
-// Achse-01 key retirement to decide on ("W5s Default-Vergleich braucht die
-// Registry-Defaults als exportierte Vergleichsbasis, solange die Keys
-// leben"), and that decision is not this wave's.
+// backend seed; β1 removed that seed, so no production code calls it. It is
+// kept because it is the only exported form of "the registry defaults as a
+// Config", and 11 call sites across 9 test files rest on it (internal/events
+// 4 files, internal/handler 4, internal/config 1) — deleting it would make
+// each of them build that base by hand. The earlier note here tied the
+// function to the Achse-01 key retirement; that retirement has landed.
 //
 // No Issues can arise — the default path never parses a raw value — so the
 // slice is dropped rather than pushed onto every caller.

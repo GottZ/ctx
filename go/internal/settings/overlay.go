@@ -14,10 +14,10 @@ import (
 // effective config as the _global base plus that tenant's context_settings rows,
 // precedence tenant > _global > env > default — the second overlay pass on the
 // same config.Build machine, fed by the MT3-W3 loadTenantOverrideRows. This is
-// the consumer that wave; the returned value is injected into config.Store by a
-// later wave (06-C3). Until then config.Store.overlay is nil and SnapshotFor*
-// return the base unchanged, so the server is functionally identical
-// (pausability invariant).
+// the consumer that wave; 06-C3 has landed, so the returned value is injected
+// into config.Store at boot — cfgStore.SetOverlay(settings.TenantOverlay(pool))
+// in cmd/ctxd/main.go:455, before the scheduler and the HTTP server start. A
+// deployment without per-tenant rows still inherits the base unchanged.
 //
 // Contract (config.TenantOverlay, store.go). The Store has already rejected an
 // empty or reserved ('_'-prefixed) scope before calling the overlay, so
