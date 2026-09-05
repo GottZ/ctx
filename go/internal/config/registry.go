@@ -13,10 +13,15 @@ import (
 // settings key to its env var, type, default, mutability, secret class and
 // parse strictness. F2 validates settings-writes against exactly this table.
 type entry struct {
-	Key     string // canonical settings key, e.g. "rerank.blend_weight"
-	EnvVar  string // env var name; "-" = no env source (settings-only from F2)
-	Mut     string // hot | restart | coupled | coupled:embed-cache
-	Secret  string // "" | "fp" | "presence"
+	Key    string // canonical settings key, e.g. "rerank.blend_weight"
+	EnvVar string // env var name; "-" = no env source (settings-only from F2)
+	Mut    string // hot | restart | coupled | coupled:embed-cache
+	Secret string // "" | "fp" | "presence"
+	// Strict carries the whole parse class, and the class has exactly two
+	// states: no parse tag = tolerant (a malformed value WARNs and keeps the
+	// default), parse:"strict" = the malformed value aborts the boot. There is
+	// no third value — buildEntry rejects anything else, because entry has
+	// nowhere to put it (parsetag_test.go pins both halves).
 	Strict  bool   // parse:"strict" — malformed value is a boot abort
 	Guard   string // "" | "sensitivity-downgrade" — lowering needs a confirm flag (F3 §3.5)
 	Tenancy string // tenant-overridable | global-only — MT3-W2: may a tenant override this key on top of _global?
@@ -172,7 +177,7 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 		return entry{}, fmt.Errorf("%s: invalid secret tag %q", loc, secret)
 	}
 	parse := f.Tag.Get("parse")
-	if parse != "" && parse != "strict" && parse != "safe" {
+	if parse != "" && parse != "strict" {
 		return entry{}, fmt.Errorf("%s: invalid parse tag %q", loc, parse)
 	}
 	guard := f.Tag.Get("guard")

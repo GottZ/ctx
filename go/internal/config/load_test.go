@@ -242,8 +242,8 @@ func TestFromSourcesDefaultsAreClean(t *testing.T) {
 }
 
 func TestFromSourcesSafeMalformedWarnsAndDefaults(t *testing.T) {
-	// parse:"safe" fields: malformed value keeps the default — today's silent
-	// getEnv*Safe fallback, now visible as a WARN (Delta 3).
+	// Fields without a parse tag: malformed value keeps the default — today's
+	// silent getEnv*Safe fallback, now visible as a WARN (Delta 3).
 	c, issues := cfgFrom(t, map[string]string{
 		"rerank.max_docs":      "abc",
 		"rerank.blend_weight":  "xyz",
