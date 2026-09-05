@@ -2,9 +2,10 @@ package derived
 
 import (
 	"strings"
-	"unicode"
 
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/GottZ/ctx/internal/util"
 )
 
 // Normalize is the ONE comparison form of this module: NFKC, then case
@@ -35,24 +36,5 @@ import (
 // failure mode this gate exists for.
 func Normalize(s string) string {
 	s = strings.ToLower(norm.NFKC.String(s))
-	return strings.TrimSpace(collapseSpace(s))
-}
-
-// collapseSpace reduces every run of unicode.IsSpace to a single U+0020.
-func collapseSpace(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	space := false
-	for _, r := range s {
-		if unicode.IsSpace(r) {
-			space = true
-			continue
-		}
-		if space && b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		space = false
-		b.WriteRune(r)
-	}
-	return b.String()
+	return strings.TrimSpace(util.CollapseSpace(s))
 }

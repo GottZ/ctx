@@ -242,10 +242,13 @@ var phrasesEN = phrases{
 // lower, then everything before the first "-" (so "de-CH" is German). A regional
 // variant must never fall out of its language's branch.
 //
-// A LOCAL copy of dream.reportLanguage / topiclabel.promptLanguage on purpose,
-// twice over: depguard bars this package from internal/config, and
-// topiclabel/prompt.go documents the non-sharing of the language SURFACE as a
-// decision — the key is shared (E3-01, one knob per corpus), the code is not.
+// A LOCAL copy of util.PrimaryLanguageSubtag, which is where the shared
+// reduction lives since T04-5. What kept this copy local was depguard barring
+// the package from internal/config; that reason does not reach internal/util,
+// which is stdlib-pure and importable from here, so folding the two is open
+// work. Untouched by that question: topiclabel/prompt.go documents the
+// non-sharing of the language SURFACE as a decision — the key is shared
+// (E3-01, one knob per corpus), the rendering is not.
 //
 // The normalization is not redundant with config.Validate (V14), which already
 // trims and lowercases the stored value: Render is a pure function with callers

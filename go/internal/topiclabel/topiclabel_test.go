@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/util"
 )
 
 // G6 — the validation is STRUCTURAL and confidence-free. Project empiricism
@@ -283,7 +284,7 @@ func TestPromptLanguage(t *testing.T) {
 		"": "German", "de": "German", "de-DE": "German", "DE": "German",
 		"en": "English", "en-GB": "English", "tr": "Turkish", "xx": "xx",
 	} {
-		if got := languageName(promptLanguage(in)); got != want {
+		if got := languageName(util.PrimaryLanguageSubtag(in)); got != want {
 			t.Fatalf("language %q → %q, want %q", in, got, want)
 		}
 	}

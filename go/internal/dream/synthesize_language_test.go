@@ -78,26 +78,6 @@ func TestLegacyPromptFrozen(t *testing.T) {
 	}
 }
 
-// TestReportLanguagePrimarySubtag pins the normalization the switch rides on.
-func TestReportLanguagePrimarySubtag(t *testing.T) {
-	cases := map[string]string{
-		"":            "",
-		"  ":          "",
-		"de":          "de",
-		"DE":          "de",
-		" de-DE ":     "de",
-		"zh-Hant-TW":  "zh",
-		"pt-BR":       "pt",
-		"en":          "en",
-		"haw-us-x-yz": "haw",
-	}
-	for in, want := range cases {
-		if got := reportLanguage(in); got != want {
-			t.Errorf("reportLanguage(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestLangNameMapping pins the prompt-facing name table. The legacy pair
 // (""/"de") is deliberately absent: those tags take the frozen German prompt
 // and never reach langName — a case for them would be dead code that reads

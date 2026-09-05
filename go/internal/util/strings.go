@@ -1,5 +1,5 @@
 // Package util provides small, dependency-free helpers shared across packages:
-// text primitives over runes and tokens.
+// language-near text primitives — runes, tokens, word tables.
 //
 // THE BOUNDARY: this package imports the standard library and NOTHING ELSE —
 // no github.com/GottZ/ctx/... and no third-party module. That is what lets any

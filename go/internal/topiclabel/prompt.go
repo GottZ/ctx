@@ -4,27 +4,25 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/util"
 )
-
-// promptLanguage normalizes a dream.language value to its primary subtag
-// ("de-DE" → "de"), the same reduction the daily-report surface applies.
-//
-// The KEY is shared with the report by decision E3-01 — one language knob per
-// corpus, and a per-tenant language (parked backlog) inherits automatically.
-// The prompt SURFACE is not shared: this package must not import
-// internal/dream (the label pipeline is deliberately independent of the dream
-// router), and the two prompts say different things anyway.
-func promptLanguage(lang string) string {
-	lang = strings.ToLower(strings.TrimSpace(lang))
-	if i := strings.IndexByte(lang, '-'); i >= 0 {
-		lang = lang[:i]
-	}
-	return lang
-}
 
 // languageName maps a primary subtag to the English name the instruction uses.
 // Unknown subtags pass through — naming the tag is still a better instruction
 // than silently switching the model to English.
+//
+// The subtag reduction itself is util.PrimaryLanguageSubtag: the KEY is shared
+// with the daily report by decision E3-01 — one language knob per corpus, and
+// a per-tenant language (parked backlog) inherits automatically.
+//
+// DELIBERATELY NOT MERGED with dream.langName (design D-04, Naht 9). The two
+// tables differ in exactly one branch and the difference is the contract:
+// ""/"de" maps to "German" here and is UNREACHABLE there (the report takes a
+// frozen German prompt for those tags and never consults its table). Merging
+// them would make this surface fall through to a passthrough for the default
+// corpus language. The prompt SURFACE is not shared for a second reason
+// either: this package must not import internal/dream — the label pipeline is
+// deliberately independent of the dream router.
 func languageName(primary string) string {
 	switch primary {
 	case "", "de":
@@ -58,7 +56,7 @@ func languageName(primary string) string {
 func systemPromptFor(lang, nonce string) string {
 	return "You name clusters of a knowledge base. Given the titles of the most central blocks of one cluster " +
 		"plus its most frequent tags and categories, answer with a SHORT topical name of two to five words in " +
-		languageName(promptLanguage(lang)) + ".\n\n" +
+		languageName(util.PrimaryLanguageSubtag(lang)) + ".\n\n" +
 		"Rules: name the common SUBJECT, not one of the documents. No sentence, no punctuation at the end, no " +
 		"quotes, at most 120 characters. Never copy an identifier, a path, a host name or a key from the input.\n\n" +
 		"Answer with JSON and nothing else: {\"label\": \"...\"}\n\n" +

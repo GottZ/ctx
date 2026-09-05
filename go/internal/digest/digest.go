@@ -198,11 +198,12 @@ func Normalize(mode string) string {
 }
 
 // stubLanguage reduces a dream.language value to its primary subtag, the same
-// reduction dream.reportLanguage, topiclabel.promptLanguage and rootmap
-// .mapLanguage apply. A LOCAL copy for the same reason they are: this package
-// may not import internal/config (depguard config-layering), and the language
-// SURFACE is deliberately not shared between the packages that render text —
-// only the KEY is (E3-01, one language knob per corpus).
+// reduction util.PrimaryLanguageSubtag and rootmap.mapLanguage apply. A LOCAL
+// copy: what kept it local was the bar on importing internal/config (depguard
+// config-layering), and that reason does not reach internal/util — folding it
+// into util.PrimaryLanguageSubtag is open work. The language SURFACE stays
+// deliberately unshared between the packages that render text — only the KEY
+// is (E3-01, one language knob per corpus).
 func stubLanguage(lang string) string {
 	lang = strings.ToLower(strings.TrimSpace(lang))
 	if i := strings.IndexByte(lang, '-'); i >= 0 {

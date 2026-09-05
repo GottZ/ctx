@@ -44,13 +44,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/GottZ/ctx/internal/distillsource"
 	"github.com/GottZ/ctx/internal/sensitivity"
+	"github.com/GottZ/ctx/internal/util"
 )
 
 // THE SIZING KEYS ARE NOT CLAMPED HERE, and that is a decision rather than an
@@ -253,22 +253,7 @@ func distillPartBody(part []distillsource.Item) string {
 // merge two chunks that differ only in a rename — a silent drop of material,
 // which is the direction a dedup key must not err in.
 func distillNormalize(s string) string {
-	s = norm.NFC.String(s)
-	var b strings.Builder
-	b.Grow(len(s))
-	space := false
-	for _, r := range s {
-		if unicode.IsSpace(r) {
-			space = true
-			continue
-		}
-		if space && b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		space = false
-		b.WriteRune(r)
-	}
-	return b.String()
+	return util.CollapseSpace(norm.NFC.String(s))
 }
 
 // distillRowHash is distill_seen.row_hash: SHA-256 over the normalized chunk

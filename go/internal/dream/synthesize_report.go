@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,28 +42,13 @@ const (
 	legacyReportTag         = "tagesbericht"
 )
 
-// reportLanguage normalizes a dream.language value to its PRIMARY SUBTAG:
-// trim + lower, then everything before the first "-" ("de-DE" → "de"). The
-// primary subtag is what the report surface switches on — a regional variant
-// must not silently fall out of its language's branch. config.Validate (V14)
-// already normalizes and shape-checks the stored value; doing it again here
-// keeps the dream package parameter-pure and total for direct callers
-// (scheduler, handler, tests).
-func reportLanguage(lang string) string {
-	lang = strings.ToLower(strings.TrimSpace(lang))
-	if i := strings.IndexByte(lang, '-'); i >= 0 {
-		lang = lang[:i]
-	}
-	return lang
-}
-
 // isLegacyReportLanguage reports whether lang keeps the pre-config German
 // report surface: unset (the default) or a German tag. This ONE predicate
 // gates title, tag and system prompt together — they are one identity, and a
 // half-localized report (English title, German body) would be worse than
 // either side alone.
 func isLegacyReportLanguage(lang string) bool {
-	switch reportLanguage(lang) {
+	switch util.PrimaryLanguageSubtag(lang) {
 	case "", "de":
 		return true
 	default:
@@ -77,7 +63,7 @@ func dailySynthesisPromptFor(lang string) string {
 	if isLegacyReportLanguage(lang) {
 		return dailySynthesisSystemPrompt
 	}
-	return `Generate a compact daily report (200-400 words) for a knowledge-store system. Write as continuous prose in ` + langName(reportLanguage(lang)) + `. List the main focus areas of the last 24 hours, name new topics, and highlight patterns or anomalies.`
+	return `Generate a compact daily report (200-400 words) for a knowledge-store system. Write as continuous prose in ` + langName(util.PrimaryLanguageSubtag(lang)) + `. List the main focus areas of the last 24 hours, name new topics, and highlight patterns or anomalies.`
 }
 
 // dailyReportTitleFor returns the block title — half the upsert key, see
@@ -100,11 +86,20 @@ func dailyReportTags(lang string) []string {
 }
 
 // langName maps a language's PRIMARY SUBTAG to the English language name
-// interpolated into the system prompt. Callers pass reportLanguage(...) of a
-// NON-legacy tag, so ""/"de" never arrive here (they take the frozen German
-// prompt) — no case for them. Unknown tags pass through as-is: the LLM knows
-// far more language codes than this table, and V14 has already constrained
-// the value to [a-z0-9-], so the passthrough carries no free text.
+// interpolated into the system prompt. Callers pass
+// util.PrimaryLanguageSubtag(...) of a NON-legacy tag, so ""/"de" never arrive
+// here (they take the frozen German prompt) — no case for them. Unknown tags
+// pass through as-is: the LLM knows far more language codes than this table,
+// and V14 has already constrained the value to [a-z0-9-], so the passthrough
+// carries no free text.
+//
+// DELIBERATELY NOT MERGED with topiclabel.languageName (design D-04, Naht 9).
+// The two tables differ in exactly one branch and the difference is the
+// contract: ""/"de" is UNREACHABLE here and maps to "German" there. Merging
+// them would either add a dead German case to this table or make the label
+// surface fall through to a passthrough for the default corpus language. The
+// shared part — the subtag reduction — is util.PrimaryLanguageSubtag; the
+// name tables are not shared, and that is not an oversight to clean up later.
 func langName(primary string) string {
 	switch primary {
 	case "en":

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/GottZ/ctx/internal/util"
 )
 
 // --- Tokenizer ---.
@@ -114,26 +116,19 @@ func fuzzyMatch(tok, target string) bool {
 
 // --- Month Maps ---.
 
-var monthMapDE = map[string]time.Month{
-	"januar": time.January, "februar": time.February, "märz": time.March, "maerz": time.March,
-	"april": time.April, "mai": time.May, "juni": time.June,
-	"juli": time.July, "august": time.August, "september": time.September,
-	"oktober": time.October, "november": time.November, "dezember": time.December,
-}
-
-var monthMapEN = map[string]time.Month{
-	"january": time.January, "february": time.February, "march": time.March,
-	"april": time.April, "may": time.May, "june": time.June,
-	"july": time.July, "august": time.August, "september": time.September,
-	"october": time.October, "november": time.November, "december": time.December,
-}
-
 // lookupMonth returns the month for a German or English month name (lowercased).
+// The tables are util.MonthDE/MonthEN, shared with the date extraction in
+// internal/store — the two packages carried identical copies (design D-04,
+// Naht 9).
+//
+// German is consulted first, and the order decides nothing: the four keys that
+// appear in both tables ("april", "august", "november", "september") are
+// spelled the same in both languages and carry the same month.
 func lookupMonth(tok string) (time.Month, bool) {
-	if m, ok := monthMapDE[tok]; ok {
+	if m, ok := util.MonthDE[tok]; ok {
 		return m, true
 	}
-	if m, ok := monthMapEN[tok]; ok {
+	if m, ok := util.MonthEN[tok]; ok {
 		return m, true
 	}
 	return 0, false

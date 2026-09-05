@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GottZ/ctx/internal/util"
 )
 
 var (
@@ -29,21 +31,6 @@ var (
 	// English month+year: "March 2026".
 	enMonthYearExtract = regexp.MustCompile(`(?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(20[2-3]\d)\b`)
 )
-
-var deMonthMap = map[string]time.Month{
-	"januar": time.January, "februar": time.February, "märz": time.March,
-	"maerz": time.March, "april": time.April, "mai": time.May,
-	"juni": time.June, "juli": time.July, "august": time.August,
-	"september": time.September, "oktober": time.October,
-	"november": time.November, "dezember": time.December,
-}
-
-var enMonthMap = map[string]time.Month{
-	"january": time.January, "february": time.February, "march": time.March,
-	"april": time.April, "may": time.May, "june": time.June,
-	"july": time.July, "august": time.August, "september": time.September,
-	"october": time.October, "november": time.November, "december": time.December,
-}
 
 // ExtractDates extracts all recognizable timestamps from text content.
 // Parses ISO dates (with optional HH:MM time) and German dot-format dates.
@@ -106,7 +93,7 @@ func ExtractDates(content string) []time.Time {
 	for _, m := range deMonthYearExtract.FindAllStringSubmatch(content, -1) {
 		if len(m) == 3 {
 			monthStr := strings.ToLower(m[1])
-			if month, ok := deMonthMap[monthStr]; ok {
+			if month, ok := util.MonthDE[monthStr]; ok {
 				ds := fmt.Sprintf("%s-%02d-01", m[2], int(month))
 				if t, err := time.Parse("2006-01-02", ds); err == nil {
 					add(t)
@@ -119,7 +106,7 @@ func ExtractDates(content string) []time.Time {
 	for _, m := range enMonthYearExtract.FindAllStringSubmatch(content, -1) {
 		if len(m) == 3 {
 			monthStr := strings.ToLower(m[1])
-			if month, ok := enMonthMap[monthStr]; ok {
+			if month, ok := util.MonthEN[monthStr]; ok {
 				ds := fmt.Sprintf("%s-%02d-01", m[2], int(month))
 				if t, err := time.Parse("2006-01-02", ds); err == nil {
 					add(t)
