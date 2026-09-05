@@ -52,11 +52,6 @@ const (
 	StratumS0   = "S0"
 )
 
-// CalibrationStrata are the four strata kappa, rho and pi are estimated over.
-// The core is a census (weight 1, no sampling variance) and S0 feeds only
-// ControlHitRate — neither belongs in an estimator of the judge's error rates.
-func CalibrationStrata() []string { return []string{StratumS1, StratumS2, StratumS3, StratumS4} }
-
 // stratumOrder fixes the key's row order so two draws of one seed are
 // byte-identical regardless of map iteration.
 var stratumOrder = map[string]int{
@@ -500,32 +495,4 @@ func ReadDrawKey(path string) (DrawKey, error) {
 		return k, fmt.Errorf("%s: Ziehungs-Schlüssel ohne Zellen", path)
 	}
 	return k, nil
-}
-
-// MarkFromDrawKey flags the template cells a draw selected, with their stratum,
-// weight and core membership — the §C3-2-D05-8 (b) counterpart of MarkControls.
-//
-// A key row without a template row aborts, for the same reason MarkControls
-// aborts: a sample that quietly lost members estimates a population it no
-// longer has.
-func MarkFromDrawKey(cells []JudgeCell, k DrawKey) (int, error) {
-	if len(k.Cells) == 0 {
-		return 0, errors.New("Ziehungs-Schlüssel hält keine Zelle — der Bogen ließe sich nicht markieren")
-	}
-	pos := make(map[string]int, len(cells))
-	for i, c := range cells {
-		pos[c.QuerySHA256+"/"+c.BlockID] = i
-	}
-	marked := 0
-	for _, d := range k.Cells {
-		i, ok := pos[d.joinKey()]
-		if !ok {
-			return 0, fmt.Errorf("%s/%s: Zelle des Ziehungs-Schlüssels ohne Vorlagen-Zeile",
-				d.QuerySHA256, d.BlockID)
-		}
-		cells[i].Stratum, cells[i].Weight, cells[i].CoreQuery = d.Stratum, d.Weight, d.CoreQuery
-		cells[i].Control = d.Control
-		marked++
-	}
-	return marked, nil
 }

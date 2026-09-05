@@ -70,7 +70,6 @@ type statusCache struct {
 const (
 	ansiReset   = "\x1b[0m"
 	ansiDim     = "\x1b[2m"
-	ansiBold    = "\x1b[1m"
 	ansiGreen   = "\x1b[32m"
 	ansiYellow  = "\x1b[33m"
 	ansiOrange  = "\x1b[38;5;208m"

@@ -37,11 +37,6 @@ func BenchBuildClassifyUser(question, title, content string) string {
 	return buildClassifyUser(question, title, content)
 }
 
-// BenchSystemPromptV52 liefert den v5.2-Synthesis-System-Prompt
-// (synthesize.go:123) OHNE Nonce-Rule. Der vollständige Prompt inklusive
-// Rule entsteht über das exportierte BuildPrompt.
-func BenchSystemPromptV52() string { return systemPromptV52 }
-
 // BenchTranslationSystemPrompt liefert den System-Prompt der
 // query-translate-Pipeline (translate.go:39).
 func BenchTranslationSystemPrompt() string { return translationSystemPrompt }

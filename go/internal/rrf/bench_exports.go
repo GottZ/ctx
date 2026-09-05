@@ -13,11 +13,6 @@
 // Source: https://github.com/GottZ/ctx
 package rrf
 
-// BenchRerankSystemPrompt liefert den nackten rerank-judge-System-Prompt OHNE
-// die Nonce-Rule (rerank.go:80). Der vollständige System-Prompt inklusive
-// Rule entsteht über BenchBuildRerankJudgePrompt.
-func BenchRerankSystemPrompt() string { return rerankSystemPrompt }
-
 // BenchBuildRerankJudgePrompt baut System- und User-Prompt des LLM-Judge
 // (rerank.go:205) — inklusive promptguard-Nonce, exakt wie in Produktion.
 func BenchBuildRerankJudgePrompt(query string, docsToRerank []SearchResult) (system, user string) {

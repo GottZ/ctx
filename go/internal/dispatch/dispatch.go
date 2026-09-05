@@ -65,15 +65,6 @@ type Target struct {
 	Origin string
 }
 
-// NewTarget builds a Target from a backend base_url.
-func NewTarget(baseURL string) (Target, error) {
-	o, err := NormalizeOrigin(baseURL)
-	if err != nil {
-		return Target{}, err
-	}
-	return Target{Origin: o}, nil
-}
-
 // NormalizeOrigin canonicalizes a backend base_url to its physical origin:
 // scheme and host lowercase, default ports made explicit (http ⇒ :80,
 // https ⇒ :443), path/query/fragment dropped (including a /v1 suffix).

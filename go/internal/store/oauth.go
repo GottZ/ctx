@@ -54,18 +54,6 @@ type RegisterOAuthClientSpec struct {
 	Metadata map[string]any
 }
 
-// CreateOAuthClient generates a new client_id + client_secret pair and stores it.
-// Returns the client and the plaintext secret (shown once, then only hash stored).
-// Label-only admin path — kept byte-compatible; explicit registrations go
-// through RegisterOAuthClient.
-func CreateOAuthClient(ctx context.Context, pool *pgxpool.Pool, label string, createdBy string) (*OAuthClient, string, error) {
-	return RegisterOAuthClient(ctx, pool, RegisterOAuthClientSpec{
-		Label:     label,
-		Source:    "admin",
-		CreatedBy: createdBy,
-	})
-}
-
 // RegisterOAuthClient stores an explicit client registration (design 02 §4a).
 // A secret is minted for every registration except explicit public clients
 // (TokenEndpointAuthMethod == "none" via DCR keeps client_secret_hash = ''

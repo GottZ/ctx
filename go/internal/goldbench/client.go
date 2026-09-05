@@ -168,17 +168,11 @@ func isContextOverflowBody(body string) bool {
 		strings.Contains(s, "n_ctx")
 }
 
-// Chat führt einen Chat-Completions-Call aus und gibt den Antwort-Content
-// zurück. Fehlerpfade sind mit %w gewrappt; der Aufrufer entscheidet über
-// Retry-Politik (der Harness macht bewusst keine — ein Bench misst das
-// Modell, nicht die Netz-Resilienz).
-// Chat behält die alte Signatur; ChatWithUsage liefert zusätzlich Usage
-// und finish_reason (für Durchsatz- und Fail-Aggregation im Report).
-func (c *Client) Chat(ctx context.Context, req ChatRequest) (string, error) {
-	res, err := c.ChatWithUsage(ctx, req)
-	return res.Content, err
-}
-
+// ChatWithUsage führt einen Chat-Completions-Call aus und liefert neben dem
+// Antwort-Content Usage und finish_reason (für Durchsatz- und Fail-Aggregation
+// im Report). Fehlerpfade sind mit %w gewrappt; der Aufrufer entscheidet über
+// Retry-Politik (der Harness macht bewusst keine — ein Bench misst das Modell,
+// nicht die Netz-Resilienz).
 func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult, error) {
 	body := wireRequest{
 		Model: c.model,

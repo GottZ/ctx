@@ -552,18 +552,6 @@ func dwMonthday() map[string]float64 {
 	return map[string]float64{"monthday": 1.0}
 }
 
-func dwLinearMonthday() map[string]float64 {
-	return map[string]float64{"linear": 0.5, "monthday": 0.5}
-}
-
-func dwSeasonal() map[string]float64 {
-	return map[string]float64{"seasonal": 1.0}
-}
-
-func dwLinearSeasonal() map[string]float64 {
-	return map[string]float64{"linear": 0.5, "seasonal": 0.5}
-}
-
 func dwHoliday() map[string]float64 {
 	// Annual holidays combine month (coarse) + seasonal (fine) for dual-anchor matching.
 	return map[string]float64{"month": 0.4, "seasonal": 0.6}
@@ -581,23 +569,9 @@ func singleResult(ref, date, dir string) *TemporalResult {
 	}
 }
 
-func singleResultDW(ref, date, dir string, dw map[string]float64) *TemporalResult {
-	return &TemporalResult{
-		Dates:            []TemporalDate{{Ref: ref, Date: date, Dir: dir}},
-		DimensionWeights: dw,
-	}
-}
-
 func rangeResult(ref, start, end, dir string) *TemporalResult {
 	return &TemporalResult{
 		Dates: []TemporalDate{{Ref: ref, Date: start, End: ptrStr(end), Dir: dir}},
-	}
-}
-
-func rangeResultDW(ref, start, end, dir string, dw map[string]float64) *TemporalResult {
-	return &TemporalResult{
-		Dates:            []TemporalDate{{Ref: ref, Date: start, End: ptrStr(end), Dir: dir}},
-		DimensionWeights: dw,
 	}
 }
 

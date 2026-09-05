@@ -557,10 +557,6 @@ var updateToolDef = llm.ToolDef{Type: "function", Function: llm.ToolDefFunction{
 		`"required":["id"]}`),
 }}
 
-// stagePreviewChars bounds the ConfirmCard content preview (display only —
-// the authoritative payload is server-held).
-const stagePreviewChars = 280
-
 // runStore stages a chat write (D-W6b) — it NEVER executes one. The stage
 // runner runs every direct-path write gate first; a gate rejection comes back
 // as a normal OK=false tool outcome (the model self-corrects, §3.7). On

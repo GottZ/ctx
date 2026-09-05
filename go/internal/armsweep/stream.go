@@ -87,9 +87,6 @@ func (s *RecordStream) Next() (Record, bool, error) {
 	return rec, true, nil
 }
 
-// Count is the number of records handed out so far.
-func (s *RecordStream) Count() int { return s.n }
-
 // Close releases the decompressor and the file.
 func (s *RecordStream) Close() error {
 	if s.gz != nil {

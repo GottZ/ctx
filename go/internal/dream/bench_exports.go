@@ -34,11 +34,6 @@ func BenchBuildKeywordPrompt(title, content string) string {
 // Pipeline (keywords.go:169).
 func BenchParseKeywords(raw string) ([]string, error) { return parseKeywords(raw) }
 
-// BenchDreamSystemPrompt liefert den nackten dream-eval-System-Prompt OHNE
-// die Nonce-Rule (evaluate.go:48). Für den vollständigen System-Prompt
-// inklusive Rule ist BenchBuildEvalPrompt die Quelle.
-func BenchDreamSystemPrompt() string { return dreamSystemPrompt }
-
 // BenchBuildEvalPrompt baut System- und User-Prompt der dream-eval-Pipeline
 // (evaluate.go:210) — inklusive promptguard-Nonce, exakt wie in Produktion.
 func BenchBuildEvalPrompt(source BlockInfo, candidates []BlockInfo) (system, user string) {
@@ -48,10 +43,6 @@ func BenchBuildEvalPrompt(source BlockInfo, candidates []BlockInfo) (system, use
 // BenchParseLinks parst eine dream-eval-Antwort mit allen produktiven
 // Drift-Formen (parse.go:40). Rückgabe wie parseLinks: (links, format, err).
 func BenchParseLinks(raw string) ([]Link, string, error) { return parseLinks(raw) }
-
-// BenchRecurrenceSystemPrompt liefert den nackten dream-recurrence-System-
-// Prompt OHNE die Nonce-Rule (recurrence.go:38).
-func BenchRecurrenceSystemPrompt() string { return recurrenceSystemPrompt }
 
 // BenchBuildRecurrencePrompt baut System- und User-Prompt der
 // dream-recurrence-Pipeline (recurrence.go:235). Der interne Typ

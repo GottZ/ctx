@@ -57,12 +57,6 @@ func (s *Set) ValidateTransition(typeName, from, to string) error {
 	return nil
 }
 
-// HasWorkflow reports whether the type carries a workflow state set.
-func (s *Set) HasWorkflow(typeName string) bool {
-	p, ok := s.Resolve(typeName)
-	return ok && len(p.Workflow.States) > 0
-}
-
 // WorkflowStates returns the ordered board-column status set for the type
 // (nil for a non-workflow/unknown type). The slice is shared with the immutable
 // Set — callers must not mutate it. It is the per-status-merge input for

@@ -52,18 +52,6 @@ const (
 // gold (§C3-2-D05-5, rule 1).
 func (v SheetVerdict) Relevant() bool { return v == SheetRelevant }
 
-// String is the sheet token of a verdict.
-func (v SheetVerdict) String() string {
-	switch v {
-	case SheetRelevant:
-		return "1"
-	case SheetUnsure:
-		return UnsureMark
-	default:
-		return "0"
-	}
-}
-
 // ParseSheetVerdict maps one filled sheet cell onto the tri-state vocabulary. An
 // empty cell stays ErrUnjudged: a skipped row and a negative verdict differ by
 // the whole of the judge's attention.
