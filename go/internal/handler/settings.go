@@ -32,6 +32,7 @@ import (
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -448,36 +449,18 @@ func (h *SettingsHandler) checkSecretRef(r *http.Request, key, raw string, ar *a
 // triggers emit audit + NOTIFY atomically with the row). scope is writeScope(ar)
 // — operator _global or the tenant's own scope, NEVER the request body.
 func (h *SettingsHandler) writeSetting(r *http.Request, key string, value json.RawMessage, scope string) error {
-	tx, err := h.pool.Begin(r.Context())
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(r.Context()) //nolint:errcheck // rollback after commit is a no-op
-	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
-		return err
-	}
-	if err := store.UpsertSetting(r.Context(), tx, key, scope, value, actorID(r)); err != nil {
-		return err
-	}
-	return tx.Commit(r.Context())
+	_, err := attributedTx(r.Context(), h.pool, func(tx pgx.Tx) (struct{}, error) {
+		return struct{}{}, store.UpsertSetting(r.Context(), tx, key, scope, value, actorID(r))
+	})
+	return err
 }
 
 // deleteSetting removes one override in an attributed transaction. scope is
 // writeScope(ar) — a tenant-admin deletes only its own row, never _global.
 func (h *SettingsHandler) deleteSetting(r *http.Request, key, scope string) (bool, error) {
-	tx, err := h.pool.Begin(r.Context())
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(r.Context()) //nolint:errcheck // rollback after commit is a no-op
-	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
-		return false, err
-	}
-	found, err := store.DeleteSetting(r.Context(), tx, key, scope, actorID(r))
-	if err != nil {
-		return false, err
-	}
-	return found, tx.Commit(r.Context())
+	return attributedTx(r.Context(), h.pool, func(tx pgx.Tx) (bool, error) {
+		return store.DeleteSetting(r.Context(), tx, key, scope, actorID(r))
+	})
 }
 
 // actorID extracts the acting key id for audit attribution.

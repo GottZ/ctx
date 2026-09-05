@@ -31,6 +31,7 @@ import (
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -355,37 +356,17 @@ func (h *SecretsHandler) referencedBy(r *http.Request) (map[string]secretRefs, e
 // putSealed persists one sealed secret in an attributed transaction. scope is
 // writeScope(ar) — the tenant's own scope or operator _global.
 func (h *SecretsHandler) putSealed(r *http.Request, name string, nonce, ct []byte, scope string) (bool, error) {
-	tx, err := h.pool.Begin(r.Context())
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(r.Context()) //nolint:errcheck // rollback after commit is a no-op
-	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
-		return false, err
-	}
-	created, err := store.PutSecret(r.Context(), tx, name, scope, nonce, ct, 1, actorID(r))
-	if err != nil {
-		return false, err
-	}
-	return created, tx.Commit(r.Context())
+	return attributedTx(r.Context(), h.pool, func(tx pgx.Tx) (bool, error) {
+		return store.PutSecret(r.Context(), tx, name, scope, nonce, ct, 1, actorID(r))
+	})
 }
 
 // deleteSealed removes one sealed secret in an attributed transaction. scope is
 // writeScope(ar) — a tenant-admin deletes only its own row.
 func (h *SecretsHandler) deleteSealed(r *http.Request, name, scope string) (bool, error) {
-	tx, err := h.pool.Begin(r.Context())
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(r.Context()) //nolint:errcheck // rollback after commit is a no-op
-	if err := store.SetTxRequestID(r.Context(), tx, RequestIDFromContext(r.Context())); err != nil {
-		return false, err
-	}
-	found, err := store.DeleteSecret(r.Context(), tx, name, scope, actorID(r))
-	if err != nil {
-		return false, err
-	}
-	return found, tx.Commit(r.Context())
+	return attributedTx(r.Context(), h.pool, func(tx pgx.Tx) (bool, error) {
+		return store.DeleteSecret(r.Context(), tx, name, scope, actorID(r))
+	})
 }
 
 // fail logs the cause and answers a value-free 500 — secrets error paths

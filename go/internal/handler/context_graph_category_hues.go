@@ -25,6 +25,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -164,36 +165,18 @@ func validCategoryName(category string) (int, string) {
 // trigger fires atomically with the row).
 func (h *GraphCategoryHuesHandler) upsert(r *http.Request, scope, category string, hue int16) error {
 	ctx := r.Context()
-	tx, err := h.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		return err
-	}
-	if err := store.UpsertCategoryHue(ctx, tx, scope, category, hue, actorID(r)); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	_, err := attributedTx(ctx, h.pool, func(tx pgx.Tx) (struct{}, error) {
+		return struct{}{}, store.UpsertCategoryHue(ctx, tx, scope, category, hue, actorID(r))
+	})
+	return err
 }
 
 // delete removes one override in an attributed transaction.
 func (h *GraphCategoryHuesHandler) delete(r *http.Request, scope, category string) (bool, error) {
 	ctx := r.Context()
-	tx, err := h.pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
-	if err := store.SetTxRequestID(ctx, tx, RequestIDFromContext(ctx)); err != nil {
-		return false, err
-	}
-	found, err := store.DeleteCategoryHue(ctx, tx, scope, category, actorID(r))
-	if err != nil {
-		return false, err
-	}
-	return found, tx.Commit(ctx)
+	return attributedTx(ctx, h.pool, func(tx pgx.Tx) (bool, error) {
+		return store.DeleteCategoryHue(ctx, tx, scope, category, actorID(r))
+	})
 }
 
 func (h *GraphCategoryHuesHandler) internalError(w http.ResponseWriter, r *http.Request, msg string, err error) {
