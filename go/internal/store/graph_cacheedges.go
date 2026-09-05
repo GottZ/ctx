@@ -184,7 +184,7 @@ func (f *egoCacheHops) inducedStructRows(in []graphcache.InducedStructEdge) ([]s
 // The three E-05-3 hardenings, all wired here:
 //
 //  1. MakeDegreeHints filters TypeID against the PER-REQUEST allowlist, not just
-//     scope — fillDegrees applies the full VisibilityPredicate per leg including
+//     scope — fillDegrees applies the full visibility.Predicate per leg including
 //     the type conjunct, so without it the hint degree would count type-invisible
 //     neighbours (retrieval=excluded checkpoint blocks, M107).
 //  2. The residual delta is DECLARED and BOUNDED, never equated with the SQL

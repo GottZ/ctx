@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/GottZ/ctx/internal/graphcache"
+	"github.com/GottZ/ctx/internal/visibility"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -50,7 +51,7 @@ func FullGraph(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes,
 		   AND ($7::timestamptz IS NULL OR b.created_at <  $7)
 		 ORDER BY b.created_at DESC, b.id
 		 LIMIT $4`,
-		VisibilityPredicate("b", "$3", "$1", "$2"),
+		visibility.Predicate("b", "$3", "$1", "$2"),
 	)
 	rows, err := pool.Query(ctx, q,
 		readScopes,               // $1

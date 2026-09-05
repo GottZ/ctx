@@ -4,10 +4,11 @@
 // Before T6 the canonical triple lived in store.VisibilityPredicate while
 // rrf/graph.go (neighbor hydrate) and overview/cluster.go (Louvain clustering,
 // 4 sites) carried INLINE COPIES of the same conjuncts — exactly the copies
-// the old visibility.go doc header promised not to exist. T6 consolidates:
-// this leaf package owns the fragment; store.VisibilityPredicate delegates,
-// rrf and overview embed it directly. It lives OUTSIDE internal/store because
-// rrf cannot import store (store → blocktype → rrf would cycle).
+// the old visibility.go doc header promised not to exist. T6 consolidated the
+// fragment here; the store-side delegator it left behind has since fallen, so
+// store, rrf and overview all embed this package directly. It lives OUTSIDE
+// internal/store because rrf cannot import store (store → blocktype → rrf
+// would cycle).
 //
 // T6 also replaces the hardcoded `type_name <> 'system-meta'` EXCLUDE literal
 // with the registry ALLOWLIST parameter (`type_name = ANY($n::text[])`,
@@ -58,6 +59,11 @@ func TypeVisible(alias, typesParam string) string {
 // grant arm is PURELY additive: an empty grant set ('{}'::uuid[]) makes
 // `id = ANY('{}')` a deterministic FALSE, so the predicate collapses
 // byte-equivalently to the scope-only state (pausability invariant).
+//
+// block-level note (multi-tenant, T40a): visibility is a flat readScopes list
+// PLUS a resolved per-tenant block-grant set (context_block_grants, 067). This
+// function (plus ctx_rrf) is the designated single switch point for the
+// row-level read grant; scope-level tenant resolution stays the readScopes axis.
 func Predicate(alias, typesParam, scopeParam, grantParam string) string {
 	return fmt.Sprintf(
 		"%s AND ( %[2]s.scope = ANY(%[3]s::text[]) OR %[2]s.id = ANY(%[4]s::uuid[]) )",

@@ -24,7 +24,7 @@
 // conventional:
 //
 //  1. A candidate becomes a hopCandidate ONLY after the batch hydrate confirmed
-//     it under store.VisibilityPredicate — so a stale scope/archive hint costs
+//     it under visibility.Predicate — so a stale scope/archive hint costs
 //     work, never bytes (§5.1 Nr. 1).
 //  2. The frontier is built by runEgoTraversal from those confirmed nodes, and
 //     the T41 leaf check runs on the HYDRATED scope — so no traversal ever
@@ -46,6 +46,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/graphcache"
+	"github.com/GottZ/ctx/internal/visibility"
 )
 
 // egoCacheHops is the snapshot arm of the hop fetcher (egoHopFetcher).
@@ -336,7 +337,7 @@ func (f *egoCacheHops) drain(s *egoCandStream, best map[uint32]egoWalkCand, drea
 // hydrate is the per-hop batched visibility recheck — the ONLY authority over
 // what may enter the result (§4.4). It carries EXACTLY the neighbour-side
 // predicate set of the SQL hop legs: the canonical visibility triple (through
-// the shared store.VisibilityPredicate, including the T40a block-grant OR-arm),
+// the shared visibility.Predicate, including the T40a block-grant OR-arm),
 // the category filter and the created window. Every asked id is resolved
 // afterwards — rows that came back are visible, the rest are not.
 func (f *egoCacheHops) hydrate(ctx context.Context, ids []uint32) error {
@@ -367,7 +368,7 @@ func (f *egoCacheHops) hydrate(ctx context.Context, ids []uint32) error {
 		   AND ($5::text[] IS NULL OR b.category = ANY($5))
 		   AND ($6::timestamptz IS NULL OR b.created_at >= $6)
 		   AND ($7::timestamptz IS NULL OR b.created_at <  $7)`,
-		VisibilityPredicate("b", "$4", "$2", "$3"),
+		visibility.Predicate("b", "$4", "$2", "$3"),
 	)
 	rows, err := f.pool.Query(ctx, q,
 		strs,                       // $1 candidate ids

@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/graphcache"
+	"github.com/GottZ/ctx/internal/visibility"
 )
 
 // Degree budgets: policy values with a single definition, passed to SQL as
@@ -227,7 +228,7 @@ var errEgoCacheStale = errors.New("store: ego cache snapshot stale for this requ
 // The traversal loop, the zipper, the T41 leaf check, the focus hydrate, the
 // induced edges and the degrees are SHARED with the SQL path — the arm replaces
 // exactly the two hop queries (Q1/Q1s) with snapshot walks whose candidates are
-// hydrated through the same store.VisibilityPredicate before they may enter the
+// hydrated through the same visibility.Predicate before they may enter the
 // node set or the next frontier (§5.1 Nr. 1+2). A second copy of any visibility
 // check would be a second truth; there is none.
 func EgoGraphCached(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cache EgoCache) (*EgoResult, error) {
@@ -598,15 +599,26 @@ func takeHopMerged(dream, structural []hopCandidate, visited map[string]bool, bu
 // hydrateFocus loads the focus node (hop 0) under the canonical visibility
 // triple. Zero rows — whether the block does not exist or is out of scope —
 // collapse into the same ErrNotVisible.
+//
+// This is the FIRST of the six store-side call sites of visibility.Predicate
+// (the T6 leaf package internal/visibility, which owns the fragment): the graph
+// endpoint references it from the focus hydrate here, from every hop leg
+// (hopNeighbors, structuralHopSQL), from the degree counter (fillDegrees), from
+// the cache-arm recheck (graph_cachearm.go) and from the flat seed
+// (graph_all.go). ctx_rrf carries the same triple on the retrieval side, and
+// rrf/graph.go + overview/cluster.go embed the fragment directly — no inline
+// copies remain to chase. All four arguments are code-owned constants at every
+// one of these sites — never user input — so embedding the fragment via Sprintf
+// adds no injection surface.
 func hydrateFocus(ctx context.Context, pool *pgxpool.Pool, id string, readScopes, grantedBlockIDs, visibleTypes []string) (*GraphNode, error) {
 	// $1=focus id, $2=readScopes, $3=grantedBlockIDs (T40a OR-arm via the shared
-	// VisibilityPredicate switch point — a granted block becomes a VISIBLE focus),
+	// visibility.Predicate switch point — a granted block becomes a VISIBLE focus),
 	// $4=visibleTypes (T6 registry allowlist).
 	q := fmt.Sprintf(
 		`SELECT b.id::text, left(b.title, 120), b.category, b.scope::text, b.created_at
 		 FROM context_blocks b
 		 WHERE b.id = $1::uuid AND %s`,
-		VisibilityPredicate("b", "$4", "$2", "$3"),
+		visibility.Predicate("b", "$4", "$2", "$3"),
 	)
 	n := GraphNode{Hop: 0}
 	err := pool.QueryRow(ctx, q, id, readScopes, grantedBlockIDs, visibleTypes).
@@ -628,10 +640,10 @@ func hydrateFocus(ctx context.Context, pool *pgxpool.Pool, id string, readScopes
 // to visible, filter-passing edges (anti-starvation + no counting channel,
 // design §6.2). DISTINCT ON keeps each neighbor once with its strongest edge.
 func hopNeighbors(ctx context.Context, pool *pgxpool.Pool, frontier, readScopes, grantedBlockIDs, visibleTypes []string, p EgoParams) ([]hopCandidate, error) {
-	// $9 = grantedBlockIDs (T40a): the shared VisibilityPredicate carries the
+	// $9 = grantedBlockIDs (T40a): the shared visibility.Predicate carries the
 	// block-grant OR-arm into BOTH hop legs (a granted neighbor becomes VISIBLE).
 	// $10 = visibleTypes (T6): registry allowlist, inside the legs BEFORE the cap.
-	vis := VisibilityPredicate("b", "$10", "$2", "$9")
+	vis := visibility.Predicate("b", "$10", "$2", "$9")
 	q := fmt.Sprintf(`
 WITH hop AS (
     SELECT DISTINCT ON (e.neighbor_id)
@@ -711,7 +723,7 @@ ORDER BY h.confidence DESC, h.neighbor_id`, vis, vis)
 // gate proves the plan of EXACTLY the shipped SQL (no test-local copy drift).
 func structuralHopSQL() string {
 	// $8 = grantedBlockIDs, $9 = visibleTypes — same predicate discipline as Q1.
-	vis := VisibilityPredicate("b", "$9", "$2", "$8")
+	vis := visibility.Predicate("b", "$9", "$2", "$8")
 	return fmt.Sprintf(`
 WITH hop AS (
     SELECT DISTINCT ON (e.neighbor_id)
@@ -1038,9 +1050,9 @@ func mapStructEdges(rows []structEdgeRow, index map[string]int) ([]StructGraphEd
 // the existence of foreign private links on shared blocks (design §6.3).
 func fillDegrees(ctx context.Context, pool *pgxpool.Pool, ids, readScopes, grantedBlockIDs, visibleTypes []string, nodes []GraphNode) error {
 	// $5 = grantedBlockIDs (T40a): a granted neighbor counts toward the VISIBLE
-	// degree via the shared VisibilityPredicate OR-arm (all four UNION legs).
+	// degree via the shared visibility.Predicate OR-arm (all four UNION legs).
 	// $6 = visibleTypes (T6): only allowlisted neighbors count.
-	vis := VisibilityPredicate("nb", "$6", "$2", "$5")
+	vis := visibility.Predicate("nb", "$6", "$2", "$5")
 	q := fmt.Sprintf(`
 SELECT n.id::text,
        (SELECT count(*) FROM (

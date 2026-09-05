@@ -3,7 +3,7 @@
 // Integration test for Multi-Tenant wave T41 (Achse 07, design/07 §4.5/§5.7/§8):
 // the GRAPH-BRIDGE LEAF PROTECTION for block-level grants. T40a (8379fa2) made a
 // grant-only block VISIBLE in the graph (it appears in the node set and in induced
-// edges to other visible nodes via the per-leg VisibilityPredicate OR-arm). T41
+// edges to other visible nodes via the per-leg visibility.Predicate OR-arm). T41
 // makes it a LEAF: visible, but NEVER a hop seed. A grant-only block is one whose
 // own scope is NOT in readScopes — it reached the node set ONLY via grantedBlockIDs.
 //
@@ -15,7 +15,7 @@
 //     traversal does not continue THROUGH it.
 //
 // The W9 trap (why the naive test is vacuous): a foreign-scope, UN-granted neighbour
-// of a grant-block never matches the per-leg VisibilityPredicate and is absent WITH
+// of a grant-block never matches the per-leg visibility.Predicate and is absent WITH
 // OR WITHOUT the fix — a test on it is green without the fix and proves nothing. The
 // OBSERVABLE effect requires an IN-SCOPE block D reachable ONLY through the grant
 // block B: D is legitimately visible, so it is sucked in over the bridge B WITHOUT

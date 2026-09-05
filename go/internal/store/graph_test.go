@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/visibility"
 )
 
 // SECURITY/WIRE PROPERTY: GraphEdge marshals as the exact fixed-width tuple
@@ -65,18 +67,21 @@ func TestStructGraphEdgeMarshalJSON(t *testing.T) {
 // literal) — Q1/Q3/focus-hydrate all reference this one string. The MANDATORY
 // parentheses keep NOT is_archived / the type allowlist OUTSIDE the
 // scope/grant OR so a granted, archived (or type-invisible) block can never
-// leak (T40a).
+// leak (T40a). Pinned with the argument sets the store call sites actually
+// pass — hydrateFocus ("b", $4, $2, $3) and fillDegrees ("nb", $6, $2, $5) —
+// so the test stays the byte-shape gate of the graph SQL, not a second copy of
+// the visibility package's own contract.
 func TestVisibilityPredicate(t *testing.T) {
-	got := VisibilityPredicate("b", "$4", "$2", "$3")
+	got := visibility.Predicate("b", "$4", "$2", "$3")
 	want := "NOT b.is_archived AND b.type_name = ANY($4::text[]) AND ( b.scope = ANY($2::text[]) OR b.id = ANY($3::uuid[]) )"
 	if got != want {
-		t.Errorf("VisibilityPredicate(b,$4,$2,$3):\n got %q\nwant %q", got, want)
+		t.Errorf("visibility.Predicate(b,$4,$2,$3):\n got %q\nwant %q", got, want)
 	}
 
-	got = VisibilityPredicate("nb", "$6", "$2", "$5")
+	got = visibility.Predicate("nb", "$6", "$2", "$5")
 	want = "NOT nb.is_archived AND nb.type_name = ANY($6::text[]) AND ( nb.scope = ANY($2::text[]) OR nb.id = ANY($5::uuid[]) )"
 	if got != want {
-		t.Errorf("VisibilityPredicate(nb,$6,$2,$5):\n got %q\nwant %q", got, want)
+		t.Errorf("visibility.Predicate(nb,$6,$2,$5):\n got %q\nwant %q", got, want)
 	}
 }
 

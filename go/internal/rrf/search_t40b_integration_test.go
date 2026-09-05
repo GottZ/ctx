@@ -2,7 +2,7 @@
 
 // Integration test for Multi-Tenant wave T40b (Achse 07-W5, design/07
 // §2.2/§4.2/§5.3.2/§5.7 + Welle T40b): the EXPENSIVE RRF-retrieval block-grant
-// OR-arm. T40a wired the cheap abruf/ID paths via store.VisibilityPredicate;
+// OR-arm. T40a wired the cheap abruf/ID paths via visibility.Predicate;
 // T40b adds the same row-level read-share OR to ctx_rrf's SIX CTE WHERE clauses
 // (migration 068) plus the rrf.Search $13 grant parameter.
 //

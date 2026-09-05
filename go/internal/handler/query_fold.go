@@ -55,7 +55,7 @@ func derefTime(t *time.Time) time.Time {
 // childFold is the per-child fold decision from the batch parent lookup.
 type childFold struct {
 	parentID string // "" ⇒ orphan (parent_id NULL): child stays + WARN
-	visible  bool   // parent passes the caller's VisibilityPredicate (only meaningful when parentID != "")
+	visible  bool   // parent passes the caller's visibility.Predicate (only meaningful when parentID != "")
 }
 
 // Over-fetch tuning (design/02 §4.4). The fold reduces the row count (several

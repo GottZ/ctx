@@ -11,7 +11,7 @@
 //
 // Mechanism = code (the OR-arm in the switch point, waves T40a/T40b), policy =
 // data (THIS table). 067 is an ADDITIVE table with NO consumer yet — the
-// VisibilityPredicate OR-arm (T40a) and the ctx_rrf sixfold OR (T40b/068) read it
+// visibility.Predicate OR-arm (T40a) and the ctx_rrf sixfold OR (T40b/068) read it
 // LATER. 067 only lays the table. Backfill-free (0 existing grants), idempotent,
 // self-registering, one Tx, new-table-only (no context_blocks lock, no 1M index
 // build — the decisive advantage of the join over the array variant, §3.2).

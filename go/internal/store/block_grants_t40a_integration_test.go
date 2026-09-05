@@ -3,7 +3,7 @@
 // Integration test for Multi-Tenant wave T40a (Achse 07, design/07 §4/§5.5/§7):
 // the BILLIGE block-level "Abruf-only-OR". A single block stays in its scope but
 // becomes additively READABLE for a grantee tenant via the resolved grant set
-// flowing as a bound uuid[] into the visibility OR-arm (VisibilityPredicate plus
+// flowing as a bound uuid[] into the visibility OR-arm (visibility.Predicate plus
 // the three blocks.go inline paths). The pausability invariant: an EMPTY grant
 // set is a byte-identical no-op to the scope-only state.
 //
@@ -16,7 +16,7 @@
 //   - G2 Revocation: DELETE the grant → GrantedBlockIDs empty → B invisible again.
 //   - G3 Pflicht-Klammer: a grant on an ARCHIVED block must NOT surface (the
 //     NOT is_archived term in front of the parentheses wins) — on the inline
-//     GetBlock path AND on the VisibilityPredicate EgoGraph path.
+//     GetBlock path AND on the visibility.Predicate EgoGraph path.
 //   - G5 empty-scope (konservativ gepinnt): empty readScopes + grants → the
 //     RequireScopes guard still errors (fail-closed), NOT the block.
 //   - byte-identical: with grants=nil the in-scope/out-of-scope behaviour is the
@@ -279,7 +279,7 @@ func TestBlockGrantsT40a_Integration(t *testing.T) {
 	})
 }
 
-// TestBlockGrantsT40a_EgoGraph_Integration pins the VisibilityPredicate path
+// TestBlockGrantsT40a_EgoGraph_Integration pins the visibility.Predicate path
 // (EgoGraph): a granted block becomes a VISIBLE focus, and the mandatory
 // parentheses keep an archived granted block out of the focus hydrate.
 func TestBlockGrantsT40a_EgoGraph_Integration(t *testing.T) {
@@ -304,7 +304,7 @@ func TestBlockGrantsT40a_EgoGraph_Integration(t *testing.T) {
 		t.Fatalf("EgoGraph(foreign focus, no grant) err = %v, want store.ErrNotVisible", err)
 	}
 
-	// Grant B → grantee: the focus hydrate's VisibilityPredicate OR-arm makes it
+	// Grant B → grantee: the focus hydrate's visibility.Predicate OR-arm makes it
 	// visible.
 	t40Grant(t, pool, focus, grantee)
 	grants, err := store.GrantedBlockIDs(ctx, pool, grantee)
@@ -320,7 +320,7 @@ func TestBlockGrantsT40a_EgoGraph_Integration(t *testing.T) {
 	}
 
 	// Archived granted focus: the NOT is_archived term before the parentheses
-	// keeps it a 404 (mandatory parentheses on the VisibilityPredicate path).
+	// keeps it a 404 (mandatory parentheses on the visibility.Predicate path).
 	archFocus := t40Block(t, pool, scopeC, "t40g-archived-focus", true)
 	t40Grant(t, pool, archFocus, grantee)
 	grants, err = store.GrantedBlockIDs(ctx, pool, grantee)

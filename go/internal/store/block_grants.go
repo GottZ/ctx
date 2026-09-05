@@ -22,7 +22,7 @@ import (
 // TENANT-DECISION(block-grant-resolution): Strategy A (resolved []string bound
 // param) for the Go ID/abruf paths in T40a — Alternative B (correlated subquery
 // `id IN (SELECT block_id FROM context_block_grants WHERE grantee_tenant=$T)`),
-// umentscheidbar weil die VisibilityPredicate-Signatur einen uuid[]-Param traegt
+// umentscheidbar weil die visibility.Predicate-Signatur einen uuid[]-Param traegt
 // und der OR-Arm hinter dem Switch-Point gekapselt ist; ctx_rrf (T40b) ist HART
 // auf A festgelegt. design/07 §4.1.
 //
