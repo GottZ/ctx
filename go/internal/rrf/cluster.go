@@ -26,11 +26,13 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
 
 	"github.com/GottZ/ctx/internal/clustersql"
 	"github.com/GottZ/ctx/internal/graphcache"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/visibility"
 )
 
@@ -428,45 +430,60 @@ ORDER BY d.cos DESC`
 // on that connection.
 //
 // Read-only, so it rolls back rather than commits: nothing was written, and a
-// rollback is the cheaper and more honest close.
+// rollback is the cheaper and more honest close. That is what pgxdb.Probe is —
+// BeginTx, fn, always the deferred rollback, never a commit — so the bracket
+// moves without the close changing: same optionless BEGIN (pgxpool.Pool.Begin
+// IS BeginTx with a zero TxOptions), same ROLLBACK, same error texts. A
+// committing bracket (Write or Read) would have been the wrong shape twice
+// over: it would turn the honest close into a commit, and on a transaction
+// that a statement error already aborted the commit is itself an error
+// (pgx.ErrTxCommitRollback, ReadOnly included).
+//
+// The one thing that does change is pgxdb's rollback policy, and this is one of
+// the paths it was written for: the probe runs inside the query request, so a
+// client that disconnects mid-probe used to make pgx close the connection
+// instead of rolling it back. The rollback now runs detached with a bound, and
+// the connection goes back to the pool.
 func fetchCentroidMatches(ctx context.Context, pool *pgxpool.Pool, embedding []float32, readScopes []string, cfg ClusterConfig) ([]centroidMatch, error) {
 	topK := cfg.CentroidTopK
 	if topK <= 0 {
 		return nil, nil
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("rrf: centroid probe begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if _, err := tx.Exec(ctx, `SET LOCAL hnsw.iterative_scan = 'relaxed_order'`); err != nil {
-		return nil, fmt.Errorf("rrf: centroid iterative_scan: %w", err)
-	}
-	if ef := cfg.CentroidEFSearch; ef > 0 {
-		// Bounded and integer-valued, so the literal is code-shaped, not
-		// user-shaped; a GUC assignment cannot take a bind parameter.
-		if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL hnsw.ef_search = %d`, ef)); err != nil {
-			return nil, fmt.Errorf("rrf: centroid ef_search: %w", err)
+	var out []centroidMatch
+	err := pgxdb.Probe(ctx, pool, "rrf: centroid probe begin", func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SET LOCAL hnsw.iterative_scan = 'relaxed_order'`); err != nil {
+			return fmt.Errorf("rrf: centroid iterative_scan: %w", err)
 		}
-	}
-
-	rows, err := tx.Query(ctx, centroidProbeSQL, pgvec.NewHalfVector(embedding), readScopes, topK)
-	if err != nil {
-		return nil, fmt.Errorf("rrf: centroid probe: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]centroidMatch, 0, topK)
-	for rows.Next() {
-		var m centroidMatch
-		if err := rows.Scan(&m.topicID, &m.clusterID, &m.cos); err != nil {
-			return nil, fmt.Errorf("rrf: centroid probe scan: %w", err)
+		if ef := cfg.CentroidEFSearch; ef > 0 {
+			// Bounded and integer-valued, so the literal is code-shaped, not
+			// user-shaped; a GUC assignment cannot take a bind parameter.
+			if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL hnsw.ef_search = %d`, ef)); err != nil {
+				return fmt.Errorf("rrf: centroid ef_search: %w", err)
+			}
 		}
-		out = append(out, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rrf: centroid probe rows: %w", err)
+
+		rows, err := tx.Query(ctx, centroidProbeSQL, pgvec.NewHalfVector(embedding), readScopes, topK)
+		if err != nil {
+			return fmt.Errorf("rrf: centroid probe: %w", err)
+		}
+		defer rows.Close()
+
+		matches := make([]centroidMatch, 0, topK)
+		for rows.Next() {
+			var m centroidMatch
+			if err := rows.Scan(&m.topicID, &m.clusterID, &m.cos); err != nil {
+				return fmt.Errorf("rrf: centroid probe scan: %w", err)
+			}
+			matches = append(matches, m)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("rrf: centroid probe rows: %w", err)
+		}
+		out = matches
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
