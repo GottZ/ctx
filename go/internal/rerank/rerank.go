@@ -40,13 +40,7 @@ import (
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
-var httpClient = &http.Client{
-	Transport: &http.Transport{
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
+var httpClient = httpx.PooledClient()
 
 // Timeout caps a single rerank round-trip. A CPU cross-encoder costs roughly
 // ~1s per query+document pair, so a full window (MAX_DOCS) runs tens of seconds;

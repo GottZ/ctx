@@ -17,13 +17,7 @@ import (
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
-var httpClient = &http.Client{
-	Transport: &http.Transport{
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
+var httpClient = httpx.PooledClient()
 
 const (
 	ChatTimeout      = 60 * time.Second
