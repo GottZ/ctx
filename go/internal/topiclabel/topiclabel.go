@@ -655,7 +655,9 @@ func ChainCall(ctx context.Context, d Deps, required backends.Sensitivity, syste
 		// Temperature near-deterministic (a name is not a creative act) and a
 		// tight output budget: the whole answer is one short JSON object, and
 		// an unbounded budget on a background arm is GPU time nobody asked for.
-		Opts:   llm.Options{Temperature: 0.2, NumPredict: 128},
+		// CapLocked: the digest role's model_map max_tokens is sized for the
+		// daily report and must not widen this budget.
+		Opts:   llm.Options{Temperature: 0.2, NumPredict: 128, CapLocked: true},
 		Format: "json",
 		// The SAME resolved budget as the outer deadline, not the constant:
 		// leaving this on the default would re-cap the wire call at 90 s

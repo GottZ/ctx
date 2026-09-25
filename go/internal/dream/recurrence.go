@@ -211,6 +211,11 @@ func confirmRecurrence(ctx context.Context, pool *pgxpool.Pool, r *Router, opts 
 	defer func() { llmlog.Record(pool, entry.Slimmed(r.Devmode)) }()
 
 	start := time.Now()
+	// The verdict is one short JSON object: keep the caller's cap hard. The
+	// dream role's model_map max_tokens is sized for the link EVAL (often
+	// thousands of tokens on reasoning models) and would otherwise inflate
+	// every per-pair confirm to that budget — see keywordOptions.
+	opts.CapLocked = true
 	resp, served, attempts, err := r.chat(ctx, backends.RoleDream, required,
 		systemPrompt, userPrompt, opts, DreamTimeout)
 	entry.Duration = time.Since(start)
