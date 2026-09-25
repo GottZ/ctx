@@ -463,6 +463,19 @@ func applyModelParams(base Options, params map[string]any, b *backends.Backend) 
 	return base, think
 }
 
+// ResolveModelParams is applyModelParams for call sites that build their own
+// wire request instead of walking ChatChain — the web-chat stream path
+// (chat.Engine → ChatStream). It applies the SAME merge, so a role's model_map
+// params mean the same thing on both paths: dedicated Options fields are set,
+// every other key (chat_template_kwargs, provider knobs) lands in
+// Options.Extra, which buildStreamBody merges BEFORE the backend's extra_body
+// exactly like chatOpenAI does. The think toggle is dropped: the stream path
+// pins reasoning off itself (per-backend override via extra_body).
+func ResolveModelParams(base Options, params map[string]any, b *backends.Backend) Options {
+	opts, _ := applyModelParams(base, params, b)
+	return opts
+}
+
 func toFloat(v any, def float64) float64 {
 	switch n := v.(type) {
 	case float64:

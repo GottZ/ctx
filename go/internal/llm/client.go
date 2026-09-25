@@ -8,9 +8,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -18,6 +20,25 @@ import (
 )
 
 var httpClient = httpx.PooledClient()
+
+// ErrReasoningExhaustedBudget reports an OpenAI-wire completion that stopped
+// at the output cap (finish_reason "length") with EMPTY content while the
+// server returned reasoning text — the model spent the whole max_tokens budget
+// thinking and never started the answer. Reasoning servers such as vLLM (and
+// LiteLLM in front of them) deliver that trace in reasoning_content, OpenRouter
+// in reasoning. The trace is never handed out as the answer: a truncated
+// chain-of-thought is not an answer, and before this sentinel it surfaced
+// either as an empty string or as the raw trace in place of the answer.
+// Callers match with errors.Is; the fix is on the serving row (disable
+// thinking via model_map params such as chat_template_kwargs, or raise the
+// cap).
+var ErrReasoningExhaustedBudget = errors.New("llm: output cap reached while reasoning — no answer content (finish_reason=length)")
+
+// reasoningExhausted is the one predicate both OpenAI wire paths (chatOpenAI,
+// the SSE stream) apply: cap hit, no content, reasoning present.
+func reasoningExhausted(content, finishReason string, reasoningLen int) bool {
+	return content == "" && reasoningLen > 0 && strings.EqualFold(finishReason, "length")
+}
 
 const (
 	ChatTimeout      = 60 * time.Second
@@ -191,6 +212,10 @@ type openAIChatResponse struct {
 			Role      string `json:"role"`
 			Content   string `json:"content"`
 			Reasoning string `json:"reasoning"`
+			// ReasoningContent is the reasoning trace as vLLM (and LiteLLM
+			// in front of it) name it. Read only to diagnose a cap hit spent
+			// entirely on thinking — never used as the answer.
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
 		// FinishReason is the OpenAI stop reason of this choice — the same
 		// field the SSE path reads per delta (stream.go). Only choice 0 is
@@ -383,6 +408,14 @@ func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 
 	choice := result.Choices[0].Message
 	content := choice.Content
+	if reasoningExhausted(content, result.Choices[0].FinishReason, len(choice.Reasoning)+len(choice.ReasoningContent)) {
+		return nil, fmt.Errorf("%w (model %q, completion_tokens=%d, max_tokens=%d)",
+			ErrReasoningExhaustedBudget, b.Model, result.Usage.CompletionTokens, opts.NumPredict)
+	}
+	// Quirk fix for providers that ignore reasoning.exclude and put the
+	// answer into the OpenRouter reasoning field. reasoning_content is NOT a
+	// fallback: on vLLM-style servers it is the chain-of-thought, not the
+	// answer.
 	if content == "" && choice.Reasoning != "" {
 		content = choice.Reasoning
 	}

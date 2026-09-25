@@ -227,8 +227,11 @@ type openAIStreamRequest struct {
 // parallel_tool_calls (off by default; the parser handles arrays defensively
 // anyway). TopP/TopK/MinP/NumCtx are not part of the openai wire — parity
 // with chatOpenAI, sampling parity comes from the server start profile.
-// extraBody entries are merged last and win on key collision (F3's escape
-// hatch: OpenRouter provider/zdr objects, per-backend reasoning override).
+// opts.Extra (model_map params without a dedicated Options field, e.g.
+// chat_template_kwargs.enable_thinking for vLLM-served reasoning models) is
+// merged next, and extraBody entries are merged last and win on key collision
+// (F3's escape hatch: OpenRouter provider/zdr objects, per-backend reasoning
+// override) — the same precedence chatOpenAI applies on the non-stream path.
 func buildStreamBody(model string, msgs []ChatMsg, tools []ToolDef, opts Options, extraBody map[string]any) ([]byte, error) {
 	req := openAIStreamRequest{
 		Model:         model,
@@ -251,17 +254,10 @@ func buildStreamBody(model string, msgs []ChatMsg, tools []ToolDef, opts Options
 	if err != nil {
 		return nil, err
 	}
-	if len(extraBody) == 0 {
-		return body, nil
-	}
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
+	if body, err = mergeJSONFields(body, opts.Extra); err != nil {
 		return nil, err
 	}
-	for k, v := range extraBody {
-		m[k] = v
-	}
-	return json.Marshal(m)
+	return mergeJSONFields(body, extraBody)
 }
 
 // ChatStream sends a streaming chat request with optional tool definitions
@@ -322,9 +318,12 @@ func ChatStream(ctx context.Context, host, apiKey, model string,
 type streamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string          `json:"content"`
-			Reasoning string          `json:"reasoning"`
-			ToolCalls []toolCallDelta `json:"tool_calls"`
+			Content   string `json:"content"`
+			Reasoning string `json:"reasoning"`
+			// ReasoningContent is vLLM's (and LiteLLM's) name for the
+			// reasoning delta — accounted, never emitted or used as answer.
+			ReasoningContent string          `json:"reasoning_content"`
+			ToolCalls        []toolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -391,6 +390,9 @@ type streamState struct {
 	usage     *usageBody
 	timings   *timingsBody
 	done      bool
+
+	// reasoningContentLen counts reasoning_content bytes (vLLM/LiteLLM).
+	reasoningContentLen int
 }
 
 func (st *streamState) emit(ev StreamEvent) error {
@@ -435,6 +437,12 @@ func parseSSEStream(r io.Reader, onEvent func(StreamEvent) error) (*StreamResult
 	}
 	if !st.done && st.finish == "" {
 		return nil, fmt.Errorf("llm: stream ended unexpectedly (no [DONE], no finish_reason)")
+	}
+	// A turn that hit the cap while still thinking has no answer — say so
+	// instead of returning an empty turn (or the truncated trace as one).
+	// Tool calls are an answer of their own and keep the turn valid.
+	if len(st.calls) == 0 && reasoningExhausted(st.content.String(), st.finish, st.reasoning.Len()+st.reasoningContentLen) {
+		return nil, ErrReasoningExhaustedBudget
 	}
 	return st.result(), nil
 }
@@ -508,6 +516,10 @@ func (st *streamState) handleChunk(payload string) error {
 	if choice.Delta.Reasoning != "" {
 		st.reasoning.WriteString(choice.Delta.Reasoning)
 	}
+	// vLLM-style reasoning trace: only its length matters (the cap-hit
+	// diagnosis in parseSSEStream). Not buffered — a long trace is not worth
+	// holding, and it must never become the answer.
+	st.reasoningContentLen += len(choice.Delta.ReasoningContent)
 	for i, d := range choice.Delta.ToolCalls {
 		if err := st.applyToolCallDelta(i, d); err != nil {
 			return err

@@ -542,6 +542,12 @@ func emitNoEligible(sink Sink) error {
 // launderError builds the error event: class code + backend NAME only. The raw
 // error (it carries the backend URL) never reaches the client (§3.5).
 func launderError(err error, b backends.Backend) map[string]any {
+	if errors.Is(err, llm.ErrReasoningExhaustedBudget) {
+		// A config signal, not a backend fault: the model thought through
+		// the whole output cap. Its own code so the UI does not report a
+		// generic server_fault for a row that needs thinking disabled.
+		return map[string]any{"code": "reasoning_budget_exhausted", "backend": b.Name, "retryable": false}
+	}
 	class := backends.Classify(err, b.ProviderClass)
 	return map[string]any{"code": class.String(), "backend": b.Name, "retryable": class.Next()}
 }
@@ -602,17 +608,16 @@ func (e *Engine) tokenClamp(b backends.Backend, budgetLeft int) int {
 	return v
 }
 
+// chatOptions resolves the chat role's model_map params through the same merge
+// the non-stream chain uses (llm.ResolveModelParams), so params without a
+// dedicated field — chat_template_kwargs above all — reach the stream wire
+// instead of being dropped. CapLocked keeps the output cap on tokenClamp's
+// value: the web-chat budget (cfg.MaxTokens, the backend's chat_max_tokens
+// limit, the per-turn budget left) must not be widened by a role-wide
+// model_map max_tokens.
 func (e *Engine) chatOptions(b backends.Backend, numPredict int) llm.Options {
-	opts := llm.Options{Temperature: 0.7, NumPredict: numPredict}
-	if spec := b.ModelFor("chat"); spec.Params != nil {
-		if t, ok := spec.Params["temperature"].(float64); ok {
-			opts.Temperature = t
-		}
-		if tp, ok := spec.Params["top_p"].(float64); ok {
-			opts.TopP = tp
-		}
-	}
-	return opts
+	opts := llm.Options{Temperature: 0.7, NumPredict: numPredict, CapLocked: true}
+	return llm.ResolveModelParams(opts, b.ModelFor("chat").Params, &b)
 }
 
 // buildHistory converts stored messages to wire form within the char budget:
