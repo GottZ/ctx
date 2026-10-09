@@ -782,6 +782,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 	embedMigrateTicker := time.NewTicker(embedMigrateInterval)
 	defer embedMigrateTicker.Stop()
 
+	// The dedicated embed-backfill arm (tracking issue: force-push.me/damienmoon/ctx/issues/1): pending
+	// embeddings used to be backfilled only at the top of the dream loop, so
+	// with dream.enabled=false (the default) or Dream switched off at runtime
+	// nothing embedded them in the background. The arm runs regardless of
+	// Dream; the dream loop keeps its inline call, the tx-wrapped
+	// FOR UPDATE SKIP LOCKED pick makes two pickers safe (Welle-49).
+	go s.runEmbedBackfillLoop(ctx)
+
 	// Dream runs in its own goroutine(s) as continuous loop(s).
 	// DreamParallelism workers all share the same DB; PickBlock's FOR UPDATE
 	// SKIP LOCKED ensures distinct blocks per worker. Backfill stays single-
@@ -2041,6 +2049,78 @@ func (t *txTail) done() {
 	if t.postCommit != nil {
 		t.postCommit()
 	}
+}
+
+// backfillArmPoll is how often the dedicated embed-backfill arm re-reads its
+// config while embed_backfill.interval is 0 (arm off), so a hot re-enable
+// takes effect without a restart (contract.recheck_interval convention).
+const backfillArmPoll = 15 * time.Second
+
+// runEmbedBackfillLoop is the dedicated background arm for pending
+// embeddings (tracking issue: force-push.me/damienmoon/ctx/issues/1). It is the same work as the call at the
+// top of runDreamLoop — backfillOneEmbedding under the iterated tenant's
+// snapshot and router — on its own cadence: a successful pick loops at once,
+// an empty pick waits embed_backfill.interval, an error waits 10 s. Under
+// !enforcing() it yields to interactive demand exactly like the dream loop
+// (P-Fallback); under Enforcing the wire call waits at its target in its
+// background lease. Interval <= 0 turns the arm off; it then polls the
+// config every backfillArmPoll so a hot enable needs no restart.
+func (s *Scheduler) runEmbedBackfillLoop(ctx context.Context) {
+	slog.Info("scheduler: embed backfill arm started", "poll", backfillArmPoll)
+	var tenantCursor uint64
+	wait := func(d time.Duration) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(d):
+			return true
+		}
+	}
+	for ctx.Err() == nil {
+		tenants := s.backgroundTenantsFn(ctx)
+		if len(tenants) == 0 {
+			tenants = []backgroundTenant{{scope: store.GlobalScope}}
+		}
+		bt := tenants[tenantCursor%uint64(len(tenants))]
+		tenantCursor++
+		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
+
+		interval := cfg.EmbedBackfill.Interval
+		if interval <= 0 {
+			if !wait(backfillArmPoll) {
+				return
+			}
+			continue
+		}
+		for !s.enforcing() && s.interactiveDemand() > 0 {
+			if !wait(dreamYieldWait) {
+				return
+			}
+		}
+
+		backfilled, err := s.backfillArmOnce(ctx, cfg, bt.scope)
+		switch {
+		case err != nil:
+			slog.Error("scheduler: embed backfill arm error", "error", err)
+			if !wait(10 * time.Second) {
+				return
+			}
+		case backfilled:
+			continue // Loop at once: more may be pending.
+		default:
+			if !wait(interval) {
+				return
+			}
+		}
+	}
+}
+
+// backfillArmOnce is one pick of the dedicated arm with its own panic guard,
+// so a panic in one cycle is logged and the arm goes on (the dream loop's
+// runDreamCycle has the same shape).
+func (s *Scheduler) backfillArmOnce(ctx context.Context, cfg *config.Config, tenant string) (bool, error) {
+	defer guardPanic("embed backfill arm")
+	return s.backfillOneEmbedding(ctx, s.newRouter(cfg, tenant), cfg)
 }
 
 // backfillOneEmbedding finds one block with missing embedding, generates it, and stores it.

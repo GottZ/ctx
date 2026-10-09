@@ -175,6 +175,8 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: SchlÃ
 	"contract.recheck_interval":                      "Seconds between periodic schema-drift re-checks; 0 runs no checks while the ticker keeps polling so a later hot enable takes effect",
 	"status.channel_probe_interval":                  "Seconds between latency probes of the four retrieval channels (semantic, fts_de, fts_en, trigram); 0 (default) disables the probe",
 	"embed_backfill.sync_cap":                        "Maximum pending blocks a query embeds inline before its search runs; 0 = uncapped, the cap bounds first-query latency after a backlog",
+	"embed_backfill.sync_budget":                     "Seconds a query may spend embedding pending blocks before its own search; a block that overruns it is memoized as caller_timeout and left to the background arm, 0 = unbounded",
+	"embed_backfill.interval":                        "Seconds the background embed-backfill arm waits between two empty picks; it runs regardless of Dream, 0 = arm off (polled for a hot re-enable)",
 	"embed_backfill.max_tokens":                      "Estimated-token threshold (length/4) above which a block is permanently parked as oversize without a wire call; 0 disables the pre-check",
 	"embed_backfill.backoff_base":                    "Base delay in seconds of the exponential retry curve (base * 2^(attempts-1)) for transient embed failures. Must be > 0 (V21) â€” 0 would mean retry immediately, a tight loop against a failing embed backend",
 	"embed_backfill.backoff_cap":                     "Upper bound in seconds on the embed-failure retry delay; a persistently failing block retries at most this often",

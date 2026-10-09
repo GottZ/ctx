@@ -393,7 +393,7 @@ func TestV17bIsAdvisoryOnly(t *testing.T) {
 // changes TYPE (seconds → int, or a struct field that stops being a
 // time.Duration) would leave the walk without anyone noticing. Raise this
 // number in the same commit that adds a duration key.
-const wantDurationKeys = 45
+const wantDurationKeys = 47 // +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered
 
 // TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
 // V17 (issue #29): before it, exactly two of the seconds keys had a sign check

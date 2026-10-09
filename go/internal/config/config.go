@@ -1592,6 +1592,29 @@ type EmbedBackfillConfig struct {
 	// unit test that never sets this field disables the cap rather than
 	// silently blocking every backfillPending call.
 	SyncCap int `key:"embed_backfill.sync_cap" env:"CTX_EMBED_BACKFILL_SYNC_CAP" default:"4" mut:"hot" tenancy:"global-only"`
+	// SyncBudget bounds Pfad A in SECONDS, next to SyncCap's count: the
+	// whole pre-search loop of one request runs inside this wall-clock
+	// budget, and each block's embed call runs under what is left of it.
+	// SyncCap alone could not stop one slow block from eating the caller's
+	// entire deadline (the tracking issue, force-push.me/damienmoon/ctx/issues/1: a ~10k-token block against a
+	// CPU embed backend at ~23 tok/s needs ~7 min, the CLI client's deadline
+	// is 120 s — the question's own embed was never admitted and the query
+	// answered 500 instead of degrading). A block that overruns the budget
+	// is memoized as caller_timeout (store.EmbedFailureCallerTimeout) and
+	// left to the background arm; the question embed keeps the rest of the
+	// deadline. Default 30 s (a quarter of the CLI deadline). 0 = unbounded,
+	// the pre-budget behavior (explicit opt-out, SyncCap convention).
+	SyncBudget time.Duration `key:"embed_backfill.sync_budget" env:"CTX_EMBED_BACKFILL_SYNC_BUDGET" default:"30" mut:"hot" tenancy:"global-only"`
+	// Interval is the idle wait in seconds of the dedicated background
+	// backfill arm (runEmbedBackfillLoop) between two empty picks. Until
+	// this key the only background backfill was the call at the top of the
+	// dream loop, so with dream.enabled=false (the default) NOTHING embedded
+	// pending blocks in the background and Pfad A was the only path (issue
+	// force-push.me/damienmoon/ctx/issues/1). The arm runs regardless of Dream; a successful
+	// pick loops at once, an empty pick waits this long. 0 = arm off
+	// (polled every 15 s for a hot re-enable, contract.recheck_interval
+	// convention).
+	Interval time.Duration `key:"embed_backfill.interval" env:"CTX_EMBED_BACKFILL_INTERVAL" default:"15" mut:"hot" tenancy:"global-only"`
 	// MaxTokens is the pre-wire Oversize-Gate estimate threshold
 	// (design/04 §4.4): len(embedText)/4 above this skips the block WITHOUT
 	// a wire call (last_class='oversize', next_attempt_at='infinity' —

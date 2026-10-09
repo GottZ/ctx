@@ -729,7 +729,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"request_id", requestID,
 		)
 	} else if llm.DetectGerman(query) {
-		slog.Info("german detected, translating",
+		// The heuristic fires on umlauts and German stopwords, so Swedish,
+		// Danish and Finnish questions land here too; the translation to
+		// English is right for them as well, only the old label was not.
+		slog.Info("non-english heuristic matched, translating",
 			"request_id", requestID,
 		)
 		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, querySens, query, ar.ApiKeyID, h.admission())
@@ -1710,12 +1713,34 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, scope string, adm embedcache.Admission, cfg *config.Config) int {
 	count := 0
 	syncCap := cfg.EmbedBackfill.SyncCap
+	// Time budget next to the count cap (embed_backfill.sync_budget, issue
+	// force-push.me/damienmoon/ctx/issues/1): SyncCap bounds how MANY blocks a request embeds
+	// inline, this bounds how LONG. One block that cannot embed inside the
+	// caller's deadline used to consume the whole deadline — the question's
+	// own embed was then never admitted and the query answered 500. Every
+	// block's wire call now runs under what is left of the budget; a block
+	// that overruns it is memoized caller_timeout and left to the
+	// background arm (runEmbedBackfillLoop), and the loop ends so the
+	// question embed keeps the rest of the request. Zero = unbounded, the
+	// pre-budget shape (explicit opt-out, same convention as SyncCap).
+	var budgetDeadline time.Time
+	if budget := cfg.EmbedBackfill.SyncBudget; budget > 0 {
+		budgetDeadline = time.Now().Add(budget)
+	}
 	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {
+		if !budgetDeadline.IsZero() && !time.Now().Before(budgetDeadline) {
+			slog.Info("query backfill: sync budget spent, rest left to the background arm",
+				"budget", cfg.EmbedBackfill.SyncBudget, "backfilled", count)
+			break
+		}
 		var blockID, title, content, sens, scope string
+		// Pfad A's predicate: the shared backoff exclusion PLUS every block
+		// already memoized caller_timeout (store.EmbedFailureQueryPath
+		// ExcludedPredicate) — such a block is the background arm's job.
 		err := h.pool.QueryRow(ctx,
 			`SELECT id, title, content, sensitivity, scope FROM context_blocks
 			WHERE embedding IS NULL AND NOT is_archived`+
-				store.EmbedFailureExcludedPredicate+store.RetrievalExcludedTypePredicate+`
+				store.EmbedFailureQueryPathExcludedPredicate+store.RetrievalExcludedTypePredicate+`
 			LIMIT 1`).Scan(&blockID, &title, &content, &sens, &scope)
 		if err != nil {
 			break // No more pending blocks (or error).
@@ -1758,9 +1783,17 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 
 		// pool=nil: document embeddings land in the block row, not the cache
 		// (today's semantics — the cache is for repeated query/keyword text).
+		// The wire call runs under the remaining sync budget; callerCut is
+		// read BEFORE cancelEmbed, which would make Err() non-nil by itself.
+		embedCtx, cancelEmbed := ctx, func() {}
+		if !budgetDeadline.IsZero() {
+			embedCtx, cancelEmbed = context.WithDeadline(ctx, budgetDeadline)
+		}
 		vec, served, wireAttempts, wired, err := embedcache.EmbedChain(
-			ctx, nil, chain, backends.RoleEmbed, embedText, embed.PrefixDocument,
+			embedCtx, nil, chain, backends.RoleEmbed, embedText, embed.PrefixDocument,
 			embedcache.ReportFunc(llm.PoolReporter(h.backendPool)), adm)
+		callerCut := err != nil && embedCtx.Err() != nil
+		cancelEmbed()
 		if wired {
 			// TENANT-DECISION(backfill-attribution): "" → NULL. backfillPending is
 			// query-triggered but maintenance in nature — it embeds whatever blocks
@@ -1782,7 +1815,20 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			// failure most often means the backend itself is unavailable,
 			// and hammering it for the rest of the sync-cap budget within
 			// one request helps nobody.
-			class, normalized := store.ClassifyEmbedError(err)
+			// A budget or request deadline is a statement about THIS caller,
+			// not about the backend: class caller_timeout, which the query
+			// path never re-picks and the background arm picks at once.
+			// Everything else keeps the wire/oversize classification.
+			var (
+				class      store.EmbedFailureClass
+				normalized string
+			)
+			if callerCut {
+				class = store.EmbedFailureCallerTimeout
+				normalized = store.NormalizeEmbedError(class, err.Error())
+			} else {
+				class, normalized = store.ClassifyEmbedError(err)
+			}
 			// The memo write must survive the request context: the wire
 			// failure above IS frequently the request deadline itself
 			// (canceled context), and a memo lost to that same cancellation

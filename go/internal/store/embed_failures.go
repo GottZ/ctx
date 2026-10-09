@@ -44,6 +44,17 @@ const (
 	// memo-free "stays unembedded, retried every cycle" semantics for this
 	// case — a pool outage there must not permanently park blocks).
 	EmbedFailureSensitivityIneligible EmbedFailureClass = "sensitivity_ineligible"
+	// EmbedFailureCallerTimeout marks a block whose embed did not fit the
+	// query path's sync budget (embed_backfill.sync_budget) or died with
+	// the request context — the backend is not known to be down, it was
+	// slow relative to THIS caller's deadline (the tracking issue, force-push.me/damienmoon/ctx/issues/1: a
+	// 10k-token block on a CPU backend). The memo therefore says nothing
+	// about the backend and must not park the block on the wire curve: the
+	// query path (EmbedFailureQueryPathExcludedPredicate) never picks a
+	// caller_timeout block again, the background arm picks it at once
+	// (next_attempt_at = now()). A later wire failure in the background
+	// arm reclassifies it as wire with the ordinary backoff.
+	EmbedFailureCallerTimeout EmbedFailureClass = "caller_timeout"
 )
 
 // maxLastErrorLen mirrors migration 113's documented last_error contract:
@@ -149,6 +160,27 @@ func RecordEmbedFailure(ctx context.Context, q pgxdb.Execer, blockID string, cla
 		)
 		if err != nil {
 			return fmt.Errorf("store: record embed failure (oversize): %w", err)
+		}
+		return nil
+	}
+
+	if class == EmbedFailureCallerTimeout {
+		// Eligible for the background arm at once: the backoff curve is
+		// for a backend that failed, this backend only took longer than
+		// the caller could wait. Pfad A's own exclusion of this class is
+		// in the predicate, not in the timestamp.
+		_, err := q.Exec(ctx,
+			`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
+			 VALUES ($1, NULL, 1, $2, $3, now())
+			 ON CONFLICT (block_id) WHERE migration_id IS NULL
+			 DO UPDATE SET attempts        = context_embed_failures.attempts + 1,
+			               last_error      = EXCLUDED.last_error,
+			               last_class      = EXCLUDED.last_class,
+			               next_attempt_at = now()`,
+			blockID, normalizedErr, string(class),
+		)
+		if err != nil {
+			return fmt.Errorf("store: record embed failure (caller_timeout): %w", err)
 		}
 		return nil
 	}
@@ -264,4 +296,22 @@ const EmbedFailureExcludedPredicate = `
 		WHERE f.block_id = context_blocks.id
 		  AND f.migration_id IS NULL
 		  AND f.next_attempt_at > now()
+	)`
+
+// EmbedFailureQueryPathExcludedPredicate is Pfad A's (query.go
+// backfillPending) variant of EmbedFailureExcludedPredicate: the same
+// backoff exclusion PLUS every block memoized as caller_timeout, for good.
+// A block that once overran the sync budget is the background arm's job
+// from then on; re-picking it inline would burn the budget of every later
+// query for a block the arm is about to embed anyway (and, while the arm
+// holds its FOR UPDATE row, embed it a second time in parallel). The
+// background arm keeps the plain predicate, so for it a caller_timeout memo
+// (next_attempt_at = now()) is immediately eligible. Same positional
+// contract as its sibling: bare context_blocks as the outer FROM.
+const EmbedFailureQueryPathExcludedPredicate = `
+	AND NOT EXISTS (
+		SELECT 1 FROM context_embed_failures f
+		WHERE f.block_id = context_blocks.id
+		  AND f.migration_id IS NULL
+		  AND (f.next_attempt_at > now() OR f.last_class = 'caller_timeout')
 	)`
