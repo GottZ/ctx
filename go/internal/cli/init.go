@@ -814,6 +814,36 @@ func stepVersion() bool {
 	return true
 }
 
+// envNoUpdateCheck switches the release check off the way NO_COLOR switches
+// color off: any non-empty value counts. An ambiguous value ("0") therefore
+// errs toward no request — the direction an air-gapped install wants.
+const envNoUpdateCheck = "CTX_NO_UPDATE_CHECK"
+
+// updateCheckOff names the switch that turned the release check off, or "".
+// With both set the flag is named — it is the more explicit of the two.
+func updateCheckOff(flag bool) string {
+	switch {
+	case flag:
+		return "--no-update-check"
+	case os.Getenv(envNoUpdateCheck) != "":
+		return envNoUpdateCheck
+	}
+	return ""
+}
+
+// runVersionStep runs the release check unless it is switched off (#49 Punkt
+// 5). Off means no request at all, not a request whose answer is ignored: the
+// check is the only call init sends to a host other than the user's ctxd, and
+// an offline or air-gapped install should not even try it. The check is passed
+// in so tests can assert "not called"; stepVersion keeps its own client.
+func runVersionStep(flag bool, check func() bool) bool {
+	if off := updateCheckOff(flag); off != "" {
+		fmt.Println(label("Version", "%s (update check off: %s) %s", Version, off, skipMark()))
+		return true
+	}
+	return check()
+}
+
 // ── Step 6: Claude Code hooks ──────────────────────────────────────.
 
 const hookCmdBrief = "ctx brief --hook"
@@ -1124,7 +1154,8 @@ func describeStatusLine(v any) string {
 // ── init command ───────────────────────────────────────────────────.
 
 func initCmd() *cobra.Command {
-	return &cobra.Command{
+	var noUpdateCheck bool
+	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Setup ctx config, hooks, and statusline",
 		Long: `Interactive setup wizard for ctx. Checks and configures:
@@ -1139,16 +1170,23 @@ func initCmd() *cobra.Command {
   7. Statusline — ctx statusline in settings.json
 
 Idempotent: re-running shows status for each item, only changes what's missing.
-Respects NO_COLOR environment variable for plain text output.`,
+Respects NO_COLOR environment variable for plain text output.
+
+The version check is the only request to a host other than your ctx server
+(api.github.com). --no-update-check or CTX_NO_UPDATE_CHECK=1 skips it entirely.`,
 		Example: `  ctx init          # Interactive setup
-  NO_COLOR=1 ctx init  # Plain text output`,
+  NO_COLOR=1 ctx init  # Plain text output
+  ctx init --no-update-check  # No GitHub request (offline / air-gapped)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInit()
+			return runInit(noUpdateCheck)
 		},
 	}
+	cmd.Flags().BoolVar(&noUpdateCheck, "no-update-check", false,
+		"skip the GitHub release check — no request leaves for api.github.com (same as "+envNoUpdateCheck+"=1)")
+	return cmd
 }
 
-func runInit() error {
+func runInit(noUpdateCheck bool) error {
 	fmt.Printf("\nctx init %s\n\n", Version)
 
 	var result initResult
@@ -1185,7 +1223,7 @@ func runInit() error {
 	}
 
 	// Step 5: Version
-	result.VersionOK = stepVersion()
+	result.VersionOK = runVersionStep(noUpdateCheck, stepVersion)
 
 	// Step 6: Hooks
 	result.HooksOK = stepHooks()

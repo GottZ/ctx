@@ -1273,3 +1273,63 @@ func TestStatuslineStepInstallsWhenAbsent(t *testing.T) {
 		t.Errorf("statusLine = %v", s.raw["statusLine"])
 	}
 }
+
+// ── Version check opt-out (#49 Punkt 5) ────────────────────────────
+//
+// The release check is the one request init sends to a foreign host. With
+// --no-update-check or CTX_NO_UPDATE_CHECK set it must not run at all — the
+// check function is injected, so "no request" is asserted as "not called".
+
+func TestVersionStepOptOut(t *testing.T) {
+	cases := []struct {
+		name     string
+		flag     bool
+		env      string
+		wantCall bool
+		wantWord string
+	}{
+		{"default checks", false, "", true, ""},
+		{"flag", true, "", false, "--no-update-check"},
+		{"env", false, "1", false, "CTX_NO_UPDATE_CHECK"},
+		{"env with any value", false, "yes", false, "CTX_NO_UPDATE_CHECK"},
+		{"both", true, "1", false, "--no-update-check"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NO_COLOR", "1")
+			t.Setenv(envNoUpdateCheck, tc.env)
+			called := false
+			var ok bool
+			out := captureStdout(t, func() {
+				ok = runVersionStep(tc.flag, func() bool { called = true; return true })
+			})
+			if called != tc.wantCall {
+				t.Fatalf("check called = %v, want %v; output:\n%s", called, tc.wantCall, out)
+			}
+			if !ok {
+				t.Error("the version step never fails init")
+			}
+			if !tc.wantCall {
+				if !strings.Contains(out, tc.wantWord) || !strings.Contains(out, "[skip]") {
+					t.Errorf("the skip line must name its switch %q; output:\n%s", tc.wantWord, out)
+				}
+				if !strings.Contains(out, Version) {
+					t.Errorf("the local version is still shown; output:\n%s", out)
+				}
+			}
+		})
+	}
+}
+
+func TestInitCmdHasNoUpdateCheckFlag(t *testing.T) {
+	f := initCmd().Flags().Lookup("no-update-check")
+	if f == nil {
+		t.Fatal("ctx init has no --no-update-check flag")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("the check stays on by default, got default %q", f.DefValue)
+	}
+	if !strings.Contains(f.Usage, envNoUpdateCheck) {
+		t.Errorf("the flag usage should name the env twin: %q", f.Usage)
+	}
+}
