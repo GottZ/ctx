@@ -45,7 +45,9 @@ echo "CTX_SECRETS_KEY=$(openssl rand -hex 32)" >> .env
 ./break-glass.sh reset-settings [key]      # factory-reset settings overrides (audited via DB trigger)
 ```
 
-`openssl enc` cannot do AES-GCM, so extraction pipes the row through the ctxd binary itself: `psql -At … | docker run --rm -i -e CTX_SECRETS_KEY -e CTX_SECRETS_KEY_PREV n8n-ctx -secret-decrypt`. PostgreSQL's `encode(bytea,'base64')` is MIME (RFC 2045) and wraps every 76 chars — the script strips the wraps SQL-side, and the decrypt mode additionally reads stdin to EOF and strips CR/LF, so every realistic provider-key length survives the pipe.
+Both docker targets resolve **fail-closed**: the DB container from `CTX_DB_CONTAINER`, else the running compose service `db`; the ctx image from `CTX_IMAGE`, else the image of the compose service `ctx` container (a crash-looping or exited one counts). When no stage yields a value the script stops with exit 2 instead of guessing a name — a guessed name would hand the DB password or the master key to whatever answers to it on that host. Both secrets travel by name (`-e PGPASSWORD`, `-e CTX_SECRETS_KEY`), never as a value on a docker command line, and the arguments reach SQL only as psql variables (`:'name'`).
+
+`openssl enc` cannot do AES-GCM, so extraction pipes the row through the ctxd binary itself: `psql -At … | docker run --rm -i -e CTX_SECRETS_KEY -e CTX_SECRETS_KEY_PREV "$CTX_IMAGE" -secret-decrypt`. PostgreSQL's `encode(bytea,'base64')` is MIME (RFC 2045) and wraps every 76 chars — the script strips the wraps SQL-side, and the decrypt mode additionally reads stdin to EOF and strips CR/LF, so every realistic provider-key length survives the pipe.
 
 ## Trust × sensitivity gating
 

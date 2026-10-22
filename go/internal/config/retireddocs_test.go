@@ -256,9 +256,9 @@ func TestEnvExampleNamesTheReplacement(t *testing.T) {
 // deliberately NOT matched: a knob with a fallback needs no template line.
 //
 // The character class carries the one exception this gate would otherwise
-// need a list for: break-glass.sh uses POSITIONAL parameters (${1:?usage …},
-// ${2:?name}) — arguments, not environment — and they fall out of
-// [A-Z][A-Z0-9_]+ by themselves. Listing them by name would be the allowlist
+// need a list for: POSITIONAL parameters (${1:?usage …}, ${2:?name}) are
+// arguments, not environment, and they fall out of [A-Z][A-Z0-9_]+ by
+// themselves. Listing them by name would be the allowlist
 // construction V17 rejects for validations in validate.go ("an allowlist …
 // would have to be maintained in lockstep").
 var requiredScriptVarPattern = regexp.MustCompile(`\$\{([A-Z][A-Z0-9_]+):\?`)
