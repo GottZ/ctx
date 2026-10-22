@@ -1,5 +1,7 @@
 # Security
 
+How the system defends itself is below. How to **report** a vulnerability — privately, through GitHub's private vulnerability reporting — is in [SECURITY.md](../SECURITY.md).
+
 ## Admin tier
 
 (BREAKING, migration 052.) Keys carry an `is_admin` flag (default `false`, no key is auto-promoted). These `/api/manage` actions require an admin key — **BREAKING for previously-working non-admin keys**: `api-key-create`, `api-key-list`, `api-key-delete`, `mcp-client-create`, `mcp-client-list`, `mcp-client-delete`, and `dream-mode` when mutating (reading the current mode stays open).
