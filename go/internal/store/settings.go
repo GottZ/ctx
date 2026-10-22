@@ -17,13 +17,16 @@ import (
 // namespace: api-key-create rejects '_'-prefixed scopes (052), so no tenant
 // home_scope can ever collide with the global settings identity.
 //
-// TODO(multi-tenant): per-tenant settings resolution reads tenant-scope
-// overrides on top of GlobalScope; F2 reads scope='_global' exclusively.
+// It is the base of settings resolution, not the whole of it. Boot and the
+// NOTIFY reload build the server-wide snapshot from scope='_global' alone
+// (settings.loadOverrideRows); a tenant's own rows sit on top of that base
+// through settings.TenantOverlay, which reads {GlobalScope, tenant} via
+// LoadSettingOverridesMulti and is installed with cfgStore.SetOverlay in
+// cmd/ctxd/main.go.
 const GlobalScope = "_global"
 
 // SettingOverride is one row of the context_settings DB override layer.
-// Runtime precedence (once the consumer waves land): request override >
-// DB override > env > code default.
+// Runtime precedence: tenant override > _global override > env > code default.
 type SettingOverride struct {
 	Key       string          `json:"key"`
 	Scope     string          `json:"scope"`
@@ -66,10 +69,10 @@ func LoadSettingOverrides(ctx context.Context, pool *pgxpool.Pool, scope string)
 // LAST scope listed wins per key. For {GlobalScope, tenant} that means tenant
 // beats _global; array_position gives a total order over ANY number of scopes,
 // so a future caller resolving across >2 scopes stays deterministic regardless
-// of row order. The caller still materializes the precedence in Go (a later
-// wave); this ORDER BY is the defensive safeguard, the index-backed read path
-// the foundation. No consumer yet (additive next to LoadSettingOverrides, which
-// stays the boot-time _global path).
+// of row order. The precedence itself is materialized in Go by the consumer —
+// settings.loadTenantOverrideRows, which feeds settings.TenantOverlay — so this
+// ORDER BY is the defensive safeguard and the index-backed read path.
+// LoadSettingOverrides stays the boot-time _global path next to it.
 //
 // Fail-closed (mirrors rrf.Search empty-scopes, auth-scope §6.2): an empty
 // slice or any empty element is rejected — an unscoped scope = ANY('{}') would

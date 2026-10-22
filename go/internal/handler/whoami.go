@@ -132,9 +132,11 @@ func (h *WhoamiHandler) identityFromDB(ctx context.Context, apiKeyID string) (wh
 // + per-tenant role), the key's own id (Self-Revoke-Schutz) and the owning
 // tenant's slug + display name — everything the SPA needs for its UI gate.
 //
-// TODO(multi-tenant): the identity lookup is still server-global (a bare
-// context_api_keys read, LEFT-joined to its tenant), not scoped per tenant —
-// the remaining seam once per-tenant label visibility matters.
+// The identity lookup reads the caller's own key and nothing else: its only
+// predicate is k.id = ar.ApiKeyID, the id the auth layer resolved for this
+// request, never request input. There is no listing and no field through which
+// a foreign key id could arrive, so the response carries only what the caller
+// already holds through that key.
 func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(r.Context())
 	if ar == nil || !ar.IsValid {

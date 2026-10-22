@@ -16,7 +16,7 @@ import (
 // same config.Build machine, fed by the MT3-W3 loadTenantOverrideRows. This is
 // the consumer that wave; 06-C3 has landed, so the returned value is injected
 // into config.Store at boot — cfgStore.SetOverlay(settings.TenantOverlay(pool))
-// in cmd/ctxd/main.go:455, before the scheduler and the HTTP server start. A
+// in cmd/ctxd/main.go, before the scheduler and the HTTP server start. A
 // deployment without per-tenant rows still inherits the base unchanged.
 //
 // Contract (config.TenantOverlay, store.go). The Store has already rejected an

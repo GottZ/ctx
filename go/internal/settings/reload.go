@@ -140,7 +140,7 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 //
 // This is the boot/reload half and stays scope='_global' exclusively — the
 // server-wide config. The per-tenant half is loadTenantOverrideRows below: it
-// reads {_global, tenant} in one query for the request path (overlay.go:34),
+// reads {_global, tenant} in one query for the request path (TenantOverlay),
 // and the precedence tenant > global > env > default is materialized there,
 // not here. The 051 scope column carries the dimension both of them use.
 func loadOverrideRows(ctx context.Context, pool *pgxpool.Pool) ([]store.SettingOverride, error) {
@@ -152,7 +152,7 @@ func loadOverrideRows(ctx context.Context, pool *pgxpool.Pool) ([]store.SettingO
 // (toOverrides) materializes the precedence tenant > _global; the ORDER BY in
 // LoadSettingOverridesMulti is only the defensive safeguard. Additive next to
 // loadOverrideRows (the boot-time _global path stays). Its consumer is the
-// config.Store overlay — TenantOverlay in overlay.go:34; Bootstrap/Reload stay
+// config.Store overlay — TenantOverlay in overlay.go; Bootstrap/Reload stay
 // _global-only here.
 func loadTenantOverrideRows(ctx context.Context, pool *pgxpool.Pool, tenant string) ([]store.SettingOverride, error) {
 	return store.LoadSettingOverridesMulti(ctx, pool, []string{store.GlobalScope, tenant})

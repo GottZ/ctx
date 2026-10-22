@@ -17,11 +17,15 @@ import (
 // OR-arm (T40a/T40b) is already live; this is the WRITE side — create/list/revoke
 // behind the server-admin tier PLUS a hard per-resource ownership gate.
 //
-// requireAdminAction (the upstream tier gate, context_manage.go) checks ONLY the
-// server-global is_admin — it has NO tenant filter (TODO :215). So the ownership
-// gate below is the ONLY thing standing between an admin and cross-tenant
-// exfiltration via a forged block-grant (design/07 §5.1, KRITISCH). It is NOT
-// optional.
+// requireAdminAction (the upstream tier gate, context_manage.go) checks only the
+// server-global is_admin flag and by design carries no tenant filter: the
+// server-admin tier is the operator role above all tenants. The tenant dimension
+// is enforced per resource instead — blockOwnershipGate below resolves the
+// block's scope against the caller tenant's owned scopes on both mutating paths
+// (create, revoke), and it is what stops cross-tenant exfiltration via a forged
+// block grant (design/07 §5.1, KRITISCH). It is NOT optional. Behind it, a
+// cross-tenant create additionally needs the owner tenant's opt-in (default
+// false).
 
 type blockGrantSpec struct {
 	BlockID       string `json:"block_id"`
