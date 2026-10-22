@@ -793,7 +793,10 @@ func stepVersion() bool {
 		return true
 	}
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	// The release object carries the whole body and every asset with its
+	// uploader — 14.6 KB for v5.23.1. A 4 KB cap truncated it, so the check
+	// always ended in "parse error"; 1 MiB still bounds a misbehaving reply.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var release githubRelease
 	if err := json.Unmarshal(body, &release); err != nil || release.TagName == "" {
 		fmt.Println(label("Version", "%s (parse error) %s", local, skipMark()))
