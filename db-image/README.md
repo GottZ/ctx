@@ -15,6 +15,11 @@ Trixie is required because TimescaleDB PG18 packages are only available for Debi
 | pgvector    | Base image (pre-built)              | `CREATE EXTENSION vector`      |
 | TimescaleDB | packagecloud timescale/timescaledb  | `shared_preload_libraries` + `CREATE EXTENSION timescaledb` |
 
+The TimescaleDB apt source is written directly with `signed-by=` on the packagecloud
+repository key — no install script piped into a shell. The key's fingerprints are pinned
+in the Dockerfile (`TIMESCALE_REPO_FPRS`): a different, additional or rotated key fails
+the build instead of being trusted on first use.
+
 ## Build
 
 ```bash
