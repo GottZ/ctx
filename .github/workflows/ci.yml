@@ -892,6 +892,11 @@ jobs:
       contents: read
       packages: write
 
+    # Der Index-Digest des gepushten Images (Manifest-Liste inkl. SBOM- und
+    # Provenance-Manifeste) — docker-attest signiert genau diesen.
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -924,6 +929,7 @@ jobs:
             org.opencontainers.image.licenses=MPL-2.0
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./go
@@ -939,8 +945,11 @@ jobs:
           # Build-Argumente und die aufgelösten Basis-Digests in die Provenance
           # auf — zusammen mit den Digest-Pins im Dockerfile ist damit belegbar,
           # woraus ein Release-Image gebaut wurde. Beides sind unsignierte
-          # BuildKit-Attestations; Sigstore-signierte bräuchten id-token/
-          # attestations-Rechte, die dieser Job bewusst nicht hat.
+          # BuildKit-Attestations im selben Manifest wie das Image — wer das
+          # Image ersetzen kann, ersetzt sie mit. Die Sigstore-signierte
+          # Provenance kommt aus dem Job docker-attest; dieser Job bleibt ohne
+          # id-token/attestations-Rechte, weil hier Build-Schritte und
+          # Drittanbieter-Actions laufen.
           sbom: true
           provenance: mode=max
           cache-from: |
@@ -949,3 +958,38 @@ jobs:
           cache-to: |
             type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
             type=gha,mode=max
+
+  # ─── Stage 6: Image-Attestation ───────────────────────────────────────────────
+  # #49 Punkt 2, Image-Hälfte: Sigstore-signierte Build-Provenance für genau den
+  # Index-Digest, den docker gepusht hat — `gh attestation verify
+  # oci://ghcr.io/gottz/ctx:<tag> -R GottZ/ctx`. Ein eigener Job, damit id-token
+  # nicht neben Build-Schritten und Drittanbieter-Actions liegt: hier laufen nur
+  # ein docker login (Shell, kein Action-Code) und die GitHub-eigene
+  # Attest-Action. Läuft nur, wenn docker lief (needs → sonst skipped).
+  # push-to-registry legt die Attestation zusätzlich als OCI-Referrer neben das
+  # Image (dafür packages: write und der Login); Storage-Records gibt es nur für
+  # Organisations-Repos, GottZ/ctx ist ein User-Repo.
+  docker-attest:
+    name: Docker Attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [docker]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      packages: write
+
+    steps:
+      - name: Login to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Attest image build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ needs.docker.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false

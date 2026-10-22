@@ -86,10 +86,43 @@ jobs:
           path: ctx-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
           retention-days: 30
 
+  # Build-Provenance (#49 Punkt 2): SHA256SUMS liegt neben den Binaries und
+  # fängt einen kaputten Download, aber kein ausgetauschtes Release — beide
+  # Dateien liegen am selben Ort. Die Attestation ist Sigstore-signiert über das
+  # OIDC-Token dieses Workflow-Laufs und liegt in der Attestations-API des Repos,
+  # nicht im Release: `gh attestation verify <datei> -R GottZ/ctx`.
+  #
+  # Eigener Job statt eines Schritts in publish: id-token kann jeder Schritt des
+  # Jobs anfordern, der es trägt. Hier läuft neben dem Download nur die
+  # GitHub-eigene Attest-Action — kein Drittanbieter-Code (action-gh-release)
+  # und kein contents: write teilen sich den Job mit dem Token. publish hängt
+  # an diesem Job: ohne Attestation kein Release.
+  attest:
+    name: Attest Build Provenance
+    runs-on: ubuntu-latest
+    needs: [release]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/ctx-*
+
   publish:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [release]
+    needs: [release, attest]
     permissions:
       contents: write
 
@@ -133,15 +166,12 @@ jobs:
             echo '```'
             echo ""
             echo "**Binary download:**"
-            echo "Download the binary for your platform, make it executable, move to PATH:"
+            echo "Download the binary for your platform (and SHA256SUMS), verify both, then install:"
             echo '```bash'
+            echo "gh attestation verify ctx-<os>-<arch> -R GottZ/ctx   # signed build provenance"
+            echo "sha256sum -c --ignore-missing SHA256SUMS            # download integrity"
             echo "chmod +x ctx-*"
             echo "sudo mv ctx-* /usr/local/bin/ctx"
-            echo '```'
-            echo ""
-            echo "**Verify the download:**"
-            echo '```bash'
-            echo "sha256sum -c --ignore-missing SHA256SUMS"
             echo '```'
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"

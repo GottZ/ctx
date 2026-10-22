@@ -39,8 +39,14 @@ It speaks **MCP, a CLI, and a plain HTTP API**, ships an embedded web UI, and is
 ## Quick install
 
 ```bash
-# Binary (Linux/macOS/Windows)
-curl -fsSL https://github.com/GottZ/ctx/releases/latest/download/ctx-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/ctx && chmod +x /usr/local/bin/ctx
+# Binary (Linux/macOS/Windows): download to a temp dir, verify the signed build
+# provenance (GitHub CLI — fails unless this repo's release workflow built the
+# file), and only then install
+f=ctx-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+tmp=$(mktemp -d)
+curl -fsSL "https://github.com/GottZ/ctx/releases/latest/download/$f" -o "$tmp/$f" \
+  && gh attestation verify "$tmp/$f" -R GottZ/ctx \
+  && install -m 0755 "$tmp/$f" /usr/local/bin/ctx
 
 # Or with Go
 go install github.com/GottZ/ctx/cmd/ctx@latest
