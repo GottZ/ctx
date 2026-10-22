@@ -125,6 +125,11 @@ type Config struct {
 }
 
 // ServerConfig is the restart-only process surface: DB connection + listener.
+//
+// ListenAddr defaults to loopback: a bare ctxd on a host must not listen on
+// every interface (#49 Punkt 4). Inside a container 127.0.0.1 is out of reach
+// of any published port, so go/Dockerfile and docker-compose.yml set :8080 —
+// the three are pinned together in listen_addr_test.go.
 type ServerConfig struct {
 	DB         string `key:"server.db" env:"CONTEXT_DB" default:"context_store" mut:"restart" tenancy:"global-only"`
 	DBUser     string `key:"server.db_user" env:"CONTEXT_DB_USER" default:"context_user" mut:"restart" tenancy:"global-only"`
@@ -132,7 +137,7 @@ type ServerConfig struct {
 	DBHost     string `key:"server.db_host" env:"CONTEXT_DB_HOST" default:"localhost" mut:"restart" tenancy:"global-only"`
 	DBPort     int    `key:"server.db_port" env:"CONTEXT_DB_PORT" default:"5432" mut:"restart" parse:"strict" tenancy:"global-only"`
 	DBSSL      string `key:"server.db_sslmode" env:"CONTEXT_DB_SSLMODE" default:"disable" mut:"restart" tenancy:"global-only"`
-	ListenAddr string `key:"server.listen_addr" env:"LISTEN_ADDR" default:":8080" mut:"restart" tenancy:"global-only"`
+	ListenAddr string `key:"server.listen_addr" env:"LISTEN_ADDR" default:"127.0.0.1:8080" mut:"restart" tenancy:"global-only"`
 	// InstanceKind is what this process claims to BE: "live" (default) or
 	// "measure-copy" — a corpus restored from backups/*.dump for the shadow
 	// measurement programme (design/05 §5 B4b, M-W2). The armsweep driver reads

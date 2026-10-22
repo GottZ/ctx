@@ -331,7 +331,7 @@ func TestFromEnvReadsEnvironment(t *testing.T) {
 	// β7 cut the tuple; server.listen_addr is a string key with a non-empty
 	// default that the loop above blanks like every other env var, and unlike
 	// the backend hosts it outlives the whole cut train.
-	if c.Server.ListenAddr != ":8080" {
+	if c.Server.ListenAddr != "127.0.0.1:8080" {
 		t.Errorf("empty env must fall back to default, got %q", c.Server.ListenAddr)
 	}
 	if !slices.Equal(c.Scheduler.ReadScopes, []string{"private", "shared", "work"}) {

@@ -13,7 +13,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: SchlÃ
 	"server.db_host":                                 "Hostname or IP of the PostgreSQL server to connect to; applied on restart",
 	"server.db_port":                                 "TCP port of the PostgreSQL server; a malformed value aborts boot, changes apply on restart",
 	"server.db_sslmode":                              "libpq sslmode for the database connection (disable, require, verify-full, ...); applied on restart",
-	"server.listen_addr":                             "host:port the HTTP API binds to, e.g. :8080; applied on restart",
+	"server.listen_addr":                             "host:port the HTTP API binds to; the default 127.0.0.1:8080 is loopback-only, :8080 binds every interface (the container image and compose set that); applied on restart",
 	"server.instance_kind":                           "What this instance is: live (default) or measure-copy â€” a corpus restored for the shadow measurement programme; the armsweep driver refuses shadow_types against anything but measure-copy, applied on restart",
 	"dream.enabled":                                  "Master switch for the background dream pipeline (link discovery, keywords, temporal review); takes effect on restart",
 	"dream.idle_wait":                                "Seconds the dream scheduler sleeps when no block is eligible; eligible blocks are still processed back-to-back",

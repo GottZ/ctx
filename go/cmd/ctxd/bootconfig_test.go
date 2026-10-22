@@ -80,7 +80,7 @@ func TestBootDefaults(t *testing.T) {
 	// Server (password is the injected required value).
 	if cc.Server.DB != "context_store" || cc.Server.DBUser != "context_user" ||
 		cc.Server.DBHost != "localhost" || cc.Server.DBPort != 5432 ||
-		cc.Server.DBSSL != "disable" || cc.Server.ListenAddr != ":8080" {
+		cc.Server.DBSSL != "disable" || cc.Server.ListenAddr != "127.0.0.1:8080" {
 		t.Errorf("server defaults drifted: %+v", cc.Server)
 	}
 	if cc.Server.ListenAddr != defaultListenAddr {

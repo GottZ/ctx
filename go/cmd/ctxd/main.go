@@ -496,7 +496,7 @@ func warnRetiredV3SettingRowsBoot(ctx context.Context, pool *pgxpool.Pool) {
 // (pinned against drift by TestBootDefaults). The -health mode needs it
 // WITHOUT the full config load: it must work in a crash-looping container
 // where FromEnv could fail, so it reads LISTEN_ADDR raw.
-const defaultListenAddr = ":8080"
+const defaultListenAddr = "127.0.0.1:8080"
 
 // normalizeInterruptedSyncsBoot runs the W11 boot-time sync crash recovery
 // (design/03 §3.1): a project left at sync_status='running' by a crash is a lie

@@ -28,6 +28,12 @@ FROM gcr.io/distroless/static-debian13:nonroot@sha256:d62067879de890a1def9da0e77
 COPY --from=build /ctx /ctx
 ENV GOMEMLIMIT=200MiB
 ENV GOGC=100
+# Der Registry-Default ist 127.0.0.1:8080 (#49 Punkt 4: ein nacktes ctxd auf
+# einem Host lauscht nicht auf allen Interfaces). Im Container ist 127.0.0.1
+# das eigene Loopback, kein veröffentlichter Port erreicht es — das Image
+# bindet deshalb alle Interfaces, `docker run -p 8080:8080 ghcr.io/gottz/ctx`
+# bleibt erreichbar. Gepinnt in internal/config/listen_addr_test.go.
+ENV LISTEN_ADDR=:8080
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/ctx"]

@@ -154,8 +154,11 @@ func TestHealthUnreachableFails(t *testing.T) {
 // ones stay green.
 func TestHealthCheckURL(t *testing.T) {
 	cases := map[string]string{
+		// Unset: the registry default 127.0.0.1:8080 (#49 Punkt 4) is
+		// host-qualified, so it takes the SplitHostPort path like every row
+		// below — the concatenation would yield http://localhost127.0.0.1:8080.
+		"": "http://localhost:8080/health",
 		// Historic shapes — unchanged.
-		"":      "http://localhost" + defaultListenAddr + "/health",
 		":9090": "http://localhost:9090/health",
 		":8080": "http://localhost:8080/health",
 		// Host-qualified: the host is dropped, the port survives.
@@ -178,6 +181,34 @@ func TestHealthCheckURL(t *testing.T) {
 		if got != want {
 			t.Errorf("LISTEN_ADDR=%q → %q, want %q", addr, got, want)
 		}
+	}
+}
+
+// TestHealthProbeReachesLoopbackBind dials for real: the server binds the
+// loopback address only — the registry default 127.0.0.1:8080 (#49 Punkt 4) —
+// and the probe, which always dials "localhost", must still reach it.
+// "localhost" also resolves to ::1; a resolver order that tried only that and
+// gave up would turn every bare-binary install permanently unhealthy, and
+// TestHealthCheckURL, which never opens a socket, would stay green.
+// httptest.NewServer binds 127.0.0.1:0, exactly that shape on a free port.
+func TestHealthProbeReachesLoopbackBind(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"services":{"database":"ok"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	bind := srv.Listener.Addr().String()
+	if !strings.HasPrefix(bind, "127.0.0.1:") {
+		t.Fatalf("test server bound %q, want a 127.0.0.1 loopback bind", bind)
+	}
+	url := healthCheckURL(func(string) string { return bind })
+	if !strings.HasPrefix(url, "http://localhost:") {
+		t.Fatalf("probe URL %q does not dial localhost", url)
+	}
+	var stderr bytes.Buffer
+	if code := runHealthCheck(url, &stderr); code != 0 {
+		t.Fatalf("probe against loopback bind %s via %s: exit %d, stderr %q", bind, url, code, stderr.String())
 	}
 }
 
