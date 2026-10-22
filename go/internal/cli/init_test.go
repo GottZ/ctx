@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -221,7 +223,7 @@ func TestSettingsSave_PreservesExisting(t *testing.T) {
 	hooks := s.getHooksMap()
 	hooks["SubagentStart"] = []any{newHookGroup(hookCmdBrief)}
 
-	if err := s.save(path); err != nil {
+	if _, err := s.save(path); err != nil {
 		t.Fatal(err)
 	}
 
@@ -258,7 +260,7 @@ func TestSettingsSave_CreatesDir(t *testing.T) {
 	path := filepath.Join(tmpDir, "subdir", "settings.json")
 
 	s := &settingsJSON{raw: map[string]any{"test": true}}
-	if err := s.save(path); err != nil {
+	if _, err := s.save(path); err != nil {
 		t.Fatalf("save() error: %v", err)
 	}
 
@@ -1037,5 +1039,237 @@ func TestStepKeyProbesExistingConfig(t *testing.T) {
 func TestInitSummaryCountsKeyVerdict(t *testing.T) {
 	if initSummaryOK(initResult{ConfigOK: true, ServerOK: true, KeyOK: false, HooksOK: true, StatuslineOK: true}) {
 		t.Error("a key the server does not accept must not end init as ready")
+	}
+}
+
+// ── settings.json: backup before rewrite, foreign statusline (#49 Punkt 3) ──
+//
+// The rewrite re-sorts and re-indents the whole file, so an existing file
+// whose content changes is first copied next to itself; a statusline that is
+// not ctx's is shown and only replaced on an explicit yes.
+
+// fixedSettingsClock pins the backup timestamp for one test.
+func fixedSettingsClock(t *testing.T) {
+	t.Helper()
+	orig := settingsClock
+	settingsClock = func() time.Time { return time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("CEST", 2*3600)) }
+	t.Cleanup(func() { settingsClock = orig })
+}
+
+// backups lists the settings.json.bak-* files in dir.
+func backups(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "settings.json.bak-") {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+func writeSettingsFile(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil { // WriteFile's mode is cut by the umask
+		t.Fatal(err)
+	}
+}
+
+func TestSettingsSaveBacksUpChangedFile(t *testing.T) {
+	fixedSettingsClock(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	original := "{\"model\":\"opus\",   \"env\":{\"A\":\"1\"}}"
+	writeSettingsFile(t, path, original, 0o640)
+
+	s, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.raw["statusLine"] = map[string]any{"type": "command", "command": statuslineCmd2}
+	backup, err := s.save(path)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// UTC, not the clock's zone: 12:00 CEST is 10:00Z.
+	want := filepath.Join(dir, "settings.json.bak-20261022T100000Z")
+	if backup != want {
+		t.Fatalf("backup = %q, want %q", backup, want)
+	}
+	data, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("backup not written: %v", err)
+	}
+	if string(data) != original {
+		t.Errorf("backup must be the byte-exact original, got %q", data)
+	}
+	info, err := os.Stat(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o640 {
+		t.Errorf("backup mode = %v, want the original's 0640", info.Mode().Perm())
+	}
+	if now, _ := os.ReadFile(path); !strings.Contains(string(now), statuslineCmd2) {
+		t.Errorf("the rewrite itself must still happen: %s", now)
+	}
+}
+
+func TestSettingsSaveUnchangedFileIsNotTouched(t *testing.T) {
+	fixedSettingsClock(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	canonical := "{\n  \"model\": \"opus\"\n}\n" // exactly what save would write
+	writeSettingsFile(t, path, canonical, 0o600)
+
+	s, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := s.save(path)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if backup != "" || len(backups(t, dir)) != 0 {
+		t.Errorf("an unchanged file needs no backup, got %q / %v", backup, backups(t, dir))
+	}
+}
+
+func TestSettingsSaveNewFileHasNoBackup(t *testing.T) {
+	fixedSettingsClock(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	backup, err := (&settingsJSON{raw: map[string]any{"a": 1}}).save(path)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if backup != "" || len(backups(t, dir)) != 0 {
+		t.Errorf("nothing existed, nothing to back up: %q / %v", backup, backups(t, dir))
+	}
+}
+
+// Hooks and statusline are two rewrites in the same run, usually in the same
+// second. The second backup must not replace the first — that one holds the
+// pre-init original.
+func TestSettingsSaveNeverOverwritesABackup(t *testing.T) {
+	fixedSettingsClock(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	original := `{"model":"opus"}`
+	writeSettingsFile(t, path, original, 0o600)
+
+	s, _ := loadSettings(path)
+	s.getHooksMap()["SubagentStart"] = []any{newHookGroup(hookCmdBrief)}
+	first, err := s.save(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediate, _ := os.ReadFile(path)
+	s2, _ := loadSettings(path)
+	s2.raw["statusLine"] = map[string]any{"type": "command", "command": statuslineCmd2}
+	second, err := s2.save(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || second == "" || first == second {
+		t.Fatalf("want two distinct backups, got %q and %q", first, second)
+	}
+	if got, _ := os.ReadFile(first); string(got) != original {
+		t.Errorf("first backup lost the original: %q", got)
+	}
+	if got, _ := os.ReadFile(second); string(got) != string(intermediate) {
+		t.Errorf("second backup must hold the state the second rewrite replaced: %q", got)
+	}
+}
+
+// A statusline that is not ctx's is shown and kept unless the answer is yes.
+func TestStatuslineStepKeepsForeignByDefault(t *testing.T) {
+	fixedSettingsClock(t)
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	path := filepath.Join(dir, "settings.json")
+	original := `{"statusLine":{"type":"command","command":"bash ~/.claude/my-line.sh"}}`
+	writeSettingsFile(t, path, original, 0o600)
+
+	var ok bool
+	out := captureStdout(t, func() { ok = runStatuslineStep(scriptedLines("")) })
+	if ok {
+		t.Error("keeping a foreign statusline is a skip, not a configured ctx statusline")
+	}
+	if !strings.Contains(out, "bash ~/.claude/my-line.sh") {
+		t.Errorf("the existing command must be shown before asking; output:\n%s", out)
+	}
+	if got, _ := os.ReadFile(path); string(got) != original {
+		t.Errorf("the default answer must keep the file byte-identical, got %s", got)
+	}
+	if b := backups(t, dir); len(b) != 0 {
+		t.Errorf("no rewrite, no backup: %v", b)
+	}
+}
+
+func TestStatuslineStepReplacesForeignOnYes(t *testing.T) {
+	fixedSettingsClock(t)
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	path := filepath.Join(dir, "settings.json")
+	original := `{"statusLine":{"type":"command","command":"bash ~/.claude/my-line.sh"}}`
+	writeSettingsFile(t, path, original, 0o600)
+
+	var ok bool
+	out := captureStdout(t, func() { ok = runStatuslineStep(scriptedLines("y")) })
+	if !ok {
+		t.Fatalf("an explicit yes installs the ctx statusline; output:\n%s", out)
+	}
+	s, _ := loadSettings(path)
+	sl, _ := s.raw["statusLine"].(map[string]any)
+	if sl["command"] != statuslineCmd2 {
+		t.Errorf("statusLine = %v, want %q", s.raw["statusLine"], statuslineCmd2)
+	}
+	b := backups(t, dir)
+	if len(b) != 1 {
+		t.Fatalf("want exactly one backup in CLAUDE_CONFIG_DIR, got %v", b)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, b[0])); string(got) != original {
+		t.Errorf("backup must hold the replaced statusline: %s", got)
+	}
+	if !strings.Contains(out, b[0]) {
+		t.Errorf("the step must name the backup; output:\n%s", out)
+	}
+}
+
+// A statusLine value of an unexpected shape is foreign too — it must not be
+// overwritten as if nothing were configured.
+func TestStatuslineStepTreatsOddShapeAsForeign(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	path := filepath.Join(dir, "settings.json")
+	original := `{"statusLine":"my-line"}`
+	writeSettingsFile(t, path, original, 0o600)
+
+	out := captureStdout(t, func() { _ = runStatuslineStep(scriptedLines("")) })
+	if got, _ := os.ReadFile(path); string(got) != original {
+		t.Errorf("an unknown statusLine value must be kept on the default answer, got %s; output:\n%s", got, out)
+	}
+}
+
+func TestStatuslineStepInstallsWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+
+	var ok bool
+	out := captureStdout(t, func() { ok = runStatuslineStep(scriptedLines("")) })
+	if !ok {
+		t.Fatalf("no statusline yet: the default answer installs it; output:\n%s", out)
+	}
+	s, _ := loadSettings(filepath.Join(dir, "settings.json"))
+	if sl, _ := s.raw["statusLine"].(map[string]any); sl["command"] != statuslineCmd2 {
+		t.Errorf("statusLine = %v", s.raw["statusLine"])
 	}
 }

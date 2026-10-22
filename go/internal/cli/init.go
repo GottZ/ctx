@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -838,17 +840,97 @@ func loadSettings(path string) (*settingsJSON, error) {
 	return &settingsJSON{raw: raw}, nil
 }
 
-func (s *settingsJSON) save(path string) error {
+// settingsClock stamps the backup name; a variable so tests can pin it.
+var settingsClock = time.Now
+
+// maxSettingsBackupsPerSecond bounds the -2, -3 … suffix search of one
+// timestamp — init rewrites the file at most twice per run.
+const maxSettingsBackupsPerSecond = 100
+
+// save rewrites settings.json and returns the path of the backup it made, or
+// "" when none was needed. The rewrite re-sorts and re-indents the whole file,
+// so an existing file whose content actually changes is first copied next to
+// itself (#49 Punkt 3a) — the backup makes the change inspectable with a plain
+// diff. A file whose serialized content would not change is not touched at
+// all, and without a backup there is no rewrite: a failed copy aborts the save.
+func (s *settingsJSON) save(path string) (string, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
+		return "", err
 	}
 	data, err := json.MarshalIndent(s.raw, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o600)
+
+	backup := ""
+	current, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if bytes.Equal(current, data) {
+			return "", nil
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", err
+		}
+		if backup, err = backupSettings(path, current, info.Mode().Perm()); err != nil {
+			return "", fmt.Errorf("backup before rewrite: %w", err)
+		}
+	case !os.IsNotExist(err):
+		return "", err
+	}
+	return backup, os.WriteFile(path, data, 0o600)
+}
+
+// backupSettings writes data next to path as <name>.bak-<UTC timestamp>, with
+// the original's permission bits — settings.json can carry env secrets, so the
+// copy must not be more readable than the file. O_EXCL: an existing backup is
+// never replaced. Hooks and statusline are two rewrites in one run, usually in
+// the same second; the second gets a -2 suffix instead of overwriting the copy
+// that holds the pre-init original.
+func backupSettings(path string, data []byte, perm os.FileMode) (string, error) {
+	base := path + ".bak-" + settingsClock().UTC().Format("20060102T150405Z")
+	for i := 1; i <= maxSettingsBackupsPerSecond; i++ {
+		name := base
+		if i > 1 {
+			name = fmt.Sprintf("%s-%d", base, i)
+		}
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		// OpenFile's mode is cut by the umask, Chmod's is not.
+		if err := writeBackupFile(f, data, perm); err != nil {
+			_ = os.Remove(name)
+			return "", err
+		}
+		return name, nil
+	}
+	return "", fmt.Errorf("no free backup name for %s after %d attempts", base, maxSettingsBackupsPerSecond)
+}
+
+func writeBackupFile(f *os.File, data []byte, perm os.FileMode) error {
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// printSettingsBackup names the backup under a step's result line.
+func printSettingsBackup(backup string) {
+	if backup != "" {
+		fmt.Println(indentHint("previous settings.json kept as " + displayConfigPath(backup)))
+	}
 }
 
 // hasHookEntry reports whether any entry in the hook array contains the given
@@ -948,12 +1030,14 @@ func stepHooks() bool {
 		hooksMap["SubagentStop"] = stopArr
 	}
 
-	if err := settings.save(settingsPath); err != nil {
+	backup, err := settings.save(settingsPath)
+	if err != nil {
 		fmt.Println(label("Hooks", "write failed: %v %s", err, failMark()))
 		return false
 	}
 
 	fmt.Println(label("Hooks", "SubagentStart %s  SubagentStop %s", okMark(), okMark()))
+	printSettingsBackup(backup)
 	return true
 }
 
@@ -962,6 +1046,15 @@ func stepHooks() bool {
 const statuslineCmd2 = "ctx statusline"
 
 func stepStatusline() bool {
+	return runStatuslineStep(prompt)
+}
+
+// runStatuslineStep is stepStatusline with the prompt injected. Claude Code has
+// exactly one statusLine, so installing ctx's replaces whatever is there. A
+// statusline that is not ctx's is therefore shown and asked about on its own,
+// defaulting to keep (#49 Punkt 3b) — the generic install question used to
+// replace it on a bare Enter.
+func runStatuslineStep(ask func(question string) string) bool {
 	settingsPath := claudeSettingsPath()
 	settings, err := loadSettings(settingsPath)
 	if err != nil {
@@ -969,21 +1062,25 @@ func stepStatusline() bool {
 		return false
 	}
 
-	// Check existing statusLine
-	sl, _ := settings.raw["statusLine"].(map[string]any)
-	if sl != nil {
-		cmd, _ := sl["command"].(string)
-		if strings.Contains(cmd, "ctx statusline") {
-			fmt.Println(label("Statusline", "configured %s", okMark()))
-			return true
+	existing := settings.raw["statusLine"]
+	present := existing != nil // a JSON null configures nothing
+	switch {
+	case present && isCtxStatusLine(existing):
+		fmt.Println(label("Statusline", "configured %s", okMark()))
+		return true
+	case present:
+		fmt.Println(label("Statusline", "another statusline is configured"))
+		fmt.Println(indentHint(describeStatusLine(existing)))
+		if !answerIsYes(ask("  ? Replace it with ctx statusline? [y/N]: ")) {
+			fmt.Println(label("Statusline", "kept the existing one %s", skipMark()))
+			return false
 		}
-	}
-
-	fmt.Println(label("Statusline", "not configured"))
-
-	if !promptYesNo("  ? Install statusline?") {
-		fmt.Println(label("Statusline", "skipped %s", skipMark()))
-		return false
+	default:
+		fmt.Println(label("Statusline", "not configured"))
+		if answer := ask("  ? Install statusline? [Y/n]: "); answer != "" && !answerIsYes(answer) {
+			fmt.Println(label("Statusline", "skipped %s", skipMark()))
+			return false
+		}
 	}
 
 	settings.raw["statusLine"] = map[string]any{
@@ -991,13 +1088,37 @@ func stepStatusline() bool {
 		"command": statuslineCmd2,
 	}
 
-	if err := settings.save(settingsPath); err != nil {
+	backup, err := settings.save(settingsPath)
+	if err != nil {
 		fmt.Println(label("Statusline", "write failed: %v %s", err, failMark()))
 		return false
 	}
 
 	fmt.Println(label("Statusline", "configured %s", okMark()))
+	printSettingsBackup(backup)
 	return true
+}
+
+func isCtxStatusLine(v any) bool {
+	m, _ := v.(map[string]any)
+	cmd, _ := m["command"].(string)
+	return strings.Contains(cmd, statuslineCmd2)
+}
+
+// describeStatusLine renders an existing statusLine for the question: its
+// command in the usual {type, command} shape, the raw JSON otherwise. Quoted,
+// so a command carrying control characters cannot rewrite the terminal line.
+func describeStatusLine(v any) string {
+	if m, ok := v.(map[string]any); ok {
+		if cmd, ok := m["command"].(string); ok && cmd != "" {
+			return fmt.Sprintf("command %q", cmd)
+		}
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("value %v", v)
+	}
+	return "value " + strconv.Quote(truncateForError(raw))
 }
 
 // ── init command ───────────────────────────────────────────────────.

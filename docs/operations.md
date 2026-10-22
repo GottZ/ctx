@@ -13,8 +13,10 @@ The wizard is the documented first-run path and is idempotent — it reports eve
 3. **Key** — the authenticated probe again, on every run: a re-run over a hand-edited, rotated or revoked key reports `rejected (401 unauthorized)` and says whether to fix the config file or an exported `CTX_KEY`, instead of ending `ready`. The backend-pool step needs an accepted key and is skipped otherwise.
 4. **Backend pool** — lists the pool and, when no enabled `_global` row serves the `synthesis` or `embed` role, asks for host, protocol, chat model, embedding model and an optional API key (for the `anthropic` protocol: the chat model's context window, a separate embedding host and protocol, and the key), then runs the same seed `ctx backends seed` runs (same server-admin gate, same full-trust posture, same sealed-secret handling — the key is read without echo and never lands in the row). Afterwards, and whenever it finds a pool already populated, it **probes** each serving row and names the dead ones. A key below server-admin is not an error here: the step says so, points at `ctx backends seed`, and init carries on — hooks and statusline do not need an admin key.
 5. **Version** — compares the local build against the latest GitHub release.
-6. **Hooks** — `SubagentStart` / `SubagentStop` in Claude Code's `settings.json`.
-7. **Statusline** — `ctx statusline` in the same file.
+6. **Hooks** — `SubagentStart` / `SubagentStop` in Claude Code's `settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when that variable is set).
+7. **Statusline** — `ctx statusline` in the same file. Claude Code has one statusline, so installing ctx's replaces whatever is there: a statusline that is not ctx's is shown with its command and replaced only on an explicit `y` — the default keeps it.
+
+Both steps rewrite `settings.json` as a whole (re-sorted, re-indented). Before a rewrite that changes an existing file, the wizard copies it to `settings.json.bak-<UTC timestamp>` in the same directory, with the original's permissions, and names the copy — `diff` against it shows exactly what init changed. Two rewrites in one run keep two copies (`…Z` and `…Z-2`); the first one is the file as it was before init. An unchanged file is not touched.
 
 <details>
 <summary>Configuring the endpoint by hand instead</summary>
