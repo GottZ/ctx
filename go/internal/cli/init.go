@@ -120,6 +120,7 @@ func displayConfigPath(path string) string {
 type initResult struct {
 	ConfigOK     bool
 	ServerOK     bool
+	KeyOK        bool
 	BackendsOK   bool
 	VersionOK    bool
 	HooksOK      bool
@@ -130,12 +131,20 @@ type initResult struct {
 // tracked but deliberately NOT summed into it: both steps can end short of ✓
 // for reasons that are none of init's business — a key below server-admin, an
 // offline GitHub — and neither invalidates what init actually configures.
+// The key verdict IS summed: a key the server does not accept makes every
+// later call fail with a bare "unauthorized", so "ready" on top of it would be
+// exactly the false green of #40 Bug 8b.
 // init exits 0 regardless; the per-step line carries the detail.
 func initSummaryOK(r initResult) bool {
-	return r.ConfigOK && r.ServerOK && r.HooksOK && r.StatuslineOK
+	return r.ConfigOK && r.ServerOK && r.KeyOK && r.HooksOK && r.StatuslineOK
 }
 
 func stepConfig() (Config, bool) {
+	return runConfigStep(prompt)
+}
+
+// runConfigStep is stepConfig with the prompt injected, so tests can script it.
+func runConfigStep(ask func(question string) string) (Config, bool) {
 	cfgPath := clientconfig.FilePath()
 	displayPath := displayConfigPath(cfgPath)
 
@@ -147,14 +156,13 @@ func stepConfig() (Config, bool) {
 
 	fmt.Println(label("Config", "not found"))
 
-	baseURL := prompt("  ? Base URL: ")
+	baseURL := ask("  ? Base URL: ")
 	if baseURL == "" {
 		fmt.Println(label("Config", "skipped (no URL) %s", failMark()))
 		return Config{}, false
 	}
-	apiKey := prompt("  ? API Key: ")
-	if apiKey == "" {
-		fmt.Println(label("Config", "skipped (no key) %s", failMark()))
+	apiKey, verified, ok := askAcceptedKey(ask, baseURL)
+	if !ok {
 		return Config{}, false
 	}
 
@@ -171,6 +179,10 @@ func stepConfig() (Config, bool) {
 		return Config{}, false
 	}
 
+	if !verified {
+		fmt.Println(label("Config", "saved to %s, key not verified %s", displayPath, warnMark()))
+		return Config{BaseURL: baseURL, Key: apiKey}, true
+	}
 	fmt.Println(label("Config", "saved to %s %s", displayPath, okMark()))
 	return Config{BaseURL: baseURL, Key: apiKey}, true
 }
@@ -207,7 +219,201 @@ func stepServer(cfg Config) bool {
 	return true // degraded is still usable
 }
 
-// ── Step 3: Backend pool ───────────────────────────────────────────.
+// ── Step 3: API key ────────────────────────────────────────────────.
+//
+// #40 Bug 8b: any non-empty answer used to become CTX_KEY, and the only
+// network check was the unauthenticated GET /health — a typo got "healthy ✓"
+// and a config whose first authenticated call returned a bare "unauthorized".
+// The check lives here, where the typo happens, and NOT in the server's
+// SanitizeKey: rejecting malformed keys there would turn the 401 into a
+// key-shape oracle on the unauthenticated path and give up a strip that is
+// tested as a security property.
+
+// apiKeyLen is the length of every raw API key: 32 random bytes, hex-encoded
+// (store.CreateApiKey).
+const apiKeyLen = 64
+
+// maxKeyAttempts bounds the re-ask loop. An empty answer ends it at once, so a
+// closed stdin cannot spin it either.
+const maxKeyAttempts = 3
+
+// maxListedPositions caps the position list of a form problem — a pasted wrong
+// value has dozens, and the count already carries the size.
+const maxListedPositions = 8
+
+// The server's credential grammar (handler.resolveCredential): these prefixes
+// mark OAuth tokens, everything else is a raw key. Mirrored rather than
+// imported — the CLI does not link the store; TestOAuthPrefixesMirrorServer
+// pins the two values.
+const (
+	oauthAccessTokenPrefix  = "ctxt_"
+	oauthRefreshTokenPrefix = "ctxr_"
+)
+
+// keyFormProblem names how a value deviates from the raw-key shape — counted
+// and with 1-based character positions, so the typo can be found — or returns
+// "" for a well-formed key. Uppercase hex is a deviation of its own: the
+// server keeps it (SanitizeKey strips only non-hex), but ctx_auth hashes the
+// key as given and keys are minted lowercase, so it never authenticates.
+func keyFormProblem(key string) string {
+	if strings.HasPrefix(key, oauthAccessTokenPrefix) || strings.HasPrefix(key, oauthRefreshTokenPrefix) {
+		return "this is an OAuth token, not an API key — tokens expire, the config needs the API key itself"
+	}
+	var nonHex, upper []int
+	n := 0
+	for _, r := range key {
+		n++
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+			upper = append(upper, n)
+		default:
+			nonHex = append(nonHex, n)
+		}
+	}
+	var problems []string
+	if n != apiKeyLen {
+		problems = append(problems, fmt.Sprintf("%d characters, expected %d", n, apiKeyLen))
+	}
+	if len(nonHex) > 0 {
+		problems = append(problems, countedPositions(nonHex, "non-hex character"))
+	}
+	if len(upper) > 0 {
+		problems = append(problems, countedPositions(upper, "uppercase character")+" (keys are lowercase)")
+	}
+	return strings.Join(problems, "; ")
+}
+
+// countedPositions renders "2 non-hex characters at positions 5, 17".
+func countedPositions(pos []int, noun string) string {
+	if len(pos) == 1 {
+		return fmt.Sprintf("1 %s at position %d", noun, pos[0])
+	}
+	listed, more := pos, ""
+	if len(listed) > maxListedPositions {
+		listed, more = listed[:maxListedPositions], ", …"
+	}
+	parts := make([]string, len(listed))
+	for i, p := range listed {
+		parts[i] = strconv.Itoa(p)
+	}
+	return fmt.Sprintf("%d %ss at positions %s%s", len(pos), noun, strings.Join(parts, ", "), more)
+}
+
+type keyVerdict int
+
+const (
+	keyAccepted   keyVerdict = iota // 200 + identity
+	keyRejected                     // 401: the server knows no such key
+	keyUnverified                   // unreachable, or an answer that is not ctxd's
+)
+
+type keyProbe struct {
+	verdict keyVerdict
+	label   string // the key's label, on accept
+	detail  string // why the key stayed unverified
+}
+
+// probeKey asks the server who the key is. GET /api/whoami is the cheapest
+// authenticated read there is — one key lookup, no side effect — and the Auth
+// middleware answers an unknown key with 401 before the handler runs. The
+// request goes to the user's OWN ctxd, so the keyed Client is the right
+// transport here (unlike stepVersion's foreign host).
+func probeKey(baseURL, key string) keyProbe {
+	c := NewClientWithTimeout(Config{BaseURL: baseURL, Key: key}, 5*time.Second, 64<<10)
+	body, status, err := c.Do(http.MethodGet, "/api/whoami", nil)
+	if err != nil {
+		return keyProbe{verdict: keyUnverified, detail: "server unreachable"}
+	}
+	if status == http.StatusUnauthorized {
+		return keyProbe{verdict: keyRejected}
+	}
+	var who struct {
+		Success bool   `json:"success"`
+		Label   string `json:"label"`
+	}
+	if status != http.StatusOK || json.Unmarshal(body, &who) != nil || !who.Success {
+		return keyProbe{verdict: keyUnverified, detail: fmt.Sprintf("unexpected answer from /api/whoami: HTTP %d", status)}
+	}
+	return keyProbe{verdict: keyAccepted, label: who.Label}
+}
+
+// askAcceptedKey reads the key until it is well-formed AND the server accepts
+// it, so that "saved" means the key works. A malformed answer never leaves the
+// machine; a rejected one is re-asked like a malformed one. When the server
+// cannot answer at all, the offline path the wizard always had stays open: the
+// key comes back unverified and the Server step names the unreachable host.
+func askAcceptedKey(ask func(question string) string, baseURL string) (key string, verified, ok bool) {
+	for attempt := 1; attempt <= maxKeyAttempts; attempt++ {
+		key = ask("  ? API Key: ")
+		if key == "" {
+			fmt.Println(label("Config", "skipped (no key) %s", failMark()))
+			return "", false, false
+		}
+		if problem := keyFormProblem(key); problem != "" {
+			fmt.Println(indentHint("not an API key: " + problem + retryNote(attempt)))
+			continue
+		}
+		p := probeKey(baseURL, key)
+		switch p.verdict {
+		case keyAccepted:
+			return key, true, true
+		case keyRejected:
+			fmt.Println(indentHint(strings.TrimSuffix(baseURL, "/") +
+				" rejects this key (401 unauthorized): a typo, a revoked key, or a key of another server" +
+				retryNote(attempt)))
+		default:
+			fmt.Println(indentHint("key not verified: " + p.detail))
+			return key, false, true
+		}
+	}
+	fmt.Println(label("Config", "not saved (no accepted key after %d attempts) %s", maxKeyAttempts, failMark()))
+	return "", false, false
+}
+
+func retryNote(attempt int) string {
+	if attempt >= maxKeyAttempts {
+		return ""
+	}
+	return " — try again"
+}
+
+// stepKey verifies the configured key on every run, so a re-run over a
+// hand-edited, rotated or revoked key does not report it as ready. A fresh
+// config was probed before it was saved; this second, cheap probe keeps the
+// line the same on every run.
+func stepKey(cfg Config) bool {
+	p := probeKey(cfg.BaseURL, cfg.Key)
+	switch p.verdict {
+	case keyAccepted:
+		if p.label != "" {
+			fmt.Println(label("Key", "accepted (%q) %s", p.label, okMark()))
+		} else {
+			fmt.Println(label("Key", "accepted %s", okMark()))
+		}
+		return true
+	case keyRejected:
+		fmt.Println(label("Key", "rejected (401 unauthorized) %s", failMark()))
+		if problem := keyFormProblem(cfg.Key); problem != "" {
+			fmt.Println(indentHint("not an API key: " + problem))
+		}
+		fmt.Println(indentHint("fix " + configuredKeySource() + " — every authenticated call fails until then"))
+	default:
+		fmt.Println(label("Key", "not verified (%s) %s", p.detail, warnMark()))
+	}
+	return false
+}
+
+// configuredKeySource names where the key came from: an exported CTX_KEY wins
+// over the file (clientconfig.Load).
+func configuredKeySource() string {
+	if os.Getenv("CTX_KEY") != "" {
+		return "the CTX_KEY environment variable (it takes precedence over the config file)"
+	}
+	return "CTX_KEY in " + displayConfigPath(clientconfig.FilePath())
+}
+
+// ── Step 4: Backend pool ───────────────────────────────────────────.
 
 // The backends step is the interactive twin of `ctx backends seed` (design/02
 // §4.1b). It never re-implements the seed: where the serving roles are
@@ -547,7 +753,7 @@ func legacyDefaultRow(row backendRow) bool {
 	return legacyDefaultNames[row.Name] && strings.TrimSuffix(row.BaseURL, "/") == legacyDefaultHost
 }
 
-// ── Step 4: Version check ──────────────────────────────────────────.
+// ── Step 5: Version check ──────────────────────────────────────────.
 
 type githubRelease struct {
 	TagName string `json:"tag_name"`
@@ -606,7 +812,7 @@ func stepVersion() bool {
 	return true
 }
 
-// ── Step 5: Claude Code hooks ──────────────────────────────────────.
+// ── Step 6: Claude Code hooks ──────────────────────────────────────.
 
 const hookCmdBrief = "ctx brief --hook"
 const hookCmdPersist = "ctx persist --hook"
@@ -751,7 +957,7 @@ func stepHooks() bool {
 	return true
 }
 
-// ── Step 6: Statusline ─────────────────────────────────────────────.
+// ── Step 7: Statusline ─────────────────────────────────────────────.
 
 const statuslineCmd2 = "ctx statusline"
 
@@ -802,12 +1008,14 @@ func initCmd() *cobra.Command {
 		Short: "Setup ctx config, hooks, and statusline",
 		Long: `Interactive setup wizard for ctx. Checks and configures:
 
-  1. Config file (~/.config/ctx/config) — API key and base URL
+  1. Config file (~/.config/ctx/config) — API key and base URL; the key is
+     form-checked (64 lowercase hex characters) and probed before it is saved
   2. Server connection — /health endpoint reachability
-  3. Backend pool — seeds chat + embed backends when none serve (server-admin key)
-  4. Version — compare local version against latest GitHub release
-  5. Claude Code hooks — SubagentStart/SubagentStop in settings.json
-  6. Statusline — ctx statusline in settings.json
+  3. API key — authenticated probe (GET /api/whoami): does the server accept it?
+  4. Backend pool — seeds chat + embed backends when none serve (server-admin key)
+  5. Version — compare local version against latest GitHub release
+  6. Claude Code hooks — SubagentStart/SubagentStop in settings.json
+  7. Statusline — ctx statusline in settings.json
 
 Idempotent: re-running shows status for each item, only changes what's missing.
 Respects NO_COLOR environment variable for plain text output.`,
@@ -835,23 +1043,36 @@ func runInit() error {
 		fmt.Println(label("Server", "skipped (no config) %s", skipMark()))
 	}
 
-	// Step 3: Backend pool (needs a reachable server and a key)
-	if result.ConfigOK && result.ServerOK {
-		result.BackendsOK = stepBackends(cfg)
-	} else {
-		fmt.Println(label("Backends", "skipped (no server) %s", skipMark()))
+	// Step 3: Key (needs a reachable server)
+	switch {
+	case !result.ConfigOK:
+		fmt.Println(label("Key", "skipped (no config) %s", skipMark()))
+	case !result.ServerOK:
+		fmt.Println(label("Key", "skipped (no server) %s", skipMark()))
+	default:
+		result.KeyOK = stepKey(cfg)
 	}
 
-	// Step 4: Version
+	// Step 4: Backend pool (needs a reachable server and an accepted key)
+	switch {
+	case !result.ConfigOK || !result.ServerOK:
+		fmt.Println(label("Backends", "skipped (no server) %s", skipMark()))
+	case !result.KeyOK:
+		fmt.Println(label("Backends", "skipped (key not verified) %s", skipMark()))
+	default:
+		result.BackendsOK = stepBackends(cfg)
+	}
+
+	// Step 5: Version
 	result.VersionOK = stepVersion()
 
-	// Step 5: Hooks
+	// Step 6: Hooks
 	result.HooksOK = stepHooks()
 
-	// Step 6: Statusline
+	// Step 7: Statusline
 	result.StatuslineOK = stepStatusline()
 
-	// Step 7: Summary
+	// Step 8: Summary
 	fmt.Println()
 	allGood := initSummaryOK(result)
 	if allGood {

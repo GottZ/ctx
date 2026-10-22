@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/GottZ/ctx/internal/store"
 )
 
 func TestNoColor(t *testing.T) {
@@ -298,7 +300,7 @@ func TestClaudeSettingsPath(t *testing.T) {
 	}
 }
 
-// ── Step 3: backend pool (A02-W3) ──────────────────────────────────
+// ── Step 4: backend pool (A02-W3) ──────────────────────────────────
 //
 // The step's contract is the seed's contract seen from the wizard: it must not
 // write below server-admin, it must produce the same full-trust payloads
@@ -672,14 +674,14 @@ func TestDeadRowHintDistinguishesLegacyFingerprint(t *testing.T) {
 // The step never turns into a non-zero exit: its verdict stays out of the
 // summary, so a non-admin's init still ends "ready".
 func TestInitSummaryIgnoresBackendsVerdict(t *testing.T) {
-	base := initResult{ConfigOK: true, ServerOK: true, HooksOK: true, StatuslineOK: true}
+	base := initResult{ConfigOK: true, ServerOK: true, KeyOK: true, HooksOK: true, StatuslineOK: true}
 	if !initSummaryOK(base) {
 		t.Fatal("baseline should be ready")
 	}
-	if !initSummaryOK(initResult{ConfigOK: true, ServerOK: true, HooksOK: true, StatuslineOK: true, BackendsOK: false}) {
+	if !initSummaryOK(initResult{ConfigOK: true, ServerOK: true, KeyOK: true, HooksOK: true, StatuslineOK: true, BackendsOK: false}) {
 		t.Error("a degraded backends step must not flip the summary — init stays usable for non-admins")
 	}
-	if initSummaryOK(initResult{ConfigOK: true, ServerOK: true, HooksOK: false, StatuslineOK: true, BackendsOK: true}) {
+	if initSummaryOK(initResult{ConfigOK: true, ServerOK: true, KeyOK: true, HooksOK: false, StatuslineOK: true, BackendsOK: true}) {
 		t.Error("the steps init actually owns must still count")
 	}
 }
@@ -806,5 +808,234 @@ func TestInitBackendsStepAnthropicRejectsBadWindow(t *testing.T) {
 	}
 	if *secretCalls != 0 || len(m.creates) != 0 {
 		t.Errorf("secret prompts %d, creates %d — want nothing asked or written", *secretCalls, len(m.creates))
+	}
+}
+
+// ── API key: form check + authenticated probe (#40 Bug 8b) ─────────
+//
+// Before this, any non-empty string became CTX_KEY and the only network check
+// was the unauthenticated /health — a typo got a green "healthy" and a broken
+// config. The contract now: a malformed key is named by its counted deviation
+// and re-asked, a well-formed one is probed against an authenticated endpoint
+// before it is saved, and the offline path still saves (unverified).
+
+const goodTestKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// keyServer is a ctxd stand-in for GET /api/whoami: the one key it knows gets
+// 200 + identity, everything else the Auth middleware's 401.
+type keyServer struct {
+	srv   *httptest.Server
+	mu    sync.Mutex
+	calls []string // X-Context-Key of every whoami request
+}
+
+func newKeyServer(t *testing.T, accepted string) *keyServer {
+	t.Helper()
+	ks := &keyServer{}
+	ks.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/whoami" || r.Method != http.MethodGet {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		key := r.Header.Get("X-Context-Key")
+		ks.mu.Lock()
+		ks.calls = append(ks.calls, key)
+		ks.mu.Unlock()
+		if key != accepted {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		writeMockJSON(w, map[string]any{"success": true, "label": "laptop", "home_scope": "private"})
+	}))
+	t.Cleanup(ks.srv.Close)
+	return ks
+}
+
+func (ks *keyServer) probes() []string {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	return append([]string(nil), ks.calls...)
+}
+
+// isolatedConfigHome points the client config at an empty temp dir and clears
+// every environment source clientconfig.Load would otherwise read.
+func isolatedConfigHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("CTX_BASE_URL", "")
+	t.Setenv("CTX_KEY", "")
+	t.Setenv("WEBHOOK_BASE_URL", "")
+	return filepath.Join(dir, "ctx", "config")
+}
+
+func scriptedLines(lines ...string) func(string) string {
+	i := 0
+	return func(string) string {
+		if i >= len(lines) {
+			return ""
+		}
+		answer := lines[i]
+		i++
+		return answer
+	}
+}
+
+func TestKeyFormProblem(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+		want []string // substrings; empty = well-formed
+	}{
+		{"real key", goodTestKey, nil},
+		{"one char short", goodTestKey[:63], []string{"63 characters, expected 64"}},
+		{"one char long", goodTestKey + "0", []string{"65 characters, expected 64"}},
+		{"two typos", goodTestKey[:4] + "g" + goodTestKey[5:16] + "z" + goodTestKey[17:],
+			[]string{"2 non-hex characters at positions 5, 17"}},
+		{"one typo, singular", "x" + goodTestKey[1:], []string{"1 non-hex character at position 1"}},
+		{"uppercase", "AB" + goodTestKey[2:], []string{"2 uppercase characters at positions 1, 2", "lowercase"}},
+		{"short and typo", goodTestKey[:10] + "-" + goodTestKey[11:63],
+			[]string{"63 characters, expected 64", "1 non-hex character at position 11"}},
+		{"multibyte counts as one character", "ä" + goodTestKey[1:],
+			[]string{"1 non-hex character at position 1"}},
+		{"oauth access token", "ctxt_" + goodTestKey, []string{"OAuth token", "API key"}},
+		{"oauth refresh token", "ctxr_" + goodTestKey, []string{"OAuth token"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keyFormProblem(tc.key)
+			if len(tc.want) == 0 {
+				if got != "" {
+					t.Errorf("well-formed key reported as %q", got)
+				}
+				return
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("keyFormProblem = %q, want it to contain %q", got, w)
+				}
+			}
+		})
+	}
+	// A long run of garbage lists a bounded number of positions, not 60.
+	if got := keyFormProblem(strings.Repeat("z", 64)); strings.Count(got, ",") > 10 {
+		t.Errorf("position list must stay bounded: %q", got)
+	}
+}
+
+// The prefixes mirror the server's credential grammar (resolveCredential).
+func TestOAuthPrefixesMirrorServer(t *testing.T) {
+	if oauthAccessTokenPrefix != store.AccessTokenPrefix || oauthRefreshTokenPrefix != store.RefreshTokenPrefix {
+		t.Errorf("cli prefixes %q/%q drifted from store %q/%q", oauthAccessTokenPrefix, oauthRefreshTokenPrefix,
+			store.AccessTokenPrefix, store.RefreshTokenPrefix)
+	}
+}
+
+// A malformed key is re-asked with the counted deviation and never reaches the
+// server; the corrected key is probed and saved.
+func TestConfigStepReasksMalformedKey(t *testing.T) {
+	cfgPath := isolatedConfigHome(t)
+	ks := newKeyServer(t, goodTestKey)
+
+	var cfg Config
+	var ok bool
+	out := captureStdout(t, func() {
+		cfg, ok = runConfigStep(scriptedLines(ks.srv.URL, goodTestKey[:63], goodTestKey))
+	})
+	if !ok || cfg.Key != goodTestKey {
+		t.Fatalf("the corrected key must be accepted, got ok=%v key=%q; output:\n%s", ok, cfg.Key, out)
+	}
+	if !strings.Contains(out, "63 characters, expected 64") {
+		t.Errorf("the deviation must be counted; output:\n%s", out)
+	}
+	if got := ks.probes(); len(got) != 1 || got[0] != goodTestKey {
+		t.Errorf("only the well-formed key may be probed, got %q", got)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("config not written: %v", err)
+	}
+	if !strings.Contains(string(data), "CTX_KEY="+goodTestKey+"\n") || strings.Contains(string(data), goodTestKey[:63]+"\n") {
+		t.Errorf("config must carry exactly the accepted key:\n%s", data)
+	}
+}
+
+// A well-formed key the server rejects is never written: "saved" means the key
+// works. Three rejections end the step without a config.
+func TestConfigStepRefusesRejectedKey(t *testing.T) {
+	cfgPath := isolatedConfigHome(t)
+	ks := newKeyServer(t, goodTestKey)
+	wrong := strings.Repeat("e", 64)
+
+	var ok bool
+	out := captureStdout(t, func() {
+		_, ok = runConfigStep(scriptedLines(ks.srv.URL, wrong, wrong, wrong, goodTestKey))
+	})
+	if ok {
+		t.Fatalf("a rejected key must not end the step green; output:\n%s", out)
+	}
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Errorf("a rejected key must never be written (stat err = %v)", err)
+	}
+	if !strings.Contains(out, "401") {
+		t.Errorf("the rejection must be named; output:\n%s", out)
+	}
+	if got := len(ks.probes()); got != 3 {
+		t.Errorf("want exactly 3 attempts, got %d probes", got)
+	}
+}
+
+// The offline path stays: an unreachable server cannot verify the key, the
+// config is written anyway and the line says the key is unverified.
+func TestConfigStepSavesUnverifiedWhenUnreachable(t *testing.T) {
+	cfgPath := isolatedConfigHome(t)
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close()
+
+	var ok bool
+	out := captureStdout(t, func() {
+		_, ok = runConfigStep(scriptedLines(deadURL, goodTestKey))
+	})
+	if !ok {
+		t.Fatalf("offline must still save the config; output:\n%s", out)
+	}
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Errorf("config must be written on the offline path: %v", err)
+	}
+	if !strings.Contains(out, "not verified") {
+		t.Errorf("the line must say the key is unverified; output:\n%s", out)
+	}
+}
+
+// An existing config is probed too — a re-run must not report a broken key
+// as ready.
+func TestStepKeyProbesExistingConfig(t *testing.T) {
+	isolatedConfigHome(t)
+	ks := newKeyServer(t, goodTestKey)
+
+	var ok bool
+	out := captureStdout(t, func() { ok = stepKey(Config{BaseURL: ks.srv.URL, Key: goodTestKey}) })
+	if !ok || !strings.Contains(out, "laptop") {
+		t.Errorf("accepted key must pass and name its label; ok=%v output:\n%s", ok, out)
+	}
+
+	out = captureStdout(t, func() { ok = stepKey(Config{BaseURL: ks.srv.URL, Key: goodTestKey[:63]}) })
+	if ok {
+		t.Errorf("a rejected key must fail the step; output:\n%s", out)
+	}
+	for _, want := range []string{"rejected", "401", "63 characters, expected 64", "CTX_KEY in"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestInitSummaryCountsKeyVerdict(t *testing.T) {
+	if initSummaryOK(initResult{ConfigOK: true, ServerOK: true, KeyOK: false, HooksOK: true, StatuslineOK: true}) {
+		t.Error("a key the server does not accept must not end init as ready")
 	}
 }

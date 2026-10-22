@@ -8,12 +8,13 @@ ctx init
 
 The wizard is the documented first-run path and is idempotent — it reports every item and only changes what is missing:
 
-1. **Config** — asks for base URL and API key, writes `~/.config/ctx/config` (mode 0600).
-2. **Server** — reads `/health`. A `degraded` or `unhealthy` server is shown but accepted: an install whose [backend pool](#backends) is still empty answers `unhealthy` with HTTP 503 by design, and that is precisely the state the next step fixes.
-3. **Backend pool** — lists the pool and, when no enabled `_global` row serves the `synthesis` or `embed` role, asks for host, protocol, chat model, embedding model and an optional API key (for the `anthropic` protocol: the chat model's context window, a separate embedding host and protocol, and the key), then runs the same seed `ctx backends seed` runs (same server-admin gate, same full-trust posture, same sealed-secret handling — the key is read without echo and never lands in the row). Afterwards, and whenever it finds a pool already populated, it **probes** each serving row and names the dead ones. A key below server-admin is not an error here: the step says so, points at `ctx backends seed`, and init carries on — hooks and statusline do not need an admin key.
-4. **Version** — compares the local build against the latest GitHub release.
-5. **Hooks** — `SubagentStart` / `SubagentStop` in Claude Code's `settings.json`.
-6. **Statusline** — `ctx statusline` in the same file.
+1. **Config** — asks for base URL and API key, writes `~/.config/ctx/config` (mode 0600). The key is checked before it is written: a value that is not 64 lowercase hex characters is named by its counted deviation (`63 characters, expected 64`, `2 non-hex characters at positions 5, 17`) and asked again, and a well-formed key is probed against `GET /api/whoami` — a `401` is asked again too, up to three attempts, and never written. Only when the server cannot be reached at all is the config written anyway, marked `key not verified`; the next step then names the unreachable host.
+2. **Server** — reads `/health`. A `degraded` or `unhealthy` server is shown but accepted: an install whose [backend pool](#backends) is still empty answers `unhealthy` with HTTP 503 by design, and that is precisely the state the backend-pool step fixes.
+3. **Key** — the authenticated probe again, on every run: a re-run over a hand-edited, rotated or revoked key reports `rejected (401 unauthorized)` and says whether to fix the config file or an exported `CTX_KEY`, instead of ending `ready`. The backend-pool step needs an accepted key and is skipped otherwise.
+4. **Backend pool** — lists the pool and, when no enabled `_global` row serves the `synthesis` or `embed` role, asks for host, protocol, chat model, embedding model and an optional API key (for the `anthropic` protocol: the chat model's context window, a separate embedding host and protocol, and the key), then runs the same seed `ctx backends seed` runs (same server-admin gate, same full-trust posture, same sealed-secret handling — the key is read without echo and never lands in the row). Afterwards, and whenever it finds a pool already populated, it **probes** each serving row and names the dead ones. A key below server-admin is not an error here: the step says so, points at `ctx backends seed`, and init carries on — hooks and statusline do not need an admin key.
+5. **Version** — compares the local build against the latest GitHub release.
+6. **Hooks** — `SubagentStart` / `SubagentStop` in Claude Code's `settings.json`.
+7. **Statusline** — `ctx statusline` in the same file.
 
 <details>
 <summary>Configuring the endpoint by hand instead</summary>
@@ -48,7 +49,7 @@ ctx stats     # Block count, categories, storage
 
 ## Claude Code integration (optional)
 
-`ctx init` (steps 5 and 6 above) writes the hooks and the statusline for you; below is the same thing by hand.
+`ctx init` (steps 6 and 7 above) writes the hooks and the statusline for you; below is the same thing by hand.
 
 **Statusline** — live block count, health, and rate limits:
 
