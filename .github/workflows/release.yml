@@ -89,8 +89,13 @@ jobs:
   # Build-Provenance (#49 Punkt 2): SHA256SUMS liegt neben den Binaries und
   # fängt einen kaputten Download, aber kein ausgetauschtes Release — beide
   # Dateien liegen am selben Ort. Die Attestation ist Sigstore-signiert über das
-  # OIDC-Token dieses Workflow-Laufs und liegt in der Attestations-API des Repos,
-  # nicht im Release: `gh attestation verify <datei> -R GottZ/ctx`.
+  # OIDC-Token dieses Workflow-Laufs und liegt in der Attestations-API des Repos:
+  # `gh attestation verify <datei> -R GottZ/ctx`.
+  #
+  # Dasselbe Bundle hängt zusätzlich als ctx.intoto.jsonl am Release (OpenSSF
+  # Scorecard, Check Signed-Releases: der liest nur Release-Assets nach
+  # Dateiendung, nicht die Attestations-API). Offline prüfbar mit
+  # `gh attestation verify <datei> --bundle ctx.intoto.jsonl -R GottZ/ctx`.
   #
   # Eigener Job statt eines Schritts in publish: id-token kann jeder Schritt des
   # Jobs anfordern, der es trägt. Hier läuft neben dem Download nur die
@@ -115,9 +120,29 @@ jobs:
           merge-multiple: true
 
       - name: Attest build provenance
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/ctx-*
+
+      # Eine Zeile pro Bundle (jq -c normalisiert JSON wie JSONL). publish lädt
+      # alle Artefakte nach dist/ — so landet die Datei im Release und in
+      # SHA256SUMS, ohne dass publish davon wissen muss.
+      - name: Write provenance bundle
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          mkdir -p provenance
+          jq -c . "$BUNDLE" > provenance/ctx.intoto.jsonl
+          test -s provenance/ctx.intoto.jsonl
+          wc -l provenance/ctx.intoto.jsonl
+
+      - name: Upload provenance bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ctx-provenance
+          path: provenance/ctx.intoto.jsonl
+          retention-days: 30
 
   publish:
     name: Publish Release
@@ -169,6 +194,7 @@ jobs:
             echo "Download the binary for your platform (and SHA256SUMS), verify both, then install:"
             echo '```bash'
             echo "gh attestation verify ctx-<os>-<arch> -R GottZ/ctx   # signed build provenance"
+            echo "# offline: add --bundle ctx.intoto.jsonl (Sigstore bundle attached to this release)"
             echo "sha256sum -c --ignore-missing SHA256SUMS            # download integrity"
             echo "chmod +x ctx-*"
             echo "sudo mv ctx-* /usr/local/bin/ctx"
