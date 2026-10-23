@@ -110,6 +110,7 @@ Using a shared memory *well* takes discipline against drift — see [using ctx e
 | [Architecture](docs/architecture.md) | Retrieval pipeline, cyclic temporal model, Dream Mode, Guard, block-type registry, backend pool |
 | [Multi-tenancy](docs/multi-tenancy.md) | Model C (tenant/scope/block), grants, admin tiers, per-tenant settings/secrets/quotas, self-service onboarding |
 | [HTTP API](docs/api.md) | Endpoints, manage actions, graph API, settings API, backend pool, web-chat sessions |
+| [MCP reference](docs/mcp.md) | All 15 MCP tools with parameters, answers, error codes and staged writes |
 | [CLI reference](docs/cli.md) | Every `ctx` subcommand, incl. tenant / quota / keys / block-grant |
 | [Security](docs/security.md) | Admin tier, sealed secrets & break-glass, trust×sensitivity gating, sensitivity classification |
 | [Operations](docs/operations.md) | Setup, environment variables, boot validation, backups, deploy & migrations |
