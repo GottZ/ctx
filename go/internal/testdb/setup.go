@@ -97,7 +97,7 @@ func SetupTestDB(t *testing.T) *pgxpool.Pool {
 func SetupTestDBWithDSN(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 	ensureShared(t)
-	return newDatabase(t, templateDB, -1)
+	return newDatabase(t, templateDB, "", -1)
 }
 
 // SetupTestDBUpTo returns a pool on a fresh database with only embedded
@@ -127,7 +127,84 @@ func SetupTestDBUpTo(t *testing.T, maxVersion int) *pgxpool.Pool {
 func SetupTestDBUpToWithDSN(t *testing.T, maxVersion int) (*pgxpool.Pool, string) {
 	t.Helper()
 	ensureShared(t)
-	return newDatabase(t, "", maxVersion)
+	return newDatabase(t, "", "", maxVersion)
+}
+
+// seeded holds the per-process fixture templates of SetupSeededTestDB, one
+// per key. Each entry builds at most once; a failed build fails every later
+// caller with the same key instead of reseeding.
+var seeded struct {
+	mu      sync.Mutex
+	entries map[string]*seededEntry
+}
+
+type seededEntry struct {
+	once sync.Once
+	name string
+	err  error
+}
+
+// SetupSeededTestDB is SetupTestDB for tests that share one expensive,
+// read-only fixture. The first call for a key copies the migrated template,
+// runs seed on that copy, closes it and keeps it as a second template; every
+// call — the first included — then gets its OWN database copied from it.
+// Statistics come along with the copy (pg_statistic is per database), so a
+// fixture seeded and ANALYZEd once plans the same in every copy.
+//
+// The copy uses STRATEGY FILE_COPY: the default WAL_LOG strategy writes the
+// whole source through WAL block by block, which for a fixture of a million
+// rows costs more than seeding a small one, while FILE_COPY is a checkpoint
+// plus a directory copy.
+//
+// key must name everything that shapes the fixture (row count included):
+// two callers with the same key get the same data. seed runs outside any
+// single test's scope with a 30-minute bound; its error fails the caller.
+func SetupSeededTestDB(t *testing.T, key string, seed func(ctx context.Context, pool *pgxpool.Pool) error) *pgxpool.Pool {
+	t.Helper()
+	ensureShared(t)
+
+	seeded.mu.Lock()
+	if seeded.entries == nil {
+		seeded.entries = map[string]*seededEntry{}
+	}
+	e, ok := seeded.entries[key]
+	if !ok {
+		e = &seededEntry{}
+		seeded.entries[key] = e
+	}
+	seeded.mu.Unlock()
+
+	e.once.Do(func() { e.name, e.err = buildSeeded(seed) })
+	if e.err != nil {
+		t.Fatalf("testdb: seeded template %q: %v", key, e.err)
+	}
+	pool, _ := newDatabase(t, e.name, "FILE_COPY", -1)
+	return pool
+}
+
+// buildSeeded creates one fixture template: a copy of the migrated template,
+// seeded, with every connection closed so it can serve as a TEMPLATE source.
+func buildSeeded(seed func(ctx context.Context, pool *pgxpool.Pool) error) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	name := fmt.Sprintf("ctxseed_%d", dbSeq.Add(1))
+	createMu.Lock()
+	_, err := shared.admin.Exec(ctx, "CREATE DATABASE "+name+" TEMPLATE "+templateDB)
+	createMu.Unlock()
+	if err != nil {
+		return "", fmt.Errorf("create %s: %w", name, err)
+	}
+	pool, err := pgxpool.New(ctx, dsnForDB(name))
+	if err != nil {
+		return "", fmt.Errorf("connect %s: %w", name, err)
+	}
+	err = seed(ctx, pool)
+	pool.Close()
+	if err != nil {
+		return "", fmt.Errorf("seed %s: %w", name, err)
+	}
+	return name, nil
 }
 
 // ensureShared boots the shared container + template exactly once per
@@ -255,8 +332,10 @@ func prepareDatabase(ctx context.Context, pool *pgxpool.Pool, maxVersion int) er
 // newDatabase creates one isolated database for a test and connects a pool.
 // template != "" copies the fully-migrated template (millisecond path);
 // template == "" creates an empty database and migrates it up to maxVersion.
+// strategy != "" picks the copy strategy (FILE_COPY for large seeded
+// templates, see SetupSeededTestDB); empty keeps the server default.
 // Cleanup closes the pool and force-drops the database via the admin pool.
-func newDatabase(t *testing.T, template string, maxVersion int) (*pgxpool.Pool, string) {
+func newDatabase(t *testing.T, template, strategy string, maxVersion int) (*pgxpool.Pool, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -265,6 +344,9 @@ func newDatabase(t *testing.T, template string, maxVersion int) (*pgxpool.Pool, 
 	stmt := "CREATE DATABASE " + name
 	if template != "" {
 		stmt += " TEMPLATE " + template
+	}
+	if strategy != "" {
+		stmt += " STRATEGY " + strategy
 	}
 
 	// Serialized + retried: pgxpool health checks against the template pool

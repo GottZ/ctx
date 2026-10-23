@@ -75,7 +75,7 @@ func scaleSpread(n int) time.Duration {
 	return time.Duration(float64(n) / liveBlocksPerDay * 24 * float64(time.Hour))
 }
 
-// seedScale loads n checkpoint blocks laid out the way the corpus is: blocks
+// seedScaleRows loads n checkpoint blocks laid out the way the corpus is: blocks
 // come in groups of scaleParts, each group is one manifest LISTING its
 // scaleParts-1 parts by id, and consecutive groups round-robin over scaleRoots
 // roots.
@@ -89,16 +89,18 @@ func scaleSpread(n int) time.Duration {
 // Row triggers are disabled for the load — context_blocks carries three
 // FOR EACH ROW triggers and the NOTIFY duplicate check in one of them is
 // quadratic, which turns a bulk load into hours.
-func seedScale(t *testing.T, ctx context.Context, pool *pgxpool.Pool, n int) time.Duration {
-	t.Helper()
-	start := time.Now()
-
+//
+// The four scale tests only read this fixture, so it is seeded ONCE per test
+// binary and handed to each of them as a template copy (scalePool). Seeding it
+// per test cost four identical million-row loads, ~2.5 min each, and pushed
+// the package past go test's default 10-minute timeout on a local run.
+func seedScaleRows(ctx context.Context, pool *pgxpool.Pool, n int) (err error) {
 	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER`); err != nil {
-		t.Fatalf("disable triggers: %v", err)
+		return fmt.Errorf("disable triggers: %w", err)
 	}
 	defer func() {
-		if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks ENABLE TRIGGER USER`); err != nil {
-			t.Fatalf("enable triggers: %v", err)
+		if _, eerr := pool.Exec(ctx, `ALTER TABLE context_blocks ENABLE TRIGGER USER`); eerr != nil && err == nil {
+			err = fmt.Errorf("enable triggers: %w", eerr)
 		}
 	}()
 
@@ -139,12 +141,32 @@ SELECT ('019f2210-0000-7000-9000-' || lpad(to_hex(i), 12, '0'))::uuid,
 			hi = n - 1
 		}
 		if _, err := pool.Exec(ctx, q, lo, hi, fxCategory, fxScope, scaleParts, scaleRoots, n, secondsPerRow); err != nil {
-			t.Fatalf("seed rows %d..%d: %v", lo, hi, err)
+			return fmt.Errorf("seed rows %d..%d: %w", lo, hi, err)
 		}
 	}
 	if _, err := pool.Exec(ctx, `ANALYZE context_blocks`); err != nil {
-		t.Fatalf("analyze: %v", err)
+		return fmt.Errorf("analyze: %w", err)
 	}
+	return nil
+}
+
+// scalePool returns a database of its own holding the n-row fixture, copied
+// from the per-binary seeded template, and runs the fixture self-check on
+// that copy. The returned duration is the seed time on the first call and the
+// copy time after.
+func scalePool(t *testing.T, ctx context.Context, n int) (*pgxpool.Pool, time.Duration) {
+	t.Helper()
+	start := time.Now()
+	pool := testdb.SetupSeededTestDB(t, fmt.Sprintf("ctxcheckpoint-scale-%d", n),
+		func(ctx context.Context, pool *pgxpool.Pool) error { return seedScaleRows(ctx, pool, n) })
+	took := time.Since(start)
+	scaleSelfCheck(t, ctx, pool, n)
+	return pool, took
+}
+
+// scaleSelfCheck asserts the copy is worth measuring.
+func scaleSelfCheck(t *testing.T, ctx context.Context, pool *pgxpool.Pool, n int) {
+	t.Helper()
 
 	// The fixture is only worth measuring if the addressed root really holds
 	// manifests with resolvable parts, AND if the horizon the tests use still
@@ -180,7 +202,6 @@ SELECT (SELECT count(*) FROM context_blocks
 	t.Logf("fixture time span: %d rows at %.1f blocks/day = %.1f days (%.2f years); horizon %s covers %.3f %% of it",
 		n, liveBlocksPerDay, scaleSpread(n).Hours()/24, scaleSpread(n).Hours()/24/365.25,
 		scaleHorizon, 100*scaleHorizon.Seconds()/scaleSpread(n).Seconds())
-	return time.Since(start)
 }
 
 func explain(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) string {
@@ -215,10 +236,9 @@ func explain(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, 
 func TestReadUsesCheckpointRootIndexAtScale(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
-	pool := testdb.SetupTestDB(t)
-
 	n := scaleN(t)
-	t.Logf("fixture: %d rows in %s", n, seedScale(t, ctx, pool, n))
+	pool, took := scalePool(t, ctx, n)
+	t.Logf("fixture: %d rows ready in %s", n, took)
 
 	const selectList = `
 SELECT id::text,
@@ -274,10 +294,9 @@ SELECT id::text,
 func TestSessionsAvoidsSeqScanAtScale(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
-	pool := testdb.SetupTestDB(t)
-
 	n := scaleN(t)
-	t.Logf("fixture: %d rows in %s", n, seedScale(t, ctx, pool, n))
+	pool, took := scalePool(t, ctx, n)
+	t.Logf("fixture: %d rows ready in %s", n, took)
 
 	const head = `
 SELECT metadata->>'root_session_id' AS root
@@ -376,10 +395,9 @@ func totalBuffers(t *testing.T, plan string) int {
 func TestLatencyBudgetAtScale(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
-	pool := testdb.SetupTestDB(t)
-
 	n := scaleN(t)
-	t.Logf("fixture: %d rows in %s", n, seedScale(t, ctx, pool, n))
+	pool, took := scalePool(t, ctx, n)
+	t.Logf("fixture: %d rows ready in %s", n, took)
 
 	opt := fxOpts()
 	opt.MaxManifests = 1
@@ -445,10 +463,9 @@ func TestLatencyBudgetAtScale(t *testing.T) {
 func TestSessionsHorizonCrossoverAtScale(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
-	pool := testdb.SetupTestDB(t)
-
 	n := scaleN(t)
-	t.Logf("fixture: %d rows in %s", n, seedScale(t, ctx, pool, n))
+	pool, took := scalePool(t, ctx, n)
+	t.Logf("fixture: %d rows ready in %s", n, took)
 
 	horizons := []time.Duration{
 		0, // no cap
