@@ -1,0 +1,195 @@
+/* ctx.gottz.de — one stylesheet, no web fonts, no scripts (CSP: style-src 'self'). */
+
+:root {
+  --paper: #ecefea;
+  --ink: #1b2220;
+  --ink-2: #4a5550;
+  --rule: #b9c2bb;
+  --lapis: #2c4a9e;
+  --lapis-soft: rgba(44, 74, 158, 0.16);
+  --code-bg: #dfe4dc;
+
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", "URW Palladio L", P052, Georgia, serif;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --gutter: clamp(16px, 4vw, 48px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #161b1a;
+    --ink: #e1e6e0;
+    --ink-2: #a3aea8;
+    --rule: #3a4441;
+    --lapis: #93a9ee;
+    --lapis-soft: rgba(147, 169, 238, 0.18);
+    --code-bg: #212826;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 1.0625rem/1.6 var(--sans);
+}
+
+a { color: var(--lapis); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--lapis); outline-offset: 3px; border-radius: 2px; }
+
+h1, h2 { font-family: var(--serif); font-weight: 500; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.3rem, 5.4vw, 3.9rem); margin: 0 0 0.45em; max-width: 14ch; }
+h2 { font-size: clamp(1.55rem, 2.6vw, 1.95rem); margin: 0 0 0.6em; }
+
+code, pre { font-family: var(--mono); font-size: 0.875em; }
+code { background: var(--code-bg); padding: 0.08em 0.32em; border-radius: 3px; }
+pre {
+  background: var(--code-bg);
+  padding: 1rem 1.1rem;
+  border-radius: 4px;
+  overflow-x: auto;
+  line-height: 1.5;
+  margin: 0 0 1.4em;
+}
+pre code { background: none; padding: 0; font-size: 1em; }
+
+/* Header */
+.top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem var(--gutter);
+  max-width: 76rem;
+  margin: 0 auto;
+}
+.mark {
+  font-family: var(--serif);
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+}
+.top nav { display: flex; gap: 1.4rem; }
+.top nav a { color: var(--ink-2); text-decoration: none; }
+.top nav a:hover { color: var(--lapis); }
+
+main { max-width: 76rem; margin: 0 auto; padding: 0 var(--gutter); }
+
+/* Hero: text left, the rings right; stacks below 900px */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  gap: clamp(1.5rem, 4vw, 4rem);
+  align-items: center;
+  padding: clamp(2rem, 7vw, 5.5rem) 0 clamp(2.5rem, 6vw, 5rem);
+  border-bottom: 1px solid var(--rule);
+}
+.lede { font-size: 1.2rem; color: var(--ink-2); max-width: 36rem; margin: 0 0 1.8rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0; }
+.button {
+  display: inline-block;
+  padding: 0.62rem 1.15rem;
+  border: 1px solid var(--lapis);
+  border-radius: 4px;
+  background: var(--lapis);
+  color: var(--paper);
+  text-decoration: none;
+  font-weight: 600;
+}
+.button:hover { text-decoration: none; filter: brightness(1.08); }
+.button-quiet { background: transparent; color: var(--lapis); }
+
+.hero-figure { margin: 0; }
+.hero-figure figcaption { font-size: 0.92rem; color: var(--ink-2); max-width: 34rem; margin-top: 0.4rem; }
+
+/* The rings (inline SVG, styled here: presentation stays CSP-clean) */
+.rings { display: block; width: 100%; height: auto; overflow: visible; }
+.rings .ring { fill: none; stroke: var(--rule); stroke-width: 1.2; }
+.rings .ring-active { stroke: var(--ink-2); stroke-width: 1.6; }
+.rings .tick { stroke: var(--ink-2); stroke-width: 1.4; }
+.rings .swell { fill: var(--lapis-soft); stroke: var(--lapis); stroke-width: 2; stroke-linejoin: round; }
+.rings .peak { fill: var(--lapis); }
+.rings .leader { stroke: var(--lapis); stroke-width: 1; }
+.rings .q { font-family: var(--serif); font-size: 19px; fill: var(--ink); }
+.rings .q-sub { font-family: var(--sans); font-size: 12px; fill: var(--ink-2); }
+.rings .rl { font-family: var(--sans); font-size: 10.5px; fill: var(--ink-2); stroke: var(--paper); stroke-width: 4px; stroke-linejoin: round; }
+.rings .rl-active { fill: var(--lapis); font-weight: 600; }
+
+/* Sections: heading left, content right. The content column runs to the same
+   right edge as the section rule; the 1 : 2.2 split keeps body lines near 80
+   characters at full width. Below 900px everything stacks. */
+:root { --section-cols: minmax(0, 1fr) minmax(0, 2.2fr); --section-gap: clamp(1.5rem, 4vw, 4rem); }
+
+section { padding: clamp(2.2rem, 5vw, 3.6rem) 0; border-bottom: 1px solid var(--rule); }
+.prose, .wide {
+  display: grid;
+  grid-template-columns: var(--section-cols);
+  column-gap: var(--section-gap);
+  align-items: start;
+}
+.prose > h2, .wide > h2 { grid-column: 1; grid-row: 1; margin-top: -0.12em; }
+.prose > :not(h2), .wide > :not(h2) { grid-column: 2; min-width: 0; }
+.prose p { margin: 0 0 1em; }
+.prose > :last-child { margin-bottom: 0; }
+.wide .narrow { margin: 0 0 1.6rem; }
+
+/* The architecture diagram leaves the two-column grid: at 1200px native width
+   its labels need the full section width (~1:1) to stay legible. */
+.diagram { margin: 0; }
+.wide > .diagram { grid-column: 1 / -1; margin-top: 0.6rem; }
+.diagram img {
+  max-width: 1200px;
+  display: block;
+  width: 100%;
+  height: auto;
+  /* no frame of our own: the SVG draws its own rounded panel */
+}
+.diagram figcaption { font-size: 0.92rem; margin-top: 0.6rem; }
+
+/* Features as a definition list, not a card grid */
+.features { margin: 0; display: grid; grid-template-columns: 13rem minmax(0, 1fr); gap: 0.9rem 1.6rem; }
+.features dt { font-family: var(--serif); font-size: 1.12rem; font-weight: 600; }
+.features dd { margin: 0; color: var(--ink-2); }
+
+table { border-collapse: collapse; width: 100%; font-size: 0.97rem; }
+th, td { text-align: left; padding: 0.55rem 0.8rem 0.55rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; }
+td code { white-space: nowrap; }
+
+.doclist { list-style: none; padding: 0; margin: 0; }
+.doclist li { padding: 0.45rem 0; border-bottom: 1px solid var(--rule); }
+.doclist li:last-child { border-bottom: 0; }
+.doclist a { font-weight: 600; margin-right: 0.6rem; }
+.doclist span { color: var(--ink-2); }
+
+.foot {
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 2rem var(--gutter) 3rem;
+  color: var(--ink-2);
+  font-size: 0.92rem;
+  display: grid;
+  grid-template-columns: var(--section-cols);
+  column-gap: var(--section-gap);
+}
+.foot p { grid-column: 2; margin: 0 0 0.5em; }
+
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr; }
+  .hero-figure { max-width: 34rem; }
+  .prose, .wide, .foot { display: block; }
+}
+
+@media (max-width: 620px) {
+  .features { grid-template-columns: 1fr; gap: 0.2rem; }
+  .features dd { margin-bottom: 0.9rem; }
+  td code { white-space: normal; word-break: break-word; }
+  .top nav { gap: 1rem; }
+}

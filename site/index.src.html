@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ctx — persistent memory for LLM agents</title>
+<meta name="description" content="ctx is a self-hosted knowledge store that gives LLM agents a persistent, searchable memory: hybrid retrieval, cyclic temporal gravity, autonomous cross-referencing. MCP, CLI and HTTP. MPL-2.0.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<link rel="canonical" href="https://ctx.gottz.de/">
+</head>
+<body>
+
+<header class="top">
+  <a class="mark" href="/">ctx</a>
+  <nav aria-label="Primary">
+    <a href="#install">Install</a>
+    <a href="#docs">Docs</a>
+    <a href="#involved">Contribute</a>
+    <a href="https://github.com/GottZ/ctx">GitHub</a>
+  </nav>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="hero-text">
+    <h1>The memory your LLM pretends to have.</h1>
+    <p class="lede">ctx is a self-hosted knowledge store for LLM agents. Your agent saves what it learns as small blocks; ctx finds them again by meaning, by wording and by time — and keeps cross-linking them in the background while nobody is asking.</p>
+    <p class="actions">
+      <a class="button" href="#install">Install ctx</a>
+      <a class="button button-quiet" href="https://github.com/GottZ/ctx">Read the source</a>
+    </p>
+  </div>
+  <figure class="hero-figure">
+@@RINGS@@
+    <figcaption>Time is not one axis. Each cycle — time of day, weekday, day of month, week, month, quarter, season — is scored as its own Gaussian field, so &#8220;every Tuesday&#8221; finds Tuesday notes from any year.</figcaption>
+  </figure>
+</section>
+
+<section class="prose" aria-labelledby="what">
+  <h2 id="what">What it does</h2>
+  <p>Store a finding once, get it back when it matters. A query runs semantic search, English and German fulltext and trigram matching side by side and fuses the rankings. Then time weighs in: every block carries the dates it talks about and the date it was written, so &#8220;the meeting on Tuesday&#8221; is found by either.</p>
+  <p><strong>Dream Mode</strong> runs as a continuous background loop. It discovers relations between blocks, marks information that newer blocks supersede and promotes what holds up — the store organises itself instead of silting up.</p>
+  <p>Agents reach ctx over <strong>MCP</strong>, a <strong>CLI</strong> or plain <strong>HTTP</strong>. An embedded web UI covers settings, the knowledge graph, the corpus and chat. Multiple tenants are isolated down to the single block.</p>
+</section>
+
+<section class="wide" aria-labelledby="how">
+  <h2 id="how">How it works</h2>
+  <p class="narrow">Four ways in, one Go daemon, PostgreSQL 18 with pgvector underneath. The diagram follows a block from storing to retrieval, through the topic map and the Dream loop.</p>
+  <figure class="diagram">
+    <a href="how-ctx-works.svg">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="how-ctx-works-dark.svg">
+        <img src="how-ctx-works.svg" width="1200" height="2430" loading="lazy" alt="How ctx works: four access paths into one Go daemon; the store pipeline with time-anchor extraction, embedding and Guard dedup; the query pipeline with temporal parsing, 4-way RRF fusion, temporal gravity, cluster-topic boost, graph expansion and LLM synthesis; the topic-map layer; and the autonomous Dream Mode loop.">
+      </picture>
+    </a>
+    <figcaption><a href="how-ctx-works.svg">Open the diagram at full size</a></figcaption>
+  </figure>
+</section>
+
+<section class="prose" aria-labelledby="features">
+  <h2 id="features">What is inside</h2>
+  <dl class="features">
+    <dt>4-way rank fusion</dt>
+    <dd>Semantic, English fulltext, German fulltext and trigram rankings merged by reciprocal-rank fusion, weighted per block type.</dd>
+    <dt>Cyclic temporal gravity</dt>
+    <dd>Seven cycles, each with its own Gaussian decay. Queries like &#8220;every Tuesday&#8221; or &#8220;at Christmas&#8221; activate the cycle they name.</dd>
+    <dt>Dream Mode</dt>
+    <dd>Autonomous cross-referencing and supersede detection with parallel, race-safe workers.</dd>
+    <dt>Block types</dt>
+    <dd>A declarative registry decides per type how blocks are retrieved, deduplicated, dreamed over and digested — reloadable without a restart.</dd>
+    <dt>Multi-tenancy</dt>
+    <dd>Tenant, scope and block isolation with grants, quotas and self-service onboarding.</dd>
+    <dt>Issues and forge sync</dt>
+    <dd>A per-project issue corpus with a kanban board, validated status transitions and two-way GitHub sync.</dd>
+    <dt>Sealed secrets</dt>
+    <dd>Provider credentials encrypted with AES-256-GCM; outbound calls gated by trust and sensitivity.</dd>
+    <dt>Any model backend</dt>
+    <dd>OpenAI-compatible APIs, Ollama or the Anthropic Messages API. Runs on CPU; a GPU shortens chat latency.</dd>
+  </dl>
+</section>
+
+<section class="prose" aria-labelledby="install">
+  <h2 id="install">Install</h2>
+  <p>Download the binary for your platform, check that this repository&#8217;s release workflow built it, then install it:</p>
+<pre><code>f=ctx-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+tmp=$(mktemp -d)
+curl -fsSL "https://github.com/GottZ/ctx/releases/latest/download/$f" -o "$tmp/$f" \
+  &amp;&amp; gh attestation verify "$tmp/$f" -R GottZ/ctx \
+  &amp;&amp; install -m 0755 "$tmp/$f" /usr/local/bin/ctx</code></pre>
+  <p>Or build it with Go:</p>
+<pre><code>go install github.com/GottZ/ctx/cmd/ctx@latest</code></pre>
+  <p>Then point the CLI at your server. <code>ctx init</code> asks for the URL and an API key, checks both before saving anything, and sets up the Claude Code hooks:</p>
+<pre><code>ctx init</code></pre>
+  <p>The server itself — the Go daemon plus PostgreSQL 18 with pgvector — starts with <code>docker compose up -d ctx</code>. Every release ships signed build provenance; <a href="https://github.com/GottZ/ctx/releases/latest">see the latest release</a>.</p>
+</section>
+
+<section class="prose" aria-labelledby="use">
+  <h2 id="use">How an agent uses it</h2>
+  <p>Five primitives. The same operations exist as MCP tools, so agents in Claude Code or claude.ai call them without shell quoting.</p>
+  <table>
+    <thead><tr><th scope="col">To</th><th scope="col">Run</th></tr></thead>
+    <tbody>
+      <tr><td>Answer from stored knowledge</td><td><code>ctx query "question"</code></td></tr>
+      <tr><td>Save a finding</td><td><code>ctx save &lt;category&gt; &lt;title&gt; - &lt;content&gt;</code></td></tr>
+      <tr><td>Replace a block</td><td><code>ctx save</code> with the same category and title</td></tr>
+      <tr><td>Browse without an LLM call</td><td><code>ctx search [category] [query:text]</code></td></tr>
+      <tr><td>Open one block</td><td><code>ctx get &lt;block-id&gt;</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="prose" aria-labelledby="docs">
+  <h2 id="docs">Documentation</h2>
+  <ul class="doclist">
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/architecture.md">Architecture</a> <span>retrieval pipeline, temporal model, Dream Mode, block types, backend pool</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md">Operations</a> <span>setup, environment, backups, upgrades and migrations</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/api.md">HTTP API</a> <span>endpoints, graph, settings, backends</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/mcp.md">MCP reference</a> <span>every tool, its parameters and its answers</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/cli.md">CLI reference</a> <span>every <code>ctx</code> subcommand</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/multi-tenancy.md">Multi-tenancy</a> <span>tenants, scopes, grants, quotas</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/security.md">Security</a> <span>admin tier, sealed secrets, egress gating</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/using-ctx-effectively.md">Using ctx effectively</a> <span>memory drift and agent discipline</span></li>
+  </ul>
+</section>
+
+<section class="prose" aria-labelledby="involved">
+  <h2 id="involved">Get involved</h2>
+  <dl class="features">
+    <dt>Ask or give feedback</dt>
+    <dd>Questions go to <a href="https://github.com/GottZ/ctx/discussions/categories/q-a">Q&amp;A</a>, feature ideas and design feedback to <a href="https://github.com/GottZ/ctx/discussions/categories/ideas">Ideas</a>, everything else to <a href="https://github.com/GottZ/ctx/discussions">Discussions</a>.</dd>
+    <dt>Report a bug</dt>
+    <dd><a href="https://github.com/GottZ/ctx/issues/new/choose">Open an issue</a> with the version (<code>ctx version</code>), how ctx runs, and the exact commands and output. Open bugs are listed under <a href="https://github.com/GottZ/ctx/issues?q=is%3Aissue+is%3Aopen+label%3Abug">the bug label</a>.</dd>
+    <dt>Report a vulnerability</dt>
+    <dd>Privately, through a <a href="https://github.com/GottZ/ctx/security/advisories/new">GitHub security advisory</a> — never in a public issue. The <a href="https://github.com/GottZ/ctx/blob/root/SECURITY.md">security policy</a> says what to include and what happens next.</dd>
+    <dt>Contribute code</dt>
+    <dd>The <a href="https://github.com/GottZ/ctx/blob/root/CONTRIBUTING.md">contributing guide</a> covers forking, the git hooks, tests, commit messages, the <a href="https://github.com/GottZ/ctx/blob/root/CONTRIBUTING.md#coding-standards">coding standards</a> CI enforces and how review works; build and test details are in <a href="https://github.com/GottZ/ctx/blob/root/docs/development.md">the development docs</a>. Issues labelled <a href="https://github.com/GottZ/ctx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> are a place to start.</dd>
+  </dl>
+</section>
+
+<section class="prose" aria-labelledby="method">
+  <h2 id="method">Built with AI agents</h2>
+  <p>ctx is built by AI agents working against a published calibration: a map of 22 ways LLMs fail at long-running work — memory drift, unattributed certainty, median-user caution — each with real examples. <a href="https://gottz.de/warnings.md">Read the warnings</a>, or the long history of the project in <a href="https://gottz.de/ctx-en.html">the ctx compendium</a>.</p>
+</section>
+
+</main>
+
+<footer class="foot">
+  <p>ctx is open source under the <a href="https://github.com/GottZ/ctx/blob/root/LICENSE">Mozilla Public License 2.0</a>, by <a href="https://github.com/GottZ">GottZ</a>.</p>
+  <p>Report vulnerabilities privately through <a href="https://github.com/GottZ/ctx/security/advisories/new">GitHub security advisories</a>. Support the benchmarks: <a href="https://github.com/sponsors/GottZ">GitHub Sponsors</a>, <a href="https://ko-fi.com/gottz">Ko-fi</a>.</p>
+</footer>
+
+</body>
+</html>
