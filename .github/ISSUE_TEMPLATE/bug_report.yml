@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in ctx does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities go to a private advisory, not here — see SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `ctx version`, or the release tag / commit.
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: How ctx runs
+      options:
+        - compose stack
+        - container image
+        - bare binary
+        - CLI only (against a remote server)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead. Exact commands and output.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `docker compose logs ctx` or the CLI. Remove keys and private content.
+      render: text
+  - type: input
+    id: reproduce
+    attributes:
+      label: Does it reproduce?
+      description: Always, sometimes (how often), or once.

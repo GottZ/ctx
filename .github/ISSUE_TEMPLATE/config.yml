@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea
+    url: https://github.com/GottZ/ctx/discussions
+    about: Ask how something works, propose a feature or share feedback in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/GottZ/ctx/security/advisories/new
+    about: Report vulnerabilities privately, never in a public issue (see SECURITY.md).
