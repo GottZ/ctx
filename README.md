@@ -5,6 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/GottZ/ctx)](https://github.com/GottZ/ctx/releases)
 [![Go](https://img.shields.io/badge/Go-1.27-00ADD8)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15838/badge)](https://www.bestpractices.dev/projects/15838)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791)](https://www.postgresql.org)
 
 <p align="center">
