@@ -167,18 +167,16 @@ func (s *Set) Names() []string {
 func (s *Set) VisibleTypes() []string { return s.visible }
 
 // GraphVisible reports whether a block of the given type can be the focus of
-// the graph routes (ego/all). It mirrors the retrieval allowlist — the same
-// set the VisibilityPredicate type arm serves — so a type that is searchable
-// but excluded from retrieval (system-meta, checkpoint, the derived layers)
-// is also NOT graph-focusable, and the graph UI must not offer a focus link
+// the graph ego route. It is membership in the retrieval allowlist — the very
+// list VisibleTypes hands the ego route — so it stays the same list, not just
+// the same condition, whatever retrieval kinds are added later. A type that is
+// searchable but excluded from retrieval (system-meta, checkpoint, the derived
+// layers) is NOT graph-focusable, and the graph UI must not offer a focus link
 // for it. Unknown/empty names answer false (fail-closed, byte-identical to
 // `type_name = ANY($types)` in hydrateFocus).
 func (s *Set) GraphVisible(name string) bool {
-	p, ok := s.Resolve(name)
-	if !ok {
-		return false
-	}
-	return p.Retrieval.Kind != RetrievalExcluded
+	_, found := slices.BinarySearch(s.visible, name)
+	return found
 }
 
 // DampedTypesFor returns the parallel (types, factors) arrays for the query:

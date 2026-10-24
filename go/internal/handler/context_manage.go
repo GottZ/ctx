@@ -406,7 +406,10 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		return
 	}
 
-	block, err := store.GetBlock(ctx, h.pool, h.typeSnapshot(ctx), resolvedID, ar.ReadScopes, grants)
+	// One registry snapshot per request: GetBlock (untrusted framing) and
+	// graph_visible must answer from the same generation.
+	types := h.typeSnapshot(ctx)
+	block, err := store.GetBlock(ctx, h.pool, types, resolvedID, ar.ReadScopes, grants)
 	if err != nil {
 		slog.Error("manage: get error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -438,23 +441,26 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		"action":  "get",
 		"success": true,
 		"block":   block,
-		// Graph-focusable? Mirrors the retrieval allowlist the ego route
-		// serves (Set.GraphVisible). The UI hides "open in graph" for
+		// Graph-focusable? Membership in the retrieval allowlist the ego
+		// route serves (Set.GraphVisible). The UI hides "open in graph" for
 		// excluded types (system-meta, checkpoint, …) — a focus on those
-		// would 404 with "Block not found".
-		"graph_visible": h.graphVisible(ctx, block.TypeName),
+		// would 404 with "Block not found". Type verdict only: GetBlock above
+		// honours block grants, the ego route does not yet (graph.go passes
+		// nil grants), so a block visible only through a grant still reads
+		// true here and 404s on ego.
+		"graph_visible": graphVisible(types, block.TypeName),
 	})
 }
 
 // graphVisible reports whether a block of the given type can be the focus of
-// the graph routes. An unwired registry is treated as fully visible (the
-// pre-flag behavior) so the envelope stays additive and old topologies never
-// lose the link; once wired, excluded types answer false.
-func (h *ManageHandler) graphVisible(ctx context.Context, typeName string) bool {
-	if h.blocktypes == nil {
+// the graph ego route. An unwired registry (nil snapshot) is treated as fully
+// visible (the pre-flag behavior) so the envelope stays additive and old
+// topologies never lose the link; once wired, excluded types answer false.
+func graphVisible(types *blocktype.Set, typeName string) bool {
+	if types == nil {
 		return true
 	}
-	return h.blocktypes.SnapshotForRequest(ctx).GraphVisible(typeName)
+	return types.GraphVisible(typeName)
 }
 
 func (h *ManageHandler) handleListCategories(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
