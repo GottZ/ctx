@@ -80,9 +80,13 @@
       <dd>{b.updated_at.slice(0, 10)}</dd>
     </dl>
 
-    {#if model.openId && model.graphVisible}
+    {#if model.openId}
       <div class="actions">
-        <a href={`/graph?focus=${model.openId}`}>Open in graph</a>
+        <!-- Only the graph link depends on graph_visible; Edit/Delete stay for
+             retrieval-excluded types (checkpoint, system-meta). -->
+        {#if model.graphVisible}
+          <a href={`/graph?focus=${model.openId}`}>Open in graph</a>
+        {/if}
         {#if onedit}
           <button type="button" class="edit" onclick={onedit}>Edit</button>
         {/if}
