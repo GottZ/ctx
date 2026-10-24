@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # n8n + Context Store — Automated PostgreSQL Backup Script
-# Runs pg_dump via docker exec against n8n-db-1 container
+# Runs pg_dump via docker exec against the compose service `db`
 # Stores backups in /compose/n8n/backups/ with 7-day rotation
 # =============================================================================
 # Part of ctx by GottZ (github.com/GottZ/ctx/graphs/contributors)
@@ -27,7 +27,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_DIR="${SCRIPT_DIR}/backups"
 ENV_FILE="${SCRIPT_DIR}/.env"
 HOOKS_DIR="${BACKUP_HOOKS_DIR:-${SCRIPT_DIR}/backup.d}"
-CONTAINER="${CTX_DB_CONTAINER:-n8n-db-1}"
 RETENTION_DAYS=7
 DATE=$(date +%Y%m%d-%H%M%S)
 
@@ -43,6 +42,11 @@ fi
 set -a
 source "$ENV_FILE"
 set +a
+
+# DB container: env → running compose service `db` → exit 2 (issue #40).
+source "$SCRIPT_DIR/scripts/lib/db-container.sh"
+ctx_resolve_db_container "$SCRIPT_DIR/docker-compose.yml" || exit 2
+CONTAINER="$DB_CONTAINER"
 
 # ---------------------------------------------------------------------------
 # Helpers (also the hook API — keep signatures stable)
@@ -68,7 +72,7 @@ backup_dump() {
     local file="${BACKUP_DIR}/${label}-${DATE}.dump"
     echo ""
     echo "[STEP]  Dumping ${db} database (${label})..."
-    if docker exec -e PGPASSWORD="$pass" "$CONTAINER" \
+    if PGPASSWORD="$pass" docker exec -e PGPASSWORD "$CONTAINER" \
         pg_dump -U "$user" -d "$db" -Fc "$@" \
         > "$file" 2>/dev/null; then
         echo "[OK]    ${label} → $file ($(du -h "$file" | cut -f1))"

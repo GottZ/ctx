@@ -38,9 +38,19 @@ done
 SQL_FILE="$(cd "$(dirname "$0")" && pwd)/archive-legacy-topic-maps.sql"
 [[ -f "$SQL_FILE" ]] || { echo "SQL fehlt: $SQL_FILE" >&2; exit 1; }
 
-# Verbindung wie in CLAUDE.md dokumentiert: der Context-Store läuft im
-# db-Container. PSQL kann überschrieben werden, wenn die DB woanders liegt.
-PSQL="${CTX_PSQL_CMD:-docker exec -i -e PGPASSWORD=${CONTEXT_DB_PASSWORD:-} n8n-db-1 psql -U ${CONTEXT_DB_USER:-admin} -d ${CONTEXT_DB:-context_store}}"
+# Der Context-Store läuft im compose-Service `db`. PSQL kann überschrieben
+# werden, wenn die DB woanders liegt. Ohne Override: Container über
+# CTX_DB_CONTAINER → laufender compose-Service `db` → exit 2 (Issue #40), das
+# Passwort geht per Name an docker, nie als Wert in die Prozessliste.
+if [[ -n "${CTX_PSQL_CMD:-}" ]]; then
+  PSQL="$CTX_PSQL_CMD"
+else
+  REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+  source "$REPO_DIR/scripts/lib/db-container.sh"
+  ctx_resolve_db_container "$REPO_DIR/docker-compose.yml" || exit 2
+  export PGPASSWORD="${CONTEXT_DB_PASSWORD:-}"
+  PSQL="docker exec -i -e PGPASSWORD $DB_CONTAINER psql -U ${CONTEXT_DB_USER:-admin} -d ${CONTEXT_DB:-context_store}"
+fi
 
 if $APPLY; then
   echo "== W-H: ARCHIVIERE (committet) =="

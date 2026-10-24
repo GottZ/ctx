@@ -60,12 +60,12 @@ api() {
 # Query the DB for blocks with explicit dates, build test cases dynamically.
 # This avoids hardcoding block IDs that may change.
 
-# DB container resolution: env → compose → literal (issue #19).
-DB_CONTAINER="${CTX_DB_CONTAINER:-}"
-[[ -z "$DB_CONTAINER" ]] && DB_CONTAINER="$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps -q db 2>/dev/null | head -1)"
-[[ -z "$DB_CONTAINER" ]] && DB_CONTAINER="n8n-db-1"
+# DB container: env → running compose service `db` → exit 2 (issues #19, #40).
+source "$SCRIPT_DIR/scripts/lib/db-container.sh"
+ctx_resolve_db_container "$SCRIPT_DIR/docker-compose.yml" || exit 2
 
-DB_CMD="docker exec -e PGPASSWORD=${CONTEXT_DB_PASSWORD:?CONTEXT_DB_PASSWORD not set in .env} ${DB_CONTAINER} psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
+export PGPASSWORD="${CONTEXT_DB_PASSWORD:?CONTEXT_DB_PASSWORD not set in .env}"
+DB_CMD="docker exec -e PGPASSWORD ${DB_CONTAINER} psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
 
 echo "================================================================="
 echo "  Temporal Retrieval Evaluation"

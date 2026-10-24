@@ -18,17 +18,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 set -a; source "$ENV_FILE"; set +a
 
-# DB container resolution: env → compose → literal (issue #19).
-# if-form, not `[[ ]] &&` — this script runs under set -e.
-DB_CONTAINER="${CTX_DB_CONTAINER:-}"
-if [[ -z "$DB_CONTAINER" ]]; then
-  DB_CONTAINER="$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps -q db 2>/dev/null | head -1)"
-fi
-if [[ -z "$DB_CONTAINER" ]]; then
-  DB_CONTAINER="n8n-db-1"
-fi
+# DB container: env → running compose service `db` → exit 2 (issues #19, #40).
+source "$SCRIPT_DIR/scripts/lib/db-container.sh"
+ctx_resolve_db_container "$SCRIPT_DIR/docker-compose.yml" || exit 2
 
-DB_CMD="docker exec -e PGPASSWORD=${CONTEXT_DB_PASSWORD:?} ${DB_CONTAINER} psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
+export PGPASSWORD="${CONTEXT_DB_PASSWORD:?}"
+DB_CMD="docker exec -e PGPASSWORD ${DB_CONTAINER} psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
 
 # --- Database ---
 block_active=$($DB_CMD -c "SELECT count(*) FROM context_blocks WHERE NOT is_archived;")

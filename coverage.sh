@@ -83,7 +83,9 @@ if $SYSTEM; then
   source "$ENV_FILE"
   set +a
 
-  DB_CONTAINER="${CTX_DB_CONTAINER:-n8n-db-1}"
+  # shellcheck source=scripts/lib/db-container.sh
+  source "$SCRIPT_DIR/scripts/lib/db-container.sh"
+  ctx_resolve_db_container "$SCRIPT_DIR/docker-compose.yml" || exit 2
   CTX_CONTAINER="${COV_CTX_CONTAINER:-ctx}"
   CLONE="${COV_DB:-ctx_cov}"
   NAME="${COV_CONTAINER:-ctx-cov}"
