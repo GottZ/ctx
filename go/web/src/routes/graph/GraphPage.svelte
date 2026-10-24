@@ -4,7 +4,13 @@
   // sigma 4 hat das Paket gestrichen — parallel-edges.ts).
   import { DEFAULT_EDGE_CURVATURE, indexParallelEdgesIndex } from '../../lib/graph/parallel-edges'
   import { toApiError, type ApiError } from '../../lib/api'
-  import { fetchCategoryHues, fetchEgo, fetchGraphAll, isEgoFocusNotFound } from '../../lib/graph/api'
+  import {
+    egoNotFoundFallback,
+    fetchCategoryHues,
+    fetchEgo,
+    fetchGraphAll,
+    isEgoFocusNotFound,
+  } from '../../lib/graph/api'
   import { LayoutRunner } from '../../lib/graph/fa2'
   import { defaultFilters, toEgoQuery } from '../../lib/graph/filters'
   import { createGraph, evict, mergeEgo, recomputeHops, touch } from '../../lib/graph/graph-client'
@@ -44,8 +50,8 @@
   const rendererCaps = $derived(RENDERERS[rendererId].caps)
   let busy = $state(false)
   let error = $state<ApiError | null>(null)
-  // Soft fallback notice (fix C): a focus/expand 404 drops back to the topic
-  // map with this banner instead of a hard error — see isEgoFocusNotFound.
+  // Soft fallback notice (fix C): a focus/expand 404 shows this banner instead
+  // of a hard error — see isEgoFocusNotFound / egoNotFoundFallback.
   let notice = $state<string | null>(null)
   let truncated = $state(false)
   // Explicit counters: graph.order/size are non-reactive by design.
@@ -249,9 +255,12 @@
         // retrieval-excluded type like system-meta, foreign scope) — the ego
         // route answers one identical 404 for all three (no existence
         // oracle). A hard error banner would be a dead end for a shareable
-        // deep link; fall back to the topic map with a soft notice instead.
-        backToOverview()
-        notice = 'Block is not visible in the graph — showing the topic map.'
+        // deep link, so without a focus we fall back to the topic map. With
+        // a focus in place (SearchBox pick) the current view and its windows
+        // stay; only the notice explains it.
+        const fb = egoNotFoundFallback(focus)
+        if (fb.toOverview) backToOverview()
+        notice = fb.notice
       } else {
         error = apiErr
       }
@@ -275,11 +284,12 @@
     } catch (err) {
       const apiErr = toApiError(err)
       if (isEgoFocusNotFound(apiErr)) {
-        // Same fallback as setFocus: the expanded block vanished from the
-        // visible graph mid-session (archived/scope-shifted) — back to the
-        // topic map instead of a dead-end banner.
-        backToOverview()
-        notice = 'Block is not visible in the graph — showing the topic map.'
+        // Same rule as setFocus: the expanded neighbour vanished from the
+        // visible graph mid-session (archived/scope-shifted). The focus is
+        // still valid, so it and the open windows stay — notice only.
+        const fb = egoNotFoundFallback(focus)
+        if (fb.toOverview) backToOverview()
+        notice = fb.notice
       } else {
         error = apiErr
       }

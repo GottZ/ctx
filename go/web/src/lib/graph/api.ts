@@ -220,6 +220,28 @@ export function isEgoFocusNotFound(err: unknown): boolean {
   return err instanceof ApiError && err.status === 404
 }
 
+/** What the graph page does after an ego 404 (see egoNotFoundFallback). */
+export interface EgoNotFoundFallback {
+  /** Drop to the topic map (clears focus and closes all windows). */
+  toOverview: boolean
+  notice: string
+}
+
+/**
+ * Decide the reaction to an ego 404 from the CURRENT focus. Without a focus
+ * (a ?focus= deep link, a pick from the topic map) there is nothing to keep,
+ * so the page falls back to the topic map. With a focus in place (a SearchBox
+ * pick — search runs without a type filter, so retrieval-excluded hits show up
+ * — or an expand of a neighbour that was archived meanwhile) the ego view and
+ * its open windows stay; only a notice explains why nothing happened.
+ */
+export function egoNotFoundFallback(currentFocus: string | null): EgoNotFoundFallback {
+  if (currentFocus === null) {
+    return { toOverview: true, notice: 'Block is not visible in the graph — showing the topic map.' }
+  }
+  return { toOverview: false, notice: 'Block is not visible in the graph — keeping the current view.' }
+}
+
 // Source: go/internal/handler/overview.go (overviewResponse), wire format
 // pinned by the §3.1 example + handler golden test. The cluster supergraph
 // "landkarte": `cluster` is a per-request ordinal (the internal cluster_id is
