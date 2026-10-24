@@ -162,3 +162,48 @@ describe('BlockDetailModel close', () => {
     expect(m.graphVisible).toBe(true)
   })
 })
+
+// Last pick wins: a slow response for an earlier pick must not overwrite the
+// panel after a later pick (or a close) — otherwise the panel renders block A
+// while openId (and with it the graph link and the Delete target) is B.
+describe('BlockDetailModel stale responses', () => {
+  type GetResult = { success: true; block: BlockDetail; graph_visible?: boolean }
+
+  function slowFirst(): DetailApi & { resolveA: (r: GetResult) => void } {
+    let resolveA: (r: GetResult) => void = () => {}
+    return {
+      get resolveA() {
+        return resolveA
+      },
+      get: (id: string): Promise<GetResult> =>
+        id === 'A'
+          ? new Promise<GetResult>((r) => (resolveA = r))
+          : Promise.resolve({ success: true, block: block(id), graph_visible: true }),
+    }
+  }
+
+  it('ignores an earlier pick that answers after a later one', async () => {
+    const api = slowFirst()
+    const m = new BlockDetailModel(api)
+    const pendingA = m.load('A')
+    await m.load('B')
+    api.resolveA({ success: true, block: block('A'), graph_visible: false })
+    await pendingA
+    expect(m.openId).toBe('B')
+    expect(m.block?.id).toBe('B')
+    expect(m.graphVisible).toBe(true)
+    expect(m.status).toBe('ready')
+  })
+
+  it('ignores a response that arrives after close', async () => {
+    const api = slowFirst()
+    const m = new BlockDetailModel(api)
+    const pendingA = m.load('A')
+    m.close()
+    api.resolveA({ success: true, block: block('A'), graph_visible: false })
+    await pendingA
+    expect(m.openId).toBeNull()
+    expect(m.block).toBeNull()
+    expect(m.status).toBe('idle')
+  })
+})

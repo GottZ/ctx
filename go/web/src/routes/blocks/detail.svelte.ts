@@ -33,6 +33,7 @@ export class BlockDetailModel {
   graphVisible = $state<boolean>(true)
 
   #api: DetailApi
+  #seq = 0
 
   constructor(api: DetailApi = { get: getBlock }) {
     this.#api = api
@@ -44,17 +45,23 @@ export class BlockDetailModel {
    * pending promise. A rejected getBlock — including the not-found / not-visible
    * case, which arrives as an HTTP 200 {success:false} envelope that apiFetch
    * rejects as ApiError — lands in the error state without ever throwing.
+   * Last pick wins: a load superseded by a later load() or close() is never
+   * applied (lib/resource.svelte #seq) — otherwise the panel would show block
+   * A while openId, the graph link and the Delete target are already B.
    */
   async load(id: string): Promise<void> {
+    const seq = ++this.#seq
     this.openId = id
     this.status = 'loading'
     this.loadError = null
     try {
       const res = await this.#api.get(id)
+      if (seq !== this.#seq) return
       this.block = res.block
       this.graphVisible = res.graph_visible ?? true
       this.status = 'ready'
     } catch (err) {
+      if (seq !== this.#seq) return
       this.loadError = toApiError(err)
       this.status = 'error'
       this.block = null
@@ -63,6 +70,7 @@ export class BlockDetailModel {
 
   /** Close the panel and drop the loaded block (back to a non-content state). */
   close(): void {
+    this.#seq++
     this.block = null
     this.openId = null
     this.loadError = null
