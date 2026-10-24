@@ -206,7 +206,17 @@ else's environment — that led to a fix landing in the repository.
   keywords up with the deterministic tokenizer, hardened to run after the
   retries instead of short-circuiting them, to fill up to `MaxKeywords`, and
   to deduplicate case-insensitively and against the tokens of multi-word
-  keywords, with mutation-tested pins for each rule.
+  keywords, with mutation-tested pins for each rule. Also PR
+  [#48](https://github.com/GottZ/ctx/pull/48): "Open in graph" in the block
+  sidebar was offered for every block, so retrieval-excluded types (the
+  topic map, checkpoints) and any stale deep link ended on a hard "Block not
+  found" banner; the shipped fix keeps his server-side `graph_visible` verdict
+  on `manage get` (membership in the very allowlist the ego route serves) and
+  his soft 404 fallback that drops to the topic map only when there is no
+  view to keep, hardened with an ego-parity integration test that a mutation
+  turns red, a last-pick-wins guard in the detail panel (a late response
+  could leave Delete aimed at a block other than the one shown), and
+  precise grant/archival docs.
 
 ## How to be listed
 
