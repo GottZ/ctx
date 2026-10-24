@@ -402,7 +402,7 @@
   {#if notice}
     <div class="notice" role="status">
       <p>{notice}</p>
-      <button type="button" class="notice-close" aria-label="dismiss" onclick={() => (notice = null)}>×</button>
+      <button type="button" class="notice-close" aria-label="dismiss notice" onclick={() => (notice = null)}>×</button>
     </div>
   {/if}
 
