@@ -59,5 +59,5 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 For existing databases, run manually:
 
 ```bash
-docker exec n8n-db-1 psql -U admin -d context_store -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+docker compose exec db psql -U admin -d context_store -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
 ```

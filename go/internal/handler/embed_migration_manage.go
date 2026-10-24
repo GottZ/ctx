@@ -33,7 +33,7 @@ import (
 
 // embedMigrationDiskCheckPath is the volume the create pre-flight disk check
 // statfs's (design §6.1). ctxd runs as its own container that does NOT bind-mount
-// the DB data volume (docker-compose.yml: only n8n-db-1 mounts ./db), so a
+// the DB data volume (docker-compose.yml: only the service `db` mounts ./db), so a
 // truthful cross-container reading of the exact PGDATA free space is not
 // available from this process. On the single-host RAID-0 deployment the ctx
 // container's own root filesystem sits on the SAME physical array as the DB bind

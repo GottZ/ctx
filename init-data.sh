@@ -7,7 +7,7 @@
 #
 # Execution context:
 #   Called by PostgreSQL entrypoint (/docker-entrypoint-initdb.d/) on first start,
-#   or manually via: docker exec n8n-db-1 bash /docker-entrypoint-initdb.d/init-data.sh
+#   or manually via: docker compose exec db bash /docker-entrypoint-initdb.d/init-data.sh
 #
 # Idempotency:
 #   Running this on an existing DB must produce zero errors — only NOTICEs.

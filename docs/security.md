@@ -12,11 +12,11 @@ How the system defends itself is below. How to **report** a vulnerability — pr
 
 ```bash
 # 1. Inspect candidates:
-docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
+PGPASSWORD="$CONTEXT_DB_PASSWORD" docker compose exec -e PGPASSWORD db \
   psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" \
   -c "SELECT id, label, active, home_scope, is_admin FROM context_api_keys;"
 # 2. Promote EXACTLY one key by id:
-docker exec -e PGPASSWORD="$CONTEXT_DB_PASSWORD" n8n-db-1 \
+PGPASSWORD="$CONTEXT_DB_PASSWORD" docker compose exec -e PGPASSWORD db \
   psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" \
   -c "UPDATE context_api_keys SET is_admin = true WHERE id = '<uuid>';"
 ```

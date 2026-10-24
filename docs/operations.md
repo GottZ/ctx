@@ -636,7 +636,7 @@ Migration 132 adds `context_embed_cache_meta`, a single row holding `coupled_fin
 **The one operator step, once per installation.** The migration deliberately seeds no fingerprint, and the first boot after the upgrade **stamps without flushing**. That is a chosen trade-off: flushing there would force a complete embed warmup on *every* installation of this upgrade in order to heal the minority that ever moved its embed host. If yours is in that minority — if this deployment has at any point in its history changed `CTX_EMBED_HOST`/`_PROTOCOL` or edited the `base_url`/`protocol` of an embed-role pool row — clear the historic residue once, at a moment of your choosing:
 
 ```bash
-docker exec n8n-db-1 psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" \
+docker compose exec db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" \
   -c 'DELETE FROM context_embed_cache;'
 ```
 
@@ -659,7 +659,7 @@ The cohort where skipping it actually costs something is the oldest one: an inst
 **Recovering a value.** Every delete is recorded by the ordinary settings audit trigger as an `unset` with the old value attached, marked with the migration's request id:
 
 ```bash
-docker exec n8n-db-1 psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
+docker compose exec db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
   "SELECT entity_key, scope, old_value FROM context_settings_audit
     WHERE metadata->>'request_id' = 'migration-133-retire-backend-tuples';"
 ```
@@ -677,7 +677,7 @@ Restore what you find **into the backend pool** (`ctx backends`), not as a setti
 **Recovering a value.** Every delete is recorded by the ordinary settings audit trigger as an `unset` with the old value attached, marked with the migration's request id:
 
 ```bash
-docker exec n8n-db-1 psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
+docker compose exec db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
   "SELECT entity_key, scope, old_value FROM context_settings_audit
     WHERE metadata->>'request_id' = 'migration-152-retire-v2-settings';"
 ```
@@ -699,7 +699,7 @@ There is nowhere to restore such a value to — the settings API answers 404 on 
 **Recovering a value.** Every delete is recorded by the ordinary settings audit trigger as an `unset` with the old value attached, marked with the migration's request id:
 
 ```bash
-docker exec n8n-db-1 psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
+docker compose exec db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
   "SELECT entity_key, scope, old_value FROM context_settings_audit
     WHERE metadata->>'request_id' = 'migration-153-retire-v3-settings';"
 ```
@@ -722,7 +722,7 @@ It creates no snapshot (a knowledge block with a valid superseder is marked by t
 **Recovering a pointer.** Every touched row carries the previous pointer in its metadata:
 
 ```bash
-docker exec n8n-db-1 psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
+docker compose exec db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
   "SELECT id, lifecycle_state, metadata->'supersedes_repair' FROM context_blocks
     WHERE metadata ? 'supersedes_repair';"
 ```
