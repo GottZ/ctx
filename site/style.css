@@ -180,6 +180,8 @@ td code { white-space: nowrap; }
   column-gap: var(--section-gap);
 }
 .foot p { grid-column: 2; margin: 0 0 0.5em; }
+.foot .badges { margin-bottom: 0.9em; }
+.foot .badges img { display: block; }
 
 @media (max-width: 900px) {
   .hero { grid-template-columns: 1fr; }
