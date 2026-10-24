@@ -82,6 +82,7 @@ bash eval.sh --no-warmup            # Skip the unscored warm-up pass (developmen
 bash deadcode.sh                    # Unreachable-code gate against go/deadcode-allow.txt
 bash deadcode.sh testonly           # Test-only ratchet against go/deadcode-testonly-allow.txt
 cd go && go test ./... -short       # Go unit tests
+bash coverage.sh                    # Go coverage across all suites (see Coverage below)
 ```
 
 `deadcode.sh` needs `go install golang.org/x/tools/cmd/deadcode@v0.50.0` (the same
@@ -827,6 +828,38 @@ The path prefix of the whole workflow surface lives in exactly one constant each
 ### Live tier (PV10) — real ctxd, production write paths
 
 Beside the browser-mocked suite there is a second, small tier (`go/web/e2e/live/`, ≤ 15 `@live` specs) that runs against a **throwaway** ctxd + Postgres brought up per run by `docker-compose.e2e.yml` (`bun run e2e:live` → `run-live.sh`). It proves the classes the mock tier cannot: real server **enforcement** (tenant isolation with a positive control), fixture-**shape** truth (W10), and real **SSE transport**. The corpus is seeded **only through production write paths** (`tenant-create` → `store` → `issue-create`), so the seed itself is an integration test of those handlers and no hand-written shape can drift from the server. A three-layer **fail-closed target gate** (`seed.ts`, design 06 §3.6) refuses to write to anything but the job-local instance (env-gate + host binding, a per-run bootstrap-key handshake via `GET /api/whoami` — the PV10a `CTX_BOOTSTRAP_ADMIN_KEY` mints the first server-admin key only on an empty DB, [operations](operations.md#environment-variables), and the key is valid solely against the instance that dies with the stack). The tier makes **no pixel assertions** — no screenshot baselines here. Runbook, the three negative gates (W10 shape-mutation / target-gate refusal / leak-detector), the trace-secret handling and the **release-gate rule** (a version tag is pushed only after a green nightly `web-live` run — the "CI is truth" rule extended to the live tier, with the staging-redaction caveat) live in [`go/web/e2e/live/README.md`](../go/web/e2e/live/README.md). CI runs it nightly (`schedule`) + on `workflow_dispatch` + on PRs labelled `e2e-live` — never on every PR (the mock `web` job stays the per-PR frontend gate).
+
+## Coverage
+
+`coverage.sh` measures Go statement coverage across every suite that runs the
+code and merges the results: a block counts as covered when any suite executed it.
+
+```bash
+bash coverage.sh                    # unit + integration (-coverpkg=./...), needs Docker, ~30 min
+bash coverage.sh --short            # unit tests only, no Docker
+bash coverage.sh --system           # + test.sh and eval.sh against a -cover build (compose stack)
+bash coverage.sh --html             # + coverage.html of the merged profile
+```
+
+It reports two denominators — the whole Go module, and the packages that ship in
+the `ctxd` and `ctx` binaries (`go list -deps ./cmd/ctxd ./cmd/ctx`), which leaves
+out the benchmark and eval tooling — plus the shipped packages with the most
+uncovered statements. Output goes to `.gotmp/coverage/` (`coverage.txt`, the merged
+profile `merged.out`, logs). The web UI (Svelte/TypeScript) is not part of the figures.
+
+`--system` never touches the live instance. It clones the live database
+TimescaleDB-aware (pre/post restore) into a throwaway database (`COV_DB`, default
+`ctx_cov`), starts the live image with an instrumented `ctxd` and the live
+container's environment pointed at the clone (`127.0.0.1:$COV_PORT`, default 18080),
+turns the background loops off there (Dream, distill, recall check, overview
+labelling — they would execute code no test asked for), and runs copies of
+`test.sh`/`eval.sh` whose `.env` points at the clone. Clone, container and the
+copied `.env` files are removed on exit, also on failure. Afterwards it checks the
+live database for test blocks written during the run and fails if it finds any.
+
+Measured 2026-10-24 (v5.24.1) with `--system`: 79.3 % of the shipped code
+(29,619 of 37,341 statements), 77.3 % of the whole module; unit tests alone 43.3 %
+of the shipped code.
 
 ## Bundle byte budget (Web, PLc)
 
