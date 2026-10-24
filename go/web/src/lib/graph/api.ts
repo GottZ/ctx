@@ -202,6 +202,12 @@ export interface BlockDetail {
   sensitivity?: string
 }
 
+/**
+ * Full block via the scope-gated `manage get`. `graph_visible` is the server's
+ * verdict whether the block's type can be the focus of /api/graph/ego (false
+ * for retrieval-excluded types like system-meta, checkpoint); absent on servers
+ * older than the flag, so callers must default it to true.
+ */
 export function getBlock(id: string): Promise<{ success: true; block: BlockDetail; graph_visible?: boolean }> {
   return apiFetch<{ success: true; block: BlockDetail; graph_visible?: boolean }>('/api/manage', {
     method: 'POST',

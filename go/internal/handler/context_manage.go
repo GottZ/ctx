@@ -453,9 +453,9 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 }
 
 // graphVisible reports whether a block of the given type can be the focus of
-// the graph ego route. An unwired registry (nil snapshot) is treated as fully
-// visible (the pre-flag behavior) so the envelope stays additive and old
-// topologies never lose the link; once wired, excluded types answer false.
+// the graph ego route. An unwired registry (nil snapshot — test wiring only,
+// cmd/ctxd always passes one) answers true: like untrustedOf's nil arm it
+// keeps the pre-flag answer. Once wired, excluded types answer false.
 func graphVisible(types *blocktype.Set, typeName string) bool {
 	if types == nil {
 		return true
