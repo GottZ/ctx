@@ -546,8 +546,8 @@ func TestDimensionPhase(t *testing.T) {
 		{"week", "1", 0.0, false},
 		{"week", "13", 12.0 / 52.0, false},
 		{"monthday", "1", 0.0, false},
-		{"monthday", "15", 14.0 / 30.0, false},  // mid-month
-		{"monthday", "31", 1.0, false}, // end (30/30)
+		{"monthday", "15", 14.0 / 31.0, false}, // mid-month
+		{"monthday", "31", 30.0 / 31.0, false}, // end — its own position, not day 1's
 		{"seasonal", "1", 0.0, false},            // Jan 1
 		{"seasonal", "365", 364.0 / 365.0, false}, // Dec 31 non-leap
 		{"seasonal", "366", 1.0, false}, // Dec 31 leap (365/365)
@@ -598,7 +598,7 @@ func TestQueryPhase(t *testing.T) {
 		{"month", 2.0 / 12.0},    // March=3 → 2/12
 		{"quarter", 0.0},         // Q1 → (1-1)/4
 		{"week", 13.0 / 52.0},    // week 14 → 13/52
-		{"monthday", 1.0},          // day 31 → 30/30
+		{"monthday", 30.0 / 31.0},  // day 31 → 30/31
 		{"seasonal", 89.0 / 365.0}, // day-of-year 90 → 89/365
 	}
 	for _, tt := range tests {
@@ -811,5 +811,29 @@ func TestApplyCyclicGravityBoost_NoOp(t *testing.T) {
 	empty := ApplyCyclicGravityBoost(nil, nil, map[string]float64{"weekday": 1.0}, mustDate("2026-03-31"), 0.3)
 	if len(empty) != 0 {
 		t.Errorf("empty results should return empty")
+	}
+}
+
+// TestMonthdayRingSeparatesDay31FromDay1 pins #40 Bug 8a: day 31 and day 1
+// are neighbors on the monthday ring, not the same point. The two month-
+// segment rules of the temporal parser (Monatsanfang → day 3, Monatsende →
+// day 29) must each prefer their own side of the month boundary.
+func TestMonthdayRingSeparatesDay31FromDay1(t *testing.T) {
+	p31, _ := DimensionPhase("monthday", "31")
+	p1, _ := DimensionPhase("monthday", "1")
+	if d := CyclicDistance(p31, p1); math.Abs(d-1.0/31.0) > 1e-9 {
+		t.Fatalf("distance day 31 ↔ day 1 = %v, want one ring position (1/31)", d)
+	}
+
+	weights := map[string]float64{"monthday": 1.0}
+	score := func(query time.Time, day string) float64 {
+		return ComputeCyclicGravity(weights, []TemporalDim{{Dimension: "monthday", Value: day}}, query)
+	}
+	start, end := mustDate("2026-01-03"), mustDate("2026-01-29")
+	if s1, s31 := score(start, "1"), score(start, "31"); s1 <= s31 {
+		t.Errorf("Monatsanfang: day 1 (%.3f) must outrank day 31 (%.3f)", s1, s31)
+	}
+	if s31, s1 := score(end, "31"), score(end, "1"); s31 <= s1 {
+		t.Errorf("Monatsende: day 31 (%.3f) must outrank day 1 (%.3f)", s31, s1)
 	}
 }

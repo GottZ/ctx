@@ -234,8 +234,8 @@ var DimensionSigma = map[string]float64{
 
 // CyclicDistance returns the minimum wrap-around distance between two phases
 // on a unit circle. Phases are in [0,1] — the interval is closed, because the
-// last value of a cycle normalizes to exactly 1.0 (week 53, monthday 31,
-// seasonal 366). The wrap below maps 1.0 onto 0.0, which is correct for a
+// last value of a cycle normalizes to exactly 1.0 (week 53, seasonal 366).
+// The wrap below maps 1.0 onto 0.0, which is correct for a
 // ring: both name the same point. Result is in [0, 0.5].
 //
 // Monday (0/7) vs Sunday (6/7):
@@ -268,8 +268,8 @@ func GaussianDecay(distance, sigma float64) float64 {
 }
 
 // DimensionPhase converts an EAV (dimension, value) pair to a phase in [0,1].
-// The upper end is reachable — week 53, monthday 31 and seasonal 366 each
-// normalize to exactly 1.0 — and CyclicDistance folds 1.0 onto 0.0, the same
+// The upper end is reachable — week 53 and seasonal 366 each normalize to
+// exactly 1.0 — and CyclicDistance folds 1.0 onto 0.0, the same
 // point on the ring. Callers must not assume phase < 1.0.
 // Matches the encoding used by store.ExpandDimensions:
 //
@@ -277,6 +277,7 @@ func GaussianDecay(distance, sigma float64) float64 {
 //	month:   1-12 → (v-1)/12
 //	quarter: 1-4  → (v-1)/4
 //	week:    ISO 1-53 → (v-1)/52
+//	monthday: 1-31 → (v-1)/31
 //	year:    not cyclic in the [0,1) sense — returns error
 //
 // Returns (phase, nil) on success, (0, error) on invalid input.
@@ -310,9 +311,13 @@ func DimensionPhase(dimension, value string) (float64, error) {
 		if v < 1 || v > 31 {
 			return 0, fmt.Errorf("rrf: monthday value out of range: %d", v)
 		}
-		// Use 30-day reference cycle — most months fit, Feb and 31-day months
-		// introduce minor asymmetry but the Gaussian σ=0.10 absorbs it.
-		return float64(v-1) / 30.0, nil
+		// 31 positions on the ring, one per possible day (#40 Bug 8a). The
+		// former /30 put day 31 onto day 1's phase: for "Monatsende" day 1
+		// scored like day 31, for "Monatsanfang" day 31 like day 1 — and day
+		// 31 is no edge case, it ends seven months a year. Shorter months
+		// leave their last days one or more positions short of day 1; that
+		// residue is smaller than σ=0.10 and keeps the phase month-agnostic.
+		return float64(v-1) / 31.0, nil
 	case "seasonal":
 		if v < 1 || v > 366 {
 			return 0, fmt.Errorf("rrf: seasonal value out of range: %d", v)
@@ -360,7 +365,7 @@ func QueryPhase(dimension string, t time.Time) (float64, error) {
 		_, iso := t.ISOWeek()
 		return float64(iso-1) / 52.0, nil
 	case "monthday":
-		return float64(t.Day()-1) / 30.0, nil
+		return float64(t.Day()-1) / 31.0, nil // same ring as DimensionPhase
 	case "seasonal":
 		return float64(t.YearDay()-1) / 365.0, nil
 	case "daily":
