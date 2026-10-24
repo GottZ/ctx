@@ -1333,3 +1333,191 @@ func TestInitCmdHasNoUpdateCheckFlag(t *testing.T) {
 		t.Errorf("the flag usage should name the env twin: %q", f.Usage)
 	}
 }
+
+// ── Remove (#49 Punkt 3c) ──────────────────────────────────────────
+//
+// --remove takes out what init installs and nothing else: foreign hook
+// commands, foreign keys of a shared matcher group and a foreign statusline
+// all survive, and a file without ctx entries is not rewritten.
+
+func TestRemoveHookEntriesShapes(t *testing.T) {
+	foreign := map[string]any{"type": "command", "command": "other-tool"}
+	hooks := []any{
+		map[string]any{"type": "command", "command": hookCmdBrief}, // legacy flat
+		newHookGroup(hookCmdBrief),                                 // nested, ctx only
+		map[string]any{"matcher": "x", "hooks": []any{ // nested, shared
+			map[string]any{"type": "command", "command": "/usr/local/bin/ctx brief --hook"},
+			foreign,
+		}},
+		"not-an-object",
+	}
+	rest, n := removeHookEntries(hooks, "ctx brief")
+	if n != 3 {
+		t.Fatalf("removed %d commands, want 3", n)
+	}
+	if len(rest) != 2 {
+		t.Fatalf("kept %d entries, want the shared group + the odd entry: %#v", len(rest), rest)
+	}
+	group, _ := rest[0].(map[string]any)
+	if group["matcher"] != "x" {
+		t.Errorf("the shared group keeps its other keys: %#v", group)
+	}
+	if inner, _ := group["hooks"].([]any); len(inner) != 1 || inner[0].(map[string]any)["command"] != "other-tool" {
+		t.Errorf("the shared group keeps exactly the foreign command: %#v", group["hooks"])
+	}
+	if rest[1] != "not-an-object" {
+		t.Errorf("entries of an unknown shape stay: %#v", rest[1])
+	}
+}
+
+func TestRemoveCtxKeepsForeignEntries(t *testing.T) {
+	s := &settingsJSON{raw: map[string]any{
+		"model": "opus",
+		"hooks": map[string]any{
+			"SubagentStart": []any{newHookGroup(hookCmdBrief), newHookGroup("other-start")},
+			"SubagentStop":  []any{newHookGroup(hookCmdPersist)},
+			"PreToolUse":    []any{newHookGroup("ctx brief --hook")}, // not an event init writes to
+		},
+		"statusLine": map[string]any{"type": "command", "command": "my-statusline"},
+	}}
+	r := s.removeCtx()
+	if r.brief != 1 || r.persist != 1 || r.statusLine {
+		t.Fatalf("result = %+v", r)
+	}
+	if !strings.Contains(r.foreignStatus, "my-statusline") {
+		t.Errorf("the kept statusline is described: %q", r.foreignStatus)
+	}
+	hooks := s.raw["hooks"].(map[string]any)
+	if _, ok := hooks["SubagentStop"]; ok {
+		t.Error("an event emptied by the removal is dropped")
+	}
+	if start := getHookArray(hooks, "SubagentStart"); len(start) != 1 || !hasHookEntry(start, "other-start") {
+		t.Errorf("SubagentStart keeps the foreign group: %#v", start)
+	}
+	if !hasHookEntry(getHookArray(hooks, "PreToolUse"), "ctx brief") {
+		t.Error("events init never writes to are not touched")
+	}
+	if sl, _ := s.raw["statusLine"].(map[string]any); sl["command"] != "my-statusline" {
+		t.Errorf("a foreign statusline stays: %v", s.raw["statusLine"])
+	}
+	if s.raw["model"] != "opus" {
+		t.Error("unrelated keys stay")
+	}
+}
+
+func TestRemoveCtxDropsHooksObjectItEmptied(t *testing.T) {
+	s := &settingsJSON{raw: map[string]any{
+		"hooks": map[string]any{
+			"SubagentStart": []any{newHookGroup(hookCmdBrief)},
+			"SubagentStop":  []any{newHookGroup(hookCmdPersist)},
+		},
+		"statusLine": map[string]any{"type": "command", "command": statuslineCmd2},
+	}}
+	if r := s.removeCtx(); !r.statusLine || r.brief != 1 || r.persist != 1 {
+		t.Fatalf("result = %+v", r)
+	}
+	if len(s.raw) != 0 {
+		t.Errorf("nothing of ctx's may be left: %#v", s.raw)
+	}
+
+	pre := &settingsJSON{raw: map[string]any{"hooks": map[string]any{}}}
+	if r := pre.removeCtx(); r.changed() {
+		t.Fatalf("nothing to remove, result = %+v", r)
+	}
+	if _, ok := pre.raw["hooks"]; !ok {
+		t.Error("a hooks object that was empty before is not init's to delete")
+	}
+}
+
+// TestRunRemoveRoundTrip installs through the production writers (the hook
+// groups init builds, the statusline step itself), removes, and compares the
+// result with the file as it was before the install.
+func TestRunRemoveRoundTrip(t *testing.T) {
+	fixedSettingsClock(t)
+	t.Setenv("NO_COLOR", "1")
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	path := filepath.Join(dir, "settings.json")
+	before := map[string]any{
+		"env":   map[string]any{"A": "1"},
+		"hooks": map[string]any{"SubagentStart": []any{newHookGroup("other-start")}},
+	}
+	raw, _ := json.Marshal(before)
+	writeSettingsFile(t, path, string(raw), 0o600)
+
+	s, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.getHooksMap()
+	h["SubagentStart"] = append(getHookArray(h, "SubagentStart"), newHookGroup(hookCmdBrief))
+	h["SubagentStop"] = []any{newHookGroup(hookCmdPersist)}
+	if _, err := s.save(path); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() { runStatuslineStep(scriptedLines("")) })
+	installed, _ := os.ReadFile(path)
+	nBefore := len(backups(t, dir))
+
+	var rerr error
+	out := captureStdout(t, func() { rerr = runRemove() })
+	if rerr != nil {
+		t.Fatalf("runRemove: %v; output:\n%s", rerr, out)
+	}
+	after, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotJSON, _ := json.Marshal(after.raw)
+	if string(gotJSON) != string(raw) {
+		t.Errorf("after remove:\n%s\nwant the pre-install file:\n%s", gotJSON, raw)
+	}
+	bk := backups(t, dir)
+	if len(bk) != nBefore+1 {
+		t.Fatalf("remove leaves one more backup, have %v", bk)
+	}
+	newest, _ := os.ReadFile(filepath.Join(dir, bk[len(bk)-1]))
+	if string(newest) != string(installed) {
+		t.Errorf("the backup is the file as remove found it")
+	}
+	for _, want := range []string{"SubagentStart 1, SubagentStop 1", "Statusline", "removed", "API key"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+
+	// A second run finds nothing and writes nothing.
+	out = captureStdout(t, func() { rerr = runRemove() })
+	if rerr != nil || len(backups(t, dir)) != nBefore+1 {
+		t.Errorf("second run must not rewrite (err %v, backups %v)", rerr, backups(t, dir))
+	}
+	if !strings.Contains(out, "none installed") {
+		t.Errorf("second run says there is nothing:\n%s", out)
+	}
+}
+
+func TestRunRemoveWithoutSettingsCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	var err error
+	captureStdout(t, func() { err = runRemove() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "settings.json")); !os.IsNotExist(statErr) {
+		t.Errorf("--remove must not create settings.json (stat: %v)", statErr)
+	}
+}
+
+func TestInitCmdRemoveFlag(t *testing.T) {
+	cmd := initCmd()
+	if f := cmd.Flags().Lookup("remove"); f == nil || f.DefValue != "false" {
+		t.Fatalf("ctx init needs a --remove flag that is off by default: %+v", f)
+	}
+	cmd.SetArgs([]string{"--remove", "--no-update-check"})
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetErr(new(strings.Builder))
+	if err := cmd.Execute(); err == nil {
+		t.Error("--remove and --no-update-check are mutually exclusive")
+	}
+}

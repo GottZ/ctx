@@ -1154,10 +1154,143 @@ func describeStatusLine(v any) string {
 	return "value " + strconv.Quote(truncateForError(raw))
 }
 
+// ── Remove (#49 Punkt 3c) ──────────────────────────────────────────.
+
+// removeHookEntries drops every command entry containing cmdSubstr from a hook
+// event array, in both shapes hasHookEntry recognizes. A matcher group left
+// without commands goes with it; a group that still holds foreign commands
+// keeps them and its other keys. Returns the remaining array and the number of
+// removed commands.
+func removeHookEntries(hooks []any, cmdSubstr string) ([]any, int) {
+	kept := make([]any, 0, len(hooks))
+	removed := 0
+	for _, entry := range hooks {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			kept = append(kept, entry)
+			continue
+		}
+		if cmd, _ := m["command"].(string); strings.Contains(cmd, cmdSubstr) {
+			removed++ // legacy flat form
+			continue
+		}
+		if inner, ok := m["hooks"].([]any); ok {
+			rest, n := removeHookEntries(inner, cmdSubstr)
+			if n > 0 {
+				removed += n
+				if len(rest) == 0 {
+					continue // the group held nothing but ctx's command
+				}
+				m["hooks"] = rest
+			}
+		}
+		kept = append(kept, entry)
+	}
+	return kept, removed
+}
+
+// removeHookEvent applies removeHookEntries to one event and drops the event
+// key once its array is empty. An event without a ctx command is left exactly
+// as it was.
+func removeHookEvent(hooks map[string]any, event, cmdSubstr string) int {
+	rest, n := removeHookEntries(getHookArray(hooks, event), cmdSubstr)
+	if n == 0 {
+		return 0
+	}
+	if len(rest) == 0 {
+		delete(hooks, event)
+	} else {
+		hooks[event] = rest
+	}
+	return n
+}
+
+// removeResult is what removeCtx took out of settings.json.
+type removeResult struct {
+	brief, persist int    // removed SubagentStart / SubagentStop commands
+	statusLine     bool   // ctx's statusLine was removed
+	foreignStatus  string // describeStatusLine of a statusline that is not ctx's, kept
+}
+
+func (r removeResult) changed() bool {
+	return r.brief+r.persist > 0 || r.statusLine
+}
+
+// removeCtx takes out exactly what stepHooks and runStatuslineStep install:
+// the `ctx brief` / `ctx persist` hook commands — matched like the install
+// side detects them — and a statusLine that is ctx's. Everything else stays,
+// including a foreign statusline. A hooks object emptied by the removal goes
+// too; one that was empty before is left alone.
+func (s *settingsJSON) removeCtx() removeResult {
+	var r removeResult
+	if hooks, ok := s.raw["hooks"].(map[string]any); ok {
+		r.brief = removeHookEvent(hooks, "SubagentStart", "ctx brief")
+		r.persist = removeHookEvent(hooks, "SubagentStop", "ctx persist")
+		if len(hooks) == 0 && r.brief+r.persist > 0 {
+			delete(s.raw, "hooks")
+		}
+	}
+	if v := s.raw["statusLine"]; v != nil {
+		if isCtxStatusLine(v) {
+			delete(s.raw, "statusLine")
+			r.statusLine = true
+		} else {
+			r.foreignStatus = describeStatusLine(v)
+		}
+	}
+	return r
+}
+
+// runRemove is `ctx init --remove`: the reverse of the hooks and statusline
+// steps. It asks nothing — the flag is the decision, and the rewrite leaves a
+// settings.json.bak-* copy like every other one. A file without ctx entries,
+// or no file at all, is not touched. The client config stays: it holds the
+// key, and deleting a credential is the user's call, so the line names it.
+func runRemove() error {
+	fmt.Printf("\nctx init --remove %s\n\n", Version)
+
+	path := claudeSettingsPath()
+	settings, err := loadSettings(path)
+	if err != nil {
+		fmt.Println(label("Settings", "cannot read %s: %v %s", displayConfigPath(path), err, failMark()))
+		return err
+	}
+	r := settings.removeCtx()
+
+	backup := ""
+	if r.changed() {
+		if backup, err = settings.save(path); err != nil {
+			fmt.Println(label("Settings", "write failed: %v %s", err, failMark()))
+			return err
+		}
+	}
+
+	switch {
+	case r.brief+r.persist > 0:
+		fmt.Println(label("Hooks", "removed (SubagentStart %d, SubagentStop %d) %s", r.brief, r.persist, okMark()))
+	default:
+		fmt.Println(label("Hooks", "none installed %s", skipMark()))
+	}
+	switch {
+	case r.statusLine:
+		fmt.Println(label("Statusline", "removed %s", okMark()))
+	case r.foreignStatus != "":
+		fmt.Println(label("Statusline", "not ctx's, kept %s", skipMark()))
+		fmt.Println(indentHint(r.foreignStatus))
+	default:
+		fmt.Println(label("Statusline", "none installed %s", skipMark()))
+	}
+	printSettingsBackup(backup)
+	fmt.Println(label("Config", "kept %s", displayConfigPath(clientconfig.FilePath())))
+	fmt.Println(indentHint("holds your API key — delete it to remove ctx's client config too"))
+	fmt.Println()
+	return nil
+}
+
 // ── init command ───────────────────────────────────────────────────.
 
 func initCmd() *cobra.Command {
-	var noUpdateCheck bool
+	var noUpdateCheck, remove bool
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Setup ctx config, hooks, and statusline",
@@ -1176,16 +1309,27 @@ Idempotent: re-running shows status for each item, only changes what's missing.
 Respects NO_COLOR environment variable for plain text output.
 
 The version check is the only request to a host other than your ctx server
-(api.github.com). --no-update-check or CTX_NO_UPDATE_CHECK=1 skips it entirely.`,
+(api.github.com). --no-update-check or CTX_NO_UPDATE_CHECK=1 skips it entirely.
+
+--remove reverses steps 6 and 7: it takes the ctx hook commands and ctx's
+statusline out of settings.json (a foreign statusline stays) and keeps a
+settings.json.bak-* copy. The config file from step 1 is left in place.`,
 		Example: `  ctx init          # Interactive setup
   NO_COLOR=1 ctx init  # Plain text output
-  ctx init --no-update-check  # No GitHub request (offline / air-gapped)`,
+  ctx init --no-update-check  # No GitHub request (offline / air-gapped)
+  ctx init --remove  # Uninstall hooks + statusline from settings.json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if remove {
+				return runRemove()
+			}
 			return runInit(noUpdateCheck)
 		},
 	}
 	cmd.Flags().BoolVar(&noUpdateCheck, "no-update-check", false,
 		"skip the GitHub release check — no request leaves for api.github.com (same as "+envNoUpdateCheck+"=1)")
+	cmd.Flags().BoolVar(&remove, "remove", false,
+		"remove the ctx hooks and ctx's statusline from Claude Code's settings.json, nothing else")
+	cmd.MarkFlagsMutuallyExclusive("remove", "no-update-check")
 	return cmd
 }
 

@@ -18,6 +18,8 @@ The wizard is the documented first-run path and is idempotent — it reports eve
 
 Both steps rewrite `settings.json` as a whole (re-sorted, re-indented). Before a rewrite that changes an existing file, the wizard copies it to `settings.json.bak-<UTC timestamp>` in the same directory, with the original's permissions, and names the copy — `diff` against it shows exactly what init changed. Two rewrites in one run keep two copies (`…Z` and `…Z-2`); the first one is the file as it was before init. An unchanged file is not touched.
 
+**Uninstall:** `ctx init --remove` reverses steps 6 and 7 without asking — it takes the `ctx brief` / `ctx persist` hook commands out of `SubagentStart` / `SubagentStop` (a matcher group that also holds foreign commands keeps them) and removes the statusline only when it is ctx's; a foreign one is named and kept. The rewrite leaves a `settings.json.bak-<UTC timestamp>` like any other, and a file without ctx entries is not touched. The client config from step 1 stays where it is: it holds your API key, so the command names the file and leaves deleting it to you.
+
 <details>
 <summary>Configuring the endpoint by hand instead</summary>
 
