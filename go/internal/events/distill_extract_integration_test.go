@@ -41,6 +41,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/distillsource"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -407,8 +408,26 @@ func a8WaitRows(t *testing.T, pool *pgxpool.Pool, want int) []a8Row {
 	}
 }
 
+// a8SettleLog waits until every llmlog insert started on pool has finished.
+// Every helper that DELETEs from context_llm_log calls it first: the arm's
+// call returns before its row lands (llmlog.Record is fire-and-forget), so a
+// clear right after a run can win the race, and the earlier run's row then
+// lands AFTER the clear and is counted against the next probe — issue #50,
+// TestDistillShadowRetypeReset seeing "1 LLM-Calls" for a run that never
+// called. Fatal instead of best-effort: a straggler that does not finish
+// inside the window would turn back into exactly that silent miscount.
+func a8SettleLog(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := llmlog.Settle(ctx, pool); err != nil {
+		t.Fatalf("pending llm log writes: %v", err)
+	}
+}
+
 func a8Truncate(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
+	a8SettleLog(t, pool)
 	// Two statements, two Execs: pgx prepares, and a prepared statement carries
 	// exactly one command (SQLSTATE 42601).
 	if _, err := pool.Exec(context.Background(), `TRUNCATE distill_run`); err != nil {
@@ -1152,6 +1171,7 @@ func a8MultiBatchSource(batches, perBatch int) *fakeDistillSource {
 // "an hour later" state.
 func a8ClearWindow(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
+	a8SettleLog(t, pool)
 	if _, err := pool.Exec(context.Background(),
 		`DELETE FROM context_llm_log WHERE pipeline = $1`, distillPipeline); err != nil {
 		t.Fatalf("clear the spend window: %v", err)

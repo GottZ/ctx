@@ -68,6 +68,7 @@ const dsForeignPipeline = "dream-eval"
 func dsReset(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	dfTruncate(t, pool)
+	a8SettleLog(t, pool)
 	if _, err := pool.Exec(context.Background(),
 		`DELETE FROM context_llm_log WHERE pipeline = ANY($1)`,
 		[]string{distillPipeline, dsForeignPipeline}); err != nil {

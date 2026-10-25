@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GottZ/ctx/internal/prompts"
@@ -172,6 +174,21 @@ func EvictBodies(ctx context.Context, pool *pgxpool.Pool, retentionDays int) (in
 	return tag.RowsAffected(), nil
 }
 
+// inflight counts, per pool, the inserts Record has started and that have not
+// finished yet (landed, failed or timed out). Record raises the count BEFORE it
+// returns, so every Record whose caller has returned is visible to Settle.
+//
+// Keyed by pool and not one global counter: integration tests give every test
+// its own database and pool, and a straggler writing into an earlier test's
+// (closed) pool must not hold up the next test's Settle. One entry per pool
+// ever created — a single one in ctxd.
+var inflight sync.Map // *pgxpool.Pool → *atomic.Int64
+
+func inflightFor(pool *pgxpool.Pool) *atomic.Int64 {
+	v, _ := inflight.LoadOrStore(pool, new(atomic.Int64))
+	return v.(*atomic.Int64)
+}
+
 // Record persists an entry asynchronously. Safe to call from request paths —
 // the DB write happens in its own goroutine with a short deadline and failures
 // are logged but never bubble up.
@@ -179,7 +196,32 @@ func Record(pool *pgxpool.Pool, e Entry) {
 	if pool == nil || e.Pipeline == "" {
 		return
 	}
-	go insert(pool, e)
+	n := inflightFor(pool)
+	n.Add(1)
+	go func() {
+		defer n.Add(-1)
+		insert(pool, e)
+	}()
+}
+
+// Settle blocks until every insert Record started on pool has finished, or ctx
+// ends. It is the ordering point the fire-and-forget write otherwise lacks: a
+// caller that clears or counts context_llm_log right after the LLM call
+// returned races the insert goroutine (issue #50 — a row of an earlier run
+// landed after the journal reset and was counted against the next one).
+// Settle says nothing about rows other processes write.
+func Settle(ctx context.Context, pool *pgxpool.Pool) error {
+	n := inflightFor(pool)
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for n.Load() > 0 {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("llmlog: settle with %d insert(s) in flight: %w", n.Load(), ctx.Err())
+		case <-tick.C:
+		}
+	}
+	return nil
 }
 
 func insert(pool *pgxpool.Pool, e Entry) {
