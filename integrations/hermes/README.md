@@ -78,6 +78,15 @@ Hermes, and the contract without this plugin behaves like stock Hermes.
 
 ## Install (plugin, both modes)
 
+From the [Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins)
+(the entry pins an exact commit of this repository):
+
+```bash
+hermes plugins install ctx_checkpoint
+```
+
+Or from a checkout of this repository, with the host probes below:
+
 ```bash
 scripts/install.sh                      # auto-detects the Hermes home
 scripts/install.sh --hermes-home /opt/data --hermes-src /opt/hermes
@@ -233,7 +242,9 @@ and manifest are deliberately small so routine recall stays cheap.
 
 - Plugin: see `plugin/ctx_checkpoint/VERSION` (0.4.3: runtime contract
   negotiation, `tool_evidence` keyword tolerance, `host_checkpoint_api` /
-  `checkpoint_api_version` / `tool_index_status` metadata).
+  `checkpoint_api_version` / `tool_index_status` metadata; 0.4.4: catalog
+  packaging — `requires_hermes: ">=0.20.4"` in `plugin.yaml` and a plugin
+  README for the catalog page, no code change).
 - Plugin contract ceiling: `PLUGIN_CHECKPOINT_API_MAX = 2` in
   `plugin/ctx_checkpoint/__init__.py` — the declared version is negotiated
   at runtime as `max(2, min(host, plugin))`, see
