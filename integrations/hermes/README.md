@@ -20,6 +20,18 @@ head → manifest → parts to recover exact wording and provenance. Secrets are
 redacted twice (Hermes' own `redact_sensitive_text` plus a conservative
 key/value + bearer-token pass) before anything leaves the process.
 
+**Listed in the Hermes plugin catalog** as
+[`ctx_checkpoint`](https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint)
+(community tier, category Memory, since 2026-10-25):
+
+```bash
+hermes plugins install ctx_checkpoint
+```
+
+The catalog page shows the plugin's own short README and links here as the
+entry's documentation. This page is the full integration guide: operating
+modes, the host contract, host probes, operator warnings and the recall path.
+
 ## Two operating modes
 
 | Mode | Host | Guarantee |
@@ -27,10 +39,11 @@ key/value + bearer-token pass) before anything leaves the process.
 | **best-effort** (start here) | any Hermes | checkpoint is attempted before compaction; a failure is logged and compaction proceeds (historical hook semantics, contract version 1) |
 | fail-closed | Hermes carrying the checkpoint contract (version 2; a version-3 host with the `tool_evidence` channel is detected at runtime, see [Runtime contract negotiation](#runtime-contract-negotiation)) | compaction is **blocked** unless a checkpoint-capable provider confirms the durable checkpoint; the uncompressed transcript is preserved |
 
-The plugin is a plain Hermes **user plugin** — install it into
-`$HERMES_HOME/plugins/` on a completely stock Hermes and it works today in
-best-effort mode (since upstream v2026.8.18, provider text is forwarded into
-the compaction summary).
+The plugin is a plain Hermes **user plugin** — it lives in
+`$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
+put it there, and works in best-effort mode on a completely stock Hermes
+≥ 0.20.4, the catalog entry's `requires_hermes` floor (since upstream
+v2026.8.18, provider text is forwarded into the compaction summary).
 
 The fail-closed gate is what makes it a real guarantee: a memory system you
 only *hope* ran is not a memory system. The host-side contract is **upstream**
@@ -65,7 +78,8 @@ fail-closed checkpoint contract.** It stays opt-in and provider-agnostic:
   `on_turn_complete()` or from a scheduler of its own — is **not yet** bound
   there: `compress()` is the one compaction verb the host can checkpoint, so
   such an engine never reaches the gate at all. The follow-up (branch
-  `feat/context-engine-compaction-authority`, PR pending) closes it with
+  `feat/context-engine-compaction-authority`, open upstream as
+  [#94983](https://github.com/NousResearch/hermes-agent/pull/94983)) closes it with
   `ContextEngine.compacts_outside_compress` plus the
   `engine_compacts_outside_compress()` resolver in `agent/context_engine.py`,
   an init refuse (`BLOCKED_MISSING_PREREQUISITE`) in `agent/agent_init.py`,
@@ -78,14 +92,28 @@ Hermes, and the contract without this plugin behaves like stock Hermes.
 
 ## Install (plugin, both modes)
 
-From the [Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins)
-(the entry pins an exact commit of this repository):
+**From the Hermes plugin catalog** (recommended) — entry
+[`ctx_checkpoint`](https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint),
+added upstream in
+[NousResearch/hermes-agent#144212](https://github.com/NousResearch/hermes-agent/pull/144212)
+as `plugin-catalog/ctx_checkpoint.yaml`:
 
 ```bash
 hermes plugins install ctx_checkpoint
+hermes plugins update ctx_checkpoint    # later: follow the current catalog pin
 ```
 
-Or from a checkout of this repository, with the host probes below:
+The entry pins an exact commit of this repository — currently `98749f3`,
+plugin 0.4.4 — and Hermes enforces its `requires_hermes: ">=0.20.4"`. Changes
+here reach catalog users only through a reviewed re-pin PR upstream that bumps
+the entry's `sha` and `version`; `hermes plugins update` then moves to the new
+pin. The catalog install does **not** probe the host: run the probes under
+[Fail-closed host](#fail-closed-host-stock-hermes-no-patches), or
+`scripts/install.sh --dry-run --hermes-src <hermes-checkout>`, which reports
+mode and engine binding without writing anything.
+
+**From a checkout of this repository** — for code newer than the catalog pin,
+or a Hermes without catalog access — with the host probes below:
 
 ```bash
 scripts/install.sh                      # auto-detects the Hermes home
@@ -97,6 +125,13 @@ The installer copies `plugin/ctx_checkpoint/` to
 which survives image updates), probes the host for the fail-closed contract
 and the context-engine binding, and prints the config steps. It never edits `config.yaml` and never restarts
 anything.
+
+Use one install path per Hermes home. `hermes plugins install` refuses an
+existing `plugins/ctx_checkpoint/` ("already exists"), and `install.sh` moves
+any existing install — a catalog one included — aside to
+`ctx_checkpoint.bak-<timestamp>`. To move a manual install onto the catalog,
+remove the copied directory first, then run `hermes plugins install
+ctx_checkpoint`.
 
 Configuration reference (all under `memory.ctx_checkpoint`):
 
@@ -114,8 +149,9 @@ through Hermes' own MCP dispatch, so any ctx reachable as an MCP server works
 ## Fail-closed host (stock Hermes, no patches)
 
 Any Hermes carrying the merge already has the contract: any release cut after
-2026-08-25 (`v2026.9.7` onward; verified on `v0.22.4`, 2026-10-22), or `main`
-at/after `1ee524f77d`. The last tag *without* it is `v2026.8.19`.
+2026-08-25 (`v0.21.1` / `v2026.9.7` onward — the catalog page's "Hermes
+0.21.1+"; verified on `v0.22.4`, 2026-10-22), or `main` at/after
+`1ee524f77d`. The last tag *without* it is `v2026.8.19`.
 
 Probe the host you are about to enable the gate on:
 
@@ -137,7 +173,9 @@ grep -c compacts_outside_compress agent/context_engine.py
 ```
 
 `scripts/install.sh --hermes-src <hermes-checkout>` runs both probes and
-reports the resulting mode and engine binding. Then enable the gate:
+reports the resulting mode and engine binding; with `--dry-run` it only
+probes and copies nothing, which is the way to probe next to a catalog
+install. Then enable the gate:
 
 ```yaml
 compression:
@@ -245,6 +283,9 @@ and manifest are deliberately small so routine recall stays cheap.
   `checkpoint_api_version` / `tool_index_status` metadata; 0.4.4: catalog
   packaging — `requires_hermes: ">=0.20.4"` in `plugin.yaml` and a plugin
   README for the catalog page, no code change).
+- Catalog pin: 0.4.4 at `98749f3` (`plugin-catalog/ctx_checkpoint.yaml`
+  upstream, listed 2026-10-25). `VERSION` in this repository can run ahead of
+  the pin until the next re-pin PR lands.
 - Plugin contract ceiling: `PLUGIN_CHECKPOINT_API_MAX = 2` in
   `plugin/ctx_checkpoint/__init__.py` — the declared version is negotiated
   at runtime as `max(2, min(host, plugin))`, see
@@ -252,9 +293,10 @@ and manifest are deliberately small so routine recall stays cheap.
 - Host contract: `PRE_COMPRESS_CHECKPOINT_API_VERSION` in the Hermes host —
   v2 is fail-closed, v1 is historical best-effort; v3 (upstream follow-up,
   `tool_evidence` channel) is detected by the probe but not yet rendered.
-- Context-engine binding: follow-up **pending upstream** (branch
-  `feat/context-engine-compaction-authority`, on top of `main`; PR not yet
-  opened). Probe a host with
+- Context-engine binding: follow-up **open upstream** as
+  [#94983](https://github.com/NousResearch/hermes-agent/pull/94983) (branch
+  `feat/context-engine-compaction-authority`); not on `main` as of
+  2026-10-26 (`c714c42`). Probe a host with
   `grep -c compacts_outside_compress agent/context_engine.py` — `0` means the
   host predates it.
 - Retired patch series: `patches/archive/`, last entry `v2026.8.19`.
