@@ -99,12 +99,31 @@ added upstream in
 as `plugin-catalog/ctx_checkpoint.yaml`:
 
 ```bash
-hermes plugins install ctx_checkpoint
+hermes plugins install ctx_checkpoint   # answer y: use it as the memory provider
+hermes memory setup ctx_checkpoint      # asks for ctx URL and API key
 hermes plugins update ctx_checkpoint    # later: follow the current catalog pin
 ```
 
+Setup (plugin 0.5.0 and later) needs no YAML editing. In Hermes Desktop or the
+Dashboard the memory settings show the same fields as a form
+(`get_config_schema()` / `save_config()`); `hermes memory setup ctx_checkpoint`
+asks for them on the terminal (`post_setup()`). Only the ctx server URL and the
+API key need an answer. The key lands in Hermes' `.env` as `CTX_API_KEY`, and
+the `mcp_servers` entry references it as `Authorization: Bearer
+${CTX_API_KEY}`. Setup targets the entry named by `memory.ctx_checkpoint.mcp_server`
+(default `ctx`, changed in `config.yaml` only) and keeps an existing one: it
+re-enables it, updates the `url` of an HTTP entry, and asks for the key only
+when it manages that entry's auth itself — no `headers`/`auth` yet, or headers
+referencing `${CTX_API_KEY}`. Entries with their own `headers` or `auth`, and
+stdio `command` entries, keep their transport and authentication. Setup writes
+only `memory.ctx_checkpoint`, that server entry and (terminal setup)
+`memory.provider`, merged into `config.yaml` as it is on disk at write time.
+It reads the file without `${VAR}` expansion, so no secret behind a template
+ends up in `config.yaml`. A package-managed install refuses setup. Setup
+never writes compaction settings.
+
 The entry pins an exact commit of this repository — currently `98749f3`,
-plugin 0.4.4 — and Hermes enforces its `requires_hermes: ">=0.20.4"`. Changes
+plugin 0.4.4, with a re-pin to 0.5.0 pending upstream — and Hermes enforces its `requires_hermes: ">=0.20.4"`. Changes
 here reach catalog users only through a reviewed re-pin PR upstream that bumps
 the entry's `sha` and `version`; `hermes plugins update` then moves to the new
 pin. The catalog install does **not** probe the host: run the probes under
@@ -140,11 +159,45 @@ Configuration reference (all under `memory.ctx_checkpoint`):
 | `mcp_server` | `ctx` | name of the ctx MCP server entry in `mcp_servers` |
 | `category` | `compaction-checkpoints` | ctx category for checkpoint blocks |
 | `chunk_chars` | `36000` | source part size (clamped to 1k..40k) |
-| `sensitivity` | `internal` | ctx sensitivity for stored blocks |
+| `sensitivity` | `internal` | ctx sensitivity for stored blocks (`public`, `internal`, `personal`, `credentials`) |
 
-Activate with `memory.provider: ctx_checkpoint`. The provider talks to ctx
-through Hermes' own MCP dispatch, so any ctx reachable as an MCP server works
-— no extra credentials inside the plugin.
+Activate with `memory.provider: ctx_checkpoint` (terminal setup and the
+installer prompt set it). The provider talks to ctx through Hermes' own MCP
+dispatch, so any ctx reachable as an MCP server works — no extra credentials
+inside the plugin. It counts as available only while that `mcp_servers` entry
+exists and is not disabled.
+
+## Long contexts (1M) and compaction thresholds
+
+The plugin leaves every compaction setting at Hermes' defaults, and those work
+for 1M-token models:
+
+- **Compressor:** `compression.threshold` defaults to 0.50 of the window on
+  models with 512K or more, and is floored at 0.75 below 512K.
+- **Gateway session hygiene:** compacts between turns at a fixed 0.85 of the
+  window (`gateway/run_turn_hygiene.py`, not configurable) and holds the next
+  turn for at most `compression.hygiene_max_turn_hold_seconds` (10 s). After
+  that the turn runs on the uncompressed transcript and the summary lands one
+  turn late. The short hold is deliberate: a longer one can trip transport
+  idle timeouts, and 30 s without summary progress cancels the hygiene
+  compaction instead.
+
+With a threshold at or above 0.85, hygiene compacts before the compressor
+and that short hold becomes the normal path. On a host without the
+compaction-lock follow-up, the compressor's own attempts during such a turn
+find the lock held and send the request anyway, up to and past 100 % of the
+window. The plugin logs a warning once per process when
+`compression.threshold >= 0.85`.
+
+A compaction does not get slower with the window. Hermes caps the summary at
+`min(5 % of the window, 10,000)` tokens and the summarizer input at 160,000
+characters, sampling across the window above that. Measured on a 272K window
+with gpt-6-sol (2026-10-25/26, six compactions): 16k–49k summary input
+tokens, 7.3k–9.9k output tokens, 54–78 s, output at a steady 115–136 tokens/s.
+The time goes into writing the summary. At 1M the same caps make the summary
+much lossier, and the checkpoint is what keeps the exact wording. Its part
+count follows the direct user/assistant text only: at about 250k tokens of
+context that was one part, stored in 1–5 s.
 
 ## Fail-closed host (stock Hermes, no patches)
 
@@ -241,11 +294,13 @@ compaction.
 
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (26 tests on `v0.22.4`, 2026-10)
-and provider-side here in `plugin/ctx_checkpoint/tests/` (32 tests, mocked
+and provider-side here in `plugin/ctx_checkpoint/tests/` (67 tests, mocked
 MCP dispatch — no live ctx needed): `test_provider_contract.py` (9) covers
 the checkpoint chain, `test_contract_negotiation.py` (23) the runtime
 negotiation against the real host on `PYTHONPATH` plus a monkeypatched v3
-host.
+host, `test_setup.py` (35) the setup surfaces, each test against its own
+temporary `HERMES_HOME`, including a round trip through the host's Dashboard
+form writer (skipped on hosts older than `v2026.9.7`, which lack it).
 
 The pre-merge patch series that used to supply the contract is retired and
 kept for history under `patches/archive/` — see its README before touching
@@ -282,10 +337,15 @@ and manifest are deliberately small so routine recall stays cheap.
   negotiation, `tool_evidence` keyword tolerance, `host_checkpoint_api` /
   `checkpoint_api_version` / `tool_index_status` metadata; 0.4.4: catalog
   packaging — `requires_hermes: ">=0.20.4"` in `plugin.yaml` and a plugin
-  README for the catalog page, no code change).
+  README for the catalog page, no code change; 0.5.0: setup through Hermes'
+  own surfaces — `get_config_schema()` / `save_config()` for the Desktop and
+  Dashboard form, `post_setup()` for `hermes memory setup ctx_checkpoint` —,
+  a warning when `compression.threshold >= 0.85`, and `is_available()` now
+  requires the ctx `mcp_servers` entry to exist; before 0.5.0 a missing entry
+  counted as available).
 - Catalog pin: 0.4.4 at `98749f3` (`plugin-catalog/ctx_checkpoint.yaml`
-  upstream, listed 2026-10-25). `VERSION` in this repository can run ahead of
-  the pin until the next re-pin PR lands.
+  upstream, listed 2026-10-25); re-pin to 0.5.0 pending. `VERSION` in this
+  repository can run ahead of the pin until the next re-pin PR lands.
 - Plugin contract ceiling: `PLUGIN_CHECKPOINT_API_MAX = 2` in
   `plugin/ctx_checkpoint/__init__.py` — the declared version is negotiated
   at runtime as `max(2, min(host, plugin))`, see

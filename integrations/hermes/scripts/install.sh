@@ -127,6 +127,9 @@ cat <<'NEXT'
 
 Next steps (manual, operator-owned):
 
+Steps 1 and 2 are what `hermes memory setup ctx_checkpoint` does
+interactively (plugin 0.5.0+); the manual equivalent:
+
 1. Make sure the ctx MCP server is configured in config.yaml:
      mcp_servers:
        ctx:

@@ -22,15 +22,28 @@ Compaction checkpoint head <root-session>     ← stable title, upserted per ses
 hermes plugins install ctx_checkpoint
 ```
 
-The plugin talks to ctx through Hermes' own MCP dispatch, so it needs a ctx MCP
-server entry in `config.yaml` and holds no credentials of its own:
+Answer **y** when the installer asks to use it as the memory provider. Then
+set it up — no YAML editing needed:
+
+- **Hermes Desktop / Dashboard:** open the memory settings, pick
+  `ctx_checkpoint` and fill in the form.
+- **Terminal:** `hermes memory setup ctx_checkpoint`
+
+Setup asks for your ctx server URL and API key. Everything else has a working
+default. The key goes into Hermes' `.env` as `CTX_API_KEY`; `config.yaml` only
+references it. Setting up a ctx server is covered in the
+[ctx README](https://github.com/GottZ/ctx#readme).
+
+The plugin talks to ctx through Hermes' own MCP dispatch and holds no
+credentials of its own. Setup writes the same configuration you could also
+write by hand:
 
 ```yaml
 mcp_servers:
   ctx:
     url: https://your-ctx-host.example/mcp
     headers:
-      X-Context-Key: ${CTX_KEY}
+      Authorization: Bearer ${CTX_API_KEY}
 
 memory:
   provider: ctx_checkpoint
@@ -38,12 +51,29 @@ memory:
     mcp_server: ctx                  # name of the entry above (default: ctx)
     category: compaction-checkpoints # ctx category for checkpoint blocks
     chunk_chars: 36000               # source part size, clamped to 1k..40k
-    sensitivity: internal            # ctx sensitivity for stored blocks
+    sensitivity: internal            # public | internal | personal | credentials
 ```
 
 Every key under `memory.ctx_checkpoint` is optional; the values shown are the
-defaults. Setting up a ctx server is covered in the
-[ctx README](https://github.com/GottZ/ctx#readme).
+defaults. An existing `mcp_servers.ctx` entry is kept: setup updates its URL
+and re-enables it, but asks for a key only when it manages that entry's
+authentication itself (no auth yet, or `Bearer ${CTX_API_KEY}` from an earlier
+setup). An entry with its own `headers` or `auth`, or a stdio `command` entry,
+keeps them untouched. Setup always targets the entry named by `mcp_server`;
+change that name in `config.yaml` if your ctx entry is called differently.
+
+## Long contexts (1M)
+
+The defaults work unchanged for 1M-token models. Compaction thresholds stay
+Hermes' own: compression at 50 % of the window on models with 512K or more,
+75 % below. A compaction takes about as long at 1M as at 272K (around a
+minute with gpt-6-sol), because Hermes caps the summary at 10,000 tokens and
+writing it is what takes the time. At 1M that summary is far lossier than at
+272K — the checkpoint keeps the exact wording of what it dropped.
+
+Keep `compression.threshold` below 0.85. At 0.85 the gateway's session
+hygiene, which waits only 10 seconds before a turn continues, compacts before
+the compressor does. The plugin logs a warning when the threshold is that high.
 
 ## Two operating modes
 
@@ -76,8 +106,13 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
   Secrets are redacted twice before anything leaves the process: Hermes'
   `redact_sensitive_text` plus a conservative key/value and bearer-token pass.
 - **Reads:** its own section of the Hermes config (`memory.ctx_checkpoint`), the
-  named `mcp_servers` entry (only to check it exists and is enabled) and the
-  transcript Hermes passes to `on_pre_compress`. Nothing outside that.
+  named `mcp_servers` entry (to check it exists and is enabled, and to prefill
+  setup), `compression.threshold` (for the warning above) and the transcript
+  Hermes passes to `on_pre_compress`. Nothing outside that.
+- **Writes, only when you run setup:** `memory.ctx_checkpoint`, the named
+  `mcp_servers` entry and — in terminal setup — `memory.provider` in
+  `config.yaml`, merged into the file so other sections stay as they are; the
+  API key goes to `.env` as `CTX_API_KEY`. It never writes compaction settings.
 - **No** shell commands, background processes, stored credentials or
   self-updating code.
 - **Core modules used:** `agent.memory_provider`, `agent.redact` (redaction),
@@ -86,8 +121,9 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
 
 ## Tests
 
-32 contract tests (mocked MCP dispatch, no live ctx needed) against the real host
-on `PYTHONPATH`:
+67 tests (mocked MCP dispatch, no live ctx needed) against the real host on
+`PYTHONPATH`: the checkpoint contract, its runtime negotiation and the setup
+surfaces (each setup test writes into its own temporary `HERMES_HOME`):
 
 ```bash
 PYTHONPATH=/path/to/hermes-agent:. python -m pytest ctx_checkpoint/tests
