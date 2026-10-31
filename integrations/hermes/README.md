@@ -392,9 +392,11 @@ and manifest are deliberately small so routine recall stays cheap.
   user/assistant text returns an empty receipt instead of blocking a required
   compaction, and the chain write runs inside `budget_s` (default 60 s) with
   2/4/8 s backoff on rate-limited stores and a `max_parts` cap (default 80)
-  that refuses before writing anything; 0.5.2: block ids are read from the
-  `(id: …)` group of ctx's answer only — before, the first UUID anywhere in it
-  won, and a UUID-shaped session id (the API server lets clients choose one)
+  that refuses before writing anything; 0.5.2: a block id is taken from a
+  structured `id` field when the answer carries a valid one, otherwise from
+  the `(id: …)` group of ctx's answer text, never from any other UUID in it —
+  before, the first UUID anywhere in the answer won, and a UUID-shaped session
+  id (the API server lets clients choose one)
   became the id of every part, manifest and head while the checkpoint reported
   success —, parts are cut at ctx's 50 KB content cap in UTF-8 bytes as well as
   at `chunk_chars` (Cyrillic or CJK transcripts used to fail every checkpoint),
