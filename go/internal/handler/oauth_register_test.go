@@ -240,3 +240,30 @@ func TestWarnIfOpenDCR(t *testing.T) {
 		})
 	}
 }
+
+// TestDCRRegister_ClientNameStripped: spec() drops format (Cf) and control
+// runes from client_name BEFORE the length cap (§F-§6), so the stored label
+// is clean and invisible padding cannot push the visible name past the
+// 200-rune column width.
+func TestDCRRegister_ClientNameStripped(t *testing.T) {
+	for _, tc := range []struct {
+		name, clientName, want string
+	}{
+		{"BidiZeroWidthControl", "A\u202eb\u200bc\u0000d\u2066", "Abcd"},
+		{"PaddingBeforeCap", strings.Repeat("\u200b", 250) + "visible", "visible"},
+		{"PlainUnchanged", "Claude", "Claude"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, errCode, _ := (&dcrRequest{
+				RedirectURIs: []string{"https://client.example/cb"},
+				ClientName:   tc.clientName,
+			}).spec()
+			if errCode != "" {
+				t.Fatalf("spec: %s", errCode)
+			}
+			if spec.Label != tc.want {
+				t.Errorf("label = %q, want %q", spec.Label, tc.want)
+			}
+		})
+	}
+}

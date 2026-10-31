@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -57,6 +58,25 @@ var dcrGrantTypes = map[string]bool{
 // oauthClientLabelMax mirrors context_oauth_clients.label VARCHAR(200) —
 // client_name is truncated to it (design 02 §4b: cap, never 500/22001).
 const oauthClientLabelMax = 200
+
+// sanitizeClientName drops Unicode format characters (category Cf: bidi
+// overrides, isolates and marks, zero-width space and joiners, BOM, tag
+// characters) and control characters (Cc) from a client name (§F-§6).
+// Under open registration the name is attacker-chosen free text, and
+// html/template escapes markup but passes these runes through: invisible
+// in the consent screen, they could reorder or hide what the user reads.
+// Applied twice: in spec() before the length cap (the stored label is
+// clean) and when the consent page renders (covers admin- and CLI-made
+// rows and rows stored before this filter). Cost: an emoji ZWJ sequence
+// falls apart into its parts — acceptable for a client label.
+func sanitizeClientName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
 
 // Register handles POST /register — RFC 7591 Dynamic Client Registration.
 func (h *OAuthHandler) Register(w http.ResponseWriter, r *http.Request) {
@@ -207,9 +227,12 @@ func (req *dcrRequest) spec() (spec store.RegisterOAuthClientSpec, errCode, errD
 		}
 	}
 
-	// client_name → label, truncated to the column width (rune-safe: the
-	// VARCHAR limit counts characters, and a byte cut could split a rune).
-	label := req.ClientName
+	// client_name → label: format and control runes dropped first
+	// (sanitizeClientName, §F-§6 — before the cap, so invisible padding
+	// cannot crowd out the visible name), then truncated to the column
+	// width (rune-safe: the VARCHAR limit counts characters, and a byte cut
+	// could split a rune).
+	label := sanitizeClientName(req.ClientName)
 	if runes := []rune(label); len(runes) > oauthClientLabelMax {
 		label = string(runes[:oauthClientLabelMax])
 	}

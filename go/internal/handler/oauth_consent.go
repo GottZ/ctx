@@ -12,8 +12,9 @@
 //     rendered; a failure is an error page WITHOUT a key field (OAuth 2.1
 //     §4.1.2.1: an invalid client or redirect is never redirected to and
 //     never offered the credential prompt);
-//   - the form shows the client's name, its client_id and the redirect
-//     ORIGIN (scheme + host, path shortened) — the address the code goes to;
+//   - the form shows the client's name (format and control runes dropped,
+//     bidi-isolated), its client_id and the redirect ORIGIN (scheme + host,
+//     path shortened) — the address the code goes to;
 //   - a client that registered itself (DCR without an acting admin key)
 //     carries an explicit warning, unless the redirect this request asks
 //     for is an operator-vetted callback (§F-§6, see newConsentView);
@@ -183,9 +184,11 @@ type consentView struct {
 // newConsentView derives the display values from the validated client and
 // redirect. A host with non-ASCII runes is shown in escaped form (\uXXXX)
 // and flagged: a Unicode look-alike host must never render as the domain it
-// imitates.
+// imitates. The client name loses its format and control runes
+// (sanitizeClientName, §F-§6) and is bidi-isolated in the template (<bdi>),
+// so it cannot reorder or hide the text around it.
 func newConsentView(client *store.OAuthClient, redirect *url.URL, p authorizeParams, errMsg string) consentView {
-	name := strings.TrimSpace(client.Label)
+	name := strings.TrimSpace(sanitizeClientName(client.Label))
 	if name == "" {
 		name = "unnamed client"
 	}
@@ -241,7 +244,7 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!DOCTYPE html>
 <h1>ctx — Authorize MCP Access</h1>
 <p>An application is asking for access to ctx with your API key.</p>
 <dl class="client">
-  <dt>Application</dt><dd><strong>{{.ClientName}}</strong></dd>
+  <dt>Application</dt><dd><strong><bdi>{{.ClientName}}</bdi></strong></dd>
   <dt>Client ID</dt><dd class="mono">{{.ClientID}}</dd>
   <dt>You will be sent back to</dt><dd><span class="origin">{{.RedirectOrigin}}</span><span class="mono">{{.RedirectPath}}</span></dd>
 </dl>

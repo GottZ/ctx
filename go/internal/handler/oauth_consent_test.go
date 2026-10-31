@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -67,6 +68,41 @@ func TestConsentSelfRegWarning_RequestedRedirect(t *testing.T) {
 			if got := strings.Contains(body, consentSelfRegMarker); got != tc.wantWarn {
 				t.Errorf("warning shown = %v, want %v (client source %q, redirect %q)",
 					got, tc.wantWarn, tc.client.RegistrationSource, tc.redirect)
+			}
+		})
+	}
+}
+
+// TestConsentClientNameStripsFormatAndControl pins the client_name hygiene
+// of §F-§6: the name is attacker-chosen free text under open registration,
+// and html/template escapes markup but passes Unicode format characters
+// (bidi overrides and isolates, zero-width runes) and control characters
+// through. The consent page drops both classes from the name and isolates
+// it in <bdi>, so the name cannot reorder or hide text around it. The
+// render side covers every row alike — DCR, admin, CLI-created and rows
+// stored before the registration-side filter existed.
+func TestConsentClientNameStripsFormatAndControl(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		label string
+		want  string
+	}{
+		{"BidiAndZeroWidth", "Claude\u202e AI\u200b\u2066x\u2069", "Claude AIx"},
+		{"ControlRunes", "ctx\u0007 \u0085client\u007f", "ctx client"},
+		{"TagAndBOM", "\ufeffName\U000e0041\u061c", "Name"},
+		{"OnlyInvisible", "\u200b\u202e\u2066", "unnamed client"},
+		{"PlainUnchanged", "Claude Desktop — Prod", "Claude Desktop — Prod"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &store.OAuthClient{ClientID: "ctx_cf", Label: tc.label, RegistrationSource: "dcr"}
+			body := renderConsentPage(t, client, "https://evil.example/cb")
+			for _, r := range body {
+				if unicode.Is(unicode.Cf, r) {
+					t.Fatalf("rendered page carries format rune %U", r)
+				}
+			}
+			if want := "<strong><bdi>" + tc.want + "</bdi></strong>"; !strings.Contains(body, want) {
+				t.Errorf("rendered name: want %q in page", want)
 			}
 		})
 	}
