@@ -98,8 +98,12 @@ explicit stores so provenance tags stay consistent (`source:hermes`, `profile:<n
 
 - **Checkpoint**: before every compaction the direct user/assistant transcript is archived
   (head → manifest → parts); the compaction summary carries the ids, so exact wording is
-  recoverable later. Retrieve it with `search` in category `compaction-checkpoints`
-  by `Compaction checkpoint head <root-session>`, then `get` the head and its manifest.
+  recoverable later. Retrieve it with `ctx_search` in category `compaction-checkpoints`
+  by `Compaction checkpoint head <root-session>` and `types_exclude: []` (checkpoint
+  blocks are excluded by default), then `get` the head and its manifest. A root session
+  id outside `[A-Za-z0-9_.-]` or longer than 48 characters appears in the title
+  sanitized (`_` for other characters), cut and with an 8-character hash suffix —
+  search by its sanitized start; the full id is in the head's `root_session_id`.
 - **Recall** (memory features on): relevant blocks are injected before each turn, labelled
   when untrusted. Use them silently when relevant; do not force them into the answer.
 - **Facts and digests** (memory features on): salient closing statements of compacted

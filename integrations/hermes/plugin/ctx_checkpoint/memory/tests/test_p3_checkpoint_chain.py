@@ -150,7 +150,8 @@ def test_provider_publishes_versioned_stable_head_with_bounded_frame(factory):
 
     assert provider.pre_compress_checkpoint_api_version == 2
     assert _names(c.calls) == ["search", "store", "store", "store"]
-    assert c.calls[3][1]["title"] == "Compaction checkpoint head root_session-a"
+    # "/" is sanitized away, so the title carries a hash of the full root id (0.6.1).
+    assert c.calls[3][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
     assert manifest_id in c.calls[3][1]["content"]
     assert source_id in c.calls[2][1]["content"]
     assert head_id in frame and manifest_id in frame
@@ -565,6 +566,22 @@ def test_hard_cut_when_single_message_exceeds_chunk():
     assert _MODULE.clamp_chunk_chars(10) == 1_000 and _MODULE.clamp_chunk_chars(10**6) == 40_000
 
 
+def test_forced_cuts_keep_every_character():
+    # 0.6.1: a hard cut that lands next to a space used to strip it; the parts must
+    # concatenate back to the exact transcript, at the byte limit and at the char limit.
+    head = "### Message 1 — user\n\n"
+    unit = "漢" * 9 + " "  # 28 UTF-8 bytes, 10 characters, ends in a space
+    text = head + unit * 3_000
+    budget = len(head.encode("utf-8")) + 28 * 1_000  # first byte cut lands right after a space
+    chunks = _MODULE.split_chunks(text, 40_000, budget)
+    assert len(chunks) > 1 and "".join(chunks) == text
+    assert all(len(ch.encode("utf-8")) <= budget for ch in chunks)
+
+    ascii_text = head + ("a" * 9 + " ") * 500
+    chunks = _MODULE.split_chunks(ascii_text, 1_000, _MODULE.CTX_CONTENT_MAX_BYTES)
+    assert len(chunks) > 1 and "".join(chunks) == ascii_text
+
+
 def test_golden_part_format_matches_distiller_parser(factory):
     p, c = factory("sess-golden", agent_context="primary")
     p.on_pre_compress(
@@ -868,6 +885,7 @@ def test_wire_payload_of_real_client(monkeypatch):
     assert sent[0]["body"] == {
         "query": "Compaction checkpoint head r1",
         "category": CHAIN_CAT,
+        "tags": ["checkpoint-head"],  # 0.6.1: only heads, parts share the checkpoint type
         "types": ["checkpoint"],
         "limit": 10,
     }
@@ -898,3 +916,62 @@ def test_config_defaults_and_coercion(tmp_path):
     cfg = load_ctx_config(str(tmp_path))
     assert cfg["checkpoint_chain"] is False and cfg["checkpoint_sensitivity"] == "personal"
     assert cfg["checkpoint_chunk_chars"] == 40_000 and cfg["checkpoint_max_parts"] == 95
+
+
+# =============================================================================
+# 0.6.1 — byte-capped parts, head tag filter, collision-free head titles
+# =============================================================================
+
+# Head titles are what existing chains are found by: ordinary ids must keep their
+# title, ids that sanitizing or the 48-character cut changes get a stable hash suffix.
+HEAD_TITLE_GOLDEN = {
+    "20261031_120000_abcdef": "20261031_120000_abcdef",
+    "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c": "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c",
+    "root/session-a": "root_session-a-a0af5788",
+    "team/alice:1": "team_alice_1-8e207def",
+    "team:alice/1": "team_alice_1-7054b256",
+    "x" * 60: "x" * 39 + "-42f2d973",
+    "über-sitzung": "_ber-sitzung-a42b9cb4",
+}
+
+
+def test_head_title_golden_vectors():
+    for root, token in HEAD_TITLE_GOLDEN.items():
+        assert _MODULE._short_root(root) == token, root
+        assert _MODULE.head_title_for(root) == f"Compaction checkpoint head {token}"
+        assert len(token) <= 48 and re.fullmatch(r"[A-Za-z0-9_.-]+", token)
+
+
+def test_multibyte_parts_stay_under_ctx_byte_cap(factory):
+    for char, per_message in (("ж", 30_000), ("漢", 20_000), ("🙂", 15_000)):
+        p, c = factory(f"sess-bytes-{ord(char)}", config={"checkpoint_chunk_chars": 40_000}, agent_context="primary")
+        msgs = [
+            {"role": "user", "content": (char * 99 + " ") * (per_message // 100)},
+            {"role": "assistant", "content": (char * 49 + "\n") * (per_message // 50)},
+        ]
+
+        p.on_pre_compress(msgs)
+
+        parts = [a["content"] for a in _stores(c.calls) if " part " in a["title"]]
+        assert len(parts) > 1, char
+        sizes = [len(body.encode("utf-8")) for body in parts]
+        assert max(sizes) <= _MODULE.CTX_CONTENT_MAX_BYTES, (char, sizes)
+        # every character of the transcript lands in exactly one part
+        assert sum(body.count(char) for body in parts) == sum(m["content"].count(char) for m in msgs)
+
+
+def test_ascii_parts_keep_the_character_limit():
+    chunks = _MODULE.split_chunks("x" * 5_000, 1_000, _MODULE.CTX_CONTENT_MAX_BYTES)
+    assert [len(chunk) for chunk in chunks] == [1_000] * 5
+
+
+def test_head_search_is_narrowed_to_checkpoint_heads(factory):
+    p, c = factory("20261031_120000_abcdef", agent_context="primary")
+    p.on_pre_compress([{"role": "user", "content": "evidence"}])
+
+    name, args = c.calls[0]
+    assert name == "search"
+    assert args["query"] == "Compaction checkpoint head 20261031_120000_abcdef"
+    assert args["tags"] == ["checkpoint-head"] and args["types"] == ["checkpoint"]
+    head = _stores(c.calls)[-1]
+    assert "checkpoint-head" in head["tags"]  # the tag the search relies on survives merge_tags

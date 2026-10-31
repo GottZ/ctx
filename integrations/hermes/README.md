@@ -178,7 +178,9 @@ anything.
 Use one install path per Hermes home. `hermes plugins install` refuses an
 existing `plugins/ctx_checkpoint/` ("already exists"), and `install.sh` moves
 any existing install — a catalog one included — aside to
-`ctx_checkpoint.bak-<timestamp>`. To move a manual install onto the catalog,
+`.ctx_checkpoint.bak-<timestamp>` (dot-prefixed since 0.6.1: Hermes lists every
+other directory under `plugins/` as a memory provider of its own, so the installer
+also names any old `ctx_checkpoint.bak-*` it finds). To move a manual install onto the catalog,
 remove the copied directory first, then run `hermes plugins install
 ctx_checkpoint`.
 
@@ -188,7 +190,7 @@ Configuration reference (all under `memory.ctx_checkpoint`):
 |-----|---------|---------|
 | `mcp_server` | `ctx` | name of the ctx MCP server entry in `mcp_servers` |
 | `category` | `compaction-checkpoints` | ctx category for checkpoint blocks |
-| `chunk_chars` | `36000` | source part size (clamped to 1k..40k) |
+| `chunk_chars` | `36000` | source part size (clamped to 1k..40k); a part also stays under ctx's 50 KB content cap in UTF-8 bytes |
 | `sensitivity` | `internal` | ctx sensitivity for stored blocks (`public`, `internal`, `personal`, `credentials`) |
 
 Activate with `memory.provider: ctx_checkpoint` (terminal setup and the
@@ -324,8 +326,8 @@ compaction.
 
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (26 tests on `v0.22.4`, 2026-10)
-and provider-side here in `plugin/ctx_checkpoint/tests/` (67 tests, mocked
-MCP dispatch — no live ctx needed): `test_provider_contract.py` (9) covers
+and provider-side here in `plugin/ctx_checkpoint/tests/` (84 tests, mocked
+MCP dispatch — no live ctx needed): `test_provider_contract.py` (26) covers
 the checkpoint chain, `test_contract_negotiation.py` (23) the runtime
 negotiation against the real host on `PYTHONPATH` plus a monkeypatched v3
 host, `test_setup.py` (35) the setup surfaces, each test against its own
@@ -411,6 +413,15 @@ and manifest are deliberately small so routine recall stays cheap.
   `ruff --select S` gate). The chain is written in every agent context; CJK
   code-switch rejection is opt-in; the untrusted label is English. Engine
   history: `plugin/ctx_checkpoint/memory/CHANGELOG.md`.
+- 0.6.1: checkpoint-chain fixes (GottZ/ctx#51) — parts stay under ctx's 50 KB
+  content cap in UTF-8 bytes (Cyrillic/CJK transcripts failed every checkpoint),
+  the head search filters on the `checkpoint-head` tag (the MCP transport drops
+  `types`), root ids that sanitizing or the 48-character cut changes get a hash
+  suffix in the head title (ordinary ids keep theirs), MCP store answers yield a
+  block id only from a structured `id` or the `(id: …)` group, `confirm_writes`
+  keys are refused by name instead of the never-reached auto-confirm, the chain
+  writer's per-call budget bounds MCP dispatches too, and `install.sh` writes
+  dot-prefixed backups.
 
 ## Licensing
 
