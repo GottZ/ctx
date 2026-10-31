@@ -138,16 +138,19 @@ func RegisterOAuthClient(ctx context.Context, pool *pgxpool.Pool, spec RegisterO
 // the lookup 03 uses at /authorize + /token. Inactive clients report
 // found=false (fail-closed): the WHERE clause carries `active = true`, so a
 // deactivated row is indistinguishable from a missing one for every caller.
+// CreatedBy is nil for an open-mode DCR registration (and for a row whose
+// creating key was hard-deleted, ON DELETE SET NULL) — the consent screen
+// reads it to tell a self-registered client from an operator-made one.
 func GetOAuthClientByClientID(ctx context.Context, pool *pgxpool.Pool, clientID string) (*OAuthClient, bool, error) {
 	var client OAuthClient
 	err := pool.QueryRow(ctx,
-		`SELECT id, client_id, label, active, created_at,
+		`SELECT id, client_id, label, active, created_by::text, created_at,
 		        redirect_uris, scopes, grant_types, response_types,
 		        token_endpoint_auth_method, registration_source, updated_at
 		FROM context_oauth_clients
 		WHERE client_id = $1 AND active = true`,
 		clientID,
-	).Scan(&client.ID, &client.ClientID, &client.Label, &client.Active, &client.CreatedAt,
+	).Scan(&client.ID, &client.ClientID, &client.Label, &client.Active, &client.CreatedBy, &client.CreatedAt,
 		&client.RedirectURIs, &client.Scopes, &client.GrantTypes, &client.ResponseTypes,
 		&client.TokenEndpointAuthMethod, &client.RegistrationSource, &client.UpdatedAt)
 	if err != nil {

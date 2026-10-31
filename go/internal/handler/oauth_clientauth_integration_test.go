@@ -93,6 +93,7 @@ func TestOAuthClientAuthS6_Integration(t *testing.T) {
 			"redirect_uri":          {redirectURI},
 			"code_challenge":        {challenge},
 			"code_challenge_method": {"S256"},
+			"consent":               {consentFieldValue}, // K7: explicit consent is checked server-side
 		}
 	}
 	tokenForm := func(clientID, code string, extra url.Values) url.Values {

@@ -1255,8 +1255,13 @@ func (h *ManageHandler) handleMCPClientCreate(w http.ResponseWriter, r *http.Req
 	client, secret, err := store.RegisterOAuthClient(r.Context(), h.pool, store.RegisterOAuthClientSpec{
 		Label:        data.Label,
 		RedirectURIs: data.RedirectURIs,
-		Source:       "admin",
-		CreatedBy:    ar.ApiKeyID,
+		// Both served grants, stated explicitly: the 097 default
+		// '{authorization_code}' predates refresh issuance. /token serves
+		// admin clients both grants either way (clientAllowsGrant); the row
+		// should say what the client actually gets.
+		GrantTypes: []string{"authorization_code", "refresh_token"},
+		Source:     "admin",
+		CreatedBy:  ar.ApiKeyID,
 	})
 	if err != nil {
 		slog.Error("manage: create oauth client failed", "error", err)

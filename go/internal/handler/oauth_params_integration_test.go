@@ -103,6 +103,7 @@ func TestOAuthParamsS5_Integration(t *testing.T) {
 			"redirect_uri":          {"https://claude.ai/api/mcp/auth_callback"},
 			"code_challenge":        {base64.RawURLEncoding.EncodeToString(chal[:])},
 			"code_challenge_method": {"S256"},
+			"consent":               {consentFieldValue}, // K7: explicit consent is checked server-side
 		}
 	}
 

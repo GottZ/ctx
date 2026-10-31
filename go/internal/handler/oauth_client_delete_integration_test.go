@@ -66,6 +66,7 @@ func TestOAuthClientDelete_Integration(t *testing.T) {
 		st, c := opAuthorize(t, oh, url.Values{
 			"api_key": {plainKey}, "client_id": {clientID}, "redirect_uri": {cb},
 			"code_challenge": {challenge}, "code_challenge_method": {"S256"},
+			"consent": {consentFieldValue}, // K7 (§6): explicit consent at POST /authorize
 		})
 		if st != http.StatusFound || c == "" {
 			t.Fatalf("authorize %s: got %d", clientID, st)

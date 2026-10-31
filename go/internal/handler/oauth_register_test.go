@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -170,5 +171,26 @@ func TestDCRRegister_BodyOverCap400(t *testing.T) {
 	rec := dcrPost(t, h, body)
 	if rec.Code != 400 && rec.Code != 413 {
 		t.Errorf("oversized body: status = %d, want 400 or 413", rec.Code)
+	}
+}
+
+// The DCR grant_types default covers both served grants (advisory §6
+// follow-up): /token enforces the registered set, so the RFC 7591 default
+// (authorization_code alone) would silently end the refresh of MCP clients
+// that omit the field. An explicit list is stored as given.
+func TestDCRRegister_GrantTypesDefault(t *testing.T) {
+	spec, errCode, _ := (&dcrRequest{RedirectURIs: []string{"https://client.example/cb"}}).spec()
+	if errCode != "" {
+		t.Fatalf("spec: %s", errCode)
+	}
+	if want := []string{"authorization_code", "refresh_token"}; !slices.Equal(spec.GrantTypes, want) {
+		t.Errorf("default grant_types = %v, want %v", spec.GrantTypes, want)
+	}
+	spec, errCode, _ = (&dcrRequest{
+		RedirectURIs: []string{"https://client.example/cb"},
+		GrantTypes:   []string{"authorization_code"},
+	}).spec()
+	if errCode != "" || !slices.Equal(spec.GrantTypes, []string{"authorization_code"}) {
+		t.Errorf("explicit grant_types = %v (%s), want [authorization_code]", spec.GrantTypes, errCode)
 	}
 }

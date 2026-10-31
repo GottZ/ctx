@@ -13,11 +13,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -244,7 +244,7 @@ func (h *OAuthHandler) ProtectedResource(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// Authorize handles GET /authorize — shows a form to enter the API key.
+// Authorize handles GET /authorize — renders the consent screen (K7).
 // Handles POST /authorize — validates the key, issues a code, redirects.
 func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -258,38 +258,17 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
+// authorizeForm serves GET /authorize: the consent screen (K7). client_id
+// and redirect_uri are validated BEFORE anything is rendered — an invalid
+// pair gets the key-less error page, never the credential prompt.
 func (h *OAuthHandler) authorizeForm(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	e := html.EscapeString // Shorthand for XSS prevention.
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	//nolint:gosec // All dynamic values escaped via html.EscapeString.
-	_, _ = w.Write([]byte(`<!DOCTYPE html>
-<html><head><title>ctx — Authorize</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  body { font-family: system-ui; max-width: 400px; margin: 80px auto; padding: 0 20px; }
-  h1 { font-size: 1.4em; }
-  input[type=password] { width: 100%; padding: 10px; font-size: 1em; font-family: monospace; box-sizing: border-box; }
-  button { margin-top: 12px; padding: 10px 24px; font-size: 1em; cursor: pointer; }
-  .hint { color: #666; font-size: 0.85em; margin-top: 8px; }
-</style>
-</head><body>
-<h1>ctx — Authorize MCP Access</h1>
-<form method="POST" action="/authorize">
-  <label for="key">API Key:</label><br>
-  <input type="password" id="key" name="api_key" required autofocus><br>
-  <p class="hint">Enter your ctx API key to authorize this client.</p>
-  <input type="hidden" name="response_type" value="` + e(q.Get("response_type")) + `">
-  <input type="hidden" name="client_id" value="` + e(q.Get("client_id")) + `">
-  <input type="hidden" name="redirect_uri" value="` + e(q.Get("redirect_uri")) + `">
-  <input type="hidden" name="code_challenge" value="` + e(q.Get("code_challenge")) + `">
-  <input type="hidden" name="code_challenge_method" value="` + e(q.Get("code_challenge_method")) + `">
-  <input type="hidden" name="resource" value="` + e(q.Get("resource")) + `">
-  <input type="hidden" name="state" value="` + e(q.Get("state")) + `">
-  <button type="submit">Authorize</button>
-</form>
-</body></html>`))
+	p := authorizeParamsFrom(r.URL.Query().Get)
+	client, redirect, rej := h.resolveAuthorizeClient(r, p.ClientID, p.RedirectURI)
+	if rej != nil {
+		writeAuthorizeError(w, rej)
+		return
+	}
+	writeConsent(w, http.StatusOK, client, redirect, p, "")
 }
 
 func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
@@ -299,13 +278,22 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	p := authorizeParamsFrom(r.FormValue)
 	apiKey := auth.SanitizeKey(r.FormValue("api_key"))
-	redirectURI := r.FormValue("redirect_uri")
-	codeChallenge := r.FormValue("code_challenge")
-	state := r.FormValue("state")
 
-	if redirectURI == "" || codeChallenge == "" {
-		http.Error(w, "missing redirect_uri or code_challenge", http.StatusBadRequest)
+	// client_id + redirect_uri: the SAME rule the GET applied before it
+	// rendered the form (resolveAuthorizeClient) — re-checked here because
+	// the POST is an independent request. Loaded as the FULL row: the
+	// redirect check keys on the client's registered redirect_uris, the
+	// consent re-render on its name and origin.
+	client, parsedRedirect, rej := h.resolveAuthorizeClient(r, p.ClientID, p.RedirectURI)
+	if rej != nil {
+		writeAuthorizeError(w, rej)
+		return
+	}
+
+	if p.CodeChallenge == "" {
+		http.Error(w, "missing code_challenge", http.StatusBadRequest)
 		return
 	}
 
@@ -314,7 +302,7 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	// ABSENT method defaults to plain per RFC 7636 §4.3, so both reject).
 	// The /token side verifies with SHA-256 unconditionally, but rejecting
 	// here beats a doomed round trip through the user's key entry.
-	if r.FormValue("code_challenge_method") != "S256" {
+	if p.CodeChallengeMethod != "S256" {
 		oauthError(w, "invalid_request", "code_challenge_method must be S256")
 		return
 	}
@@ -324,67 +312,16 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	// canonical MCP resource is a mix-up vector and answers invalid_target;
 	// the value stored on the code row is only ever the validated canonical
 	// one, never the raw client input.
-	resource := r.FormValue("resource")
-	if resource != "" && resource != h.canonicalOrHostIssuer(r)+"/mcp" {
+	if p.Resource != "" && p.Resource != h.canonicalOrHostIssuer(r)+"/mcp" {
 		oauthError(w, "invalid_target", "unknown resource")
 		return
 	}
 
-	// Reject non-http(s) redirect targets (javascript:, data:, file:, …) —
-	// open-redirect mitigation. Reconstructing the URL through net/url also
-	// sanitises any control characters that would otherwise be reflected
-	// straight into the Location header.
-	parsedRedirect, err := url.Parse(redirectURI)
-	if err != nil || parsedRedirect.Host == "" || (parsedRedirect.Scheme != "http" && parsedRedirect.Scheme != "https") {
-		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
-		return
-	}
-
-	// client_id is MANDATORY (S2/W03-2; OAuth 2.1 §4.1.1). The former
-	// `if clientID != ""` anonymous flow was half the takeover surface —
-	// without a client identity there is nothing to bind the code to.
-	// Loaded as the FULL row since S6: the redirect check below keys on the
-	// client's registered redirect_uris.
-	clientID := r.FormValue("client_id")
-	if clientID == "" {
-		http.Error(w, "client_id is required", http.StatusBadRequest)
-		return
-	}
-	client, found, err := store.GetOAuthClientByClientID(r.Context(), h.pool, clientID)
-	if err != nil || !found {
-		slog.Warn("oauth: invalid client_id in authorize", "client_id", clientID, "error", err)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
-			<h1>Unknown Client</h1><p>This client_id is not registered. Use <code>ctx mcp add</code> to create one.</p>
-		</body></html>`))
-		return
-	}
-
-	// Redirect allowlist — the GHSA-p3jf-x27v-4jg6 core: without it, an
-	// attacker-controlled redirect_uri carries the code (and with it the
-	// victim's key) off-site. Since S6 (W03-7) a client with REGISTERED
-	// redirect_uris is matched EXCLUSIVELY against them (exact array
-	// membership, C2 SQL — no loopback rule, no static fallback: the
-	// registration is the contract, and a fallback would let a narrowly
-	// registered client escape to the broader static list). An empty
-	// registration (plain `ctx mcp add`, pre-097 rows) keeps the static
-	// S2 allowlist + RFC 8252 loopback rule.
-	if len(client.RedirectURIs) > 0 {
-		allowed, err := store.ClientAllowsRedirectURI(r.Context(), h.pool, clientID, redirectURI)
-		if err != nil {
-			slog.Error("oauth: check registered redirect_uri", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if !allowed {
-			slog.Warn("oauth: redirect_uri not in client registration", "redirect_uri", redirectURI, "client_id", clientID)
-			http.Error(w, "invalid redirect_uri: not an allowed callback", http.StatusBadRequest)
-			return
-		}
-	} else if !redirectAllowed(redirectURI, parsedRedirect) {
-		slog.Warn("oauth: redirect_uri not in allowlist", "redirect_uri", redirectURI)
-		http.Error(w, "invalid redirect_uri: not an allowed callback", http.StatusBadRequest)
+	// Explicit consent (K7): the checkbox is checked server-side, before
+	// the key is even looked at — a key alone issues no code.
+	if r.FormValue("consent") != consentFieldValue {
+		writeConsent(w, http.StatusBadRequest, client, parsedRedirect, p,
+			"Confirm that you want to grant this client access before continuing.")
 		return
 	}
 
@@ -392,11 +329,7 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	result, err := auth.Authenticate(r.Context(), h.pool, apiKey)
 	if err != nil || !result.IsValid {
 		slog.Warn("oauth: invalid API key in authorize", "error", err)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
-			<h1>Invalid API Key</h1><p><a href="javascript:history.back()">Try again</a></p>
-		</body></html>`))
+		writeConsent(w, http.StatusUnauthorized, client, parsedRedirect, p, "Invalid API key.")
 		return
 	}
 
@@ -414,10 +347,10 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := store.PutOAuthCode(r.Context(), h.pool, codeHash(code), store.OAuthCode{
 		APIKeyID:      result.ApiKeyID,
 		PrincipalID:   result.PrincipalID,
-		ClientID:      clientID,
-		RedirectURI:   redirectURI,
-		CodeChallenge: codeChallenge,
-		Resource:      resource, // validated above — canonical or empty
+		ClientID:      p.ClientID,
+		RedirectURI:   p.RedirectURI,
+		CodeChallenge: p.CodeChallenge,
+		Resource:      p.Resource, // validated above — canonical or empty
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	}); err != nil {
 		slog.Error("oauth: persist authorization code", "error", err)
@@ -431,8 +364,8 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	// header free of anything that did not survive url.Parse.
 	q := parsedRedirect.Query()
 	q.Set("code", code)
-	if state != "" {
-		q.Set("state", state)
+	if p.State != "" {
+		q.Set("state", p.State)
 	}
 	// RFC 9207 `iss` — ONLY from the configured canonical issuer, never an
 	// r.Host derivation (a client-influencable iss would defeat the mix-up
@@ -480,7 +413,8 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 			presentedSecret = basicSecret
 		}
 	}
-	if !h.authenticateClient(w, r, presentedClient, presentedSecret, basicAuthUsed) {
+	client, ok := h.authenticateClient(w, r, presentedClient, presentedSecret, basicAuthUsed)
+	if !ok {
 		return
 	}
 
@@ -496,14 +430,52 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		redirectURI:  r.FormValue("redirect_uri"),
 		resource:     r.FormValue("resource"),
 	}
-	switch r.FormValue("grant_type") {
-	case "authorization_code":
-		h.tokenAuthorizationCode(w, r, req)
-	case "refresh_token":
-		h.tokenRefresh(w, r, req)
-	default:
+	grant := r.FormValue("grant_type")
+	if grant != "authorization_code" && grant != "refresh_token" {
 		oauthError(w, "unsupported_grant_type", "only authorization_code and refresh_token are supported")
+		return
 	}
+
+	// Registered grant_types (RFC 7591 §2) are enforced BEFORE any code or
+	// refresh row is touched — a refused grant consumes nothing and rotates
+	// nothing. No client row (empty client_id — unregistered and deactivated
+	// ones were already invalid_client in authenticateClient, §9c) means no
+	// grant can be authorised: the grant's generic invalid_grant, as the
+	// binding checks would have answered. A registered
+	// client outside its grant set is unauthorized_client (RFC 6749 §5.2).
+	if client == nil {
+		if grant == "authorization_code" {
+			oauthError(w, "invalid_grant", "code was not issued to this client")
+		} else {
+			oauthError(w, "invalid_grant", "refresh token invalid or expired")
+		}
+		return
+	}
+	if !clientAllowsGrant(client, grant) {
+		oauthError(w, "unauthorized_client", "grant_type "+grant+" is not registered for this client")
+		return
+	}
+
+	if grant == "authorization_code" {
+		h.tokenAuthorizationCode(w, r, req, clientAllowsGrant(client, "refresh_token"))
+		return
+	}
+	h.tokenRefresh(w, r, req)
+}
+
+// clientAllowsGrant reports whether the client may use grant at /token.
+// DCR (and future CIMD) clients get exactly their registered grant_types —
+// the self-declared contract. Operator-made (`admin`) clients get both
+// served grants: their grant_types column is the 097 schema default
+// '{authorization_code}', written before S4 issued refresh tokens and never
+// a declaration (mcp-client-create has no grant knob) — enforcing it would
+// end the refresh of every existing operator client, the claude.ai
+// connector included, without a data migration that rewrites the default.
+func clientAllowsGrant(c *store.OAuthClient, grant string) bool {
+	if c.RegistrationSource == "admin" {
+		return grant == "authorization_code" || grant == "refresh_token"
+	}
+	return slices.Contains(c.GrantTypes, grant)
 }
 
 // authenticateClient enforces the registered token_endpoint_auth_method at
@@ -517,23 +489,26 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 // without a secret (§9c): /authorize only issues codes to active
 // registered clients, so such a client_id can carry no legitimate grant,
 // and a deleted client must not keep rotating its refresh tokens as a
-// secret-less "public" client. Both secret channels (form + Basic) are accepted for confidential
-// clients; both are advertised in the metadata, and channel strictness
-// would add breakage without a security gain (the identity consistency is
-// enforced by the caller). Returns false after writing the 401.
-func (h *OAuthHandler) authenticateClient(w http.ResponseWriter, r *http.Request, clientID, secret string, basicAuthUsed bool) bool {
+// secret-less "public" client. Both secret channels (form + Basic) are
+// accepted for confidential clients; both are advertised in the metadata,
+// and channel strictness would add breakage without a security gain (the
+// identity consistency is enforced by the caller). Returns ok=false after
+// writing the 401; on ok the client row is returned — nil only for an
+// empty client_id (the caller's grant_types gate then answers
+// invalid_grant).
+func (h *OAuthHandler) authenticateClient(w http.ResponseWriter, r *http.Request, clientID, secret string, basicAuthUsed bool) (*store.OAuthClient, bool) {
 	if clientID == "" {
 		if secret != "" {
 			oauthUnauthorized(w, basicAuthUsed, "client_secret without client_id")
-			return false
+			return nil, false
 		}
-		return true // pre-S2 shape; the code/refresh binding rejects downstream
+		return nil, true // pre-S2 shape; rejected downstream as invalid_grant
 	}
 	client, found, err := store.GetOAuthClientByClientID(r.Context(), h.pool, clientID)
 	if err != nil {
 		slog.Error("oauth: load client for token auth", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return false
+		return nil, false
 	}
 	if !found {
 		// Unknown OR deactivated (GetOAuthClientByClientID folds both):
@@ -543,32 +518,32 @@ func (h *OAuthHandler) authenticateClient(w http.ResponseWriter, r *http.Request
 		// bound to an unregistered client_id — /authorize requires an
 		// active registered client since S2 — so nothing valid is refused.
 		oauthUnauthorized(w, basicAuthUsed, "client authentication failed")
-		return false
+		return nil, false
 	}
 	if client.TokenEndpointAuthMethod == "none" {
 		if secret != "" {
 			oauthUnauthorized(w, basicAuthUsed, "public client must not present a client_secret")
-			return false
+			return nil, false
 		}
-		return true
+		return client, true
 	}
 	// client_secret_basic | client_secret_post (the 097 CHECK bounds the set).
 	if secret == "" {
 		oauthUnauthorized(w, basicAuthUsed, "confidential client requires client authentication")
-		return false
+		return nil, false
 	}
 	ok, err := store.ValidateOAuthClientSecret(r.Context(), h.pool, clientID, secret)
 	if err != nil {
 		slog.Error("oauth: validate client secret", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return false
+		return nil, false
 	}
 	if !ok {
 		slog.Warn("oauth: client secret mismatch", "client_id", clientID)
 		oauthUnauthorized(w, basicAuthUsed, "client authentication failed")
-		return false
+		return nil, false
 	}
-	return true
+	return client, true
 }
 
 // oauthUnauthorized emits the RFC 6749 §5.2 invalid_client response: 401,
@@ -628,8 +603,10 @@ func (h *OAuthHandler) tokenRefresh(w http.ResponseWriter, r *http.Request, req 
 }
 
 // tokenAuthorizationCode handles the authorization_code grant: the S1/S2
-// hardened code redemption, minting the S3 opaque pair (S4: + refresh).
-func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request, req tokenRequest) {
+// hardened code redemption, minting the S3 opaque access token plus — only
+// when the client's grant_types include refresh_token (withRefresh) — the S4
+// rotating refresh token.
+func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request, req tokenRequest, withRefresh bool) {
 	// Atomic single-use take (098, S1): DELETE … RETURNING — of two racing
 	// /token calls exactly one gets the row, on ANY instance sharing the DB
 	// (the in-memory map's single-instance gap, closed). Expiry check follows
@@ -693,13 +670,21 @@ func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Req
 	// at /mcp materialises through the same ctx_auth_by_id gates as the
 	// raw-key path. audiences always contains the ctx-MCP resource (design
 	// 03 §4: E2 × RFC-8707 — the membership CHECK at /mcp lands in S5).
-	pair, err := store.MintTokenPair(r.Context(), h.pool, store.OAuthToken{
+	// A client registered without refresh_token gets the access token alone
+	// (RFC 6749 §5.1: refresh_token is OPTIONAL) — no family is opened.
+	tok := store.OAuthToken{
 		APIKeyID:    ac.APIKeyID,
 		PrincipalID: ac.PrincipalID,
 		ClientID:    ac.ClientID,
 		Audiences:   []string{h.canonicalOrHostIssuer(r) + "/mcp"},
 		IssuedVia:   "oauth",
-	}, accessTokenTTL(), refreshTokenTTL())
+	}
+	var pair *store.TokenPair
+	if withRefresh {
+		pair, err = store.MintTokenPair(r.Context(), h.pool, tok, accessTokenTTL(), refreshTokenTTL())
+	} else {
+		pair, err = store.MintAccessToken(r.Context(), h.pool, tok, accessTokenTTL())
+	}
 	if err != nil {
 		slog.Error("oauth: mint token pair", "error", err)
 		oauthError(w, "invalid_grant", "code expired or not found")
@@ -711,16 +696,20 @@ func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Req
 // writeTokenPair emits the RFC 6749 §5.1 success response for a fresh or
 // rotated pair. expires_in carries the pair's nominal access TTL (a
 // rotation near the family cap shortens only the refresh lifetime, never
-// the access TTL).
+// the access TTL). An access-only issuance (empty RefreshToken) omits the
+// refresh_token member instead of sending an empty one.
 func writeTokenPair(w http.ResponseWriter, pair *store.TokenPair) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token":  pair.AccessToken,
-		"token_type":    "Bearer",
-		"expires_in":    int(pair.AccessTTL / time.Second),
-		"refresh_token": pair.RefreshToken,
-	})
+	resp := map[string]any{
+		"access_token": pair.AccessToken,
+		"token_type":   "Bearer",
+		"expires_in":   int(pair.AccessTTL / time.Second),
+	}
+	if pair.RefreshToken != "" {
+		resp["refresh_token"] = pair.RefreshToken
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func oauthError(w http.ResponseWriter, code, desc string) {
