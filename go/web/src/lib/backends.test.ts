@@ -152,6 +152,14 @@ describe('backendDiff', () => {
     expect(backendDiff(orig, draft).roles).toEqual(['synthesis', 'chat', 'dream'])
   })
 
+  it('a withheld api_key_ref (row the caller cannot write) drafts as empty and diffs to nothing', () => {
+    const orig = bv({ name: 'x', api_key_ref: undefined })
+    const draft = draftFromBackend(orig)
+    expect(draft.api_key_ref).toBe('')
+    expect(isEmptySpec(backendDiff(orig, draft))).toBe(true)
+    expect(secretUsage([], [item({ name: 'x', api_key_ref: undefined })], []).dangling).toEqual([])
+  })
+
   it('sends an explicit empty roles to CLEAR a previously set list', () => {
     const orig = bv({ name: 'x', roles: ['chat'] })
     const draft = draftFromBackend(orig)

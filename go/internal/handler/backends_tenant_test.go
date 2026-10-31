@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -101,6 +102,61 @@ func TestBackendListTenantFiltered(t *testing.T) {
 	}
 	if strings.Contains(body, "tenant-b-cloud") {
 		t.Errorf("egress topology leak: tenant-a list discloses foreign backend: %s", body)
+	}
+}
+
+// TestBackendListHidesUnwritableKeyRefs (§B): backend-list gives api_key_ref
+// only on rows the caller may write. A tenant-admin sees the _global rows but
+// not the operator's secret names on them — /api/secrets lists it only its own
+// names and the api_key_ref 422 hides _global names on purpose; its own rows
+// keep the field (the edit dialog round-trips it). A server-admin sees every
+// ref. RED before the filter: the tenant-admin listing carried
+// "api_key_ref":"operator-key" on the _global row.
+func TestBackendListHidesUnwritableKeyRefs(t *testing.T) {
+	bp := backends.NewPool(nil, nil)
+	bp.SeedSnapshotForTest([]backends.Backend{
+		{ID: "g1", Name: "shared-cloud", Scope: backends.GlobalScope, APIKeyRef: "operator-key", Trust: backends.TrustNoCredentials, Locality: backends.LocalityExternal, Roles: []string{backends.RoleSynthesis}, Enabled: true},
+		{ID: "a1", Name: "tenant-a-cloud", Scope: "tenant-a", APIKeyRef: "tenant-a-key", Trust: backends.TrustNoCredentials, Locality: backends.LocalityExternal, Roles: []string{backends.RoleSynthesis}, Enabled: true},
+	})
+	refs := func(ar *auth.AuthResult) map[string]any {
+		t.Helper()
+		rec := manageReqWithPool(t, ar, bp, map[string]any{"action": "backend-list"})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list: status %d", rec.Code)
+		}
+		var resp struct {
+			Backends []map[string]any `json:"backends"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		out := map[string]any{}
+		for _, b := range resp.Backends {
+			ref, ok := b["api_key_ref"]
+			if !ok {
+				ref = nil
+			}
+			out[b["name"].(string)] = ref
+		}
+		return out
+	}
+
+	ta := refs(tenantAdminScopedAR("tenant-a"))
+	if got, ok := ta["shared-cloud"]; !ok {
+		t.Fatalf("tenant-a list lost the _global row: %v", ta)
+	} else if got != nil {
+		t.Errorf("tenant-a list discloses the operator's secret name on a _global row: api_key_ref=%v", got)
+	}
+	if got := ta["tenant-a-cloud"]; got != "tenant-a-key" {
+		t.Errorf("tenant-a list dropped the ref of its own row: api_key_ref=%v", got)
+	}
+	if body := manageReqWithPool(t, tenantAdminScopedAR("tenant-a"), bp, map[string]any{"action": "backend-list"}).Body.String(); strings.Contains(body, "operator-key") {
+		t.Errorf("operator secret name anywhere in the tenant-admin list: %s", body)
+	}
+
+	sa := refs(serverAdminScopedAR())
+	if sa["shared-cloud"] != "operator-key" || sa["tenant-a-cloud"] != "tenant-a-key" {
+		t.Errorf("server-admin list must carry every ref: %v", sa)
 	}
 }
 

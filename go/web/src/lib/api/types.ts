@@ -137,15 +137,18 @@ export interface ModelSpec {
 
 // Source: go/internal/handler/backends_manage.go (backendView) — the full
 // editable backend as read back from backend-create/update/list. The resolved
-// api key is NEVER serialized (json:"-"); api_key_ref is the harmless secret
-// name. model_map keys are role names plus the special "default".
+// api key is NEVER serialized (json:"-"); api_key_ref is the secret name.
+// model_map keys are role names plus the special "default".
 export interface BackendView {
   id: string
   name: string
   base_url: string
   protocol: string
   provider_class: string
-  api_key_ref: string
+  // Absent on backend-list rows the caller cannot write (a tenant-admin's view
+  // of _global rows): the operator's secret names stay with the operator, as
+  // in /api/secrets. Present (possibly '') on every writable row.
+  api_key_ref?: string
   trust: string
   locality: string
   // Tenant scope of the row (062, Modell C; server emits it in backendView).

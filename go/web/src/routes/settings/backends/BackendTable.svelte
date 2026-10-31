@@ -12,7 +12,9 @@
   // inline; Test runs the reachability/chat probe per row (read-only, own
   // running state); Edit opens the tuple dialog; Delete confirms inline. The
   // secret column joins api_key_ref against the known secret names (a missing
-  // one is the derived "fehlt" status). Health/state is read-only from the
+  // one is the derived "fehlt" status; a row whose ref the server withholds —
+  // a tenant-admin's view of a _global row — reads as managed at server
+  // scope). Health/state is read-only from the
   // merged live status — mutation and status are separate server paths.
   import { flip } from 'svelte/animate'
   import { toApiError } from '../../../lib/api'
@@ -316,7 +318,9 @@
             </div>
           </td>
           <td class="secret">
-            {#if b.api_key_ref === ''}
+            {#if b.api_key_ref === undefined}
+              <span class="dim" title="managed at server scope">·</span>
+            {:else if b.api_key_ref === ''}
               <span class="dim">—</span>
             {:else if knownSecrets.has(b.api_key_ref)}
               <span class="ok-ref" title="resolves to a vault secret">✓ {b.api_key_ref}</span>

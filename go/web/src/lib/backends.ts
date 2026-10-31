@@ -150,7 +150,7 @@ export function draftFromBackend(b: BackendView): BackendDraft {
     base_url: b.base_url,
     protocol: b.protocol,
     provider_class: b.provider_class,
-    api_key_ref: b.api_key_ref,
+    api_key_ref: b.api_key_ref ?? '',
     locality: b.locality,
     num_ctx: b.num_ctx,
     trust: b.trust,
@@ -189,7 +189,7 @@ export function backendDiff(original: BackendView, d: BackendDraft): BackendSpec
   if (d.base_url !== original.base_url) spec.base_url = d.base_url
   if (d.protocol !== original.protocol) spec.protocol = d.protocol
   if (d.provider_class !== original.provider_class) spec.provider_class = d.provider_class
-  if (d.api_key_ref !== original.api_key_ref) spec.api_key_ref = d.api_key_ref
+  if (d.api_key_ref !== (original.api_key_ref ?? '')) spec.api_key_ref = d.api_key_ref
   if (d.locality !== original.locality) spec.locality = d.locality
   if (d.num_ctx !== original.num_ctx) spec.num_ctx = d.num_ctx
   if (d.trust !== original.trust) spec.trust = d.trust

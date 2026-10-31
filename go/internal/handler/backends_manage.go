@@ -705,6 +705,16 @@ func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		v := backendView(&snap[i])
+		// api_key_ref names a sealed secret. /api/secrets lists a tenant-admin
+		// only its own scope's names, and the api_key_ref 422 answers unknown,
+		// foreign and wrong-host alike so _global names cannot be probed (§5.5);
+		// the list must not hand those names out on the _global rows a
+		// tenant-admin can see (§B). Rows the caller may write keep the field —
+		// the edit dialog round-trips it; the web table shows the others as
+		// managed at server scope.
+		if !backendWritableByCaller(ar, snap[i].Scope) {
+			delete(v, "api_key_ref")
+		}
 		// disable_profiles = full membership (incl. inactive profiles, U01-W4) so
 		// the W6 checkbox dialog can pre-check every profile the backend belongs
 		// to — distinct from disabled_by_profiles below (the ACTIVE subset).
