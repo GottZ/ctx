@@ -510,7 +510,7 @@ def test_two_compactions_one_head_two_linked_manifests(factory):
     for a in stores:
         assert a["type"] == "checkpoint" and a["category"] == CHAIN_CAT and a["sensitivity"] == "personal"
         assert "provenance" not in a["metadata"]
-        assert a["metadata"]["ctx_plugin"]["writer"] == "hermes-ctx-plugin"
+        assert a["metadata"]["ctx_plugin"]["writer"] == "ctx_checkpoint"
         assert a["metadata"]["root_session_id"] == "sess-chain"
         assert "source:hermes" in a["tags"] and "hook:checkpoint" in a["tags"]
         assert "parent_id" not in a, "chain lives in metadata (FK CASCADE on parent_id)"
@@ -712,7 +712,7 @@ def test_part_cap_refuses_before_any_request(factory):
     p, c = factory(
         "sess-cap", config={"checkpoint_chunk_chars": 1_000, "checkpoint_max_parts": 2}, agent_context="primary"
     )
-    with pytest.raises(CtxCheckpointError, match="checkpoint_max_parts"):
+    with pytest.raises(CtxCheckpointError, match="max_parts"):
         p.on_pre_compress([{"role": "user", "content": "q" * 5_000}], require_checkpoint=True)
     assert c.calls == []
 
@@ -796,7 +796,7 @@ def test_empty_evidence_noop_receipt_no_writes(factory):
     # compaction that has nothing to archive. Nothing is written either way.
     p, c = factory("sess-empty", agent_context="primary")
     out = p.on_pre_compress([{"role": "tool", "content": "only tool"}], require_checkpoint=True)
-    assert "empty" in out and "nothing to archive" in out
+    assert out == ""  # 0.6.0: an empty receipt, no no-op line in the summary and "nothing to archive" in out
     assert c.calls == []
 
 

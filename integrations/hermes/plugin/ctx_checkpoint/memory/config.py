@@ -44,6 +44,7 @@ DEFAULT_CHECKPOINT_CHAIN = True
 DEFAULT_CHECKPOINT_SENSITIVITY = "personal"  # transcripts = personal data (user decision 2026-10-20)
 DEFAULT_CHECKPOINT_CHUNK_CHARS = 36_000  # upstream default, hard max 40_000
 DEFAULT_CHECKPOINT_MAX_PARTS = 80  # < 100 writes/60 s per key incl. manifest + head
+DEFAULT_CHECKPOINT_CATEGORY = "compaction-checkpoints"  # ctx_checkpoint `category` setting
 
 # Prefetch protection (P2). Retrieval-excluded / foreign-text block types that must
 # never be injected as recalled context. Server reference (GottZ/ctx v5.21):
@@ -118,6 +119,7 @@ def _default_config() -> dict[str, Any]:
         "checkpoint_sensitivity": DEFAULT_CHECKPOINT_SENSITIVITY,
         "checkpoint_chunk_chars": DEFAULT_CHECKPOINT_CHUNK_CHARS,
         "checkpoint_max_parts": DEFAULT_CHECKPOINT_MAX_PARTS,
+        "checkpoint_category": DEFAULT_CHECKPOINT_CATEGORY,
         # P5: session digests per segment (compaction / rolling / idle / end).
         # Unit "exchanges" = user/assistant text messages (as the pre-P5 threshold).
         "digest_min_exchanges": DEFAULT_DIGEST_MIN_EXCHANGES,
@@ -133,8 +135,9 @@ def ctx_config_path(hermes_home: str) -> Path:
     return Path(hermes_home) / "ctx.json"
 
 
-def load_ctx_config(hermes_home: str) -> dict[str, Any]:
-    """Load ctx.json merged over defaults. Never raises (corrupt file → defaults)."""
+def load_ctx_config(hermes_home: str, overlay: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Defaults ← ``ctx.json`` ← ``overlay`` (the ``memory.ctx_checkpoint`` section of Hermes'
+    ``config.yaml``, mapped by :func:`overlay_from_umbrella`). Never raises (corrupt file → defaults)."""
     config = _default_config()
     path = ctx_config_path(hermes_home)
     if path.exists():
@@ -144,6 +147,8 @@ def load_ctx_config(hermes_home: str) -> dict[str, Any]:
                 config.update({k: v for k, v in raw.items() if v is not None})
         except Exception:
             logger.debug("Failed to parse %s", path, exc_info=True)
+    if overlay:
+        config.update({k: v for k, v in overlay.items() if v is not None})
 
     # Coerce / validate
     config["ctx_base_url"] = str(config.get("ctx_base_url") or "").strip()
@@ -186,11 +191,13 @@ def load_ctx_config(hermes_home: str) -> dict[str, Any]:
     config["checkpoint_mode"] = cp_mode if cp_mode in CHECKPOINT_MODES else DEFAULT_CHECKPOINT_MODE
     try:
         config["checkpoint_budget_s"] = max(
-            5.0, min(60.0, float(config.get("checkpoint_budget_s", DEFAULT_CHECKPOINT_BUDGET_S)))
+            5.0, min(600.0, float(config.get("checkpoint_budget_s", DEFAULT_CHECKPOINT_BUDGET_S)))
         )
     except Exception:
         config["checkpoint_budget_s"] = DEFAULT_CHECKPOINT_BUDGET_S
     config["checkpoint_chain"] = _as_bool(config.get("checkpoint_chain"), DEFAULT_CHECKPOINT_CHAIN)
+    cat = str(config.get("checkpoint_category") or "").strip()
+    config["checkpoint_category"] = cat or DEFAULT_CHECKPOINT_CATEGORY
     cps = str(config.get("checkpoint_sensitivity", DEFAULT_CHECKPOINT_SENSITIVITY)).strip().lower()
     config["checkpoint_sensitivity"] = cps if cps in VALID_SENSITIVITIES else DEFAULT_CHECKPOINT_SENSITIVITY
     try:
@@ -796,3 +803,54 @@ class FactLedger:
                 raise
         except Exception:
             logger.debug("CTX fact ledger write failed: %s", self.path, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Umbrella mapping (ctx_checkpoint 0.6.0)
+# ---------------------------------------------------------------------------
+# The ctx_checkpoint plugin keeps ONE settings section, ``memory.ctx_checkpoint`` in Hermes'
+# config.yaml. Its historical keys (category, sensitivity, chunk_chars, budget_s, max_parts)
+# map onto the engine's checkpoint_* keys; every other engine key may be written there under
+# its own name. ``memory: false`` (the default) keeps the plugin checkpoint-only.
+
+UMBRELLA_KEY_MAP = {
+    "category": "checkpoint_category",
+    "sensitivity": "checkpoint_sensitivity",
+    "chunk_chars": "checkpoint_chunk_chars",
+    "budget_s": "checkpoint_budget_s",
+    "max_parts": "checkpoint_max_parts",
+}
+# Keys of the umbrella section that are not engine settings.
+UMBRELLA_OWN_KEYS = ("mcp_server", "memory", "transport", "rest_base_url")
+TRANSPORTS = ("mcp", "rest")
+
+
+def overlay_from_umbrella(section: dict[str, Any] | None) -> dict[str, Any]:
+    """``memory.ctx_checkpoint`` → engine overlay for :func:`load_ctx_config`.
+
+    With ``memory`` off (default) recall, capture and fact extraction are forced off, so the
+    plugin behaves exactly like the checkpoint-only versions before 0.6.0.
+    """
+    section = dict(section or {})
+    overlay: dict[str, Any] = {}
+    defaults = _default_config()
+    for key, value in section.items():
+        if key in UMBRELLA_OWN_KEYS or value is None:
+            continue
+        target = UMBRELLA_KEY_MAP.get(key, key)
+        if target in defaults:
+            overlay[target] = value
+    if section.get("rest_base_url"):
+        overlay["ctx_base_url"] = str(section["rest_base_url"]).strip()
+    if not _as_bool(section.get("memory"), False):
+        overlay.update({"auto_recall": False, "auto_capture": False, "auto_compress_extract": False})
+    return overlay
+
+
+def umbrella_transport(section: dict[str, Any] | None) -> str:
+    raw = str((section or {}).get("transport") or "mcp").strip().lower()
+    return raw if raw in TRANSPORTS else "mcp"
+
+
+def umbrella_memory_enabled(section: dict[str, Any] | None) -> bool:
+    return _as_bool((section or {}).get("memory"), False)

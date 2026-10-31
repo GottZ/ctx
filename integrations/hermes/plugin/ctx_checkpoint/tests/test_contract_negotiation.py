@@ -14,20 +14,19 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
-
 import agent.conversation_compression as host_compression
 import agent.memory_provider as host_contract
+import pytest
 
 _PROVIDER_PATH = Path(
-    os.environ.get("CTX_CHECKPOINT_PROVIDER_PATH")
-    or Path(__file__).resolve().parents[1] / "__init__.py"
+    os.environ.get("CTX_CHECKPOINT_PROVIDER_PATH") or Path(__file__).resolve().parents[1] / "__init__.py"
 )
 _SPEC = importlib.util.spec_from_file_location(
-    "ctx_checkpoint_contract_negotiation", _PROVIDER_PATH
+    "ctx_checkpoint_contract_negotiation", _PROVIDER_PATH, submodule_search_locations=[str(_PROVIDER_PATH.parent)]
 )
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE  # package context for the plugin's relative imports
 _SPEC.loader.exec_module(_MODULE)
 CtxCheckpointMemoryProvider = _MODULE.CtxCheckpointMemoryProvider
 
@@ -62,9 +61,7 @@ def _stores(calls):
 def _simulate_v3_host(monkeypatch, *, with_feature=True):
     monkeypatch.setattr(host_contract, "PRE_COMPRESS_CHECKPOINT_API_VERSION", 3)
     if with_feature:
-        monkeypatch.setattr(
-            host_compression, _HOST_FEATURE, lambda messages: [], raising=False
-        )
+        monkeypatch.setattr(host_compression, _HOST_FEATURE, lambda messages: [], raising=False)
     elif hasattr(host_compression, _HOST_FEATURE):
         monkeypatch.delattr(host_compression, _HOST_FEATURE)
 
@@ -165,18 +162,14 @@ def test_probe_falls_back_to_2_when_host_module_entry_is_none(monkeypatch):
 
 
 def test_probe_falls_back_to_2_when_host_module_name_does_not_exist(monkeypatch):
-    monkeypatch.setattr(
-        _MODULE, "_HOST_CONTRACT_MODULE", "agent.ctx_checkpoint_does_not_exist"
-    )
+    monkeypatch.setattr(_MODULE, "_HOST_CONTRACT_MODULE", "agent.ctx_checkpoint_does_not_exist")
 
     assert _MODULE._probe_host_checkpoint_api() == 2
 
 
 def test_probe_falls_back_to_2_when_feature_module_is_missing_on_v3_host(monkeypatch):
     monkeypatch.setattr(host_contract, "PRE_COMPRESS_CHECKPOINT_API_VERSION", 3)
-    monkeypatch.setattr(
-        _MODULE, "_HOST_FEATURE_MODULE", "agent.ctx_checkpoint_does_not_exist"
-    )
+    monkeypatch.setattr(_MODULE, "_HOST_FEATURE_MODULE", "agent.ctx_checkpoint_does_not_exist")
 
     assert _MODULE._probe_host_checkpoint_api() == 2
 
@@ -203,7 +196,7 @@ def test_probe_swallows_exception_raised_during_import(monkeypatch):
             return None
 
     monkeypatch.delitem(sys.modules, "agent.memory_provider")
-    monkeypatch.setattr(sys, "meta_path", [_Exploding()] + sys.meta_path)
+    monkeypatch.setattr(sys, "meta_path", [_Exploding(), *sys.meta_path])
 
     with pytest.raises(RuntimeError):
         importlib.import_module("agent.memory_provider")
@@ -228,9 +221,7 @@ def test_tool_evidence_kwarg_is_accepted_and_labelled_received_unrendered(caplog
 
     stores = _stores(calls)
     assert len(stores) == 3
-    assert all(
-        args["metadata"]["tool_index_status"] == "received-unrendered" for args in stores
-    )
+    assert all(args["metadata"]["tool_index_status"] == "received-unrendered" for args in stores)
     assert "read README.md" not in stores[0]["content"]
     assert len(frame) < 1_000
 
@@ -240,23 +231,14 @@ def test_tool_evidence_warning_fires_once_per_instance(caplog):
     provider = _provider(calls)
 
     with caplog.at_level(logging.WARNING):
-        provider.on_pre_compress(
-            [{"role": "user", "content": "first"}], tool_evidence=[{"ordinal": 1}]
-        )
-        provider.on_pre_compress(
-            [{"role": "user", "content": "second"}], tool_evidence=[]
-        )
+        provider.on_pre_compress([{"role": "user", "content": "first"}], tool_evidence=[{"ordinal": 1}])
+        provider.on_pre_compress([{"role": "user", "content": "second"}], tool_evidence=[])
 
     assert len(_tool_evidence_warnings(caplog)) == 1
-    assert all(
-        args["metadata"]["tool_index_status"] == "received-unrendered"
-        for args in _stores(calls)
-    )
+    assert all(args["metadata"]["tool_index_status"] == "received-unrendered" for args in _stores(calls))
 
     with caplog.at_level(logging.WARNING):
-        _provider([]).on_pre_compress(
-            [{"role": "user", "content": "third"}], tool_evidence=[{"ordinal": 2}]
-        )
+        _provider([]).on_pre_compress([{"role": "user", "content": "third"}], tool_evidence=[{"ordinal": 2}])
 
     assert len(_tool_evidence_warnings(caplog)) == 2
 

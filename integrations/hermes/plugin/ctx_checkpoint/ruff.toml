@@ -1,0 +1,23 @@
+# Development tooling only (no pyproject.toml on purpose: Hermes' plugin manager treats any
+# pyproject.toml in a plugin dir as a uv workspace member and evicts the plugin if it has
+# no [project].version — see memory/CHANGELOG.md 1.7.1). Covers the whole ctx_checkpoint
+# plugin: umbrella, engine (memory/), both test suites. "S" (flake8-bandit) is part of the
+# gate on purpose — the security sweep is a standing check, not a one-off.
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S"]
+ignore = [
+    "RUF001", "RUF002", "RUF003",  # German prose and typographic dashes/arrows are intentional
+    "SIM105",                      # explicit try/except/pass reads clearer in cleanup paths
+    "UP017",                       # keep timezone.utc (datetime.UTC needs 3.11; plugin must load on any host)
+]
+
+[lint.per-file-ignores]
+# asserts are the test idiom; fake keys in fixtures are not credentials
+"tests/*" = ["S101", "S105", "S106"]
+"memory/tests/*" = ["S101", "S105", "S106"]
+
+[lint.isort]
+known-first-party = ["ctx_plugin"]

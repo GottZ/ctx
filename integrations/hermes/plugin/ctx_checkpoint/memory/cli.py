@@ -1,10 +1,10 @@
-"""CLI commands for the CTX memory plugin: ``hermes ctx <status|sync|query|store|search|get>``.
+"""CLI commands of the ctx_checkpoint plugin: ``hermes ctx_checkpoint <status|sync|query|store|search|get>``.
 
 Discovered by the host at argparse setup time (``register_cli``), before the provider is
 loaded. The host registers the plugin's parent package first, so the relative imports
 below resolve without executing ``__init__.py``; ``client`` and ``config`` are stdlib-only
 at import time. Active-provider gating applies: the commands only appear when
-``memory.provider: ctx`` is set.
+``memory.provider: ctx_checkpoint`` is set.
 
 All commands go through the same ``CtxClient`` and helpers as the provider, so CLI writes
 carry the provenance tags (``hook:cli``) and the configured sensitivity, and reads honour
@@ -31,14 +31,22 @@ from .config import (
     env_secret,
     load_ctx_config,
     merge_tags,
+    overlay_from_umbrella,
     resolve_base_url,
+    umbrella_transport,
 )
 
 # Built-in memory files separate entries with a line holding only "§" (host ENTRY_DELIMITER
 # "\n§\n"); a "§" inside an entry ("gemäß § 22 UStG") must not split it.
 _ENTRY_SEPARATOR = "§"
 _HOOK = "cli"
+PROVIDER_NAME = "ctx_checkpoint"
 _SUBCOMMANDS = "status|sync|query|store|search|get"
+_MCP_HINT = (
+    "✗ this command needs the REST transport (memory.ctx_checkpoint.transport: rest with CTX_KEY in .env). "
+    "Over the default MCP transport the store is reached inside a session through the ctx MCP tools, "
+    "or from the shell with the ctx CLI (github.com/GottZ/ctx)."
+)
 
 
 def _hermes_home() -> Path:
@@ -59,7 +67,30 @@ def _ctx_json(home: Path) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _plugin_section() -> dict[str, Any]:
+    """``memory.ctx_checkpoint`` from Hermes' config.yaml ({} when unreadable)."""
+    try:
+        from hermes_cli.config import load_config
+
+        memory = load_config().get("memory", {})
+        section = memory.get("ctx_checkpoint", {}) if isinstance(memory, dict) else {}
+        return dict(section) if isinstance(section, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load(home: Path) -> dict[str, Any]:
+    """Engine config: defaults ← ctx.json ← the umbrella section (config.yaml)."""
+    section = _plugin_section()
+    config = load_ctx_config(str(home), overlay=overlay_from_umbrella(section))
+    config["_transport"] = umbrella_transport(section)
+    return config
+
+
 def _client(config: dict[str, Any]) -> CtxClient | None:
+    if config.get("_transport", "rest") != "rest":
+        print(_MCP_HINT)
+        return None
     base, key = resolve_base_url(config.get("ctx_base_url")), env_secret("CTX_KEY")
     if not (base and key):
         print("✗ CTX not configured: set CTX_KEY (and CTX_BASE_URL or ctx_base_url in ctx.json).")
@@ -99,8 +130,17 @@ def _hit_line(item: dict[str, Any]) -> str:
 
 def cmd_status(args, home: Path, config: dict[str, Any]) -> int:
     base, key = resolve_base_url(config.get("ctx_base_url")), env_secret("CTX_KEY")
-    print("CTX memory plugin — status")
+    print(f"{PROVIDER_NAME} — status")
     print(f"  profile:  {derive_profile_name(str(home))} ({home})")
+    print(f"  transport: {config.get('_transport', 'rest')}")
+    if config.get("_transport", "rest") != "rest":
+        print("  (REST credentials are not used over MCP; the connection check is `hermes mcp test <server>`)")
+        settings = _ctx_json(home)
+        if settings:
+            print("  ctx.json settings:")
+            for name, value in sorted(settings.items()):
+                print(f"    {name}: {value}")
+        return 0
     print(f"  base URL: {base or '(not set)'}")
     print(f"  key:      {'set' if key else 'NOT set'}")
     if not (base and key):
@@ -245,14 +285,14 @@ _COMMANDS = {
 
 
 def ctx_command(args) -> None:
-    """argparse handler for ``hermes ctx …`` (also found by the host as ``<provider>_command``)."""
+    """argparse handler for ``hermes ctx_checkpoint …`` (the host finds it as ``<provider>_command``)."""
     command = _COMMANDS.get(getattr(args, "ctx_command", None) or "")
     if command is None:
-        print(f"Usage: hermes ctx <{_SUBCOMMANDS}>")
+        print(f"Usage: hermes {PROVIDER_NAME} <{_SUBCOMMANDS}>")
         sys.exit(2)
     home = _hermes_home()
     try:
-        rc = command(args, home, load_ctx_config(str(home)))
+        rc = command(args, home, _load(home))
     except CtxApiError as exc:
         print(f"✗ {exc}")
         rc = 1
@@ -261,7 +301,7 @@ def ctx_command(args) -> None:
 
 
 def register_cli(subparser) -> None:
-    """Build the ``hermes ctx`` argparse tree (called by plugin CLI discovery)."""
+    """Build the ``hermes ctx_checkpoint`` argparse tree (called by plugin CLI discovery)."""
     subparser.set_defaults(func=ctx_command)
     subs = subparser.add_subparsers(dest="ctx_command")
 

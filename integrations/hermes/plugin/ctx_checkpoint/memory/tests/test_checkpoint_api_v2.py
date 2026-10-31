@@ -103,7 +103,7 @@ def test_negotiation_floor_and_ceiling():
 def test_config_coercion_checkpoint_keys(tmp_path):
     (tmp_path / "ctx.json").write_text(json.dumps({"checkpoint_mode": "Best-Effort", "checkpoint_budget_s": 999}))
     cfg = load_ctx_config(str(tmp_path))
-    assert cfg["checkpoint_mode"] == "best_effort" and cfg["checkpoint_budget_s"] == 60.0
+    assert cfg["checkpoint_mode"] == "best_effort" and cfg["checkpoint_budget_s"] == 600.0  # clamp ceiling (0.6.0)
     (tmp_path / "ctx.json").write_text(json.dumps({"checkpoint_mode": "bogus", "checkpoint_budget_s": "x"}))
     cfg = load_ctx_config(str(tmp_path))
     assert cfg["checkpoint_mode"] == "best_effort" and cfg["checkpoint_budget_s"] == 20.0

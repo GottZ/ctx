@@ -25,6 +25,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .config import FACT_STATE_DIR, _safe_root
 
@@ -190,7 +191,9 @@ def resolve_lineage_root(hermes_home: str, session_id: str) -> str:
         return ""
     con = None
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+        # Path quoted for the URI form: a "?" or "#" in HERMES_HOME would otherwise turn into
+        # URI syntax and the read-only mode could be lost.
+        con = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=2.0)
         con.row_factory = sqlite3.Row
 
         def _get(row_id: str) -> dict[str, Any] | None:
@@ -222,8 +225,8 @@ def resolve_lineage_root(hermes_home: str, session_id: str) -> str:
         if con is not None:
             try:
                 con.close()
-            except Exception:
-                pass
+            except Exception:  # nothing to do on a failed close of a read-only handle
+                logger.debug("CTX lineage root: closing %s failed", path, exc_info=True)
 
 
 # -- Pruning -------------------------------------------------------------------------------

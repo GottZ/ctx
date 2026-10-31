@@ -1,4 +1,4 @@
-"""``hermes ctx`` CLI: argparse tree, provenance tags, sensitivity default, § parsing, exit codes."""
+"""``hermes ctx_checkpoint`` CLI: argparse tree, provenance tags, sensitivity default, § parsing, exit codes."""
 
 from __future__ import annotations
 
@@ -11,6 +11,13 @@ import pytest
 from ctx_plugin import cli
 from ctx_plugin.client import CtxApiError
 from ctx_plugin.config import DEFAULT_PREFETCH_TYPES_EXCLUDE
+
+
+@pytest.fixture(autouse=True)
+def _rest_transport_section(monkeypatch):
+    """The CLI reads memory.ctx_checkpoint from config.yaml; pin the REST transport and keep
+    the real profile out of the tests."""
+    monkeypatch.setattr(cli, "_plugin_section", lambda: {"transport": "rest"})
 
 
 class CliFake:
@@ -70,7 +77,7 @@ def run(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "CtxClient", CliFake)
     monkeypatch.setattr(cli, "_hermes_home", lambda: home)
     CliFake.log = []
-    parser = argparse.ArgumentParser(prog="hermes ctx")
+    parser = argparse.ArgumentParser(prog="hermes ctx_checkpoint")
     cli.register_cli(parser)
 
     def _run(*argv: str) -> int:
@@ -163,7 +170,7 @@ def test_status_shows_profile_and_settings(run, capsys):
 
 def test_unconfigured_and_usage_exit_codes(run, monkeypatch, capsys):
     assert run() == 2
-    assert "Usage: hermes ctx <status|sync|query|store|search|get>" in capsys.readouterr().out
+    assert "Usage: hermes ctx_checkpoint <status|sync|query|store|search|get>" in capsys.readouterr().out
     monkeypatch.delenv("CTX_KEY")
     assert run("search", "x") == 1
     assert "CTX not configured" in capsys.readouterr().out

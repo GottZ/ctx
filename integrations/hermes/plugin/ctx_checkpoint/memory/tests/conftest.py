@@ -119,6 +119,21 @@ class FakeClient:
         return {"success": True, "block": {"id": block_id, "metadata": {}}}
 
 
+@pytest.fixture(autouse=True)
+def _isolated_hermes_home(tmp_path, monkeypatch):
+    """Never read or write the real profile (config.yaml, ctx.json, state.db, ctx_state/)."""
+    home = tmp_path / "hermes-home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    try:
+        import hermes_constants
+
+        monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: home)
+    except ImportError:
+        pass
+    yield home
+
+
 @pytest.fixture
 def fake_client_cls(monkeypatch):
     import ctx_plugin.provider as provider_mod

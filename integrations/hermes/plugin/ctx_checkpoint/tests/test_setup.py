@@ -9,17 +9,19 @@ These tests run against the real Hermes host on ``PYTHONPATH`` with an isolated
 import importlib.util
 import json
 import logging
+import sys
 from pathlib import Path
 
 import pytest
-
 from hermes_cli.config import read_user_config_raw
 
-
 _PROVIDER_PATH = Path(__file__).resolve().parents[1] / "__init__.py"
-_SPEC = importlib.util.spec_from_file_location("ctx_checkpoint_setup", _PROVIDER_PATH)
+_SPEC = importlib.util.spec_from_file_location(
+    "ctx_checkpoint_setup", _PROVIDER_PATH, submodule_search_locations=[str(_PROVIDER_PATH.parent)]
+)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE  # package context for the plugin's relative imports
 _SPEC.loader.exec_module(_MODULE)
 CtxCheckpointMemoryProvider = _MODULE.CtxCheckpointMemoryProvider
 KEY_ENV = _MODULE.SETUP_API_KEY_ENV
@@ -55,7 +57,12 @@ def test_schema_offers_url_key_and_checkpoint_settings_on_a_fresh_home(hermes_ho
 
     fields = {field["key"]: field for field in schema}
     assert [field["key"] for field in schema] == [
-        "ctx_url", "ctx_api_key", "sensitivity", "category", "chunk_chars",
+        "ctx_url",
+        "ctx_api_key",
+        "sensitivity",
+        "category",
+        "chunk_chars",
+        "memory",
     ]
     assert fields["ctx_url"]["required"] is True
     assert fields["ctx_url"]["default"] == ""
@@ -73,12 +80,16 @@ def test_schema_offers_url_key_and_checkpoint_settings_on_a_fresh_home(hermes_ho
     "entry, keys",
     [
         # Own auth (another env var, or OAuth): kept as it is, no key asked.
-        ({"url": "https://ctx.example.test/mcp",
-          "headers": {"Authorization": "Bearer ${MCP_CTX_API_KEY}"}}, {"ctx_url"}),
+        (
+            {"url": "https://ctx.example.test/mcp", "headers": {"Authorization": "Bearer ${MCP_CTX_API_KEY}"}},
+            {"ctx_url"},
+        ),
         ({"url": "https://ctx.example.test/mcp", "auth": "oauth"}, {"ctx_url"}),
         # Auth that setup wrote earlier: the key can be rotated.
-        ({"url": "https://ctx.example.test/mcp",
-          "headers": {"Authorization": "Bearer ${CTX_API_KEY}"}}, {"ctx_url", "ctx_api_key"}),
+        (
+            {"url": "https://ctx.example.test/mcp", "headers": {"Authorization": "Bearer ${CTX_API_KEY}"}},
+            {"ctx_url", "ctx_api_key"},
+        ),
         # No auth yet: setup adds the header, so it needs the key.
         ({"url": "https://ctx.example.test/mcp"}, {"ctx_url", "ctx_api_key"}),
         # stdio transport: neither URL nor key.
@@ -96,10 +107,15 @@ def test_schema_follows_the_existing_server_entry(hermes_home, entry, keys):
 
 
 def test_schema_follows_the_configured_server_name(hermes_home):
-    _write_config(hermes_home, {"mcp_servers": {
-        "ctx": {"url": "https://wrong.example.test/mcp"},
-        "ctx-prod": {"url": "https://prod.example.test/mcp", "auth": "oauth"},
-    }})
+    _write_config(
+        hermes_home,
+        {
+            "mcp_servers": {
+                "ctx": {"url": "https://wrong.example.test/mcp"},
+                "ctx-prod": {"url": "https://prod.example.test/mcp", "auth": "oauth"},
+            }
+        },
+    )
     provider = CtxCheckpointMemoryProvider(config={"mcp_server": "ctx-prod"})
 
     fields = {f["key"]: f for f in provider.get_config_schema()}
@@ -122,13 +138,16 @@ def test_save_config_writes_provider_section_and_server_entry_only(hermes_home):
         return json.dumps({"id": f"019f6000-0000-7000-8000-{len(calls):012d}"})
 
     provider = CtxCheckpointMemoryProvider(config={}, dispatch=dispatch)
-    provider.save_config({
-        "ctx_url": "https://ctx.example.test/mcp",
-        "sensitivity": "personal",
-        "category": "hermes-checkpoints",
-        "chunk_chars": 20_000,
-        "mcp_server": "ctx",
-    }, str(hermes_home))
+    provider.save_config(
+        {
+            "ctx_url": "https://ctx.example.test/mcp",
+            "sensitivity": "personal",
+            "category": "hermes-checkpoints",
+            "chunk_chars": 20_000,
+            "mcp_server": "ctx",
+        },
+        str(hermes_home),
+    )
 
     config = _read_config(hermes_home)
     assert config["memory"]["ctx_checkpoint"] == {
@@ -136,6 +155,7 @@ def test_save_config_writes_provider_section_and_server_entry_only(hermes_home):
         "category": "hermes-checkpoints",
         "sensitivity": "personal",
         "chunk_chars": 20_000,
+        "memory": False,
     }
     assert "provider" not in config["memory"]
     assert config["mcp_servers"]["ctx"] == {
@@ -156,20 +176,20 @@ def test_save_config_never_materializes_env_templates(hermes_home, monkeypatch):
     secret = "ctx-secret-value-0123456789"
     monkeypatch.setenv("MCP_CTX_API_KEY", secret)
     monkeypatch.setenv("OTHER_TOKEN", "other-secret-value-0123456789")
-    _write_config(hermes_home, {
-        "mcp_servers": {
-            "ctx": {
-                "url": "https://ctx.example.test/mcp",
-                "headers": {"Authorization": "Bearer ${MCP_CTX_API_KEY}"},
+    _write_config(
+        hermes_home,
+        {
+            "mcp_servers": {
+                "ctx": {
+                    "url": "https://ctx.example.test/mcp",
+                    "headers": {"Authorization": "Bearer ${MCP_CTX_API_KEY}"},
+                },
+                "other": {"url": "https://other.example.test/mcp", "headers": {"X-Token": "${OTHER_TOKEN}"}},
             },
-            "other": {"url": "https://other.example.test/mcp",
-                      "headers": {"X-Token": "${OTHER_TOKEN}"}},
         },
-    })
-
-    CtxCheckpointMemoryProvider(config={}).save_config(
-        {"ctx_url": "https://ctx.example.test/mcp"}, str(hermes_home)
     )
+
+    CtxCheckpointMemoryProvider(config={}).save_config({"ctx_url": "https://ctx.example.test/mcp"}, str(hermes_home))
 
     text = (hermes_home / "config.yaml").read_text(encoding="utf-8")
     assert "${MCP_CTX_API_KEY}" in text
@@ -179,16 +199,21 @@ def test_save_config_never_materializes_env_templates(hermes_home, monkeypatch):
 
 
 def test_save_config_keeps_an_existing_entry_and_follows_the_url(hermes_home):
-    _write_config(hermes_home, {"mcp_servers": {"ctx": {
-        "url": "https://old.example.test/mcp",
-        "auth": "oauth",
-        "timeout": 45,
-        "enabled": False,
-    }}})
-
-    CtxCheckpointMemoryProvider(config={}).save_config(
-        {"ctx_url": "https://new.example.test/mcp"}, str(hermes_home)
+    _write_config(
+        hermes_home,
+        {
+            "mcp_servers": {
+                "ctx": {
+                    "url": "https://old.example.test/mcp",
+                    "auth": "oauth",
+                    "timeout": 45,
+                    "enabled": False,
+                }
+            }
+        },
     )
+
+    CtxCheckpointMemoryProvider(config={}).save_config({"ctx_url": "https://new.example.test/mcp"}, str(hermes_home))
 
     entry = _read_config(hermes_home)["mcp_servers"]["ctx"]
     assert entry["url"] == "https://new.example.test/mcp"
@@ -199,14 +224,25 @@ def test_save_config_keeps_an_existing_entry_and_follows_the_url(hermes_home):
 
 
 def test_save_config_leaves_a_stdio_entry_on_its_transport(hermes_home):
-    _write_config(hermes_home, {"mcp_servers": {"ctx": {
-        "command": "ctx", "args": ["mcp"], "enabled": False,
-    }}})
+    _write_config(
+        hermes_home,
+        {
+            "mcp_servers": {
+                "ctx": {
+                    "command": "ctx",
+                    "args": ["mcp"],
+                    "enabled": False,
+                }
+            }
+        },
+    )
 
     CtxCheckpointMemoryProvider(config={}).save_config({}, str(hermes_home))
 
     assert _read_config(hermes_home)["mcp_servers"]["ctx"] == {
-        "command": "ctx", "args": ["mcp"], "enabled": True,
+        "command": "ctx",
+        "args": ["mcp"],
+        "enabled": True,
     }
 
 
@@ -217,9 +253,7 @@ def test_save_config_merges_over_the_file_as_it_is_at_write_time(hermes_home, mo
     _write_config(hermes_home, {"model": {"default": "after"}, "display": {"skin": "mono"}})
     monkeypatch.setattr(_MODULE, "_read_user_config", lambda: stale)
 
-    CtxCheckpointMemoryProvider(config={}).save_config(
-        {"ctx_url": "https://ctx.example.test/mcp"}, str(hermes_home)
-    )
+    CtxCheckpointMemoryProvider(config={}).save_config({"ctx_url": "https://ctx.example.test/mcp"}, str(hermes_home))
 
     config = _read_config(hermes_home)
     assert config["model"] == {"default": "after"}
@@ -270,9 +304,8 @@ def test_save_config_clamps_part_size(hermes_home, raw, stored):
 
 
 def test_post_setup_prompts_writes_env_and_activates(hermes_home, monkeypatch, capsys):
-    # ctx_url, sensitivity (invalid, then valid), category, chunk_chars
-    _answers(monkeypatch, ["https://ctx.example.test/mcp", "secret", "personal", "", ""],
-             secret="ctx-key-abcdef")
+    # ctx_url, sensitivity (invalid, then valid), category, chunk_chars, memory features
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "secret", "personal", "", "", ""], secret="ctx-key-abcdef")
 
     CtxCheckpointMemoryProvider(config={}).post_setup(str(hermes_home), {})
 
@@ -289,9 +322,12 @@ def test_post_setup_prompts_writes_env_and_activates(hermes_home, monkeypatch, c
 
 def test_post_setup_requires_a_key_for_a_new_server(hermes_home, monkeypatch, capsys):
     secrets = iter(["", "ctx-key-second-try"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": {
-        "  ctx server URL: ": "https://ctx.example.test/mcp",
-    }.get(prompt, ""))
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": {
+            "  ctx server URL: ": "https://ctx.example.test/mcp",
+        }.get(prompt, ""),
+    )
     monkeypatch.setattr(_MODULE.getpass, "getpass", lambda prompt="": next(secrets))
 
     CtxCheckpointMemoryProvider(config={}).post_setup(str(hermes_home), {})
@@ -303,9 +339,12 @@ def test_post_setup_requires_a_key_for_a_new_server(hermes_home, monkeypatch, ca
 def test_post_setup_keeps_a_current_key_on_blank_input(hermes_home, monkeypatch, capsys):
     (hermes_home / ".env").write_text(f"{KEY_ENV}=existing-key-1234\n", encoding="utf-8")
     prompts = []
-    monkeypatch.setattr("builtins.input", lambda prompt="": {
-        "  ctx server URL: ": "https://ctx.example.test/mcp",
-    }.get(prompt, ""))
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": {
+            "  ctx server URL: ": "https://ctx.example.test/mcp",
+        }.get(prompt, ""),
+    )
     monkeypatch.setattr(_MODULE.getpass, "getpass", lambda prompt="": prompts.append(prompt) or "")
 
     CtxCheckpointMemoryProvider(config={}).post_setup(str(hermes_home), {})
@@ -315,12 +354,10 @@ def test_post_setup_keeps_a_current_key_on_blank_input(hermes_home, monkeypatch,
     assert _read_config(hermes_home)["memory"]["provider"] == "ctx_checkpoint"
 
 
-def test_post_setup_reports_a_failed_key_write_without_touching_config(
-    hermes_home, monkeypatch, capsys
-):
+def test_post_setup_reports_a_failed_key_write_without_touching_config(hermes_home, monkeypatch, capsys):
     import hermes_cli.config as host_config
 
-    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", ""], secret="ctx-key-abcdef")
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", ""], secret="ctx-key-abcdef")
 
     def refuse(key, value):
         raise PermissionError(".env is read-only")
@@ -367,10 +404,14 @@ def test_dashboard_form_round_trip_configures_and_enables_the_provider(hermes_ho
     assert status._memory_provider_is_configured("ctx_checkpoint", provider) is False
     assert provider.is_available() is False
 
-    routes._write_memory_provider_config_values("ctx_checkpoint", provider, {
-        "ctx_url": "https://ctx.example.test/mcp",
-        "ctx_api_key": "ctx-key-from-form",
-    })
+    routes._write_memory_provider_config_values(
+        "ctx_checkpoint",
+        provider,
+        {
+            "ctx_url": "https://ctx.example.test/mcp",
+            "ctx_api_key": "ctx-key-from-form",
+        },
+    )
 
     config = _read_config(hermes_home)
     assert config["mcp_servers"]["ctx"]["headers"] == {

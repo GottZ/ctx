@@ -226,13 +226,12 @@ else's environment — that led to a fix landing in the repository.
   `type: checkpoint` on every write, a no-op receipt for a batch without
   direct user/assistant text instead of blocking a required compaction for
   nothing, and a wall-clock budget with rate-limit backoff and a part cap.
-  The whole provider was then imported into this repository as
-  `integrations/hermes/plugin/ctx` (verbatim at 1.7.1, commit `e9ae6010`
-  under his authorship) and is maintained here from 1.8.0 on — the second
-  Hermes memory provider next to `ctx_checkpoint`, the full one: recall,
-  agent tools, built-in memory mirror, fact extraction with cross-compaction
-  dedupe, session digests and the `hermes ctx` CLI, built from his
-  long-term production use.
+  The whole provider was then imported into this repository (verbatim at
+  1.7.1, commit `e9ae6010` under his authorship) and became the memory engine
+  of `ctx_checkpoint` 0.6.0 (`integrations/hermes/plugin/ctx_checkpoint/memory`):
+  recall, agent tools, built-in memory mirror, fact extraction with
+  cross-compaction dedupe, session digests and the `hermes ctx_checkpoint` CLI,
+  built from his long-term production use.
 
 ## How to be listed
 
