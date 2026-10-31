@@ -26,8 +26,17 @@ dispatch (`tools/mcp_tool_handlers.py`) actually produce.
   now filters on the `checkpoint-head` tag, which every head carries.
 - **No shared heads for different sessions.** A root id that sanitizing or the
   48-character cut changes (`team/alice:1` vs `team:alice/1`) gets an 8-character hash
-  of the full id as suffix. Ordinary Hermes ids (`20261031_120000_abcdef`, UUIDs) keep
-  their titles, so existing heads are still found.
+  of the full id as suffix. Timestamp ids (`20261031_120000_abcdef`) and UUIDs keep
+  their titles. Hermes' `local-<sha256>` session ids (70 characters, the format of
+  cli/tui sessions on the gateway store) and every other id over 48 characters get the
+  suffix too.
+- **Chains started under 0.6.0 continue.** For a root whose head title changed, the
+  writer looks up the 0.6.0 title once when no head exists under the new one (and the
+  process has no chain cached): the new manifest links to that head's latest manifest,
+  its fact-dedupe keys carry over, and the new head is published under the new title
+  (log `lookup=legacy`). The old head is taken only if its metadata names the same full
+  root id — `team/alice:1` and `team:alice/1` shared it under 0.6.0 — and it stays as
+  it is.
 - **Block ids over MCP.** `McpClient` took the first UUID anywhere in a store answer when
   the `(id: …)` group was missing; the answer starts with the title, which can carry a
   UUID-shaped session id. Only a structured `id` or the `(id: …)` group count now; no id
@@ -43,6 +52,17 @@ dispatch (`tools/mcp_tool_handlers.py`) actually produce.
   Hermes' MCP timeout (300 s by default). An explicit `timeout` now bounds the dispatch on
   a worker thread (caller's context variables copied along) and raises `code="timeout"`;
   calls without one keep the transport's timeout.
+- **`/stop` reaches bounded MCP calls.** Hermes' interrupts are per thread; the worker of
+  a bounded call now acts for the calling thread (`tools.interrupt.acting_for_tid`, set
+  inside the copied context), so a `/stop` aimed at the caller ends the call as it ends
+  an unbounded one. In Hermes' default compression path the hook itself runs on a
+  `compress-ctx-timeout` pool worker that is not marked as acting for the agent; there
+  neither 0.6.0 nor 0.6.1 sees `/stop` (host side, `tools/thread_context.py`).
+- **REST availability reads `rest_base_url`.** `is_available()` and `get_status_config()`
+  loaded defaults and `ctx.json` only. With `transport: rest`, `rest_base_url` in
+  `memory.ctx_checkpoint` and no `CTX_BASE_URL`, Hermes dropped the provider before
+  `initialize()` and `hermes memory status` reported it as not configured. Both read the
+  same settings overlay as `initialize()` now.
 
 ## [ctx_checkpoint 0.6.0] — 2026-10-31 (engine 1.8.0, folded in)
 

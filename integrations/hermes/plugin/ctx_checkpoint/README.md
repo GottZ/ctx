@@ -38,7 +38,8 @@ features on. Everything else has a working default. The key goes into Hermes'
 `.env` as `CTX_API_KEY`; `config.yaml` only references it. Setting up a ctx server
 is covered in the [ctx README](https://github.com/GottZ/ctx#readme). From a ctx
 checkout the directory can also be installed with
-`integrations/hermes/scripts/install.sh`.
+`integrations/hermes/scripts/install.sh` — the way to get the memory features while
+the catalog still pins 0.5.0.
 
 The plugin talks to ctx through Hermes' own MCP dispatch and holds no
 credentials of its own. Setup writes the same configuration you could also
@@ -190,10 +191,10 @@ Two suites, run separately (both use fakes, no live ctx; the host contract comes
 from a Hermes checkout):
 
 ```bash
-# umbrella: checkpoint contract, negotiation, setup surfaces, MCP transport (84)
+# umbrella: checkpoint contract, negotiation, setup surfaces, MCP transport (88)
 PYTHONPATH=/path/to/hermes-agent:integrations/hermes/plugin python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/tests
-# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (289)
+# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (292)
 HERMES_REPO=/path/to/hermes-agent python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/memory/tests
 # lint + format + bandit rules (ruff.toml in this directory)

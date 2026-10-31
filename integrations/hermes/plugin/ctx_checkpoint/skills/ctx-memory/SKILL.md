@@ -1,7 +1,7 @@
 ---
 name: ctx-memory
 description: "Use the ctx knowledge store as long-term memory and evidence layer: query as a question, search to browse, get by id, verify before acting, persist one durable fact per block."
-version: 0.6.0
+version: 0.6.1
 author: ctx (GottZ/ctx)
 license: MPL-2.0
 metadata:
@@ -101,7 +101,8 @@ explicit stores so provenance tags stay consistent (`source:hermes`, `profile:<n
   recoverable later. Retrieve it with `ctx_search` in category `compaction-checkpoints`
   by `Compaction checkpoint head <root-session>` and `types_exclude: []` (checkpoint
   blocks are excluded by default), then `get` the head and its manifest. A root session
-  id outside `[A-Za-z0-9_.-]` or longer than 48 characters appears in the title
+  id outside `[A-Za-z0-9_.-]` or longer than 48 characters (Hermes' `local-<sha256>`
+  ids among them) appears in the title
   sanitized (`_` for other characters), cut and with an 8-character hash suffix —
   search by its sanitized start; the full id is in the head's `root_session_id`.
 - **Recall** (memory features on): relevant blocks are injected before each turn, labelled

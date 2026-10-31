@@ -81,6 +81,13 @@ quality ("memory drift"). `sync_turn` only counts exchanges for the digest trigg
 engine. See the [plugin README](../README.md#install). Verify with `hermes memory status`
 and `hermes ctx_checkpoint status`.
 
+The Hermes plugin catalog still pins plugin 0.5.0 (`ee8cb2e`), which predates this
+engine: a catalog install has neither the "Memory features" choice nor the `ctx_*` tools.
+Until the re-pin lands upstream
+([hermes-agent #147170](https://github.com/NousResearch/hermes-agent/pull/147170)),
+install from a ctx checkout with `integrations/hermes/scripts/install.sh`
+([integration guide](../../../README.md)).
+
 ## Configuration
 
 All settings live under `memory.ctx_checkpoint` in Hermes' `config.yaml`, by the key names

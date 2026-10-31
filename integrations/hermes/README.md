@@ -46,7 +46,7 @@ digests, the `hermes ctx_checkpoint` CLI and the bundled `ctx-memory` skill.
 | | checkpoint layer (always) | memory layer (`memory: true`) |
 |---|---|---|
 | Purpose | archive the direct transcript before every compaction; block the compaction under `compression.checkpoint_required` until the checkpoint is durable | let Hermes *use* the store: recall, explicit tools, mirrored built-in memory, facts, digests |
-| Transport | Hermes' MCP dispatch to `mcp_servers.<mcp_server>`; no credentials in the plugin | the same, by default; `transport: rest` (own `CTX_KEY`) adds semantic `/api/query` recall and the CLI's read/write commands |
+| Transport | Hermes' MCP dispatch to `mcp_servers.<mcp_server>` by default, no credentials in the plugin; with `transport: rest` the chain goes over REST too | the same transport; `transport: rest` (own `CTX_KEY`) adds semantic `/api/query` recall and the CLI's read/write commands |
 | Writes per compaction | parts + manifest + head | plus up to 5 `learnings` facts and a segment digest |
 | Agent contexts | chain written in every context, labelled via `metadata.agent_context` | mirror, facts, digests skipped in `cron`/`flush`/`subagent` forks |
 | Setup | Desktop/Dashboard memory form or `hermes memory setup ctx_checkpoint` | the same form; one `memory: on/off` choice |
@@ -326,11 +326,11 @@ compaction.
 
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (26 tests on `v0.22.4`, 2026-10)
-and provider-side here in `plugin/ctx_checkpoint/tests/` (84 tests, mocked
-MCP dispatch — no live ctx needed): `test_provider_contract.py` (26) covers
+and provider-side here in `plugin/ctx_checkpoint/tests/` (88 tests, mocked
+MCP dispatch — no live ctx needed): `test_provider_contract.py` (28) covers
 the checkpoint chain, `test_contract_negotiation.py` (23) the runtime
 negotiation against the real host on `PYTHONPATH` plus a monkeypatched v3
-host, `test_setup.py` (35) the setup surfaces, each test against its own
+host, `test_setup.py` (37) the setup surfaces, each test against its own
 temporary `HERMES_HOME`, including a round trip through the host's Dashboard
 form writer (skipped on hosts older than `v2026.9.7`, which lack it).
 
@@ -348,6 +348,11 @@ ctx search compaction-checkpoints query:"Compaction checkpoint head <root-sessio
 ctx get <head-id>        # → latest_manifest_id
 ctx get <manifest-id>    # → source part IDs, parent manifest chain
 ```
+
+A root id longer than 48 characters (Hermes' `local-<sha256>` ids among them) or
+one outside `[A-Za-z0-9_.-]` appears in the title sanitized, cut to at most 39
+characters and with an 8-character hash suffix (since 0.6.1); search by the id's
+start, the full id is in the head's `metadata.root_session_id`.
 
 Load source parts only when exact wording or provenance is needed — the head
 and manifest are deliberately small so routine recall stays cheap.
@@ -388,7 +393,9 @@ and manifest are deliberately small so routine recall stays cheap.
 - Catalog pin: 0.5.0 at `ee8cb2e` (`plugin-catalog/ctx_checkpoint.yaml`
   upstream; listed 2026-10-25 with 0.4.4 at `98749f3`, re-pinned 2026-10-29 in
   #145302). `VERSION` in this repository can run ahead of the pin until the
-  next re-pin PR lands.
+  next re-pin PR lands; the re-pin to 0.6.0 is open upstream as
+  [#147170](https://github.com/NousResearch/hermes-agent/pull/147170)
+  (2026-10-31).
 - Plugin contract ceiling: `PLUGIN_CHECKPOINT_API_MAX = 2` in
   `plugin/ctx_checkpoint/__init__.py` — the declared version is negotiated
   at runtime as `max(2, min(host, plugin))`, see
@@ -417,11 +424,14 @@ and manifest are deliberately small so routine recall stays cheap.
   content cap in UTF-8 bytes (Cyrillic/CJK transcripts failed every checkpoint),
   the head search filters on the `checkpoint-head` tag (the MCP transport drops
   `types`), root ids that sanitizing or the 48-character cut changes get a hash
-  suffix in the head title (ordinary ids keep theirs), MCP store answers yield a
-  block id only from a structured `id` or the `(id: …)` group, `confirm_writes`
-  keys are refused by name instead of the never-reached auto-confirm, the chain
-  writer's per-call budget bounds MCP dispatches too, and `install.sh` writes
-  dot-prefixed backups.
+  suffix in the head title (timestamp ids and UUIDs keep theirs, Hermes'
+  `local-<sha256>` ids get the suffix) and a chain started under the 0.6.0 title
+  continues under the new one, MCP store answers yield a block id only from a
+  structured `id` or the `(id: …)` group, `confirm_writes` keys are refused by name
+  instead of the never-reached auto-confirm, the chain writer's per-call budget
+  bounds MCP dispatches too and `/stop` aimed at the caller still reaches them,
+  `transport: rest` is available with `rest_base_url` in the section alone, and
+  `install.sh` writes dot-prefixed backups.
 
 ## Licensing
 
