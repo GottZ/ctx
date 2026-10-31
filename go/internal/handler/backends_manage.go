@@ -315,18 +315,22 @@ func embedEquivalenceClaimed(b *backends.Backend) bool {
 // update it may only keep what the row already carried (prev nil on create),
 // and only while the proven identity stays: the probe measured ONE host,
 // wire protocol and embed model, so changing any of them while keeping the
-// flag would carry a stale proof onto a different vector space.
+// flag would carry a stale proof onto a different vector space. The embed
+// roles belong to that identity too (§F-§8): adding dream-embed to a flagged
+// row, or pointing its dream-embed role at another model through model_map,
+// would put a vector space nobody measured into the background embeds under
+// the old proof (sameEmbedIdentity).
 // Returns false after writing the 422.
 func checkEmbedEquivalenceClaim(w http.ResponseWriter, ar *auth.AuthResult, prev, next *backends.Backend) bool {
 	if ar.IsServerAdmin() || !embedEquivalenceClaimed(next) {
 		return true
 	}
 	if embedEquivalenceClaimed(prev) {
-		if prev.Host == next.Host && prev.Protocol == next.Protocol && embedModelOf(prev) == embedModelOf(next) {
+		if prev.Host == next.Host && prev.Protocol == next.Protocol && sameEmbedIdentity(prev, next) {
 			return true
 		}
 		writeBackendValidation(w, []backends.FieldError{{Field: "metadata",
-			Message: "embed_equivalence_verified was proven for this row's previous base_url, protocol and embed model — drop the flag when changing them; a server-admin re-runs the equivalence probe"}})
+			Message: "embed_equivalence_verified was proven for this row's previous base_url, protocol, embed roles and embed models — drop the flag when changing them; a server-admin re-runs the equivalence probe"}})
 		return false
 	}
 	writeBackendValidation(w, []backends.FieldError{{Field: "metadata",

@@ -234,10 +234,38 @@ func (h *ManageHandler) equivReference(ar *auth.AuthResult, cand *backends.Backe
 // embedModelOf resolves the model an embed call on b would use (RoleEmbed →
 // "default" → F1 Model field, the ModelFor chain).
 func embedModelOf(b *backends.Backend) string {
-	if spec := b.ModelFor(backends.RoleEmbed); spec.Model != "" {
+	return embedModelFor(b, backends.RoleEmbed)
+}
+
+// embedModelFor resolves the model a call under one embed role would use on b
+// (role → "default" → F1 Model field, the ModelFor chain).
+func embedModelFor(b *backends.Backend, role string) string {
+	if spec := b.ModelFor(role); spec.Model != "" {
 		return spec.Model
 	}
 	return b.ModelFor("default").Model
+}
+
+// equivEmbedRoles are the roles that write into the shared vector space —
+// the part of a row the equivalence proof speaks for.
+var equivEmbedRoles = []string{backends.RoleEmbed, backends.RoleDreamEmbed}
+
+// sameEmbedIdentity reports whether next embeds exactly like prev in every
+// way the equivalence proof depends on beyond host and protocol: the same
+// subset of embed roles, and for each of them the same resolved model. A
+// tenant-admin may change everything else on a flagged row (chat roles,
+// priority, limits …) — not the embed roles it serves under nor the model
+// either of them resolves to (§F-§8).
+func sameEmbedIdentity(prev, next *backends.Backend) bool {
+	for _, role := range equivEmbedRoles {
+		if prev.HasRole(role) != next.HasRole(role) {
+			return false
+		}
+		if next.HasRole(role) && embedModelFor(prev, role) != embedModelFor(next, role) {
+			return false
+		}
+	}
+	return true
 }
 
 // admittedEmbed runs ONE embed wire call through the dispatch admission layer

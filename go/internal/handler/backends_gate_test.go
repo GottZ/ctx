@@ -535,6 +535,56 @@ func TestBackendEmbedEquivalenceClaim(t *testing.T) {
 		})
 	}
 
+	// §F-§8: the embed roles and the model each of them resolves to belong to
+	// the proven identity as well. RED with the host/protocol/embed-model
+	// comparison alone: all four reach the api_key_ref gate instead.
+	bpBoth := backends.NewPool(nil, nil)
+	both := tenantRow("0190-proven-both", true)
+	both.Roles = []string{backends.RoleEmbed, backends.RoleDreamEmbed}
+	bpBoth.SeedSnapshotForTest([]backends.Backend{tenantRow("0190-proven", true), both})
+	for name, c := range map[string]struct {
+		id     string
+		change map[string]any
+	}{
+		"AddDreamEmbedRole": {"0190-proven", map[string]any{"roles": []string{"embed", "dream-embed"}}},
+		"AddDreamEmbedRoleAndModel": {"0190-proven", map[string]any{
+			"roles": []string{"embed", "dream-embed"}, "model_map": map[string]any{"default": "m", "dream-embed": "other-model"},
+		}},
+		"DreamEmbedModel": {"0190-proven-both", map[string]any{"model_map": map[string]any{"default": "m", "dream-embed": "other-model"}}},
+		"DropEmbedRole":   {"0190-proven-both", map[string]any{"roles": []string{"dream-embed"}}},
+	} {
+		t.Run("Update_TenantAdmin_KeepFlag_"+name+"_422", func(t *testing.T) {
+			req := update(c.id)
+			data := req["data"].(map[string]any)
+			for k, v := range c.change {
+				data[k] = v
+			}
+			rec := manageReqWithPool(t, tenantAdminScopedAR("tenant-a"), bpBoth, req)
+			if msg := fieldErrorsOf(t, rec)["metadata"]; rec.Code != http.StatusUnprocessableEntity || !strings.Contains(msg, "embed roles") {
+				t.Fatalf("stale equivalence proof kept across a %s change: status %d body %s", name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+	// Everything outside the embed identity stays the tenant-admin's to change:
+	// a chat role or a model for a role the row does not embed under.
+	for name, change := range map[string]map[string]any{
+		"AddChatRole":             {"roles": []string{"embed", "chat"}},
+		"ModelForAbsentEmbedRole": {"model_map": map[string]any{"default": "m", "dream-embed": "other-model"}},
+	} {
+		t.Run("Update_TenantAdmin_KeepFlag_"+name+"_PassesClaim", func(t *testing.T) {
+			req := update("0190-proven")
+			data := req["data"].(map[string]any)
+			for k, v := range change {
+				data[k] = v
+			}
+			rec := manageReqWithPool(t, tenantAdminScopedAR("tenant-a"), bpBoth, req)
+			fields := fieldErrorsOf(t, rec)
+			if rec.Code != http.StatusUnprocessableEntity || fields["api_key_ref"] == "" || fields["metadata"] != "" {
+				t.Fatalf("a change outside the embed identity was rejected: status %d body %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
 	t.Run("Update_ServerAdmin_KeepFlag_ChangeBaseURL_PassesClaim", func(t *testing.T) {
 		req := update("0190-proven")
 		req["data"].(map[string]any)["base_url"] = "https://other-embed.example.com"
