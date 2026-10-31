@@ -408,3 +408,61 @@ func assertStatus(t *testing.T, err error, want int) {
 		t.Errorf("status = %d, want %d (err: %v)", fe.Status, want, err)
 	}
 }
+
+// Mint rule (GHSA 2026-10-31 §7): a signed URL reaches the foreign host byte for
+// byte, so no part of it may serve as an exfiltration channel for model output.
+
+func TestProxiableURL_ExfilChannelsRefused(t *testing.T) {
+	long := "/" + strings.Repeat("a", MaxPathLen-1) // escaped path exactly at the cap
+	cases := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"plain https", "https://e.com/a.png", true},
+		{"plain http", "http://e.com/a.png", true},
+		{"fragment only (never sent)", "https://e.com/a.png#x", true},
+		{"path at the cap", "https://e.com" + long, true},
+		{"query string", "https://evil.example/p.png?d=secret", false},
+		{"empty query marker", "https://evil.example/p.png?", false},
+		{"query without path", "https://evil.example?d=secret", false},
+		{"userinfo", "https://secret@evil.example/p.png", false},
+		{"userinfo with password", "https://u:secret@evil.example/p.png", false},
+		{"path over the cap", "https://e.com" + long + "b", false},
+		{"escaped path over the cap", "https://e.com/" + strings.Repeat("%41", MaxPathLen/3+1), false},
+		{"relative", "/relative.png", false},
+		{"data uri", "data:image/png;base64,AAAA", false},
+		{"mailto", "mailto:x@y", false},
+		{"ftp", "ftp://e.com/a.png", false},
+	}
+	for _, c := range cases {
+		if got := ProxiableURL(c.url); got != c.want {
+			t.Errorf("%s: ProxiableURL(%q) = %v, want %v", c.name, c.url, got, c.want)
+		}
+	}
+}
+
+func TestParseOrigin(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   Origin
+		ok     bool
+		maxURL int
+	}{
+		{"", OriginAssistant, true, 1}, // absent = strictest
+		{"assistant", OriginAssistant, true, 1},
+		{"issue", OriginIssue, true, 0},
+		{"Assistant", "", false, 0},
+		{"chat", "", false, 0},
+	}
+	for _, c := range cases {
+		got, ok := ParseOrigin(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("ParseOrigin(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
+			continue
+		}
+		if ok && got.MaxURLs() != c.maxURL {
+			t.Errorf("%q.MaxURLs() = %d, want %d", got, got.MaxURLs(), c.maxURL)
+		}
+	}
+}

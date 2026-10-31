@@ -31,15 +31,18 @@ type CamoHandler struct {
 // NewCamoHandler wires the handler to a (possibly disabled) service.
 func NewCamoHandler(svc *camo.Service) *CamoHandler { return &CamoHandler{svc: svc} }
 
-// signRequest is the batch mint body: the foreign image URLs a rendered document
-// wants to proxy.
+// signRequest is the mint body: the foreign image URLs a rendered document wants
+// to proxy, and the kind of content they come from (camo.Origin: "assistant" for
+// LLM output, "issue" for forge/issue markdown; absent = "assistant").
 type signRequest struct {
-	URLs []string `json:"urls"`
+	URLs   []string `json:"urls"`
+	Origin string   `json:"origin"`
 }
 
 // signResponse maps each proxiable input URL to its signed proxy path. URLs that
-// are not proxiable (relative, data:, mailto:, unparseable) are simply omitted —
-// the renderer keeps the placeholder for those.
+// are not proxiable (relative, data:, mailto:, unparseable, a query string,
+// userinfo, an over-long path) are simply omitted — the renderer keeps the
+// placeholder for those.
 type signResponse struct {
 	Success    bool              `json:"success"`
 	Signatures map[string]string `json:"signatures"`
@@ -68,6 +71,18 @@ func (h *CamoHandler) HandleSign(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "invalid request body"})
 		return
 	}
+	origin, ok := camo.ParseOrigin(req.Origin)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "unknown origin"})
+		return
+	}
+	// LLM output is click-to-load (GHSA 2026-10-31 §7): one click signs one
+	// image. A batch from assistant content means something is signing on
+	// render again — refuse it whole rather than sign a prefix.
+	if limit := origin.MaxURLs(); limit > 0 && distinctCount(req.URLs) > limit {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "assistant images are signed one at a time (click-to-load)"})
+		return
+	}
 
 	sigs := make(map[string]string, len(req.URLs))
 	for _, u := range req.URLs {
@@ -82,9 +97,18 @@ func (h *CamoHandler) HandleSign(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, signResponse{Success: true, Signatures: sigs})
 }
 
+// distinctCount counts the distinct URLs of a sign request.
+func distinctCount(urls []string) int {
+	seen := make(map[string]struct{}, len(urls))
+	for _, u := range urls {
+		seen[u] = struct{}{}
+	}
+	return len(seen)
+}
+
 // HandleFetch implements GET /api/img/{sig} (auth-less, signature = capability).
 // Order (design §4.4): parse exp → verify sig (constant work, ZERO fetch on
-// failure) → expiry → fetch under policy → stream with a safe content-type and
+// failure) → expiry → mint rule (ProxiableURL) → fetch under policy → stream with a safe content-type and
 // immutable cache headers. Errors carry NO image body and a no-store cache header
 // (D7) so a broken upstream cannot trigger a retry storm and the browser simply
 // shows a broken image (the renderer may re-instate its placeholder).
@@ -116,6 +140,14 @@ func (h *CamoHandler) HandleFetch(w http.ResponseWriter, r *http.Request) {
 	// legitimately had it — but still triggers ZERO fetch.
 	if exp <= time.Now().Unix() {
 		camoError(w, http.StatusGone)
+		return
+	}
+
+	// The mint rule again, at redemption: a signature minted before the
+	// query-string/path rule existed (or under any future drift of it) must not
+	// carry a payload to the foreign host either (GHSA 2026-10-31 §7). ZERO fetch.
+	if !camo.ProxiableURL(rawURL) {
+		camoError(w, http.StatusForbidden)
 		return
 	}
 
