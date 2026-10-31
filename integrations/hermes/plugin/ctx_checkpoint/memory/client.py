@@ -26,6 +26,7 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -141,7 +142,11 @@ class CtxClient:
         timeout: float = 10.0,
         synthesis_timeout: float = 90.0,
     ):
-        self._base = base_url.rstrip("/")
+        parsed = urllib.parse.urlsplit(str(base_url or "").strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            # urllib would happily open file:// or other schemes; the store is an http(s) API.
+            raise ValueError("CTX base URL must be an http(s) URL with a host")
+        self._base = base_url.strip().rstrip("/")
         self._key = api_key
         self._timeout = timeout
         self._synthesis_timeout = synthesis_timeout
@@ -158,13 +163,13 @@ class CtxClient:
             "Accept": "application/json",
         }
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310
         t = timeout if timeout is not None else self._timeout
         last_error: CtxApiError | None = None
 
         for attempt in (0, 1):  # one retry on 429 (per-key write rate limit)
             try:
-                with urllib.request.urlopen(req, timeout=t) as resp:
+                with urllib.request.urlopen(req, timeout=t) as resp:  # noqa: S310 — http(s) only, see __init__
                     raw = resp.read().decode("utf-8", "replace")
                 try:
                     parsed = json.loads(raw)
@@ -178,7 +183,7 @@ class CtxClient:
                 try:
                     body = exc.read(16384).decode("utf-8", "replace")
                 except Exception:
-                    pass
+                    logger.debug("CTX error body unreadable", exc_info=True)
                 code, err_text = _parse_error_body(body)
                 detail = err_text or body[:300] or str(exc.reason)
                 message = f"HTTP {exc.code}{f' [{code}]' if code else ''}: {detail[:300]}"

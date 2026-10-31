@@ -1,4 +1,4 @@
 name: ctx_checkpoint
-version: 0.5.1
-description: Archive direct transcript evidence before compaction.
+version: 0.6.0
+description: "ctx memory provider: durable pre-compaction transcript checkpoints (fail-closed on request), and with memory: true recall, ctx_* agent tools, MEMORY.md/USER.md mirror, fact extraction and session digests — over Hermes' own MCP dispatch, no credentials of its own."
 requires_hermes: ">=0.20.4"

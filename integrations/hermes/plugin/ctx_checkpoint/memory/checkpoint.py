@@ -37,7 +37,7 @@ from .client import CtxApiError, response_code, store_block_id
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "1.8.0"  # keep in sync with plugin.yaml (tests/test_host_contract.py)
+PLUGIN_VERSION = "0.6.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -101,39 +101,52 @@ def _load_host_module(name: str):
     return importlib.import_module(name)
 
 
-def _probe_host_checkpoint_api() -> int:
+def _probe_host_checkpoint_api(
+    contract_module: str | None = None,
+    feature_module: str | None = None,
+    constant: str | None = None,
+    feature: str | None = None,
+    fallback: int | None = None,
+) -> int:
     """Checkpoint contract version of the loading host; never raises.
 
-    3 only when the constant is >= 3 AND the host exposes ``HOST_V3_FEATURE`` as a
-    callable; 2 when the constant is >= 2; else 1. Any failure → ``_PROBE_FALLBACK_API``.
+    3 only when the constant is >= 3 AND the host exposes the v3 feature as a callable;
+    2 when the constant is >= 2; else 1. Any failure → the fallback. The module and
+    attribute names default to this module's constants; the umbrella passes its own so
+    they stay patchable on the plugin module (tests simulate hosts that way).
     """
+    contract_module = contract_module or _HOST_CONTRACT_MODULE
+    feature_module = feature_module or _HOST_FEATURE_MODULE
+    constant = constant or _HOST_CONTRACT_CONSTANT
+    feature = feature or HOST_V3_FEATURE
+    fallback = _PROBE_FALLBACK_API if fallback is None else fallback
     try:
-        contract = _load_host_module(_HOST_CONTRACT_MODULE)
-        version = getattr(contract, _HOST_CONTRACT_CONSTANT, None)
+        contract = _load_host_module(contract_module)
+        version = getattr(contract, constant, None)
         if isinstance(version, bool) or not isinstance(version, int):
             logger.debug(
                 "ctx checkpoint host probe: %s.%s is %r, not an int; assuming v%d",
-                _HOST_CONTRACT_MODULE,
-                _HOST_CONTRACT_CONSTANT,
+                contract_module,
+                constant,
                 version,
-                _PROBE_FALLBACK_API,
+                fallback,
             )
-            return _PROBE_FALLBACK_API
+            return fallback
         if version >= 3:
-            features = _load_host_module(_HOST_FEATURE_MODULE)
-            if callable(getattr(features, HOST_V3_FEATURE, None)):
+            features = _load_host_module(feature_module)
+            if callable(getattr(features, feature, None)):
                 return 3
             logger.debug(
                 "ctx checkpoint host probe: constant %d but %s.%s missing; reporting v2",
                 version,
-                _HOST_FEATURE_MODULE,
-                HOST_V3_FEATURE,
+                feature_module,
+                feature,
             )
             return 2
         return 2 if version >= 2 else 1
     except Exception:
-        logger.debug("ctx checkpoint host probe failed; assuming v%d", _PROBE_FALLBACK_API, exc_info=True)
-        return _PROBE_FALLBACK_API
+        logger.debug("ctx checkpoint host probe failed; assuming v%d", fallback, exc_info=True)
+        return fallback
 
 
 def _negotiate_checkpoint_api(host_api: int) -> int:
@@ -351,7 +364,9 @@ class ChainReceipt:
     def frame(self) -> str:
         """Upstream receipt text (bounded, < 1000 chars; part IDs deliberately omitted)."""
         if not self.head_id:
-            return "ctx checkpoint: empty (no direct user/assistant evidence — nothing to archive)"
+            # Nothing archived: an empty receipt keeps the compaction summary free of a
+            # no-op line; the host counts the returning provider as a successful checkpoint.
+            return ""
         return (
             f"ctx checkpoint head: `{self.head_id}`\n"
             f"ctx checkpoint manifest: `{self.manifest_id}`\n"
@@ -368,6 +383,7 @@ class ChainWriter:
     partial failure never moves the stable head."""
 
     client: Any
+    category: str = CATEGORY_CHECKPOINT
     sensitivity: str = "personal"
     chunk_chars: int = DEFAULT_CHUNK_CHARS
     max_parts: int = DEFAULT_MAX_PARTS
@@ -446,7 +462,7 @@ class ChainWriter:
             budget_s,
             self.client.store,
             stats,
-            category=CATEGORY_CHECKPOINT,
+            category=self.category,
             title=title,
             content=content,
             sensitivity=self.sensitivity,
@@ -476,7 +492,7 @@ class ChainWriter:
             self.client.search,
             stats,
             text=head_title,
-            category=CATEGORY_CHECKPOINT,
+            category=self.category,
             types=[CHECKPOINT_TYPE],
             limit=10,
         )
@@ -515,13 +531,15 @@ class ChainWriter:
         tool_evidence: Any = None,
         cached_manifest_id: str | None = None,
         host_api: int | None = None,
+        negotiated_api: int | None = None,
         fact_hashes: list[str] | None = None,
     ) -> ChainReceipt:
         started = self.monotonic()
         if deadline is None:
             deadline = started + float(budget_s)
         host_api = _probe_host_checkpoint_api() if host_api is None else host_api
-        negotiated_api = _negotiate_checkpoint_api(host_api)
+        if negotiated_api is None:
+            negotiated_api = _negotiate_checkpoint_api(host_api)
         tool_status = self.tool_index_status(tool_evidence)
 
         rendered = render_direct_evidence(messages)
@@ -547,7 +565,7 @@ class ChainWriter:
         max_parts = max(1, min(int(self.max_parts), MAX_PARTS_CEILING))
         if len(chunks) > max_parts:
             raise CtxCheckpointError(
-                f"ctx checkpoint needs {len(chunks)} parts > checkpoint_max_parts {max_parts} "
+                f"ctx checkpoint needs {len(chunks)} parts > max_parts {max_parts} "
                 "(write rate limit 100/60s per key); nothing written"
             )
 
@@ -581,7 +599,7 @@ class ChainWriter:
             "invalidated_by": "A verified correction or transcript-recovery finding",
             # own provenance key — metadata.provenance is server-owned (403 reserved_metadata)
             "ctx_plugin": {
-                "writer": "hermes-ctx-plugin",
+                "writer": "ctx_checkpoint",
                 "version": PLUGIN_VERSION,
                 "profile": self.profile,
                 "port_of": UPSTREAM_REF,

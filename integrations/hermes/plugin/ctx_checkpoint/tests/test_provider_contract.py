@@ -1,14 +1,17 @@
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 from agent.memory_manager import MemoryManager
 
-
 _PROVIDER_PATH = Path(__file__).resolve().parents[1] / "__init__.py"
-_SPEC = importlib.util.spec_from_file_location("ctx_checkpoint_provider_contract", _PROVIDER_PATH)
+_SPEC = importlib.util.spec_from_file_location(
+    "ctx_checkpoint_provider_contract", _PROVIDER_PATH, submodule_search_locations=[str(_PROVIDER_PATH.parent)]
+)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE  # package context for the plugin's relative imports
 _SPEC.loader.exec_module(_MODULE)
 CtxCheckpointMemoryProvider = _MODULE.CtxCheckpointMemoryProvider
 
@@ -29,9 +32,7 @@ def test_provider_publishes_versioned_stable_head_with_bounded_frame():
     provider = CtxCheckpointMemoryProvider(dispatch=dispatch)
     provider.initialize("root/session-a", platform="cli")
 
-    frame = provider.on_pre_compress(
-        [{"role": "user", "content": "durable source decision"}]
-    )
+    frame = provider.on_pre_compress([{"role": "user", "content": "durable source decision"}])
 
     assert provider.pre_compress_checkpoint_api_version == 2
     assert [name for name, _ in calls] == [
@@ -68,9 +69,7 @@ def test_provider_frame_stays_bounded_when_transcript_spans_many_source_blocks()
     )
     provider.initialize("session-a", platform="cli")
 
-    frame = provider.on_pre_compress(
-        [{"role": "user", "content": "durable " + "x" * 12_000}]
-    )
+    frame = provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}])
 
     assert len(calls) > 7
     source_parts = [call[1]["metadata"]["part"] for call in calls[1:-2]]
@@ -101,12 +100,8 @@ def test_provider_upserts_same_head_title_for_new_transcript_digest():
     provider = CtxCheckpointMemoryProvider(dispatch=dispatch)
     provider.initialize("session-a", platform="cli")
 
-    first = provider.on_pre_compress(
-        [{"role": "user", "content": "first durable decision"}]
-    )
-    second = provider.on_pre_compress(
-        [{"role": "user", "content": "second corrected decision"}]
-    )
+    first = provider.on_pre_compress([{"role": "user", "content": "first durable decision"}])
+    second = provider.on_pre_compress([{"role": "user", "content": "second corrected decision"}])
 
     assert calls[3][1]["title"] == calls[7][1]["title"]
     assert calls[2][1]["title"] != calls[6][1]["title"]
@@ -216,9 +211,7 @@ def test_provider_links_new_manifest_to_previous_head_manifest_before_head_updat
 
     provider = CtxCheckpointMemoryProvider(dispatch=dispatch)
     provider.initialize("session-a", platform="cli")
-    provider.on_pre_compress(
-        [{"role": "user", "content": "new durable child checkpoint"}]
-    )
+    provider.on_pre_compress([{"role": "user", "content": "new durable child checkpoint"}])
 
     assert [name for name, _ in calls] == [
         "mcp__ctx__search",
@@ -249,9 +242,7 @@ def _store_metadata_for(**initialize_kwargs):
 
     provider = CtxCheckpointMemoryProvider(dispatch=dispatch)
     provider.initialize("session-fork", **initialize_kwargs)
-    provider.on_pre_compress(
-        [{"role": "user", "content": "fork evidence worth archiving"}]
-    )
+    provider.on_pre_compress([{"role": "user", "content": "fork evidence worth archiving"}])
     return [args["metadata"] for name, args in calls if name == "mcp__ctx__store"]
 
 
@@ -362,11 +353,15 @@ def test_redaction_failure_raises_instead_of_being_mistaken_for_empty_evidence(m
     def broken(text, force=False):
         raise RuntimeError("redactor down")
 
-    monkeypatch.setattr(_MODULE, "redact_sensitive_text", broken)
+    import agent.redact as host_redact
+
+    monkeypatch.setattr(host_redact, "redact_sensitive_text", broken)
     import pytest
 
     with pytest.raises(_MODULE.CtxCheckpointError, match="redaction failed"):
-        provider.on_pre_compress([{"role": "user", "content": "secret-ish evidence"}])
+        provider.on_pre_compress([{"role": "user", "content": "secret-ish evidence"}], require_checkpoint=True)
+    # best effort: logged, never raised, nothing written
+    assert provider.on_pre_compress([{"role": "user", "content": "secret-ish evidence"}]) == ""
     assert calls == []
 
 
@@ -379,7 +374,7 @@ def test_more_parts_than_max_parts_writes_nothing():
     )
     provider.initialize("session-a", platform="cli")
     with pytest.raises(_MODULE.CtxCheckpointError, match="max_parts 3"):
-        provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}])
+        provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}], require_checkpoint=True)
     assert calls == []
 
 
@@ -420,7 +415,7 @@ def test_rate_limit_beyond_budget_fails_closed(monkeypatch):
 
     monkeypatch.setattr(_MODULE, "_sleep", advancing_sleep)
     with pytest.raises(_MODULE.CtxCheckpointError, match="budget 5s"):
-        provider.on_pre_compress([{"role": "user", "content": "rate limited evidence"}])
+        provider.on_pre_compress([{"role": "user", "content": "rate limited evidence"}], require_checkpoint=True)
     assert "mcp__ctx__store" in [name for name, _ in calls]
 
 
@@ -439,7 +434,7 @@ def test_exhausted_budget_before_a_store_fails_closed(monkeypatch):
     provider = CtxCheckpointMemoryProvider(dispatch=slow_dispatch)
     provider.initialize("session-a", platform="cli")
     with pytest.raises(_MODULE.CtxCheckpointError, match="budget 60s exceeded"):
-        provider.on_pre_compress([{"role": "user", "content": "slow evidence"}])
+        provider.on_pre_compress([{"role": "user", "content": "slow evidence"}], require_checkpoint=True)
     # Only the head search ran; no partial chain was written.
     assert [name for name, _ in calls] == ["mcp__ctx__search"]
 

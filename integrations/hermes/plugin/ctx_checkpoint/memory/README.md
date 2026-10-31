@@ -1,17 +1,18 @@
-# CTX Memory Provider for Hermes Agent
+# ctx_checkpoint — memory engine
 
 [CTX](https://github.com/GottZ/ctx) is a self-hosted knowledge store with a hybrid
 retrieval pipeline (semantic + fulltext + trigram RRF, temporal gravity, Dream-mode
 graph expansion). This plugin registers it as a [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 memory provider: cross-session long-term memory without sending data to a third party.
 
-Written by derLonius ([W4-NERF](https://github.com/W4-NERF)) as
-[hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin) from long-term use
-and maintained in the ctx repository since 1.8.0 (see
-[License & attribution](#license--attribution)). It is the **full** provider; the
-sibling [`ctx_checkpoint`](../ctx_checkpoint/README.md) is the checkpoint-only provider
-that talks to ctx through Hermes' MCP dispatch and holds no credentials of its own.
-Which one to pick: [integration guide](../../README.md#two-providers).
+This directory is the memory engine of the [`ctx_checkpoint`](../README.md) plugin:
+the code behind recall, the `ctx_*` tools, the `MEMORY.md`/`USER.md` mirror, fact
+extraction, session digests, the checkpoint chain over REST or MCP, and the CLI. It was
+written by derLonius ([W4-NERF](https://github.com/W4-NERF)) as
+[hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin) from long-term use and
+folded into `ctx_checkpoint` 0.6.0 (see [License & attribution](#license--attribution)).
+Install, setup and the plugin-level settings are in the [plugin README](../README.md);
+this page documents the engine: every setting, the tools, the CLI and the internals.
 
 | | |
 |---|---|
@@ -65,68 +66,35 @@ quality ("memory drift"). `sync_turn` only counts exchanges for the digest trigg
   (`agent.memory_provider.PRE_COMPRESS_CHECKPOINT_API_VERSION >= 2`); profile-scoped
   secrets, context-bound threads and the recall indicator are used when the host
   provides them and degrade to plain behaviour otherwise.
-- **CTX server** ([GottZ/ctx](https://github.com/GottZ/ctx)) and an API key. API keys are
-  managed on the server (`ctx keys create <label> --home <scope>`); blocks are stored in
-  the key's `home_scope` — use a key with a shared scope if other agents should see
-  Hermes' blocks. `types_exclude` needs server v5.x; older servers are covered by a
-  client-side filter.
+- **CTX server** ([GottZ/ctx](https://github.com/GottZ/ctx)). Over the default MCP
+  transport the key lives in the `mcp_servers.ctx` entry (set up by the plugin); with
+  `transport: rest` the engine reads `CTX_BASE_URL`/`CTX_KEY` from the profile's `.env`.
+  API keys are managed on the server (`ctx keys create <label> --home <scope>`); blocks
+  are stored in the key's `home_scope` — use a key with a shared scope if other agents
+  should see Hermes' blocks. `types_exclude` needs server v5.x; older servers are covered
+  by a client-side filter.
 
-## Installation
+## Installation and setup
 
-The provider is this directory (`integrations/hermes/plugin/ctx/` in GottZ/ctx). Install
-it as a user plugin named `ctx`:
+`hermes plugins install ctx_checkpoint`, then the Desktop/Dashboard memory form or
+`hermes memory setup ctx_checkpoint`; answer `on` to "Memory features" to enable this
+engine. See the [plugin README](../README.md#install). Verify with `hermes memory status`
+and `hermes ctx_checkpoint status`.
 
-```bash
-# from a ctx checkout
-integrations/hermes/scripts/install.sh --plugin ctx [--hermes-home PATH]
-# or by hand: copy this directory to $HERMES_HOME/plugins/ctx/
-```
+## Configuration
 
-Then run `hermes memory setup` and pick `ctx`. The directory name must be `ctx` (per
-profile, e.g. `~/.hermes/plugins/ctx/` or `~/.hermes/profiles/<name>/plugins/ctx/`).
-Do not put a `pyproject.toml` into the installed plugin directory: older Hermes plugin
-managers auto-disable such a plugin (see CHANGELOG 1.7.1). The `tests/` directory
-inside the plugin is harmless to ship (`ctx_checkpoint` does the same); remove it if
-you prefer a lean install. The plugin is not in the Hermes plugin catalog yet.
-
-**Next to a `mcp_servers.ctx` entry.** `ctx_checkpoint` users already have a ctx MCP
-server configured. With both, the model sees two tool surfaces for the same store:
-this plugin's `ctx_query/ctx_store/ctx_search/ctx_get` and the MCP tools
-`mcp__ctx__query/store/search/get`. Nothing breaks, but pick one: either disable the
-MCP entry (`enabled: false`) while `memory.provider: ctx` is active, or keep the MCP
-tools and leave this plugin's recall/mirror/digest paths on while telling the model
-in your system prompt which surface to use for explicit stores.
-
-## Setup
-
-```bash
-hermes memory setup          # pick "ctx" — prompts for the base URL and the API key
-```
-
-Or manually:
-
-```bash
-hermes config set memory.provider ctx
-echo "CTX_BASE_URL=https://ctx.example.com" >> ~/.hermes/.env
-echo "CTX_KEY=your-key"                      >> ~/.hermes/.env
-```
-
-Verify:
-
-```bash
-hermes memory status         # "✓ Connected · <url> · scope: … · label: …"
-hermes ctx status            # plugin CLI (available while memory.provider is ctx)
-```
-
-## Configuration — `$HERMES_HOME/ctx.json`
-
-Only the base URL and the key are prompted during setup; everything else is optional.
-`CTX_BASE_URL` / `CTX_KEY` from the environment (the profile's `.env`) override the file.
-Out-of-range values are clamped, unknown values fall back to the default.
+All settings live under `memory.ctx_checkpoint` in Hermes' `config.yaml`, by the key names
+below (the plugin's own `category`/`sensitivity`/`chunk_chars`/`budget_s`/`max_parts` map
+onto `checkpoint_category`/`checkpoint_sensitivity`/`checkpoint_chunk_chars`/
+`checkpoint_budget_s`/`checkpoint_max_parts`). A legacy `$HERMES_HOME/ctx.json` is still
+read with lower priority. With `memory: false` recall, capture and fact extraction are
+forced off. For `transport: rest`, `CTX_BASE_URL` / `CTX_KEY` from the environment (the
+profile's `.env`) or `rest_base_url` in the section name the server. Out-of-range values
+are clamped, unknown values fall back to the default.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `ctx_base_url` | — | CTX server base URL (also `CTX_BASE_URL`) |
+| `ctx_base_url` | — | REST transport only: CTX server base URL (also `CTX_BASE_URL`, or `rest_base_url` in the section) |
 | `sensitivity_default` | `personal` | Sensitivity of plugin writes — automatic, `ctx_store` default, CLI (`credentials`/`personal`/`internal`/`public`) |
 | `prefetch_mode` | `query` | `query` (semantic, search fallback) or `search` (lightweight only) |
 | `max_prefetch_results` | `5` | Max blocks injected per turn (1–10) |
@@ -142,25 +110,27 @@ Out-of-range values are clamped, unknown values fall back to the default.
 | `api_timeout` | `10` | Seconds for retrieval and write calls (1–30) |
 | `synthesis_timeout` | `90` | Seconds for `synthesize: true` queries (15–300) |
 | `checkpoint_mode` | `best_effort` | `off` = legacy v1 hook (raw transcript, no chain); `best_effort` / `required` = checkpoint API v2 (identical in the plugin — fail-closed is requested by the host, see below) |
-| `checkpoint_budget_s` | `20` | Time budget for the synchronous pre-compress writes, chain and required facts share it (5–60) |
+| `checkpoint_budget_s` | `60` | Time budget for the synchronous pre-compress writes, chain and required facts share it (5–600; plugin key `budget_s`) |
 | `checkpoint_chain` | `true` | Write the transcript chain (needs `checkpoint_mode` ≠ `off`); independent of `auto_compress_extract` |
-| `checkpoint_sensitivity` | `personal` | Sensitivity of chain blocks (transcripts are personal data) |
-| `checkpoint_chunk_chars` | `36000` | Part size (1 000–40 000 chars) |
-| `checkpoint_max_parts` | `80` | Max parts per checkpoint (1–95; server write limit 100/60 s per key) — more ⇒ nothing written, error |
+| `checkpoint_sensitivity` | `internal` | Sensitivity of chain blocks (plugin key `sensitivity`; the engine's own default is `personal`) |
+| `checkpoint_category` | `compaction-checkpoints` | ctx category of the chain blocks (plugin key `category`) |
+| `checkpoint_chunk_chars` | `36000` | Part size (1 000–40 000 chars; plugin key `chunk_chars`) |
+| `checkpoint_max_parts` | `80` | Max parts per checkpoint (1–95; server write limit 100/60 s per key; plugin key `max_parts`) — more ⇒ nothing written, error |
 | `digest_min_exchanges` | `4` | Min. new user/assistant text messages since the last digest of the root session (1–1000) |
 | `digest_every_exchanges` | `40` | Rolling digest after N new exchanges; `0` = off |
 | `digest_every_hours` | `6` | Rolling digest at a turn ≥ N h after the last digest (with ≥ `digest_min_exchanges`); `0` = off |
 | `idle_digest_minutes` | `360` | Digest the open segment after N min without a turn; `0` = off |
 | `state_retention_days` | `30` | Delete `$HERMES_HOME/ctx_state` files untouched for N days (once per process); `0` = never |
 
-Example:
+Example (`config.yaml`):
 
-```json
-{
-  "ctx_base_url": "https://ctx.example.com",
-  "sensitivity_default": "internal",
-  "max_prefetch_results": 5
-}
+```yaml
+memory:
+  provider: ctx_checkpoint
+  ctx_checkpoint:
+    memory: true
+    sensitivity_default: internal
+    max_prefetch_results: 5
 ```
 
 Whether a pre-compress checkpoint is mandatory is decided by the host
@@ -185,15 +155,17 @@ Category conventions: `infrastructure`, `decisions`, `projects`, `reference`,
 
 ## CLI
 
-`hermes ctx` (available while `memory.provider: ctx` is active; non-zero exit code on failure):
+`hermes ctx_checkpoint` (available while `memory.provider: ctx_checkpoint` is active; non-zero exit
+code on failure). `status` always works; the other commands need `transport: rest`, because the
+CLI process has no MCP dispatch — over MCP, use the ctx tools inside a session or the ctx CLI.
 
 ```bash
-hermes ctx status                                  # profile, connection, ctx.json settings
-hermes ctx sync                                    # push MEMORY.md/USER.md entries to CTX
-hermes ctx query "what port does X use?"           # [--synthesize] [--all-types]
-hermes ctx store infrastructure "INFRA-GIT" "Host 192.0.2.10, user hermes" --sensitivity internal --tag git
-hermes ctx search "docker compose" --category reference   # [--tag T]... [--all-types]
-hermes ctx get <block-id>
+hermes ctx_checkpoint status                                  # profile, connection, ctx.json settings
+hermes ctx_checkpoint sync                                    # push MEMORY.md/USER.md entries to CTX
+hermes ctx_checkpoint query "what port does X use?"           # [--synthesize] [--all-types]
+hermes ctx_checkpoint store infrastructure "INFRA-GIT" "Host 192.0.2.10, user hermes" --sensitivity internal --tag git
+hermes ctx_checkpoint search "docker compose" --category reference   # [--tag T]... [--all-types]
+hermes ctx_checkpoint get <block-id>
 ```
 
 CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tagged
@@ -257,11 +229,10 @@ CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tag
 
 ### Transcript checkpoint chain
 
-Module [`checkpoint.py`](checkpoint.py) is a port of
-[`ctx_checkpoint`](../ctx_checkpoint/) (plugin 0.4.3, commit `38fdb74`) to the REST
-client, see [License & attribution](#license--attribution). `ctx_checkpoint` 0.5.1 took
-four of the port's improvements back (auth-header redaction, explicit type, no-op on
-empty evidence, budget/backoff/part cap), so the two chains behave alike.
+Module [`checkpoint.py`](checkpoint.py) is a port of the plugin's original chain writer
+(`ctx_checkpoint` 0.4.3, commit `38fdb74`) to a client interface, see
+[License & attribution](#license--attribution); since 0.6.0 it is the one chain writer of
+the plugin and runs over either transport.
 
 - Per compaction: search the head by title (`types: ["checkpoint"]`) → read
   `latest_manifest_id` → write the parts (`### Message N — role`, split at message
@@ -381,7 +352,7 @@ environment that has pytest and the host's dependencies, from the ctx checkout:
 
 ```bash
 HERMES_REPO=/path/to/hermes-agent python -m pytest -p no:cacheprovider \
-    integrations/hermes/plugin/ctx/tests
+    integrations/hermes/plugin/ctx_checkpoint/memory/tests
 ```
 
 The ctx repository's CI does not run these tests (it has no Hermes checkout); run them
@@ -389,42 +360,42 @@ locally before a change lands. Lint and format (configuration in `ruff.toml` ins
 plugin directory — deliberately no `pyproject.toml`, see CHANGELOG 1.7.1):
 
 ```bash
-cd integrations/hermes/plugin/ctx && ruff check . && ruff format --check .
+cd integrations/hermes/plugin/ctx_checkpoint && ruff check . && ruff format --check .
 ```
 
-Layout (`integrations/hermes/plugin/ctx/`, installed as `$HERMES_HOME/plugins/ctx/`):
+Layout (`integrations/hermes/plugin/ctx_checkpoint/memory/`):
 
 ```
-__init__.py           register(ctx) entry point
-provider.py           CtxMemoryProvider: lifecycle, recall, hooks, digests
+__init__.py           engine package (the umbrella in ../__init__.py registers with Hermes)
+provider.py           CtxMemoryProvider: lifecycle, recall, hooks, digests, seams for the umbrella
 tools.py              ctx_query / ctx_store / ctx_search / ctx_get
-client.py             stdlib HTTP client for the CTX REST API
-config.py             ctx.json, secrets, tags, fact heuristics, fact ledger
-checkpoint.py         transcript checkpoint chain (REST port of ctx_checkpoint)
+client.py             stdlib HTTP client for the CTX REST API (transport: rest)
+mcp_client.py         the same surface over Hermes' MCP dispatch (default transport)
+config.py             settings, umbrella mapping, secrets, tags, fact heuristics, fact ledger
+checkpoint.py         transcript checkpoint chain (ChainWriter)
 digest.py             digest state, lineage root, state pruning
-cli.py                hermes ctx … commands
-plugin.yaml           manifest (name, version, hooks)
-CHANGELOG.md          release history (1.x by W4-NERF; 1.8.0+ here)
-ruff.toml             lint/format configuration (development only)
-tests/                pytest suite (conftest loads the plugin as package ctx_plugin)
+cli.py                hermes ctx_checkpoint … commands (wrapped by ../cli.py)
+CHANGELOG.md          engine history (1.x by W4-NERF; 0.6.0+ with the plugin)
+tests/                pytest suite (conftest loads the engine as package ctx_plugin)
 ```
 
 ## License & attribution
 
-[Mozilla Public License 2.0](../../../../LICENSE), like the rest of ctx.
+[Mozilla Public License 2.0](../../../../../LICENSE), like the rest of ctx.
 
-This provider was written by **derLonius ([W4-NERF](https://github.com/W4-NERF))** as
+This engine was written by **derLonius ([W4-NERF](https://github.com/W4-NERF))** as
 [hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin) (releases 1.0–1.7.1,
 2026-09/10, from long-term production use) and offered to the ctx project for porting.
 It was imported verbatim at 1.7.1 (upstream commit `fbd210a`) in GottZ/ctx commit
-`e9ae6010`, which carries his authorship; everything from 1.8.0 on is maintained here,
-with changes recorded in [CHANGELOG.md](CHANGELOG.md). His review notes and the
+`e9ae6010`, which carries his authorship, and folded into the `ctx_checkpoint` plugin
+as its memory engine in 0.6.0; everything since is maintained here, with changes
+recorded in [CHANGELOG.md](CHANGELOG.md). His review notes and the
 reciprocal review are tracked in
 [W4-NERF/hermes-ctx-plugin#3](https://github.com/W4-NERF/hermes-ctx-plugin/issues/3).
 
 [`checkpoint.py`](checkpoint.py) and
 [`tests/test_p3_checkpoint_chain.py`](tests/test_p3_checkpoint_chain.py) are modified
-versions of [`ctx_checkpoint`](../ctx_checkpoint/) (plugin 0.4.3, commit `38fdb74`,
+versions of the plugin's original chain writer (`ctx_checkpoint` 0.4.3, commit `38fdb74`,
 © Jan-Stefan Janetzky, MPL-2.0); their file headers keep that notice. Changes vs. that
 origin: REST `CtxClient` instead of MCP dispatch, explicit `type=checkpoint`, time
 budget, rate-limit backoff, part cap, configurable sensitivity, own metadata key

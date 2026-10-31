@@ -144,10 +144,11 @@ def test_recall_status_counts_only_injected_hits(make_provider):
 
 
 def test_plugin_yaml_version_matches_chain_metadata_version():
-    text = (PLUGIN_DIR / "plugin.yaml").read_text(encoding="utf-8")
+    # The engine lives in ctx_checkpoint/memory/; the manifest is the umbrella plugin's.
+    text = (PLUGIN_DIR.parent / "plugin.yaml").read_text(encoding="utf-8")
     match = re.search(r"^version:\s*([\w.]+)\s*$", text, re.M)
     assert match and match.group(1) == checkpoint.PLUGIN_VERSION
-    assert re.search(r"^name:\s*ctx\s*$", text, re.M), "the directory/provider name must stay 'ctx'"
+    assert re.search(r"^name:\s*ctx_checkpoint\s*$", text, re.M), "the plugin name is ctx_checkpoint"
 
 
 def test_plugin_dir_ships_no_tests():
@@ -184,4 +185,4 @@ def test_plugin_redaction_masks_auth_scheme_credentials(header):
 
 def test_version_file_matches_plugin_yaml():
     # install.sh and the ctx release notes read VERSION; keep it in lockstep with plugin.yaml.
-    assert (PLUGIN_DIR / "VERSION").read_text(encoding="utf-8").strip() == checkpoint.PLUGIN_VERSION
+    assert (PLUGIN_DIR.parent / "VERSION").read_text(encoding="utf-8").strip() == checkpoint.PLUGIN_VERSION

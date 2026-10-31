@@ -1,13 +1,45 @@
-# Changelog
+# Changelog — memory engine of ctx_checkpoint
 
-All notable changes to the CTX memory provider. Versions follow `plugin/plugin.yaml`.
-Internal phase names (P1–P6) refer to the ctx-plugin-v2 work packages.
+History of the memory engine (`ctx_checkpoint/memory/`). Entries up to 1.7.1 are the
+releases of [W4-NERF/hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin);
+from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSION`,
+`../plugin.yaml`) and this file records engine-level changes only. Internal phase names
+(P1–P6) refer to the ctx-plugin-v2 work packages.
 
-## [1.8.0] — 2026-10-31
+## [ctx_checkpoint 0.6.0] — 2026-10-31 (engine 1.8.0, folded in)
 
-Maintained in [GottZ/ctx](https://github.com/GottZ/ctx) as
-`integrations/hermes/plugin/ctx/` from this version on (imported verbatim at 1.7.1,
-commit `fbd210a`, with the author's attribution; see README "License & attribution").
+Imported verbatim at 1.7.1 (upstream commit `fbd210a`, GottZ/ctx commit `e9ae6010` under
+the author's name), then made the engine of the `ctx_checkpoint` plugin: one provider name,
+one settings section (`memory.ctx_checkpoint`), the plugin's setup surfaces and skill.
+
+### Added
+- `mcp_client.McpClient`: the same client surface over Hermes' MCP dispatch
+  (`mcp__<server>__{search,query,store,get,confirm}`) — the default transport of the
+  plugin, no credentials of its own. Retrieval-only recall runs on the `search` tool
+  (the MCP `query` tool always synthesizes); `transport: rest` keeps the REST client and
+  its semantic `/api/query` recall.
+- Umbrella mapping in `config.py` (`overlay_from_umbrella`, `umbrella_transport`,
+  `umbrella_memory_enabled`): `category`/`sensitivity`/`chunk_chars`/`budget_s`/`max_parts`
+  of the plugin section map onto the `checkpoint_*` keys; `memory: false` (default) forces
+  recall, capture and fact extraction off.
+- `checkpoint_category` (the chain category is a setting), `ChainWriter.category`,
+  `ChainWriter.write(negotiated_api=…)` and the provider seams `_connect`, `_now`,
+  `_probe_host_api`, `_negotiate`, `_config_overlay`, `_chain_writer_seams`.
+- Security sweep (standing `ruff --select S` gate in `ruff.toml`, tests in
+  `tests/test_security_sweep.py`): every automatic write — mirror, facts, digests — passes
+  the same double redaction as the chain before it leaves the process — content, the
+  block title derived from it and the receipt lines in the compaction summary — and a
+  failing redactor skips the write; recalled text cannot close the `<ctx-context>` recall
+  frame (closing tags are escaped) and recalled titles are flattened to one line; the REST
+  client accepts http(s) base URLs only; the read-only `state.db` lookup quotes the path
+  in the SQLite URI. An independent review pass over the diff found one gap (fact titles
+  from the unredacted text) and it is closed in the same release.
+
+### Fixed
+- The recall frame's closing tag was rendered as `</ctx-context>>` (one `>` too many).
+- `checkpoint_budget_s` clamps to 5–600 s (was 5–60), matching the plugin's `budget_s`.
+- An empty-evidence batch returns an empty receipt (no no-op line in the compaction
+  summary); the host counts a returning provider as a successful checkpoint.
 
 ### Changed
 - The transcript checkpoint chain is written in **every** agent context. The
@@ -23,8 +55,10 @@ commit `fbd210a`, with the author's attribution; see README "License & attributi
   `facts_reject_cjk_codeswitch` (default `false`). The `>20 % CJK` rule stays. The old
   default dropped every fact of a user writing Chinese/Japanese/Korean with Latin
   identifiers.
-- Tests live inside the plugin directory (`tests/`), as for `ctx_checkpoint`; the
-  bootstrap resolves the plugin as its parent directory.
+- Tests live in `memory/tests/` and load the engine as package `ctx_plugin`; run them
+  separately from the umbrella suite (`../tests/`), see the plugin README.
+- CLI is `hermes ctx_checkpoint <status|sync|query|store|search|get>`; the write and
+  read commands need `transport: rest` (the CLI process has no MCP dispatch).
 
 ### Added
 - README section on running this provider next to a `mcp_servers.ctx` entry (duplicate

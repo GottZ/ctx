@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Install a ctx memory provider plugin into a Hermes home directory.
+# Install the ctx_checkpoint memory provider into a Hermes home directory.
 #
-# Copies the user plugin to $HERMES_HOME/plugins/<name>/ and reports which
-# operating mode the host supports. Never edits config.yaml and never
+# Copies the whole plugin directory (umbrella, memory/ engine, skills/, cli.py) to
+# $HERMES_HOME/plugins/ctx_checkpoint/ and reports which operating mode the host
+# supports. Never edits config.yaml and never
 # restarts anything — config changes and process lifecycle stay with the
 # operator.
 #
 # Usage:
-#   install.sh [--plugin NAME] [--hermes-home PATH] [--hermes-src PATH] [--dry-run]
+#   install.sh [--hermes-home PATH] [--hermes-src PATH] [--dry-run]
 #
-#   --plugin NAME       ctx_checkpoint (default; checkpoint-only, MCP dispatch)
-#                       or ctx (full provider, REST client, own key)
 #   --hermes-home PATH  Hermes home (default: $HERMES_HOME, then /opt/data if
 #                       it holds a config.yaml, then ~/.hermes)
 #   --hermes-src PATH   Hermes source checkout/installation to probe for the
@@ -32,19 +31,14 @@ DRY_RUN=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --plugin)      PLUGIN_NAME="$2"; shift 2 ;;
         --hermes-home) HERMES_HOME_ARG="$2"; shift 2 ;;
         --hermes-src)  HERMES_SRC="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=1; shift ;;
-        -h|--help)     sed -n '2,23p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,22p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 
-case "$PLUGIN_NAME" in
-    ctx_checkpoint|ctx) ;;
-    *) echo "unknown plugin: ${PLUGIN_NAME} (use ctx_checkpoint or ctx)" >&2; exit 2 ;;
-esac
 PLUGIN_SRC="${SCRIPT_DIR}/../plugin/${PLUGIN_NAME}"
 
 [ -f "${PLUGIN_SRC}/__init__.py" ] || {
@@ -80,7 +74,8 @@ else
     fi
     mkdir -p "${HOME_DIR}/plugins"
     cp -R "$PLUGIN_SRC" "$DEST"
-    rm -rf "${DEST}/__pycache__" "${DEST}/tests/__pycache__"
+    find "$DEST" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    rm -rf "${DEST}/.ruff_cache"
     echo "installed plugin version $(cat "${DEST}/VERSION")"
 fi
 
