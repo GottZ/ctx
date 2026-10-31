@@ -213,15 +213,70 @@ func (s *Service) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	return s.fetcher.Fetch(ctx, rawURL)
 }
 
+// MaxPathLen caps the escaped path of a proxiable URL. A signed URL is fetched
+// by the server, so every byte of it reaches the foreign host: the query string
+// is refused outright (ProxiableURL) and the path is bounded so it cannot carry
+// a bulk payload either (GHSA 2026-10-31 §7). Real image paths sit far below it.
+const MaxPathLen = 512
+
 // ProxiableURL reports whether rawURL is a candidate for proxying: a parseable
-// absolute http/https URL. SSRF is enforced at fetch time (fetch.go); this only
-// filters obvious non-images (mailto:, data:, relative) at mint time.
+// absolute http/https URL with no query string, no userinfo and an escaped path
+// of at most MaxPathLen bytes. SSRF is enforced at fetch time (fetch.go); this
+// filters obvious non-images (mailto:, data:, relative) at mint time and closes
+// the exfiltration channels a URL offers before anything is fetched: model
+// output that echoes context into `?d=<secret>` (or into userinfo, which the
+// HTTP client sends as a Basic auth header, or into an unbounded path) must
+// never be signed (GHSA 2026-10-31 §7). The fetch handler re-checks it, so a
+// signature minted before this rule cannot be redeemed either.
 func ProxiableURL(rawURL string) bool {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return false
 	}
-	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.User != nil {
+		return false
+	}
+	return len(u.EscapedPath()) <= MaxPathLen
+}
+
+// Origin names the kind of rendered content a sign request comes from. The
+// SPA declares it; the server applies the stricter rule for model output.
+type Origin string
+
+const (
+	// OriginAssistant is LLM output (chat assistant turns). Its images are
+	// click-to-load in the SPA, so a sign request carries exactly the one URL
+	// the viewer clicked — a batch is refused (GHSA 2026-10-31 §7).
+	OriginAssistant Origin = "assistant"
+	// OriginIssue is forge/issue markdown: foreign text, but no model in the
+	// loop, so its images stay automatic (batch-signed per render).
+	OriginIssue Origin = "issue"
+)
+
+// ParseOrigin maps the wire value to an Origin. An absent value is treated as
+// OriginAssistant — the strictest rule, so a caller that omits the field never
+// gets the batch behaviour by default. An unknown value is ok=false.
+func ParseOrigin(v string) (Origin, bool) {
+	switch Origin(strings.TrimSpace(v)) {
+	case "", OriginAssistant:
+		return OriginAssistant, true
+	case OriginIssue:
+		return OriginIssue, true
+	default:
+		return "", false
+	}
+}
+
+// MaxURLs is the per-request cap on distinct URLs for this origin; 0 means no
+// cap beyond the request body itself.
+func (o Origin) MaxURLs() int {
+	if o == OriginAssistant {
+		return 1
+	}
+	return 0
 }
 
 // sigFor computes hex(HMAC-SHA256(key, url + "\n" + exp)) — the wire signature.

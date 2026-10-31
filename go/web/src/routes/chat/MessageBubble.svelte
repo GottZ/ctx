@@ -5,7 +5,7 @@
   // hardening, design 04 §4.4). Tool messages are not rendered here (they
   // surface as ToolCallCard under the assistant turn that called them).
   import { renderMarkdown } from '../../lib/markdown/markdown'
-  import { camoProxy } from '../../lib/markdown/camo'
+  import { camoClickToLoad } from '../../lib/markdown/camo'
   import type { Sensitivity } from '../../lib/chat/types'
 
   let {
@@ -27,8 +27,8 @@
   </div>
   {#if role === 'assistant'}
     <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by renderMarkdown -->
-    <!-- use:camoProxy swaps remote-image placeholders for proxied same-origin <img> post-render (design 07 §4.3) -->
-    <div class="body md" use:camoProxy={html}>{@html html}{#if streaming}<span class="cursor"></span>{/if}</div>
+    <!-- use:camoClickToLoad: remote images in LLM output load only on a click, one image per click (design 07 §4.3, GHSA 2026-10-31 §7) -->
+    <div class="body md" use:camoClickToLoad={html}>{@html html}{#if streaming}<span class="cursor"></span>{/if}</div>
   {:else}
     <div class="body user-text">{content}</div>
   {/if}
@@ -136,6 +136,16 @@
     border-radius: var(--radius);
     padding: 0 var(--space-1);
     word-break: break-all;
+  }
+  .md :global(.md-img-load) {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    padding: 0 var(--space-1);
+  }
+  .md :global(.md-img) {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius);
   }
   .md :global(.md-truncated) {
     font-family: var(--font-mono);
