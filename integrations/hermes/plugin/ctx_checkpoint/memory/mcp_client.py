@@ -181,12 +181,14 @@ class McpClient:
                 text = str(error)
                 code = _code_for_error(text)
                 if code == "confirm_writes":
+                    # Guidance and hash first: the chain writer keeps only the first 200
+                    # characters of this message, and the server name is the variable part.
                     hash_match = _PAYLOAD_HASH_RE.search(text)
                     raise CtxApiError(
-                        f"mcp {tool}: staged, not stored — the ctx key behind mcp_servers.{self._server} has "
-                        "confirm_writes, and this plugin never confirms on the operator's behalf; use a key "
-                        "without confirm_writes"
-                        + (f" (staged payload_hash {hash_match.group(1)})" if hash_match else ""),
+                        f"mcp {tool}: staged, not stored — the key has confirm_writes and this plugin never "
+                        "confirms on the operator's behalf; "
+                        + (f"payload_hash {hash_match.group(1)}; " if hash_match else "")
+                        + f"use a key without confirm_writes for mcp_servers.{self._server}",
                         code=code,
                     )
                 raise CtxApiError(f"mcp {tool}: {text[:300]}", status=429 if code == "rate_limit" else None, code=code)

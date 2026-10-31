@@ -525,8 +525,11 @@ def test_staged_store_is_refused_by_name_and_never_confirmed():
     provider.initialize("session-a", platform="cli")
 
     # Not just the raw server text: the refusal is coded and says what to do.
-    with pytest.raises(_MODULE.CtxCheckpointError, match=r"\[confirm_writes\].*staged, not stored"):
+    with pytest.raises(_MODULE.CtxCheckpointError, match=r"\[confirm_writes\].*staged, not stored") as raised:
         provider.on_pre_compress([{"role": "user", "content": "evidence"}], require_checkpoint=True)
+    # The staged hash survives the chain writer's 200-character cut of the cause.
+    message = str(raised.value)
+    assert "payload_hash " + "ab" * 32 in message
     assert [name for name, _ in calls] == ["mcp__ctx__search", "mcp__ctx__store"]
     assert not any(name.endswith("__confirm") for name, _ in calls)
 
