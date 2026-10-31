@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -192,5 +194,49 @@ func TestDCRRegister_GrantTypesDefault(t *testing.T) {
 	}).spec()
 	if errCode != "" || !slices.Equal(spec.GrantTypes, []string{"authorization_code"}) {
 		t.Errorf("explicit grant_types = %v (%s), want [authorization_code]", spec.GrantTypes, errCode)
+	}
+}
+
+// TestWarnIfOpenDCR pins the boot warning for open registration (§F-§6):
+// exactly one WARN naming the env var when the mode resolves to open (the
+// same normalisation dcrMode applies per request), nothing for any other
+// value. The NewRouter wiring is pinned in cmd/ctxd
+// (TestNewRouterWarnsOnOpenDCR).
+func TestWarnIfOpenDCR(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mode     string
+		wantWarn bool
+	}{
+		{"Open", "open", true},
+		{"OpenPadded", " open ", true},
+		{"Admin", "admin", false},
+		{"Off", "off", false},
+		{"Unset", "", false},
+		{"TypoFailsClosed", "Open", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvDCRMode, tc.mode)
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			if got := warnIfOpenDCR(logger); got != tc.wantWarn {
+				t.Errorf("warned = %v, want %v", got, tc.wantWarn)
+			}
+			out := buf.String()
+			if !tc.wantWarn {
+				if out != "" {
+					t.Errorf("mode %q logged: %s", tc.mode, out)
+				}
+				return
+			}
+			if n := strings.Count(out, "\n"); n != 1 {
+				t.Errorf("%d log lines, want 1: %s", n, out)
+			}
+			for _, want := range []string{"level=WARN", "env=" + EnvDCRMode, "registration is open"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("warning lacks %q: %s", want, out)
+				}
+			}
+		})
 	}
 }

@@ -202,6 +202,23 @@ func dcrMode() string {
 	}
 }
 
+// WarnIfOpenDCR logs one warning when open registration is configured
+// (§F-§6). The mode is read per request, so nothing else would tell an
+// operator at boot that anyone can register a client; main calls this once
+// where the OAuth routes are mounted, never per request.
+func WarnIfOpenDCR() { warnIfOpenDCR(slog.Default()) }
+
+// warnIfOpenDCR is WarnIfOpenDCR against an explicit logger (tests capture
+// it); it reports whether it warned.
+func warnIfOpenDCR(logger *slog.Logger) bool {
+	if dcrMode() != "open" {
+		return false
+	}
+	logger.Warn("oauth: dynamic client registration is open — anyone can register a client; the /authorize consent screen is the only barrier before a user's key",
+		"env", EnvDCRMode)
+	return true
+}
+
 // Metadata serves GET /.well-known/oauth-authorization-server (RFC 8414).
 // Coupling rules (design 02 §4c, 02-W3): grant_types_supported includes
 // refresh_token since S4 actually issues and rotates them (the coupling

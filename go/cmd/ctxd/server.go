@@ -80,6 +80,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// unauthenticated) — auth lives IN the handler, not in middleware,
 	// because the mode decides whether auth applies at all.
 	r.Post("/register", oauthH.Register)
+	// The mode is read per request; this is the one boot line that says
+	// open registration is on (§F-§6).
+	handler.WarnIfOpenDCR()
 
 	// External-login consumer routes (OAuth L5, design 04 §4.2/§4.3) — public
 	// like the OAuth server endpoints above (these ARE the auth flow). The
