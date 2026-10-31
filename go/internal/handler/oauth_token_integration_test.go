@@ -131,6 +131,7 @@ func TestOpaqueTokenS3_Integration(t *testing.T) {
 		"redirect_uri":   {"https://claude.ai/api/mcp/auth_callback"},
 		"code_challenge":        {base64.RawURLEncoding.EncodeToString(chal[:])},
 		"code_challenge_method": {"S256"}, // mandatory since S5 (plain/absent → 400)
+		"consent":               {consentFieldValue}, // K7: explicit consent is checked server-side
 		"state":                 {"ot-state"},
 	}
 	authReq := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))

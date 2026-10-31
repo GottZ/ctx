@@ -16,7 +16,7 @@ tool section says so.
 |---|---|
 | Endpoint | `POST\|GET\|DELETE /mcp` — Streamable HTTP, **stateless** (no session; every call stands alone), JSON responses instead of SSE |
 | Server name | `ctx` |
-| Authentication | the same API key as the HTTP API, as `X-Context-Key: <key>` or `Authorization: Bearer <key>`; remote clients such as claude.ai use OAuth 2.1 with PKCE — register one with `ctx mcp add <label>` ([architecture](architecture.md)) |
+| Authentication | the same API key as the HTTP API, as `X-Context-Key: <key>` or `Authorization: Bearer <key>`; remote clients such as claude.ai use OAuth 2.1 with PKCE — register one with `ctx mcp add <label>` ([architecture](architecture.md)); `/authorize` is a consent screen that names the client and the address the browser returns to, warns about self-registered (DCR) clients and needs an explicit consent tick next to the key |
 | Request size | the body is capped at 1 MB before the MCP layer reads it; `store`, `update` and the issue tools cap content at 50 KB |
 | Scope | every tool acts within the scopes the key may read or write ([multi-tenancy](multi-tenancy.md)); a key without a resolved tenant identity is refused |
 

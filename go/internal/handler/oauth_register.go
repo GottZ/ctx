@@ -4,8 +4,10 @@
 // no registration_endpoint either), admin → server-admin bearer key required,
 // open → unauthenticated. Open registration grants ZERO data access (INV-B:
 // client.scopes is a requestable ceiling, never authoritative — the api key
-// entered at /authorize stays the hard authority cap); the open mode is
-// switched on in production only after the consent screen (K7) lands.
+// entered at /authorize stays the hard authority cap). Since K7 the
+// /authorize consent screen names the client and its redirect origin and
+// warns about self-registered clients (oauth_consent.go) — the UI barrier
+// against an open registration phishing a key into a code (advisory §6).
 package handler
 
 import (
