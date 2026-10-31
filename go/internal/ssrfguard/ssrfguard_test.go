@@ -100,6 +100,14 @@ func TestIsDeniedIP(t *testing.T) {
 		"64:ff9b::7f00:1":    true, // NAT64 → 127.0.0.1
 		"64:ff9b::a9fe:a9fe": true, // NAT64 → 169.254.169.254
 		"64:ff9b:1::1":       true,
+		// §F-ops: the well-known NAT64 prefix is judged by the embedded IPv4.
+		"64:ff9b::808:808":   false, // → 8.8.8.8 (DNS64 synthesis of a public host)
+		"64:ff9b::8c52:7003": false, // → 140.82.112.3
+		"64:ff9b::ac10:1":    true,  // → 172.16.0.1
+		"64:ff9b::a00:1":     true,  // → 10.0.0.1
+		"64:ff9b::6464:64c8": true,  // → 100.100.100.200 (CGNAT)
+		"64:ff9b::":          true,  // → 0.0.0.0
+		"64:ff9b:1::808:808": true,  // local-use /48 stays refused whatever it embeds
 		"fec0::1":            true,
 		"ff0e::1":            true,
 		"2002:7f00:1::":      true, // 6to4 of 127.0.0.1
@@ -135,11 +143,13 @@ func TestIsDeniedIP(t *testing.T) {
 }
 
 // TestIsDeniedIP_EveryTableRow walks deniedPrefixes: the first and last
-// address of every row — and, for IPv4 rows, both in 4-byte and in
-// IPv4-mapped 16-byte form — is denied, through IsDeniedIP and through the
-// dial-time DialControl hook.
+// address of every row — and, for IPv4 rows, in 4-byte form, in IPv4-mapped
+// 16-byte form and embedded in the NAT64 well-known prefix — is denied,
+// through IsDeniedIP and through the dial-time DialControl hook.
 func TestIsDeniedIP_EveryTableRow(t *testing.T) {
-	if len(deniedPrefixes) < 30 {
+	// 29 since §F-ops: 64:ff9b::/96 left the table for the embedded-IPv4
+	// check (nat64WellKnown).
+	if len(deniedPrefixes) < 29 {
 		t.Fatalf("deniedPrefixes has %d rows — table truncated?", len(deniedPrefixes))
 	}
 	for _, p := range deniedPrefixes {
@@ -149,7 +159,9 @@ func TestIsDeniedIP_EveryTableRow(t *testing.T) {
 			probes := []net.IP{net.IP(a.AsSlice())}
 			if a.Is4() {
 				m := netip.AddrFrom16(a.As16())
-				probes = append(probes, net.IP(m.AsSlice()))
+				v4 := a.As4()
+				nat64 := netip.AddrFrom16([16]byte{0, 0x64, 0xff, 0x9b, 12: v4[0], 13: v4[1], 14: v4[2], 15: v4[3]})
+				probes = append(probes, net.IP(m.AsSlice()), net.IP(nat64.AsSlice()))
 			}
 			for _, ip := range probes {
 				if !IsDeniedIP(ip) {

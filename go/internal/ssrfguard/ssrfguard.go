@@ -30,7 +30,8 @@ import (
 // 100.100.100.200 sits there), 0.0.0.0/8 beyond 0.0.0.0, 192.0.0.0/24,
 // 198.18.0.0/15, 240.0.0.0/4, most multicast, NAT64 and site-local open.
 // IPv4-mapped IPv6 (::ffff:a.b.c.d) is unmapped BEFORE the lookup, so the
-// IPv4 rows cover it.
+// IPv4 rows cover it; so is an address in the NAT64 well-known prefix (see
+// nat64WellKnown), which is therefore not a row of its own.
 var deniedPrefixes = []netip.Prefix{
 	// IPv4
 	netip.MustParsePrefix("0.0.0.0/8"),          // "this network" (RFC 791/1122)
@@ -53,8 +54,7 @@ var deniedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("::/128"),         // unspecified
 	netip.MustParsePrefix("::1/128"),        // loopback
 	netip.MustParsePrefix("::/96"),          // IPv4-compatible, deprecated (RFC 4291)
-	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known prefix (RFC 6052)
-	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use (RFC 8215)
+	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use (RFC 8215): IPv4 position not fixed, refused whole
 	netip.MustParsePrefix("100::/64"),       // discard-only (RFC 6666)
 	netip.MustParsePrefix("2001::/23"),      // IETF protocol assignments incl. Teredo (RFC 2928/4380)
 	netip.MustParsePrefix("2001:db8::/32"),  // documentation (RFC 3849)
@@ -66,19 +66,34 @@ var deniedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("ff00::/8"),       // multicast
 }
 
+// nat64WellKnown is the NAT64 well-known prefix (RFC 6052 §2.1): the IPv4
+// address the NAT64 gateway translates to sits in the low 32 bits. A
+// destination in it is judged by that embedded address — exactly the one the
+// gateway connects to — so 64:ff9b::7f00:1 (127.0.0.1) stays refused while
+// 64:ff9b::808:808 (8.8.8.8) passes. Refusing the whole /96 made every
+// IPv4-only host unreachable from an IPv6-only host behind DNS64 (§F-ops);
+// the local-use prefix 64:ff9b:1::/48 (RFC 8215) allows other prefix lengths,
+// so its IPv4 position is not fixed and it stays in deniedPrefixes.
+var nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
+
 // IsDeniedIP reports whether ip is an SSRF-forbidden target: any address in
 // deniedPrefixes — loopback (127/8, ::1), private (RFC 1918, fc00::/7),
 // link-local (169.254/16 incl. the cloud metadata endpoint 169.254.169.254,
 // fe80::/10), CGNAT (100.64/10), unspecified/"this network" (0/8, ::),
-// multicast, reserved/broadcast, documentation/benchmark ranges, NAT64,
-// 6to4/Teredo and site-local. IPv4-mapped IPv6 is unmapped first. A nil or
-// malformed ip is denied (fail-closed).
+// multicast, reserved/broadcast, documentation/benchmark ranges, NAT64
+// local-use, 6to4/Teredo and site-local. IPv4-mapped IPv6 is unmapped first,
+// and a NAT64 well-known-prefix address is replaced by the IPv4 address it
+// embeds. A nil or malformed ip is denied (fail-closed).
 func IsDeniedIP(ip net.IP) bool {
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
 		return true
 	}
 	addr = addr.Unmap()
+	if nat64WellKnown.Contains(addr) {
+		a := addr.As16()
+		addr = netip.AddrFrom4([4]byte{a[12], a[13], a[14], a[15]})
+	}
 	for _, p := range deniedPrefixes {
 		if p.Contains(addr) {
 			return true

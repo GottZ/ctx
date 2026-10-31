@@ -247,7 +247,8 @@ func validateEgressTarget(b *Backend) []FieldError {
 }
 
 // literalIPDenied reports whether base_url names a literal IP in the dial-time
-// deny-list (ssrfguard.IsDeniedIP: CGNAT 100.64/10, 198.18/15, 240/4, NAT64,
+// deny-list (ssrfguard.IsDeniedIP: CGNAT 100.64/10, 198.18/15, 240/4, NAT64
+// local-use and any 64:ff9b::/96 address embedding a refused IPv4,
 // multicast, documentation ranges …). DeriveLocality only knows the net.IP
 // predicates and calls those ranges "external"; without this the write path
 // would admit a row the guarded client then refuses on every call. Hostnames
