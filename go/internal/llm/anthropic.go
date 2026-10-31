@@ -466,7 +466,7 @@ func chatAnthropic(ctx context.Context, b backends.Backend, systemPrompt, userPr
 	}
 
 	var result anthropicResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("llm: decode response: %w", err)
 	}
 

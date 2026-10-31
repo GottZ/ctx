@@ -513,11 +513,14 @@ func parseAnthropicSSE(r io.Reader, onEvent func(StreamEvent) error) (*StreamRes
 		onEvent: onEvent, byIndex: map[int]*pendingToolCall{}, thinking: map[int]*pendingThinking{},
 		reasoning: map[int]json.RawMessage{}, texts: map[int]*strings.Builder{},
 	}
-	br := bufio.NewReader(r)
+	br := bufio.NewReader(httpx.CapBody(r, maxStreamBytes)) // caps: see maxSSEFrameBytes (stream.go)
 	var data []string
 	for {
-		line, readErr := br.ReadString('\n')
+		line, readErr := readSSELine(br)
 		if err := st.feedLine(strings.TrimRight(line, "\r\n"), &data); err != nil {
+			return nil, err
+		}
+		if err := checkSSEFrame(data); err != nil {
 			return nil, err
 		}
 		if st.done {

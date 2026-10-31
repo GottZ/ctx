@@ -163,7 +163,7 @@ func embedOllama(ctx context.Context, client *http.Client, host, apiKey, model, 
 	}
 
 	var result ollamaEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 
@@ -204,7 +204,7 @@ func embedOpenAI(ctx context.Context, client *http.Client, host, apiKey, model, 
 	}
 
 	var result openAIEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 

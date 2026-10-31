@@ -455,6 +455,50 @@ func (st *streamState) emit(ev StreamEvent) error {
 	return nil
 }
 
+// Stream caps (GHSA 2026-10-31 §3). A stream is consumed incrementally, so
+// its memory risk is one unterminated line or one data frame that never ends
+// — ReadString would buffer either without bound. maxSSEFrameBytes bounds a
+// line and a buffered multi-line data frame: a legitimate frame is one delta
+// (a few tokens, or one tool call's arguments — kilobytes), so 4 MiB is three
+// orders of magnitude of headroom. maxStreamBytes bounds the whole answer: a
+// 128000-token output at one token per frame and ≤ 300 bytes of framing per
+// chunk (OpenRouter's metadata-rich chunks) is ≈ 38 MiB, so 64 MiB keeps the
+// longest legitimate stream while ending a backend that streams forever.
+const (
+	maxSSEFrameBytes       = 4 << 20
+	maxStreamBytes   int64 = 64 << 20
+)
+
+// readSSELine is bufio.Reader.ReadString('\n') with the frame cap: the line
+// (terminator included) is returned with the reader's error, exactly like
+// ReadString, unless it grows past maxSSEFrameBytes.
+func readSSELine(br *bufio.Reader) (string, error) {
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if len(line)+len(chunk) > maxSSEFrameBytes {
+			return "", fmt.Errorf("%w: SSE line over %d bytes", httpx.ErrResponseTooLarge, maxSSEFrameBytes)
+		}
+		line = append(line, chunk...)
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return string(line), err
+		}
+	}
+}
+
+// checkSSEFrame bounds the data lines buffered for one not-yet-dispatched
+// frame (a server can send data: lines without ever sending the blank line).
+func checkSSEFrame(data []string) error {
+	n := 0
+	for _, d := range data {
+		n += len(d)
+	}
+	if n > maxSSEFrameBytes {
+		return fmt.Errorf("llm: %w: SSE frame over %d bytes", httpx.ErrResponseTooLarge, maxSSEFrameBytes)
+	}
+	return nil
+}
+
 // parseSSEStream reads SSE frames until [DONE] or EOF. Comment lines
 // (": OPENROUTER PROCESSING") are skipped per SSE spec; multi-line data
 // fields are joined with newlines before JSON decoding. Lenient endings:
@@ -463,11 +507,14 @@ func (st *streamState) emit(ev StreamEvent) error {
 // connection death must not look like a finished turn.
 func parseSSEStream(r io.Reader, onEvent func(StreamEvent) error) (*StreamResult, error) {
 	st := &streamState{onEvent: onEvent, byIndex: map[int]*pendingToolCall{}}
-	br := bufio.NewReader(r)
+	br := bufio.NewReader(httpx.CapBody(r, maxStreamBytes))
 	var data []string
 	for {
-		line, readErr := br.ReadString('\n')
+		line, readErr := readSSELine(br)
 		if err := st.feedLine(strings.TrimRight(line, "\r\n"), &data); err != nil {
+			return nil, err
+		}
+		if err := checkSSEFrame(data); err != nil {
 			return nil, err
 		}
 		if st.done {
