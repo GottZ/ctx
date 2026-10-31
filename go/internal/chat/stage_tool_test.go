@@ -164,6 +164,39 @@ func TestRunUpdateStagesAndCarriesTheCardPayload(t *testing.T) {
 	}
 }
 
+// §9h: the staged-update card carries the TARGET block's category, title
+// and scope (unchanged fields show the current values), and the engine writes
+// the tool content with the outcome sensitivity into history and turnMax. A
+// credentials-class target must therefore tag the outcome credentials — never
+// public — or its title reaches a lower-trust backend on the next turn. An
+// unknown target sensitivity (runner did not report one) fails closed.
+func TestRunUpdateOutcomeCarriesTargetSensitivity(t *testing.T) {
+	cases := map[string]string{
+		"credentials": "credentials",
+		"personal":    "personal",
+		"public":      "public",
+		"":            "credentials",
+	}
+	for target, want := range cases {
+		fs := &fakeStage{staged: &StagedWrite{
+			PayloadHash: "up789", Op: "update", Scope: "private", Category: "ops",
+			Title: "prod db password", TargetID: "0198aaaa-0000-7000-8000-000000000002",
+			UpdateFields: []string{"tags"}, TargetSensitivity: target,
+		}}
+		ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(fs)
+		out := ex.Run(context.Background(), nil, "key1", updateCall(`{"id":"0198aaaa","tags":["x"]}`))
+		if !out.OK {
+			t.Fatalf("target %q: staged update must be OK=true: %s", target, out.Content)
+		}
+		if string(out.Sensitivity) != want {
+			t.Errorf("target %q: outcome sensitivity = %q, want %q", target, out.Sensitivity, want)
+		}
+		if strings.Contains(out.Content, "target_sensitivity") {
+			t.Errorf("target %q: internal target sensitivity leaked into the card JSON: %s", target, out.Content)
+		}
+	}
+}
+
 func TestRunUpdateRequiresID(t *testing.T) {
 	ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(&fakeStage{})
 	out := ex.Run(context.Background(), nil, "key1", updateCall(`{"content":"neu"}`))

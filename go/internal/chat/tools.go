@@ -90,6 +90,11 @@ type StagedWrite struct {
 	// CanonicalWrite.UpdateFields — the card shows WHAT will change).
 	TargetID     string   `json:"target_id,omitempty"`
 	UpdateFields []string `json:"update_fields,omitempty"`
+	// TargetSensitivity is the target block's sensitivity as read by the
+	// stage runner's TOCTOU base read (update form only). Not serialised: it
+	// sets the ctx_update outcome sensitivity, because the card carries the
+	// target's category, title and scope (§9h); '' fails closed.
+	TargetSensitivity string `json:"-"`
 }
 
 // StageRunner stages a chat-initiated write (F6-C6 D-W6b). The chat surface is
@@ -598,8 +603,10 @@ func (ex *Executor) runStore(ctx context.Context, raw json.RawMessage) ToolOutco
 // runUpdate stages a chat block update (D-W6c) — like runStore it NEVER
 // executes one. Field pointers keep the omit-vs-clear distinction the staged
 // form hash-binds (update_fields list); the TOCTOU pin is captured by the
-// stage runner. The outcome sensitivity stays public: the update result
-// carries no block content beyond what the model itself supplied.
+// stage runner. The outcome sensitivity is the TARGET block's (fail-closed on
+// an unknown one): the staged card carries the target's category, title and
+// scope for every field the update leaves alone, and the engine writes this
+// content with this sensitivity into history and the turn maximum (§9h).
 func (ex *Executor) runUpdate(ctx context.Context, raw json.RawMessage) ToolOutcome {
 	if ex.stage == nil {
 		return errOutcome("ctx_update is not available")
@@ -630,7 +637,7 @@ func (ex *Executor) runUpdate(ctx context.Context, raw json.RawMessage) ToolOutc
 			"staged": staged,
 			"note":   "Update staged, NOT applied yet. The user must confirm the card shown in the UI. Tell the user to confirm or dismiss it; do not call ctx_update again for this change.",
 		}),
-		Sensitivity: backends.SensPublic,
+		Sensitivity: backends.MaxSensitivity(backends.SensPublic, backends.Sensitivity(staged.TargetSensitivity)),
 		OK:          true,
 		Summary:     "staged update — awaiting user confirmation",
 		Staged:      staged,

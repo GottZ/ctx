@@ -123,6 +123,15 @@ func TestUpdateConfirmCrossSurface(t *testing.T) {
 		if len(staged.UpdateFields) != 1 || staged.UpdateFields[0] != "content" {
 			t.Fatalf("update_fields = %v, want [content]", staged.UpdateFields)
 		}
+		// §9h: the runner reports the target's sensitivity from its base read
+		// (the ctx_update outcome inherits it).
+		var targetSens string
+		if err := pool.QueryRow(ctx, `SELECT sensitivity FROM context_blocks WHERE id = $1`, seed.ID).Scan(&targetSens); err != nil {
+			t.Fatalf("read target sensitivity: %v", err)
+		}
+		if staged.TargetSensitivity == "" || staged.TargetSensitivity != targetSens {
+			t.Fatalf("staged.TargetSensitivity = %q, want the target's %q", staged.TargetSensitivity, targetSens)
+		}
 		chatHash = staged.PayloadHash
 		if got := contentOf(seed.ID); got != "original content" {
 			t.Fatalf("chat update must NOT execute directly (content=%q) — default-confirm broken", got)
