@@ -122,8 +122,10 @@ It reads the file without `${VAR}` expansion, so no secret behind a template
 ends up in `config.yaml`. A package-managed install refuses setup. Setup
 never writes compaction settings.
 
-The entry pins an exact commit of this repository — currently `98749f3`,
-plugin 0.4.4, with a re-pin to 0.5.0 pending upstream — and Hermes enforces its `requires_hermes: ">=0.20.4"`. Changes
+The entry pins an exact commit of this repository — currently `ee8cb2e`
+(release v5.27.0), plugin 0.5.0, re-pinned in
+[#145302](https://github.com/NousResearch/hermes-agent/pull/145302) — and
+Hermes enforces its `requires_hermes: ">=0.20.4"`. Changes
 here reach catalog users only through a reviewed re-pin PR upstream that bumps
 the entry's `sha` and `version`; `hermes plugins update` then moves to the new
 pin. The catalog install does **not** probe the host: run the probes under
@@ -343,9 +345,10 @@ and manifest are deliberately small so routine recall stays cheap.
   a warning when `compression.threshold >= 0.85`, and `is_available()` now
   requires the ctx `mcp_servers` entry to exist; before 0.5.0 a missing entry
   counted as available).
-- Catalog pin: 0.4.4 at `98749f3` (`plugin-catalog/ctx_checkpoint.yaml`
-  upstream, listed 2026-10-25); re-pin to 0.5.0 pending. `VERSION` in this
-  repository can run ahead of the pin until the next re-pin PR lands.
+- Catalog pin: 0.5.0 at `ee8cb2e` (`plugin-catalog/ctx_checkpoint.yaml`
+  upstream; listed 2026-10-25 with 0.4.4 at `98749f3`, re-pinned 2026-10-29 in
+  #145302). `VERSION` in this repository can run ahead of the pin until the
+  next re-pin PR lands.
 - Plugin contract ceiling: `PLUGIN_CHECKPOINT_API_MAX = 2` in
   `plugin/ctx_checkpoint/__init__.py` — the declared version is negotiated
   at runtime as `max(2, min(host, plugin))`, see
