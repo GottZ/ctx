@@ -504,7 +504,7 @@ type backgroundTenant struct {
 // read_scopes ∩ owned, NOT the DISTINCT home_scope set. owned (the Tenant->scopes
 // map) is the ceiling; the register is only the tenant SELECTION. For the default
 // tenant owned = {private,shared,work} (059 backfill), so read_scopes ∩ owned =
-// read_scopes byte-for-byte — no cadence change at one tenant. See intersectWindow.
+// read_scopes byte-for-byte — no cadence change at one tenant. See store.IntersectWindow.
 func (s *Scheduler) backgroundTenants(ctx context.Context) []backgroundTenant {
 	tenants, err := store.ListTenants(ctx, s.pool)
 	if err != nil {
@@ -568,31 +568,6 @@ func (s *Scheduler) backgroundTenantScopes(ctx context.Context) []string {
 		scopes[i] = t.scope
 	}
 	return scopes
-}
-
-// intersectWindow clamps the configured background read_scopes to the tenant's
-// entitlements (T38 §4.4-(a)): read_scopes ∩ owned. owned == nil means
-// "unbounded" — the pre-MT / register-error fallback returns read_scopes
-// verbatim (the byte-identical legacy single pass). A non-nil owned clamps; a
-// read_scopes value the tenant does NOT own is dropped, closing the
-// cross-tenant-background-read leak a raw config value (NOT grant-gated) would
-// open (config.go:280 consumer obligation, T28-Lehre). Order follows read_scopes
-// (deterministic, the same order RunDreamCycle/RunDigest consume).
-func intersectWindow(readScopes, owned []string) []string {
-	if owned == nil {
-		return readScopes
-	}
-	set := make(map[string]struct{}, len(owned))
-	for _, sc := range owned {
-		set[sc] = struct{}{}
-	}
-	out := make([]string, 0, len(readScopes))
-	for _, sc := range readScopes {
-		if _, ok := set[sc]; ok {
-			out = append(out, sc)
-		}
-	}
-	return out
 }
 
 // effectiveHomeScope clamps the configured background home_scope to the tenant's
@@ -1272,7 +1247,7 @@ func (s *Scheduler) renderRootMap(ctx context.Context, bt backgroundTenant) {
 			Language: cfgT.Dream.Language,
 		},
 		effectiveHomeScope(cfgT.Scheduler.HomeScope, bt.owned),
-		intersectWindow(cfgT.Scheduler.ReadScopes, bt.owned))
+		store.IntersectWindow(cfgT.Scheduler.ReadScopes, bt.owned))
 	switch {
 	case err != nil:
 		slog.Warn("scheduler: root map failed", "error", err, "tenant_scope", bt.scope)
@@ -1838,7 +1813,7 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		// 06-C6 / T38: the snapshot is taken per ITERATED TENANT, round-robin over
 		// the authoritative tenant list (Achse 01), so each cycle dreams under one
 		// tenant's config generation + a tenant-visible Chain (newRouter tenant) +
-		// an entitlement-clamped read window (intersectWindow). The scope comes
+		// an entitlement-clamped read window (store.IntersectWindow). The scope comes
 		// EXCLUSIVELY from that list, never request input (why SnapshotForTenant
 		// takes it explicitly). Single-tenant: the list is [{_global, nil}], so the
 		// cursor stays on the base generation, the Chain stays shared-only and the
@@ -1851,7 +1826,7 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		tenantCursor++
 		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
 		router := s.newRouter(cfg, bt.scope)
-		readWindow := intersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
+		readWindow := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 
 		// Top priority: backfill blocks with missing embeddings.
 		if backfilled, err := s.backfillOneEmbedding(ctx, router, cfg, bt.owned); err != nil {
@@ -1898,7 +1873,7 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 // call through it (G28), num_ctx included (one num_ctx per pool row, so chat-
 // model call sites resolving onto the same row share the single runner — the V1
 // invariant, now structural). readScopes is the iteration's ENTITLEMENT-CLAMPED
-// read window (intersectWindow, T38 §4.4-(a)) — NOT the raw cfg.Scheduler.
+// read window (store.IntersectWindow, T38 §4.4-(a)) — NOT the raw cfg.Scheduler.
 // ReadScopes, which is tenant-overridable and unintersected would be a
 // cross-tenant background-read leak (config.go:280).
 func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router, readScopes []string) (int, error) {
@@ -1981,7 +1956,7 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 	for _, bt := range s.backgroundTenantsFn(ctx) {
 		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
 		homeScope := effectiveHomeScope(cfg.Scheduler.HomeScope, bt.owned)
-		window := intersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
+		window := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 		slog.Info("scheduler: running digest", "scope", homeScope)
 		if err := digest.RunDigest(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window); err != nil {
 			slog.Error("scheduler: digest error", "error", err)

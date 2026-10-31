@@ -3,7 +3,7 @@
 // Integration test for Multi-Tenant wave T38 (04-W6): backgroundTenants resolves,
 // per iterated tenant, the OWNED scope set (TenantScopes) the read window is
 // clamped to — the data foundation of the entitlement-bounded background path
-// (read_scopes ∩ owned). The pure clamp is unit-tested (intersectWindow); this
+// (read_scopes ∩ owned). The pure clamp is unit-tested (store.IntersectWindow); this
 // pins that owned comes from the real register against a live schema.
 //
 // AMENDMENT #3 (design Z.342-348): the default tenant's owned MUST be the full
@@ -53,7 +53,7 @@ func TestBackgroundTenants_OwnedResolution_Integration(t *testing.T) {
 			t.Fatalf("default bt.owned = %v, want [private shared work] (059 backfill, NOT DISTINCT home_scope)", owned)
 		}
 		// The clamp at the default tenant is byte-identical to the raw read_scopes.
-		win := intersectWindow([]string{"private", "shared", "work"}, bt.owned)
+		win := store.IntersectWindow([]string{"private", "shared", "work"}, bt.owned)
 		if !slices.Equal(win, []string{"private", "shared", "work"}) {
 			t.Fatalf("default window = %v, want [private shared work] (byte-identical legacy cadence)", win)
 		}
@@ -92,7 +92,7 @@ func TestBackgroundTenants_OwnedResolution_Integration(t *testing.T) {
 			t.Fatalf("acme bt.owned = %v, want [t38-acme-a t38-acme-b]", owned)
 		}
 		// A read_scopes override claiming a FOREIGN scope intersects away.
-		win := intersectWindow([]string{"t38-acme-a", "private"}, acmeBT.owned)
+		win := store.IntersectWindow([]string{"t38-acme-a", "private"}, acmeBT.owned)
 		if slices.Contains(win, "private") {
 			t.Fatalf("acme window = %v, must NOT contain the foreign 'private' scope (cross-tenant leak)", win)
 		}

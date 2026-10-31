@@ -74,6 +74,40 @@ func TenantScopes(ctx context.Context, pool *pgxpool.Pool, tenantID string) ([]s
 	return scopes, nil
 }
 
+// IntersectWindow clamps a read window to a tenant's entitlements (T38
+// §4.4-(a)): readScopes ∩ owned, where owned is TenantScopes(tenant). owned ==
+// nil means "unbounded" — the pre-MT / register-error fallback of the
+// background pipeline returns readScopes verbatim (the byte-identical legacy
+// single pass). A non-nil owned clamps; a readScopes value the tenant does NOT
+// own is dropped. Two sources carry such values: a tenant-overridable
+// scheduler.read_scopes (a raw config value, NOT grant-gated — config.go:280
+// consumer obligation, T28-Lehre) and a key's ctx_auth read_scopes, which fold in
+// scopes ANOTHER tenant granted via context_tenant_grants. A grant entitles the
+// key to READ the foreign scope; it does not entitle any surface to copy that
+// scope's content into a block under the grantee's own scope, where every reader
+// of that scope sees it (GHSA §5: /api/digest). Order follows readScopes
+// (deterministic, the same order RunDreamCycle/RunDigest consume).
+//
+// A caller holding a resolved tenant must pass a NON-nil owned even when the
+// tenant owns no scope (TenantScopes returns nil for zero rows) — nil is the
+// unbounded legacy arm, not "owns nothing".
+func IntersectWindow(readScopes, owned []string) []string {
+	if owned == nil {
+		return readScopes
+	}
+	set := make(map[string]struct{}, len(owned))
+	for _, sc := range owned {
+		set[sc] = struct{}{}
+	}
+	out := make([]string, 0, len(readScopes))
+	for _, sc := range readScopes {
+		if _, ok := set[sc]; ok {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
 // TenantStatusForScope resolves the OWNING tenant's lifecycle status for a scope
 // via context_tenant_scopes → context_tenants (Modell C: one scope ⇒ one tenant,
 // PK on context_tenant_scopes.scope). found=false when the scope maps to no
