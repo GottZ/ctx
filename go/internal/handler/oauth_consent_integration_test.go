@@ -10,6 +10,10 @@
 //   - GET for a valid open-DCR client shows the (escaped) client name, the
 //     client_id, the redirect origin and the self-registration warning; an
 //     empty name shows "unnamed client"; an admin client shows no warning.
+//   - §F-§6: the warning keys on the REQUESTED redirect — an open-DCR
+//     client returning to a statically allowlisted callback shows none; the
+//     same client registered with an additional foreign callback warns when
+//     a request asks for that one.
 //   - The page carries the script-free CSP.
 //   - POST without (or with a wrong) consent value → no code, no code row.
 //   - POST with consent → 302 with code (positive control); POST with a bad
@@ -87,6 +91,12 @@ func TestOAuthConsentK7_Integration(t *testing.T) {
 	}
 	evilID := register(t, `{"redirect_uris":["`+evilCB+`"],"client_name":"<script>alert(1)</script>Totally ctx"}`)
 	namelessID := register(t, `{"redirect_uris":["https://nameless.example/cb"]}`)
+	// §F-§6: an open-DCR client whose only callback is on the static
+	// allowlist (the shape of a genuine claude.ai connector), and one that
+	// registered the same callback next to a foreign one.
+	mixedCB := "https://mixed.example/cb"
+	trustedID := register(t, `{"redirect_uris":["https://claude.ai/api/mcp/auth_callback"],"client_name":"Claude"}`)
+	mixedID := register(t, `{"redirect_uris":["https://claude.ai/api/mcp/auth_callback","`+mixedCB+`"],"client_name":"Mixed"}`)
 	adminClient, _, err := store.RegisterOAuthClient(ctx, pool, store.RegisterOAuthClientSpec{
 		Label: "k7-admin", TokenEndpointAuthMethod: "none", Source: "admin",
 	})
@@ -209,6 +219,40 @@ func TestOAuthConsentK7_Integration(t *testing.T) {
 		}
 		if !strings.Contains(body, "k7-admin") || !strings.Contains(body, "https://claude.ai") {
 			t.Error("admin client page lacks name or origin")
+		}
+	})
+
+	// --- GET: §F-§6 — the warning follows the requested redirect -------------
+	t.Run("GetDCRClientAllowlistedRedirectNoWarning", func(t *testing.T) {
+		rec := get(t, query(trustedID, staticCB))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if strings.Contains(body, k7Warning) {
+			t.Error("self-registered client returning to an allowlisted callback carries the warning")
+		}
+		for _, want := range []string{"Claude", trustedID, "https://claude.ai", `name="api_key"`} {
+			if !strings.Contains(body, want) {
+				t.Errorf("consent page lacks %q", want)
+			}
+		}
+	})
+
+	t.Run("GetDCRMixedClientWarnsOnForeignRedirect", func(t *testing.T) {
+		rec := get(t, query(mixedID, mixedCB))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), k7Warning) {
+			t.Error("request for the foreign callback of a mixed registration lacks the warning")
+		}
+		rec = get(t, query(mixedID, staticCB))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), k7Warning) {
+			t.Error("request for the allowlisted callback of a mixed registration carries the warning")
 		}
 	})
 

@@ -15,7 +15,8 @@
 //   - the form shows the client's name, its client_id and the redirect
 //     ORIGIN (scheme + host, path shortened) — the address the code goes to;
 //   - a client that registered itself (DCR without an acting admin key)
-//     carries an explicit warning;
+//     carries an explicit warning, unless the redirect this request asks
+//     for is an operator-vetted callback (§F-§6, see newConsentView);
 //   - an explicit consent checkbox, checked SERVER-side at POST — a key
 //     alone no longer issues a code.
 //
@@ -142,9 +143,27 @@ func (h *OAuthHandler) resolveAuthorizeClient(r *http.Request, clientID, redirec
 // (or future CIMD) row without an acting admin key. Admin-mode DCR rows carry
 // the admin's key id in created_by and are operator-made; a NULL creator on a
 // non-admin source can only be open registration (or a hard-deleted admin
-// key — the warning then errs on the cautious side).
+// key — the warning then errs on the cautious side). Whether the warning is
+// SHOWN also depends on the requested redirect (selfRegWarning).
 func clientSelfRegistered(c *store.OAuthClient) bool {
 	return c.RegistrationSource != "admin" && c.CreatedBy == nil
+}
+
+// selfRegWarning decides the self-registration warning (§F-§6). It is shown
+// for a self-registered client UNLESS the redirect this request asks for is
+// an exact member of the static allowlist or CTX_OAUTH_REDIRECT_EXTRA. The
+// warning guards against a key-backed code reaching an address the attacker
+// controls; a code sent to an operator-vetted callback (claude.ai, ChatGPT,
+// a deployment's own extra entry) cannot be received by whoever registered
+// the client, and a warning on every genuine connector only trains users to
+// click past it. The decision keys on the requested redirect, never on the
+// client's registration list, so a registration that mixes a vetted and a
+// foreign callback still warns whenever the foreign one is requested. The
+// loopback rule does not count: a local listener is not something the user
+// can verify. redirect is the URL resolveAuthorizeClient validated; its
+// String() is the target the code is sent to (authorizeSubmit).
+func selfRegWarning(c *store.OAuthClient, redirect *url.URL) bool {
+	return clientSelfRegistered(c) && !redirectStaticallyTrusted(redirect.String())
 }
 
 // consentView is the template data of the consent page.
@@ -154,10 +173,11 @@ type consentView struct {
 	RedirectOrigin string
 	RedirectPath   string
 	NonASCIIHost   bool
-	SelfRegistered bool
-	Error          string
-	ConsentValue   string
-	Params         authorizeParams
+	// WarnSelfRegistered shows the self-registration warning (selfRegWarning).
+	WarnSelfRegistered bool
+	Error              string
+	ConsentValue       string
+	Params             authorizeParams
 }
 
 // newConsentView derives the display values from the validated client and
@@ -185,15 +205,15 @@ func newConsentView(client *store.OAuthClient, redirect *url.URL, p authorizePar
 		path = string(runes[:consentPathMax]) + "…"
 	}
 	return consentView{
-		ClientName:     name,
-		ClientID:       client.ClientID,
-		RedirectOrigin: redirect.Scheme + "://" + host,
-		RedirectPath:   path,
-		NonASCIIHost:   nonASCII,
-		SelfRegistered: clientSelfRegistered(client),
-		Error:          errMsg,
-		ConsentValue:   consentFieldValue,
-		Params:         p,
+		ClientName:         name,
+		ClientID:           client.ClientID,
+		RedirectOrigin:     redirect.Scheme + "://" + host,
+		RedirectPath:       path,
+		NonASCIIHost:       nonASCII,
+		WarnSelfRegistered: selfRegWarning(client, redirect),
+		Error:              errMsg,
+		ConsentValue:       consentFieldValue,
+		Params:             p,
 	}
 }
 
@@ -226,7 +246,7 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!DOCTYPE html>
   <dt>You will be sent back to</dt><dd><span class="origin">{{.RedirectOrigin}}</span><span class="mono">{{.RedirectPath}}</span></dd>
 </dl>
 {{if .NonASCIIHost}}<div class="warn"><strong>Warning:</strong> the return address contains non-ASCII characters and is shown escaped. It may imitate a different domain.</div>
-{{end}}{{if .SelfRegistered}}<div class="warn"><strong>Warning:</strong> This client registered itself. Only continue if you started this flow from that application and recognise the address above.</div>
+{{end}}{{if .WarnSelfRegistered}}<div class="warn"><strong>Warning:</strong> This client registered itself. Only continue if you started this flow from that application and recognise the address above.</div>
 {{end}}{{if .Error}}<div class="error">{{.Error}}</div>
 {{end}}<form method="POST" action="/authorize">
   <label for="key">API Key:</label><br>

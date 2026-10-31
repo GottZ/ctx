@@ -68,12 +68,13 @@ var redirectAllowlist = map[string]bool{
 // redirect allowlist (comma-separated exact URIs).
 const EnvRedirectExtra = "CTX_OAUTH_REDIRECT_EXTRA"
 
-// redirectAllowed reports whether the (already scheme-checked and parsed)
-// redirect target passes the static allowlist: exact match against the known
-// callbacks or the env extension, or a loopback target (RFC 8252 §7.3 —
-// 127.0.0.1 / ::1 / localhost with any port and path, native-app pattern).
-// No substring or wildcard matching anywhere (OAuth 2.1 §4.1.3).
-func redirectAllowed(raw string, parsed *url.URL) bool {
+// redirectStaticallyTrusted reports whether raw is an operator-vetted
+// callback: an exact member of redirectAllowlist or of the
+// CTX_OAUTH_REDIRECT_EXTRA extension. Deliberately WITHOUT the loopback
+// rule — a local listener is admitted at runtime (RFC 8252) but nothing on
+// it is vetted. The consent screen uses this to decide whether a
+// self-registered client still needs its warning (§F-§6).
+func redirectStaticallyTrusted(raw string) bool {
 	if redirectAllowlist[raw] {
 		return true
 	}
@@ -81,6 +82,19 @@ func redirectAllowed(raw string, parsed *url.URL) bool {
 		if extra = strings.TrimSpace(extra); extra != "" && extra == raw {
 			return true
 		}
+	}
+	return false
+}
+
+// redirectAllowed reports whether the (already scheme-checked and parsed)
+// redirect target passes the static allowlist: exact match against the known
+// callbacks or the env extension (redirectStaticallyTrusted), or a loopback
+// target (RFC 8252 §7.3 — 127.0.0.1 / ::1 / localhost with any port and
+// path, native-app pattern). No substring or wildcard matching anywhere
+// (OAuth 2.1 §4.1.3).
+func redirectAllowed(raw string, parsed *url.URL) bool {
+	if redirectStaticallyTrusted(raw) {
+		return true
 	}
 	host := parsed.Hostname()
 	return host == "127.0.0.1" || host == "::1" || host == "localhost"
