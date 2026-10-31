@@ -218,3 +218,65 @@ func TestDeleteApiKey_OwnerGuards(t *testing.T) {
 		}
 	})
 }
+
+// markServerAdmin flips is_admin on a seeded key. No production code path
+// writes is_admin (UpdateApiKey names neither the column nor a tier for it), so
+// the fixture sets it directly — the shape a bootstrap server-admin key has.
+func markServerAdmin(t *testing.T, pool *pgxpool.Pool, id string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE context_api_keys SET is_admin = true WHERE id = $1::uuid`, id); err != nil {
+		t.Fatalf("mark server-admin %s: %v", id, err)
+	}
+}
+
+// §9i: a tenant owner or admin (isServerAdmin=false) must not revoke a
+// server-admin key (is_admin=true) of its own tenant, even when that key holds
+// no owner role — before the fix only the owner guard stood in the way, so a
+// default-tenant admin could disable the operator's server-admin key. A
+// server-admin caller still revokes it.
+func TestDeleteApiKey_ServerAdminProtected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name                 string
+		callerMayManageOwner bool
+	}{{"tenant_admin", false}, {"tenant_owner", true}} {
+		t.Run(tc.name+"_revoke_server_admin_key_returns_ErrServerAdminProtected", func(t *testing.T) {
+			tid := freshTenant(t, ctx, pool, "del-s9i-"+tc.name)
+			seedKeyRole(t, pool, "del-s9i-"+tc.name+"-owner", tid, "owner", true)
+			sa := seedKeyRole(t, pool, "del-s9i-"+tc.name+"-sa", tid, "admin", true)
+			markServerAdmin(t, pool, sa)
+
+			deleted, err := store.DeleteApiKey(ctx, pool, sa, tid, false /*isServerAdmin*/, tc.callerMayManageOwner)
+			if !errors.Is(err, store.ErrServerAdminProtected) {
+				t.Fatalf("revoke server-admin key err = %v, want ErrServerAdminProtected", err)
+			}
+			if deleted {
+				t.Fatal("revoke server-admin key reported deleted=true")
+			}
+			if !keyActive(t, pool, sa) {
+				t.Fatal("tenant caller revoked a server-admin key")
+			}
+		})
+	}
+
+	t.Run("server_admin_revokes_server_admin_key", func(t *testing.T) {
+		tid := freshTenant(t, ctx, pool, "del-s9i-sa-ok")
+		seedKeyRole(t, pool, "del-s9i-sa-ok-owner", tid, "owner", true)
+		sa := seedKeyRole(t, pool, "del-s9i-sa-ok-sa", tid, "member", true)
+		markServerAdmin(t, pool, sa)
+
+		deleted, err := store.DeleteApiKey(ctx, pool, sa, "", true /*isServerAdmin*/, true)
+		if err != nil || !deleted {
+			t.Fatalf("server-admin revoke = (deleted=%v, err=%v), want (true, nil)", deleted, err)
+		}
+		if keyActive(t, pool, sa) {
+			t.Fatal("server-admin key still active after a server-admin revoke")
+		}
+	})
+}

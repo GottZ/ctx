@@ -361,6 +361,8 @@ func TenantAPIKeyIDs(ctx context.Context, pool *pgxpool.Pool, tenantID string) (
 //     revoke an OWNER key → ErrOwnerProtected (the handler maps it to 403).
 //   - (4) Last-Owner (AM6(a)): revoking the last ACTIVE owner → ErrLastOwner (409),
 //     nothing written — the tenant always keeps >= 1 active owner (Recovery, D3).
+//   - Server-admin protection (§9i): a non-server-admin cannot revoke an active
+//     is_admin key → ErrServerAdminProtected (403), checked right after resolve.
 //
 // No-oracle (Leak-Pfad L2) preserved: a foreign / absent / malformed (22P02) id
 // resolves to zero rows → (false, nil), indistinguishable from "absent", BEFORE
@@ -401,6 +403,14 @@ func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 				return pgxdb.ErrRollback // foreign / absent / malformed id — no oracle (L2)
 			}
 			targetTenant, curRole, curActive := rk.tenant, rk.role, rk.active
+
+			// (1b) Server-admin protection (§9i): only a server-admin revokes a
+			// server-admin key. is_admin is never written by any code path, so the
+			// resolve-time read needs no lock. Re-revoking an inactive one stays the
+			// idempotent no-op miss below.
+			if rk.isAdmin && !isServerAdmin && curActive {
+				return ErrServerAdminProtected
+			}
 
 			// (2) Serialisation point: lock the target key's TENANT row (see UpdateApiKey's
 			// lock-target rationale). tenant_id is a NOT NULL FK, so the row is guaranteed.
@@ -481,6 +491,15 @@ var ErrLastOwner = errors.New("store: would remove the last active owner of the 
 // to neutralise the tenant's owner. The handler maps this to 403.
 var ErrOwnerProtected = errors.New("store: owner key may only be managed by an owner or server-admin")
 
+// ErrServerAdminProtected is returned by UpdateApiKey and DeleteApiKey when a
+// caller that is not a server-admin targets a server-admin key (is_admin=true):
+// a tenant owner or admin of the key's tenant — in practice the default tenant —
+// must not revoke, re-role, re-scope or reactivate the operator's server-global
+// key (§9i). Only a server-admin manages server-admin keys. The handler maps it
+// to 403, like ErrOwnerProtected; it fires only for a same-tenant target, so a
+// foreign key still collapses to "not found" first (no cross-tenant oracle).
+var ErrServerAdminProtected = errors.New("store: server-admin key may only be managed by a server-admin")
+
 // UpdateApiKey mutates the tenant_role and/or active flag of one api key,
 // tenant-isolated, owner-invariant-safe, and TOCTOU-free. role / active nil =
 // "leave unchanged" (COALESCE in the final UPDATE). It writes ONLY tenant_role +
@@ -502,6 +521,9 @@ var ErrOwnerProtected = errors.New("store: owner key may only be managed by an o
 //     strip owner power from an owner key → ErrOwnerProtected (checked first).
 //   - (4) Last-Owner (AM6(a)): a patch that would drop the tenant's active-owner
 //     count below one → ErrLastOwner, nothing written.
+//
+// Before both, a non-server-admin patching an is_admin key gets
+// ErrServerAdminProtected (§9i), whatever the patch.
 //
 // LOCK TARGET — the SHARED context_tenants row of the target key, NOT a per-key
 // lock. This is load-bearing: two concurrent demotions of DIFFERENT owner keys of
@@ -540,6 +562,12 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 				return pgxdb.ErrRollback // foreign / absent / malformed id — no oracle (mirrors DeleteApiKey)
 			}
 			targetTenant := rk.tenant
+
+			// (1b) Server-admin protection (§9i): no patch — deactivate, re-role,
+			// re-scope or reactivate — of a server-admin key by a tenant caller.
+			if rk.isAdmin && !isServerAdmin {
+				return ErrServerAdminProtected
+			}
 
 			// (2a) write_scopes ⊆ allowed_scopes ∪ {home_scope} (078, E4b, enforcement path
 			// (a) on update). Validated against the key's EXISTING read set — home_scope and
@@ -660,18 +688,18 @@ func enforceOwnerInvariantsTx(ctx context.Context, tx pgx.Tx, rk resolvedKey, id
 	return nil
 }
 
-// resolveKeyForUpdate fetches the target key's tenant + current role/active under the
+// resolveKeyForUpdate fetches the target key's tenant + current role/active/is_admin under the
 // caller's tenant constraint. A foreign, absent, or malformed (22P02) id collapses to
 // found=false so the caller cannot distinguish a foreign key from a nonexistent one
 // (no oracle, mirrors DeleteApiKey). Split out of UpdateApiKey to keep its cyclomatic
 // complexity under the cyclop limit.
 func resolveKeyForUpdate(ctx context.Context, q pgxdb.Rower, id string, isServerAdmin bool, tenantArg *string) (r resolvedKey, found bool, err error) {
 	err = q.QueryRow(ctx,
-		`SELECT tenant_id::text, tenant_role, active, home_scope, allowed_scopes
+		`SELECT tenant_id::text, tenant_role, active, is_admin, home_scope, allowed_scopes
 		   FROM context_api_keys
 		  WHERE id = $1::uuid AND ($2::boolean OR tenant_id = $3::uuid)`,
 		id, isServerAdmin, tenantArg,
-	).Scan(&r.tenant, &r.role, &r.active, &r.homeScope, &r.allowedScopes)
+	).Scan(&r.tenant, &r.role, &r.active, &r.isAdmin, &r.homeScope, &r.allowedScopes)
 	if err == nil {
 		return r, true, nil
 	}
@@ -691,6 +719,7 @@ type resolvedKey struct {
 	tenant        string
 	role          string
 	active        bool
+	isAdmin       bool // server-global tier; gates ErrServerAdminProtected (§9i)
 	homeScope     string
 	allowedScopes []string
 }
