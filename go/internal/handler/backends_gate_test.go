@@ -472,9 +472,11 @@ func TestBackendEmbedEquivalenceClaim(t *testing.T) {
 
 	tenantRow := func(id string, flagged bool) backends.Backend {
 		b := backends.Backend{
-			ID: id, Name: id, Host: "http://10.0.0.5:11434", Scope: "tenant-a",
+			// Public host: since §3 a tenant row on a private address fails
+			// the validator before the claim check is reached.
+			ID: id, Name: id, Host: "https://embed.example.com", Scope: "tenant-a",
 			Protocol: backends.ProtocolOllama, ProviderClass: backends.ProviderGeneric,
-			Trust: backends.TrustPublic, Locality: backends.LocalityLocal,
+			Trust: backends.TrustPublic, Locality: backends.LocalityExternal,
 			Roles:    []string{backends.RoleEmbed},
 			ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
 			Enabled:  true,
