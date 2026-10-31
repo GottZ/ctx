@@ -149,11 +149,14 @@ def test_provider_publishes_versioned_stable_head_with_bounded_frame(factory):
     frame = provider.on_pre_compress([{"role": "user", "content": "durable source decision"}])
 
     assert provider.pre_compress_checkpoint_api_version == 2
-    assert _names(c.calls) == ["search", "store", "store", "store"]
-    # "/" is sanitized away, so the title carries a hash of the full root id (0.6.1).
-    assert c.calls[3][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
-    assert manifest_id in c.calls[3][1]["content"]
-    assert source_id in c.calls[2][1]["content"]
+    assert _names(c.calls) == ["search", "search", "store", "store", "store"]
+    # "/" is sanitized away, so the title carries a hash of the full root id (0.6.1); with
+    # no head under it yet, the 0.6.0 title is searched once for a chain to continue.
+    assert c.calls[0][1]["query"] == "Compaction checkpoint head root_session-a-a0af5788"
+    assert c.calls[1][1]["query"] == "Compaction checkpoint head root_session-a"
+    assert c.calls[4][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
+    assert manifest_id in c.calls[4][1]["content"]
+    assert source_id in c.calls[3][1]["content"]
     assert head_id in frame and manifest_id in frame
     assert source_id not in frame
     assert len(frame) < 1_000
@@ -922,8 +925,10 @@ def test_config_defaults_and_coercion(tmp_path):
 # 0.6.1 — byte-capped parts, head tag filter, collision-free head titles
 # =============================================================================
 
-# Head titles are what existing chains are found by: ordinary ids must keep their
-# title, ids that sanitizing or the 48-character cut changes get a stable hash suffix.
+# Head titles are what existing chains are found by: timestamp ids and UUIDs keep their
+# title, ids that sanitizing or the 48-character cut changes get a stable hash suffix —
+# Hermes' local-<sha256> ids (70 characters) included.
+LOCAL_ROOT = "local-" + "0123456789abcdef" * 4
 HEAD_TITLE_GOLDEN = {
     "20261031_120000_abcdef": "20261031_120000_abcdef",
     "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c": "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c",
@@ -932,6 +937,7 @@ HEAD_TITLE_GOLDEN = {
     "team:alice/1": "team_alice_1-7054b256",
     "x" * 60: "x" * 39 + "-42f2d973",
     "über-sitzung": "_ber-sitzung-a42b9cb4",
+    LOCAL_ROOT: "local-0123456789abcdef0123456789abcdef0-1d986fd2",
 }
 
 
@@ -975,3 +981,91 @@ def test_head_search_is_narrowed_to_checkpoint_heads(factory):
     assert args["tags"] == ["checkpoint-head"] and args["types"] == ["checkpoint"]
     head = _stores(c.calls)[-1]
     assert "checkpoint-head" in head["tags"]  # the tag the search relies on survives merge_tags
+
+
+# A head a 0.6.0 writer left under its old title (no hash suffix) is continued once.
+LEGACY_HEAD_ID = "019f5000-0000-7000-8000-000000000002"
+LEGACY_MANIFEST_ID = "019f5000-0000-7000-8000-000000000001"
+
+
+def _searches(calls):
+    return [a["query"] for n, a in calls if n == "search"]
+
+
+def _seed_legacy_head(c, root, *, owner=None, fact_hashes=()):
+    """Stateful fake holding the head a 0.6.0 writer published for ``root``; its metadata
+    names ``owner`` (default: ``root`` itself)."""
+    c.stateful = True
+    title = _MODULE.legacy_head_title_for(root)
+    c.blocks[title] = {
+        "id": LEGACY_HEAD_ID,
+        "metadata": {
+            "latest_manifest_id": LEGACY_MANIFEST_ID,
+            "root_session_id": owner or root,
+            "fact_hashes": list(fact_hashes),
+        },
+    }
+    return title
+
+
+def test_head_written_before_0_6_1_continues_its_chain(factory):
+    p, c = factory(LOCAL_ROOT, agent_context="primary")
+    legacy_title = _seed_legacy_head(c, LOCAL_ROOT, fact_hashes=["deadbeef"])
+    new_title = _MODULE.head_title_for(LOCAL_ROOT)
+    assert legacy_title == f"Compaction checkpoint head {LOCAL_ROOT[:48]}" != new_title
+
+    p.on_pre_compress([{"role": "user", "content": "erste Kompaktierung nach dem Upgrade"}])
+
+    assert _searches(c.calls) == [new_title, legacy_title]
+    manifest, head = _stores(c.calls)[-2:]
+    assert manifest["metadata"]["parent_manifest_id"] == LEGACY_MANIFEST_ID
+    assert f"- Parent manifest: `{LEGACY_MANIFEST_ID}`" in manifest["content"]
+    assert head["title"] == new_title
+    assert head["metadata"]["fact_hashes"] == ["deadbeef"]  # P4 dedupe keys carried over
+    receipt = p._last_chain_receipt
+    assert receipt.lookup == "legacy" and receipt.parent_manifest_id == LEGACY_MANIFEST_ID
+    assert c.blocks[legacy_title]["metadata"]["latest_manifest_id"] == LEGACY_MANIFEST_ID  # old head untouched
+
+    # The next process finds the head under the new title; no legacy search any more.
+    p._last_manifest_by_root.clear()
+    c.calls.clear()
+    p.on_pre_compress([{"role": "user", "content": "zweite Kompaktierung"}])
+
+    assert _searches(c.calls) == [new_title]
+    assert p._last_chain_receipt.lookup == "server"
+    assert _stores(c.calls)[-2]["metadata"]["parent_manifest_id"] == receipt.manifest_id
+
+
+def test_legacy_head_of_another_root_is_not_continued(factory):
+    """team/alice:1 and team:alice/1 shared the 0.6.0 head ``team_alice_1``; the fallback
+    continues it only for the root its metadata names."""
+    p, c = factory("team/alice:1", agent_context="primary")
+    legacy_title = _seed_legacy_head(c, "team/alice:1", owner="team:alice/1")
+    assert legacy_title == _MODULE.legacy_head_title_for("team:alice/1")
+
+    p.on_pre_compress([{"role": "user", "content": "alice eins"}])
+
+    manifest, head = _stores(c.calls)[-2:]
+    assert manifest["metadata"]["parent_manifest_id"] is None
+    assert head["title"] == "Compaction checkpoint head team_alice_1-8e207def"
+    assert p._last_chain_receipt.lookup == "none"
+
+    p.on_session_switch("team:alice/1", reset=True)
+    p.on_pre_compress([{"role": "user", "content": "alice zwei"}])
+
+    manifest, head = _stores(c.calls)[-2:]
+    assert manifest["metadata"]["root_session_id"] == "team:alice/1"
+    assert manifest["metadata"]["parent_manifest_id"] == LEGACY_MANIFEST_ID
+    assert head["title"] == "Compaction checkpoint head team_alice_1-7054b256"
+    assert p._last_chain_receipt.lookup == "legacy"
+
+
+def test_ordinary_ids_keep_their_title_and_search_once(factory):
+    for root in ("20261031_120000_abcdef", "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c"):
+        assert _MODULE.legacy_head_title_for(root) == _MODULE.head_title_for(root)
+        p, c = factory(root, agent_context="primary")
+
+        p.on_pre_compress([{"role": "user", "content": "evidence"}])
+
+        assert _searches(c.calls) == [f"Compaction checkpoint head {root}"], root
+        assert p._last_chain_receipt.lookup == "none"

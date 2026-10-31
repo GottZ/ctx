@@ -386,11 +386,15 @@ def _find_block_id_by_title(value: Any, title: str) -> str | None:
 def _short_root(root_session_id: str) -> str:
     """Root session id as a title token: ``[A-Za-z0-9_.-]``, at most 48 characters.
 
-    An id that sanitizing leaves unchanged and that fits is used as it is, so heads of
-    ordinary Hermes session ids keep their titles. An id that sanitizing or truncation
-    changed gets a hash of the full id as suffix: ``team/alice:1`` and ``team:alice/1``,
-    or two long ids sharing their first 48 characters, used to map to one head and mixed
-    their chains (0.6.1; golden vectors in tests/test_p3_checkpoint_chain.py).
+    An id that sanitizing leaves unchanged and that fits is used as it is, so timestamp
+    ids (``20261031_120000_abcdef``) and UUIDs keep their titles. An id that sanitizing or
+    truncation changed gets a hash of the full id as suffix: ``team/alice:1`` and
+    ``team:alice/1``, or two long ids sharing their first 48 characters, used to map to one
+    head and mixed their chains (0.6.1; golden vectors in tests/test_p3_checkpoint_chain.py).
+    Hermes' ``local-<sha256>`` ids (70 characters) are cut and get the suffix too; a head
+    such a root wrote before 0.6.1 is found under its old title (``_legacy_short_root``).
+    Known limit: an unchanged id that spells out another id's suffixed token exactly
+    (``team_alice_1-8e207def``) shares that id's head; Hermes' id formats do not produce one.
     """
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", root_session_id)
     if safe == root_session_id and len(safe) <= ROOT_TOKEN_MAX:
@@ -402,6 +406,20 @@ def _short_root(root_session_id: str) -> str:
 def head_title_for(root_session_id: str) -> str:
     """Stable head title per root session (server classifies it as ``checkpoint``, M120)."""
     return f"Compaction checkpoint head {_short_root(root_session_id)}"
+
+
+def _legacy_short_root(root_session_id: str) -> str:
+    """The 0.6.0 title token, frozen: sanitized and cut at 48 characters, no hash suffix.
+
+    Only for finding a head written before 0.6.1 (``ChainWriter.write``). Never change it:
+    the chains it continues were published under exactly these titles.
+    """
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", root_session_id)[:48]
+
+
+def legacy_head_title_for(root_session_id: str) -> str:
+    """Head title a 0.6.0 writer used for this root session."""
+    return f"Compaction checkpoint head {_legacy_short_root(root_session_id)}"
 
 
 # -- Chain writer ----------------------------------------------------------------------
@@ -418,7 +436,7 @@ class ChainReceipt:
     writes: int = 0
     duration_s: float = 0.0
     rate_limited: int = 0
-    lookup: str = ""  # server | cache | none
+    lookup: str = ""  # server | cache | legacy | none
     # P4: cumulative fact dedupe keys read from the previous head (server side)
     previous_fact_hashes: list[str] = field(default_factory=list)
 
@@ -538,7 +556,13 @@ class ChainWriter:
         return block_id
 
     def load_previous_head(
-        self, head_title: str, deadline: float, budget_s: float, stats: dict[str, int]
+        self,
+        head_title: str,
+        deadline: float,
+        budget_s: float,
+        stats: dict[str, int],
+        *,
+        root_session_id: str | None = None,
     ) -> tuple[str | None, list[str]]:
         """``(latest_manifest_id, fact_hashes)`` of the existing head (upstream
         ``_load_previous_manifest_id`` plus the P4 dedupe keys from the same read).
@@ -551,6 +575,10 @@ class ChainWriter:
         altogether, so without the tag source parts that talk about checkpoints or
         headings could rank ahead of the head and push it out of the result window,
         silently starting a new chain (0.6.1).
+
+        With ``root_session_id`` (the lookup under the 0.6.0 title) a head whose metadata
+        names another root counts as no head: under that title ``team/alice:1`` and
+        ``team:alice/1`` shared one head, and continuing it would mix their chains again.
         """
         result = self._call(
             "head search",
@@ -568,6 +596,8 @@ class ChainWriter:
         if not head_id:
             return None, []
         head = self._call("head read", deadline, budget_s, self.client.get_block, stats, block_id=head_id)
+        if root_session_id is not None and _find_value(head, "root_session_id") != root_session_id:
+            return None, []
         manifest_id = _find_value(head, "latest_manifest_id")
         if not manifest_id or not _UUID_RE.fullmatch(manifest_id):
             raise CtxCheckpointError("ctx checkpoint head is missing a valid latest_manifest_id")
@@ -652,13 +682,25 @@ class ChainWriter:
         head_title = head_title_for(root)
         stats: dict[str, int] = {"writes": 0, "rate_limited": 0}
         previous_manifest_id, previous_fact_hashes = self.load_previous_head(head_title, deadline, budget_s, stats)
-        # P4: cumulative fact dedupe keys (previous head ∪ this run), newest kept, capped
-        chain_fact_hashes = _merge_hashes(previous_fact_hashes, fact_hashes or [])
         lookup = "server" if previous_manifest_id else "none"
         if not previous_manifest_id and cached_manifest_id and _UUID_RE.fullmatch(cached_manifest_id):
             # search miss (ranking/backfill) but this process wrote the chain → keep it linked
             previous_manifest_id = cached_manifest_id
             lookup = "cache"
+        legacy_title = legacy_head_title_for(root)
+        if not previous_manifest_id and legacy_title != head_title:
+            # 0.6.1 changed this root's head title (an id over 48 characters such as Hermes'
+            # local-<sha256>, or one that sanitizing changes): continue the chain a 0.6.0
+            # writer left under the old title. One more search, only while no head exists
+            # under the new title; the new head is published under the new title and the
+            # old head stays as it is.
+            previous_manifest_id, previous_fact_hashes = self.load_previous_head(
+                legacy_title, deadline, budget_s, stats, root_session_id=root
+            )
+            if previous_manifest_id:
+                lookup = "legacy"
+        # P4: cumulative fact dedupe keys (previous head ∪ this run), newest kept, capped
+        chain_fact_hashes = _merge_hashes(previous_fact_hashes, fact_hashes or [])
         checkpoint_id = hashlib.sha256(f"{root}\0{now}\0{digest}".encode()).hexdigest()[:16]
         title_base = f"Compaction source {short_root} {digest[:16]} {checkpoint_id}"
         common_metadata: dict[str, Any] = {

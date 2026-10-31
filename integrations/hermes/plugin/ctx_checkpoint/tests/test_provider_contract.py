@@ -37,14 +37,18 @@ def test_provider_publishes_versioned_stable_head_with_bounded_frame():
     assert provider.pre_compress_checkpoint_api_version == 2
     assert [name for name, _ in calls] == [
         "mcp__ctx__search",
+        "mcp__ctx__search",
         "mcp__ctx__store",
         "mcp__ctx__store",
         "mcp__ctx__store",
     ]
-    # "/" is sanitized away, so the title carries a hash of the full root id (0.6.1).
-    assert calls[3][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
-    assert manifest_id in calls[3][1]["content"]
-    assert source_id in calls[2][1]["content"]
+    # "/" is sanitized away, so the title carries a hash of the full root id (0.6.1); with
+    # no head under it yet, the 0.6.0 title is searched once for a chain to continue.
+    assert calls[0][1]["query"] == "Compaction checkpoint head root_session-a-a0af5788"
+    assert calls[1][1]["query"] == "Compaction checkpoint head root_session-a"
+    assert calls[4][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
+    assert manifest_id in calls[4][1]["content"]
+    assert source_id in calls[3][1]["content"]
     assert head_id in frame
     assert manifest_id in frame
     assert source_id not in frame
