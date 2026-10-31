@@ -451,7 +451,7 @@ func TestParseOrigin(t *testing.T) {
 	}{
 		{"", OriginAssistant, true, 1}, // absent = strictest
 		{"assistant", OriginAssistant, true, 1},
-		{"issue", OriginIssue, true, 0},
+		{"issue", OriginIssue, true, 1}, // click-to-load as well (§E)
 		{"Assistant", "", false, 0},
 		{"chat", "", false, 0},
 	}

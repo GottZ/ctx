@@ -31,9 +31,10 @@ type CamoHandler struct {
 // NewCamoHandler wires the handler to a (possibly disabled) service.
 func NewCamoHandler(svc *camo.Service) *CamoHandler { return &CamoHandler{svc: svc} }
 
-// signRequest is the mint body: the foreign image URLs a rendered document wants
-// to proxy, and the kind of content they come from (camo.Origin: "assistant" for
-// LLM output, "issue" for forge/issue markdown; absent = "assistant").
+// signRequest is the mint body: the foreign image URL the viewer clicked, and the
+// kind of content it comes from (camo.Origin: "assistant" for LLM output,
+// "issue" for issue/comment markdown; absent = "assistant"). Every origin is
+// capped at one distinct URL per request.
 type signRequest struct {
 	URLs   []string `json:"urls"`
 	Origin string   `json:"origin"`
@@ -76,11 +77,12 @@ func (h *CamoHandler) HandleSign(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "unknown origin"})
 		return
 	}
-	// LLM output is click-to-load (GHSA 2026-10-31 §7): one click signs one
-	// image. A batch from assistant content means something is signing on
-	// render again — refuse it whole rather than sign a prefix.
-	if limit := origin.MaxURLs(); limit > 0 && distinctCount(req.URLs) > limit {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "assistant images are signed one at a time (click-to-load)"})
+	// Every markdown surface is click-to-load (GHSA 2026-10-31 §7, security
+	// review 2026-10-31 §E): one click signs one image. A batch means something
+	// is signing on render — a regressed or stale frontend — so refuse it whole
+	// rather than sign a prefix.
+	if distinctCount(req.URLs) > origin.MaxURLs() {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "images are signed one at a time (click-to-load)"})
 		return
 	}
 

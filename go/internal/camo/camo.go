@@ -243,7 +243,8 @@ func ProxiableURL(rawURL string) bool {
 }
 
 // Origin names the kind of rendered content a sign request comes from. The
-// SPA declares it; the server applies the stricter rule for model output.
+// SPA declares it. Every origin gets the same rule today — one URL per request
+// — so the value only has to parse; an unknown one is refused.
 type Origin string
 
 const (
@@ -251,14 +252,17 @@ const (
 	// click-to-load in the SPA, so a sign request carries exactly the one URL
 	// the viewer clicked — a batch is refused (GHSA 2026-10-31 §7).
 	OriginAssistant Origin = "assistant"
-	// OriginIssue is forge/issue markdown: foreign text, but no model in the
-	// loop, so its images stay automatic (batch-signed per render).
+	// OriginIssue is issue and comment markdown. Agents write it through the
+	// MCP issue tools, ctx manage and REST with the same api-key auth as the
+	// web UI, so it is no more trusted than model output and is click-to-load
+	// as well (security review 2026-10-31 §E). The SPA's click sends
+	// OriginAssistant; this value stays accepted for API compatibility, and
+	// the one-URL cap refuses the batch an older bundle still sends on render.
 	OriginIssue Origin = "issue"
 )
 
 // ParseOrigin maps the wire value to an Origin. An absent value is treated as
-// OriginAssistant — the strictest rule, so a caller that omits the field never
-// gets the batch behaviour by default. An unknown value is ok=false.
+// OriginAssistant. An unknown value is ok=false.
 func ParseOrigin(v string) (Origin, bool) {
 	switch Origin(strings.TrimSpace(v)) {
 	case "", OriginAssistant:
@@ -270,13 +274,12 @@ func ParseOrigin(v string) (Origin, bool) {
 	}
 }
 
-// MaxURLs is the per-request cap on distinct URLs for this origin; 0 means no
-// cap beyond the request body itself.
-func (o Origin) MaxURLs() int {
-	if o == OriginAssistant {
-		return 1
-	}
-	return 0
+// MaxURLs is the per-request cap on distinct URLs for this origin. Every
+// markdown surface is click-to-load, so every origin signs exactly the one URL
+// the viewer clicked (GHSA 2026-10-31 §7, security review 2026-10-31 §E).
+// There is no "uncapped" value: the handler compares against it directly.
+func (Origin) MaxURLs() int {
+	return 1
 }
 
 // sigFor computes hex(HMAC-SHA256(key, url + "\n" + exp)) — the wire signature.
