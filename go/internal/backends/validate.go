@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/ssrfguard"
 )
 
 // FieldError is one 422-grade validation failure, addressable by field.
@@ -236,12 +238,27 @@ func validateEgressTarget(b *Backend) []FieldError {
 			"base_url must not contain '?' or '#' — wire paths are appended to it, and a query or fragment would cut them off"})
 	}
 	if b.EgressGuarded() {
-		if loc, err := DeriveLocality(b.Host); err == nil && loc != LocalityExternal {
+		if loc, err := DeriveLocality(b.Host); err == nil && (loc != LocalityExternal || literalIPDenied(b.Host)) {
 			errs = append(errs, FieldError{"base_url",
-				"a tenant backend needs a publicly routable host — loopback, private, link-local and single-label hosts are reserved to _global (server-admin) backends"})
+				"a tenant backend needs a publicly routable host — loopback, private, link-local, special-purpose and single-label hosts are reserved to _global (server-admin) backends"})
 		}
 	}
 	return errs
+}
+
+// literalIPDenied reports whether base_url names a literal IP in the dial-time
+// deny-list (ssrfguard.IsDeniedIP: CGNAT 100.64/10, 198.18/15, 240/4, NAT64,
+// multicast, documentation ranges …). DeriveLocality only knows the net.IP
+// predicates and calls those ranges "external"; without this the write path
+// would admit a row the guarded client then refuses on every call. Hostnames
+// stay to the dial-time check (no DNS here).
+func literalIPDenied(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(strings.TrimSuffix(u.Hostname(), "."))
+	return ip != nil && ssrfguard.IsDeniedIP(ip)
 }
 
 func validateVersionedRoot(b *Backend) []FieldError {

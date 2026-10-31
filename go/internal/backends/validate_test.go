@@ -670,3 +670,36 @@ func TestEgressGuarded(t *testing.T) {
 		}
 	}
 }
+
+// TestTenantBackendDeniedLiteralIP: a literal IP that DeriveLocality calls
+// "external" but the dial-time deny-list refuses (CGNAT, benchmarking,
+// reserved, NAT64, documentation …) is a 422 at write time on a tenant row,
+// so the write rule and the dial rule agree. _global rows keep them.
+func TestTenantBackendDeniedLiteralIP(t *testing.T) {
+	for _, host := range []string{
+		"http://100.100.100.200",
+		"http://100.64.0.1:8080",
+		"http://198.18.0.1",
+		"http://240.0.0.1",
+		"http://192.0.0.8",
+		"http://203.0.113.9",
+		"http://[64:ff9b::a00:1]:8080",
+		"http://[2002:a00:1::1]",
+		"http://[::ffff:100.64.0.1]",
+	} {
+		b := validBackend()
+		b.Scope = "acme"
+		b.Host = host
+		b.Locality = LocalityExternal
+		if loc, err := DeriveLocality(host); err != nil || loc != LocalityExternal {
+			t.Fatalf("precondition: DeriveLocality(%s) = %q, %v; want external", host, loc, err)
+		}
+		if _, errs := ValidateBackend(&b); !fieldHit(errs, "base_url") {
+			t.Errorf("tenant row with %s passed, want base_url 422", host)
+		}
+		b.Scope = GlobalScope
+		if _, errs := ValidateBackend(&b); fieldHit(errs, "base_url") {
+			t.Errorf("_global row with %s rejected: %+v", host, errs)
+		}
+	}
+}

@@ -59,7 +59,7 @@ func GuardedPooledClient() *http.Client {
 // its own /api/llmlog), so echoing it would turn the guard into a resolver
 // for the server's internal DNS names. The "SSRF guard" marker stays, so
 // logs and tests still tell a refusal from a connection-refused.
-var errGuardRefused = errors.New("refusing a loopback, private or link-local address (SSRF guard)")
+var errGuardRefused = errors.New("refusing a denied address range (SSRF guard)")
 
 type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
