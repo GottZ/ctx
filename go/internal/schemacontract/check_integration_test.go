@@ -110,6 +110,43 @@ func TestCheck_MigrationIntegrity_ChecksumTamper(t *testing.T) {
 	}
 }
 
+// TestCheck_MigrationIntegrity_AmendedChecksum: 156 was amended after
+// 5.29.2 (its data repair could abort the boot), so a database that applied
+// the shipped revision records that revision's checksum. The contract accepts
+// exactly that one — any other checksum on the same version is still the
+// tamper case above.
+func TestCheck_MigrationIntegrity_AmendedChecksum(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	const shipped = "c095c3918345c0fa7c78e96bc9172a2a38aa790baa3b155f67514edba40ca121" // 5.29.1/5.29.2
+	if _, err := pool.Exec(ctx, `UPDATE _migrations SET checksum = $1 WHERE version = 156`, shipped); err != nil {
+		t.Fatalf("stamping the shipped 156 checksum: %v", err)
+	}
+	report, err := Check(ctx, pool)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if found := findDrift(report.Drifts, "_migrations:156"); found != nil {
+		t.Errorf("shipped 156 checksum reported as drift: %+v", *found)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE _migrations SET checksum = $1 WHERE version = 156`, strings.Repeat("e", 64)); err != nil {
+		t.Fatalf("tampering the 156 checksum: %v", err)
+	}
+	report, err = Check(ctx, pool)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	found := findDrift(report.Drifts, "_migrations:156")
+	if found == nil {
+		t.Fatalf("unlisted 156 checksum not reported — drifts: %+v", report.Drifts)
+	}
+	if found.Class != ClassMigrationIntegrity || found.Severity != SeverityBreaking {
+		t.Errorf("got class=%s severity=%s, want migration_integrity/breaking", found.Class, found.Severity)
+	}
+}
+
 // TestCheck_HandAddedObjects_ClassificationAndSnapshotExceptionScope covers
 // design/03 §7 W03-2 Gate 2 bullets 3-5 in one container: a hand-added
 // table (unknown_object/param), a hand-added trigger on a contract table
