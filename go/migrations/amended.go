@@ -12,7 +12,7 @@ package migrations
 // version; every entry says which releases shipped it and why the file
 // changed. The current file's checksum never belongs here.
 var amended = map[int][]string{
-	// 156_guard_tenant_candidates.sql as shipped in 5.29.1 and 5.29.2. Its
+	// 156_guard_tenant_candidates.sql as shipped in 5.29.1–5.29.3. Its
 	// data repair un-archived rows without checking the partial unique
 	// indexes over NOT is_archived, so a database with an archived row beside
 	// a live twin hit a 23505, rolled the migration back and could not boot.

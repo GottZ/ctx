@@ -8,7 +8,7 @@
 // prove anything in each other's presence: the repair is one UPDATE, and a
 // single row un-archived into an occupied slot of a partial unique index over
 // NOT is_archived is a 23505 that rolls the whole migration back — in prod,
-// the boot. The statement shipped in 5.29.1/5.29.2 failed this suite at the
+// the boot. The statement shipped in 5.29.1–5.29.3 failed this suite at the
 // first fixture that has a live twin.
 //
 //	GOTMPDIR=/compose/n8n/.gocache GOCACHE=/compose/n8n/.gocache/build \

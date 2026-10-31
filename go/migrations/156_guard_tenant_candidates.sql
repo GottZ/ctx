@@ -34,7 +34,7 @@
 -- guard batch re-checks it against its own tenant only. Matched blocks that
 -- no longer exist cannot be attributed and are left as they are; so are rows
 -- whose slot a live row holds and rows a person archived (see the guards at
--- the statement below, amended after 5.29.2).
+-- the statement below, amended after 5.29.3).
 
 CREATE OR REPLACE FUNCTION ctx_guard_check(
     p_block_id            UUID,
@@ -159,7 +159,7 @@ $$;
 -- guard_checked_at, see guardPendingWhere).
 --
 -- Three guards, the M121 pattern (121_checkpoint_head_repair.sql, statement
--- (b)). The statement as shipped in 5.29.1/5.29.2 had none of them, and ONE
+-- (b)). The statement as shipped in 5.29.1–5.29.3 had none of them, and ONE
 -- un-archive into an occupied slot is a 23505 that rolls the migration back
 -- and, with it, the boot (cmd/ctxd/main.go: "migrations failed", exit 1, the
 -- next start fails the same way):
@@ -186,7 +186,7 @@ $$;
 -- the first run returned (guard 1) or excluded by guard 3.
 --
 -- Amending a shipped migration changes its checksum; databases that applied
--- the 5.29.1/5.29.2 file keep that checksum in _migrations, and
+-- the 5.29.1–5.29.3 file keep that checksum in _migrations, and
 -- migrations.AmendedChecksums keeps it valid for the schema contract.
 WITH candidates AS (
     SELECT b.id,
