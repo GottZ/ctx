@@ -57,7 +57,20 @@ described in [SECURITY.md](SECURITY.md).
   `README.md` or a `docs/*.md` file.
 - **Migrations are append-only.** Never edit a migration that has landed on `root`;
   add a new one. A new migration needs the regenerated schema manifest in the same
-  commit — the pre-commit hook prints the command.
+  commit — the pre-commit hook prints the command. The one exception is a shipped
+  migration that cannot complete on some databases (no later migration would ever
+  run there): amend it, and in the same commit
+  - add the shipped file's sha256 to `go/migrations/amended.go`;
+  - keep the shipped file byte for byte as
+    `go/migrations/testdata/<name>.<first 8 hex>.sql.txt` (not `.sql`: the hook's
+    `go/migrations/*.sql` pathspec reaches into subdirectories) and let a test show
+    it failing where the amended file passes;
+  - regenerate the manifest and compare. If only an image-driven
+    `extensions.*.min_version` moves, do not commit that bump; the hook cannot tell
+    a catalog-neutral (DML-only) amendment yet, so the commit takes the
+    `--no-verify` path the hook names, after running its gates by hand, and the
+    message states the regeneration result;
+  - document the change for operators, as for any migration.
 - **Tests come with the change.** A bug fix carries a test that fails without it.
   Fixtures go through the production write path, not hand-inserted rows.
 - **CI is green.** Lint, unit and integration tests, cross-compilation and the web
