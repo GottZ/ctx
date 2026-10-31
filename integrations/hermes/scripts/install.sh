@@ -72,8 +72,8 @@ fi
 
 # Backups are dot-prefixed: Hermes skips plugin directories starting with "." or "_",
 # but lists every other one under plugins/ as a memory provider of its own — an old
-# ctx_checkpoint.bak-* copy showed up next to the real provider (plugin 0.5.2).
-for legacy in "${HOME_DIR}/plugins/ctx_checkpoint.bak-"*; do
+# <plugin>.bak-* copy showed up next to the real provider (ctx_checkpoint 0.5.2).
+for legacy in "${HOME_DIR}/plugins/${PLUGIN_NAME}.bak-"*; do
     [ -d "$legacy" ] || continue
     echo "note: ${legacy} is an old-style backup that Hermes lists as a memory provider;" >&2
     echo "      delete it or rename it to start with a dot." >&2
@@ -83,7 +83,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] would install plugin version $(cat "${PLUGIN_SRC}/VERSION")"
 else
     if [ -d "$DEST" ]; then
-        BACKUP="${HOME_DIR}/plugins/.ctx_checkpoint.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+        BACKUP="${HOME_DIR}/plugins/.${PLUGIN_NAME}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
         echo "existing install found — backing up to ${BACKUP}"
         mv "$DEST" "$BACKUP"
     fi
