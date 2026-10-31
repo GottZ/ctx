@@ -215,6 +215,14 @@ func coupledSetOf(p *backends.Pool) coupledSet {
 		if !b.HasRole(backends.RoleEmbed) && !b.HasRole(backends.RoleDreamEmbed) {
 			continue
 		}
+		// Only the operator's _global rows feed the shared embed cache
+		// (embedcache.cacheable), so only they can move the vector space the
+		// cache holds — a tenant-admin creating, toggling or re-hosting its
+		// own embed row must not flush every tenant's cache (GHSA 2026-10-31
+		// §8, the denial-of-service half).
+		if b.Scope != "" && b.Scope != backends.GlobalScope {
+			continue
+		}
 		out[coupledPair{host: b.Host, protocol: string(b.Protocol)}] = struct{}{}
 	}
 	return out

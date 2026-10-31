@@ -410,3 +410,104 @@ func TestBackendWriteRejectsUserinfo(t *testing.T) {
 		t.Errorf("userinfo-free base_url rejected: %s", rec.Body.String())
 	}
 }
+
+// fieldErrorsOf decodes the 422 body of writeBackendValidation into
+// field → message.
+func fieldErrorsOf(t *testing.T, rec *httptest.ResponseRecorder) map[string]string {
+	t.Helper()
+	var resp struct {
+		Fields []backends.FieldError `json:"fields"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode 422 body: %v (%s)", err, rec.Body.String())
+	}
+	out := make(map[string]string, len(resp.Fields))
+	for _, f := range resp.Fields {
+		out[f.Field] = f.Message
+	}
+	return out
+}
+
+// TestBackendEmbedEquivalenceClaim pins GHSA 2026-10-31 §8: the vector-space
+// equivalence flag (metadata.embed_equivalence_verified, which lifts the
+// external-embed 422) is a SERVER-ADMIN statement minted by the cosine probe.
+// A tenant-admin may not introduce it on create or update (422 on
+// `metadata`, before the store); a server-admin passes the claim check, and so
+// does a tenant update that only keeps a flag the row already carried. The
+// probes past the claim check stop at the value-shaped api_key_ref (422 on
+// `api_key_ref`, still DB-free, the nil store is never reached). RED without
+// checkEmbedEquivalenceClaim (measured): both tenant-introduce cases answer
+// the api_key_ref error instead of the metadata one.
+func TestBackendEmbedEquivalenceClaim(t *testing.T) {
+	spec := func() map[string]any {
+		return map[string]any{
+			"name": "ext-embed", "base_url": "https://embed.example.com",
+			"roles": []string{"embed"}, "model_map": map[string]any{"default": "m"},
+			"metadata":    map[string]any{"embed_equivalence_verified": true},
+			"api_key_ref": "NOT A SECRET NAME",
+		}
+	}
+
+	t.Run("Create_TenantAdmin_422", func(t *testing.T) {
+		rec := manageReqWithPool(t, tenantAdminScopedAR("tenant-a"), backends.NewPool(nil, nil), map[string]any{
+			"action": "backend-create", "data": spec(),
+		})
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status %d, want 422 (body %s)", rec.Code, rec.Body.String())
+		}
+		if msg := fieldErrorsOf(t, rec)["metadata"]; !strings.Contains(msg, "embed_equivalence_verified") {
+			t.Fatalf("tenant-admin claimed the equivalence proof by hand: fields %s", rec.Body.String())
+		}
+	})
+
+	t.Run("Create_ServerAdmin_PassesClaim", func(t *testing.T) {
+		rec := manageReqWithPool(t, adminAR(), backends.NewPool(nil, nil), map[string]any{
+			"action": "backend-create", "data": spec(),
+		})
+		fields := fieldErrorsOf(t, rec)
+		if rec.Code != http.StatusUnprocessableEntity || fields["api_key_ref"] == "" || fields["metadata"] != "" {
+			t.Fatalf("server-admin did not pass the claim check to the api_key_ref gate: status %d body %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	tenantRow := func(id string, flagged bool) backends.Backend {
+		b := backends.Backend{
+			ID: id, Name: id, Host: "http://10.0.0.5:11434", Scope: "tenant-a",
+			Protocol: backends.ProtocolOllama, ProviderClass: backends.ProviderGeneric,
+			Trust: backends.TrustPublic, Locality: backends.LocalityLocal,
+			Roles:    []string{backends.RoleEmbed},
+			ModelMap: map[string]backends.ModelSpec{"default": {Model: "m"}},
+			Enabled:  true,
+		}
+		if flagged {
+			b.Metadata = map[string]any{"embed_equivalence_verified": true}
+		}
+		return b
+	}
+	bp := backends.NewPool(nil, nil)
+	bp.SeedSnapshotForTest([]backends.Backend{tenantRow("0190-plain", false), tenantRow("0190-proven", true)})
+	update := func(id string) map[string]any {
+		return map[string]any{
+			"action": "backend-update", "id": id,
+			"data": map[string]any{
+				"metadata":    map[string]any{"embed_equivalence_verified": true},
+				"api_key_ref": "NOT A SECRET NAME",
+			},
+		}
+	}
+
+	t.Run("Update_TenantAdmin_Introduce_422", func(t *testing.T) {
+		rec := manageReqWithPool(t, tenantAdminScopedAR("tenant-a"), bp, update("0190-plain"))
+		if msg := fieldErrorsOf(t, rec)["metadata"]; rec.Code != http.StatusUnprocessableEntity || !strings.Contains(msg, "embed_equivalence_verified") {
+			t.Fatalf("tenant-admin introduced the equivalence flag on update: status %d body %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("Update_TenantAdmin_KeepExisting_PassesClaim", func(t *testing.T) {
+		rec := manageReqWithPool(t, tenantAdminScopedAR("tenant-a"), bp, update("0190-proven"))
+		fields := fieldErrorsOf(t, rec)
+		if rec.Code != http.StatusUnprocessableEntity || fields["api_key_ref"] == "" || fields["metadata"] != "" {
+			t.Fatalf("keeping an existing flag was rejected: status %d body %s", rec.Code, rec.Body.String())
+		}
+	})
+}

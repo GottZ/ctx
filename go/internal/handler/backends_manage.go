@@ -296,6 +296,33 @@ func (h *ManageHandler) attachDisableProfiles(v map[string]any, backendID string
 	}
 }
 
+// embedEquivalenceClaimed reports whether a row carries the vector-space
+// equivalence proof flag (metadata.embed_equivalence_verified=true).
+func embedEquivalenceClaimed(b *backends.Backend) bool {
+	if b == nil || b.Metadata == nil {
+		return false
+	}
+	v, _ := b.Metadata["embed_equivalence_verified"].(bool)
+	return v
+}
+
+// checkEmbedEquivalenceClaim keeps the equivalence proof a SERVER-ADMIN
+// statement. The flag lifts the external-embed 422 (validate.go) and is meant
+// to be minted by the server's own cosine probe (backend-test
+// probe:"embed-equivalence", tierServerAdmin); a tenant-admin could set it by
+// hand in the metadata payload and run an embed backend of its own choosing
+// (GHSA 2026-10-31 §8). A non-server-admin may not introduce the flag — on
+// update it may only keep what the row already carried (prev nil on create).
+// Returns false after writing the 422.
+func checkEmbedEquivalenceClaim(w http.ResponseWriter, ar *auth.AuthResult, prev, next *backends.Backend) bool {
+	if ar.IsServerAdmin() || !embedEquivalenceClaimed(next) || embedEquivalenceClaimed(prev) {
+		return true
+	}
+	writeBackendValidation(w, []backends.FieldError{{Field: "metadata",
+		Message: "embed_equivalence_verified is set by the server's equivalence probe (backend-test, server-admin) — it cannot be claimed in the payload"}})
+	return false
+}
+
 // checkBackendSecretRef is the write-time half of the pool's scope-bound secret
 // resolution (GHSA 2026-10-31 §1). An api_key_ref must name a sealed secret in
 // a scope the ROW resolves at reload (store.BackendSecretScopes: the row's own
@@ -442,6 +469,9 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 		writeBackendValidation(w, fieldErrs)
 		return
 	}
+	if !checkEmbedEquivalenceClaim(w, ar, nil, b) {
+		return
+	}
 	if !h.checkBackendSecretRef(w, r, b.APIKeyRef, b.Scope) {
 		return
 	}
@@ -548,6 +578,9 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 	warnings, fieldErrs := backends.ValidateBackend(&next)
 	if len(fieldErrs) > 0 {
 		writeBackendValidation(w, fieldErrs)
+		return
+	}
+	if !checkEmbedEquivalenceClaim(w, ar, prev, &next) {
 		return
 	}
 	// Scope is immutable through update, so the ref resolves in prev.Scope.

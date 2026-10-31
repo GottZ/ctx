@@ -107,3 +107,28 @@ func mapsEqualForTest(a, b coupledSet) bool {
 	}
 	return true
 }
+
+// TestCoupledSetIgnoresTenantRows pins the §8 denial-of-service half (GHSA
+// 2026-10-31): only _global rows feed the shared embed cache
+// (embedcache.cacheable), so a tenant-admin creating, enabling or re-hosting
+// its OWN embed row must leave the coupled set — and therefore the cache —
+// untouched. RED without the scope filter in coupledSetOf: the tenant host
+// joins the set and the diff flushes every tenant's vectors.
+func TestCoupledSetIgnoresTenantRows(t *testing.T) {
+	global := embedRow("g", "http://embed-g:11434", backends.ProtocolOllama, true, backends.RoleEmbed)
+	tenantEmbed := embedRow("t", "http://tenant-embed:11434", backends.ProtocolOpenAI, true, backends.RoleEmbed)
+	tenantEmbed.Scope = "tenant-a"
+	tenantDream := embedRow("u", "http://embed-g:11434", backends.ProtocolOpenAI, true, backends.RoleDreamEmbed)
+	tenantDream.Scope = "tenant-a"
+
+	before := backends.NewPool(nil, nil)
+	before.SeedSnapshotForTest([]backends.Backend{global})
+	after := backends.NewPool(nil, nil)
+	after.SeedSnapshotForTest([]backends.Backend{global, tenantEmbed, tenantDream})
+
+	got := coupledSetOf(after)
+	if !mapsEqualForTest(coupledSetOf(before), got) {
+		t.Fatalf("tenant embed rows moved the coupled set: before %v, after %v", coupledSetOf(before), got)
+	}
+	has(t, got, "http://embed-g:11434", backends.ProtocolOllama)
+}

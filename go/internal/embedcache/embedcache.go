@@ -145,6 +145,13 @@ func PeekByHash(ctx context.Context, q pgxdb.Rower, hash []byte, model string) (
 	return cached.Slice(), true, nil
 }
 
+// cacheable reports whether a backend may read from or write to the shared
+// embed cache: only the operator's _global rows (and the test-only unscoped
+// row). See the probe comment in EmbedChain.
+func cacheable(b *backends.Backend) bool {
+	return b.Scope == "" || b.Scope == backends.GlobalScope
+}
+
 // EmbedChain is the chained Embed (F3-P3): cache first (keyed on the FIRST
 // backend's resolved model — the chain's preferred model), then wire attempts
 // over the chain with Classify deciding continuation. role resolves the
@@ -183,8 +190,18 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 	}
 
 	key := HashKey(prefix, text)
-	if cached, hit := cacheProbe(ctx, pool, key, chain[0].ModelFor(role).Model); hit {
-		return cached, nil, nil, false, nil
+	// The cache is the OPERATOR's: context_embed_cache keys on (text_hash,
+	// model) across every tenant, and the model name is a free field on a
+	// tenant-admin's pool row. Only a _global-scoped backend may serve a probe
+	// or write a row (cacheable) — a tenant row that could name the operator's
+	// model and return crafted vectors would otherwise poison every tenant's
+	// retrieval (first writer wins), and its cache-miss call would tell that
+	// tenant whether anyone had embedded the exact text before (GHSA
+	// 2026-10-31 §8). Tenant rows go straight to the wire, every time.
+	if cacheable(&chain[0]) {
+		if cached, hit := cacheProbe(ctx, pool, key, chain[0].ModelFor(role).Model); hit {
+			return cached, nil, nil, false, nil
+		}
 	}
 
 	var lastErr error
@@ -224,7 +241,7 @@ func EmbedChain(ctx context.Context, pool *pgxpool.Pool, chain []backends.Backen
 			if report != nil {
 				report(b.ID, backends.ClassOK, 0)
 			}
-			if pool != nil {
+			if pool != nil && cacheable(&b) {
 				preview := text
 				if len(preview) > previewLen {
 					preview = preview[:previewLen]
