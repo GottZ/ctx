@@ -43,7 +43,7 @@ func m156Tenant(t *testing.T, pool *pgxpool.Pool, slug string, scopes ...string)
 	ctx := context.Background()
 	var id string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO context_tenants (slug, display_name) VALUES ($1, $1) RETURNING id::text`, slug).Scan(&id); err != nil {
+		`INSERT INTO context_tenants (slug, display_name) VALUES ($1, $2) RETURNING id::text`, slug, slug).Scan(&id); err != nil {
 		t.Fatalf("create tenant %s: %v", slug, err)
 	}
 	for _, sc := range scopes {
