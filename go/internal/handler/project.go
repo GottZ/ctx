@@ -23,6 +23,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/ssrfguard"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
@@ -44,8 +46,9 @@ type projectCacheInvalidator interface{ InvalidateProjects() }
 
 // ProjectHandler serves the /api/project surface.
 type ProjectHandler struct {
-	pool *pgxpool.Pool
-	hub  projectCacheInvalidator
+	pool  *pgxpool.Pool
+	hub   projectCacheInvalidator
+	quota *backends.QuotaAccountant
 }
 
 // NewProjectHandler creates a new ProjectHandler.
@@ -58,6 +61,15 @@ func NewProjectHandler(pool *pgxpool.Pool) *ProjectHandler {
 // invalidation is a no-op (the TTL fallback still re-resolves within 60s).
 func (h *ProjectHandler) WithHub(hub projectCacheInvalidator) *ProjectHandler {
 	h.hub = hub
+	return h
+}
+
+// WithQuota attaches the process-wide tenant-quota accountant so a create that
+// adds a scope refreshes it at once (the scope-create mirror, tenant_manage.go
+// handleScopeCreate). Returns the handler for chaining; left unset the new
+// scope is gated only after the accountant's next TTL refresh.
+func (h *ProjectHandler) WithQuota(q *backends.QuotaAccountant) *ProjectHandler {
+	h.quota = q
 	return h
 }
 
@@ -217,7 +229,7 @@ func (h *ProjectHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "tenant limits lookup failed"})
 		return
 	}
-	row, _, err := store.CreateProject(ctx, h.pool, store.CreateProjectParams{
+	row, created, err := store.CreateProject(ctx, h.pool, store.CreateProjectParams{
 		TenantID:    bindingTenant,
 		ScopeName:   scope,
 		MaxScopes:   maxScopes,
@@ -244,6 +256,16 @@ func (h *ProjectHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// cheap (lazy rebuild) — no need to branch on created. PATCH is exempt: scope
 	// is immutable there (UpdateProject never touches it), so the mapping stands.
 	h.invalidateHub()
+	// The quota accountant resolves scope → tenant from its cached generation;
+	// a new scope is unknown to it (= ungated) until the next refresh. Refresh
+	// now so a key minted into the new scope is under the tenant's quota from
+	// its first call, exactly like scope-create (GHSA 2026-10-31 §4; §C3). An
+	// idempotent re-init adds no scope and needs none.
+	if created && h.quota != nil {
+		if err := h.quota.RefreshNow(ctx); err != nil {
+			slog.Warn("project-create: quota refresh failed; the new scope is gated after the next TTL refresh", "scope", scope, "error", err)
+		}
+	}
 	// Idempotent re-init and fresh create both return 200 (codebase convention,
 	// handleScopeCreate) — the row identity + the no-duplicate DB state carry the
 	// distinction (§7-W4 idempotency gate).

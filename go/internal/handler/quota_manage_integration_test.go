@@ -13,8 +13,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
@@ -163,5 +166,50 @@ func TestQuotaScopeCreateRefreshes(t *testing.T) {
 	var qe *backends.ErrQuotaExceeded
 	if err == nil || !errors.As(err, &qe) || qe.Reason != "daily_calls" {
 		t.Fatalf("the new scope must be gated by the tenant's quota right after scope-create, Gate err=%v", err)
+	}
+}
+
+// TestQuotaProjectCreateRefreshes (§C3): POST /api/project assigns a scope
+// too (compound create), so it closes the same window as scope-create — the
+// accountant is refreshed and the new scope is gated by the tenant's quota at
+// once, not after a TTL refresh. Driven through the production MountProject
+// chain with the accountant wired the way server.go wires it.
+func TestQuotaProjectCreateRefreshes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	tenantID := be5SeedTenant(t, pool, "s4pc")
+	be5SeedScope(t, pool, "s4pc", tenantID)
+	if _, err := pool.Exec(ctx, `INSERT INTO context_tenant_quota (scope, daily_calls) VALUES ('s4pc', 0)`); err != nil {
+		t.Fatalf("seed quota: %v", err)
+	}
+	acc := backends.NewQuotaAccountant(pool, time.Hour) // no TTL refresh inside the test
+	if err := acc.RefreshNow(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	r := chi.NewRouter()
+	admin := &auth.AuthResult{IsValid: true, TenantID: tenantID, TenantRole: auth.RoleAdmin}
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
+			next.ServeHTTP(w, rq.WithContext(context.WithValue(rq.Context(), authResultKey, admin)))
+		})
+	})
+	MountProject(r, NewProjectHandler(pool).WithQuota(acc))
+	req := httptest.NewRequest(http.MethodPost, "/api/project", strings.NewReader(`{"identity":"github:acme/s4pc","scope":"repo"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project create: status %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	_, err := acc.Gate("s4pc:repo", []backends.Backend{{ID: "x", Name: "local", Locality: "local"}})
+	var qe *backends.ErrQuotaExceeded
+	if err == nil || !errors.As(err, &qe) || qe.Reason != "daily_calls" {
+		t.Fatalf("the project's new scope must be gated by the tenant's quota right after project create, Gate err=%v", err)
 	}
 }
