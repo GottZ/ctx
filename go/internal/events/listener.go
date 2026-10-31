@@ -391,6 +391,22 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 	// generation is harmless (quota is cached separately, not in the snapshot).
 	if scope := p.Scope; scope != "" && !strings.HasPrefix(scope, "_") {
 		h.cfg.InvalidateTenant(scope)
+		// A tenant-scope SETTINGS write can flip that tenant's
+		// tenant.allow_shared_secrets, and the pool holds the _global key it
+		// resolved through that opt-in in its snapshot — read directly at
+		// the tenant scope by the resolver (store.TenantAllowsSharedSecrets),
+		// never through the config generation dropped above. Without a pool
+		// reload here a revoked opt-in kept the operator key serving on the
+		// tenant's rows until the next backend or secret write, a reconnect,
+		// a 401 self-heal or a restart (§B). Settings writes are rare and the
+		// reload is O(backends) — the price the secret branch above already
+		// pays. A context_secrets write reloaded above; the quota trigger's
+		// tenant-scope notifications change nothing the pool resolves.
+		if p.Entity == "context_settings" && h.backendPool != nil {
+			if err := h.backendPool.Reload(ctx); err != nil {
+				slog.Warn("listener: backend pool reload after tenant settings write failed — previous snapshot stays active", "error", err)
+			}
+		}
 		return nil
 	}
 	if err := settings.Reload(ctx, h.pool, h.cfg); err != nil {
