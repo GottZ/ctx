@@ -8,8 +8,8 @@
 // prove anything in each other's presence: the repair is one UPDATE, and a
 // single row un-archived into an occupied slot of a partial unique index over
 // NOT is_archived is a 23505 that rolls the whole migration back — in prod,
-// the boot. The statement shipped in 5.29.1/5.29.2 failed this suite at the
-// first fixture that has a live twin.
+// the boot. The file as shipped in 5.29.1/5.29.2 dies on this corpus with
+// exactly that 23505; m156ShippedAborts runs it before the amended one.
 //
 //	GOTMPDIR=/compose/n8n/.gocache GOCACHE=/compose/n8n/.gocache/build \
 //	  CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18 \
@@ -18,8 +18,13 @@ package guard_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -28,6 +33,10 @@ import (
 )
 
 const m156File = "156_guard_tenant_candidates.sql"
+
+// m156ShippedFile is migration 156 byte for byte as 5.29.1/5.29.2 shipped it
+// (migrations.TestAmendedChecksums_Provenance ties it to the amended entry).
+const m156ShippedFile = "../../migrations/testdata/156_guard_tenant_candidates.c095c391.sql.txt"
 
 // m156State is everything the repair may touch on one row, plus the audit
 // marker that proves the repair (and not something else) touched it.
@@ -190,6 +199,35 @@ func m156ApplyAgain(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
+// m156ShippedAborts is the negative proof: the shipped revision, run against
+// the seeded corpus in a transaction that is rolled back, must die with the
+// 23505 on a partial unique index over live rows that the amendment exists
+// for. It also pins the file to the checksum the schema contract accepts.
+func m156ShippedAborts(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	sql, err := os.ReadFile(m156ShippedFile)
+	if err != nil {
+		t.Fatalf("read shipped 156: %v", err)
+	}
+	sum := sha256.Sum256(sql)
+	if checksum := hex.EncodeToString(sum[:]); !migrations.IsAmendedChecksum(156, checksum) {
+		t.Fatalf("%s: sha256 %s is not an amended checksum of 156", m156ShippedFile, checksum)
+	}
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, string(sql))
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" ||
+		(pgErr.ConstraintName != "uq_context_category_title_scope" && pgErr.ConstraintName != "uq_source_chunk") {
+		t.Fatalf("shipped 156 on the corpus: err = %v, want 23505 on uq_context_category_title_scope or uq_source_chunk", err)
+	}
+	t.Logf("shipped 156 on the corpus: %s (%s) on %s", pgErr.Code, pgErr.Message, pgErr.ConstraintName)
+}
+
 // TestRepair_M156_Corpus is the main gate: one database, one migration run,
 // one fixture per guard.
 func TestRepair_M156_Corpus(t *testing.T) {
@@ -252,6 +290,8 @@ func TestRepair_M156_Corpus(t *testing.T) {
 	// back like a 23505 — and neither names a block, so both stay.
 	noMatch := m156Archived(t, pool, "01920000-0000-7000-8000-000000156a20", "no match", "s156a", "", "")
 	badMatch := m156Archived(t, pool, "01920000-0000-7000-8000-000000156a21", "bad match", "s156a", "not-a-uuid", "")
+
+	m156ShippedAborts(t, pool)
 
 	pre := m156Snapshot(t, pool)
 	if err := store.RunMigrationsUpTo(ctx, pool, 156); err != nil {

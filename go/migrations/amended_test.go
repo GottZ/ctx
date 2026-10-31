@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -43,6 +45,56 @@ func TestAmendedChecksums_Wellformed(t *testing.T) {
 	}
 	if IsAmendedChecksum(1, strings.Repeat("d", 64)) {
 		t.Error("IsAmendedChecksum accepted an unlisted version")
+	}
+}
+
+// TestAmendedChecksums_Provenance ties every amended checksum to the bytes it
+// stands for. Each earlier revision is kept byte for byte as it shipped, as
+// testdata/<file name without .sql>.<first 8 hex digits>.sql.txt; its sha256
+// must be the listed checksum, and every kept revision must be listed. Without
+// the file an entry is a number copied by hand, and only another copy of the
+// same number would ever disagree with it. The .txt suffix keeps the file out
+// of every go/migrations/*.sql path: the embed pattern, and the git pathspec
+// of the pre-commit manifest gate, which matches across directories.
+func TestAmendedChecksums_Provenance(t *testing.T) {
+	kept := map[string]bool{}
+	for version, sums := range amended {
+		for _, s := range sums {
+			if !sha256Hex.MatchString(s) {
+				continue // TestAmendedChecksums_Wellformed reports it
+			}
+			pattern := filepath.Join("testdata", fmt.Sprintf("%03d_*.%s.sql.txt", version, s[:8]))
+			matches, err := filepath.Glob(pattern)
+			if err != nil {
+				t.Fatalf("glob %s: %v", pattern, err)
+			}
+			if len(matches) != 1 {
+				t.Errorf("version %d, checksum %s: want exactly one shipped revision %s, got %v", version, s, pattern, matches)
+				continue
+			}
+			content, err := os.ReadFile(matches[0])
+			if err != nil {
+				t.Fatalf("read %s: %v", matches[0], err)
+			}
+			sum := sha256.Sum256(content)
+			if got := hex.EncodeToString(sum[:]); got != s {
+				t.Errorf("%s: sha256 %s, but amended lists %s", matches[0], got, s)
+			}
+			name := strings.TrimSuffix(filepath.Base(matches[0]), "."+s[:8]+".sql.txt") + ".sql"
+			if _, err := fs.Stat(FS, name); err != nil {
+				t.Errorf("%s is no revision of an embedded migration: %s: %v", matches[0], name, err)
+			}
+			kept[matches[0]] = true
+		}
+	}
+	all, err := filepath.Glob(filepath.Join("testdata", "*.sql.txt"))
+	if err != nil {
+		t.Fatalf("glob testdata: %v", err)
+	}
+	for _, f := range all {
+		if !kept[f] {
+			t.Errorf("%s: shipped revision without an amended entry", f)
+		}
 	}
 }
 
