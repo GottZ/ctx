@@ -46,10 +46,9 @@ var dcrAuthMethods = map[string]bool{
 	"client_secret_post":  true,
 }
 
-// dcrGrantTypes is the allowed grant_types superset. refresh_token is
-// registerable as client DATA already (the 097 column), even though /token
-// only serves it once 03/S4 issues refresh tokens — registration stores the
-// client's declared intent, the endpoint stays the enforcement point.
+// dcrGrantTypes is the allowed grant_types superset. The registered set is
+// enforced at /token (clientAllowsGrant): a refresh token is issued and
+// rotated only for a client that registered refresh_token.
 var dcrGrantTypes = map[string]bool{
 	"authorization_code": true,
 	"refresh_token":      true,
@@ -180,9 +179,17 @@ func (req *dcrRequest) spec() (spec store.RegisterOAuthClientSpec, errCode, errD
 		return spec, "invalid_client_metadata", "unsupported token_endpoint_auth_method"
 	}
 
+	// grant_types — default authorization_code + refresh_token: a
+	// DELIBERATE deviation from the RFC 7591 §2 default (authorization_code
+	// alone). /token enforces the registered set since the advisory §6 fix;
+	// before it every client got a refresh token regardless of grant_types,
+	// so an MCP client that omits the field relied on refresh. The RFC
+	// default would now end its session after the 1 h access TTL. The
+	// narrower default would buy no protection: any client can declare
+	// refresh_token explicitly. Explicit values outside the set → 400.
 	grantTypes := req.GrantTypes
 	if len(grantTypes) == 0 {
-		grantTypes = []string{"authorization_code"}
+		grantTypes = []string{"authorization_code", "refresh_token"}
 	}
 	for _, gt := range grantTypes {
 		if !dcrGrantTypes[gt] {

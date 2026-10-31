@@ -176,6 +176,41 @@ func MintTokenPair(ctx context.Context, pool *pgxpool.Pool, t OAuthToken, access
 	return pair, nil
 }
 
+// MintAccessToken mints a lone access row — no refresh token, no family
+// (refresh_family NULL): the authorization_code grant for a client whose
+// registered grant_types lack refresh_token (RFC 7591 §2 grant_types is the
+// contract; RFC 6749 §5.1 makes refresh_token OPTIONAL in the response). The
+// returned pair carries an empty RefreshToken. Revocation stays the same as
+// for pair rows: key soft-revoke and principal deactivation gate it in
+// ctx_auth_by_id, expiry bounds it.
+func MintAccessToken(ctx context.Context, pool *pgxpool.Pool, t OAuthToken, accessTTL time.Duration) (*TokenPair, error) {
+	access, err := newOpaqueToken(AccessTokenPrefix)
+	if err != nil {
+		return nil, err
+	}
+	pair := &TokenPair{
+		AccessToken:   access,
+		AccessTTL:     accessTTL,
+		AccessExpires: time.Now().Add(accessTTL),
+	}
+	var clientID, scope any
+	if t.ClientID != "" {
+		clientID = t.ClientID
+	}
+	if t.Scope != "" {
+		scope = t.Scope
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO context_access_tokens
+		     (token_hash, token_type, api_key_id, principal_id, client_id, audiences, scope, issued_via, expires_at)
+		 VALUES ($1, 'access', $2::uuid, $3::uuid, $4, $5, $6, $7, $8)`,
+		TokenHash(access), t.APIKeyID, t.PrincipalID, clientID, t.Audiences, scope, t.IssuedVia, pair.AccessExpires,
+	); err != nil {
+		return nil, fmt.Errorf("oauth tokens: mint access: %w", err)
+	}
+	return pair, nil
+}
+
 // RotateRefreshToken performs one refresh_token grant (S4, design 03 §4):
 // atomic take of the presented refresh, reuse detection with family revoke,
 // and the mint of the successor pair — all inside one transaction.
