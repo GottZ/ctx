@@ -6,6 +6,10 @@
 // was copied unchecked and every row resolved _global, so a tenant-admin could
 // bind an operator secret by name to a base_url it controls.
 //
+// §B: the tenant's allow_shared_secrets opt-in opens the _global fallback only
+// on the origin of a _global row that already carries the ref — before, the
+// opt-in alone let the tenant-admin choose the host the operator key went to.
+//
 //	go test -tags=integration ./internal/handler/ -run TestBackendSecretRefGate -count=1 -v
 package handler
 
@@ -55,6 +59,7 @@ func TestBackendSecretRefGate_Integration(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("tenant-admin create with a _global api_key_ref = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
+	foreignBody := rec.Body.String()
 	if !strings.Contains(rec.Body.String(), `"api_key_ref"`) {
 		t.Errorf("422 does not name the api_key_ref field: %s", rec.Body.String())
 	}
@@ -128,13 +133,59 @@ func TestBackendSecretRefGate_Integration(t *testing.T) {
 		t.Fatalf("operator tenant-scope row with a _global ref (no opt-in) = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// With the tenant's allow_shared_secrets opt-in the _global name is
-	// accepted for its rows — mirroring the resolver's gated fallback.
+	// §B: the tenant's allow_shared_secrets opt-in does NOT let its row carry
+	// the operator's secret to a host the tenant chose. Before the host binding
+	// this was 200 and the reload resolved the operator key for own.example.com.
 	seedSettingScope(t, ph.pool, store.AllowSharedSecretsKey, "tenant-a", "true")
 	rec = ph.doRaw(ph.ten, map[string]any{"action": "backend-update", "id": ownID, "data": map[string]any{
 		"api_key_ref": "openrouter-key",
 	}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("opted-in tenant update to the shared secret on its own host = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	// Same message as unknown and foreign — the gate does not tell an opted-in
+	// tenant which host the operator uses the name on.
+	if rec.Body.String() != foreignBody {
+		t.Errorf("wrong-host 422 differs from the unknown/foreign 422:\n%s\n%s", rec.Body.String(), foreignBody)
+	}
+	if err := ph.pool.QueryRow(ph.ctx, `SELECT api_key_ref FROM context_backends WHERE id = $1`, ownID).Scan(&ref); err != nil || ref != "tenant-own" {
+		t.Errorf("row api_key_ref after the wrong-host 422 = %q err=%v, want tenant-own untouched", ref, err)
+	}
+	// Create is gated the same way (scheme and port count: http on the
+	// operator's https host is another origin).
+	for _, host := range []string{"https://own.example.com", "http://global.example.com", "https://global.example.com:8443"} {
+		rec = ph.doRaw(ph.ten, map[string]any{"action": "backend-create", "data": map[string]any{
+			"name": "shared-elsewhere", "base_url": host, "roles": []string{"chat"},
+			"model_map": map[string]any{"default": "stub-model"}, "api_key_ref": "openrouter-key",
+		}})
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("opted-in tenant create with the shared secret on %s = %d, want 422; body=%s", host, rec.Code, rec.Body.String())
+		}
+	}
+
+	// On the origin of the operator's own row that carries openrouter-key
+	// (global-provider, https://global.example.com) the opted-in tenant may
+	// share it — the design use case: own model_map/priority on the operator's
+	// provider, under the operator's key. Any spelling of that origin counts.
+	rec = ph.doRaw(ph.ten, map[string]any{"action": "backend-update", "id": ownID, "data": map[string]any{
+		"base_url": "https://GLOBAL.example.com:443/api", "api_key_ref": "openrouter-key",
+	}})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("opted-in tenant update to the shared secret = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("opted-in tenant update to the shared secret on the operator's origin = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	rec = ph.doRaw(ph.ten, map[string]any{"action": "backend-create", "data": map[string]any{
+		"name": "shared-provider", "base_url": "https://global.example.com", "roles": []string{"chat"},
+		"model_map": map[string]any{"default": "other-model"}, "api_key_ref": "openrouter-key",
+	}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("opted-in tenant create with the shared secret on the operator's origin = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// Moving such a row off the operator's origin while keeping the ref is the
+	// same 422 — the binding holds on every write, not only when the ref changes.
+	rec = ph.doRaw(ph.ten, map[string]any{"action": "backend-update", "id": ownID, "data": map[string]any{
+		"base_url": "https://own.example.com",
+	}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("re-hosting a shared-secret row to the tenant's own host = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
 }

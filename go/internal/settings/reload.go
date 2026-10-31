@@ -40,15 +40,18 @@ import (
 // by the store.ResolveSecret contract. Backends with unresolvable refs stay
 // keyless in the snapshot (401 → ClassAuth → reload self-heal).
 //
-// Resolution is bound to the ROW's scope (store.BackendSecretScopes): a
-// _global row reads _global; a tenant row reads its own tenant scope and —
-// only behind that tenant's allow_shared_secrets opt-in — _global, exactly
-// like a tenant setting's secret_ref (tenantSecretResolver). Before 2026-10-31
-// every row resolved _global regardless of its scope, so a tenant-admin could
-// point a row with a base_url it controls at an operator secret by name and
-// receive the operator's provider key on the next chain call (GHSA §1).
+// Resolution is bound to the ROW's scope and host (store.BackendSecretScopes):
+// a _global row reads _global; a tenant row reads its own tenant scope and —
+// only behind that tenant's allow_shared_secrets opt-in, and only when a
+// _global row carrying the same api_key_ref points at the row's origin —
+// _global. Before 2026-10-31 every row resolved _global regardless of its
+// scope, so a tenant-admin could point a row with a base_url it controls at an
+// operator secret by name and receive the operator's provider key on the next
+// chain call (GHSA §1); the opt-in alone still let it pick that base_url (§B).
+// The host check runs at every reload, so an operator re-hosting or deleting
+// its row leaves a tenant row that leaned on it keyless.
 func BackendSecretResolver(pool *pgxpool.Pool) backends.SecretResolver {
-	return func(ctx context.Context, name, scope string) (string, error) {
+	return func(ctx context.Context, name, scope, host string) (string, error) {
 		if strings.TrimSpace(os.Getenv(sealbox.EnvKey)) == "" {
 			return "", fmt.Errorf("secrets master key not configured")
 		}
@@ -56,7 +59,7 @@ func BackendSecretResolver(pool *pgxpool.Pool) backends.SecretResolver {
 		if err != nil {
 			return "", fmt.Errorf("secrets master key unusable")
 		}
-		scopes, err := store.BackendSecretScopes(ctx, pool, scope)
+		scopes, err := store.BackendSecretScopes(ctx, pool, scope, name, host)
 		if err != nil {
 			return "", err
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -193,15 +194,28 @@ type BackendSecretRef struct {
 	APIKeyRef string
 }
 
-// BackendSecretScopes lists the secret scopes a pool row of rowScope resolves
-// its api_key_ref in, in resolver order: a _global row reads _global only; a
-// tenant row reads its own scope first and — only behind the tenant's
-// allow_shared_secrets opt-in (TenantAllowsSharedSecrets, fail-closed) —
-// _global. settings.BackendSecretResolver walks this list, and the
+// BackendSecretScopes lists the secret scopes a pool row of rowScope and
+// base_url host resolves its api_key_ref ref in, in resolver order: a _global
+// row reads _global only; a tenant row reads its own scope first and — only
+// behind the tenant's allow_shared_secrets opt-in (TenantAllowsSharedSecrets,
+// fail-closed) AND only when a _global row carrying the same api_key_ref points
+// at the same origin (GlobalBackendSharesOrigin) — _global.
+// settings.BackendSecretResolver walks this list, and the
 // backend-create/-update gate rejects a ref that exists in none of these
 // scopes, so write-time acceptance and reload-time resolution can never
 // disagree (GHSA 2026-10-31 §1: a tenant row naming an operator secret).
-func BackendSecretScopes(ctx context.Context, pool *pgxpool.Pool, rowScope string) ([]string, error) {
+//
+// The host binding (§B): the opt-in shares the operator's key with the
+// operator's provider, not with a host the tenant names. A tenant-admin picks
+// its row's base_url freely (any publicly routable host), so a name-only
+// fallback would let it aim the operator's provider key at a host of its
+// choosing. Bound to the origin of an operator row that already sends that key,
+// the opt-in means what design 03 §9.3 meant by it — a tenant row with its own
+// model_map, priority, limits and trust on the operator's provider, under the
+// operator's key. An operator moving its row to another host, or deleting it,
+// leaves the tenant row keyless at the next reload instead of sending the key
+// along to the old host.
+func BackendSecretScopes(ctx context.Context, pool *pgxpool.Pool, rowScope, ref, host string) ([]string, error) {
 	if rowScope == "" || rowScope == GlobalScope {
 		return []string{GlobalScope}, nil
 	}
@@ -209,10 +223,55 @@ func BackendSecretScopes(ctx context.Context, pool *pgxpool.Pool, rowScope strin
 	if err != nil {
 		return nil, err
 	}
-	if allowShared {
+	if !allowShared {
+		return []string{rowScope}, nil
+	}
+	bound, err := GlobalBackendSharesOrigin(ctx, pool, ref, host)
+	if err != nil {
+		return nil, err
+	}
+	if bound {
 		return []string{rowScope, GlobalScope}, nil
 	}
 	return []string{rowScope}, nil
+}
+
+// GlobalBackendSharesOrigin reports whether a _global pool row whose
+// api_key_ref is ref points at the same origin as host — scheme and host
+// lowercased, the default port made explicit, path dropped
+// (dispatch.NormalizeOrigin, the admission layer's notion of one physical
+// target). Both sides go through the same normalization; a host that does not
+// parse matches nothing (fail-closed). The row's enabled flag does not matter:
+// the binding is to where the operator sends its key, not to whether that row
+// serves right now.
+func GlobalBackendSharesOrigin(ctx context.Context, pool *pgxpool.Pool, ref, host string) (bool, error) {
+	if ref == "" {
+		return false, nil
+	}
+	want, err := dispatch.NormalizeOrigin(host)
+	if err != nil {
+		return false, nil
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT base_url FROM context_backends WHERE scope = $1 AND api_key_ref = $2`,
+		GlobalScope, ref)
+	if err != nil {
+		return false, fmt.Errorf("store: shared-secret origin lookup: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var baseURL string
+		if err := rows.Scan(&baseURL); err != nil {
+			return false, fmt.Errorf("store: shared-secret origin lookup: %w", err)
+		}
+		if got, err := dispatch.NormalizeOrigin(baseURL); err == nil && got == want {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("store: shared-secret origin lookup: %w", err)
+	}
+	return false, nil
 }
 
 // BackendSecretRefsInScopes lists every pool row in one of scopes whose

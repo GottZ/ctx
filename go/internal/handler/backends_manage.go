@@ -337,16 +337,18 @@ func checkEmbedEquivalenceClaim(w http.ResponseWriter, ar *auth.AuthResult, prev
 // checkBackendSecretRef is the write-time half of the pool's scope-bound secret
 // resolution (GHSA 2026-10-31 §1). An api_key_ref must name a sealed secret in
 // a scope the ROW resolves at reload (store.BackendSecretScopes: the row's own
-// scope, plus _global only behind the tenant's allow_shared_secrets opt-in) —
-// the exact rule settings' checkSecretRef applies to a secret_ref. Without it a
+// scope, plus _global only behind the tenant's allow_shared_secrets opt-in and
+// only for the origin of a _global row carrying the same ref). Without it a
 // tenant-admin could write a row with a base_url it controls and the NAME of an
 // operator secret, and the reload would hand the operator's provider key to
-// that host. A ref that exists in none of the row's scopes is a 422 field
-// error at write time (visible), never a keyless backend later (silent). The
-// message is identical for "unknown" and "foreign" so a tenant cannot probe
-// _global secret names through it (§5.5). Empty ref = keyless row, no check.
+// that host; the host binding (§B) keeps that true for an opted-in tenant too.
+// host is the row's base_url as it will be stored. A ref that resolves in none
+// of the row's scopes is a 422 field error at write time (visible), never a
+// keyless backend later (silent). The message is identical for "unknown",
+// "foreign" and "operator key, other host" so a tenant cannot probe _global
+// secret names through it (§5.5). Empty ref = keyless row, no check.
 // Returns false after writing the response.
-func (h *ManageHandler) checkBackendSecretRef(w http.ResponseWriter, r *http.Request, ref, rowScope string) bool {
+func (h *ManageHandler) checkBackendSecretRef(w http.ResponseWriter, r *http.Request, ref, rowScope, host string) bool {
 	if strings.TrimSpace(ref) == "" {
 		return true
 	}
@@ -355,7 +357,7 @@ func (h *ManageHandler) checkBackendSecretRef(w http.ResponseWriter, r *http.Req
 			Message: "takes a secret NAME (lowercase [a-z0-9._-], max 128 chars), never the secret value — create the secret first"}})
 		return false
 	}
-	scopes, err := store.BackendSecretScopes(r.Context(), h.pool, rowScope)
+	scopes, err := store.BackendSecretScopes(r.Context(), h.pool, rowScope, ref, host)
 	if err != nil {
 		internalError(w, r.Context(), "backends: shared-secrets opt-in check failed", err)
 		return false
@@ -371,7 +373,7 @@ func (h *ManageHandler) checkBackendSecretRef(w http.ResponseWriter, r *http.Req
 		}
 	}
 	writeBackendValidation(w, []backends.FieldError{{Field: "api_key_ref",
-		Message: "references a secret that does not exist in this backend's scope — create the secret first (a tenant backend resolves its own tenant's secrets; _global only with tenant.allow_shared_secrets)"}})
+		Message: "references a secret that does not exist in this backend's scope — create the secret first (a tenant backend resolves its own tenant's secrets; _global only with tenant.allow_shared_secrets, and only on the base_url origin of a _global backend using that secret)"}})
 	return false
 }
 
@@ -483,7 +485,7 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 	if !checkEmbedEquivalenceClaim(w, ar, nil, b) {
 		return
 	}
-	if !h.checkBackendSecretRef(w, r, b.APIKeyRef, b.Scope) {
+	if !h.checkBackendSecretRef(w, r, b.APIKeyRef, b.Scope, b.Host) {
 		return
 	}
 
@@ -594,8 +596,10 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 	if !checkEmbedEquivalenceClaim(w, ar, prev, &next) {
 		return
 	}
-	// Scope is immutable through update, so the ref resolves in prev.Scope.
-	if !h.checkBackendSecretRef(w, r, next.APIKeyRef, prev.Scope) {
+	// Scope is immutable through update, so the ref resolves in prev.Scope;
+	// the host is the one the row will carry after this write (next.Host), so
+	// re-hosting a row away from the operator's provider drops the fallback.
+	if !h.checkBackendSecretRef(w, r, next.APIKeyRef, prev.Scope, next.Host) {
 		return
 	}
 	if scoreDomainChanged(prev, &next) {

@@ -181,11 +181,13 @@ func (h *ManageHandler) equivCandidate(ctx context.Context, req manageRequest, s
 	}
 	if spec.APIKeyRef != nil && *spec.APIKeyRef != "" {
 		// Same scope rule as the pool resolver (store.BackendSecretScopes): an
-		// unsaved candidate resolves in the scope the row WOULD get — _global
-		// unless the (server-admin, backend-test tier) caller named a tenant
-		// scope — never unconditionally _global (GHSA 2026-10-31 §1).
+		// unsaved candidate resolves in the scope and for the host the row
+		// WOULD get — _global unless the (server-admin, backend-test tier)
+		// caller named a tenant scope — never unconditionally _global (GHSA
+		// 2026-10-31 §1), and a tenant scope reaches _global only for the
+		// origin of an operator row that already carries the ref (§B).
 		if box := h.sealboxOrNil(); box != nil {
-			if scopes, err := store.BackendSecretScopes(ctx, h.pool, cand.Scope); err == nil {
+			if scopes, err := store.BackendSecretScopes(ctx, h.pool, cand.Scope, *spec.APIKeyRef, cand.Host); err == nil {
 				for _, s := range scopes {
 					if plaintext, err := store.ResolveSecret(ctx, h.pool, box, *spec.APIKeyRef, s); err == nil {
 						cand.APIKey = string(plaintext)
