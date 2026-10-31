@@ -5,10 +5,10 @@
 //
 // The suite seeds every pre-156 case into ONE database, applies 156 exactly
 // once and reads each fixture back. As in the M121 suite, the guards only
-// prove anything in each other's presence: the repair is one UPDATE, and a
-// single row un-archived into an occupied slot of a partial unique index over
-// NOT is_archived is a 23505 that rolls the whole migration back — in prod,
-// the boot. The file as shipped in 5.29.1/5.29.2 dies on this corpus with
+// prove anything in each other's presence: the repair is one UPDATE, repeated
+// until a pass returns nothing, and a single row un-archived into an occupied
+// slot of a partial unique index over NOT is_archived is a 23505 that rolls
+// the whole migration back — in prod, the boot. The file as shipped in 5.29.1/5.29.2 dies on this corpus with
 // exactly that 23505; m156ShippedAborts runs it before the amended one.
 //
 //	GOTMPDIR=/compose/n8n/.gocache GOCACHE=/compose/n8n/.gocache/build \
@@ -291,6 +291,41 @@ func TestRepair_M156_Corpus(t *testing.T) {
 	noMatch := m156Archived(t, pool, "01920000-0000-7000-8000-000000156a20", "no match", "s156a", "", "")
 	badMatch := m156Archived(t, pool, "01920000-0000-7000-8000-000000156a21", "bad match", "s156a", "not-a-uuid", "")
 
+	// (i) chunks whose source is gone (fk_blocks_source ON DELETE SET NULL)
+	// hold no uq_source_chunk slot — the index treats NULLs as distinct —
+	// so two of them at the same chunk_index do not block each other: both
+	// come back.
+	var goneSource string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO context_sources (file_path, file_hash, scope) VALUES ('m156-gone.md', 'h', 'private') RETURNING id::text`).
+		Scan(&goneSource); err != nil {
+		t.Fatalf("seed gone source: %v", err)
+	}
+	orphanOld := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a30", "orphan old", goneSource, 0, foreign)
+	orphanNew := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a31", "orphan new", goneSource, 0, foreign)
+	if _, err := pool.Exec(ctx, `DELETE FROM context_sources WHERE id = $1::uuid`, goneSource); err != nil {
+		t.Fatalf("delete gone source: %v", err)
+	}
+
+	// (j) the newest row of a title slot is a chunk whose chunk slot the live
+	// chunk of (g) holds: it stays, and it must not keep the older row of
+	// the same title, whose chunk slot is free, from coming back.
+	crossTitleFree := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a40", "cross title", source, 2, foreign)
+	crossTitleHeld := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a41", "cross title", source, 0, foreign)
+
+	// (k) the same across the other index: the newest row of a chunk slot
+	// carries the title the live row of (b) holds; the older row of that
+	// chunk slot has a free title and comes back.
+	crossChunkFree := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a50", "cross chunk", source, 3, foreign)
+	crossChunkHeld := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a51", "slot", source, 3, foreign)
+
+	// (l) a shadow only a second pass lifts: "chain z" (newest) takes chunk
+	// slot 4 from the newer "chain" row, which therefore stays — but in that
+	// same pass it still outranks the older "chain" row (chunk slot 5).
+	chainOld := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a60", "chain", source, 5, foreign)
+	chainNew := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a61", "chain", source, 4, foreign)
+	chainZ := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a62", "chain z", source, 4, foreign)
+
 	m156ShippedAborts(t, pool)
 
 	pre := m156Snapshot(t, pool)
@@ -323,6 +358,15 @@ func TestRepair_M156_Corpus(t *testing.T) {
 		{"(g) newer chunk twin", chunkNew, back},
 		{"(h) empty guard_matched_id", noMatch, stays},
 		{"(h) malformed guard_matched_id", badMatch, stays},
+		{"(i) older orphaned chunk", orphanOld, back},
+		{"(i) newer orphaned chunk", orphanNew, back},
+		{"(j) newest of the title, chunk slot held", crossTitleHeld, stays},
+		{"(j) older of the title, chunk slot free", crossTitleFree, back},
+		{"(k) newest of the chunk slot, title held", crossChunkHeld, stays},
+		{"(k) older of the chunk slot, title free", crossChunkFree, back},
+		{"(l) chunk slot taken in the same pass", chainNew, stays},
+		{"(l) the row that took it", chainZ, back},
+		{"(l) older row, second pass", chainOld, back},
 		{"foreign target", foreign, live},
 		{"own target", own, live},
 	} {

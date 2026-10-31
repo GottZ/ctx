@@ -172,61 +172,94 @@ $$;
 --      ordinary data, not a corner case.
 --   2. rn = 1 per slot among the rows this statement would return: of
 --      several archived rows for one slot (re-saves the guard archived
---      again) only the newest, in UUIDv7 order, comes back.
+--      again) only the newest, in UUIDv7 order, comes back. Guards 1 and 3
+--      filter before the ranking, so a row that cannot come back never
+--      holds a slot's first rank. A chunk row without source_id or
+--      chunk_index has no uq_source_chunk slot (the index treats NULLs as
+--      distinct) and is ranked by its title slot alone.
 --   3. A block a person archived through guard-resolve keeps that verdict:
 --      resolve writes guard_status = 'archived_dup' as well, and
 --      metadata.guard_resolution = 'archive' is the only trace of the person.
 -- Rows the guards hold back stay archived exactly as they are; the query in
 -- docs/operations.md ("Migration 156") lists them. Every row this statement
 -- returns carries metadata.guard_repair = 'M156' (a reserved key, see
--- derived.ReservedMetadataKeys), so `metadata ? 'guard_repair'` reconstructs
--- the touched set at any later date.
+-- derived.ReservedMetadataKeys; M121 writes the same key with 'M121'), so
+-- `metadata->>'guard_repair' = 'M156'` reconstructs the touched set at any
+-- later date. Rows the 5.29.1/5.29.2 revision un-archived carry no marker.
 --
--- Idempotent: on a second run every remaining candidate is blocked by the row
--- the first run returned (guard 1) or excluded by guard 3.
+-- The match is compared as uuid, not as text, so context_blocks_pkey serves
+-- it: one index probe per candidate instead of a scan of every block.
+-- pg_input_is_valid keeps an empty or malformed guard_matched_id (the guard
+-- writes '' when it found no match) away from the cast, which would raise
+-- 22P02; the CASE, not an AND, is what guarantees that order.
+--
+-- The statement repeats until a pass returns nothing. A row ranked first in
+-- its title slot can lose its chunk slot to a newer row of the same pass (or
+-- the other way round); it stays archived and still outranks the older rows
+-- of its first slot in that pass. The next pass sees it blocked (guard 1) and
+-- ranks the next one. Every pass that does not end the loop un-archives at
+-- least one row, and an un-archived row is never a candidate again, so the
+-- loop ends; it ends only on a pass without an unblocked candidate (the
+-- newest one would rank first in both of its slots). Idempotent: a second run
+-- of this file finds every remaining candidate blocked by a live holder
+-- (guard 1) or excluded by guard 3 and changes nothing.
 --
 -- Amending a shipped migration changes its checksum; databases that applied
 -- the 5.29.1/5.29.2 file keep that checksum in _migrations, and
--- migrations.AmendedChecksums keeps it valid for the schema contract.
-WITH candidates AS (
-    SELECT b.id,
-           row_number() OVER (PARTITION BY b.category, b.title, b.scope
-                              ORDER BY b.id DESC) AS rn_title,
-           CASE WHEN b.lifecycle_state = 'chunk' THEN
-                row_number() OVER (PARTITION BY b.lifecycle_state = 'chunk', b.source_id, b.chunk_index
-                                   ORDER BY b.id DESC)
-           ELSE 1 END AS rn_chunk
-      FROM context_blocks b
-     WHERE b.is_archived
-       AND b.guard_status = 'archived_dup'
-       AND b.metadata->>'guard_resolution' IS DISTINCT FROM 'archive'
-       AND EXISTS (
-             SELECT 1
-               FROM context_blocks m
-               JOIN context_tenant_scopes mts ON mts.scope = m.scope
-               LEFT JOIN context_tenant_scopes bts ON bts.scope = b.scope
-              WHERE m.id::text = b.metadata->>'guard_matched_id'
-                AND (bts.tenant_id IS NULL OR bts.tenant_id <> mts.tenant_id)
-       )
-)
-UPDATE context_blocks b
-   SET is_archived  = false,
-       guard_status = 'active',
-       metadata     = (COALESCE(b.metadata, '{}'::jsonb)
-                       - 'guard_status' - 'guard_checked_at' - 'guard_similarity'
-                       - 'guard_matched_id' - 'guard_is_cross_scope'
-                       - 'guard_threshold_duplicate' - 'guard_threshold_review')
-                      || jsonb_build_object('guard_repair', 'M156'),
-       updated_at   = now()
-  FROM candidates c
- WHERE b.id = c.id
-   AND c.rn_title = 1
-   AND c.rn_chunk = 1
-   AND NOT EXISTS (
-         SELECT 1 FROM context_blocks live
-          WHERE live.category = b.category AND live.title = b.title
-            AND live.scope = b.scope AND NOT live.is_archived)
-   AND NOT (b.lifecycle_state = 'chunk' AND EXISTS (
-         SELECT 1 FROM context_blocks live
-          WHERE live.lifecycle_state = 'chunk' AND live.source_id = b.source_id
-            AND live.chunk_index = b.chunk_index AND NOT live.is_archived));
+-- migrations.IsAmendedChecksum (amended.go) keeps it valid for the schema
+-- contract.
+DO $$
+DECLARE
+    v_returned BIGINT;
+BEGIN
+    LOOP
+        WITH candidates AS (
+            SELECT b.id,
+                   row_number() OVER (PARTITION BY b.category, b.title, b.scope
+                                      ORDER BY b.id DESC) AS rn_title,
+                   CASE WHEN b.lifecycle_state = 'chunk'
+                         AND b.source_id IS NOT NULL AND b.chunk_index IS NOT NULL THEN
+                        row_number() OVER (PARTITION BY b.lifecycle_state = 'chunk'
+                                                        AND b.source_id IS NOT NULL
+                                                        AND b.chunk_index IS NOT NULL,
+                                                        b.source_id, b.chunk_index
+                                           ORDER BY b.id DESC)
+                   ELSE 1 END AS rn_chunk
+              FROM context_blocks b
+             WHERE b.is_archived
+               AND b.guard_status = 'archived_dup'
+               AND b.metadata->>'guard_resolution' IS DISTINCT FROM 'archive'
+               AND EXISTS (
+                     SELECT 1
+                       FROM context_blocks m
+                       JOIN context_tenant_scopes mts ON mts.scope = m.scope
+                       LEFT JOIN context_tenant_scopes bts ON bts.scope = b.scope
+                      WHERE m.id = CASE WHEN pg_input_is_valid(b.metadata->>'guard_matched_id', 'uuid')
+                                        THEN (b.metadata->>'guard_matched_id')::uuid END
+                        AND (bts.tenant_id IS NULL OR bts.tenant_id <> mts.tenant_id))
+               AND NOT EXISTS (
+                     SELECT 1 FROM context_blocks live
+                      WHERE live.category = b.category AND live.title = b.title
+                        AND live.scope = b.scope AND NOT live.is_archived)
+               AND NOT (b.lifecycle_state = 'chunk' AND EXISTS (
+                     SELECT 1 FROM context_blocks live
+                      WHERE live.lifecycle_state = 'chunk' AND live.source_id = b.source_id
+                        AND live.chunk_index = b.chunk_index AND NOT live.is_archived))
+        )
+        UPDATE context_blocks b
+           SET is_archived  = false,
+               guard_status = 'active',
+               metadata     = (COALESCE(b.metadata, '{}'::jsonb)
+                               - 'guard_status' - 'guard_checked_at' - 'guard_similarity'
+                               - 'guard_matched_id' - 'guard_is_cross_scope'
+                               - 'guard_threshold_duplicate' - 'guard_threshold_review')
+                              || jsonb_build_object('guard_repair', 'M156'),
+               updated_at   = now()
+          FROM candidates c
+         WHERE b.id = c.id
+           AND c.rn_title = 1
+           AND c.rn_chunk = 1;
+        GET DIAGNOSTICS v_returned = ROW_COUNT;
+        EXIT WHEN v_returned = 0;
+    END LOOP;
+END $$;
