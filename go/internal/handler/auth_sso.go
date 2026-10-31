@@ -664,12 +664,19 @@ func safeReturnTo(raw string) string {
 // the direct peer IS the configured trusted proxy — the rightmost non-empty
 // X-Forwarded-For entry (the hop the trusted proxy itself appended; entries
 // further left are client-forgeable).
+//
+// Without CTX_TRUSTED_PROXY a request that carries X-Forwarded-For triggers the
+// one-per-process proxy warning (§9f) — XFF itself is never trusted for it.
 func clientIP(r *http.Request, trustedProxy string) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if trustedProxy == "" || host != trustedProxy {
+	if trustedProxy == "" {
+		unsetProxyWarner.check(slog.Default(), r)
+		return host
+	}
+	if host != trustedProxy {
 		return host
 	}
 	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
@@ -680,6 +687,30 @@ func clientIP(r *http.Request, trustedProxy string) string {
 	}
 	return host
 }
+
+// proxyWarner emits the CTX_TRUSTED_PROXY operations signal (§9f): behind a
+// reverse proxy without CTX_TRUSTED_PROXY every login/SSO request counts
+// against the proxy's address, so the per-IP limit becomes one global lockout
+// for all clients. An X-Forwarded-For header on a request whose rate-limit key
+// is computed without a trusted proxy is the indication. The warning fires at
+// most once per process and is value-free (no address, no header value); a
+// client sending XFF directly can trigger it too, which costs one log line.
+type proxyWarner struct{ once sync.Once }
+
+func (pw *proxyWarner) check(log *slog.Logger, r *http.Request) {
+	if r.Header.Get("X-Forwarded-For") == "" {
+		return
+	}
+	pw.once.Do(func() {
+		log.Warn("auth: request carries X-Forwarded-For but " + EnvTrustedProxy + " is unset — " +
+			"login/SSO rate limits key on the direct peer, behind a reverse proxy that is one shared " +
+			"bucket for all clients; set " + EnvTrustedProxy + " to the proxy's address as ctxd sees it " +
+			"(docs/operations.md). Logged once per process.")
+	})
+}
+
+// unsetProxyWarner is the process-wide instance clientIP reports to.
+var unsetProxyWarner = &proxyWarner{}
 
 // ipLimiterMaxBuckets caps the limiter map — the flow is unauthenticated, so
 // the keyspace is attacker-controlled. When even pruning expired windows

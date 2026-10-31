@@ -8,8 +8,10 @@
 package handler
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -101,6 +103,65 @@ func TestClientIP(t *testing.T) {
 	// appended); left entries stay untrusted.
 	if got := clientIP(req, "203.0.113.7"); got != "192.0.2.3" {
 		t.Errorf("trusted peer: got %q, want rightmost XFF entry", got)
+	}
+}
+
+// §9f: without CTX_TRUSTED_PROXY a request carrying X-Forwarded-For logs ONE
+// value-free warning per process; requests without XFF log nothing, and XFF is
+// still not trusted for the rate-limit key.
+func TestProxyWarnerOncePerProcess(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	pw := &proxyWarner{}
+
+	plain := httptest.NewRequest("GET", "/auth/login/x", nil)
+	plain.RemoteAddr = "172.18.0.5:5000"
+	pw.check(log, plain)
+	if buf.Len() != 0 {
+		t.Fatalf("request without X-Forwarded-For logged: %s", buf.String())
+	}
+
+	fwd := httptest.NewRequest("POST", "/auth/login", nil)
+	fwd.RemoteAddr = "172.18.0.5:5000"
+	fwd.Header.Set("X-Forwarded-For", "198.51.100.9")
+	for range 3 {
+		pw.check(log, fwd)
+	}
+	out := buf.String()
+	if n := strings.Count(out, "CTX_TRUSTED_PROXY is unset"); n != 1 {
+		t.Fatalf("warning count = %d, want exactly 1: %s", n, out)
+	}
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("warning not at WARN level: %s", out)
+	}
+	for _, leak := range []string{"198.51.100.9", "172.18.0.5"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("warning carries a request value %q: %s", leak, out)
+		}
+	}
+}
+
+// TestClientIPWiresProxyWarner pins that clientIP — the login/SSO rate-limit
+// key — reports to the process warner only when no trusted proxy is set.
+func TestClientIPWiresProxyWarner(t *testing.T) {
+	var buf bytes.Buffer
+	prevLog, prevWarner := slog.Default(), unsetProxyWarner
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	unsetProxyWarner = &proxyWarner{}
+	t.Cleanup(func() { slog.SetDefault(prevLog); unsetProxyWarner = prevWarner })
+
+	req := httptest.NewRequest("POST", "/auth/login", nil)
+	req.RemoteAddr = "203.0.113.7:41234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.9")
+
+	if got := clientIP(req, "203.0.113.7"); got != "198.51.100.9" || buf.Len() != 0 {
+		t.Fatalf("trusted proxy set: ip=%q, log=%q — want XFF ip and no warning", got, buf.String())
+	}
+	if got := clientIP(req, ""); got != "203.0.113.7" {
+		t.Fatalf("no proxy: ip=%q, want the peer (XFF never trusted)", got)
+	}
+	if !strings.Contains(buf.String(), "CTX_TRUSTED_PROXY is unset") {
+		t.Fatalf("no proxy + XFF: warning missing: %q", buf.String())
 	}
 }
 

@@ -255,3 +255,70 @@ func TestUpdateApiKey_Integration(t *testing.T) {
 		}
 	})
 }
+
+// §9i: a tenant owner or admin must not deactivate, re-role, re-scope or
+// reactivate a server-admin key (is_admin=true) of its own tenant; nothing is
+// written. A server-admin caller still patches it.
+func TestUpdateApiKey_ServerAdminProtected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	empty := []string{}
+	patches := []struct {
+		name        string
+		role        *string
+		active      *bool
+		writeScopes *[]string
+		startActive bool
+	}{
+		{"deactivate", nil, activePtr(false), nil, true},
+		{"demote", rolePtr("member"), nil, nil, true},
+		{"write_scopes", nil, nil, &empty, true},
+		{"reactivate", nil, activePtr(true), nil, false},
+	}
+	for _, caller := range []struct {
+		name                 string
+		callerMayManageOwner bool
+	}{{"tenant_admin", false}, {"tenant_owner", true}} {
+		for _, p := range patches {
+			t.Run(caller.name+"_"+p.name, func(t *testing.T) {
+				slug := "upd-s9i-" + caller.name + "-" + p.name
+				tid := freshTenant(t, ctx, pool, slug)
+				seedKeyRole(t, pool, slug+"-owner", tid, "owner", true)
+				sa := seedKeyRole(t, pool, slug+"-sa", tid, "admin", p.startActive)
+				markServerAdmin(t, pool, sa)
+
+				_, changed, err := store.UpdateApiKey(ctx, pool, sa, tid, false /*isServerAdmin*/,
+					caller.callerMayManageOwner, p.role, p.active, p.writeScopes)
+				if !errors.Is(err, store.ErrServerAdminProtected) {
+					t.Fatalf("patch server-admin key err = %v, want ErrServerAdminProtected", err)
+				}
+				if changed {
+					t.Fatal("patch server-admin key reported changed=true")
+				}
+				role, active := keyRoleActive(t, pool, sa)
+				if role != "admin" || active != p.startActive {
+					t.Fatalf("server-admin key mutated: role=%q active=%v, want admin/%v", role, active, p.startActive)
+				}
+			})
+		}
+	}
+
+	t.Run("server_admin_patches_server_admin_key", func(t *testing.T) {
+		tid := freshTenant(t, ctx, pool, "upd-s9i-sa-ok")
+		seedKeyRole(t, pool, "upd-s9i-sa-ok-owner", tid, "owner", true)
+		sa := seedKeyRole(t, pool, "upd-s9i-sa-ok-sa", tid, "admin", true)
+		markServerAdmin(t, pool, sa)
+
+		_, changed, err := store.UpdateApiKey(ctx, pool, sa, "", true /*isServerAdmin*/, true, nil, activePtr(false), nil)
+		if err != nil || !changed {
+			t.Fatalf("server-admin patch = (changed=%v, err=%v), want (true, nil)", changed, err)
+		}
+		if _, active := keyRoleActive(t, pool, sa); active {
+			t.Fatal("server-admin key still active after a server-admin deactivate")
+		}
+	})
+}

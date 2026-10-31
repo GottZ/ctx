@@ -305,6 +305,53 @@ func TestOpen_NoPrevNoFallback(t *testing.T) {
 	}
 }
 
+// TestOpen_WrongNonceLengthErrorsNotPanics pins the §9g fix: cipher.AEAD.Open
+// panics on a nonce of the wrong length, and the nonce comes from
+// context_secrets.nonce (no CHECK) or break-glass stdin. The boot sweep,
+// settings.Bootstrap and the LISTEN reload run without recover, so one
+// tampered row would kill ctxd at boot. Open must return an error instead —
+// for the current key and for the prev-key fallback.
+func TestOpen_WrongNonceLengthErrorsNotPanics(t *testing.T) {
+	oldHex, newHex := testKeyHex(t), testKeyHex(t)
+	single, err := New(newHex, "")
+	if err != nil {
+		t.Fatalf("single box: %v", err)
+	}
+	rotated, err := New(newHex, oldHex)
+	if err != nil {
+		t.Fatalf("rotated box: %v", err)
+	}
+	_, ct, err := single.Seal("nonce-len", "_global", []byte("v"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	for _, box := range []struct {
+		name string
+		b    *Box
+	}{{"current only", single}, {"with prev", rotated}} {
+		for _, n := range []int{0, 11, 13, 24} {
+			nonce := bytes.Repeat([]byte{0x41}, n)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("%s, nonce len %d: Open panicked: %v", box.name, n, r)
+					}
+				}()
+				pt, usedPrev, err := box.b.Open("nonce-len", "_global", nonce, ct)
+				if err == nil {
+					t.Errorf("%s, nonce len %d: Open succeeded", box.name, n)
+				}
+				if pt != nil || usedPrev {
+					t.Errorf("%s, nonce len %d: plaintext=%v usedPrev=%v on error", box.name, n, pt != nil, usedPrev)
+				}
+				if err != nil && strings.Contains(err.Error(), "AAAA") {
+					t.Errorf("%s, nonce len %d: error echoes nonce bytes: %v", box.name, n, err)
+				}
+			}()
+		}
+	}
+}
+
 // --- break-glass stdin format ---.
 
 func TestDecodeLine_RoundTrip(t *testing.T) {

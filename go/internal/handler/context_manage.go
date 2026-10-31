@@ -1605,6 +1605,8 @@ func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Reques
 		switch {
 		case errors.Is(err, store.ErrOwnerProtected):
 			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "owner key may only be managed by an owner or server-admin"})
+		case errors.Is(err, store.ErrServerAdminProtected):
+			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "server-admin key may only be managed by a server-admin"})
 		case errors.Is(err, store.ErrLastOwner):
 			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot revoke the last active owner of the tenant"})
 		default:
@@ -1699,6 +1701,8 @@ func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Reques
 		switch {
 		case errors.Is(err, store.ErrOwnerProtected):
 			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "owner key may only be managed by an owner or server-admin"})
+		case errors.Is(err, store.ErrServerAdminProtected):
+			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "server-admin key may only be managed by a server-admin"})
 		case errors.Is(err, store.ErrLastOwner):
 			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot remove the last active owner of the tenant"})
 		case errors.Is(err, store.ErrWriteScopeNotAllowed):

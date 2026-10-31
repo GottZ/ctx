@@ -247,6 +247,9 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 		ExpiresAt:      pw.ExpiresAt,
 		TargetID:       resolvedID,
 		UpdateFields:   cw.UpdateFields,
+		// The card above carries the target's category/title/scope: the
+		// tool outcome inherits the target's sensitivity (§9h).
+		TargetSensitivity: block.Sensitivity,
 	}, "", nil
 }
 
