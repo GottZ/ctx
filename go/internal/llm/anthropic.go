@@ -455,7 +455,7 @@ func chatAnthropic(ctx context.Context, b backends.Backend, systemPrompt, userPr
 	}
 	SetAnthropicHeaders(httpReq, &b)
 
-	resp, err := httpx.DoRetryOnce(httpClient, httpReq, body)
+	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), httpReq, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}

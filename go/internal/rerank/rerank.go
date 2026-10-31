@@ -37,10 +37,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
-var httpClient = httpx.PooledClient()
+// httpClients is this family's plain/guarded pool pair; every wire call picks
+// its client with httpClients.For(b.EgressGuarded()) — tenant rows dial
+// through ssrfguard (GHSA 2026-10-31 §3), operator rows do not.
+var httpClients = httpx.NewClients()
 
 // Timeout caps a single rerank round-trip. A CPU cross-encoder costs roughly
 // ~1s per query+document pair, so a full window (MAX_DOCS) runs tens of seconds;
@@ -115,7 +119,7 @@ const (
 // Returns an error on transport failure, non-200, malformed JSON, or any
 // index the server returns that does not cleanly cover the input set — the
 // caller fails open and keeps the pre-rerank order.
-func Score(ctx context.Context, host, apiKey, model, query string, docs []string, scoreDomain string) ([]float64, int, error) {
+func Score(ctx context.Context, b backends.Backend, model, query string, docs []string, scoreDomain string) ([]float64, int, error) {
 	if len(docs) == 0 {
 		return nil, 0, nil
 	}
@@ -128,16 +132,16 @@ func Score(ctx context.Context, host, apiKey, model, query string, docs []string
 	reqCtx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, host+"/v1/rerank", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, b.Host+"/v1/rerank", bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, fmt.Errorf("rerank: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	if b.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.APIKey)
 	}
 
-	resp, err := httpx.DoRetryOnce(httpClient, req, body)
+	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, 0, fmt.Errorf("rerank: request failed: %w", err)
 	}

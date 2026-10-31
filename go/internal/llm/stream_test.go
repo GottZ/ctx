@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
 )
 
 // serveFixture streams the named testdata file as an SSE response body.
@@ -52,7 +54,7 @@ func TestChatStreamToolCallFixture(t *testing.T) {
 	defer srv.Close()
 
 	var events []StreamEvent
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, collectEvents(&events))
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, collectEvents(&events))
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -115,7 +117,7 @@ func TestChatStreamContentFixture(t *testing.T) {
 	defer srv.Close()
 
 	var events []StreamEvent
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, collectEvents(&events))
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, collectEvents(&events))
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -146,7 +148,7 @@ func TestChatStreamToolRoundtripFixture(t *testing.T) {
 	srv := serveFixture(t, "llamacpp_tool_roundtrip.sse")
 	defer srv.Close()
 
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -175,7 +177,7 @@ func TestChatStreamOpenRouterCommentFrames(t *testing.T) {
 	srv := serveFixture(t, "openrouter_comments.sse")
 	defer srv.Close()
 
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -206,7 +208,7 @@ func TestChatStreamOpenRouterMidStreamError(t *testing.T) {
 	srv := serveFixture(t, "openrouter_midstream_error.sse")
 	defer srv.Close()
 
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err == nil {
 		t.Fatalf("want error, got success: %+v", res)
 	}
@@ -233,7 +235,7 @@ func TestChatStreamFinishReasonErrorWithoutObject(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	_, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	var se *StreamError
 	if !errors.As(err, &se) {
 		t.Fatalf("error = %v, want *StreamError on finish_reason error", err)
@@ -252,11 +254,11 @@ func TestChatStreamArgumentsObjectForm(t *testing.T) {
 	strSrv := serveFixture(t, "llamacpp_tool_call.sse")
 	defer strSrv.Close()
 
-	objRes, err := ChatStream(context.Background(), objSrv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	objRes, err := ChatStream(context.Background(), backends.Backend{Host: objSrv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("object form: %v", err)
 	}
-	strRes, err := ChatStream(context.Background(), strSrv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	strRes, err := ChatStream(context.Background(), backends.Backend{Host: strSrv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("string form: %v", err)
 	}
@@ -280,7 +282,7 @@ func TestChatStreamEmptyArgumentsNormalizedToObject(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -331,7 +333,7 @@ func TestChatStreamParallelToolCallsByIndex(t *testing.T) {
 	defer srv.Close()
 
 	var events []StreamEvent
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, collectEvents(&events))
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, collectEvents(&events))
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -367,7 +369,7 @@ func TestChatStreamToolCallWithoutIndexField(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -392,7 +394,7 @@ func TestChatStreamIndexlessCallsAcrossChunksStayDistinct(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -417,7 +419,7 @@ func TestChatStreamEOFWithoutFinishIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	_, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err == nil || !strings.Contains(err.Error(), "ended unexpectedly") {
 		t.Fatalf("err = %v, want stream-ended-unexpectedly", err)
 	}
@@ -434,7 +436,7 @@ func TestChatStreamEOFAfterFinishWithoutDoneIsAccepted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	res, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -449,7 +451,7 @@ func TestChatStreamHTTPErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, nil)
+	_, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, nil)
 	if err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("err = %v, want unexpected status 503", err)
 	}
@@ -461,7 +463,7 @@ func TestChatStreamCallbackErrorAborts(t *testing.T) {
 
 	wantErr := errors.New("sink gone")
 	calls := 0
-	_, err := ChatStream(context.Background(), srv.URL, "", "m", nil, nil, Options{}, nil, 5*time.Second, func(StreamEvent) error {
+	_, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, 5*time.Second, func(StreamEvent) error {
 		calls++
 		return wantErr
 	})
@@ -492,7 +494,7 @@ func TestChatStreamContextCancelMidStream(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	start := time.Now()
-	_, err := ChatStream(ctx, srv.URL, "", "m", nil, nil, Options{}, nil, time.Minute, func(StreamEvent) error {
+	_, err := ChatStream(ctx, backends.Backend{Host: srv.URL}, "m", nil, nil, Options{}, nil, time.Minute, func(StreamEvent) error {
 		cancel()
 		return nil
 	})
@@ -544,7 +546,7 @@ func TestChatStreamRequestWire(t *testing.T) {
 		{Role: "tool", Content: `{"temperature_c":21}`, ToolCallID: "call_demo_001"},
 	}
 	opts := Options{Temperature: 0.7, RepeatPenalty: 1.1, NumPredict: 256}
-	_, err := ChatStream(context.Background(), srv.URL, "test-key", "demo-model", msgs, []ToolDef{tool}, opts, nil, 5*time.Second, nil)
+	_, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL, APIKey: "test-key"}, "demo-model", msgs, []ToolDef{tool}, opts, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
@@ -619,7 +621,7 @@ func TestChatStreamNoToolsOmitsToolsField(t *testing.T) {
 	srv, body, _ := captureRequestBody(t, minimalStopStream)
 	defer srv.Close()
 
-	_, err := ChatStream(context.Background(), srv.URL, "", "m",
+	_, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m",
 		[]ChatMsg{{Role: "user", Content: "hi"}}, nil, Options{}, nil, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
@@ -641,7 +643,7 @@ func TestChatStreamExtraBodyMergeAndOverride(t *testing.T) {
 		"provider":  map[string]any{"zdr": true},     // additive (OpenRouter)
 		"reasoning": map[string]any{"enabled": true}, // override of a core field
 	}
-	_, err := ChatStream(context.Background(), srv.URL, "", "m",
+	_, err := ChatStream(context.Background(), backends.Backend{Host: srv.URL}, "m",
 		[]ChatMsg{{Role: "user", Content: "hi"}}, nil, Options{}, extra, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
@@ -735,7 +737,7 @@ func TestChatStreamLiveSmoke(t *testing.T) {
 
 	t.Run("plain", func(t *testing.T) {
 		var deltas int
-		res, err := ChatStream(context.Background(), host, "", model, []ChatMsg{
+		res, err := ChatStream(context.Background(), backends.Backend{Host: host}, model, []ChatMsg{
 			{Role: "system", Content: "You are a demo assistant."},
 			{Role: "user", Content: "Reply with exactly: streaming smoke ok"},
 		}, nil, opts, nil, 2*time.Minute, func(ev StreamEvent) error {
@@ -763,7 +765,7 @@ func TestChatStreamLiveSmoke(t *testing.T) {
 			{Role: "system", Content: "You are a weather demo assistant."},
 			{Role: "user", Content: "What is the weather in Berlin right now? Use the get_weather tool."},
 		}
-		res, err := ChatStream(context.Background(), host, "", model, msgs, []ToolDef{tool}, opts, nil, 2*time.Minute, nil)
+		res, err := ChatStream(context.Background(), backends.Backend{Host: host}, model, msgs, []ToolDef{tool}, opts, nil, 2*time.Minute, nil)
 		if err != nil {
 			t.Fatalf("tool turn: %v", err)
 		}
@@ -783,7 +785,7 @@ func TestChatStreamLiveSmoke(t *testing.T) {
 			ChatMsg{Role: "assistant", Content: res.Content, ToolCalls: res.ToolCalls},
 			ChatMsg{Role: "tool", Content: `{"temperature_c":21,"condition":"sunny"}`, ToolCallID: tc.ID},
 		)
-		final, err := ChatStream(context.Background(), host, "", model, msgs, []ToolDef{tool}, opts, nil, 2*time.Minute, nil)
+		final, err := ChatStream(context.Background(), backends.Backend{Host: host}, model, msgs, []ToolDef{tool}, opts, nil, 2*time.Minute, nil)
 		if err != nil {
 			t.Fatalf("roundtrip turn: %v", err)
 		}

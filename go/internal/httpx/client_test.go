@@ -1,7 +1,11 @@
 package httpx
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -44,5 +48,50 @@ func TestPooledClientIsConstructor(t *testing.T) {
 	}
 	if a.Transport == b.Transport {
 		t.Error("two calls share one *http.Transport; the idle pools would be merged")
+	}
+}
+
+// TestGuardedPooledClient: same pool values as PooledClient, but the dial
+// runs through ssrfguard — a loopback server is refused before any request.
+func TestGuardedPooledClient(t *testing.T) {
+	c := GuardedPooledClient()
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", c.Transport)
+	}
+	if tr.MaxIdleConns != 20 || tr.MaxIdleConnsPerHost != 10 || tr.IdleConnTimeout != 90*time.Second || c.Timeout != 0 {
+		t.Errorf("pool values drifted from PooledClient: %+v timeout %v", tr, c.Timeout)
+	}
+	if tr.DialContext == nil || !tr.ForceAttemptHTTP2 {
+		t.Error("guarded transport needs the ssrfguard DialContext and HTTP/2 kept on")
+	}
+
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	body := []byte(`{}`)
+	_, err := DoRetryOnce(c, newReq(t, context.Background(), srv.URL, body), body) //nolint:bodyclose // error path, no body
+	if err == nil || !strings.Contains(err.Error(), "SSRF guard") {
+		t.Fatalf("guarded loopback call error = %v, want SSRF guard refusal", err)
+	}
+	if !IsBackendUnavailable(err) {
+		t.Errorf("guard refusal must classify as backend-unavailable (failover), got %v", err)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("guarded client reached loopback")
+	}
+}
+
+// TestClientsFor: one plain and one guarded pool per family, never shared.
+func TestClientsFor(t *testing.T) {
+	c := NewClients()
+	if c.For(false) == c.For(true) {
+		t.Fatal("guarded and plain calls share one client")
+	}
+	if tr := c.For(true).Transport.(*http.Transport); tr.DialContext == nil {
+		t.Error("For(true) is not the guarded client")
+	}
+	if tr := c.For(false).Transport.(*http.Transport); tr.DialContext != nil {
+		t.Error("For(false) carries a custom dialer")
 	}
 }

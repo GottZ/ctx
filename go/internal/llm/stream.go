@@ -309,7 +309,7 @@ func ChatStreamBackend(ctx context.Context, b backends.Backend, model string,
 	if b.Protocol == backends.ProtocolAnthropic {
 		return chatStreamAnthropic(ctx, b, model, msgs, tools, opts, timeout, onEvent)
 	}
-	return ChatStream(ctx, b.Host, b.APIKey, model, msgs, tools, opts, b.ExtraBody, timeout, onEvent)
+	return ChatStream(ctx, b, model, msgs, tools, opts, b.ExtraBody, timeout, onEvent)
 }
 
 // ChatStream sends a streaming chat request with optional tool definitions
@@ -322,7 +322,11 @@ func ChatStreamBackend(ctx context.Context, b backends.Backend, model string,
 // httpx.DoRetryOnce covers the connection setup only: a transport error
 // after response bytes arrived surfaces as a read error and is NOT replayed
 // — no silent double generation or double tool execution mid-stream.
-func ChatStream(ctx context.Context, host, apiKey, model string,
+//
+// b carries host, key and scope; the scope picks the client (a tenant row
+// dials through ssrfguard, Backend.EgressGuarded). extraBody stays a separate
+// parameter so tests can drive the wire without a full row.
+func ChatStream(ctx context.Context, b backends.Backend, model string,
 	msgs []ChatMsg, tools []ToolDef, opts Options, extraBody map[string]any,
 	timeout time.Duration, onEvent func(StreamEvent) error) (*StreamResult, error) {
 	body, err := buildStreamBody(model, msgs, tools, opts, extraBody)
@@ -333,17 +337,17 @@ func ChatStream(ctx context.Context, host, apiKey, model string,
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/v1/chat/completions", bytes.NewReader(body)) //nolint:gosec // G704: host aus dem F3-Backend-Pool (context_backends) — admin-gated + locality-validiert, kein freier User-Input. SSRF über die Egress-Locality-Trust-Dimension gegated (vor Prompt-Übertragung), nicht auf dieser Wire-Schicht.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.Host+"/v1/chat/completions", bytes.NewReader(body)) //nolint:gosec // G704: host from the F3 backend pool (context_backends), admin-gated; tenant rows dial through ssrfguard (httpClients.For below).
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	if b.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.APIKey)
 	}
 
-	resp, err := httpx.DoRetryOnce(httpClient, req, body)
+	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}

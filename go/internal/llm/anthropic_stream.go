@@ -411,7 +411,7 @@ func chatStreamAnthropic(ctx context.Context, b backends.Backend, model string,
 	SetAnthropicHeaders(httpReq, &b)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := httpx.DoRetryOnce(httpClient, httpReq, body)
+	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), httpReq, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}

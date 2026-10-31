@@ -19,7 +19,10 @@ import (
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
-var httpClient = httpx.PooledClient()
+// httpClients is this family's plain/guarded pool pair; every wire call picks
+// its client with httpClients.For(b.EgressGuarded()) — tenant rows dial
+// through ssrfguard (GHSA 2026-10-31 §3), operator rows do not.
+var httpClients = httpx.NewClients()
 
 const (
 	ChatTimeout      = 60 * time.Second
@@ -306,7 +309,7 @@ func chatOllama(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 	}
 	setChatHeaders(req, &b)
 
-	resp, err := httpx.DoRetryOnce(httpClient, req, body)
+	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
@@ -393,7 +396,7 @@ func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 	}
 	setChatHeaders(req, &b)
 
-	resp, err := httpx.DoRetryOnce(httpClient, req, body)
+	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}

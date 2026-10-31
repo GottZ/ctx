@@ -221,11 +221,17 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 // answer 404/405 on GET / and auth-gated APIs answer 401/403, all of which
 // prove the host is up and serving (see pingHost). Errors log the backend name
 // to slog ONLY — the response carries the aggregate.
+//
+// Only operator rows (_global/unscoped) are pinged: /health is anonymous, and a
+// tenant row's base_url is tenant-admin input — pinging it would hand every
+// anonymous caller a request into wherever a tenant pointed it (GHSA
+// 2026-10-31 §3). Server health is the operator's pool; a tenant's rows answer
+// for themselves on its own chain calls.
 func roleReachable(ctx context.Context, snap []backends.Backend, role string) string {
 	candidates := 0
 	for i := range snap {
 		b := &snap[i]
-		if !b.Enabled || !b.HasRole(role) {
+		if !b.Enabled || !b.HasRole(role) || b.EgressGuarded() {
 			continue
 		}
 		candidates++
