@@ -35,7 +35,25 @@ type m156State struct {
 	archived   bool
 	guard      string
 	repairMark string // metadata->>'guard_repair'; "" when absent
-	hasMatch   bool   // metadata ? 'guard_matched_id'
+	guardKeys  bool   // metadata ?| m156GuardKeys
+}
+
+// m156GuardKeys are the decision keys the guard writes into metadata
+// (guard.go applyDecision): the archive branch writes the first five, the
+// mark-checked branch the thresholds as well, and a block checked more than
+// once carries all seven. A row the repair returns must have lost every one
+// of them — guard_checked_at is the key guardPendingWhere reads, so a row
+// that kept it would never reach the guard again.
+const m156GuardKeys = `array['guard_status', 'guard_checked_at', 'guard_similarity', 'guard_matched_id',
+	'guard_is_cross_scope', 'guard_threshold_duplicate', 'guard_threshold_review']`
+
+// m156GuardMeta is the decision metadata of a row the guard archived, all
+// seven keys, matched against the given bind parameter.
+func m156GuardMeta(matchedParam string) string {
+	return `jsonb_build_object('guard_status', 'near_duplicate', 'guard_checked_at', now()::text,
+		'guard_similarity', 0.99, 'guard_matched_id', ` + matchedParam + `::text,
+		'guard_is_cross_scope', true, 'guard_threshold_duplicate', 0.95,
+		'guard_threshold_review', 0.85)`
 }
 
 func m156Tenant(t *testing.T, pool *pgxpool.Pool, slug string, scopes ...string) {
@@ -77,8 +95,7 @@ func m156Archived(t *testing.T, pool *pgxpool.Pool, id, title, scope, matched, r
 		`INSERT INTO context_blocks
 		   (id, category, title, content, scope, type_name, type_source, is_archived, guard_status, metadata)
 		 VALUES ($1::uuid, 'learnings', $2, 'body', $3, 'knowledge', 'auto', true, 'archived_dup',
-		         jsonb_build_object('guard_matched_id', $4::text, 'guard_similarity', 0.99,
-		                            'guard_checked_at', now()::text, 'guard_is_cross_scope', true)
+		         `+m156GuardMeta("$4")+`
 		         || CASE WHEN $5 = '' THEN '{}'::jsonb
 		                 ELSE jsonb_build_object('guard_resolution', $5::text) END)
 		 RETURNING id::text`, id, title, scope, matched, resolution).Scan(&out); err != nil {
@@ -103,7 +120,7 @@ func m156Chunk(t *testing.T, pool *pgxpool.Pool, id, title, source string, index
 		 VALUES ($1::uuid, 'learnings', $2, 'body', 's156a', 'knowledge', 'auto',
 		         'chunk', $3::uuid, $4, $5, $6,
 		         CASE WHEN $7 = '' THEN '{}'::jsonb
-		              ELSE jsonb_build_object('guard_matched_id', $7::text) END)
+		              ELSE `+m156GuardMeta("$7")+` END)
 		 RETURNING id::text`, id, title, source, index, archived, guard, matched).Scan(&out); err != nil {
 		t.Fatalf("seed chunk %q: %v", title, err)
 	}
@@ -115,9 +132,9 @@ func m156StateOf(t *testing.T, pool *pgxpool.Pool, id string) m156State {
 	var s m156State
 	if err := pool.QueryRow(context.Background(),
 		`SELECT is_archived, COALESCE(guard_status, ''), COALESCE(metadata->>'guard_repair', ''),
-		        COALESCE(metadata ? 'guard_matched_id', false)
+		        COALESCE(metadata ?| `+m156GuardKeys+`, false)
 		   FROM context_blocks WHERE id = $1::uuid`, id).
-		Scan(&s.archived, &s.guard, &s.repairMark, &s.hasMatch); err != nil {
+		Scan(&s.archived, &s.guard, &s.repairMark, &s.guardKeys); err != nil {
 		t.Fatalf("read state of %s: %v", id, err)
 	}
 	return s
@@ -229,13 +246,22 @@ func TestRepair_M156_Corpus(t *testing.T) {
 	chunkOld := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a12", "chunk twin old", source, 1, foreign)
 	chunkNew := m156Chunk(t, pool, "01920000-0000-7000-8000-000000156a13", "chunk twin new", source, 1, foreign)
 
+	// (h) the guard writes guard_matched_id = '' when it found no match
+	// (guard.go applyDecision; live data carries such rows). Neither that
+	// nor a malformed value may reach a uuid cast — a 22P02 rolls the boot
+	// back like a 23505 — and neither names a block, so both stay.
+	noMatch := m156Archived(t, pool, "01920000-0000-7000-8000-000000156a20", "no match", "s156a", "", "")
+	badMatch := m156Archived(t, pool, "01920000-0000-7000-8000-000000156a21", "bad match", "s156a", "not-a-uuid", "")
+
+	pre := m156Snapshot(t, pool)
 	if err := store.RunMigrationsUpTo(ctx, pool, 156); err != nil {
 		t.Fatalf("apply migration 156: %v", err)
 	}
+	post := m156Snapshot(t, pool)
 
-	back := m156State{archived: false, guard: "active", repairMark: "M156", hasMatch: false}
-	stays := m156State{archived: true, guard: "archived_dup", repairMark: "", hasMatch: true}
-	live := m156State{archived: false, guard: "active", repairMark: "", hasMatch: false}
+	back := m156State{archived: false, guard: "active", repairMark: "M156", guardKeys: false}
+	stays := m156State{archived: true, guard: "archived_dup", repairMark: "", guardKeys: true}
+	live := m156State{archived: false, guard: "active", repairMark: "", guardKeys: false}
 
 	for _, c := range []struct {
 		label string
@@ -255,11 +281,18 @@ func TestRepair_M156_Corpus(t *testing.T) {
 		{"(g) archived chunk beside a live one", chunkSlot, stays},
 		{"(g) older chunk twin", chunkOld, stays},
 		{"(g) newer chunk twin", chunkNew, back},
+		{"(h) empty guard_matched_id", noMatch, stays},
+		{"(h) malformed guard_matched_id", badMatch, stays},
 		{"foreign target", foreign, live},
 		{"own target", own, live},
 	} {
 		if got := m156StateOf(t, pool, c.id); got != c.want {
 			t.Errorf("%s = %+v, want %+v", c.label, got, c.want)
+		}
+		// A row the guards hold back stays exactly as it was: metadata
+		// byte for byte, updated_at included.
+		if c.want == stays && post[c.id] != pre[c.id] {
+			t.Errorf("%s was held back but changed:\n before %s\n after  %s", c.label, pre[c.id], post[c.id])
 		}
 	}
 
