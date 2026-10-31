@@ -197,3 +197,27 @@ func TestNewSSOHandlerDefaultClientBlocksLoopback(t *testing.T) {
 		t.Fatalf("loopback fetch failed for the wrong reason: %v", err)
 	}
 }
+
+// TestNewSSOHandlerDialsDirect pins the §9d proxy half (GHSA 2026-10-31): the
+// production SSO transport must not consult HTTP(S)_PROXY — through a proxy
+// the dial-time guard checks only the proxy's IP — and a special-purpose
+// target the old predicates missed (CGNAT, Alibaba metadata) is refused by
+// the guard itself.
+func TestNewSSOHandlerDialsDirect(t *testing.T) {
+	h := NewSSOHandler(nil)
+	tr, ok := h.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("SSO transport is %T, want *http.Transport", h.client.Transport)
+	}
+	if tr.Proxy != nil {
+		t.Fatal("SSO transport honours a proxy — the ssrfguard would only see the proxy's IP")
+	}
+	resp, err := h.client.Get("http://100.100.100.200/latest/meta-data/") //nolint:noctx // dial-refusal probe
+	if err == nil {
+		resp.Body.Close() //nolint:errcheck
+		t.Fatal("default SSO client fetched 100.100.100.200 — CGNAT/metadata not denied")
+	}
+	if !strings.Contains(err.Error(), "SSRF guard") {
+		t.Fatalf("100.100.100.200 failed for the wrong reason: %v", err)
+	}
+}

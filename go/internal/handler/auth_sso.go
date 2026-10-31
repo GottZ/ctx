@@ -119,10 +119,14 @@ type SSOHandler struct {
 // targets resolving into private ranges), shared OIDC cache, env-derived
 // canonical issuer and trusted proxy.
 func NewSSOHandler(pool *pgxpool.Pool) *SSOHandler {
+	// No Proxy (GHSA 2026-10-31 §9d): with HTTP(S)_PROXY honoured, the
+	// guarded dialer would only ever see the proxy's address and the
+	// deny-list would never meet the IdP target. Forge and camo dial direct
+	// the same way; no documented setup routes OIDC through a proxy.
 	client := &http.Client{
 		Timeout: oidc.DefaultFetchTimeout,
 		Transport: &http.Transport{
-			Proxy:       http.ProxyFromEnvironment,
+			Proxy:       nil,
 			DialContext: ssrfguard.GuardedDialer().DialContext,
 		},
 	}
