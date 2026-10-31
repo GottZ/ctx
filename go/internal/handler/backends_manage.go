@@ -312,11 +312,22 @@ func embedEquivalenceClaimed(b *backends.Backend) bool {
 // probe:"embed-equivalence", tierServerAdmin); a tenant-admin could set it by
 // hand in the metadata payload and run an embed backend of its own choosing
 // (GHSA 2026-10-31 §8). A non-server-admin may not introduce the flag — on
-// update it may only keep what the row already carried (prev nil on create).
+// update it may only keep what the row already carried (prev nil on create),
+// and only while the proven identity stays: the probe measured ONE host,
+// wire protocol and embed model, so changing any of them while keeping the
+// flag would carry a stale proof onto a different vector space.
 // Returns false after writing the 422.
 func checkEmbedEquivalenceClaim(w http.ResponseWriter, ar *auth.AuthResult, prev, next *backends.Backend) bool {
-	if ar.IsServerAdmin() || !embedEquivalenceClaimed(next) || embedEquivalenceClaimed(prev) {
+	if ar.IsServerAdmin() || !embedEquivalenceClaimed(next) {
 		return true
+	}
+	if embedEquivalenceClaimed(prev) {
+		if prev.Host == next.Host && prev.Protocol == next.Protocol && embedModelOf(prev) == embedModelOf(next) {
+			return true
+		}
+		writeBackendValidation(w, []backends.FieldError{{Field: "metadata",
+			Message: "embed_equivalence_verified was proven for this row's previous base_url, protocol and embed model — drop the flag when changing them; a server-admin re-runs the equivalence probe"}})
+		return false
 	}
 	writeBackendValidation(w, []backends.FieldError{{Field: "metadata",
 		Message: "embed_equivalence_verified is set by the server's equivalence probe (backend-test, server-admin) — it cannot be claimed in the payload"}})

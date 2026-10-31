@@ -512,4 +512,36 @@ func TestBackendEmbedEquivalenceClaim(t *testing.T) {
 			t.Fatalf("keeping an existing flag was rejected: status %d body %s", rec.Code, rec.Body.String())
 		}
 	})
+
+	// Keeping the flag while moving the proven identity (host, protocol,
+	// embed model) carries a stale proof: 422 on metadata for a tenant-admin.
+	// RED without the identity comparison: all three reach the api_key_ref
+	// gate instead.
+	for name, change := range map[string]map[string]any{
+		"BaseURL":  {"base_url": "https://other-embed.example.com"},
+		"Protocol": {"protocol": "openai"},
+		"Model":    {"model_map": map[string]any{"default": "other-model"}},
+	} {
+		t.Run("Update_TenantAdmin_KeepFlag_Change"+name+"_422", func(t *testing.T) {
+			req := update("0190-proven")
+			data := req["data"].(map[string]any)
+			for k, v := range change {
+				data[k] = v
+			}
+			rec := manageReqWithPool(t, tenantAdminScopedAR("tenant-a"), bp, req)
+			if msg := fieldErrorsOf(t, rec)["metadata"]; rec.Code != http.StatusUnprocessableEntity || !strings.Contains(msg, "previous base_url") {
+				t.Fatalf("stale equivalence proof kept across a %s change: status %d body %s", name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("Update_ServerAdmin_KeepFlag_ChangeBaseURL_PassesClaim", func(t *testing.T) {
+		req := update("0190-proven")
+		req["data"].(map[string]any)["base_url"] = "https://other-embed.example.com"
+		rec := manageReqWithPool(t, adminAR(), bp, req)
+		fields := fieldErrorsOf(t, rec)
+		if rec.Code != http.StatusUnprocessableEntity || fields["api_key_ref"] == "" || fields["metadata"] != "" {
+			t.Fatalf("server-admin update did not pass the claim check: status %d body %s", rec.Code, rec.Body.String())
+		}
+	})
 }
