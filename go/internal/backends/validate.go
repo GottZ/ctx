@@ -80,7 +80,9 @@ func DeriveLocality(baseURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("unparseable URL")
 	}
-	host := u.Hostname()
+	// Lower-case and drop the root dot: "LOCALHOST" and "localhost." resolve
+	// exactly like "localhost", and "llama-cpu." is still a single label.
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	if host == "" {
 		return "", fmt.Errorf("URL has no host")
 	}
@@ -89,7 +91,8 @@ func DeriveLocality(baseURL string) (string, error) {
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		switch {
-		case ip.IsLoopback():
+		case ip.IsLoopback(), ip.IsUnspecified():
+			// 0.0.0.0 / [::] connect to the local host on Linux.
 			return LocalityLocal, nil
 		case ip.IsPrivate(), ip.IsLinkLocalUnicast():
 			return LocalityLAN, nil
@@ -149,6 +152,7 @@ func validateIdentity(b *Backend) (errs []FieldError) {
 	}
 
 	errs = append(errs, validateVersionedRoot(b)...)
+	errs = append(errs, validateEgressTarget(b)...)
 
 	switch b.Protocol {
 	case ProtocolOpenAI, ProtocolOllama, ProtocolAnthropic, "rerank":
@@ -208,6 +212,38 @@ func validateIdentity(b *Backend) (errs []FieldError) {
 // synthesis, chat 404. Silent acceptance here is what made that hard to
 // diagnose, so it is a 422. ollama protocol stays out: its wire appends
 // /api/…, so a /v1 root there is odd but does not double.
+// validateEgressTarget closes the two base_url shapes behind GHSA 2026-10-31
+// §3 (tenant-admin SSRF):
+//
+//   - '?' or '#' anywhere in base_url. Every wire builds its URL as
+//     base_url + "/v1/..." by string concatenation, so a query or fragment
+//     marker turns the appended API path into query/fragment text that is
+//     never routed: "http://internal:9200/_search#" POSTs the request body to
+//     /_search instead of /v1/chat/completions. No legitimate API root
+//     carries either, so the rule holds for every scope.
+//   - a tenant-owned row (EgressGuarded) whose host is not publicly routable
+//     (DeriveLocality local/lan: loopback, RFC 1918, link-local, unspecified,
+//     single-label docker names). LAN backends stay a server-admin choice on
+//     '_global' rows. This is the static, network-free half; the wire clients
+//     re-check every resolved address at dial time (ssrfguard), which also
+//     covers public names that resolve privately and redirects.
+//
+// Unparseable URLs are left to the absolute-URL rule above (one error each).
+func validateEgressTarget(b *Backend) []FieldError {
+	var errs []FieldError
+	if strings.ContainsAny(b.Host, "?#") {
+		errs = append(errs, FieldError{"base_url",
+			"base_url must not contain '?' or '#' — wire paths are appended to it, and a query or fragment would cut them off"})
+	}
+	if b.EgressGuarded() {
+		if loc, err := DeriveLocality(b.Host); err == nil && loc != LocalityExternal {
+			errs = append(errs, FieldError{"base_url",
+				"a tenant backend needs a publicly routable host — loopback, private, link-local and single-label hosts are reserved to _global (server-admin) backends"})
+		}
+	}
+	return errs
+}
+
 func validateVersionedRoot(b *Backend) []FieldError {
 	// TrimSpace: copy-paste with trailing whitespace is the realistic entry
 	// path for exactly the audience this guard protects; ToLower: /V1 404s

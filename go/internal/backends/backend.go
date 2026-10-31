@@ -184,6 +184,20 @@ type Backend struct {
 	Metadata     map[string]any
 }
 
+// EgressGuarded reports whether this row is tenant-owned and therefore an
+// SSRF-relevant egress target (GHSA 2026-10-31 §3): a tenant-admin chooses its
+// base_url, so the wire clients dial it only through internal/ssrfguard, the
+// validator admits only publicly routable hosts for it, and /health never
+// pings it. '_global' rows are the operator's choice (LAN backends such as a
+// docker Ollama are legitimate there) and stay unguarded; so do unscoped
+// tuples (Scope == "": config-derived F1 tuples and test rows — the DB
+// enforces scope NOT NULL DEFAULT '_global', and every write path sets it).
+// The "" ∪ _global = shared rule is the one VisibleTo uses. This is the ONE
+// predicate every backend egress path keys its client choice on.
+func (b *Backend) EgressGuarded() bool {
+	return b.Scope != "" && b.Scope != GlobalScope
+}
+
 // HasRole reports whether the backend carries the given role.
 func (b *Backend) HasRole(role string) bool {
 	for _, r := range b.Roles {
