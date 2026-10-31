@@ -534,6 +534,41 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// isBrakeOnly reports whether an update payload is exactly {"enabled": false}
+// — the instant brake (§F-ops). It changes neither target nor key nor any
+// embed identity; it only takes the row out of every chain, which shrinks
+// what the row can reach. The whole-row gates (gateBackendUpdate) re-judge the
+// entire row, so a row written before a gate existed (a tenant row naming a
+// _global secret without the opt-in or off the operator's origin, a tenant row
+// on a private base_url) answered 422 to its own brake, for a server-admin
+// too; the only ways out were api_key_ref:"" in the same payload or a delete.
+// Any other key in the payload — even a harmless one next to enabled:false —
+// and enabled:true take the fully gated path.
+func isBrakeOnly(spec *backendSpec, keys map[string]json.RawMessage) bool {
+	return len(keys) == 1 && spec.Enabled != nil && !*spec.Enabled
+}
+
+// gateBackendUpdate runs the whole-row gates of backend-update on next:
+// ValidateBackend, the embed-equivalence claim and the api_key_ref gate.
+// Returns the validator's warnings, or false after writing the 422.
+func (h *ManageHandler) gateBackendUpdate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, prev, next *backends.Backend) ([]string, bool) {
+	warnings, fieldErrs := backends.ValidateBackend(next)
+	if len(fieldErrs) > 0 {
+		writeBackendValidation(w, fieldErrs)
+		return nil, false
+	}
+	if !checkEmbedEquivalenceClaim(w, ar, prev, next) {
+		return nil, false
+	}
+	// Scope is immutable through update, so the ref resolves in prev.Scope;
+	// the host is the one the row will carry after this write (next.Host), so
+	// re-hosting a row away from the operator's provider drops the fallback.
+	if !h.checkBackendSecretRef(w, r, next.APIKeyRef, prev.Scope, next.Host) {
+		return nil, false
+	}
+	return warnings, true
+}
+
 func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	if req.ID == "" {
@@ -592,19 +627,15 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	warnings, fieldErrs := backends.ValidateBackend(&next)
-	if len(fieldErrs) > 0 {
-		writeBackendValidation(w, fieldErrs)
-		return
-	}
-	if !checkEmbedEquivalenceClaim(w, ar, prev, &next) {
-		return
-	}
-	// Scope is immutable through update, so the ref resolves in prev.Scope;
-	// the host is the one the row will carry after this write (next.Host), so
-	// re-hosting a row away from the operator's provider drops the fallback.
-	if !h.checkBackendSecretRef(w, r, next.APIKeyRef, prev.Scope, next.Host) {
-		return
+	// The instant brake skips the whole-row gates (isBrakeOnly); the trust,
+	// data-collection and score-domain confirms above are no-ops for it
+	// (nothing they compare changes).
+	var warnings []string
+	if !isBrakeOnly(spec, keys) {
+		var ok bool
+		if warnings, ok = h.gateBackendUpdate(w, r, ar, prev, &next); !ok {
+			return
+		}
 	}
 	if scoreDomainChanged(prev, &next) {
 		slog.Warn("backends: confirmed score_domain change",
