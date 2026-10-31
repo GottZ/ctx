@@ -486,12 +486,26 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 			Confidence string           `json:"confidence"`
 			Sources    []mcpQuerySource `json:"sources"`
 			Error      string           `json:"error"`
+			ErrorCode  string           `json:"error_code"`
 		}
 		if err := json.Unmarshal(rec.body, &qr); err != nil {
 			return errResult("failed to parse query response"), nil, err
 		}
 		if qr.Error != "" {
 			return errResult(qr.Error), nil, nil
+		}
+		// A refusal that carries only error_code (the tenant quota gate's
+		// quota_exceeded, no_eligible_backend) must not read as an empty
+		// answer. Before the heartbeat it is a real 4xx/5xx; on the synthesis
+		// path the 200 is already committed and only the body says so. The
+		// text names the code alone — the other fields of the body (the role and
+		// required sensitivity a no_eligible_backend body carries) stay out
+		// of the tool result.
+		if qr.ErrorCode != "" {
+			return errResultCoded(qr.ErrorCode, "query refused: "+qr.ErrorCode), nil, nil
+		}
+		if rec.statusCode >= http.StatusBadRequest {
+			return errResult(fmt.Sprintf("query failed (HTTP %d)", rec.statusCode)), nil, nil
 		}
 
 		var sb strings.Builder

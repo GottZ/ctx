@@ -123,6 +123,8 @@ Every row is a type whose *generic* writes stop being accepted **unless they nam
 
 **Citations on the MCP `query` tool (V-W1b).** The tool's `Sources:` list is numbered with each source's `citation_index` (the `<source id="N">` prompt ordinal described under `POST /api/query`) and sorted by it, so a `[N]` in the answer names the source printed under `[N]`; a source that never entered the prompt is marked `[n/a]` instead of numbered, and a response carrying no `citation_index` at all (retrieval-only path, pre-V-W1 server) keeps the previous position numbering byte-identically.
 
+**Refusals on the MCP `query` tool.** A delegated `/api/query` answer that refuses with an `error_code` — `quota_exceeded` from the tenant quota gate, `no_eligible_backend` — is an `isError` tool result whose text names the code (`query refused: quota_exceeded`) and whose structured content carries it as `code`; the other fields of the body (role, required sensitivity) are not passed on. This holds whether the refusal arrives as a real `429`/`503` (before the synthesis heartbeat) or inside the already committed `200` body. Any other answer with an HTTP error status and no `error` text is an `isError` result too (`query failed (HTTP <status>)`), never an empty answer.
+
 ## Block-type registry
 
 The block-type registry has its own REST namespace, the canonical surface going forward: reads (workflow W1) are **member-gated** — any valid key reads — and writes (workflow W2) are **admin-or-tenant-admin-gated**. Both gates live inside the mount (`RequireMember` for GET, `RequireAdminOrTenantAdmin` for PUT/DELETE), so a missing/invalid key is `401` and an under-privileged one is `403` before the handler runs — the gate cannot be forgotten without the route vanishing.
