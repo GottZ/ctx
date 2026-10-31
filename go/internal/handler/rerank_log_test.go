@@ -20,7 +20,7 @@ func TestRerankLogEntryDispatchColumns(t *testing.T) {
 	callerSpan := 500 * time.Millisecond // acquire wait + wire — must NOT become duration_ms
 
 	wired := rrf.RerankWire{Wired: true, WaitMs: 120, WireDur: 30 * time.Millisecond}
-	e := rerankLogEntry("m", b, backends.SensInternal, []string{"id1"}, wired, callerSpan, nil, dispatch.ClassInteractive)
+	e := rerankLogEntry("m", b, backends.SensInternal, []string{"id1"}, wired, callerSpan, nil, dispatch.ClassInteractive, "")
 	if e.Duration != 30*time.Millisecond {
 		t.Errorf("duration = %v, want the wait-free wire span 30ms (§4.4a), not the caller span", e.Duration)
 	}
@@ -36,12 +36,24 @@ func TestRerankLogEntryDispatchColumns(t *testing.T) {
 
 	// B-R4 on the rerank row: a pass-through admission (wait 0) persists 0.
 	zero := rrf.RerankWire{Wired: true, WaitMs: 0, WireDur: 5 * time.Millisecond}
-	if e := rerankLogEntry("m", b, backends.SensInternal, nil, zero, callerSpan, nil, dispatch.ClassInteractive); e.QueueWaitMs == nil || *e.QueueWaitMs != 0 {
+	if e := rerankLogEntry("m", b, backends.SensInternal, nil, zero, callerSpan, nil, dispatch.ClassInteractive, ""); e.QueueWaitMs == nil || *e.QueueWaitMs != 0 {
 		t.Errorf("pass-through queue_wait_ms = %v, want a REAL 0 via pointer (B-R4)", e.QueueWaitMs)
 	}
 
 	// Early-out (no lease, no wire): caller span kept, no fabricated wait.
-	if e := rerankLogEntry("m", b, backends.SensInternal, nil, rrf.RerankWire{}, 3*time.Millisecond, nil, dispatch.ClassInteractive); e.QueueWaitMs != nil || e.Duration != 3*time.Millisecond {
+	if e := rerankLogEntry("m", b, backends.SensInternal, nil, rrf.RerankWire{}, 3*time.Millisecond, nil, dispatch.ClassInteractive, ""); e.QueueWaitMs != nil || e.Duration != 3*time.Millisecond {
 		t.Errorf("early-out row = wait %v dur %v, want nil wait + caller span", e.QueueWaitMs, e.Duration)
+	}
+}
+
+// TestRerankLogEntryAttributesCaller (§C3): the cross-encoder row carries the
+// caller's key id like every other foreground row — the tenant quota's call
+// budget (QuotaAccountant.spend) counts only rows with an api_key_id of the
+// tenant, so an unattributed row was a free call.
+func TestRerankLogEntryAttributesCaller(t *testing.T) {
+	b := backends.Backend{Name: "sidecar", Host: "http://rerank:8082", Trust: backends.TrustFull, Locality: "local"}
+	wired := rrf.RerankWire{Wired: true, WaitMs: 1, WireDur: time.Millisecond}
+	if e := rerankLogEntry("m", b, backends.SensInternal, []string{"id1"}, wired, time.Millisecond, nil, dispatch.ClassInteractive, "key-1"); e.APIKeyID != "key-1" {
+		t.Errorf("api_key_id = %q, want the caller's key-1", e.APIKeyID)
 	}
 }

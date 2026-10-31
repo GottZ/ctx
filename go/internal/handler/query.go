@@ -1273,7 +1273,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 						docCount = maxDocs
 					}
 					llmlog.Record(h.pool, rerankLogEntry(model, b, required,
-						sensIDs[:docCount], rerankTel, time.Since(rrStart), rerr, h.admission().Class))
+						sensIDs[:docCount], rerankTel, time.Since(rrStart), rerr, h.admission().Class, ar.ApiKeyID))
 				}
 			}
 		} else {
@@ -1970,12 +1970,16 @@ func (h *QueryHandler) granteeScopeFloor(ctx context.Context, tenantID string, f
 // there was no lease, nothing inflates — and carries no queue_wait_ms
 // (fabricating a 0 there would pollute the wait distribution with rows
 // that never entered a queue). Class is the handler's admission binding
-// (interactive; rejected admissions never reach this builder).
+// (interactive; rejected admissions never reach this builder). apiKeyID is
+// the caller attribution every foreground row carries (T35b): the tenant
+// quota's call budget counts attributed rows only, so a NULL here kept the
+// cross-encoder call out of daily_calls although its chain is gated (§C3).
 func rerankLogEntry(model string, b backends.Backend, required backends.Sensitivity,
-	blockIDs []string, tel rrf.RerankWire, callerSpan time.Duration, rerr error, class dispatch.Class,
+	blockIDs []string, tel rrf.RerankWire, callerSpan time.Duration, rerr error, class dispatch.Class, apiKeyID string,
 ) llmlog.Entry {
 	entry := llmlog.Entry{
 		Pipeline:            "query-rerank",
+		APIKeyID:            apiKeyID,
 		Model:               model,
 		Host:                b.Host,
 		Duration:            callerSpan,
