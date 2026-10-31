@@ -993,3 +993,37 @@ jobs:
           subject-digest: ${{ needs.docker.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
+
+  # ─── Stage 7: Dependency Graph ────────────────────────────────────────────────
+  # GitHub's own go.mod parser had stopped refreshing the dependency graph: on
+  # 2026-10-31 it still held a pre-July 2026 snapshot (chi 5.2.5 while go.mod
+  # pinned 5.5.0), so Dependabot alert #24 fired on a phantom chi version. A
+  # manual snapshot via the Dependency Submission API fixed the graph that day;
+  # this job submits the real module graph (go list, build target all) on
+  # every root push so Dependabot always matches go.mod. Push-only: PR runs
+  # (forks above all) get no write token, and the submission needs
+  # contents: write.
+  dependency-graph:
+    name: Dependency Graph
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push' && github.ref == 'refs/heads/root'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go/go.sum
+
+      - name: Submit Go module graph
+        uses: actions/go-dependency-submission@f35d5c9af13ce9cc32f7930b171e315e878f6921 # v2.0.3
+        with:
+          go-mod-path: go/go.mod
+          go-build-target: all
