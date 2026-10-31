@@ -283,10 +283,11 @@ type RerankWire struct {
 // Classify, no health report, no llmlog row). The sidecar's reported
 // usage.prompt_tokens charge into the lease (MW22/C1); a server without
 // counts stays uncharged.
-// scoreDomain is the backend's rerank dialect slot (Backend.ScoreDomain():
-// auto keeps the wire-container coupling, logit/probability override it) —
-// passed through verbatim to rerank.Score.
-func RerankCrossEncoder(ctx context.Context, b backends.Backend, model, scoreDomain string, maxDocs int, blendWeight float64, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, RerankWire, error) {
+// b is the resolved rerank row: its Host/APIKey address the wire, its scope
+// picks the (guarded) client, and its ScoreDomain() is the rerank dialect
+// slot handed to rerank.Score (auto keeps the wire-container coupling,
+// logit/probability override it).
+func RerankCrossEncoder(ctx context.Context, b backends.Backend, model string, maxDocs int, blendWeight float64, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, RerankWire, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("cross-encoder rerank: skipping, fewer than min results",
 			"result_count", len(results),
@@ -307,7 +308,7 @@ func RerankCrossEncoder(ctx context.Context, b backends.Backend, model, scoreDom
 	// signal and is cheap, so prepend it to the (truncated) content.
 	docs := buildCrossEncoderDocs(docsToRerank)
 
-	lease, runCtx, admErr := adm.Acquire(ctx, &backends.Backend{Host: b.Host}, backends.RoleRerank, rerank.Timeout)
+	lease, runCtx, admErr := adm.Acquire(ctx, &b, backends.RoleRerank, rerank.Timeout)
 	if admErr != nil {
 		return results, RerankWire{}, admErr // terminal doctrine §4.3: not an attempt — caller skips Classify/health/llmlog
 	}
@@ -318,7 +319,7 @@ func RerankCrossEncoder(ctx context.Context, b backends.Backend, model, scoreDom
 	logits, err := func() ([]float64, error) {
 		// defer is the only allowed release form (B1: panic-safe).
 		defer lease.Release()
-		logits, ptoks, err := rerank.Score(runCtx, b, model, query, docs, scoreDomain)
+		logits, ptoks, err := rerank.Score(runCtx, b, model, query, docs, b.ScoreDomain())
 		if err == nil && ptoks > 0 {
 			lease.ReportUsage(dispatch.Usage{PromptTokens: ptoks})
 		}
