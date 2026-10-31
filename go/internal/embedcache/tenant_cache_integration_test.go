@@ -9,8 +9,14 @@
 // same chain on a _global row keeps the cache-first behaviour.
 //
 // RED without embedcache.cacheable: the tenant row's seeded text is served
-// from the cache (no wire call, hit_count +1) and its fresh text leaves a
-// cache row behind.
+// from the cache (no error, no wire attempt, hit_count +1).
+//
+// Since §3 a tenant row dials through internal/ssrfguard, so its wire call to
+// the loopback fake below is refused at dial time ("SSRF guard"): the tenant
+// subtests assert that the chain WENT to the wire (the refusal) instead of
+// answering from the cache, and that nothing reached the server or the cache.
+// The write side uses the same cacheable predicate as the probe; a tenant
+// wire success cannot be produced against a loopback fake any more.
 //
 //	go test -tags=integration ./internal/embedcache/ -run TestEmbedChainTenantRowBypassesCache -count=1 -v
 package embedcache_test
@@ -20,6 +26,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -108,15 +115,26 @@ func TestEmbedChainTenantRowBypassesCache(t *testing.T) {
 		return served, wired
 	}
 
+	// tenantCall runs the chain on a tenant row and expects the §3 dial-time
+	// refusal: proof that the chain skipped the cache and went to the wire,
+	// without a byte reaching the fake server.
+	tenantCall := func(text string) {
+		t.Helper()
+		before := wireHits.Load()
+		v, served, _, wired, err := embedcache.EmbedChain(ctx, pool, row("tenant-a"), "embed", text, embed.PrefixQuery, nil, adm)
+		if err == nil || !strings.Contains(err.Error(), "SSRF guard") {
+			t.Fatalf("tenant row EmbedChain(%q): dims=%d served=%v err=%v, want the SSRF-guard wire refusal (a cache hit answers without error)",
+				text, len(v), served, err)
+		}
+		if !wired || served != nil || wireHits.Load() != before {
+			t.Fatalf("tenant row: wired=%v served=%v wire hits +%d, want a refused wire attempt", wired, served, wireHits.Load()-before)
+		}
+	}
+
 	hits0 := hitCount()
 
 	t.Run("TenantRow_NotServedFromCache", func(t *testing.T) {
-		before := wireHits.Load()
-		served, wired := call(row("tenant-a"), seeded)
-		if !wired || served == nil || wireHits.Load() != before+1 {
-			t.Fatalf("tenant row served from the operator's cache: wired=%v served=%v wire hits +%d, want a wire call",
-				wired, served, wireHits.Load()-before)
-		}
+		tenantCall(seeded)
 		if got := hitCount(); got != hits0 {
 			t.Errorf("tenant row probed the cache: hit_count %d -> %d, want untouched", hits0, got)
 		}
@@ -124,9 +142,7 @@ func TestEmbedChainTenantRowBypassesCache(t *testing.T) {
 
 	t.Run("TenantRow_WritesNoCacheRow", func(t *testing.T) {
 		const fresh = "tenant-a only text that nobody embedded before"
-		if _, wired := call(row("tenant-a"), fresh); !wired {
-			t.Fatal("fresh text not wired")
-		}
+		tenantCall(fresh)
 		if n := cacheRows(fresh); n != 0 {
 			t.Errorf("tenant row wrote %d cache row(s) under the operator's model name, want 0", n)
 		}
