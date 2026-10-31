@@ -513,11 +513,11 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 // against the stored hash; public clients (`none`) MUST NOT present one
 // (fail-closed — a `none` registration HAS no secret, so a presented one
 // can only be a misconfiguration or a guessing attempt). An UNREGISTERED
-// client_id passes only when no secret is presented: the grant handlers
-// bind code/refresh rows on the client_id anyway (invalid_grant, the S4
-// no-oracle path), while a presented secret is an authentication attempt
-// against a client this server never issued — invalid_client (RFC 6749
-// §5.2). Both secret channels (form + Basic) are accepted for confidential
+// or DEACTIVATED client_id is invalid_client (RFC 6749 §5.2) with or
+// without a secret (§9c): /authorize only issues codes to active
+// registered clients, so such a client_id can carry no legitimate grant,
+// and a deleted client must not keep rotating its refresh tokens as a
+// secret-less "public" client. Both secret channels (form + Basic) are accepted for confidential
 // clients; both are advertised in the metadata, and channel strictness
 // would add breakage without a security gain (the identity consistency is
 // enforced by the caller). Returns false after writing the 401.
@@ -536,11 +536,14 @@ func (h *OAuthHandler) authenticateClient(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	if !found {
-		if secret != "" {
-			oauthUnauthorized(w, basicAuthUsed, "client authentication failed")
-			return false
-		}
-		return true // unregistered + public shape: binding checks answer invalid_grant
+		// Unknown OR deactivated (GetOAuthClientByClientID folds both):
+		// invalid_client, secret or not (GHSA 2026-10-31 §9c). A deleted
+		// client used to land here as an "unregistered public client" and
+		// keep refreshing without its secret. No legitimate grant can be
+		// bound to an unregistered client_id — /authorize requires an
+		// active registered client since S2 — so nothing valid is refused.
+		oauthUnauthorized(w, basicAuthUsed, "client authentication failed")
+		return false
 	}
 	if client.TokenEndpointAuthMethod == "none" {
 		if secret != "" {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -203,16 +204,47 @@ func ListOAuthClients(ctx context.Context, pool *pgxpool.Pool) ([]OAuthClient, e
 	return clients, rows.Err()
 }
 
-// DeleteOAuthClient deactivates an OAuth client by client_id.
+// DeleteOAuthClient deactivates an OAuth client by client_id and, in the
+// SAME transaction, kills everything that client still holds (GHSA
+// 2026-10-31 §9c): every live access and refresh token bound to the
+// client_id is revoked (revoked_at = now()) and its unredeemed
+// authorization codes are deleted. Before, delete only flipped active=false
+// and the client's tokens lived on — access tokens until expiry, refresh
+// tokens indefinitely through rotation. Login tokens carry client_id NULL
+// and are never matched. The token/code cleanup also runs when the client
+// is already inactive (a re-delete sweeps rows a pre-fix delete left
+// behind); the bool reports only whether THIS call deactivated it.
 func DeleteOAuthClient(ctx context.Context, pool *pgxpool.Pool, clientID string) (bool, error) {
-	tag, err := pool.Exec(ctx,
-		`UPDATE context_oauth_clients SET active = false WHERE client_id = $1 AND active = true`,
-		clientID,
-	)
+	var deactivated bool
+	err := pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "oauth: begin delete client", Commit: "oauth: commit delete client"},
+		func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx,
+				`UPDATE context_oauth_clients SET active = false WHERE client_id = $1 AND active = true`,
+				clientID,
+			)
+			if err != nil {
+				return fmt.Errorf("oauth: delete client: %w", err)
+			}
+			deactivated = tag.RowsAffected() > 0
+			if _, err := tx.Exec(ctx,
+				`UPDATE context_access_tokens SET revoked_at = now()
+				  WHERE client_id = $1 AND revoked_at IS NULL`,
+				clientID,
+			); err != nil {
+				return fmt.Errorf("oauth: delete client: revoke tokens: %w", err)
+			}
+			if _, err := tx.Exec(ctx,
+				`DELETE FROM context_oauth_codes WHERE client_id = $1`, clientID,
+			); err != nil {
+				return fmt.Errorf("oauth: delete client: drop codes: %w", err)
+			}
+			return nil
+		})
 	if err != nil {
-		return false, fmt.Errorf("oauth: delete client: %w", err)
+		return false, err
 	}
-	return tag.RowsAffected() > 0, nil
+	return deactivated, nil
 }
 
 // ValidateOAuthClientSecret checks a client_id + secret pair (wired at

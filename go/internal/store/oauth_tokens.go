@@ -50,11 +50,23 @@ func TokenHash(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// liveClientPredicate is the context_access_tokens row filter "the token's
+// OAuth client is still active" (GHSA 2026-10-31 §9c): login tokens
+// (client_id NULL) always pass; an OAuth token passes only while its
+// context_oauth_clients row exists with active = true. DeleteOAuthClient
+// revokes a client's tokens in its own transaction; this predicate is the
+// read-side guarantee for rows that predate that (a client deactivated by
+// an older binary, or by hand in psql).
+const liveClientPredicate = `(context_access_tokens.client_id IS NULL OR EXISTS (
+		      SELECT 1 FROM context_oauth_clients c
+		       WHERE c.client_id = context_access_tokens.client_id AND c.active = true))`
+
 // LookupAccessToken resolves a presented ctxt_ token to its INV-A single-key
 // selector. Fail-closed by predicate: unknown hash, wrong type, revoked,
-// expired — and, when requiredAudience is non-empty, a row whose audiences
-// do NOT contain it (RFC 8707 membership check at /mcp, S5/W03-6) — are all
-// the same miss ("", false, nil); the caller answers 401 without an oracle.
+// expired, bound to an inactive/unknown OAuth client (liveClientPredicate)
+// — and, when requiredAudience is non-empty, a row whose audiences do NOT
+// contain it (RFC 8707 membership check at /mcp, S5/W03-6) — are all the
+// same miss ("", false, nil); the caller answers 401 without an oracle.
 // An empty requiredAudience skips the audience gate: without a configured
 // canonical issuer there is no trustworthy expected value (rows were minted
 // with an r.Host-derived audience), and inventing one would 401 every
@@ -68,7 +80,8 @@ func LookupAccessToken(ctx context.Context, pool *pgxpool.Pool, token, requiredA
 		    AND token_type = 'access'
 		    AND revoked_at IS NULL
 		    AND expires_at > now()
-		    AND ($2 = '' OR $2 = ANY(audiences))`,
+		    AND ($2 = '' OR $2 = ANY(audiences))
+		    AND `+liveClientPredicate,
 		TokenHash(token), requiredAudience,
 	).Scan(&apiKeyID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -222,6 +235,7 @@ func RotateRefreshToken(ctx context.Context, pool *pgxpool.Pool, presented, clie
 				    AND client_id IS NOT DISTINCT FROM $2
 				    AND revoked_at IS NULL
 				    AND expires_at > now()
+				    AND `+liveClientPredicate+`
 				 RETURNING id, api_key_id, principal_id, client_id, audiences, scope, refresh_family, issued_via`,
 				TokenHash(presented), presentedClient,
 			).Scan(&oldID, &apiKeyID, &principalID, &rowClient, &audiences, &scope, &family, &issuedVia)
