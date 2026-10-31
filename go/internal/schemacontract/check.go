@@ -300,7 +300,10 @@ func checkMigrationIntegrity(ctx context.Context, pool *pgxpool.Pool) ([]Drift, 
 			})
 			continue
 		}
-		if *row.checksum != f.checksum {
+		// An amended migration (migrations.IsAmendedChecksum) legitimately
+		// differs on every database that applied its earlier shipped revision;
+		// any other difference is still the tamper case this column exists for.
+		if *row.checksum != f.checksum && !migrations.IsAmendedChecksum(f.version, *row.checksum) {
 			drifts = append(drifts, Drift{
 				Class: ClassMigrationIntegrity, Severity: SeverityBreaking,
 				Object: fmt.Sprintf("_migrations:%d", f.version),
