@@ -515,7 +515,10 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
 
     def unavailable_reason(self) -> str:
         if self.transport == "rest":
-            return super().unavailable_reason()
+            return (
+                "transport rest: set CTX_KEY in .env and the server URL — rest_base_url in "
+                "memory.ctx_checkpoint, CTX_BASE_URL in .env or ctx_base_url in ctx.json"
+            )
         return (
             f"configure the ctx MCP server entry mcp_servers.{self._server_name()} — "
             "`hermes memory setup ctx_checkpoint` does it"

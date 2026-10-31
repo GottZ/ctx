@@ -438,6 +438,40 @@ def test_available_only_with_an_enabled_server_entry(hermes_home, servers, avail
     assert CtxCheckpointMemoryProvider(config={}).is_available() is available
 
 
+def test_rest_transport_is_available_with_rest_base_url_in_the_section(hermes_home, monkeypatch):
+    monkeypatch.setenv("CTX_KEY", "rest-key-not-real")
+    monkeypatch.delenv("CTX_BASE_URL", raising=False)
+    assert not (hermes_home / "ctx.json").exists()
+
+    rest = CtxCheckpointMemoryProvider(config={"transport": "rest", "rest_base_url": "https://ctx.example.test"})
+    no_url = CtxCheckpointMemoryProvider(config={"transport": "rest"})
+
+    assert rest.is_available() is True
+    assert no_url.is_available() is False
+    assert "rest_base_url" in no_url.unavailable_reason()
+
+
+def test_rest_status_reads_rest_base_url_from_the_section(hermes_home, monkeypatch):
+    monkeypatch.setenv("CTX_KEY", "rest-key-not-real")
+    monkeypatch.delenv("CTX_BASE_URL", raising=False)
+    contacted = []
+
+    class Whoami:
+        def __init__(self, base_url, api_key, **kwargs):
+            contacted.append(base_url)
+
+        def whoami(self):
+            return {"success": True, "home_scope": "private", "label": "status-test"}
+
+    monkeypatch.setattr(sys.modules[f"{_SPEC.name}.memory.provider"], "CtxClient", Whoami)
+    section = {"transport": "rest", "rest_base_url": "https://ctx.example.test/"}
+
+    status = CtxCheckpointMemoryProvider(config=section).get_status_config(section)
+
+    assert status["ok"] is True and status["base_url"] == "https://ctx.example.test"
+    assert contacted == ["https://ctx.example.test"]
+
+
 def test_warns_once_when_threshold_lets_hygiene_compact_first(hermes_home, caplog):
     _write_config(hermes_home, {"compression": {"threshold": 0.919}})
     provider = CtxCheckpointMemoryProvider(config={})

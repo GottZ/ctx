@@ -235,7 +235,9 @@ class CtxMemoryProvider(MemoryProvider):
                 return True
             from hermes_constants import get_hermes_home
 
-            cfg = load_ctx_config(str(get_hermes_home()))
+            # Same sources as initialize(): ctx.json under the settings overlay (the umbrella's
+            # memory.ctx_checkpoint section, whose rest_base_url becomes ctx_base_url).
+            cfg = load_ctx_config(str(get_hermes_home()), overlay=self._config_overlay())
             return bool(cfg.get("ctx_base_url", "").strip())
         except Exception:
             return False
@@ -274,7 +276,7 @@ class CtxMemoryProvider(MemoryProvider):
         try:
             from hermes_constants import get_hermes_home
 
-            cfg = load_ctx_config(str(get_hermes_home()))
+            cfg = load_ctx_config(str(get_hermes_home()), overlay=self._config_overlay())
             fallback = cfg.get("ctx_base_url") or (provider_config or {}).get("ctx_base_url") or ""
             base = status["base_url"] = resolve_base_url(str(fallback))
             api_key = env_secret("CTX_KEY")
