@@ -18,7 +18,10 @@ The provider returns the head/manifest IDs to Hermes, which carries them
 into the compaction summary — a later session (or a human) can walk
 head → manifest → parts to recover exact wording and provenance. Secrets are
 redacted twice (Hermes' own `redact_sensitive_text` plus a conservative
-key/value + bearer-token pass) before anything leaves the process.
+key/value + bearer-token pass, which since 0.5.1 also masks the credential
+behind an `Authorization: Bearer|Basic|Digest` scheme word) before anything
+leaves the process; a failing redactor aborts the checkpoint instead of
+storing unredacted text.
 
 **Listed in the Hermes plugin catalog** as
 [`ctx_checkpoint`](https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint)
@@ -344,7 +347,17 @@ and manifest are deliberately small so routine recall stays cheap.
   Dashboard form, `post_setup()` for `hermes memory setup ctx_checkpoint` —,
   a warning when `compression.threshold >= 0.85`, and `is_available()` now
   requires the ctx `mcp_servers` entry to exist; before 0.5.0 a missing entry
-  counted as available).
+  counted as available; 0.5.1: port-backs from the review of
+  [W4-NERF/hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin)
+  1.7.1, whose `checkpoint.py` is an MPL-2.0 port of this plugin — the
+  key/value redaction masks the credential behind `Authorization:
+  Bearer|Basic|Digest` instead of only the scheme word, a redactor failure
+  raises instead of rendering an empty transcript, every write claims
+  `type: checkpoint` explicitly (ctx ≥ v5.5.0), a batch without direct
+  user/assistant text returns an empty receipt instead of blocking a required
+  compaction, and the chain write runs inside `budget_s` (default 60 s) with
+  2/4/8 s backoff on rate-limited stores and a `max_parts` cap (default 80)
+  that refuses before writing anything).
 - Catalog pin: 0.5.0 at `ee8cb2e` (`plugin-catalog/ctx_checkpoint.yaml`
   upstream; listed 2026-10-25 with 0.4.4 at `98749f3`, re-pinned 2026-10-29 in
   #145302). `VERSION` in this repository can run ahead of the pin until the

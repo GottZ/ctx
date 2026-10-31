@@ -276,3 +276,178 @@ def test_agent_context_and_platform_are_independent_metadata_keys():
 
     assert all(entry["platform"] == "telegram" for entry in metadata)
     assert all(entry["agent_context"] == "cron" for entry in metadata)
+
+
+# ---------------------------------------------------------------------------
+# 0.5.1 — port-backs from the hermes-ctx-plugin review (W4-NERF, 2026-10-31)
+# ---------------------------------------------------------------------------
+
+
+def _counting_dispatch(calls, *, store_results=None):
+    """Dispatch fake: empty head search, then one block id per store (or a scripted result)."""
+    counter = 200
+    scripted = list(store_results or [])
+
+    def dispatch(name, args, **kwargs):
+        nonlocal counter
+        calls.append((name, args))
+        if name == "mcp__ctx__search":
+            return json.dumps({"result": "[]"})
+        if scripted:
+            return scripted.pop(0)
+        block_id = f"019f6000-0000-7000-8000-{counter:012d}"
+        counter += 1
+        return json.dumps({"id": block_id})
+
+    return dispatch
+
+
+def test_authorization_header_credential_is_fully_redacted():
+    redact = _MODULE._redact_checkpoint_secrets
+    for scheme in ("Bearer", "Basic", "Digest"):
+        out = redact(f"curl -H 'Authorization: {scheme} sk-live-ABCDEFGH123456'")
+        assert "sk-live-ABCDEFGH123456" not in out, out
+        assert "ABCDEFGH" not in out, out
+    assert redact("token: xyz") == "token: [REDACTED]"
+    # A sentence that merely mentions the word stays readable.
+    assert redact("the authorization flow is documented") == "the authorization flow is documented"
+
+
+def test_every_checkpoint_write_declares_the_checkpoint_type():
+    calls = []
+    provider = CtxCheckpointMemoryProvider(dispatch=_counting_dispatch(calls))
+    provider.initialize("session-a", platform="cli")
+    provider.on_pre_compress([{"role": "user", "content": "typed evidence"}])
+    stores = [args for name, args in calls if name == "mcp__ctx__store"]
+    assert len(stores) == 3
+    assert all(args["type"] == "checkpoint" for args in stores)
+
+
+def test_batch_without_direct_evidence_returns_empty_receipt_and_writes_nothing():
+    calls = []
+    provider = CtxCheckpointMemoryProvider(dispatch=_counting_dispatch(calls))
+    provider.initialize("session-a", platform="cli")
+    frame = provider.on_pre_compress(
+        [
+            {"role": "tool", "content": "exit 0"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "x"}]},
+            {"role": "system", "content": "prompt"},
+            {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
+        ]
+    )
+    assert frame == ""
+    assert calls == []
+
+
+def test_memory_manager_accepts_empty_evidence_under_required_checkpoint():
+    calls = []
+    provider = CtxCheckpointMemoryProvider(dispatch=_counting_dispatch(calls))
+    provider.initialize("session-a", platform="cli")
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    frame = manager.on_pre_compress(
+        [{"role": "tool", "content": "only tool rows here"}],
+        require_checkpoint=True,
+        checkpoint_api_version=2,
+    )
+    assert frame == ""
+    assert calls == []
+
+
+def test_redaction_failure_raises_instead_of_being_mistaken_for_empty_evidence(monkeypatch):
+    calls = []
+    provider = CtxCheckpointMemoryProvider(dispatch=_counting_dispatch(calls))
+    provider.initialize("session-a", platform="cli")
+
+    def broken(text, force=False):
+        raise RuntimeError("redactor down")
+
+    monkeypatch.setattr(_MODULE, "redact_sensitive_text", broken)
+    import pytest
+
+    with pytest.raises(_MODULE.CtxCheckpointError, match="redaction failed"):
+        provider.on_pre_compress([{"role": "user", "content": "secret-ish evidence"}])
+    assert calls == []
+
+
+def test_more_parts_than_max_parts_writes_nothing():
+    import pytest
+
+    calls = []
+    provider = CtxCheckpointMemoryProvider(
+        config={"chunk_chars": 1_000, "max_parts": 3}, dispatch=_counting_dispatch(calls)
+    )
+    provider.initialize("session-a", platform="cli")
+    with pytest.raises(_MODULE.CtxCheckpointError, match="max_parts 3"):
+        provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}])
+    assert calls == []
+
+
+def test_rate_limited_store_backs_off_and_retries_within_budget(monkeypatch):
+    calls = []
+    slept = []
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(_MODULE, "_sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(_MODULE, "_monotonic", lambda: clock["now"])
+    rate_limited = json.dumps({"error": "Rate limit exceeded: max 100 writes per 60 seconds"})
+    provider = CtxCheckpointMemoryProvider(
+        dispatch=_counting_dispatch(calls, store_results=[rate_limited, rate_limited])
+    )
+    provider.initialize("session-a", platform="cli")
+    frame = provider.on_pre_compress([{"role": "user", "content": "rate limited evidence"}])
+    stores = [name for name, _ in calls if name == "mcp__ctx__store"]
+    assert len(stores) == 5  # part ×3 (two 429s), manifest, head
+    assert slept == [2.0, 4.0]
+    assert "ctx checkpoint head" in frame
+
+
+def test_rate_limit_beyond_budget_fails_closed(monkeypatch):
+    import pytest
+
+    calls = []
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(_MODULE, "_sleep", lambda s: None)
+    monkeypatch.setattr(_MODULE, "_monotonic", lambda: clock["now"])
+    rate_limited = json.dumps({"error": "Rate limit exceeded: max 100 writes per 60 seconds"})
+    provider = CtxCheckpointMemoryProvider(
+        config={"budget_s": 5},  # clamped floor: 5 s — the first 2 s backoff fits, the 4 s one does not
+        dispatch=_counting_dispatch(calls, store_results=[rate_limited, rate_limited, rate_limited]),
+    )
+    provider.initialize("session-a", platform="cli")
+
+    def advancing_sleep(s):
+        clock["now"] += s
+
+    monkeypatch.setattr(_MODULE, "_sleep", advancing_sleep)
+    with pytest.raises(_MODULE.CtxCheckpointError, match="budget 5s"):
+        provider.on_pre_compress([{"role": "user", "content": "rate limited evidence"}])
+    assert "mcp__ctx__store" in [name for name, _ in calls]
+
+
+def test_exhausted_budget_before_a_store_fails_closed(monkeypatch):
+    import pytest
+
+    calls = []
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(_MODULE, "_monotonic", lambda: clock["now"])
+    real_dispatch = _counting_dispatch(calls)
+
+    def slow_dispatch(name, args, **kwargs):
+        clock["now"] += 100.0  # every call eats 100 s of the 60 s default budget
+        return real_dispatch(name, args, **kwargs)
+
+    provider = CtxCheckpointMemoryProvider(dispatch=slow_dispatch)
+    provider.initialize("session-a", platform="cli")
+    with pytest.raises(_MODULE.CtxCheckpointError, match="budget 60s exceeded"):
+        provider.on_pre_compress([{"role": "user", "content": "slow evidence"}])
+    # Only the head search ran; no partial chain was written.
+    assert [name for name, _ in calls] == ["mcp__ctx__search"]
+
+
+def test_budget_and_max_parts_are_clamped():
+    assert _MODULE._clamped_budget_s(None) == 60.0
+    assert _MODULE._clamped_budget_s("1") == 5.0
+    assert _MODULE._clamped_budget_s(10_000) == 600.0
+    assert _MODULE._clamped_max_parts(None) == 80
+    assert _MODULE._clamped_max_parts(0) == 1
+    assert _MODULE._clamped_max_parts(500) == 95

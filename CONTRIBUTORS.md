@@ -216,7 +216,16 @@ else's environment — that led to a fix landing in the repository.
   view to keep, hardened with an ego-parity integration test that a mutation
   turns red, a last-pick-wins guard in the detail panel (a late response
   could leave Delete aimed at a block other than the one shown), and
-  precise grant/archival docs.
+  precise grant/archival docs. Also
+  [hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin), his
+  full Hermes memory provider for ctx whose `checkpoint.py` is an MPL-2.0
+  port of `integrations/hermes/plugin/ctx_checkpoint`, offered for porting
+  back; the review shipped four of its improvements as `ctx_checkpoint`
+  0.5.1 — the `Authorization: Bearer|Basic|Digest` redaction gap (only the
+  scheme word was masked, the credential stayed), an explicit
+  `type: checkpoint` on every write, a no-op receipt for a batch without
+  direct user/assistant text instead of blocking a required compaction for
+  nothing, and a wall-clock budget with rate-limit backoff and a part cap.
 
 ## How to be listed
 

@@ -1,4 +1,4 @@
 name: ctx_checkpoint
-version: 0.5.0
+version: 0.5.1
 description: Archive direct transcript evidence before compaction.
 requires_hermes: ">=0.20.4"

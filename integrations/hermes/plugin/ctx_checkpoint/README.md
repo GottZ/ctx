@@ -52,10 +52,13 @@ memory:
     category: compaction-checkpoints # ctx category for checkpoint blocks
     chunk_chars: 36000               # source part size, clamped to 1k..40k
     sensitivity: internal            # public | internal | personal | credentials
+    budget_s: 60                     # wall-clock budget per checkpoint, 5..600 s
+    max_parts: 80                    # part cap per checkpoint, 1..95 (ctx writes 100/60 s per key)
 ```
 
 Every key under `memory.ctx_checkpoint` is optional; the values shown are the
-defaults. An existing `mcp_servers.ctx` entry is kept: setup updates its URL
+defaults. `budget_s` and `max_parts` are not asked during setup; set them in
+`config.yaml` when needed (setup keeps them). An existing `mcp_servers.ctx` entry is kept: setup updates its URL
 and re-enables it, but asks for a key only when it manages that entry's
 authentication itself (no auth yet, or `Bearer ${CTX_API_KEY}` from an earlier
 setup). An entry with its own `headers` or `auth`, or a stdio `command` entry,
@@ -83,9 +86,14 @@ the compressor does. The plugin logs a warning when the threshold is that high.
 | **fail-closed** | Hermes ≥ 0.21.1 (carries the checkpoint contract, upstream PR #94639) | with `compression.checkpoint_required: true`, compaction is **blocked** unless the checkpoint is confirmed durable; the uncompressed transcript is preserved |
 
 Fail-closed means accepting a session halt (`BLOCKED_MISSING_PREREQUISITE`) while
-ctx is unreachable, instead of an unarchived compaction. The plugin negotiates the
-contract version with the loading host at runtime; details, host probes and the
-operator warnings are in the
+ctx is unreachable, instead of an unarchived compaction. The halt also triggers
+when a checkpoint would need more than `max_parts` source parts or does not
+finish inside `budget_s` (a rate-limited store is retried after 2/4/8 s while the
+budget allows). A batch with no direct user/assistant text — only tool rows or
+compaction envelopes — has nothing to archive and never blocks: the provider
+returns an empty receipt and the compaction proceeds (0.5.1; before, it raised).
+The plugin negotiates the contract version with the loading host at runtime;
+details, host probes and the operator warnings are in the
 [full integration guide](../../README.md).
 
 ## Recall

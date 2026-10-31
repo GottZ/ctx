@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -63,11 +64,36 @@ _SETUP_STORED_KEYS = ("mcp_server", "category", "sensitivity", "chunk_chars")
 # compact first.
 _HOST_HYGIENE_THRESHOLD = 0.85
 _hygiene_warning_emitted = False
+# The value may start with an auth scheme ("Authorization: Bearer <token>"). Without
+# the optional scheme group only the scheme word was masked and the credential stayed
+# in the transcript (hermes-ctx-plugin 1.7.0 finding, W4-NERF, ported 0.5.1).
 _GENERIC_SECRET_RE = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
-    r"password|passwd|authorization)\b(\s*[:=]\s*)([^\s,;]+)"
+    r"password|passwd|authorization)\b(\s*[:=]\s*)((?:(?:bearer|basic|digest)\s+)?[^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*")
+# Explicit block type on every checkpoint write (ctx >= v5.5.0 accepts ``type`` on the
+# MCP store tool). The server classifies the titles as ``checkpoint`` anyway (M120); the
+# explicit claim pins ``type_source=manual`` so a later classifier change cannot move
+# archive blocks into retrieval.
+_CHECKPOINT_TYPE = "checkpoint"
+# Wall-clock budget for one checkpoint (search + every store). The host holds the
+# compaction until this provider returns; without a budget a slow ctx or a long 429
+# streak could hold it for minutes. Exceeding the budget fails closed.
+_DEFAULT_BUDGET_S = 60.0
+_MIN_BUDGET_S = 5.0
+_MAX_BUDGET_S = 600.0
+# ctx write rate limit: 100 writes per 60 s per API key (``query.rate_limit_write``,
+# go/internal/handler/ratelimit.go). One checkpoint = parts + manifest + head; the cap
+# keeps a single chain inside that window with headroom for other writers on the key.
+_DEFAULT_MAX_PARTS = 80
+_MAX_PARTS_CEILING = 95
+# Backoff after a rate-limited store (seconds, each attempt bounded by the budget).
+_RATE_LIMIT_BACKOFF_S = (2.0, 4.0, 8.0)
+_RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "429")
+# Injection seams for tests.
+_sleep = time.sleep
+_monotonic = time.monotonic
 
 # Highest checkpoint contract THIS plugin implements. 2 = the fail-closed contract as
 # merged upstream (NousResearch/hermes-agent#94639, 2026-08-25; upstream renumbered:
@@ -332,6 +358,27 @@ def _clamped_chunk_chars(value: Any) -> int:
     except (TypeError, ValueError):
         number = _DEFAULT_CHUNK_CHARS
     return max(_MIN_CHUNK_CHARS, min(number, _MAX_CHUNK_CHARS))
+
+
+def _clamped_budget_s(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = _DEFAULT_BUDGET_S
+    return max(_MIN_BUDGET_S, min(number, _MAX_BUDGET_S))
+
+
+def _clamped_max_parts(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = _DEFAULT_MAX_PARTS
+    return max(1, min(number, _MAX_PARTS_CEILING))
+
+
+def _is_rate_limited(error: str) -> bool:
+    lowered = error.lower()
+    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
 
 
 def _env_value(name: str) -> str:
@@ -708,15 +755,33 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
         host_api = _probe_host_checkpoint_api()
         negotiated_api = _negotiate_checkpoint_api(host_api)
         tool_index_status = self._tool_index_status(tool_evidence)
+        budget_s = _clamped_budget_s(self._config.get("budget_s"))
+        deadline = _monotonic() + budget_s
 
+        # Redaction failure raises inside the renderer (never store unredacted text).
         rendered = self._render_direct_evidence(messages)
         if not rendered:
-            raise CtxCheckpointError(
-                "ctx checkpoint has no direct user/assistant source evidence"
+            # Nothing to archive: the batch holds no direct user/assistant text (the
+            # host already drops tool rows and pure tool-call wrappers). The lossy
+            # summary cannot discard what was never there, so a required checkpoint
+            # has nothing to make durable — blocking the compaction would halt the
+            # session for nothing. The host counts a returning provider as a
+            # successful checkpoint regardless of the receipt text.
+            logger.info(
+                "ctx checkpoint: no direct user/assistant evidence in %d messages; "
+                "nothing to archive, compaction proceeds",
+                len(messages) if isinstance(messages, list) else -1,
             )
+            return ""
 
         digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
         chunks = self._split_chunks(rendered)
+        max_parts = _clamped_max_parts(self._config.get("max_parts"))
+        if len(chunks) > max_parts:
+            raise CtxCheckpointError(
+                f"ctx checkpoint needs {len(chunks)} source parts > max_parts {max_parts} "
+                "(ctx write rate limit 100/60 s per key); nothing written"
+            )
         now = datetime.now(timezone.utc).isoformat()
         root = self._root_session_id or self._session_id or "unknown"
         short_root = re.sub(r"[^A-Za-z0-9_.-]", "_", root)[:48]
@@ -766,6 +831,8 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
                 content=body,
                 metadata=metadata,
                 tags=["hermes", "compaction", "source-evidence", "transcript", "control"],
+                deadline=deadline,
+                budget_s=budget_s,
             )
             if not block_id:
                 raise CtxCheckpointError(
@@ -798,6 +865,8 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
                 "parent_manifest_id": previous_manifest_id,
             },
             tags=["hermes", "compaction", "checkpoint-manifest", "ctx", "control"],
+            deadline=deadline,
+            budget_s=budget_s,
         )
         if not manifest_id:
             raise CtxCheckpointError("ctx checkpoint failed while storing manifest")
@@ -823,6 +892,8 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
                 "source_block_count": len(chunk_ids),
             },
             tags=["hermes", "compaction", "checkpoint-head", "ctx", "control"],
+            deadline=deadline,
+            budget_s=budget_s,
         )
         if not head_id:
             raise CtxCheckpointError("ctx checkpoint failed while publishing stable head")
@@ -935,9 +1006,11 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
                 safe = _redact_checkpoint_secrets(
                     redact_sensitive_text(raw, force=True)
                 ).strip()
-            except Exception:
+            except Exception as exc:
+                # Fail closed: a checkpoint with unredacted text must never be stored,
+                # and "nothing rendered" must not be mistaken for "nothing to archive".
                 logger.exception("ctx checkpoint redaction failed for message %d", ordinal)
-                return ""
+                raise CtxCheckpointError("ctx checkpoint redaction failed") from exc
             if safe:
                 entries.append(f"### Message {ordinal} — {role}\n\n{safe}\n")
         return "\n".join(entries)
@@ -964,21 +1037,52 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
         content: str,
         metadata: Dict[str, Any],
         tags: List[str],
+        deadline: Optional[float] = None,
+        budget_s: float = _DEFAULT_BUDGET_S,
     ) -> Optional[str]:
+        """One checkpoint block write inside the budget.
+
+        A rate-limited answer is retried after ``_RATE_LIMIT_BACKOFF_S`` while the
+        deadline allows it; an exhausted budget raises ``CtxCheckpointError`` (fail
+        closed, nothing further is written). Any other store error returns ``None``
+        and the caller raises with the block's role in the message.
+        """
         prefix = f"mcp__{self._server_name()}__"
-        result = self._dispatch(
-            prefix + "store",
-            {
-                "category": str(self._config.get("category") or _DEFAULT_CATEGORY),
-                "title": title,
-                "content": content,
-                "tags": tags,
-                "metadata": metadata,
-                "sensitivity": str(self._config.get("sensitivity") or _DEFAULT_SENSITIVITY),
-            },
-        )
-        block_id, payload_hash, error = _parse_tool_result(result)
-        if error:
+        payload = {
+            "category": str(self._config.get("category") or _DEFAULT_CATEGORY),
+            "title": title,
+            "content": content,
+            "tags": tags,
+            "metadata": metadata,
+            "sensitivity": str(self._config.get("sensitivity") or _DEFAULT_SENSITIVITY),
+            "type": _CHECKPOINT_TYPE,
+        }
+        attempt = 0
+        while True:
+            if deadline is not None and _monotonic() >= deadline:
+                raise CtxCheckpointError(
+                    f"ctx checkpoint budget {budget_s:.0f}s exceeded before storing {title!r}"
+                )
+            result = self._dispatch(prefix + "store", payload)
+            block_id, payload_hash, error = _parse_tool_result(result)
+            if not error:
+                break
+            if _is_rate_limited(error) and attempt < len(_RATE_LIMIT_BACKOFF_S):
+                delay = _RATE_LIMIT_BACKOFF_S[attempt]
+                attempt += 1
+                if deadline is None or _monotonic() + delay < deadline:
+                    logger.info(
+                        "ctx store rate-limited; backing off %.0fs (attempt %d) before %r",
+                        delay,
+                        attempt,
+                        title,
+                    )
+                    _sleep(delay)
+                    continue
+                raise CtxCheckpointError(
+                    f"ctx checkpoint rate-limited and budget {budget_s:.0f}s exhausted "
+                    f"while storing {title!r}"
+                )
             logger.warning("ctx store failed: %s", error)
             return None
         if payload_hash and not block_id:
