@@ -23,8 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/guard"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -35,10 +38,29 @@ const (
 	// Same-scope group: repo-a issue + an identical foreign repo-b issue.
 	ijScopeHome    = "019f2210-0000-7000-9000-00000000e003"
 	ijScopeForeign = "019f2210-0000-7000-9000-00000000e004"
-	// Knowledge bestand group: cross-scope identical knowledge pair.
+	// Knowledge bestand group: cross-scope knowledge pair INSIDE one tenant,
+	// plus an identical twin in a SECOND tenant (156 — never a candidate).
 	ijKnowA = "019f2210-0000-7000-9000-00000000e005"
 	ijKnowB = "019f2210-0000-7000-9000-00000000e006"
+	ijKnowC = "019f2210-0000-7000-9000-00000000e007"
 )
+
+// ijSeedTenantScopes registers scopes under a fresh tenant (Modell C) so the
+// 156 tenant predicate of ctx_guard_check has something to bound to.
+func ijSeedTenantScopes(t *testing.T, pool *pgxpool.Pool, slug string, scopes ...string) {
+	t.Helper()
+	ctx := context.Background()
+	tn, err := store.CreateTenant(ctx, pool, slug, slug)
+	if err != nil {
+		t.Fatalf("create tenant %s: %v", slug, err)
+	}
+	for _, sc := range scopes {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_tenant_scopes (scope, tenant_id) VALUES ($1, $2::uuid)`, sc, tn.ID); err != nil {
+			t.Fatalf("register scope %s for %s: %v", sc, slug, err)
+		}
+	}
+}
 
 func TestIJGuardPolicy(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
@@ -74,9 +96,17 @@ func TestIJGuardPolicy(t *testing.T) {
 	t7Insert(t, pool, ijScopeHome, "scope-home", "issue", "projects", "repo-a", unitVec1024(20, 1.0), t0.Add(2*time.Hour))
 	t7Insert(t, pool, ijScopeForeign, "scope-foreign", "issue", "projects", "repo-b", unitVec1024(20, 1.0), t0.Add(3*time.Hour))
 
-	// Knowledge bestand group: cross-scope identical knowledge pair (axis 30).
+	// Knowledge bestand group (axis 30): kA and kB are two scopes of ONE
+	// tenant (cross-scope inside the tenant, cosine 0.995 — above the 0.98
+	// duplicate threshold); kC lives in a SECOND tenant and is kA's EXACT twin
+	// (cosine 1.0). Without the 156 tenant predicate kC is kA's nearest
+	// neighbour (1.0 > 0.995) — GATE D's matched id turns red and GATE E's
+	// clean verdict too.
+	ijSeedTenantScopes(t, pool, "ij-tenant-one", "kA", "kB")
+	ijSeedTenantScopes(t, pool, "ij-tenant-two", "kC")
 	t7Insert(t, pool, ijKnowA, "know-a", "knowledge", "learnings", "kA", unitVec1024(30, 1.0), t0.Add(4*time.Hour))
-	t7Insert(t, pool, ijKnowB, "know-b", "knowledge", "learnings", "kB", unitVec1024(30, 1.0), t0.Add(5*time.Hour))
+	t7Insert(t, pool, ijKnowB, "know-b", "knowledge", "learnings", "kB", blendedVec1024(30, 31, 0.995, 0.0999), t0.Add(5*time.Hour))
+	t7Insert(t, pool, ijKnowC, "know-c", "knowledge", "learnings", "kC", unitVec1024(30, 1.0), t0.Add(6*time.Hour))
 
 	if _, err := guard.RunGuardBatch(ctx, pool, set, 100); err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
@@ -135,10 +165,13 @@ func TestIJGuardPolicy(t *testing.T) {
 		}
 	})
 
-	// GATE D (knowledge bestand byte-identical): a knowledge type keeps
-	// cross-scope matching (candidates=all default) AND auto-archive
-	// (mode=archive default) AND the is_cross_scope flag. RED if the I-J change
-	// leaked flag/same-scope semantics onto the knowledge line.
+	// GATE D (knowledge bestand byte-identical INSIDE a tenant): a knowledge
+	// type keeps cross-scope matching (candidates=all default) AND auto-archive
+	// (mode=archive default) AND the is_cross_scope flag — bounded to the
+	// tenant's own scopes since 156. RED if the I-J change leaked
+	// flag/same-scope semantics onto the knowledge line; RED against the
+	// pre-156 function because kC (other tenant, cosine 1.0) would be the
+	// matched id instead of kB.
 	t.Run("KnowledgeBestand_CrossScopeArchive", func(t *testing.T) {
 		a := readGuardState(t, pool, ijKnowA)
 		if !a.IsArchived {
@@ -148,10 +181,33 @@ func TestIJGuardPolicy(t *testing.T) {
 			t.Errorf("knowledge guard_status = %q, want archived_dup", a.GuardStatus)
 		}
 		if a.MetaMatchedID != ijKnowB {
-			t.Errorf("knowledge guard_matched_id = %q, want %s (cross-scope match)", a.MetaMatchedID, ijKnowB)
+			t.Errorf("knowledge guard_matched_id = %q, want %s (cross-scope match inside the tenant)", a.MetaMatchedID, ijKnowB)
 		}
 		if !a.MetaIsCrossScope {
 			t.Errorf("knowledge guard_is_cross_scope = false, want true (kA vs kB)")
+		}
+	})
+
+	// GATE E (156, GHSA §2 — never across tenants): kC is kA's exact twin in
+	// another tenant. It is neither matched nor archived, and it points at
+	// nobody — a tenant-two member reading kC back learns nothing about
+	// tenant one. RED against the pre-156 function (measured: GATE D matched
+	// kC instead of kB, so kA was archived as a duplicate of another tenant's
+	// block; kC, checked after kA had left the candidate set, still carried a
+	// foreign block's UUIDv7 — ijFlagA — as guard_matched_id).
+	t.Run("CrossTenant_NeverACandidate", func(t *testing.T) {
+		c := readGuardState(t, pool, ijKnowC)
+		if c.IsArchived {
+			t.Errorf("cross-tenant twin archived as a duplicate of another tenant's block: %+v", c)
+		}
+		if c.GuardStatus != "clean" {
+			t.Errorf("cross-tenant twin guard_status = %q, want clean", c.GuardStatus)
+		}
+		if c.MetaMatchedID != "" {
+			t.Errorf("cross-tenant twin guard_matched_id = %q, want none", c.MetaMatchedID)
+		}
+		if c.MetaSimilarity != 0 {
+			t.Errorf("cross-tenant twin guard_similarity = %.4f, want 0 (no candidate)", c.MetaSimilarity)
 		}
 	})
 }

@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 155,
-    "migration_count": 43,
+    "migration_max": 156,
+    "migration_count": 44,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -5018,7 +5018,7 @@
       "src_hash": "4b5add16d06a48cb0783435e48748263c962ed6c33c9f7bb1e7fb270a4deff4e"
     },
     "ctx_guard_check(p_block_id uuid, p_threshold_duplicate real, p_threshold_review real, p_candidate_types text[], p_same_scope_only boolean)": {
-      "src_hash": "979a26794c4f6b5d723c9065d848cb1e715987fc6b8778174d974661da727ec7"
+      "src_hash": "e78928167543f0533238951f7e66daba4e23d1ee3f1fa2a2698cdaedb04a3e76"
     },
     "ctx_rrf(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer)": {
       "src_hash": "575f15445f49c284e838a67656062ffc63aa42f570e29498ea0968852f182d28"

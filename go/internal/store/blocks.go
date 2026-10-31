@@ -938,6 +938,26 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 	}
 }
 
+// guardRedactedMetadataSQL is the `metadata` select expression of the raw read
+// paths (GetBlock, non-compact SearchBlocks): the guard's guard_matched_id is
+// dropped when the matched block does not lie in the caller's read scopes —
+// the rule GuardList applies to matched_id/matched_title, now on every path
+// that returns metadata verbatim (GHSA 2026-10-31 §2: the key named a block
+// the caller could not read, a UUIDv7 with its creation time). scopesParam is
+// the bind placeholder of the caller's read-scope text[] — code-owned at every
+// call site, never user input. The CASE guards the uuid cast so a malformed
+// value in metadata degrades to "not readable" instead of a 22P02. Blocks
+// whose metadata carries no guard_matched_id pass through untouched, and the
+// matched-block lookup is a primary-key probe (one row per returned block).
+func guardRedactedMetadataSQL(scopesParam string) string {
+	return `CASE WHEN context_blocks.metadata ? 'guard_matched_id' AND NOT EXISTS (
+			SELECT 1 FROM context_blocks mb
+			WHERE mb.id = CASE WHEN pg_input_is_valid(context_blocks.metadata->>'guard_matched_id', 'uuid')
+			                   THEN (context_blocks.metadata->>'guard_matched_id')::uuid END
+			  AND mb.scope = ANY(` + scopesParam + `::text[]))
+		THEN context_blocks.metadata - 'guard_matched_id' ELSE context_blocks.metadata END AS metadata`
+}
+
 // GetBlock retrieves a single block by ID, filtered by allowed scopes plus the
 // resolved block-grant set (T40a, design/07 §4). grantedBlockIDs is the set of
 // block IDs row-level-granted to the caller's tenant; nil ⇒ '{}'::uuid[] ⇒ the
@@ -956,7 +976,7 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id st
 	}
 	b := &Block{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at
+		`SELECT id, category, tags, title, content, `+guardRedactedMetadataSQL("$2")+`, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at
 		 FROM context_blocks
 		 WHERE id = $1 AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($3::uuid[]))
 		 LIMIT 1`,
@@ -1482,7 +1502,7 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 			orderBy = `updated_at DESC, id DESC`
 		}
 	} else {
-		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, content, metadata, created_at, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, content, ` + guardRedactedMetadataSQL("$1") + `, created_at, updated_at`
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
