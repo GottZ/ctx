@@ -162,6 +162,33 @@ func TestIngestChunkScopeBinding(t *testing.T) {
 		}
 	})
 
+	// The answer form docs/api.md documents (§F-ops): a failed chunk does not
+	// change the status code — 200, success:false, failed counted, the
+	// per-chunk status next to the chunks that were written.
+	t.Run("mixed_batch_reports_in_body", func(t *testing.T) {
+		own := seedSource(t, pool, "/s9e/mixed-own.md", "private")
+		foreign := seedSource(t, pool, "/s9e/mixed-foreign.md", "isotest")
+		status, resp := postIngest(t, h, keyCtx, map[string]any{"source": "s9e", "chunks": []map[string]any{
+			{"category": "vault", "title": "s9e mixed own", "content": "own chunk", "source_id": own, "chunk_index": 0},
+			{"category": "vault", "title": "s9e mixed foreign", "content": "foreign chunk", "source_id": foreign, "chunk_index": 0},
+		}})
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %v)", status, resp)
+		}
+		if resp["success"] != false || resp["total"] != float64(2) || resp["inserted"] != float64(1) || resp["failed"] != float64(1) {
+			t.Fatalf("envelope = %v, want success:false total:2 inserted:1 failed:1", resp)
+		}
+		results, _ := resp["results"].([]any)
+		if len(results) != 2 {
+			t.Fatalf("results = %v, want two", resp["results"])
+		}
+		r0, _ := results[0].(map[string]any)
+		r1, _ := results[1].(map[string]any)
+		if r0["status"] != "inserted" || r1["status"] != "failed" || r1["error"] != "source not found" {
+			t.Fatalf("results = %v, want [inserted, failed/source not found]", results)
+		}
+	})
+
 	// Regression: the caller's own source and chunk still upsert.
 	t.Run("own_chunk_updates", func(t *testing.T) {
 		src := seedSource(t, pool, "/s9e/own.md", "private")
