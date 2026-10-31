@@ -216,7 +216,19 @@ else's environment — that led to a fix landing in the repository.
   view to keep, hardened with an ego-parity integration test that a mutation
   turns red, a last-pick-wins guard in the detail panel (a late response
   could leave Delete aimed at a block other than the one shown), and
-  precise grant/archival docs. Also
+  precise grant/archival docs. Also PR
+  [#52](https://github.com/GottZ/ctx/pull/52): the data repair of migration
+  156 as shipped in 5.29.1/5.29.2 un-archived rows without looking at the
+  partial unique indexes over live rows, so a database with an archived row
+  beside a live twin of its title hit a 23505 that rolled the migration back
+  and kept `ctxd` from booting, on every restart; the shipped fix keeps his
+  amended repair — live-holder guards for both indexes, one row per slot, a
+  person's guard-resolve verdict left standing, a `guard_repair` audit marker
+  — and his amended-checksum registry through which the schema contract
+  accepts the shipped file, hardened with a test that proves the returned rows
+  reach the guard again (a mutation that keeps `guard_checked_at` turns it
+  red), the shipped file kept byte for byte as a negative proof tied to the
+  registry entry, and a check for databases that already ran it. Also
   [hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin), his
   full Hermes memory provider for ctx whose `checkpoint.py` is an MPL-2.0
   port of `integrations/hermes/plugin/ctx_checkpoint`, offered for porting
