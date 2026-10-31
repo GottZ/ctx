@@ -192,8 +192,8 @@ WITH candidates AS (
     SELECT b.id,
            row_number() OVER (PARTITION BY b.category, b.title, b.scope
                               ORDER BY b.id DESC) AS rn_title,
-           CASE WHEN b.block_type = 'chunk' THEN
-                row_number() OVER (PARTITION BY b.block_type = 'chunk', b.source_id, b.chunk_index
+           CASE WHEN b.lifecycle_state = 'chunk' THEN
+                row_number() OVER (PARTITION BY b.lifecycle_state = 'chunk', b.source_id, b.chunk_index
                                    ORDER BY b.id DESC)
            ELSE 1 END AS rn_chunk
       FROM context_blocks b
@@ -226,7 +226,7 @@ UPDATE context_blocks b
          SELECT 1 FROM context_blocks live
           WHERE live.category = b.category AND live.title = b.title
             AND live.scope = b.scope AND NOT live.is_archived)
-   AND NOT (b.block_type = 'chunk' AND EXISTS (
+   AND NOT (b.lifecycle_state = 'chunk' AND EXISTS (
          SELECT 1 FROM context_blocks live
-          WHERE live.block_type = 'chunk' AND live.source_id = b.source_id
+          WHERE live.lifecycle_state = 'chunk' AND live.source_id = b.source_id
             AND live.chunk_index = b.chunk_index AND NOT live.is_archived));

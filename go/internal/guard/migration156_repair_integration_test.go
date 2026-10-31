@@ -99,7 +99,7 @@ func m156Chunk(t *testing.T, pool *pgxpool.Pool, id, title, source string, index
 	if err := pool.QueryRow(context.Background(),
 		`INSERT INTO context_blocks
 		   (id, category, title, content, scope, type_name, type_source,
-		    block_type, source_id, chunk_index, is_archived, guard_status, metadata)
+		    lifecycle_state, source_id, chunk_index, is_archived, guard_status, metadata)
 		 VALUES ($1::uuid, 'learnings', $2, 'body', 's156a', 'knowledge', 'auto',
 		         'chunk', $3::uuid, $4, $5, $6,
 		         CASE WHEN $7 = '' THEN '{}'::jsonb
@@ -215,10 +215,12 @@ func TestRepair_M156_Corpus(t *testing.T) {
 	legacy := m156Archived(t, pool, "01920000-0000-7000-8000-000000156e01", "legacy", "s156legacy", foreign, "")
 
 	// (g) chunk slots (uq_source_chunk): an archived chunk beside a live one
-	// stays; of two archived chunk twins only the newer returns.
+	// stays; of two archived chunk twins only the newer returns. The source
+	// row keeps a legacy scope (chk_source_scope); the index does not look at
+	// it.
 	var source string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO context_sources (file_path, file_hash, scope) VALUES ('m156.md', 'h', 's156a') RETURNING id::text`).
+		`INSERT INTO context_sources (file_path, file_hash, scope) VALUES ('m156.md', 'h', 'private') RETURNING id::text`).
 		Scan(&source); err != nil {
 		t.Fatalf("seed source: %v", err)
 	}
