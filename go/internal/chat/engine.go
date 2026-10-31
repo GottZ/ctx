@@ -190,7 +190,7 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 		required := backends.MaxSensitivity(reqSens, sessHWM)
 		chain, cerr := e.provider.ChatChain(ctx, required, sess.Scope)
 		if cerr != nil || len(chain) == 0 {
-			return emitNoEligible(sink)
+			return emitChainError(sink, cerr)
 		}
 
 		so := e.runStream(ctx, chain, msgs, toolsEnabled, false, budgetLeft, iter, sess.ID, apiKeyID, required, adm, sink)
@@ -556,7 +556,7 @@ func (e *Engine) finalCall(ctx context.Context, sess *store.ChatSession, msgs []
 	required := backends.MaxSensitivity(reqSens, sessHWM)
 	chain, cerr := e.provider.ChatChain(ctx, required, sess.Scope)
 	if cerr != nil || len(chain) == 0 {
-		return emitNoEligible(sink)
+		return emitChainError(sink, cerr)
 	}
 	so := e.runStream(ctx, chain, msgs, toolsEnabled, true, e.cfg.MaxTokens, e.cfg.MaxIterations+1, sess.ID, apiKeyID, required, adm, sink)
 	if !so.served {
@@ -575,6 +575,20 @@ func (e *Engine) finalCall(ctx context.Context, sess *store.ChatSession, msgs []
 		"finish_reason": reason, "assistant_seq": arow.Seq,
 		"iterations": e.cfg.MaxIterations, "total_ms": e.now().Sub(start).Milliseconds(),
 	})
+}
+
+// emitChainError ends a turn whose chain did not resolve. A tenant over its
+// quota (call budget, or cost budget under on_exceed=block) gets the generic
+// quota_exceeded code — the same signal the query path answers with a 429; the
+// budget kind stays server-side. Every other failure, including a chain the
+// external_off degrade emptied, is the terminal no_eligible_backend.
+func emitChainError(sink Sink, err error) error {
+	var qe *backends.ErrQuotaExceeded
+	if errors.As(err, &qe) {
+		slog.Info("chat: quota exceeded", "scope", qe.Scope, "reason", qe.Reason)
+		return sink.Event("error", map[string]any{"code": "quota_exceeded", "retryable": false})
+	}
+	return emitNoEligible(sink)
 }
 
 func emitNoEligible(sink Sink) error {
@@ -787,17 +801,39 @@ func intPtr(v int) *int { return &v }
 
 // PoolProvider is the production BackendProvider over the F3 pool.
 type PoolProvider struct {
-	pool *backends.Pool
+	pool  *backends.Pool
+	quota *backends.QuotaAccountant
 }
 
-// NewPoolProvider wraps the pool. Chain-time exclusion is the eject
-// disable-profile (092), applied inside Pool.Chain — no provider-level input.
-func NewPoolProvider(pool *backends.Pool) *PoolProvider {
-	return &PoolProvider{pool: pool}
+// NewPoolProvider wraps the pool and the process-wide quota accountant.
+// Chain-time exclusion is the eject disable-profile (092), applied inside
+// Pool.Chain — no provider-level input. A nil quota (tests) skips the gate.
+func NewPoolProvider(pool *backends.Pool, quota *backends.QuotaAccountant) *PoolProvider {
+	return &PoolProvider{pool: pool, quota: quota}
 }
 
 // ChatChain returns the trust-ordered chat chain for the required sensitivity,
-// bounded to the caller tenant's visible backends (04-W2/T34).
+// bounded to the caller tenant's visible backends (04-W2/T34) and gated by the
+// tenant's quota exactly like the synthesis path (T36; GHSA 2026-10-31 §4 —
+// the chat path used to skip the gate, so any member key could keep spending
+// past its tenant's budget): the call budget and a cost budget under block
+// return *ErrQuotaExceeded, external_off drops external backends, and a chain
+// that degrade leaves empty is *ErrNoEligibleBackend. The gate runs per chain
+// resolution, i.e. per model call of a turn, against the cached spend.
 func (p *PoolProvider) ChatChain(_ context.Context, required backends.Sensitivity, tenant string) ([]backends.Backend, error) {
-	return p.pool.Chain("chat", required, tenant)
+	chain, err := p.pool.Chain(backends.RoleChat, required, tenant)
+	if err != nil || p.quota == nil {
+		return chain, err
+	}
+	gated, qerr := p.quota.Gate(tenant, chain)
+	if qerr != nil {
+		return nil, qerr
+	}
+	if len(gated) == 0 {
+		return nil, &backends.ErrNoEligibleBackend{
+			Role: backends.RoleChat, Required: required,
+			Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "quota: external budget exhausted, no local backend"}},
+		}
+	}
+	return gated, nil
 }
