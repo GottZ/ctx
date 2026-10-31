@@ -739,25 +739,46 @@ func ApplyProviderTelemetry(entry *llmlog.Entry, resp *ChatResponse) {
 	if resp == nil {
 		return
 	}
-	entry.CostUSD = resp.CostUSD
-	if resp.ServedModel != "" {
-		entry.Model = resp.ServedModel
+	applyProviderTelemetry(entry, resp.CostUSD, resp.ServedModel, resp.ProviderRequestID,
+		resp.CacheReadTokens, resp.CacheCreationTokens)
+}
+
+// ApplyStreamTelemetry is ApplyProviderTelemetry for the stream path (the
+// web-chat row, chat/engine.go recordLLM), which assembles its llmlog row from
+// a StreamResult: the same cost_usd, served-model and provider_request_id
+// stamping plus the prompt-cache counters. Without it a streamed OpenRouter
+// answer would book no cost, and the tenant cost budget — which sums cost_usd
+// — would not see web-chat spend. A nil result leaves the row untouched.
+func ApplyStreamTelemetry(entry *llmlog.Entry, res *StreamResult) {
+	if res == nil {
+		return
 	}
-	if resp.ProviderRequestID != "" {
+	applyProviderTelemetry(entry, res.CostUSD, res.ServedModel, res.ProviderRequestID,
+		res.CacheReadTokens, res.CacheCreationTokens)
+}
+
+// applyProviderTelemetry is the one body behind both exported funnels, so the
+// streamed and the non-streamed row of the same backend carry the same
+// provenance columns.
+func applyProviderTelemetry(entry *llmlog.Entry, cost *float64, servedModel, requestID string, cacheRead, cacheCreate int) {
+	entry.CostUSD = cost
+	if servedModel != "" {
+		entry.Model = servedModel
+	}
+	if requestID != "" {
 		if entry.Metadata == nil {
 			entry.Metadata = map[string]any{}
 		}
-		entry.Metadata["provider_request_id"] = resp.ProviderRequestID
+		entry.Metadata["provider_request_id"] = requestID
 	}
 	// Prompt-cache counters (anthropic wire): recorded only when non-zero so
 	// the other wires' rows stay byte-identical. prompt_tokens already holds
 	// the total; these make the hit rate readable per row.
-	applyCacheTelemetry(entry, resp.CacheReadTokens, resp.CacheCreationTokens)
+	applyCacheTelemetry(entry, cacheRead, cacheCreate)
 }
 
 // applyCacheTelemetry writes the prompt-cache counters into the llmlog
-// metadata. Shared by the non-streaming funnel (ApplyProviderTelemetry) and
-// the web-chat stream row (chat/engine.go recordLLM).
+// metadata.
 func applyCacheTelemetry(entry *llmlog.Entry, cacheRead, cacheCreate int) {
 	if cacheRead == 0 && cacheCreate == 0 {
 		return
@@ -771,11 +792,4 @@ func applyCacheTelemetry(entry *llmlog.Entry, cacheRead, cacheCreate int) {
 	if cacheCreate > 0 {
 		entry.Metadata["cache_creation_input_tokens"] = cacheCreate
 	}
-}
-
-// ApplyCacheTelemetry is the exported form for the stream path (chat/engine),
-// which assembles its llmlog row from a StreamResult rather than a
-// ChatResponse.
-func ApplyCacheTelemetry(entry *llmlog.Entry, cacheRead, cacheCreate int) {
-	applyCacheTelemetry(entry, cacheRead, cacheCreate)
 }

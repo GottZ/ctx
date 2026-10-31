@@ -17,6 +17,12 @@ import (
 // two gate positions:
 //   - cost budget (daily/monthly_cost_usd) gates ONLY external backends — cost is
 //     an external concept, never a lock on the operator's own GPU (F3 OE-4).
+//     It sees PROVIDER-REPORTED cost only: the SUM over context_llm_log.cost_usd,
+//     which is filled from usage.cost of openrouter-class backends (streamed web
+//     chat and non-streamed pipelines alike). ctx keeps no price list, so an
+//     external backend whose wire reports no cost — the anthropic Messages API,
+//     a generic /v1 server — books NULL and never moves the cost budget; only
+//     the call budget bounds it.
 //   - call budget (daily_calls) gates EVERY wire call (local included — a call cap
 //     that skipped local would be toothless); it counts only ATTRIBUTED
 //     (api_key_id-carried) calls, so it is a coarse foreground-abuse limit, NOT a
@@ -32,7 +38,9 @@ import (
 
 // TenantQuota is one tenant's enforcement policy (context_tenant_quota, 063). nil
 // budget pointers mean unlimited (fail-OPEN on cost — the fail-CLOSED axis is
-// egress visibility §4.1, not the cost budget).
+// egress visibility §4.1, not the cost budget). The cost budgets compare against
+// provider-reported cost only (OpenRouter usage.cost; see the package comment
+// above) — on a backend without cost reporting they never trip.
 type TenantQuota struct {
 	DailyCostUSD   *float64
 	MonthlyCostUSD *float64

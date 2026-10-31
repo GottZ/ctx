@@ -640,11 +640,12 @@ func (e *Engine) recordLLM(sessID, apiKeyID string, required backends.Sensitivit
 		entry.PromptTokens = res.PromptTokens
 		entry.CompletionTokens = res.CompletionTokens
 		entry.Metadata["tool_calls"] = len(res.ToolCalls)
-		if res.ProviderRequestID != "" {
-			entry.Metadata["provider_request_id"] = res.ProviderRequestID
-		}
-		// anthropic wire: prompt-cache counters (no-op on the openai wire).
-		llm.ApplyCacheTelemetry(&entry, res.CacheReadTokens, res.CacheCreationTokens)
+		// The non-streaming funnel's provenance, row for row: cost_usd and the
+		// served model (openrouter-class only — the tenant cost budget sums
+		// this column, so a chat turn on OpenRouter counts against it like
+		// any synthesis call), provider_request_id, and the anthropic wire's
+		// prompt-cache counters.
+		llm.ApplyStreamTelemetry(&entry, res)
 	}
 	recordEntry(e.pool, entry)
 }

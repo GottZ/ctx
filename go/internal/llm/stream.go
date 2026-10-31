@@ -198,13 +198,25 @@ type StreamResult struct {
 	PromptTokens     int
 	CompletionTokens int
 	DraftAccept      float64 // timings.draft_n_accepted/draft_n, 0 when n/a
-	// CacheReadTokens / CacheCreationTokens / ProviderRequestID are filled by
-	// the anthropic wire only (ChatResponse's twins): the cache counters are
-	// already inside PromptTokens and travel for llmlog metadata, the
-	// message id for audit. Zero on the openai wire.
+	// CacheReadTokens / CacheCreationTokens are filled by the anthropic wire
+	// only (ChatResponse's twins): already inside PromptTokens, they travel
+	// for llmlog metadata. Zero on the openai wire.
 	CacheReadTokens     int
 	CacheCreationTokens int
-	ProviderRequestID   string
+	// ProviderRequestID is the provider's id for this answer, for audit: the
+	// anthropic wire's message id, or on the openai wire the response id of
+	// an openrouter-class backend (GET /api/v1/generation?id=…).
+	ProviderRequestID string
+	// CostUSD and ServedModel are the stream twins of ChatResponse's
+	// provider fields (G29), filled for provider_class=openrouter only:
+	// CostUSD from usage.cost of the final usage chunk, ServedModel from the
+	// chunks' top-level model (models-fallback can answer with another model
+	// than the one requested). No other wire reports a cost — the anthropic
+	// Messages API has none on either path — so they stay nil/"" there and
+	// llmlog's cost_usd stays NULL. The tenant cost budget sums exactly this
+	// column (backends/quota.go).
+	CostUSD     *float64
+	ServedModel string
 	// ProviderBlocks are the answer's content blocks in the API's order
 	// (anthropic wire, only when the answer carried a reasoning block), to
 	// be echoed back via ChatMsg.ProviderBlocks when the harness replays
@@ -363,15 +375,33 @@ func ChatStream(ctx context.Context, b backends.Backend, model string,
 		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
 
-	return parseSSEStream(resp.Body, onEvent)
+	res, err := parseSSEStream(resp.Body, onEvent)
+	if err != nil {
+		return nil, err
+	}
+	// Provider provenance is an openrouter-class contract, exactly as on the
+	// non-streaming wire (chatOpenAI): local /v1 servers echo an id and a
+	// model string too, but only OpenRouter's model may legitimately differ
+	// from the requested one and only OpenRouter reports a cost — gating
+	// here keeps the web-chat row's model column and cost_usd row-faithful
+	// for every other backend.
+	if b.ProviderClass != backends.ProviderOpenRouter {
+		res.CostUSD = nil
+		res.ServedModel = ""
+		res.ProviderRequestID = ""
+	}
+	return res, nil
 }
 
 // --- SSE parsing ---.
 
 // streamChunk is one data frame of an OpenAI-compatible stream. Error is the
 // OpenRouter mid-stream error object (HTTP 200); Timings is llama.cpp's
-// final-chunk telemetry.
+// final-chunk telemetry. ID and Model are the top-level response id and the
+// model that answered; ChatStream keeps them for openrouter-class backends.
 type streamChunk struct {
+	ID      string `json:"id"`
+	Model   string `json:"model"`
 	Choices []struct {
 		Delta struct {
 			Content   string          `json:"content"`
@@ -397,9 +427,13 @@ type toolCallDelta struct {
 	} `json:"function"`
 }
 
+// usageBody is the usage object of the final chunk (stream_options
+// include_usage). Cost is OpenRouter's usage.cost in USD — the field the
+// non-streaming wire reads too (client.go); nil when the provider sends none.
 type usageBody struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens     int      `json:"prompt_tokens"`
+	CompletionTokens int      `json:"completion_tokens"`
+	Cost             *float64 `json:"cost"`
 }
 
 type timingsBody struct {
@@ -443,6 +477,8 @@ type streamState struct {
 	usage     *usageBody
 	timings   *timingsBody
 	done      bool
+	id        string // last non-empty top-level id
+	model     string // last non-empty top-level model
 }
 
 func (st *streamState) emit(ev StreamEvent) error {
@@ -609,6 +645,12 @@ func (st *streamState) handleChunk(payload string) error {
 	if chunk.Error != nil {
 		return chunk.Error.toStreamError()
 	}
+	if chunk.ID != "" {
+		st.id = chunk.ID
+	}
+	if chunk.Model != "" {
+		st.model = chunk.Model
+	}
 	if chunk.Usage != nil {
 		st.usage = chunk.Usage
 	}
@@ -740,10 +782,15 @@ func (st *streamState) result() *StreamResult {
 			Function: ToolCallFunction{Name: pc.name, Arguments: args},
 		})
 	}
+	// Provider provenance travels raw here; ChatStream keeps it for
+	// openrouter-class backends only (the gate chatOpenAI applies).
+	res.ProviderRequestID = st.id
+	res.ServedModel = st.model
 	switch {
 	case st.usage != nil:
 		res.PromptTokens = st.usage.PromptTokens
 		res.CompletionTokens = st.usage.CompletionTokens
+		res.CostUSD = st.usage.Cost
 	case st.timings != nil:
 		res.PromptTokens = st.timings.PromptN
 		res.CompletionTokens = st.timings.PredictedN

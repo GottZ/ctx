@@ -199,6 +199,53 @@ func TestChatStreamOpenRouterCommentFrames(t *testing.T) {
 	}
 }
 
+// orCostStream is an OpenRouter stream whose final usage chunk carries
+// usage.cost, with a served model that differs from the requested one
+// (models-fallback) on every chunk.
+const orCostStream = "data: {\"id\":\"gen-stream-1\",\"model\":\"qwen/served\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
+	"data: {\"id\":\"gen-stream-1\",\"model\":\"qwen/served\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+	"data: {\"id\":\"gen-stream-1\",\"model\":\"qwen/served\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":6,\"total_tokens\":17,\"cost\":0.0123}}\n\n" +
+	"data: [DONE]\n\n"
+
+// TestChatStreamOpenRouterUsageCost (§C1): the stream twin of
+// TestOpenRouterResponseTelemetry. usage.cost of the final chunk, the
+// top-level model and the response id reach StreamResult for an
+// openrouter-class backend; a generic backend leaves all three zero although
+// its stream carries them.
+func TestChatStreamOpenRouterUsageCost(t *testing.T) {
+	srv, _, _ := captureRequestBody(t, orCostStream)
+	defer srv.Close()
+
+	or := orBackend(srv.URL, backends.TrustNoCredentials)
+	res, err := ChatStream(context.Background(), or, "qwen/requested", nil, nil, Options{}, nil, 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if res.CostUSD == nil || *res.CostUSD != 0.0123 {
+		t.Errorf("CostUSD = %v, want 0.0123 from the final usage chunk", res.CostUSD)
+	}
+	if res.ServedModel != "qwen/served" {
+		t.Errorf("ServedModel = %q, want the chunks' top-level model", res.ServedModel)
+	}
+	if res.ProviderRequestID != "gen-stream-1" {
+		t.Errorf("ProviderRequestID = %q, want gen-stream-1", res.ProviderRequestID)
+	}
+	if res.PromptTokens != 11 || res.CompletionTokens != 6 {
+		t.Errorf("tokens = %d/%d, want 11/6", res.PromptTokens, res.CompletionTokens)
+	}
+
+	generic := or
+	generic.ProviderClass = backends.ProviderGeneric
+	res, err = ChatStream(context.Background(), generic, "qwen/requested", nil, nil, Options{}, nil, 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("ChatStream (generic): %v", err)
+	}
+	if res.CostUSD != nil || res.ServedModel != "" || res.ProviderRequestID != "" {
+		t.Errorf("generic backend filled provider telemetry: cost=%v model=%q id=%q",
+			res.CostUSD, res.ServedModel, res.ProviderRequestID)
+	}
+}
+
 // TestChatStreamOpenRouterMidStreamError proves that an error event inside an
 // HTTP-200 stream (OpenRouter provider failure) is lifted to a hard error. A
 // parser without the error branch returns the partial content as success

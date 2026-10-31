@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/chat"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -146,6 +147,65 @@ func TestChatQuota(t *testing.T) {
 		}
 	})
 
+	// §C1: the chat books its OWN spend. A turn on an openrouter-class backend
+	// whose final usage chunk reports a cost writes cost_usd on its web-chat
+	// row; after the next refresh the tenant is over its cost budget and the
+	// following turn is blocked before the wire. Without the stream-side
+	// booking the row carries NULL and the second turn streams again.
+	t.Run("ChatSpendAccrues", func(t *testing.T) {
+		tid := seedQuotaTenant(t, pool, "cq-spend", []string{"cq-spend"}, nil, ptrF(0.01), backends.QuotaExceedBlock)
+		keyID := seedTenantKey(t, pool, tid, "cq-spend")
+		acc := refreshed(t)
+
+		turn := func(sse string) (*collector, *fakeLLM) {
+			llmSrv := &fakeLLM{responses: []fakeResp{{sse: sse}}}
+			srv := httptest.NewServer(llmSrv.handler())
+			t.Cleanup(srv.Close)
+			b := fullTrustBackend("or", srv.URL)
+			b.Locality = backends.LocalityExternal
+			b.ProviderClass = backends.ProviderOpenRouter
+			bpool := backends.NewPool(nil, nil)
+			bpool.SeedSnapshotForTest([]backends.Backend{b})
+			eng := chat.NewEngine(pool, chat.NewPoolProvider(bpool, acc), chat.NewExecutor(pool, &fakeQuery{}, 8000), chat.Config{}, testAdmitter(t))
+			sess := newSession(t, pool, "cq-spend", []string{"cq-spend"})
+			col := &collector{}
+			ar := &auth.AuthResult{ApiKeyID: keyID, HomeScope: "cq-spend", ReadScopes: []string{"cq-spend"}, IsValid: true}
+			if err := eng.RunTurn(ctx, ar, sess, "hello", backends.SensInternal, false, col); err != nil {
+				t.Fatalf("RunTurn: %v", err)
+			}
+			return col, llmSrv
+		}
+		costly := frame(`{"id":"gen-1","model":"m","choices":[{"index":0,"delta":{"content":"paid"},"finish_reason":null}]}`) +
+			frame(`{"id":"gen-1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`) +
+			frame(`{"id":"gen-1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0.05}}`) +
+			"data: [DONE]\n\n"
+
+		col, llmSrv := turn(costly)
+		if llmSrv.hitCount() != 1 || col.last("done") == nil {
+			t.Fatalf("first turn: hits %d done %v error %v; want one streamed answer", llmSrv.hitCount(), col.last("done"), col.last("error"))
+		}
+		if err := llmlog.Settle(ctx, pool); err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		var booked *float64
+		if err := pool.QueryRow(ctx, `SELECT cost_usd FROM context_llm_log WHERE pipeline='web-chat' AND api_key_id=$1::uuid`, keyID).Scan(&booked); err != nil {
+			t.Fatalf("web-chat row: %v", err)
+		}
+		if booked == nil || *booked != 0.05 {
+			t.Fatalf("web-chat cost_usd = %v; want 0.05 — the chat must book the provider-reported cost", booked)
+		}
+		if err := acc.RefreshNow(ctx); err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		col, llmSrv = turn(sseContent("again"))
+		if llmSrv.hitCount() != 0 {
+			t.Fatalf("second turn: llm hits = %d; want 0 — the chat's own spend must exhaust the cost budget", llmSrv.hitCount())
+		}
+		if e := col.last("error"); e == nil || e["code"] != "quota_exceeded" {
+			t.Fatalf("second turn: error event = %v; want quota_exceeded", e)
+		}
+	})
+
 	// Control: a scope whose tenant has no quota row streams normally.
 	t.Run("NoQuotaStreams", func(t *testing.T) {
 		col, llmSrv := run(t, fullTrustBackend("local", ""), "cq-free", refreshed(t))
@@ -159,3 +219,17 @@ func TestChatQuota(t *testing.T) {
 }
 
 func ptrF(v float64) *float64 { return &v }
+
+// seedTenantKey mints a key of the tenant homed in homeScope and returns its
+// id — the attribution the accountant's spend query joins on.
+func seedTenantKey(t *testing.T, pool *pgxpool.Pool, tenantID, homeScope string) string {
+	t.Helper()
+	var keyID string
+	if err := pool.QueryRow(context.Background(),
+		`WITH p AS (INSERT INTO context_principals (display_name) VALUES ($2) RETURNING id)
+		 INSERT INTO context_api_keys (key_hash, label, home_scope, tenant_id, principal_id)
+		 SELECT $1,$2,$3,$4::uuid, p.id FROM p RETURNING id::text`, "ck-"+homeScope, "ck-"+homeScope, homeScope, tenantID).Scan(&keyID); err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	return keyID
+}
