@@ -781,6 +781,25 @@ SELECT id, category, title, scope
 
 Archive each one again with `ctx guard resolve <id> archive`, one id per call, with a key that may write the block's scope: the single-id form takes any live block, while the batch form (several ids) only touches flagged blocks and skips these as `not_flagged`.
 
+### Migration 157: live guard decisions that name a match outside the tenant
+
+Migration 156 repaired the blocks the pre-156 guard had **archived** against another tenant's block. Every other block the old guard had decided kept its decision keys, whatever happened to it since — a review flag, a clean verdict, a block a person kept through `guard-resolve`, a block that has become `canonical` — and with them `guard_similarity`, `guard_is_cross_scope` and a `guard_matched_id` naming the foreign block. The read paths drop `guard_matched_id` when the caller cannot read the matched block, but the similarity, the cross-scope flag and a review flag raised against the foreign block stayed, and they are a decision the tenant-bounded guard never makes.
+
+Migration 157 selects live rows (`NOT is_archived`; it does not filter on `guard_status` or the lifecycle) whose `guard_matched_id` names an existing block that the 156 candidate predicate excludes: a block of another tenant, a block outside the row's own scope when that scope is registered to no tenant, or a block in a scope registered to no tenant. The last case goes beyond the 156 repair predicate, which only looked at matches in registered scopes. Empty, malformed and dangling matches (the matched block is gone) are left alone. What it does depends on whether a person has decided on the row:
+
+- **No `guard-resolve` trace** (no `metadata.guard_resolution`): the guard's decision is handed back. `guard_status` returns to `active` and every guard decision key leaves `metadata` (`guard_status`, `guard_checked_at`, `guard_similarity`, `guard_matched_id`, `guard_is_cross_scope`, `guard_threshold_duplicate`, `guard_threshold_review`). Without `guard_checked_at` a row the guard still checks (lifecycle `knowledge`, a type with `guard.check`) is pending again, and the next guard batch re-checks it against its own tenant only; a block that really has a near twin in its own tenant gets its review flag back from that check. A row the guard no longer checks — decided while it was `knowledge`, `canonical` or a snapshot now — simply carries no decision afterwards.
+- **A `guard-resolve` trace** (`keep` or `archive`, any decision of a person): the decision stands. Only the keys that point at the foreign block go — `guard_matched_id`, `guard_similarity`, `guard_is_cross_scope`; `guard_status`, `guard_checked_at`, the thresholds and the trace (`guard_resolution`, `guard_resolved_at`) stay. The row is not pending, so the guard does not put it up for a verdict again — a re-check could otherwise archive a kept block as the near duplicate of a block in its own tenant.
+
+Both kinds of row get `metadata.guard_repair = 'M157'`. No row is un-archived, so the partial unique indexes over live rows cannot be hit; the statement is idempotent (no touched row carries `guard_matched_id` any more) and an install whose blocks all sit in scopes registered to the default tenant changes no row. Nothing to do at upgrade time. To list what it touched, with the rows that kept a person's verdict told apart:
+
+```sql
+SELECT id, scope, category, title, guard_status, metadata->>'guard_resolution' AS resolution
+  FROM context_blocks
+ WHERE metadata->>'guard_repair' = 'M157';
+```
+
+Until the guard has run, the rows without a resolution show `guard_status = active` without `guard_checked_at`; afterwards they carry the guard's new decision next to the marker.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.
