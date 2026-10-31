@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -132,23 +133,40 @@ func (b *Box) Seal(name, scope string, plaintext []byte) (nonce, ciphertext []by
 	return nonce, ciphertext, nil
 }
 
+// errNonceLength is returned instead of letting cipher.AEAD.Open panic on a
+// nonce of the wrong size. The nonce comes from context_secrets.nonce (BYTEA,
+// no CHECK) or break-glass stdin, and several callers (boot sweep,
+// settings.Bootstrap, the LISTEN reload, break-glass) run without recover —
+// one tampered row must fail that row, not kill ctxd. Value-free: no length,
+// no bytes.
+var errNonceLength = errors.New("invalid nonce length")
+
+// openWith runs one AEAD attempt after checking the nonce length the AEAD
+// requires.
+func openWith(aead cipher.AEAD, nonce, ciphertext, ad []byte) ([]byte, error) {
+	if len(nonce) != aead.NonceSize() {
+		return nil, errNonceLength
+	}
+	return aead.Open(nil, nonce, ciphertext, ad)
+}
+
 // Open decrypts a sealed secret bound to (name, scope). It tries the current
 // key first, then the previous key (if loaded). usedPrev=true signals the
 // caller (boot sweep) to re-seal with the current key. The returned error is
-// the cipher standard error from the LAST attempt — it carries no ciphertext,
-// no key material and no plaintext fragments.
+// the cipher standard error (or the nonce-length error) from the LAST attempt
+// — it carries no ciphertext, no key material and no plaintext fragments.
 func (b *Box) Open(name, scope string, nonce, ciphertext []byte) (plaintext []byte, usedPrev bool, err error) {
 	if name == "" || scope == "" {
 		return nil, false, fmt.Errorf("sealbox: name and scope are required")
 	}
 	ad := aad(name, scope)
-	plaintext, err = b.current.Open(nil, nonce, ciphertext, ad)
+	plaintext, err = openWith(b.current, nonce, ciphertext, ad)
 	if err == nil {
 		return plaintext, false, nil
 	}
 	if b.prev != nil {
 		var prevErr error
-		plaintext, prevErr = b.prev.Open(nil, nonce, ciphertext, ad)
+		plaintext, prevErr = openWith(b.prev, nonce, ciphertext, ad)
 		if prevErr == nil {
 			return plaintext, true, nil
 		}
