@@ -939,13 +939,15 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 }
 
 // guardRedactedMetadataSQL is the `metadata` select expression of the raw read
-// paths (GetBlock, non-compact SearchBlocks): the guard's guard_matched_id is
-// dropped when the matched block does not lie in the caller's read scopes —
+// paths (GetBlock, non-compact SearchBlocks, the UpdateBlock RETURNING and the
+// issue projection issueScanColsRedacted): the guard's guard_matched_id is
+// dropped when the matched block does not lie in the caller's scopes —
 // the rule GuardList applies to matched_id/matched_title, now on every path
 // that returns metadata verbatim (GHSA 2026-10-31 §2: the key named a block
 // the caller could not read, a UUIDv7 with its creation time). scopesParam is
-// the bind placeholder of the caller's read-scope text[] — code-owned at every
-// call site, never user input. The CASE guards the uuid cast so a malformed
+// a text[] expression over the caller's read scopes, or a subset of them
+// (the write paths pass their write-scope bind) — code-owned at every call
+// site, never user input. The CASE guards the uuid cast so a malformed
 // value in metadata degrades to "not readable" instead of a 22P02. Blocks
 // whose metadata carries no guard_matched_id pass through untouched, and the
 // matched-block lookup is a primary-key probe (one row per returned block).
@@ -1149,12 +1151,25 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// (handler/context_manage.go, handler/mcp_update.go, handler/confirm_core.go);
 	// no arm or scheduler writes through it. The guard is therefore
 	// client-only by construction rather than by a flag.
+	//
+	// The RETURNING metadata goes through the guard redaction GetBlock applies
+	// (guardRedactedMetadataSQL): the REST update answers with the whole block,
+	// so without it a guard_matched_id naming a block outside the caller's view
+	// came back verbatim on any field update (§F-§2). The redaction reads the
+	// write-scope bind this statement already carries, not the caller's read
+	// scopes. writeScopes is a subset of the read scopes (writableBlockScopes
+	// honours a write scope only where the key also reads it), so a match the
+	// caller can read but not write is dropped here too — the fail-closed
+	// direction; `get` still returns it. Binding the read scopes instead would
+	// widen the signature of all three callers for parity on one key of a
+	// write response. Both execution paths below (plain and scope move) run
+	// this one query string.
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
 		   AND NOT (metadata ? '`+derived.MetadataKey+`')
-		 RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
-		strings.Join(setClauses, ", "), idIdx, scopeIdx,
+		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
+		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)),
 	)
 
 	b := &Block{}

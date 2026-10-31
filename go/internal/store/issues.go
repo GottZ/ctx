@@ -161,12 +161,34 @@ func nextLocalSeq(ctx context.Context, tx pgx.Tx, lockKey, whereClause string, w
 	return seq, nil
 }
 
-// issueScanCols is the shared RETURNING/SELECT projection for issue rows: the
-// GetBlock columns plus workflow_status (M077). One string so insert/get/update
-// never drift.
-const issueScanCols = `id, category, tags, title, content, metadata, scope,
+// issueCols is the shared RETURNING/SELECT projection for issue rows: the
+// GetBlock columns plus workflow_status (M077), with the metadata expression
+// supplied by the caller. One column list so insert/get/update never drift.
+func issueCols(metadataExpr string) string {
+	return `id, category, tags, title, content, ` + metadataExpr + `, scope,
 	sensitivity, sensitivity_source, type_name, lifecycle_state, type_source,
 	COALESCE(workflow_status, ''), created_at, updated_at`
+}
+
+// issueScanCols projects metadata verbatim. It serves the RETURNING of the
+// insert paths (InsertIssueBlock, InsertCommentBlock, the forge pull-create),
+// whose fresh rows carry no guard decision — whatever metadata they hold is
+// what the caller just sent — and the forge pull updates, whose result never
+// reaches a response.
+var issueScanCols = issueCols("metadata")
+
+// issueScanColsRedacted is the projection of every path that hands an
+// EXISTING issue or comment row to a caller (GetIssue, ListComments,
+// CommentPageSQL, the UpdateIssueBlock RETURNING): metadata goes through
+// guardRedactedMetadataSQL, so a guard_matched_id naming a block outside
+// scopesParam is dropped, as on GetBlock (§F-§2). Native issues and comments
+// never carry a foreign match (the issue guard is same-scope, comments are
+// not checked), but a knowledge block re-typed to issue keeps its guard
+// metadata. scopesParam is a code-owned SQL expression of type text[] at
+// every call site.
+func issueScanColsRedacted(scopesParam string) string {
+	return issueCols(guardRedactedMetadataSQL(scopesParam))
+}
 
 // scanIssue scans one row in issueScanCols order into a Block.
 func scanIssue(row pgx.Row) (*Block, error) {
@@ -311,7 +333,7 @@ func GetIssue(ctx context.Context, pool *pgxpool.Pool, id string, readScopes, gr
 		grantedBlockIDs = []string{}
 	}
 	row := pool.QueryRow(ctx, `
-		SELECT `+issueScanCols+`
+		SELECT `+issueScanColsRedacted("$2")+`
 		FROM context_blocks
 		WHERE id = $1 AND NOT is_archived
 		  AND type_name = ANY(ARRAY['`+IssueTypeName+`','`+CommentTypeName+`'])
@@ -339,7 +361,7 @@ func ListComments(ctx context.Context, pool *pgxpool.Pool, parentID string, read
 		grantedBlockIDs = []string{}
 	}
 	rows, err := pool.Query(ctx, `
-		SELECT `+issueScanCols+`
+		SELECT `+issueScanColsRedacted("$2")+`
 		FROM context_blocks
 		WHERE parent_id = $1::uuid AND NOT is_archived
 		  AND type_name = '`+CommentTypeName+`'
@@ -471,9 +493,13 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 	}
 	set2.addLiteral("updated_at = now()")
 
+	// The RETURNING redacts against writableScopes, the set the lookup above
+	// already checked — a subset of the caller's read scopes, so the
+	// fail-closed direction (see UpdateBlock).
+	idIdx := len(set2.args) + 1
 	query := fmt.Sprintf(`UPDATE context_blocks SET %s WHERE id = $%d RETURNING %s`,
-		strings.Join(set2.clauses, ", "), len(set2.args)+1, issueScanCols)
-	set2.args = append(set2.args, id)
+		strings.Join(set2.clauses, ", "), idIdx, issueScanColsRedacted(fmt.Sprintf("$%d", idIdx+1)))
+	set2.args = append(set2.args, id, writableScopes)
 	b, err := scanIssue(tx.QueryRow(ctx, query, set2.args...))
 	if err != nil {
 		return nil, fmt.Errorf("store: update issue: %w", err)

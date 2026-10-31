@@ -260,10 +260,11 @@ const minUUID = "00000000-0000-0000-0000-000000000000"
 // order; comments are immutable in order, §4.3). Rides idx_parent_id (M001) on
 // parent_id equality; the (created_at, id) keyset walks the small per-issue set.
 // scope-restricted to the parent's project scope (the handler passes the verified
-// scope) so a foreign comment id can never surface. Uses issueScanCols (issues.go)
-// so the wire shape is byte-identical to the inline thread in issue-detail.
-const CommentPageSQL = `
-	SELECT ` + issueScanCols + `
+// scope) so a foreign comment id can never surface. Uses issueScanColsRedacted
+// (issues.go) so the wire shape is byte-identical to the inline thread in
+// issue-detail; the guard redaction reads the same single scope (§F-§2).
+var CommentPageSQL = `
+	SELECT ` + issueScanColsRedacted("ARRAY[$2::text]") + `
 	FROM context_blocks
 	WHERE parent_id = $1::uuid
 	  AND NOT is_archived
