@@ -460,10 +460,12 @@ func (st *streamState) emit(ev StreamEvent) error {
 // — ReadString would buffer either without bound. maxSSEFrameBytes bounds a
 // line and a buffered multi-line data frame: a legitimate frame is one delta
 // (a few tokens, or one tool call's arguments — kilobytes), so 4 MiB is three
-// orders of magnitude of headroom. maxStreamBytes bounds the whole answer: a
-// 128000-token output at one token per frame and ≤ 300 bytes of framing per
-// chunk (OpenRouter's metadata-rich chunks) is ≈ 38 MiB, so 64 MiB keeps the
-// longest legitimate stream while ending a backend that streams forever.
+// orders of magnitude of headroom; the frame is measured as it will be
+// dispatched, joining newlines included, so empty data: lines count (§D).
+// maxStreamBytes bounds the whole answer: a 128000-token output at one token
+// per frame and ≤ 300 bytes of framing per chunk (OpenRouter's metadata-rich
+// chunks) is ≈ 38 MiB, so 64 MiB keeps the longest legitimate stream while
+// ending a backend that streams forever.
 const (
 	maxSSEFrameBytes       = 4 << 20
 	maxStreamBytes   int64 = 64 << 20
@@ -486,17 +488,46 @@ func readSSELine(br *bufio.Reader) (string, error) {
 	}
 }
 
-// checkSSEFrame bounds the data lines buffered for one not-yet-dispatched
-// frame (a server can send data: lines without ever sending the blank line).
-func checkSSEFrame(data []string) error {
-	n := 0
-	for _, d := range data {
-		n += len(d)
+// sseFrame is the data of one not-yet-dispatched SSE frame (a server can
+// send data: lines without ever sending the blank line). Lines are joined as
+// they arrive — each one after the first behind the newline the SSE spec puts
+// between them — so the buffer is always the payload dispatchData hands on:
+// the frame cap is one comparison per line (§D: re-measuring the buffered
+// lines on every line was quadratic in their number), an empty data: line
+// weighs its newline, and the buffered frame never holds more than
+// maxSSEFrameBytes, however its lines are cut.
+type sseFrame struct {
+	buf   strings.Builder
+	lines int
+}
+
+func (f *sseFrame) add(v string) error {
+	sep := 0
+	if f.lines > 0 {
+		sep = 1
 	}
-	if n > maxSSEFrameBytes {
+	if f.buf.Len()+sep+len(v) > maxSSEFrameBytes {
 		return fmt.Errorf("llm: %w: SSE frame over %d bytes", httpx.ErrResponseTooLarge, maxSSEFrameBytes)
 	}
+	if sep > 0 {
+		f.buf.WriteByte('\n')
+	}
+	f.buf.WriteString(v)
+	f.lines++
 	return nil
+}
+
+// take returns the frame's payload and empties it; ok is false when no data
+// line arrived since the last dispatch (a blank line between frames, or EOF
+// right after one).
+func (f *sseFrame) take() (payload string, ok bool) {
+	if f.lines == 0 {
+		return "", false
+	}
+	payload = f.buf.String()
+	f.buf.Reset()
+	f.lines = 0
+	return payload, true
 }
 
 // parseSSEStream reads SSE frames until [DONE] or EOF. Comment lines
@@ -508,13 +539,10 @@ func checkSSEFrame(data []string) error {
 func parseSSEStream(r io.Reader, onEvent func(StreamEvent) error) (*StreamResult, error) {
 	st := &streamState{onEvent: onEvent, byIndex: map[int]*pendingToolCall{}}
 	br := bufio.NewReader(httpx.CapBody(r, maxStreamBytes))
-	var data []string
+	var data sseFrame
 	for {
 		line, readErr := readSSELine(br)
 		if err := st.feedLine(strings.TrimRight(line, "\r\n"), &data); err != nil {
-			return nil, err
-		}
-		if err := checkSSEFrame(data); err != nil {
 			return nil, err
 		}
 		if st.done {
@@ -541,7 +569,7 @@ func parseSSEStream(r io.Reader, onEvent func(StreamEvent) error) (*StreamResult
 // feedLine handles one SSE line: blank → dispatch the buffered data frame,
 // ":" prefix → comment (ignored), "data:" → buffer, anything else → other
 // SSE field (event:/id:/retry: — unused by chat completion streams).
-func (st *streamState) feedLine(line string, data *[]string) error {
+func (st *streamState) feedLine(line string, data *sseFrame) error {
 	switch {
 	case line == "":
 		return st.dispatchData(data)
@@ -550,19 +578,17 @@ func (st *streamState) feedLine(line string, data *[]string) error {
 	case strings.HasPrefix(line, "data:"):
 		v := strings.TrimPrefix(line, "data:")
 		v = strings.TrimPrefix(v, " ")
-		*data = append(*data, v)
-		return nil
+		return data.add(v)
 	default:
 		return nil
 	}
 }
 
-func (st *streamState) dispatchData(data *[]string) error {
-	if len(*data) == 0 {
+func (st *streamState) dispatchData(data *sseFrame) error {
+	payload, ok := data.take()
+	if !ok {
 		return nil
 	}
-	payload := strings.Join(*data, "\n")
-	*data = (*data)[:0]
 	if strings.TrimSpace(payload) == doneSentinel {
 		st.done = true
 		return nil

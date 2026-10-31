@@ -105,3 +105,93 @@ func TestSSEStreamCaps(t *testing.T) {
 		t.Errorf("anthropic control: %v", err)
 	}
 }
+
+// sseParsers runs one stream through both SSE wires.
+var sseParsers = []struct {
+	name  string
+	parse func(io.Reader, func(StreamEvent) error) (*StreamResult, error)
+}{
+	{"openai", parseSSEStream},
+	{"anthropic", parseAnthropicSSE},
+}
+
+// parseWithin runs parse in a goroutine and fails the test once it has not
+// returned after limit: a parser that is quadratic in the lines of a frame
+// would otherwise hold the test for hours instead of failing it.
+func parseWithin(t *testing.T, limit time.Duration, parse func(io.Reader, func(StreamEvent) error) (*StreamResult, error), r io.Reader) (time.Duration, error) {
+	t.Helper()
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := parse(r, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return time.Since(start), err
+	case <-time.After(limit):
+		t.Fatalf("parser still running after %v", limit)
+		return 0, nil
+	}
+}
+
+// TestSSEFrameLinearCost (§D): the frame cap is checked on every data line,
+// so its check must not re-measure the whole buffered frame each time — a
+// frame of 200000 empty data lines (1.2 MB) parses in milliseconds, where a
+// per-line re-sum takes about ten seconds. The bound is generous on purpose
+// (two orders of magnitude above the linear cost, a fifth of the quadratic
+// one), so CI jitter cannot flip it. The frame is newlines, not JSON: the
+// parser reports it as malformed, and the cap must not fire — 200 KB is far
+// below it.
+func TestSSEFrameLinearCost(t *testing.T) {
+	for _, p := range sseParsers {
+		took, err := parseWithin(t, 2*time.Second, p.parse, io.MultiReader(repeatReader("data:\n", 200_000), strings.NewReader("\n")))
+		if err == nil || errors.Is(err, httpx.ErrResponseTooLarge) || !strings.Contains(err.Error(), "malformed stream chunk") {
+			t.Errorf("%s: err = %v, want a malformed stream chunk", p.name, err)
+		}
+		t.Logf("%s: 200000 empty data lines in %v", p.name, took)
+	}
+}
+
+// TestSSEFrameCapCountsEmptyLines (§D): an empty data: line adds the newline
+// that joins it to the frame, so a frame of more than maxSSEFrameBytes empty
+// lines is over the cap and ends with ErrResponseTooLarge — not a stream that
+// runs on to EOF because its lines weigh nothing.
+func TestSSEFrameCapCountsEmptyLines(t *testing.T) {
+	for _, p := range sseParsers {
+		_, err := parseWithin(t, 30*time.Second, p.parse, io.MultiReader(repeatReader("data:\n", maxSSEFrameBytes+8), strings.NewReader("\n")))
+		if !errors.Is(err, httpx.ErrResponseTooLarge) {
+			t.Errorf("%s: err = %v, want ErrResponseTooLarge", p.name, err)
+		}
+	}
+}
+
+// TestSSEFrameCapIsPayloadSize (§D): the frame cap bounds the payload as it
+// is dispatched — the data lines and the newlines that join them. A frame of
+// exactly maxSSEFrameBytes dispatches (it is no JSON, so the parser reports a
+// malformed chunk); one byte more is ErrResponseTooLarge.
+func TestSSEFrameCapIsPayloadSize(t *testing.T) {
+	const lines = 5
+	room := maxSSEFrameBytes - (lines - 1) // payload minus the joining newlines
+	x := strings.Repeat("x", room/lines+room%lines+1)
+	frame := func(extra int) io.Reader {
+		var b strings.Builder
+		for i := range lines {
+			n := room / lines
+			if i == lines-1 {
+				n += room%lines + extra
+			}
+			b.WriteString("data: " + x[:n] + "\n")
+		}
+		b.WriteString("\n")
+		return strings.NewReader(b.String())
+	}
+	for _, p := range sseParsers {
+		if _, err := p.parse(frame(0), nil); err == nil || errors.Is(err, httpx.ErrResponseTooLarge) || !strings.Contains(err.Error(), "malformed stream chunk") {
+			t.Errorf("%s at the cap: err = %v, want a malformed stream chunk", p.name, err)
+		}
+		if _, err := p.parse(frame(1), nil); !errors.Is(err, httpx.ErrResponseTooLarge) {
+			t.Errorf("%s one byte over the cap: err = %v, want ErrResponseTooLarge", p.name, err)
+		}
+	}
+}

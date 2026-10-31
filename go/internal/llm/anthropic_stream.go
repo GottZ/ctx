@@ -514,13 +514,10 @@ func parseAnthropicSSE(r io.Reader, onEvent func(StreamEvent) error) (*StreamRes
 		reasoning: map[int]json.RawMessage{}, texts: map[int]*strings.Builder{},
 	}
 	br := bufio.NewReader(httpx.CapBody(r, maxStreamBytes)) // caps: see maxSSEFrameBytes (stream.go)
-	var data []string
+	var data sseFrame
 	for {
 		line, readErr := readSSELine(br)
 		if err := st.feedLine(strings.TrimRight(line, "\r\n"), &data); err != nil {
-			return nil, err
-		}
-		if err := checkSSEFrame(data); err != nil {
 			return nil, err
 		}
 		if st.done {
@@ -544,7 +541,7 @@ func parseAnthropicSSE(r io.Reader, onEvent func(StreamEvent) error) (*StreamRes
 
 // feedLine: blank → dispatch the buffered frame; ":" → comment; "data:" →
 // buffer; "event:"/"id:"/"retry:" → ignored (the type travels in the data).
-func (st *anthropicStreamState) feedLine(line string, data *[]string) error {
+func (st *anthropicStreamState) feedLine(line string, data *sseFrame) error {
 	switch {
 	case line == "":
 		return st.dispatchData(data)
@@ -553,19 +550,17 @@ func (st *anthropicStreamState) feedLine(line string, data *[]string) error {
 	case strings.HasPrefix(line, "data:"):
 		v := strings.TrimPrefix(line, "data:")
 		v = strings.TrimPrefix(v, " ")
-		*data = append(*data, v)
-		return nil
+		return data.add(v)
 	default:
 		return nil
 	}
 }
 
-func (st *anthropicStreamState) dispatchData(data *[]string) error {
-	if len(*data) == 0 {
+func (st *anthropicStreamState) dispatchData(data *sseFrame) error {
+	payload, ok := data.take()
+	if !ok {
 		return nil
 	}
-	payload := strings.Join(*data, "\n")
-	*data = (*data)[:0]
 	return st.handleFrame(payload)
 }
 
