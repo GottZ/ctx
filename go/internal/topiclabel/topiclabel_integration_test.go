@@ -324,6 +324,32 @@ func TestW6LabelPipeline(t *testing.T) {
 		}
 	})
 
+	// ── G5b (§F-§8): the label chain resolves with no tenant (shared rows
+	// only), so a tenant-private digest row is no configured backend for it.
+	// RED against the pool-wide RoleConfigured: the run went active and every
+	// selected topic failed on an empty chain instead of reporting no-backend.
+	t.Run("G5b tenant-private digest row ⇒ no-backend", func(t *testing.T) {
+		const scope = "w6tenantdigest"
+		core := []string{w6Block(t, pool, scope, "tenant-digest-orphan", "internal", 65)}
+		w6Topic(t, pool, scope, core)
+
+		chat := &fakeChat{}
+		d := w6Deps(pool, chat, func(d *Deps) {
+			bp := backends.NewPool(nil, nil)
+			bp.SeedSnapshotForTest([]backends.Backend{
+				{ID: "9", Name: "embedder", Trust: backends.TrustFull,
+					Roles: []string{backends.RoleEmbed}, Priority: 1, Enabled: true},
+				{ID: "10", Name: "tenant-digest", Scope: "tenant-x", Trust: backends.TrustFull,
+					Locality: "external", Roles: []string{backends.RoleDigest}, Priority: 1, Enabled: true},
+			})
+			d.Backends = bp
+		})
+		st := Run(ctx, d, []string{scope})
+		if st.State != StateNoBackend || chat.calls != 0 {
+			t.Fatalf("state=%s calls=%d, want no-backend/0 — a tenant-private digest row counted for the shared label chain", st.State, chat.calls)
+		}
+	})
+
 	// ── G7: three strikes and the topic leaves the selection — until its core
 	// drifts, which is the W5 pass's job to signal.
 	t.Run("G7 the attempt cap takes a topic out and drift puts it back", func(t *testing.T) {

@@ -333,8 +333,11 @@ func Run(ctx context.Context, d Deps, scopes []string) Stats {
 	}
 	// Kein-Backend-Guard (A01-4): no chat-capable digest backend means no
 	// labelling — a visible state, not a per-topic error flood. The W5 fallback
-	// carries the map in the meantime.
-	if d.Backends == nil || !d.Backends.RoleConfigured(backends.RoleDigest) {
+	// carries the map in the meantime. Asked in the view ChainCall resolves in:
+	// its llm.ChainCall carries no Tenant, so the label chain sees shared rows
+	// only, and a tenant row with the digest role must not count as configured
+	// (§F-§8).
+	if d.Backends == nil || !d.Backends.RoleConfiguredFor(backends.RoleDigest, "") {
 		st.State = StateNoBackend
 		return st
 	}

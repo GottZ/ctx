@@ -224,13 +224,16 @@ func (r *Router) chatMode(ctx context.Context, role string, required backends.Se
 }
 
 // EmbedChain resolves the background-embed chain: the dedicated dream-embed
-// role when any row carries it (the bootstrap split), the shared embed role
-// otherwise — the pool mirror of the old DreamEmbedBackend field-fallback.
-// Returns the role the chain resolved under so model resolution and llmlog
-// rows use the same key. Exported for the scheduler's embed-backfill.
+// role when a row visible to the iterated tenant carries it (the bootstrap
+// split), the shared embed role otherwise — the pool mirror of the old
+// DreamEmbedBackend field-fallback. The split is decided in the same tenant
+// view the chain resolves in, so another tenant's dream-embed row cannot flip
+// this tenant onto a role it has no backend for (§F-§8). Returns the role the
+// chain resolved under so model resolution and llmlog rows use the same key.
+// Exported for the scheduler's embed-backfill.
 func (r *Router) EmbedChain(required backends.Sensitivity) ([]backends.Backend, string, error) {
 	role := backends.RoleEmbed
-	if r.Pool.RoleConfigured(backends.RoleDreamEmbed) {
+	if r.Pool.RoleConfiguredFor(backends.RoleDreamEmbed, r.Tenant) {
 		role = backends.RoleDreamEmbed
 	}
 	chain, err := r.Pool.Chain(role, required, r.Tenant) // iterated tenant, see available()

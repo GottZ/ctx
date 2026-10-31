@@ -80,6 +80,38 @@ func TestRouterEmbedChainIsTenantScoped(t *testing.T) {
 	}
 }
 
+// TestRouterEmbedChainRoleModeIsTenantScoped (§F-§8): the bootstrap split
+// (dream-embed when configured, embed otherwise) is decided in the iterated
+// tenant's view. The shared row carries embed only; tenant-a's private row
+// carries embed AND dream-embed. tenant-a resolves dream-embed (its own row);
+// every other view — a foreign tenant, the _global default tenant, the empty
+// fail-closed tenant — stays on embed and keeps a chain. RED against the
+// pool-wide RoleConfigured: those three flipped to dream-embed and got
+// ErrNoEligibleBackend (the background embed backfill parked every block).
+func TestRouterEmbedChainRoleModeIsTenantScoped(t *testing.T) {
+	p := backends.NewPool(nil, nil)
+	ta := tenantEmbedRow("tenant-a-embed", "tenant-a", 100)
+	ta.Roles = []string{backends.RoleEmbed, backends.RoleDreamEmbed}
+	p.SeedSnapshotForTest([]backends.Backend{
+		tenantEmbedRow("shared-embed", backends.GlobalScope, 50), // roles: embed only
+		ta,
+	})
+	for _, tenant := range []string{"tenant-b", backends.GlobalScope, ""} {
+		chain, role, err := (&Router{Pool: p, Tenant: tenant}).EmbedChain(backends.SensPublic)
+		if err != nil || role != backends.RoleEmbed {
+			t.Errorf("tenant %q: role=%s err=%v — another tenant's dream-embed row switched this tenant's embed role", tenant, role, err)
+			continue
+		}
+		if len(chain) != 1 || chain[0].Name != "shared-embed" {
+			t.Errorf("tenant %q: chain = %v, want [shared-embed]", tenant, chain)
+		}
+	}
+	chain, role, err := (&Router{Pool: p, Tenant: "tenant-a"}).EmbedChain(backends.SensPublic)
+	if err != nil || role != backends.RoleDreamEmbed || len(chain) != 1 || chain[0].Name != "tenant-a-embed" {
+		t.Errorf("tenant-a: role=%s err=%v chain=%v, want dream-embed on its own row", role, err, chain)
+	}
+}
+
 // TestRouterAvailableIsTenantScoped pins the second Chain call-site (available):
 // a dream role served ONLY by tenant-a's private backend is available to the
 // tenant-a router but NOT to the shared-only '_global' router. RED arm — the

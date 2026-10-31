@@ -543,15 +543,27 @@ func (p *Pool) Chain(role string, required Sensitivity, tenant string) ([]Backen
 	return eligible, nil
 }
 
-// RoleConfigured reports whether ANY row carries the role, regardless of
-// enabled/trust/cooldown. The rerank dispatch needs the distinction
-// "role absent from the routing table" (⇒ LLM-judge substitute, a
-// configuration alternative) vs "chain empty by trust/profile/disabled"
-// (⇒ fail-open to RRF order, design 03 §2.5).
-func (p *Pool) RoleConfigured(role string) bool {
+// RoleConfiguredFor reports whether any row VISIBLE to tenant carries the
+// role, regardless of enabled/trust/cooldown. The rerank dispatch needs the
+// distinction "role absent from the routing table" (⇒ LLM-judge substitute,
+// a configuration alternative) vs "chain empty by trust/profile/disabled"
+// (⇒ fail-open to RRF order, design 03 §2.5); the dream router picks the
+// dream-embed role over embed on it (the bootstrap split); the topic labeller
+// reports no-backend on it.
+//
+// tenant is the SAME value the caller then passes to Chain, so both answers
+// come from one view of the routing table (VisibleTo). Counting every row
+// instead — the earlier RoleConfigured — let one tenant's private row switch
+// the decision for every other tenant: a tenant row carrying dream-embed made
+// every other tenant's background-embed chain resolve dream-embed, which
+// Chain then filtered to nothing (embed backfill parked, dream keyword embeds
+// failed); a tenant row carrying rerank cut every other tenant's LLM-judge
+// (§F-§8).
+func (p *Pool) RoleConfiguredFor(role, tenant string) bool {
 	snap := p.snap.Load()
 	for i := range snap.backends {
-		if snap.backends[i].HasRole(role) {
+		b := &snap.backends[i]
+		if VisibleTo(b.Scope, tenant) && b.HasRole(role) {
 			return true
 		}
 	}

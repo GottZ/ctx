@@ -1231,7 +1231,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// chain the pre-rerank order is kept (the judge is a configuration
 	// alternative, not a failover target).
 	if rerankCfg.Enabled {
-		if h.backendPool.RoleConfigured(backends.RoleRerank) {
+		if h.backendPool.RoleConfiguredFor(backends.RoleRerank, ar.HomeScope) {
 			maxDocs := rerankCfg.MaxDocs
 			if maxDocs <= 0 {
 				maxDocs = rrf.RerankCrossEncoderMaxDocs
