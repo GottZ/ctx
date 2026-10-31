@@ -13,15 +13,15 @@
   // is DOMPurify-sanitized. Adding a second raw {@html} anywhere turns that
   // freeze red before review.
   import { renderMarkdown } from './markdown'
-  import { camoProxy } from './camo'
+  import { camoClickToLoad } from './camo'
 
   let { source }: { source: string } = $props()
   const html = $derived(renderMarkdown(source))
 </script>
 
 <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by renderMarkdown (html:false + DOMPurify) -->
-<!-- use:camoProxy swaps remote-image placeholders for proxied same-origin <img> post-render (design 07 §4.3); LLM output never comes through here — MessageBubble uses click-to-load (GHSA 2026-10-31 §7) -->
-<div class="md" use:camoProxy={html}>{@html html}</div>
+<!-- use:camoClickToLoad: remote images in issue and comment bodies load only on a click, one image per click, like chat (design 07 §4.3). Agents write these bodies through MCP, ctx manage and REST, so they are no more trusted than LLM output (GHSA 2026-10-31 §7, security review §E) -->
+<div class="md" use:camoClickToLoad={html}>{@html html}</div>
 
 <style>
   /* Shared markdown body styling — the readable defaults + the pipeline-emitted
@@ -73,6 +73,11 @@
     padding-left: var(--space-3);
     border-left: 2px solid var(--border-strong);
     color: var(--text-dim);
+  }
+  .md :global(.md-img-load) {
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    padding: 0 var(--space-1);
   }
   .md :global(.md-img) {
     max-width: 100%;

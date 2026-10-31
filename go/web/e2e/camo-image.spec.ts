@@ -6,13 +6,15 @@ import { seedSession, gotoArea, trackPageErrors } from './fixtures'
 // internal/camo + internal/handler Go tests; here we prove the FRONTEND wiring
 // that the visual baselines cannot carry:
 //
-//   (a) a foreign image whose URL the server signs is swapped to a proxied
-//       same-origin <img src="/api/img/…"> and renders (no placeholder);
-//   (b) the viewer's browser NEVER issues a request to the foreign origin — the
+//   (a) issue markdown is click-to-load (security review §E): nothing is signed
+//       on render; the placeholder offers a "Load image" button, and its click
+//       signs exactly that one URL;
+//   (b) the signed image is swapped to a proxied same-origin
+//       <img src="/api/img/…"> and renders (no placeholder);
+//   (c) the viewer's browser NEVER issues a request to the foreign origin — the
 //       deanonymization guarantee (E04-9), the whole point of the proxy;
-//   (c) when the sign endpoint fails (proxy disabled / rate-limited), the
-//       placeholder fallback stays — covered by the existing U06 remote-image
-//       test in issue-detail.spec.ts (no sign mock ⇒ signImages resolves empty).
+//   (d) without a click the placeholder stays and no sign request is made —
+//       covered by the U06 remote-image test in issue-detail.spec.ts.
 //
 // Everything is served from localhost fixtures — no test leaves the host
 // (repo doctrine): page.route intercepts /api/img/sign, /api/img/<sig>, and the
@@ -62,7 +64,7 @@ function onlyDetailGet(body: Record<string, unknown>) {
 }
 
 test.describe('camo image proxy — proxied render + deanonymization (design 07 §7.7)', () => {
-  test('a signed foreign image renders from /api/img and never hits the foreign origin', async ({ page }) => {
+  test('a clicked foreign image renders from /api/img and never hits the foreign origin', async ({ page }) => {
     const errors = trackPageErrors(page)
 
     // Deanonymization gate: record any request whose HOST is the foreign origin.
@@ -82,10 +84,10 @@ test.describe('camo image proxy — proxied render + deanonymization (design 07 
 
     await seedSession(page, { role: 'member', theme: 'dark' })
 
-    // MINT: the server signs the foreign URL the renderer asks about.
-    let signBody: { urls?: string[] } = {}
+    // MINT: the server signs the foreign URL the click asks about.
+    const signBodies: unknown[] = []
     await page.route('**/api/img/sign', async (route) => {
-      signBody = JSON.parse(route.request().postData() ?? '{}')
+      signBodies.push(JSON.parse(route.request().postData() ?? '{}'))
       return route.fulfill({ status: 200, json: { success: true, signatures: { [FOREIGN]: SIGNED_PATH } } })
     })
 
@@ -107,7 +109,19 @@ test.describe('camo image proxy — proxied render + deanonymization (design 07 
     const content = page.locator('main.content')
     await expect(content.getByRole('heading', { name: 'Example issue' })).toBeVisible()
 
-    // (a) the placeholder is replaced by a proxied same-origin <img> that loads.
+    // (a) click-to-load: the render signs nothing; the placeholder names the
+    // host + path and offers one button.
+    const ph = content.locator('.md-img-blocked')
+    await expect(ph).toContainText('images.example/cat.png')
+    const load = ph.getByRole('button', { name: 'Load image from images.example/cat.png' })
+    await expect(load).toBeVisible()
+    await page.waitForTimeout(200)
+    expect(signBodies, 'issue markdown signed an image on render').toEqual([])
+    expect(await content.locator('img').count()).toBe(0)
+
+    await load.click()
+
+    // (b) the placeholder is replaced by a proxied same-origin <img> that loads.
     const img = content.locator('img.md-img')
     await expect(img).toBeVisible()
     await expect(img).toHaveAttribute('src', SIGNED_PATH)
@@ -118,10 +132,10 @@ test.describe('camo image proxy — proxied render + deanonymization (design 07 
       .toBe(true)
     expect(fetchHits).toBeGreaterThan(0)
 
-    // The renderer asked to sign exactly the foreign URL.
-    expect(signBody.urls).toContain(FOREIGN)
+    // The click asked to sign exactly the one foreign URL.
+    expect(signBodies).toEqual([{ urls: [FOREIGN], origin: 'assistant' }])
 
-    // (b) NO request ever went to the foreign origin.
+    // (c) NO request ever went to the foreign origin.
     await page.waitForTimeout(200)
     expect(foreignHits, `leaked to the foreign origin: ${foreignHits.join(', ')}`).toEqual([])
     expect(errors, errors.join('\n')).toEqual([])

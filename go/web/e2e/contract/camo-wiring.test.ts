@@ -1,14 +1,19 @@
-// Camo wiring gate (GHSA 2026-10-31 §7). The unit tests in
-// src/lib/markdown/camo.test.ts prove that camoClickToLoad signs nothing on
-// render; this gate proves the chat surface actually USES it. LLM output can be
-// steered by injected text in a retrieved block into an image URL that carries
-// context, so the assistant turn must never sit behind the automatic camoProxy
-// (sign on render ⇒ the server fetches the URL without anyone clicking).
+// Camo wiring gate (GHSA 2026-10-31 §7, security review 2026-10-31 §E). The
+// unit tests in src/lib/markdown/camo.test.ts prove that camoClickToLoad signs
+// nothing on render; this gate proves every markdown surface actually USES it.
+// Signing on render makes the server fetch a foreign URL without anyone
+// clicking, and no surface renders only trusted text: LLM output can be steered
+// by injected text in a retrieved block, and issue / comment bodies are written
+// by agents through MCP, `ctx manage` and REST with the same api-key auth as the
+// web UI (§E) — so there is no surface left that may sign on render.
 //
-//   - MessageBubble (the chat {@html} sink) mounts use:camoClickToLoad and does
-//     not import camoProxy.
-//   - No file under src/routes/chat/ reaches the automatic path indirectly by
-//     importing camoProxy or the shared Markdown.svelte component.
+//   - Both renderMarkdown {@html} sinks — Markdown.svelte (issue bodies,
+//     comments) and MessageBubble (chat assistant turns) — mount
+//     use:camoClickToLoad.
+//   - No file under src/ mentions camoProxy, the removed sign-on-render action.
+//   - signImages (POST /api/img/sign) is called only from lib/markdown/camo.ts,
+//     where the click handler is its one caller; a new render-time signer
+//     elsewhere turns this red.
 //
 // Lives under e2e/contract/ like html-sinks.test.ts: src/ is svelte-checked with
 // the app tsconfig, which rejects node:fs.
@@ -18,22 +23,34 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const CHAT_ROOT = fileURLToPath(new URL('../../src/routes/chat', import.meta.url))
+const SRC_ROOT = fileURLToPath(new URL('../../src', import.meta.url))
 
-describe('camo wiring — LLM output is click-to-load (GHSA 2026-10-31 §7)', () => {
-  it('MessageBubble mounts camoClickToLoad, never the automatic camoProxy', () => {
-    const src = readFileSync(join(CHAT_ROOT, 'MessageBubble.svelte'), 'utf8')
-    expect(src).toMatch(/use:camoClickToLoad=\{html\}/)
-    expect(src).not.toMatch(/camoProxy/)
+/** Every non-test .svelte / .ts source file under src/, as src-relative paths. */
+function sourceFiles(): string[] {
+  return readdirSync(SRC_ROOT, { recursive: true, encoding: 'utf8' })
+    .filter((f) => f.endsWith('.svelte') || f.endsWith('.ts'))
+    .filter((f) => !f.endsWith('.test.ts'))
+    .map((f) => f.split('\\').join('/'))
+    .sort()
+}
+
+const read = (f: string) => readFileSync(join(SRC_ROOT, f), 'utf8')
+
+describe('camo wiring — every remote image is click-to-load (GHSA 2026-10-31 §7, §E)', () => {
+  it.each(['lib/markdown/Markdown.svelte', 'routes/chat/MessageBubble.svelte'])(
+    '%s mounts camoClickToLoad on its {@html} sink',
+    (f) => {
+      expect(read(f)).toMatch(/use:camoClickToLoad=\{html\}/)
+    },
+  )
+
+  it('no file under src/ references the sign-on-render camoProxy action', () => {
+    const offenders = sourceFiles().filter((f) => /\bcamoProxy\b/.test(read(f)))
+    expect(offenders).toEqual([])
   })
 
-  it('no chat file imports camoProxy or the auto-proxying Markdown component', () => {
-    const offenders = readdirSync(CHAT_ROOT, { recursive: true, encoding: 'utf8' })
-      .filter((f) => f.endsWith('.svelte') || f.endsWith('.ts'))
-      .filter((f) => {
-        const src = readFileSync(join(CHAT_ROOT, f), 'utf8')
-        return /\bcamoProxy\b/.test(src) || /markdown\/Markdown\.svelte/.test(src)
-      })
-    expect(offenders).toEqual([])
+  it('signImages is called only from lib/markdown/camo.ts', () => {
+    const callers = sourceFiles().filter((f) => f !== 'lib/api/images.ts' && /\bsignImages\s*\(/.test(read(f)))
+    expect(callers).toEqual(['lib/markdown/camo.ts'])
   })
 })

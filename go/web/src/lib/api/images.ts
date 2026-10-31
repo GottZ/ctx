@@ -8,9 +8,10 @@
 import { apiFetch } from '../api'
 
 /**
- * The kind of rendered content a sign request comes from. The server signs
- * "assistant" (LLM output, click-to-load) one URL at a time; "issue" content
- * may batch. No origin signs a URL with a query string (GHSA 2026-10-31 §7).
+ * The kind of rendered content a sign request comes from. Every markdown
+ * surface is click-to-load and its click sends "assistant", which the server
+ * signs one URL at a time (GHSA 2026-10-31 §7, security review §E). No origin
+ * signs a URL with a query string.
  */
 export type CamoOrigin = 'assistant' | 'issue'
 
@@ -20,7 +21,7 @@ interface SignResponse {
 }
 
 /**
- * Batch-sign foreign image URLs for the Camo proxy. Returns a map from each
+ * Sign foreign image URLs for the Camo proxy. Returns a map from each
  * accepted input URL to its `/api/img/<sig>?url=…&exp=…` proxy path. On ANY
  * failure — proxy disabled (404), rate limit (429), network — it resolves to an
  * empty map rather than throwing: a failed sign must degrade to the existing

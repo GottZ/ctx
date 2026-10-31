@@ -1,16 +1,16 @@
 // @vitest-environment jsdom
 //
 // Camo client + post-render swap unit tests (design 07-camo §4.3, D2b).
-//  1. signImages: batch shape, de-dup, fail-safe empty-map on any error.
-//  2. camoProxy action (issue markdown): swaps signed placeholders for
-//     same-origin <img>, keeps the placeholder for declined/failed URLs.
-//  3. camoClickToLoad action (LLM output, GHSA 2026-10-31 §7): no sign request
-//     on render or re-render; one click signs exactly one URL; the approval
-//     survives a re-render; query-string URLs get no button and no request.
+//  1. signImages: request shape, de-dup, fail-safe empty-map on any error.
+//  2. camoClickToLoad action, mounted by every markdown sink — chat assistant
+//     turns (GHSA 2026-10-31 §7) and issue / comment bodies (security review
+//     §E): no sign request on render or re-render; one click signs exactly one
+//     URL; the approval survives a re-render; query-string URLs get no button
+//     and no request.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { signImages } from '../api/images'
-import { camoClickToLoad, camoProxy, describeImageURL } from './camo'
+import { camoClickToLoad, describeImageURL } from './camo'
 import { renderMarkdown } from './markdown'
 
 function stubFetch(handler: (url: string, init?: RequestInit) => unknown): void {
@@ -73,58 +73,7 @@ function mount(md: string): HTMLDivElement {
   return div
 }
 
-describe('camoProxy action (issue markdown)', () => {
-  it('swaps a signed placeholder for a same-origin <img>, dropping the placeholder', async () => {
-    let body: unknown = null
-    stubFetch((_url, init) => {
-      body = JSON.parse(String(init?.body))
-      return {
-      success: true,
-      signatures: { 'https://evil.example/pixel.png': '/api/img/abc123?url=https%3A%2F%2Fevil.example%2Fpixel.png&exp=9999999999' },
-      }
-    })
-    const div = mount('![shot](https://evil.example/pixel.png)')
-    expect(div.querySelector('.md-img-blocked')).not.toBeNull()
-
-    camoProxy(div, div.innerHTML)
-    await vi.waitFor(() => {
-      const img = div.querySelector('img.md-img')
-      expect(img).not.toBeNull()
-      expect(img?.getAttribute('src')).toBe('/api/img/abc123?url=https%3A%2F%2Fevil.example%2Fpixel.png&exp=9999999999')
-    })
-    // The placeholder is gone and the src is a same-origin proxy PATH — the
-    // foreign host only survives percent-encoded inside the url query, never as
-    // the request origin (the browser fetches from 'self').
-    expect(div.querySelector('.md-img-blocked')).toBeNull()
-    const src = div.querySelector('img')?.getAttribute('src') ?? ''
-    expect(src.startsWith('/api/img/')).toBe(true)
-    expect(body).toEqual({ urls: ['https://evil.example/pixel.png'], origin: 'issue' })
-    div.remove()
-  })
-
-  it('keeps the placeholder when the server declines the URL (fallback)', async () => {
-    stubFetch(() => ({ success: true, signatures: {} })) // declined
-    const div = mount('![shot](https://evil.example/pixel.png)')
-    camoProxy(div, div.innerHTML)
-    // Give the microtask a tick; the placeholder must survive.
-    await new Promise((r) => setTimeout(r, 0))
-    expect(div.querySelector('.md-img-blocked')).not.toBeNull()
-    expect(div.querySelector('img')).toBeNull()
-    div.remove()
-  })
-
-  it('does nothing when there are no foreign-image placeholders', async () => {
-    const spy = vi.fn()
-    vi.stubGlobal('fetch', spy)
-    const div = mount('a plain [link](/local) and `code`')
-    camoProxy(div, div.innerHTML)
-    await new Promise((r) => setTimeout(r, 0))
-    expect(spy).not.toHaveBeenCalled()
-    div.remove()
-  })
-})
-
-describe('camoClickToLoad action (LLM output, GHSA 2026-10-31 §7)', () => {
+describe('camoClickToLoad action (every markdown sink, GHSA 2026-10-31 §7, §E)', () => {
   const tick = () => new Promise((r) => setTimeout(r, 0))
   const signed = (u: string) => `/api/img/s1?url=${encodeURIComponent(u)}&exp=9999999999`
 
@@ -200,6 +149,34 @@ describe('camoClickToLoad action (LLM output, GHSA 2026-10-31 §7)', () => {
     a2.destroy()
     div.remove()
     again.remove()
+  })
+
+  it('an issue page (body + comments, one Markdown mount each) signs nothing until a click', async () => {
+    // IssueDetailContent mounts one Markdown.svelte per body and per comment;
+    // none of them may sign on mount, and a click in one comment signs only
+    // that comment's URL (§E: issue text is agent-writable via MCP/REST).
+    const calls: unknown[] = []
+    stubFetch((_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { urls: string[] }
+      calls.push(body)
+      return { success: true, signatures: { [body.urls[0]]: signed(body.urls[0]) } }
+    })
+    const body = mount('Body ![b](https://img.example/body.png) ![b2](https://img.example/body2.png)')
+    const c1 = mount('Comment ![c](https://img.example/c1.png)')
+    const c2 = mount('Comment ![c](https://img.example/c2.png)')
+    const actions = [body, c1, c2].map((n) => camoClickToLoad(n, n.innerHTML))
+    await tick()
+    expect(calls).toHaveLength(0)
+    expect(document.querySelectorAll('img')).toHaveLength(0)
+    expect(document.querySelectorAll('button.md-img-load')).toHaveLength(4)
+
+    c2.querySelector<HTMLButtonElement>('button.md-img-load')?.click()
+    await vi.waitFor(() => expect(c2.querySelector('img.md-img')).not.toBeNull())
+    expect(calls).toEqual([{ urls: ['https://img.example/c2.png'], origin: 'assistant' }])
+    expect(body.querySelectorAll('.md-img-blocked')).toHaveLength(2)
+    expect(c1.querySelectorAll('.md-img-blocked')).toHaveLength(1)
+    for (const a of actions) a.destroy()
+    for (const n of [body, c1, c2]) n.remove()
   })
 
   it('offers no button and never shows or requests a query-string URL', async () => {

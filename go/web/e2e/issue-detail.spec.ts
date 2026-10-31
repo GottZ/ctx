@@ -109,8 +109,10 @@ test.describe('issue detail — remote-image interception (U06 / §4.4.3 / E04-9
   test('a foreign image becomes a placeholder and never hits the foreign origin', async ({ page }) => {
     const errors = trackPageErrors(page)
     const foreign: string[] = []
+    const signs: string[] = []
     page.on('request', (r) => {
-      if (r.url().includes('evil.example')) foreign.push(r.url())
+      if (new URL(r.url()).pathname === '/api/img/sign') signs.push(r.url())
+      else if (r.url().includes('evil.example')) foreign.push(r.url())
     })
     await seedSession(page, { role: 'member', theme: 'dark' })
     await page.route(
@@ -122,11 +124,15 @@ test.describe('issue detail — remote-image interception (U06 / §4.4.3 / E04-9
     const content = page.locator('main.content')
     const ph = content.locator('.md-img-blocked')
     await expect(ph).toBeVisible()
-    await expect(ph).toContainText('https://evil.example/pixel.png')
+    // Click-to-load (security review §E): host + path and a button, no sign
+    // request and no image until the viewer clicks.
+    await expect(ph).toContainText('evil.example/pixel.png')
+    await expect(ph.getByRole('button', { name: 'Load image from evil.example/pixel.png' })).toBeVisible()
     expect(await content.locator('img').count(), 'no img element must reach the DOM').toBe(0)
 
     await page.waitForTimeout(300)
     expect(foreign, `a request leaked to the foreign origin: ${foreign.join(', ')}`).toEqual([])
+    expect(signs, 'issue markdown signed an image on render').toEqual([])
     expect(errors, errors.join('\n')).toEqual([])
   })
 })
