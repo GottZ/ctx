@@ -139,7 +139,7 @@ func TestDerivedWriteLock(t *testing.T) {
 		raw, _ := json.Marshal(body)
 		req := httptest.NewRequest(http.MethodPost, "/api/ingest", strings.NewReader(string(raw))).WithContext(keyCtx)
 		rec := httptest.NewRecorder()
-		NewIngestHandler(pool).HandleIngest(rec, req)
+		NewIngestHandler(pool, nil).HandleIngest(rec, req)
 		var resp map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("decode /api/ingest body %s: %v", rec.Body.String(), err)

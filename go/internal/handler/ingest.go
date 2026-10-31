@@ -3,7 +3,8 @@
 //
 // POST /api/ingest accepts up to 200 chunks per request.
 // Each chunk is validated, hash-checked, upserted, embedded, and temporally enriched.
-// No rate-limit on this endpoint (internal API path).
+// Write rate limit: own action bucket "ingest", one row per accepted request,
+// budgeted against query.rate_limit_write (§9e).
 //
 // Source: https://github.com/GottZ/ctx
 package handler
@@ -36,14 +37,24 @@ const (
 	maxTitleLen = 500
 )
 
+// ingestBucket is the access-log action the ingest write rate limit counts.
+// One row per accepted REQUEST, not per chunk: a batch carries up to
+// maxIngestChunks chunks, and the per-chunk "write" rows feed the /api/store
+// budget already — counting chunks here would cut bulk vault ingestion to
+// rate_limit_write chunks a minute.
+const ingestBucket = "ingest"
+
 // IngestHandler handles POST /api/ingest.
 type IngestHandler struct {
 	pool *pgxpool.Pool
+	cfg  ConfigStore // nil = no write rate limit (test wiring)
 }
 
-// NewIngestHandler creates a new IngestHandler.
-func NewIngestHandler(pool *pgxpool.Pool) *IngestHandler {
-	return &IngestHandler{pool: pool}
+// NewIngestHandler creates a new IngestHandler. The write rate limit comes
+// from cfg per request (tenant-overridable query.rate_limit_write); a nil cfg
+// disables it.
+func NewIngestHandler(pool *pgxpool.Pool, cfg ConfigStore) *IngestHandler {
+	return &IngestHandler{pool: pool, cfg: cfg}
 }
 
 // IngestRequest is the JSON body for POST /api/ingest.
@@ -201,6 +212,14 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Write rate limit (§9e): before this the route had none, so one key could
+	// push maxIngestChunks writes per request without bound. Checked after the
+	// batch gates so a refused batch costs no budget; the bucket row is written
+	// synchronously so concurrent requests see it.
+	if h.ingestRateLimited(w, ctx, authResult.ApiKeyID) {
+		return
+	}
+
 	// Process each chunk.
 	resp := IngestResponse{
 		Total:   len(req.Chunks),
@@ -252,6 +271,11 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			chunk.Category, chunk.Title, chunk.Content,
 			chunk.Tags, chunk.Metadata, scope,
 		)
+		if errors.Is(err, store.ErrChunkNotWritable) {
+			// Absent source, foreign source and a slot held by another scope's
+			// chunk are ONE answer (no oracle, §9e); nothing was written.
+			return IngestResult{Index: index, Status: "failed", Error: "source not found"}
+		}
 		if err != nil {
 			slog.Error("ingest: insert chunk error",
 				"error", err, "index", index, "source_id", chunk.SourceID, "request_id", reqID)
@@ -310,4 +334,26 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 
 	// Embedding generated async by scheduler backfill loop.
 	return IngestResult{Index: index, ID: block.ID, Status: action}
+}
+
+// ingestRateLimited applies the write budget to the request and books it in
+// the ingest bucket. It answers on w and reports whether it did.
+func (h *IngestHandler) ingestRateLimited(w http.ResponseWriter, ctx context.Context, apiKeyID string) bool {
+	if h.cfg == nil {
+		return false
+	}
+	limit := h.cfg.SnapshotForRequest(ctx).Query.RateLimitWrite
+	if limit <= 0 {
+		return false
+	}
+	if rateLimitBlocked(w, ctx, h.pool, apiKeyID, ingestBucket, "ingest: rate limit check error", "ingest requests", limit) {
+		return true
+	}
+	if err := store.LogAccess(ctx, h.pool, apiKeyID, "", ingestBucket); err != nil {
+		// Fail closed: an unbooked request would not count against the limit.
+		slog.Error("ingest: rate limit booking failed", "error", err, "request_id", RequestIDFromContext(ctx))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
+		return true
+	}
+	return false
 }
