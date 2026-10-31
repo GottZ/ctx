@@ -10,6 +10,7 @@ package handler
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -30,10 +31,58 @@ func TestSafeReturnTo(t *testing.T) {
 		{"https://evil.example/", "/"},
 		{"evil", "/"},
 		{`\\evil`, "/"},
+		{"///evil.example", "/"},
+		// GHSA 2026-10-31 §9b: browsers strip TAB/CR/LF from URLs, so
+		// "/\t/evil.example" is read as "//evil.example". Any control byte
+		// (raw, or percent-decoded in the path) collapses to "/".
+		{"/\t/evil.example", "/"},
+		{"\t//evil.example", "/"},
+		{"/\r\n/evil.example", "/"},
+		{"/\n/evil.example", "/"},
+		{"/a\x00b", "/"},
+		{"/a\x7fb", "/"},
+		{"/blocks?q=\r\nSet-Cookie:x", "/"},
+		{"/%09/evil.example", "/"},
+		{"/%0d%0a/evil.example", "/"},
+		// Encoded slash/backslash at the second position: decoded "//" / "/\".
+		{"/%2F/evil.example", "/"},
+		{"/%2fevil.example", "/"},
+		{"/%5Cevil.example", "/"},
+		// path.Clean shapes http.Redirect would otherwise turn into "/\evil".
+		{`/./\evil`, "/"},
+		{`/../\evil`, "/"},
+		{"/.//evil.example", "/evil.example"}, // cleaned to a same-origin path
+		// Absolute / scheme / userinfo / opaque shapes.
+		{"/\\evil.example", "/"},
+		{"https:/evil.example", "/"},
+		{"javascript:alert(1)", "/"},
+		{"//user@evil.example/", "/"},
+		{"%2F%2Fevil.example", "/"},
+		// Normalised output (u.RequestURI form, fragment dropped, cleaned).
+		{"/blocks#frag", "/blocks"},
+		{"/a/../b", "/b"},
+		{"/a//b", "/a/b"},
+		{"/sub/", "/sub/"},
+		{"/a b", "/a%20b"},
+		{"/?x=1", "/?x=1"},
+		{"/a%2Fb", "/a/b"},
+		{"/@evil.example", "/@evil.example"},
 	}
 	for _, c := range cases {
-		if got := safeReturnTo(c.in); got != c.want {
+		got := safeReturnTo(c.in)
+		if got != c.want {
 			t.Errorf("safeReturnTo(%q) = %q, want %q", c.in, got, c.want)
+		}
+		// Idempotent: the callback re-filters the sealed value.
+		if again := safeReturnTo(got); again != got {
+			t.Errorf("safeReturnTo not idempotent: %q → %q → %q", c.in, got, again)
+		}
+		// http.Redirect's own path.Clean must not change the value: what
+		// was checked is exactly what reaches the Location header.
+		rec := httptest.NewRecorder()
+		http.Redirect(rec, httptest.NewRequest("GET", "/auth/callback/x", nil), got, http.StatusFound)
+		if loc := rec.Header().Get("Location"); loc != got {
+			t.Errorf("safeReturnTo(%q) = %q, but http.Redirect emits Location %q", c.in, got, loc)
 		}
 	}
 }

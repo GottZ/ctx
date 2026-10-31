@@ -18,7 +18,7 @@
 //   - RFC 9207 iss mismatch → reject, NO exchange
 //   - missing code / missing cookie → reject
 //   - unknown verified (issuer,subject) → 403 admin-invite, no row created
-//   - return_to '//evil.example' and '/\evil' → sealed as "/" (F5)
+//   - return_to '//evil.example', '/\evil', tab/CR/LF, '/%2F', '/./\' → sealed as "/" (F5, §9b)
 //   - email_verified=false → login succeeds, email NOT refreshed
 //   - per-IP rate limit N+1 → 429 (F7)
 //   - github e2e: authorize URL without PKCE/nonce (F6), exchange without
@@ -471,7 +471,9 @@ func TestSSOLoginFlowOIDC_Integration(t *testing.T) {
 	})
 
 	t.Run("return_to_open_redirect_filtered", func(t *testing.T) {
-		for _, evil := range []string{"//evil.example", `/\evil`} {
+		// The raw query is built by hand for the §9b shapes: "%09" reaches
+		// the handler as a TAB, "%252F" as the literal "%2F".
+		for _, evil := range []string{"//evil.example", `/\evil`, "/\t/evil.example", "/\r\n/evil.example", "/%2F/evil.example", `/./\evil`} {
 			cookieVal, _ := doLogin(t, router, "corp", "?return_to="+url.QueryEscape(evil))
 			var sealed string
 			if err := pool.QueryRow(ctx,
