@@ -18,21 +18,33 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   is therefore served by ``search`` (lexical hybrid, no embedding). Operators who want the
   semantic ``/api/query`` retrieval for recall choose ``transport: rest``.
 - ``store`` → ``Stored: <title> (id: <uuid>, category: <c>)`` or ``No change needed —
-  identical content already exists (id: <uuid>)``; a ``confirm_writes`` key answers with a
-  ``payload_hash`` that is confirmed through the ``confirm`` tool. Rejections come back as
-  ``{"error": "..."}`` from the dispatcher; a rate-limit text maps to ``code="rate_limit"``
-  so the chain writer's backoff applies.
+  identical content already exists (id: <uuid>)``. The block id is the ``(id: …)`` group
+  (or a structured ``id``), never another UUID in the text: the title in front of it can
+  carry a UUID-shaped session id. Rejections come back as ``{"error": "..."}`` from the
+  dispatcher; a rate-limit text maps to ``code="rate_limit"`` so the chain writer's backoff
+  applies. A ``confirm_writes`` key gets the write STAGED instead (``mcp_confirm.go``),
+  which also arrives as an error envelope; it maps to ``code="confirm_writes"`` and is
+  refused — writes from this plugin run unattended and are never confirmed on the
+  operator's behalf (0.6.1).
 - ``get`` → the full block JSON → ``{"success", "block"}``.
 
 Hermes wraps every MCP text result as ``{"result": "<text>"}`` (``tools/mcp_tool_handlers``)
 and every failure as ``{"error": "..."}``; both shapes, plus bare JSON, are accepted here.
+
+A ``timeout`` passed to ``search``/``store``/``get_block`` (the chain writer passes its
+remaining budget) bounds that one dispatch: it runs on a worker thread with the caller's
+context variables and is abandoned at the deadline (``code="timeout"``). Without one, the
+MCP transport's own timeout applies (300 s by default in Hermes). Hermes serializes calls
+per MCP server, so an abandoned call still completes before the next call is sent.
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -41,6 +53,8 @@ from .client import CtxApiError
 logger = logging.getLogger(__name__)
 
 _UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b")
+_ANSWER_ID_RE = re.compile(r"\(id:\s*(" + _UUID_RE.pattern + r")")
+_PAYLOAD_HASH_RE = re.compile(r"payload_hash:\s*([0-9a-fA-F]{16,128})")
 _SOURCE_LINE_RE = re.compile(r"^\[(\d+|n/a)\]\s+(.*?)\s+\(([^()]*)\)\s+id:([0-9a-fA-F-]{36})\s*$")
 _SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit")
@@ -72,9 +86,37 @@ def _find_value(value: Any, key: str) -> str | None:
 
 def _code_for_error(text: str) -> str:
     lowered = text.lower()
+    if lowered.lstrip().startswith("staged") or "confirm_writes" in lowered:
+        return "confirm_writes"
     if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
         return "rate_limit"
     return ""
+
+
+def _run_bounded(fn: Callable[[], Any], timeout: float) -> tuple[bool, Any, BaseException | None]:
+    """Run ``fn`` on a daemon worker thread and wait at most ``timeout`` seconds.
+
+    Returns ``(finished, value, error)``. A call still running at the timeout is
+    abandoned, not cancelled: it ends in the background (at the latest at the MCP
+    transport's own timeout) and its result is dropped. The caller's context variables
+    travel along, so host state bound to the agent's context (approval prompts, the
+    session key) stays visible to the dispatch.
+    """
+    box: dict[str, Any] = {}
+    context = contextvars.copy_context()
+
+    def run() -> None:
+        try:
+            box["value"] = context.run(fn)
+        except BaseException as exc:  # handed back to the calling thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="ctx-mcp-call", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        return False, None, None
+    return True, box.get("value"), box.get("error")
 
 
 class McpClient:
@@ -94,7 +136,9 @@ class McpClient:
             raise ValueError(f"MCP server name {server_name!r} may only contain letters, digits, '_' and '-'")
         self._dispatch = dispatch
         self._server = server_name
-        self._timeout = timeout  # informational: the MCP transport owns its timeouts
+        # Informational defaults: only an explicit per-call ``timeout`` (the chain writer's
+        # remaining budget) bounds a dispatch; otherwise the MCP transport owns its timeouts.
+        self._timeout = timeout
         self._synthesis_timeout = synthesis_timeout
 
     @property
@@ -103,10 +147,24 @@ class McpClient:
 
     # -- transport ----------------------------------------------------------------
 
-    def _call(self, tool: str, args: dict[str, Any]) -> tuple[Any, str]:
-        """Dispatch one tool; returns ``(payload, text)``. Raises ``CtxApiError`` on an error envelope."""
+    def _call(self, tool: str, args: dict[str, Any], timeout: float | None = None) -> tuple[Any, str]:
+        """Dispatch one tool; returns ``(payload, text)``. Raises ``CtxApiError`` on an error envelope.
+
+        With ``timeout`` the dispatch is bounded (see the module docstring) and an
+        abandoned call raises ``CtxApiError(code="timeout")``.
+        """
+        name = f"mcp__{self._server}__{tool}"
         try:
-            raw = self._dispatch(f"mcp__{self._server}__{tool}", args)
+            if timeout is None:
+                raw = self._dispatch(name, args)
+            else:
+                finished, raw, error = _run_bounded(lambda: self._dispatch(name, args), timeout)
+                if not finished:
+                    raise CtxApiError(
+                        f"mcp {tool}: no answer within {timeout:.1f}s; the call was abandoned", code="timeout"
+                    )
+                if error is not None:
+                    raise error
         except CtxApiError:
             raise
         except Exception as exc:
@@ -122,6 +180,15 @@ class McpClient:
             if error:
                 text = str(error)
                 code = _code_for_error(text)
+                if code == "confirm_writes":
+                    hash_match = _PAYLOAD_HASH_RE.search(text)
+                    raise CtxApiError(
+                        f"mcp {tool}: staged, not stored — the ctx key behind mcp_servers.{self._server} has "
+                        "confirm_writes, and this plugin never confirms on the operator's behalf; use a key "
+                        "without confirm_writes"
+                        + (f" (staged payload_hash {hash_match.group(1)})" if hash_match else ""),
+                        code=code,
+                    )
                 raise CtxApiError(f"mcp {tool}: {text[:300]}", status=429 if code == "rate_limit" else None, code=code)
             if "result" in payload and isinstance(payload["result"], str):
                 return payload, payload["result"]
@@ -160,7 +227,7 @@ class McpClient:
             args["types_exclude"] = list(types_exclude)
         if limit:
             args["limit"] = int(limit)
-        payload, body = self._call("search", args)
+        payload, body = self._call("search", args, timeout)
         results = self._as_json(body)
         if results is None and isinstance(payload, list):
             results = payload
@@ -232,12 +299,9 @@ class McpClient:
             args["metadata"] = dict(metadata)
         if type:
             args["type"] = type
-        payload, body = self._call("store", args)
-        block_id, payload_hash = _store_ids(payload, body)
-        if payload_hash and not block_id:
-            # confirm_writes key: the store was staged; confirm it to get the block id.
-            confirmed, confirmed_text = self._call("confirm", {"payload_hash": payload_hash})
-            block_id, _ = _store_ids(confirmed, confirmed_text)
+        # A confirm_writes key gets the write staged; _call raises code="confirm_writes" for it.
+        payload, body = self._call("store", args, timeout)
+        block_id = _store_id(payload, body)
         if not block_id:
             return {"success": False, "error": f"store returned no block id: {body[:200]}"}
         if "No change needed" in body:
@@ -245,7 +309,7 @@ class McpClient:
         return {"success": True, "block": {"id": block_id, "title": title, "category": category}}
 
     def get_block(self, block_id: str, timeout: float | None = None) -> dict[str, Any]:
-        payload, body = self._call("get", {"id": block_id})
+        payload, body = self._call("get", {"id": block_id}, timeout)
         block = self._as_json(body)
         if not isinstance(block, dict) and isinstance(payload, dict) and "result" not in payload:
             block = payload
@@ -256,14 +320,18 @@ class McpClient:
         return {"success": True, "block": block}
 
 
-def _store_ids(payload: Any, text: str) -> tuple[str | None, str | None]:
-    """``(block_id, payload_hash)`` from a store/confirm answer in any of the known shapes."""
+def _store_id(payload: Any, text: str) -> str | None:
+    """Block id of a store answer: a valid structured ``id``, else the ``(id: <uuid>)`` group.
+
+    Never any other UUID in the answer text: it starts with the block title, which can carry
+    a UUID-shaped root session id, and the first-UUID fallback took that for the block id
+    (0.6.1). No id → ``None`` and the caller reports the store as failed.
+    """
     block_id = _find_value(payload, "id") if payload is not None else None
-    if not (block_id and _UUID_RE.fullmatch(block_id)):
-        match = re.search(r"\(id:\s*([0-9a-fA-F-]{36})", text) or _UUID_RE.search(text)
-        block_id = match.group(1) if match and match.lastindex else (match.group(0) if match else None)
-    payload_hash = _find_value(payload, "payload_hash") if payload is not None else None
-    return block_id, payload_hash
+    if block_id and _UUID_RE.fullmatch(block_id):
+        return block_id
+    match = _ANSWER_ID_RE.search(text)
+    return match.group(1) if match else None
 
 
 def _parse_query_text(body: str) -> tuple[str, list[dict[str, Any]]]:

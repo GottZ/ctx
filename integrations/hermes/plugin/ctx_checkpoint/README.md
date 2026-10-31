@@ -57,7 +57,7 @@ memory:
     mcp_server: ctx                  # name of the entry above (default: ctx)
     memory: false                    # true = recall, tools, mirror, facts, digests
     category: compaction-checkpoints # ctx category for checkpoint blocks
-    chunk_chars: 36000               # source part size, clamped to 1k..40k
+    chunk_chars: 36000               # source part size, clamped to 1k..40k; a part also stays under ctx's 50 KB byte cap
     sensitivity: internal            # public | internal | personal | credentials
     budget_s: 60                     # wall-clock budget per checkpoint, 5..600 s
     max_parts: 80                    # part cap per checkpoint, 1..95 (ctx writes 100/60 s per key)
@@ -130,7 +130,11 @@ Fail-closed means accepting a session halt (`BLOCKED_MISSING_PREREQUISITE`) whil
 ctx is unreachable, instead of an unarchived compaction. The halt also triggers
 when a checkpoint would need more than `max_parts` source parts or does not
 finish inside `budget_s` (a rate-limited store is retried after 2/4/8 s while the
-budget allows). A batch with no direct user/assistant text — only tool rows or
+budget allows; since 0.6.1 every single call over MCP is bounded by the remaining
+budget too, so a hanging ctx no longer holds the compaction for Hermes' 300 s MCP
+timeout). A ctx key with `confirm_writes` is refused with that reason: ctx stages
+its writes instead of storing them, and the plugin never confirms them on your
+behalf. A batch with no direct user/assistant text — only tool rows or
 compaction envelopes — has nothing to archive and never blocks: the provider
 returns an empty receipt and the compaction proceeds. The plugin negotiates the
 contract version with the loading host at runtime; details, host probes and the
@@ -148,7 +152,7 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
 
 - **Network:** only the MCP calls Hermes makes to the ctx server you configured
   (`search`/`get` to find the session's checkpoint head and for recall, `store` for
-  the blocks, `confirm` when the ctx guard stages a store, `query` for
+  the blocks, `query` for
   `ctx_query(synthesize=true)`). With `transport: rest`, HTTPS calls of the
   plugin's own stdlib client to `CTX_BASE_URL` instead. No third-party services,
   no telemetry.
@@ -186,10 +190,10 @@ Two suites, run separately (both use fakes, no live ctx; the host contract comes
 from a Hermes checkout):
 
 ```bash
-# umbrella: checkpoint contract, negotiation, setup surfaces, MCP transport (77)
+# umbrella: checkpoint contract, negotiation, setup surfaces, MCP transport (84)
 PYTHONPATH=/path/to/hermes-agent:integrations/hermes/plugin python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/tests
-# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (282)
+# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (288)
 HERMES_REPO=/path/to/hermes-agent python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/memory/tests
 # lint + format + bandit rules (ruff.toml in this directory)

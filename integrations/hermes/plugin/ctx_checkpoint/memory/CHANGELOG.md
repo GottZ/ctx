@@ -6,6 +6,42 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.6.1] — 2026-10-31
+
+Checkpoint-chain fixes from the review in GottZ/ctx#51, checked against the answers ctx
+(`go/internal/handler/mcp.go`, `mcp_confirm.go`, `context_store.go`) and Hermes' MCP
+dispatch (`tools/mcp_tool_handlers.py`) actually produce.
+
+### Fixed
+- **Parts respect ctx's byte cap.** `split_chunks` cut at `chunk_chars` characters while
+  ctx caps content at 50 KiB of UTF-8 bytes; a full Cyrillic part is ~72 KB, a CJK part
+  ~108 KB, so such transcripts failed every checkpoint (a permanent halt under
+  `checkpoint_required`). Parts are cut at whichever limit comes first, with the largest
+  possible part header reserved; the part format is unchanged.
+- **Head lookup is narrowed to heads.** The MCP transport drops `types`, so the head
+  search ran over every block of the category; source parts about checkpoints or headings
+  could push the head out of the result window and silently start a new chain. The search
+  now filters on the `checkpoint-head` tag, which every head carries.
+- **No shared heads for different sessions.** A root id that sanitizing or the
+  48-character cut changes (`team/alice:1` vs `team:alice/1`) gets an 8-character hash
+  of the full id as suffix. Ordinary Hermes ids (`20261031_120000_abcdef`, UUIDs) keep
+  their titles, so existing heads are still found.
+- **Block ids over MCP.** `McpClient` took the first UUID anywhere in a store answer when
+  the `(id: …)` group was missing; the answer starts with the title, which can carry a
+  UUID-shaped session id. Only a structured `id` or the `(id: …)` group count now; no id
+  fails the store.
+- **`confirm_writes` keys are refused by name.** ctx stages their writes and Hermes
+  delivers that as an error envelope, so the auto-confirm branch was never reached and
+  the failure was an unnamed store error. The staged answer now raises
+  `code="confirm_writes"` ("staged, not stored … use a key without confirm_writes", with
+  the staged `payload_hash`); writes from this plugin are never confirmed on the
+  operator's behalf.
+- **Per-call budget over MCP.** The chain writer passed its remaining budget as
+  `timeout`, but `McpClient` ignored it, so one hanging call could hold a compaction for
+  Hermes' MCP timeout (300 s by default). An explicit `timeout` now bounds the dispatch on
+  a worker thread (caller's context variables copied along) and raises `code="timeout"`;
+  calls without one keep the transport's timeout.
+
 ## [ctx_checkpoint 0.6.0] — 2026-10-31 (engine 1.8.0, folded in)
 
 Imported verbatim at 1.7.1 (upstream commit `fbd210a`, GottZ/ctx commit `e9ae6010` under

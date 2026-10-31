@@ -150,8 +150,7 @@ def test_provider_publishes_versioned_stable_head_with_bounded_frame(factory):
 
     assert provider.pre_compress_checkpoint_api_version == 2
     assert _names(c.calls) == ["search", "store", "store", "store"]
-    # "/" is sanitized away, so the title carries a hash of the full root id (1.8.1,
-    # identical to ctx_checkpoint 0.5.2).
+    # "/" is sanitized away, so the title carries a hash of the full root id (0.6.1).
     assert c.calls[3][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
     assert manifest_id in c.calls[3][1]["content"]
     assert source_id in c.calls[2][1]["content"]
@@ -870,7 +869,7 @@ def test_wire_payload_of_real_client(monkeypatch):
     assert sent[0]["body"] == {
         "query": "Compaction checkpoint head r1",
         "category": CHAIN_CAT,
-        "tags": ["checkpoint-head"],  # 1.8.1: only heads, parts share the checkpoint type
+        "tags": ["checkpoint-head"],  # 0.6.1: only heads, parts share the checkpoint type
         "types": ["checkpoint"],
         "limit": 10,
     }
@@ -904,12 +903,11 @@ def test_config_defaults_and_coercion(tmp_path):
 
 
 # =============================================================================
-# 1.8.1 — fixes shared with ctx_checkpoint 0.5.2
+# 0.6.1 — byte-capped parts, head tag filter, collision-free head titles
 # =============================================================================
 
-# The same inputs and outputs are pinned in ctx_checkpoint's tests
-# (test_head_title_golden_vectors_shared_with_the_ctx_provider): both providers write
-# identical chain titles, so the two title functions must never drift apart.
+# Head titles are what existing chains are found by: ordinary ids must keep their
+# title, ids that sanitizing or the 48-character cut changes get a stable hash suffix.
 HEAD_TITLE_GOLDEN = {
     "20261031_120000_abcdef": "20261031_120000_abcdef",
     "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c": "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c",
@@ -921,7 +919,7 @@ HEAD_TITLE_GOLDEN = {
 }
 
 
-def test_head_title_golden_vectors_match_ctx_checkpoint():
+def test_head_title_golden_vectors():
     for root, token in HEAD_TITLE_GOLDEN.items():
         assert _MODULE._short_root(root) == token, root
         assert _MODULE.head_title_for(root) == f"Compaction checkpoint head {token}"
