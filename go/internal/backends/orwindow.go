@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GottZ/ctx/internal/httpx"
 )
 
 // ProviderEndpoint is one serving provider of a model as OpenRouter reports
@@ -88,17 +90,16 @@ type endpointEntry struct {
 // is why it lives as a package-level singleton next to the wire clients rather
 // than being threaded through every call site.
 //
-// The HTTP client is deliberately NOT the ssrfguard-hardened one: the guarded
-// dialer exists for targets an outside party can influence (camo image URLs,
-// forge api_base, SSO issuer discovery). This request goes to the very host
-// the chat path already POSTs prompts to, unguarded, one function away — a
-// deny-list on the metadata GET while the prompt POST travels free would be
-// decoration, and it would break every LAN-hosted OpenAI-compatible gateway an
-// operator may point an openrouter-class row at.
+// The client follows the chat path's rule for the same host (GHSA 2026-10-31
+// §3): a _global (operator) row is fetched unguarded — an operator may point
+// an openrouter-class row at a LAN-hosted OpenAI-compatible gateway — and a
+// tenant row (Backend.EgressGuarded) only through the ssrfguard dialer, since
+// a tenant-admin chooses its base_url.
 type EndpointCache struct {
 	mu      sync.Mutex
 	entries map[string]*endpointEntry
-	client  *http.Client
+	client  *http.Client // operator rows
+	guarded *http.Client // tenant rows
 	now     func() time.Time
 }
 
@@ -107,6 +108,7 @@ func NewEndpointCache() *EndpointCache {
 	return &EndpointCache{
 		entries: map[string]*endpointEntry{},
 		client:  &http.Client{},
+		guarded: httpx.GuardedPooledClient(),
 		now:     time.Now,
 	}
 }
@@ -134,6 +136,12 @@ func (c *EndpointCache) Endpoints(ctx context.Context, b Backend, model string, 
 		return nil, false
 	}
 	key := b.Host + "|" + model
+	if b.EgressGuarded() {
+		// A guarded fetch can fail where the operator's unguarded one succeeds
+		// (same host, internal address): separate entries, so a tenant row's
+		// refusal never backs off a _global row's discovery.
+		key += "|guarded"
+	}
 	now := c.now()
 
 	// The whole cache read happens under the lock and yields VALUES — holding
@@ -207,7 +215,11 @@ func (c *EndpointCache) fetch(ctx context.Context, b Backend, model string) ([]P
 	for k, v := range b.ExtraHeaders {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.client.Do(req) //nolint:gosec // G704: the target is the admin-configured backend base_url — the same host the chat path POSTs prompts to.
+	client := c.client
+	if b.EgressGuarded() {
+		client = c.guarded
+	}
+	resp, err := client.Do(req) //nolint:gosec // G704: the target is the admin-configured backend base_url — the same host the chat path POSTs prompts to.
 	if err != nil {
 		return nil, err
 	}

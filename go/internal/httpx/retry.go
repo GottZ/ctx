@@ -72,7 +72,7 @@ func IsBackendUnavailable(err error) bool {
 // (the server answered) and context errors (timeout/cancel) are returned
 // unchanged. body must be the same bytes the original request was built from.
 func DoRetryOnce(c *http.Client, req *http.Request, body []byte) (*http.Response, error) {
-	resp, err := c.Do(req) //nolint:gosec // G704: URL aus dem F3-Backend-Pool (context_backends) — admin-gated + locality-validiert beim Schreiben (backends-Validierung), kein freier User-Input. SSRF ist über die Egress-Locality-Trust-Dimension gegated (vor Prompt-Übertragung), nicht auf dieser Wire-Schicht.
+	resp, err := c.Do(req) //nolint:gosec // G704: URL from the F3 backend pool (context_backends), admin-gated and validated at write time; tenant rows reach only public hosts and are dialed through ssrfguard (the caller passes Clients.For(b.EgressGuarded()), GHSA 2026-10-31 §3).
 	if err == nil || !IsTransientNetErr(err) || req.Context().Err() != nil {
 		return resp, err
 	}

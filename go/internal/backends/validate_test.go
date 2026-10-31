@@ -113,6 +113,12 @@ func TestDeriveLocality(t *testing.T) {
 		{"http://192.168.1.5", LocalityLAN},
 		{"http://172.16.0.7:8080", LocalityLAN},
 		{"http://llama-cpu:8080", LocalityLAN}, // docker single-label
+		{"http://llama-cpu.:8080", LocalityLAN}, // root dot keeps it single-label
+		{"http://LOCALHOST:8080", LocalityLocal},
+		{"http://localhost.:8080", LocalityLocal},
+		{"http://0.0.0.0:8080", LocalityLocal}, // unspecified dials the local host
+		{"http://[::]:8080", LocalityLocal},
+		{"http://169.254.169.254", LocalityLAN}, // cloud metadata
 		{"https://openrouter.ai/api/v1", LocalityExternal},
 		{"http://8.8.8.8", LocalityExternal},
 	}
@@ -590,5 +596,77 @@ func TestValidateAnthropicRejectsUnservedKeys(t *testing.T) {
 	o.ExtraBody = map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}, "temperature": 0.1}
 	if _, errs := ValidateBackend(&o); fieldHit(errs, "extra_body") {
 		t.Errorf("anthropic key rules leaked onto an openai row: %v", errs)
+	}
+}
+
+// TestBaseURLQueryFragmentRejected: a '?' or '#' in base_url turns the
+// appended wire path into query/fragment text (GHSA 2026-10-31 §3), so the
+// request lands on whatever path the URL names. 422 for every scope.
+func TestBaseURLQueryFragmentRejected(t *testing.T) {
+	for _, scope := range []string{"", GlobalScope, "acme"} {
+		for _, host := range []string{
+			"https://api.example.com/_search#",
+			"https://api.example.com/admin#x",
+			"https://api.example.com/x?",
+			"https://api.example.com/x?a=b",
+		} {
+			b := validBackend()
+			b.Scope = scope
+			b.Host = host
+			if _, errs := ValidateBackend(&b); !fieldHit(errs, "base_url") {
+				t.Errorf("scope %q: base_url %q passed, want 422", scope, host)
+			}
+		}
+	}
+}
+
+// TestTenantBackendNeedsPublicHost: a tenant row may only point at a
+// publicly routable host; the same LAN host stays legal on a _global
+// (server-admin) row and on an unscoped tuple.
+func TestTenantBackendNeedsPublicHost(t *testing.T) {
+	internal := []struct{ host, locality string }{
+		{"http://127.0.0.1:11434", LocalityLocal},
+		{"http://localhost:8080", LocalityLocal},
+		{"http://0.0.0.0:8080", LocalityLocal},
+		{"http://[::1]:8080", LocalityLocal},
+		{"http://10.0.0.5:8080", LocalityLAN},
+		{"http://192.168.1.5", LocalityLAN},
+		{"http://169.254.169.254", LocalityLAN},
+		{"http://[fd00::1]:8080", LocalityLAN},
+		{"http://ollama:11434", LocalityLAN},
+	}
+	for _, c := range internal {
+		b := validBackend()
+		b.Scope = "acme"
+		b.Host = c.host
+		b.Locality = c.locality
+		if _, errs := ValidateBackend(&b); !fieldHit(errs, "base_url") {
+			t.Errorf("tenant row with %s passed, want base_url 422", c.host)
+		}
+		for _, shared := range []string{GlobalScope, ""} {
+			b.Scope = shared
+			if _, errs := ValidateBackend(&b); fieldHit(errs, "base_url") {
+				t.Errorf("scope %q row with %s rejected: %+v", shared, c.host, errs)
+			}
+		}
+	}
+
+	b := validBackend()
+	b.Scope = "acme"
+	b.Host = "https://openrouter.ai/api"
+	if _, errs := ValidateBackend(&b); len(errs) != 0 {
+		t.Errorf("tenant row with a public host rejected: %+v", errs)
+	}
+}
+
+// TestEgressGuarded pins the predicate the wire clients key on: tenant
+// rows are guarded, _global and unscoped tuples are not.
+func TestEgressGuarded(t *testing.T) {
+	cases := map[string]bool{"": false, GlobalScope: false, "acme": true, "acme.team": true}
+	for scope, want := range cases {
+		b := Backend{Scope: scope}
+		if got := b.EgressGuarded(); got != want {
+			t.Errorf("EgressGuarded(scope %q) = %v, want %v", scope, got, want)
+		}
 	}
 }

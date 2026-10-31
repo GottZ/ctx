@@ -780,7 +780,8 @@ func (h *ManageHandler) handleBackendTest(w http.ResponseWriter, r *http.Request
 // (llama.cpp: host:port; OpenRouter: https://openrouter.ai/api).
 func openRouterDetails(ctx context.Context, b *backends.Backend) map[string]any {
 	details := map[string]any{}
-	if body, ok := openRouterGET(ctx, b.Host+"/v1/key", b.APIKey); ok {
+	client := backendProbeClient(b)
+	if body, ok := openRouterGET(ctx, client, b.Host+"/v1/key", b.APIKey); ok {
 		var key struct {
 			Data struct {
 				LimitRemaining *float64 `json:"limit_remaining"`
@@ -800,7 +801,7 @@ func openRouterDetails(ctx context.Context, b *backends.Backend) map[string]any 
 	if model == "" {
 		return details
 	}
-	if body, ok := openRouterGET(ctx, b.Host+"/v1/endpoints/zdr", ""); ok {
+	if body, ok := openRouterGET(ctx, client, b.Host+"/v1/endpoints/zdr", ""); ok {
 		var zdr struct {
 			Data []struct {
 				ModelID string `json:"model_id"`
@@ -822,7 +823,7 @@ func openRouterDetails(ctx context.Context, b *backends.Backend) map[string]any 
 // openRouterGET is one authenticated detail-check GET; non-200 or transport
 // failure degrades to "field absent" — the reachability verdict was already
 // made by probeBackendURL.
-func openRouterGET(ctx context.Context, url, apiKey string) ([]byte, bool) {
+func openRouterGET(ctx context.Context, client *http.Client, url, apiKey string) ([]byte, bool) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -832,7 +833,7 @@ func openRouterGET(ctx context.Context, url, apiKey string) ([]byte, bool) {
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: admin-gated runtime data; reaching the configured backend is this action's function
+	resp, err := client.Do(req) //nolint:gosec // G704: admin-gated runtime data; reaching the configured backend is this action's function — tenant rows only through ssrfguard (backendProbeClient)
 	if err != nil {
 		return nil, false
 	}
@@ -879,6 +880,20 @@ func dataCollectionEscapeOn(b *backends.Backend) bool {
 	return ok && v
 }
 
+// guardedProbeClient serves backend-test's own GETs against tenant rows.
+var guardedProbeClient = httpx.GuardedPooledClient()
+
+// backendProbeClient picks backend-test's client by the wire clients' rule
+// (Backend.EgressGuarded, GHSA 2026-10-31 §3): a tenant row is probed only
+// through the ssrfguard dialer — the test must not reach what the row's real
+// calls cannot — while _global rows keep http.DefaultClient as before.
+func backendProbeClient(b *backends.Backend) *http.Client {
+	if b.EgressGuarded() {
+		return guardedProbeClient
+	}
+	return http.DefaultClient
+}
+
 func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string]string) bool {
 	url := b.Host
 	anthropic := b.Protocol == backends.ProtocolAnthropic
@@ -912,7 +927,7 @@ func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string
 	case b.APIKey != "":
 		httpReq.Header.Set("Authorization", "Bearer "+b.APIKey)
 	}
-	resp, err := http.DefaultClient.Do(httpReq) //nolint:gosec // G704: admin-gated runtime data; reaching arbitrary URLs is this action's function
+	resp, err := backendProbeClient(b).Do(httpReq) //nolint:gosec // G704: admin-gated runtime data; reaching the row's URL is this action's function — tenant rows only through ssrfguard
 	if err != nil {
 		if httpx.IsBackendUnavailable(err) {
 			checks["base_url"] = "error: unreachable"

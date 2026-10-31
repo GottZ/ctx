@@ -255,3 +255,30 @@ func TestEndpointsRefusesUnparsableBody(t *testing.T) {
 		t.Error("an HTML error page parsed as endpoint data")
 	}
 }
+
+// TestEndpointsTenantRowGuarded (GHSA 2026-10-31 §3): window discovery for a
+// tenant row dials through ssrfguard — a loopback base_url is never fetched —
+// while a _global row on the same server is.
+func TestEndpointsTenantRowGuarded(t *testing.T) {
+	s := newDiscoveryStub(t)
+	clock := time.Unix(1_700_000_000, 0)
+	c := testCache(s, &clock)
+
+	tenant := discoveryBackend(s.srv.URL)
+	tenant.Scope = "acme"
+	if _, ok := c.Endpoints(context.Background(), tenant, "qwen/qwen3.6-27b", time.Hour); ok {
+		t.Error("tenant row produced endpoint data from a loopback host")
+	}
+	if n := s.hits.Load(); n != 0 {
+		t.Fatalf("tenant discovery reached the loopback stub (%d hits)", n)
+	}
+
+	global := discoveryBackend(s.srv.URL)
+	global.Scope = GlobalScope
+	if _, ok := c.Endpoints(context.Background(), global, "qwen/qwen3.6-27b", time.Hour); !ok {
+		t.Error("_global row got no endpoint data")
+	}
+	if n := s.hits.Load(); n != 1 {
+		t.Errorf("_global discovery hits = %d, want 1", n)
+	}
+}

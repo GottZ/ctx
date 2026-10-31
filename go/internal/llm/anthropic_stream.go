@@ -411,7 +411,7 @@ func chatStreamAnthropic(ctx context.Context, b backends.Backend, model string,
 	SetAnthropicHeaders(httpReq, &b)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := httpx.DoRetryOnce(httpClient, httpReq, body)
+	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), httpReq, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
@@ -513,11 +513,14 @@ func parseAnthropicSSE(r io.Reader, onEvent func(StreamEvent) error) (*StreamRes
 		onEvent: onEvent, byIndex: map[int]*pendingToolCall{}, thinking: map[int]*pendingThinking{},
 		reasoning: map[int]json.RawMessage{}, texts: map[int]*strings.Builder{},
 	}
-	br := bufio.NewReader(r)
+	br := bufio.NewReader(httpx.CapBody(r, maxStreamBytes)) // caps: see maxSSEFrameBytes (stream.go)
 	var data []string
 	for {
-		line, readErr := br.ReadString('\n')
+		line, readErr := readSSELine(br)
 		if err := st.feedLine(strings.TrimRight(line, "\r\n"), &data); err != nil {
+			return nil, err
+		}
+		if err := checkSSEFrame(data); err != nil {
 			return nil, err
 		}
 		if st.done {

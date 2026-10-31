@@ -19,7 +19,10 @@ import (
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
-var httpClient = httpx.PooledClient()
+// httpClients is this family's plain/guarded pool pair; every wire call picks
+// its client with httpClients.For(b.EgressGuarded()) — tenant rows dial
+// through ssrfguard (GHSA 2026-10-31 §3), operator rows do not.
+var httpClients = httpx.NewClients()
 
 const (
 	TargetDims   = 1024
@@ -103,9 +106,9 @@ func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) 
 	var raw []float64
 
 	if b.Protocol == backends.ProtocolOpenAI {
-		raw, promptTokens, err = embedOpenAI(ctx, b.Host, b.APIKey, b.Model, input)
+		raw, promptTokens, err = embedOpenAI(ctx, httpClients.For(b.EgressGuarded()), b.Host, b.APIKey, b.Model, input)
 	} else {
-		raw, promptTokens, err = embedOllama(ctx, b.Host, b.APIKey, b.Model, input, b.NumCtx)
+		raw, promptTokens, err = embedOllama(ctx, httpClients.For(b.EgressGuarded()), b.Host, b.APIKey, b.Model, input, b.NumCtx)
 	}
 	if err != nil {
 		return nil, 0, err
@@ -124,7 +127,7 @@ func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) 
 	return vec, promptTokens, nil
 }
 
-func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx int) ([]float64, int, error) {
+func embedOllama(ctx context.Context, client *http.Client, host, apiKey, model, input string, numCtx int) ([]float64, int, error) {
 	reqBody := ollamaEmbedRequest{Model: model, Input: input}
 	if numCtx > 0 {
 		reqBody.Options = &ollamaOpts{NumCtx: numCtx}
@@ -148,7 +151,7 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := httpx.DoRetryOnce(httpClient, req, body)
+	resp, err := httpx.DoRetryOnce(client, req, body)
 	if err != nil {
 		return nil, 0, fmt.Errorf("embed: request failed: %w", err)
 	}
@@ -160,7 +163,7 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 	}
 
 	var result ollamaEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 
@@ -171,7 +174,7 @@ func embedOllama(ctx context.Context, host, apiKey, model, input string, numCtx 
 	return result.Embeddings[0], result.PromptEvalCount, nil
 }
 
-func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]float64, int, error) {
+func embedOpenAI(ctx context.Context, client *http.Client, host, apiKey, model, input string) ([]float64, int, error) {
 	reqBody := openAIEmbedRequest{Model: model, Input: input}
 
 	body, err := json.Marshal(reqBody)
@@ -189,7 +192,7 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := httpx.DoRetryOnce(httpClient, req, body)
+	resp, err := httpx.DoRetryOnce(client, req, body)
 	if err != nil {
 		return nil, 0, fmt.Errorf("embed: request failed: %w", err)
 	}
@@ -201,7 +204,7 @@ func embedOpenAI(ctx context.Context, host, apiKey, model, input string) ([]floa
 	}
 
 	var result openAIEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 

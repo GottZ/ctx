@@ -190,3 +190,65 @@ func TestRoleReachableFiveXXIsDown(t *testing.T) {
 		t.Errorf("roleReachable on a 502 host = %q, want error", got)
 	}
 }
+
+// TestRoleReachableSkipsTenantRows (GHSA 2026-10-31 §3): anonymous /health
+// pings operator rows only. A tenant row — its base_url is tenant-admin
+// input — is never requested, so it neither counts as a candidate nor makes
+// the role reachable; the _global row on the same server still does.
+func TestRoleReachableSkipsTenantRows(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+	}))
+	t.Cleanup(srv.Close)
+
+	tenant := backends.Backend{
+		ID: "t", Name: "tenant-row", Host: srv.URL, Scope: "acme", Enabled: true,
+		Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed},
+	}
+	if got := roleReachable(context.Background(), []backends.Backend{tenant}, backends.RoleEmbed); got != "error" {
+		t.Errorf("roleReachable over a tenant row only = %q, want error (no operator candidate)", got)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("/health pinged a tenant row (%d requests)", n)
+	}
+
+	global := tenant
+	global.Scope = backends.GlobalScope
+	if got := roleReachable(context.Background(), []backends.Backend{tenant, global}, backends.RoleEmbed); got != "ok" {
+		t.Errorf("roleReachable with a _global row = %q, want ok", got)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("requests = %d, want exactly 1 (the _global row)", n)
+	}
+}
+
+// TestBackendTestProbeGuardsTenantRows: backend-test's own GET follows the
+// wire clients' rule — a tenant row is probed through ssrfguard and a
+// loopback base_url reports unreachable without a request; a _global row on
+// the same server is reached.
+func TestBackendTestProbeGuardsTenantRows(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+	}))
+	t.Cleanup(srv.Close)
+
+	b := &backends.Backend{Name: "t", Host: srv.URL, Scope: "acme", Protocol: backends.ProtocolOpenAI}
+	checks := map[string]string{}
+	if probeBackendURL(context.Background(), b, checks) {
+		t.Errorf("tenant probe reported reachable: %v", checks)
+	}
+	if checks["base_url"] != "error: unreachable" {
+		t.Errorf("tenant probe base_url = %q, want error: unreachable", checks["base_url"])
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("tenant probe reached loopback (%d requests)", n)
+	}
+
+	b.Scope = backends.GlobalScope
+	checks = map[string]string{}
+	if !probeBackendURL(context.Background(), b, checks) || hits.Load() != 1 {
+		t.Errorf("_global probe = %v, hits %d; want reachable, 1", checks, hits.Load())
+	}
+}
