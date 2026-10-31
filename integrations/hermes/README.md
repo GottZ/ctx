@@ -332,8 +332,8 @@ compaction.
 
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (26 tests on `v0.22.4`, 2026-10)
-and provider-side here in `plugin/ctx_checkpoint/tests/` (89 tests, mocked
-MCP dispatch — no live ctx needed): `test_provider_contract.py` (31) covers
+and provider-side here in `plugin/ctx_checkpoint/tests/` (90 tests, mocked
+MCP dispatch — no live ctx needed): `test_provider_contract.py` (32) covers
 the checkpoint chain, `test_contract_negotiation.py` (23) the runtime
 negotiation against the real host on `PYTHONPATH` plus a monkeypatched v3
 host, `test_setup.py` (35) the setup surfaces, each test against its own

@@ -134,7 +134,7 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
 
 ## Tests
 
-89 tests (mocked MCP dispatch, no live ctx needed) against the real host on
+90 tests (mocked MCP dispatch, no live ctx needed) against the real host on
 `PYTHONPATH`: the checkpoint contract, its runtime negotiation and the setup
 surfaces (each setup test writes into its own temporary `HERMES_HOME`):
 
