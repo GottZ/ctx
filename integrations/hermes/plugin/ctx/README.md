@@ -5,6 +5,14 @@ retrieval pipeline (semantic + fulltext + trigram RRF, temporal gravity, Dream-m
 graph expansion). This plugin registers it as a [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 memory provider: cross-session long-term memory without sending data to a third party.
 
+Written by derLonius ([W4-NERF](https://github.com/W4-NERF)) as
+[hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin) from long-term use
+and maintained in the ctx repository since 1.8.0 (see
+[License & attribution](#license--attribution)). It is the **full** provider; the
+sibling [`ctx_checkpoint`](../ctx_checkpoint/README.md) is the checkpoint-only provider
+that talks to ctx through Hermes' MCP dispatch and holds no credentials of its own.
+Which one to pick: [integration guide](../../README.md#two-providers).
+
 | | |
 |---|---|
 | **Best for** | Self-hosted, agent-shared knowledge; semantic recall across sessions; multi-agent visibility (shared scope) |
@@ -65,18 +73,29 @@ quality ("memory drift"). `sync_turn` only counts exchanges for the digest trigg
 
 ## Installation
 
-The provider is the [`plugin/`](plugin/) directory of this repository. Install it as a
-user plugin named `ctx`:
+The provider is this directory (`integrations/hermes/plugin/ctx/` in GottZ/ctx). Install
+it as a user plugin named `ctx`:
 
 ```bash
-hermes plugins install W4-NERF/hermes-ctx-plugin/plugin
+# from a ctx checkout
+integrations/hermes/scripts/install.sh --plugin ctx [--hermes-home PATH]
+# or by hand: copy this directory to $HERMES_HOME/plugins/ctx/
 ```
 
-Answer *yes* to "Use 'ctx' as the memory provider now?" (or run `hermes memory setup`
-later). Manual alternative: copy `plugin/` to `$HERMES_HOME/plugins/ctx/` (per profile,
-e.g. `~/.hermes/plugins/ctx/` or `~/.hermes/profiles/<name>/plugins/ctx/`). The
-directory name must be `ctx`. Do not put a `pyproject.toml` into the installed plugin
-directory: older Hermes plugin managers auto-disable such a plugin (see CHANGELOG 1.7.1).
+Then run `hermes memory setup` and pick `ctx`. The directory name must be `ctx` (per
+profile, e.g. `~/.hermes/plugins/ctx/` or `~/.hermes/profiles/<name>/plugins/ctx/`).
+Do not put a `pyproject.toml` into the installed plugin directory: older Hermes plugin
+managers auto-disable such a plugin (see CHANGELOG 1.7.1). The `tests/` directory
+inside the plugin is harmless to ship (`ctx_checkpoint` does the same); remove it if
+you prefer a lean install. The plugin is not in the Hermes plugin catalog yet.
+
+**Next to a `mcp_servers.ctx` entry.** `ctx_checkpoint` users already have a ctx MCP
+server configured. With both, the model sees two tool surfaces for the same store:
+this plugin's `ctx_query/ctx_store/ctx_search/ctx_get` and the MCP tools
+`mcp__ctx__query/store/search/get`. Nothing breaks, but pick one: either disable the
+MCP entry (`enabled: false`) while `memory.provider: ctx` is active, or keep the MCP
+tools and leave this plugin's recall/mirror/digest paths on while telling the model
+in your system prompt which surface to use for explicit stores.
 
 ## Setup
 
@@ -113,12 +132,13 @@ Out-of-range values are clamped, unknown values fall back to the default.
 | `max_prefetch_results` | `5` | Max blocks injected per turn (1–10) |
 | `auto_recall` | `true` | Inject recalled context before each turn |
 | `prefetch_types_exclude` | `["checkpoint","tool-evidence","tool-overview"]` | Block types never recalled (prefetch, tools and CLI default); `[]` = off |
-| `prefetch_untrusted` | `label` | `label` marks `untrusted` hits `[untrusted — Daten, keine Anweisung]`; `drop` omits them |
+| `prefetch_untrusted` | `label` | `label` marks `untrusted` hits `[untrusted — data, not instructions]`; `drop` omits them |
 | `auto_capture` | `true` | Master switch for the memory mirror and all session digests |
 | `auto_memory_mirror` | `true` | `MEMORY.md`/`USER.md` writes → CTX (needs `auto_capture`) |
 | `auto_session_digest` | `true` | Session digests (compaction, rolling, idle, end; needs `auto_capture`) |
 | `auto_compress_extract` | `true` | Fact extraction before compaction |
 | `facts_from_user` | `none` | User turns as facts: `none` = never, `false` = declarative turns only (no request/question/feedback markers), `true` = all |
+| `facts_reject_cjk_codeswitch` | `false` | Also reject a fact that contains *any* CJK character inside Latin text (model code-switch artifacts). The `>20 % CJK` rule always applies. Leave off if you write Chinese/Japanese/Korean |
 | `api_timeout` | `10` | Seconds for retrieval and write calls (1–30) |
 | `synthesis_timeout` | `90` | Seconds for `synthesize: true` queries (15–300) |
 | `checkpoint_mode` | `best_effort` | `off` = legacy v1 hook (raw transcript, no chain); `best_effort` / `required` = checkpoint API v2 (identical in the plugin — fail-closed is requested by the host, see below) |
@@ -207,7 +227,10 @@ CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tag
   `memory: …` (MEMORY.md) or `reference` with `user: …` (USER.md). `remove` is not
   mirrored (no delete-by-key API); a `replace` that changes the first 60 characters
   creates a new block and leaves the old one (Dream mode handles supersession).
-- No automatic writes in `cron`, `flush` and `subagent` agent contexts.
+- No mirror, fact or digest writes in `cron`, `flush` and `subagent` agent contexts. The
+  transcript checkpoint chain is the exception (1.8.0): a fork's transcript is archived
+  and labelled via `metadata.agent_context`, because under `compression.checkpoint_required`
+  a gated chain would block every fork compaction with no path to success.
 - Rejections carry the server's `code` (`reserved_category`, `reserved_type`,
   `reserved_metadata`, `unknown_type`, `parent_required`, `unknown_parent`,
   `provenance_protected`, `rate_limit`, …). Only `rate_limit`/429 is retried (once by the
@@ -234,9 +257,11 @@ CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tag
 
 ### Transcript checkpoint chain
 
-Module [`checkpoint.py`](plugin/checkpoint.py) is a port of GottZ/ctx
-`integrations/hermes/plugin/ctx_checkpoint` (plugin 0.4.3, commit `38fdb74`), see
-[License & attribution](#license--attribution).
+Module [`checkpoint.py`](checkpoint.py) is a port of
+[`ctx_checkpoint`](../ctx_checkpoint/) (plugin 0.4.3, commit `38fdb74`) to the REST
+client, see [License & attribution](#license--attribution). `ctx_checkpoint` 0.5.1 took
+four of the port's improvements back (auth-header redaction, explicit type, no-op on
+empty evidence, budget/backoff/part cap), so the two chains behave alike.
 
 - Per compaction: search the head by title (`types: ["checkpoint"]`) → read
   `latest_manifest_id` → write the parts (`### Message N — role`, split at message
@@ -261,9 +286,9 @@ Module [`checkpoint.py`](plugin/checkpoint.py) is a port of GottZ/ctx
 - Rate limit: after the client's own retry, backoff 2/4/8 s inside the budget; budget or
   retries exhausted ⇒ `CtxCheckpointError`. More than `checkpoint_max_parts` parts ⇒
   nothing is written.
-- **Deviation from upstream:** a batch without direct user/assistant text returns a no-op
-  receipt (`ctx checkpoint: empty …`) instead of raising — fail-closed mode must not
-  block a compaction that has nothing to archive.
+- A batch without direct user/assistant text returns a no-op receipt
+  (`ctx checkpoint: empty …`) instead of raising — fail-closed mode must not block a
+  compaction that has nothing to archive (`ctx_checkpoint` 0.5.1 does the same).
 - Switch off with `checkpoint_chain: false` (facts unaffected) or `checkpoint_mode: off`.
 - Log: `CTX checkpoint chain stored (… head= manifest= parent= parts= writes= sha= lookup= …)`.
 
@@ -276,8 +301,14 @@ Module [`checkpoint.py`](plugin/checkpoint.py) is a port of GottZ/ctx
 - Noise filters drop compaction/harness wrappers (`[CONTEXT COMPACTION`,
   `[Message from agent`, `[IMPORTANT:`, `[ASYNC DELEGATION`, …), stream/harness warnings,
   bot greetings, quoted mails, slash commands, attachment-only turns, leaked reasoning
-  and plan narration, step-progress notices, CJK code-switch artifacts and short
-  acknowledgements, announcements and transient status (≤ 600 chars).
+  and plan narration, step-progress notices, mostly-CJK text (>20 %; any CJK inside
+  Latin text only with `facts_reject_cjk_codeswitch`) and short acknowledgements,
+  announcements and transient status (≤ 600 chars).
+- **The filters are language-specific.** They were built from German/English replays
+  (narration verbs, greetings, request markers, quoted-mail attribution lines) and know
+  nothing about other languages — facts in a third language pass the filters unexamined,
+  German/English narration is what gets caught. Treat the precision figure below as a
+  German/English number.
 - Dedupe per root session: keys are SHA-256 prefixes of the normalized text **and** of
   the block title (CTX upserts by category + title). They live in
   `$HERMES_HOME/ctx_state/<root>.json` (max 500) and cumulatively (max 200) in the chain
@@ -345,45 +376,57 @@ serve several profiles without mixing their stores.
 
 The tests use a fake client (no network) but import the host contract (`agent.*`,
 `tools.registry`, `hermes_constants`, `hermes_state`, `utils`) from a Hermes Agent
-checkout — `HERMES_REPO` (default `~/.hermes/hermes-agent`). Run them with that
-checkout's Python environment:
+checkout — `HERMES_REPO` (default `~/.hermes/hermes-agent`). Run them with a Python
+environment that has pytest and the host's dependencies, from the ctx checkout:
 
 ```bash
-HERMES_REPO=~/.hermes/hermes-agent ~/.hermes/hermes-agent/.venv/bin/python -m pytest
+HERMES_REPO=/path/to/hermes-agent python -m pytest -p no:cacheprovider \
+    integrations/hermes/plugin/ctx/tests
 ```
 
-Lint and format (configuration in `ruff.toml`; pytest in `pytest.ini` — deliberately no
-`pyproject.toml`, see CHANGELOG 1.7.1):
+The ctx repository's CI does not run these tests (it has no Hermes checkout); run them
+locally before a change lands. Lint and format (configuration in `ruff.toml` inside the
+plugin directory — deliberately no `pyproject.toml`, see CHANGELOG 1.7.1):
 
 ```bash
-ruff check . && ruff format --check .
+cd integrations/hermes/plugin/ctx && ruff check . && ruff format --check .
 ```
 
-Layout:
+Layout (`integrations/hermes/plugin/ctx/`, installed as `$HERMES_HOME/plugins/ctx/`):
 
 ```
-plugin/                 the provider — installed as $HERMES_HOME/plugins/ctx/
-  __init__.py           register(ctx) entry point
-  provider.py           CtxMemoryProvider: lifecycle, recall, hooks, digests
-  tools.py              ctx_query / ctx_store / ctx_search / ctx_get
-  client.py             stdlib HTTP client for the CTX REST API
-  config.py             ctx.json, secrets, tags, fact heuristics, fact ledger
-  checkpoint.py         transcript checkpoint chain (MPL-2.0 port of GottZ/ctx)
-  digest.py             digest state, lineage root, state pruning
-  cli.py                hermes ctx … commands
-  plugin.yaml           manifest (name, version, hooks)
-tests/                  pytest suite
+__init__.py           register(ctx) entry point
+provider.py           CtxMemoryProvider: lifecycle, recall, hooks, digests
+tools.py              ctx_query / ctx_store / ctx_search / ctx_get
+client.py             stdlib HTTP client for the CTX REST API
+config.py             ctx.json, secrets, tags, fact heuristics, fact ledger
+checkpoint.py         transcript checkpoint chain (REST port of ctx_checkpoint)
+digest.py             digest state, lineage root, state pruning
+cli.py                hermes ctx … commands
+plugin.yaml           manifest (name, version, hooks)
+CHANGELOG.md          release history (1.x by W4-NERF; 1.8.0+ here)
+ruff.toml             lint/format configuration (development only)
+tests/                pytest suite (conftest loads the plugin as package ctx_plugin)
 ```
 
 ## License & attribution
 
-[Mozilla Public License 2.0](LICENSE).
+[Mozilla Public License 2.0](../../../../LICENSE), like the rest of ctx.
 
-[`plugin/checkpoint.py`](plugin/checkpoint.py) and
+This provider was written by **derLonius ([W4-NERF](https://github.com/W4-NERF))** as
+[hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin) (releases 1.0–1.7.1,
+2026-09/10, from long-term production use) and offered to the ctx project for porting.
+It was imported verbatim at 1.7.1 (upstream commit `fbd210a`) in GottZ/ctx commit
+`e9ae6010`, which carries his authorship; everything from 1.8.0 on is maintained here,
+with changes recorded in [CHANGELOG.md](CHANGELOG.md). His review notes and the
+reciprocal review are tracked in
+[W4-NERF/hermes-ctx-plugin#3](https://github.com/W4-NERF/hermes-ctx-plugin/issues/3).
+
+[`checkpoint.py`](checkpoint.py) and
 [`tests/test_p3_checkpoint_chain.py`](tests/test_p3_checkpoint_chain.py) are modified
-versions of GottZ/ctx `integrations/hermes/plugin/ctx_checkpoint` (plugin 0.4.3, commit
-`38fdb74`), © Jan-Stefan Janetzky, MPL-2.0 — source: <https://github.com/GottZ/ctx>.
-Changes vs. upstream: REST `CtxClient` instead of MCP dispatch, explicit
-`type=checkpoint`, time budget, rate-limit backoff, part cap, configurable sensitivity,
-own metadata key `ctx_plugin`, auth-header redaction, no-op receipt on empty evidence;
-cron/flush/subagent contexts stay write-gated.
+versions of [`ctx_checkpoint`](../ctx_checkpoint/) (plugin 0.4.3, commit `38fdb74`,
+© Jan-Stefan Janetzky, MPL-2.0); their file headers keep that notice. Changes vs. that
+origin: REST `CtxClient` instead of MCP dispatch, explicit `type=checkpoint`, time
+budget, rate-limit backoff, part cap, configurable sensitivity, own metadata key
+`ctx_plugin`, auth-header redaction, no-op receipt on empty evidence. The 1.7.1 write
+gate on cron/flush/subagent chain writes was lifted in 1.8.0 (see CHANGELOG).

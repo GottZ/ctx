@@ -16,7 +16,8 @@ from typing import ClassVar
 
 import pytest
 
-PLUGIN_DIR = Path(__file__).resolve().parent.parent / "plugin"
+# tests/ lives inside the plugin directory (GottZ/ctx integrations/hermes/plugin/ctx/).
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 HERMES_REPO = Path(os.environ.get("HERMES_REPO", str(Path.home() / ".hermes" / "hermes-agent")))
 
 if str(HERMES_REPO) not in sys.path:

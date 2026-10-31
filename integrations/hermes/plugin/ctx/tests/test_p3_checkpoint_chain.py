@@ -8,10 +8,11 @@ ctx_checkpoint/tests`` (test_provider_contract.py: 9, test_contract_negotiation.
 commit 38fdb74, MPL-2.0). Adaptation: the MCP dispatch fake (``mcp__ctx__search/get/
 store``) becomes a REST ``ChainFake`` client (``search``/``get``/``store`` with REST
 response shapes); the provider is ours (``CtxMemoryProvider``) with
-``auto_compress_extract: false`` so the frame is the pure chain receipt. Deliberate
-deviation: ``agent_context`` cron/subagent/flush stays write-gated (plugin rule since
-1.0), so the upstream "label the fork" tests assert *no writes* for those contexts and
-check the labelling with ``primary``/empty instead.
+``auto_compress_extract: false`` so the frame is the pure chain receipt. Since 1.8.0 the
+chain follows upstream for ``agent_context`` cron/subagent/flush as well: the fork's
+transcript is archived and labelled, never dropped (the write gate covers facts, mirror
+and digests only) — under ``compression.checkpoint_required`` a gated chain would have
+blocked every fork compaction with no path to success.
 
 Part B: own tests (chain linking over two compactions, part splitting, golden body
 format vs distiller ``parse.go``, redaction, budget, rate limit, part cap, gating,
@@ -257,9 +258,11 @@ def _store_metadata_for(factory, **initialize_kwargs):
     return [a["metadata"] for a in _stores(c.calls)]
 
 
-def test_subagent_fork_checkpoint_is_not_written_by_this_plugin(factory):
-    # Upstream labels subagent forks; this plugin write-gates cron/flush/subagent (deviation).
-    assert _store_metadata_for(factory, platform="cli", agent_context="subagent") == []
+def test_subagent_fork_checkpoint_is_labelled_in_every_block_metadata(factory):
+    # 1.8.0: like upstream, a fork's transcript is archived and labelled, never dropped —
+    # under compression.checkpoint_required a gated chain would block the fork's compaction.
+    metadata = _store_metadata_for(factory, platform="cli", agent_context="subagent")
+    assert len(metadata) == 3 and all(m["agent_context"] == "subagent" for m in metadata)
     metadata = _store_metadata_for(factory, platform="cli", agent_context="primary")
     assert len(metadata) == 3 and all(m["agent_context"] == "primary" for m in metadata)
 
@@ -275,7 +278,9 @@ def test_agent_context_and_platform_are_independent_metadata_keys(factory):
     metadata = _store_metadata_for(factory, platform="telegram", agent_context="primary")
     assert all(entry["platform"] == "telegram" for entry in metadata)
     assert all(entry["agent_context"] == "primary" for entry in metadata)
-    assert _store_metadata_for(factory, platform="telegram", agent_context="cron") == []
+    metadata = _store_metadata_for(factory, platform="telegram", agent_context="cron")
+    assert all(entry["platform"] == "telegram" for entry in metadata)
+    assert all(entry["agent_context"] == "cron" for entry in metadata)
 
 
 # =============================================================================
@@ -723,10 +728,18 @@ def test_permanent_rejection_is_not_retried(factory):
 
 
 @pytest.mark.parametrize("ctx_name", ["cron", "flush", "subagent"])
-def test_no_chain_writes_in_gated_agent_contexts(factory, ctx_name):
+def test_chain_is_written_but_facts_stay_gated_in_fork_contexts(factory, ctx_name):
+    # 1.8.0: the write gate covers facts/mirror/digests only; the chain archives evidence
+    # in every agent context (labelled via metadata.agent_context), also under
+    # require_checkpoint — a gated chain would block every fork compaction for good.
+    long_fact = "Der Proxy auf INFRA-WWW terminiert TLS fuer alle Dienste mit Traefik und HTTP/3."
     p, c = factory("sess-gate", agent_context=ctx_name)
-    assert p.on_pre_compress([{"role": "user", "content": "x"}]) == ""
-    assert c.calls == []
+    frame = p.on_pre_compress([{"role": "user", "content": long_fact}], require_checkpoint=True)
+    assert "ctx checkpoint head:" in frame
+    stores = _stores(c.calls)
+    assert len(stores) == 3 and all(a["category"] == CHAIN_CAT for a in stores)
+    assert all(a["metadata"]["agent_context"] == ctx_name for a in stores)
+    assert "Facts extracted" not in frame and "fact block" not in frame
 
 
 def test_checkpoint_chain_switch_independent_of_facts(factory):

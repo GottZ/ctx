@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Install the ctx_checkpoint memory provider into a Hermes home directory.
+# Install a ctx memory provider plugin into a Hermes home directory.
 #
-# Copies the user plugin to $HERMES_HOME/plugins/ctx_checkpoint/ and reports
-# which operating mode the host supports. Never edits config.yaml and never
+# Copies the user plugin to $HERMES_HOME/plugins/<name>/ and reports which
+# operating mode the host supports. Never edits config.yaml and never
 # restarts anything — config changes and process lifecycle stay with the
 # operator.
 #
 # Usage:
-#   install.sh [--hermes-home PATH] [--hermes-src PATH] [--dry-run]
+#   install.sh [--plugin NAME] [--hermes-home PATH] [--hermes-src PATH] [--dry-run]
 #
+#   --plugin NAME       ctx_checkpoint (default; checkpoint-only, MCP dispatch)
+#                       or ctx (full provider, REST client, own key)
 #   --hermes-home PATH  Hermes home (default: $HERMES_HOME, then /opt/data if
 #                       it holds a config.yaml, then ~/.hermes)
 #   --hermes-src PATH   Hermes source checkout/installation to probe for the
@@ -23,20 +25,27 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_SRC="${SCRIPT_DIR}/../plugin/ctx_checkpoint"
+PLUGIN_NAME="ctx_checkpoint"
 HERMES_HOME_ARG=""
 HERMES_SRC=""
 DRY_RUN=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --plugin)      PLUGIN_NAME="$2"; shift 2 ;;
         --hermes-home) HERMES_HOME_ARG="$2"; shift 2 ;;
         --hermes-src)  HERMES_SRC="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=1; shift ;;
-        -h|--help)     sed -n '2,21p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,23p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+case "$PLUGIN_NAME" in
+    ctx_checkpoint|ctx) ;;
+    *) echo "unknown plugin: ${PLUGIN_NAME} (use ctx_checkpoint or ctx)" >&2; exit 2 ;;
+esac
+PLUGIN_SRC="${SCRIPT_DIR}/../plugin/${PLUGIN_NAME}"
 
 [ -f "${PLUGIN_SRC}/__init__.py" ] || {
     echo "plugin source not found at ${PLUGIN_SRC}" >&2; exit 1;
@@ -50,7 +59,7 @@ resolve_home() {
 }
 
 HOME_DIR="$(resolve_home)"
-DEST="${HOME_DIR}/plugins/ctx_checkpoint"
+DEST="${HOME_DIR}/plugins/${PLUGIN_NAME}"
 
 echo "Hermes home:    ${HOME_DIR}"
 echo "Plugin source:  ${PLUGIN_SRC}"

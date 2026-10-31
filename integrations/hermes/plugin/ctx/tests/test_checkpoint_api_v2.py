@@ -176,9 +176,20 @@ def test_required_checkpoint_failure_propagates(provider_factory, mode):
         _manager(p).on_pre_compress(RAW, evidence_messages=EVIDENCE, require_checkpoint=True)
 
 
-def test_required_checkpoint_raises_when_writes_disabled(provider_factory):
-    p, _ = provider_factory(agent_context="subagent")
-    with pytest.raises(CtxCheckpointError):
+def test_required_checkpoint_in_subagent_writes_the_chain_and_gates_only_facts(provider_factory):
+    # 1.8.0: a fork under compression.checkpoint_required must be able to compact. The chain
+    # is archived and labelled; facts/mirror/digests stay gated for cron/flush/subagent.
+    p, client = provider_factory(agent_context="subagent")
+    out = _manager(p).on_pre_compress(RAW, evidence_messages=EVIDENCE, require_checkpoint=True)
+    assert "ctx checkpoint head:" in out
+    assert client.calls == [], "no fact/mirror writes in a subagent"
+    assert len(client.chain_calls) == 3
+    assert all(c["metadata"]["agent_context"] == "subagent" for c in client.chain_calls)
+
+
+def test_required_checkpoint_raises_when_chain_disabled_and_writes_gated(provider_factory):
+    p, _ = provider_factory({"checkpoint_chain": False}, agent_context="subagent")
+    with pytest.raises(CtxCheckpointError, match="write-gated"):
         _manager(p).on_pre_compress(RAW, evidence_messages=EVIDENCE, require_checkpoint=True)
 
 

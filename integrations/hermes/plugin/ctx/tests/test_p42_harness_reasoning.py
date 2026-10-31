@@ -210,3 +210,30 @@ def test_p42_live_compaction_keeps_results_drops_leaks():
     ]
     facts = extract_salient_facts(msgs, facts_from_user=True)
     assert facts == [RESULT_PM_MC2, RESULT_OPENJDK]
+
+
+# -- 1.8.0: CJK code-switch rejection is opt-in -------------------------------------------
+
+
+def test_cjk_inside_latin_text_is_kept_by_default_and_rejected_only_on_request():
+    mixed = "Der Serving-Stack auf DGX 的 Konfiguration nutzt SGLang mit enable_thinking=false für qwen38."
+    assert fact_noise_reason(mixed) == ""
+    assert fact_noise_reason(mixed, reject_cjk_codeswitch=True) == "cjk-codeswitch"
+    mostly_cjk = (
+        "部署说明：所有公开服务通过 Traefik 终止 TLS，配置文件位于 /etc/traefik/dynamic，"
+        "修改后需要重启容器才会生效，证书由 acme 自动续期。"
+    )
+    assert fact_noise_reason(mostly_cjk) == "cjk>20%"
+    assert fact_noise_reason(mostly_cjk, reject_cjk_codeswitch=True) == "cjk>20%"
+
+
+def test_extract_salient_facts_passes_the_cjk_switch_through():
+    msgs = [
+        {"role": "user", "content": "Bitte dokumentieren."},
+        {
+            "role": "assistant",
+            "content": "Der Serving-Stack auf DGX 的 Konfiguration nutzt SGLang mit enable_thinking=false für qwen38.",
+        },
+    ]
+    assert len(extract_salient_facts(msgs)) == 1
+    assert extract_salient_facts(msgs, reject_cjk_codeswitch=True) == []

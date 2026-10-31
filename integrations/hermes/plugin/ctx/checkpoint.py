@@ -37,7 +37,7 @@ from .client import CtxApiError, response_code, store_block_id
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "1.7.1"  # keep in sync with plugin.yaml (tests/test_host_contract.py)
+PLUGIN_VERSION = "1.8.0"  # keep in sync with plugin.yaml (tests/test_host_contract.py)
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"

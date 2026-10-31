@@ -35,6 +35,35 @@ The catalog page shows the plugin's own short README and links here as the
 entry's documentation. This page is the full integration guide: operating
 modes, the host contract, host probes, operator warnings and the recall path.
 
+## Two providers
+
+This directory ships two Hermes memory providers for ctx. They share the
+checkpoint chain format (head → manifest → parts, identical titles and
+bodies, so the server classifies both as `checkpoint` and the distiller reads
+both) and differ in scope and trust model:
+
+| | [`ctx_checkpoint`](plugin/ctx_checkpoint/README.md) | [`ctx`](plugin/ctx/README.md) |
+|---|---|---|
+| Scope | checkpoint only: archive the direct transcript before every compaction | full provider: recall before each turn, agent tools (`ctx_query/store/search/get`), `MEMORY.md`/`USER.md` mirror, fact extraction, session digests, `hermes ctx` CLI — plus the same checkpoint chain |
+| Transport | Hermes' own MCP dispatch to the `mcp_servers.ctx` entry; the plugin holds **no credentials** | its own stdlib REST client; `CTX_BASE_URL` + `CTX_KEY` in the profile's `.env`, settings in `$HERMES_HOME/ctx.json` |
+| Writes per compaction | parts + manifest + head | the same chain, plus up to 5 `learnings` facts and a segment digest |
+| Fail-closed (`compression.checkpoint_required`) | yes, in every agent context | yes, in every agent context (chain); facts, mirror and digests are skipped in cron/flush/subagent forks |
+| Setup | Desktop/Dashboard memory form or `hermes memory setup ctx_checkpoint` | `hermes memory setup` → `ctx` |
+| Catalog | listed (`hermes plugins install ctx_checkpoint`) | not yet — install from this checkout |
+| Origin | ctx project | contributed by derLonius (W4-NERF) as [hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin), maintained here since 1.8.0 |
+
+Pick `ctx_checkpoint` when the only thing you want from ctx inside Hermes is the
+durable transcript and you prefer that the plugin never sees a key. Pick `ctx`
+when Hermes should also *use* the store — recall, explicit tools, mirrored
+built-in memory, digests. Only one memory provider is active per profile
+(`memory.provider`). Running `ctx` next to a `mcp_servers.ctx` entry gives the
+model two tool surfaces for the same store; the plugin README says how to
+handle that.
+
+The rest of this page is about `ctx_checkpoint`; the `ctx` provider documents
+itself in [its README](plugin/ctx/README.md) and
+[CHANGELOG](plugin/ctx/CHANGELOG.md).
+
 ## Two operating modes
 
 | Mode | Host | Guarantee |
@@ -376,11 +405,18 @@ and manifest are deliberately small so routine recall stays cheap.
   `grep -c compacts_outside_compress agent/context_engine.py` — `0` means the
   host predates it.
 - Retired patch series: `patches/archive/`, last entry `v2026.8.19`.
+- `ctx` provider: see `plugin/ctx/CHANGELOG.md` (1.8.0 = first version
+  maintained here: chain written in every agent context, English untrusted
+  label, CJK code-switch rejection opt-in; 1.7.1 = verbatim import, commit
+  `e9ae6010`).
 
 ## Licensing
 
-The plugin and scripts are part of ctx (MPL-2.0). The archived patch series
-under `patches/archive/` modifies
+Both plugins and the scripts are part of ctx (MPL-2.0). The `ctx` provider
+was contributed by derLonius (W4-NERF) under the same license; its
+`checkpoint.py` in turn is a port of `ctx_checkpoint` and keeps that notice
+(see [its README](plugin/ctx/README.md#license--attribution)). The archived
+patch series under `patches/archive/` modifies
 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
 (MIT); those patches carry unmodified context lines from that codebase and
 have been upstreamed.

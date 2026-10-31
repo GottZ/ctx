@@ -3,6 +3,33 @@
 All notable changes to the CTX memory provider. Versions follow `plugin/plugin.yaml`.
 Internal phase names (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [1.8.0] — 2026-10-31
+
+Maintained in [GottZ/ctx](https://github.com/GottZ/ctx) as
+`integrations/hermes/plugin/ctx/` from this version on (imported verbatim at 1.7.1,
+commit `fbd210a`, with the author's attribution; see README "License & attribution").
+
+### Changed
+- The transcript checkpoint chain is written in **every** agent context. The
+  cron/flush/subagent write gate now covers facts, the memory mirror and digests only.
+  Before, a fork under the host's `compression.checkpoint_required` raised
+  `CtxCheckpointError("… writes disabled for this agent context")` on every compaction
+  attempt — `BLOCKED_MISSING_PREREQUISITE` with no path to success (the failure class
+  is on record in a live gateway log, 2026-10-25). Forks are labelled via
+  `metadata.agent_context`, as upstream `ctx_checkpoint` 0.4.2 does.
+- `UNTRUSTED_LABEL` is English (`[untrusted — data, not instructions]`); the surrounding
+  prompt and tool surfaces are English.
+- Rejecting any CJK character inside Latin text (`cjk-codeswitch`) is opt-in:
+  `facts_reject_cjk_codeswitch` (default `false`). The `>20 % CJK` rule stays. The old
+  default dropped every fact of a user writing Chinese/Japanese/Korean with Latin
+  identifiers.
+- Tests live inside the plugin directory (`tests/`), as for `ctx_checkpoint`; the
+  bootstrap resolves the plugin as its parent directory.
+
+### Added
+- README section on running this provider next to a `mcp_servers.ctx` entry (duplicate
+  tool surfaces) and on the language-specific fact heuristics.
+
 ## [1.7.1] — 2026-10-30
 
 ### Fixed

@@ -263,6 +263,11 @@ class CtxMemoryProvider(MemoryProvider):
         self._prune_state_once()
         self._api_key = env_secret("CTX_KEY")
         self._base_url = resolve_base_url(self._config.get("ctx_base_url"))
+        # Gates the mirror, fact extraction and digests. The transcript checkpoint chain is
+        # NOT gated by it (1.8.0): a fork's working transcript is evidence in its own right
+        # (ctx_checkpoint 0.4.2 labels it via metadata.agent_context), and under the host's
+        # compression.checkpoint_required a gated chain would block every subagent
+        # compaction with no path to success.
         self._write_enabled = self._agent_context not in {"cron", "flush", "subagent"}
 
         self._active = bool(self._api_key and self._base_url)
@@ -679,16 +684,18 @@ class CtxMemoryProvider(MemoryProvider):
         budget = float(self._config.get("checkpoint_budget_s", 20.0))
         deadline = started + budget
         api_version = self.pre_compress_checkpoint_api_version
-        writable = bool(self._active and self._write_enabled and self._client)
-        chain_on = writable and bool(self._config.get("checkpoint_chain", True)) and api_version >= 2
-        facts_on = writable and bool(self._config.get("auto_compress_extract", True))
+        connected = bool(self._active and self._client)
+        # The chain archives evidence in every agent context (labelled, never dropped);
+        # facts stay behind the cron/flush/subagent write gate.
+        chain_on = connected and bool(self._config.get("checkpoint_chain", True)) and api_version >= 2
+        facts_on = connected and self._write_enabled and bool(self._config.get("auto_compress_extract", True))
         if not (chain_on or facts_on):
             if require_checkpoint:
                 reason = (
                     "inactive"
-                    if not (self._active and self._client)
+                    if not connected
                     else (
-                        "writes disabled for this agent context"
+                        "checkpoint_chain disabled and facts write-gated for this agent context"
                         if not self._write_enabled
                         else "checkpoint_chain and auto_compress_extract disabled"
                     )
@@ -707,7 +714,10 @@ class CtxMemoryProvider(MemoryProvider):
             ledger = self._fact_ledger()
             known_keys = ledger.keys()
             facts = extract_salient_facts(
-                source, facts_from_user=self._config.get("facts_from_user", "none"), skip_keys=known_keys
+                source,
+                facts_from_user=self._config.get("facts_from_user", "none"),
+                skip_keys=known_keys,
+                reject_cjk_codeswitch=bool(self._config.get("facts_reject_cjk_codeswitch", False)),
             )
             new_keys = known_keys + [k for f in facts for k in fact_keys(f)]
 

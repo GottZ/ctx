@@ -180,3 +180,8 @@ def test_plugin_redaction_masks_auth_scheme_credentials(header):
     assert checkpoint._redact_checkpoint_secrets("send it with Bearer abcdefgh12345678") == (
         "send it with Bearer [REDACTED]"
     )
+
+
+def test_version_file_matches_plugin_yaml():
+    # install.sh and the ctx release notes read VERSION; keep it in lockstep with plugin.yaml.
+    assert (PLUGIN_DIR / "VERSION").read_text(encoding="utf-8").strip() == checkpoint.PLUGIN_VERSION
