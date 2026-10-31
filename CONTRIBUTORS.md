@@ -231,7 +231,20 @@ else's environment — that led to a fix landing in the repository.
   of `ctx_checkpoint` 0.6.0 (`integrations/hermes/plugin/ctx_checkpoint/memory`):
   recall, agent tools, built-in memory mirror, fact extraction with
   cross-compaction dedupe, session digests and the `hermes ctx_checkpoint` CLI,
-  built from his long-term production use.
+  built from his long-term production use. Also PR
+  [#51](https://github.com/GottZ/ctx/pull/51): checkpoint-chain fixes on that
+  engine, checked against the answers ctx and Hermes' MCP dispatch really
+  produce — Cyrillic and CJK transcripts crossed ctx's 50 KiB byte cap below
+  the character limit and failed every checkpoint, source parts could push the
+  head out of the head search, `team/alice:1` and `team:alice/1` shared one
+  head, a staged `confirm_writes` store failed unnamed, and the chain writer's
+  per-call budget never bounded an MCP call; the shipped `ctx_checkpoint`
+  0.6.1 keeps his byte-capped splitter, the `checkpoint-head` tag filter, the
+  hash-suffixed head titles, block ids from the `(id: …)` group only, the named
+  `confirm_writes` refusal and the bounded MCP dispatch, hardened with a lookup
+  under the 0.6.0 title so existing chains (Hermes' `local-<sha256>` sessions)
+  continue, `/stop` reaching bounded calls, and REST availability from
+  `rest_base_url`.
 
 ## How to be listed
 
