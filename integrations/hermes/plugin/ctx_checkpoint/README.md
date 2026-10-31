@@ -50,7 +50,7 @@ memory:
   ctx_checkpoint:
     mcp_server: ctx                  # name of the entry above (default: ctx)
     category: compaction-checkpoints # ctx category for checkpoint blocks
-    chunk_chars: 36000               # source part size, clamped to 1k..40k
+    chunk_chars: 36000               # source part size, clamped to 1k..40k; a part also stays under ctx's 50 KB byte cap
     sensitivity: internal            # public | internal | personal | credentials
     budget_s: 60                     # wall-clock budget per checkpoint, 5..600 s
     max_parts: 80                    # part cap per checkpoint, 1..95 (ctx writes 100/60 s per key)
@@ -89,7 +89,12 @@ Fail-closed means accepting a session halt (`BLOCKED_MISSING_PREREQUISITE`) whil
 ctx is unreachable, instead of an unarchived compaction. The halt also triggers
 when a checkpoint would need more than `max_parts` source parts or does not
 finish inside `budget_s` (a rate-limited store is retried after 2/4/8 s while the
-budget allows). A batch with no direct user/assistant text — only tool rows or
+budget allows; since 0.5.2 the budget also bounds every single call, the head
+search included, so a hanging ctx no longer holds the compaction for Hermes' MCP
+timeout). A ctx key with `confirm_writes` is refused with that reason: ctx stages
+its writes instead of storing them, and checkpoint writes run unattended, so the
+plugin never confirms them on your behalf. Every failure is logged as a warning
+(since 0.5.2), also in best-effort mode. A batch with no direct user/assistant text — only tool rows or
 compaction envelopes — has nothing to archive and never blocks: the provider
 returns an empty receipt and the compaction proceeds (0.5.1; before, it raised).
 The plugin negotiates the contract version with the loading host at runtime;
@@ -107,8 +112,8 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
 ## What it does on your machine
 
 - **Network:** only the MCP calls Hermes makes to the ctx server you configured
-  (`search`/`get` to find the session's checkpoint head, `store` for the blocks,
-  `confirm` when the ctx guard stages a store). No third-party services, no telemetry.
+  (`search`/`get` to find the session's checkpoint head, `store` for the blocks).
+  No third-party services, no telemetry.
 - **Data sent:** direct user/assistant text of the turns about to be compacted.
   Tool results, system prompts and synthetic compaction envelopes are excluded.
   Secrets are redacted twice before anything leaves the process: Hermes'
@@ -129,7 +134,7 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
 
 ## Tests
 
-67 tests (mocked MCP dispatch, no live ctx needed) against the real host on
+89 tests (mocked MCP dispatch, no live ctx needed) against the real host on
 `PYTHONPATH`: the checkpoint contract, its runtime negotiation and the setup
 surfaces (each setup test writes into its own temporary `HERMES_HOME`):
 

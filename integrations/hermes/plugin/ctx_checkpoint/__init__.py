@@ -13,6 +13,7 @@ Hermes' own defaults.
 
 from __future__ import annotations
 
+import contextvars
 import getpass
 import hashlib
 import importlib
@@ -20,6 +21,7 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -33,6 +35,11 @@ _UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
 )
+# The block id inside ctx's answer text: "Stored: <title> (id: <uuid>, category: …)",
+# "No change needed — identical content already exists (id: <uuid>)". Only this group
+# names the block: the title in front of it carries the root session id, and a session
+# id that is itself a UUID used to be taken for the block id (0.5.2).
+_ANSWER_ID_RE = re.compile(r"\(id: (" + _UUID_RE.pattern + r")")
 _PRIOR_CONTEXT_PREFIX = "[PRIOR CONTEXT — for reference only; not a new message]"
 _PRIOR_CONTEXT_MERGE_BOUNDARY = (
     "\n\n[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\n\n"
@@ -46,6 +53,17 @@ _SYNTHETIC_ASSISTANT_PREFIXES = (
 _DEFAULT_CHUNK_CHARS = 36_000
 _MIN_CHUNK_CHARS = 1_000
 _MAX_CHUNK_CHARS = 40_000
+# ctx caps block content at 50 KiB of UTF-8 BYTES (go/internal/handler/context_store.go,
+# blockSizeLimit: ``len(content) > 50*1024``). ``chunk_chars`` counts characters, so a
+# part of Cyrillic (2 bytes/char) or CJK (3 bytes/char) text crossed the cap long before
+# the character limit and every checkpoint of such a transcript failed (0.5.2). Parts
+# are now cut at whichever limit comes first.
+_CTX_CONTENT_MAX_BYTES = 50 * 1024
+# Transcript bytes a part must at least have room for after its header; below that the
+# session identifiers alone would fill the part.
+_MIN_PART_TEXT_BYTES = 4 * 1024
+# Root session id as a title token: at most this many characters of [A-Za-z0-9_.-].
+_ROOT_TOKEN_MAX = 48
 _DEFAULT_MCP_SERVER = "ctx"
 _DEFAULT_CATEGORY = "compaction-checkpoints"
 _DEFAULT_SENSITIVITY = "internal"
@@ -77,9 +95,12 @@ _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*")
 # explicit claim pins ``type_source=manual`` so a later classifier change cannot move
 # archive blocks into retrieval.
 _CHECKPOINT_TYPE = "checkpoint"
-# Wall-clock budget for one checkpoint (search + every store). The host holds the
-# compaction until this provider returns; without a budget a slow ctx or a long 429
-# streak could hold it for minutes. Exceeding the budget fails closed.
+# Wall-clock budget for one checkpoint (head search, head read, every store). The host
+# holds the compaction until this provider returns; without a budget a slow ctx or a
+# long 429 streak could hold it for minutes. Exceeding the budget fails closed. Every
+# call runs against the remaining budget (``_call_within_deadline``): before 0.5.2 the
+# deadline was only checked between stores, so one hanging call could hold the
+# compaction for Hermes' MCP tool timeout (300 s by default) on top of the budget.
 _DEFAULT_BUDGET_S = 60.0
 _MIN_BUDGET_S = 5.0
 _MAX_BUDGET_S = 600.0
@@ -91,6 +112,11 @@ _MAX_PARTS_CEILING = 95
 # Backoff after a rate-limited store (seconds, each attempt bounded by the budget).
 _RATE_LIMIT_BACKOFF_S = (2.0, 4.0, 8.0)
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "429")
+# A key with ctx's ``confirm_writes`` capability gets every store STAGED instead of
+# executed (go/internal/handler/mcp_confirm.go); Hermes delivers that answer as an
+# error payload. Checkpoint writes run unattended, so the plugin refuses such a key
+# with a named reason instead of confirming on the operator's behalf (0.5.2).
+_STAGED_MARKER = "confirm_writes"
 # Injection seams for tests.
 _sleep = time.sleep
 _monotonic = time.monotonic
@@ -381,6 +407,82 @@ def _is_rate_limited(error: str) -> bool:
     return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
 
 
+def _is_staged(error: str) -> bool:
+    lowered = error.lower()
+    return lowered.lstrip().startswith("staged") or _STAGED_MARKER in lowered
+
+
+def _utf8_prefix(text: str, max_bytes: int) -> str:
+    """Longest prefix of ``text`` whose UTF-8 encoding fits into ``max_bytes``."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    # Cutting the bytes can split one multi-byte character at the end; "ignore" drops
+    # exactly that incomplete tail and nothing else.
+    return encoded[:max_bytes].decode("utf-8", "ignore")
+
+
+def _root_title_token(root: str) -> str:
+    """Root session id as a title token: ``[A-Za-z0-9_.-]``, at most 48 characters.
+
+    An id that sanitizing leaves unchanged and that fits is used as it is, so heads of
+    ordinary Hermes session ids keep their titles. An id that sanitizing or truncation
+    changed gets a hash of the full id as suffix: ``team/alice:1`` and
+    ``team:alice/1``, or two long ids sharing their first 48 characters, used to map to
+    one head and mixed their chains (0.5.2).
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", root)
+    if safe == root and len(safe) <= _ROOT_TOKEN_MAX:
+        return safe
+    suffix = hashlib.sha256(root.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    return f"{safe[:_ROOT_TOKEN_MAX - len(suffix) - 1]}-{suffix}"
+
+
+def _run_bounded(fn: Callable[[], Any], timeout: float) -> tuple[bool, Any, Optional[BaseException]]:
+    """Run ``fn`` on a daemon worker thread and wait at most ``timeout`` seconds.
+
+    Returns ``(finished, value, error)``. A call still running at the timeout is
+    abandoned, not cancelled: it ends in the background (at the latest at the host's
+    own MCP tool timeout) and its result is dropped. The caller's context variables
+    travel along (``contextvars.copy_context``), so host state bound to the agent's
+    context — approval prompts, the session key — stays visible to the call.
+    """
+    box: Dict[str, Any] = {}
+    context = contextvars.copy_context()
+
+    def run() -> None:
+        try:
+            box["value"] = context.run(fn)
+        except BaseException as exc:  # handed back to the calling thread below
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="ctx-checkpoint-call", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        return False, None, None
+    return True, box.get("value"), box.get("error")
+
+
+def _call_within_deadline(
+    fn: Callable[[], Any], deadline: Optional[float], budget_s: float, what: str
+) -> Any:
+    """``fn()`` bounded by the checkpoint budget; an exhausted budget fails closed."""
+    if deadline is None:
+        return fn()
+    remaining = deadline - _monotonic()
+    if remaining <= 0:
+        raise CtxCheckpointError(f"ctx checkpoint budget {budget_s:.0f}s exceeded before {what}")
+    finished, value, error = _run_bounded(fn, remaining)
+    if not finished:
+        raise CtxCheckpointError(
+            f"ctx checkpoint budget {budget_s:.0f}s exceeded while {what}; the call was abandoned"
+        )
+    if error is not None:
+        raise error
+    return value
+
+
 def _env_value(name: str) -> str:
     """Scope-aware environment or .env value (the host's own lookup), ``""`` if unset."""
     try:
@@ -530,8 +632,14 @@ def _find_block_id_by_title(value: Any, title: str) -> Optional[str]:
     return None
 
 
-def _parse_tool_result(raw: Any) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """Return ``(block_id, payload_hash, error)`` from an MCP tool result."""
+def _parse_tool_result(raw: Any) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(block_id, error)`` from an MCP store result.
+
+    The block id comes from a structured ``id`` field when the answer carries one, else
+    from the ``(id: <uuid>)`` group of ctx's answer text — never from the first UUID
+    anywhere in the answer (see ``_ANSWER_ID_RE``). An answer without either yields no
+    block id, and the caller fails closed.
+    """
     text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
     parsed: Any = None
     try:
@@ -539,22 +647,17 @@ def _parse_tool_result(raw: Any) -> tuple[Optional[str], Optional[str], Optional
     except (TypeError, ValueError):
         pass
 
+    match = _ANSWER_ID_RE.search(text)
     if parsed is not None:
         error = _find_value(parsed, "error")
         if error:
-            return None, None, error
+            return None, error
         block_id = _find_value(parsed, "id")
-        payload_hash = _find_value(parsed, "payload_hash")
         if block_id and _UUID_RE.fullmatch(block_id):
-            return block_id, payload_hash, None
-        match = _UUID_RE.search(text)
-        return (match.group(0) if match else None), payload_hash, None
-
-    match = _UUID_RE.search(text)
-    lowered = text.lower()
-    if "error" in lowered and not match:
-        return None, None, text[:500]
-    return (match.group(0) if match else None), None, None
+            return block_id, None
+    elif "error" in text.lower() and not match:
+        return None, text[:500]
+    return (match.group(1) if match else None), None
 
 
 class CtxCheckpointMemoryProvider(MemoryProvider):
@@ -746,12 +849,34 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
         messages: List[Dict[str, Any]],
         *,
         tool_evidence: Optional[List[Dict[str, Any]]] = None,
+        require_checkpoint: Optional[bool] = None,
         **_kwargs: Any,
     ) -> str:
         # Keyword tolerance (design 02-tool-evidenz §4.2): a v3 host may send
         # ``tool_evidence`` and further keywords without breaking this plugin.
         # ``tool_evidence`` is NOT rendered in this version — it is only labelled
         # honestly in the metadata; the prose checkpoint stays complete either way.
+        # ``require_checkpoint`` (sent by v2 hosts) only shapes the failure log below.
+        try:
+            return self._checkpoint(messages, tool_evidence)
+        except Exception as exc:
+            # The host logs a failing provider at DEBUG only (agent/memory_manager.py,
+            # on_pre_compress), so in best-effort mode a refused or failed checkpoint was
+            # invisible at the default log level (0.5.2).
+            if require_checkpoint:
+                outcome = "compaction stays blocked until a checkpoint succeeds"
+            elif require_checkpoint is None:
+                outcome = "the host decides whether compaction proceeds"
+            else:
+                outcome = "compaction proceeds without a durable checkpoint"
+            logger.warning("ctx checkpoint failed (%s): %s", outcome, exc)
+            raise
+
+    def _checkpoint(
+        self,
+        messages: List[Dict[str, Any]],
+        tool_evidence: Optional[List[Dict[str, Any]]],
+    ) -> str:
         host_api = _probe_host_checkpoint_api()
         negotiated_api = _negotiate_checkpoint_api(host_api)
         tool_index_status = self._tool_index_status(tool_evidence)
@@ -775,7 +900,17 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
             return ""
 
         digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-        chunks = self._split_chunks(rendered)
+        root = self._root_session_id or self._session_id or "unknown"
+        # Reserve the largest header any part of this checkpoint can carry; the rest of
+        # ctx's byte cap is the transcript budget of one part.
+        header_bytes = len(self._part_header(root, digest, 99_999, 99_999).encode("utf-8"))
+        byte_budget = _CTX_CONTENT_MAX_BYTES - header_bytes
+        if byte_budget < _MIN_PART_TEXT_BYTES:
+            raise CtxCheckpointError(
+                f"ctx checkpoint part header takes {header_bytes} of ctx's "
+                f"{_CTX_CONTENT_MAX_BYTES}-byte content cap; nothing written"
+            )
+        chunks = self._split_chunks(rendered, byte_budget)
         max_parts = _clamped_max_parts(self._config.get("max_parts"))
         if len(chunks) > max_parts:
             raise CtxCheckpointError(
@@ -783,10 +918,11 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
                 "(ctx write rate limit 100/60 s per key); nothing written"
             )
         now = datetime.now(timezone.utc).isoformat()
-        root = self._root_session_id or self._session_id or "unknown"
-        short_root = re.sub(r"[^A-Za-z0-9_.-]", "_", root)[:48]
+        short_root = _root_title_token(root)
         head_title = f"Compaction checkpoint head {short_root}"
-        previous_manifest_id = self._load_previous_manifest_id(head_title)
+        previous_manifest_id = self._load_previous_manifest_id(
+            head_title, deadline=deadline, budget_s=budget_s
+        )
         checkpoint_id = hashlib.sha256(
             f"{root}\0{now}\0{digest}".encode("utf-8")
         ).hexdigest()[:16]
@@ -810,20 +946,7 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
 
         chunk_ids: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
-            body = (
-                "# Compaction source evidence\n\n"
-                "This is deterministic, redacted source evidence captured before "
-                "Hermes replaced older turns with a lossy compaction summary. "
-                "Role labels and message ordinals are preserved. Tool results, "
-                "system prompts, synthetic compaction handoffs, and credentials "
-                "are intentionally excluded.\n\n"
-                f"- Root session: `{root}`\n"
-                f"- Active session: `{self._session_id}`\n"
-                f"- Transcript SHA-256: `{digest}`\n"
-                f"- Part: {index}/{len(chunks)}\n\n"
-                "## Direct transcript\n\n"
-                f"{chunk}"
-            )
+            body = self._part_header(root, digest, index, len(chunks)) + chunk
             metadata = dict(common_metadata)
             metadata.update({"part": index, "parts": len(chunks)})
             block_id = self._store(
@@ -913,17 +1036,44 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
             "blocks only when exact wording or provenance is needed."
         )
 
-    def _load_previous_manifest_id(self, head_title: str) -> Optional[str]:
+    def _part_header(self, root: str, digest: str, index: int, total: int) -> str:
+        return (
+            "# Compaction source evidence\n\n"
+            "This is deterministic, redacted source evidence captured before "
+            "Hermes replaced older turns with a lossy compaction summary. "
+            "Role labels and message ordinals are preserved. Tool results, "
+            "system prompts, synthetic compaction handoffs, and credentials "
+            "are intentionally excluded.\n\n"
+            f"- Root session: `{root}`\n"
+            f"- Active session: `{self._session_id}`\n"
+            f"- Transcript SHA-256: `{digest}`\n"
+            f"- Part: {index}/{total}\n\n"
+            "## Direct transcript\n\n"
+        )
+
+    def _load_previous_manifest_id(
+        self,
+        head_title: str,
+        *,
+        deadline: Optional[float] = None,
+        budget_s: float = _DEFAULT_BUDGET_S,
+    ) -> Optional[str]:
         prefix = f"mcp__{self._server_name()}__"
-        search_result = self._dispatch(
-            prefix + "search",
-            {
-                "query": head_title,
-                "category": str(
-                    self._config.get("category") or _DEFAULT_CATEGORY
-                ),
-                "limit": 5,
-            },
+        # Narrowed to heads by their tag (every head carries ``checkpoint-head`` since the
+        # first release): an unfiltered full-text search ranked source parts that talk
+        # about checkpoints or headings ahead of the head and could push it out of the
+        # result window, which silently started a new chain without a parent (0.5.2).
+        search_args = {
+            "query": head_title,
+            "category": str(self._config.get("category") or _DEFAULT_CATEGORY),
+            "tags": ["checkpoint-head"],
+            "limit": 5,
+        }
+        search_result = _call_within_deadline(
+            lambda: self._dispatch(prefix + "search", search_args),
+            deadline,
+            budget_s,
+            "searching the checkpoint head",
         )
         search_text = (
             search_result
@@ -941,7 +1091,12 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
         if not head_id:
             return None
 
-        head_result = self._dispatch(prefix + "get", {"id": head_id})
+        head_result = _call_within_deadline(
+            lambda: self._dispatch(prefix + "get", {"id": head_id}),
+            deadline,
+            budget_s,
+            "reading the checkpoint head",
+        )
         head_text = (
             head_result
             if isinstance(head_result, str)
@@ -1015,17 +1170,23 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
                 entries.append(f"### Message {ordinal} — {role}\n\n{safe}\n")
         return "\n".join(entries)
 
-    def _split_chunks(self, rendered: str) -> list[str]:
+    def _split_chunks(self, rendered: str, byte_budget: int = _CTX_CONTENT_MAX_BYTES) -> list[str]:
+        """Parts of at most ``chunk_chars`` characters AND ``byte_budget`` UTF-8 bytes.
+
+        A part ends at the last message boundary inside that window, or hard at the
+        window's end when the boundary would leave the part shorter than a third of it.
+        """
         limit = _clamped_chunk_chars(self._config.get("chunk_chars"))
         chunks: list[str] = []
         remaining = rendered
         while remaining:
-            if len(remaining) <= limit:
+            window = len(_utf8_prefix(remaining[:limit], byte_budget))
+            if window >= len(remaining):
                 chunks.append(remaining)
                 break
-            cut = remaining.rfind("\n### Message ", 0, limit)
-            if cut < limit // 3:
-                cut = limit
+            cut = remaining.rfind("\n### Message ", 0, window)
+            if cut < window // 3:
+                cut = window
             chunks.append(remaining[:cut].rstrip())
             remaining = remaining[cut:].lstrip()
         return chunks
@@ -1044,8 +1205,9 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
 
         A rate-limited answer is retried after ``_RATE_LIMIT_BACKOFF_S`` while the
         deadline allows it; an exhausted budget raises ``CtxCheckpointError`` (fail
-        closed, nothing further is written). Any other store error returns ``None``
-        and the caller raises with the block's role in the message.
+        closed, nothing further is written), and so does a staged answer from a
+        ``confirm_writes`` key. Any other store error returns ``None`` and the caller
+        raises with the block's role in the message.
         """
         prefix = f"mcp__{self._server_name()}__"
         payload = {
@@ -1059,14 +1221,24 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
         }
         attempt = 0
         while True:
-            if deadline is not None and _monotonic() >= deadline:
-                raise CtxCheckpointError(
-                    f"ctx checkpoint budget {budget_s:.0f}s exceeded before storing {title!r}"
-                )
-            result = self._dispatch(prefix + "store", payload)
-            block_id, payload_hash, error = _parse_tool_result(result)
+            result = _call_within_deadline(
+                lambda: self._dispatch(prefix + "store", payload),
+                deadline,
+                budget_s,
+                f"storing {title!r}",
+            )
+            block_id, error = _parse_tool_result(result)
             if not error:
                 break
+            if _is_staged(error):
+                # Confirming here would turn the operator's confirm_writes decision into
+                # a formality; the staged write expires on its own (writes.confirm_ttl).
+                raise CtxCheckpointError(
+                    "ctx staged the checkpoint write instead of storing it: the API key "
+                    "behind mcp_servers." + self._server_name() + " has confirm_writes. "
+                    "Checkpoint writes run unattended and are never confirmed on the "
+                    "operator's behalf; use a ctx key without confirm_writes"
+                )
             if _is_rate_limited(error) and attempt < len(_RATE_LIMIT_BACKOFF_S):
                 delay = _RATE_LIMIT_BACKOFF_S[attempt]
                 attempt += 1
@@ -1085,12 +1257,6 @@ class CtxCheckpointMemoryProvider(MemoryProvider):
                 )
             logger.warning("ctx store failed: %s", error)
             return None
-        if payload_hash and not block_id:
-            confirmed = self._dispatch(prefix + "confirm", {"payload_hash": payload_hash})
-            block_id, _unused_hash, error = _parse_tool_result(confirmed)
-            if error:
-                logger.warning("ctx staged store confirmation failed: %s", error)
-                return None
         if not block_id:
             logger.warning("ctx store returned no block id")
         return block_id
