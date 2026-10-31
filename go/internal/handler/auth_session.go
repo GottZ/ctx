@@ -13,7 +13,8 @@
 // resolved by the Auth middleware since R2; the refresh cookie (ctx_refresh)
 // carries the ctxr_ plaintext, path-scoped to /auth so it never rides data
 // requests. CSRF: the login/refresh/logout routes themselves need no
-// synchronizer token — login PRESENTS a credential (nothing ambient),
+// synchronizer token — login PRESENTS a credential (nothing ambient; the
+// login-CSRF shape is closed by loginRequestAllowed instead),
 // refresh needs the SameSite=Strict refresh cookie a cross-site request
 // cannot send, logout is idempotent and SameSite=Lax-shielded; the
 // synchronizer gate protects the ambient /api/* mutations (middleware.go).
@@ -24,7 +25,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -138,6 +141,10 @@ func (h *SessionHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{"success": false, "error": "rate limited"})
 		return
 	}
+	if !h.loginRequestAllowed(r) {
+		sessionError(w, http.StatusForbidden)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	var req struct {
 		APIKey string `json:"api_key"`
@@ -185,6 +192,64 @@ func (h *SessionHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	h.setSessionCookies(w, sessionID, pair.RefreshToken)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "csrf_token": csrfSecret})
+}
+
+// loginRequestAllowed is the login-CSRF gate (GHSA 2026-10-31 §9a). Login
+// presents a credential, so it needs no synchronizer token — but without a
+// gate a cross-site <form enctype="text/plain"> can post
+// {"api_key":"<attacker key>","x":"="} and sign the victim into the
+// attacker's account (the response cookies of a top-level navigation are
+// stored). Two independent conditions, both required:
+//
+//  1. Content-Type is application/json (media type compared, parameters such
+//     as charset ignored). An HTML form cannot send it, and a cross-site
+//     fetch with it needs a CORS preflight ctxd never answers.
+//
+//  2. The request provably comes from our own origin:
+//
+//     Origin present            → must be our origin, else reject
+//     Origin absent, Referer    → Referer must be our origin, else reject
+//     both absent               → Sec-Fetch-Site same-origin / none / absent
+//     passes; cross-site and same-site are rejected
+//
+//     "Our origin" is the canonical issuer's scheme+host when configured, or
+//     a host equal to r.Host (a cross-site request cannot choose the Host
+//     its victim's browser sends). Origin "null" is not our origin. Non-
+//     browser clients send none of the three headers and pass condition 2.
+func (h *SessionHandler) loginRequestAllowed(r *http.Request) bool {
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mt != "application/json" {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return h.isOwnOrigin(r, origin)
+	}
+	if referer := r.Header.Get("Referer"); referer != "" {
+		return h.isOwnOrigin(r, referer)
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return true
+	default:
+		return false
+	}
+}
+
+// isOwnOrigin reports whether raw (an Origin or Referer value) names this
+// server: the canonical issuer's scheme+host, or — the dev/no-issuer shape —
+// any http(s) URL whose host equals r.Host.
+func (h *SessionHandler) isOwnOrigin(r *http.Request, raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	if h.issuer != "" {
+		if iu, err := url.Parse(h.issuer); err == nil &&
+			strings.EqualFold(iu.Scheme, u.Scheme) && strings.EqualFold(iu.Host, u.Host) {
+			return true
+		}
+	}
+	return r.Host != "" && strings.EqualFold(u.Host, r.Host)
 }
 
 // HandleRefresh implements POST /auth/refresh: rotate the refresh cookie

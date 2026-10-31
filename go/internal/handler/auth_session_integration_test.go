@@ -119,6 +119,29 @@ func TestAuthSessionR3_Integration(t *testing.T) {
 		t.Fatalf("login wrong key: got %d, want 401", resp.StatusCode)
 	}
 
+	// --- login CSRF (GHSA 2026-10-31 §9a): a VALID key cross-site → 403 -----
+	if resp, _ := asDo(t, http.MethodPost, srv.URL+"/auth/login",
+		`{"api_key":"`+plainKey+`","x":"="}`, func(r *http.Request) {
+			r.Header.Set("Content-Type", "text/plain")
+			r.Header.Set("Origin", "https://evil.example")
+		}); resp.StatusCode != http.StatusForbidden || len(resp.Cookies()) != 0 {
+		t.Fatalf("cross-site text/plain login: got %d (%d cookies), want 403 without cookies",
+			resp.StatusCode, len(resp.Cookies()))
+	}
+	if resp, _ := asDo(t, http.MethodPost, srv.URL+"/auth/login",
+		`{"api_key":"`+plainKey+`"}`, func(r *http.Request) {
+			r.Header.Set("Origin", "https://evil.example")
+		}); resp.StatusCode != http.StatusForbidden || len(resp.Cookies()) != 0 {
+		t.Fatalf("cross-origin JSON login: got %d (%d cookies), want 403 without cookies",
+			resp.StatusCode, len(resp.Cookies()))
+	}
+	if resp, _ := asDo(t, http.MethodPost, srv.URL+"/auth/login",
+		`{"api_key":"`+plainKey+`"}`, func(r *http.Request) {
+			r.Header.Set("Origin", srv.URL)
+		}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("same-origin JSON login: got %d, want 200", resp.StatusCode)
+	}
+
 	// --- login: valid key → 200 + csrf + both cookies ------------------------
 	loginResp, loginBody := asDo(t, http.MethodPost, srv.URL+"/auth/login",
 		`{"api_key":"`+plainKey+`"}`, nil)
