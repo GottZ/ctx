@@ -12,13 +12,13 @@
 //     with the chat tuple in β8, see the comment on the subtest
 //   - Gate 8: died with the chat tuple in β8, see the comment where it stood
 //   - Gate 9: no submitted secret value in any tenant response
-//   - Gate 10 (04-W5 §5.5): a tenant-admin has NO api_key_ref half at all —
-//     pool references bind to the _global secret of that name (the resolver
-//     reads _global only), so a name-matched pool row neither shows up in a
-//     tenant's list nor blocks its delete
-//   - Gate 11 (04-W5 §5.7): a NON-opt-in tenant's pool row DOES block the
-//     operator's delete of the _global secret it resolves — the fail-open the
-//     scope-filtered pool scan left open
+//   - Gate 10 (04-W5 §5.5, re-cut 2026-10-31): a tenant-admin's api_key_ref
+//     half is its OWN scope's rows — they bind the tenant's own secret of
+//     that name (scope-bound resolver, GHSA §1), so they show in its list
+//     and block its delete; foreign rows never enter the scan
+//   - Gate 11 (04-W5 §5.7, re-cut 2026-10-31): only an OPT-IN tenant's pool
+//     row binds a _global secret (its gated fallback) and blocks the
+//     operator's delete; a non-opt-in row resolves nothing and is not counted
 //
 // Run with:
 //
@@ -232,55 +232,59 @@ func TestSecretsTenantAPI_Integration(t *testing.T) {
 		scanClean(t, api.as(operatorAR()).do(t, http.MethodGet, "/api/secrets", "").Body.String(), "operator GET list")
 	})
 
-	// Gate 10 (04-W5 §5.5, re-cut on the resolver semantics) — a tenant-admin
-	// gets NO pool half at all. settings.BackendSecretResolver resolves every
-	// api_key_ref against _global ALONE, so a pool row referencing "sec-a"
-	// points at the _GLOBAL secret of that name, never at tenant A's own
-	// sec-a. Counting it for A produced a FALSE 409 whose remediation ("clear
-	// the row's api_key_ref") would have broken a working backend; and the
-	// scoped scan was the only thing keeping foreign row names out of a
-	// tenant's referenced_by. Both disappear when the scan does.
+	// Gate 10 (04-W5 §5.5, re-cut 2026-10-31 on the scope-bound resolver,
+	// GHSA §1) — a tenant-admin's pool half is its OWN scope's rows. Since the
+	// resolver reads a row's api_key_ref in the ROW's scope, a tenant-A row
+	// referencing "sec-a" binds tenant A's own sec-a: it shows up in A's
+	// referenced_by and blocks A's DELETE (409 — deleting would leave that
+	// backend keyless at the next resolver pass, the §5.7 fail-open). A
+	// same-named row of tenant B never enters A's scan (§5.5).
 	//
-	// Two pool rows reference the same secret NAME from two tenants — under
-	// the old scoped scan A saw its own row and 409'd. Now: no pool entry in
-	// A's list, and A's DELETE of its OWN tenant secret goes through.
-	//
-	// Negative probe (2026-08-21): restoring the pool scan for tenant callers
-	// (dropping the isGlobal guard in referencedBy) turns the "no backend:"
-	// assertion and the 200 red; leaving the guard but scanning all scopes for
-	// tenants would additionally leak tb-provider into A's view.
-	t.Run("Gate10_TenantAdminHasNoPoolHalf", func(t *testing.T) {
+	// Before the fix every row resolved _global, so A's row bound the
+	// operator's sec-a (if any) and A's own secret was unusable for A's rows;
+	// the old Gate 10 pinned exactly that (no pool half for tenants, 200).
+	t.Run("Gate10_TenantAdminPoolHalfIsOwnScope", func(t *testing.T) {
 		insertBackendSecretRef(t, pool, "ta-provider", "tenanta", "sec-a")
 		insertBackendSecretRef(t, pool, "tb-provider", "tenantb", "sec-a")
 
 		rec := api.as(tenantAdmin("tenanta")).do(t, http.MethodGet, "/api/secrets", "")
-		if strings.Contains(rec.Body.String(), "backend:") {
-			t.Errorf("A's list carries a pool reference — tenant scan not skipped: %s", rec.Body.String())
+		if !strings.Contains(rec.Body.String(), `"backend:ta-provider"`) {
+			t.Errorf("A's list lacks its own pool reference: %s", rec.Body.String())
 		}
 		if strings.Contains(rec.Body.String(), "tb-provider") {
 			t.Errorf("A's list leaks tenant B's pool row: %s", rec.Body.String())
 		}
+		scanClean(t, rec.Body.String(), "A GET list with own pool ref")
 
-		// The false-409 class: A deletes its OWN tenant secret whose name a
-		// pool row happens to share. No settings row references sec-a, so the
-		// delete must go through.
+		// A's DELETE of its own secret is a 409 while A's row references it.
 		rec = api.as(tenantAdmin("tenanta")).do(t, http.MethodDelete, "/api/secrets/sec-a", "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("A DELETE sec-a = %d, want 200 (a pool row binds to the _global secret, not A's) body=%s",
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("A DELETE sec-a = %d, want 409 (A's own pool row resolves it) body=%s",
 				rec.Code, rec.Body.String())
 		}
-		scanClean(t, rec.Body.String(), "A DELETE 200")
+		body := rec.Body.String()
+		if !strings.Contains(body, `"backend:ta-provider"`) || strings.Contains(body, "tb-provider") {
+			t.Errorf("409 references = %s, want exactly A's own row", body)
+		}
+		if !strings.Contains(body, "api_key_ref") {
+			t.Errorf("409 lacks the pool remediation: %s", body)
+		}
+		scanClean(t, body, "A DELETE 409")
+		if exists, _ := scopeSecretExists(t, pool, "sec-a", "tenanta"); !exists {
+			t.Fatalf("A's secret gone despite 409")
+		}
+
+		// Clearing the row's ref releases the delete.
+		if _, err := pool.Exec(ctx, `UPDATE context_backends SET api_key_ref = NULL WHERE name = 'ta-provider'`); err != nil {
+			t.Fatalf("clear ref: %v", err)
+		}
+		rec = api.as(tenantAdmin("tenanta")).do(t, http.MethodDelete, "/api/secrets/sec-a", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("A DELETE sec-a after clearing its row = %d, want 200 (B's same-named row binds B's secret, not A's) body=%s",
+				rec.Code, rec.Body.String())
+		}
 		if exists, _ := scopeSecretExists(t, pool, "sec-a", "tenanta"); exists {
 			t.Errorf("A's secret survived a 200 delete")
-		}
-		// The pool rows are untouched — the delete never bound to them.
-		var refCount int
-		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM context_backends WHERE api_key_ref = 'sec-a'`).Scan(&refCount); err != nil {
-			t.Fatalf("count pool refs: %v", err)
-		}
-		if refCount != 2 {
-			t.Errorf("pool rows after the tenant delete = %d, want 2 untouched", refCount)
 		}
 
 		// Counter-direction: B has no secret of that name at all, so B's own
@@ -292,39 +296,39 @@ func TestSecretsTenantAPI_Integration(t *testing.T) {
 		}
 	})
 
-	// Gate 11 (04-W5 §5.7, the fail-open half the scoped scan left open) — a
-	// pool row of a NON-opt-in tenant references a _global secret. Because the
-	// resolver reads _global for every api_key_ref, that row genuinely depends
-	// on the operator's secret; the old scan (mutationScope + opt-in tenants) did
-	// not see the row, answered 200 and left the backend keyless at the next
-	// resolver pass. The all-scopes pool scan closes it.
-	//
-	// Negative probe (2026-08-21): re-filtering BackendSecretRefsAll by the
-	// settings scope set turns the 409 assertion red (200 + the secret gone),
-	// while Gate 8 and the _global pin in TestSecretsAPI stay green — the hole
-	// is invisible to every opt-in-shaped test.
-	t.Run("Gate11_NonOptInPoolRowBlocksGlobalDelete", func(t *testing.T) {
+	// Gate 11 (04-W5 §5.7, re-cut 2026-10-31) — which tenant rows bind a
+	// _global secret follows the resolver: ONLY rows of opt-in tenants (their
+	// gated _global fallback). A non-opt-in tenant row naming a _global secret
+	// resolves nothing (keyless by the scope rule), so the operator's DELETE
+	// must NOT 409 on it; an opt-in tenant's row DOES block the delete, with
+	// the pool remediation. tenanta opted in (Gate 7), tenantb never did.
+	t.Run("Gate11_OptInTenantRowBlocksGlobalDelete", func(t *testing.T) {
 		const globalSecret = "glob-pool-only"
 		rec := api.as(operatorAR()).do(t, http.MethodPut, "/api/secrets/"+globalSecret, `{"value":"`+valueShared+`"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("operator create = %d body=%s", rec.Code, rec.Body.String())
 		}
-		// tenantb never opted in (only tenanta did, Gate 7) — invisible to the
-		// settings scope set by construction.
 		insertBackendSecretRef(t, pool, "tb-global-consumer", "tenantb", globalSecret)
 
+		// Non-opt-in row: not a reference, not in the list, delete not blocked.
 		rec = api.as(operatorAR()).do(t, http.MethodGet, "/api/secrets", "")
-		if !strings.Contains(rec.Body.String(), `"backend:tb-global-consumer"`) {
-			t.Errorf("operator list lacks the non-opt-in tenant's pool reference: %s", rec.Body.String())
+		if strings.Contains(rec.Body.String(), "tb-global-consumer") {
+			t.Errorf("operator list counts a non-opt-in tenant row that resolves nothing: %s", rec.Body.String())
 		}
 
+		// Opt-in row: a genuine reference via the gated fallback.
+		insertBackendSecretRef(t, pool, "ta-global-consumer", "tenanta", globalSecret)
+		rec = api.as(operatorAR()).do(t, http.MethodGet, "/api/secrets", "")
+		if !strings.Contains(rec.Body.String(), `"backend:ta-global-consumer"`) {
+			t.Errorf("operator list lacks the opt-in tenant's pool reference: %s", rec.Body.String())
+		}
 		rec = api.as(operatorAR()).do(t, http.MethodDelete, "/api/secrets/"+globalSecret, "")
 		if rec.Code != http.StatusConflict {
-			t.Fatalf("operator DELETE = %d, want 409 (non-opt-in pool row resolves this _global secret)", rec.Code)
+			t.Fatalf("operator DELETE = %d, want 409 (opt-in pool row resolves this _global secret)", rec.Code)
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, `"backend:tb-global-consumer"`) {
-			t.Errorf("409 lacks the referencing pool row: %s", body)
+		if !strings.Contains(body, `"backend:ta-global-consumer"`) || strings.Contains(body, "tb-global-consumer") {
+			t.Errorf("409 references = %s, want exactly the opt-in row", body)
 		}
 		if !strings.Contains(body, "api_key_ref") || strings.Contains(body, "/api/settings/") {
 			t.Errorf("409 carries the wrong remediation for a pool-only reference: %s", body)
@@ -332,6 +336,16 @@ func TestSecretsTenantAPI_Integration(t *testing.T) {
 		scanClean(t, body, "operator DELETE 409")
 		if exists, _ := scopeSecretExists(t, pool, globalSecret, store.GlobalScope); !exists {
 			t.Fatalf("secret gone despite 409 — the guard answered but did not hold")
+		}
+
+		// With the opt-in row cleared, only the non-opt-in row remains — and it
+		// does not bind, so the delete goes through.
+		if _, err := pool.Exec(ctx, `UPDATE context_backends SET api_key_ref = NULL WHERE name = 'ta-global-consumer'`); err != nil {
+			t.Fatalf("clear ref: %v", err)
+		}
+		rec = api.as(operatorAR()).do(t, http.MethodDelete, "/api/secrets/"+globalSecret, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("operator DELETE with only a non-opt-in row left = %d, want 200 body=%s", rec.Code, rec.Body.String())
 		}
 	})
 }

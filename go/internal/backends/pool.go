@@ -15,10 +15,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// SecretResolver resolves an F2 secret name to its plaintext. Errors must be
-// value-free (store.ResolveSecret contract). The pool never persists the
+// SecretResolver resolves an F2 secret name to its plaintext FOR one pool row
+// scope: a _global row resolves the _global secret, a tenant row resolves its
+// own tenant's secret (with the operator-granted _global fallback only behind
+// the tenant's allow_shared_secrets opt-in — settings.BackendSecretResolver).
+// The scope is the ROW's, never the caller's, so a tenant-admin row can never
+// name an operator secret it was not granted (GHSA 2026-10-31 §1). Errors must
+// be value-free (store.ResolveSecret contract). The pool never persists the
 // resolved value — it lives in the in-memory snapshot only.
-type SecretResolver func(ctx context.Context, name string) (string, error)
+type SecretResolver func(ctx context.Context, name, scope string) (string, error)
 
 // ExclusionReason names why one backend did not make a chain. Reasons go to
 // slog and the admin-gated status surface ONLY — client errors stay generic
@@ -161,7 +166,7 @@ func (p *Pool) Reload(ctx context.Context) error {
 			if p.secrets == nil {
 				slog.Warn("backends: no secret resolver configured — backend stays keyless",
 					"backend", b.Name, "api_key_ref", b.APIKeyRef)
-			} else if key, err := p.secrets(ctx, b.APIKeyRef); err != nil {
+			} else if key, err := p.secrets(ctx, b.APIKeyRef, b.Scope); err != nil {
 				// Error is value-free by the resolver contract. Keep the
 				// backend: a 401 at call time triggers the reload self-heal.
 				slog.Error("backends: secret resolution failed — backend stays keyless",

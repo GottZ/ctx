@@ -263,21 +263,21 @@ func (s secretRefs) remediation(name string) string {
 // silently fail-open to env/default. Without any opt-in tenant the set
 // degenerates to the _global-only scan.
 //
-// POOL scope is a DIFFERENT question and deliberately NOT the settings scope
-// set. settings.BackendSecretResolver resolves every api_key_ref against
-// GlobalScope alone (reload.go), so a pool reference binds to the _GLOBAL
-// secret of that name regardless of the ROW's scope. Two consequences:
+// POOL scope follows the pool resolver (store.BackendSecretScopes, inverted):
+// since 2026-10-31 a row resolves its api_key_ref in its OWN scope, with the
+// _global fallback only behind the tenant's opt-in (GHSA §1 — before, every
+// row read _global, so a tenant row could bind an operator secret by name).
+// Hence the SAME scope set as the settings half:
 //
-//   - server-admin (mutationScope == _global): scan ALL scopes. The old
-//     scope-filtered scan skipped the rows of non-opt-in tenants, so deleting
-//     a _global secret those rows resolve answered 200 and left them keyless
-//     at the next resolver pass — fail-open (§5.7).
-//   - tenant-admin: NO pool scan. Its DELETE can only remove a TENANT-scope
-//     secret, and no pool reference binds to one; a name-matched pool row is a
-//     different secret entirely, so counting it produced a false 409 whose
-//     remediation pointed at a working backend. Skipping the scan outright
-//     (rather than filtering it) also keeps referenced_by free of any pool
-//     enumeration surface for tenants (§5.5) by construction.
+//   - server-admin (mutationScope == _global): _global rows plus the rows of
+//     opt-in tenants bind a _global secret. A non-opt-in tenant row naming a
+//     _global secret resolves nothing (keyless) and is not counted — a 409 on
+//     it would block the operator over a dead reference.
+//   - tenant-admin: its OWN scope's rows. A tenant row binds the tenant's own
+//     secret of that name now, so deleting it would leave that backend keyless
+//     at the next resolver pass — the fail-open class the guard exists for
+//     (§5.7). Foreign rows never enter the scan, so referenced_by stays free
+//     of other tenants' topology (§5.5).
 func (h *SecretsHandler) referencedBy(r *http.Request) (map[string]secretRefs, error) {
 	ws := mutationScope(AuthResultFromContext(r.Context()))
 	scopes := []string{ws}
@@ -322,18 +322,14 @@ func (h *SecretsHandler) referencedBy(r *http.Request) (map[string]secretRefs, e
 		refs[name] = rs
 	}
 
-	// Pool half of the union (§3.3), _global callers only — see the scope note
-	// above. Row names are unique only PER SCOPE since migration 062
-	// (uq_backends_scope_name), so the all-scopes scan can see the same name
-	// twice; dedup by name keeps referenced_by a set. Two same-named rows
-	// collapse into one entry — for the operator (the only caller here) that is
-	// a remediation hint, not an identifier: clearing api_key_ref on both rows
-	// of that name is exactly what the 409 asks for. The query orders by name,
-	// keeping referenced_by stable between calls.
-	if !isGlobal {
-		return refs, nil
-	}
-	poolRefs, err := store.BackendSecretRefsAll(r.Context(), h.pool)
+	// Pool half of the union (§3.3), over the SAME scope set — see the scope
+	// note above. Row names are unique only PER SCOPE since migration 062
+	// (uq_backends_scope_name), so the operator's multi-scope scan can see the
+	// same name twice; dedup by name keeps referenced_by a set. Two same-named
+	// rows collapse into one entry — a remediation hint, not an identifier:
+	// clearing api_key_ref on both rows of that name is exactly what the 409
+	// asks for. The query orders by name, keeping referenced_by stable.
+	poolRefs, err := store.BackendSecretRefsInScopes(r.Context(), h.pool, scopes)
 	if err != nil {
 		return nil, err
 	}

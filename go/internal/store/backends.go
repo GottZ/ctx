@@ -193,32 +193,58 @@ type BackendSecretRef struct {
 	APIKeyRef string
 }
 
-// BackendSecretRefsAll lists EVERY pool row whose api_key_ref is set, across
-// all scopes — the pool half of the sealbox delete guard's reference union
-// (04-W5 §3.3). Since F3 made the pool the living home of provider
+// BackendSecretScopes lists the secret scopes a pool row of rowScope resolves
+// its api_key_ref in, in resolver order: a _global row reads _global only; a
+// tenant row reads its own scope first and — only behind the tenant's
+// allow_shared_secrets opt-in (TenantAllowsSharedSecrets, fail-closed) —
+// _global. settings.BackendSecretResolver walks this list, and the
+// backend-create/-update gate rejects a ref that exists in none of these
+// scopes, so write-time acceptance and reload-time resolution can never
+// disagree (GHSA 2026-10-31 §1: a tenant row naming an operator secret).
+func BackendSecretScopes(ctx context.Context, pool *pgxpool.Pool, rowScope string) ([]string, error) {
+	if rowScope == "" || rowScope == GlobalScope {
+		return []string{GlobalScope}, nil
+	}
+	allowShared, err := TenantAllowsSharedSecrets(ctx, pool, rowScope)
+	if err != nil {
+		return nil, err
+	}
+	if allowShared {
+		return []string{rowScope, GlobalScope}, nil
+	}
+	return []string{rowScope}, nil
+}
+
+// BackendSecretRefsInScopes lists every pool row in one of scopes whose
+// api_key_ref is set — the pool half of the sealbox delete guard's reference
+// union (04-W5 §3.3). Since F3 made the pool the living home of provider
 // credentials, a secret referenced ONLY by a pool row was deletable: the guard
 // scanned context_settings alone, so DELETE answered 200, deleteSealed removed
 // the plaintext and the backend went keyless at the next resolver pass — the
 // fail-open class the guard exists to prevent (§5.7).
 //
-// Deliberately UNSCOPED, and only ever called for a _global (server-admin)
-// delete. settings.BackendSecretResolver resolves EVERY api_key_ref against
-// GlobalScope alone, so a pool row's reference binds to the _global secret of
-// that name no matter which scope the ROW lives in. A scope-filtered scan
-// therefore missed the rows of non-opt-in tenants and answered 200 for a
-// _global secret those rows resolve — the very fail-open class above, one
-// level deeper. Tenant-admin callers get NO pool scan at all (their DELETE
-// only ever removes a tenant-scope secret, which no pool reference binds to),
-// so this function can never surface foreign provider topology to a tenant
-// (§5.5): the isolation is structural, not a filter.
+// The scan follows the resolver (BackendSecretScopes, inverted): a tenant
+// secret is bound by that tenant's own rows, so a tenant-admin's DELETE scans
+// its own scope; a _global secret is bound by _global rows and by the rows of
+// opt-in tenants (their fallback), so the operator's DELETE scans _global plus
+// OptInTenantScopes. A non-opt-in tenant row naming a _global secret no longer
+// binds it (it stays keyless by the resolver rule) and is deliberately not
+// counted — counting it would 409 the operator on a reference that resolves
+// nothing. The scoped scan is also what keeps foreign row names out of a
+// tenant's referenced_by (§5.5).
 //
-// Fail-closed by construction: with no scope predicate there is no empty-slice
-// footgun (`scope = ANY('{}')` silently matching nothing) to guard against.
-func BackendSecretRefsAll(ctx context.Context, pool *pgxpool.Pool) ([]BackendSecretRef, error) {
+// Fail-closed: an empty scope list returns no rows WITHOUT touching the DB —
+// `scope = ANY('{}')` would match nothing silently, which is the same answer,
+// but the early return makes the contract explicit for the caller.
+func BackendSecretRefsInScopes(ctx context.Context, pool *pgxpool.Pool, scopes []string) ([]BackendSecretRef, error) {
+	if len(scopes) == 0 {
+		return nil, nil
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT name, api_key_ref FROM context_backends
 		  WHERE api_key_ref IS NOT NULL AND btrim(api_key_ref) <> ''
-		  ORDER BY name`)
+		    AND scope = ANY($1::text[])
+		  ORDER BY name`, scopes)
 	if err != nil {
 		return nil, fmt.Errorf("backends: load secret refs: %w", err)
 	}

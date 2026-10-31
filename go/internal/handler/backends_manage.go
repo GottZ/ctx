@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -43,13 +44,13 @@ type backendSpec struct {
 	// ConfirmDataCollection guards arming metadata.allow_data_collection —
 	// the ONLY way to lift the forced zdr/deny of an openrouter-class
 	// backend (never implicit via trust elevation, design 03 §3.3).
-	ConfirmDataCollection bool    `json:"confirm_data_collection"`
+	ConfirmDataCollection bool `json:"confirm_data_collection"`
 	// ConfirmScoreDomainChange guards changing the effective
 	// metadata.score_domain of a rerank-capable backend — the change
 	// reinterprets every future ranking this backend produces and cuts
 	// the comparability of the access-log score trail at the switch.
-	ConfirmScoreDomainChange bool `json:"confirm_score_domain_change"`
-	Locality              *string `json:"locality"`
+	ConfirmScoreDomainChange bool    `json:"confirm_score_domain_change"`
+	Locality                 *string `json:"locality"`
 	// Scope is the tenant dimension (062, Modell C). HONORED ONLY for a
 	// server-admin on create (free choice, defaults to _global); a tenant-admin
 	// always has it forced to ar.HomeScope, and update ignores it entirely
@@ -295,6 +296,47 @@ func (h *ManageHandler) attachDisableProfiles(v map[string]any, backendID string
 	}
 }
 
+// checkBackendSecretRef is the write-time half of the pool's scope-bound secret
+// resolution (GHSA 2026-10-31 §1). An api_key_ref must name a sealed secret in
+// a scope the ROW resolves at reload (store.BackendSecretScopes: the row's own
+// scope, plus _global only behind the tenant's allow_shared_secrets opt-in) —
+// the exact rule settings' checkSecretRef applies to a secret_ref. Without it a
+// tenant-admin could write a row with a base_url it controls and the NAME of an
+// operator secret, and the reload would hand the operator's provider key to
+// that host. A ref that exists in none of the row's scopes is a 422 field
+// error at write time (visible), never a keyless backend later (silent). The
+// message is identical for "unknown" and "foreign" so a tenant cannot probe
+// _global secret names through it (§5.5). Empty ref = keyless row, no check.
+// Returns false after writing the response.
+func (h *ManageHandler) checkBackendSecretRef(w http.ResponseWriter, r *http.Request, ref, rowScope string) bool {
+	if strings.TrimSpace(ref) == "" {
+		return true
+	}
+	if !store.ValidSecretName(ref) {
+		writeBackendValidation(w, []backends.FieldError{{Field: "api_key_ref",
+			Message: "takes a secret NAME (lowercase [a-z0-9._-], max 128 chars), never the secret value — create the secret first"}})
+		return false
+	}
+	scopes, err := store.BackendSecretScopes(r.Context(), h.pool, rowScope)
+	if err != nil {
+		internalError(w, r.Context(), "backends: shared-secrets opt-in check failed", err)
+		return false
+	}
+	for _, scope := range scopes {
+		exists, err := store.SecretExists(r.Context(), h.pool, ref, scope)
+		if err != nil {
+			internalError(w, r.Context(), "backends: secret existence check failed", err)
+			return false
+		}
+		if exists {
+			return true
+		}
+	}
+	writeBackendValidation(w, []backends.FieldError{{Field: "api_key_ref",
+		Message: "references a secret that does not exist in this backend's scope — create the secret first (a tenant backend resolves its own tenant's secrets; _global only with tenant.allow_shared_secrets)"}})
+	return false
+}
+
 func writeBackendValidation(w http.ResponseWriter, errs []backends.FieldError) {
 	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 		"success": false, "error": "validation failed", "fields": errs,
@@ -400,6 +442,9 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 		writeBackendValidation(w, fieldErrs)
 		return
 	}
+	if !h.checkBackendSecretRef(w, r, b.APIKeyRef, b.Scope) {
+		return
+	}
 
 	// disable_profiles: resolve names → ids against the caller's visible+acceptable
 	// profile set (§5.2) BEFORE opening the tx, so an unknown name is a 422 without
@@ -503,6 +548,10 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 	warnings, fieldErrs := backends.ValidateBackend(&next)
 	if len(fieldErrs) > 0 {
 		writeBackendValidation(w, fieldErrs)
+		return
+	}
+	// Scope is immutable through update, so the ref resolves in prev.Scope.
+	if !h.checkBackendSecretRef(w, r, next.APIKeyRef, prev.Scope) {
 		return
 	}
 	if scoreDomainChanged(prev, &next) {

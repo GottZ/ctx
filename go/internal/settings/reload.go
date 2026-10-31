@@ -39,8 +39,16 @@ import (
 // (§3.6 sweep) needs no resolver rebuild; errors stay name- and value-free
 // by the store.ResolveSecret contract. Backends with unresolvable refs stay
 // keyless in the snapshot (401 → ClassAuth → reload self-heal).
+//
+// Resolution is bound to the ROW's scope (store.BackendSecretScopes): a
+// _global row reads _global; a tenant row reads its own tenant scope and —
+// only behind that tenant's allow_shared_secrets opt-in — _global, exactly
+// like a tenant setting's secret_ref (tenantSecretResolver). Before 2026-10-31
+// every row resolved _global regardless of its scope, so a tenant-admin could
+// point a row with a base_url it controls at an operator secret by name and
+// receive the operator's provider key on the next chain call (GHSA §1).
 func BackendSecretResolver(pool *pgxpool.Pool) backends.SecretResolver {
-	return func(ctx context.Context, name string) (string, error) {
+	return func(ctx context.Context, name, scope string) (string, error) {
 		if strings.TrimSpace(os.Getenv(sealbox.EnvKey)) == "" {
 			return "", fmt.Errorf("secrets master key not configured")
 		}
@@ -48,11 +56,23 @@ func BackendSecretResolver(pool *pgxpool.Pool) backends.SecretResolver {
 		if err != nil {
 			return "", fmt.Errorf("secrets master key unusable")
 		}
-		plaintext, err := store.ResolveSecret(ctx, pool, box, name, store.GlobalScope)
+		scopes, err := store.BackendSecretScopes(ctx, pool, scope)
 		if err != nil {
 			return "", err
 		}
-		return string(plaintext), nil
+		var last error
+		for i, s := range scopes {
+			plaintext, rerr := store.ResolveSecret(ctx, pool, box, name, s)
+			if rerr == nil {
+				if i > 0 {
+					slog.Info("backends: tenant row fell back to shared _global secret",
+						"scope", scope, "api_key_ref", name)
+				}
+				return string(plaintext), nil
+			}
+			last = rerr
+		}
+		return "", last
 	}
 }
 
