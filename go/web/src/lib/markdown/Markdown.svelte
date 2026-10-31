@@ -20,7 +20,7 @@
 </script>
 
 <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by renderMarkdown (html:false + DOMPurify) -->
-<!-- use:camoProxy swaps remote-image placeholders for proxied same-origin <img> post-render (design 07 §4.3) -->
+<!-- use:camoProxy swaps remote-image placeholders for proxied same-origin <img> post-render (design 07 §4.3); LLM output never comes through here — MessageBubble uses click-to-load (GHSA 2026-10-31 §7) -->
 <div class="md" use:camoProxy={html}>{@html html}</div>
 
 <style>

@@ -106,9 +106,10 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
       // of the inserted node is safe by construction.
       //
       // Camo (design 07 §4.3): the placeholder ALSO carries the foreign URL in
-      // data-camo-src, so a post-render pass (Markdown.svelte) can batch-sign
-      // the URLs via POST /api/img/sign and swap the placeholder for a proxied
-      // <img src="/api/img/…"> (same-origin ⇒ CSP-allowed). The placeholder is
+      // data-camo-src, so a post-render pass (camo.ts) can sign the URLs via
+      // POST /api/img/sign and swap the placeholder for a proxied
+      // <img src="/api/img/…"> (same-origin ⇒ CSP-allowed) — automatically for
+      // issue markdown, only on a click for LLM output. The placeholder is
       // the safe DEFAULT and the fallback: no sign step, sign failure, or a
       // disabled proxy all leave this visible text in place. The attribute value
       // is a data-* attribute (never executed) set on an element we construct,
