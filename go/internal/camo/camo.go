@@ -243,35 +243,27 @@ func ProxiableURL(rawURL string) bool {
 }
 
 // Origin names the kind of rendered content a sign request comes from. The
-// SPA declares it. Every origin gets the same rule today — one URL per request
-// — so the value only has to parse; an unknown one is refused.
+// SPA declares it; OriginAssistant is the only value left.
 type Origin string
 
-const (
-	// OriginAssistant is LLM output (chat assistant turns). Its images are
-	// click-to-load in the SPA, so a sign request carries exactly the one URL
-	// the viewer clicked — a batch is refused (GHSA 2026-10-31 §7).
-	OriginAssistant Origin = "assistant"
-	// OriginIssue is issue and comment markdown. Agents write it through the
-	// MCP issue tools, ctx manage and REST with the same api-key auth as the
-	// web UI, so it is no more trusted than model output and is click-to-load
-	// as well (security review 2026-10-31 §E). The SPA's click sends
-	// OriginAssistant; this value stays accepted for API compatibility, and
-	// the one-URL cap refuses the batch an older bundle still sends on render.
-	OriginIssue Origin = "issue"
-)
+// OriginAssistant is the origin of every sign request the SPA makes. Every
+// markdown surface — chat assistant turns, issue bodies, comments — is
+// click-to-load, so a sign request carries exactly the one URL the viewer
+// clicked (GHSA 2026-10-31 §7, security review 2026-10-31 §E). The name stays
+// because "assistant" is the wire value clients already send.
+const OriginAssistant Origin = "assistant"
 
 // ParseOrigin maps the wire value to an Origin. An absent value is treated as
-// OriginAssistant. An unknown value is ok=false.
+// OriginAssistant; every other value is ok=false. That includes "issue",
+// which earlier bundles sent for issue and comment markdown and signed on
+// render: agents write that text through MCP, ctx manage and REST (§E), so a
+// tab still running such a bundle must get nothing signed, not one image per
+// body.
 func ParseOrigin(v string) (Origin, bool) {
-	switch Origin(strings.TrimSpace(v)) {
-	case "", OriginAssistant:
+	if o := Origin(strings.TrimSpace(v)); o == "" || o == OriginAssistant {
 		return OriginAssistant, true
-	case OriginIssue:
-		return OriginIssue, true
-	default:
-		return "", false
 	}
+	return "", false
 }
 
 // MaxURLs is the per-request cap on distinct URLs for this origin. Every

@@ -15,10 +15,10 @@
 // bodies are written by agents through MCP, `ctx manage` and REST with the same
 // api-key auth as the web UI (security review 2026-10-31 §E). Each placeholder
 // instead shows the target host + a shortened path and a "Load image" button;
-// one click signs exactly that one URL, declared as origin "assistant", which
-// the server signs one URL at a time. Approved URLs are remembered for the page
-// session, so the re-renders of a streaming or re-mounted message swap them
-// again without another click.
+// one click signs exactly that one URL (signImages declares the one origin the
+// server accepts; it signs one URL per request). Approved URLs are remembered
+// for the page session, so the re-renders of a streaming or re-mounted message
+// swap them again without another click.
 //
 // Fail-safe by construction: the placeholder is the default and the fallback. A
 // disabled proxy, a sign failure, or a URL the server declines all leave the
@@ -143,7 +143,7 @@ export function camoClickToLoad(node: HTMLElement, _content?: unknown) {
     ev.preventDefault()
     pending.add(url)
     setButton(btn, url)
-    void signImages([url], 'assistant').then((sigs) => {
+    void signImages([url]).then((sigs) => {
       pending.delete(url)
       const proxied = sigs[url]
       if (proxied) approved.set(url, proxied)

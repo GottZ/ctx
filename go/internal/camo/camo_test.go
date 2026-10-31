@@ -451,7 +451,7 @@ func TestParseOrigin(t *testing.T) {
 	}{
 		{"", OriginAssistant, true, 1}, // absent = strictest
 		{"assistant", OriginAssistant, true, 1},
-		{"issue", OriginIssue, true, 1}, // click-to-load as well (§E)
+		{"issue", "", false, 0}, // retired (§E): a pre-upgrade bundle gets nothing signed
 		{"Assistant", "", false, 0},
 		{"chat", "", false, 0},
 	}

@@ -32,9 +32,9 @@ type CamoHandler struct {
 func NewCamoHandler(svc *camo.Service) *CamoHandler { return &CamoHandler{svc: svc} }
 
 // signRequest is the mint body: the foreign image URL the viewer clicked, and the
-// kind of content it comes from (camo.Origin: "assistant" for LLM output,
-// "issue" for issue/comment markdown; absent = "assistant"). Every origin is
-// capped at one distinct URL per request.
+// kind of content it comes from (camo.Origin: "assistant", also when absent; any
+// other value, the retired "issue" included, is refused). One distinct URL per
+// request.
 type signRequest struct {
 	URLs   []string `json:"urls"`
 	Origin string   `json:"origin"`

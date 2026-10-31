@@ -27,22 +27,22 @@ function stubFetch(handler: (url: string, init?: RequestInit) => unknown): void 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('signImages', () => {
-  it('POSTs /api/img/sign with the de-duplicated url set and returns the map', async () => {
+  it('POSTs /api/img/sign with the de-duplicated url set and origin assistant, returns the map', async () => {
     let captured: { url: string; body: unknown } = { url: '', body: null }
     stubFetch((url, init) => {
       captured = { url, body: JSON.parse(String(init?.body)) }
       return { success: true, signatures: { 'https://e.com/a.png': '/api/img/sig1?url=x&exp=1' } }
     })
-    const out = await signImages(['https://e.com/a.png', 'https://e.com/a.png', ''], 'issue')
+    const out = await signImages(['https://e.com/a.png', 'https://e.com/a.png', ''])
     expect(captured.url).toBe('/api/img/sign')
-    expect(captured.body).toEqual({ urls: ['https://e.com/a.png'], origin: 'issue' })
+    expect(captured.body).toEqual({ urls: ['https://e.com/a.png'], origin: 'assistant' })
     expect(out).toEqual({ 'https://e.com/a.png': '/api/img/sig1?url=x&exp=1' })
   })
 
   it('resolves to an empty map on an empty input (no request)', async () => {
     const spy = vi.fn()
     vi.stubGlobal('fetch', spy)
-    expect(await signImages([], 'issue')).toEqual({})
+    expect(await signImages([])).toEqual({})
     expect(spy).not.toHaveBeenCalled()
   })
 
@@ -55,12 +55,12 @@ describe('signImages', () => {
         text: () => Promise.resolve(JSON.stringify({ success: false, error: 'not enabled' })),
       } as Response),
     )
-    expect(await signImages(['https://e.com/a.png'], 'assistant')).toEqual({})
+    expect(await signImages(['https://e.com/a.png'])).toEqual({})
   })
 
   it('degrades to an empty map on a network throw', async () => {
     vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')))
-    expect(await signImages(['https://e.com/a.png'], 'assistant')).toEqual({})
+    expect(await signImages(['https://e.com/a.png'])).toEqual({})
   })
 })
 

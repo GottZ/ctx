@@ -8,12 +8,13 @@
 import { apiFetch } from '../api'
 
 /**
- * The kind of rendered content a sign request comes from. Every markdown
- * surface is click-to-load and its click sends "assistant", which the server
- * signs one URL at a time (GHSA 2026-10-31 §7, security review §E). No origin
- * signs a URL with a query string.
+ * The origin of every sign request. Every markdown surface — chat assistant
+ * turns, issue bodies, comments — is click-to-load, and a click signs exactly
+ * one URL; the server accepts this origin only and signs one URL per request
+ * (GHSA 2026-10-31 §7, security review §E). No URL with a query string is
+ * signed.
  */
-export type CamoOrigin = 'assistant' | 'issue'
+const SIGN_ORIGIN = 'assistant'
 
 /** POST /api/img/sign response: the accepted subset of the requested URLs. */
 interface SignResponse {
@@ -27,13 +28,13 @@ interface SignResponse {
  * empty map rather than throwing: a failed sign must degrade to the existing
  * placeholder, never break the render. De-duplicates and drops empty inputs.
  */
-export async function signImages(urls: string[], origin: CamoOrigin): Promise<Record<string, string>> {
+export async function signImages(urls: string[]): Promise<Record<string, string>> {
   const unique = [...new Set(urls.filter((u) => u))]
   if (unique.length === 0) return {}
   try {
     const res = await apiFetch<SignResponse>('/api/img/sign', {
       method: 'POST',
-      body: JSON.stringify({ urls: unique, origin }),
+      body: JSON.stringify({ urls: unique, origin: SIGN_ORIGIN }),
     })
     return res.signatures ?? {}
   } catch {

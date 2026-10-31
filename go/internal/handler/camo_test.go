@@ -50,7 +50,7 @@ func TestCamoSign_MintsProxiableOnly(t *testing.T) {
 	// signature; the rest are answered 200 with an empty map.
 	h := NewCamoHandler(enabledCamo(t))
 	sign := func(u string) (int, bool, map[string]string) {
-		b, _ := json.Marshal(map[string]any{"origin": "issue", "urls": []string{u}})
+		b, _ := json.Marshal(map[string]any{"origin": "assistant", "urls": []string{u}})
 		rec := httptest.NewRecorder()
 		h.HandleSign(rec, withAuth(httptest.NewRequest(http.MethodPost, "/api/img/sign", strings.NewReader(string(b))), "k1"))
 		var resp struct {
@@ -200,7 +200,7 @@ func TestCamoSign_RefusesQueryUserinfoAndLongPath(t *testing.T) {
 		"https://secret@evil.example/p.png",
 		longPath,
 	}
-	for _, origin := range []string{"issue", "assistant"} {
+	for _, origin := range []string{"assistant", ""} {
 		b, _ := json.Marshal(map[string]any{"origin": origin, "urls": []string{"https://e.com/ok.png"}})
 		if code, sigs := signCall(t, h, string(b)); code != http.StatusOK || sigs["https://e.com/ok.png"] == "" {
 			t.Errorf("%s ok.png: status %d signatures %v, want 200 + signature", origin, code, sigs)
@@ -237,21 +237,21 @@ func TestCamoSign_AssistantOneURLPerRequest(t *testing.T) {
 	}
 }
 
-func TestCamoSign_IssueOneURLPerRequest(t *testing.T) {
+func TestCamoSign_IssueOriginRefused(t *testing.T) {
 	// Issue and comment markdown is click-to-load like assistant output: agents
 	// write it through MCP, ctx manage and REST with the same api-key auth as
-	// the web UI, so it is no more trusted than model output (security review
-	// 2026-10-31 §E). A batch means a client still signs on render (a stale
-	// bundle) — refused whole, nothing signed.
+	// the web UI (security review 2026-10-31 §E). The SPA declares origin
+	// "assistant" for every click, so the retired "issue" value is refused
+	// even for a single URL: a pre-upgrade bundle that still signs issue images
+	// on render gets nothing signed.
 	h := NewCamoHandler(enabledCamo(t))
-
-	code, sigs := signCall(t, h, `{"origin":"issue","urls":["https://e.com/a.png","https://e.com/b.png"]}`)
-	if code != http.StatusBadRequest || len(sigs) != 0 {
-		t.Errorf("issue batch: status %d sigs %v, want 400 and none", code, sigs)
-	}
-	code, sigs = signCall(t, h, `{"origin":"issue","urls":["https://e.com/a.png"]}`)
-	if code != http.StatusOK || sigs["https://e.com/a.png"] == "" {
-		t.Errorf("single issue url: status %d sigs %v, want 200 + signature", code, sigs)
+	for _, body := range []string{
+		`{"origin":"issue","urls":["https://e.com/a.png"]}`,
+		`{"origin":"issue","urls":["https://e.com/a.png","https://e.com/b.png"]}`,
+	} {
+		if code, sigs := signCall(t, h, body); code != http.StatusBadRequest || len(sigs) != 0 {
+			t.Errorf("%s: status %d sigs %v, want 400 and none", body, code, sigs)
+		}
 	}
 }
 

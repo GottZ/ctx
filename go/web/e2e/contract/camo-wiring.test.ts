@@ -14,6 +14,9 @@
 //   - signImages (POST /api/img/sign) is called only from lib/markdown/camo.ts,
 //     where the click handler is its one caller; a new render-time signer
 //     elsewhere turns this red.
+//   - The SPA never declares the retired sign origin "issue" (the server
+//     refuses it, §E): no file under src/ — tests included — writes
+//     origin: 'issue', and the two camo wire modules carry no "issue" literal.
 //
 // Lives under e2e/contract/ like html-sinks.test.ts: src/ is svelte-checked with
 // the app tsconfig, which rejects node:fs.
@@ -25,11 +28,11 @@ import { describe, expect, it } from 'vitest'
 
 const SRC_ROOT = fileURLToPath(new URL('../../src', import.meta.url))
 
-/** Every non-test .svelte / .ts source file under src/, as src-relative paths. */
-function sourceFiles(): string[] {
+/** Every .svelte / .ts file under src/ (tests only on request), src-relative. */
+function sourceFiles(withTests = false): string[] {
   return readdirSync(SRC_ROOT, { recursive: true, encoding: 'utf8' })
     .filter((f) => f.endsWith('.svelte') || f.endsWith('.ts'))
-    .filter((f) => !f.endsWith('.test.ts'))
+    .filter((f) => withTests || !f.endsWith('.test.ts'))
     .map((f) => f.split('\\').join('/'))
     .sort()
 }
@@ -52,5 +55,14 @@ describe('camo wiring — every remote image is click-to-load (GHSA 2026-10-31 �
   it('signImages is called only from lib/markdown/camo.ts', () => {
     const callers = sourceFiles().filter((f) => f !== 'lib/api/images.ts' && /\bsignImages\s*\(/.test(read(f)))
     expect(callers).toEqual(['lib/markdown/camo.ts'])
+  })
+
+  it('no file under src/ declares the retired sign origin "issue"', () => {
+    const offenders = sourceFiles(true).filter((f) => /\borigin\s*:\s*['"`]issue['"`]/.test(read(f)))
+    expect(offenders).toEqual([])
+  })
+
+  it.each(['lib/api/images.ts', 'lib/markdown/camo.ts'])('%s carries no "issue" literal', (f) => {
+    expect(read(f)).not.toMatch(/['"`]issue['"`]/)
   })
 })
