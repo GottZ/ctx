@@ -100,9 +100,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	r.Post("/auth/logout", sessH.HandleLogout)
 
 	// Per-tenant quota accountant (T36, 04-W4): one process-wide instance, a
-	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis
-	// and web-chat gates. 30s TTL (§6.2) — the cost SUM over the 1M+ llm_log
-	// hypertable is never run per request.
+	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis,
+	// web-chat and query embed/rerank gates. 30s TTL (§6.2) — the cost SUM over
+	// the 1M+ llm_log hypertable is never run per request.
 	quota := backends.NewQuotaAccountant(pool, 30*time.Second)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.

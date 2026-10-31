@@ -158,6 +158,22 @@ func (a *QuotaAccountant) Gate(scope string, chain []Backend) ([]Backend, error)
 	return chain, nil
 }
 
+// SeedForTest stores a fresh generation in which scope is the only scope of
+// its own tenant, carrying policy q and the given rolling call count / daily
+// external cost. Test seam only (pattern: Pool.SeedSnapshotForTest) — it lets
+// call sites outside this package prove they reach Gate without a DB. The
+// TTL is pushed out so Gate never triggers a refresh against the nil querier.
+func (a *QuotaAccountant) SeedForTest(scope string, q TenantQuota, dayCalls int, dayCost float64) {
+	tenant := "seed/" + scope
+	gen := quotaGen{
+		scopeTenant: map[string]string{scope: tenant},
+		tenants:     map[string]tenantState{tenant: {quota: q, dayCalls: dayCalls, dayCost: dayCost}},
+	}
+	a.ttl = 24 * time.Hour
+	a.cache.Store(&gen)
+	a.cacheAt.Store(a.nowFn().UnixNano())
+}
+
 // withoutExternal returns chain with external-locality backends removed (the
 // external_off degrade). It allocates a fresh slice — the snapshot chain is
 // shared and must not be mutated in place.

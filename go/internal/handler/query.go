@@ -841,8 +841,27 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// repeated queries (debug sessions, recurring lookups) serve from cache in a single UPDATE.
 	// The chain resolves with the query sensitivity; empty/exhausted chain
 	// keeps today's semantics: query 500, embed is health-mandatory.
+	//
+	// The tenant quota gates this chain like synthesis and chat (GHSA
+	// 2026-10-31 §4): an exhausted call budget or a cost budget under block is
+	// the generic 429 quota_exceeded the synthesis step answers with (here
+	// before the heartbeat, so it is a real 429); an external_off degrade that
+	// empties the chain is the no-eligible 500 below. The gate runs before the
+	// embed cache, so a budget-exhausted tenant gets no cached vector either —
+	// the call budget is a coarse foreground limit, not a wire-call meter.
 	embChain, err := h.backendPool.Chain(backends.RoleEmbed, querySens, ar.HomeScope)
+	if err == nil {
+		embChain, err = llm.GateQuota(h.quota, ar.HomeScope, embChain, backends.RoleEmbed, querySens)
+	}
 	if err != nil {
+		var quotaErr *backends.ErrQuotaExceeded
+		if errors.As(err, &quotaErr) {
+			slog.Warn("query embed: quota exceeded", "error", err, "request_id", requestID)
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"success": false, "error_code": "quota_exceeded",
+			})
+			return
+		}
 		slog.Error("embedding failed: no eligible backend", "error", err, "request_id", requestID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "embedding failed"})
 		return
@@ -1216,7 +1235,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				maxDocs = rrf.RerankCrossEncoderMaxDocs
 			}
 			required := rerankRequired(querySens, results, maxDocs)
-			if chain, cerr := h.backendPool.Chain(backends.RoleRerank, required, ar.HomeScope); cerr != nil {
+			// The tenant quota gates the cross-encoder chain like every
+			// foreground chain (GHSA 2026-10-31 §4); a gated-out rerank keeps
+			// the stage's fail-open semantics (pre-rerank order).
+			chain, cerr := h.backendPool.Chain(backends.RoleRerank, required, ar.HomeScope)
+			if cerr == nil {
+				chain, cerr = llm.GateQuota(h.quota, ar.HomeScope, chain, backends.RoleRerank, required)
+			}
+			if cerr != nil {
 				slog.Warn("rerank chain empty, using original order",
 					"error", cerr, "request_id", requestID)
 			} else {
@@ -1250,7 +1276,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			required := rerankRequired(querySens, results, rrf.RerankMaxDocs)
-			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, required, originalQuery, results, ar.ApiKeyID, h.admission())
+			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, h.quota, ar.HomeScope, required, originalQuery, results, ar.ApiKeyID, h.admission())
 			if err != nil {
 				slog.Warn("rerank failed, using original order",
 					"error", err,

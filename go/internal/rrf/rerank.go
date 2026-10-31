@@ -102,9 +102,11 @@ var jsonArrayPattern = regexp.MustCompile(`\[\s*[\d\s,]+\]`)
 // (design 03 §2.5; the judge runs when no backend carries the rerank role).
 // required must already cover the query AND the judged docs; the slim llmlog
 // row carries the doc block_ids (egress trace).
+// quota/scope gate the judge chain by the caller tenant's quota (GHSA
+// 2026-10-31 §4); a gated-out judge fails open like any other judge error.
 // Returns the results re-sorted by blended score (0.6*rerank_norm + 0.4*rrf_norm).
 // If fewer than RerankMinResults, returns results unchanged.
-func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, required backends.Sensitivity, query string, results []SearchResult, apiKeyID string, adm llm.Admission) ([]SearchResult, error) {
+func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, scope string, required backends.Sensitivity, query string, results []SearchResult, apiKeyID string, adm llm.Admission) ([]SearchResult, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("rerank: skipping, fewer than min results",
 			"result_count", len(results),
@@ -138,6 +140,8 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, require
 		DefTimeout: llm.RerankTimeout,
 		BlockIDs:   blockIDs,
 		APIKeyID:   apiKeyID, // T35b: foreground caller attribution
+		Quota:      quota,
+		QuotaScope: scope,
 	}.Do(ctx, db, adm)
 	if err != nil {
 		slog.Warn("rerank: LLM call failed, returning original order", "error", err)
