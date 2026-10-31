@@ -33,9 +33,11 @@ and every failure as ``{"error": "..."}``; both shapes, plus bare JSON, are acce
 
 A ``timeout`` passed to ``search``/``store``/``get_block`` (the chain writer passes its
 remaining budget) bounds that one dispatch: it runs on a worker thread with the caller's
-context variables and is abandoned at the deadline (``code="timeout"``). Without one, the
-MCP transport's own timeout applies (300 s by default in Hermes). Hermes serializes calls
-per MCP server, so an abandoned call still completes before the next call is sent.
+context variables and is abandoned at the deadline (``code="timeout"``). The worker acts
+for the calling thread in Hermes' interrupt registry, so a ``/stop`` aimed at the caller
+ends a bounded call as it ends an unbounded one. Without a ``timeout``, the MCP
+transport's own timeout applies (300 s by default in Hermes). Hermes serializes calls per
+MCP server, so an abandoned call still completes before the next call is sent.
 """
 
 from __future__ import annotations
@@ -93,6 +95,15 @@ def _code_for_error(text: str) -> str:
     return ""
 
 
+def _interrupt_acting_for() -> Any:
+    """Hermes' ``tools.interrupt.acting_for_tid`` ContextVar; ``None`` on a host without it."""
+    try:
+        from tools.interrupt import acting_for_tid
+    except ImportError:
+        return None
+    return acting_for_tid
+
+
 def _run_bounded(fn: Callable[[], Any], timeout: float) -> tuple[bool, Any, BaseException | None]:
     """Run ``fn`` on a daemon worker thread and wait at most ``timeout`` seconds.
 
@@ -101,13 +112,28 @@ def _run_bounded(fn: Callable[[], Any], timeout: float) -> tuple[bool, Any, Base
     transport's own timeout) and its result is dropped. The caller's context variables
     travel along, so host state bound to the agent's context (approval prompts, the
     session key) stays visible to the dispatch.
+
+    Hermes' interrupts are per thread: ``is_interrupted()`` checks the current thread and
+    ``acting_for_tid``. The worker therefore acts for the calling thread (or for the
+    thread the caller already acts for), so a ``/stop`` aimed at the caller reaches the
+    MCP wait (``tools/mcp_tool_loop._run_on_mcp_loop`` polls ``is_interrupted()``) the same
+    way it reaches an unbounded call; Hermes' terminal tool does the same around its
+    deadline worker. The value is set inside the copied context: set in the caller after
+    the copy, it would never reach the worker.
     """
     box: dict[str, Any] = {}
     context = contextvars.copy_context()
+    caller_tid = threading.get_ident()
+    acting_for = _interrupt_acting_for()
+
+    def target() -> Any:
+        if acting_for is not None and acting_for.get() is None:
+            acting_for.set(caller_tid)
+        return fn()
 
     def run() -> None:
         try:
-            box["value"] = context.run(fn)
+            box["value"] = context.run(target)
         except BaseException as exc:  # handed back to the calling thread
             box["error"] = exc
 

@@ -621,3 +621,57 @@ def test_dispatch_sees_the_callers_context_variables():
     provider.on_pre_compress([{"role": "user", "content": "evidence"}], require_checkpoint=True)
 
     assert seen and set(seen) == {"agent-context"}  # bounded calls run on a worker thread
+
+
+def test_bounded_dispatch_acts_for_the_calling_thread():
+    import threading
+
+    from tools.interrupt import acting_for_tid
+
+    seen = []
+    inner = _ctx_text_dispatch([])
+
+    def dispatch(name, args, **kwargs):
+        seen.append((threading.get_ident(), acting_for_tid.get()))
+        return inner(name, args, **kwargs)
+
+    provider = CtxCheckpointMemoryProvider(dispatch=dispatch)
+    provider.initialize("session-a", platform="cli")
+    provider.on_pre_compress([{"role": "user", "content": "evidence"}], require_checkpoint=True)
+
+    caller = threading.get_ident()
+    assert seen and all(worker != caller and acting == caller for worker, acting in seen)
+    assert acting_for_tid.get() is None  # set in the worker's copy of the context only
+
+
+def test_stop_aimed_at_the_calling_thread_reaches_a_bounded_call():
+    import threading
+    import time
+
+    import pytest
+    from tools.interrupt import is_interrupted, set_interrupt
+
+    caller = threading.get_ident()
+
+    def dispatch(name, args, **kwargs):
+        # polls like Hermes' _run_on_mcp_loop and answers like its InterruptedError branch
+        until = time.monotonic() + 10
+        while time.monotonic() < until:
+            if is_interrupted():
+                return _hermes_error("MCP call interrupted: user sent a new message")
+            time.sleep(0.02)
+        return _hermes_ok("[]")
+
+    provider = CtxCheckpointMemoryProvider(config={"api_timeout": 5}, dispatch=dispatch)
+    provider.initialize("session-a", platform="cli")
+    stop = threading.Timer(0.2, set_interrupt, args=(True, caller))
+    started = time.monotonic()
+    stop.start()
+    try:
+        with pytest.raises(_MODULE.CtxCheckpointError, match="interrupted") as raised:
+            provider.on_pre_compress([{"role": "user", "content": "evidence"}], require_checkpoint=True)
+    finally:
+        stop.cancel()
+        set_interrupt(False, caller)
+    assert time.monotonic() - started < 3  # not held until the 5 s call timeout
+    assert "[timeout]" not in str(raised.value)
