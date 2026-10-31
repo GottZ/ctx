@@ -517,20 +517,23 @@ func parseAnthropicSSE(r io.Reader, onEvent func(StreamEvent) error) (*StreamRes
 	var data sseFrame
 	for {
 		line, readErr := readSSELine(br)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			// The error wins (§D): the line it cut short is no line, and
+			// its empty stand-in must not dispatch the buffered frame as if
+			// the blank separator had arrived.
+			return nil, fmt.Errorf("llm: read stream: %w", readErr)
+		}
 		if err := st.feedLine(strings.TrimRight(line, "\r\n"), &data); err != nil {
 			return nil, err
 		}
 		if st.done {
 			break
 		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				if err := st.dispatchData(&data); err != nil {
-					return nil, err
-				}
-				break
+		if readErr != nil { // io.EOF — any other error returned above
+			if err := st.dispatchData(&data); err != nil {
+				return nil, err
 			}
-			return nil, fmt.Errorf("llm: read stream: %w", readErr)
+			break
 		}
 	}
 	if !st.done && !st.stopSeen {

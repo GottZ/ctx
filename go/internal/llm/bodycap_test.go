@@ -195,3 +195,84 @@ func TestSSEFrameCapIsPayloadSize(t *testing.T) {
 		}
 	}
 }
+
+// errAfter yields r, then fails every further read with err — a connection
+// that breaks mid-stream.
+type errAfter struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errAfter) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, e.err
+	}
+	return n, err
+}
+
+// TestSSEReadErrorWins (§D): a read error ends the stream with that error.
+// The line it cut short is not a line — its empty stand-in must not count as
+// the blank separator that dispatches the buffered frame: not a content delta
+// to onEvent, and not a buffered end frame ([DONE] / message_stop) that would
+// turn the error into a finished turn. Each case buffers one frame without
+// its blank line, then fails the next line: an over-long line (the frame
+// cap) or a broken connection.
+func TestSSEReadErrorWins(t *testing.T) {
+	errReset := errors.New("connection reset")
+	overlong := func(head string) io.Reader {
+		return io.MultiReader(strings.NewReader(head), repeatReader(strings.Repeat("x", 1024), maxSSEFrameBytes/1024+1))
+	}
+	broken := func(head string) io.Reader {
+		return &errAfter{r: strings.NewReader(head), err: errReset}
+	}
+	anthropicStop := "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\ndata: {\"type\":\"message_stop\"}\n"
+	heads := []struct {
+		name, openai, anthropic string
+	}{
+		{"buffered end frame",
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n",
+			anthropicStop},
+		{"buffered content frame",
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n",
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n"},
+	}
+	tails := []struct {
+		name string
+		body func(head string) io.Reader
+		want error
+	}{
+		{"over-long line", overlong, httpx.ErrResponseTooLarge},
+		{"broken connection", broken, errReset},
+	}
+	for _, h := range heads {
+		for _, tl := range tails {
+			for _, p := range sseParsers {
+				head := h.openai
+				if p.name == "anthropic" {
+					head = h.anthropic
+				}
+				var deltas []string
+				onEvent := func(ev StreamEvent) error {
+					if ev.ContentDelta != "" {
+						deltas = append(deltas, ev.ContentDelta)
+					}
+					return nil
+				}
+				res, err := p.parse(tl.body(head), onEvent)
+				if !errors.Is(err, tl.want) || res != nil {
+					t.Errorf("%s, %s, %s: res = %v, err = %v; want no result and %v", p.name, h.name, tl.name, res != nil, err, tl.want)
+				}
+				// The end-frame case dispatched its content frame before the
+				// buffered end frame; the content case dispatched nothing.
+				wantDeltas := 0
+				if h.name == "buffered end frame" && p.name == "openai" {
+					wantDeltas = 1
+				}
+				if len(deltas) != wantDeltas {
+					t.Errorf("%s, %s, %s: onEvent saw %q, want %d content deltas", p.name, h.name, tl.name, deltas, wantDeltas)
+				}
+			}
+		}
+	}
+}
