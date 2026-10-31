@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -655,6 +656,15 @@ func (h *ManageHandler) handleScopeCreate(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "assign scope failed"})
 		}
 		return
+	}
+	// The quota accountant resolves scope → tenant from its cached generation;
+	// a new scope is unknown to it (= ungated) until the next refresh. Refresh
+	// now so a key minted into the new scope is under the tenant's quota from
+	// its first call, not after a TTL window (GHSA 2026-10-31 §4).
+	if h.quota != nil {
+		if err := h.quota.RefreshNow(r.Context()); err != nil {
+			slog.Warn("scope-create: quota refresh failed; the new scope is gated after the next TTL refresh", "scope", scope, "error", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "scope": scope, "tenant_id": bindingTenant})
 }

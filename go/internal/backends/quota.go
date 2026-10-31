@@ -3,6 +3,10 @@ package backends
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -59,12 +63,27 @@ func (e *ErrQuotaExceeded) Error() string {
 
 // tenantState is one tenant's cached policy + rolling spend, built by a refresh
 // and read lock-free. Spend is external cost (the budget axis); calls counts all
-// attributed wire calls.
+// attributed wire calls. Spend is counted over EVERY key of the tenant, so the
+// policy it is compared against must bind the whole tenant too (GHSA
+// 2026-10-31 §4) — quotaGen keys it by tenant, never by one scope.
 type tenantState struct {
 	quota     TenantQuota
 	dayCost   float64 // SUM(cost_usd) external, last 24h
 	monthCost float64 // SUM(cost_usd) external, last 30d
 	dayCalls  int     // COUNT attributed calls, last 24h
+}
+
+// quotaGen is one immutable refresh generation. A quota row lives on the scope
+// tenant-quota-set named, but it binds the TENANT that scope belongs to: Gate
+// resolves the caller's scope through scopeTenant and reads the tenant's state.
+// Before this a key homed in a second scope of the same tenant found no row
+// under its own scope and ran unlimited, while its spend still counted towards
+// the tenant (GHSA 2026-10-31 §4). Only scopes of tenants that HAVE an enabled
+// policy are mapped — every other scope resolves to "no policy" either way, so
+// the map stays bounded by the policy tenants, not by the whole scope table.
+type quotaGen struct {
+	scopeTenant map[string]string      // scope → tenant_id (policy tenants only)
+	tenants     map[string]tenantState // tenant_id → merged policy + spend
 }
 
 // QuotaAccountant serves per-tenant spend + policy from a generation snapshot
@@ -74,9 +93,15 @@ type QuotaAccountant struct {
 	q       pgxdb.Querier
 	ttl     time.Duration
 	nowFn   func() time.Time // injectable clock for tests (real: time.Now)
-	cache   atomic.Pointer[map[string]tenantState]
+	cache   atomic.Pointer[quotaGen]
 	cacheAt atomic.Int64 // unix nano of the last successful refresh
 	refresh atomic.Bool  // CAS single-flight guard
+
+	// warnMu guards warned, the last-logged multi-row signature per tenant, so
+	// a tenant with several quota rows is warned about once per change, not on
+	// every TTL refresh. Build path only — never touched by Gate.
+	warnMu sync.Mutex
+	warned map[string]string
 }
 
 // NewQuotaAccountant builds an accountant over q (a *pgxpool.Pool in production)
@@ -89,21 +114,27 @@ func NewQuotaAccountant(q pgxdb.Querier, ttl time.Duration) *QuotaAccountant {
 }
 
 // Gate applies both budgets to a resolved chain for the caller's scope and
-// returns the (possibly external-filtered) chain. It is lock-free and triggers a
-// background refresh when the cache is stale. Fail-open: a cold cache, a scope
-// with no quota row, or a disabled policy passes the chain through unchanged —
-// the fail-closed axis is egress visibility (Chain), not the cost budget. An
-// empty/reserved scope (no real tenant) is never gated.
+// returns the (possibly external-filtered) chain. The policy is the one of the
+// scope's TENANT — a row on any scope of that tenant binds every scope of it.
+// It is lock-free and triggers a background refresh when the cache is stale.
+// Fail-open: a cold cache, a tenant with no quota row, or a disabled policy
+// passes the chain through unchanged — the fail-closed axis is egress
+// visibility (Chain), not the cost budget. An empty/reserved scope, or any
+// scope that maps to no tenant (_global, sentinel callers), is never gated.
 func (a *QuotaAccountant) Gate(scope string, chain []Backend) ([]Backend, error) {
 	if scope == "" || scope == GlobalScope {
 		return chain, nil
 	}
 	a.ensureFresh()
-	m := a.cache.Load()
-	if m == nil {
+	gen := a.cache.Load()
+	if gen == nil {
 		return chain, nil // cold start: fail-open until the first refresh lands
 	}
-	st, ok := (*m)[scope]
+	tenant, ok := gen.scopeTenant[scope]
+	if !ok {
+		return chain, nil // no tenant, or a tenant without an enabled policy
+	}
+	st, ok := gen.tenants[tenant]
 	if !ok || !st.quota.Enabled {
 		return chain, nil // no quota row (or disabled) = unlimited
 	}
@@ -174,83 +205,210 @@ func (a *QuotaAccountant) RefreshNow(ctx context.Context) error {
 	return nil
 }
 
-// build assembles the per-scope policy + spend generation. Three steps: (1) load
-// enabled quota rows; (2) resolve each quota scope's key ids to a literal uuid[]
-// in ONE pass; (3) per scope, SUM external cost + COUNT calls over those keys —
-// api_key_id = ANY($keys) (literal, index-friendly, NOT IN(subquery) the planner
-// hash-joins past, §6.4).
-func (a *QuotaAccountant) build(ctx context.Context) (map[string]tenantState, error) {
-	policies, err := a.loadPolicies(ctx)
+// build assembles the per-tenant policy + spend generation. Four steps: (1)
+// load the enabled quota rows with the tenant their scope belongs to and merge
+// them per tenant; (2) map every scope of those tenants to its tenant; (3)
+// resolve each tenant's key ids to a literal uuid[] in ONE pass; (4) per
+// tenant, SUM external cost + COUNT calls over those keys — api_key_id =
+// ANY($keys) (literal, index-friendly, NOT IN(subquery) the planner hash-joins
+// past, §6.4).
+func (a *QuotaAccountant) build(ctx context.Context) (quotaGen, error) {
+	gen := quotaGen{scopeTenant: map[string]string{}, tenants: map[string]tenantState{}}
+	rows, err := a.loadPolicies(ctx)
 	if err != nil {
-		return nil, err
+		return gen, err
 	}
-	gen := make(map[string]tenantState, len(policies))
+	policies := a.mergePolicies(rows)
 	if len(policies) == 0 {
 		return gen, nil
 	}
-	scopes := make([]string, 0, len(policies))
-	for s := range policies {
-		scopes = append(scopes, s)
+	tenantIDs := make([]string, 0, len(policies))
+	for t := range policies {
+		tenantIDs = append(tenantIDs, t)
 	}
-	keysByScope, err := a.loadKeysByScope(ctx, scopes)
+	if gen.scopeTenant, err = a.loadTenantScopes(ctx, tenantIDs); err != nil {
+		return gen, err
+	}
+	keysByTenant, err := a.loadKeysByTenant(ctx, tenantIDs)
 	if err != nil {
-		return nil, err
+		return gen, err
 	}
-	for scope, q := range policies {
+	for tenant, q := range policies {
 		st := tenantState{quota: q}
-		if keys := keysByScope[scope]; len(keys) > 0 {
+		if keys := keysByTenant[tenant]; len(keys) > 0 {
 			dc, mc, calls, serr := a.spend(ctx, keys)
 			if serr != nil {
-				return nil, serr
+				return gen, serr
 			}
 			st.dayCost, st.monthCost, st.dayCalls = dc, mc, calls
 		}
-		gen[scope] = st
+		gen.tenants[tenant] = st
 	}
 	return gen, nil
 }
 
-func (a *QuotaAccountant) loadPolicies(ctx context.Context) (map[string]TenantQuota, error) {
+// policyRow is one enabled context_tenant_quota row with the tenant its scope
+// maps to ("" = the scope is in no tenant).
+type policyRow struct {
+	scope, tenant string
+	quota         TenantQuota
+}
+
+func (a *QuotaAccountant) loadPolicies(ctx context.Context) ([]policyRow, error) {
 	rows, err := a.q.Query(ctx, `
-		SELECT scope, daily_cost_usd, monthly_cost_usd, daily_calls, on_exceed, enabled
-		FROM context_tenant_quota
-		WHERE enabled = true`)
+		SELECT q.scope, COALESCE(cts.tenant_id::text, ''),
+		       q.daily_cost_usd, q.monthly_cost_usd, q.daily_calls, q.on_exceed, q.enabled
+		FROM context_tenant_quota q
+		LEFT JOIN context_tenant_scopes cts ON cts.scope = q.scope
+		WHERE q.enabled = true`)
 	if err != nil {
 		return nil, fmt.Errorf("quota: load policies: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]TenantQuota{}
+	var out []policyRow
 	for rows.Next() {
-		var scope string
-		var q TenantQuota
-		if err := rows.Scan(&scope, &q.DailyCostUSD, &q.MonthlyCostUSD, &q.DailyCalls, &q.OnExceed, &q.Enabled); err != nil {
+		var r policyRow
+		if err := rows.Scan(&r.scope, &r.tenant, &r.quota.DailyCostUSD, &r.quota.MonthlyCostUSD, &r.quota.DailyCalls, &r.quota.OnExceed, &r.quota.Enabled); err != nil {
 			return nil, fmt.Errorf("quota: scan policy: %w", err)
 		}
-		out[scope] = q
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
 
-// loadKeysByScope maps each quota scope to its tenant's api-key ids in one query
-// (scope → tenant_id via context_tenant_scopes → keys). active AND inactive keys
-// count (cost history outlives a revoked key, §3.4).
-func (a *QuotaAccountant) loadKeysByScope(ctx context.Context, scopes []string) (map[string][]string, error) {
+// mergePolicies folds the rows into one policy per tenant. The schema keeps
+// UNIQUE(scope), not UNIQUE(tenant), so two rows on two scopes of one tenant
+// can exist; the strictest limit per field applies (StrictestQuota) and the
+// condition is logged once per change. A row whose scope maps to no tenant
+// binds nobody — Gate never gates a tenant-less scope — and is logged too.
+func (a *QuotaAccountant) mergePolicies(rows []policyRow) map[string]TenantQuota {
+	byTenant := map[string][]policyRow{}
+	for _, r := range rows {
+		if r.tenant == "" {
+			a.warnOnce("scope:"+r.scope, "", "quota: policy row on a scope that maps to no tenant is ignored", "scope", r.scope)
+			continue
+		}
+		byTenant[r.tenant] = append(byTenant[r.tenant], r)
+	}
+	out := make(map[string]TenantQuota, len(byTenant))
+	for tenant, rs := range byTenant {
+		qs := make([]TenantQuota, len(rs))
+		scopes := make([]string, len(rs))
+		for i, r := range rs {
+			qs[i], scopes[i] = r.quota, r.scope
+		}
+		if len(rs) > 1 {
+			slices.Sort(scopes)
+			a.warnOnce("tenant:"+tenant, strings.Join(scopes, ","),
+				"quota: tenant has several quota rows; the strictest limit per field applies",
+				"tenant_id", tenant, "scopes", scopes)
+		} else {
+			a.warnOnce("tenant:"+tenant, "", "")
+		}
+		out[tenant] = StrictestQuota(qs...)
+	}
+	return out
+}
+
+// warnOnce logs msg when the signature recorded under key changes to a
+// non-empty sig (or to "seen" for a sig-less warning). An empty msg only
+// clears the key, so a condition that comes back is logged again.
+func (a *QuotaAccountant) warnOnce(key, sig, msg string, args ...any) {
+	a.warnMu.Lock()
+	defer a.warnMu.Unlock()
+	if a.warned == nil {
+		a.warned = map[string]string{}
+	}
+	if msg == "" {
+		delete(a.warned, key)
+		return
+	}
+	if sig == "" {
+		sig = "seen"
+	}
+	if a.warned[key] == sig {
+		return
+	}
+	a.warned[key] = sig
+	slog.Warn(msg, args...)
+}
+
+// StrictestQuota merges enabled policies of one tenant into the strictest one:
+// per budget the smallest non-nil limit (nil = unlimited loses to any limit),
+// on_exceed block over external_off. With no policy it returns the zero value
+// (disabled = unlimited). Exported for tenant-quota-get, which shows a
+// tenant-admin the policy Gate actually enforces.
+func StrictestQuota(qs ...TenantQuota) TenantQuota {
+	if len(qs) == 0 {
+		return TenantQuota{}
+	}
+	out := qs[0]
+	for _, q := range qs[1:] {
+		out.DailyCostUSD = minLimit(out.DailyCostUSD, q.DailyCostUSD)
+		out.MonthlyCostUSD = minLimit(out.MonthlyCostUSD, q.MonthlyCostUSD)
+		out.DailyCalls = minLimit(out.DailyCalls, q.DailyCalls)
+		if q.OnExceed == QuotaExceedBlock {
+			out.OnExceed = QuotaExceedBlock
+		}
+		out.Enabled = out.Enabled || q.Enabled
+	}
+	return out
+}
+
+// minLimit returns the smaller of two optional limits; nil means unlimited.
+func minLimit[T int | float64](a, b *T) *T {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case *b < *a:
+		return b
+	default:
+		return a
+	}
+}
+
+// loadTenantScopes maps every scope of the given tenants to its tenant — the
+// lookup Gate resolves the caller's scope through.
+func (a *QuotaAccountant) loadTenantScopes(ctx context.Context, tenantIDs []string) (map[string]string, error) {
 	rows, err := a.q.Query(ctx, `
-		SELECT cts.scope, cak.id::text
-		FROM context_api_keys cak
-		JOIN context_tenant_scopes cts ON cak.tenant_id = cts.tenant_id
-		WHERE cts.scope = ANY($1::text[])`, scopes)
+		SELECT scope, tenant_id::text
+		FROM context_tenant_scopes
+		WHERE tenant_id = ANY($1::uuid[])`, tenantIDs)
+	if err != nil {
+		return nil, fmt.Errorf("quota: load tenant scopes: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var scope, tenant string
+		if err := rows.Scan(&scope, &tenant); err != nil {
+			return nil, fmt.Errorf("quota: scan tenant scope: %w", err)
+		}
+		out[scope] = tenant
+	}
+	return out, rows.Err()
+}
+
+// loadKeysByTenant maps each policy tenant to its api-key ids in one query.
+// active AND inactive keys count (cost history outlives a revoked key, §3.4).
+func (a *QuotaAccountant) loadKeysByTenant(ctx context.Context, tenantIDs []string) (map[string][]string, error) {
+	rows, err := a.q.Query(ctx, `
+		SELECT tenant_id::text, id::text
+		FROM context_api_keys
+		WHERE tenant_id = ANY($1::uuid[])`, tenantIDs)
 	if err != nil {
 		return nil, fmt.Errorf("quota: load keys: %w", err)
 	}
 	defer rows.Close()
 	out := map[string][]string{}
 	for rows.Next() {
-		var scope, id string
-		if err := rows.Scan(&scope, &id); err != nil {
+		var tenant, id string
+		if err := rows.Scan(&tenant, &id); err != nil {
 			return nil, fmt.Errorf("quota: scan key: %w", err)
 		}
-		out[scope] = append(out[scope], id)
+		out[tenant] = append(out[tenant], id)
 	}
 	return out, rows.Err()
 }

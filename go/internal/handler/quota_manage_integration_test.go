@@ -107,6 +107,20 @@ func TestQuotaManageRoundTrip(t *testing.T) {
 		}
 	})
 
+	// GHSA 2026-10-31 §4: a tenant-admin homed in a SECOND scope of tq-a's
+	// tenant sees the tenant's policy (the one Gate enforces), not "unlimited".
+	t.Run("tenant_admin_get_second_scope_sees_tenant_policy", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `INSERT INTO context_tenant_scopes (scope, tenant_id)
+			SELECT 'tq-a:side', tenant_id FROM context_tenant_scopes WHERE scope = 'tq-a'`); err != nil {
+			t.Fatalf("map tq-a:side: %v", err)
+		}
+		ta := &auth.AuthResult{IsValid: true, HomeScope: "tq-a:side", TenantID: "tid-a", TenantRole: auth.RoleAdmin}
+		got := callGet(ta, nil)
+		if got["scope"] != "tq-a:side" || got["unlimited"] == true || got["daily_calls"] != float64(0) {
+			t.Fatalf("second scope should show the tenant's policy (daily_calls=0), got %v", got)
+		}
+	})
+
 	// server-admin get can target any scope.
 	t.Run("server_admin_get_any_scope", func(t *testing.T) {
 		got := callGet(server, map[string]any{"scope": "tq-other"})
@@ -114,4 +128,40 @@ func TestQuotaManageRoundTrip(t *testing.T) {
 			t.Fatalf("server-admin get should reach tq-other: got %v", got["scope"])
 		}
 	})
+}
+
+// TestQuotaScopeCreateRefreshes is the GHSA 2026-10-31 §4 window probe: the
+// accountant maps scope → tenant from its cached generation, so a scope a
+// tenant-admin creates would be unknown (= ungated) until the next TTL refresh.
+// scope-create refreshes the accountant; the new scope is gated by the
+// tenant's quota at once.
+func TestQuotaScopeCreateRefreshes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	tenantID := be5SeedTenant(t, pool, "s4sc")
+	be5SeedScope(t, pool, "s4sc", tenantID)
+	if _, err := pool.Exec(ctx, `INSERT INTO context_tenant_quota (scope, daily_calls) VALUES ('s4sc', 0)`); err != nil {
+		t.Fatalf("seed quota: %v", err)
+	}
+	acc := backends.NewQuotaAccountant(pool, time.Hour) // no TTL refresh inside the test
+	if err := acc.RefreshNow(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	h := NewManageHandler(pool, nil, nil, nil, nil, nil, acc, nil)
+
+	rec := be5ScopeManageAs(t, h, be5TenantAdmin(tenantID), map[string]any{
+		"action": "scope-create", "data": map[string]any{"name": "side"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scope-create: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	_, err := acc.Gate("s4sc:side", []backends.Backend{{ID: "x", Name: "local", Locality: "local"}})
+	var qe *backends.ErrQuotaExceeded
+	if err == nil || !errors.As(err, &qe) || qe.Reason != "daily_calls" {
+		t.Fatalf("the new scope must be gated by the tenant's quota right after scope-create, Gate err=%v", err)
+	}
 }
