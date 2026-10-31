@@ -404,7 +404,8 @@ and manifest are deliberately small so routine recall stays cheap.
   head out of the result window, `budget_s` bounds every call including the
   head search, a root session id that sanitizing or truncation changes gets a
   hash suffix in its head title (no more shared heads; ordinary Hermes ids keep
-  their titles), every failure is logged as a warning naming the compaction
+  their titles; the `ctx` provider 1.8.1 uses the same function, so both still
+  write identical titles), every failure is logged as a warning naming the compaction
   outcome, and `install.sh` writes dot-prefixed backups).
 - Catalog pin: 0.5.0 at `ee8cb2e` (`plugin-catalog/ctx_checkpoint.yaml`
   upstream; listed 2026-10-25 with 0.4.4 at `98749f3`, re-pinned 2026-10-29 in

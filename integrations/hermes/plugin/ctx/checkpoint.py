@@ -37,7 +37,7 @@ from .client import CtxApiError, response_code, store_block_id
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "1.8.0"  # keep in sync with plugin.yaml (tests/test_host_contract.py)
+PLUGIN_VERSION = "1.8.1"  # keep in sync with plugin.yaml (tests/test_host_contract.py)
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -59,6 +59,17 @@ _SYNTHETIC_ASSISTANT_PREFIXES = (
 DEFAULT_CHUNK_CHARS = 36_000
 MAX_CHUNK_CHARS = 40_000
 MIN_CHUNK_CHARS = 1_000
+# ctx caps block content at 50 KiB of UTF-8 BYTES (go/internal/handler/context_store.go,
+# blockSizeLimit: ``len(content) > 50*1024``), on /api/store as on MCP. The chunk size
+# counts characters, so a part of Cyrillic (2 bytes/char) or CJK (3 bytes/char) text
+# crossed the cap long before the character limit and every checkpoint of such a
+# transcript was rejected (1.8.1, same fix as ctx_checkpoint 0.5.2). Parts are cut at
+# whichever limit comes first.
+CTX_CONTENT_MAX_BYTES = 50 * 1024
+# Transcript bytes a part must at least have room for after its header.
+MIN_PART_TEXT_BYTES = 4 * 1024
+# Root session id as a title token: at most this many characters of [A-Za-z0-9_.-].
+ROOT_TOKEN_MAX = 48
 # Server write rate limit: 100 writes / 60 s per key (go/internal/config/config.go:860).
 # One checkpoint = parts + manifest + head; the cap keeps a single chain below the
 # window with headroom for facts/mirror writes of the same key.
@@ -226,21 +237,55 @@ def clamp_chunk_chars(value: Any) -> int:
     return max(MIN_CHUNK_CHARS, min(configured, MAX_CHUNK_CHARS))
 
 
-def split_chunks(rendered: str, chunk_chars: Any = DEFAULT_CHUNK_CHARS) -> list[str]:
-    """Split at message boundaries (``\\n### Message ``) when possible; hard cut otherwise."""
+def _utf8_prefix(text: str, max_bytes: int) -> str:
+    """Longest prefix of ``text`` whose UTF-8 encoding fits into ``max_bytes``."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    # Cutting the bytes can split one multi-byte character at the end; "ignore" drops
+    # exactly that incomplete tail and nothing else.
+    return encoded[:max_bytes].decode("utf-8", "ignore")
+
+
+def split_chunks(
+    rendered: str, chunk_chars: Any = DEFAULT_CHUNK_CHARS, byte_budget: int = CTX_CONTENT_MAX_BYTES
+) -> list[str]:
+    """Parts of at most ``chunk_chars`` characters AND ``byte_budget`` UTF-8 bytes.
+
+    A part ends at the last message boundary (``\\n### Message ``) inside that window,
+    or hard at the window's end when the boundary would leave it shorter than a third.
+    """
     limit = clamp_chunk_chars(chunk_chars)
     chunks: list[str] = []
     remaining = rendered
     while remaining:
-        if len(remaining) <= limit:
+        window = len(_utf8_prefix(remaining[:limit], byte_budget))
+        if window >= len(remaining):
             chunks.append(remaining)
             break
-        cut = remaining.rfind("\n### Message ", 0, limit)
-        if cut < limit // 3:
-            cut = limit
+        cut = remaining.rfind("\n### Message ", 0, window)
+        if cut < window // 3:
+            cut = window
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
     return chunks
+
+
+def part_header(root: str, session_id: str, digest: str, index: int, total: int) -> str:
+    """Header of one source part — bit-identical to ctx_checkpoint (distiller format)."""
+    return (
+        "# Compaction source evidence\n\n"
+        "This is deterministic, redacted source evidence captured before "
+        "Hermes replaced older turns with a lossy compaction summary. "
+        "Role labels and message ordinals are preserved. Tool results, "
+        "system prompts, synthetic compaction handoffs, and credentials "
+        "are intentionally excluded.\n\n"
+        f"- Root session: `{root}`\n"
+        f"- Active session: `{session_id}`\n"
+        f"- Transcript SHA-256: `{digest}`\n"
+        f"- Part: {index}/{total}\n\n"
+        "## Direct transcript\n\n"
+    )
 
 
 def _find_value(value: Any, key: str) -> str | None:
@@ -322,7 +367,21 @@ def _find_block_id_by_title(value: Any, title: str) -> str | None:
 
 
 def _short_root(root_session_id: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", root_session_id)[:48]
+    """Root session id as a title token: ``[A-Za-z0-9_.-]``, at most 48 characters.
+
+    Same function as ``_root_title_token`` in ctx_checkpoint 0.5.2 — both providers
+    write identical titles, so this must stay in lockstep (golden vectors in
+    tests/test_p3_checkpoint_chain.py and ctx_checkpoint's tests pin the same outputs).
+    An id that sanitizing leaves unchanged and that fits is used as it is, so heads of
+    ordinary Hermes session ids keep their titles. An id that sanitizing or truncation
+    changed gets a hash of the full id as suffix: ``team/alice:1`` and ``team:alice/1``,
+    or two long ids sharing their first 48 characters, used to map to one head (1.8.1).
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", root_session_id)
+    if safe == root_session_id and len(safe) <= ROOT_TOKEN_MAX:
+        return safe
+    suffix = hashlib.sha256(root_session_id.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    return f"{safe[: ROOT_TOKEN_MAX - len(suffix) - 1]}-{suffix}"
 
 
 def head_title_for(root_session_id: str) -> str:
@@ -468,6 +527,11 @@ class ChainWriter:
 
         Searches the head by title and reads it. ``(None, [])`` = no head yet; a head
         without a valid ``latest_manifest_id`` raises ``CtxCheckpointError``.
+
+        Narrowed to heads by their tag (every head carries ``checkpoint-head``): parts
+        and manifests share the ``checkpoint`` type, so a type filter alone still let
+        source parts that talk about checkpoints or headings rank ahead of the head and
+        push it out of the result window (1.8.1, same fix as ctx_checkpoint 0.5.2).
         """
         result = self._call(
             "head search",
@@ -478,6 +542,7 @@ class ChainWriter:
             text=head_title,
             category=CATEGORY_CHECKPOINT,
             types=[CHECKPOINT_TYPE],
+            tags=["checkpoint-head"],
             limit=10,
         )
         head_id = _find_block_id_by_title(result, head_title)
@@ -543,7 +608,17 @@ class ChainWriter:
                 lookup="none",
             )
         digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-        chunks = split_chunks(rendered, self.chunk_chars)
+        root = root_session_id or session_id or "unknown"
+        # Reserve the largest header any part of this chain can carry; the rest of ctx's
+        # byte cap is the transcript budget of one part.
+        header_bytes = len(part_header(root, session_id, digest, 99_999, 99_999).encode("utf-8"))
+        byte_budget = CTX_CONTENT_MAX_BYTES - header_bytes
+        if byte_budget < MIN_PART_TEXT_BYTES:
+            raise CtxCheckpointError(
+                f"ctx checkpoint part header takes {header_bytes} of ctx's "
+                f"{CTX_CONTENT_MAX_BYTES}-byte content cap; nothing written"
+            )
+        chunks = split_chunks(rendered, self.chunk_chars, byte_budget)
         max_parts = max(1, min(int(self.max_parts), MAX_PARTS_CEILING))
         if len(chunks) > max_parts:
             raise CtxCheckpointError(
@@ -552,7 +627,6 @@ class ChainWriter:
             )
 
         now = datetime.now(timezone.utc).isoformat()
-        root = root_session_id or session_id or "unknown"
         short_root = _short_root(root)
         head_title = head_title_for(root)
         stats: dict[str, int] = {"writes": 0, "rate_limited": 0}
@@ -592,20 +666,7 @@ class ChainWriter:
 
         chunk_ids: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
-            body = (
-                "# Compaction source evidence\n\n"
-                "This is deterministic, redacted source evidence captured before "
-                "Hermes replaced older turns with a lossy compaction summary. "
-                "Role labels and message ordinals are preserved. Tool results, "
-                "system prompts, synthetic compaction handoffs, and credentials "
-                "are intentionally excluded.\n\n"
-                f"- Root session: `{root}`\n"
-                f"- Active session: `{session_id}`\n"
-                f"- Transcript SHA-256: `{digest}`\n"
-                f"- Part: {index}/{len(chunks)}\n\n"
-                "## Direct transcript\n\n"
-                f"{chunk}"
-            )
+            body = part_header(root, session_id, digest, index, len(chunks)) + chunk
             metadata = dict(common_metadata)
             metadata.update(
                 {"part": index, "parts": len(chunks), "part_sha256": hashlib.sha256(chunk.encode("utf-8")).hexdigest()}

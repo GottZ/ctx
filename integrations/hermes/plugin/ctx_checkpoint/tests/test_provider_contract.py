@@ -715,3 +715,19 @@ def test_failure_is_logged_as_a_warning_naming_the_compaction_outcome(caplog):
         assert len(failures) == 1, failures
         assert outcome in failures[0]
         assert "source part 1/1" in failures[0]
+
+
+# Same inputs and outputs as HEAD_TITLE_GOLDEN in the ctx provider's
+# tests/test_p3_checkpoint_chain.py: both providers write identical chain titles.
+def test_head_title_golden_vectors_shared_with_the_ctx_provider():
+    golden = {
+        "20261031_120000_abcdef": "20261031_120000_abcdef",
+        "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c": "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c",
+        "root/session-a": "root_session-a-a0af5788",
+        "team/alice:1": "team_alice_1-8e207def",
+        "team:alice/1": "team_alice_1-7054b256",
+        "x" * 60: "x" * 39 + "-42f2d973",
+        "über-sitzung": "_ber-sitzung-a42b9cb4",
+    }
+    for root, token in golden.items():
+        assert _MODULE._root_title_token(root) == token, root

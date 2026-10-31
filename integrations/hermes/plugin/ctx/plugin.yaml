@@ -1,5 +1,5 @@
 name: ctx
-version: 1.8.0
+version: 1.8.1
 description: "CTX (GottZ/ctx) self-hosted knowledge store — semantic long-term memory, explicit recall/store tools, mirror of built-in memory writes."
 hooks:
   - on_memory_write

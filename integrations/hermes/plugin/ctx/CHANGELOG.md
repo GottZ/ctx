@@ -3,6 +3,30 @@
 All notable changes to the CTX memory provider. Versions follow `plugin/plugin.yaml`.
 Internal phase names (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [1.8.1] — 2026-10-31
+
+Checkpoint-chain fixes shared with `ctx_checkpoint` 0.5.2. The two providers write
+identical chain titles, so the title function changes in both at once.
+
+### Fixed
+- **Parts respect ctx's byte cap.** `split_chunks` cut at `checkpoint_chunk_chars`
+  characters, but `/api/store` caps content at 50 KiB of UTF-8 bytes. A full part of
+  Cyrillic text is ~72 KB, of CJK text ~108 KB, so every checkpoint of such a
+  transcript was rejected — under `compression.checkpoint_required` the session halted
+  for good. Parts are now cut at whichever limit comes first, with the largest possible
+  part header reserved. The part format is unchanged (the distiller golden test holds).
+- **Head lookup is narrowed to heads.** The head search filtered on
+  `types=["checkpoint"]` only; parts and manifests share that type, so source parts
+  talking about checkpoints or headings could push the head out of the result window and
+  silently start a new chain (the in-process cache only rescues this within one process).
+  The search now also filters on the `checkpoint-head` tag, which every head carries.
+- **No more shared heads for different sessions.** A root session id that sanitizing or
+  the 48-character cut changes (`team/alice:1` vs `team:alice/1`, or two long ids with
+  the same prefix) mapped to the same head title. Such ids now get an 8-character hash of
+  the full id as suffix. Ordinary Hermes ids (`20261031_120000_abcdef`, UUIDs) keep
+  their titles, so existing heads are still found. Golden vectors pinned in both
+  providers' tests keep the two title functions in lockstep.
+
 ## [1.8.0] — 2026-10-31
 
 Maintained in [GottZ/ctx](https://github.com/GottZ/ctx) as

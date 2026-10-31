@@ -145,7 +145,7 @@ Out-of-range values are clamped, unknown values fall back to the default.
 | `checkpoint_budget_s` | `20` | Time budget for the synchronous pre-compress writes, chain and required facts share it (5–60) |
 | `checkpoint_chain` | `true` | Write the transcript chain (needs `checkpoint_mode` ≠ `off`); independent of `auto_compress_extract` |
 | `checkpoint_sensitivity` | `personal` | Sensitivity of chain blocks (transcripts are personal data) |
-| `checkpoint_chunk_chars` | `36000` | Part size (1 000–40 000 chars) |
+| `checkpoint_chunk_chars` | `36000` | Part size (1 000–40 000 chars); a part also stays under ctx's 50 KB content cap in UTF-8 bytes (1.8.1) |
 | `checkpoint_max_parts` | `80` | Max parts per checkpoint (1–95; server write limit 100/60 s per key) — more ⇒ nothing written, error |
 | `digest_min_exchanges` | `4` | Min. new user/assistant text messages since the last digest of the root session (1–1000) |
 | `digest_every_exchanges` | `40` | Rolling digest after N new exchanges; `0` = off |
