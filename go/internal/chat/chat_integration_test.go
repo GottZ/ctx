@@ -124,11 +124,13 @@ func (p trustProvider) ChatChain(_ context.Context, required backends.Sensitivit
 }
 
 type fakeQuery struct {
+	gotScope  string
 	gotScopes []string
 	result    chat.QueryResult
 }
 
-func (q *fakeQuery) RunQuery(_ context.Context, readScopes []string, _ string, _ int) (chat.QueryResult, error) {
+func (q *fakeQuery) RunQuery(_ context.Context, scope string, readScopes []string, _ string, _ int) (chat.QueryResult, error) {
+	q.gotScope = scope
 	q.gotScopes = readScopes
 	return q.result, nil
 }
@@ -237,6 +239,11 @@ func TestChatEngine(t *testing.T) {
 		}
 		if got := strings.Join(fq.gotScopes, ","); got != "private" {
 			t.Fatalf("ctx_query ran under scopes %q; want the session snapshot [private]", got)
+		}
+		// §C2: the caller's AuthResult carries no home scope here, so a
+		// non-empty owner scope can only have come from the session.
+		if fq.gotScope != "private" {
+			t.Fatalf("ctx_query ran for owner scope %q; want the session's scope private", fq.gotScope)
 		}
 		if tr := col.last("tool_result"); tr == nil || tr["ok"] != true {
 			t.Fatalf("tool_result = %v; want ok=true", tr)
@@ -534,12 +541,12 @@ func TestChatExecutor(t *testing.T) {
 		privID := seedBlock(t, pool, "private", "Secret block", "the private secret content", backends.SensInternal)
 
 		// ctx_get under [work] → not found (GetBlock scope filter is the gate).
-		out := exec.Run(ctx, []string{"work"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q}`, privID)))
+		out := exec.Run(ctx, "private", []string{"work"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q}`, privID)))
 		if out.OK {
 			t.Fatalf("ctx_get on a private block under [work] returned ok=true — scope gate breached")
 		}
 		// ctx_get under [private] → found (proves the not-found above was the gate, not chance).
-		out2 := exec.Run(ctx, []string{"private"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q}`, privID)))
+		out2 := exec.Run(ctx, "private", []string{"private"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q}`, privID)))
 		if !out2.OK || !strings.Contains(out2.Content, "private secret content") {
 			t.Fatalf("ctx_get under [private] = ok:%v; want the block content", out2.OK)
 		}
@@ -547,7 +554,7 @@ func TestChatExecutor(t *testing.T) {
 
 	t.Run("SensitivityAnnotationRaisesHWM", func(t *testing.T) {
 		credID := seedBlock(t, pool, "private", "Creds block", "AKIA-style content", backends.SensCredentials)
-		out := exec.Run(ctx, []string{"private"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q}`, credID)))
+		out := exec.Run(ctx, "private", []string{"private"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q}`, credID)))
 		if !out.OK || out.Sensitivity != backends.SensCredentials {
 			t.Fatalf("ctx_get sensitivity = %q (ok=%v); want credentials", out.Sensitivity, out.OK)
 		}
@@ -557,7 +564,7 @@ func TestChatExecutor(t *testing.T) {
 		// 80-char block, 50-char window: offset 0 truncates (next=50), offset 50
 		// reads the final 30-char window (no further truncation).
 		bigID := seedBlock(t, pool, "private", "Big block", strings.Repeat("x", 80), backends.SensInternal)
-		out := exec.Run(ctx, []string{"private"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q}`, bigID)))
+		out := exec.Run(ctx, "private", []string{"private"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q}`, bigID)))
 		if !out.OK || !out.Truncated {
 			t.Fatalf("ctx_get on an 80-char block with window 50 = ok:%v truncated:%v; want ok/true", out.OK, out.Truncated)
 		}
@@ -572,14 +579,14 @@ func TestChatExecutor(t *testing.T) {
 			t.Fatalf("content window missing the offset marker: %q", c)
 		}
 		// Resume from offset=50 reads the tail.
-		out2 := exec.Run(ctx, []string{"private"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q,"offset":50}`, bigID)))
+		out2 := exec.Run(ctx, "private", []string{"private"}, "", toolCall("ctx_get", fmt.Sprintf(`{"id":%q,"offset":50}`, bigID)))
 		if !out2.OK || out2.Truncated {
 			t.Fatalf("offset=50 read truncated=%v; want the final window", out2.Truncated)
 		}
 	})
 
 	t.Run("UnknownToolIsNotFatal", func(t *testing.T) {
-		out := exec.Run(ctx, []string{"private"}, "", toolCall("ctx_delete_everything", `{}`))
+		out := exec.Run(ctx, "private", []string{"private"}, "", toolCall("ctx_delete_everything", `{}`))
 		if out.OK || !strings.Contains(out.Content, "unknown tool") {
 			t.Fatalf("unknown tool = ok:%v content:%q; want ok=false / unknown tool", out.OK, out.Content)
 		}

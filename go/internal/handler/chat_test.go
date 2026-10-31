@@ -128,15 +128,19 @@ func TestChatSinkHeartbeat(t *testing.T) {
 
 // TestChatQueryRunnerDelegation proves the ctx_query tool delegation: the
 // retrieval-only + include_content body shape, the SESSION read_scopes injected
-// into the delegated request's AuthResult (scope isolation, §3.1), and the
-// response mapping into chat.QueryResult.
+// into the delegated request's AuthResult (scope isolation, §3.1), the session
+// OWNER's scope as its home scope (§C2 — not the continuing caller's), the
+// caller's key id for attribution, and the response mapping into
+// chat.QueryResult.
 func TestChatQueryRunnerDelegation(t *testing.T) {
 	var gotBody map[string]any
 	var gotScopes []string
+	var gotAR auth.AuthResult
 	fake := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		if ar := AuthResultFromContext(r.Context()); ar != nil {
 			gotScopes = ar.ReadScopes
+			gotAR = *ar
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"success":    true,
@@ -147,10 +151,23 @@ func TestChatQueryRunnerDelegation(t *testing.T) {
 		})
 	})
 	qr := &chatQueryRunner{handler: fake}
+	// The continuing caller is homed elsewhere and carries a tenant: neither
+	// may leak into the delegated request — only its key id does.
+	caller := &auth.AuthResult{ApiKeyID: "k1", HomeScope: "caller-home", TenantID: "t-caller", ReadScopes: []string{"work", "shared", "caller-home"}, IsValid: true}
+	ctx := context.WithValue(context.Background(), authResultKey, caller)
 
-	res, err := qr.RunQuery(context.Background(), []string{"work", "shared"}, "dream backoff", 5)
+	res, err := qr.RunQuery(ctx, "work", []string{"work", "shared"}, "dream backoff", 5)
 	if err != nil {
 		t.Fatalf("RunQuery: %v", err)
+	}
+	if gotAR.HomeScope != "work" {
+		t.Fatalf("injected home scope = %q; want the session owner's scope work (quota gate + backend visibility bind to it)", gotAR.HomeScope)
+	}
+	if gotAR.TenantID != "" {
+		t.Fatalf("injected tenant id = %q; want empty (chat tools read scope-only, no grants)", gotAR.TenantID)
+	}
+	if gotAR.ApiKeyID != "k1" {
+		t.Fatalf("injected key id = %q; want the caller's k1 (attribution)", gotAR.ApiKeyID)
 	}
 	if gotBody["synthesize"] != false {
 		t.Fatalf("delegated body synthesize = %v; want false (retrieval-only)", gotBody["synthesize"])
@@ -181,8 +198,18 @@ func TestChatQueryRunnerError(t *testing.T) {
 		writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": "synthesis failed"})
 	})
 	qr := &chatQueryRunner{handler: fake}
-	if _, err := qr.RunQuery(context.Background(), []string{"private"}, "q", 5); err == nil {
+	if _, err := qr.RunQuery(context.Background(), "private", []string{"private"}, "q", 5); err == nil {
 		t.Fatal("RunQuery must return an error when the query envelope carries one")
+	}
+
+	// The quota gate's refusal carries only error_code: it must surface as an
+	// error, not as an empty hit list the model reads as "nothing stored".
+	quota := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"success": false, "error_code": "quota_exceeded"})
+	})
+	qr = &chatQueryRunner{handler: quota}
+	if _, err := qr.RunQuery(context.Background(), "private", []string{"private"}, "q", 5); err == nil {
+		t.Fatal("RunQuery must return an error on a 429 quota_exceeded refusal")
 	}
 }
 

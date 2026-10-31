@@ -36,7 +36,7 @@ func (f *fakeStage) StageUpdate(_ context.Context, _ string, _, _, _ *string, _ 
 // fakeQuery lives behind the integration build tag).
 type unitFakeQuery struct{}
 
-func (unitFakeQuery) RunQuery(context.Context, []string, string, int) (QueryResult, error) {
+func (unitFakeQuery) RunQuery(context.Context, string, []string, string, int) (QueryResult, error) {
 	return QueryResult{}, nil
 }
 
@@ -79,7 +79,7 @@ func TestRunStoreStagesAndCarriesTheCardPayload(t *testing.T) {
 	}}
 	ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(fs)
 
-	out := ex.Run(context.Background(), nil, "key1", storeCall(`{"category":"test","title":"t","content":"c"}`))
+	out := ex.Run(context.Background(), "", nil, "key1", storeCall(`{"category":"test","title":"t","content":"c"}`))
 	if !out.OK {
 		t.Fatalf("staged outcome must be OK=true (the turn continues): %s", out.Content)
 	}
@@ -99,7 +99,7 @@ func TestRunStoreStagesAndCarriesTheCardPayload(t *testing.T) {
 
 func TestRunStoreGateRejectIsModelVisible(t *testing.T) {
 	ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(&fakeStage{reject: "Cannot write to requested scope"})
-	out := ex.Run(context.Background(), nil, "key1", storeCall(`{"category":"test","title":"t","content":"c"}`))
+	out := ex.Run(context.Background(), "", nil, "key1", storeCall(`{"category":"test","title":"t","content":"c"}`))
 	if out.OK || !strings.Contains(out.Content, "Cannot write to requested scope") {
 		t.Fatalf("gate reject must be an OK=false outcome carrying the reason: ok=%v content=%s", out.OK, out.Content)
 	}
@@ -110,7 +110,7 @@ func TestRunStoreGateRejectIsModelVisible(t *testing.T) {
 
 func TestRunStoreWithoutRunnerFailsClosed(t *testing.T) {
 	ex := NewExecutor(nil, &unitFakeQuery{}, 0)
-	out := ex.Run(context.Background(), nil, "key1", storeCall(`{"category":"test","title":"t","content":"c"}`))
+	out := ex.Run(context.Background(), "", nil, "key1", storeCall(`{"category":"test","title":"t","content":"c"}`))
 	if out.OK || !strings.Contains(out.Content, "not available") {
 		t.Fatalf("unarmed ctx_store must fail closed: ok=%v content=%s", out.OK, out.Content)
 	}
@@ -149,7 +149,7 @@ func TestRunUpdateStagesAndCarriesTheCardPayload(t *testing.T) {
 	}}
 	ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(fs)
 
-	out := ex.Run(context.Background(), nil, "key1", updateCall(`{"id":"0198aaaa","content":"neu","tags":[]}`))
+	out := ex.Run(context.Background(), "", nil, "key1", updateCall(`{"id":"0198aaaa","content":"neu","tags":[]}`))
 	if !out.OK {
 		t.Fatalf("staged update outcome must be OK=true: %s", out.Content)
 	}
@@ -184,7 +184,7 @@ func TestRunUpdateOutcomeCarriesTargetSensitivity(t *testing.T) {
 			UpdateFields: []string{"tags"}, TargetSensitivity: target,
 		}}
 		ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(fs)
-		out := ex.Run(context.Background(), nil, "key1", updateCall(`{"id":"0198aaaa","tags":["x"]}`))
+		out := ex.Run(context.Background(), "", nil, "key1", updateCall(`{"id":"0198aaaa","tags":["x"]}`))
 		if !out.OK {
 			t.Fatalf("target %q: staged update must be OK=true: %s", target, out.Content)
 		}
@@ -199,7 +199,7 @@ func TestRunUpdateOutcomeCarriesTargetSensitivity(t *testing.T) {
 
 func TestRunUpdateRequiresID(t *testing.T) {
 	ex := NewExecutor(nil, &unitFakeQuery{}, 0).WithStage(&fakeStage{})
-	out := ex.Run(context.Background(), nil, "key1", updateCall(`{"content":"neu"}`))
+	out := ex.Run(context.Background(), "", nil, "key1", updateCall(`{"content":"neu"}`))
 	if out.OK || !strings.Contains(out.Content, "id is required") {
 		t.Fatalf("ctx_update without id must reject: ok=%v content=%s", out.OK, out.Content)
 	}
@@ -207,7 +207,7 @@ func TestRunUpdateRequiresID(t *testing.T) {
 
 func TestRunUpdateWithoutRunnerFailsClosed(t *testing.T) {
 	ex := NewExecutor(nil, &unitFakeQuery{}, 0)
-	out := ex.Run(context.Background(), nil, "key1", updateCall(`{"id":"x","content":"neu"}`))
+	out := ex.Run(context.Background(), "", nil, "key1", updateCall(`{"id":"x","content":"neu"}`))
 	if out.OK || !strings.Contains(out.Content, "not available") {
 		t.Fatalf("unarmed ctx_update must fail closed: ok=%v content=%s", out.OK, out.Content)
 	}

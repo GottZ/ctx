@@ -65,9 +65,13 @@ func guardTexts(in []string) []string {
 // QueryRunner runs a retrieval-only query under the given read-scopes and
 // returns the ranked blocks. The handler (C4) implements it by delegating to
 // the QueryHandler with an injected AuthResult (read_scopes = the session
-// snapshot) via a responseRecorder; tests inject a scriptable fake.
+// snapshot) via a responseRecorder; tests inject a scriptable fake. scope is
+// the session OWNER's scope (sess.Scope): it becomes the delegated request's
+// home scope, so the query's embed/rerank chains see the owner tenant's
+// backends and run under its quota — the same binding the chat chain itself
+// has (PoolProvider.ChatChain).
 type QueryRunner interface {
-	RunQuery(ctx context.Context, readScopes []string, query string, limit int) (QueryResult, error)
+	RunQuery(ctx context.Context, scope string, readScopes []string, query string, limit int) (QueryResult, error)
 }
 
 // StagedWrite is the card payload of one staged chat write (F6-C6 D-W6b). It
@@ -203,13 +207,15 @@ func (ex *Executor) Defs() []llm.ToolDef {
 
 // Run dispatches one tool call. Unknown tool / bad arguments / not-found /
 // ambiguous-prefix / DB error all return OK=false outcomes — only the engine's
-// transport/context errors end a turn.
-func (ex *Executor) Run(ctx context.Context, readScopes []string, apiKeyID string, call llm.ToolCall) ToolOutcome {
+// transport/context errors end a turn. scope is the session owner's scope;
+// only ctx_query consumes it (QueryRunner) — the other read tools filter on
+// readScopes alone.
+func (ex *Executor) Run(ctx context.Context, scope string, readScopes []string, apiKeyID string, call llm.ToolCall) ToolOutcome {
 	start := time.Now()
 	var out ToolOutcome
 	switch call.Function.Name {
 	case "ctx_query":
-		out = ex.runQuery(ctx, readScopes, call.Function.Arguments)
+		out = ex.runQuery(ctx, scope, readScopes, call.Function.Arguments)
 	case "ctx_search":
 		out = ex.runSearch(ctx, readScopes, call.Function.Arguments)
 	case "ctx_get":
@@ -228,7 +234,7 @@ func (ex *Executor) Run(ctx context.Context, readScopes []string, apiKeyID strin
 	return out
 }
 
-func (ex *Executor) runQuery(ctx context.Context, readScopes []string, raw json.RawMessage) ToolOutcome {
+func (ex *Executor) runQuery(ctx context.Context, scope string, readScopes []string, raw json.RawMessage) ToolOutcome {
 	var a struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
@@ -240,7 +246,7 @@ func (ex *Executor) runQuery(ctx context.Context, readScopes []string, raw json.
 		return errOutcome("query is required")
 	}
 	limit := clamp(a.Limit, 5, 1, 10)
-	res, err := ex.query.RunQuery(ctx, readScopes, a.Query, limit)
+	res, err := ex.query.RunQuery(ctx, scope, readScopes, a.Query, limit)
 	if err != nil {
 		return errOutcome("query failed") // laundered — raw error goes to slog upstream
 	}

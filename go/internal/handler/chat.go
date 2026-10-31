@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -46,16 +47,26 @@ import (
 // the continuing key's possibly-broader set, §3.1). Body forces synthesize:false
 // (retrieval-only — no agent-in-agent, ~10s less latency) + include_content:true
 // (the G36 flag) so the chat model synthesizes from the snippets itself.
+//
+// HomeScope is the SESSION OWNER's scope (sess.Scope), the binding the chat
+// chain has too (PoolProvider.ChatChain): the query handler resolves its
+// embed/rerank chains, the tenant quota gate, the tenant config snapshot and
+// the dispatch fairness key from it. Left empty, the tenant quota never applied
+// to ctx_query (Gate passes an empty scope through) and a tenant-private embed
+// backend was invisible to it (§C2). TenantID stays empty on purpose: in the
+// query handler it only switches on block grants (and the per-tenant dispatch
+// cap), and every other chat tool reads scope-only without grants — a set
+// TenantID would make ctx_query see more than ctx_search/ctx_get.
 type chatQueryRunner struct {
 	handler http.Handler // queryHandler.HandleQuery, scheduler-wrapped
 }
 
-func (q *chatQueryRunner) RunQuery(ctx context.Context, readScopes []string, query string, limit int) (chat.QueryResult, error) {
+func (q *chatQueryRunner) RunQuery(ctx context.Context, scope string, readScopes []string, query string, limit int) (chat.QueryResult, error) {
 	apiKeyID := ""
 	if ar := AuthResultFromContext(ctx); ar != nil {
 		apiKeyID = ar.ApiKeyID
 	}
-	injected := &auth.AuthResult{ApiKeyID: apiKeyID, ReadScopes: readScopes, IsValid: true}
+	injected := &auth.AuthResult{ApiKeyID: apiKeyID, HomeScope: scope, ReadScopes: readScopes, IsValid: true}
 	ctx = context.WithValue(ctx, authResultKey, injected)
 
 	body, _ := json.Marshal(map[string]any{
@@ -73,6 +84,7 @@ func (q *chatQueryRunner) RunQuery(ctx context.Context, readScopes []string, que
 	var resp struct {
 		Confidence string `json:"confidence"`
 		Error      string `json:"error"`
+		ErrorCode  string `json:"error_code"`
 		Sources    []struct {
 			ID       string  `json:"id"`
 			Title    string  `json:"title"`
@@ -89,6 +101,12 @@ func (q *chatQueryRunner) RunQuery(ctx context.Context, readScopes []string, que
 	}
 	if resp.Error != "" {
 		return chat.QueryResult{}, errors.New(resp.Error)
+	}
+	// A refusal without an "error" field — the quota gate's 429 carries only
+	// error_code — must not read as "no hits": the model would conclude the
+	// store holds nothing. 0 = WriteHeader never called = implicit 200.
+	if rec.statusCode >= http.StatusBadRequest {
+		return chat.QueryResult{}, fmt.Errorf("query: status %d %s", rec.statusCode, resp.ErrorCode)
 	}
 	blocks := make([]chat.QueryBlock, len(resp.Sources))
 	for i, s := range resp.Sources {

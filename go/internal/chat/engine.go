@@ -248,7 +248,7 @@ func (e *Engine) RunTurn(ctx context.Context, ar *auth.AuthResult, sess *store.C
 			}); serr != nil {
 				return serr
 			}
-			outcome := e.exec.Run(ctx, sess.ReadScopes, apiKeyID, call)
+			outcome := e.exec.Run(ctx, sess.Scope, sess.ReadScopes, apiKeyID, call)
 			toolRow, hwm, perr := store.AppendMessage(ctx, e.pool, sess.ID, store.NewMessage{
 				Role: "tool", Content: outcome.Content, Sensitivity: outcome.Sensitivity,
 				ToolCallID: call.ID, ToolName: call.Function.Name,

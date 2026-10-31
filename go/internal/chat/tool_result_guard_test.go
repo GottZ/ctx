@@ -79,7 +79,7 @@ func (c *wireCapture) only(t *testing.T) []byte {
 // guardFakeQuery is the QueryRunner that hands the executor hostile blocks.
 type guardFakeQuery struct{ blocks []QueryBlock }
 
-func (f *guardFakeQuery) RunQuery(context.Context, []string, string, int) (QueryResult, error) {
+func (f *guardFakeQuery) RunQuery(context.Context, string, []string, string, int) (QueryResult, error) {
 	return QueryResult{Confidence: "high", Blocks: f.blocks}, nil
 }
 
@@ -110,7 +110,7 @@ func toolMessageOnWire(t *testing.T, blocks []QueryBlock) (raw []byte, toolConte
 	srv := cap.server(t)
 
 	ex := NewExecutor(deadPool(t), &guardFakeQuery{blocks: blocks}, 0)
-	out := ex.Run(context.Background(), []string{"private"}, "key-h7", llm.ToolCall{
+	out := ex.Run(context.Background(), "private", []string{"private"}, "key-h7", llm.ToolCall{
 		ID:       "call-h7",
 		Function: llm.ToolCallFunction{Name: "ctx_query", Arguments: json.RawMessage(`{"query":"h7"}`)},
 	})
