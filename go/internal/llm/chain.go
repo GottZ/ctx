@@ -629,6 +629,38 @@ type ChainCall struct {
 	// this" has to be the model that actually answered, not the one the pool
 	// would have picked.
 	OnServed func(backend, model string)
+	// Quota, when set, gates the resolved chain by the tenant quota of
+	// QuotaScope exactly like the synthesis path (T36; GHSA 2026-10-31 §4):
+	// *ErrQuotaExceeded or a degrade-emptied chain return before any wire
+	// call, the call site keeps its fail-open/fail-hard semantics. QuotaScope
+	// is the caller's home scope — distinct from Tenant, which bounds backend
+	// visibility and stays "" for the Q-only callers. Background callers
+	// leave Quota nil (operator cost, never gated).
+	Quota      *backends.QuotaAccountant
+	QuotaScope string
+}
+
+// GateQuota applies the tenant quota of scope to a resolved chain (T36; GHSA
+// 2026-10-31 §4): the call budget and a cost budget under block return
+// *backends.ErrQuotaExceeded, external_off drops external backends, and a
+// chain that degrade leaves empty is *backends.ErrNoEligibleBackend. A nil
+// accountant passes the chain through. Shared by ChainCall and the query
+// handler's embed/rerank chains so every foreground gate maps alike.
+func GateQuota(quota *backends.QuotaAccountant, scope string, chain []backends.Backend, role string, required backends.Sensitivity) ([]backends.Backend, error) {
+	if quota == nil {
+		return chain, nil
+	}
+	gated, err := quota.Gate(scope, chain)
+	if err != nil {
+		return nil, err
+	}
+	if len(gated) == 0 {
+		return nil, &backends.ErrNoEligibleBackend{
+			Role: role, Required: required,
+			Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "quota: external budget exhausted, no local backend"}},
+		}
+	}
+	return gated, nil
 }
 
 // Do resolves the chain (the trust gate: an excluded backend does not exist
@@ -650,6 +682,11 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 				Role: c.Role, Required: c.Required,
 				Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "local-only call, all eligible backends external"}},
 			}
+		}
+	}
+	if c.Quota != nil {
+		if chain, err = GateQuota(c.Quota, c.QuotaScope, chain, c.Role, c.Required); err != nil {
+			return nil, err
 		}
 	}
 

@@ -122,13 +122,15 @@ type ChatHandler struct {
 // (scheduler-wrapped) the ctx_query tool delegates to. blocktypes feeds the
 // staged-write gate bundle (type validation) — nil disables the ctx_store tool.
 // admitter is the dispatch admission layer for the stream path (MW5, design/01
-// §4.6 N2).
-func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, queryHandler http.Handler, blocktypes *blocktype.Registry, admitter dispatch.Admitter) *ChatHandler {
+// §4.6 N2). quota is the process-wide accountant the synthesis path also
+// gates on (T36; nil skips the gate).
+func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.Pool, quota *backends.QuotaAccountant, queryHandler http.Handler, blocktypes *blocktype.Registry, admitter dispatch.Admitter) *ChatHandler {
 	// Chain-time exclusion is the eject disable-profile (092), applied inside
 	// Pool.Chain from the live pool snapshot — no config input threads through
 	// the provider since U01-W5 (the legacy global-only gaming.active/
-	// disabled_backends settings keys are gone).
-	provider := chat.NewPoolProvider(backendPool)
+	// disabled_backends settings keys are gone). The tenant quota gates the
+	// resolved chain inside the provider (GHSA 2026-10-31 §4).
+	provider := chat.NewPoolProvider(backendPool, quota)
 	h := &ChatHandler{
 		pool:        pool,
 		cfg:         cfg,

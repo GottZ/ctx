@@ -100,9 +100,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	r.Post("/auth/logout", sessH.HandleLogout)
 
 	// Per-tenant quota accountant (T36, 04-W4): one process-wide instance, a
-	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis
-	// gate. 30s TTL (§6.2) — the cost SUM over the 1M+ llm_log hypertable is
-	// never run per request.
+	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis,
+	// web-chat and query embed/rerank gates. 30s TTL (§6.2) — the cost SUM over
+	// the 1M+ llm_log hypertable is never run per request.
 	quota := backends.NewQuotaAccountant(pool, 30*time.Second)
 
 	// All authenticated routes in a single group with Auth middleware as first defense line.
@@ -366,7 +366,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// them. The ctx_query tool delegates to the SAME dispatcher-wrapped query
 		// handler. Session routes are the read-lastig GET/DELETE companions (no
 		// LLM, no demand signal).
-		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, http.HandlerFunc(queryHTTPHandler), blocktypeReg, dispatcher)
+		chatH := handler.NewChatHandler(pool, cfgStore, backendPool, quota, http.HandlerFunc(queryHTTPHandler), blocktypeReg, dispatcher)
 		r.Post("/api/chat/stream", handler.WithScheduler(dispatcher, chatH.HandleStream))
 		r.Get("/api/chat/sessions", chatH.HandleListSessions)
 		r.Get("/api/chat/sessions/{id}", chatH.HandleGetSession)

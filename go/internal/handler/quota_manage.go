@@ -46,10 +46,12 @@ func quotaView(scope string, q *backends.TenantQuota) map[string]any {
 	}
 }
 
-// handleTenantQuotaGet reads one tenant scope's quota. A tenant-admin is pinned
-// to its OWN scope (ar.HomeScope, payload ignored — never a foreign tenant's
-// budget); a server-admin may target any scope via the payload, defaulting to
-// its own.
+// handleTenantQuotaGet reads the quota that binds one tenant scope — the
+// strictest merge of the enabled rows on every scope of its tenant, exactly
+// what the accountant enforces (a key homed in a second scope sees the
+// tenant's policy, not "unlimited"). A tenant-admin is pinned to its OWN scope
+// (ar.HomeScope, payload ignored — never a foreign tenant's budget); a
+// server-admin may target any scope via the payload, defaulting to its own.
 func (h *ManageHandler) handleTenantQuotaGet(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	scope := ar.HomeScope
 	if ar.IsServerAdmin() {
@@ -57,7 +59,7 @@ func (h *ManageHandler) handleTenantQuotaGet(w http.ResponseWriter, r *http.Requ
 			scope = s
 		}
 	}
-	q, _, err := store.GetTenantQuota(r.Context(), h.pool, scope)
+	q, _, err := store.GetEffectiveTenantQuota(r.Context(), h.pool, scope)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
