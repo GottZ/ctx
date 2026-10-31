@@ -735,10 +735,12 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		slog.Info("non-english heuristic matched, translating",
 			"request_id", requestID,
 		)
-		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, querySens, query, ar.ApiKeyID, h.admission())
+		translatedQuery, err := llm.TranslateQuery(ctx, h.pool, h.backendPool, h.quota, ar.HomeScope, querySens, query, ar.ApiKeyID, h.admission())
 		if err != nil {
 			// Fail-open (design 03 §2.4 translate row) — covers the empty
-			// chain (trust/profile/disabled) AND exhausted attempts alike.
+			// chain (trust/profile/disabled) AND exhausted attempts alike,
+			// and the tenant quota gate (§C3): a quota stop makes no wire
+			// call here, and the embed gate below answers the 429.
 			slog.Warn("translation failed, using original",
 				"error", err,
 				"request_id", requestID,
@@ -776,7 +778,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// non-deterministic half of this stage, and the pin exists to remove
 		// exactly that variance from a sweep run.
 		var err error
-		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, querySens, originalQuery, now, ar.ApiKeyID, h.admission())
+		temporalResult, err = llm.NormalizeTemporal(ctx, h.pool, h.backendPool, h.quota, ar.HomeScope, querySens, originalQuery, now, ar.ApiKeyID, h.admission())
 		if err != nil {
 			slog.Warn("temporal LLM fallback failed, no temporal expansion available",
 				"error", err,

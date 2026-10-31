@@ -111,7 +111,13 @@ func DetectGerman(query string) bool {
 // Returns the original query unchanged if translation fails validation; an
 // empty chain surfaces as *backends.ErrNoEligibleBackend and the caller
 // fail-opens (skip the step, keep the original query).
-func TranslateQuery(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, querySens backends.Sensitivity, query, apiKeyID string, adm Admission) (string, error) {
+//
+// quota/quotaScope gate the chain by the caller tenant's quota before any
+// wire call (ChainCall.Quota; §C3): a tenant over its call budget, or over a
+// cost budget under block, gets *backends.ErrQuotaExceeded, external_off
+// drops external backends — the caller's fail-open path handles both. A nil
+// accountant leaves the chain ungated.
+func TranslateQuery(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, quotaScope string, querySens backends.Sensitivity, query, apiKeyID string, adm Admission) (string, error) {
 	resp, err := ChainCall{
 		Pool:       bpool,
 		Role:       backends.RoleTranslate,
@@ -123,6 +129,8 @@ func TranslateQuery(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool,
 		Opts:       TranslateOptions(0),
 		DefTimeout: TranslateTimeout,
 		APIKeyID:   apiKeyID, // T35b: foreground caller attribution
+		Quota:      quota,
+		QuotaScope: quotaScope,
 	}.Do(ctx, db, adm)
 	if err != nil {
 		return query, fmt.Errorf("llm: translate: %w", err)

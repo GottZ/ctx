@@ -106,7 +106,7 @@ func TestTranslateQueryWirePath(t *testing.T) {
 	for _, tc := range wireCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newWireRecorder(t, "database status")
-			got, err := TranslateQuery(testPrincipalCtx(), nil, translatePool(rec.backend(tc.protocol)), backends.SensPersonal, "wie ist der status der datenbank", "", testAdmission(t, dispatch.ClassInteractive))
+			got, err := TranslateQuery(testPrincipalCtx(), nil, translatePool(rec.backend(tc.protocol)), nil, "", backends.SensPersonal, "wie ist der status der datenbank", "", testAdmission(t, dispatch.ClassInteractive))
 			if err != nil {
 				t.Fatalf("TranslateQuery: %v", err)
 			}
@@ -125,7 +125,7 @@ func TestNormalizeTemporalWirePath(t *testing.T) {
 	for _, tc := range wireCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newWireRecorder(t, temporalJSON)
-			res, err := NormalizeTemporal(testPrincipalCtx(), nil, translatePool(rec.backend(tc.protocol)), backends.SensPersonal, "what happened yesterday", now, "", testAdmission(t, dispatch.ClassInteractive))
+			res, err := NormalizeTemporal(testPrincipalCtx(), nil, translatePool(rec.backend(tc.protocol)), nil, "", backends.SensPersonal, "what happened yesterday", now, "", testAdmission(t, dispatch.ClassInteractive))
 			if err != nil {
 				t.Fatalf("NormalizeTemporal: %v", err)
 			}
