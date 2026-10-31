@@ -45,7 +45,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -119,10 +119,14 @@ type SSOHandler struct {
 // targets resolving into private ranges), shared OIDC cache, env-derived
 // canonical issuer and trusted proxy.
 func NewSSOHandler(pool *pgxpool.Pool) *SSOHandler {
+	// No Proxy (GHSA 2026-10-31 §9d): with HTTP(S)_PROXY honoured, the
+	// guarded dialer would only ever see the proxy's address and the
+	// deny-list would never meet the IdP target. Forge and camo dial direct
+	// the same way; no documented setup routes OIDC through a proxy.
 	client := &http.Client{
 		Timeout: oidc.DefaultFetchTimeout,
 		Transport: &http.Transport{
-			Proxy:       http.ProxyFromEnvironment,
+			Proxy:       nil,
 			DialContext: ssrfguard.GuardedDialer().DialContext,
 		},
 	}
@@ -455,11 +459,13 @@ func (h *SSOHandler) issueWebSession(w http.ResponseWriter, r *http.Request, slu
 	// Browser flow: land the person where they wanted to go (return_to was
 	// open-redirect-filtered at login, "" folds to "/"); the SPA picks the
 	// csrf token up from whoami.
-	if returnTo == "" {
-		returnTo = "/"
-	}
+	// Re-filtered here as well: a state row sealed by a pre-fix binary
+	// (the regex filter) may still be live for its TTL across an upgrade.
+	// safeReturnTo is idempotent on its own output and folds "" to "/".
+	returnTo = safeReturnTo(returnTo)
 	// #nosec G710 -- returnTo passed the login-time open-redirect filter
-	// (^/[^/\\], sealed into the single-use state row) and reaches this
+	// (safeReturnTo: normalised same-origin path, no control bytes, sealed
+	// into the single-use state row) and reaches this
 	// point only from the consumed state — never raw request input.
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
@@ -646,18 +652,65 @@ func truncateString(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// returnToRe implements the F5 open-redirect filter: exactly one leading
-// slash followed by anything but '/' or '\' — rejects '//evil.example',
-// '/\evil', absolute and protocol-relative URLs.
-var returnToRe = regexp.MustCompile(`^/[^/\\]`)
-
 // safeReturnTo filters a caller-supplied post-login path (design/04 §4.2.4 /
-// §5 F5). Anything outside the allowed shape collapses to "/".
+// §5 F5; GHSA 2026-10-31 §9b) and returns it in NORMALISED form — the
+// value later lands verbatim in a Location header. Accepted is only a
+// same-origin path reference: no scheme, host, userinfo or opaque part;
+// the path (raw and percent-decoded) starts with exactly one '/' that is
+// not followed by '/' or '\'; and no control byte (< 0x20 or 0x7F) occurs
+// anywhere, raw or decoded. The control-byte rule is what the former regex
+// ^/[^/\\] missed: "/\t/evil.example" passed it, and browsers strip tab/CR/LF
+// from URLs, reading "//evil.example" — a protocol-relative open redirect.
+// The result is u.RequestURI() over the path.Clean'ed path (escaped path +
+// query, fragment dropped).
+// Anything else collapses to "/".
 func safeReturnTo(raw string) string {
-	if returnToRe.MatchString(raw) {
-		return raw
+	if raw == "" || hasControlByte(raw) {
+		return "/"
 	}
-	return "/"
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return "/"
+	}
+	if !isSingleSlashPath(u.Path) || !isSingleSlashPath(u.EscapedPath()) || hasControlByte(u.Path) {
+		return "/"
+	}
+	// Clean the way http.Redirect will (path.Clean, trailing slash kept),
+	// and check the CLEANED form: "/./\evil" passes the prefix test but
+	// http.Redirect would emit "/\evil", which browsers read as "//evil".
+	// Cleaning here makes the redirect's own Clean a no-op.
+	cleaned := path.Clean(u.Path)
+	if strings.HasSuffix(u.Path, "/") && cleaned != "/" {
+		cleaned += "/"
+	}
+	if !isSingleSlashPath(cleaned) {
+		return "/"
+	}
+	u.Path, u.RawPath, u.Fragment, u.RawFragment = cleaned, "", "", ""
+	out := u.RequestURI()
+	if !isSingleSlashPath(out) || hasControlByte(out) {
+		return "/"
+	}
+	return out
+}
+
+// isSingleSlashPath reports whether p starts with '/' and its second byte
+// (if any) is neither '/' nor '\' (the protocol-relative shapes).
+func isSingleSlashPath(p string) bool {
+	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	return len(p) == 1 || (p[1] != '/' && p[1] != '\\')
+}
+
+// hasControlByte reports any ASCII control byte (< 0x20 or DEL).
+func hasControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // clientIP derives the rate-limit key: the direct peer's IP, or — ONLY when

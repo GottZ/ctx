@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -32,10 +33,58 @@ func TestSafeReturnTo(t *testing.T) {
 		{"https://evil.example/", "/"},
 		{"evil", "/"},
 		{`\\evil`, "/"},
+		{"///evil.example", "/"},
+		// GHSA 2026-10-31 §9b: browsers strip TAB/CR/LF from URLs, so
+		// "/\t/evil.example" is read as "//evil.example". Any control byte
+		// (raw, or percent-decoded in the path) collapses to "/".
+		{"/\t/evil.example", "/"},
+		{"\t//evil.example", "/"},
+		{"/\r\n/evil.example", "/"},
+		{"/\n/evil.example", "/"},
+		{"/a\x00b", "/"},
+		{"/a\x7fb", "/"},
+		{"/blocks?q=\r\nSet-Cookie:x", "/"},
+		{"/%09/evil.example", "/"},
+		{"/%0d%0a/evil.example", "/"},
+		// Encoded slash/backslash at the second position: decoded "//" / "/\".
+		{"/%2F/evil.example", "/"},
+		{"/%2fevil.example", "/"},
+		{"/%5Cevil.example", "/"},
+		// path.Clean shapes http.Redirect would otherwise turn into "/\evil".
+		{`/./\evil`, "/"},
+		{`/../\evil`, "/"},
+		{"/.//evil.example", "/evil.example"}, // cleaned to a same-origin path
+		// Absolute / scheme / userinfo / opaque shapes.
+		{"/\\evil.example", "/"},
+		{"https:/evil.example", "/"},
+		{"javascript:alert(1)", "/"},
+		{"//user@evil.example/", "/"},
+		{"%2F%2Fevil.example", "/"},
+		// Normalised output (u.RequestURI form, fragment dropped, cleaned).
+		{"/blocks#frag", "/blocks"},
+		{"/a/../b", "/b"},
+		{"/a//b", "/a/b"},
+		{"/sub/", "/sub/"},
+		{"/a b", "/a%20b"},
+		{"/?x=1", "/?x=1"},
+		{"/a%2Fb", "/a/b"},
+		{"/@evil.example", "/@evil.example"},
 	}
 	for _, c := range cases {
-		if got := safeReturnTo(c.in); got != c.want {
+		got := safeReturnTo(c.in)
+		if got != c.want {
 			t.Errorf("safeReturnTo(%q) = %q, want %q", c.in, got, c.want)
+		}
+		// Idempotent: the callback re-filters the sealed value.
+		if again := safeReturnTo(got); again != got {
+			t.Errorf("safeReturnTo not idempotent: %q → %q → %q", c.in, got, again)
+		}
+		// http.Redirect's own path.Clean must not change the value: what
+		// was checked is exactly what reaches the Location header.
+		rec := httptest.NewRecorder()
+		http.Redirect(rec, httptest.NewRequest("GET", "/auth/callback/x", nil), got, http.StatusFound)
+		if loc := rec.Header().Get("Location"); loc != got {
+			t.Errorf("safeReturnTo(%q) = %q, but http.Redirect emits Location %q", c.in, got, loc)
 		}
 	}
 }
@@ -207,5 +256,29 @@ func TestNewSSOHandlerDefaultClientBlocksLoopback(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SSRF guard") {
 		t.Fatalf("loopback fetch failed for the wrong reason: %v", err)
+	}
+}
+
+// TestNewSSOHandlerDialsDirect pins the §9d proxy half (GHSA 2026-10-31): the
+// production SSO transport must not consult HTTP(S)_PROXY — through a proxy
+// the dial-time guard checks only the proxy's IP — and a special-purpose
+// target the old predicates missed (CGNAT, Alibaba metadata) is refused by
+// the guard itself.
+func TestNewSSOHandlerDialsDirect(t *testing.T) {
+	h := NewSSOHandler(nil)
+	tr, ok := h.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("SSO transport is %T, want *http.Transport", h.client.Transport)
+	}
+	if tr.Proxy != nil {
+		t.Fatal("SSO transport honours a proxy — the ssrfguard would only see the proxy's IP")
+	}
+	resp, err := h.client.Get("http://100.100.100.200/latest/meta-data/") //nolint:noctx // dial-refusal probe
+	if err == nil {
+		resp.Body.Close() //nolint:errcheck
+		t.Fatal("default SSO client fetched 100.100.100.200 — CGNAT/metadata not denied")
+	}
+	if !strings.Contains(err.Error(), "SSRF guard") {
+		t.Fatalf("100.100.100.200 failed for the wrong reason: %v", err)
 	}
 }
