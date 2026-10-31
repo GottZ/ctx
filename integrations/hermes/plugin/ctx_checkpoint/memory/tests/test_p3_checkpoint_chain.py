@@ -566,6 +566,22 @@ def test_hard_cut_when_single_message_exceeds_chunk():
     assert _MODULE.clamp_chunk_chars(10) == 1_000 and _MODULE.clamp_chunk_chars(10**6) == 40_000
 
 
+def test_forced_cuts_keep_every_character():
+    # 0.6.1: a hard cut that lands next to a space used to strip it; the parts must
+    # concatenate back to the exact transcript, at the byte limit and at the char limit.
+    head = "### Message 1 — user\n\n"
+    unit = "漢" * 9 + " "  # 28 UTF-8 bytes, 10 characters, ends in a space
+    text = head + unit * 3_000
+    budget = len(head.encode("utf-8")) + 28 * 1_000  # first byte cut lands right after a space
+    chunks = _MODULE.split_chunks(text, 40_000, budget)
+    assert len(chunks) > 1 and "".join(chunks) == text
+    assert all(len(ch.encode("utf-8")) <= budget for ch in chunks)
+
+    ascii_text = head + ("a" * 9 + " ") * 500
+    chunks = _MODULE.split_chunks(ascii_text, 1_000, _MODULE.CTX_CONTENT_MAX_BYTES)
+    assert len(chunks) > 1 and "".join(chunks) == ascii_text
+
+
 def test_golden_part_format_matches_distiller_parser(factory):
     p, c = factory("sess-golden", agent_context="primary")
     p.on_pre_compress(

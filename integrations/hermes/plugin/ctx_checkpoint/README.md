@@ -193,7 +193,7 @@ from a Hermes checkout):
 # umbrella: checkpoint contract, negotiation, setup surfaces, MCP transport (84)
 PYTHONPATH=/path/to/hermes-agent:integrations/hermes/plugin python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/tests
-# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (288)
+# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (289)
 HERMES_REPO=/path/to/hermes-agent python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/memory/tests
 # lint + format + bandit rules (ruff.toml in this directory)

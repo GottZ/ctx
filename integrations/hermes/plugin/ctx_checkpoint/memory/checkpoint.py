@@ -266,6 +266,9 @@ def split_chunks(
 
     A part ends at the last message boundary (``\\n### Message ``) inside that window,
     or hard at the window's end when the boundary would leave it shorter than a third.
+    Only a message boundary trims the separator whitespace around it; a hard cut lands
+    inside a message and keeps every character, so the parts concatenate back to the
+    exact transcript (0.6.1 — a cut next to a space used to drop it).
     """
     limit = clamp_chunk_chars(chunk_chars)
     chunks: list[str] = []
@@ -277,7 +280,9 @@ def split_chunks(
             break
         cut = remaining.rfind("\n### Message ", 0, window)
         if cut < window // 3:
-            cut = window
+            chunks.append(remaining[:window])
+            remaining = remaining[window:]
+            continue
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
     return chunks

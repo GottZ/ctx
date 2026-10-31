@@ -17,7 +17,9 @@ dispatch (`tools/mcp_tool_handlers.py`) actually produce.
   ctx caps content at 50 KiB of UTF-8 bytes; a full Cyrillic part is ~72 KB, a CJK part
   ~108 KB, so such transcripts failed every checkpoint (a permanent halt under
   `checkpoint_required`). Parts are cut at whichever limit comes first, with the largest
-  possible part header reserved; the part format is unchanged.
+  possible part header reserved; the part format is unchanged. A hard cut (inside a
+  message) no longer strips whitespace beside it, so the parts concatenate back to the
+  exact transcript; only message boundaries trim their separators.
 - **Head lookup is narrowed to heads.** The MCP transport drops `types`, so the head
   search ran over every block of the category; source parts about checkpoints or headings
   could push the head out of the result window and silently start a new chain. The search
