@@ -58,10 +58,15 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The read window every artefact of this request is built over: the key's
+	// read_scopes clamped to its tenant's own scopes (GHSA §5), the same clamp
+	// the background digest/root map apply.
+	window := h.readWindow(ctx, authResult, reqID)
+
 	// Run digest. The request path resolves the policy overlay against the
 	// caller's own tenant (HomeScope) — the same scope it writes the topic-map
 	// under (T12: tenant key == write scope on the request path).
-	err := digest.RunDigest(ctx, h.pool, h.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, authResult.HomeScope, authResult.HomeScope, authResult.ReadScopes)
+	err := digest.RunDigest(ctx, h.pool, h.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, authResult.HomeScope, authResult.HomeScope, window)
 	if err != nil {
 		slog.Error("digest: run error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -73,9 +78,9 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	// Root map (W-D). A failure here does not fail the request: the topic map
 	// already succeeded, and the map is an additive artefact — degrading to
 	// "no root map this round" is honest, taking the whole endpoint down is not.
-	rootMapTitle, rootMapLength := h.runRootMap(ctx, authResult, cfg, reqID)
+	rootMapTitle, rootMapLength := h.runRootMap(ctx, authResult, window, cfg, reqID)
 
-	blockCount, categoryCount, contentLength := h.digestEnvelopeCounts(ctx, authResult, cfg, reqID)
+	blockCount, categoryCount, contentLength := h.digestEnvelopeCounts(ctx, authResult, window, cfg, reqID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":       true,
@@ -90,11 +95,52 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// readWindow clamps the caller's read_scopes to the scopes its tenant OWNS —
+// read_scopes ∩ TenantScopes(tenant), exactly the window the background digest
+// and root map run over (events.runDigest / store.IntersectWindow).
+//
+// Why the request path needs it (GHSA §5): ctx_auth folds every scope another
+// tenant granted via context_tenant_grants into read_scopes. A grant lets the
+// key READ that scope; both artefacts this route writes — the topic map (titles,
+// id prefixes, [scope] tags) and the root map (cluster labels, representative
+// titles, scope mix) — land under the caller's HOME scope, where every reader
+// of that scope sees them, granted or not. Built over the raw read_scopes they
+// copied the granting tenant's titles into the grantee's scope.
+//
+//   - No tenant on the key (sentinel / legacy paths): read_scopes unchanged —
+//     the nil-owned arm, as before this fix.
+//   - Tenant-scope lookup fails: fail CLOSED to the home scope alone, never the
+//     raw read_scopes. The home scope is the scope the artefacts are written to,
+//     so reading it cannot move anything across a scope boundary.
+//   - A resolved tenant owning no scope passes a non-nil empty owned (nil would
+//     be the unbounded arm); an empty clamp also falls back to the home scope —
+//     an empty window is not "all scopes", but a home-only window keeps the
+//     read_scopes[0]=home shape every downstream reader expects.
+func (h *DigestHandler) readWindow(ctx context.Context, ar *auth.AuthResult, reqID string) []string {
+	if ar.TenantID == "" {
+		return ar.ReadScopes
+	}
+	owned, err := store.TenantScopes(ctx, h.pool, ar.TenantID)
+	if err != nil {
+		slog.Warn("digest: tenant scope lookup failed, clamping the read window to the home scope",
+			"error", err, "request_id", reqID)
+		return []string{ar.HomeScope}
+	}
+	if owned == nil {
+		owned = []string{}
+	}
+	window := store.IntersectWindow(ar.ReadScopes, owned)
+	if len(window) == 0 {
+		return []string{ar.HomeScope}
+	}
+	return window
+}
+
 // runRootMap renders the caller's root map and reports its title and size.
 // Title is returned even when the map is off or unwritten — it is the ADDRESS
 // of the artefact ("where do I look"), independent of whether this request
 // changed it; a zero length says "not written in this round".
-func (h *DigestHandler) runRootMap(ctx context.Context, auth *auth.AuthResult, cfg *config.Config, reqID string) (string, int) {
+func (h *DigestHandler) runRootMap(ctx context.Context, auth *auth.AuthResult, window []string, cfg *config.Config, reqID string) (string, int) {
 	if !cfg.RootMap.Enabled {
 		return "", 0
 	}
@@ -115,7 +161,7 @@ func (h *DigestHandler) runRootMap(ctx context.Context, auth *auth.AuthResult, c
 			// must render the same bytes or content idempotency collapses.
 			Language: cfg.Dream.Language,
 		},
-		auth.HomeScope, auth.ReadScopes)
+		auth.HomeScope, window)
 	if err != nil {
 		slog.Warn("digest: root map failed", "error", err, "request_id", reqID)
 		return "", 0
@@ -133,13 +179,13 @@ func (h *DigestHandler) runRootMap(ctx context.Context, auth *auth.AuthResult, c
 // (removing them would break the CLI's response shape) but can no longer run
 // unbounded: on expiry the field degrades to 0, which is what "we did not
 // measure it this round" looks like in a number.
-func (h *DigestHandler) digestEnvelopeCounts(ctx context.Context, auth *auth.AuthResult, cfg *config.Config, reqID string) (int, int, int) {
+func (h *DigestHandler) digestEnvelopeCounts(ctx context.Context, auth *auth.AuthResult, window []string, cfg *config.Config, reqID string) (int, int, int) {
 	timeout := cfg.RootMap.CountTimeout
-	blockCount, _, err := store.ActiveBlockCount(ctx, h.pool, auth.ReadScopes, timeout)
+	blockCount, _, err := store.ActiveBlockCount(ctx, h.pool, window, timeout)
 	if err != nil {
 		slog.Warn("digest: block count failed", "error", err, "request_id", reqID)
 	}
-	categoryCount, _, err := store.ActiveCategoryCount(ctx, h.pool, auth.ReadScopes, timeout)
+	categoryCount, _, err := store.ActiveCategoryCount(ctx, h.pool, window, timeout)
 	if err != nil {
 		slog.Warn("digest: category count failed", "error", err, "request_id", reqID)
 	}

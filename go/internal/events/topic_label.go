@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/topiclabel"
 )
 
@@ -85,7 +86,7 @@ func (s *Scheduler) labelTopicsOnce(ctx context.Context, bt backgroundTenant) {
 	// scopes intersected with what this tenant actually owns. A scope the
 	// tenant does not own must never enter a background read, and a label is
 	// built from block titles.
-	window := intersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
+	window := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 
 	deps := topiclabel.Deps{
 		Pool:     s.pool,

@@ -17,63 +17,10 @@ import (
 // T38 (04-W6): the background path runs per iterated tenant with an
 // entitlement-clamped read window (read_scopes ∩ TenantScopes), a tenant-visible
 // Chain, and a per-tenant scope floor. This file pins the events-package seams:
-// the two pure clamps (intersectWindow / effectiveHomeScope), the dream loop's
+// the pure home-scope clamp (effectiveHomeScope; the read-window clamp moved to
+// store.IntersectWindow, unit-tested in package store), the dream loop's
 // read-window threading (runCycle observes the CLAMPED window, not raw
 // read_scopes), and newRouter carrying the per-tenant floor.
-
-// TestIntersectWindow pins the §4.4-(a) read-window clamp: read_scopes ∩ owned.
-// A nil owned is the unbounded fallback (pre-MT / register error). A foreign
-// read_scopes value (a tenant-overridable config the tenant does NOT own) is
-// dropped — the cross-tenant-background-read gate. The default tenant's owned =
-// {private,shared,work} intersected with the default read_scopes is byte-equal
-// (AMENDMENT #3 invariance).
-func TestIntersectWindow(t *testing.T) {
-	cases := []struct {
-		name       string
-		readScopes []string
-		owned      []string
-		want       []string
-	}{
-		{
-			name:       "nil_owned_is_unbounded_fallback",
-			readScopes: []string{"private", "shared", "work"},
-			owned:      nil,
-			want:       []string{"private", "shared", "work"},
-		},
-		{
-			name:       "default_invariant_byte_equal",
-			readScopes: []string{"private", "shared", "work"},
-			owned:      []string{"private", "shared", "work"},
-			want:       []string{"private", "shared", "work"},
-		},
-		{
-			name:       "foreign_read_scope_override_intersects_away",
-			readScopes: []string{"tenant-a", "foreign-x"}, // override claims a foreign scope
-			owned:      []string{"tenant-a"},
-			want:       []string{"tenant-a"}, // foreign-x dropped, leak closed
-		},
-		{
-			name:       "empty_intersection_fails_closed",
-			readScopes: []string{"foreign-x"},
-			owned:      []string{"tenant-a"},
-			want:       []string{}, // reads nothing rather than a foreign scope
-		},
-		{
-			name:       "order_follows_read_scopes",
-			readScopes: []string{"work", "private", "shared"},
-			owned:      []string{"private", "shared", "work"},
-			want:       []string{"work", "private", "shared"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := intersectWindow(tc.readScopes, tc.owned)
-			if !slices.Equal(got, tc.want) {
-				t.Fatalf("intersectWindow(%v, %v) = %v, want %v", tc.readScopes, tc.owned, got, tc.want)
-			}
-		})
-	}
-}
 
 // TestEffectiveHomeScope pins the authoritative home-scope mapping (§4.4): the
 // config home_scope when the tenant owns it, else its identity scope (owned[0]).
@@ -160,7 +107,7 @@ func captureDreamWindow(t *testing.T, base *config.Config, bt backgroundTenant, 
 // background-read gate: a tenant whose scheduler.read_scopes override claims a
 // FOREIGN scope must NOT read it — the dream cycle's window is read_scopes ∩
 // owned. RED arm (runDreamLoop passing raw cfg.Scheduler.ReadScopes instead of
-// intersectWindow): the window would carry "foreign-x" — a cross-tenant leak.
+// store.IntersectWindow): the window would carry "foreign-x" — a cross-tenant leak.
 func TestDreamLoopClampsReadWindowToEntitlements(t *testing.T) {
 	base := captureTestConfig(t, 12)
 	window := captureDreamWindow(t,
