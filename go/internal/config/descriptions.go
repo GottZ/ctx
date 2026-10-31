@@ -159,7 +159,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"pool.blob_scan_max_bytes":                       "Largest decoded blob payload the credentials detector reads on the blob write path; a bigger one is stored as metadata.sensitivity='unscanned' rather than refused, and 0 turns the scan off entirely",
 	"pool.external_num_ctx_fallback":                 "Assumed context window in tokens for external backends that declare none; 0 means prompts carrying foreign text are refused",
 	"pool.openrouter_window_ttl":                     "Cache lifetime in seconds for OpenRouter per-provider context-window discovery; 0 turns discovery off",
-	"tenant.allow_shared_secrets":                    "Operator-set per-tenant opt-in letting secret refs fall back to shared _global provider keys; false keeps strict isolation",
+	"tenant.allow_shared_secrets":                    "Operator-set per-tenant opt-in letting secret refs fall back to shared _global provider keys, for backend rows only on the base_url origin of a _global backend using that key; false keeps strict isolation",
 	"tenant.allow_cross_tenant_block_grant":          "Operator-set per-tenant opt-in allowing single-block read grants to a foreign tenant; false limits grants to intra-tenant",
 	"tenant.devmode":                                 "Developer-transparency umbrella for one tenant: false (default) seals credentials-class LLM prompt/reply bodies at write time, true stores and shows this tenant's own bodies on the status page; never widens what the tenant sees of other tenants",
 	"dispatch.enabled":                               "Emergency stop for the admission dispatcher; false degrades every acquire to a pass-through with no queueing or preemption",
