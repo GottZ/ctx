@@ -80,6 +80,20 @@ func TestGuardedPooledClient(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Errorf("guarded client reached loopback")
 	}
+
+	// A NAME that resolves internally must not have its address echoed: the
+	// error reaches a tenant-admin through /api/llmlog.
+	byName := strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)
+	_, err = DoRetryOnce(c, newReq(t, context.Background(), byName, body), body) //nolint:bodyclose // error path, no body
+	if err == nil || !strings.Contains(err.Error(), "SSRF guard") {
+		t.Fatalf("guarded localhost call error = %v, want SSRF guard refusal", err)
+	}
+	if s := err.Error(); strings.Contains(s, "127.0.0.1") || strings.Contains(s, "::1") {
+		t.Errorf("refusal echoes the resolved address: %v", err)
+	}
+	if !IsBackendUnavailable(err) {
+		t.Errorf("redacted refusal must stay a dial failure, got %v", err)
+	}
 }
 
 // TestClientsFor: one plain and one guarded pool per family, never shared.

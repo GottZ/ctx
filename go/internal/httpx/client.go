@@ -1,7 +1,11 @@
 package httpx
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/ssrfguard"
@@ -40,12 +44,36 @@ func PooledClient() *http.Client {
 func GuardedPooledClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			DialContext:         ssrfguard.GuardedDialer().DialContext,
+			DialContext:         redactGuardRefusal(ssrfguard.GuardedDialer().DialContext),
 			ForceAttemptHTTP2:   true,
 			MaxIdleConns:        20,
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
 		},
+	}
+}
+
+// errGuardRefused replaces ssrfguard's refusal on the backend path. The
+// guard's own message names the RESOLVED address; on a tenant row the error
+// reaches the tenant-admin (the first 256 characters of a chain error show in
+// its own /api/llmlog), so echoing it would turn the guard into a resolver
+// for the server's internal DNS names. The "SSRF guard" marker stays, so
+// logs and tests still tell a refusal from a connection-refused.
+var errGuardRefused = errors.New("refusing a loopback, private or link-local address (SSRF guard)")
+
+type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// redactGuardRefusal keeps the refusal a dial *net.OpError (so
+// IsBackendUnavailable / backends.Classify still see a transport failure)
+// but drops the resolved address from it. addr is the host:port the row
+// named — the tenant's own input — and is not repeated either.
+func redactGuardRefusal(dial dialFunc) dialFunc {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, network, addr)
+		if err != nil && strings.Contains(err.Error(), "SSRF guard") {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: errGuardRefused}
+		}
+		return conn, err
 	}
 }
 
