@@ -38,6 +38,16 @@ re-initialized provider keeps nothing of the previous run.
   first. The MCP `_connect()` of the umbrella binds a new client and every identity field
   on each call, holds no key and never ends inactive; `_chain()` replaces a writer whose
   client is not the current one, so it is unchanged.
+- **Re-initialization also drops caches of the previous binding.** `initialize()` did not
+  clear the recall prefetch: a matching query could get the previous profile's recall
+  for up to 60 s, and a warm-up still in flight could publish into the new binding. The
+  cache is now invalidated together with a generation counter, at the start of a re-init
+  and again after its connect (a warm-up queued in between still used the old client),
+  and on session switches; a warm-up publishes only into the generation it started under. The
+  manifest-lineage cache (`_last_manifest_by_root`, the parent fallback when the server
+  has no head) is dropped when the profile home, backend, key or whoami identity
+  changes, so a manifest id from another binding never becomes a parent; it is kept on
+  a re-init with the same binding.
 
 ### Compatibility
 No configuration or wire change. Error messages and failure envelopes differ only where

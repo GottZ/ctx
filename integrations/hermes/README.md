@@ -436,7 +436,8 @@ and manifest are deliberately small so routine recall stays cheap.
   the client produces — HTTP error bodies, codes outside the reject vocabulary,
   reasons, connection errors and HTTP 200 failure envelopes, before truncation and
   without the chained original exception — and a re-initialized provider drops the
-  previous client, key, whoami identity and checkpoint writer.
+  previous client, key, whoami identity and checkpoint writer, its recall prefetch
+  (including warm-ups in flight) and, on a binding change, its manifest-lineage cache.
 
 ## Licensing
 

@@ -125,6 +125,9 @@ class CtxMemoryProvider(MemoryProvider):
         # prefetch pre-warm cache: (query, context, hit count, monotonic_ts)
         self._prefetch_cache: tuple | None = None
         self._prefetch_lock = threading.Lock()
+        # Bumped whenever the cache is invalidated; a warm-up publishes only into the
+        # generation it started under.
+        self._prefetch_generation = 0
         self._last_recall_count = 0  # hits injected by the most recent prefetch()
         self._queue_thread: threading.Thread | None = None
         self._write_thread: threading.Thread | None = None
@@ -324,6 +327,10 @@ class CtxMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         from hermes_constants import get_hermes_home
 
+        # A re-initialization starts a new binding: no recall cached (or still being warmed)
+        # for the previous one is served under it.
+        self._invalidate_prefetch()
+        previous_binding = self._binding_identity()
         self._hermes_home = kwargs.get("hermes_home") or str(get_hermes_home())
         self._profile = derive_profile_name(self._hermes_home)
         self._session_id = session_id
@@ -354,6 +361,22 @@ class CtxMemoryProvider(MemoryProvider):
         # compaction with no path to success.
         self._write_enabled = self._agent_context not in {"cron", "flush", "subagent"}
         self._connect()
+        # A warm-up queued while this re-init ran still used the previous client: orphan it.
+        self._invalidate_prefetch()
+        # The manifest cache only bridges a missing server head on the SAME binding; a
+        # manifest id from another profile, backend or key must never become a parent.
+        if self._binding_identity() != previous_binding:
+            self._last_manifest_by_root = {}
+
+    def _binding_identity(self) -> tuple[str, str, str, str]:
+        """Profile home, backend and credential the provider is bound to (compared, never logged)."""
+        return (self._hermes_home, self._base_url, self._api_key, self._whoami_label)
+
+    def _invalidate_prefetch(self) -> None:
+        """Drop the pre-warmed recall and orphan warm-ups still in flight."""
+        with self._prefetch_lock:
+            self._prefetch_generation += 1
+            self._prefetch_cache = None
 
     def on_session_switch(
         self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False, rewound: bool = False, **kwargs
@@ -384,8 +407,7 @@ class CtxMemoryProvider(MemoryProvider):
                     self._root_session_id,
                 )
             self._cancel_idle_timer()
-        with self._prefetch_lock:
-            self._prefetch_cache = None
+        self._invalidate_prefetch()
 
     def _prune_state_once(self) -> None:
         days = int((self._config or {}).get("state_retention_days") or 0)
@@ -477,12 +499,16 @@ class CtxMemoryProvider(MemoryProvider):
         q = (query or "").strip()
         if not q:
             return
+        with self._prefetch_lock:
+            generation = self._prefetch_generation
 
         def _warm() -> None:
             try:
                 context, count = self._recall(q)
                 with self._prefetch_lock:
-                    self._prefetch_cache = (q, context, count, self._now())
+                    # A re-init or session switch since the start invalidated this warm-up.
+                    if generation == self._prefetch_generation:
+                        self._prefetch_cache = (q, context, count, self._now())
             except Exception as exc:
                 logger.debug("CTX prefetch warm-up failed (non-fatal): %s", exc)
 

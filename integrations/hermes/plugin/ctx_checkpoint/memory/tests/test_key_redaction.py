@@ -431,6 +431,100 @@ def test_reinitialize_with_other_key_replaces_client(tmp_path, ctx_env, fake_cli
     assert p._chain().client is p._client
 
 
+# -- re-initialization: caches bound to the previous binding ---------------------------------
+
+MANIFEST_ID = "019a0000-0000-7000-8000-000000000001"
+
+
+def test_reinitialize_drops_prefetch_cache(tmp_path, ctx_env, fake_client_cls):
+    p = _init(tmp_path)
+    p._prefetch_cache = ("same query", "<recall of alpha>", 1, p._now())
+    ctx_env.setenv("CTX_KEY", KEY_B)
+    ctx_env.setenv("CTX_BASE_URL", URL_B)
+    p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "beta"), agent_context="primary")
+    assert p._prefetch_cache is None
+
+
+def test_prefetch_warm_up_publishes_without_reinitialize(tmp_path, ctx_env, fake_client_cls):
+    p = _init(tmp_path)
+    ctx_env.setattr(p, "_recall", lambda _q: ("<recall of alpha>", 1))
+    p.queue_prefetch("same query")
+    p._queue_thread.join(5.0)
+    assert p._prefetch_cache[:3] == ("same query", "<recall of alpha>", 1)
+
+
+def test_inflight_prefetch_does_not_publish_after_reinitialize(tmp_path, ctx_env, fake_client_cls):
+    import threading
+
+    p = _init(tmp_path)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_recall(_q):
+        started.set()
+        assert release.wait(5.0)
+        return "<recall of alpha>", 1
+
+    ctx_env.setattr(p, "_recall", slow_recall)
+    p.queue_prefetch("same query")
+    assert started.wait(5.0)
+    warm = p._queue_thread
+    ctx_env.setenv("CTX_KEY", KEY_B)
+    ctx_env.setenv("CTX_BASE_URL", URL_B)
+    p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "beta"), agent_context="primary")
+    release.set()
+    warm.join(5.0)
+    assert not warm.is_alive()
+    assert p._prefetch_cache is None
+
+
+def test_prefetch_queued_during_reinitialize_does_not_publish(tmp_path, ctx_env, fake_client_cls):
+    """A warm-up queued between the start of initialize() and _connect() still sees the
+    previous client; its result must not survive the re-init."""
+    p = _init(tmp_path)
+    ctx_env.setattr(p, "_recall", lambda _q: ("<recall of alpha>", 1))
+    warm = []
+    prune = p._prune_state_once
+
+    def queue_mid_init():
+        p.queue_prefetch("same query")
+        warm.append(p._queue_thread)
+        warm[-1].join(5.0)
+        prune()
+
+    ctx_env.setattr(p, "_prune_state_once", queue_mid_init)
+    ctx_env.setenv("CTX_KEY", KEY_B)
+    ctx_env.setenv("CTX_BASE_URL", URL_B)
+    p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "beta"), agent_context="primary")
+    assert warm and not warm[0].is_alive()
+    assert p._prefetch_cache is None
+
+
+def test_manifest_cache_kept_on_same_binding(tmp_path, ctx_env, fake_client_cls):
+    p = _init(tmp_path)
+    p._last_manifest_by_root = {"root-1": MANIFEST_ID}
+    p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "alpha"), agent_context="primary")
+    assert p._last_manifest_by_root == {"root-1": MANIFEST_ID}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"CTX_KEY": KEY_B}, id="other-key"),
+        pytest.param({"CTX_BASE_URL": URL_B}, id="other-backend"),
+        pytest.param({}, id="other-profile"),
+    ],
+)
+def test_manifest_cache_dropped_on_other_binding(tmp_path, ctx_env, fake_client_cls, change):
+    p = _init(tmp_path)
+    p._last_manifest_by_root = {"root-1": MANIFEST_ID}
+    for name, value in change.items():
+        ctx_env.setenv(name, value)
+    profile = "alpha" if change else "beta"
+    p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / profile), agent_context="primary")
+    assert p._active
+    assert p._last_manifest_by_root == {}
+
+
 # -- re-initialization of the umbrella over MCP (finding: no stale state) --------------------
 
 
