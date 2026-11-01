@@ -447,7 +447,7 @@ def test_reinitialize_drops_prefetch_cache(tmp_path, ctx_env, fake_client_cls):
 
 def test_prefetch_warm_up_publishes_without_reinitialize(tmp_path, ctx_env, fake_client_cls):
     p = _init(tmp_path)
-    ctx_env.setattr(p, "_recall", lambda _q: ("<recall of alpha>", 1))
+    ctx_env.setattr(p, "_recall", lambda *_a: ("<recall of alpha>", 1))
     p.queue_prefetch("same query")
     p._queue_thread.join(5.0)
     assert p._prefetch_cache[:3] == ("same query", "<recall of alpha>", 1)
@@ -459,7 +459,7 @@ def test_inflight_prefetch_does_not_publish_after_reinitialize(tmp_path, ctx_env
     p = _init(tmp_path)
     started, release = threading.Event(), threading.Event()
 
-    def slow_recall(_q):
+    def slow_recall(*_a):
         started.set()
         assert release.wait(5.0)
         return "<recall of alpha>", 1
@@ -481,7 +481,7 @@ def test_prefetch_queued_during_reinitialize_does_not_publish(tmp_path, ctx_env,
     """A warm-up queued between the start of initialize() and _connect() still sees the
     previous client; its result must not survive the re-init."""
     p = _init(tmp_path)
-    ctx_env.setattr(p, "_recall", lambda _q: ("<recall of alpha>", 1))
+    ctx_env.setattr(p, "_recall", lambda *_a: ("<recall of alpha>", 1))
     warm = []
     prune = p._prune_state_once
 
@@ -499,10 +499,86 @@ def test_prefetch_queued_during_reinitialize_does_not_publish(tmp_path, ctx_env,
     assert p._prefetch_cache is None
 
 
+def test_warm_up_queries_the_client_it_was_queued_with(tmp_path, ctx_env, fake_client_cls):
+    """A warm-up that only starts running after a re-init must still go to the binding it
+    was queued under, never to the next binding's server."""
+    import ctx_plugin.provider as provider_mod
+
+    p = _init(tmp_path)
+    old = p._client
+    deferred = []
+    real_spawn = provider_mod.spawn_context_thread
+
+    def spawn_later(target, **kwargs):
+        deferred.append(real_spawn(target, **kwargs))
+        return SimpleNamespace(start=lambda: None, is_alive=lambda: False, join=lambda *_a, **_k: None)
+
+    ctx_env.setattr(provider_mod, "spawn_context_thread", spawn_later)
+    p.queue_prefetch("alpha question")
+    ctx_env.setenv("CTX_KEY", KEY_B)
+    ctx_env.setenv("CTX_BASE_URL", URL_B)
+    p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "beta"), agent_context="primary")
+    new = p._client
+    assert new is not old
+    deferred[0].start()
+    deferred[0].join(5.0)
+    assert [r[1] for r in old.reads] == ["alpha question"]
+    assert all(r[1] != "alpha question" for r in new.reads)
+    assert p._prefetch_cache is None
+
+
+def test_prefetch_queries_the_client_it_passed_the_gate_with(tmp_path, ctx_env, fake_client_cls):
+    """A re-init between prefetch()'s gate and its recall must not send this turn's query
+    to the next binding's server."""
+    p = _init(tmp_path)
+    old = p._client
+    real_lock = p._prefetch_lock
+
+    class RebindOnEnter:
+        def __enter__(self):
+            p._prefetch_lock = real_lock
+            ctx_env.setenv("CTX_KEY", KEY_B)
+            ctx_env.setenv("CTX_BASE_URL", URL_B)
+            p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "beta"), agent_context="primary")
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    p._prefetch_lock = RebindOnEnter()
+    p.prefetch("alpha turn")
+    new = p._client
+    assert new is not old
+    assert [r[1] for r in old.reads] == ["alpha turn"]
+    assert all(r[1] != "alpha turn" for r in new.reads)
+
+
 def test_manifest_cache_kept_on_same_binding(tmp_path, ctx_env, fake_client_cls):
     p = _init(tmp_path)
     p._last_manifest_by_root = {"root-1": MANIFEST_ID}
     p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "alpha"), agent_context="primary")
+    assert p._last_manifest_by_root == {"root-1": MANIFEST_ID}
+
+
+def test_manifest_cache_survives_failed_reinitialize_on_same_binding(tmp_path, ctx_env, fake_client_cls):
+    """A failed whoami leaves the provider inactive (no writes); the cache belongs to the
+    last verified binding and is still there when a retry on that binding succeeds."""
+    from ctx_plugin.client import CtxApiError
+
+    p = _init(tmp_path)
+    p._last_manifest_by_root = {"root-1": MANIFEST_ID}
+    home = str(tmp_path / "profiles" / "alpha")
+    whoami = fake_client_cls.whoami
+
+    def fail(self):
+        raise CtxApiError("connection error: simulated")
+
+    ctx_env.setattr(fake_client_cls, "whoami", fail)
+    p.initialize("sess-next", hermes_home=home, agent_context="primary")
+    assert not p._active
+    ctx_env.setattr(fake_client_cls, "whoami", whoami)
+    p.initialize("sess-next", hermes_home=home, agent_context="primary")
+    assert p._active
     assert p._last_manifest_by_root == {"root-1": MANIFEST_ID}
 
 

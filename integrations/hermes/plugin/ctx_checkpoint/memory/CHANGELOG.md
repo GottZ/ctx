@@ -43,11 +43,14 @@ re-initialized provider keeps nothing of the previous run.
   for up to 60 s, and a warm-up still in flight could publish into the new binding. The
   cache is now invalidated together with a generation counter, at the start of a re-init
   and again after its connect (a warm-up queued in between still used the old client),
-  and on session switches; a warm-up publishes only into the generation it started under. The
+  and on session switches; a warm-up publishes only into the generation it started under,
+  and it queries the client it was queued with (query and search fallback), not the one
+  bound when it runs; `prefetch()` likewise queries the client it passed its gate with. The
   manifest-lineage cache (`_last_manifest_by_root`, the parent fallback when the server
-  has no head) is dropped when the profile home, backend, key or whoami identity
-  changes, so a manifest id from another binding never becomes a parent; it is kept on
-  a re-init with the same binding.
+  has no head) is dropped when the profile home, backend, key or whoami identity of a
+  successful connect differs from the last verified binding, so a manifest id from another
+  binding never becomes a parent; a re-init with the same binding keeps it, and so does a
+  failed re-init (inactive, no writes) followed by a successful retry on that binding.
 
 ### Compatibility
 No configuration or wire change. Error messages and failure envelopes differ only where

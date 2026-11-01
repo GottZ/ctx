@@ -137,6 +137,8 @@ class CtxMemoryProvider(MemoryProvider):
         self._agent_context = ""
         self._chain_writer: ChainWriter | None = None
         self._last_manifest_by_root: dict[str, str] = {}
+        # Binding of the last successful connect; the manifest cache belongs to it.
+        self._verified_binding: tuple[str, str, str, str] | None = None
         self._last_chain_receipt = None
         # P4 cross-compaction fact dedupe, one ledger per root session
         self._fact_ledgers: dict[str, FactLedger] = {}
@@ -330,7 +332,7 @@ class CtxMemoryProvider(MemoryProvider):
         # A re-initialization starts a new binding: no recall cached (or still being warmed)
         # for the previous one is served under it.
         self._invalidate_prefetch()
-        previous_binding = self._binding_identity()
+        previous_binding = self._verified_binding
         self._hermes_home = kwargs.get("hermes_home") or str(get_hermes_home())
         self._profile = derive_profile_name(self._hermes_home)
         self._session_id = session_id
@@ -364,9 +366,14 @@ class CtxMemoryProvider(MemoryProvider):
         # A warm-up queued while this re-init ran still used the previous client: orphan it.
         self._invalidate_prefetch()
         # The manifest cache only bridges a missing server head on the SAME binding; a
-        # manifest id from another profile, backend or key must never become a parent.
-        if self._binding_identity() != previous_binding:
-            self._last_manifest_by_root = {}
+        # manifest id from another profile, backend or key must never become a parent. Only
+        # verified bindings count: a failed re-init (inactive, no writes) keeps the cache for
+        # a later retry on the same binding.
+        if self._active:
+            binding = self._binding_identity()
+            if binding != previous_binding:
+                self._last_manifest_by_root = {}
+            self._verified_binding = binding
 
     def _binding_identity(self) -> tuple[str, str, str, str]:
         """Profile home, backend and credential the provider is bound to (compared, never logged)."""
@@ -473,6 +480,7 @@ class CtxMemoryProvider(MemoryProvider):
         q = (query or "").strip()
         if not q:
             return ""
+        client = self._client  # the binding this turn passed the gate with
         with self._prefetch_lock:
             cached = self._prefetch_cache
             if cached and cached[0] == q and (self._now() - cached[3]) < _PREFETCH_CACHE_TTL_S:
@@ -480,7 +488,7 @@ class CtxMemoryProvider(MemoryProvider):
                 self._last_recall_count = cached[2]
                 return cached[1]
         try:
-            context, self._last_recall_count = self._recall(q)
+            context, self._last_recall_count = self._recall(q, client)
             return context
         except Exception as exc:
             logger.debug("CTX prefetch failed (non-fatal): %s", exc)
@@ -499,12 +507,15 @@ class CtxMemoryProvider(MemoryProvider):
         q = (query or "").strip()
         if not q:
             return
+        # Pin the warm-up to the binding it was queued under: a re-init replaces
+        # ``_client``, and the query must not reach the next binding's server.
+        client = self._client
         with self._prefetch_lock:
             generation = self._prefetch_generation
 
         def _warm() -> None:
             try:
-                context, count = self._recall(q)
+                context, count = self._recall(q, client)
                 with self._prefetch_lock:
                     # A re-init or session switch since the start invalidated this warm-up.
                     if generation == self._prefetch_generation:
@@ -520,17 +531,20 @@ class CtxMemoryProvider(MemoryProvider):
     def _types_exclude(self) -> list[str]:
         return list(self._config.get("prefetch_types_exclude") or [])
 
-    def _recall(self, text: str) -> tuple[str, int]:
+    def _recall(self, text: str, client: CtxClient | None = None) -> tuple[str, int]:
         """Retrieval-only recall → ``(context block, hit count)``. Query path with search
         fallback (embedding backfill can make /api/query time out right after stores). Both
-        paths send ``types_exclude`` (P2: checkpoints are browseable on /api/search)."""
-        if not self._client:
+        paths send ``types_exclude`` (P2: checkpoints are browseable on /api/search).
+        ``client`` pins the call to a binding (prefetch, warm-ups); default: the current client."""
+        if client is None:
+            client = self._client
+        if not client:
             return "", 0
         types_exclude = self._types_exclude()
         if self._config.get("prefetch_mode") == "search":
-            return self._format_search_results(self._client.search(text, types_exclude=types_exclude))
+            return self._format_search_results(client.search(text, types_exclude=types_exclude))
         try:
-            data = self._client.query(text, synthesize=False, include_content=True, types_exclude=types_exclude)
+            data = client.query(text, synthesize=False, include_content=True, types_exclude=types_exclude)
             if data.get("success"):
                 sources = data.get("sources") or []
                 if sources:
@@ -538,7 +552,7 @@ class CtxMemoryProvider(MemoryProvider):
             return "", 0
         except Exception:
             try:
-                return self._format_search_results(self._client.search(text, types_exclude=types_exclude))
+                return self._format_search_results(client.search(text, types_exclude=types_exclude))
             except Exception:
                 return "", 0
 
