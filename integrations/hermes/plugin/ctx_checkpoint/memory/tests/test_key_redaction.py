@@ -527,6 +527,35 @@ def test_warm_up_queries_the_client_it_was_queued_with(tmp_path, ctx_env, fake_c
     assert p._prefetch_cache is None
 
 
+def test_warm_up_queued_across_a_reinitialize_never_pairs_old_client_with_new_generation(
+    tmp_path, ctx_env, fake_client_cls
+):
+    """A re-init that completes while queue_prefetch() is between reading the generation
+    and the client must not let the previous client query (or publish) under the new
+    generation."""
+    p = _init(tmp_path)
+    old = p._client
+    real_lock = p._prefetch_lock
+
+    class RebindOnEnter:
+        def __enter__(self):
+            p._prefetch_lock = real_lock
+            ctx_env.setenv("CTX_KEY", KEY_B)
+            ctx_env.setenv("CTX_BASE_URL", URL_B)
+            p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "beta"), agent_context="primary")
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    p._prefetch_lock = RebindOnEnter()
+    p.queue_prefetch("alpha question")
+    if p._queue_thread is not None:
+        p._queue_thread.join(5.0)
+    assert p._client is not old
+    assert all(r[1] != "alpha question" for r in old.reads)
+
+
 def test_prefetch_queries_the_client_it_passed_the_gate_with(tmp_path, ctx_env, fake_client_cls):
     """A re-init between prefetch()'s gate and its recall must not send this turn's query
     to the next binding's server."""

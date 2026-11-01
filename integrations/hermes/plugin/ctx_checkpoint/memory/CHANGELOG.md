@@ -45,7 +45,9 @@ re-initialized provider keeps nothing of the previous run.
   and again after its connect (a warm-up queued in between still used the old client),
   and on session switches; a warm-up publishes only into the generation it started under,
   and it queries the client it was queued with (query and search fallback), not the one
-  bound when it runs; `prefetch()` likewise queries the client it passed its gate with. The
+  bound when it runs (the generation is read before the client, so a re-init in between
+  never pairs the previous client with the new generation); `prefetch()` likewise queries
+  the client it passed its gate with. The
   manifest-lineage cache (`_last_manifest_by_root`, the parent fallback when the server
   has no head) is dropped when the profile home, backend, key or whoami identity of a
   successful connect differs from the last verified binding, so a manifest id from another

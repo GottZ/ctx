@@ -507,11 +507,15 @@ class CtxMemoryProvider(MemoryProvider):
         q = (query or "").strip()
         if not q:
             return
+        # Generation first, then the client: a re-init in between bumps the generation past
+        # this warm-up, so a pinned previous client can never publish under the new one.
+        with self._prefetch_lock:
+            generation = self._prefetch_generation
         # Pin the warm-up to the binding it was queued under: a re-init replaces
         # ``_client``, and the query must not reach the next binding's server.
         client = self._client
-        with self._prefetch_lock:
-            generation = self._prefetch_generation
+        if client is None:
+            return
 
         def _warm() -> None:
             try:
