@@ -33,7 +33,7 @@ from agent.memory_provider import MemoryProvider
 from . import checkpoint as _cp
 from . import digest as _dg
 from .checkpoint import ChainWriter, CtxCheckpointError
-from .client import CtxApiError, CtxClient, response_code, store_action, store_block_id
+from .client import CtxApiError, CtxClient, redact_secret, response_code, store_action, store_block_id
 from .config import (
     CATEGORY_DIGEST,
     CATEGORY_LEARNINGS,
@@ -195,6 +195,16 @@ class CtxMemoryProvider(MemoryProvider):
 
     def _connect(self) -> None:
         """Bind credentials and the client; sets ``_active``/``_client``. Default: REST."""
+        # A re-initialization of the same instance must not keep the previous client, key,
+        # whoami identity or checkpoint writer — not even when it ends inactive below, or
+        # when env_secret raises (unscoped read under multiplexing) before the new values land.
+        self._active = False
+        self._client = None
+        self._chain_writer = None
+        self._api_key = ""
+        self._base_url = ""
+        self._home_scope = ""
+        self._whoami_label = ""
         self._api_key = env_secret("CTX_KEY")
         self._base_url = resolve_base_url(self._config.get("ctx_base_url"))
         self._active = bool(self._api_key and self._base_url)
@@ -222,7 +232,11 @@ class CtxMemoryProvider(MemoryProvider):
                 self._profile,
             )
         except Exception as exc:
-            logger.warning("CTX whoami validation failed (%s); provider disabled for this session", exc)
+            # CtxClient already redacts; this guards foreign/injected clients the same way.
+            logger.warning(
+                "CTX whoami validation failed (%s); provider disabled for this session",
+                redact_secret(exc, self._api_key),
+            )
             self._active = False
             self._client = None
 

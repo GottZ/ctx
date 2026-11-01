@@ -432,6 +432,11 @@ and manifest are deliberately small so routine recall stays cheap.
   bounds MCP dispatches too and `/stop` aimed at the caller still reaches them,
   `transport: rest` is available with `rest_base_url` in the section alone, and
   `install.sh` writes dot-prefixed backups.
+- 0.6.2: `transport: rest` redacts the ctx key (`[REDACTED]`) from every error text
+  the client produces — HTTP error bodies, codes outside the reject vocabulary,
+  reasons, connection errors and HTTP 200 failure envelopes, before truncation and
+  without the chained original exception — and a re-initialized provider drops the
+  previous client, key, whoami identity and checkpoint writer.
 
 ## Licensing
 

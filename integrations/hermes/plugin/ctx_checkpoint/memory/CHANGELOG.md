@@ -6,6 +6,45 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.6.2] — 2026-11-01
+
+REST transport: the ctx key no longer leaves the client in error texts, and a
+re-initialized provider keeps nothing of the previous run.
+
+### Security
+- **The key is redacted from every REST error text.** A ctx server or a proxy in front of
+  it that repeats the request's `X-Context-Key` in an answer put the key verbatim into
+  `CtxApiError` texts and codes, into the provider's log lines, into `exc_info` tracebacks
+  (the original `HTTPError`/`URLError` was chained via `raise … from exc`) and, through
+  tool errors, into the model context. `CtxClient` now replaces the key with `[REDACTED]`
+  in the HTTP error body (`error`, `message`, nested error objects, plain text), in the
+  `code` (codes from the closed `REJECT_CODES` vocabulary stay verbatim), in `exc.reason`,
+  in `URLError`/`TimeoutError`/`OSError` texts and, recursively in every string value, in
+  HTTP 200 failure envelopes (`success: false` or an `error` key). Texts are redacted
+  before the 300-character cut, so no key prefix survives it. Errors are raised
+  `from None`; their content is in the message. The debug line for an unreadable error
+  body names only the exception type (its `exc_info` traceback chained the unredacted
+  `HTTPError`). Successful answers are returned
+  unchanged, even for a one-character key. New public helpers `redact_secret` /
+  `redact_deep` in `memory/client.py`; the whoami warning in the provider redacts as
+  well, for clients that are not a `CtxClient`.
+
+### Fixed
+- **Re-initialization drops the previous client.** `_connect()` (REST) reset nothing
+  before binding: a re-init that ended inactive (no `CTX_KEY`/`CTX_BASE_URL`) kept the
+  old client with the old key, the whoami identity and the checkpoint writer on the
+  instance, and a failed whoami kept the previous identity. It now clears `_active`,
+  `_client`, `_chain_writer`, `_api_key`, `_base_url`, `_home_scope` and `_whoami_label`
+  first. The MCP `_connect()` of the umbrella binds a new client and every identity field
+  on each call, holds no key and never ends inactive; `_chain()` replaces a writer whose
+  client is not the current one, so it is unchanged.
+
+### Compatibility
+No configuration or wire change. Error messages and failure envelopes differ only where
+they contained the key; callers that matched on `CtxApiError.__cause__` get `None` now.
+Credentials are still read through `env_secret` only (no `.env`/`os.environ` fallback of
+its own — the host's fail-closed secret scope stays the contract).
+
 ## [ctx_checkpoint 0.6.1] — 2026-10-31
 
 Checkpoint-chain fixes from the review in GottZ/ctx#51, checked against the answers ctx

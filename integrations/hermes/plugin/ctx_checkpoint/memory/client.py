@@ -60,6 +60,35 @@ REJECT_CODES = (
 RETRYABLE_CODES = frozenset({"rate_limit"})
 # Metadata keys the server owns (403 reserved_metadata) — rejected client-side.
 RESERVED_METADATA_KEYS = ("provenance",)
+# Replacement for an API key echoed back in any error text (server body, proxy, socket).
+REDACTED = "[REDACTED]"
+
+
+def redact_secret(text: Any, secret: str | None) -> str:
+    """``text`` with every exact occurrence of ``secret`` replaced by ``[REDACTED]``.
+
+    Apply BEFORE any truncation, otherwise a cut could leave a key prefix behind.
+    """
+    out = "" if text is None else str(text)
+    if secret and out:
+        out = out.replace(secret, REDACTED)
+    return out
+
+
+def redact_deep(value: Any, secret: str | None) -> Any:
+    """Recursively redact ``secret`` in every string VALUE of a JSON-like structure.
+
+    Dict keys and non-string scalars are returned unchanged; containers are rebuilt.
+    """
+    if not secret:
+        return value
+    if isinstance(value, str):
+        return value.replace(secret, REDACTED)
+    if isinstance(value, dict):
+        return {k: redact_deep(v, secret) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_deep(v, secret) for v in value]
+    return value
 
 
 class CtxApiError(Exception):
@@ -153,6 +182,10 @@ class CtxClient:
 
     # -- low-level -----------------------------------------------------------
 
+    def _redact(self, text: Any) -> str:
+        """Central key redaction for every text leaving this client as an error."""
+        return redact_secret(text, self._key)
+
     def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None, timeout: float | None = None
     ) -> dict[str, Any]:
@@ -177,15 +210,30 @@ class CtxClient:
                     return {"success": False, "error": "invalid JSON response from CTX"}
                 if not isinstance(parsed, dict):
                     return {"success": False, "error": "unexpected response shape from CTX"}
+                # Failure envelopes (HTTP 200 + success:false, or any answer carrying an
+                # ``error``) may echo the key in error texts/objects or codes: redact every
+                # string VALUE there. Successful data (incl. store/noop answers without a
+                # success field) is never rewritten — a short key would corrupt payloads.
+                # Closed-vocabulary codes never contain a key and stay verbatim.
+                if parsed.get("success") is False or "error" in parsed:
+                    code = parsed.get("code")
+                    parsed = redact_deep(parsed, self._key)
+                    if isinstance(code, str) and code in REJECT_CODES:
+                        parsed["code"] = code
                 return parsed
             except urllib.error.HTTPError as exc:
                 body = ""
                 try:
                     body = exc.read(16384).decode("utf-8", "replace")
-                except Exception:
-                    logger.debug("CTX error body unreadable", exc_info=True)
+                except Exception as read_exc:
+                    # No exc_info: the traceback would chain the unredacted HTTPError.
+                    logger.debug("CTX error body unreadable (%s)", type(read_exc).__name__)
                 code, err_text = _parse_error_body(body)
-                detail = err_text or body[:300] or str(exc.reason)
+                # Redact the FULL texts first, truncate afterwards (no key prefix survives a cut).
+                # Codes from the closed vocabulary stay verbatim (machine-readable contract).
+                if code not in REJECT_CODES:
+                    code = self._redact(code)
+                detail = self._redact(err_text) or self._redact(body)[:300] or self._redact(exc.reason)
                 message = f"HTTP {exc.code}{f' [{code}]' if code else ''}: {detail[:300]}"
                 error = CtxApiError(message, status=exc.code, code=code)
                 # Retry once only on a transient 429 (per-key write rate limit);
@@ -194,9 +242,11 @@ class CtxClient:
                     time.sleep(1.0)
                     last_error = error
                     continue
-                raise error from exc
+                # ``from None``: the original HTTPError/URLError text is unredacted and would
+                # resurface in every ``exc_info=True`` traceback; its content is in the message.
+                raise error from None
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                raise CtxApiError(f"connection error: {exc}") from exc
+                raise CtxApiError(f"connection error: {self._redact(exc)}") from None
 
         raise last_error or CtxApiError("request failed")
 
