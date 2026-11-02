@@ -965,6 +965,18 @@ def test_manifest_cache_dropped_on_other_binding(tmp_path, ctx_env, fake_client_
     assert p._last_manifest_by_root == {}
 
 
+def test_verified_binding_keeps_a_digest_not_the_key(tmp_path, ctx_env, fake_client_cls):
+    """The binding of the last successful connect outlives the client (also an inactive re-init);
+    it must not be a second copy of the key."""
+    p = _init(tmp_path)
+    assert p._verified_binding is not None
+    _assert_no_key(repr(p._verified_binding))
+    ctx_env.delenv("CTX_KEY")
+    p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "alpha"), agent_context="primary")
+    assert not p._active and p._verified_binding is not None
+    _assert_no_key(repr(p._verified_binding))
+
+
 # -- re-initialization of the umbrella over MCP (finding: no stale state) --------------------
 
 

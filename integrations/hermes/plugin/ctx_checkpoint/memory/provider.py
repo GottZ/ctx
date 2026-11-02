@@ -20,6 +20,7 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import threading
@@ -377,8 +378,14 @@ class CtxMemoryProvider(MemoryProvider):
             self._verified_binding = binding
 
     def _binding_identity(self) -> tuple[str, str, str, str]:
-        """Profile home, backend and credential the provider is bound to (compared, never logged)."""
-        return (self._hermes_home, self._base_url, self._api_key, self._whoami_label)
+        """Profile home, backend, credential and whoami identity the provider is bound to.
+
+        Only compared, never logged. The credential is its SHA-256 digest (``""`` without a key):
+        the identity outlives the client, also an inactive re-init, and must not be a second
+        copy of the key.
+        """
+        key_digest = hashlib.sha256(self._api_key.encode("utf-8")).hexdigest() if self._api_key else ""
+        return (self._hermes_home, self._base_url, key_digest, self._whoami_label)
 
     def _invalidate_prefetch(self) -> None:
         """Drop the pre-warmed recall and orphan warm-ups still in flight."""
