@@ -44,8 +44,14 @@ jobs:
             ext: .exe
 
     steps:
-      - name: Checkout
+      - name: Checkout the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A tag push checks out that tag anyway; a manual dispatch would
+          # otherwise build the branch the run was started from and label the
+          # binaries with the input tag. Pinning the ref builds the selected
+          # tag — and fails the run when that tag does not exist.
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Setup Go ${{ env.GO_VERSION }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -155,6 +161,7 @@ jobs:
       - name: Checkout (with tags)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
           fetch-tags: true
 
