@@ -13,17 +13,31 @@ import (
 // briefCategory is the dedicated store category for agent briefings.
 const briefCategory = "agent-briefing"
 
+// Paging bounds of the untagged fallback. /api/search has no "no tags"
+// filter, so the fallback browses the category and keeps the untagged blocks
+// on the client; a page holds at most briefPageSize rows (the REST cap) and it
+// reads at most briefMaxPages pages, so a store full of other projects'
+// briefings costs a hook a bounded number of requests.
+const (
+	briefPageSize = 50
+	briefMaxPages = 10
+)
+
 // briefBlock represents a single block from the search response.
 type briefBlock struct {
-	Title   string `json:"title"`
-	Content string `json:"content"`
+	Title   string   `json:"title"`
+	Content string   `json:"content"`
+	Tags    []string `json:"tags"`
 }
 
-// briefResponse is the search API response shape.
+// briefResponse is the search API response shape. NextAfter is the keyset
+// cursor of the next page (JSON null on the last page), passed back verbatim
+// as "after".
 type briefResponse struct {
-	Success bool         `json:"success"`
-	Count   int          `json:"count"`
-	Results []briefBlock `json:"results"`
+	Success   bool            `json:"success"`
+	Count     int             `json:"count"`
+	Results   []briefBlock    `json:"results"`
+	NextAfter json.RawMessage `json:"next_after"`
 }
 
 // hookInput is the JSON passed on stdin by Claude Code hooks.
@@ -55,7 +69,9 @@ func briefCmd(getClient func() (*Client, error)) *cobra.Command {
 		Use:   "brief",
 		Short: "Project briefing from agent-briefing blocks",
 		Long: `Output a compact project briefing from agent-briefing blocks.
-Scoped by project tag (git root or CWD). Falls back to untagged blocks.
+Scoped by project tag (git root or CWD). When no block carries the
+project tag, falls back to the blocks without any tag; blocks tagged for
+another project are never included.
 
 Default: human-readable text. With --hook: reads CWD from stdin JSON,
 outputs Claude Code SubagentStart hook JSON.
@@ -93,10 +109,14 @@ func runBrief(getClient func() (*Client, error), hook bool, limit int, project s
 		project = projectFromCWD()
 	}
 
-	// Try project-scoped first, fall back to untagged.
-	blocks := searchBriefBlocks(c, limit, project)
-	if len(blocks) == 0 && project != "" {
-		blocks = searchBriefBlocks(c, limit, "")
+	// Project-scoped first; without project blocks (or without a project),
+	// the untagged blocks only. Never the blocks tagged for another project.
+	var blocks []briefBlock
+	if project != "" {
+		blocks = searchBriefBlocks(c, limit, project)
+	}
+	if len(blocks) == 0 {
+		blocks = searchUntaggedBriefBlocks(c, limit)
 	}
 	if len(blocks) == 0 {
 		return nil
@@ -110,15 +130,61 @@ func runBrief(getClient func() (*Client, error), hook bool, limit int, project s
 	return nil
 }
 
-// searchBriefBlocks queries agent-briefing blocks, optionally filtered by project tag.
+// searchBriefBlocks queries the agent-briefing blocks tagged with project.
 func searchBriefBlocks(c *Client, limit int, project string) []briefBlock {
+	data := searchBriefPage(c, limit, []string{project}, nil)
+	if data == nil {
+		return nil
+	}
+	return data.Results
+}
+
+// searchUntaggedBriefBlocks returns up to limit agent-briefing blocks that
+// carry no tag at all, most recently updated first. The filter runs here because the search
+// API cannot ask for "no tags", so it pages through the category until it has
+// limit blocks, the store runs out, or briefMaxPages pages were read.
+func searchUntaggedBriefBlocks(c *Client, limit int) []briefBlock {
+	if limit <= 0 {
+		limit = 10 // the search API's own default (handler.defaultSearchLimit)
+	}
+	var out []briefBlock
+	var after json.RawMessage
+	for range briefMaxPages {
+		data := searchBriefPage(c, briefPageSize, nil, after)
+		if data == nil {
+			break
+		}
+		for _, b := range data.Results {
+			if len(b.Tags) > 0 {
+				continue
+			}
+			out = append(out, b)
+			if len(out) == limit {
+				return out
+			}
+		}
+		if len(data.NextAfter) == 0 || string(data.NextAfter) == "null" {
+			break
+		}
+		after = data.NextAfter
+	}
+	return out
+}
+
+// searchBriefPage posts one empty-query search over the agent-briefing
+// category. tags (if any) filter server-side; after is the cursor of the
+// previous page (nil = first page). nil = error or no results.
+func searchBriefPage(c *Client, limit int, tags []string, after json.RawMessage) *briefResponse {
 	body := map[string]any{
 		"category": briefCategory,
 		"limit":    limit,
 		"compact":  false,
 	}
-	if project != "" {
-		body["tags"] = []string{project}
+	if len(tags) > 0 {
+		body["tags"] = tags
+	}
+	if after != nil {
+		body["after"] = after
 	}
 
 	resp, err := c.Post("search", body)
@@ -130,7 +196,7 @@ func searchBriefBlocks(c *Client, limit int, project string) []briefBlock {
 	if err := json.Unmarshal(resp, &data); err != nil || !data.Success || data.Count == 0 {
 		return nil
 	}
-	return data.Results
+	return &data
 }
 
 // projectFromStdin reads hook JSON from stdin and extracts CWD, then resolves to git root.

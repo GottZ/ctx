@@ -85,6 +85,8 @@ ctx stats     # Block count, categories, storage
 }
 ```
 
+`ctx brief` injects the `agent-briefing` blocks tagged with the project (the nearest directory at or above the subagent's working directory that holds a `.git` directory, else the working directory itself). When none carry that tag, it falls back to the `agent-briefing` blocks that have no tag at all, never to blocks tagged for another project. The search API has no "no tags" filter, so the CLI filters the fallback itself and looks for them among at most the 500 most recently updated `agent-briefing` blocks the key can read.
+
 ## Environment variables
 
 Every var below can also carry a runtime override in `context_settings` (precedence: **DB override > env > default**; sealed `context_secrets` + trigger-fed audit trail in `context_settings_audit`, migration 051). The boot loads the overrides right after the migrations and builds the effective snapshot; sensitive keys take a `secret_ref` (the *name* of a sealed secret), resolved in-memory only. The override layer is never fatal: unknown keys, restart-only/coupled keys (incl. the `CONTEXT_DB_*` group), corrupt values and a missing or wrong master key each degrade to a WARN while the env/default value stays active; `CTX_SETTINGS_DISABLE=1` switches the whole layer off. Live editing goes through the admin-gated [Settings API](api.md#settings-api); direct SQL edits (and break-glass resets) take effect immediately (the 051 triggers NOTIFY a listener that rebuilds the snapshot).
