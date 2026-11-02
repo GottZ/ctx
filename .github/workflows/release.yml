@@ -33,6 +33,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      checks: read
     outputs:
       tag: ${{ steps.check.outputs.tag }}
       commit: ${{ steps.check.outputs.commit }}
@@ -45,12 +46,19 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - name: Tag is an annotated version tag on root
+      - name: Tag is an annotated version tag on root, unreleased, with a green live tier
         id: check
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # A manual run is the maintainer's: anyone with write may re-run or
+          # dispatch workflows, and a rebuilt release would carry a new
+          # main.date and new checksums.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" ]; then
+            echo "::error::manual release runs are limited to the repository owner (dispatched by $GITHUB_ACTOR)"; exit 1
+          fi
           # Anchored: a glob would accept v1.0.0";id;" — a valid git ref name.
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::'$TAG' is not a version tag (vMAJOR.MINOR.PATCH)"; exit 1
@@ -73,6 +81,19 @@ jobs:
           git fetch --no-tags --quiet origin root
           if ! git merge-base --is-ancestor "$PEELED" origin/root; then
             echo "::error::tag $TAG points to $PEELED, which is not on root — releases are cut on merged commits only (GOVERNANCE.md)"; exit 1
+          fi
+          # A published release is immutable: a second run for the same tag
+          # (re-run, re-dispatch) must not replace its binaries, checksums or
+          # provenance. `gh release view` succeeds only when it exists.
+          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists — published releases are not rebuilt (GOVERNANCE.md, Releases)"; exit 1
+          fi
+          # The live tier (real ctxd + Postgres, production write paths) runs
+          # on every push to root; the tagged commit must have a green run.
+          LIVE_OK="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PEELED}/check-runs?check_name=Web%20Live%20Tier&per_page=50" \
+            --jq '[.check_runs[] | select(.conclusion == "success")] | length')"
+          if [ "${LIVE_OK:-0}" -lt 1 ]; then
+            echo "::error::no successful 'Web Live Tier' run on $PEELED — wait for the root push run of ci.yml (or dispatch it on root), then tag"; exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "commit=${PEELED}" >> "$GITHUB_OUTPUT"

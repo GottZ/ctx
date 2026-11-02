@@ -70,12 +70,16 @@ flow there).
 
 ## Release-gate rule
 
-**A version tag is pushed only after a GREEN nightly live-tier run** — the
+**A version tag needs a GREEN live-tier run on the tagged commit** — the
 extension of the repo's "CI is truth, not local" rule (MEMORY
-`feedback_ci_is_truth_not_local`) to the live tier. The nightly `web-live` job
-(`.github/workflows/ci.yml`) is the enforcement; `workflow_dispatch` runs it on
-demand, and a PR carrying the `e2e-live` label runs it on that PR (backend PRs
-that change enforcement/shapes/SSE should set the label).
+`feedback_ci_is_truth_not_local`) to the live tier. The `web-live` job
+(`.github/workflows/ci.yml`) runs on every push to `root`, so every merge
+commit — every release candidate — carries its verdict; the `verify` job of
+`release.yml` refuses a tag whose commit has no successful `Web Live Tier`
+check run (see [GOVERNANCE.md](../../../../GOVERNANCE.md), Releases). The
+nightly run is the daily drift signal, `workflow_dispatch` runs it on demand,
+and a PR carrying the `e2e-live` label runs it on that PR (backend PRs that
+change enforcement/shapes/SSE should set the label).
 
 ## Scope honesty (W21)
 
