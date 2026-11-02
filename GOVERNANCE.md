@@ -94,7 +94,10 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
   tier. The nightly run of the same job is the daily drift signal, not the
   gate. Tags are cut on the tip of `root`: a second merge while the first
   one's run is still going cancels that run, so an earlier commit has no
-  verdict unless `ci.yml` is dispatched on its ref by hand.
+  verdict unless its run is re-run by hand. Such a re-run is safe: `ci.yml`
+  publishes the container image only from the commit that is the tip of
+  `root` at run time, so `latest` and the date tag cannot be re-pointed at
+  an older commit.
 - Versioning: a `feat` lands as a minor release, fixes as a patch, a
   breaking change as a major. Several merged pull requests may share one
   release.

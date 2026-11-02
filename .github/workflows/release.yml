@@ -105,7 +105,7 @@ jobs:
           LIVE_OK="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PEELED}/check-runs?check_name=Web%20Live%20Tier&per_page=50" \
             --jq '[.check_runs[] | select(.conclusion == "success")] | length')"
           if [ "${LIVE_OK:-0}" -lt 1 ]; then
-            echo "::error::no successful 'Web Live Tier' run on $PEELED — wait for the ci.yml run of the push that put it on root; if that run was cancelled by a later push, dispatch ci.yml on this ref without image publishing (gh workflow run ci.yml --ref $TAG -f publish_images=false) and re-run this workflow"; exit 1
+            echo "::error::no successful 'Web Live Tier' run on $PEELED — wait for the ci.yml run of the push that put it on root; if that run was cancelled by a later push, re-run it (gh run rerun <run-id>; ci.yml publishes images only from the current tip of root, so an older commit's re-run cannot re-point a tag) and then re-run this workflow"; exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "commit=${PEELED}" >> "$GITHUB_OUTPUT"

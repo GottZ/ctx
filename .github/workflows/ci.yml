@@ -901,7 +901,7 @@ jobs:
     # that older commit.
     if: >-
       github.event_name != 'schedule' &&
-      (github.ref == 'refs/heads/root' ||
+      ((github.event_name == 'push' && github.ref == 'refs/heads/root') ||
       (github.event_name == 'workflow_dispatch' && inputs.publish_images == true))
 
     permissions:
@@ -917,10 +917,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # `latest` and the {{date}} tag name "the newest root"; a re-run or a
+      # dispatch of an older commit (release.yml's recovery path for a missing
+      # live-tier verdict, or any manual re-run) must not re-point them. The
+      # tip is read live from origin, not from the event: only the commit that
+      # IS root right now publishes. `sha-<short>` would be harmless, but one
+      # rule for the whole job is simpler than three.
+      - name: Publish only from the current tip of root
+        id: tip
+        run: |
+          set -eu
+          git fetch --no-tags --depth=1 origin root
+          TIP="$(git rev-parse FETCH_HEAD)"
+          if [ "$TIP" = "$GITHUB_SHA" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "ok: $GITHUB_SHA is the tip of root"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::image not published — $GITHUB_SHA is not the tip of root ($TIP); a re-run of an older commit never re-points latest or the date tag"
+          fi
+
       - name: Setup Docker Buildx
+        if: steps.tip.outputs.publish == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Login to GitHub Container Registry
+        if: steps.tip.outputs.publish == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -928,6 +950,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker metadata
+        if: steps.tip.outputs.publish == 'true'
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
@@ -945,6 +968,7 @@ jobs:
             org.opencontainers.image.licenses=MPL-2.0
 
       - name: Build and push Docker image
+        if: steps.tip.outputs.publish == 'true'
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -990,6 +1014,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [docker]
+    # Nothing to attest when docker ran but did not publish (not the tip).
+    if: needs.docker.result == 'success' && needs.docker.outputs.digest != ''
     permissions:
       contents: read
       id-token: write
