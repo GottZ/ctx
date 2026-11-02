@@ -913,12 +913,15 @@ jobs:
     # One image publication at a time across ALL refs: ci.yml's workflow
     # group is per ref, so a dispatch on a tag and a push to root would run
     # side by side and the older build could land its mutable tags last.
-    # Pending jobs queue (never cancelled); the tip is re-read right before
-    # the mutable tags are promoted, so whoever runs second sees the newer
-    # root and backs off.
+    # Pending jobs queue in order and are never cancelled (`queue: max`,
+    # 2026-05 — without it a group keeps ONE pending job and a later entrant
+    # displaces it, so an old-tag dispatch could cancel the pending root
+    # publication). The tip is re-read right before the mutable tags are
+    # promoted, so whoever runs later sees the newer root and backs off.
     concurrency:
       group: ctx-image-publish
       cancel-in-progress: false
+      queue: max
 
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -1053,8 +1056,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [docker]
-    # Nothing to attest when docker ran but did not publish (not the tip).
-    if: needs.docker.result == 'success' && needs.docker.outputs.digest != ''
+    # Attest whenever an image was pushed: the build step publishes the sha-
+    # tag and sets the digest before the promotion step, so a failed
+    # promotion must not leave a pushed image without provenance. Skipped
+    # when docker did not publish (not the tip) or was cancelled.
+    if: ${{ always() && (needs.docker.result == 'success' || needs.docker.result == 'failure') && needs.docker.outputs.digest != '' }}
     permissions:
       contents: read
       id-token: write
