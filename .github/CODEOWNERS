@@ -1,6 +1,8 @@
 # (GOVERNANCE.md, "How root changes"). One approval from any owner listed on
-# the matching line satisfies the rule; an owner cannot approve their own
-# pull request, so every owner's work is reviewed by another owner. Later
+# the matching line satisfies the rule. An author cannot approve their own
+# pull request, and the ruleset's last-push rule keeps whoever pushed last
+# from approving either, so every owner's commits are reviewed by another
+# owner — including hardening pushed onto a contributor's branch. Later
 # lines take precedence over earlier ones, so the catch-all stays first; add
 # an area line below it when someone takes an area over. Owners need write
 # access, or GitHub ignores the entry.

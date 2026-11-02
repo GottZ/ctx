@@ -9,8 +9,8 @@ repository, not a way around review.
 
 | Role | Who | May |
 |---|---|---|
-| **Maintainer** | [@GottZ](https://github.com/GottZ) (owner) | everything below, plus: merge pull requests, cut release tags, change repository settings and rulesets, grant and revoke access, publish security advisories |
-| **Code owner** | [Damien Moon](https://github.com/DamieMoon), [derLonius](https://github.com/W4-NERF) and the maintainer, per [`.github/CODEOWNERS`](.github/CODEOWNERS) | a collaborator whose approval satisfies the review requirement on `root`; requested for review automatically |
+| **Maintainer** | [@GottZ](https://github.com/GottZ) (owner) | everything below, plus: merge contributors' pull requests, cut release tags, change repository settings and rulesets, grant and revoke access, publish security advisories |
+| **Code owner** | [Damien Moon](https://github.com/DamieMoon), [derLonius](https://github.com/W4-NERF) and the maintainer, per [`.github/CODEOWNERS`](.github/CODEOWNERS) | a collaborator whose approval satisfies the review requirement on `root`; requested for review automatically; merges their own pull request once it is approved (see *Who merges*) |
 | **Collaborator** (GitHub role *write*) | invited by the maintainer; see [Becoming a collaborator](#becoming-a-collaborator) | push branches to this repository (no fork needed), review pull requests, triage issues, apply labels, approve CI runs of first-time contributors, re-run workflows |
 | **Contributor** | anyone | fork, open pull requests, report issues, join discussions |
 
@@ -35,9 +35,9 @@ guard it and apply to all accounts (the admin bypass excepted, see below).
    approvals, and the last push must be approved by someone other than the
    one who pushed it. So an author never approves their own pull request,
    and an owner who pushes hardening commits onto a contributor's branch
-   needs a third owner's approval for them — the maintainer's work is
-   reviewed by another owner like anyone else's. Every review conversation
-   is resolved before the merge.
+   needs the approval of an owner other than themselves for them — the
+   maintainer's work is reviewed by another owner like anyone else's. Every
+   review conversation is resolved before the merge.
 3. **Required status checks** (exact context names): `Lint`, `Unit Tests`,
    `Unit Tests (windows, tagged packages)`, `Build`, `Web`,
    `Cross-compile (darwin/arm64)`, `Cross-compile (windows/amd64)`,
@@ -61,8 +61,11 @@ guard it and apply to all accounts (the admin bypass excepted, see below).
    means taking responsibility for the change on the release line.
 
 **Maintainer escape hatch.** The ruleset lets repository admins merge a
-pull request that lacks the approval (bypass mode *pull requests only* — a
-direct push stays blocked); GitHub records every such merge as a bypass. It exists for
+pull request through a bypass (bypass mode *pull requests only* — a direct
+push stays blocked). A bypass merge skips the whole root ruleset for that
+one merge: the approval, the required checks (`PR title` included), thread
+resolution and the last-push rule — not only the missing approval. GitHub
+records every such merge as a bypass. It exists for
 the case where no other owner is available in time, and it is used that
 way: as the exception the merge commit's audit trail shows, not as the
 maintainer's regular path. It is removed by a change to the ruleset once the
@@ -89,17 +92,21 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
   on every push to `root`, and `verify` requires a successful run on the
   exact commit — the repository's "CI is truth" rule extended to the live
   tier. The nightly run of the same job is the daily drift signal, not the
-  gate.
+  gate. Tags are cut on the tip of `root`: a second merge while the first
+  one's run is still going cancels that run, so an earlier commit has no
+  verdict unless `ci.yml` is dispatched on its ref by hand.
 - Versioning: a `feat` lands as a minor release, fixes as a patch, a
   breaking change as a major. Several merged pull requests may share one
   release.
 - `v*` tags are created, moved or deleted only by the maintainer: the tag
   ruleset blocks creation, update and deletion for everyone, and the
   maintainer acts through its admin bypass. A published tag never changes.
-- A published release never changes either: `verify` refuses a tag that
-  already has a release, so a re-run or re-dispatch cannot replace binaries,
-  checksums or provenance; manual dispatches are limited to the repository
-  owner.
+- A published release never changes either: both `verify` and `publish`
+  refuse a tag that already has a release (checked right before the upload,
+  so a re-run of single jobs cannot slip past a reused `verify` result),
+  the upload never overwrites an existing asset, and manual dispatches are
+  limited to the repository owner. The repository-level *immutable
+  releases* setting is not enabled yet.
 - Only the newest minor receives fixes ([SECURITY.md](SECURITY.md)).
 
 ## Decisions
