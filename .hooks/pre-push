@@ -1,25 +1,28 @@
 #!/bin/sh
-# Pre-push hook — enforces two release-discipline rules:
+# Pre-push hook — three gates:
 #
-#   1. Branch pushes (refs/heads/*) require an annotated v* tag pointing at
-#      the pushed HEAD. Either the tag already exists on origin (no-op for
-#      the tag, just the branch moves) or it is part of the same `git push`.
-#      Without this, fix-commits land on origin without ever appearing in a
-#      release — exactly the regression that produced commits past v1.0.2
-#      with no v1.0.3 tag.
+#   1. root is not pushed directly. On the canonical repository (GottZ/ctx)
+#      the default branch moves only by merging a pull request; the GitHub
+#      ruleset rejects a direct push server-side, this gate says so before
+#      the round trip. Every other branch pushes freely — that is how a pull
+#      request starts.
 #
 #   2. Pushed version tags (refs/tags/v*) must be annotated AND carry a
 #      substantial body (>= 80 chars). GitHub Releases inline the tag
 #      annotation; lightweight or terse tags become useless release notes.
 #
-# Rule 1 applies to the canonical repo only (GottZ/ctx). Pushing refinement
-# commits onto a contributor's fork branch (maintainerCanModify PR flow,
-# established with PRs #9-#12) is not a release channel — those pushes land
-# on origin later via the PR merge, which IS tagged. The tag-quality rule 2
-# stays global (a bad v* tag is bad wherever it lands).
+#   3. A push that carries a v* tag runs the deadcode allowlist gates once
+#      more. A tag is a release, cut on a merge commit CI has already
+#      judged, so this is the last local look — CI stays the authority.
 #
-# Bypass: `git push --no-verify` — use sparingly, and only when an emergency
-# revert needs to land before tagging is feasible. Routine work tags first.
+# History: until v5.29.6 gate 1 was the inverse — every branch push had to
+# carry a v* tag, because root was pushed directly and "every commit on
+# origin is part of a release" could hold only that way. With the pull
+# request flow root advances by merge and the release tag follows on the
+# merge commit (GOVERNANCE.md, "Releases"). Gate 1 binds the canonical repo
+# only: a contributor's fork is not a release line.
+#
+# Bypass: `git push --no-verify` — the server-side rulesets still apply.
 
 MIN_MSG_LENGTH=80
 REJECTED=0
@@ -27,12 +30,10 @@ REJECTED=0
 # pre-push receives the remote name and URL as arguments.
 REMOTE_URL="$2"
 case "$REMOTE_URL" in
-    *github.com[:/]GottZ/ctx*) ENFORCE_BRANCH_RULE=1 ;;
-    *) ENFORCE_BRANCH_RULE=0 ;;
+    *github.com[:/]GottZ/ctx*) CANONICAL=1 ;;
+    *) CANONICAL=0 ;;
 esac
 
-# First pass: collect all refs being pushed in this invocation. We need the
-# tag set to know whether a branch push is paired with its tag.
 TMP_REFS=$(mktemp)
 trap 'rm -f "$TMP_REFS"' EXIT
 
@@ -40,26 +41,22 @@ while read local_ref local_sha remote_ref remote_sha; do
     printf '%s %s %s %s\n' "$local_ref" "$local_sha" "$remote_ref" "$remote_sha" >> "$TMP_REFS"
 done
 
-# Build a list of v* tag SHAs being pushed, so the branch check can credit
-# them even if `git tag --points-at` doesn't see the tag yet on origin.
-PUSHED_TAG_TARGETS=$(awk '
-    $3 ~ /^refs\/tags\/v/ {
-        # local_sha is either the tag object (annotated) or the commit it
-        # points at (lightweight). Resolve to the underlying commit.
-        cmd = "git rev-parse " $2 "^{commit} 2>/dev/null"
-        cmd | getline target
-        close(cmd)
-        if (target != "") print target
-    }
-' "$TMP_REFS")
+PUSHES_TAG=0
 
 while read local_ref local_sha remote_ref remote_sha; do
     case "$remote_ref" in
         refs/tags/v*)
             TAG_NAME=$(echo "$remote_ref" | sed 's|refs/tags/||')
 
-            # Check object type: annotated tags are 'tag' objects, lightweight
-            # are 'commit' objects (they point directly to a commit).
+            # Deleting a tag: nothing to inspect locally (the tag ruleset
+            # decides server-side).
+            case "$local_sha" in
+                0000000000000000000000000000000000000000) continue ;;
+            esac
+            PUSHES_TAG=1
+
+            # Annotated tags are 'tag' objects; lightweight ones point at a
+            # commit directly.
             OBJ_TYPE=$(git cat-file -t "$local_sha" 2>/dev/null)
             if [ "$OBJ_TYPE" != "tag" ]; then
                 echo ""
@@ -73,7 +70,7 @@ while read local_ref local_sha remote_ref remote_sha; do
                 echo '    git tag -a '"$TAG_NAME"' -m "\$(cat <<EOF'
                 echo "$TAG_NAME — Kurzer Titel"
                 echo ""
-                echo "    Was ist neu (2-3 Saetze). Technische Details."
+                echo "    Was ist neu (2-3 Sätze). Technische Details."
                 echo "    EOF"
                 echo "    )\""
                 echo ""
@@ -81,7 +78,7 @@ while read local_ref local_sha remote_ref remote_sha; do
                 continue
             fi
 
-            # Check annotation length (subject + body, excluding signature).
+            # Annotation length (subject + body, excluding signature).
             MSG=$(git tag -l --format='%(contents:subject)%0a%(contents:body)' "$TAG_NAME")
             MSG_LENGTH=$(printf '%s' "$MSG" | wc -c)
 
@@ -103,100 +100,67 @@ while read local_ref local_sha remote_ref remote_sha; do
             fi
             ;;
 
-        refs/heads/*)
-            # Release discipline binds the canonical repo, not fork branches.
-            [ "$ENFORCE_BRANCH_RULE" -eq 0 ] && continue
+        refs/heads/root)
+            [ "$CANONICAL" -eq 0 ] && continue
 
-            BRANCH_NAME=$(echo "$remote_ref" | sed 's|refs/heads/||')
-
-            # Skip branch-deletion pushes (local_sha is all-zeros).
+            # Branch deletion is the ruleset's business, not this gate's.
             case "$local_sha" in
                 0000000000000000000000000000000000000000) continue ;;
             esac
 
-            # Resolve HEAD to a commit SHA for tag lookup.
-            HEAD_COMMIT=$(git rev-parse "$local_sha^{commit}" 2>/dev/null)
-            [ -z "$HEAD_COMMIT" ] && continue
-
-            # Tag credit: any local v* tag pointing at HEAD, OR any v* tag
-            # being pushed in the same invocation whose target equals HEAD.
-            LOCAL_TAG=$(git tag --points-at "$HEAD_COMMIT" --list 'v*' 2>/dev/null | head -1)
-            SAME_PUSH_TAG=$(printf '%s\n' "$PUSHED_TAG_TARGETS" | grep -Fx "$HEAD_COMMIT" | head -1)
-
-            if [ -z "$LOCAL_TAG" ] && [ -z "$SAME_PUSH_TAG" ]; then
-                SHORT=$(git rev-parse --short "$HEAD_COMMIT")
-                LAST_TAG=$(git describe --tags --abbrev=0 "$HEAD_COMMIT" 2>/dev/null || echo "<none>")
-                AHEAD=$(git rev-list --count "${LAST_TAG}..${HEAD_COMMIT}" 2>/dev/null || echo "?")
-                echo ""
-                echo "pre-push: REJECTED — branch $BRANCH_NAME HEAD ($SHORT) carries no v* tag"
-                echo ""
-                echo "  Last tag reachable: $LAST_TAG ($AHEAD commit(s) behind HEAD)"
-                echo ""
-                echo "  Every commit that lands on origin must be part of a release."
-                echo "  Tag the HEAD before pushing, then push branch and tag together:"
-                echo ""
-                echo "    git tag -a vX.Y.Z -m \"\$(cat <<EOF"
-                echo "    vX.Y.Z — Kurzer Titel"
-                echo ""
-                echo "    Was ist neu (2-3 Saetze, technische Details, mind. 80 Zeichen)."
-                echo "    EOF"
-                echo "    )\""
-                echo "    git push origin $BRANCH_NAME vX.Y.Z"
-                echo ""
-                echo "  Bypass for emergency reverts only: git push --no-verify"
-                echo ""
-                REJECTED=1
-                continue
-            fi
+            echo ""
+            echo "pre-push: REJECTED — direct push to root on GottZ/ctx"
+            echo ""
+            echo "  root moves only by merging a pull request (GOVERNANCE.md)."
+            echo "  Push your branch and open one:"
+            echo ""
+            echo "    git push -u origin <branch>"
+            echo "    gh pr create --base root"
+            echo ""
+            echo "  Release tags are pushed on their own after the merge:"
+            echo "    git push origin vX.Y.Z"
+            echo ""
+            REJECTED=1
+            continue
             ;;
     esac
 done < "$TMP_REFS"
 
 if [ "$REJECTED" -eq 1 ]; then
-    echo "pre-push: push blocked. Use --no-verify to bypass (use sparingly)."
+    echo "pre-push: push blocked. The server-side rulesets enforce the same; --no-verify only skips this message."
     echo ""
     exit 1
 fi
 
-# Gate 3 (T02-7) — deadcode allowlist tripwire, deliberately here and NOT in
-# pre-commit: pre-commit already runs a full `go vet -tags=integration ./...`
-# plus golangci-lint, and a third whole-tree typecheck per commit would double
-# commit latency. A push, by rule 1 above, only ever happens against an
-# annotated v* tag — and ci.yml's `build` job needs `lint`, so the CI verdict
-# arrives only AFTER the tag is already published. That is the window this gate
-# closes. CI stays the authority; this is the early warning.
-#
-# Missing tool means a hint, never a block: whoever pushes without deadcode
-# installed still gets the CI verdict. deadcode.sh itself refuses to report ok
-# without running when CI is set, so the CI side cannot go silently green.
-#
-# T02-13 added the second mode: the same script without `-test` against
-# go/deadcode-testonly-allow.txt (class T — production symbols alive only
-# because a test calls them). Both modes run here, in this order, because the
-# testonly run subtracts the with-tests allowlist and that subtraction is only
-# exact while the first gate is green. The second run costs ~5 s warm (the
-# package graph is already loaded, so it is well under the first one) — that is
-# the whole added latency of this gate, once per release push.
-if command -v deadcode >/dev/null 2>&1; then
-    if ! bash "$(git rev-parse --show-toplevel)/deadcode.sh"; then
-        echo ""
-        echo "pre-push: deadcode gate failed — cut the symbol, or add a line"
-        echo "  with a reason to go/deadcode-allow.txt. Bypass: git push --no-verify"
-        echo ""
-        exit 1
+# Gate 3 (T02-7, narrowed with the pull request flow) — deadcode allowlist
+# tripwire on release pushes only. Pull request branches get the CI verdict
+# (ci.yml runs deadcode.sh); a tag is cut on an already-judged merge commit,
+# so this is the last local look before the Release workflow publishes
+# binaries. Missing tool means a hint, never a block. T02-13 added the
+# second mode (go/deadcode-testonly-allow.txt, class T); both run here in
+# this order because the testonly run subtracts the with-tests allowlist.
+if [ "$PUSHES_TAG" -eq 1 ]; then
+    if command -v deadcode >/dev/null 2>&1; then
+        if ! bash "$(git rev-parse --show-toplevel)/deadcode.sh"; then
+            echo ""
+            echo "pre-push: deadcode gate failed — cut the symbol, or add a line"
+            echo "  with a reason to go/deadcode-allow.txt. Bypass: git push --no-verify"
+            echo ""
+            exit 1
+        fi
+        if ! bash "$(git rev-parse --show-toplevel)/deadcode.sh" testonly; then
+            echo ""
+            echo "pre-push: deadcode test-only ratchet failed — cut the symbol, or"
+            echo "  add a line with a reason to go/deadcode-testonly-allow.txt."
+            echo "  Bypass: git push --no-verify"
+            echo ""
+            exit 1
+        fi
+    else
+        echo "pre-push: deadcode not found, skipping both allowlist gates (CI enforces them)."
+        echo "  install: GOTOOLCHAIN=\$(go -C go env GOVERSION) go install golang.org/x/tools/cmd/deadcode@v0.52.0"
+        echo "  (GOTOOLCHAIN: deadcode must be built with the toolchain of go/go.mod, else every package fails with 'requires newer Go version')"
     fi
-    if ! bash "$(git rev-parse --show-toplevel)/deadcode.sh" testonly; then
-        echo ""
-        echo "pre-push: deadcode test-only ratchet failed — cut the symbol, or"
-        echo "  add a line with a reason to go/deadcode-testonly-allow.txt."
-        echo "  Bypass: git push --no-verify"
-        echo ""
-        exit 1
-    fi
-else
-    echo "pre-push: deadcode not found, skipping both allowlist gates (CI enforces them)."
-    echo "  install: GOTOOLCHAIN=\$(go -C go env GOVERSION) go install golang.org/x/tools/cmd/deadcode@v0.52.0"
-    echo "  (GOTOOLCHAIN: deadcode must be built with the toolchain of go/go.mod, else every package fails with 'requires newer Go version')"
 fi
 
 exit 0
