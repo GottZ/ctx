@@ -1060,7 +1060,7 @@ jobs:
     # tag and sets the digest before the promotion step, so a failed
     # promotion must not leave a pushed image without provenance. Skipped
     # when docker did not publish (not the tip) or was cancelled.
-    if: ${{ always() && (needs.docker.result == 'success' || needs.docker.result == 'failure') && needs.docker.outputs.digest != '' }}
+    if: ${{ !cancelled() && (needs.docker.result == 'success' || needs.docker.result == 'failure') && needs.docker.outputs.digest != '' }}
     permissions:
       contents: read
       id-token: write
