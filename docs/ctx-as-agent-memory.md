@@ -10,9 +10,9 @@ The parts behave like a memory, not like a filing cabinet:
 
 - **Storing is encoding.** `store` saves a block as it arises — a decision with the words that made it, an observation with its date, a lesson with its incident. A block is a point-in-time observation, not live state. You store what happened, with source and date; you do not decide at that moment how important it will turn out to be.
 - **Consolidation runs in the background.** [Dream Mode](architecture.md#dream-mode) is a continuous loop that discovers relationships between blocks, marks outdated information as superseded and promotes high-quality content. The [Guard](architecture.md#guard-deduplication) checks new blocks against what exists and archives or flags near-duplicates. What looks central in one context window may turn out to be noise; the store decides that with more context than any single window has.
-- **Recall is by cue.** `query` fuses semantic similarity, English and German full text and trigram matching by reciprocal-rank fusion, weights by time, expands along the links Dream Mode found, and answers with an LLM synthesis plus sources. A cue can match as a concept, an exact phrase, a misspelling or a word in another language — each arm catches a different phrasing.
-- **Classification is the store's.** Block types carry behavior for retrieval, Guard and Dream Mode, and the store assigns them with its own classifier — on store, on update, and again in its background pipelines ([type & lifecycle axes](architecture.md#type--lifecycle-axes)).
-- **The store can be asked about itself.** The web chat runs its own retrieval loop over four read-only tools (`ctx_query`, `ctx_search`, `ctx_get`, `ctx_recent`) and answers in prose ([web chat sessions](api.md#web-chat-sessions)). It reads the blocks so that the agent does not have to.
+- **Recall is by cue.** `query` fuses semantic similarity, English and German full text and trigram matching on titles by reciprocal-rank fusion, weights by time when the cue names one, expands along the links Dream Mode found where graph expansion is enabled (the compose stack turns it on; the registry default is off), and answers with an LLM synthesis plus sources. A cue can match as a concept, an exact phrase, a misspelling or a word in another language — each arm catches a different phrasing.
+- **Classification is the store's.** Block types carry behavior for retrieval, Guard and Dream Mode, and the store assigns them with its own classifier — on store and on update, including staged writes, and on the blocks its own pipelines (digest, Dream synthesis, root map) create ([type & lifecycle axes](architecture.md#type--lifecycle-axes)).
+- **The store can be asked about itself.** The web chat runs its own retrieval loop over four read-only tools (`ctx_query`, `ctx_search`, `ctx_get`, `ctx_recent`) — plus `ctx_store` and `ctx_update` as staged writes behind a confirmation card — and answers in prose ([web chat sessions](api.md#web-chat-sessions)). It reads the blocks so that the agent does not have to.
 
 ## The loop
 
@@ -27,9 +27,9 @@ The parts behave like a memory, not like a filing cabinet:
 
 **A subagent or workflow agent:**
 
-1. Starts with the project's `agent-briefing` blocks in its context (the untagged ones when none carry the project's tag), injected by `ctx brief --hook` on `SubagentStart`, and queries for its own task.
+1. Starts with the project's most recently updated `agent-briefing` blocks in its context (up to `--limit`, default 20) — when none carry the project's tag, with the most recently updated `agent-briefing` blocks the key can read, whatever their tags (#58) — injected by `ctx brief --hook` on `SubagentStart`, and queries for its own task.
 2. Does the work against the store like a session.
-3. Ends its final message with one `[PERSIST:category:title]` line per finding, the content below each marker. `ctx persist --hook` on `SubagentStop` sends each marker with non-empty content to `store`, tagged with the project and carrying the session and agent ids in its metadata. `store` upserts on category, title and scope, so a marker that reuses a title already in the key's scope replaces that block; a failed write is dropped silently. Setup in [operations](operations.md#claude-code-integration-optional).
+3. Ends its final message with one `[PERSIST:category:title]` line per finding, the content below each marker. `ctx persist --hook` on `SubagentStop` sends each marker with non-empty content to `store`, tagged with the project and carrying the session and agent ids in its metadata. `store` upserts on category, title and scope, so a marker that reuses a title already in the key's scope replaces that block. A write the store never receives is dropped silently; a write the store rejects is still counted as saved until #59 lands. Setup in [operations](operations.md#claude-code-integration-optional).
 
 ## Failure modes
 
