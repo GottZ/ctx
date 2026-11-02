@@ -33,9 +33,10 @@ REJECTED=0
 # pre-push receives the remote name and URL as arguments.
 REMOTE_URL="$2"
 # Exact repository match: GottZ/ctx, with or without .git or a trailing
-# slash — not GottZ/ctx-anything.
-case "$REMOTE_URL" in
-    *github.com[:/]GottZ/ctx|*github.com[:/]GottZ/ctx.git|*github.com[:/]GottZ/ctx/) CANONICAL=1 ;;
+# slash — not GottZ/ctx-anything. GitHub URLs are case-insensitive, so the
+# comparison is made in lower case.
+case "$(printf '%s' "$REMOTE_URL" | tr 'A-Z' 'a-z')" in
+    *github.com[:/]gottz/ctx|*github.com[:/]gottz/ctx.git|*github.com[:/]gottz/ctx/) CANONICAL=1 ;;
     *) CANONICAL=0 ;;
 esac
 
@@ -97,7 +98,16 @@ while read local_ref local_sha remote_ref remote_sha; do
             # remote tip live; a tip we do not have locally means root moved
             # (a merge on GitHub) and the tag was cut before fetching it.
             if [ "$CANONICAL" -eq 1 ]; then
-                REMOTE_ROOT=$(git ls-remote --heads "$1" root 2>/dev/null | cut -f1)
+                # Full ref name: the pattern "root" would also match
+                # refs/heads/fix/root and return two lines.
+                REMOTE_ROOT=$(git ls-remote "$1" refs/heads/root 2>/dev/null | cut -f1)
+                if [ "$(printf '%s\n' "$REMOTE_ROOT" | grep -c .)" -gt 1 ]; then
+                    echo ""
+                    echo "pre-push: REJECTED — tag $TAG_NAME: $1 answered with more than one ref for refs/heads/root"
+                    echo ""
+                    REJECTED=1
+                    continue
+                fi
                 if [ -z "$REMOTE_ROOT" ]; then
                     echo ""
                     echo "pre-push: REJECTED — tag $TAG_NAME: cannot read root from $1, so the on-root check cannot run"
