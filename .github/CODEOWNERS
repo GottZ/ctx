@@ -1,9 +1,9 @@
-# Code owners are requested for review automatically, and the root ruleset
-# requires an approving review from one of them before a pull request merges
-# (GOVERNANCE.md, "How root changes"). Later lines take precedence over
-# earlier ones, so the catch-all stays first; add an area line below it when
-# a second maintainer takes an area over. A second owner on the catch-all is
-# what ends the maintainer bypass (GOVERNANCE.md, "Maintainer escape hatch").
+# (GOVERNANCE.md, "How root changes"). One approval from any owner listed on
+# the matching line satisfies the rule; an owner cannot approve their own
+# pull request, so every owner's work is reviewed by another owner. Later
+# lines take precedence over earlier ones, so the catch-all stays first; add
+# an area line below it when someone takes an area over. Owners need write
+# access, or GitHub ignores the entry.
 # Syntax: https://docs.github.com/articles/about-code-owners
 
-* @GottZ
+* @GottZ @DamieMoon @W4-NERF

@@ -10,7 +10,8 @@ repository, not a way around review.
 | Role | Who | May |
 |---|---|---|
 | **Maintainer** | [@GottZ](https://github.com/GottZ) (owner) | everything below, plus: merge pull requests, cut release tags, change repository settings and rulesets, grant and revoke access, publish security advisories |
-| **Collaborator** (GitHub role *write*) | invited by the maintainer; see [Becoming a collaborator](#becoming-a-collaborator) | push branches to this repository (no fork needed), review and approve pull requests, triage issues, apply labels, approve CI runs of first-time contributors, re-run workflows |
+| **Code owner** | [Damien Moon](https://github.com/DamieMoon), [derLonius](https://github.com/W4-NERF) and the maintainer, per [`.github/CODEOWNERS`](.github/CODEOWNERS) | a collaborator whose approval satisfies the review requirement on `root`; requested for review automatically |
+| **Collaborator** (GitHub role *write*) | invited by the maintainer; see [Becoming a collaborator](#becoming-a-collaborator) | push branches to this repository (no fork needed), review pull requests, triage issues, apply labels, approve CI runs of first-time contributors, re-run workflows |
 | **Contributor** | anyone | fork, open pull requests, report issues, join discussions |
 
 Write access does **not** include pushing to `root`, merging without the
@@ -26,9 +27,11 @@ guard it and apply to all accounts.
    branch moves only by merging a pull request. Force pushes and deletion
    are blocked.
 2. **One approving review** from a code owner
-   ([`.github/CODEOWNERS`](.github/CODEOWNERS)), given on the current head —
-   a new push dismisses earlier approvals. Every review conversation is
-   resolved before the merge.
+   ([`.github/CODEOWNERS`](.github/CODEOWNERS): GottZ, Damien Moon and
+   derLonius), given on the current head — a new push dismisses earlier
+   approvals. An owner cannot approve their own pull request, so the
+   maintainer's work is reviewed by another owner like anyone else's. Every
+   review conversation is resolved before the merge.
 3. **Required status checks** (exact context names): `Lint`, `Unit Tests`,
    `Unit Tests (windows, tagged packages)`, `Build`, `Web`,
    `Cross-compile (darwin/arm64)`, `Cross-compile (windows/amd64)`,
@@ -45,14 +48,13 @@ guard it and apply to all accounts.
 5. **Who merges**: the maintainer. Collaborators approve; merging a pull
    request means taking responsibility for it on the release line.
 
-**Maintainer escape hatch.** The maintainer's own pull requests need the
-same approval, and an approval counts only from a code owner — with
-`* @GottZ` as the sole owner, no one else can give it. Until a second code
-owner is listed in [`.github/CODEOWNERS`](.github/CODEOWNERS), the maintainer
-may merge an unapproved pull request through the ruleset bypass; GitHub
-records the bypass. That is a stopgap, not a second path: the pull request,
-the CI checks and the public review thread still happen. The bypass is
-removed in the same change that adds the second code owner.
+**Maintainer escape hatch.** The ruleset lets repository admins merge a
+pull request that lacks the approval (pull requests only — a direct push
+stays blocked); GitHub records every such merge as a bypass. It exists for
+the case where no other owner is available in time, and it is used that
+way: as the exception the merge commit's audit trail shows, not as the
+maintainer's regular path. It is removed by a change to the ruleset once the
+other owners review regularly.
 
 ## Releases
 
