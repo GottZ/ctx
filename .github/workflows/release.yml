@@ -21,10 +21,58 @@ env:
   GO_VERSION: "1.27"
 
 jobs:
+  # Gate before anything is built: the selected tag is a version tag, the
+  # checkout IS the peeled tag commit, and that commit is on root. The tag
+  # ruleset restricts who may create v* tags, not where they point; the
+  # pre-push hook says the same earlier but can be skipped with --no-verify,
+  # so this is the check that holds. A manual dispatch uses refs/tags/<input>
+  # so a branch name can never satisfy it.
+  verify:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      commit: ${{ steps.check.outputs.commit }}
+    steps:
+      - name: Checkout the release tag (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Tag is a version tag on root
+        id: check
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::'$TAG' is not a version tag (vMAJOR.MINOR.PATCH)"; exit 1 ;;
+          esac
+          PEELED="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$PEELED" != "$HEAD_SHA" ]; then
+            echo "::error::checkout $HEAD_SHA is not the commit tag $TAG points to ($PEELED)"; exit 1
+          fi
+          git fetch --no-tags --quiet origin root
+          if ! git merge-base --is-ancestor "$PEELED" origin/root; then
+            echo "::error::tag $TAG points to $PEELED, which is not on root — releases are cut on merged commits only (GOVERNANCE.md)"; exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "commit=${PEELED}" >> "$GITHUB_OUTPUT"
+          echo "ok: $TAG -> $PEELED is on root"
+
   release:
     name: Build & Release
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [verify]
     permissions:
       contents: read
 
@@ -49,9 +97,10 @@ jobs:
         with:
           # A tag push checks out that tag anyway; a manual dispatch would
           # otherwise build the branch the run was started from and label the
-          # binaries with the input tag. Pinning the ref builds the selected
-          # tag — and fails the run when that tag does not exist.
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          # binaries with the input tag. refs/tags/<input> builds the selected
+          # tag and nothing else — a missing tag fails the run at checkout.
+          ref: ${{ github.event.inputs.tag && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
+          persist-credentials: false
 
       - name: Setup Go ${{ env.GO_VERSION }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -74,12 +123,14 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          # github.sha is the dispatch ref on a manual run, not the tag's commit.
+          COMMIT="$(git rev-parse HEAD)"
           BINARY="../ctx-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           go build \
             -trimpath \
             -ldflags="-s -w \
               -X main.version=${{ steps.version.outputs.tag }} \
-              -X main.commit=${{ github.sha }} \
+              -X main.commit=${COMMIT} \
               -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -o "${BINARY}" \
             ./cmd/ctx/
@@ -161,9 +212,10 @@ jobs:
       - name: Checkout (with tags)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Download all artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

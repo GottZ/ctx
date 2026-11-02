@@ -8,8 +8,11 @@
 #      request starts.
 #
 #   2. Pushed version tags (refs/tags/v*) must be annotated AND carry a
-#      substantial body (>= 80 chars). GitHub Releases inline the tag
-#      annotation; lightweight or terse tags become useless release notes.
+#      substantial body (>= 80 chars) AND, on the canonical repo, point to a
+#      commit that is already on the remote's root. GitHub Releases inline
+#      the tag annotation; lightweight or terse tags become useless release
+#      notes, and a tag off root would publish binaries from an unmerged
+#      commit (the Release workflow's verify job refuses that as well).
 #
 #   3. A push that carries a v* tag runs the deadcode allowlist gates once
 #      more. A tag is a release, cut on a merge commit CI has already
@@ -80,6 +83,36 @@ while read local_ref local_sha remote_ref remote_sha; do
                 echo ""
                 REJECTED=1
                 continue
+            fi
+
+            # The tagged commit must already be on the remote's root: a
+            # release is cut on a merged commit, never on a branch. Read the
+            # remote tip live; a tip we do not have locally means root moved
+            # (a merge on GitHub) and the tag was cut before fetching it.
+            if [ "$CANONICAL" -eq 1 ] && [ -n "$TAG_TARGET" ]; then
+                REMOTE_ROOT=$(git ls-remote --heads "$1" root 2>/dev/null | cut -f1)
+                if [ -z "$REMOTE_ROOT" ]; then
+                    echo "pre-push: could not read root from $1 — skipping the on-root check for $TAG_NAME (the Release workflow enforces it)."
+                elif ! git cat-file -e "$REMOTE_ROOT^{commit}" 2>/dev/null; then
+                    echo ""
+                    echo "pre-push: REJECTED — tag $TAG_NAME: the remote root ($(printf '%s' "$REMOTE_ROOT" | cut -c1-8)) is not fetched"
+                    echo ""
+                    echo "  Releases are cut on commits of root. Fetch, tag the merge commit, push the tag:"
+                    echo "    git fetch origin root && git tag -d $TAG_NAME"
+                    echo "    git tag -a $TAG_NAME origin/root -m ... && git push origin $TAG_NAME"
+                    echo ""
+                    REJECTED=1
+                    continue
+                elif ! git merge-base --is-ancestor "$TAG_TARGET" "$REMOTE_ROOT"; then
+                    echo ""
+                    echo "pre-push: REJECTED — tag $TAG_NAME points to $(git rev-parse --short "$TAG_TARGET"), which is not on the remote root"
+                    echo ""
+                    echo "  Releases are cut on merged commits only (GOVERNANCE.md, Releases)."
+                    echo "  Merge the pull request first, then tag the merge commit on root."
+                    echo ""
+                    REJECTED=1
+                    continue
+                fi
             fi
 
             # Annotation length (subject + body, excluding signature).
