@@ -18,26 +18,32 @@ Write access does **not** include pushing to `root`, merging without the
 required review, creating or moving `v*` tags, or changing settings. The
 repository rulesets enforce that for every account — with one exception,
 the repository-admin bypass described under *Maintainer escape hatch* and
-*Releases*: it lets the maintainer merge without the approval and create
-tags, never push to `root`.
+*Releases*: it lets the maintainer merge a pull request past the whole
+`root` ruleset and create tags, never push to `root`.
 
 ## How `root` changes
 
-`root` is the main branch and the only release line. Two GitHub rulesets
-guard it and apply to all accounts (the admin bypass excepted, see below).
+`root` is the main branch and the only release line. One GitHub ruleset
+guards it (id 25758355, target: the default branch) and applies to all
+accounts, the admin bypass excepted (see below); the second ruleset
+(id 26378757) covers `v*` tags and is described under *Releases*.
 
 1. **Pull request required.** Nothing is pushed to `root` directly; the
    branch moves only by merging a pull request. Force pushes and deletion
    are blocked.
 2. **One approving review** from a code owner
    ([`.github/CODEOWNERS`](.github/CODEOWNERS): GottZ, Damien Moon and
-   derLonius), given on the current head — a new push dismisses earlier
-   approvals, and the last push must be approved by someone other than the
-   one who pushed it. So an author never approves their own pull request,
-   and an owner who pushes hardening commits onto a contributor's branch
-   needs the approval of an owner other than themselves for them — the
-   maintainer's work is reviewed by another owner like anyone else's. Every
-   review conversation is resolved before the merge.
+   derLonius), given on the current head: a new push dismisses earlier
+   approvals, and the approval that counts must come from someone other
+   than the person who pushed last. A pull request's author cannot approve
+   it at all. Beyond code ownership, that is all GitHub checks about who
+   approves — the last-push rule looks at the last pusher only, so an owner
+   who pushed to a branch earlier can give the counting approval once
+   someone else has pushed after them. The rest is convention: **an owner
+   does not approve a pull request they pushed to**, so every owner's
+   commits, including hardening pushed onto a contributor's branch, are
+   approved by another owner — the maintainer's work like anyone else's.
+   Every review conversation is resolved before the merge.
 3. **Required status checks** (exact context names): `Lint`, `Unit Tests`,
    `Unit Tests (windows, tagged packages)`, `Build`, `Web`,
    `Cross-compile (darwin/arm64)`, `Cross-compile (windows/amd64)`,
