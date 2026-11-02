@@ -10,7 +10,7 @@ A stored block is also a *point-in-time observation, not live state*. A note tha
 
 ## Discipline — put this in your agent's instructions
 
-- **Load conventions into context before working — don't just file them away.** Passive influence on behavior ranks training weights > file instructions > user feedback in context: a trained default outweighs a filed instruction, and a passing correction in the chat loses to both. What counters it is a deliberate anchor — the conventions themselves, loaded into the *current* context before work starts; only that reliably overrides a trained default. A discipline doc that's never loaded gets silently re-undermined by each new session. (`ctx query` your project conventions at session start.)
+- **Load conventions into context before working — don't just file them away.** Conventions loaded into the *current* context before work starts are followed far more reliably than instructions that only sit in a file. A discipline doc that's never loaded gets silently re-undermined by each new session. (`ctx query` your project conventions at session start.)
 - **Trace every stored claim to a source.** Save quote + date; keep verified user statements separate from your own interpretation. An interpretation re-saved as fact is how a "probably" disappears across three persistence layers.
 - **Cross-check stored claims against live state before acting.** Before a destructive or status-dependent step, verify against the authoritative source — live config, a test, the actual file — not the note.
 - **Don't gate on self-reported confidence.** Models are often just as sure when wrong. Gate on external truth: a test, the source, observed behavior.

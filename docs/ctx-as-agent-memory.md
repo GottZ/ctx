@@ -27,9 +27,9 @@ The parts behave like a memory, not like a filing cabinet:
 
 **A subagent or workflow agent:**
 
-1. Starts with the project's `agent-briefing` blocks in its context, injected by `ctx brief --hook` on `SubagentStart`, and queries for its own task.
+1. Starts with the project's `agent-briefing` blocks in its context (the untagged ones when none carry the project's tag), injected by `ctx brief --hook` on `SubagentStart`, and queries for its own task.
 2. Does the work against the store like a session.
-3. Ends its final message with one `[PERSIST:category:title]` line per finding, the content below each marker. `ctx persist --hook` on `SubagentStop` sends each marker with non-empty content to `store`, tagged with the project and carrying the session and agent ids in its metadata. `store` upserts on category and title, so a marker that reuses an existing title replaces that block; a failed write is dropped silently. Setup in [operations](operations.md#claude-code-integration-optional).
+3. Ends its final message with one `[PERSIST:category:title]` line per finding, the content below each marker. `ctx persist --hook` on `SubagentStop` sends each marker with non-empty content to `store`, tagged with the project and carrying the session and agent ids in its metadata. `store` upserts on category, title and scope, so a marker that reuses a title already in the key's scope replaces that block; a failed write is dropped silently. Setup in [operations](operations.md#claude-code-integration-optional).
 
 ## Failure modes
 
@@ -61,11 +61,11 @@ A shell loop over `ctx get` or `ctx search` output, or a dump of many blocks int
 
 ### Subagents without memory
 
-A subagent that is started without the brief hook, and that ends without `[PERSIST:...]` markers, works stateless: it re-derives what the store already holds and its findings die with its context window. The hooks exist so that an agent without a conversation of its own still retrieves before and persists after.
+A subagent that neither retrieves before its work nor persists after it, by any path (MCP, CLI, HTTP or the hooks), works stateless: it re-derives what the store already holds and its findings die with its context window. The hooks exist so that an agent without a conversation of its own does both even when its prompt does not ask for it.
 
 ### The session re-persisting a subagent's finding
 
-When a subagent's finding has already been persisted from its own markers, the session that started it re-saving the same finding in its own words adds a second, re-interpreted copy. Every re-interpretation pushes the claim in the same direction — more absolute, less attributed — which is how memory drifts ([using ctx effectively](using-ctx-effectively.md#why-stored-memory-drifts)). The session stores what is new from its own vantage point, not a summary of what its agents already stored.
+When a subagent's finding has already been persisted from its own markers, the session that started it re-saving the same finding in its own words, under a title of its own, adds a second, re-interpreted copy. Every re-interpretation pushes the claim in the same direction — more absolute, less attributed — which is how memory drifts ([using ctx effectively](using-ctx-effectively.md#why-stored-memory-drifts)). The session stores what is new from its own vantage point, not a summary of what its agents already stored.
 
 ### A curated digest instead of what happened
 
