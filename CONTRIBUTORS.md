@@ -256,7 +256,24 @@ else's environment — that led to a fix landing in the repository.
   `confirm_writes` refusal and the bounded MCP dispatch, hardened with a lookup
   under the 0.6.0 title so existing chains (Hermes' `local-<sha256>` sessions)
   continue, `/stop` reaching bounded calls, and REST availability from
-  `rest_base_url`.
+  `rest_base_url`. Also PR
+  [#53](https://github.com/GottZ/ctx/pull/53): under `transport: rest` a proxy,
+  error page or wrong `rest_base_url` that echoed the request's `X-Context-Key`
+  put the key into `CtxApiError` texts, log lines, `exc_info` tracebacks and,
+  through tool errors, the model context, and a re-initialized provider kept its
+  previous client, key and caches; the shipped `ctx_checkpoint` 0.6.2 keeps his
+  redaction in `CtxClient` (error bodies, codes outside the reject vocabulary,
+  reasons, connection errors and HTTP 200 failure envelopes, before the cut and
+  without the chained original), the connect reset, the prefetch generation
+  counter, the warm-up pin and the manifest cache bound to the last verified
+  binding, with three CodeRabbit rounds worked through by himself — hardened
+  with redaction of `http.client` exceptions and control-character header
+  errors, a client that refuses redirects (urllib carried the key to the
+  `Location`), successful answers left untouched when they carry an `error`
+  key, a single client read in `prefetch()`, the bound key redacted from
+  checkpoint, mirror, fact and digest writes, a digest instead of the key in
+  the binding identity, and tests for the `env_secret` raise on re-init and the
+  skill's version lockstep.
 
 ## How to be listed
 
