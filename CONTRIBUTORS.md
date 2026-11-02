@@ -266,7 +266,8 @@ else's environment — that led to a fix landing in the repository.
   reasons, connection errors and HTTP 200 failure envelopes, before the cut and
   without the chained original), the connect reset, the prefetch generation
   counter, the warm-up pin and the manifest cache bound to the last verified
-  binding, with three CodeRabbit rounds worked through by himself — hardened
+  binding, with four CodeRabbit rounds worked through by himself (three
+  answered with commits, one with an argument that held) — hardened
   with redaction of `http.client` exceptions and control-character header
   errors, a client that refuses redirects (urllib carried the key to the
   `Location`), successful answers left untouched when they carry an `error`
