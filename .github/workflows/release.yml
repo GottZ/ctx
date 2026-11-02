@@ -340,10 +340,12 @@ jobs:
           # build's. Runs are serialized per tag (concurrency above), so a
           # draft here is never a concurrent run's — delete it, then publish
           # a release whose assets, SHA256SUMS and provenance are one build.
-          DRAFTS="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq "[.[] | select(.draft == true and .tag_name == \"${TAG}\") | .id] | @sh")"
+          # Every page, not the newest 100: the action looks further back for
+          # a draft to resume (two pages in v3.0.3), and this repository has
+          # more releases than one page holds. A failing page fails the step.
+          DRAFTS="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.draft == true and .tag_name == \"${TAG}\") | .id")"
           for id in $DRAFTS; do
-            id="${id//\'/}"
             echo "removing leftover draft release ${id} for ${TAG}"
             gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
           done
