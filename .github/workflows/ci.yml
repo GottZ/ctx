@@ -308,19 +308,21 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-  # ─── Stage 1c: Web Live Tier (PV10, nightly + on-demand) ─────────────────────
+  # ─── Stage 1c: Web Live Tier (PV10: root push + nightly + on-demand) ─────────
   # Wave PV10 (design 06 §4.7/§9.5): the ≤15 @live specs run against a REAL,
   # throwaway ctxd + Postgres (docker-compose.e2e.yml), seeded ONLY through
   # production write paths (fail-closed target gate, §3.6). It proves classes
   # the mock `web` job cannot — server enforcement (tenant isolation), fixture-
   # shape truth (W10), real SSE transport — so it is intentionally OFF the
-  # per-PR path: nightly (schedule) + on-demand (dispatch) + PR opt-in via the
-  # `e2e-live` label (decision E3). run-live.sh needs only docker on the host;
-  # bun + Playwright run INSIDE the pinned toolchain image (--network host).
+  # per-PR path: every push to root (= every merge, the release candidates),
+  # nightly (schedule), on-demand (dispatch) and PR opt-in via the `e2e-live`
+  # label (decision E3). run-live.sh needs only docker on the host; bun +
+  # Playwright run INSIDE the pinned toolchain image (--network host).
   #
-  # RELEASE-GATE RULE (design 06 §9.5, README): a version tag is pushed only
-  # after a GREEN nightly run of THIS job — the live-tier extension of the
-  # repo's "CI is truth, not local" rule.
+  # RELEASE-GATE RULE (design 06 §9.5, README, GOVERNANCE.md): a version tag
+  # needs a GREEN run of THIS job on the tagged commit — release.yml's verify
+  # job refuses the tag otherwise. The live-tier extension of the repo's
+  # "CI is truth, not local" rule.
   web-live:
     name: Web Live Tier
     runs-on: ubuntu-latest

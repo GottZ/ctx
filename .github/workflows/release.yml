@@ -56,8 +56,10 @@ jobs:
           # A manual run is the maintainer's: anyone with write may re-run or
           # dispatch workflows, and a rebuilt release would carry a new
           # main.date and new checksums.
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" ]; then
-            echo "::error::manual release runs are limited to the repository owner (dispatched by $GITHUB_ACTOR)"; exit 1
+          # GITHUB_TRIGGERING_ACTOR is who pressed the button; GITHUB_ACTOR
+          # stays the original actor on a re-run.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "${GITHUB_TRIGGERING_ACTOR:-$GITHUB_ACTOR}" != "$GITHUB_REPOSITORY_OWNER" ]; then
+            echo "::error::manual release runs are limited to the repository owner (dispatched by ${GITHUB_TRIGGERING_ACTOR:-$GITHUB_ACTOR})"; exit 1
           fi
           # Anchored: a glob would accept v1.0.0";id;" — a valid git ref name.
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -84,16 +86,22 @@ jobs:
           fi
           # A published release is immutable: a second run for the same tag
           # (re-run, re-dispatch) must not replace its binaries, checksums or
-          # provenance. `gh release view` succeeds only when it exists.
-          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
-            echo "::error::release $TAG already exists — published releases are not rebuilt (GOVERNANCE.md, Releases)"; exit 1
-          fi
+          # provenance. Only a 404 means "no release yet"; an API error is not
+          # permission to publish. publish repeats this check right before
+          # the upload, because a job-level re-run reuses verify's result.
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" || echo 000)"
+          case "$CODE" in
+            404) ;;
+            200) echo "::error::release $TAG already exists — published releases are not rebuilt (GOVERNANCE.md, Releases)"; exit 1 ;;
+            *)   echo "::error::could not tell whether release $TAG exists (HTTP $CODE)"; exit 1 ;;
+          esac
           # The live tier (real ctxd + Postgres, production write paths) runs
           # on every push to root; the tagged commit must have a green run.
           LIVE_OK="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PEELED}/check-runs?check_name=Web%20Live%20Tier&per_page=50" \
             --jq '[.check_runs[] | select(.conclusion == "success")] | length')"
           if [ "${LIVE_OK:-0}" -lt 1 ]; then
-            echo "::error::no successful 'Web Live Tier' run on $PEELED — wait for the root push run of ci.yml (or dispatch it on root), then tag"; exit 1
+            echo "::error::no successful 'Web Live Tier' run on $PEELED — wait for the ci.yml run of the push that put it on root; if that run was cancelled by a later push, dispatch ci.yml on this ref (gh workflow run ci.yml --ref $TAG) and re-run this workflow"; exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "commit=${PEELED}" >> "$GITHUB_OUTPUT"
@@ -305,6 +313,23 @@ jobs:
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
 
+      # Same check as in verify, repeated here: re-running this job alone (or
+      # release + its dependents) reuses verify's outputs and would otherwise
+      # publish again onto an existing release.
+      - name: Release does not exist yet
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" || echo 000)"
+          case "$CODE" in
+            404) echo "ok: no release $TAG yet" ;;
+            200) echo "::error::release $TAG already exists — published releases are not rebuilt (GOVERNANCE.md, Releases)"; exit 1 ;;
+            *)   echo "::error::could not tell whether release $TAG exists (HTTP $CODE)"; exit 1 ;;
+          esac
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -312,4 +337,6 @@ jobs:
           name: ctx ${{ steps.version.outputs.tag }}
           generate_release_notes: false
           files: dist/*
+          # Never replace an asset that is already there — belt to the check above.
+          overwrite_files: false
           body: ${{ steps.notes.outputs.body }}
