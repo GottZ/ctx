@@ -45,7 +45,7 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - name: Tag is a version tag on root
+      - name: Tag is an annotated version tag on root
         id: check
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -54,6 +54,16 @@ jobs:
           # Anchored: a glob would accept v1.0.0";id;" — a valid git ref name.
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::'$TAG' is not a version tag (vMAJOR.MINOR.PATCH)"; exit 1
+          fi
+          # Annotated with real release notes — the annotation IS the
+          # GitHub Release body (same rule as the pre-push hook, which can
+          # be skipped; this one cannot).
+          if [ "$(git cat-file -t "refs/tags/${TAG}")" != "tag" ]; then
+            echo "::error::$TAG is a lightweight tag — version tags are annotated (the annotation is the release body)"; exit 1
+          fi
+          NOTES_LEN="$(git tag -l --format='%(contents:subject)%0a%(contents:body)' "$TAG" | wc -c)"
+          if [ "$NOTES_LEN" -lt 80 ]; then
+            echo "::error::$TAG annotation is $NOTES_LEN chars; at least 80 are required for the release notes"; exit 1
           fi
           PEELED="$(git rev-parse "refs/tags/${TAG}^{commit}")"
           HEAD_SHA="$(git rev-parse HEAD)"

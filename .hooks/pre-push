@@ -60,7 +60,14 @@ while read local_ref local_sha remote_ref remote_sha; do
                 0000000000000000000000000000000000000000) continue ;;
             esac
             PUSHES_TAG=1
-            TAG_TARGET=$(git rev-parse "$local_sha^{commit}" 2>/dev/null)
+            TAG_TARGET=$(git rev-parse --verify -q "$local_sha^{commit}" 2>/dev/null)
+            if [ -z "$TAG_TARGET" ]; then
+                echo ""
+                echo "pre-push: REJECTED — tag $TAG_NAME does not resolve to a commit (a tag on a tree or blob?)"
+                echo ""
+                REJECTED=1
+                continue
+            fi
 
             # Annotated tags are 'tag' objects; lightweight ones point at a
             # commit directly.
@@ -89,10 +96,16 @@ while read local_ref local_sha remote_ref remote_sha; do
             # release is cut on a merged commit, never on a branch. Read the
             # remote tip live; a tip we do not have locally means root moved
             # (a merge on GitHub) and the tag was cut before fetching it.
-            if [ "$CANONICAL" -eq 1 ] && [ -n "$TAG_TARGET" ]; then
+            if [ "$CANONICAL" -eq 1 ]; then
                 REMOTE_ROOT=$(git ls-remote --heads "$1" root 2>/dev/null | cut -f1)
                 if [ -z "$REMOTE_ROOT" ]; then
-                    echo "pre-push: could not read root from $1 — skipping the on-root check for $TAG_NAME (the Release workflow enforces it)."
+                    echo ""
+                    echo "pre-push: REJECTED — tag $TAG_NAME: cannot read root from $1, so the on-root check cannot run"
+                    echo ""
+                    echo "  The push needs the remote anyway; retry when it is reachable."
+                    echo ""
+                    REJECTED=1
+                    continue
                 elif ! git cat-file -e "$REMOTE_ROOT^{commit}" 2>/dev/null; then
                     echo ""
                     echo "pre-push: REJECTED — tag $TAG_NAME: the remote root ($(printf '%s' "$REMOTE_ROOT" | cut -c1-8)) is not fetched"

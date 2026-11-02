@@ -64,11 +64,14 @@ GitHub Release from the tag annotation. The maintainer signs tags with their
 SSH key; the tag ruleset enforces who may create a tag, not its signature.
 
 - Tags are cut on merge commits that CI has already judged, after the
-  merge — never on a pull request branch. Enforced twice: the pre-push hook
-  refuses a `v*` tag whose commit is not on the remote `root`, and the
-  `Release` workflow's `verify` job fails before building unless the tag is
-  a version tag, the checkout is the tag's commit, and that commit is on
-  `root`. A manual dispatch resolves `refs/tags/<input>` only.
+  merge — never on a pull request branch. The authoritative gate is the
+  `Release` workflow's `verify` job: it fails before anything is built
+  unless the tag is a version tag (`vMAJOR.MINOR.PATCH`), annotated with
+  release notes, the checkout is the tag's commit, and that commit is on
+  `root`; a manual dispatch resolves `refs/tags/<input>` only. The pre-push
+  hook applies the same rules first, reading the remote `root` tip live, so
+  the maintainer sees the error before the push — but a hook can be skipped,
+  the workflow cannot.
 - Versioning: a `feat` lands as a minor release, fixes as a patch, a
   breaking change as a major. Several merged pull requests may share one
   release.
