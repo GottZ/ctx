@@ -13,10 +13,13 @@ on:
 
 permissions: {}
 
-# One publication per tag at a time, never cancelled: a tag push and a manual
-# dispatch for the same tag would otherwise land in different groups
-# (refs/tags/v… vs refs/heads/root), pass the existence check together and
-# share one draft with assets from two builds.
+# One run per tag at a time: a tag push and a manual dispatch for the same
+# tag would otherwise land in different groups (refs/tags/v… vs
+# refs/heads/root), pass the existence check together and share one draft
+# with assets from two builds. A second run waits instead of cancelling the
+# first or being displaced (`queue: max`: up to 100 waiting runs). The order
+# among waiting runs is not guaranteed and does not matter: whichever runs
+# after a published release stops at verify's existence check.
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false

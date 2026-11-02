@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_images:
-        description: "Build and push the container image (off for a recovery run on an older ref — its date tag would overwrite today's)"
+        description: "Build and push the container image (only the current tip of root ever publishes; off skips the image job)"
         type: boolean
         default: true
   # Nightly cadence for the PV10 live tier (design 06 §4.7/§9.5, decision E3).
@@ -899,10 +899,10 @@ jobs:
     needs: [build, integration-tests, web]
     # Off-schedule gate (PV10): the nightly run is a verification pass for the
     # live tier — it must never re-push an image of an unchanged ref.
-    # A manual run may opt out of publishing: release.yml's recovery path
-    # dispatches this workflow on an older tag ref only to get its live-tier
-    # verdict, and the {{date}} tag below would otherwise be re-pointed at
-    # that older commit.
+    # A push publishes from root only; a manual run only with publish_images
+    # on. Either way the tip check below (`Publish only from the current tip
+    # of root`) lets only the current tip of root publish, so a re-run or
+    # dispatch of an older commit never re-points the mutable tags.
     if: >-
       github.event_name != 'schedule' &&
       ((github.event_name == 'push' && github.ref == 'refs/heads/root') ||
@@ -912,21 +912,23 @@ jobs:
       contents: read
       packages: write
 
-    # Der Index-Digest des gepushten Images (Manifest-Liste inkl. SBOM- und
-    # Provenance-Manifeste) — docker-attest signiert genau diesen.
     # One image publication at a time across ALL refs: ci.yml's workflow
     # group is per ref, so a dispatch on a tag and a push to root would run
     # side by side and the older build could land its mutable tags last.
-    # Pending jobs queue in order and are never cancelled (`queue: max`,
-    # 2026-05 — without it a group keeps ONE pending job and a later entrant
-    # displaces it, so an old-tag dispatch could cancel the pending root
-    # publication). The tip is re-read right before the mutable tags are
-    # promoted, so whoever runs later sees the newer root and backs off.
+    # Without `queue` a group keeps ONE pending job and a later entrant
+    # cancels it, so an old-tag dispatch could displace the pending root
+    # publication; `queue: max` (2026-05) lets up to 100 jobs wait. GitHub
+    # starts them first-in-first-out by the time each began waiting, but
+    # does not guarantee that order, and correctness does not need it: the
+    # tip is re-read right before the mutable tags are promoted, so a job
+    # for an older commit backs off whenever it runs.
     concurrency:
       group: ctx-image-publish
       cancel-in-progress: false
       queue: max
 
+    # Der Index-Digest des gepushten Images (Manifest-Liste inkl. SBOM- und
+    # Provenance-Manifeste) — docker-attest signiert genau diesen.
     outputs:
       digest: ${{ steps.build.outputs.digest }}
 
