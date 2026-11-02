@@ -94,12 +94,17 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
   tier. The nightly run of the same job is the daily drift signal, not the
   gate. Tags are cut on the tip of `root`: a second merge while the first
   one's run is still going cancels that run, so an earlier commit has no
-  verdict unless its run is re-run by hand. Such a re-run is safe: `ci.yml`
-  publishes image tags one job at a time across all refs, pushes only the
+  verdict unless its run is re-run by hand. A re-run keeps the original
+  event and ref, so it lands in the concurrency group of `root`'s push
+  runs and cancels the one in progress there: re-run only once no newer
+  `ci.yml` run on `root` is queued or in progress. If a re-run cancels a
+  newer run anyway, no image tag moves to the older commit — `ci.yml`
+  publishes images one job at a time across all refs, pushes only the
   per-commit `sha-` tag with the build, and promotes `latest` and the date
-  tag only after re-reading the tip of `root` — an older commit never
-  re-points them. For a run from before that guard, re-run only its
-  `Web Live Tier` job, never the whole run.
+  tag only after re-reading the tip of `root` — but the newer commit then
+  needs a re-run of its own for its verdict and its image. For a run from
+  before that guard, re-run only its `Web Live Tier` job, never the whole
+  run.
 - Versioning: a `feat` lands as a minor release, fixes as a patch, a
   breaking change as a major. Several merged pull requests may share one
   release.

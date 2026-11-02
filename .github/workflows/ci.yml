@@ -35,6 +35,10 @@ permissions: {}
 # that run is the release gate (release.yml verify); the nightly stays as
 # the daily drift signal. Two parallel runs on the same ref cannot conflict:
 # docker (image push) is gated OFF schedule.
+# A re-run keeps the event and ref of its original run, so it lands in this
+# group as well and, as a push run, cancels the newer run in progress on the
+# same ref — GOVERNANCE.md (Releases) says to re-run an older root run only
+# once no newer one is queued or in progress.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
