@@ -186,3 +186,11 @@ def test_plugin_redaction_masks_auth_scheme_credentials(header):
 def test_version_file_matches_plugin_yaml():
     # install.sh and the ctx release notes read VERSION; keep it in lockstep with plugin.yaml.
     assert (PLUGIN_DIR.parent / "VERSION").read_text(encoding="utf-8").strip() == checkpoint.PLUGIN_VERSION
+
+
+def test_skill_frontmatter_version_matches_plugin_yaml():
+    # The bundled skill is released with the plugin; its frontmatter version moves in lockstep.
+    text = (PLUGIN_DIR.parent / "skills" / "ctx-memory" / "SKILL.md").read_text(encoding="utf-8")
+    frontmatter = text.split("---", 2)[1]
+    match = re.search(r"^version:\s*([\w.]+)\s*$", frontmatter, re.M)
+    assert match and match.group(1) == checkpoint.PLUGIN_VERSION

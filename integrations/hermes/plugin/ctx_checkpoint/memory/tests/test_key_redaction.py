@@ -678,6 +678,9 @@ def test_memory_mirror_does_not_store_the_bound_key(hex_key_provider):
 
 
 # -- re-initialization of the same instance (REST) -------------------------------------------
+# Hermes v0.22 builds a fresh provider instance per agent and initializes it once
+# (agent/agent_init.py _init_memory, agent/memory_provider.py "Initialize once"); the re-init
+# tests below pin the contract for hosts that do re-initialize an instance.
 
 
 def test_reinitialize_without_key_drops_client_identity_and_chain_writer(tmp_path, ctx_env, fake_client_cls):
@@ -714,6 +717,30 @@ def test_reinitialize_after_whoami_failure_clears_identity(tmp_path, ctx_env, fa
     p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "alpha"), agent_context="primary")
     assert not p._active and p._client is None and p._chain_writer is None
     assert p._home_scope == "" and p._whoami_label == ""
+
+
+def test_reinitialize_with_env_secret_raising_leaves_no_previous_state(tmp_path, ctx_env, fake_client_cls):
+    """An unscoped secret read under multiplexing raises inside _connect(); the previous client,
+    key, identity, checkpoint writer and recall must be gone before it does."""
+    from agent.secret_scope import UnscopedSecretError
+
+    import ctx_plugin.provider as provider_mod
+
+    p = _init(tmp_path)
+    writer = p._chain()
+    assert p._active and writer.client is p._client and p._api_key == KEY_A
+    p._prefetch_cache = ("q", "<recall of alpha>", 1, p._now())
+
+    def unscoped(name):
+        raise UnscopedSecretError(name)
+
+    ctx_env.setattr(provider_mod, "env_secret", unscoped)
+    with pytest.raises(UnscopedSecretError):
+        p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "alpha"), agent_context="primary")
+    assert not p._active
+    assert p._client is None and p._chain_writer is None
+    assert p._api_key == "" and p._home_scope == "" and p._whoami_label == ""
+    assert p._prefetch_cache is None
 
 
 def test_reinitialize_with_other_key_replaces_client(tmp_path, ctx_env, fake_client_cls):
