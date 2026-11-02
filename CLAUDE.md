@@ -72,4 +72,4 @@ git config core.hooksPath .hooks
 
 - **pre-commit**: golangci-lint auf gestagte Go-Dateien
 - **commit-msg**: README-Review bei `feat:` Commits und Schema-Migrationen
-- **pre-push**: erzwingt annotated Tags bei Version-Releases
+- **pre-push**: lehnt direkte `root`-Pushes auf GottZ/ctx ab (root nur per PR-Merge, `GOVERNANCE.md`), erzwingt annotated `v*`-Tags, deadcode-Gates bei Tag-Push

@@ -1,7 +1,8 @@
 # Contributing to ctx
 
 Thanks for taking the time. This page says where each kind of message goes and
-what a pull request needs to get merged.
+what a pull request needs to get merged. Who decides what, and how `root` and
+releases are guarded, is in [GOVERNANCE.md](GOVERNANCE.md).
 
 ## Questions, ideas and feedback
 
@@ -32,9 +33,15 @@ described in [SECURITY.md](SECURITY.md).
 
 ## Pull requests
 
-1. Fork the repository and branch from `root` (the main branch).
+`root` is the main branch and the only release line. Nobody pushes to it directly —
+not collaborators, not the maintainer; it moves only by merging a pull request
+(enforced by a repository ruleset, see [GOVERNANCE.md](GOVERNANCE.md#how-root-changes)).
+
+1. Branch from `root`. Contributors fork; collaborators with write access may push
+   their branch to this repository instead.
 2. Enable the git hooks once: `git config core.hooksPath .hooks`. They run
-   golangci-lint on staged Go files and check the commit message rules below.
+   golangci-lint on staged Go files, check the commit message rules below, and
+   refuse a direct push of `root`.
 3. Make the change. Build and test as described in
    [docs/development.md](docs/development.md); at least:
 
@@ -44,14 +51,18 @@ described in [SECURITY.md](SECURITY.md).
 
    Integration tests (`-tags=integration`) need Docker for testcontainers; CI runs them
    on every pull request.
-4. Open the pull request against `root` and leave **Allow edits by maintainers** on.
+4. Open the pull request against `root`. The template asks what changes, why, and
+   what you verified. Title it `type(scope): summary` — the title becomes the merge
+   commit subject, and a workflow checks it. Leave **Allow edits by maintainers**
+   on.
 
 ### What gets a pull request merged
 
 - **One concern per pull request.** A fix and an unrelated refactor are two PRs.
 - **Commit messages** follow `type(scope): summary` — `feat`, `fix`, `docs`, `test`,
-  `ci`, `chore`, `refactor`; the scope is the package or area (`fix(cli): …`,
-  `feat(llm): …`). The body says why.
+  `ci`, `chore`, `refactor`, `perf`, `build`, `revert`; the scope is the package or
+  area (`fix(cli): …`, `feat(llm): …`), `!` before the colon marks a breaking
+  change. The body says why. The pull request title follows the same rule.
 - **Features and schema changes update the documentation.** The commit-msg hook
   rejects a `feat:` commit or a change under `go/migrations/` that does not also stage
   `README.md` or a `docs/*.md` file.
@@ -73,8 +84,14 @@ described in [SECURITY.md](SECURITY.md).
   - document the change for operators, as for any migration.
 - **Tests come with the change.** A bug fix carries a test that fails without it.
   Fixtures go through the production write path, not hand-inserted rows.
-- **CI is green.** Lint, unit and integration tests, cross-compilation and the web
-  checks all run on the pull request.
+- **CI is green.** The required checks are the `ci.yml` jobs that run on every pull
+  request — `Lint`, `Unit Tests`, `Unit Tests (windows, tagged packages)`, `Build`,
+  `Web`, both `Cross-compile (…)` targets, the six `Integration Tests (…)` shards —
+  plus `PR title`. The ruleset will not merge without them.
+- **One approving review** from a code owner ([`.github/CODEOWNERS`](.github/CODEOWNERS)),
+  given on the current head: pushing new commits dismisses earlier approvals, and
+  whoever pushed last cannot be the one who approves. All review conversations are
+  resolved before the merge.
 
 ### Coding standards
 
@@ -111,10 +128,17 @@ These are the rules CI enforces; a pull request that breaks one does not merge.
 ### What happens after you open one
 
 The maintainer reviews every pull request, often with AI agents doing a first pass
-(see [Built with AI agents](README.md#built-with-ai-agents)). Review comments may come
-as commits pushed onto your branch — hardening, tests, documentation — instead of
-change requests; that is why maintainer edits should stay enabled. There is no
-guaranteed response time.
+(see [Built with AI agents](README.md#built-with-ai-agents)); CodeRabbit comments
+as well. Review comments may come as commits pushed onto your branch — hardening,
+tests, documentation — instead of change requests; that is why maintainer edits
+should stay enabled. There is no guaranteed response time.
+
+When the checks are green and the review is in, the maintainer merges — as a merge
+commit by default (your commits and their signatures stay as they are), or squashed
+into one new commit when the branch history is not worth keeping. Rebase merging is
+off: it would rewrite your commits and drop their signatures. The source branch is
+deleted on merge. The change ships with the next release tag,
+cut on `root` after the merge ([releases](GOVERNANCE.md#releases)).
 
 ## License
 

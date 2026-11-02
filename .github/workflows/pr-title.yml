@@ -1,0 +1,33 @@
+# PR title gate. The pull request title becomes the merge commit subject
+# (repository setting merge_commit_title = PR_TITLE), so it follows the same
+# `type(scope): summary` rule as a commit message (CONTRIBUTING.md). The job
+# is a required status check of the root ruleset and re-runs on every title
+# edit. No third-party action: one grep over the title, passed in through the
+# environment so a title cannot inject into the shell.
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    name: PR title
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: "The title follows type(scope): summary"
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|test|ci|chore|refactor|perf|build|revert)(\([A-Za-z0-9_./,-]+\))?!?: [^ ].*$'
+          if printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+            printf 'ok: %s\n' "$TITLE"
+          else
+            printf 'PR title must read type(scope): summary — got: %s\n' "$TITLE" >&2
+            printf 'types: feat fix docs test ci chore refactor perf build revert (scope optional, "!" for breaking); see CONTRIBUTING.md\n' >&2
+            exit 1
+          fi

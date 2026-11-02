@@ -24,11 +24,12 @@ on:
 permissions: {}
 
 # Schedule runs get their OWN concurrency group (wave C-W3): the nightly
-# tiers (web-live release gate, web-lhci timing trend) must survive a root
-# push around 03:00 UTC — in the shared group the push would cancel the
-# schedule run and the tag rule (green nightly before a version tag) would
-# block the morning release until a manual re-dispatch. Two parallel runs on
-# the same ref cannot conflict: docker (image push) is gated OFF schedule.
+# tiers (web-live, web-lhci timing trend) must survive a root push around
+# 03:00 UTC — in the shared group the push would cancel the schedule run.
+# Since the pull request flow, web-live also runs on every root push and
+# that run is the release gate (release.yml verify); the nightly stays as
+# the daily drift signal. Two parallel runs on the same ref cannot conflict:
+# docker (image push) is gated OFF schedule.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
@@ -324,7 +325,11 @@ jobs:
     name: Web Live Tier
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # push = a merge into root (the only push trigger): every candidate for a
+    # release tag gets its live-tier verdict, which release.yml's verify job
+    # requires on the tagged commit (GOVERNANCE.md, Releases). ~2 min.
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-live'))
