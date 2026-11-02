@@ -13,6 +13,11 @@ on:
   pull_request:
     branches: [root]
   workflow_dispatch:
+    inputs:
+      publish_images:
+        description: "Build and push the container image (off for a recovery run on an older ref — its date tag would overwrite today's)"
+        type: boolean
+        default: true
   # Nightly cadence for the PV10 live tier (design 06 §4.7/§9.5, decision E3).
   # The whole workflow re-runs at 03:00 UTC, but only web-live is scheduled-
   # gated to actually do live work; docker is gated OFF schedule so a nightly
@@ -890,10 +895,14 @@ jobs:
     needs: [build, integration-tests, web]
     # Off-schedule gate (PV10): the nightly run is a verification pass for the
     # live tier — it must never re-push an image of an unchanged ref.
+    # A manual run may opt out of publishing: release.yml's recovery path
+    # dispatches this workflow on an older tag ref only to get its live-tier
+    # verdict, and the {{date}} tag below would otherwise be re-pointed at
+    # that older commit.
     if: >-
       github.event_name != 'schedule' &&
       (github.ref == 'refs/heads/root' ||
-      github.event_name == 'workflow_dispatch')
+      (github.event_name == 'workflow_dispatch' && inputs.publish_images == true))
 
     permissions:
       contents: read
