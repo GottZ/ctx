@@ -808,6 +808,45 @@ def test_prefetch_queries_the_client_it_passed_the_gate_with(tmp_path, ctx_env, 
     assert all(r[1] != "alpha turn" for r in new.reads)
 
 
+@pytest.mark.parametrize("window", ["rebind", "reset-then-rebind"])
+def test_prefetch_gate_and_query_use_one_client_read(tmp_path, ctx_env, fake_client_cls, window):
+    """prefetch() reads ``_client`` once: a re-init landing after its gate (here: inside
+    ``query.strip()``) must neither send this turn's query to the next binding nor, when the
+    gate's binding was mid-reset (``_client`` None), fall back to whatever is bound later."""
+    p = _init(tmp_path)
+    old = p._client
+    real_lock = p._prefetch_lock
+
+    def rebind():
+        ctx_env.setenv("CTX_KEY", KEY_B)
+        ctx_env.setenv("CTX_BASE_URL", URL_B)
+        p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "beta"), agent_context="primary")
+
+    class RebindOnEnter:
+        def __enter__(self):
+            p._prefetch_lock = real_lock
+            rebind()
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    class QueryHook(str):
+        def strip(self, *args):
+            if window == "rebind":
+                rebind()
+            else:  # the _connect() reset window, the new binding lands before the recall
+                p._client = None
+                p._prefetch_lock = RebindOnEnter()
+            return str(self).strip(*args)
+
+    p.prefetch(QueryHook("alpha turn"))
+    new = p._client
+    assert new is not old
+    assert [r[1] for r in old.reads] == ["alpha turn"]
+    assert all(r[1] != "alpha turn" for r in new.reads)
+
+
 def test_manifest_cache_kept_on_same_binding(tmp_path, ctx_env, fake_client_cls):
     p = _init(tmp_path)
     p._last_manifest_by_root = {"root-1": MANIFEST_ID}

@@ -475,12 +475,14 @@ class CtxMemoryProvider(MemoryProvider):
         fresh pre-warmed cache entry when available, otherwise queries now.
         """
         self._last_recall_count = 0
-        if not self._active or not self._config.get("auto_recall", True) or not self._client:
+        # One read: the gate and the recall see the same binding (a re-init after the gate
+        # neither redirects this turn's query nor leaves a None for _recall to resolve).
+        client = self._client
+        if not self._active or not self._config.get("auto_recall", True) or not client:
             return ""
         q = (query or "").strip()
         if not q:
             return ""
-        client = self._client  # the binding this turn passed the gate with
         with self._prefetch_lock:
             cached = self._prefetch_cache
             if cached and cached[0] == q and (self._now() - cached[3]) < _PREFETCH_CACHE_TTL_S:
