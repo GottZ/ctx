@@ -131,7 +131,7 @@ def wire(monkeypatch):
             return _Resp(r)
         return _Resp({"success": True, "results": [], "sources": []})
 
-    monkeypatch.setattr(client_mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(client_mod, "_urlopen", fake_urlopen)
     monkeypatch.setattr(client_mod.time, "sleep", lambda s: None)
     return sent, plan
 

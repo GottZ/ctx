@@ -881,7 +881,7 @@ def test_wire_payload_of_real_client(monkeypatch):
         n["i"] += 1
         return _Resp({"success": True, "block": {"id": f"019f6000-0000-7000-8000-{n['i']:012d}"}})
 
-    monkeypatch.setattr(client_mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(client_mod, "_urlopen", fake_urlopen)
     w = ChainWriter(client=client_mod.CtxClient("http://ctx.invalid", "k"), sensitivity="personal", api_timeout=10.0)
     r = w.write([{"role": "user", "content": "wire"}], root_session_id="r1", session_id="r1", budget_s=20)
     assert [s["url"].rsplit("/", 1)[1] for s in sent] == ["search", "store", "store", "store"]

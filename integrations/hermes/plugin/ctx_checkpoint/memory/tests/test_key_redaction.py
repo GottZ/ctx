@@ -7,7 +7,8 @@ must never get that key into ``CtxApiError`` texts/codes, returned failure envel
 Re-initializing a provider instance must not keep the previous client, key, whoami identity
 or checkpoint writer — not even when the new run ends inactive.
 
-Network-free: ``urllib.request.urlopen`` is mocked; every key is synthetic.
+Network-free: ``ctx_plugin.client._urlopen`` (urllib's opener without redirects) is mocked; the
+redirect tests run two servers on 127.0.0.1. Every key is synthetic.
 """
 
 from __future__ import annotations
@@ -18,10 +19,12 @@ import io
 import json
 import logging
 import sys
+import threading
 import urllib.error
-import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -127,7 +130,7 @@ def test_redact_secret_and_redact_deep():
 def test_http_error_body_echo_is_redacted(monkeypatch, body):
     from ctx_plugin.client import CtxApiError, CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(_http_error(401, body)))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(_http_error(401, body)))
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).whoami()
     _assert_no_key(str(info.value))
@@ -138,7 +141,7 @@ def test_http_error_body_echo_is_redacted(monkeypatch, body):
 def test_http_error_reason_echo_is_redacted(monkeypatch):
     from ctx_plugin.client import CtxApiError, CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(_http_error(401, b"", reason=f"Unauthorized {KEY_A}")))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(_http_error(401, b"", reason=f"Unauthorized {KEY_A}")))
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).search("x")
     assert str(info.value) == f"HTTP 401: Unauthorized {REDACTED}"
@@ -152,7 +155,7 @@ def test_unreadable_error_body_debug_log_does_not_chain_key(monkeypatch, caplog)
             raise OSError("connection reset while reading body")
 
     exc = urllib.error.HTTPError(URL_A + "/api/x", 401, f"Unauthorized {KEY_A}", {}, _BrokenBody())
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(exc))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(exc))
     caplog.set_level(logging.DEBUG)
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).search("x")
@@ -164,7 +167,7 @@ def test_unreadable_error_body_debug_log_does_not_chain_key(monkeypatch, caplog)
 def test_http_error_unknown_code_echo_is_redacted(monkeypatch):
     from ctx_plugin.client import CtxApiError, CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(_http_error(422, {"error": "no", "code": f"bad-{KEY_A}"})))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(_http_error(422, {"error": "no", "code": f"bad-{KEY_A}"})))
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).store("c", "t", "x")
     assert info.value.code == f"bad-{REDACTED}"
@@ -182,7 +185,7 @@ def test_http_error_reject_codes_stay_verbatim(monkeypatch, code):
     def _urlopen(*_a, **_k):  # fresh error per call: a 429 is retried once and reads the body again
         raise _http_error(status, body)
 
-    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _urlopen)
     monkeypatch.setattr("ctx_plugin.client.time.sleep", lambda _s: None)
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).store("c", "t", "x")
@@ -193,7 +196,7 @@ def test_http_error_reject_codes_stay_verbatim(monkeypatch, code):
 def test_texts_without_key_are_untouched(monkeypatch):
     from ctx_plugin.client import CtxApiError, CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(_http_error(400, {"error": "Missing required field: id"})))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(_http_error(400, {"error": "Missing required field: id"})))
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).whoami()
     assert str(info.value) == "HTTP 400: Missing required field: id"
@@ -213,7 +216,7 @@ def test_texts_without_key_are_untouched(monkeypatch):
 def test_connection_error_echo_is_redacted(monkeypatch, exc):
     from ctx_plugin.client import CtxApiError, CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(exc))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(exc))
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).query("x")
     assert str(info.value).startswith("connection error:")
@@ -232,7 +235,7 @@ def test_original_exception_is_not_chained(monkeypatch, exc):
     """``raise … from None``: the unredacted original must not ride along as cause/context."""
     from ctx_plugin.client import CtxApiError, CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(exc))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(exc))
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).whoami()
     assert info.value.__cause__ is None
@@ -254,7 +257,7 @@ def test_http_client_exception_echo_is_redacted(monkeypatch, exc):
     leave ``_request`` raw (it would carry the reflected header value)."""
     from ctx_plugin.client import CtxApiError, CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(exc))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(exc))
     with pytest.raises(CtxApiError) as info:
         CtxClient(URL_A, KEY_A).search("x")
     assert str(info.value).startswith("connection error:")
@@ -272,7 +275,7 @@ def test_http_client_exception_echo_not_in_tool_result_or_log(tmp_path, ctx_env,
             return _Resp({"success": True, "home_scope": "private", "label": "probe"})
         raise http.client.BadStatusLine(f"PROXY-ERR denied {KEY_A}\r\n")
 
-    ctx_env.setattr(urllib.request, "urlopen", _urlopen)
+    ctx_env.setattr("ctx_plugin.client._urlopen", _urlopen)
     caplog.set_level(logging.DEBUG)
     p = _init(tmp_path)
     assert p._active
@@ -311,6 +314,122 @@ def test_key_with_control_characters_leaves_provider_inactive_without_logging_ke
     _assert_no_key(json.dumps(status))
 
 
+# -- redirects are refused (review of #53) --------------------------------------------------
+
+
+class _RedirectTarget(BaseHTTPRequestHandler):
+    """Origin B: records every request it receives and answers like a healthy ctx."""
+
+    seen: ClassVar[list] = []
+
+    def _answer(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        _RedirectTarget.seen.append((self.command, self.path, self.headers.get("X-Context-Key")))
+        body = json.dumps({"success": True, "home_scope": "private", "label": "redirect-target"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _answer
+
+    def log_message(self, *_a):
+        pass
+
+
+class _Redirector(BaseHTTPRequestHandler):
+    """Origin A (a proxy or error page in front of ctx): answers every request with a 30x to B."""
+
+    code = 302
+    target = ""
+
+    def _redirect(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        self.send_response(_Redirector.code)
+        self.send_header("Location", f"{_Redirector.target}{self.path}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_GET = do_POST = _redirect
+
+    def log_message(self, *_a):
+        pass
+
+
+@pytest.fixture
+def redirect_to_b():
+    """Two local origins: A redirects to B. Yields (base URL of A, set_code)."""
+    servers = [HTTPServer(("127.0.0.1", 0), _RedirectTarget), HTTPServer(("127.0.0.1", 0), _Redirector)]
+    _RedirectTarget.seen = []
+    _Redirector.target = f"http://127.0.0.1:{servers[0].server_port}"
+    threads = [threading.Thread(target=s.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True) for s in servers]
+    for t in threads:
+        t.start()
+
+    def set_code(code):
+        _Redirector.code = code
+
+    try:
+        yield f"http://127.0.0.1:{servers[1].server_port}", set_code
+    finally:
+        for s in servers:
+            s.shutdown()
+            s.server_close()
+        for t in threads:
+            t.join(5.0)
+
+
+def _assert_redirect_refused(info, code):
+    text = str(info.value)
+    assert info.value.status == code
+    assert text.startswith(f"HTTP {code}: redirect not followed")
+    assert _Redirector.target.rsplit(":", 1)[1] not in text  # the Location is not echoed
+    _assert_no_key(text)
+    assert _RedirectTarget.seen == []  # B never got a request, let alone the key
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_get_redirect_is_not_followed(redirect_to_b, code):
+    """urllib's default opener follows a 30x and copies X-Context-Key into the request to the
+    Location, without comparing hosts; the ctx API never redirects /api/*."""
+    from ctx_plugin.client import CtxApiError, CtxClient
+
+    url_a, set_code = redirect_to_b
+    set_code(code)
+    with pytest.raises(CtxApiError) as info:
+        CtxClient(url_a, KEY_A, timeout=5.0).whoami()
+    _assert_redirect_refused(info, code)
+
+
+@pytest.mark.parametrize("code", [301, 302, 303])
+def test_post_redirect_is_not_followed(redirect_to_b, code):
+    """A POST answered with 301/302/303 would be repeated as a GET to the Location, key included."""
+    from ctx_plugin.client import CtxApiError, CtxClient
+
+    url_a, set_code = redirect_to_b
+    set_code(code)
+    with pytest.raises(CtxApiError) as info:
+        CtxClient(url_a, KEY_A, timeout=5.0).store("learnings", "t", "c")
+    _assert_redirect_refused(info, code)
+
+
+def test_initialize_against_a_redirect_stays_inactive(tmp_path, ctx_env, redirect_to_b, caplog):
+    url_a, set_code = redirect_to_b
+    set_code(302)
+    ctx_env.setenv("CTX_BASE_URL", url_a)
+    caplog.set_level(logging.DEBUG)
+    p = _init(tmp_path)
+    assert p._active is False and p._client is None
+    assert _RedirectTarget.seen == []
+    assert "redirect not followed" in caplog.text
+    _assert_no_key(_all_log_text(caplog))
+
+
 # -- HTTP 200 failure envelopes --------------------------------------------------------------
 
 
@@ -347,7 +466,7 @@ def test_key_with_control_characters_leaves_provider_inactive_without_logging_ke
 def test_200_failure_envelope_is_redacted(monkeypatch, payload, expect):
     from ctx_plugin.client import CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _respond(payload))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _respond(payload))
     data = CtxClient(URL_A, KEY_A).store("c", "t", "x")
     assert data == expect
     _assert_no_key(json.dumps(data))
@@ -365,7 +484,7 @@ def test_200_success_payload_is_not_rewritten(monkeypatch, payload):
     """Successful answers are never rewritten — not even with a 1-character key."""
     from ctx_plugin.client import CtxClient
 
-    monkeypatch.setattr(urllib.request, "urlopen", _respond(payload))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _respond(payload))
     assert CtxClient(URL_A, "e").search("q") == payload
 
 
@@ -375,7 +494,7 @@ def test_200_success_payload_is_not_rewritten(monkeypatch, payload):
 def test_whoami_http_error_echo_not_logged(tmp_path, ctx_env, caplog):
     """Real CtxClient, whoami 401 echoing the key → provider inactive, nothing in the log."""
     caplog.set_level(logging.DEBUG)
-    ctx_env.setattr(urllib.request, "urlopen", _raise(_http_error(401, {"error": f"invalid provided key {KEY_A}"})))
+    ctx_env.setattr("ctx_plugin.client._urlopen", _raise(_http_error(401, {"error": f"invalid provided key {KEY_A}"})))
     p = _init(tmp_path)
     assert not p._active and p._client is None
     log = _all_log_text(caplog)
@@ -404,9 +523,9 @@ def test_status_summary_does_not_echo_key(ctx_env, mode):
     from ctx_plugin.provider import CtxMemoryProvider
 
     if mode == "http_error":
-        ctx_env.setattr(urllib.request, "urlopen", _raise(_http_error(401, {"error": f"invalid key {KEY_A}"})))
+        ctx_env.setattr("ctx_plugin.client._urlopen", _raise(_http_error(401, {"error": f"invalid key {KEY_A}"})))
     else:
-        ctx_env.setattr(urllib.request, "urlopen", _respond({"success": False, "error": f"key {KEY_A} revoked"}))
+        ctx_env.setattr("ctx_plugin.client._urlopen", _respond({"success": False, "error": f"key {KEY_A} revoked"}))
     status = CtxMemoryProvider().get_status_config({})
     assert status["ok"] is False
     _assert_no_key(json.dumps(status))
@@ -422,14 +541,14 @@ def test_tool_errors_and_logs_do_not_echo_key(monkeypatch, caplog):
     store_args = {"category": "c", "title": "t", "content": "x"}
     outputs = []
     for status, body in ((403, {"error": f"denied for {KEY_A}", "code": "scope_denied"}), (500, {"error": KEY_A})):
-        monkeypatch.setattr(urllib.request, "urlopen", _raise(_http_error(status, body)))
+        monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(_http_error(status, body)))
         outputs.append(handle_tool_call(provider, "ctx_search", {"query": "x"}))
     for tool, args, payload in (
         ("ctx_store", store_args, {"success": False, "error": f"key {KEY_A}", "code": f"invalid-{KEY_A}"}),
         ("ctx_search", {"query": "q"}, {"success": False, "error": {"reason": f"key {KEY_A}"}}),
         ("ctx_query", {"text": "q"}, {"success": False, "error": f"key {KEY_A} revoked"}),
     ):
-        monkeypatch.setattr(urllib.request, "urlopen", _respond(payload))
+        monkeypatch.setattr("ctx_plugin.client._urlopen", _respond(payload))
         outputs.append(handle_tool_call(provider, tool, args))
     for out in outputs:
         assert "error" in json.loads(out)
@@ -445,9 +564,9 @@ def test_exc_info_traceback_does_not_carry_key(monkeypatch, caplog):
 
     caplog.set_level(logging.DEBUG)
     provider = SimpleNamespace(_active=True, _client=CtxClient(URL_A, KEY_A), _config={}, _profile="alpha")
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(urllib.error.URLError(f"proxy refused key {KEY_A}")))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(urllib.error.URLError(f"proxy refused key {KEY_A}")))
     out = handle_tool_call(provider, "ctx_search", {"query": "x"})
-    monkeypatch.setattr(urllib.request, "urlopen", _raise(_http_error(401, b"", reason=f"Unauthorized {KEY_A}")))
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(_http_error(401, b"", reason=f"Unauthorized {KEY_A}")))
     out += handle_tool_call(provider, "ctx_search", {"query": "x"})
     _assert_no_key(out)
     assert "Traceback" in caplog.text  # exc_info was rendered

@@ -63,6 +63,30 @@ RETRYABLE_CODES = frozenset({"rate_limit"})
 RESERVED_METADATA_KEYS = ("provenance",)
 # Replacement for an API key echoed back in any error text (server body, proxy, socket).
 REDACTED = "[REDACTED]"
+# Redirect statuses urllib's HTTPRedirectHandler would follow; CtxClient refuses all of them.
+REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the 30x surfaces as ``HTTPError``.
+
+    urllib's default handler copies every request header — ``X-Context-Key`` included — into
+    the request to the ``Location``, without comparing hosts (POST 301/302/303 become a GET).
+    The ctx API never redirects ``/api/*``; a redirect means the base URL is not the ctx API.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# The default opener's handlers (proxies from the environment, https, error processing) with
+# the redirect handler replaced.
+_OPENER = urllib.request.build_opener(_RefuseRedirect)
+
+
+def _urlopen(req: urllib.request.Request, *, timeout: float) -> Any:
+    """``urllib.request.urlopen`` without following redirects (see ``_RefuseRedirect``)."""
+    return _OPENER.open(req, timeout=timeout)
 
 
 def redact_secret(text: Any, secret: str | None) -> str:
@@ -197,13 +221,13 @@ class CtxClient:
             "Accept": "application/json",
         }
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310 — http(s) only, see __init__
         t = timeout if timeout is not None else self._timeout
         last_error: CtxApiError | None = None
 
         for attempt in (0, 1):  # one retry on 429 (per-key write rate limit)
             try:
-                with urllib.request.urlopen(req, timeout=t) as resp:  # noqa: S310 — http(s) only, see __init__
+                with _urlopen(req, timeout=t) as resp:
                     raw = resp.read().decode("utf-8", "replace")
                 try:
                     parsed = json.loads(raw)
@@ -223,6 +247,12 @@ class CtxClient:
                         parsed["code"] = code
                 return parsed
             except urllib.error.HTTPError as exc:
+                if exc.code in REDIRECT_CODES:
+                    # Not followed (``_RefuseRedirect``); the Location is not part of the message.
+                    raise CtxApiError(
+                        f"HTTP {exc.code}: redirect not followed — the ctx API never redirects; check the base URL",
+                        status=exc.code,
+                    ) from None
                 body = ""
                 try:
                     body = exc.read(16384).decode("utf-8", "replace")
