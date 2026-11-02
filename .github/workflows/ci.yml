@@ -910,14 +910,26 @@ jobs:
 
     # Der Index-Digest des gepushten Images (Manifest-Liste inkl. SBOM- und
     # Provenance-Manifeste) — docker-attest signiert genau diesen.
+    # One image publication at a time across ALL refs: ci.yml's workflow
+    # group is per ref, so a dispatch on a tag and a push to root would run
+    # side by side and the older build could land its mutable tags last.
+    # Pending jobs queue (never cancelled); the tip is re-read right before
+    # the mutable tags are promoted, so whoever runs second sees the newer
+    # root and backs off.
+    concurrency:
+      group: ctx-image-publish
+      cancel-in-progress: false
+
     outputs:
       digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      # `latest` and the {{date}} tag name "the newest root"; a re-run or a
+      # `latest` and the date tag name "the newest root"; a re-run or a
       # dispatch of an older commit (release.yml's recovery path for a missing
       # live-tier verdict, or any manual re-run) must not re-point them. The
       # tip is read live from origin, not from the event: only the commit that
@@ -955,10 +967,11 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_NAME }}
+          # Only the immutable per-commit tag is pushed with the build. The
+          # mutable tags (latest, date) are promoted in the step after it,
+          # behind a second tip check, by re-tagging the same digest.
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/root' }}
             type=sha,prefix=sha-,format=short
-            type=raw,value={{date 'YYYY-MM-DD'}}
           labels: |
             org.opencontainers.image.title=ctx
             org.opencontainers.image.description=The memory your LLM pretends to have. GottZ 4-Way RRF + GottZ Scope Model.
@@ -998,6 +1011,32 @@ jobs:
           cache-to: |
             type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
             type=gha,mode=max
+
+      # The build above may have taken minutes; root may have moved meanwhile
+      # and the newer commit's job may be queued behind this one. Re-read the
+      # tip and promote only if this commit still is it. `imagetools create`
+      # re-tags the pushed manifest — same digest, no rebuild — so the
+      # attestation below covers latest and the date tag as well.
+      - name: Promote latest and the date tag (re-checked against root)
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          IMAGE: ${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -eu
+          git fetch --no-tags --depth=1 origin root
+          TIP="$(git rev-parse FETCH_HEAD)"
+          if [ "$TIP" != "$GITHUB_SHA" ]; then
+            echo "::notice::mutable tags not promoted — root moved to $TIP during the build; sha-tag of $GITHUB_SHA stays published, latest/date untouched"
+            exit 0
+          fi
+          TAGS="-t ${IMAGE}:$(date -u +%Y-%m-%d)"
+          if [ "$GITHUB_REF" = "refs/heads/root" ]; then
+            TAGS="$TAGS -t ${IMAGE}:latest"
+          fi
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $TAGS "${IMAGE}@${DIGEST}"
+          echo "promoted ${DIGEST} ->${TAGS}"
 
   # ─── Stage 6: Image-Attestation ───────────────────────────────────────────────
   # #49 Punkt 2, Image-Hälfte: Sigstore-signierte Build-Provenance für genau den
