@@ -22,6 +22,7 @@ Auth: ``X-Context-Key: <key>`` (alternative ``Authorization: Bearer``).
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -245,8 +246,18 @@ class CtxClient:
                 # ``from None``: the original HTTPError/URLError text is unredacted and would
                 # resurface in every ``exc_info=True`` traceback; its content is in the message.
                 raise error from None
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+                # ``http.client.HTTPException`` (e.g. ``BadStatusLine`` from a proxy's non-HTTP
+                # status line, which can reflect a header value) is no OSError.
                 raise CtxApiError(f"connection error: {self._redact(exc)}") from None
+            except ValueError:
+                # http.client rejects a header value with control characters (inner CR/LF) via
+                # ValueError carrying the bytes repr of the key, and non-latin-1 header or
+                # non-ASCII URL text via UnicodeEncodeError (a ValueError); the repr escapes
+                # defeat exact-match redaction, so the message is fixed and names no value.
+                raise CtxApiError(
+                    "invalid request header: key or URL contains control or non-latin-1 characters"
+                ) from None
 
         raise last_error or CtxApiError("request failed")
 

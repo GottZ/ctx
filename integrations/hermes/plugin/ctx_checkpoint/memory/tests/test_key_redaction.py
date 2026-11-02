@@ -12,6 +12,7 @@ Network-free: ``urllib.request.urlopen`` is mocked; every key is synthetic.
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import io
 import json
@@ -236,6 +237,78 @@ def test_original_exception_is_not_chained(monkeypatch, exc):
         CtxClient(URL_A, KEY_A).whoami()
     assert info.value.__cause__ is None
     assert info.value.__suppress_context__ is True
+
+
+# -- http.client exceptions and invalid header values (review of #53) -----------------------
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(http.client.BadStatusLine(f"PROXY-ERR denied {KEY_A}\r\n"), id="BadStatusLine"),
+        pytest.param(http.client.UnknownProtocol(f"HTTP/{KEY_A}"), id="UnknownProtocol"),
+    ],
+)
+def test_http_client_exception_echo_is_redacted(monkeypatch, exc):
+    """A non-HTTP status line from a proxy is neither an HTTPError nor an OSError; it must not
+    leave ``_request`` raw (it would carry the reflected header value)."""
+    from ctx_plugin.client import CtxApiError, CtxClient
+
+    monkeypatch.setattr(urllib.request, "urlopen", _raise(exc))
+    with pytest.raises(CtxApiError) as info:
+        CtxClient(URL_A, KEY_A).search("x")
+    assert str(info.value).startswith("connection error:")
+    assert REDACTED in str(info.value)
+    _assert_no_key(str(info.value))
+    assert info.value.__cause__ is None
+
+
+def test_http_client_exception_echo_not_in_tool_result_or_log(tmp_path, ctx_env, caplog):
+    """Real provider and CtxClient: the tool error the model sees and the DEBUG traceback of
+    tools.py stay free of the key."""
+
+    def _urlopen(req, *_a, **_k):
+        if req.full_url.endswith("/api/whoami"):
+            return _Resp({"success": True, "home_scope": "private", "label": "probe"})
+        raise http.client.BadStatusLine(f"PROXY-ERR denied {KEY_A}\r\n")
+
+    ctx_env.setattr(urllib.request, "urlopen", _urlopen)
+    caplog.set_level(logging.DEBUG)
+    p = _init(tmp_path)
+    assert p._active
+    out = p.handle_tool_call("ctx_search", {"query": "x"})
+    assert "error" in json.loads(out)
+    _assert_no_key(out)
+    assert REDACTED in out
+    _assert_no_key(_all_log_text(caplog))
+
+
+def test_key_with_control_characters_raises_ctx_api_error_without_key():
+    """http.client rejects a header value with an inner LF via ValueError, whose text is the
+    bytes repr of the key (the escaped LF defeats exact-match redaction). Raised before any
+    socket is opened."""
+    from ctx_plugin.client import CtxApiError, CtxClient
+
+    with pytest.raises(CtxApiError) as info:
+        CtxClient("http://127.0.0.1:9", KEY_A + "\nX-Evil: 1", timeout=2.0).whoami()
+    assert "invalid request" in str(info.value)
+    _assert_no_key(str(info.value))
+    assert info.value.__cause__ is None
+
+
+def test_key_with_control_characters_leaves_provider_inactive_without_logging_key(tmp_path, ctx_env, caplog):
+    from ctx_plugin.provider import CtxMemoryProvider
+
+    ctx_env.setenv("CTX_KEY", KEY_A + "\nX-Evil: 1")
+    ctx_env.setenv("CTX_BASE_URL", "http://127.0.0.1:9")
+    caplog.set_level(logging.DEBUG)
+    p = _init(tmp_path)
+    assert p._active is False and p._client is None
+    assert "CTX whoami validation failed" in caplog.text
+    _assert_no_key(_all_log_text(caplog))
+    status = CtxMemoryProvider().get_status_config({})
+    assert status["ok"] is False
+    _assert_no_key(json.dumps(status))
 
 
 # -- HTTP 200 failure envelopes --------------------------------------------------------------
