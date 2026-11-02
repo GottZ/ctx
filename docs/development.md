@@ -903,4 +903,7 @@ Enable with `git config core.hooksPath .hooks`:
 
 - **pre-commit** — golangci-lint on staged Go files.
 - **commit-msg** — enforces a documentation review for `feat:` commits and schema migrations (`go/migrations/`): the commit must stage `README.md` **or** a `docs/*.md` file. Also enforces the `[baseline]` marker (above).
-- **pre-push** — requires annotated `v*` tags for version releases.
+- **pre-push** — rejects a direct push of `root` to the canonical repository
+  (`root` moves only by merging a pull request, see [GOVERNANCE.md](../GOVERNANCE.md)),
+  requires annotated `v*` tags with release notes, and runs the deadcode gates when a
+  tag is pushed.
