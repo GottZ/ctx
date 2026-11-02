@@ -29,8 +29,10 @@ REJECTED=0
 
 # pre-push receives the remote name and URL as arguments.
 REMOTE_URL="$2"
+# Exact repository match: GottZ/ctx, with or without .git or a trailing
+# slash — not GottZ/ctx-anything.
 case "$REMOTE_URL" in
-    *github.com[:/]GottZ/ctx*) CANONICAL=1 ;;
+    *github.com[:/]GottZ/ctx|*github.com[:/]GottZ/ctx.git|*github.com[:/]GottZ/ctx/) CANONICAL=1 ;;
     *) CANONICAL=0 ;;
 esac
 
@@ -42,6 +44,7 @@ while read local_ref local_sha remote_ref remote_sha; do
 done
 
 PUSHES_TAG=0
+TAG_TARGET=""
 
 while read local_ref local_sha remote_ref remote_sha; do
     case "$remote_ref" in
@@ -54,6 +57,7 @@ while read local_ref local_sha remote_ref remote_sha; do
                 0000000000000000000000000000000000000000) continue ;;
             esac
             PUSHES_TAG=1
+            TAG_TARGET=$(git rev-parse "$local_sha^{commit}" 2>/dev/null)
 
             # Annotated tags are 'tag' objects; lightweight ones point at a
             # commit directly.
@@ -139,8 +143,15 @@ fi
 # binaries. Missing tool means a hint, never a block. T02-13 added the
 # second mode (go/deadcode-testonly-allow.txt, class T); both run here in
 # this order because the testonly run subtracts the with-tests allowlist.
+# deadcode.sh reads the working tree, so the gates mean something only when
+# the checkout IS the tagged commit; a tag pushed from another branch gets a
+# note instead of a verdict about the wrong tree.
 if [ "$PUSHES_TAG" -eq 1 ]; then
-    if command -v deadcode >/dev/null 2>&1; then
+    HEAD_COMMIT=$(git rev-parse HEAD 2>/dev/null)
+    if [ -n "$TAG_TARGET" ] && [ "$HEAD_COMMIT" != "$TAG_TARGET" ]; then
+        echo "pre-push: deadcode gates skipped — the checkout ($(git rev-parse --short HEAD)) is not the tagged commit ($(git rev-parse --short "$TAG_TARGET"))."
+        echo "  Check out the tag to run them locally; CI ran them on the merge commit."
+    elif command -v deadcode >/dev/null 2>&1; then
         if ! bash "$(git rev-parse --show-toplevel)/deadcode.sh"; then
             echo ""
             echo "pre-push: deadcode gate failed — cut the symbol, or add a line"

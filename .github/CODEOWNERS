@@ -2,7 +2,8 @@
 # requires an approving review from one of them before a pull request merges
 # (GOVERNANCE.md, "How root changes"). Later lines take precedence over
 # earlier ones, so the catch-all stays first; add an area line below it when
-# a second maintainer takes an area over.
+# a second maintainer takes an area over. A second owner on the catch-all is
+# what ends the maintainer bypass (GOVERNANCE.md, "Maintainer escape hatch").
 # Syntax: https://docs.github.com/articles/about-code-owners
 
 * @GottZ

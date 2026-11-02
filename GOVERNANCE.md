@@ -29,10 +29,12 @@ guard it and apply to all accounts.
    ([`.github/CODEOWNERS`](.github/CODEOWNERS)), given on the current head —
    a new push dismisses earlier approvals. Every review conversation is
    resolved before the merge.
-3. **Required status checks**: Lint, Unit Tests, Unit Tests (windows), Build,
-   Web, both Cross-compile targets, all six Integration Tests shards and the
-   PR title check — the `ci.yml` jobs that run on every pull request.
-   Label-gated and nightly jobs are not required.
+3. **Required status checks** (exact context names): `Lint`, `Unit Tests`,
+   `Unit Tests (windows, tagged packages)`, `Build`, `Web`,
+   `Cross-compile (darwin/arm64)`, `Cross-compile (windows/amd64)`,
+   `Integration Tests (handler|store|guard|rest|heavy|distill)` and
+   `PR title` — the `ci.yml` jobs that run on every pull request. Label-gated
+   and nightly jobs are not required.
 4. **Merge method**: *merge commit* (default) or *squash*. Rebase merging is
    off because it rewrites the contributor's commits and drops their
    signatures. The pull request title becomes the merge commit subject, so
@@ -44,17 +46,20 @@ guard it and apply to all accounts.
    request means taking responsibility for it on the release line.
 
 **Maintainer escape hatch.** The maintainer's own pull requests need the
-same approval. While the project has fewer than two regular reviewers, the
-maintainer may merge an unapproved pull request through the ruleset bypass;
-GitHub records the bypass. That is a stopgap, not a second path: the pull
-request, the CI checks and the public review thread still happen. The bypass
-goes away once a second regular reviewer is active.
+same approval, and an approval counts only from a code owner — with
+`* @GottZ` as the sole owner, no one else can give it. Until a second code
+owner is listed in [`.github/CODEOWNERS`](.github/CODEOWNERS), the maintainer
+may merge an unapproved pull request through the ruleset bypass; GitHub
+records the bypass. That is a stopgap, not a second path: the pull request,
+the CI checks and the public review thread still happen. The bypass is
+removed in the same change that adds the second code owner.
 
 ## Releases
 
-A release is an annotated, signed `v*` tag on a commit of `root`, pushed by
-the maintainer; the `Release` workflow builds the binaries and publishes the
-GitHub Release from the tag annotation.
+A release is an annotated `v*` tag on a commit of `root`, pushed by the
+maintainer; the `Release` workflow builds the binaries and publishes the
+GitHub Release from the tag annotation. The maintainer signs tags with their
+SSH key; the tag ruleset enforces who may create a tag, not its signature.
 
 - Tags are cut on merge commits that CI has already judged, after the
   merge — never on a pull request branch.

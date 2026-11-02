@@ -84,9 +84,9 @@ not collaborators, not the maintainer; it moves only by merging a pull request
 - **Tests come with the change.** A bug fix carries a test that fails without it.
   Fixtures go through the production write path, not hand-inserted rows.
 - **CI is green.** The required checks are the `ci.yml` jobs that run on every pull
-  request — Lint, Unit Tests (linux and windows), Build, Web, both Cross-compile
-  targets, the six Integration Tests shards — plus the PR title check. The ruleset
-  will not merge without them.
+  request — `Lint`, `Unit Tests`, `Unit Tests (windows, tagged packages)`, `Build`,
+  `Web`, both `Cross-compile (…)` targets, the six `Integration Tests (…)` shards —
+  plus `PR title`. The ruleset will not merge without them.
 - **One approving review** from a code owner ([`.github/CODEOWNERS`](.github/CODEOWNERS)),
   given on the current head: pushing new commits dismisses earlier approvals. All
   review conversations are resolved before the merge.
