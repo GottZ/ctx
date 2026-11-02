@@ -16,12 +16,15 @@ repository, not a way around review.
 
 Write access does **not** include pushing to `root`, merging without the
 required review, creating or moving `v*` tags, or changing settings. The
-repository rulesets enforce that for every account, the maintainer's included.
+repository rulesets enforce that for every account — with one exception,
+the repository-admin bypass described under *Maintainer escape hatch* and
+*Releases*: it lets the maintainer merge without the approval and create
+tags, never push to `root`.
 
 ## How `root` changes
 
 `root` is the main branch and the only release line. Two GitHub rulesets
-guard it and apply to all accounts.
+guard it and apply to all accounts (the admin bypass excepted, see below).
 
 1. **Pull request required.** Nothing is pushed to `root` directly; the
    branch moves only by merging a pull request. Force pushes and deletion
@@ -29,28 +32,37 @@ guard it and apply to all accounts.
 2. **One approving review** from a code owner
    ([`.github/CODEOWNERS`](.github/CODEOWNERS): GottZ, Damien Moon and
    derLonius), given on the current head — a new push dismisses earlier
-   approvals. An owner cannot approve their own pull request, so the
-   maintainer's work is reviewed by another owner like anyone else's. Every
-   review conversation is resolved before the merge.
+   approvals, and the last push must be approved by someone other than the
+   one who pushed it. So an author never approves their own pull request,
+   and an owner who pushes hardening commits onto a contributor's branch
+   needs a third owner's approval for them — the maintainer's work is
+   reviewed by another owner like anyone else's. Every review conversation
+   is resolved before the merge.
 3. **Required status checks** (exact context names): `Lint`, `Unit Tests`,
    `Unit Tests (windows, tagged packages)`, `Build`, `Web`,
    `Cross-compile (darwin/arm64)`, `Cross-compile (windows/amd64)`,
    `Integration Tests (handler|store|guard|rest|heavy|distill)` and
    `PR title` — the `ci.yml` jobs that run on every pull request. Label-gated
    and nightly jobs are not required.
-4. **Merge method**: *merge commit* (default) or *squash*. Rebase merging is
-   off because it rewrites the contributor's commits and drops their
-   signatures. The pull request title becomes the merge commit subject, so
+4. **Merge method**: *merge commit* (default) or *squash*. A merge commit
+   keeps the contributor's commits and their signatures; a squash creates one
+   new commit (signed by GitHub) and is for branches whose history is not
+   worth keeping. Rebase merging is off because it rewrites every commit and
+   drops the signatures without saying so. The pull request title becomes
+   the merge commit subject, so
    it follows `type(scope): summary` like a commit message (checked by the
    `PR title` workflow); the pull request body becomes the merge commit
    body. `git log --first-parent root` therefore reads as one entry per
    pull request. The source branch is deleted on merge.
-5. **Who merges**: the maintainer. Collaborators approve; merging a pull
-   request means taking responsibility for it on the release line.
+5. **Who merges** — a convention, not a ruleset rule: the rulesets say what
+   must be true before a merge, not who clicks. Contributors cannot merge
+   (no write); the maintainer merges their pull requests. An owner's own
+   pull request is merged by its author once the approval is in. Merging
+   means taking responsibility for the change on the release line.
 
 **Maintainer escape hatch.** The ruleset lets repository admins merge a
-pull request that lacks the approval (pull requests only — a direct push
-stays blocked); GitHub records every such merge as a bypass. It exists for
+pull request that lacks the approval (bypass mode *pull requests only* — a
+direct push stays blocked); GitHub records every such merge as a bypass. It exists for
 the case where no other owner is available in time, and it is used that
 way: as the exception the merge commit's audit trail shows, not as the
 maintainer's regular path. It is removed by a change to the ruleset once the
@@ -72,11 +84,22 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
   hook applies the same rules first, reading the remote `root` tip live, so
   the maintainer sees the error before the push — but a hook can be skipped,
   the workflow cannot.
+- The live tier is green on the tagged commit: `ci.yml` runs the
+  `Web Live Tier` job (a throwaway ctxd + Postgres, production write paths)
+  on every push to `root`, and `verify` requires a successful run on the
+  exact commit — the repository's "CI is truth" rule extended to the live
+  tier. The nightly run of the same job is the daily drift signal, not the
+  gate.
 - Versioning: a `feat` lands as a minor release, fixes as a patch, a
   breaking change as a major. Several merged pull requests may share one
   release.
-- `v*` tags are created, moved or deleted only by the maintainer (tag
-  ruleset); a published tag never changes.
+- `v*` tags are created, moved or deleted only by the maintainer: the tag
+  ruleset blocks creation, update and deletion for everyone, and the
+  maintainer acts through its admin bypass. A published tag never changes.
+- A published release never changes either: `verify` refuses a tag that
+  already has a release, so a re-run or re-dispatch cannot replace binaries,
+  checksums or provenance; manual dispatches are limited to the repository
+  owner.
 - Only the newest minor receives fixes ([SECURITY.md](SECURITY.md)).
 
 ## Decisions

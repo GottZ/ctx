@@ -60,8 +60,9 @@ not collaborators, not the maintainer; it moves only by merging a pull request
 
 - **One concern per pull request.** A fix and an unrelated refactor are two PRs.
 - **Commit messages** follow `type(scope): summary` — `feat`, `fix`, `docs`, `test`,
-  `ci`, `chore`, `refactor`; the scope is the package or area (`fix(cli): …`,
-  `feat(llm): …`). The body says why.
+  `ci`, `chore`, `refactor`, `perf`, `build`, `revert`; the scope is the package or
+  area (`fix(cli): …`, `feat(llm): …`), `!` before the colon marks a breaking
+  change. The body says why. The pull request title follows the same rule.
 - **Features and schema changes update the documentation.** The commit-msg hook
   rejects a `feat:` commit or a change under `go/migrations/` that does not also stage
   `README.md` or a `docs/*.md` file.
@@ -88,8 +89,9 @@ not collaborators, not the maintainer; it moves only by merging a pull request
   `Web`, both `Cross-compile (…)` targets, the six `Integration Tests (…)` shards —
   plus `PR title`. The ruleset will not merge without them.
 - **One approving review** from a code owner ([`.github/CODEOWNERS`](.github/CODEOWNERS)),
-  given on the current head: pushing new commits dismisses earlier approvals. All
-  review conversations are resolved before the merge.
+  given on the current head: pushing new commits dismisses earlier approvals, and
+  whoever pushed last cannot be the one who approves. All review conversations are
+  resolved before the merge.
 
 ### Coding standards
 
@@ -132,9 +134,10 @@ tests, documentation — instead of change requests; that is why maintainer edit
 should stay enabled. There is no guaranteed response time.
 
 When the checks are green and the review is in, the maintainer merges — as a merge
-commit by default, or squashed when the branch history is not worth keeping. Rebase
-merging is off: it would rewrite your commits and drop their signatures. The
-source branch is deleted on merge. The change ships with the next release tag,
+commit by default (your commits and their signatures stay as they are), or squashed
+into one new commit when the branch history is not worth keeping. Rebase merging is
+off: it would rewrite your commits and drop their signatures. The source branch is
+deleted on merge. The change ships with the next release tag,
 cut on `root` after the merge ([releases](GOVERNANCE.md#releases)).
 
 ## License
