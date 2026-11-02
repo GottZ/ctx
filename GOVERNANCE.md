@@ -117,12 +117,14 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
 - `v*` tags are created, moved or deleted only by the maintainer: the tag
   ruleset blocks creation, update and deletion for everyone, and the
   maintainer acts through its admin bypass. A published tag never changes.
-- A published release never changes either: both `verify` and `publish`
-  refuse a tag that already has a release (checked right before the upload,
-  so a re-run of single jobs cannot slip past a reused `verify` result),
-  the upload never overwrites an existing asset, and manual dispatches are
-  limited to the repository owner. The repository-level *immutable
-  releases* setting is not enabled yet.
+- The `Release` workflow never rebuilds or replaces a published release:
+  both `verify` and `publish` refuse a tag that already has a release
+  (checked right before the upload, so a re-run of single jobs cannot slip
+  past a reused `verify` result), the upload never overwrites an existing
+  asset, and manual dispatches are limited to the repository owner. These
+  guards live in the workflow, not in the repository: collaborators with
+  write access can still create and edit releases directly. The
+  repository-level *immutable releases* setting is not enabled yet.
 - Only the newest minor receives fixes ([SECURITY.md](SECURITY.md)).
 
 ## Decisions
