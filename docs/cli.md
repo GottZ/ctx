@@ -20,7 +20,7 @@ The `ctx` CLI reads its config from `~/.config/ctx/config` (`CTX_BASE_URL` + `CT
 Three deliberate exceptions, unchanged:
 
 - **`ctx health`** reads `GET /health`, which is not an `/api` route and carries no `success` frame. It exits `0` whenever it got an answer; read the answer, not the exit code.
-- **`ctx brief`, `ctx persist`, `ctx statusline`, `ctx ingest`** degrade silently by design — they run inside Claude Code hooks and the status bar, where a non-zero exit would break the caller rather than inform anybody.
+- **`ctx brief`, `ctx persist`, `ctx statusline`, `ctx ingest`** degrade silently by design — they run inside Claude Code hooks and the status bar, where a non-zero exit would break the caller rather than inform anybody. `ctx persist` drops a rejected write (non-2xx or `success:false`) the same way it drops an unreachable server — exit `0`, no error — and its `N block(s) saved` line on stderr counts only the blocks the server accepted.
 - **`ctx api` and `ctx manage`** are raw passthroughs: *you* pick the route, so a body without a `success` field (a bare array, a proxied `/health`) prints and exits `0` there. An explicit `success:false` exits `1` like everywhere else.
 
 ## Core
