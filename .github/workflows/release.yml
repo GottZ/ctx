@@ -123,6 +123,7 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           # github.sha is the dispatch ref on a manual run, not the tag's commit.
           COMMIT="$(git rev-parse HEAD)"
@@ -130,7 +131,7 @@ jobs:
           go build \
             -trimpath \
             -ldflags="-s -w \
-              -X main.version=${{ steps.version.outputs.tag }} \
+              -X main.version=${TAG} \
               -X main.commit=${COMMIT} \
               -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -o "${BINARY}" \
