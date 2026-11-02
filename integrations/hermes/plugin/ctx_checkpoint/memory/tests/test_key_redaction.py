@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
+from conftest import join_writes
 
 KEY_A = "ctxkey-REDACT-ALPHA-5e8c13a7d2"
 KEY_B = "ctxkey-REDACT-BETA-91f0b4c6e3"
@@ -605,6 +606,75 @@ def test_exc_info_traceback_does_not_carry_key(monkeypatch, caplog):
     _assert_no_key(out)
     assert "Traceback" in caplog.text  # exc_info was rendered
     _assert_no_key(_all_log_text(caplog))
+
+
+# -- automatic writes redact the bound key (review of #53) ----------------------------------
+
+KEY_HEX64 = "f4ke" + "0123456789abcdef" * 3 + "0123456789ab"  # 64 characters, shaped like a minted key
+
+
+@pytest.fixture
+def hex_key_provider(tmp_path, ctx_env, fake_client_cls):
+    ctx_env.setenv("CTX_KEY", KEY_HEX64)
+    p = _init(tmp_path)
+    assert p._active and p._api_key == KEY_HEX64
+    return p
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(f"my ctx key is {KEY_HEX64}", id="prose"),
+        pytest.param(f"X-Context-Key: {KEY_HEX64}", id="header"),
+        pytest.param(KEY_HEX64, id="bare"),
+    ],
+)
+def test_automatic_write_redaction_masks_the_bound_key(hex_key_provider, text):
+    """Neither the host redactor nor the generic rules know a bare 64-hex ctx key or the
+    X-Context-Key header form; mirror, fact and digest writes apply the bound key on top."""
+    out = hex_key_provider._redacted(text)
+    assert KEY_HEX64 not in out
+    assert REDACTED in out
+
+
+def test_automatic_write_redaction_is_unchanged_without_the_key(hex_key_provider):
+    from ctx_plugin import checkpoint
+
+    p = hex_key_provider
+    text = "CTX_KEY=abc and a plain sentence with Bearer abcdefgh12345678"
+    assert p._redacted(text) == checkpoint.redact_text(text)
+    p._api_key = ""  # no bound key (transport: mcp): the redaction is exactly the previous one
+    assert p._redacted(f"my ctx key is {KEY_HEX64}") == checkpoint.redact_text(f"my ctx key is {KEY_HEX64}")
+
+
+def test_pre_compress_chain_does_not_store_the_bound_key(hex_key_provider):
+    """Real host MemoryManager: the transcript checkpoint parts are redacted by the chain
+    writer, which needs the bound key as well."""
+    from agent.memory_manager import MemoryManager
+
+    p = hex_key_provider
+    client = p._client
+    manager = MemoryManager()
+    manager.add_provider(p)
+    evidence = [
+        {"role": "user", "content": f"my ctx key is {KEY_HEX64}"},
+        {"role": "assistant", "content": f"X-Context-Key: {KEY_HEX64}"},
+    ]
+    manager.on_pre_compress(list(evidence), evidence_messages=evidence)
+    join_writes(p)
+    assert client.chain_calls
+    assert any(REDACTED in call["content"] for call in client.chain_calls)
+    for call in client.chain_calls + client.calls:
+        assert KEY_HEX64 not in json.dumps(call, default=str)
+
+
+def test_memory_mirror_does_not_store_the_bound_key(hex_key_provider):
+    p = hex_key_provider
+    p.on_memory_write("add", "memory", f"my ctx key is {KEY_HEX64}")
+    join_writes(p)
+    assert p._client.calls
+    for call in p._client.calls:
+        assert KEY_HEX64 not in json.dumps(call, default=str)  # content and derived title
 
 
 # -- re-initialization of the same instance (REST) -------------------------------------------

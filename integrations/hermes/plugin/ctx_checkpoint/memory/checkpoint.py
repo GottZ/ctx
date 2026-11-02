@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .client import CtxApiError, response_code, store_block_id
+from .client import CtxApiError, redact_secret, response_code, store_block_id
 
 logger = logging.getLogger(__name__)
 
@@ -196,9 +196,13 @@ def _host_redact(text: str) -> str:
     return redact_sensitive_text(text, force=True)
 
 
-def redact_text(text: str) -> str:
-    """Double redaction (host force + upstream generic rules) — defense in depth."""
-    return _redact_checkpoint_secrets(_host_redact(text))
+def redact_text(text: str, secret: str = "") -> str:
+    """Double redaction (host force + upstream generic rules) — defense in depth.
+
+    ``secret`` (the bound ctx key; ``""`` without one, e.g. ``transport: mcp``) is replaced
+    first: neither rule set knows a bare 64-hex ctx key or the ``X-Context-Key`` header form.
+    """
+    return _redact_checkpoint_secrets(_host_redact(redact_secret(text, secret)))
 
 
 def _is_synthetic_handoff(message: dict[str, Any], raw: str) -> bool:
@@ -212,8 +216,10 @@ def _is_synthetic_handoff(message: dict[str, Any], raw: str) -> bool:
     return any(stripped.startswith(prefix) for prefix in _SYNTHETIC_ASSISTANT_PREFIXES)
 
 
-def render_direct_evidence(messages: list[dict[str, Any]]) -> str:
+def render_direct_evidence(messages: list[dict[str, Any]], secret: str = "") -> str:
     """Redacted ``### Message N — role`` transcript of direct user/assistant text only.
+
+    ``secret``: the bound ctx key, redacted as well (see :func:`redact_text`).
 
     Raises ``CtxCheckpointError`` when redaction fails (never stores unredacted text).
     """
@@ -232,7 +238,7 @@ def render_direct_evidence(messages: list[dict[str, Any]]) -> str:
         if not raw.lstrip():
             continue
         try:
-            safe = redact_text(raw).strip()
+            safe = redact_text(raw, secret).strip()
         except Exception as exc:
             logger.warning("ctx checkpoint redaction failed for message %d (%s)", ordinal, type(exc).__name__)
             raise CtxCheckpointError("ctx checkpoint redaction failed") from exc
@@ -471,6 +477,8 @@ class ChainWriter:
     profile: str = "default"
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
+    # The bound ctx key, redacted from the transcript parts; never part of the repr.
+    secret: str = field(default="", repr=False)
     _tool_evidence_warned: bool = field(default=False, init=False)
 
     # -- transport with budget + rate-limit backoff --
@@ -640,7 +648,7 @@ class ChainWriter:
             negotiated_api = _negotiate_checkpoint_api(host_api)
         tool_status = self.tool_index_status(tool_evidence)
 
-        rendered = render_direct_evidence(messages)
+        rendered = render_direct_evidence(messages, self.secret)
         if not rendered:
             # P6: nothing to archive — no direct user/assistant text means the
             # lossy summary has nothing to discard. Upstream raises

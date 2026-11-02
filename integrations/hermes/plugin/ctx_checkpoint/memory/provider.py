@@ -172,14 +172,15 @@ class CtxMemoryProvider(MemoryProvider):
         return time.monotonic()
 
     def _redacted(self, text: str) -> str | None:
-        """Host redaction (force) + the generic key/value and bearer rules, as for the chain.
+        """Host redaction (force) + the generic key/value and bearer rules, as for the chain,
+        plus the bound ctx key (which neither rule set knows).
 
         Every automatic write — mirror, facts, digests — passes through here before it leaves
         the process; ``None`` means the redactor failed and the write is skipped (never store
         unredacted text).
         """
         try:
-            return _cp.redact_text(text or "")
+            return _cp.redact_text(text or "", self._api_key)
         except Exception as exc:
             logger.warning("CTX redaction failed (%s); automatic write skipped", type(exc).__name__)
             return None
@@ -928,6 +929,7 @@ class CtxMemoryProvider(MemoryProvider):
                 api_timeout=float(self._config.get("api_timeout") or 10.0),
                 tags_for=_tags,
                 profile=profile,
+                secret=self._api_key,
                 **self._chain_writer_seams(),
             )
         return self._chain_writer

@@ -472,7 +472,7 @@ def test_fact_hashes_in_chain_metadata_dedupe_across_hosts(monkeypatch, tmp_path
 
     StatefulFake.shared_blocks = {}
     monkeypatch.setattr(provider_mod, "CtxClient", StatefulFake)
-    monkeypatch.setenv("CTX_KEY", "k")
+    monkeypatch.setenv("CTX_KEY", "test-key-not-real")  # writes redact the bound key; "k" would rewrite every fact
     monkeypatch.setenv("CTX_BASE_URL", "http://ctx.invalid")
     s1, _s2, _ = _compactions()
 
@@ -510,7 +510,7 @@ def test_facts_off_keeps_previous_fact_hashes_in_head(monkeypatch, tmp_path):
 
     StatefulFake.shared_blocks = {}
     monkeypatch.setattr(provider_mod, "CtxClient", StatefulFake)
-    monkeypatch.setenv("CTX_KEY", "k")
+    monkeypatch.setenv("CTX_KEY", "test-key-not-real")  # writes redact the bound key; "k" would rewrite every fact
     monkeypatch.setenv("CTX_BASE_URL", "http://ctx.invalid")
     home = tmp_path / "profiles" / "dev"
     home.mkdir(parents=True)
