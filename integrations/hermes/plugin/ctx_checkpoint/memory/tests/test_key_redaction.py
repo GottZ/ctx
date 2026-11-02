@@ -666,6 +666,8 @@ def test_pre_compress_chain_does_not_store_the_bound_key(hex_key_provider):
     assert any(REDACTED in call["content"] for call in client.chain_calls)
     for call in client.chain_calls + client.calls:
         assert KEY_HEX64 not in json.dumps(call, default=str)
+    # The stored provenance names the bound-key pass that ran first.
+    assert all("bound-ctx-key" in call["metadata"]["ctx_plugin"]["redaction"] for call in client.chain_calls)
 
 
 def test_memory_mirror_does_not_store_the_bound_key(hex_key_provider):

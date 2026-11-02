@@ -730,7 +730,8 @@ class ChainWriter:
                 "version": PLUGIN_VERSION,
                 "profile": self.profile,
                 "port_of": UPSTREAM_REF,
-                "redaction": ["host:redact_sensitive_text(force=True)", "generic-key-value", "bearer"],
+                "redaction": (["bound-ctx-key"] if self.secret else [])
+                + ["host:redact_sensitive_text(force=True)", "generic-key-value", "bearer"],
                 "checkpoint_id": checkpoint_id,
             },
         }
