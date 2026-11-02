@@ -38,8 +38,9 @@ features on. Everything else has a working default. The key goes into Hermes'
 `.env` as `CTX_API_KEY`; `config.yaml` only references it. Setting up a ctx server
 is covered in the [ctx README](https://github.com/GottZ/ctx#readme). From a ctx
 checkout the directory can also be installed with
-`integrations/hermes/scripts/install.sh` — the way to get the memory features while
-the catalog still pins 0.5.0.
+`integrations/hermes/scripts/install.sh` — for code newer than the catalog pin
+(0.6.2 since [hermes-agent #147170](https://github.com/NousResearch/hermes-agent/pull/147170),
+merged 2026-11-02).
 
 The plugin talks to ctx through Hermes' own MCP dispatch and holds no
 credentials of its own. Setup writes the same configuration you could also
