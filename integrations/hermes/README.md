@@ -434,10 +434,15 @@ and manifest are deliberately small so routine recall stays cheap.
   `install.sh` writes dot-prefixed backups.
 - 0.6.2: `transport: rest` redacts the ctx key (`[REDACTED]`) from every error text
   the client produces — HTTP error bodies, codes outside the reject vocabulary,
-  reasons, connection errors and HTTP 200 failure envelopes, before truncation and
-  without the chained original exception — and a re-initialized provider drops the
-  previous client, key, whoami identity and checkpoint writer, its recall prefetch
-  (including warm-ups in flight) and, on a binding change, its manifest-lineage cache.
+  reasons, connection and `http.client` errors and HTTP 200 failure envelopes, before
+  truncation and without the chained original exception — refuses redirects (urllib
+  would carry `X-Context-Key` to the `Location`), redacts the bound key from checkpoint,
+  mirror, fact and digest writes, and a re-initialized provider drops the previous
+  client, key, whoami identity and checkpoint writer. On both transports a re-init or
+  session switch drops the recall prefetch (including warm-ups in flight), warm-ups and
+  `prefetch()` stay on the client they started with, and a binding change drops the
+  manifest-lineage cache (under `transport: mcp` the binding is the profile home plus
+  the MCP server name, so a backend switch under the same name is not detected).
 
 ## Licensing
 

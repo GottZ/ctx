@@ -253,8 +253,8 @@ the plugin and runs over either transport.
   part format. Category `compaction-checkpoints`, sensitivity `checkpoint_sensitivity`.
 - Only direct user/assistant text; tool rows, system prompts, `_compressed_summary`
   carriers and synthetic hand-offs are dropped. Redaction runs twice — host
-  `redact_sensitive_text(force=True)` plus key/value, auth-header and bearer rules — and
-  a redactor failure writes nothing.
+  `redact_sensitive_text(force=True)` plus key/value, auth-header and bearer rules — after
+  the bound ctx key (`transport: rest`) is replaced, and a redactor failure writes nothing.
 - Chain linkage lives in **metadata** (`parent_manifest_id`, `source_block_ids`,
   `latest_manifest_id`), not in `parent_id` (that foreign key cascades on hard delete).
   Further metadata: upstream keys (`root_session_id`, `active_session_id`, `sha256`,

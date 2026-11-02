@@ -163,7 +163,8 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
   results, system prompts and synthetic compaction envelopes are excluded.
   Every automatic write is redacted twice before anything leaves the process:
   Hermes' `redact_sensitive_text` plus a conservative key/value, auth-header and
-  bearer-token pass; a failing redactor skips the write.
+  bearer-token pass, with the bound ctx key (`transport: rest`) replaced first; a
+  failing redactor skips the write.
 - **Reads:** its own section of the Hermes config (`memory.ctx_checkpoint`), the
   named `mcp_servers` entry, `compression.threshold` (for the warning above), the
   transcript Hermes passes to `on_pre_compress`, and with memory features on the

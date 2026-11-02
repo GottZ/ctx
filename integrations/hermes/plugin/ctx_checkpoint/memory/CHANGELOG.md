@@ -8,8 +8,10 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 
 ## [ctx_checkpoint 0.6.2] — 2026-11-01
 
-REST transport: the ctx key no longer leaves the client in error texts, and a
-re-initialized provider keeps nothing of the previous run.
+`transport: rest`: the ctx key no longer leaves the client in error texts, follows no
+redirect and is redacted from automatic writes, and a re-initialized provider keeps
+nothing of its previous client. The recall-prefetch invalidation, the warm-up pin and the
+manifest-cache binding are transport-independent and apply to `transport: mcp` as well.
 
 ### Security
 - **The key is redacted from every REST error text.** A ctx server or a proxy in front of
@@ -30,6 +32,29 @@ re-initialized provider keeps nothing of the previous run.
   `error` key, only that value is redacted. New public helpers `redact_secret` /
   `redact_deep` in `memory/client.py`; the whoami warning in the provider redacts as
   well, for clients that are not a `CtxClient`.
+- **Two more exception classes are redacted.** `http.client.HTTPException` is no
+  `OSError`: a proxy's non-HTTP status line (`BadStatusLine`, whose text is that line and
+  can reflect a header value) left `_request` raw, into tool errors and DEBUG tracebacks;
+  it is now a redacted connection error. A key with an inner CR/LF made `http.client`
+  raise a `ValueError` carrying the key's bytes repr (its escapes defeat exact matching)
+  into the whoami warning, `hermes memory status` and `hermes ctx_checkpoint status`; it
+  is now a `CtxApiError` with a fixed message that names no value.
+- **Redirects are refused.** urllib's default opener follows 301/302/303/307/308 (a POST
+  answered with 301/302/303 is repeated as a GET) and copies every request header,
+  `X-Context-Key` included, into the request to the `Location` without comparing hosts,
+  and the provider became active against the redirect target. The ctx API never
+  redirects; `CtxClient` now opens requests through an opener that follows no redirect,
+  and a 30x becomes `HTTP 30x: redirect not followed …` without the `Location`.
+  Pre-existing.
+- **Automatic writes redact the bound key.** Neither the host redactor nor the generic
+  key/value and bearer rules know a minted ctx key (64 hex characters) or the
+  `X-Context-Key` header form, so a key pasted into the conversation was stored verbatim
+  in compaction checkpoint parts and in mirror writes (content and title). `redact_text`
+  and the chain writer take the bound key, and mirror, fact and digest writes apply it;
+  without a key (`transport: mcp`) the redaction is unchanged. Pre-existing.
+- **The verified binding keeps a digest.** The binding identity kept for the manifest
+  cache held the key as a second plain-text copy, also after a re-init that ended
+  inactive; it now holds the key's SHA-256.
 
 ### Fixed
 - **Re-initialization drops the previous client.** `_connect()` (REST) reset nothing
@@ -40,16 +65,20 @@ re-initialized provider keeps nothing of the previous run.
   first. The MCP `_connect()` of the umbrella binds a new client and every identity field
   on each call, holds no key and never ends inactive; `_chain()` replaces a writer whose
   client is not the current one, so it is unchanged.
-- **Re-initialization also drops caches of the previous binding.** `initialize()` did not
-  clear the recall prefetch: a matching query could get the previous profile's recall
-  for up to 60 s, and a warm-up still in flight could publish into the new binding. The
+- **Re-initialization and session switches drop caches of the previous binding.**
+  `initialize()` did not clear the recall prefetch: a re-initialized instance could serve
+  the previous profile's recall for up to 60 s, and a warm-up still in flight could
+  publish into the new binding — defense for hosts outside the contract (Hermes v0.22
+  builds a fresh provider per agent and initializes it once). `on_session_switch` cleared
+  the cache, but a warm-up in flight across the switch still published afterwards; that
+  is the path Hermes v0.22 reaches. The
   cache is now invalidated together with a generation counter, at the start of a re-init
   and again after its connect (a warm-up queued in between still used the old client),
   and on session switches; a warm-up publishes only into the generation it started under,
   and it queries the client it was queued with (query and search fallback), not the one
   bound when it runs (the generation is read before the client, so a re-init in between
-  never pairs the previous client with the new generation); `prefetch()` likewise queries
-  the client it passed its gate with. The
+  never pairs the previous client with the new generation); `prefetch()` reads the client
+  once, so its gate and its query see the same binding. The
   manifest-lineage cache (`_last_manifest_by_root`, the parent fallback when the server
   has no head) is dropped when the profile home, backend, key or whoami identity of a
   successful connect differs from the last verified binding, so a manifest id from another
@@ -60,7 +89,21 @@ re-initialized provider keeps nothing of the previous run.
 No configuration or wire change. Error messages and failure envelopes differ only where
 they contained the key; callers that matched on `CtxApiError.__cause__` get `None` now.
 Credentials are still read through `env_secret` only (no `.env`/`os.environ` fallback of
-its own — the host's fail-closed secret scope stays the contract).
+its own — the host's fail-closed secret scope stays the contract). A 30x answer from the
+base URL is an error now instead of being followed: point `rest_base_url`/`CTX_BASE_URL`
+at the ctx server itself.
+
+### Known limits
+- `redact_deep` leaves dict keys untouched; an error object rendered through `str()` can
+  escape a key containing backslashes or quotes before matching (ctx mints hex keys);
+  `__context__` of a raised `CtxApiError` still references the original exception
+  (`from None` only suppresses it — `traceback` and `logger.exception` output is clean,
+  explicit traversal reaches it).
+- Under `transport: mcp` the binding identity is the profile home plus the MCP server
+  name. A backend switch under the same server name — also through Hermes' MCP
+  auto-reload in the CLI or `/reload-mcp` in the gateway, where no `initialize()` runs —
+  is not detected; the first manifest on the new backend then points once to a parent
+  that does not exist there.
 
 ## [ctx_checkpoint 0.6.1] — 2026-10-31
 
