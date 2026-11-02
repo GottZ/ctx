@@ -287,10 +287,12 @@ class CtxClient:
             except ValueError:
                 # http.client rejects a header value with control characters (inner CR/LF) via
                 # ValueError carrying the bytes repr of the key, and non-latin-1 header or
-                # non-ASCII URL text via UnicodeEncodeError (a ValueError); the repr escapes
-                # defeat exact-match redaction, so the message is fixed and names no value.
+                # non-ASCII URL text via UnicodeEncodeError (a ValueError); socket rejects a
+                # negative timeout the same way. The repr escapes defeat exact-match
+                # redaction, so the message is fixed and names no value.
                 raise CtxApiError(
-                    "invalid request header: key or URL contains control or non-latin-1 characters"
+                    "invalid request: key, URL or timeout rejected before any connection "
+                    "(control or non-latin-1 characters in the key or URL, or a negative timeout)"
                 ) from None
 
         raise last_error or CtxApiError("request failed")

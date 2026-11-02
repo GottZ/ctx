@@ -300,6 +300,17 @@ def test_key_with_control_characters_raises_ctx_api_error_without_key():
     assert info.value.__cause__ is None
 
 
+def test_negative_timeout_is_a_ctx_api_error_without_a_header_claim():
+    """socket rejects a negative timeout with a ValueError as well; the fixed message names
+    the three rejected inputs (key, URL, timeout) and no value."""
+    from ctx_plugin.client import CtxApiError, CtxClient
+
+    with pytest.raises(CtxApiError) as info:
+        CtxClient("http://127.0.0.1:9", KEY_A, timeout=-1.0).whoami()
+    assert "timeout" in str(info.value)
+    _assert_no_key(str(info.value))
+
+
 def test_key_with_control_characters_leaves_provider_inactive_without_logging_key(tmp_path, ctx_env, caplog):
     from ctx_plugin.provider import CtxMemoryProvider
 
