@@ -235,16 +235,20 @@ class CtxClient:
                     return {"success": False, "error": "invalid JSON response from CTX"}
                 if not isinstance(parsed, dict):
                     return {"success": False, "error": "unexpected response shape from CTX"}
-                # Failure envelopes (HTTP 200 + success:false, or any answer carrying an
-                # ``error``) may echo the key in error texts/objects or codes: redact every
-                # string VALUE there. Successful data (incl. store/noop answers without a
-                # success field) is never rewritten — a short key would corrupt payloads.
+                # Failure envelopes (HTTP 200 + success:false, or a non-empty ``error``
+                # without success:true) may echo the key in error texts/objects or codes:
+                # redact every string VALUE there. Successful data (incl. store/noop answers
+                # without a success field) is never rewritten — a short key would corrupt
+                # payloads; an ``error`` value next to it is redacted on its own.
                 # Closed-vocabulary codes never contain a key and stay verbatim.
-                if parsed.get("success") is False or "error" in parsed:
+                success = parsed.get("success")
+                if success is False or (success is not True and parsed.get("error")):
                     code = parsed.get("code")
                     parsed = redact_deep(parsed, self._key)
                     if isinstance(code, str) and code in REJECT_CODES:
                         parsed["code"] = code
+                elif "error" in parsed:
+                    parsed["error"] = redact_deep(parsed["error"], self._key)
                 return parsed
             except urllib.error.HTTPError as exc:
                 if exc.code in REDIRECT_CODES:

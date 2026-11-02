@@ -20,12 +20,14 @@ re-initialized provider keeps nothing of the previous run.
   in the HTTP error body (`error`, `message`, nested error objects, plain text), in the
   `code` (codes from the closed `REJECT_CODES` vocabulary stay verbatim), in `exc.reason`,
   in `URLError`/`TimeoutError`/`OSError` texts and, recursively in every string value, in
-  HTTP 200 failure envelopes (`success: false` or an `error` key). Texts are redacted
+  HTTP 200 failure envelopes (`success: false`, or a non-empty `error` without
+  `success: true`). Texts are redacted
   before the 300-character cut, so no key prefix survives it. Errors are raised
   `from None`; their content is in the message. The debug line for an unreadable error
   body names only the exception type (its `exc_info` traceback chained the unredacted
   `HTTPError`). Successful answers are returned
-  unchanged, even for a one-character key. New public helpers `redact_secret` /
+  unchanged, even for a one-character key; when a `success: true` answer also carries an
+  `error` key, only that value is redacted. New public helpers `redact_secret` /
   `redact_deep` in `memory/client.py`; the whoami warning in the provider redacts as
   well, for clients that are not a `CtxClient`.
 

@@ -478,14 +478,48 @@ def test_200_failure_envelope_is_redacted(monkeypatch, payload, expect):
         pytest.param({"success": True, "results": [{"id": "e1", "content": "eee", "score": 0.5}]}, id="search"),
         pytest.param({"action": "noop", "existing_id": "e1", "reason": "identical content"}, id="store-noop"),
         pytest.param({"block": {"id": "e2", "created_at": "t", "updated_at": "t"}}, id="store-created"),
+        pytest.param(
+            {
+                "success": True,
+                "error": None,
+                "answer": "the key e sits here",
+                "sources": [{"id": "s1", "content": "see the memo"}],
+            },
+            id="success-with-error-null",
+        ),
+        pytest.param(
+            {
+                "success": True,
+                "error": "",
+                "answer": "the key e sits here",
+                "sources": [{"id": "s1", "content": "see the memo"}],
+            },
+            id="success-with-error-empty",
+        ),
+        pytest.param(
+            {"success": True, "block": {"id": "e2", "created_at": "t", "updated_at": "t"}, "error": None},
+            id="store-created-with-error-null",
+        ),
+        pytest.param(
+            {"action": "noop", "existing_id": "e1", "reason": "identical content", "error": None},
+            id="store-noop-with-error-null",
+        ),
     ],
 )
 def test_200_success_payload_is_not_rewritten(monkeypatch, payload):
-    """Successful answers are never rewritten — not even with a 1-character key."""
+    """Successful answers are never rewritten — not even with a 1-character key, and not when
+    they carry an empty ``error`` key."""
     from ctx_plugin.client import CtxClient
 
     monkeypatch.setattr("ctx_plugin.client._urlopen", _respond(payload))
     assert CtxClient(URL_A, "e").search("q") == payload
+
+
+def test_200_success_answer_redacts_only_its_error_value(monkeypatch):
+    from ctx_plugin.client import CtxClient
+
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _respond({"success": True, "error": KEY_A, "answer": "ok"}))
+    assert CtxClient(URL_A, KEY_A).search("q") == {"success": True, "error": REDACTED, "answer": "ok"}
 
 
 # -- callers: provider, status, tools, logs --------------------------------------------------
