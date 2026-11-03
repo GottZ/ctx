@@ -109,8 +109,13 @@ func runPersist(getClient func() (*Client, error), hook bool) error {
 				"project":    project,
 			},
 		}
-		if storeAccepted(c, body) {
+		accepted, status := storeAccepted(c, body)
+		if accepted {
 			count++
+		}
+		// 401 and this window's 429 reject every remaining write on the key.
+		if status == http.StatusUnauthorized || status == http.StatusTooManyRequests {
+			break
 		}
 	}
 
@@ -121,19 +126,20 @@ func runPersist(getClient func() (*Client, error), hook bool) error {
 }
 
 // storeAccepted sends one block to POST /api/store and reports whether the
-// server accepted it: a 2xx status AND a success:true envelope. Every other
-// outcome — transport error, non-2xx (403/413/429/500 …), 200 with
-// success:false, a body that is no envelope — is a dropped write, which the
-// hook absorbs silently like an unreachable server; it just must not be
-// counted as saved (issue #59). Do, not Post: Post returns the body for any
-// status, and most of its callers print that body before checking the
-// envelope (envelope.go), so the status gate belongs here rather than in Post.
-func storeAccepted(c *Client, body any) bool {
+// server accepted it (a 2xx status AND a success:true envelope) together with
+// the HTTP status. Every other outcome — transport error, non-2xx
+// (403/413/429/500 …), 200 with success:false, a body that is no envelope — is
+// a dropped write, which the hook absorbs silently like an unreachable server;
+// it just must not be counted as saved (issue #59). Do, not Post: Post returns
+// the body for any status, and most of its callers print that body before
+// checking the envelope (envelope.go), so the status gate belongs here rather
+// than in Post.
+func storeAccepted(c *Client, body any) (bool, int) {
 	resp, status, err := c.Do(http.MethodPost, "/api/store", body)
 	if err != nil || status < 200 || status > 299 {
-		return false
+		return false, status
 	}
-	return checkEnvelope(resp, envelopeRequired) == nil
+	return checkEnvelope(resp, envelopeRequired) == nil, status
 }
 
 // persistMetadata holds session and machine context for cross-referencing.
