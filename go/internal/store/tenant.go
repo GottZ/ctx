@@ -517,7 +517,12 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 // to Option A (DELETE ... WHERE api_key_id = ANY(keys) BEFORE the key delete) when
 // a deployment needs a full compliance body-wipe on offboarding — but that is the
 // Policy axis (§9 N11), not this mechanism wave.
-func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string) error {
+//
+// stamp attributes the key hard-delete (step 7) in the audit trail (migration
+// 160): that step runs in its own transaction stamped with the caller's actor
+// and request id and ALWAYS via='offboarding' — whatever stamp.Via says — so the
+// delete rows name the offboarding, never a psql edit.
+func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp AuditStamp) error {
 	// Existence + the malformed/absent → ErrTenantNotFound contract, reusing the
 	// same oracle as GetTenant (no 22P02 → 500 side-channel).
 	if _, err := GetTenant(ctx, pool, tenantID); err != nil {
@@ -569,7 +574,14 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string) error
 	// 7: HARD-delete the tenant's keys. DeleteApiKey is a SOFT delete (active=
 	// false, api_keys.go:102) which would leave the RESTRICT FK and block step 8
 	// with 23001.
-	if _, err := pool.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID); err != nil {
+	stamp.Via = ViaOffboarding
+	if err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		if err := stampAudit(ctx, tx, stamp); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID)
+		return err
+	}); err != nil {
 		return fmt.Errorf("store: prune tenant keys: %w", err)
 	}
 	// 8: the tenant row last; ON DELETE CASCADE clears context_tenant_scopes.

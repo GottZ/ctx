@@ -53,7 +53,7 @@ func TestForgeSync_PruneTenantDrainsSyncMap(t *testing.T) {
 		t.Fatalf("seed mapping: %v", err)
 	}
 
-	if err := store.PruneTenant(ctx, pool, tn.ID); err != nil {
+	if err := store.PruneTenant(ctx, pool, tn.ID, store.AuditStamp{}); err != nil {
 		t.Fatalf("PruneTenant: %v (mapping FK not CASCADE ⇒ 23503?)", err)
 	}
 	var n int

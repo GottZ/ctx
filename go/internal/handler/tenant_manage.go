@@ -241,7 +241,7 @@ func validTenantStatus(s string) bool {
 	return s == "active" || s == "suspended" || s == "offboarding"
 }
 
-func (h *ManageHandler) handleTenantCreate(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, req manageRequest) {
+func (h *ManageHandler) handleTenantCreate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	var spec tenantSpec
 	if len(req.Data) == 0 || json.Unmarshal(req.Data, &spec) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "data payload required (slug, display_name)"})
@@ -289,7 +289,7 @@ func (h *ManageHandler) handleTenantCreate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "scope name too long (max 50 chars including the tenant prefix)"})
 		return
 	}
-	tn, ownerKey, ownerPlaintext, err := h.bootstrapTenant(r.Context(), spec.Slug, spec.DisplayName, initialScope, seedScopes, seedKeys)
+	tn, ownerKey, ownerPlaintext, err := h.bootstrapTenant(r.Context(), spec.Slug, spec.DisplayName, initialScope, seedScopes, seedKeys, auditStamp(r, ar))
 	if err != nil {
 		writeBootstrapError(w, err)
 		return
@@ -324,8 +324,9 @@ const bootstrapScopeName = "main"
 // (T22). The owner-key mint skips the key quota by construction (MintOwnerKey, no
 // cap) and skips T22 legitimately (server-admin tenant-create, freshly registered
 // own scope). It returns the tenant (with seeded limits echoed), the owner key
-// record, and its plaintext (shown once).
-func (h *ManageHandler) bootstrapTenant(ctx context.Context, slug, displayName, initialScope string, seedScopes, seedKeys *int) (*store.Tenant, store.ApiKey, string, error) {
+// record, and its plaintext (shown once). stamp attributes the owner-key mint in
+// the audit trail (migration 160: via='api', actor = the creating server-admin).
+func (h *ManageHandler) bootstrapTenant(ctx context.Context, slug, displayName, initialScope string, seedScopes, seedKeys *int, stamp store.AuditStamp) (*store.Tenant, store.ApiKey, string, error) {
 	// The two labels are the caller's own words, not At("bootstrap"): the texts
 	// have always been "bootstrap begin"/"bootstrap commit" without the colon,
 	// and %w keeps writeBootstrapError's errors.As(&pgErr) path intact.
@@ -368,7 +369,7 @@ func (h *ManageHandler) bootstrapTenant(ctx context.Context, slug, displayName, 
 		// (d) Owner key: the single sanctioned path to role='owner' (MintOwnerKey), home
 		// + allowed pinned to the just-registered scope. A 22001 here (over-long scope)
 		// is mapped to a clean 400 by writeBootstrapError, not an anonymous 500.
-		key, plaintext, err = store.MintOwnerKey(ctx, tx, slug+" owner", initialScope, []string{initialScope}, tn.ID)
+		key, plaintext, err = store.MintOwnerKey(ctx, tx, slug+" owner", initialScope, []string{initialScope}, tn.ID, stamp)
 		return err
 	})
 	if err != nil {
@@ -478,7 +479,7 @@ const defaultTenantID = store.DefaultTenantID
 // batched mass-DELETE of the tenant's scope-carried data, its keys, then the
 // tenant row (design/01 §4.3.1). Admin-gated upstream (actionRequiresAdmin); the
 // default tenant is additionally guarded (400). Unknown/malformed id → 404.
-func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, req manageRequest) {
+func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	if req.ID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
 		return
@@ -487,7 +488,9 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "the default tenant cannot be deleted"})
 		return
 	}
-	err := store.PruneTenant(r.Context(), h.pool, req.ID)
+	// The key hard-delete is recorded as via='offboarding' with this server-admin
+	// as actor (PruneTenant pins the channel; migration 160).
+	err := store.PruneTenant(r.Context(), h.pool, req.ID, auditStamp(r, ar))
 	if errors.Is(err, store.ErrTenantNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		return

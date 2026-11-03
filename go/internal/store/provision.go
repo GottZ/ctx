@@ -40,6 +40,7 @@ type ProvisionParams struct {
 	SeedKeys    *int                  // optional tenant max_keys override (nil = 069 default)
 	Quota       *backends.TenantQuota // optional LLM-quota seed for the scope (nil = none, E7)
 	CreatedBy   string                // acting server-admin key id ("" -> NULL)
+	RequestID   string                // request id for the audit trail ("" = none)
 }
 
 // ProvisionResult carries the compound outcome. The two plaintexts are the
@@ -111,6 +112,14 @@ func ProvisionProject(ctx context.Context, pool *pgxpool.Pool, p ProvisionParams
 				return errTxCommitted
 			}
 
+			// Audit stamp (migration 160): the owner key, the repo-agent key and the
+			// quota seed below are recorded as via='provision', actor = the acting
+			// server-admin. Set once for the whole transaction, before the first write.
+			stamp := AuditStamp{ActorKeyID: p.CreatedBy, RequestID: p.RequestID, Via: ViaProvision}
+			if err := stampAudit(ctx, tx, stamp); err != nil {
+				return err
+			}
+
 			// 1: tenant row (23505 slug -> ErrTenantSlugExists -> 409).
 			tn, err := CreateTenantTx(ctx, tx, p.Slug, p.DisplayName)
 			if err != nil {
@@ -142,7 +151,7 @@ func ProvisionProject(ctx context.Context, pool *pgxpool.Pool, p ProvisionParams
 
 			// 4: owner key (role='owner', home + allowed = the scope) — the operator's
 			// tenant-admin credential, reveal-once.
-			ownerKey, ownerPlain, err := MintOwnerKey(ctx, tx, p.Slug+ownerKeyLabelSuffix, p.Scope, []string{p.Scope}, tn.ID)
+			ownerKey, ownerPlain, err := MintOwnerKey(ctx, tx, p.Slug+ownerKeyLabelSuffix, p.Scope, []string{p.Scope}, tn.ID, stamp)
 			if err != nil {
 				return err
 			}

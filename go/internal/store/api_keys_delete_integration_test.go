@@ -71,7 +71,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 	// L2: a non-server-admin of tenant A must NOT revoke a tenant-B key.
 	t.Run("non_server_admin_cannot_delete_foreign_tenant_key", func(t *testing.T) {
 		keyB := seedTenantKey(t, pool, "del-keyB-1", "del-b", tenantB)
-		deleted, err := store.DeleteApiKey(ctx, pool, keyB, tenantA, false, false)
+		deleted, err := store.DeleteApiKey(ctx, pool, keyB, tenantA, false, false, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("delete: %v", err)
 		}
@@ -86,7 +86,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 	// A non-server-admin may revoke its OWN tenant's key.
 	t.Run("non_server_admin_deletes_own_tenant_key", func(t *testing.T) {
 		keyA := seedTenantKey(t, pool, "del-keyA-1", "del-a", tenantA)
-		deleted, err := store.DeleteApiKey(ctx, pool, keyA, tenantA, false, false)
+		deleted, err := store.DeleteApiKey(ctx, pool, keyA, tenantA, false, false, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("delete: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 	// A server-admin deletes across tenants exactly as before (behaviorally neutral).
 	t.Run("server_admin_deletes_any_tenant_key", func(t *testing.T) {
 		keyB := seedTenantKey(t, pool, "del-keyB-2", "del-b", tenantB)
-		deleted, err := store.DeleteApiKey(ctx, pool, keyB, tenantA, true, true)
+		deleted, err := store.DeleteApiKey(ctx, pool, keyB, tenantA, true, true, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("delete: %v", err)
 		}
@@ -117,7 +117,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 	// same outcome an absent id yields — a malformed vs absent distinction would
 	// be an oracle.
 	t.Run("malformed_id_is_not_found_no_oracle", func(t *testing.T) {
-		deleted, err := store.DeleteApiKey(ctx, pool, "not-a-uuid", tenantA, false, false)
+		deleted, err := store.DeleteApiKey(ctx, pool, "not-a-uuid", tenantA, false, false, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("malformed id must collapse to not-found, got err: %v", err)
 		}
@@ -125,7 +125,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 			t.Fatal("malformed id reported a delete")
 		}
 		// server-admin path collapses too (empty callerTenant is fine here).
-		deleted2, err2 := store.DeleteApiKey(ctx, pool, "also-bad", "", true, true)
+		deleted2, err2 := store.DeleteApiKey(ctx, pool, "also-bad", "", true, true, store.AuditStamp{})
 		if err2 != nil {
 			t.Fatalf("malformed id (server-admin) err: %v", err2)
 		}
@@ -136,7 +136,7 @@ func TestDeleteApiKey_TenantScoped(t *testing.T) {
 
 	// A well-formed but absent id is a plain miss.
 	t.Run("absent_id_is_not_found", func(t *testing.T) {
-		deleted, err := store.DeleteApiKey(ctx, pool, "00000000-0000-0000-0000-00000000dead", tenantA, false, false)
+		deleted, err := store.DeleteApiKey(ctx, pool, "00000000-0000-0000-0000-00000000dead", tenantA, false, false, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("absent id err: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestDeleteApiKey_OwnerGuards(t *testing.T) {
 		owner := seedKeyRole(t, pool, "del-be6w4-lastowner-o1", tid, "owner", true)
 
 		deleted, err := store.DeleteApiKey(ctx, pool, owner, tid,
-			false /*isServerAdmin*/, true /*callerMayManageOwner*/)
+			false /*isServerAdmin*/, true /*callerMayManageOwner*/, store.AuditStamp{})
 		if !errors.Is(err, store.ErrLastOwner) {
 			t.Fatalf("revoke last owner err = %v, want ErrLastOwner", err)
 		}
@@ -189,7 +189,7 @@ func TestDeleteApiKey_OwnerGuards(t *testing.T) {
 		seedKeyRole(t, pool, "del-be6w4-ownerprot-o2", tid, "owner", true) // second owner → non-last
 
 		deleted, err := store.DeleteApiKey(ctx, pool, o1, tid,
-			false /*isServerAdmin*/, false /*callerMayManageOwner = admin*/)
+			false /*isServerAdmin*/, false /*callerMayManageOwner = admin*/, store.AuditStamp{})
 		if !errors.Is(err, store.ErrOwnerProtected) {
 			t.Fatalf("admin revoke owner err = %v, want ErrOwnerProtected", err)
 		}
@@ -209,7 +209,7 @@ func TestDeleteApiKey_OwnerGuards(t *testing.T) {
 		seedKeyRole(t, pool, "del-be6w4-okrevoke-o2", tid, "owner", true) // an owner remains after revoke
 
 		deleted, err := store.DeleteApiKey(ctx, pool, o1, tid,
-			false /*isServerAdmin*/, true /*owner caller*/)
+			false /*isServerAdmin*/, true /*owner caller*/, store.AuditStamp{})
 		if err != nil || !deleted {
 			t.Fatalf("owner revoke non-last owner = (deleted=%v, err=%v), want (true, nil)", deleted, err)
 		}
@@ -252,7 +252,7 @@ func TestDeleteApiKey_ServerAdminProtected(t *testing.T) {
 			sa := seedKeyRole(t, pool, "del-s9i-"+tc.name+"-sa", tid, "admin", true)
 			markServerAdmin(t, pool, sa)
 
-			deleted, err := store.DeleteApiKey(ctx, pool, sa, tid, false /*isServerAdmin*/, tc.callerMayManageOwner)
+			deleted, err := store.DeleteApiKey(ctx, pool, sa, tid, false /*isServerAdmin*/, tc.callerMayManageOwner, store.AuditStamp{})
 			if !errors.Is(err, store.ErrServerAdminProtected) {
 				t.Fatalf("revoke server-admin key err = %v, want ErrServerAdminProtected", err)
 			}
@@ -271,7 +271,7 @@ func TestDeleteApiKey_ServerAdminProtected(t *testing.T) {
 		sa := seedKeyRole(t, pool, "del-s9i-sa-ok-sa", tid, "member", true)
 		markServerAdmin(t, pool, sa)
 
-		deleted, err := store.DeleteApiKey(ctx, pool, sa, "", true /*isServerAdmin*/, true)
+		deleted, err := store.DeleteApiKey(ctx, pool, sa, "", true /*isServerAdmin*/, true, store.AuditStamp{})
 		if err != nil || !deleted {
 			t.Fatalf("server-admin revoke = (deleted=%v, err=%v), want (true, nil)", deleted, err)
 		}

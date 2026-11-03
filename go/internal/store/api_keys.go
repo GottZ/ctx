@@ -225,7 +225,11 @@ var ErrKeyQuotaExceeded = errors.New("store: tenant key quota exceeded")
 // key never permanently burns a slot. insertApiKeyTx runs on the SAME tx, so the
 // count and the insert are one atomic unit. role MUST be a member of the 059 CHECK
 // domain; self-service passes a fixed "member" (owner is the MintOwnerKey path).
-func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes, writeScopes []string, tenantID, role string, maxKeys *int) (ApiKey, string, error) {
+//
+// stamp attributes the mint in the audit trail (migration 160): it is applied
+// to the transaction before the INSERT, so the create row names the acting key,
+// the request id and the channel (the handler passes APIStamp).
+func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope string, allowedScopes, writeScopes []string, tenantID, role string, maxKeys *int, stamp AuditStamp) (ApiKey, string, error) {
 	var (
 		key       ApiKey
 		plaintext string
@@ -243,6 +247,9 @@ func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope 
 					return ErrTenantNotFound
 				}
 				return fmt.Errorf("api_keys: mint tenant lock: %w", err)
+			}
+			if err := stampAudit(ctx, tx, stamp); err != nil {
+				return err
 			}
 
 			// Quota cap (nil / negative = unlimited). ACTIVE-only count under the lock so it
@@ -280,7 +287,16 @@ func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope 
 // (MintKeyWithQuota), so an owner role can arise only here or via the owner-gated
 // api-key-update (design/04 §D-B point 4, closing AM3). No cap, no tenant-row lock:
 // the caller owns the transaction scope.
-func MintOwnerKey(ctx context.Context, q pgxdb.Rower, label, homeScope string, allowedScopes []string, tenantID string) (ApiKey, string, error) {
+//
+// stamp attributes the mint in the audit trail (migration 160): it is applied to
+// q right before the INSERT and, on a pgx.Tx, holds until the caller's COMMIT —
+// tenant-create passes APIStamp, project-provision its ViaProvision stamp. On a
+// pool the INSERT is its own transaction and the stamp does not reach it; every
+// production caller composes the mint into its transaction.
+func MintOwnerKey(ctx context.Context, q pgxdb.Rower, label, homeScope string, allowedScopes []string, tenantID string, stamp AuditStamp) (ApiKey, string, error) {
+	if err := stampAudit(ctx, q, stamp); err != nil {
+		return ApiKey{}, "", err
+	}
 	// Owner keys mint with empty write_scopes (nil): an owner's home_scope IS the
 	// tenant's first scope and covers the bootstrap corpus; explicit write_scopes
 	// are a later, per-key concern via api-key-update.
@@ -375,8 +391,11 @@ func TenantAPIKeyIDs(ctx context.Context, pool *pgxpool.Pool, tenantID string) (
 // owner keys serialise → the second sees the committed revoke and gets ErrLastOwner
 // (a per-key lock would let both through → zero owners). An empty callerTenant for a
 // non-server-admin yields a NULL tenant arg → matches nothing (fail-closed).
+//
+// stamp attributes the revoke in the audit trail (migration 160; the soft
+// delete is recorded as action 'revoke'); it is applied before the UPDATE.
 func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string,
-	isServerAdmin, callerMayManageOwner bool) (bool, error) {
+	isServerAdmin, callerMayManageOwner bool, stamp AuditStamp) (bool, error) {
 
 	var affected bool
 	if err := pgxdb.Write(ctx, pool,
@@ -455,6 +474,9 @@ func DeleteApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 			// revoke); `active = true` keeps re-deletes idempotent (already-inactive → 0
 			// rows → false). The 22P02 case is already absorbed by resolveKeyForUpdate, so
 			// this Exec runs only on a well-formed, resolved id.
+			if err = stampAudit(ctx, tx, stamp); err != nil {
+				return err
+			}
 			tag, err := tx.Exec(ctx,
 				`UPDATE context_api_keys SET active = false, updated_at = now()
 				  WHERE id = $1::uuid AND active = true
@@ -533,8 +555,11 @@ var ErrServerAdminProtected = errors.New("store: server-admin key may only be ma
 // the first's committed change → it sees the reduced owner set → 409. Every
 // UpdateApiKey of a tenant locks the same row first, so there is no lock-ordering
 // inversion (no deadlock).
+//
+// stamp attributes the patch in the audit trail (migration 160: update, revoke
+// or reactivate); it is applied before the UPDATE.
 func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant string,
-	isServerAdmin, callerMayManageOwner bool, role *string, active *bool, writeScopes *[]string) (updated ApiKey, changed bool, err error) {
+	isServerAdmin, callerMayManageOwner bool, role *string, active *bool, writeScopes *[]string, stamp AuditStamp) (updated ApiKey, changed bool, err error) {
 
 	var row ApiKey
 	if err = pgxdb.Write(ctx, pool,
@@ -612,6 +637,9 @@ func UpdateApiKey(ctx context.Context, pool *pgxpool.Pool, id, callerTenant stri
 			var wsArg any
 			if writeScopes != nil {
 				wsArg = *writeScopes
+			}
+			if err = stampAudit(ctx, tx, stamp); err != nil {
+				return err
 			}
 			err = tx.QueryRow(ctx,
 				`UPDATE context_api_keys

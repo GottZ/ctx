@@ -368,7 +368,7 @@ func TestProjectW4_PruneTenantDrainsProjects_Integration(t *testing.T) {
 	// PruneTenant MUST drain context_projects + context_project_sync_runs (K14).
 	// Without the drain step the tenant delete would 23503 against the surviving
 	// project (FK tenant_id NO ACTION) — the RED baseline against the pre-079 prune.
-	if err := store.PruneTenant(ctx, pool, tn); err != nil {
+	if err := store.PruneTenant(ctx, pool, tn, store.AuditStamp{}); err != nil {
 		t.Fatalf("PruneTenant: %v (K14 drain missing ⇒ FK violation on tenant delete)", err)
 	}
 	var projects, runs int

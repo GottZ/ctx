@@ -48,6 +48,17 @@ func tccField(t *testing.T, rec *httptest.ResponseRecorder, key string) string {
 	return s
 }
 
+// tccAdminAR is adminAR with a well-formed key id. Since migration 160 the
+// owner-key mint of tenant-create stamps the acting key into ctx.api_key_id,
+// which the audit trigger reads as a uuid (as the settings triggers have since
+// 051), so the fixture id "non-admin-key-id" fails the compound with 22P02. The
+// key need not exist: the audit row then names an actor without a label.
+func tccAdminAR() *auth.AuthResult {
+	ar := adminAR()
+	ar.ApiKeyID = "00000000-0000-0000-0000-00000000ad01"
+	return ar
+}
+
 func TestTenantCreateCompound_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -58,7 +69,7 @@ func TestTenantCreateCompound_Integration(t *testing.T) {
 
 	// The headline: a single tenant-create yields a working, authenticatable owner.
 	t.Run("BootstrapsScopeAndAuthenticatableOwnerKey", func(t *testing.T) {
-		rec := be5ScopeManageAs(t, h, adminAR(), map[string]any{
+		rec := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tcc-acme", "display_name": "Acme Corp"},
 		})
@@ -123,7 +134,7 @@ func TestTenantCreateCompound_Integration(t *testing.T) {
 	// Limit seeding shares the bootstrap tx (atomic): the caps echo AND the owner
 	// key + scope are still produced.
 	t.Run("LimitSeedingIsAtomic", func(t *testing.T) {
-		rec := be5ScopeManageAs(t, h, adminAR(), map[string]any{
+		rec := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tcc-seed", "display_name": "Seeded", "max_scopes": 3, "max_keys": 4},
 		})
@@ -145,10 +156,10 @@ func TestTenantCreateCompound_Integration(t *testing.T) {
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tcc-dup", "display_name": "First"},
 		}
-		if rec := be5ScopeManageAs(t, h, adminAR(), body); rec.Code != http.StatusOK {
+		if rec := be5ScopeManageAs(t, h, tccAdminAR(), body); rec.Code != http.StatusOK {
 			t.Fatalf("first create: status %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 		}
-		rec := be5ScopeManageAs(t, h, adminAR(), body)
+		rec := be5ScopeManageAs(t, h, tccAdminAR(), body)
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("duplicate slug: status %d, want 409 (body=%s)", rec.Code, rec.Body.String())
 		}
@@ -163,7 +174,7 @@ func TestTenantCreateCompound_Integration(t *testing.T) {
 		other := be5SeedTenant(t, pool, "tcc-other")
 		be5SeedScope(t, pool, "tcc-roll:main", other) // squat the would-be initial scope
 
-		rec := be5ScopeManageAs(t, h, adminAR(), map[string]any{
+		rec := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tcc-roll", "display_name": "Rolled Back"},
 		})
