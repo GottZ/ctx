@@ -38,6 +38,7 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		PreemptReleaseTimeout:        19 * time.Second,
 		BackgroundAgingAfter:         23 * time.Second,
 		Fairness:                     dispatch.FairnessFIFO,
+		RankOrder:                    dispatch.DefaultRankOrder(),
 	}
 	if got := DispatchSettings(in); got != want {
 		t.Fatalf("DispatchSettings = %+v, want %+v", got, want)
