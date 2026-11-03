@@ -465,6 +465,63 @@ What to know before running it:
 
 To take a GPU host (e.g. `herbert`) down for maintenance without dropping in-flight work, use the eject toggle as a quiesce gate. The disable profile takes the host's backends out of every NEW chain; requests already on the wire finish normally (a 27B synthesis ≤60s, an in-flight dream cycle ≤700s). The runbook: **activate the profile → watch the DispatchTile until `inflight=0` for that origin → then service the host.** `ctx eject on` (or the disable-profiles card on the backends settings page) activates it; the status page's DispatchTile shows `inflight`/`waitQ` per origin live, so `inflight=0` is the safe-to-stop signal. `ctx eject off` restores the host to the pool. There is no active drain — a waiting lease already holds its chain, and failover + cooldown heal the dead-host case on their own; the DispatchTile is the quiesce monitor, not an automated barrier. See [security](security.md#trust--sensitivity-gating) for the toggle's admin gating and persistence semantics.
 
+## Foreign load detector
+
+**Topology doctrine.** ctx orders the work on a GPU — interactive before background, the reserved internal partition, fairness, wait budgets — in its dispatcher, without any help from the engine: no backend has to support authentication or priorities, an OpenAI-compatible wire is enough. That ordering only holds while ctx is the **one admission authority of each GPU**, and that is a deployment convention, not something the engine enforces: one ctx instance fronts each GPU engine, and everything else — LAN clients, scripts, other ctx instances — reaches the engine through that instance (other instances register it as a `ctx` backend row, never the engine port itself). A client that talks to the engine port directly lands in the engine's own FCFS queue ahead of ctx's whole ordering, while every ctx-internal counter still looks fine. The detector is the evidence that the convention holds: it reads the engine's own metrics and compares them with what ctx itself put on the engine. Port authentication on the engine (`--api-key` plus the row's `api_key_ref`) is an optional extra layer where an engine supports it, never a precondition.
+
+**Activation is per backend row**, as data: a server-admin sets `metadata.foreign_load_probe` to the engine's probe kind on a `_global` row.
+
+```
+POST /api/manage {"action":"backend-update","id":"<row id>","data":{"metadata":{"foreign_load_probe":"sglang"}}}
+```
+
+`metadata` is replaced as a whole on update, so carry the row's existing keys along (`backend-list` shows them). `sglang` is the only kind today. Any other value is a `422` on `metadata.foreign_load_probe`, and so is the key on a tenant row, whatever its value: the probe observes the GPU host, which is the server operator's, and its readings expose every tenant's load. Removing the key stops the probe. Rows sharing one origin (`scheme://host:port`, the dispatcher's key) are probed once. A row that is disabled, or parked by an active disable profile (the eject case above), is not probed — the GPU is lent out on purpose.
+
+**What it reads.** Every status tick the collector sends `GET <origin>/metrics` to each marked origin. The request goes out asynchronously and single-flight: the tick never waits for it, a hung engine holds at most one probe for at most `status.foreign_load_timeout`, and `/api/status` answers from the last round that landed. It uses the same HTTP transport as the backend's inference calls, and sends `Authorization: Bearer <secret>` only when the row has an `api_key_ref` (a ref whose secret did not resolve is reported as `api_key_ref unresolved`, without sending). From the Prometheus text it reads three families and ignores every other line:
+
+| Family (sglang) | Use |
+|---|---|
+| `sglang:num_running_reqs` (gauge) | requests the engine's scheduler runs now, summed over all label sets (one per TP/PP/EP rank) |
+| `sglang:http_requests_active` (gauge, optional) | HTTP requests in flight on the model endpoints, queued ones included — one per HTTP request, the unit of a dispatcher lease |
+| `sglang:http_responses_total` (counter) | HTTP responses finished on the model endpoints, any status code |
+
+The model endpoints are `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank`, `/generate`, `/encode` and `/classify`. `/health`, `/metrics` (the probe's own GET) and the info routes never reach the model, and unknown endpoints are ignored. The arrival counter `sglang:http_requests_total` is deliberately not read: it counts a request when it arrives, so requests in flight across an hour boundary would land in the wrong hour.
+
+**Two checks.**
+
+- **Per round — engine vs. held.** The engine side is the larger of `running` and `active`. A lease is taken before a request is sent and released after it ends, so the lag between dispatcher and engine only ever reads as `engine <= held`. When `engine > held` holds for `status.foreign_load_hysteresis_ticks` consecutive rounds, the target is `suspected` (with `since`). It clears after the same number of consecutive rounds with `engine <= held`. `active` is what still sees foreign requests waiting in a saturated engine's queue: there, `running` is pinned at the engine's limit and reads `running = held`. `held` is read from the dispatcher before and after the GET, and the larger of the two counts. It applies only to a target the dispatcher holds slots for. A pass-through origin (no `limits.slots`, or `dispatch.enabled=false`) does not count its leases in `held`, so `held` is `null` there and only the hourly check runs.
+- **Per hour — engine responses vs. ctx's own calls.** Both sides count a call when it ends: the engine its response, ctx the `context_llm_log` row it inserts after the call. The response counter at the first round of each hour stands for the hour boundary, provided that round lands within one tick plus one probe timeout of the boundary. With two consecutive boundaries, the engine's request delta for that hour is compared with `sum(duration_n)` of that hour bucket in the LLM-usage rollup (migration 159), taken over every backend row on the origin — every scope, matched by row name, and by `base_url` for calls logged without a backend name. The hour is `suspected_hourly` when the engine **exceeds** ctx's count by more than `max(status.foreign_load_hourly_min_abs, status.foreign_load_hourly_min_ratio × ctx requests)`. A deficit — ctx logged calls the engine never counted — is not foreign load. An hour whose boundary round came too late, or across which the counter went backwards (engine restart), is not compared.
+
+**Status section** (server-admin only, see [api](api.md)): `foreign_load` is an array with one row per probed origin. It is present while at least one row is probed — marked, enabled, and not parked by a disable profile — and absent otherwise, so under eject the section disappears. An empty array would read as "probed, nothing foreign" for an engine nobody observes, so it is never sent.
+
+| Field | Meaning |
+|---|---|
+| `target`, `probe`, `backends` | normalized origin, probe kind, names of every backend row on the origin |
+| `running`, `active`, `held`, `delta` | last reading (`delta = max(running, active) − held`); `null` when the round failed, `active` also `null` when the engine does not expose the gauge, `held`/`delta` also `null` for a pass-through target |
+| `suspected`, `since` | the per-round verdict and when it was entered |
+| `suspected_hourly`, `hourly` | the verdict of the last compared hour, with `{hour, engine_requests, ctx_requests}` |
+| `probe_error` | `null`, or the failure class of the last round: `timeout`, `unreachable`, `http status <code>`, `metric family absent: <name>`, `api_key_ref unresolved`, `metrics body over <n> bytes` — never request material or a secret |
+| `probed_at` | when the last round landed |
+
+**Log lines.** Each state change logs one WARN, never one per tick: `status: foreign load suspected` / `… cleared`, `status: foreign load hourly mismatch` / `… cleared`, `status: foreign load probe failed` (at INFO, `… probe recovered`) and `status: foreign load hourly rollup read failed` (at INFO, `… read recovered`). The detector exports nothing — ctx still has no metrics endpoint of its own; it only reads the engine's.
+
+**Settings** (all `global-only`, hot):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `status.foreign_load_timeout` | `2` (s) | bound of one `/metrics` GET and of the hourly rollup read; `>= 1` |
+| `status.foreign_load_hysteresis_ticks` | `2` | consecutive rounds to enter and to leave `suspected`; `>= 1` |
+| `status.foreign_load_hourly_min_abs` | `5` | absolute floor of the hourly tolerance |
+| `status.foreign_load_hourly_min_ratio` | `0.01` | relative term of the hourly tolerance, in `[0,1]` |
+
+**Limits of the reading.**
+
+- **Rounds follow the status collector.** The collector refreshes while `/api/status` is polled or the dashboard's event stream is open, and probes only then. Without an observer there are no rounds, so no WARN, and the hours are not compared.
+- **`running` counts scheduler requests, not HTTP requests.** ctx sends one scheduler request per call today (`n = 1`). A request that fans out inside the engine — `n > 1`, or a batch of inputs on one endpoint — would push `running` above `held` without any foreign load. If ctx starts sending such requests, compare on `active` alone.
+- **Another ctx instance on the same engine counts as foreign load.** That is the doctrine above, applied: it should reach the engine through the owning instance.
+- **The hourly check credits a call to the backend that answered.** ctx logs one `context_llm_log` row per call, under that backend. An attempt that reached this engine, failed, and was then served by a fallback backend is counted by the engine but not credited to this origin. Hours with many failed attempts can therefore drift toward `suspected_hourly`, and the tolerance settings are the knob.
+- **Row names are unique per scope only.** Two rows with one name on different origins share their rollup rows, which favours ctx's side of the comparison.
+
 ## Models & hardware
 
 ctx is **engine-agnostic**: every LLM role speaks the OpenAI-compatible or the Ollama wire protocol (per-backend `protocol`), and the chat-class roles (synthesis, translate, dream, digest, chat) can also run on the native Anthropic Messages API (`anthropic`, hosted Claude — no embeddings or rerank there), so any provider serving one of those works — local llama.cpp / Ollama or a remote API. Models are configuration, not code: each `context_backends` row carries a per-role `model_map` (see [architecture — backend pool](architecture.md#backend-pool-f3-migrations-053055)). The models below are the **tested production reference**, not hard requirements. Beyond the LLM backends, ctx itself is a single Go daemon plus PostgreSQL 18 + pgvector — no GPU needs of its own.

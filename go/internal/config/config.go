@@ -1576,6 +1576,30 @@ type StatusConfig struct {
 	// RecheckInterval/DBStatsInterval — a malformed value falls back to the
 	// default (off) rather than aborting boot.
 	ChannelProbeInterval time.Duration `key:"status.channel_probe_interval" env:"CTX_STATUS_CHANNEL_PROBE_INTERVAL" default:"0" mut:"hot" tenancy:"global-only"`
+
+	// The foreign-load detector (W06-8, design/06 §4.9): per status tick the
+	// collector reads GET <origin>/metrics of every '_global' backend marked
+	// metadata.foreign_load_probe and compares the engine's running requests
+	// with the dispatcher's held leases, plus hourly the engine's request
+	// counter with the LLM-usage rollup. The marker on the row is the switch;
+	// these four keys are its policy (A-E2: no magic values).
+	//
+	// ForeignLoadTimeout bounds one /metrics GET (and the hourly rollup read).
+	// The pull runs off the status path, so the timeout bounds how long a hung
+	// engine keeps the probe round busy, never a status read. Must be >= 1 s
+	// (V37): 0 would fail every probe on the spot.
+	ForeignLoadTimeout time.Duration `key:"status.foreign_load_timeout" env:"CTX_STATUS_FOREIGN_LOAD_TIMEOUT" default:"2" mut:"hot" tenancy:"global-only"`
+	// ForeignLoadHysteresisTicks is how many CONSECUTIVE probe rounds must see
+	// running > held before a target turns suspected — and how many must see
+	// running <= held before it clears again. Must be >= 1 (V37).
+	ForeignLoadHysteresisTicks int `key:"status.foreign_load_hysteresis_ticks" env:"CTX_STATUS_FOREIGN_LOAD_HYSTERESIS_TICKS" default:"2" mut:"hot" tenancy:"global-only"`
+	// ForeignLoadHourlyMinAbs and ForeignLoadHourlyMinRatio form the hourly
+	// tolerance max(abs, ratio × ctx requests): an hour whose engine request
+	// delta exceeds ctx's own logged requests to that origin by MORE than it
+	// is suspected_hourly. 0 for either term leaves the other one alone; the
+	// ratio must lie in [0,1] (V37).
+	ForeignLoadHourlyMinAbs   int     `key:"status.foreign_load_hourly_min_abs" env:"CTX_STATUS_FOREIGN_LOAD_HOURLY_MIN_ABS" default:"5" mut:"hot" tenancy:"global-only"`
+	ForeignLoadHourlyMinRatio float64 `key:"status.foreign_load_hourly_min_ratio" env:"CTX_STATUS_FOREIGN_LOAD_HOURLY_MIN_RATIO" default:"0.01" mut:"hot" tenancy:"global-only"`
 }
 
 // EmbedBackfillConfig is the Achse-04 W04-2 safety-valve surface for the two

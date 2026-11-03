@@ -703,3 +703,42 @@ func TestTenantBackendDeniedLiteralIP(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateForeignLoadProbe (W06-8, design/06 §4.9): metadata.
+// foreign_load_probe turns the status collector's /metrics pull on for the
+// row's origin. It is a server-admin observation of the GPU host, so it is
+// legal on a '_global' row only — a tenant row carrying it is a FieldError
+// (422), as is any value outside the probe vocabulary ({sglang}).
+func TestValidateForeignLoadProbe(t *testing.T) {
+	b := validBackend()
+	b.Scope = GlobalScope
+	b.Metadata = map[string]any{"foreign_load_probe": "sglang"}
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "metadata.foreign_load_probe") {
+		t.Errorf("_global row with foreign_load_probe=sglang rejected: %+v", errs)
+	}
+
+	b = validBackend()
+	b.Scope = "acme"
+	b.Host = "https://gpu.example.com"
+	b.Metadata = map[string]any{"foreign_load_probe": "sglang"}
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "metadata.foreign_load_probe") {
+		t.Errorf("tenant row with foreign_load_probe passed, want a metadata.foreign_load_probe FieldError: %+v", errs)
+	}
+
+	for _, bad := range []any{"vllm", "SGLang", "", 1, true, nil, map[string]any{"kind": "sglang"}} {
+		b = validBackend()
+		b.Scope = GlobalScope
+		b.Metadata = map[string]any{"foreign_load_probe": bad}
+		if _, errs := ValidateBackend(&b); !fieldHit(errs, "metadata.foreign_load_probe") {
+			t.Errorf("foreign_load_probe=%#v passed, want a FieldError", bad)
+		}
+	}
+
+	b = validBackend()
+	b.Scope = "acme"
+	b.Host = "https://gpu.example.com"
+	b.Metadata = map[string]any{"score_domain": "auto"}
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "metadata.foreign_load_probe") {
+		t.Errorf("tenant row without the marker hit the foreign_load_probe rule: %+v", errs)
+	}
+}

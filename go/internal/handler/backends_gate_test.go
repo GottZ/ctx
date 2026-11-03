@@ -595,3 +595,38 @@ func TestBackendEmbedEquivalenceClaim(t *testing.T) {
 		}
 	})
 }
+
+// TestBackendForeignLoadProbeServerAdminOnly (W06-8): the marker that turns
+// the /metrics foreign-load probe on is a server-admin observation of a
+// '_global' row. On the one write path both tiers share (POST /api/manage
+// backend-create) a tenant-admin's row — pinned to its home scope — and a
+// server-admin's tenant-scoped row both answer 422 on
+// metadata.foreign_load_probe; an unknown probe kind does too.
+func TestBackendForeignLoadProbeServerAdminOnly(t *testing.T) {
+	data := func(probe any) map[string]any {
+		return map[string]any{
+			"name": "gpu", "base_url": "https://gpu.example.com",
+			"roles": []string{"synthesis"}, "model_map": map[string]any{"default": "m"},
+			"metadata": map[string]any{"foreign_load_probe": probe},
+		}
+	}
+	tenantScoped := data("sglang")
+	tenantScoped["scope"] = "acme"
+	cases := []struct {
+		name string
+		ar   *auth.AuthResult
+		data map[string]any
+	}{
+		{"tenant-admin row", tenantAdminScopedAR("tenant-a"), data("sglang")},
+		{"server-admin tenant-scoped row", adminAR(), tenantScoped},
+		{"server-admin unknown probe kind", adminAR(), data("vllm")},
+	}
+	for _, c := range cases {
+		rec := manageReqWithPool(t, c.ar, backends.NewPool(nil, nil), map[string]any{
+			"action": "backend-create", "data": c.data,
+		})
+		if rec.Code != http.StatusUnprocessableEntity || !backendFieldErrors(t, rec.Body.String(), "metadata.foreign_load_probe") {
+			t.Errorf("%s: status %d, want 422 on metadata.foreign_load_probe (body %s)", c.name, rec.Code, rec.Body.String())
+		}
+	}
+}

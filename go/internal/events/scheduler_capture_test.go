@@ -101,6 +101,10 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		// instead of field by field, so a key added to the group needs no edit
 		// here. Not wire-active in these tests: distill.enabled stays false.
 		Distill: config.Defaults().Distill,
+		// W06-8: the foreign-load detector's timeout and hysteresis carry
+		// fatal floors (V37), the same class again — taken whole from the
+		// registry like Distill above. Not wire-active: no row is marked.
+		Status: config.Defaults().Status,
 		Query: config.QueryConfig{
 			ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: "v5.2",
 		},

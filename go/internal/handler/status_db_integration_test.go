@@ -440,6 +440,9 @@ func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 		// the whole-config re-validation Replace runs. Taken WHOLE from the
 		// registry so a key added to the group needs no edit here.
 		Distill: config.Defaults().Distill,
+		// W06-8: the foreign-load detector's timeout and hysteresis carry
+		// fatal floors (V37) — same class, taken whole from the registry.
+		Status: config.Defaults().Status,
 	}
 }
 
