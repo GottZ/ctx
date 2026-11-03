@@ -652,7 +652,7 @@ func (e *Engine) recordLLM(sessID, apiKeyID string, required backends.Sensitivit
 
 func (e *Engine) tokenClamp(b backends.Backend, budgetLeft int) int {
 	v := e.cfg.MaxTokens
-	if bm := backendMaxTokens(b); bm > 0 && bm < v {
+	if bm := b.ChatMaxTokens(); bm > 0 && bm < v {
 		v = bm
 	}
 	if budgetLeft > 0 && budgetLeft < v {
@@ -767,21 +767,6 @@ func totalChars(msgs []llm.ChatMsg) int {
 		n += len(m.Content)
 	}
 	return n
-}
-
-func backendMaxTokens(b backends.Backend) int {
-	if b.Limits == nil {
-		return 0
-	}
-	switch v := b.Limits["chat_max_tokens"].(type) {
-	case float64:
-		return int(v)
-	case int:
-		return v
-	case int64:
-		return int(v)
-	}
-	return 0
 }
 
 func normalizeSens(s backends.Sensitivity) backends.Sensitivity {

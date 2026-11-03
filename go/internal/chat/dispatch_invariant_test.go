@@ -35,6 +35,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +53,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
+	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 )
@@ -76,6 +80,62 @@ func (c *countingAdmitter) Acquire(ctx context.Context, req dispatch.Request) (*
 }
 
 func (c *countingAdmitter) count() int64 { return atomic.LoadInt64(&c.acquires) }
+
+// walkAcquirer is the test llm.Acquirer of the gateway walker (W02-06): First
+// is the blocking Acquire, Next the non-blocking TryAcquire, both counted on
+// the SAME counter as every other site. No production Acquirer exists yet
+// (A03-W3/W5/W17, W02-07 build it).
+type walkAcquirer struct {
+	ca    *countingAdmitter
+	class dispatch.Class
+}
+
+func (w walkAcquirer) Class() dispatch.Class { return w.class }
+
+func (w walkAcquirer) req(b *backends.Backend, role string, timeout time.Duration) dispatch.Request {
+	return dispatch.Request{Target: dispatch.Target{Origin: b.Host}, Class: w.class, Role: role, DeadlineIn: timeout}
+}
+
+func (w walkAcquirer) First(ctx context.Context, b *backends.Backend, role string, timeout time.Duration) (*dispatch.Lease, context.Context, error) {
+	return w.ca.Acquire(ctx, w.req(b, role, timeout))
+}
+
+func (w walkAcquirer) Next(ctx context.Context, b *backends.Backend, role string, timeout time.Duration) (*dispatch.Lease, context.Context, error) {
+	atomic.AddInt64(&w.ca.acquires, 1)
+	return w.ca.d.TryAcquire(ctx, w.req(b, role, timeout))
+}
+
+func (w walkAcquirer) Continue(context.Context, *backends.Backend, string, time.Duration) (*dispatch.Lease, context.Context, error) {
+	return nil, nil, llm.ErrNoContinuation
+}
+
+// passthroughAttempt is the gateway attempt shape W02-07/W02-08 will wire:
+// BuildUpstreamBody per row, then the raw wire under the walker's lease.
+func passthroughAttempt(stream bool) llm.AttemptFunc {
+	return func(runCtx context.Context, b *backends.Backend, _ *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+		body, err := llm.BuildUpstreamBody(llm.UpstreamSpec{
+			Messages: json.RawMessage(`[{"role":"user","content":"hi"}]`), Role: "chat", Stream: stream, MaxTokens: 16,
+		}, b)
+		if err != nil {
+			return dispatch.Usage{}, false, err
+		}
+		if stream {
+			res, err := llm.ChatRawStream(runCtx, *b, body, timeout, 1<<20, func([]byte) error { return nil })
+			if res == nil {
+				return dispatch.Usage{}, false, err
+			}
+			return dispatch.Usage{PromptTokens: res.PromptTokens, CompletionTokens: res.CompletionTokens}, res.Frames > 0, err
+		}
+		res, err := llm.ChatRaw(runCtx, *b, body, timeout, httpx.MaxResponseBytes)
+		if err != nil {
+			return dispatch.Usage{}, false, err
+		}
+		return dispatch.Usage{PromptTokens: res.PromptTokens, CompletionTokens: res.CompletionTokens}, false, nil
+	}
+}
+
+// walkRules admits the test class (ClassBackground, see the count gate).
+var walkRules = llm.WalkRules{WindowRule: true, AllowedClasses: []dispatch.Class{dispatch.ClassBackground}}
 
 // wireVec1024 is a quality-gate-passing raw vector (alternating 1,-1 has norm 1
 // and variance 1/1024 after L2 normalization — mirrors embed/wire_test.go).
@@ -237,9 +297,20 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 		t.Fatalf("anthropic stream: served=%v err=%v", so.served, so.err)
 	}
 
-	// Eight sites, each one physical wire contact under one lease.
-	if ca.count() != 8 || atomic.LoadInt64(&wireHits) != 8 {
-		t.Fatalf("after the eight sites: acquires=%d wire=%d, want 8/8", ca.count(), atomic.LoadInt64(&wireHits))
+	// --- Sites 9 + 10: passthrough.go (gateway ChatRaw / ChatRawStream,
+	// W02-06) — reached ONLY through llm.WalkChain, which acquires per
+	// attempt via the Acquirer before the wire call. ---
+	wa := walkAcquirer{ca: ca, class: dispatch.ClassBackground}
+	for _, stream := range []bool{false, true} {
+		if served, _, err := llm.WalkChain(ctx, []backends.Backend{invariantBackend(srv.URL, backends.ProtocolOpenAI)},
+			"chat", wa, nil, walkRules, passthroughAttempt(stream)); err != nil || served == nil {
+			t.Fatalf("passthrough stream=%v: served=%v err=%v", stream, served, err)
+		}
+	}
+
+	// Ten sites, each one physical wire contact under one lease.
+	if ca.count() != 10 || atomic.LoadInt64(&wireHits) != 10 {
+		t.Fatalf("after the ten sites: acquires=%d wire=%d, want 10/10", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
 	// --- Failover walk (design W5: "inkl. Failover-Pfade"): a down primary
@@ -256,8 +327,20 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 		"chat", "s", "u", llm.Options{}, "", time.Second, nil, llmAdm); err != nil || served == nil || len(attempts) != 2 {
 		t.Fatalf("failover walk: served=%v attempts=%d err=%v", served, len(attempts), err)
 	}
-	if ca.count() != 10 || atomic.LoadInt64(&wireHits) != 10 {
-		t.Fatalf("after failover: acquires=%d wire=%d, want 10/10", ca.count(), atomic.LoadInt64(&wireHits))
+	if ca.count() != 12 || atomic.LoadInt64(&wireHits) != 12 {
+		t.Fatalf("after failover: acquires=%d wire=%d, want 12/12", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+
+	// --- Gateway failover walk: the same down primary under WalkChain —
+	// attempt 2 acquires through Next (TryAcquire), still one lease per
+	// physical contact: +2/+2. ---
+	if served, attempts, err := llm.WalkChain(ctx,
+		[]backends.Backend{invariantBackend(down.URL, backends.ProtocolOpenAI), invariantBackend(srv.URL, backends.ProtocolOpenAI)},
+		"chat", wa, nil, walkRules, passthroughAttempt(false)); err != nil || served == nil || len(attempts) != 2 {
+		t.Fatalf("passthrough failover walk: served=%v attempts=%d err=%v", served, len(attempts), err)
+	}
+	if ca.count() != 14 || atomic.LoadInt64(&wireHits) != 14 {
+		t.Fatalf("after passthrough failover: acquires=%d wire=%d, want 14/14", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
 	// --- Lease-free without wire contact (the cache-hit clause's structural
@@ -292,11 +375,18 @@ var wirePin = map[string]int{
 	"llm/anthropic_stream.go": 1, // /v1/messages (anthropic stream)
 	"embed/embed.go":          2, // /api/embed + /v1/embeddings
 	"rerank/rerank.go":        1, // /v1/rerank
+	"llm/passthrough.go":      2, // /v1/chat/completions (gateway ChatRaw + ChatRawStream, W02-06)
 }
 
+// wirePackages are the packages the census scans. internal/oai is in it with
+// pin 0 (design/02 §4.1 L4, B14): no wirePin key names an oai file, so ANY
+// http.NewRequestWithContext there is an un-pinned site — the gateway handler
+// package never talks to a backend itself; its wire calls are llm's.
+var wirePackages = []string{"llm", "embed", "rerank", "oai"}
+
 // TestWireSitePositiveListPinned pins the grep positive list: the ONLY
-// http.NewRequestWithContext sites in internal/{llm,embed,rerank} are the ones
-// listed above. A new un-listed wire file, or a changed count in a listed file,
+// http.NewRequestWithContext sites in internal/{llm,embed,rerank,oai}
+// (wirePackages; oai with pin 0) are the ones listed above. A new un-listed wire file, or a changed count in a listed file,
 // turns this gate red — the static half of the I-D1 endpoint proof (§1.2:
 // admittiertheit itself is proven by the count gate, not by grep).
 func TestWireSitePositiveListPinned(t *testing.T) {
@@ -313,19 +403,25 @@ func TestWireSitePositiveListPinned(t *testing.T) {
 	}
 }
 
-// censusWireSites counts http.NewRequestWithContext per non-test .go file across
-// internal/{llm,embed,rerank}, keyed "pkg/file". Files with zero matches are
-// omitted so an added wire file surfaces as an un-pinned key.
-func censusWireSites(t *testing.T) map[string]int {
+// internalDir locates …/internal from this file.
+func internalDir(t *testing.T) string {
 	t.Helper()
 	_, self, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed — cannot locate the source tree")
 	}
-	internalDir := filepath.Dir(filepath.Dir(self)) // …/internal/chat → …/internal
+	return filepath.Dir(filepath.Dir(self)) // …/internal/chat → …/internal
+}
+
+// censusWireSites counts http.NewRequestWithContext per non-test .go file across
+// internal/{llm,embed,rerank,oai}, keyed "pkg/file". Files with zero matches are
+// omitted so an added wire file surfaces as an un-pinned key.
+func censusWireSites(t *testing.T) map[string]int {
+	t.Helper()
+	internalDir := internalDir(t)
 	const needle = "http.NewRequestWithContext("
 	got := map[string]int{}
-	for _, pkg := range []string{"llm", "embed", "rerank"} {
+	for _, pkg := range wirePackages {
 		dir := filepath.Join(internalDir, pkg)
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -346,4 +442,205 @@ func censusWireSites(t *testing.T) map[string]int {
 		}
 	}
 	return got
+}
+
+// parseWireFile parses one pinned wire file (comments dropped — a doc comment
+// naming httpClients.For(b.EgressGuarded()) must not count).
+func parseWireFile(t *testing.T, rel string) *ast.File {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(internalDir(t), rel), nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", rel, err)
+	}
+	return f
+}
+
+// selectorCall reports pkg.name of a call's function expression ("" when the
+// callee is not a selector on an identifier).
+func selectorCall(call *ast.CallExpr) (recv, name string) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", ""
+	}
+	if id, ok := sel.X.(*ast.Ident); ok {
+		return id.Name, sel.Sel.Name
+	}
+	return "", sel.Sel.Name
+}
+
+// TestEveryWireSiteSelectsEgressClient is the AST half of B19 (design/02 §5):
+// in every pinned wire file
+//   - the number of client choices X.For(b.EgressGuarded()) — the predicate
+//     called on a plain identifier, the attempt's row, never on a literal —
+//     equals the number of wire sites;
+//   - every client handed to httpx.DoRetryOnce or a one-argument .Do is such
+//     a choice or a parameter of the enclosing function (embed.go hands the
+//     choice down to embedOpenAI/embedOllama), never a local value;
+//   - no client is built or borrowed past the pair: no
+//     httpx.PooledClient/GuardedPooledClient, no http.DefaultClient, no
+//     http.Client literal or new(http.Client).
+//
+// A tenant row whose host rebinds to loopback/LAN must never be dialed without
+// ssrfguard. The behaviour half per wire family: llm/egress_guard_test.go,
+// llm/passthrough_test.go.
+func TestEveryWireSiteSelectsEgressClient(t *testing.T) {
+	for rel, sites := range wirePin {
+		f := parseWireFile(t, rel)
+		choices, requests := 0, 0
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CallExpr:
+				recv, name := selectorCall(x)
+				if recv == "http" && name == "NewRequestWithContext" {
+					requests++
+				}
+				if isEgressChoice(x) {
+					choices++
+				}
+				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 && isSelector(x.Args[0], "http", "Client") {
+					t.Errorf("%s builds new(http.Client) — a wire file picks its client only via httpClients.For(b.EgressGuarded())", rel)
+				}
+			case *ast.SelectorExpr:
+				if isSelector(x, "httpx", "PooledClient") || isSelector(x, "httpx", "GuardedPooledClient") || isSelector(x, "http", "DefaultClient") {
+					t.Errorf("%s names %s — a wire file picks its client only via httpClients.For(b.EgressGuarded())", rel, x.Sel.Name)
+				}
+			case *ast.CompositeLit:
+				// A *http.Client parameter type is fine (embed.go hands the
+				// chosen client down); building one is not.
+				if isSelector(x.Type, "http", "Client") {
+					t.Errorf("%s builds an http.Client literal — a wire file picks its client only via httpClients.For(b.EgressGuarded())", rel)
+				}
+			}
+			return true
+		})
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			params := map[string]bool{}
+			for _, p := range fn.Type.Params.List {
+				for _, nm := range p.Names {
+					params[nm.Name] = true
+				}
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				recv, name := selectorCall(call)
+				var client ast.Expr
+				switch {
+				case recv == "httpx" && name == "DoRetryOnce" && len(call.Args) > 0:
+					client = call.Args[0]
+				case name == "Do" && len(call.Args) == 1:
+					if _, isFunc := call.Args[0].(*ast.FuncLit); isFunc {
+						return true // sync.Once.Do(func(){…}) — no client call
+					}
+					client = call.Fun.(*ast.SelectorExpr).X
+				default:
+					return true
+				}
+				if c, ok := client.(*ast.CallExpr); ok && isEgressChoice(c) {
+					return true
+				}
+				if id, ok := client.(*ast.Ident); ok && params[id.Name] {
+					return true
+				}
+				t.Errorf("%s: %s sends with a client that is neither X.For(b.EgressGuarded()) nor a parameter of the function", rel, fn.Name.Name)
+				return true
+			})
+		}
+		if requests != sites {
+			t.Errorf("%s: %d http.NewRequestWithContext call(s) in the AST, pin says %d", rel, requests, sites)
+		}
+		if choices != sites {
+			t.Errorf("%s: %d .For(b.EgressGuarded()) client choice(s) for %d wire site(s) — every site picks the egress client by the one predicate (B19)", rel, choices, sites)
+		}
+	}
+}
+
+// isEgressChoice matches X.For(<ident>.EgressGuarded()).
+func isEgressChoice(call *ast.CallExpr) bool {
+	if _, name := selectorCall(call); name != "For" || len(call.Args) != 1 {
+		return false
+	}
+	arg, ok := call.Args[0].(*ast.CallExpr)
+	if !ok || len(arg.Args) != 0 {
+		return false
+	}
+	sel, ok := arg.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "EgressGuarded" {
+		return false
+	}
+	_, onIdent := sel.X.(*ast.Ident)
+	return onIdent
+}
+
+// isSelector matches the expression pkg.name.
+func isSelector(e ast.Expr, pkg, name string) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == pkg
+}
+
+// TestOAIPackageHasNoWireCalls is the AST half of the oai pin 0 (design/02
+// §5 B14). No non-test file of internal/oai
+//   - calls (*http.Client).Do — any method named Do is counted, fail-closed,
+//     because the AST carries no types (a sync.Once.Do there trips this pin:
+//     teach the pin the receiver, never drop the rule) — nor RoundTrip,
+//     DialContext, httpx.DoRetryOnce, http.Get/Head/Post/PostForm,
+//     http.NewRequest(WithContext) or net.Dial*;
+//   - names a client or transport at all: http.Client, http.DefaultClient,
+//     http.Transport, http.DefaultTransport, net.Dialer, httpx.PooledClient,
+//     httpx.GuardedPooledClient, httpx.NewClients, httpx.Clients. Without a
+//     client value the Get/Post methods of one are unreachable, so they need
+//     no receiver-blind rule (r.Header.Get stays legal).
+func TestOAIPackageHasNoWireCalls(t *testing.T) {
+	dir := filepath.Join(internalDir(t), "oai")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	files := 0
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		files++
+		f := parseWireFile(t, filepath.Join("oai", name))
+		ast.Inspect(f, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				for _, ref := range [...][2]string{
+					{"http", "Client"}, {"http", "DefaultClient"}, {"http", "Transport"}, {"http", "DefaultTransport"},
+					{"net", "Dialer"}, {"httpx", "PooledClient"}, {"httpx", "GuardedPooledClient"}, {"httpx", "NewClients"}, {"httpx", "Clients"},
+				} {
+					if isSelector(sel, ref[0], ref[1]) {
+						t.Errorf("oai/%s names %s.%s — internal/oai holds no backend client (wire pin 0)", name, ref[0], ref[1])
+					}
+				}
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			recv, fn := selectorCall(call)
+			switch {
+			case fn == "Do", fn == "RoundTrip", fn == "DialContext",
+				recv == "httpx" && fn == "DoRetryOnce",
+				recv == "http" && (fn == "Get" || fn == "Head" || fn == "Post" || fn == "PostForm" || fn == "NewRequest" || fn == "NewRequestWithContext"),
+				recv == "net" && strings.HasPrefix(fn, "Dial"):
+				t.Errorf("oai/%s calls %s.%s — internal/oai has wire pin 0; backend calls belong to internal/llm", name, recv, fn)
+			}
+			return true
+		})
+	}
+	if files == 0 {
+		t.Fatal("internal/oai has no non-test files — the pin would be vacuous")
+	}
 }
