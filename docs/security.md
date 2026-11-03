@@ -86,6 +86,24 @@ Both docker targets resolve **fail-closed**: the DB container from `CTX_DB_CONTA
 
 `openssl enc` cannot do AES-GCM, so extraction pipes the row through the ctxd binary itself: `psql -At … | docker run --rm -i -e CTX_SECRETS_KEY -e CTX_SECRETS_KEY_PREV "$CTX_IMAGE" -secret-decrypt`. PostgreSQL's `encode(bytea,'base64')` is MIME (RFC 2045) and wraps every 76 chars — the script strips the wraps SQL-side, and the decrypt mode additionally reads stdin to EOF and strips CR/LF, so every realistic provider-key length survives the pipe.
 
+## Model API key format
+
+(`internal/modelkey`. The format lands first; minting, the admin API and the `/v1` gate that accepts it follow in later releases.) External programs reach the model API with their own credential class — a **model key**, never a knowledge key:
+
+```
+ctxm_ │ body: 43 × Base62 (256 random bits) │ checksum: 6 × Base62
+```
+
+- **54 bytes**, alphabet Base62 `[0-9A-Za-z]` after the prefix, no further separator. `ctxm_` joins the `ctxt_`/`ctxr_` family of the opaque OAuth tokens; knowledge keys (64 hex characters) never carry a prefix, so the credential class is decidable from the first five bytes.
+- **Body: 256 bits** from the operating system's CSPRNG (`crypto/rand`), every character drawn by rejection sampling — random bytes ≥ 248 are discarded, so each of the 62 digits is exactly equally likely.
+- **Checksum:** CRC32-IEEE over prefix and body, written as six big-endian Base62 digits padded with `0` (the GitHub token pattern). It catches every single-character typo and every swap of two neighbouring body characters, so the model API can turn typos and garbage away without a database round-trip. **It is no protection against forgery:** the CRC is public, anyone can compute a well-formed key, and a well-formed key proves nothing — floods of well-formed guesses are the job of the `/v1` gate's failure limiter, probe bucket and database semaphore.
+- **Strict parsing:** only the canonical spelling is a key — no trimming, no case folding, and the checksum is compared as text, so no second spelling of the same CRC value passes. Every defect (length, prefix, character, checksum) yields the same error, so a prober never learns which part of a guess was right.
+- **Stored only as SHA-256** — lowercase hex over the whole key, the same procedure as for knowledge keys. The hash is computed in Go: unlike the knowledge-key path (`ctx_auth($1)`), the plaintext never travels to PostgreSQL as a query parameter. 256 random bits need no password hashing (NIST SP 800-63B asks for it below 112 bits).
+- **Hint** `ctxm_…` + the last four characters, e.g. `ctxm_…G44D` (10 characters): all four are checksum characters — a fragment of a public function of the key, no body character. Lists and logs show the hint; the full key is shown once, when it is created.
+- **In code**, a key prints as its hint through `fmt`'s `%v`, `%s`, `%q` and `%#v` (`%x` gives the hint in hex) and through `slog`, as a bare pointer address wherever `fmt` formats it by reflection instead (other verbs, an unexported struct field), and as `{}` through `encoding/json`. The package's way to the plaintext is the explicit `Plaintext()` call; reflection-based dumpers (test-diff libraries, `reflect` itself) can still follow the pointer, so a key is never handed to them.
+
+**Secret scanning.** Match `\bctxm_[0-9A-Za-z]{49}\b` and verify the checksum (CRC32-IEEE of the first 48 characters, six Base62 digits `[0-9A-Za-z]`, big-endian, `0`-padded) — a random 49-character match passes the check with a probability of 1 in 62⁶ ≈ 5.7·10¹⁰, so a verified match is almost certainly a real key. A scanner that verifies the checksum should drop the word-boundary anchors (`ctxm_[0-9A-Za-z]{49}`): `\b` misses a key glued to word characters — `\nctxm_…` in JSON-escaped text, `TOKEN_ctxm_…`, `ctxm_…_old` — and the checksum keeps the false positives at 1 in 62⁶ without them.
+
 ## Trust × sensitivity gating
 
 (Backend pool, migration 055.) A backend carries a **trust level** and an egress `locality`; every block carries a `sensitivity`. A backend with trust `T` may receive content of sensitivity `S` iff `rank(S) ≤ maxRank(T)` — `full-trust` ≥ credentials, `no-credentials` ≥ personal, `non-personal` ≥ internal, `public` = public only. Empty/unknown sensitivity counts as `credentials`; an empty chain is an error, **never a silent escalation across trust borders**.
