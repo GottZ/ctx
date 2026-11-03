@@ -5501,6 +5501,9 @@
     "model_consumers_identity_immutable()": {
       "src_hash": "4c4ed4d642223e4c6d2573144d3e2bfebb99aaf4a3a7003e0f81bb261dcc42ca"
     },
+    "model_keys_consumer_active()": {
+      "src_hash": "3903ec96d9cfd305202b5e4678552558b0188b6db33c72bbea44e7b19e31dd1d"
+    },
     "model_keys_identity_immutable()": {
       "src_hash": "2dc33e608e7627e16c2cb430926158fd4cc6c396e8f37ba84416b4c812a2842a"
     },
@@ -5595,6 +5598,9 @@
     },
     "context_model_keys.trg_model_keys_audit_upd": {
       "def_hash": "d21e8b17401a938b050aec078201c5cb5d4cd48dbabdc9136fac0d0f0978f069"
+    },
+    "context_model_keys.trg_model_keys_consumer_active": {
+      "def_hash": "b9a0c4795749d0ffea43092d71aa4d90e42c0499f5f3b66cb8a4130187a16af1"
     },
     "context_model_keys.trg_model_keys_identity": {
       "def_hash": "49864b0ed0b881ae9bfe237c31cb821c5d003b03faec250c1e20195f6665a873"

@@ -34,8 +34,15 @@
 -- result columns are a contract; a new column goes last (a changed result
 -- type needs DROP + CREATE).
 --
--- Triggers. Deactivating a consumer revokes all its live keys on every path,
--- psql included; reactivating revives no old key. tenant_id of a consumer and
+-- Triggers. Deactivating a consumer revokes its live keys and refuses new
+-- ones, psql included: a key insert locks its consumer row FOR SHARE and
+-- fails with 23514 on an inactive consumer, so a mint and a deactivation
+-- serialize on that row — under READ COMMITTED (every ctx writer) either the
+-- deactivation waits and revokes the new key, or the mint waits and fails.
+-- Reactivating revives no old key. Known limit: a deactivation under
+-- explicit REPEATABLE READ does not revoke a key committed after its
+-- snapshot (the key stays live at the inactive consumer and would be valid
+-- after a reactivation). tenant_id of a consumer and
 -- consumer_id of a key are immutable (SQLSTATE 23514): a key moved to another
 -- consumer, or a consumer moved to another tenant, would carry a credential
 -- into a foreign policy or tenant. Both tables write their history into
@@ -87,8 +94,9 @@
 -- row types); DROP TABLE context_model_keys, context_model_consumers (their
 -- triggers go with them); DROP FUNCTION audit_model_keys_write(),
 -- audit_model_consumers_write(), model_keys_identity_immutable(),
--- model_consumers_identity_immutable(), model_consumer_deactivate_revokes(),
--- model_cidrs_private(CIDR[]); ALTER TABLE context_tenants DROP COLUMN
+-- model_consumers_identity_immutable(), model_keys_consumer_active(),
+-- model_consumer_deactivate_revokes(), model_cidrs_private(CIDR[]);
+-- ALTER TABLE context_tenants DROP COLUMN
 -- max_model_consumers; DROP INDEX idx_settings_audit_entity_tenant; DELETE
 -- FROM _migrations WHERE version = 161 (so a later upgrade applies it
 -- again). The audit rows stay (append-only history).
@@ -200,8 +208,8 @@ CREATE INDEX IF NOT EXISTS idx_model_keys_consumer_live
 CREATE INDEX IF NOT EXISTS idx_model_keys_consumer_created
     ON context_model_keys (consumer_id, created_at DESC, id DESC);
 
--- 5. Deactivating a consumer revokes all its live keys — on every path, so
---    nothing here may fail: a key another transaction committed after this
+-- 5. Deactivating a consumer revokes all its live keys — on every write
+--    path (API, boot, psql), so nothing here may fail: a key another transaction committed after this
 --    one began is newer than now() (revoked at its created_at instead, which
 --    the revoke-order CHECK demands), and a stamped actor key that no longer
 --    exists leaves revoked_by_key NULL instead of failing its foreign key.
@@ -220,6 +228,32 @@ CREATE TRIGGER trg_model_consumers_deactivate
     AFTER UPDATE OF active ON context_model_consumers
     FOR EACH ROW WHEN (OLD.active AND NOT NEW.active)
     EXECUTE FUNCTION model_consumer_deactivate_revokes();
+
+-- A key only for an active consumer. The foreign key alone takes FOR KEY
+-- SHARE on the consumer row, which the deactivating UPDATE (FOR NO KEY
+-- UPDATE) does not wait for: a mint overlapping a deactivation committed a
+-- live key at the inactive consumer. FOR SHARE conflicts with that UPDATE:
+-- a mint holding it makes the deactivation wait (whose revoke then sees the
+-- committed key), a mint behind a running deactivation waits and reads the
+-- committed active = false.
+CREATE OR REPLACE FUNCTION model_keys_consumer_active() RETURNS TRIGGER AS $$
+DECLARE
+    v_active BOOLEAN;
+BEGIN
+    SELECT c.active INTO v_active
+      FROM context_model_consumers c WHERE c.id = NEW.consumer_id
+       FOR SHARE;
+    IF v_active IS NULL OR NOT v_active THEN
+        RAISE EXCEPTION 'context_model_keys: consumer % is not active', NEW.consumer_id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_model_keys_consumer_active ON context_model_keys;
+CREATE TRIGGER trg_model_keys_consumer_active
+    BEFORE INSERT ON context_model_keys
+    FOR EACH ROW EXECUTE FUNCTION model_keys_consumer_active();
 
 -- 6. Identity pins: a consumer stays in its tenant, a key with its consumer.
 CREATE OR REPLACE FUNCTION model_consumers_identity_immutable() RETURNS TRIGGER AS $$
@@ -369,7 +403,9 @@ CREATE TRIGGER trg_model_keys_audit_ins_del
     FOR EACH ROW EXECUTE FUNCTION audit_model_keys_write();
 
 -- The batched last_used_at flush, the SET NULL of an actor column and the
--- revoked_by_* stamp next to a revocation never reach it on their own.
+-- revoked_by_* stamp next to a revocation never reach it on their own. The
+-- SET NULL of rotated_from when a predecessor is pruned does: the chain of
+-- the surviving key changes, which is an update row.
 DROP TRIGGER IF EXISTS trg_model_keys_audit_upd ON context_model_keys;
 CREATE TRIGGER trg_model_keys_audit_upd
     AFTER UPDATE OF consumer_id, key_hint, expires_at, revoked_at, rotated_from

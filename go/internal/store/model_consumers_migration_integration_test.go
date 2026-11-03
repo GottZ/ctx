@@ -52,6 +52,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -80,6 +81,11 @@ var m161Overlays = map[string][][2]string{
 	"gate6": {{`(?s)IF NOT COALESCE\(p_secure, false\) AND NOT v_plain THEN.*?END IF;`, ``}},
 	// model_cidrs_private without its NULL-element clause.
 	"cidr-null": {{`WHERE n IS NULL\s+OR NOT`, `WHERE NOT`}},
+	// I-K8 without the insert guard (Fremd-Review 2 F-1).
+	"no-insert-guard": {{
+		`(?s)CREATE TRIGGER trg_model_keys_consumer_active\s.*?EXECUTE FUNCTION model_keys_consumer_active\(\);`,
+		`SELECT 1;`,
+	}},
 	// I-K8 without the trigger.
 	"no-deactivate": {{
 		`(?s)CREATE TRIGGER trg_model_consumers_deactivate\s.*?EXECUTE FUNCTION model_consumer_deactivate_revokes\(\);`,
@@ -362,8 +368,16 @@ func TestModelAuthGateMatrix(t *testing.T) {
 	_, revokedHash := mcKey(ctx, t, pool, good, "revoked", map[string]string{
 		"created_at": "now() - interval '1 hour'", "revoked_at": "now() - interval '1 minute'"})
 	_, expiredHash := mcKey(ctx, t, pool, good, "expired", map[string]string{"expires_at": "now() - interval '1 minute'"})
-	inactive := mcConsumer(ctx, t, pool, tid, "inactive", map[string]string{"active": "false"})
+	// A live key at an inactive consumer is unreachable on a regular path: the
+	// deactivation revokes it, the insert guard refuses a new one. Gate 2 is
+	// defence in depth for a state built past them — the key is minted while
+	// the consumer is active, then the consumer is deactivated with the
+	// revoking trigger disabled.
+	inactive := mcConsumer(ctx, t, pool, tid, "inactive", nil)
 	_, inactiveHash := mcKey(ctx, t, pool, inactive, "inactive", nil)
+	kaExecInTx(ctx, t, pool, fmt.Sprintf(`ALTER TABLE context_model_consumers DISABLE TRIGGER trg_model_consumers_deactivate;
+		UPDATE context_model_consumers SET active = false WHERE id = '%s'::uuid;
+		ALTER TABLE context_model_consumers ENABLE TRIGGER trg_model_consumers_deactivate;`, inactive))
 	_, suspHash := mcKey(ctx, t, pool, mcConsumer(ctx, t, pool, suspended, "susp", nil), "susp", nil)
 	_, offHash := mcKey(ctx, t, pool, mcConsumer(ctx, t, pool, offboarding, "off", nil), "off", nil)
 	// A scope of its own, then handed to another tenant.
@@ -620,6 +634,132 @@ func TestModelConsumerDeactivateRevokes(t *testing.T) {
 		}
 		if r := mcAuth(ctx, t, pool, h, nil, true); r.text != mcSentinel {
 			t.Errorf("key of the deactivated consumer: %s, want the sentinel", r.text)
+		}
+	})
+}
+
+// I-K8 under concurrency (Fremd-Review 2 F-1). The foreign key alone takes
+// FOR KEY SHARE on the consumer row and the deactivating UPDATE FOR NO KEY
+// UPDATE — compatible, so a key insert that overlaps a deactivation used to
+// commit a live key at the inactive consumer, valid again after reactivation.
+// The insert guard locks the consumer row FOR SHARE and refuses an inactive
+// consumer: under READ COMMITTED (ctx's write isolation) either the
+// deactivation waits for the mint and revokes the key, or the mint waits for
+// the deactivation and fails with 23514. Red with
+// CTX_M161_OVERLAY=no-insert-guard.
+func TestModelKeyInsertRacesDeactivation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := mcSetup(t)
+	tid, _ := mcTenant(ctx, t, pool, "mc-race", "active")
+
+	begin := func(t *testing.T) pgx.Tx {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		// READ COMMITTED, as every ctx writer; a lost wait fails instead of hanging.
+		if _, err := tx.Exec(ctx, `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`); err != nil {
+			t.Fatalf("isolation: %v", err)
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '10s'`); err != nil {
+			t.Fatalf("lock_timeout: %v", err)
+		}
+		return tx
+	}
+	// noLiveKeyAtInactive: whatever committed, no live key of c may wait for a
+	// reactivation — reactivate and authenticate the minted hash.
+	noLiveKeyAtInactive := func(t *testing.T, c, hash string) {
+		t.Helper()
+		var active bool
+		var live int
+		if err := pool.QueryRow(ctx,
+			`SELECT c.active, (SELECT count(*) FROM context_model_keys k WHERE k.consumer_id = c.id AND k.revoked_at IS NULL)
+			   FROM context_model_consumers c WHERE c.id = $1::uuid`, c).Scan(&active, &live); err != nil {
+			t.Fatalf("read consumer: %v", err)
+		}
+		if active || live != 0 {
+			t.Errorf("after the race: consumer active=%v with %d live key(s), want inactive with 0", active, live)
+		}
+		kaExec(ctx, t, pool, `UPDATE context_model_consumers SET active = true WHERE id = $1::uuid`, c)
+		if r := mcAuth(ctx, t, pool, hash, nil, true); r.text != mcSentinel {
+			t.Errorf("key minted during the deactivation is valid after reactivation: %s (I-K8)", r.text)
+		}
+	}
+	insertSQL := `INSERT INTO context_model_keys (consumer_id, key_hash, key_hint) VALUES ($1::uuid, $2, 'ctxm_…race')`
+	deactivateSQL := `UPDATE context_model_consumers SET active = false WHERE id = $1::uuid`
+
+	// The mint starts first and commits while the deactivation is under way.
+	t.Run("insert_first", func(t *testing.T) {
+		c := mcConsumer(ctx, t, pool, tid, "race-insert-first", nil)
+		hash := mcHash("race-insert-first")
+		ins := begin(t)
+		defer func() { _ = ins.Rollback(ctx) }()
+		deact := begin(t)
+		defer func() { _ = deact.Rollback(ctx) }()
+		if _, err := ins.Exec(ctx, insertSQL, c, hash); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := deact.Exec(ctx, deactivateSQL, c)
+			done <- err
+		}()
+		time.Sleep(300 * time.Millisecond)
+		if err := ins.Commit(ctx); err != nil {
+			t.Fatalf("commit insert: %v", err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("deactivate: %v (SQLSTATE %s)", err, mcSQLState(err))
+		}
+		if err := deact.Commit(ctx); err != nil {
+			t.Fatalf("commit deactivation: %v", err)
+		}
+		noLiveKeyAtInactive(t, c, hash)
+	})
+
+	// The deactivation starts first; the mint overlaps it and must not commit
+	// a live key.
+	t.Run("deactivate_first", func(t *testing.T) {
+		c := mcConsumer(ctx, t, pool, tid, "race-deactivate-first", nil)
+		hash := mcHash("race-deactivate-first")
+		deact := begin(t)
+		defer func() { _ = deact.Rollback(ctx) }()
+		ins := begin(t)
+		defer func() { _ = ins.Rollback(ctx) }()
+		if _, err := deact.Exec(ctx, deactivateSQL, c); err != nil {
+			t.Fatalf("deactivate: %v", err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := ins.Exec(ctx, insertSQL, c, hash)
+			done <- err
+		}()
+		time.Sleep(300 * time.Millisecond)
+		if err := deact.Commit(ctx); err != nil {
+			t.Fatalf("commit deactivation: %v", err)
+		}
+		insErr := <-done
+		if insErr == nil {
+			if err := ins.Commit(ctx); err != nil {
+				t.Logf("insert commit: %v (SQLSTATE %s)", err, mcSQLState(err))
+			}
+		} else if got := mcSQLState(insErr); got != "23514" {
+			t.Errorf("insert behind the deactivation: %v (SQLSTATE %s), want 23514 or a revoked key", insErr, got)
+		}
+		t.Logf("insert behind the deactivation: err %v (SQLSTATE %q)", insErr, mcSQLState(insErr))
+		noLiveKeyAtInactive(t, c, hash)
+	})
+
+	// Without concurrency: a key for an inactive consumer is refused.
+	t.Run("insert_into_inactive_consumer_is_refused", func(t *testing.T) {
+		c := mcConsumer(ctx, t, pool, tid, "race-sequential", map[string]string{"active": "false"})
+		_, err := pool.Exec(ctx, insertSQL, c, mcHash("race-sequential"))
+		if got := mcSQLState(err); got != "23514" {
+			t.Errorf("key insert into an inactive consumer: err %v (SQLSTATE %q), want 23514", err, got)
 		}
 	})
 }
@@ -944,6 +1084,7 @@ func m161Catalog(ctx context.Context, t *testing.T, pool *pgxpool.Pool) string {
 	for _, q := range []string{
 		`SELECT p.proname || ': ' || pg_get_functiondef(p.oid) FROM pg_proc p
 		  WHERE p.proname IN ('model_cidrs_private', 'model_consumer_deactivate_revokes',
+		                      'model_keys_consumer_active',
 		                      'model_consumers_identity_immutable', 'model_keys_identity_immutable',
 		                      'audit_state_model_consumer', 'audit_state_model_key',
 		                      'audit_model_consumers_write', 'audit_model_keys_write', 'ctx_model_auth')
@@ -986,7 +1127,8 @@ DROP FUNCTION audit_state_model_consumer(context_model_consumers);
 DROP TABLE context_model_keys, context_model_consumers;
 DROP FUNCTION audit_model_keys_write(), audit_model_consumers_write(),
               model_keys_identity_immutable(), model_consumers_identity_immutable(),
-              model_consumer_deactivate_revokes(), model_cidrs_private(CIDR[]);
+              model_keys_consumer_active(), model_consumer_deactivate_revokes(),
+              model_cidrs_private(CIDR[]);
 ALTER TABLE context_tenants DROP COLUMN max_model_consumers;
 DROP INDEX idx_settings_audit_entity_tenant;
 DELETE FROM _migrations WHERE version = 161;`
@@ -1031,7 +1173,7 @@ func TestMigration161Idempotent(t *testing.T) {
 		}
 		var left int
 		if err := tx.QueryRow(ctx, `SELECT
-			  (SELECT count(*) FROM pg_proc WHERE proname IN ('model_cidrs_private', 'model_consumer_deactivate_revokes',
+			  (SELECT count(*) FROM pg_proc WHERE proname IN ('model_cidrs_private', 'model_consumer_deactivate_revokes', 'model_keys_consumer_active',
 			      'model_consumers_identity_immutable', 'model_keys_identity_immutable', 'audit_state_model_consumer',
 			      'audit_state_model_key', 'audit_model_consumers_write', 'audit_model_keys_write', 'ctx_model_auth'))
 			+ (SELECT count(*) FROM pg_class WHERE relname IN ('context_model_consumers', 'context_model_keys',
