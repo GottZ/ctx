@@ -112,3 +112,58 @@ func TestQuotaCooldownAfterThreeFailures(t *testing.T) {
 		t.Errorf("busy set a cooldown of %s, want none", time.Until(until).Round(time.Second))
 	}
 }
+
+// TestClassifyStatusBoundaryByProvider pins the tabu of W02-11: the body of
+// an error answer is read on ctx rows only. Every other provider class keeps
+// the status mapping even when the body carries a gateway code — including
+// a code that disagrees with the status. On a ctx row the code wins for
+// every table code, not only for the four K15 overrides (review 2, FR2-2).
+func TestClassifyStatusBoundaryByProvider(t *testing.T) {
+	for _, pc := range []string{ProviderGeneric, ProviderOpenRouter, ProviderLlamaCpp} {
+		cases := []struct {
+			name string
+			err  error
+			want ErrClass
+		}{
+			{"429 server_busy", statusErr(429, envelope("server_busy")), ClassRateLimit},
+			{"429 concurrency_limit_exceeded", statusErr(429, envelope("concurrency_limit_exceeded")), ClassRateLimit},
+			{"504 upstream_timeout", statusErr(504, envelope("upstream_timeout")), ClassGateway},
+			{"429 insufficient_quota", statusErr(429, envelope("insufficient_quota")), ClassRateLimit},
+			{"500 with rate_limit_exceeded", statusErr(500, envelope("rate_limit_exceeded")), ClassServerFault},
+			{"401 with server_busy", statusErr(401, envelope("server_busy")), ClassAuth},
+			{"503 with upstream_error", statusErr(503, envelope("upstream_error")), ClassGateway},
+		}
+		for _, c := range cases {
+			if got := Classify(c.err, pc); got != c.want {
+				t.Errorf("%s %s: Classify = %s, want %s (status mapping, body unread)", pc, c.name, got, c.want)
+			}
+		}
+	}
+	ctxCases := []struct {
+		name string
+		err  error
+		want ErrClass
+	}{
+		{"500 with rate_limit_exceeded", statusErr(500, envelope("rate_limit_exceeded")), ClassRateLimit},
+		{"401 with server_busy", statusErr(401, envelope("server_busy")), ClassBusy},
+		{"503 with upstream_error", statusErr(503, envelope("upstream_error")), ClassServerFault},
+	}
+	for _, c := range ctxCases {
+		if got := Classify(c.err, ProviderCtx); got != c.want {
+			t.Errorf("ctx %s: Classify = %s, want %s (the code wins)", c.name, got, c.want)
+		}
+	}
+}
+
+// TestProviderCtxLiteral pins the wire value of the ctx provider class: the
+// provider_class CHECK and validate.go open for exactly "ctx" with F-W5
+// (design/04 §4.12); a drifted constant would leave every such row outside
+// the ctx branch (review 2, FR2-3).
+func TestProviderCtxLiteral(t *testing.T) {
+	if ProviderCtx != "ctx" {
+		t.Fatalf("ProviderCtx = %q, want \"ctx\"", ProviderCtx)
+	}
+	if got := Classify(statusErr(429, envelope("server_busy")), "ctx"); got != ClassBusy {
+		t.Errorf(`provider class "ctx": Classify = %s, want busy`, got)
+	}
+}
