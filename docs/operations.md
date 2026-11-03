@@ -251,7 +251,9 @@ backup_rotate "graph-*.dump" 3
 `ctx-llmlog-export` is a SELECT-only bulk export of `context_llm_log` as JSONL — one line per
 row, 1:1 with the live schema (`to_jsonb`), meant to secure the prompt/response **bodies**
 before a retention window (`CTX_LLMLOG_RETENTION_DAYS`, hot-mutable) ever NULLs them, and as
-the raw source of a replay corpus.
+the raw source of a replay corpus. Because each line is `to_jsonb` of the row, a new column shows up
+without a code change: since migration 158 every line additionally carries `"consumer_id"` (`null`
+on every row until the OpenAI-compatible API writes it) — additive, existing keys are unchanged.
 
 ```bash
 cd go && go build ./cmd/ctx-llmlog-export
@@ -846,6 +848,14 @@ SELECT id, scope, category, title, guard_status, metadata->>'guard_resolution' A
 ```
 
 Until the guard has run, the rows without a resolution show `guard_status = active` without `guard_checked_at`; afterwards they carry the guard's new decision next to the marker.
+
+### Migration 158: `consumer_id` on `context_llm_log`
+
+`context_llm_log` gets a nullable `consumer_id UUID`: the external consumer of the OpenAI-compatible API (`/v1`) a row is attributed to. Consumers are a credential class of their own (`ctxm_` model keys); they never authenticate as a knowledge key and so never fill `api_key_id`. Like `api_key_id` the column has no foreign key — the log references a credential, it does not depend on it, so deleting a consumer never anonymises or deletes its history. A `CHECK` (`ck_llm_log_one_identity`, `num_nonnulls(api_key_id, consumer_id) <= 1`) holds on the hypertable and on every chunk, existing and future: a row names a knowledge key, a consumer or nobody (background work), never both. An insert with both fails with `23514`; through the daemon's write path such a row is lost and counted (`llmlog.insert_failures` on `/api/status`). A partial index `idx_llm_log_consumer` on `(consumer_id, created_at DESC) WHERE consumer_id IS NOT NULL` serves per-consumer windows and stays empty until the first `/v1` row. No existing row changes and there is no backfill: every row so far is internal, so `consumer_id` is NULL everywhere, and nothing in this release writes it yet.
+
+**Boot time.** Adding the column is a catalog change. Adding the `CHECK` validates every existing row, and the index is built chunk by chunk — two reads of every chunk's heap, the prompt and response bodies stored inline in the row included (only bodies above the TOAST threshold lie outside the heap and are not read), while `context_llm_log` stays locked until the migration's transaction commits. Measured on a synthetic copy of production shape — 1 000 000 rows over 29 chunks, 976 MB of heap (about 1 kB per row; the live table has 945 bytes), TimescaleDB 2.31.0 in the test container: `CHECK` validation **0.45 s**, index build **0.43 s**, the whole migration through the boot runner **0.75 s**. For comparison, a serial read-only scan of the same predicate over the live table (352 565 rows, 29 chunks, 318 MB of heap, 2026-11-03) took 0.15 s from shared buffers. Those runs read a warm cache. Cold, as measured in review (nothing cached), the whole migration through the runner took about 0.9–1.25 s for 1 000 000 rows / 976 MB of heap and about 2.85 s for 3 000 000 rows / 2.9 GB — roughly 0.7–1 s per GB of heap and cold read. Take that as the upper bound to plan with: extrapolated (not measured), a 30 GB heap read cold twice would hold `context_llm_log` locked for roughly 40–60 s at boot. Reproduce the measurement with `CTX_M158_PROBE_ROWS=1000000 go test -tags=integration -p 1 -run TestMigration158CostProbe -v ./internal/llmlog/`. Nothing to do at upgrade time, with one caveat: the migration sets `lock_timeout = '3s'`, so a session that holds a lock on `context_llm_log` while ctxd boots — a long query in `psql`, a dashboard — makes the migration fail and the boot with it (`migrations failed`); the next start retries it.
+
+**Downgrading** below 158 needs no schema change: an older binary never names `consumer_id`, its rows keep it NULL, and the `CHECK` accepts them. Drop the objects only together with a revert of the code that writes the column (a current binary names it in every insert, so without it every LLM-log row is lost): `DROP INDEX idx_llm_log_consumer; ALTER TABLE context_llm_log DROP CONSTRAINT ck_llm_log_one_identity; ALTER TABLE context_llm_log DROP COLUMN consumer_id;`.
 
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 

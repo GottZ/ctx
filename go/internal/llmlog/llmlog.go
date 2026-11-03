@@ -104,6 +104,19 @@ type Entry struct {
 	CostUSD             *float64
 	APIKeyID            string
 
+	// ConsumerID is the /v1 caller (design/01 §4.7): the external consumer
+	// of the OpenAI-compatible API a row is attributed to, persisted as
+	// consumer_id (migration 158; no FK, like api_key_id — the log outlives
+	// the credential). A row names at most ONE caller, never ConsumerID
+	// together with APIKeyID: a consumer is a credential class of its own
+	// and never authenticates as a knowledge key. The database side of that
+	// contract is the CHECK ck_llm_log_one_identity — such a row is refused
+	// and counted in InsertFailures; the Go side is the gateway stamp
+	// (Entry.StampGateway, W06-9), which is to be the field's only setter.
+	// Until it lands no production code sets ConsumerID, so every row keeps
+	// consumer_id NULL.
+	ConsumerID string
+
 	// Dispatch telemetry (Vorhaben E wave MW10, design/05 §3.2). QueueWaitMs
 	// is the row-defining attempt's lease wait — a POINTER because 0 is a
 	// real measurement (immediate admission, pass-through state) and must
@@ -399,16 +412,16 @@ func insert(pool *pgxpool.Pool, e Entry) error {
 			 block_ids, dream_version, metadata,
 			 backend_name, backend_trust, backend_locality,
 			 required_sensitivity, attempt, cost_usd, api_key_id,
-			 queue_wait_ms, dispatch_class, dispatch_abort)
+			 queue_wait_ms, dispatch_class, dispatch_abort, consumer_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-		        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+		        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
 		e.Pipeline, e.Model, e.Host, durMs, errStr,
 		nullInt(e.PromptTokens), nullInt(e.CompletionTokens),
 		e.RequestSystem, e.RequestUser, e.ResponseContent,
 		e.BlockIDs, e.DreamVersion, metadata,
 		nullStr(e.BackendName), nullStr(e.BackendTrust), nullStr(e.BackendLocality),
 		nullStr(e.RequiredSensitivity), nullInt16(e.Attempt), e.CostUSD, nullUUID(e.APIKeyID),
-		e.QueueWaitMs, nullStr(e.DispatchClass), nullStr(e.DispatchAbort),
+		e.QueueWaitMs, nullStr(e.DispatchClass), nullStr(e.DispatchAbort), nullUUID(e.ConsumerID),
 	)
 	return err
 }
