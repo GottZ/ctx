@@ -96,7 +96,7 @@ func TestWritersEnvelope(t *testing.T) {
 
 func vocabulary() map[string]oai.CodeSpec {
 	m := map[string]oai.CodeSpec{}
-	for _, c := range oai.Codes {
+	for _, c := range oai.Codes() {
 		m[c.Code] = c
 	}
 	return m
@@ -113,7 +113,7 @@ func TestCodesVocabulary(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	var fiveHundred []string
-	for _, c := range oai.Codes {
+	for _, c := range oai.Codes() {
 		if seen[c.Code] {
 			t.Errorf("code %q listed twice", c.Code)
 		}
@@ -142,6 +142,11 @@ func TestCodesVocabulary(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("code %q missing from oai.Codes", want)
 		}
+	}
+	got := oai.Codes()
+	got[0].Status = 0
+	if oai.Codes()[0].Status == 0 {
+		t.Error("Codes() hands out the table itself — a caller changed the vocabulary")
 	}
 	if seen["tokens_exceed_limit"] {
 		t.Error("tokens_exceed_limit is retired (design/06 E-06-9 = (a), Finding 31) and must not be in the vocabulary")

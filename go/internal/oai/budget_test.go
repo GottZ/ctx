@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -244,6 +245,57 @@ func TestReservationSealedAfterRelease(t *testing.T) {
 		<-done
 		if got := b.InUse(); got != 0 {
 			t.Fatalf("round %d: %d bytes left reserved after release raced a grow", i, got)
+		}
+	}
+}
+
+// TestBudgetConcurrentGrowNeverOversubscribes pins the atomicity of the
+// budget's compare-and-swap (Fremd-Review 2, FR2-2): many goroutines growing
+// against a tight limit at once never get more granted than the limit, the
+// counter equals what was granted, and concurrent double releases bring it
+// back to exactly 0. A check-then-store counter loses updates here.
+func TestBudgetConcurrentGrowNeverOversubscribes(t *testing.T) {
+	const (
+		limit   = 1000
+		workers = 200
+		grows   = 3
+		chunk   = 7
+	)
+	for round := 0; round < 50; round++ {
+		var b oai.Budget
+		start := make(chan struct{})
+		var granted atomic.Int64
+		var wg sync.WaitGroup
+		res := make([]*oai.Reservation, workers)
+		for i := range res {
+			res[i] = b.NewReservation(limit)
+			wg.Add(1)
+			go func(r *oai.Reservation) {
+				defer wg.Done()
+				<-start
+				for j := 0; j < grows; j++ {
+					if r.Grow(chunk) {
+						granted.Add(chunk)
+					}
+				}
+			}(res[i])
+		}
+		close(start)
+		wg.Wait()
+		if g := granted.Load(); g > limit {
+			t.Fatalf("round %d: %d bytes granted against a %d-byte budget", round, g, limit)
+		}
+		if got, g := b.InUse(), granted.Load(); got != g {
+			t.Fatalf("round %d: InUse %d, granted %d — the counter lost updates", round, got, g)
+		}
+		for _, r := range res {
+			wg.Add(2)
+			go func() { defer wg.Done(); r.Release() }()
+			go func() { defer wg.Done(); r.Release() }()
+		}
+		wg.Wait()
+		if got := b.InUse(); got != 0 {
+			t.Fatalf("round %d: InUse %d after releasing everything, want 0", round, got)
 		}
 	}
 }

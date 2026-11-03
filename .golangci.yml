@@ -143,8 +143,12 @@ linters:
         # the block store. internal/config is already refused by
         # config-layering above — values arrive through the injected
         # func() oai.Settings getter. Tests are included: the harness has no
-        # business with the corpus either. Deny prefixes end in "$" (exact
-        # match, see the leaf rules below).
+        # business with the corpus either. depguard checks direct imports
+        # only; that the oai test binary is corpus-free transitively as well
+        # (go list -deps -test ./internal/oai/ = oai alone) is kept by the
+        # tests, which use a stand-in for the house Recovery instead of
+        # importing internal/handler. Deny prefixes end in "$" (exact match,
+        # see the leaf rules below).
         oai-isolation:
           files:
             - "**/go/internal/oai/**"

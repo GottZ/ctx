@@ -40,14 +40,18 @@ func EnabledGate(get func() Settings) func(http.Handler) http.Handler {
 // chain set — a Retry-After, rate-limit headers, a Content-Length — belongs
 // to an answer that will never be sent.
 //
-// Two cases write no envelope:
-//   - the response is already committed (status line out, e.g. a stream in
-//     flight): nothing valid can follow, and ending it normally would hand
-//     the client a truncated body that reads like a complete one. The
-//     response is aborted instead (abortCommitted), so the client sees a
-//     failed read;
-//   - http.ErrAbortHandler: net/http's own "abort this response" signal, not
-//     a fault; it is re-panicked unchanged.
+// Once the response is committed (status line out, e.g. a stream in flight)
+// nothing valid can follow, and ending it normally would hand the client a
+// truncated body that reads like a complete one; the response is aborted
+// instead (abortCommitted), so the client sees a failed read.
+//
+// http.ErrAbortHandler is no special case on this surface (Fremd-Review 2,
+// FR2-1): re-panicked, it would reach the global house Recovery, which
+// catches every panic — before the commit as a plain-text 500 (K5: never a
+// 500 from inside ctx), after it as "internal server error" appended to the
+// stream and a clean end. So a deliberate abort is handled like any panic:
+// the internal 503 before the commit, abortCommitted after it. It is logged
+// as a warning without a stack, because the handler asked for it.
 func Recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cw := &commitWatch{ResponseWriter: w}
@@ -58,16 +62,22 @@ func Recover(next http.Handler) http.Handler {
 				return
 			}
 			if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
-				panic(rec)
+				slog.Warn("gateway: handler aborted the response",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"committed", cw.committed,
+					"request_id", w.Header().Get("X-Request-ID"),
+				)
+			} else {
+				slog.Error("gateway: panic recovered",
+					"error", rec,
+					"stack", string(debug.Stack()),
+					"method", r.Method,
+					"path", r.URL.Path,
+					"committed", cw.committed,
+					"request_id", w.Header().Get("X-Request-ID"),
+				)
 			}
-			slog.Error("gateway: panic recovered",
-				"error", rec,
-				"stack", string(debug.Stack()),
-				"method", r.Method,
-				"path", r.URL.Path,
-				"committed", cw.committed,
-				"request_id", w.Header().Get("X-Request-ID"),
-			)
 			if cw.committed {
 				abortCommitted(w)
 				return
@@ -85,10 +95,13 @@ func Recover(next http.Handler) http.Handler {
 
 // abortCommitted ends a committed response so that the client sees an error,
 // not a short success: on HTTP/1 the connection is taken over and closed
-// (the body ends without its terminating chunk — the client's read fails).
-// Where the connection cannot be taken over (HTTP/2, a recorder),
-// http.ErrAbortHandler is raised — net/http then resets the stream, provided
-// no outer middleware swallows the signal.
+// (the body ends without its terminating chunk — the client's read fails);
+// the global chain lets the takeover through (handler.Logger's writer
+// unwraps). Where the connection cannot be taken over (a recorder; HTTP/2,
+// which ctxd does not serve today — plain ListenAndServe, no TLS),
+// http.ErrAbortHandler is raised as the last resort; net/http would reset
+// the stream, but the house Recovery outside still swallows it (handover
+// W02-08).
 func abortCommitted(w http.ResponseWriter) {
 	if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
 		_ = conn.Close()

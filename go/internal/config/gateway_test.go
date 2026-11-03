@@ -125,6 +125,10 @@ func TestValidateGateway(t *testing.T) {
 			g(c).EmbeddingMaxFloats = 16 << 20 // 64 MiB of float32 vectors
 			g(c).InflightBudget = 3*g(c).MaxRequestBytes + 2*g(c).MaxResponseBytes
 		}},
+		// Fremd-Review 2, FR2-3: caps whose reservation overflows int64 must
+		// not wrap around into a negative floor that every budget clears.
+		{"gateway.inflight_budget", func(c *Config) { g(c).MaxRequestBytes = 1 << 62 }},
+		{"gateway.inflight_budget", func(c *Config) { g(c).EmbeddingMaxFloats = 1 << 62 }},
 		{"gateway.retry_after_jitter", func(c *Config) { g(c).RetryAfterJitter = -0.01 }},
 		{"gateway.retry_after_jitter", func(c *Config) { g(c).RetryAfterJitter = 1.01 }},
 		{"gateway.retry_after_jitter", func(c *Config) { g(c).RetryAfterJitter = math.NaN() }},

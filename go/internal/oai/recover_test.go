@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -22,7 +21,7 @@ import (
 func TestRecoverPanicIs503(t *testing.T) {
 	// The gateway's Recover sits inside the global chain (design/02 §4.2):
 	// the house Recovery around it must never see the panic.
-	for _, v := range recoverViolations(handler.Recovery(oai.Recover(panicky()))) {
+	for _, v := range recoverViolations(houseRecovery(oai.Recover(panicky()))) {
 		t.Error(v)
 	}
 }
@@ -30,7 +29,7 @@ func TestRecoverPanicIs503(t *testing.T) {
 // TestRecoverCounterproof keeps the red side of R-02-14 reproducible: the
 // global house Recovery alone answers a plain-text 500.
 func TestRecoverCounterproof(t *testing.T) {
-	got := recoverViolations(handler.Recovery(panicky()))
+	got := recoverViolations(houseRecovery(panicky()))
 	for _, v := range got {
 		t.Log(v)
 	}
@@ -74,7 +73,7 @@ func recoverViolations(stack http.Handler) []string {
 // finding 1). Over HTTP/1 Recover takes the connection over and closes it:
 // the client gets the partial body and a FAILED read.
 func TestRecoverAbortsCommittedResponse(t *testing.T) {
-	srv := httptest.NewServer(handler.Recovery(oai.Recover(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(houseRecovery(oai.Recover(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("data: {\"partial\":true}\n\n"))
 		_ = http.NewResponseController(w).Flush()
@@ -144,15 +143,31 @@ func TestRecoverDropsHeadersOfTheLostAnswer(t *testing.T) {
 	}
 }
 
-// TestRecoverRepanicsAbortHandler: http.ErrAbortHandler is net/http's
-// "abort this response" signal, not a fault — it passes through.
-func TestRecoverRepanicsAbortHandler(t *testing.T) {
-	defer func() {
-		rec := recover()
-		if err, ok := rec.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
-			t.Errorf("recovered %v, want http.ErrAbortHandler to pass through", rec)
-		}
-	}()
-	oai.Recover(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) })).
-		ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+// TestRecoverAbortHandlerBeforeCommitIs503: http.ErrAbortHandler is no
+// special case on the gateway (Fremd-Review 2, FR2-1) — before the commit it
+// is the internal 503 like any panic, not a re-panic that the house Recovery
+// outside would turn into a plain-text 500. The real chain is pinned in
+// internal/handler (TestGatewayRecoverThroughHouseChain).
+func TestRecoverAbortHandlerBeforeCommitIs503(t *testing.T) {
+	for _, v := range recoverViolations(houseRecovery(oai.Recover(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	})))) {
+		t.Error(v)
+	}
+}
+
+// houseRecovery stands in for handler.Recovery (the global chain's
+// recovery: plain-text 500 for every panic, ErrAbortHandler included) so the
+// oai test binary stays free of internal/handler and, through it, of the
+// corpus packages oai-isolation keeps out (Fremd-Review 2, FR2-5). The real
+// chain is pinned in internal/handler/gateway_recover_test.go.
+func houseRecovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recover() != nil {
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }

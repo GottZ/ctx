@@ -1340,8 +1340,13 @@ func validateGateway(c *Config) []Issue {
 	if g.StreamCommitGrace > gatewayCommitGraceCeiling {
 		bad("gateway.stream_commit_grace", fmt.Sprintf("gateway.stream_commit_grace (%v) must be <= %v — a later commit runs into a typical 60 s proxy idle timeout", g.StreamCommitGrace, gatewayCommitGraceCeiling))
 	}
-	if need, ok := gatewayBudgetFloor(g); ok && g.InflightBudget > 0 && int64(g.InflightBudget) < need {
-		bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap (%d = %d × gateway.max_request_bytes + the largest response share) — such a request could never be served", g.InflightBudget, need, gatewayRequestReserve))
+	if need, ok := gatewayBudgetFloor(g); ok && g.InflightBudget > 0 {
+		switch {
+		case need < 0:
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + the largest response share) exceed any representable budget", g.InflightBudget, gatewayRequestReserve))
+		case int64(g.InflightBudget) < need:
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap (%d = %d × gateway.max_request_bytes + the largest response share) — such a request could never be served", g.InflightBudget, need, gatewayRequestReserve))
+		}
 	}
 	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {
 		bad("gateway.retry_after_jitter", fmt.Sprintf("gateway.retry_after_jitter (%v) must be in [0, 1]", j))
@@ -1351,15 +1356,38 @@ func validateGateway(c *Config) []Issue {
 
 // gatewayBudgetFloor is the in-flight reservation of one request at every
 // gateway cap (V39). ok is false while a size is not positive — V35/V38
-// report those, and a floor over them would only add a second error.
+// report those, and a floor over them would only add a second error. The
+// arithmetic saturates (Fremd-Review 2, FR2-3): a floor beyond int64 is
+// reported as -1 — "no budget can hold it" — instead of wrapping around into
+// a negative value every budget clears.
 func gatewayBudgetFloor(g *GatewayConfig) (int64, bool) {
 	if g.MaxRequestBytes <= 0 || g.MaxResponseBytes <= 0 || g.MaxStreamFrameBytes <= 0 || g.EmbeddingMaxFloats <= 0 {
 		return 0, false
 	}
 	response := max(
-		gatewayResponseCopies*int64(g.MaxResponseBytes),
-		gatewayResponseCopies*int64(g.MaxStreamFrameBytes),
-		gatewayFloatBytes*int64(g.EmbeddingMaxFloats)+gatewayEmbedEncoderReserve,
+		gatewayMulSat(gatewayResponseCopies, int64(g.MaxResponseBytes)),
+		gatewayMulSat(gatewayResponseCopies, int64(g.MaxStreamFrameBytes)),
+		gatewayAddSat(gatewayMulSat(gatewayFloatBytes, int64(g.EmbeddingMaxFloats)), gatewayEmbedEncoderReserve),
 	)
-	return gatewayRequestReserve*int64(g.MaxRequestBytes) + response, true
+	floor := gatewayAddSat(gatewayMulSat(gatewayRequestReserve, int64(g.MaxRequestBytes)), response)
+	if floor == math.MaxInt64 {
+		return -1, true
+	}
+	return floor, true
+}
+
+// gatewayMulSat and gatewayAddSat are a·b and a+b for non-negative operands,
+// saturating at math.MaxInt64.
+func gatewayMulSat(a, b int64) int64 {
+	if a != 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
+}
+
+func gatewayAddSat(a, b int64) int64 {
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
 }

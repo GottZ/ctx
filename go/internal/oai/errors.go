@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 )
 
 // Error types — the `type` field of the envelope (design/02 §4.10.2). The
@@ -73,7 +74,7 @@ type CodeSpec struct {
 	Type   string
 }
 
-// Codes is the exported vocabulary (design/02 §4.10.2; the dispatcher's
+// codes is the vocabulary behind Codes (design/02 §4.10.2; the dispatcher's
 // saturation code server_busy, masterplan K6; the limiter codes of design/06
 // §4.4; the federation codes of design/04 §4.6). Each code has exactly one
 // status and type; what varies per situation is x-should-retry and the
@@ -85,7 +86,7 @@ type CodeSpec struct {
 // The federation codes have no type in design/04; they take the convention
 // of the table above: 4xx ⇒ invalid_request_error, the non-503 5xx (508) ⇒
 // server_error.
-var Codes = []CodeSpec{
+var codes = []CodeSpec{
 	{CodeNotFound, http.StatusNotFound, TypeInvalidRequest},
 	{CodeMethodNotAllowed, http.StatusMethodNotAllowed, TypeInvalidRequest},
 	{CodeInvalidAPIKey, http.StatusUnauthorized, TypeInvalidRequest},
@@ -118,6 +119,11 @@ var Codes = []CodeSpec{
 	{CodeFederationHopRequired, http.StatusBadRequest, TypeInvalidRequest},
 	{CodePeerInstanceMismatch, http.StatusForbidden, TypeInvalidRequest},
 }
+
+// Codes returns the vocabulary as a copy (Fremd-Review 2, FR2-7): the table
+// W02-11 checks its classifier against for totality cannot be changed at
+// run time by any importer.
+func Codes() []CodeSpec { return slices.Clone(codes) }
 
 // overloadedRetryAfter is the Retry-After of a budget refusal (design/02
 // §4.2.1, §4.10.2: "Retry-After: 1"). Hardcoded on purpose and not a setting:
