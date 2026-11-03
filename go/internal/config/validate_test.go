@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -393,7 +394,7 @@ func TestV17bIsAdvisoryOnly(t *testing.T) {
 // changes TYPE (seconds → int, or a struct field that stops being a
 // time.Duration) would leave the walk without anyone noticing. Raise this
 // number in the same commit that adds a duration key.
-const wantDurationKeys = 47 // +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered
+const wantDurationKeys = 48 // +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered; +1 on 2026-11-03 (W06-8): status.foreign_load_timeout, V17 sign + V37 floor
 
 // TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
 // V17 (issue #29): before it, exactly two of the seconds keys had a sign check
@@ -468,7 +469,7 @@ func TestValidateFoldedSignChecksReportOnce(t *testing.T) {
 // that silently changes TYPE (int → float, or a leaf that stops being an int)
 // would leave the walk without anyone noticing. Raise this number in the same
 // commit that adds an int key.
-const wantIntKeys = 89
+const wantIntKeys = 91 // +2 on 2026-11-03 (W06-8): status.foreign_load_hysteresis_ticks and status.foreign_load_hourly_min_abs, V35 sign (+ V37 floor for the ticks)
 
 // intSignWarnKeys is the OTHER half of the classification, and the reason V35
 // runs last. These three keys are served by NORMALIZING passes that write the
@@ -780,5 +781,47 @@ func TestValidateRerankHeartbeatWarnsRetired(t *testing.T) {
 func TestDecideTieOddsDefaultMirrorsDream(t *testing.T) {
 	if got := Defaults().Dream.DecideTieOdds; got != dream.DecideTieOddsDefault {
 		t.Fatalf("registry default %v != dream.DecideTieOddsDefault %v", got, dream.DecideTieOddsDefault)
+	}
+}
+
+// TestValidateStatusForeignLoad pins V37 (W06-8): the floors of the
+// foreign-load detector's timeout and hysteresis and the [0,1] range of its
+// hourly ratio. The registry defaults pass; each broken value is exactly one
+// error on its own key (signs stay with V17/V35).
+func TestValidateStatusForeignLoad(t *testing.T) {
+	if issues := validateStatusForeignLoad(Defaults()); len(issues) != 0 {
+		t.Fatalf("defaults raise V37 issues: %+v", issues)
+	}
+	cases := []struct {
+		key string
+		mut func(c *Config)
+	}{
+		{"status.foreign_load_timeout", func(c *Config) { c.Status.ForeignLoadTimeout = 0 }},
+		{"status.foreign_load_hysteresis_ticks", func(c *Config) { c.Status.ForeignLoadHysteresisTicks = 0 }},
+		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = -0.01 }},
+		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = 1.5 }},
+		// Fremd-Review 2, F3: NaN parses (strconv.ParseFloat) and fails every
+		// comparison, so a bare range check lets it through and the hourly
+		// verdict is silently dead (excess > NaN is always false).
+		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = math.NaN() }},
+	}
+	for _, tc := range cases {
+		c := Defaults()
+		tc.mut(c)
+		var hits []Issue
+		for _, is := range Validate(c) {
+			if is.Field == tc.key {
+				hits = append(hits, is)
+			}
+		}
+		if len(hits) != 1 || hits[0].Severity != SeverityError {
+			t.Errorf("%s: want exactly one error, got %+v", tc.key, hits)
+		}
+	}
+	c := Defaults()
+	c.Status.ForeignLoadHourlyMinAbs = 0
+	c.Status.ForeignLoadHourlyMinRatio = 0
+	if issues := validateStatusForeignLoad(c); len(issues) != 0 {
+		t.Errorf("0 for either tolerance term is legal, got %+v", issues)
 	}
 }

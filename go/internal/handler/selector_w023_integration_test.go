@@ -110,6 +110,9 @@ func w023Config(enabled bool) *config.Config {
 		// subset would need an edit for every key the group gains, which is the
 		// maintenance this fixture keeps re-learning.
 		Distill: config.Defaults().Distill,
+		// W06-8: same class again — the foreign-load detector's timeout and
+		// hysteresis carry fatal floors (V37); taken whole from the registry.
+		Status: config.Defaults().Status,
 		Selector: config.SelectorConfig{
 			Enabled:        enabled,
 			ExactMax:       w023ExactMax,

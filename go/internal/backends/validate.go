@@ -126,7 +126,34 @@ func ValidateBackend(b *Backend) (warnings []string, errs []FieldError) {
 	errs = append(errs, e...)
 	errs = append(errs, validateCarriers(b)...)
 	errs = append(errs, validateAnthropic(b)...)
+	errs = append(errs, validateForeignLoadProbe(b)...)
 	return warnings, errs
+}
+
+// validateForeignLoadProbe guards metadata.foreign_load_probe (W06-8,
+// design/06 §4.9). The marker makes the status collector GET <origin>/metrics
+// every tick and publish the reading in the server-admin status frame — an
+// observation of the GPU host the server operator runs, so it is legal on a
+// shared row only: a tenant row carrying it is refused, whatever the value.
+// Both tiers write backends through the same backend-create/-update path; a
+// tenant-admin's rows are pinned to its home scope before this runs, and a
+// tenant-admin cannot update a '_global' row at all, so this scope rule alone
+// keeps the marker server-admin-only. The value must name a known probe kind;
+// a typo would otherwise switch the detector off silently (ForeignLoadProbe
+// resolves an unknown value to "not probed").
+func validateForeignLoadProbe(b *Backend) []FieldError {
+	raw, ok := b.Metadata[foreignLoadProbeKey]
+	if !ok {
+		return nil
+	}
+	if b.EgressGuarded() {
+		return []FieldError{{"metadata.foreign_load_probe",
+			"foreign load probing observes the GPU host and is reserved to _global (server-admin) backends"}}
+	}
+	if v, isStr := raw.(string); !isStr || v != ForeignLoadProbeSGLang {
+		return []FieldError{{"metadata.foreign_load_probe", "must be one of: sglang"}}
+	}
+	return nil
 }
 
 // validateIdentity covers name, URL, enums and the locality cross-check.

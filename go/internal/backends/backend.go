@@ -256,6 +256,36 @@ func (b *Backend) ScoreDomain() string {
 	return ScoreDomainAuto
 }
 
+// foreignLoadProbeKey is the metadata slot that turns the status collector's
+// foreign-load detector on for the row's origin (W06-8, design/06 §4.9): the
+// value names the engine whose GET /metrics vocabulary the detector reads.
+// Metadata again, for the score_domain reason: an observation flag of the
+// server operator, not a wire-merge field, and no migration.
+const foreignLoadProbeKey = "foreign_load_probe"
+
+// ForeignLoadProbeSGLang is the one probe kind today: an SGLang engine
+// (sglang:num_running_reqs, sglang:http_requests_active,
+// sglang:http_responses_total — the vocabulary lives in the status
+// collector's profile table).
+const ForeignLoadProbeSGLang = "sglang"
+
+// ForeignLoadProbe resolves the probe kind of the row: the metadata value when
+// it is a known kind AND the row is server-shared ('_global', or an unscoped
+// tuple — the EgressGuarded complement), "" otherwise. The scope half repeats
+// the write-time rule (ValidateBackend) on purpose: a tenant row that carries
+// the marker anyway — written past the API, by hand — must still never make
+// the collector dial its tenant-chosen host, and an invalid stored value
+// resolves to "not probed" rather than to a guess.
+func (b *Backend) ForeignLoadProbe() string {
+	if b.EgressGuarded() {
+		return ""
+	}
+	if v, ok := b.Metadata[foreignLoadProbeKey].(string); ok && v == ForeignLoadProbeSGLang {
+		return v
+	}
+	return ""
+}
+
 // TimeoutFor resolves the per-role timeout override, falling back to def.
 func (b *Backend) TimeoutFor(role string, def time.Duration) time.Duration {
 	if secs, ok := b.Timeouts[role]; ok && secs > 0 {

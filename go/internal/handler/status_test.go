@@ -162,6 +162,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	// recall fixture pointers (no address-of-literal in composite literals).
 	recallScope := "shared"
 	recallAvg, recallMin := 0.98, 0.91
+	flRunning, flHeld, flDelta := int64(3), 0, int64(3)
 	resp := statusResponse{
 		Success:  true,
 		Health:   healthResponse{Status: "ok", Services: map[string]string{"database": "ok"}},
@@ -256,6 +257,17 @@ func TestStatusGoldenKeys(t *testing.T) {
 		// PRESENT (this fixture, and even at 0); TestStatusPerTenantView's
 		// server_global_fields_zero_for_tenant subtest pins ABSENT on the tenant path.
 		LLMLog: &llmlogWriteStatus{InsertFailures: 1, InsertDropped: 0},
+		// W06-8 (design/06 §4.9): the foreign_load section is server-admin
+		// PRESENT while a target is marked (this fixture: one suspected
+		// target with an evaluated hour); TestForeignLoadExposure pins ABSENT
+		// on the tenant path and without a marked target.
+		ForeignLoad: &[]foreignLoadRow{{
+			Target: "http://spark:30000", Probe: "sglang", Backends: []string{"spark-chat"},
+			Running: &flRunning, Active: &flRunning, Held: &flHeld, Delta: &flDelta, Suspected: true, Since: &next,
+			SuspectedHourly: false,
+			Hourly:          &foreignLoadHour{Hour: next, EngineRequests: 102, CtxRequests: 100},
+			ProbeError:      nil, ProbedAt: &next,
+		}},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -264,7 +276,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "advisories", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
 		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration", "guard_review",
-		"guard_review_by_scope", "llmlog",
+		"guard_review_by_scope", "llmlog", "foreign_load",
 	})
 
 	var top map[string]json.RawMessage
@@ -282,6 +294,23 @@ func TestStatusGoldenKeys(t *testing.T) {
 	// W06-1: the llmlog write-path section — two process-wide loss counters,
 	// nothing else (no pipeline names, no error text: those are log material).
 	assertKeys(t, "llmlog", top["llmlog"], []string{"insert_failures", "insert_dropped"})
+
+	// W06-8: one foreign_load row per marked origin. probe_error/held/running/
+	// active are null-capable but always present (null = not measured, never omitted),
+	// the hourly sub-object carries the last evaluated hour.
+	var fls []json.RawMessage
+	if err := json.Unmarshal(top["foreign_load"], &fls); err != nil {
+		t.Fatalf("unmarshal foreign_load: %v", err)
+	}
+	assertKeys(t, "foreign_load.row", fls[0], []string{
+		"target", "probe", "backends", "running", "active", "held", "delta", "suspected", "since",
+		"suspected_hourly", "hourly", "probe_error", "probed_at",
+	})
+	var fl map[string]json.RawMessage
+	if err := json.Unmarshal(fls[0], &fl); err != nil {
+		t.Fatalf("unmarshal foreign_load row: %v", err)
+	}
+	assertKeys(t, "foreign_load.hourly", fl["hourly"], []string{"hour", "engine_requests", "ctx_requests"})
 
 	assertKeys(t, "dream", top["dream"], []string{
 		"mode", "throttle_interval_s", "pickable_now", "in_cooldown", "never_dreamed",

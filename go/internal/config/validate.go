@@ -75,6 +75,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
 	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
+	// V37 (W06-8): the foreign-load detector's floors and ratio range.
+	issues = append(issues, validateStatusForeignLoad(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -633,6 +635,37 @@ func validateEmbedBackoff(c *Config) []Issue {
 			issues = append(issues, Issue{Field: k.key, Severity: SeverityError,
 				Msg: fmt.Sprintf("%s must be > 0 — the consumer reads 0 as \"retry immediately\" (base * 2^attempts stays 0), so the failure memo parks nothing and a failing embed backend is retried in a tight loop", k.key)})
 		}
+	}
+	return issues
+}
+
+// validateStatusForeignLoad is V37 (wave W06-8): the floors and the ratio
+// range of the foreign-load detector's policy keys (design/06 §4.9). The
+// signs stay with the generic walks (V17 for the timeout, V35 for the two
+// counts); this check owns the values that parse, are not negative, and still
+// cannot mean what the surface would render:
+//   - status.foreign_load_timeout 0: every /metrics GET fails before it is
+//     sent, so the detector reports probe errors forever instead of readings.
+//   - status.foreign_load_hysteresis_ticks 0: a target would turn suspected
+//     and clear on the same round, one WARN pair per tick.
+//   - status.foreign_load_hourly_min_ratio outside [0,1] (float keys have no
+//     generic walk): a negative tolerance flags every hour, one above 1 hides
+//     an hour in which foreign requests outnumber ctx's own, and NaN — which
+//     ParseFloat accepts and every comparison rejects — switches the hourly
+//     verdict off silently.
+func validateStatusForeignLoad(c *Config) []Issue {
+	var issues []Issue
+	if c.Status.ForeignLoadTimeout == 0 {
+		issues = append(issues, Issue{Field: "status.foreign_load_timeout", Severity: SeverityError,
+			Msg: "status.foreign_load_timeout must be >= 1 second — 0 fails every foreign-load probe before it is sent"})
+	}
+	if c.Status.ForeignLoadHysteresisTicks == 0 {
+		issues = append(issues, Issue{Field: "status.foreign_load_hysteresis_ticks", Severity: SeverityError,
+			Msg: "status.foreign_load_hysteresis_ticks must be >= 1 — 0 would suspect and clear a target in the same probe round"})
+	}
+	if r := c.Status.ForeignLoadHourlyMinRatio; math.IsNaN(r) || r < 0 || r > 1 {
+		issues = append(issues, Issue{Field: "status.foreign_load_hourly_min_ratio", Severity: SeverityError,
+			Msg: fmt.Sprintf("status.foreign_load_hourly_min_ratio %g must be in [0,1]", r)})
 	}
 	return issues
 }

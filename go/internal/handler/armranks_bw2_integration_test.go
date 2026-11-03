@@ -108,6 +108,7 @@ func bw2Config() *config.Config {
 		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		Distill:        config.Defaults().Distill,
+		Status:         config.Defaults().Status, // W06-8: V37 floors
 	}
 }
 

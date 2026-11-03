@@ -227,6 +227,20 @@ type statusResponse struct {
 	// sets it — the counters sum every tenant's and the background's rows, a
 	// server-global figure) and when no source is wired (test fakes).
 	LLMLog *llmlogWriteStatus `json:"llmlog,omitempty"`
+	// ForeignLoad is the foreign-load detector section (W06-8, design/06
+	// §4.9, foreign_load.go): one row per '_global' backend origin marked
+	// metadata.foreign_load_probe — engine requests vs. dispatcher held
+	// leases, the hourly engine-response vs. rollup comparison, the probe
+	// error. Pointer + omitempty, PRESENT on the server-admin path whenever at
+	// least one target is probed (marked, enabled, not parked by a disable
+	// profile — one row per target from the tick it qualified, readings null
+	// until the first round lands). ABSENT otherwise, deliberately unlike
+	// llmlog's always-present 0/0: llmlog always measures, the detector
+	// measures only what an operator marked, and an empty list would read as
+	// "probed, nothing foreign" for a GPU nobody looks at. ABSENT on the per-tenant path (SnapshotForTenant never sets
+	// it): the running requests of a shared GPU are a live activity oracle
+	// over every tenant's load (dispatcher.go TargetSnapshot exposure rule).
+	ForeignLoad *[]foreignLoadRow `json:"foreign_load,omitempty"`
 	// GuardReview is the needs_review pipeline's push signal (guard W2): the
 	// flagged-block counts + the oldest flagged stamp, so an unworked review
 	// queue is VISIBLE instead of discoverable-on-pull only (guard-stats).
@@ -742,6 +756,12 @@ type StatusCollector struct {
 	// literal in a test) omits the section.
 	llmlogStats func() llmlogWriteStatus
 
+	// foreignLoad is the W06-8 foreign-load detector (foreign_load.go):
+	// buildCheap kicks its async single-flight round, assemble reads its last
+	// published rows (process memory, like llmlogStats). nil (a collector
+	// literal in a test) ⇒ no probing, no section.
+	foreignLoad *foreignLoadDetector
+
 	// broadcasting is set while an SSE broadcast loop (G34) is refreshing the
 	// cache every tick. A poll then serves that cache instead of triggering its
 	// own refresh (design §3.6: "refresh only when stale AND no SSE loop runs").
@@ -765,6 +785,7 @@ func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams d
 		channelProbeRun: runChannelProbe,
 		guardGenBuild:   buildGuardReviewGeneration,
 		llmlogStats:     readLLMLogWriteStatus,
+		foreignLoad:     newForeignLoadDetector(pool, dispatchSrc),
 	}
 }
 
@@ -1187,6 +1208,10 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// generation's per-scope slot, so both paths share this single aggregate
 	// instead of each running their own.
 	snap.guardReview = c.guardReviewGlobal(ctx, cfg.Events.TickInterval)
+	// W06-8 foreign-load detector: one probe round per tick, started here and
+	// NEVER awaited — the GETs run off this pass (single-flight, own timeout),
+	// assemble serves the last landed round.
+	c.kickForeignLoad(cfg)
 	c.stampLiveness(snap, failsBefore)
 	return snap
 }
@@ -1555,6 +1580,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// calls assemble, so its field stays nil → absent (process-wide counters
 		// sum every tenant's rows).
 		LLMLog: lw,
+		// foreign_load is server-admin-only and PRESENT while a target is
+		// probed (pointer; nil → omitted otherwise). The per-tenant
+		// SnapshotForTenant never calls assemble, so its field stays nil →
+		// absent.
+		ForeignLoad: c.foreignLoad.section(),
 	}
 }
 
