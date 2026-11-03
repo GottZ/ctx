@@ -39,8 +39,7 @@ features on. Everything else has a working default. The key goes into Hermes'
 is covered in the [ctx README](https://github.com/GottZ/ctx#readme). From a ctx
 checkout the directory can also be installed with
 `integrations/hermes/scripts/install.sh` — for code newer than the catalog pin
-(0.6.2 since [hermes-agent #147170](https://github.com/NousResearch/hermes-agent/pull/147170),
-merged 2026-11-02).
+(see [Versions](https://github.com/GottZ/ctx/blob/root/integrations/hermes/README.md#versions)).
 
 The plugin talks to ctx through Hermes' own MCP dispatch and holds no
 credentials of its own. Setup writes the same configuration you could also
