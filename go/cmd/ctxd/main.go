@@ -20,6 +20,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/toolboot"
@@ -820,21 +821,82 @@ func main() {
 		}
 	}
 
-	// Graceful shutdown: HTTP Stop -> Background Cancel -> Listener Stop -> Pool Close
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Graceful shutdown: HTTP Stop -> llmlog Settle -> Background Cancel ->
+	// Listener Stop -> llmlog Settle -> Pool Close (the pool closes via the
+	// sess.Stop defer above).
+	shutdownSequence(srv, scheduler, pool)
+	slog.Info("shutdown complete")
+}
+
+// Shutdown budget after SIGTERM (W06-1). docker-compose.yml gives the ctx
+// service a stop_grace_period that must cover shutdownHTTPTimeout + 2 ×
+// llmlogSettleTimeout, or Docker SIGKILLs the daemon mid-teardown (compose
+// default: 10 s); internal/config TestComposeCtxStopGracePeriod pins it at no
+// less than that sum (25 s). scheduler.Wait between the two settles is
+// unbounded and lives in the margin above it. A new shutdown step (the /v1
+// drain, K-06-29) adds its budget here, in that test and in the compose file.
+const (
+	// shutdownHTTPTimeout bounds srv.Shutdown: in-flight requests finish, new
+	// ones are refused.
+	shutdownHTTPTimeout = 15 * time.Second
+	// llmlogSettleTimeout bounds EACH of the two llmlog.Settle calls: queued
+	// and running context_llm_log inserts land before the teardown moves on.
+	// Rows still pending after the second one are lost when the pool closes.
+	llmlogSettleTimeout = 5 * time.Second
+)
+
+// drainer is the scheduler step shutdownSequence orders — *events.Scheduler
+// in production, a stand-in in the W06-1 shutdown probes.
+type drainer interface {
+	Wait()
+}
+
+// shutdownSequence is the daemon's teardown after the serve loop ended and the
+// root context was cancelled; the caller closes the pool afterwards.
+//
+// The llmlog queue is settled TWICE. First right after srv.Shutdown: no request
+// can Record any more, so the rows of the HTTP side land before the teardown
+// enters scheduler.Wait. That wait is unbounded — a running dream cycle does not
+// stop on SIGTERM, it runs on its own context up to dream.cycle_timeout (700 s
+// by default) — and when it outlasts the stop grace period, Docker's SIGKILL
+// takes whatever is still queued; settling only after Wait would hand the HTTP
+// rows to that same fate. Second after Wait returns: the dream workers and the
+// other scheduler arms have written their last rows by then.
+func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool) {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
 	defer shutdownCancel()
 
 	slog.Info("shutting down HTTP server")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("HTTP server shutdown error", "error", err)
 	}
+	settleLLMLog(pool, llmlogSettleTimeout, "http")
 
 	// Wait for scheduler to finish (drains active dream cycle before pool closes).
 	slog.Info("waiting for scheduler shutdown")
-	scheduler.Wait()
+	sched.Wait()
 
-	// Pool is closed via defer above.
-	slog.Info("shutdown complete")
+	settleLLMLog(pool, llmlogSettleTimeout, "scheduler")
+}
+
+// settleLLMLog waits up to timeout for the pool's pending llmlog inserts and
+// logs the outcome with the process-wide loss totals. after names the shutdown
+// step the settle follows ("http" or "scheduler").
+func settleLLMLog(pool *pgxpool.Pool, timeout time.Duration, after string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	begin := time.Now()
+	if err := llmlog.Settle(ctx, pool); err != nil {
+		slog.Warn("llmlog: settle at shutdown incomplete, pending rows are lost",
+			"after", after, "error", err, "timeout", timeout,
+			"insert_failures_total", llmlog.InsertFailures(),
+			"insert_dropped_total", llmlog.InsertDropped())
+		return
+	}
+	slog.Info("llmlog: settled at shutdown",
+		"after", after, "elapsed", time.Since(begin).Round(time.Millisecond),
+		"insert_failures_total", llmlog.InsertFailures(),
+		"insert_dropped_total", llmlog.InsertDropped())
 }
 
 // maxHeaderValueCount is the per-request cap on header VALUES that ctxd will
