@@ -492,7 +492,7 @@ func (s *foreignLoadState) settleRead(r foreignLoadRead, set foreignLoadSettings
 		log.Info("status: foreign load hourly rollup read recovered", "target", r.origin)
 		s.hourlyReadFail = false
 	}
-	s.settleHour(r.n, set, log)
+	s.settleHour(r.hour, r.n, set, log)
 }
 
 func (d *foreignLoadDetector) heldView() (dispatch.Snapshot, bool) {
@@ -600,7 +600,7 @@ func (s *foreignLoadState) compare(now time.Time, engine int64, held int, set fo
 // start boundary: the first successful reading of the hour, if it came within
 // grace of the boundary. When the previous hour's start sample exists too,
 // that hour's engine delta is known and the hour is pending until the rollup
-// side is read (readDueHours). A counter that went backwards is an engine
+// side is read (dueHours, settleRead). A counter that went backwards is an engine
 // restart: that hour is not comparable and is skipped.
 func (s *foreignLoadState) observeHour(now time.Time, responses int64, set foreignLoadSettings) {
 	hour := now.UTC().Truncate(time.Hour)
@@ -617,12 +617,16 @@ func (s *foreignLoadState) observeHour(now time.Time, responses int64, set forei
 }
 
 // settleHour is check (b) for the pending hour: ctxRequests is the rollup's
-// duration_n over the origin's rows, the engine side its response delta. Only an engine EXCESS counts — a deficit
+// duration_n over the origin's rows, the engine side its response delta. It
+// settles only the hour the rollup read was for: when the pending hour moved
+// on meanwhile (a newer boundary replaced it), the read is discarded and the
+// newer hour stays pending for its own read — never one hour's engine delta
+// against another hour's rollup. Only an engine EXCESS counts — a deficit
 // means ctx logged attempts the engine never counted (refused before the
 // HTTP layer), not foreign load.
-func (s *foreignLoadState) settleHour(ctxRequests int64, set foreignLoadSettings, log *slog.Logger) {
+func (s *foreignLoadState) settleHour(hour time.Time, ctxRequests int64, set foreignLoadSettings, log *slog.Logger) {
 	p := s.pending
-	if p == nil {
+	if p == nil || !p.Hour.Equal(hour) {
 		return
 	}
 	s.pending = nil
@@ -741,7 +745,9 @@ func transportClass(ctx context.Context, err error) string {
 // running gauge) or over the model-endpoint label sets (active, responses);
 // NaN/Inf samples are skipped. A family counts as present once a
 // "# TYPE <name>" line or a sample names it, so an engine that declared its
-// counter but has not served a request yet reads 0. running and responses are
+// counter but has not served a request yet reads 0. Values are taken as the
+// engine reports them: a sample beyond ±2^63 (never sent by a sane engine)
+// converts to an undefined int64 and is not guarded against. running and responses are
 // required — an engine that does not speak this vocabulary is an error naming
 // the missing family; active is optional (hasActive).
 func parseForeignLoadMetrics(body []byte, prof foreignLoadProfile) (foreignLoadReading, error) {

@@ -175,7 +175,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"contract.recheck_interval":                      "Seconds between periodic schema-drift re-checks; 0 runs no checks while the ticker keeps polling so a later hot enable takes effect",
 	"status.channel_probe_interval":                  "Seconds between latency probes of the four retrieval channels (semantic, fts_de, fts_en, trigram); 0 (default) disables the probe",
 	"status.foreign_load_timeout":                    "Seconds one foreign-load probe (GET <origin>/metrics of a backend marked metadata.foreign_load_probe) may take; runs off the status path, must be >= 1",
-	"status.foreign_load_hysteresis_ticks":           "Consecutive probe rounds with engine running > dispatcher held before a target is suspected of foreign load, and with running <= held before it clears; >= 1",
+	"status.foreign_load_hysteresis_ticks":           "Consecutive probe rounds with the engine's requests (max of running and in-flight HTTP) above the dispatcher's held leases before a target is suspected of foreign load, and at or below them before it clears; >= 1",
 	"status.foreign_load_hourly_min_abs":             "Absolute floor of the hourly foreign-load tolerance: an hour is suspected when engine requests exceed ctx's logged requests by more than max(this, ratio x ctx requests)",
 	"status.foreign_load_hourly_min_ratio":           "Relative term (0..1) of the hourly foreign-load tolerance max(min_abs, ratio x ctx requests); 0.01 = 1 %",
 	"embed_backfill.sync_cap":                        "Maximum pending blocks a query embeds inline before its search runs; 0 = uncapped, the cap bounds first-query latency after a backlog",

@@ -264,7 +264,9 @@ func (b *Backend) ScoreDomain() string {
 const foreignLoadProbeKey = "foreign_load_probe"
 
 // ForeignLoadProbeSGLang is the one probe kind today: an SGLang engine
-// (sglang:num_running_reqs, sglang:http_requests_total).
+// (sglang:num_running_reqs, sglang:http_requests_active,
+// sglang:http_responses_total — the vocabulary lives in the status
+// collector's profile table).
 const ForeignLoadProbeSGLang = "sglang"
 
 // ForeignLoadProbe resolves the probe kind of the row: the metadata value when

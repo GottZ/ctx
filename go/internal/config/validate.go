@@ -650,7 +650,9 @@ func validateEmbedBackoff(c *Config) []Issue {
 //     and clear on the same round, one WARN pair per tick.
 //   - status.foreign_load_hourly_min_ratio outside [0,1] (float keys have no
 //     generic walk): a negative tolerance flags every hour, one above 1 hides
-//     an hour in which foreign requests outnumber ctx's own.
+//     an hour in which foreign requests outnumber ctx's own, and NaN — which
+//     ParseFloat accepts and every comparison rejects — switches the hourly
+//     verdict off silently.
 func validateStatusForeignLoad(c *Config) []Issue {
 	var issues []Issue
 	if c.Status.ForeignLoadTimeout == 0 {
@@ -661,7 +663,7 @@ func validateStatusForeignLoad(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "status.foreign_load_hysteresis_ticks", Severity: SeverityError,
 			Msg: "status.foreign_load_hysteresis_ticks must be >= 1 — 0 would suspect and clear a target in the same probe round"})
 	}
-	if r := c.Status.ForeignLoadHourlyMinRatio; r < 0 || r > 1 {
+	if r := c.Status.ForeignLoadHourlyMinRatio; math.IsNaN(r) || r < 0 || r > 1 {
 		issues = append(issues, Issue{Field: "status.foreign_load_hourly_min_ratio", Severity: SeverityError,
 			Msg: fmt.Sprintf("status.foreign_load_hourly_min_ratio %g must be in [0,1]", r)})
 	}

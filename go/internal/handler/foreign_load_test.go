@@ -465,6 +465,78 @@ func TestForeignLoadHourlyReadFailureWarnsOnce(t *testing.T) {
 	}
 }
 
+// TestForeignLoadSettleBindsReadHour (Fremd-Review 2, F2): a rollup read
+// settles ONLY the hour it read. If the pending hour moved on in between — the
+// state no longer holds the hour the read was for — the read is discarded and
+// the newer pending hour stays, instead of comparing hour 11's engine delta
+// with hour 10's rollup.
+func TestForeignLoadSettleBindsReadHour(t *testing.T) {
+	logs := &flCapture{}
+	set := foreignLoadSettings{minAbs: 5, minRatio: 0.01}
+	h10 := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	h11 := h10.Add(time.Hour)
+	st := &foreignLoadState{target: foreignLoadTarget{origin: "http://gpu:30000"},
+		pending: &foreignLoadHour{Hour: h11, EngineRequests: 100}}
+	st.settleRead(foreignLoadRead{origin: "http://gpu:30000", hour: h10, n: 500}, set, slog.New(logs))
+	if st.hourly != nil || st.pending == nil || !st.pending.Hour.Equal(h11) {
+		t.Fatalf("a read of 10:00 settled the pending 11:00: hourly=%+v pending=%+v — want discarded, 11:00 still pending", st.hourly, st.pending)
+	}
+	st.settleRead(foreignLoadRead{origin: "http://gpu:30000", hour: h11, n: 100}, set, slog.New(logs))
+	if st.hourly == nil || !st.hourly.Hour.Equal(h11) || st.hourly.CtxRequests != 100 || st.pending != nil {
+		t.Fatalf("the read of 11:00 did not settle 11:00: hourly=%+v pending=%+v", st.hourly, st.pending)
+	}
+}
+
+// TestForeignLoadReadFailureAcrossBoundary (Fremd-Review 2, F2 scenario): the
+// rollup stays unreadable from 11:00:10 past the 12:00 boundary. The first
+// successful read (12:00:01) still belongs to hour 10 and must be compared
+// with hour 10's rollup; hour 11 follows in the next due round with its own.
+func TestForeignLoadReadFailureAcrossBoundary(t *testing.T) {
+	fake := &flCounter{}
+	srv := httptest.NewServer(http.HandlerFunc(fake.serve))
+	defer srv.Close()
+	origin, _ := dispatch.NormalizeOrigin(srv.URL)
+	targets := []foreignLoadTarget{{origin: origin, kind: backends.ForeignLoadProbeSGLang, rollupKeys: []string{"spark-chat"}}}
+	var clock time.Time
+	failing := true
+	rollupByHour := map[string]int64{"10:00": 500, "11:00": 100}
+	d := newForeignLoadDetector(nil, nil)
+	d.logger = slog.New(&flCapture{})
+	d.now = func() time.Time { return clock }
+	d.hourlySum = func(_ context.Context, hour time.Time, _ []string) (int64, error) {
+		if failing {
+			return 0, fmt.Errorf("pool closed")
+		}
+		return rollupByHour[hour.Format("15:04")], nil
+	}
+	set := foreignLoadSettings{timeout: time.Second, hysteresis: 2, minAbs: 5, minRatio: 0.01, grace: 7 * time.Second}
+	d.mu.Lock()
+	d.syncLocked(targets)
+	d.mu.Unlock()
+	at := func(hhmmss string, responses int64) string {
+		t.Helper()
+		clock, _ = time.Parse("2006-01-02 15:04:05", "2026-11-03 "+hhmmss)
+		fake.set(responses, 0)
+		d.round(context.Background(), targets, set)
+		r := (*d.section())[0]
+		if r.Hourly == nil {
+			return "none"
+		}
+		return fmt.Sprintf("%s engine=%d ctx=%d", r.Hourly.Hour.Format("15:04"), r.Hourly.EngineRequests, r.Hourly.CtxRequests)
+	}
+	at("10:00:01", 0)
+	at("11:00:01", 500) // hour 10: Δ 500
+	at("11:00:10", 500) // due, read fails
+	at("11:30:00", 550)
+	failing = false
+	if got := at("12:00:01", 600); got != "10:00 engine=500 ctx=500" { // hour 10 read at last; hour 11 (Δ 100) becomes pending
+		t.Fatalf("after 12:00:01: hourly=%s, want 10:00 engine=500 ctx=500", got)
+	}
+	if got := at("12:00:10", 600); got != "11:00 engine=100 ctx=100" {
+		t.Fatalf("after 12:00:10: hourly=%s, want 11:00 engine=100 ctx=100", got)
+	}
+}
+
 // TestForeignLoadSettingsOf pins the A-E2 wiring: every policy value of a
 // round comes from its registry key (here all four off their defaults), and
 // grace is derived from events.tick_interval + status.foreign_load_timeout.

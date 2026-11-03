@@ -47,6 +47,9 @@ type flMetrics struct {
 	status int     // 0 = 200
 	hang   time.Duration
 	auth   []string // Authorization header of every request ("" = none)
+	// gate, armed by round(), parks every /metrics GET until round()
+	// releases it — see round() for why that makes a round atomic.
+	gate chan struct{}
 
 	hits atomic.Int32
 }
@@ -58,11 +61,18 @@ func newFLMetrics(t *testing.T) *flMetrics {
 		m.hits.Add(1)
 		m.mu.Lock()
 		m.auth = append(m.auth, r.Header.Get("Authorization"))
-		running, active, chat, status, hang := m.running, m.active, m.chat, m.status, m.hang
+		running, active, chat, status, hang, gate := m.running, m.active, m.chat, m.status, m.hang, m.gate
 		m.mu.Unlock()
 		if r.URL.Path != "/metrics" {
 			http.NotFound(w, r)
 			return
+		}
+		if gate != nil {
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+				return
+			}
 		}
 		if hang > 0 {
 			select {
@@ -253,38 +263,68 @@ func (h *flHarness) rows() ([]flRow, bool) {
 	return rows, true
 }
 
-// round starts exactly ONE probe round and waits until it has landed. A round
-// has started when the fake m sees its GET: a tick that hits the previous
-// round's single-flight tail is a no-op, so the loop ticks again until a GET
-// arrives — and stops ticking the moment one did. It has landed when target's
-// row carries a probed_at newer than the last round this harness saw. Every
-// test's first collector call is a tick (refreshForBroadcast builds and
-// caches directly), and the cache TTL is an hour, so a Snapshot read never
-// cold-starts or refreshes — and therefore never kicks — a round of its own.
+// round runs exactly ONE probe round and waits until it has landed.
+//
+// The fake's gate makes that deterministic instead of timing-dependent: while
+// round() runs, every /metrics GET of m parks at the gate. round() ticks until
+// a GET has ARRIVED (hits moved) and then stops ticking. The round that sent
+// it cannot finish while its GET is parked, so its single-flight flag stays
+// set and every later tick is a no-op — no tick can start a second round,
+// however the scheduler interleaves under host load. (The previous helper
+// only slept between ticks: a round that started, probed and finished between
+// its hits check and the next tick let that tick start a second round, and
+// "tick 1" then saw two rounds — the 2-tick hysteresis tripped early.) Only
+// then is the GET released and the landing awaited: target's row carries a
+// probed_at newer than the last round this harness saw. Ticks before the
+// previous round's single-flight tail has cleared are no-ops too, so the
+// loop also absorbs that tail. Every test's first collector call is a tick
+// (refreshForBroadcast builds and caches directly) and the cache TTL is an
+// hour, so a Snapshot read never kicks a round of its own.
 func (h *flHarness) round(m *flMetrics, target string) flRow {
 	h.t.Helper()
+	gate := make(chan struct{})
+	m.mu.Lock()
+	m.gate = gate
+	m.mu.Unlock()
+	released := false
+	defer func() {
+		if !released {
+			close(gate)
+		}
+		m.mu.Lock()
+		m.gate = nil
+		m.mu.Unlock()
+	}()
 	hits := m.hits.Load()
 	deadline := time.Now().Add(6 * time.Second)
 	for m.hits.Load() == hits && time.Now().Before(deadline) {
 		h.tick()
 		time.Sleep(5 * time.Millisecond)
 	}
+	if n := m.hits.Load() - hits; n != 1 {
+		keys := []string{}
+		for k := range h.frame() {
+			keys = append(keys, k)
+		}
+		h.t.Fatalf("%d probe GETs reached %s within 6s, want exactly 1 — foreign_load rows absent or the round not atomic; status keys: %v", n, target, keys)
+	}
+	close(gate)
+	released = true
 	for time.Now().Before(deadline) {
 		if rows, ok := h.rows(); ok {
 			for _, r := range rows {
 				if r.Target == target && r.ProbedAt != nil && r.ProbedAt.After(h.last) {
 					h.last = *r.ProbedAt
+					if n := m.hits.Load() - hits; n != 1 {
+						h.t.Fatalf("%d probe GETs during one round(), want 1", n)
+					}
 					return r
 				}
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	keys := []string{}
-	for k := range h.frame() {
-		keys = append(keys, k)
-	}
-	h.t.Fatalf("no landed probe round for %s within 6s — foreign_load rows absent or stale; status keys: %v", target, keys)
+	h.t.Fatalf("the released probe round for %s never landed within 6s", target)
 	return flRow{}
 }
 

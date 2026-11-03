@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -799,6 +800,10 @@ func TestValidateStatusForeignLoad(t *testing.T) {
 		{"status.foreign_load_hysteresis_ticks", func(c *Config) { c.Status.ForeignLoadHysteresisTicks = 0 }},
 		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = -0.01 }},
 		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = 1.5 }},
+		// Fremd-Review 2, F3: NaN parses (strconv.ParseFloat) and fails every
+		// comparison, so a bare range check lets it through and the hourly
+		// verdict is silently dead (excess > NaN is always false).
+		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = math.NaN() }},
 	}
 	for _, tc := range cases {
 		c := Defaults()
