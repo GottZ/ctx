@@ -252,6 +252,10 @@ func TestStatusGoldenKeys(t *testing.T) {
 			"shared": {NeedsReview: 3, NearDuplicate: 0, PossibleDuplicate: 1,
 				OldestUpdatedAt: &next, BuiltAt: &next},
 		},
+		// W06-1 (design/06 §7): the llmlog write-path section is server-admin
+		// PRESENT (this fixture, and even at 0); TestStatusPerTenantView's
+		// server_global_fields_zero_for_tenant subtest pins ABSENT on the tenant path.
+		LLMLog: &llmlogWriteStatus{InsertFailures: 1, InsertDropped: 0},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -260,7 +264,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "advisories", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
 		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration", "guard_review",
-		"guard_review_by_scope",
+		"guard_review_by_scope", "llmlog",
 	})
 
 	var top map[string]json.RawMessage
@@ -274,6 +278,10 @@ func TestStatusGoldenKeys(t *testing.T) {
 		t.Fatalf("unmarshal advisories: %v", err)
 	}
 	assertKeys(t, "advisories.row", advs[0], []string{"subject", "state"})
+
+	// W06-1: the llmlog write-path section — two process-wide loss counters,
+	// nothing else (no pipeline names, no error text: those are log material).
+	assertKeys(t, "llmlog", top["llmlog"], []string{"insert_failures", "insert_dropped"})
 
 	assertKeys(t, "dream", top["dream"], []string{
 		"mode", "throttle_interval_s", "pickable_now", "in_cooldown", "never_dreamed",

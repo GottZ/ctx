@@ -18,6 +18,7 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/graphcache"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/recall"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/GottZ/ctx/internal/store"
@@ -214,6 +215,17 @@ type statusResponse struct {
 	// verify_report content (those live ONLY on the admin-gated manage endpoint,
 	// embed_migration_manage.go).
 	EmbedMigration *embedMigrationStatus `json:"embed_migration,omitempty"`
+	// LLMLog is the server-admin-only llmlog write-path section (W06-1,
+	// design/06 §7): the process-wide loss counters of the async
+	// context_llm_log writer — inserts the database refused or that timed out,
+	// and rows dropped because the bounded insert queue was full. Pointer +
+	// omitempty, the Profiles/DB/GraphCache/Recall convention: PRESENT on the
+	// server-admin path whenever the counter source is wired (always in
+	// production) — INCLUDING at 0/0, because "nothing lost" and "not measured"
+	// must not look alike. ABSENT on the per-tenant path (SnapshotForTenant never
+	// sets it — the counters sum every tenant's and the background's rows, a
+	// server-global figure) and when no source is wired (test fakes).
+	LLMLog *llmlogWriteStatus `json:"llmlog,omitempty"`
 	// GuardReview is the needs_review pipeline's push signal (guard W2): the
 	// flagged-block counts + the oldest flagged stamp, so an unworked review
 	// queue is VISIBLE instead of discoverable-on-pull only (guard-stats).
@@ -254,6 +266,21 @@ type statusResponse struct {
 	// TestStatusEventCarriesEveryDualPathField — the push frame cannot carry a
 	// per-caller predicate before the per-scope frame build (S11).
 	GuardReviewByScope map[string]*guardReviewStatus `json:"guard_review_by_scope,omitempty"`
+}
+
+// llmlogWriteStatus is the /api/status llmlog block wire shape (W06-1): two
+// monotone counters since process start (llmlog.InsertFailures,
+// llmlog.InsertDropped). Each unit is one context_llm_log row that never
+// landed. Deliberately no pipeline names and no error text — the throttled
+// WARN line in the log carries those.
+type llmlogWriteStatus struct {
+	InsertFailures int64 `json:"insert_failures"`
+	InsertDropped  int64 `json:"insert_dropped"`
+}
+
+// readLLMLogWriteStatus is the production llmlogStats source.
+func readLLMLogWriteStatus() llmlogWriteStatus {
+	return llmlogWriteStatus{InsertFailures: llmlog.InsertFailures(), InsertDropped: llmlog.InsertDropped()}
 }
 
 // advisoryRow is one named reason on the admin status surface (A02-W4):
@@ -703,6 +730,13 @@ type StatusCollector struct {
 	guardGenRefresh atomic.Bool // CAS single-flight guard
 	guardGenBuild   func(ctx context.Context, pool *pgxpool.Pool) *guardGen
 
+	// llmlogStats reads the llmlog write-path loss counters (W06-1) — process
+	// memory, no I/O, so assemble reads it per call instead of per tick.
+	// Defaults to readLLMLogWriteStatus and is swappable in tests, the same
+	// injection point dbStatsBuild/guardGenBuild already are; nil (a collector
+	// literal in a test) omits the section.
+	llmlogStats func() llmlogWriteStatus
+
 	// broadcasting is set while an SSE broadcast loop (G34) is refreshing the
 	// cache every tick. A poll then serves that cache instead of triggering its
 	// own refresh (design §3.6: "refresh only when stale AND no SSE loop runs").
@@ -725,6 +759,7 @@ func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams d
 		dbStatsBuild:    buildDBStatus,
 		channelProbeRun: runChannelProbe,
 		guardGenBuild:   buildGuardReviewGeneration,
+		llmlogStats:     readLLMLogWriteStatus,
 	}
 }
 
@@ -1465,6 +1500,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		rows := cheap.derivedCoverage
 		dcov = &rows
 	}
+	var lw *llmlogWriteStatus
+	if c.llmlogStats != nil {
+		v := c.llmlogStats()
+		lw = &v
+	}
 	return statusResponse{
 		Success:        true,
 		AsOf:           cheap.asOf,
@@ -1505,6 +1545,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// aggregate from the tick; the tenant path builds its own scope-filtered
 		// read in SnapshotForTenant.
 		GuardReview: cheap.guardReview,
+		// llmlog is server-admin-only and PRESENT whenever the counter source is
+		// wired, at 0/0 too (pointer). The per-tenant SnapshotForTenant never
+		// calls assemble, so its field stays nil → absent (process-wide counters
+		// sum every tenant's rows).
+		LLMLog: lw,
 	}
 }
 
