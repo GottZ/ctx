@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 160,
-    "migration_count": 48,
+    "migration_max": 161,
+    "migration_count": 49,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1984,6 +1984,208 @@
       ],
       "row_security": false
     },
+    "context_model_consumers": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "tenant_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "label",
+          "type": "character varying(100)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "kind",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "tenant_scope",
+          "type": "character varying(50)",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "all_models",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "prompt_sensitivity",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "fair_weight",
+          "type": "smallint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "admission_lane",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "allowed_cidrs",
+          "type": "cidr[]",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "allow_plaintext",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "peer_instance_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "peer_bound_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_key",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_model_keys": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "consumer_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "key_hash",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "key_hint",
+          "type": "character varying(16)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "revoked_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "rotated_from",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "last_used_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_key",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "revoked_by_key",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "revoked_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
     "context_oauth_clients": {
       "columns": [
         {
@@ -3322,6 +3524,12 @@
           "type": "integer",
           "not_null": false,
           "storage": "p"
+        },
+        {
+          "name": "max_model_consumers",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
         }
       ],
       "row_security": false
@@ -4558,6 +4766,12 @@
     "context_llm_log_pkey": {
       "def_hash": "71bc1db96f8018863b268c53999b6e62059c08f2db9b05631d8ebf2f184eef7b"
     },
+    "context_model_consumers_pkey": {
+      "def_hash": "d2d14bd6f798014e745feb7c15dfe4a8f41e191fb12bb939118a901d332f7418"
+    },
+    "context_model_keys_pkey": {
+      "def_hash": "e939d869965651efa8a3c3fcc876fc4db278a6aff2c32dd7183e6c8ac50663cd"
+    },
     "context_oauth_clients_client_id_key": {
       "def_hash": "084277c83406160d1d5d976e0c81dd2aee4c7f6a50d77924174f8871383b6f34"
     },
@@ -4979,6 +5193,18 @@
     "idx_llm_usage_key": {
       "def_hash": "3406f7af3b46972bd2c2e6a9bf0b0ae6b7e9afb388b607c01c3db82beea35cc3"
     },
+    "idx_model_consumers_peer_instance": {
+      "def_hash": "08bbb37c20a49485f710e039470ac3e257d6f1a4225bca0504ae1082006fec17"
+    },
+    "idx_model_consumers_tenant_active": {
+      "def_hash": "46d4d3cf90a14207743fc55708133e7d73d43902f69c2904bc9a3d43e0c50262"
+    },
+    "idx_model_keys_consumer_created": {
+      "def_hash": "1e0732a7f48cc7c5eddf3f0ee5e5779499a5fd7c4487149f1256e3c9bb0f71c5"
+    },
+    "idx_model_keys_consumer_live": {
+      "def_hash": "53fd2e2948d51722232748756f10b9cae57441f720b2489daf6452a9f6566ec2"
+    },
     "idx_oauth_clients_active": {
       "def_hash": "fb7988c8823da82ba293af0240e08c4e1dfb9bd682bd803b1e3d4328a8df9882"
     },
@@ -5005,6 +5231,9 @@
     },
     "idx_settings_audit_entity": {
       "def_hash": "ff5a40f6b99bde13a30cb0ad31c45d81e1e1a44b73ae3e740c044091ba52cd0d"
+    },
+    "idx_settings_audit_entity_tenant": {
+      "def_hash": "b380e95e39490a3a88e9c19dea344679cfd23c677dcd34c378873fe3ff06b076"
     },
     "idx_settings_audit_key": {
       "def_hash": "70f7310bb22a4e5ba8a89713687e5be49f31437d98411cf9027b362486133f92"
@@ -5147,6 +5376,12 @@
     "uq_llm_usage_hourly": {
       "def_hash": "d653a870c668d587e16a6b81a08dbe187678f6a21c40e6621c92b879b85e5914"
     },
+    "uq_model_consumers_tenant_label": {
+      "def_hash": "48b473ce173a18be85cb6f3ac91bc68160ea50f7f38b53d951e4f1134abf67ff"
+    },
+    "uq_model_keys_hash": {
+      "def_hash": "afc5fe713f3f2df1370977ca428d61f369b9b83f5ddd1897f1fe57fd6c6d3d45"
+    },
     "uq_projects_identity": {
       "def_hash": "a510155665d945fb7cf6d59cc3f4016355a00a2e196e9b913f2fb976f179a0ee"
     },
@@ -5200,11 +5435,23 @@
     "audit_graph_category_hues_write()": {
       "src_hash": "642caf7533f79abd18190506b1b490998a597e776f8f90b952c5a0347e1ee4ba"
     },
+    "audit_model_consumers_write()": {
+      "src_hash": "02f075d4a98927e717a2840bcf22f0c609dc8a4f48d8dc0f7a2ba6869b3e9a91"
+    },
+    "audit_model_keys_write()": {
+      "src_hash": "df0d65722dfedab702ee17e06d9c6aa796aae3deab91bdf242391d54cf7c02c7"
+    },
     "audit_settings_write()": {
       "src_hash": "46bc77b167069c5c74bd682a25ed6624fd7192a97c8f6a52a5566901d9178a02"
     },
     "audit_state_api_key(k context_api_keys)": {
       "src_hash": "b864dab1db4ba08570476b70f13d2b396caab4afd119fd49f9c0c7e7001c6981"
+    },
+    "audit_state_model_consumer(c context_model_consumers)": {
+      "src_hash": "c31dfffa79233dbc075925f1fe69000cc1032ff1d48f4fccbafcb1735fe636d7"
+    },
+    "audit_state_model_key(k context_model_keys)": {
+      "src_hash": "103517248bcc8fb499d9ae11f401b1e481c99c0bb3a0845e31afd9c769d73024"
     },
     "audit_state_tenant_quota(q context_tenant_quota)": {
       "src_hash": "68fccb67869fdbc7d08cf3048290a286433ee5d32c6752f92e750fc9fe8df8d8"
@@ -5220,6 +5467,9 @@
     },
     "ctx_guard_check(p_block_id uuid, p_threshold_duplicate real, p_threshold_review real, p_candidate_types text[], p_same_scope_only boolean)": {
       "src_hash": "e78928167543f0533238951f7e66daba4e23d1ee3f1fa2a2698cdaedb04a3e76"
+    },
+    "ctx_model_auth(p_key_hash text, p_client_ip inet, p_secure boolean)": {
+      "src_hash": "4a53d01644bbb648173d964f2ffb2670e3cde0c9b81a1e98b9391edde7a20b45"
     },
     "ctx_rrf(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer)": {
       "src_hash": "575f15445f49c284e838a67656062ffc63aa42f570e29498ea0968852f182d28"
@@ -5241,6 +5491,21 @@
     },
     "mark_guard_dirty()": {
       "src_hash": "bb49dcca30b0f002ce40fd258d63330f6c62cd3de3d09740520cfb1f15bae09d"
+    },
+    "model_cidrs_private(p cidr[])": {
+      "src_hash": "2e4acdde5106b4b69e28b751d69d9bd5eacc4af02dfdacc3947d011eed3482d3"
+    },
+    "model_consumer_deactivate_revokes()": {
+      "src_hash": "a743f13ed190021c5b472b4f97cdc64ddfcb75a9437f3869a7fea838773641c4"
+    },
+    "model_consumers_identity_immutable()": {
+      "src_hash": "4c4ed4d642223e4c6d2573144d3e2bfebb99aaf4a3a7003e0f81bb261dcc42ca"
+    },
+    "model_keys_consumer_active()": {
+      "src_hash": "3903ec96d9cfd305202b5e4678552558b0188b6db33c72bbea44e7b19e31dd1d"
+    },
+    "model_keys_identity_immutable()": {
+      "src_hash": "2dc33e608e7627e16c2cb430926158fd4cc6c396e8f37ba84416b4c812a2842a"
     },
     "notify_block_write()": {
       "src_hash": "3bc9e9099f5bac1083e3a426edd6805396bcef8aa3f8ad53900c4f28cbaf4c0c"
@@ -5315,6 +5580,30 @@
     },
     "context_llm_log.trg_llm_usage_rollup": {
       "def_hash": "cd7a75eeec79d9ffa466965c707f50f00a346b066c597c6a56c7d0bb844ece0f"
+    },
+    "context_model_consumers.trg_model_consumers_audit_ins_del": {
+      "def_hash": "bda1f75b177103c18e9499e9a1881991628cdd55aaf8ab405d9e88d6a0eadc2c"
+    },
+    "context_model_consumers.trg_model_consumers_audit_upd": {
+      "def_hash": "eb7cf9da3704b9f60e84094cc4af53e35b50455dbfad04a5dad85205647401bf"
+    },
+    "context_model_consumers.trg_model_consumers_deactivate": {
+      "def_hash": "39098f2eeabd387754c4dd669f02c37f10a9c923f210392de606f17b9a10671f"
+    },
+    "context_model_consumers.trg_model_consumers_identity": {
+      "def_hash": "0b5d2b77739de04a25996a641ade8e2acd9fb6b0c937ff44010e27ba8a86baf3"
+    },
+    "context_model_keys.trg_model_keys_audit_ins_del": {
+      "def_hash": "331e049f656fe193bedb5e711f794f006b4a7e1f6529e7e5e62c55f8672ce2db"
+    },
+    "context_model_keys.trg_model_keys_audit_upd": {
+      "def_hash": "d21e8b17401a938b050aec078201c5cb5d4cd48dbabdc9136fac0d0f0978f069"
+    },
+    "context_model_keys.trg_model_keys_consumer_active": {
+      "def_hash": "b9a0c4795749d0ffea43092d71aa4d90e42c0499f5f3b66cb8a4130187a16af1"
+    },
+    "context_model_keys.trg_model_keys_identity": {
+      "def_hash": "49864b0ed0b881ae9bfe237c31cb821c5d003b03faec250c1e20195f6665a873"
     },
     "context_secrets.trg_secrets_audit": {
       "def_hash": "e2a7cc38641a5f9928702777f76a2d2e2cd15cf0c760f83a2fa2ac57323207a1"

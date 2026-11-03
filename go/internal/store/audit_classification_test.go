@@ -20,11 +20,22 @@
 // emits the right key with the wrong value, passes the catalog check and fails
 // this one.
 //
+// Since migration 161 (W01-1) the model consumers and model keys are
+// classified too; their identity columns (consumer tenant_id, key
+// consumer_id) are immutable by trigger, so their per-column probe proves the
+// refusal and then the audit row with that trigger disabled. Completeness:
+// every table carrying a trigger that writes context_settings_audit is either
+// classified here or named in auditLegacyTables — a new audited table without
+// an entry turns TestAuditClassificationPin red.
+//
 // CTX_M160_PROBE_COLUMN=1 adds a column secret_probe to context_api_keys
 // before the pin runs: the red run of Negativ 3. The subtest
 // probe_column_turns_the_pin_red checks the same on a database of its own in
 // every run. TestAuditClassificationPerColumn honours CTX_M160_OVERLAY
-// (when-hole, value-swap) for its red runs.
+// (when-hole, value-swap) and CTX_M161_OVERLAY (no-of-list, no-identity)
+// for its red runs; the blacklist overlay of 161 stays green here (its
+// projection carries every audited value) and turns
+// TestModelAudit/state_is_the_whitelist red instead.
 //
 //	go test -tags=integration -p 1 -count=1 -run TestAuditClassification ./internal/store/
 package store_test
@@ -84,6 +95,89 @@ var auditClassification = []auditedTable{
 			"metadata":             "free-form JSONB that no writer sets; forwarding it would copy any future content unreviewed",
 		},
 	},
+	{
+		table:   "context_model_consumers",
+		stateFn: "audit_state_model_consumer",
+		audited: []string{
+			"tenant_id", "label", "description", "kind", "tenant_scope", "all_models",
+			"prompt_sensitivity", "fair_weight", "admission_lane", "allowed_cidrs",
+			"allow_plaintext", "active", "peer_instance_id", "peer_bound_at",
+		},
+		excluded: map[string]string{
+			"id":                   "identity of the row, written as entity_key and metadata.consumer_id",
+			"created_at":           "insert time; the audit row carries its own created_at",
+			"updated_at":           "bookkeeping time the store writes next to an audited change",
+			"created_by_key":       "actor attribution, carried by api_key_id / actor_label; ON DELETE SET NULL must not write a row",
+			"created_by_principal": "actor attribution, carried by metadata.actor_principal",
+		},
+		updTrig: "trg_model_consumers_audit_upd",
+	},
+	{
+		table:   "context_model_keys",
+		stateFn: "audit_state_model_key",
+		audited: []string{"consumer_id", "key_hint", "expires_at", "revoked_at", "rotated_from"},
+		excluded: map[string]string{
+			"id":                   "identity of the row, written as entity_key",
+			"key_hash":             "credential: SHA-256 of the model key, never leaves the table",
+			"last_used_at":         "usage stamp of the batched flush; one audit row per flush would be noise",
+			"created_at":           "insert time; the audit row carries its own created_at",
+			"created_by_key":       "actor attribution, carried by api_key_id / actor_label; ON DELETE SET NULL must not write a row",
+			"created_by_principal": "actor attribution, carried by metadata.actor_principal",
+			"revoked_by_key":       "actor attribution of the revoke row (api_key_id / actor_label); ON DELETE SET NULL must not write a row",
+			"revoked_by_principal": "actor attribution of the revoke row, carried by metadata.actor_principal",
+		},
+		updTrig: "trg_model_keys_audit_upd",
+	},
+}
+
+// auditLegacyTables carry audit triggers from before the whitelist doctrine
+// (K16). Their rows stay off the tenant-admin read surface (GET /api/audit
+// does not serve their entity types; settings keep their own surface), so
+// they are named here instead of classified column by column. Every other
+// table whose trigger writes context_settings_audit must be in
+// auditClassification — a new audited table without an entry fails
+// TestAuditClassificationPin.
+var auditLegacyTables = map[string]string{
+	"context_settings":                 "051 audit_settings_write; history on GET /api/settings/{key}, server-admin surfaces only",
+	"context_secrets":                  "051 audit_settings_write; values are never recorded (NULL old/new)",
+	"context_backends":                 "backend audit; admin-only manage surface",
+	"context_block_types":              "block-type audit; server-admin surface",
+	"context_disable_profiles":         "disable-profile audit; server-admin surface",
+	"context_disable_profile_backends": "disable-profile audit; server-admin surface",
+	"context_graph_category_hues":      "graph category hue audit; server-admin surface",
+}
+
+// checkAuditedTablesClassified compares the tables carrying a trigger whose
+// function writes context_settings_audit with auditClassification ∪
+// auditLegacyTables (one line per mismatch).
+func checkAuditedTablesClassified(ctx context.Context, pool *pgxpool.Pool) []string {
+	live, err := stringList(ctx, pool,
+		`SELECT DISTINCT t.tgrelid::regclass::text
+		   FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+		  WHERE NOT t.tgisinternal AND p.prosrc ILIKE '%context_settings_audit%'
+		  ORDER BY 1`)
+	if err != nil {
+		return []string{fmt.Sprintf("read audited tables: %v", err)}
+	}
+	known := map[string]bool{}
+	for _, c := range auditClassification {
+		known[c.table] = true
+	}
+	var bad []string
+	liveSet := map[string]bool{}
+	for _, tbl := range live {
+		liveSet[tbl] = true
+		if _, legacy := auditLegacyTables[tbl]; !known[tbl] && !legacy {
+			bad = append(bad, fmt.Sprintf("%s: an audit trigger writes context_settings_audit, but the table is not in auditClassification — classify its columns", tbl))
+		}
+	}
+	for tbl := range known {
+		if !liveSet[tbl] {
+			bad = append(bad, fmt.Sprintf("%s: classified, but no trigger of it writes context_settings_audit", tbl))
+		}
+	}
+	sort.Strings(bad)
+	return bad
 }
 
 // auditedSet returns the audited columns of the classification for table.
@@ -221,6 +315,9 @@ func TestAuditClassificationPin(t *testing.T) {
 	if bad := checkAuditClassification(ctx, pool); len(bad) > 0 {
 		t.Fatalf("audit classification pin: %d mismatch(es):\n  %s", len(bad), strings.Join(bad, "\n  "))
 	}
+	if bad := checkAuditedTablesClassified(ctx, pool); len(bad) > 0 {
+		t.Fatalf("audited tables: %d mismatch(es):\n  %s", len(bad), strings.Join(bad, "\n  "))
+	}
 
 	// Negativ 3 in every run: an unclassified column turns the pin red.
 	t.Run("probe_column_turns_the_pin_red", func(t *testing.T) {
@@ -242,10 +339,25 @@ func TestAuditClassificationPin(t *testing.T) {
 
 // auditColumnProbes: per audited table, for every column an UPDATE expression
 // that changes exactly that column. %[1]s is a second tenant id, %[2]s a second
-// principal id, %[3]s a key id (all existing FK targets). The audited probes
-// must cover every audited column, the excluded probes every excluded column
-// but the row identity.
-var auditColumnProbes = map[string]struct{ audited, excluded map[string]string }{
+// principal id, %[3]s a key id, %[4]s a second model consumer id, %[5]s a
+// second model key id (all existing FK targets). The audited probes must cover
+// every audited column, the excluded probes every excluded column but the row
+// identity.
+//
+// prep: a statement (same placeholders, $1 = the row id) run before a probe
+// and not counted — it brings the row into a state in which the probe column
+// alone may change (a CHECK couples kind and the peer binding). pinned: a
+// column an identity trigger keeps immutable (23514); its probe first proves
+// the refusal (no row), then runs once with that trigger disabled in its own
+// transaction and expects the one audit row, so the audit covers the column
+// even past the pin.
+type auditProbeSet struct {
+	audited, excluded map[string]string
+	prep              map[string]string
+	pinned            map[string]string // column -> identity trigger
+}
+
+var auditColumnProbes = map[string]auditProbeSet{
 	"context_api_keys": {
 		audited: map[string]string{
 			"label":          "label || '-p'",
@@ -283,6 +395,57 @@ var auditColumnProbes = map[string]struct{ audited, excluded map[string]string }
 			"metadata":             `metadata || '{"pin": "probe"}'::jsonb`,
 		},
 	},
+	"context_model_consumers": {
+		audited: map[string]string{
+			"tenant_id":          "'%[1]s'::uuid",
+			"label":              "label || '-p'",
+			"description":        "description || 'p'",
+			"kind":               "CASE WHEN kind = 'app' THEN 'ctx-peer' ELSE 'app' END",
+			"tenant_scope":       "COALESCE(tenant_scope, 'pinprobe') || 'p'",
+			"all_models":         "NOT all_models",
+			"prompt_sensitivity": "CASE WHEN prompt_sensitivity = 'credentials' THEN 'public' ELSE 'credentials' END",
+			"fair_weight":        "fair_weight % 100 + 1",
+			"admission_lane":     "CASE WHEN admission_lane = 'bulk' THEN 'urgent' ELSE 'bulk' END",
+			"allowed_cidrs":      "COALESCE(allowed_cidrs, '{}'::cidr[]) || '10.9.0.0/16'::cidr",
+			"allow_plaintext":    "NOT allow_plaintext",
+			"active":             "NOT active",
+			"peer_instance_id":   "gen_random_uuid()",
+			"peer_bound_at":      "peer_bound_at - interval '1 minute'",
+		},
+		excluded: map[string]string{
+			"created_at":           "created_at - interval '1 minute'",
+			"updated_at":           "updated_at - interval '1 minute'",
+			"created_by_key":       "'%[3]s'::uuid",
+			"created_by_principal": "'%[2]s'::uuid",
+		},
+		prep: map[string]string{
+			// kind may only flip on an unbound consumer; the binding columns
+			// only change pairwise-valid on a bound ctx-peer.
+			"kind":             "UPDATE context_model_consumers SET peer_instance_id = NULL, peer_bound_at = NULL WHERE id = $1::uuid",
+			"peer_instance_id": "UPDATE context_model_consumers SET kind = 'ctx-peer', peer_instance_id = gen_random_uuid(), peer_bound_at = now() WHERE id = $1::uuid",
+			"peer_bound_at":    "UPDATE context_model_consumers SET kind = 'ctx-peer', peer_instance_id = gen_random_uuid(), peer_bound_at = now() WHERE id = $1::uuid",
+		},
+		pinned: map[string]string{"tenant_id": "trg_model_consumers_identity"},
+	},
+	"context_model_keys": {
+		audited: map[string]string{
+			"consumer_id":  "'%[4]s'::uuid",
+			"key_hint":     "key_hint || 'p'",
+			"expires_at":   "COALESCE(expires_at, now()) + interval '1 day'",
+			"revoked_at":   "COALESCE(revoked_at, now()) + interval '1 second'",
+			"rotated_from": "'%[5]s'::uuid",
+		},
+		excluded: map[string]string{
+			"key_hash":             "md5(key_hash) || md5(key_hash)",
+			"last_used_at":         "now() - interval '1 minute'",
+			"created_at":           "created_at - interval '1 minute'",
+			"created_by_key":       "'%[3]s'::uuid",
+			"created_by_principal": "'%[2]s'::uuid",
+			"revoked_by_key":       "'%[3]s'::uuid",
+			"revoked_by_principal": "'%[2]s'::uuid",
+		},
+		pinned: map[string]string{"consumer_id": "trg_model_keys_identity"},
+	},
 }
 
 func TestAuditClassificationPerColumn(t *testing.T) {
@@ -290,7 +453,9 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 		t.Skip("integration test")
 	}
 	ctx := context.Background()
+	// 160 (honouring CTX_M160_OVERLAY), then 161 (honouring CTX_M161_OVERLAY).
 	pool := kaSetup(t, nil)
+	m161Apply(ctx, t, pool)
 
 	otherTenant := freshTenant(t, ctx, pool, "ka-pin-other")
 	var otherPrincipal string
@@ -305,8 +470,27 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO context_tenant_quota (scope, daily_calls) VALUES ('ka-pin:main', 1) RETURNING id::text`).Scan(&quotaID); err != nil {
 		t.Fatalf("insert quota: %v", err)
 	}
-	rowID := map[string]string{"context_api_keys": key.ID, "context_tenant_quota": quotaID}
-	entity := map[string]string{"context_api_keys": "api_key", "context_tenant_quota": "tenant_quota"}
+	// Model consumer A (the probed row: a bound ctx-peer with a private
+	// allowlist, so every probe has a valid target state) and consumer B, which
+	// owns the probed key and a second key (rotated_from target).
+	modelTenant, _ := mcTenant(ctx, t, pool, "ka-pin-model", "active")
+	consumerA := mcConsumer(ctx, t, pool, modelTenant, "ka-pin-a", map[string]string{
+		"kind": "'ctx-peer'", "peer_instance_id": "gen_random_uuid()", "peer_bound_at": "now()",
+		"allowed_cidrs": "'{10.1.0.0/16}'"})
+	consumerB := mcConsumer(ctx, t, pool, modelTenant, "ka-pin-b", nil)
+	modelKey, _ := mcKey(ctx, t, pool, consumerB, "ka-pin-key", nil)
+	secondModelKey, _ := mcKey(ctx, t, pool, consumerB, "ka-pin-key-2", nil)
+
+	rowID := map[string]string{"context_api_keys": key.ID, "context_tenant_quota": quotaID,
+		"context_model_consumers": consumerA, "context_model_keys": modelKey}
+	entity := map[string]string{"context_api_keys": "api_key", "context_tenant_quota": "tenant_quota",
+		"context_model_consumers": "model_consumer", "context_model_keys": "model_key"}
+	fill := func(expr string) string {
+		if !strings.Contains(expr, "%[") {
+			return expr
+		}
+		return fmt.Sprintf(expr, otherTenant, otherPrincipal, key.ID, consumerA, secondModelKey)
+	}
 
 	for _, c := range auditClassification {
 		probes, ok := auditColumnProbes[c.table]
@@ -329,12 +513,26 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 
 		run := func(col, expr string, wantRows int) {
 			t.Helper()
-			before := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table])
-			set := expr
-			if strings.Contains(expr, "%[") {
-				set = fmt.Sprintf(expr, otherTenant, otherPrincipal, key.ID)
+			if prep, ok := probes.prep[col]; ok {
+				if _, err := pool.Exec(ctx, fill(prep), rowID[c.table]); err != nil {
+					t.Fatalf("%s.%s: prep: %v", c.table, col, err)
+				}
 			}
-			if _, err := pool.Exec(ctx, fmt.Sprintf(`UPDATE %s SET %s = %s WHERE id = $1::uuid`, c.table, col, set), rowID[c.table]); err != nil {
+			before := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table])
+			update := fmt.Sprintf(`UPDATE %s SET %s = %s WHERE id = $1::uuid`, c.table, col, fill(expr))
+			if trig, ok := probes.pinned[col]; ok {
+				// The pin refuses the change and nothing is written ...
+				if _, err := pool.Exec(ctx, update, rowID[c.table]); mcSQLState(err) != "23514" {
+					t.Errorf("%s.%s: pinned column changed: err %v, want SQLSTATE 23514 from %s", c.table, col, err, trig)
+				}
+				if got := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table]) - before; got != 0 {
+					t.Errorf("%s.%s: refused change wrote %d audit row(s), want 0", c.table, col, got)
+				}
+				// ... and past the pin the audit trigger still records it.
+				kaExecInTx(ctx, t, pool, fmt.Sprintf(`ALTER TABLE %[1]s DISABLE TRIGGER %[2]s;
+					%[3]s;
+					ALTER TABLE %[1]s ENABLE TRIGGER %[2]s;`, c.table, trig, strings.Replace(update, "$1::uuid", "'"+rowID[c.table]+"'::uuid", 1)))
+			} else if _, err := pool.Exec(ctx, update, rowID[c.table]); err != nil {
 				t.Fatalf("%s.%s: update: %v", c.table, col, err)
 			}
 			if got := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table]) - before; got != wantRows {
