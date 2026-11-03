@@ -386,7 +386,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	})
 
 	// Ingest — larger body limit (10 MB for bulk chunk import)
-	ingestH := handler.NewIngestHandler(pool, cfgStore)
+	ingestH := handler.NewIngestHandler(pool, cfgStore, blocktypeReg)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
 		r.Use(handler.MaxBodySize(IngestMaxBodySize))

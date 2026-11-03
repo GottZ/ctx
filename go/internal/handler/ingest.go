@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -46,15 +47,17 @@ const ingestBucket = "ingest"
 
 // IngestHandler handles POST /api/ingest.
 type IngestHandler struct {
-	pool *pgxpool.Pool
-	cfg  ConfigStore // nil = no write rate limit (test wiring)
+	pool       *pgxpool.Pool
+	cfg        ConfigStore // nil = no write rate limit (test wiring)
+	blocktypes *blocktype.Registry
 }
 
 // NewIngestHandler creates a new IngestHandler. The write rate limit comes
 // from cfg per request (tenant-overridable query.rate_limit_write); a nil cfg
-// disables it.
-func NewIngestHandler(pool *pgxpool.Pool, cfg ConfigStore) *IngestHandler {
-	return &IngestHandler{pool: pool, cfg: cfg}
+// disables it. blocktypes feeds the auto-classify hook after a block-mode
+// upsert, the same registry /api/store classifies with.
+func NewIngestHandler(pool *pgxpool.Pool, cfg ConfigStore, blocktypes *blocktype.Registry) *IngestHandler {
+	return &IngestHandler{pool: pool, cfg: cfg, blocktypes: blocktypes}
 }
 
 // IngestRequest is the JSON body for POST /api/ingest.
@@ -305,6 +308,21 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		// We cannot distinguish insert vs update at this level, so we use "updated" as
 		// the default since HashNOOPCheck already catches identical content (= true skip).
 		action = "updated"
+
+		// Auto-classify type_name from title and metadata with the registry
+		// snapshot, like POST /api/store and the MCP store and update paths.
+		// type_source='manual' blocks are never re-classified; no rule match
+		// is a no-op. A failure keeps the written block with the type it
+		// already has (the default on a new row), as on /api/store.
+		//
+		// Chunk mode above does not classify. InsertChunk rows
+		// (lifecycle_state='chunk') have never gone through the hook, and
+		// InsertChunk has no caller besides this handler; classifying them is
+		// a decision of its own.
+		if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, h.classifySet(ctx), block.ID, block.Title, block.Metadata); err != nil {
+			slog.Warn("ingest: auto-classify failed",
+				"error", err, "index", index, "block_id", block.ID, "request_id", reqID)
+		}
 	}
 
 	// 3. Log write (fire-and-forget).
@@ -334,6 +352,17 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 
 	// Embedding generated async by scheduler backfill loop.
 	return IngestResult{Index: index, ID: block.ID, Status: action}
+}
+
+// classifySet resolves the caller's block-type policy set for the classify
+// hook. A nil registry (test wiring without classify) gives a nil set, and
+// ClassifyBlockAfterUpsert then fails loudly instead of using a compiled-in
+// set — the same contract as StoreHandler.classifySet.
+func (h *IngestHandler) classifySet(ctx context.Context) *blocktype.Set {
+	if h.blocktypes == nil {
+		return nil
+	}
+	return h.blocktypes.SnapshotForRequest(ctx)
 }
 
 // ingestRateLimited applies the write budget to the request and books it in
