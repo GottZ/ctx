@@ -16,6 +16,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/modelkey"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -311,9 +312,16 @@ func stateChanging(method string) bool {
 //   - ctxr_ (refresh token): explicitly rejected — a refresh token is not an
 //     access credential; the SQL token_type='access' filter is only the
 //     second belt.
+//   - ctxm_ (model key of the /v1 model API, modelkey.HasPrefix — also behind
+//     whitespace and the invisible characters a paste carries): explicitly
+//     rejected without a database round-trip (design/01 §4.3, W01-4). Model
+//     keys are their own credential class and never authenticate a knowledge
+//     request (masterplan I-K0); before this branch SanitizeKey reduced one to
+//     a hex remnant and sent that to ctx_auth.
 //   - anything else: the raw-api-key path, byte-identical to the pre-S3
-//     behaviour (SanitizeKey → ctx_auth). Raw keys are pure hex, so a
-//     prefixed token can never be misclassified here and vice versa.
+//     behaviour (auth.AuthenticateRaw: SanitizeKey → ctx_auth). Raw keys are
+//     pure hex, so a prefixed token can never be misclassified here and vice
+//     versa.
 //
 // Both token and key materialise through the SAME ctx_auth_by_id scope-build
 // (095): a revoked key or deactivated principal kills its tokens instantly,
@@ -340,8 +348,10 @@ func resolveCredential(ctx context.Context, pool *pgxpool.Pool, raw string) (*au
 		return auth.AuthenticateByID(ctx, pool, apiKeyID)
 	case strings.HasPrefix(raw, store.RefreshTokenPrefix):
 		return &auth.AuthResult{IsValid: false}, nil
+	case modelkey.HasPrefix(raw):
+		return &auth.AuthResult{IsValid: false}, nil
 	default:
-		return auth.Authenticate(ctx, pool, auth.SanitizeKey(raw))
+		return auth.AuthenticateRaw(ctx, pool, raw)
 	}
 }
 

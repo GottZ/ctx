@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/modelkey"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -887,6 +888,7 @@ func scriptedLines(lines ...string) func(string) string {
 }
 
 func TestKeyFormProblem(t *testing.T) {
+	modelKey := testModelKey(t)
 	cases := []struct {
 		name string
 		key  string
@@ -905,6 +907,12 @@ func TestKeyFormProblem(t *testing.T) {
 			[]string{"1 non-hex character at position 1"}},
 		{"oauth access token", "ctxt_" + goodTestKey, []string{"OAuth token", "API key"}},
 		{"oauth refresh token", "ctxr_" + goodTestKey, []string{"OAuth token"}},
+		// W01-4: a model key is named as such instead of being counted as 54
+		// characters with non-hex positions — same predicate the server's
+		// knowledge paths refuse it with (modelkey.HasPrefix).
+		{"model key", modelKey, []string{"model key", "/v1", "not a ctx API key"}},
+		{"model key behind a byte-order mark", "\ufeff" + modelKey, []string{"model key", "/v1"}},
+		{"api key glued behind the model-key prefix", modelkey.Prefix + goodTestKey, []string{"model key"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -925,6 +933,46 @@ func TestKeyFormProblem(t *testing.T) {
 	// A long run of garbage lists a bounded number of positions, not 60.
 	if got := keyFormProblem(strings.Repeat("z", 64)); strings.Count(got, ",") > 10 {
 		t.Errorf("position list must stay bounded: %q", got)
+	}
+}
+
+// testModelKey mints a well-formed model key (ctxm_, W01-2).
+func testModelKey(t *testing.T) string {
+	t.Helper()
+	k, err := modelkey.Generate()
+	if err != nil {
+		t.Fatalf("modelkey.Generate: %v", err)
+	}
+	return k.Plaintext()
+}
+
+// A model key typed into the key prompt gets the model-key hint, is never
+// probed against the server and never written (W01-4).
+func TestConfigStepNamesModelKey(t *testing.T) {
+	cfgPath := isolatedConfigHome(t)
+	ks := newKeyServer(t, goodTestKey)
+	modelKey := testModelKey(t)
+
+	var cfg Config
+	var ok bool
+	out := captureStdout(t, func() {
+		cfg, ok = runConfigStep(scriptedLines(ks.srv.URL, modelKey, goodTestKey))
+	})
+	if !ok || cfg.Key != goodTestKey {
+		t.Fatalf("the API key after the model key must be accepted, got ok=%v key=%q; output:\n%s", ok, cfg.Key, out)
+	}
+	if !strings.Contains(out, "model key") || strings.Contains(out, "54 characters") {
+		t.Errorf("a model key must be named as such, not counted; output:\n%s", out)
+	}
+	if got := ks.probes(); len(got) != 1 || got[0] != goodTestKey {
+		t.Errorf("only the API key may be probed, got %q", got)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("config not written: %v", err)
+	}
+	if strings.Contains(string(data), modelkey.Prefix) {
+		t.Errorf("the model key must never reach the config:\n%s", data)
 	}
 }
 

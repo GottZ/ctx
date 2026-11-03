@@ -36,6 +36,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -150,11 +151,23 @@ func Parse(raw string) (Key, error) {
 }
 
 // HasPrefix reports whether raw claims to be a model key: the prefix after
-// trimming surrounding whitespace, nothing more. It is the knowledge paths'
-// switch (design/01 §4.3) — a credential of this class is refused there
-// without a database round-trip, well-formed or not.
+// the characters a paste carries in front of it (see invisible), nothing
+// more — case-sensitive like the whole format, so CTXM_ is no model key. It is
+// the knowledge paths' switch (design/01 §4.3): a credential of this class is
+// refused there without a database round-trip, well-formed or not.
 func HasPrefix(raw string) bool {
-	return strings.HasPrefix(strings.TrimSpace(raw), Prefix)
+	return strings.HasPrefix(strings.TrimLeftFunc(raw, invisible), Prefix)
+}
+
+// invisible is what HasPrefix skips in front of the prefix: Unicode
+// White_Space, format characters (Cf — zero-width space and joiners, the
+// byte-order mark a file saved as "UTF-8 with BOM" starts with, bidi marks,
+// soft hyphen) and control characters (Cc). A key copied from a web page or
+// read from such a file keeps them, and the knowledge paths' SanitizeKey
+// would otherwise reduce that key to a hex remnant for ctx_auth (W01-4,
+// W01-2 review F-3).
+func invisible(r rune) bool {
+	return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) || unicode.IsControl(r)
 }
 
 // checksum is CRC32-IEEE of b as sumLen big-endian Base62 digits; leading

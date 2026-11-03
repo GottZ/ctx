@@ -8,6 +8,8 @@ import (
 	"regexp"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/modelkey"
 )
 
 // hexOnly strips everything except hex characters [a-fA-F0-9].
@@ -52,8 +54,25 @@ func SanitizeKey(raw string) string {
 	return hexOnly.ReplaceAllString(raw, "")
 }
 
+// AuthenticateRaw is the entry point for a knowledge credential exactly as a
+// client sent it: the raw-key branch of the header gate, the login form, the
+// /authorize form. A value that claims to be a model key (modelkey.HasPrefix —
+// ctxm_, the credential class of the /v1 model API) is invalid here without a
+// database round-trip: model keys never authenticate a knowledge request
+// (masterplan I-K0), and SanitizeKey would hand a hex remnant of the key to
+// ctx_auth as a query parameter (design/01 §4.3). Everything else is
+// sanitized and checked by Authenticate, unchanged. Request paths call this,
+// never Authenticate — TestAuthenticateCallSitesGuarded counts them.
+func AuthenticateRaw(ctx context.Context, pool *pgxpool.Pool, raw string) (*AuthResult, error) {
+	if modelkey.HasPrefix(raw) {
+		return &AuthResult{IsValid: false}, nil
+	}
+	return Authenticate(ctx, pool, SanitizeKey(raw))
+}
+
 // Authenticate verifies an API key against the database using the ctx_auth PG function.
-// Returns an AuthResult with IsValid=false if the key is invalid or empty.
+// Returns an AuthResult with IsValid=false if the key is invalid or empty. The key is
+// taken as given — user input reaches it only through AuthenticateRaw.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*AuthResult, error) {
 	if apiKey == "" {
 		return &AuthResult{IsValid: false}, nil

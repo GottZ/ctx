@@ -154,7 +154,7 @@ func (h *SessionHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := auth.Authenticate(r.Context(), h.pool, auth.SanitizeKey(req.APIKey))
+	result, err := auth.AuthenticateRaw(r.Context(), h.pool, req.APIKey)
 	if err != nil || !result.IsValid {
 		sessionError(w, http.StatusUnauthorized)
 		return
