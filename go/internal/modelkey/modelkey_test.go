@@ -266,6 +266,18 @@ func TestHasPrefix(t *testing.T) {
 		"x ctxm_":                false,
 		strings.Repeat("ab", 32): false,
 		"":                       false,
+		// W01-4 (W01-2 review F-3): the invisible characters a paste carries
+		// in front of the prefix are skipped like whitespace.
+		"\ufeffctxm_x":               true,  // byte-order mark (file saved as UTF-8 with BOM)
+		"\u200bctxm_x":               true,  // zero-width space (copy from a web page)
+		"\u2060\u200dctxm_x":         true,  // word joiner + zero-width joiner
+		"\u00adctxm_x":               true,  // soft hyphen (Cf)
+		"\x00ctxm_x":                 true,  // NUL (Cc)
+		" \ufeff\tctxm_x":            true,  // mixed
+		"\ufeffCTXM_x":               false, // still case-sensitive
+		"\uff43\uff54\uff58\uff4d_x": false, // fullwidth letters are other characters, not a spelling
+		"\xffctxm_x":                 false, // an invalid UTF-8 byte is not skipped
+		"x\u200bctxm_":               false, // only leading characters are skipped
 	} {
 		if got := HasPrefix(raw); got != want {
 			t.Errorf("HasPrefix(%q) = %v, want %v", raw, got, want)

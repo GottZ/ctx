@@ -310,7 +310,7 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p := authorizeParamsFrom(r.FormValue)
-	apiKey := auth.SanitizeKey(r.FormValue("api_key"))
+	apiKey := r.FormValue("api_key") // raw: AuthenticateRaw refuses ctxm_ before it sanitizes
 
 	// client_id + redirect_uri: the SAME rule the GET applied before it
 	// rendered the form (resolveAuthorizeClient) — re-checked here because
@@ -357,7 +357,7 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate the API key.
-	result, err := auth.Authenticate(r.Context(), h.pool, apiKey)
+	result, err := auth.AuthenticateRaw(r.Context(), h.pool, apiKey)
 	if err != nil || !result.IsValid {
 		slog.Warn("oauth: invalid API key in authorize", "error", err)
 		writeConsent(w, http.StatusUnauthorized, client, parsedRedirect, p, "Invalid API key.")
