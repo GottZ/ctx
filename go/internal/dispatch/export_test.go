@@ -18,7 +18,7 @@ func (d *Dispatcher) SeedWaitSampleForTest(origin string, class Class, wait time
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	st := d.targetLocked(norm)
-	st.waits[classIdx(class)].add(wait)
+	st.ring(class).add(wait)
 }
 
 // SeedInteractiveDepthForTest raises the interactive queue depth counter of a

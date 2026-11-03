@@ -68,7 +68,7 @@ func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 		return 0
 	}
 	var ws WaitStats
-	st.waits[classIdx(class)].statsInto(&ws)
+	st.ring(class).statsInto(&ws)
 	return retryAfterEstimate(depth, ws.P95Wait)
 }
 

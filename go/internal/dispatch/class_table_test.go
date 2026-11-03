@@ -165,8 +165,8 @@ func TestInvalidClassSecondLine(t *testing.T) {
 			t.Errorf("Class(%d): queues interactive=%d background=%d after enqueue+drop, want 0/0",
 				c, st.interactive.total, st.background.len())
 		}
-		if i := classIdx(c); i != -1 {
-			t.Errorf("classIdx(Class(%d)) = %d, want -1 — an out-of-table value must not map onto a ring", c, i)
+		if r := st.ring(c); r != nil {
+			t.Errorf("ring(Class(%d)) = %p, want nil — an out-of-table value must not map onto a window", c, r)
 		}
 		l := d.admitLocked(st, w, time.Now(), false)
 		d.finishLocked(l)
@@ -220,8 +220,8 @@ func TestEveryClassHasEveryBranch(t *testing.T) {
 			t.Errorf("enqueueLocked(%s) = %v, want nil", c, err)
 		}
 		d.dropWaiterLocked(st, w)
-		if i := classIdx(c); i != int(c) {
-			t.Errorf("classIdx(%s) = %d, want %d", c, i, c)
+		if r := st.ring(c); r != &st.waits[c] {
+			t.Errorf("ring(%s) = %p, want its own window %p", c, r, &st.waits[c])
 		}
 		l := d.admitLocked(st, w, time.Now(), false)
 		if got := st.waits[c].count; got != 1 {
@@ -242,5 +242,128 @@ func TestEveryClassHasEveryBranch(t *testing.T) {
 	}
 	if got := d.Snapshot().InvalidClass; got != 0 {
 		t.Errorf("Snapshot.InvalidClass = %d for classes below numClasses, want 0", got)
+	}
+}
+
+// TestDoorOrderCtxErrBeforeInvalidClass pins the door order A03-W1 and W01-7
+// build on (ctx.Err() → ErrInvalidClass → …; review 2 F3): a canceled ctx
+// answers ctx.Err() even for an out-of-table class — the class check neither
+// counts nor logs it, at both doors.
+func TestDoorOrderCtxErrBeforeInvalidClass(t *testing.T) {
+	d, h := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
+	ctx, cancel := context.WithCancel(withPrincipal(context.Background(), principal("x")))
+	cancel()
+	doors := map[string]func(*Dispatcher, context.Context, Request) (*Lease, context.Context, error){
+		"Acquire":    (*Dispatcher).Acquire,
+		"TryAcquire": (*Dispatcher).TryAcquire,
+	}
+	for name, enter := range doors {
+		for _, c := range outOfTable {
+			l, runCtx, err := enter(d, ctx, Request{Target: Target{Origin: testOrigin}, Class: c, Role: "test"})
+			if !errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidClass) || l != nil || runCtx != nil {
+				t.Errorf("%s(canceled ctx, Class(%d)) = (lease %v, runCtx %v, err %v), want (nil, nil, context.Canceled)",
+					name, c, l != nil, runCtx != nil, err)
+			}
+		}
+	}
+	if got := d.Snapshot().InvalidClass; got != 0 {
+		t.Errorf("Snapshot.InvalidClass = %d after canceled-ctx attempts, want 0 (ctx.Err() comes first)", got)
+	}
+	if got := h.count("dispatch: acquire with an invalid class refused"); got != 0 {
+		t.Errorf("invalid-class ERROR lines = %d after canceled-ctx attempts, want 0", got)
+	}
+}
+
+// TestClassTableGapIsRefusedNotFatal pins deviation A1 (valid() requires a
+// named row) and the panic-freedom of every wait-ring read (review 2 F2/F4):
+// a row emptied at run time — the shape a constant inserted mid-enum without
+// its row compiles to — makes that class invalid: refused at both doors on a
+// slot-capped and a pass-through target (never admitted), named "invalid",
+// while a valid class keeps working and Snapshot / RetryAfterHint still
+// answer instead of panicking on a negative ring index under the dispatcher.
+func TestClassTableGapIsRefusedNotFatal(t *testing.T) {
+	saved := classTable[ClassInteractive]
+	classTable[ClassInteractive].name = ""
+	t.Cleanup(func() { classTable[ClassInteractive] = saved })
+
+	if ClassInteractive.valid() {
+		t.Fatal("ClassInteractive.valid() = true with an empty table row, want false")
+	}
+	if got := ClassInteractive.String(); got != invalidClassName {
+		t.Errorf("ClassInteractive.String() = %q with an empty table row, want %q", got, invalidClassName)
+	}
+	for _, tc := range []struct {
+		name string
+		pol  Policy
+	}{
+		{"1-slot target", onSlotPolicy(1)},
+		{"pass-through target", Policy{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := newTestDispatcher(t, DefaultSettings(), tc.pol)
+			ctx := withPrincipal(context.Background(), principal("x"))
+			if l, _, err := d.Acquire(ctx, interactiveReq()); !errors.Is(err, ErrInvalidClass) || l != nil {
+				t.Errorf("Acquire(gap class) = (lease %v, err %v), want (nil, ErrInvalidClass)", l != nil, err)
+				if l != nil {
+					l.Release()
+				}
+			}
+			if l, _, err := d.TryAcquire(ctx, interactiveReq()); !errors.Is(err, ErrInvalidClass) || l != nil {
+				t.Errorf("TryAcquire(gap class) = (lease %v, err %v), want (nil, ErrInvalidClass)", l != nil, err)
+				if l != nil {
+					l.Release()
+				}
+			}
+			l, _, err := d.Acquire(context.Background(), backgroundReq())
+			if err != nil {
+				t.Fatalf("Acquire(background) with a gap elsewhere: %v", err)
+			}
+			l.Release()
+			snap := d.Snapshot()
+			if snap.InvalidClass != 2 {
+				t.Errorf("Snapshot.InvalidClass = %d, want 2", snap.InvalidClass)
+			}
+			// The class switches compare constants, so the emptied row of an
+			// existing constant still takes its case — the door is what refuses
+			// it. The pin here is that the ring read answers (nil window ⇒ no
+			// samples) instead of panicking on a negative index.
+			if got := d.RetryAfterHint(testOrigin, ClassInteractive); got < 0 || got > retryAfterCap {
+				t.Errorf("RetryAfterHint(gap class) = %v, want within [0, %v]", got, retryAfterCap)
+			}
+			if ts := target(t, d); ts.Held != 0 || ts.Inflight != 0 || ts.Background.Samples != 1 {
+				t.Errorf("after release: Held=%d Inflight=%d Background.Samples=%d, want 0/0/1",
+					ts.Held, ts.Inflight, ts.Background.Samples)
+			}
+		})
+	}
+}
+
+// TestWaitRingAccessorNilSafe (review 2 F2): ring is the only index into
+// waits — its own window for a class below numClasses, nil outside the class
+// table — and both window methods are nil-safe, so a caller that forgets the
+// nil check neither panics nor leaves d.mu locked.
+func TestWaitRingAccessorNilSafe(t *testing.T) {
+	var st targetState
+	for c := Class(0); c < numClasses; c++ {
+		if r := st.ring(c); r != &st.waits[c] {
+			t.Errorf("ring(%s) = %p, want %p", c, r, &st.waits[c])
+		}
+	}
+	for _, c := range outOfTable {
+		r := st.ring(c)
+		if r != nil {
+			t.Errorf("ring(Class(%d)) = %p, want nil", c, r)
+		}
+		r.add(time.Second)
+		ws := WaitStats{}
+		r.statsInto(&ws)
+		if ws != (WaitStats{}) {
+			t.Errorf("nil ring statsInto changed the view: %+v", ws)
+		}
+	}
+	for i := range st.waits {
+		if st.waits[i].count != 0 {
+			t.Errorf("waits[%d].count = %d after out-of-table writes, want 0", i, st.waits[i].count)
+		}
 	}
 }

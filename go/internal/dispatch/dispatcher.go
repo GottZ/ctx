@@ -98,7 +98,7 @@ type targetState struct {
 	// telemetry counters, design/02 §3.3) — see preempt.go.
 	preempt preemptState
 	// waits are the per-class rolling wait-sample windows (MW7/D3-W3), one
-	// per class below numClasses, indexed by classIdx — see metrics.go.
+	// per class below numClasses, accessed ONLY through ring — see metrics.go.
 	waits [numClasses]waitRing
 }
 
@@ -397,8 +397,8 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 		}
 	}
 	wait := now.Sub(w.enqueued)
-	if i := classIdx(l.class); i >= 0 {
-		st.waits[i].add(wait) // MW7/D3-W3 wait sample, O(1)
+	if r := st.ring(l.class); r != nil {
+		r.add(wait) // MW7/D3-W3 wait sample, O(1)
 	} else {
 		// Fail-closed (A03-W1), unreachable behind the door check: no
 		// class's window absorbs a sample of a class outside the table.
@@ -759,8 +759,8 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		if t := st.background.oldest(); !t.IsZero() {
 			ts.Background.OldestWait = now.Sub(t)
 		}
-		st.waits[classIdx(ClassInteractive)].statsInto(&ts.Interactive)
-		st.waits[classIdx(ClassBackground)].statsInto(&ts.Background)
+		st.ring(ClassInteractive).statsInto(&ts.Interactive)
+		st.ring(ClassBackground).statsInto(&ts.Background)
 		ts.Buckets = d.bucketSnapshotsLocked(st, now)
 		out.Targets = append(out.Targets, ts)
 	}
