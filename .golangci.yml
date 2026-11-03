@@ -136,7 +136,7 @@ linters:
               desc: "internal/config may only be imported by cmd/**, internal/handler, internal/events, internal/settings (F1 layering rule — pass values as parameters instead)"
 
         # Leaf doctrine (design/01-schnitt.md §4.5, masterplan K7/K11 + A-4).
-        # Six packages are leaves BY DESIGN; until now the doctrine lived only
+        # Seven packages are leaves BY DESIGN; until now the doctrine lived only
         # in their package comments, and a comment is not a gate. Every rule
         # below matches today's import graph exactly — nothing in the tree
         # changes, the NEXT violation just becomes a CI failure instead of a
@@ -144,7 +144,7 @@ linters:
         # above), and a deny prefix ending in "$" is an EXACT match in depguard
         # v2 — without it "…/internal/llm" would also block "…/internal/llmlog".
         #
-        # 1/6 — internal/util. The K11 wording verbatim: "sprachnahe
+        # 1/7 — internal/util. The K11 wording verbatim: "sprachnahe
         # Text-Primitiven — Runen, Tokens, Wörter-Tabellen; ausschließlich
         # stdlib." The package comment (util/strings.go:1-9) states the same
         # boundary in English — the standard library and NOTHING ELSE, no
@@ -161,7 +161,7 @@ linters:
             - pkg: "github.com/GottZ/ctx"
               desc: "internal/util is the stdlib-only leaf of language-near text primitives — runes, tokens, word tables (K11). A helper that needs a ctx package does not belong here; it belongs next to the thing it needs (util/strings.go:4-9)"
 
-        # 2/6 — internal/clientconfig: the ONE resolution rule for base URL and
+        # 2/7 — internal/clientconfig: the ONE resolution rule for base URL and
         # API key, shared by internal/cli and cmd/ctx-armsweep (T01-6).
         # Stdlib-only on purpose (clientconfig/config.go:6-10): a tool that
         # merely needs those two values must not link the command tree, and with
@@ -175,7 +175,7 @@ linters:
             - pkg: "github.com/GottZ/ctx"
               desc: "internal/clientconfig is the stdlib-only leaf that resolves base URL and API key for every ctx client — importing a ctx package here drags the command tree back into the tools that only wanted those two values (T01-6, clientconfig/config.go:6-10)"
 
-        # 3/6 — internal/visibility: THE shared "this block is visible" SQL
+        # 3/7 — internal/visibility: THE shared "this block is visible" SQL
         # fragment (WF T6). It lives OUTSIDE internal/store because rrf cannot
         # import store (store → blocktype → rrf would cycle); store, rrf and
         # overview all embed this package directly (visibility.go:4-11).
@@ -186,7 +186,7 @@ linters:
             - pkg: "github.com/GottZ/ctx/internal/store$"
               desc: "internal/visibility is a leaf so store, rrf and overview can share ONE visibility predicate — an import of store here re-creates the cycle the package exists to break (visibility.go:4-11)"
 
-        # 4/6 — internal/clustersql: THE shared "cluster membership, scope-pure"
+        # 4/7 — internal/clustersql: THE shared "cluster membership, scope-pure"
         # SQL fragment, a leaf for exactly the reason visibility is one — rrf
         # cannot import store, and the filter is needed by rrf, store and
         # potentially handler (clustersql.go:4-9).
@@ -199,7 +199,7 @@ linters:
             - pkg: "github.com/GottZ/ctx/internal/rrf$"
               desc: "internal/clustersql is a leaf so rrf, store and handler can share ONE cluster-membership fragment — rrf imports clustersql, so the reverse import is the cycle itself (clustersql.go:4-9)"
 
-        # 5/6 — internal/derived: the leaf property is a RULE, not the current
+        # 5/7 — internal/derived: the leaf property is a RULE, not the current
         # import list (derived.go:14-20). The DB-facing half of the contract
         # (store.ResolveSources) lives in store and calls INTO this package —
         # the same cut internal/visibility uses — and echo.go is an independent
@@ -217,7 +217,7 @@ linters:
             - pkg: "github.com/GottZ/ctx/internal/topiclabel$"
               desc: "internal/derived must not import store, llm, blocktype or topiclabel — echo.go is deliberately an independent implementation of the topiclabel/guard.go index, not an import (derived.go:14-20)"
 
-        # 6/6 — internal/llmusage: THE reader of the hourly LLM-usage rollup
+        # 6/7 — internal/llmusage: THE reader of the hourly LLM-usage rollup
         # (design/06 §4.7, W06-4). Its consumers are the quota accountant
         # (internal/backends), the status rollups (internal/handler) and the
         # usage API, so it imports none of them and no config: the pgxdb
@@ -237,6 +237,30 @@ linters:
             - "$gostd"
             - "github.com/GottZ/ctx/internal/pgxdb$"
             - "github.com/jackc/pgx/v5"
+
+        # 7/7 — internal/modelkey: the ctxm_ credential format of the model
+        # API (design/01 §4.1, W01-2) — Base62 body from crypto/rand, CRC32
+        # checksum, SHA-256 hash, hint. The store that mints keys, the knowledge
+        # paths that refuse them and the /v1 middleware that checks them all
+        # import it, so it imports none of them; and nothing third-party
+        # either, because whatever it imports sits on every authentication
+        # path. Hence allow = $gostd, with the ctx half carrying the message.
+        # $gostd includes math/rand and math/rand/v2, and both are named
+        # "rand" like crypto/rand — one wrong import and keys become
+        # predictable while every test stays green (unique, uniform: a
+        # seeded ChaCha8 passes both). The two denies close that.
+        modelkey-leaf:
+          files:
+            - "**/go/internal/modelkey/**"
+          allow:
+            - "$gostd"
+          deny:
+            - pkg: "github.com/GottZ/ctx"
+              desc: "internal/modelkey is the stdlib-only leaf that defines the ctxm_ model-key format — store, auth, handler and the /v1 middleware import it, so a ctx import here inverts that layering or closes a cycle (modelkey/modelkey.go package comment, design/01 §4.1)"
+            - pkg: "math/rand$"
+              desc: "model keys are secrets: their only randomness source is crypto/rand (modelkey.Generate) — math/rand is predictable, and no test can tell its output from crypto/rand's"
+            - pkg: "math/rand/v2$"
+              desc: "model keys are secrets: their only randomness source is crypto/rand (modelkey.Generate) — math/rand/v2 (also ChaCha8/PCG) is seedable and therefore predictable, and no test can tell its output from crypto/rand's"
 
         # evalscore stays TOOLING (design/06 §4.7, masterplan K18 + A-15).
         # internal/evalscore is the measurement vocabulary of the gold bench —

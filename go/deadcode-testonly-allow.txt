@@ -130,6 +130,20 @@ internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_g
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
+internal/modelkey/modelkey.go	Generate	# wartet: W01-5 — W01-3 (Store) ruft es, ist selbst aber bis zu den Admin-Actions test-only
+internal/modelkey/modelkey.go	HasPrefix	# wartet: W01-4 — erster Produktionsaufrufer resolveCredential (Wissens-Pfade weisen ctxm_ ohne DB ab)
+internal/modelkey/modelkey.go	Key.GoString	# Hint-Darstellung für fmt %#v (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
+internal/modelkey/modelkey.go	Key.Hash	# wartet: W01-5 (Store-Aufrufer aus W01-3, erreichbar mit den Admin-Actions) oder W02-05 (ModelAuth), wer zuerst
+internal/modelkey/modelkey.go	Key.HashPrefix	# wartet: W02-05 — einziger Aufrufer ModelAuth (W01-6, Limiter-Schlüssel) bleibt bis zum Mount unmontiert
+internal/modelkey/modelkey.go	Key.Hint	# wartet: W01-5 — key_hint beim Anlegen/Rotieren (W01-3), erreichbar mit den Admin-Actions
+internal/modelkey/modelkey.go	Key.LogValue	# Hint-Darstellung für slog (LogValuer) (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
+internal/modelkey/modelkey.go	Key.Plaintext	# wartet: W01-5 — Reveal-once-Antwort der Admin-Actions (W01-3 übergibt den Klartext)
+internal/modelkey/modelkey.go	Key.String	# Hint-Darstellung für fmt %v/%s und jeden Stringer-Verbraucher (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
+internal/modelkey/modelkey.go	Parse	# wartet: W02-05 — einziger Aufrufer ModelAuth (W01-6) bleibt bis zum Mount unmontiert
+internal/modelkey/modelkey.go	checksum	# Helfer von generate und Parse: wartet auf W01-5 oder W02-05, wer zuerst
+internal/modelkey/modelkey.go	generate	# wartet: W01-5 — einziger Prod-Aufrufer Generate; der io.Reader-Parameter ist der Test-Saum des Rejection-Sampling-Gates
+internal/modelkey/modelkey.go	isBase62	# Helfer von Parse: wartet: W02-05
+internal/modelkey/modelkey.go	newKey	# Helfer von generate und Parse: wartet auf W01-5 oder W02-05, wer zuerst
 internal/promptguard/promptguard.go	Canonicalize	# Nonce zu Null-Nonce für den Fixture-Determinismus der Prompt-Golden; 26 Aufrufe in 8 _test.go
 internal/prompts/prompts.go	All	# Nur prompts_test.go:52/85/125: Registry-Vollständigkeit und Sortierung; Prod stempelt über Register
 internal/prompts/prompts.go	Lookup	# Nur prompts_test.go:103 und completeness_test.go:534/611: ID-zu-Identity-Probe der Registry-Gates
