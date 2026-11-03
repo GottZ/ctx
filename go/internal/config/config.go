@@ -31,6 +31,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
@@ -119,6 +120,7 @@ type Config struct {
 	RecallCheck    RecallCheckConfig
 	Selector       SelectorConfig
 	Distill        DistillConfig
+	Gateway        GatewayConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -2428,6 +2430,105 @@ type DistillConfig struct {
 	SeenRetentionDays int `key:"distill.seen_retention_days" env:"CTX_DISTILL_SEEN_RETENTION_DAYS" default:"30" mut:"hot" tenancy:"global-only"`
 }
 
+// GatewayConfig is the OpenAI-compatible gateway (/v1, /v2; design/02 §3.3,
+// prefix gateway.* per masterplan K3; wave W02-02). Every key is hot — the
+// gateway reads one snapshot per request through the getter cmd/ctxd builds
+// over GatewaySettings — and global-only: one gateway per process, one
+// memory budget, one set of caps (the fail-closed default for new keys).
+//
+// Enabled is the one flag (K3). Off (the default, and in production until the
+// release wave W06-20, masterplan §3.2 duty 1) every /v1 and /v2 request gets
+// the same OpenAI 404 BEFORE authentication: no oracle on keys, no database
+// work (K4). The checks come with the keys (V38, V39), not with their later
+// consumers — a check added after a key is configurable would be added
+// against values already in use (precedent validateDistill).
+//
+// The tenant-alias ceiling is one key per dimension
+// (gateway.tenant_alias_ceiling.*) instead of the design's single JSON object:
+// the registry has no object type, and a new field type would need a parser,
+// a typeNames entry (the settings UI dispatches widgets on it — API
+// contract) and an env form, while one int/seconds key per dimension reuses
+// the typed parsers, the generic sign walks (V17, V35) and the per-key
+// settings audit.
+type GatewayConfig struct {
+	Enabled bool `key:"gateway.enabled" env:"CTX_GATEWAY_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+
+	// MaxRequestBytes is the strict body cap of the gateway (stage 3,
+	// handler.MaxBodySizeStrictWith): a declared longer body is a 413 before
+	// the handler runs. 8 MiB ≈ a 262k-token prompt without JSON escaping.
+	MaxRequestBytes int `key:"gateway.max_request_bytes" env:"CTX_GATEWAY_MAX_REQUEST_BYTES" default:"8388608" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// InflightBudget is the process-wide sum of all running gateway
+	// reservations — request share (3 × body) plus response share (§4.2.1);
+	// past it a request is refused at once with 503 server_overloaded
+	// (B9: the container limit is 1 GiB, an OOM kill takes every pipeline).
+	// Must hold at least one request at the cap (V39: >= 3 ×
+	// max_request_bytes), or such a request could never be admitted.
+	InflightBudget int `key:"gateway.inflight_budget" env:"CTX_GATEWAY_INFLIGHT_BUDGET" default:"268435456" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// MaxResponseBytes caps the read of one non-streamed upstream body; the
+	// response reserve of a non-stream call is twice this. At most
+	// httpx.MaxResponseBytes (V39), the transport-wide cap it narrows.
+	MaxResponseBytes int `key:"gateway.max_response_bytes" env:"CTX_GATEWAY_MAX_RESPONSE_BYTES" default:"4194304" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// MaxStreamFrameBytes caps one SSE frame relayed on /v1; the response
+	// reserve of a stream is twice this. At most 4 MiB (V39), the internal
+	// frame cap of the stream reader (llm/stream.go maxSSEFrameBytes).
+	MaxStreamFrameBytes int `key:"gateway.max_stream_frame_bytes" env:"CTX_GATEWAY_MAX_STREAM_FRAME_BYTES" default:"1048576" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// EmbeddingMaxFloats is the ceiling of max_inputs × native_dims per
+	// embedding alias (1048576 floats = 4 MiB of float32).
+	EmbeddingMaxFloats int `key:"gateway.embedding_max_floats" env:"CTX_GATEWAY_EMBEDDING_MAX_FLOATS" default:"1048576" mut:"hot" parse:"strict" tenancy:"global-only"`
+
+	// StreamCommitGrace is the latest header commit of a stream, measured
+	// from handler entry; at most 50 s (V39) so it stays under a typical
+	// 60 s proxy idle timeout. The lower clamp (dispatcher max wait + 5 s)
+	// arrives with dispatch.external_max_wait (A03-W5).
+	StreamCommitGrace time.Duration `key:"gateway.stream_commit_grace" env:"CTX_GATEWAY_STREAM_COMMIT_GRACE" default:"40" mut:"hot" tenancy:"global-only"`
+	// KeepaliveInterval spaces the ": keepalive" comments of a committed
+	// stream in silence.
+	KeepaliveInterval time.Duration `key:"gateway.keepalive_interval" env:"CTX_GATEWAY_KEEPALIVE_INTERVAL" default:"15" mut:"hot" tenancy:"global-only"`
+	// ClientWriteWindow is the rolling write deadline per frame after the
+	// commit: a client that stops reading is cut off and its lease freed.
+	ClientWriteWindow time.Duration `key:"gateway.client_write_window" env:"CTX_GATEWAY_CLIENT_WRITE_WINDOW" default:"30" mut:"hot" tenancy:"global-only"`
+	// RequestTimeout is the stream fallback of the per-role LLM timeout
+	// (= webchat.llm_timeout's default).
+	RequestTimeout time.Duration `key:"gateway.request_timeout" env:"CTX_GATEWAY_REQUEST_TIMEOUT" default:"900" mut:"hot" tenancy:"global-only"`
+	// RequestDeadline is the whole budget of a non-streamed request from
+	// handler entry. Below 600 s (V39), the OpenAI SDKs' default timeout:
+	// at or above it the SDK gives up and retries the whole request while
+	// the first one still runs.
+	RequestDeadline time.Duration `key:"gateway.request_deadline" env:"CTX_GATEWAY_REQUEST_DEADLINE" default:"540" mut:"hot" tenancy:"global-only"`
+
+	// DefaultMaxTokens is the fallback max_tokens when neither the client
+	// nor the alias sets one.
+	DefaultMaxTokens int `key:"gateway.default_max_tokens" env:"CTX_GATEWAY_DEFAULT_MAX_TOKENS" default:"4096" mut:"hot" tenancy:"global-only"`
+	// MaxOutputTokensCeiling is the hard ceiling of every effective
+	// max_tokens, independent of alias and backend-row caps (a row without
+	// a cap means unlimited).
+	MaxOutputTokensCeiling int `key:"gateway.max_output_tokens_ceiling" env:"CTX_GATEWAY_MAX_OUTPUT_TOKENS_CEILING" default:"32768" mut:"hot" parse:"strict" tenancy:"global-only"`
+
+	TenantAliasCeiling GatewayTenantAliasCeiling
+
+	// RelayUpstream4xxMessages: off (default, fail-closed) a client sees only
+	// ctx's own error texts; on, a sanitized upstream 4xx text (E-02-5).
+	RelayUpstream4xxMessages bool `key:"gateway.relay_upstream_4xx_messages" env:"CTX_GATEWAY_RELAY_UPSTREAM_4XX_MESSAGES" default:"false" mut:"hot" tenancy:"global-only"`
+	// RetryAfterJitter widens a saturation hint: retry-after-ms = hint ×
+	// U[1, 1 + jitter] ("treat it as a minimum and add a small random
+	// delay"). Range [0, 1] (V39).
+	RetryAfterJitter float64 `key:"gateway.retry_after_jitter" env:"CTX_GATEWAY_RETRY_AFTER_JITTER" default:"0.5" mut:"hot" tenancy:"global-only"`
+}
+
+// GatewayTenantAliasCeiling is the server admin's ceiling on tenant-alias
+// policies (design/02 §3.3 "tenant_alias_ceiling", Finding 8b): a tenant
+// alias above it is refused on write (422, W02-04) and clamped with a WARN on
+// reload (W02-03). The design's JSON object, one key per dimension.
+type GatewayTenantAliasCeiling struct {
+	MaxOutputTokens    int           `key:"gateway.tenant_alias_ceiling.max_output_tokens" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_MAX_OUTPUT_TOKENS" default:"8192" mut:"hot" parse:"strict" tenancy:"global-only"`
+	MaxN               int           `key:"gateway.tenant_alias_ceiling.max_n" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_MAX_N" default:"1" mut:"hot" parse:"strict" tenancy:"global-only"`
+	Timeout            time.Duration `key:"gateway.tenant_alias_ceiling.timeout" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_TIMEOUT" default:"600" mut:"hot" tenancy:"global-only"`
+	EmbeddingMaxInputs int           `key:"gateway.tenant_alias_ceiling.embedding_max_inputs" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_EMBEDDING_MAX_INPUTS" default:"32" mut:"hot" parse:"strict" tenancy:"global-only"`
+	RerankMaxDocuments int           `key:"gateway.tenant_alias_ceiling.rerank_max_documents" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_RERANK_MAX_DOCUMENTS" default:"128" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ToolsMaxCount may be 0: tenant aliases then offer no tools.
+	ToolsMaxCount int `key:"gateway.tenant_alias_ceiling.tools_max_count" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_TOOLS_MAX_COUNT" default:"64" mut:"hot" parse:"strict" tenancy:"global-only"`
+}
+
 // Source reports the origin of a registry key in this snapshot:
 // "env" | "default" (F2 adds "settings"). Unknown keys return "".
 func (c *Config) Source(key string) string {
@@ -2577,6 +2678,39 @@ func (c *Config) SynthesisSettings() llm.SynthesisSettings {
 		ExternalNumCtxFallback: c.Pool.ExternalNumCtxFallback,
 		OpenRouterWindowTTL:    c.Pool.OpenRouterWindowTTL,
 		Devmode:                c.Tenant.Devmode,
+	}
+}
+
+// GatewaySettings converts the gateway group to the oai settings snapshot
+// (design/02 §3.3): internal/oai may not import config (config-layering), so
+// cmd/ctxd hands the gateway a getter over this method. Every gateway.* key
+// maps here — pinned by TestGatewayKeysReachSettings.
+func (c *Config) GatewaySettings() oai.Settings {
+	g := &c.Gateway
+	return oai.Settings{
+		Enabled:                  g.Enabled,
+		MaxRequestBytes:          int64(g.MaxRequestBytes),
+		InflightBudget:           int64(g.InflightBudget),
+		MaxResponseBytes:         int64(g.MaxResponseBytes),
+		MaxStreamFrameBytes:      int64(g.MaxStreamFrameBytes),
+		EmbeddingMaxFloats:       int64(g.EmbeddingMaxFloats),
+		StreamCommitGrace:        g.StreamCommitGrace,
+		KeepaliveInterval:        g.KeepaliveInterval,
+		ClientWriteWindow:        g.ClientWriteWindow,
+		RequestTimeout:           g.RequestTimeout,
+		RequestDeadline:          g.RequestDeadline,
+		DefaultMaxTokens:         g.DefaultMaxTokens,
+		MaxOutputTokensCeiling:   g.MaxOutputTokensCeiling,
+		RelayUpstream4xxMessages: g.RelayUpstream4xxMessages,
+		RetryAfterJitter:         g.RetryAfterJitter,
+		TenantAliasCeiling: oai.AliasCeiling{
+			MaxOutputTokens:    g.TenantAliasCeiling.MaxOutputTokens,
+			MaxN:               g.TenantAliasCeiling.MaxN,
+			Timeout:            g.TenantAliasCeiling.Timeout,
+			EmbeddingMaxInputs: g.TenantAliasCeiling.EmbeddingMaxInputs,
+			RerankMaxDocuments: g.TenantAliasCeiling.RerankMaxDocuments,
+			ToolsMaxCount:      g.TenantAliasCeiling.ToolsMaxCount,
+		},
 	}
 }
 

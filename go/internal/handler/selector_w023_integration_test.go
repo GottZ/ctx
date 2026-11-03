@@ -113,6 +113,9 @@ func w023Config(enabled bool) *config.Config {
 		// W06-8: same class again — the foreign-load detector's timeout and
 		// hysteresis carry fatal floors (V37); taken whole from the registry.
 		Status: config.Defaults().Status,
+		// W02-02: the gateway group's sizes and durations carry fatal floors
+		// (V38/V39); taken whole from the registry.
+		Gateway: config.Defaults().Gateway,
 		Selector: config.SelectorConfig{
 			Enabled:        enabled,
 			ExactMax:       w023ExactMax,

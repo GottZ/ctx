@@ -504,17 +504,39 @@ func MaxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 // through to the wrapping guard — memory stays bounded, only the response shape
 // is the handler's. Declared-length requests are the ones we can answer cleanly,
 // and every MCP client sends one.
+//
+// Since W02-02 a thin wrapper over MaxBodySizeStrictWith with the house 413
+// writer; the bytes it answers are unchanged (TestMaxBodySizeStrictHouseBytes).
 func MaxBodySizeStrict(maxBytes int64) func(http.Handler) http.Handler {
+	return MaxBodySizeStrictWith(func() int64 { return maxBytes }, writeHouseTooLarge)
+}
+
+// writeHouseTooLarge is the house-envelope 413 of MaxBodySizeStrict.
+func writeHouseTooLarge(w http.ResponseWriter, maxBytes int64) {
+	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+		"success": false,
+		"error":   fmt.Sprintf("request body exceeds %s cap", byteCap(maxBytes)),
+	})
+}
+
+// MaxBodySizeStrictWith is MaxBodySizeStrict with the cap and the 413 writer
+// supplied by the surface that mounts it (design/02 §4.2 stage 3): the
+// OpenAI-compatible gateway answers in its own envelope (oai.
+// WriteRequestTooLarge), and its cap is the hot gateway.max_request_bytes, so
+// maxBytes is read once per request. Same mounting rule — AFTER the
+// authenticating middleware — and the same residual for undeclared lengths.
+func MaxBodySizeStrictWith(maxBytes func() int64, onTooLarge func(http.ResponseWriter, int64)) func(http.Handler) http.Handler {
+	if maxBytes == nil || onTooLarge == nil {
+		panic("handler.MaxBodySizeStrictWith: nil cap getter or writer")
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.ContentLength > maxBytes {
-				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-					"success": false,
-					"error":   fmt.Sprintf("request body exceeds %s cap", byteCap(maxBytes)),
-				})
+			limit := maxBytes()
+			if r.ContentLength > limit {
+				onTooLarge(w, limit)
 				return
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 			next.ServeHTTP(w, r)
 		})
 	}

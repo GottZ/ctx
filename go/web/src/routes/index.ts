@@ -27,6 +27,11 @@ export const RESERVED_SERVER_PREFIXES = [
   // /auth/login/{provider} + /auth/callback/{provider} are server routes —
   // the SPA must never claim the prefix or a deep link would shadow the flow.
   '/auth',
+  // OpenAI-compatible gateway (design 02 §4.2, design 05 K-05-12, W02-02):
+  // /v1/* and /v2/rerank answer in the OpenAI error envelope once mounted,
+  // so no SPA route may claim either prefix.
+  '/v1',
+  '/v2',
 ] as const
 
 /**

@@ -163,6 +163,9 @@ func renderHours(h Hours) string {
 var dumpGroupOrder = []string{
 	"server", "dream",
 	"rerank", "graph", "query", "scheduler",
+	// W02-02: the gateway flag and caps belong in the boot record — whether
+	// /v1 answers at all is the first thing an operator checks.
+	"gateway",
 }
 
 // BootDumpArgs renders the effective config + issues as slog args for the
