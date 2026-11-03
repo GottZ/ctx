@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math/big"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,8 +79,10 @@ type auditRowJSON struct {
 //
 // A server-admin reads every row as stored. A tenant-admin reads the rows of
 // its own tenant (metadata.tenant_id, filtered in SQL) with foreign actors
-// masked (redactActor) and the server-admin bit and person of a key left out
-// of its state (redactKeyState); a foreign or unknown id reads as rows: [] (B-06-3),
+// masked (redactActor), the server-admin bit and person of a key left out of
+// its state (redactKeyState), and an update whose only change lay in those
+// fields left out entirely (auditInvisibleUpdate — so a page may hold fewer
+// than limit rows); a foreign or unknown id reads as rows: [] (B-06-3),
 // and so does the server-admin-only entity instance — the group's convention
 // is a reduced view, not a role-specific error (HandleStatus, HandleLLMLog).
 func (h *AuditHandler) HandleAudit(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +162,13 @@ func (h *AuditHandler) HandleAudit(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("audit: metadata is not a JSON object", "id", row.ID, "error", err)
 			jr.Metadata = map[string]json.RawMessage{}
 		}
-		out = append(out, redactKeyState(entity, redactActor(jr, readerTenant, readerIsServerAdmin), readerIsServerAdmin))
+		jr = redactKeyState(entity, redactActor(jr, readerTenant, readerIsServerAdmin), readerIsServerAdmin)
+		if auditInvisibleUpdate(entity, jr, readerIsServerAdmin) {
+			// Left out AFTER the SQL LIMIT: such a page can hold fewer than
+			// limit rows while older rows exist (documented in docs/api.md).
+			continue
+		}
+		out = append(out, jr)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "entity": entity, "rows": out})
 }
@@ -271,4 +282,62 @@ func auditDropFields(v json.RawMessage, fields []string) json.RawMessage {
 		return nil
 	}
 	return b
+}
+
+// auditInvisibleUpdate reports whether a reader below server-admin must not
+// get this row at all: an update of an entity with hidden state fields whose
+// redacted old_value and new_value are equal. Its change lay only in fields
+// redactKeyState removed (a psql promotion to server-admin, a principal
+// swap), so the row would itself say "a hidden field changed". Pure. Equality
+// is semantic — decoded JSON compared as values, numbers exactly — not byte
+// equality. Only "update": every other action carries its own meaning.
+func auditInvisibleUpdate(entity string, row auditRowJSON, readerIsServerAdmin bool) bool {
+	if readerIsServerAdmin || row.Action != "update" || len(auditHiddenStateFields[entity]) == 0 {
+		return false
+	}
+	return auditJSONEqual(row.OldValue, row.NewValue)
+}
+
+// auditJSONEqual compares two JSON documents as values; two absent (null)
+// documents are equal, an undecodable one equals nothing.
+func auditJSONEqual(a, b json.RawMessage) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	va, okA := auditDecode(a)
+	vb, okB := auditDecode(b)
+	return okA && okB && reflect.DeepEqual(va, vb)
+}
+
+func auditDecode(raw json.RawMessage) (any, bool) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	var v any
+	if err := d.Decode(&v); err != nil {
+		return nil, false
+	}
+	return auditNormNumbers(v), true
+}
+
+// auditNormNumbers turns json.Number into a canonical decimal string, so 1 and
+// 1.0 compare equal without the precision loss of float64.
+func auditNormNumbers(v any) any {
+	switch x := v.(type) {
+	case json.Number:
+		if r, ok := new(big.Rat).SetString(string(x)); ok {
+			return r.RatString()
+		}
+		return string(x)
+	case map[string]any:
+		for k, e := range x {
+			x[k] = auditNormNumbers(e)
+		}
+		return x
+	case []any:
+		for i, e := range x {
+			x[i] = auditNormNumbers(e)
+		}
+		return x
+	}
+	return v
 }

@@ -269,3 +269,54 @@ func TestRedactKeyState(t *testing.T) {
 		}
 	})
 }
+
+// TestAuditInvisibleUpdate (W06-7 Härtung 2, Fremd-Review 2 F3): an api_key
+// update whose change lies only in the fields redactKeyState removes reads,
+// for a reader below server-admin, as an update with equal old and new — the
+// row itself says "a hidden field changed" (a psql promotion to server-admin).
+// Such rows leave the answer; equality is semantic (canonical JSON, key order
+// and spacing ignored), never byte equality.
+func TestAuditInvisibleUpdate(t *testing.T) {
+	row := func(entity, action, oldV, newV string) (string, auditRowJSON) {
+		r := auditRowJSON{ID: "r", EntityKey: "k", Action: action, Metadata: map[string]json.RawMessage{}}
+		if oldV != "" {
+			r.OldValue = json.RawMessage(oldV)
+		}
+		if newV != "" {
+			r.NewValue = json.RawMessage(newV)
+		}
+		return entity, r
+	}
+	const (
+		stateA  = `{"label":"m","active":true,"allowed_scopes":["a:main","a:x"],"tenant_id":"t","n":1}`
+		stateA2 = `{ "n": 1.0, "tenant_id":"t", "allowed_scopes":["a:main","a:x"], "active":true, "label":"m" }`
+		stateB  = `{"label":"m","active":true,"allowed_scopes":["a:x","a:main"],"tenant_id":"t","n":1}`
+		stateC  = `{"label":"renamed","active":true,"allowed_scopes":["a:main","a:x"],"tenant_id":"t","n":1}`
+	)
+	for _, c := range []struct {
+		name                     string
+		entity, action, old, new string
+		wantTenant               bool // left out for a tenant-admin reader
+	}{
+		{"equal_state_update", "api_key", "update", stateA, stateA, true},
+		{"equal_in_another_key_order_and_spacing", "api_key", "update", stateA, stateA2, true},
+		{"array_order_is_a_change", "api_key", "update", stateA, stateB, false},
+		{"visible_change", "api_key", "update", stateA, stateC, false},
+		{"both_states_unreadable_null", "api_key", "update", "", "", true},
+		{"one_side_null", "api_key", "update", "", stateA, false},
+		{"create_is_kept", "api_key", "create", "", stateA, false},
+		{"revoke_is_kept", "api_key", "revoke", stateA, stateA, false},
+		{"snapshot_is_kept", "api_key", "snapshot", "", stateA, false},
+		{"entity_without_hidden_fields", "tenant_quota", "update", stateA, stateA, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			entity, r := row(c.entity, c.action, c.old, c.new)
+			if got := auditInvisibleUpdate(entity, r, false); got != c.wantTenant {
+				t.Errorf("tenant-admin reader: left out = %v, want %v", got, c.wantTenant)
+			}
+			if auditInvisibleUpdate(entity, r, true) {
+				t.Errorf("server-admin reader: a row was left out")
+			}
+		})
+	}
+}

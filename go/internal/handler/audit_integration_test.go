@@ -339,6 +339,50 @@ func TestAuditTenantFilterAndRedaction(t *testing.T) {
 		}
 	})
 
+	// Härtung 2 (Fremd-Review 2 F3): a psql promotion/demotion of a key — only
+	// is_admin changes — is an update whose state is equal once redactKeyState
+	// removed is_admin; for a tenant-admin that row would itself say "a hidden
+	// field changed". It leaves the tenant-admin's answer; the server-admin
+	// keeps it. A psql update that also changes a visible field stays.
+	t.Run("change_only_in_hidden_fields_is_left_out", func(t *testing.T) {
+		status, resp := kaManage(t, mh, a.ar, "au-req-promote", map[string]any{
+			"action": "api-key-create", "data": map[string]any{"label": "au-a-promote", "home_scope": a.scope},
+		})
+		pID, _ := resp["id"].(string)
+		if status != http.StatusOK || pID == "" {
+			t.Fatalf("api-key-create: status %d resp %v", status, resp)
+		}
+		for _, stmt := range []string{
+			`UPDATE context_api_keys SET is_admin = true WHERE id = $1::uuid`,                   // invisible to A
+			`UPDATE context_api_keys SET is_admin = false, active = false WHERE id = $1::uuid`, // visible: revoke
+		} {
+			if _, err := pool.Exec(ctx, stmt, pID); err != nil {
+				t.Fatalf("psql edge %q: %v", stmt, err)
+			}
+		}
+		invisible := func(rows []auditRowJSON) (n int) {
+			for _, r := range rows {
+				if r.Action == "update" && string(r.OldValue) == string(r.NewValue) {
+					n++
+				}
+			}
+			return n
+		}
+		_, ta := auditOK(t, h, a.ar, "?entity=api_key&id="+pID)
+		var acts []string
+		for _, r := range ta.Rows {
+			acts = append(acts, r.Action)
+		}
+		if n := invisible(ta.Rows); n != 0 || strings.Join(acts, ",") != "revoke,create" {
+			t.Errorf("tenant-admin A: actions %v, %d update(s) with equal visible old/new, want revoke,create and 0", acts, n)
+		}
+		_, sa := auditOK(t, h, admin, "?entity=api_key&id="+pID)
+		if len(sa.Rows) != 3 || sa.Rows[1].Action != "update" ||
+			!strings.Contains(strings.ReplaceAll(string(sa.Rows[1].NewValue), " ", ""), `"is_admin":true`) {
+			t.Errorf("server-admin must keep all three rows incl. the promotion: %+v", sa.Rows)
+		}
+	})
+
 	t.Run("future_entities_and_instance_are_empty", func(t *testing.T) {
 		for _, e := range []string{"gateway_limits", "model_consumer", "model_key", "model_grant", "consumer_usage", "instance"} {
 			for _, ar := range []*auth.AuthResult{admin, a.ar} {
