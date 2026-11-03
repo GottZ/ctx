@@ -13,9 +13,17 @@ on:
 
 permissions: {}
 
+# One run per tag at a time: a tag push and a manual dispatch for the same
+# tag would otherwise land in different groups (refs/tags/v… vs
+# refs/heads/root), pass the existence check together and share one draft
+# with assets from two builds. A second run waits instead of cancelling the
+# first or being displaced (`queue: max`: up to 100 waiting runs). The order
+# among waiting runs is not guaranteed and does not matter: whichever runs
+# after a published release stops at verify's existence check.
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+  queue: max
 
 env:
   GO_VERSION: "1.27"
@@ -56,8 +64,10 @@ jobs:
           # A manual run is the maintainer's: anyone with write may re-run or
           # dispatch workflows, and a rebuilt release would carry a new
           # main.date and new checksums.
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" ]; then
-            echo "::error::manual release runs are limited to the repository owner (dispatched by $GITHUB_ACTOR)"; exit 1
+          # GITHUB_TRIGGERING_ACTOR is who pressed the button; GITHUB_ACTOR
+          # stays the original actor on a re-run.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "${GITHUB_TRIGGERING_ACTOR:-$GITHUB_ACTOR}" != "$GITHUB_REPOSITORY_OWNER" ]; then
+            echo "::error::manual release runs are limited to the repository owner (dispatched by ${GITHUB_TRIGGERING_ACTOR:-$GITHUB_ACTOR})"; exit 1
           fi
           # Anchored: a glob would accept v1.0.0";id;" — a valid git ref name.
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -84,16 +94,28 @@ jobs:
           fi
           # A published release is immutable: a second run for the same tag
           # (re-run, re-dispatch) must not replace its binaries, checksums or
-          # provenance. `gh release view` succeeds only when it exists.
-          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
-            echo "::error::release $TAG already exists — published releases are not rebuilt (GOVERNANCE.md, Releases)"; exit 1
+          # provenance. Only a 404 means "no release yet"; an API error is not
+          # permission to publish. publish repeats this check right before
+          # the upload, because a job-level re-run reuses verify's result.
+          # curl prints 000 and exits non-zero when no HTTP answer arrived;
+          # that is reported as what it is, and still refuses to publish.
+          CURL_RC=0
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")" || CURL_RC=$?
+          if [ "$CURL_RC" -ne 0 ]; then
+            echo "::error::could not tell whether release $TAG exists (transport error, curl exit $CURL_RC)"; exit 1
           fi
+          case "$CODE" in
+            404) ;;
+            200) echo "::error::release $TAG already exists — published releases are not rebuilt (GOVERNANCE.md, Releases)"; exit 1 ;;
+            *)   echo "::error::could not tell whether release $TAG exists (HTTP $CODE)"; exit 1 ;;
+          esac
           # The live tier (real ctxd + Postgres, production write paths) runs
           # on every push to root; the tagged commit must have a green run.
           LIVE_OK="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PEELED}/check-runs?check_name=Web%20Live%20Tier&per_page=50" \
             --jq '[.check_runs[] | select(.conclusion == "success")] | length')"
           if [ "${LIVE_OK:-0}" -lt 1 ]; then
-            echo "::error::no successful 'Web Live Tier' run on $PEELED — wait for the root push run of ci.yml (or dispatch it on root), then tag"; exit 1
+            echo "::error::no successful 'Web Live Tier' run on $PEELED — wait for the ci.yml run of the push that put it on root; if that run was cancelled by a later push, re-run it once no newer ci.yml run on root is queued or in progress, since a re-run keeps its ref and cancels the newer run (gh run rerun <run-id>; ci.yml publishes mutable image tags only from the current tip of root, so an older commit's re-run cannot re-point them — for a run from before that guard, re-run only its 'Web Live Tier' job, never the whole run), and then re-run this workflow"; exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "commit=${PEELED}" >> "$GITHUB_OUTPUT"
@@ -305,6 +327,44 @@ jobs:
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
 
+      # Same check as in verify, repeated here: re-running this job alone (or
+      # release + its dependents) reuses verify's outputs and would otherwise
+      # publish again onto an existing release.
+      - name: Release does not exist yet; a leftover draft is removed
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # curl prints 000 and exits non-zero when no HTTP answer arrived;
+          # that is reported as what it is, and still refuses to publish.
+          CURL_RC=0
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")" || CURL_RC=$?
+          if [ "$CURL_RC" -ne 0 ]; then
+            echo "::error::could not tell whether release $TAG exists (transport error, curl exit $CURL_RC)"; exit 1
+          fi
+          case "$CODE" in
+            404) echo "ok: no published release $TAG" ;;
+            200) echo "::error::release $TAG already exists — published releases are not rebuilt (GOVERNANCE.md, Releases)"; exit 1 ;;
+            *)   echo "::error::could not tell whether release $TAG exists (HTTP $CODE)"; exit 1 ;;
+          esac
+          # The by-tag endpoint answers 404 for drafts. A draft for this tag is
+          # a leftover of a run that died between create and upload; the
+          # release action would resume it and mix its assets with this
+          # build's. Runs are serialized per tag (concurrency above), so a
+          # draft here is never a concurrent run's — delete it, then publish
+          # a release whose assets, SHA256SUMS and provenance are one build.
+          # Every page, not the newest 100: the action looks further back for
+          # a draft to resume (two pages in v3.0.3), and this repository has
+          # more releases than one page holds. A failing page fails the step.
+          DRAFTS="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.draft == true and .tag_name == \"${TAG}\") | .id")"
+          for id in $DRAFTS; do
+            echo "removing leftover draft release ${id} for ${TAG}"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
+          done
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -312,4 +372,6 @@ jobs:
           name: ctx ${{ steps.version.outputs.tag }}
           generate_release_notes: false
           files: dist/*
+          # Never replace an asset that is already there — belt to the check above.
+          overwrite_files: false
           body: ${{ steps.notes.outputs.body }}
