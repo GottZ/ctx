@@ -596,15 +596,17 @@ func TestAuditTriggerSetPerTable(t *testing.T) {
 	}
 }
 
-// kaCatalog renders what 160 owns: function definitions, the triggers on both
-// tables and the audit-table indexes.
+// kaCatalog renders what 160 owns: function definitions (the redefined 051
+// audit_settings_write included), the triggers on both tables and the
+// audit-table indexes.
 func kaCatalog(ctx context.Context, t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	var parts []string
 	for _, q := range []string{
 		`SELECT p.proname || ': ' || pg_get_functiondef(p.oid) FROM pg_proc p
 		  WHERE p.proname IN ('audit_state_api_key', 'audit_actor_meta', 'audit_api_keys_write',
-		                      'audit_state_tenant_quota', 'audit_tenant_quota_write')
+		                      'audit_state_tenant_quota', 'audit_tenant_quota_write',
+		                      'audit_settings_write')
 		  ORDER BY p.proname`,
 		`SELECT 'trigger: ' || pg_get_triggerdef(oid) FROM pg_trigger
 		  WHERE NOT tgisinternal AND tgrelid IN ('context_api_keys'::regclass, 'context_tenant_quota'::regclass)
@@ -718,6 +720,158 @@ func TestKeyAuditStampOutsideTx(t *testing.T) {
 		rs := kaRows(ctx, t, pool, "api_key", key.ID)
 		if len(rs) != 1 || rs[0].Meta["via"] != "api" || rs[0].APIKeyID == nil || *rs[0].APIKeyID != admin.ID || rs[0].Meta["request_id"] != "ka-req-tx" {
 			t.Fatalf("stamped mint in a tx: rows %+v, want one create with via=api, the admin, request_id ka-req-tx", rs)
+		}
+	})
+}
+
+// kaStr renders a nullable column for a failure message.
+func kaStr(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
+}
+
+// Hardening 2 (CodeRabbit on PR #76): PruneTenant hard-deletes the tenant's
+// keys (step 7) in a transaction stamped via='offboarding'. PruneTenant does
+// not drain context_settings, so a setting whose updated_by names one of those
+// keys is still there; the FK ON DELETE SET NULL updates it inside the stamped
+// transaction and fires the settings audit of 051 (audit_settings_write). That
+// row must carry the stamped channel, the stamped actor and the request id —
+// not the api/sql derivation from the actor alone.
+func TestSettingsAuditOffboardingVia(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+
+	admin, _, err := store.CreateApiKey(ctx, pool, "ka-offb-admin", "private", nil, "")
+	if err != nil {
+		t.Fatalf("mint admin: %v", err)
+	}
+	kaExec(ctx, t, pool, `UPDATE context_api_keys SET is_admin = true WHERE id = $1::uuid`, admin.ID)
+	tid := freshTenant(t, ctx, pool, "ka-offb")
+	const scope = "ka-offb-scope"
+	kaExec(ctx, t, pool, `INSERT INTO context_tenant_scopes (scope, tenant_id) VALUES ($1, $2::uuid)`, scope, tid)
+	member, _, err := store.CreateApiKey(ctx, pool, "ka-offb-member", scope, nil, tid)
+	if err != nil {
+		t.Fatalf("mint tenant key: %v", err)
+	}
+
+	const settingKey = "ka.offboarding.probe"
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := store.UpsertSetting(ctx, tx, settingKey, scope, json.RawMessage(`{"probe": true}`), &member.ID); err != nil {
+		t.Fatalf("upsert setting as the tenant key: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	const reqID = "ka-req-offb-settings"
+	if err := store.PruneTenant(ctx, pool, tid, store.APIStamp(admin.ID, reqID)); err != nil {
+		t.Fatalf("prune tenant: %v", err)
+	}
+
+	rs := kaRows(ctx, t, pool, "setting", settingKey)
+	if len(rs) != 2 {
+		t.Fatalf("setting audit rows [%s], want [set,set] (the upsert, then the SET NULL of updated_by at the key hard-delete)", kaActions(rs))
+	}
+	if r := rs[0]; r.Action != "set" || r.Meta["via"] != "api" || r.APIKeyID == nil || *r.APIKeyID != member.ID {
+		t.Fatalf("upsert row: action %s via %v api_key_id %s, want set / api / %s (metadata %v)", r.Action, r.Meta["via"], kaStr(r.APIKeyID), member.ID, r.Meta)
+	}
+	r := rs[1]
+	if r.Action != "set" || r.Meta["via"] != string(store.ViaOffboarding) ||
+		r.APIKeyID == nil || *r.APIKeyID != admin.ID ||
+		r.Label == nil || *r.Label != "ka-offb-admin" || r.Meta["request_id"] != reqID {
+		t.Fatalf("offboarding SET NULL row: action %s via %v api_key_id %s label %s request_id %v, want set / offboarding / %s / ka-offb-admin / %s (metadata %v)",
+			r.Action, r.Meta["via"], kaStr(r.APIKeyID), kaStr(r.Label), r.Meta["request_id"], admin.ID, reqID, r.Meta)
+	}
+
+	// Not a gate: context_settings.scope has no FK to context_tenant_scopes and
+	// PruneTenant does not drain it, so the setting outlives its tenant.
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_settings WHERE scope = $1`, scope).Scan(&left); err != nil {
+		t.Fatalf("count settings: %v", err)
+	}
+	t.Logf("context_settings rows left in the pruned scope %s: %d", scope, left)
+}
+
+// Hardening 2 (Copilot on PR #76): stampAudit casts the actor to uuid when it
+// sets ctx.api_key_id. A malformed actor fails at the stamp with 22P02 instead
+// of at the next audited write (audit_actor_meta and the 051 trigger cast it
+// there), and the stamped setting carries the canonical spelling.
+func TestAuditStampActorIsUUID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	admin, _, err := store.CreateApiKey(ctx, pool, "ka-uuid-admin", "private", nil, "")
+	if err != nil {
+		t.Fatalf("mint admin: %v", err)
+	}
+	target, _, err := store.CreateApiKey(ctx, pool, "ka-uuid-target", "private", nil, "")
+	if err != nil {
+		t.Fatalf("mint target: %v", err)
+	}
+
+	t.Run("malformed_actor_fails_at_the_stamp", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		err = store.StampAuditForTest(ctx, tx, store.AuditStamp{ActorKeyID: "not-a-uuid", Via: store.ViaAPI})
+		if err == nil {
+			_, werr := tx.Exec(ctx, `UPDATE context_api_keys SET label = 'ka-uuid-target-x' WHERE id = $1::uuid`, target.ID)
+			t.Fatalf("stamp with actor %q: no error; the next audited write failed instead: %v (SQLSTATE %q)", "not-a-uuid", werr, pgCode(werr))
+		}
+		if pgCode(err) != "22P02" {
+			t.Fatalf("stamp with a malformed actor: %v (SQLSTATE %q), want 22P02", err, pgCode(err))
+		}
+		if !strings.Contains(err.Error(), "actor key id") {
+			t.Errorf("error %q does not name the actor key id", err)
+		}
+		t.Logf("stamp refused: %v", err)
+	})
+
+	t.Run("uppercase_actor_is_accepted_and_canonicalised", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		upper := strings.ToUpper(admin.ID)
+		if err := store.StampAuditForTest(ctx, tx, store.AuditStamp{ActorKeyID: upper, RequestID: "ka-req-upper", Via: store.ViaAPI}); err != nil {
+			t.Fatalf("stamp with actor %s: %v", upper, err)
+		}
+		var stamped string
+		if err := tx.QueryRow(ctx, `SELECT current_setting('ctx.api_key_id', true)`).Scan(&stamped); err != nil {
+			t.Fatalf("read ctx.api_key_id: %v", err)
+		}
+		if stamped != admin.ID {
+			t.Errorf("ctx.api_key_id = %q, want the canonical %q", stamped, admin.ID)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE context_api_keys SET label = 'ka-uuid-target-2' WHERE id = $1::uuid`, target.ID); err != nil {
+			t.Fatalf("update after the stamp: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		rs := kaRows(ctx, t, pool, "api_key", target.ID)
+		if len(rs) == 0 {
+			t.Fatal("no audit row for the target key")
+		}
+		r := rs[len(rs)-1]
+		if r.Action != "update" || r.APIKeyID == nil || *r.APIKeyID != admin.ID ||
+			r.Label == nil || *r.Label != "ka-uuid-admin" || r.Meta["via"] != "api" || r.Meta["request_id"] != "ka-req-upper" {
+			t.Fatalf("update row: action %s api_key_id %s label %s metadata %v, want update / %s / ka-uuid-admin / via api, request_id ka-req-upper",
+				r.Action, kaStr(r.APIKeyID), kaStr(r.Label), r.Meta, admin.ID)
 		}
 	})
 }

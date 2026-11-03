@@ -48,6 +48,16 @@
 -- belongs to (key: tenant_id; quota: the owner of its scope in
 -- context_tenant_scopes, absent for a scope no tenant owns).
 --
+-- The settings/secrets audit of 051 (audit_settings_write) is redefined with
+-- one change: its via honours a stamped ctx.audit_via the same way, and only
+-- without one falls back to its own derivation (api with an actor, sql
+-- without). Reason: the offboarding hard-delete of a tenant's keys runs
+-- stamped via='offboarding', and the ON DELETE SET NULL of
+-- context_settings.updated_by / context_secrets.created_by, rotated_by fires
+-- that trigger inside the same transaction — its row read via='api' with the
+-- offboarding admin as actor. Everything else in the function is unchanged
+-- (no audit_actor_meta, no state filter).
+--
 -- Which rows: one 'snapshot' row per existing key and per existing quota row
 -- (whitelist state, metadata {via: 'migration', tenant_id}), written only
 -- for an entity without any audit row yet — a second run writes nothing.
@@ -71,8 +81,9 @@
 --
 -- Way back: DROP TRIGGER trg_api_keys_audit_ins_del, trg_api_keys_audit_upd
 -- ON context_api_keys; DROP TRIGGER trg_tenant_quota_audit ON
--- context_tenant_quota; then the five functions and the index. The audit
--- rows stay (append-only history).
+-- context_tenant_quota; then the five functions and the index; re-apply the
+-- 051 definition of audit_settings_write (113_baseline.sql, section
+-- 051_settings_store.sql). The audit rows stay (append-only history).
 -- =============================================================================
 
 SET LOCAL lock_timeout = '3s';
@@ -211,6 +222,44 @@ DROP TRIGGER IF EXISTS trg_tenant_quota_audit ON context_tenant_quota;
 CREATE TRIGGER trg_tenant_quota_audit
     AFTER INSERT OR UPDATE OR DELETE ON context_tenant_quota
     FOR EACH ROW EXECUTE FUNCTION audit_tenant_quota_write();
+
+-- The 051 settings/secrets audit, unchanged except for via: a stamped
+-- ctx.audit_via wins (as in audit_actor_meta), the actor derivation is the
+-- fallback.
+CREATE OR REPLACE FUNCTION audit_settings_write() RETURNS TRIGGER AS $$
+DECLARE
+    v_new   JSONB := to_jsonb(NEW);
+    v_old   JSONB := to_jsonb(OLD);
+    v_actor UUID  := NULLIF(current_setting('ctx.api_key_id', true), '')::uuid;
+    v_label TEXT;
+BEGIN
+    IF v_actor IS NOT NULL THEN
+        SELECT label INTO v_label FROM context_api_keys WHERE id = v_actor;
+    END IF;
+    INSERT INTO context_settings_audit
+        (entity_type, entity_key, scope, action, old_value, new_value,
+         api_key_id, actor_label, metadata)
+    VALUES (
+        CASE TG_TABLE_NAME WHEN 'context_settings' THEN 'setting' ELSE 'secret' END,
+        COALESCE(v_new->>'key', v_new->>'name', v_old->>'key', v_old->>'name'),
+        COALESCE(v_new->>'scope', v_old->>'scope'),
+        CASE WHEN TG_TABLE_NAME = 'context_settings'
+             THEN CASE TG_OP WHEN 'DELETE' THEN 'unset' ELSE 'set' END
+             ELSE CASE TG_OP WHEN 'INSERT' THEN 'create'
+                             WHEN 'UPDATE' THEN 'rotate'
+                             ELSE 'delete' END
+        END,
+        CASE WHEN TG_TABLE_NAME = 'context_settings' THEN v_old->'value' END,
+        CASE WHEN TG_TABLE_NAME = 'context_settings' THEN v_new->'value' END,
+        v_actor, v_label,
+        jsonb_strip_nulls(jsonb_build_object(
+            'via',        COALESCE(left(NULLIF(current_setting('ctx.audit_via', true), ''), 32),
+                                   CASE WHEN v_actor IS NULL THEN 'sql' ELSE 'api' END),
+            'request_id', NULLIF(current_setting('ctx.request_id', true), '')))
+    );
+    RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
 
 -- Backfill: one snapshot per entity without history.
 INSERT INTO context_settings_audit

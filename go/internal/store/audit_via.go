@@ -7,6 +7,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // AuditVia names the channel a write reached context_api_keys or
@@ -76,7 +77,9 @@ var errStampOutsideTx = errors.New("store: audit stamp outside a transaction")
 // via='sql' without an actor although the caller stamped it — so that case
 // is refused with errStampOutsideTx before anything is written. An empty
 // stamp is a no-op on any handle. An unknown via is refused — a typo must not
-// reach the audit trail as a channel.
+// reach the audit trail as a channel. The actor is cast to uuid as it is set,
+// so a malformed actor fails here (SQLSTATE 22P02) rather than at the next
+// audited write, and ctx.api_key_id always holds the canonical spelling.
 func stampAudit(ctx context.Context, q pgxdb.Rower, s AuditStamp) error {
 	if s.Via != "" && !s.Via.valid() {
 		return fmt.Errorf("store: audit stamp: unknown via %q", s.Via)
@@ -89,10 +92,14 @@ func stampAudit(ctx context.Context, q pgxdb.Rower, s AuditStamp) error {
 	}
 	var a, r, v *string
 	if err := q.QueryRow(ctx,
-		`SELECT CASE WHEN $1::text <> '' THEN set_config('ctx.api_key_id', $1::text, true) END,
+		`SELECT CASE WHEN $1::text <> '' THEN set_config('ctx.api_key_id', ($1::text)::uuid::text, true) END,
 		        CASE WHEN $2::text <> '' THEN set_config('ctx.request_id', $2::text, true) END,
 		        CASE WHEN $3::text <> '' THEN set_config('ctx.audit_via', $3::text, true) END`,
 		s.ActorKeyID, s.RequestID, string(s.Via)).Scan(&a, &r, &v); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+			return fmt.Errorf("store: audit stamp: actor key id: %w", err)
+		}
 		return fmt.Errorf("store: audit stamp: %w", err)
 	}
 	return nil

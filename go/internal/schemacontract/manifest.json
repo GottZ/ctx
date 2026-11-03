@@ -5201,7 +5201,7 @@
       "src_hash": "642caf7533f79abd18190506b1b490998a597e776f8f90b952c5a0347e1ee4ba"
     },
     "audit_settings_write()": {
-      "src_hash": "5870753fc1fca4c236350687b007a4a5e3718f2b0c24c7ff7ab7c692934c50f1"
+      "src_hash": "46bc77b167069c5c74bd682a25ed6624fd7192a97c8f6a52a5566901d9178a02"
     },
     "audit_state_api_key(k context_api_keys)": {
       "src_hash": "b864dab1db4ba08570476b70f13d2b396caab4afd119fd49f9c0c7e7001c6981"
