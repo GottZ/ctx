@@ -394,7 +394,7 @@ func TestV17bIsAdvisoryOnly(t *testing.T) {
 // changes TYPE (seconds → int, or a struct field that stops being a
 // time.Duration) would leave the walk without anyone noticing. Raise this
 // number in the same commit that adds a duration key.
-const wantDurationKeys = 48 // +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered; +1 on 2026-11-03 (W06-8): status.foreign_load_timeout, V17 sign + V37 floor
+const wantDurationKeys = 49 // +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered; +1 on 2026-11-03 (W06-8): status.foreign_load_timeout, V17 sign + V37 floor; +1 on 2026-11-03 (W06-8b): status.foreign_load_interval, V17 sign + V37 floor
 
 // TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
 // V17 (issue #29): before it, exactly two of the seconds keys had a sign check
@@ -798,6 +798,11 @@ func TestValidateStatusForeignLoad(t *testing.T) {
 		mut func(c *Config)
 	}{
 		{"status.foreign_load_timeout", func(c *Config) { c.Status.ForeignLoadTimeout = 0 }},
+		// W06-8b: 0 would spin the detector's ticker without a pause, and
+		// interval + timeout >= 1 h (here 3598 s + the 2 s default) puts the
+		// hourly rollup read past the next boundary — no hour is ever read.
+		{"status.foreign_load_interval", func(c *Config) { c.Status.ForeignLoadInterval = 0 }},
+		{"status.foreign_load_interval", func(c *Config) { c.Status.ForeignLoadInterval = 3598 * time.Second }},
 		{"status.foreign_load_hysteresis_ticks", func(c *Config) { c.Status.ForeignLoadHysteresisTicks = 0 }},
 		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = -0.01 }},
 		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = 1.5 }},
@@ -824,5 +829,10 @@ func TestValidateStatusForeignLoad(t *testing.T) {
 	c.Status.ForeignLoadHourlyMinRatio = 0
 	if issues := validateStatusForeignLoad(c); len(issues) != 0 {
 		t.Errorf("0 for either tolerance term is legal, got %+v", issues)
+	}
+	c = Defaults()
+	c.Status.ForeignLoadInterval = 3597 * time.Second // + 2 s timeout = 59m59s
+	if issues := validateStatusForeignLoad(c); len(issues) != 0 {
+		t.Errorf("interval + timeout just below 1 h is legal, got %+v", issues)
 	}
 }

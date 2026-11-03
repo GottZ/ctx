@@ -538,11 +538,16 @@ func TestForeignLoadReadFailureAcrossBoundary(t *testing.T) {
 }
 
 // TestForeignLoadSettingsOf pins the A-E2 wiring: every policy value of a
-// round comes from its registry key (here all four off their defaults), and
-// grace is derived from events.tick_interval + status.foreign_load_timeout.
+// round comes from its registry key (here all of them off their defaults),
+// and grace is derived from the round cadence status.foreign_load_interval +
+// status.foreign_load_timeout — not from events.tick_interval, which since
+// W06-8b paces only the status collector, never a probe round. The
+// interval's default is pinned to the collector tick's default (5 s), the
+// cadence design/06 §4.9 and the 2-round hysteresis default were set for.
 func TestForeignLoadSettingsOf(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.Events.TickInterval = 10 * time.Second
+	cfg.Events.TickInterval = 30 * time.Second
+	cfg.Status.ForeignLoadInterval = 10 * time.Second
 	cfg.Status.ForeignLoadTimeout = 3 * time.Second
 	cfg.Status.ForeignLoadHysteresisTicks = 4
 	cfg.Status.ForeignLoadHourlyMinAbs = 7
@@ -554,9 +559,12 @@ func TestForeignLoadSettingsOf(t *testing.T) {
 	}
 	def := config.Defaults()
 	got = foreignLoadSettingsOf(def)
-	want = foreignLoadSettings{timeout: 2 * time.Second, hysteresis: 2, minAbs: 5, minRatio: 0.01, grace: def.Events.TickInterval + 2*time.Second}
+	want = foreignLoadSettings{timeout: 2 * time.Second, hysteresis: 2, minAbs: 5, minRatio: 0.01, grace: 7 * time.Second}
 	if got != want {
 		t.Fatalf("default settings = %+v, want %+v", got, want)
+	}
+	if def.Status.ForeignLoadInterval != 5*time.Second || def.Status.ForeignLoadInterval != def.Events.TickInterval {
+		t.Fatalf("status.foreign_load_interval default %v, want 5s = the events.tick_interval default %v", def.Status.ForeignLoadInterval, def.Events.TickInterval)
 	}
 }
 

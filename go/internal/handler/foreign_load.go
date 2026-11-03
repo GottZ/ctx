@@ -29,11 +29,15 @@ package handler
 //	    both sides — the arrival counter http_requests_total would not.
 //
 // Activation is data: metadata.foreign_load_probe = "sglang" on a '_global'
-// backend row (backends.ForeignLoadProbe). The pull is ASYNC: buildCheap only
-// kicks a single-flight round and returns, the status read serves the last
-// landed round — a hung engine never carries the status latency (the
-// dbStatsBuild posture). The section is server-admin-only: running requests of
-// a shared GPU are a live activity oracle over every tenant's load.
+// backend row (backends.ForeignLoadProbe). The detector runs on its OWN
+// cadence (RunForeignLoad, status.foreign_load_interval, W06-8b), not on
+// status reads: it is A-E5's standard observation — ctx decides the priority
+// order, so it has to watch for load past that order whether or not anyone
+// has the dashboard open. Each tick kicks a single-flight round and returns;
+// the status read serves the last landed round, so a hung engine never
+// carries the status latency (the dbStatsBuild posture). The section is
+// server-admin-only: running requests of a shared GPU are a live activity
+// oracle over every tenant's load.
 
 import (
 	"bytes"
@@ -252,17 +256,15 @@ type foreignLoadSettings struct {
 	// may come and still stand for the hour boundary, and how long after the
 	// boundary the hourly rollup read waits. The wait is for llmlog inserts
 	// whose transaction began before the boundary (created_at = transaction
-	// start) and commits after it. One tick plus one probe timeout is what a
-	// continuously ticking collector needs to land a round after the
-	// boundary.
+	// start) and commits after it. The ticker wakes ON every boundary
+	// (foreignLoadWait), so the boundary round normally lands within one GET
+	// of it; when that kick is a no-op because a round is still in flight,
+	// the next regular round starts within one interval and lands within one
+	// probe timeout — interval + timeout is the bound.
 	grace time.Duration
 }
 
 func foreignLoadSettingsOf(cfg *config.Config) foreignLoadSettings {
-	tick := cfg.Events.TickInterval
-	if tick <= 0 {
-		tick = 5 * time.Second // cheapNow's fallback for the same key
-	}
 	hyst := cfg.Status.ForeignLoadHysteresisTicks
 	if hyst < 1 {
 		hyst = 1 // V37 refuses 0 at boot and on settings writes; a literal test config is the only source
@@ -272,8 +274,33 @@ func foreignLoadSettingsOf(cfg *config.Config) foreignLoadSettings {
 		hysteresis: hyst,
 		minAbs:     int64(cfg.Status.ForeignLoadHourlyMinAbs),
 		minRatio:   cfg.Status.ForeignLoadHourlyMinRatio,
-		grace:      tick + cfg.Status.ForeignLoadTimeout,
+		grace:      foreignLoadIntervalOf(cfg) + cfg.Status.ForeignLoadTimeout,
 	}
+}
+
+// foreignLoadIntervalOf is the ticker's period, status.foreign_load_interval.
+// V37 refuses 0 at boot and on settings writes and V17 any negative, so the
+// clamp to V37's 1 s floor only catches a literal test config, where a
+// non-positive wait would spin the ticker.
+func foreignLoadIntervalOf(cfg *config.Config) time.Duration {
+	if iv := cfg.Status.ForeignLoadInterval; iv > 0 {
+		return iv
+	}
+	return time.Second
+}
+
+// foreignLoadWait is the ticker's sleep before its next round: one interval,
+// cut short at the next UTC hour boundary (the hourly check's own buckets).
+// The cut lands the first round of every hour ON the boundary, so the
+// boundary sample of check (b) stands for the boundary to within one GET
+// instead of up to one interval after it, and the hourly precision no longer
+// depends on the interval: with a plain period, an interval of 36 s already
+// lets the boundary jitter reach a 1 % tolerance at any request rate.
+func foreignLoadWait(now time.Time, interval time.Duration) time.Duration {
+	if untilHour := now.UTC().Truncate(time.Hour).Add(time.Hour).Sub(now); untilHour < interval {
+		return untilHour
+	}
+	return interval
 }
 
 // foreignLoadReading is one parsed /metrics body.
@@ -326,7 +353,10 @@ type foreignLoadDetector struct {
 	// (no pool) ⇒ the hourly comparison never runs.
 	hourlySum func(ctx context.Context, hour time.Time, rollupKeys []string) (int64, error)
 	now       func() time.Time
-	logger    *slog.Logger // nil ⇒ slog.Default() at call time
+	// after is the ticker's sleep (RunForeignLoad): time.After in production,
+	// a stepped channel in the ticker gates.
+	after  func(time.Duration) <-chan time.Time
+	logger *slog.Logger // nil ⇒ slog.Default() at call time
 
 	inflight atomic.Bool
 	mu       sync.Mutex
@@ -336,7 +366,7 @@ type foreignLoadDetector struct {
 }
 
 func newForeignLoadDetector(pool *pgxpool.Pool, src DispatchSource) *foreignLoadDetector {
-	d := &foreignLoadDetector{dispatch: src, now: time.Now, states: map[string]*foreignLoadState{}}
+	d := &foreignLoadDetector{dispatch: src, now: time.Now, after: time.After, states: map[string]*foreignLoadState{}}
 	if pool != nil {
 		d.hourlySum = func(ctx context.Context, hour time.Time, keys []string) (int64, error) {
 			return queryForeignLoadHourly(ctx, pool, hour, keys)
@@ -352,20 +382,61 @@ func (d *foreignLoadDetector) log() *slog.Logger {
 	return slog.Default()
 }
 
-// kickForeignLoad is buildCheap's hook: derive the marked targets from the
-// pool snapshot and start a round. Never blocks on I/O.
-func (c *StatusCollector) kickForeignLoad(cfg *config.Config) {
+// RunForeignLoad is the detector's own cadence (W06-8b) and its ONLY round
+// source: one kick per status.foreign_load_interval, plus one on every UTC
+// hour boundary (foreignLoadWait), whether or not anyone reads /api/status.
+// Before it, rounds followed the status collector, whose refresh is
+// read-driven — headless there were no rounds, no WARN and practically never
+// an hourly comparison, which made A-E5's standard observation depend on an
+// open dashboard. Unlike the read-driven sources beside it (the dream-queue
+// scan, the db section), the detector raises WARNs and gates a rollout
+// (A03-W12 checks suspected = false), so it ticks on its own; buildCheap no
+// longer kicks rounds at all, so the round cadence — and with it the
+// hysteresis window (rounds × interval) and grace — is the same with or
+// without an observer.
+//
+// The interval is read per tick (hot: a change applies from the next wait
+// on). cmd/ctxd starts it once per process with the server lifecycle
+// context, like the scheduler arms and the SSE hub; it returns when ctx ends,
+// and the round in flight then is cancelled with it and records nothing
+// (round). Without a probed row a tick is the pool snapshot scan plus the
+// wait's timer: no GET, no round goroutine, no allocation in the kick itself.
+// Blocks until ctx ends.
+func (c *StatusCollector) RunForeignLoad(ctx context.Context) {
+	d := c.foreignLoad
+	if d == nil || c.backendPool == nil {
+		return
+	}
+	slog.Info("status: foreign load ticker started")
+	for {
+		cfg := c.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: the detector's cadence and policy (status.foreign_load_*) are global-only server telemetry, no tenant dimension.
+		c.kickForeignLoad(ctx, cfg)
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.after(foreignLoadWait(d.now(), foreignLoadIntervalOf(cfg))):
+		}
+	}
+}
+
+// kickForeignLoad is one tick of RunForeignLoad: derive the marked targets
+// from the pool snapshot and start a round. Never blocks on I/O.
+func (c *StatusCollector) kickForeignLoad(ctx context.Context, cfg *config.Config) {
 	if c.foreignLoad == nil || c.backendPool == nil {
 		return
 	}
-	c.foreignLoad.kick(foreignLoadTargets(c.backendPool.Snapshot(), c.backendPool.DisabledBy()), foreignLoadSettingsOf(cfg))
+	c.foreignLoad.kick(ctx, foreignLoadTargets(c.backendPool.Snapshot(), c.backendPool.DisabledBy()), foreignLoadSettingsOf(cfg))
 }
 
 // kick syncs the target set (a newly marked origin shows up at once, with
 // null readings; an unmarked one disappears) and starts ONE async round
 // unless one is still in flight — a hung engine therefore costs at most one
-// goroutine for at most one timeout, however often the status ticks.
-func (d *foreignLoadDetector) kick(targets []foreignLoadTarget, set foreignLoadSettings) {
+// goroutine for at most one timeout, however short the interval. The round
+// runs under ctx (the server lifecycle): after the stop no round starts.
+func (d *foreignLoadDetector) kick(ctx context.Context, targets []foreignLoadTarget, set foreignLoadSettings) {
+	if ctx.Err() != nil {
+		return
+	}
 	d.mu.Lock()
 	d.syncLocked(targets)
 	d.mu.Unlock()
@@ -374,7 +445,7 @@ func (d *foreignLoadDetector) kick(targets []foreignLoadTarget, set foreignLoadS
 	}
 	go func() {
 		defer d.inflight.Store(false)
-		d.round(context.Background(), targets, set)
+		d.round(ctx, targets, set)
 	}()
 }
 
@@ -401,6 +472,9 @@ func (d *foreignLoadDetector) syncLocked(targets []foreignLoadTarget) {
 // round is one probe pass over every target: the dispatcher's held view
 // before and after, and in between — all in parallel — the GETs and the
 // hourly rollup reads that are due; then one state update under the lock.
+// A round whose ctx ended meanwhile (shutdown) records nothing: its GETs and
+// reads were cut off, not answered, and a stop is no engine failure to WARN
+// about or to break a hysteresis streak with.
 func (d *foreignLoadDetector) round(ctx context.Context, targets []foreignLoadTarget, set foreignLoadSettings) {
 	now := d.now()
 	due := d.dueHours(now, set)
@@ -427,6 +501,9 @@ func (d *foreignLoadDetector) round(ctx context.Context, targets []foreignLoadTa
 		}(i)
 	}
 	wg.Wait()
+	if ctx.Err() != nil {
+		return
+	}
 	after, _ := d.heldView()
 
 	log := d.log()

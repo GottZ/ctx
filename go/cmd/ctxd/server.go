@@ -210,6 +210,12 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// refresh, not N. scheduler supplies the dream mode (GetDreamMode).
 	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore, blocktypeReg, dispatcher)
 	statusH := handler.NewStatusHandler(statusCollector)
+	// W06-8b: the foreign-load detector probes on its own cadence
+	// (status.foreign_load_interval), not when a status reader refreshes the
+	// collector — A-E5's standard observation runs headless. Bound to the
+	// server lifecycle like the SSE hub below: it ends with ctx at shutdown,
+	// and a round in flight then is cancelled, not recorded.
+	go statusCollector.RunForeignLoad(ctx)
 	llmlogH := handler.NewLLMLogHandler(pool, cfgStore)
 	// Audit read surface (W06-7, design/06 §4.10): context_settings_audit for
 	// the served entity types, tenant-filtered in SQL, foreign actors redacted.

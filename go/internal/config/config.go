@@ -1589,13 +1589,22 @@ type StatusConfig struct {
 	// default (off) rather than aborting boot.
 	ChannelProbeInterval time.Duration `key:"status.channel_probe_interval" env:"CTX_STATUS_CHANNEL_PROBE_INTERVAL" default:"0" mut:"hot" tenancy:"global-only"`
 
-	// The foreign-load detector (W06-8, design/06 §4.9): per status tick the
-	// collector reads GET <origin>/metrics of every '_global' backend marked
-	// metadata.foreign_load_probe and compares the engine's running requests
-	// with the dispatcher's held leases, plus hourly the engine's request
-	// counter with the LLM-usage rollup. The marker on the row is the switch;
-	// these four keys are its policy (A-E2: no magic values).
+	// The foreign-load detector (W06-8, design/06 §4.9): on its own cadence
+	// the collector reads GET <origin>/metrics of every '_global' backend
+	// marked metadata.foreign_load_probe and compares the engine's running
+	// requests with the dispatcher's held leases, plus hourly the engine's
+	// request counter with the LLM-usage rollup. The marker on the row is the
+	// switch; these five keys are its policy (A-E2: no magic values).
 	//
+	// ForeignLoadInterval is that cadence (W06-8b): one probe round per
+	// interval, whether or not anyone reads /api/status — the detector is
+	// A-E5's standard observation and runs headless; the ticker also wakes at
+	// each UTC hour boundary for the hourly check. Read per tick, so a change
+	// applies from the next wait on. Must be >= 1 s (V37): 0 would spin the
+	// ticker; and interval + timeout (the hourly grace) must stay below 1 h
+	// (V37), or no hour is ever read. The default is the events.tick_interval
+	// default, the cadence the 2-round hysteresis default was set for.
+	ForeignLoadInterval time.Duration `key:"status.foreign_load_interval" env:"CTX_STATUS_FOREIGN_LOAD_INTERVAL" default:"5" mut:"hot" tenancy:"global-only"`
 	// ForeignLoadTimeout bounds one /metrics GET (and the hourly rollup read).
 	// The pull runs off the status path, so the timeout bounds how long a hung
 	// engine keeps the probe round busy, never a status read. Must be >= 1 s

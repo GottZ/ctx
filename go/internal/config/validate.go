@@ -639,13 +639,20 @@ func validateEmbedBackoff(c *Config) []Issue {
 	return issues
 }
 
-// validateStatusForeignLoad is V37 (wave W06-8): the floors and the ratio
-// range of the foreign-load detector's policy keys (design/06 §4.9). The
-// signs stay with the generic walks (V17 for the timeout, V35 for the two
-// counts); this check owns the values that parse, are not negative, and still
-// cannot mean what the surface would render:
+// validateStatusForeignLoad is V37 (waves W06-8, W06-8b): the floors and the
+// ratio range of the foreign-load detector's policy keys (design/06 §4.9).
+// The signs stay with the generic walks (V17 for the timeout and the
+// interval, V35 for the two counts); this check owns the values that parse,
+// are not negative, and still cannot mean what the surface would render:
 //   - status.foreign_load_timeout 0: every /metrics GET fails before it is
 //     sent, so the detector reports probe errors forever instead of readings.
+//   - status.foreign_load_interval 0 (W06-8b): the detector's ticker would
+//     start the next round without a pause.
+//   - status.foreign_load_interval + status.foreign_load_timeout >= 1 h
+//     (W06-8b, cross-field): that sum is the hourly check's grace, and the
+//     rollup read of hour H is due grace after H ends — at or past the next
+//     boundary, whose round has already replaced H, so no hour is ever
+//     compared and nothing says so.
 //   - status.foreign_load_hysteresis_ticks 0: a target would turn suspected
 //     and clear on the same round, one WARN pair per tick.
 //   - status.foreign_load_hourly_min_ratio outside [0,1] (float keys have no
@@ -658,6 +665,14 @@ func validateStatusForeignLoad(c *Config) []Issue {
 	if c.Status.ForeignLoadTimeout == 0 {
 		issues = append(issues, Issue{Field: "status.foreign_load_timeout", Severity: SeverityError,
 			Msg: "status.foreign_load_timeout must be >= 1 second — 0 fails every foreign-load probe before it is sent"})
+	}
+	if c.Status.ForeignLoadInterval == 0 {
+		issues = append(issues, Issue{Field: "status.foreign_load_interval", Severity: SeverityError,
+			Msg: "status.foreign_load_interval must be >= 1 second — 0 would start the next foreign-load probe round without a pause"})
+	}
+	if iv, to := c.Status.ForeignLoadInterval, c.Status.ForeignLoadTimeout; iv > 0 && to >= 0 && iv+to >= time.Hour {
+		issues = append(issues, Issue{Field: "status.foreign_load_interval", Severity: SeverityError,
+			Msg: fmt.Sprintf("status.foreign_load_interval (%v) + status.foreign_load_timeout (%v) must stay below 1 hour — the hourly foreign-load check would never read an hour", iv, to)})
 	}
 	if c.Status.ForeignLoadHysteresisTicks == 0 {
 		issues = append(issues, Issue{Field: "status.foreign_load_hysteresis_ticks", Severity: SeverityError,

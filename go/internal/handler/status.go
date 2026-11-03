@@ -756,10 +756,11 @@ type StatusCollector struct {
 	// literal in a test) omits the section.
 	llmlogStats func() llmlogWriteStatus
 
-	// foreignLoad is the W06-8 foreign-load detector (foreign_load.go):
-	// buildCheap kicks its async single-flight round, assemble reads its last
-	// published rows (process memory, like llmlogStats). nil (a collector
-	// literal in a test) ⇒ no probing, no section.
+	// foreignLoad is the W06-8 foreign-load detector (foreign_load.go): its
+	// own ticker (RunForeignLoad, W06-8b) kicks the async single-flight
+	// rounds, assemble reads its last published rows (process memory, like
+	// llmlogStats). nil (a collector literal in a test) ⇒ no probing, no
+	// section.
 	foreignLoad *foreignLoadDetector
 
 	// broadcasting is set while an SSE broadcast loop (G34) is refreshing the
@@ -1208,10 +1209,11 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// generation's per-scope slot, so both paths share this single aggregate
 	// instead of each running their own.
 	snap.guardReview = c.guardReviewGlobal(ctx, cfg.Events.TickInterval)
-	// W06-8 foreign-load detector: one probe round per tick, started here and
-	// NEVER awaited — the GETs run off this pass (single-flight, own timeout),
-	// assemble serves the last landed round.
-	c.kickForeignLoad(cfg)
+	// The W06-8 foreign-load detector is deliberately NOT kicked here: since
+	// W06-8b its rounds run on their own cadence (RunForeignLoad), so a status
+	// reader neither starts one nor changes the round cadence the hysteresis
+	// and the hourly grace are defined over; assemble serves the last landed
+	// round.
 	c.stampLiveness(snap, failsBefore)
 	return snap
 }
