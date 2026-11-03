@@ -65,11 +65,12 @@ type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// seedLLMLog writes rows synthetic context_llm_log rows spread evenly over
-// the last days days — 025's chunk interval is 7 days, so days/7 chunks —
-// with an api_key_id on every keyEvery-th row (the live table has a minority
-// of key-attributed rows). bodyLen sizes request_user and one metadata string
-// and so the heap width of a row.
+// seedLLMLog writes the given number of synthetic context_llm_log rows,
+// spread evenly over the given number of days before now — 025's chunk
+// interval is 7 days, so about days/7 chunks — with an api_key_id on every
+// keyEvery-th row (the live table has a minority of key-attributed rows).
+// bodyLen sizes request_user and one metadata string and so the heap width
+// of a row.
 func seedLLMLog(ctx context.Context, t *testing.T, pool *pgxpool.Pool, rows, days, keyEvery, bodyLen int) {
 	t.Helper()
 	stepSecs := float64(days) * 86400 / float64(rows)
