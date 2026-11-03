@@ -710,6 +710,40 @@ func TestChatStreamExtraBodyMergeAndOverride(t *testing.T) {
 	}
 }
 
+// TestStreamExtraHeaders: the streaming openai wire applies the row's
+// extra_headers like the non-stream wire (setChatHeaders) — the OpenRouter
+// attribution pair reaches the backend — and the core headers are set last:
+// an extra_headers Authorization loses against the api_key_ref-derived
+// bearer, Content-Type stays JSON and Accept stays text/event-stream.
+func TestStreamExtraHeaders(t *testing.T) {
+	srv, _, hdr := captureRequestBody(t, minimalStopStream)
+	defer srv.Close()
+	b := orBackend(srv.URL, backends.TrustNoCredentials)
+	b.APIKey = "sk-or-real"
+	b.ExtraHeaders = map[string]string{
+		"HTTP-Referer":  "https://github.com/GottZ/ctx",
+		"X-Title":       "ctx",
+		"Authorization": "Bearer sk-smuggled",
+		"Content-Type":  "text/plain",
+		"Accept":        "application/json",
+	}
+	if _, err := ChatStreamBackend(context.Background(), b, b.Model,
+		[]ChatMsg{{Role: "user", Content: "hi"}}, nil, Options{}, 5*time.Second, nil); err != nil {
+		t.Fatalf("ChatStreamBackend: %v", err)
+	}
+	for _, want := range [][2]string{
+		{"HTTP-Referer", "https://github.com/GottZ/ctx"},
+		{"X-Title", "ctx"},
+		{"Authorization", "Bearer sk-or-real"},
+		{"Content-Type", "application/json"},
+		{"Accept", "text/event-stream"},
+	} {
+		if got := hdr.Get(want[0]); got != want[1] {
+			t.Errorf("%s = %q, want %q", want[0], got, want[1])
+		}
+	}
+}
+
 // --- ToolCall marshal/unmarshal symmetry ---.
 
 func TestToolCallMarshalEmitsStringForm(t *testing.T) {

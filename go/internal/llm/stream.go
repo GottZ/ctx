@@ -273,7 +273,8 @@ type openAIStreamRequest struct {
 // anyway). TopP/TopK/MinP/NumCtx are not part of the openai wire — parity
 // with chatOpenAI, sampling parity comes from the server start profile.
 // extraBody entries are merged last and win on key collision (F3's escape
-// hatch: OpenRouter provider/zdr objects, per-backend reasoning override).
+// hatch: OpenRouter provider/zdr objects, per-backend reasoning override);
+// ChatStream then runs the OpenRouter ZDR force on top (applyOpenAIBodyExtras).
 func buildStreamBody(model string, msgs []ChatMsg, tools []ToolDef, opts Options, extraBody map[string]any) ([]byte, error) {
 	req := openAIStreamRequest{
 		Model:         model,
@@ -337,12 +338,19 @@ func ChatStreamBackend(ctx context.Context, b backends.Backend, model string,
 //
 // b carries host, key and scope; the scope picks the client (a tenant row
 // dials through ssrfguard, Backend.EgressGuarded). extraBody stays a separate
-// parameter so tests can drive the wire without a full row.
+// parameter so tests can drive the wire without a full row. Body and header
+// policy are chatOpenAI's (W02-01): the OpenRouter ZDR force and the row's
+// extra_headers come from b, never from extraBody.
 func ChatStream(ctx context.Context, b backends.Backend, model string,
 	msgs []ChatMsg, tools []ToolDef, opts Options, extraBody map[string]any,
 	timeout time.Duration, onEvent func(StreamEvent) error) (*StreamResult, error) {
 	body, err := buildStreamBody(model, msgs, tools, opts, extraBody)
 	if err != nil {
+		return nil, fmt.Errorf("llm: marshal request: %w", err)
+	}
+	// The ZDR force runs AFTER the extraBody merge, so extra_body can only
+	// tighten. nil: buildStreamBody already merged; the force is b's alone.
+	if body, err = applyOpenAIBodyExtras(body, nil, &b); err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
 
@@ -353,11 +361,10 @@ func ChatStream(ctx context.Context, b backends.Backend, model string,
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	// extra_headers first, core headers last (setChatHeaders); Accept is the
+	// stream's core header and goes on after them.
+	setChatHeaders(req, &b)
 	req.Header.Set("Accept", "text/event-stream")
-	if b.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+b.APIKey)
-	}
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {

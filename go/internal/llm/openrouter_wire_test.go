@@ -166,6 +166,115 @@ func TestGenericProviderNoZDRInjection(t *testing.T) {
 	}
 }
 
+// --- Streaming wire (W02-01): the openai stream applies the same body policy
+// as chatOpenAI. Driven through ChatStreamBackend, the production entry, which
+// hands the row's extra_body to ChatStream.
+
+// streamORBody streams one request for b against a capture fake and returns
+// the decoded wire body and headers.
+func streamORBody(t *testing.T, b backends.Backend) (map[string]any, http.Header) {
+	t.Helper()
+	srv, raw, hdr := captureRequestBody(t, minimalStopStream)
+	defer srv.Close()
+	b.Host = srv.URL
+	if _, err := ChatStreamBackend(context.Background(), b, b.Model,
+		[]ChatMsg{{Role: "user", Content: "hi"}}, nil, Options{NumPredict: 5}, 5*time.Second, nil); err != nil {
+		t.Fatalf("ChatStreamBackend: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(*raw, &body); err != nil {
+		t.Fatalf("stream request body not JSON: %v (%s)", err, *raw)
+	}
+	return body, *hdr
+}
+
+// TestOpenRouterForcedZDRStream is the stream half of the trust-independent
+// force (K19): the live openrouter row shape (extra_body.provider =
+// {"require_parameters":true}, no zdr) must reach the wire with
+// provider.zdr=true + provider.data_collection="deny" and require_parameters
+// intact. The row's extra_body map belongs to the shared pool snapshot — the
+// force must not write into it.
+func TestOpenRouterForcedZDRStream(t *testing.T) {
+	for _, trust := range []backends.Trust{backends.TrustFull, backends.TrustNoCredentials} {
+		t.Run(string(trust), func(t *testing.T) {
+			snapProv := map[string]any{"require_parameters": true}
+			b := orBackend("", trust)
+			b.ExtraBody = map[string]any{"provider": snapProv}
+			body, _ := streamORBody(t, b)
+			prov := providerObj(t, body)
+			if prov == nil {
+				t.Fatalf("stream request lacks the provider object; body = %v", body)
+			}
+			if prov["zdr"] != true {
+				t.Errorf("provider.zdr = %v, want true (forced, trust-independent); provider = %v", prov["zdr"], prov)
+			}
+			if prov["data_collection"] != "deny" {
+				t.Errorf("provider.data_collection = %v, want deny", prov["data_collection"])
+			}
+			if prov["require_parameters"] != true {
+				t.Errorf("provider.require_parameters = %v, want true (extra_body must merge)", prov["require_parameters"])
+			}
+			if len(snapProv) != 1 {
+				t.Errorf("the force wrote into the row's extra_body map (pool snapshot): %v", snapProv)
+			}
+		})
+	}
+}
+
+// TestOpenRouterExtraBodyTightensNeverLoosensStream mirrors the non-stream pin
+// on the stream wire: extra_body.provider.zdr=false is overwritten, the force
+// runs AFTER the merge.
+func TestOpenRouterExtraBodyTightensNeverLoosensStream(t *testing.T) {
+	b := orBackend("", backends.TrustNoCredentials)
+	b.ExtraBody = map[string]any{
+		"provider": map[string]any{"require_parameters": true, "zdr": false},
+	}
+	body, _ := streamORBody(t, b)
+	prov := providerObj(t, body)
+	if prov == nil {
+		t.Fatal("stream request lacks the provider object")
+	}
+	if prov["require_parameters"] != true {
+		t.Errorf("provider.require_parameters = %v, want true (extra_body must merge)", prov["require_parameters"])
+	}
+	if prov["zdr"] != true {
+		t.Errorf("provider.zdr = %v, want true (force wins over extra_body loosening)", prov["zdr"])
+	}
+	if prov["data_collection"] != "deny" {
+		t.Errorf("provider.data_collection = %v, want deny", prov["data_collection"])
+	}
+}
+
+// TestOpenRouterDataCollectionEscapeStream mirrors the escape pin on the
+// stream wire: only a literal bool metadata.allow_data_collection=true
+// disarms the force; a string "true" keeps it armed.
+func TestOpenRouterDataCollectionEscapeStream(t *testing.T) {
+	b := orBackend("", backends.TrustNoCredentials)
+	b.Metadata = map[string]any{"allow_data_collection": true}
+	body, _ := streamORBody(t, b)
+	if prov := providerObj(t, body); prov != nil {
+		t.Errorf("escape armed but provider object still injected: %v", prov)
+	}
+
+	b2 := orBackend("", backends.TrustNoCredentials)
+	b2.Metadata = map[string]any{"allow_data_collection": "true"} // not a bool
+	body2, _ := streamORBody(t, b2)
+	if providerObj(t, body2) == nil {
+		t.Error(`metadata "true" (string) must NOT disarm the enforcement on the stream wire`)
+	}
+}
+
+// TestGenericProviderNoZDRInjectionStream mirrors the provider-class binding on
+// the stream wire: a generic row gets no provider object.
+func TestGenericProviderNoZDRInjectionStream(t *testing.T) {
+	b := orBackend("", backends.TrustFull)
+	b.ProviderClass = backends.ProviderGeneric
+	body, _ := streamORBody(t, b)
+	if prov := providerObj(t, body); prov != nil {
+		t.Errorf("generic provider got a provider object injected on the stream wire: %v", prov)
+	}
+}
+
 // TestOpenRouterResponseTelemetry: usage.cost, the top-level model (the model
 // that ACTUALLY answered — models-fallback can differ) and the response id
 // reach ChatResponse for openrouter-class backends; a generic backend leaves
