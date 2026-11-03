@@ -26,10 +26,14 @@ var ErrWouldBlock = errors.New("dispatch: target busy, would block")
 // higher-class waiter is ahead, so a try can never overtake the queue.
 // Pass-through targets (disabled / no declared policy) admit
 // unconditionally, exactly like Acquire — behavior neutrality with empty
-// policy.
+// policy. Same door check order as Acquire: ctx.Err(), then the class
+// (ErrInvalidClass outside the class table, A03-W1), then B8.
 func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, context.Context, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err // canceled ctx never admits
+	}
+	if !req.Class.valid() {
+		return nil, nil, d.refuseInvalidClass("try-acquire", req.Class, req.Target.Origin, req.Role)
 	}
 	principal := principalFromContext(ctx)
 	class := req.Class

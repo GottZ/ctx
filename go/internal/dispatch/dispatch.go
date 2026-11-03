@@ -27,11 +27,19 @@ import (
 // Class is the admission priority of one wire call. Two classes by decision
 // E-U1: no consumer has a requirement between "a human waits synchronously"
 // and "nobody waits" — a third class would need an ordering decision against
-// every existing one (design/03 §4.1). Extension rule: a new class only as
-// its own wave including an authorization decision (design/03 C7).
+// every existing one (design/03 §4.1). Extension rule (design/03 C7): a new
+// class only as its own wave including an authorization decision, and
+// structurally — since A03-W1 — in three places the compiler or the table
+// test enforces: its constant goes BEFORE numClasses, its row into
+// classTable (the build fails while a trailing row is missing), and every
+// class branch is a switch over the valid classes with a fail-closed
+// default, so a forgotten branch is test-red instead of silently treating
+// the new value like an existing class. A value outside the table is a code
+// bug: both admission doors refuse it with ErrInvalidClass before any
+// waiter or lease exists, String names it "invalid", External is false.
 type Class uint8
 
-// The two admission classes (E-U1).
+// The admission classes (E-U1). A new class goes before numClasses.
 const (
 	// ClassInteractive — a human waits synchronously for the answer.
 	ClassInteractive Class = iota
@@ -39,14 +47,69 @@ const (
 	// paths). Background leases are the only ones the dispatcher may cancel
 	// (I-D1: interactive leases are never canceled).
 	ClassBackground
+	// numClasses is the enum end, not a class: every value >= numClasses is
+	// invalid, and classTable carries exactly numClasses rows.
+	numClasses
 )
 
-// String implements fmt.Stringer for logs and snapshots.
+// invalidClassName is String() of a value outside the class table — never
+// the name of a real class (pairwise distinct dispatch_class vocabulary,
+// design/03 §3.4, design/06 B-06-12).
+const invalidClassName = "invalid"
+
+// classInfo is one row of the class table. Deliberately WITHOUT a rank: the
+// admission order is policy data (A-E2 no. 1, dispatch.external_order, wave
+// A03-W2), not a property of the class.
+type classInfo struct {
+	// name is the String() form, persisted as context_llm_log.dispatch_class.
+	name string
+	// external marks a class of external consumers (design/01 §4.5 I-K10: a
+	// consumer principal is admitted only in an external class, wave W01-7).
+	// Both in-house classes are false; the external classes arrive with
+	// their own waves (design/03 §4.1: XU A03-W3, XB A03-W9).
+	external bool
+}
+
+// classTable is the single source of String, valid and External: one row per
+// class below numClasses, keyed by the constant.
+var classTable = [...]classInfo{
+	ClassInteractive: {name: "interactive"},
+	ClassBackground:  {name: "background"},
+}
+
+// Compile-time half of the C7 gate: len(classTable) == numClasses in both
+// directions. A constant added before numClasses without its row (or a row
+// keyed past the enum end) makes one of these array lengths negative, so the
+// build fails. A row missing in the MIDDLE compiles as a zero row with an
+// empty name — valid() treats it as invalid (refused at the doors) and the
+// table test (class_table_test.go) is red.
+var (
+	_ [len(classTable) - int(numClasses)]struct{}
+	_ [int(numClasses) - len(classTable)]struct{}
+)
+
+// valid reports whether c has a (named) row in the class table.
+func (c Class) valid() bool {
+	return c < numClasses && classTable[c].name != ""
+}
+
+// String implements fmt.Stringer for logs, snapshots and the persisted
+// dispatch_class column: the table name, "invalid" outside the table
+// (pre-A03-W1 every non-interactive value read "background").
 func (c Class) String() string {
-	if c == ClassInteractive {
-		return "interactive"
+	if !c.valid() {
+		return invalidClassName
 	}
-	return "background"
+	return classTable[c].name
+}
+
+// External reports whether c is a class of external consumers — the
+// classifier of the I-K10 gate (design/01 §4.5: a consumer principal in a
+// class with External() == false is refused with ErrClassUnauthorized, wave
+// W01-7). False for both in-house classes and fail-closed false outside the
+// class table.
+func (c Class) External() bool {
+	return c.valid() && classTable[c].external
 }
 
 // GlobalScope is the shared-backend sentinel on context_backends.scope.
@@ -185,9 +248,18 @@ var (
 	ErrTargetSaturated = errors.New("dispatch: target wait cap reached")
 )
 
+// ErrInvalidClass is both admission doors' answer to a Request.Class outside
+// the class table (design/03 §4.1 C7 precondition, wave A03-W1). It is a
+// CODE BUG, not a capacity verdict: deliberately NOT part of IsRejection (no
+// 429, no Retry-After) — the /v1 mapping is 503 server_error with
+// x-should-retry: false (masterplan K29, wave A03-W8). Like every admission
+// error it is terminal for a chain walk and not an attempt. Every refusal is
+// counted (Snapshot.InvalidClass) and logged at ERROR.
+var ErrInvalidClass = errors.New("dispatch: invalid admission class")
+
 // IsRejection is the ONE check point for handler mapping (429/SSE): true for
 // every Deckel-Staffel sentinel and ErrQueueFull, false for everything else
-// (in particular ctx.Err()). It exists so no handler ever matches error
+// (in particular ctx.Err() and ErrInvalidClass). It exists so no handler ever matches error
 // STRINGS — string comparisons are the drift source that would collide the
 // generic B6 texts with the mapping (design/03 §4.5.1).
 func IsRejection(err error) bool {
