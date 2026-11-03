@@ -10,16 +10,20 @@
 //     tenant (a scope no tenant owns, psql rows) are server-admin-only; an
 //     empty reader tenant reads nothing and issues no query (fail-closed).
 //   - Entities: the eight served types are data (store.AuditEntities); the
-//     six whose writers have not landed read as empty lists; setting, secret,
+//     four whose writers have not landed read as empty lists (model_consumer
+//     and model_key are written by the 161 triggers); setting, secret,
 //     backend and every other type answer store.ErrAuditEntity; 'instance' is
 //     server-admin-only.
 //   - Order created_at DESC, id DESC (rows of one transaction share
 //     created_at); since is a strict lower bound; the limit is the caller's.
 //   - EXPLAIN: with ≥ 10 000 seeded rows every statement shape (server-admin /
 //     tenant × with/without id × with/without since) rides an index — the
-//     entity-only shapes idx_settings_audit_entity — under a custom AND a
-//     generic plan; no Seq Scan. A negative control drops the index and the
-//     same checker must refuse the plan.
+//     server-admin entity-only shapes idx_settings_audit_entity, the tenant
+//     entity-only shapes idx_settings_audit_entity_tenant (migration 161,
+//     W06-7 F1) — under a custom AND a generic plan; no Seq Scan. A tenant
+//     without rows of the entity removes no more than `limit` rows by filter
+//     (EXPLAIN ANALYZE; before 161: the whole entity range). A negative
+//     control drops the index and the same checker must refuse the plan.
 //
 //	go test -tags=integration -p 1 -count=1 -run 'TestAuditList' ./internal/store/
 package store_test
@@ -222,7 +226,7 @@ func TestAuditListEntities(t *testing.T) {
 		}
 	})
 	t.Run("future_entities_read_as_empty_lists", func(t *testing.T) {
-		for _, e := range []string{"gateway_limits", "model_consumer", "model_key", "model_grant", "consumer_usage"} {
+		for _, e := range []string{"gateway_limits", "model_grant", "consumer_usage"} {
 			for _, all := range []bool{true, false} {
 				aq := store.AuditQuery{Entity: e, Limit: 10, AllTenants: all}
 				if !all {
@@ -343,6 +347,40 @@ func auCheckPlan(raw []byte, wantIndex string) (string, error) {
 	return summary, nil
 }
 
+// auRowsRemovedByFilter sums "Rows Removed by Filter" over every node of an
+// EXPLAIN (ANALYZE, FORMAT JSON) document.
+func auRowsRemovedByFilter(raw []byte) (int64, error) {
+	var doc []struct {
+		Plan json.RawMessage `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return 0, fmt.Errorf("decode plan: %w (%s)", err, raw)
+	}
+	if len(doc) != 1 {
+		return 0, fmt.Errorf("plan document holds %d plans, want 1 (%s)", len(doc), raw)
+	}
+	var walk func(json.RawMessage) (int64, error)
+	walk = func(n json.RawMessage) (int64, error) {
+		var node struct {
+			Removed float64           `json:"Rows Removed by Filter"`
+			Plans   []json.RawMessage `json:"Plans"`
+		}
+		if err := json.Unmarshal(n, &node); err != nil {
+			return 0, err
+		}
+		sum := int64(node.Removed)
+		for _, c := range node.Plans {
+			s, err := walk(c)
+			if err != nil {
+				return 0, err
+			}
+			sum += s
+		}
+		return sum, nil
+	}
+	return walk(doc[0].Plan)
+}
+
 func keysOf(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -423,8 +461,12 @@ func TestAuditListPlan(t *testing.T) {
 					aq.TenantID = tenants[7]
 				}
 				want := ""
-				if key == "" {
+				switch {
+				case key != "":
+				case all:
 					want = "idx_settings_audit_entity"
+				default:
+					want = "idx_settings_audit_entity_tenant"
 				}
 				shapes = append(shapes, shape{
 					name: fmt.Sprintf("server_admin=%v/id=%v/since=%v", all, key != "", !s.IsZero()),
@@ -452,28 +494,29 @@ func TestAuditListPlan(t *testing.T) {
 		})
 	}
 
-	// Measurement, not a gate: the tenant predicate has no index of its own,
-	// so a tenant read walks the entity's index range until it has `limit`
-	// rows — for a tenant with few rows of that entity, the whole range.
-	// tenants[7] holds 300 of the 2 400 key rows; tenants[0] holds none.
-	t.Run("tenant_walk_cost_is_measured", func(t *testing.T) {
+	// W06-7 F1: a tenant read must not walk the entity's index range. With
+	// the tenant index the tenant predicate is an index condition; without it
+	// (before 161) a tenant with no rows of the entity removed every row of
+	// the entity by filter. tenants[7] holds 300 of the 2 400 key rows;
+	// tenants[0] holds none.
+	t.Run("tenant_walk_stays_within_limit", func(t *testing.T) {
+		const limit = 200
 		for _, tenant := range []string{tenants[7], tenants[0]} {
 			q := &auRecorder{pool: pool}
-			rows := auList(ctx, t, q, store.AuditQuery{Entity: "api_key", Limit: 200, TenantID: tenant})
-			var lines []string
-			r, err := pool.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) "+q.sql[0], q.args[0]...)
-			if err != nil {
+			rows := auList(ctx, t, q, store.AuditQuery{Entity: "api_key", Limit: limit, TenantID: tenant})
+			var raw []byte
+			if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) "+q.sql[0], q.args[0]...).Scan(&raw); err != nil {
 				t.Fatalf("explain analyze: %v", err)
 			}
-			for r.Next() {
-				var l string
-				if err := r.Scan(&l); err != nil {
-					t.Fatalf("scan: %v", err)
-				}
-				lines = append(lines, l)
+			removed, err := auRowsRemovedByFilter(raw)
+			if err != nil {
+				t.Fatalf("%v", err)
 			}
-			r.Close()
-			t.Logf("tenant read, %d row(s) returned:\n%s", len(rows), strings.Join(lines, "\n"))
+			summary, _ := auCheckPlan(raw, "")
+			t.Logf("tenant %s: %d row(s) returned, Rows Removed by Filter %d — %s", tenant, len(rows), removed, summary)
+			if removed > limit {
+				t.Errorf("tenant %s: the read removed %d rows by filter, want ≤ limit %d (no walk over foreign rows)", tenant, removed, limit)
+			}
 		}
 	})
 

@@ -176,7 +176,7 @@ B-W6 arms the loop: each scheduler tick rebuilds ONE tenant with `ScopeFilter = 
 
 ## Self-service onboarding (v4.1.1)
 
-Migration 069 adds structural per-tenant count-limits on `context_tenants`: `max_scopes`/`max_keys` (typed `INTEGER`, `CHECK >= 0`, `DEFAULT 25`/`50` so every existing tenant is capped without a backfill, `NULL` = operator-set unlimited — the system/default tenant seeded `NULL`), plus `idx_tenant_scopes_tenant`/`idx_api_keys_tenant`. These are structural counts (how many scopes/keys a tenant may self-provision), distinct from the 063 cost quota.
+Migration 069 adds structural per-tenant count-limits on `context_tenants`: `max_scopes`/`max_keys` (typed `INTEGER`, `CHECK >= 0`, `DEFAULT 25`/`50` so every existing tenant is capped without a backfill, `NULL` = operator-set unlimited — the system/default tenant seeded `NULL`), plus `idx_tenant_scopes_tenant`/`idx_api_keys_tenant`. These are structural counts (how many scopes/keys a tenant may self-provision), distinct from the 063 cost quota. Migration 161 adds `max_model_consumers` (`DEFAULT 64` for every tenant, the default tenant included) for the callers of the OpenAI-compatible model API; a model consumer belongs to exactly one tenant for its whole life — its `tenant_id` is immutable (trigger, SQLSTATE `23514`), and so is the `consumer_id` of each of its keys.
 
 | Action | Tier | What |
 |---|---|---|

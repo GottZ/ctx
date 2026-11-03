@@ -19,6 +19,12 @@
 //   - entity=setting|secret|backend, an unknown and a missing entity ⇒ 400;
 //     the entities whose writers have not landed ⇒ rows: []; instance ⇒
 //     rows: [] for a tenant-admin.
+//   - W01-1 (migration 161): model consumers and model keys written by raw
+//     SQL under a server-admin stamp — tenant-admin A reads entity=model_consumer
+//     and entity=model_key rows of A only, B's consumer id answers like an
+//     unknown id, the server-admin actor is masked; the server-admin reads
+//     both tenants. Red against 160 (no tables) and against 161 without its
+//     audit triggers (rows: [] for both readers).
 //   - limit=1000 ⇒ the audit.max_limit cap (default 200, ≥ 201 rows seeded);
 //     a configured cap wins; limit ≤ 0 or non-numeric ⇒ 400; since filters
 //     strictly, a malformed since ⇒ 400.
@@ -29,6 +35,8 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -384,7 +392,7 @@ func TestAuditTenantFilterAndRedaction(t *testing.T) {
 	})
 
 	t.Run("future_entities_and_instance_are_empty", func(t *testing.T) {
-		for _, e := range []string{"gateway_limits", "model_consumer", "model_key", "model_grant", "consumer_usage", "instance"} {
+		for _, e := range []string{"gateway_limits", "model_grant", "consumer_usage", "instance"} {
 			for _, ar := range []*auth.AuthResult{admin, a.ar} {
 				if _, r := auditOK(t, h, ar, "?entity="+e); len(r.Rows) != 0 || r.Entity != e {
 					t.Errorf("entity %s (server-admin=%v): entity %q, %d row(s), want rows: []", e, ar.IsServerAdmin(), r.Entity, len(r.Rows))
@@ -392,6 +400,91 @@ func TestAuditTenantFilterAndRedaction(t *testing.T) {
 			}
 		}
 	})
+}
+
+// auModelConsumer writes one consumer of tenantID with one key the way an
+// admin action will (W01-3/W01-5 build those): in one transaction stamped
+// with the acting key, via api. Returns the consumer and key ids.
+func auModelConsumer(ctx context.Context, t *testing.T, pool *pgxpool.Pool, actor *auth.AuthResult, tenantID, scope, label string) (consumer, key string) {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('ctx.api_key_id', $1, true), set_config('ctx.audit_via', 'api', true)`, actor.ApiKeyID); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO context_model_consumers (tenant_id, label, tenant_scope, created_by_key)
+		 VALUES ($1::uuid, $2, $3, $4::uuid) RETURNING id::text`, tenantID, label, scope, actor.ApiKeyID).Scan(&consumer); err != nil {
+		t.Fatalf("insert consumer %s: %v", label, err)
+	}
+	sum := sha256.Sum256([]byte("ctxm_" + label))
+	hash := hex.EncodeToString(sum[:])
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO context_model_keys (consumer_id, key_hash, key_hint, created_by_key)
+		 VALUES ($1::uuid, $2, 'ctxm_…abcd', $3::uuid) RETURNING id::text`, consumer, hash, actor.ApiKeyID).Scan(&key); err != nil {
+		t.Fatalf("insert key of %s: %v", label, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return consumer, key
+}
+
+func TestAuditModelConsumerTenantFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	mh := t43Handler(pool)
+	admin, _ := kaServerAdmin(ctx, t, pool)
+	a := auMakeTenant(ctx, t, pool, mh, admin, "au-ma")
+	b := auMakeTenant(ctx, t, pool, mh, admin, "au-mb")
+	consumerA, keyA := auModelConsumer(ctx, t, pool, admin, a.id, a.scope, "au-ma-app")
+	consumerB, keyB := auModelConsumer(ctx, t, pool, admin, b.id, b.scope, "au-mb-app")
+	h := auditHandler(pool)
+
+	for _, e := range []struct{ entity, a, b string }{
+		{"model_consumer", consumerA, consumerB},
+		{"model_key", keyA, keyB},
+	} {
+		t.Run(e.entity+"/tenant_admin_reads_its_own_only", func(t *testing.T) {
+			_, r := auditOK(t, h, a.ar, "?entity="+e.entity)
+			if len(r.Rows) != 1 || r.Rows[0].EntityKey != e.a || r.Rows[0].Action != "create" {
+				t.Fatalf("tenant-admin A, entity=%s: %d row(s) %+v, want exactly the create row of %s", e.entity, len(r.Rows), r.Rows, e.a)
+			}
+			row := r.Rows[0]
+			if auMetaStr(row, "tenant_id") != a.id || auMetaStr(row, "consumer_id") != consumerA {
+				t.Errorf("tenant-admin A, entity=%s: metadata %s, want tenant_id %s consumer_id %s", e.entity, auMeta(row), a.id, consumerA)
+			}
+			auWantRedacted(t, row)
+		})
+		t.Run(e.entity+"/foreign_id_reads_like_an_unknown_one", func(t *testing.T) {
+			foreign, fr := auditOK(t, h, a.ar, "?entity="+e.entity+"&id="+e.b)
+			unknown, _ := auditOK(t, h, a.ar, "?entity="+e.entity+"&id="+uuid.NewString())
+			if len(fr.Rows) != 0 || !bytes.Equal(foreign, unknown) {
+				t.Errorf("tenant-admin A reading B's %s: %s, want the body of an unknown id %s", e.entity, foreign, unknown)
+			}
+		})
+		t.Run(e.entity+"/server_admin_reads_both", func(t *testing.T) {
+			_, r := auditOK(t, h, admin, "?entity="+e.entity)
+			got := map[string]string{}
+			for _, row := range r.Rows {
+				got[row.EntityKey] = auMetaStr(row, "tenant_id")
+			}
+			if len(r.Rows) != 2 || got[e.a] != a.id || got[e.b] != b.id {
+				t.Errorf("server-admin, entity=%s: rows %v, want %s→%s and %s→%s", e.entity, got, e.a, a.id, e.b, b.id)
+			}
+			for _, row := range r.Rows {
+				if row.APIKeyID == nil || *row.APIKeyID != admin.ApiKeyID {
+					t.Errorf("server-admin, entity=%s: row %s actor %s, want the unredacted admin key", e.entity, row.EntityKey, auStr(row.APIKeyID))
+				}
+			}
+		})
+	}
 }
 
 func TestAuditLimitAndSince(t *testing.T) {

@@ -24,9 +24,10 @@ type auditEntity struct {
 
 // auditEntities is the closed set of entity types the audit read surface
 // serves — data, not a switch. api_key and tenant_quota are written by the
-// 160 triggers; gateway_limits (M-06-5), the three model_* types (01's
-// trigger), consumer_usage (the gateway's Go writer) and instance (04's
-// trigger) read as empty lists until their writers land. setting, secret and
+// 160 triggers, model_consumer and model_key by the 161 triggers;
+// gateway_limits (M-06-5), model_grant (the grant migration's trigger),
+// consumer_usage (the gateway's Go writer) and instance (04's trigger) read
+// as empty lists until their writers land. setting, secret and
 // backend stay on their own surfaces (GET /api/settings/{key} and the
 // admin-only manage actions) and, like every other type, answer
 // ErrAuditEntity here.
@@ -131,9 +132,12 @@ func auditListSQL(aq AuditQuery, tenant string) (string, []any) {
 }
 
 // ListAudit returns the audit rows of one entity type for one reader, newest
-// first (created_at DESC, id DESC). The entity range rides
-// idx_settings_audit_entity (entity_type, created_at DESC); with an EntityKey
-// the planner may take idx_settings_audit_key instead.
+// first (created_at DESC, id DESC). A server-admin's entity range rides
+// idx_settings_audit_entity (entity_type, created_at DESC), a tenant reader's
+// idx_settings_audit_entity_tenant (entity_type, metadata->>'tenant_id',
+// created_at DESC; migration 161), which the tenant predicate below matches
+// as written; with an EntityKey the planner may take idx_settings_audit_key
+// instead.
 //
 // A tenant reader's view is the intersection of the query with its tenant:
 // a foreign or unknown EntityKey reads as the same empty list (no oracle,

@@ -246,6 +246,13 @@ func auditActorIsOwn(md map[string]json.RawMessage, readerTenant string) bool {
 // api_key: api-key-list shows a tenant-admin neither the server-admin bit nor
 // the key's person, and a server-admin key living in the reader's tenant would
 // otherwise be named by both (B-06-23 on the state side, Fremd-Review #1).
+// model_consumer and model_key need no entry so far: their whitelist leaves
+// out every actor and person column (created_by_*, revoked_by_*), and the
+// rest is what model-consumer-list is planned to show a tenant-admin. Open:
+// whether the peer binding (peer_instance_id, peer_bound_at) is server-admin
+// only (design/05 §3.2) or listed for tenant-admins too (design/04 §4.8) —
+// the wave that builds the consumer view decides and, if hidden, adds the
+// entry here.
 var auditHiddenStateFields = map[string][]string{
 	"api_key": {"is_admin", "principal_id"},
 }

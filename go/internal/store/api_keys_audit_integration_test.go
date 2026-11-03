@@ -568,7 +568,9 @@ func TestMigration160Backfill(t *testing.T) {
 
 // K16: exactly one audit trigger set per table — matched by name AND by any
 // trigger function that writes context_settings_audit, so a differently named
-// audit trigger is caught too.
+// audit trigger is caught too. Since 161 the model consumers and model keys
+// are in the list; their deactivation and identity triggers carry no "audit"
+// in their names and do not write the audit table themselves.
 func TestAuditTriggerSetPerTable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -579,7 +581,8 @@ func TestAuditTriggerSetPerTable(t *testing.T) {
 		`SELECT t.tgrelid::regclass::text || '.' || t.tgname || ' -> ' || p.proname
 		   FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
 		  WHERE NOT t.tgisinternal
-		    AND t.tgrelid IN ('context_api_keys'::regclass, 'context_tenant_quota'::regclass)
+		    AND t.tgrelid IN ('context_api_keys'::regclass, 'context_tenant_quota'::regclass,
+		                      'context_model_consumers'::regclass, 'context_model_keys'::regclass)
 		    AND (p.proname LIKE 'audit%' OR t.tgname LIKE '%audit%'
 		         OR p.prosrc ILIKE '%context_settings_audit%')
 		  ORDER BY 1`)
@@ -589,6 +592,10 @@ func TestAuditTriggerSetPerTable(t *testing.T) {
 	want := []string{
 		"context_api_keys.trg_api_keys_audit_ins_del -> audit_api_keys_write",
 		"context_api_keys.trg_api_keys_audit_upd -> audit_api_keys_write",
+		"context_model_consumers.trg_model_consumers_audit_ins_del -> audit_model_consumers_write",
+		"context_model_consumers.trg_model_consumers_audit_upd -> audit_model_consumers_write",
+		"context_model_keys.trg_model_keys_audit_ins_del -> audit_model_keys_write",
+		"context_model_keys.trg_model_keys_audit_upd -> audit_model_keys_write",
 		"context_tenant_quota.trg_tenant_quota_audit -> audit_tenant_quota_write",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
