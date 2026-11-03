@@ -463,13 +463,14 @@ func TestValidateFoldedSignChecksReportOnce(t *testing.T) {
 // wantIntKeys is the number of typInt keys in the registry, MEASURED on the
 // stand this wave was built against (90, the same number design/05 §2 Naht 5
 // counted from config.go's field tags; 89 since root_map.label_budget was
-// retired without a successor). Like wantDurationKeys above it is a
+// retired without a successor; 90 again with W06-7's audit.max_limit). Like
+// wantDurationKeys above it is a
 // DRIFT GUARD, not a fact worth asserting for its own sake: V35 is a generic
 // walk, so an int key added later is covered without an edit here — but a key
 // that silently changes TYPE (int → float, or a leaf that stops being an int)
 // would leave the walk without anyone noticing. Raise this number in the same
 // commit that adds an int key.
-const wantIntKeys = 91 // +2 on 2026-11-03 (W06-8): status.foreign_load_hysteresis_ticks and status.foreign_load_hourly_min_abs, V35 sign (+ V37 floor for the ticks)
+const wantIntKeys = 92 // +2 on 2026-11-03 (W06-8): status.foreign_load_hysteresis_ticks and status.foreign_load_hourly_min_abs, V35 sign (+ V37 floor for the ticks); +1 on 2026-11-03 (W06-7): audit.max_limit, V35 sign
 
 // intSignWarnKeys is the OTHER half of the classification, and the reason V35
 // runs last. These three keys are served by NORMALIZING passes that write the

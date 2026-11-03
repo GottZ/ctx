@@ -107,6 +107,7 @@ type Config struct {
 	Events         EventsConfig
 	Project        ProjectConfig
 	LLMLog         LLMLogConfig
+	Audit          AuditConfig
 	WebChat        WebChatConfig
 	Writes         WritesConfig
 	Tenant         TenantConfig
@@ -1088,6 +1089,17 @@ type LLMLogConfig struct {
 	// Server read-endpoint cap (bounds one /api/llmlog page over the hypertable)
 	// — global-only by fail-closed default; not a per-tenant tuning surface.
 	MaxLimit int `key:"llmlog.max_limit" env:"CTX_LLMLOG_MAX_LIMIT" default:"200" mut:"hot" parse:"strict" tenancy:"global-only"`
+}
+
+// AuditConfig is the audit read surface (GET /api/audit, design/06 §4.10).
+type AuditConfig struct {
+	// MaxLimit caps GET /api/audit?limit= — and is the page size when the
+	// parameter is absent. 200 is the endpoint contract of design/06 §4.10;
+	// the cap bounds one page, not the index walk behind it (a tenant-admin
+	// read filters metadata.tenant_id along the entity's created_at range).
+	// Server read-endpoint cap like llmlog.max_limit: global-only, strict (a
+	// typo'd cap aborts boot instead of silently falling back).
+	MaxLimit int `key:"audit.max_limit" env:"CTX_AUDIT_MAX_LIMIT" default:"200" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // WebChatConfig is the F6 web-chat harness surface (design 06 §3.2). All knobs
