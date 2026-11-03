@@ -135,6 +135,35 @@ linters:
             - pkg: "github.com/GottZ/ctx/internal/config"
               desc: "internal/config may only be imported by cmd/**, internal/handler, internal/events, internal/settings (F1 layering rule — pass values as parameters instead)"
 
+        # W02-02 (design/02 §4.1, L6; B15c): internal/oai is the
+        # OpenAI-compatible wire surface that external model keys reach. It
+        # serves models, never the knowledge corpus: a corpus package imported
+        # here is one handler bug away from handing a model-key holder
+        # retrieval, chat over the corpus, dream state, the event stream or
+        # the block store. internal/config is already refused by
+        # config-layering above — values arrive through the injected
+        # func() oai.Settings getter. Tests are included: the harness has no
+        # business with the corpus either. depguard checks direct imports
+        # only; that the oai test binary is corpus-free transitively as well
+        # (go list -deps -test ./internal/oai/ = oai alone) is kept by the
+        # tests, which use a stand-in for the house Recovery instead of
+        # importing internal/handler. Deny prefixes end in "$" (exact match,
+        # see the leaf rules below).
+        oai-isolation:
+          files:
+            - "**/go/internal/oai/**"
+          deny:
+            - pkg: "github.com/GottZ/ctx/internal/rrf$"
+              desc: "internal/oai serves models, not the corpus — retrieval (rrf) is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "github.com/GottZ/ctx/internal/chat$"
+              desc: "internal/oai serves models, not the corpus — corpus chat is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "github.com/GottZ/ctx/internal/dream$"
+              desc: "internal/oai serves models, not the corpus — dream state is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "github.com/GottZ/ctx/internal/events$"
+              desc: "internal/oai serves models, not the corpus — the event stream is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "github.com/GottZ/ctx/internal/store$"
+              desc: "internal/oai serves models, not the corpus — the block store is out of reach of a model key (design/02 §4.1 L6, B15c)"
+
         # Leaf doctrine (design/01-schnitt.md §4.5, masterplan K7/K11 + A-4).
         # Seven packages are leaves BY DESIGN; until now the doctrine lived only
         # in their package comments, and a comment is not a gate. Every rule

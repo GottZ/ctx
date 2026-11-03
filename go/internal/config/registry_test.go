@@ -131,6 +131,26 @@ func TestRegistryStrictSet(t *testing.T) {
 		// global partition break, and someone who writes engine=leiden and gets
 		// a gonum partition would have no way to notice.
 		"graph_overview.engine": true,
+		// W02-02 (design/02 §3.3, §4.2.1, B9) gateway ceilings: the request
+		// body cap, the process-wide in-flight budget, the response and frame
+		// read caps, the embedding float ceiling, the hard output-token
+		// ceiling and the five tenant-alias ceilings — int caps like
+		// events.max_connections; a typo'd cap silently falling back to the
+		// default would hide the intended memory or policy bound, so each
+		// aborts loudly. The gateway DURATIONS (commit grace, keepalive,
+		// write window, timeouts) stay non-strict like the other cadences, and
+		// gateway.default_max_tokens is a fallback value, not a ceiling.
+		"gateway.max_request_bytes":                         true,
+		"gateway.inflight_budget":                           true,
+		"gateway.max_response_bytes":                        true,
+		"gateway.max_stream_frame_bytes":                    true,
+		"gateway.embedding_max_floats":                      true,
+		"gateway.max_output_tokens_ceiling":                 true,
+		"gateway.tenant_alias_ceiling.max_output_tokens":    true,
+		"gateway.tenant_alias_ceiling.max_n":                true,
+		"gateway.tenant_alias_ceiling.embedding_max_inputs": true,
+		"gateway.tenant_alias_ceiling.rerank_max_documents": true,
+		"gateway.tenant_alias_ceiling.tools_max_count":      true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.

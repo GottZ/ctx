@@ -45,6 +45,9 @@ const BASE_AREAS = [
 // RESERVED_SERVER_PREFIXES). U04 adds '/webhooks' as a pin ahead of the W13
 // forge-webhook route (design 04 §4.1.1 / Achse 03 §5.3): the route lives
 // OUTSIDE /api and the SPA must never interpret it as a client route.
+// W02-02 adds '/v1' and '/v2', the OpenAI-compatible gateway (design 02 §4.2,
+// design 05 K-05-12): both prefixes answer in the OpenAI error envelope once
+// mounted, so no SPA route may ever claim them.
 const REQUIRED_RESERVED_PREFIXES = [
   '/api',
   '/mcp',
@@ -53,6 +56,8 @@ const REQUIRED_RESERVED_PREFIXES = [
   '/token',
   '/.well-known',
   '/webhooks',
+  '/v1',
+  '/v2',
 ] as const
 
 function whoami(p: Partial<WhoamiResponse> = {}): WhoamiResponse {

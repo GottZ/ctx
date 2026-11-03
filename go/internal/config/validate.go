@@ -14,6 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
 
@@ -77,6 +78,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
 	// V37 (W06-8): the foreign-load detector's floors and ratio range.
 	issues = append(issues, validateStatusForeignLoad(c)...)
+	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation.
+	issues = append(issues, validateGateway(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1224,4 +1227,167 @@ func defaultFor(key string) any {
 		}
 	}
 	panic("config: unknown registry key " + key)
+}
+
+// Gateway bounds that are external facts, not policy (design/02 §3.3) — named
+// so V39 says where each comes from.
+const (
+	// gatewayFrameCeiling is the internal SSE frame cap of the stream reader
+	// (llm/stream.go maxSSEFrameBytes, unexported there): a relayed frame
+	// larger than what the reader accepts can never arrive.
+	gatewayFrameCeiling = 4 << 20
+	// gatewaySDKTimeout is the OpenAI SDKs' default request timeout
+	// (design/02 §3.3, extern-recherche §1.7 DEFAULT_TIMEOUT): a request
+	// deadline at or above it lets the SDK give up and resend the whole
+	// request while the first one still runs.
+	gatewaySDKTimeout = 600 * time.Second
+	// gatewayCommitGraceCeiling keeps the stream header commit under a typical
+	// 60 s proxy idle timeout (design/02 §3.3, handler/sse.go).
+	gatewayCommitGraceCeiling = 50 * time.Second
+	// gatewayRequestReserve mirrors oai's request share per body byte
+	// (design/02 §4.2.1: body, RawMessage copy, upstream body).
+	gatewayRequestReserve = 3
+	// gatewayResponseCopies is the response share per capped unit (design/02
+	// §4.2.1): raw upstream body plus rewritten copy (non-stream), one frame
+	// raw plus rewritten (stream).
+	gatewayResponseCopies = 2
+	// gatewayFloatBytes and gatewayEmbedEncoderReserve size the embeddings
+	// response share (design/02 §4.2.1): vectors held as float32, plus the
+	// 64 KiB buffer of the streamed encoder.
+	gatewayFloatBytes          = 4
+	gatewayEmbedEncoderReserve = 64 << 10
+)
+
+// validateGateway is V38 and V39 (wave W02-02, design/02 §3.3). The keys come
+// with their checks although their consumers arrive in later waves — the
+// precedent of validateDistill: a check added after a key is configurable
+// would be added against values already in use. Negative values stay with
+// the generic walks (V17 durations, V35 ints); these checks own the values
+// that parse, are not negative, and still cannot mean what they say:
+//
+// V38 — floors. 0 for any byte size, token count or duration of the group is
+// refused: a 0 budget or cap refuses every request, a 0 timeout or window
+// ends every request at once, a 0 keepalive spins. The one legal 0 is
+// gateway.tenant_alias_ceiling.tools_max_count (tenant aliases without
+// tools).
+//
+// V39 — caps and the one relation:
+//   - gateway.max_response_bytes <= httpx.MaxResponseBytes: the transport cap
+//     it narrows; above it the setting would claim a read the transport never
+//     delivers.
+//   - gateway.max_stream_frame_bytes <= 4 MiB: the stream reader's frame cap.
+//   - gateway.request_deadline < 600 s: the SDKs' default timeout.
+//   - gateway.stream_commit_grace <= 50 s: under a typical proxy idle.
+//   - gateway.inflight_budget >= one request at every cap: 3 ×
+//     gateway.max_request_bytes (request share) plus the largest response
+//     share — 2 × gateway.max_response_bytes, 2 ×
+//     gateway.max_stream_frame_bytes, or 4 B × gateway.embedding_max_floats
+//     plus 64 KiB (design/02 §4.2.1). A smaller budget could never serve such a
+//     request, and the client would read "overloaded, retry in 1 s" forever.
+//   - gateway.retry_after_jitter in [0, 1] (float keys have no generic sign
+//     walk; NaN fails every comparison and is refused explicitly).
+func validateGateway(c *Config) []Issue {
+	var issues []Issue
+	g := &c.Gateway
+	bad := func(field, msg string) {
+		issues = append(issues, Issue{Field: field, Severity: SeverityError, Msg: msg})
+	}
+	for _, f := range []struct {
+		key string
+		v   int
+	}{
+		{"gateway.max_request_bytes", g.MaxRequestBytes},
+		{"gateway.inflight_budget", g.InflightBudget},
+		{"gateway.max_response_bytes", g.MaxResponseBytes},
+		{"gateway.max_stream_frame_bytes", g.MaxStreamFrameBytes},
+		{"gateway.embedding_max_floats", g.EmbeddingMaxFloats},
+		{"gateway.default_max_tokens", g.DefaultMaxTokens},
+		{"gateway.max_output_tokens_ceiling", g.MaxOutputTokensCeiling},
+		{"gateway.tenant_alias_ceiling.max_output_tokens", g.TenantAliasCeiling.MaxOutputTokens},
+		{"gateway.tenant_alias_ceiling.max_n", g.TenantAliasCeiling.MaxN},
+		{"gateway.tenant_alias_ceiling.embedding_max_inputs", g.TenantAliasCeiling.EmbeddingMaxInputs},
+		{"gateway.tenant_alias_ceiling.rerank_max_documents", g.TenantAliasCeiling.RerankMaxDocuments},
+	} {
+		if f.v == 0 {
+			bad(f.key, f.key+" must be >= 1 — 0 would refuse or truncate every gateway request")
+		}
+	}
+	for _, f := range []struct {
+		key string
+		v   time.Duration
+	}{
+		{"gateway.stream_commit_grace", g.StreamCommitGrace},
+		{"gateway.keepalive_interval", g.KeepaliveInterval},
+		{"gateway.client_write_window", g.ClientWriteWindow},
+		{"gateway.request_timeout", g.RequestTimeout},
+		{"gateway.request_deadline", g.RequestDeadline},
+		{"gateway.tenant_alias_ceiling.timeout", g.TenantAliasCeiling.Timeout},
+	} {
+		if f.v == 0 {
+			bad(f.key, f.key+" must be >= 1 second — 0 would end every gateway request (or spin the keepalive) at once")
+		}
+	}
+
+	if int64(g.MaxResponseBytes) > httpx.MaxResponseBytes {
+		bad("gateway.max_response_bytes", fmt.Sprintf("gateway.max_response_bytes (%d) must not exceed the transport cap httpx.MaxResponseBytes (%d)", g.MaxResponseBytes, httpx.MaxResponseBytes))
+	}
+	if g.MaxStreamFrameBytes > gatewayFrameCeiling {
+		bad("gateway.max_stream_frame_bytes", fmt.Sprintf("gateway.max_stream_frame_bytes (%d) must not exceed the stream reader's frame cap (%d)", g.MaxStreamFrameBytes, gatewayFrameCeiling))
+	}
+	if g.RequestDeadline >= gatewaySDKTimeout {
+		bad("gateway.request_deadline", fmt.Sprintf("gateway.request_deadline (%v) must stay below the OpenAI SDKs' default timeout (%v) — the SDK would resend a request still running", g.RequestDeadline, gatewaySDKTimeout))
+	}
+	if g.StreamCommitGrace > gatewayCommitGraceCeiling {
+		bad("gateway.stream_commit_grace", fmt.Sprintf("gateway.stream_commit_grace (%v) must be <= %v — a later commit runs into a typical 60 s proxy idle timeout", g.StreamCommitGrace, gatewayCommitGraceCeiling))
+	}
+	if need, ok := gatewayBudgetFloor(g); ok && g.InflightBudget > 0 {
+		switch {
+		case need < 0:
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + the largest response share) exceed any representable budget", g.InflightBudget, gatewayRequestReserve))
+		case int64(g.InflightBudget) < need:
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap (%d = %d × gateway.max_request_bytes + the largest response share) — such a request could never be served", g.InflightBudget, need, gatewayRequestReserve))
+		}
+	}
+	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {
+		bad("gateway.retry_after_jitter", fmt.Sprintf("gateway.retry_after_jitter (%v) must be in [0, 1]", j))
+	}
+	return issues
+}
+
+// gatewayBudgetFloor is the in-flight reservation of one request at every
+// gateway cap (V39). ok is false while a size is not positive — V35/V38
+// report those, and a floor over them would only add a second error. The
+// arithmetic saturates (Fremd-Review 2, FR2-3): a floor beyond int64 is
+// reported as -1 — "no budget can hold it" — instead of wrapping around into
+// a negative value every budget clears.
+func gatewayBudgetFloor(g *GatewayConfig) (int64, bool) {
+	if g.MaxRequestBytes <= 0 || g.MaxResponseBytes <= 0 || g.MaxStreamFrameBytes <= 0 || g.EmbeddingMaxFloats <= 0 {
+		return 0, false
+	}
+	response := max(
+		gatewayMulSat(gatewayResponseCopies, int64(g.MaxResponseBytes)),
+		gatewayMulSat(gatewayResponseCopies, int64(g.MaxStreamFrameBytes)),
+		gatewayAddSat(gatewayMulSat(gatewayFloatBytes, int64(g.EmbeddingMaxFloats)), gatewayEmbedEncoderReserve),
+	)
+	floor := gatewayAddSat(gatewayMulSat(gatewayRequestReserve, int64(g.MaxRequestBytes)), response)
+	if floor == math.MaxInt64 {
+		return -1, true
+	}
+	return floor, true
+}
+
+// gatewayMulSat and gatewayAddSat are a·b and a+b for non-negative operands,
+// saturating at math.MaxInt64.
+func gatewayMulSat(a, b int64) int64 {
+	if a != 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
+}
+
+func gatewayAddSat(a, b int64) int64 {
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
 }

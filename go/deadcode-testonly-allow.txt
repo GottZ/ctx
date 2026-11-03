@@ -34,6 +34,7 @@
 #
 # Eine spätere Welle, die eines dieser Symbole schneidet, nimmt seine Zeile hier
 # im selben Commit mit.
+cmd/ctxd/gateway.go	gatewaySettingsGetter	# wartet: W01-6 (mountModelGroup) — Getter des Gateways, montiert erst mit der /v1-Gruppe; heute nur gateway_test.go
 cmd/ctxd/overviewworker_priority_linux.go	ioprioGet	# Prod setzt nur (IOPRIO_SET); die Rücklese-Hälfte der Prioritätsprobe, priority_linux_test.go:164/167
 internal/armsweep/report.go	ReadReportBody	# Schreib-Hälfte WriteReport ist prod; den Leser braucht nur das Determinismus-Gate, 7x in 4 *_test.go
 internal/config/envonly.go	EnvOnlyServerNames	# Zubringer des Env-only-Gates envonly_test.go:94/170/192; die Map ist Daten, Prod liest sie nie
@@ -143,6 +144,30 @@ internal/modelkey/modelkey.go	checksum	# Helfer von generate und Parse: wartet a
 internal/modelkey/modelkey.go	generate	# wartet: W01-5 — einziger Prod-Aufrufer Generate; der io.Reader-Parameter ist der Test-Saum des Rejection-Sampling-Gates
 internal/modelkey/modelkey.go	isBase62	# Helfer von Parse: wartet: W02-05
 internal/modelkey/modelkey.go	newKey	# Helfer von generate und Parse: wartet auf W01-5 oder W02-05, wer zuerst
+internal/oai/budget.go	Budget.InUse	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/budget.go	Budget.NewReservation	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/budget.go	Budget.tryAdd	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/budget.go	InflightBudget	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/budget.go	Reservation.Grow	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/budget.go	Reservation.Release	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/budget.go	ReservationFrom	# wartet: W01-6/W02-05 — Antwort-Reserve der Handler (W02-07ff.) (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/budget.go	budgetedBody.Read	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5, chunked (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/errors.go	Codes	# wartet: W02-11 — Totalitäts-Referenz für backends.Classify (Kopie des Code-Vokabulars, FR2-7); heute nur internal/oai-Tests
+internal/oai/errors.go	MethodNotAllowed	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/errors.go	NotFound	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/errors.go	Write	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/errors.go	WriteInternal	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/errors.go	WriteInvalidAPIKey	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer, 401 der ModelAuth-Tür (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/errors.go	WriteOverloaded	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/errors.go	WriteRequestTooLarge	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer, 413 der Stufe 3 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/errors.go	nullable	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/gates.go	EnabledGate	# wartet: W01-6/W02-05 — Stufe 1 vor Auth (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/gates.go	Recover	# wartet: W01-6/W02-05 — /v1-Recovery R-02-14 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/gates.go	abortCommitted	# wartet: W01-6/W02-05 — /v1-Recovery R-02-14, Abbruch nach Commit (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/gates.go	commitWatch.Flush	# wartet: W01-6/W02-05 — /v1-Recovery R-02-14 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/gates.go	commitWatch.Unwrap	# wartet: W01-6/W02-05 — /v1-Recovery R-02-14 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/gates.go	commitWatch.Write	# wartet: W01-6/W02-05 — /v1-Recovery R-02-14 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
+internal/oai/gates.go	commitWatch.WriteHeader	# wartet: W01-6/W02-05 — /v1-Recovery R-02-14 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/promptguard/promptguard.go	Canonicalize	# Nonce zu Null-Nonce für den Fixture-Determinismus der Prompt-Golden; 26 Aufrufe in 8 _test.go
 internal/prompts/prompts.go	All	# Nur prompts_test.go:52/85/125: Registry-Vollständigkeit und Sortierung; Prod stempelt über Register
 internal/prompts/prompts.go	Lookup	# Nur prompts_test.go:103 und completeness_test.go:534/611: ID-zu-Identity-Probe der Registry-Gates

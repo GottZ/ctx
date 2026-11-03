@@ -394,7 +394,7 @@ func TestV17bIsAdvisoryOnly(t *testing.T) {
 // changes TYPE (seconds → int, or a struct field that stops being a
 // time.Duration) would leave the walk without anyone noticing. Raise this
 // number in the same commit that adds a duration key.
-const wantDurationKeys = 49 // +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered; +1 on 2026-11-03 (W06-8): status.foreign_load_timeout, V17 sign + V37 floor; +1 on 2026-11-03 (W06-8b): status.foreign_load_interval, V17 sign + V37 floor
+const wantDurationKeys = 55 // +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered; +1 on 2026-11-03 (W06-8): status.foreign_load_timeout, V17 sign + V37 floor; +1 on 2026-11-03 (W06-8b): status.foreign_load_interval, V17 sign + V37 floor; +6 on 2026-11-03 (W02-02): gateway.{stream_commit_grace,keepalive_interval,client_write_window,request_timeout,request_deadline,tenant_alias_ceiling.timeout}, V17 sign + V38 floor (+ V39 caps for stream_commit_grace and request_deadline)
 
 // TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
 // V17 (issue #29): before it, exactly two of the seconds keys had a sign check
@@ -470,7 +470,7 @@ func TestValidateFoldedSignChecksReportOnce(t *testing.T) {
 // that silently changes TYPE (int → float, or a leaf that stops being an int)
 // would leave the walk without anyone noticing. Raise this number in the same
 // commit that adds an int key.
-const wantIntKeys = 92 // +2 on 2026-11-03 (W06-8): status.foreign_load_hysteresis_ticks and status.foreign_load_hourly_min_abs, V35 sign (+ V37 floor for the ticks); +1 on 2026-11-03 (W06-7): audit.max_limit, V35 sign
+const wantIntKeys = 104 // +2 on 2026-11-03 (W06-8): status.foreign_load_hysteresis_ticks and status.foreign_load_hourly_min_abs, V35 sign (+ V37 floor for the ticks); +1 on 2026-11-03 (W06-7): audit.max_limit, V35 sign; +12 on 2026-11-03 (W02-02): gateway.{max_request_bytes,inflight_budget,max_response_bytes,max_stream_frame_bytes,embedding_max_floats,default_max_tokens,max_output_tokens_ceiling} and gateway.tenant_alias_ceiling.{max_output_tokens,max_n,embedding_max_inputs,rerank_max_documents,tools_max_count}, V35 sign (+ V38 floor for all but tools_max_count, V39 caps for the byte sizes)
 
 // intSignWarnKeys is the OTHER half of the classification, and the reason V35
 // runs last. These three keys are served by NORMALIZING passes that write the
