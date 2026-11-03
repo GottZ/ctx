@@ -53,9 +53,19 @@ func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 	if st == nil {
 		return 0
 	}
-	depth := st.interactive.total
-	if class == ClassBackground {
+	var depth int
+	switch class {
+	case ClassInteractive:
+		depth = st.interactive.total
+	case ClassBackground:
 		depth = st.background.len()
+	default:
+		// Fail-closed (A03-W1): no estimate for a class without a case here
+		// — 0 omits the header (pre-A03-W1: interactive depth × the
+		// background window, K14).
+		d.logger.Error("dispatch: class without a retry-after case — no estimate (fail-closed default)",
+			"target", norm, "class", uint8(class))
+		return 0
 	}
 	var ws WaitStats
 	st.waits[classIdx(class)].statsInto(&ws)

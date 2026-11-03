@@ -97,9 +97,9 @@ type targetState struct {
 	// preempt is the MW18 preempt-path bookkeeping (victims in eviction +
 	// telemetry counters, design/02 §3.3) — see preempt.go.
 	preempt preemptState
-	// waits are the per-class rolling wait-sample windows (MW7/D3-W3,
-	// indexed by classIdx) — see metrics.go.
-	waits [2]waitRing
+	// waits are the per-class rolling wait-sample windows (MW7/D3-W3), one
+	// per class below numClasses, indexed by classIdx — see metrics.go.
+	waits [numClasses]waitRing
 }
 
 // Dispatcher is the process-wide admission layer (I-D1: exactly one). Policy
@@ -125,6 +125,9 @@ type Dispatcher struct {
 
 	reapsTotal      atomic.Int64
 	classDowngrades atomic.Int64
+	// invalidClass counts refusals with ErrInvalidClass (A03-W1) — every
+	// one is a code bug, like a class downgrade.
+	invalidClass atomic.Int64
 	// stats are the MW22 meter counters: uncharged_calls + the hot-path
 	// measurement hooks (usage.go).
 	stats usageStats
@@ -202,10 +205,15 @@ func (d *Dispatcher) InteractiveDemand() int {
 // background leases the dispatcher holds its cancel (preempt/reap), for
 // interactive it never cancels (I-D1). Acquire errors are NOT attempts: no
 // Classify, no health report, no llmlog line, terminal for the chain walk
-// (design/01 §4.3).
+// (design/01 §4.3). Check order at the door: ctx.Err(), then the class
+// (ErrInvalidClass for a value outside the class table — never queued, never
+// downgraded, A03-W1), then the B8 class authorization.
 func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.Context, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err // canceled ctx never takes a wait slot
+	}
+	if !req.Class.valid() {
+		return nil, nil, d.refuseInvalidClass("acquire", req.Class, req.Target.Origin, req.Role)
 	}
 	principal := principalFromContext(ctx)
 	class := req.Class
@@ -295,14 +303,22 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 // bucket; bucket order is policy). background: slot free AND both wait
 // queues empty AND demand == 0 — the herald term keeps background out of the
 // inter-lease gaps of running interactive requests (R3, not softenable).
+// A class outside the class table is never eligible (fail-closed default,
+// A03-W1; pre-A03-W1 it got the background predicate, K6).
 func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, slots int) bool {
 	if st.held >= slots {
 		return false
 	}
-	if class == ClassInteractive {
+	switch class {
+	case ClassInteractive:
 		return st.interactive.total == 0
+	case ClassBackground:
+		return st.interactive.total == 0 && st.background.len() == 0 && d.demand.Load() == 0
+	default:
+		d.logger.Error("dispatch: class without an eligibility case — not eligible (fail-closed default)",
+			"target", st.origin, "class", uint8(class))
+		return false
 	}
-	return st.interactive.total == 0 && st.background.len() == 0 && d.demand.Load() == 0
 }
 
 // enqueueLocked places w in its class queue or rejects it fast. Check order
@@ -310,7 +326,10 @@ func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, slots int) 
 // offender first, D3-U4/E-U6).
 func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 	set := d.currentSettings()
-	if w.class == ClassBackground {
+	switch w.class {
+	case ClassInteractive:
+		// The Deckel-Staffel below.
+	case ClassBackground:
 		if set.BackgroundQueueMax > 0 && st.background.len() >= set.BackgroundQueueMax {
 			return ErrQueueFull
 		}
@@ -318,6 +337,12 @@ func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 		w.seq = st.seq
 		st.background.push(w)
 		return nil
+	default:
+		// Fail-closed (A03-W1): behind the door check only a table class
+		// without a case here lands in this branch — it never enters a queue
+		// (pre-A03-W1 any third value fell into the interactive queue and its
+		// Deckel-Staffel, K7).
+		return d.refuseInvalidClass("enqueue", w.class, st.origin, w.role)
 	}
 	q := st.interactive
 	if set.InteractiveQueuePerPrincipal > 0 && q.byKey[w.principal.ApiKeyID] >= set.InteractiveQueuePerPrincipal {
@@ -372,7 +397,14 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 		}
 	}
 	wait := now.Sub(w.enqueued)
-	st.waits[classIdx(l.class)].add(wait) // MW7/D3-W3 wait sample, O(1)
+	if i := classIdx(l.class); i >= 0 {
+		st.waits[i].add(wait) // MW7/D3-W3 wait sample, O(1)
+	} else {
+		// Fail-closed (A03-W1), unreachable behind the door check: no
+		// class's window absorbs a sample of a class outside the table.
+		d.logger.Error("dispatch: class outside the class table — wait sample dropped (fail-closed default)",
+			"target", st.origin, "class", uint8(l.class))
+	}
 	if l.class == ClassInteractive && wait > d.warnAfter {
 		d.warnWaitLocked(st, wait)
 	}
@@ -458,11 +490,35 @@ func (d *Dispatcher) wakeAll() {
 // dropWaiterLocked removes a canceled waiter from its queue (wait slot
 // vacated, counters corrected — no leak, W1 negative probe).
 func (d *Dispatcher) dropWaiterLocked(st *targetState, w *waiter) {
-	if w.class == ClassInteractive {
+	switch w.class {
+	case ClassInteractive:
 		st.interactive.remove(w)
-		return
+	case ClassBackground:
+		st.background.remove(w)
+	default:
+		// Fail-closed (A03-W1), unreachable: a class without a case here
+		// never entered a queue (door check + enqueueLocked default), so
+		// there is nothing to remove (pre-A03-W1 the cancel removed from the
+		// WRONG queue and left a dead interactive waiter for the next release
+		// to hand a slot to, K12).
+		d.logger.Error("dispatch: class without a drop case — waiter drop ignored (fail-closed default)",
+			"target", st.origin, "class", uint8(w.class))
 	}
-	st.background.remove(w)
+}
+
+// refuseInvalidClass is the class check of both admission doors and the
+// enqueue default (A03-W1, design/03 §4.1 C7). At a door (site acquire /
+// try-acquire) the class is outside the class table; at site enqueue —
+// unreachable for such a value behind the doors — it is a table class
+// without an enqueue case (TestEveryClassHasEveryBranch is red). Either way a
+// code bug: refused before any waiter or lease exists, counted
+// (Snapshot.InvalidClass) and logged at ERROR so it cannot drown in slog
+// noise. Never a downgrade: an unhandled value has no nearest class.
+func (d *Dispatcher) refuseInvalidClass(site string, class Class, origin, role string) error {
+	d.invalidClass.Add(1)
+	d.logger.Error("dispatch: acquire with an invalid class refused",
+		"site", site, "class", uint8(class), "target", origin, "role", role)
+	return ErrInvalidClass
 }
 
 // targetLocked returns (or creates) the state of one normalized origin.
@@ -648,6 +704,10 @@ type Snapshot struct {
 	Demand          int
 	ReapsTotal      int64
 	ClassDowngrades int64
+	// InvalidClass counts acquires refused with ErrInvalidClass (a class
+	// outside the class table, A03-W1). Dispatcher-internal for now: the
+	// status surface gains it with the class-generic status fields (A03-W3).
+	InvalidClass int64
 	// UnchargedCalls counts interactive releases without reported usage
 	// (charge 0 — visibility instead of estimation, MW22/C1).
 	UnchargedCalls int64
@@ -670,6 +730,7 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		Demand:          int(d.demand.Load()),
 		ReapsTotal:      d.reapsTotal.Load(),
 		ClassDowngrades: d.classDowngrades.Load(),
+		InvalidClass:    d.invalidClass.Load(),
 		UnchargedCalls:  d.stats.unchargedCalls.Load(),
 		OpsTotal:        d.stats.opsTotal.Load(),
 		MaxOpDur:        time.Duration(d.stats.maxOpNs.Load()),

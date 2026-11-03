@@ -7,8 +7,8 @@ package dispatch
 // estimator is pinned: a ring buffer over the last waitRingK admitted wait
 // samples per target × class — O(1) insert in the hot path (one array store
 // under the mutex admitLocked already holds), all quantile work deferred to
-// the snapshot pull. int64 nanoseconds ⇒ 4 KiB per class, 8 KiB per
-// targetState: memory is irrelevant even across many targets.
+// the snapshot pull. int64 nanoseconds ⇒ 4 KiB per class, numClasses × 4 KiB
+// per targetState: memory is irrelevant even across many targets.
 
 import (
 	"slices"
@@ -62,12 +62,14 @@ func (r *waitRing) statsInto(ws *WaitStats) {
 	ws.P95Wait = time.Duration(buf[(r.count*95+99)/100-1])
 }
 
-// classIdx maps a class onto its ring slot. Everything that is not
-// interactive counts as background — the same defensive reading the queue
-// side uses (an out-of-range Class value must never panic the meter).
+// classIdx maps a class onto its ring slot in targetState.waits (one window
+// per class below numClasses). A value outside the class table maps to -1:
+// the caller skips the sample or the estimate (fail-closed, never a panic of
+// the meter) — it is never folded into another class's window, as the
+// pre-A03-W1 fold did onto background's ring (K9).
 func classIdx(c Class) int {
-	if c == ClassInteractive {
-		return 0
+	if !c.valid() {
+		return -1
 	}
-	return 1
+	return int(c)
 }
