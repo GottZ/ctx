@@ -184,9 +184,16 @@ func insertRows(ctx context.Context, tx pgx.Tx, rows []logRow) error {
 // edgeRows counts the rows of keys inside a window's raw edge.
 func edgeRows(sc scenario, keys []string, span time.Duration) int {
 	since, edgeEnd := llmusage.Bounds(sc.now, span)
+	member := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		member[k] = struct{}{}
+	}
 	n := 0
 	for _, r := range sc.rows {
-		if r.key == nil || !strings.Contains(strings.Join(keys, ","), *r.key) {
+		if r.key == nil {
+			continue
+		}
+		if _, ok := member[*r.key]; !ok {
 			continue
 		}
 		if r.at.After(since) && r.at.Before(edgeEnd) {

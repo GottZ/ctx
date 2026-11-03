@@ -21,9 +21,9 @@
 //
 // The package is a leaf: it imports the pgxdb handle atoms and nothing of
 // ctx's domain (no config, no handler, no store), so every reader — the
-// tenant quota accountant today, the status rollups and the usage API later —
-// can share it without an import cycle. The rule is a depguard gate
-// (.golangci.yml, llmusage-leaf).
+// tenant quota accountant (Window), the status rollups (Groups, TenantGroups)
+// and the usage API later — can share it without an import cycle. The rule
+// is a depguard gate (.golangci.yml, llmusage-leaf).
 package llmusage
 
 import (

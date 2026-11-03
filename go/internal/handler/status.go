@@ -19,6 +19,7 @@ import (
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/llmusage"
 	"github.com/GottZ/ctx/internal/recall"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/GottZ/ctx/internal/store"
@@ -716,6 +717,10 @@ type StatusCollector struct {
 	tenantRollup        atomic.Pointer[map[string][]llm24hRow]
 	tenantRollupAt      atomic.Int64 // unix nano of last per-tenant rollup refresh
 	tenantRollupRefresh atomic.Bool  // CAS single-flight guard
+
+	// llm24hNow anchors the llm_24h window of both views (llm24hAnchor); nil
+	// is the wall clock. Tests pin it to lay rows on the window's boundaries.
+	llm24hNow func() time.Time
 
 	// guard_review generation (RC-1 wave S1, status_guard.go): ONE ROLLUP
 	// aggregate per events.tick_interval carries the global row AND every
@@ -1553,54 +1558,63 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 	}
 }
 
-// queryLLM24h aggregates the last 24h of telemetry by (backend, pipeline). The
-// backend key is backend_name with a host fallback; complete reports whether
-// every row in the window is attributed — it carried a backend_name OR it is an
-// error row. A failed call (error IS NOT NULL) may legitimately have no
-// backend_name (it failed before a backend was selected); that is a known failure
-// surfaced by the errors count, NOT a telemetry gap, so it must not flip the flag.
-// Only a SUCCESSFUL un-attributed row flips complete false → the UI shows the
+// llm24hSpan is the window of the llm_24h rows: the 24 hours the wire field is
+// named after, a fixed part of the contract, not a setting.
+const llm24hSpan = 24 * time.Hour
+
+// llm24hAnchor is where the llm_24h window ends (server and tenant view):
+// llm24hNow when a test pinned it, the wall clock otherwise.
+func (c *StatusCollector) llm24hAnchor() time.Time {
+	if c.llm24hNow != nil {
+		return c.llm24hNow()
+	}
+	return time.Now()
+}
+
+// queryLLM24h aggregates the last 24h of telemetry by (backend, pipeline),
+// ordered by calls (ties by backend, then pipeline). The backend key is
+// backend_name with a host fallback; complete reports whether every row in the
+// window is attributed — it carried a backend_name OR it is an error row. A
+// failed call (error IS NOT NULL) may legitimately have no backend_name (it
+// failed before a backend was selected); that is a known failure surfaced by
+// the errors count, NOT a telemetry gap, so it must not flip the flag. Only a
+// SUCCESSFUL un-attributed row flips complete false → the UI shows the
 // "telemetry incomplete" disclaimer. NO body columns.
+//
+// The figures come from the hourly rollup plus the window's raw edge hour
+// (llmusage.Groups, W06-5), equal to the raw-row aggregate they replace for
+// every backend and pipeline name up to 100 characters (the rollup's width;
+// longer names show cut); the rollup counts the successful un-attributed rows
+// as unattributed_ok.
 func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
-	rows, err := c.pool.Query(ctx, `
-		SELECT COALESCE(backend_name, host) AS backend, pipeline,
-		       count(*)::int AS calls,
-		       COALESCE(avg(duration_ms), 0)::int AS avg_ms,
-		       (count(*) FILTER (WHERE error IS NOT NULL))::int AS errors,
-		       COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens,
-		       COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens,
-		       COALESCE(sum(cost_usd), 0)::float8 AS cost_usd,
-		       bool_and(backend_name IS NOT NULL OR error IS NOT NULL) AS attributed
-		FROM context_llm_log
-		WHERE created_at > now() - interval '24 hours'
-		GROUP BY 1, 2
-		ORDER BY calls DESC`)
+	groups, err := llmusage.Groups(ctx, c.pool, c.llm24hAnchor(), llm24hSpan)
 	if err != nil {
 		c.noteDBFail("status: llm_24h query failed", err)
 		return nil, false
 	}
-	defer rows.Close()
-
-	out := []llm24hRow{}
+	out := make([]llm24hRow, 0, len(groups))
 	complete := true
-	for rows.Next() {
-		var r llm24hRow
-		var attributed bool
-		if err := rows.Scan(&r.Backend, &r.Pipeline, &r.Calls, &r.AvgMs, &r.Errors,
-			&r.PromptTokens, &r.CompletionTokens, &r.CostUSD, &attributed); err != nil {
-			c.noteDBFail("status: llm_24h scan failed", err)
-			return out, false
-		}
-		if !attributed {
+	for _, g := range groups {
+		if g.UnattributedOK > 0 {
 			complete = false
 		}
-		out = append(out, r)
-	}
-	if rows.Err() != nil {
-		c.noteDBFail("status: llm_24h rows error", rows.Err())
-		return out, false
+		out = append(out, llm24hRowOf(g))
 	}
 	return out, complete
+}
+
+// llm24hRowOf is the status row of one usage group.
+func llm24hRowOf(g llmusage.Group) llm24hRow {
+	return llm24hRow{
+		Backend:          g.Backend,
+		Pipeline:         g.Pipeline,
+		Calls:            int(g.Calls),
+		AvgMs:            int(g.AvgMs),
+		Errors:           int(g.Errors),
+		PromptTokens:     g.PromptTokens,
+		CompletionTokens: g.CompletionTokens,
+		CostUSD:          g.Cost,
+	}
 }
 
 // queryLastCycleAt returns the timestamp of the last dream-cycle LLM call

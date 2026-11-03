@@ -1,0 +1,674 @@
+[
+  {
+    "anchor": "2026-11-03T10:20:30.123456Z",
+    "server": [
+      {
+        "backend": "spark-chat",
+        "pipeline": "dream-eval",
+        "calls": 10,
+        "avg_ms": 250,
+        "errors": 2,
+        "prompt_tokens": 6010,
+        "completion_tokens": 44,
+        "cost_usd": 0
+      },
+      {
+        "backend": "ext-openai",
+        "pipeline": "query-synthesize",
+        "calls": 6,
+        "avg_ms": 1666,
+        "errors": 2,
+        "prompt_tokens": 22,
+        "completion_tokens": 44,
+        "cost_usd": 0.74074068
+      },
+      {
+        "backend": "spark-chat",
+        "pipeline": "query-synthesize",
+        "calls": 6,
+        "avg_ms": 2,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0.6
+      },
+      {
+        "backend": "spark-chat",
+        "pipeline": "web-chat",
+        "calls": 6,
+        "avg_ms": 3,
+        "errors": 2,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "",
+        "pipeline": "embed-backfill",
+        "calls": 4,
+        "avg_ms": 8,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "herbert",
+        "pipeline": "rerank",
+        "calls": 4,
+        "avg_ms": 6,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "spark-embed-host",
+        "pipeline": "query-embed",
+        "calls": 4,
+        "avg_ms": 9,
+        "errors": 4,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "spark-embed",
+        "pipeline": "dream-keyword-embed",
+        "calls": 2,
+        "avg_ms": 0,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      }
+    ],
+    "complete": false,
+    "tenant": {
+      "w065-a": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "dream-eval",
+          "calls": 4,
+          "avg_ms": 200,
+          "errors": 2,
+          "prompt_tokens": 4000,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 4,
+          "avg_ms": 1,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.2
+        },
+        {
+          "backend": "ext-openai",
+          "pipeline": "query-synthesize",
+          "calls": 2,
+          "avg_ms": 999,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.24691356
+        },
+        {
+          "backend": "herbert",
+          "pipeline": "rerank",
+          "calls": 2,
+          "avg_ms": 5,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-embed-host",
+          "pipeline": "query-embed",
+          "calls": 2,
+          "avg_ms": 9,
+          "errors": 2,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        }
+      ],
+      "w065-a2": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "dream-eval",
+          "calls": 4,
+          "avg_ms": 200,
+          "errors": 2,
+          "prompt_tokens": 4000,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 4,
+          "avg_ms": 1,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.2
+        },
+        {
+          "backend": "ext-openai",
+          "pipeline": "query-synthesize",
+          "calls": 2,
+          "avg_ms": 999,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.24691356
+        },
+        {
+          "backend": "herbert",
+          "pipeline": "rerank",
+          "calls": 2,
+          "avg_ms": 5,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-embed-host",
+          "pipeline": "query-embed",
+          "calls": 2,
+          "avg_ms": 9,
+          "errors": 2,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        }
+      ],
+      "w065-b": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "web-chat",
+          "calls": 6,
+          "avg_ms": 3,
+          "errors": 2,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "",
+          "pipeline": "embed-backfill",
+          "calls": 2,
+          "avg_ms": 8,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 2,
+          "avg_ms": 2,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.4
+        }
+      ]
+    }
+  },
+  {
+    "anchor": "2026-11-03T10:00:00Z",
+    "server": [
+      {
+        "backend": "spark-chat",
+        "pipeline": "dream-eval",
+        "calls": 10,
+        "avg_ms": 250,
+        "errors": 2,
+        "prompt_tokens": 6010,
+        "completion_tokens": 44,
+        "cost_usd": 0
+      },
+      {
+        "backend": "ext-openai",
+        "pipeline": "query-synthesize",
+        "calls": 6,
+        "avg_ms": 1666,
+        "errors": 2,
+        "prompt_tokens": 22,
+        "completion_tokens": 44,
+        "cost_usd": 0.74074068
+      },
+      {
+        "backend": "spark-chat",
+        "pipeline": "query-synthesize",
+        "calls": 6,
+        "avg_ms": 2,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0.6
+      },
+      {
+        "backend": "spark-chat",
+        "pipeline": "web-chat",
+        "calls": 6,
+        "avg_ms": 3,
+        "errors": 2,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "",
+        "pipeline": "embed-backfill",
+        "calls": 4,
+        "avg_ms": 8,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "herbert",
+        "pipeline": "rerank",
+        "calls": 4,
+        "avg_ms": 6,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "spark-embed-host",
+        "pipeline": "query-embed",
+        "calls": 4,
+        "avg_ms": 9,
+        "errors": 4,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "spark-embed",
+        "pipeline": "dream-keyword-embed",
+        "calls": 2,
+        "avg_ms": 0,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      }
+    ],
+    "complete": false,
+    "tenant": {
+      "w065-a": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "dream-eval",
+          "calls": 4,
+          "avg_ms": 200,
+          "errors": 2,
+          "prompt_tokens": 4000,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 4,
+          "avg_ms": 1,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.2
+        },
+        {
+          "backend": "ext-openai",
+          "pipeline": "query-synthesize",
+          "calls": 2,
+          "avg_ms": 999,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.24691356
+        },
+        {
+          "backend": "herbert",
+          "pipeline": "rerank",
+          "calls": 2,
+          "avg_ms": 5,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-embed-host",
+          "pipeline": "query-embed",
+          "calls": 2,
+          "avg_ms": 9,
+          "errors": 2,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        }
+      ],
+      "w065-a2": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "dream-eval",
+          "calls": 4,
+          "avg_ms": 200,
+          "errors": 2,
+          "prompt_tokens": 4000,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 4,
+          "avg_ms": 1,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.2
+        },
+        {
+          "backend": "ext-openai",
+          "pipeline": "query-synthesize",
+          "calls": 2,
+          "avg_ms": 999,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.24691356
+        },
+        {
+          "backend": "herbert",
+          "pipeline": "rerank",
+          "calls": 2,
+          "avg_ms": 5,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-embed-host",
+          "pipeline": "query-embed",
+          "calls": 2,
+          "avg_ms": 9,
+          "errors": 2,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        }
+      ],
+      "w065-b": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "web-chat",
+          "calls": 6,
+          "avg_ms": 3,
+          "errors": 2,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "",
+          "pipeline": "embed-backfill",
+          "calls": 2,
+          "avg_ms": 8,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 2,
+          "avg_ms": 2,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.4
+        }
+      ]
+    }
+  },
+  {
+    "anchor": "2026-11-03T10:59:59.999999Z",
+    "server": [
+      {
+        "backend": "spark-chat",
+        "pipeline": "dream-eval",
+        "calls": 8,
+        "avg_ms": 257,
+        "errors": 1,
+        "prompt_tokens": 4010,
+        "completion_tokens": 44,
+        "cost_usd": 0
+      },
+      {
+        "backend": "ext-openai",
+        "pipeline": "query-synthesize",
+        "calls": 6,
+        "avg_ms": 1666,
+        "errors": 2,
+        "prompt_tokens": 22,
+        "completion_tokens": 44,
+        "cost_usd": 0.74074068
+      },
+      {
+        "backend": "spark-chat",
+        "pipeline": "query-synthesize",
+        "calls": 4,
+        "avg_ms": 1,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0.4
+      },
+      {
+        "backend": "spark-chat",
+        "pipeline": "web-chat",
+        "calls": 4,
+        "avg_ms": 3,
+        "errors": 1,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "",
+        "pipeline": "embed-backfill",
+        "calls": 3,
+        "avg_ms": 8,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "spark-embed-host",
+        "pipeline": "query-embed",
+        "calls": 3,
+        "avg_ms": 9,
+        "errors": 3,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "herbert",
+        "pipeline": "rerank",
+        "calls": 2,
+        "avg_ms": 6,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      },
+      {
+        "backend": "spark-embed",
+        "pipeline": "dream-keyword-embed",
+        "calls": 2,
+        "avg_ms": 0,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0
+      }
+    ],
+    "complete": false,
+    "tenant": {
+      "w065-a": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 3,
+          "avg_ms": 1,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.2
+        },
+        {
+          "backend": "ext-openai",
+          "pipeline": "query-synthesize",
+          "calls": 2,
+          "avg_ms": 999,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.24691356
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "dream-eval",
+          "calls": 2,
+          "avg_ms": 200,
+          "errors": 1,
+          "prompt_tokens": 2000,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "herbert",
+          "pipeline": "rerank",
+          "calls": 1,
+          "avg_ms": 5,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-embed-host",
+          "pipeline": "query-embed",
+          "calls": 1,
+          "avg_ms": 9,
+          "errors": 1,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        }
+      ],
+      "w065-a2": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 3,
+          "avg_ms": 1,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.2
+        },
+        {
+          "backend": "ext-openai",
+          "pipeline": "query-synthesize",
+          "calls": 2,
+          "avg_ms": 999,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.24691356
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "dream-eval",
+          "calls": 2,
+          "avg_ms": 200,
+          "errors": 1,
+          "prompt_tokens": 2000,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "herbert",
+          "pipeline": "rerank",
+          "calls": 1,
+          "avg_ms": 5,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-embed-host",
+          "pipeline": "query-embed",
+          "calls": 1,
+          "avg_ms": 9,
+          "errors": 1,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        }
+      ],
+      "w065-b": [
+        {
+          "backend": "spark-chat",
+          "pipeline": "web-chat",
+          "calls": 4,
+          "avg_ms": 3,
+          "errors": 1,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "",
+          "pipeline": "embed-backfill",
+          "calls": 2,
+          "avg_ms": 8,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0
+        },
+        {
+          "backend": "spark-chat",
+          "pipeline": "query-synthesize",
+          "calls": 1,
+          "avg_ms": 2,
+          "errors": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cost_usd": 0.2
+        }
+      ]
+    }
+  }
+]
