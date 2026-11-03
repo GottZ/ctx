@@ -37,7 +37,7 @@ func TestManageWriteScope_W3StaleNeutralised(t *testing.T) {
 	// Mint a key that LEGITIMATELY may write 'work': allowed=[shared,work] ⊇ write=[work].
 	key, plaintext, err := store.MintKeyWithQuota(ctx, pool,
 		"w3-stale", "private", []string{"shared", "work"}, []string{"work"},
-		store.DefaultTenantID, "member", nil)
+		store.DefaultTenantID, "member", nil, store.AuditStamp{})
 	if err != nil {
 		t.Fatalf("mint write-key: %v", err)
 	}

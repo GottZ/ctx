@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -32,6 +33,10 @@ import (
 // the production write paths (tenant-create, store, …). No plaintext is
 // persisted (only the hash); the caller holds the plaintext (it came from the
 // env in the first place).
+//
+// The statement runs in a transaction stamped ctx.audit_via='bootstrap' with no
+// actor (migration 160): the create row the audit trigger writes names the
+// legitimate boot path instead of reading like a psql edit (via='sql').
 func BootstrapAdminKey(ctx context.Context, pool *pgxpool.Pool, plaintext, label string) (created bool, keyID string, err error) {
 	if plaintext == "" {
 		return false, "", fmt.Errorf("store: bootstrap admin key: empty plaintext")
@@ -52,8 +57,12 @@ func BootstrapAdminKey(ctx context.Context, pool *pgxpool.Pool, plaintext, label
 	// yields zero principal rows and zero key rows (no orphan principal), and
 	// the empty-table check keeps the exact single-statement TOCTOU semantics
 	// of the previous shape (all CTE legs share one snapshot).
-	err = pool.QueryRow(ctx,
-		`WITH guard AS (
+	err = pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		if err := stampAudit(ctx, tx, AuditStamp{Via: ViaBootstrap}); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
+			`WITH guard AS (
 		     SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM context_api_keys)
 		 ), p AS (
 		     INSERT INTO context_principals (display_name)
@@ -65,8 +74,9 @@ func BootstrapAdminKey(ctx context.Context, pool *pgxpool.Pool, plaintext, label
 		 SELECT $1, $2, 'private', '{shared}'::text[], true, $3::uuid, 'owner', true, p.id
 		   FROM p
 		 RETURNING id`,
-		label, keyHash, DefaultTenantID,
-	).Scan(&keyID)
+			label, keyHash, DefaultTenantID,
+		).Scan(&keyID)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Table already populated — fail-closed: mint nothing.
 		return false, "", nil

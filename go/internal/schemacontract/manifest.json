@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 159,
-    "migration_count": 47,
+    "migration_max": 160,
+    "migration_count": 48,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -5003,6 +5003,9 @@
     "idx_secrets_scope_name": {
       "def_hash": "91e61a374ee12ca5eb73fbe50d616fb46f12ada8179d76003371639b1008ba18"
     },
+    "idx_settings_audit_entity": {
+      "def_hash": "ff5a40f6b99bde13a30cb0ad31c45d81e1e1a44b73ae3e740c044091ba52cd0d"
+    },
     "idx_settings_audit_key": {
       "def_hash": "70f7310bb22a4e5ba8a89713687e5be49f31437d98411cf9027b362486133f92"
     },
@@ -5176,6 +5179,12 @@
     }
   },
   "functions": {
+    "audit_actor_meta(p_fallback_actor uuid)": {
+      "src_hash": "462948f7604dfdf2ee73ecb85b3d7e86973865139bf56e864b0fb750c581d08e"
+    },
+    "audit_api_keys_write()": {
+      "src_hash": "066f0acc7b6c31dd3d4c8d2251650836aeb0e2456c699e155b46f5f3e98fdc20"
+    },
     "audit_backends_write()": {
       "src_hash": "94350fcfb95a525c83c5d4bf5161e784b540f9c1a6248f45344abd474ec60cda"
     },
@@ -5192,7 +5201,16 @@
       "src_hash": "642caf7533f79abd18190506b1b490998a597e776f8f90b952c5a0347e1ee4ba"
     },
     "audit_settings_write()": {
-      "src_hash": "5870753fc1fca4c236350687b007a4a5e3718f2b0c24c7ff7ab7c692934c50f1"
+      "src_hash": "46bc77b167069c5c74bd682a25ed6624fd7192a97c8f6a52a5566901d9178a02"
+    },
+    "audit_state_api_key(k context_api_keys)": {
+      "src_hash": "b864dab1db4ba08570476b70f13d2b396caab4afd119fd49f9c0c7e7001c6981"
+    },
+    "audit_state_tenant_quota(q context_tenant_quota)": {
+      "src_hash": "68fccb67869fdbc7d08cf3048290a286433ee5d32c6752f92e750fc9fe8df8d8"
+    },
+    "audit_tenant_quota_write()": {
+      "src_hash": "591ae6dcc221eeee169dd67c36dc9176d39b4d3be0f0eb4c7acf07140ac73259"
     },
     "ctx_auth(p_api_key text)": {
       "src_hash": "a5b51033a10c0016c1e560c15721d218bad483757fc31e49706ce5c660c01d58"
@@ -5241,6 +5259,12 @@
     }
   },
   "triggers": {
+    "context_api_keys.trg_api_keys_audit_ins_del": {
+      "def_hash": "d63cf34e4548f6abd3651b023a18aaacd69a4736d1f2efe3f8905d512fafbea0"
+    },
+    "context_api_keys.trg_api_keys_audit_upd": {
+      "def_hash": "7854aa4fd01b4ff2fceb3be4cac5778b7ee864adff461b9743507676ce5661d7"
+    },
     "context_backends.trg_backends_audit": {
       "def_hash": "fd75674ba3bbb9cb40428f944ccf4b72789f81f0e1bc57ca9907bf821a60d3d2"
     },
@@ -5309,6 +5333,9 @@
     },
     "context_structural_links.trg_struct_link_write": {
       "def_hash": "1e9e54fea2ee5a5fd5c249601df4ffe57bba1752f3e959fc601743246db4df7f"
+    },
+    "context_tenant_quota.trg_tenant_quota_audit": {
+      "def_hash": "a58c1ea2b5f5c75416876849d8b44dd4e49330d0bcbac01f4b3d271e3ad1741f"
     },
     "context_tenant_quota.trg_tenant_quota_notify": {
       "def_hash": "ca700af91d2761d07412425be0b9c3b889c3487d8ad77b3f8537e8ee127f38bc"

@@ -165,7 +165,7 @@ func TestTenantPrune_Integration(t *testing.T) {
 		// Bystander: a block in the default tenant's 'private' scope MUST survive.
 		bystander := seedBlock(t, "private", "survivor")
 
-		if err := store.PruneTenant(ctx, pool, victim.ID); err != nil {
+		if err := store.PruneTenant(ctx, pool, victim.ID, store.AuditStamp{}); err != nil {
 			t.Fatalf("PruneTenant(victim): %v", err)
 		}
 
@@ -199,10 +199,10 @@ func TestTenantPrune_Integration(t *testing.T) {
 	// NOT a silent no-op success — the prune must not pretend to delete a tenant
 	// that never existed.
 	t.Run("prune_unknown_not_found", func(t *testing.T) {
-		if err := store.PruneTenant(ctx, pool, "11111111-2222-3333-4444-555566667777"); !errors.Is(err, store.ErrTenantNotFound) {
+		if err := store.PruneTenant(ctx, pool, "11111111-2222-3333-4444-555566667777", store.AuditStamp{}); !errors.Is(err, store.ErrTenantNotFound) {
 			t.Errorf("PruneTenant(unknown) = %v, want ErrTenantNotFound", err)
 		}
-		if err := store.PruneTenant(ctx, pool, "not-a-uuid"); !errors.Is(err, store.ErrTenantNotFound) {
+		if err := store.PruneTenant(ctx, pool, "not-a-uuid", store.AuditStamp{}); !errors.Is(err, store.ErrTenantNotFound) {
 			t.Errorf("PruneTenant(malformed) = %v, want ErrTenantNotFound (no 22P02 oracle)", err)
 		}
 	})

@@ -78,7 +78,7 @@ func TestWebhookW13_PruneTenantDrainsSecret_Integration(t *testing.T) {
 		 VALUES ($1, $2, '\x00'::bytea, '\x01'::bytea, 1)`, name, res.Scope); err != nil {
 		t.Fatalf("seed webhook secret: %v", err)
 	}
-	if err := store.PruneTenant(ctx, pool, res.Tenant.ID); err != nil {
+	if err := store.PruneTenant(ctx, pool, res.Tenant.ID, store.AuditStamp{}); err != nil {
 		t.Fatalf("PruneTenant: %v", err)
 	}
 	var after int

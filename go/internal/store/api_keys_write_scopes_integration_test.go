@@ -86,7 +86,7 @@ func TestWriteScopes_Migration078_Integration(t *testing.T) {
 	t.Run("MintPersistsAndCtxAuthReturnsWriteScopes", func(t *testing.T) {
 		tid := freshTenant(t, ctx, pool, "w3-persist")
 		key, plaintext, err := store.MintKeyWithQuota(ctx, pool,
-			"w3-writer", "private", []string{"shared", "work"}, []string{"work"}, tid, "member", nil)
+			"w3-writer", "private", []string{"shared", "work"}, []string{"work"}, tid, "member", nil, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("mint with valid write_scope = %v, want nil", err)
 		}
@@ -110,7 +110,7 @@ func TestWriteScopes_Migration078_Integration(t *testing.T) {
 		tid := freshTenant(t, ctx, pool, "w3-blind")
 		// 'work' is NOT in allowed_scopes ∪ {home_scope} → a blind-writer → rejected.
 		key, _, err := store.MintKeyWithQuota(ctx, pool,
-			"w3-blind-writer", "private", []string{"shared"}, []string{"work"}, tid, "member", nil)
+			"w3-blind-writer", "private", []string{"shared"}, []string{"work"}, tid, "member", nil, store.AuditStamp{})
 		if !errors.Is(err, store.ErrWriteScopeNotAllowed) {
 			t.Fatalf("mint blind-writer err = %v (key id %q), want ErrWriteScopeNotAllowed", err, key.ID)
 		}
@@ -128,7 +128,7 @@ func TestWriteScopes_Migration078_Integration(t *testing.T) {
 	t.Run("CompatEmptyWriteScopes", func(t *testing.T) {
 		tid := freshTenant(t, ctx, pool, "w3-compat")
 		key, plaintext, err := store.MintKeyWithQuota(ctx, pool,
-			"w3-compat-key", "private", []string{"shared"}, nil, tid, "member", nil)
+			"w3-compat-key", "private", []string{"shared"}, nil, tid, "member", nil, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("mint without write_scopes = %v, want nil", err)
 		}

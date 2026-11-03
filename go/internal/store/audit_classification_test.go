@@ -1,0 +1,385 @@
+//go:build integration
+
+// Classification pin of the audited tables (W06-6, design/06 §3.3 M-06-3,
+// B-06-2, K16). Every column of a table whose writes land in
+// context_settings_audit is either AUDITED (its value is part of the
+// whitelist projection audit_state_<table>(row) and so reaches old_value /
+// new_value) or EXCLUDED with a stated reason. A column in neither list fails
+// the pin: a new column — a future secret above all — never travels into the
+// tenant-admin-readable audit table just because nobody looked at it, which
+// is what a blacklist projection (to_jsonb(NEW) - 'key_hash') would do.
+//
+// TestAuditClassificationPin compares the catalog with the data below: the
+// live column list of the table, the keys the whitelist function emits, and —
+// where the UPDATE trigger carries a column list — that OF list and the
+// column names in its WHEN clause. TestAuditClassificationPerColumn binds the
+// behaviour: an UPDATE of exactly one audited column writes exactly one row
+// whose new_value carries that column's real value and differs from old_value
+// in that key only; an UPDATE of exactly one excluded column writes none. A
+// WHEN clause that names a column without comparing it, or a projection that
+// emits the right key with the wrong value, passes the catalog check and fails
+// this one.
+//
+// CTX_M160_PROBE_COLUMN=1 adds a column secret_probe to context_api_keys
+// before the pin runs: the red run of Negativ 3. The subtest
+// probe_column_turns_the_pin_red checks the same on a database of its own in
+// every run. TestAuditClassificationPerColumn honours CTX_M160_OVERLAY
+// (when-hole, value-swap) for its red runs.
+//
+//	go test -tags=integration -p 1 -count=1 -run TestAuditClassification ./internal/store/
+package store_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/testdb"
+)
+
+// auditedTable is the classification of one audited table.
+type auditedTable struct {
+	table    string
+	stateFn  string            // whitelist projection audit_state_<table>(row)
+	audited  []string          // columns whose values the projection carries
+	excluded map[string]string // column -> why it never reaches the audit row
+	updTrig  string            // UPDATE trigger whose OF list and WHEN must name exactly `audited` ("" = none)
+}
+
+var auditClassification = []auditedTable{
+	{
+		table:   "context_api_keys",
+		stateFn: "audit_state_api_key",
+		audited: []string{
+			"label", "home_scope", "allowed_scopes", "write_scopes", "active", "is_admin",
+			"tenant_id", "tenant_role", "confirm_writes", "principal_id",
+		},
+		excluded: map[string]string{
+			"id":           "identity of the row, written as entity_key",
+			"key_hash":     "credential: SHA-256 of the plaintext key, never leaves the table",
+			"last_used_at": "per-request bookkeeping of ctx_auth_by_id (B-06-1)",
+			"created_at":   "insert time; the audit row carries its own created_at",
+			"updated_at":   "bookkeeping time the store writes next to an audited change",
+		},
+		updTrig: "trg_api_keys_audit_upd",
+	},
+	{
+		table:   "context_tenant_quota",
+		stateFn: "audit_state_tenant_quota",
+		audited: []string{
+			"scope", "daily_cost_usd", "monthly_cost_usd", "daily_calls", "on_exceed", "enabled",
+		},
+		excluded: map[string]string{
+			"id":                   "surrogate key the API never exposes; a quota is addressed by scope (entity_key)",
+			"created_at":           "insert time; the audit row carries its own created_at",
+			"updated_at":           "bookkeeping time of the last write",
+			"updated_by":           "actor attribution, carried by api_key_id / actor_label (and the trigger's actor fallback)",
+			"updated_by_principal": "actor attribution, carried by metadata.actor_principal",
+			"metadata":             "free-form JSONB that no writer sets; forwarding it would copy any future content unreviewed",
+		},
+	},
+}
+
+// auditedSet returns the audited columns of the classification for table.
+func auditedSet(table string) map[string]bool {
+	out := map[string]bool{}
+	for _, c := range auditClassification {
+		if c.table == table {
+			for _, col := range c.audited {
+				out[col] = true
+			}
+		}
+	}
+	return out
+}
+
+// checkAuditClassification compares the live schema with the classification
+// and returns one line per mismatch (empty = pinned).
+func checkAuditClassification(ctx context.Context, pool *pgxpool.Pool) []string {
+	var bad []string
+	for _, c := range auditClassification {
+		audited := map[string]bool{}
+		for _, col := range c.audited {
+			audited[col] = true
+			if _, both := c.excluded[col]; both {
+				bad = append(bad, fmt.Sprintf("%s: column %s is listed as audited AND excluded", c.table, col))
+			}
+		}
+
+		// (1) live columns == audited ∪ excluded.
+		live, err := stringList(ctx, pool,
+			`SELECT column_name::text FROM information_schema.columns
+			  WHERE table_schema = current_schema() AND table_name = $1 ORDER BY column_name`, c.table)
+		if err != nil {
+			bad = append(bad, fmt.Sprintf("%s: read columns: %v", c.table, err))
+			continue
+		}
+		liveSet := map[string]bool{}
+		for _, col := range live {
+			liveSet[col] = true
+			if _, ex := c.excluded[col]; !audited[col] && !ex {
+				bad = append(bad, fmt.Sprintf("%s: column %s is neither audited nor excluded — classify it", c.table, col))
+			}
+		}
+		for col := range audited {
+			if !liveSet[col] {
+				bad = append(bad, fmt.Sprintf("%s: audited column %s does not exist", c.table, col))
+			}
+		}
+		for col := range c.excluded {
+			if !liveSet[col] {
+				bad = append(bad, fmt.Sprintf("%s: excluded column %s does not exist", c.table, col))
+			}
+		}
+
+		// (2) the whitelist projection emits exactly the audited keys. A NULL row
+		// still yields every key (jsonb_build_object keeps NULL values).
+		keys, err := stringList(ctx, pool, fmt.Sprintf(
+			`SELECT k FROM jsonb_object_keys(%s(NULL::%s)) AS k ORDER BY k`, c.stateFn, c.table))
+		if err != nil {
+			bad = append(bad, fmt.Sprintf("%s: %s(): %v", c.table, c.stateFn, err))
+		} else if got, want := strings.Join(keys, ","), sortedJoin(c.audited); got != want {
+			bad = append(bad, fmt.Sprintf("%s: %s() emits keys [%s], audited columns are [%s]", c.table, c.stateFn, got, want))
+		}
+
+		// (3) the UPDATE trigger fires on exactly the audited columns and its
+		// WHEN clause compares every one of them.
+		if c.updTrig == "" {
+			continue
+		}
+		ofCols, err := stringList(ctx, pool,
+			`SELECT a.attname::text
+			   FROM pg_trigger t
+			   JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = ANY (t.tgattr)
+			  WHERE t.tgname = $1 AND t.tgrelid = $2::regclass
+			  ORDER BY a.attname`, c.updTrig, c.table)
+		if err != nil {
+			bad = append(bad, fmt.Sprintf("%s: read OF list of %s: %v", c.table, c.updTrig, err))
+			continue
+		}
+		if got, want := strings.Join(ofCols, ","), sortedJoin(c.audited); got != want {
+			bad = append(bad, fmt.Sprintf("%s: %s fires on [%s], audited columns are [%s]", c.table, c.updTrig, got, want))
+		}
+		var def string
+		if err := pool.QueryRow(ctx,
+			`SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = $1 AND tgrelid = $2::regclass`,
+			c.updTrig, c.table).Scan(&def); err != nil {
+			bad = append(bad, fmt.Sprintf("%s: read %s: %v", c.table, c.updTrig, err))
+			continue
+		}
+		for _, col := range c.audited {
+			if !strings.Contains(def, "old."+col) || !strings.Contains(def, "new."+col) {
+				bad = append(bad, fmt.Sprintf("%s: WHEN clause of %s does not compare %s: %s", c.table, c.updTrig, col, def))
+			}
+		}
+	}
+	return bad
+}
+
+func sortedJoin(in []string) string {
+	s := append([]string(nil), in...)
+	sort.Strings(s)
+	return strings.Join(s, ",")
+}
+
+func stringList(ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) ([]string, error) {
+	rows, err := pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func TestAuditClassificationPin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+
+	if os.Getenv("CTX_M160_PROBE_COLUMN") != "" {
+		if _, err := pool.Exec(ctx, `ALTER TABLE context_api_keys ADD COLUMN secret_probe TEXT`); err != nil {
+			t.Fatalf("add probe column: %v", err)
+		}
+		t.Log("CTX_M160_PROBE_COLUMN: context_api_keys.secret_probe added before the pin")
+	}
+	if bad := checkAuditClassification(ctx, pool); len(bad) > 0 {
+		t.Fatalf("audit classification pin: %d mismatch(es):\n  %s", len(bad), strings.Join(bad, "\n  "))
+	}
+
+	// Negativ 3 in every run: an unclassified column turns the pin red.
+	t.Run("probe_column_turns_the_pin_red", func(t *testing.T) {
+		probe := testdb.SetupTestDB(t)
+		if _, err := probe.Exec(ctx, `ALTER TABLE context_api_keys ADD COLUMN secret_probe TEXT`); err != nil {
+			t.Fatalf("add probe column: %v", err)
+		}
+		bad := checkAuditClassification(ctx, probe)
+		want := "context_api_keys: column secret_probe is neither audited nor excluded — classify it"
+		found := false
+		for _, b := range bad {
+			found = found || b == want
+		}
+		if !found || len(bad) != 1 {
+			t.Fatalf("probe column: pin reported %v, want exactly [%s]", bad, want)
+		}
+	})
+}
+
+// auditColumnProbes: per audited table, for every column an UPDATE expression
+// that changes exactly that column. %[1]s is a second tenant id, %[2]s a second
+// principal id, %[3]s a key id (all existing FK targets). The audited probes
+// must cover every audited column, the excluded probes every excluded column
+// but the row identity.
+var auditColumnProbes = map[string]struct{ audited, excluded map[string]string }{
+	"context_api_keys": {
+		audited: map[string]string{
+			"label":          "label || '-p'",
+			"home_scope":     "home_scope || 'p'",
+			"allowed_scopes": "allowed_scopes || '{pinprobe}'::text[]",
+			"write_scopes":   "write_scopes || '{pinprobe}'::text[]",
+			"active":         "NOT active",
+			"is_admin":       "NOT is_admin",
+			"tenant_id":      "'%[1]s'::uuid",
+			"tenant_role":    "CASE WHEN tenant_role = 'member' THEN 'admin' ELSE 'member' END",
+			"confirm_writes": "NOT confirm_writes",
+			"principal_id":   "'%[2]s'::uuid",
+		},
+		excluded: map[string]string{
+			"key_hash":     "key_hash || 'p'",
+			"last_used_at": "now() - interval '1 minute'",
+			"created_at":   "created_at - interval '1 minute'",
+			"updated_at":   "updated_at - interval '1 minute'",
+		},
+	},
+	"context_tenant_quota": {
+		audited: map[string]string{
+			"scope":            "scope || 'p'",
+			"daily_cost_usd":   "COALESCE(daily_cost_usd, 0) + 1",
+			"monthly_cost_usd": "COALESCE(monthly_cost_usd, 0) + 1",
+			"daily_calls":      "COALESCE(daily_calls, 0) + 1",
+			"on_exceed":        "CASE WHEN on_exceed = 'block' THEN 'external_off' ELSE 'block' END",
+			"enabled":          "NOT enabled",
+		},
+		excluded: map[string]string{
+			"created_at":           "created_at - interval '1 minute'",
+			"updated_at":           "updated_at - interval '1 minute'",
+			"updated_by":           "'%[3]s'::uuid",
+			"updated_by_principal": "'%[2]s'::uuid",
+			"metadata":             `metadata || '{"pin": "probe"}'::jsonb`,
+		},
+	},
+}
+
+func TestAuditClassificationPerColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := kaSetup(t, nil)
+
+	otherTenant := freshTenant(t, ctx, pool, "ka-pin-other")
+	var otherPrincipal string
+	if err := pool.QueryRow(ctx, `INSERT INTO context_principals (display_name) VALUES ('ka-pin-principal') RETURNING id::text`).Scan(&otherPrincipal); err != nil {
+		t.Fatalf("insert principal: %v", err)
+	}
+	key, _, err := store.CreateApiKey(ctx, pool, "ka-pin-key", "private", nil, "")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	var quotaID string
+	if err := pool.QueryRow(ctx, `INSERT INTO context_tenant_quota (scope, daily_calls) VALUES ('ka-pin:main', 1) RETURNING id::text`).Scan(&quotaID); err != nil {
+		t.Fatalf("insert quota: %v", err)
+	}
+	rowID := map[string]string{"context_api_keys": key.ID, "context_tenant_quota": quotaID}
+	entity := map[string]string{"context_api_keys": "api_key", "context_tenant_quota": "tenant_quota"}
+
+	for _, c := range auditClassification {
+		probes, ok := auditColumnProbes[c.table]
+		if !ok {
+			t.Fatalf("%s: no column probes — add them to auditColumnProbes", c.table)
+		}
+		// Coverage: a column added to either list needs its probe.
+		if got, want := sortedKeys(probes.audited), sortedJoin(c.audited); got != want {
+			t.Errorf("%s: audited probes [%s], audited columns [%s]", c.table, got, want)
+		}
+		var excl []string
+		for col := range c.excluded {
+			if col != "id" {
+				excl = append(excl, col)
+			}
+		}
+		if got, want := sortedKeys(probes.excluded), sortedJoin(excl); got != want {
+			t.Errorf("%s: excluded probes [%s], excluded columns but id [%s]", c.table, got, want)
+		}
+
+		run := func(col, expr string, wantRows int) {
+			t.Helper()
+			before := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table])
+			set := expr
+			if strings.Contains(expr, "%[") {
+				set = fmt.Sprintf(expr, otherTenant, otherPrincipal, key.ID)
+			}
+			if _, err := pool.Exec(ctx, fmt.Sprintf(`UPDATE %s SET %s = %s WHERE id = $1::uuid`, c.table, col, set), rowID[c.table]); err != nil {
+				t.Fatalf("%s.%s: update: %v", c.table, col, err)
+			}
+			if got := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table]) - before; got != wantRows {
+				t.Errorf("%s.%s: an update of only this column wrote %d audit row(s), want %d", c.table, col, got, wantRows)
+				return
+			}
+			if wantRows == 0 {
+				return
+			}
+			// The newest row carries the column's real value, and old/new differ
+			// in this key only.
+			var valueMatches, changed, restEqual bool
+			var newRaw, rowRaw string
+			if err := pool.QueryRow(ctx, fmt.Sprintf(
+				`SELECT COALESCE((a.new_value -> $2) = (to_jsonb(t) -> $2), false),
+				        (a.old_value -> $2) IS DISTINCT FROM (a.new_value -> $2),
+				        (a.old_value - $2) = (a.new_value - $2),
+				        COALESCE((a.new_value -> $2)::text, '<absent>'), COALESCE((to_jsonb(t) -> $2)::text, '<absent>')
+				   FROM %s t,
+				        LATERAL (SELECT old_value, new_value FROM context_settings_audit
+				                  WHERE entity_type = $3 ORDER BY created_at DESC, id DESC LIMIT 1) a
+				  WHERE t.id = $1::uuid`, c.table), rowID[c.table], col, entity[c.table]).
+				Scan(&valueMatches, &changed, &restEqual, &newRaw, &rowRaw); err != nil {
+				t.Fatalf("%s.%s: read row: %v", c.table, col, err)
+			}
+			if !valueMatches || !changed || !restEqual {
+				t.Errorf("%s.%s: new_value carries %s, the row holds %s; changed=%v, other keys equal=%v",
+					c.table, col, newRaw, rowRaw, changed, restEqual)
+			}
+		}
+		for _, col := range c.audited {
+			if expr, ok := probes.audited[col]; ok {
+				run(col, expr, 1)
+			}
+		}
+		for col, expr := range probes.excluded {
+			run(col, expr, 0)
+		}
+	}
+}
+
+func sortedKeys(m map[string]string) string {
+	s := make([]string, 0, len(m))
+	for k := range m {
+		s = append(s, k)
+	}
+	return sortedJoin(s)
+}

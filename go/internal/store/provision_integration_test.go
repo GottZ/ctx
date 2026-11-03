@@ -186,7 +186,7 @@ func TestPruneForgeSecret_Integration(t *testing.T) {
 		t.Fatalf("secret count before prune = %d, want 1", before)
 	}
 
-	if err := store.PruneTenant(ctx, pool, res.Tenant.ID); err != nil {
+	if err := store.PruneTenant(ctx, pool, res.Tenant.ID, store.AuditStamp{}); err != nil {
 		t.Fatalf("PruneTenant: %v", err)
 	}
 

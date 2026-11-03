@@ -67,12 +67,12 @@ func TestMintKeyWithQuota_Integration(t *testing.T) {
 		const max = 2
 		for i := 0; i < max; i++ {
 			if _, _, err := store.MintKeyWithQuota(ctx, pool,
-				"be6w2-cap-k", "private", nil, nil, tid, "member", intPtr(max)); err != nil {
+				"be6w2-cap-k", "private", nil, nil, tid, "member", intPtr(max), store.AuditStamp{}); err != nil {
 				t.Fatalf("mint %d/%d under cap = %v, want nil", i+1, max, err)
 			}
 		}
 		if _, _, err := store.MintKeyWithQuota(ctx, pool,
-			"be6w2-cap-over", "private", nil, nil, tid, "member", intPtr(max)); !errors.Is(err, store.ErrKeyQuotaExceeded) {
+			"be6w2-cap-over", "private", nil, nil, tid, "member", intPtr(max), store.AuditStamp{}); !errors.Is(err, store.ErrKeyQuotaExceeded) {
 			t.Fatalf("mint over cap err = %v, want ErrKeyQuotaExceeded", err)
 		}
 		if n := activeKeyCount(t, pool, tid); n != max {
@@ -96,7 +96,7 @@ func TestMintKeyWithQuota_Integration(t *testing.T) {
 			go func(i int) {
 				defer wg.Done()
 				_, _, errs[i] = store.MintKeyWithQuota(ctx, pool,
-					"be6w2-race-k", "private", nil, nil, tid, "member", intPtr(1))
+					"be6w2-race-k", "private", nil, nil, tid, "member", intPtr(1), store.AuditStamp{})
 			}(i)
 		}
 		wg.Wait()
@@ -127,12 +127,12 @@ func TestMintKeyWithQuota_Integration(t *testing.T) {
 	t.Run("N8r_revoke_reclaims_budget", func(t *testing.T) {
 		tid := freshTenant(t, ctx, pool, "be6w2-reclaim")
 		first, _, err := store.MintKeyWithQuota(ctx, pool,
-			"be6w2-reclaim-k1", "private", nil, nil, tid, "member", intPtr(1))
+			"be6w2-reclaim-k1", "private", nil, nil, tid, "member", intPtr(1), store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("first mint = %v, want nil", err)
 		}
 		if _, _, err := store.MintKeyWithQuota(ctx, pool,
-			"be6w2-reclaim-k2", "private", nil, nil, tid, "member", intPtr(1)); !errors.Is(err, store.ErrKeyQuotaExceeded) {
+			"be6w2-reclaim-k2", "private", nil, nil, tid, "member", intPtr(1), store.AuditStamp{}); !errors.Is(err, store.ErrKeyQuotaExceeded) {
 			t.Fatalf("second mint at cap err = %v, want ErrKeyQuotaExceeded", err)
 		}
 		// Revoke the first key (soft-delete: active=false) — frees its slot.
@@ -141,7 +141,7 @@ func TestMintKeyWithQuota_Integration(t *testing.T) {
 			t.Fatalf("revoke first key: %v", err)
 		}
 		if _, _, err := store.MintKeyWithQuota(ctx, pool,
-			"be6w2-reclaim-k3", "private", nil, nil, tid, "member", intPtr(1)); err != nil {
+			"be6w2-reclaim-k3", "private", nil, nil, tid, "member", intPtr(1), store.AuditStamp{}); err != nil {
 			t.Fatalf("mint after revoke = %v, want nil (active-only count reclaims the slot)", err)
 		}
 		if n := activeKeyCount(t, pool, tid); n != 1 {
@@ -154,12 +154,12 @@ func TestMintKeyWithQuota_Integration(t *testing.T) {
 	t.Run("unknown_tenant_returns_ErrTenantNotFound", func(t *testing.T) {
 		if _, _, err := store.MintKeyWithQuota(ctx, pool,
 			"be6w2-orphan", "private", nil, nil,
-			"11111111-2222-3333-4444-555566667777", "member", intPtr(5)); !errors.Is(err, store.ErrTenantNotFound) {
+			"11111111-2222-3333-4444-555566667777", "member", intPtr(5), store.AuditStamp{}); !errors.Is(err, store.ErrTenantNotFound) {
 			t.Fatalf("unknown tenant err = %v, want ErrTenantNotFound", err)
 		}
 		if _, _, err := store.MintKeyWithQuota(ctx, pool,
 			"be6w2-orphan2", "private", nil, nil,
-			"not-a-uuid", "member", intPtr(5)); !errors.Is(err, store.ErrTenantNotFound) {
+			"not-a-uuid", "member", intPtr(5), store.AuditStamp{}); !errors.Is(err, store.ErrTenantNotFound) {
 			t.Fatalf("malformed tenant id err = %v, want ErrTenantNotFound (22P02 no oracle)", err)
 		}
 	})
@@ -167,10 +167,10 @@ func TestMintKeyWithQuota_Integration(t *testing.T) {
 	// Unlimited (maxKeys=nil) and negative both skip the cap: many keys all commit.
 	t.Run("unlimited_nil_or_negative_skips_cap", func(t *testing.T) {
 		tid := freshTenant(t, ctx, pool, "be6w2-unl")
-		if _, _, err := store.MintKeyWithQuota(ctx, pool, "be6w2-unl-a", "private", nil, nil, tid, "member", nil); err != nil {
+		if _, _, err := store.MintKeyWithQuota(ctx, pool, "be6w2-unl-a", "private", nil, nil, tid, "member", nil, store.AuditStamp{}); err != nil {
 			t.Fatalf("nil-maxKeys mint = %v, want nil", err)
 		}
-		if _, _, err := store.MintKeyWithQuota(ctx, pool, "be6w2-unl-b", "private", nil, nil, tid, "member", intPtr(-1)); err != nil {
+		if _, _, err := store.MintKeyWithQuota(ctx, pool, "be6w2-unl-b", "private", nil, nil, tid, "member", intPtr(-1), store.AuditStamp{}); err != nil {
 			t.Fatalf("negative-maxKeys mint = %v, want nil", err)
 		}
 		if n := activeKeyCount(t, pool, tid); n != 2 {
@@ -195,7 +195,7 @@ func TestMintOwnerKey_Integration(t *testing.T) {
 			`UPDATE context_tenants SET max_keys = 0 WHERE id = $1::uuid`, tid); err != nil {
 			t.Fatalf("set max_keys=0: %v", err)
 		}
-		key, plaintext, err := store.MintOwnerKey(ctx, pool, "be6w2-owner-k", "private", nil, tid)
+		key, plaintext, err := store.MintOwnerKey(ctx, pool, "be6w2-owner-k", "private", nil, tid, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("MintOwnerKey on max_keys=0 tenant = %v, want nil (cap-free)", err)
 		}
@@ -227,7 +227,7 @@ func TestMintOwnerKey_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin rollback tx: %v", err)
 		}
-		rolled, _, err := store.MintOwnerKey(ctx, txRoll, "be6w2-owner-rolled", "private", nil, tid)
+		rolled, _, err := store.MintOwnerKey(ctx, txRoll, "be6w2-owner-rolled", "private", nil, tid, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("MintOwnerKey in tx = %v, want nil", err)
 		}
@@ -248,7 +248,7 @@ func TestMintOwnerKey_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin commit tx: %v", err)
 		}
-		committed, _, err := store.MintOwnerKey(ctx, txOK, "be6w2-owner-committed", "private", nil, tid)
+		committed, _, err := store.MintOwnerKey(ctx, txOK, "be6w2-owner-committed", "private", nil, tid, store.AuditStamp{})
 		if err != nil {
 			t.Fatalf("MintOwnerKey in commit tx = %v, want nil", err)
 		}

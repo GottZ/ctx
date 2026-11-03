@@ -1448,7 +1448,8 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 	// context_tenants-row lock (race-tight, active-only), the structural limit a
 	// self-service tenant cannot exceed.
 	key, plaintext, err := store.MintKeyWithQuota(r.Context(), h.pool,
-		data.Label, data.HomeScope, data.AllowedScopes, data.WriteScopes, bindingTenant, "member", maxKeys)
+		data.Label, data.HomeScope, data.AllowedScopes, data.WriteScopes, bindingTenant, "member", maxKeys,
+		auditStamp(r, ar))
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrKeyQuotaExceeded):
@@ -1605,7 +1606,8 @@ func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Reques
 	// An admin (callerMayManageOwner=false) may not revoke an owner key, and no
 	// caller may revoke the last active owner (design/04 §D-D, AM6).
 	callerMayManageOwner := ar.IsServerAdmin() || ar.TenantRole.Delegates()
-	deleted, err := store.DeleteApiKey(r.Context(), h.pool, data.ID, ar.TenantID, ar.IsServerAdmin(), callerMayManageOwner)
+	deleted, err := store.DeleteApiKey(r.Context(), h.pool, data.ID, ar.TenantID, ar.IsServerAdmin(), callerMayManageOwner,
+		auditStamp(r, ar))
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrOwnerProtected):
@@ -1701,7 +1703,7 @@ func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Reques
 	}
 
 	updatedKey, changed, err := store.UpdateApiKey(r.Context(), h.pool, data.ID, ar.TenantID,
-		ar.IsServerAdmin(), callerMayManageOwner, rolePtr, data.Active, data.WriteScopes)
+		ar.IsServerAdmin(), callerMayManageOwner, rolePtr, data.Active, data.WriteScopes, auditStamp(r, ar))
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrOwnerProtected):
