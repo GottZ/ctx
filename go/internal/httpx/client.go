@@ -3,8 +3,11 @@ package httpx
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -24,6 +27,9 @@ import (
 // shared instance would pool connections across chat/embed/rerank against the
 // same hosts — a change in connection behaviour, not a de-duplication. If that
 // is ever wanted, it can be introduced here, in one place.
+//
+// Redirects follow sameOriginRedirect: a Location on another origin is not
+// followed, the caller gets the 3xx itself.
 func PooledClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -31,6 +37,7 @@ func PooledClient() *http.Client {
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
 		},
+		CheckRedirect: sameOriginRedirect,
 	}
 }
 
@@ -40,7 +47,9 @@ func PooledClient() *http.Client {
 // targets are refused before a byte flows (GHSA 2026-10-31 §3). It serves the
 // tenant-owned pool rows (backends.Backend.EgressGuarded); the pool values are
 // PooledClient's. ForceAttemptHTTP2 keeps HTTP/2 negotiation, which a custom
-// DialContext would otherwise switch off.
+// DialContext would otherwise switch off. The guard judges addresses, not
+// origins — a redirect to a foreign PUBLIC host passes it — so the client
+// carries the same sameOriginRedirect as PooledClient.
 func GuardedPooledClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -50,7 +59,100 @@ func GuardedPooledClient() *http.Client {
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
 		},
+		CheckRedirect: sameOriginRedirect,
 	}
+}
+
+// maxRedirects is net/http's own hop limit (defaultCheckRedirect). Setting
+// CheckRedirect replaces that default, so the limit and its error text are
+// restated here: same-origin chains end exactly where they ended before.
+const maxRedirects = 10
+
+// sameOriginRedirect is the CheckRedirect of both pool clients (design/04 I17,
+// S5). net/http re-sends a POST body on 307/308 — every wire builds its body
+// from a bytes.Reader, so GetBody is set — and copies every header except
+// Authorization/Cookie (x-api-key, a row's extra_headers) to any redirect
+// target. Following a Location to another host would hand the prompt and the
+// row's credential to a host that never passed the Trust × Sensitivity check,
+// while the egress audit names the configured row.
+//
+// A hop is followed only on the origin of the FIRST request — via[0], the
+// configured base_url that was vetted — or as an http→https upgrade of it on
+// the same host (sameOrigin). Every other hop returns the 3xx itself
+// (http.ErrUseLastResponse): the wires turn a non-200 into a StatusError,
+// which backends.Classify maps to ClassBadRequest. The refusal is logged once,
+// with both origins and the status — never a path or query, which can carry
+// tokens.
+func sameOriginRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	from, to := originOf(via[0].URL), originOf(req.URL)
+	if sameOrigin(from, to) {
+		return nil
+	}
+	status := 0
+	if req.Response != nil {
+		status = req.Response.StatusCode
+	}
+	slog.Warn("redirect refused", "from_origin", from.String(), "to_origin", to.String(), "status", status)
+	return http.ErrUseLastResponse
+}
+
+// origin is the (scheme, host, port) triple of a URL: scheme and host
+// lowercased in the ASCII range only, the scheme's default port filled in.
+// Userinfo, path and query are not part of it.
+type origin struct{ scheme, host, port string }
+
+func originOf(u *url.URL) origin {
+	host := u.Hostname()
+	zone := ""
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host, zone = host[:i], host[i:] // an IPv6 zone names an interface: case-sensitive
+	}
+	o := origin{scheme: asciiLower(u.Scheme), host: asciiLower(host) + zone, port: u.Port()}
+	if o.port == "" {
+		switch o.scheme {
+		case "http":
+			o.port = "80"
+		case "https":
+			o.port = "443"
+		}
+	}
+	return o
+}
+
+func (o origin) String() string { return o.scheme + "://" + net.JoinHostPort(o.host, o.port) }
+
+// asciiLower folds A-Z only. strings.ToLower folds Unicode as well — U+0130
+// 'İ' becomes ASCII 'i' — while net/http dials the IDNA form of a non-ASCII
+// host (xn--…), so a Unicode fold would call two different hosts one origin.
+// Non-ASCII bytes therefore compare exactly; a refusal is the safe side.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
+// sameOrigin reports whether a redirect from → to stays on the vetted origin:
+// identical triple, or the http→https upgrade on the same host with port
+// 80→443 or the same explicit port. Host names compare as strings (ASCII
+// case aside) — a subdomain, a trailing dot, a non-ASCII spelling or an IP
+// literal for the same name is another origin (the refusal is the safe side
+// of every such ambiguity).
+func sameOrigin(from, to origin) bool {
+	if from.host != to.host {
+		return false
+	}
+	if from.scheme == to.scheme {
+		return from.port == to.port
+	}
+	return from.scheme == "http" && to.scheme == "https" &&
+		(from.port == to.port || (from.port == "80" && to.port == "443"))
 }
 
 // errGuardRefused replaces ssrfguard's refusal on the backend path. The
