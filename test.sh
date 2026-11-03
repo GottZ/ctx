@@ -310,14 +310,15 @@ fi
 # gegen eine frisch migrierte DB und wird rot, wenn sie hier auseinanderlaufen.
 T="T07 SCHEMA_INTEGRITY"
 
-# Zähl-Fallback-Erwartung, an Migration 161 gebunden (siehe Kommentar oben;
+# Zähl-Fallback-Erwartung, an Migration 162 gebunden (siehe Kommentar oben;
 # 131 fügt context_blocks.dream_last_inert hinzu → 42 Spalten; 132 fügt die
 # Tabelle context_embed_cache_meta hinzu → 56 Tabellen; 135 fügt distill_run
 # und distill_seen hinzu → 58 Tabellen, Spalten unverändert; 159 fügt
 # context_llm_usage_hourly hinzu → 59 Tabellen, Spalten unverändert; 161 fügt
 # context_model_consumers und context_model_keys hinzu → 61 Tabellen, Spalten
+# unverändert; 162 fügt context_model_aliases hinzu → 62 Tabellen, Spalten
 # unverändert).
-T07_EXPECT_TABLES=61
+T07_EXPECT_TABLES=62
 T07_EXPECT_COLUMNS=42
 
 t07_count_fallback() {
@@ -328,7 +329,7 @@ t07_count_fallback() {
   if [[ "$tc" == "$T07_EXPECT_TABLES" ]] && [[ "$col" == "$T07_EXPECT_COLUMNS" ]]; then
     pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
   else
-    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 161), got tables=$tc columns=$col"
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 162), got tables=$tc columns=$col"
   fi
 }
 

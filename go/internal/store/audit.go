@@ -24,7 +24,10 @@ type auditEntity struct {
 
 // auditEntities is the closed set of entity types the audit read surface
 // serves — data, not a switch. api_key and tenant_quota are written by the
-// 160 triggers, model_consumer and model_key by the 161 triggers;
+// 160 triggers, model_consumer and model_key by the 161 triggers,
+// model_alias by the 162 trigger (a tenant alias carries its tenant in
+// metadata.tenant_id, a _global one none, so the operator catalog's history
+// stays server-admin-only through the same filter);
 // gateway_limits (M-06-5), model_grant (the grant migration's trigger),
 // consumer_usage (the gateway's Go writer) and instance (04's trigger) read
 // as empty lists until their writers land. setting, secret and
@@ -35,6 +38,7 @@ var auditEntities = map[string]auditEntity{
 	"api_key":        {},
 	"tenant_quota":   {},
 	"gateway_limits": {},
+	"model_alias":    {},
 	"model_consumer": {},
 	"model_key":      {},
 	"model_grant":    {},

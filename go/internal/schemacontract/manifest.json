@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 161,
-    "migration_count": 49,
+    "migration_max": 162,
+    "migration_count": 50,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1974,6 +1974,77 @@
           "type": "bigint[]",
           "not_null": true,
           "storage": "x"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_model_aliases": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "scope",
+          "type": "character varying(50)",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "kind",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "role",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "sensitivity",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "policy",
+          "type": "jsonb",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
         },
         {
           "name": "updated_at",
@@ -4766,6 +4837,9 @@
     "context_llm_log_pkey": {
       "def_hash": "71bc1db96f8018863b268c53999b6e62059c08f2db9b05631d8ebf2f184eef7b"
     },
+    "context_model_aliases_pkey": {
+      "def_hash": "0c24f3b4e9d05b5be6df0b45b6793e1e196c6f5e63883b60b79520aba078011b"
+    },
     "context_model_consumers_pkey": {
       "def_hash": "d2d14bd6f798014e745feb7c15dfe4a8f41e191fb12bb939118a901d332f7418"
     },
@@ -5193,6 +5267,9 @@
     "idx_llm_usage_key": {
       "def_hash": "3406f7af3b46972bd2c2e6a9bf0b0ae6b7e9afb388b607c01c3db82beea35cc3"
     },
+    "idx_model_aliases_scope": {
+      "def_hash": "a9d1e19edf34e8d2d17ac45d664a973df1bfd867a70c532cb5eb474e0aa35ca4"
+    },
     "idx_model_consumers_peer_instance": {
       "def_hash": "08bbb37c20a49485f710e039470ac3e257d6f1a4225bca0504ae1082006fec17"
     },
@@ -5376,6 +5453,9 @@
     "uq_llm_usage_hourly": {
       "def_hash": "d653a870c668d587e16a6b81a08dbe187678f6a21c40e6621c92b879b85e5914"
     },
+    "uq_model_aliases_scope_name": {
+      "def_hash": "bef15f013e7205e65ac5690ea549878ae28dc83247feb06d53ba180f1b238e22"
+    },
     "uq_model_consumers_tenant_label": {
       "def_hash": "48b473ce173a18be85cb6f3ac91bc68160ea50f7f38b53d951e4f1134abf67ff"
     },
@@ -5435,6 +5515,9 @@
     "audit_graph_category_hues_write()": {
       "src_hash": "642caf7533f79abd18190506b1b490998a597e776f8f90b952c5a0347e1ee4ba"
     },
+    "audit_model_aliases_write()": {
+      "src_hash": "75a7664e4059afc24e7172d926352f502e81ac80a5cf35f744fed5c3c61672ed"
+    },
     "audit_model_consumers_write()": {
       "src_hash": "02f075d4a98927e717a2840bcf22f0c609dc8a4f48d8dc0f7a2ba6869b3e9a91"
     },
@@ -5446,6 +5529,9 @@
     },
     "audit_state_api_key(k context_api_keys)": {
       "src_hash": "b864dab1db4ba08570476b70f13d2b396caab4afd119fd49f9c0c7e7001c6981"
+    },
+    "audit_state_model_alias(a context_model_aliases)": {
+      "src_hash": "51cec9a296a124f88b899b8c3bdf85605f85761389159b9c481199588b1ebcbc"
     },
     "audit_state_model_consumer(c context_model_consumers)": {
       "src_hash": "c31dfffa79233dbc075925f1fe69000cc1032ff1d48f4fccbafcb1735fe636d7"
@@ -5491,6 +5577,9 @@
     },
     "mark_guard_dirty()": {
       "src_hash": "bb49dcca30b0f002ce40fd258d63330f6c62cd3de3d09740520cfb1f15bae09d"
+    },
+    "model_aliases_identity_immutable()": {
+      "src_hash": "39a12695bfa6b8833dd79b8af690c03e12961b8f05ec8ce0e1158d1195c35554"
     },
     "model_cidrs_private(p cidr[])": {
       "src_hash": "2e4acdde5106b4b69e28b751d69d9bd5eacc4af02dfdacc3947d011eed3482d3"
@@ -5580,6 +5669,18 @@
     },
     "context_llm_log.trg_llm_usage_rollup": {
       "def_hash": "cd7a75eeec79d9ffa466965c707f50f00a346b066c597c6a56c7d0bb844ece0f"
+    },
+    "context_model_aliases.trg_model_aliases_audit_ins_del": {
+      "def_hash": "f237a7e25eba18fa2837b9ee677c1d77044aeefd50f00ec371a2a80dd1fb4058"
+    },
+    "context_model_aliases.trg_model_aliases_audit_upd": {
+      "def_hash": "6814a5b659a52d0b186444f877fbbb4f5e893de64d88451b4966e81029e04d05"
+    },
+    "context_model_aliases.trg_model_aliases_identity": {
+      "def_hash": "4f2d9dac36ff9bc2ab3531cd2cede253edfc6df3f57e35b409b82ed9d663ff22"
+    },
+    "context_model_aliases.trg_model_aliases_notify": {
+      "def_hash": "7867438a98a3fdba3ece7155e03b97053273b965ccd72692817ef8033eff1b6b"
     },
     "context_model_consumers.trg_model_consumers_audit_ins_del": {
       "def_hash": "bda1f75b177103c18e9499e9a1881991628cdd55aaf8ab405d9e88d6a0eadc2c"

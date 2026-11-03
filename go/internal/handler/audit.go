@@ -252,7 +252,9 @@ func auditActorIsOwn(md map[string]json.RawMessage, readerTenant string) bool {
 // whether the peer binding (peer_instance_id, peer_bound_at) is server-admin
 // only (design/05 §3.2) or listed for tenant-admins too (design/04 §4.8) —
 // the wave that builds the consumer view decides and, if hidden, adds the
-// entry here.
+// entry here. model_alias needs none either: its whitelist is the alias
+// definition itself (scope, name, kind, role, sensitivity, policy,
+// description, enabled), which a tenant-admin manages for its own scope.
 var auditHiddenStateFields = map[string][]string{
 	"api_key": {"is_admin", "principal_id"},
 }

@@ -25,6 +25,9 @@
 //     unknown id, the server-admin actor is masked; the server-admin reads
 //     both tenants. Red against 160 (no tables) and against 161 without its
 //     audit triggers (rows: [] for both readers).
+//   - W02-03 (migration 162): model aliases — tenant-admin A reads
+//     entity=model_alias rows of A's aliases only; B's and the _global alias
+//     id answer like an unknown id; the server-admin reads all three.
 //   - limit=1000 ⇒ the audit.max_limit cap (default 200, ≥ 201 rows seeded);
 //     a configured cap wins; limit ≤ 0 or non-numeric ⇒ 400; since filters
 //     strictly, a malformed since ⇒ 400.
@@ -485,6 +488,82 @@ func TestAuditModelConsumerTenantFilter(t *testing.T) {
 			}
 		})
 	}
+}
+
+// auModelAlias writes one model alias of scope the way the alias admin
+// actions will (W02-04 builds those): in one transaction stamped with the
+// acting key, via api. Returns the alias id.
+func auModelAlias(ctx context.Context, t *testing.T, pool *pgxpool.Pool, actor *auth.AuthResult, scope, name string) string {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('ctx.api_key_id', $1, true), set_config('ctx.audit_via', 'api', true)`, actor.ApiKeyID); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	var id string
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO context_model_aliases (scope, name, kind, role) VALUES ($1, $2, 'chat', 'chat') RETURNING id::text`,
+		scope, name).Scan(&id); err != nil {
+		t.Fatalf("insert alias %s/%s: %v", scope, name, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return id
+}
+
+// W02-03 (migration 162): entity=model_alias on the read surface. A tenant
+// alias carries its tenant in metadata.tenant_id, a _global alias none — so
+// a tenant-admin reads its own tenant's alias history only, and the operator
+// catalog (_global) stays server-admin-only. Red against a store without
+// model_alias in auditEntities (400) and against 161 (no table).
+func TestAuditModelAliasTenantFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	mh := t43Handler(pool)
+	admin, _ := kaServerAdmin(ctx, t, pool)
+	a := auMakeTenant(ctx, t, pool, mh, admin, "au-aa")
+	b := auMakeTenant(ctx, t, pool, mh, admin, "au-ab")
+	aliasA := auModelAlias(ctx, t, pool, admin, a.scope, "chat")
+	aliasB := auModelAlias(ctx, t, pool, admin, b.scope, "chat")
+	aliasG := auModelAlias(ctx, t, pool, admin, "_global", "chat")
+	h := auditHandler(pool)
+
+	t.Run("tenant_admin_reads_its_own_only", func(t *testing.T) {
+		_, r := auditOK(t, h, a.ar, "?entity=model_alias")
+		if len(r.Rows) != 1 || r.Rows[0].EntityKey != aliasA || r.Rows[0].Action != "create" || r.Rows[0].Scope != a.scope {
+			t.Fatalf("tenant-admin A, entity=model_alias: %d row(s) %+v, want exactly the create row of %s", len(r.Rows), r.Rows, aliasA)
+		}
+		if auMetaStr(r.Rows[0], "tenant_id") != a.id {
+			t.Errorf("tenant-admin A: metadata %s, want tenant_id %s", auMeta(r.Rows[0]), a.id)
+		}
+		auWantRedacted(t, r.Rows[0])
+	})
+	t.Run("foreign_and_global_ids_read_like_an_unknown_one", func(t *testing.T) {
+		unknown, _ := auditOK(t, h, a.ar, "?entity=model_alias&id="+uuid.NewString())
+		for _, id := range []string{aliasB, aliasG} {
+			body, r := auditOK(t, h, a.ar, "?entity=model_alias&id="+id)
+			if len(r.Rows) != 0 || !bytes.Equal(body, unknown) {
+				t.Errorf("tenant-admin A reading alias %s: %s, want the body of an unknown id %s", id, body, unknown)
+			}
+		}
+	})
+	t.Run("server_admin_reads_all_three", func(t *testing.T) {
+		_, r := auditOK(t, h, admin, "?entity=model_alias")
+		got := map[string]string{}
+		for _, row := range r.Rows {
+			got[row.EntityKey] = auMetaStr(row, "tenant_id")
+		}
+		if len(r.Rows) != 3 || got[aliasA] != a.id || got[aliasB] != b.id || got[aliasG] != "" {
+			t.Errorf("server-admin, entity=model_alias: rows %v, want %s→%s, %s→%s and %s without a tenant", got, aliasA, a.id, aliasB, b.id, aliasG)
+		}
+	})
 }
 
 func TestAuditLimitAndSince(t *testing.T) {

@@ -23,7 +23,9 @@
 // Since migration 161 (W01-1) the model consumers and model keys are
 // classified too; their identity columns (consumer tenant_id, key
 // consumer_id) are immutable by trigger, so their per-column probe proves the
-// refusal and then the audit row with that trigger disabled. Completeness:
+// refusal and then the audit row with that trigger disabled. Since migration
+// 162 (W02-03) the model aliases are, with the same probe for their three
+// identity columns scope, name and kind. Completeness:
 // every table carrying a trigger that writes context_settings_audit is either
 // classified here or named in auditLegacyTables — a new audited table without
 // an entry turns TestAuditClassificationPin red.
@@ -32,10 +34,11 @@
 // before the pin runs: the red run of Negativ 3. The subtest
 // probe_column_turns_the_pin_red checks the same on a database of its own in
 // every run. TestAuditClassificationPerColumn honours CTX_M160_OVERLAY
-// (when-hole, value-swap) and CTX_M161_OVERLAY (no-of-list, no-identity)
-// for its red runs; the blacklist overlay of 161 stays green here (its
-// projection carries every audited value) and turns
-// TestModelAudit/state_is_the_whitelist red instead.
+// (when-hole, value-swap), CTX_M161_OVERLAY and CTX_M162_OVERLAY
+// (no-of-list, no-identity) for its red runs; the blacklist overlays of 161
+// and 162 stay green here (their projections carry every audited value) and
+// turn TestModelAudit/state_is_the_whitelist and
+// TestModelAliasAudit/state_is_the_whitelist red instead.
 //
 //	go test -tags=integration -p 1 -count=1 -run TestAuditClassification ./internal/store/
 package store_test
@@ -127,6 +130,19 @@ var auditClassification = []auditedTable{
 			"revoked_by_principal": "actor attribution of the revoke row, carried by metadata.actor_principal",
 		},
 		updTrig: "trg_model_keys_audit_upd",
+	},
+	{
+		table:   "context_model_aliases",
+		stateFn: "audit_state_model_alias",
+		audited: []string{
+			"scope", "name", "kind", "role", "sensitivity", "policy", "description", "enabled",
+		},
+		excluded: map[string]string{
+			"id":         "identity of the row, written as entity_key",
+			"created_at": "insert time; the audit row carries its own created_at",
+			"updated_at": "bookkeeping time the store writes next to an audited change",
+		},
+		updTrig: "trg_model_aliases_audit_upd",
 	},
 }
 
@@ -446,6 +462,27 @@ var auditColumnProbes = map[string]auditProbeSet{
 		},
 		pinned: map[string]string{"consumer_id": "trg_model_keys_identity"},
 	},
+	"context_model_aliases": {
+		audited: map[string]string{
+			"scope":       "scope || 'p'",
+			"name":        "name || '-p'",
+			"kind":        "CASE WHEN kind = 'chat' THEN 'embedding' ELSE 'chat' END",
+			"role":        "role || '-p'",
+			"sensitivity": "CASE WHEN sensitivity = 'credentials' THEN 'public' ELSE 'credentials' END",
+			"policy":      `policy || '{"max_n": 2}'::jsonb`,
+			"description": "description || 'p'",
+			"enabled":     "NOT enabled",
+		},
+		excluded: map[string]string{
+			"created_at": "created_at - interval '1 minute'",
+			"updated_at": "updated_at - interval '1 minute'",
+		},
+		pinned: map[string]string{
+			"scope": "trg_model_aliases_identity",
+			"name":  "trg_model_aliases_identity",
+			"kind":  "trg_model_aliases_identity",
+		},
+	},
 }
 
 func TestAuditClassificationPerColumn(t *testing.T) {
@@ -453,9 +490,11 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 		t.Skip("integration test")
 	}
 	ctx := context.Background()
-	// 160 (honouring CTX_M160_OVERLAY), then 161 (honouring CTX_M161_OVERLAY).
+	// 160 (honouring CTX_M160_OVERLAY), then 161 (honouring CTX_M161_OVERLAY),
+	// then 162 (honouring CTX_M162_OVERLAY).
 	pool := kaSetup(t, nil)
 	m161Apply(ctx, t, pool)
+	m162Apply(ctx, t, pool)
 
 	otherTenant := freshTenant(t, ctx, pool, "ka-pin-other")
 	var otherPrincipal string
@@ -481,10 +520,14 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	modelKey, _ := mcKey(ctx, t, pool, consumerB, "ka-pin-key", nil)
 	secondModelKey, _ := mcKey(ctx, t, pool, consumerB, "ka-pin-key-2", nil)
 
+	// The probed model alias: a tenant alias (scope 'ka-pin:main'), so the
+	// scope probe moves it to another tenant scope.
+	modelAlias := maAlias(ctx, t, pool, "ka-pin:main", "ka-pin-alias", nil)
+
 	rowID := map[string]string{"context_api_keys": key.ID, "context_tenant_quota": quotaID,
-		"context_model_consumers": consumerA, "context_model_keys": modelKey}
+		"context_model_consumers": consumerA, "context_model_keys": modelKey, "context_model_aliases": modelAlias}
 	entity := map[string]string{"context_api_keys": "api_key", "context_tenant_quota": "tenant_quota",
-		"context_model_consumers": "model_consumer", "context_model_keys": "model_key"}
+		"context_model_consumers": "model_consumer", "context_model_keys": "model_key", "context_model_aliases": "model_alias"}
 	fill := func(expr string) string {
 		if !strings.Contains(expr, "%[") {
 			return expr
