@@ -37,9 +37,14 @@ import (
 //     `AND type_source = 'auto'` — a manual block is never re-classified.
 //     applied=false in that case (rowsAffected 0).
 //
-// The hook runs on /api/store, MCP store, digest topic-map, dream daily
-// report AND (since T4) the manage-update path. Returns the applied type
-// name ("" when nothing was written) for caller logging.
+// The hook runs on /api/store (handler/context_store.go), MCP store
+// (handler/mcp.go), confirmed staged writes (handler/confirm_core.go),
+// block-mode /api/ingest (handler/ingest.go), the digest topic map and its
+// stub (digest/digest.go), the root map (rootmap/run.go), the dream daily
+// report (dream/synthesize_report.go) AND (since T4) the update afterwork
+// (handler/mcp_update.go finishBlockUpdate: REST manage update, MCP update,
+// confirmed updates). Returns the applied type name ("" when nothing was
+// written) for caller logging.
 func ClassifyBlockAfterUpsert(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, blockID, title string, metadata map[string]any) (typeName string, err error) {
 	if set == nil {
 		// Loud, not silent: a nil set means the caller skipped the registry
