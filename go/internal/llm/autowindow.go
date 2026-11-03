@@ -248,9 +248,8 @@ func resolveMaxOut(base Options, params map[string]any, b *backends.Backend) (in
 //
 // The returned maps are fresh copies. That is not hygiene, it is a
 // requirement: the source map belongs to the immutable pool snapshot, and
-// applyOpenAIBodyExtras writes provider.zdr/data_collection into whatever map
-// it finds under "provider" — mutating the snapshot's map would leak one
-// request's constraint into every later request on that backend.
+// this merge writes provider.only — mutating the snapshot's map would leak
+// one request's constraint into every later request on that backend.
 func mergeProviderConstraint(extra map[string]any, eligible []string, m *autoMember) (map[string]any, bool) {
 	out := make(map[string]any, len(extra)+1)
 	for k, v := range extra {

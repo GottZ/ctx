@@ -275,6 +275,55 @@ func TestGenericProviderNoZDRInjectionStream(t *testing.T) {
 	}
 }
 
+// TestOpenAIBodyExtrasNeverWritesSnapshot: the row's extra_body maps belong to
+// the pool snapshot that every concurrent request on the backend shares
+// (Pool.Chain hands out shallow Backend copies). chatOpenAI passes
+// b.ExtraBody to the helper, whose flat merge puts the row's own provider map
+// into the request; the ZDR force must write into a clone of it. Writing into
+// the row's map is a data race between concurrent requests — outside -race
+// the runtime aborts the process with "concurrent map writes" — and leaves
+// zdr/deny in the snapshot.
+func TestOpenAIBodyExtrasNeverWritesSnapshot(t *testing.T) {
+	b := orBackend("http://unused.invalid", backends.TrustNoCredentials)
+	b.ExtraBody = map[string]any{"provider": map[string]any{"require_parameters": true}}
+	before, err := json.Marshal(b.ExtraBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"model":"qwen/qwen3.6-27b","messages":[{"role":"user","content":"hi"}]}`)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				out, err := applyOpenAIBodyExtras(body, b.ExtraBody, &b)
+				if err != nil {
+					t.Errorf("applyOpenAIBodyExtras: %v", err)
+					return
+				}
+				var got map[string]any
+				if err := json.Unmarshal(out, &got); err != nil {
+					t.Errorf("body not JSON: %v", err)
+					return
+				}
+				if prov, _ := got["provider"].(map[string]any); prov["zdr"] != true || prov["data_collection"] != "deny" || prov["require_parameters"] != true {
+					t.Errorf("wire provider = %v, want zdr/deny forced and require_parameters merged", prov)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	after, err := json.Marshal(b.ExtraBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the ZDR force wrote into the row's extra_body (pool snapshot): before %s, after %s", before, after)
+	}
+}
+
 // TestOpenRouterResponseTelemetry: usage.cost, the top-level model (the model
 // that ACTUALLY answered — models-fallback can differ) and the response id
 // reach ChatResponse for openrouter-class backends; a generic backend leaves

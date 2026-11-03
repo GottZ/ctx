@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"time"
 
@@ -483,8 +484,8 @@ func mergeJSONFields(body []byte, extra map[string]any) ([]byte, error) {
 // It is the one implementation of the force for both openai chat wires: the
 // force is decided by b alone (provider class + escape), never by extra.
 // chatOpenAI passes b.ExtraBody; ChatStream passes nil, because
-// buildStreamBody already merged its extraBody — with nil the force writes
-// only into the freshly decoded body, never into the row's extra_body maps.
+// buildStreamBody already merged its extraBody. Either way the force writes
+// into a clone of the provider map, never into the row's extra_body maps.
 func applyOpenAIBodyExtras(body []byte, extra map[string]any, b *backends.Backend) ([]byte, error) {
 	forceZDR := b.ProviderClass == backends.ProviderOpenRouter && !allowsDataCollection(b)
 	if len(extra) == 0 && !forceZDR {
@@ -498,7 +499,14 @@ func applyOpenAIBodyExtras(body []byte, extra map[string]any, b *backends.Backen
 		m[k] = v
 	}
 	if forceZDR {
-		prov, _ := m["provider"].(map[string]any)
+		// Clone before writing: the flat merge put extra's own provider map
+		// into m, and for chatOpenAI that is the row's — the pool snapshot
+		// every concurrent request on this backend shares. Writing into it
+		// races (the runtime aborts with "concurrent map writes") and leaves
+		// zdr/deny in the snapshot. One level suffices: the force writes
+		// only provider's top-level keys.
+		src, _ := m["provider"].(map[string]any)
+		prov := maps.Clone(src)
 		if prov == nil {
 			prov = map[string]any{}
 		}

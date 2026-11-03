@@ -173,8 +173,7 @@ func TestMergeProviderConstraintPreservesOperatorFields(t *testing.T) {
 	}
 	// The pool snapshot's maps are shared across every request on this
 	// backend; a merge that writes into them leaks one request's constraint
-	// into all later ones (and applyOpenAIBodyExtras then adds zdr/deny to the
-	// snapshot too).
+	// into all later ones.
 	if _, leaked := extra["provider"].(map[string]any)["only"]; leaked {
 		t.Error("merge wrote into the source extra_body — the pool snapshot is shared, not per-request")
 	}
