@@ -211,6 +211,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore, blocktypeReg, dispatcher)
 	statusH := handler.NewStatusHandler(statusCollector)
 	llmlogH := handler.NewLLMLogHandler(pool, cfgStore)
+	// Audit read surface (W06-7, design/06 §4.10): context_settings_audit for
+	// the served entity types, tenant-filtered in SQL, foreign actors redacted.
+	auditH := handler.NewAuditHandler(pool, cfgStore)
 	// SSE live updates (F4-W7/G34): GET /api/events broadcasts from the SAME
 	// collector — one diff per tick fans out to all connections. ctx is the
 	// server lifecycle (cancelled on shutdown) so streams end before
@@ -358,6 +361,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 			// under the SAME tenant gate (server-admin = any row; tenant-admin =
 			// only its own keys' rows, uniform 404 otherwise).
 			r.Get("/api/llmlog/{id}", llmlogH.HandleLLMLogDetail)
+			// Audit history (W06-7): a tenant-admin reads only rows whose
+			// metadata.tenant_id is its own tenant, with server-admin and
+			// foreign actors masked; a server-admin reads everything.
+			r.Get("/api/audit", auditH.HandleAudit)
 		})
 		// Web-chat (F6-C4/G37): POST /api/chat/stream runs one turn and streams
 		// SSE — wrapped in WithScheduler so the turn raises the interactive-demand

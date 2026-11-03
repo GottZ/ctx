@@ -139,6 +139,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"project.sync.rate_limit":                        "Manual forge-sync runs allowed per project per hour, shared across all API keys of the project; excess gets 429 with Retry-After",
 	"project.sync.max_concurrent":                    "Process-wide cap on simultaneously running forge syncs; the semaphore is sized at boot, so changes require a restart",
 	"llmlog.max_limit":                               "Upper bound on the limit parameter of one GET /api/llmlog page, keeping a single read over the telemetry hypertable bounded",
+	"audit.max_limit":                                "Upper bound on the limit parameter of one GET /api/audit page, and the page size when the parameter is absent; 0 falls back to the default",
 	"webchat.enabled":                                "Gates the web-chat streaming and session API routes; off returns 404 and the web UI hides the chat feature",
 	"webchat.max_iterations":                         "Caps tool-call loop iterations per chat turn; after the cap one closing model call without tools finishes the turn",
 	"webchat.max_tokens":                             "Upper clamp on max_tokens per model call in a chat turn; a request may ask for less but never more",

@@ -81,6 +81,9 @@ func TestRegistryStrictSet(t *testing.T) {
 		// F4-W6 (G33) read cap: a malformed limit is an operator typo worth
 		// surfacing loudly, same as its telemetry sibling above.
 		"llmlog.max_limit": true,
+		// W06-7 audit read cap: the same class as llmlog.max_limit (one bounded
+		// page of a read endpoint), same loud-abort treatment.
+		"audit.max_limit": true,
 		// F4-W7 (G34) SSE connection cap: an int ceiling like llmlog.max_limit,
 		// so it shares the loud-abort treatment — a typo'd cap that silently
 		// falls back to the default would hide the intended ceiling. The events.*

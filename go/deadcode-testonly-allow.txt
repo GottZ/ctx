@@ -42,7 +42,6 @@ internal/config/envscan.go	ScanEnvNames	# AST-Scanner beider Env-Zäune; 5 Aufru
 internal/config/envscan.go	WithNamePattern	# Einzige Option von ScanEnvNames; nur der Tooling-Zaun cmd/envnames_test.go:174/190 setzt ein Muster
 internal/config/envscan.go	envNameRefs	# Nur Aufrufer ScanEnvNames:106, das selbst nur Tests bedient — fällt mit ihm, nicht vor ihm
 internal/config/envscan.go	NonTestGoFiles	# Aufrufer ScanEnvNames:97 (test-only) plus contractmode_pin_test.go:94 und cmd/{envnames,dbaccess}_test.go — der Prod-Pfad endet vorher; exportiert seit NZ-3, weil beide Zaun-Hälften dieselbe Dateiliste brauchen
-internal/config/load.go	Defaults	# K24 dauerhaft: einzige exportierte Form der Registry-Defaults, 11 Aufrufe in 9 Testdateien
 internal/config/registry.go	EnvVars	# K24 dauerhaft: Key/Env-Vertrag (F2), 42 Referenzen in 25 Testdateien halten die Env-Hygiene
 internal/derived/citegate.go	CiteGate	# wartet: E01-2 C (C2-12) — Gen-1-Gate (W01-1); das Paket ist verdrahtet, diese Hälfte nicht
 internal/derived/citegate.go	Verdict.SourcesCovered	# wartet: E01-2 C (C2-12) — Gen-1-Gate (W01-1); das Paket ist verdrahtet, diese Hälfte nicht

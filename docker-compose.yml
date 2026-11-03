@@ -332,6 +332,9 @@ services:
       # ── llmlog.* (1) ──
       CTX_LLMLOG_MAX_LIMIT: ${CTX_LLMLOG_MAX_LIMIT:-}
 
+      # ── audit.* (1) ──
+      CTX_AUDIT_MAX_LIMIT: ${CTX_AUDIT_MAX_LIMIT:-}
+
       # ── webchat.* (9) ──
       # Web-chat harness (F6). ENABLED gates POST /api/chat/stream + the session
       # routes (off ⇒ 404). The integer budgets cap one turn; CONCURRENT_TURNS
