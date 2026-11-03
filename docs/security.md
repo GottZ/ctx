@@ -54,7 +54,7 @@ PGPASSWORD="$CONTEXT_DB_PASSWORD" docker compose exec -e PGPASSWORD db \
 | `migration` | the `snapshot` rows of migration 160 |
 | `sql` | nothing stamped the transaction — a direct `psql` edit |
 
-The values are constants in `internal/store/audit_via.go`; the store stamps them, together with the actor and the request id, as transaction-local settings (`ctx.audit_via`, `ctx.api_key_id`, `ctx.request_id`) before the write. A `psql` session can set the same settings, so the audit trail attributes faithfully what ctx writes and records an unstamped edit as `sql`; it is not proof against an operator with database access. A `psql` write that sets a quota's `updated_by` names that key as actor and still reads `via = 'sql'`.
+The values are constants in `internal/store/audit_via.go`; the store stamps them, together with the actor and the request id, as transaction-local settings (`ctx.audit_via`, `ctx.api_key_id`, `ctx.request_id`) before the write. A `psql` session can set the same settings, so the audit trail attributes faithfully what ctx writes and records an unstamped edit as `sql`; it is not proof against an operator with database access. A `psql` write that sets a quota's `updated_by` names that key as actor and still reads `via = 'sql'`: on a `via = 'sql'` row the actor is the `updated_by` the row itself claims, not a stamped caller.
 
 There is no API to read these rows yet; until there is, `SELECT created_at, action, actor_label, metadata, old_value, new_value FROM context_settings_audit WHERE entity_type = 'api_key' AND entity_key = '<key id>' ORDER BY created_at;`.
 

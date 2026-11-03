@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/jackc/pgx/v5"
 )
 
 // AuditVia names the channel a write reached context_api_keys or
@@ -61,19 +63,29 @@ func APIStamp(actorKeyID, requestID string) AuditStamp {
 	return AuditStamp{ActorKeyID: actorKeyID, RequestID: requestID, Via: ViaAPI}
 }
 
+// errStampOutsideTx refuses a stamp that could not reach the write it is meant
+// for (see stampAudit).
+var errStampOutsideTx = errors.New("store: audit stamp outside a transaction")
+
 // stampAudit applies s to the transaction q runs in, the way setTxActor and
 // SetTxRequestID do (set_config with is_local=true, reset at COMMIT/ROLLBACK),
 // in one round trip; only the non-empty fields are set, so it never clears a
-// stamp the caller's transaction already carries. q must be a pgx.Tx for the
-// stamp to reach the write: on a pool the statement is its own transaction
-// and the settings are gone before the next one. An unknown via is refused —
-// a typo must not reach the audit trail as a channel.
+// stamp the caller's transaction already carries. A non-empty stamp needs q
+// to be a pgx.Tx: on a pool the set_config statement is its own transaction
+// and the settings are gone before the write, which would then read
+// via='sql' without an actor although the caller stamped it — so that case
+// is refused with errStampOutsideTx before anything is written. An empty
+// stamp is a no-op on any handle. An unknown via is refused — a typo must not
+// reach the audit trail as a channel.
 func stampAudit(ctx context.Context, q pgxdb.Rower, s AuditStamp) error {
 	if s.Via != "" && !s.Via.valid() {
 		return fmt.Errorf("store: audit stamp: unknown via %q", s.Via)
 	}
 	if s.ActorKeyID == "" && s.RequestID == "" && s.Via == "" {
 		return nil
+	}
+	if _, inTx := q.(pgx.Tx); !inTx {
+		return errStampOutsideTx
 	}
 	var a, r, v *string
 	if err := q.QueryRow(ctx,

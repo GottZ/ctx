@@ -644,3 +644,80 @@ func TestKeyAuditBootstrapVia(t *testing.T) {
 		t.Fatalf("bootstrap key: new_value %s", r.NewRaw)
 	}
 }
+
+// H1: a stamp handed to a pool would vanish with the one statement it runs in
+// (set_config is_local), and the mint would read via='sql' without an actor
+// although the caller stamped it. stampAudit refuses a non-empty stamp outside
+// a transaction before anything is written; an empty stamp stays allowed, and
+// a stamp on a transaction reaches the row.
+func TestKeyAuditStampOutsideTx(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	admin, _, err := store.CreateApiKey(ctx, pool, "ka-pool-admin", "private", nil, "")
+	if err != nil {
+		t.Fatalf("mint admin: %v", err)
+	}
+	tid := freshTenant(t, ctx, pool, "ka-pool")
+	countKeys := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_api_keys WHERE tenant_id = $1::uuid`, tid).Scan(&n); err != nil {
+			t.Fatalf("count keys: %v", err)
+		}
+		return n
+	}
+
+	t.Run("stamp_on_a_pool_is_refused_before_any_write", func(t *testing.T) {
+		beforeAudit, beforeKeys := kaCount(ctx, t, pool, `entity_type = 'api_key'`), countKeys()
+		key, _, err := store.MintOwnerKey(ctx, pool, "ka-pool-owner", "private", nil, tid, store.APIStamp(admin.ID, "ka-req-pool"))
+		if err == nil {
+			rs := kaRows(ctx, t, pool, "api_key", key.ID)
+			var via, actor any = "<none>", "<none>"
+			if len(rs) > 0 {
+				via, actor = rs[len(rs)-1].Meta["via"], rs[len(rs)-1].APIKeyID
+			}
+			t.Fatalf("MintOwnerKey on a pool with a stamp: no error, key %s minted, audit via=%v api_key_id=%v — the stamp was lost silently", key.ID, via, actor)
+		}
+		if !strings.Contains(err.Error(), "audit stamp outside a transaction") {
+			t.Fatalf("error %q, want the outside-a-transaction refusal", err)
+		}
+		if d := kaCount(ctx, t, pool, `entity_type = 'api_key'`) - beforeAudit; d != 0 {
+			t.Fatalf("refused mint wrote %d audit row(s), want 0", d)
+		}
+		if d := countKeys() - beforeKeys; d != 0 {
+			t.Fatalf("refused mint wrote %d key(s), want 0", d)
+		}
+	})
+
+	t.Run("empty_stamp_on_a_pool_stays_allowed", func(t *testing.T) {
+		key, _, err := store.MintOwnerKey(ctx, pool, "ka-pool-owner-unstamped", "private", nil, tid, store.AuditStamp{})
+		if err != nil {
+			t.Fatalf("unstamped mint on a pool: %v", err)
+		}
+		rs := kaRows(ctx, t, pool, "api_key", key.ID)
+		if len(rs) != 1 || rs[0].Meta["via"] != "sql" || rs[0].APIKeyID != nil {
+			t.Fatalf("unstamped mint: rows %+v, want one create with via=sql and no actor", rs)
+		}
+	})
+
+	t.Run("stamp_on_a_transaction_reaches_the_row", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		key, _, err := store.MintOwnerKey(ctx, tx, "ka-tx-owner", "private", nil, tid, store.APIStamp(admin.ID, "ka-req-tx"))
+		if err != nil {
+			t.Fatalf("mint in a tx: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		rs := kaRows(ctx, t, pool, "api_key", key.ID)
+		if len(rs) != 1 || rs[0].Meta["via"] != "api" || rs[0].APIKeyID == nil || *rs[0].APIKeyID != admin.ID || rs[0].Meta["request_id"] != "ka-req-tx" {
+			t.Fatalf("stamped mint in a tx: rows %+v, want one create with via=api, the admin, request_id ka-req-tx", rs)
+		}
+	})
+}

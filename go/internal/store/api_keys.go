@@ -289,10 +289,11 @@ func MintKeyWithQuota(ctx context.Context, pool *pgxpool.Pool, label, homeScope 
 // the caller owns the transaction scope.
 //
 // stamp attributes the mint in the audit trail (migration 160): it is applied to
-// q right before the INSERT and, on a pgx.Tx, holds until the caller's COMMIT —
-// tenant-create passes APIStamp, project-provision its ViaProvision stamp. On a
-// pool the INSERT is its own transaction and the stamp does not reach it; every
-// production caller composes the mint into its transaction.
+// q right before the INSERT and holds until the caller's COMMIT — tenant-create
+// passes APIStamp, project-provision its ViaProvision stamp. A non-empty stamp
+// requires q to be a pgx.Tx: on a pool it could not reach the INSERT, so the
+// mint is refused (errStampOutsideTx) before anything is written; an empty
+// stamp keeps the pool path open (unattributed, via='sql').
 func MintOwnerKey(ctx context.Context, q pgxdb.Rower, label, homeScope string, allowedScopes []string, tenantID string, stamp AuditStamp) (ApiKey, string, error) {
 	if err := stampAudit(ctx, q, stamp); err != nil {
 		return ApiKey{}, "", err
