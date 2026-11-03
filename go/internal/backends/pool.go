@@ -626,10 +626,17 @@ func (p *Pool) cooldownSet(list []Backend, now time.Time) map[string]bool {
 	return out
 }
 
+// failBackoffCap bounds the doubling of ReportFailure — the back-off, never
+// the class cooldown itself.
+const failBackoffCap = 10 * time.Minute
+
 // ReportFailure records one failed attempt: class cooldown (doubled after
-// ≥3 consecutive fails, capped at 10 minutes — cheap backoff, no circuit
-// breaker state machine) and the sanitized error class. Full error strings
-// (URLs, provider bodies) exist in slog only — never here, never in status.
+// ≥3 consecutive fails up to 10 minutes — cheap backoff, no circuit breaker
+// state machine) and the sanitized error class. The doubling never shortens
+// a class cooldown longer than its cap (W02-11): billing and no_providers
+// keep their hour, auth its 15 minutes, a peer's spent quota its full
+// Retry-After (design/06 K-06-26). Full error strings (URLs, provider bodies)
+// exist in slog only — never here, never in status.
 func (p *Pool) ReportFailure(backendID string, class ErrClass, retryAfter time.Duration) {
 	p.healthM.Lock()
 	defer p.healthM.Unlock()
@@ -643,10 +650,7 @@ func (p *Pool) ReportFailure(backendID string, class ErrClass, retryAfter time.D
 	h.lastErrAt = time.Now()
 	cd := class.Cooldown(retryAfter)
 	if h.consecutiveFails >= 3 && cd > 0 {
-		cd *= 2
-		if cd > 10*time.Minute {
-			cd = 10 * time.Minute
-		}
+		cd = max(cd, min(2*cd, failBackoffCap))
 	}
 	if cd > 0 {
 		h.cooldownUntil = time.Now().Add(cd)
