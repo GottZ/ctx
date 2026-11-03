@@ -27,9 +27,9 @@ The parts behave like a memory, not like a filing cabinet:
 
 **A subagent or workflow agent:**
 
-1. Starts with the project's most recently updated `agent-briefing` blocks in its context (up to `--limit`, default 20) — when none carry the project's tag, with the most recently updated `agent-briefing` blocks the key can read, whatever their tags (#58) — injected by `ctx brief --hook` on `SubagentStart`, and queries for its own task.
+1. Starts with the project's most recently updated `agent-briefing` blocks in its context (up to `--limit`, default 20) — when the project-tagged lookup returns nothing or fails, with the most recently updated `agent-briefing` blocks the key can read, whatever their tags (#58) — injected by `ctx brief --hook` on `SubagentStart`, and queries for its own task.
 2. Does the work against the store like a session.
-3. Ends its final message with one `[PERSIST:category:title]` line per finding, the content below each marker. `ctx persist --hook` on `SubagentStop` sends each marker with non-empty content to `store`, tagged with the project and carrying the session and agent ids in its metadata. `store` upserts on category, title and scope, so a marker that reuses a title already in the key's scope replaces that block. A write the store never receives is dropped silently; a write the store rejects is still counted as saved until #59 lands. Setup in [operations](operations.md#claude-code-integration-optional).
+3. Ends its final message with one `[PERSIST:category:title]` line per finding, the content below each marker. `ctx persist --hook` on `SubagentStop` sends each marker with non-empty content to `store`, tagged with the project and carrying the session and agent ids in its metadata. `store` upserts on category, title and scope, so a marker that reuses a title already in the key's scope replaces that block. A write the store never receives or rejects is dropped silently and not counted as saved. Setup in [operations](operations.md#claude-code-integration-optional).
 
 ## Failure modes
 
