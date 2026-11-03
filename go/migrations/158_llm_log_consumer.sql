@@ -31,17 +31,18 @@
 --
 -- Cost: ADD COLUMN without a default is a catalog change. ADD CONSTRAINT
 -- validates every existing row once and CREATE INDEX builds the partial index
--- chunk by chunk — two reads of every chunk's heap (the bodies sit in TOAST
--- and are not read). The partial index holds no entry until the first /v1
--- row. The runner holds the migration in one transaction, so context_llm_log
--- stays locked (ACCESS EXCLUSIVE) until it commits; it runs at boot before
--- this process writes. lock_timeout bounds the wait for a foreign session's
--- lock: past 3 s the migration fails, the boot with it, and the next start
--- retries. Measured on a synthetic copy of production shape (W06-2 probe,
--- llmlog.TestMigration158CostProbe: 1 000 000 rows, 29 chunks, 976 MB of
--- heap, TimescaleDB 2.31.0): CHECK validation 0.45 s, index build 0.43 s,
--- the whole file through the runner 0.75 s — see docs/operations.md
--- "Migration 158".
+-- chunk by chunk — two reads of every chunk's heap, the prompt and response
+-- bodies stored inline in the row included; only bodies above the TOAST
+-- threshold lie outside the heap and are not read. The partial index holds no
+-- entry until the first /v1 row. The runner holds the migration in one
+-- transaction, so context_llm_log stays locked (ACCESS EXCLUSIVE) until it
+-- commits; it runs at boot before this process writes. lock_timeout bounds
+-- the wait for a foreign session's lock: past 3 s the migration fails, the
+-- boot with it, and the next start retries. Measured on a synthetic copy of
+-- production shape (W06-2 probe, llmlog.TestMigration158CostProbe:
+-- 1 000 000 rows, 29 chunks, 976 MB of heap, TimescaleDB 2.31.0): CHECK
+-- validation 0.45 s, index build 0.43 s, the whole file through the runner
+-- 0.75 s — see docs/operations.md "Migration 158".
 --
 -- Idempotent: ADD COLUMN / CREATE INDEX IF NOT EXISTS; the constraint is
 -- added in a block that swallows duplicate_object, so a second run changes

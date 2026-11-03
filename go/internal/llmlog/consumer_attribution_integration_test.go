@@ -20,7 +20,7 @@
 //	go test -tags=integration -p 1 ./internal/llmlog/ \
 //	  -run 'TestRecordConsumerAttribution|TestOneIdentityCheck|TestMigration158' -count=1 -v
 //	CTX_M158_PROBE_ROWS=1000000 go test -tags=integration -p 1 ./internal/llmlog/ \
-//	  -run TestMigration158CostProbe -count=1 -v -timeout 30m
+//	  -run TestMigration158CostProbe -count=1 -v -timeout 40m
 package llmlog_test
 
 import (
@@ -476,11 +476,11 @@ func topLevelStatements(body string) []string {
 // TestMigration158CostProbe measures gate (d)'s cost question (design/06
 // §3.1 [H]): how long 158 holds the boot on a hypertable of production shape.
 // The database stops at 157 and gets CTX_M158_PROBE_ROWS rows over 196 days
-// (29 chunks, the live count on 2026-11-03), about 900 bytes of heap per row
-// (live: 945) and an api_key_id on one row in 60; VACUUM ANALYZE then leaves
-// it as settled as the live table. Each top-level statement of 158 is timed
-// in one transaction that is rolled back, then the boot runner applies the
-// file for real and is timed as a whole.
+// (29 chunks, the live count on 2026-11-03), 1 024 bytes of heap per row as
+// measured at 1M rows (976 MB; live: 945) and an api_key_id on one row in
+// 60; VACUUM ANALYZE then leaves it as settled as the live table. Each
+// top-level statement of 158 is timed in one transaction that is rolled back,
+// then the boot runner applies the file for real and is timed as a whole.
 func TestMigration158CostProbe(t *testing.T) {
 	raw := os.Getenv("CTX_M158_PROBE_ROWS")
 	if raw == "" {
