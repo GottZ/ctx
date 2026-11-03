@@ -143,6 +143,9 @@ var passthroughPipelineIdents = map[string]bool{
 	"internal/llm:pipeline":   true, // ChatChain / rejection / newChainEntry helpers
 	"internal/llm:c.Pipeline": true, // ChainCall.Do into newChainEntry
 	"internal/dream:pipeline": true, // newDreamEntry's own parameter (router.go)
+	// handler/status.go llm24hRowOf: a status row copies the pipeline name of
+	// an llmusage group, read back from context_llm_log — no prompt is built.
+	"internal/handler:g.Pipeline": true,
 }
 
 // constIdentAt matches an identifier (optionally one selector deep) at the

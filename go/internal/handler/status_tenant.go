@@ -8,6 +8,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/llmusage"
 )
 
 // Per-tenant status view (MT T37c, 04-W4/§4.6). A tenant-admin's GET /api/status
@@ -23,8 +24,9 @@ import (
 // SSE migration map lives in events.go (this SnapshotForTenant is its anchor 5).
 
 // tenantRollupTTL bounds the per-tenant rollup cache age. The rollup query joins
-// llm_log → api_keys → tenant_scopes over the 24h window; 30s amortizes it
-// across N tenant-admin polls (the §4.6 cache, NOT a per-request scan).
+// the hourly usage rollup plus the raw edge hour → api_keys → tenant_scopes over
+// the 24h window; 30s amortizes it across N tenant-admin polls (the §4.6 cache,
+// NOT a per-request scan).
 const tenantRollupTTL = 30 * time.Second
 
 // TenantLLM24h returns the caller tenant's 24h rollup from the lock-free
@@ -66,43 +68,19 @@ func (c *StatusCollector) refreshTenantRollupAsync() {
 // buildTenantRollupInto builds the whole per-tenant generation in ONE query
 // (scope → its backend/pipeline buckets, api_key_id-attributed, cost-bearing)
 // and swaps it in. On a query error the old generation is kept (a transient DB
-// blip never blanks a tenant's view).
+// blip never blanks a tenant's view). The query reads the hourly rollup plus
+// the window's raw edge hour, both joined through context_api_keys and
+// context_tenant_scopes as the raw-row query was (llmusage.TenantGroups,
+// W06-5): a consumer's row carries no api_key_id and counts for no tenant.
 func (c *StatusCollector) buildTenantRollupInto(ctx context.Context) {
-	rows, err := c.pool.Query(ctx, `
-		SELECT cts.scope,
-		       COALESCE(cll.backend_name, cll.host) AS backend, cll.pipeline,
-		       count(*)::int AS calls,
-		       COALESCE(avg(cll.duration_ms), 0)::int AS avg_ms,
-		       (count(*) FILTER (WHERE cll.error IS NOT NULL))::int AS errors,
-		       COALESCE(sum(cll.prompt_tokens), 0)::bigint AS prompt_tokens,
-		       COALESCE(sum(cll.completion_tokens), 0)::bigint AS completion_tokens,
-		       COALESCE(sum(cll.cost_usd), 0)::float8 AS cost_usd
-		FROM context_llm_log cll
-		JOIN context_api_keys cak ON cll.api_key_id = cak.id
-		JOIN context_tenant_scopes cts ON cak.tenant_id = cts.tenant_id
-		WHERE cll.created_at > now() - interval '24 hours'
-		GROUP BY cts.scope, 2, cll.pipeline
-		ORDER BY cts.scope, calls DESC`)
+	groups, err := llmusage.TenantGroups(ctx, c.pool, c.llm24hAnchor(), llm24hSpan)
 	if err != nil {
 		slog.Warn("status: per-tenant llm_24h rollup query failed", "error", err)
 		return
 	}
-	defer rows.Close()
-
 	gen := map[string][]llm24hRow{}
-	for rows.Next() {
-		var scope string
-		var r llm24hRow
-		if err := rows.Scan(&scope, &r.Backend, &r.Pipeline, &r.Calls, &r.AvgMs,
-			&r.Errors, &r.PromptTokens, &r.CompletionTokens, &r.CostUSD); err != nil {
-			slog.Warn("status: per-tenant llm_24h scan failed", "error", err)
-			return
-		}
-		gen[scope] = append(gen[scope], r)
-	}
-	if rows.Err() != nil {
-		slog.Warn("status: per-tenant llm_24h rows error", "error", rows.Err())
-		return
+	for _, g := range groups {
+		gen[g.Scope] = append(gen[g.Scope], llm24hRowOf(g))
 	}
 	c.tenantRollup.Store(&gen)
 	c.tenantRollupAt.Store(time.Now().UnixNano())
