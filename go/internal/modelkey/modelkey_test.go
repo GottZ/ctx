@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,17 @@ const (
 	// modulo 2^32, i.e. the second spelling a uint32 decoder would accept.
 	goldenAliasSum = "50vJGH"
 )
+
+// keyShape is the canonical form spelled independently of alphabet and
+// isBase62, so a mutant of either cannot bend the oracle along with it.
+var keyShape = regexp.MustCompile(`^ctxm_[0-9A-Za-z]{49}$`)
+
+// withSum appends the checksum recomputed over s — an input built this way
+// passes the CRC comparison, so only the shape checks can refuse it.
+func withSum(s string) string {
+	sum := checksum([]byte(s))
+	return s + string(sum[:])
+}
 
 func mustParse(t *testing.T, raw string) Key {
 	t.Helper()
@@ -193,10 +205,6 @@ func TestParseOneErrorForm(t *testing.T) {
 // recomputed over its own first 48 bytes: only the prefix check, the
 // character check or the length check stands between it and a Key.
 func TestParseRejectsShapeWithValidChecksum(t *testing.T) {
-	withSum := func(s string) string {
-		sum := checksum([]byte(s))
-		return s + string(sum[:])
-	}
 	at20 := func(c string) string { return goldenBody[:20] + c + goldenBody[21:] }
 	cases := map[string]string{
 		"access-token prefix": withSum("ctxt_" + goldenBody),
@@ -216,6 +224,33 @@ func TestParseRejectsShapeWithValidChecksum(t *testing.T) {
 		if k, err := Parse(raw); err != ErrShape || k.Plaintext() != "" { //nolint:errorlint // identity is the contract
 			t.Errorf("%s: err = %v, non-zero Key = %v", name, err, k.Plaintext() != "")
 		}
+	}
+}
+
+// Every body position 5…47 × every byte outside [0-9A-Za-z], each with a
+// recomputed checksum (43 × 194 = 8342 inputs): the refusal can only come
+// from the character check, so a loop that skips its first or last body
+// position is red here.
+func TestParseRejectsInvalidCharAtEveryBodyPosition(t *testing.T) {
+	total, accepted := 0, 0
+	for pos := len(Prefix); pos < len(Prefix)+bodyLen; pos++ {
+		for b := 0; b < 256; b++ {
+			c := string([]byte{byte(b)})
+			if keyShape.MatchString("ctxm_" + strings.Repeat("0", 48) + c) {
+				continue
+			}
+			total++
+			raw := withSum(Prefix + goldenBody[:pos-len(Prefix)] + c + goldenBody[pos-len(Prefix)+1:])
+			if k, err := Parse(raw); err != ErrShape || k.Plaintext() != "" { //nolint:errorlint // identity is the contract
+				accepted++
+				if accepted <= 5 {
+					t.Errorf("byte 0x%02x at %d with a valid checksum: err = %v", b, pos, err)
+				}
+			}
+		}
+	}
+	if total != bodyLen*194 || accepted != 0 {
+		t.Fatalf("accepted %d of %d invalid-character inputs (want 0 of %d)", accepted, total, bodyLen*194)
 	}
 }
 
@@ -419,7 +454,7 @@ func FuzzParse(f *testing.F) {
 				t.Fatalf("rejection must be ErrShape with a zero Key, got %v", err)
 			}
 		} else {
-			if k.Plaintext() != raw || !HasPrefix(raw) {
+			if k.Plaintext() != raw || !HasPrefix(raw) || !keyShape.MatchString(raw) {
 				t.Fatalf("accepted %q but round trip gives %q", raw, k.Plaintext())
 			}
 			again, err := Parse(k.Plaintext())
