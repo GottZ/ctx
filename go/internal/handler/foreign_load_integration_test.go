@@ -3,12 +3,14 @@
 // W06-8 gates (design/06 §4.9, §5 B-06-26): the foreign-load detector against
 // a real PG18 testcontainer and a fake SGLang GET /metrics (httptest).
 //
-// The collector gates are black-box on purpose: a tick is refreshForBroadcast
-// (one buildCheap pass), a read is Snapshot() + JSON, the dispatcher is a
-// DispatchSource fake. None of them names a detector symbol, so they run RED
-// against the pre-W06-8 tree (the foreign_load key never appears) and GREEN
-// against the detector — the "erst rot ohne Detektor" proof of B-06-26. Only
-// the last test (the rollup read) calls into the detector directly.
+// The collector gates are black-box on purpose: a read is Snapshot() + JSON,
+// the dispatcher is a DispatchSource fake. Until W06-8b a tick was
+// refreshForBroadcast alone (one buildCheap pass, which kicked the round), so
+// no gate named a detector symbol and they ran RED against the pre-W06-8 tree
+// (the foreign_load key never appears) — the "erst rot ohne Detektor" proof
+// of B-06-26. Since W06-8b rounds come from the detector's own ticker, and
+// tick() adds that ticker's one step (kickForeignLoad). The last test (the
+// rollup read) calls into the detector directly.
 //
 //	go test -tags=integration -p 1 ./internal/handler/ -run 'Foreign' -count=1 -v
 package handler
@@ -208,9 +210,11 @@ type flRow struct {
 }
 
 // flHarness wires one collector over a real DB, a seeded backend pool and the
-// mutable dispatch fake. tick() is one collector pass; the cache TTL is an hour
-// so Snapshot() never ticks on its own — every probe round is one the test
-// started.
+// mutable dispatch fake. tick() is one collector pass plus one detector tick
+// (kickForeignLoad, the step RunForeignLoad takes per interval — since W06-8b
+// buildCheap kicks no round, and the harness runs no ticker of its own); the
+// cache TTL is an hour so Snapshot() never ticks on its own — every probe
+// round is one the test started.
 type flHarness struct {
 	t    *testing.T
 	ctx  context.Context
@@ -234,7 +238,10 @@ func newFLHarness(t *testing.T, rows []backends.Backend, disp *flDispatch) *flHa
 	return &flHarness{t: t, ctx: context.Background(), col: col, disp: disp}
 }
 
-func (h *flHarness) tick() { h.col.refreshForBroadcast(h.ctx) }
+func (h *flHarness) tick() {
+	h.col.refreshForBroadcast(h.ctx)
+	h.col.kickForeignLoad(h.ctx, h.col.cfg.Snapshot())
+}
 
 // frame is the server-admin status as the wire carries it.
 func (h *flHarness) frame() map[string]json.RawMessage {
@@ -640,6 +647,31 @@ func TestForeignLoadExposure(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if _, ok := unmarked.frame()["foreign_load"]; ok {
 		t.Fatal("foreign_load present with no marked target — absent must mean nothing is measured")
+	}
+}
+
+// W06-8b: a status read never starts a probe round. The detector's own ticker
+// (RunForeignLoad) is the only round source, so neither the SSE refresh
+// (refreshForBroadcast, one buildCheap pass) nor a server-admin poll nor the
+// tenant path sends a GET or publishes the section, however often they run —
+// with a marked target on a live fake. Red against a tree whose buildCheap
+// kicks rounds (v5.30.0): the reads would probe.
+func TestForeignLoadStatusReadStartsNoRound(t *testing.T) {
+	captureFLLogs(t)
+	m := newFLMetrics(t)
+	m.set(3)
+	h := newFLHarness(t, []backends.Backend{flMarked("b1", "spark-chat", m.srv.URL)}, &flDispatch{origin: m.origin(t), slots: 4})
+	for i := 0; i < 10; i++ {
+		h.col.refreshForBroadcast(h.ctx)
+		h.col.Snapshot(h.ctx)
+		h.col.SnapshotForTenant(h.ctx, "st-a", nil)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := m.hits.Load(); n != 0 {
+		t.Fatalf("%d /metrics GETs from 30 status reads — a status read must never start a probe round", n)
+	}
+	if _, ok := h.frame()["foreign_load"]; ok {
+		t.Fatal("foreign_load published by status reads alone — only a detector tick syncs the targets")
 	}
 }
 
