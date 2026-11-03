@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GottZ/ctx/internal/llmusage"
 	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
@@ -32,9 +33,18 @@ import (
 // via atomic.Pointer and never holds a mutex — every external call of every
 // tenant hits this in the hot path, and a mutex would serialize all tenants
 // (mirrors StatusCollector's atomic.Pointer + CAS, status.go:123/220). The
-// per-tenant cost SUM over the 1M+ context_llm_log hypertable is the expensive
-// part, so it is cached with a short TTL and refreshed single-flight off the read
-// path — never per request (§6.2).
+// per-tenant spend is cached with a short TTL and refreshed single-flight off
+// the read path — never per request (§6.2). It is read from the hourly rollup
+// context_llm_usage_hourly plus the raw rows of each window's first, partial
+// hour (internal/llmusage), not by a 30-day scan over the 1M+ context_llm_log
+// hypertable.
+//
+// The spend is INTERNAL-ONLY (K17, B-06-18): it counts rows that carry one of
+// the tenant's knowledge keys in api_key_id. A row of an external /v1
+// consumer carries consumer_id and never api_key_id (CHECK of migration 158),
+// so consumer traffic can never exhaust daily_calls or the cost budget of the
+// tenant and lock its people out of /api/query and the web chat; consumer
+// volume is bounded by the consumer limits instead.
 
 // TenantQuota is one tenant's enforcement policy (context_tenant_quota, 063). nil
 // budget pointers mean unlimited (fail-OPEN on cost — the fail-CLOSED axis is
@@ -79,6 +89,14 @@ type tenantState struct {
 	dayCost   float64 // SUM(cost_usd) external, last 24h
 	monthCost float64 // SUM(cost_usd) external, last 30d
 	dayCalls  int     // COUNT attributed calls, last 24h
+
+	// The earliest moment each figure above can drop: the oldest row it
+	// counts + its window (zero = nothing to relieve, see llmusage.Totals).
+	// Nothing reads them yet; the /v1 tenant gate turns them into
+	// Retry-After (W06-14).
+	dayCallsRelief  time.Time
+	dayCostRelief   time.Time
+	monthCostRelief time.Time
 }
 
 // quotaGen is one immutable refresh generation. A quota row lives on the scope
@@ -98,7 +116,7 @@ type quotaGen struct {
 // swapped on a CAS-guarded TTL refresh. Construct with NewQuotaAccountant; the
 // zero value is not usable.
 type QuotaAccountant struct {
-	q       pgxdb.Querier
+	q       quotaDB
 	ttl     time.Duration
 	nowFn   func() time.Time // injectable clock for tests (real: time.Now)
 	cache   atomic.Pointer[quotaGen]
@@ -112,9 +130,16 @@ type QuotaAccountant struct {
 	warned map[string]string
 }
 
+// quotaDB is what the accountant reads through: Query for the policy, scope
+// and key lists, QueryRow for the spend windows (llmusage.Window).
+type quotaDB interface {
+	pgxdb.Querier
+	pgxdb.Rower
+}
+
 // NewQuotaAccountant builds an accountant over q (a *pgxpool.Pool in production)
 // with the given cache TTL. A TTL <= 0 falls back to 30s (§6.2 guidance).
-func NewQuotaAccountant(q pgxdb.Querier, ttl time.Duration) *QuotaAccountant {
+func NewQuotaAccountant(q quotaDB, ttl time.Duration) *QuotaAccountant {
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
@@ -233,9 +258,9 @@ func (a *QuotaAccountant) RefreshNow(ctx context.Context) error {
 // load the enabled quota rows with the tenant their scope belongs to and merge
 // them per tenant; (2) map every scope of those tenants to its tenant; (3)
 // resolve each tenant's key ids to a literal uuid[] in ONE pass; (4) per
-// tenant, SUM external cost + COUNT calls over those keys — api_key_id =
-// ANY($keys) (literal, index-friendly, NOT IN(subquery) the planner hash-joins
-// past, §6.4).
+// tenant, SUM external cost + COUNT calls over those keys (a literal list,
+// probed key by key — never NOT IN(subquery), which the planner hash-joins
+// past, §6.4). Every tenant's windows end at the same instant, taken once.
 func (a *QuotaAccountant) build(ctx context.Context) (quotaGen, error) {
 	gen := quotaGen{scopeTenant: map[string]string{}, tenants: map[string]tenantState{}}
 	rows, err := a.loadPolicies(ctx)
@@ -257,14 +282,13 @@ func (a *QuotaAccountant) build(ctx context.Context) (quotaGen, error) {
 	if err != nil {
 		return gen, err
 	}
+	now := a.nowFn()
 	for tenant, q := range policies {
 		st := tenantState{quota: q}
 		if keys := keysByTenant[tenant]; len(keys) > 0 {
-			dc, mc, calls, serr := a.spend(ctx, keys)
-			if serr != nil {
-				return gen, serr
+			if err := a.spend(ctx, keys, now, &st); err != nil {
+				return gen, err
 			}
-			st.dayCost, st.monthCost, st.dayCalls = dc, mc, calls
 		}
 		gen.tenants[tenant] = st
 	}
@@ -437,28 +461,37 @@ func (a *QuotaAccountant) loadKeysByTenant(ctx context.Context, tenantIDs []stri
 	return out, rows.Err()
 }
 
-// spend runs the rolling external-cost SUMs + the attributed call COUNT for one
-// tenant's literal key list. created_at lower-bounded at 30d so the index scan
-// stays bounded; the 24h windows are FILTER clauses over that.
-func (a *QuotaAccountant) spend(ctx context.Context, keys []string) (dayCost, monthCost float64, dayCalls int, err error) {
-	rows, err := a.q.Query(ctx, `
-		SELECT
-		  COALESCE(SUM(cost_usd) FILTER (
-		      WHERE created_at > now() - interval '24 hours' AND backend_locality = 'external'), 0),
-		  COALESCE(SUM(cost_usd) FILTER (
-		      WHERE backend_locality = 'external'), 0),
-		  COUNT(*) FILTER (WHERE created_at > now() - interval '24 hours')::int
-		FROM context_llm_log
-		WHERE api_key_id = ANY($1::uuid[])
-		  AND created_at > now() - interval '30 days'`, keys)
+// The two rolling windows of the spend. spendMonth is thirty days rolling,
+// not the calendar month — the semantics monthly_cost_usd has always had.
+const (
+	spendDay   = 24 * time.Hour
+	spendMonth = 30 * spendDay
+)
+
+// spend fills st's rolling figures for one tenant's literal key list, all
+// three windows ending at now: external cost over 24 h and over 30 days, and
+// every attributed call over 24 h (local, failed and NULL-locality rows
+// included), each with its earliest relief. Each window is the hourly rollup
+// plus the raw rows of its first, partial hour (llmusage.Window) — no raw
+// scan over thirty days of the hypertable; the sums read at most one hour of
+// raw rows per window. The filter stays the tenant's knowledge keys
+// (api_key_id): a /v1 consumer row never counts here (K17, see the package
+// comment).
+func (a *QuotaAccountant) spend(ctx context.Context, keys []string, now time.Time, st *tenantState) error {
+	day, err := llmusage.Window(ctx, a.q, llmusage.Spec{Now: now, Span: spendDay, APIKeyIDs: keys})
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("quota: spend sum: %w", err)
+		return fmt.Errorf("quota: spend calls: %w", err)
 	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&dayCost, &monthCost, &dayCalls); err != nil {
-			return 0, 0, 0, fmt.Errorf("quota: spend scan: %w", err)
-		}
+	dayExt, err := llmusage.Window(ctx, a.q, llmusage.Spec{Now: now, Span: spendDay, APIKeyIDs: keys, Locality: LocalityExternal})
+	if err != nil {
+		return fmt.Errorf("quota: spend day cost: %w", err)
 	}
-	return dayCost, monthCost, dayCalls, rows.Err()
+	monthExt, err := llmusage.Window(ctx, a.q, llmusage.Spec{Now: now, Span: spendMonth, APIKeyIDs: keys, Locality: LocalityExternal})
+	if err != nil {
+		return fmt.Errorf("quota: spend month cost: %w", err)
+	}
+	st.dayCalls, st.dayCallsRelief = int(day.Calls), day.CallsRelief
+	st.dayCost, st.dayCostRelief = dayExt.Cost, dayExt.CostRelief
+	st.monthCost, st.monthCostRelief = monthExt.Cost, monthExt.CostRelief
+	return nil
 }
