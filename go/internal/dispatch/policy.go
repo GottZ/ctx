@@ -342,6 +342,18 @@ type Settings struct {
 	// interactive-role targets). ≤ 0 (default) = off — herald term
 	// unweakened, behavior byte-identical (E-F5/K6).
 	BackgroundAgingAfter time.Duration
+	// RankOrder is the rank table of the admission scan (design/03 §4.2,
+	// A-E2 no. 1: policy data, not a constant, rank.go): both admission
+	// predicates serve the classes in this order. Hot: a swap acts on the
+	// next wake. The zero value reads as the default order (DefaultRankOrder:
+	// interactive, background), like an empty Fairness reads as fifo —
+	// ClassInteractive is 0, so an all-interactive order IS the zero value.
+	// Any other order must be a permutation of all classes with
+	// ClassInteractive on rank 0 (I-03-2); otherwise the default is in
+	// effect and New/UpdateSettings log one WARN. An array, not a slice, so
+	// Settings stays comparable. Its config key (dispatch.external_order)
+	// lands with A03-W3.
+	RankOrder [numClasses]Class
 }
 
 // DefaultSettings mirrors the config registry defaults of the dispatch.* keys.
@@ -357,6 +369,7 @@ func DefaultSettings() Settings {
 		PreemptReleaseTimeout:        defaultPreemptReleaseTimeout,
 		Fairness:                     FairnessFIFO,
 		UsageWindow:                  time.Hour,
+		RankOrder:                    defaultRankOrder,
 	}
 }
 

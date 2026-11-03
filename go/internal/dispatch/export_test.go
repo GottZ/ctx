@@ -34,3 +34,14 @@ func (d *Dispatcher) SeedInteractiveDepthForTest(origin string, n int) {
 	st := d.targetLocked(norm)
 	st.interactive.total = n
 }
+
+// SetRankOrderForTest stores a rank table WITHOUT validation and wakes every
+// target like UpdateSettings — the A03-W2 mutation probe only: an order the
+// settings path refuses (background on rank 0) must still steer both
+// admission predicates, which proves they read the table.
+func (d *Dispatcher) SetRankOrderForTest(order [numClasses]Class) {
+	s := d.currentSettings()
+	s.RankOrder = order
+	d.settings.Store(&s)
+	d.wakeAll()
+}

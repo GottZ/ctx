@@ -17,7 +17,9 @@ import (
 // DispatchSettings maps the dispatch.* config surface onto the dispatcher's
 // knobs (design/01 §3.1). Fairness stays the FIFO baseline — its config key
 // is the fairness activation wave's (MW23); until then the structural field
-// is pinned here so the mapping stays total.
+// is pinned here so the mapping stays total. RankOrder follows the same
+// pattern: pinned to the default order (interactive, background) — its
+// config key dispatch.external_order lands with A03-W3 (A-E2 no. 1).
 func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 	return dispatch.Settings{
 		Enabled:                      c.Enabled,
@@ -30,6 +32,7 @@ func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 		PreemptReleaseTimeout:        c.PreemptReleaseTimeout,
 		BackgroundAgingAfter:         c.BackgroundAgingAfter,
 		Fairness:                     dispatch.FairnessFIFO,
+		RankOrder:                    dispatch.DefaultRankOrder(),
 		// UsageWindow stays zero (= package default): its config key belongs
 		// to the fairness activation wave (MW23), the Fairness pattern.
 	}

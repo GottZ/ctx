@@ -1,7 +1,9 @@
 // Package dispatch is the single process-wide admission layer in front of
 // every inference wire call (Vorhaben E, design/01 §1.2 invariant I-D1): a
 // blocking Acquire per physical backend origin with an explicit priority
-// class (interactive > background, FIFO per class, no barging), a demand
+// class served by a rank scan over the rank table Settings.RankOrder (policy
+// data, default interactive > background; FIFO per class, no barging — a
+// waiting, admissible higher-ranked class always goes first), a demand
 // herald counting interactive requests from HTTP ingress, per-principal /
 // per-tenant / per-target wait caps (Deckel-Staffel, design/03 §4.5.4) and a
 // reaper against leaked leases. Policy lives in data (context_backends.limits

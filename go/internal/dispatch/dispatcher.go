@@ -148,6 +148,7 @@ func New(logger *slog.Logger, s Settings) *Dispatcher {
 		targets:    make(map[string]*targetState),
 		stopReaper: make(chan struct{}),
 	}
+	s.RankOrder = d.resolveRankOrder(s.RankOrder)
 	d.settings.Store(&s)
 	d.policy.Store(&Policy{})
 	go d.reapLoop()
@@ -162,8 +163,11 @@ func (d *Dispatcher) Close() {
 
 // UpdateSettings hot-swaps the config-derived knobs. A flip to
 // Enabled=false drains every waiter as pass-through immediately (B2: the
-// emergency stop must never leave goroutines stuck behind a dead gate).
+// emergency stop must never leave goroutines stuck behind a dead gate). The
+// rank table resolves here once per swap (rank.go: zero ⇒ default, invalid ⇒
+// default + one WARN); the next wake reads it.
 func (d *Dispatcher) UpdateSettings(s Settings) {
+	s.RankOrder = d.resolveRankOrder(s.RankOrder)
 	d.settings.Store(&s)
 	d.wakeAll()
 }
@@ -297,28 +301,31 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	}
 }
 
-// eligibleNowLocked is the admission predicate (design/01 §4.4).
-// interactive: slot free AND no waiting interactive (FIFO, no barging — a
-// newcomer never overtakes a waiter of its own or a higher class of the SAME
-// bucket; bucket order is policy). background: slot free AND both wait
-// queues empty AND demand == 0 — the herald term keeps background out of the
-// inter-lease gaps of running interactive requests (R3, not softenable).
-// A class outside the class table is never eligible (fail-closed default,
-// A03-W1; pre-A03-W1 it got the background predicate, K6).
+// eligibleNowLocked is the immediate-admission half of the rank scan
+// (design/03 §4.2, rank.go): class is admissible (weight 1) AND its own queue
+// is empty (FIFO, no barging — a newcomer never overtakes a waiter of its own
+// class; bucket order is policy) AND every class ranked above it in
+// Settings.RankOrder has an empty queue or an inadmissible head. With the
+// default order this is exactly the pre-A03-W2 predicate: interactive = slot
+// free AND no waiting interactive; background = slot free AND both wait
+// queues empty AND demand == 0 (the herald term, R3). A class outside the
+// class table is never eligible (fail-closed default in admissibleLocked,
+// A03-W1; pre-A03-W1 it got the background predicate, K6); a class absent
+// from the rank table — reachable only through the unvalidated test hook —
+// is never eligible either.
 func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, slots int) bool {
-	if st.held >= slots {
+	if !d.admissibleLocked(st, class, 1, slots) || d.queuedLocked(st, class) {
 		return false
 	}
-	switch class {
-	case ClassInteractive:
-		return st.interactive.total == 0
-	case ClassBackground:
-		return st.interactive.total == 0 && st.background.len() == 0 && d.demand.Load() == 0
-	default:
-		d.logger.Error("dispatch: class without an eligibility case — not eligible (fail-closed default)",
-			"target", st.origin, "class", uint8(class))
-		return false
+	for _, h := range d.currentSettings().RankOrder {
+		if h == class {
+			return true
+		}
+		if d.queuedLocked(st, h) && d.admissibleLocked(st, h, 1, slots) {
+			return false // a waiting, admissible higher-ranked head goes first
+		}
 	}
+	return false
 }
 
 // enqueueLocked places w in its class queue or rejects it fast. Check order
@@ -437,13 +444,18 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 	}
 }
 
-// wakeLocked re-evaluates admission on one target: strict class order,
-// direct handoff, herald term for background — softened ONLY by the FA
+// wakeLocked re-evaluates admission on one target — the wake half of the
+// rank scan (design/03 §4.2, rank.go): while a slot is free, walk
+// Settings.RankOrder and hand the slot to the head of the first class whose
+// head is admissible (direct handoff); when no class yields one, the wake
+// ends. The rank table is read once per wake (hot: a settings swap acts on
+// the next wake). The herald term for background is softened ONLY by the FA
 // aging escape (aging.go): with demand > 0 an aged background HEAD may still
 // be admitted, re-checked per iteration (a younger next head stays gated).
-// Interactive precedence is structural: the escape is consulted only after
-// the interactive pick returned nil. With slots ≤ 0 (emergency stop or
-// cleared policy) every waiter drains as pass-through.
+// Interactive precedence is structural: interactive holds rank 0
+// (validRankOrder), so the escape is consulted only after the interactive
+// pick returned nil. With slots ≤ 0 (emergency stop or cleared policy) every
+// waiter drains as pass-through.
 func (d *Dispatcher) wakeLocked(st *targetState) {
 	slots := d.slotsLocked(st.origin)
 	if slots <= 0 {
@@ -458,20 +470,13 @@ func (d *Dispatcher) wakeLocked(st *targetState) {
 			d.handoffLocked(st, w, false)
 		}
 	}
-	mode := d.currentSettings().Fairness
+	set := d.currentSettings()
+scan:
 	for st.held < slots {
-		if w := st.interactive.pick(mode); w != nil {
-			d.handoffLocked(st, w, true)
-			continue
-		}
-		now := time.Now()
-		if demandFree := d.demand.Load() == 0; demandFree || d.agingEscapeLocked(st, now) {
-			if w := st.background.pop(); w != nil {
-				if !demandFree {
-					d.agedAdmitLocked(st, w, now)
-				}
+		for _, c := range set.RankOrder {
+			if w := d.pickAdmissibleLocked(st, c, set.Fairness, slots); w != nil {
 				d.handoffLocked(st, w, true)
-				continue
+				continue scan
 			}
 		}
 		return
