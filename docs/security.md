@@ -52,7 +52,7 @@ PGPASSWORD="$CONTEXT_DB_PASSWORD" docker compose exec -e PGPASSWORD db \
 | `api` | a manage action (`api-key-create/-update/-delete`, `tenant-create` for the owner key, `tenant-quota-set`) |
 | `bootstrap` | the first-key mint at boot (`CTX_BOOTSTRAP_ADMIN_KEY` on an empty key table); no actor |
 | `provision` | `project-provision`: owner key, repo-agent key and quota seed |
-| `offboarding` | `tenant-delete`: the hard delete of the tenant's keys |
+| `offboarding` | `tenant-delete`: the hard delete of the tenant's knowledge keys (`delete` rows), model keys and model consumers (`prune` rows) |
 | `migration` | the `snapshot` rows of migration 160 |
 | `sql` | nothing stamped the transaction — a direct `psql` edit |
 

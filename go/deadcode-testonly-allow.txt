@@ -131,11 +131,11 @@ internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_g
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
-internal/modelkey/modelkey.go	Generate	# wartet: W01-5 — W01-3 (Store) ruft es, ist selbst aber bis zu den Admin-Actions test-only
+internal/modelkey/modelkey.go	Generate	# wartet: W01-5 — einzige Aufrufer CreateConsumerWithKey/RotateKey (W01-3, Store) sind selbst test-only bis zu den Admin-Actions
 internal/modelkey/modelkey.go	Key.GoString	# Hint-Darstellung für fmt %#v (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
-internal/modelkey/modelkey.go	Key.Hash	# wartet: W01-5 (Store-Aufrufer aus W01-3, erreichbar mit den Admin-Actions) oder W02-05 (ModelAuth), wer zuerst
+internal/modelkey/modelkey.go	Key.Hash	# wartet: W01-5 (Store-Aufrufer insertModelKeyTx aus W01-3, erreichbar mit den Admin-Actions) oder W02-05 (ModelAuth), wer zuerst
 internal/modelkey/modelkey.go	Key.HashPrefix	# wartet: W02-05 — einziger Aufrufer ModelAuth (W01-6, Limiter-Schlüssel) bleibt bis zum Mount unmontiert
-internal/modelkey/modelkey.go	Key.Hint	# wartet: W01-5 — key_hint beim Anlegen/Rotieren (W01-3), erreichbar mit den Admin-Actions
+internal/modelkey/modelkey.go	Key.Hint	# wartet: W01-5 — key_hint beim Anlegen/Rotieren (insertModelKeyTx, W01-3), erreichbar mit den Admin-Actions
 internal/modelkey/modelkey.go	Key.LogValue	# Hint-Darstellung für slog (LogValuer) (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
 internal/modelkey/modelkey.go	Key.Plaintext	# wartet: W01-5 — Reveal-once-Antwort der Admin-Actions (W01-3 übergibt den Klartext)
 internal/modelkey/modelkey.go	Key.String	# Hint-Darstellung für fmt %v/%s und jeden Stringer-Verbraucher (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
@@ -181,6 +181,32 @@ internal/schemacontract/recheck.go	CheckRunCountForTest	# Test-only-Accessor auf
 internal/store/api_keys.go	CreateApiKey	# E02-3 A: Fixture-Fassade über insertApiKeyTx; 73 Aufrufe in 44 Testdateien, Prod mintet über den Tx-Kern
 internal/store/graph.go	EgoGraph	# Cache-lose Fassade über EgoGraphCached (Prod-Pfad); 59 Aufrufe in 12 Integrationstests als SQL-Orakel
 internal/store/graph.go	takeHop	# Legacy-Fassade über takeHopMerged (Prod: graph.go:336); graph_test.go:105 ff. pinnt die alte Trunkierung
+internal/store/model_keys.go	CreateConsumerWithKey	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
+internal/store/model_keys.go	DeleteConsumer	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
+internal/store/model_keys.go	KeyHistory	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
+internal/store/model_keys.go	ListConsumers	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
+internal/store/model_keys.go	ModelAccess.args	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	ModelConsumerPatch.assignments	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	ModelKeyUsage.Flush	# wartet: W02-05 (Mount) — Touch aus ModelAuth (W01-6), Run/Flush im ctxd-Lifecycle (W01-6 Übergabe); Gates in TestUsageFlushNoLockWait
+internal/store/model_keys.go	ModelKeyUsage.Run	# wartet: W02-05 (Mount) — Touch aus ModelAuth (W01-6), Run/Flush im ctxd-Lifecycle (W01-6 Übergabe); Gates in TestUsageFlushNoLockWait
+internal/store/model_keys.go	ModelKeyUsage.Touch	# wartet: W02-05 (Mount) — Touch aus ModelAuth (W01-6), Run/Flush im ctxd-Lifecycle (W01-6 Übergabe); Gates in TestUsageFlushNoLockWait
+internal/store/model_keys.go	NewModelKeyUsage	# wartet: W02-05 (Mount) — Touch aus ModelAuth (W01-6), Run/Flush im ctxd-Lifecycle (W01-6 Übergabe); Gates in TestUsageFlushNoLockWait
+internal/store/model_keys.go	RevokeKey	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
+internal/store/model_keys.go	RotateKey	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
+internal/store/model_keys.go	TenantConsumerIDs	# wartet: W06-16 — Konsumenten-Teil der Tenant-Usage-Sicht (consumer_id = ANY($ids), Muster TenantAPIKeyIDs)
+internal/store/model_keys.go	UpdateConsumer	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
+internal/store/model_keys.go	checkConsumerCap	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	consumerDest	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	insertConsumerTx	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	insertModelKeyTx	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	keyDest	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	liveKeyIDsTx	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	lockConsumer	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	lockTenantOfConsumer	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	lockTenantRow	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	retirePredecessorsTx	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	stampRevokedPrincipalTx	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
+internal/store/model_keys.go	writeConsumerTx	# Helfer der Modell-Konsumenten-Primitive (W01-3): wartet: W01-5
 internal/store/project_sync.go	SetProjectSyncCursor	# Prod schreibt nur MergeProjectSyncCursor (forge/sync.go:355/436/498); Set nur project_sync_it:117
 internal/store/resolve_sources.go	ResolveSources	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt
 internal/store/resolve_sources.go	SourceSet.Facts	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt
