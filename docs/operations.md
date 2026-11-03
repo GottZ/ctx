@@ -503,7 +503,7 @@ The model endpoints are `/v1/chat/completions`, `/v1/completions`, `/v1/embeddin
 | `probe_error` | `null`, or the failure class of the last round: `timeout`, `unreachable`, `http status <code>`, `metric family absent: <name>`, `api_key_ref unresolved`, `metrics body over <n> bytes` — never request material or a secret |
 | `probed_at` | when the last round landed |
 
-**Log lines.** Each state change logs one WARN, never one per tick: `status: foreign load suspected` / `… cleared`, `status: foreign load hourly mismatch` / `… cleared`, `status: foreign load probe failed` (at INFO, `… probe recovered`) and `status: foreign load hourly rollup read failed` (at INFO, `… read recovered`). The detector exports nothing — ctx still has no metrics endpoint of its own; it only reads the engine's.
+**Log lines.** Each state change logs one WARN, never one per tick: `status: foreign load suspected` / `… cleared`, `status: foreign load hourly mismatch` / `… cleared`, `status: foreign load probe failed` and `status: foreign load hourly rollup read failed` (both WARN on entering the failure; their counterparts `… probe recovered` and `… read recovered` log at INFO). The detector exports nothing — ctx still has no metrics endpoint of its own; it only reads the engine's.
 
 **Settings** (all `global-only`, hot):
 
