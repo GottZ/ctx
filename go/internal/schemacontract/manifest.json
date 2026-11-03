@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 158,
-    "migration_count": 46,
+    "migration_max": 159,
+    "migration_count": 47,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1817,6 +1817,168 @@
           "name": "consumer_id",
           "type": "uuid",
           "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_llm_usage_hourly": {
+      "columns": [
+        {
+          "name": "bucket_start",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "api_key_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "consumer_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "not_null": false,
+          "generated_expr_hash": "af4e310384b18e00057891f06ea451fcbaa4d474866b94199590cd6902216267",
+          "storage": "x"
+        },
+        {
+          "name": "pipeline",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "backend_name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "model",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "model_alias",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "dispatch_class",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "backend_locality",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "hop",
+          "type": "smallint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "calls",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "errors",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "unattributed_ok",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "estimated_calls",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "completion_tokens",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "duration_ms_sum",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "duration_n",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "queue_wait_ms_sum",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "queue_wait_n",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "cost_usd",
+          "type": "numeric",
+          "not_null": true,
+          "storage": "m"
+        },
+        {
+          "name": "latency_hist",
+          "type": "bigint[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "queue_wait_hist",
+          "type": "bigint[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "ttft_hist",
+          "type": "bigint[]",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
           "storage": "p"
         }
       ],
@@ -4808,6 +4970,15 @@
     "idx_llm_log_pipeline": {
       "def_hash": "1020ca37593bb524a6fd456e8c4a241d30b313aed45a98c4cf83fdbab3d37eea"
     },
+    "idx_llm_usage_bucket": {
+      "def_hash": "dc09cef479e88cb5b85f6f533edb4b81e4a84a4b560cb637f13ed726f2d265b9"
+    },
+    "idx_llm_usage_consumer": {
+      "def_hash": "e3cfd335e0ae9e3b527705010dcbb1d8aa97cbd75784f5375b20198b94dbe311"
+    },
+    "idx_llm_usage_key": {
+      "def_hash": "3406f7af3b46972bd2c2e6a9bf0b0ae6b7e9afb388b607c01c3db82beea35cc3"
+    },
     "idx_oauth_clients_active": {
       "def_hash": "fb7988c8823da82ba293af0240e08c4e1dfb9bd682bd803b1e3d4328a8df9882"
     },
@@ -4970,6 +5141,9 @@
     "uq_graph_cat_hue_scope_cat": {
       "def_hash": "e80cfb6737f8b7faa3d0f6c8deacf3dc4c8b83544b289e0d9cbd2bdff066fb5a"
     },
+    "uq_llm_usage_hourly": {
+      "def_hash": "d653a870c668d587e16a6b81a08dbe187678f6a21c40e6621c92b879b85e5914"
+    },
     "uq_projects_identity": {
       "def_hash": "a510155665d945fb7cf6d59cc3f4016355a00a2e196e9b913f2fb976f179a0ee"
     },
@@ -5034,6 +5208,18 @@
     },
     "ctx_rrf_arms(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer, p_cap_semantic integer, p_cap_fts_de integer, p_cap_fts_en integer, p_cap_trigram integer, p_trgm_threshold double precision)": {
       "src_hash": "bf458ff316a1038890a32da8f55fde4f69d08f1cce9ead99e507dbde135cef86"
+    },
+    "hist_add(a bigint[], b bigint[])": {
+      "src_hash": "5731502fcc7477dbba23b988180051f4cf97802217dbb6faf506cb49bd53e30a"
+    },
+    "llm_usage_hist_idx(ms bigint)": {
+      "src_hash": "0c76b6670b4e67815665d51292cd5ad736139bde6fa803884cc1a96556e0c281"
+    },
+    "llm_usage_hist_one(idx integer)": {
+      "src_hash": "dba615515c581607e2c87c832aec9ae8d3f433c360222b421f5bd8e238b2840c"
+    },
+    "llm_usage_rollup_ins()": {
+      "src_hash": "6e7bdaa2efba53e3fa254643d2989bf22d6ad80a65b5b03d1c7cdc656c2746af"
     },
     "mark_guard_dirty()": {
       "src_hash": "bb49dcca30b0f002ce40fd258d63330f6c62cd3de3d09740520cfb1f15bae09d"
@@ -5102,6 +5288,9 @@
     },
     "context_graph_category_hues.trg_graph_category_hues_audit": {
       "def_hash": "3b8fa57135a109cf1dd6e6677ae6e845e1302320227d2e67ff3c8093e86097c9"
+    },
+    "context_llm_log.trg_llm_usage_rollup": {
+      "def_hash": "cd7a75eeec79d9ffa466965c707f50f00a346b066c597c6a56c7d0bb844ece0f"
     },
     "context_secrets.trg_secrets_audit": {
       "def_hash": "e2a7cc38641a5f9928702777f76a2d2e2cd15cf0c760f83a2fa2ac57323207a1"
