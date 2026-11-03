@@ -35,21 +35,32 @@
 -- must never raise — an error in it fails the llmlog INSERT and loses the
 -- row with its telemetry — so every metadata read is guarded by
 -- jsonb_typeof, numbers are floored and clamped (hop 0..16, ttft_ms
--- 0..9e15), NULLs are coalesced, the alias is cut to 128 characters, and
--- cost_usd is an unbounded NUMERIC: a bounded one overflows on a sum
--- (NUMERIC(18,8) after 10 001 rows at the llmlog column maximum).
+-- 0..9e15), NULLs are coalesced, every text dimension is cut to 100
+-- characters, and cost_usd is an unbounded NUMERIC: a bounded one overflows
+-- on a sum (NUMERIC(18,8) after 10 001 rows at the llmlog column maximum).
 -- Totality comes from the guards, not from swallowing errors — an EXCEPTION
--- block would hide the miscount it caused. The one limit left is the B-tree
--- entry size of the unique index (about 2.7 kB): a dimension text of
--- kilobytes — the longest today has 25 characters — fails the insert, as an
--- oversized pipeline or backend_name already does on the log's own indexes. Histograms are added element by
--- element by hist_add: bigint[] + bigint[] does not exist (42883), and
--- intarray's + would be a union. No update touches a dimension column, so an
--- update stays on its page (HOT) as long as the page has room; fillfactor 50
--- leaves room on every page, so a row version that has to move lands where
--- the next ones fit (92 % HOT at 50 against 89 % at 100 with eight writers
--- on one row), and autovacuum runs per 5 000 dead tuples instead of per
--- 20 % of the table.
+-- block would hide the miscount it caused.
+--
+-- The cut keeps every entry of the unique index below the B-tree limit of
+-- 2 704 bytes, which context_llm_log itself does not impose on model, host,
+-- dispatch_class or backend_locality (model comes from the upstream's
+-- answer). Worst case after left(x, 100), at most 4 bytes per character:
+-- six texts of 400 bytes + 4-byte varlena headers = 2 424, bucket_start 8,
+-- api_key_id and consumer_id 2 × 16 = 32 (the CHECK allows only one),
+-- hop 2, tuple header with null bitmap 16, alignment padding below 30 —
+-- under 2 510 bytes. Uncut, six texts of 128 four-byte characters already
+-- make a 3 096-byte entry (54000, measured). One cut for all six, the alias
+-- included (100 rather than 128), keeps that sum checkable. Two texts that
+-- differ only after the 100th character share a rollup row; today's longest
+-- dimension text has 25 characters.
+--
+-- Histograms are added element by element by hist_add: bigint[] +
+-- bigint[] does not exist (42883), and intarray's + would be a union. No
+-- update touches a dimension column, so an update stays on its page (HOT)
+-- as long as the page has room; fillfactor 50 leaves room on every page, so
+-- a row version that has to move lands where the next ones fit (92 % HOT at
+-- 50 against 89 % at 100 with eight writers on one row), and autovacuum runs
+-- per 5 000 dead tuples instead of per 20 % of the table.
 --
 -- Which rows: all of them. The backfill at the end aggregates every existing
 -- context_llm_log row with the same normalisation and writes its counts over
@@ -175,14 +186,14 @@ CREATE OR REPLACE FUNCTION hist_add(a BIGINT[], b BIGINT[]) RETURNS BIGINT[] AS 
 $$ LANGUAGE sql IMMUTABLE PARALLEL SAFE;
 
 -- Counts one context_llm_log row into its hour and dimension. It must not
--- raise; the guards and their one limit are described in the header.
+-- raise; the guards are described in the header.
 CREATE OR REPLACE FUNCTION llm_usage_rollup_ins() RETURNS TRIGGER AS $$
 DECLARE
     v_gw    JSONB    := CASE WHEN jsonb_typeof(NEW.metadata->'gw') = 'object'
                              THEN NEW.metadata->'gw' END;
     v_key   UUID     := CASE WHEN NEW.consumer_id IS NULL THEN NEW.api_key_id END;
     v_alias TEXT     := CASE WHEN jsonb_typeof(v_gw->'alias') = 'string'
-                             THEN left(v_gw->>'alias', 128) ELSE '' END;
+                             THEN left(v_gw->>'alias', 100) ELSE '' END;
     v_hop   SMALLINT := CASE WHEN jsonb_typeof(v_gw->'hop') = 'number'
                              THEN LEAST(GREATEST(floor((v_gw->>'hop')::numeric), 0), 16)::smallint
                              ELSE 0 END;
@@ -198,8 +209,10 @@ BEGIN
          duration_ms_sum, duration_n, queue_wait_ms_sum, queue_wait_n, cost_usd,
          latency_hist, queue_wait_hist, ttft_hist)
     VALUES (date_trunc('hour', NEW.created_at, 'UTC'), v_key, NEW.consumer_id,
-            NEW.pipeline, COALESCE(NEW.backend_name, NEW.host, ''), COALESCE(NEW.model, ''), v_alias,
-            COALESCE(NEW.dispatch_class, ''), COALESCE(NEW.backend_locality, ''), v_hop,
+            left(NEW.pipeline, 100), left(COALESCE(NEW.backend_name, NEW.host, ''), 100),
+            left(COALESCE(NEW.model, ''), 100), v_alias,
+            left(COALESCE(NEW.dispatch_class, ''), 100),
+            left(COALESCE(NEW.backend_locality, ''), 100), v_hop,
             1, (NEW.error IS NOT NULL)::int, (NEW.backend_name IS NULL AND NEW.error IS NULL)::int, v_est,
             COALESCE(NEW.prompt_tokens, 0), COALESCE(NEW.completion_tokens, 0),
             COALESCE(NEW.duration_ms, 0), (NEW.duration_ms IS NOT NULL)::int,
@@ -284,14 +297,14 @@ SELECT s.bucket_start, s.api_key_id, s.consumer_id, s.pipeline, s.backend_name, 
   FROM (SELECT date_trunc('hour', l.created_at, 'UTC') AS bucket_start,
                CASE WHEN l.consumer_id IS NULL THEN l.api_key_id END AS api_key_id,
                l.consumer_id,
-               l.pipeline,
-               COALESCE(l.backend_name, l.host, '') AS backend_name,
+               left(l.pipeline, 100) AS pipeline,
+               left(COALESCE(l.backend_name, l.host, ''), 100) AS backend_name,
                l.backend_name AS raw_backend,
-               COALESCE(l.model, '') AS model,
+               left(COALESCE(l.model, ''), 100) AS model,
                CASE WHEN jsonb_typeof(g.gw->'alias') = 'string'
-                    THEN left(g.gw->>'alias', 128) ELSE '' END AS model_alias,
-               COALESCE(l.dispatch_class, '') AS dispatch_class,
-               COALESCE(l.backend_locality, '') AS backend_locality,
+                    THEN left(g.gw->>'alias', 100) ELSE '' END AS model_alias,
+               left(COALESCE(l.dispatch_class, ''), 100) AS dispatch_class,
+               left(COALESCE(l.backend_locality, ''), 100) AS backend_locality,
                CASE WHEN jsonb_typeof(g.gw->'hop') = 'number'
                     THEN LEAST(GREATEST(floor((g.gw->>'hop')::numeric), 0), 16)::smallint
                     ELSE 0 END AS hop,

@@ -11,7 +11,8 @@
 //	(b) two key-less rows of one dimension ⇒ one rollup row, calls = 2
 //	(c) histogram: p95 from the buckets within one bucket width of
 //	    percentile_cont(0.95); the upsert adds the arrays element by element
-//	(d) totality: every metadata.gw form is accepted, hop and ttft clamped
+//	(d) totality: every metadata.gw form is accepted, hop and ttft clamped,
+//	    dimension texts cut to 100 characters below the B-tree entry limit
 //	(e) 159 applied twice ⇒ identical catalog and rollup rows
 //	(f) EvictBodies leaves the rollup untouched
 //	(g) load: p99 insert latency with the trigger within 2 ms of the
@@ -32,6 +33,7 @@ package llmlog_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,14 +71,16 @@ const (
 	histBuckets = 16
 	histBaseMs  = 60
 
-	aliasMaxRunes = 128                   // left(metadata.gw.alias, 128)
-	hopMax        = 16                    // metadata.gw.hop clamped to 0..16
-	ttftMaxMs     = 9_000_000_000_000_000 // metadata.gw.ttft_ms clamped to 0..9e15
+	dimMaxRunes = 100                   // left(<text dimension>, 100) on all six
+	hopMax      = 16                    // metadata.gw.hop clamped to 0..16
+	ttftMaxMs   = 9_000_000_000_000_000 // metadata.gw.ttft_ms clamped to 0..9e15
 
-	// loadWriters is gate (g)'s concurrency; loadP99Slack its H threshold.
-	loadWriters  = 8
-	loadP99Slack = 2 * time.Millisecond
-	loadHOTFloor = 0.9
+	// loadWriters is gate (g)'s concurrency; loadP99Slack its H threshold;
+	// loadMinInserts the smallest run that may stand for the gate.
+	loadWriters    = 8
+	loadP99Slack   = 2 * time.Millisecond
+	loadHOTFloor   = 0.9
+	loadMinInserts = 10_000
 )
 
 // m159Overlays are the mutated variants of 159 that prove the gates red:
@@ -304,6 +308,13 @@ var (
 	gwTTFTForms  = []string{`0`, `59`, `60`, `61`, `120`, `450.5`, `983040`, `983041`,
 		`1e400`, `-5`, `"x"`, `"7"`, `null`, `[]`, `{}`}
 	gwNotObjects = []string{`5`, `"s"`, `[1]`, `null`}
+
+	// Dimension texts past the 100-character cut: two models that differ
+	// only after it (they share one rollup row) and a dispatch class of
+	// four-byte characters.
+	longModelA   = strings.Repeat("µ", dimMaxRunes) + "-a"
+	longModelB   = strings.Repeat("µ", dimMaxRunes) + "-b"
+	longDClass   = strings.Repeat("😀", dimMaxRunes+20)
 	mdNotObjects = []string{`null`, `[]`, `"s"`, `5`}
 )
 
@@ -323,8 +334,8 @@ func genScenario(seed, stream uint64, base time.Time, recordable bool) []genRow 
 			pipeline: fmt.Sprintf("m159-%04d-%d", seed, rng.IntN(2)),
 			backend:  pick(rng, "", "b1", "b2"),
 			host:     pick(rng, "h1", "h2"),
-			model:    pick(rng, "m1", "m2"),
-			dclass:   pick(rng, "", "interactive", "background"),
+			model:    pick(rng, "m1", "m2", longModelA, longModelB),
+			dclass:   pick(rng, "", "interactive", "background", longDClass),
 			loc:      pick(rng, "", "local", "external"),
 		}
 		switch k := rng.IntN(6); {
@@ -487,8 +498,14 @@ func gwAlias(gw map[string]json.RawMessage) string {
 	if json.Unmarshal(raw, &s) != nil {
 		return ""
 	}
-	if r := []rune(s); len(r) > aliasMaxRunes {
-		return string(r[:aliasMaxRunes])
+	return capDim(s)
+}
+
+// capDim is left(s, 100): the cut 159 applies to every text dimension, so
+// that no unique-index entry outgrows the B-tree limit.
+func capDim(s string) string {
+	if r := []rune(s); len(r) > dimMaxRunes {
+		return string(r[:dimMaxRunes])
 	}
 	return s
 }
@@ -591,14 +608,14 @@ func expectedRollup(ctx context.Context, t *testing.T, q rowQuerier) (map[rollKe
 		gw := gwObject(md)
 		k := rollKey{
 			bucket: at.UTC().Truncate(time.Hour).Unix(), consumer: valOr(consumer),
-			pipeline: pipeline, backend: host, model: model, alias: gwAlias(gw),
-			dclass: valOr(dclass), loc: valOr(loc), hop: gwHop(gw),
+			pipeline: capDim(pipeline), backend: capDim(host), model: capDim(model), alias: gwAlias(gw),
+			dclass: capDim(valOr(dclass)), loc: capDim(valOr(loc)), hop: gwHop(gw),
 		}
 		if consumer == nil { // the consumer wins (01 B17)
 			k.key = valOr(key)
 		}
 		if backend != nil {
-			k.backend = *backend
+			k.backend = capDim(*backend)
 		}
 		v := want[k]
 		if v == nil {
@@ -971,8 +988,9 @@ func checkTotalityRow(ctx context.Context, t *testing.T, pool *pgxpool.Pool, pip
 
 // TestUsageRollupTotality is gate (d) — B-06-4: the trigger runs inside the
 // llmlog INSERT, so a trigger that throws loses the row with its telemetry.
-// Every hop × ttft_ms form, gw and metadata that are not objects, a row with
-// both identities and a cost sum past NUMERIC(18,8) must be accepted.
+// Every hop × ttft_ms form, gw and metadata that are not objects, dimension
+// texts too long for a B-tree entry, a row with both identities and a cost
+// sum past NUMERIC(18,8) must be accepted.
 func TestUsageRollupTotality(t *testing.T) {
 	pool := setupRollupDB(t, nil)
 	ctx := context.Background()
@@ -1056,6 +1074,65 @@ func TestUsageRollupTotality(t *testing.T) {
 		}
 		if got, want := sum, "10000999999.99989999"; got != want {
 			t.Errorf("cost_usd = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("dimension texts past the B-tree entry limit", func(t *testing.T) {
+		// A unique-index entry holds at most 2 704 bytes (B-tree version 4).
+		// context_llm_log stores these rows; uncut, the rollup upsert would
+		// refuse them with 54000 and take the log row along.
+		rng := rand.New(rand.NewPCG(159, 4))
+		wide := func(n int) string { // n random four-byte characters
+			var b strings.Builder
+			for range n {
+				b.WriteRune(rune(0x1F300 + rng.IntN(0x600)))
+			}
+			return b.String()
+		}
+		var hexModel strings.Builder
+		for i := 0; hexModel.Len() < 3000; i++ {
+			fmt.Fprintf(&hexModel, "%x", sha256.Sum256([]byte(strconv.Itoa(i))))
+		}
+		cases := []struct {
+			name string
+			row  genRow
+			gw   string
+		}{
+			{"model of 3 000 bytes", genRow{at: at, pipeline: "m159-totlong-model", host: "h",
+				model: hexModel.String()[:3000], metadata: `{}`}, ""},
+			{"six dimensions of 128 four-byte characters", genRow{at: at, pipeline: wide(128),
+				backend: wide(128), host: "h", model: wide(128), dclass: wide(128), loc: wide(128)}, wide(128)},
+		}
+		for _, c := range cases {
+			c.row.metadata = `{}`
+			if c.gw != "" {
+				c.row.metadata = `{"gw": {"alias": "` + c.gw + `"}}`
+			}
+			if err := insertRawErr(ctx, pool, []genRow{c.row}); err != nil {
+				t.Errorf("%s: insert refused: %v", c.name, err)
+				continue
+			}
+			if n := countRows(ctx, t, pool, `SELECT count(*) FROM context_llm_log WHERE pipeline = $1`, c.row.pipeline); n != 1 {
+				t.Errorf("%s: %d log rows, want 1", c.name, n)
+			}
+			var calls int64
+			var backend, model, alias, dclass, loc string
+			if err := pool.QueryRow(ctx, `
+				SELECT calls, backend_name, model, model_alias, dispatch_class, backend_locality
+				  FROM context_llm_usage_hourly WHERE pipeline = $1`, capDim(c.row.pipeline)).Scan(
+				&calls, &backend, &model, &alias, &dclass, &loc); err != nil {
+				t.Errorf("%s: rollup row: %v", c.name, err)
+				continue
+			}
+			wantBackend := c.row.backend
+			if wantBackend == "" {
+				wantBackend = c.row.host
+			}
+			got := []string{backend, model, alias, dclass, loc}
+			want := []string{capDim(wantBackend), capDim(c.row.model), capDim(c.gw), capDim(c.row.dclass), capDim(c.row.loc)}
+			if calls != 1 || !slices.Equal(got, want) {
+				t.Errorf("%s: calls %d, dimensions not cut to %d characters: got %q, want %q", c.name, calls, dimMaxRunes, got, want)
+			}
 		}
 	})
 
@@ -1370,8 +1447,9 @@ func TestUsageRollupLoad(t *testing.T) {
 		t.Skip("CTX_M159_LOAD_INSERTS not set — the load gate (g) is opt-in")
 	}
 	n, err := strconv.Atoi(raw)
-	if err != nil || n < 2 {
-		t.Fatalf("CTX_M159_LOAD_INSERTS=%q: want a row count >= 2", raw)
+	if err != nil || n < loadMinInserts {
+		t.Fatalf("CTX_M159_LOAD_INSERTS=%q: want at least %d inserts per side — a smaller run shows no p99 and no HOT share worth the name; the gate runs with 50000",
+			raw, loadMinInserts)
 	}
 	ctx := context.Background()
 	_, baseDSN := testdb.SetupTestDBUpToWithDSN(t, m159Version-1)
@@ -1393,13 +1471,19 @@ func TestUsageRollupLoad(t *testing.T) {
 			half, warm := n/2, 1000
 			start := time.Now()
 			updBefore, hotBefore := tableUpdates(ctx, t, trigPool, 0)
+			rowsQ := `SELECT count(*) FROM context_llm_usage_hourly WHERE pipeline LIKE $1`
+			rowsBefore := countRows(ctx, t, trigPool, rowsQ, tag+"-%")
 			var base, trig []time.Duration
 			base = append(base, loadRun(ctx, t, baseDSN, tag, half, warm, p.dims)...)
 			trig = append(trig, loadRun(ctx, t, trigDSN, tag, half, warm, p.dims)...)
 			trig = append(trig, loadRun(ctx, t, trigDSN, tag, n-half, warm, p.dims)...)
 			base = append(base, loadRun(ctx, t, baseDSN, tag, n-half, warm, p.dims)...)
-			// Every trigger-side insert after a dimension's first is an update.
-			wantUpd := int64(n+2*warm) - int64(p.dims)
+			// Every trigger-side insert that did not create a rollup row
+			// updated one. Counted rather than assumed to be p.dims: a run
+			// that crosses an hour boundary creates a second row per
+			// dimension, and the inserts keep created_at to its default as
+			// every writer of the daemon does.
+			wantUpd := int64(n+2*warm) - (countRows(ctx, t, trigPool, rowsQ, tag+"-%") - rowsBefore)
 			upd, hot := tableUpdates(ctx, t, trigPool, updBefore+wantUpd)
 			upd, hot = upd-updBefore, hot-hotBefore
 			bs, ts := percentiles(base), percentiles(trig)
