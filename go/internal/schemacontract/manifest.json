@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 157,
-    "migration_count": 45,
+    "migration_max": 158,
+    "migration_count": 46,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1812,6 +1812,12 @@
           "type": "text",
           "not_null": false,
           "storage": "x"
+        },
+        {
+          "name": "consumer_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
         }
       ],
       "row_security": false
@@ -4780,6 +4786,9 @@
     },
     "idx_llm_log_block_ids": {
       "def_hash": "1c5ed9c73e7b3da27a5c11a851b800f04c7a9c5a58d67edceafa9546b823c50f"
+    },
+    "idx_llm_log_consumer": {
+      "def_hash": "59421ad8af4c20e16f359fedf166c9b2bdf367945b312d18eb4ccce1da2374f4"
     },
     "idx_llm_log_cost": {
       "def_hash": "1dd3f64df629d6894002c4e873a220c6a02a823db4ed7993200291d90a2cb2e8"
