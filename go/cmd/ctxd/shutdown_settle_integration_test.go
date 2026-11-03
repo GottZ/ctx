@@ -80,8 +80,8 @@ func TestShutdownWithoutSettleLosesRows(t *testing.T) {
 	}
 }
 
-// drainingScheduler stands in for *events.Scheduler: its Wait is where a dream
-// cycle cancelled by the shutdown signal still writes its deferred llmlog rows.
+// drainingScheduler stands in for *events.Scheduler: its Wait is where a
+// running dream cycle — SIGTERM does not cancel it — still writes llmlog rows.
 type drainingScheduler struct{ wait func() }
 
 func (s drainingScheduler) Wait() { s.wait() }
@@ -89,9 +89,10 @@ func (s drainingScheduler) Wait() { s.wait() }
 // TestShutdownSequenceSettlesLLMLog is W06-1 gate (c): the daemon's teardown
 // waits for the llmlog writes before the pool goes. 50 rows recorded before
 // the shutdown signal against a slow database all land; so do the 10 rows a
-// draining scheduler writes INSIDE scheduler.Wait — the probe for the settle's
-// position (after Wait, not between srv.Shutdown and Wait as design/06 §4.2
-// sketched it: a settle there returns before the dream drain has written).
+// draining scheduler writes INSIDE scheduler.Wait — the probe for the second
+// settle after Wait (a settle only between srv.Shutdown and Wait, as design/06
+// §4.2 sketched it, returns before the dream drain has written; the first
+// settle's own probe is TestShutdownSettlesHTTPRowsBeforeSchedulerWait).
 // A late Record after the sequence neither panics nor holds up the close.
 func TestShutdownSequenceSettlesLLMLog(t *testing.T) {
 	ref, dsn := testdb.SetupTestDBWithDSN(t)
@@ -136,8 +137,37 @@ func TestSettleLLMLogRespectsTimeout(t *testing.T) {
 		llmlog.Record(pool, llmlog.Entry{Pipeline: "w06-1-timeout", Model: "m", Host: "h"})
 	}
 	begin := time.Now()
-	settleLLMLog(pool, 20*time.Millisecond)
+	settleLLMLog(pool, 20*time.Millisecond, "http")
 	if el := time.Since(begin); el > 2*time.Second {
 		t.Errorf("settleLLMLog with a 20ms budget returned after %s", el)
+	}
+}
+
+// TestShutdownSettlesHTTPRowsBeforeSchedulerWait is the W06-1 hardening probe
+// (H1): the rows the HTTP side recorded must be in the database BEFORE the
+// teardown blocks in scheduler.Wait. A running dream cycle is not cancelled by
+// SIGTERM — it runs on its own context up to dream.cycle_timeout (700 s by
+// default) — so Wait can outlast the stop grace period, and a settle that only
+// runs after Wait never runs at all: Docker's SIGKILL takes the queue with it.
+// The stand-in Wait counts the landed rows at entry, before it returns.
+func TestShutdownSettlesHTTPRowsBeforeSchedulerWait(t *testing.T) {
+	ref, dsn := testdb.SetupTestDBWithDSN(t)
+	pool := slowShutdownPool(t, dsn)
+	defer pool.Close()
+
+	const n = 50
+	for range n {
+		llmlog.Record(pool, llmlog.Entry{Pipeline: "w06-1-http-before-wait", Model: "m", Host: "h"})
+	}
+	atWait := -1
+	sched := drainingScheduler{wait: func() {
+		atWait = countLLMLogRows(t, ref, "w06-1-http-before-wait")
+	}}
+
+	shutdownSequence(&http.Server{}, sched, pool)
+
+	t.Logf("HTTP-side rows landed when the teardown entered scheduler.Wait: %d of %d", atWait, n)
+	if atWait != n {
+		t.Errorf("rows landed at scheduler.Wait entry = %d, want %d — a dream cycle outliving the grace period would SIGKILL the rest", atWait, n)
 	}
 }

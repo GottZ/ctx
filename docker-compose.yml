@@ -10,12 +10,12 @@ services:
     container_name: ctx
     restart: unless-stopped
     # Time between SIGTERM and SIGKILL. ctxd's shutdown spends up to 15 s on
-    # the HTTP drain and 5 s settling the async llmlog inserts
-    # (cmd/ctxd/main.go shutdownSequence); the 10 s compose default cut the HTTP
-    # drain short. 30 s = 20 s budget + margin for the (unbounded) scheduler
-    # drain between the two; pinned >= 20 s by internal/config
-    # TestComposeCtxStopGracePeriod. Grows with every new shutdown step (the
-    # /v1 drain window, K-06-29).
+    # the HTTP drain and twice up to 5 s settling the async llmlog inserts,
+    # before and after the scheduler drain (cmd/ctxd/main.go
+    # shutdownSequence); the 10 s compose default cut the HTTP drain short.
+    # 30 s = 25 s budget + margin for the (unbounded) scheduler drain; pinned
+    # >= 25 s by internal/config TestComposeCtxStopGracePeriod. Grows with
+    # every new shutdown step (the /v1 drain window, K-06-29).
     stop_grace_period: 30s
     labels:
       - "reversed.host=${CTX_HOSTNAME}"

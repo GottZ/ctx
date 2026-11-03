@@ -38,9 +38,12 @@ const (
 	maxConcurrentInserts = 4
 	// maxQueuedInserts bounds the rows waiting for an insert slot per pool.
 	// Beyond it Record drops the row and counts it (InsertDropped) instead of
-	// growing without bound while the database is away. 4 096 rows are about
-	// 20 h of the live average rate, and at the measured 3.6 kB average row
-	// (bodies included) roughly 15 MB when full.
+	// growing without bound while the database is away. The bound counts
+	// rows, not bytes: 4 096 rows are about 20 h of the live average rate
+	// (≈ 5 000 rows/24 h) but only around 2 h or less at the target scale of
+	// thousands of calls per hour; at the measured 3.6 kB average row (bodies
+	// included) a full queue holds roughly 15 MB, a queue of large-body rows
+	// more.
 	maxQueuedInserts = 4096
 	// lossWarnInterval throttles the loss WARN to one line per interval,
 	// process-wide: a database outage fails every insert, and one line per
