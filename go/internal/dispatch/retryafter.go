@@ -59,6 +59,8 @@ func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 		depth = st.interactive.total
 	case ClassBackground:
 		depth = st.background.len()
+	case ClassExternal:
+		depth = st.external.total
 	default:
 		// Fail-closed (A03-W1): no estimate for a class without a case here
 		// — 0 omits the header (pre-A03-W1: interactive depth × the

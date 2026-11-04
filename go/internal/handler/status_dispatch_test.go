@@ -33,12 +33,19 @@ func sampleSnapshot() dispatch.Snapshot {
 				HeraldScope:       dispatch.HeraldGlobal,
 				Held:              1,
 				Inflight:          1,
-				Interactive:       dispatch.WaitStats{Waiting: 2, OldestWait: 500 * time.Millisecond, P95Wait: 400 * time.Millisecond, MaxWait: 600 * time.Millisecond, Samples: 10},
+				// A03-W3: a real snapshot always carries the internal split;
+				// the tenant occupancy reads only these two.
+				HeldInternal:     1,
+				InflightInternal: 1,
+				Interactive:      dispatch.WaitStats{Waiting: 2, OldestWait: 500 * time.Millisecond, P95Wait: 400 * time.Millisecond, MaxWait: 600 * time.Millisecond, Samples: 10},
 				Background:        dispatch.WaitStats{Waiting: 3},
 				Preempt:           dispatch.PreemptStats{PreemptsTotal: 5, WastedMsTotal: 20, AgedAdmitsTotal: 2, AgedPreemptsTotal: 1},
 				Buckets: []dispatch.BucketSnapshot{
 					{FairKey: "private", Waiting: 1, OldestWait: 300 * time.Millisecond, Inflight: 1, Tokens: 111, Charges: 2},
 					{FairKey: "acme-secret", Waiting: 4, OldestWait: 900 * time.Millisecond, Inflight: 2, Tokens: 999, Charges: 9},
+					// A03-W3: an external consumer bucket of a foreign tenant —
+					// server-admin detail, never in the tenant shape.
+					{FairKey: "_consumer:acme-app", TenantID: "acme", Class: dispatch.ClassExternal, Waiting: 6, Inflight: 1},
 				},
 			},
 			{
@@ -97,7 +104,7 @@ func TestBuildDispatchTenantNoForeignPrincipal(t *testing.T) {
 	}
 	payload := string(b)
 	// F-B3: no foreign fairKey, no foreign token/charge leak, no "fair_key" field.
-	for _, forbidden := range []string{"acme-secret", "fair_key", "999", "sidecar", "class_unauthorized", "principal_conflicts"} {
+	for _, forbidden := range []string{"acme-secret", "fair_key", "999", "sidecar", "class_unauthorized", "principal_conflicts", "_consumer:", "acme-app"} {
 		if strings.Contains(payload, forbidden) {
 			t.Errorf("F-B3 leak: tenant payload contains %q\n%s", forbidden, payload)
 		}

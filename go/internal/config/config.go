@@ -1471,8 +1471,10 @@ type TenantConfig struct {
 // parse:"strict" like their siblings (webchat.concurrent_turns,
 // events.max_connections) — a typo'd cap silently falling back to the
 // default would hide the intended ceiling on the shared llama.cpp backend.
-// The per-TARGET policy (slots, preempt_background, herald_scope) lives in
-// context_backends.limits, not here (mechanism=code, policy=data). The
+// The per-TARGET policy (slots, preempt_background, herald_scope and the
+// external opt-in internal_reserved_slots / external_offer /
+// external_max_inflight) lives in context_backends.limits, not here
+// (mechanism=code, policy=data). The
 // settings reload owner maps this struct onto dispatch.Settings.
 type DispatchConfig struct {
 	// Enabled is the emergency stop, NOT a feature flag (E-U3): false
@@ -1523,6 +1525,33 @@ type DispatchConfig struct {
 	// Activation is an operations decision under the aged-preempt waste
 	// metric (E-F5), not a deploy.
 	BackgroundAgingAfter time.Duration `key:"dispatch.background_aging_after" env:"CTX_DISPATCH_BACKGROUND_AGING_AFTER" default:"0" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalOrder names the admission order of the external class XU
+	// against ctx' own background work (wave A03-W3, DECISIONS A-E2 no. 1):
+	// o1 = interactive > external > background (decision E2, the default),
+	// o2 = interactive > background > external. Interactive always ranks
+	// first, and the internal partition (limits.internal_reserved_slots)
+	// holds in both. Validated against the dispatcher's named orders (V42:
+	// trim + lower, an unknown name aborts boot / fails the settings write).
+	// Hot: a switch acts on the next handoff.
+	ExternalOrder string `key:"dispatch.external_order" env:"CTX_DISPATCH_EXTERNAL_ORDER" default:"o1" mut:"hot" tenancy:"global-only"`
+	// ExternalQueuePerConsumer caps waiting external acquires per consumer
+	// identity per target (design/03 §3.3, A-E2 no. 2) — a memory ceiling;
+	// 0 = off. A refusal is ErrPrincipalSaturated.
+	ExternalQueuePerConsumer int `key:"dispatch.external_queue_per_consumer" env:"CTX_DISPATCH_EXTERNAL_QUEUE_PER_CONSUMER" default:"8" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalQueuePerTenant caps waiting external acquires per tenant per
+	// target with a counter of its own (not the interactive 16): N consumers
+	// of one tenant cannot multiply the per-consumer cap (C8, K-03-6); 0 =
+	// off. A refusal is ErrTenantSaturated.
+	ExternalQueuePerTenant int `key:"dispatch.external_queue_per_tenant" env:"CTX_DISPATCH_EXTERNAL_QUEUE_PER_TENANT" default:"32" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalQueueMax is the aggregate cap on waiting external acquires per
+	// target; 0 = off. A refusal is ErrTargetSaturated.
+	ExternalQueueMax int `key:"dispatch.external_queue_max" env:"CTX_DISPATCH_EXTERNAL_QUEUE_MAX" default:"64" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalLeaseMax (bare seconds) caps the reap reference of an external
+	// lease at admission + this value (I-03-3: the reaper's leak net is the
+	// only cancel path of an external lease; an alias timeout of up to 3600 s
+	// must not hold external partition capacity that long); 0 = no external
+	// cap, the general reap reference applies.
+	ExternalLeaseMax time.Duration `key:"dispatch.external_lease_max" env:"CTX_DISPATCH_EXTERNAL_LEASE_MAX" default:"900" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // ContractConfig is the schema-contract check surface (Evokoa-Clean-Room

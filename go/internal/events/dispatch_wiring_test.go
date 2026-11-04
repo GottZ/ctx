@@ -2,7 +2,9 @@ package events
 
 import (
 	"context"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +28,16 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		LeaseMaxAge:                  17 * time.Second,
 		PreemptReleaseTimeout:        19 * time.Second,
 		BackgroundAgingAfter:         23 * time.Second,
+		// A03-W3: the external order and the external cap ladder.
+		ExternalOrder:            "o2",
+		ExternalQueuePerConsumer: 29,
+		ExternalQueuePerTenant:   31,
+		ExternalQueueMax:         37,
+		ExternalLeaseMax:         41 * time.Second,
+	}
+	o2, ok := dispatch.RankOrderFor(dispatch.ExternalOrderO2)
+	if !ok {
+		t.Fatal("named order o2 missing")
 	}
 	want := dispatch.Settings{
 		Enabled:                      false,
@@ -38,10 +50,22 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		PreemptReleaseTimeout:        19 * time.Second,
 		BackgroundAgingAfter:         23 * time.Second,
 		Fairness:                     dispatch.FairnessFIFO,
-		RankOrder:                    dispatch.DefaultRankOrder(),
+		RankOrder:                    o2,
+		ExternalQueuePerConsumer:     29,
+		ExternalQueuePerTenant:       31,
+		ExternalQueueMax:             37,
+		ExternalLeaseMax:             41 * time.Second,
 	}
 	if got := DispatchSettings(in); got != want {
 		t.Fatalf("DispatchSettings = %+v, want %+v", got, want)
+	}
+	// o1 is the default reading; an empty value (a literal Config) reads as
+	// o1 too — the zero value never selects a different order.
+	for _, name := range []string{"o1", ""} {
+		in.ExternalOrder = name
+		if got := DispatchSettings(in).RankOrder; got != dispatch.DefaultRankOrder() {
+			t.Fatalf("external_order %q maps to %v, want the default o1", name, got)
+		}
 	}
 }
 
@@ -69,6 +93,15 @@ func TestDispatchBackendRowsMapping(t *testing.T) {
 			Locality:      backends.LocalityExternal,
 			Enabled:       false, // disabled rows are projected too
 		},
+		{
+			// A03-W3: a peer ctx instance on the LAN is self-admitting too.
+			Name:          "peer-ctx",
+			Scope:         "_global",
+			Host:          "http://peer:8077",
+			ProviderClass: backends.ProviderCtx,
+			Locality:      backends.LocalityLAN,
+			Enabled:       true,
+		},
 	}
 	// The projection is the cross-wave seam: Roles/External feed the MW14
 	// Enforcing coverage term, ProviderClass feeds the MW18 external guard.
@@ -76,7 +109,8 @@ func TestDispatchBackendRowsMapping(t *testing.T) {
 	// in internal/dispatch noticing — this pin is their owner-side anchor.
 	want := []dispatch.BackendRow{
 		{Name: "herbert-chat", Scope: "_global", BaseURL: "http://HOST:8089/v1", ProviderClass: "llamacpp", Limits: map[string]any{"slots": float64(1)}, Roles: []string{"chat", "dream"}},
-		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com", ProviderClass: "openrouter", External: true},
+		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com", ProviderClass: "openrouter", External: true, SelfAdmitting: true},
+		{Name: "peer-ctx", Scope: "_global", BaseURL: "http://peer:8077", ProviderClass: "ctx", SelfAdmitting: true},
 	}
 	if got := DispatchBackendRows(in); !reflect.DeepEqual(got, want) {
 		t.Fatalf("DispatchBackendRows = %+v, want %+v", got, want)
@@ -162,5 +196,74 @@ func TestRefreshDispatchPolicy_DerivesFromPoolSnapshot(t *testing.T) {
 	}
 	if ts.Held != 1 {
 		t.Fatalf("held = %d, want 1 (declared policy must hold a slot, not pass through)", ts.Held)
+	}
+}
+
+// TestDispatchExternalLimitsWritePathAndDerivationAgree pins the two halves
+// of the three external limits keys against each other (A03-W3): the backend
+// write path refuses a malformed value of exactly the keys the derivation
+// reads, the derivation does not offer on the same malformed value (a row
+// that bypassed the write path), and the well-formed values projected
+// through DispatchBackendRows + DerivePolicy offer the external class.
+func TestDispatchExternalLimitsWritePathAndDerivationAgree(t *testing.T) {
+	base := func(limits map[string]any, b backends.Backend) backends.Backend {
+		b.Name, b.Scope, b.Protocol, b.Trust, b.Enabled, b.Limits = "row", "_global", backends.ProtocolOpenAI, backends.TrustFull, true, limits
+		b.Roles = []string{"chat"}
+		return b
+	}
+	lan := backends.Backend{Host: "http://gpu:8089", ProviderClass: backends.ProviderLlamaCpp, Locality: backends.LocalityLAN}
+	cloud := backends.Backend{Host: "https://api.example.com", ProviderClass: backends.ProviderGeneric, Locality: backends.LocalityExternal}
+	for _, bad := range []struct {
+		key string
+		val any
+	}{
+		{"internal_reserved_slots", "two"}, {"internal_reserved_slots", float64(0)}, {"internal_reserved_slots", 1.5},
+		{"external_offer", "yes"},
+		{"external_max_inflight", float64(0)}, {"external_max_inflight", -1.0},
+	} {
+		b := base(map[string]any{bad.key: bad.val}, lan)
+		_, errs := backends.ValidateBackend(&b)
+		found := false
+		for _, e := range errs {
+			if e.Field == "limits."+bad.key {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("write path accepts limits.%s=%v: %v", bad.key, bad.val, errs)
+		}
+		// The same value on a row that otherwise offers — slot-managed with R
+		// for R, self-admitting with the offer for the other two keys.
+		row := base(map[string]any{"slots": float64(4), "internal_reserved_slots": float64(2), bad.key: bad.val}, lan)
+		origin := "http://gpu:8089"
+		if bad.key != "internal_reserved_slots" {
+			row = base(map[string]any{"external_offer": true, bad.key: bad.val}, cloud)
+			origin = "https://api.example.com"
+		}
+		d := dispatch.New(nil, dispatch.DefaultSettings())
+		d.UpdatePolicy(dispatch.DerivePolicy(DispatchBackendRows([]backends.Backend{row}), slog.New(slog.DiscardHandler)))
+		if d.ExternalAdmissible(origin) {
+			t.Errorf("derivation offers on limits.%s=%v, which the write path refuses", bad.key, bad.val)
+		}
+		d.Close()
+	}
+	l := base(map[string]any{"slots": float64(4), "internal_reserved_slots": float64(2)}, lan)
+	c := base(map[string]any{"external_offer": true, "external_max_inflight": float64(3)}, cloud)
+	for _, b := range []backends.Backend{l, c} {
+		if _, errs := backends.ValidateBackend(&b); len(errs) != 0 {
+			for _, e := range errs {
+				if strings.HasPrefix(e.Field, "limits.") {
+					t.Fatalf("write path refuses well-formed %s: %v", e.Field, errs)
+				}
+			}
+		}
+	}
+	pol := dispatch.DerivePolicy(DispatchBackendRows([]backends.Backend{l, c}), nil)
+	d := dispatch.New(nil, dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	d.UpdatePolicy(pol)
+	if !d.ExternalAdmissible("http://gpu:8089") || !d.ExternalAdmissible("https://api.example.com") {
+		t.Fatalf("well-formed external limits do not offer: lan=%v cloud=%v",
+			d.ExternalAdmissible("http://gpu:8089"), d.ExternalAdmissible("https://api.example.com"))
 	}
 }

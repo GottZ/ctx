@@ -395,10 +395,13 @@ export interface DispatchPreempt {
 }
 
 // Source: status_dispatch.go (dispatchBucket) — per-fair-key detail. SERVER-
-// ADMIN ONLY: fair_key is principal identity (HomeScope) and NEVER appears in
-// the tenant shape.
+// ADMIN ONLY: fair_key is principal identity (HomeScope, or _consumer:<id> for
+// an external consumer bucket) and NEVER appears in the tenant shape. `class`
+// names the queue of the bucket.
 export interface DispatchBucket {
   fair_key: string
+  tenant_id: string
+  class: 'interactive' | 'external'
   waiting: number
   oldest_wait_ms: number
   inflight: number
@@ -413,8 +416,17 @@ export interface DispatchEmbedTokens {
   prompt_tokens: number
 }
 
+// Source: status_dispatch.go (dispatchExternalRejects) — the external class's
+// refusals per reason (A03-W3): the cap ladder and "target does not offer".
+export interface DispatchExternalRejects {
+  cap: number
+  not_offered: number
+}
+
 // Source: status_dispatch.go (dispatchTarget) — one backend target's live
 // occupancy + wait/preempt aggregates + per-fair-key buckets. SERVER-ADMIN.
+// `held` counts internal AND external slot-holding leases (held_internal +
+// held_external); the external fields are the A03-W3 partition view.
 export interface DispatchTarget {
   origin: string
   slots: number
@@ -422,6 +434,14 @@ export interface DispatchTarget {
   herald_scope: string
   held: number
   inflight: number
+  held_internal: number
+  held_external: number
+  inflight_internal: number
+  internal_reserved: number
+  external_offered: boolean
+  external_capacity: number
+  external: DispatchWait
+  external_rejects: DispatchExternalRejects
   interactive: DispatchWait
   background: DispatchWait
   preempt: DispatchPreempt

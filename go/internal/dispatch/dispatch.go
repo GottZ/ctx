@@ -2,8 +2,10 @@
 // every inference wire call (Vorhaben E, design/01 §1.2 invariant I-D1): a
 // blocking Acquire per physical backend origin with an explicit priority
 // class served by a rank scan over the rank table Settings.RankOrder (policy
-// data, default interactive > background; FIFO per class, no barging — a
-// waiting, admissible higher-ranked class always goes first), a demand
+// data dispatch.external_order, default o1 = interactive > external >
+// background; FIFO per class, no barging — a waiting, admissible
+// higher-ranked class always goes first; the external class only inside the
+// external partition of a target, design/03 §4.3), a demand
 // herald counting interactive requests from HTTP ingress, per-principal /
 // per-tenant / per-target wait caps (Deckel-Staffel, design/03 §4.5.4) and a
 // reaper against leaked leases. Policy lives in data (context_backends.limits
@@ -26,10 +28,12 @@ import (
 	"time"
 )
 
-// Class is the admission priority of one wire call. Two classes by decision
-// E-U1: no consumer has a requirement between "a human waits synchronously"
-// and "nobody waits" — a third class would need an ordering decision against
-// every existing one (design/03 §4.1). Extension rule (design/03 C7): a new
+// Class is the admission priority of one wire call. Two in-house classes by
+// decision E-U1 (no ctx consumer has a requirement between "a human waits
+// synchronously" and "nobody waits"); the external class XU of /v1 consumers
+// came with its own wave and authorization decision (design/03 §4.1, A03-W3),
+// its order against the in-house classes is policy data (A-E2 no. 1).
+// Extension rule (design/03 C7): a new
 // class only as its own wave including an authorization decision, and
 // structurally — since A03-W1 — in three places the compiler or the table
 // test enforces: its constant goes BEFORE numClasses, its row into
@@ -49,6 +53,16 @@ const (
 	// paths). Background leases are the only ones the dispatcher may cancel
 	// (I-D1: interactive leases are never canceled).
 	ClassBackground
+	// ClassExternal (XU, design/03 §4.1, wave A03-W3) — an external program
+	// or a peer's human behind /v1: the requester waits, but it is not ctx'
+	// own work. Admitted ONLY for a consumer principal (ConsumerID set,
+	// ApiKeyID empty, TenantID set, not poisoned — K-03-1), only on a target
+	// that offers it (I-03-6: the internal partition R on a slot-managed
+	// target, external_offer on a self-admitting one), never a preempt victim
+	// (I-03-3: the reaper's leak net is its only cancel path) and never a
+	// pass-through lease. Its rank against background is the policy datum
+	// dispatch.external_order (A-E2 no. 1).
+	ClassExternal
 	// numClasses is the enum end, not a class: every value >= numClasses is
 	// invalid, and classTable carries exactly numClasses rows.
 	numClasses
@@ -66,9 +80,10 @@ type classInfo struct {
 	// name is the String() form, persisted as context_llm_log.dispatch_class.
 	name string
 	// external marks a class of external consumers (design/01 §4.5 I-K10: a
-	// consumer principal is admitted only in an external class, wave W01-7).
-	// Both in-house classes are false; the external classes arrive with
-	// their own waves (design/03 §4.1: XU A03-W3, XB A03-W9).
+	// consumer principal is admitted only in an external class, wave W01-7;
+	// an external class only for a consumer principal, wave A03-W3). Both
+	// in-house classes are false; XU is true (A03-W3), XB follows with
+	// A03-W9.
 	external bool
 }
 
@@ -77,6 +92,7 @@ type classInfo struct {
 var classTable = [...]classInfo{
 	ClassInteractive: {name: "interactive"},
 	ClassBackground:  {name: "background"},
+	ClassExternal:    {name: "external", external: true},
 }
 
 // Compile-time half of the C7 gate: len(classTable) == numClasses in both
@@ -106,10 +122,11 @@ func (c Class) String() string {
 }
 
 // External reports whether c is a class of external consumers — the
-// classifier of the I-K10 gate (design/01 §4.5: a consumer principal in a
-// class with External() == false is refused with ErrClassUnauthorized, wave
-// W01-7). False for both in-house classes and fail-closed false outside the
-// class table.
+// classifier of the principal gate in both directions (design/01 §4.5: a
+// consumer principal in a class with External() == false is refused with
+// ErrClassUnauthorized, wave W01-7; an external class without a consumer
+// principal likewise, wave A03-W3). True for ClassExternal, false for both
+// in-house classes and fail-closed false outside the class table.
 func (c Class) External() bool {
 	return c.valid() && classTable[c].external
 }
@@ -183,10 +200,10 @@ type Principal struct {
 	// (context_model_consumers.id, design/01 §4.5) — "" on every knowledge
 	// and detached principal. Non-empty, it confines the principal to the
 	// external classes (I-K10: a class with External() == false refuses it
-	// with ErrClassUnauthorized). TenantID then is attribution only; the
-	// interactive caps never see a consumer. The external queue's cap and
-	// fairness key (_consumer:<id>) arrives with the external class (A03-W3,
-	// K-03-3) — fairKey is deliberately unchanged here.
+	// with ErrClassUnauthorized). The interactive caps never see a consumer;
+	// in the external queue it is the identity bucket and cap key
+	// _consumer:<id> (identityKey, K-03-3), and TenantID is the key of the
+	// external tenant cap (C8, K-03-6) — fairKey is deliberately unchanged.
 	ConsumerID string
 	// ConsumerKind is the consumer's kind (auth.ConsumerKind as a string:
 	// "app" | "ctx-peer"): an input for the external classes, never
@@ -214,6 +231,17 @@ func (p Principal) fairKey() string {
 	}
 	return p.ApiKeyID
 }
+
+// consumerKeyPrefix namespaces the identity key of a consumer principal. It
+// cannot collide with a scope or key id: a leading "_" is reserved for scopes
+// (store/api_keys.go) and UUIDs never start with one (design/01 §4.5).
+const consumerKeyPrefix = "_consumer:"
+
+// identityKey is the bucket and cap key of a principal in the external queue
+// (design/03 §4.1 C7 (5), K-03-3): _consumer:<ConsumerID>. Without it every
+// consumer principal — ApiKeyID and HomeScope empty by I-K0 — would share the
+// one "" bucket and the one "" cap counter.
+func (p Principal) identityKey() string { return consumerKeyPrefix + p.ConsumerID }
 
 // Request is one admission demand: which physical target, which class. WHO
 // asks is deliberately NOT a field (design/03 §4.1.1): the principal — class
@@ -268,10 +296,12 @@ var (
 	// ErrQueueFull — background wait queue at background_queue_max
 	// (background only; the arm retries on its own cadence).
 	ErrQueueFull = errors.New("dispatch: background queue full")
-	// ErrPrincipalSaturated — B9 cap per ApiKeyID × target (interactive).
+	// ErrPrincipalSaturated — B9 cap per ApiKeyID × target (interactive), per
+	// consumer identity × target (external, A03-W3).
 	ErrPrincipalSaturated = errors.New("dispatch: principal wait cap reached")
 	// ErrTenantSaturated — second cap per TenantID × target: N self-minted
-	// keys of one tenant cannot multiply the principal cap (C8).
+	// keys (or N consumers, external) of one tenant cannot multiply the
+	// principal cap (C8). The external class counts its own tenant cap.
 	ErrTenantSaturated = errors.New("dispatch: tenant wait cap reached")
 	// ErrTargetSaturated — aggregate cap per target: an early 429 beats a
 	// wait slot no plausible client patience would ever see served.
@@ -297,19 +327,30 @@ var ErrInvalidClass = errors.New("dispatch: invalid admission class")
 // at ERROR.
 var (
 	// ErrClassUnauthorized — the principal may not use the requested class.
-	// One sentinel for both directions: here a consumer principal in a class
-	// with External() == false; with the external classes (A03-W3) also an
-	// external class without a consumer principal.
+	// One sentinel for both directions: a consumer principal in a class with
+	// External() == false (W01-7), and an external class without a valid
+	// consumer principal — ConsumerID set, ApiKeyID empty, TenantID set
+	// (A03-W3, K-03-1).
 	ErrClassUnauthorized = errors.New("dispatch: principal not authorized for the admission class")
 	// ErrPrincipalConflict — the principal is poisoned (Principal.Conflict):
 	// the request ctx carried both credential kinds or an invalid one.
 	ErrPrincipalConflict = errors.New("dispatch: conflicting request principal")
 )
 
+// ErrExternalNotOffered is the answer to an external acquire on a target that
+// does not offer the external class (I-03-6, design/03 §4.3): no valid
+// internal partition R on a slot-managed target, no external_offer on a
+// self-admitting one, or the emergency stop (dispatch.enabled=false). Waiting
+// external acquires end with it when the offer goes away (policy swap, kill
+// switch) — never through a pass-through handoff (X9). It is NOT a rejection
+// (no 429, no Retry-After: retrying the same target cannot help); the /v1
+// mapping is A03-W8's, the chain filter is Dispatcher.ExternalAdmissible.
+var ErrExternalNotOffered = errors.New("dispatch: target does not offer the external class")
+
 // IsRejection is the ONE check point for handler mapping (429/SSE): true for
 // every Deckel-Staffel sentinel and ErrQueueFull, false for everything else
-// (in particular ctx.Err(), ErrInvalidClass, ErrClassUnauthorized and
-// ErrPrincipalConflict). It exists so no handler ever matches error
+// (in particular ctx.Err(), ErrInvalidClass, ErrClassUnauthorized,
+// ErrPrincipalConflict and ErrExternalNotOffered). It exists so no handler ever matches error
 // STRINGS — string comparisons are the drift source that would collide the
 // generic B6 texts with the mapping (design/03 §4.5.1).
 func IsRejection(err error) bool {

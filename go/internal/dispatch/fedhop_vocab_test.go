@@ -34,7 +34,7 @@ func TestFedhopClassVocabularyCoversDispatchClasses(t *testing.T) {
 	}
 	// Urgency per class: merged under an interactive lease, an urgent class
 	// keeps the lease (a tie), a bulk class lowers it to itself.
-	urgent := map[Class]bool{ClassInteractive: true, ClassBackground: false}
+	urgent := map[Class]bool{ClassInteractive: true, ClassBackground: false, ClassExternal: true}
 	for c := Class(0); c < numClasses; c++ {
 		u, ok := urgent[c]
 		if !ok {

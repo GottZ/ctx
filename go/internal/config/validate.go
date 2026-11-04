@@ -13,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/derived"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/promptguard"
@@ -83,6 +84,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGateway(c)...)
 	// V41 (W01-5): the consumer administration's grace ceiling and page floors.
 	issues = append(issues, validateGatewayConsumers(c)...)
+	// V42 (A03-W3): dispatch.external_order names a known admission order.
+	issues = append(issues, validateDispatchExternalOrder(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1169,6 +1172,28 @@ func validateDreamDecideMode(c *Config) []Issue {
 			Msg: fmt.Sprintf("decide mode %q must be %q, %q or %q — empty reads as %q",
 				c.Dream.DecideMode, dream.DecideModeOff, dream.DecideModeEval, dream.DecideModeAll, dream.DecideModeOff)}}
 	}
+}
+
+// validateDispatchExternalOrder is V42 (wave A03-W3, DECISIONS A-E2 no. 1):
+// dispatch.external_order in the V21 shape — trim + lower IN PLACE, then the
+// name must be one of the dispatcher's own named orders (dispatch.RankOrderFor:
+// config validates against the consumer's vocabulary, never a second copy of
+// it). Empty reads as o1, like the zero value of the rank table. Fatal, not
+// warn-and-reset: an operator reaching for this key wants the order they
+// typed, and a typo silently keeping o1 would let the settings surface show
+// their value while the dispatcher serves the other — boot aborts, the
+// settings PUT is a 422.
+func validateDispatchExternalOrder(c *Config) []Issue {
+	c.Dispatch.ExternalOrder = strings.ToLower(strings.TrimSpace(c.Dispatch.ExternalOrder))
+	if c.Dispatch.ExternalOrder == "" {
+		return nil
+	}
+	if _, ok := dispatch.RankOrderFor(c.Dispatch.ExternalOrder); ok {
+		return nil
+	}
+	return []Issue{{Field: "dispatch.external_order", Severity: SeverityError,
+		Msg: fmt.Sprintf("external order %q must be %q (interactive, external, background) or %q (interactive, background, external) — empty reads as %q",
+			c.Dispatch.ExternalOrder, dispatch.ExternalOrderO1, dispatch.ExternalOrderO2, dispatch.ExternalOrderO1)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

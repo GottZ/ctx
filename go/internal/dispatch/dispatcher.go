@@ -80,8 +80,12 @@ type targetState struct {
 	// seq is the monotone per-target arrival order (design/03 §4.2: seq, not
 	// timestamp — no tie path).
 	seq uint64
-	// held counts slot-holding leases (pass-through leases excluded).
-	held int
+	// held counts slot-holding leases (pass-through leases excluded) of ALL
+	// classes — internal and external; heldExt is its external part (an
+	// external lease always holds a slot of the external partition, it is
+	// never pass-through). held − heldExt is the internal part.
+	held    int
+	heldExt int
 	// inflight is the registry of ALL leases incl. pass-through (telemetry,
 	// divergence metric, reaper).
 	inflight map[*Lease]struct{}
@@ -89,9 +93,20 @@ type targetState struct {
 	// only — interactive cancel funcs are never registered, so a dispatcher
 	// cancel of interactive is structurally impossible, not just forbidden
 	// (I-D1/B5).
-	cancelable  map[*Lease]context.CancelCauseFunc
+	cancelable map[*Lease]context.CancelCauseFunc
+	// extCancel holds the cancel funcs of the external leases — read ONLY by
+	// the reaper (I-03-3: an external lease is never a preempt victim; the
+	// leak net past admitted + external_lease_max is its only cancel path).
+	// A map of its own, so pickVictimsLocked cannot reach it structurally.
+	extCancel   map[*Lease]context.CancelCauseFunc
 	interactive *classQueue
 	background  bgQueue
+	// external is the wait queue of the external class (identity buckets
+	// _consumer:<id>, its own cap ladder — A03-W3).
+	external *classQueue
+	// extRejects counts the external refusals per reason (design/03 §3.4:
+	// no llmlog line per external rejection, a counter instead).
+	extRejects ExternalRejectStats
 	// usage is the per-fairness-bucket token meter (MW22/F2, usage.go).
 	usage map[string]*usageWindow
 	// preempt is the MW18 preempt-path bookkeeping (victims in eviction +
@@ -263,27 +278,22 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	d.mu.Lock()
 	opStart := time.Now()
 	st := d.targetLocked(canonicalOrigin(req.Target.Origin))
-	slots := d.slotsLocked(st.origin)
-	if slots <= 0 {
-		// Pass-through: disabled or no declared policy — exactly today's
-		// behavior, tracked for telemetry only.
-		l := d.admitLocked(st, w, now, false)
+	l, err := d.admitNowLocked(st, w, now)
+	if l != nil || err != nil {
 		d.opDone(opStart)
 		d.mu.Unlock()
+		if err != nil {
+			cancel(context.Canceled)
+			return nil, nil, err
+		}
 		return l, runCtx, nil
 	}
-	if d.eligibleNowLocked(st, class, slots) {
-		l := d.admitLocked(st, w, now, true)
-		d.opDone(opStart)
-		d.mu.Unlock()
-		return l, runCtx, nil
-	}
-	err := d.enqueueLocked(st, w)
+	err = d.enqueueLocked(st, w)
 	if err == nil && class == ClassInteractive {
 		// Preempt trigger (MW18, design/02 §4.2.1): only an interactive
 		// acquire that has to WAIT may open a preempt on a preempt-enabled
 		// target — never a background acquire, never the herald alone.
-		d.maybePreemptLocked(st, slots)
+		d.maybePreemptLocked(st, d.slotsLocked(st.origin))
 	}
 	d.opDone(opStart)
 	d.mu.Unlock()
@@ -294,6 +304,12 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 
 	select {
 	case <-w.admitCh:
+		if w.err != nil {
+			// Ended without an admission (A03-W3 waiter error channel): the
+			// target stopped offering the external class.
+			cancel(context.Canceled)
+			return nil, nil, w.err
+		}
 		return w.lease, runCtx, nil
 	case <-ctx.Done():
 		d.mu.Lock()
@@ -301,7 +317,7 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 			// The direct handoff raced the cancel: the slot is already
 			// ours — settle it properly so the next waiter wakes.
 			d.finishLocked(w.lease)
-		} else {
+		} else if w.err == nil {
 			d.dropWaiterLocked(st, w)
 		}
 		d.mu.Unlock()
@@ -339,12 +355,21 @@ func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, slots int) 
 
 // enqueueLocked places w in its class queue or rejects it fast. Check order
 // of the Deckel-Staffel: principal → tenant → aggregate (the most specific
-// offender first, D3-U4/E-U6).
+// offender first, D3-U4/E-U6). The external class runs the same ladder over
+// its own queue and its own caps (consumer → tenant → aggregate, A03-W3).
 func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 	set := d.currentSettings()
 	switch w.class {
 	case ClassInteractive:
-		// The Deckel-Staffel below.
+		return d.pushCappedLocked(st, st.interactive, w,
+			set.InteractiveQueuePerPrincipal, set.InteractiveQueuePerTenant, set.InteractiveQueueMax)
+	case ClassExternal:
+		err := d.pushCappedLocked(st, st.external, w,
+			set.ExternalQueuePerConsumer, set.ExternalQueuePerTenant, set.ExternalQueueMax)
+		if err != nil {
+			st.extRejects.Cap++
+		}
+		return err
 	case ClassBackground:
 		if set.BackgroundQueueMax > 0 && st.background.len() >= set.BackgroundQueueMax {
 			return ErrQueueFull
@@ -360,18 +385,22 @@ func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 		// Deckel-Staffel, K7).
 		return d.refuseInvalidClass("enqueue", w.class, st.origin, w.role)
 	}
-	q := st.interactive
-	if set.InteractiveQueuePerPrincipal > 0 && q.byKey[w.principal.ApiKeyID] >= set.InteractiveQueuePerPrincipal {
+}
+
+// pushCappedLocked runs the Deckel-Staffel of one per-principal queue and
+// enqueues w: per principal (the queue's cap key) → per tenant → aggregate,
+// each cap off at 0. The tenant cap applies only to a non-empty TenantID: an
+// "" bucket would couple unrelated sentinel principals into one shared cap;
+// the aggregate cap still bounds them (an external principal always carries
+// a tenant — the door refuses it otherwise).
+func (d *Dispatcher) pushCappedLocked(st *targetState, q *classQueue, w *waiter, perPrincipal, perTenant, maxTotal int) error {
+	if perPrincipal > 0 && q.byKey[q.capKey(w.principal)] >= perPrincipal {
 		return ErrPrincipalSaturated
 	}
-	// The tenant cap applies only to a non-empty TenantID: an "" bucket
-	// would couple unrelated sentinel principals into one shared cap; the
-	// aggregate cap still bounds them.
-	if set.InteractiveQueuePerTenant > 0 && w.principal.TenantID != "" &&
-		q.byTenant[w.principal.TenantID] >= set.InteractiveQueuePerTenant {
+	if perTenant > 0 && w.principal.TenantID != "" && q.byTenant[w.principal.TenantID] >= perTenant {
 		return ErrTenantSaturated
 	}
-	if set.InteractiveQueueMax > 0 && q.total >= set.InteractiveQueueMax {
+	if maxTotal > 0 && q.total >= maxTotal {
 		return ErrTargetSaturated
 	}
 	st.seq++
@@ -408,8 +437,13 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 	st.inflight[l] = struct{}{}
 	if slotHeld {
 		st.held++
-		if l.class == ClassBackground {
+		switch l.class {
+		case ClassBackground:
 			st.cancelable[l] = w.cancel
+		case ClassExternal:
+			// Reaper-only cancel (I-03-3): never in cancelable.
+			st.heldExt++
+			st.extCancel[l] = w.cancel
 		}
 	}
 	wait := now.Sub(w.enqueued)
@@ -447,8 +481,12 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 	d.preemptSettledLocked(l) // release-latency sample for a regular victim release (MW18)
 	delete(l.st.inflight, l)
 	delete(l.st.cancelable, l)
+	delete(l.st.extCancel, l)
 	if l.slotHeld {
 		l.st.held--
+		if l.class == ClassExternal {
+			l.st.heldExt--
+		}
 		d.wakeLocked(l.st)
 	}
 }
@@ -464,8 +502,18 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 // Interactive precedence is structural: interactive holds rank 0
 // (validRankOrder), so the escape is consulted only after the interactive
 // pick returned nil. With slots ≤ 0 (emergency stop or cleared policy) every
-// waiter drains as pass-through.
+// in-house waiter drains as pass-through. External waiters NEVER drain as
+// pass-through (X9): on a target that stopped offering the external class
+// (emergency stop, R removed, external_offer withdrawn) they end with
+// ErrExternalNotOffered through the waiter error channel; on an offered
+// self-admitting target (no slots) they are admitted against
+// external_max_inflight.
 func (d *Dispatcher) wakeLocked(st *targetState) {
+	if st.external.total > 0 {
+		if offered, _ := d.externalOffer(st.origin); !offered {
+			d.failExternalWaitersLocked(st, ErrExternalNotOffered)
+		}
+	}
 	slots := d.slotsLocked(st.origin)
 	if slots <= 0 {
 		for {
@@ -474,9 +522,16 @@ func (d *Dispatcher) wakeLocked(st *targetState) {
 				w = st.background.pop()
 			}
 			if w == nil {
-				return
+				break
 			}
 			d.handoffLocked(st, w, false)
+		}
+		for {
+			w := d.pickAdmissibleLocked(st, ClassExternal, FairnessFIFO, slots)
+			if w == nil {
+				return
+			}
+			d.handoffLocked(st, w, true)
 		}
 	}
 	set := d.currentSettings()
@@ -509,6 +564,8 @@ func (d *Dispatcher) dropWaiterLocked(st *targetState, w *waiter) {
 		st.interactive.remove(w)
 	case ClassBackground:
 		st.background.remove(w)
+	case ClassExternal:
+		st.external.remove(w)
 	default:
 		// Fail-closed (A03-W1), unreachable: a class without a case here
 		// never entered a queue (door check + enqueueLocked default), so
@@ -540,8 +597,10 @@ func (d *Dispatcher) refuseInvalidClass(site string, class Class, origin, role s
 // poisoned principal (Conflict — the request ctx carried both credential
 // kinds or an invalid model credential) is refused with ErrPrincipalConflict
 // whatever else it carries; a consumer principal (ConsumerID != "") in a
-// class with External() == false — today every class — with
-// ErrClassUnauthorized. Never a downgrade: the background queue has no
+// class with External() == false with ErrClassUnauthorized, and — the reverse
+// direction, A03-W3 — an external class for anything but a consumer principal
+// (ConsumerID set, ApiKeyID empty, TenantID set; K-03-1) with
+// ErrClassUnauthorized too. Never a downgrade: the background queue has no
 // competing principals by invariant (queue.go), and external load there
 // would starve dream/digest (ErrQueueFull) and become preempt-/reapable —
 // the inverse of "ctx first". Both are wiring defects: counted and logged at
@@ -561,6 +620,19 @@ func (d *Dispatcher) refusePrincipal(site string, p Principal, req Request) erro
 			"target", req.Target.Origin, "role", req.Role)
 		return ErrClassUnauthorized
 	}
+	if req.Class.External() && (p.ConsumerID == "" || p.ApiKeyID != "" || p.TenantID == "") {
+		// The reverse direction (A03-W3, K-03-1): an external class only for
+		// a consumer principal — consumer set, no knowledge key (I-K0), and a
+		// tenant (migration 161 makes tenant_id NOT NULL; an empty tenant
+		// would bypass the external tenant cap). Never a downgrade: the
+		// zero principal is ctx' own detached work, a knowledge key a human.
+		d.classUnauthorized.Add(1)
+		d.logger.Error("dispatch: external class without a consumer principal refused",
+			"site", site, "class", req.Class.String(), "consumer", p.ConsumerID,
+			"knowledge_key", p.ApiKeyID != "", "tenant", p.TenantID != "",
+			"target", req.Target.Origin, "role", req.Role)
+		return ErrClassUnauthorized
+	}
 	return nil
 }
 
@@ -572,7 +644,9 @@ func (d *Dispatcher) targetLocked(origin string) *targetState {
 			origin:      origin,
 			inflight:    make(map[*Lease]struct{}),
 			cancelable:  make(map[*Lease]context.CancelCauseFunc),
+			extCancel:   make(map[*Lease]context.CancelCauseFunc),
 			interactive: newClassQueue(),
+			external:    newExternalQueue(),
 			usage:       make(map[string]*usageWindow),
 		}
 		d.targets[origin] = st
@@ -651,7 +725,9 @@ func (d *Dispatcher) reapLoop() {
 // leaked lease must never keep a target permanently closed). Background
 // leases are canceled with cause ErrReaped BEFORE the release — the
 // underlying wire call ends instead of silently over-admitting into the
-// invisible llama.cpp defer queue. Interactive leases are never canceled
+// invisible llama.cpp defer queue; external leases likewise, with their reap
+// reference capped at admitted + external_lease_max (reapDeadline; the
+// reaper is their only canceller, I-03-3). Interactive leases are never canceled
 // (I-D1); their over-admission window is an accepted degradation toward
 // today's behavior, alarmed by the divergence metric. Pass-through leases
 // are evicted from the registry WITHOUT cancel (behavior neutrality). The
@@ -664,16 +740,16 @@ func (d *Dispatcher) reapNow(now time.Time) {
 	for _, st := range d.targets {
 		var victims []*Lease
 		for l := range st.inflight {
-			ref := l.reapRef
-			if ref.IsZero() {
-				ref = l.admitted.Add(set.LeaseMaxAge)
-			}
-			if now.After(ref.Add(set.LeaseReapGrace)) {
+			if now.After(reapDeadline(l, set)) {
 				victims = append(victims, l)
 			}
 		}
 		for _, l := range victims {
 			if cancel, ok := st.cancelable[l]; ok {
+				cancel(ErrReaped)
+			} else if cancel, ok := st.extCancel[l]; ok {
+				// I-03-3: the reaper is the ONLY canceller of an external
+				// lease (leak net), extCancel is read nowhere else.
 				cancel(ErrReaped)
 			}
 			d.reapsTotal.Add(1)
@@ -698,6 +774,24 @@ func (d *Dispatcher) reapNow(now time.Time) {
 			d.wakeLocked(st)
 		}
 	}
+}
+
+// reapDeadline is the instant past which the reaper force-releases l: its
+// reap reference (lease_max_age fallback when none was given) — for an
+// external lease capped at admitted + external_lease_max (I-03-3, design/03
+// §4.6: alias timeouts up to 3600 s must not hold external partition capacity
+// that long) — plus lease_reap_grace.
+func reapDeadline(l *Lease, set Settings) time.Time {
+	ref := l.reapRef
+	if ref.IsZero() {
+		ref = l.admitted.Add(set.LeaseMaxAge)
+	}
+	if l.class == ClassExternal && set.ExternalLeaseMax > 0 {
+		if lim := l.admitted.Add(set.ExternalLeaseMax); lim.Before(ref) {
+			ref = lim
+		}
+	}
+	return ref.Add(set.LeaseReapGrace)
 }
 
 // WaitStats is one class's queue view in a target snapshot.
@@ -729,10 +823,34 @@ type TargetSnapshot struct {
 	Slots             int
 	PreemptBackground bool
 	HeraldScope       HeraldScope
-	Held              int
-	Inflight          int
-	Interactive       WaitStats
-	Background        WaitStats
+	// Held is the number of slot-holding leases of ALL classes, internal AND
+	// external — the foreign-load detector contract (handler/foreign_load.go
+	// heldOf, DECISIONS A-E5 no. 3): the engine sees both, so the comparison
+	// must too. HeldInternal + HeldExternal == Held.
+	Held     int
+	Inflight int
+	// HeldInternal / HeldExternal split Held by side (design/03 §4.14);
+	// InflightInternal counts the internal leases incl. pass-through (an
+	// external lease is never pass-through, so Inflight − InflightInternal
+	// == HeldExternal). The tenant view reads ONLY the internal sizes (X23).
+	HeldInternal     int
+	HeldExternal     int
+	InflightInternal int
+	// InternalReserved is the validated internal partition R (0 = none);
+	// ExternalOffered whether the target admits the external class right now
+	// (I-03-6, false under the emergency stop), ExternalCapacity its E (S − R
+	// on a slot-managed target, external_max_inflight on a self-admitting
+	// one; 0 = not offered or no external cap).
+	InternalReserved int
+	ExternalOffered  bool
+	ExternalCapacity int
+	Interactive      WaitStats
+	Background       WaitStats
+	// External is the wait view of the external class (own queue, own
+	// K = 512 window).
+	External WaitStats
+	// ExternalRejects counts the external refusals per reason.
+	ExternalRejects ExternalRejectStats
 	// Buckets is the per-fairness-bucket wait + token-window view (MW22,
 	// usage.go) — the primary gate source for the fairness/budget waves.
 	Buckets []BucketSnapshot
@@ -801,9 +919,18 @@ func (d *Dispatcher) Snapshot() Snapshot {
 			HeraldScope:       hs,
 			Held:              st.held,
 			Inflight:          len(st.inflight),
+			HeldInternal:      st.held - st.heldExt,
+			HeldExternal:      st.heldExt,
+			InflightInternal:  len(st.inflight) - st.heldExt,
+			InternalReserved:  tp.InternalReserved,
 			Interactive:       WaitStats{Waiting: st.interactive.total},
 			Background:        WaitStats{Waiting: st.background.len()},
+			External:          WaitStats{Waiting: st.external.total},
+			ExternalRejects:   st.extRejects,
 			Preempt:           st.preempt.statsLocked(),
+		}
+		if set.Enabled {
+			ts.ExternalOffered, ts.ExternalCapacity = tp.externalCapacity()
 		}
 		if t := st.interactive.oldest(); !t.IsZero() {
 			ts.Interactive.OldestWait = now.Sub(t)
@@ -811,8 +938,12 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		if t := st.background.oldest(); !t.IsZero() {
 			ts.Background.OldestWait = now.Sub(t)
 		}
+		if t := st.external.oldest(); !t.IsZero() {
+			ts.External.OldestWait = now.Sub(t)
+		}
 		st.ring(ClassInteractive).statsInto(&ts.Interactive)
 		st.ring(ClassBackground).statsInto(&ts.Background)
+		st.ring(ClassExternal).statsInto(&ts.External)
 		ts.Buckets = d.bucketSnapshotsLocked(st, now)
 		out.Targets = append(out.Targets, ts)
 	}

@@ -3,6 +3,7 @@ package backends
 import (
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/url"
 	"slices"
@@ -144,7 +145,48 @@ func ValidateBackend(b *Backend) (warnings []string, errs []FieldError) {
 	errs = append(errs, validateCarriers(b)...)
 	errs = append(errs, validateAnthropic(b)...)
 	errs = append(errs, validateForeignLoadProbe(b)...)
+	errs = append(errs, validateDispatchExternalLimits(b)...)
 	return warnings, errs
+}
+
+// dispatchExternalIntLimits / dispatchExternalBoolLimits are the external
+// opt-in keys of the admission dispatcher (wave A03-W3, design/03 §3.2) —
+// the same names internal/dispatch derives policy from (policy.go
+// limitInternalReserved / limitExternalOffer / limitExternalMaxInflight;
+// dispatch is a leaf and backends does not import it, the owner side pins
+// the pair: events TestDispatchExternalLimitsWritePathMatchesDerivation).
+var (
+	dispatchExternalIntLimits  = []string{"internal_reserved_slots", "external_max_inflight"}
+	dispatchExternalBoolLimits = []string{"external_offer"}
+)
+
+// validateDispatchExternalLimits checks the FORM of the external limits keys
+// on the write path (design/03 §3.2): internal_reserved_slots and
+// external_max_inflight an integer >= 1, external_offer a bool — a 422 at
+// write time instead of a WARN at the next policy derivation. What needs
+// more than this one row (the merge against slots, R <= slots-1, the target
+// kind) stays in the derivation. Every other limits key stays unvalidated
+// as before.
+func validateDispatchExternalLimits(b *Backend) (errs []FieldError) {
+	for _, key := range dispatchExternalIntLimits {
+		v, ok := b.Limits[key]
+		if !ok {
+			continue
+		}
+		if !positiveInteger(v) {
+			errs = append(errs, FieldError{"limits." + key, "must be an integer >= 1"})
+		}
+	}
+	for _, key := range dispatchExternalBoolLimits {
+		v, ok := b.Limits[key]
+		if !ok {
+			continue
+		}
+		if _, isBool := v.(bool); !isBool {
+			errs = append(errs, FieldError{"limits." + key, "must be true or false"})
+		}
+	}
+	return errs
 }
 
 // validateForeignLoadProbe guards metadata.foreign_load_probe (W06-8,
@@ -558,4 +600,18 @@ func validateCarriers(b *Backend) (errs []FieldError) {
 		}
 	}
 	return errs
+}
+
+// positiveInteger reports whether a decoded limits value is an integer >= 1
+// (JSON numbers decode as float64; int forms come from in-process callers).
+func positiveInteger(v any) bool {
+	switch n := v.(type) {
+	case float64:
+		return n >= 1 && n == math.Trunc(n) && !math.IsInf(n, 1)
+	case int:
+		return n >= 1
+	case int64:
+		return n >= 1
+	}
+	return false
 }

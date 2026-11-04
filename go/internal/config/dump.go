@@ -166,6 +166,10 @@ var dumpGroupOrder = []string{
 	// W02-02: the gateway flag and caps belong in the boot record — whether
 	// /v1 answers at all is the first thing an operator checks.
 	"gateway",
+	// A03-W3 (DECISIONS A-E2 no. 3): the dispatcher's admission mechanics —
+	// the external order, the cap ladders, the reaper clocks — are visible
+	// in the boot record, never a silent recalibration.
+	"dispatch",
 }
 
 // BootDumpArgs renders the effective config + issues as slog args for the

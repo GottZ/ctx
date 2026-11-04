@@ -6,9 +6,9 @@ package dispatch
 // another class's queue depth. The file uses ONLY the pre-A03-W1 surface
 // (Acquire, TryAcquire, Snapshot, String, RetryAfterHint and the existing
 // test seams), so the very same file is red against the base and green after
-// the hardening. Class(2) is the first value past the two-row table; when a
-// later wave (A03-W3) gives 2 a table row, these probes move to numClasses —
-// they fail loudly instead of passing vacuously, because 2 then admits.
+// the hardening. The probe is the first value past the class table: Class(2)
+// until A03-W3 gave 2 its row (ClassExternal), numClasses since — the probes
+// moved as announced, because 2 now admits.
 
 import (
 	"context"
@@ -17,8 +17,8 @@ import (
 	"time"
 )
 
-// probeClass is the first value past the class table of the base.
-const probeClass = Class(2)
+// probeClass is the first value past the class table.
+const probeClass = numClasses
 
 func probeReq() Request {
 	return Request{Target: Target{Origin: testOrigin}, Class: probeClass, Role: "test"}
