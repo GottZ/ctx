@@ -40,16 +40,15 @@ const okFrame = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}
 // chatCapTimeout is the Chat deadline for the body-cap proofs. It is a safety
 // net only — the proof is ErrResponseTooLarge, and a decoded result fails the
 // test at any deadline — so it follows the test binary's own deadline (minus a
-// margin for the report) instead of a fixed 30 s: decoding 16 MiB on three
-// wires under -race took 24 s at host load 2 and all three wires ran into a
-// 30 s deadline at an elevenfold core contention (host load ≥ 55 in the wave
-// builds), which the fixed value reported as a cap failure.
+// margin for the report, never beyond it) instead of a fixed 30 s: decoding
+// 16 MiB on three wires under -race took 24 s at host load 2 and all three
+// wires ran into a 30 s deadline at an elevenfold core contention (host load
+// ≥ 55 in the wave builds), which the fixed value reported as a cap failure.
+// Without a binary deadline (-timeout 0) the net is 10 min.
 func chatCapTimeout(t *testing.T) time.Duration {
 	t.Helper()
 	if dl, ok := t.Deadline(); ok {
-		if d := time.Until(dl) - 10*time.Second; d > time.Minute {
-			return d
-		}
+		return max(time.Until(dl)-10*time.Second, time.Second)
 	}
 	return 10 * time.Minute
 }
