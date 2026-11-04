@@ -223,6 +223,14 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One block-type snapshot for the whole batch (#70), resolved after the
+	// rate limit so a refused request costs none. Resolved per chunk, a batch
+	// of maxIngestChunks would reach the registry up to 200 times: on its miss
+	// path (a failed tenant-set build is not cached and logs a WARN) that is
+	// 200 rebuild attempts and 200 WARN lines, and a reload landing mid-batch
+	// would classify one request against two rule generations.
+	classifySet := h.classifySet(ctx)
+
 	// Process each chunk.
 	resp := IngestResponse{
 		Total:   len(req.Chunks),
@@ -230,7 +238,7 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i, chunk := range req.Chunks {
-		result := h.processChunk(ctx, reqID, chunk, i, writeScope, authResult.ApiKeyID)
+		result := h.processChunk(ctx, reqID, chunk, i, writeScope, authResult.ApiKeyID, classifySet)
 		resp.Results = append(resp.Results, result)
 
 		switch result.Status {
@@ -251,7 +259,8 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 }
 
 // processChunk handles a single chunk: hash check, upsert/insert, embed, temporal enrichment.
-func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk IngestChunk, index int, scope, apiKeyID string) IngestResult {
+// classifySet is the request's block-type snapshot, resolved once in HandleIngest.
+func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk IngestChunk, index int, scope, apiKeyID string, classifySet *blocktype.Set) IngestResult {
 	// 1. Hash NOOP check — skip if identical content exists.
 	existingID, err := store.HashNOOPCheck(ctx, h.pool, chunk.Content, scope, chunk.Category, chunk.Title)
 	if err != nil {
@@ -309,17 +318,19 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		// the default since HashNOOPCheck already catches identical content (= true skip).
 		action = "updated"
 
-		// Auto-classify type_name from title and metadata with the registry
-		// snapshot, like POST /api/store and the MCP store and update paths.
-		// type_source='manual' blocks are never re-classified; no rule match
-		// is a no-op. A failure keeps the written block with the type it
+		// Auto-classify type_name from title and metadata with the request's
+		// registry snapshot, like POST /api/store and the MCP store and update
+		// paths. type_source='manual' blocks are never re-classified; no rule
+		// match is a no-op. A failure keeps the written block with the type it
 		// already has (the default on a new row), as on /api/store.
 		//
-		// Chunk mode above does not classify. InsertChunk rows
-		// (lifecycle_state='chunk') have never gone through the hook, and
-		// InsertChunk has no caller besides this handler; classifying them is
-		// a decision of its own.
-		if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, h.classifySet(ctx), block.ID, block.Title, block.Metadata); err != nil {
+		// Chunk-mode writes above do not run the classifier: InsertChunk has
+		// no caller besides this handler, and classifying its writes is a
+		// decision of its own. That is a statement about the write path, not
+		// about chunk rows — uq_context_category_title_scope has no lifecycle
+		// filter, so a block-mode write with new content naming a chunk row's
+		// (category, title, scope) lands on that row and classifies it here.
+		if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("ingest: auto-classify failed",
 				"error", err, "index", index, "block_id", block.ID, "request_id", reqID)
 		}
