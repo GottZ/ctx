@@ -22,21 +22,21 @@ import (
 	"github.com/GottZ/ctx/internal/oai"
 )
 
-// The door's codes that the gateway vocabulary (oai.Codes, W02-02) does not
-// hold yet (design/01 K-02-1). All three are 503 service_unavailable_error
-// with x-should-retry: false; the renderer maps them, the mount wave adds
-// them to the vocabulary.
+// The door's own codes (design/01 K-02-1), codes of the gateway vocabulary
+// since the mount (oai.Codes, W02-05; TestDoorCodesInVocabulary). All three
+// are 503 service_unavailable_error with x-should-retry: false; the renderer
+// (cmd/ctxd renderModelAuthRejection) writes them through oai.WriteCode.
 const (
 	// ModelAuthCodeProxyMisconfigured: X-Forwarded-For arrives while
 	// CTX_TRUSTED_PROXY is unset — the client address cannot be known
 	// (stage 1, B22, E-01-13).
-	ModelAuthCodeProxyMisconfigured = "proxy_misconfigured"
+	ModelAuthCodeProxyMisconfigured = oai.CodeProxyMisconfigured
 	// ModelAuthCodeOverloaded: the probe bucket is empty (stage 6, B18).
-	ModelAuthCodeOverloaded = "auth_overloaded"
+	ModelAuthCodeOverloaded = oai.CodeAuthOverloaded
 	// ModelAuthCodeUnavailable: semaphore deadline, exhausted pool or
 	// database error (stage 7). Never a 500: an SDK retries a 500 twice
 	// into the saturation, and a peer ctx stops its chain on it.
-	ModelAuthCodeUnavailable = "auth_unavailable"
+	ModelAuthCodeUnavailable = oai.CodeAuthUnavailable
 )
 
 // ErrModelAuthUnavailable wraps every failure of the door's database step
@@ -152,8 +152,8 @@ type ModelDoor struct {
 // ReauthConsumer.
 type modelDoorKey struct{}
 
-// ModelAuth builds the model-key door. Not mounted in W01-6: the mount
-// (mountModelGroup, cmd/ctxd) goes in with W02-05.
+// ModelAuth builds the model-key door; cmd/ctxd builds it once per process
+// and mounts it in the model groups (mountModelGroup, W02-05).
 func ModelAuth(cfg ModelAuthConfig) *ModelDoor {
 	switch {
 	case cfg.Pool == nil:

@@ -59,9 +59,11 @@ const MaxRotationGrace = 7 * 24 * time.Hour
 // most stamps a crash can lose.
 const ModelKeyUsageFlushInterval = 60 * time.Second
 
-// modelKeyUsageFinalFlushTimeout bounds the flush Run performs after its
+// ModelKeyUsageFinalFlushTimeout bounds the flush Run performs after its
 // context ends, on a context of its own (the cancelled one cannot carry it).
-const modelKeyUsageFinalFlushTimeout = 5 * time.Second
+// It is a step of ctxd's shutdown budget (cmd/ctxd gatewayStopTimeout, the
+// compose stop_grace_period).
+const ModelKeyUsageFinalFlushTimeout = 5 * time.Second
 
 var (
 	// ErrModelConsumerNotFound: no consumer with this id in the caller's reach —
@@ -1033,7 +1035,7 @@ func (u *ModelKeyUsage) retain(batch map[uuid.UUID]time.Time, only []string) {
 }
 
 // Run flushes every ModelKeyUsageFlushInterval until ctx ends, then once more
-// on a context of its own bounded by modelKeyUsageFinalFlushTimeout, so an
+// on a context of its own bounded by ModelKeyUsageFinalFlushTimeout, so an
 // orderly shutdown loses no stamp. A failed flush is logged and retried on
 // the next tick.
 func (u *ModelKeyUsage) Run(ctx context.Context) {
@@ -1042,7 +1044,7 @@ func (u *ModelKeyUsage) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), modelKeyUsageFinalFlushTimeout)
+			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ModelKeyUsageFinalFlushTimeout)
 			if err := u.Flush(fctx); err != nil {
 				slog.Warn("store: final model key usage flush failed", "err", err)
 			}

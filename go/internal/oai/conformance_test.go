@@ -37,6 +37,10 @@ import (
 // transitive $ref closure). The Python harness reads the same file.
 const schemaExcerpt = "../../conformance/oai/testdata/openapi-c2aecc2f-error-response.json"
 
+// listModelsExcerpt is the excerpt of the model list (ListModelsResponse and
+// Model, same commit; W02-05). The Python harness reads the same file.
+const listModelsExcerpt = "../../conformance/oai/testdata/openapi-c2aecc2f-list-models-response.json"
+
 // sdkCase is one error situation a client can meet. The fake serves it under
 // /c/<name>/, so the SDK's GET <base>/models lands on /c/<name>/models.
 type sdkCase struct {
@@ -204,7 +208,14 @@ func (f *fakeServer) observed(name string) (int, []byte) {
 // rewrites the refs — mechanical, the schema values stay the vendored ones.
 func loadErrorSchema(t testing.TB) *jsonschema.Resolved {
 	t.Helper()
-	raw, err := os.ReadFile(schemaExcerpt)
+	return loadSchema(t, schemaExcerpt, "ErrorResponse")
+}
+
+// loadSchema resolves the vendored schema name of the excerpt at path (same
+// mechanical $defs move as above).
+func loadSchema(t testing.TB, path, name string) *jsonschema.Resolved {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read schema excerpt: %v", err)
 	}
@@ -217,14 +228,14 @@ func loadErrorSchema(t testing.TB) *jsonschema.Resolved {
 		t.Fatalf("parse schema excerpt: %v", err)
 	}
 	defs := strings.ReplaceAll(string(doc.Components.Schemas), `"#/components/schemas/`, `"#/$defs/`)
-	root := `{"$ref":"#/$defs/ErrorResponse","$defs":` + defs + `}`
+	root := `{"$ref":"#/$defs/` + name + `","$defs":` + defs + `}`
 	var s jsonschema.Schema
 	if err := json.Unmarshal([]byte(root), &s); err != nil {
 		t.Fatalf("schema excerpt is not a JSON Schema: %v", err)
 	}
 	res, err := s.Resolve(nil)
 	if err != nil {
-		t.Fatalf("resolve ErrorResponse: %v", err)
+		t.Fatalf("resolve %s: %v", name, err)
 	}
 	return res
 }
@@ -327,6 +338,85 @@ func TestConformanceGoSDKRejectsHouseFormat(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("%s: the house form passes the harness — it no longer tells the envelope from the house format", c.name)
+		}
+	}
+}
+
+// conformanceModels is the model fixture both SDK halves list: an app
+// consumer of acme holding grants on the tenant alias "chat" and on the
+// _global "qwen/x" (slash id); "embed", "rank", the foreign, disabled and
+// broken aliases are not released to it.
+func conformanceModels(t *testing.T) http.Handler {
+	t.Helper()
+	f := &fakeDeps{ca: appConsumer(), reg: fixtureRegistry(t, fixtureRows()), grants: map[string]bool{idTenantChat: true, idSlash: true}}
+	return modelsRouter(f.deps())
+}
+
+// conformanceModelIDs are the ids the fixture releases, in list order.
+var conformanceModelIDs = []string{"chat", "qwen/x"}
+
+// TestConformanceGoSDKModels (W02-05, G1): the Go SDK lists exactly the
+// released fixture aliases and retrieves the slash id; the list and every
+// element are valid against the vendored ListModelsResponse / Model, and
+// the ctx extension reaches the SDK as an extra field instead of failing it.
+func TestConformanceGoSDKModels(t *testing.T) {
+	h := conformanceModels(t)
+	var mu sync.Mutex
+	bodies := map[string][]byte{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cw := &captureWriter{ResponseWriter: w}
+		h.ServeHTTP(cw, r)
+		mu.Lock()
+		bodies[r.URL.EscapedPath()] = cw.buf.Bytes()
+		mu.Unlock()
+	}))
+	t.Cleanup(srv.Close)
+	client := openai.NewClient(option.WithBaseURL(srv.URL+"/v1/"), option.WithAPIKey("ctxm_conformance"), option.WithMaxRetries(0))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	page, err := client.Models.List(ctx)
+	if err != nil {
+		t.Fatalf("Models.List: %v", err)
+	}
+	var got []string
+	for _, m := range page.Data {
+		got = append(got, m.ID)
+		if m.Object != "model" || m.OwnedBy != "ctx" || m.Created != aliasCreated.Unix() {
+			t.Errorf("%s: object %q owned_by %q created %d", m.ID, m.Object, m.OwnedBy, m.Created)
+		}
+		if _, ok := m.JSON.ExtraFields["ctx"]; !ok {
+			t.Errorf("%s: the ctx extension did not reach the SDK as an extra field", m.ID)
+		}
+	}
+	if strings.Join(got, ",") != strings.Join(conformanceModelIDs, ",") {
+		t.Errorf("Models.List = %v, want %v", got, conformanceModelIDs)
+	}
+	one, err := client.Models.Get(ctx, "qwen/x")
+	if err != nil {
+		t.Fatalf(`Models.Get("qwen/x"): %v`, err)
+	}
+	if one.ID != "qwen/x" {
+		t.Errorf(`Models.Get("qwen/x") = %q`, one.ID)
+	}
+	_, err = client.Models.Get(ctx, "embed")
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound || apiErr.Code != oai.CodeModelNotFound {
+		t.Errorf(`Models.Get("embed") (not granted) = %v, want *openai.Error 404 model_not_found`, err)
+	}
+
+	list := loadSchema(t, listModelsExcerpt, "ListModelsResponse")
+	model := loadSchema(t, listModelsExcerpt, "Model")
+	mu.Lock()
+	defer mu.Unlock()
+	for path, schema := range map[string]*jsonschema.Resolved{"/v1/models": list, "/v1/models/qwen%2Fx": model} {
+		var v any
+		if err := json.Unmarshal(bodies[path], &v); err != nil {
+			t.Errorf("%s: wire body %q is not JSON: %v", path, bodies[path], err)
+			continue
+		}
+		if err := schema.Validate(v); err != nil {
+			t.Errorf("%s: wire body fails the vendored schema: %v", path, err)
 		}
 	}
 }

@@ -267,6 +267,10 @@ var gatewayCodeClasses = map[string]ErrClass{
 	"upstream_timeout":     ClassGateway,
 	"federation_loop":      ClassGateway,
 	"federation_depth":     ClassGateway,
+	// the model-key door's 503s (W01-6, in the vocabulary since W02-05)
+	"proxy_misconfigured": ClassGateway,
+	"auth_overloaded":     ClassGateway,
+	"auth_unavailable":    ClassGateway,
 	// 500 — the one STOP code: the upstream ran the request
 	"upstream_error": ClassServerFault,
 	// 401, 403

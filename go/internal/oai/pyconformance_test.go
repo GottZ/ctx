@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,9 @@ const (
 
 // runPySDK starts the fake for ws and runs the pytest half against it. It
 // returns pytest's combined output and its exit error (nil = all passed).
+// Next to the error fake it serves the model fixture (conformanceModels,
+// W02-05) under CTX_MODELS_BASE_URL for test_models.py — the same in both
+// runs, so the house-format run still fails exactly the error cases.
 func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Helper()
 	uv, err := exec.LookPath("uv")
@@ -43,6 +47,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 		t.Skipf("SKIP, not PASS: uv not on PATH (%v) — the Python SDK half cannot run here", err)
 	}
 	srv := newFakeServer(t, ws)
+	models := httptest.NewServer(conformanceModels(t))
+	t.Cleanup(models.Close)
 	moduleRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +59,7 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 		"--with", "openai=="+pythonSDKVersion, "--with", "jsonschema=="+jsonschemaVersion, "--with", "pytest=="+pytestVersion,
 		"pytest", "-p", "no:cacheprovider", "-v", "conformance/oai")
 	cmd.Dir = moduleRoot
-	cmd.Env = append(os.Environ(), "OPENAI_BASE_URL="+srv.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
+	cmd.Env = append(os.Environ(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/", "PYTHONDONTWRITEBYTECODE=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

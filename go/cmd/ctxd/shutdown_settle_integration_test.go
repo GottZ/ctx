@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/testdb"
 	"github.com/jackc/pgx/v5"
@@ -108,7 +109,7 @@ func TestShutdownSequenceSettlesLLMLog(t *testing.T) {
 		}
 	}}
 
-	shutdownSequence(&http.Server{}, sched, pool)
+	shutdownSequence(&http.Server{}, sched, pool, func() {})
 	llmlog.Record(pool, llmlog.Entry{Pipeline: "w06-1-late", Model: "m", Host: "h"})
 	closed := make(chan struct{})
 	go func() { pool.Close(); close(closed) }()
@@ -164,10 +165,75 @@ func TestShutdownSettlesHTTPRowsBeforeSchedulerWait(t *testing.T) {
 		atWait = countLLMLogRows(t, ref, "w06-1-http-before-wait")
 	}}
 
-	shutdownSequence(&http.Server{}, sched, pool)
+	shutdownSequence(&http.Server{}, sched, pool, func() {})
 
 	t.Logf("HTTP-side rows landed when the teardown entered scheduler.Wait: %d of %d", atWait, n)
 	if atWait != n {
 		t.Errorf("rows landed at scheduler.Wait entry = %d, want %d — a dream cycle outliving the grace period would SIGKILL the rest", atWait, n)
+	}
+}
+
+// TestShutdownGatewayStopRunsAlongsideTheSettle pins W02-05 review 2 L-b:
+// the model gateway's stop runs alongside the first llmlog settle, so the
+// bounded part of the shutdown stays 15 s + max(5 s, 5 s) + 5 s = 25 s
+// (internal/config minCtxStopGrace) instead of adding a step. Both are made
+// to block for their full budget — one transaction holds context_model_keys
+// (the final usage flush of a real gateway waits on it) and context_llm_log
+// (queued inserts wait) — and the scheduler stand-in releases the locks, so
+// the second settle drains at once. Twelve rows are three waves of llmlog's
+// four concurrent inserts, each wave held for its 5 s insert deadline: the
+// settle has pending work for 15 s, wherever it starts. Side by side the
+// sequence takes about 5 s, one after the other about 10 s.
+func TestShutdownGatewayStopRunsAlongsideTheSettle(t *testing.T) {
+	ref, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	defer pool.Close()
+	applyEnv(t, map[string]string{})
+	cc, issues := loadFromEnv()
+	if config.HasErrors(issues) {
+		t.Fatalf("env fixture invalid: %v", issues)
+	}
+	gw := newModelGateway(pool, config.NewStore(cc))
+
+	lock, err := ref.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = lock.Rollback(ctx) }()
+	if _, err := lock.Exec(ctx, `LOCK TABLE context_model_keys, context_llm_log IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	stop := startModelGateway(gw)
+	// A stamp for the final flush to write: its statement waits on the lock.
+	gw.usage.Touch("00000000-0000-4000-8000-0000000002b5")
+	const rows = 12
+	for range rows {
+		llmlog.Record(pool, llmlog.Entry{Pipeline: "w02-05-l-b", Model: "m", Host: "h"})
+	}
+
+	var stopTook time.Duration
+	timed := func() {
+		b := time.Now()
+		stop()
+		stopTook = time.Since(b)
+	}
+	sched := drainingScheduler{wait: func() { _ = lock.Rollback(ctx) }}
+	begin := time.Now()
+	shutdownSequence(&http.Server{}, sched, pool, timed)
+	total := time.Since(begin)
+	t.Logf("shutdown sequence %s, gateway stop %s (budgets: gateway stop %s, settle %s)",
+		total.Round(time.Millisecond), stopTook.Round(time.Millisecond), gatewayStopTimeout, llmlogSettleTimeout)
+	// The probe is only a probe while the stop really blocked for its budget.
+	if stopTook < gatewayStopTimeout-time.Second {
+		t.Fatalf("gateway stop took %s — the lock did not hold the final flush, the probe proves nothing", stopTook)
+	}
+	// Side by side: about max(stop, settle) = 5 s; in sequence about 10 s.
+	// The threshold leaves 3 s for host load.
+	if limit := gatewayStopTimeout + llmlogSettleTimeout - 2*time.Second; total >= limit {
+		t.Errorf("shutdown sequence %s >= %s — the gateway stop and the first settle ran one after the other", total.Round(time.Millisecond), limit)
 	}
 }
