@@ -14,7 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/llmlog"
 )
 
-func TestGatewayBodyLoggingV43(t *testing.T) {
+func TestGatewayBodyLoggingV44(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw, want string
 		fatal           bool
