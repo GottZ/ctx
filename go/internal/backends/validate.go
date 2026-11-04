@@ -54,8 +54,9 @@ var bodyCredentialKeys = map[string]bool{
 // itself, so a row may set none — on every provider class. X-Ctx- covers the
 // older spelling. The psql path, which skips this validation, is covered on
 // every model wire call by fedhop.Stamp, which removes both prefixes; the
-// backend-test reachability probe (probeBackendURL) is not stamped yet and
-// still sends a psql-written row's headers as they are.
+// backend-test reachability probe (probeBackendURL) and the OpenRouter
+// endpoint discovery (EndpointCache.fetch, orwindow.go) are not stamped yet
+// and still send a psql-written row's headers as they are.
 var federationHeaderPrefixes = []string{"ctx-", "x-ctx-"}
 
 // deniedHeader says why name may not be an extra_headers key ("" = allowed):
