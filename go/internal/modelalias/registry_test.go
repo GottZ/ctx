@@ -214,6 +214,78 @@ func TestRegistryInvalidPolicyIsNotOffered(t *testing.T) {
 	}
 }
 
+// TestRegistryWarnOfAHugeKeyIsBounded (Fremd-Review 2 R-2): a policy key of
+// 1 MiB (a psql edit; the column has no size cap) is named in the WARN line
+// clipped, not whole — once per reload.
+func TestRegistryWarnOfAHugeKeyIsBounded(t *testing.T) {
+	ctx := context.Background()
+	r, mock, buf := newTestRegistry(t)
+	r.log = slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+		return a
+	}}))
+	huge := strings.Repeat("k", 1<<20)
+	mock.ExpectQuery(loadQuery).WillReturnRows(mockRows(row{"a1", "_global", "huge", "chat", `{"` + huge + `": 1}`, true}))
+	if err := r.Reload(ctx); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	var line string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, "level=WARN") {
+			line = l
+		}
+	}
+	if n := len(line); n > 256 || !strings.Contains(line, "kkkk") {
+		t.Fatalf("WARN line of a 1 MiB key: %d bytes (want ≤ 256, naming the clipped key): %.300s", n, line)
+	}
+	t.Logf("WARN line of a 1 MiB key: %d bytes", len(line))
+	var pe *PolicyError
+	if _, err := ParsePolicy(KindChat, []byte(`{"`+strings.Repeat("ä", 100)+`": 1}`)); !errors.As(err, &pe) ||
+		pe.Key != strings.Repeat("ä", policyKeyClip)+"…" {
+		t.Errorf("clipped key %q, want %d runes and an ellipsis (rune-safe)", pe.Key, policyKeyClip)
+	}
+}
+
+// TestRegistryTriggerCoalesces (Fremd-Review 2 R-1): Trigger never waits;
+// while a reload runs, further Triggers only mark one rerun. 100 Triggers
+// during a held load cost exactly that load plus one rerun, and the rerun
+// publishes the newest read.
+func TestRegistryTriggerCoalesces(t *testing.T) {
+	ctx := context.Background()
+	g := &gateQuerier{entered: make(chan struct{}), release: make(chan struct{})}
+	r := NewRegistry(g)
+	r.log = slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	start := time.Now()
+	r.Trigger(ctx)
+	<-g.entered
+	for i := 0; i < 99; i++ {
+		r.Trigger(ctx)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("100 Triggers took %v while a load was held — Trigger waited", took)
+	}
+	close(g.release)
+	deadline := time.Now().Add(5 * time.Second)
+	for r.Generation() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := g.calls.Load(); n != 2 || r.Generation() != 2 || names(r.Snapshot().Aliases()) != "_global/new" {
+		t.Fatalf("100 Triggers: %d load(s), generation %d, aliases %s — want 2, 2 and the rerun's read _global/new",
+			n, r.Generation(), names(r.Snapshot().Aliases()))
+	}
+	// Idle again: the next Trigger starts a new load.
+	r.Trigger(ctx)
+	for r.Generation() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if r.Generation() != 3 {
+		t.Errorf("a Trigger after the burst: generation %d, want 3", r.Generation())
+	}
+}
+
 // fixture: _global chat/embed/old, tenant A shadows chat, adds its own;
 // tenant B has a disabled alias and one with a broken policy that shadows
 // _global "embed"; a row with a reserved scope.
@@ -375,6 +447,14 @@ func TestValidateRow(t *testing.T) {
 	})
 	if got := names(Offers(s, "acme:main")); got != "_global/chat" {
 		t.Errorf("an empty-scope row took part: Offers = %s", got)
+	}
+	// Fremd-Review 2 R-8: also for the empty consumer scope, where an indexed
+	// "" row would be its own tenant map.
+	if got := names(Offers(s, "")); got != "_global/chat" {
+		t.Errorf("an empty-scope row took part for scope \"\": Offers = %s", got)
+	}
+	if a, ok := Lookup(s, "chat", ""); !ok || a.ID != "g" {
+		t.Errorf("Lookup(chat, \"\") = %+v %v, want the _global row", a, ok)
 	}
 }
 

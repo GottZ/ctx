@@ -87,6 +87,12 @@ const (
 	DefaultRerankMaxDocuments = 128
 	DefaultRerankSubBatch     = 128
 
+	// policyKeyClip bounds the key a PolicyError names, in runes: the key of
+	// an unknown or duplicate entry is input (a psql edit, an admin request —
+	// the column has no size cap), and the error reaches a WARN line per
+	// reload and a 422 body. Longer keys are cut and end in "…".
+	policyKeyClip = 64
+
 	// policyIntMax bounds every integer entry, ceiling or not: a value past
 	// int32 is no count, size or token budget anyone means, and a consumer
 	// multiplying two of them (max_inputs × native_dims) stays far from
@@ -95,7 +101,8 @@ const (
 )
 
 // PolicyError is a refused policy: Key names the offending key ("" for the
-// document as a whole — not an object, malformed, an unknown alias kind).
+// document as a whole — not an object, malformed, an unknown alias kind),
+// cut to policyKeyClip runes.
 // The admin action answers it with 422 at that field.
 type PolicyError struct {
 	Key    string
@@ -172,6 +179,19 @@ var policyKeys = []policyKey{
 	{"rerank.sub_batch", forRerank, typeInt, CeilingRerankSubBatch, func(p *Policy) *Opt[int] { return &p.RerankSubBatch }},
 }
 
+// clipKey cuts key to policyKeyClip runes (rune-safe; invalid UTF-8 counts
+// one rune per byte, as range does).
+func clipKey(key string) string {
+	n := 0
+	for i := range key {
+		if n == policyKeyClip {
+			return key[:i] + "…"
+		}
+		n++
+	}
+	return key
+}
+
 func lookupKey(name string) (policyKey, bool) {
 	for _, k := range policyKeys {
 		if k.name == name {
@@ -225,12 +245,12 @@ func parsePolicy(kind Kind, raw []byte) (Policy, error) {
 		}
 		name, _ := tok.(string) // an object key is always a string token
 		if seen[name] {
-			return p, &PolicyError{Key: name, Reason: "named twice"}
+			return p, &PolicyError{Key: clipKey(name), Reason: "named twice"}
 		}
 		seen[name] = true
 		k, ok := lookupKey(name)
 		if !ok {
-			return p, &PolicyError{Key: name, Reason: "unknown key"}
+			return p, &PolicyError{Key: clipKey(name), Reason: "unknown key"}
 		}
 		if !k.kinds.has(kind) {
 			return p, &PolicyError{Key: name, Reason: fmt.Sprintf("does not apply to a %s alias", kind)}

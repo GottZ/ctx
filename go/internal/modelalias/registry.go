@@ -178,6 +178,12 @@ type Registry struct {
 	mu   sync.Mutex // serializes reloads: generation order = publication order
 	snap atomic.Pointer[Snapshot]
 	log  *slog.Logger // nil = slog.Default(); tests capture it
+
+	// Trigger's single flight: running while a drain goroutine reloads,
+	// pending when a Trigger arrived during that reload.
+	flightMu sync.Mutex
+	running  bool
+	pending  bool
 }
 
 // NewRegistry returns an empty registry that loads through q.
@@ -200,6 +206,46 @@ func (r *Registry) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// Trigger asks for a reload and returns at once — the hot-reload entry of
+// the NOTIFY listener, whose single loop serves every channel and must never
+// wait for a table read. Single flight with a pending bit: if no reload runs,
+// one starts in its own goroutine; if one runs, the Trigger only marks a
+// rerun, and the running reload reads the table exactly once more after it
+// finishes. A burst of N writes therefore costs at most the running reload
+// plus one, never N; no write is lost, because every reload reads the whole
+// table and a write committed during a reload brings its own NOTIFY, which
+// marks the rerun. A failed reload keeps the previous snapshot (Reload) and
+// is logged here; nothing retries it until the next Trigger (a NOTIFY, a
+// listener backlog) — the Pool.Reload doctrine. ctx bounds the goroutine: a
+// cancelled ctx ends the drain after the reload it is in.
+func (r *Registry) Trigger(ctx context.Context) {
+	r.flightMu.Lock()
+	defer r.flightMu.Unlock()
+	if r.running {
+		r.pending = true
+		return
+	}
+	r.running = true
+	go r.drain(ctx)
+}
+
+// drain reloads until no Trigger arrived during the last reload.
+func (r *Registry) drain(ctx context.Context) {
+	for {
+		if err := r.Reload(ctx); err != nil {
+			r.logger().Warn("modelalias: registry reload failed — previous snapshot stays active", "error", err)
+		}
+		r.flightMu.Lock()
+		if !r.pending || ctx.Err() != nil {
+			r.running, r.pending = false, false
+			r.flightMu.Unlock()
+			return
+		}
+		r.pending = false
+		r.flightMu.Unlock()
+	}
+}
+
 // loadSQL reads every alias; Reload scans the columns in this order.
 const loadSQL = `
 SELECT id::text, scope, name, kind, role, sensitivity, policy, description, enabled, created_at, updated_at
@@ -207,8 +253,7 @@ SELECT id::text, scope, name, kind, role, sensitivity, policy, description, enab
  ORDER BY scope COLLATE "C", name COLLATE "C"`
 
 // Reload reads context_model_aliases and publishes it as the next
-// generation. Triggers: boot, the NOTIFY of the table (listener), the
-// listener's backlog. A failed read keeps the previous snapshot and its
+// generation, synchronously (boot, tests; the listener uses Trigger). A failed read keeps the previous snapshot and its
 // generation (the Pool.Reload doctrine) and returns the error. A row that
 // fails validation is loaded with Invalid set and named by one WARN per
 // reload; it is never offered.

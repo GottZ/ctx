@@ -324,15 +324,14 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 	// nothing else — not settings.Reload (the fall-through would rebuild the
 	// config base and wipe every tenant generation per alias write, the
 	// warning at 113_baseline.sql:9552-9556), and not the tenant invalidation
-	// below (a tenant alias's scope is a pool scope, no config write). A
-	// failed reload keeps the previous snapshot (Registry.Reload) and is never
-	// returned: pgxlisten treats a handler error as connection-level.
+	// below (a tenant alias's scope is a pool scope, no config write).
+	// Trigger, not Reload: this loop serves every channel of the listener,
+	// and a full table read per alias write would hold all of them — a burst
+	// of N writes is coalesced into at most two reads (Registry.Trigger). A
+	// failed reload keeps the previous snapshot and is logged by the registry.
 	if p.Entity == "context_model_aliases" {
-		if h.modelAliases == nil {
-			return nil
-		}
-		if err := h.modelAliases.Reload(ctx); err != nil {
-			slog.Warn("listener: model-alias registry reload failed — previous snapshot stays active", "error", err)
+		if h.modelAliases != nil {
+			h.modelAliases.Trigger(ctx)
 		}
 		return nil
 	}
@@ -496,10 +495,9 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 		}
 	}
 	// An alias write during the disconnect window lost its NOTIFY with it.
+	// Asynchronous like the entity branch (Registry.Trigger).
 	if h.modelAliases != nil {
-		if err := h.modelAliases.Reload(ctx); err != nil {
-			slog.Warn("listener: model-alias backlog reload failed — previous snapshot stays active", "error", err)
-		}
+		h.modelAliases.Trigger(ctx)
 	}
 	return nil
 }
