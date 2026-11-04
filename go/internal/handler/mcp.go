@@ -541,7 +541,10 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		//     home scope whether a write to a foreign scope is a no-op, and
 		//     answer "No change needed" for a block that does not exist
 		//     where the caller asked for it. REST has always ordered it this
-		//     way (context_store.go: scope gate, then HashNOOPCheck).
+		//     way (context_store.go: scope gate, then its identical-content
+		//     check — since #64 store.IdenticalContentMatch, which also
+		//     compares tags, metadata, sensitivity and type; this check
+		//     still compares the content alone).
 		//   - a refusal here also precedes the D-W5 stage branch, so a
 		//     flagged key never gets a CARD for a scope it may not write.
 		//
