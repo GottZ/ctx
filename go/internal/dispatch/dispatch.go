@@ -161,6 +161,12 @@ func NormalizeOrigin(raw string) (string, error) {
 // — since MW4 EXCLUSIVELY out of the request ctx via the boot-installed
 // principal hook (design/03 §4.1.1), never as a caller parameter: detached
 // scheduler contexts resolve empty, which makes them STRUCTURALLY background.
+//
+// Three shapes (design/01 §4.5, wave W01-7): a knowledge principal (ApiKeyID
+// set, consumer fields empty), a consumer principal of a model-key request
+// (I-K0: ApiKeyID, HomeScope and PrincipalID empty, ConsumerID set) and the
+// zero principal of ctx' own detached work. Conflict poisons a principal
+// whose request ctx is inconsistent; both doors refuse it outright.
 type Principal struct {
 	ApiKeyID  string
 	TenantID  string
@@ -173,6 +179,28 @@ type Principal struct {
 	// (policy.FairnessPrincipalRR) once a principal may hold keys across
 	// tenants (E1t=multi); no consumer flips it in this wave.
 	PrincipalID string
+	// ConsumerID is the external consumer of a model-key request
+	// (context_model_consumers.id, design/01 §4.5) — "" on every knowledge
+	// and detached principal. Non-empty, it confines the principal to the
+	// external classes (I-K10: a class with External() == false refuses it
+	// with ErrClassUnauthorized). TenantID then is attribution only; the
+	// interactive caps never see a consumer. The external queue's cap and
+	// fairness key (_consumer:<id>) arrives with the external class (A03-W3,
+	// K-03-3) — fairKey is deliberately unchanged here.
+	ConsumerID string
+	// ConsumerKind is the consumer's kind (auth.ConsumerKind as a string:
+	// "app" | "ctx-peer"): an input for the external classes, never
+	// authorizing on its own.
+	ConsumerKind string
+	// FairWeight is the consumer's weighted round-robin share (1..100) in the
+	// external queue (A03-W3/W4); 0 on every other principal.
+	FairWeight int
+	// Conflict marks a poisoned principal: the request ctx carried both a
+	// knowledge and a model credential, or an invalid ConsumerAuth — states
+	// the doors' mutual exclusion rules out (W01-6). It is never mapped to
+	// the zero principal, which is ctx' own detached work; both admission
+	// doors refuse it with ErrPrincipalConflict, whatever else it carries.
+	Conflict bool
 }
 
 // fairKey is the fairness bucket of a principal (E-F1: HomeScope, single
@@ -259,9 +287,29 @@ var (
 // counted (Snapshot.InvalidClass) and logged at ERROR.
 var ErrInvalidClass = errors.New("dispatch: invalid admission class")
 
+// The principal-gate sentinels (design/01 §4.5 I-K10, wave W01-7). Both
+// admission doors answer them after the class check and before the B8 block:
+// no waiter, no wait slot, no downgrade, no lease. Like ErrInvalidClass they
+// are CODE BUGS (a wiring defect), not capacity verdicts — deliberately NOT
+// part of IsRejection; the /v1 mapping is 503 server_error with
+// x-should-retry: false (masterplan K29, K-02-8, wave W02-07). Each refusal
+// is counted (Snapshot.ClassUnauthorized / .PrincipalConflicts) and logged
+// at ERROR.
+var (
+	// ErrClassUnauthorized — the principal may not use the requested class.
+	// One sentinel for both directions: here a consumer principal in a class
+	// with External() == false; with the external classes (A03-W3) also an
+	// external class without a consumer principal.
+	ErrClassUnauthorized = errors.New("dispatch: principal not authorized for the admission class")
+	// ErrPrincipalConflict — the principal is poisoned (Principal.Conflict):
+	// the request ctx carried both credential kinds or an invalid one.
+	ErrPrincipalConflict = errors.New("dispatch: conflicting request principal")
+)
+
 // IsRejection is the ONE check point for handler mapping (429/SSE): true for
 // every Deckel-Staffel sentinel and ErrQueueFull, false for everything else
-// (in particular ctx.Err() and ErrInvalidClass). It exists so no handler ever matches error
+// (in particular ctx.Err(), ErrInvalidClass, ErrClassUnauthorized and
+// ErrPrincipalConflict). It exists so no handler ever matches error
 // STRINGS — string comparisons are the drift source that would collide the
 // generic B6 texts with the mapping (design/03 §4.5.1).
 func IsRejection(err error) bool {

@@ -128,6 +128,11 @@ type Dispatcher struct {
 	// invalidClass counts refusals with ErrInvalidClass (A03-W1) — every
 	// one is a code bug, like a class downgrade.
 	invalidClass atomic.Int64
+	// classUnauthorized / principalConflicts count the principal-gate
+	// refusals (W01-7, design/01 §4.5 I-K10): ErrClassUnauthorized and
+	// ErrPrincipalConflict — every one a wiring defect, like a downgrade.
+	classUnauthorized  atomic.Int64
+	principalConflicts atomic.Int64
 	// stats are the MW22 meter counters: uncharged_calls + the hot-path
 	// measurement hooks (usage.go).
 	stats usageStats
@@ -211,7 +216,8 @@ func (d *Dispatcher) InteractiveDemand() int {
 // Classify, no health report, no llmlog line, terminal for the chain walk
 // (design/01 §4.3). Check order at the door: ctx.Err(), then the class
 // (ErrInvalidClass for a value outside the class table — never queued, never
-// downgraded, A03-W1), then the B8 class authorization.
+// downgraded, A03-W1), then the principal gate (ErrPrincipalConflict,
+// ErrClassUnauthorized — I-K10, W01-7), then the B8 class authorization.
 func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.Context, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err // canceled ctx never takes a wait slot
@@ -220,6 +226,9 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		return nil, nil, d.refuseInvalidClass("acquire", req.Class, req.Target.Origin, req.Role)
 	}
 	principal := principalFromContext(ctx)
+	if err := d.refusePrincipal("acquire", principal, req); err != nil {
+		return nil, nil, err
+	}
 	class := req.Class
 	if class == ClassInteractive && principal.ApiKeyID == "" {
 		// B8 class authorization, ctx-bound (design/03 §4.1.1): interactive
@@ -526,6 +535,35 @@ func (d *Dispatcher) refuseInvalidClass(site string, class Class, origin, role s
 	return ErrInvalidClass
 }
 
+// refusePrincipal is the principal gate of both admission doors (design/01
+// §4.5 I-K10, wave W01-7), after the class check and BEFORE the B8 block: a
+// poisoned principal (Conflict — the request ctx carried both credential
+// kinds or an invalid model credential) is refused with ErrPrincipalConflict
+// whatever else it carries; a consumer principal (ConsumerID != "") in a
+// class with External() == false — today every class — with
+// ErrClassUnauthorized. Never a downgrade: the background queue has no
+// competing principals by invariant (queue.go), and external load there
+// would starve dream/digest (ErrQueueFull) and become preempt-/reapable —
+// the inverse of "ctx first". Both are wiring defects: counted and logged at
+// ERROR, refused before any waiter, wait slot or lease exists. nil admits
+// the principal to B8, which stays byte-identical.
+func (d *Dispatcher) refusePrincipal(site string, p Principal, req Request) error {
+	if p.Conflict {
+		d.principalConflicts.Add(1)
+		d.logger.Error("dispatch: conflicting request principal (knowledge and model credential, or an invalid model credential) refused",
+			"site", site, "class", req.Class.String(), "target", req.Target.Origin, "role", req.Role)
+		return ErrPrincipalConflict
+	}
+	if p.ConsumerID != "" && !req.Class.External() {
+		d.classUnauthorized.Add(1)
+		d.logger.Error("dispatch: consumer principal in a non-external class refused",
+			"site", site, "class", req.Class.String(), "consumer", p.ConsumerID,
+			"target", req.Target.Origin, "role", req.Role)
+		return ErrClassUnauthorized
+	}
+	return nil
+}
+
 // targetLocked returns (or creates) the state of one normalized origin.
 func (d *Dispatcher) targetLocked(origin string) *targetState {
 	st, ok := d.targets[origin]
@@ -713,6 +751,13 @@ type Snapshot struct {
 	// outside the class table, A03-W1). Dispatcher-internal for now: the
 	// status surface gains it with the class-generic status fields (A03-W3).
 	InvalidClass int64
+	// ClassUnauthorized counts acquires refused with ErrClassUnauthorized (a
+	// consumer principal in a class with External() == false, W01-7);
+	// PrincipalConflicts those refused with ErrPrincipalConflict (a poisoned
+	// principal). Both are server-admin status fields next to
+	// class_downgrades.
+	ClassUnauthorized  int64
+	PrincipalConflicts int64
 	// UnchargedCalls counts interactive releases without reported usage
 	// (charge 0 — visibility instead of estimation, MW22/C1).
 	UnchargedCalls int64
@@ -731,14 +776,16 @@ func (d *Dispatcher) Snapshot() Snapshot {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	out := Snapshot{
-		Enabled:         set.Enabled,
-		Demand:          int(d.demand.Load()),
-		ReapsTotal:      d.reapsTotal.Load(),
-		ClassDowngrades: d.classDowngrades.Load(),
-		InvalidClass:    d.invalidClass.Load(),
-		UnchargedCalls:  d.stats.unchargedCalls.Load(),
-		OpsTotal:        d.stats.opsTotal.Load(),
-		MaxOpDur:        time.Duration(d.stats.maxOpNs.Load()),
+		Enabled:            set.Enabled,
+		Demand:             int(d.demand.Load()),
+		ReapsTotal:         d.reapsTotal.Load(),
+		ClassDowngrades:    d.classDowngrades.Load(),
+		InvalidClass:       d.invalidClass.Load(),
+		ClassUnauthorized:  d.classUnauthorized.Load(),
+		PrincipalConflicts: d.principalConflicts.Load(),
+		UnchargedCalls:     d.stats.unchargedCalls.Load(),
+		OpsTotal:           d.stats.opsTotal.Load(),
+		MaxOpDur:           time.Duration(d.stats.maxOpNs.Load()),
 	}
 	for _, origin := range sortedOrigins(d.targets) {
 		st := d.targets[origin]
