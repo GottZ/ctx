@@ -134,6 +134,21 @@ type extFair struct {
 	consumers     map[string]*fairConsumer
 	tenants       map[string]*fairTenant
 	activeTenants int
+	// viewAt is the clock of the fairness order (review 4 FR4-2): the
+	// running slot time of the held leases is read at viewAt, which moves
+	// only at events — every wake (wakeLocked) and every external lease
+	// start and end — never by the mere passing of time between them. So
+	// the pick, and with it "the fairness-first head holds the class", is
+	// a function of the state; a waiting head never becomes the pick
+	// without the wake that hands it its units.
+	viewAt time.Time
+}
+
+// touch moves the clock of the fairness order to now (never back).
+func (f *extFair) touch(now time.Time) {
+	if now.After(f.viewAt) {
+		f.viewAt = now
+	}
 }
 
 func newExtFair() *extFair {
@@ -222,6 +237,7 @@ func (f *extFair) leaseEnter(l *Lease, c *fairConsumer, start time.Time) {
 	c.add(l.weight, start)
 	c.tenant.add(l.weight, start)
 	l.fair, l.slotStart = c, start
+	f.touch(start) // a lease never starts after the view (no negative running time)
 }
 
 // leaseLeave settles an external lease (finishLocked — release, reaper,
@@ -232,6 +248,7 @@ func (f *extFair) leaseLeave(l *Lease, now time.Time, win time.Duration) {
 	c.settle(l.weight, l.slotStart, now, win)
 	c.tenant.settle(l.weight, l.slotStart, now, win)
 	f.leave(c)
+	f.touch(now)
 }
 
 // sweep drops the records without activity whose window ran out (reaper
@@ -308,7 +325,8 @@ func externalFits(st *targetState, w, slots, capacity int) bool {
 	return (slots <= 0 || st.held+w <= slots) && (capacity == 0 || st.heldExt+w <= capacity)
 }
 
-// fairView is what one pick reads once: the meter's clock, the slot-time
+// fairView is what one pick reads once: the clock of the fairness order
+// (extFair.viewAt — frozen between events, review 4 FR4-2), the slot-time
 // window and the tenant share (0: no external cap — no shares, only the
 // order).
 type fairView struct {
@@ -318,7 +336,10 @@ type fairView struct {
 }
 
 func (d *Dispatcher) fairViewLocked(f *extFair, capacity int) fairView {
-	v := fairView{now: d.fairClock(time.Now()), win: d.usageWindowDur()}
+	v := fairView{now: f.viewAt, win: d.usageWindowDur()}
+	if v.now.IsZero() {
+		v.now = d.fairClock(time.Now()) // no event on the target yet
+	}
 	if capacity > 0 && f.activeTenants > 0 {
 		v.tenantShare = shareOf(capacity, 1, f.activeTenants)
 	}

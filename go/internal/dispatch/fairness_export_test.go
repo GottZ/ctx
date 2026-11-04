@@ -15,6 +15,9 @@ import (
 func (d *Dispatcher) setFairClockForTest(now func() time.Time) {
 	d.mu.Lock()
 	d.fairNow = now
+	for _, st := range d.targets {
+		st.external.fair.viewAt = time.Time{} // the order's clock follows the new clock from the next event
+	}
 	d.mu.Unlock()
 }
 

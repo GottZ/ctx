@@ -75,13 +75,15 @@ func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (
 	}
 	if eligible {
 		l := d.admitLocked(st, w, now, true)
-		if st.external.total > 0 && (w.class == ClassInteractive || !d.externalBeforeBackground()) {
-			// The units an in-house class ranked above the external class
-			// just took can end the hold of a waiting external head that
-			// this class now keeps out on its own (A03-W4 review 3:
-			// externalHeadHoldsLocked for the external class,
-			// externalReservedLocked for background) — the units held back
-			// for it go to the waiters now, not at the next release.
+		if st.external.total > 0 && (w.class == ClassInteractive || w.class == ClassExternal || !d.externalBeforeBackground()) {
+			// An admission can change the fairness-first external head or
+			// end its hold (A03-W4 reviews 3 and 4): units an in-house class
+			// ranked above the external class just took can keep that head
+			// out on its own (externalHeadHoldsLocked, externalReservedLocked
+			// for background); an external newcomer that ranked before the
+			// holding head changes heldBy, the shares and with them the
+			// fairness-first head, which may fit now (FR4-1). Whatever the
+			// pick is now goes to its units at once, not at the next release.
 			d.wakeLocked(st)
 		}
 		return l, nil

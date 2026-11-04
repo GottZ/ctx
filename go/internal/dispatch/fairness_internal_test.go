@@ -405,7 +405,13 @@ func (r *traceRun) reference(st *targetState, slots int) (*waiter, int) {
 	if st.external.total == 0 {
 		return nil, 0
 	}
-	now := r.now()
+	// The clock of the order is the dispatcher's view time (review 4 FR4-2:
+	// frozen between events) — the trace reads the same clock; everything
+	// computed at it comes from the trace's own records.
+	now := st.external.fair.viewAt
+	if now.IsZero() {
+		now = r.now()
+	}
 	heldC, heldT := map[string]int{}, map[string]int{}
 	slotC, slotT := map[string]float64{}, map[string]float64{}
 	activeC := map[int]bool{}

@@ -337,6 +337,14 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	budget, err := d.waitBudgetLocked(st, w, req, now)
 	if err == nil {
 		err = d.enqueueLocked(st, w)
+		if err == nil && class == ClassExternal {
+			// An external enqueue changes T_act and Σ fair_weight and with
+			// them the shares: the fairness-first head can change — the
+			// waiter itself may be it now and fit (A03-W4 review 4 FR4-1).
+			// The wake hands the pick its units (it may admit w itself;
+			// the wait below then returns at once).
+			d.wakeLocked(st)
+		}
 	}
 	if err == nil && class == ClassInteractive {
 		// Preempt trigger (MW18, design/02 §4.2.1): only an interactive
@@ -609,6 +617,9 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 // A03-W7); on an offered self-admitting target (no slots) they are admitted
 // against external_max_inflight.
 func (d *Dispatcher) wakeLocked(st *targetState) {
+	// The wake re-reads the fairness order of the external class at this
+	// instant (A03-W4 review 4 FR4-2: frozen between events).
+	st.external.fair.touch(d.fairClock(time.Now()))
 	if st.external.total > 0 {
 		if capacity := d.externalWeightCap(st.origin); capacity == 0 {
 			d.failExternalWaitersLocked(st, ErrExternalNotOffered)
