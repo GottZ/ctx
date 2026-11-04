@@ -51,7 +51,25 @@ var (
 	ErrModelAliasExists = errors.New("store: model alias already exists in the scope")
 	// ErrModelAliasScope: the alias's scope lies outside the caller's scopes.
 	ErrModelAliasScope = errors.New("store: model alias scope outside the caller's scopes")
+	// ErrModelAliasGranted: DeleteModelAlias refused an alias active
+	// consumers hold an explicit grant on (design/05 V-02-b). The concrete
+	// error is a *ModelAliasGrantedError with their count.
+	ErrModelAliasGranted = errors.New("store: model alias is granted to active model consumers")
 )
+
+// ModelAliasGrantedError carries the number of active consumers holding a
+// grant on the alias a delete refused — a count, never who they are.
+// errors.Is(err, ErrModelAliasGranted).
+type ModelAliasGrantedError struct {
+	Count int
+}
+
+func (e *ModelAliasGrantedError) Error() string {
+	return fmt.Sprintf("%v: %d", ErrModelAliasGranted, e.Count)
+}
+
+// Is makes the error match ErrModelAliasGranted.
+func (e *ModelAliasGrantedError) Is(target error) bool { return target == ErrModelAliasGranted }
 
 // ModelAliasImmutableError names the identity column a refused write tried to
 // change ("name", "kind" or "scope"). errors.Is(err, ErrModelAliasImmutable).
@@ -184,7 +202,14 @@ func UpdateModelAlias(ctx context.Context, tx pgx.Tx, a ModelAlias, scopes []str
 }
 
 // DeleteModelAlias removes the alias id in tx and returns the deleted row;
-// found=false as in UpdateModelAlias.
+// found=false as in UpdateModelAlias. While an ACTIVE consumer holds an
+// explicit grant on the alias (migration 164) it deletes nothing and returns a
+// *ModelAliasGrantedError (V-02-b): the row is locked FOR UPDATE first — in
+// the caller's scopes, so an alias outside them stays "not found" whatever its
+// grants — which waits for, and then blocks, every grant insert on it (the
+// foreign key takes KEY SHARE), so the count sees each grant committed before
+// the delete and no new one lands after it. A grant of an inactive consumer
+// goes with the alias (ON DELETE CASCADE), as do all grants of a psql DELETE.
 func DeleteModelAlias(ctx context.Context, tx pgx.Tx, id string, scopes []string, w ModelAliasWrite) (ModelAlias, bool, error) {
 	id, ok := modelAliasID(id)
 	if !ok {
@@ -192,6 +217,23 @@ func DeleteModelAlias(ctx context.Context, tx pgx.Tx, id string, scopes []string
 	}
 	if err := stampModelAliasWrite(ctx, tx, w); err != nil {
 		return ModelAlias{}, false, err
+	}
+	var locked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT true FROM context_model_aliases
+		 WHERE id = $1::uuid AND ($2::text[] IS NULL OR scope = ANY($2))
+		   FOR UPDATE`, id, scopes).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ModelAlias{}, false, nil
+		}
+		return ModelAlias{}, false, modelAliasErr("delete", err)
+	}
+	n, err := CountActiveExplicitGrants(ctx, tx, id)
+	if err != nil {
+		return ModelAlias{}, false, err
+	}
+	if n > 0 {
+		return ModelAlias{}, false, &ModelAliasGrantedError{Count: n}
 	}
 	out, err := scanModelAlias(tx.QueryRow(ctx, `
 		DELETE FROM context_model_aliases

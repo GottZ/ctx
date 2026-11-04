@@ -572,7 +572,10 @@ func TestMigration160Backfill(t *testing.T) {
 // are in the list; their deactivation and identity triggers carry no "audit"
 // in their names and do not write the audit table themselves. Since 162 the
 // model aliases are too; their identity and notify triggers likewise. Since
-// 163 the instance identity is (one set: INSERT/DELETE + UPDATE OF).
+// 163 the instance identity is (one set: INSERT/DELETE + UPDATE OF). Since
+// 164 the model grants are: one INSERT/DELETE trigger and no UPDATE audit
+// trigger (the identity pin keeps both audited columns; it carries no
+// "audit" in its name and does not write the audit table).
 func TestAuditTriggerSetPerTable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -585,7 +588,8 @@ func TestAuditTriggerSetPerTable(t *testing.T) {
 		  WHERE NOT t.tgisinternal
 		    AND t.tgrelid IN ('context_api_keys'::regclass, 'context_tenant_quota'::regclass,
 		                      'context_model_consumers'::regclass, 'context_model_keys'::regclass,
-		                      'context_model_aliases'::regclass, 'context_instance'::regclass)
+		                      'context_model_aliases'::regclass, 'context_instance'::regclass,
+		                      'context_model_consumer_grants'::regclass)
 		    AND (p.proname LIKE 'audit%' OR t.tgname LIKE '%audit%'
 		         OR p.prosrc ILIKE '%context_settings_audit%')
 		  ORDER BY 1`)
@@ -599,6 +603,7 @@ func TestAuditTriggerSetPerTable(t *testing.T) {
 		"context_instance.trg_instance_audit_upd -> audit_instance_write",
 		"context_model_aliases.trg_model_aliases_audit_ins_del -> audit_model_aliases_write",
 		"context_model_aliases.trg_model_aliases_audit_upd -> audit_model_aliases_write",
+		"context_model_consumer_grants.trg_model_grants_audit -> audit_model_grants_write",
 		"context_model_consumers.trg_model_consumers_audit_ins_del -> audit_model_consumers_write",
 		"context_model_consumers.trg_model_consumers_audit_upd -> audit_model_consumers_write",
 		"context_model_keys.trg_model_keys_audit_ins_del -> audit_model_keys_write",

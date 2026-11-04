@@ -55,7 +55,11 @@ func TestModelAliasStore(t *testing.T) {
 		t.Skip("integration test")
 	}
 	ctx := context.Background()
+	// 162 (honouring CTX_M162_OVERLAY), then the later migrations the store
+	// code of the tree expects: DeleteModelAlias counts the grants of 164.
 	pool := maSetup(t)
+	m163Apply(ctx, t, pool)
+	m164Apply(ctx, t, pool)
 	admin, _, err := store.CreateApiKey(ctx, pool, "ma-store-admin", "private", nil, "")
 	if err != nil {
 		t.Fatalf("mint admin: %v", err)

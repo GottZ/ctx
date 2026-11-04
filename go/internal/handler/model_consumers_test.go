@@ -87,7 +87,7 @@ func TestConsumerViewGoldenKeys(t *testing.T) {
 	want := map[string][]string{
 		"consumer": {"active", "admission_lane", "all_models", "allow_plaintext", "allowed_cidrs", "created_at",
 			"created_by_label", "description", "fair_weight", "id", "keys", "keys_total", "kind", "label",
-			"last_used_at", "peer", "prompt_sensitivity", "status", "tenant_id", "tenant_scope", "tenant_slug"},
+			"last_used_at", "models", "peer", "prompt_sensitivity", "status", "tenant_id", "tenant_scope", "tenant_slug"},
 		"key":  {"created_at", "expires_at", "hint", "id", "last_used_at", "revoked_at", "rotated_from", "status"},
 		"peer": {"bound_at", "instance_id"},
 	}

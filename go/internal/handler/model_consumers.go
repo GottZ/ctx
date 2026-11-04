@@ -19,6 +19,12 @@ package handler
 //     must be a scope of the consumer's tenant;
 //   - the expiry per kind (keyExpiry): ≤ now + gateway.key_max_lifetime_<kind>,
 //     the default when the request names none; no update path (V-01-d);
+//   - the model grants (models, migration 164): a target set of alias ids;
+//     every id it adds must be one the CONSUMER is offered (modelalias.Offers
+//     over the registry snapshot with the scope the consumer resolves in: its
+//     tenant_scope, _global only for a ctx-peer — V-02-c; never the caller's
+//     home scope, V-0102-h), else 400 at models; adding is granting, removing
+//     is revoking;
 //   - reveal-once: the plaintext of a key is in the create and the rotate
 //     answer, nowhere else.
 //
@@ -46,6 +52,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -169,12 +176,131 @@ func writeAdminRequired(w http.ResponseWriter) {
 // lock (store.UpdateConsumerChecked); it surfaces as writeAdminRequired.
 var errFieldTier = errors.New("consumer field tier refused")
 
+// modelsError is a refusal of the models field: 400 with param "models".
+type modelsError struct{ msg string }
+
+func (e *modelsError) Error() string { return e.msg }
+
+// errModelsNotOffered is the one text for every id the consumer's scope is
+// not offered — unknown, deleted, disabled, of an invalid policy, of another
+// scope, shadowed: no reason tells an alias of another tenant apart.
+func errModelsNotOffered(id string) *modelsError {
+	return &modelsError{msg: "models: " + id + " is not a model alias this consumer can be granted " +
+		"(unknown, disabled, invalid, outside its tenant_scope, or shadowed by a tenant alias of the same name)"}
+}
+
+func writeModelsError(w http.ResponseWriter, e *modelsError) {
+	writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": e.msg, "param": "models"})
+}
+
+// parseModels turns a models list into the canonical target set.
+func parseModels(in []string) ([]string, error) {
+	// A handler-owned message naming the offending value — never the store's
+	// internal error text (Copilot review on #118).
+	for _, s := range in {
+		if _, err := uuid.Parse(s); err != nil {
+			return nil, &modelsError{msg: fmt.Sprintf("models: %q is not a model alias id — every entry must be the id of a model alias", s)}
+		}
+	}
+	ids, err := store.CanonicalAliasIDs(in)
+	if err != nil {
+		return nil, &modelsError{msg: "models: every entry must be a model alias id"}
+	}
+	return ids, nil
+}
+
+// errModelsNotWired: a grant is to be added, but the handler has no alias
+// registry — no id can be judged offered (fail-closed, 503). Removing grants
+// needs no registry.
+var errModelsNotWired = errors.New("model aliases not wired")
+
+func writeModelsNotWired(w http.ResponseWriter) {
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"success": false, "error": errModelsNotWired.Error()})
+}
+
+// modelSnapshot returns the alias registry's snapshot, nil without one.
+func (h *ManageHandler) modelSnapshot() *modelalias.Snapshot {
+	if h.modelAliases == nil {
+		return nil
+	}
+	return h.modelAliases.Snapshot()
+}
+
+// offerScope is the scope a consumer is offered aliases in — the scope /v1
+// resolves its model names in: its tenant_scope (nil = _global only), and
+// _global only for a ctx-peer, which never resolves against a tenant alias
+// (design/05 V-02-c; W02-05 Resolve: Lookup(…, "")). Validating a peer
+// against its tenant_scope would accept a grant /v1 never honours (and that
+// still holds a delete of the alias back, V-02-b) and refuse the _global
+// alias it does resolve to.
+func offerScope(kind string, tenantScope *string) *string {
+	if kind == "ctx-peer" {
+		return nil
+	}
+	return tenantScope
+}
+
+// addedModels returns the ids of next that cur does not hold (both sorted
+// sets) — the grants a target set adds.
+func addedModels(cur, next []string) []string {
+	have := make(map[string]bool, len(cur))
+	for _, id := range cur {
+		have[id] = true
+	}
+	var out []string
+	for _, id := range next {
+		if !have[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// checkModelsOffered refuses the first id of add that Offers does not list
+// for tenantScope (nil = _global aliases only; see offerScope) — V-0102-h: the
+// scope is the consumer's, as /v1 resolves it. A grant the consumer already
+// holds is not judged again: keeping it grants nothing, and the request time
+// filters a grant that became invisible (design/01 §3.8). Without a snapshot
+// an addition is errModelsNotWired.
+func checkModelsOffered(snap *modelalias.Snapshot, tenantScope *string, add []string) error {
+	if len(add) == 0 {
+		return nil
+	}
+	if snap == nil {
+		return errModelsNotWired
+	}
+	scope := ""
+	if tenantScope != nil {
+		scope = *tenantScope
+	}
+	offered := map[string]bool{}
+	for _, a := range modelalias.Offers(snap, scope) {
+		offered[a.ID] = true
+	}
+	for _, id := range add {
+		if !offered[id] {
+			return errModelsNotOffered(id)
+		}
+	}
+	return nil
+}
+
 // writeConsumerStoreError maps a store error of the consumer primitives.
 func writeConsumerStoreError(w http.ResponseWriter, r *http.Request, err error, op string) {
-	var pgErr *pgconn.PgError
+	var (
+		pgErr *pgconn.PgError
+		mErr  *modelsError
+	)
 	switch {
 	case errors.Is(err, errFieldTier):
 		writeAdminRequired(w)
+	case errors.As(err, &mErr):
+		writeModelsError(w, mErr)
+	case errors.Is(err, errModelsNotWired):
+		writeModelsNotWired(w)
+	case errors.Is(err, store.ErrModelGrantAliasGone):
+		// Deleted between the snapshot check and the insert.
+		writeModelsError(w, &modelsError{msg: "models: a model alias of the list was deleted meanwhile — reload the aliases and retry"})
 	case errors.Is(err, store.ErrModelConsumerNotFound):
 		writeConsumerError(w, http.StatusNotFound, errConsumerNotFound)
 	case errors.Is(err, store.ErrModelKeyNotFound):
@@ -199,9 +325,9 @@ func writeConsumerStoreError(w http.ResponseWriter, r *http.Request, err error, 
 	}
 }
 
-// decodeConsumerPayload decodes a manage payload, refusing unknown fields: a field this
-// wave does not know (models before W01-9, expires_at on an update — V-01-d)
-// must be an error, never silently dropped.
+// decodeConsumerPayload decodes a manage payload, refusing unknown fields: a
+// field the action does not know (expires_at on an update — V-01-d) must be an
+// error, never silently dropped.
 func decodeConsumerPayload(raw json.RawMessage, v any) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		raw = json.RawMessage("{}")
@@ -360,8 +486,8 @@ func (p consumerPolicy) keyExpiry(kind string, requested *time.Time, now time.Ti
 }
 
 // consumerCreateRequest is the payload of model-consumer-create. TenantID is
-// server-admin only (resolveKeyMintTenant). There is no models field yet
-// (grants arrive with W01-9) — an unknown field is a 400.
+// server-admin only (resolveKeyMintTenant). Models are the alias ids to grant
+// (null or absent: none); an unknown field is a 400.
 type consumerCreateRequest struct {
 	Label             string     `json:"label"`
 	Description       string     `json:"description"`
@@ -369,6 +495,7 @@ type consumerCreateRequest struct {
 	TenantScope       *string    `json:"tenant_scope"`
 	Kind              string     `json:"kind"`
 	AllModels         bool       `json:"all_models"`
+	Models            []string   `json:"models"`
 	PromptSensitivity *string    `json:"prompt_sensitivity"`
 	FairWeight        *int16     `json:"fair_weight"`
 	AdmissionLane     *string    `json:"admission_lane"`
@@ -399,6 +526,13 @@ func (d *consumerCreateRequest) validate() ([]netip.Prefix, error) {
 	if err := validatePolicyValues(d.PromptSensitivity, d.AdmissionLane, d.FairWeight); err != nil {
 		return nil, err
 	}
+	if d.Models != nil {
+		ids, err := parseModels(d.Models)
+		if err != nil {
+			return nil, err
+		}
+		d.Models = ids
+	}
 	if d.AllowedCIDRs == nil {
 		return nil, nil
 	}
@@ -427,13 +561,22 @@ func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http
 		return
 	}
 	cidrs, err := d.validate()
-	if err != nil {
+	var mErr *modelsError
+	switch {
+	case errors.As(err, &mErr):
+		writeModelsError(w, mErr)
+		return
+	case err != nil:
 		writeConsumerError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	pol := h.consumerPolicy()
 	if !pol.allowed(ar, d.grant(), false) {
 		writeAdminRequired(w)
+		return
+	}
+	if len(d.Models) > 0 && h.modelAliases == nil {
+		writeModelsNotWired(w)
 		return
 	}
 	var scopes []string
@@ -456,6 +599,11 @@ func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http
 	if h.rejectScopeOutsideTenant(w, r, scopes, tenant) {
 		return
 	}
+	// Every model is a new grant, judged against the new consumer's scope.
+	if err := checkModelsOffered(h.modelSnapshot(), offerScope(d.Kind, d.TenantScope), d.Models); err != nil {
+		writeConsumerStoreError(w, r, err, "model-consumer-create")
+		return
+	}
 	now := time.Now()
 	expiry, err := pol.keyExpiry(d.Kind, d.ExpiresAt, now)
 	if err != nil {
@@ -464,7 +612,7 @@ func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http
 	}
 	spec := store.ModelConsumerSpec{
 		TenantID: tenant, Label: d.Label, Description: d.Description, Kind: d.Kind,
-		TenantScope: d.TenantScope, AllModels: d.AllModels, AllowPlaintext: d.AllowPlaintext,
+		TenantScope: d.TenantScope, AllModels: d.AllModels, Models: d.Models, AllowPlaintext: d.AllowPlaintext,
 	}
 	if d.PromptSensitivity != nil {
 		spec.PromptSensitivity = *d.PromptSensitivity
@@ -508,10 +656,11 @@ func (h *ManageHandler) freshConsumerView(r *http.Request, ar *auth.AuthResult, 
 
 // consumerUpdateFields is the closed field set of model-consumer-update.
 // expires_at is deliberately absent (V-01-d: a new expiry needs a new key —
-// model-key-rotate), so are kind, tenant_id, the peer binding and models
-// (W01-9).
+// model-key-rotate), so are kind, tenant_id and the peer binding. models is
+// the target set of granted alias ids.
 var consumerUpdateFields = map[string]bool{
 	"id": true, "label": true, "description": true, "tenant_scope": true, "all_models": true,
+	"models":             true,
 	"prompt_sensitivity": true, "fair_weight": true, "admission_lane": true,
 	"allowed_cidrs": true, "allow_plaintext": true, "active": true,
 }
@@ -564,9 +713,34 @@ func decodeConsumerUpdate(raw json.RawMessage) (consumerUpdate, error) {
 	if err := decodeNullableScope(fields, p); err != nil {
 		return u, err
 	}
+	if err := decodeModels(fields, p); err != nil {
+		return u, err
+	}
 	var err error
 	u.cidrs, err = decodeNullableCIDRs(fields, p)
 	return u, err
+}
+
+// decodeModels reads models: a list of alias ids (the target set; [] removes
+// every grant), never null.
+func decodeModels(fields map[string]json.RawMessage, p *store.ModelConsumerPatch) error {
+	raw, ok := fields["models"]
+	if !ok {
+		return nil
+	}
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return &modelsError{msg: "models must not be null — [] removes every grant"}
+	}
+	var in []string
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return &modelsError{msg: "models must be a list of model alias ids"}
+	}
+	ids, err := parseModels(in)
+	if err != nil {
+		return err
+	}
+	p.Models = &ids
+	return nil
 }
 
 func decodeNullableScope(fields map[string]json.RawMessage, p *store.ModelConsumerPatch) error {
@@ -626,6 +800,8 @@ func (u consumerUpdate) widens(cur store.ModelConsumer) bool {
 		return true // opens tenant-private backends (B11)
 	case p.AllModels != nil && *p.AllModels && !cur.AllModels:
 		return true
+	case p.Models != nil && len(addedModels(cur.Models, *p.Models)) > 0:
+		return true // a new release of a model alias (K11); removing one revokes
 	case p.Active != nil && *p.Active && !cur.Active:
 		return true // reactivation; revives no key (I-K8)
 	case p.ClearAllowedCIDRs && cur.AllowedCIDRs != nil:
@@ -653,9 +829,35 @@ func (u consumerUpdate) serverAdminOnly(cur store.ModelConsumer) bool {
 	return false
 }
 
+// scopeAfter is the consumer's tenant_scope once the update has run: the
+// patch's value, NULL when it clears the scope, else the current one.
+func (u consumerUpdate) scopeAfter(cur store.ModelConsumer) *string {
+	switch {
+	case u.patch.ClearTenantScope:
+		return nil
+	case u.patch.TenantScope != nil:
+		return u.patch.TenantScope
+	}
+	return cur.TenantScope
+}
+
+// checkModels judges the grants the update adds against what the consumer is
+// offered after the update (kind is immutable; the scope may change with it).
+func (u consumerUpdate) checkModels(snap *modelalias.Snapshot, cur store.ModelConsumer) error {
+	if u.patch.Models == nil {
+		return nil
+	}
+	return checkModelsOffered(snap, offerScope(cur.Kind, u.scopeAfter(cur)), addedModels(cur.Models, *u.patch.Models))
+}
+
 func (h *ManageHandler) handleModelConsumerUpdate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	u, err := decodeConsumerUpdate(req.Data)
-	if err != nil {
+	var mErr *modelsError
+	switch {
+	case errors.As(err, &mErr):
+		writeModelsError(w, mErr)
+		return
+	case err != nil:
 		writeConsumerError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -686,11 +888,19 @@ func (h *ManageHandler) handleModelConsumerUpdate(w http.ResponseWriter, r *http
 	if u.patch.TenantScope != nil && h.rejectScopeOutsideTenant(w, r, []string{*u.patch.TenantScope}, cur.TenantID) {
 		return
 	}
+	// One registry snapshot for both judgements of the grants: unlocked here,
+	// then against the consumer as it stands under its lock. Only an added id
+	// needs it — removing grants works without the registry.
+	snap := h.modelSnapshot()
+	if err := u.checkModels(snap, cur); err != nil {
+		writeConsumerStoreError(w, r, err, "model-consumer-update")
+		return
+	}
 	check := func(locked store.ModelConsumer) error {
 		if !pol.allowed(ar, u.grant(locked), locked.Kind == "ctx-peer") {
 			return errFieldTier
 		}
-		return nil
+		return u.checkModels(snap, locked)
 	}
 	c, err := store.UpdateConsumerChecked(r.Context(), h.pool, u.id, access, u.patch, check, auditStamp(r, ar))
 	if err != nil {

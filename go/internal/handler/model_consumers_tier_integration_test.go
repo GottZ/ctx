@@ -373,6 +373,7 @@ func TestModelConsumerTierMatrix(t *testing.T) {
 			{"update_expires_at", hOff, admin, "model-consumer-update", map[string]any{"id": app.id,
 				"expires_at": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)}, http.StatusBadRequest, ""},
 			{"update_kind", hOff, admin, "model-consumer-update", map[string]any{"id": app.id, "kind": "ctx-peer"}, http.StatusBadRequest, ""},
+			// K11 (W01-9): models names alias ids — an alias name is a 400.
 			{"create_models", hOff, admin, "model-consumer-create", map[string]any{"label": "mc-models", "models": []string{"chat"}}, http.StatusBadRequest, ""},
 		} {
 			row.run(t)

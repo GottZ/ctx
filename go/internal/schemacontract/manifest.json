@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 163,
-    "migration_count": 51,
+    "migration_max": 164,
+    "migration_count": 52,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -2085,6 +2085,41 @@
           "name": "updated_at",
           "type": "timestamp with time zone",
           "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_model_consumer_grants": {
+      "columns": [
+        {
+          "name": "consumer_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "alias_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_key",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_by_principal",
+          "type": "uuid",
+          "not_null": false,
           "storage": "p"
         }
       ],
@@ -4878,6 +4913,9 @@
     "context_model_aliases_pkey": {
       "def_hash": "0c24f3b4e9d05b5be6df0b45b6793e1e196c6f5e63883b60b79520aba078011b"
     },
+    "context_model_consumer_grants_pkey": {
+      "def_hash": "525f51efb7249e9f85996355747384c78caf487a845717ab052aa7112ef5eb71"
+    },
     "context_model_consumers_pkey": {
       "def_hash": "d2d14bd6f798014e745feb7c15dfe4a8f41e191fb12bb939118a901d332f7418"
     },
@@ -5320,6 +5358,15 @@
     "idx_model_consumers_tenant_active": {
       "def_hash": "46d4d3cf90a14207743fc55708133e7d73d43902f69c2904bc9a3d43e0c50262"
     },
+    "idx_model_grants_alias": {
+      "def_hash": "d1b56153a0006f39bae04d6c2e0d011df086d61496f6fcb87b78ec96a8566018"
+    },
+    "idx_model_grants_created_by_key": {
+      "def_hash": "ce046997bcd5229c51b2e21590f9d48e6563a0fe14b35a524d62032daa29ebd1"
+    },
+    "idx_model_grants_created_by_principal": {
+      "def_hash": "3817463e18d3a5b24695525aa3c7d787bcff63556cb295c847ae3778027115ed"
+    },
     "idx_model_keys_consumer_created": {
       "def_hash": "1e0732a7f48cc7c5eddf3f0ee5e5779499a5fd7c4487149f1256e3c9bb0f71c5"
     },
@@ -5583,6 +5630,9 @@
     "audit_model_consumers_write()": {
       "src_hash": "02f075d4a98927e717a2840bcf22f0c609dc8a4f48d8dc0f7a2ba6869b3e9a91"
     },
+    "audit_model_grants_write()": {
+      "src_hash": "467e1da7bdf3a157dc93f8762e8bc2fd37a35a0c057c7872554a5e9038e9982c"
+    },
     "audit_model_keys_write()": {
       "src_hash": "df0d65722dfedab702ee17e06d9c6aa796aae3deab91bdf242391d54cf7c02c7"
     },
@@ -5600,6 +5650,9 @@
     },
     "audit_state_model_consumer(c context_model_consumers)": {
       "src_hash": "c31dfffa79233dbc075925f1fe69000cc1032ff1d48f4fccbafcb1735fe636d7"
+    },
+    "audit_state_model_grant(g context_model_consumer_grants)": {
+      "src_hash": "26acfa1913e6f6c346db99053b88d1c1dc730088dddfbb7778cbdabcbdf16bf2"
     },
     "audit_state_model_key(k context_model_keys)": {
       "src_hash": "103517248bcc8fb499d9ae11f401b1e481c99c0bb3a0845e31afd9c769d73024"
@@ -5657,6 +5710,9 @@
     },
     "model_consumers_identity_immutable()": {
       "src_hash": "4c4ed4d642223e4c6d2573144d3e2bfebb99aaf4a3a7003e0f81bb261dcc42ca"
+    },
+    "model_grants_identity_immutable()": {
+      "src_hash": "27ba960f206eaf0b96fa514ad30920479e4597b23d0ebdb95641558cd8ea97b8"
     },
     "model_keys_consumer_active()": {
       "src_hash": "3903ec96d9cfd305202b5e4678552558b0188b6db33c72bbea44e7b19e31dd1d"
@@ -5761,6 +5817,12 @@
     },
     "context_model_aliases.trg_model_aliases_notify": {
       "def_hash": "7867438a98a3fdba3ece7155e03b97053273b965ccd72692817ef8033eff1b6b"
+    },
+    "context_model_consumer_grants.trg_model_grants_audit": {
+      "def_hash": "a69afe8481ef81a637ab000ba0b449124c8c9dca82fa39b83832409187dc0e66"
+    },
+    "context_model_consumer_grants.trg_model_grants_identity": {
+      "def_hash": "a4152c2fd7cfa2bb596dfdf0f91f305811858434cb9cccdb5749c799a778e27f"
     },
     "context_model_consumers.trg_model_consumers_audit_ins_del": {
       "def_hash": "bda1f75b177103c18e9499e9a1881991628cdd55aaf8ab405d9e88d6a0eadc2c"
