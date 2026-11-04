@@ -152,7 +152,7 @@ internal/oai/budget.go	Reservation.Grow	# wartet: W01-6/W02-05 — In-flight-Bud
 internal/oai/budget.go	Reservation.Release	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/budget.go	ReservationFrom	# wartet: W01-6/W02-05 — Antwort-Reserve der Handler (W02-07ff.) (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/budget.go	budgetedBody.Read	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5, chunked (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
-internal/oai/errors.go	Codes	# wartet: W02-11 — Totalitäts-Referenz für backends.Classify (Kopie des Code-Vokabulars, FR2-7); heute nur internal/oai-Tests
+internal/oai/errors.go	Codes	# wartet: erster Produktionsleser — Totalitäts-Referenz für backends.Classify (Kopie des Code-Vokabulars, FR2-7), gelesen von internal/oai TestClassifierTotality (W02-11 gelandet); heute nur internal/oai-Tests
 internal/oai/errors.go	MethodNotAllowed	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/errors.go	NotFound	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/errors.go	Write	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests

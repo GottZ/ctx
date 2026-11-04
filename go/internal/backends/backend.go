@@ -50,11 +50,17 @@ var CoreRoles = []string{
 var embedRoles = map[string]bool{RoleEmbed: true, RoleDreamEmbed: true}
 
 // Provider classes refine wire behavior beyond the protocol (OpenRouter:
-// forced zdr/deny, usage.cost, no-providers classification).
+// forced zdr/deny, usage.cost, no-providers classification; ctx: a peer ctx
+// instance, whose gateway error codes Classify reads, W02-11).
+//
+// ProviderCtx is not accepted by validation or the provider_class CHECK yet
+// — the class opens for rows with F-W5; until then no row carries it and
+// only the classifier knows it.
 const (
 	ProviderGeneric    = "generic"
 	ProviderLlamaCpp   = "llamacpp"
 	ProviderOpenRouter = "openrouter"
+	ProviderCtx        = "ctx"
 )
 
 // Localities for the egress audit dimension; validated against base_url.
