@@ -47,6 +47,10 @@ type waiter struct {
 	// request, A03-W17): it waits in classQueue.cont, the head of the class,
 	// never in a bucket. Always false in-house.
 	cont bool
+	// fair is the consumer's fairness record while the waiter is queued in
+	// the external queue (A03-W4, extFair.waiterEnter) — the pick reads it
+	// without a map lookup; nil in-house.
+	fair *fairConsumer
 }
 
 // classQueue is a per-principal wait queue of one target: per-bucket FIFOs
@@ -89,6 +93,12 @@ type classQueue struct {
 	// but never checked against a cap (enqueueLocked). Empty in the
 	// interactive queue.
 	cont []*waiter
+	// fair is the fairness bookkeeping of the external queue (A03-W4,
+	// fairness.go; nil on the interactive queue); headMin is the smallest
+	// bucket-head weight, recomputed lazily once headMinStale (headMinWeight).
+	fair         *extFair
+	headMin      int
+	headMinStale bool
 }
 
 func newClassQueue() *classQueue {
@@ -103,6 +113,7 @@ func newClassQueue() *classQueue {
 func newExternalQueue() *classQueue {
 	q := newClassQueue()
 	q.external = true
+	q.fair = newExtFair()
 	return q
 }
 
@@ -129,8 +140,12 @@ func (q *classQueue) push(w *waiter) {
 	key := q.bucketKey(w.principal)
 	if _, ok := q.buckets[key]; !ok {
 		q.ring = append(q.ring, key)
+		q.headJoined(w)
 	}
 	q.buckets[key] = append(q.buckets[key], w)
+	if q.fair != nil {
+		q.fair.waiterEnter(key, w)
+	}
 	q.count(w)
 }
 
@@ -138,6 +153,9 @@ func (q *classQueue) push(w *waiter) {
 // continuations, before every bucket) and counts it like any waiter.
 func (q *classQueue) pushCont(w *waiter) {
 	q.cont = append(q.cont, w)
+	if q.fair != nil {
+		q.fair.waiterEnter(q.bucketKey(w.principal), w)
+	}
 	q.count(w)
 }
 
@@ -198,25 +216,6 @@ func (q *classQueue) fifoHeadKey() string {
 	return best
 }
 
-// peekFIFO returns the waiter pick(FairnessFIFO) would dequeue, without
-// dequeuing it, or nil — the weight check of the external head (A03-W7:
-// the head is admissible with ITS weight or not): the oldest continuation
-// when one waits (A03-W17), else the FIFO bucket head. The external fairness
-// pick (A03-W4) needs the same view under its own mode, continuation first.
-func (q *classQueue) peekFIFO() *waiter {
-	if q.total == 0 {
-		return nil
-	}
-	if len(q.cont) > 0 {
-		return q.cont[0]
-	}
-	key := q.fifoHeadKey()
-	if key == "" {
-		return nil
-	}
-	return q.buckets[key][0]
-}
-
 // popHead removes and returns the head of one bucket, maintaining counters
 // and evicting the bucket when it empties.
 func (q *classQueue) popHead(key string) *waiter {
@@ -230,6 +229,10 @@ func (q *classQueue) popHead(key string) *waiter {
 		q.buckets[key] = b
 	}
 	q.uncount(w)
+	q.headLeft()
+	if q.fair != nil {
+		q.fair.waiterLeave(key, w)
+	}
 	return w
 }
 
@@ -239,6 +242,9 @@ func (q *classQueue) popCont() *waiter {
 	q.cont[0] = nil // no stale reference in the backing array
 	q.cont = q.cont[1:]
 	q.uncount(w)
+	if q.fair != nil {
+		q.fair.waiterLeave(q.bucketKey(w.principal), w)
+	}
 	return w
 }
 
@@ -257,6 +263,9 @@ func (q *classQueue) remove(w *waiter) {
 				q.cont[last] = nil
 				q.cont = q.cont[:last]
 				q.uncount(w)
+				if q.fair != nil {
+					q.fair.waiterLeave(q.bucketKey(w.principal), w)
+				}
 				return
 			}
 		}
@@ -276,6 +285,12 @@ func (q *classQueue) remove(w *waiter) {
 			q.buckets[key] = b
 		}
 		q.uncount(w)
+		if i == 0 {
+			q.headLeft()
+		}
+		if q.fair != nil {
+			q.fair.waiterLeave(key, w)
+		}
 		return
 	}
 }

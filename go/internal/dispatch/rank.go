@@ -106,8 +106,9 @@ func (d *Dispatcher) resolveRankOrder(order [numClasses]Class) [numClasses]Class
 // on a target with slots slots (design/03 §4.2), independent of queue order:
 // interactive held + w ≤ slots; background held + w ≤ slots ∧ demand == 0
 // (the herald term — it keeps background out of the inter-lease gaps of
-// running interactive requests, R3, not softenable here); external see
-// externalAdmissibleLocked. w is the waiter's weight in slot units (A03-W7:
+// running interactive requests, R3, not softenable here) ∧ the units are not
+// reserved for a waiting external head (o1 only, A03-W4 d2 —
+// externalReservedLocked); external see externalAdmissibleLocked. w is the waiter's weight in slot units (A03-W7:
 // Request.Weight for the external class, always 1 in-house — requestWeight),
 // and held is the sum of the weights. A class without a case is never
 // admissible (fail-closed default, A03-W1 pattern).
@@ -116,7 +117,7 @@ func (d *Dispatcher) admissibleLocked(st *targetState, c Class, w, slots int) bo
 	case ClassInteractive:
 		return st.held+w <= slots
 	case ClassBackground:
-		return st.held+w <= slots && d.demand.Load() == 0
+		return st.held+w <= slots && d.demand.Load() == 0 && !d.externalReservedLocked(st, w, slots)
 	case ClassExternal:
 		return d.externalAdmissibleLocked(st, w, slots)
 	default:
@@ -146,13 +147,17 @@ func (d *Dispatcher) queuedLocked(st *targetState, c Class) bool {
 
 // pickAdmissibleLocked is the wake half of the rank scan for ONE class:
 // it dequeues the head of c when that head is admissible with its weight
-// (1 in-house; the external head's own weight, A03-W7 — a head that does not
-// fit is not skipped: no barging inside the class), or returns nil. Interactive dequeues under the fairness mode. Background
-// additionally takes the FA aging escape (aging.go) when only the herald
-// term refuses it — the scan reaches background only after every
-// higher-ranked class yielded no admissible head, so the escape never
-// overtakes a waiting admissible higher-ranked class. A class without a case
-// is never picked (fail-closed default).
+// (1 in-house), or returns nil. Interactive dequeues under the fairness
+// mode. The external class dequeues the fairness pick (A03-W4,
+// externalPickLocked): the head of the first bucket in fairness order that
+// fits with its own weight (A03-W7) — a head that does not fit blocks only
+// its own bucket (d1), never another one. Background additionally takes the
+// FA aging escape (aging.go) when only the herald term refuses it — the scan
+// reaches background only after every higher-ranked class yielded no
+// admissible head, so the escape never overtakes a waiting admissible
+// higher-ranked class, and it never takes units reserved for a waiting
+// external head (d2). A class without a case is never picked (fail-closed
+// default).
 func (d *Dispatcher) pickAdmissibleLocked(st *targetState, c Class, mode FairnessMode, slots int) *waiter {
 	switch c {
 	case ClassInteractive:
@@ -165,7 +170,7 @@ func (d *Dispatcher) pickAdmissibleLocked(st *targetState, c Class, mode Fairnes
 			return st.background.pop()
 		}
 		now := time.Now()
-		if st.held+1 > slots || !d.agingEscapeLocked(st, now) {
+		if st.held+1 > slots || d.externalReservedLocked(st, 1, slots) || !d.agingEscapeLocked(st, now) {
 			return nil
 		}
 		w := st.background.pop()
@@ -174,11 +179,14 @@ func (d *Dispatcher) pickAdmissibleLocked(st *targetState, c Class, mode Fairnes
 		}
 		return w
 	case ClassExternal:
-		// FIFO across the identity buckets (the fairness pick is A03-W4).
-		if !d.headAdmissibleLocked(st, c, slots) {
+		w, key := d.externalPickLocked(st, slots)
+		switch {
+		case w == nil:
 			return nil
+		case w.cont:
+			return st.external.popCont()
 		}
-		return st.external.pick(FairnessFIFO)
+		return st.external.popHead(key)
 	default:
 		d.logger.Error("dispatch: class without a wake case — not picked (fail-closed default)",
 			"target", st.origin, "class", uint8(c))
@@ -187,22 +195,20 @@ func (d *Dispatcher) pickAdmissibleLocked(st *targetState, c Class, mode Fairnes
 }
 
 // headAdmissibleLocked reports whether class c has a queued head that is
-// admissible with its own weight (A03-W7): the head the wake would pick next
-// — the FIFO head of the external queue, whose weight is its Request.Weight;
-// an in-house head always weighs 1. False with an empty queue.
+// admissible with its own weight (A03-W7): the head the wake would pick next.
+// For the external class that is the fairness pick itself
+// (externalPickLocked, A03-W4) — the very head the wake dequeues, so the rank
+// scan of a newcomer and the wake never look at two different heads; an
+// in-house head always weighs 1. False with an empty queue.
 func (d *Dispatcher) headAdmissibleLocked(st *targetState, c Class, slots int) bool {
 	if !d.queuedLocked(st, c) {
 		return false
 	}
-	w := 1
 	if c == ClassExternal {
-		h := st.external.peekFIFO()
-		if h == nil {
-			return false
-		}
-		w = h.weight
+		w, _ := d.externalPickLocked(st, slots)
+		return w != nil
 	}
-	return d.admissibleLocked(st, c, w, slots)
+	return d.admissibleLocked(st, c, 1, slots)
 }
 
 // externalAdmissibleLocked is the admission term of the external class

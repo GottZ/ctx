@@ -58,8 +58,16 @@ func waitQueued(t *testing.T, d *Dispatcher, ch chan admission, n int, what stri
 // acquire is ErrTargetSaturated, with room (queue_max 3) it is ErrWaitExpired
 // after 100 ms; the continuation waits past both and is admitted at K0's
 // release BEFORE K2 and K3 — the refusal counters stay unchanged, every lease
-// is released.
+// is released. Under every Settings.Fairness mode (A03-W17 review 2 F-6:
+// since A03-W4 the external class head is the fairness pick, and the mode
+// must not reach it).
 func TestContinuationHeadOfClass(t *testing.T) {
+	for _, mode := range []FairnessMode{FairnessFIFO, FairnessPrincipalRR} {
+		t.Run(string(mode), func(t *testing.T) { continuationHeadOfClass(t, mode) })
+	}
+}
+
+func continuationHeadOfClass(t *testing.T, mode FairnessMode) {
 	for _, tc := range []struct {
 		name     string
 		queueMax int
@@ -69,6 +77,7 @@ func TestContinuationHeadOfClass(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := DefaultSettings()
+			s.Fairness = mode
 			s.ExternalQueueMax = tc.queueMax
 			d, _ := newTestDispatcher(t, s, partitionPolicy(4, 2))
 			bg := context.Background()
@@ -358,7 +367,9 @@ func TestContinuationCountsInHintDepth(t *testing.T) {
 // TestContinuationTryDoor: TryAcquire shares Acquire's immediate half, so a
 // continuation try is admitted when it would be the class head — past waiting
 // non-continuations whose own weight does not fit — and would-blocks behind a
-// waiting continuation. An ordinary try never overtakes a waiter (MW9).
+// waiting continuation. An ordinary try never overtakes a waiter of its own
+// consumer (MW9; A03-W4 d1 lets it pass another consumer's head that does
+// not fit).
 func TestContinuationTryDoor(t *testing.T) {
 	bg := context.Background()
 	d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(4, 2))
@@ -369,8 +380,18 @@ func TestContinuationTryDoor(t *testing.T) {
 	startWaiter(xctx(ctx, "k2", "tenant-a"), d, "k2", weightedReq(2), ch)
 	waitQueued(t, d, ch, 1, "heavy head queued")
 
-	if l, _, err := d.TryAcquire(xctx(bg, "k1", "tenant-a"), weightedReq(1)); !errors.Is(err, ErrWouldBlock) || l != nil {
-		t.Fatalf("ordinary try behind a waiting head: (lease %v, err %v), want ErrWouldBlock", l != nil, err)
+	// A03-W4 (d1, hardened by review 2 F-1): the head's own consumer never
+	// passes its waiting head; an ordinary try of ANOTHER consumer takes a
+	// unit the head cannot use when it ranks before the head in the
+	// fairness order — here k2's tenant is over its share (k0 holds one of
+	// its units: 1 + 2 > tenantShare 2), the try is within it.
+	if l, _, err := d.TryAcquire(xctx(bg, "k2", "tenant-a"), weightedReq(1)); !errors.Is(err, ErrWouldBlock) || l != nil {
+		t.Fatalf("ordinary try behind its own consumer's waiting head: (lease %v, err %v), want ErrWouldBlock", l != nil, err)
+	}
+	if l, _, err := d.TryAcquire(xctx(bg, "k5", "tenant-a"), weightedReq(1)); err != nil || l == nil {
+		t.Fatalf("ordinary try of another consumer past a waiting head that does not fit: (lease %v, err %v), want an admission", l != nil, err)
+	} else {
+		l.Release()
 	}
 	l, _, err := d.TryAcquire(xctx(bg, "k1", "tenant-a"), contReq(1))
 	if err != nil || l == nil {
@@ -402,8 +423,11 @@ func TestContinuationTryDoor(t *testing.T) {
 // TestContinuationBeforeEveryBucketPick is the queue-level invariant a bucket
 // pick must keep (A03-W4 rebases its fairness pick onto it): a continuation is
 // the class head before every bucket — the same consumer's older ordinary
-// waiter included — under every fairness mode, in the peek as in the pick, and
-// continuations among themselves keep their arrival order.
+// waiter included — under every fairness mode, in the class head as in the
+// pick, and continuations among themselves keep their arrival order. (The
+// head view of the external class is the fairness pick since A03-W4,
+// externalPickLocked — pinned dispatcher-level by
+// TestContinuationBeforeFairnessPick.)
 func TestContinuationBeforeEveryBucketPick(t *testing.T) {
 	for _, mode := range []FairnessMode{FairnessFIFO, FairnessPrincipalRR} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -422,8 +446,8 @@ func TestContinuationBeforeEveryBucketPick(t *testing.T) {
 			if q.total != 4 || q.byKey[xuPrincipal("k1", "").identityKey()] != 2 {
 				t.Fatalf("counters total %d byKey(k1) %d, want 4/2 — a continuation is counted like every waiter", q.total, q.byKey[xuPrincipal("k1", "").identityKey()])
 			}
-			if h := q.peekFIFO(); h != c1 {
-				t.Fatalf("peek = seq %d, want the first continuation (seq 3)", h.seq)
+			if q.headMinWeight() != c1.weight || q.cont[0] != c1 {
+				t.Fatalf("class head = seq %d, want the first continuation (seq 3)", q.cont[0].seq)
 			}
 			var got []uint64
 			for w := q.pick(mode); w != nil; w = q.pick(mode) {

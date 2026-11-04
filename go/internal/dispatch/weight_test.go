@@ -306,33 +306,38 @@ func TestExternalWeightCap(t *testing.T) {
 	}
 }
 
-// TestWeightHeavyHeadBlocksOnlyItsClass: a waiting external head that does
-// not fit (w = 4 on Σw_ext = 3, E = 5) lets a background newcomer through
-// (work conservation, design/03 §4.2: an inadmissible higher-ranked head
-// blocks no lower class — eligibleNow reads the head's weight), and a light
-// external newcomer (w = 2, it would fit: 3 + 2 = E) queues behind it (FIFO
-// inside the class, no barging). The release of the first lease hands the
-// units to the heavy head; the light one (4 + 2 > E) waits for the next.
-func TestWeightHeavyHeadBlocksOnlyItsClass(t *testing.T) {
+// TestWeightHeavyHeadBlocksOnlyItsBucket (A03-W4 rewrite of
+// TestWeightHeavyHeadBlocksOnlyItsClass — the pick became weight-aware, d1):
+// a waiting external head that does not fit (w = 4 on Σw_ext = 3, E = 5) lets
+// a background newcomer through (work conservation, design/03 §4.2: an
+// inadmissible higher-ranked head blocks no lower class), a light newcomer
+// of the SAME consumer (w = 1, it would fit) queues behind it (FIFO inside a
+// bucket), and a light newcomer of ANOTHER consumer (w = 1) is admitted at
+// once — before A03-W4 it queued behind the heavy head of the foreign bucket
+// (FIFO across the buckets). The release of the first lease hands the units
+// to the heavy head (1 + 4 = E); the same-consumer light one (5 + 1 > E)
+// waits for the heavy release.
+func TestWeightHeavyHeadBlocksOnlyItsBucket(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
 	x1 := mustAcquire(t, d, xctx(context.Background(), "c1", "tenant-a"), weightedReq(3))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	heavyCh := make(chan admission, 1)
-	lightCh := make(chan admission, 1)
+	sameCh := make(chan admission, 1)
 	startWaiter(xctx(ctx, "c2", "tenant-a"), d, "heavy", weightedReq(4), heavyCh)
 	waitFor(t, "heavy external head queued", func() bool { return waitingExternal(d) == 1 })
 	b, _, err := acquireWithin(t, d, context.Background(), backgroundReq(), time.Second)
 	if err != nil {
 		t.Fatalf("background behind an inadmissible heavy external head: %v — work conservation broken", err)
 	}
-	startWaiter(xctx(ctx, "c3", "tenant-b"), d, "light", weightedReq(2), lightCh)
-	waitFor(t, "light external settled", func() bool {
-		ts := target(t, d)
-		return ts.HeldExternal+ts.External.Waiting == 3
-	})
-	if ts := target(t, d); ts.External.Waiting != 2 || ts.HeldExternalWeight != 3 || ts.HeldWeight != 4 {
-		t.Fatalf("light newcomer barged past the heavy head: waiting=%d HeldExternalWeight=%d HeldWeight=%d, want 2/3/4",
+	startWaiter(xctx(ctx, "c2", "tenant-a"), d, "same", weightedReq(1), sameCh)
+	waitFor(t, "same-consumer light queued behind the heavy head", func() bool { return waitingExternal(d) == 2 })
+	other, _, err := acquireWithin(t, d, xctx(context.Background(), "c3", "tenant-b"), weightedReq(1), time.Second)
+	if err != nil {
+		t.Fatalf("light newcomer of another consumer behind a foreign heavy head that does not fit: %v, want admitted at once (d1)", err)
+	}
+	if ts := target(t, d); ts.External.Waiting != 2 || ts.HeldExternalWeight != 4 || ts.HeldWeight != 5 {
+		t.Fatalf("after the newcomers: waiting=%d HeldExternalWeight=%d HeldWeight=%d, want 2/4/5 (the same-consumer light one queues behind its own heavy head)",
 			ts.External.Waiting, ts.HeldExternalWeight, ts.HeldWeight)
 	}
 	x1.Release()
@@ -340,19 +345,20 @@ func TestWeightHeavyHeadBlocksOnlyItsClass(t *testing.T) {
 	if heavy.err != nil {
 		t.Fatalf("heavy head: %v", heavy.err)
 	}
-	if ts := target(t, d); ts.External.Waiting != 1 || ts.HeldExternalWeight != 4 || ts.HeldWeight != 5 {
-		t.Fatalf("after the first release: waiting=%d HeldExternalWeight=%d HeldWeight=%d, want 1/4/5 — the light head does not fit (4+2 > E)",
+	if ts := target(t, d); ts.External.Waiting != 1 || ts.HeldExternalWeight != weightE || ts.HeldWeight != weightE+1 {
+		t.Fatalf("after the first release: waiting=%d HeldExternalWeight=%d HeldWeight=%d, want 1/5/6 — the same-consumer light one does not fit (5+1 > E)",
 			ts.External.Waiting, ts.HeldExternalWeight, ts.HeldWeight)
 	}
 	heavy.lease.Release()
-	light := recvAdmission(t, lightCh, "light external after the heavy release")
-	if light.err != nil {
-		t.Fatalf("light: %v", light.err)
+	same := recvAdmission(t, sameCh, "same-consumer light after the heavy release")
+	if same.err != nil {
+		t.Fatalf("same-consumer light: %v", same.err)
 	}
-	if ts := target(t, d); ts.HeldExternalWeight != 2 || ts.HeldExternal != 1 || ts.HeldWeight != 3 {
-		t.Fatalf("after the heavy release: HeldExternalWeight=%d HeldExternal=%d HeldWeight=%d, want 2/1/3", ts.HeldExternalWeight, ts.HeldExternal, ts.HeldWeight)
+	if ts := target(t, d); ts.HeldExternalWeight != 2 || ts.HeldExternal != 2 || ts.HeldWeight != 3 {
+		t.Fatalf("after the heavy release: HeldExternalWeight=%d HeldExternal=%d HeldWeight=%d, want 2/2/3", ts.HeldExternalWeight, ts.HeldExternal, ts.HeldWeight)
 	}
-	light.lease.Release()
+	same.lease.Release()
+	other.Release()
 	b.Release()
 }
 
@@ -673,7 +679,9 @@ func TestWeightSlotTermCountsBackgroundInE(t *testing.T) {
 
 // TestWeightCanceledHeavyHeadWakesTheNext (review F1): a waiting heavy
 // external head that is canceled may leave a lighter waiter behind it that
-// fits now (Σw_ext 3, E = 5, the next head weighs 2). Its admission must not
+// fits now (Σw_ext 3, E = 5, the next head weighs 2). The light waiter is the
+// heavy head's own consumer (A03-W4: a light waiter of another consumer no
+// longer waits behind a foreign head that does not fit — d1). Its admission must not
 // wait for the next release on the target — and in o1 a background newcomer
 // must not be refused behind an admissible external head that no wake
 // serves (the B floor of design/03 §4.3).
@@ -688,7 +696,7 @@ func TestWeightCanceledHeavyHeadWakesTheNext(t *testing.T) {
 	lctx, lcancel := context.WithCancel(context.Background())
 	defer lcancel()
 	lightCh := make(chan admission, 1)
-	startWaiter(xctx(lctx, "c3", "tenant-b"), d, "light", weightedReq(2), lightCh)
+	startWaiter(xctx(lctx, "c2", "tenant-a"), d, "light", weightedReq(2), lightCh)
 	waitFor(t, "light external queued behind it", func() bool { return waitingExternal(d) == 2 })
 
 	hcancel()
@@ -723,7 +731,12 @@ func TestWeightCanceledHeavyHeadWakesTheNext(t *testing.T) {
 // partition. The first shrink ends EVERY waiter above the new E (4 and 5),
 // a waiter at exactly E (3) stays; growing E admits a new w = 6 waiter into
 // the queue, the second shrink ends it. Afterwards the release serves the
-// survivors in FIFO order under E = 3.
+// survivors in fairness order under E = 3 (A03-W4 hardening, review 2 F-1
+// (ii)): one tenant, two equal consumers ⇒ consumer share ⌈3/2⌉ = 2, but a
+// consumer that holds nothing is within its share whatever its weight — so
+// both are, the slot times are equal (0) and the older waiter w3 goes first
+// (3 = E); w2 follows once w3's units are back (3 + 2 > E). Before the
+// hardening w2 went first, because w3 alone was counted above its share.
 func TestWeightHotSwapDrainEndsEveryOverweightWaiter(t *testing.T) {
 	const warn = "waiting acquires ended after the capacity shrank"
 	d, h := newTestDispatcher(t, DefaultSettings(), weightPolicy())
@@ -761,7 +774,7 @@ func TestWeightHotSwapDrainEndsEveryOverweightWaiter(t *testing.T) {
 	occ.Release()
 	first := recvAdmission(t, ch, "w3 after the release")
 	if first.label != "w3" || first.err != nil {
-		t.Fatalf("after the release: %s %v, want w3", first.label, first.err)
+		t.Fatalf("after the release: %s %v, want w3 (both consumers hold nothing, so both are within their share; w3 is older)", first.label, first.err)
 	}
 	if ts := target(t, d); ts.External.Waiting != 1 || ts.HeldExternalWeight != 3 {
 		t.Fatalf("waiting=%d HeldExternalWeight=%d, want 1/3 (w2 waits: 3 + 2 > E = 3)", ts.External.Waiting, ts.HeldExternalWeight)
@@ -776,8 +789,9 @@ func TestWeightHotSwapDrainEndsEveryOverweightWaiter(t *testing.T) {
 
 // TestWeightDrainBeforeScanSameWake (review F2, P6): the shrink drain runs
 // BEFORE the rank scan of the same wake — a heavy head ends and the light
-// waiter behind it that fits under the new E is admitted by that wake, not
-// by a later release.
+// waiter behind it (same consumer: A03-W4 admits a light waiter of another
+// consumer past a head that does not fit at once, d1) that fits under the
+// new E is admitted by that wake, not by a later release.
 func TestWeightDrainBeforeScanSameWake(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
 	occ := mustAcquire(t, d, xctx(context.Background(), "occ", "tenant-a"), weightedReq(2))
@@ -786,7 +800,7 @@ func TestWeightDrainBeforeScanSameWake(t *testing.T) {
 	ch := make(chan admission, 2)
 	startWaiter(xctx(ctx, "c1", "tenant-b"), d, "heavy", weightedReq(4), ch)
 	waitFor(t, "heavy queued", func() bool { return waitingExternal(d) == 1 })
-	startWaiter(xctx(ctx, "c2", "tenant-b"), d, "light", weightedReq(1), ch)
+	startWaiter(xctx(ctx, "c1", "tenant-b"), d, "light", weightedReq(1), ch)
 	waitFor(t, "light queued", func() bool { return waitingExternal(d) == 2 })
 	d.UpdatePolicy(partitionPolicy(weightSlots, 4)) // E = 3: heavy ends, light fits (2 + 1 <= 3)
 	got := map[string]admission{}
@@ -833,11 +847,14 @@ func TestWeightDrainWarnsOnlyWhenItEnds(t *testing.T) {
 	}
 }
 
-// TestWeightPeekIsThePickAcrossBuckets (review F2, P7): the weight check
-// reads the waiter the FIFO pick dequeues — the smallest seq over all bucket
-// heads — also when the bucket ring order differs. Consumer c1 queues w = 2
-// and later w = 1, consumer c2 in between w = 4: after the w = 2 handoff the
-// next FIFO head is c2's w = 4 (2 + 4 > E), not c1's w = 1.
+// TestWeightPeekIsThePickAcrossBuckets (review F2, P7; A03-W4: the pick and
+// the weight check are one function, externalPickLocked): the wake hands
+// units to the heads that fit, in fairness order across the buckets.
+// Consumer c1 queues w = 2 and later w = 1, consumer c2 in between w = 4, one
+// tenant (consumer share ⌈5·10/20⌉ = 3): the release serves c1's w = 2
+// (within its share; c2's w = 4 is above it), then c1's w = 1 — c2's w = 4
+// does not fit (2 + 4 > E) and no longer blocks the other bucket (before
+// A03-W4 it was the FIFO head and c1's w = 1 waited behind it).
 func TestWeightPeekIsThePickAcrossBuckets(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
 	occ := mustAcquire(t, d, xctx(context.Background(), "occ", "tenant-a"), weightedReq(4))
@@ -853,19 +870,27 @@ func TestWeightPeekIsThePickAcrossBuckets(t *testing.T) {
 		waitFor(t, step.label+" queued", func() bool { return waitingExternal(d) == n })
 	}
 	occ.Release()
-	a := recvAdmission(t, ch, "a2 after the release")
-	if a.label != "a2" || a.err != nil {
-		t.Fatalf("first admitted %s %v, want a2", a.label, a.err)
-	}
-	if ts := target(t, d); ts.HeldExternalWeight != 2 || ts.External.Waiting != 2 {
-		t.Fatalf("HeldExternalWeight=%d waiting=%d, want 2/2 — b4 is the FIFO head and does not fit (2 + 4 > E = 5)", ts.HeldExternalWeight, ts.External.Waiting)
-	}
-	a.lease.Release()
+	got := map[string]admission{}
 	for i := 0; i < 2; i++ {
-		if x := recvAdmission(t, ch, "the rest"); x.lease != nil {
-			x.lease.Release()
+		a := recvAdmission(t, ch, "the wake after the release")
+		if a.err != nil {
+			t.Fatalf("%s: %v", a.label, a.err)
 		}
+		got[a.label] = a
 	}
+	if got["a2"].lease == nil || got["c1"].lease == nil {
+		t.Fatalf("the release admitted %v, want a2 and c1 (b4 does not fit after a2: 2 + 4 > E = 5)", got)
+	}
+	if ts := target(t, d); ts.HeldExternalWeight != 3 || ts.External.Waiting != 1 {
+		t.Fatalf("HeldExternalWeight=%d waiting=%d, want 3/1 — b4 waits", ts.HeldExternalWeight, ts.External.Waiting)
+	}
+	got["a2"].lease.Release()
+	b4 := recvAdmission(t, ch, "b4 after the a2 release")
+	if b4.label != "b4" || b4.err != nil {
+		t.Fatalf("%s %v, want b4 (1 + 4 = E)", b4.label, b4.err)
+	}
+	b4.lease.Release()
+	got["c1"].lease.Release()
 }
 
 // levelsOf returns the levels of the records whose message contains sub
@@ -925,7 +950,9 @@ func TestWeightRefusalsLogAtWarn(t *testing.T) {
 // dropWaiterLocked and wakes the target in the same mutex section, exactly
 // like a canceled one. S = 7, R = 2 (E = 5): an external lease of weight 1
 // runs, a head of weight E waits (1 + 5 > E) with MaxWait 300 ms, a light
-// waiter of weight 2 queues behind it (it would fit; FIFO keeps it behind
+// waiter of weight 2 of the SAME consumer queues behind it (A03-W4: a light
+// waiter of another consumer passes a head that does not fit at once, d1;
+// it would fit; FIFO inside the bucket keeps it behind
 // the head) and in o1 a background newcomer still passes the inadmissible
 // head (work conservation). The head ends with ErrWaitExpired after its
 // budget; when its Acquire returns, the light waiter already holds its
@@ -955,7 +982,7 @@ func TestWeightExpiredHeavyHeadWakesTheNext(t *testing.T) {
 	}()
 	waitFor(t, "heavy head queued", func() bool { return waitingExternal(d) == 1 })
 	lightCh := make(chan admission, 1)
-	startWaiter(xctx(ctx, "c2", "tenant-b"), d, "light", weightedReq(2), lightCh)
+	startWaiter(xctx(ctx, "c1", "tenant-a"), d, "light", weightedReq(2), lightCh)
 	waitFor(t, "light waiter queued behind the head", func() bool { return waitingExternal(d) == 2 })
 	b0, _, err := d.TryAcquire(context.Background(), backgroundReq())
 	if err != nil {
