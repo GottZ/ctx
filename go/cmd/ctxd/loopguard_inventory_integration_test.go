@@ -255,7 +255,7 @@ func TestLoopGuardMaxDepthIsHot(t *testing.T) {
 	}
 	for _, bad := range []string{"0", "17"} {
 		if st := put(bad); st != http.StatusUnprocessableEntity {
-			t.Errorf("PUT federation.max_depth=%s = %d, want 422 (V43)", bad, st)
+			t.Errorf("PUT federation.max_depth=%s = %d, want 422 (V45)", bad, st)
 		}
 	}
 }

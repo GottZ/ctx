@@ -74,7 +74,7 @@ func gatewayIngressAssert(c *config.Config, in *fedhop.Ingress) error {
 	src := c.Source("gateway.enabled")
 	remedy := "unset CTX_GATEWAY_ENABLED or set it to false"
 	if src == "settings" {
-		remedy = "remove the settings row (psql: DELETE FROM context_settings WHERE key = 'gateway.enabled'), or start once with " +
+		remedy = "remove the settings row (psql: DELETE FROM context_settings WHERE key = 'gateway.enabled'), or — with CTX_GATEWAY_ENABLED unset or false — start once with " +
 			settings.EnvDisable + "=1 and DELETE /api/settings/gateway.enabled"
 	}
 	return fmt.Errorf("gateway.enabled is true (source: %s) but no model group with its federation LoopGuard is mounted — the model API cannot be enabled before its federation ingress is mounted; %s, or run a build that mounts /v1",
