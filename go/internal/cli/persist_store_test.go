@@ -85,23 +85,24 @@ func execPersistHook(t *testing.T, getClient func() (*Client, error)) (string, e
 func TestPersistHookCountsOnlyAcceptedStores(t *testing.T) {
 	ok := storeAnswer{http.StatusOK, `{"success":true,"id":"b1","action":"created"}`}
 	cases := []struct {
-		name    string
-		answers []storeAnswer
-		want    string // expected stderr, exactly
+		name     string
+		answers  []storeAnswer
+		want     string // expected stderr, exactly
+		wantHits int32
 	}{
-		{"all accepted", []storeAnswer{ok}, "ctx persist: 3 block(s) saved\n"},
-		{"403 envelope", []storeAnswer{{http.StatusForbidden, `{"success":false,"error":"scope not writable"}`}}, ""},
-		{"413 envelope", []storeAnswer{{http.StatusRequestEntityTooLarge, `{"success":false,"error":"content too large"}`}}, ""},
-		{"429 envelope", []storeAnswer{{http.StatusTooManyRequests, `{"success":false,"error":"quota_exceeded"}`}}, ""},
-		{"500 plain text", []storeAnswer{{http.StatusInternalServerError, "internal server error"}}, ""},
-		{"500 with success:true body", []storeAnswer{{http.StatusInternalServerError, `{"success":true}`}}, ""},
-		{"200 success:false", []storeAnswer{{http.StatusOK, `{"success":false,"error":"validation: category"}`}}, ""},
-		{"200 frameless body", []storeAnswer{{http.StatusOK, `[]`}}, ""},
+		{"all accepted", []storeAnswer{ok}, "ctx persist: 3 block(s) saved\n", 3},
+		{"403 envelope", []storeAnswer{{http.StatusForbidden, `{"success":false,"error":"scope not writable"}`}}, "", 3},
+		{"413 envelope", []storeAnswer{{http.StatusRequestEntityTooLarge, `{"success":false,"error":"content too large"}`}}, "", 3},
+		{"429 envelope", []storeAnswer{{http.StatusTooManyRequests, `{"success":false,"error":"quota_exceeded"}`}}, "", 1},
+		{"500 plain text", []storeAnswer{{http.StatusInternalServerError, "internal server error"}}, "", 3},
+		{"500 with success:true body", []storeAnswer{{http.StatusInternalServerError, `{"success":true}`}}, "", 3},
+		{"200 success:false", []storeAnswer{{http.StatusOK, `{"success":false,"error":"validation: category"}`}}, "", 3},
+		{"200 frameless body", []storeAnswer{{http.StatusOK, `[]`}}, "", 3},
 		{"mixed: one of three accepted", []storeAnswer{
 			ok,
 			{http.StatusForbidden, `{"success":false,"error":"forbidden"}`},
 			{http.StatusOK, `{"success":false,"error":"validation: title"}`},
-		}, "ctx persist: 1 block(s) saved\n"},
+		}, "ctx persist: 1 block(s) saved\n", 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,13 +110,47 @@ func TestPersistHookCountsOnlyAcceptedStores(t *testing.T) {
 			if err != nil {
 				t.Fatalf("persist --hook returned %v; the hook must never fail", err)
 			}
-			if hits != 3 {
-				t.Fatalf("server saw %d store requests, want 3", hits)
+			if hits != tc.wantHits {
+				t.Fatalf("server saw %d store requests, want %d", hits, tc.wantHits)
 			}
 			if stderr != tc.want {
 				t.Errorf("stderr = %q, want %q", stderr, tc.want)
 			}
 		})
+	}
+}
+
+// TestPersistHookStopsAfterUnauthorized pins the key-wide 401 case from
+// issue #65: after the first rejection, later blocks must not be sent.
+func TestPersistHookStopsAfterUnauthorized(t *testing.T) {
+	stderr, hits, err := runPersistHookAgainst(t, []storeAnswer{
+		{http.StatusUnauthorized, `{"success":false,"error":"invalid key"}`},
+	})
+	if err != nil {
+		t.Fatalf("persist --hook returned %v; the hook must never fail", err)
+	}
+	if hits != 1 {
+		t.Fatalf("server saw %d store requests, want 1", hits)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty", stderr)
+	}
+}
+
+// TestPersistHookStopsAfterRateLimit pins the key-wide 429 case from issue
+// #65: within the rate-limit window, later writes get the same rejection.
+func TestPersistHookStopsAfterRateLimit(t *testing.T) {
+	stderr, hits, err := runPersistHookAgainst(t, []storeAnswer{
+		{http.StatusTooManyRequests, `{"success":false,"error":"rate_limit"}`},
+	})
+	if err != nil {
+		t.Fatalf("persist --hook returned %v; the hook must never fail", err)
+	}
+	if hits != 1 {
+		t.Fatalf("server saw %d store requests, want 1", hits)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty", stderr)
 	}
 }
 
