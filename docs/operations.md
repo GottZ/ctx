@@ -231,7 +231,7 @@ curl -sS -X PUT https://<host>/api/settings/federation.max_depth \
   -H "Authorization: Bearer $CTX_KEY" -H 'Content-Type: application/json' -d '{"value":4}'
 ```
 
-Boot and write validation (V43): `1 ≤ max_depth ≤ 16` — `0` would refuse every request, and a value above the `Ctx-Hop` parse limit of 16 entries could never be reached (a longer chain is a `400` first). A settings write outside the range is a `422`; a row written by `psql` replaces the key's one row and is then dropped with a WARN, so the registry default `3` applies (not the value the row replaced). The boot record shows it as `federation: max_depth=3`. Raise it only for a deliberate chain of instances (B → A → C → …): every hop adds its latency and holds a request slot on each instance it passes.
+Boot and write validation (V45): `1 ≤ max_depth ≤ 16` — `0` would refuse every request, and a value above the `Ctx-Hop` parse limit of 16 entries could never be reached (a longer chain is a `400` first). A settings write outside the range is a `422`; a row written by `psql` replaces the key's one row and is then dropped with a WARN, so the registry default `3` applies (not the value the row replaced). The boot record shows it as `federation: max_depth=3`. Raise it only for a deliberate chain of instances (B → A → C → …): every hop adds its latency and holds a request slot on each instance it passes.
 
 **The ingress assert.** `gateway.enabled` turns the model API on, and the model API only exists with its federation loop guard in front of it ([security](security.md#federation-loop-guard-ingress)). A build whose router mounts no model group — every build up to the one that mounts `/v1` — therefore refuses the flag:
 

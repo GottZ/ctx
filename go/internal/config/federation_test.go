@@ -2,7 +2,7 @@ package config
 
 // F-W8 G6 (design/04 §3.1, DECISIONS A-E2): federation.max_depth is a
 // registry key — int, default 3, hot, global-only, strict, settings-only —
-// checked by V43 to 1 ≤ max_depth ≤ fedhop.MaxHopEntries, and visible in the
+// checked by V45 to 1 ≤ max_depth ≤ fedhop.MaxHopEntries, and visible in the
 // boot record under its own group.
 
 import (
@@ -39,7 +39,7 @@ func TestFederationMaxDepthRegistry(t *testing.T) {
 	}
 }
 
-// TestValidateFederationMaxDepth is V43: 0 would refuse every request (a
+// TestValidateFederationMaxDepth is V45: 0 would refuse every request (a
 // chain of length 0 is already "≥ 0"), a value above fedhop.MaxHopEntries can
 // never be reached (ParseInbound refuses a longer chain with 400 first), so
 // both are errors; a negative value is V35's single error, not a second one.
