@@ -664,7 +664,7 @@ func TestListNeverCarriesSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConsumers: %v", err)
 	}
-	hist, err := store.KeyHistory(ctx, e.pool, c.ID, store.ModelAccess{TenantID: tenant}, nil, store.MaxKeyHistoryLimit)
+	hist, err := store.KeyHistory(ctx, e.pool, c.ID, store.ModelAccess{TenantID: tenant}, nil, 100)
 	if err != nil {
 		t.Fatalf("KeyHistory: %v", err)
 	}

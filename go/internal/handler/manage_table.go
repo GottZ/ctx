@@ -1,5 +1,5 @@
 // Dispatch table of POST /api/manage — the SINGLE source of routing and admin
-// tier for all 93 manage actions (T03-11, design/03 §4.11). It replaces a
+// tier for all 101 manage actions (T03-11, design/03 §4.11). It replaces a
 // three-level construct: an 18-arm switch in HandleManage, fifteen
 // dispatch*Action fan-out methods, and a 211-line parallel tier classifier.
 // In that construct every action existed two to four times (routing arm,
@@ -38,7 +38,7 @@ type manageActionFunc func(*ManageHandler, http.ResponseWriter, *http.Request, *
 // manageAction binds ONE dispatchable manage action to its admin tier and its
 // handler.
 //
-// tier vs. tierFn: for 86 actions the tier is a function of the action name
+// tier vs. tierFn: for 94 actions the tier is a function of the action name
 // alone and lives in the tier column. For dream-mode, gaming-mode and
 // eject-mode it is a function of (action, data shape) — only the MUTATING
 // shape is gated, reading the current mode stays open to every valid key
@@ -135,7 +135,7 @@ func gamingModeTier(req manageRequest) adminTier {
 	return tierOpen
 }
 
-// manageActions is the dispatch table: 93 actions, alphabetical, one row each.
+// manageActions is the dispatch table: 101 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5), alphabetical, one row each.
 //
 // The tiers are the pre-table behaviour, action for action — this wave routes
 // differently, it does not re-cut permissions.
@@ -154,6 +154,13 @@ func gamingModeTier(req manageRequest) adminTier {
 // goroutine set / physical GPU lock). Read/write asymmetry is deliberate where
 // it appears: quota-get and usage-get are tenant-admin, quota-set and
 // limit-set are not — an operator ceiling a tenant could raise is no ceiling.
+//
+// The eight model-consumer-*/model-key-* rows (W01-5, design/01 §4.6) are a
+// new surface, not pre-table behaviour: granting a new credential
+// (model-consumer-create, model-key-rotate) is tierSelfService, reading,
+// narrowing and revoking tierTenantAdmin — their handlers carry the tenant
+// binding (the store's consumer join, V-01-g) and the field tiers of
+// model-consumer-update.
 //
 // Eleven rows deserve a note:
 // stats, get, list-categories, list-meta, update, delete, guard-list,
@@ -235,6 +242,14 @@ var manageActions = map[string]manageAction{
 	"model-alias-delete": {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelAliasDelete},
 	"model-alias-list":   {tier: tierTenantAdmin, handle: dropReq((*ManageHandler).handleModelAliasList)},
 	"model-alias-update": {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelAliasUpdate},
+	"model-consumer-create":    {tier: tierSelfService, handle: (*ManageHandler).handleModelConsumerCreate},
+	"model-consumer-delete":    {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelConsumerDelete},
+	"model-consumer-get":       {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelConsumerGet},
+	"model-consumer-list":      {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelConsumerList},
+	"model-consumer-update":    {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelConsumerUpdate},
+	"model-key-history":        {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelKeyHistory},
+	"model-key-revoke":         {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelKeyRevoke},
+	"model-key-rotate":         {tier: tierSelfService, handle: (*ManageHandler).handleModelKeyRotate},
 	"oauth-identity-link":      {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityLink)},
 	"oauth-identity-list":      {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityList)},
 	"oauth-identity-unlink":    {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityUnlink)},
@@ -318,7 +333,13 @@ func actionTierExplicit(req manageRequest) (adminTier, bool) {
 //
 // The 403 body is the shared requireAdminAction text for both admin tiers —
 // no tier oracle for the caller.
-func enforceManageActionTier(w http.ResponseWriter, a manageAction, req manageRequest, ar *auth.AuthResult, reqID string) bool {
+//
+// selfService reports whether gateway.enabled AND gateway.tenant_self_service
+// are on in the _global snapshot; it is asked only for a tierSelfService row.
+// A server-admin passes such a row without it; everyone else needs it on and
+// then the tenant-admin hurdle. Off, missing or unreadable is server-admin
+// only — the same 403 text, so the switch is no oracle either.
+func enforceManageActionTier(w http.ResponseWriter, a manageAction, req manageRequest, ar *auth.AuthResult, reqID string, selfService func() bool) bool {
 	switch manageActionTier(a, req) {
 	case tierUnset:
 		slog.Error("manage: dispatch row carries no admin tier — refusing",
@@ -330,6 +351,14 @@ func enforceManageActionTier(w http.ResponseWriter, a manageAction, req manageRe
 	case tierServerAdmin:
 		return requireAdminAction(w, ar)
 	case tierTenantAdmin:
+		return requireTenantAdmin(w, ar, ar.TenantID)
+	case tierSelfService:
+		if ar.IsServerAdmin() {
+			return true
+		}
+		if selfService == nil || !selfService() {
+			return requireAdminAction(w, ar)
+		}
 		return requireTenantAdmin(w, ar, ar.TenantID)
 	}
 	return true // tierOpen
@@ -378,7 +407,7 @@ func (h *ManageHandler) handleManage(w http.ResponseWriter, r *http.Request, act
 	}
 
 	// MT T25 (05-A8): two-tier admin gate before dispatch (design 05 §4.4).
-	if !enforceManageActionTier(w, action, req, authResult, reqID) {
+	if !enforceManageActionTier(w, action, req, authResult, reqID, h.selfServiceOpen) {
 		return
 	}
 	action.handle(h, w, r, authResult, req)

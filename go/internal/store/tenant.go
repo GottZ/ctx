@@ -152,6 +152,9 @@ type Tenant struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 	MaxScopes   *int      `json:"max_scopes"` // nil = unlimited (069 max_scopes)
 	MaxKeys     *int      `json:"max_keys"`   // nil = unlimited (069 max_keys)
+	// MaxModelConsumers caps the tenant's ACTIVE model consumers (161
+	// max_model_consumers, default 64); nil = unlimited.
+	MaxModelConsumers *int `json:"max_model_consumers"`
 }
 
 // ErrTenantNotFound is returned by GetTenant/UpdateTenant when no tenant matches
@@ -181,11 +184,11 @@ var ErrScopeQuotaExceeded = errors.New("store: tenant scope quota exceeded")
 // non-negative int). This is the typed-column path the JSONB design (02 §2) was
 // superseded by — the §2 poison-the-shared-aggregate cast risk does not exist
 // for a typed column.
-const tenantCols = `id::text, slug, display_name, status, created_at, updated_at, max_scopes, max_keys`
+const tenantCols = `id::text, slug, display_name, status, created_at, updated_at, max_scopes, max_keys, max_model_consumers`
 
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
-	if err := row.Scan(&t.ID, &t.Slug, &t.DisplayName, &t.Status, &t.CreatedAt, &t.UpdatedAt, &t.MaxScopes, &t.MaxKeys); err != nil {
+	if err := row.Scan(&t.ID, &t.Slug, &t.DisplayName, &t.Status, &t.CreatedAt, &t.UpdatedAt, &t.MaxScopes, &t.MaxKeys, &t.MaxModelConsumers); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -405,6 +408,33 @@ func SetTenantLimits(ctx context.Context, pool *pgxpool.Pool, tenantID string, m
 		`UPDATE context_tenants
 		    SET max_scopes = $2, max_keys = $3, updated_at = now()
 		  WHERE id = $1::uuid`, tenantID, maxScopes, maxKeys)
+	if err != nil {
+		if pgxdb.AbsentOrMalformed(err) {
+			return ErrTenantNotFound
+		}
+		return fmt.Errorf("store: set tenant limits: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrTenantNotFound
+	}
+	return nil
+}
+
+// SetTenantLimitsWithModelConsumers is SetTenantLimits plus the model
+// consumer cap (161 max_model_consumers, N22) in the same UPDATE: the
+// optional field of tenant-limit-set, written only when the request carries
+// it — an absent field keeps the column as it is, which is why this is a
+// second function and not a third pointer on SetTenantLimits (nil already
+// means unlimited there). nil = unlimited; the 161 CHECK (>= 0) is the
+// backstop, the range check is the handler's.
+func SetTenantLimitsWithModelConsumers(ctx context.Context, pool *pgxpool.Pool, tenantID string, maxScopes, maxKeys, maxModelConsumers *int) error {
+	if tenantID == "" {
+		return ErrTenantNotFound
+	}
+	tag, err := pool.Exec(ctx,
+		`UPDATE context_tenants
+		    SET max_scopes = $2, max_keys = $3, max_model_consumers = $4, updated_at = now()
+		  WHERE id = $1::uuid`, tenantID, maxScopes, maxKeys, maxModelConsumers)
 	if err != nil {
 		if pgxdb.AbsentOrMalformed(err) {
 			return ErrTenantNotFound
