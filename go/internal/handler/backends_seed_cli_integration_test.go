@@ -123,7 +123,7 @@ func newSeedHarness(t *testing.T, sealboxKey string, tenantAdmin bool) *seedHarn
 			next.ServeHTTP(w, rq.WithContext(context.WithValue(rq.Context(), authResultKey, ar)))
 		})
 	})
-	r.Get("/api/whoami", NewWhoamiHandler(pool).HandleWhoami)
+	r.Get("/api/whoami", NewWhoamiHandler(pool, nil).HandleWhoami)
 	MountSecrets(r, NewSecretsHandler(pool, cfgStore))
 	r.Post("/api/manage", mh.HandleManage)
 	srv := httptest.NewServer(r)
