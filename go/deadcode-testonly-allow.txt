@@ -147,6 +147,7 @@ internal/handler/model_auth.go	ModelDoor.warn	# wartet: W02-05 (Mount) — Model
 internal/handler/model_auth.go	ReauthConsumer	# wartet: W02-08 — Re-Check des Stream-Watchers (K22), gleicher Semaphor wie ModelAuth; entfällt mit W01-8
 internal/handler/model_auth.go	bearerToken	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
 internal/handler/model_auth.go	canonicalAddr	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	canonicalProxy	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
 internal/handler/model_auth.go	headerList	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
 internal/handler/model_auth.go	lastListValue	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
 internal/handler/model_auth_limiter.go	authSemaphore.acquire	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go

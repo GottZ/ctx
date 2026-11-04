@@ -132,8 +132,8 @@ type modelAuthCounters struct {
 type ModelDoor struct {
 	pool         *pgxpool.Pool
 	settings     func() oai.Settings
-	trustedProxy string     // CTX_TRUSTED_PROXY as configured ("" = none)
-	trustedAddr  netip.Addr // the same, parsed; invalid ⇒ compared as a string
+	trustedProxy string     // CTX_TRUSTED_PROXY, normalised ("" = none; a value that is no address is "" too, logged at construction)
+	trustedAddr  netip.Addr // the same as an address (port and brackets stripped, IPv4-mapped unmapped, no zone)
 	usage        ModelKeyToucher
 	reject       func(http.ResponseWriter, *http.Request, ModelAuthRejection)
 	log          *slog.Logger
@@ -170,8 +170,20 @@ func ModelAuth(cfg ModelAuthConfig) *ModelDoor {
 		log = slog.Default()
 	}
 	trusted := strings.TrimSpace(cfg.TrustedProxy)
+	trustedAddr := canonicalProxy(trusted)
+	if trusted != "" && !trustedAddr.IsValid() {
+		// Review 2 FR2-1: a value that names no address (a host name, a
+		// CIDR, a URL) can never equal a peer, so the door would run in the
+		// silent B22 state — the proxy taken for the client, every request's
+		// address the proxy's. Treated as unset instead: a request that
+		// arrives with X-Forwarded-For answers 503 proxy_misconfigured, loud.
+		log.Error("model auth: "+EnvTrustedProxy+" is not an IP address — treated as unset: every model-key request that arrives "+
+			"with X-Forwarded-For is refused with 503 proxy_misconfigured; set it to the proxy's plain address as ctxd sees it "+
+			"(a port or brackets are accepted and stripped, a host name is not)", "value", trusted)
+		trusted = ""
+	}
 	return &ModelDoor{
-		pool: cfg.Pool, settings: cfg.Settings, trustedProxy: trusted, trustedAddr: canonicalAddr(trusted),
+		pool: cfg.Pool, settings: cfg.Settings, trustedProxy: trusted, trustedAddr: trustedAddr,
 		usage: cfg.Usage, reject: cfg.Reject, log: log,
 		limiter: newFailLimiter(modelAuthLimiterCap, time.Now),
 		known:   newKnownGood(modelAuthKnownGoodCap),
@@ -212,7 +224,7 @@ func (d *ModelDoor) Handler(next http.Handler) http.Handler {
 		if d.trustedProxy == "" && strings.TrimSpace(headerList(r, "X-Forwarded-For")) != "" {
 			d.st.proxyMisconfigured.Add(1)
 			d.proxyOnce.Do(func() {
-				d.log.Error("model auth: X-Forwarded-For arrives but " + EnvTrustedProxy + " is unset — the client address " +
+				d.log.Error("model auth: X-Forwarded-For arrives but " + EnvTrustedProxy + " is unset (or no IP address) — the client address " +
 					"cannot be determined, every model-key request is refused with 503 proxy_misconfigured; set " +
 					EnvTrustedProxy + " to the proxy's address as ctxd sees it (docs/operations.md). Logged once per process.")
 			})
@@ -311,17 +323,12 @@ func (d *ModelDoor) origin(r *http.Request) (netip.Addr, bool) {
 }
 
 // isTrustedProxy compares the direct peer with CTX_TRUSTED_PROXY as
-// addresses (Fremd-Review N6): 2001:DB8::10 and [2001:db8::10] are one
-// host, and so are an IPv4 address and its IPv4-mapped spelling. A value
-// that is no address is compared as a string, as clientIP does.
+// addresses (Fremd-Review N6, review 2 FR2-1): 2001:DB8::10, [2001:db8::10]
+// and [2001:db8::10]:443 are one host, and so are an IPv4 address and its
+// IPv4-mapped spelling. Without a valid configured address nothing is
+// trusted (ModelAuth logged the value and dropped it).
 func (d *ModelDoor) isTrustedProxy(peer string) bool {
-	if d.trustedProxy == "" {
-		return false
-	}
-	if d.trustedAddr.IsValid() {
-		return canonicalAddr(peer) == d.trustedAddr
-	}
-	return peer == d.trustedProxy
+	return d.trustedAddr.IsValid() && canonicalAddr(peer) == d.trustedAddr
 }
 
 // canonicalAddr parses s as an address without zone, IPv4-mapped as IPv4;
@@ -332,6 +339,17 @@ func canonicalAddr(s string) netip.Addr {
 		return netip.Addr{}
 	}
 	return a.Unmap().WithZone("")
+}
+
+// canonicalProxy is canonicalAddr for the configured value: the spellings
+// an operator writes for one host — plain, with a port (192.0.2.10:443,
+// [2001:db8::10]:443) or bracketed ([2001:db8::10]) — all name the address;
+// anything else is the zero Addr.
+func canonicalProxy(s string) netip.Addr {
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return ap.Addr().Unmap().WithZone("")
+	}
+	return canonicalAddr(strings.TrimSuffix(strings.TrimPrefix(s, "["), "]"))
 }
 
 // lastListValue is the rightmost non-empty entry of a comma list — the one
