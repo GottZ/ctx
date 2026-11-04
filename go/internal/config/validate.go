@@ -86,6 +86,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGatewayConsumers(c)...)
 	// V42 (A03-W3): dispatch.external_order names a known admission order.
 	issues = append(issues, validateDispatchExternalOrder(c)...)
+	// V43 (A03-W17): dispatch.external_max_wait at most 45 s.
+	issues = append(issues, validateDispatchExternalMaxWait(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1194,6 +1196,42 @@ func validateDispatchExternalOrder(c *Config) []Issue {
 	return []Issue{{Field: "dispatch.external_order", Severity: SeverityError,
 		Msg: fmt.Sprintf("external order %q must be %q (interactive, external, background) or %q (interactive, background, external) — empty reads as %q",
 			c.Dispatch.ExternalOrder, dispatch.ExternalOrderO1, dispatch.ExternalOrderO2, dispatch.ExternalOrderO1)}}
+}
+
+// Dispatch bounds derived from the gateway caps (design/02 §4.11.2) — named
+// so V43 says where its number comes from.
+const (
+	// gatewayCommitDistance is the distance the stream header commit keeps
+	// above the external wait budget (design/02 §4.7: the commit grace is
+	// clamped to at least dispatch.external_max_wait + 5 s, so no byte goes
+	// out before the acquire returns — a refusal must still be able to be a
+	// 429).
+	gatewayCommitDistance = 5 * time.Second
+	// dispatchExternalMaxWaitCeiling is the V43 ceiling: the commit grace
+	// ceiling (gatewayCommitGraceCeiling, 50 s, V39) minus that distance —
+	// a larger wait budget would push the commit clamp above the grace a
+	// typical 60 s proxy idle timeout allows.
+	dispatchExternalMaxWaitCeiling = gatewayCommitGraceCeiling - gatewayCommitDistance
+)
+
+// validateDispatchExternalMaxWait is V43 (wave A03-W17, masterplan K21,
+// design/02 §4.11.2): dispatch.external_max_wait — the one wait budget of an
+// external acquire (A03-W5) — at most dispatchExternalMaxWaitCeiling (45 s),
+// so the stream commit clamp of W02-08 never has to rise above the V39 grace
+// ceiling. The key came with A03-W5 and its ceiling only now (K21 assigns it
+// to this wave — the exception to the "checks come WITH the keys" precedent
+// of validateDistill): no installation sets it (live 2026-11-04: no
+// dispatch.* settings row, the env var unset). Negative values stay with the
+// V17 sign walk — no second, contradicting issue here; 0 is legitimate
+// ("never wait"). Fatal: boot abort, settings write 422.
+func validateDispatchExternalMaxWait(c *Config) []Issue {
+	w := c.Dispatch.ExternalMaxWait
+	if w <= dispatchExternalMaxWaitCeiling {
+		return nil
+	}
+	return []Issue{{Field: "dispatch.external_max_wait", Severity: SeverityError,
+		Msg: fmt.Sprintf("external max wait %v must be <= %v: the stream commit grace ceiling %v minus the %v the header commit keeps above the wait budget",
+			w, dispatchExternalMaxWaitCeiling, gatewayCommitGraceCeiling, gatewayCommitDistance)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

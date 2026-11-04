@@ -536,8 +536,10 @@ func (rl *sseRelay) result() *RawStreamResult {
 
 // --- the gateway chain walker (design/02 §4.11.1) ---.
 
-// ErrNoContinuation is Acquirer.Continue's answer while no continuation
-// acquire exists (A03-W17, K21): a sub-block walk then stays at k = 1.
+// ErrNoContinuation is Acquirer.Continue's answer from an Acquirer without a
+// continuation door (K21): a sub-block walk then stays at k = 1. The
+// dispatcher's continuation acquire exists since A03-W17
+// (llm.Admission.Continue).
 var ErrNoContinuation = errors.New("llm: continuation acquire not available")
 
 // ErrWalkClass refuses an Acquirer whose class is not in
@@ -550,10 +552,11 @@ var ErrWalkClass = errors.New("llm: walk class not allowed")
 // follow-ups (design/02 §4.11.1, L5): First blocks (the wait budget lives in
 // the dispatcher, A03-W4), Next never blocks (TryAcquire semantics — no
 // second queue wait across failover), Continue serves a further sub-block of
-// the same attempt (A03-W17; ErrNoContinuation until then). Class exposes
-// the admission class for the walker's assert. The production
-// implementation is the planner's (A03-W3/W5/W17, wired by W02-07);
-// llm.Admission is deliberately none — it has no non-blocking door.
+// the same attempt (A03-W17). Class exposes the admission class for the
+// walker's assert. The production implementation is the planner's
+// (A03-W8, wired by W02-07): it binds llm.Admission's doors with the
+// request's AdmitOptions — First = AcquireWith, Next = TryAcquire, Continue
+// = Continue. llm.Admission itself is none (its doors take the options).
 // Errors end the walk terminally (acquire-error doctrine, design/01 §4.3).
 type Acquirer interface {
 	Class() dispatch.Class

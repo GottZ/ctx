@@ -9,14 +9,33 @@ package dispatch
 // under the mutex admitLocked already holds), all quantile work deferred to
 // the snapshot pull. int64 nanoseconds ⇒ 4 KiB per class, numClasses × 4 KiB
 // per targetState: memory is irrelevant even across many targets.
+//
+// Publication (A03-W17, masterplan K21, design/02 §9.2 A03-9): the
+// Retry-After hint is on the /v1 hot path — every 429 of an external request
+// asks for it — so it may not sort the window under the dispatcher mutex.
+// The publisher goroutine (publishLoop, started by New, ended by Close)
+// re-reads every window that took samples since its last pass at most once
+// per waitPublishInterval: it copies the window under the mutex, sorts the
+// copy OUTSIDE it and stores p95/max/samples atomically (waitRing.pub). The
+// hint reads only that published value. Snapshot keeps computing exactly
+// (statsInto, the server-admin pull). The lease-duration ring of A03-W6
+// hangs onto the same pass.
 
 import (
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
 // waitRingK is the rolling window size per target × class (design/03 §4.6.1).
 const waitRingK = 512
+
+// waitPublishInterval is the staleness bound of the published wait aggregates
+// (design/02 §9.2 A03-9: "at most once per second, outside the mutex"): a
+// mechanism constant, not a tuning value. A window republishes at most once
+// per interval, and a published value is at most one interval (plus the pass
+// itself) older than the window it summarizes.
+const waitPublishInterval = time.Second
 
 // waitRing is the fixed rolling window over the last waitRingK admitted wait
 // samples of one target × class (guarded by Dispatcher.mu like every other
@@ -34,6 +53,18 @@ type waitRing struct {
 	pos int
 	// count is the number of filled entries, ≤ waitRingK.
 	count int
+	// gen counts the samples ever added and copied is gen at the last
+	// publication copy — a window republishes only when they differ.
+	gen, copied uint64
+	// pub is the last published aggregate (nil before the first
+	// publication) — written by the publication pass, read lock-free.
+	pub atomic.Pointer[waitAgg]
+}
+
+// waitAgg is one published aggregate of a wait window.
+type waitAgg struct {
+	p95, max time.Duration
+	samples  int
 }
 
 // add records one admitted wait — O(1), hot path (admitLocked). A nil ring
@@ -47,6 +78,7 @@ func (r *waitRing) add(wait time.Duration) {
 	if r.count < waitRingK {
 		r.count++
 	}
+	r.gen++
 }
 
 // statsInto fills the window aggregates of one class view: p95 (nearest-rank
@@ -66,10 +98,84 @@ func (r *waitRing) statsInto(ws *WaitStats) {
 	}
 	buf := make([]int64, r.count)
 	copy(buf, r.samples[:r.count])
+	a := aggregate(buf)
+	ws.MaxWait, ws.P95Wait = a.max, a.p95
+}
+
+// aggregate sorts buf in place and returns its window aggregates — the ONE
+// formula of the exact snapshot and of the publication: max and the
+// nearest-rank p95, the ⌈0.95·n⌉-th smallest sample.
+func aggregate(buf []int64) waitAgg {
+	n := len(buf)
+	if n == 0 {
+		return waitAgg{}
+	}
 	slices.Sort(buf)
-	ws.MaxWait = time.Duration(buf[r.count-1])
-	// Nearest-rank p95: the ⌈0.95·n⌉-th smallest sample of the window.
-	ws.P95Wait = time.Duration(buf[(r.count*95+99)/100-1])
+	return waitAgg{p95: time.Duration(buf[(n*95+99)/100-1]), max: time.Duration(buf[n-1]), samples: n}
+}
+
+// published returns the last published aggregate of the window — zero before
+// the first publication and for a nil ring. Lock-free, allocation-free.
+func (r *waitRing) published() waitAgg {
+	if r == nil {
+		return waitAgg{}
+	}
+	if a := r.pub.Load(); a != nil {
+		return *a
+	}
+	return waitAgg{}
+}
+
+// publishLoop runs a publication pass every waitPublishInterval until Close.
+func (d *Dispatcher) publishLoop() {
+	defer d.loops.Done()
+	t := time.NewTicker(waitPublishInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-d.stopLoops:
+			return
+		case <-t.C:
+			d.publishWaits()
+		}
+	}
+}
+
+// publishWaits is one publication pass: under the mutex it collects the
+// windows that took samples since their last copy, then per window it copies
+// the samples under the mutex (one short measured section each), sorts the
+// copy outside it and stores the aggregate atomically. Passes are serialized
+// (pubMu), so a published value never goes back in time.
+func (d *Dispatcher) publishWaits() {
+	d.pubMu.Lock()
+	defer d.pubMu.Unlock()
+	if d.pubBuf == nil {
+		d.pubBuf = make([]int64, waitRingK)
+	}
+	d.mu.Lock()
+	opStart := time.Now()
+	rings := d.pubRings[:0]
+	for _, st := range d.targets {
+		for c := range st.waits {
+			if r := &st.waits[c]; r.gen != r.copied {
+				rings = append(rings, r)
+			}
+		}
+	}
+	d.opDone(opStart)
+	d.mu.Unlock()
+	for _, r := range rings {
+		d.mu.Lock()
+		opStart = time.Now()
+		n := copy(d.pubBuf, r.samples[:r.count])
+		r.copied = r.gen
+		d.opDone(opStart)
+		d.mu.Unlock()
+		a := aggregate(d.pubBuf[:n])
+		r.pub.Store(&a)
+	}
+	clear(rings)
+	d.pubRings = rings[:0]
 }
 
 // ring returns class c's wait window — the ONLY index into targetState.waits

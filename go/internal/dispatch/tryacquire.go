@@ -28,7 +28,10 @@ var ErrWouldBlock = errors.New("dispatch: target busy, would block")
 // classes unconditionally, exactly like Acquire — behavior neutrality with
 // empty policy; an external request is never pass-through (A03-W3: refused
 // with ErrExternalNotOffered where the target does not offer it, the
-// llm.Admission try path for /v1 is A03-W17). Same door check order as
+// llm.Admission try path for /v1 is A03-W17: llm.Admission.TryAcquire over
+// the TryAdmitter door). A continuation try (Request.Continuation, external)
+// shares Acquire's immediate half too: admitted when it would be the class
+// head, else ErrWouldBlock — never queued. Same door check order as
 // Acquire: ctx.Err(), then the class
 // (ErrInvalidClass outside the class table, A03-W1), then the principal gate
 // (ErrPrincipalConflict, ErrClassUnauthorized — I-K10, W01-7), then B8.
@@ -63,6 +66,7 @@ func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, conte
 		reapRef:    reapReference(req.Deadline, ctx),
 		deadlineIn: req.DeadlineIn,
 		weight:     requestWeight(class, req.Weight),
+		cont:       req.Continuation && class.External(),
 		runCtx:     runCtx,
 		cancel:     cancel,
 	}

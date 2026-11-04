@@ -161,33 +161,54 @@ type Dispatcher struct {
 	// measurement hooks (usage.go).
 	stats usageStats
 
-	stopReaper chan struct{}
-	stopOnce   sync.Once
+	// spellings maps a raw origin spelling a Retry-After hint was asked for
+	// (the rejection mapping passes b.Host, A03-W17) to its target, so the
+	// hint parses an origin once per spelling, not once per call — only
+	// spellings of an existing target are kept (bounded by the backend rows'
+	// hosts; targets are never deleted). Guarded by mu.
+	spellings map[string]*targetState
+	// pubMu serializes the wait publication passes (publishWaits, metrics.go)
+	// and guards their reusable scratch; lock order pubMu → mu.
+	pubMu    sync.Mutex
+	pubBuf   []int64
+	pubRings []*waitRing
+
+	// stopLoops ends the reaper and the wait publisher; loops counts them so
+	// Close returns only after both are gone (no ticker outlives Close).
+	stopLoops chan struct{}
+	stopOnce  sync.Once
+	loops     sync.WaitGroup
 }
 
-// New constructs the dispatcher and starts the reaper goroutine. logger nil
-// falls back to slog.Default().
+// New constructs the dispatcher and starts its two goroutines: the reaper
+// and the wait publisher (A03-W17, metrics.go). logger nil falls back to
+// slog.Default().
 func New(logger *slog.Logger, s Settings) *Dispatcher {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	d := &Dispatcher{
-		logger:     logger,
-		warnAfter:  interactiveWaitWarn,
-		targets:    make(map[string]*targetState),
-		stopReaper: make(chan struct{}),
+		logger:    logger,
+		warnAfter: interactiveWaitWarn,
+		targets:   make(map[string]*targetState),
+		spellings: make(map[string]*targetState),
+		stopLoops: make(chan struct{}),
 	}
 	s.RankOrder = d.resolveRankOrder(s.RankOrder)
 	d.settings.Store(&s)
 	d.policy.Store(&Policy{})
+	d.loops.Add(1)
 	go d.reapLoop()
+	d.loops.Add(1)
+	go d.publishLoop()
 	return d
 }
 
-// Close stops the reaper goroutine (process shutdown; waiters drain via
-// their own ctx).
+// Close stops the reaper and the wait publisher and returns once both have
+// ended (process shutdown; waiters drain via their own ctx). Idempotent.
 func (d *Dispatcher) Close() {
-	d.stopOnce.Do(func() { close(d.stopReaper) })
+	d.stopOnce.Do(func() { close(d.stopLoops) })
+	d.loops.Wait()
 }
 
 // UpdateSettings hot-swaps the config-derived knobs. A flip to
@@ -283,6 +304,7 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		reapRef:    reapReference(req.Deadline, ctx),
 		deadlineIn: req.DeadlineIn,
 		weight:     requestWeight(class, req.Weight),
+		cont:       req.Continuation && class.External(),
 		runCtx:     runCtx,
 		cancel:     cancel,
 		admitCh:    make(chan struct{}),
@@ -302,8 +324,9 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		return l, runCtx, nil
 	}
 	// The wait budget (A03-W5, waitbudget.go): external only, resolved
-	// before the enqueue — a budget already ≤ 0 is ErrWaitExpired at once.
-	budget, err := d.waitBudgetLocked(st, class, req, now)
+	// before the enqueue — a budget already ≤ 0 is ErrWaitExpired at once; a
+	// continuation has none (A03-W17).
+	budget, err := d.waitBudgetLocked(st, w, req, now)
 	if err == nil {
 		err = d.enqueueLocked(st, w)
 	}
@@ -358,18 +381,39 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 // w AND its own queue is empty (FIFO, no barging — a newcomer never
 // overtakes a waiter of its own class; bucket order is policy) AND every
 // class ranked above it in Settings.RankOrder has an empty queue or a head
-// that is inadmissible with ITS weight (headAdmissibleLocked, A03-W7). With the
+// that is inadmissible with ITS weight (rankClearLocked). With the
 // default order this is exactly the pre-A03-W2 predicate: interactive = slot
 // free AND no waiting interactive; background = slot free AND both wait
 // queues empty AND demand == 0 (the herald term, R3). A class outside the
 // class table is never eligible (fail-closed default in admissibleLocked,
 // A03-W1; pre-A03-W1 it got the background predicate, K6); a class absent
 // from the rank table — reachable only through the unvalidated test hook —
-// is never eligible either.
+// is never eligible either. A continuation newcomer has its own own-queue
+// term (continuationEligibleNowLocked).
 func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, w, slots int) bool {
 	if !d.admissibleLocked(st, class, w, slots) || d.queuedLocked(st, class) {
 		return false
 	}
+	return d.rankClearLocked(st, class, slots)
+}
+
+// continuationEligibleNowLocked is eligibleNowLocked for a continuation of
+// weight w (A03-W17): it is the head of the external class, so only a
+// waiting continuation is ahead of it — the waiting non-continuations are
+// behind it, whatever their bucket. Partition and rank order apply
+// unchanged: admissible within E and S, and no higher-ranked class with a
+// waiting, admissible head.
+func (d *Dispatcher) continuationEligibleNowLocked(st *targetState, w, slots int) bool {
+	if !d.admissibleLocked(st, ClassExternal, w, slots) || len(st.external.cont) > 0 {
+		return false
+	}
+	return d.rankClearLocked(st, ClassExternal, slots)
+}
+
+// rankClearLocked reports whether no class ranked above class in
+// Settings.RankOrder has a waiting head that is admissible with its weight
+// (headAdmissibleLocked, A03-W7) — false for a class absent from the table.
+func (d *Dispatcher) rankClearLocked(st *targetState, class Class, slots int) bool {
 	for _, h := range d.currentSettings().RankOrder {
 		if h == class {
 			return true
@@ -384,7 +428,9 @@ func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, w, slots in
 // enqueueLocked places w in its class queue or rejects it fast. Check order
 // of the Deckel-Staffel: principal → tenant → aggregate (the most specific
 // offender first, D3-U4/E-U6). The external class runs the same ladder over
-// its own queue and its own caps (consumer → tenant → aggregate, A03-W3).
+// its own queue and its own caps (consumer → tenant → aggregate, A03-W3). A
+// continuation (A03-W17) skips the ladder: it goes to the class head and is
+// never refused — it still counts in the depth the ladder reads.
 func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 	set := d.currentSettings()
 	switch w.class {
@@ -392,6 +438,12 @@ func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 		return d.pushCappedLocked(st, st.interactive, w,
 			set.InteractiveQueuePerPrincipal, set.InteractiveQueuePerTenant, set.InteractiveQueueMax)
 	case ClassExternal:
+		if w.cont {
+			st.seq++
+			w.seq = st.seq
+			st.external.pushCont(w)
+			return nil
+		}
 		err := d.pushCappedLocked(st, st.external, w,
 			set.ExternalQueuePerConsumer, set.ExternalQueuePerTenant, set.ExternalQueueMax)
 		if err != nil {
@@ -753,11 +805,12 @@ func reapReference(hint time.Time, ctx context.Context) time.Time {
 
 // reapLoop runs the reaper on its lazy cadence until Close.
 func (d *Dispatcher) reapLoop() {
+	defer d.loops.Done()
 	t := time.NewTicker(reapInterval)
 	defer t.Stop()
 	for {
 		select {
-		case <-d.stopReaper:
+		case <-d.stopLoops:
 			return
 		case now := <-t.C:
 			d.reapNow(now)

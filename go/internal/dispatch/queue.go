@@ -43,6 +43,10 @@ type waiter struct {
 	// requestWeight): Request.Weight for the external class, always 1 for
 	// the in-house classes.
 	weight int
+	// cont marks a continuation (Request.Continuation of an external
+	// request, A03-W17): it waits in classQueue.cont, the head of the class,
+	// never in a bucket. Always false in-house.
+	cont bool
 }
 
 // classQueue is a per-principal wait queue of one target: per-bucket FIFOs
@@ -75,6 +79,16 @@ type classQueue struct {
 	// — the O(1) guard that keeps the drain off the release path while every
 	// waiter fits.
 	maxWeight int
+	// cont is the continuation FIFO of the external queue (A03-W17, masterplan
+	// K21): the HEAD of the class. Invariant for every bucket pick (the
+	// fairness pick of A03-W4 included): each view of the class head
+	// (peekFIFO) and each dequeue (pick) consults cont BEFORE any bucket,
+	// under every fairness mode — a continuation never waits for its
+	// bucket's turn. A continuation is counted like every waiter (total,
+	// byKey, byTenant, maxWeight: the depth ahead of a newcomer includes it)
+	// but never checked against a cap (enqueueLocked). Empty in the
+	// interactive queue.
+	cont []*waiter
 }
 
 func newClassQueue() *classQueue {
@@ -117,6 +131,18 @@ func (q *classQueue) push(w *waiter) {
 		q.ring = append(q.ring, key)
 	}
 	q.buckets[key] = append(q.buckets[key], w)
+	q.count(w)
+}
+
+// pushCont enqueues a continuation at the class head (behind the waiting
+// continuations, before every bucket) and counts it like any waiter.
+func (q *classQueue) pushCont(w *waiter) {
+	q.cont = append(q.cont, w)
+	q.count(w)
+}
+
+// count bumps the cap counters and the weight bound for one queued waiter.
+func (q *classQueue) count(w *waiter) {
 	if w.weight > q.maxWeight {
 		q.maxWeight = w.weight
 	}
@@ -127,7 +153,8 @@ func (q *classQueue) push(w *waiter) {
 	q.total++
 }
 
-// pick dequeues the next waiter under the given fairness mode, or nil.
+// pick dequeues the next waiter under the given fairness mode, or nil. A
+// waiting continuation comes first under every mode (A03-W17, cont). Then
 // fifo: smallest seq over all bucket heads — byte-equal semantics to one
 // global FIFO. principal_rr: head of the next non-empty bucket from cursor;
 // INSIDE a bucket strictly FIFO (no intra-principal barging — the per-bucket
@@ -137,6 +164,9 @@ func (q *classQueue) push(w *waiter) {
 func (q *classQueue) pick(mode FairnessMode) *waiter {
 	if q.total == 0 {
 		return nil
+	}
+	if len(q.cont) > 0 {
+		return q.popCont()
 	}
 	if mode == FairnessPrincipalRR && len(q.ring) > 0 {
 		q.cursor %= len(q.ring)
@@ -170,11 +200,15 @@ func (q *classQueue) fifoHeadKey() string {
 
 // peekFIFO returns the waiter pick(FairnessFIFO) would dequeue, without
 // dequeuing it, or nil — the weight check of the external head (A03-W7:
-// the head is admissible with ITS weight or not). The external fairness pick
-// (A03-W4) needs the same view under its own mode.
+// the head is admissible with ITS weight or not): the oldest continuation
+// when one waits (A03-W17), else the FIFO bucket head. The external fairness
+// pick (A03-W4) needs the same view under its own mode, continuation first.
 func (q *classQueue) peekFIFO() *waiter {
 	if q.total == 0 {
 		return nil
+	}
+	if len(q.cont) > 0 {
+		return q.cont[0]
 	}
 	key := q.fifoHeadKey()
 	if key == "" {
@@ -199,10 +233,35 @@ func (q *classQueue) popHead(key string) *waiter {
 	return w
 }
 
-// remove splices one canceled waiter out of its bucket (caller-ctx cancel
-// vacates the wait slot — design/01 §4.2). Depth is Deckel-bounded, so the
-// linear scan is O(≤64).
+// popCont dequeues the oldest continuation.
+func (q *classQueue) popCont() *waiter {
+	w := q.cont[0]
+	q.cont[0] = nil // no stale reference in the backing array
+	q.cont = q.cont[1:]
+	q.uncount(w)
+	return w
+}
+
+// remove splices one canceled waiter out of its bucket — a continuation out
+// of cont (caller-ctx cancel vacates the wait slot — design/01 §4.2). Depth
+// is Deckel-bounded, so the linear scan is O(≤64).
 func (q *classQueue) remove(w *waiter) {
+	if w.cont {
+		for i, cand := range q.cont {
+			if cand == w {
+				// Shift in place and clear the vacated tail slot, so the
+				// backing array keeps no reference to the canceled waiter
+				// (the same hygiene as popCont).
+				last := len(q.cont) - 1
+				copy(q.cont[i:], q.cont[i+1:])
+				q.cont[last] = nil
+				q.cont = q.cont[:last]
+				q.uncount(w)
+				return
+			}
+		}
+		return
+	}
 	key := q.bucketKey(w.principal)
 	b := q.buckets[key]
 	for i, cand := range b {
@@ -255,18 +314,20 @@ func (q *classQueue) dropRingKey(key string) {
 // oldest returns the longest-waiting enqueue time, zero when empty.
 func (q *classQueue) oldest() time.Time {
 	var t time.Time
-	for _, b := range q.buckets {
-		for _, w := range b {
-			if t.IsZero() || w.enqueued.Before(t) {
-				t = w.enqueued
-			}
+	q.each(func(w *waiter) {
+		if t.IsZero() || w.enqueued.Before(t) {
+			t = w.enqueued
 		}
-	}
+	})
 	return t
 }
 
-// each visits every waiter (WARN scan of the reaper).
+// each visits every waiter, the continuations included (WARN scan of the
+// reaper, overweight drain).
 func (q *classQueue) each(fn func(*waiter)) {
+	for _, w := range q.cont {
+		fn(w)
+	}
 	for _, b := range q.buckets {
 		for _, w := range b {
 			fn(w)

@@ -39,17 +39,31 @@ type RetryHinter interface {
 // RetryAfterHint returns the B1 Retry-After estimate for a target × class, or
 // 0 for an unknown origin (⇒ the handler omits the header — no fabricated
 // value for a target we never admitted against). The value derives ONLY from
-// snapshot data already maintained (queue depth + the MW7 wait window); it
-// takes the same mutex as Acquire and does O(K) sort work over the ≤ 512
-// window only on this cold path, never in admission.
+// data already maintained: the queue depth and the PUBLISHED p95 of the MW7
+// wait window (A03-W17, metrics.go — at most waitPublishInterval old). Every
+// 429 of an external request asks for it, so it is a hot path: one short
+// measured mutex section, no sort, no window copy, no allocation — the origin
+// spelling is parsed once (outside the mutex) and then resolved through
+// Dispatcher.spellings.
 func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
-	norm, err := NormalizeOrigin(origin)
-	if err != nil {
-		norm = origin // defensive: fall back to the raw key
-	}
 	d.mu.Lock()
+	st, cached := d.spellings[origin]
+	if !cached {
+		// A spelling not seen yet: parse it OUTSIDE the mutex (a raw
+		// base_url costs allocations, review F5), then resolve it; only a
+		// spelling of an existing target is cached (targets are never
+		// deleted, so the cache is bounded by the backend rows' hosts) —
+		// an unknown origin parses again on its next hint.
+		d.mu.Unlock()
+		norm := canonicalOrigin(origin)
+		d.mu.Lock()
+		if st = d.targets[norm]; st != nil {
+			d.spellings[origin] = st
+		}
+	}
 	defer d.mu.Unlock()
-	st := d.targets[norm]
+	opStart := time.Now()
+	defer d.opDone(opStart)
 	if st == nil {
 		return 0
 	}
@@ -62,19 +76,18 @@ func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 	case ClassExternal:
 		// The external window includes the censored samples of expired
 		// waiters (A03-W5, metrics.go) — the estimate does not read only
-		// the survivors.
+		// the survivors; the depth includes waiting continuations (A03-W17),
+		// which are served before a newcomer.
 		depth = st.external.total
 	default:
 		// Fail-closed (A03-W1): no estimate for a class without a case here
 		// — 0 omits the header (pre-A03-W1: interactive depth × the
 		// background window, K14).
 		d.logger.Error("dispatch: class without a retry-after case — no estimate (fail-closed default)",
-			"target", norm, "class", uint8(class))
+			"target", st.origin, "class", uint8(class))
 		return 0
 	}
-	var ws WaitStats
-	st.ring(class).statsInto(&ws)
-	return retryAfterEstimate(depth, ws.P95Wait)
+	return retryAfterEstimate(depth, st.ring(class).published().p95)
 }
 
 // retryAfterEstimate is the pure B1 formula (queue depth × per-position

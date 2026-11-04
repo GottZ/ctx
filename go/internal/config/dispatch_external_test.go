@@ -86,8 +86,8 @@ func TestBootDumpCarriesDispatchGroup(t *testing.T) {
 // no. 2, design/03 §3.3): dispatch.external_max_wait is bare seconds with the
 // registry default 20 s, 0 is a legitimate value ("external never waits"),
 // and a negative value is refused by the generic V17 duration walk (ERROR —
-// boot abort, settings write rejected). The <= 45 s ceiling is A03-W17's
-// (masterplan K21), not this key's.
+// boot abort, settings write rejected). The <= 45 s ceiling is V43
+// (A03-W17, masterplan K21): TestDispatchExternalMaxWaitCeilingV43.
 func TestDispatchExternalMaxWait(t *testing.T) {
 	if got := defaultFor("dispatch.external_max_wait"); got != 20*time.Second {
 		t.Fatalf("dispatch.external_max_wait default = %v, want 20s", got)
@@ -116,6 +116,53 @@ func TestDispatchExternalMaxWait(t *testing.T) {
 		}
 		if got != -1 || cfg.Dispatch.ExternalMaxWait != tc.want {
 			t.Fatalf("dispatch.external_max_wait=%q: severity %d, value %v, want clean %v", tc.raw, got, cfg.Dispatch.ExternalMaxWait, tc.want)
+		}
+	}
+}
+
+// TestDispatchExternalMaxWaitCeilingV43 is the A03-W17 config gate (masterplan
+// K21, design/02 §4.11.2): dispatch.external_max_wait above 45 s — the stream
+// commit grace ceiling (50 s, V39) minus the 5 s the header commit needs above
+// the wait budget — is ONE error on the key (boot abort, settings write
+// rejected); 45 s itself and everything below are clean, and a negative value
+// stays the V17 walk's single issue (no second, contradicting report).
+func TestDispatchExternalMaxWaitCeilingV43(t *testing.T) {
+	if dispatchExternalMaxWaitCeiling != 45*time.Second {
+		t.Fatalf("ceiling %v, want 45s = grace ceiling %v − commit distance %v", dispatchExternalMaxWaitCeiling, gatewayCommitGraceCeiling, gatewayCommitDistance)
+	}
+	count := func(issues []Issue) (n int, sev Severity) {
+		sev = -1
+		for _, is := range issues {
+			if is.Field == "dispatch.external_max_wait" {
+				n++
+				if is.Severity > sev {
+					sev = is.Severity
+				}
+			}
+		}
+		return n, sev
+	}
+	for _, tc := range []struct {
+		raw   string
+		want  int
+		fatal bool
+	}{
+		{raw: "46", want: 1, fatal: true},
+		{raw: "3600", want: 1, fatal: true},
+		{raw: "45", want: 0},
+		{raw: "20", want: 0},
+		{raw: "-46", want: 1, fatal: true}, // V17 alone
+	} {
+		cfg := validCfg(t, map[string]string{"dispatch.external_max_wait": tc.raw})
+		n, sev := count(Validate(cfg))
+		if n != tc.want || (tc.fatal && sev != SeverityError) {
+			t.Fatalf("dispatch.external_max_wait=%s: %d issue(s), worst severity %d (-1 = none), want %d (fatal %v)", tc.raw, n, sev, tc.want, tc.fatal)
+		}
+		if !tc.fatal {
+			continue
+		}
+		if err := NewStore(validCfg(t, map[string]string{})).Replace(cfg); err == nil || !strings.Contains(err.Error(), "dispatch.external_max_wait") {
+			t.Fatalf("settings write with dispatch.external_max_wait=%s accepted: %v", tc.raw, err)
 		}
 	}
 }

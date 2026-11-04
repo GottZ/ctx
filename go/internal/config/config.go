@@ -1561,7 +1561,9 @@ type DispatchConfig struct {
 	// request's own budget (MaxWait, ServeBy) can only shorten it. 0 = an
 	// external acquire never waits (admitted at once or refused at once) —
 	// fail-closed, NOT unbounded. The 20 s default stays below a typical 60 s
-	// proxy idle timeout, so the queue phase needs no keepalive byte.
+	// proxy idle timeout, so the queue phase needs no keepalive byte. At most
+	// 45 s (V43, A03-W17): the stream commit grace ceiling 50 s minus the 5 s
+	// the header commit keeps above the wait budget.
 	ExternalMaxWait time.Duration `key:"dispatch.external_max_wait" env:"CTX_DISPATCH_EXTERNAL_MAX_WAIT" default:"20" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
