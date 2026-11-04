@@ -291,7 +291,7 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	// off stays free.
 	if info.Guard == config.GuardFederationIngress && raw == "true" && !h.ingress.Registered() {
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false,
-			"error": fmt.Sprintf("%s: %s — the router serves no model group with the LoopGuard in front of it", key, ingressMissingText)})
+			"error": fmt.Sprintf("%s: %s — the router serves no model group with the LoopGuard and the PeerIngress in front of it", key, ingressMissingText)})
 		return
 	}
 	// Two-write-worlds scope resolution (§4.1a/§4.5): the write targets mutationScope

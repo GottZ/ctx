@@ -27,7 +27,7 @@ func TestModelGroupRegistersItsRoutersIngress(t *testing.T) {
 		ingress: mine, maxDepth: func() int { return 3 },
 	})
 	if !mine.Registered() {
-		t.Error("mountModelGroup did not register the router's ingress")
+		t.Error("mountModelGroup did not register the router's ingress (LoopGuard and PeerIngress, F-W9)")
 	}
 	if other.Registered() {
 		t.Error("mounting one router's group registered another router's ingress")

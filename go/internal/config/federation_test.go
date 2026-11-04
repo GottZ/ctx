@@ -110,3 +110,17 @@ func TestGuardFederationIngressOnlyOnBool(t *testing.T) {
 		t.Fatalf("bool field with the guard: built %v, err %v — want one entry carrying the guard", built, err)
 	}
 }
+
+// TestNoFederationInboundKeys is the registry pin of design/04 §5.3 D4 and
+// §4.7 "Kein zweiter Boden" (F-W9 G9): no federation.inbound_* key exists —
+// Rev. 0's tenant-overridable federation.inbound_sensitivity (and
+// inbound_log_bodies) are gone; the floor of a foreign prompt is the
+// consumer's prompt_sensitivity, lowered only by server-admin. Green at the
+// base already: a pin against its return, not a gate of this wave.
+func TestNoFederationInboundKeys(t *testing.T) {
+	for _, e := range registry() {
+		if strings.HasPrefix(e.Key, "federation.inbound_") {
+			t.Errorf("registry holds %q — a second sensitivity floor or body policy for foreign prompts (design/04 §4.7, D4)", e.Key)
+		}
+	}
+}

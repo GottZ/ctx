@@ -60,6 +60,11 @@ func TestGatewayEnableRequiresIngress(t *testing.T) {
 	const wantText = "the model API cannot be enabled before its federation ingress is mounted"
 	marked := &fedhop.Ingress{}
 	marked.MarkLoopGuard()
+	marked.MarkPeerIngress()
+	// guardOnly is a router whose model group carries the LoopGuard but not
+	// the PeerIngress (F-W9 G8): not registered, the write is refused.
+	guardOnly := &fedhop.Ingress{}
+	guardOnly.MarkLoopGuard()
 	refused := func(t *testing.T, rec *httptest.ResponseRecorder, reached bool) {
 		t.Helper()
 		if reached {
@@ -77,7 +82,7 @@ func TestGatewayEnableRequiresIngress(t *testing.T) {
 		}
 	}
 
-	for name, in := range map[string]*fedhop.Ingress{"nil ingress": nil, "unmarked ingress": {}} {
+	for name, in := range map[string]*fedhop.Ingress{"nil ingress": nil, "unmarked ingress": {}, "LoopGuard without PeerIngress": guardOnly} {
 		t.Run("PUT true/"+name, func(t *testing.T) {
 			rec, reached := ingressSettingsServe(t, in, "", http.MethodPut, "/api/settings/gateway.enabled", `{"value":true}`)
 			refused(t, rec, reached)
@@ -108,6 +113,10 @@ func TestGatewayEnableRequiresIngress(t *testing.T) {
 	// same way; with the env off it is an ordinary delete.
 	t.Run("DELETE that would fall back to env true", func(t *testing.T) {
 		rec, reached := ingressSettingsServe(t, nil, "true", http.MethodDelete, "/api/settings/gateway.enabled", "")
+		refused(t, rec, reached)
+	})
+	t.Run("DELETE that would fall back to env true, LoopGuard without PeerIngress", func(t *testing.T) {
+		rec, reached := ingressSettingsServe(t, guardOnly, "true", http.MethodDelete, "/api/settings/gateway.enabled", "")
 		refused(t, rec, reached)
 	})
 	t.Run("DELETE that falls back to env false passes the check", func(t *testing.T) {

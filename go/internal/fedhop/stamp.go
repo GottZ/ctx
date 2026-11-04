@@ -82,7 +82,13 @@ func WithInbound(ctx context.Context, in Inbound) context.Context {
 	return context.WithValue(ctx, inboundKey{}, in)
 }
 
-func inboundFrom(ctx context.Context) Inbound {
+// InboundFrom returns the federation state of the incoming request — the
+// zero Inbound (no chain, no budget) when none was set. Besides Stamp it is
+// the one reader outside this package (design/04 §4.6, F-W9): the handlers
+// and the admission behind the /v1 ingress (A03-W8: Class, Path, Wait) read
+// what the PeerIngress cleaned. Read the wait budget only through
+// Inbound.Wait, never MaxWait alone (F-W3).
+func InboundFrom(ctx context.Context) Inbound {
 	in, _ := ctx.Value(inboundKey{}).(Inbound)
 	return in
 }
@@ -166,7 +172,7 @@ func WireTimeout(ctx context.Context, t Target, base time.Duration) time.Duratio
 	if t.Tier != TierFederation || base <= 0 {
 		return base
 	}
-	w, ok := maxWaitFor(callFrom(ctx), inboundFrom(ctx))
+	w, ok := maxWaitFor(callFrom(ctx), InboundFrom(ctx))
 	if !ok {
 		return base
 	}
@@ -212,7 +218,7 @@ func Stamp(ctx context.Context, h http.Header, t Target) {
 		slog.ErrorContext(ctx, "federation: stamp without instance identity, no hop marker sent", "backend", t.BackendID)
 		return
 	}
-	in := inboundFrom(ctx)
+	in := InboundFrom(ctx)
 	h.Set(HeaderHop, appendList(in.Hop, tok))
 	if t.Tier != TierFederation {
 		return
@@ -245,12 +251,15 @@ func Stamp(ctx context.Context, h http.Header, t Target) {
 
 // Ingress is the registration of the federation ingress of ONE router
 // (design/04 §4.6 "Registrierung als Mechanismus", §7.2 no. 1): the model
-// groups (/v1, /v2) mark it when they are mounted with the LoopGuard fixed
-// in front of their handlers (cmd/ctxd mountModelGroup, F-W8; F-W9 adds the
-// PeerIngress to the condition), and the two assertions "no /v1 without its
-// ingress protection" read it — the boot (gateway.enabled effectively true ∧
-// not registered ⇒ no boot) and the settings write (gateway.enabled → true
-// ⇒ 409).
+// groups (/v1, /v2) mark it when they are mounted with the LoopGuard (F-W8)
+// and the PeerIngress (F-W9) fixed in front of their handlers (cmd/ctxd
+// mountModelGroup), and the two assertions "no /v1 without its ingress
+// protection" read it — the boot (gateway.enabled effectively true ∧ not
+// registered ⇒ no boot) and the settings write (gateway.enabled → true ⇒
+// 409). Registered needs both marks: a group with the loop guard alone
+// would serve without a resolved policy (federation.PolicyFrom's narrowest
+// default for every request, the consumer's floor and Ctx-Egress unread)
+// and without the consumer check of PeerIngress step 5.
 //
 // It is a value per router, not process state: two routers in one test
 // process — one with a model group, one without — must not see each other's
@@ -258,16 +267,23 @@ func Stamp(ctx context.Context, h http.Header, t Target) {
 // open every later router. The zero value is "not registered"; so is a nil
 // *Ingress — a reader that was never wired refuses (fail-closed).
 type Ingress struct {
-	loopGuard atomic.Bool
+	loopGuard, peerIngress atomic.Bool
 }
 
 // MarkLoopGuard records that a model group of this router is mounted with
 // the LoopGuard in front of it.
 func (i *Ingress) MarkLoopGuard() { i.loopGuard.Store(true) }
 
-// Registered reports whether the federation ingress of this router is
-// mounted in front of the model API. A nil *Ingress is not registered.
-func (i *Ingress) Registered() bool { return i != nil && i.loopGuard.Load() }
+// MarkPeerIngress records that a model group of this router is mounted with
+// the PeerIngress behind its LoopGuard (F-W9).
+func (i *Ingress) MarkPeerIngress() { i.peerIngress.Store(true) }
+
+// Registered reports whether the federation ingress of this router — the
+// LoopGuard and the PeerIngress — is mounted in front of the model API. A
+// nil *Ingress is not registered, neither is one with a single mark.
+func (i *Ingress) Registered() bool {
+	return i != nil && i.loopGuard.Load() && i.peerIngress.Load()
+}
 
 // Counters of the hop contract.
 var (

@@ -97,6 +97,11 @@ func TestWhoamiModelAPIGetter(t *testing.T) {
 func TestBootRefusesGatewayWithoutIngress(t *testing.T) {
 	registered := &fedhop.Ingress{}
 	registered.MarkLoopGuard()
+	registered.MarkPeerIngress()
+	// A model group with the LoopGuard but without the PeerIngress (F-W9 G8)
+	// is no registered ingress: the boot refuses as without any.
+	guardOnly := &fedhop.Ingress{}
+	guardOnly.MarkLoopGuard()
 
 	applyEnv(t, map[string]string{})
 	override, issues := config.Build([]config.Override{{Key: "gateway.enabled", Value: "true"}}, nil)
@@ -112,14 +117,14 @@ func TestBootRefusesGatewayWithoutIngress(t *testing.T) {
 	}
 
 	for name, c := range map[string]*config.Config{"override": override, "env": env} {
-		for _, in := range []*fedhop.Ingress{nil, {}} {
+		for _, in := range []*fedhop.Ingress{nil, {}, guardOnly} {
 			err := gatewayIngressAssert(c, in)
 			if err == nil {
 				t.Errorf("%s: gateway.enabled=true without a registered ingress boots", name)
 				continue
 			}
-			if !strings.Contains(err.Error(), "gateway.enabled") {
-				t.Errorf("%s: error %q does not name gateway.enabled", name, err)
+			if !strings.Contains(err.Error(), "gateway.enabled") || !strings.Contains(err.Error(), "PeerIngress") {
+				t.Errorf("%s: error %q does not name gateway.enabled and the missing ingress stages (LoopGuard and PeerIngress)", name, err)
 			}
 			// The remedy names the layer that set the value; the settings API
 			// is unreachable while the boot refuses (Fremd-Review FR-2).

@@ -71,6 +71,9 @@ type inventoryFixture struct {
 	ident    fedhop.Identity
 	adminKey string
 	modelKey string
+	// peerKey is a ctx-peer consumer's key (F-W9: the PeerIngress stage of
+	// the inventory, TestPeerIngressRouteInventory).
+	peerKey string
 }
 
 // inventoryRouter boots the production router against a throwaway DB, with
@@ -103,11 +106,15 @@ func inventoryRouter(t *testing.T) inventoryFixture {
 	if err != nil {
 		t.Fatalf("model key: %v", err)
 	}
+	_, _, peer, err := store.CreateConsumerWithKey(ctx, pool, store.ModelConsumerSpec{TenantID: store.DefaultTenantID, Label: "f-w9-inventory-peer", Kind: "ctx-peer"}, nil, store.APIStamp(adminID, "f-w9-inventory"))
+	if err != nil {
+		t.Fatalf("peer key: %v", err)
+	}
 	ident := fedhop.NewIdentity("00000000-0000-4000-8000-0000000000f8", bytes.Repeat([]byte{0xf8}, 32))
 	// newRouter, the constructor main uses: the fixture also carries the
 	// router's own ingress registration (FR2-2 pins it).
 	router, ingress, _ := newRouter(fedhop.WithIdentity(ctx, ident), pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d)
-	return inventoryFixture{router: router, ingress: ingress, pool: pool, ident: ident, adminKey: inventoryAdminKey, modelKey: model.Plaintext()}
+	return inventoryFixture{router: router, ingress: ingress, pool: pool, ident: ident, adminKey: inventoryAdminKey, modelKey: model.Plaintext(), peerKey: peer.Plaintext()}
 }
 
 var routeParam = regexp.MustCompile(`\{[^}]*\}`)
