@@ -240,6 +240,26 @@ Boot and write validation (V45): `1 ≤ max_depth ≤ 16` — `0` would refuse e
 - **Upgrade note.** Up to 5.31 `PUT /api/settings/gateway.enabled {"value":true}` was accepted (nothing was mounted, so it changed nothing). An install that stored that row does not boot after this release until the row is removed as above. Check before the upgrade: `SELECT scope, value FROM context_settings WHERE key = 'gateway.enabled';`.
 - The same flag gates the model-consumer self-service (`gateway.tenant_self_service` takes effect only while `gateway.enabled` is on), so that stays closed too until a build mounts `/v1`.
 
+## Write rejections in the server log
+
+A write `POST /api/store` refuses after its body parsed leaves a `WARN` record `store: write rejected` — at most one per key, code and minute (see *Throttled* below); the request logger's `http request` line names method, path, status and `request_id`, but not the key, and `ctx persist --hook` is silent on the client by design. The record carries:
+
+| Field | Value |
+| --- | --- |
+| `api_key_id` | the UUID of the key (`context_api_keys.id`) — never its hash or plaintext |
+| `code`, `status` | the machine code and HTTP status the client was answered with (`rate_limit` 429, `reserved_category` / `provenance_protected` / `scope_denied` 403, `size_cap` 413, `missing_fields` 400, …; `internal` 500 too — its cause is on the `ERROR` line with the same `request_id`) |
+| `request_id` | joins the record to the request logger's line |
+| `category`, `scope` | the write's category and its scope **as requested** (`""` = the key's home scope), each capped at 100 runes |
+| `suppressed` | refusals of the same key and code the throttle swallowed since that pair's previous line |
+
+It never carries the title, the content, the metadata, the tags or the rejection's prose. An unauthenticated request (no key to name) and an unparsable body (no write to name; it keeps its own `store: invalid request body` line) get none.
+
+**Throttled per key and code.** A key over its write budget is refused on every write of the window, and a refused write books no write row, so the write budget bounds no refusal — a looping client is refused as often as it asks. The first refusal of a `(api_key_id, code)` pair in a 60-second window — the window of the write rate limit — gets its line; the rest are counted. The count reaches the log on the pair's next line (`suppressed`), or, for a pair that stays quiet, on a `store: write rejections suppressed` record (`api_key_id`, `code`, `suppressed`) written by a sweep that runs at most once per window on the next refusal of any key. The counts live in the process: a restart drops what is pending. The window is a constant, not a setting: it bounds the server's own log volume.
+
+```bash
+docker compose logs ctx | grep '"store: write reject' | grep '"api_key_id":"<key-uuid>"'
+```
+
 ## Backups & disaster recovery
 
 `backup.sh` archives only the pg_dumps — the sealed-secret ciphertexts are in every dump, the master key (`CTX_SECRETS_KEY`) is in **none**, by design. Disaster recovery needs both the dump and the separately-stored master key. See [security](security.md#sealed-secrets--break-glass) for master-key setup, rotation and break-glass extraction.

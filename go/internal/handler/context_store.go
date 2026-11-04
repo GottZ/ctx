@@ -23,6 +23,7 @@ type StoreHandler struct {
 	pool       *pgxpool.Pool
 	cfg        ConfigStore
 	blocktypes *blocktype.Registry
+	rejectLog  writeRejectLog // issue #66: the throttled, key-attributed rejection line
 }
 
 // NewStoreHandler creates a new StoreHandler. The write rate limit comes from
@@ -131,13 +132,13 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	res, rej := runStageWriteGates(ctx, h.pool, h.classifySet(ctx), authResult, req,
 		snap.Pool.DefaultBlockSensitivity, snap.Query.RateLimitWrite, reqID)
 	if rej != nil {
-		writeJSONReject(w, rej)
+		h.reject(w, ctx, authResult, req, rej)
 		return
 	}
 
 	// The named parent is resolved BEFORE anything is written (NZ-3 point 8).
 	if rej := parentPreflight(ctx, h.pool, req, res.WriteScope, reqID); rej != nil {
-		writeJSONReject(w, rej)
+		h.reject(w, ctx, authResult, req, rej)
 		return
 	}
 
@@ -152,7 +153,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		existingID, err := store.HashNOOPCheck(ctx, h.pool, req.Content, res.WriteScope, req.Category, req.Title)
 		if err != nil {
 			slog.Error("store: hash noop check error", "error", err, "request_id", reqID)
-			writeJSONReject(w, classInternal.reject("Internal server error"))
+			h.reject(w, ctx, authResult, req, classInternal.reject("Internal server error"))
 			return
 		}
 		if existingID != "" {
@@ -180,13 +181,13 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// I7/S3: the conflicting row is a derivative. The refusal is decided in
 		// the store (atomic with the row lock) and answered here as 403.
-		writeJSONReject(w, upsertFailureReject(err, reqID))
+		h.reject(w, ctx, authResult, req, upsertFailureReject(err, reqID))
 		return
 	}
 
 	// Hang the block under the parent it named (nothing named ⇒ no-op).
 	if rej := linkParent(ctx, h.pool, block.ID, req.ParentID, res.WriteScope, reqID); rej != nil {
-		writeJSONReject(w, rej)
+		h.reject(w, ctx, authResult, req, rej)
 		return
 	}
 
@@ -233,6 +234,16 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 			res.Sens.Value, block.Sensitivity)}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// reject answers a write refused after its body parsed and writes the
+// key-attributed rejection line (issue #66, write_reject_log.go). Every refusal
+// of HandleStore past the body parse goes through it; the two before it do not
+// — an unauthenticated request has no key to name, and an unparsable body has
+// no write to name (it keeps its own WARN line).
+func (h *StoreHandler) reject(w http.ResponseWriter, ctx context.Context, ar *auth.AuthResult, req storeRequest, rej *writeReject) {
+	h.rejectLog.record(ctx, ar.ApiKeyID, req.Category, req.Scope, rej)
+	writeJSONReject(w, rej)
 }
 
 // parentPreflight resolves the parent a write NAMED, before anything is
