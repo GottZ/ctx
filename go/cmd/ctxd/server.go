@@ -143,6 +143,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	manageH.SetAdmitter(dispatcher)
 	// overview-rebuild-start (A2): manual kick of the cluster-overview rebuild.
 	manageH.SetOverviewController(scheduler)
+	// model-alias-* (W02-04): the registry the scheduler's listener keeps hot
+	// (Trigger after each committed write) and the same ceiling getter the
+	// registry clamps with.
+	manageH.SetModelAliases(scheduler.ModelAliasRegistry(), modelAliasCeilings(cfgStore))
 	// Forge PULL sync engine (Achse-02 I-F). Fail-closed gates: the tenant gate
 	// is store.TenantStatusForScope (found=false ⇒ skip + disable, S13); the
 	// issue-policy gate refuses a run unless the registry resolves an `issue`

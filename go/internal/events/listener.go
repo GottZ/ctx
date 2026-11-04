@@ -442,6 +442,14 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 	// §3.1). Only on this _global branch: the keys are global-only, so a
 	// tenant-scope write (early return above) can never change them.
 	h.refreshDispatchSettings()
+	// The model-alias registry clamps tenant aliases to the global-only
+	// gateway.tenant_alias_ceiling.* at reload (W02-04, design/02 §3.3): a
+	// lowered ceiling must reach the snapshot now, not with the next alias
+	// write. Trigger is single-flight and returns at once (one table read per
+	// burst, off this loop).
+	if h.modelAliases != nil {
+		h.modelAliases.Trigger(ctx)
+	}
 	return nil
 }
 

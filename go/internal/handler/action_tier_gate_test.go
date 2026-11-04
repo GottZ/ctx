@@ -31,6 +31,13 @@ func TestActionTier_Classification(t *testing.T) {
 		// default → this row turns RED (the S9 probe).
 		{"backend-reorder", "", tierTenantAdmin},
 		{"tenant-quota-get", "", tierTenantAdmin}, // read own quota (transparency)
+		// model-alias-* (W02-04): tenant-admin tier; the field tiers
+		// (_global/foreign scope 404-equivalent, lowering a sensitivity
+		// server-admin + confirm, tenant ceiling) live in the handler.
+		{"model-alias-create", "", tierTenantAdmin},
+		{"model-alias-delete", "", tierTenantAdmin},
+		{"model-alias-list", "", tierTenantAdmin},
+		{"model-alias-update", "", tierTenantAdmin},
 		// server-global (not yet isolated, or operator-level by nature)
 		{"mcp-client-create", "", tierServerAdmin},
 		{"mcp-client-list", "", tierServerAdmin},

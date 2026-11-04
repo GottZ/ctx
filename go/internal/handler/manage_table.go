@@ -1,5 +1,5 @@
 // Dispatch table of POST /api/manage — the SINGLE source of routing and admin
-// tier for all 89 manage actions (T03-11, design/03 §4.11). It replaces a
+// tier for all 93 manage actions (T03-11, design/03 §4.11). It replaces a
 // three-level construct: an 18-arm switch in HandleManage, fifteen
 // dispatch*Action fan-out methods, and a 211-line parallel tier classifier.
 // In that construct every action existed two to four times (routing arm,
@@ -27,7 +27,7 @@ import (
 // blobActionFunc: a row can then name the existing method directly, with no
 // place to drift away from the method it claims to call.
 //
-// Only 49 of the 89 target handlers already carry this exact shape; the rest
+// Only 49 of the 89 original target handlers already carry this exact shape; the rest
 // take a subset (no AuthResult, no manageRequest, neither) or derive a
 // parameter. Those rows wrap the method expression in one of the adapters
 // below — the adapter takes the method as a VALUE, so the handler name still
@@ -135,7 +135,7 @@ func gamingModeTier(req manageRequest) adminTier {
 	return tierOpen
 }
 
-// manageActions is the dispatch table: 89 actions, alphabetical, one row each.
+// manageActions is the dispatch table: 93 actions, alphabetical, one row each.
 //
 // The tiers are the pre-table behaviour, action for action — this wave routes
 // differently, it does not re-cut permissions.
@@ -145,8 +145,9 @@ func gamingModeTier(req manageRequest) adminTier {
 // tenant-isolated — the api-key family (T22 scope→tenant, T23 own-tenant list
 // filter, T24 404-no-oracle delete), the backend CRUD (T37 scope predicate),
 // the disable-profile family, the own reads (tenant-quota-get,
-// tenant-usage-get), the own-namespace scope provisioning and the forge family
-// (ownsProject). Every other gated action stays server-admin, because its
+// tenant-usage-get), the own-namespace scope provisioning, the forge family
+// (ownsProject) and the model-alias family (store scope predicate + handler
+// field tiers, W02-04). Every other gated action stays server-admin, because its
 // handler carries no tenant filter — admitting a tenant-admin there would be
 // fail-OPEN. tenant-*/tenant-grant-*/block-grant-* are operator actions by
 // nature; the dream/gaming mutations are server-global by design (scheduler
@@ -225,6 +226,15 @@ var manageActions = map[string]manageAction{
 	"mcp-client-create":        {tier: tierServerAdmin, handle: (*ManageHandler).handleMCPClientCreate},
 	"mcp-client-delete":        {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleMCPClientDelete)},
 	"mcp-client-list":          {tier: tierServerAdmin, handle: dropAuthReq((*ManageHandler).handleMCPClientList)},
+	// model-alias-* (W02-04): the /v1 model namespace. tierTenantAdmin with
+	// the field tiers in the handler (model_alias_manage.go): _global and
+	// foreign scopes are 404-equivalent for a tenant-admin, lowering a
+	// sensitivity is server-admin + confirm, the shadowing floor and the
+	// tenant ceiling hold for every caller.
+	"model-alias-create": {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelAliasCreate},
+	"model-alias-delete": {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelAliasDelete},
+	"model-alias-list":   {tier: tierTenantAdmin, handle: dropReq((*ManageHandler).handleModelAliasList)},
+	"model-alias-update": {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelAliasUpdate},
 	"oauth-identity-link":      {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityLink)},
 	"oauth-identity-list":      {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityList)},
 	"oauth-identity-unlink":    {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityUnlink)},

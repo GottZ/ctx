@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -358,4 +359,72 @@ func TestModelAliasStore(t *testing.T) {
 			t.Errorf("write went through without its stamp")
 		}
 	})
+}
+
+// TestModelAliasFloorPrimitives (W02-04): the floor read names the _global
+// alias of a name only, the shadow list every tenant alias of that name in
+// byte order, and the name lock serializes two transactions on the same
+// name (the second waits until the first ends) but not on another name.
+func TestModelAliasFloorPrimitives(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := maSetup(t)
+	if _, err := pool.Exec(ctx, `INSERT INTO context_model_aliases (scope, name, kind, role, sensitivity) VALUES
+	        ('_global', 'chat', 'chat', 'chat', 'internal'),
+	        ('beta',    'chat', 'chat', 'chat', 'public'),
+	        ('alpha',   'chat', 'chat', 'chat', 'credentials'),
+	        ('alpha',   'other', 'chat', 'chat', 'public')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if sens, found, err := store.GlobalModelAliasSensitivity(ctx, pool, "chat"); err != nil || !found || sens != "internal" {
+		t.Errorf("floor(chat) = %q %v %v, want internal", sens, found, err)
+	}
+	if _, found, err := store.GlobalModelAliasSensitivity(ctx, pool, "other"); err != nil || found {
+		t.Errorf("floor(other) found=%v err=%v, want none (only a tenant alias carries the name)", found, err)
+	}
+	sh, err := store.ModelAliasShadows(ctx, pool, "chat")
+	if err != nil || len(sh) != 2 || sh[0] != (store.ModelAliasShadow{Scope: "alpha", Sensitivity: "credentials"}) ||
+		sh[1] != (store.ModelAliasShadow{Scope: "beta", Sensitivity: "public"}) {
+		t.Errorf("shadows(chat) = %+v %v, want alpha=credentials, beta=public", sh, err)
+	}
+
+	first, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = first.Rollback(ctx) }()
+	if err := store.LockModelAliasName(ctx, first, "chat"); err != nil {
+		t.Fatalf("lock chat: %v", err)
+	}
+	if err := maWrite(ctx, t, pool, func(tx pgx.Tx) error { return store.LockModelAliasName(ctx, tx, "other") }); err != nil {
+		t.Errorf("lock other while chat is held: %v (another name must not wait)", err)
+	}
+	acquired := make(chan error, 1)
+	go func() {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			acquired <- err
+			return
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		acquired <- store.LockModelAliasName(ctx, tx, "chat")
+	}()
+	select {
+	case err := <-acquired:
+		t.Fatalf("a second lock on chat returned (%v) while the first transaction holds it", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := first.Rollback(ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Errorf("second lock on chat after release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second lock on chat never got it after the first transaction ended")
+	}
 }

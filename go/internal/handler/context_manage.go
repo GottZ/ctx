@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -73,6 +74,12 @@ type ManageHandler struct {
 	// overview feeds overview-rebuild-start (A2-Gate der Scharfschaltung).
 	// Wired via SetOverviewController (server.go); nil ⇒ the action answers 503.
 	overview OverviewController
+	// modelAliases / aliasCeilings feed the model-alias-* actions (W02-04):
+	// the registry gets a Trigger after every committed write, the getter
+	// yields the setting-bound policy ceilings. Wired via SetModelAliases
+	// (server.go); a nil getter ⇒ the writing actions answer 503.
+	modelAliases  *modelalias.Registry
+	aliasCeilings func() modelalias.Ceilings
 }
 
 // SetOverviewController wires the scheduler's overview-kick surface.
