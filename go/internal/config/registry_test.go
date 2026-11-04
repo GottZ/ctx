@@ -196,6 +196,16 @@ func TestRegistryStrictSet(t *testing.T) {
 		// to 0 would hide an intended activation, a malformed one must never
 		// guess a weakening window, so it aborts loudly.
 		"dispatch.background_aging_after": true,
+		// A03-W3 (design/03 §3.3, A-E2 no. 2): the external cap ladder and the
+		// external lease ceiling are ceilings and a reaper clock like their
+		// interactive siblings above — a typo'd value silently defaulting
+		// would hide the intended bound on the shared GPU. dispatch.
+		// external_order is NOT here: a string enum cannot malform at parse
+		// time, V42 refuses an unknown name instead.
+		"dispatch.external_queue_per_consumer": true,
+		"dispatch.external_queue_per_tenant":   true,
+		"dispatch.external_queue_max":          true,
+		"dispatch.external_lease_max":          true,
 		// B2: the blob write budget is a CEILING like its rate-limit siblings —
 		// a typo'd value silently defaulting to 10 would hide the intended cap
 		// on the one write surface that costs disk per request.

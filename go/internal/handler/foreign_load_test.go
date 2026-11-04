@@ -253,6 +253,11 @@ func TestHeldOfAndMerge(t *testing.T) {
 		{"dispatcher disabled", snap(false, 4, 0), 0, false},
 		{"absent", dispatch.Snapshot{Enabled: true}, 0, true},
 		{"absent, dispatcher disabled", dispatch.Snapshot{Enabled: false}, 0, false},
+		// A03-W3 (A-E5 no. 3): Held is the sum of internal and external
+		// slot-holding leases — the detector reads the sum, never the
+		// internal half, or external load would read as foreign.
+		{"internal plus external", dispatch.Snapshot{Enabled: true, Targets: []dispatch.TargetSnapshot{{
+			Origin: "http://gpu:30000", Slots: 4, Held: 3, HeldInternal: 1, HeldExternal: 2}}}, 3, true},
 	} {
 		if h, k := heldOf(tc.s, "http://gpu:30000"); h != tc.held || k != tc.known {
 			t.Errorf("%s: heldOf = %d/%v, want %d/%v", tc.name, h, k, tc.held, tc.known)

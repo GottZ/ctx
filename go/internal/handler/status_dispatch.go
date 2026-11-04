@@ -54,16 +54,37 @@ type dispatchStatus struct {
 }
 
 type dispatchTarget struct {
-	Origin            string           `json:"origin"`
-	Slots             int              `json:"slots"`
-	PreemptBackground bool             `json:"preempt_background"`
-	HeraldScope       string           `json:"herald_scope"`
-	Held              int              `json:"held"`
-	Inflight          int              `json:"inflight"`
-	Interactive       dispatchWait     `json:"interactive"`
-	Background        dispatchWait     `json:"background"`
-	Preempt           dispatchPreempt  `json:"preempt"`
-	Buckets           []dispatchBucket `json:"buckets"`
+	Origin            string `json:"origin"`
+	Slots             int    `json:"slots"`
+	PreemptBackground bool   `json:"preempt_background"`
+	HeraldScope       string `json:"herald_scope"`
+	// Held is ALL slot-holding leases, internal and external (the
+	// foreign-load detector contract); held_internal + held_external == held.
+	Held     int `json:"held"`
+	Inflight int `json:"inflight"`
+	// The external class (A03-W3, design/03 §4.14) — server-admin only: the
+	// internal/external split, the internal partition R, the external offer
+	// and its capacity E, the external wait view and its refusals.
+	HeldInternal     int                     `json:"held_internal"`
+	HeldExternal     int                     `json:"held_external"`
+	InflightInternal int                     `json:"inflight_internal"`
+	InternalReserved int                     `json:"internal_reserved"`
+	ExternalOffered  bool                    `json:"external_offered"`
+	ExternalCapacity int                     `json:"external_capacity"`
+	External         dispatchWait            `json:"external"`
+	ExternalRejects  dispatchExternalRejects `json:"external_rejects"`
+	Interactive      dispatchWait            `json:"interactive"`
+	Background       dispatchWait            `json:"background"`
+	Preempt          dispatchPreempt         `json:"preempt"`
+	Buckets          []dispatchBucket        `json:"buckets"`
+}
+
+// dispatchExternalRejects counts the external refusals of one target per
+// reason: cap (the external cap ladder) and not_offered (the target does not
+// offer the external class).
+type dispatchExternalRejects struct {
+	Cap        int64 `json:"cap"`
+	NotOffered int64 `json:"not_offered"`
 }
 
 type dispatchWait struct {
@@ -85,9 +106,13 @@ type dispatchPreempt struct {
 }
 
 // dispatchBucket is the per-fair-key detail — SERVER-ADMIN ONLY. fair_key is
-// principal detail (HomeScope); it never appears in the tenant shape.
+// principal detail (HomeScope; for an external consumer the identity key
+// _consumer:<id>); it never appears in the tenant shape. class names the
+// queue ("interactive" | "external"), tenant_id the bucket's tenant.
 type dispatchBucket struct {
 	FairKey      string `json:"fair_key"`
+	TenantID     string `json:"tenant_id"`
+	Class        string `json:"class"`
 	Waiting      int    `json:"waiting"`
 	OldestWaitMs int64  `json:"oldest_wait_ms"`
 	Inflight     int    `json:"inflight"`
@@ -112,10 +137,12 @@ type dispatchTenantStatus struct {
 // foreign principal identity (F-B3).
 type dispatchTenantTarget struct {
 	Origin string `json:"origin"`
-	// Busy reports whether the target holds any lease right now (aggregate,
-	// no principal detail).
+	// Busy reports whether the target holds any INTERNAL lease right now
+	// (aggregate, no principal detail). External leases never count: a
+	// tenant must not see app or peer load (design/03 §4.14, X23).
 	Busy bool `json:"busy"`
-	// Depth is the coarsened total waitQ depth: "leer" | "niedrig" | "hoch"
+	// Depth is the coarsened internal waitQ depth (interactive + background;
+	// the external queue never counts): "leer" | "niedrig" | "hoch"
 	// (E-A5-6b). The exact bucket boundaries are NOT load-bearing — only the
 	// monotone mapping matters; full depth would add foreign-load resolution
 	// the tenant view deliberately withholds.
@@ -175,8 +202,19 @@ func buildDispatchAdmin(snap dispatch.Snapshot, enforcing bool, guardAt, digestA
 			HeraldScope:       string(t.HeraldScope),
 			Held:              t.Held,
 			Inflight:          t.Inflight,
-			Interactive:       waitOf(t.Interactive),
-			Background:        waitOf(t.Background),
+			HeldInternal:      t.HeldInternal,
+			HeldExternal:      t.HeldExternal,
+			InflightInternal:  t.InflightInternal,
+			InternalReserved:  t.InternalReserved,
+			ExternalOffered:   t.ExternalOffered,
+			ExternalCapacity:  t.ExternalCapacity,
+			External:          waitOf(t.External),
+			ExternalRejects: dispatchExternalRejects{
+				Cap:        t.ExternalRejects.Cap,
+				NotOffered: t.ExternalRejects.NotOffered,
+			},
+			Interactive: waitOf(t.Interactive),
+			Background:  waitOf(t.Background),
 			Preempt: dispatchPreempt{
 				PreemptsTotal:       t.Preempt.PreemptsTotal,
 				WastedMsTotal:       t.Preempt.WastedMsTotal,
@@ -191,6 +229,8 @@ func buildDispatchAdmin(snap dispatch.Snapshot, enforcing bool, guardAt, digestA
 		for _, b := range t.Buckets {
 			dt.Buckets = append(dt.Buckets, dispatchBucket{
 				FairKey:      b.FairKey,
+				TenantID:     b.TenantID,
+				Class:        b.Class.String(),
 				Waiting:      b.Waiting,
 				OldestWaitMs: b.OldestWait.Milliseconds(),
 				Inflight:     b.Inflight,
@@ -241,7 +281,10 @@ func embedTokensFromRollup(llm24h []llm24hRow) []dispatchEmbedTokens {
 // is the set of target origins the tenant may see (VisibleTo over the backend
 // pool); a target absent from it does not appear at all (K-T1 / B-R3: a non-
 // visible backend is invisible, not anonymized). fairKey is the caller's own
-// fairness bucket key (its HomeScope) — the ONLY bucket whose detail is exposed.
+// fairness bucket key (its HomeScope) — the ONLY bucket whose detail is exposed,
+// and only an INTERACTIVE one: the external class (A03-W3) never reaches this
+// view — Busy and Depth read the internal sizes, and external buckets are
+// skipped by class, never by a key comparison (design/03 §4.14, X23).
 func buildDispatchTenant(snap dispatch.Snapshot, visible map[string]bool, fairKey string) *dispatchTenantStatus {
 	out := &dispatchTenantStatus{Targets: []dispatchTenantTarget{}}
 	for _, t := range snap.Targets {
@@ -251,14 +294,14 @@ func buildDispatchTenant(snap dispatch.Snapshot, visible map[string]bool, fairKe
 		waiting := t.Interactive.Waiting + t.Background.Waiting
 		tt := dispatchTenantTarget{
 			Origin: t.Origin,
-			Busy:   t.Held > 0 || t.Inflight > 0,
+			Busy:   t.HeldInternal > 0 || t.InflightInternal > 0,
 			Depth:  coarsenDepth(waiting),
 		}
 		// Own principal detail — matched on fairKey, NEVER emitting the key
 		// itself. A foreign bucket contributes only to Busy/Depth above.
 		if fairKey != "" {
 			for _, b := range t.Buckets {
-				if b.FairKey != fairKey {
+				if b.Class != dispatch.ClassInteractive || b.FairKey != fairKey {
 					continue
 				}
 				tt.OwnWaiting = b.Waiting

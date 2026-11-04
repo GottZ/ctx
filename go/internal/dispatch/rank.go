@@ -9,7 +9,11 @@
 // bypass, for background only, and is consulted only when the scan reaches
 // background, so it never overtakes a waiting admissible higher-ranked class
 // (design/03 §4.8 doctrine line). For the two in-house classes the scan yields
-// exactly the pre-A03-W2 literals: interactive before background.
+// exactly the pre-A03-W2 literals: interactive before background. The
+// external class (A03-W3) ranks between them (o1) or after background (o2) —
+// a named order selected by dispatch.external_order — and is admissible only
+// inside the external partition, so at the partition border it never blocks
+// a lower class.
 
 package dispatch
 
@@ -19,10 +23,9 @@ import (
 )
 
 // defaultRankOrder is the rank table in effect for the zero value and for
-// every invalid order: interactive before background (E-U1 — a waiting human
-// is always served first). The config key dispatch.external_order and the
-// named orders o1/o2 arrive with the first external class (A03-W3).
-var defaultRankOrder = [...]Class{ClassInteractive, ClassBackground}
+// every invalid order: the named order o1 (decision E2) — interactive, then
+// external, then background. A waiting human is always served first (E-U1).
+var defaultRankOrder = [...]Class{ClassInteractive, ClassExternal, ClassBackground}
 
 // Compile-time guard: the default order names exactly numClasses classes. A
 // class added before numClasses without its rank here makes one of these
@@ -33,10 +36,34 @@ var (
 	_ [int(numClasses) - len(defaultRankOrder)]struct{}
 )
 
-// DefaultRankOrder returns the default rank table (interactive, background) —
-// the value the owner side pins Settings.RankOrder to until its config key
-// lands (A03-W3).
+// DefaultRankOrder returns the default rank table (o1: interactive, external,
+// background).
 func DefaultRankOrder() [numClasses]Class { return defaultRankOrder }
+
+// The named admission orders of dispatch.external_order (DECISIONS A-E2 no. 1:
+// "auch 02 durch einen config switch im backend ermöglichen").
+const (
+	// ExternalOrderO1 is I ≻ XU ≻ B: an external requester goes before ctx'
+	// own background work (decision E2, the default).
+	ExternalOrderO1 = "o1"
+	// ExternalOrderO2 is I ≻ B ≻ XU: ctx' background work goes first.
+	ExternalOrderO2 = "o2"
+)
+
+// namedRankOrders is the data table behind dispatch.external_order. The
+// internal partition R holds in both orders (it is an admission term, not a
+// rank). The external bulk class XB joins both as the last rank (A03-W9).
+var namedRankOrders = map[string][numClasses]Class{
+	ExternalOrderO1: defaultRankOrder,
+	ExternalOrderO2: {ClassInteractive, ClassBackground, ClassExternal},
+}
+
+// RankOrderFor returns the rank table of one named order (exact name — the
+// config layer trims and lowers, V42) and whether the name is known.
+func RankOrderFor(name string) ([numClasses]Class, bool) {
+	o, ok := namedRankOrders[name]
+	return o, ok
+}
 
 // validRankOrder reports whether order is a permutation of all classes with
 // ClassInteractive on rank 0 (I-03-2: no class is ever served before a
@@ -79,18 +106,18 @@ func (d *Dispatcher) resolveRankOrder(order [numClasses]Class) [numClasses]Class
 // on a target with slots slots (design/03 §4.2), independent of queue order:
 // interactive held + w ≤ slots; background held + w ≤ slots ∧ demand == 0
 // (the herald term — it keeps background out of the inter-lease gaps of
-// running interactive requests, R3, not softenable here). Callers pass
-// w = 1; the real weight source is A03-W7. A class without a case is never
-// admissible (fail-closed default, A03-W1 pattern).
+// running interactive requests, R3, not softenable here); external see
+// externalAdmissibleLocked. Callers pass w = 1; the real weight source is
+// A03-W7. A class without a case is never admissible (fail-closed default,
+// A03-W1 pattern).
 func (d *Dispatcher) admissibleLocked(st *targetState, c Class, w, slots int) bool {
-	if st.held+w > slots {
-		return false
-	}
 	switch c {
 	case ClassInteractive:
-		return true
+		return st.held+w <= slots
 	case ClassBackground:
-		return d.demand.Load() == 0
+		return st.held+w <= slots && d.demand.Load() == 0
+	case ClassExternal:
+		return d.externalAdmissibleLocked(st, w, slots)
 	default:
 		d.logger.Error("dispatch: class without an eligibility case — not admissible (fail-closed default)",
 			"target", st.origin, "class", uint8(c))
@@ -107,6 +134,8 @@ func (d *Dispatcher) queuedLocked(st *targetState, c Class) bool {
 		return st.interactive.total > 0
 	case ClassBackground:
 		return st.background.len() > 0
+	case ClassExternal:
+		return st.external.total > 0
 	default:
 		d.logger.Error("dispatch: class without a queue case — no queue (fail-closed default)",
 			"target", st.origin, "class", uint8(c))
@@ -142,9 +171,46 @@ func (d *Dispatcher) pickAdmissibleLocked(st *targetState, c Class, mode Fairnes
 			d.agedAdmitLocked(st, w, now)
 		}
 		return w
+	case ClassExternal:
+		// FIFO across the identity buckets (the fairness pick is A03-W4).
+		if !d.admissibleLocked(st, c, 1, slots) {
+			return nil
+		}
+		return st.external.pick(FairnessFIFO)
 	default:
 		d.logger.Error("dispatch: class without a wake case — not picked (fail-closed default)",
 			"target", st.origin, "class", uint8(c))
 		return nil
 	}
+}
+
+// externalAdmissibleLocked is the admission term of the external class
+// (design/03 §4.2/§4.3): never on a target that does not offer it; on a
+// slot-managed target held + w ≤ S ∧ heldExt + w ≤ E with E = S − R (the
+// internal partition: ctx keeps R slots whatever the external load); on a
+// self-admitting target (no slots) heldExt + w ≤ external_max_inflight, or
+// always without that cap — the remote admission acts. No herald term
+// (design/03 §4.8a): external work occupies only the external partition, so
+// it cannot fill the inter-lease gaps of an interactive request.
+func (d *Dispatcher) externalAdmissibleLocked(st *targetState, w, slots int) bool {
+	offered, capacity := d.externalOffer(st.origin)
+	if !offered {
+		return false
+	}
+	if slots > 0 && st.held+w > slots {
+		return false
+	}
+	return capacity == 0 || st.heldExt+w <= capacity
+}
+
+// externalOffer resolves whether a target offers the external class
+// right now and its external capacity E (0 on an offered self-admitting
+// target = no external cap): never with the emergency stop, else the derived
+// policy (TargetPolicy.externalCapacity). Two atomic loads, no mutex — the
+// admission path calls it under Dispatcher.mu, ExternalAdmissible without.
+func (d *Dispatcher) externalOffer(origin string) (offered bool, capacity int) {
+	if !d.currentSettings().Enabled {
+		return false, 0
+	}
+	return d.policy.Load().Targets[origin].externalCapacity()
 }

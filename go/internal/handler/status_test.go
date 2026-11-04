@@ -417,6 +417,8 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "dispatch.target", dts[0], []string{
 		"origin", "slots", "preempt_background", "herald_scope", "held", "inflight",
+		"held_internal", "held_external", "inflight_internal", "internal_reserved",
+		"external_offered", "external_capacity", "external", "external_rejects",
 		"interactive", "background", "preempt", "buckets",
 	})
 	var dbk []json.RawMessage
@@ -427,7 +429,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	// (asserted by TestStatusDispatchTenantNoForeignPrincipal). Here it is pinned
 	// as present on the admin side.
 	assertKeys(t, "dispatch.bucket", dbk[0], []string{
-		"fair_key", "waiting", "oldest_wait_ms", "inflight", "tokens", "charges",
+		"fair_key", "tenant_id", "class", "waiting", "oldest_wait_ms", "inflight", "tokens", "charges",
 	})
 
 	var be []json.RawMessage

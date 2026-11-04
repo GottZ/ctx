@@ -1,6 +1,7 @@
 package backends
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -770,5 +771,66 @@ func TestValidateForeignLoadProbe(t *testing.T) {
 	b.Metadata = map[string]any{"score_domain": "auto"}
 	if _, errs := ValidateBackend(&b); fieldHit(errs, "metadata.foreign_load_probe") {
 		t.Errorf("tenant row without the marker hit the foreign_load_probe rule: %+v", errs)
+	}
+}
+
+// TestValidateDispatchExternalLimits (A03-W3, design/03 §3.2): the write path
+// checks the FORM of the three external limits keys — internal_reserved_slots
+// and external_max_inflight an integer 1..math.MaxInt32, external_offer a
+// bool — as a limits.<key> FieldError (422) instead of a later derivation
+// WARN. Checks across rows (the merge against slots, the target kind) stay in
+// the derivation; other limits keys stay unvalidated as before.
+func TestValidateDispatchExternalLimits(t *testing.T) {
+	for _, ok := range []map[string]any{
+		{"internal_reserved_slots": float64(1)},
+		{"internal_reserved_slots": float64(7), "slots": float64(8)},
+		{"external_offer": true},
+		{"external_offer": false},
+		{"external_max_inflight": float64(3), "external_offer": true},
+		{"slots": "unvalidated as before"},
+		{"internal_reserved_slots": 2, "external_max_inflight": int64(4), "external_offer": true},
+		// The upper bound of the derivation (dispatch limitCount) is inclusive.
+		{"external_max_inflight": float64(math.MaxInt32), "external_offer": true},
+		{"internal_reserved_slots": math.MaxInt32},
+	} {
+		b := validBackend()
+		b.Limits = ok
+		if _, errs := ValidateBackend(&b); len(errs) != 0 {
+			t.Errorf("limits %v refused: %+v", ok, errs)
+		}
+	}
+	for _, bad := range []struct {
+		key string
+		val any
+	}{
+		{"internal_reserved_slots", float64(0)},
+		{"internal_reserved_slots", float64(-2)},
+		{"internal_reserved_slots", 2.5},
+		{"internal_reserved_slots", "2"},
+		{"internal_reserved_slots", nil},
+		{"external_offer", "true"},
+		{"external_offer", float64(1)},
+		{"external_offer", nil},
+		{"external_max_inflight", float64(0)},
+		{"external_max_inflight", 0.5},
+		{"external_max_inflight", true},
+		// Review M15/M16: +Inf and the in-process int forms.
+		{"external_max_inflight", math.Inf(1)},
+		{"internal_reserved_slots", 0},
+		{"external_max_inflight", int64(-1)},
+		// Review 2 F-B: above math.MaxInt32 the derivation refuses (dispatch
+		// limitCount), so the write path does too — not a stored row that
+		// silently offers nothing.
+		{"internal_reserved_slots", 1e19},
+		{"internal_reserved_slots", float64(3000000000)},
+		{"external_max_inflight", 1e19},
+		{"external_max_inflight", float64(math.MaxInt32 + 1)},
+		{"external_max_inflight", int64(math.MaxInt32 + 1)},
+	} {
+		b := validBackend()
+		b.Limits = map[string]any{bad.key: bad.val}
+		if _, errs := ValidateBackend(&b); !fieldHit(errs, "limits."+bad.key) {
+			t.Errorf("limits.%s=%#v passed, want a limits.%s FieldError: %+v", bad.key, bad.val, bad.key, errs)
+		}
 	}
 }

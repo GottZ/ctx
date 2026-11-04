@@ -24,9 +24,12 @@ var ErrWouldBlock = errors.New("dispatch: target busy, would block")
 // reserved for WAITING interactive acquires, design/02 §4.2.1). No-barging
 // holds by construction: eligibleNowLocked admits only when no same-or-
 // higher-class waiter is ahead, so a try can never overtake the queue.
-// Pass-through targets (disabled / no declared policy) admit
-// unconditionally, exactly like Acquire — behavior neutrality with empty
-// policy. Same door check order as Acquire: ctx.Err(), then the class
+// Pass-through targets (disabled / no declared policy) admit in-house
+// classes unconditionally, exactly like Acquire — behavior neutrality with
+// empty policy; an external request is never pass-through (A03-W3: refused
+// with ErrExternalNotOffered where the target does not offer it, the
+// llm.Admission try path for /v1 is A03-W17). Same door check order as
+// Acquire: ctx.Err(), then the class
 // (ErrInvalidClass outside the class table, A03-W1), then the principal gate
 // (ErrPrincipalConflict, ErrClassUnauthorized — I-K10, W01-7), then B8.
 func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, context.Context, error) {
@@ -66,23 +69,18 @@ func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, conte
 	d.mu.Lock()
 	opStart := time.Now()
 	st := d.targetLocked(canonicalOrigin(req.Target.Origin))
-	slots := d.slotsLocked(st.origin)
-	if slots <= 0 {
-		// Pass-through: disabled or no declared policy — exactly today's
-		// behavior, tracked for telemetry only (same clause as Acquire).
-		l := d.admitLocked(st, w, now, false)
-		d.opDone(opStart)
-		d.mu.Unlock()
-		return l, runCtx, nil
-	}
-	if d.eligibleNowLocked(st, class, slots) {
-		l := d.admitLocked(st, w, now, true)
-		d.opDone(opStart)
-		d.mu.Unlock()
-		return l, runCtx, nil
-	}
+	// Same immediate half as Acquire (admitNowLocked): pass-through for the
+	// in-house classes on a target without slots, ErrExternalNotOffered for
+	// an external request on a target that does not offer it.
+	l, err := d.admitNowLocked(st, w, now)
 	d.opDone(opStart)
 	d.mu.Unlock()
+	if l != nil {
+		return l, runCtx, nil
+	}
 	cancel(context.Canceled)
+	if err != nil {
+		return nil, nil, err
+	}
 	return nil, nil, ErrWouldBlock
 }

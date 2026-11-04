@@ -6,9 +6,10 @@ import (
 )
 
 // mutatedRankOrder is the A03-W2 mutation probe: background ranked before
-// interactive. The settings path refuses it (ClassInteractive must hold rank
-// 0); only SetRankOrderForTest stores it, unvalidated.
-var mutatedRankOrder = [numClasses]Class{ClassBackground, ClassInteractive}
+// interactive (external last, A03-W3). The settings path refuses it
+// (ClassInteractive must hold rank 0); only SetRankOrderForTest stores it,
+// unvalidated.
+var mutatedRankOrder = [numClasses]Class{ClassBackground, ClassInteractive, ClassExternal}
 
 // TestRankOrderIsTheSource is the A03-W2 gate: the admission scan reads its
 // class order from the rank table, not from class literals. Same input in
@@ -203,10 +204,10 @@ func TestRankOrderValidation(t *testing.T) {
 	if ([numClasses]Class{ClassInteractive, ClassInteractive}) != ([numClasses]Class{}) {
 		t.Fatalf("all-interactive order differs from the zero value — revisit the zero-value rule")
 	}
-	// The predicate itself rejects a duplicate with interactive on rank 0.
-	// Through resolveRankOrder that order is the zero value (short-circuited
-	// above validRankOrder), so only this direct probe reaches the duplicate
-	// check while there are two classes.
+	// The predicate itself rejects an all-interactive order; through
+	// resolveRankOrder that order is the zero value (short-circuited above
+	// validRankOrder). Since A03-W3 a duplicate that is NOT the zero value is
+	// representable and runs through the table below.
 	if validRankOrder([numClasses]Class{ClassInteractive, ClassInteractive}) {
 		t.Errorf("validRankOrder(interactive, interactive) = true, want false (not a permutation)")
 	}
@@ -218,12 +219,14 @@ func TestRankOrderValidation(t *testing.T) {
 	}{
 		{name: "zero value", order: [numClasses]Class{}, warns: 0},
 		{name: "default order", order: def, warns: 0},
-		{name: "background first", order: [numClasses]Class{ClassBackground, ClassInteractive}, warns: 1},
-		// Refused on rank 0 already (interactive missing); the duplicate check
-		// is probed directly above.
-		{name: "background twice", order: [numClasses]Class{ClassBackground, ClassBackground}, warns: 1},
-		{name: "interactive first, enum end", order: [numClasses]Class{ClassInteractive, numClasses}, warns: 1},
-		{name: "interactive first, out-of-table value", order: [numClasses]Class{ClassInteractive, Class(255)}, warns: 1},
+		{name: "background first", order: [numClasses]Class{ClassBackground, ClassInteractive, ClassExternal}, warns: 1},
+		// Refused on rank 0 already (interactive missing).
+		{name: "background twice", order: [numClasses]Class{ClassBackground, ClassBackground, ClassExternal}, warns: 1},
+		// A03-W2 handover 4: the duplicate with interactive on rank 0.
+		{name: "interactive twice", order: [numClasses]Class{ClassInteractive, ClassInteractive, ClassBackground}, warns: 1},
+		{name: "external missing", order: [numClasses]Class{ClassInteractive, ClassBackground, ClassBackground}, warns: 1},
+		{name: "interactive first, enum end", order: [numClasses]Class{ClassInteractive, numClasses, ClassBackground}, warns: 1},
+		{name: "interactive first, out-of-table value", order: [numClasses]Class{ClassInteractive, Class(255), ClassBackground}, warns: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := DefaultSettings()
@@ -254,17 +257,19 @@ func TestRankOrderValidation(t *testing.T) {
 // fires), and a value outside the table is never admissible, never queued
 // and never picked — each refusal logged at ERROR.
 func TestRankScanSwitchesCoverEveryClass(t *testing.T) {
-	d, h := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
+	// A03-W3: the target offers the external class (R = 1 of 2 slots), so
+	// every table class is admissible on it while idle.
+	d, h := newTestDispatcher(t, DefaultSettings(), partitionPolicy(2, 1))
 	d.mu.Lock()
 	st := d.targetLocked(testOrigin)
 	for c := Class(0); c < numClasses; c++ {
-		if !d.admissibleLocked(st, c, 1, 1) {
-			t.Errorf("admissible(%s) on an idle 1-slot target = false, want true", c)
+		if !d.admissibleLocked(st, c, 1, 2) {
+			t.Errorf("admissible(%s) on an idle 2-slot target with R = 1 = false, want true", c)
 		}
 		if d.queuedLocked(st, c) {
 			t.Errorf("queued(%s) on an idle target = true, want false", c)
 		}
-		if w := d.pickAdmissibleLocked(st, c, FairnessFIFO, 1); w != nil {
+		if w := d.pickAdmissibleLocked(st, c, FairnessFIFO, 2); w != nil {
 			t.Errorf("pick(%s) on an idle target = %p, want nil", c, w)
 		}
 	}

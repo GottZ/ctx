@@ -229,9 +229,9 @@ func TestEveryClassHasEveryBranch(t *testing.T) {
 		}
 		d.finishLocked(l)
 	}
-	if st.interactive.total != 0 || st.background.len() != 0 || len(st.inflight) != 0 {
-		t.Errorf("after enqueue+drop+admit+finish: interactive=%d background=%d inflight=%d, want 0/0/0",
-			st.interactive.total, st.background.len(), len(st.inflight))
+	if st.interactive.total != 0 || st.background.len() != 0 || st.external.total != 0 || len(st.inflight) != 0 {
+		t.Errorf("after enqueue+drop+admit+finish: interactive=%d background=%d external=%d inflight=%d, want 0/0/0/0",
+			st.interactive.total, st.background.len(), st.external.total, len(st.inflight))
 	}
 	d.mu.Unlock()
 	for c := Class(0); c < numClasses; c++ {

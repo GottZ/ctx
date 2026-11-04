@@ -743,7 +743,11 @@ func TestDefaultSettings(t *testing.T) {
 		s.LeaseReapGrace != 30*time.Second || s.LeaseMaxAge != 900*time.Second ||
 		s.PreemptReleaseTimeout != 2*time.Second ||
 		s.Fairness != FairnessFIFO ||
-		s.BackgroundAgingAfter != 0 { // MW25: aging escape off by default (E-F5/K6)
+		s.BackgroundAgingAfter != 0 || // MW25: aging escape off by default (E-F5/K6)
+		// A03-W3 (A-E2 no. 2): the external cap ladder and lease ceiling.
+		s.ExternalQueuePerConsumer != 8 || s.ExternalQueuePerTenant != 32 ||
+		s.ExternalQueueMax != 64 || s.ExternalLeaseMax != 900*time.Second ||
+		s.RankOrder != DefaultRankOrder() {
 		t.Fatalf("defaults drifted from the registry contract: %+v", s)
 	}
 }
