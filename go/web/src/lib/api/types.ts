@@ -1471,8 +1471,10 @@ export interface ConsumerView {
   kind: string
   /** null = only the _global catalog. */
   tenant_scope: string | null
-  /** true = every offered model incl. future ones (the grants of W01-9 replace it). */
+  /** true = every offered model incl. future ones. */
   all_models: boolean
+  /** The model aliases granted one by one (W01-9): sorted alias IDS, [] = none (never a name, never "*"). */
+  models: string[]
   prompt_sensitivity: string
   fair_weight: number
   admission_lane: string
@@ -1499,4 +1501,63 @@ export interface ConsumerListResponse {
   success: true
   consumers: ConsumerView[]
   next_cursor: string | null
+}
+
+// --- Model API mutations + picker reads (wave W05-06, design/05 §4.2). Drift
+// anchor = internal/handler/model_consumers.go (create/delete/update/revoke
+// answers) and model_alias_manage.go modelAliasView + the list's `writable`.
+
+/**
+ * model-consumer-create answer: the consumer with its first key, and the key's
+ * PLAINTEXT exactly once (`api_key`, ctxm_…). The caller reveals it through
+ * RevealOnceKey and drops it — no store, no storage, no log ever holds it
+ * (design/05 §5 B-6).
+ */
+export interface ConsumerCreateResult {
+  success: true
+  consumer: ConsumerView
+  api_key: string
+}
+
+/** model-consumer-update answer (reactivation). */
+export interface ConsumerUpdateResult {
+  success: true
+  consumer: ConsumerView
+}
+
+/**
+ * model-consumer-delete / model-key-revoke answer. cancelled_inflight is the
+ * number of running requests the server ended — null until it can end and
+ * count them (W01-8), never a 0 that would claim none ran (V-01-e).
+ */
+export interface ConsumerRevokeResult {
+  success: true
+  cancelled_inflight: number | null
+}
+
+/** One model alias as model-alias-list answers it (modelAliasView + writable). */
+export interface ModelAliasView {
+  id: string
+  /** '_global' or the tenant scope the alias belongs to. */
+  scope: string
+  /** The OpenAI model id external callers name. */
+  name: string
+  /** chat | embedding | rerank (immutable). Bare string for forward-compat. */
+  kind: string
+  role: string
+  sensitivity: string
+  policy: Record<string, unknown>
+  description: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+  /** The caller may edit this row (server-admin: all; tenant-admin: its home scope). */
+  writable: boolean
+}
+
+/** model-alias-list answer — a tenant-admin reads _global + its home scope, a server-admin every scope. */
+export interface ModelAliasListResponse {
+  success: true
+  model_aliases: ModelAliasView[]
+  count: number
 }

@@ -51,3 +51,15 @@ export function fmtMinute(ts: string): string {
     ? '—'
     : d.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
+
+/**
+ * Toast line after a revoke / deactivate, from the server's
+ * `cancelled_inflight` (design/05 §4.6, V-01-e, B-25): a number is what the
+ * server ended; null (until W01-8 can end and count running requests) means
+ * running streams finish on their own. Only a real number is ever shown as a
+ * count — never a "0 ended" made up for null (Lead decision 4 of W05-06).
+ */
+export function cancelledText(n: unknown): string {
+  if (typeof n === 'number' && Number.isFinite(n)) return `${n} running stream${n === 1 ? '' : 's'} ended.`
+  return 'Running streams continue until they finish (live cancellation not available yet).'
+}

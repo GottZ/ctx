@@ -17,7 +17,7 @@
 
 import { expect } from '@playwright/test'
 import type { PageContract } from './contract'
-import { KEY, SENTINEL, modelApiCapabilities, sseRoute, type RecordedCall, type SseFrame } from '../fixtures'
+import { KEY, REVEAL_MARKER, SENTINEL, modelApiCapabilities, sseRoute, type RecordedCall, type SseFrame } from '../fixtures'
 
 /**
  * Mobile opt-out for the five PV4-Erstbelegung areas: their mobile BASELINES
@@ -969,7 +969,11 @@ export const contracts: PageContract[] = [
     },
   },
   {
-    // Model API area (design/05 §4.6, wave W05-05): the read-only consumer list.
+    // Model API area (design/05 §4.6, waves W05-05 + W05-06): the consumer list
+    // and, since W05-06, create with reveal-once, deactivate/reactivate and key
+    // revoke. capabilities = gateway ON with self-service, so the tenant-admin
+    // holds mintModelKeys (the full Kernauftrag world: create AND revoke); the
+    // tier UX without self-service is e2e/gateway-mint.spec.ts (G6).
     // role:'tenant-admin' = the guard truth with the gateway ON — viewModelApi is
     // serverAdmin || (tenantAdminOrUp && model_api.enabled), so the contract-wide
     // `capabilities` seeds the gateway-on world into every generated dimension:
@@ -982,11 +986,30 @@ export const contracts: PageContract[] = [
     name: 'gateway',
     role: 'tenant-admin',
     mode: 'reading',
-    capabilities: modelApiCapabilities(true),
+    capabilities: modelApiCapabilities(true, true),
     tenantScoped: true,
     adminCalls: ['model-consumer-list', 'tenant-list'],
     states: [
       { name: 'default', seed: {} },
+      // W05-06: the create dialog (template row, scope select, offer picker,
+      // expiry, sensitivity, CIDR) — axe + visual of the form view
+      {
+        name: 'create',
+        seed: {},
+        prepare: async (page) => {
+          await page.getByRole('button', { name: '+ New consumer' }).click()
+          await expect(page.locator('[data-testid="models-ready"]')).toBeAttached()
+        },
+      },
+      // W05-06: the revoke confirm of ci-chat's key (danger, typed 4-character gate)
+      {
+        name: 'revoke',
+        seed: {},
+        prepare: async (page) => {
+          await page.getByRole('button', { name: 'Revoke key ctxm_…a9Fq' }).click()
+          await expect(page.getByRole('dialog', { name: 'Revoke key' })).toBeVisible()
+        },
+      },
       // cross-tenant view: tenant column + tenant filter (tenant-list)
       { name: 'server-admin', seed: { role: 'server-admin' } },
       // no consumer yet: the empty state carries the /v1 base URL hint
@@ -1014,7 +1037,7 @@ export const contracts: PageContract[] = [
       },
     },
     flowDoc:
-      'Tenant-Admin öffnet „Model API": die Konsumenten-Liste lädt mit dem Default-Statusfilter (die vier Status eines aktiven Konsumenten), Status-Badges und Key-Hints kommen vom Server; „inactive" zuschalten erweitert die Liste, die Label-Präfix-Suche engt sie ein — lesend, ohne Anlege- oder Mutations-Controls (W05-06).',
+      'Tenant-Admin öffnet „Model API": die Konsumenten-Liste lädt mit dem Default-Statusfilter (die vier Status eines aktiven Konsumenten), Status-Badges und Key-Hints kommen vom Server; „+ New consumer" mit Vorlage „App · Chat" legt einen Konsumenten an, der Klartext steht genau einmal im Reveal und ist nach „I\'ve stored it — done" aus dem DOM, die Liste zeigt nur den Hint; der Key von ci-chat wird erst nach Tippen seiner 4 Hint-Zeichen widerrufen, der Toast meldet laufende Streams laut Server (W05-06); „inactive" zuschalten erweitert die Liste, die Label-Präfix-Suche engt sie ein.',
     primaryFlow: async (page, session) => {
       const content = page.locator('main.content')
       await expect(page.getByRole('heading', { name: 'Model API', exact: true })).toBeVisible()
@@ -1030,11 +1053,34 @@ export const contracts: PageContract[] = [
       await expect(ci.locator('[data-key-status]')).toHaveText(['active'])
       await expect(rows.filter({ hasText: 'ctx-peer-b' }).locator('[data-consumer-status]')).toHaveText('rotating')
       expect(consumerListBodies(session.calls)[0]?.status).toEqual(['active', 'expiring', 'rotating', 'no_key'])
-      // read-only wave: no create and no mutation control
-      await expect(content.getByRole('button', { name: /new|create|revoke|deactivate|rotate/i })).toHaveCount(0)
+      // W05-06 — create: template "App · Chat", reveal exactly once, ack wipes it
+      await content.getByRole('button', { name: '+ New consumer' }).click()
+      const dialog = page.getByRole('dialog', { name: /New model consumer|Consumer created/ })
+      await expect(dialog.locator('[data-testid="models-ready"]')).toBeAttached()
+      await dialog.getByRole('button', { name: 'App · Chat' }).click()
+      await dialog.getByLabel('label', { exact: true }).fill('flow-app')
+      await dialog.getByRole('button', { name: 'Create consumer' }).click()
+      await expect(dialog.getByRole('textbox', { name: 'new api key — plaintext, shown once' })).toHaveValue(REVEAL_MARKER)
+      await dialog.getByRole('button', { name: "I've stored it — done" }).click()
+      await expect(dialog).toHaveCount(0)
+      await expect(rows).toHaveCount(5)
+      await expect(rows.filter({ hasText: 'flow-app' })).toContainText('ctxm_…sist')
+      expect(await page.evaluate((m) => document.documentElement.outerHTML.includes(m), REVEAL_MARKER)).toBe(false)
+      // no rotation, no edit in this wave (W05-07/W05-08)
+      await expect(content.getByRole('button', { name: /rotate|edit/i })).toHaveCount(0)
+      // W05-06 — revoke ci-chat's key behind the typed 4-character gate; toast from the server
+      await ci.getByRole('button', { name: 'Revoke key ctxm_…a9Fq' }).click()
+      const confirm = page.getByRole('dialog', { name: 'Revoke key' })
+      await confirm.getByRole('button', { name: 'Revoke', exact: true }).click()
+      await expect(confirm.getByRole('button', { name: 'Revoke', exact: true })).toBeDisabled()
+      await confirm.getByRole('textbox').fill('a9Fq')
+      await confirm.getByRole('button', { name: 'Revoke', exact: true }).click()
+      await expect(confirm).toHaveCount(0)
+      await expect(page.locator('[data-testid="gateway-toast"]')).toContainText('Running streams continue until they finish')
+      await expect(ci.locator('[data-consumer-status]')).toHaveText('no key')
       // status filter: + inactive ⇒ all five statuses, sent as ["all"]
       await content.getByRole('checkbox', { name: 'inactive', exact: true }).check()
-      await expect(rows).toHaveCount(5)
+      await expect(rows).toHaveCount(6)
       await expect(content).toContainText('legacy-app')
       expect(consumerListBodies(session.calls).at(-1)?.status).toEqual(['all'])
       // label-prefix search narrows the list (server-side q)

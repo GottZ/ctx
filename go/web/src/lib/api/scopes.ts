@@ -29,10 +29,15 @@ export function createScope(spec: ScopeCreateSpec): Promise<ScopeCreateResult> {
  * ar.TenantID — cross-tenant scopes are not enumerable). Distinct from the
  * server-admin `scope-overview` (deliberately unscoped, whole-store): this is the
  * tenant-scoped read that feeds the /tenant scope list + the re-list after a
- * createScope. Rows are ScopeOverview-shaped (reused envelope). No payload. */
-export function listScopes(): Promise<ScopeOverviewListResponse> {
+ * createScope. Rows are ScopeOverview-shaped (reused envelope). No payload.
+ * `tenantId` (W05-06, server-admin only): the top-level `id` handleScopeList
+ * reads to list ANOTHER tenant's scopes — a tenant-admin's id is ignored
+ * server-side (ar.TenantID wins). Without it the body is unchanged. */
+export function listScopes(tenantId?: string): Promise<ScopeOverviewListResponse> {
+  const req: Record<string, unknown> = { action: 'scope-list' }
+  if (tenantId) req.id = tenantId
   return apiFetch<ScopeOverviewListResponse>('/api/manage', {
     method: 'POST',
-    body: JSON.stringify({ action: 'scope-list' }),
+    body: JSON.stringify(req),
   })
 }

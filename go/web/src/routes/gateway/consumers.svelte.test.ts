@@ -11,8 +11,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readdirSync, readFileSync } from 'node:fs'
 import { ApiError } from '../../lib/api'
-import type { ConsumerListParams } from '../../lib/api/modelapi'
-import type { ConsumerListResponse, ConsumerView, TenantListResponse } from '../../lib/api/types'
+import type { ConsumerCreateSpec, ConsumerListParams } from '../../lib/api/modelapi'
+import type {
+  ConsumerCreateResult,
+  ConsumerListResponse,
+  ConsumerRevokeResult,
+  ConsumerUpdateResult,
+  ConsumerView,
+  TenantListResponse,
+} from '../../lib/api/types'
 import { CONSUMER_POLL_MS, ConsumersModel, type VisibilitySource } from './consumers.svelte'
 
 function consumer(label: string, p: Partial<ConsumerView> = {}): ConsumerView {
@@ -25,6 +32,7 @@ function consumer(label: string, p: Partial<ConsumerView> = {}): ConsumerView {
     kind: 'app',
     tenant_scope: null,
     all_models: false,
+    models: [],
     prompt_sensitivity: 'credentials',
     fair_weight: 1,
     admission_lane: 'bulk',
@@ -338,6 +346,157 @@ describe('ConsumersModel keyset + filter (G5)', () => {
     await m.loadTenants()
     expect(m.tenants.map((t) => t.slug)).toEqual(['acme'])
     expect(f.list).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Mutations (wave W05-06, design/05 §4.6 store table): create() hands the
+// result WITH the plaintext to the caller and never keeps it (G1, B-6 —
+// precedent routes/tenant/keys.svelte.ts create()); deactivate / reactivate /
+// revokeKey run the W01-5 actions, guard the row with busyId, surface a
+// failure on actionError AND rethrow (the ConfirmDialog stays open), and
+// reload page 1 after every success.
+// ---------------------------------------------------------------------------
+
+const MARKER = 'ctxm_TESTKEY_reveal_once_do_not_persist'
+
+/**
+ * Every value the model exposes, recursively: own enumerable fields plus the
+ * accessor properties of its prototype chain ($state class fields compile to
+ * prototype getters, so JSON.stringify(model) alone would see `{}`).
+ */
+function modelState(m: object): string {
+  const seen: Record<string, unknown> = {}
+  for (const k of Object.keys(m)) seen[k] = (m as Record<string, unknown>)[k]
+  for (let proto = Object.getPrototypeOf(m); proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+    for (const [k, d] of Object.entries(Object.getOwnPropertyDescriptors(proto))) {
+      if (d.get) seen[k] = (m as Record<string, unknown>)[k]
+    }
+  }
+  return JSON.stringify(seen, (_k, v) => (typeof v === 'function' ? undefined : v))
+}
+
+function mutationApi() {
+  const f = fakeApi([page(['one'], null)])
+  const created = consumer('new-app', { id: 'id-new', keys: [{ id: 'k-new', hint: 'ctxm_…sist', status: 'active', created_at: '2026-06-29T12:00:05Z', expires_at: null, revoked_at: null, rotated_from: null, last_used_at: null }] })
+  const create = vi.fn(async (_spec: ConsumerCreateSpec): Promise<ConsumerCreateResult> => ({ success: true, consumer: created, api_key: MARKER }))
+  const del = vi.fn(async (_id: string): Promise<ConsumerRevokeResult> => ({ success: true, cancelled_inflight: null }))
+  const reactivate = vi.fn(async (id: string): Promise<ConsumerUpdateResult> => ({ success: true, consumer: consumer('back', { id, status: 'no_key' }) }))
+  const revoke = vi.fn(async (_keyId: string): Promise<ConsumerRevokeResult> => ({ success: true, cancelled_inflight: 3 }))
+  return { ...f, api: { ...f.api, create, del, reactivate, revoke }, create, del, reactivate, revoke }
+}
+
+describe('ConsumersModel.create — reveal-once hygiene (G1, B-6)', () => {
+  it('returns {consumer, api_key} to the caller; no field of the model holds the plaintext', async () => {
+    const f = mutationApi()
+    const m = new ConsumersModel(f.api, fakeVisibility('hidden').source)
+    await m.load()
+    const res = await m.create({ label: 'new-app' })
+    expect(res.api_key).toBe(MARKER)
+    expect(res.consumer.label).toBe('new-app')
+    expect(f.create).toHaveBeenCalledWith({ label: 'new-app' })
+    // the detector sees the model's state at all (positive control) …
+    expect(modelState(m)).toContain('"label":"one"')
+    // … and the plaintext is nowhere in it
+    expect(modelState(m)).not.toContain(MARKER)
+    expect(modelState(m)).not.toContain('TESTKEY')
+  })
+
+  it('reloads page 1 after a create (the new consumer appears through the list, not through the result)', async () => {
+    const f = mutationApi()
+    const m = new ConsumersModel(f.api, fakeVisibility('hidden').source)
+    await m.load()
+    expect(f.list).toHaveBeenCalledTimes(1)
+    await m.create({ label: 'new-app' })
+    expect(f.list).toHaveBeenCalledTimes(2)
+    expect(f.calls[1]?.cursor).toBeUndefined()
+    expect(modelState(m)).not.toContain(MARKER)
+  })
+
+  it('a failed create rethrows the ApiError and leaves no trace on the model', async () => {
+    const f = mutationApi()
+    f.create.mockRejectedValueOnce(new ApiError(409, 'conflict', 'a model consumer with this label already exists in the tenant'))
+    const m = new ConsumersModel(f.api, fakeVisibility('hidden').source)
+    await m.load()
+    await expect(m.create({ label: 'dup' })).rejects.toThrow('already exists')
+    expect(f.list).toHaveBeenCalledTimes(1)
+    expect(m.actionError).toBeNull()
+  })
+})
+
+// The reflective probe above cannot see ECMAScript #private fields; this
+// static half covers every storage form (Fremd-Review W05-06 F3): the model's
+// source never touches a create answer's plaintext — no `.api_key` access, no
+// `['api_key']`, no destructuring of it. It only passes the answer through.
+describe('ConsumersModel source never touches the plaintext (G1, B-6 static half)', () => {
+  const touch = /\.api_key\b|\[\s*['"`]api_key['"`]\s*\]|\{[^}]*\bapi_key\b[^}]*\}\s*=/
+  it('the pattern catches every access form and spares a comment/type mention', () => {
+    for (const bad of ['this.#k = res.api_key', "x = res['api_key']", 'const { api_key } = res', 'res.api_key;']) {
+      expect(bad, bad).toMatch(touch)
+    }
+    expect('// returns the reveal-once answer (`api_key` = plaintext)').not.toMatch(touch)
+  })
+
+  it('consumers.svelte.ts reads no api_key', () => {
+    const src = readFileSync(new URL('./consumers.svelte.ts', import.meta.url), 'utf8')
+    expect(src).not.toMatch(touch)
+  })
+})
+
+describe('ConsumersModel deactivate / reactivate / revokeKey (W01-5 actions)', () => {
+  it('deactivate(id) → model-consumer-delete, returns cancelled_inflight, reloads, busyId cleared', async () => {
+    const f = mutationApi()
+    const m = new ConsumersModel(f.api, fakeVisibility('hidden').source)
+    await m.load()
+    const p = m.deactivate('id-one')
+    expect(m.busyId).toBe('id-one')
+    const res = await p
+    expect(f.del).toHaveBeenCalledWith('id-one')
+    expect(res.cancelled_inflight).toBeNull()
+    expect(m.busyId).toBeNull()
+    expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('reactivate(id) → model-consumer-update {active:true}, reloads', async () => {
+    const f = mutationApi()
+    const m = new ConsumersModel(f.api, fakeVisibility('hidden').source)
+    await m.load()
+    await m.reactivate('id-one')
+    expect(f.reactivate).toHaveBeenCalledWith('id-one')
+    expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('revokeKey(keyId) → model-key-revoke with the KEY id, passes the server count through', async () => {
+    const f = mutationApi()
+    const m = new ConsumersModel(f.api, fakeVisibility('hidden').source)
+    await m.load()
+    const res = await m.revokeKey('k-1')
+    expect(f.revoke).toHaveBeenCalledWith('k-1')
+    expect(res.cancelled_inflight).toBe(3)
+    expect(f.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('a refused mutation sets actionError, rethrows, keeps the list, clears busyId', async () => {
+    const f = mutationApi()
+    f.reactivate.mockRejectedValueOnce(new ApiError(403, 'forbidden', 'admin key required'))
+    const m = new ConsumersModel(f.api, fakeVisibility('hidden').source)
+    await m.load()
+    await expect(m.reactivate('id-one')).rejects.toThrow('admin key required')
+    expect(m.actionError).toBe('admin key required')
+    expect(m.busyId).toBeNull()
+    expect(m.consumers.map((c) => c.label)).toEqual(['one'])
+    expect(f.list).toHaveBeenCalledTimes(1)
+  })
+
+  it('the next mutation clears an earlier actionError', async () => {
+    const f = mutationApi()
+    f.del.mockRejectedValueOnce(new ApiError(404, 'not_found', 'model consumer not found'))
+    const m = new ConsumersModel(f.api, fakeVisibility('hidden').source)
+    await m.load()
+    await expect(m.deactivate('gone')).rejects.toThrow()
+    expect(m.actionError).toBe('model consumer not found')
+    await m.revokeKey('k-1')
+    expect(m.actionError).toBeNull()
   })
 })
 

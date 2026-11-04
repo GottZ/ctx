@@ -1,10 +1,17 @@
 <script lang="ts">
-  // Model API area (design/05 §4.6, wave W05-05) — the READ surface over the
-  // gateway consumers: the keyset-paged list with status filter, label-prefix
-  // search and (server-admin) tenant filter, polled every 30 s while the tab is
-  // visible (ConsumersModel). Creating, deactivating and revoking are W05-06 —
-  // this page carries no create button and no mutation control. Strings are
-  // English inline like every key/admin surface (design/05 §4.6 "Strings").
+  // Model API area (design/05 §4.6, waves W05-05 + W05-06) — the gateway
+  // consumers: the keyset-paged list with status filter, label-prefix search
+  // and (server-admin) tenant filter, polled every 30 s while the tab is
+  // visible (ConsumersModel); since W05-06 "+ New consumer" (only with
+  // caps.mintModelKeys — server-admin, or tenant-admin with gateway.enabled
+  // AND gateway.tenant_self_service) opening ConsumerCreateDialog with the
+  // reveal-once key, and per row Revoke (each live key) / Deactivate — both
+  // behind a danger ConfirmDialog that requires the last 4 hint characters —
+  // and Reactivate (plain confirm, only where the server grants it). After a
+  // revoke the toast reports what the SERVER says about running streams
+  // (cancelled_inflight, V-01-e/B-25), never a static "immediately". Every
+  // control is a UI mirror; the server decides (V-01-c). Strings are English
+  // inline like every key/admin surface (design/05 §4.6 "Strings").
   //
   // Gate: the route is registered flag-independently (dark-launch precedent,
   // routes/index.ts) and guardArea redirects below caps.viewModelApi
@@ -19,9 +26,13 @@
   import { untrack } from 'svelte'
   import { session } from '../../lib/auth.svelte'
   import { CONSUMER_STATUSES, DEFAULT_CONSUMER_STATUSES } from '../../lib/api/modelapi'
+  import type { ConsumerView, KeyView } from '../../lib/api/types'
+  import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
   import Table from '../../lib/ui/Table.svelte'
+  import ConsumerRow from './ConsumerRow.svelte'
   import { ConsumersModel } from './consumers.svelte'
-  import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute, keyTone } from './format'
+  import { STATUS_LABEL, cancelledText } from './format'
+  import { canReactivate, deactivateTyped, hintTail } from './rows'
 
   const model = new ConsumersModel()
 
@@ -64,8 +75,50 @@
   )
 
   // The OpenAI-compatible base URL of THIS instance — the same origin that
-  // serves the SPA (no secret; design/05 §4.6 empty state).
+  // serves the SPA (no secret; design/05 §4.6 empty state + beside the reveal).
   const baseUrl = typeof location === 'undefined' ? '/v1' : `${location.origin}/v1`
+
+  // --- W05-06 mutations ---
+  const serverAdmin = $derived(session.caps.tier === 'server-admin')
+  let creating = $state(false)
+  // The create dialog is its own lazy chunk: only a click on "+ New consumer"
+  // loads it (the list's first load stays within the default chunk budget).
+  const loadCreateDialog = () => import('./ConsumerCreateDialog.svelte')
+  type Pending =
+    | { kind: 'revoke'; consumer: ConsumerView; key: KeyView }
+    | { kind: 'deactivate'; consumer: ConsumerView }
+    | { kind: 'reactivate'; consumer: ConsumerView }
+  // The row awaiting confirmation (null = no dialog); a fresh ConfirmDialog
+  // mounts per target so showModal re-fires (precedent TenantPage revoke).
+  let pending = $state<Pending | null>(null)
+  /** Outcome line of the last row mutation — the server's word on running streams. */
+  let toast = $state<string | null>(null)
+
+  function request(p: Pending): void {
+    toast = null
+    pending = p
+  }
+
+  const PEER_WARN = ' This consumer is a ctx peer — its federation link breaks.'
+
+  // ConfirmDialog awaits this: a throw keeps it open with the error (the
+  // model rethrows after setting actionError); success sets the toast from
+  // the server's answer and unmounts the dialog after its own close().
+  async function confirmPending(): Promise<void> {
+    const p = pending
+    if (p === null) return
+    if (p.kind === 'revoke') {
+      const res = await model.revokeKey(p.key.id)
+      toast = `Key ${p.key.hint} of ${p.consumer.label} revoked — new requests are refused. ${cancelledText(res.cancelled_inflight)}`
+    } else if (p.kind === 'deactivate') {
+      const res = await model.deactivate(p.consumer.id)
+      toast = `${p.consumer.label} deactivated and its keys revoked — new requests are refused. ${cancelledText(res.cancelled_inflight)}`
+    } else {
+      await model.reactivate(p.consumer.id)
+      toast = `${p.consumer.label} reactivated — it has no live key until a new one is issued.`
+    }
+    setTimeout(() => (pending = null), 0)
+  }
 </script>
 
 <section class="area">
@@ -73,7 +126,7 @@
     <h1>Model API</h1>
     <p class="sub">
       Consumers of the OpenAI-compatible endpoint — external programs and ctx peers, each reaching the models with its
-      own <code>ctxm_</code> keys. Status is computed by the server; this view is read-only.
+      own <code>ctxm_</code> keys. Status is computed by the server.
     </p>
   </header>
 
@@ -140,6 +193,24 @@
       {/if}
     </form>
 
+    {#if session.caps.mintModelKeys}
+      <div class="page-actions">
+        <button type="button" class="primary" data-testid="consumer-new" onclick={() => (creating = true)}>
+          + New consumer
+        </button>
+      </div>
+    {/if}
+
+    {#if toast}
+      <div class="toast" role="status" data-testid="gateway-toast">
+        <span>{toast}</span>
+        <button type="button" class="x" aria-label="dismiss" onclick={() => (toast = null)}>×</button>
+      </div>
+    {/if}
+    {#if model.actionError && pending === null}
+      <p class="action-error" role="alert">{model.actionError}</p>
+    {/if}
+
     {#if model.refreshError}
       <p class="note warn" role="status">refresh failed: {model.refreshError} — showing the last loaded list</p>
     {/if}
@@ -170,8 +241,9 @@
           <h2>consumers</h2>
           <span class="count">{model.consumers.length}{model.nextCursor !== null ? '+' : ''}</span>
         </header>
-        <!-- read-only rows carry no focusable control: the scroll region itself
-             is keyboard-reachable on narrow viewports (axe scrollable-region-focusable) -->
+        <!-- the scroll region stays keyboard-reachable on narrow viewports even
+             when no row carries a control (e.g. only inactive rows for a key
+             without self-service — axe scrollable-region-focusable) -->
         <Table label="model consumers" focusableScroll>
           {#snippet head()}
             <tr>
@@ -182,46 +254,19 @@
               <th>keys</th>
               <th>last used</th>
               <th>created</th>
+              <th>actions</th>
             </tr>
           {/snippet}
           {#each model.consumers as c (c.id)}
-            <tr data-consumer-row class:off={!c.active}>
-              <td class="label">
-                <span class="label-text">{c.label}</span>
-                {#if c.description}<span class="desc">{c.description}</span>{/if}
-              </td>
-              <td><span class="badge" class:peer={c.kind === 'ctx-peer'}>{c.kind}</span></td>
-              <td>
-                <span class="badge {consumerTone(c.status)}" data-consumer-status
-                  >{STATUS_LABEL[c.status] ?? c.status}</span
-                >
-              </td>
-              {#if crossTenant}<td><span class="chip">{c.tenant_slug}</span></td>{/if}
-              <td class="keys">
-                {#if c.keys.length === 0}
-                  <span class="dim">no live key</span>
-                {:else}
-                  <ul>
-                    {#each c.keys as k (k.id)}
-                      <li>
-                        <code class="hint">{k.hint}</code>
-                        <span class="badge {keyTone(k.status)}" data-key-status>{k.status}</span>
-                        <span class="when">{k.expires_at ? `expires ${fmtDay(k.expires_at)}` : 'no expiry'}</span>
-                      </li>
-                    {/each}
-                  </ul>
-                {/if}
-              </td>
-              <td class="when">
-                {#if c.last_used_at}
-                  {fmtMinute(c.last_used_at)}
-                  <span class="approx" title="recorded at one-minute precision">±1 min</span>
-                {:else}
-                  <span class="dim">never</span>
-                {/if}
-              </td>
-              <td class="when">{fmtDay(c.created_at)}</td>
-            </tr>
+            <ConsumerRow
+              consumer={c}
+              {crossTenant}
+              reactivatable={canReactivate(c, { serverAdmin, mintModelKeys: session.caps.mintModelKeys })}
+              busy={model.busyId !== null && (model.busyId === c.id || c.keys.some((k) => k.id === model.busyId))}
+              onrevoke={(k) => request({ kind: 'revoke', consumer: c, key: k })}
+              ondeactivate={() => request({ kind: 'deactivate', consumer: c })}
+              onreactivate={() => request({ kind: 'reactivate', consumer: c })}
+            />
           {/each}
         </Table>
         {#if model.nextCursor !== null}
@@ -238,6 +283,46 @@
     {/if}
   {/if}
 </section>
+
+{#if creating}
+  {#await loadCreateDialog()}
+    <p class="sr-status" role="status" aria-busy="true">loading the create dialog…</p>
+  {:then { default: CreateDialog }}
+    <CreateDialog {model} tenants={model.tenants} {baseUrl} onclose={() => (creating = false)} />
+  {:catch err}
+    <p class="action-error" role="alert">create dialog unavailable: {err instanceof Error ? err.message : String(err)}</p>
+  {/await}
+{/if}
+
+{#if pending?.kind === 'revoke'}
+  <ConfirmDialog
+    danger
+    title="Revoke key"
+    requireTyped={hintTail(pending.key.hint)}
+    confirmLabel="Revoke"
+    message={`Revoke key ${pending.key.hint} of "${pending.consumer.label}"? New requests are refused immediately.${pending.consumer.kind === 'ctx-peer' ? PEER_WARN : ''}`}
+    onconfirm={confirmPending}
+    oncancel={() => (pending = null)}
+  />
+{:else if pending?.kind === 'deactivate'}
+  <ConfirmDialog
+    danger
+    title="Deactivate consumer"
+    requireTyped={deactivateTyped(pending.consumer)}
+    confirmLabel="Deactivate"
+    message={`Deactivate "${pending.consumer.label}" and revoke all its keys? New requests are refused immediately.${pending.consumer.kind === 'ctx-peer' ? PEER_WARN : ''}`}
+    onconfirm={confirmPending}
+    oncancel={() => (pending = null)}
+  />
+{:else if pending?.kind === 'reactivate'}
+  <ConfirmDialog
+    title="Reactivate consumer"
+    confirmLabel="Reactivate"
+    message={`Reactivate "${pending.consumer.label}"? It comes back with status ${STATUS_LABEL.no_key} — its old keys stay revoked; a new key has to be issued.`}
+    onconfirm={confirmPending}
+    oncancel={() => (pending = null)}
+  />
+{/if}
 
 <style>
   .area {
@@ -451,81 +536,41 @@
     letter-spacing: var(--label-tracking);
     color: var(--text-dim);
   }
-  tr.off .label-text {
-    opacity: 0.55;
-  }
-  .label {
-    font-family: var(--font-mono);
-  }
-  .label-text {
+  .sr-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
     white-space: nowrap;
   }
-  .desc {
-    display: block;
-    color: var(--text-dim);
-    font-family: var(--font-ui);
-    font-size: var(--fs-xs);
+  .page-actions {
+    display: flex;
+    justify-content: flex-end;
   }
-  .chip {
-    font-family: var(--font-mono);
-    font-size: var(--label-size);
-    color: var(--text-dim);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    padding: 0 var(--space-1);
-    white-space: nowrap;
-  }
-  .badge {
-    font-family: var(--font-mono);
-    font-size: var(--label-size);
-    text-transform: uppercase;
-    letter-spacing: var(--label-tracking);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    padding: 0 var(--space-1);
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-  .badge.ok {
-    color: var(--ok);
-    border-color: var(--ok);
-  }
-  .badge.warn {
-    color: var(--warn);
-    border-color: var(--warn);
-  }
-  .badge.peer {
-    color: var(--accent);
+  button.primary {
     border-color: var(--accent);
+    color: var(--accent);
   }
-  .keys ul {
-    margin: 0;
-    padding: 0;
-    list-style: none;
+  .toast {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-  .keys li {
-    display: flex;
-    align-items: center;
+    align-items: flex-start;
+    justify-content: space-between;
     gap: var(--space-2);
-    white-space: nowrap;
-  }
-  .hint {
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-1);
     color: var(--text);
+    font-size: var(--fs-sm);
   }
-  .dim {
-    color: var(--text-faint);
-  }
-  .when {
+  .toast .x {
+    min-height: 0;
+    border: none;
+    background: transparent;
     color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .approx {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
+    padding: 0 var(--space-1);
+    font-size: var(--fs-md);
   }
   .more {
     display: flex;

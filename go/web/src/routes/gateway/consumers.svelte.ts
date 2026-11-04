@@ -21,18 +21,36 @@
 //     response of an older generation never overwrites a newer state.
 //   - dispose() stops the timer, removes the visibility listener and drops
 //     whatever is still in flight.
-// Mutations (create, deactivate, revoke — result to the caller, never on the
-// model) are W05-06.
+//   - Mutations (wave W05-06): create() hands the reveal-once answer — WITH
+//     the plaintext api_key — to the caller and keeps NOTHING of it (no
+//     field, no cache, no error text; design/05 §5 B-6, precedent
+//     routes/tenant/keys.svelte.ts create()). deactivate / reactivate /
+//     revokeKey guard the row with busyId, put a refusal on actionError AND
+//     rethrow (the ConfirmDialog stays open with the error), and hand the
+//     server's answer (cancelled_inflight) back for the toast. Every success
+//     reloads page 1 — the list shows what the server now says.
 
 import { toApiError, type ApiError } from '../../lib/api'
 import {
   CONSUMER_STATUSES,
   DEFAULT_CONSUMER_STATUSES,
+  createConsumer,
+  deleteConsumer,
   listConsumers,
+  reactivateConsumer,
+  revokeModelKey,
+  type ConsumerCreateSpec,
   type ConsumerListParams,
 } from '../../lib/api/modelapi'
 import { listTenants } from '../../lib/api/tenants'
-import type { ConsumerStatus, ConsumerView, Tenant } from '../../lib/api/types'
+import type {
+  ConsumerCreateResult,
+  ConsumerRevokeResult,
+  ConsumerStatus,
+  ConsumerUpdateResult,
+  ConsumerView,
+  Tenant,
+} from '../../lib/api/types'
 import type { ResourceStatus } from '../../lib/resource.svelte'
 
 /**
@@ -62,6 +80,19 @@ export const documentVisibility: VisibilitySource = {
 interface ConsumersApi {
   list: typeof listConsumers
   tenants: typeof listTenants
+  create: (spec: ConsumerCreateSpec) => Promise<ConsumerCreateResult>
+  del: typeof deleteConsumer
+  reactivate: typeof reactivateConsumer
+  revoke: typeof revokeModelKey
+}
+
+const DEFAULT_API: ConsumersApi = {
+  list: listConsumers,
+  tenants: listTenants,
+  create: (spec) => createConsumer(spec),
+  del: deleteConsumer,
+  reactivate: reactivateConsumer,
+  revoke: revokeModelKey,
 }
 
 /** The list filter: a non-empty status set, a label prefix ('' = none), a tenant (server-admin; null = all). */
@@ -92,6 +123,10 @@ export class ConsumersModel {
   /** Options of the server-admin tenant filter (tenant-list). */
   tenants = $state<Tenant[]>([])
   tenantsError = $state<string | null>(null)
+  /** The consumer or key id a deactivate / reactivate / revoke is in flight for. */
+  busyId = $state<string | null>(null)
+  /** Failure of the last row mutation (also rethrown to the confirm dialog). */
+  actionError = $state<string | null>(null)
 
   #api: ConsumersApi
   #visibility: VisibilitySource
@@ -105,11 +140,8 @@ export class ConsumersModel {
   /** A tick fell into a hidden phase — catch it up once on the next visible. */
   #missed = false
 
-  constructor(
-    api: ConsumersApi = { list: listConsumers, tenants: listTenants },
-    visibility: VisibilitySource = documentVisibility,
-  ) {
-    this.#api = api
+  constructor(api: Partial<ConsumersApi> = {}, visibility: VisibilitySource = documentVisibility) {
+    this.#api = { ...DEFAULT_API, ...api }
     this.#visibility = visibility
   }
 
@@ -260,6 +292,50 @@ export class ConsumersModel {
   /** "all" on = the five statuses; off = back to the server default set. */
   async setAllStatuses(on: boolean): Promise<void> {
     await this.setFilter({ statuses: on ? [...CONSUMER_STATUSES] : [...DEFAULT_CONSUMER_STATUSES] })
+  }
+
+  /**
+   * Create a consumer with its first key. Returns the reveal-once answer —
+   * carrying the plaintext `api_key` — for the caller to show once and drop;
+   * the model never keeps it (B-6). Throws the ApiError of a refusal (400
+   * field, 403 tier, 409 label, 429 quota) untouched — the dialog renders it.
+   * On success page 1 reloads (load() never throws), so the new consumer
+   * arrives through the list, as the server lists it (hint only).
+   */
+  async create(spec: ConsumerCreateSpec): Promise<ConsumerCreateResult> {
+    const res = await this.#api.create(spec)
+    await this.load()
+    return res
+  }
+
+  /** Deactivate (model-consumer-delete) — always allowed; returns cancelled_inflight for the toast. */
+  async deactivate(id: string): Promise<ConsumerRevokeResult> {
+    return this.#mutate(id, () => this.#api.del(id))
+  }
+
+  /** Reactivate (model-consumer-update {active:true}) — granting, the server gates it. */
+  async reactivate(id: string): Promise<ConsumerUpdateResult> {
+    return this.#mutate(id, () => this.#api.reactivate(id))
+  }
+
+  /** Revoke one key by its KEY id (model-key-revoke); returns cancelled_inflight for the toast. */
+  async revokeKey(keyId: string): Promise<ConsumerRevokeResult> {
+    return this.#mutate(keyId, () => this.#api.revoke(keyId))
+  }
+
+  async #mutate<T>(id: string, run: () => Promise<T>): Promise<T> {
+    this.busyId = id
+    this.actionError = null
+    try {
+      const res = await run()
+      await this.load()
+      return res
+    } catch (err) {
+      this.actionError = toApiError(err).message
+      throw err
+    } finally {
+      this.busyId = null
+    }
   }
 
   /** Load the server-admin tenant filter options (tenant-list is server-admin only). */

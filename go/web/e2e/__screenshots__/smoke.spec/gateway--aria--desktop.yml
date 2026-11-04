@@ -40,7 +40,7 @@
   - paragraph:
     - text: Consumers of the OpenAI-compatible endpoint — external programs and ctx peers, each reaching the models with its own
     - code: ctxm_
-    - text: keys. Status is computed by the server; this view is read-only.
+    - text: keys. Status is computed by the server.
   - search "filter consumers":
     - group "status":
       - text: ""
@@ -59,60 +59,74 @@
     - text: label prefix
     - searchbox "label prefix"
     - button "Search"
+  - button "+ New consumer"
   - region "model consumers":
     - heading "consumers" [level=2]
     - text: "4"
     - region "model consumers, scrollable":
       - table "model consumers":
         - rowgroup:
-          - row "label kind status keys last used created":
+          - row "label kind status keys last used created actions":
             - columnheader "label"
             - columnheader "kind"
             - columnheader "status"
             - columnheader "keys"
             - columnheader "last used"
             - columnheader "created"
+            - columnheader "actions"
         - rowgroup:
-          - row /ci-chat CI pipeline chat completions app active ctxm_…a9Fq active expires \d+\/\d+\/\d+ \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+/:
+          - row /ci-chat CI pipeline chat completions app active ctxm_…a9Fq active expires \d+\/\d+\/\d+ Revoke key ctxm_…a9Fq \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Deactivate ci-chat/:
             - cell "ci-chat CI pipeline chat completions"
             - cell "app"
             - cell "active"
-            - cell /ctxm_…a9Fq active expires \d+\/\d+\/\d+/:
+            - cell /ctxm_…a9Fq active expires \d+\/\d+\/\d+ Revoke key ctxm_…a9Fq/:
               - list:
                 - listitem:
                   - code: ctxm_…a9Fq
                   - text: /active expires \d+\/\d+\/\d+/
+                  - button "Revoke key ctxm_…a9Fq"
             - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
             - cell /\d+\/\d+\/\d+/
-          - row /ctx-peer-b ctx-peer rotating ctxm_…Qe7z active expires \d+\/\d+\/\d+ ctxm_…mP2c superseded expires \d+\/\d+\/\d+ \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+/:
+            - cell "Deactivate ci-chat":
+              - button "Deactivate ci-chat"
+          - row /ctx-peer-b ctx-peer rotating ctxm_…Qe7z active expires \d+\/\d+\/\d+ Revoke key ctxm_…Qe7z ctxm_…mP2c superseded expires \d+\/\d+\/\d+ Revoke key ctxm_…mP2c \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Deactivate ctx-peer-b/:
             - cell "ctx-peer-b"
             - cell "ctx-peer"
             - cell "rotating"
-            - cell /ctxm_…Qe7z active expires \d+\/\d+\/\d+ ctxm_…mP2c superseded expires \d+\/\d+\/\d+/:
+            - cell /ctxm_…Qe7z active expires \d+\/\d+\/\d+ Revoke key ctxm_…Qe7z ctxm_…mP2c superseded expires \d+\/\d+\/\d+ Revoke key ctxm_…mP2c/:
               - list:
                 - listitem:
                   - code: ctxm_…Qe7z
                   - text: /active expires \d+\/\d+\/\d+/
+                  - button "Revoke key ctxm_…Qe7z"
                 - listitem:
                   - code: ctxm_…mP2c
                   - text: /superseded expires \d+\/\d+\/\d+/
+                  - button "Revoke key ctxm_…mP2c"
             - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
             - cell /\d+\/\d+\/\d+/
-          - row /A-SENTINEL-1f9c62d84b7e app expiring ctxm_…Xk4d expiring expires \d+\/\d+\/\d+ never \d+\/\d+\/\d+/:
+            - cell "Deactivate ctx-peer-b":
+              - button "Deactivate ctx-peer-b"
+          - row /A-SENTINEL-1f9c62d84b7e app expiring ctxm_…Xk4d expiring expires \d+\/\d+\/\d+ Revoke key ctxm_…Xk4d never \d+\/\d+\/\d+ Deactivate A-SENTINEL-1f9c62d84b7e/:
             - cell "A-SENTINEL-1f9c62d84b7e"
             - cell "app"
             - cell "expiring"
-            - cell /ctxm_…Xk4d expiring expires \d+\/\d+\/\d+/:
+            - cell /ctxm_…Xk4d expiring expires \d+\/\d+\/\d+ Revoke key ctxm_…Xk4d/:
               - list:
                 - listitem:
                   - code: ctxm_…Xk4d
                   - text: /expiring expires \d+\/\d+\/\d+/
+                  - button "Revoke key ctxm_…Xk4d"
             - cell "never"
             - cell /\d+\/\d+\/\d+/
-          - row /nightly-embed app no key no live key \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+/:
+            - cell "Deactivate A-SENTINEL-1f9c62d84b7e":
+              - button "Deactivate A-SENTINEL-1f9c62d84b7e"
+          - row /nightly-embed app no key no live key \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Deactivate nightly-embed/:
             - cell "nightly-embed"
             - cell "app"
             - cell "no key"
             - cell "no live key"
             - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
             - cell /\d+\/\d+\/\d+/
+            - cell "Deactivate nightly-embed":
+              - button "Deactivate nightly-embed"
