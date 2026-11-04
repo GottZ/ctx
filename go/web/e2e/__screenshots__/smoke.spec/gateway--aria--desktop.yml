@@ -1,0 +1,118 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+      - listitem:
+        - link "Backends":
+          - /url: /tenant/backends
+      - listitem:
+        - link "Guard Review":
+          - /url: /guard
+      - listitem:
+        - link "Model API":
+          - /url: /gateway
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - heading "Model API" [level=1]
+  - paragraph:
+    - text: Consumers of the OpenAI-compatible endpoint — external programs and ctx peers, each reaching the models with its own
+    - code: ctxm_
+    - text: keys. Status is computed by the server; this view is read-only.
+  - search "filter consumers":
+    - group "status":
+      - text: ""
+      - checkbox "active" [checked]
+      - text: active
+      - checkbox "expiring" [checked]
+      - text: expiring
+      - checkbox "rotating" [checked]
+      - text: rotating
+      - checkbox "no key" [checked]
+      - text: no key
+      - checkbox "inactive"
+      - text: inactive
+      - checkbox "all"
+      - text: all
+    - text: label prefix
+    - searchbox "label prefix"
+    - button "Search"
+  - region "model consumers":
+    - heading "consumers" [level=2]
+    - text: "4"
+    - region "model consumers, scrollable":
+      - table "model consumers":
+        - rowgroup:
+          - row "label kind status keys last used created":
+            - columnheader "label"
+            - columnheader "kind"
+            - columnheader "status"
+            - columnheader "keys"
+            - columnheader "last used"
+            - columnheader "created"
+        - rowgroup:
+          - row /ci-chat CI pipeline chat completions app active ctxm_…a9Fq active expires \d+\/\d+\/\d+ \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+/:
+            - cell "ci-chat CI pipeline chat completions"
+            - cell "app"
+            - cell "active"
+            - cell /ctxm_…a9Fq active expires \d+\/\d+\/\d+/:
+              - list:
+                - listitem:
+                  - code: ctxm_…a9Fq
+                  - text: /active expires \d+\/\d+\/\d+/
+            - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
+            - cell /\d+\/\d+\/\d+/
+          - row /ctx-peer-b ctx-peer rotating ctxm_…Qe7z active expires \d+\/\d+\/\d+ ctxm_…mP2c superseded expires \d+\/\d+\/\d+ \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+/:
+            - cell "ctx-peer-b"
+            - cell "ctx-peer"
+            - cell "rotating"
+            - cell /ctxm_…Qe7z active expires \d+\/\d+\/\d+ ctxm_…mP2c superseded expires \d+\/\d+\/\d+/:
+              - list:
+                - listitem:
+                  - code: ctxm_…Qe7z
+                  - text: /active expires \d+\/\d+\/\d+/
+                - listitem:
+                  - code: ctxm_…mP2c
+                  - text: /superseded expires \d+\/\d+\/\d+/
+            - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
+            - cell /\d+\/\d+\/\d+/
+          - row /A-SENTINEL-1f9c62d84b7e app expiring ctxm_…Xk4d expiring expires \d+\/\d+\/\d+ never \d+\/\d+\/\d+/:
+            - cell "A-SENTINEL-1f9c62d84b7e"
+            - cell "app"
+            - cell "expiring"
+            - cell /ctxm_…Xk4d expiring expires \d+\/\d+\/\d+/:
+              - list:
+                - listitem:
+                  - code: ctxm_…Xk4d
+                  - text: /expiring expires \d+\/\d+\/\d+/
+            - cell "never"
+            - cell /\d+\/\d+\/\d+/
+          - row /nightly-embed app no key no live key \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+/:
+            - cell "nightly-embed"
+            - cell "app"
+            - cell "no key"
+            - cell "no live key"
+            - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
+            - cell /\d+\/\d+\/\d+/

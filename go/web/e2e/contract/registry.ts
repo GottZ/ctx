@@ -17,7 +17,7 @@
 
 import { expect } from '@playwright/test'
 import type { PageContract } from './contract'
-import { KEY, SENTINEL, sseRoute, type SseFrame } from '../fixtures'
+import { KEY, SENTINEL, modelApiCapabilities, sseRoute, type RecordedCall, type SseFrame } from '../fixtures'
 
 /**
  * Mobile opt-out for the five PV4-Erstbelegung areas: their mobile BASELINES
@@ -35,6 +35,13 @@ const MOBILE_PV4_EXEMPT = {
 
 /** Fixture tenant A id (fixtures.ts TENANTS.A) — the /admin/tenants/:id template param. */
 const TENANT_A_ID = '550e8400-e29b-41d4-a716-446655440aaa'
+
+/** The data payload of the session's model-consumer-list calls, in wire order (W05-05). */
+function consumerListBodies(calls: RecordedCall[]): Array<Record<string, unknown>> {
+  return calls
+    .filter((x) => x.action === 'model-consumer-list')
+    .map((x) => ((x.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}))
+}
 
 // ---------------------------------------------------------------------------
 // /chat primaryFlow payload (design 06 §5.6a, wave PV7): the streamed AND
@@ -959,6 +966,83 @@ export const contracts: PageContract[] = [
       // Crumb navigates back to the tenant self-service area.
       await page.locator('.crumb').getByRole('link', { name: 'Tenant' }).click()
       await expect(page).toHaveURL(/\/tenant$/)
+    },
+  },
+  {
+    // Model API area (design/05 §4.6, wave W05-05): the read-only consumer list.
+    // role:'tenant-admin' = the guard truth with the gateway ON — viewModelApi is
+    // serverAdmin || (tenantAdminOrUp && model_api.enabled), so the contract-wide
+    // `capabilities` seeds the gateway-on world into every generated dimension:
+    // the deny test then proves the TIER gate (a member with the gateway on still
+    // lands on /home, model-consumer-list never fires) and the leak probe reaches
+    // the page as tenant-admin B. The flag half (tenant-admin with enabled:false ⇒
+    // /status) is e2e/gateway.spec.ts. Full mobile dimension: a new page freezes
+    // its own baselines from day one (PV7 rule).
+    route: '/gateway',
+    name: 'gateway',
+    role: 'tenant-admin',
+    mode: 'reading',
+    capabilities: modelApiCapabilities(true),
+    tenantScoped: true,
+    adminCalls: ['model-consumer-list', 'tenant-list'],
+    states: [
+      { name: 'default', seed: {} },
+      // cross-tenant view: tenant column + tenant filter (tenant-list)
+      { name: 'server-admin', seed: { role: 'server-admin' } },
+      // no consumer yet: the empty state carries the /v1 base URL hint
+      { name: 'empty', seed: { state: 'empty' } },
+      // the list read fails: error band with Retry
+      { name: 'error', seed: { faults: [{ action: 'model-consumer-list', status: 500 }] } },
+    ],
+    scale: {
+      name: '10k',
+      seed: { state: '10k' },
+      // Keyset pages of gateway.consumer_list_max_limit (100, the client sends no
+      // limit): the first render is ONE page, „Load more" appends exactly one
+      // more — 200 = two pages ≪ 10 000. A list without pagination renders 10 000.
+      domCap: { selector: 'main.content tr[data-consumer-row]', max: 200 },
+      flow: async (page, session) => {
+        const rows = page.locator('main.content tr[data-consumer-row]')
+        await expect(rows).toHaveCount(100)
+        await page.getByRole('button', { name: 'Load more' }).click()
+        await expect(rows).toHaveCount(200)
+        // the mock resumes strictly after the cursor's row: row 100 = consumer 100
+        await expect(rows.nth(100)).toContainText('consumer-00100')
+        const bodies = consumerListBodies(session.calls)
+        expect(bodies[0]?.cursor, 'page 1 carries no cursor').toBeUndefined()
+        expect(typeof bodies[bodies.length - 1]?.cursor, 'load-more re-issues the list WITH the opaque cursor').toBe('string')
+      },
+    },
+    flowDoc:
+      'Tenant-Admin öffnet „Model API": die Konsumenten-Liste lädt mit dem Default-Statusfilter (die vier Status eines aktiven Konsumenten), Status-Badges und Key-Hints kommen vom Server; „inactive" zuschalten erweitert die Liste, die Label-Präfix-Suche engt sie ein — lesend, ohne Anlege- oder Mutations-Controls (W05-06).',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Model API', exact: true })).toBeVisible()
+      const rows = content.locator('tr[data-consumer-row]')
+      // default filter: active, expiring, rotating, no_key — the inactive row stays out
+      await expect(rows).toHaveCount(4)
+      await expect(content).not.toContainText('legacy-app')
+      const ci = rows.filter({ hasText: 'ci-chat' })
+      await expect(ci.locator('[data-consumer-status]')).toHaveText('active')
+      await expect(ci).toContainText('ctxm_…a9Fq')
+      // B-11: the fixture key expired by the page clock, the server says active —
+      // the server's verdict is what renders (never the client clock)
+      await expect(ci.locator('[data-key-status]')).toHaveText(['active'])
+      await expect(rows.filter({ hasText: 'ctx-peer-b' }).locator('[data-consumer-status]')).toHaveText('rotating')
+      expect(consumerListBodies(session.calls)[0]?.status).toEqual(['active', 'expiring', 'rotating', 'no_key'])
+      // read-only wave: no create and no mutation control
+      await expect(content.getByRole('button', { name: /new|create|revoke|deactivate|rotate/i })).toHaveCount(0)
+      // status filter: + inactive ⇒ all five statuses, sent as ["all"]
+      await content.getByRole('checkbox', { name: 'inactive', exact: true }).check()
+      await expect(rows).toHaveCount(5)
+      await expect(content).toContainText('legacy-app')
+      expect(consumerListBodies(session.calls).at(-1)?.status).toEqual(['all'])
+      // label-prefix search narrows the list (server-side q)
+      await content.getByRole('searchbox', { name: 'label prefix' }).fill('ci')
+      await content.getByRole('button', { name: 'Search' }).click()
+      await expect(rows).toHaveCount(1)
+      await expect(rows.first()).toContainText('ci-chat')
+      expect(consumerListBodies(session.calls).at(-1)?.q).toBe('ci')
     },
   },
   {

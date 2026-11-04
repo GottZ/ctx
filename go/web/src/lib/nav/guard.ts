@@ -12,7 +12,9 @@
 // guardArea (N5): a tier-forbidden area returns its redirect target (= the
 // caps-adaptive landing), else null. /admin (+/admin/*) needs server-admin
 // (viewTenants); /tenant (+/tenant/*) needs tenant-admin or higher
-// (manageTenantKeys). `loading` → ALWAYS null: no redirect during the
+// (manageTenantKeys); /gateway (+/gateway/*, W05-05) needs viewModelApi —
+// server-admin always, tenant-admin only while model_api.enabled, member
+// never. `loading` → ALWAYS null: no redirect during the
 // session-restore race (R6), else a deep link would kick the user out before
 // whoami resolves. Visibility is UX only — the real authorization stays
 // server-side (RequireAdmin / RequireAdminOrTenantAdmin, R2); this redirect is
@@ -45,6 +47,10 @@ export function landingFor(caps: Capabilities): LandingPath {
 const TIER_GATED: ReadonlyArray<readonly [string, (caps: Capabilities) => boolean]> = [
   ['/admin', (caps) => caps.viewTenants], // server-admin only
   ['/tenant', (caps) => caps.manageTenantKeys], // tenant-admin or higher
+  // Model API area (design/05 §4.6): a tier AND the gateway flag below
+  // server-admin. Disjoint from /admin and /tenant — the peer page lives under
+  // /admin (/admin/peers), never as a stricter sub-prefix of /gateway.
+  ['/gateway', (caps) => caps.viewModelApi],
 ]
 
 /**
