@@ -220,6 +220,12 @@ func (h *ManageHandler) handleTenantLimitSet(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusOK, map[string]any{"success": true})
 		return
 	}
+	// The model consumer cap (161) is read on demand — it is not part of the
+	// shared tenant read path (store.Tenant.MaxModelConsumers). Cosmetic too:
+	// a failed read leaves the field out of the echo.
+	if capacity, err := store.TenantModelConsumerCap(r.Context(), h.pool, req.ID); err == nil {
+		tn.MaxModelConsumers = capacity
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tn})
 }
 

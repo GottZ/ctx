@@ -153,8 +153,13 @@ type Tenant struct {
 	MaxScopes   *int      `json:"max_scopes"` // nil = unlimited (069 max_scopes)
 	MaxKeys     *int      `json:"max_keys"`   // nil = unlimited (069 max_keys)
 	// MaxModelConsumers caps the tenant's ACTIVE model consumers (161
-	// max_model_consumers, default 64); nil = unlimited.
-	MaxModelConsumers *int `json:"max_model_consumers"`
+	// max_model_consumers, default 64); nil = unlimited. NOT part of
+	// tenantCols: the tenant read path is shared with repair tests that run
+	// the store against a schema before 161 (SetupTestDBUpTo(t, 155) +
+	// CreateTenant), so the 161 column is read on demand by
+	// TenantModelConsumerCap — today only for the echo of tenant-limit-set —
+	// and is absent from every other tenant response.
+	MaxModelConsumers *int `json:"max_model_consumers,omitempty"`
 }
 
 // ErrTenantNotFound is returned by GetTenant/UpdateTenant when no tenant matches
@@ -184,11 +189,11 @@ var ErrScopeQuotaExceeded = errors.New("store: tenant scope quota exceeded")
 // non-negative int). This is the typed-column path the JSONB design (02 §2) was
 // superseded by — the §2 poison-the-shared-aggregate cast risk does not exist
 // for a typed column.
-const tenantCols = `id::text, slug, display_name, status, created_at, updated_at, max_scopes, max_keys, max_model_consumers`
+const tenantCols = `id::text, slug, display_name, status, created_at, updated_at, max_scopes, max_keys`
 
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
-	if err := row.Scan(&t.ID, &t.Slug, &t.DisplayName, &t.Status, &t.CreatedAt, &t.UpdatedAt, &t.MaxScopes, &t.MaxKeys, &t.MaxModelConsumers); err != nil {
+	if err := row.Scan(&t.ID, &t.Slug, &t.DisplayName, &t.Status, &t.CreatedAt, &t.UpdatedAt, &t.MaxScopes, &t.MaxKeys); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -445,6 +450,22 @@ func SetTenantLimitsWithModelConsumers(ctx context.Context, pool *pgxpool.Pool, 
 		return ErrTenantNotFound
 	}
 	return nil
+}
+
+// TenantModelConsumerCap reads max_model_consumers (161) of one tenant —
+// nil = unlimited. The one reader of the column on the tenant row: the echo
+// of tenant-limit-set (see Tenant.MaxModelConsumers for why it is not in
+// tenantCols). An unknown or malformed id is ErrTenantNotFound.
+func TenantModelConsumerCap(ctx context.Context, pool *pgxpool.Pool, tenantID string) (*int, error) {
+	var capacity *int
+	err := pool.QueryRow(ctx, `SELECT max_model_consumers FROM context_tenants WHERE id = $1::uuid`, tenantID).Scan(&capacity)
+	if errors.Is(err, pgx.ErrNoRows) || pgxdb.AbsentOrMalformed(err) {
+		return nil, ErrTenantNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: tenant model consumer cap: %w", err)
+	}
+	return capacity, nil
 }
 
 // SetTenantLimitsTx is the tx-composable column write behind the compound
