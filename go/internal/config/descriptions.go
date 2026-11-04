@@ -271,4 +271,13 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.auth_failure_window": "Fixed window in seconds of the model-key failure count, from the pair's first failure; also the longest Retry-After of the lock",
 	"gateway.auth_probe_rate":     "Database checks per second (burst = rate) for model keys without a past success; above it 503 auth_overloaded, known keys pass without a token",
 	"gateway.auth_db_concurrency": "Concurrent ctx_model_auth calls of the model-key door (its share of the 20-connection pool); below 20",
+	// W01-5: consumer and model-key administration (design/01 §4.6, §4.9).
+	"gateway.tenant_self_service":      "Lets tenant-admins create model consumers, rotate their keys and grant consumer fields in their own tenant — only while gateway.enabled is on too; off (default) these stay server-admin, revoking stays open to tenant-admins",
+	"gateway.key_max_lifetime_app":     "Default and ceiling in seconds of a new model key's expiry for kind=app consumers (365 d); 0 = no expiry required and no ceiling",
+	"gateway.key_max_lifetime_peer":    "Default and ceiling in seconds of a new model key's expiry for kind=ctx-peer consumers; 0 (default) = the key never expires unless the request names an expiry",
+	"gateway.key_rotation_grace":       "Seconds the previous model key stays valid after a rotation that names no grace; at most 604800 (7 d)",
+	"gateway.key_expiry_warn":          "Seconds before a model key's expiry in which its consumer reads as expiring; 0 = no warning",
+	"gateway.consumer_list_max_limit":  "Upper bound on the limit of one model-consumer-list or model-key-history page, and the page size when the request names none; at least 1",
+	"gateway.consumer_chain_max":       "Most keys of a consumer's chain one model-consumer-get returns (newest first; keys_truncated marks the rest); at least 1",
+	"gateway.consumer_audit_trail_max": "Most audit rows one model-consumer-get returns for a consumer and its keys (newest first); at least 1",
 }

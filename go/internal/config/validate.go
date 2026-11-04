@@ -81,6 +81,8 @@ func Validate(c *Config) []Issue {
 	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation;
 	// V40 (W01-6): the model-key door's limits.
 	issues = append(issues, validateGateway(c)...)
+	// V41 (W01-5): the consumer administration's grace ceiling and page floors.
+	issues = append(issues, validateGatewayConsumers(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1390,6 +1392,43 @@ func validateGatewayAuth(g *GatewayConfig) []Issue {
 		bad("gateway.auth_db_concurrency", "gateway.auth_db_concurrency must be >= 1 — 0 would refuse every model-key check with 503")
 	case n >= gatewayDBPoolConns:
 		bad("gateway.auth_db_concurrency", fmt.Sprintf("gateway.auth_db_concurrency (%d) must stay below the database pool size (%d) — a forgery flood could otherwise hold every connection", n, gatewayDBPoolConns))
+	}
+	return issues
+}
+
+// gatewayMaxRotationGrace is store.MaxRotationGrace (the store refuses a
+// longer grace; config may not import store). The equality is pinned in
+// internal/handler (TestRotationGraceCeilingMatchesStore).
+const gatewayMaxRotationGrace = 7 * 24 * time.Hour
+
+// validateGatewayConsumers is V41 (wave W01-5, design/01 §4.9). Negative
+// values stay with the generic walks (V17, V35); these checks own what parses
+// and is not negative, yet cannot mean what it says:
+//   - gateway.key_rotation_grace <= 7 d: the store refuses a longer grace, so
+//     every rotation without an explicit grace would answer 400.
+//   - the three page caps >= 1: 0 would serve empty pages forever while the
+//     settings surface renders a configured cap.
+//
+// The lifetimes and the expiry warning may be 0 (no ceiling, no warning).
+func validateGatewayConsumers(c *Config) []Issue {
+	var issues []Issue
+	g := &c.Gateway.Consumers
+	if g.KeyRotationGrace > gatewayMaxRotationGrace {
+		issues = append(issues, Issue{Field: "gateway.key_rotation_grace", Severity: SeverityError,
+			Msg: fmt.Sprintf("gateway.key_rotation_grace (%v) must be <= %v — the store refuses a longer grace, every rotation without its own grace would fail", g.KeyRotationGrace, gatewayMaxRotationGrace)})
+	}
+	for _, f := range []struct {
+		key string
+		v   int
+	}{
+		{"gateway.consumer_list_max_limit", g.ListMaxLimit},
+		{"gateway.consumer_chain_max", g.ChainMax},
+		{"gateway.consumer_audit_trail_max", g.AuditTrailMax},
+	} {
+		if f.v == 0 {
+			issues = append(issues, Issue{Field: f.key, Severity: SeverityError,
+				Msg: f.key + " must be >= 1 — 0 would serve an empty page on every read"})
+		}
 	}
 	return issues
 }

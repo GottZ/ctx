@@ -161,6 +161,13 @@ func TestRegistryStrictSet(t *testing.T) {
 		"gateway.auth_failure_window": true,
 		"gateway.auth_probe_rate":     true,
 		"gateway.auth_db_concurrency": true,
+		// W01-5 (design/01 §4.6, design/05 §3.2): the page ceilings of the
+		// consumer administration bound one read of the consumer, key and
+		// audit tables — a typo'd value silently defaulting would hide the
+		// ceiling the operator meant to set (precedent audit.max_limit).
+		"gateway.consumer_list_max_limit":  true,
+		"gateway.consumer_chain_max":       true,
+		"gateway.consumer_audit_trail_max": true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.

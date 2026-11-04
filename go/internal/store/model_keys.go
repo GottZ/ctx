@@ -32,7 +32,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -54,10 +53,6 @@ import (
 // (design/01 §4.9 "hardcoded-legitimate"): the default grace is policy
 // (modelapi.key_rotation_grace) and reaches RotateKey as a parameter.
 const MaxRotationGrace = 7 * 24 * time.Hour
-
-// MaxKeyHistoryLimit is the largest page KeyHistory serves (design/01 §4.6:
-// model-key-history limit ≤ 100); the caller clamps its own parameter.
-const MaxKeyHistoryLimit = 100
 
 // ModelKeyUsageFlushInterval is the cadence of the batched last_used_at flush
 // (design/01 §4.2, §4.9 mechanism constant): the field's resolution, and the
@@ -113,8 +108,9 @@ func (a ModelAccess) args() (bool, *string) {
 }
 
 // ModelConsumer is a consumer as the store reads it — never a key secret.
-// LastUsedAt, Keys and KeysTotal are filled by ListConsumers only: Keys holds
-// the live keys (at most two, I-K2), KeysTotal counts the whole chain.
+// LastUsedAt, Keys and KeysTotal are filled by ListConsumers and GetConsumer
+// only: Keys holds the live keys (at most two, I-K2), KeysTotal counts the
+// whole chain.
 type ModelConsumer struct {
 	ID                string
 	TenantID          string
@@ -136,6 +132,15 @@ type ModelConsumer struct {
 	LastUsedAt        *time.Time
 	Keys              []ModelKeyInfo
 	KeysTotal         int
+	// TenantSlug and the CreatedBy* fields describe the tenant and the
+	// creating knowledge key (filled by ListConsumers and GetConsumer only).
+	// The creator fields are unredacted: masking a foreign or server-admin
+	// creator for a lesser reader is the handler's job, as for the audit
+	// trail. CreatedByLabel is nil when the creator is unknown or deleted.
+	TenantSlug           string
+	CreatedByLabel       *string
+	CreatedByTenantID    *string
+	CreatedByServerAdmin bool
 }
 
 // ModelKeyInfo is a key as the store reads it: id, hint and lifecycle. There
@@ -197,12 +202,6 @@ type ModelConsumerPatch struct {
 type KeyCursor struct {
 	CreatedAt time.Time
 	ID        string
-}
-
-// ListConsumersOptions narrows ListConsumers; the zero value lists active
-// consumers.
-type ListConsumersOptions struct {
-	IncludeInactive bool
 }
 
 const (
@@ -578,6 +577,22 @@ func DeleteConsumer(ctx context.Context, pool *pgxpool.Pool, consumerID string, 
 // acting principal on them (the trigger records the actor key only).
 func UpdateConsumer(ctx context.Context, pool *pgxpool.Pool, consumerID string, access ModelAccess,
 	patch ModelConsumerPatch, stamp AuditStamp) (ModelConsumer, error) {
+	return UpdateConsumerChecked(ctx, pool, consumerID, access, patch, nil, stamp)
+}
+
+// UpdateConsumerChecked is UpdateConsumer with an authorization step under the
+// consumer's row lock: check receives the consumer as it stands once locked
+// and before the patch, and an error it returns aborts the transaction
+// unchanged and is returned as is. The field tiers of model-consumer-update
+// ("revoking is always allowed, granting needs a release", design/01 §4.6)
+// compare the patch against the current value — fair_weight raised or
+// lowered, the CIDR list narrowed or widened, a reactivation — so that
+// comparison has to see the value the write replaces, not one read before a
+// concurrent write (a server-admin lowering fair_weight while a tenant-admin
+// re-submits the old value would otherwise read as "unchanged" and raise it
+// back). nil check = UpdateConsumer.
+func UpdateConsumerChecked(ctx context.Context, pool *pgxpool.Pool, consumerID string, access ModelAccess,
+	patch ModelConsumerPatch, check func(current ModelConsumer) error, stamp AuditStamp) (ModelConsumer, error) {
 
 	set, args, err := patch.assignments()
 	if err != nil {
@@ -603,6 +618,15 @@ func UpdateConsumer(ctx context.Context, pool *pgxpool.Pool, consumerID string, 
 			tenant, wasActive, err := lockConsumer(ctx, tx, consumerID, access)
 			if err != nil {
 				return err
+			}
+			if check != nil {
+				cur, err := readConsumerTx(ctx, tx, consumerID)
+				if err != nil {
+					return err
+				}
+				if err := check(cur); err != nil {
+					return err
+				}
 			}
 			if activating && !wasActive {
 				if err := checkConsumerCap(ctx, tx, tenant, limit); err != nil {
@@ -672,16 +696,23 @@ func stampRevokedPrincipalTx(ctx context.Context, tx pgx.Tx, ids []string) error
 	return nil
 }
 
+// readConsumerTx reads a consumer row the caller has already locked (or may
+// read unlocked) inside its transaction.
+func readConsumerTx(ctx context.Context, tx pgx.Tx, consumerID string) (ModelConsumer, error) {
+	var c ModelConsumer
+	if err := tx.QueryRow(ctx, `SELECT `+sqlConsumerCols+` FROM context_model_consumers c WHERE c.id = $1::uuid`,
+		consumerID).Scan(consumerDest(&c)...); err != nil {
+		return ModelConsumer{}, fmt.Errorf("model_consumers: read: %w", err)
+	}
+	return c, nil
+}
+
 // writeConsumerTx applies the assignments (or, with none, reads the row) and
 // returns the consumer.
 func writeConsumerTx(ctx context.Context, tx pgx.Tx, consumerID string, set []string, args []any) (ModelConsumer, error) {
 	var c ModelConsumer
 	if len(set) == 0 {
-		if err := tx.QueryRow(ctx, `SELECT `+sqlConsumerCols+` FROM context_model_consumers c WHERE c.id = $1::uuid`,
-			consumerID).Scan(consumerDest(&c)...); err != nil {
-			return ModelConsumer{}, fmt.Errorf("model_consumers: read: %w", err)
-		}
-		return c, nil
+		return readConsumerTx(ctx, tx, consumerID)
 	}
 	sql := `UPDATE context_model_consumers c SET ` + strings.Join(set, ", ") + `, updated_at = now()
 	         WHERE c.id = $1::uuid RETURNING ` + sqlConsumerCols
@@ -747,70 +778,18 @@ func (p ModelConsumerPatch) assignments() ([]string, []any, error) {
 	return set, args, nil
 }
 
-// ListConsumers lists the consumers in the caller's reach, newest first, in
-// ONE statement: a LEFT JOIN LATERAL aggregates each consumer's keys
-// (idx_model_keys_consumer_created) into its live keys (json_agg of the
-// whitelisted key fields — no hash, no plaintext), the chain length and the
-// latest use. Inactive consumers only with opts.IncludeInactive.
-func ListConsumers(ctx context.Context, pool *pgxpool.Pool, access ModelAccess, opts ListConsumersOptions) ([]ModelConsumer, error) {
-	admin, tenantArg := access.args()
-	rows, err := pool.Query(ctx,
-		`SELECT `+sqlConsumerCols+`, kk.live, kk.total, kk.last_used
-		   FROM context_model_consumers c
-		   LEFT JOIN LATERAL (
-		        SELECT COALESCE(json_agg(json_build_object(
-		                   'id', k.id, 'consumer_id', k.consumer_id, 'hint', k.key_hint,
-		                   'created_at', k.created_at, 'expires_at', k.expires_at,
-		                   'revoked_at', k.revoked_at, 'last_used_at', k.last_used_at,
-		                   'rotated_from', k.rotated_from)
-		                   ORDER BY k.created_at DESC, k.id DESC) FILTER (WHERE `+sqlKeyLive+`), '[]') AS live,
-		               count(*)::int AS total,
-		               max(k.last_used_at) AS last_used
-		          FROM context_model_keys k WHERE k.consumer_id = c.id) kk ON true
-		  WHERE `+sqlListAccess+`
-		    AND ($3::boolean OR c.active)
-		  ORDER BY c.created_at DESC, c.id DESC`,
-		admin, tenantArg, opts.IncludeInactive)
-	if err != nil {
-		if pgxdb.MalformedUUID(err) {
-			return []ModelConsumer{}, nil
-		}
-		return nil, fmt.Errorf("model_consumers: list: %w", err)
-	}
-	defer rows.Close()
-	out := []ModelConsumer{}
-	for rows.Next() {
-		var (
-			c    ModelConsumer
-			live []byte
-		)
-		if err := rows.Scan(append(consumerDest(&c), &live, &c.KeysTotal, &c.LastUsedAt)...); err != nil {
-			return nil, fmt.Errorf("model_consumers: list scan: %w", err)
-		}
-		if err := json.Unmarshal(live, &c.Keys); err != nil {
-			return nil, fmt.Errorf("model_consumers: list keys: %w", err)
-		}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		if pgxdb.MalformedUUID(err) {
-			return []ModelConsumer{}, nil
-		}
-		return nil, fmt.Errorf("model_consumers: list: %w", err)
-	}
-	return out, nil
-}
-
 // KeyHistory pages through a consumer's keys, newest first, by the keyset
 // (created_at, id) — revoked and expired ones included. before is the last
-// key of the previous page (nil: the first page); limit lies in [1,
-// MaxKeyHistoryLimit]. A consumer outside the caller's reach is
-// ErrModelConsumerNotFound — one statement answers both questions.
+// key of the previous page (nil: the first page); limit is at least 1 — the
+// caller clamps it to its page cap (gateway.consumer_list_max_limit,
+// gateway.consumer_chain_max; precedent AuditQuery.Limit). A consumer outside
+// the caller's reach is ErrModelConsumerNotFound — one statement answers both
+// questions.
 func KeyHistory(ctx context.Context, pool *pgxpool.Pool, consumerID string, access ModelAccess,
 	before *KeyCursor, limit int) ([]ModelKeyInfo, error) {
 
-	if limit < 1 || limit > MaxKeyHistoryLimit {
-		return nil, fmt.Errorf("store: key history: limit %d outside 1..%d", limit, MaxKeyHistoryLimit)
+	if limit < 1 {
+		return nil, fmt.Errorf("store: key history: limit %d below 1", limit)
 	}
 	admin, tenantArg := access.args()
 	var (

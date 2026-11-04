@@ -2537,6 +2537,51 @@ type GatewayConfig struct {
 	// share of the 20-connection pool; ctx's own database work keeps the
 	// rest under any flood. Below the pool size (V40).
 	AuthDBConcurrency int `key:"gateway.auth_db_concurrency" env:"CTX_GATEWAY_AUTH_DB_CONCURRENCY" default:"4" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// Consumers is the administration of model consumers and their keys
+	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
+	Consumers GatewayConsumersConfig
+}
+
+// GatewayConsumersConfig is the policy of the consumer and model-key
+// administration (design/01 §4.6, §4.9; design/05 §3.2; wave W01-5). The
+// manage handler reads it from the _global snapshot per request; it never
+// reaches the /v1 door, which is why GatewaySettings does not carry it.
+// global-only like the rest of the group: a tenant-overridable value would
+// let a tenant-admin grant itself the self-service it is gated by, or lift
+// the expiry ceiling of its own keys (classification rule above).
+type GatewayConsumersConfig struct {
+	// TenantSelfService opens model-consumer-create, model-key-rotate and
+	// the granting fields of model-consumer-update (tier tierSelfService) to
+	// tenant-admins of their own tenant — only while gateway.enabled is on
+	// as well (V-01-c dark launch). Off (default, decision E3): server-admin
+	// only. Revoking stays open to tenant-admins either way.
+	TenantSelfService bool `key:"gateway.tenant_self_service" env:"CTX_GATEWAY_TENANT_SELF_SERVICE" default:"false" mut:"hot" tenancy:"global-only"`
+	// KeyMaxLifetimeApp is the default AND the ceiling of a new key's expiry
+	// for kind=app: a mint or rotation without expires_at expires at now +
+	// value, one beyond it is refused (400). 0 = no expiry required and no
+	// ceiling. Default 365 d (E-01-4).
+	KeyMaxLifetimeApp time.Duration `key:"gateway.key_max_lifetime_app" env:"CTX_GATEWAY_KEY_MAX_LIFETIME_APP" default:"31536000" mut:"hot" tenancy:"global-only"`
+	// KeyMaxLifetimePeer is the same rule for kind=ctx-peer. Default 0: a
+	// peer key never expires unless the mint names an expiry (E-01-4).
+	KeyMaxLifetimePeer time.Duration `key:"gateway.key_max_lifetime_peer" env:"CTX_GATEWAY_KEY_MAX_LIFETIME_PEER" default:"0" mut:"hot" tenancy:"global-only"`
+	// KeyRotationGrace is the grace of a rotation that names none: how long
+	// the predecessor key stays valid beside its successor. At most 7 d
+	// (store.MaxRotationGrace, V40). Default 24 h (E-01-10).
+	KeyRotationGrace time.Duration `key:"gateway.key_rotation_grace" env:"CTX_GATEWAY_KEY_ROTATION_GRACE" default:"86400" mut:"hot" tenancy:"global-only"`
+	// KeyExpiryWarn is the window before a key's expiry in which the
+	// consumer reads as "expiring" (design/05 §3.2). 0 = no warning.
+	// Default 14 d.
+	KeyExpiryWarn time.Duration `key:"gateway.key_expiry_warn" env:"CTX_GATEWAY_KEY_EXPIRY_WARN" default:"1209600" mut:"hot" tenancy:"global-only"`
+	// ListMaxLimit caps the page of model-consumer-list and
+	// model-key-history, and is the page size when the request names none
+	// (precedent audit.max_limit). At least 1 (V40).
+	ListMaxLimit int `key:"gateway.consumer_list_max_limit" env:"CTX_GATEWAY_CONSUMER_LIST_MAX_LIMIT" default:"100" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ChainMax caps the key chain model-consumer-get returns (newest first;
+	// keys_truncated says more exist). At least 1 (V40).
+	ChainMax int `key:"gateway.consumer_chain_max" env:"CTX_GATEWAY_CONSUMER_CHAIN_MAX" default:"50" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// AuditTrailMax caps the audit rows model-consumer-get returns. At least
+	// 1 (V40).
+	AuditTrailMax int `key:"gateway.consumer_audit_trail_max" env:"CTX_GATEWAY_CONSUMER_AUDIT_TRAIL_MAX" default:"20" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // GatewayTenantAliasCeiling is the server admin's ceiling on tenant-alias

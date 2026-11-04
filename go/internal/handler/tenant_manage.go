@@ -147,12 +147,41 @@ func oneLimitField(fields map[string]json.RawMessage, key string, requirePresenc
 	return &v, nil
 }
 
+// errModelConsumerLimitRange — a present max_model_consumers is not an integer
+// between 0 and maxTenantLimit (→ 400).
+var errModelConsumerLimitRange = errors.New("max_model_consumers must be an integer between 0 and 1000000, or null for unlimited")
+
+// modelConsumerLimitFromData reads the OPTIONAL max_model_consumers field of
+// tenant-limit-set (N22, design/01 §4.9). Unlike max_scopes/max_keys it may be
+// absent: absent (set=false) leaves the column as it is — the field arrived
+// after the two mandatory ones, and making it mandatory would break every
+// existing caller. Present: null = unlimited, a number = the cap, with the
+// same range as the other two (0 = frozen: no new or reactivated consumer).
+func modelConsumerLimitFromData(data json.RawMessage) (limit *int, set bool, err error) {
+	var fields map[string]json.RawMessage
+	if len(data) > 0 {
+		if uerr := json.Unmarshal(data, &fields); uerr != nil {
+			return nil, false, uerr
+		}
+	}
+	if _, present := fields["max_model_consumers"]; !present {
+		return nil, false, nil
+	}
+	v, err := oneLimitField(fields, "max_model_consumers", true)
+	if err != nil {
+		return nil, false, errModelConsumerLimitRange
+	}
+	return v, true, nil
+}
+
 // handleTenantLimitSet writes the structural per-tenant caps (BEQ-1b, design/02
 // §3b). Tier tierServerAdmin (actionTier): the cap is an OPERATOR ceiling, never
 // tenant-self-raisable (the tenant-usage-get READ is the tenant-admin counterpart
 // — K10 tier-asymmetry). REPLACE-semantics: limitsFromData(req.Data, true) forces
 // BOTH max_scopes and max_keys to be present (a missing field → 400, no silent
-// uncap); a present null = unlimited, a present number = the cap. Unknown/malformed
+// uncap); a present null = unlimited, a present number = the cap. The model
+// consumer cap max_model_consumers is optional (modelConsumerLimitFromData):
+// absent leaves it, present writes it in the same UPDATE. Unknown/malformed
 // id → 404 (no oracle). The 200 re-reads the row so the response echoes the stored
 // limits (the frozen FE TenantResponse {success, tenant}); SetTenantLimits returns
 // no row, so the re-get is how the echo is produced.
@@ -166,7 +195,17 @@ func (h *ManageHandler) handleTenantLimitSet(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
-	if err := store.SetTenantLimits(r.Context(), h.pool, req.ID, maxScopes, maxKeys); err != nil {
+	maxConsumers, setConsumers, err := modelConsumerLimitFromData(req.Data)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if setConsumers {
+		err = store.SetTenantLimitsWithModelConsumers(r.Context(), h.pool, req.ID, maxScopes, maxKeys, maxConsumers)
+	} else {
+		err = store.SetTenantLimits(r.Context(), h.pool, req.ID, maxScopes, maxKeys)
+	}
+	if err != nil {
 		if errors.Is(err, store.ErrTenantNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 			return
@@ -181,7 +220,26 @@ func (h *ManageHandler) handleTenantLimitSet(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusOK, map[string]any{"success": true})
 		return
 	}
+	// The model consumer cap (161) is read on demand — it is not part of the
+	// shared tenant read path (store.Tenant.MaxModelConsumers, omitempty). The
+	// echo renders the key even for an unlimited cap (null), so the caller who
+	// just lifted the cap reads the lifted value and not a missing key; a
+	// failed read is cosmetic and leaves the key out.
+	if capacity, err := store.TenantModelConsumerCap(r.Context(), h.pool, req.ID); err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tenantWithCap{Tenant: tn, MaxModelConsumers: capacity}})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tn})
+}
+
+// tenantWithCap is the tenant-limit-set echo: the shared tenant row with the
+// 161 cap rendered explicitly — null for unlimited — where the shared row
+// omits it (store.Tenant.MaxModelConsumers is omitempty because the read
+// path serves schemas before 161). The outer field shadows the embedded one
+// under the same JSON key.
+type tenantWithCap struct {
+	*store.Tenant
+	MaxModelConsumers *int `json:"max_model_consumers"`
 }
 
 // handleTenantUsageGet returns one tenant's structural usage (scope_count +

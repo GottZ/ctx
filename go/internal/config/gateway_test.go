@@ -45,14 +45,35 @@ func TestGatewayKeysAreHotGlobalOnly(t *testing.T) {
 	}
 }
 
+// gatewayConsumerKeys is the registry keys of GatewayConsumersConfig — the
+// consumer administration, which the manage handler reads from the snapshot
+// and the /v1 door never sees (wave W01-5). Read off the struct tags, so the
+// exclusion below is exactly that struct and nothing a name pattern catches.
+func gatewayConsumerKeys() map[string]bool {
+	out := map[string]bool{}
+	rt := reflect.TypeOf(GatewayConsumersConfig{})
+	for i := range rt.NumField() {
+		if k := rt.Field(i).Tag.Get("key"); k != "" {
+			out[k] = true
+		}
+	}
+	return out
+}
+
 // TestGatewayKeysReachSettings is the totality pin of the getter: every
 // gateway.* key, set to a valid non-default value on its own, changes
 // GatewaySettings(). A key added to the group without its Settings field —
-// or mapped onto the wrong one — is red here.
+// or mapped onto the wrong one — is red here. The keys of
+// GatewayConsumersConfig are not /v1 settings; TestGatewayConsumerKeysReachConsumers
+// holds them to the same standard against their own reader.
 func TestGatewayKeysReachSettings(t *testing.T) {
 	resetBuildEnv(t)
 	base := Defaults().GatewaySettings()
+	consumers := gatewayConsumerKeys()
 	for _, e := range gatewayKeys(t) {
+		if consumers[e.Key] {
+			continue
+		}
 		raw := bumpedValue(t, e)
 		c, issues := Build([]Override{{Key: e.Key, Value: raw}}, nil)
 		for _, is := range issues {
@@ -61,6 +82,65 @@ func TestGatewayKeysReachSettings(t *testing.T) {
 		if reflect.DeepEqual(c.GatewaySettings(), base) {
 			t.Errorf("%s=%s does not reach oai.Settings — the getter misses the key", e.Key, raw)
 		}
+	}
+}
+
+// TestGatewayConsumerKeysReachConsumers is the totality pin of the consumer
+// administration's keys (W01-5): every key of GatewayConsumersConfig,
+// bumped on its own, builds without an issue and changes
+// c.Gateway.Consumers — the value the manage handler reads. Eight keys, so a
+// key dropped from the struct (and with it from the exclusion above) is red.
+func TestGatewayConsumerKeysReachConsumers(t *testing.T) {
+	resetBuildEnv(t)
+	keys := gatewayConsumerKeys()
+	if len(keys) != 8 {
+		t.Fatalf("GatewayConsumersConfig has %d keys, want 8", len(keys))
+	}
+	base := Defaults().Gateway.Consumers
+	for _, e := range gatewayKeys(t) {
+		if !keys[e.Key] {
+			continue
+		}
+		raw := bumpedValue(t, e)
+		c, issues := Build([]Override{{Key: e.Key, Value: raw}}, nil)
+		for _, is := range issues {
+			t.Errorf("%s=%s: build issue on %s: %s", e.Key, raw, is.Field, is.Msg)
+		}
+		if reflect.DeepEqual(c.Gateway.Consumers, base) {
+			t.Errorf("%s=%s does not reach Gateway.Consumers", e.Key, raw)
+		}
+	}
+}
+
+// TestValidateGatewayConsumers is V40 (W01-5): the grace ceiling and the
+// three page floors, one error each, plus the legal edges.
+func TestValidateGatewayConsumers(t *testing.T) {
+	if issues := validateGatewayConsumers(Defaults()); len(issues) != 0 {
+		t.Fatalf("defaults raise V40 issues: %+v", issues)
+	}
+	g := func(c *Config) *GatewayConsumersConfig { return &c.Gateway.Consumers }
+	for _, tc := range []struct {
+		key string
+		mut func(c *Config)
+	}{
+		{"gateway.key_rotation_grace", func(c *Config) { g(c).KeyRotationGrace = gatewayMaxRotationGrace + time.Second }},
+		{"gateway.consumer_list_max_limit", func(c *Config) { g(c).ListMaxLimit = 0 }},
+		{"gateway.consumer_chain_max", func(c *Config) { g(c).ChainMax = 0 }},
+		{"gateway.consumer_audit_trail_max", func(c *Config) { g(c).AuditTrailMax = 0 }},
+	} {
+		c := Defaults()
+		tc.mut(c)
+		hits := issuesOn(Validate(c), tc.key)
+		if len(hits) != 1 || hits[0].Severity != SeverityError {
+			t.Errorf("%s: %d issue(s) %+v, want exactly one error", tc.key, len(hits), hits)
+		}
+	}
+	c := Defaults()
+	g(c).KeyRotationGrace = gatewayMaxRotationGrace
+	g(c).KeyMaxLifetimeApp, g(c).KeyMaxLifetimePeer, g(c).KeyExpiryWarn = 0, 0, 0
+	g(c).ListMaxLimit, g(c).ChainMax, g(c).AuditTrailMax = 1, 1, 1
+	if issues := validateGatewayConsumers(c); len(issues) != 0 {
+		t.Errorf("legal edges raise V40 issues: %+v", issues)
 	}
 }
 

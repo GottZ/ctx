@@ -182,6 +182,13 @@ const (
 	tierOpen                  // no admin gate (auth + scope only)
 	tierTenantAdmin           // server-admin OR tenant-admin of own tenant
 	tierServerAdmin           // server-admin only (server-global semantics)
+	// tierSelfService: server-admin; a tenant-admin of its own tenant only
+	// while gateway.enabled AND gateway.tenant_self_service are on (design/01
+	// §4.6, decision E3, V-01-c dark launch). The switch is a setting, so the
+	// stage cannot be a tierFn (no config access, and the shape gate demands
+	// a payload dependence); as a stage of its own the gate sits in the
+	// pinned table, not only in a handler.
+	tierSelfService
 )
 
 // requireAdminAction gates a server-global manage action on the server-admin
@@ -1427,7 +1434,8 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 	// `handled` means it already answered and we must stop. Extracted to keep this
 	// handler under the cyclop ceiling (the foreign-target vs self-mint branching
 	// would otherwise push it over).
-	bindingTenant, handled := h.resolveKeyMintTenant(w, r, data, ar)
+	bindingTenant, handled := h.resolveKeyMintTenant(w, r, data.TenantID,
+		append([]string{data.HomeScope}, data.AllowedScopes...), ar)
 	if handled {
 		return
 	}
@@ -1486,35 +1494,40 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// resolveKeyMintTenant decides, and authorizes, the tenant a freshly minted api
-// key binds to (S2, design/04 §D-B). It returns the binding tenant and
-// handled=false on success, or "" and handled=true once it has written a
-// 4xx/5xx response (the caller must then stop). Three cases:
+// resolveKeyMintTenant decides, and authorizes, the tenant a freshly minted
+// credential binds to (S2, design/04 §D-B) — an api key (api-key-create) or a
+// model consumer (model-consumer-create, design/01 §4.6 N12). tenantID is the
+// request's tenant_id field, scopes the scopes the credential asks for (an api
+// key: home_scope first, then allowed_scopes; a consumer: its tenant_scope, or
+// none). It returns the binding tenant and handled=false on success, or "" and
+// handled=true once it has written a 4xx/5xx response (the caller must then
+// stop). Three cases:
 //
-//   - data.TenantID set: SERVER-ADMIN ONLY (AM2). A non-server-admin caller can
+//   - tenantID set: SERVER-ADMIN ONLY (AM2). A non-server-admin caller can
 //     NEVER target a foreign tenant — it is rejected 403 before the field is ever
-//     read as a binding, so the field is dead for it. The server-admin must still
-//     pick scopes the TARGET tenant owns (foreign-target T22 → 403 otherwise), so
-//     it cannot mint a cross-tenant write-key.
-//   - data.TenantID empty, non-server-admin: the existing self-mint T22 gate —
-//     every requested scope (home + allowed) must belong to ar.TenantID (403).
-//   - data.TenantID empty, server-admin: self-mint, no T22 (byte-identical to the
+//     read as a binding, so the field is dead for it (every value gets the same
+//     answer: no existence oracle). The server-admin must still pick scopes the
+//     TARGET tenant owns (foreign-target T22 → 403 otherwise), so it cannot mint
+//     a cross-tenant credential.
+//   - tenantID empty, non-server-admin: the existing self-mint T22 gate —
+//     every requested scope must belong to ar.TenantID (403).
+//   - tenantID empty, server-admin: self-mint, no T22 (byte-identical to the
 //     pre-BE6 server-admin path; §5.4 pausability).
-func (h *ManageHandler) resolveKeyMintTenant(w http.ResponseWriter, r *http.Request, data apiKeyCreateRequest, ar *auth.AuthResult) (string, bool) {
-	if data.TenantID != "" {
+func (h *ManageHandler) resolveKeyMintTenant(w http.ResponseWriter, r *http.Request, tenantID string, scopes []string, ar *auth.AuthResult) (string, bool) {
+	if tenantID != "" {
 		if !ar.IsServerAdmin() {
 			writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": "tenant_id is server-admin only"})
 			return "", true
 		}
 		// foreign-target T22: a server-admin minting for tenant B must use B's scopes.
-		if h.rejectScopeOutsideTenant(w, r, data, data.TenantID) {
+		if h.rejectScopeOutsideTenant(w, r, scopes, tenantID) {
 			return "", true
 		}
-		return data.TenantID, false
+		return tenantID, false
 	}
 	if !ar.IsServerAdmin() {
 		// existing self-mint T22, byte-identical to the pre-BE6 gate (05-A5, L3).
-		if h.rejectScopeOutsideTenant(w, r, data, ar.TenantID) {
+		if h.rejectScopeOutsideTenant(w, r, scopes, ar.TenantID) {
 			return "", true
 		}
 	}
@@ -1522,22 +1535,28 @@ func (h *ManageHandler) resolveKeyMintTenant(w http.ResponseWriter, r *http.Requ
 }
 
 // rejectScopeOutsideTenant runs the T22 mint gate (05-A5, Leak-Pfad L3): every
-// requested scope (home + allowed) must belong to ownerTenant in
-// context_tenant_scopes (store.TenantScopes). In Modell C the scope→tenant map is
-// the table, NOT the naive home_scope==TenantID compare (tenant_id is a UUID,
-// scope is the data discriminator → never string-equal). A foreign/unowned scope
-// is privilege escalation into a foreign corpus → 403. An empty ownerTenant yields
-// an empty owned set → every scope is "outside" → 403 (fail-closed). It writes the
-// 403/500 and returns true when it has handled the response; false when every
-// requested scope is owned and the caller may proceed.
-func (h *ManageHandler) rejectScopeOutsideTenant(w http.ResponseWriter, r *http.Request, data apiKeyCreateRequest, ownerTenant string) bool {
+// requested scope must belong to ownerTenant in context_tenant_scopes
+// (store.TenantScopes), checked in order (an api key's home_scope first). In
+// Modell C the scope→tenant map is the table, NOT the naive home_scope==TenantID
+// compare (tenant_id is a UUID, scope is the data discriminator → never
+// string-equal). A foreign/unowned scope is privilege escalation into a foreign
+// corpus (a key) or a foreign tenant's private backends (a consumer, B9) → 403.
+// An empty ownerTenant yields an empty owned set → every scope is "outside" →
+// 403 (fail-closed). No requested scope (a consumer without tenant_scope) asks
+// for nothing and passes without a lookup. It writes the 403/500 and returns
+// true when it has handled the response; false when every requested scope is
+// owned and the caller may proceed.
+func (h *ManageHandler) rejectScopeOutsideTenant(w http.ResponseWriter, r *http.Request, scopes []string, ownerTenant string) bool {
+	if len(scopes) == 0 {
+		return false
+	}
 	owned, err := store.TenantScopes(r.Context(), h.pool, ownerTenant)
 	if err != nil {
 		slog.Error("manage: tenant scopes lookup failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return true
 	}
-	if outside := firstScopeOutsideTenant(data.HomeScope, data.AllowedScopes, owned); outside != "" {
+	if outside := firstScopeOutsideTenant(scopes[0], scopes[1:], owned); outside != "" {
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"success": false,
 			"error":   "cannot create keys outside your tenant",
