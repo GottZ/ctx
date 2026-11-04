@@ -335,8 +335,8 @@ func TestWriteInternalOnly(t *testing.T) {
 		// clause first renamed that verdict — measured, and the reason it runs
 		// last in overlayWriteViolation.
 		tenantAdmin := &auth.AuthResult{
-			IsValid: true, ApiKeyID: row.ID, HomeScope: "private",
-			ReadScopes: []string{"private"}, TenantID: c24Tenant, TenantRole: auth.RoleAdmin,
+			IsValid: true, ApiKeyID: row.ID, HomeScope: c24Tenant,
+			ReadScopes: []string{c24Tenant}, TenantID: c24TenantID, TenantRole: auth.RoleAdmin,
 		}
 		// Same fixture as TestC24OverlayWriteGate/A2, and for the same reason:
 		// HandlePut resolves the name in the caller's VISIBLE namespaces first,

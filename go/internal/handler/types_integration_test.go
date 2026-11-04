@@ -94,13 +94,15 @@ func TestTypesReadIsolation(t *testing.T) {
 	mk("team-a-secret", "tenant-a")
 	mk("team-b-secret", "tenant-b")
 
+	// The type namespace is the key's HomeScope (#112); each TenantID is a
+	// different string on purpose, so the filter is proven on the right key.
 	tenantB := &auth.AuthResult{
-		IsValid: true, ApiKeyID: actor.ID, HomeScope: "private",
-		ReadScopes: []string{"private"}, TenantID: "tenant-b", TenantRole: auth.RoleMember,
+		IsValid: true, ApiKeyID: actor.ID, HomeScope: "tenant-b",
+		ReadScopes: []string{"tenant-b"}, TenantID: "00000000-0000-0000-0000-00000000b0b0", TenantRole: auth.RoleMember,
 	}
 	tenantA := &auth.AuthResult{
-		IsValid: true, ApiKeyID: actor.ID, HomeScope: "private",
-		ReadScopes: []string{"private"}, TenantID: "tenant-a", TenantRole: auth.RoleMember,
+		IsValid: true, ApiKeyID: actor.ID, HomeScope: "tenant-a",
+		ReadScopes: []string{"tenant-a"}, TenantID: "00000000-0000-0000-0000-00000000a0a0", TenantRole: auth.RoleMember,
 	}
 
 	// CONSTRUCTED probe: the unfiltered SELECT (what a naive handler would run)

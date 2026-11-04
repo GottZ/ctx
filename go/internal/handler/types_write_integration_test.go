@@ -64,11 +64,13 @@ func TestTypesWrite(t *testing.T) {
 	}
 
 	// A tenant-admin of tenant-a (owner/admin role administers its own tenant)
-	// and a server-admin (operator). The type namespace is the tenant id, the
-	// same key typeVisibleScopes uses (072: scope is a free VARCHAR).
+	// and a server-admin (operator). The type namespace is the key's HomeScope,
+	// the same key typeVisibleScopes uses and the registry resolves by (#112;
+	// 072: scope is a free VARCHAR). The TenantID is a different string on
+	// purpose, so the test tells the two keys apart.
 	tenantAdminA := &auth.AuthResult{
-		IsValid: true, ApiKeyID: actor.ID, HomeScope: "private",
-		ReadScopes: []string{"private"}, TenantID: "tenant-a", TenantRole: auth.RoleAdmin,
+		IsValid: true, ApiKeyID: actor.ID, HomeScope: "tenant-a",
+		ReadScopes: []string{"tenant-a"}, TenantID: "00000000-0000-0000-0000-00000000a0a0", TenantRole: auth.RoleAdmin,
 	}
 	serverAdmin := &auth.AuthResult{
 		IsValid: true, IsAdmin: true, ApiKeyID: actor.ID, HomeScope: "private",

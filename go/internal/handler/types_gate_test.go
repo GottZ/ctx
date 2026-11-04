@@ -49,9 +49,10 @@ func invalidAR() *auth.AuthResult {
 
 // SECURITY PROPERTY (design/03 §5.1): the /api/types reads require a VALID key.
 // Without the in-mount gate a nil/invalid AuthResult would reach the handler
-// and either panic into typeVisibleScopes (nil deref) or hit the nil pool — the
-// fail-open trap. The gate returns 401 BEFORE the handler runs, so no store
-// touch happens and the recover never fires.
+// and hit the nil pool (typeVisibleScopes is nil-safe since #112 and resolves
+// such a caller to '_global' alone) — the fail-open trap. The gate returns 401
+// BEFORE the handler runs, so no store touch happens and the recover never
+// fires.
 //
 // Negative probe (2026-07-03): run against MountTypes with the
 // `r.Use(RequireMember)` line removed — both subtests failed (nil-AR request
