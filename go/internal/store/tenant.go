@@ -469,8 +469,8 @@ const pruneBatchSize = 2000
 //	blocks/blobs/sources/sessions have no hard inter-ordering among themselves.
 //
 // TENANT-DECISION(tenant-prune-order): dream_links→blocks→blobs→sources→
-// chat_sessions, then model keys + model consumers + keys (HARD, one tx), then
-// tenant (CASCADE clears tenant_scopes).
+// chat_sessions, then model keys + model consumers + knowledge keys
+// (context_api_keys; HARD, one tx), then tenant (CASCADE clears tenant_scopes).
 // Umentscheidbar only if a future migration sets the dream_links FK to ON DELETE
 // CASCADE (then step 1 would be redundant) — while 016:18-19 has no ON DELETE,
 // links-first is forced (design/01 §4.3.1).

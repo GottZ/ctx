@@ -897,12 +897,19 @@ func TestUsageFlushNoLockWait(t *testing.T) {
 			t.Fatalf("hold the key row: %v", err)
 		}
 		released := make(chan struct{})
+		rolledBack := make(chan struct{})
 		go func() {
 			// Release the row once the skipping flush is done (the retry
 			// inside newerTouchSurvives must reach it).
 			<-released
 			_ = hold.Rollback(ctx)
+			close(rolledBack)
 		}()
+		// A pgx.Tx is not safe for concurrent use: the retry loop below sees
+		// the stamp as soon as the server drops the row lock, while this
+		// goroutine may still be reading the ROLLBACK reply — wait for it
+		// before the deferred Rollback above runs on the same connection.
+		defer func() { <-rolledBack }()
 		older := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 		newer := older.Add(time.Hour)
 		var clock atomic.Value
@@ -1025,6 +1032,54 @@ func TestRevokeOrderAndIdempotence(t *testing.T) {
 			t.Errorf("audit actions %v, want [create revoke]", actions)
 		}
 	})
+}
+
+// Review (CodeRabbit on PR #95): allowed_cidrs binds a []string to cidr[].
+// pgx has no binary inet plan for a string, so the claim was that create and
+// patch fail at parameter encoding; pgx falls back to the text format for the
+// whole array and encodes each string as text. Pinned end to end — create,
+// patch, clear — so the binding stays under test when W01-5 starts to pass
+// the field.
+func TestConsumerAllowedCIDRsRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	e := mkSetup(t)
+	tenant := mkTenant(ctx, t, e.pool, "mk-cidr", nil)
+	asT := store.ModelAccess{TenantID: tenant}
+	c, _, _, err := store.CreateConsumerWithKey(ctx, e.pool, store.ModelConsumerSpec{
+		TenantID: tenant, Label: "cidr", AllowedCIDRs: []string{"10.0.0.0/8", "192.168.1.0/24"},
+	}, nil, e.stamp)
+	if err != nil {
+		t.Fatalf("create with allowed_cidrs: %v", err)
+	}
+	read := func(want []string) {
+		t.Helper()
+		list, err := store.ListConsumers(ctx, e.pool, asT, store.ListConsumersOptions{})
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for _, got := range list {
+			if got.ID != c.ID {
+				continue
+			}
+			if fmt.Sprint(got.AllowedCIDRs) != fmt.Sprint(want) {
+				t.Fatalf("allowed_cidrs read back = %v, want %v", got.AllowedCIDRs, want)
+			}
+			return
+		}
+		t.Fatalf("consumer %s not listed", c.ID)
+	}
+	read([]string{"10.0.0.0/8", "192.168.1.0/24"})
+	if _, err := store.UpdateConsumer(ctx, e.pool, c.ID, asT, store.ModelConsumerPatch{AllowedCIDRs: []string{"fd00::/8"}}, e.stamp); err != nil {
+		t.Fatalf("patch allowed_cidrs: %v", err)
+	}
+	read([]string{"fd00::/8"})
+	if _, err := store.UpdateConsumer(ctx, e.pool, c.ID, asT, store.ModelConsumerPatch{ClearAllowedCIDRs: true}, e.stamp); err != nil {
+		t.Fatalf("clear allowed_cidrs: %v", err)
+	}
+	read(nil)
 }
 
 func TestModelKeyWritersStamp(t *testing.T) {
