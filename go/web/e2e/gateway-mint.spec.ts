@@ -205,13 +205,62 @@ test.describe('gateway mint (W05-06)', () => {
     await go.click()
     await expect(confirm).toHaveCount(0)
     const revoke = session.calls.filter((c) => c.action === 'model-key-revoke')
-    expect(revoke.map((c) => (c.body as { data?: unknown }).data)).toEqual([{ key_id: '0190000000007000800000000000c0k0' }])
+    expect(revoke.map((c) => (c.body as { data?: unknown }).data)).toEqual([{ key_id: '0190000000007000800000000000c0a1k0' }])
     const toast = page.locator('[data-testid="gateway-toast"]')
     await expect(toast).toContainText('Running streams continue until they finish')
     await expect(toast).not.toContainText('ended')
     await expect(toast).not.toContainText(/\b0\b/)
     // the row follows the server: no live key left
     await expect(ci.locator('[data-consumer-status]')).toHaveText('no key')
+  })
+
+  // Key ids must name exactly one row (Copilot on #121): a revoke of a key of a
+  // NON-first row must take that row's key and leave every other row alone.
+  test('gateway mint G2: revoking a key of a non-first row revokes that key only (ctx-peer-b, not ci-chat)', async ({ page }) => {
+    const session = await open(page)
+    const rows = page.locator('main.content tr[data-consumer-row]')
+    const ci = rows.filter({ hasText: 'ci-chat' })
+    const peer = rows.filter({ hasText: 'ctx-peer-b' })
+    await peer.getByRole('button', { name: 'Revoke key ctxm_…Qe7z' }).click()
+    const confirm = page.getByRole('dialog', { name: 'Revoke key' })
+    await confirm.getByRole('button', { name: 'Revoke', exact: true }).click()
+    await confirm.getByRole('textbox').fill('Qe7z')
+    await confirm.getByRole('button', { name: 'Revoke', exact: true }).click()
+    await expect(confirm).toHaveCount(0)
+    // the peer lost exactly the revoked key; ci-chat is untouched
+    await expect(peer).not.toContainText('ctxm_…Qe7z')
+    await expect(peer).toContainText('ctxm_…mP2c')
+    await expect(peer.locator('[data-consumer-status]')).toHaveText('active')
+    await expect(ci).toContainText('ctxm_…a9Fq')
+    await expect(ci.locator('[data-consumer-status]')).toHaveText('active')
+    const sent = session.calls.filter((c) => c.action === 'model-key-revoke').map((c) => (c.body as { data?: { key_id?: string } }).data?.key_id)
+    expect(sent).toEqual(['0190000000007000800000000000c0a2k0'])
+  })
+
+  test('gateway mint G2: revoking the key of an older created consumer leaves the newer one live', async ({ page }) => {
+    await open(page)
+    for (const label of ['older-app', 'newer-app']) {
+      const dialog = await openCreate(page)
+      await dialog.getByLabel('label', { exact: true }).fill(label)
+      await dialog.getByRole('button', { name: 'Create consumer' }).click()
+      await expect(dialog.getByRole('heading', { name: 'Consumer created' })).toBeVisible()
+      await dialog.getByRole('button', { name: "I've stored it — done" }).click()
+      await expect(createDialog(page)).toHaveCount(0)
+    }
+    const rows = page.locator('main.content tr[data-consumer-row]')
+    const older = rows.filter({ has: page.locator('[data-testid="consumer-label"]', { hasText: /^older-app$/ }) })
+    const newer = rows.filter({ has: page.locator('[data-testid="consumer-label"]', { hasText: /^newer-app$/ }) })
+    // both carry the same hint (ctxm_…sist) — only the key id tells them apart
+    await older.getByRole('button', { name: 'Revoke key ctxm_…sist' }).click()
+    const confirm = page.getByRole('dialog', { name: 'Revoke key' })
+    await expect(confirm).toContainText('older-app')
+    await confirm.getByRole('button', { name: 'Revoke', exact: true }).click()
+    await confirm.getByRole('textbox').fill('sist')
+    await confirm.getByRole('button', { name: 'Revoke', exact: true }).click()
+    await expect(confirm).toHaveCount(0)
+    await expect(older.locator('[data-consumer-status]')).toHaveText('no key')
+    await expect(newer.locator('[data-consumer-status]')).toHaveText('active')
+    await expect(newer).toContainText('ctxm_…sist')
   })
 
   test('gateway mint G2+G5: deactivating types the newest live key tail; a server count shows as "N running streams ended"', async ({ page }) => {

@@ -756,9 +756,15 @@ function scaleConsumer(tenant: TenantKey, i: number): MockConsumer {
   }
 }
 
-/** The key id the list derives for key n of a consumer (stable per world, W05-06). */
-function mockKeyId(c: MockConsumer, n: number): string {
-  return `${c.id.slice(0, -2)}k${n}`
+/**
+ * The key id of key n of a consumer (stable per world, W05-06): the FULL
+ * consumer id + 'k' + n. Consumer ids are hex, so 'k' never occurs in them and
+ * (consumer, n) ↦ key id is injective — a key id names exactly one row. (The
+ * first cut dropped the last two id characters, so …c0a1 and …c0a2 both
+ * yielded …c0k0 and a revoke hit the first matching row — Copilot on #121.)
+ */
+function mockKeyId(c: { id: string }, n: number): string {
+  return `${c.id}k${n}`
 }
 
 function consumerView(c: MockConsumer, serverAdmin: boolean): Record<string, unknown> {
@@ -1059,7 +1065,7 @@ class GatewayWorld {
       status: 'active',
       created_at: created,
       last_used_at: null,
-      keys: [{ id: `${id.slice(0, -2)}k0`, hint: `ctxm_…${REVEAL_MARKER.slice(-4)}`, status: 'active', created_at: created, expires_at: expires, last_used_at: null }],
+      keys: [{ id: mockKeyId({ id }, 0), hint: `ctxm_…${REVEAL_MARKER.slice(-4)}`, status: 'active', created_at: created, expires_at: expires, last_used_at: null }],
       keys_total: 1,
       description: typeof d.description === 'string' ? d.description : '',
       tenant_scope: scope,
