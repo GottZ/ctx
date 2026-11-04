@@ -35,6 +35,8 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		ExternalQueuePerTenant:   31,
 		ExternalQueueMax:         37,
 		ExternalLeaseMax:         41 * time.Second,
+		// A03-W5: the external wait budget.
+		ExternalMaxWait: 43 * time.Second,
 	}
 	o2, ok := dispatch.RankOrderFor(dispatch.ExternalOrderO2)
 	if !ok {
@@ -56,6 +58,7 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		ExternalQueuePerTenant:       31,
 		ExternalQueueMax:             37,
 		ExternalLeaseMax:             41 * time.Second,
+		ExternalMaxWait:              43 * time.Second,
 	}
 	if got := DispatchSettings(in); got != want {
 		t.Fatalf("DispatchSettings = %+v, want %+v", got, want)

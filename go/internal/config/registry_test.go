@@ -206,6 +206,10 @@ func TestRegistryStrictSet(t *testing.T) {
 		"dispatch.external_queue_per_tenant":   true,
 		"dispatch.external_queue_max":          true,
 		"dispatch.external_lease_max":          true,
+		// A03-W5: the one external wait budget bounds every external wait —
+		// a typo'd value silently defaulting to 20 s would hide the intended
+		// bound (and 0 is a switch, "external never waits").
+		"dispatch.external_max_wait": true,
 		// B2: the blob write budget is a CEILING like its rate-limit siblings —
 		// a typo'd value silently defaulting to 10 would hide the intended cap
 		// on the one write surface that costs disk per request.

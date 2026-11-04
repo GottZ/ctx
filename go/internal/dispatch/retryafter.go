@@ -60,6 +60,9 @@ func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 	case ClassBackground:
 		depth = st.background.len()
 	case ClassExternal:
+		// The external window includes the censored samples of expired
+		// waiters (A03-W5, metrics.go) — the estimate does not read only
+		// the survivors.
 		depth = st.external.total
 	default:
 		// Fail-closed (A03-W1): no estimate for a class without a case here

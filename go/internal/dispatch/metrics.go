@@ -24,7 +24,9 @@ const waitRingK = 512
 // samples — immediate and pass-through admissions record their ~0 wait, so
 // the window is the true per-acquire distribution, not just the queued
 // subset (the D3-W6 before/after comparison must see admissions that never
-// waited).
+// waited). The external window also holds CENSORED samples (A03-W5,
+// expireWaiter): an external waiter whose wait budget ran out adds the time
+// it waited — without them the external p95 would measure only the survivors.
 type waitRing struct {
 	// samples holds waits in nanoseconds (admitted − enqueued).
 	samples [waitRingK]int64

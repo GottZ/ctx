@@ -349,7 +349,7 @@ func intFromAny(v any) (int, bool) {
 	return 0, false
 }
 
-// Settings are the config-derived dispatcher knobs (the 14 dispatch.* keys,
+// Settings are the config-derived dispatcher knobs (the 15 dispatch.* keys,
 // all hot + global-only; Fairness and UsageWindow have no key yet). The owner
 // side maps config.DispatchConfig onto this struct and calls UpdateSettings on
 // reload; dispatch never imports config (layering rule).
@@ -422,6 +422,15 @@ type Settings struct {
 	// cancel path of an external lease, independent of alias timeouts up to
 	// 3600 s). ≤ 0 = no external cap, the general reap reference applies.
 	ExternalLeaseMax time.Duration
+	// ExternalMaxWait is the ONE wait budget of an external acquire (A03-W5,
+	// design/03 §4.9, A-E2 no. 2; default 20 s): an external acquire that
+	// has to wait ends with ErrWaitExpired when it runs out (Request.MaxWait
+	// and Request.ServeBy can only shorten it, waitbudget.go). ≤ 0 = an
+	// external acquire never WAITS — admitted at once when admissible, else
+	// ErrWaitExpired at once — fail-closed, NOT unbounded. The in-house
+	// classes have no wait budget. Hot like every setting: a swap acts on
+	// the next acquire; a waiting acquire keeps the budget it started with.
+	ExternalMaxWait time.Duration
 }
 
 // DefaultSettings mirrors the config registry defaults of the dispatch.* keys.
@@ -442,6 +451,7 @@ func DefaultSettings() Settings {
 		ExternalQueuePerTenant:       32,
 		ExternalQueueMax:             64,
 		ExternalLeaseMax:             900 * time.Second,
+		ExternalMaxWait:              20 * time.Second,
 	}
 }
 
