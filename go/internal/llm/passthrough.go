@@ -21,6 +21,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llmlog"
 )
@@ -301,13 +302,15 @@ type rawChatMeta struct {
 // httpx.MaxResponseBytes; ≤ 0 means that cap). A non-200 is a StatusError
 // for the failover classifier, exactly like chatOpenAI.
 //
-// Headers come ONLY from the row (setChatHeaders: extra_headers, then
+// Headers come ONLY from the row and the hop stamp (setChatHeaders:
+// extra_headers, then fedhop.Stamp for the row's hop target, then
 // Content-Type and the row's Authorization): no parameter of either wire can
 // carry an inbound header, so nothing of the client's request
 // (Authorization, X-Api-Key, Cookie, Ctx-*, X-Request-ID) reaches a backend
-// (design/04 §5.2 S1, R-02-2, I-F1). A server-side X-Request-ID for
-// provider_class=ctx rows (K28) arrives with the federation stamp
-// (F-W4/F-W5), at both sites.
+// (design/04 §5.2 S1, R-02-2, I-F1) — an inbound hop chain reaches the stamp
+// through the request context only, set by the ingress. A server-side
+// X-Request-ID for provider_class=ctx rows (K28) arrives with the federation
+// tier of that class, at both sites.
 func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.Duration, maxResp int64) (*RawChatResult, error) {
 	if err := passthroughRow(&b, timeout); err != nil {
 		return nil, err
@@ -321,12 +324,16 @@ func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	setChatHeaders(req, &b)
+	hop := b.HopTarget(fedhop.WireChat)
+	setChatHeaders(req, &b, hop)
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
@@ -400,13 +407,17 @@ func ChatRawStream(ctx context.Context, b backends.Backend, body []byte, timeout
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	setChatHeaders(req, &b)
+	hop := b.HopTarget(fedhop.WireChat)
+	setChatHeaders(req, &b, hop)
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))

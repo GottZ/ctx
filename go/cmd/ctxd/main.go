@@ -733,6 +733,12 @@ func main() {
 	// wizard or the web UI. Loading stays non-fatal — a degraded pool must
 	// not block a boot that served queries yesterday.
 	backendPool := backends.NewPool(pool, settings.BackendSecretResolver(pool))
+	// F-W4 (design/04 §4.4): the pool is the observer of every wire answer —
+	// a row that answers as a ctx instance shows as a status hint. Installed
+	// right after the pool exists, before any wire call: the scheduler's
+	// detached contexts carry no observer of their own (boot happens-before,
+	// as SetDefaultIdentity; TestMainInstallsPoolObserverBeforeScheduler).
+	fedhop.SetDefaultObserver(backendPool)
 	// A04-W4 (design/04 §3.2b): the reconcile below is the boot half of the
 	// embed-cache coupled diff. The listener's diff rides the NOTIFY funnel and
 	// therefore only sees edits made while this process runs; a pool row or

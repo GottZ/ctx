@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -308,13 +309,17 @@ func chatOllama(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	setChatHeaders(req, &b)
+	hop := b.HopTarget(fedhop.WireChat)
+	setChatHeaders(req, &b, hop)
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -395,13 +400,17 @@ func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	setChatHeaders(req, &b)
+	hop := b.HopTarget(fedhop.WireChat)
+	setChatHeaders(req, &b, hop)
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -524,14 +533,19 @@ func allowsDataCollection(b *backends.Backend) bool {
 	return ok && v
 }
 
-// setChatHeaders applies the standard headers, then ExtraHeaders (OpenRouter
-// attribution: HTTP-Referer/X-Title). Core headers are set LAST so a row
-// edited past the credential-carrier denylist can not override the
-// Authorization derived from api_key_ref.
-func setChatHeaders(req *http.Request, b *backends.Backend) {
+// setChatHeaders writes the headers of every chat wire on the OpenAI and
+// Ollama shapes, in three layers: the row's ExtraHeaders (OpenRouter
+// attribution: HTTP-Referer/X-Title), then the hop stamp for target hop
+// (fedhop.Stamp: it first removes every Ctx-/X-Ctx- header a row edited past
+// the denylist carries, then sets the hop marker by tier), then the core
+// headers LAST, so such a row can override neither the marker nor the
+// Authorization derived from api_key_ref. Order: ExtraHeaders → Stamp → core
+// (design/04 §4.1).
+func setChatHeaders(req *http.Request, b *backends.Backend, hop fedhop.Target) {
 	for k, v := range b.ExtraHeaders {
 		req.Header.Set(k, v)
 	}
+	fedhop.Stamp(req.Context(), req.Header, hop)
 	req.Header.Set("Content-Type", "application/json")
 	if b.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+b.APIKey)

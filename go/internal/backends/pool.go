@@ -53,6 +53,9 @@ type healthState struct {
 	lastErrClass     ErrClass
 	lastErrAt        time.Time
 	lastOK           time.Time
+	// peerInstance is the last Ctx-Instance the row answered with ("" =
+	// never; NotePeerInstance, F-W4) — the source of HintAnswersAsCtxInstance.
+	peerInstance string
 }
 
 // Profile is one row of context_disable_profiles (092, Web-UX U01-W1): a named,
@@ -693,6 +696,10 @@ type BackendStatus struct {
 	ConsecutiveFails   int      `json:"consecutive_fails"`
 	LastErrorClass     string   `json:"last_error_class,omitempty"`
 	LastOK             string   `json:"last_ok,omitempty"`
+	// Hints are machine codes of what the wire learned about the row and the
+	// admin should act on (F-W4: HintAnswersAsCtxInstance); omitted when none.
+	// Codes only — no instance id, no URL.
+	Hints []string `json:"hints,omitempty"`
 }
 
 // AdvisorySubjectPool and AdvisoryStateEmpty name the empty-pool advisory
@@ -751,6 +758,9 @@ func (p *Pool) Status() []BackendStatus {
 			if b.Enabled && s.EffectiveState == "active" && h.cooldownUntil.After(now) {
 				s.EffectiveState = "cooldown"
 				s.CooldownRemaining = int(time.Until(h.cooldownUntil).Seconds())
+			}
+			if h.peerInstance != "" {
+				s.Hints = []string{HintAnswersAsCtxInstance}
 			}
 		}
 		out = append(out, s)

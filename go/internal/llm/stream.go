@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -361,9 +362,11 @@ func ChatStream(ctx context.Context, b backends.Backend, model string,
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	// extra_headers first, core headers last (setChatHeaders); Accept is the
-	// stream's core header and goes on after them.
-	setChatHeaders(req, &b)
+	// extra_headers first, then the hop stamp, core headers last
+	// (setChatHeaders); Accept is the stream's core header and goes on after
+	// them.
+	hop := b.HopTarget(fedhop.WireChat)
+	setChatHeaders(req, &b, hop)
 	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
@@ -371,6 +374,11 @@ func ChatStream(ctx context.Context, b backends.Backend, model string,
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// The answer headers before the status and before the first SSE byte: a
+	// 508 echoing the own token must reach the observer, too.
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

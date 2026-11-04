@@ -49,13 +49,30 @@ var bodyCredentialKeys = map[string]bool{
 	"token": true, "secret": true, "password": true, "authorization": true,
 }
 
-func deniedHeader(name string) bool {
+// federationHeaderPrefixes are the names of the hop contract between ctx
+// instances (internal/fedhop, design/04 §4.3): ctx sets them on the wire
+// itself, so a row may set none — on every provider class. X-Ctx- covers the
+// older spelling. The psql path, which skips this validation, is covered on
+// every model wire call by fedhop.Stamp, which removes both prefixes; the
+// backend-test reachability probe (probeBackendURL) and the OpenRouter
+// endpoint discovery (EndpointCache.fetch, orwindow.go) are not stamped yet
+// and still send a psql-written row's headers as they are.
+var federationHeaderPrefixes = []string{"ctx-", "x-ctx-"}
+
+// deniedHeader says why name may not be an extra_headers key ("" = allowed):
+// a reserved federation header, or a credential carrier.
+func deniedHeader(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
-	if headerDenylist[n] {
-		return true
+	for _, p := range federationHeaderPrefixes {
+		if strings.HasPrefix(n, p) {
+			return "is a reserved federation header — ctx sets it on the wire itself"
+		}
 	}
-	return strings.HasSuffix(n, "-token") || strings.HasSuffix(n, "-key") ||
-		strings.HasSuffix(n, "_token") || strings.HasSuffix(n, "_key")
+	if headerDenylist[n] || strings.HasSuffix(n, "-token") || strings.HasSuffix(n, "-key") ||
+		strings.HasSuffix(n, "_token") || strings.HasSuffix(n, "_key") {
+		return "is a credential carrier — use api_key_ref (create the secret first)"
+	}
+	return ""
 }
 
 func findCredentialBodyKey(m map[string]any) string {
@@ -520,12 +537,12 @@ func validateRoles(b *Backend) (warnings []string, errs []FieldError) {
 	return warnings, errs
 }
 
-// validateCarriers covers the credential-carrier denylist and timeouts.
+// validateCarriers covers the header denylist (credential carriers and the
+// reserved federation prefixes), credential body keys and timeouts.
 func validateCarriers(b *Backend) (errs []FieldError) {
 	for name := range b.ExtraHeaders {
-		if deniedHeader(name) {
-			errs = append(errs, FieldError{"extra_headers",
-				fmt.Sprintf("header %q is a credential carrier — use api_key_ref (create the secret first)", name)})
+		if why := deniedHeader(name); why != "" {
+			errs = append(errs, FieldError{"extra_headers", fmt.Sprintf("header %q %s", name, why)})
 		}
 	}
 
