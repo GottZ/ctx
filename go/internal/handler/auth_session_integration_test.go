@@ -43,7 +43,7 @@ import (
 // so the CSRF gate is probed through the REAL middleware chain.
 func asServer(pool *pgxpool.Pool) *httptest.Server {
 	sessH := NewSessionHandler(pool)
-	whoH := NewWhoamiHandler(pool)
+	whoH := NewWhoamiHandler(pool, nil)
 	r := chi.NewRouter()
 	r.Post("/auth/login", sessH.HandleLogin)
 	r.Post("/auth/refresh", sessH.HandleRefresh)

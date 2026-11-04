@@ -45,6 +45,23 @@ export interface Capabilities {
    * is visibility only, like every other cap (R2 — real auth is server-side).
    */
   viewWorkflow: boolean
+  /**
+   * Model-API area (gateway consumers and their `ctxm_` keys, design/05 §4.6,
+   * wave W05-01). server-admin always — the area is prepared before the gateway
+   * is switched on —, tenant-admin once whoami.capabilities.model_api.enabled
+   * is true, member never. Visibility only; no route or nav item reads it yet
+   * (W05-05).
+   */
+  viewModelApi: boolean
+  /**
+   * Create consumers / rotate keys (design/05 §4.6). server-admin always,
+   * tenant-admin only with model_api.enabled AND model_api.self_service — the
+   * action tier the server enforces for model-consumer-create/model-key-rotate
+   * (tierSelfService, V-01-c). Below that tier the handlers still refuse a
+   * tenant-admin kind=ctx-peer and the server-admin-only fields; the dialogs
+   * hide those (W05-06/W05-07).
+   */
+  mintModelKeys: boolean
 }
 
 /** Per-tenant roles that map to the tenant-admin tier (owner manages the tenant, admin co-manages). */
@@ -59,6 +76,8 @@ const NO_CAPS = {
   viewTenantBackends: false,
   viewOpsSurfaces: false,
   viewWorkflow: false,
+  viewModelApi: false,
+  mintModelKeys: false,
 } as const
 
 /**
@@ -79,6 +98,11 @@ export function capabilitiesFor(whoami: WhoamiResponse | null): Capabilities {
 
   const tenantAdminOrUp = tier === 'tenant-admin' || tier === 'server-admin'
   const serverAdmin = tier === 'server-admin'
+  // Server policy, not a tier: only a literal true opens a switch; an absent
+  // bag (older server) leaves both closed.
+  const modelApi = whoami.capabilities?.model_api
+  const gatewayOn = modelApi?.enabled === true
+  const selfService = modelApi?.self_service === true
 
   return {
     tier,
@@ -91,5 +115,7 @@ export function capabilitiesFor(whoami: WhoamiResponse | null): Capabilities {
     // Feature flag, not tier-derived: enabled for ANY resolved tier once the
     // backend sends it, absent (⇒ false) until then (dark-launch, §4.1.3).
     viewWorkflow: whoami.capabilities?.workflow === true,
+    viewModelApi: serverAdmin || (tenantAdminOrUp && gatewayOn),
+    mintModelKeys: serverAdmin || (tenantAdminOrUp && gatewayOn && selfService),
   }
 }

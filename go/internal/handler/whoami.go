@@ -66,12 +66,43 @@ type whoamiResponse struct {
 	// went GA with v4.3.0 (RC-2, user decision 2026-07-04) and is emitted
 	// statically here — the field stays in the wire so a later per-tenant gate
 	// (B9, tenant_limits-style) only changes THIS value, not the SPA. Additive.
+	// model_api (W05-01) carries the gateway policy the same way: data the
+	// SPA derives its model-API caps from, never an authorisation input.
 	Capabilities whoamiCapabilities `json:"capabilities"`
 }
 
 // whoamiCapabilities is the whoami feature-flag bag (design 04-§3.2 B9).
 type whoamiCapabilities struct {
-	Workflow bool `json:"workflow"`
+	Workflow bool           `json:"workflow"`
+	ModelAPI WhoamiModelAPI `json:"model_api"`
+}
+
+// WhoamiModelAPI is the model_api capability (design/05 §4.6, wave W05-01):
+// the _global gateway policy as data, durations in whole seconds. The SPA
+// derives viewModelApi (server-admin, or tenant-admin with Enabled) and
+// mintModelKeys (server-admin, or tenant-admin with Enabled AND SelfService)
+// from it. The bag is UX, not a gate: the server enforces minting on its own
+// (tierSelfService, V-01-c, plus the kind and field tiers of the consumer
+// handlers); the read actions carry no gateway switch, so hiding the area
+// below server-admin while the gateway is off is the SPA's dark launch.
+// Every authenticated caller receives it — server policy, no secret. The zero
+// value is the fail-closed answer (gateway off, self-service off) for a
+// handler without a getter.
+type WhoamiModelAPI struct {
+	// Enabled is gateway.enabled.
+	Enabled bool `json:"enabled"`
+	// SelfService is gateway.tenant_self_service — it opens minting to
+	// tenant-admins only together with Enabled.
+	SelfService bool `json:"self_service"`
+	// KeyMaxLifetimeSeconds is gateway.key_max_lifetime_app: default and
+	// ceiling of a new app key's expiry, 0 = no ceiling. The peer lifetime
+	// (gateway.key_max_lifetime_peer) is not part of the bag (W05-14).
+	KeyMaxLifetimeSeconds int64 `json:"key_max_lifetime_s"`
+	// RotationGraceSeconds is gateway.key_rotation_grace.
+	RotationGraceSeconds int64 `json:"rotation_grace_s"`
+	// ExpiryWarnSeconds is gateway.key_expiry_warn — display only, the key
+	// status itself is computed by the server.
+	ExpiryWarnSeconds int64 `json:"expiry_warn_s"`
 }
 
 // whoamiIdentity is the per-key identity resolved from the DB in one round-trip:
@@ -92,13 +123,27 @@ type WhoamiHandler struct {
 	// name; a function field so unit tests can run the handler without a
 	// database (-short).
 	identityByKeyID func(ctx context.Context, apiKeyID string) (whoamiIdentity, error)
+	// modelAPI reads the gateway policy for capabilities.model_api, once per
+	// request (the gateway.* keys are hot). cmd/ctxd builds it from the
+	// _global snapshot; nil leaves the bag at its zero value.
+	modelAPI func() WhoamiModelAPI
 }
 
-// NewWhoamiHandler creates a new WhoamiHandler.
-func NewWhoamiHandler(pool *pgxpool.Pool) *WhoamiHandler {
-	h := &WhoamiHandler{pool: pool}
+// NewWhoamiHandler creates a new WhoamiHandler. modelAPI is the source of
+// capabilities.model_api; nil answers the zero value (enabled:false).
+func NewWhoamiHandler(pool *pgxpool.Pool, modelAPI func() WhoamiModelAPI) *WhoamiHandler {
+	h := &WhoamiHandler{pool: pool, modelAPI: modelAPI}
 	h.identityByKeyID = h.identityFromDB
 	return h
+}
+
+// modelAPIPolicy is the model_api bag of this request: the getter's answer,
+// or the fail-closed zero value when none is wired.
+func (h *WhoamiHandler) modelAPIPolicy() WhoamiModelAPI {
+	if h.modelAPI == nil {
+		return WhoamiModelAPI{}
+	}
+	return h.modelAPI()
 }
 
 // identityFromDB resolves the calling key's label and the owning tenant's
@@ -170,6 +215,6 @@ func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 		TenantSlug:        id.tenantSlug,
 		TenantDisplayName: id.tenantDisplayName,
 		CSRFToken:         CSRFTokenFromContext(r.Context()),
-		Capabilities:      whoamiCapabilities{Workflow: true},
+		Capabilities:      whoamiCapabilities{Workflow: true, ModelAPI: h.modelAPIPolicy()},
 	})
 }

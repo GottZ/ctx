@@ -202,7 +202,8 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		_, err := forgeSync.StartSync(ctx, project, false)
 		return err
 	})
-	whoamiH := handler.NewWhoamiHandler(pool)
+	// W05-01: capabilities.model_api reads the _global gateway policy per request.
+	whoamiH := handler.NewWhoamiHandler(pool, whoamiModelAPIGetter(cfgStore))
 	// Camo image proxy service (design 07-camo). Fail-closed: disabled unless
 	// CTX_CAMO_ENABLED is set AND the sealbox master key is present; a misconfig
 	// logs and disables rather than crashing boot. Shared by both /api/img routes.

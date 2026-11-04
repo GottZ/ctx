@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ import (
 // enrichment fields (N9) are exercised without a DB.
 func whoamiReqAs(t *testing.T, ar *auth.AuthResult, label string, lookupErr error) *httptest.ResponseRecorder {
 	t.Helper()
-	h := NewWhoamiHandler(nil)
+	h := NewWhoamiHandler(nil, nil)
 	h.identityByKeyID = func(context.Context, string) (whoamiIdentity, error) {
 		return whoamiIdentity{label: label, tenantSlug: "default", tenantDisplayName: "Default Tenant"}, lookupErr
 	}
@@ -121,7 +122,7 @@ func TestWhoami_NoAuthContext401(t *testing.T) {
 // a request without any credentials is rejected by the Auth middleware before
 // the handler runs (empty key short-circuits, the nil pool is never touched).
 func TestWhoami_NoKeyThroughAuthMiddleware(t *testing.T) {
-	h := NewWhoamiHandler(nil)
+	h := NewWhoamiHandler(nil, nil)
 	h.identityByKeyID = func(context.Context, string) (whoamiIdentity, error) {
 		t.Fatal("handler reached without auth — middleware did not gate")
 		return whoamiIdentity{}, nil
@@ -169,13 +170,126 @@ func TestWhoamiGoldenShape(t *testing.T) {
 		PrincipalID:       "22222222-2222-2222-2222-222222222222",
 		TenantSlug:        "default",
 		TenantDisplayName: "Default Tenant",
-		Capabilities:      whoamiCapabilities{Workflow: true},
+		Capabilities: whoamiCapabilities{Workflow: true, ModelAPI: WhoamiModelAPI{
+			Enabled:               true,
+			SelfService:           false,
+			KeyMaxLifetimeSeconds: 31536000,
+			RotationGraceSeconds:  86400,
+			ExpiryWarnSeconds:     1209600,
+		}},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `{"success":true,"label":"example-key","home_scope":"private","read_scopes":["private","shared"],"admin":true,"tenant_id":"00000000-0000-0000-0000-0000000d3fa0","role":"member","api_key_id":"11111111-1111-1111-1111-111111111111","principal_id":"22222222-2222-2222-2222-222222222222","tenant_slug":"default","tenant_display_name":"Default Tenant","capabilities":{"workflow":true}}`
+	want := `{"success":true,"label":"example-key","home_scope":"private","read_scopes":["private","shared"],"admin":true,"tenant_id":"00000000-0000-0000-0000-0000000d3fa0","role":"member","api_key_id":"11111111-1111-1111-1111-111111111111","principal_id":"22222222-2222-2222-2222-222222222222","tenant_slug":"default","tenant_display_name":"Default Tenant","capabilities":{"workflow":true,"model_api":{"enabled":true,"self_service":false,"key_max_lifetime_s":31536000,"rotation_grace_s":86400,"expiry_warn_s":1209600}}}`
 	if string(got) != want {
 		t.Fatalf("golden shape drift:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// whoamiModelAPIHandler builds a handler whose model_api source is get (nil =
+// no getter wired) with a stubbed identity lookup — no database in -short runs.
+func whoamiModelAPIHandler(get func() WhoamiModelAPI) *WhoamiHandler {
+	h := NewWhoamiHandler(nil, get)
+	h.identityByKeyID = func(context.Context, string) (whoamiIdentity, error) {
+		return whoamiIdentity{label: "a key"}, nil
+	}
+	return h
+}
+
+// whoamiModelAPIReq runs GET /api/whoami as ar against h and returns the
+// response's capabilities bag decoded as raw JSON keys, so a renamed or
+// dropped tag fails here and not only at the golden literal.
+func whoamiModelAPIReq(t *testing.T, h *WhoamiHandler, ar *auth.AuthResult) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/whoami", nil)
+	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))
+	rec := httptest.NewRecorder()
+	h.HandleWhoami(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Capabilities map[string]any `json:"capabilities"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Capabilities["workflow"] != true {
+		t.Fatalf("capabilities.workflow = %v, want true (the model_api field is additive)", got.Capabilities["workflow"])
+	}
+	return got.Capabilities
+}
+
+// modelAPIWire is the expected capabilities.model_api object as JSON decodes
+// it (numbers are float64) — the exact key set, so an extra or a missing
+// field fails as well as a wrong value.
+func modelAPIWire(enabled, selfService bool, lifetime, grace, warn float64) map[string]any {
+	return map[string]any{
+		"enabled":            enabled,
+		"self_service":       selfService,
+		"key_max_lifetime_s": lifetime,
+		"rotation_grace_s":   grace,
+		"expiry_warn_s":      warn,
+	}
+}
+
+// TestWhoami_ModelAPICapability pins the model_api capability (design/05
+// §4.6, wave W05-01): the server-side gateway policy travels as DATA — the
+// gateway switch, the self-service switch and the key-lifetime, rotation-grace
+// and expiry-warning windows in whole seconds, straight from the injected
+// getter. The SPA derives viewModelApi/mintModelKeys from it; the server keeps
+// enforcing V-01-c on its own. Without a getter every value is the zero value
+// (enabled:false), never a panic.
+func TestWhoami_ModelAPICapability(t *testing.T) {
+	fixed := func(m WhoamiModelAPI) func() WhoamiModelAPI { return func() WhoamiModelAPI { return m } }
+	cases := []struct {
+		name string
+		ar   *auth.AuthResult
+		get  func() WhoamiModelAPI
+		want map[string]any
+	}{
+		{"no getter wired: fail-closed zero values", adminAR(), nil, modelAPIWire(false, false, 0, 0, 0)},
+		{"gateway off: enabled false, the other values as set", adminAR(),
+			fixed(WhoamiModelAPI{SelfService: true, KeyMaxLifetimeSeconds: 31536000, RotationGraceSeconds: 86400, ExpiryWarnSeconds: 1209600}),
+			modelAPIWire(false, true, 31536000, 86400, 1209600)},
+		{"gateway on, self-service off", adminAR(),
+			fixed(WhoamiModelAPI{Enabled: true, KeyMaxLifetimeSeconds: 31536000, RotationGraceSeconds: 86400, ExpiryWarnSeconds: 1209600}),
+			modelAPIWire(true, false, 31536000, 86400, 1209600)},
+		{"gateway on, self-service on, non-default windows", adminAR(),
+			fixed(WhoamiModelAPI{Enabled: true, SelfService: true, KeyMaxLifetimeSeconds: 2592000, RotationGraceSeconds: 7200, ExpiryWarnSeconds: 172800}),
+			modelAPIWire(true, true, 2592000, 7200, 172800)},
+		{"a member receives the same server policy (no tier filter on the server)", nonAdminAR(),
+			fixed(WhoamiModelAPI{Enabled: true, SelfService: true, KeyMaxLifetimeSeconds: 2592000, RotationGraceSeconds: 7200, ExpiryWarnSeconds: 172800}),
+			modelAPIWire(true, true, 2592000, 7200, 172800)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			caps := whoamiModelAPIReq(t, whoamiModelAPIHandler(tc.get), tc.ar)
+			if !reflect.DeepEqual(caps["model_api"], tc.want) {
+				t.Fatalf("capabilities.model_api = %#v, want %#v", caps["model_api"], tc.want)
+			}
+		})
+	}
+}
+
+// TestWhoami_ModelAPIGetterPerRequest: one handler asks the getter on every
+// request (the gateway.* keys are hot), so a settings write shows on the next
+// whoami without a restart — the value is never cached at construction.
+func TestWhoami_ModelAPIGetterPerRequest(t *testing.T) {
+	calls := 0
+	h := whoamiModelAPIHandler(func() WhoamiModelAPI {
+		calls++
+		return WhoamiModelAPI{Enabled: calls > 1}
+	})
+	first := whoamiModelAPIReq(t, h, adminAR())
+	second := whoamiModelAPIReq(t, h, adminAR())
+	if calls != 2 {
+		t.Fatalf("getter calls = %d, want one per request (2)", calls)
+	}
+	if !reflect.DeepEqual(first["model_api"], modelAPIWire(false, false, 0, 0, 0)) ||
+		!reflect.DeepEqual(second["model_api"], modelAPIWire(true, false, 0, 0, 0)) {
+		t.Fatalf("model_api first/second = %v/%v, want enabled false then true (switch read per request)",
+			first["model_api"], second["model_api"])
 	}
 }

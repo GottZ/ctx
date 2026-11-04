@@ -41,6 +41,27 @@ export interface WhoamiResponse {
   capabilities?: {
     /** The issue/board workflow surface is enabled for this key's tenant. */
     workflow?: boolean
+    /**
+     * The gateway policy (handler/whoami.go WhoamiModelAPI, design/05 §4.6,
+     * wave W05-01) — server data, folded into capabilitiesFor → viewModelApi /
+     * mintModelKeys. Durations are whole seconds straight from the server's
+     * settings (gateway.key_max_lifetime_app, gateway.key_rotation_grace,
+     * gateway.key_expiry_warn); the SPA carries no copy of them. OPTIONAL +
+     * additive: absent on a pre-W05-01 server ⇒ both caps false below
+     * server-admin. The server enforces minting on its own (V-01-c).
+     */
+    model_api?: {
+      /** gateway.enabled. */
+      enabled: boolean
+      /** gateway.tenant_self_service — opens minting to tenant-admins only with `enabled`. */
+      self_service: boolean
+      /** Default and ceiling of a new app key's expiry; 0 = no ceiling. */
+      key_max_lifetime_s: number
+      /** Default grace of a rotation: how long the predecessor key stays valid. */
+      rotation_grace_s: number
+      /** Window before expiry in which a key reads as expiring (display only — status is server-side). */
+      expiry_warn_s: number
+    }
   }
   // Per-Session CSRF-Synchronizer (design 05 §4.4, OAuth R4). NUR am Cookie-
   // Pfad gesetzt (whoami.go, omitempty) — Header-Credential-Calls sehen das
