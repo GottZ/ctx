@@ -232,8 +232,11 @@ func TestExternalWaitBudgetServeBy(t *testing.T) {
 		if l != nil || !errors.Is(err, ErrWaitExpired) || !IsRejection(err) {
 			t.Fatalf("acquire = (lease %v, %v), want ErrWaitExpired as a rejection", l != nil, err)
 		}
-		if el >= 5*time.Millisecond {
-			t.Fatalf("predicted refusal took %v, want < 5ms", el)
+		// "At once" means no enqueue and no timer — the bound only has to sit
+		// far below the 300 ms the ServeBy would otherwise allow; 50 ms leaves
+		// room for scheduler noise and GC on a loaded CI runner.
+		if el >= 50*time.Millisecond {
+			t.Fatalf("predicted refusal took %v, want < 50ms (no enqueue, no timer)", el)
 		}
 		ts := target(t, d)
 		if targetSeq(d) != seq || ts.External.Waiting != 0 || externalQueueResidue(d) != 0 || ts.External.Samples != 0 {
@@ -286,7 +289,7 @@ func TestExternalWaitBudgetZeroNeverWaits(t *testing.T) {
 			saturateWithBackground(t, d)
 			seq := targetSeq(d)
 			l, el, err := timedExternal(t, d, "c1", externalReq())
-			if l != nil || !errors.Is(err, ErrWaitExpired) || el >= 5*time.Millisecond {
+			if l != nil || !errors.Is(err, ErrWaitExpired) || el >= 50*time.Millisecond {
 				t.Fatalf("saturated acquire under budget %v = (lease %v, %v) after %v, want ErrWaitExpired at once", setting, l != nil, err, el)
 			}
 			if ts := target(t, d); targetSeq(d) != seq || ts.ExternalRejects != (ExternalRejectStats{Predicted: 1}) {
