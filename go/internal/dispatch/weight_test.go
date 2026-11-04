@@ -18,7 +18,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -146,17 +149,37 @@ func TestWeightAboveCapacityIsNotOffered(t *testing.T) {
 		l.Release()
 	})
 	t.Run("self-admitting without cap admits any weight up to the bound", func(t *testing.T) {
+		// The bound is the literal math.MaxInt32, never derived from the
+		// constant (review 2 F-B): a wider ExternalWeightUnbounded such as
+		// math.MaxInt lets the sum of two such weights wrap, and "one above"
+		// computed from the constant itself would wrap to a negative weight
+		// that is refused for the wrong reason. Three leases at the bound
+		// hold 3 × MaxInt32 units in the 64-bit sums without wrapping.
+		const bound = math.MaxInt32
 		pol := Policy{Targets: map[string]TargetPolicy{testOrigin: {ExternalOffer: true}}}
 		d, _ := newTestDispatcher(t, DefaultSettings(), pol)
-		l := mustAcquire(t, d, xctx(context.Background(), "c1", "tenant-a"), weightedReq(ExternalWeightUnbounded))
-		if ts := target(t, d); ts.HeldExternalWeight != ExternalWeightUnbounded || ts.HeldExternal != 1 {
-			t.Fatalf("w=unbounded: HeldExternalWeight=%d HeldExternal=%d", ts.HeldExternalWeight, ts.HeldExternal)
+		if got := d.ExternalWeightCap(testOrigin); got != bound {
+			t.Fatalf("ExternalWeightCap without a cap = %d, want the representation bound %d (math.MaxInt32)", got, bound)
 		}
-		l.Release()
-		over := ExternalWeightUnbounded
-		over++
-		if _, _, err := acquireWithin(t, d, xctx(context.Background(), "c1", "tenant-a"), weightedReq(over), time.Second); !errors.Is(err, ErrExternalNotOffered) {
-			t.Fatalf("w above the unbounded constant: err=%v, want ErrExternalNotOffered", err)
+		var leases []*Lease
+		for i := 1; i <= 3; i++ {
+			leases = append(leases, mustAcquire(t, d, xctx(context.Background(), fmt.Sprintf("c%d", i), "tenant-a"), weightedReq(bound)))
+		}
+		ts := target(t, d)
+		if want := 3 * int64(bound); int64(ts.HeldExternalWeight) != want || int64(ts.HeldWeight) != want || ts.HeldExternal != 3 || ts.Held != 3 {
+			t.Fatalf("three leases at the bound: HeldExternalWeight=%d HeldWeight=%d HeldExternal=%d Held=%d, want %d/%d/3/3 — the weight sums must not wrap",
+				ts.HeldExternalWeight, ts.HeldWeight, ts.HeldExternal, ts.Held, want, want)
+		}
+		for _, over := range []int64{int64(bound) + 1, math.MaxInt64} {
+			if _, _, err := acquireWithin(t, d, xctx(context.Background(), "c9", "tenant-a"), weightedReq(int(over)), time.Second); !errors.Is(err, ErrExternalNotOffered) {
+				t.Fatalf("w=%d above the bound: err=%v, want ErrExternalNotOffered", over, err)
+			}
+		}
+		for _, l := range leases {
+			l.Release()
+		}
+		if ts := target(t, d); ts.HeldWeight != 0 || ts.HeldExternalWeight != 0 || ts.Held != 0 {
+			t.Fatalf("after the releases: HeldWeight=%d HeldExternalWeight=%d Held=%d, want 0/0/0", ts.HeldWeight, ts.HeldExternalWeight, ts.Held)
 		}
 	})
 	t.Run("zero weight reads as one", func(t *testing.T) {
@@ -238,7 +261,9 @@ func TestWeightDetectorContract(t *testing.T) {
 // TestExternalWeightCap pins the chain-build read: E_eff of an offered
 // target, 0 when it does not offer (no R, no offer, emergency stop, unknown
 // origin), the named unbounded constant on an offered self-admitting target
-// without a cap; raw spellings resolve to the canonical origin.
+// without a cap — pinned as the literal math.MaxInt32, the overflow bound of
+// the weight sum (review 2 F-B) —; raw spellings resolve to the canonical
+// origin.
 func TestExternalWeightCap(t *testing.T) {
 	cases := []struct {
 		name string
@@ -249,7 +274,7 @@ func TestExternalWeightCap(t *testing.T) {
 		{name: "slot-managed narrowed by external_max_inflight 3", tp: TargetPolicy{Slots: weightSlots, InternalReserved: weightReserved, ExternalMaxInflight: 3}, want: 3},
 		{name: "slot-managed without R", tp: TargetPolicy{Slots: weightSlots}, want: 0},
 		{name: "self-admitting with external_max_inflight 4", tp: TargetPolicy{ExternalOffer: true, ExternalMaxInflight: 4}, want: 4},
-		{name: "self-admitting without cap", tp: TargetPolicy{ExternalOffer: true}, want: ExternalWeightUnbounded},
+		{name: "self-admitting without cap", tp: TargetPolicy{ExternalOffer: true}, want: math.MaxInt32},
 		{name: "self-admitting without offer", tp: TargetPolicy{ExternalMaxInflight: 4}, want: 0},
 	}
 	for _, tc := range cases {
@@ -453,11 +478,28 @@ func TestWeightPreemptCountsUnits(t *testing.T) {
 // background waits, the in-house side holds at least R units.
 func TestWeightPartitionUnderMixedLoad(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
-	var ext, bg atomic.Int64
+	// The test's own sums: raised after an admission, lowered before the
+	// release, so at any instant they lie at or below the dispatcher's true
+	// sums. One mutex for both — two separate atomic loads would pair an
+	// external sum from before a release with a background sum from after the
+	// handoff that release made, and report a false ext+bg > S.
+	var sums struct {
+		sync.Mutex
+		ext, bg int64
+	}
+	add := func(ext, bg int64) {
+		sums.Lock()
+		sums.ext += ext
+		sums.bg += bg
+		sums.Unlock()
+	}
 	var fail atomic.Value
 	report := func(format string, args ...any) { fail.CompareAndSwap(nil, fmt.Sprintf(format, args...)) }
 	check := func(where string) {
-		if e, b := ext.Load(), bg.Load(); e > weightE || e+b > weightSlots {
+		sums.Lock()
+		e, b := sums.ext, sums.bg
+		sums.Unlock()
+		if e > weightE || e+b > weightSlots {
 			report("%s: own sums ext=%d bg=%d, want ext <= E=%d and ext+bg <= S=%d", where, e, b, weightE, weightSlots)
 		}
 		ts := target(t, d)
@@ -491,10 +533,10 @@ func TestWeightPartitionUnderMixedLoad(t *testing.T) {
 					report("consumer %d acquire w=%d: %v", c, w, err)
 					return
 				}
-				ext.Add(int64(w))
+				add(int64(w), 0)
 				check(fmt.Sprintf("external handoff c%d w=%d", c, w))
 				time.Sleep(time.Duration(rng.Intn(800)) * time.Microsecond)
-				ext.Add(-int64(w))
+				add(-int64(w), 0)
 				l.Release()
 			}
 		}(c)
@@ -517,11 +559,11 @@ func TestWeightPartitionUnderMixedLoad(t *testing.T) {
 				if err != nil {
 					return
 				}
-				bg.Add(1)
+				add(0, 1)
 				bgServed.Add(1)
 				check("background handoff")
 				time.Sleep(time.Duration(rng.Intn(800)) * time.Microsecond)
-				bg.Add(-1)
+				add(0, -1)
 				l.Release()
 			}
 		}(i)
@@ -820,4 +862,56 @@ func TestWeightPeekIsThePickAcrossBuckets(t *testing.T) {
 			x.lease.Release()
 		}
 	}
+}
+
+// levelsOf returns the levels of the records whose message contains sub
+// (levelRecorder, consumer_gate_test.go).
+func (h *levelRecorder) levelsOf(sub string) []slog.Level {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []slog.Level
+	for _, r := range h.recs {
+		if strings.Contains(r.Message, sub) {
+			out = append(out, r.Level)
+		}
+	}
+	return out
+}
+
+// TestWeightRefusalsLogAtWarn (review 2 F-C): the weight refusals are a
+// configuration error and log at WARN (briefing (c), design/03 §4.7) — the
+// door refusal once per refused acquire through both doors, the swap drain
+// once per drain. A record at INFO would vanish from the default log level.
+func TestWeightRefusalsLogAtWarn(t *testing.T) {
+	const door = "heavier than its target's external capacity (or with a negative weight) refused"
+	const drain = "waiting acquires ended after the capacity shrank"
+	h := &levelRecorder{}
+	d := New(slog.New(h), DefaultSettings())
+	d.UpdatePolicy(weightPolicy())
+	t.Cleanup(d.Close)
+
+	if _, _, err := d.Acquire(xctx(context.Background(), "c1", "tenant-a"), weightedReq(weightE+1)); !errors.Is(err, ErrExternalNotOffered) {
+		t.Fatalf("acquire w=E+1: err=%v, want ErrExternalNotOffered", err)
+	}
+	if _, _, err := d.TryAcquire(xctx(context.Background(), "c1", "tenant-a"), weightedReq(weightE+1)); !errors.Is(err, ErrExternalNotOffered) {
+		t.Fatalf("try-acquire w=E+1: err=%v, want ErrExternalNotOffered", err)
+	}
+	if got := h.levelsOf(door); len(got) != 2 || got[0] != slog.LevelWarn || got[1] != slog.LevelWarn {
+		t.Fatalf("door refusal records at %v, want exactly two at WARN (one per refused acquire)", got)
+	}
+
+	occ := mustAcquire(t, d, xctx(context.Background(), "occ", "tenant-a"), weightedReq(weightE))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := make(chan admission, 1)
+	startWaiter(xctx(ctx, "c2", "tenant-b"), d, "heavy", weightedReq(4), ch)
+	waitFor(t, "w=4 external queued", func() bool { return waitingExternal(d) == 1 })
+	d.UpdatePolicy(partitionPolicy(weightSlots, 4)) // E = 3 < 4
+	if a := recvAdmission(t, ch, "overweight waiter after the shrink"); !errors.Is(a.err, ErrExternalNotOffered) {
+		t.Fatalf("after the shrink: err=%v, want ErrExternalNotOffered", a.err)
+	}
+	if got := h.levelsOf(drain); len(got) != 1 || got[0] != slog.LevelWarn {
+		t.Fatalf("drain records at %v, want exactly one at WARN", got)
+	}
+	occ.Release()
 }
