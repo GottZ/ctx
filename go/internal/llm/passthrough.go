@@ -590,11 +590,20 @@ func (r *WalkRules) timeoutFor(b *backends.Backend, role string) time.Duration {
 // rule: a 4xx other than 404, or a provider error event without a status
 // (request-specific by its type). 404 (the row does not know the model) and
 // a 3xx (a cross-origin redirect the pool client refused, F-W1) are row
-// configuration faults, never the client's — they move on unconditionally.
+// configuration faults, never the client's — they move on unconditionally,
+// and so do the status-less twins of a 404: the anthropic not_found_error
+// and the gateway codes not_found/model_not_found (404 in oai.Codes).
 func windowBound(err error) bool {
 	var se *httpx.StatusError
 	if errors.As(err, &se) {
 		return se.Code >= 400 && se.Code < 500 && se.Code != http.StatusNotFound
+	}
+	var pe interface{ ProviderErrorType() string }
+	if errors.As(err, &pe) {
+		switch pe.ProviderErrorType() {
+		case "not_found_error", "not_found", "model_not_found":
+			return false
+		}
 	}
 	return true
 }

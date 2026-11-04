@@ -598,6 +598,22 @@ func TestChatRawErrors(t *testing.T) {
 	}
 }
 
+// maxResp is clamped to httpx.MaxResponseBytes: a larger (or ≤ 0) cap reads
+// at most that many bytes — a valid answer padded one byte past the harness
+// cap is refused, never decoded (fremd-review 2 W02-06 F-2).
+func TestChatRawClampsResponseCap(t *testing.T) {
+	padded := ptOKReply + strings.Repeat(" ", int(httpx.MaxResponseBytes)-len(ptOKReply)+1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, padded)
+	}))
+	defer srv.Close()
+	for _, maxResp := range []int64{2 * httpx.MaxResponseBytes, 0, -1} {
+		if _, err := ChatRaw(context.Background(), ptRow(srv.URL), []byte(`{}`), 30*time.Second, maxResp); !errors.Is(err, httpx.ErrResponseTooLarge) {
+			t.Errorf("maxResp %d, body MaxResponseBytes+1: err = %v, want ErrResponseTooLarge (clamped to the harness cap)", maxResp, err)
+		}
+	}
+}
+
 const ptStream = ": OPENROUTER PROCESSING\n\n" +
 	"data: {\"id\":\"up-s\",\"model\":\"served\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
 	"data: {\"id\":\"up-s\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n" +
@@ -935,6 +951,23 @@ func TestWalkStatuslessBadRequestIsWindowBound(t *testing.T) {
 		map[string]ptStep{"spark": {err: ev}})
 	if served != nil || !errors.As(err, new(*StreamError)) || !reflect.DeepEqual(w.calls, []string{"spark"}) {
 		t.Errorf("served = %v calls = %v err = %v, want STOP on spark", served, w.calls, err)
+	}
+}
+
+// The status-less twins of a 404 — the anthropic not_found_error, the
+// gateway codes not_found/model_not_found — move on like the 404 itself
+// instead of falling under the window rule (fremd-review 2 W02-06 F-3).
+func TestWalkStatuslessNotFoundMovesOn(t *testing.T) {
+	for _, code := range []string{"not_found_error", "not_found", "model_not_found"} {
+		ev := &StreamError{Code: code, Message: "no such model"}
+		if c := backends.Classify(ev, ""); c != backends.ClassBadRequest {
+			t.Fatalf("precondition %s: Classify = %v, want bad_request", code, c)
+		}
+		w, served, _, err := ptRun(t, newPTAcquirer(t), []backends.Backend{ptChainRow("spark", 262144), ptChainRow("cpu", 98304)}, ptRules,
+			map[string]ptStep{"spark": {err: ev}})
+		if err != nil || served == nil || served.Name != "cpu" || !reflect.DeepEqual(w.calls, []string{"spark", "cpu"}) {
+			t.Errorf("%s: served = %v calls = %v err = %v, want cpu (like a 404)", code, served, w.calls, err)
+		}
 	}
 }
 

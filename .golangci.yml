@@ -164,6 +164,10 @@ linters:
               desc: "internal/oai serves models, not the corpus — the event stream is out of reach of a model key (design/02 §4.1 L6, B15c)"
             - pkg: "github.com/GottZ/ctx/internal/store$"
               desc: "internal/oai serves models, not the corpus — the block store is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "net/http/httputil$"
+              desc: "internal/oai never proxies to a backend itself — every upstream call is llm.ChatRaw/ChatRawStream under llm.WalkChain (admission, overlay, egress choice, header rule; design/02 §4.1 L4, B14/B19)"
+            - pkg: "crypto/tls$"
+              desc: "internal/oai dials no backend — TLS to a backend lives in the httpx pool clients behind the llm wire sites (design/02 §4.1 L4, B14/B19)"
 
         # Leaf doctrine (design/01-schnitt.md §4.5, masterplan K7/K11 + A-4).
         # Seven packages are leaves BY DESIGN; until now the doctrine lived only

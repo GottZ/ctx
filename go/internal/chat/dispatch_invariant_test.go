@@ -588,18 +588,60 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 	return ok && id.Name == pkg
 }
 
+// oaiForbiddenImports are import paths internal/oai never takes, whatever
+// local name: a reverse proxy or a TLS dial would talk to a backend past
+// admission, overlay, egress choice and the header rule (B14/B19; fremd-
+// review 2 W02-06 F-1). depguard rule oai-isolation (.golangci.yml) bans
+// the same paths at lint time; this is the test-time half.
+var oaiForbiddenImports = map[string]bool{
+	"net/http/httputil": true,
+	"crypto/tls":        true,
+}
+
+// oaiForbiddenRefs are the package-level names internal/oai never uses, keyed
+// by IMPORT PATH (resolved per file, so an import alias — h "net/http" —
+// changes nothing): wire calls and every client, transport or dialer.
+// Without a client value the Get/Post METHODS of one are unreachable, so
+// they need no receiver-blind rule (r.Header.Get stays legal).
+var oaiForbiddenRefs = map[string]map[string]bool{
+	"net/http": {
+		"Get": true, "Head": true, "Post": true, "PostForm": true, "NewRequest": true, "NewRequestWithContext": true,
+		"Client": true, "DefaultClient": true, "Transport": true, "DefaultTransport": true,
+	},
+	"net":                                 {"Dialer": true},
+	"github.com/GottZ/ctx/internal/httpx": {"DoRetryOnce": true, "PooledClient": true, "GuardedPooledClient": true, "NewClients": true, "Clients": true},
+}
+
+// importNames maps each file-local package name to its import path: the
+// alias when one is given, else the path's last element (true for every path
+// the oai rules name). Dot and blank imports come back separately.
+func importNames(f *ast.File) (names map[string]string, dotted []string) {
+	names = map[string]string{}
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		switch {
+		case imp.Name == nil:
+			names[path[strings.LastIndex(path, "/")+1:]] = path
+		case imp.Name.Name == ".":
+			dotted = append(dotted, path)
+		case imp.Name.Name != "_":
+			names[imp.Name.Name] = path
+		}
+	}
+	return names, dotted
+}
+
 // TestOAIPackageHasNoWireCalls is the AST half of the oai pin 0 (design/02
 // §5 B14). No non-test file of internal/oai
-//   - calls (*http.Client).Do — any method named Do is counted, fail-closed,
-//     because the AST carries no types (a sync.Once.Do there trips this pin:
-//     teach the pin the receiver, never drop the rule) — nor RoundTrip,
-//     DialContext, httpx.DoRetryOnce, http.Get/Head/Post/PostForm,
-//     http.NewRequest(WithContext) or net.Dial*;
-//   - names a client or transport at all: http.Client, http.DefaultClient,
-//     http.Transport, http.DefaultTransport, net.Dialer, httpx.PooledClient,
-//     httpx.GuardedPooledClient, httpx.NewClients, httpx.Clients. Without a
-//     client value the Get/Post methods of one are unreachable, so they need
-//     no receiver-blind rule (r.Header.Get stays legal).
+//   - imports net/http/httputil or crypto/tls (oaiForbiddenImports), or
+//     dot-imports a package the rules below name;
+//   - names a package-level wire call, client, transport or dialer of
+//     net/http, net or httpx (oaiForbiddenRefs; net.Dial* by prefix) — the
+//     package is resolved through the file's imports, so an alias does not
+//     hide it;
+//   - calls a method named Do, RoundTrip or DialContext on any receiver —
+//     fail-closed, because the AST carries no types (a sync.Once.Do there
+//     trips this pin: teach the pin the receiver, never drop the rule).
 func TestOAIPackageHasNoWireCalls(t *testing.T) {
 	dir := filepath.Join(internalDir(t), "oai")
 	entries, err := os.ReadDir(dir)
@@ -614,14 +656,23 @@ func TestOAIPackageHasNoWireCalls(t *testing.T) {
 		}
 		files++
 		f := parseWireFile(t, filepath.Join("oai", name))
+		names, dotted := importNames(f)
+		for _, imp := range f.Imports {
+			if path := strings.Trim(imp.Path.Value, `"`); oaiForbiddenImports[path] {
+				t.Errorf("oai/%s imports %s — internal/oai never talks to a backend itself (wire pin 0)", name, path)
+			}
+		}
+		for _, path := range dotted {
+			if _, ruled := oaiForbiddenRefs[path]; ruled || oaiForbiddenImports[path] {
+				t.Errorf("oai/%s dot-imports %s — the pin cannot see its names; import it by name", name, path)
+			}
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			if sel, ok := n.(*ast.SelectorExpr); ok {
-				for _, ref := range [...][2]string{
-					{"http", "Client"}, {"http", "DefaultClient"}, {"http", "Transport"}, {"http", "DefaultTransport"},
-					{"net", "Dialer"}, {"httpx", "PooledClient"}, {"httpx", "GuardedPooledClient"}, {"httpx", "NewClients"}, {"httpx", "Clients"},
-				} {
-					if isSelector(sel, ref[0], ref[1]) {
-						t.Errorf("oai/%s names %s.%s — internal/oai holds no backend client (wire pin 0)", name, ref[0], ref[1])
+				if id, ok := sel.X.(*ast.Ident); ok {
+					path := names[id.Name]
+					if oaiForbiddenRefs[path][sel.Sel.Name] || (path == "net" && strings.HasPrefix(sel.Sel.Name, "Dial")) {
+						t.Errorf("oai/%s names %s.%s (%s) — internal/oai holds no backend client and makes no wire call (wire pin 0)", name, id.Name, sel.Sel.Name, path)
 					}
 				}
 			}
@@ -629,12 +680,7 @@ func TestOAIPackageHasNoWireCalls(t *testing.T) {
 			if !ok {
 				return true
 			}
-			recv, fn := selectorCall(call)
-			switch {
-			case fn == "Do", fn == "RoundTrip", fn == "DialContext",
-				recv == "httpx" && fn == "DoRetryOnce",
-				recv == "http" && (fn == "Get" || fn == "Head" || fn == "Post" || fn == "PostForm" || fn == "NewRequest" || fn == "NewRequestWithContext"),
-				recv == "net" && strings.HasPrefix(fn, "Dial"):
+			if recv, fn := selectorCall(call); fn == "Do" || fn == "RoundTrip" || fn == "DialContext" {
 				t.Errorf("oai/%s calls %s.%s — internal/oai has wire pin 0; backend calls belong to internal/llm", name, recv, fn)
 			}
 			return true
