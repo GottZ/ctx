@@ -56,9 +56,11 @@ type usageStats struct {
 	// (preempt, wire error, reap before the usage arrived) — charge 0 plus
 	// visibility instead of a made-up estimate (C1).
 	unchargedCalls atomic.Int64
-	// opsTotal counts Acquire+Release mutex sections (ops/s source) and
-	// maxOpNs holds the longest observed section — the two hot-path
-	// measurement hooks of design/04 §6.
+	// opsTotal counts the measured mutex sections — Acquire, TryAcquire,
+	// Release, and since A03-W17 the Retry-After hint (a /v1 hot path) and
+	// the wait publication's copy sections (ops/s source) — and maxOpNs
+	// holds the longest observed section: the two hot-path measurement hooks
+	// of design/04 §6.
 	opsTotal atomic.Int64
 	maxOpNs  atomic.Int64
 }
@@ -208,6 +210,13 @@ func (d *Dispatcher) bucketSnapshotsLocked(st *targetState, now time.Time) []Buc
 			bs := get(class, key, b[0].principal.TenantID)
 			bs.Waiting = len(b)
 			bs.OldestWait = now.Sub(b[0].enqueued) // per-bucket FIFO: head is oldest
+		}
+		// A waiting continuation (A03-W17) belongs to its consumer's bucket
+		// view although it waits at the class head (classQueue.cont).
+		for _, w := range q.cont {
+			bs := get(class, q.bucketKey(w.principal), w.principal.TenantID)
+			bs.Waiting++
+			bs.OldestWait = max(bs.OldestWait, now.Sub(w.enqueued))
 		}
 	}
 	for l := range st.inflight {

@@ -295,6 +295,27 @@ type Request struct {
 	// lease duration once A03-W6 measures it), and a budget that is already
 	// ≤ 0 when the acquire would have to wait is ErrWaitExpired at once.
 	ServeBy time.Time
+	// Continuation marks the next sub-block of an EXTERNAL request whose
+	// earlier sub-block already held a lease (masterplan K21, wave A03-W17;
+	// design/02 §9.2 A03-6): the walker released block k and asks for block
+	// k+1 of the same attempt. A continuation waits at the HEAD of its class
+	// — before every waiter that is not a continuation, whatever its bucket
+	// (classQueue.cont) — and is exempt from the external cap ladder and from
+	// the wait budget (ExternalMaxWait, MaxWait and ServeBy are not read):
+	// the request was admitted once, and a 429 between its sub-blocks would
+	// throw away the finished ones. It ends only with an admission, its ctx,
+	// a withdrawn offer or the emergency stop (ErrExternalNotOffered, X9) or
+	// the overweight drain after a swap (A03-W7). It is an acquire like any
+	// other — one lease, one release (Σacquire == Σwire) — and it is counted
+	// like any waiter in the queue depth newcomers see. Rank order and
+	// partition still hold: a waiting, admissible interactive head goes
+	// first, background goes first under o2, and the continuation never
+	// takes a unit beyond E. The in-house classes ignore the field. Only the
+	// /v1 planner sets it (A03-W8: Continue only after a First lease of the
+	// same request, pinned by its census); the dispatcher sets no
+	// per-request bound on continuations — each request asks for at most one
+	// at a time, so their number is bounded by the requests in flight.
+	Continuation bool
 }
 
 // Wrap error doctrine (K1, binding since MW1): the two cancel causes WRAP
@@ -400,3 +421,22 @@ func IsRejection(err error) bool {
 type Admitter interface {
 	Acquire(ctx context.Context, req Request) (*Lease, context.Context, error)
 }
+
+// TryAdmitter is the OPTIONAL non-blocking door of an Admitter (Q-I3,
+// design/03 §4.4; for the external class masterplan K21, wave A03-W17):
+// TryAcquire admits through the predicate of Acquire's immediate half or
+// answers ErrWouldBlock at once — no waiter, no wait slot, no wait budget.
+// Kept separate from Admitter like RetryHinter, so the many fake admitters
+// need not implement it. A caller that needs the non-blocking door
+// type-asserts it and FAILS without it; it never falls back onto the
+// blocking Acquire (design/02 §4.11.1 L5: exactly one wait point per
+// request — llm.Admission.TryAcquire, the Next door of the /v1 walk).
+type TryAdmitter interface {
+	TryAcquire(ctx context.Context, req Request) (*Lease, context.Context, error)
+}
+
+// The dispatcher offers both doors.
+var (
+	_ Admitter    = (*Dispatcher)(nil)
+	_ TryAdmitter = (*Dispatcher)(nil)
+)

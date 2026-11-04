@@ -38,12 +38,15 @@ func externalWaitBudget(set Settings, req Request, now time.Time) time.Duration 
 
 // waitBudgetLocked resolves the wait budget of an acquire that has to wait —
 // called after the immediate admission failed and BEFORE the enqueue: 0 for
-// the in-house classes (no budget, no timer), MaxWait_eff (> 0) for an
-// external class, or ErrWaitExpired when that budget is already ≤ 0 (reason
-// predicted, counted; the acquire is never queued and never touches the cap
-// ladder).
-func (d *Dispatcher) waitBudgetLocked(st *targetState, class Class, req Request, now time.Time) (time.Duration, error) {
-	if !class.External() {
+// the in-house classes (no budget, no timer) and for a continuation (A03-W17,
+// masterplan K21: the next sub-block of an admitted request waits at the
+// class head until admission, its ctx or a withdrawn offer — the exemption
+// stands BEFORE every budget term, A03-W6's prediction included), MaxWait_eff
+// (> 0) for an external class, or ErrWaitExpired when that budget is already
+// ≤ 0 (reason predicted, counted; the acquire is never queued and never
+// touches the cap ladder).
+func (d *Dispatcher) waitBudgetLocked(st *targetState, w *waiter, req Request, now time.Time) (time.Duration, error) {
+	if !w.class.External() || w.cont {
 		return 0, nil
 	}
 	budget := externalWaitBudget(d.currentSettings(), req, now)

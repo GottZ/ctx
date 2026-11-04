@@ -41,7 +41,8 @@ type ExternalRejectStats struct {
 // once and with one WARN: it could never be admitted, so it must never wait
 // (design/03 §4.7 — a configuration error such as a sub-batch or n above E,
 // not a rejection). In-house requests keep the clause unchanged:
-// pass-through with slots ≤ 0, else the rank scan's eligibleNow.
+// pass-through with slots ≤ 0, else the rank scan's eligibleNow; a
+// continuation (A03-W17) is eligible as the head of the external class.
 func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (*Lease, error) {
 	slots := d.slotsLocked(st.origin)
 	if w.class == ClassExternal {
@@ -61,7 +62,13 @@ func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (
 		// behavior, tracked for telemetry only.
 		return d.admitLocked(st, w, now, false), nil
 	}
-	if d.eligibleNowLocked(st, w.class, w.weight, slots) {
+	eligible := false
+	if w.cont {
+		eligible = d.continuationEligibleNowLocked(st, w.weight, slots)
+	} else {
+		eligible = d.eligibleNowLocked(st, w.class, w.weight, slots)
+	}
+	if eligible {
 		return d.admitLocked(st, w, now, true), nil
 	}
 	return nil, nil
