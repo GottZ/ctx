@@ -39,6 +39,10 @@ type waiter struct {
 	// external class gets ErrExternalNotOffered instead of a pass-through
 	// handoff (X9). nil on every admission.
 	err error
+	// weight is the number of slot units the lease will hold (A03-W7,
+	// requestWeight): Request.Weight for the external class, always 1 for
+	// the in-house classes.
+	weight int
 }
 
 // classQueue is a per-principal wait queue of one target: per-bucket FIFOs
@@ -66,6 +70,11 @@ type classQueue struct {
 	byKey    map[string]int
 	byTenant map[string]int
 	total    int
+	// maxWeight is an upper bound of the waiting weights (A03-W7): raised on
+	// push, reset when the queue empties, recomputed by the overweight drain
+	// — the O(1) guard that keeps the drain off the release path while every
+	// waiter fits.
+	maxWeight int
 }
 
 func newClassQueue() *classQueue {
@@ -108,6 +117,9 @@ func (q *classQueue) push(w *waiter) {
 		q.ring = append(q.ring, key)
 	}
 	q.buckets[key] = append(q.buckets[key], w)
+	if w.weight > q.maxWeight {
+		q.maxWeight = w.weight
+	}
 	q.byKey[q.capKey(w.principal)]++
 	if w.principal.TenantID != "" {
 		q.byTenant[w.principal.TenantID]++
@@ -133,6 +145,16 @@ func (q *classQueue) pick(mode FairnessMode) *waiter {
 		return q.popHead(key)
 	}
 	// fifo: global arrival order via the monotone per-target seq.
+	best := q.fifoHeadKey()
+	if best == "" {
+		return nil
+	}
+	return q.popHead(best)
+}
+
+// fifoHeadKey is the bucket whose head has the smallest seq ("" when
+// empty): the bucket pick(FairnessFIFO) dequeues from.
+func (q *classQueue) fifoHeadKey() string {
 	best := ""
 	var bestSeq uint64
 	for key, b := range q.buckets {
@@ -143,10 +165,22 @@ func (q *classQueue) pick(mode FairnessMode) *waiter {
 			best, bestSeq = key, b[0].seq
 		}
 	}
-	if best == "" {
+	return best
+}
+
+// peekFIFO returns the waiter pick(FairnessFIFO) would dequeue, without
+// dequeuing it, or nil — the weight check of the external head (A03-W7:
+// the head is admissible with ITS weight or not). The external fairness pick
+// (A03-W4) needs the same view under its own mode.
+func (q *classQueue) peekFIFO() *waiter {
+	if q.total == 0 {
 		return nil
 	}
-	return q.popHead(best)
+	key := q.fifoHeadKey()
+	if key == "" {
+		return nil
+	}
+	return q.buckets[key][0]
 }
 
 // popHead removes and returns the head of one bucket, maintaining counters
@@ -200,6 +234,9 @@ func (q *classQueue) uncount(w *waiter) {
 		}
 	}
 	q.total--
+	if q.total == 0 {
+		q.maxWeight = 0
+	}
 }
 
 func (q *classQueue) dropRingKey(key string) {

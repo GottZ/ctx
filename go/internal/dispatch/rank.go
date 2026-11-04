@@ -107,9 +107,10 @@ func (d *Dispatcher) resolveRankOrder(order [numClasses]Class) [numClasses]Class
 // interactive held + w ≤ slots; background held + w ≤ slots ∧ demand == 0
 // (the herald term — it keeps background out of the inter-lease gaps of
 // running interactive requests, R3, not softenable here); external see
-// externalAdmissibleLocked. Callers pass w = 1; the real weight source is
-// A03-W7. A class without a case is never admissible (fail-closed default,
-// A03-W1 pattern).
+// externalAdmissibleLocked. w is the waiter's weight in slot units (A03-W7:
+// Request.Weight for the external class, always 1 in-house — requestWeight),
+// and held is the sum of the weights. A class without a case is never
+// admissible (fail-closed default, A03-W1 pattern).
 func (d *Dispatcher) admissibleLocked(st *targetState, c Class, w, slots int) bool {
 	switch c {
 	case ClassInteractive:
@@ -144,8 +145,9 @@ func (d *Dispatcher) queuedLocked(st *targetState, c Class) bool {
 }
 
 // pickAdmissibleLocked is the wake half of the rank scan for ONE class:
-// it dequeues the head of c when that head is admissible (weight 1), or
-// returns nil. Interactive dequeues under the fairness mode. Background
+// it dequeues the head of c when that head is admissible with its weight
+// (1 in-house; the external head's own weight, A03-W7 — a head that does not
+// fit is not skipped: no barging inside the class), or returns nil. Interactive dequeues under the fairness mode. Background
 // additionally takes the FA aging escape (aging.go) when only the herald
 // term refuses it — the scan reaches background only after every
 // higher-ranked class yielded no admissible head, so the escape never
@@ -173,7 +175,7 @@ func (d *Dispatcher) pickAdmissibleLocked(st *targetState, c Class, mode Fairnes
 		return w
 	case ClassExternal:
 		// FIFO across the identity buckets (the fairness pick is A03-W4).
-		if !d.admissibleLocked(st, c, 1, slots) {
+		if !d.headAdmissibleLocked(st, c, slots) {
 			return nil
 		}
 		return st.external.pick(FairnessFIFO)
@@ -182,6 +184,25 @@ func (d *Dispatcher) pickAdmissibleLocked(st *targetState, c Class, mode Fairnes
 			"target", st.origin, "class", uint8(c))
 		return nil
 	}
+}
+
+// headAdmissibleLocked reports whether class c has a queued head that is
+// admissible with its own weight (A03-W7): the head the wake would pick next
+// — the FIFO head of the external queue, whose weight is its Request.Weight;
+// an in-house head always weighs 1. False with an empty queue.
+func (d *Dispatcher) headAdmissibleLocked(st *targetState, c Class, slots int) bool {
+	if !d.queuedLocked(st, c) {
+		return false
+	}
+	w := 1
+	if c == ClassExternal {
+		h := st.external.peekFIFO()
+		if h == nil {
+			return false
+		}
+		w = h.weight
+	}
+	return d.admissibleLocked(st, c, w, slots)
 }
 
 // externalAdmissibleLocked is the admission term of the external class

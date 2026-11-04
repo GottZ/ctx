@@ -154,7 +154,7 @@ func TestInvalidClassSecondLine(t *testing.T) {
 	st := d.targetLocked(testOrigin)
 	for _, c := range outOfTable {
 		w := &waiter{class: c, role: "test", cancel: func(error) {}}
-		if d.eligibleNowLocked(st, c, 1) {
+		if d.eligibleNowLocked(st, c, 1, 1) {
 			t.Errorf("eligibleNowLocked(Class(%d)) = true, want false", c)
 		}
 		if err := d.enqueueLocked(st, w); !errors.Is(err, ErrInvalidClass) {
@@ -215,7 +215,7 @@ func TestEveryClassHasEveryBranch(t *testing.T) {
 	st := d.targetLocked(testOrigin)
 	for c := Class(0); c < numClasses; c++ {
 		w := &waiter{class: c, principal: principal("x"), role: "test", cancel: func(error) {}}
-		d.eligibleNowLocked(st, c, 1)
+		d.eligibleNowLocked(st, c, 1, 1)
 		if err := d.enqueueLocked(st, w); err != nil {
 			t.Errorf("enqueueLocked(%s) = %v, want nil", c, err)
 		}

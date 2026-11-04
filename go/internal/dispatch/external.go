@@ -16,11 +16,13 @@ import (
 // (design/03 §3.4: an external rejection writes no llmlog line — the rollup's
 // rejected_admission comes from the /v1 helper, the snapshot from here). Cap
 // counts the cap-ladder refusals (consumer, tenant, aggregate),
-// NotOffered the ErrExternalNotOffered answers — immediate ones and waiters
-// ended by a withdrawn offer. Predicted and Expired split the ErrWaitExpired
-// answers by reason (A03-W5, waitbudget.go): Predicted an acquire whose wait
-// budget was already ≤ 0 when it would have had to wait (never queued),
-// Expired a waiter whose budget ran out in the queue.
+// NotOffered the ErrExternalNotOffered answers — immediate ones (no offer, or
+// a weight above the external capacity, A03-W7) and waiters ended by a
+// withdrawn offer or by a capacity that shrank below their weight.
+// Predicted and Expired split the ErrWaitExpired answers by reason (A03-W5,
+// waitbudget.go): Predicted an acquire whose wait budget was already ≤ 0
+// when it would have had to wait (never queued), Expired a waiter whose
+// budget ran out in the queue.
 type ExternalRejectStats struct {
 	Cap        int64
 	NotOffered int64
@@ -33,14 +35,25 @@ type ExternalRejectStats struct {
 // (TryAcquire), or ErrExternalNotOffered. An external request never takes the
 // pass-through clause: on a target that does not offer the external class it
 // is refused — also under the emergency stop, which for the in-house classes
-// is exactly the pass-through (X9) — and when admitted it always holds a slot
-// of the external partition. In-house requests keep the clause unchanged:
+// is exactly the pass-through (X9) — and when admitted it always holds units
+// of the external partition. An external request heavier than the target's
+// external capacity E_eff (or with a negative weight) is refused as well, at
+// once and with one WARN: it could never be admitted, so it must never wait
+// (design/03 §4.7 — a configuration error such as a sub-batch or n above E,
+// not a rejection). In-house requests keep the clause unchanged:
 // pass-through with slots ≤ 0, else the rank scan's eligibleNow.
 func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (*Lease, error) {
 	slots := d.slotsLocked(st.origin)
 	if w.class == ClassExternal {
-		if offered, _ := d.externalOffer(st.origin); !offered {
+		capacity := d.externalWeightCap(st.origin)
+		if capacity == 0 {
 			st.extRejects.NotOffered++
+			return nil, ErrExternalNotOffered
+		}
+		if w.weight < 1 || w.weight > capacity {
+			st.extRejects.NotOffered++
+			d.logger.Warn("dispatch: external acquire heavier than its target's external capacity (or with a negative weight) refused — a configuration error, not offered",
+				"target", st.origin, "role", w.role, "weight", w.weight, "capacity", capacity)
 			return nil, ErrExternalNotOffered
 		}
 	} else if slots <= 0 {
@@ -48,10 +61,93 @@ func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (
 		// behavior, tracked for telemetry only.
 		return d.admitLocked(st, w, now, false), nil
 	}
-	if d.eligibleNowLocked(st, w.class, slots) {
+	if d.eligibleNowLocked(st, w.class, w.weight, slots) {
 		return d.admitLocked(st, w, now, true), nil
 	}
 	return nil, nil
+}
+
+// requestWeight resolves Request.Weight into the slot units of one waiter
+// (design/03 §4.7): 0 reads as 1; an in-house class always weighs 1 — the
+// "internal w = 1" of §4.7 is structural, not a caller convention; an
+// external weight passes unchanged (a negative one is refused at the door,
+// never clamped into a lighter lease).
+func requestWeight(c Class, raw int) int {
+	if !c.External() || raw == 0 {
+		return 1
+	}
+	return raw
+}
+
+// ExternalWeightUnbounded is ExternalWeightCap of an offered self-admitting
+// target without external_max_inflight: the dispatcher sets no external cap
+// there (the remote admission acts, design/03 §4.3), so every weight up to
+// this bound is admitted. A representation bound, not a policy value — the
+// bound of every count-typed limits value (maxLimitCount); with a 64-bit int
+// a sum of such weights cannot overflow for any reachable number of leases
+// (on a 32-bit int a second lease of this weight would wrap — the ctx
+// targets are 64-bit).
+const ExternalWeightUnbounded = maxLimitCount
+
+// ExternalWeightCap returns the external capacity E_eff of origin in weight
+// units right now (design/03 §4.7): S − R on a slot-managed target (narrowed
+// by external_max_inflight where the derivation kept one), the
+// external_max_inflight of an offered self-admitting target,
+// ExternalWeightUnbounded there without a cap, and 0 when the target does not
+// offer the external class (emergency stop included). The read of the /v1
+// chain build (A03-W8: inputs per lease ≤ this cap, max_n ≤ this cap) —
+// atomic policy loads, no dispatcher mutex. An acquire heavier than the cap
+// answers ErrExternalNotOffered.
+func (d *Dispatcher) ExternalWeightCap(origin string) int {
+	return d.externalWeightCap(canonicalOrigin(origin))
+}
+
+// externalWeightCap is ExternalWeightCap for a canonical origin.
+func (d *Dispatcher) externalWeightCap(origin string) int {
+	offered, capacity := d.externalOffer(origin)
+	switch {
+	case !offered:
+		return 0
+	case capacity == 0:
+		return ExternalWeightUnbounded
+	}
+	return capacity
+}
+
+// failOverweightExternalWaitersLocked ends the waiting external acquires of
+// st that are heavier than capacity — a policy or settings swap shrank E_eff
+// below their weight, so they could never be admitted and would block their
+// class head-of-line (A03-W7, the swap twin of the door refusal). They end
+// with ErrExternalNotOffered through the waiter error channel; lighter
+// waiters stay queued. O(1) unless capacity lies below the queue's weight
+// bound (classQueue.maxWeight), one WARN per drain.
+func (d *Dispatcher) failOverweightExternalWaitersLocked(st *targetState, capacity int) {
+	q := st.external
+	if capacity >= q.maxWeight {
+		return
+	}
+	var heavy []*waiter
+	q.each(func(w *waiter) {
+		if w.weight > capacity {
+			heavy = append(heavy, w)
+		}
+	})
+	for _, w := range heavy {
+		q.remove(w)
+		w.err = ErrExternalNotOffered
+		close(w.admitCh)
+		st.extRejects.NotOffered++
+	}
+	q.maxWeight = 0
+	q.each(func(w *waiter) {
+		if w.weight > q.maxWeight {
+			q.maxWeight = w.weight
+		}
+	})
+	if len(heavy) > 0 {
+		d.logger.Warn("dispatch: external acquire heavier than its target's external capacity — waiting acquires ended after the capacity shrank",
+			"target", st.origin, "capacity", capacity, "ended", len(heavy))
+	}
 }
 
 // failExternalWaitersLocked ends every waiting external acquire of st with

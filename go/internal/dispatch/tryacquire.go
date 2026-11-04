@@ -62,6 +62,7 @@ func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, conte
 		enqueued:   now,
 		reapRef:    reapReference(req.Deadline, ctx),
 		deadlineIn: req.DeadlineIn,
+		weight:     requestWeight(class, req.Weight),
 		runCtx:     runCtx,
 		cancel:     cancel,
 	}
