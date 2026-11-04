@@ -12,6 +12,13 @@
 // RED with IngestHandler.classifySet returning the base Snapshot() instead of
 // SnapshotForRequest: the tenant-only rule is not seen, and the
 // tenant_rule_classifies block reads (knowledge, auto), want (reference, auto).
+//
+// #70: both probes above send exactly one chunk. RED with the hook run for
+// index == 0 only: multi_chunk_each_classified and
+// mixed_block_and_chunk_mode_request read (knowledge, auto) for chunks 1 and
+// 2. The mixed request leads with its chunk-mode chunk, so a snapshot resolved
+// only when chunk 0 is block mode leaves both block-mode chunks unclassified
+// as well.
 package main
 
 import (
@@ -29,6 +36,7 @@ import (
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestIngestMountClassifies_Integration(t *testing.T) {
@@ -139,4 +147,102 @@ func TestIngestMountClassifies_Integration(t *testing.T) {
 			t.Errorf("(type_name, type_source) = (%q, %q), want (reference, auto)", name, source)
 		}
 	})
+
+	// #70: one request of several block-mode chunks through the mount, each
+	// classified by its own title against the tenant-resolved set — the row
+	// default, the tenant-only rule and a _global rule, in that order.
+	t.Run("multi_chunk_each_classified", func(t *testing.T) {
+		postMountIngestProbes(t, router, plaintext, pool, tenantScope, blocktypeReg.SnapshotForTenant(ctx, tenantScope), []mountIngestProbe{
+			{title: "i70 plain mount batch note", want: "knowledge"},
+			{title: "i61 tenant-only marker i70 mount batch", want: "reference"},
+			{title: "Session 70 Handover mount batch", want: "audit-trail"},
+		})
+	})
+
+	// #70: a request that leads with a chunk-mode chunk keeps that row on the
+	// default and still classifies both block-mode chunks after it.
+	t.Run("mixed_block_and_chunk_mode_request", func(t *testing.T) {
+		postMountIngestProbes(t, router, plaintext, pool, tenantScope, blocktypeReg.SnapshotForTenant(ctx, tenantScope), []mountIngestProbe{
+			{title: "Session 70 Handover mount mixed chunk", chunkMode: true, want: "knowledge"},
+			{title: "Session 70 Handover mount mixed block", want: "audit-trail"},
+			{title: "i61 tenant-only marker i70 mount mixed", want: "reference"},
+		})
+	})
+}
+
+// mountIngestProbe is one chunk of a multi-chunk classify probe on the mount
+// (#70): block mode, or chunk mode on a context_sources row the helper seeds
+// in the key's scope. want is the type_name its row carries after the
+// request; type_source stays 'auto' in both modes.
+type mountIngestProbe struct {
+	title     string
+	chunkMode bool
+	want      string
+}
+
+// postMountIngestProbes sends probes as ONE POST /api/ingest through router
+// and asserts every row by its result position. Each fixture is checked
+// against set, the tenant-resolved set the request classifies with: a
+// block-mode title must classify to want, or to nothing when want is the row
+// default ("knowledge"); a chunk-mode title must hit a rule, or the probe
+// could not tell a skipped hook from one that ran.
+func postMountIngestProbes(t *testing.T, router http.Handler, bearer string, pool *pgxpool.Pool, scope string, set *blocktype.Set, probes []mountIngestProbe) {
+	t.Helper()
+	ctx := context.Background()
+	chunks := make([]map[string]any, len(probes))
+	for i, p := range probes {
+		name, matched := set.Classify(p.title, map[string]any{})
+		if p.chunkMode && !matched {
+			t.Fatalf("fixture: chunk %d title %q hits no classify rule, want a match", i, p.title)
+		}
+		if !p.chunkMode && (name != p.want || matched != (p.want != "knowledge")) {
+			t.Fatalf("fixture: chunk %d classifies to (%q, %v), want %q", i, name, matched, p.want)
+		}
+		chunk := map[string]any{"category": "learnings", "title": p.title, "content": "i70 mount batch chunk: " + p.title}
+		if p.chunkMode {
+			var src string
+			if err := pool.QueryRow(ctx,
+				`INSERT INTO context_sources (file_path, file_hash, scope) VALUES ($1, 'i70', $2) RETURNING id::text`,
+				"/i70/"+p.title+".md", scope).Scan(&src); err != nil {
+				t.Fatalf("seed source for chunk %d: %v", i, err)
+			}
+			chunk["category"], chunk["source_id"], chunk["chunk_index"] = "vault", src, 0
+		}
+		chunks[i] = chunk
+	}
+	raw, _ := json.Marshal(map[string]any{"source": "i70", "chunks": chunks})
+	req := httptest.NewRequest(http.MethodPost, "/api/ingest", strings.NewReader(string(raw)))
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	var resp struct {
+		Success bool `json:"success"`
+		Results []struct {
+			Index  int    `json:"index"`
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK || !resp.Success || len(resp.Results) != len(probes) {
+		t.Fatalf("status = %d, want 200 with success and %d results (decode err %v); body=%s", rec.Code, len(probes), err, rec.Body.String())
+	}
+	for i, p := range probes {
+		r := resp.Results[i]
+		wantStatus := "updated"
+		if p.chunkMode {
+			wantStatus = "inserted"
+		}
+		if r.Index != i || r.Status != wantStatus || r.ID == "" {
+			t.Fatalf("result %d = %+v, want index %d, status %s, with an id", i, r, i, wantStatus)
+		}
+		var name, source string
+		if err := pool.QueryRow(ctx,
+			`SELECT type_name, type_source FROM context_blocks WHERE id = $1::uuid`, r.ID).Scan(&name, &source); err != nil {
+			t.Fatalf("read type of chunk %d: %v", i, err)
+		}
+		if name != p.want || source != "auto" {
+			t.Errorf("chunk %d (%q): (type_name, type_source) = (%q, %q), want (%s, auto)", i, p.title, name, source, p.want)
+		}
+	}
 }
