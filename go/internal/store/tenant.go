@@ -469,7 +469,8 @@ const pruneBatchSize = 2000
 //	blocks/blobs/sources/sessions have no hard inter-ordering among themselves.
 //
 // TENANT-DECISION(tenant-prune-order): dream_links→blocks→blobs→sources→
-// chat_sessions, then keys (HARD), then tenant (CASCADE clears tenant_scopes).
+// chat_sessions, then model keys + model consumers + knowledge keys
+// (context_api_keys; HARD, one tx), then tenant (CASCADE clears tenant_scopes).
 // Umentscheidbar only if a future migration sets the dream_links FK to ON DELETE
 // CASCADE (then step 1 would be redundant) — while 016:18-19 has no ON DELETE,
 // links-first is forced (design/01 §4.3.1).
@@ -496,7 +497,7 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 
 // PruneTenant is the full-prune behind tenant-delete (T05b, design/01 §4.3.1): an
 // FK-ordered, batched mass-DELETE of the tenant's scope-carried data, then its
-// keys, then the tenant row. It is deliberately NOT a metadata-only step and NOT a
+// model consumers and keys (step 7b), then its knowledge keys, then the tenant row. It is deliberately NOT a metadata-only step and NOT a
 // single-Tx CASCADE: the data (blocks/links/blobs/sources/sessions) is tenant-LESS
 // (scope-discriminated, Modell C), there is no implicit CASCADE onto
 // context_blocks, and at 1M+ blocks a single mass-DELETE would be an over-large
@@ -518,10 +519,26 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 // a deployment needs a full compliance body-wipe on offboarding — but that is the
 // Policy axis (§9 N11), not this mechanism wave.
 //
-// stamp attributes the key hard-delete (step 7) in the audit trail (migration
-// 160): that step runs in its own transaction stamped with the caller's actor
-// and request id and ALWAYS via='offboarding' — whatever stamp.Via says — so the
-// delete rows name the offboarding, never a psql edit.
+// MODEL CONSUMERS (step 7b, design/01 §4.6 I-K6, B25): context_model_consumers
+// .tenant_id and context_model_keys.consumer_id are ON DELETE RESTRICT (161), so
+// a tenant with a consumer would fail step 8 with 23001 AFTER steps 1-7 already
+// ran (a half-pruned tenant). Step 7b hard-deletes the tenant's model keys, then
+// its consumers — two statements, keys first, so each key's prune row still
+// resolves metadata.tenant_id through its consumer (a single CTE over both
+// would lose it) — after locking the tenant's consumer rows FOR UPDATE, the
+// consumer-then-keys order of every consumer writer (model_keys.go), which
+// keeps a concurrent rotation or deactivation from deadlocking against it. It runs inside the step-7 transaction BEFORE the knowledge-key
+// delete: the consumers' and keys' created_by_key/revoked_by_key reference
+// context_api_keys ON DELETE SET NULL, and deleting the dependants first spares
+// those updates on rows that are about to go. A rotation chain goes in one
+// statement (rotated_from is SET NULL, the successor dies in the same
+// statement). No batching: max_model_consumers caps a tenant at 64 consumers by
+// default, a few rows each. This is the ONE delete path of both tables.
+//
+// stamp attributes the hard deletes of steps 7b and 7 in the audit trail
+// (migrations 160, 161): they run in one transaction stamped with the caller's
+// actor and request id and ALWAYS via='offboarding' — whatever stamp.Via says —
+// so the prune/delete rows name the offboarding, never a psql edit.
 func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp AuditStamp) error {
 	// Existence + the malformed/absent → ErrTenantNotFound contract, reusing the
 	// same oracle as GetTenant (no 22P02 → 500 side-channel).
@@ -571,13 +588,31 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 	if _, err := pool.Exec(ctx, `DELETE FROM context_projects WHERE tenant_id = $1::uuid`, tenantID); err != nil {
 		return fmt.Errorf("store: prune tenant projects: %w", err)
 	}
-	// 7: HARD-delete the tenant's keys. DeleteApiKey is a SOFT delete (active=
+	// 7b + 7: HARD-delete the tenant's model keys and model consumers (7b, see
+	// above), then its knowledge keys (7). DeleteApiKey is a SOFT delete (active=
 	// false, api_keys.go:102) which would leave the RESTRICT FK and block step 8
-	// with 23001.
+	// with 23001; so would a deactivated consumer.
 	stamp.Via = ViaOffboarding
 	if err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
 		if err := stampAudit(ctx, tx, stamp); err != nil {
 			return err
+		}
+		// Consumer rows first, keys after: the lock order of every consumer
+		// writer (RotateKey/UpdateConsumer lock the consumer FOR UPDATE, then
+		// write its keys; so does the deactivation trigger). Deleting the keys
+		// first would hold them while waiting for a consumer such a writer
+		// holds — a deadlock (40P01) that rolls this step back.
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM context_model_consumers WHERE tenant_id = $1::uuid ORDER BY id FOR UPDATE`, tenantID); err != nil {
+			return fmt.Errorf("model consumers lock: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM context_model_keys WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
+			tenantID); err != nil {
+			return fmt.Errorf("model keys: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM context_model_consumers WHERE tenant_id = $1::uuid`, tenantID); err != nil {
+			return fmt.Errorf("model consumers: %w", err)
 		}
 		_, err := tx.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID)
 		return err
