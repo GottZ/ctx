@@ -821,7 +821,7 @@ func main() {
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
 	listenAddr := cfgStore.Snapshot().Server.ListenAddr //nolint:forbidigo // MT 06 BLIND: restart-only server.listen_addr is a process-global env value (the overlay rejects restart-only keys), read once at boot.
-	router, ingress := newRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
+	router, ingress, gateway := newRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
 	// F-W8 (design/04 §4.6, §7.2 no. 1): no /v1 without its ingress
 	// protection — gateway.enabled effectively true on a router that mounts no
 	// model group with its LoopGuard is no boot (TestMainAssertsGatewayIngressRightAfterRouter pins the place).
@@ -830,6 +830,11 @@ func main() {
 		os.Exit(1)
 	}
 	srv := newHTTPServer(listenAddr, router)
+	// W02-05: the model gateway's loops (batched last_used_at, the access
+	// log's rejection window) on a context of their own — shutdownSequence
+	// ends them after the HTTP drain, so the drained requests' stamps make
+	// the final flush (W01-3 F-7).
+	stopGateway := startModelGateway(gateway)
 
 	// Start HTTP server in background
 	errCh := make(chan error, 1)
@@ -852,24 +857,32 @@ func main() {
 		}
 	}
 
-	// Graceful shutdown: HTTP Stop -> llmlog Settle -> Background Cancel ->
-	// Listener Stop -> llmlog Settle -> Pool Close (the pool closes via the
-	// sess.Stop defer above).
-	shutdownSequence(srv, scheduler, pool)
+	// Graceful shutdown: HTTP Stop -> gateway flush -> llmlog Settle ->
+	// Background Cancel -> Listener Stop -> llmlog Settle -> Pool Close (the
+	// pool closes via the sess.Stop defer above).
+	shutdownSequence(srv, scheduler, pool, stopGateway)
 	slog.Info("shutdown complete")
 }
 
 // Shutdown budget after SIGTERM (W06-1). docker-compose.yml gives the ctx
-// service a stop_grace_period that must cover shutdownHTTPTimeout + 2 ×
-// llmlogSettleTimeout, or Docker SIGKILLs the daemon mid-teardown (compose
-// default: 10 s); internal/config TestComposeCtxStopGracePeriod pins it at no
-// less than that sum (25 s). scheduler.Wait between the two settles is
-// unbounded and lives in the margin above it. A new shutdown step (the /v1
-// drain, K-06-29) adds its budget here, in that test and in the compose file.
+// service a stop_grace_period that must cover shutdownHTTPTimeout +
+// max(gatewayStopTimeout, llmlogSettleTimeout) + llmlogSettleTimeout — the
+// gateway stop runs alongside the first settle (W02-05) — or Docker SIGKILLs
+// the daemon mid-teardown (compose default: 10 s); internal/config
+// TestComposeCtxStopGracePeriod pins it at no less than that sum (25 s).
+// scheduler.Wait between the two settles is unbounded and lives in the margin
+// above it (5 s at the shipped 30 s). A new shutdown step (K-06-29) adds its
+// budget here, in that test and in the compose file — or runs alongside an
+// existing one and says so.
 const (
 	// shutdownHTTPTimeout bounds srv.Shutdown: in-flight requests finish, new
 	// ones are refused.
 	shutdownHTTPTimeout = 15 * time.Second
+	// gatewayStopTimeout bounds the model gateway's stop (W02-05): the final
+	// last_used_at flush, itself bounded by the store's own timeout, and the
+	// access log's last rejection lines. It runs alongside the first llmlog
+	// settle, so it adds nothing to the sum while it stays <= that settle.
+	gatewayStopTimeout = store.ModelKeyUsageFinalFlushTimeout
 	// llmlogSettleTimeout bounds EACH of the two llmlog.Settle calls: queued
 	// and running context_llm_log inserts land before the teardown moves on.
 	// Rows still pending after the second one are lost when the pool closes.
@@ -885,6 +898,13 @@ type drainer interface {
 // shutdownSequence is the daemon's teardown after the serve loop ended and the
 // root context was cancelled; the caller closes the pool afterwards.
 //
+// stopGateway (startModelGateway) runs right after srv.Shutdown, alongside
+// the first settle: no request can stamp a model key any more, so the final
+// usage flush carries every accepted request's last_used_at (W01-3 F-7). The
+// two touch different tables and are bounded on their own (5 s each), so
+// running them side by side keeps the bounded part at 15 + 5 + 5 s instead
+// of adding a step (Fremd-Review 1 L-2, RC-C-INDEX Q-06-9).
+//
 // The llmlog queue is settled TWICE. First right after srv.Shutdown: no request
 // can Record any more, so the rows of the HTTP side land before the teardown
 // enters scheduler.Wait. That wait is unbounded — a running dream cycle does not
@@ -893,7 +913,7 @@ type drainer interface {
 // takes whatever is still queued; settling only after Wait would hand the HTTP
 // rows to that same fate. Second after Wait returns: the dream workers and the
 // other scheduler arms have written their last rows by then.
-func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool) {
+func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool, stopGateway func()) {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
 	defer shutdownCancel()
 
@@ -901,7 +921,13 @@ func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool) {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("HTTP server shutdown error", "error", err)
 	}
+	gatewayStopped := make(chan struct{})
+	go func() {
+		defer close(gatewayStopped)
+		stopGateway()
+	}()
 	settleLLMLog(pool, llmlogSettleTimeout, "http")
+	<-gatewayStopped
 
 	// Wait for scheduler to finish (drains active dream cycle before pool closes).
 	slog.Info("waiting for scheduler shutdown")

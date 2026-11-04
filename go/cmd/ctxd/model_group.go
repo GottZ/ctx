@@ -2,17 +2,21 @@ package main
 
 import (
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/oai"
 )
 
 // modelGroupDeps is what one model group (/v1, /v2) is built from
-// (masterplan K23, design/02 K-02-2). Not mounted in W01-6; W02-05 mounts
-// /v1 (and W02-10 /v2) through mountModelGroup and runs the door gate
-// (internal/handler/v1door) over the real mount.
+// (masterplan K23, design/02 K-02-2). newRouter mounts /v1 through
+// mountModelGroup (W02-05; W02-10 adds /v2) from the process's
+// modelGateway (modelGateway.group); the door gate
+// (internal/handler/v1door) runs over that mount.
 type modelGroupDeps struct {
 	// access is the OUTERMOST stage (W06-9, design/06 §4.6): the access log
 	// of the model groups — one line per success, refusals counted per
@@ -44,10 +48,6 @@ type modelGroupDeps struct {
 	// routes are the group's endpoints; the handlers come from here, so
 	// the door gate can put a probe behind every route (K-02-2).
 	routes []modelRoute
-	// notFound and methodNotAllowed are the group's catch-alls (owner 02,
-	// K-02-2: oai.NotFound / oai.MethodNotAllowed with Allow); nil keeps
-	// chi's. They run behind gate and door like every route of the group.
-	notFound, methodNotAllowed http.HandlerFunc
 }
 
 // modelRoute is one endpoint of a model group, relative to its prefix.
@@ -58,11 +58,24 @@ type modelRoute struct {
 
 // mountModelGroup mounts prefix as a sub-router whose every request — a
 // registered route, an unknown path, a wrong method, OPTIONS — passes
-// access log → gate → door → LoopGuard → inner stages before anything answers
-// (design/01 §4.2, B4; design/06 §4.6; masterplan K14: EnabledGate → ModelAuth →
-// LoopGuard → body cap/parse). The LoopGuard answers in the OpenAI envelope and
-// is part of every group by construction; once the group is mounted, the router's
-// ingress is registered (design/04 §4.6 "Registrierung als Mechanismus").
+// access log → recovery → gate → door → LoopGuard → inner stages before
+// anything answers (design/01 §4.2, B4; design/06 §4.6; masterplan K14:
+// EnabledGate → ModelAuth → LoopGuard → body cap/parse). Three stages are
+// fixed by construction, no mount can leave them out:
+//
+//   - oai.Recover right inside the access log: a panic anywhere behind it is
+//     the 503 internal_error of the envelope (K5, R-02-14), counted by the
+//     access log as a refusal (W06-9 handover), never the plain-text 500 of
+//     the house Recovery outside;
+//   - the LoopGuard, answering in the OpenAI envelope; once the group is
+//     mounted, the router's ingress is registered (design/04 §4.6
+//     "Registrierung als Mechanismus");
+//   - the catch-alls (K-02-2, owner 02): an unknown path is oai.NotFound and
+//     a wrong method oai.MethodNotAllowed with Allow — both behind gate and
+//     door like every route, so nothing under the prefix falls through to
+//     the root's SPA fallback (chi hands a sub-router without its own
+//     handler the parent's).
+//
 // A missing access log, gate, door, ingress or depth getter is a wiring bug and
 // panics at mount time.
 func mountModelGroup(r chi.Router, prefix string, deps modelGroupDeps) {
@@ -71,17 +84,50 @@ func mountModelGroup(r chi.Router, prefix string, deps modelGroupDeps) {
 	}
 	loopGuard := handler.LoopGuard(handler.LoopGuardConfig{MaxDepth: deps.maxDepth, Envelope: handler.LoopGuardOpenAI})
 	r.Route(prefix, func(g chi.Router) {
-		g.Use(deps.access.Handler, deps.gate, deps.door.Handler, loopGuard)
+		g.Use(deps.access.Handler, oai.Recover, deps.gate, deps.door.Handler, loopGuard)
 		g.Use(deps.inner...)
-		if deps.notFound != nil {
-			g.NotFound(deps.notFound)
-		}
-		if deps.methodNotAllowed != nil {
-			g.MethodNotAllowed(deps.methodNotAllowed)
-		}
+		g.NotFound(oai.NotFound)
+		g.MethodNotAllowed(methodNotAllowed(g, routeMethods(deps.routes)))
 		for _, rt := range deps.routes {
 			g.Method(rt.method, rt.pattern, rt.handler)
 		}
 	})
 	deps.ingress.MarkLoopGuard()
+}
+
+// routeMethods are the distinct methods of routes, sorted.
+func routeMethods(routes []modelRoute) []string {
+	var out []string
+	for _, rt := range routes {
+		if !slices.Contains(out, rt.method) {
+			out = append(out, rt.method)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// methodNotAllowed is the group's 405: Allow lists every method of the group
+// that has a route for the request's path within the group (RFC 9110
+// §15.5.6 — chi sets no Allow for a custom handler), then
+// oai.MethodNotAllowed answers. The path is the one the group routes on
+// (chi's RoutePath of the sub-router), so an escaped wildcard is matched the
+// same way the route itself would be.
+func methodNotAllowed(g chi.Router, methods []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := "/"
+		if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.RoutePath != "" {
+			path = rctx.RoutePath
+		}
+		var allow []string
+		for _, m := range methods {
+			if g.Match(chi.NewRouteContext(), m, path) {
+				allow = append(allow, m)
+			}
+		}
+		if len(allow) > 0 {
+			w.Header().Set("Allow", strings.Join(allow, ", "))
+		}
+		oai.MethodNotAllowed(w, r)
+	}
 }

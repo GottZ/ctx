@@ -37,16 +37,26 @@ const (
 // process-wide dispatch admission layer (MW3, I-D1) feeding the query
 // pipeline, the daily-synthesis trigger and the backend chat probe.
 func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher) *chi.Mux {
-	r, _ := newRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
+	r, _, _ := newRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
 	return r
 }
 
 // newRouter is NewRouter plus the router's federation-ingress registration
-// (F-W8, design/04 §4.6): a value of THIS router — the model groups mark it
-// when they mount (mountModelGroup), its settings handler and main's boot
-// assert read it. Per router, so two routers in one test process never see
-// each other's registration.
-func newRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher) (*chi.Mux, *fedhop.Ingress) {
+// (F-W8, design/04 §4.6) and its model gateway (W02-05). The ingress is a
+// value of THIS router — the model groups mark it when they mount
+// (mountModelGroup), its settings handler and main's boot assert read it;
+// per router, so two routers in one test process never see each other's
+// registration. The gateway carries the background loops main runs
+// (startModelGateway).
+func newRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher) (*chi.Mux, *fedhop.Ingress, *modelGateway) {
+	return buildRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher, nil)
+}
+
+// buildRouter is newRouter with the model groups' route seam (K-02-2):
+// wrapRoutes, when non-nil, replaces a group's route table before the mount
+// — the door census (v1door) puts its probe behind every real route this
+// way. Production passes nil.
+func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher, wrapRoutes func([]modelRoute) []modelRoute) (*chi.Mux, *fedhop.Ingress, *modelGateway) {
 	r := chi.NewRouter()
 	ingress := &fedhop.Ingress{}
 	// F-W8 (design/04 §4.6, masterplan K14): the federation loop and depth
@@ -468,10 +478,23 @@ func newRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Get("/api/img/{sig}", camoH.HandleFetch)
 	})
 
+	// The OpenAI-compatible model API (W02-05, design/02 §4.2): /v1 behind
+	// access log → recovery → EnabledGate → ModelAuth → LoopGuard → body cap
+	// → in-flight budget (mountModelGroup, masterplan K14). gateway.enabled
+	// off (the default) ⇒ the group answers every request with the same JSON
+	// 404 before any credential is read. Mounted before the SPA fallback; the
+	// group's own catch-alls keep /v1/* out of it.
+	gateway := newModelGateway(pool, cfgStore)
+	v1 := v1Routes(gatewayDeps(pool, scheduler.ModelAliasRegistry()))
+	if wrapRoutes != nil {
+		v1 = wrapRoutes(v1)
+	}
+	mountModelGroup(r, "/v1", gateway.group(ingress, federationMaxDepthGetter(cfgStore), v1))
+
 	// Embedded SPA — mounted last: chi matches registered routes first, only
 	// unknown paths fall through (history-API fallback for HTML navigations
 	// only; mistyped API URLs stay 404, known path + wrong method stays 405).
 	r.NotFound(web.Handler().ServeHTTP)
 
-	return r, ingress
+	return r, ingress, gateway
 }

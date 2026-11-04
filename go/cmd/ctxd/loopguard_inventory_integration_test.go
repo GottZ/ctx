@@ -106,7 +106,7 @@ func inventoryRouter(t *testing.T) inventoryFixture {
 	ident := fedhop.NewIdentity("00000000-0000-4000-8000-0000000000f8", bytes.Repeat([]byte{0xf8}, 32))
 	// newRouter, the constructor main uses: the fixture also carries the
 	// router's own ingress registration (FR2-2 pins it).
-	router, ingress := newRouter(fedhop.WithIdentity(ctx, ident), pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d)
+	router, ingress, _ := newRouter(fedhop.WithIdentity(ctx, ident), pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d)
 	return inventoryFixture{router: router, ingress: ingress, pool: pool, ident: ident, adminKey: inventoryAdminKey, modelKey: model.Plaintext()}
 }
 

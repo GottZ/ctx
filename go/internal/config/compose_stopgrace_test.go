@@ -12,7 +12,9 @@ import (
 // minCtxStopGrace is the bounded part of the shutdown ctxd spends after
 // SIGTERM before it lets the pool go (cmd/ctxd/main.go shutdownSequence):
 // shutdownHTTPTimeout (15 s, srv.Shutdown) + 2 × llmlogSettleTimeout (5 s
-// each: one llmlog.Settle before scheduler.Wait, one after it). scheduler.Wait
+// each: one llmlog.Settle before scheduler.Wait, one after it); the model
+// gateway's final flush (gatewayStopTimeout, 5 s, W02-05) runs alongside the
+// first settle and adds nothing. scheduler.Wait
 // itself is unbounded and only covered by the margin above this floor. A stop
 // grace period below it lets Docker SIGKILL the daemon mid-teardown — the
 // compose default of 10 s did exactly that to the 15 s HTTP drain alone. When
@@ -34,7 +36,7 @@ func TestComposeCtxStopGracePeriod(t *testing.T) {
 		t.Fatalf("ctx stop_grace_period %q is not a duration: %v", raw, err)
 	}
 	if d < minCtxStopGrace {
-		t.Errorf("ctx stop_grace_period = %s, want >= %s (15 s HTTP shutdown + 2 × 5 s llmlog settle)", d, minCtxStopGrace)
+		t.Errorf("ctx stop_grace_period = %s, want >= %s (15 s HTTP shutdown + 2 × 5 s llmlog settle, the gateway flush alongside the first)", d, minCtxStopGrace)
 	}
 }
 

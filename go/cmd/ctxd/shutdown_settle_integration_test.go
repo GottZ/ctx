@@ -108,7 +108,7 @@ func TestShutdownSequenceSettlesLLMLog(t *testing.T) {
 		}
 	}}
 
-	shutdownSequence(&http.Server{}, sched, pool)
+	shutdownSequence(&http.Server{}, sched, pool, func() {})
 	llmlog.Record(pool, llmlog.Entry{Pipeline: "w06-1-late", Model: "m", Host: "h"})
 	closed := make(chan struct{})
 	go func() { pool.Close(); close(closed) }()
@@ -164,7 +164,7 @@ func TestShutdownSettlesHTTPRowsBeforeSchedulerWait(t *testing.T) {
 		atWait = countLLMLogRows(t, ref, "w06-1-http-before-wait")
 	}}
 
-	shutdownSequence(&http.Server{}, sched, pool)
+	shutdownSequence(&http.Server{}, sched, pool, func() {})
 
 	t.Logf("HTTP-side rows landed when the teardown entered scheduler.Wait: %d of %d", atWait, n)
 	if atWait != n {

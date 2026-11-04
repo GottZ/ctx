@@ -138,6 +138,7 @@ func TestCodesVocabulary(t *testing.T) {
 		"unsupported_value", "model_not_found", "model_not_supported", "model_unavailable", "no_eligible_backend",
 		"upstream_unavailable", "upstream_rejected", "context_length_exceeded", "upstream_error", "upstream_timeout",
 		"federation_header_invalid", "federation_loop", "federation_depth", "federation_hop_required", "peer_instance_mismatch",
+		"proxy_misconfigured", "auth_overloaded", "auth_unavailable", // the model-key door's 503s (W01-6, W02-05)
 	} {
 		if !seen[want] {
 			t.Errorf("code %q missing from oai.Codes", want)
@@ -173,5 +174,51 @@ func TestWriteGeneral(t *testing.T) {
 	}
 	if got := rec.Header().Get("x-should-retry"); got != "true" {
 		t.Errorf("x-should-retry %q, want true", got)
+	}
+}
+
+// TestWriteCode (W02-05): WriteCode takes status and type from the
+// vocabulary for every code — a call site names the code, never its status —
+// keeps the caller's message and x-should-retry, and answers an unknown code
+// as WriteInternal (503 internal_error) with an ERROR instead of guessing.
+func TestWriteCode(t *testing.T) {
+	for _, spec := range oai.Codes() {
+		for _, retry := range []bool{false, true} {
+			rec := httptest.NewRecorder()
+			oai.WriteCode(rec, spec.Code, "text of "+spec.Code, retry)
+			var e struct {
+				Error struct {
+					Message string  `json:"message"`
+					Type    string  `json:"type"`
+					Param   *string `json:"param"`
+					Code    string  `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+				t.Fatalf("%s: body %q: %v", spec.Code, rec.Body.Bytes(), err)
+			}
+			want := "false"
+			if retry {
+				want = "true"
+			}
+			if rec.Code != spec.Status || e.Error.Type != spec.Type || e.Error.Code != spec.Code || e.Error.Message != "text of "+spec.Code ||
+				e.Error.Param != nil || rec.Header().Get("x-should-retry") != want || rec.Header().Get("Content-Type") != "application/json" {
+				t.Errorf("WriteCode(%s, retry=%v) = %d %s x-should-retry=%q, want %d %s", spec.Code, retry, rec.Code, rec.Body.Bytes(),
+					rec.Header().Get("x-should-retry"), spec.Status, spec.Type)
+			}
+		}
+	}
+
+	sink := captureLog(t)
+	rec := httptest.NewRecorder()
+	oai.WriteCode(rec, "no_such_code", "x", true)
+	internal := httptest.NewRecorder()
+	oai.WriteInternal(internal)
+	if rec.Code != internal.Code || !bytes.Equal(rec.Body.Bytes(), internal.Body.Bytes()) || rec.Header().Get("x-should-retry") != "false" {
+		t.Errorf("unknown code: %d %s x-should-retry=%q, want the WriteInternal answer %d %s", rec.Code, rec.Body.Bytes(),
+			rec.Header().Get("x-should-retry"), internal.Code, internal.Body.Bytes())
+	}
+	if sink.errors() != 1 {
+		t.Errorf("unknown code: %d ERROR lines, want 1", sink.errors())
 	}
 }

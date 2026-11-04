@@ -1,8 +1,9 @@
 // Package oai is the OpenAI-compatible wire surface of ctxd: the /v1 group
 // (and /v2/rerank) that external programs reach with a model key
 // (design/02-wire.md). Wave W02-02 lays its foundation — the error envelope,
-// the enabled gate, the in-flight budget and the recovery middleware; the
-// route group, the model-key door and the handlers arrive in later waves.
+// the enabled gate, the in-flight budget and the recovery middleware; W02-05
+// adds the handler dependencies (Deps), the alias resolution (Resolve) and
+// the model list; the inference handlers arrive in later waves.
 //
 // Layering (.golangci.yml depguard oai-isolation and config-layering): the
 // package imports no corpus package (rrf, chat, dream, events, store) and no
@@ -65,6 +66,12 @@ const (
 	CodeFederationDepth          = "federation_depth"
 	CodeFederationHopRequired    = "federation_hop_required"
 	CodePeerInstanceMismatch     = "peer_instance_mismatch"
+	// The model-key door's own 503s (handler.ModelAuth, W01-6; vocabulary
+	// since W02-05): X-Forwarded-For without CTX_TRUSTED_PROXY, an empty
+	// probe bucket, an unavailable auth database.
+	CodeProxyMisconfigured = "proxy_misconfigured"
+	CodeAuthOverloaded     = "auth_overloaded"
+	CodeAuthUnavailable    = "auth_unavailable"
 )
 
 // CodeSpec binds a code to the one status and type it is sent with.
@@ -118,6 +125,9 @@ var codes = []CodeSpec{
 	{CodeFederationDepth, http.StatusLoopDetected, TypeServer},
 	{CodeFederationHopRequired, http.StatusBadRequest, TypeInvalidRequest},
 	{CodePeerInstanceMismatch, http.StatusForbidden, TypeInvalidRequest},
+	{CodeProxyMisconfigured, http.StatusServiceUnavailable, TypeServiceUnavailable},
+	{CodeAuthOverloaded, http.StatusServiceUnavailable, TypeServiceUnavailable},
+	{CodeAuthUnavailable, http.StatusServiceUnavailable, TypeServiceUnavailable},
 }
 
 // Codes returns the vocabulary as a copy (Fremd-Review 2, FR2-7): the table
@@ -195,11 +205,29 @@ func NotFound(w http.ResponseWriter, _ *http.Request) {
 // MethodNotAllowed is the gateway's 405. RFC 9110 requires an Allow header;
 // this writer keeps one set before the call but cannot compute it. chi does
 // NOT set Allow for a custom MethodNotAllowed handler (chi v5.5.0 mux.go:
-// only its default handler does), so the wave that mounts the group computes
-// Allow per path before calling this (W01-6).
+// only its default handler does), so the model group computes Allow per path
+// from its registered methods before calling this (cmd/ctxd mountModelGroup,
+// W02-05).
 func MethodNotAllowed(w http.ResponseWriter, _ *http.Request) {
 	Write(w, Error{Status: http.StatusMethodNotAllowed, Type: TypeInvalidRequest, Code: CodeMethodNotAllowed,
 		Message: "The request method is not allowed for this endpoint."})
+}
+
+// WriteCode sends code with the one status and type the vocabulary binds it
+// to (Codes): a call site names the code and never restates its status and
+// type, so the two cannot drift apart (W02-02 handover: Write bound to
+// Codes). message and shouldRetry are the caller's. An unknown code is a
+// wiring defect: logged as ERROR and answered as WriteInternal — never sent
+// with a guessed status.
+func WriteCode(w http.ResponseWriter, code, message string, shouldRetry bool) {
+	i := slices.IndexFunc(codes, func(c CodeSpec) bool { return c.Code == code })
+	if i < 0 {
+		slog.Error("gateway: error code outside the vocabulary (wiring defect) — answered as internal_error", "code", code)
+		WriteInternal(w)
+		return
+	}
+	spec := codes[i]
+	Write(w, Error{Status: spec.Status, Type: spec.Type, Code: spec.Code, Message: message, ShouldRetry: shouldRetry})
 }
 
 // WriteInvalidAPIKey is the 401 of the model-key door (W01-6): missing,
