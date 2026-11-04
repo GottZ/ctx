@@ -254,6 +254,17 @@ type Request struct {
 	Class  Class
 	// Role travels into llmlog/telemetry (design/01 §4.3).
 	Role string
+	// Weight is the engine parallelism of the request in engine sequences
+	// (design/03 §4.7, wave A03-W7): chat n, embedding inputs, rerank
+	// documents — the units of the target's slots S and of the external
+	// partition E it holds while admitted. 0 reads as 1. It is effective ONLY
+	// for the external class: an in-house request always weighs 1 whatever
+	// it carries here (ctx' embed wire sends single strings, chat n = 1; the
+	// unweighted internal rerank is the named gap of §4.7). An external
+	// request heavier than its target's ExternalWeightCap — or with a
+	// negative weight — is refused at once with ErrExternalNotOffered: a
+	// configuration error, never a wait. The /v1 helper computes it (A03-W8).
+	Weight int
 	// Deadline is the caller's attempt-deadline hint (N1 knows b.TimeoutFor
 	// before the acquire, N4 has rerank.Timeout). Zero is allowed: leases
 	// without a hint AND without a ctx deadline fall under the reaper's

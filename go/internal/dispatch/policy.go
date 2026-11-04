@@ -50,7 +50,8 @@ func heraldRank(h HeraldScope) int {
 // pass-through (no admission limit — exactly today's behavior), which keeps
 // every code wave behavior-neutral until the deliberate data activation.
 type TargetPolicy struct {
-	// Slots caps concurrent slot-holding leases on the origin; 0 = pass-through.
+	// Slots caps the slot units held on the origin (Σw, A03-W7: an in-house
+	// lease holds one, an external lease its weight); 0 = pass-through.
 	Slots int
 	// PreemptBackground allows the dispatcher to cancel background leases in
 	// favor of waiting interactive acquires (consumer: preempt path, MW18;

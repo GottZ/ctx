@@ -168,8 +168,8 @@ func TestRankOrderSteersEligibleNow(t *testing.T) {
 				d.mu.Unlock()
 				t.Fatalf("enqueue %s: %v", tc.queued, err)
 			}
-			gotIa := d.eligibleNowLocked(st, ClassInteractive, 1)
-			gotBg := d.eligibleNowLocked(st, ClassBackground, 1)
+			gotIa := d.eligibleNowLocked(st, ClassInteractive, 1, 1)
+			gotBg := d.eligibleNowLocked(st, ClassBackground, 1, 1)
 			d.dropWaiterLocked(st, w)
 			d.mu.Unlock()
 			if gotIa != tc.wantIa {

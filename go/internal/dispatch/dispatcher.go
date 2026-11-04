@@ -38,6 +38,10 @@ type Lease struct {
 	// never occupy a slot and the dispatcher never cancels them (behavior
 	// neutrality before activation).
 	slotHeld bool
+	// weight is the number of slot units a slot-holding lease holds (A03-W7,
+	// design/03 §4.7): its Request.Weight for the external class, 1 for the
+	// in-house classes (requestWeight).
+	weight int
 	// done guards single release (Dispatcher.mu). Both Release and the
 	// reaper settle a lease through finishLocked exactly once.
 	done bool
@@ -80,12 +84,17 @@ type targetState struct {
 	// seq is the monotone per-target arrival order (design/03 §4.2: seq, not
 	// timestamp — no tie path).
 	seq uint64
-	// held counts slot-holding leases (pass-through leases excluded) of ALL
-	// classes — internal and external; heldExt is its external part (an
-	// external lease always holds a slot of the external partition, it is
-	// never pass-through). held − heldExt is the internal part.
-	held    int
-	heldExt int
+	// held is the sum of the weights (Σw, A03-W7, design/03 §4.7) of the
+	// slot-holding leases (pass-through leases excluded) of ALL classes —
+	// internal and external: the unit of every admission term, of the wake
+	// scan and of the preempt need. heldExt is its external part (an
+	// external lease always holds units of the external partition, it is
+	// never pass-through); extLeases counts the external leases. An in-house
+	// lease weighs 1, so held − heldExt is both the internal weight and the
+	// number of internal slot-holding leases.
+	held      int
+	heldExt   int
+	extLeases int
 	// inflight is the registry of ALL leases incl. pass-through (telemetry,
 	// divergence metric, reaper).
 	inflight map[*Lease]struct{}
@@ -273,6 +282,7 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		enqueued:   now,
 		reapRef:    reapReference(req.Deadline, ctx),
 		deadlineIn: req.DeadlineIn,
+		weight:     requestWeight(class, req.Weight),
 		runCtx:     runCtx,
 		cancel:     cancel,
 		admitCh:    make(chan struct{}),
@@ -344,10 +354,11 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 }
 
 // eligibleNowLocked is the immediate-admission half of the rank scan
-// (design/03 §4.2, rank.go): class is admissible (weight 1) AND its own queue
-// is empty (FIFO, no barging — a newcomer never overtakes a waiter of its own
-// class; bucket order is policy) AND every class ranked above it in
-// Settings.RankOrder has an empty queue or an inadmissible head. With the
+// (design/03 §4.2, rank.go): class is admissible with the newcomer's weight
+// w AND its own queue is empty (FIFO, no barging — a newcomer never
+// overtakes a waiter of its own class; bucket order is policy) AND every
+// class ranked above it in Settings.RankOrder has an empty queue or a head
+// that is inadmissible with ITS weight (headAdmissibleLocked, A03-W7). With the
 // default order this is exactly the pre-A03-W2 predicate: interactive = slot
 // free AND no waiting interactive; background = slot free AND both wait
 // queues empty AND demand == 0 (the herald term, R3). A class outside the
@@ -355,15 +366,15 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 // A03-W1; pre-A03-W1 it got the background predicate, K6); a class absent
 // from the rank table — reachable only through the unvalidated test hook —
 // is never eligible either.
-func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, slots int) bool {
-	if !d.admissibleLocked(st, class, 1, slots) || d.queuedLocked(st, class) {
+func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, w, slots int) bool {
+	if !d.admissibleLocked(st, class, w, slots) || d.queuedLocked(st, class) {
 		return false
 	}
 	for _, h := range d.currentSettings().RankOrder {
 		if h == class {
 			return true
 		}
-		if d.queuedLocked(st, h) && d.admissibleLocked(st, h, 1, slots) {
+		if d.headAdmissibleLocked(st, h, slots) {
 			return false // a waiting, admissible higher-ranked head goes first
 		}
 	}
@@ -453,13 +464,17 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 	}
 	st.inflight[l] = struct{}{}
 	if slotHeld {
-		st.held++
+		// Σw (A03-W7): the lease holds its weight in units — 1 for the
+		// in-house classes by construction (requestWeight).
+		l.weight = w.weight
+		st.held += l.weight
 		switch l.class {
 		case ClassBackground:
 			st.cancelable[l] = w.cancel
 		case ClassExternal:
 			// Reaper-only cancel (I-03-3): never in cancelable.
-			st.heldExt++
+			st.heldExt += l.weight
+			st.extLeases++
 			st.extCancel[l] = w.cancel
 		}
 	}
@@ -500,19 +515,20 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 	delete(l.st.cancelable, l)
 	delete(l.st.extCancel, l)
 	if l.slotHeld {
-		l.st.held--
+		l.st.held -= l.weight
 		if l.class == ClassExternal {
-			l.st.heldExt--
+			l.st.heldExt -= l.weight
+			l.st.extLeases--
 		}
 		d.wakeLocked(l.st)
 	}
 }
 
 // wakeLocked re-evaluates admission on one target — the wake half of the
-// rank scan (design/03 §4.2, rank.go): while a slot is free, walk
-// Settings.RankOrder and hand the slot to the head of the first class whose
-// head is admissible (direct handoff); when no class yields one, the wake
-// ends. The rank table is read once per wake (hot: a settings swap acts on
+// rank scan (design/03 §4.2, rank.go): while a slot unit is free, walk
+// Settings.RankOrder and hand the units to the head of the first class whose
+// head is admissible with its weight (direct handoff, A03-W7); when no class
+// yields one, the wake ends. The rank table is read once per wake (hot: a settings swap acts on
 // the next wake). The herald term for background is softened ONLY by the FA
 // aging escape (aging.go): with demand > 0 an aged background HEAD may still
 // be admitted, re-checked per iteration (a younger next head stays gated).
@@ -522,13 +538,17 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 // in-house waiter drains as pass-through. External waiters NEVER drain as
 // pass-through (X9): on a target that stopped offering the external class
 // (emergency stop, R removed, external_offer withdrawn) they end with
-// ErrExternalNotOffered through the waiter error channel; on an offered
-// self-admitting target (no slots) they are admitted against
-// external_max_inflight.
+// ErrExternalNotOffered through the waiter error channel, and so do the
+// external waiters heavier than the target's current external capacity (a
+// policy swap shrank E below their weight — they could never be admitted,
+// A03-W7); on an offered self-admitting target (no slots) they are admitted
+// against external_max_inflight.
 func (d *Dispatcher) wakeLocked(st *targetState) {
 	if st.external.total > 0 {
-		if offered, _ := d.externalOffer(st.origin); !offered {
+		if capacity := d.externalWeightCap(st.origin); capacity == 0 {
 			d.failExternalWaitersLocked(st, ErrExternalNotOffered)
+		} else {
+			d.failOverweightExternalWaitersLocked(st, capacity)
 		}
 	}
 	slots := d.slotsLocked(st.origin)
@@ -574,7 +594,13 @@ func (d *Dispatcher) wakeAll() {
 }
 
 // dropWaiterLocked removes a canceled waiter from its queue (wait slot
-// vacated, counters corrected — no leak, W1 negative probe).
+// vacated, counters corrected — no leak, W1 negative probe). A dropped
+// external waiter wakes the target (A03-W7): under weight the waiter behind
+// it may fit where it did not — a canceled heavy head would otherwise strand
+// a lighter next head until the next release, and in o1 that admissible but
+// unserved head would refuse every background newcomer (eligibleNow). An
+// in-house drop changes no head's admissibility (weight 1, the head of each
+// class was already inadmissible), so it needs no wake.
 func (d *Dispatcher) dropWaiterLocked(st *targetState, w *waiter) {
 	switch w.class {
 	case ClassInteractive:
@@ -583,6 +609,7 @@ func (d *Dispatcher) dropWaiterLocked(st *targetState, w *waiter) {
 		st.background.remove(w)
 	case ClassExternal:
 		st.external.remove(w)
+		d.wakeLocked(st)
 	default:
 		// Fail-closed (A03-W1), unreachable: a class without a case here
 		// never entered a queue (door check + enqueueLocked default), so
@@ -843,9 +870,20 @@ type TargetSnapshot struct {
 	// Held is the number of slot-holding leases of ALL classes, internal AND
 	// external — the foreign-load detector contract (handler/foreign_load.go
 	// heldOf, DECISIONS A-E5 no. 3): the engine sees both, so the comparison
-	// must too. HeldInternal + HeldExternal == Held.
-	Held     int
-	Inflight int
+	// must too. HeldInternal + HeldExternal == Held. It stays a LEASE count
+	// under weight (A03-W7): the engine's http_requests_active counts
+	// requests, so active pairs with Held; a sum of weights there would hide
+	// a foreign request waiting in a saturated engine in the gap Σw − leases.
+	Held int
+	// HeldWeight is the sum of the weights of the slot-holding leases (Σw,
+	// design/03 §4.7: engine sequences) — the admission unit, and the
+	// counterpart of the engine's running sequences for the first wave that
+	// sends w > 1 to a probe-marked origin; HeldExternalWeight its external
+	// part. An in-house lease weighs 1, so HeldWeight − HeldExternalWeight
+	// == HeldInternal.
+	HeldWeight         int
+	HeldExternalWeight int
+	Inflight           int
 	// HeldInternal / HeldExternal split Held by side (design/03 §4.14);
 	// InflightInternal counts the internal leases incl. pass-through (an
 	// external lease is never pass-through, so Inflight − InflightInternal
@@ -855,9 +893,9 @@ type TargetSnapshot struct {
 	InflightInternal int
 	// InternalReserved is the validated internal partition R (0 = none);
 	// ExternalOffered whether the target admits the external class right now
-	// (I-03-6, false under the emergency stop), ExternalCapacity its E (S − R
-	// on a slot-managed target, external_max_inflight on a self-admitting
-	// one; 0 = not offered or no external cap).
+	// (I-03-6, false under the emergency stop), ExternalCapacity its E in
+	// weight units (S − R on a slot-managed target, external_max_inflight on
+	// a self-admitting one; 0 = not offered or no external cap).
 	InternalReserved int
 	ExternalOffered  bool
 	ExternalCapacity int
@@ -934,11 +972,11 @@ func (d *Dispatcher) Snapshot() Snapshot {
 			Slots:             tp.Slots,
 			PreemptBackground: tp.PreemptBackground,
 			HeraldScope:       hs,
-			Held:              st.held,
+			Held:              st.held - st.heldExt + st.extLeases,
 			Inflight:          len(st.inflight),
 			HeldInternal:      st.held - st.heldExt,
-			HeldExternal:      st.heldExt,
-			InflightInternal:  len(st.inflight) - st.heldExt,
+			HeldExternal:      st.extLeases,
+			InflightInternal:  len(st.inflight) - st.extLeases,
 			InternalReserved:  tp.InternalReserved,
 			Interactive:       WaitStats{Waiting: st.interactive.total},
 			Background:        WaitStats{Waiting: st.background.len()},
@@ -946,6 +984,8 @@ func (d *Dispatcher) Snapshot() Snapshot {
 			ExternalRejects:   st.extRejects,
 			Preempt:           st.preempt.statsLocked(),
 		}
+		// Σw next to the lease counts (A03-W7): Held stays the lease count.
+		ts.HeldWeight, ts.HeldExternalWeight = st.held, st.heldExt
 		if set.Enabled {
 			ts.ExternalOffered, ts.ExternalCapacity = tp.externalCapacity()
 		}
