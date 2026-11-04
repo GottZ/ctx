@@ -227,10 +227,14 @@ test.describe('gateway mint (W05-06)', () => {
     await confirm.getByRole('textbox').fill('Qe7z')
     await confirm.getByRole('button', { name: 'Revoke', exact: true }).click()
     await expect(confirm).toHaveCount(0)
-    // the peer lost exactly the revoked key; ci-chat is untouched
+    // the peer lost exactly the revoked key; ci-chat is untouched. The server
+    // re-judges the peer: its one live key mP2c expires 2026-06-29T21:00Z,
+    // inside gateway.key_expiry_warn (14 d) ⇒ consumer AND key `expiring`
+    // (consumerStatus / newKeyView — no longer superseded, it is the youngest live key)
     await expect(peer).not.toContainText('ctxm_…Qe7z')
     await expect(peer).toContainText('ctxm_…mP2c')
-    await expect(peer.locator('[data-consumer-status]')).toHaveText('active')
+    await expect(peer.locator('[data-consumer-status]')).toHaveText('expiring')
+    await expect(peer.locator('[data-key-status]')).toHaveText(['expiring'])
     await expect(ci).toContainText('ctxm_…a9Fq')
     await expect(ci.locator('[data-consumer-status]')).toHaveText('active')
     const sent = session.calls.filter((c) => c.action === 'model-key-revoke').map((c) => (c.body as { data?: { key_id?: string } }).data?.key_id)

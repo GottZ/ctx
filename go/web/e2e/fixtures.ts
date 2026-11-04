@@ -906,6 +906,14 @@ export const REVEAL_MARKER = 'ctxm_TESTKEY_reveal_once_do_not_persist'
 /** The mock server's "now" — the contract page clock (FIXED_NOW, contract.ts). */
 const MOCK_NOW_MS = Date.parse('2026-06-29T12:00:05Z')
 
+/**
+ * gateway.key_expiry_warn default — 1 209 600 s = 14 d (go/internal/config/
+ * config.go:2660 KeyExpiryWarn): a live key expiring within this window reads
+ * as `expiring` (consumer and key, model_consumers_read.go consumerStatus /
+ * newKeyView).
+ */
+const MOCK_KEY_EXPIRY_WARN_MS = 1_209_600 * 1000
+
 interface MockAlias {
   id: string
   scope: string
@@ -983,9 +991,30 @@ class GatewayWorld {
     return role === 'server-admin' ? this.consumers : this.consumers.filter((c) => c.tenant === tkey)
   }
 
+  /**
+   * Re-derive a mutated row's statuses the way the server does at its clock
+   * (model_consumers_read.go consumerStatus + youngestLive + newKeyView, here
+   * at MOCK_NOW_MS with MOCK_KEY_EXPIRY_WARN_MS): live = not revoked (a revoked
+   * key is already gone from `keys` — the list carries live keys only) and not
+   * expired; consumer: inactive stays, 0 live ⇒ no_key, ≥ 2 ⇒ rotating, 1
+   * expiring within the warn window ⇒ expiring, else active; key: superseded
+   * unless it is the youngest live key, else expiring within the window, else
+   * active. Seed rows that no mutation touches keep their declared statuses
+   * (the B-11 probe key a9Fq is `active` by a server clock behind the page).
+   */
   #restatus(c: MockConsumer): void {
+    const expired = (k: MockKey) => k.expires_at !== null && Date.parse(k.expires_at) <= MOCK_NOW_MS
+    const soon = (k: MockKey) => k.expires_at !== null && Date.parse(k.expires_at) <= MOCK_NOW_MS + MOCK_KEY_EXPIRY_WARN_MS
+    c.keys = c.keys.filter((k) => !expired(k))
+    let youngest: MockKey | undefined
+    for (const k of c.keys) {
+      if (youngest === undefined || k.created_at > youngest.created_at || (k.created_at === youngest.created_at && (k.id ?? '') > (youngest.id ?? ''))) youngest = k
+    }
+    for (const k of c.keys) k.status = k !== youngest ? 'superseded' : soon(k) ? 'expiring' : 'active'
     if (c.status === 'inactive') return
-    c.status = c.keys.length === 0 ? 'no_key' : c.keys.length === 2 ? 'rotating' : 'active'
+    if (c.keys.length === 0) c.status = 'no_key'
+    else if (c.keys.length >= 2) c.status = 'rotating'
+    else c.status = soon(c.keys[0]) ? 'expiring' : 'active'
   }
 
   create(role: Role, tkey: TenantKey, caps: Record<string, unknown> | undefined, data: Record<string, unknown> | undefined): MockAnswer {
@@ -1074,6 +1103,7 @@ class GatewayWorld {
       prompt_sensitivity: sensitivity,
       allowed_cidrs: cidrs,
     }
+    this.#restatus(c)
     this.consumers.unshift(c)
     return { status: 200, json: { success: true, consumer: consumerView(c, serverAdmin), api_key: REVEAL_MARKER } }
   }
