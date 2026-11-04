@@ -28,7 +28,10 @@ func externalWaitBudget(set Settings, req Request, now time.Time) time.Duration 
 		budget = req.MaxWait
 	}
 	if !req.ServeBy.IsZero() {
-		budget = min(budget, req.ServeBy.Sub(now)-serveMargin)
+		// ServeBy.Add(-m).Sub(now), not ServeBy.Sub(now)-m: Sub saturates at
+		// minDuration for a ServeBy more than ~292 years back, and minDuration
+		// minus the margin would wrap into a huge positive budget (review 2 F-1).
+		budget = min(budget, req.ServeBy.Add(-serveMargin).Sub(now))
 	}
 	return budget
 }
