@@ -195,9 +195,16 @@ func writeModelsError(w http.ResponseWriter, e *modelsError) {
 
 // parseModels turns a models list into the canonical target set.
 func parseModels(in []string) ([]string, error) {
+	// A handler-owned message naming the offending value — never the store's
+	// internal error text (Copilot review on #118).
+	for _, s := range in {
+		if _, err := uuid.Parse(s); err != nil {
+			return nil, &modelsError{msg: fmt.Sprintf("models: %q is not a model alias id — every entry must be the id of a model alias", s)}
+		}
+	}
 	ids, err := store.CanonicalAliasIDs(in)
 	if err != nil {
-		return nil, &modelsError{msg: "models: every entry must be a model alias id (" + err.Error() + ")"}
+		return nil, &modelsError{msg: "models: every entry must be a model alias id"}
 	}
 	return ids, nil
 }
