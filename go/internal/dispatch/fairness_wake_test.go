@@ -233,3 +233,21 @@ func TestExternalWakeOrderAfterAnAdmissionInTheSameWake(t *testing.T) {
 		t.Fatalf("admission order %v, want a1, b1 first — the just-admitted consumer ranked before b", order)
 	}
 }
+
+// TestExternalFairnessViewNeverMovesBack pins the monotone touch of the
+// view clock (review 5 FR5-5): on the production clock an instant read
+// before the mutex can meet a later event of another path; the view keeps
+// the later instant (no negative running time of a lease).
+func TestExternalFairnessViewNeverMovesBack(t *testing.T) {
+	f := newExtFair()
+	at := time.Unix(1000, 0)
+	f.touch(at)
+	f.touch(at.Add(-time.Second))
+	if !f.viewAt.Equal(at) {
+		t.Fatalf("view at %v after touch(t) and touch(t − 1 s), want %v", f.viewAt, at)
+	}
+	f.touch(at.Add(time.Second))
+	if !f.viewAt.Equal(at.Add(time.Second)) {
+		t.Fatalf("view at %v after touch(t + 1 s), want %v", f.viewAt, at.Add(time.Second))
+	}
+}

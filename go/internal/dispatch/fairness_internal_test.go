@@ -223,6 +223,11 @@ type traceRun struct {
 	served  map[string]float64 // settled slot time per consumer key and per "_tenant:<id>"
 	pending bool               // a shrink left held above S or E (attrition) — the bound check waits
 	o2      bool               // dispatch.external_order=o2: background ranks above the external class
+	// viewRef is the trace's own clock of the fairness order (review 5
+	// FR5-2): the step time of the last operation that, by the documented
+	// rule, re-reads the order — a wake or the start or end of an external
+	// lease. After every operation the dispatcher's view time must equal it.
+	viewRef time.Time
 
 	// probe statistics; bound counts the probes whose fairness-first head
 	// did not fit and bound the backfill (review 2 F-1 (i)).
@@ -290,8 +295,14 @@ func (r *traceRun) policy(slots int) Policy {
 }
 
 // settle drains the acquire reports until every outstanding acquire either
-// holds a recorded lease or waits in a queue.
-func (r *traceRun) settle() {
+// holds a recorded lease or waits in a queue, every lease the dispatcher
+// handed out has reported (review 5 FR5-1: a wake inside an enqueue or a
+// drop can admit ANOTHER waiter — the waiting count alone stays equal, the
+// late report would book the lease start a step too late), and the acquire
+// gone (≥ 0: a canceled one) has ended.
+func (r *traceRun) settle() { r.settleGone(-1) }
+
+func (r *traceRun) settleGone(gone int) {
 	r.t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -313,7 +324,11 @@ func (r *traceRun) settle() {
 			}
 		}
 		ts := target(r.t, r.d)
-		if ts.External.Waiting+ts.Background.Waiting == len(r.waiting) {
+		r.d.mu.Lock()
+		leases := len(r.d.targetLocked(testOrigin).inflight)
+		r.d.mu.Unlock()
+		_, open := r.waiting[gone]
+		if ts.External.Waiting+ts.Background.Waiting == len(r.waiting) && leases == len(r.xu)+len(r.bg) && !open {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -337,12 +352,31 @@ func (r *traceRun) acquire(external bool) {
 		ctx = withPrincipal(ctx, Principal{ConsumerID: fmt.Sprintf("c%d", c), TenantID: traceTenant(c), ConsumerKind: "app", FairWeight: traceFW(c)})
 		req = weightedReq(w)
 	}
+	extWaiting := r.externalWaiting()
 	r.waiting[id] = traceWaiter{cancel: cancel, consumer: c, weight: w, external: external}
 	go func() {
 		l, _, err := r.d.Acquire(ctx, req)
 		r.reports <- traceReport{id: id, lease: l, err: err}
 	}()
 	r.settle()
+	_, queued := r.waiting[id]
+	switch {
+	case external:
+		r.viewRef = r.now() // an external lease starts, or the enqueue wakes
+	case r.o2 && !queued && extWaiting > 0:
+		r.viewRef = r.now() // o2: a background admission wakes while external heads wait
+	}
+}
+
+// externalWaiting is the number of external acquires the trace has queued.
+func (r *traceRun) externalWaiting() int {
+	n := 0
+	for _, w := range r.waiting {
+		if w.external {
+			n++
+		}
+	}
+	return n
 }
 
 func (r *traceRun) release() {
@@ -371,6 +405,7 @@ func (r *traceRun) release() {
 		l.Release()
 	}
 	r.settle()
+	r.viewRef = r.now() // every release wakes
 }
 
 func (r *traceRun) cancelOne() {
@@ -382,8 +417,13 @@ func (r *traceRun) cancelOne() {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
-	r.waiting[ids[r.rng.Intn(len(ids))]].cancel()
-	r.settle()
+	id := ids[r.rng.Intn(len(ids))]
+	w := r.waiting[id]
+	w.cancel()
+	r.settleGone(id)
+	if w.external {
+		r.viewRef = r.now() // the drop of an external waiter wakes (a background drop does not)
+	}
 }
 
 // reference is the spec transcription of the pick (design/03 §4.5 no. 2/3,
@@ -405,12 +445,12 @@ func (r *traceRun) reference(st *targetState, slots int) (*waiter, int) {
 	if st.external.total == 0 {
 		return nil, 0
 	}
-	// The clock of the order is the dispatcher's view time (review 4 FR4-2:
-	// frozen between events) — the trace reads the same clock; everything
-	// computed at it comes from the trace's own records.
-	now := st.external.fair.viewAt
+	// The clock of the order is the trace's own view clock (review 4 FR4-2:
+	// frozen between events; review 5 FR5-2: kept by the trace from the
+	// documented rule, check compares it with the dispatcher's).
+	now := r.viewRef
 	if now.IsZero() {
-		now = r.now()
+		now = r.now() // no event yet: the dispatcher reads the clock
 	}
 	heldC, heldT := map[string]int{}, map[string]int{}
 	slotC, slotT := map[string]float64{}, map[string]float64{}
@@ -531,6 +571,7 @@ func (r *traceRun) probe(slots int) {
 	}
 	r.d.wakeLocked(st)
 	r.d.mu.Unlock()
+	r.viewRef = r.now() // the probe's wake
 	if msg != "" {
 		r.t.Fatalf("probe %d: %s", r.probes, msg)
 	}
@@ -555,8 +596,20 @@ func (r *traceRun) check(step int) {
 	r.d.mu.Lock()
 	st := r.d.targetLocked(testOrigin)
 	left, _ := r.d.externalPickLocked(st, r.slots)
+	// Frozen between events (review 4 FR4-2): the clock alone never changes
+	// the pick — 1000 s later, under the same mutex section, it is the same.
+	r.clk.Add(int64(1000 * time.Second))
+	later, _ := r.d.externalPickLocked(st, r.slots)
+	r.clk.Add(-int64(1000 * time.Second))
 	held, heldExt := st.held, st.heldExt
+	viewAt := st.external.fair.viewAt
 	r.d.mu.Unlock()
+	if later != left {
+		r.t.Fatalf("step %d: the pick is %s now and %s 1000 s later without an event — the order moved with the clock", step, waiterLabel(left), waiterLabel(later))
+	}
+	if !viewAt.Equal(r.viewRef) {
+		r.t.Fatalf("step %d: the dispatcher's fairness view is at %v, the trace's rule says %v — the order's clock moved without its event (or missed one)", step, viewAt.UnixNano(), r.viewRef.UnixNano())
+	}
 	if left != nil {
 		r.t.Fatalf("step %d: %s fits and still waits after the wake", step, waiterLabel(left))
 	}
