@@ -207,7 +207,12 @@ func TestRouterCarriesItsInstanceIdentity(t *testing.T) {
 
 	a := fedhop.NewIdentity("00000000-0000-4000-8000-0000000000a1", bytes.Repeat([]byte{0xa1}, 32))
 	b := fedhop.NewIdentity("00000000-0000-4000-8000-0000000000b2", bytes.Repeat([]byte{0xb2}, 32))
-	for _, ident := range []fedhop.Identity{a, b, a} {
+	// Both routers exist BEFORE either serves (review 2 FR2-1): a NewRouter
+	// that set the process default and mounted a zero identity would pass a
+	// build-then-serve loop, because the last-built default happens to be the
+	// one asked for; serving A, B, A on routers built together does not.
+	routers := map[string]http.Handler{}
+	for _, ident := range []fedhop.Identity{a, b} {
 		router := NewRouter(fedhop.WithIdentity(ctx, ident), pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d)
 		mws := router.Middlewares()
 		name := func(i int) string {
@@ -223,10 +228,13 @@ func TestRouterCarriesItsInstanceIdentity(t *testing.T) {
 		router.Get("/zz-f-w2-identity", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, fedhop.IdentityFrom(r.Context()).ID)
 		})
+		routers[ident.ID] = router
+	}
+	for _, ident := range []fedhop.Identity{a, b, a} {
 		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/zz-f-w2-identity", nil))
+		routers[ident.ID].ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/zz-f-w2-identity", nil))
 		if rec.Code != http.StatusOK || rec.Body.String() != ident.ID {
-			t.Errorf("router of %s: status %d, handler read %q", ident.ID, rec.Code, rec.Body.String())
+			t.Errorf("router of %s: status %d, handler read %q — every router must carry its own identity, not the last one built", ident.ID, rec.Code, rec.Body.String())
 		}
 	}
 }

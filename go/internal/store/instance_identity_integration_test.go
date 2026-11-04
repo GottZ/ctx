@@ -570,8 +570,11 @@ func fkScale(t *testing.T) int {
 	n := 1000
 	if v := os.Getenv("CTX_M163_SCALE_TENANTS"); v != "" {
 		var err error
-		if n, err = strconv.Atoi(v); err != nil || n < 10 {
-			t.Fatalf("CTX_M163_SCALE_TENANTS=%q: want an integer >= 10", v)
+		// The gate measures fixed tenants (fk-100/fk-101 at 162, fk-200/fk-201
+		// at 163), so fewer than 202 tenants would fail it for the wrong
+		// reason (review 2 FR2-2).
+		if n, err = strconv.Atoi(v); err != nil || n < 202 {
+			t.Fatalf("CTX_M163_SCALE_TENANTS=%q: want an integer >= 202 (the gate measures tenants fk-100..fk-201)", v)
 		}
 	}
 	return n
