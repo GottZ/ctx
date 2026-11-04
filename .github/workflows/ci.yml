@@ -1095,7 +1095,10 @@ jobs:
   # this job submits the real module graph (go list, build target all) on
   # every root push so Dependabot always matches go.mod. Push-only: PR runs
   # (forks above all) get no write token, and the submission needs
-  # contents: write.
+  # contents: write. A re-run keeps its push event and ref, so a full re-run
+  # of an older root run would submit that commit's graph again, after the
+  # tip's. The step before the submission lets only the current tip of root
+  # submit — the same rule as docker's.
   dependency-graph:
     name: Dependency Graph
     runs-on: ubuntu-latest
@@ -1115,7 +1118,23 @@ jobs:
           cache: true
           cache-dependency-path: go/go.sum
 
+      # Read the tip live, right before the submission, as docker does.
+      - name: Submit only from the current tip of root
+        id: tip
+        run: |
+          set -eu
+          git fetch --no-tags --depth=1 origin root
+          TIP="$(git rev-parse FETCH_HEAD)"
+          if [ "$TIP" = "$GITHUB_SHA" ]; then
+            echo "submit=true" >> "$GITHUB_OUTPUT"
+            echo "ok: $GITHUB_SHA is the tip of root"
+          else
+            echo "submit=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::dependency graph not submitted — $GITHUB_SHA is not the tip of root ($TIP); a re-run of an older commit never rolls the graph back"
+          fi
+
       - name: Submit Go module graph
+        if: steps.tip.outputs.submit == 'true'
         uses: actions/go-dependency-submission@f35d5c9af13ce9cc32f7930b171e315e878f6921 # v2.0.3
         with:
           go-mod-path: go/go.mod

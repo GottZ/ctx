@@ -15,11 +15,13 @@ repository, not a way around review.
 | **Contributor** | anyone | fork, open pull requests, report issues, join discussions |
 
 Write access does **not** include pushing to `root`, merging without the
-required review, creating or moving `v*` tags, or changing settings. The
-repository rulesets enforce that for every account — with one exception,
-the repository-admin bypass described under *Maintainer escape hatch* and
+required review, or creating, moving or deleting `v*` tags. The repository
+rulesets enforce that for every account — with one exception, the
+repository-admin bypass described under *Maintainer escape hatch* and
 *Releases*: it lets the maintainer merge a pull request past the whole
-`root` ruleset and create tags, never push to `root`.
+`root` ruleset and create, move or delete `v*` tags, never push to `root`.
+Changing settings or rulesets needs the admin role, which collaborators do
+not have; no ruleset is involved there.
 
 ## How `root` changes
 
@@ -108,23 +110,36 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
   publishes images one job at a time across all refs, pushes only the
   per-commit `sha-` tag with the build, and promotes `latest` and the date
   tag only after re-reading the tip of `root` — but the newer commit then
-  needs a re-run of its own for its verdict and its image. For a run from
-  before that guard, re-run only its `Web Live Tier` job, never the whole
-  run.
+  needs a re-run of its own for its verdict and its image. The
+  `Dependency Graph` job follows the same rule: it submits the module graph
+  only from the current tip of `root`, so a re-run of an older commit never
+  submits that commit's graph again. A re-run executes the
+  `ci.yml` of its original commit: for a run whose `ci.yml` lacks either
+  guard, re-run only its `Web Live Tier` job, never the whole run.
 - Versioning: a `feat` lands as a minor release, fixes as a patch, a
   breaking change as a major. Several merged pull requests may share one
   release.
 - `v*` tags are created, moved or deleted only by the maintainer: the tag
   ruleset blocks creation, update and deletion for everyone, and the
-  maintainer acts through its admin bypass. A published tag never changes.
-- The `Release` workflow never rebuilds or replaces a published release:
-  both `verify` and `publish` refuse a tag that already has a release
-  (checked right before the upload, so a re-run of single jobs cannot slip
-  past a reused `verify` result), the upload never overwrites an existing
-  asset, and manual dispatches are limited to the repository owner. These
-  guards live in the workflow, not in the repository: collaborators with
-  write access can still create and edit releases directly. The
-  repository-level *immutable releases* setting is not enabled yet.
+  maintainer acts through its admin bypass, which allows all three. The
+  maintainer does not move or delete a published tag; that is a
+  convention, not a ruleset rule.
+- The `Release` workflow as it stands on `root` never rebuilds or replaces
+  a published release: both `verify` and `publish` refuse a tag that
+  already has a release (checked right before the upload, so a re-run of
+  single jobs cannot slip past a reused `verify` result), the upload never
+  overwrites an existing asset, and `verify` stops a manual dispatch by
+  anyone but the repository owner. These guards live in the workflow, not
+  in the repository, and a run executes the copy of `release.yml` at its
+  own ref: a dispatch runs the file on the dispatched branch or tag, a
+  re-run the file of its original run. A collaborator can therefore
+  dispatch a changed copy from their own branch, with its own
+  `permissions:`. The guards hold for the copy on `root`, which changes
+  only through a reviewed pull request, and for the copies on tags from
+  v5.30.2 on; the copies on older tags lack some or all of them.
+  Collaborators with write access can also create and edit releases
+  directly. The repository-level *immutable releases* setting is not
+  enabled yet.
 - Only the newest minor receives fixes ([SECURITY.md](SECURITY.md)).
 
 ## Decisions
