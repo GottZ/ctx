@@ -290,8 +290,9 @@ func UpdateBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 // Guards (§5.1(c)), both checked in the SAME transaction as the delete:
 // builtin ⇒ ErrBlockTypeBuiltin (always); referencing blocks — archived
 // included — ⇒ *BlockTypeInUseError naming the split. A '_global' row counts
-// the blocks of every scope; a tenant row only those of its own tenant
-// (typeRefScopeFilter). found=false ⇒ no row with that id in the given scopes.
+// the blocks of every scope; a tenant row only those of the scopes a block
+// typed by it can live in (typeRefScopeFilter). found=false ⇒ no row with that
+// id in the given scopes.
 func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes []string, by *string, requestID string) (found bool, err error) {
 	if err = pgxdb.Write(ctx, pool,
 		pgxdb.Stages{Begin: "store: delete block type begin", Commit: "store: delete block type commit"},
@@ -350,22 +351,37 @@ func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 }
 
 // typeRefScopeFilter narrows the delete guard's reference count for a TENANT
-// row ($2 = its scope) to the blocks of its own tenant: the row's scope plus
-// every scope the same tenant owns (context_tenant_scopes). A tenant type is
-// resolved by the HomeScope of the writing key (#112), and a tenant-minted key
-// writes only inside its tenant (T22), so a block in another tenant's scope
-// never references this row — it carries a same-named type of its OWN tenant.
-// Counting it would refuse a tenant the delete of its own unused type and
-// answer it with a foreign tenant's block count, a cross-tenant existence and
-// size oracle over type names. The row's own scope stays in the set when it is
-// not a registered tenant scope (legacy or hand-made rows), so the guard never
-// narrows to nothing. A '_global' row keeps the unfiltered count: every
-// tenant's blocks resolve through it.
+// row ($2 = its scope) to the scopes a block typed by that row can live in. A
+// tenant type is resolved by the HomeScope of the writing key (#112), so such a
+// block lies in a scope some key homed in $2 may write — the
+// writableBlockScopes set (handler/context_store.go) over every key with
+// home_scope = $2: the home scope itself, 'shared' when the key holds it, and
+// each write_scope the key may also read. Inactive keys count too, their
+// blocks outlive them. A tenant-minted key stays inside its tenant (T22), but
+// an operator-minted key can bridge into another tenant's scope, and a block
+// it writes there references this row just the same — so that scope is
+// counted. On top: every scope the row's tenant owns (context_tenant_scopes),
+// and the row's own scope, which also covers a scope that is not registered.
+// Everything outside the set is left out: a block in another tenant's scope
+// that no key of this home scope can write carries a same-named type of its
+// OWN tenant, and counting it would refuse a tenant the delete of its own
+// unused type and answer it with a foreign block count (a cross-tenant
+// existence and size oracle). Inside a bridged scope that exposure remains, and
+// only an operator can open such a bridge. A '_global' row keeps the unfiltered
+// count: every tenant's blocks resolve through it.
 const typeRefScopeFilter = `
-			    AND (scope = $2 OR scope IN (
+			    AND (scope = $2
+			      OR scope IN (
 			        SELECT o.scope FROM context_tenant_scopes t
 			          JOIN context_tenant_scopes o ON o.tenant_id = t.tenant_id
-			         WHERE t.scope = $2))`
+			         WHERE t.scope = $2)
+			      OR scope IN (
+			        SELECT w.scope FROM context_api_keys k
+			          CROSS JOIN LATERAL unnest(k.write_scopes) AS w(scope)
+			         WHERE k.home_scope = $2 AND w.scope = ANY(k.allowed_scopes))
+			      OR (scope = 'shared' AND EXISTS (
+			        SELECT 1 FROM context_api_keys k
+			         WHERE k.home_scope = $2 AND 'shared' = ANY(k.allowed_scopes))))`
 
 // stampBlockTypeTx applies the audit attribution GUCs (settings.go:249-270
 // pattern; third user after settings and backends).

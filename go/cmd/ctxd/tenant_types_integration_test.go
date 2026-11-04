@@ -130,7 +130,7 @@ func TestTenantTypeReachesRegistry_Integration(t *testing.T) {
 	}
 
 	acmeKey, acmeScope := tenant(t, "acme")
-	betaKey, _ := tenant(t, "beta")
+	betaKey, betaScope := tenant(t, "beta")
 
 	// The fixture's premise: the type does not exist anywhere before the PUT.
 	if _, ok := blocktypeReg.Snapshot().Resolve("sprint"); ok {
@@ -215,7 +215,11 @@ func TestTenantTypeReachesRegistry_Integration(t *testing.T) {
 		if status, resp := do(t, http.MethodGet, "/api/types/sprint", betaKey, nil); status != http.StatusNotFound {
 			t.Errorf("GET /api/types/sprint as the other tenant: status %d, want 404 (resp %v)", status, resp)
 		}
-		status, id, resp := storeBlock(t, betaKey, "sprint marker three", "")
+		// The title carries BOTH of the first tenant's sprint markers — the
+		// original one and the one the update switched the rule to — so it
+		// would classify as sprint under the first tenant's set, whichever rule
+		// generation that set holds.
+		status, id, resp := storeBlock(t, betaKey, "sprint marker three, retro marker", "")
 		if status != http.StatusOK || id == "" {
 			t.Fatalf("POST /api/store as the other tenant: status %d, want 200 (resp %v)", status, resp)
 		}
@@ -275,7 +279,8 @@ func TestTenantTypeReachesRegistry_Integration(t *testing.T) {
 			},
 		})
 		writerKey, _ := resp["api_key"].(string)
-		if status != http.StatusOK || writerKey == "" {
+		writerID, _ := resp["id"].(string)
+		if status != http.StatusOK || writerKey == "" || writerID == "" {
 			t.Fatalf("api-key-create: status %d resp %v", status, resp)
 		}
 		if status, resp := putType(t, acmeKey, "wide", "wide marker"); status != http.StatusOK {
@@ -289,10 +294,64 @@ func TestTenantTypeReachesRegistry_Integration(t *testing.T) {
 		if status != http.StatusOK || block["scope"] != alphaScope {
 			t.Fatalf("POST /api/store type=wide into %s: status %d, want 200 in that scope (resp %v)", alphaScope, status, resp)
 		}
+		// The writer loses the write scope afterwards. Its block stays where it
+		// is, so the guard must still find it — through the tenant's own scopes,
+		// not through the key's current write set.
+		if status, resp := do(t, http.MethodPost, "/api/manage", acmeKey, map[string]any{
+			"action": "api-key-update", "data": map[string]any{"id": writerID, "write_scopes": []string{}},
+		}); status != http.StatusOK {
+			t.Fatalf("api-key-update write_scopes=[]: status %d, want 200 (resp %v)", status, resp)
+		}
 		status, resp = do(t, http.MethodDelete, "/api/types/wide", acmeKey, nil)
 		blocks, _ := resp["blocks"].(map[string]any)
 		if status != http.StatusConflict || blocks["active"] != float64(1) {
 			t.Errorf("DELETE wide referenced from %s: status %d blocks %v, want 409 with active 1 (resp %v)", alphaScope, status, blocks, resp)
+		}
+	})
+
+	t.Run("delete_counts_blocks_in_scopes_bridged_from_the_home_scope", func(t *testing.T) {
+		// A server-admin may mint a key without tenant_id whose home scope is
+		// this tenant's and whose write scope lies in ANOTHER tenant
+		// (resolveKeyMintTenant skips the T22 tenant check for the operator).
+		// Its writes are typed by its home scope's set, so a block it puts into
+		// the other tenant's scope references this tenant's row; the guard has
+		// to count it there too, or the delete orphans the block. The same holds
+		// for 'shared', which a key may write once it holds it as an allowed
+		// scope (writableBlockScopes) — one block in each, so each branch of the
+		// filter is pinned on its own.
+		mint := func(t *testing.T, label string, data map[string]any) string {
+			t.Helper()
+			data["label"], data["home_scope"] = label, acmeScope
+			status, resp := do(t, http.MethodPost, "/api/manage", adminKey, map[string]any{
+				"action": "api-key-create", "data": data,
+			})
+			key, _ := resp["api_key"].(string)
+			if status != http.StatusOK || key == "" {
+				t.Fatalf("server-admin api-key-create %s: status %d resp %v", label, status, resp)
+			}
+			return key
+		}
+		bridgeKey := mint(t, "i112-bridge", map[string]any{
+			"allowed_scopes": []string{betaScope}, "write_scopes": []string{betaScope},
+		})
+		sharedKey := mint(t, "i112-shared", map[string]any{"allowed_scopes": []string{"shared"}})
+		if status, resp := putType(t, acmeKey, "bridged", "bridged marker"); status != http.StatusOK {
+			t.Fatalf("PUT /api/types/bridged: status %d, want 200 (resp %v)", status, resp)
+		}
+		for _, w := range []struct{ key, scope string }{{bridgeKey, betaScope}, {sharedKey, "shared"}} {
+			status, resp := do(t, http.MethodPost, "/api/store", w.key, map[string]any{
+				"category": "learnings", "title": "bridged block in " + w.scope, "content": "i112 probe body: bridged",
+				"type": "bridged", "scope": w.scope,
+			})
+			block, _ := resp["block"].(map[string]any)
+			if status != http.StatusOK || block["scope"] != w.scope {
+				t.Fatalf("POST /api/store type=bridged into %s: status %d, want 200 in that scope (resp %v)", w.scope, status, resp)
+			}
+		}
+		status, resp := do(t, http.MethodDelete, "/api/types/bridged", acmeKey, nil)
+		blocks, _ := resp["blocks"].(map[string]any)
+		if status != http.StatusConflict || blocks["active"] != float64(2) {
+			t.Errorf("DELETE bridged referenced from %s and shared: status %d blocks %v, want 409 with active 2 (resp %v)", betaScope, status, blocks, resp)
 		}
 	})
 }
