@@ -18,9 +18,13 @@ func sampleSnapshot() dispatch.Snapshot {
 		Demand:          2,
 		ReapsTotal:      3,
 		ClassDowngrades: 1,
-		UnchargedCalls:  4,
-		OpsTotal:        99,
-		MaxOpDur:        7 * time.Millisecond,
+		// W01-7 (design/01 §4.5 I-K10): the two principal-gate refusal
+		// counters, server-admin only.
+		ClassUnauthorized:  5,
+		PrincipalConflicts: 6,
+		UnchargedCalls:     4,
+		OpsTotal:           99,
+		MaxOpDur:           7 * time.Millisecond,
 		Targets: []dispatch.TargetSnapshot{
 			{
 				Origin:            "http://herbert:8089",
@@ -93,7 +97,7 @@ func TestBuildDispatchTenantNoForeignPrincipal(t *testing.T) {
 	}
 	payload := string(b)
 	// F-B3: no foreign fairKey, no foreign token/charge leak, no "fair_key" field.
-	for _, forbidden := range []string{"acme-secret", "fair_key", "999", "sidecar"} {
+	for _, forbidden := range []string{"acme-secret", "fair_key", "999", "sidecar", "class_unauthorized", "principal_conflicts"} {
 		if strings.Contains(payload, forbidden) {
 			t.Errorf("F-B3 leak: tenant payload contains %q\n%s", forbidden, payload)
 		}
@@ -127,6 +131,10 @@ func TestBuildDispatchAdminExposesFullDetail(t *testing.T) {
 
 	if !ds.Enforcing || ds.ClassDowngrades != 1 || ds.UnchargedCalls != 4 || ds.MaxOpMs != 7 {
 		t.Errorf("admin scalar detail wrong: %+v", ds)
+	}
+	if ds.ClassUnauthorized != 5 || ds.PrincipalConflicts != 6 {
+		t.Errorf("principal-gate counters wrong: class_unauthorized=%d principal_conflicts=%d, want 5/6",
+			ds.ClassUnauthorized, ds.PrincipalConflicts)
 	}
 	if ds.LastGuardAt == nil || !ds.LastGuardAt.Equal(guard) || ds.LastDigestAt != nil {
 		t.Errorf("last-run stamps wrong: guard=%v digest=%v", ds.LastGuardAt, ds.LastDigestAt)

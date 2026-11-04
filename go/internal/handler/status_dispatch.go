@@ -32,9 +32,15 @@ type dispatchStatus struct {
 	Demand          int   `json:"demand"`
 	ReapsTotal      int64 `json:"reaps_total"`
 	ClassDowngrades int64 `json:"class_downgrades"`
-	UnchargedCalls  int64 `json:"uncharged_calls"`
-	OpsTotal        int64 `json:"ops_total"`
-	MaxOpMs         int64 `json:"max_op_ms"`
+	// ClassUnauthorized / PrincipalConflicts are the principal-gate refusal
+	// counters (W01-7, design/01 §4.5 I-K10): a consumer principal in a
+	// non-external class, a poisoned principal. Like class_downgrades every
+	// tick is a wiring defect.
+	ClassUnauthorized  int64 `json:"class_unauthorized"`
+	PrincipalConflicts int64 `json:"principal_conflicts"`
+	UnchargedCalls     int64 `json:"uncharged_calls"`
+	OpsTotal           int64 `json:"ops_total"`
+	MaxOpMs            int64 `json:"max_op_ms"`
 	// Last-run wall-clock of the lease-free arms (P6 anti-starvation metric,
 	// design/05 §4.5); null = arm did not run this process.
 	LastGuardAt    *time.Time `json:"last_guard_at"`
@@ -145,19 +151,21 @@ func coarsenDepth(waiting int) string {
 // rollup so no new query runs here.
 func buildDispatchAdmin(snap dispatch.Snapshot, enforcing bool, guardAt, digestAt, overviewAt *time.Time, llm24h []llm24hRow) *dispatchStatus {
 	out := &dispatchStatus{
-		Enabled:         snap.Enabled,
-		Enforcing:       enforcing,
-		Demand:          snap.Demand,
-		ReapsTotal:      snap.ReapsTotal,
-		ClassDowngrades: snap.ClassDowngrades,
-		UnchargedCalls:  snap.UnchargedCalls,
-		OpsTotal:        snap.OpsTotal,
-		MaxOpMs:         snap.MaxOpDur.Milliseconds(),
-		LastGuardAt:     guardAt,
-		LastDigestAt:    digestAt,
-		LastOverviewAt:  overviewAt,
-		EmbedTokens:     embedTokensFromRollup(llm24h),
-		Targets:         make([]dispatchTarget, 0, len(snap.Targets)),
+		Enabled:            snap.Enabled,
+		Enforcing:          enforcing,
+		Demand:             snap.Demand,
+		ReapsTotal:         snap.ReapsTotal,
+		ClassDowngrades:    snap.ClassDowngrades,
+		ClassUnauthorized:  snap.ClassUnauthorized,
+		PrincipalConflicts: snap.PrincipalConflicts,
+		UnchargedCalls:     snap.UnchargedCalls,
+		OpsTotal:           snap.OpsTotal,
+		MaxOpMs:            snap.MaxOpDur.Milliseconds(),
+		LastGuardAt:        guardAt,
+		LastDigestAt:       digestAt,
+		LastOverviewAt:     overviewAt,
+		EmbedTokens:        embedTokensFromRollup(llm24h),
+		Targets:            make([]dispatchTarget, 0, len(snap.Targets)),
 	}
 	for _, t := range snap.Targets {
 		dt := dispatchTarget{

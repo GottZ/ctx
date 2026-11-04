@@ -27,7 +27,8 @@ var ErrWouldBlock = errors.New("dispatch: target busy, would block")
 // Pass-through targets (disabled / no declared policy) admit
 // unconditionally, exactly like Acquire — behavior neutrality with empty
 // policy. Same door check order as Acquire: ctx.Err(), then the class
-// (ErrInvalidClass outside the class table, A03-W1), then B8.
+// (ErrInvalidClass outside the class table, A03-W1), then the principal gate
+// (ErrPrincipalConflict, ErrClassUnauthorized — I-K10, W01-7), then B8.
 func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, context.Context, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err // canceled ctx never admits
@@ -36,6 +37,9 @@ func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, conte
 		return nil, nil, d.refuseInvalidClass("try-acquire", req.Class, req.Target.Origin, req.Role)
 	}
 	principal := principalFromContext(ctx)
+	if err := d.refusePrincipal("try-acquire", principal, req); err != nil {
+		return nil, nil, err
+	}
 	class := req.Class
 	if class == ClassInteractive && principal.ApiKeyID == "" {
 		// Same B8 class authorization as Acquire (design/03 §4.1.1): every

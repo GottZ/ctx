@@ -436,6 +436,8 @@ export interface DispatchStatus {
   demand: number
   reaps_total: number
   class_downgrades: number
+  class_unauthorized: number
+  principal_conflicts: number
   uncharged_calls: number
   ops_total: number
   max_op_ms: number

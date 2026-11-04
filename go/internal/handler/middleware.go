@@ -141,17 +141,43 @@ func RequestTenantScope(ctx context.Context) string {
 // downgrade. Emptiness stays pinned on ApiKeyID inside dispatch: a synthetic
 // AuthResult with an empty key id (chat.go RunQuery, the S9 finding)
 // downgrades too instead of forming an anonymous interactive bucket.
+//
+// A model-key request (ModelAuth, design/01 §4.5, wave W01-7) resolves to a
+// consumer principal: ApiKeyID, HomeScope and PrincipalID stay empty (I-K0 —
+// B8 remains the only interactive entrance for knowledge keys, a consumer
+// has no corpus home and is no person), TenantID is attribution only. The
+// dispatcher refuses it in every class with External() == false (I-K10).
+// A context with both credentials — the doors refuse each other's context,
+// so this is the second line — or with a ConsumerAuth that is invalid or
+// names no consumer (AuthenticateModelKey produces neither: consumer_id is
+// NOT NULL; review 2 FR2-1) yields the poisoned principal {Conflict: true}:
+// never the zero principal, which is ctx' own detached work. The knowledge
+// branch is byte-identical to before.
 func RequestPrincipal(ctx context.Context) dispatch.Principal {
-	ar := AuthResultFromContext(ctx)
-	if ar == nil {
-		return dispatch.Principal{}
+	ar, ca := AuthResultFromContext(ctx), ConsumerAuthFromContext(ctx)
+	switch {
+	case ar != nil && ca != nil:
+		slog.Error("dispatch: request carries both a knowledge and a model credential")
+		return dispatch.Principal{Conflict: true}
+	case ca != nil && ca.IsValid && ca.ConsumerID != "":
+		return dispatch.Principal{
+			TenantID:     ca.TenantID,
+			ConsumerID:   ca.ConsumerID,
+			ConsumerKind: string(ca.Kind),
+			FairWeight:   ca.FairWeight,
+		}
+	case ca != nil:
+		slog.Error("dispatch: request carries an invalid model credential (not valid, or without a consumer id)")
+		return dispatch.Principal{Conflict: true}
+	case ar != nil:
+		return dispatch.Principal{
+			ApiKeyID:    ar.ApiKeyID,
+			TenantID:    ar.TenantID,
+			HomeScope:   ar.HomeScope,
+			PrincipalID: ar.PrincipalID,
+		}
 	}
-	return dispatch.Principal{
-		ApiKeyID:    ar.ApiKeyID,
-		TenantID:    ar.TenantID,
-		HomeScope:   ar.HomeScope,
-		PrincipalID: ar.PrincipalID,
-	}
+	return dispatch.Principal{}
 }
 
 // isValidRequestID checks that a client-supplied request ID contains only

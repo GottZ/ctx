@@ -407,6 +407,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	// MW12 dispatch section (server-admin) wire pins.
 	assertKeys(t, "dispatch", top["dispatch"], []string{
 		"enabled", "enforcing", "demand", "reaps_total", "class_downgrades",
+		"class_unauthorized", "principal_conflicts",
 		"uncharged_calls", "ops_total", "max_op_ms", "last_guard_at", "last_digest_at",
 		"last_overview_at", "embed_tokens", "targets",
 	})
