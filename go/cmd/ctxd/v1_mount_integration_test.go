@@ -603,8 +603,19 @@ func TestV1ModelsEndToEnd(t *testing.T) {
 	if a := f.do(http.MethodGet, "/v1/models/granted", withBearer(f.modelKey)); a.status != http.StatusOK {
 		t.Errorf("GET granted with its grant: %d %s", a.status, a.body)
 	}
-	notGranted := f.do(http.MethodGet, "/v1/models/other", withBearer(f.modelKey))
-	missing := f.do(http.MethodGet, "/v1/models/nope", withBearer(f.modelKey))
+	// The same database work for both 404s (Fremd-Review 1 L-1, review 2
+	// L-a): one grant statement each — a name that is no alias probes the
+	// grants too, so the time does not tell it from an alias not released.
+	probes := func(path string) (v1Answer, int64) {
+		before := f.tracer.grantSQL.Load()
+		a := f.do(http.MethodGet, path, withBearer(f.modelKey))
+		return a, f.tracer.grantSQL.Load() - before
+	}
+	notGranted, nG := probes("/v1/models/other")
+	missing, nM := probes("/v1/models/nope")
+	if nG != 1 || nM != 1 {
+		t.Errorf("grant statements per 404: not granted %d, missing %d — want 1 each (no timing oracle beside the identical bytes)", nG, nM)
+	}
 	if notGranted.status != http.StatusNotFound || notGranted.code() != oai.CodeModelNotFound || !sameAnswer(notGranted, missing) {
 		t.Errorf("not granted vs missing: %d %s / %d %s, want the same 404 model_not_found", notGranted.status, notGranted.body, missing.status, missing.body)
 	}
