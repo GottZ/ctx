@@ -148,8 +148,9 @@ func RequestTenantScope(ctx context.Context) string {
 // has no corpus home and is no person), TenantID is attribution only. The
 // dispatcher refuses it in every class with External() == false (I-K10).
 // A context with both credentials — the doors refuse each other's context,
-// so this is the second line — or with an invalid ConsumerAuth, which
-// ModelAuth never stores, yields the poisoned principal {Conflict: true}:
+// so this is the second line — or with a ConsumerAuth that is invalid or
+// names no consumer (AuthenticateModelKey produces neither: consumer_id is
+// NOT NULL; review 2 FR2-1) yields the poisoned principal {Conflict: true}:
 // never the zero principal, which is ctx' own detached work. The knowledge
 // branch is byte-identical to before.
 func RequestPrincipal(ctx context.Context) dispatch.Principal {
@@ -158,7 +159,7 @@ func RequestPrincipal(ctx context.Context) dispatch.Principal {
 	case ar != nil && ca != nil:
 		slog.Error("dispatch: request carries both a knowledge and a model credential")
 		return dispatch.Principal{Conflict: true}
-	case ca != nil && ca.IsValid:
+	case ca != nil && ca.IsValid && ca.ConsumerID != "":
 		return dispatch.Principal{
 			TenantID:     ca.TenantID,
 			ConsumerID:   ca.ConsumerID,
@@ -166,7 +167,7 @@ func RequestPrincipal(ctx context.Context) dispatch.Principal {
 			FairWeight:   ca.FairWeight,
 		}
 	case ca != nil:
-		slog.Error("dispatch: request carries an invalid model credential")
+		slog.Error("dispatch: request carries an invalid model credential (not valid, or without a consumer id)")
 		return dispatch.Principal{Conflict: true}
 	case ar != nil:
 		return dispatch.Principal{
