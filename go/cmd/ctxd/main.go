@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/settings"
@@ -549,6 +551,13 @@ func bootstrapAdminKeyBoot(ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
+// daemonLogger is the daemon's log handler: JSON lines at INFO. The boot tests
+// that re-execute a boot step log through it too, so a leak probe sees the
+// production rendering.
+func daemonLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
 func main() {
 	// Health check mode: /ctx -health probes the local server with serving
 	// semantics (E9) and never returns in that case — see healthmode.go.
@@ -566,10 +575,7 @@ func main() {
 	// returns when argv[1] == overview.WorkerCommand (see overviewworker.go).
 	dispatchOverviewWorkerMode()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
+	slog.SetDefault(daemonLogger(os.Stderr))
 
 	// Root context cancelled on SIGINT/SIGTERM. Derived before the boot so the
 	// pool's connect retries answer to the same two signals the rest of the
@@ -615,6 +621,14 @@ func main() {
 		slog.Error("migrations failed", "error", err)
 		os.Exit(1)
 	}
+
+	// F-W2 (design/04 §4.2): the instance identity, or no boot at all — read
+	// right after the migrations that create it, before any other boot step
+	// writes (TestMainLoadsIdentityRightAfterMigrations pins the place). The
+	// default serves the detached scheduler contexts, installed long before
+	// they spawn (boot happens-before, as SetPrincipalHook below); NewRouter
+	// puts it into every request as its first middleware.
+	fedhop.SetDefaultIdentity(bootInstanceIdentity(ctx, pool))
 
 	// W03-1 (Achse 03 Contract/Observability, migration 108): stamp the
 	// _migrations checksum column for rows still NULL (pre-108 applies and

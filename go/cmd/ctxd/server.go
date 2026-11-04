@@ -11,6 +11,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/forge"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/settings"
@@ -55,7 +56,12 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// then inherits the base pointer byte-for-byte — default-tenant equivalence).
 	blocktype.SetRequestScopeHook(handler.RequestTenantScope)
 
-	// Global middleware
+	// Global middleware. F-W2 (design/04 §4.2): the instance identity first —
+	// it only puts the identity into the request context (ctx's own: the boot
+	// default unless the caller's ctx carries another, as two routers in one
+	// test process do), so every handler and every outgoing call below reads
+	// the identity of the router that serves it.
+	r.Use(fedhop.IdentityMiddleware(fedhop.IdentityFrom(ctx)))
 	r.Use(handler.SecurityHeaders)
 	r.Use(handler.RequestID)
 	r.Use(handler.Logger)

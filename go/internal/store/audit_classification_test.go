@@ -25,7 +25,10 @@
 // consumer_id) are immutable by trigger, so their per-column probe proves the
 // refusal and then the audit row with that trigger disabled. Since migration
 // 162 (W02-03) the model aliases are, with the same probe for their three
-// identity columns scope, name and kind. Completeness:
+// identity columns scope, name and kind. Since migration 163 (F-W2) the
+// instance identity is: a singleton without an id column (its probes address
+// the row by singleton) whose secret is excluded — the HMAC key of the hop
+// tokens never reaches an audit row. Completeness:
 // every table carrying a trigger that writes context_settings_audit is either
 // classified here or named in auditLegacyTables — a new audited table without
 // an entry turns TestAuditClassificationPin red.
@@ -34,11 +37,13 @@
 // before the pin runs: the red run of Negativ 3. The subtest
 // probe_column_turns_the_pin_red checks the same on a database of its own in
 // every run. TestAuditClassificationPerColumn honours CTX_M160_OVERLAY
-// (when-hole, value-swap), CTX_M161_OVERLAY and CTX_M162_OVERLAY
-// (no-of-list, no-identity) for its red runs; the blacklist overlays of 161
-// and 162 stay green here (their projections carry every audited value) and
-// turn TestModelAudit/state_is_the_whitelist and
-// TestModelAliasAudit/state_is_the_whitelist red instead.
+// (when-hole, value-swap), CTX_M161_OVERLAY, CTX_M162_OVERLAY
+// (no-of-list, no-identity) and CTX_M163_OVERLAY (no-of-list) for its red
+// runs; the blacklist overlays of 161, 162 and 163 stay green here (their
+// projections carry every audited value) and turn
+// TestModelAudit/state_is_the_whitelist,
+// TestModelAliasAudit/state_is_the_whitelist and
+// TestInstanceAudit/rotation_writes_one_row_without_the_secret red instead.
 //
 //	go test -tags=integration -p 1 -count=1 -run TestAuditClassification ./internal/store/
 package store_test
@@ -143,6 +148,16 @@ var auditClassification = []auditedTable{
 			"updated_at": "bookkeeping time the store writes next to an audited change",
 		},
 		updTrig: "trg_model_aliases_audit_upd",
+	},
+	{
+		table:   "context_instance",
+		stateFn: "audit_state_instance",
+		audited: []string{"instance_id", "created_at", "rotated_at"},
+		excluded: map[string]string{
+			"singleton":       "row key of the one-row table (CHECK singleton); the audit row's entity_key is 'self'",
+			"instance_secret": "HMAC key of the hop tokens (design/04 §4.1): never leaves the table — no log, no status, no audit row",
+		},
+		updTrig: "trg_instance_audit_upd",
 	},
 }
 
@@ -367,10 +382,21 @@ func TestAuditClassificationPin(t *testing.T) {
 // the refusal (no row), then runs once with that trigger disabled in its own
 // transaction and expects the one audit row, so the audit covers the column
 // even past the pin.
+// keyCol/keyType address the probed row (default id/uuid; the instance
+// singleton has no id column).
 type auditProbeSet struct {
 	audited, excluded map[string]string
 	prep              map[string]string
 	pinned            map[string]string // column -> identity trigger
+	keyCol, keyType   string
+}
+
+// rowKey returns the key column and its type of a probe set.
+func (p auditProbeSet) rowKey() (col, typ string) {
+	if p.keyCol == "" {
+		return "id", "uuid"
+	}
+	return p.keyCol, p.keyType
 }
 
 var auditColumnProbes = map[string]auditProbeSet{
@@ -483,6 +509,18 @@ var auditColumnProbes = map[string]auditProbeSet{
 			"kind":  "trg_model_aliases_identity",
 		},
 	},
+	"context_instance": {
+		audited: map[string]string{
+			"instance_id": "gen_random_uuid()",
+			"created_at":  "created_at - interval '1 minute'",
+			"rotated_at":  "COALESCE(rotated_at, now()) + interval '1 second'",
+		},
+		excluded: map[string]string{
+			"instance_secret": "gen_random_bytes(32)",
+		},
+		keyCol:  "singleton",
+		keyType: "boolean",
+	},
 }
 
 func TestAuditClassificationPerColumn(t *testing.T) {
@@ -491,10 +529,11 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	}
 	ctx := context.Background()
 	// 160 (honouring CTX_M160_OVERLAY), then 161 (honouring CTX_M161_OVERLAY),
-	// then 162 (honouring CTX_M162_OVERLAY).
+	// then 162 (honouring CTX_M162_OVERLAY), then 163 (CTX_M163_OVERLAY).
 	pool := kaSetup(t, nil)
 	m161Apply(ctx, t, pool)
 	m162Apply(ctx, t, pool)
+	m163Apply(ctx, t, pool)
 
 	otherTenant := freshTenant(t, ctx, pool, "ka-pin-other")
 	var otherPrincipal string
@@ -525,9 +564,11 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	modelAlias := maAlias(ctx, t, pool, "ka-pin:main", "ka-pin-alias", nil)
 
 	rowID := map[string]string{"context_api_keys": key.ID, "context_tenant_quota": quotaID,
-		"context_model_consumers": consumerA, "context_model_keys": modelKey, "context_model_aliases": modelAlias}
+		"context_model_consumers": consumerA, "context_model_keys": modelKey, "context_model_aliases": modelAlias,
+		"context_instance": "true"}
 	entity := map[string]string{"context_api_keys": "api_key", "context_tenant_quota": "tenant_quota",
-		"context_model_consumers": "model_consumer", "context_model_keys": "model_key", "context_model_aliases": "model_alias"}
+		"context_model_consumers": "model_consumer", "context_model_keys": "model_key", "context_model_aliases": "model_alias",
+		"context_instance": "instance"}
 	fill := func(expr string) string {
 		if !strings.Contains(expr, "%[") {
 			return expr
@@ -544,15 +585,17 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 		if got, want := sortedKeys(probes.audited), sortedJoin(c.audited); got != want {
 			t.Errorf("%s: audited probes [%s], audited columns [%s]", c.table, got, want)
 		}
+		keyCol, keyType := probes.rowKey()
 		var excl []string
 		for col := range c.excluded {
-			if col != "id" {
+			if col != keyCol {
 				excl = append(excl, col)
 			}
 		}
 		if got, want := sortedKeys(probes.excluded), sortedJoin(excl); got != want {
-			t.Errorf("%s: excluded probes [%s], excluded columns but id [%s]", c.table, got, want)
+			t.Errorf("%s: excluded probes [%s], excluded columns but %s [%s]", c.table, got, keyCol, want)
 		}
+		where := fmt.Sprintf("%s = $1::%s", keyCol, keyType)
 
 		run := func(col, expr string, wantRows int) {
 			t.Helper()
@@ -562,7 +605,7 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 				}
 			}
 			before := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table])
-			update := fmt.Sprintf(`UPDATE %s SET %s = %s WHERE id = $1::uuid`, c.table, col, fill(expr))
+			update := fmt.Sprintf(`UPDATE %s SET %s = %s WHERE %s`, c.table, col, fill(expr), where)
 			if trig, ok := probes.pinned[col]; ok {
 				// The pin refuses the change and nothing is written ...
 				if _, err := pool.Exec(ctx, update, rowID[c.table]); mcSQLState(err) != "23514" {
@@ -574,7 +617,7 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 				// ... and past the pin the audit trigger still records it.
 				kaExecInTx(ctx, t, pool, fmt.Sprintf(`ALTER TABLE %[1]s DISABLE TRIGGER %[2]s;
 					%[3]s;
-					ALTER TABLE %[1]s ENABLE TRIGGER %[2]s;`, c.table, trig, strings.Replace(update, "$1::uuid", "'"+rowID[c.table]+"'::uuid", 1)))
+					ALTER TABLE %[1]s ENABLE TRIGGER %[2]s;`, c.table, trig, strings.Replace(update, "$1::", "'"+rowID[c.table]+"'::", 1)))
 			} else if _, err := pool.Exec(ctx, update, rowID[c.table]); err != nil {
 				t.Fatalf("%s.%s: update: %v", c.table, col, err)
 			}
@@ -597,7 +640,7 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 				   FROM %s t,
 				        LATERAL (SELECT old_value, new_value FROM context_settings_audit
 				                  WHERE entity_type = $3 ORDER BY created_at DESC, id DESC LIMIT 1) a
-				  WHERE t.id = $1::uuid`, c.table), rowID[c.table], col, entity[c.table]).
+				  WHERE t.%s`, c.table, where), rowID[c.table], col, entity[c.table]).
 				Scan(&valueMatches, &changed, &restEqual, &newRaw, &rowRaw); err != nil {
 				t.Fatalf("%s.%s: read row: %v", c.table, col, err)
 			}
