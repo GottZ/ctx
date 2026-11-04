@@ -915,3 +915,77 @@ func TestWeightRefusalsLogAtWarn(t *testing.T) {
 	}
 	occ.Release()
 }
+
+// TestWeightExpiredHeavyHeadWakesTheNext (A03-W5 × A03-W7, W5 review 2 F-6):
+// a heavy external head whose wait budget runs out leaves its queue through
+// dropWaiterLocked and wakes the target in the same mutex section, exactly
+// like a canceled one. S = 7, R = 2 (E = 5): an external lease of weight 1
+// runs, a head of weight E waits (1 + 5 > E) with MaxWait 300 ms, a light
+// waiter of weight 2 queues behind it (it would fit; FIFO keeps it behind
+// the head) and in o1 a background newcomer still passes the inadmissible
+// head (work conservation). The head ends with ErrWaitExpired after its
+// budget; when its Acquire returns, the light waiter already holds its
+// lease, and an o1 background newcomer is admitted at once. A drop without
+// the wake strands the light waiter until the next release and turns the o1
+// newcomer away (an admissible external head waits above it).
+func TestWeightExpiredHeavyHeadWakesTheNext(t *testing.T) {
+	const budget = 300 * time.Millisecond
+	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
+	occ := mustAcquire(t, d, xctx(context.Background(), "occ", "tenant-a"), weightedReq(1))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		err  error
+		took time.Duration
+	}
+	heavyCh := make(chan result, 1)
+	heavy := weightedReq(weightE)
+	heavy.MaxWait = budget
+	go func() {
+		start := time.Now()
+		l, _, err := d.Acquire(xctx(ctx, "c1", "tenant-a"), heavy)
+		if l != nil {
+			l.Release()
+		}
+		heavyCh <- result{err: err, took: time.Since(start)}
+	}()
+	waitFor(t, "heavy head queued", func() bool { return waitingExternal(d) == 1 })
+	lightCh := make(chan admission, 1)
+	startWaiter(xctx(ctx, "c2", "tenant-b"), d, "light", weightedReq(2), lightCh)
+	waitFor(t, "light waiter queued behind the head", func() bool { return waitingExternal(d) == 2 })
+	b0, _, err := d.TryAcquire(context.Background(), backgroundReq())
+	if err != nil {
+		t.Fatalf("o1 background newcomer beside the inadmissible heavy head: %v, want admitted (work conservation)", err)
+	}
+	b0.Release()
+
+	var h result
+	select {
+	case h = <-heavyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("heavy head still waiting 5s into a %v wait budget", budget)
+	}
+	if !errors.Is(h.err, ErrWaitExpired) || h.took < budget {
+		t.Fatalf("heavy head: err=%v after %v, want ErrWaitExpired after its %v budget", h.err, h.took, budget)
+	}
+	ts := target(t, d)
+	if ts.External.Waiting != 0 || ts.HeldExternal != 2 || ts.HeldExternalWeight != 3 || ts.ExternalRejects.Expired != 1 || ts.ExternalRejects.NotOffered != 0 {
+		t.Fatalf("when the expired head's acquire returned: waiting=%d HeldExternal=%d HeldExternalWeight=%d expired=%d not_offered=%d, want 0/2/3/1/0 — the expiry must wake the light waiter in the same mutex section",
+			ts.External.Waiting, ts.HeldExternal, ts.HeldExternalWeight, ts.ExternalRejects.Expired, ts.ExternalRejects.NotOffered)
+	}
+	b1, _, err := d.TryAcquire(context.Background(), backgroundReq())
+	if err != nil {
+		t.Fatalf("o1 background newcomer right after the heavy head expired: %v, want admitted", err)
+	}
+	b1.Release()
+	light := recvAdmission(t, lightCh, "light waiter after the head expired")
+	if light.label != "light" || light.err != nil || light.lease == nil {
+		t.Fatalf("light waiter: label=%s err=%v", light.label, light.err)
+	}
+	t.Logf("heavy w=E ended after %v with ErrWaitExpired (budget %v); the light w=2 waiter held its lease when that acquire returned", h.took, budget)
+	light.lease.Release()
+	occ.Release()
+	if ts := target(t, d); ts.HeldWeight != 0 || ts.Held != 0 || ts.External.Waiting != 0 {
+		t.Fatalf("after the releases: HeldWeight=%d Held=%d waiting=%d, want 0/0/0", ts.HeldWeight, ts.Held, ts.External.Waiting)
+	}
+}
