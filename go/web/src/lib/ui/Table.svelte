@@ -55,6 +55,17 @@
     label,
     /** When true (and emptyState is given) the empty message replaces the table. */
     empty = false,
+    /**
+     * Make the horizontal scroll container keyboard-reachable (tabindex 0, a
+     * region named by `label`) — for a READ-ONLY table whose rows carry no
+     * focusable control: once such a table overflows (390 px) a keyboard user
+     * could not scroll it, axe `scrollable-region-focusable` (WCAG 2.1.1). The
+     * region is named "<label>, scrollable" so it never repeats the name of the
+     * card landmark around it.
+     * Default off: a table with row controls is reachable through them, and
+     * every existing consumer keeps its exact markup (W05-05 /gateway list).
+     */
+    focusableScroll = false,
     /** The <tr><th>…</th></tr> header row. */
     head,
     /** The empty-state markup, rendered instead of the table when `empty`. */
@@ -66,6 +77,7 @@
     valign?: 'top' | 'baseline'
     label?: string
     empty?: boolean
+    focusableScroll?: boolean
     head: Snippet
     emptyState?: Snippet
     children: Snippet
@@ -75,7 +87,16 @@
 {#if empty && emptyState}
   {@render emptyState()}
 {:else}
-  <div class="scroll">
+  <!-- A focusable scroll region is the WCAG-sanctioned exception to "no tabindex
+       on a non-interactive element" (axe scrollable-region-focusable); it is
+       only set with focusableScroll, see the prop. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div
+    class="scroll"
+    tabindex={focusableScroll ? 0 : undefined}
+    role={focusableScroll ? 'region' : undefined}
+    aria-label={focusableScroll && label ? `${label}, scrollable` : undefined}
+  >
     <table class="ctx-table" class:valign-baseline={valign === 'baseline'} aria-label={label}>
       <thead>{@render head()}</thead>
       {#if grouped}

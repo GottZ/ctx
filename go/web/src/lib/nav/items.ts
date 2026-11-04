@@ -27,13 +27,28 @@
 
 import type { Capabilities } from '../auth/capabilities'
 
+/** The icon glyphs the rail knows (NavRail.svelte icon snippet) — one per key, closed set. */
+export type NavIconKey =
+  | 'blocks'
+  | 'graph'
+  | 'chat'
+  | 'issues'
+  | 'board'
+  | 'keys'
+  | 'backends'
+  | 'guard'
+  | 'gateway'
+  | 'tenants'
+  | 'settings'
+  | 'status'
+
 export interface NavItem {
   /** Route the item links to. Corpus items exist today; tenant/server are placeholders (§5). */
   href: string
   /** Human label for the rail. */
   label: string
   /** Stable key the shell-layout rail maps to an icon glyph (no component coupling here). */
-  iconKey: string
+  iconKey: NavIconKey
   /** The grouped section the rail renders the item under. `workflow` (design 04
    * §4.1.3, U04) sits between corpus and tenant, gated on caps.viewWorkflow. */
   section: 'corpus' | 'workflow' | 'tenant' | 'server'
@@ -97,6 +112,14 @@ export function navItems(caps: Capabilities): NavItem[] {
   // ops-relocation axis owns. Server authorization stays writableBlockScopes.
   if (caps.viewOpsSurfaces) {
     items.push({ href: '/guard', label: 'Guard Review', iconKey: 'guard', section: 'tenant' })
+  }
+  // Model API (design/05 §4.6, wave W05-05): the gateway consumers of the own
+  // tenant (server-admin: every tenant). Gated on viewModelApi — server-admin
+  // always (the area is prepared before the gateway is switched on), tenant-
+  // admin only with model_api.enabled, member never. A leaf without `exact`:
+  // the later /gateway/* sub-routes keep it highlighted.
+  if (caps.viewModelApi) {
+    items.push({ href: '/gateway', label: 'Model API', iconKey: 'gateway', section: 'tenant' })
   }
 
   // SERVER — cross-tenant admin (server-admin only). Tenants route owned by the

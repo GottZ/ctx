@@ -1423,3 +1423,80 @@ export interface SyncStartResponse {
   success: true
   run: SyncRunStatus
 }
+
+// =============================================================================
+// Model API consumers — read wire contract (design/05 §3.2, wave W05-05).
+// Drift anchor = the Go structs consumerView / keyView / peerView in
+// internal/handler/model_consumers_read.go, whose JSON keys are pinned by
+// TestConsumerViewGoldenKeys. No type here has a field for a key hash or a
+// plaintext key — the secret is absent by structure, exactly like the Go side.
+// The status strings are the SERVER's verdict at its own clock (B-11); the SPA
+// renders them and never derives a status from expires_at.
+// =============================================================================
+
+/** Consumer status (store.ConsumerStatuses, design/05 §3.2). */
+export type ConsumerStatus = 'active' | 'expiring' | 'rotating' | 'no_key' | 'inactive'
+
+/** Model-key status in precedence order revoked ≻ expired ≻ superseded ≻ expiring ≻ active. */
+export type ModelKeyStatus = 'revoked' | 'expired' | 'superseded' | 'expiring' | 'active'
+
+/** One model key: its hint and lifecycle, never the secret (keyView). */
+export interface KeyView {
+  id: string
+  /** key_hint, e.g. "ctxm_…a9Fq" — the only part of a key the read path carries. */
+  hint: string
+  status: ModelKeyStatus
+  created_at: string
+  expires_at: string | null
+  revoked_at: string | null
+  rotated_from: string | null
+  /** Throttled to one write per minute per key server-side — render as ±1 min. */
+  last_used_at: string | null
+}
+
+/** Binding of a ctx-peer consumer to the instance that proved itself — server-admin only (peerView). */
+export interface PeerView {
+  instance_id: string
+  bound_at: string
+}
+
+/** One model consumer as the administration answers it (consumerView). */
+export interface ConsumerView {
+  id: string
+  tenant_id: string
+  tenant_slug: string
+  label: string
+  description: string
+  /** app | ctx-peer — derived at create, immutable. Bare string for forward-compat. */
+  kind: string
+  /** null = only the _global catalog. */
+  tenant_scope: string | null
+  /** true = every offered model incl. future ones (the grants of W01-9 replace it). */
+  all_models: boolean
+  prompt_sensitivity: string
+  fair_weight: number
+  admission_lane: string
+  /** null = any source address. */
+  allowed_cidrs: string[] | null
+  allow_plaintext: boolean
+  active: boolean
+  status: ConsumerStatus
+  /** max over the keys, 60 s precision. */
+  last_used_at: string | null
+  created_at: string
+  /** Masked below server-admin unless the creator is a key of the reader's own tenant. */
+  created_by_label: string | null
+  /** list: the live keys (≤ 2); get: the chain. */
+  keys: KeyView[]
+  /** Length of the whole key chain. */
+  keys_total: number
+  /** null = no peer binding, or a reader below server-admin. */
+  peer: PeerView | null
+}
+
+/** model-consumer-list answer: one keyset page; next_cursor is opaque, null on the last page. */
+export interface ConsumerListResponse {
+  success: true
+  consumers: ConsumerView[]
+  next_cursor: string | null
+}

@@ -33,6 +33,24 @@ const member = capabilitiesFor(whoami({ admin: false, role: 'member' }))
 const tenantAdmin = capabilitiesFor(whoami({ admin: false, role: 'owner' }))
 const serverAdmin = capabilitiesFor(whoami({ admin: true, role: 'owner' }))
 
+// Gateway policy as whoami carries it (W05-01, design/05 §4.6). Only `enabled`
+// decides the /gateway gate; the other fields ride along unchanged.
+function modelApi(enabled: boolean): WhoamiResponse['capabilities'] {
+  return {
+    model_api: {
+      enabled,
+      self_service: false,
+      key_max_lifetime_s: 31_536_000,
+      rotation_grace_s: 86_400,
+      expiry_warn_s: 1_209_600,
+    },
+  }
+}
+const memberGatewayOn = capabilitiesFor(whoami({ admin: false, role: 'member', capabilities: modelApi(true) }))
+const tenantAdminGatewayOff = capabilitiesFor(whoami({ admin: false, role: 'owner', capabilities: modelApi(false) }))
+const tenantAdminGatewayOn = capabilitiesFor(whoami({ admin: false, role: 'admin', capabilities: modelApi(true) }))
+const serverAdminGatewayOff = capabilitiesFor(whoami({ admin: true, role: 'owner', capabilities: modelApi(false) }))
+
 describe('landingFor', () => {
   it('member → /home (the dedicated capability screen, N6)', () => {
     expect(landingFor(member)).toBe('/home')
@@ -50,7 +68,7 @@ describe('landingFor', () => {
 
 describe('guardArea', () => {
   it('loading → null for every area (no redirect during the restore race, R6)', () => {
-    for (const path of ['/admin', '/admin/tenants', '/tenant', '/tenant/backends', '/blocks']) {
+    for (const path of ['/admin', '/admin/tenants', '/tenant', '/tenant/backends', '/gateway', '/blocks']) {
       expect(guardArea(path, loading)).toBeNull()
     }
   })
@@ -89,6 +107,48 @@ describe('guardArea', () => {
     expect(guardArea('/admin/types', member)).toBe('/home')
     expect(guardArea('/admin/types', tenantAdmin)).toBe('/status')
     expect(guardArea('/admin/types', serverAdmin)).toBeNull()
+  })
+
+  it('/gateway requires viewModelApi: member never, tenant-admin only with gateway.enabled, server-admin always (W05-05)', () => {
+    // member ⇒ its landing, with the gateway on or off (tier first, design/05 §4.6)
+    expect(guardArea('/gateway', member)).toBe('/home')
+    expect(guardArea('/gateway', memberGatewayOn)).toBe('/home')
+    // tenant-admin before the switch (enabled:false) and against an older
+    // server that sends no model_api at all ⇒ its landing
+    expect(guardArea('/gateway', tenantAdminGatewayOff)).toBe('/status')
+    expect(guardArea('/gateway', tenantAdmin)).toBe('/status')
+    // tenant-admin once the gateway is on ⇒ allowed
+    expect(guardArea('/gateway', tenantAdminGatewayOn)).toBeNull()
+    // server-admin prepares the area before the switch ⇒ allowed either way
+    expect(guardArea('/gateway', serverAdminGatewayOff)).toBeNull()
+    expect(guardArea('/gateway', serverAdmin)).toBeNull()
+    // the restore race never redirects (R6)
+    expect(guardArea('/gateway', loading)).toBeNull()
+  })
+
+  it('/gateway sub-routes inherit the gate; the prefix match stops at a path boundary (W05-05)', () => {
+    for (const path of ['/gateway/x', '/gateway/consumers/550e8400-e29b-41d4-a716-446655440001', '/gateway/models']) {
+      expect(guardArea(path, member)).toBe('/home')
+      expect(guardArea(path, tenantAdminGatewayOff)).toBe('/status')
+      expect(guardArea(path, tenantAdminGatewayOn)).toBeNull()
+      expect(guardArea(path, serverAdminGatewayOff)).toBeNull()
+    }
+    // '/gatewayx' is not under the prefix — no gate claims it
+    expect(guardArea('/gatewayx', member)).toBeNull()
+  })
+
+  it('/gateway is disjoint from /admin and /tenant: each prefix keeps its own capability (W05-05)', () => {
+    // A tenant-admin with the gateway on enters /gateway and /tenant, never /admin —
+    // the peer page stays /admin/peers (design/05 §4.6), it does not move under /gateway.
+    expect(guardArea('/gateway', tenantAdminGatewayOn)).toBeNull()
+    expect(guardArea('/tenant', tenantAdminGatewayOn)).toBeNull()
+    expect(guardArea('/admin', tenantAdminGatewayOn)).toBe('/status')
+    expect(guardArea('/admin/peers', tenantAdminGatewayOn)).toBe('/status')
+    // The gateway switch opens nothing else for a member.
+    expect(guardArea('/tenant', memberGatewayOn)).toBe('/home')
+    expect(guardArea('/admin', memberGatewayOn)).toBe('/home')
+    // A tenant-admin before the switch keeps /tenant.
+    expect(guardArea('/tenant', tenantAdminGatewayOff)).toBeNull()
   })
 
   it('the workflow surface stays ungated for every tier (deep-link renders EmptyState, U04)', () => {

@@ -20,7 +20,9 @@ import { contracts, pendingContracts } from '../../e2e/contract/registry'
  * deep-route + the member landing /home (N6) + the role-gated /admin and
  * /tenant areas (N4/N5) + the workflow surface (/issues, /issues/:id, /board —
  * design 04 §4.1.1, wave U04; dark-launched behind viewWorkflow but registered
- * so a deep link renders the EmptyState instead of NotFound) + catch-all.
+ * so a deep link renders the EmptyState instead of NotFound) + the Model-API
+ * area /gateway (design/05 §4.6, wave W05-05; registered flag-independently,
+ * the guard gates it on caps.viewModelApi) + catch-all.
  */
 const BASE_AREAS = [
   '*',
@@ -30,6 +32,7 @@ const BASE_AREAS = [
   '/blocks',
   '/board',
   '/chat',
+  '/gateway',
   '/graph',
   '/home',
   '/issues',
@@ -104,6 +107,11 @@ describe('areaRoutes', () => {
         expect(path === reserved || path.startsWith(`${reserved}/`)).toBe(false)
       }
     }
+  })
+
+  it('/gateway is a lazy reading-mode area outside the reserved /v1 namespace (W05-05)', () => {
+    expect(typeof (areaRoutes as Record<string, unknown>)['/gateway']).toBe('function')
+    expect(areaMode('/gateway')).toBe('reading')
   })
 
   it('resolves every registered route to a layout mode (areaMode covers the table)', () => {

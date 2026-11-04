@@ -35,6 +35,9 @@ const CORPUS = ['/blocks', '/graph', '/chat']
 // now that its route exists (items.ts, the S11 fail-closed hide is lifted).
 // Guard W4: /guard (review queue) joins the tenant section (viewOpsSurfaces).
 const TENANT = ['/tenant', '/tenant/backends', '/guard']
+// W05-05: a server-admin always carries the Model API item (viewModelApi); a
+// tenant-admin only with model_api.enabled, which these whoami shapes omit.
+const GATEWAY = ['/gateway']
 const SERVER = ['/admin', '/settings', '/status', '/settings/backends']
 
 describe('visibleNav', () => {
@@ -50,8 +53,8 @@ describe('visibleNav', () => {
     expect(hrefs(whoami({ admin: false, role: 'owner' }))).toEqual([...CORPUS, ...TENANT])
   })
 
-  it('server-admin (admin flag) → corpus + tenant + server', () => {
-    expect(hrefs(whoami({ admin: true, role: 'owner' }))).toEqual([...CORPUS, ...TENANT, ...SERVER])
+  it('server-admin (admin flag) → corpus + tenant (incl. Model API) + server', () => {
+    expect(hrefs(whoami({ admin: true, role: 'owner' }))).toEqual([...CORPUS, ...TENANT, ...GATEWAY, ...SERVER])
   })
 
   it('unknown/empty role degrades to the member set (least privilege)', () => {

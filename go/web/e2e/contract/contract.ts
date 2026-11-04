@@ -13,8 +13,9 @@
 //   - `mobile` is `{ exempt: string }` instead of the doc's bare `false` +
 //     JSDoc duty — machine-checkable like the scale exempt (a JSDoc duty
 //     cannot make the matrix red; W19: opt-outs must be mechanically visible).
-//   - `mode`/`path`/`flowDoc`/`adminCalls` are additive fields the doc model
-//     does not list: `mode` carries the consolidated data-mode asserts of the
+//   - `mode`/`path`/`flowDoc`/`adminCalls`/`capabilities` are additive fields
+//     the doc model does not list (`capabilities`: W05-05, the feature world
+//     the generated deny/leak seeds inherit): `mode` carries the consolidated data-mode asserts of the
 //     legacy smoke suite (seam S8), `path` resolves '*'/template routes to a
 //     navigable URL, `flowDoc` makes the §4.1 "Kern-Pfad als Satz" JSDoc duty
 //     a machine-carried COVERAGE.md column, `adminCalls` names the page's
@@ -119,7 +120,7 @@ export interface PageContract {
   name: string
   /**
    * Minimal role that reaches the page per the MECHANICAL client guard
-   * (guard.ts TIER_GATED: /admin, /tenant). Named Ist-finding (PV4): the rail
+   * (guard.ts TIER_GATED: /admin, /tenant, /gateway). Named Ist-finding (PV4): the rail
    * hides /status + /settings from members (viewOpsSurfaces), but the guard
    * does NOT gate them — rail and guard diverge, so "Rail-/Guard-konsistent"
    * (§4.1) is not satisfiable there. This field follows the guard (the only
@@ -146,6 +147,15 @@ export interface PageContract {
   axe?: { exclude?: AxeExclude[] }
   /** Mobile opt-OUT with mandatory reason (default: mobile runs) — design 06 §4.1. */
   mobile?: { exempt: string }
+  /**
+   * Contract-wide whoami capability bag (W05-05): the feature world the page
+   * lives in. Seeded into EVERY generated dimension — the states (a state
+   * seed's own `capabilities` wins), the deny test and the tenant-leak probe —
+   * so a page gated on a flag AND a tier (/gateway: viewModelApi needs
+   * model_api.enabled below server-admin) is reachable for the leak probe, and
+   * the deny test proves the TIER gate with the flag on, not merely the flag.
+   */
+  capabilities?: SeedOptions['capabilities']
   /** true ⇒ generated tenant-leak probe with positive control (design 06 §5.6b). */
   tenantScoped?: boolean
   /** Admin API calls (manage actions or /api paths) that must NOT fire in the deny test. */
@@ -222,7 +232,7 @@ export function navPath(c: PageContract): string {
 
 function seedFor(c: PageContract, state: PageState, theme: Theme): SeedOptions {
   const { role, ...rest } = state.seed
-  return { role: role ?? c.role, theme, ...rest }
+  return { role: role ?? c.role, theme, ...(c.capabilities !== undefined ? { capabilities: c.capabilities } : {}), ...rest }
 }
 
 /** Wait for the authenticated shell (App.svelte → AppShell, past restore). */
@@ -378,7 +388,7 @@ export function definePageContract(c: PageContract): void {
     if (lower !== null) {
       const landing = landingForRole(lower)
       test(`${c.name} deny (${lower})`, { tag: '@flow' }, async ({ page }) => {
-        const session = await seedSession(page, { role: lower, theme: 'dark' })
+        const session = await seedSession(page, { role: lower, theme: 'dark', capabilities: c.capabilities })
         await page.goto(path)
         await page.locator('.shell').waitFor({ state: 'visible', timeout: 10_000 })
         // The guard redirect (guardArea → landingFor, guard.ts:55-63) must land
@@ -395,7 +405,7 @@ export function definePageContract(c: PageContract): void {
     // ---- tenant-leak probe (generated, §5.6b — positive control first) ----
     if (c.tenantScoped === true) {
       test(`${c.name} tenant leak probe`, { tag: '@flow' }, async ({ page }) => {
-        await seedSession(page, { role: c.role, theme: 'dark', tenant: 'B' })
+        await seedSession(page, { role: c.role, theme: 'dark', tenant: 'B', capabilities: c.capabilities })
         await gotoArea(page, path)
         await waitForShell(page)
         // (1) Positive control: the OWN sentinel is rendered in the data
