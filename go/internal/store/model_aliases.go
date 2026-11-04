@@ -249,3 +249,68 @@ func ListModelAliases(ctx context.Context, q pgxdb.Querier, scopes []string) ([]
 	}
 	return out, nil
 }
+
+// LockModelAliasName serializes, until tx ends, every alias write the admin
+// action makes under the name name — in any scope. The shadowing floor
+// (design/05 V-02-c: a tenant alias never sits below the sensitivity of the
+// _global alias of the same name) compares rows of two scopes; a row lock
+// cannot hold that, because the row to compare against may not exist yet (a
+// _global alias created while a tenant creates its shadow). A
+// transaction-scoped advisory lock on the name can: each writer takes it
+// before it reads the other side, so the second writer reads what the first
+// committed. psql writes bypass it — psql is outside the write rules.
+func LockModelAliasName(ctx context.Context, tx pgx.Tx, name string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('model_alias:' || $1::text))`, name); err != nil {
+		return fmt.Errorf("store: model alias name lock: %w", err)
+	}
+	return nil
+}
+
+// GlobalModelAliasSensitivity reads the sensitivity of the _global alias
+// name — the floor a tenant alias of that name may not go below.
+// found=false when there is none.
+func GlobalModelAliasSensitivity(ctx context.Context, q pgxdb.Rower, name string) (string, bool, error) {
+	var sens string
+	err := q.QueryRow(ctx, `
+		SELECT sensitivity FROM context_model_aliases
+		 WHERE scope = '_global' AND name = $1`, name).Scan(&sens)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: model alias floor: %w", err)
+	}
+	return sens, true, nil
+}
+
+// ModelAliasShadow is a tenant alias that shadows a _global name.
+type ModelAliasShadow struct {
+	Scope       string
+	Sensitivity string
+}
+
+// ModelAliasShadows lists the tenant aliases named name (every scope but
+// _global), ordered by scope in byte order — the rows a _global alias of
+// that name is the floor of.
+func ModelAliasShadows(ctx context.Context, q pgxdb.Querier, name string) ([]ModelAliasShadow, error) {
+	rows, err := q.Query(ctx, `
+		SELECT scope, sensitivity FROM context_model_aliases
+		 WHERE name = $1 AND scope <> '_global'
+		 ORDER BY scope COLLATE "C"`, name)
+	if err != nil {
+		return nil, fmt.Errorf("store: model alias shadows: %w", err)
+	}
+	defer rows.Close()
+	var out []ModelAliasShadow
+	for rows.Next() {
+		var s ModelAliasShadow
+		if err := rows.Scan(&s.Scope, &s.Sensitivity); err != nil {
+			return nil, fmt.Errorf("store: model alias shadows: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: model alias shadows: %w", err)
+	}
+	return out, nil
+}

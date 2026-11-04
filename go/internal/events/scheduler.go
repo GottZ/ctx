@@ -465,6 +465,13 @@ func (s *Scheduler) SetModelAliasRegistry(reg *modelalias.Registry) {
 	s.modelAliases = reg
 }
 
+// ModelAliasRegistry returns the registry installed by SetModelAliasRegistry
+// (nil before) — the one instance the router hands to the model-alias-*
+// manage actions, so a write and the listener reload the same snapshot.
+func (s *Scheduler) ModelAliasRegistry() *modelalias.Registry {
+	return s.modelAliases
+}
+
 // SetProjectHub installs the W9 SSE domain-event hub the NOTIFY listener forwards
 // ctx_project_write payloads to. Same boot contract as SetBlocktypeRegistry: MUST
 // be called before Run (the field is read when Run builds the listener, relying on

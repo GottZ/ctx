@@ -376,3 +376,77 @@ func TestListenerModelAliasStorm_Integration(t *testing.T) {
 		t.Errorf("100 alias writes cost %d registry reloads, want ≤ 3 (coalesced)", reloads)
 	}
 }
+
+// TestListenerSettingsWriteReclampsAliases_Integration (W02-04, design/02
+// §3.3): the registry clamps tenant aliases to the global-only
+// gateway.tenant_alias_ceiling.* at reload, so a _global settings write that
+// moves the ceiling must reload the registry — without it the snapshot kept
+// the old clamp until the next alias write. NEGATIVE probe: without the
+// Trigger in the _global settings branch the generation stays and max_n
+// stays clamped at 1.
+func TestListenerSettingsWriteReclampsAliases_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	cfg := config.NewStore(envBaseConfig(t))
+	if _, err := pool.Exec(ctx, `INSERT INTO context_model_aliases (scope, name, kind, role, policy)
+	        VALUES ('lm-acme:main', 'chat', 'chat', 'chat', '{"max_n": 4}')`); err != nil {
+		t.Fatalf("seed alias: %v", err)
+	}
+	reg := modelalias.NewRegistry(pool)
+	reg.SetCeilings(func() modelalias.Ceilings {
+		g := cfg.Snapshot().Gateway //nolint:forbidigo // test: the global-only ceiling, as cmd/ctxd reads it
+		return modelalias.Ceilings{Tenant: modelalias.TenantCeiling{
+			MaxN: g.TenantAliasCeiling.MaxN, TimeoutS: 600, MaxOutputTokens: 8192,
+			EmbeddingMaxInputs: 32, RerankMaxDocuments: 128, ToolsMaxCount: 64}}
+	})
+	if err := reg.Reload(ctx); err != nil {
+		t.Fatalf("boot reload: %v", err)
+	}
+	maxN := func() int {
+		a, ok := modelalias.Lookup(reg.Snapshot(), "chat", "lm-acme:main")
+		if !ok {
+			return -1
+		}
+		return a.Policy.MaxN.V
+	}
+	if got := maxN(); got != 1 {
+		t.Fatalf("boot: tenant max_n %d, want 1 (clamped to the default ceiling)", got)
+	}
+	h := NewSettingsWriteHandler(pool, cfg, nil, nil)
+	h.modelAliases = reg
+
+	lc, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire LISTEN conn: %v", err)
+	}
+	defer lc.Release()
+	if _, err := lc.Exec(ctx, "LISTEN "+channelSettingsWrite); err != nil {
+		t.Fatalf("LISTEN: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO context_settings (key, scope, value) VALUES ($1, '_global', $2)`,
+		"gateway.tenant_alias_ceiling.max_n", json.RawMessage(`"4"`)); err != nil {
+		t.Fatalf("insert setting: %v", err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	n, err := lc.Conn().WaitForNotification(wctx)
+	if err != nil {
+		t.Fatalf("WaitForNotification: %v", err)
+	}
+	gen := reg.Generation()
+	if err := h.HandleNotification(ctx, n, nil); err != nil {
+		t.Fatalf("HandleNotification: %v", err)
+	}
+	if got := cfg.Snapshot().Gateway.TenantAliasCeiling.MaxN; got != 4 { //nolint:forbidigo // test: global-only key
+		t.Fatalf("config after the settings write: ceiling max_n %d, want 4", got)
+	}
+	if !awaitGeneration(reg, gen+1) {
+		t.Fatalf("registry generation stayed %d after a ceiling write — the _global settings branch does not reload the registry", gen)
+	}
+	if got := maxN(); got != 4 {
+		t.Errorf("after raising the ceiling to 4: tenant max_n %d, want 4", got)
+	}
+}

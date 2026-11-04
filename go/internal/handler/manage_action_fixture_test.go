@@ -104,6 +104,13 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"mcp-client-create", "", tierServerAdmin, "handleMCPClientCreate"},
 	{"mcp-client-delete", "", tierServerAdmin, "handleMCPClientDelete"},
 	{"mcp-client-list", "", tierServerAdmin, "handleMCPClientList"},
+	// model-alias-* (W02-04, design/02 §4.4.2): tenant-admin tier with the
+	// field tiers in the handler (_global and foreign scopes 404-equivalent,
+	// lowering a sensitivity server-admin + confirm).
+	{"model-alias-create", "", tierTenantAdmin, "handleModelAliasCreate"},
+	{"model-alias-delete", "", tierTenantAdmin, "handleModelAliasDelete"},
+	{"model-alias-list", "", tierTenantAdmin, "handleModelAliasList"},
+	{"model-alias-update", "", tierTenantAdmin, "handleModelAliasUpdate"},
 	{"oauth-identity-link", "", tierServerAdmin, "handleOAuthIdentityLink"},
 	{"oauth-identity-list", "", tierServerAdmin, "handleOAuthIdentityList"},
 	{"oauth-identity-unlink", "", tierServerAdmin, "handleOAuthIdentityUnlink"},
@@ -136,7 +143,7 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"update", "", tierOpen, "handleUpdate"},
 }
 
-// fixtureActionNames is the deduplicated enumeration (89 names; three actions
+// fixtureActionNames is the deduplicated enumeration (93 names; three actions
 // carry two rows for their two data shapes).
 func fixtureActionNames() map[string]struct{} {
 	names := make(map[string]struct{}, len(manageActionFixture))
@@ -146,14 +153,14 @@ func fixtureActionNames() map[string]struct{} {
 	return names
 }
 
-// TestManageActionFixture_Shape guards the fixture itself: 89 distinct actions
-// in 92 rows, alphabetically ordered so a merge conflict is a real conflict.
+// TestManageActionFixture_Shape guards the fixture itself: 93 distinct actions
+// in 96 rows, alphabetically ordered so a merge conflict is a real conflict.
 func TestManageActionFixture_Shape(t *testing.T) {
-	if got := len(manageActionFixture); got != 92 {
-		t.Fatalf("fixture rows = %d, want 92 (89 actions, three of them twice)", got)
+	if got := len(manageActionFixture); got != 96 {
+		t.Fatalf("fixture rows = %d, want 96 (93 actions, three of them twice)", got)
 	}
-	if got := len(fixtureActionNames()); got != 89 {
-		t.Fatalf("fixture actions = %d, want 89", got)
+	if got := len(fixtureActionNames()); got != 93 {
+		t.Fatalf("fixture actions = %d, want 93", got)
 	}
 	for i := 1; i < len(manageActionFixture); i++ {
 		if manageActionFixture[i-1].action > manageActionFixture[i].action {

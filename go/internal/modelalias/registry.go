@@ -178,6 +178,10 @@ type Registry struct {
 	mu   sync.Mutex // serializes reloads: generation order = publication order
 	snap atomic.Pointer[Snapshot]
 	log  *slog.Logger // nil = slog.Default(); tests capture it
+	// ceilings is the setting-bound cap source (SetCeilings): every Reload
+	// reads it once and clamps tenant aliases to its Tenant part. nil = no
+	// clamp (tests that do not exercise it); cmd/ctxd always sets it.
+	ceilings func() Ceilings
 
 	// Trigger's single flight: running while a drain goroutine reloads,
 	// pending when a Trigger arrived during that reload.
@@ -191,6 +195,17 @@ func NewRegistry(q pgxdb.Querier) *Registry {
 	r := &Registry{q: q}
 	r.snap.Store(newSnapshot(0, nil))
 	return r
+}
+
+// SetCeilings installs the getter of the setting-bound ceilings the reload
+// clamps tenant aliases to (design/02 §3.3: a tenant alias above
+// gateway.tenant_alias_ceiling — a psql edit, or a ceiling lowered after the
+// write — is clamped, with a WARN, instead of served above it). Boot calls it
+// before the first Reload; it takes effect from the next reload on.
+func (r *Registry) SetCeilings(fn func() Ceilings) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ceilings = fn
 }
 
 // Snapshot returns the current generation; never nil.
@@ -256,7 +271,8 @@ SELECT id::text, scope, name, kind, role, sensitivity, policy, description, enab
 // generation, synchronously (boot, tests; the listener uses Trigger). A failed read keeps the previous snapshot and its
 // generation (the Pool.Reload doctrine) and returns the error. A row that
 // fails validation is loaded with Invalid set and named by one WARN per
-// reload; it is never offered.
+// reload; it is never offered. A valid tenant alias above the tenant ceiling
+// (SetCeilings) is loaded clamped to it, with one WARN per reload.
 func (r *Registry) Reload(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -264,17 +280,33 @@ func (r *Registry) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	invalid := 0
+	invalid, clamped := 0, 0
+	var tenantCeiling *TenantCeiling
+	if r.ceilings != nil {
+		t := r.ceilings().Tenant
+		tenantCeiling = &t
+	}
 	for i := range loaded {
-		if a := &loaded[i]; a.Invalid != nil {
+		a := &loaded[i]
+		if a.Invalid != nil {
 			invalid++
 			r.logger().Warn("modelalias: alias is not offered — its row failed validation",
 				"alias_id", a.ID, "scope", a.Scope, "name", a.Name, "error", a.Invalid)
+			continue
+		}
+		if tenantCeiling == nil || a.Scope == backends.GlobalScope {
+			continue
+		}
+		var notes []string
+		if a.Policy, notes = ClampTenant(a.Policy, *tenantCeiling); len(notes) > 0 {
+			clamped++
+			r.logger().Warn("modelalias: tenant alias clamped to gateway.tenant_alias_ceiling",
+				"alias_id", a.ID, "scope", a.Scope, "name", a.Name, "clamped", strings.Join(notes, ", "))
 		}
 	}
 	gen := r.Snapshot().Generation() + 1
 	r.snap.Store(newSnapshot(gen, loaded))
-	r.logger().Info("modelalias: snapshot reloaded", "generation", gen, "aliases", len(loaded), "invalid", invalid)
+	r.logger().Info("modelalias: snapshot reloaded", "generation", gen, "aliases", len(loaded), "invalid", invalid, "clamped", clamped)
 	return nil
 }
 
