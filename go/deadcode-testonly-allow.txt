@@ -34,9 +34,15 @@
 #
 # Eine spätere Welle, die eines dieser Symbole schneidet, nimmt seine Zeile hier
 # im selben Commit mit.
-cmd/ctxd/gateway.go	gatewaySettingsGetter	# wartet: W01-6 (mountModelGroup) — Getter des Gateways, montiert erst mit der /v1-Gruppe; heute nur gateway_test.go
+cmd/ctxd/gateway.go	gatewaySettingsGetter	# wartet: W02-05 (Mount über mountModelGroup, W01-6) — Getter des Gateways für EnabledGate und ModelAuth, montiert erst mit der /v1-Gruppe; heute nur gateway_test.go
+cmd/ctxd/model_group.go	mountModelGroup	# wartet: W02-05 (Mount) — /v1-Gruppe EnabledGate → ModelAuth → Handler (K23, W01-6), /v2 mit W02-10; v1door läuft im Mount-PR
 cmd/ctxd/overviewworker_priority_linux.go	ioprioGet	# Prod setzt nur (IOPRIO_SET); die Rücklese-Hälfte der Prioritätsprobe, priority_linux_test.go:164/167
 internal/armsweep/report.go	ReadReportBody	# Schreib-Hälfte WriteReport ist prod; den Leser braucht nur das Determinismus-Gate, 7x in 4 *_test.go
+internal/auth/consumer.go	AuthenticateModelKey	# wartet: W02-05 (Mount) — einziger Aufrufer ModelAuth (W01-6) bleibt bis zum Mount unmontiert
+internal/auth/consumer.go	ReauthenticateModelKey	# wartet: W02-08 — Re-Check des Stream-Watchers über handler.ReauthConsumer (K22); entfällt mit W01-8
+internal/auth/consumer.go	addrArg	# Helfer von AuthenticateModelKey: wartet: W02-05 (Mount) — einziger Aufrufer ModelAuth (W01-6) bleibt bis zum Mount unmontiert
+internal/auth/consumer.go	consumerKind	# Helfer von AuthenticateModelKey: wartet: W02-05 (Mount) — einziger Aufrufer ModelAuth (W01-6) bleibt bis zum Mount unmontiert
+internal/auth/consumer.go	credentialOf	# Helfer von AuthenticateModelKey: wartet: W02-05 (Mount) — einziger Aufrufer ModelAuth (W01-6) bleibt bis zum Mount unmontiert
 internal/config/envonly.go	EnvOnlyServerNames	# Zubringer des Env-only-Gates envonly_test.go:94/170/192; die Map ist Daten, Prod liest sie nie
 internal/config/envscan.go	EnvNameRef.String	# Stringer nur implizit über %s in envonly_test.go:138 und cmd/envnames_test.go:181 (Gate-Fehlertexte)
 internal/config/envscan.go	ScanEnvNames	# AST-Scanner beider Env-Zäune; 5 Aufrufe in envonly_test.go + cmd/envnames_test.go, kein Prod-Leser
@@ -129,6 +135,50 @@ internal/graphcache/validate.go	checkOrdering	# Nur export_test.go:72 (CheckOrde
 internal/graphcache/validate.go	checkRangeOrder	# Einziger Aufrufer ist checkOrdering (validate.go:103/108), das selbst nur über export_test.go:72 lebt
 internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_gate_test.go:156 u. a.); Prod gated über enforceManageActionTier
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
+internal/handler/model_auth.go	ModelAuth	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	ModelDoor.Handler	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	ModelDoor.Stats	# wartet: design/06 — Status-Exposition der Tür-Zähler (K-06-7); heute nur model_auth*_test.go
+internal/handler/model_auth.go	ModelDoor.check	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	ModelDoor.countUnavailable	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	ModelDoor.isTrustedProxy	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	ModelDoor.origin	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	ModelDoor.refuse	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	ModelDoor.warn	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	ReauthConsumer	# wartet: W02-08 — Re-Check des Stream-Watchers (K22), gleicher Semaphor wie ModelAuth; entfällt mit W01-8
+internal/handler/model_auth.go	bearerToken	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	canonicalAddr	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	headerList	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth.go	lastListValue	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	authSemaphore.acquire	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	authSemaphore.grantLocked	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	authSemaphore.release	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	failLimiter.blocked	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	failLimiter.fail	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	knownGoodLRU.add	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	knownGoodLRU.contains	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	knownGoodLRU.remove	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	limiterKey	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	newAuthSemaphore	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	newFailLimiter	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	newKnownGood	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	newProbeBucket	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/model_auth_limiter.go	probeBucket.take	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
+internal/handler/v1door/v1door.go	Assert	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	KnowledgeAuthTracer.Count	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	KnowledgeAuthTracer.TraceQueryEnd	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	KnowledgeAuthTracer.TraceQueryStart	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	bearer	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	census.do	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	census.flag	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	census.knowledge	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	census.knowledgeCredentials	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	census.modelKey	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	census.targets	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	concrete	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	probe.ServeHTTP	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	probe.take	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	routeTargets	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/handler/v1door/v1door.go	underModelPrefix	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/llm/passthrough.go	BuildUpstreamBody	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llm/passthrough.go	ChatRaw	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llm/passthrough.go	ChatRawStream	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests

@@ -78,7 +78,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
 	// V37 (W06-8): the foreign-load detector's floors and ratio range.
 	issues = append(issues, validateStatusForeignLoad(c)...)
-	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation.
+	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation;
+	// V40 (W01-6): the model-key door's limits.
 	issues = append(issues, validateGateway(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
@@ -1350,6 +1351,45 @@ func validateGateway(c *Config) []Issue {
 	}
 	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {
 		bad("gateway.retry_after_jitter", fmt.Sprintf("gateway.retry_after_jitter (%v) must be in [0, 1]", j))
+	}
+	return append(issues, validateGatewayAuth(g)...)
+}
+
+// gatewayDBPoolConns mirrors the pool size of store/pool.go (tunePool
+// MaxConns): config may not import the store, so V40 checks against this
+// mirror, and TestGatewayDBPoolMirror reads store/pool.go to keep it equal.
+const gatewayDBPoolConns = 20
+
+// validateGatewayAuth is V40 (wave W01-6, design/01 §4.2, §4.9): the
+// model-key door's four limits. Negative values stay with V17/V35.
+//
+//   - gateway.auth_failure_limit >= 1: 0 would lock a pair before its first
+//     failure has been counted against anything.
+//   - gateway.auth_failure_window >= 1 s: 0 would make the lock a no-op.
+//   - gateway.auth_probe_rate >= 1: 0 would never let an unknown hash reach
+//     the database — after a restart no key could authenticate at all.
+//   - 1 <= gateway.auth_db_concurrency < the pool size (20): 0 refuses every
+//     check with 503; at the pool size a forgery flood could hold every
+//     connection, which is what the semaphore exists to prevent (B18).
+func validateGatewayAuth(g *GatewayConfig) []Issue {
+	var issues []Issue
+	bad := func(field, msg string) {
+		issues = append(issues, Issue{Field: field, Severity: SeverityError, Msg: msg})
+	}
+	if g.AuthFailureLimit == 0 {
+		bad("gateway.auth_failure_limit", "gateway.auth_failure_limit must be >= 1 — 0 would lock a key before any failure")
+	}
+	if g.AuthFailureWindow == 0 {
+		bad("gateway.auth_failure_window", "gateway.auth_failure_window must be >= 1 second — 0 would make the failure lock a no-op")
+	}
+	if g.AuthProbeRate == 0 {
+		bad("gateway.auth_probe_rate", "gateway.auth_probe_rate must be >= 1 — 0 would never let a key without a past success reach the database")
+	}
+	switch n := g.AuthDBConcurrency; {
+	case n == 0:
+		bad("gateway.auth_db_concurrency", "gateway.auth_db_concurrency must be >= 1 — 0 would refuse every model-key check with 503")
+	case n >= gatewayDBPoolConns:
+		bad("gateway.auth_db_concurrency", fmt.Sprintf("gateway.auth_db_concurrency (%d) must stay below the database pool size (%d) — a forgery flood could otherwise hold every connection", n, gatewayDBPoolConns))
 	}
 	return issues
 }

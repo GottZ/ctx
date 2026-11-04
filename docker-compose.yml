@@ -47,7 +47,7 @@ services:
       LISTEN_ADDR: ":8080"
       CTX_INSTANCE_KIND: ${CTX_INSTANCE_KIND:-}
 
-      # ── dream.* (16) ──
+      # ── dream.* (18) ──
       # Backend topology — the endpoints themselves (host, protocol, model,
       # num_ctx, think, API key, per role chat / synthesis / embed / dream /
       # dream-embed / rerank) — is NOT configured here. It lives as rows in the
@@ -451,7 +451,7 @@ services:
       CTX_DISTILL_RETENTION_DAYS: ${CTX_DISTILL_RETENTION_DAYS:-}
       CTX_DISTILL_SEEN_RETENTION_DAYS: ${CTX_DISTILL_SEEN_RETENTION_DAYS:-}
 
-      # ── gateway.* (21) ──
+      # ── gateway.* (25) ──
       CTX_GATEWAY_ENABLED: ${CTX_GATEWAY_ENABLED:-}
       CTX_GATEWAY_MAX_REQUEST_BYTES: ${CTX_GATEWAY_MAX_REQUEST_BYTES:-}
       CTX_GATEWAY_INFLIGHT_BUDGET: ${CTX_GATEWAY_INFLIGHT_BUDGET:-}
@@ -473,6 +473,10 @@ services:
       CTX_GATEWAY_TENANT_ALIAS_CEILING_TOOLS_MAX_COUNT: ${CTX_GATEWAY_TENANT_ALIAS_CEILING_TOOLS_MAX_COUNT:-}
       CTX_GATEWAY_RELAY_UPSTREAM_4XX_MESSAGES: ${CTX_GATEWAY_RELAY_UPSTREAM_4XX_MESSAGES:-}
       CTX_GATEWAY_RETRY_AFTER_JITTER: ${CTX_GATEWAY_RETRY_AFTER_JITTER:-}
+      CTX_GATEWAY_AUTH_FAILURE_LIMIT: ${CTX_GATEWAY_AUTH_FAILURE_LIMIT:-}
+      CTX_GATEWAY_AUTH_FAILURE_WINDOW: ${CTX_GATEWAY_AUTH_FAILURE_WINDOW:-}
+      CTX_GATEWAY_AUTH_PROBE_RATE: ${CTX_GATEWAY_AUTH_PROBE_RATE:-}
+      CTX_GATEWAY_AUTH_DB_CONCURRENCY: ${CTX_GATEWAY_AUTH_DB_CONCURRENCY:-}
 
       # ── env-only names (deliberately NOT in the config registry) ──
       # These have no settings key and no registry default: they are read

@@ -266,4 +266,9 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.tenant_alias_ceiling.tools_max_count":      "Ceiling of a tenant alias's tools count policy; 0 = tenant aliases offer no tools",
 	"gateway.relay_upstream_4xx_messages":               "Relay sanitized upstream 4xx error texts to gateway clients; off (default) clients see only ctx's own texts",
 	"gateway.retry_after_jitter":                        "Jitter of gateway saturation hints: retry-after-ms = hint x U[1, 1 + value]; range [0, 1]",
+	// W01-6: the model-key door's limits (design/01 §4.2, §4.9).
+	"gateway.auth_failure_limit":  "Failed model-key checks per (client address prefix, key-hash prefix) within gateway.auth_failure_window before that pair gets 429 without a database query",
+	"gateway.auth_failure_window": "Fixed window in seconds of the model-key failure count, from the pair's first failure; also the longest Retry-After of the lock",
+	"gateway.auth_probe_rate":     "Database checks per second (burst = rate) for model keys without a past success; above it 503 auth_overloaded, known keys pass without a token",
+	"gateway.auth_db_concurrency": "Concurrent ctx_model_auth calls of the model-key door (its share of the 20-connection pool); below 20",
 }
