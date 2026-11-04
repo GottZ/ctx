@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -126,7 +127,11 @@ func TestPeerIngressPeerWithoutPath(t *testing.T) {
 	var logs bytes.Buffer
 	hop, _ := foreign(t)
 	ca := consumer(auth.KindCtxPeer, "credentials")
-	ca.ConsumerID = "c-peer-without-path-g3"
+	// The WARN set is process-wide (one WARN per consumer for the whole
+	// process, by design): a fresh id per run keeps -count=N and a rerun in
+	// the same binary independent (bot review on PR #126).
+	run := strconv.FormatInt(time.Now().UnixNano(), 36)
+	ca.ConsumerID = "c-peer-without-path-g3-" + run
 	before := CounterSnapshot().PeerWithoutPath
 	for i := range 100 {
 		rec, s := ingressServe(t, &logs, ca, map[string]string{fedhop.HeaderHop: hop, fedhop.HeaderClass: "interactive", fedhop.HeaderPipeline: "dream"})
@@ -153,7 +158,7 @@ func TestPeerIngressPeerWithoutPath(t *testing.T) {
 	}
 	// A second consumer warns once on its own.
 	other := consumer(auth.KindCtxPeer, "credentials")
-	other.ConsumerID = "c-peer-without-path-g3-other"
+	other.ConsumerID = "c-peer-without-path-g3-other-" + run
 	ingressServe(t, &logs, other, nil)
 	if n := strings.Count(logs.String(), "level=WARN"); n != 2 {
 		t.Errorf("%d WARN lines after a second consumer, want 2", n)

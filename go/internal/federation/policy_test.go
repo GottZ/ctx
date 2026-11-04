@@ -272,19 +272,20 @@ func TestPolicyFromWithoutPolicy(t *testing.T) {
 	}
 }
 
-// TestAssignmentProbe: the value part of the member probe is the first token
-// the scanner's assignment rule would capture — leading whitespace and a
-// quote skipped, cut at whitespace, quote, comma or semicolon, bounded — so a
-// long prose value costs a few bytes of probe, not a second scan.
+// TestAssignmentProbe: the value part of the member probe is the whole first
+// token the scanner's assignment rule would capture — leading whitespace and
+// a quote skipped, cut at whitespace, quote, comma or semicolon, never cut by
+// length (bot review on PR #126) — so a long prose value costs a word of
+// probe, not a second scan.
 func TestAssignmentProbe(t *testing.T) {
-	long := strings.Repeat("x", 3*assignmentProbeBytes)
+	long := strings.Repeat("x", 768)
 	for in, want := range map[string]string{
 		"Zq8vX2mL9pR4wT7yB3nK":            "Zq8vX2mL9pR4wT7yB3nK",
 		"  \"Zq8vX2mL9pR4wT7yB3nK\" rest": "Zq8vX2mL9pR4wT7yB3nK",
 		"lorem ipsum dolor":               "lorem",
 		"a,b;c":                           "a",
 		"":                                "",
-		long:                              long[:assignmentProbeBytes],
+		long:                              long,
 	} {
 		if got := assignmentProbe(in); got != want {
 			t.Errorf("assignmentProbe(%.40q) = %.40q, want %.40q", in, got, want)

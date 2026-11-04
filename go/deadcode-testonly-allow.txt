@@ -132,6 +132,7 @@ internal/federation/policy.go	PolicyFrom	# wartet: W02-07 (Kettenbau der Route-H
 internal/federation/policy.go	ScanRaise	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
 internal/federation/policy.go	assignmentProbe	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
 internal/federation/policy.go	bodyHasCredentials	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
+internal/federation/policy.go	scanBody	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
 internal/fedhop/grammar.go	ReasonFrom	# wartet: F-W10 (StatusError.CtxReason auf B; SetReason in den Fehler-Writern auf A, 02/03)
 internal/fedhop/merge.go	ClassVocabulary	# Vokabular-Pin: einziger Leser ist internal/dispatch/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb); A03-W3/A03-W9 ergänzen dort
 internal/fedhop/merge.go	SensitivityVocabulary	# Vokabular-Pin: einziger Leser ist internal/backends/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb)

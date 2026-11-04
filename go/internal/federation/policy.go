@@ -120,28 +120,35 @@ func ScanRaise(required backends.Sensitivity, body []byte) backends.Sensitivity 
 	return required
 }
 
-// assignmentProbeBytes bounds the value part of the key-value probe of an
-// object member (see bodyHasCredentials): a space-free megabyte value is not
-// scanned a second time. A mechanism bound, not a policy value (A-E2): a
-// secret longer than this still passes the assignment rule's length and
-// entropy tests on its first bytes.
-const assignmentProbeBytes = 256
-
-// assignmentProbe is the value part of the key-value probe: the first token
-// of v, the one the scanner's assignment rule captures after "key:" (it
-// skips whitespace and one quote, then takes everything up to whitespace, a
-// quote, a comma or a semicolon), at most assignmentProbeBytes. Every other
-// rule of the scanner ignores the key and has already seen the whole value,
-// so the probe adds the assignment rule and nothing else — at the cost of a
-// short string per member, not a second scan of the value.
+// assignmentProbe is the value part of the key-value probe: the WHOLE first
+// token of v, the one the scanner's assignment rule captures after "key:"
+// (it skips whitespace and one quote, then takes everything up to
+// whitespace, a quote, a comma or a semicolon). Not cut: the rule measures
+// length and entropy over the whole token, and a prefix can fall below the
+// entropy threshold the token passes (bot review on PR #126: 256 × "z" plus a
+// mixed tail) — a cut would be fail-open. Every other rule of the scanner
+// ignores the key and has already seen the whole value, so the probe adds
+// the assignment rule and nothing else: prose costs a word per member; a
+// space-free value is scanned a second time at most (bounded by
+// gateway.max_request_bytes).
 func assignmentProbe(v string) string {
 	v = strings.TrimLeft(v, " \t\n\f\r")
 	v = strings.TrimPrefix(strings.TrimPrefix(v, `"`), "'")
 	if i := strings.IndexAny(v, " \t\n\f\r\"',;"); i >= 0 {
 		v = v[:i]
 	}
-	return v[:min(len(v), assignmentProbeBytes)]
+	return v
 }
+
+// maxScanDepth bounds the open containers of the body walk. Go's v1 JSON
+// decoder does not bound Token's nesting (Go 1.27's default jsonv2
+// implementation stops at 10 000, but GOEXPERIMENT=nojsonv2 or an older
+// toolchain does not — measured in the F-W9 report): without this bound
+// 8 MiB of "[" — inside gateway.max_request_bytes, from any consumer below
+// credentials — allocated ≈ 1.5 GB in one request. Beyond it the raw scan
+// decides, as for a body that does not decode (fail-closed). A mechanism
+// bound, not a policy value (A-E2): real requests nest a few dozen levels.
+const maxScanDepth = 10000
 
 // jsonFrame is one open container of the body walk: an object alternates
 // keys and values, an array holds values only.
@@ -156,8 +163,13 @@ type jsonFrame struct {
 // object member with a scalar value, the probe "key: <first value token>": the
 // scanner's assignment rule (a secret-named key next to a high-entropy
 // value) needs both, and in JSON they are two tokens (Fremd-Review FR-3).
-// A body that does not decode is scanned raw.
-func bodyHasCredentials(body []byte) bool {
+// A body that does not decode, or nests deeper than maxScanDepth, is scanned
+// raw.
+func bodyHasCredentials(body []byte) bool { return scanBody(body, maxScanDepth) }
+
+// scanBody is bodyHasCredentials with the depth bound as a parameter (the
+// bound's test runs at a small depth, independent of the decoder's own).
+func scanBody(body []byte, maxDepth int) bool {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var stack []jsonFrame
@@ -181,6 +193,9 @@ func bodyHasCredentials(body []byte) bool {
 		case json.Delim:
 			switch v {
 			case '{', '[':
+				if len(stack) >= maxDepth {
+					return hit(string(body))
+				}
 				stack = append(stack, jsonFrame{object: v == '{', expectKey: v == '{'})
 			default: // the container closed; if it was a member value, a key comes next
 				stack = stack[:len(stack)-1]
