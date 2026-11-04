@@ -518,11 +518,17 @@ const (
 // (terminator included) is returned with the reader's error, exactly like
 // ReadString, unless it grows past maxSSEFrameBytes.
 func readSSELine(br *bufio.Reader) (string, error) {
+	return readSSELineMax(br, maxSSEFrameBytes)
+}
+
+// readSSELineMax is readSSELine with a caller-chosen cap (the gateway relay's
+// gateway frame cap, ChatRawStream); limit is at most maxSSEFrameBytes there.
+func readSSELineMax(br *bufio.Reader, limit int) (string, error) {
 	var line []byte
 	for {
 		chunk, err := br.ReadSlice('\n')
-		if len(line)+len(chunk) > maxSSEFrameBytes {
-			return "", fmt.Errorf("%w: SSE line over %d bytes", httpx.ErrResponseTooLarge, maxSSEFrameBytes)
+		if len(line)+len(chunk) > limit {
+			return "", fmt.Errorf("%w: SSE line over %d bytes", httpx.ErrResponseTooLarge, limit)
 		}
 		line = append(line, chunk...)
 		if !errors.Is(err, bufio.ErrBufferFull) {
@@ -542,15 +548,22 @@ func readSSELine(br *bufio.Reader) (string, error) {
 type sseFrame struct {
 	buf   strings.Builder
 	lines int
+	// limit is the frame cap; 0 = maxSSEFrameBytes (every chat-harness
+	// parser). The gateway relay sets its own (ChatRawStream's maxFrame).
+	limit int
 }
 
 func (f *sseFrame) add(v string) error {
+	limit := f.limit
+	if limit <= 0 {
+		limit = maxSSEFrameBytes
+	}
 	sep := 0
 	if f.lines > 0 {
 		sep = 1
 	}
-	if f.buf.Len()+sep+len(v) > maxSSEFrameBytes {
-		return fmt.Errorf("llm: %w: SSE frame over %d bytes", httpx.ErrResponseTooLarge, maxSSEFrameBytes)
+	if f.buf.Len()+sep+len(v) > limit {
+		return fmt.Errorf("llm: %w: SSE frame over %d bytes", httpx.ErrResponseTooLarge, limit)
 	}
 	if sep > 0 {
 		f.buf.WriteByte('\n')
