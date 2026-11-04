@@ -81,7 +81,7 @@ func Validate(c *Config) []Issue {
 	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation;
 	// V40 (W01-6): the model-key door's limits.
 	issues = append(issues, validateGateway(c)...)
-	// V40 (W01-5): the consumer administration's grace ceiling and page floors.
+	// V41 (W01-5): the consumer administration's grace ceiling and page floors.
 	issues = append(issues, validateGatewayConsumers(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
@@ -1401,7 +1401,7 @@ func validateGatewayAuth(g *GatewayConfig) []Issue {
 // internal/handler (TestRotationGraceCeilingMatchesStore).
 const gatewayMaxRotationGrace = 7 * 24 * time.Hour
 
-// validateGatewayConsumers is V40 (wave W01-5, design/01 §4.9). Negative
+// validateGatewayConsumers is V41 (wave W01-5, design/01 §4.9). Negative
 // values stay with the generic walks (V17, V35); these checks own what parses
 // and is not negative, yet cannot mean what it says:
 //   - gateway.key_rotation_grace <= 7 d: the store refuses a longer grace, so

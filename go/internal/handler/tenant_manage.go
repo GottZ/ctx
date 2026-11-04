@@ -221,12 +221,25 @@ func (h *ManageHandler) handleTenantLimitSet(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	// The model consumer cap (161) is read on demand — it is not part of the
-	// shared tenant read path (store.Tenant.MaxModelConsumers). Cosmetic too:
-	// a failed read leaves the field out of the echo.
+	// shared tenant read path (store.Tenant.MaxModelConsumers, omitempty). The
+	// echo renders the key even for an unlimited cap (null), so the caller who
+	// just lifted the cap reads the lifted value and not a missing key; a
+	// failed read is cosmetic and leaves the key out.
 	if capacity, err := store.TenantModelConsumerCap(r.Context(), h.pool, req.ID); err == nil {
-		tn.MaxModelConsumers = capacity
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tenantWithCap{Tenant: tn, MaxModelConsumers: capacity}})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tn})
+}
+
+// tenantWithCap is the tenant-limit-set echo: the shared tenant row with the
+// 161 cap rendered explicitly — null for unlimited — where the shared row
+// omits it (store.Tenant.MaxModelConsumers is omitempty because the read
+// path serves schemas before 161). The outer field shadows the embedded one
+// under the same JSON key.
+type tenantWithCap struct {
+	*store.Tenant
+	MaxModelConsumers *int `json:"max_model_consumers"`
 }
 
 // handleTenantUsageGet returns one tenant's structural usage (scope_count +

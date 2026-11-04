@@ -230,6 +230,9 @@ func validateLabel(label string) error {
 	if strings.TrimSpace(label) == "" {
 		return errors.New("label is required")
 	}
+	if strings.ContainsRune(label, 0) {
+		return errors.New("label must not contain NUL bytes")
+	}
 	if utf8.RuneCountInString(label) > consumerLabelMaxRunes {
 		return fmt.Errorf("label must be at most %d characters", consumerLabelMaxRunes)
 	}
@@ -237,6 +240,9 @@ func validateLabel(label string) error {
 }
 
 func validateDescription(d string) error {
+	if strings.ContainsRune(d, 0) {
+		return errors.New("description must not contain NUL bytes")
+	}
 	if utf8.RuneCountInString(d) > consumerDescriptionMaxRunes {
 		return fmt.Errorf("description must be at most %d characters", consumerDescriptionMaxRunes)
 	}

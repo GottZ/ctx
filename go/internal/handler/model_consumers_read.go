@@ -251,6 +251,9 @@ func (d consumerListRequest) listOptions(pol consumerPolicy, now time.Time) (sto
 	if utf8.RuneCountInString(d.Q) > consumerLabelMaxRunes {
 		return opts, 0, errors.New("q is longer than any label")
 	}
+	if strings.ContainsRune(d.Q, 0) {
+		return opts, 0, errors.New("q must not contain NUL bytes")
+	}
 	opts.LabelPrefix = d.Q
 	if d.Cursor != "" {
 		at, id, err := decodeKeysetCursor(d.Cursor)
