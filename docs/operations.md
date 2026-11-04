@@ -628,7 +628,7 @@ The `create` disk pre-flight statfs's the ctx container's own root filesystem (`
 
 ### Dependency graph and Dependabot alerts
 
-GitHub's dependency graph for `go/go.mod` is filled by the CI job `dependency-graph` (`actions/go-dependency-submission`, build target `all`), which submits the module list `go list` resolves on every push to `root` — only from the current tip of `root`, so a re-run of an older run never submits that commit's graph again. Dependabot alerts therefore refer to the real module graph, not to a parsed and possibly stale `go.mod` snapshot (until 2026-10-31 GitHub's own parser held a pre-July state and raised an alert on a chi version the module no longer required).
+GitHub's dependency graph for `go/go.mod` is filled by the CI job `dependency-graph` (`actions/go-dependency-submission`, build target `all`), which submits the module list `go list` resolves on every push to `root` — only from the current tip of `root`, so a re-run of an older run never submits that commit's graph again — for runs whose `ci.yml` carries that guard; a run created before it still submits on a full re-run, so re-run only its `Web Live Tier` job (see `GOVERNANCE.md`, Releases). Dependabot alerts therefore refer to the real module graph, not to a parsed and possibly stale `go.mod` snapshot (until 2026-10-31 GitHub's own parser held a pre-July state and raised an alert on a chi version the module no longer required).
 
 ### Shutdown and the LLM-log write path
 

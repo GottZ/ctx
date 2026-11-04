@@ -113,9 +113,11 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
   needs a re-run of its own for its verdict and its image. The
   `Dependency Graph` job follows the same rule: it submits the module graph
   only from the current tip of `root`, so a re-run of an older commit never
-  submits that commit's graph again. A re-run executes the
-  `ci.yml` of its original commit: for a run whose `ci.yml` lacks either
-  guard, re-run only its `Web Live Tier` job, never the whole run.
+  submits that commit's graph again — as long as the run's own `ci.yml`
+  carries the guard. A re-run executes the `ci.yml` of its original
+  commit: a run created before either guard still re-points the tags or
+  re-submits the graph on a full re-run, so for such a run re-run only its
+  `Web Live Tier` job, never the whole run.
 - Versioning: a `feat` lands as a minor release, fixes as a patch, a
   breaking change as a major. Several merged pull requests may share one
   release.
