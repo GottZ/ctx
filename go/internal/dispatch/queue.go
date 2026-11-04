@@ -249,7 +249,13 @@ func (q *classQueue) remove(w *waiter) {
 	if w.cont {
 		for i, cand := range q.cont {
 			if cand == w {
-				q.cont = append(q.cont[:i], q.cont[i+1:]...)
+				// Shift in place and clear the vacated tail slot, so the
+				// backing array keeps no reference to the canceled waiter
+				// (the same hygiene as popCont).
+				last := len(q.cont) - 1
+				copy(q.cont[i:], q.cont[i+1:])
+				q.cont[last] = nil
+				q.cont = q.cont[:last]
 				q.uncount(w)
 				return
 			}
