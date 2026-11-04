@@ -42,6 +42,7 @@ func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 		ExternalQueuePerTenant:       c.ExternalQueuePerTenant,
 		ExternalQueueMax:             c.ExternalQueueMax,
 		ExternalLeaseMax:             c.ExternalLeaseMax,
+		ExternalMaxWait:              c.ExternalMaxWait,
 		// UsageWindow stays zero (= package default): its config key belongs
 		// to the fairness activation wave (MW23), the Fairness pattern.
 	}

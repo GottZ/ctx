@@ -227,7 +227,8 @@ func (d *Dispatcher) InteractiveDemand() int {
 }
 
 // Acquire blocks until the request is admitted on its target, the caller ctx
-// ends, or a Deckel rejects it. The returned runCtx derives from ctx; for
+// ends, or a Deckel rejects it — for an external class at most its wait
+// budget (ErrWaitExpired, A03-W5, waitbudget.go). The returned runCtx derives from ctx; for
 // background leases the dispatcher holds its cancel (preempt/reap), for
 // interactive it never cancels (I-D1). Acquire errors are NOT attempts: no
 // Classify, no health report, no llmlog line, terminal for the chain walk
@@ -290,7 +291,12 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		}
 		return l, runCtx, nil
 	}
-	err = d.enqueueLocked(st, w)
+	// The wait budget (A03-W5, waitbudget.go): external only, resolved
+	// before the enqueue — a budget already ≤ 0 is ErrWaitExpired at once.
+	budget, err := d.waitBudgetLocked(st, class, req, now)
+	if err == nil {
+		err = d.enqueueLocked(st, w)
+	}
 	if err == nil && class == ClassInteractive {
 		// Preempt trigger (MW18, design/02 §4.2.1): only an interactive
 		// acquire that has to WAIT may open a preempt on a preempt-enabled
@@ -303,6 +309,8 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		cancel(context.Canceled)
 		return nil, nil, err
 	}
+	expiry, stopTimer := waitTimer(budget, now) // nil channel without a budget
+	defer stopTimer()
 
 	select {
 	case <-w.admitCh:
@@ -325,6 +333,13 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		d.mu.Unlock()
 		cancel(context.Canceled)
 		return nil, nil, ctx.Err()
+	case <-expiry:
+		lease, werr := d.expireWaiter(st, w)
+		if werr != nil {
+			cancel(context.Canceled)
+			return nil, nil, werr
+		}
+		return lease, runCtx, nil
 	}
 }
 

@@ -457,7 +457,9 @@ func TestBackgroundQueueFull(t *testing.T) {
 // --- rejection typology.
 
 func TestIsRejection(t *testing.T) {
-	for _, err := range []error{ErrQueueFull, ErrPrincipalSaturated, ErrTenantSaturated, ErrTargetSaturated} {
+	// ErrWaitExpired since A03-W5: an exhausted external wait budget is a
+	// rejection (429 server_busy, design/03 §4.9).
+	for _, err := range []error{ErrQueueFull, ErrPrincipalSaturated, ErrTenantSaturated, ErrTargetSaturated, ErrWaitExpired} {
 		if !IsRejection(err) {
 			t.Errorf("IsRejection(%v) = false, want true", err)
 		}
@@ -747,6 +749,8 @@ func TestDefaultSettings(t *testing.T) {
 		// A03-W3 (A-E2 no. 2): the external cap ladder and lease ceiling.
 		s.ExternalQueuePerConsumer != 8 || s.ExternalQueuePerTenant != 32 ||
 		s.ExternalQueueMax != 64 || s.ExternalLeaseMax != 900*time.Second ||
+		// A03-W5 (A-E2 no. 2): the one external wait budget.
+		s.ExternalMaxWait != 20*time.Second ||
 		s.RankOrder != DefaultRankOrder() {
 		t.Fatalf("defaults drifted from the registry contract: %+v", s)
 	}

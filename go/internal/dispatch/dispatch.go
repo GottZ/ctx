@@ -271,6 +271,19 @@ type Request struct {
 	// EARLIEST of {Deadline, ctx deadline, admitted+DeadlineIn} over the
 	// provided values. Zero = not provided.
 	DeadlineIn time.Duration
+	// MaxWait is the caller's own wait budget of an EXTERNAL acquire
+	// (design/03 §4.9, wave A03-W5; masterplan K8: the Ctx-Max-Wait-Ms
+	// header sets only this field, parsed by A03-W8/F-W6). It can only
+	// shorten Settings.ExternalMaxWait (I-03-5); zero or negative = not set.
+	// The in-house classes ignore it (V3: no wait-abort budget for ctx' own
+	// work, the scheduler doctrine).
+	MaxWait time.Duration
+	// ServeBy is the absolute time by which the requester needs the FINISHED
+	// answer; zero = not set. External classes only, like MaxWait: the wait
+	// budget shrinks to ServeBy − now − serveMargin (minus the predicted
+	// lease duration once A03-W6 measures it), and a budget that is already
+	// ≤ 0 when the acquire would have to wait is ErrWaitExpired at once.
+	ServeBy time.Time
 }
 
 // Wrap error doctrine (K1, binding since MW1): the two cancel causes WRAP
@@ -288,7 +301,7 @@ var (
 	ErrReaped = fmt.Errorf("dispatch: lease reaped after deadline: %w", context.Canceled)
 )
 
-// Rejection typology (design/03 §4.5.1): all four end the chain walk
+// Rejection typology (design/03 §4.5.1): all five end the chain walk
 // TERMINALLY — a rejection is NOT an attempt (no Classify, no health report,
 // no llmlog line, no failover spill onto openrouter). Sentinel texts stay
 // server-side; the client only ever sees the generic B6 body.
@@ -306,6 +319,13 @@ var (
 	// ErrTargetSaturated — aggregate cap per target: an early 429 beats a
 	// wait slot no plausible client patience would ever see served.
 	ErrTargetSaturated = errors.New("dispatch: target wait cap reached")
+	// ErrWaitExpired — the wait budget of an external acquire ran out
+	// (design/03 §4.9, wave A03-W5): before any wait when the effective
+	// budget is already ≤ 0 (reason predicted — no enqueue), or after waiting
+	// it out in the queue (reason expired). Both reasons are counted per
+	// target (ExternalRejectStats); the /v1 mapping is 429 server_busy
+	// (A03-W8). The in-house classes never get it.
+	ErrWaitExpired = errors.New("dispatch: external wait budget expired")
 )
 
 // ErrInvalidClass is both admission doors' answer to a Request.Class outside
@@ -348,7 +368,8 @@ var (
 var ErrExternalNotOffered = errors.New("dispatch: target does not offer the external class")
 
 // IsRejection is the ONE check point for handler mapping (429/SSE): true for
-// every Deckel-Staffel sentinel and ErrQueueFull, false for everything else
+// every Deckel-Staffel sentinel, ErrQueueFull and ErrWaitExpired (A03-W5),
+// false for everything else
 // (in particular ctx.Err(), ErrInvalidClass, ErrClassUnauthorized,
 // ErrPrincipalConflict and ErrExternalNotOffered). It exists so no handler ever matches error
 // STRINGS — string comparisons are the drift source that would collide the
@@ -357,7 +378,8 @@ func IsRejection(err error) bool {
 	return errors.Is(err, ErrQueueFull) ||
 		errors.Is(err, ErrPrincipalSaturated) ||
 		errors.Is(err, ErrTenantSaturated) ||
-		errors.Is(err, ErrTargetSaturated)
+		errors.Is(err, ErrTargetSaturated) ||
+		errors.Is(err, ErrWaitExpired)
 }
 
 // Admitter is the consumer-facing surface: blocking acquire with ctx, no

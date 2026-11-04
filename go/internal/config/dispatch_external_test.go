@@ -73,10 +73,49 @@ func TestBootDumpCarriesDispatchGroup(t *testing.T) {
 		"external_queue_per_tenant":   32,
 		"external_queue_max":          64,
 		"external_lease_max":          (900 * time.Second).String(),
+		"external_max_wait":           (20 * time.Second).String(),
 		"enabled":                     true,
 	} {
 		if got := group[key]; got != want {
 			t.Errorf("dispatch.%s in the boot record = %v (%T), want %v", key, got, got, want)
+		}
+	}
+}
+
+// TestDispatchExternalMaxWait is the A03-W5 config gate (DECISIONS A-E2
+// no. 2, design/03 §3.3): dispatch.external_max_wait is bare seconds with the
+// registry default 20 s, 0 is a legitimate value ("external never waits"),
+// and a negative value is refused by the generic V17 duration walk (ERROR —
+// boot abort, settings write rejected). The <= 45 s ceiling is A03-W17's
+// (masterplan K21), not this key's.
+func TestDispatchExternalMaxWait(t *testing.T) {
+	if got := defaultFor("dispatch.external_max_wait"); got != 20*time.Second {
+		t.Fatalf("dispatch.external_max_wait default = %v, want 20s", got)
+	}
+	for _, tc := range []struct {
+		raw   string
+		want  time.Duration
+		fatal bool
+	}{
+		{raw: "", want: 20 * time.Second},
+		{raw: "7", want: 7 * time.Second},
+		{raw: "0", want: 0},
+		{raw: "-5", fatal: true},
+	} {
+		src := map[string]string{}
+		if tc.raw != "" {
+			src["dispatch.external_max_wait"] = tc.raw
+		}
+		cfg := validCfg(t, src)
+		got := severityFor(Validate(cfg), "dispatch.external_max_wait")
+		if tc.fatal {
+			if got != SeverityError {
+				t.Fatalf("dispatch.external_max_wait=%q: severity %d (-1 = no issue), want the V17 ERROR", tc.raw, got)
+			}
+			continue
+		}
+		if got != -1 || cfg.Dispatch.ExternalMaxWait != tc.want {
+			t.Fatalf("dispatch.external_max_wait=%q: severity %d, value %v, want clean %v", tc.raw, got, cfg.Dispatch.ExternalMaxWait, tc.want)
 		}
 	}
 }

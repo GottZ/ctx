@@ -17,10 +17,15 @@ import (
 // rejected_admission comes from the /v1 helper, the snapshot from here). Cap
 // counts the cap-ladder refusals (consumer, tenant, aggregate),
 // NotOffered the ErrExternalNotOffered answers — immediate ones and waiters
-// ended by a withdrawn offer.
+// ended by a withdrawn offer. Predicted and Expired split the ErrWaitExpired
+// answers by reason (A03-W5, waitbudget.go): Predicted an acquire whose wait
+// budget was already ≤ 0 when it would have had to wait (never queued),
+// Expired a waiter whose budget ran out in the queue.
 type ExternalRejectStats struct {
 	Cap        int64
 	NotOffered int64
+	Predicted  int64
+	Expired    int64
 }
 
 // admitNowLocked is the immediate half of both doors: a lease when w is

@@ -1554,6 +1554,15 @@ type DispatchConfig struct {
 	// must not hold external partition capacity that long); 0 = no external
 	// cap, the general reap reference applies.
 	ExternalLeaseMax time.Duration `key:"dispatch.external_lease_max" env:"CTX_DISPATCH_EXTERNAL_LEASE_MAX" default:"900" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalMaxWait (bare seconds) is the ONE wait budget of an external
+	// acquire (wave A03-W5, design/03 §4.9, DECISIONS A-E2 no. 2): an
+	// external acquire that has to wait ends with a rejection (429
+	// server_busy) when it runs out — saturation is a 429, never a hang. A
+	// request's own budget (MaxWait, ServeBy) can only shorten it. 0 = an
+	// external acquire never waits (admitted at once or refused at once) —
+	// fail-closed, NOT unbounded. The 20 s default stays below a typical 60 s
+	// proxy idle timeout, so the queue phase needs no keepalive byte.
+	ExternalMaxWait time.Duration `key:"dispatch.external_max_wait" env:"CTX_DISPATCH_EXTERNAL_MAX_WAIT" default:"20" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // ContractConfig is the schema-contract check surface (Evokoa-Clean-Room
@@ -2509,8 +2518,10 @@ type GatewayConfig struct {
 
 	// StreamCommitGrace is the latest header commit of a stream, measured
 	// from handler entry; at most 50 s (V39) so it stays under a typical
-	// 60 s proxy idle timeout. The lower clamp (dispatcher max wait + 5 s)
-	// arrives with dispatch.external_max_wait (A03-W5).
+	// 60 s proxy idle timeout. The lower clamp (dispatch.external_max_wait
+	// + 5 s, design/02 §4.7) is not enforced yet: the key exists since
+	// A03-W5, the clamp is an open hand-over (the key's <= 45 s ceiling is
+	// wave A03-W17).
 	StreamCommitGrace time.Duration `key:"gateway.stream_commit_grace" env:"CTX_GATEWAY_STREAM_COMMIT_GRACE" default:"40" mut:"hot" tenancy:"global-only"`
 	// KeepaliveInterval spaces the ": keepalive" comments of a committed
 	// stream in silence.
