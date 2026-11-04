@@ -37,7 +37,24 @@ const (
 // process-wide dispatch admission layer (MW3, I-D1) feeding the query
 // pipeline, the daily-synthesis trigger and the backend chat probe.
 func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher) *chi.Mux {
+	r, _ := newRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
+	return r
+}
+
+// newRouter is NewRouter plus the router's federation-ingress registration
+// (F-W8, design/04 §4.6): a value of THIS router — the model groups mark it
+// when they mount (mountModelGroup), its settings handler and main's boot
+// assert read it. Per router, so two routers in one test process never see
+// each other's registration.
+func newRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher) (*chi.Mux, *fedhop.Ingress) {
 	r := chi.NewRouter()
+	ingress := &fedhop.Ingress{}
+	// F-W8 (design/04 §4.6, masterplan K14): the federation loop and depth
+	// guard of the knowledge groups — directly after Auth (an anonymous probe
+	// gets 401, never an instance oracle), before the body cap and every
+	// handler, in the house envelope. The model groups carry their own in
+	// the OpenAI envelope (mountModelGroup).
+	loopGuard := handler.LoopGuard(handler.LoopGuardConfig{MaxDepth: federationMaxDepthGetter(cfgStore)})
 
 	// MT 06-C5: wire the request→tenant-scope hook so SnapshotForRequest can
 	// derive the caller's tenant from the auth result. This is the cycle-free
@@ -254,6 +271,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// /mcp exists and where its limit sits.
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(loopGuard)
 		r.Use(handler.MaxBodySizeStrict(DefaultMaxBodySize))
 		r.Handle("/mcp", mcpH)
 	})
@@ -261,6 +279,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// ── API routes (canonical) ──────────────────────────────────────
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(DefaultMaxBodySize))
 
 		// Query — RRF + LLM synthesis
@@ -343,7 +362,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// N8a).
 		r.Post("/api/synthesize/daily", handler.WithScheduler(dispatcher, synthH.HandleDaily))
 		// Settings — runtime overrides (F2-W5); admin-gated inside the mount.
-		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore))
+		// F-W8: gateway.enabled → true is a 409 while this router's
+		// federation ingress is not registered (no model group mounted).
+		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore).WithIngress(ingress))
 		// Secrets — write-only sealed credentials (F2-W6); admin-gated inside.
 		handler.MountSecrets(r, handler.NewSecretsHandler(pool, cfgStore))
 		// Schema contract — full drift report, admin-gated inside the mount
@@ -413,6 +434,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	ingestH := handler.NewIngestHandler(pool, cfgStore, blocktypeReg)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(IngestMaxBodySize))
 		r.Post("/api/ingest", ingestH.HandleIngest)
 	})
@@ -420,6 +442,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// Blob Store — larger body limit (75 MB for base64-encoded files)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(BlobMaxBodySize))
 		r.Post("/api/blob/store", blobH.HandleBlobStore)
 	})
@@ -450,5 +473,5 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// only; mistyped API URLs stay 404, known path + wrong method stays 405).
 	r.NotFound(web.Handler().ServeHTTP)
 
-	return r
+	return r, ingress
 }

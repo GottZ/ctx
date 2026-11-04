@@ -616,8 +616,30 @@ func TestStampDoesNotAliasInboundChain(t *testing.T) {
 	}
 }
 
-func TestIngressRegisteredIsAStub(t *testing.T) {
-	if IngressRegistered() {
-		t.Error("IngressRegistered() = true before any ingress exists (F-W8 registers it)")
+// TestIngressRegistrationIsPerRouter (F-W8, design/04 §4.6): the ingress
+// registration is a value per router, not process state — a nil or zero
+// Ingress reads as not registered (fail-closed), marking one never marks
+// another, and concurrent marks and reads are race-free.
+func TestIngressRegistrationIsPerRouter(t *testing.T) {
+	var none *Ingress
+	if none.Registered() {
+		t.Error("a nil Ingress reads as registered")
+	}
+	a, b := &Ingress{}, &Ingress{}
+	if a.Registered() || b.Registered() {
+		t.Fatal("a zero Ingress reads as registered")
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(2)
+		go func() { defer wg.Done(); a.MarkLoopGuard() }()
+		go func() { defer wg.Done(); _ = b.Registered() }()
+	}
+	wg.Wait()
+	if !a.Registered() {
+		t.Error("MarkLoopGuard did not register a")
+	}
+	if b.Registered() {
+		t.Error("marking a registered b — the registration must be per router")
 	}
 }

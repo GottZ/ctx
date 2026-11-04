@@ -392,7 +392,7 @@ The OpenAI-compatible model API never exposes a backend: the `model` a client na
 
 ## Federation hop headers
 
-When one ctx instance (B) carries another (A) as a backend, every model call between them carries a small header contract, defined in `internal/fedhop` — a leaf on the standard library alone, so the wire packages (`llm`, `embed`, `rerank`), `backends`, `httpx` and `handler` can all import it. The package holds the instance identity (migration 163, see [security](security.md#instance-identity)), the header grammar, the hop token, the monotony rules and the stamp of outgoing calls. Every model wire site stamps its calls and reads the answers with it ([outgoing side](#the-outgoing-side) below); the federation context for ctx rows, the loop guard behind the authenticated route groups and the learned peer state arrive with their own waves, so this section describes the contract they build on.
+When one ctx instance (B) carries another (A) as a backend, every model call between them carries a small header contract, defined in `internal/fedhop` — a leaf on the standard library alone, so the wire packages (`llm`, `embed`, `rerank`), `backends`, `httpx` and `handler` can all import it. The package holds the instance identity (migration 163, see [security](security.md#instance-identity)), the header grammar, the hop token, the monotony rules and the stamp of outgoing calls. Every model wire site stamps its calls and reads the answers with it ([outgoing side](#the-outgoing-side) below); every authenticated route group with model egress refuses loops and over-long chains at its entrance ([incoming side](#the-incoming-side) below); the federation context for ctx rows, the ingress policy of `/v1` and the learned peer state arrive with their own waves, so this section describes the contract they build on.
 
 **Principle: restrictive headers hold for every caller, widening ones for nobody.** A hop header is unauthenticated metadata. Each one can only narrow a request — refuse it, raise its sensitivity, keep it local, lower its class, shorten its wait — and every right (class ceiling, sensitivity floor, model release, egress breadth) comes from data on the authenticated consumer or the backend row, never from a header. A forger can therefore only get its own request refused or narrowed, which is why the loop protection needs no signature over the chain. A missing inbound header means the sender's own value (its lease class, the sensitivity its chain was admitted under); the restrictive default applies only when that own value is missing.
 
@@ -433,6 +433,19 @@ Every model wire site — the ten of the wire census: Ollama and OpenAI chat (`l
 Two censuses keep every site stamped. `stampPin`, next to `wirePin` in `internal/chat/dispatch_invariant_test.go`, carries the same keys and counts as the wire census and counts the stamp and `Observe` calls per wire file in the source; the capture test (`internal/chat/wire_hop_capture_test.go`) needs a driver for every `wirePin` file, fires each site against a capturing server and checks the headers on the wire. A new wire file without a stamp entry or a driver is red, and so is a site that sends no token, lets a row's federation header through, or drops the answer unread.
 
 **Tools without an identity.** Only `ctxd` loads the instance identity. The other binaries (`ctx`, `ctx-armcost`, `ctx-armsweep`, `ctx-distillreset`, `ctx-goldbench`, `ctx-llmlog-export`) link the wire packages through shared dependencies but reach no wire site of the census — the call graph of each of their `main`s has `fedhop.Stamp` unreachable (`deadcode -whylive`) — so they load none. The bench tools that call a model directly (`ctx-goldbench`, `ctx-goldset`) use their own HTTP clients and send no hop header: they originate requests, they never forward one, so the loop guard loses nothing. A tool that gains a direct model call stamps without identity: no marker, and an `ERROR` plus the counter `federation_stamp_without_identity` per call, visible rather than silent.
+
+### The incoming side
+
+`handler.LoopGuard` (wave F-W8) sits directly behind the authentication of every route group with model egress and before the body cap, in this order (masterplan K14):
+
+| Group | Stack |
+|---|---|
+| `/mcp` | `Auth` → `LoopGuard` (house envelope) → strict body cap → MCP handler |
+| `/api` (main group, ingest, blob store) | `Auth` → `LoopGuard` (house envelope) → body cap → handler (admin gates inside) |
+| `/v1`, `/v2` (`mountModelGroup`, mounted with the gateway routes) | `EnabledGate` → `ModelAuth` → `LoopGuard` (OpenAI envelope) → body cap / in-flight budget → handler |
+| camo fetch `GET /api/img/{sig}`, webhook `POST /webhooks/github/{project_id}` | no guard: no authentication, no model egress |
+
+The guard parses `Ctx-Hop`/`Ctx-Path` (`400` unreadable, `508` repeated), refuses the own token or the own instance id (`508 federation_loop`, the own token echoed in `Ctx-Loop-Token`) and a chain of `federation.max_depth` entries or more (`508 federation_depth`), and otherwise puts the chain — `Ctx-Hop` and `Ctx-Path` only — into the request context, where the stamps of the pipelines behind it ([outgoing side](#the-outgoing-side)) continue it. On `/v1` and `/v2` the later ingress policy (`PeerIngress`, after the guard) replaces it by the cleaned full inbound state; until then no stage reads a foreign request's class, sensitivity or wait budget. The guard is fixed in `mountModelGroup`, and mounting a group registers the router's federation ingress (`fedhop.Ingress`, one per router); `gateway.enabled` cannot be on without that registration — the settings write answers `409`, the boot refuses.
 
 ## Supporting mechanisms
 

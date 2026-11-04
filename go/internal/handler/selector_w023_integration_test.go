@@ -115,7 +115,8 @@ func w023Config(enabled bool) *config.Config {
 		Status: config.Defaults().Status,
 		// W02-02: the gateway group's sizes and durations carry fatal floors
 		// (V38/V39); taken whole from the registry.
-		Gateway: config.Defaults().Gateway,
+		Gateway:    config.Defaults().Gateway,
+		Federation: config.Defaults().Federation, // F-W8: V43 range
 		Selector: config.SelectorConfig{
 			Enabled:        enabled,
 			ExactMax:       w023ExactMax,

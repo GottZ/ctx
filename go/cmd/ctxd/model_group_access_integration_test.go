@@ -22,6 +22,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/modelkey"
 	"github.com/GottZ/ctx/internal/oai"
@@ -121,7 +122,7 @@ func TestModelGroupGatewayAccessLog_Integration(t *testing.T) {
 	r := chi.NewRouter()
 	r.Use(handler.RequestID, handler.Logger)
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	mountModelGroup(r, "/v1", modelGroupDeps{access: access, gate: oai.EnabledGate(get), door: door, routes: []modelRoute{
+	mountModelGroup(r, "/v1", modelGroupDeps{access: access, gate: oai.EnabledGate(get), door: door, ingress: &fedhop.Ingress{}, maxDepth: func() int { return 3 }, routes: []modelRoute{
 		{http.MethodGet, "/models", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })},
 		// The probe route of the 429 flood: authenticated, then refused —
 		// the shape of a meter rejection (W06-10) without the meter.

@@ -523,6 +523,19 @@ A per-`home_scope` semaphore (`CTX_WEBCHAT_CONCURRENT_TURNS`, default 1) bounds 
 
 Env (all default-safe): `CTX_CAMO_ENABLED` (default false), `CTX_CAMO_TTL` (signature + cache lifetime, default `24h` — bounds the auth-less fetch endpoint's relay window), `CTX_CAMO_MAX_BYTES` (default `10485760`). No new secret and no DB migration — the signature is stateless and the signing key is derived from the existing `CTX_SECRETS_KEY` (rotation via `CTX_SECRETS_KEY_PREV`).
 
+## Federation refusals (`Ctx-Hop`, `Ctx-Path`)
+
+Every authenticated route under `/api` and `/mcp` — and `/v1`, `/v2` once mounted — checks the federation hop headers of a request right after authentication ([security](security.md#federation-loop-guard-ingress)). A request without them is untouched. The refusals, with `x-should-retry: false` on every one:
+
+| Status | `code` | `Ctx-Reason` | When |
+|---|---|---|---|
+| `400` | `federation_header_invalid` | — | `Ctx-Hop`, `Ctx-Path` or `Ctx-Embed-Space-Require` cannot be read (grammar, more than 16 entries, a path longer than the chain) |
+| `508` | `federation_loop` | `loop` | the chain repeats an entry, carries one of this instance's hop tokens (then also `Ctx-Loop-Token`) or its instance id |
+| `508` | `federation_depth` | `depth` | the chain already holds `federation.max_depth` entries |
+| `503` | `internal_error` | — | a router without instance identity received a readable chain (test routers only) |
+
+On `/api` and `/mcp` the body is the house envelope (`{"success":false,"error":…,"code":…}`), on `/v1` and `/v2` the OpenAI envelope below with the same status and code (`508` has type `server_error`). The text never names the chain, a token, an instance id, the depth or the limit.
+
 ## OpenAI-compatible gateway (`/v1`, `/v2`) — status
 
 ctxd is growing an OpenAI-compatible surface for external programs that hold a model key (design 02). **Nothing is mounted yet:** no route answers under `/v1` or `/v2`, and the settings flag `gateway.enabled` ships `false`. What exists is the foundation every later route stands on (internal/oai):
@@ -531,6 +544,7 @@ ctxd is growing an OpenAI-compatible surface for external programs that hold a m
 - **The flag answers before authentication.** With `gateway.enabled=false` every request under the gateway prefixes — any method, path, credential or body — gets the same `404` in the OpenAI envelope, before any credential is looked at: a switched-off server does not reveal whether a key is valid, and costs no database query. The same bytes answer an unknown path while the gateway is on. The flag is hot.
 - **Error envelope.** Every gateway error has the OpenAI form with all four keys — `{"error":{"message":…,"type":…,"param":…,"code":…}}`, `param`/`code` `null` where they do not apply — `Content-Type: application/json`, and an explicit `x-should-retry: true|false` header that both official SDKs honour over their status-based default. Messages never carry key material, hostnames, backend or model names of the backends, or upstream bodies.
 - **Statuses.** `401 invalid_api_key` (with `WWW-Authenticate: Bearer realm="ctx"`), `404 not_found`, `405 method_not_allowed`, `413 request_too_large` (strict body cap `gateway.max_request_bytes`, answered before the handler for a declared length, after authentication), `503 server_overloaded` with `Retry-After: 1` and `x-should-retry: true` when the process-wide in-flight budget (`gateway.inflight_budget`, 3 × the body plus a response reserve per request) is exhausted — refused at once, never queued — and `503 internal_error` with `x-should-retry: false` for every fault inside ctx, a recovered panic included. A fault inside ctx is a `503`, not a `500`: a peer ctx falls over to its next backend on a `503` but stops its chain on a `500`. The only `500` the gateway will send is a relayed upstream `500` (`upstream_error`).
+- **Federation guard.** The model groups carry the federation loop guard between the key door and the body cap (`EnabledGate → ModelAuth → LoopGuard → body cap`), refusing in this envelope with the codes of [federation refusals](#federation-refusals-ctx-hop-ctx-path). `gateway.enabled` cannot be turned on while no model group with that guard is mounted: the settings write is a `409`, the boot refuses.
 - **Code vocabulary.** The full table of codes with their status and type is exported data (`oai.Codes()`, a copy): the statuses above plus `invalid_json`, `missing_required_parameter`, `invalid_type`, `unsupported_parameter`, `unsupported_value`, `model_not_found`, `model_not_supported`, `context_length_exceeded`, `upstream_rejected` (400), `permission_denied` (403), `rate_limit_exceeded`, `server_busy`, `concurrency_limit_exceeded` (429 `rate_limit_error`), `insufficient_quota` (429 `insufficient_quota`), `service_unavailable`, `model_unavailable`, `no_eligible_backend`, `upstream_unavailable` (503), `upstream_error` (500), `upstream_timeout` (504) and the federation codes `federation_header_invalid`, `federation_hop_required` (400), `peer_instance_mismatch` (403), `federation_loop`, `federation_depth` (508).
 - **Conformance.** The envelope is checked against the official OpenAI SDKs — Go `openai-go/v3` in the regular test run, Python `openai` locally (`go test -tags=pyconformance ./internal/oai/`, needs `uv`) — and against the `ErrorResponse` schema of the OpenAI spec (vendored excerpt under `go/conformance/oai/testdata/`).
 

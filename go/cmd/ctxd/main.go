@@ -821,7 +821,14 @@ func main() {
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
 	listenAddr := cfgStore.Snapshot().Server.ListenAddr //nolint:forbidigo // MT 06 BLIND: restart-only server.listen_addr is a process-global env value (the overlay rejects restart-only keys), read once at boot.
-	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
+	router, ingress := newRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
+	// F-W8 (design/04 §4.6, §7.2 no. 1): no /v1 without its ingress
+	// protection — gateway.enabled effectively true on a router that mounts no
+	// model group with its LoopGuard is no boot (TestMainAssertsGatewayIngressRightAfterRouter pins the place).
+	if err := gatewayIngressAssert(cfgStore.Snapshot(), ingress); err != nil { //nolint:forbidigo // MT 06 BLIND: gateway.enabled is global-only, read once at boot before the server serves.
+		slog.Error("gateway: refusing to start", "error", err)
+		os.Exit(1)
+	}
 	srv := newHTTPServer(listenAddr, router)
 
 	// Start HTTP server in background

@@ -59,7 +59,7 @@ func TestMainLoadsIdentityRightAfterMigrations(t *testing.T) {
 			at["migrations"] = i
 		case calls(st, "fedhop", "SetDefaultIdentity") && calls(st, "", "bootInstanceIdentity"):
 			at["identity"] = i
-		case calls(st, "", "NewRouter"):
+		case calls(st, "", "NewRouter") || calls(st, "", "newRouter"):
 			at["router"] = i
 		}
 		if g, ok := st.(*ast.GoStmt); ok && calls(g, "", "Run") {
@@ -130,7 +130,7 @@ func TestMainInstallsPoolObserverBeforeScheduler(t *testing.T) {
 		if es, ok := st.(*ast.AssignStmt); ok {
 			for _, r := range es.Rhs {
 				if c, ok := r.(*ast.CallExpr); ok {
-					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "NewRouter" {
+					if id, ok := c.Fun.(*ast.Ident); ok && (id.Name == "NewRouter" || id.Name == "newRouter") {
 						at["router"] = i
 					}
 				}
@@ -150,5 +150,53 @@ func TestMainInstallsPoolObserverBeforeScheduler(t *testing.T) {
 	}
 	if r, ok := at["router"]; ok && at["observer"] > r {
 		t.Errorf("main(): observer at statement %d after NewRouter at %d", at["observer"], r)
+	}
+}
+
+// TestMainAssertsGatewayIngressRightAfterRouter — F-W8 (design/04 §4.6,
+// §7.2 no. 1): the boot assert "no /v1 without its ingress protection" reads
+// the ingress registration of the router main serves, so it must follow the
+// router construction directly and come before the HTTP server exists. Red
+// when the assert is missing, moves before the router (nothing registered
+// yet) or after newHTTPServer (the server would already be built).
+func TestMainAssertsGatewayIngressRightAfterRouter(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	var body []ast.Stmt
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "main" && fn.Recv == nil {
+			body = fn.Body.List
+		}
+	}
+	at := map[string]int{}
+	for i, st := range body {
+		ast.Inspect(st, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := c.Fun.(*ast.Ident); ok {
+				switch id.Name {
+				case "newRouter":
+					at["router"] = i
+				case "gatewayIngressAssert":
+					at["assert"] = i
+				case "newHTTPServer":
+					at["server"] = i
+				}
+			}
+			return true
+		})
+	}
+	for _, k := range []string{"router", "assert", "server"} {
+		if _, ok := at[k]; !ok {
+			t.Fatalf("main(): no top-level statement calling %s found (have %v)", k, at)
+		}
+	}
+	if at["assert"] != at["router"]+1 || at["assert"] >= at["server"] {
+		t.Errorf("main(): newRouter at statement %d, gatewayIngressAssert at %d, newHTTPServer at %d — the assert must follow the router directly and precede the server",
+			at["router"], at["assert"], at["server"])
 	}
 }

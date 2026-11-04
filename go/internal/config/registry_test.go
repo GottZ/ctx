@@ -210,6 +210,11 @@ func TestRegistryStrictSet(t *testing.T) {
 		// a typo'd value silently defaulting to 20 s would hide the intended
 		// bound (and 0 is a switch, "external never waits").
 		"dispatch.external_max_wait": true,
+		// F-W8 (design/04 §3.1): the federation depth limit bounds how many
+		// instances one request may pass — a typo'd value silently defaulting
+		// to 3 would present as the operator's limit while the guard enforced
+		// another, so it aborts loudly.
+		"federation.max_depth": true,
 		// B2: the blob write budget is a CEILING like its rate-limit siblings —
 		// a typo'd value silently defaulting to 10 would hide the intended cap
 		// on the one write surface that costs disk per request.
@@ -332,6 +337,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"pool.openrouter_window_ttl":            true, // E10-W2: AUTO-window discovery TTL, born in settings like its pool siblings
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
 		"tenant.allow_cross_tenant_block_grant": true, // MT T43 (07-W6): operator-set per-tenant cross-tenant block-grant opt-in (global-only)
+		"federation.max_depth":                  true, // F-W8: federation topology is settings-only (design/04 §3.1), like every federation.* key
 		"tenant.devmode":                        true, // C6-C: developer-transparency umbrella; settings-only ON PURPOSE — an env would let the privacy default fall without an audit row
 	}
 	seen := map[string]string{}

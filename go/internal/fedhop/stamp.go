@@ -243,10 +243,31 @@ func Stamp(ctx context.Context, h http.Header, t Target) {
 	}
 }
 
-// IngressRegistered reports whether the federation ingress (LoopGuard/
-// PeerIngress) is mounted in front of /v1 — the boot and settings assert of
-// design/04 §4.6. A stub until F-W8 registers it: false.
-func IngressRegistered() bool { return false }
+// Ingress is the registration of the federation ingress of ONE router
+// (design/04 §4.6 "Registrierung als Mechanismus", §7.2 no. 1): the model
+// groups (/v1, /v2) mark it when they are mounted with the LoopGuard fixed
+// in front of their handlers (cmd/ctxd mountModelGroup, F-W8; F-W9 adds the
+// PeerIngress to the condition), and the two assertions "no /v1 without its
+// ingress protection" read it — the boot (gateway.enabled effectively true ∧
+// not registered ⇒ no boot) and the settings write (gateway.enabled → true
+// ⇒ 409).
+//
+// It is a value per router, not process state: two routers in one test
+// process — one with a model group, one without — must not see each other's
+// registration, and a process-wide flag would let the first mounted group
+// open every later router. The zero value is "not registered"; so is a nil
+// *Ingress — a reader that was never wired refuses (fail-closed).
+type Ingress struct {
+	loopGuard atomic.Bool
+}
+
+// MarkLoopGuard records that a model group of this router is mounted with
+// the LoopGuard in front of it.
+func (i *Ingress) MarkLoopGuard() { i.loopGuard.Store(true) }
+
+// Registered reports whether the federation ingress of this router is
+// mounted in front of the model API. A nil *Ingress is not registered.
+func (i *Ingress) Registered() bool { return i != nil && i.loopGuard.Load() }
 
 // Counters of the hop contract.
 var (

@@ -121,6 +121,7 @@ type Config struct {
 	Selector       SelectorConfig
 	Distill        DistillConfig
 	Gateway        GatewayConfig
+	Federation     FederationConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -2493,7 +2494,12 @@ type DistillConfig struct {
 // the typed parsers, the generic sign walks (V17, V35) and the per-key
 // settings audit.
 type GatewayConfig struct {
-	Enabled bool `key:"gateway.enabled" env:"CTX_GATEWAY_ENABLED" default:"false" mut:"hot" tenancy:"global-only"`
+	//
+	// guard:"federation-ingress" (F-W8, design/04 §7.2 no. 1): the settings
+	// write that would turn it on is a 409 while the router's federation
+	// ingress (the LoopGuard in front of the model groups) is not
+	// registered, and the boot refuses an effective true without it.
+	Enabled bool `key:"gateway.enabled" env:"CTX_GATEWAY_ENABLED" default:"false" mut:"hot" guard:"federation-ingress" tenancy:"global-only"`
 
 	// MaxRequestBytes is the strict body cap of the gateway (stage 3,
 	// handler.MaxBodySizeStrictWith): a declared longer body is a 413 before
@@ -2602,6 +2608,24 @@ type GatewayConfig struct {
 	// Consumers is the administration of model consumers and their keys
 	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
 	Consumers GatewayConsumersConfig
+}
+
+// FederationConfig is the federation policy between ctx instances
+// (design/04 §3.1, prefix federation.* per masterplan K3). Every key is
+// settings-only (env:"-"), hot and global-only: the federation topology and
+// its limits are a property of the process, not of a tenant (classification
+// rule above). Wave F-W8 brings the first key; F-W6, F-W10 and F-W12 add
+// theirs here.
+type FederationConfig struct {
+	// MaxDepth is the longest incoming Ctx-Hop chain this instance still
+	// serves (design/04 §4.6 step 3, L5; E-04-7): a request whose chain
+	// already holds MaxDepth entries is refused with 508 federation_depth —
+	// this instance would be hop MaxDepth+1. Read per request by the
+	// LoopGuard of every authenticated group with model egress. Range 1 to
+	// fedhop.MaxHopEntries (V43): 0 would refuse every request, a larger
+	// value could never be reached because ParseInbound refuses a longer
+	// chain with 400 first.
+	MaxDepth int `key:"federation.max_depth" env:"-" default:"3" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // GatewayConsumersConfig is the policy of the consumer and model-key

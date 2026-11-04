@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
 )
 
@@ -27,8 +28,18 @@ type modelGroupDeps struct {
 	// failure lock, probe bucket and DB semaphore, so two groups never hold
 	// twice the database share.
 	door *handler.ModelDoor
-	// inner are the stages after the door, in order (body cap, in-flight
-	// budget, hop gate; design/02 §4.2, W02-05ff.).
+	// ingress is the federation-ingress registration of the router the group
+	// is mounted on (F-W8, design/04 §4.6): mountModelGroup marks it, the
+	// boot assert and the gateway.enabled settings write read it. The
+	// router's own — NewRouter's, never a process-wide one.
+	ingress *fedhop.Ingress
+	// maxDepth is the federation.max_depth getter of the group's LoopGuard
+	// (federationMaxDepthGetter). The guard itself is no dependency: it is
+	// fixed in the group between the door and inner (K14), so no mount can
+	// leave it out.
+	maxDepth func() int
+	// inner are the stages after the door and the LoopGuard, in order (body
+	// cap, in-flight budget; design/02 §4.2, W02-05ff.).
 	inner []func(http.Handler) http.Handler
 	// routes are the group's endpoints; the handlers come from here, so
 	// the door gate can put a probe behind every route (K-02-2).
@@ -47,15 +58,20 @@ type modelRoute struct {
 
 // mountModelGroup mounts prefix as a sub-router whose every request — a
 // registered route, an unknown path, a wrong method, OPTIONS — passes
-// access log → gate → door → inner stages before anything answers
-// (design/01 §4.2, B4; design/06 §4.6). A missing access log, gate or door
-// is a wiring bug and panics at mount time.
+// access log → gate → door → LoopGuard → inner stages before anything answers
+// (design/01 §4.2, B4; design/06 §4.6; masterplan K14: EnabledGate → ModelAuth →
+// LoopGuard → body cap/parse). The LoopGuard answers in the OpenAI envelope and
+// is part of every group by construction; once the group is mounted, the router's
+// ingress is registered (design/04 §4.6 "Registrierung als Mechanismus").
+// A missing access log, gate, door, ingress or depth getter is a wiring bug and
+// panics at mount time.
 func mountModelGroup(r chi.Router, prefix string, deps modelGroupDeps) {
-	if deps.access == nil || deps.gate == nil || deps.door == nil {
-		panic("mountModelGroup " + prefix + ": the access log, the gate and the model-key door are required")
+	if deps.access == nil || deps.gate == nil || deps.door == nil || deps.ingress == nil || deps.maxDepth == nil {
+		panic("mountModelGroup " + prefix + ": the access log, the gate, the model-key door, the ingress registration and the federation.max_depth getter are required")
 	}
+	loopGuard := handler.LoopGuard(handler.LoopGuardConfig{MaxDepth: deps.maxDepth, Envelope: handler.LoopGuardOpenAI})
 	r.Route(prefix, func(g chi.Router) {
-		g.Use(deps.access.Handler, deps.gate, deps.door.Handler)
+		g.Use(deps.access.Handler, deps.gate, deps.door.Handler, loopGuard)
 		g.Use(deps.inner...)
 		if deps.notFound != nil {
 			g.NotFound(deps.notFound)
@@ -67,4 +83,5 @@ func mountModelGroup(r chi.Router, prefix string, deps modelGroupDeps) {
 			g.Method(rt.method, rt.pattern, rt.handler)
 		}
 	})
+	deps.ingress.MarkLoopGuard()
 }
