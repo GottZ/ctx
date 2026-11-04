@@ -6,7 +6,8 @@ import "time"
 // per masterplan K3). cmd/ctxd builds the getter (config.GatewaySettings
 // over the live config store); the gateway reads it once per request, so
 // every key is hot. Field meanings and defaults are documented on
-// config.GatewayConfig — this package only consumes the values.
+// config.GatewayConfig — this package only consumes the values, except Auth,
+// which the model-key door (handler.ModelAuth) reads from the same snapshot.
 type Settings struct {
 	Enabled bool
 
@@ -28,6 +29,19 @@ type Settings struct {
 
 	RelayUpstream4xxMessages bool
 	RetryAfterJitter         float64
+
+	Auth AuthSettings
+}
+
+// AuthSettings are the limits of the model-key door (gateway.auth_*,
+// design/01 §4.2 stages 5-7; wave W01-6): the failure lock per (address
+// prefix, key-hash prefix), the global probe bucket for hashes without a
+// success, and the database semaphore of ctx_model_auth.
+type AuthSettings struct {
+	FailureLimit  int
+	FailureWindow time.Duration
+	ProbeRate     int
+	DBConcurrency int
 }
 
 // AliasCeiling is the server admin's ceiling on tenant-alias policies

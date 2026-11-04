@@ -2513,6 +2513,30 @@ type GatewayConfig struct {
 	// U[1, 1 + jitter] ("treat it as a minimum and add a small random
 	// delay"). Range [0, 1] (V39).
 	RetryAfterJitter float64 `key:"gateway.retry_after_jitter" env:"CTX_GATEWAY_RETRY_AFTER_JITTER" default:"0.5" mut:"hot" tenancy:"global-only"`
+
+	// The model-key door (handler.ModelAuth, design/01 §4.2, §4.9; wave
+	// W01-6). All four are security limits of an unauthenticated path and
+	// parse-strict; V40 checks them.
+	//
+	// AuthFailureLimit is the number of failed checks per (client address
+	// prefix — IPv4 /32, IPv6 /64 — , key-hash prefix) inside one
+	// AuthFailureWindow after which that pair gets 429 rate_limit_exceeded
+	// without a database query. The pair, not the address, is the key: a
+	// stale key behind a shared address locks only itself (B27).
+	AuthFailureLimit int `key:"gateway.auth_failure_limit" env:"CTX_GATEWAY_AUTH_FAILURE_LIMIT" default:"30" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// AuthFailureWindow is the fixed window of that count, from the pair's
+	// first failure; it is also the longest Retry-After of the lock.
+	AuthFailureWindow time.Duration `key:"gateway.auth_failure_window" env:"CTX_GATEWAY_AUTH_FAILURE_WINDOW" default:"60" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// AuthProbeRate is the global token bucket (burst = rate, refill = rate
+	// per second) a key hash without a successful check needs a token from
+	// before it may reach ctx_model_auth; empty ⇒ 503 auth_overloaded. Known
+	// keys pass without a token, so a forgery flood cannot lock them out
+	// (B18, B26).
+	AuthProbeRate int `key:"gateway.auth_probe_rate" env:"CTX_GATEWAY_AUTH_PROBE_RATE" default:"50" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// AuthDBConcurrency caps the concurrent ctx_model_auth calls — the door's
+	// share of the 20-connection pool; ctx's own database work keeps the
+	// rest under any flood. Below the pool size (V40).
+	AuthDBConcurrency int `key:"gateway.auth_db_concurrency" env:"CTX_GATEWAY_AUTH_DB_CONCURRENCY" default:"4" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // GatewayTenantAliasCeiling is the server admin's ceiling on tenant-alias
@@ -2703,6 +2727,12 @@ func (c *Config) GatewaySettings() oai.Settings {
 		MaxOutputTokensCeiling:   g.MaxOutputTokensCeiling,
 		RelayUpstream4xxMessages: g.RelayUpstream4xxMessages,
 		RetryAfterJitter:         g.RetryAfterJitter,
+		Auth: oai.AuthSettings{
+			FailureLimit:  g.AuthFailureLimit,
+			FailureWindow: g.AuthFailureWindow,
+			ProbeRate:     g.AuthProbeRate,
+			DBConcurrency: g.AuthDBConcurrency,
+		},
 		TenantAliasCeiling: oai.AliasCeiling{
 			MaxOutputTokens:    g.TenantAliasCeiling.MaxOutputTokens,
 			MaxN:               g.TenantAliasCeiling.MaxN,

@@ -151,6 +151,16 @@ func TestRegistryStrictSet(t *testing.T) {
 		"gateway.tenant_alias_ceiling.embedding_max_inputs": true,
 		"gateway.tenant_alias_ceiling.rerank_max_documents": true,
 		"gateway.tenant_alias_ceiling.tools_max_count":      true,
+		// W01-6 (design/01 §4.9, A-E2) the model-key door's limits: the
+		// failure lock (count and window), the probe rate and the DB
+		// semaphore — security ceilings of an unauthenticated path; a typo'd
+		// value silently falling back to the default would hide the intended
+		// bound, so each aborts loudly. The window is a duration and strict
+		// all the same: it is a lock length, not a cadence.
+		"gateway.auth_failure_limit":  true,
+		"gateway.auth_failure_window": true,
+		"gateway.auth_probe_rate":     true,
+		"gateway.auth_db_concurrency": true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.

@@ -59,6 +59,11 @@ type contextKey string
 const (
 	requestIDKey contextKey = "request_id"
 	authResultKey contextKey = "auth_result"
+	// consumerAuthKey carries the *auth.ConsumerAuth of a model-key request
+	// (the /v1 door, ModelAuth). A request carries it or an AuthResult,
+	// never both: each door refuses a context the other one filled
+	// (design/01 §4.2 stage 0 and its counterpart in Auth).
+	consumerAuthKey contextKey = "consumer_auth"
 )
 
 // RequestIDFromContext extracts the request ID from the context.
@@ -73,6 +78,15 @@ func RequestIDFromContext(ctx context.Context) string {
 func AuthResultFromContext(ctx context.Context) *auth.AuthResult {
 	if ar, ok := ctx.Value(authResultKey).(*auth.AuthResult); ok {
 		return ar
+	}
+	return nil
+}
+
+// ConsumerAuthFromContext extracts the ConsumerAuth of a model-key request
+// (ModelAuth); nil on every knowledge path.
+func ConsumerAuthFromContext(ctx context.Context) *auth.ConsumerAuth {
+	if ca, ok := ctx.Value(consumerAuthKey).(*auth.ConsumerAuth); ok {
+		return ca
 	}
 	return nil
 }
@@ -96,9 +110,21 @@ func AuthResultFromContext(ctx context.Context) *auth.AuthResult {
 // Alt: ar.TenantID (UUID). Reversible if Achse 01 ever splits a parallel
 // tenant_id away from the scope dimension — then this wrapper and
 // LoadSettingOverrides would key on the UUID (§11.1).
+//
+// A model-key request (W01-6, design/01 §4.5) resolves its consumer's
+// tenant_scope, so tenant overrides apply to the tenant's consumers too;
+// an empty tenant_scope means the base snapshot. A context with both
+// credentials is a wiring defect the doors refuse; should one reach here it
+// stays on the base snapshot.
 func RequestTenantScope(ctx context.Context) string {
-	if ar := AuthResultFromContext(ctx); ar != nil {
+	ar, ca := AuthResultFromContext(ctx), ConsumerAuthFromContext(ctx)
+	switch {
+	case ar != nil && ca != nil:
+		return ""
+	case ar != nil:
 		return ar.HomeScope
+	case ca != nil && ca.IsValid:
+		return ca.TenantScope
 	}
 	return ""
 }
@@ -362,6 +388,18 @@ func resolveCredential(ctx context.Context, pool *pgxpool.Pool, raw string) (*au
 func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Mutual exclusion, first check (design/01 §4.2, B6): a request
+			// the model-key door already authenticated is a wiring defect
+			// here — the two doors are stacked. A hard 500 instead of a
+			// request that carries both credential classes.
+			if ConsumerAuthFromContext(r.Context()) != nil {
+				slog.Error("auth: request already carries a model-key ConsumerAuth — handler.Auth stacked behind ModelAuth (wiring defect)",
+					"path", r.URL.Path,
+					"request_id", RequestIDFromContext(r.Context()),
+				)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "authentication error"})
+				return
+			}
 			raw, isSession := requestCredential(r)
 			result, csrfSecret, err := resolveRequestCredential(r.Context(), pool, raw, isSession)
 			if err != nil {
