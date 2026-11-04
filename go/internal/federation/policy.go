@@ -99,8 +99,9 @@ func ResolvePolicy(ca *auth.ConsumerAuth, in fedhop.Inbound) Policy {
 // raising — a hit in a non-prompt field (user, metadata) costs trust
 // headroom, never confidentiality. Leaves are decoded, so a JSON escape
 // cannot hide a key; a number literal is scanned as its text; an object
-// member is also scanned as "key: value" (a secret-named key such as
-// "client_secret" next to its value). The cost is
+// member with a scalar value is also scanned as "key: value" (a
+// secret-named key such as "client_secret" next to its value — not over an
+// array or object value, a named limit, F2-3). The cost is
 // bounded by the request cap gateway.max_request_bytes, which the body cap
 // enforces before any handler parses (measured in the F-W9 report). A body
 // that is not valid JSON is scanned raw as one string (fail-closed: an

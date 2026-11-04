@@ -166,6 +166,61 @@ func TestScanRaiseEscapedAndInvalidBodies(t *testing.T) {
 	}
 }
 
+// TestScanRaiseRawScanOnParseError is F2-1 (Fremd-Review 2): a body the
+// decoder cannot read is scanned raw, never skipped. Each fixture carries its
+// secret only BEHIND the parse error, so no token before it can hit — a scan
+// that gave up at the error (mutant M10) answers personal.
+func TestScanRaiseRawScanOnParseError(t *testing.T) {
+	const secret = "Zq7Lp2Wx9Kd4Rv8Tn3Hb6Yc1"
+	for name, body := range map[string]string{
+		"not JSON":                    `password: ` + secret,
+		"valid JSON, then garbage":    `{"a":"b"} password=` + secret,
+		"missing comma before secret": `{"a":"x" "password=` + secret + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := ScanRaise(backends.SensPersonal, []byte(body)); got != backends.SensCredentials {
+				t.Errorf("ScanRaise(personal, %q) = %q, want credentials (raw scan after the parse error)", body, got)
+			}
+		})
+	}
+}
+
+// TestScanRaiseObjectKeys is F2-2 (Fremd-Review 2): object keys are scanned
+// like values — a credential used as a key (metadata maps keyed by an access
+// key id) raises; with the key scan off (mutant M15) it would not, the value
+// beside it being a bool.
+func TestScanRaiseObjectKeys(t *testing.T) {
+	body := []byte(`{"metadata":{"` + awsKey() + `":true}}`)
+	if got := ScanRaise(backends.SensPersonal, body); got != backends.SensCredentials {
+		t.Fatalf("AWS key as an object key: %q, want credentials", got)
+	}
+}
+
+// TestScanRaiseMemberProbeScalarsOnly pins a NAMED LIMIT (F2-3, Fremd-Review
+// 2; lead decision: no rework in F-W9): the key-value probe of FR-3 covers an
+// object member with a scalar value only. A secret-named key over an array or
+// an object value is not paired with the strings inside it, so a short secret
+// without a vendor prefix there stays at the lowered floor — as it would
+// under a raw scan of the serialized body (the assignment rule's capture ends
+// at "[" or "{"). The scalar control raises. If this test turns red because
+// the containers now raise too, the limit is closed: update docs/security.md
+// and the handover in the F-W9 report.
+func TestScanRaiseMemberProbeScalarsOnly(t *testing.T) {
+	const secret = "Zq7Lp2Wx9Kd4Rv8Tn3Hb6Yc1"
+	for _, c := range []struct {
+		body string
+		want backends.Sensitivity
+	}{
+		{`{"api_key":"` + secret + `"}`, backends.SensCredentials},
+		{`{"api_key":["` + secret + `"]}`, backends.SensPersonal},
+		{`{"api_key":{"value":"` + secret + `"}}`, backends.SensPersonal},
+	} {
+		if got := ScanRaise(backends.SensPersonal, []byte(c.body)); got != c.want {
+			t.Errorf("ScanRaise(personal, %s) = %q, want %q", c.body, got, c.want)
+		}
+	}
+}
+
 // TestScanRaiseShortCircuit: at credentials there is nothing left to raise —
 // no scan; an empty or unknown requirement is credentials (fail-closed).
 func TestScanRaiseShortCircuit(t *testing.T) {
