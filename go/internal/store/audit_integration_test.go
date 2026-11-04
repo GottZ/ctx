@@ -9,9 +9,10 @@
 //     empty list, the same as an unknown one (no oracle); rows without a
 //     tenant (a scope no tenant owns, psql rows) are server-admin-only; an
 //     empty reader tenant reads nothing and issues no query (fail-closed).
-//   - Entities: the eight served types are data (store.AuditEntities); the
+//   - Entities: the nine served types are data (store.AuditEntities); the
 //     four whose writers have not landed read as empty lists (model_consumer
-//     and model_key are written by the 161 triggers); setting, secret,
+//     and model_key are written by the 161 triggers, model_alias by the 162
+//     ones); setting, secret,
 //     backend and every other type answer store.ErrAuditEntity; 'instance' is
 //     server-admin-only.
 //   - Order created_at DESC, id DESC (rows of one transaction share
@@ -206,7 +207,7 @@ func TestAuditListEntities(t *testing.T) {
 	auSeed(ctx, t, pool, "instance", "peer-1", tA, t0)
 	auSeed(ctx, t, pool, "setting", "dream.enabled", tA, t0)
 
-	want := []string{"api_key", "consumer_usage", "gateway_limits", "instance", "model_consumer", "model_grant", "model_key", "tenant_quota"}
+	want := []string{"api_key", "consumer_usage", "gateway_limits", "instance", "model_alias", "model_consumer", "model_grant", "model_key", "tenant_quota"}
 	if got := store.AuditEntities(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("AuditEntities() = %v, want %v", got, want)
 	}

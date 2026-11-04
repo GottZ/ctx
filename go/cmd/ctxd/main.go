@@ -778,6 +778,9 @@ func main() {
 	// Boot happens-before (SetOverlay pattern): installed before Run starts
 	// the listener goroutine, so the unsynchronized field write is safe.
 	scheduler.SetBlocktypeRegistry(blocktypeReg)
+	// W02-03: the /v1 model namespace, loaded before Run builds the listener
+	// that keeps it hot (same boot happens-before).
+	scheduler.SetModelAliasRegistry(bootModelAliases(ctx, pool))
 	// W9: the SSE domain-event hub. Its flush loop is bound to ctx (server
 	// lifecycle); the scheduler's listener forwards ctx_project_write (081) to it.
 	// Installed before Run for the same boot happens-before contract.

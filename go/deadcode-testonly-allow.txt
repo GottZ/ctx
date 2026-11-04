@@ -131,6 +131,10 @@ internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_g
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
+internal/modelalias/registry.go	Alias.offerable	# Helfer von Offers/Lookup: wartet: W01-9 oder W02-05, wer zuerst
+internal/modelalias/registry.go	Lookup	# wartet: W02-05 — Resolve über Offers/Lookup + Grants + V-02-c (/v1), erster Produktionsaufrufer
+internal/modelalias/registry.go	Offers	# wartet: W01-9 (models-Validierung gegen das Angebot des Konsumenten-Scopes, V-0102-h) oder W02-05 (/v1/models), wer zuerst
+internal/modelalias/registry.go	Snapshot.winner	# Helfer von Offers/Lookup (Überschattungs-Regel): wartet: W01-9 oder W02-05, wer zuerst
 internal/modelkey/modelkey.go	Generate	# wartet: W01-5 — einzige Aufrufer CreateConsumerWithKey/RotateKey (W01-3, Store) sind selbst test-only bis zu den Admin-Actions
 internal/modelkey/modelkey.go	Key.GoString	# Hint-Darstellung für fmt %#v (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
 internal/modelkey/modelkey.go	Key.Hash	# wartet: W01-5 (Store-Aufrufer insertModelKeyTx aus W01-3, erreichbar mit den Admin-Actions) oder W02-05 (ModelAuth), wer zuerst
@@ -181,6 +185,18 @@ internal/schemacontract/recheck.go	CheckRunCountForTest	# Test-only-Accessor auf
 internal/store/api_keys.go	CreateApiKey	# E02-3 A: Fixture-Fassade über insertApiKeyTx; 73 Aufrufe in 44 Testdateien, Prod mintet über den Tx-Kern
 internal/store/graph.go	EgoGraph	# Cache-lose Fassade über EgoGraphCached (Prod-Pfad); 59 Aufrufe in 12 Integrationstests als SQL-Orakel
 internal/store/graph.go	takeHop	# Legacy-Fassade über takeHopMerged (Prod: graph.go:336); graph_test.go:105 ff. pinnt die alte Trunkierung
+internal/store/model_aliases.go	CreateModelAlias	# wartet: W02-04 — model-alias-create (Manage-Action mit Feld-Tiers)
+internal/store/model_aliases.go	DeleteModelAlias	# wartet: W02-04 — model-alias-delete (V-02-b-409 erst mit W01-9)
+internal/store/model_aliases.go	GetModelAlias	# wartet: W02-04 — Lesepfad vor jedem Update (Merge, Überschattungs-Boden)
+internal/store/model_aliases.go	ListModelAliases	# wartet: W02-04 — model-alias-list
+internal/store/model_aliases.go	ModelAliasImmutableError.Error	# wartet: W02-04 — 400 immutable_field; nur über errors.As/Is erreichbar, sobald UpdateModelAlias einen Produktionsaufrufer hat
+internal/store/model_aliases.go	ModelAliasImmutableError.Is	# wartet: W02-04 — errors.Is(err, ErrModelAliasImmutable) im Update-Handler
+internal/store/model_aliases.go	UpdateModelAlias	# wartet: W02-04 — model-alias-update
+internal/store/model_aliases.go	modelAliasErr	# Helfer der Store-CRUD: wartet: W02-04
+internal/store/model_aliases.go	modelAliasID	# Helfer der Store-CRUD (Id vor dem Statement prüfen, Fremd-Review F-1): wartet: W02-04
+internal/store/model_aliases.go	modelAliasPolicy	# Helfer der Store-CRUD: wartet: W02-04
+internal/store/model_aliases.go	scanModelAlias	# Helfer der Store-CRUD: wartet: W02-04
+internal/store/model_aliases.go	stampModelAliasWrite	# Helfer der Store-CRUD (Stempel + ctx.confirm_downgrade): wartet: W02-04
 internal/store/model_keys.go	CreateConsumerWithKey	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
 internal/store/model_keys.go	DeleteConsumer	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
 internal/store/model_keys.go	KeyHistory	# wartet: W01-5 — Admin-Actions model-consumer-*/model-key-* (W01-3 legt die Store-Primitive an; Gates in model_keys_integration_test.go)
