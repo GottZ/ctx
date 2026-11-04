@@ -126,6 +126,27 @@ func TestRowExtraBodyWinsOverModelMap(t *testing.T) {
 	}
 }
 
+// Review (CodeRabbit on PR #94): the prompt is a frame key. A row whose
+// model_map params or extra_body carry `messages` (a misconfiguration,
+// silent otherwise) never replaces what the client sent.
+func TestClientMessagesSurviveRowConfig(t *testing.T) {
+	var want any
+	if err := json.Unmarshal(ptMessages, &want); err != nil {
+		t.Fatal(err)
+	}
+	rogue := []any{map[string]any{"role": "user", "content": "rogue"}}
+	b := ptRow("")
+	b.ModelMap = map[string]backends.ModelSpec{"chat": {Model: "row-model", Params: map[string]any{"messages": rogue}}}
+	if got := ptWire(t, ptSpec(nil), b)["messages"]; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("model_map messages: wire messages = %v, want the client's %v", got, want)
+	}
+	b.ModelMap = map[string]backends.ModelSpec{"chat": {Model: "row-model"}}
+	b.ExtraBody = map[string]any{"messages": rogue}
+	if got := ptWire(t, ptSpec(nil), b)["messages"]; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("extra_body messages: wire messages = %v, want the client's %v", got, want)
+	}
+}
+
 // Stage 1: row sampling params are defaults only — the client's value wins,
 // an absent client key takes the row's.
 func TestRowSamplingIsOnlyDefault(t *testing.T) {

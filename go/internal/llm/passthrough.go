@@ -116,7 +116,6 @@ func BuildUpstreamBody(s UpstreamSpec, b *backends.Backend) ([]byte, error) {
 			m[k] = v
 		}
 	}
-	m["messages"] = s.Messages
 	if s.ReasoningOff || (think != nil && !*think) {
 		m["reasoning"] = reasoningOffBody
 	}
@@ -138,6 +137,10 @@ func BuildUpstreamBody(s UpstreamSpec, b *backends.Backend) ([]byte, error) {
 		return nil, err
 	}
 	putFrame(m, spec.Model, s.Stream, effectiveMaxTokens(s.MaxTokens, b.ChatMaxTokens(), opts.NumPredict))
+	// The prompt is a frame key too: written after stages 5a and 5, so no
+	// model_map param and no extra_body (a row misconfiguration, silent
+	// otherwise) can replace what the client sent.
+	m["messages"] = s.Messages
 	return json.Marshal(m)
 }
 
