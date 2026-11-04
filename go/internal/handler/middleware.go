@@ -212,6 +212,29 @@ func RequestID(next http.Handler) http.Handler {
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
+	// logClaimed: a stage further in writes this request's log line
+	// itself (the model groups' access log, W06-9), so Logger stays
+	// silent — a request is one line, not two.
+	logClaimed bool
+}
+
+// claimRequestLog marks the request whose response chain w belongs to as
+// logged by the caller: it walks w's Unwrap chain to Logger's writer. A
+// writer in between that does not unwrap ends the walk, and Logger then
+// logs as usual — the failure direction is a second line, never a missing
+// one.
+func claimRequestLog(w http.ResponseWriter) {
+	for w != nil {
+		if rw, ok := w.(*responseWriter); ok {
+			rw.logClaimed = true
+			return
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = u.Unwrap()
+	}
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
@@ -227,7 +250,14 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 	return rw.ResponseWriter
 }
 
-// Logger logs each HTTP request with method, path, status, and duration.
+// Logger logs each HTTP request with method, path, status, and duration —
+// except the requests a model group (/v1, /v2) logs itself
+// (GatewayAccessLog claims them, W06-9): there the group's own line or
+// throttled refusal count is the request's one log entry, so a refusal
+// flood cannot write a line per request through this logger (B-06-22). The
+// claim, not a path prefix, decides: a /v1 path that never reaches the
+// group (no group mounted, or a raw path chi routes elsewhere) keeps its
+// line here.
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -235,6 +265,9 @@ func Logger(next http.Handler) http.Handler {
 
 		next.ServeHTTP(rw, r)
 
+		if rw.logClaimed {
+			return
+		}
 		slog.Info("http request",
 			"method", r.Method,
 			"path", r.URL.Path,

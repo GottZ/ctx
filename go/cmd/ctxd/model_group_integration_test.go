@@ -64,14 +64,15 @@ func TestModelGroupDoor_Integration(t *testing.T) {
 		},
 	})
 	gate := oai.EnabledGate(get)
+	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 
 	mount := func(r chi.Router, probe http.Handler) {
-		mountModelGroup(r, "/v1", modelGroupDeps{gate: gate, door: door, routes: []modelRoute{
+		mountModelGroup(r, "/v1", modelGroupDeps{access: access, gate: gate, door: door, routes: []modelRoute{
 			{http.MethodGet, "/models", probe},
 			{http.MethodGet, "/models/{model}", probe},
 			{http.MethodPost, "/chat/completions", probe},
 		}})
-		mountModelGroup(r, "/v2", modelGroupDeps{gate: gate, door: door, routes: []modelRoute{
+		mountModelGroup(r, "/v2", modelGroupDeps{access: access, gate: gate, door: door, routes: []modelRoute{
 			{http.MethodPost, "/rerank", probe},
 		}})
 	}
@@ -80,12 +81,16 @@ func TestModelGroupDoor_Integration(t *testing.T) {
 	})
 }
 
-// TestModelGroupRefusesMissingDeps: a group without gate or door is a
-// wiring bug and panics at mount time instead of serving an open group.
+// TestModelGroupRefusesMissingDeps: a group without access log, gate or
+// door is a wiring bug and panics at mount time instead of serving an open
+// (or unlogged) group.
 func TestModelGroupRefusesMissingDeps(t *testing.T) {
+	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: func() oai.Settings { return oai.Settings{} }})
+	pass := func(h http.Handler) http.Handler { return h }
 	for name, deps := range map[string]modelGroupDeps{
-		"no gate": {door: &handler.ModelDoor{}},
-		"no door": {gate: func(h http.Handler) http.Handler { return h }},
+		"no gate":       {access: access, door: &handler.ModelDoor{}},
+		"no door":       {access: access, gate: pass},
+		"no access log": {gate: pass, door: &handler.ModelDoor{}},
 	} {
 		func() {
 			defer func() {

@@ -144,6 +144,12 @@ func TestValidateGatewayConsumers(t *testing.T) {
 	}
 }
 
+// gatewayStringBumps names a valid non-default value per string key of the
+// gateway group (W06-9: gateway.body_logging).
+var gatewayStringBumps = map[string]string{
+	"gateway.body_logging": "full",
+}
+
 // bumpedValue is a valid value different from the key's default.
 func bumpedValue(t *testing.T, e entry) string {
 	t.Helper()
@@ -156,6 +162,11 @@ func bumpedValue(t *testing.T, e entry) string {
 		return strconv.FormatFloat(def/2, 'f', -1, 64)
 	case time.Duration:
 		return strconv.Itoa(int(def/time.Second) + 1)
+	case string:
+		// A string key is an enum; its bump is a valid non-default member.
+		if v, ok := gatewayStringBumps[e.Key]; ok && v != def {
+			return v
+		}
 	}
 	t.Fatalf("%s: no bump for default type %T", e.Key, e.defVal)
 	return ""

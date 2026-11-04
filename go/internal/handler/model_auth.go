@@ -280,12 +280,15 @@ func (d *ModelDoor) Handler(next http.Handler) http.Handler {
 			d.refuse(w, r, rejInvalid)
 			return
 		}
-		// 8 — accepted.
+		// 8 — accepted. The identity goes into the access record; the
+		// group's access log writes the request's one line from it (W06-9:
+		// no line of the door's own per request).
 		d.known.add(hash)
 		d.usage.Touch(ca.ModelKeyID)
 		d.st.accepted.Add(1)
-		d.log.Info("model auth: accepted", "consumer_id", ca.ConsumerID, "model_key_id", ca.ModelKeyID,
-			"request_id", RequestIDFromContext(ctx))
+		if rec := oai.AccessRecordFrom(ctx); rec != nil {
+			rec.ConsumerID, rec.ModelKeyID, rec.TenantID = ca.ConsumerID, ca.ModelKeyID, ca.TenantID
+		}
 		ctx = context.WithValue(ctx, consumerAuthKey, ca)
 		ctx = context.WithValue(ctx, modelDoorKey{}, d)
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -419,8 +422,13 @@ func (d *ModelDoor) countUnavailable(ctx context.Context, c *atomic.Uint64) {
 	c.Add(1)
 }
 
-// refuse sets the decision headers and hands the body to the renderer.
+// refuse sets the decision headers, names the code as the refusal reason
+// of the access record (the group's throttled refusal line counts by it)
+// and hands the body to the renderer.
 func (d *ModelDoor) refuse(w http.ResponseWriter, r *http.Request, rej ModelAuthRejection) {
+	if rec := oai.AccessRecordFrom(r.Context()); rec != nil {
+		rec.Reason = rej.Code
+	}
 	h := w.Header()
 	if rej.Status == http.StatusUnauthorized {
 		// No resource_metadata: this is not the MCP resource (design/01 §4.2).

@@ -30,6 +30,13 @@ type Settings struct {
 	RelayUpstream4xxMessages bool
 	RetryAfterJitter         float64
 
+	// BodyLogging is the body policy of the /v1 rows (gateway.body_logging,
+	// none, errors or full — llmlog.BodyLoggingValid); the handler passes it to
+	// llmlog.GatewayEntry. AccessLog turns the per-request success line of
+	// the model groups' access log on (gateway.access_log; W06-9).
+	BodyLogging string
+	AccessLog   bool
+
 	Auth AuthSettings
 }
 

@@ -2581,6 +2581,24 @@ type GatewayConfig struct {
 	// share of the 20-connection pool; ctx's own database work keeps the
 	// rest under any flood. Below the pool size (V40).
 	AuthDBConcurrency int `key:"gateway.auth_db_concurrency" env:"CTX_GATEWAY_AUTH_DB_CONCURRENCY" default:"4" mut:"hot" parse:"strict" tenancy:"global-only"`
+
+	// The telemetry of the /v1 rows and the model groups' access log
+	// (design/06 §4.6, masterplan K10; wave W06-9).
+	//
+	// BodyLogging is the one body policy of /v1 rows in context_llm_log:
+	// none (default) stores no body (''), errors stores the serialized
+	// request and response only on rows with an error, full on every row,
+	// each capped at 64 KiB. Every row is slimmed as for a tenant without
+	// devmode, so a credentials-class row stays sealed under every policy.
+	// V43: trim + lower, empty reads as none, an unknown name aborts boot /
+	// fails the settings write.
+	BodyLogging string `key:"gateway.body_logging" env:"CTX_GATEWAY_BODY_LOGGING" default:"none" mut:"hot" tenancy:"global-only"`
+	// AccessLog writes one INFO line "gateway request" per successful
+	// request of the model groups (identities, op, alias, status, tokens,
+	// timings — no label, no content). Refusals are never logged per
+	// request: they are counted per (consumer, reason) and logged as one
+	// WARN line per minute, whatever this key says.
+	AccessLog bool `key:"gateway.access_log" env:"CTX_GATEWAY_ACCESS_LOG" default:"true" mut:"hot" tenancy:"global-only"`
 	// Consumers is the administration of model consumers and their keys
 	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
 	Consumers GatewayConsumersConfig
@@ -2816,6 +2834,8 @@ func (c *Config) GatewaySettings() oai.Settings {
 		MaxOutputTokensCeiling:   g.MaxOutputTokensCeiling,
 		RelayUpstream4xxMessages: g.RelayUpstream4xxMessages,
 		RetryAfterJitter:         g.RetryAfterJitter,
+		BodyLogging:              g.BodyLogging,
+		AccessLog:                g.AccessLog,
 		Auth: oai.AuthSettings{
 			FailureLimit:  g.AuthFailureLimit,
 			FailureWindow: g.AuthFailureWindow,

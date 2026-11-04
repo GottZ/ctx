@@ -112,9 +112,10 @@ type Entry struct {
 	// and never authenticates as a knowledge key. The database side of that
 	// contract is the CHECK ck_llm_log_one_identity — such a row is refused
 	// and counted in InsertFailures; the Go side is the gateway stamp
-	// (Entry.StampGateway, W06-9), which is to be the field's only setter.
-	// Until it lands no production code sets ConsumerID, so every row keeps
-	// consumer_id NULL.
+	// (Entry.StampGateway, W06-9), the field's only setter (census
+	// TestGatewayConsumerIDCensus). Every other writer leaves it empty, so
+	// its rows keep consumer_id NULL — a /v1 row is built by GatewayEntry,
+	// never by an internal pipeline's constructor.
 	ConsumerID string
 
 	// Dispatch telemetry (Vorhaben E wave MW10, design/05 §3.2). QueueWaitMs
