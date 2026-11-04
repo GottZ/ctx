@@ -359,8 +359,10 @@ func TestModelAuthKnowledgeCredentials_Integration(t *testing.T) {
 }
 
 // Success: the handler sees a ConsumerAuth with every K20 field, no
-// AuthResult; Touch got the key id; one log line with the ids. A revoked
-// key is a 401 on the very next request.
+// AuthResult; Touch got the key id; the ids go into the request's access
+// record and the door writes no line of its own (W06-9: the group's access
+// log writes the request's one line). A revoked key is a 401 on the very
+// next request.
 func TestModelAuthSuccessAndRevoke_Integration(t *testing.T) {
 	e := madSetup(t)
 	ctx := context.Background()
@@ -377,7 +379,11 @@ func TestModelAuthSuccessAndRevoke_Integration(t *testing.T) {
 	if _, err := e.seed.Exec(ctx, `UPDATE context_model_consumers SET peer_instance_id = $2, peer_bound_at = now() WHERE id = $1`, c.ID, peer); err != nil {
 		t.Fatalf("bind peer: %v", err)
 	}
-	d, h, rec := e.door(t, "")
+	d, door, rec := e.door(t, "")
+	ar := &oai.AccessRecord{}
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		door.ServeHTTP(w, r.WithContext(oai.WithAccessRecord(r.Context(), ar)))
+	})
 	r := madDo(h, madReq{bearer: key.Plaintext(), tag: "ok"})
 	if r.Code != http.StatusOK || rec.count() != 1 {
 		t.Fatalf("valid key: %d %s", r.Code, r.Body.String())
@@ -398,9 +404,11 @@ func TestModelAuthSuccessAndRevoke_Integration(t *testing.T) {
 	if fmt.Sprint(e.usage.keys) != "["+k.ID+"]" {
 		t.Fatalf("Touch got %v, want [%s]", e.usage.keys, k.ID)
 	}
-	logs := e.logs.String()
-	if !strings.Contains(logs, "consumer_id="+c.ID) || !strings.Contains(logs, "model_key_id="+k.ID) {
-		t.Fatalf("no success line with consumer_id and model_key_id: %s", logs)
+	if ar.ConsumerID != c.ID || ar.ModelKeyID != k.ID || ar.TenantID != store.DefaultTenantID || ar.Reason != "" {
+		t.Fatalf("access record %+v, want consumer %s, key %s, tenant %s, no reason", ar, c.ID, k.ID, store.DefaultTenantID)
+	}
+	if logs := e.logs.String(); strings.Contains(logs, c.ID) || strings.Contains(logs, "accepted") {
+		t.Fatalf("the door logged the accepted request itself: %s", logs)
 	}
 	if !d.known.contains(key.Hash()) {
 		t.Fatal("the key is not known-good after a success")
@@ -409,10 +417,14 @@ func TestModelAuthSuccessAndRevoke_Integration(t *testing.T) {
 	if err := store.RevokeKey(ctx, e.seed, k.ID, store.ModelAccess{ServerAdmin: true}, e.stamp); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
+	*ar = oai.AccessRecord{}
 	r = madDo(h, madReq{bearer: key.Plaintext()})
 	t.Logf("next request after revoke: %d %s", r.Code, strings.TrimSpace(r.Body.String()))
 	if r.Code != http.StatusUnauthorized || rec.count() != 1 {
 		t.Fatalf("revoked key: %d, want 401", r.Code)
+	}
+	if ar.Reason != oai.CodeInvalidAPIKey || ar.ConsumerID != "" {
+		t.Fatalf("access record after the refusal %+v, want reason %s and no consumer", ar, oai.CodeInvalidAPIKey)
 	}
 	if d.known.contains(key.Hash()) {
 		t.Fatal("a key that failed its check stays exempt from the probe token")

@@ -16,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/httpx"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
 
@@ -88,6 +89,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateDispatchExternalOrder(c)...)
 	// V43 (A03-W17): dispatch.external_max_wait at most 45 s.
 	issues = append(issues, validateDispatchExternalMaxWait(c)...)
+	// V44 (W06-9): gateway.body_logging names a known body policy.
+	issues = append(issues, validateGatewayBodyLogging(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1232,6 +1235,30 @@ func validateDispatchExternalMaxWait(c *Config) []Issue {
 	return []Issue{{Field: "dispatch.external_max_wait", Severity: SeverityError,
 		Msg: fmt.Sprintf("external max wait %v must be <= %v: the stream commit grace ceiling %v minus the %v the header commit keeps above the wait budget",
 			w, dispatchExternalMaxWaitCeiling, gatewayCommitGraceCeiling, gatewayCommitDistance)}}
+}
+
+// validateGatewayBodyLogging is V44 (wave W06-9, design/06 §4.6, masterplan
+// K10): gateway.body_logging in the V42 shape — trim + lower IN PLACE, then
+// the name must be one of llmlog's policies (llmlog.BodyLoggingValid: config
+// validates against the consumer's vocabulary, never a second copy of it).
+// Empty reads as none and is written back as none, so the settings surface
+// and the boot record show the policy that is served. Fatal, not
+// warn-and-reset: a typo must not silently keep a policy the operator did
+// not choose — in either direction (bodies stored that were meant to stay
+// out, or missing that were meant to be there). Boot aborts, the settings
+// PUT is a 422.
+func validateGatewayBodyLogging(c *Config) []Issue {
+	c.Gateway.BodyLogging = strings.ToLower(strings.TrimSpace(c.Gateway.BodyLogging))
+	if c.Gateway.BodyLogging == "" {
+		c.Gateway.BodyLogging = llmlog.BodyLoggingNone
+		return nil
+	}
+	if llmlog.BodyLoggingValid(c.Gateway.BodyLogging) {
+		return nil
+	}
+	return []Issue{{Field: "gateway.body_logging", Severity: SeverityError,
+		Msg: fmt.Sprintf("body logging %q must be %q (no bodies), %q (bodies on error rows only) or %q (bodies on every row, 64 KiB each) — empty reads as %q",
+			c.Gateway.BodyLogging, llmlog.BodyLoggingNone, llmlog.BodyLoggingErrors, llmlog.BodyLoggingFull, llmlog.BodyLoggingNone)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

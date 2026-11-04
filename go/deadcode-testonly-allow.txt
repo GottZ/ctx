@@ -161,8 +161,24 @@ internal/goldset/sheet.go	ForbiddenSheetFields	# Nur draw_c34a_test.go:254: Kopi
 internal/graphcache/snapshot.go	sortedMembership	# Permanenter Vergleichsarm zu mapMembership (snapshot.go:383); nur export_test.go:91 für Bench und Arm-Gleichheit
 internal/graphcache/validate.go	checkOrdering	# Nur export_test.go:72 (CheckOrdering): CSR-Ordnungsinvariante gegen den unsortierten Fixture-Seam
 internal/graphcache/validate.go	checkRangeOrder	# Einziger Aufrufer ist checkOrdering (validate.go:103/108), das selbst nur über export_test.go:72 lebt
+internal/handler/gateway_access.go	GatewayAccessLog.Flush	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	GatewayAccessLog.Handler	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	GatewayAccessLog.Run	# wartet: W02-05 (Mount) — Flusher-Goroutine des Ablehnungs-Logfensters W06-9 (W06-12 kann sie mit dem Meter-Flusher zusammenlegen); Gate in handler/gateway_access_test.go
+internal/handler/gateway_access.go	GatewayAccessLog.flush	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	GatewayAccessLog.flushDue	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	GatewayAccessLog.reject	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	GatewayAccessLog.rejectionReason	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	NewGatewayAccessLog	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	accessWriter.Flush	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	accessWriter.FlushError	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	accessWriter.Unwrap	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	accessWriter.Write	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	accessWriter.WriteHeader	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	accessWriter.statusCode	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
+internal/handler/gateway_access.go	windowLabel	# wartet: W02-05 (Mount) — Zugriffslog der Modell-Gruppen W06-9, äußerste Stage von mountModelGroup; Gates in handler/gateway_access_test.go, cmd/ctxd model_group_access
 internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_gate_test.go:156 u. a.); Prod gated über enforceManageActionTier
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
+internal/handler/middleware.go	claimRequestLog	# wartet: W02-05 (Mount) — einziger Aufrufer GatewayAccessLog.Handler (W06-9): Logger schweigt für Requests, die die Modell-Gruppe selbst loggt
 internal/handler/model_auth.go	ModelAuth	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
 internal/handler/model_auth.go	ModelDoor.Handler	# wartet: W02-05 (Mount) — Modell-Key-Tür W01-6, unmontiert bis zur /v1-Gruppe (mountModelGroup); Gates in model_auth*_test.go
 internal/handler/model_auth.go	ModelDoor.Stats	# wartet: design/06 — Status-Exposition der Tür-Zähler (K-06-7); heute nur model_auth*_test.go
@@ -229,6 +245,13 @@ internal/llm/passthrough.go	sseRelay.result	# wartet: W02-07 — Gateway-Passthr
 internal/llm/passthrough.go	sseRelay.run	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llm/passthrough.go	windowAbove	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llm/passthrough.go	windowBound	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
+internal/llmlog/gateway.go	GatewayEntry	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
+internal/llmlog/gateway.go	GatewayOp	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
+internal/llmlog/gateway.go	RecordGateway	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
+internal/llmlog/gateway.go	RedactedErr.Error	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
+internal/llmlog/gateway.go	bodiesAllowed	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
+internal/llmlog/gateway.go	capBody	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
+internal/llmlog/gateway.go	redactedToken	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
 internal/modelalias/registry.go	Alias.offerable	# Helfer von Offers/Lookup: wartet: W01-9 oder W02-05, wer zuerst
@@ -241,6 +264,8 @@ internal/modelkey/modelkey.go	Key.LogValue	# Hint-Darstellung für slog (LogValu
 internal/modelkey/modelkey.go	Key.String	# Hint-Darstellung für fmt %v/%s und jeden Stringer-Verbraucher (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
 internal/modelkey/modelkey.go	Parse	# wartet: W02-05 — einziger Aufrufer ModelAuth (W01-6) bleibt bis zum Mount unmontiert
 internal/modelkey/modelkey.go	isBase62	# Helfer von Parse: wartet: W02-05
+internal/oai/access.go	AccessRecordFrom	# wartet: W02-05 (Mount) — Request-Halter des Zugriffslogs W06-9 (Stage legt an, Tür Stufe 8 füllt); unmontiert bis zur /v1-Gruppe
+internal/oai/access.go	WithAccessRecord	# wartet: W02-05 (Mount) — Request-Halter des Zugriffslogs W06-9 (Stage legt an, Tür Stufe 8 füllt); unmontiert bis zur /v1-Gruppe
 internal/oai/budget.go	Budget.InUse	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/budget.go	Budget.NewReservation	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/budget.go	Budget.tryAdd	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
