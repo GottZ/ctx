@@ -88,6 +88,10 @@ var (
 	// ErrRotationGraceOutOfRange: a rotation grace below 0 or above
 	// MaxRotationGrace.
 	ErrRotationGraceOutOfRange = errors.New("store: rotation grace out of range")
+	// ErrModelKeyExpiryInPast: a mint or rotation with an expiry that is
+	// already over — it would mint a dead key, and a rotation would fork the
+	// chain (the predecessor stays the youngest live key).
+	ErrModelKeyExpiryInPast = errors.New("store: model key expiry is in the past")
 )
 
 // ModelAccess binds a primitive to its caller: a tenant-admin reaches the
@@ -259,6 +263,9 @@ func CreateConsumerWithKey(ctx context.Context, pool *pgxpool.Pool, spec ModelCo
 	if strings.TrimSpace(spec.Label) == "" {
 		return ModelConsumer{}, ModelKeyInfo{}, modelkey.Key{}, errors.New("store: model consumer: label is required")
 	}
+	if expiryInPast(keyExpiresAt) {
+		return ModelConsumer{}, ModelKeyInfo{}, modelkey.Key{}, ErrModelKeyExpiryInPast
+	}
 	key, err := modelkey.Generate()
 	if err != nil {
 		return ModelConsumer{}, ModelKeyInfo{}, modelkey.Key{}, fmt.Errorf("store: model consumer: %w", err)
@@ -289,6 +296,14 @@ func CreateConsumerWithKey(ctx context.Context, pool *pgxpool.Pool, spec ModelCo
 		return ModelConsumer{}, ModelKeyInfo{}, modelkey.Key{}, err
 	}
 	return c, k, key, nil
+}
+
+// expiryInPast reports an expiry that is set and already over (the
+// process clock; the database judges liveness by its own now(), so a value a
+// few milliseconds ahead can still be dead on arrival — the caller resolves
+// expiries in hours, W01-5).
+func expiryInPast(at *time.Time) bool {
+	return at != nil && !at.After(time.Now())
 }
 
 // lockTenantRow locks the tenant row FOR UPDATE — the one serialisation point
@@ -428,6 +443,9 @@ func RotateKey(ctx context.Context, pool *pgxpool.Pool, consumerID string, acces
 
 	if grace < 0 || grace > MaxRotationGrace {
 		return ModelKeyInfo{}, modelkey.Key{}, ErrRotationGraceOutOfRange
+	}
+	if expiryInPast(expiresAt) {
+		return ModelKeyInfo{}, modelkey.Key{}, ErrModelKeyExpiryInPast
 	}
 	key, err := modelkey.Generate()
 	if err != nil {
@@ -876,9 +894,9 @@ func TenantConsumerIDs(ctx context.Context, pool *pgxpool.Pool, tenantID string)
 	return ids, nil
 }
 
-// usageExecer is the handle the usage flush writes through: a pool.
-type usageExecer interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+// usageQuerier is the handle the usage flush writes through: a pool.
+type usageQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // ModelKeyUsage batches the last_used_at stamp of model keys (design/01 §4.2):
@@ -888,7 +906,7 @@ type usageExecer interface {
 // writes no audit row. Safe for concurrent use; create it with
 // NewModelKeyUsage (the zero value has no handle and no map).
 type ModelKeyUsage struct {
-	db       usageExecer
+	db       usageQuerier
 	now      func() time.Time
 	interval time.Duration
 
@@ -920,8 +938,18 @@ func (u *ModelKeyUsage) Touch(keyID string) {
 
 // Flush writes the pending stamps in one statement. The predicate keeps
 // last_used_at monotonic: a stamp older than the stored one changes nothing,
-// whatever order flushes of several processes land in. On failure the batch
-// is merged back (the later time wins), so the next flush retries it.
+// whatever order flushes of several processes land in.
+//
+// The flush never waits on a row lock: it locks the rows it writes FOR UPDATE
+// SKIP LOCKED and leaves every key another transaction holds. The consumer
+// writers (rotation, deactivation trigger, prune step 7b) lock a consumer's
+// keys in heap or index order, a flush over an id array in array order; a
+// waiting flush could close a cycle with any of them (40P01 — and the victim
+// may be the prune, after its steps 1–6 ran). A key it skipped (locked, still
+// present, stamp still newer) is returned by the same statement and kept for
+// the next flush; a deleted key or an older stamp is dropped. On failure the
+// whole batch is merged back (the later time wins), so the next flush retries
+// it.
 func (u *ModelKeyUsage) Flush(ctx context.Context) error {
 	u.mu.Lock()
 	batch := u.pending
@@ -940,21 +968,56 @@ func (u *ModelKeyUsage) Flush(ctx context.Context) error {
 	for i, id := range ids {
 		keys[i], stamps[i] = id.String(), batch[id]
 	}
-	if _, err := u.db.Exec(ctx,
-		`UPDATE context_model_keys k SET last_used_at = v.ts
-		   FROM unnest($1::uuid[], $2::timestamptz[]) AS v(id, ts)
-		  WHERE k.id = v.id AND (k.last_used_at IS NULL OR k.last_used_at < v.ts)`,
-		keys, stamps); err != nil {
-		u.mu.Lock()
-		for id, at := range batch {
-			if prev, ok := u.pending[id]; !ok || at.After(prev) {
-				u.pending[id] = at
-			}
-		}
-		u.mu.Unlock()
+	// The final SELECT reads the statement's snapshot (a data-modifying CTE's
+	// effect is invisible to it): keys that exist with an older stamp and were
+	// not written — the skipped ones.
+	rows, err := u.db.Query(ctx,
+		`WITH v AS (SELECT * FROM unnest($1::uuid[], $2::timestamptz[]) AS v(id, ts)),
+		      l AS (SELECT k.id, v.ts FROM context_model_keys k JOIN v ON v.id = k.id
+		             WHERE k.last_used_at IS NULL OR k.last_used_at < v.ts
+		             ORDER BY k.id
+		               FOR UPDATE OF k SKIP LOCKED),
+		      w AS (UPDATE context_model_keys k SET last_used_at = l.ts FROM l
+		             WHERE k.id = l.id RETURNING k.id)
+		 SELECT v.id::text FROM v JOIN context_model_keys k ON k.id = v.id
+		  WHERE (k.last_used_at IS NULL OR k.last_used_at < v.ts)
+		    AND NOT EXISTS (SELECT 1 FROM w WHERE w.id = v.id)`,
+		keys, stamps)
+	var skipped []string
+	if err == nil {
+		skipped, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	}
+	if err != nil {
+		u.retain(batch, nil)
 		return fmt.Errorf("model_keys: usage flush: %w", err)
 	}
+	u.retain(batch, skipped)
 	return nil
+}
+
+// retain merges stamps of batch back into the pending set, the later time
+// winning: every one when only is nil (a failed flush), else those of the
+// listed key ids (the ones a flush skipped).
+func (u *ModelKeyUsage) retain(batch map[uuid.UUID]time.Time, only []string) {
+	keep := batch
+	if only != nil {
+		keep = make(map[uuid.UUID]time.Time, len(only))
+		for _, s := range only {
+			if id, err := uuid.Parse(s); err == nil {
+				keep[id] = batch[id]
+			}
+		}
+	}
+	if len(keep) == 0 {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for id, at := range keep {
+		if prev, ok := u.pending[id]; !ok || at.After(prev) {
+			u.pending[id] = at
+		}
+	}
 }
 
 // Run flushes every ModelKeyUsageFlushInterval until ctx ends, then once more

@@ -784,7 +784,7 @@ func TestUsageFlushNoLockWait(t *testing.T) {
 		sqls, durs := tr.snapshot()
 		updates := 0
 		for _, s := range sqls {
-			if strings.HasPrefix(strings.TrimSpace(s), "UPDATE context_model_keys") {
+			if strings.Contains(s, "UPDATE context_model_keys") {
 				updates++
 			}
 		}
@@ -853,9 +853,41 @@ func TestUsageFlushNoLockWait(t *testing.T) {
 		}
 	})
 
+	// A touch that lands while a flush runs must survive the flush's
+	// merge-back whether the flush fails (its context is cancelled the moment
+	// the statement starts) or skips the key (held by another transaction,
+	// next subtest): the later time wins.
 	t.Run("touch_during_a_failed_flush_survives", func(t *testing.T) {
-		// The flush statement waits behind a row lock and times out; a newer
-		// touch lands while it runs. The merge-back must keep the newer time.
+		older := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+		newer := older.Add(time.Hour)
+		var clock atomic.Value
+		clock.Store(older)
+		var u *store.ModelKeyUsage
+		flushCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		hook := &mkHookTracer{onStart: func(sql string) {
+			if strings.Contains(sql, "UPDATE context_model_keys k SET last_used_at") {
+				clock.Store(newer)
+				u.Touch(k.ID)
+				cancel()
+			}
+		}}
+		u = store.NewModelKeyUsage(mkTracedPool(t, e.pool, hook))
+		store.SetModelKeyUsageClockForTest(u, func() time.Time { return clock.Load().(time.Time) })
+		u.Touch(k.ID)
+		if err := u.Flush(flushCtx); err == nil {
+			t.Fatalf("flush on a context cancelled at its statement succeeded")
+		}
+		hook.onStart = nil
+		if err := u.Flush(ctx); err != nil {
+			t.Fatalf("retry Flush: %v", err)
+		}
+		if got := lastUsed(); got == nil || !got.Equal(newer) {
+			t.Errorf("after the retry: last_used_at %v, want the touch that landed during the failed flush (%v)", got, newer)
+		}
+	})
+
+	t.Run("touch_during_a_skipping_flush_survives", func(t *testing.T) {
 		hold, err := e.pool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
@@ -864,13 +896,20 @@ func TestUsageFlushNoLockWait(t *testing.T) {
 		if _, err := hold.Exec(ctx, `SELECT 1 FROM context_model_keys WHERE id = $1::uuid FOR UPDATE`, k.ID); err != nil {
 			t.Fatalf("hold the key row: %v", err)
 		}
-		older := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+		released := make(chan struct{})
+		go func() {
+			// Release the row once the skipping flush is done (the retry
+			// inside newerTouchSurvives must reach it).
+			<-released
+			_ = hold.Rollback(ctx)
+		}()
+		older := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 		newer := older.Add(time.Hour)
 		var clock atomic.Value
 		clock.Store(older)
 		var u *store.ModelKeyUsage
 		hook := &mkHookTracer{onStart: func(sql string) {
-			if strings.HasPrefix(strings.TrimSpace(sql), "UPDATE context_model_keys k SET last_used_at") {
+			if strings.Contains(sql, "UPDATE context_model_keys k SET last_used_at") {
 				clock.Store(newer)
 				u.Touch(k.ID)
 			}
@@ -878,21 +917,29 @@ func TestUsageFlushNoLockWait(t *testing.T) {
 		u = store.NewModelKeyUsage(mkTracedPool(t, e.pool, hook))
 		store.SetModelKeyUsageClockForTest(u, func() time.Time { return clock.Load().(time.Time) })
 		u.Touch(k.ID)
-		short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
-		ferr := u.Flush(short)
-		cancel()
-		if ferr == nil {
-			t.Fatalf("flush behind a held row lock succeeded")
-		}
-		if err := hold.Rollback(ctx); err != nil {
-			t.Fatalf("release: %v", err)
-		}
-		hook.onStart = nil
 		if err := u.Flush(ctx); err != nil {
-			t.Fatalf("retry Flush: %v", err)
+			t.Fatalf("flush skipping a held key: %v", err)
 		}
-		if got := lastUsed(); got == nil || !got.Equal(newer) {
-			t.Errorf("after the retry: last_used_at %v, want the touch that landed during the failed flush (%v)", got, newer)
+		if got := lastUsed(); got != nil && !got.Before(older) {
+			t.Fatalf("the held key was written (%v) — the flush did not skip it", got)
+		}
+		close(released)
+		hook.onStart = nil
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if err := u.Flush(ctx); err != nil {
+				t.Fatalf("retry Flush: %v", err)
+			}
+			if got := lastUsed(); got != nil && !got.Before(older) {
+				if !got.Equal(newer) {
+					t.Errorf("after the retry: last_used_at %v, want the touch that landed during the flush (%v)", got, newer)
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the skipped stamp never reached the key")
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	})
 
