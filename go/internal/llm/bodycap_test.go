@@ -37,6 +37,22 @@ func (c *cycle) Read(p []byte) (int, error) {
 
 const okFrame = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
 
+// chatCapTimeout is the Chat deadline for the body-cap proofs. It is a safety
+// net only — the proof is ErrResponseTooLarge, and a decoded result fails the
+// test at any deadline — so it follows the test binary's own deadline (minus a
+// margin for the report, never beyond it) instead of a fixed 30 s: decoding
+// 16 MiB on three wires under -race took 24 s at host load 2 and all three
+// wires ran into a 30 s deadline at an elevenfold core contention (host load
+// ≥ 55 in the wave builds), which the fixed value reported as a cap failure.
+// Without a binary deadline (-timeout 0) the net is 10 min.
+func chatCapTimeout(t *testing.T) time.Duration {
+	t.Helper()
+	if dl, ok := t.Deadline(); ok {
+		return max(time.Until(dl)-10*time.Second, time.Second)
+	}
+	return 10 * time.Minute
+}
+
 // TestChatBodyCap (GHSA 2026-10-31 §3): a chat answer over MaxResponseBytes
 // is ErrResponseTooLarge — on the openai, ollama and anthropic wires — and
 // not a decoded result. The body is valid JSON, so without the cap it would
@@ -60,7 +76,7 @@ func TestChatBodyCap(t *testing.T) {
 
 	for _, p := range []backends.Protocol{backends.ProtocolOpenAI, backends.ProtocolOllama, backends.ProtocolAnthropic} {
 		b := backends.Backend{Host: srv.URL, Protocol: p, Model: "m", APIKey: "k"}
-		_, err := Chat(context.Background(), b, "s", "u", Options{}, 30*time.Second)
+		_, err := Chat(context.Background(), b, "s", "u", Options{}, chatCapTimeout(t))
 		if !errors.Is(err, httpx.ErrResponseTooLarge) {
 			t.Errorf("%s: err = %v, want ErrResponseTooLarge", p, err)
 		}
