@@ -108,7 +108,8 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		// W02-02: the gateway group's sizes and durations carry fatal floors
 		// (V38/V39) — taken whole like Status. Not wire-active: nothing mounts
 		// the gateway in these tests.
-		Gateway: config.Defaults().Gateway,
+		Gateway:    config.Defaults().Gateway,
+		Federation: config.Defaults().Federation, // F-W8: V43 range
 		Query: config.QueryConfig{
 			ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: "v5.2",
 		},

@@ -222,6 +222,24 @@ The response echoes `previous` and the new effective value; the write is hot (a 
 
 `GET /api/llmlog/{id}` reports `body_state` from the **row**, not from the sensitivity class, so an unsealed row renders as what it is. `required_sensitivity` stays on the card in every state.
 
+## `federation.max_depth` and the model-API ingress assert
+
+**`federation.max_depth`** (settings-only, `int`, default **3**, `hot`, global-only, parse-strict): the longest incoming `Ctx-Hop` chain this instance serves. A request whose chain already holds that many entries is refused with `508 federation_depth` (`Ctx-Reason: depth`) on every authenticated group with model egress (`/api`, `/mcp`, and `/v1`, `/v2` once mounted) — this instance would be hop *n + 1*. The value is read per request, so a write applies to the next one:
+
+```bash
+curl -sS -X PUT https://<host>/api/settings/federation.max_depth \
+  -H "Authorization: Bearer $CTX_KEY" -H 'Content-Type: application/json' -d '{"value":4}'
+```
+
+Boot and write validation (V45): `1 ≤ max_depth ≤ 16` — `0` would refuse every request, and a value above the `Ctx-Hop` parse limit of 16 entries could never be reached (a longer chain is a `400` first). A settings write outside the range is a `422`; a row written by `psql` replaces the key's one row and is then dropped with a WARN, so the registry default `3` applies (not the value the row replaced). The boot record shows it as `federation: max_depth=3`. Raise it only for a deliberate chain of instances (B → A → C → …): every hop adds its latency and holds a request slot on each instance it passes.
+
+**The ingress assert.** `gateway.enabled` turns the model API on, and the model API only exists with its federation loop guard in front of it ([security](security.md#federation-loop-guard-ingress)). A build whose router mounts no model group — every build up to the one that mounts `/v1` — therefore refuses the flag:
+
+- `PUT /api/settings/gateway.enabled {"value":true}`, and a `DELETE` of a `false` override that would fall back to `CTX_GATEWAY_ENABLED=true`, answer `409` "the model API cannot be enabled before its federation ingress is mounted", and no row is written. Turning it off is always allowed.
+- The boot refuses an effective `true` from either layer: `gateway: refusing to start` with `gateway.enabled is true (source: env|settings) but no model group with its federation LoopGuard is mounted …`, exit code 1. **Remedy** — the settings API is not reachable while the boot refuses, and an env value does not beat a settings row, so it depends on the source the message names: `env` ⇒ unset `CTX_GATEWAY_ENABLED` or set it to `false`; `settings` ⇒ remove the row with `psql` (`DELETE FROM context_settings WHERE key = 'gateway.enabled';`), or start once with `CTX_SETTINGS_DISABLE=1` (override layer off), `DELETE /api/settings/gateway.enabled`, and restart without the switch. Either way a build that mounts `/v1` boots with the flag on. A `psql` write of `true` is not refused at write time; this assert catches it at the next start.
+- **Upgrade note.** Up to 5.31 `PUT /api/settings/gateway.enabled {"value":true}` was accepted (nothing was mounted, so it changed nothing). An install that stored that row does not boot after this release until the row is removed as above. Check before the upgrade: `SELECT scope, value FROM context_settings WHERE key = 'gateway.enabled';`.
+- The same flag gates the model-consumer self-service (`gateway.tenant_self_service` takes effect only while `gateway.enabled` is on), so that stays closed too until a build mounts `/v1`.
+
 ## Backups & disaster recovery
 
 `backup.sh` archives only the pg_dumps — the sealed-secret ciphertexts are in every dump, the master key (`CTX_SECRETS_KEY`) is in **none**, by design. Disaster recovery needs both the dump and the separately-stored master key. See [security](security.md#sealed-secrets--break-glass) for master-key setup, rotation and break-glass extraction.

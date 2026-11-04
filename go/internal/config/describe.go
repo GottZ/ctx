@@ -16,7 +16,7 @@ type KeyInfo struct {
 	Type       string // typeName() — drives the UI widget choice
 	Mutability string // hot | restart | coupled | coupled:embed-cache
 	Sensitive  bool   // secret-class field: values are masked everywhere
-	Guard      string // "" | "sensitivity-downgrade": lowering needs a confirm flag (F3 §3.5)
+	Guard      string // "" | "sensitivity-downgrade": lowering needs a confirm flag (F3 §3.5) | GuardFederationIngress: turning it on needs the registered federation ingress (F-W8)
 	Tenancy    string // tenant-overridable | global-only (MT3-W2): the settings UI hides per-tenant editing on global-only keys
 	Default    any    // registry default, rendered like RenderValue
 	Desc       string // one-line operator description (keyDescriptions) — UI hint + search corpus

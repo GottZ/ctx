@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/promptguard"
@@ -91,6 +92,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateDispatchExternalMaxWait(c)...)
 	// V44 (W06-9): gateway.body_logging names a known body policy.
 	issues = append(issues, validateGatewayBodyLogging(c)...)
+	// V45 (F-W8): federation.max_depth in 1..fedhop.MaxHopEntries.
+	issues = append(issues, validateFederation(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1259,6 +1262,25 @@ func validateGatewayBodyLogging(c *Config) []Issue {
 	return []Issue{{Field: "gateway.body_logging", Severity: SeverityError,
 		Msg: fmt.Sprintf("body logging %q must be %q (no bodies), %q (bodies on error rows only) or %q (bodies on every row, 64 KiB each) — empty reads as %q",
 			c.Gateway.BodyLogging, llmlog.BodyLoggingNone, llmlog.BodyLoggingErrors, llmlog.BodyLoggingFull, llmlog.BodyLoggingNone)}}
+}
+
+// validateFederation is V45 (wave F-W8, design/04 §3.1): federation.max_depth
+// must lie in 1..fedhop.MaxHopEntries. Negative values stay with V35 (one
+// issue per field). 0 would refuse every request — a chain of length 0 is
+// already "≥ 0" — and a value above MaxHopEntries can never be reached:
+// ParseInbound refuses a longer Ctx-Hop with 400 first, so the setting would
+// show a limit nobody enforces. Fatal like V42: the key is settings-only, so
+// a settings PUT answers 422, and a psql-written row (which replaces the one
+// row of the key) is dropped by the reload with a WARN — Build's override
+// tolerance falls back to the registry default 3, never to an invalid limit.
+func validateFederation(c *Config) []Issue {
+	d := c.Federation.MaxDepth
+	if d < 0 || (d >= 1 && d <= fedhop.MaxHopEntries) {
+		return nil
+	}
+	return []Issue{{Field: "federation.max_depth", Severity: SeverityError,
+		Msg: fmt.Sprintf("federation.max_depth (%d) must be between 1 and %d (the Ctx-Hop parse limit) — 0 refuses every request, a larger value is never reached",
+			d, fedhop.MaxHopEntries)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

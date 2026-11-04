@@ -23,7 +23,7 @@ type entry struct {
 	// no third value — buildEntry rejects anything else, because entry has
 	// nowhere to put it (parsetag_test.go pins both halves).
 	Strict  bool   // parse:"strict" — malformed value is a boot abort
-	Guard   string // "" | "sensitivity-downgrade" — lowering needs a confirm flag (F3 §3.5)
+	Guard   string // "" | "sensitivity-downgrade" — lowering needs a confirm flag (F3 §3.5) | "federation-ingress" (bool) — turning it on needs the registered federation ingress (F-W8)
 	Tenancy string // tenant-overridable | global-only — MT3-W2: may a tenant override this key on top of _global?
 
 	defRaw string       // raw default tag value
@@ -152,6 +152,14 @@ func buildRegistry(root reflect.Type) ([]entry, error) {
 	return out, nil
 }
 
+// GuardFederationIngress is the guard of a bool key that switches the model
+// API on (gateway.enabled; wave F-W8, design/04 §4.6, §7.2 no. 1): a
+// settings write that would make it true — PUT true, or a DELETE that falls
+// back to a true env value — is a 409 while the router's federation ingress
+// is not registered (handler/settings.go), and the boot refuses an effective
+// true without it (cmd/ctxd gatewayIngressAssert).
+const GuardFederationIngress = "federation-ingress"
+
 func buildEntry(owner string, f reflect.StructField, key string, path []int) (entry, error) {
 	loc := fmt.Sprintf("%s.%s (%s)", owner, f.Name, key)
 
@@ -181,8 +189,11 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 		return entry{}, fmt.Errorf("%s: invalid parse tag %q", loc, parse)
 	}
 	guard := f.Tag.Get("guard")
-	if guard != "" && guard != "sensitivity-downgrade" {
+	if guard != "" && guard != "sensitivity-downgrade" && guard != GuardFederationIngress {
 		return entry{}, fmt.Errorf("%s: invalid guard tag %q", loc, guard)
+	}
+	if guard == GuardFederationIngress && f.Type != typBool {
+		return entry{}, fmt.Errorf("%s: guard %q needs a bool field, not %s", loc, guard, f.Type)
 	}
 
 	e := entry{

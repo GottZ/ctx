@@ -288,4 +288,6 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.consumer_list_max_limit":  "Upper bound on the limit of one model-consumer-list or model-key-history page, and the page size when the request names none; at least 1",
 	"gateway.consumer_chain_max":       "Most keys of a consumer's chain one model-consumer-get returns (newest first; keys_truncated marks the rest); at least 1",
 	"gateway.consumer_audit_trail_max": "Most audit rows one model-consumer-get returns for a consumer and its keys (newest first); at least 1",
+	// F-W8 (design/04 §3.1, §4.6): the federation depth limit.
+	"federation.max_depth": "Longest incoming Ctx-Hop chain this instance serves: a request whose chain already holds this many entries is refused with a loop-detected federation_depth error; at least 1, at most the Ctx-Hop parse limit",
 }

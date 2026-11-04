@@ -35,8 +35,9 @@
 # Eine spätere Welle, die eines dieser Symbole schneidet, nimmt seine Zeile hier
 # im selben Commit mit.
 cmd/ctxd/gateway.go	gatewaySettingsGetter	# wartet: W02-05 (Mount über mountModelGroup, W01-6) — Getter des Gateways für EnabledGate und ModelAuth, montiert erst mit der /v1-Gruppe; heute nur gateway_test.go
-cmd/ctxd/model_group.go	mountModelGroup	# wartet: W02-05 (Mount) — /v1-Gruppe EnabledGate → ModelAuth → Handler (K23, W01-6), /v2 mit W02-10; v1door läuft im Mount-PR
+cmd/ctxd/model_group.go	mountModelGroup	# wartet: W02-05 (Mount) — /v1-Gruppe EnabledGate → ModelAuth → LoopGuard → Handler (K23, W01-6), /v2 mit W02-10; v1door läuft im Mount-PR
 cmd/ctxd/overviewworker_priority_linux.go	ioprioGet	# Prod setzt nur (IOPRIO_SET); die Rücklese-Hälfte der Prioritätsprobe, priority_linux_test.go:164/167
+cmd/ctxd/server.go	NewRouter	# Test-Fassade: Prod baut den Router über newRouter (main.go, F-W8: Router + Ingress-Registrierung für den Boot-Assert); die cmd/ctxd-Integrationstests bauen den Produktions-Router hierüber
 internal/armsweep/report.go	ReadReportBody	# Schreib-Hälfte WriteReport ist prod; den Leser braucht nur das Determinismus-Gate, 7x in 4 *_test.go
 internal/auth/consumer.go	AuthenticateModelKey	# wartet: W02-05 (Mount) — einziger Aufrufer ModelAuth (W01-6) bleibt bis zum Mount unmontiert
 internal/auth/consumer.go	ReauthenticateModelKey	# wartet: W02-08 — Re-Check des Stream-Watchers über handler.ReauthConsumer (K22); entfällt mit W01-8
@@ -126,33 +127,15 @@ internal/evalscore/diversity.go	rankedAlphaDCG	# Nur Aufrufer AlphaNDCG:113, das
 internal/evalscore/diversity.go	serveFacets	# Nur über rankedAlphaDCG:173/idealAlphaDCG:207 unter AlphaNDCG — kein eigener Testaufrufer
 internal/events/distill_block.go	distillShardOrdinal	# Prod nutzt die Basis-Form distillShardOrdinalFrom (:1742, W-L1 #6); den Wrapper nur 5 Tests
 internal/events/scheduler.go	Scheduler.backgroundTenantScopes	# Live-Pipeline liest backgroundTenantsFn direkt; Projektion nur für tenant_iteration_integration_test.go
-internal/fedhop/grammar.go	DuplicateEntryError.Error	# wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop) — Fehlertyp 508
-internal/fedhop/grammar.go	Inbound.LoopFor	# wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	InvalidHeaderError.Error	# wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop) — Fehlertyp 400
-internal/fedhop/grammar.go	ParseInbound	# wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	Reason.known	# Helfer von SetReason/ReasonFrom: wartet: F-W10 (StatusError.CtxReason auf B; SetReason in den Fehler-Writern auf A, 02/03)
 internal/fedhop/grammar.go	ReasonFrom	# wartet: F-W10 (StatusError.CtxReason auf B; SetReason in den Fehler-Writern auf A, 02/03)
-internal/fedhop/grammar.go	SetReason	# wartet: F-W10 (StatusError.CtxReason auf B; SetReason in den Fehler-Writern auf A, 02/03)
-internal/fedhop/grammar.go	checkCanonicalKeys	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	hasDuplicate	# Helfer von ParseInbound/LoopFor: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	invalid	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	parseClass	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	parseEgress	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	parseEmbedSpaceRequire	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	parseList	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	parseMaxWait	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	parseMillis	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	parsePipeline	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
-internal/fedhop/grammar.go	parseSensitivity	# Helfer von ParseInbound: wartet: F-W8 (LoopGuard: ParseInbound/LoopFor ⇒ 400 federation_header_invalid / 508 federation_loop)
 internal/fedhop/merge.go	ClassVocabulary	# Vokabular-Pin: einziger Leser ist internal/dispatch/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb); A03-W3/A03-W9 ergänzen dort
 internal/fedhop/merge.go	SensitivityVocabulary	# Vokabular-Pin: einziger Leser ist internal/backends/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb)
 internal/fedhop/observe.go	WithObserver	# wartet: F-W11 (zwei Router, zwei Pools im Test)
 internal/fedhop/stamp.go	CounterSnapshot	# wartet: W06-16 (Status-Sektion federation: federation_stamp_without_identity, federation_header_ignored)
-internal/fedhop/stamp.go	IngressRegistered	# wartet: F-W8 (Stub false bis LoopGuard/PeerIngress registriert; Boot-/Settings-Assert §4.6)
+internal/fedhop/stamp.go	Ingress.MarkLoopGuard	# wartet: W02-05 (Mount /v1 über mountModelGroup markiert die Ingress-Registrierung des Routers, F-W8); heute nur model_group*_test.go
 internal/fedhop/stamp.go	SetPeerMaxWait	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Settings federation.peer_max_wait_* im Reload
 internal/fedhop/stamp.go	WireTimeout	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Sites client.go/stream.go/rerank.go
 internal/fedhop/stamp.go	WithCall	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Admission.Acquire, ChainCall.Do
-internal/fedhop/stamp.go	WithInbound	# wartet: F-W8/F-W9 (LoopGuard/PeerIngress legen die eingehende Kette in den ctx)
 internal/fedhop/stamp.go	WithRequestID	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — RequestID-Middleware (K28)
 internal/goldset/generate_slices.go	AcceptGeneratedQuery	# Nur slices_test.go:19/41/55: bool-Fassade über InspectGeneratedQuery, das cmd/ctx-goldset/slices.go:72 ruft
 internal/goldset/judge.go	JudgeGates	# Nur judge_test.go:421: Kopie-Getter auf judgeGates; Prod liest die Var direkt (judge.go:666, calibrate.go:453)
@@ -271,15 +254,12 @@ internal/oai/budget.go	Reservation.Grow	# wartet: W01-6/W02-05 — In-flight-Bud
 internal/oai/budget.go	Reservation.Release	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/budget.go	ReservationFrom	# wartet: W01-6/W02-05 — Antwort-Reserve der Handler (W02-07ff.) (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/budget.go	budgetedBody.Read	# wartet: W01-6/W02-05 — In-flight-Budget Stufe 5, chunked (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
-internal/oai/errors.go	Codes	# wartet: erster Produktionsleser — Totalitäts-Referenz für backends.Classify (Kopie des Code-Vokabulars, FR2-7), gelesen von internal/oai TestClassifierTotality (W02-11 gelandet); heute nur internal/oai-Tests
 internal/oai/errors.go	MethodNotAllowed	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/errors.go	NotFound	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
-internal/oai/errors.go	Write	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/errors.go	WriteInternal	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/errors.go	WriteInvalidAPIKey	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer, 401 der ModelAuth-Tür (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/errors.go	WriteOverloaded	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/errors.go	WriteRequestTooLarge	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer, 413 der Stufe 3 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
-internal/oai/errors.go	nullable	# wartet: W01-6/W02-05 — OpenAI-Fehler-Writer (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/gates.go	EnabledGate	# wartet: W01-6/W02-05 — Stufe 1 vor Auth (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/gates.go	Recover	# wartet: W01-6/W02-05 — /v1-Recovery R-02-14 (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests
 internal/oai/gates.go	abortCommitted	# wartet: W01-6/W02-05 — /v1-Recovery R-02-14, Abbruch nach Commit (W02-02 baut, Montage ohne Route/Mount ist Tabu); heute nur internal/oai-Tests

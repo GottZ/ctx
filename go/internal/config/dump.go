@@ -170,6 +170,9 @@ var dumpGroupOrder = []string{
 	// the external order, the cap ladders, the reaper clocks — are visible
 	// in the boot record, never a silent recalibration.
 	"dispatch",
+	// F-W8 (design/04 §3.1): the federation limits — the depth a peer chain
+	// may reach is the first question when a peer is refused with 508.
+	"federation",
 }
 
 // BootDumpArgs renders the effective config + issues as slog args for the

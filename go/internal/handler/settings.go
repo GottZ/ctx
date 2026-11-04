@@ -29,6 +29,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/go-chi/chi/v5"
@@ -52,6 +53,11 @@ type SettingsHandler struct {
 	// reload is settings.Reload bound to (pool, cfg) — a function field so
 	// unit tests can observe/stub the post-commit reload without a DB.
 	reload func(r *http.Request) error
+	// ingress is the federation-ingress registration of the router this
+	// handler serves (F-W8, design/04 §4.6): a write that would turn a
+	// guard:"federation-ingress" key on is a 409 while it is not registered.
+	// nil reads as never registered (fail-closed).
+	ingress *fedhop.Ingress
 }
 
 // NewSettingsHandler creates a new SettingsHandler.
@@ -62,6 +68,18 @@ func NewSettingsHandler(pool *pgxpool.Pool, cfg *config.Store) *SettingsHandler 
 	}
 	return h
 }
+
+// WithIngress binds h to the federation-ingress registration of the router
+// it is mounted on (server.go passes the router's own). Without it, turning
+// gateway.enabled on is refused.
+func (h *SettingsHandler) WithIngress(in *fedhop.Ingress) *SettingsHandler {
+	h.ingress = in
+	return h
+}
+
+// ingressMissingText is the 409 of a write that would turn the model API on
+// before its federation ingress is mounted (design/04 §7.2 no. 1).
+const ingressMissingText = "the model API cannot be enabled before its federation ingress is mounted"
 
 // MountSettings mounts the /api/settings routes behind RequireAdminOrTenantAdmin
 // (03-W5): a tenant-admin manages its OWN tenant scope, an operator manages
@@ -268,6 +286,14 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 			"success": false, "error": fmt.Sprintf("validation: %s must be true or false", key)})
 		return
 	}
+	// /v1 only with its ingress protection (F-W8, design/04 §7.2 no. 1):
+	// before any database work, so a refused write leaves no row. Turning it
+	// off stays free.
+	if info.Guard == config.GuardFederationIngress && raw == "true" && !h.ingress.Registered() {
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false,
+			"error": fmt.Sprintf("%s: %s — the router serves no model group with the LoopGuard in front of it", key, ingressMissingText)})
+		return
+	}
 	// Two-write-worlds scope resolution (§4.1a/§4.5): the write targets mutationScope
 	// (operator → _global, tenant-admin → own scope), the candidate validates the
 	// effective readScopes view, and secret_refs resolve at the write scope with
@@ -391,7 +417,22 @@ func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found, err := h.deleteSetting(r, key, mutationScope(AuthResultFromContext(r.Context())))
+	ws := mutationScope(AuthResultFromContext(r.Context()))
+	// Removing the _global override falls back to the env/default value: for
+	// a guard:"federation-ingress" key that is "on" when CTX_GATEWAY_ENABLED
+	// says so, which is the same as a PUT true (F-W8). A tenant scope never
+	// holds a row of the global-only key, its delete changes nothing.
+	if info.Guard == config.GuardFederationIngress && ws == store.GlobalScope && !h.ingress.Registered() {
+		if base, _ := config.FromEnv(); base != nil {
+			if v, ok := config.RenderValue(base, key); ok && v == true {
+				writeJSON(w, http.StatusConflict, map[string]any{"success": false,
+					"error": fmt.Sprintf("%s: %s — removing the override would turn it on from the environment", key, ingressMissingText)})
+				return
+			}
+		}
+	}
+
+	found, err := h.deleteSetting(r, key, ws)
 	if err != nil {
 		internalError(w, r.Context(), "settings: delete failed", err)
 		return

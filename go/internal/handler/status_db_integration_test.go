@@ -445,7 +445,8 @@ func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 		Status: config.Defaults().Status,
 		// W02-02: the gateway group's sizes and durations carry fatal floors
 		// (V38/V39) — same class, taken whole from the registry.
-		Gateway: config.Defaults().Gateway,
+		Gateway:    config.Defaults().Gateway,
+		Federation: config.Defaults().Federation, // F-W8: V43 range
 	}
 }
 
