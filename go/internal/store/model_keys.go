@@ -110,7 +110,9 @@ func (a ModelAccess) args() (bool, *string) {
 // ModelConsumer is a consumer as the store reads it — never a key secret.
 // LastUsedAt, Keys and KeysTotal are filled by ListConsumers and GetConsumer
 // only: Keys holds the live keys (at most two, I-K2), KeysTotal counts the
-// whole chain.
+// whole chain. Models — the alias ids of its grants (migration 164), sorted —
+// is filled by ListConsumers, GetConsumer, CreateConsumerWithKey and
+// UpdateConsumer(Checked), including the consumer the check sees.
 type ModelConsumer struct {
 	ID                string
 	TenantID          string
@@ -119,6 +121,7 @@ type ModelConsumer struct {
 	Kind              string
 	TenantScope       *string
 	AllModels         bool
+	Models            []string
 	PromptSensitivity string
 	FairWeight        int16
 	AdmissionLane     string
@@ -159,9 +162,11 @@ type ModelKeyInfo struct {
 // ModelConsumerSpec is a new consumer. A zero Kind, PromptSensitivity,
 // FairWeight or AdmissionLane takes the column default of migration 161
 // ('app', 'credentials', 1, 'bulk' — the fail-closed values); nil
-// TenantScope means _global backends only, nil AllowedCIDRs any source. The
-// handler validates field tiers and the tenant's ownership of TenantScope
-// before it calls; the database CHECKs are the backstop.
+// TenantScope means _global backends only, nil AllowedCIDRs any source.
+// Models are the alias ids to grant (SetConsumerGrants; nil = none). The
+// handler validates field tiers, the tenant's ownership of TenantScope and
+// that the scope is offered every model before it calls; the database CHECKs
+// and foreign keys are the backstop.
 type ModelConsumerSpec struct {
 	TenantID          string
 	Label             string
@@ -169,6 +174,7 @@ type ModelConsumerSpec struct {
 	Kind              string
 	TenantScope       *string
 	AllModels         bool
+	Models            []string
 	PromptSensitivity string
 	FairWeight        int16
 	AdmissionLane     string
@@ -180,14 +186,17 @@ type ModelConsumerSpec struct {
 // stays unchanged. ClearTenantScope / ClearAllowedCIDRs write NULL (the field
 // beside it must then be nil). Active false deactivates (the trigger revokes
 // every live key), Active true reactivates (counted against the cap; it
-// revives no key). There is deliberately no field for kind, the peer binding
-// or any key expiry: a patch cannot extend a key (V-01-d).
+// revives no key). Models non-nil makes the grants exactly *Models (a target
+// set, SetConsumerGrants; an empty list removes every grant) in the same
+// transaction. There is deliberately no field for kind, the peer binding or
+// any key expiry: a patch cannot extend a key (V-01-d).
 type ModelConsumerPatch struct {
 	Label             *string
 	Description       *string
 	TenantScope       *string
 	ClearTenantScope  bool
 	AllModels         *bool
+	Models            *[]string
 	PromptSensitivity *string
 	FairWeight        *int16
 	AdmissionLane     *string
@@ -288,6 +297,16 @@ func CreateConsumerWithKey(ctx context.Context, pool *pgxpool.Pool, spec ModelCo
 			}
 			if c, err = insertConsumerTx(ctx, tx, spec); err != nil {
 				return err
+			}
+			c.Models = []string{}
+			if len(spec.Models) > 0 {
+				// The transaction is stamped above.
+				if err := SetConsumerGrants(ctx, tx, c.ID, spec.Models, AuditStamp{}); err != nil {
+					return err
+				}
+				if c.Models, err = ConsumerGrantIDs(ctx, tx, c.ID); err != nil {
+					return err
+				}
 			}
 			k, err = insertModelKeyTx(ctx, tx, c.ID, key, keyExpiresAt, nil)
 			return err
@@ -590,7 +609,9 @@ func UpdateConsumer(ctx context.Context, pool *pgxpool.Pool, consumerID string, 
 // comparison has to see the value the write replaces, not one read before a
 // concurrent write (a server-admin lowering fair_weight while a tenant-admin
 // re-submits the old value would otherwise read as "unchanged" and raise it
-// back). nil check = UpdateConsumer.
+// back). A patch of Models is judged the same way: check sees the consumer's
+// grants as they stand under the lock (current.Models). nil check =
+// UpdateConsumer.
 func UpdateConsumerChecked(ctx context.Context, pool *pgxpool.Pool, consumerID string, access ModelAccess,
 	patch ModelConsumerPatch, check func(current ModelConsumer) error, stamp AuditStamp) (ModelConsumer, error) {
 
@@ -624,6 +645,9 @@ func UpdateConsumerChecked(ctx context.Context, pool *pgxpool.Pool, consumerID s
 				if err != nil {
 					return err
 				}
+				if cur.Models, err = ConsumerGrantIDs(ctx, tx, consumerID); err != nil {
+					return err
+				}
 				if err := check(cur); err != nil {
 					return err
 				}
@@ -640,6 +664,15 @@ func UpdateConsumerChecked(ctx context.Context, pool *pgxpool.Pool, consumerID s
 				}
 			}
 			if c, err = writeConsumerTx(ctx, tx, consumerID, set, args); err != nil {
+				return err
+			}
+			if patch.Models != nil {
+				// The transaction is stamped above.
+				if err := SetConsumerGrants(ctx, tx, consumerID, *patch.Models, AuditStamp{}); err != nil {
+					return err
+				}
+			}
+			if c.Models, err = ConsumerGrantIDs(ctx, tx, consumerID); err != nil {
 				return err
 			}
 			return stampRevokedPrincipalTx(ctx, tx, revoking)

@@ -17,7 +17,7 @@
 //   - TestModelKeyTenantJoin (V-01-g): another tenant's key or consumer reads
 //     byte-identically to an unknown id and stays untouched — red against a
 //     revoke without the join.
-//   - TestListSingleQuery: 50 consumers ⇒ one statement (QueryTracer) — red
+//   - TestListSingleQuery: 50 consumers (à 3 grants since W01-9) ⇒ one statement (QueryTracer) — red
 //     against an N+1 list.
 //   - TestListNeverCarriesSecret: no 64-hex value, no ctxm_ plaintext in the
 //     list, the history or any audit row after a create and two rotations.
@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -573,12 +574,22 @@ func TestListSingleQuery(t *testing.T) {
 	ctx := context.Background()
 	e := mkSetup(t)
 	tenant := mkTenant(ctx, t, e.pool, "mk-list", nil)
+	// Three model aliases, granted to every consumer (W01-9: the grants ride
+	// in the same statement, one LATERAL aggregate).
+	var aliases []string
+	for i := range 3 {
+		aliases = append(aliases, maAlias(ctx, t, e.pool, "_global", fmt.Sprintf("mk-list-a%d", i), nil))
+	}
+	sort.Strings(aliases)
 	rotated := map[string]bool{}
 	for i := range 50 {
 		c, _, _ := mkCreate(ctx, t, e, tenant, fmt.Sprintf("list-%02d", i))
 		if i%5 == 0 {
 			mkRotate(ctx, t, e, c.ID, 24*time.Hour)
 			rotated[c.ID] = true
+		}
+		for _, a := range aliases {
+			mgGrant(ctx, t, e.pool, c.ID, a)
 		}
 	}
 	tr := &mkTracer{}
@@ -594,7 +605,7 @@ func TestListSingleQuery(t *testing.T) {
 		t.Fatalf("ListConsumers: %v", err)
 	}
 	sqls, _ := tr.snapshot()
-	t.Logf("measured: ListConsumers over 50 consumers / 60 keys: %d statement(s), %v", len(sqls), took)
+	t.Logf("measured: ListConsumers over 50 consumers / 60 keys / 150 grants: %d statement(s), %v", len(sqls), took)
 	if len(sqls) != 1 {
 		t.Errorf("ListConsumers sent %d statements, want exactly 1:\n%s", len(sqls), strings.Join(sqls, "\n---\n"))
 	}
@@ -608,6 +619,9 @@ func TestListSingleQuery(t *testing.T) {
 		}
 		if len(c.Keys) != want || c.KeysTotal != want {
 			t.Errorf("consumer %s: %d live / %d total, want %d / %d", c.Label, len(c.Keys), c.KeysTotal, want, want)
+		}
+		if strings.Join(c.Models, ",") != strings.Join(aliases, ",") {
+			t.Errorf("consumer %s: models %v, want %v", c.Label, c.Models, aliases)
 		}
 		if i > 0 && c.CreatedAt.After(list[i-1].CreatedAt) {
 			t.Errorf("list not newest first at %d", i)

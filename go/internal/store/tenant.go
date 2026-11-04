@@ -585,6 +585,10 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 // statement (rotated_from is SET NULL, the successor dies in the same
 // statement). No batching: max_model_consumers caps a tenant at 64 consumers by
 // default, a few rows each. This is the ONE delete path of both tables.
+// The consumers' model grants (164) would go by ON DELETE CASCADE, but a
+// cascaded grant's ungrant row finds its consumer gone (no metadata.tenant_id,
+// scope '_global': server-admin-only history of a tenant-admin's grants) — so
+// they are deleted first, in a statement of their own, under the same lock.
 //
 // stamp attributes the hard deletes of steps 7b and 7 in the audit trail
 // (migrations 160, 161): they run in one transaction stamped with the caller's
@@ -656,6 +660,11 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 		if _, err := tx.Exec(ctx,
 			`SELECT 1 FROM context_model_consumers WHERE tenant_id = $1::uuid ORDER BY id FOR UPDATE`, tenantID); err != nil {
 			return fmt.Errorf("model consumers lock: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM context_model_consumer_grants WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
+			tenantID); err != nil {
+			return fmt.Errorf("model grants: %w", err)
 		}
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM context_model_keys WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,

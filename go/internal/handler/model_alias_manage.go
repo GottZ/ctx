@@ -28,8 +28,11 @@
 //     live by default.
 //
 // Removing access is always allowed: a tenant-admin disables or deletes its
-// own alias without any gate beyond the scope. Every committed write ends with
-// Registry.Trigger (W02-03 R-5: a second chance next to the NOTIFY path).
+// own alias without any gate beyond the scope — except that a delete waits
+// for the explicit grants of active consumers to go first (design/05 V-02-b,
+// migration 164): 409 model_granted with their count, never who they are.
+// Every committed write ends with Registry.Trigger (W02-03 R-5: a second
+// chance next to the NOTIFY path).
 package handler
 
 import (
@@ -600,10 +603,20 @@ func lockedModelAlias(ctx context.Context, w http.ResponseWriter, tx pgx.Tx, id 
 
 // writeModelAliasStoreErr answers a failed store write.
 func writeModelAliasStoreErr(ctx context.Context, w http.ResponseWriter, op string, err error) {
-	var imm *store.ModelAliasImmutableError
+	var (
+		imm     *store.ModelAliasImmutableError
+		granted *store.ModelAliasGrantedError
+	)
 	switch {
 	case errors.As(err, &imm):
 		writeModelAliasImmutable(w, imm.Field)
+	case errors.As(err, &granted):
+		// V-02-b: the count only — the holders are consumers of any tenant.
+		writeJSONCode(w, http.StatusConflict, "model_granted", map[string]any{
+			"success": false,
+			"error":   "model alias is granted to active model consumers — remove it from their models (or deactivate them) first",
+			"count":   granted.Count,
+		})
 	case errors.Is(err, store.ErrModelAliasScope):
 		writeModelAliasNotFound(w)
 	case errors.Is(err, store.ErrModelAliasExists):

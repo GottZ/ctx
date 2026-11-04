@@ -22,9 +22,10 @@ import (
 )
 
 // consumerView is one consumer as the administration answers it: the policy
-// fields (design/01 K-05-2 — all_models instead of models[] until the grants
-// of W01-9), the status (design/05 §3.2), the keys (the list: the live ones;
-// get: the chain) and the peer binding, which only a server-admin sees.
+// fields (design/01 K-05-2: all_models and models — the alias ids of its
+// grants, migration 164, sorted; [] for none), the status (design/05 §3.2),
+// the keys (the list: the live ones; get: the chain) and the peer binding,
+// which only a server-admin sees.
 type consumerView struct {
 	ID                string     `json:"id"`
 	TenantID          string     `json:"tenant_id"`
@@ -34,6 +35,7 @@ type consumerView struct {
 	Kind              string     `json:"kind"`
 	TenantScope       *string    `json:"tenant_scope"`
 	AllModels         bool       `json:"all_models"`
+	Models            []string   `json:"models"`
 	PromptSensitivity string     `json:"prompt_sensitivity"`
 	FairWeight        int16      `json:"fair_weight"`
 	AdmissionLane     string     `json:"admission_lane"`
@@ -158,9 +160,13 @@ func newConsumerView(c store.ModelConsumer, keys []store.ModelKeyInfo, ar *auth.
 	for _, k := range keys {
 		kv = append(kv, newKeyView(k, youngest, now, warn))
 	}
+	models := c.Models
+	if models == nil {
+		models = []string{}
+	}
 	v := consumerView{
 		ID: c.ID, TenantID: c.TenantID, TenantSlug: c.TenantSlug, Label: c.Label,
-		Description: c.Description, Kind: c.Kind, TenantScope: c.TenantScope, AllModels: c.AllModels,
+		Description: c.Description, Kind: c.Kind, TenantScope: c.TenantScope, AllModels: c.AllModels, Models: models,
 		PromptSensitivity: c.PromptSensitivity, FairWeight: c.FairWeight, AdmissionLane: c.AdmissionLane,
 		AllowedCIDRs: c.AllowedCIDRs, AllowPlaintext: c.AllowPlaintext, Active: c.Active,
 		Status: consumerStatus(c.Active, c.Keys, now, warn), LastUsedAt: c.LastUsedAt,

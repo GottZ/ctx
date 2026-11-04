@@ -742,7 +742,11 @@ func TestMigration163ForeignKeyIndexes(t *testing.T) {
 		}
 		t.Logf("RESULT %s: sequential scans caused by the deletes — context_model_keys %d, context_model_consumers %d",
 			label, s.keysSeq, s.consumersSeq)
-		// The real prune, committed, on a tenant of the same shape.
+		// The real prune, committed, on a tenant of the same shape. The store
+		// code of the tree deletes the grants of 164 first, so the (empty)
+		// grant table must exist at either level; it adds no scan of the
+		// two tables measured here.
+		m164Apply(ctx, t, pool)
 		pruneID, _ := fkProbe(ctx, t, pool, pruneSlug)
 		load0 := fkLoad()
 		t0 := time.Now()

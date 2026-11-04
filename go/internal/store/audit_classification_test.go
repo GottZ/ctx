@@ -150,6 +150,19 @@ var auditClassification = []auditedTable{
 		updTrig: "trg_model_aliases_audit_upd",
 	},
 	{
+		// No UPDATE trigger: the identity pin of 164 keeps both audited
+		// columns, so a grant is only ever inserted or deleted, and those two
+		// rows carry its state.
+		table:   "context_model_consumer_grants",
+		stateFn: "audit_state_model_grant",
+		audited: []string{"consumer_id", "alias_id"},
+		excluded: map[string]string{
+			"created_at":           "insert time; the audit row carries its own created_at",
+			"created_by_key":       "actor attribution, carried by api_key_id / actor_label; ON DELETE SET NULL must not write a row",
+			"created_by_principal": "actor attribution, carried by metadata.actor_principal",
+		},
+	},
+	{
 		table:   "context_instance",
 		stateFn: "audit_state_instance",
 		audited: []string{"instance_id", "created_at", "rotated_at"},
@@ -371,7 +384,8 @@ func TestAuditClassificationPin(t *testing.T) {
 // auditColumnProbes: per audited table, for every column an UPDATE expression
 // that changes exactly that column. %[1]s is a second tenant id, %[2]s a second
 // principal id, %[3]s a key id, %[4]s a second model consumer id, %[5]s a
-// second model key id (all existing FK targets). The audited probes must cover
+// second model key id, %[6]s a second model alias id (all existing FK
+// targets). The audited probes must cover
 // every audited column, the excluded probes every excluded column but the row
 // identity.
 //
@@ -383,12 +397,18 @@ func TestAuditClassificationPin(t *testing.T) {
 // transaction and expects the one audit row, so the audit covers the column
 // even past the pin.
 // keyCol/keyType address the probed row (default id/uuid; the instance
-// singleton has no id column).
+// singleton has no id column, a grant is addressed by its consumer, which
+// holds exactly one). insDelOnly: the table has no UPDATE audit trigger —
+// every audited column is pinned, a row is only inserted or deleted (those
+// rows carry its state, gated in the table's own tests) — so a pinned probe
+// proves the refusal and nothing past it: with the pin disabled the change
+// writes no row either.
 type auditProbeSet struct {
 	audited, excluded map[string]string
 	prep              map[string]string
 	pinned            map[string]string // column -> identity trigger
 	keyCol, keyType   string
+	insDelOnly        bool
 }
 
 // rowKey returns the key column and its type of a probe set.
@@ -509,6 +529,24 @@ var auditColumnProbes = map[string]auditProbeSet{
 			"kind":  "trg_model_aliases_identity",
 		},
 	},
+	"context_model_consumer_grants": {
+		audited: map[string]string{
+			"consumer_id": "'%[4]s'::uuid",
+			"alias_id":    "'%[6]s'::uuid",
+		},
+		excluded: map[string]string{
+			"created_at":           "created_at - interval '1 minute'",
+			"created_by_key":       "'%[3]s'::uuid",
+			"created_by_principal": "'%[2]s'::uuid",
+		},
+		pinned: map[string]string{
+			"consumer_id": "trg_model_grants_identity",
+			"alias_id":    "trg_model_grants_identity",
+		},
+		keyCol:     "consumer_id",
+		keyType:    "uuid",
+		insDelOnly: true,
+	},
 	"context_instance": {
 		audited: map[string]string{
 			"instance_id": "gen_random_uuid()",
@@ -529,11 +567,13 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	}
 	ctx := context.Background()
 	// 160 (honouring CTX_M160_OVERLAY), then 161 (honouring CTX_M161_OVERLAY),
-	// then 162 (honouring CTX_M162_OVERLAY), then 163 (CTX_M163_OVERLAY).
+	// then 162 (honouring CTX_M162_OVERLAY), then 163 (CTX_M163_OVERLAY),
+	// then 164 (CTX_M164_OVERLAY).
 	pool := kaSetup(t, nil)
 	m161Apply(ctx, t, pool)
 	m162Apply(ctx, t, pool)
 	m163Apply(ctx, t, pool)
+	m164Apply(ctx, t, pool)
 
 	otherTenant := freshTenant(t, ctx, pool, "ka-pin-other")
 	var otherPrincipal string
@@ -562,18 +602,24 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	// The probed model alias: a tenant alias (scope 'ka-pin:main'), so the
 	// scope probe moves it to another tenant scope.
 	modelAlias := maAlias(ctx, t, pool, "ka-pin:main", "ka-pin-alias", nil)
+	// The probed grant: the one grant of consumer G (its address), on a
+	// _global alias; a second alias is the alias_id probe's target.
+	grantAlias := maAlias(ctx, t, pool, "_global", "ka-pin-grant", nil)
+	secondAlias := maAlias(ctx, t, pool, "_global", "ka-pin-grant-2", nil)
+	consumerG := mcConsumer(ctx, t, pool, modelTenant, "ka-pin-g", nil)
+	mgGrant(ctx, t, pool, consumerG, grantAlias)
 
 	rowID := map[string]string{"context_api_keys": key.ID, "context_tenant_quota": quotaID,
 		"context_model_consumers": consumerA, "context_model_keys": modelKey, "context_model_aliases": modelAlias,
-		"context_instance": "true"}
+		"context_model_consumer_grants": consumerG, "context_instance": "true"}
 	entity := map[string]string{"context_api_keys": "api_key", "context_tenant_quota": "tenant_quota",
 		"context_model_consumers": "model_consumer", "context_model_keys": "model_key", "context_model_aliases": "model_alias",
-		"context_instance": "instance"}
+		"context_model_consumer_grants": "model_grant", "context_instance": "instance"}
 	fill := func(expr string) string {
 		if !strings.Contains(expr, "%[") {
 			return expr
 		}
-		return fmt.Sprintf(expr, otherTenant, otherPrincipal, key.ID, consumerA, secondModelKey)
+		return fmt.Sprintf(expr, otherTenant, otherPrincipal, key.ID, consumerA, secondModelKey, secondAlias)
 	}
 
 	for _, c := range auditClassification {
@@ -584,6 +630,16 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 		// Coverage: a column added to either list needs its probe.
 		if got, want := sortedKeys(probes.audited), sortedJoin(c.audited); got != want {
 			t.Errorf("%s: audited probes [%s], audited columns [%s]", c.table, got, want)
+		}
+		// insDelOnly holds only while every audited column is pinned: an
+		// audited column without pin and without UPDATE trigger would change
+		// with no audit row while the probe below stays green.
+		if probes.insDelOnly {
+			for _, col := range c.audited {
+				if _, ok := probes.pinned[col]; !ok {
+					t.Errorf("%s: insDelOnly, but audited column %s has no identity pin", c.table, col)
+				}
+			}
 		}
 		keyCol, keyType := probes.rowKey()
 		var excl []string
@@ -614,12 +670,17 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 				if got := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table]) - before; got != 0 {
 					t.Errorf("%s.%s: refused change wrote %d audit row(s), want 0", c.table, col, got)
 				}
+				if probes.insDelOnly {
+					return // no UPDATE audit trigger: nothing past the pin to record
+				}
 				// ... and past the pin the audit trigger still records it.
 				kaExecInTx(ctx, t, pool, fmt.Sprintf(`ALTER TABLE %[1]s DISABLE TRIGGER %[2]s;
 					%[3]s;
 					ALTER TABLE %[1]s ENABLE TRIGGER %[2]s;`, c.table, trig, strings.Replace(update, "$1::", "'"+rowID[c.table]+"'::", 1)))
-			} else if _, err := pool.Exec(ctx, update, rowID[c.table]); err != nil {
+			} else if tag, err := pool.Exec(ctx, update, rowID[c.table]); err != nil {
 				t.Fatalf("%s.%s: update: %v", c.table, col, err)
+			} else if tag.RowsAffected() != 1 {
+				t.Fatalf("%s.%s: the probe updated %d row(s), want exactly the probed one", c.table, col, tag.RowsAffected())
 			}
 			if got := kaCount(ctx, t, pool, `entity_type = $1`, entity[c.table]) - before; got != wantRows {
 				t.Errorf("%s.%s: an update of only this column wrote %d audit row(s), want %d", c.table, col, got, wantRows)
@@ -651,7 +712,11 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 		}
 		for _, col := range c.audited {
 			if expr, ok := probes.audited[col]; ok {
-				run(col, expr, 1)
+				want := 1
+				if probes.insDelOnly {
+					want = 0
+				}
+				run(col, expr, want)
 			}
 		}
 		for col, expr := range probes.excluded {

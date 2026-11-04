@@ -29,10 +29,10 @@ type auditEntity struct {
 // metadata.tenant_id, a _global one none, so the operator catalog's history
 // stays server-admin-only through the same filter);
 // instance by the 163 trigger (the instance identity: no tenant, and
-// server-admin-only whatever a row's metadata says);
-// gateway_limits (M-06-5), model_grant (the grant migration's trigger) and
-// consumer_usage (the gateway's Go writer) read as empty lists until their
-// writers land. setting, secret and
+// server-admin-only whatever a row's metadata says), model_grant by the 164
+// trigger (tenant_id through the grant's consumer);
+// gateway_limits (M-06-5) and consumer_usage (the gateway's Go writer) read
+// as empty lists until their writers land. setting, secret and
 // backend stay on their own surfaces (GET /api/settings/{key} and the
 // admin-only manage actions) and, like every other type, answer
 // ErrAuditEntity here.

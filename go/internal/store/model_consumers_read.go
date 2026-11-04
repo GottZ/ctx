@@ -88,11 +88,13 @@ type ListConsumersOptions struct {
 // consumer, its tenant's slug, its creator, and one LEFT JOIN LATERAL over its
 // keys (idx_model_keys_consumer_created) that aggregates the live keys (the
 // whitelisted key fields — no hash, no plaintext), their count, the expiry
-// warning, the chain length and the latest use. $3 is $now, $4 the warning
-// window in microseconds.
+// warning, the chain length and the latest use, and one over its grants
+// (migration 164, the primary key's range) that aggregates the granted alias
+// ids in ConsumerGrantIDs' order. $3 is $now, $4 the warning window in
+// microseconds.
 const consumerReadSelect = `SELECT ` + sqlConsumerCols + `,
 	       t.slug, a.label, a.tenant_id::text, COALESCE(a.is_admin, false),
-	       kk.live, kk.total, kk.last_used
+	       kk.live, kk.total, kk.last_used, gg.ids
 	  FROM context_model_consumers c
 	  JOIN context_tenants t ON t.id = c.tenant_id
 	  LEFT JOIN context_api_keys a ON a.id = c.created_by_key
@@ -107,7 +109,10 @@ const consumerReadSelect = `SELECT ` + sqlConsumerCols + `,
 	              COALESCE(bool_or(` + sqlKeyLiveAt + ` AND k.expires_at <= $3::timestamptz + $4::bigint * interval '1 microsecond'), false) AS warn_hit,
 	              count(*)::int AS total,
 	              max(k.last_used_at) AS last_used
-	         FROM context_model_keys k WHERE k.consumer_id = c.id) kk ON true`
+	         FROM context_model_keys k WHERE k.consumer_id = c.id) kk ON true
+	  LEFT JOIN LATERAL (
+	       SELECT COALESCE(array_agg(g.alias_id::text ORDER BY g.alias_id), '{}') AS ids
+	         FROM context_model_consumer_grants g WHERE g.consumer_id = c.id) gg ON true`
 
 // sqlKeyLiveAt is I-K2's "live" on the key alias k at the parameter $3.
 const sqlKeyLiveAt = `(k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > $3::timestamptz))`
@@ -255,7 +260,7 @@ func scanConsumerRead(rows pgx.Rows) (ModelConsumer, error) {
 		live []byte
 	)
 	dest := append(consumerDest(&c), &c.TenantSlug, &c.CreatedByLabel, &c.CreatedByTenantID,
-		&c.CreatedByServerAdmin, &live, &c.KeysTotal, &c.LastUsedAt)
+		&c.CreatedByServerAdmin, &live, &c.KeysTotal, &c.LastUsedAt, &c.Models)
 	if err := rows.Scan(dest...); err != nil {
 		return ModelConsumer{}, fmt.Errorf("model_consumers: read scan: %w", err)
 	}
