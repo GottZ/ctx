@@ -28,6 +28,11 @@
 //   - W02-03 (migration 162): model aliases — tenant-admin A reads
 //     entity=model_alias rows of A's aliases only; B's and the _global alias
 //     id answer like an unknown id; the server-admin reads all three.
+//   - F-W2 (migration 163): a rotation of the instance identity by SQL ⇒
+//     the server-admin reads exactly the rotate row (old and new
+//     instance_id, no tenant), a tenant-admin rows: [] — and neither body
+//     carries a rendering of the old or the new secret. Red against 162 (no
+//     context_instance: 42P01 at the rotation).
 //   - limit=1000 ⇒ the audit.max_limit cap (default 200, ≥ 201 rows seeded);
 //     a configured cap wins; limit ≤ 0 or non-numeric ⇒ 400; since filters
 //     strictly, a malformed since ⇒ 400.
@@ -39,6 +44,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -562,6 +568,71 @@ func TestAuditModelAliasTenantFilter(t *testing.T) {
 		}
 		if len(r.Rows) != 3 || got[aliasA] != a.id || got[aliasB] != b.id || got[aliasG] != "" {
 			t.Errorf("server-admin, entity=model_alias: rows %v, want %s→%s, %s→%s and %s without a tenant", got, aliasA, a.id, aliasB, b.id, aliasG)
+		}
+	})
+}
+
+func TestAuditInstanceServerAdminOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	mh := t43Handler(pool)
+	admin, _ := kaServerAdmin(ctx, t, pool)
+	a := auMakeTenant(ctx, t, pool, mh, admin, "au-inst")
+	read := func() (id string, secret []byte) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT instance_id::text, instance_secret FROM context_instance`).Scan(&id, &secret); err != nil {
+			t.Fatalf("read context_instance: %v", err)
+		}
+		return id, secret
+	}
+	oldID, oldSecret := read()
+	if _, err := pool.Exec(ctx, `UPDATE context_instance
+	                                SET instance_id = gen_random_uuid(), instance_secret = gen_random_bytes(32), rotated_at = now()`); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	newID, newSecret := read()
+	h := auditHandler(pool)
+	leaks := func(body []byte) []string {
+		var hits []string
+		for _, s := range [][]byte{oldSecret, newSecret} {
+			for _, r := range []string{hex.EncodeToString(s), strings.ToUpper(hex.EncodeToString(s)),
+				base64.StdEncoding.EncodeToString(s), base64.RawStdEncoding.EncodeToString(s),
+				base64.URLEncoding.EncodeToString(s), base64.RawURLEncoding.EncodeToString(s)} {
+				if bytes.Contains(body, []byte(r)) {
+					hits = append(hits, r)
+				}
+			}
+		}
+		return hits
+	}
+
+	t.Run("server_admin_reads_the_rotation", func(t *testing.T) {
+		body, r := auditOK(t, h, admin, "?entity=instance")
+		if len(r.Rows) != 1 {
+			t.Fatalf("server-admin, entity=instance: %d row(s) %s, want exactly the rotation", len(r.Rows), body)
+		}
+		row := r.Rows[0]
+		var o, n map[string]any
+		_ = json.Unmarshal(row.OldValue, &o)
+		_ = json.Unmarshal(row.NewValue, &n)
+		if row.Action != "rotate" || row.EntityKey != "self" || o["instance_id"] != oldID || n["instance_id"] != newID || auMetaStr(row, "tenant_id") != "" {
+			t.Errorf("rotation row: action %s key %s, instance_id %v -> %v, metadata %s — want rotate/self, %s -> %s, no tenant",
+				row.Action, row.EntityKey, o["instance_id"], n["instance_id"], auMeta(row), oldID, newID)
+		}
+		if hits := leaks(body); len(hits) > 0 {
+			t.Errorf("server-admin body carries the secret: %v", hits)
+		}
+	})
+	t.Run("tenant_admin_reads_nothing", func(t *testing.T) {
+		body, r := auditOK(t, h, a.ar, "?entity=instance")
+		if len(r.Rows) != 0 {
+			t.Errorf("tenant-admin, entity=instance: %s, want rows: []", body)
+		}
+		if hits := leaks(body); len(hits) > 0 {
+			t.Errorf("tenant-admin body carries the secret: %v", hits)
 		}
 	})
 }

@@ -296,6 +296,30 @@ linters:
             - pkg: "math/rand/v2$"
               desc: "model keys are secrets: their only randomness source is crypto/rand (modelkey.Generate) — math/rand/v2 (also ChaCha8/PCG) is seedable and therefore predictable, and no test can tell its output from crypto/rand's"
 
+        # 8 (a leaf by design since F-W2, after the seven above) —
+        # internal/fedhop: the hop contract between ctx instances
+        # (design/04 §4.1, F-W2): the instance identity now, the hop header
+        # grammar, the hop token and the stamp of outgoing calls with the
+        # waves that follow. llm, embed, rerank, backends, httpx and handler
+        # import it, so it imports none of them and nothing of ctx at all —
+        # the standard library only (fedhop/identity.go package comment).
+        # Tests are included: the package needs nothing else to be tested.
+        # The hop token is minted from crypto/rand (F-W3); math/rand would
+        # make the nonce predictable while every uniqueness test stays green,
+        # hence the two denies of modelkey-leaf.
+        fedhop-leaf:
+          files:
+            - "**/go/internal/fedhop/**"
+          allow:
+            - "$gostd"
+          deny:
+            - pkg: "github.com/GottZ/ctx"
+              desc: "internal/fedhop is the stdlib-only leaf of the hop contract between ctx instances — llm, embed, rerank, backends, httpx and handler import it, so a ctx import here inverts that layering or closes a cycle (fedhop/identity.go package comment, design/04 §4.1)"
+            - pkg: "math/rand$"
+              desc: "the hop token's nonce and the instance key are secrets: their only randomness source is crypto/rand — math/rand is predictable, and no test can tell its output from crypto/rand's"
+            - pkg: "math/rand/v2$"
+              desc: "the hop token's nonce and the instance key are secrets: their only randomness source is crypto/rand — math/rand/v2 (also ChaCha8/PCG) is seedable and therefore predictable, and no test can tell its output from crypto/rand's"
+
         # evalscore stays TOOLING (design/06 §4.7, masterplan K18 + A-15).
         # internal/evalscore is the measurement vocabulary of the gold bench —
         # nDCG, MRR, recall, rank diversity. The server answers a query; it

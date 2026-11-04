@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 162,
-    "migration_count": 50,
+    "migration_max": 163,
+    "migration_count": 51,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1655,6 +1655,41 @@
         {
           "name": "pending_count",
           "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_instance": {
+      "columns": [
+        {
+          "name": "singleton",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "instance_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "instance_secret",
+          "type": "bytea",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "rotated_at",
+          "type": "timestamp with time zone",
           "not_null": false,
           "storage": "p"
         }
@@ -4831,6 +4866,9 @@
     "context_guard_state_pkey": {
       "def_hash": "4f029a2e2fbfd3d351585f6bd8577bf4738e452a548a0640005e82f9516ce488"
     },
+    "context_instance_pkey": {
+      "def_hash": "95cca95bd2d121809b03fd3857570a8cfe4f015f3d4ca504d9c9c6d7a5424493"
+    },
     "context_llm_log_created_at_idx": {
       "def_hash": "69a09678bea2cc122b85b7c27c65a0237ed4dab75b1d59d6467e0afc3c6a89b9"
     },
@@ -5270,6 +5308,12 @@
     "idx_model_aliases_scope": {
       "def_hash": "a9d1e19edf34e8d2d17ac45d664a973df1bfd867a70c532cb5eb474e0aa35ca4"
     },
+    "idx_model_consumers_created_by_key": {
+      "def_hash": "57a2e1e75f26569aa3b0ae834fe38e5aed891a4fdcf1af9a99546d4b0055000a"
+    },
+    "idx_model_consumers_created_by_principal": {
+      "def_hash": "f9e33a6dae7df619379b3989e03d1588c2b16ab6f59617da37c1b83d329b83a1"
+    },
     "idx_model_consumers_peer_instance": {
       "def_hash": "08bbb37c20a49485f710e039470ac3e257d6f1a4225bca0504ae1082006fec17"
     },
@@ -5281,6 +5325,21 @@
     },
     "idx_model_keys_consumer_live": {
       "def_hash": "53fd2e2948d51722232748756f10b9cae57441f720b2489daf6452a9f6566ec2"
+    },
+    "idx_model_keys_created_by_key": {
+      "def_hash": "2cac9bd432b67da9bfd7d68bd0597f5613982dcd2483f434e746e876e8c4475f"
+    },
+    "idx_model_keys_created_by_principal": {
+      "def_hash": "25781ed34309b143f43658dca163ea064ba5ce7dedda364b209fa76ff546c618"
+    },
+    "idx_model_keys_revoked_by_key": {
+      "def_hash": "8edb89505f11ebf51f1f5ecb61f0ee693b1a85a43bae30dbe03e99ed079432f7"
+    },
+    "idx_model_keys_revoked_by_principal": {
+      "def_hash": "8bbf8292ecd93c2b735f728deb86f5e6a0e653425da9db79d921fad91ffdd89a"
+    },
+    "idx_model_keys_rotated_from": {
+      "def_hash": "16c92b1bce7c303cea62bd7030986ca6b464e32cacfb514f01a6f4a14af4bc7b"
     },
     "idx_oauth_clients_active": {
       "def_hash": "fb7988c8823da82ba293af0240e08c4e1dfb9bd682bd803b1e3d4328a8df9882"
@@ -5515,6 +5574,9 @@
     "audit_graph_category_hues_write()": {
       "src_hash": "642caf7533f79abd18190506b1b490998a597e776f8f90b952c5a0347e1ee4ba"
     },
+    "audit_instance_write()": {
+      "src_hash": "c4fb87b52c74ecdf1d3716ce1c12b31fdd797e70edc6516ff427a5f4254ec90a"
+    },
     "audit_model_aliases_write()": {
       "src_hash": "75a7664e4059afc24e7172d926352f502e81ac80a5cf35f744fed5c3c61672ed"
     },
@@ -5529,6 +5591,9 @@
     },
     "audit_state_api_key(k context_api_keys)": {
       "src_hash": "b864dab1db4ba08570476b70f13d2b396caab4afd119fd49f9c0c7e7001c6981"
+    },
+    "audit_state_instance(i context_instance)": {
+      "src_hash": "ac4e02c386330ef11e2f111af58fa50b78586e39f5ac4645c2253847330a2cb4"
     },
     "audit_state_model_alias(a context_model_aliases)": {
       "src_hash": "51cec9a296a124f88b899b8c3bdf85605f85761389159b9c481199588b1ebcbc"
@@ -5565,6 +5630,9 @@
     },
     "hist_add(a bigint[], b bigint[])": {
       "src_hash": "5731502fcc7477dbba23b988180051f4cf97802217dbb6faf506cb49bd53e30a"
+    },
+    "instance_row_guard()": {
+      "src_hash": "66a781e120328a04a900b4f84c31e619b81018290363c95e68ed74149943c831"
     },
     "llm_usage_hist_idx(ms bigint)": {
       "src_hash": "0c76b6670b4e67815665d51292cd5ad736139bde6fa803884cc1a96556e0c281"
@@ -5666,6 +5734,18 @@
     },
     "context_graph_category_hues.trg_graph_category_hues_audit": {
       "def_hash": "3b8fa57135a109cf1dd6e6677ae6e845e1302320227d2e67ff3c8093e86097c9"
+    },
+    "context_instance.trg_instance_audit_ins_del": {
+      "def_hash": "7902bfeff42b55534507049a0c39478e5777bc18a17ad16af94c416c971c6fe3"
+    },
+    "context_instance.trg_instance_audit_upd": {
+      "def_hash": "7fc435d1e431f31f30fd61b249043ef6f92c10936a81738d9628d385b2b8df22"
+    },
+    "context_instance.trg_instance_guard": {
+      "def_hash": "5c815ed227bf1259989d0574096b902d1ad1a0a4e99d937212f6423b2f395780"
+    },
+    "context_instance.trg_instance_no_truncate": {
+      "def_hash": "cd7e7288184f19012f67244331030d48d0538199863e853e639c5acea2f6cbb0"
     },
     "context_llm_log.trg_llm_usage_rollup": {
       "def_hash": "cd7a75eeec79d9ffa466965c707f50f00a346b066c597c6a56c7d0bb844ece0f"
