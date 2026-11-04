@@ -251,7 +251,7 @@ func ListModelAliases(ctx context.Context, q pgxdb.Querier, scopes []string) ([]
 }
 
 // LockModelAliasName serializes, until tx ends, every alias write the admin
-// action makes under the name name — in any scope. The shadowing floor
+// action makes under the alias name `name` — in any scope. The shadowing floor
 // (design/05 V-02-c: a tenant alias never sits below the sensitivity of the
 // _global alias of the same name) compares rows of two scopes; a row lock
 // cannot hold that, because the row to compare against may not exist yet (a
