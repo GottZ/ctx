@@ -72,6 +72,7 @@ LIVE_ENV=(
   -e "CTX_E2E_BASE_URL=$BASE_URL"
   -e "CTX_E2E_STATE_FILE=/work/e2e/live/.results/seed-state.json"
   -e "CTX_E2E_LEAK_INJECT=${CTX_E2E_LEAK_INJECT:-}"
+  -e "CTX_E2E_MODELKEY_SWAP=${CTX_E2E_MODELKEY_SWAP:-}"
   -e "CI=${CI:-}"
 )
 
