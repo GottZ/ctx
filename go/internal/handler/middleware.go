@@ -520,7 +520,8 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 // gate admits, the handler scopes reads to the caller's visible scopes).
 // Negative probe: TestTypesMemberGate_NoAuth401 was red against MountTypes with
 // this Use() line removed (the nil AuthResult reached the handler and panicked
-// into typeVisibleScopes — the fail-open trap made visible).
+// — into typeVisibleScopes then, into the store layer since #112 made it
+// nil-safe — the fail-open trap made visible).
 func RequireMember(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ar := AuthResultFromContext(r.Context())

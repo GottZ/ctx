@@ -6,9 +6,11 @@
 //
 // Write-scope is PINNED by role, never taken from the request body (§5.2(2)
 // scope-injection class): a server-admin writes the shipped '_global'
-// namespace, a tenant-admin writes ONLY its own tenant namespace. This is the
-// backendWriteScopes precedent named in §9.5(c) — the same two-write-worlds
-// split mutationScope() applies to settings/secrets (tenant_scope.go:20-28).
+// namespace, a tenant-admin writes ONLY its own tenant namespace — its
+// HomeScope, the key the registry resolves its requests by (tenantTypeScope,
+// #112). This is the backendWriteScopes precedent named in §9.5(c) — the same
+// two-write-worlds split mutationScope() applies to settings/secrets
+// (tenant_scope.go), on the same key.
 // A tenant-admin that targets a '_global' type is refused 403, NOT 404: global
 // types are member-visible via GET /api/types, so there is no existence oracle
 // to protect — the honest "operator-only" answer is correct.
@@ -57,8 +59,10 @@ type typeWritePayload struct {
 
 // typeWriteScope is the scope a CREATE targets, pinned by role (§9.5(c),
 // backendWriteScopes precedent): server-admin → '_global', tenant-admin → its
-// own tenant namespace (the tenant UUID, the same key typeVisibleScopes uses).
-// A nil/invalid ar yields "" — fail-closed, canWriteTypeScope then refuses.
+// own tenant namespace (tenantTypeScope: the HomeScope, the same key
+// typeVisibleScopes uses and the registry resolves by). A nil/invalid ar or an
+// empty/reserved HomeScope yields "" — fail-closed, canWriteTypeScope then
+// refuses.
 func typeWriteScope(ar *auth.AuthResult) string {
 	if ar == nil {
 		return ""
@@ -66,14 +70,16 @@ func typeWriteScope(ar *auth.AuthResult) string {
 	if ar.IsServerAdmin() {
 		return store.GlobalScope
 	}
-	return ar.TenantID
+	return tenantTypeScope(ar)
 }
 
 // canWriteTypeScope reports whether ar may mutate a type in the given scope:
-// '_global' is server-admin-only; any tenant scope requires the caller to be
-// that tenant's admin (IsTenantAdminOf also returns true for a server-admin).
-// The mount gate already admitted only server-admins and tenant-admins-of-
-// their-own-tenant, so this is the second, data-side half of the K-T1 pairing.
+// '_global' is server-admin-only; a server-admin may mutate any other row it
+// can reach; a tenant-admin only rows of its OWN tenant namespace — the scope
+// must be its tenantTypeScope AND the key must administer its tenant
+// (IsTenantAdminOf(ar.TenantID): owner/admin role, non-empty tenant). The mount
+// gate already admitted only server-admins and tenant-admins-of-their-own-
+// tenant, so this is the second, data-side half of the K-T1 pairing.
 func canWriteTypeScope(ar *auth.AuthResult, scope string) bool {
 	if ar == nil || scope == "" {
 		return false
@@ -81,7 +87,10 @@ func canWriteTypeScope(ar *auth.AuthResult, scope string) bool {
 	if scope == store.GlobalScope {
 		return ar.IsServerAdmin()
 	}
-	return ar.IsTenantAdminOf(scope)
+	if ar.IsServerAdmin() {
+		return true
+	}
+	return scope == tenantTypeScope(ar) && ar.IsTenantAdminOf(ar.TenantID)
 }
 
 // forbidTypeWrite writes the uniform 403 for a caller that is admitted by the

@@ -288,9 +288,10 @@ func UpdateBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 
 // DeleteBlockType removes one row by id inside an attributed transaction.
 // Guards (§5.1(c)), both checked in the SAME transaction as the delete:
-// builtin ⇒ ErrBlockTypeBuiltin (always); referencing blocks — counted over
-// ALL rows, archived included — ⇒ *BlockTypeInUseError naming the split.
-// found=false ⇒ no row with that id in the given scopes.
+// builtin ⇒ ErrBlockTypeBuiltin (always); referencing blocks — archived
+// included — ⇒ *BlockTypeInUseError naming the split. A '_global' row counts
+// the blocks of every scope; a tenant row only those of its own tenant
+// (typeRefScopeFilter). found=false ⇒ no row with that id in the given scopes.
 func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes []string, by *string, requestID string) (found bool, err error) {
 	if err = pgxdb.Write(ctx, pool,
 		pgxdb.Stages{Begin: "store: delete block type begin", Commit: "store: delete block type commit"},
@@ -299,12 +300,12 @@ func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 				return err
 			}
 
-			var name string
+			var name, scope string
 			var builtin bool
 			err := tx.QueryRow(ctx,
-				`SELECT name, builtin FROM context_block_types
+				`SELECT name, scope, builtin FROM context_block_types
 				  WHERE id = $1::uuid AND scope = ANY($2::text[]) FOR UPDATE`,
-				id, scopes).Scan(&name, &builtin)
+				id, scopes).Scan(&name, &scope, &builtin)
 			if errors.Is(err, pgx.ErrNoRows) {
 				// (false, nil) before the commit in the straight-line form —
 				// pgxdb.ErrRollback keeps that a rollback instead of a commit.
@@ -318,11 +319,16 @@ func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 				return ErrBlockTypeBuiltin
 			}
 
+			refSQL := `SELECT count(*) FILTER (WHERE NOT is_archived)::int,
+			                  count(*) FILTER (WHERE is_archived)::int
+			             FROM context_blocks WHERE type_name = $1`
+			refArgs := []any{name}
+			if scope != GlobalScope {
+				refSQL += typeRefScopeFilter
+				refArgs = append(refArgs, scope)
+			}
 			var active, archived int
-			if err := tx.QueryRow(ctx,
-				`SELECT count(*) FILTER (WHERE NOT is_archived)::int,
-				        count(*) FILTER (WHERE is_archived)::int
-				   FROM context_blocks WHERE type_name = $1`, name).Scan(&active, &archived); err != nil {
+			if err := tx.QueryRow(ctx, refSQL, refArgs...).Scan(&active, &archived); err != nil {
 				return fmt.Errorf("store: delete block type ref count: %w", err)
 			}
 			if active > 0 || archived > 0 {
@@ -342,6 +348,24 @@ func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 	}
 	return true, nil
 }
+
+// typeRefScopeFilter narrows the delete guard's reference count for a TENANT
+// row ($2 = its scope) to the blocks of its own tenant: the row's scope plus
+// every scope the same tenant owns (context_tenant_scopes). A tenant type is
+// resolved by the HomeScope of the writing key (#112), and a tenant-minted key
+// writes only inside its tenant (T22), so a block in another tenant's scope
+// never references this row — it carries a same-named type of its OWN tenant.
+// Counting it would refuse a tenant the delete of its own unused type and
+// answer it with a foreign tenant's block count, a cross-tenant existence and
+// size oracle over type names. The row's own scope stays in the set when it is
+// not a registered tenant scope (legacy or hand-made rows), so the guard never
+// narrows to nothing. A '_global' row keeps the unfiltered count: every
+// tenant's blocks resolve through it.
+const typeRefScopeFilter = `
+			    AND (scope = $2 OR scope IN (
+			        SELECT o.scope FROM context_tenant_scopes t
+			          JOIN context_tenant_scopes o ON o.tenant_id = t.tenant_id
+			         WHERE t.scope = $2))`
 
 // stampBlockTypeTx applies the audit attribution GUCs (settings.go:249-270
 // pattern; third user after settings and backends).

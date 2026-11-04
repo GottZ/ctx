@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/blocktype"
@@ -59,15 +60,33 @@ type typeUpdatePayload struct {
 	Config      json.RawMessage `json:"config,omitempty"`
 }
 
+// tenantTypeScope is the caller's own tenant type namespace: its HomeScope —
+// the key the block-type registry resolves the caller's requests by
+// (SnapshotForRequest → RequestTenantScope). The background loops resolve a
+// tenant by its identity scope instead (events.backgroundTenantFor: '_global'
+// for the default tenant, the first owned scope otherwise), which is the same
+// string for a tenant with one scope. It is NOT the tenant UUID: per design
+// §11.1 the tenant identity IS the scope namespace, the key mutationScope uses
+// for settings/secrets. A row under the UUID never reaches the registry (#112:
+// the type answered GET but neither classified nor validated). An empty or
+// reserved (_-prefixed) HomeScope yields "" — no tenant namespace, fail-closed
+// (the registry serves such a caller the base set, too).
+func tenantTypeScope(ar *auth.AuthResult) string {
+	if ar == nil || ar.HomeScope == "" || strings.HasPrefix(ar.HomeScope, "_") {
+		return ""
+	}
+	return ar.HomeScope
+}
+
 // typeVisibleScopes is the namespace set a caller may SEE (K-T1 handler
 // scoping for the tierOpen reads): the shipped '_global' rows plus rows of
-// the caller's own tenant namespace. In tier 1 only '_global' rows exist —
-// the tenant term is inert until T12 populates tenant rows; it is wired now
-// so the read shape does not change when tier 2 lands.
+// the caller's own tenant namespace (tenantTypeScope) — exactly the rows the
+// registry merges for the same caller, so what a read shows is what its
+// writes classify and validate against.
 func typeVisibleScopes(ar *auth.AuthResult) []string {
 	scopes := []string{store.GlobalScope}
-	if ar.TenantID != "" {
-		scopes = append(scopes, ar.TenantID)
+	if ts := tenantTypeScope(ar); ts != "" {
+		scopes = append(scopes, ts)
 	}
 	return scopes
 }
@@ -248,10 +267,10 @@ func (h *ManageHandler) handleTypeUpdate(w http.ResponseWriter, r *http.Request,
 		// D6 overlay gate (E2-6, wave C2-4) — the SECOND transport of the same
 		// write logic. type-create is pinned to '_global' (:202) and cannot
 		// produce an overlay, but this action patches through
-		// typeVisibleScopes(ar), which carries ar.TenantID: a server-admin key
-		// with a tenant id reaches the tenant row from here. A gate on only the
-		// REST seam would be the divergent-gate anti-pattern the types_write.go
-		// header names (§5.1).
+		// typeVisibleScopes(ar), which carries the caller's tenant namespace:
+		// a server-admin key reaches its HomeScope's tenant row from here. A
+		// gate on only the REST seam would be the divergent-gate anti-pattern
+		// the types_write.go header names (§5.1).
 		if msg, err := overlayWriteViolation(ctx, h.pool, cur.Name, cur.Scope, pol); err != nil {
 			slog.Error("manage: type-update overlay base", "error", err, "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
