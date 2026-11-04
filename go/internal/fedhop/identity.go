@@ -1,10 +1,14 @@
 // Package fedhop is the hop contract between ctx instances (design/04 §4.1):
-// the identity of this instance and — with the waves that follow — the hop
-// header grammar, the hop token, the stamp of outgoing wire calls and the
-// loop checks of incoming requests. It is a leaf on purpose: llm, embed,
-// rerank, backends, httpx and handler import it, so it imports nothing of
-// ctx and nothing third-party — the standard library only (.golangci.yml
-// rule fedhop-leaf).
+// the identity of this instance (this file), the hop header grammar and the
+// loop test of a parsed chain (grammar.go), the hop token (token.go), the
+// monotony rules of the hop headers (merge.go), the stamp of outgoing wire
+// calls with its context carriers (stamp.go) and the evaluation of a peer's
+// answer (observe.go). Nothing outside the boot calls it yet: the wire sites
+// (F-W4), the Tier-F context (F-W6), the loop guard of incoming requests
+// (F-W8) and the learned state (F-W11) build on it. It is a leaf on
+// purpose: llm, embed, rerank, backends, httpx and handler import it, so it
+// imports nothing of ctx and nothing third-party — the standard library only
+// (.golangci.yml rule fedhop-leaf).
 //
 // Identity is the instance id plus the HMAC key of the hop tokens, read from
 // context_instance (migration 163) by store.LoadInstanceIdentity at boot. It
@@ -41,6 +45,9 @@ import (
 // refuses to start without one).
 //
 // Identity is not comparable (the key is a func): compare identities by ID.
+// Hold it as a named field, never embedded: an embedding struct inherits
+// Format, String and LogValue and then renders as the id alone, hiding its
+// other fields.
 type Identity struct {
 	ID  string
 	key func() []byte
@@ -85,7 +92,11 @@ func SetDefaultIdentity(i Identity) { defaultIdentity.Store(&i) }
 
 type identityKey struct{}
 
-// WithIdentity returns ctx carrying i.
+// WithIdentity returns ctx carrying i. A zero i is carried as well: the
+// context then reads the zero Identity even over a boot default, and Stamp
+// refuses to mark its calls (ERROR and federation_stamp_without_identity) —
+// the explicit "no identity" of a test. IdentityMiddleware is the door that
+// skips a zero identity.
 func WithIdentity(ctx context.Context, i Identity) context.Context {
 	return context.WithValue(ctx, identityKey{}, i)
 }
