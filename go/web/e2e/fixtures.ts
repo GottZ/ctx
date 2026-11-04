@@ -681,6 +681,8 @@ const CONSUMER_LIST_MAX = 100
 const CONSUMER_SCALE_TOTAL = 10_000
 
 interface MockKey {
+  /** stable key id (the per-session world fixes it once, W05-06 revoke) */
+  id?: string
   hint: string
   status: string
   created_at: string
@@ -699,6 +701,12 @@ interface MockConsumer {
   keys: MockKey[]
   keys_total: number
   description?: string
+  // policy of a consumer created through the W05-06 mock (defaults otherwise)
+  tenant_scope?: string | null
+  all_models?: boolean
+  models?: string[]
+  prompt_sensitivity?: string
+  allowed_cidrs?: string[] | null
 }
 
 // Server-clock-skew probe (design/05 §5 B-11): the server calls this key
@@ -748,6 +756,17 @@ function scaleConsumer(tenant: TenantKey, i: number): MockConsumer {
   }
 }
 
+/**
+ * The key id of key n of a consumer (stable per world, W05-06): the FULL
+ * consumer id + 'k' + n. Consumer ids are hex, so 'k' never occurs in them and
+ * (consumer, n) ↦ key id is injective — a key id names exactly one row. (The
+ * first cut dropped the last two id characters, so …c0a1 and …c0a2 both
+ * yielded …c0k0 and a revoke hit the first matching row — Copilot on #121.)
+ */
+function mockKeyId(c: { id: string }, n: number): string {
+  return `${c.id}k${n}`
+}
+
 function consumerView(c: MockConsumer, serverAdmin: boolean): Record<string, unknown> {
   const t = TENANTS[c.tenant]
   return {
@@ -757,12 +776,13 @@ function consumerView(c: MockConsumer, serverAdmin: boolean): Record<string, unk
     label: c.label,
     description: c.description ?? '',
     kind: c.kind,
-    tenant_scope: null,
-    all_models: false,
-    prompt_sensitivity: 'credentials',
+    tenant_scope: c.tenant_scope ?? null,
+    all_models: c.all_models ?? false,
+    models: c.models ?? [],
+    prompt_sensitivity: c.prompt_sensitivity ?? 'credentials',
     fair_weight: 1,
     admission_lane: 'bulk',
-    allowed_cidrs: null,
+    allowed_cidrs: c.allowed_cidrs ?? null,
     allow_plaintext: false,
     active: c.status !== 'inactive',
     status: c.status,
@@ -770,7 +790,7 @@ function consumerView(c: MockConsumer, serverAdmin: boolean): Record<string, unk
     created_at: c.created_at,
     created_by_label: serverAdmin ? 'smoke-key' : null,
     keys: c.keys.map((k, n) => ({
-      id: `${c.id.slice(0, -2)}k${n}`,
+      id: k.id ?? mockKeyId(c, n),
       hint: k.hint,
       status: k.status,
       created_at: k.created_at,
@@ -798,6 +818,7 @@ function modelConsumerListFixture(
   data: Record<string, unknown> | undefined,
   state: SeedState,
   empty: boolean,
+  consumers: readonly MockConsumer[] = CONSUMERS,
 ): { status: number; json: Record<string, unknown> } {
   const bad = (error: string) => ({ status: 400, json: { success: false, error } })
   if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
@@ -833,7 +854,7 @@ function modelConsumerListFixture(
   let world: MockConsumer[]
   if (empty) world = []
   else if (state === '10k') world = tenants.flatMap((t) => Array.from({ length: CONSUMER_SCALE_TOTAL }, (_, i) => scaleConsumer(t, i)))
-  else world = CONSUMERS.filter((c) => tenants.includes(c.tenant))
+  else world = consumers.filter((c) => tenants.includes(c.tenant))
   const rows = world
     .filter((c) => statuses.includes(c.status) && c.label.toLowerCase().startsWith(q))
     .sort((a, b) => {
@@ -867,6 +888,293 @@ function modelConsumerListFixture(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Model API mutations (wave W05-06): model-consumer-create / -delete /
+// -update {active:true}, model-key-revoke, model-alias-list and scope-list
+// for a chosen tenant — STATEFUL per session (a create shows up in the next
+// list, a revoke/deactivate changes the row), with the server semantics read
+// from internal/handler/model_consumers.go (field set, validation texts,
+// tier and field-tier 403s, models validated through Offers, expires_at
+// against key_max_lifetime_s, label uniqueness) and model_alias_manage.go
+// (a tenant-admin reads _global + its own HOME scope, a server-admin every
+// scope). The create answer carries the reveal-once marker as the plaintext.
+// ---------------------------------------------------------------------------
+
+/** The plaintext model-consumer-create returns — must surface once and never persist (B-6). */
+export const REVEAL_MARKER = 'ctxm_TESTKEY_reveal_once_do_not_persist'
+
+/** The mock server's "now" — the contract page clock (FIXED_NOW, contract.ts). */
+const MOCK_NOW_MS = Date.parse('2026-06-29T12:00:05Z')
+
+/**
+ * gateway.key_expiry_warn default — 1 209 600 s = 14 d (go/internal/config/
+ * config.go:2660 KeyExpiryWarn): a live key expiring within this window reads
+ * as `expiring` (consumer and key, model_consumers_read.go consumerStatus /
+ * newKeyView).
+ */
+const MOCK_KEY_EXPIRY_WARN_MS = 1_209_600 * 1000
+
+interface MockAlias {
+  id: string
+  scope: string
+  name: string
+  kind: 'chat' | 'embedding' | 'rerank'
+  enabled: boolean
+}
+
+/**
+ * The alias catalog: _global chat/embed/draft + a disabled legacy; tenant A's
+ * home scope shadows chat (enabled) and draft (DISABLED — shadowing is by
+ * presence, so neither draft is offered to scope home); tenant A's shared
+ * scope shadows embed; tenant B's home scope shadows chat.
+ */
+export const MODEL_ALIASES: readonly MockAlias[] = [
+  { id: '01900000-0000-7000-8000-00000000a001', scope: '_global', name: 'chat', kind: 'chat', enabled: true },
+  { id: '01900000-0000-7000-8000-00000000a002', scope: '_global', name: 'embed', kind: 'embedding', enabled: true },
+  { id: '01900000-0000-7000-8000-00000000a003', scope: '_global', name: 'draft', kind: 'chat', enabled: true },
+  { id: '01900000-0000-7000-8000-00000000a004', scope: '_global', name: 'legacy', kind: 'chat', enabled: false },
+  { id: '01900000-0000-7000-8000-00000000b001', scope: 'home', name: 'chat', kind: 'chat', enabled: true },
+  { id: '01900000-0000-7000-8000-00000000b002', scope: 'home', name: 'draft', kind: 'chat', enabled: false },
+  { id: '01900000-0000-7000-8000-00000000c001', scope: 'shared', name: 'embed', kind: 'embedding', enabled: true },
+  { id: '01900000-0000-7000-8000-00000000d001', scope: 'globex:home', name: 'chat', kind: 'chat', enabled: true },
+]
+
+/** modelalias.Offers over MODEL_ALIASES (registry.go: own names + unshadowed _global names, winner by presence, enabled only). */
+function mockOffers(scope: string): MockAlias[] {
+  const tenantScope = scope === '' || scope.startsWith('_') ? '' : scope
+  const own = new Map(MODEL_ALIASES.filter((a) => tenantScope !== '' && a.scope === tenantScope).map((a) => [a.name, a]))
+  const global = new Map(MODEL_ALIASES.filter((a) => a.scope === '_global').map((a) => [a.name, a]))
+  const out: MockAlias[] = []
+  for (const a of own.values()) if (a.enabled) out.push(a)
+  for (const [name, a] of global) if (!own.has(name) && a.enabled) out.push(a)
+  return out.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))
+}
+
+function aliasView(a: MockAlias, writable: boolean): Record<string, unknown> {
+  return {
+    id: a.id,
+    scope: a.scope,
+    name: a.name,
+    kind: a.kind,
+    role: a.kind,
+    sensitivity: 'public',
+    policy: {},
+    description: '',
+    enabled: a.enabled,
+    created_at: '2026-06-01T08:00:00Z',
+    updated_at: '2026-06-01T08:00:00Z',
+    writable,
+  }
+}
+
+/** The fields handleModelConsumerCreate decodes (DisallowUnknownFields). */
+const CREATE_FIELDS = new Set([
+  'label', 'description', 'tenant_id', 'tenant_scope', 'kind', 'all_models', 'models', 'prompt_sensitivity',
+  'fair_weight', 'admission_lane', 'allowed_cidrs', 'allow_plaintext', 'expires_at',
+])
+const SENSITIVITY_VOCAB = ['credentials', 'personal', 'internal', 'public']
+const UUID_RE = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i
+const CIDR_RE = /^(\d{1,3}(\.\d{1,3}){3}\/\d{1,2}|[0-9a-f:]+\/\d{1,3})$/i
+
+type MockAnswer = { status: number; json: Record<string, unknown> }
+
+/** Per-session state of the W05-06 mutation mock: a mutable copy of CONSUMERS with fixed key ids. */
+class GatewayWorld {
+  consumers: MockConsumer[]
+  #seq = 0
+
+  constructor() {
+    this.consumers = CONSUMERS.map((c) => ({ ...c, keys: c.keys.map((k, n) => ({ ...k, id: mockKeyId(c, n) })) }))
+  }
+
+  #visible(role: Role, tkey: TenantKey): MockConsumer[] {
+    return role === 'server-admin' ? this.consumers : this.consumers.filter((c) => c.tenant === tkey)
+  }
+
+  /**
+   * Re-derive a mutated row's statuses the way the server does at its clock
+   * (model_consumers_read.go consumerStatus + youngestLive + newKeyView, here
+   * at MOCK_NOW_MS with MOCK_KEY_EXPIRY_WARN_MS): live = not revoked (a revoked
+   * key is already gone from `keys` — the list carries live keys only) and not
+   * expired; consumer: inactive stays, 0 live ⇒ no_key, ≥ 2 ⇒ rotating, 1
+   * expiring within the warn window ⇒ expiring, else active; key: superseded
+   * unless it is the youngest live key, else expiring within the window, else
+   * active. Seed rows that no mutation touches keep their declared statuses
+   * (the B-11 probe key a9Fq is `active` by a server clock behind the page).
+   */
+  #restatus(c: MockConsumer): void {
+    const expired = (k: MockKey) => k.expires_at !== null && Date.parse(k.expires_at) <= MOCK_NOW_MS
+    const soon = (k: MockKey) => k.expires_at !== null && Date.parse(k.expires_at) <= MOCK_NOW_MS + MOCK_KEY_EXPIRY_WARN_MS
+    c.keys = c.keys.filter((k) => !expired(k))
+    let youngest: MockKey | undefined
+    for (const k of c.keys) {
+      if (youngest === undefined || k.created_at > youngest.created_at || (k.created_at === youngest.created_at && (k.id ?? '') > (youngest.id ?? ''))) youngest = k
+    }
+    for (const k of c.keys) k.status = k !== youngest ? 'superseded' : soon(k) ? 'expiring' : 'active'
+    if (c.status === 'inactive') return
+    if (c.keys.length === 0) c.status = 'no_key'
+    else if (c.keys.length >= 2) c.status = 'rotating'
+    else c.status = soon(c.keys[0]) ? 'expiring' : 'active'
+  }
+
+  create(role: Role, tkey: TenantKey, caps: Record<string, unknown> | undefined, data: Record<string, unknown> | undefined): MockAnswer {
+    const bad = (error: string, extra: Record<string, unknown> = {}): MockAnswer => ({ status: 400, json: { success: false, error, ...extra } })
+    const forbid = (error = 'admin key required'): MockAnswer => ({ status: 403, json: { success: false, error } })
+    if (role === 'member') return forbid()
+    const policy = (caps?.model_api ?? {}) as { enabled?: boolean; self_service?: boolean; key_max_lifetime_s?: number }
+    const serverAdmin = role === 'server-admin'
+    if (!serverAdmin && !(policy.enabled === true && policy.self_service === true)) return forbid()
+    const d = data ?? {}
+    for (const k of Object.keys(d)) if (!CREATE_FIELDS.has(k)) return bad(`invalid data: json: unknown field "${k}"`)
+    const label = typeof d.label === 'string' ? d.label.trim() : ''
+    if (label === '') return bad('label is required')
+    if ([...label].length > 100) return bad('label must be at most 100 characters')
+    if (d.kind !== undefined && d.kind !== 'app' && d.kind !== 'ctx-peer') return bad('kind must be app or ctx-peer')
+    if (d.tenant_scope === '') return bad('tenant_scope must not be empty; null means _global backends only')
+    const sensitivity = (d.prompt_sensitivity as string | undefined) ?? 'credentials'
+    if (!SENSITIVITY_VOCAB.includes(sensitivity)) return bad('prompt_sensitivity must be one of credentials, personal, internal, public')
+    let cidrs: string[] | null = null
+    if (d.allowed_cidrs !== undefined && d.allowed_cidrs !== null) {
+      if (!Array.isArray(d.allowed_cidrs) || d.allowed_cidrs.length === 0) return bad('allowed_cidrs must not be empty; null means any source')
+      for (const c of d.allowed_cidrs) if (typeof c !== 'string' || !CIDR_RE.test(c)) return bad(`allowed_cidrs: "${String(c)}" is not a CIDR prefix`)
+      cidrs = d.allowed_cidrs as string[]
+    }
+    // field tiers: server-admin only even with self-service
+    if (!serverAdmin && (d.kind === 'ctx-peer' || sensitivity !== 'credentials')) return forbid()
+    // tenant binding
+    let tenant: TenantKey = tkey
+    if (typeof d.tenant_id === 'string' && d.tenant_id !== '') {
+      if (!serverAdmin) return forbid('tenant_id is server-admin only')
+      const hit = (Object.keys(TENANTS) as TenantKey[]).find((k) => TENANTS[k].id === d.tenant_id)
+      if (!hit) return { status: 404, json: { success: false, error: 'tenant not found' } }
+      tenant = hit
+    }
+    const scope = typeof d.tenant_scope === 'string' ? d.tenant_scope : null
+    if (scope !== null && !TENANTS[tenant].read.includes(scope)) return forbid('cannot create keys outside your tenant')
+    // models: every id must be offered to the consumer's own scope
+    const models: string[] = []
+    if (d.models !== undefined && d.models !== null) {
+      if (!Array.isArray(d.models)) return bad('invalid data: json: cannot unmarshal models', { param: 'models' })
+      const offered = new Set(mockOffers(scope ?? '').map((a) => a.id))
+      for (const m of d.models) {
+        if (typeof m !== 'string' || !UUID_RE.test(m)) {
+          return bad(`models: "${String(m)}" is not a model alias id — every entry must be the id of a model alias`, { param: 'models' })
+        }
+        if (!offered.has(m)) {
+          return bad(
+            `models: ${m} is not a model alias this consumer can be granted (unknown, disabled, invalid, outside its tenant_scope, or shadowed by a tenant alias of the same name)`,
+            { param: 'models' },
+          )
+        }
+        if (!models.includes(m.toLowerCase())) models.push(m.toLowerCase())
+      }
+      models.sort()
+    }
+    // expiry against key_max_lifetime_s (keyExpiry)
+    const max = policy.key_max_lifetime_s ?? 31_536_000
+    let expires: string | null = max > 0 ? new Date(MOCK_NOW_MS + max * 1000).toISOString() : null
+    if (d.expires_at !== undefined && d.expires_at !== null) {
+      const at = typeof d.expires_at === 'string' ? Date.parse(d.expires_at) : NaN
+      if (Number.isNaN(at)) return bad('invalid data: parsing time')
+      if (at <= MOCK_NOW_MS) return bad('expires_at must lie in the future')
+      if (max > 0 && at > MOCK_NOW_MS + max * 1000) return bad(`expires_at lies beyond gateway.key_max_lifetime_app (${max} s from now)`)
+      expires = new Date(at).toISOString()
+    }
+    if (this.consumers.some((c) => c.tenant === tenant && c.label === label)) {
+      return { status: 409, json: { success: false, error: 'a model consumer with this label already exists in the tenant' } }
+    }
+    this.#seq++
+    const created = new Date(MOCK_NOW_MS + this.#seq * 1000).toISOString().replace('.000Z', 'Z')
+    const id = `0190000000007000800000000000e${String(this.#seq).padStart(3, '0')}`
+    const c: MockConsumer = {
+      id,
+      tenant,
+      label,
+      kind: 'app',
+      status: 'active',
+      created_at: created,
+      last_used_at: null,
+      keys: [{ id: mockKeyId({ id }, 0), hint: `ctxm_…${REVEAL_MARKER.slice(-4)}`, status: 'active', created_at: created, expires_at: expires, last_used_at: null }],
+      keys_total: 1,
+      description: typeof d.description === 'string' ? d.description : '',
+      tenant_scope: scope,
+      all_models: d.all_models === true,
+      models,
+      prompt_sensitivity: sensitivity,
+      allowed_cidrs: cidrs,
+    }
+    this.#restatus(c)
+    this.consumers.unshift(c)
+    return { status: 200, json: { success: true, consumer: consumerView(c, serverAdmin), api_key: REVEAL_MARKER } }
+  }
+
+  deactivate(role: Role, tkey: TenantKey, data: Record<string, unknown> | undefined, cancelled: number | null): MockAnswer {
+    if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
+    const id = typeof data?.id === 'string' ? data.id : ''
+    if (id === '') return { status: 400, json: { success: false, error: 'id is required' } }
+    const c = this.#visible(role, tkey).find((x) => x.id === id)
+    if (!c) return { status: 404, json: { success: false, error: 'model consumer not found' } }
+    c.status = 'inactive'
+    c.keys = []
+    return { status: 200, json: { success: true, cancelled_inflight: cancelled } }
+  }
+
+  revoke(role: Role, tkey: TenantKey, data: Record<string, unknown> | undefined, cancelled: number | null): MockAnswer {
+    if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
+    const keyId = typeof data?.key_id === 'string' ? data.key_id : ''
+    if (keyId === '') return { status: 400, json: { success: false, error: 'key_id is required' } }
+    const c = this.#visible(role, tkey).find((x) => x.keys.some((k) => k.id === keyId))
+    if (!c) return { status: 404, json: { success: false, error: 'model key not found' } }
+    c.keys = c.keys.filter((k) => k.id !== keyId)
+    this.#restatus(c)
+    return { status: 200, json: { success: true, cancelled_inflight: cancelled } }
+  }
+
+  update(role: Role, tkey: TenantKey, caps: Record<string, unknown> | undefined, data: Record<string, unknown> | undefined): MockAnswer {
+    if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
+    const d = data ?? {}
+    for (const k of Object.keys(d)) if (k !== 'id' && k !== 'active') return { status: 400, json: { success: false, error: `unknown field "${k}" (expiry changes need model-key-rotate)` } }
+    const id = typeof d.id === 'string' ? d.id : ''
+    if (id === '') return { status: 400, json: { success: false, error: 'id is required' } }
+    const c = this.#visible(role, tkey).find((x) => x.id === id)
+    if (!c) return { status: 404, json: { success: false, error: 'model consumer not found' } }
+    if (d.active === true && c.status === 'inactive') {
+      const policy = (caps?.model_api ?? {}) as { enabled?: boolean; self_service?: boolean }
+      // reactivating is granting: tenant-admin only with self-service, never on a peer
+      if (role !== 'server-admin' && (c.kind === 'ctx-peer' || !(policy.enabled === true && policy.self_service === true))) {
+        return { status: 403, json: { success: false, error: 'admin key required' } }
+      }
+      c.status = 'no_key' // reactivating brings back no key (I-K8)
+    } else if (d.active === false) {
+      c.status = 'inactive'
+      c.keys = []
+    }
+    return { status: 200, json: { success: true, consumer: consumerView(c, role === 'server-admin') } }
+  }
+
+  aliases(role: Role, tkey: TenantKey): MockAnswer {
+    if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
+    const home = TENANTS[tkey].home
+    const rows =
+      role === 'server-admin'
+        ? MODEL_ALIASES
+        : MODEL_ALIASES.filter((a) => a.scope === '_global' || (home !== '' && !home.startsWith('_') && a.scope === home))
+    const sorted = [...rows].sort((a, b) => (a.scope + '\u0000' + a.name < b.scope + '\u0000' + b.name ? -1 : 1))
+    return {
+      status: 200,
+      json: { success: true, model_aliases: sorted.map((a) => aliasView(a, role === 'server-admin' || a.scope === home)), count: sorted.length },
+    }
+  }
+}
+
+/** scope-list for a server-admin's chosen tenant (top-level id, handleScopeList); null = not this branch. */
+function scopeListForTenant(role: Role, id: string | undefined): MockAnswer | null {
+  if (role !== 'server-admin' || typeof id !== 'string' || id === '') return null
+  const hit = (Object.keys(TENANTS) as TenantKey[]).find((k) => TENANTS[k].id === id)
+  const rows = hit ? TENANTS[hit].read.map((scope) => ({ scope, block_count: 0, key_count: 0, tenant_id: TENANTS[hit].id })) : []
+  return { status: 200, json: { success: true, scopes: rows } }
+}
+
 /** seedSession options — named + exported since PV4 (the PageContract seed builds on it). */
 export interface SeedOptions {
   role: Role
@@ -895,6 +1203,11 @@ export interface SeedOptions {
   /** Capability bag threaded into whoamiFor (S14 — Achse-04 feature gates; since
    * W05-05 also the model_api policy object, modelApiCapabilities()). */
   capabilities?: Record<string, unknown>
+  /**
+   * What model-key-revoke / model-consumer-delete answer as cancelled_inflight
+   * (W05-06 toast, V-01-e). Default null — the server's word until W01-8.
+   */
+  cancelledInflight?: number | null
 }
 
 /** One recorded /api/** request (mock-call recorder, design 06 §4.1 deny dimension). */
@@ -987,6 +1300,9 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
   // tenant id) so a following tenant-get / tenant-list reflects the toggle — the
   // suspend→suspended→activate e2e only proves anything if the read paths move.
   const tenantStatus: Record<string, string> = {}
+  // W05-06: the stateful model consumer world of this session.
+  const gateway = new GatewayWorld()
+  const cancelled = opts.cancelledInflight === undefined ? null : opts.cancelledInflight
 
   await page.route('**/health', (route: Route) =>
     route.fulfill({ json: { status: 'ok', services: { db: 'ok', embed: 'ok' } } }),
@@ -1170,8 +1486,19 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
       // Model API consumer list (W05-05): role/state-aware, so it is served
       // here rather than in the role-agnostic manageFixture layer.
       if (action === 'model-consumer-list') {
-        const r = modelConsumerListFixture(opts.role, tkey, data, state, empty)
+        const r = modelConsumerListFixture(opts.role, tkey, data, state, empty, gateway.consumers)
         return route.fulfill({ status: r.status, json: r.json })
+      }
+      // Model API mutations + picker reads (W05-06), stateful per session.
+      {
+        let r: MockAnswer | null = null
+        if (action === 'model-consumer-create') r = gateway.create(opts.role, tkey, opts.capabilities, data)
+        else if (action === 'model-consumer-delete') r = gateway.deactivate(opts.role, tkey, data, cancelled)
+        else if (action === 'model-consumer-update') r = gateway.update(opts.role, tkey, opts.capabilities, data)
+        else if (action === 'model-key-revoke') r = gateway.revoke(opts.role, tkey, data, cancelled)
+        else if (action === 'model-alias-list') r = gateway.aliases(opts.role, tkey)
+        else if (action === 'scope-list') r = scopeListForTenant(opts.role, id)
+        if (r !== null) return route.fulfill({ status: r.status, json: r.json })
       }
       // --- A3b stateful tenant lifecycle (suspend/activate/delete) ---
       // tenant-update records the status; tenant-get/-list below reflect it.

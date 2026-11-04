@@ -34,7 +34,7 @@ It speaks **MCP, a CLI, and a plain HTTP API**, ships an embedded web UI, and is
 | **Multi-tenancy** | Three-level tenant/scope/block isolation, grants, quotas, self-service onboarding — [multi-tenancy](docs/multi-tenancy.md) |
 | **Issues & forge sync** | Per-project issue/comment corpus (own scope = own repo), kanban board, policy-validated workflow-status transitions, and GitHub pull/push sync — [api](docs/api.md#project-issues-read-surface) · [cli](docs/cli.md#issues) |
 | **Sealed secrets** | AES-256-GCM provider credentials + trust×sensitivity egress gating — [security](docs/security.md) |
-| **Web UI** | Embedded Svelte 5 admin SPA: settings, graph, corpus, status, chat, issues, type-registry admin — [development](docs/development.md#web-ui-svelte-5--typescript--vite-bun) |
+| **Web UI** | Embedded Svelte 5 admin SPA: settings, graph, corpus, status, chat, issues, type-registry admin, model API consumers (create with a reveal-once key, revoke) — [development](docs/development.md#web-ui-svelte-5--typescript--vite-bun) |
 | **MCP / CLI / HTTP** | Three access paths to the same store, OAuth 2.1 for remote MCP — [api](docs/api.md) |
 
 ## Quick install
