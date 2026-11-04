@@ -354,9 +354,11 @@ func intFromAny(v any) (int, bool) {
 // side maps config.DispatchConfig onto this struct and calls UpdateSettings on
 // reload; dispatch never imports config (layering rule).
 type Settings struct {
-	// Enabled false degrades every Acquire to a pass-through — the emergency
-	// stop (E-U3: default true; the waves are behavior-neutral through
-	// policy emptiness, a second activation truth would drift, B7).
+	// Enabled false degrades every in-house Acquire (interactive,
+	// background) to a pass-through and refuses the external class with
+	// ErrExternalNotOffered — the emergency stop (E-U3: default true; the
+	// waves are behavior-neutral through policy emptiness, a second
+	// activation truth would drift, B7).
 	Enabled bool
 	// BackgroundQueueMax caps waiting background acquires per target;
 	// above it Acquire fails fast with ErrQueueFull. 0 = uncapped.

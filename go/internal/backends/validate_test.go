@@ -776,10 +776,10 @@ func TestValidateForeignLoadProbe(t *testing.T) {
 
 // TestValidateDispatchExternalLimits (A03-W3, design/03 §3.2): the write path
 // checks the FORM of the three external limits keys — internal_reserved_slots
-// and external_max_inflight an integer >= 1, external_offer a bool — as a
-// limits.<key> FieldError (422) instead of a later derivation WARN. Checks
-// across rows (the merge against slots, the target kind) stay in the
-// derivation; other limits keys stay unvalidated as before.
+// and external_max_inflight an integer 1..math.MaxInt32, external_offer a
+// bool — as a limits.<key> FieldError (422) instead of a later derivation
+// WARN. Checks across rows (the merge against slots, the target kind) stay in
+// the derivation; other limits keys stay unvalidated as before.
 func TestValidateDispatchExternalLimits(t *testing.T) {
 	for _, ok := range []map[string]any{
 		{"internal_reserved_slots": float64(1)},
@@ -789,6 +789,9 @@ func TestValidateDispatchExternalLimits(t *testing.T) {
 		{"external_max_inflight": float64(3), "external_offer": true},
 		{"slots": "unvalidated as before"},
 		{"internal_reserved_slots": 2, "external_max_inflight": int64(4), "external_offer": true},
+		// The upper bound of the derivation (dispatch limitCount) is inclusive.
+		{"external_max_inflight": float64(math.MaxInt32), "external_offer": true},
+		{"internal_reserved_slots": math.MaxInt32},
 	} {
 		b := validBackend()
 		b.Limits = ok
@@ -815,6 +818,14 @@ func TestValidateDispatchExternalLimits(t *testing.T) {
 		{"external_max_inflight", math.Inf(1)},
 		{"internal_reserved_slots", 0},
 		{"external_max_inflight", int64(-1)},
+		// Review 2 F-B: above math.MaxInt32 the derivation refuses (dispatch
+		// limitCount), so the write path does too — not a stored row that
+		// silently offers nothing.
+		{"internal_reserved_slots", 1e19},
+		{"internal_reserved_slots", float64(3000000000)},
+		{"external_max_inflight", 1e19},
+		{"external_max_inflight", float64(math.MaxInt32 + 1)},
+		{"external_max_inflight", int64(math.MaxInt32 + 1)},
 	} {
 		b := validBackend()
 		b.Limits = map[string]any{bad.key: bad.val}

@@ -154,7 +154,7 @@ func ValidateBackend(b *Backend) (warnings []string, errs []FieldError) {
 // the same names internal/dispatch derives policy from (policy.go
 // limitInternalReserved / limitExternalOffer / limitExternalMaxInflight;
 // dispatch is a leaf and backends does not import it, the owner side pins
-// the pair: events TestDispatchExternalLimitsWritePathMatchesDerivation).
+// the pair: events TestDispatchExternalLimitsWritePathAndDerivationAgree).
 var (
 	dispatchExternalIntLimits  = []string{"internal_reserved_slots", "external_max_inflight"}
 	dispatchExternalBoolLimits = []string{"external_offer"}
@@ -162,8 +162,8 @@ var (
 
 // validateDispatchExternalLimits checks the FORM of the external limits keys
 // on the write path (design/03 §3.2): internal_reserved_slots and
-// external_max_inflight an integer >= 1, external_offer a bool — a 422 at
-// write time instead of a WARN at the next policy derivation. What needs
+// external_max_inflight an integer 1..math.MaxInt32, external_offer a bool —
+// a 422 at write time instead of a WARN at the next policy derivation. What needs
 // more than this one row (the merge against slots, R <= slots-1, the target
 // kind) stays in the derivation. Every other limits key stays unvalidated
 // as before.
@@ -174,7 +174,7 @@ func validateDispatchExternalLimits(b *Backend) (errs []FieldError) {
 			continue
 		}
 		if !positiveInteger(v) {
-			errs = append(errs, FieldError{"limits." + key, "must be an integer >= 1"})
+			errs = append(errs, FieldError{"limits." + key, "must be an integer from 1 to 2147483647"})
 		}
 	}
 	for _, key := range dispatchExternalBoolLimits {
@@ -602,16 +602,20 @@ func validateCarriers(b *Backend) (errs []FieldError) {
 	return errs
 }
 
-// positiveInteger reports whether a decoded limits value is an integer >= 1
-// (JSON numbers decode as float64; int forms come from in-process callers).
+// positiveInteger reports whether a decoded limits value is an integer
+// 1..math.MaxInt32 (JSON numbers decode as float64; int forms come from
+// in-process callers) — the rule of the derivation's limitCount
+// (dispatch/external.go, maxLimitCount = math.MaxInt32): a value the
+// derivation refuses is a 422 here, never a stored row that silently offers
+// nothing. The upper bound also excludes +Inf; NaN fails n >= 1.
 func positiveInteger(v any) bool {
 	switch n := v.(type) {
 	case float64:
-		return n >= 1 && n == math.Trunc(n) && !math.IsInf(n, 1)
+		return n >= 1 && n <= math.MaxInt32 && n == math.Trunc(n)
 	case int:
-		return n >= 1
+		return n >= 1 && n <= math.MaxInt32
 	case int64:
-		return n >= 1
+		return n >= 1 && n <= math.MaxInt32
 	}
 	return false
 }

@@ -182,8 +182,10 @@ func (d *Dispatcher) Close() {
 }
 
 // UpdateSettings hot-swaps the config-derived knobs. A flip to
-// Enabled=false drains every waiter as pass-through immediately (B2: the
-// emergency stop must never leave goroutines stuck behind a dead gate). The
+// Enabled=false drains every in-house waiter as pass-through immediately and
+// ends every external waiter with ErrExternalNotOffered (B2: the emergency
+// stop must never leave goroutines stuck behind a dead gate; X9: never an
+// external pass-through). The
 // rank table resolves here once per swap (rank.go: zero ⇒ default, invalid ⇒
 // default + one WARN); the next wake reads it.
 func (d *Dispatcher) UpdateSettings(s Settings) {

@@ -1478,8 +1478,10 @@ type TenantConfig struct {
 // settings reload owner maps this struct onto dispatch.Settings.
 type DispatchConfig struct {
 	// Enabled is the emergency stop, NOT a feature flag (E-U3): false
-	// degrades every Acquire to a pass-through = exactly today's behavior.
-	// The code waves are behavior-neutral through policy emptiness anyway;
+	// degrades every in-house Acquire (interactive, background) to a
+	// pass-through = exactly today's behavior; the external class is
+	// refused instead (ErrExternalNotOffered, never a pass-through). The
+	// code waves are behavior-neutral through policy emptiness anyway;
 	// a default-off switch would be a second activation truth (B7 analog).
 	// Deliberately non-strict: the exact-match bool parser cannot malform,
 	// so a strict tag would be an unreachable classification (see

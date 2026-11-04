@@ -379,6 +379,59 @@ func TestExternalCapLadderC8(t *testing.T) {
 	})
 }
 
+// TestExternalCapLadderNonDefaultValues pins the wiring of the three external
+// queue caps, the aggregate cap dispatch.external_queue_max included (review
+// 2, F-A): consumer 2, tenant 3, aggregate 4 while the interactive caps keep
+// their defaults 8/16/64. A ladder that reads an interactive knob for the
+// external queue, drops the external aggregate cap or compares it off by one
+// queues a waiter here that the external settings refuse; the C8 gate above
+// runs on the defaults, where the consumer caps of both classes are 8. A hot
+// raise of the aggregate cap acts on the next acquire.
+func TestExternalCapLadderNonDefaultValues(t *testing.T) {
+	s := DefaultSettings()
+	s.ExternalQueuePerConsumer, s.ExternalQueuePerTenant, s.ExternalQueueMax = 2, 3, 4
+	if s.InteractiveQueuePerPrincipal <= 2 || s.InteractiveQueuePerTenant <= 3 || s.InteractiveQueueMax <= 4 {
+		t.Fatalf("interactive caps %d/%d/%d must stay above the external ones for this gate to tell them apart",
+			s.InteractiveQueuePerPrincipal, s.InteractiveQueuePerTenant, s.InteractiveQueueMax)
+	}
+	d, _ := newTestDispatcher(t, s, partitionPolicy(2, 1))
+	occ := mustAcquire(t, d, xctx(context.Background(), "occ", "tenant-x"), externalReq())
+	defer occ.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := make(chan admission, 16)
+	queue := func(consumer, tenant string, want int) {
+		t.Helper()
+		startWaiter(xctx(ctx, consumer, tenant), d, consumer, externalReq(), ch)
+		waitFor(t, fmt.Sprintf("%s of %s queued as external waiter %d", consumer, tenant, want),
+			func() bool { return waitingExternal(d) == want })
+	}
+	refuse := func(consumer, tenant string, want error, why string) {
+		t.Helper()
+		if _, _, err := acquireWithin(t, d, xctx(ctx, consumer, tenant), externalReq(), 500*time.Millisecond); !errors.Is(err, want) {
+			t.Fatalf("%s of %s: %v, want %v (%s)", consumer, tenant, err, want, why)
+		}
+	}
+	queue("c1", "tenant-a", 1)
+	queue("c1", "tenant-a", 2)
+	refuse("c1", "tenant-a", ErrPrincipalSaturated, "external_queue_per_consumer 2, not the interactive 8")
+	queue("c2", "tenant-a", 3)
+	refuse("c3", "tenant-a", ErrTenantSaturated, "external_queue_per_tenant 3, not the interactive 16")
+	queue("c4", "tenant-b", 4)
+	refuse("c5", "tenant-c", ErrTargetSaturated, "external_queue_max 4, not the interactive 64")
+	if ts := target(t, d); ts.ExternalRejects.Cap != 3 || ts.External.Waiting != 4 || ts.Interactive.Waiting != 0 {
+		t.Fatalf("cap=%d external waiting=%d interactive waiting=%d, want 3/4/0",
+			ts.ExternalRejects.Cap, ts.External.Waiting, ts.Interactive.Waiting)
+	}
+	s.ExternalQueueMax = 5
+	d.UpdateSettings(s)
+	queue("c5", "tenant-c", 5)
+	refuse("c6", "tenant-d", ErrTargetSaturated, "the hot-raised external_queue_max 5")
+	if got := target(t, d).ExternalRejects.Cap; got != 4 {
+		t.Fatalf("ExternalRejects.Cap = %d, want 4", got)
+	}
+}
+
 // TestExternalHeldIsTheDetectorSum pins the foreign-load detector contract
 // (A-E5 no. 3, handler/foreign_load.go heldOf): TargetSnapshot.Held stays the
 // sum of ALL slot-holding leases, internal and external — two external and

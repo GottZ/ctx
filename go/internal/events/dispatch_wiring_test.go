@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"log/slog"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -220,6 +221,10 @@ func TestDispatchExternalLimitsWritePathAndDerivationAgree(t *testing.T) {
 		{"internal_reserved_slots", "two"}, {"internal_reserved_slots", float64(0)}, {"internal_reserved_slots", 1.5},
 		{"external_offer", "yes"},
 		{"external_max_inflight", float64(0)}, {"external_max_inflight", -1.0},
+		// Review 2 F-B, the other direction: a value the derivation refuses
+		// above math.MaxInt32 is refused on the write path as well.
+		{"internal_reserved_slots", 1e19}, {"internal_reserved_slots", float64(3000000000)},
+		{"external_max_inflight", float64(math.MaxInt32 + 1)},
 	} {
 		b := base(map[string]any{bad.key: bad.val}, lan)
 		_, errs := backends.ValidateBackend(&b)
