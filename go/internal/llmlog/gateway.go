@@ -77,7 +77,9 @@ const (
 	// truncation marker included.
 	gatewayBodyCap = 64 << 10
 	// gatewayAliasMax is the alias name limit of the alias registry
-	// (^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$); the rollup keeps 100 of it.
+	// (^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$); the rollup keeps 100 of it,
+	// so aliases differing only after the 100th character share one rollup
+	// cell (migration 159; docs/operations.md "Migration 159").
 	gatewayAliasMax = 128
 	// gatewayHopMax is the deepest federation hop (design/04 §4.6); the
 	// rollup clamps to the same range.
@@ -187,14 +189,14 @@ type gatewayWire struct {
 // consumer_id column and metadata.gw. It is the ONLY setter of both
 // (census TestGatewayConsumerIDCensus), the pattern of StampPrompt. A row
 // names one caller: a knowledge api_key_id left on the entry is cleared and
-// logged at ERROR (design/01 B17) — kept, it would get the row refused by
+// logged at ERROR, throttled (design/01 B17) — kept, it would get the row refused by
 // ck_llm_log_one_identity, and the rollup, the tenant spend and the tenant
 // llmlog filter read api_key_id as a knowledge key. A metadata.consumer_id
 // (the transitional spelling of design/02 rev. 0) is removed: the column is
 // the attribution.
 func (e *Entry) StampGateway(consumerID string, g Gateway) {
 	if e.APIKeyID != "" {
-		slog.Error("llmlog: a gateway row carried a knowledge api_key_id — cleared, the row is attributed to the consumer only (B17)",
+		wiringError(&lastKeyWarn, "llmlog: a gateway row carried a knowledge api_key_id — cleared, the row is attributed to the consumer only (B17)",
 			"pipeline", e.Pipeline)
 		e.APIKeyID = ""
 	}
@@ -352,18 +354,19 @@ type GatewayRow struct {
 // is tenant-overridable, and a tenant must not open the seal of a
 // credentials-class /v1 row for itself (design/06 §4.6, design/04 R-06-1).
 // A row without a consumer or with a pipeline outside the vocabulary is a
-// wiring defect: logged at ERROR and still built, so the defect is visible
-// in the log and the row is not lost.
+// wiring defect: logged at ERROR (throttled per defect) and still built, so
+// the defect is visible in the log and the row is not lost.
 func GatewayEntry(r GatewayRow) Entry {
 	e := r.Telemetry
 	e.Pipeline = r.Pipeline
 	g := r.Gateway
 	g.Op = GatewayOp(r.Pipeline)
 	if g.Op == "" {
-		slog.Error("llmlog: a gateway row names a pipeline outside the gateway vocabulary", "pipeline", r.Pipeline)
+		wiringError(&lastPipelineWarn, "llmlog: a gateway row names a pipeline outside the gateway vocabulary",
+			"pipeline", cleanText(r.Pipeline, gatewayTokenMax))
 	}
 	if r.ConsumerID == "" {
-		slog.Error("llmlog: a gateway row without a consumer — the request is unattributed", "pipeline", r.Pipeline)
+		wiringError(&lastConsumerWarn, "llmlog: a gateway row without a consumer — the request is unattributed", "pipeline", r.Pipeline)
 	}
 	e.StampGateway(r.ConsumerID, g)
 
@@ -393,10 +396,31 @@ func GatewayEntry(r GatewayRow) Entry {
 	return e.Slimmed(false)
 }
 
-// lastSensWarn throttles the ERROR of bodiesAllowed like the loss WARN
-// (lossWarnInterval): a writer that forgot the sensitivity forgets it on
-// every row.
-var lastSensWarn atomic.Int64
+// The wiring-defect ERRORs of the gateway row, one throttle per defect: a
+// writer that gets its wiring wrong gets it wrong on every row, and one
+// line per request is the flood B-06-22 keeps out of the log. Each defect
+// logs at most once per lossWarnInterval (unix nanos of the last line; 0 =
+// none yet); the rows themselves are still built and written.
+var (
+	lastKeyWarn      atomic.Int64 // StampGateway cleared a knowledge api_key_id
+	lastPipelineWarn atomic.Int64 // pipeline outside the gateway vocabulary
+	lastConsumerWarn atomic.Int64 // row without a consumer
+	lastSensWarn     atomic.Int64 // bodiesAllowed: undefined sensitivity
+)
+
+// wiringError logs msg at ERROR unless last's defect was logged within
+// lossWarnInterval — the throttle of warnLoss, per defect.
+func wiringError(last *atomic.Int64, msg string, args ...any) {
+	now := time.Now().UnixNano()
+	prev := last.Load()
+	if prev != 0 && now-prev < int64(lossWarnInterval) {
+		return
+	}
+	if !last.CompareAndSwap(prev, now) {
+		return // another goroutine took this interval's line
+	}
+	slog.Error(msg+" (throttled per defect)", args...)
+}
 
 // bodiesAllowed is the fail-closed half of the seal that Slimmed cannot
 // give: Slimmed drops the bodies of exactly "credentials", while an empty
@@ -409,11 +433,8 @@ func bodiesAllowed(sensitivity, pipeline string) bool {
 	if backends.ValidSensitivity(s) {
 		return s.Rank() < backends.SensCredentials.Rank()
 	}
-	now := time.Now().UnixNano()
-	if last := lastSensWarn.Load(); (last == 0 || now-last >= int64(lossWarnInterval)) && lastSensWarn.CompareAndSwap(last, now) {
-		slog.Error("llmlog: a gateway row without a defined required_sensitivity — bodies not stored (fail-closed as credentials)",
-			"pipeline", pipeline, "required_sensitivity", cleanText(sensitivity, gatewayTokenMax))
-	}
+	wiringError(&lastSensWarn, "llmlog: a gateway row without a defined required_sensitivity — bodies not stored (fail-closed as credentials)",
+		"pipeline", pipeline, "required_sensitivity", cleanText(sensitivity, gatewayTokenMax))
 	return false
 }
 

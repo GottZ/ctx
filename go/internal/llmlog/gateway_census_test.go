@@ -27,6 +27,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -359,5 +360,55 @@ func TestGatewayCensusDetects(t *testing.T) {
 		if probes < 3 {
 			t.Fatalf("%s: %d probe file(s), want the full set", dir, probes)
 		}
+	}
+}
+
+// TestGatewayEntryReturnsSlimmedFalse pins K10's invariant syntactically
+// (review 2 F-1): GatewayEntry ends in exactly `return e.Slimmed(false)` —
+// one return, one Slimmed call, the literal false — never the tenant's
+// devmode. Behaviourally the seal is unobservable at the constructor:
+// bodiesAllowed already withholds credentials bodies, so a Slimmed(true)
+// mutant passes every row test; this pin is what turns it red (and
+// TestBodiesAllowed is what turns the other layer's mutant red).
+func TestGatewayEntryReturnsSlimmedFalse(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "gateway.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "GatewayEntry" {
+			fn = fd
+		}
+	}
+	if fn == nil || fn.Body == nil || len(fn.Body.List) == 0 {
+		t.Fatal("gateway.go declares no GatewayEntry with a body")
+	}
+	var returns []*ast.ReturnStmt
+	var slims []*ast.CallExpr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.ReturnStmt:
+			returns = append(returns, v)
+		case *ast.CallExpr:
+			if sel, ok := v.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Slimmed" {
+				slims = append(slims, v)
+			}
+		}
+		return true
+	})
+	last, _ := fn.Body.List[len(fn.Body.List)-1].(*ast.ReturnStmt)
+	if len(returns) != 1 || last == nil || last != returns[0] || len(last.Results) != 1 {
+		t.Fatalf("GatewayEntry has %d return statement(s); want exactly one, as its last statement, with one result", len(returns))
+	}
+	call, ok := last.Results[0].(*ast.CallExpr)
+	if !ok || len(slims) != 1 || call != slims[0] {
+		t.Fatalf("GatewayEntry returns %s and calls Slimmed %d time(s); want `return e.Slimmed(false)` and no other Slimmed call",
+			types.ExprString(last.Results[0]), len(slims))
+	}
+	recv, _ := call.Fun.(*ast.SelectorExpr).X.(*ast.Ident)
+	arg, _ := call.Args[0].(*ast.Ident)
+	if recv == nil || recv.Name != "e" || len(call.Args) != 1 || arg == nil || arg.Name != "false" {
+		t.Fatalf("GatewayEntry returns %s, want e.Slimmed(false) — the literal false, never a devmode value (K10)", types.ExprString(call))
 	}
 }

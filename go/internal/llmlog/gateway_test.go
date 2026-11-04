@@ -14,6 +14,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,6 +176,7 @@ func captureSlog(t *testing.T, level slog.Level) *bytes.Buffer {
 // says so at ERROR (the CHECK would refuse the row otherwise).
 func TestStampGatewayClearsAPIKeyID(t *testing.T) {
 	buf := captureSlog(t, slog.LevelDebug)
+	resetWiringThrottles(t)
 	e := Entry{Pipeline: PipelineGatewayChat, APIKeyID: gwTestKnowKey}
 	e.StampGateway(gwTestConsumer, Gateway{Op: GatewayOpChat})
 	if e.APIKeyID != "" || e.ConsumerID != gwTestConsumer {
@@ -373,8 +375,7 @@ func TestGatewayEntryBodyPolicy(t *testing.T) {
 // interval — the fail-closed seal must not hide the wiring defect.
 func TestGatewayEntryUndefinedSensitivityLogs(t *testing.T) {
 	buf := captureSlog(t, slog.LevelDebug)
-	lastSensWarn.Store(0)
-	t.Cleanup(func() { lastSensWarn.Store(0) })
+	resetWiringThrottles(t)
 	for range 3 {
 		if e := GatewayEntry(gwRow(BodyLoggingFull, nil, "")); e.RequestUser != "" || e.ResponseContent != "" {
 			t.Fatalf("bodies stored for an undefined sensitivity")
@@ -500,6 +501,7 @@ func TestGatewayEntryKeepsTelemetry(t *testing.T) {
 // ERROR, still written (losing the row would hide the defect too).
 func TestGatewayEntryFlagsMissingIdentity(t *testing.T) {
 	buf := captureSlog(t, slog.LevelDebug)
+	resetWiringThrottles(t)
 	r := gwRow(BodyLoggingNone, nil, "internal")
 	r.ConsumerID = ""
 	e := GatewayEntry(r)
@@ -515,5 +517,73 @@ func TestGatewayEntryFlagsMissingIdentity(t *testing.T) {
 	}
 	if _, ok := gwObject(t, e)["op"]; ok {
 		t.Errorf("an unknown pipeline got an op")
+	}
+}
+
+// resetWiringThrottles clears the per-defect ERROR throttles for one test
+// and again after it, so the order of tests cannot hide a line.
+func resetWiringThrottles(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		for _, a := range []*atomic.Int64{&lastKeyWarn, &lastPipelineWarn, &lastConsumerWarn, &lastSensWarn} {
+			a.Store(0)
+		}
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// TestGatewayWiringErrorsThrottled (review 2 F-3): a caller that loops over
+// a wiring defect gets one ERROR per defect and interval, not one per row —
+// the flood B-06-22 keeps out of the log. Each defect has its own throttle,
+// so one defect does not silence another.
+func TestGatewayWiringErrorsThrottled(t *testing.T) {
+	buf := captureSlog(t, slog.LevelDebug)
+	resetWiringThrottles(t)
+	for range 50 {
+		r := gwRow(BodyLoggingFull, nil, "")
+		r.Pipeline = "gateway-responses"
+		r.ConsumerID = ""
+		r.Telemetry.APIKeyID = gwTestKnowKey
+		if e := GatewayEntry(r); e.APIKeyID != "" || e.RequestUser != "" {
+			t.Fatalf("a throttled defect changed the row: api_key %q, body %q", e.APIKeyID, e.RequestUser)
+		}
+	}
+	out := buf.String()
+	if n := strings.Count(out, "level=ERROR"); n != 4 {
+		t.Fatalf("%d ERROR lines for 50 rows with four defects, want 4 (one per defect): %q", n, out)
+	}
+	for _, want := range []string{"api_key_id", "outside the gateway vocabulary", "without a consumer", "without a defined required_sensitivity"} {
+		if strings.Count(out, want) != 1 {
+			t.Errorf("defect %q logged %d time(s), want 1", want, strings.Count(out, want))
+		}
+	}
+	// The interval elapsed: the next row logs again.
+	lastConsumerWarn.Store(time.Now().Add(-lossWarnInterval).UnixNano())
+	buf.Reset()
+	r := gwRow(BodyLoggingNone, nil, "internal")
+	r.ConsumerID = ""
+	GatewayEntry(r)
+	if n := strings.Count(buf.String(), "level=ERROR"); n != 1 {
+		t.Fatalf("%d ERROR line(s) after the interval, want 1", n)
+	}
+}
+
+// TestBodiesAllowed pins the fail-closed body layer on its own (review 2
+// F-1): GatewayEntry seals in two layers — bodiesAllowed decides whether a
+// body is stored at all, Slimmed(false) drops credentials bodies — and each
+// layer hides the other's mutation in every end-to-end test. Here only the
+// first layer is in play: bodies for the defined classes below credentials,
+// never for credentials, an empty or an unknown class.
+func TestBodiesAllowed(t *testing.T) {
+	captureSlog(t, slog.LevelDebug)
+	resetWiringThrottles(t)
+	for sens, want := range map[string]bool{
+		"public": true, "personal": true, "internal": true,
+		"credentials": false, "": false, "Credentials": false, " public": false, "secret": false,
+	} {
+		if got := bodiesAllowed(sens, PipelineGatewayChat); got != want {
+			t.Errorf("bodiesAllowed(%q) = %v, want %v", sens, got, want)
+		}
 	}
 }
