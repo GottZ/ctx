@@ -132,7 +132,7 @@ func (c *Client) Do(method, path string, body any) ([]byte, int, error) {
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, c.readLimit()))
 	if err != nil {
-		return nil, 0, fmt.Errorf("read response: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
 	}
 	return respBody, resp.StatusCode, nil
 }
