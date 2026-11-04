@@ -3,9 +3,11 @@
 // loop test of a parsed chain (grammar.go), the hop token (token.go), the
 // monotony rules of the hop headers (merge.go), the stamp of outgoing wire
 // calls with its context carriers (stamp.go) and the evaluation of a peer's
-// answer (observe.go). Nothing outside the boot calls it yet: the wire sites
-// (F-W4), the Tier-F context (F-W6), the loop guard of incoming requests
-// (F-W8) and the learned state (F-W11) build on it. It is a leaf on
+// answer (observe.go). The wire sites stamp and observe with it (F-W4); the
+// loop guard of incoming requests (handler.LoopGuard, F-W8) parses and
+// checks the inbound chain, and the per-router Ingress records that it is
+// mounted in front of the model API; the Tier-F context (F-W6), the ingress
+// policy (F-W9) and the learned state (F-W11) build on it. It is a leaf on
 // purpose: llm, embed, rerank, backends, httpx and handler import it, so it
 // imports nothing of ctx and nothing third-party — the standard library only
 // (.golangci.yml rule fedhop-leaf).

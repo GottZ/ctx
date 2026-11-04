@@ -65,7 +65,8 @@ const inventoryDeclaredBody = 1 << 30
 const inventoryAdminKey = "f8f82026110400000000000000000000deadbeefdeadbeefdeadbeefdeadbeef"
 
 type inventoryFixture struct {
-	router   http.Handler
+	router   *chi.Mux
+	ingress  *fedhop.Ingress
 	pool     *pgxpool.Pool
 	ident    fedhop.Identity
 	adminKey string
@@ -103,8 +104,10 @@ func inventoryRouter(t *testing.T) inventoryFixture {
 		t.Fatalf("model key: %v", err)
 	}
 	ident := fedhop.NewIdentity("00000000-0000-4000-8000-0000000000f8", bytes.Repeat([]byte{0xf8}, 32))
-	router := NewRouter(fedhop.WithIdentity(ctx, ident), pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d)
-	return inventoryFixture{router: router, pool: pool, ident: ident, adminKey: inventoryAdminKey, modelKey: model.Plaintext()}
+	// newRouter, the constructor main uses: the fixture also carries the
+	// router's own ingress registration (FR2-2 pins it).
+	router, ingress := newRouter(fedhop.WithIdentity(ctx, ident), pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d)
+	return inventoryFixture{router: router, ingress: ingress, pool: pool, ident: ident, adminKey: inventoryAdminKey, modelKey: model.Plaintext()}
 }
 
 var routeParam = regexp.MustCompile(`\{[^}]*\}`)
@@ -127,13 +130,9 @@ func inventoried(route string) bool {
 
 func TestLoopGuardRouteInventory(t *testing.T) {
 	fx := inventoryRouter(t)
-	mux, ok := fx.router.(chi.Routes)
-	if !ok {
-		t.Fatalf("NewRouter returned %T, not chi.Routes", fx.router)
-	}
 	type route struct{ method, pattern string }
 	var routes []route
-	if err := chi.Walk(mux, func(method, pattern string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+	if err := chi.Walk(fx.router, func(method, pattern string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		if inventoried(pattern) {
 			routes = append(routes, route{method, pattern})
 		}
@@ -258,5 +257,50 @@ func TestLoopGuardMaxDepthIsHot(t *testing.T) {
 		if st := put(bad); st != http.StatusUnprocessableEntity {
 			t.Errorf("PUT federation.max_depth=%s = %d, want 422 (V43)", bad, st)
 		}
+	}
+}
+
+// TestNewRouterRegistersIngressOnlyWithModelGroup (Fremd-Review 2, FR2-2)
+// pins the production wiring of the registration: the router main serves is
+// registered exactly when it mounts a model group (/v1 or /v2 — only
+// mountModelGroup marks, and it puts the LoopGuard in front). Without one,
+// PUT /api/settings/gateway.enabled {"value":true} through that same router
+// is a 409 and leaves no override row; with one (W02-05 onwards) the write
+// is accepted. A registration that newRouter set on its own (fail-open) or a
+// settings handler wired to another router's marker would break the first
+// half before any model route exists.
+func TestNewRouterRegistersIngressOnlyWithModelGroup(t *testing.T) {
+	fx := inventoryRouter(t)
+	modelRoutes := 0
+	if err := chi.Walk(fx.router, func(_, pattern string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if strings.HasPrefix(pattern, "/v1/") || strings.HasPrefix(pattern, "/v2/") || pattern == "/v1" || pattern == "/v2" {
+			modelRoutes++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if got, want := fx.ingress.Registered(), modelRoutes > 0; got != want {
+		t.Fatalf("ingress registered = %v with %d model routes — want registered exactly when a model group is mounted", got, modelRoutes)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/api/settings/gateway.enabled", strings.NewReader(`{"value":true}`))
+	req.Header.Set("Authorization", "Bearer "+fx.adminKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	fx.router.ServeHTTP(rec, req)
+	var rows int
+	if err := fx.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM context_settings WHERE key = 'gateway.enabled'`).Scan(&rows); err != nil {
+		t.Fatalf("row probe: %v", err)
+	}
+	if modelRoutes == 0 {
+		if rec.Code != http.StatusConflict || rows != 0 {
+			t.Fatalf("no model group: PUT gateway.enabled=true = %d (%s), %d override rows — want 409 and none", rec.Code, rec.Body.Bytes(), rows)
+		}
+		return
+	}
+	if rec.Code != http.StatusOK || rows != 1 {
+		t.Fatalf("model group mounted: PUT gateway.enabled=true = %d (%s), %d override rows — want 200 and one", rec.Code, rec.Body.Bytes(), rows)
 	}
 }

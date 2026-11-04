@@ -6,7 +6,9 @@ package config
 // boot record under its own group.
 
 import (
+	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/fedhop"
@@ -81,4 +83,30 @@ func TestBootDumpCarriesFederation(t *testing.T) {
 		return
 	}
 	t.Fatalf("boot dump has no federation group: %v", args)
+}
+
+// guard:"federation-ingress" means "turning this key on needs the registered
+// federation ingress" — a property of a bool switch. On any other type the
+// handler's raw == "true" check would never fire and the key would carry a
+// guard nobody enforces, so buildEntry refuses it (Fremd-Review 2, FR2-3).
+type guardIngressIntGroup struct {
+	X int `key:"legacy.guard_ingress_int" env:"-" default:"0" mut:"hot" guard:"federation-ingress" tenancy:"global-only"`
+}
+
+type guardIngressBoolGroup struct {
+	X bool `key:"legacy.guard_ingress_bool" env:"-" default:"false" mut:"hot" guard:"federation-ingress" tenancy:"global-only"`
+}
+
+func TestGuardFederationIngressOnlyOnBool(t *testing.T) {
+	_, err := buildRegistry(reflect.TypeOf(guardIngressIntGroup{}))
+	if err == nil {
+		t.Fatal(`buildRegistry accepted guard:"federation-ingress" on an int field — the guard needs a bool switch`)
+	}
+	if want := `guard "federation-ingress" needs a bool field`; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
+	}
+	built, err := buildRegistry(reflect.TypeOf(guardIngressBoolGroup{}))
+	if err != nil || len(built) != 1 || built[0].Guard != GuardFederationIngress {
+		t.Fatalf("bool field with the guard: built %v, err %v — want one entry carrying the guard", built, err)
+	}
 }
