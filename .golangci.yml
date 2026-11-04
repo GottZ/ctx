@@ -320,6 +320,24 @@ linters:
             - pkg: "math/rand/v2$"
               desc: "the hop token's nonce and the instance key are secrets: their only randomness source is crypto/rand — math/rand/v2 (also ChaCha8/PCG) is seedable and therefore predictable, and no test can tell its output from crypto/rand's"
 
+        # internal/federation (F-W9, design/04 §4.5–§4.7): the ingress policy
+        # of the model API — PeerIngress, ResolvePolicy, ScanRaise,
+        # FilterChain. It takes the consumer through an injected accessor and
+        # policy values as arguments, so it needs neither the HTTP handlers
+        # nor the store (config is refused by config-layering above): a
+        # handler or store import here would let the policy reach around the
+        # door it sits behind. The mesh test package fedtest is exempt — it
+        # assembles the real stack (handler.LoopGuard) on purpose.
+        federation-layering:
+          files:
+            - "**/go/internal/federation/**"
+            - "!**/go/internal/federation/fedtest/**"
+          deny:
+            - pkg: "github.com/GottZ/ctx/internal/handler$"
+              desc: "internal/federation takes the consumer through an injected accessor (PeerIngressConfig.Consumer) — importing handler inverts the layering of the /v1 stack (cmd/ctxd wires handler.ConsumerAuthFromContext in; design/04 §4.6, F-W9)"
+            - pkg: "github.com/GottZ/ctx/internal/store$"
+              desc: "internal/federation is pure policy over the request — no database: the consumer row arrives as auth.ConsumerAuth, the learned instances as a map (design/04 §4.5–§4.7, F-W9)"
+
         # evalscore stays TOOLING (design/06 §4.7, masterplan K18 + A-15).
         # internal/evalscore is the measurement vocabulary of the gold bench —
         # nDCG, MRR, recall, rank diversity. The server answers a query; it

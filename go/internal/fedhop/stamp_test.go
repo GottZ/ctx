@@ -632,14 +632,54 @@ func TestIngressRegistrationIsPerRouter(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Add(2)
-		go func() { defer wg.Done(); a.MarkLoopGuard() }()
+		go func() { defer wg.Done(); a.MarkLoopGuard(); a.MarkPeerIngress() }()
 		go func() { defer wg.Done(); _ = b.Registered() }()
 	}
 	wg.Wait()
 	if !a.Registered() {
-		t.Error("MarkLoopGuard did not register a")
+		t.Error("MarkLoopGuard + MarkPeerIngress did not register a")
 	}
 	if b.Registered() {
 		t.Error("marking a registered b — the registration must be per router")
+	}
+}
+
+// TestIngressRegisteredNeedsLoopGuardAndPeerIngress is G8 (F-W9, design/04
+// §4.6 "Registrierung als Mechanismus", §7.2 no. 1 "ab F-W9 zusätzlich
+// PeerIngress"): a router whose model group carries the LoopGuard but not the
+// PeerIngress is not registered — /v1 behind it would serve without the
+// fail-closed policy and with an app's Ctx-Class. Either mark alone is not
+// enough; both are.
+func TestIngressRegisteredNeedsLoopGuardAndPeerIngress(t *testing.T) {
+	guardOnly, peerOnly, both := &Ingress{}, &Ingress{}, &Ingress{}
+	guardOnly.MarkLoopGuard()
+	peerOnly.MarkPeerIngress()
+	both.MarkLoopGuard()
+	both.MarkPeerIngress()
+	if guardOnly.Registered() {
+		t.Error("LoopGuard alone reads as registered — the PeerIngress is part of the condition since F-W9")
+	}
+	if peerOnly.Registered() {
+		t.Error("PeerIngress alone reads as registered")
+	}
+	if !both.Registered() {
+		t.Error("LoopGuard and PeerIngress marked, not registered")
+	}
+}
+
+// TestInboundFromIsTheContextReader (F-W9): InboundFrom reads what
+// WithInbound put there; a context without one is the zero Inbound (no
+// chain, no budget — Wait reports none).
+func TestInboundFromIsTheContextReader(t *testing.T) {
+	if in := InboundFrom(context.Background()); in.Hop != nil || in.Class != "" {
+		t.Fatalf("InboundFrom(empty) = %+v, want the zero Inbound", in)
+	}
+	if _, ok := InboundFrom(context.Background()).Wait(); ok {
+		t.Error("the zero Inbound reports a wait budget")
+	}
+	want := Inbound{Hop: []string{"a"}, Class: "interactive", MaxWait: time.Second, HasMaxWait: true}
+	got := InboundFrom(WithInbound(context.Background(), want))
+	if got.Class != want.Class || len(got.Hop) != 1 || got.MaxWait != time.Second || !got.HasMaxWait {
+		t.Errorf("InboundFrom(WithInbound(%+v)) = %+v", want, got)
 	}
 }

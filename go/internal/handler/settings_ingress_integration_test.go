@@ -73,9 +73,13 @@ func TestGatewayEnableRequiresIngress_Integration(t *testing.T) {
 	}
 	row := func() (string, bool) { return scopeRowValue(t, pool, "gateway.enabled", store.GlobalScope) }
 
+	// plain carries the LoopGuard mark only — since F-W9 that is not a
+	// registered ingress (G8): the PeerIngress is part of the condition.
 	plain := &fedhop.Ingress{}
+	plain.MarkLoopGuard()
 	registered := &fedhop.Ingress{}
 	registered.MarkLoopGuard()
+	registered.MarkPeerIngress()
 	routerWithout, routerWith := newRouter(plain, admin), newRouter(registered, admin)
 
 	if rec := do(routerWithout, http.MethodPut, `{"value":true}`); rec.Code != http.StatusConflict {

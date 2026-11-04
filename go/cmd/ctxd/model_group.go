@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/oai"
@@ -38,12 +39,13 @@ type modelGroupDeps struct {
 	// router's own — NewRouter's, never a process-wide one.
 	ingress *fedhop.Ingress
 	// maxDepth is the federation.max_depth getter of the group's LoopGuard
-	// (federationMaxDepthGetter). The guard itself is no dependency: it is
-	// fixed in the group between the door and inner (K14), so no mount can
-	// leave it out.
+	// (federationMaxDepthGetter). The guard itself is no dependency, nor is
+	// the PeerIngress behind it (F-W9): both are fixed in the group between
+	// the door and inner (K14), so no mount can leave them out.
 	maxDepth func() int
-	// inner are the stages after the door and the LoopGuard, in order (body
-	// cap, in-flight budget; design/02 §4.2, W02-05ff.).
+	// inner are the stages after the door, the LoopGuard and the
+	// PeerIngress, in order (body cap, in-flight budget; design/02 §4.2,
+	// W02-05ff.).
 	inner []func(http.Handler) http.Handler
 	// routes are the group's endpoints; the handlers come from here, so
 	// the door gate can put a probe behind every route (K-02-2).
@@ -58,18 +60,21 @@ type modelRoute struct {
 
 // mountModelGroup mounts prefix as a sub-router whose every request — a
 // registered route, an unknown path, a wrong method, OPTIONS — passes
-// access log → recovery → gate → door → LoopGuard → inner stages before
-// anything answers (design/01 §4.2, B4; design/06 §4.6; masterplan K14:
-// EnabledGate → ModelAuth → LoopGuard → body cap/parse). Three stages are
-// fixed by construction, no mount can leave them out:
+// access log → recovery → gate → door → LoopGuard → PeerIngress → inner
+// stages before anything answers (design/01 §4.2, B4; design/06 §4.6;
+// masterplan K14: EnabledGate → ModelAuth → LoopGuard → PeerIngress → body
+// cap/parse). Four stages are fixed by construction, no mount can leave them
+// out:
 //
 //   - oai.Recover right inside the access log: a panic anywhere behind it is
 //     the 503 internal_error of the envelope (K5, R-02-14), counted by the
 //     access log as a refusal (W06-9 handover), never the plain-text 500 of
 //     the house Recovery outside;
-//   - the LoopGuard, answering in the OpenAI envelope; once the group is
-//     mounted, the router's ingress is registered (design/04 §4.6
-//     "Registrierung als Mechanismus");
+//   - the LoopGuard, answering in the OpenAI envelope;
+//   - the PeerIngress (F-W9) behind it: it reads the door's consumer, cleans
+//     the inbound federation state and resolves the request's policy; once
+//     the group is mounted, the router's ingress is registered with both
+//     marks (design/04 §4.6 "Registrierung als Mechanismus");
 //   - the catch-alls (K-02-2, owner 02): an unknown path is oai.NotFound and
 //     a wrong method oai.MethodNotAllowed with Allow — both behind gate and
 //     door like every route, so nothing under the prefix falls through to
@@ -83,8 +88,9 @@ func mountModelGroup(r chi.Router, prefix string, deps modelGroupDeps) {
 		panic("mountModelGroup " + prefix + ": the access log, the gate, the model-key door, the ingress registration and the federation.max_depth getter are required")
 	}
 	loopGuard := handler.LoopGuard(handler.LoopGuardConfig{MaxDepth: deps.maxDepth, Envelope: handler.LoopGuardOpenAI})
+	peerIngress := federation.PeerIngress(federation.PeerIngressConfig{Consumer: handler.ConsumerAuthFromContext})
 	r.Route(prefix, func(g chi.Router) {
-		g.Use(deps.access.Handler, oai.Recover, deps.gate, deps.door.Handler, loopGuard)
+		g.Use(deps.access.Handler, oai.Recover, deps.gate, deps.door.Handler, loopGuard, peerIngress)
 		g.Use(deps.inner...)
 		g.NotFound(oai.NotFound)
 		g.MethodNotAllowed(methodNotAllowed(g, routeMethods(deps.routes)))
@@ -93,6 +99,7 @@ func mountModelGroup(r chi.Router, prefix string, deps modelGroupDeps) {
 		}
 	})
 	deps.ingress.MarkLoopGuard()
+	deps.ingress.MarkPeerIngress()
 }
 
 // routeMethods are the distinct methods of routes, sorted.

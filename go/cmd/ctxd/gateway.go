@@ -70,7 +70,8 @@ func federationMaxDepthGetter(cfgStore *config.Store) func() int {
 // protection" (F-W8, design/04 §4.6, §7.2 no. 1): gateway.enabled
 // effectively true — from CTX_GATEWAY_ENABLED or a settings override, the
 // snapshot does not care which — while the router's federation ingress is
-// not registered refuses the boot. The settings write of the key is the
+// not registered refuses the boot; since F-W9 registered means the LoopGuard
+// and the PeerIngress (fedhop.Ingress). The settings write of the key is the
 // other half (handler/settings.go, 409); a psql write is caught here at the
 // next start.
 //
@@ -87,7 +88,7 @@ func gatewayIngressAssert(c *config.Config, in *fedhop.Ingress) error {
 		remedy = "remove the settings row (psql: DELETE FROM context_settings WHERE key = 'gateway.enabled'), or — with CTX_GATEWAY_ENABLED unset or false — start once with " +
 			settings.EnvDisable + "=1 and DELETE /api/settings/gateway.enabled"
 	}
-	return fmt.Errorf("gateway.enabled is true (source: %s) but no model group with its federation LoopGuard is mounted — the model API cannot be enabled before its federation ingress is mounted; %s, or run a build that mounts /v1",
+	return fmt.Errorf("gateway.enabled is true (source: %s) but no model group with its federation ingress (LoopGuard and PeerIngress) is mounted — the model API cannot be enabled before its federation ingress is mounted; %s, or run a build that mounts /v1",
 		src, remedy)
 }
 
