@@ -124,8 +124,12 @@ func TestWeightAboveCapacityIsNotOffered(t *testing.T) {
 			if !errors.Is(err, ErrExternalNotOffered) {
 				t.Fatalf("w=%d: err=%v, want ErrExternalNotOffered", tc.weight, err)
 			}
-			if took >= 5*time.Millisecond {
-				t.Fatalf("w=%d: refusal took %v, want < 5ms", tc.weight, took)
+			// "Not offered" is decided before the enqueue and before W5's budget:
+			// no waiter, no timer. The bound only has to sit far below any wait
+			// the budget would allow; 50 ms (as in A03-W5) leaves room for
+			// scheduler noise on a loaded runner (one 5.31 ms sample at load 40).
+			if took >= 50*time.Millisecond {
+				t.Fatalf("w=%d: refusal took %v, want < 50ms (no enqueue, no timer)", tc.weight, took)
 			}
 			if _, _, err := d.TryAcquire(xctx(context.Background(), "c1", "tenant-a"), weightedReq(tc.weight)); !errors.Is(err, ErrExternalNotOffered) {
 				t.Fatalf("w=%d try-acquire: err=%v, want ErrExternalNotOffered (not ErrWouldBlock)", tc.weight, err)
