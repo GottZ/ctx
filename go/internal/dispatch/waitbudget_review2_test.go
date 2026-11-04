@@ -118,7 +118,9 @@ func TestWaitBudgetExpiryCancelsRunCtx(t *testing.T) {
 	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if after := runtime.NumGoroutine(); after != before {
+	// Only growth is a leak: goroutines of earlier tests in the package (waiters
+	// ending at their budget, reapers of closed dispatchers) may exit meanwhile.
+	if after := runtime.NumGoroutine(); after > before {
 		t.Fatalf("goroutines %d → %d after 20 expiries under a live non-stdlib parent ctx (runCtx not canceled)", before, after)
 	}
 }
