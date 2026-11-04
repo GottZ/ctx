@@ -61,7 +61,8 @@
      * focusable control: once such a table overflows (390 px) a keyboard user
      * could not scroll it, axe `scrollable-region-focusable` (WCAG 2.1.1). The
      * region is named "<label>, scrollable" so it never repeats the name of the
-     * card landmark around it.
+     * card landmark around it; without a `label` it is named "Scrollable table",
+     * so the landmark is never unnamed (Copilot review on #119).
      * Default off: a table with row controls is reachable through them, and
      * every existing consumer keeps its exact markup (W05-05 /gateway list).
      */
@@ -95,7 +96,7 @@
     class="scroll"
     tabindex={focusableScroll ? 0 : undefined}
     role={focusableScroll ? 'region' : undefined}
-    aria-label={focusableScroll && label ? `${label}, scrollable` : undefined}
+    aria-label={focusableScroll ? (label ? `${label}, scrollable` : 'Scrollable table') : undefined}
   >
     <table class="ctx-table" class:valign-baseline={valign === 'baseline'} aria-label={label}>
       <thead>{@render head()}</thead>
