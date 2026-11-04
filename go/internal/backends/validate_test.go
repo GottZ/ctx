@@ -63,6 +63,36 @@ func TestHeaderDenylist(t *testing.T) {
 	}
 }
 
+// TestHeaderDenylistFederationPrefixes — F-W4 (design/04 §4.3 Härtung, §5.2
+// S4): the hop contract's prefixes Ctx- and X-Ctx- are reserved on every
+// provider class, in any case, with a message of their own (no credential
+// wording: the header carries no secret, ctx sets it on the wire itself).
+// Names that only contain the prefix elsewhere pass.
+func TestHeaderDenylistFederationPrefixes(t *testing.T) {
+	for _, class := range []string{ProviderGeneric, ProviderLlamaCpp, ProviderOpenRouter} {
+		for _, h := range []string{"Ctx-Hop", "ctx-hop", "CTX-PATH", "Ctx-Instance", "X-Ctx-Foo", "x-ctx-dispatch-class", " Ctx-Hop"} {
+			b := validBackend()
+			b.ProviderClass = class
+			b.ExtraHeaders = map[string]string{h: "x"}
+			_, errs := ValidateBackend(&b)
+			var msg string
+			for _, e := range errs {
+				if e.Field == "extra_headers" {
+					msg = e.Message
+				}
+			}
+			if !strings.Contains(msg, "reserved federation header") || strings.Contains(msg, "credential") {
+				t.Errorf("%s header %q: extra_headers error %q, want the reserved-federation-header message", class, h, msg)
+			}
+		}
+	}
+	b := validBackend()
+	b.ExtraHeaders = map[string]string{"Ctxfoo": "x", "X-Ctxt": "x", "My-Ctx-Hop": "x", "Accept-Ctx": "x"}
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "extra_headers") {
+		t.Errorf("headers that merely contain the prefix rejected: %+v", errs)
+	}
+}
+
 func TestExtraBodyCredentialKeys(t *testing.T) {
 	b := validBackend()
 	b.ExtraBody = map[string]any{"provider": map[string]any{"api_key": "sk-…"}}

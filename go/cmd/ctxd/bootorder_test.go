@@ -84,3 +84,71 @@ func TestMainLoadsIdentityRightAfterMigrations(t *testing.T) {
 			at["identity"], at["scheduler"], at["router"])
 	}
 }
+
+// TestMainInstallsPoolObserverBeforeScheduler — F-W4 (design/04 §4.2, §4.4):
+// the backend pool is the boot's fedhop observer, installed by the statement
+// right after the pool is built and before the scheduler spawns the detached
+// contexts whose wire calls report to it, and before NewRouter. Red when the
+// call is missing or moves after `go scheduler.Run` or `NewRouter`.
+func TestMainInstallsPoolObserverBeforeScheduler(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	var body []ast.Stmt
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "main" && fn.Recv == nil {
+			body = fn.Body.List
+		}
+	}
+	at := map[string]int{}
+	for i, st := range body {
+		ast.Inspect(st, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := c.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, _ := sel.X.(*ast.Ident)
+			switch {
+			case x != nil && x.Name == "backends" && sel.Sel.Name == "NewPool":
+				at["pool"] = i
+			case x != nil && x.Name == "fedhop" && sel.Sel.Name == "SetDefaultObserver" && len(c.Args) == 1:
+				if a, ok := c.Args[0].(*ast.Ident); ok && a.Name == "backendPool" {
+					at["observer"] = i
+				}
+			case x != nil && x.Name == "scheduler" && sel.Sel.Name == "Run":
+				if _, isGo := st.(*ast.GoStmt); isGo {
+					at["scheduler"] = i
+				}
+			}
+			return true
+		})
+		if es, ok := st.(*ast.AssignStmt); ok {
+			for _, r := range es.Rhs {
+				if c, ok := r.(*ast.CallExpr); ok {
+					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "NewRouter" {
+						at["router"] = i
+					}
+				}
+			}
+		}
+	}
+	for _, k := range []string{"pool", "observer", "scheduler"} {
+		if _, ok := at[k]; !ok {
+			t.Fatalf("main(): no top-level statement for %s found (have %v)", k, at)
+		}
+	}
+	if at["observer"] != at["pool"]+1 {
+		t.Errorf("main(): fedhop.SetDefaultObserver(backendPool) is statement %d, backends.NewPool %d — it must follow the pool directly", at["observer"], at["pool"])
+	}
+	if at["observer"] > at["scheduler"] {
+		t.Errorf("main(): observer at statement %d after go scheduler.Run at %d", at["observer"], at["scheduler"])
+	}
+	if r, ok := at["router"]; ok && at["observer"] > r {
+		t.Errorf("main(): observer at statement %d after NewRouter at %d", at["observer"], r)
+	}
+}

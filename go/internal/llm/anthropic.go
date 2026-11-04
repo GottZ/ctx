@@ -69,6 +69,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
@@ -369,11 +370,31 @@ func buildAnthropicBody(req anthropicRequest, opts Options, b *backends.Backend)
 // the core headers LAST so a row edited past the credential-carrier
 // denylist can never override the key derived from api_key_ref or the
 // version pin. Exported for the backend-test probe, which must send the
-// same headers the wire does.
+// same row and core headers the wire does; the probe carries no hop stamp
+// (its WireProbe stamp is a later wave's) — the two wires stamp through
+// setAnthropicWireHeaders.
 func SetAnthropicHeaders(req *http.Request, b *backends.Backend) {
 	for k, v := range b.ExtraHeaders {
 		req.Header.Set(k, v)
 	}
+	setAnthropicCoreHeaders(req, b)
+}
+
+// setAnthropicWireHeaders writes the headers of the two Messages API wires:
+// the row's ExtraHeaders, then the hop stamp for target hop (fedhop.Stamp,
+// which first removes every Ctx-/X-Ctx- header of the row), then the core
+// headers last — ExtraHeaders → Stamp → core (design/04 §4.1).
+func setAnthropicWireHeaders(req *http.Request, b *backends.Backend, hop fedhop.Target) {
+	for k, v := range b.ExtraHeaders {
+		req.Header.Set(k, v)
+	}
+	fedhop.Stamp(req.Context(), req.Header, hop)
+	setAnthropicCoreHeaders(req, b)
+}
+
+// setAnthropicCoreHeaders sets the Messages API's core headers: content
+// type, the version pin and the key from api_key_ref.
+func setAnthropicCoreHeaders(req *http.Request, b *backends.Backend) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", AnthropicVersion)
 	if b.APIKey != "" {
@@ -453,13 +474,17 @@ func chatAnthropic(ctx context.Context, b backends.Backend, systemPrompt, userPr
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	SetAnthropicHeaders(httpReq, &b)
+	hop := b.HopTarget(fedhop.WireChat)
+	setAnthropicWireHeaders(httpReq, &b, hop)
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), httpReq, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, anthropicStatusError(resp)

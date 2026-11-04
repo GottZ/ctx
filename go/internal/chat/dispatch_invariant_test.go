@@ -171,49 +171,56 @@ func newWireServer(t *testing.T, wireHits *int64) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(wireHits, 1)
 		body, _ := io.ReadAll(r.Body)
-		switch r.URL.Path {
-		case "/api/chat": // client.go:190 (ollama non-stream)
-			fmt.Fprint(w, `{"message":{"role":"assistant","content":"ok"},"eval_count":5,"prompt_eval_count":10}`)
-		case "/v1/chat/completions": // client.go:263 (openai non-stream) OR stream.go:288
-			if bytes.Contains(body, []byte(`"stream":true`)) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprint(w, invariantSSE)
-				return
-			}
-			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
-		case "/api/embed": // embed.go:144 (ollama)
-			fmt.Fprintf(w, `{"embeddings":[[%s]],"prompt_eval_count":7}`, vec)
-		case "/v1/embeddings": // embed.go:185 (openai)
-			fmt.Fprintf(w, `{"data":[{"embedding":[%s]}]}`, vec)
-		case "/v1/messages": // anthropic.go (non-stream) OR anthropic_stream.go
-			if bytes.Contains(body, []byte(`"stream":true`)) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"usage\":{\"input_tokens\":10}}}\n\n"+
-					"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"+
-					"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n"+
-					"data: {\"type\":\"message_stop\"}\n\n")
-				return
-			}
-			fmt.Fprint(w, `{"id":"msg_1","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`)
-		case "/v1/rerank": // rerank.go:96
-			var req struct {
-				Documents []string `json:"documents"`
-			}
-			_ = json.Unmarshal(body, &req)
-			results := make([]map[string]any, len(req.Documents))
-			for i := range req.Documents {
-				results[i] = map[string]any{"index": i, "relevance_score": float64(len(req.Documents) - i)}
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"results": results,
-				"usage":   map[string]any{"prompt_tokens": 11},
-			})
-		default:
-			t.Errorf("unexpected wire path %q — a new inference wire site escaped the gate", r.URL.Path)
-		}
+		serveWireShape(t, w, r, body, vec)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// serveWireShape answers one request in the shape of its inference wire
+// (shared by the MW6 count server and the F-W4 capture server,
+// wire_hop_capture_test.go). An unexpected path fails the test loudly.
+func serveWireShape(t *testing.T, w http.ResponseWriter, r *http.Request, body []byte, vec string) {
+	switch r.URL.Path {
+	case "/api/chat": // client.go:190 (ollama non-stream)
+		fmt.Fprint(w, `{"message":{"role":"assistant","content":"ok"},"eval_count":5,"prompt_eval_count":10}`)
+	case "/v1/chat/completions": // client.go:263 (openai non-stream) OR stream.go:288
+		if bytes.Contains(body, []byte(`"stream":true`)) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, invariantSSE)
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+	case "/api/embed": // embed.go:144 (ollama)
+		fmt.Fprintf(w, `{"embeddings":[[%s]],"prompt_eval_count":7}`, vec)
+	case "/v1/embeddings": // embed.go:185 (openai)
+		fmt.Fprintf(w, `{"data":[{"embedding":[%s]}]}`, vec)
+	case "/v1/messages": // anthropic.go (non-stream) OR anthropic_stream.go
+		if bytes.Contains(body, []byte(`"stream":true`)) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"usage\":{\"input_tokens\":10}}}\n\n"+
+				"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"+
+				"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n"+
+				"data: {\"type\":\"message_stop\"}\n\n")
+			return
+		}
+		fmt.Fprint(w, `{"id":"msg_1","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`)
+	case "/v1/rerank": // rerank.go:96
+		var req struct {
+			Documents []string `json:"documents"`
+		}
+		_ = json.Unmarshal(body, &req)
+		results := make([]map[string]any, len(req.Documents))
+		for i := range req.Documents {
+			results[i] = map[string]any{"index": i, "relevance_score": float64(len(req.Documents) - i)}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": results,
+			"usage":   map[string]any{"prompt_tokens": 11},
+		})
+	default:
+		t.Errorf("unexpected wire path %q — a new inference wire site escaped the gate", r.URL.Path)
+	}
 }
 
 func invariantBackend(host string, proto backends.Protocol) backends.Backend {
@@ -376,6 +383,107 @@ var wirePin = map[string]int{
 	"embed/embed.go":          2, // /api/embed + /v1/embeddings
 	"rerank/rerank.go":        1, // /v1/rerank
 	"llm/passthrough.go":      2, // /v1/chat/completions (gateway ChatRaw + ChatRawStream, W02-06)
+}
+
+// stampPin is the static half of the hop-stamp census (F-W4, design/04 §4.3
+// "Zensus, zweistufig"): per wire file the number of wire sites that stamp
+// their request — fedhop.Stamp directly, or a call of a stamp route
+// (stampRoutes) — and hand the answer to fedhop.Observe. stampPin ≡ wirePin:
+// the same keys, so a wire file without a stamp entry is red, and the same
+// counts, because every wire site stamps and observes exactly once. Whoever
+// adds a wire file adds it here and to hopDrivers (wire_hop_capture_test.go),
+// whose capture census proves on the wire what this one counts in the source.
+var stampPin = map[string]int{
+	"llm/client.go":           2, // chatOllama + chatOpenAI, through setChatHeaders
+	"llm/stream.go":           1, // ChatStream, through setChatHeaders
+	"llm/anthropic.go":        1, // chatAnthropic, through setAnthropicWireHeaders
+	"llm/anthropic_stream.go": 1, // chatStreamAnthropic, through setAnthropicWireHeaders
+	"embed/embed.go":          2, // embedOllama + embedOpenAI, fedhop.Stamp directly
+	"rerank/rerank.go":        1, // Score, fedhop.Stamp directly
+	"llm/passthrough.go":      2, // ChatRaw + ChatRawStream, through setChatHeaders
+}
+
+// stampRoutes are the header helpers that carry the one fedhop.Stamp of the
+// sites calling them — row extra_headers, then the stamp, then the core
+// headers — keyed by name, with the file that declares them. A call of a
+// route counts as the calling site's stamp; the route's own fedhop.Stamp
+// does not count again.
+var stampRoutes = map[string]string{
+	"setChatHeaders":          "llm/client.go",
+	"setAnthropicWireHeaders": "llm/anthropic.go",
+}
+
+// censusStampSites counts, per pinned wire file, the stamp calls of its sites
+// (a stamp-route call, or a fedhop.Stamp outside a route body) and its
+// fedhop.Observe calls; routes is the number of fedhop.Stamp calls inside
+// each route body. Comments do not count (parseWireFile drops them).
+func censusStampSites(t *testing.T) (stamps, observes, routes map[string]int) {
+	t.Helper()
+	stamps, observes, routes = map[string]int{}, map[string]int{}, map[string]int{}
+	for rel := range wirePin {
+		f := parseWireFile(t, rel)
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			route := ""
+			if stampRoutes[fn.Name.Name] == rel && fn.Recv == nil {
+				route = fn.Name.Name
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if id, ok := call.Fun.(*ast.Ident); ok && stampRoutes[id.Name] != "" {
+					stamps[rel]++
+				}
+				switch recv, name := selectorCall(call); {
+				case recv == "fedhop" && name == "Stamp" && route != "":
+					routes[route]++
+				case recv == "fedhop" && name == "Stamp":
+					stamps[rel]++
+				case recv == "fedhop" && name == "Observe":
+					observes[rel]++
+				}
+				return true
+			})
+		}
+	}
+	return stamps, observes, routes
+}
+
+// TestStampPinMatchesWirePin is the static gate of the hop stamp (F-W4 (a)):
+// stampPin ≡ wirePin, every pinned wire file carries as many stamp calls and
+// as many fedhop.Observe calls as it has wire sites, and every stamp route
+// stamps exactly once. A site whose stamp is removed, a new wire file without
+// a stamp entry, or a route that loses its fedhop.Stamp turns it red.
+func TestStampPinMatchesWirePin(t *testing.T) {
+	for file, n := range wirePin {
+		if got, ok := stampPin[file]; !ok || got != n {
+			t.Errorf("stampPin[%s] = %d (present %v), wirePin says %d — every wire file is stamped at each of its sites", file, got, ok, n)
+		}
+	}
+	for file := range stampPin {
+		if _, ok := wirePin[file]; !ok {
+			t.Errorf("stampPin names %s, which wirePin does not — the two pins carry the same keys", file)
+		}
+	}
+	stamps, observes, routes := censusStampSites(t)
+	for file, want := range stampPin {
+		if stamps[file] != want {
+			t.Errorf("%s: %d stamped wire site(s) in the source, stampPin says %d (a site sends without fedhop.Stamp)", file, stamps[file], want)
+		}
+		if observes[file] != want {
+			t.Errorf("%s: %d fedhop.Observe call(s) in the source, stampPin says %d (a site drops the answer headers unread)", file, observes[file], want)
+		}
+	}
+	for name, file := range stampRoutes {
+		if routes[name] != 1 {
+			t.Errorf("stamp route %s (%s) carries %d fedhop.Stamp call(s), want exactly 1", name, file, routes[name])
+		}
+	}
 }
 
 // wirePackages are the packages the census scans. internal/oai is in it with

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -136,6 +137,9 @@ func Score(ctx context.Context, b backends.Backend, model, query string, docs []
 	if err != nil {
 		return nil, 0, fmt.Errorf("rerank: create request: %w", err)
 	}
+	// No row extra_headers on the rerank wire; the hop stamp, then the core.
+	hop := b.HopTarget(fedhop.WireRerank)
+	fedhop.Stamp(reqCtx, req.Header, hop)
 	req.Header.Set("Content-Type", "application/json")
 	if b.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+b.APIKey)
@@ -146,6 +150,9 @@ func Score(ctx context.Context, b backends.Backend, model, query string, docs []
 		return nil, 0, fmt.Errorf("rerank: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(reqCtx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, 0, fmt.Errorf("rerank: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
