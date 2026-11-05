@@ -48,8 +48,9 @@ func externalWaitBudget(set Settings, req Request, now time.Time, sHat time.Dura
 // (> 0) for an external class, or ErrWaitExpired when that budget is already
 // ≤ 0 (reason predicted, counted; the acquire is never queued and never
 // touches the cap ladder; the error carries the Retry-After of its own
-// position, RejectionError). The prediction ŵ against this budget runs after
-// the push, before the enqueue wake (predictAfterPushLocked, A03-W6).
+// position, RejectionError). The prediction ŵ against what is left of this
+// budget runs after the push, before the enqueue wake (predictAfterPushLocked,
+// A03-W6).
 func (d *Dispatcher) waitBudgetLocked(st *targetState, w *waiter, req Request, now time.Time) (time.Duration, error) {
 	if !w.class.External() || w.cont {
 		return 0, nil

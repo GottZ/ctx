@@ -358,7 +358,7 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 			// now and fit (A03-W4 review 4 FR4-1). The wake hands the pick
 			// its units (it may admit w itself; the wait below then
 			// returns at once) — only for a waiter that stays (review 3 C1).
-			if err = d.predictAfterPushLocked(st, w, budget); err == nil {
+			if err = d.predictAfterPushLocked(st, w, budget, time.Now()); err == nil {
 				d.wakeLocked(st)
 			}
 		}

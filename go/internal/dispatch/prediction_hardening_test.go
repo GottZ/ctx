@@ -611,18 +611,20 @@ func TestRefusedNewcomerIsNoEvent(t *testing.T) {
 //   - waiting tenants count: L_p50 5 s, fresh leases ⇒ ŵ = r̂ + 5 s ≈ 10 s >
 //     5 s ⇒ predicted, Retry-After 10 s (without the waiting tenants, T_w = 1,
 //     it would be one round, ŵ = r̂ < 5 s, and wait);
-//   - boundary: overdue oldest lease (r̂ = 0), L_p50 5 s ⇒ ŵ = 0 + 5 s =
-//     MaxWait exactly ⇒ it waits (ŵ ≤ budget, not <).
+//   - arrival budget: overdue oldest lease (r̂ = 0), L_p50 5 s ⇒ ŵ = 0 + 5 s =
+//     MaxWait exactly — but the wait-budget timer counts from the arrival,
+//     so at the decision less than MaxWait is left ⇒ predicted, Retry-After
+//     5 s (the exact boundary ŵ = left waits: TestPredictionComparesTheBudgetLeft).
 func TestQueuedPositionDecides(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		age  time.Duration
 		l50  time.Duration
-		ra   time.Duration // 0: the newcomer waits
+		ra   time.Duration
 	}{
 		{"overdue oldest lease", 40 * time.Second, 10 * time.Second, 10 * time.Second},
 		{"waiting tenants count", 0, 5 * time.Second, 10 * time.Second},
-		{"boundary", 40 * time.Second, 5 * time.Second, 0},
+		{"arrival budget", 40 * time.Second, 5 * time.Second, 5 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := budgetSettings(5 * time.Second)
@@ -646,20 +648,6 @@ func TestQueuedPositionDecides(t *testing.T) {
 			startWaiter(fairXctx(ctx, "y", "tY", 1), d, "Y", externalReq(), ch)
 			waitQueued(t, d, ch, 2, "Y queued (cold)")
 			seedLeases(d, testOrigin, waitRingK, tc.l50)
-			if tc.ra == 0 {
-				nch := make(chan admission, 1)
-				startWaiter(fairXctx(ctx, "n", "tN", 1), d, "N", externalReq(), nch)
-				waitQueued(t, d, nch, 3, "N waits at ŵ = budget")
-				if rej := target(t, d).ExternalRejects; rej != (ExternalRejectStats{}) {
-					t.Fatalf("rejects %+v, want none", rej)
-				}
-				cancel()
-				for i := 0; i < 2; i++ {
-					recvAdmission(t, ch, "waiter ends")
-				}
-				recvAdmission(t, nch, "N ends")
-				return
-			}
 			start := time.Now()
 			l, _, err := d.Acquire(fairXctx(bg, "n", "tN", 1), externalReq())
 			el := time.Since(start)
@@ -909,4 +897,136 @@ func TestPredictedRefusalRestoresRecordWeight(t *testing.T) {
 // fairPrincipalKey is the record key of consumer of tenant.
 func fairPrincipalKey(consumer, tenant string) string {
 	return Principal{ConsumerID: consumer, TenantID: tenant, ConsumerKind: "app"}.identityKey()
+}
+
+// externalWaiterAt is an external acquire of consumer (tenant, fair weight 1)
+// that arrived at arrived — the white-box acquire of the budget-left pin,
+// which picks the instant the decision reads.
+func externalWaiterAt(consumer, tenant string, arrived time.Time) *waiter {
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	return &waiter{
+		class:     ClassExternal,
+		principal: Principal{ConsumerID: consumer, TenantID: tenant, ConsumerKind: "app", FairWeight: 1},
+		role:      "test",
+		enqueued:  arrived,
+		weight:    1,
+		runCtx:    runCtx,
+		cancel:    cancel,
+		admitCh:   make(chan struct{}),
+	}
+}
+
+// TestPredictionComparesTheBudgetLeft is the PR #140 bot finding (Copilot):
+// the wait-budget timer counts from the arrival (waitTimer), so every term
+// of the decision — the rounds bound, ŵ and the fairness-first r̂ — compares
+// against the budget left at the instant it reads, budget − (now − arrival),
+// not against the arrival budget: the time the acquire already spent, on
+// the dispatcher mutex above all, is gone. White-box: n is pushed and
+// decided under the mutex at an instant the test picks.
+//   - boundary (the fixture of TestQueuedPositionDecides: E = 2 held, the
+//     oldest lease overdue ⇒ r̂ = 0, tX and tY waiting, L_p50 5 s, MaxWait
+//     5 s ⇒ two rounds, ŵ = 5 s): read at the arrival ŵ = left ⇒ n waits
+//     (≤, not <); read 1 ns later ⇒ predicted, Retry-After 5 s;
+//   - mutex wait (the bot's case): E = 2 held by leases admitted while n
+//     waited 1 s for the mutex, L_p50 1 s, MaxWait 1.5 s, n alone (the
+//     fairness-first head, one round, r̂ ≈ 1 s): read at the arrival the
+//     rounds bound fits ⇒ n waits; read now (≈ 0.5 s left) ⇒ predicted,
+//     although the rounds bound, ŵ and r̂ all fit the arrival budget.
+func TestPredictionComparesTheBudgetLeft(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		maxWait time.Duration
+		l50     time.Duration
+		age     time.Duration // of the first held lease
+		before  time.Duration // n's arrival before the decision
+		waiting int           // waiters ahead of n (tX, tY)
+		ra      time.Duration
+	}{
+		{"boundary", 5 * time.Second, 5 * time.Second, 40 * time.Second, 0, 2, 5 * time.Second},
+		{"mutex wait", 1500 * time.Millisecond, time.Second, 0, time.Second, 0, time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := newTestDispatcher(t, budgetSettings(tc.maxWait), partitionPolicy(3, 1)) // E = 2
+			bg := context.Background()
+			for i := 0; i < 2; i++ {
+				l := mustAcquire(t, d, fairXctx(bg, "holder", "tenant-h", 1), externalReq())
+				t.Cleanup(l.Release)
+				if i == 0 {
+					ageLease(d, l, tc.age)
+				}
+			}
+			ctx, cancel := context.WithCancel(bg)
+			defer cancel()
+			ch := make(chan admission, 2)
+			for i, tenant := range []string{"tX", "tY"}[:tc.waiting] {
+				startWaiter(fairXctx(ctx, "c-"+tenant, tenant, 1), d, tenant, externalReq(), ch)
+				waitQueued(t, d, ch, i+1, tenant+" queued (cold)")
+			}
+			seedLeases(d, testOrigin, waitRingK, tc.l50)
+			d.mu.Lock()
+			st := d.targetLocked(canonicalOrigin(testOrigin))
+			n := externalWaiterAt("n", "tN", time.Now().Add(-tc.before))
+			if err := d.enqueueLocked(st, n); err != nil {
+				d.mu.Unlock()
+				t.Fatalf("enqueue n: %v", err)
+			}
+			atArrival := d.predictAfterPushLocked(st, n, tc.maxWait, n.enqueued)
+			queued := st.external.total
+			var later error
+			if atArrival == nil {
+				later = d.predictAfterPushLocked(st, n, tc.maxWait, n.enqueued.Add(tc.before+time.Nanosecond))
+			}
+			total := st.external.total
+			d.mu.Unlock()
+			ts := target(t, d)
+			t.Logf("%s: at the arrival %v (queued %d); %v later %v, queued %d, rejects %+v", tc.name, atArrival, queued, tc.before+time.Nanosecond, later, total, ts.ExternalRejects)
+			if atArrival != nil || queued != tc.waiting+1 {
+				t.Fatalf("%s: at the arrival %v with %d queued, want n waiting (ŵ fits the whole budget)", tc.name, atArrival, queued)
+			}
+			if !errors.Is(later, ErrWaitExpired) || retryAfterOf(t, later) != tc.ra || total != tc.waiting || ts.ExternalRejects != (ExternalRejectStats{Predicted: 1}) {
+				t.Fatalf("%s: later %v, queued %d, rejects %+v, want predicted with Retry-After %v (the budget left is short of ŵ)", tc.name, later, total, ts.ExternalRejects, tc.ra)
+			}
+			cancel()
+			for i := 0; i < tc.waiting; i++ {
+				recvAdmission(t, ch, "waiter ends")
+			}
+		})
+	}
+}
+
+// TestPredictionCountsTheMutexWait is the PR #140 bot finding through
+// Acquire: n arrives while the dispatcher mutex is held 750 ms (contention),
+// E = 2 held, the oldest lease 8.75 s into L_p50 10 s (r̂ ≈ 0.5 s when n
+// decides), MaxWait 1 s, n alone (the fairness-first head, one round). ŵ =
+// r̂ ≈ 0.5 s fits the arrival budget but not the ≈ 0.25 s its timer has
+// left: predicted at once when the mutex frees (before the fix it queued and
+// ran into its timer, expired ≈ 250 ms later).
+func TestPredictionCountsTheMutexWait(t *testing.T) {
+	d, _ := newTestDispatcher(t, budgetSettings(time.Second), partitionPolicy(3, 1)) // E = 2
+	bg := context.Background()
+	for i := 0; i < 2; i++ {
+		l := mustAcquire(t, d, fairXctx(bg, "holder", "tenant-h", 1), externalReq())
+		t.Cleanup(l.Release)
+		if i == 0 {
+			ageLease(d, l, 8750*time.Millisecond)
+		}
+	}
+	seedLeases(d, testOrigin, waitRingK, 10*time.Second)
+	ch := make(chan admission, 1)
+	d.mu.Lock()
+	startWaiter(fairXctx(bg, "n", "tN", 1), d, "N", externalReq(), ch)
+	time.Sleep(750 * time.Millisecond)
+	d.mu.Unlock()
+	freed := time.Now()
+	a := recvAdmission(t, ch, "N decides")
+	el := time.Since(freed)
+	ts := target(t, d)
+	t.Logf("n: lease %v, err %v, %v after the mutex freed, waiting %d, rejects %+v", a.lease != nil, a.err, el, ts.External.Waiting, ts.ExternalRejects)
+	if a.lease != nil {
+		a.lease.Release()
+		t.Fatalf("n admitted, want predicted")
+	}
+	if !errors.Is(a.err, ErrWaitExpired) || ts.ExternalRejects != (ExternalRejectStats{Predicted: 1}) || el > 50*time.Millisecond {
+		t.Fatalf("n: %v after %v, rejects %+v, want predicted at once when the mutex frees", a.err, el, ts.ExternalRejects)
+	}
 }

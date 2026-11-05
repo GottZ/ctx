@@ -313,8 +313,11 @@ func (d *Dispatcher) enqueueExternalLocked(st *targetState, w *waiter, set Setti
 // (review 3 delta D-1); a refusal restores the view of the last event. Only
 // a queued w that is no continuation (A03-W17), on a warm window of a
 // target with an external cap: w stays when ŵ = r̂ + (rounds − 1) · L_p50 ≤
-// budget, when it is the pick, or when r̂ ≤ budget and it is the
-// fairness-first head (rounds = 1, review 2 F-2 (a)). Otherwise it leaves
+// left, when it is the pick, or when r̂ ≤ left and it is the fairness-first
+// head (rounds = 1, review 2 F-2 (a)) — left = budget − (now − arrival), what
+// the wait-budget timer has left at now: the timer counts from the arrival
+// (waitTimer), so the time w already spent, on the dispatcher mutex above
+// all, is used up (PR #140 bot review). Otherwise it leaves
 // the queue again without a wake, and the order is back to the state before
 // its push, which the last wake left without an admissible head: the queue
 // counters, the activity and waiting sums, the view clock, and the fair
@@ -328,18 +331,19 @@ func (d *Dispatcher) enqueueExternalLocked(st *targetState, w *waiter, set Setti
 // leases (r̂), the pick (O(1) while not even the lightest head fits, else one
 // or two passes over the bucket heads) and one pass for the fairness-first
 // head, each only when the terms before it did not decide.
-func (d *Dispatcher) predictAfterPushLocked(st *targetState, w *waiter, budget time.Duration) error {
+func (d *Dispatcher) predictAfterPushLocked(st *targetState, w *waiter, budget time.Duration, now time.Time) error {
 	lv, capacity := st.externalLeaseView(), d.boundedExternalCapacity(st.origin)
 	if w.cont || !lv.warm || capacity <= 0 {
 		return nil
 	}
+	left := budget - now.Sub(w.enqueued)
 	rounds := queuedPositionLocked(st, w).rounds(capacity)
-	if roundsWait(rounds, lv.p50, lv.p50) <= budget {
+	if roundsWait(rounds, lv.p50, lv.p50) <= left {
 		return nil // r̂ ≤ L_p50: within the rounds bound, ŵ fits as well
 	}
-	first := st.firstRoundLocked(lv.p50, time.Now())
+	first := st.firstRoundLocked(lv.p50, now)
 	est := roundsWait(rounds, first, lv.p50)
-	if est <= budget {
+	if est <= left {
 		return nil
 	}
 	// The pick and the fairness-first head on the order the enqueue wake
@@ -348,11 +352,11 @@ func (d *Dispatcher) predictAfterPushLocked(st *targetState, w *waiter, budget t
 	// not persist that view: it is no event of the order (FR4-2).
 	f := st.external.fair
 	viewAt := f.viewAt
-	f.touch(d.fairClock(time.Now()))
+	f.touch(d.fairClock(now))
 	if pick, _ := d.externalPickLocked(st, d.slotsLocked(st.origin)); pick == w {
 		return nil // the wake admits w now
 	}
-	if first <= budget && d.externalFairnessFirstLocked(st, w) {
+	if first <= left && d.externalFairnessFirstLocked(st, w) {
 		return nil
 	}
 	f.viewAt = viewAt
