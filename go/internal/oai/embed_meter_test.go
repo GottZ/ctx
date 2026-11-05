@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -190,6 +191,40 @@ func TestEmbedMeterConnectTimeoutGivesBack(t *testing.T) {
 	}
 	if held != 0 || m.endsOf() != "abort" {
 		t.Errorf("the bucket holds %d tokens (ends %s) after a connect that timed out, want 0 by Abort", held, m.endsOf())
+	}
+}
+
+// TestEmbedMeterHTTP2DeadlineWithAConnectionKeeps pins the context rule of
+// the block's wire call (the chat route's named limit, the conservative
+// side): an HTTP/2 attempt whose deadline ends while it holds a connection,
+// before its headers are written — net/http's HTTP/2 client returns on the
+// context without waiting for the stream's writer, which may still write —
+// keeps the reservation. The request goroutine stalls in GotConn (a trace on
+// the inbound context, composed with the route's) past the attempt deadline,
+// so no write hook fires: only the context rule marks the wire contact.
+func TestEmbedMeterHTTP2DeadlineWithAConnectionKeeps(t *testing.T) {
+	var hits atomic.Int64
+	url := serveH2(t, newHeldListener(t), http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	row := embedWireRow("h2slow", url, 10)
+	row.Timeouts = nil
+	rig, m := embedMeterRig(t, row)
+	shortAttempts(rig)
+	pt := &h2Trace{}
+	stall := pt.trace()
+	record := stall.GotConn
+	stall.GotConn = func(i httptrace.GotConnInfo) {
+		record(i)
+		time.Sleep(400 * time.Millisecond)
+	}
+	a := postEmbedCtx(t, rig, httptrace.WithClientTrace(context.Background(), stall), embedBody("emb1", embedInputs(1)))
+	held := m.heldEmbed(t, rig)
+	t.Logf("h2 deadline before the headers: answer %d; connections %s; handler hits %d; ends %s; the bucket holds %d tokens",
+		a.status, pt, hits.Load(), m.endsOf(), held)
+	if pt.String() != "h2" || hits.Load() != 0 {
+		t.Fatalf("connections %q, handler hits %d — want one h2 connection and no request", pt, hits.Load())
+	}
+	if held != embedReservation(1) || m.endsOf() != "keep" {
+		t.Errorf("the bucket holds %d tokens (ends %s), want the reservation %d kept (the writer may still write)", held, m.endsOf(), embedReservation(1))
 	}
 }
 
