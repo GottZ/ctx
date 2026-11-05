@@ -1,0 +1,7 @@
+// census-want: 1
+// W02-09 Z4 probe: a blockFunc call in a function that runs under no lease.
+package oai
+
+func (r subBlockRun) prefetch(do blockFunc) {
+	_, _ = do(0, 1, nil, nil, 0)
+}

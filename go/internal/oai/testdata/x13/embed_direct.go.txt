@@ -1,0 +1,14 @@
+// census-want: 1
+// W02-09 Z4 probe: embed.EmbedRaw in a function that runs under no lease.
+package oai
+
+import (
+	"context"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/embed"
+)
+
+func directEmbed(ctx context.Context, b backends.Backend) {
+	_, _, _ = embed.EmbedRaw(ctx, b, "m", []string{"x"}, 0)
+}

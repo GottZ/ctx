@@ -76,7 +76,10 @@ var pipelineMarkers = []string{"Pipeline:", "newChainEntry(", "newDreamEntry("}
 //
 // 17 since W02-07: gateway-chat, the one llmlog row of POST
 // /v1/chat/completions (internal/oai/chat.go, value the llmlog constant).
-const wantPipelineSites = 17
+//
+// 18 since W02-09: gateway-embeddings, the one llmlog row of POST
+// /v1/embeddings (internal/oai/embeddings.go, value the llmlog constant).
+const wantPipelineSites = 18
 
 // noPromptGuard is the CLOSED list of pipelines whose site carries no guard
 // and needs none. One justification line each; a reason that does not survive
@@ -99,6 +102,13 @@ var noPromptGuard = map[string]string{
 	// into a template of its own and acts on nothing the model says, so
 	// there is no ctx role to escalate into (W02-07).
 	"gateway-chat": "internal/oai/chat.go",
+
+	// The embeddings route sends an external caller's OWN texts, verbatim and
+	// without any prefix (design/02 §4.8), to an embedding model and returns
+	// vectors to the same caller: ctx builds no prompt and no template, and
+	// an embedding model returns numbers, never a turn — no role to escalate
+	// into (W02-09).
+	"gateway-embeddings": "internal/oai/embeddings.go",
 }
 
 // guardedElsewhere is the CLOSED list of Pipeline: sites that sit in a
@@ -141,6 +151,8 @@ var constPipelineSites = map[string]constPipelineSite{
 	"internal/topiclabel:Pipeline":    {"cluster-label", "internal/topiclabel/topiclabel.go"},
 	// W02-07: the chat route names its pipeline by the llmlog constant.
 	"internal/oai:chatPipeline": {"gateway-chat", "internal/oai/chat.go"},
+	// W02-09: the embeddings route, the same shape.
+	"internal/oai:embedPipeline": {"gateway-embeddings", "internal/oai/embeddings.go"},
 }
 
 // passthroughPipelineIdents is the counter-list: Pipeline: values that name NO
@@ -225,7 +237,7 @@ func TestPromptPipelineCallSitesAreGuarded(t *testing.T) {
 
 	// The closed lists do not grow, shrink or drift. Compared against literals
 	// on purpose: reading the expectation out of the maps would assert nothing.
-	if got, want := slices.Sorted(maps.Keys(noPromptGuard)), []string{"gateway-chat", "query-rerank", "query-temporal", "query-translate"}; !slices.Equal(got, want) {
+	if got, want := slices.Sorted(maps.Keys(noPromptGuard)), []string{"gateway-chat", "gateway-embeddings", "query-rerank", "query-temporal", "query-translate"}; !slices.Equal(got, want) {
 		t.Errorf("noPromptGuard list changed: got %v, want %v — a new unguarded pipeline needs wiring (H2-H8 pattern), not an exception", got, want)
 	}
 	if got, want := slices.Sorted(maps.Keys(guardedElsewhere)), []string{"web-chat"}; !slices.Equal(got, want) {

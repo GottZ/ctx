@@ -328,6 +328,7 @@ func v1Routes(d oai.Deps) []modelRoute {
 		{http.MethodGet, "/models", oai.ListModels(d)},
 		{http.MethodGet, "/models/*", oai.GetModel(d)},
 		{http.MethodPost, "/chat/completions", oai.ChatCompletions(d)},
+		{http.MethodPost, "/embeddings", oai.Embeddings(d)},
 	}
 }
 

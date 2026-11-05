@@ -1,0 +1,11 @@
+// census-want: 1
+// W02-09 Z4 probe: embed.EmbedRaw as a value — a wire site the call census
+// cannot follow.
+package oai
+
+import "github.com/GottZ/ctx/internal/embed"
+
+func embedValue() {
+	f := embed.EmbedRaw
+	_, _, _ = f(nil, backendsZero, "m", nil, 0)
+}

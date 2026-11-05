@@ -228,7 +228,9 @@ func (a *V1Admission) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.Ad
 		units:    in.Units,
 		subBatch: in.SubBatch,
 	}
-	return oai.Plan{Acquirer: acq, Chain: chain, Lane: lane}, nil
+	// Continue is llm.Admission.Continue — the dispatcher's continuation
+	// door (A03-W17): a sub-block route may walk every block of the plan.
+	return oai.Plan{Acquirer: acq, Chain: chain, Lane: lane, Continuation: true}, nil
 }
 
 // ExternalWeightPlan is the weight plan of one request on one target
