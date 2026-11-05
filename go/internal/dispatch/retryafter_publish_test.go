@@ -31,15 +31,16 @@ func warmRing(d *Dispatcher, origin string, c Class, n int, wait time.Duration) 
 // TestRetryAfterHintAllocFree: on a warm 512-sample window the hint performs
 // no allocation — neither for the canonical origin nor for the raw spelling
 // the rejection mapping passes (b.Host, here with case drift and a /v1
-// suffix), in every class.
+// suffix), in every class of the class table (XB included, A03-W9 review 2
+// F2-8).
 func TestRetryAfterHintAllocFree(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(4, 2))
-	for _, c := range []Class{ClassInteractive, ClassBackground, ClassExternal} {
+	for c := Class(0); c < numClasses; c++ {
 		warmRing(d, testOrigin, c, waitRingK, 2*time.Second)
 	}
 	d.SeedInteractiveDepthForTest(testOrigin, 3)
 	for _, origin := range []string{testOrigin, "http://GPU:8089/v1"} {
-		for _, c := range []Class{ClassInteractive, ClassBackground, ClassExternal} {
+		for c := Class(0); c < numClasses; c++ {
 			var est time.Duration
 			allocs := testing.AllocsPerRun(1000, func() { est = d.RetryAfterHint(origin, c) })
 			if allocs != 0 {

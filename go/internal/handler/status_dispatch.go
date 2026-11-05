@@ -113,7 +113,8 @@ type dispatchPreempt struct {
 // dispatchBucket is the per-fair-key detail — SERVER-ADMIN ONLY. fair_key is
 // principal detail (HomeScope; for an external consumer the identity key
 // _consumer:<id>); it never appears in the tenant shape. class names the
-// queue ("interactive" | "external"), tenant_id the bucket's tenant.
+// queue ("interactive" | "external" | "external_bulk"), tenant_id the
+// bucket's tenant.
 type dispatchBucket struct {
 	FairKey      string `json:"fair_key"`
 	TenantID     string `json:"tenant_id"`

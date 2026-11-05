@@ -943,7 +943,7 @@ func TestExternalRetryAfterHint(t *testing.T) {
 // TestNamedRankOrders pins the A-E2 data table: o1 = (I, XU, B, XB), o2 =
 // (I, B, XU, XB) — XB last in both (DECISIONS E2, A03-W9) — both valid; the
 // default order is o1; an unknown name is not an order; a duplicate with
-// interactive on rank 0 — representable since numClasses = 3 — reads as the
+// interactive on rank 0 — representable since numClasses ≥ 3 — reads as the
 // default with one WARN (A03-W2 handover 4).
 func TestNamedRankOrders(t *testing.T) {
 	want := map[string][numClasses]Class{

@@ -723,6 +723,14 @@ func (d *Dispatcher) externalReservedLocked(st *targetState, w, slots int) bool 
 // (no external class ranks above it in o1 or o2). The needs are read
 // without the claims of classes above h — with two external classes no
 // such class exists. O(#buckets of the classes above c).
+//
+// Named limit (A03-W9 review 2 F2-2): the claim and the rank order starve
+// XB under sustained XU load above E — while an XU head waits at every
+// release, an XB acquire never gets a unit; it ends at its wait budget
+// (dispatch.external_max_wait) with ErrWaitExpired (reason expired) and a
+// Retry-After, never waits past it, and leaves no goroutine behind
+// (TestExternalBulkStarvationEndsAtTheBudget). An aging rule for XB
+// (external_bulk_aging_after, design/03 §4.8) is named, not built — A03-W8a.
 func (d *Dispatcher) externalClaimLocked(st *targetState, c Class, slots, capacity int) int {
 	claim := 0
 	for _, h := range d.currentSettings().RankOrder {

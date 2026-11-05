@@ -236,8 +236,23 @@ func (d *Dispatcher) headAdmissibleLocked(st *targetState, c Class, slots int) b
 // counts that head, and without the wake the head would get the free unit
 // only at the next release or reaper tick (escape-capability comes with
 // time, not with an event). The wake serves the classes in rank order, so
-// it gives the unit to the aged head. O(1) while the escape is off
-// (background_aging_after = 0) or no background waiter exists.
+// it gives the unit to the aged head.
+//
+// Its scope is any refusal without an enqueue wake, of every class (A03-W9
+// review 2 F2-6, kept and named): Acquire's refusals after the budget, the
+// enqueue and the prediction (dispatcher.go — a spent or predicted budget, a
+// cap, also of interactive and background) and every non-admission of
+// TryAcquire under the mutex, the in-house one included
+// (events/backfill_admission.go); the refusals of a class or principal
+// before the mutex, and Acquire's not offered, return before it. Work
+// conservation, the principle of A03-W4 FR4-1: a free unit does not stay
+// idle while an escape-capable aged background head waits, whichever class
+// notices the refusal. It overtakes no higher-ranked class (the wake walks
+// the rank order), wakes only when the head escapes now — any other refusal
+// is no event of the fairness order (FR4-2) — and is O(1) and byte-identical
+// to the base while the escape is off (background_aging_after = 0) or no
+// background waiter exists (TestEscapeYieldsOnInHouseTryAcquire,
+// TestRefusalBesideABackgroundWaiterIsNoEvent).
 func (d *Dispatcher) yieldToEscapeLocked(st *targetState) {
 	if st.background.len() > 0 && d.backgroundEscapesLocked(st, d.slotsLocked(st.origin), time.Now()) {
 		d.wakeLocked(st)

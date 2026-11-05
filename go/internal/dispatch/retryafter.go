@@ -167,8 +167,9 @@ type RejectionError struct {
 	// ErrTenantSaturated, ErrTargetSaturated).
 	Err error
 	// RetryAfter is Q(ŵ) of the rejected acquire's OWN position (identity
-	// weight queued ahead, waiting tenants and consumers, E_eff, the
-	// remaining time of the oldest held external lease, lease p50), or on a
+	// weight queued ahead, waiting tenants and consumers, E_eff, r̂ — the
+	// least remaining time of the held external leases, each at the lease
+	// p50 of its class —, the lease p50 of its own class), or on a
 	// cold lease window the class formula of the external class, quantized
 	// onto Settings.ExternalRetryAfterSteps — always one of the steps; for an
 	// expired waiter never below the time it waited. Without jitter: the

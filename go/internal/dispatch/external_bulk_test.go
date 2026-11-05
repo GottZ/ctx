@@ -669,7 +669,12 @@ func TestExternalBulkPredictionPerClass(t *testing.T) {
 		ctx, cancel := context.WithCancel(bg)
 		defer cancel()
 		ch := make(chan admission, 1)
+		// The XU waiter weighs E: the XB newcomer's position is ⌈(2 + 1) /
+		// 2⌉ = 2 rounds — r̂ of the XU holders at their own 1 s window (H-1,
+		// review 2 F2-1) plus one round at the 60 s round length of the XB
+		// window. Read with the XU window (mutant X08) ŵ ≈ 2 s would queue.
 		xu := externalReq()
+		xu.Weight = 2
 		xu.MaxWait = 5 * time.Second
 		startWaiter(xctx(ctx, "u", "tenant-a"), d, "XU", xu, ch)
 		waitQueued(t, d, ch, 1, "XU queued on its 1 s window")
@@ -684,8 +689,8 @@ func TestExternalBulkPredictionPerClass(t *testing.T) {
 		if ts.ExternalBulkRejects != (ExternalRejectStats{Predicted: 1}) || ts.ExternalRejects != (ExternalRejectStats{}) {
 			t.Fatalf("rejects XB %+v XU %+v, want predicted 1 / none", ts.ExternalBulkRejects, ts.ExternalRejects)
 		}
-		if re.RetryAfter != time.Minute {
-			t.Fatalf("XB Retry-After %v, want 1m0s (Q of r̂ ≈ L_p50 = 60 s of the XB window)", re.RetryAfter)
+		if re.RetryAfter != 2*time.Minute {
+			t.Fatalf("XB Retry-After %v, want 2m0s (Q of r̂ ≈ 1 s + one 60 s round of the XB window)", re.RetryAfter)
 		}
 	})
 	t.Run("own class tenants", func(t *testing.T) {
