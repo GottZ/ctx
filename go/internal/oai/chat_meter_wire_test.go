@@ -652,3 +652,66 @@ func TestMeterUsageMarkerSaturates(t *testing.T) {
 		t.Errorf("access record usage %q, row usage %q — want %q on both (the saturated sum is > 0)", rec.Usage, rows[0].Gateway.Usage, llmlog.UsageBackend)
 	}
 }
+
+// TestMeterWireAnswerBeforeTheRead pins the response side of the wire trace
+// (Fremd-Review 5 F5-3): an HTTP/1.1 backend that answers the moment it
+// accepts, before it reads a byte (an early 503 of a proxy or an overloaded
+// server), and reads what comes afterwards. Two outcomes are right, and the
+// timing picks one per run:
+//
+//   - net/http takes the answer for the request: the route answers with the
+//     backend's 503. It can hand the response back before its write loop
+//     reaches the first write hook, so only GotFirstResponseByte marks the
+//     wire contact in time — the reservation is kept. Without that hook the
+//     meter would give it back and the request would go onto the connection
+//     after the decision.
+//   - net/http sees the answer before it has a request on the connection and
+//     drops the connection (both tries): nothing of the request was written,
+//     the route answers 500 and the reservation goes back.
+//
+// So: the backend's answer reached the client ⇒ keep, and abort ⇒ the
+// backend read no byte of the request. Without the hook the first rule
+// fails once in a few hundred runs on an idle host (about one run in eight
+// under load); the loop makes that certain.
+func TestMeterWireAnswerBeforeTheRead(t *testing.T) {
+	const runs = 2000
+	const early = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"busy\"}}"
+	seen := map[string]int{}
+	for i := 0; i < runs; i++ {
+		var got, finished, dials atomic.Int64
+		b := newRawBackend(t, func(_ *rawBackend, c net.Conn, br *bufio.Reader, _ int64) {
+			defer finished.Add(1)
+			_, _ = io.WriteString(c, early)
+			_ = c.SetReadDeadline(time.Now().Add(time.Second))
+			n, _ := io.Copy(io.Discard, br)
+			got.Add(n)
+		})
+		rig, m := wireRig(t, wireRow("early", b.host(), 10))
+		a := postTraced(t, rig, &httptrace.ClientTrace{ConnectDone: func(_, _ string, err error) {
+			if err == nil {
+				dials.Add(1)
+			}
+		}})
+		end, held := m.endsOf(), m.held(t, rig)
+		// Every connection the client opened is read to its end before the
+		// backend's byte count is taken (the client closed its side).
+		for deadline := time.Now().Add(5 * time.Second); finished.Load() < dials.Load(); {
+			if time.Now().After(deadline) {
+				t.Fatalf("run %d: %d connections dialed, %d read to the end", i, dials.Load(), finished.Load())
+			}
+			time.Sleep(50 * time.Microsecond)
+		}
+		seen[fmt.Sprintf("%d/%s/backend read %v", a.status, end, got.Load() > 0)]++
+		if a.status == http.StatusServiceUnavailable && (end != "keep" || held != wireReservation) {
+			t.Fatalf("run %d: the backend's answer came through (%d), ends %s, the bucket holds %d tokens — an answer is wire contact, want keep and the whole reservation %d",
+				i, a.status, end, held, wireReservation)
+		}
+		if end == "abort" && got.Load() > 0 {
+			t.Fatalf("run %d: answer %d, the reservation went back although the backend read %d bytes of the request", i, a.status, got.Load())
+		}
+		if end != "keep" && end != "abort" {
+			t.Fatalf("run %d: answer %d, ends %q, want exactly one of keep and abort", i, a.status, end)
+		}
+	}
+	t.Logf("answer before the read, %d runs: status/end/backend %v", runs, seen)
+}
