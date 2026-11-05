@@ -134,8 +134,11 @@ func tooManyMembers(body []byte) *paramError {
 			unknown = append(unknown, k)
 		}
 	}
-	// The order of the parse below: a repeated key first (uniqueMembers),
-	// then the first unknown key.
+	// Within these first members the order of the parse below holds: a
+	// repeated key first (uniqueMembers), then the first unknown key in
+	// sort order. A repeat or an unknown key past them is not seen — the body
+	// is a 400 either way, only the named param can differ from the parse of
+	// the whole object (Fremd-Review 3 F3-4).
 	if repeatedName != "" || len(unknown) == 0 {
 		return repeated("", repeatedName)
 	}
@@ -184,7 +187,9 @@ func (req *embedRequest) readInput(v json.RawMessage) *paramError {
 		n, over := arrayElems(v, modelalias.CeilingEmbeddingMaxInputs)
 		switch {
 		case over:
-			return unsupportedValue("input", fmt.Sprintf("at most %d inputs per request", modelalias.CeilingEmbeddingMaxInputs))
+			// The code ceiling, before any alias is known: the text names no
+			// alias's limit (Fremd-Review 3 F3-5).
+			return unsupportedValue("input", fmt.Sprintf("more inputs than any model accepts (%d)", modelalias.CeilingEmbeddingMaxInputs))
 		case n == 0:
 			return unsupportedValue("input", "at least one input is required")
 		}

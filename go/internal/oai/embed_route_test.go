@@ -164,12 +164,23 @@ func TestEmbeddingsInputRefusals(t *testing.T) {
 		{"case variant of a key", `{"model":"emb4k","Input":"x"}`, oai.CodeUnsupportedParameter, "Input"},
 		{"repeated key", `{"model":"emb4k","input":"x","input":"y"}`, oai.CodeInvalidJSON, "input"},
 		{"no object", `["x"]`, oai.CodeInvalidJSON, ""},
+		// The shape checks before the map (Fremd-Review 3 F3-10): bytes
+		// after the object are not JSON even when the member count would
+		// take the window path; the window decodes one member more than the
+		// known names, so an unknown sixth member is named.
+		{"trailing bytes after six members", `{"a":1,"b":1,"c":1,"d":1,"e":1,"f":1}x`, oai.CodeInvalidJSON, ""},
+		{"an unknown key behind the five known", `{"model":"m","input":"a","encoding_format":"float","dimensions":4,"user":"u","x":1}`, oai.CodeUnsupportedParameter, "x"},
 	} {
 		a := rig.postEmbed(t, tc.body)
 		code, param, _ := a.envelope(t)
 		if a.status != http.StatusBadRequest || code != tc.code || param != tc.param {
 			t.Errorf("%s: %d %s/%q (%s), want 400 %s/%q", tc.name, a.status, code, param, a.body, tc.code, tc.param)
 		}
+	}
+	// More inputs than the code ceiling: the text names the ceiling, no
+	// alias's limit (Fremd-Review 3 F3-5).
+	if a := rig.postEmbed(t, embedBody("embsmall", embedInputs(257))); !strings.Contains(string(a.body), "more inputs than any model accepts (256)") {
+		t.Errorf("257 inputs: %d %s, want the neutral text naming the ceiling 256", a.status, a.body)
 	}
 	if h := e.hits.Load(); h != 0 {
 		t.Errorf("wire hits %d, want 0", h)

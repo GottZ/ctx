@@ -115,9 +115,11 @@ const embedKindMessage = "The model does not support embeddings."
 // watcher's and the shutdown's): verdict answers them.
 var (
 	// errAnswerOverloaded: the native dimension learned from the first
-	// block makes the answer larger than the reserve, and the in-flight
-	// budget does not hold the rest ⇒ 503 server_overloaded after GPU work
-	// (only with an unknown native dimension past gateway.embedding_max_floats).
+	// block makes the answer — or the decode share of the later blocks —
+	// larger than reserved, and the in-flight budget does not hold the rest
+	// ⇒ 503 server_overloaded after GPU work (only with an unknown native
+	// dimension: past gateway.embedding_max_floats, resp. a later block's
+	// read cap past the floats ceiling's).
 	errAnswerOverloaded = fmt.Errorf("oai: the answer does not fit the in-flight budget: %w", context.Canceled)
 	// errRouteRefused: the route ended the run with its own answer after an
 	// acquire (c.own) — the k = 1 rule against a weight plan of more than
@@ -387,7 +389,38 @@ func (c *embedCall) reserveAnswer() bool {
 		return false
 	}
 	c.reserved = need
+	// The decode share that is certain before the acquire, with the answer's
+	// (hardening 2, Fremd-Review 3 F3-2): a refusal that stands at the entry
+	// costs no queue wait, no queue place and no unit. The rest of a larger
+	// block follows at the attempt (decodeFloor).
+	if !c.reserveDecode(c.decodeFloor(), c.lim.nativeDims) {
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return false
+	}
 	return true
+}
+
+// decodeFloor is the largest block whose decode share is certain before
+// the acquire. The weight plan's largest block is min(n, sub_batch, E)
+// (handler.ExternalWeightPlan), and the row's capacity E is known at the
+// acquire only. Without a native dimension every block is read up to the
+// floats ceiling — only the 256-B frame of an entry grows with the block —
+// so the plan's bound min(n, sub_batch) is booked: at most 3 × 256 B per
+// input above an E-limited block, nothing where the 16-MiB clamp binds
+// (the default ceiling). With one the cap grows with the block, and only a
+// one-input block is certain (E ≥ 1): booking min(n, sub_batch) there would
+// over-reserve by the factor sub_batch / E. The rest of a larger block is
+// booked after the queue wait, at the attempt — a named limit (docs/api.md).
+func (c *embedCall) decodeFloor() int {
+	if c.lim.nativeDims > 0 {
+		return 1
+	}
+	n := len(c.req.inputs)
+	if c.lim.subBatch > 0 {
+		n = min(n, c.lim.subBatch)
+	}
+	return n
 }
 
 // learnReserve grows the reserve to the answer of a native dimension the
@@ -408,10 +441,10 @@ func (c *embedCall) learnReserve(dims int) bool {
 }
 
 // reserveDecode grows the decode transient to the bound of a block of
-// inputs (embedDecodeFactor × embedReadCap at the policy's native dimension,
-// the floats ceiling without one).
-func (c *embedCall) reserveDecode(inputs int) bool {
-	need := embedDecodeFactor * embedReadCap(inputs, c.lim.nativeDims, c.s.EmbeddingMaxFloats)
+// inputs at dims components (embedDecodeFactor × embedReadCap; dims ≤ 0:
+// the floats ceiling). It only grows — the reservation cannot shrink.
+func (c *embedCall) reserveDecode(inputs, dims int) bool {
+	need := embedDecodeFactor * embedReadCap(inputs, dims, c.s.EmbeddingMaxFloats)
 	if need <= c.decoding {
 		return true
 	}
@@ -513,6 +546,7 @@ type embedState struct {
 	admitted time.Time
 	lease    *dispatch.Lease // the First/Next lease of the latest attempt
 	k        int             // blocks of the latest attempt's weight plan
+	later    int             // the largest of its blocks after the first (0: one block)
 	done     int             // its blocks with a result
 	vecs     [][]float32
 	dims     int            // the vectors' length (policy or learned)
@@ -612,8 +646,10 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 	// The decode transient of the largest block of this row's plan, before
 	// its first wire call — the blocks run one after the other, so one
 	// transient is held at a time; a later attempt with larger blocks grows
-	// it (H-3). Refused ⇒ 503 server_overloaded before any wire contact.
-	if !c.reserveDecode(slices.Max(blocks)) {
+	// it (H-3). The share of decodeFloor is booked before the acquire; this
+	// grows it to the block the row's capacity set. Refused ⇒ 503
+	// server_overloaded after the queue wait, before any wire contact.
+	if !c.reserveDecode(slices.Max(blocks), c.lim.nativeDims) {
 		return dispatch.Usage{}, false, c.refuseAfterAcquire(func() string {
 			c.rec.Reason = CodeServerOverloaded
 			WriteOverloaded(c.w)
@@ -621,6 +657,10 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 		})
 	}
 	st.k, st.done, st.failedBlock, st.abort = len(blocks), 0, -1, ""
+	st.later = 0
+	if len(blocks) > 1 {
+		st.later = slices.Max(blocks[1:])
+	}
 	st.vecs = make([][]float32, n)
 	st.dims = c.lim.nativeDims
 	model := b.ModelFor(c.alias.Role).Model
@@ -691,7 +731,11 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 	}
 	if st.dims <= 0 {
 		st.dims = len(vecs[0])
-		if !c.learnReserve(st.dims) {
+		// Every later block is read up to the cap of the learned dimension
+		// (embedReadCap with st.dims), which can pass the floats ceiling's
+		// the decode share was booked for: it grows with the answer's before
+		// the next block is asked for (Fremd-Review 3 F3-8).
+		if !c.learnReserve(st.dims) || (st.later > 0 && !c.reserveDecode(st.later, st.dims)) {
 			c.cancel(errAnswerOverloaded) // verdict answers it; the block itself served
 		}
 	}

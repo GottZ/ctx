@@ -452,22 +452,47 @@ func (d *discardWriter) Write(p []byte) (int, error) { d.n += len(p); return len
 
 // TestEmbeddingResponseReserved (G8, B9b): the answer share is reserved
 // before the acquire. A request of 256 × 65 536 floats (the ceiling raised
-// for the test) reserves 64 MiB + 64 KiB for its answer, and since the
-// hardening (H-3) the decode transient of its largest block, 3 × the 16 MiB
-// read cap of a 32-input block, before the first wire call — 112 MiB it
-// holds in the engine; with a budget of 128 MiB (96 MiB before H-3: the
-// transient was outside the reserve) a second one is 503
-// server_overloaded at once, without an acquire (with the briefing's 64 MiB
-// not even the first fits: 64 MiB of vectors + the encoder buffer > 64 MiB).
-// The first one then serves its 64 MiB of vectors: the live heap peak over
-// the baseline stays below the answer reserve plus a constant (the decode
-// transient of one block) — the bound of the gate is unchanged by H-3.
+// for the test) reserves 64 MiB + 64 KiB for its answer, the decode share of
+// a one-input block before the acquire (hardening 2, C-2: the block size of a
+// known native dimension is set by the row's capacity at the acquire) and
+// grows it to its largest block, 3 × the 16 MiB read cap of a 32-input block,
+// before the first wire call (H-3). While it holds in the engine the budget
+// holds EXACTLY that sum, computed here from the named factors, not read off
+// the booking (Fremd-Review 3 F3-9: with a budget chosen loose, a 30 % too
+// small answer reserve passed); the budget is that sum plus what a second
+// request books before its acquire, minus one byte — the second is 503
+// server_overloaded at once, without an acquire, exactly when every share is
+// right. The first one then serves its 64 MiB of vectors: the live heap peak
+// over the baseline stays below the answer reserve plus a constant (the
+// decode transient of one block).
 func TestEmbeddingResponseReserved(t *testing.T) {
 	const (
-		dims   = 65536
-		budget = 128 << 20
-		slack  = 32 << 20
+		dims  = 65536
+		count = 256
+		block = 32 // min(count, sub_batch 256, E 32)
+		slack = 32 << 20
 	)
+	// The factors of the reserve (design/02 §4.2.1, hardening H-3), as the
+	// gate's own constants: a mutated factor in the route must not move the
+	// expectation with it.
+	const (
+		floatBytes    = 4        // one float32 component held for the answer
+		encodeBuffer  = 64 << 10 // the answer's encoder buffer
+		wireComponent = 25       // the longest float64 literal and its separator
+		wireItem      = 256      // the frame of one data entry
+		wireFrame     = 4 << 10  // the frame of the answer
+		decodeFactor  = 3        // the decoder buffer's doubling
+		transportCap  = 16 << 20 // httpx.MaxResponseBytes
+	)
+	readCap := func(inputs int) int64 {
+		return min(int64(inputs)*dims*wireComponent+int64(inputs)*wireItem+wireFrame, transportCap)
+	}
+	body := embedBody("embbig", embedInputs(count))
+	bodyShare := 3 * int64(len(body))
+	answerShare := int64(count*dims*floatBytes + encodeBuffer)
+	holds := bodyShare + answerShare + decodeFactor*readCap(block) // the first request in the engine
+	books := bodyShare + answerShare + decodeFactor*readCap(1)     // a request before its acquire
+	budget := holds + books - 1                                    // the second does not fit by one byte
 	e := newEmbedEngine(t, dims)
 	row := []byte(strings.TrimSuffix(strings.Repeat("1.5,", dims), ","))
 	release := make(chan struct{})
@@ -529,15 +554,23 @@ func TestEmbeddingResponseReserved(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(embedBody("embbig", embedInputs(256))))
+		req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
 		rig.router.ServeHTTP(first, req)
 	}()
 	for e.hits.Load() == 0 {
-		time.Sleep(time.Millisecond)
+		select {
+		case <-done: // a reserve larger than the sum: the first does not fit the budget
+			t.Fatalf("first: %d before the engine — the budget %d B (the sum of the shares + one request's booking − 1) did not hold it", first.status, budget)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if got := rig.budget.InUse(); got != holds {
+		t.Errorf("the budget holds %d B while the first request is in the engine, want exactly %d B = 3 × body %d + answer %d + decode %d (3 × the read cap of a %d-input block)",
+			got, holds, bodyShare, answerShare, holds-bodyShare-answerShare, block)
 	}
 	_ = rig.recorder.Take()
 	start := time.Now()
-	second := rig.postEmbed(t, embedBody("embbig", embedInputs(256)))
+	second := rig.postEmbed(t, body)
 	took := time.Since(start)
 	code, _, _ := second.envelope(t)
 	if second.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded || took > 50*time.Millisecond {
