@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,10 +15,13 @@ import (
 const persistHookStdin = `{"cwd":"/work/proj","session_id":"s1","agent_type":"general","agent_id":"a1",` +
 	`"last_assistant_message":"done\n[PERSIST:learnings:One]\nfirst\n[PERSIST:learnings:Two]\nsecond\n[PERSIST:decisions:Three]\nthird\n"}`
 
-// storeAnswer is one canned /api/store response.
+// storeAnswer is one canned /api/store response. truncate advertises a body
+// one byte longer than the server sends, so Client.Do receives a response and
+// then io.ErrUnexpectedEOF while reading its body.
 type storeAnswer struct {
-	status int
-	body   string
+	status   int
+	body     string
+	truncate bool
 }
 
 // runPersistHookAgainst drives `ctx persist --hook` through the cobra command
@@ -38,6 +42,9 @@ func runPersistHookAgainst(t *testing.T, answers []storeAnswer) (string, int32, 
 			n = len(answers) - 1
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if answers[n].truncate {
+			w.Header().Set("Content-Length", strconv.Itoa(len(answers[n].body)+1))
+		}
 		w.WriteHeader(answers[n].status)
 		_, _ = w.Write([]byte(answers[n].body))
 	}))
@@ -83,7 +90,7 @@ func execPersistHook(t *testing.T, getClient func() (*Client, error)) (string, e
 // write is dropped exactly like an unreachable server — no error, exit 0, and
 // never reported as saved.
 func TestPersistHookCountsOnlyAcceptedStores(t *testing.T) {
-	ok := storeAnswer{http.StatusOK, `{"success":true,"id":"b1","action":"created"}`}
+	ok := storeAnswer{status: http.StatusOK, body: `{"success":true,"id":"b1","action":"created"}`}
 	cases := []struct {
 		name     string
 		answers  []storeAnswer
@@ -91,17 +98,17 @@ func TestPersistHookCountsOnlyAcceptedStores(t *testing.T) {
 		wantHits int32
 	}{
 		{"all accepted", []storeAnswer{ok}, "ctx persist: 3 block(s) saved\n", 3},
-		{"403 envelope", []storeAnswer{{http.StatusForbidden, `{"success":false,"error":"scope not writable"}`}}, "", 3},
-		{"413 envelope", []storeAnswer{{http.StatusRequestEntityTooLarge, `{"success":false,"error":"content too large"}`}}, "", 3},
-		{"429 envelope", []storeAnswer{{http.StatusTooManyRequests, `{"success":false,"error":"quota_exceeded"}`}}, "", 1},
-		{"500 plain text", []storeAnswer{{http.StatusInternalServerError, "internal server error"}}, "", 3},
-		{"500 with success:true body", []storeAnswer{{http.StatusInternalServerError, `{"success":true}`}}, "", 3},
-		{"200 success:false", []storeAnswer{{http.StatusOK, `{"success":false,"error":"validation: category"}`}}, "", 3},
-		{"200 frameless body", []storeAnswer{{http.StatusOK, `[]`}}, "", 3},
+		{"403 reserved_category envelope", []storeAnswer{{status: http.StatusForbidden, body: `{"success":false,"error":"reserved_category","code":"reserved_category"}`}}, "", 3},
+		{"413 envelope", []storeAnswer{{status: http.StatusRequestEntityTooLarge, body: `{"success":false,"error":"content too large"}`}}, "", 3},
+		{"429 envelope", []storeAnswer{{status: http.StatusTooManyRequests, body: `{"success":false,"error":"quota_exceeded"}`}}, "", 1},
+		{"500 plain text", []storeAnswer{{status: http.StatusInternalServerError, body: "internal server error"}}, "", 3},
+		{"500 with success:true body", []storeAnswer{{status: http.StatusInternalServerError, body: `{"success":true}`}}, "", 3},
+		{"200 success:false", []storeAnswer{{status: http.StatusOK, body: `{"success":false,"error":"validation: category"}`}}, "", 3},
+		{"200 frameless body", []storeAnswer{{status: http.StatusOK, body: `[]`}}, "", 3},
 		{"mixed: one of three accepted", []storeAnswer{
 			ok,
-			{http.StatusForbidden, `{"success":false,"error":"forbidden"}`},
-			{http.StatusOK, `{"success":false,"error":"validation: title"}`},
+			{status: http.StatusForbidden, body: `{"success":false,"error":"forbidden"}`},
+			{status: http.StatusOK, body: `{"success":false,"error":"validation: title"}`},
 		}, "ctx persist: 1 block(s) saved\n", 3},
 	}
 	for _, tc := range cases {
@@ -124,7 +131,7 @@ func TestPersistHookCountsOnlyAcceptedStores(t *testing.T) {
 // issue #65: after the first rejection, later blocks must not be sent.
 func TestPersistHookStopsAfterUnauthorized(t *testing.T) {
 	stderr, hits, err := runPersistHookAgainst(t, []storeAnswer{
-		{http.StatusUnauthorized, `{"success":false,"error":"invalid key"}`},
+		{status: http.StatusUnauthorized, body: `{"success":false,"error":"invalid key"}`},
 	})
 	if err != nil {
 		t.Fatalf("persist --hook returned %v; the hook must never fail", err)
@@ -141,7 +148,7 @@ func TestPersistHookStopsAfterUnauthorized(t *testing.T) {
 // #65: within the rate-limit window, later writes get the same rejection.
 func TestPersistHookStopsAfterRateLimit(t *testing.T) {
 	stderr, hits, err := runPersistHookAgainst(t, []storeAnswer{
-		{http.StatusTooManyRequests, `{"success":false,"error":"rate_limit"}`},
+		{status: http.StatusTooManyRequests, body: `{"success":false,"error":"rate_limit"}`},
 	})
 	if err != nil {
 		t.Fatalf("persist --hook returned %v; the hook must never fail", err)
@@ -151,6 +158,30 @@ func TestPersistHookStopsAfterRateLimit(t *testing.T) {
 	}
 	if stderr != "" {
 		t.Errorf("stderr = %q, want empty", stderr)
+	}
+}
+
+// TestPersistHookStopsAfterTruncatedKeyWideRejection pins issue #97: a body
+// read error must not erase the 401/429 status and turn a key-wide rejection
+// into one doomed retry per remaining block.
+func TestPersistHookStopsAfterTruncatedKeyWideRejection(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			stderr, hits, err := runPersistHookAgainst(t, []storeAnswer{{
+				status:   status,
+				body:     `{"success":false,"error":"key-wide rejection"}`,
+				truncate: true,
+			}})
+			if err != nil {
+				t.Fatalf("persist --hook returned %v; the hook must never fail", err)
+			}
+			if hits != 1 {
+				t.Fatalf("server saw %d store requests, want 1", hits)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+		})
 	}
 }
 

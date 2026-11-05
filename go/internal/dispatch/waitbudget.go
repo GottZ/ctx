@@ -18,8 +18,11 @@ const serveMargin = 500 * time.Millisecond
 // externalWaitBudget is MaxWait_eff of an external acquire that would have to
 // wait (design/03 §4.9): the minimum of the setting, Request.MaxWait when > 0
 // and ServeBy − now − ŝ − serveMargin when ServeBy is set. Request values can
-// only shorten the setting (I-03-5). ŝ is the published p90 lease duration of
-// the target's external class (A03-W6, prediction.go), 0 on a cold window
+// only shorten the setting (I-03-5) — ONE budget for both external classes
+// (A03-W9 lead decision 2: dispatch.external_max_wait is "the one wait
+// budget of external acquires", design/03 §3.3). ŝ is the published p90
+// lease duration of the acquire's own external class (A03-W6, prediction.go;
+// XB its own window since A03-W9), 0 on a cold window
 // (the cold-ring rule of §4.9): a lease admitted now is predicted to end ŝ
 // later, so ServeBy minus ŝ is the latest useful admission. A setting ≤ 0 is
 // a budget of 0: the external class never waits (fail-closed, never
@@ -55,9 +58,9 @@ func (d *Dispatcher) waitBudgetLocked(st *targetState, w *waiter, req Request, n
 	if !w.class.External() || w.cont {
 		return 0, nil
 	}
-	budget := externalWaitBudget(d.currentSettings(), req, now, st.externalLeaseView().p90)
+	budget := externalWaitBudget(d.currentSettings(), req, now, st.externalLeaseView(w.class).p90)
 	if budget <= 0 {
-		st.extRejects.Predicted++
+		st.extRejects[w.class].Predicted++
 		return 0, d.externalRejectLocked(st, w, ErrWaitExpired, 0)
 	}
 	return budget, nil
@@ -108,6 +111,6 @@ func (d *Dispatcher) expireWaiter(st *targetState, w *waiter) (*Lease, error) {
 	d.dropWaiterLocked(st, w)
 	waited := time.Since(w.enqueued)
 	st.ring(w.class).add(waited)
-	st.extRejects.Expired++
+	st.extRejects[w.class].Expired++
 	return nil, d.externalRejectLocked(st, w, ErrWaitExpired, waited)
 }

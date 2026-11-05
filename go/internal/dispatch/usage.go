@@ -156,16 +156,18 @@ func (d *Dispatcher) opDone(start time.Time) {
 // status surfaces must be server-admin-only or filter Buckets to the
 // caller's own tenant; a foreign fairKey must never reach a tenant pull.
 // Since A03-W3 the view also carries the external identity buckets
-// (FairKey _consumer:<id>, Class ClassExternal): server-admin only — a
-// tenant surface filters on Class, never on a key comparison (design/03
-// §4.14, X23).
+// (FairKey _consumer:<id>, Class ClassExternal — and ClassExternalBulk since
+// A03-W9, one bucket per class and identity): server-admin only — a tenant
+// surface filters on Class, never on a key comparison (design/03 §4.14,
+// X23).
 type BucketSnapshot struct {
 	FairKey string
 	// TenantID is the tenant of the bucket's principals (attribution; a
 	// fair key is one tenant's scope or one consumer).
 	TenantID string
 	// Class is the queue the bucket belongs to: ClassInteractive (fair key
-	// HomeScope) or ClassExternal (identity key _consumer:<id>).
+	// HomeScope), ClassExternal or ClassExternalBulk (identity key
+	// _consumer:<id>).
 	Class      Class
 	Waiting    int
 	OldestWait time.Duration
@@ -198,10 +200,10 @@ func (d *Dispatcher) bucketSnapshotsLocked(st *targetState, now time.Time) []Buc
 		}
 		return bs
 	}
-	for _, q := range []*classQueue{st.interactive, st.external} {
+	for _, q := range []*classQueue{st.interactive, st.external, st.externalBulk} {
 		class := ClassInteractive
 		if q.external {
-			class = ClassExternal
+			class = q.class
 		}
 		for key, b := range q.buckets {
 			if len(b) == 0 {
@@ -225,8 +227,8 @@ func (d *Dispatcher) bucketSnapshotsLocked(st *targetState, now time.Time) []Buc
 			if key := l.principal.fairKey(); key != "" {
 				get(ClassInteractive, key, l.principal.TenantID).Inflight++
 			}
-		case ClassExternal:
-			get(ClassExternal, st.external.bucketKey(l.principal), l.principal.TenantID).Inflight++
+		case ClassExternal, ClassExternalBulk:
+			get(l.class, st.extQueue(l.class).bucketKey(l.principal), l.principal.TenantID).Inflight++
 		}
 	}
 	win := d.usageWindowDur()

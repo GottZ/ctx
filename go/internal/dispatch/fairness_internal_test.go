@@ -109,6 +109,9 @@ func TestExternalReservationKeepsTheBackgroundFloor(t *testing.T) {
 func reservationCase(t *testing.T, d *Dispatcher, st *targetState, order string, slots, e, heldI, heldB, heldExt, h1, h2 int) (got, want bool, label string) {
 	t.Helper()
 	st.held, st.heldExt = heldI+heldB+heldExt, heldExt
+	// The per-class split the rank-order terms read (A03-W9 classHeld):
+	// the same state, held by class.
+	st.classHeld[ClassInteractive], st.classHeld[ClassBackground], st.classHeld[ClassExternal] = heldI, heldB, heldExt
 	for i := 0; i < heldB; i++ {
 		st.cancelable[&Lease{}] = nil
 	}
@@ -129,6 +132,7 @@ func reservationCase(t *testing.T, d *Dispatcher, st *targetState, order string,
 	}
 	clear(st.cancelable)
 	st.held, st.heldExt = 0, 0
+	st.classHeld = [numClasses]int{}
 
 	need := h1
 	fits := heldI+heldB+heldExt+h1 <= slots && heldExt+h1 <= e
@@ -209,20 +213,41 @@ func TestExternalHeadBeyondThePolicyReservesNothing(t *testing.T) {
 // traceRun is the state of one pick-consistency trace: its own record of
 // every lease and waiter, the slot time it settled itself (the reference
 // does not read the dispatcher's meter), and the fake clock.
+//
+// Two random streams (A03-W9 hardening H-6, review 2 F2-4): rng is the main
+// stream — exactly the draws of the trace before A03-W9 (clock, operation,
+// consumer, weight, the release and cancel choice, the probe size), over the
+// records it drew them from in the base (waiting, xu, bg: XU and background
+// only). xbRng is the XB stream: every XB operation (xbOp: an XB acquire,
+// the release of an XB lease, the cancel of an XB waiter) and its draws, on
+// its own records (waitingXB, xb), one XB operation after every main step.
+// Each seed runs twice from an empty state: the base run with the XB stream
+// silent — the main stream then draws the base trace's operation sequence
+// on the base trace's state, step for step — and the mixed run with the XB
+// stream from step 0. The runs are separate because the classes share one
+// state: an XB lease holds units of the partition, an XB waiter or lease
+// joins T_act and Σ fw, an XB event re-reads the order — from the first XB
+// event on the XU path is no longer the base's, whatever stream XB draws
+// from (H-6 measurement: in the mixed run the XU probe statistics scatter
+// around the base per seed, their sum stays). agingRng drives the
+// interactive demand phases of the aging run (nil outside it).
 type traceRun struct {
-	t       *testing.T
-	d       *Dispatcher
-	rng     *rand.Rand
-	clk     atomic.Int64
-	slots   int
-	reports chan traceReport
-	nextID  int
-	waiting map[int]traceWaiter
-	xu      map[*Lease]traceLease
-	bg      []*Lease
-	served  map[string]float64 // settled slot time per consumer key and per "_tenant:<id>"
-	pending bool               // a shrink left held above S or E (attrition) — the bound check waits
-	o2      bool               // dispatch.external_order=o2: background ranks above the external class
+	t                    *testing.T
+	d                    *Dispatcher
+	rng, xbRng, agingRng *rand.Rand
+	clk                  atomic.Int64
+	slots                int
+	reports              chan traceReport
+	nextID               int
+	waiting              map[int]traceWaiter   // the waiting XU and background acquires (main stream)
+	waitingXB            map[int]traceWaiter   // the waiting XB acquires (XB stream)
+	xu                   map[*Lease]traceLease // the XU leases (main stream)
+	xb                   map[*Lease]traceLease // the XB leases (XB stream, A03-W9)
+	bg                   []*Lease
+	served               map[string]float64 // settled slot time per consumer key and per "_tenant:<id>", both external classes
+	pending              bool               // a shrink left held above S or E (attrition) — the bound check waits
+	o2                   bool               // dispatch.external_order=o2: background ranks above the external class
+	demandDone           func()             // the open interactive demand of the aging run (nil: none open)
 	// viewRef is the trace's own clock of the fairness order (review 5
 	// FR5-2): the step time of the last operation that, by the documented
 	// rule, re-reads the order — a wake or the start or end of an external
@@ -230,8 +255,14 @@ type traceRun struct {
 	viewRef time.Time
 
 	// probe statistics; bound counts the probes whose fairness-first head
-	// did not fit and bound the backfill (review 2 F-1 (i)).
+	// did not fit and bound the backfill (review 2 F-1 (i)); for XB (A03-W9)
+	// boundXB the same in the XB queue and claimed the probes whose XB pick
+	// was bound by the claim of a waiting XU head. escapes is the number of
+	// background admissions via the aging escape (the aging run).
 	probes, choices, decided, bound int
+	boundXB, claimed, decidedXB     int
+	escapes                         int64
+	admittedXB                      int // XB acquires that got a lease (record)
 }
 
 type traceReport struct {
@@ -245,6 +276,7 @@ type traceWaiter struct {
 	consumer int
 	weight   int
 	external bool
+	bulk     bool // an external waiter of XB (A03-W9)
 }
 
 type traceLease struct {
@@ -252,10 +284,60 @@ type traceLease struct {
 	start            time.Time
 }
 
+// The acquire kinds of the trace.
+const (
+	traceBackground = iota
+	traceXU
+	traceXB
+)
+
 const (
 	traceReserved  = 2
 	traceConsumers = 5
+	traceSteps     = 300 // main steps per run
 )
+
+// The XB stream (H-6): per main step one draw out of traceXBOps —
+// traceXBAcquire of them acquire XB (the same consumers and weight
+// distribution as XU), traceXBRelease release one XB lease, traceXBCancel
+// cancel one XB waiter, the rest do nothing; at most traceXBWaitMax XB
+// acquires wait. The seed of the stream is the trace seed plus
+// traceXBSeedOffset (the main stream keeps the trace seed). The mix is the
+// one of the measured variants (H-6 review 3 F3-1) with the most XB
+// admissions per seed that keeps cancels and binds XB by its own head in
+// every seed: XB is admitted only beyond the claim of a waiting XU head, and
+// the main stream keeps the base trace's full XU load — its XU queue is
+// empty after 6..57 of 300 base steps (A03-W9's trace: 28..154) — so a
+// denser XB stream mostly adds waiters, not leases.
+const (
+	traceXBOps        = 40
+	traceXBAcquire    = 20
+	traceXBRelease    = 16
+	traceXBCancel     = 1
+	traceXBWaitMax    = 32
+	traceXBSeedOffset = 1000
+)
+
+// The aging run (H-6): background_aging_after on the real clock (the escape
+// reads time.Now(), aging.go agingEscapeLocked) — 1 ns ages every queued
+// background head past it by the next wake —, and the interactive demand
+// (Dispatcher.InteractiveArrived) open from the start, flipped by one draw
+// out of traceDemandFlip per step (seed: the trace seed plus
+// traceAgingSeedOffset).
+const (
+	traceAgingAfter      = time.Nanosecond
+	traceDemandFlip      = 8
+	traceAgingSeedOffset = 2000
+)
+
+// traceBaseFloors are the XU probe statistics of the base trace before
+// A03-W9 (commit 6fd6bea4, the same main stream without XB; review 2 F2-4,
+// log subA/logs/trace_base.log): per order and seed {choices, decided,
+// bound}. The XB stream must not thin the XU part of the trace below them.
+var traceBaseFloors = map[string][6][3]int{
+	ExternalOrderO1: {{8, 6, 21}, {11, 8, 16}, {9, 9, 24}, {8, 5, 12}, {12, 9, 17}, {5, 7, 16}},
+	ExternalOrderO2: {{6, 5, 19}, {9, 10, 5}, {7, 8, 21}, {6, 7, 10}, {9, 9, 16}, {9, 7, 17}},
+}
 
 func traceConsumerKey(c int) string { return consumerKeyPrefix + fmt.Sprintf("c%d", c) }
 func traceTenant(c int) string      { return fmt.Sprintf("t%d", c%3) }
@@ -306,43 +388,75 @@ func (r *traceRun) settleGone(gone int) {
 	r.t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-	drain:
-		for {
-			select {
-			case rep := <-r.reports:
-				w := r.waiting[rep.id]
-				delete(r.waiting, rep.id)
-				switch {
-				case rep.err != nil:
-				case w.external:
-					r.xu[rep.lease] = traceLease{consumer: w.consumer, weight: w.weight, start: r.now()}
-				default:
-					r.bg = append(r.bg, rep.lease)
-				}
-			default:
-				break drain
-			}
-		}
+		r.drainReports()
 		ts := target(r.t, r.d)
 		r.d.mu.Lock()
 		leases := len(r.d.targetLocked(testOrigin).inflight)
 		r.d.mu.Unlock()
-		_, open := r.waiting[gone]
-		if ts.External.Waiting+ts.Background.Waiting == len(r.waiting) && leases == len(r.xu)+len(r.bg) && !open {
+		recorded := len(r.waiting) + len(r.waitingXB)
+		if ts.External.Waiting+ts.ExternalBulk.Waiting+ts.Background.Waiting == recorded && leases == len(r.xu)+len(r.xb)+len(r.bg) && !r.isWaiting(gone) {
 			return
 		}
 		if time.Now().After(deadline) {
-			r.t.Fatalf("trace did not settle: %d+%d waiting, %d recorded waiters", ts.External.Waiting, ts.Background.Waiting, len(r.waiting))
+			r.t.Fatalf("trace did not settle: %d+%d+%d waiting, %d recorded waiters", ts.External.Waiting, ts.ExternalBulk.Waiting, ts.Background.Waiting, recorded)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
 }
 
-func (r *traceRun) acquire(external bool) {
-	c := r.rng.Intn(traceConsumers)
-	w := 1 + r.rng.Intn(2) // mostly light, so a probe sees several heads that fit
-	if r.rng.Intn(10) < 3 {
-		w = 1 + r.rng.Intn(r.slots-traceReserved)
+// drainReports records every acquire report that has arrived.
+func (r *traceRun) drainReports() {
+	for {
+		select {
+		case rep := <-r.reports:
+			r.record(rep)
+		default:
+			return
+		}
+	}
+}
+
+// record books one acquire report into the records of its stream.
+func (r *traceRun) record(rep traceReport) {
+	w, ok := r.waiting[rep.id]
+	if ok {
+		delete(r.waiting, rep.id)
+	} else {
+		w = r.waitingXB[rep.id]
+		delete(r.waitingXB, rep.id)
+	}
+	switch {
+	case rep.err != nil:
+	case w.bulk:
+		r.xb[rep.lease] = traceLease{consumer: w.consumer, weight: w.weight, start: r.now()}
+		r.admittedXB++
+	case w.external:
+		r.xu[rep.lease] = traceLease{consumer: w.consumer, weight: w.weight, start: r.now()}
+	default:
+		r.bg = append(r.bg, rep.lease)
+	}
+}
+
+// isWaiting reports whether the acquire id waits (in either stream).
+func (r *traceRun) isWaiting(id int) bool {
+	_, main := r.waiting[id]
+	_, bulk := r.waitingXB[id]
+	return main || bulk
+}
+
+// acquire starts one acquire of kind; its consumer and weight come from the
+// stream of its kind (XB: the XB stream, else the main stream — the same
+// draws as before A03-W9).
+func (r *traceRun) acquire(kind int) {
+	external, bulk := kind != traceBackground, kind == traceXB
+	rng := r.rng
+	if bulk {
+		rng = r.xbRng
+	}
+	c := rng.Intn(traceConsumers)
+	w := 1 + rng.Intn(2) // mostly light, so a probe sees several heads that fit
+	if rng.Intn(10) < 3 {
+		w = 1 + rng.Intn(r.slots-traceReserved)
 	}
 	id := r.nextID
 	r.nextID++
@@ -351,34 +465,66 @@ func (r *traceRun) acquire(external bool) {
 	if external {
 		ctx = withPrincipal(ctx, Principal{ConsumerID: fmt.Sprintf("c%d", c), TenantID: traceTenant(c), ConsumerKind: "app", FairWeight: traceFW(c)})
 		req = weightedReq(w)
+		if bulk {
+			req.Class = ClassExternalBulk
+		}
 	}
-	extWaiting := r.externalWaiting()
-	r.waiting[id] = traceWaiter{cancel: cancel, consumer: c, weight: w, external: external}
+	xuWaiting, xbWaiting := r.externalWaiting()
+	tw := traceWaiter{cancel: cancel, consumer: c, weight: w, external: external, bulk: bulk}
+	if bulk {
+		r.waitingXB[id] = tw
+	} else {
+		r.waiting[id] = tw
+	}
 	go func() {
 		l, _, err := r.d.Acquire(ctx, req)
 		r.reports <- traceReport{id: id, lease: l, err: err}
 	}()
 	r.settle()
-	_, queued := r.waiting[id]
+	queued := r.isWaiting(id)
 	switch {
 	case external:
 		r.viewRef = r.now() // an external lease starts, or the enqueue wakes
-	case r.o2 && !queued && extWaiting > 0:
-		r.viewRef = r.now() // o2: a background admission wakes while external heads wait
+	case !queued && (xbWaiting > 0 || r.o2 && xuWaiting > 0):
+		// A background admission wakes while the heads of an external class
+		// ranked below background wait: XB in both orders, XU in o2.
+		r.viewRef = r.now()
 	}
 }
 
-// externalWaiting is the number of external acquires the trace has queued.
-func (r *traceRun) externalWaiting() int {
-	n := 0
+// externalWaiting is the number of XU and XB acquires the trace has queued.
+func (r *traceRun) externalWaiting() (xu, xb int) {
 	for _, w := range r.waiting {
 		if w.external {
-			n++
+			xu++
 		}
 	}
-	return n
+	return xu, len(r.waitingXB)
 }
 
+// sortedLeases is the leases of m in acquire order (enqueue instants
+// strictly increase: one acquire per settled step) — a selection by index
+// is reproducible per seed.
+func sortedLeases(m map[*Lease]traceLease) []*Lease {
+	keys := make([]*Lease, 0, len(m))
+	for l := range m {
+		keys = append(keys, l)
+	}
+	slices.SortFunc(keys, func(a, b *Lease) int { return a.enqueued.Compare(b.enqueued) })
+	return keys
+}
+
+// endExternal releases the external lease l and settles its slot time in
+// the trace's own record (consumer and tenant; one record set for both
+// external classes).
+func (r *traceRun) endExternal(l *Lease, tl traceLease) {
+	v := r.now().Sub(tl.start).Seconds() * float64(tl.weight)
+	r.served[traceConsumerKey(tl.consumer)] += v
+	r.served["_tenant:"+traceTenant(tl.consumer)] += v
+	l.Release()
+}
+
+// release ends one lease of the main stream (XU or background).
 func (r *traceRun) release() {
 	if len(r.xu)+len(r.bg) == 0 {
 		return
@@ -389,35 +535,34 @@ func (r *traceRun) release() {
 		r.bg = slices.Delete(r.bg, i, i+1)
 		l.Release()
 	} else {
-		keys := make([]*Lease, 0, len(r.xu))
-		for l := range r.xu {
-			keys = append(keys, l)
-		}
-		// Acquire order (enqueue instants strictly increase: one acquire per
-		// settled step) — the selection is reproducible per seed.
-		slices.SortFunc(keys, func(a, b *Lease) int { return a.enqueued.Compare(b.enqueued) })
-		l := keys[i-len(r.bg)]
+		l := sortedLeases(r.xu)[i-len(r.bg)]
 		tl := r.xu[l]
 		delete(r.xu, l)
-		v := r.now().Sub(tl.start).Seconds() * float64(tl.weight)
-		r.served[traceConsumerKey(tl.consumer)] += v
-		r.served["_tenant:"+traceTenant(tl.consumer)] += v
-		l.Release()
+		r.endExternal(l, tl)
 	}
 	r.settle()
 	r.viewRef = r.now() // every release wakes
 }
 
+// releaseXB ends one XB lease (XB stream).
+func (r *traceRun) releaseXB() {
+	if len(r.xb) == 0 {
+		return
+	}
+	l := sortedLeases(r.xb)[r.xbRng.Intn(len(r.xb))]
+	tl := r.xb[l]
+	delete(r.xb, l)
+	r.endExternal(l, tl)
+	r.settle()
+	r.viewRef = r.now() // every release wakes
+}
+
+// cancelOne cancels one waiting acquire of the main stream.
 func (r *traceRun) cancelOne() {
 	if len(r.waiting) == 0 {
 		return
 	}
-	ids := make([]int, 0, len(r.waiting))
-	for id := range r.waiting {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	id := ids[r.rng.Intn(len(ids))]
+	id := sortedIDs(r.waiting)[r.rng.Intn(len(r.waiting))]
 	w := r.waiting[id]
 	w.cancel()
 	r.settleGone(id)
@@ -426,25 +571,141 @@ func (r *traceRun) cancelOne() {
 	}
 }
 
+// cancelXB cancels one waiting XB acquire (XB stream).
+func (r *traceRun) cancelXB() {
+	if len(r.waitingXB) == 0 {
+		return
+	}
+	id := sortedIDs(r.waitingXB)[r.xbRng.Intn(len(r.waitingXB))]
+	r.waitingXB[id].cancel()
+	r.settleGone(id)
+	r.viewRef = r.now() // the drop of an external waiter wakes
+}
+
+func sortedIDs(m map[int]traceWaiter) []int {
+	ids := make([]int, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// mainOp is one operation of the main stream — the operation mix of the
+// trace before A03-W9, with the same draws.
+func (r *traceRun) mainOp() {
+	switch op := r.rng.Intn(20); {
+	case op < 7 && len(r.waiting) < 24:
+		r.acquire(traceXU)
+	case op < 10 && len(r.waiting) < 24:
+		r.acquire(traceBackground)
+	case op < 16:
+		r.release()
+	case op < 18:
+		r.cancelOne()
+	default:
+		r.probe(7 + r.rng.Intn(6))
+	}
+}
+
+// xbOp is one operation of the XB stream (between two main steps).
+func (r *traceRun) xbOp() {
+	switch op := r.xbRng.Intn(traceXBOps); {
+	case op < traceXBAcquire:
+		if len(r.waitingXB) < traceXBWaitMax {
+			r.acquire(traceXB)
+		}
+	case op < traceXBAcquire+traceXBRelease:
+		r.releaseXB()
+	case op < traceXBAcquire+traceXBRelease+traceXBCancel:
+		r.cancelXB()
+	}
+}
+
+// demandOp is one step of the demand phases of the aging run: a flip opens
+// the interactive demand (0 → 1 wakes nothing: the herald term only shuts
+// background out) or closes it (→ 0 wakes every target, InteractiveArrived's
+// done — the order is re-read).
+func (r *traceRun) demandOp() {
+	if r.agingRng.Intn(traceDemandFlip) != 0 {
+		return
+	}
+	if r.demandDone == nil {
+		r.demandDone = r.d.InteractiveArrived()
+		return
+	}
+	r.demandDone()
+	r.demandDone = nil
+	r.settle()
+	r.viewRef = r.now()
+}
+
 // reference is the spec transcription of the pick (design/03 §4.5 no. 2/3,
-// d1 and the review-2 hardening F-1), recomputed from the trace's own
-// records: T_act, Σ fw, heldBy and the slot time (settled by the trace,
+// d1 and the review-2 hardening F-1) for the external class c, recomputed
+// from the trace's own records: T_act, Σ fw, heldBy and the slot time over
+// BOTH external classes (A03-W9: one record set — settled by the trace,
 // running from its own admission times) — none of it read from the
 // dispatcher's fairness bookkeeping. The fairness-first head is the first in
 // order among the heads within the policy (w ≤ S, w ≤ E); it is taken when it
 // fits, else the first head in order that fits with its weight plus the
 // fairness-first head's weight (review 2's wording; while the first does not
 // fit no such head exists — review 3 F3-5 — so this is "nobody", kept in
-// this form as an independent statement of the rule) — unless the in-house classes ranked above
-// the external class keep that head out on their own (o1: interactive, of
-// which the trace has none, so the reservation always binds; o2: background
-// too, from the trace's own background leases). It returns the head that
-// must be taken and how many heads fit now.
-func (r *traceRun) reference(st *targetState, slots int) (*waiter, int) {
+// this form as an independent statement of the rule) — unless the classes
+// ranked above c keep that head out on their own (XU: o1 interactive, of
+// which the trace has none, so the reservation always binds; o2 background
+// too, from the trace's own background leases; XB: background and the units
+// XU holds, in both orders). For XB every candidate fits only beyond the
+// claim of XU (refClaim). It returns the head that must be taken and how
+// many heads fit now.
+func (r *traceRun) reference(st *targetState, slots int, c Class) (*waiter, int) {
 	capacity := slots - traceReserved
-	if st.external.total == 0 {
+	q := st.extQueue(c)
+	if q.total == 0 {
 		return nil, 0
 	}
+	keyOf := r.refOrder(st, slots)
+	claim := 0
+	if c == ClassExternalBulk {
+		claim = r.refClaim(st, slots, keyOf)
+	}
+	fitsW := func(w int) bool { return st.held+w+claim <= slots && st.heldExt+w+claim <= capacity }
+	first, fits := refFirst(q, slots, capacity, keyOf, fitsW)
+	if first == nil || fitsW(first.weight) {
+		return first, fits
+	}
+	reserve := first.weight
+	aboveIn, aboveExt := 0, 0
+	switch {
+	case c == ClassExternalBulk:
+		aboveIn, aboveExt = len(r.bg), r.heldXU() // background and XU rank above XB in o1 and o2
+	case r.o2:
+		aboveIn = len(r.bg) // o2: background ranks above XU
+	}
+	if aboveIn+aboveExt+first.weight > slots || aboveExt+first.weight > capacity {
+		reserve = 0
+	} else if c == ClassExternalBulk {
+		r.boundXB++
+	} else {
+		r.bound++
+	}
+	var best *waiter
+	var bk refKey
+	for key, b := range q.buckets {
+		h := b[0]
+		if !fitsW(h.weight + reserve) {
+			continue
+		}
+		if k := keyOf(key, h); best == nil || refLess(k, bk) {
+			best, bk = h, k
+		}
+	}
+	return best, fits
+}
+
+// refOrder is the reference's fairness order over both external classes:
+// the order key of a bucket head, from the trace's own records.
+func (r *traceRun) refOrder(st *targetState, slots int) func(string, *waiter) refKey {
+	capacity := slots - traceReserved
 	// The clock of the order is the trace's own view clock (review 4 FR4-2:
 	// frozen between events; review 5 FR5-2: kept by the trace from the
 	// documented rule, check compares it with the dispatcher's).
@@ -455,31 +716,30 @@ func (r *traceRun) reference(st *targetState, slots int) (*waiter, int) {
 	heldC, heldT := map[string]int{}, map[string]int{}
 	slotC, slotT := map[string]float64{}, map[string]float64{}
 	activeC := map[int]bool{}
-	for _, tl := range r.xu {
-		k, tk := traceConsumerKey(tl.consumer), "_tenant:"+traceTenant(tl.consumer)
-		heldC[k] += tl.weight
-		heldT[tk] += tl.weight
-		run := now.Sub(tl.start).Seconds() * float64(tl.weight)
-		slotC[k] += run
-		slotT[tk] += run
-		activeC[tl.consumer] = true
-	}
-	for key := range st.external.buckets {
-		var c int
-		if _, err := fmt.Sscanf(strings.TrimPrefix(key, consumerKeyPrefix), "c%d", &c); err != nil {
-			r.t.Fatalf("bucket key %q", key)
+	for _, leases := range []map[*Lease]traceLease{r.xu, r.xb} {
+		for _, tl := range leases {
+			k, tk := traceConsumerKey(tl.consumer), "_tenant:"+traceTenant(tl.consumer)
+			heldC[k] += tl.weight
+			heldT[tk] += tl.weight
+			run := now.Sub(tl.start).Seconds() * float64(tl.weight)
+			slotC[k] += run
+			slotT[tk] += run
+			activeC[tl.consumer] = true
 		}
-		activeC[c] = true
+	}
+	for _, q := range []*classQueue{st.external, st.externalBulk} {
+		for key := range q.buckets {
+			activeC[traceConsumerOf(r.t, key)] = true
+		}
 	}
 	activeT, sumFW := map[string]bool{}, map[string]int{}
 	for c := range activeC {
 		activeT[traceTenant(c)] = true
 		sumFW[traceTenant(c)] += traceFW(c)
 	}
-	tShare := max(1, (capacity+len(activeT)-1)/len(activeT))
-	keyOf := func(key string, h *waiter) refKey {
-		var c int
-		_, _ = fmt.Sscanf(strings.TrimPrefix(key, consumerKeyPrefix), "c%d", &c)
+	tShare := max(1, (capacity+len(activeT)-1)/max(len(activeT), 1))
+	return func(key string, h *waiter) refKey {
+		c := traceConsumerOf(r.t, key)
 		tk := "_tenant:" + traceTenant(c)
 		cShare := max(1, (tShare*traceFW(c)+sumFW[traceTenant(c)]-1)/sumFW[traceTenant(c)])
 		return refKey{
@@ -489,11 +749,15 @@ func (r *traceRun) reference(st *targetState, slots int) (*waiter, int) {
 			seq:      h.seq,
 		}
 	}
-	fitsW := func(w int) bool { return st.held+w <= slots && st.heldExt+w <= capacity }
+}
+
+// refFirst is the reference's fairness-first head of q among the heads
+// within the policy, and how many heads fit now (fitsW).
+func refFirst(q *classQueue, slots, capacity int, keyOf func(string, *waiter) refKey, fitsW func(int) bool) (*waiter, int) {
 	var first *waiter
 	var fk refKey
 	fits := 0
-	for key, b := range st.external.buckets {
+	for key, b := range q.buckets {
 		h := b[0]
 		if fitsW(h.weight) {
 			fits++
@@ -505,31 +769,60 @@ func (r *traceRun) reference(st *targetState, slots int) (*waiter, int) {
 			first, fk = h, k
 		}
 	}
-	if first == nil || fitsW(first.weight) {
-		return first, fits
+	return first, fits
+}
+
+// refClaim is the reference's claim of XU on XB (A03-W9, written out): the
+// weight of XU's head the freed units serve first — its fairness-first head
+// while it fits or holds (nothing above XU keeps it out: o1 no interactive,
+// o2 background), else its lightest head — unless the classes ranked above
+// XU keep that head out on their own; 0 without an XU waiter.
+func (r *traceRun) refClaim(st *targetState, slots int, keyOf func(string, *waiter) refKey) int {
+	capacity := slots - traceReserved
+	q := st.external
+	if q.total == 0 {
+		return 0
 	}
-	reserve := first.weight
-	above := st.held - st.heldExt - len(r.bg) // interactive (the trace has none)
+	plain := func(w int) bool { return st.held+w <= slots && st.heldExt+w <= capacity }
+	first, _ := refFirst(q, slots, capacity, keyOf, plain)
+	if first == nil {
+		return 0
+	}
+	above := 0
 	if r.o2 {
-		above += len(r.bg) // o2: background ranks above the external class
+		above = len(r.bg)
 	}
-	if above+first.weight > slots {
-		reserve = 0
-	} else {
-		r.bound++
-	}
-	var best *waiter
-	var bk refKey
-	for key, b := range st.external.buckets {
-		h := b[0]
-		if !fitsW(h.weight + reserve) {
-			continue
-		}
-		if k := keyOf(key, h); best == nil || refLess(k, bk) {
-			best, bk = h, k
+	need := first.weight
+	if !plain(first.weight) && above+first.weight > slots {
+		need = 0
+		for _, b := range q.buckets {
+			if need == 0 || b[0].weight < need {
+				need = b[0].weight
+			}
 		}
 	}
-	return best, fits
+	if above+need > slots || need > capacity {
+		return 0
+	}
+	return need
+}
+
+// heldXU is the weight the trace's XU leases hold.
+func (r *traceRun) heldXU() int {
+	n := 0
+	for _, tl := range r.xu {
+		n += tl.weight
+	}
+	return n
+}
+
+// traceConsumerOf parses the consumer number out of a bucket key.
+func traceConsumerOf(t *testing.T, key string) int {
+	var c int
+	if _, err := fmt.Sscanf(strings.TrimPrefix(key, consumerKeyPrefix), "c%d", &c); err != nil {
+		t.Fatalf("bucket key %q", key)
+	}
+	return c
 }
 
 // probe is the pre-wake check: a policy swap to slots is stored WITHOUT the
@@ -550,7 +843,7 @@ func (r *traceRun) probe(slots int) {
 	}
 	r.slots = slots
 	seen := r.d.headAdmissibleLocked(st, ClassExternal, slots)
-	ref, fits := r.reference(st, slots)
+	ref, fits := r.reference(st, slots, ClassExternal)
 	taken := r.d.pickAdmissibleLocked(st, ClassExternal, FairnessFIFO, slots)
 	r.probes++
 	if fits > 1 {
@@ -568,6 +861,17 @@ func (r *traceRun) probe(slots int) {
 	if taken != nil {
 		r.decided++
 		r.d.handoffLocked(st, taken, true)
+		// The XB half reads the state after this handoff: the trace records
+		// the new XU lease now (its report, settled after the probe, writes
+		// the same record again), and the lease start re-reads the order —
+		// the documented rule (fairness.go extFair.leaseEnter: touch(start)),
+		// so the XB half reads it at this step (H-6: a reference left at the
+		// last event's instant mis-ranks XU's heads and with them the claim).
+		r.xu[taken.lease] = traceLease{consumer: traceConsumerOf(r.t, taken.principal.identityKey()), weight: taken.weight, start: r.now()}
+		r.viewRef = r.now()
+	}
+	if msg == "" {
+		msg = r.probeBulkLocked(st, slots)
 	}
 	r.d.wakeLocked(st)
 	r.d.mu.Unlock()
@@ -576,6 +880,31 @@ func (r *traceRun) probe(slots int) {
 		r.t.Fatalf("probe %d: %s", r.probes, msg)
 	}
 	r.settle()
+}
+
+// probeBulkLocked is the XB half of the probe (A03-W9), on the state the XU
+// handoff left: the head the rank scan checks, XB's pick (not dequeued — the
+// wake that follows serves the classes in rank order) and the reference must
+// agree, and the pick must fit together with XU's claim. "" when they do.
+func (r *traceRun) probeBulkLocked(st *targetState, slots int) string {
+	seen := r.d.headAdmissibleLocked(st, ClassExternalBulk, slots)
+	ref, _ := r.reference(st, slots, ClassExternalBulk)
+	pick, _ := r.d.externalPickLocked(st, ClassExternalBulk, slots)
+	if st.externalBulk.total > 0 && r.refClaim(st, slots, r.refOrder(st, slots)) > 0 {
+		r.claimed++
+	}
+	switch {
+	case seen != (pick != nil):
+		return fmt.Sprintf("XB: headAdmissibleLocked = %v, but the pick is %v", seen, waiterLabel(pick))
+	case pick != ref:
+		return fmt.Sprintf("XB: the pick is %s, the reference pick is %s", waiterLabel(pick), waiterLabel(ref))
+	case pick != nil && (st.held+pick.weight > slots || st.heldExt+pick.weight > slots-traceReserved):
+		return fmt.Sprintf("XB: the pick (w=%d) does not fit: held %d heldExt %d S %d", pick.weight, st.held, st.heldExt, slots)
+	}
+	if pick != nil {
+		r.decidedXB++
+	}
+	return ""
 }
 
 func waiterLabel(w *waiter) string {
@@ -595,23 +924,26 @@ func (r *traceRun) check(step int) {
 	}
 	r.d.mu.Lock()
 	st := r.d.targetLocked(testOrigin)
-	left, _ := r.d.externalPickLocked(st, r.slots)
+	left, _ := r.d.externalPickLocked(st, ClassExternal, r.slots)
+	leftXB, _ := r.d.externalPickLocked(st, ClassExternalBulk, r.slots)
 	// Frozen between events (review 4 FR4-2): the clock alone never changes
 	// the pick — 1000 s later, under the same mutex section, it is the same.
 	r.clk.Add(int64(1000 * time.Second))
-	later, _ := r.d.externalPickLocked(st, r.slots)
+	later, _ := r.d.externalPickLocked(st, ClassExternal, r.slots)
+	laterXB, _ := r.d.externalPickLocked(st, ClassExternalBulk, r.slots)
 	r.clk.Add(-int64(1000 * time.Second))
 	held, heldExt := st.held, st.heldExt
 	viewAt := st.external.fair.viewAt
 	r.d.mu.Unlock()
-	if later != left {
-		r.t.Fatalf("step %d: the pick is %s now and %s 1000 s later without an event — the order moved with the clock", step, waiterLabel(left), waiterLabel(later))
+	if later != left || laterXB != leftXB {
+		r.t.Fatalf("step %d: the picks are %s/%s now and %s/%s 1000 s later without an event — the order moved with the clock",
+			step, waiterLabel(left), waiterLabel(leftXB), waiterLabel(later), waiterLabel(laterXB))
 	}
 	if !viewAt.Equal(r.viewRef) {
 		r.t.Fatalf("step %d: the dispatcher's fairness view is at %v, the trace's rule says %v — the order's clock moved without its event (or missed one)", step, viewAt.UnixNano(), r.viewRef.UnixNano())
 	}
-	if left != nil {
-		r.t.Fatalf("step %d: %s fits and still waits after the wake", step, waiterLabel(left))
+	if left != nil || leftXB != nil {
+		r.t.Fatalf("step %d: %s / %s (XU / XB) fits and still waits after the wake", step, waiterLabel(left), waiterLabel(leftXB))
 	}
 	if r.pending && held <= r.slots && heldExt <= r.slots-traceReserved {
 		r.pending = false
@@ -624,64 +956,170 @@ func (r *traceRun) check(step int) {
 // TestExternalPickConsistencyTrace is gate (h): 6 seeds × 300 random
 // operations (external acquires of five consumers in three tenants with
 // fair weights 1..3 and weights 1..E, background acquires, releases, caller
-// cancels, and pre-wake probes after a policy swap S ∈ 7..12, R = 2) on
-// a fake clock in whole seconds (exact slot-time arithmetic). At every probe
-// the head the rank scan checks, the head the wake takes and the spec
-// reference agree; after every operation the bookkeeping audit is clean, no
-// fitting external head waits, and no handoff overran S or E.
+// cancels, and pre-wake probes after a policy swap S ∈ 7..12, R = 2) on a
+// fake clock in whole seconds (exact slot-time arithmetic), each seed in two
+// runs: base — the trace before A03-W9 draw for draw — and xb — the same
+// main stream plus one operation of the XB stream (A03-W9; H-6: its own
+// random stream) after every main step: XB acquires of the same consumers,
+// XB releases and cancels. At every probe the head the rank scan checks,
+// the head the wake takes and the spec reference agree — for XU, and for XB
+// on the state the XU handoff left (its own order over the shared records
+// and XU's claim, written out in the reference); after every operation the
+// bookkeeping audit is clean, no fitting head of either external class
+// waits, and no handoff overran S or E. Floors per seed: the base run
+// reaches the base trace's XU probe statistics (traceBaseFloors); the mixed
+// run exercises every XU probe kind, binds XB by its own head and by the XU
+// claim, and admits XB at least traceXBAdmitFloors times.
 func TestExternalPickConsistencyTrace(t *testing.T) {
 	for _, order := range []string{ExternalOrderO1, ExternalOrderO2} {
 		for seed := int64(1); seed <= 6; seed++ {
-			t.Run(fmt.Sprintf("%s/%d", order, seed), func(t *testing.T) { externalPickTrace(t, order, seed) })
+			t.Run(fmt.Sprintf("%s/%d/base", order, seed), func(t *testing.T) {
+				externalPickTrace(t, order, seed, traceMode{}).baseFloors(order, seed)
+			})
+			t.Run(fmt.Sprintf("%s/%d/xb", order, seed), func(t *testing.T) {
+				externalPickTrace(t, order, seed, traceMode{xb: true}).mixedFloors(order, seed)
+			})
 		}
 	}
 }
 
-func externalPickTrace(t *testing.T, order string, seed int64) {
+// traceXBAdmitFloors are the XB admissions per order and seed the mixed run
+// must reach — XB leases: heldBy and slot time over both classes,
+// releaseXB, heldExt through XB (review 3 F3-1). The target is the trace at
+// A03-W9 (commit d0ec4399, a third of the external acquires XB on the main
+// stream): o1 11/18/3/17/20/14, o2 15/17/3/16/20/14. The mixed run reaches
+// it for seed 1 in both orders (floor = the d0ec4399 number); for the other
+// seeds the floor is the measured count of the mixed run (the XU claim
+// under the base trace's XU load caps it, see the XB stream mix) — an open
+// point of H-6, not the target.
+var traceXBAdmitFloors = map[string][6]int{
+	ExternalOrderO1: {11, 16, 2, 11, 9, 9},
+	ExternalOrderO2: {15, 16, 2, 11, 9, 8},
+}
+
+// baseFloors: the base run reaches the base trace's XU probe statistics
+// (traceBaseFloors — the same draw sequence, so a shortfall means the trace
+// no longer runs the base's XU part).
+func (r *traceRun) baseFloors(order string, seed int64) {
+	r.t.Helper()
+	base := traceBaseFloors[order][seed-1]
+	if r.choices < base[0] || r.decided < base[1] || r.bound < base[2] {
+		r.t.Fatalf("seed %d: base run XU probes %d/%d/%d (≥ 2 fitting heads / handoffs / bound backfill), base trace before A03-W9 %d/%d/%d — the trace thinned the XU part",
+			seed, r.choices, r.decided, r.bound, base[0], base[1], base[2])
+	}
+}
+
+// mixedFloors: the mixed run exercises the XU pick next to XB (every probe
+// kind), binds XB by its own head and by the XU claim, and admits XB at
+// least traceXBAdmitFloors times.
+func (r *traceRun) mixedFloors(order string, seed int64) {
+	r.t.Helper()
+	if r.choices == 0 || r.decided == 0 || r.bound == 0 {
+		r.t.Fatalf("seed %d: mixed run XU probes %d/%d/%d — the trace never exercised the XU pick next to XB", seed, r.choices, r.decided, r.bound)
+	}
+	if r.boundXB == 0 || r.claimed == 0 {
+		r.t.Fatalf("seed %d: XB never bound by its own head (%d) or by the XU claim (%d) — the trace never exercised the XB pick", seed, r.boundXB, r.claimed)
+	}
+	if want := traceXBAdmitFloors[order][seed-1]; r.admittedXB < want {
+		r.t.Fatalf("seed %d: %d XB admissions, floor %d — XB leases (heldBy, slot time, heldExt over both classes) thinned out", seed, r.admittedXB, want)
+	}
+}
+
+// TestExternalPickConsistencyTraceAging is the mixed run of gate (h) with
+// the aging escape armed (H-6): background_aging_after = traceAgingAfter
+// and the interactive demand in phases (demandOp), so while the demand is
+// open background is admitted past the herald term only via the escape
+// (rank.go backgroundEscapesLocked, taken by the wake's rank scan in
+// pickAdmissibleLocked) — while every check of the trace runs unchanged.
+// Escape admissions happen only inside wakes, which the trace's view rule
+// already books; demandOp books the one new wake (demand → 0). Per seed at
+// least one escape admission. The newcomer half of the escape
+// (headAdmissibleLocked) is pinned by the deterministic escape gates
+// (TestEscapeBeforeExternalUnderO2, TestExternalBulkEscapeBeforeXB and the
+// yield gates), not by this trace.
+func TestExternalPickConsistencyTraceAging(t *testing.T) {
+	for _, order := range []string{ExternalOrderO1, ExternalOrderO2} {
+		for seed := int64(1); seed <= 6; seed++ {
+			t.Run(fmt.Sprintf("%s/%d", order, seed), func(t *testing.T) {
+				r := externalPickTrace(t, order, seed, traceMode{xb: true, aging: traceAgingAfter})
+				if r.escapes == 0 {
+					t.Fatalf("seed %d: no background admission via the aging escape — the trace never exercised the escape", seed)
+				}
+			})
+		}
+	}
+}
+
+// traceMode is the variant of one trace run: xb runs the XB stream, aging
+// > 0 is the aging run.
+type traceMode struct {
+	xb    bool
+	aging time.Duration
+}
+
+// externalPickTrace runs one trace and returns it for the floors.
+func externalPickTrace(t *testing.T, order string, seed int64, mode traceMode) *traceRun {
 	s := DefaultSettings()
 	s.RankOrder = mustRankOrder(t, order)
 	s.ExternalQueuePerConsumer, s.ExternalQueuePerTenant, s.ExternalQueueMax = 0, 0, 0
 	s.ExternalMaxWait = 10 * time.Minute
 	s.BackgroundQueueMax = 0
-	r := &traceRun{t: t, rng: rand.New(rand.NewSource(seed)), slots: 7, reports: make(chan traceReport, 1024),
-		waiting: map[int]traceWaiter{}, xu: map[*Lease]traceLease{}, served: map[string]float64{}, o2: order == ExternalOrderO2}
+	s.BackgroundAgingAfter = mode.aging
+	r := &traceRun{t: t, rng: rand.New(rand.NewSource(seed)), xbRng: rand.New(rand.NewSource(seed + traceXBSeedOffset)),
+		slots: 7, reports: make(chan traceReport, 1024), waiting: map[int]traceWaiter{}, waitingXB: map[int]traceWaiter{},
+		xu: map[*Lease]traceLease{}, xb: map[*Lease]traceLease{}, served: map[string]float64{}, o2: order == ExternalOrderO2}
 	r.d, _ = newTestDispatcher(t, s, r.policy(r.slots))
 	r.clk.Store(time.Now().Truncate(time.Second).UnixNano())
 	r.d.setFairClockForTest(r.now)
-	defer func() {
-		for _, w := range r.waiting {
+	if mode.aging > 0 {
+		// With the escape armed the reaper tick wakes every target
+		// (dispatcher.go reapNow) — asynchronously, on the real clock, outside
+		// the trace's event rule. Close stops only the loops (reaper,
+		// publish); Acquire and Release do not use them.
+		r.d.Close()
+		r.agingRng = rand.New(rand.NewSource(seed + traceAgingSeedOffset))
+		r.demandDone = r.d.InteractiveArrived()
+	}
+	defer r.cleanup()
+	for step := 0; step < traceSteps; step++ {
+		r.clk.Add(int64(r.rng.Intn(4)) * int64(time.Second))
+		r.mainOp()
+		r.check(step)
+		if mode.xb {
+			r.xbOp()
+			r.check(step)
+		}
+		if r.agingRng != nil {
+			r.demandOp()
+			r.check(step)
+		}
+	}
+	r.d.mu.Lock()
+	r.escapes = r.d.targetLocked(testOrigin).preempt.agedAdmits
+	r.d.mu.Unlock()
+	t.Logf("%s seed %d xb=%v: %d probes, %d with ≥ 2 fitting heads, %d decided a handoff, %d with the backfill bound by a fairness-first head that did not fit; XB: %d admissions, %d picks, %d bound by its own head, %d bound by the XU claim; %d aging escapes",
+		order, seed, mode.xb, r.probes, r.choices, r.decided, r.bound, r.admittedXB, r.decidedXB, r.boundXB, r.claimed, r.escapes)
+	return r
+}
+
+// cleanup ends every waiter and lease of the trace (and its open demand).
+func (r *traceRun) cleanup() {
+	for _, m := range []map[int]traceWaiter{r.waiting, r.waitingXB} {
+		for _, w := range m {
 			w.cancel()
 		}
-		r.settle()
-		for l := range r.xu {
+	}
+	r.settle()
+	if r.demandDone != nil {
+		r.demandDone()
+	}
+	for _, m := range []map[*Lease]traceLease{r.xu, r.xb} {
+		for l := range m {
 			l.Release()
 		}
-		for _, l := range r.bg {
-			l.Release()
-		}
-	}()
-	for step := 0; step < 300; step++ {
-		r.clk.Add(int64(r.rng.Intn(4)) * int64(time.Second))
-		switch op := r.rng.Intn(20); {
-		case op < 7 && len(r.waiting) < 24:
-			r.acquire(true)
-		case op < 10 && len(r.waiting) < 24:
-			r.acquire(false)
-		case op < 16:
-			r.release()
-		case op < 18:
-			r.cancelOne()
-		default:
-			r.probe(7 + r.rng.Intn(6))
-		}
-		r.check(step)
 	}
-	t.Logf("%s seed %d: %d probes, %d with ≥ 2 fitting heads, %d decided a handoff, %d with the backfill bound by a fairness-first head that did not fit", order, seed, r.probes, r.choices, r.decided, r.bound)
-	if r.choices == 0 {
-		t.Fatalf("seed %d: no probe saw two fitting heads — the trace never exercised the pick order", seed)
-	}
-	if r.bound == 0 {
-		t.Fatalf("seed %d: no probe saw a fairness-first head that did not fit and bound the backfill — the trace never exercised F-1 (i)", seed)
+	for _, l := range r.bg {
+		l.Release()
 	}
 }
 
@@ -710,7 +1148,7 @@ func TestExternalPickCostScales(t *testing.T) {
 		samples := make([]time.Duration, 2000)
 		for i := range samples {
 			start := time.Now()
-			if w, _ := d.externalPickLocked(st, 2); w == nil {
+			if w, _ := d.externalPickLocked(st, ClassExternal, 2); w == nil {
 				t.Fatalf("no head picked although every head fits")
 			}
 			samples[i] = time.Since(start)

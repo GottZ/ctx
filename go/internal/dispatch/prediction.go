@@ -5,13 +5,25 @@ import (
 	"time"
 )
 
-// Prediction, relational cap and Retry-After of the external class (wave
+// Prediction, relational cap and Retry-After of the external classes (wave
 // A03-W6, design/03 §4.9, Findings 17/18/20, E-03-13; hardened after review
-// 2). All three read the PUBLISHED lease-duration aggregate of the target's
-// external class (metrics.go — never a sort under the dispatcher mutex) and
-// the own position of the acquire, kept O(1) by the fairness bookkeeping
+// 2; per external class since A03-W9). All three read the PUBLISHED
+// lease-duration aggregate of the acquire's own external class (metrics.go —
+// never a sort under the dispatcher mutex; XU and XB each their own window)
+// and the own position of the acquire, kept O(1) by the fairness bookkeeping
 // (fairness.go: waiting and waitW per consumer, waitingConsumers and waitFW
-// per tenant, waitingTenants per queue):
+// per tenant, waitingTenants per target — each per external class):
+//
+//   - what ranks ahead (A03-W9 lead decision P1): an XB acquire waits behind
+//     every waiting XU acquire of the target — XU ranks strictly before XB in
+//     both orders, and the claim keeps XB off the units XU needs — so its
+//     position adds ahead = Σ the weights of the waiting acquires of the
+//     external classes ranked above its own (the XU queue's waiting weight;
+//     0 for XU): they take all of E_eff before XB gets its share, ahead/E_eff
+//     rounds on top of its own (position.rounds). The round length L_p50
+//     stays the acquire's own class's (the lead decision: "ŵ aus dem
+//     XB-Ring"); r̂ reads the held leases of BOTH external classes — they
+//     share E — each with the L_p50 of its own class (review 2 F2-1).
 //
 //   - own position: units = Σ the weights of the identity's waiting acquires
 //     (continuations included — they are served first) plus the newcomer's
@@ -31,11 +43,21 @@ import (
 //     one tenant with equal fair weights both forms coincide.
 //   - ŵ = r̂ + (rounds − 1) · L_p50 with rounds = ⌈units / E_id⌉ ≥ 1: the
 //     first freed unit comes after the REMAINING time of the held leases, r̂ =
-//     max(0, L_p50 − the age of the oldest held external lease) — 0 when the
-//     class holds none — and every further round after a full L_p50 (review 2
-//     F-2 (b): a full first round put ŵ ≥ L_p50, so with L_p50 above the
-//     budget no external acquire ever queued, even one second before a lease
-//     ended). The fairness-first head waits its first round only: a queued
+//     min over the held external leases of max(0, p50(class of the lease) −
+//     the age of the lease) — 0 when E holds none — and every further round
+//     after a full L_p50 (review 2 F-2 (b): a full first round put ŵ ≥ L_p50,
+//     so with L_p50 above the budget no external acquire ever queued, even
+//     one second before a lease ended). Each lease remains for the L_p50 of
+//     ITS class (A03-W9 review 2 F2-1: XU and XB share E, but their lease
+//     durations differ — interactive chats against the long generations of
+//     a peer's bulk; read with the acquire's own p50, a short window under
+//     long leases of the other class queues acquires those leases cannot
+//     serve within the budget, and a long window over short leases of the
+//     other class sheds acquires the next release would serve); a lease
+//     whose class's window is cold counts at
+//     the acquire's own L_p50 (the one-class rule of A03-W6). For one
+//     external class this is the A03-W6 term: the oldest lease remains least.
+//     The fairness-first head waits its first round only: a queued
 //     acquire that is the head externalFirst picks now gets rounds = 1, ŵ = r̂
 //     (review 2 F-2 (a): the slot-time pick serves a fresh or light tenant at
 //     the very next release, the share model would have refused it).
@@ -61,8 +83,9 @@ import (
 //     second tenant).
 //   - Retry-After (E-03-13, X11): Q(ŵ) of the refused acquire's own position,
 //     never the class-wide depth nor other tenants' consumer counts — the
-//     number of waiting tenants and, through r̂, the age of the oldest held
-//     external lease enter; Q rounds up onto Settings.ExternalRetryAfterSteps.
+//     number of waiting tenants and, through r̂, the remaining time of the
+//     held external leases (each at the L_p50 of its class) enter; Q rounds
+//     up onto Settings.ExternalRetryAfterSteps.
 //     An expired waiter's Retry-After is floored at the time it waited
 //     (review 2 F-4: a stale short window predicts ŵ ≈ 0 for the waiter that
 //     just waited its budget out).
@@ -72,11 +95,12 @@ import (
 // can be overestimated and refused (fail-closed), a heavy tenant whose leases
 // hold much of E underestimated (fail-open, the wait timer bounds it); with
 // every held lease fresh and L_p50 above MaxWait_eff, r̂ ≈ L_p50 still refuses
-// at once (fail-closed): r̂ assumes every lease lasts L_p50 — it reads
-// neither the spread of the lease durations nor the earliest end among the
-// E held leases, so with widely spread durations a unit often frees well
-// before L_p50 and the acquire is refused all the same (review 4 FR4-4). r̂ is a proxy, not an oracle, on both sides: one
-// held lease past L_p50 (a long stream) makes the first round free, r̂ = 0,
+// at once (fail-closed): r̂ assumes every lease lasts the L_p50 of its class
+// — it reads neither the spread of the lease durations nor the earliest end
+// among the E held leases, so with widely spread durations a unit often
+// frees well before L_p50 and the acquire is refused all the same (review 4
+// FR4-4). r̂ is a proxy, not an oracle, on both sides: one
+// held lease past the L_p50 of its class (a long stream) makes the first round free, r̂ = 0,
 // however fresh the others are, and the fairness-first head of weight w > 1
 // waits only for the first freed unit although it needs w (fail-open by at
 // most a round, the timer bounds it). The Retry-After of a refused
@@ -115,9 +139,10 @@ type leaseView struct {
 }
 
 // externalLeaseView reads the published lease-duration aggregate of the
-// external class — lock-free, allocation-free (an atomic load).
-func (st *targetState) externalLeaseView() leaseView {
-	a := st.leaseRing(ClassExternal).published()
+// external class c — its own window (A03-W9: XB never reads XU's ring) —
+// lock-free, allocation-free (an atomic load).
+func (st *targetState) externalLeaseView(c Class) leaseView {
+	a := st.leaseRing(c).published()
 	if a.samples < leaseColdSamples || a.p50 <= 0 {
 		return leaseView{}
 	}
@@ -139,7 +164,11 @@ func (d *Dispatcher) boundedExternalCapacity(origin string) int {
 
 // position is the own position of an external acquire in its class.
 type position struct {
-	// units is w's weight plus the weights of its identity's waiting acquires.
+	// ahead is the waiting weight of the external classes ranked above w's
+	// class (A03-W9 P1, aheadLocked): served with all of E_eff first.
+	ahead int
+	// units is w's weight plus the weights of its identity's waiting
+	// acquires of its class.
 	units int
 	// tenants is T_w, the tenants with a waiting acquire, w's own counted.
 	tenants int
@@ -148,24 +177,25 @@ type position struct {
 	sumFW, fw int
 }
 
-// externalPositionLocked is the own position of the newcomer w (not queued):
-// two record lookups, O(1).
-func externalPositionLocked(st *targetState, w *waiter) position {
-	f := st.external.fair
-	p := position{units: w.weight, tenants: f.waitingTenants, fw: fairWeightOf(w.principal)}
+// externalPositionLocked is the own position of the newcomer w (not queued)
+// in its external class: two record lookups and the rank scan for what
+// ranks ahead, O(1).
+func (d *Dispatcher) externalPositionLocked(st *targetState, w *waiter) position {
+	f, k := st.external.fair, w.class
+	p := position{ahead: d.aheadLocked(st, k), units: w.weight, tenants: f.waitingTenants[k], fw: fairWeightOf(w.principal)}
 	p.sumFW = p.fw
 	var t *fairTenant
 	if c := f.consumers[w.principal.identityKey()]; c != nil {
 		t = c.tenant
-		if c.waiting > 0 {
-			p.units += c.waitW
+		if c.waiting[k] > 0 {
+			p.units += c.waitW[k]
 			p.sumFW -= c.fw // counted below in waitFW, at the newcomer's weight instead
 		}
 	} else {
 		t = f.tenants[w.principal.TenantID]
 	}
-	if t != nil && t.waitingConsumers > 0 {
-		p.sumFW += t.waitFW
+	if t != nil && t.waitingConsumers[k] > 0 {
+		p.sumFW += t.waitFW[k]
 	} else {
 		p.tenants++
 	}
@@ -173,24 +203,43 @@ func externalPositionLocked(st *targetState, w *waiter) position {
 }
 
 // queuedPositionLocked is the own position of the queued w — the same counts
-// as its newcomer position, read from the records it entered (waiterEnter):
-// its consumer's waiting Σw (w's own included; every other waiter of the
-// consumer is ahead of the newest), T_w, its tenant's waiting Σfw (the
-// consumer at the record's fair weight, which enter set to w's), the
-// record's fair weight. O(1).
-func queuedPositionLocked(st *targetState, w *waiter) position {
-	c := w.fair
-	return position{units: c.waitW, tenants: st.external.fair.waitingTenants, sumFW: c.tenant.waitFW, fw: c.fw}
+// as its newcomer position, read from the records it entered (waiterEnter)
+// in its class: its consumer's waiting Σw (w's own included; every other
+// waiter of the consumer is ahead of the newest), T_w, its tenant's waiting
+// Σfw (the consumer at the record's fair weight, which enter set to w's),
+// the record's fair weight, and what ranks ahead. O(1).
+func (d *Dispatcher) queuedPositionLocked(st *targetState, w *waiter) position {
+	c, k := w.fair, w.class
+	return position{ahead: d.aheadLocked(st, k), units: c.waitW[k], tenants: st.external.fair.waitingTenants[k], sumFW: c.tenant.waitFW[k], fw: c.fw}
 }
 
-// rounds is ⌈units / E_id⌉ ≥ 1 with E_id = capacity · fw / (tenants · Σfw):
-// the rounds of freed units the identity's work needs at its share. In
+// aheadLocked is the waiting weight of the external classes ranked above the
+// external class c (A03-W9 P1): the XU queue's for XB, 0 for XU. O(#classes).
+func (d *Dispatcher) aheadLocked(st *targetState, c Class) int {
+	ahead := 0
+	for _, h := range d.currentSettings().RankOrder {
+		if h == c {
+			return ahead
+		}
+		if h.External() {
+			ahead += st.extQueue(h).weight
+		}
+	}
+	return ahead
+}
+
+// rounds is ⌈ahead / E + units / E_id⌉ ≥ 1 with E_id = capacity · fw /
+// (tenants · Σfw): the rounds of freed units the higher-ranked external
+// waiters take with all of E (A03-W9 P1; 0 for XU) plus those the identity's
+// work needs at its share — as one fraction, ⌈(ahead · fw + units · tenants
+// · Σfw) / (capacity · fw)⌉ (for ahead = 0 exactly the A03-W6 term). In
 // float64 the products of counts are exact far beyond any reachable queue,
 // and the quotient of exact integers rounds correctly, so the ceiling is the
 // integer ceiling.
 func (p position) rounds(capacity int) float64 {
-	num := float64(p.units) * float64(max(p.tenants, 1)) * float64(max(p.sumFW, 1))
-	return max(math.Ceil(num/(float64(max(capacity, 1))*float64(max(p.fw, 1)))), 1)
+	fw := float64(max(p.fw, 1))
+	num := float64(p.ahead)*fw + float64(p.units)*float64(max(p.tenants, 1))*float64(max(p.sumFW, 1))
+	return max(math.Ceil(num/(float64(max(capacity, 1))*fw)), 1)
 }
 
 // wait is ŵ = first + (rounds − 1) · perRound of the position.
@@ -208,27 +257,71 @@ func roundsWait(rounds float64, first, perRound time.Duration) time.Duration {
 	return maxDuration
 }
 
-// firstRoundLocked is r̂ of the target's external class (review 2 F-2 (b)):
-// max(0, p50 − the age of the oldest held external lease) — the remaining
-// time until the first freed unit, read off the lease that has run longest
-// (at most p50: a lease is admitted before now, under this mutex or an
-// earlier section of it) — and 0 when the class holds no lease: its units are free,
-// the acquire waits only for the in-house classes or the pick. One pass over
-// the held external leases (extCancel holds exactly them, at most E_eff of
-// them; their cancel funcs are never called here) — run only where the
-// rounds bound alone refuses (predictAfterPushLocked) and for the
-// Retry-After of a rejection.
-func (st *targetState) firstRoundLocked(p50 time.Duration, now time.Time) time.Duration {
-	var oldest time.Time
-	for l := range st.extCancel {
-		if oldest.IsZero() || l.admitted.Before(oldest) {
-			oldest = l.admitted
+// roundLengths is the L_p50 r̂ reads per class: for each external class the
+// p50 of its own published window when warm, else the acquire's own (the
+// in-house rows stay 0 — they hold no external lease).
+type roundLengths [numClasses]time.Duration
+
+// roundLengthsFor is the roundLengths of an acquire of the external class c
+// whose own L_p50 is own (its window is warm): every other external class's
+// published window read once, lock-free and allocation-free (A03-W9 review 2
+// F2-1, lead decision H-1).
+func (st *targetState) roundLengthsFor(c Class, own time.Duration) roundLengths {
+	var p roundLengths
+	for i := range p {
+		h := Class(i)
+		if !h.External() {
+			continue
+		}
+		p[i] = own
+		if h == c {
+			continue
+		}
+		if lv := st.externalLeaseView(h); lv.warm {
+			p[i] = lv.p50
 		}
 	}
-	if oldest.IsZero() {
-		return 0
+	return p
+}
+
+// firstRoundBound is an upper bound of r̂ without the pass over the held
+// leases: the largest L_p50 of an external class that holds units
+// (classHeld), at least own — every held lease remains at most the p50 of its
+// class (it is admitted before now). For one external class it is own, the
+// A03-W6 bound r̂ ≤ L_p50. O(#classes).
+func (st *targetState) firstRoundBound(p50 roundLengths, own time.Duration) time.Duration {
+	bound := own
+	for i, d := range p50 {
+		if st.classHeld[i] > 0 {
+			bound = max(bound, d)
+		}
 	}
-	return max(p50-now.Sub(oldest), 0)
+	return bound
+}
+
+// firstRoundLocked is r̂ (review 2 F-2 (b); per lease class since A03-W9
+// review 2 F2-1): the remaining time until the first freed unit of E, min
+// over the held external leases of max(0, p50[class of the lease] − the age
+// of the lease) — each lease of either external class remains for the L_p50
+// of its own class (roundLengthsFor) — and 0 when no external lease is held:
+// the units are free, the acquire waits only for the in-house classes or the
+// pick. One pass over the held external leases (extCancel holds exactly them,
+// at most E_eff of them, each of an external class — admitLocked; their
+// cancel funcs are never called here), ended early at 0 — run only where the
+// rounds bound alone refuses (predictAfterPushLocked) and for the
+// Retry-After of a rejection. No allocation.
+func (st *targetState) firstRoundLocked(p50 roundLengths, now time.Time) time.Duration {
+	first, held := time.Duration(0), false
+	for l := range st.extCancel {
+		left := max(p50[l.class]-now.Sub(l.admitted), 0)
+		if !held || left < first {
+			first, held = left, true
+		}
+		if first == 0 {
+			break
+		}
+	}
+	return first
 }
 
 // relationalQueueCap is R = ⌈k · E_eff · maxWait / L_p50⌉ (≥ 1, bounded by
@@ -246,9 +339,10 @@ func relationalQueueCap(capacity int, maxWait, p50 time.Duration) int {
 
 // externalRetryAfterLocked is the Retry-After of an external rejection of w
 // (E-03-13): Q(ŵ) of its own position as a newcomer, ŵ = r̂ + (rounds − 1) ·
-// L_p50, on a warm window of a target with an external cap, else the class
-// formula of the external class (depth × published wait p95 — the cold rule
-// of §4.9) — never below floor (the waited time of an expired waiter, review
+// L_p50 (for XB with the waiting XU weight ahead, P1), on a warm window of
+// its class on a target with an external cap, else the class formula of its
+// external class (its depth × its published wait p95 — the cold rule of
+// §4.9) — never below floor (the waited time of an expired waiter, review
 // 2 F-4; 0 for every other reason), quantized onto
 // Settings.ExternalRetryAfterSteps. Lock-free reads, O(1) under the held
 // mutex plus the pass over the held external leases (r̂); for an expired
@@ -256,10 +350,10 @@ func relationalQueueCap(capacity int, maxWait, p50 time.Duration) int {
 func (d *Dispatcher) externalRetryAfterLocked(st *targetState, w *waiter, floor time.Duration) time.Duration {
 	steps := d.currentSettings().ExternalRetryAfterSteps
 	var est time.Duration
-	if lv, capacity := st.externalLeaseView(), d.boundedExternalCapacity(st.origin); lv.warm && capacity > 0 {
-		est = externalPositionLocked(st, w).wait(capacity, st.firstRoundLocked(lv.p50, time.Now()), lv.p50)
+	if lv, capacity := st.externalLeaseView(w.class), d.boundedExternalCapacity(st.origin); lv.warm && capacity > 0 {
+		est = d.externalPositionLocked(st, w).wait(capacity, st.firstRoundLocked(st.roundLengthsFor(w.class, lv.p50), time.Now()), lv.p50)
 	} else {
-		est = classEstimate(st.external.total, st.ring(ClassExternal).published().p95)
+		est = classEstimate(st.extQueue(w.class).total, st.ring(w.class).published().p95)
 	}
 	return quantizeRetryAfter(max(est, floor), steps)
 }
@@ -272,7 +366,9 @@ func (d *Dispatcher) externalRejectLocked(st *targetState, w *waiter, sentinel e
 }
 
 // enqueueExternalLocked queues an external waiter that is no continuation
-// (A03-W6): the absolute cap ladder consumer → tenant → aggregate first — the
+// (A03-W6) into the queue of its class (A03-W9: own cap counters per class,
+// the same cap values): the absolute cap ladder consumer → tenant →
+// aggregate first — the
 // most specific offender first, a refusal counts Cap — then, on a warm window
 // of a target with an external cap, the relational cap (w's tenant at its
 // share ⌈R / T_w⌉ ⇒ ErrTargetSaturated, Cap). Every refusal carries the
@@ -280,15 +376,15 @@ func (d *Dispatcher) externalRejectLocked(st *targetState, w *waiter, sentinel e
 // the prediction follows the push, before the enqueue wake
 // (predictAfterPushLocked).
 func (d *Dispatcher) enqueueExternalLocked(st *targetState, w *waiter, set Settings) error {
-	q := st.external
+	q := st.extQueue(w.class)
 	if err := capLadder(q, w, set.ExternalQueuePerConsumer, set.ExternalQueuePerTenant, set.ExternalQueueMax); err != nil {
-		st.extRejects.Cap++
+		st.extRejects[w.class].Cap++
 		return d.externalRejectLocked(st, w, err, 0)
 	}
-	if lv, capacity := st.externalLeaseView(), d.boundedExternalCapacity(st.origin); lv.warm && capacity > 0 {
-		tenants := max(externalPositionLocked(st, w).tenants, 1)
+	if lv, capacity := st.externalLeaseView(w.class), d.boundedExternalCapacity(st.origin); lv.warm && capacity > 0 {
+		tenants := max(d.externalPositionLocked(st, w).tenants, 1)
 		if r := relationalQueueCap(capacity, set.ExternalMaxWait, lv.p50); r > 0 && q.byTenant[w.principal.TenantID] >= (r+tenants-1)/tenants {
-			st.extRejects.Cap++
+			st.extRejects[w.class].Cap++
 			return d.externalRejectLocked(st, w, ErrTargetSaturated, 0)
 		}
 	}
@@ -327,21 +423,24 @@ func (d *Dispatcher) enqueueExternalLocked(st *targetState, w *waiter, set Setti
 // upper bound maxWeight. No timer is armed (Acquire arms it only after a nil
 // error), no goroutine parks: counted Predicted, answered
 // ErrWaitExpired with the Retry-After Q(ŵ) of the comparison. O(1) while the
-// rounds bound fits (r̂ ≤ L_p50); beyond it one pass over the held external
+// rounds bound fits (r̂ ≤ firstRoundBound, the largest L_p50 of a class that
+// holds — L_p50 for one external class); beyond it one pass over the held external
 // leases (r̂), the pick (O(1) while not even the lightest head fits, else one
 // or two passes over the bucket heads) and one pass for the fairness-first
 // head, each only when the terms before it did not decide.
 func (d *Dispatcher) predictAfterPushLocked(st *targetState, w *waiter, budget time.Duration, now time.Time) error {
-	lv, capacity := st.externalLeaseView(), d.boundedExternalCapacity(st.origin)
+	lv, capacity := st.externalLeaseView(w.class), d.boundedExternalCapacity(st.origin)
 	if w.cont || !lv.warm || capacity <= 0 {
 		return nil
 	}
 	left := budget - now.Sub(w.enqueued)
-	rounds := queuedPositionLocked(st, w).rounds(capacity)
-	if roundsWait(rounds, lv.p50, lv.p50) <= left {
-		return nil // r̂ ≤ L_p50: within the rounds bound, ŵ fits as well
+	pos := d.queuedPositionLocked(st, w)
+	rounds := pos.rounds(capacity)
+	p50 := st.roundLengthsFor(w.class, lv.p50)
+	if roundsWait(rounds, st.firstRoundBound(p50, lv.p50), lv.p50) <= left {
+		return nil // r̂ ≤ the bound: within the rounds bound, ŵ fits as well
 	}
-	first := st.firstRoundLocked(lv.p50, now)
+	first := st.firstRoundLocked(p50, now)
 	est := roundsWait(rounds, first, lv.p50)
 	if est <= left {
 		return nil
@@ -353,18 +452,22 @@ func (d *Dispatcher) predictAfterPushLocked(st *targetState, w *waiter, budget t
 	f := st.external.fair
 	viewAt := f.viewAt
 	f.touch(d.fairClock(now))
-	if pick, _ := d.externalPickLocked(st, d.slotsLocked(st.origin)); pick == w {
+	if pick, _ := d.externalPickLocked(st, w.class, d.slotsLocked(st.origin)); pick == w {
 		return nil // the wake admits w now
 	}
-	if first <= left && d.externalFairnessFirstLocked(st, w) {
+	// The fairness-first head waits its first round only — behind the
+	// higher-ranked external weight ahead of it (P1): ⌈(ahead + w) / E⌉
+	// rounds, 1 for XU.
+	headRounds := position{ahead: pos.ahead, units: w.weight}.rounds(capacity)
+	if roundsWait(headRounds, first, lv.p50) <= left && d.externalFairnessFirstLocked(st, w) {
 		return nil
 	}
 	f.viewAt = viewAt
-	st.external.remove(w) // no wake: nothing the push changed may act (C1)
+	st.extQueue(w.class).remove(w) // no wake: nothing the push changed may act (C1)
 	if c := w.fair; w.fwBefore > 0 && c.refs > 0 {
 		c.reweigh(w.fwBefore) // nor the fair weight it brought (review 4 FR4-2)
 	}
-	st.extRejects.Predicted++
+	st.extRejects[w.class].Predicted++
 	return &RejectionError{Err: ErrWaitExpired, RetryAfter: quantizeRetryAfter(est, d.currentSettings().ExternalRetryAfterSteps)}
 }
 
@@ -374,7 +477,7 @@ func (d *Dispatcher) predictAfterPushLocked(st *targetState, w *waiter, budget t
 // bucket, and no other bucket head ranks before it. O(1) for the first two
 // terms, one pass over the bucket heads for the third.
 func (d *Dispatcher) externalFairnessFirstLocked(st *targetState, w *waiter) bool {
-	q := st.external
+	q := st.extQueue(w.class)
 	if len(q.cont) > 0 {
 		return false
 	}
@@ -382,6 +485,6 @@ func (d *Dispatcher) externalFairnessFirstLocked(st *targetState, w *waiter) boo
 		return false
 	}
 	_, capacity := d.externalOffer(st.origin)
-	first, _, _ := externalFirst(st, d.fairViewLocked(q.fair, capacity), d.slotsLocked(st.origin), capacity)
+	first, _, _ := externalFirst(q, d.fairViewLocked(q.fair, capacity), d.slotsLocked(st.origin), capacity)
 	return first == w
 }

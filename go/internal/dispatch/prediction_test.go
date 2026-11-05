@@ -815,7 +815,9 @@ func TestColdLeaseRingNoPrediction(t *testing.T) {
 
 // TestLeaseDurationRingSamplesEveryLeaseEnd: one sample per lease end, per
 // target × class (continuation leases included), the window exact in the
-// snapshot (p50/p90 nearest rank) and published for the hot path.
+// snapshot (p50/p90 nearest rank) and published for the hot path — the
+// snapshot and the publication only for the external classes (A03-W9 lead
+// decision P2, A03-W6 review 1 F-8); the in-house windows keep sampling.
 func TestLeaseDurationRingSamplesEveryLeaseEnd(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(4, 2))
 	bg := context.Background()
@@ -831,8 +833,20 @@ func TestLeaseDurationRingSamplesEveryLeaseEnd(t *testing.T) {
 	if got := ts.LeaseDur[ClassExternal].Samples; got != 4 {
 		t.Fatalf("external lease samples %d, want 4 (three leases and one continuation)", got)
 	}
-	if ts.LeaseDur[ClassInteractive].Samples != 2 || ts.LeaseDur[ClassBackground].Samples != 1 {
-		t.Fatalf("lease samples interactive %d background %d, want 2/1", ts.LeaseDur[ClassInteractive].Samples, ts.LeaseDur[ClassBackground].Samples)
+	if ia, bg := d.leaseSamplesForTest(testOrigin, ClassInteractive), d.leaseSamplesForTest(testOrigin, ClassBackground); ia != 2 || bg != 1 {
+		t.Fatalf("lease samples interactive %d background %d, want 2/1", ia, bg)
+	}
+	if ts.LeaseDur[ClassInteractive] != (LeaseDurStats{}) || ts.LeaseDur[ClassBackground] != (LeaseDurStats{}) {
+		t.Fatalf("snapshot lease view interactive %+v background %+v, want empty (P2: only the external windows)",
+			ts.LeaseDur[ClassInteractive], ts.LeaseDur[ClassBackground])
+	}
+	d.publishWaits()
+	d.mu.Lock()
+	st := d.targetLocked(testOrigin)
+	ipub, bpub := st.leaseRing(ClassInteractive).published(), st.leaseRing(ClassBackground).published()
+	d.mu.Unlock()
+	if ipub != (waitAgg{}) || bpub != (waitAgg{}) {
+		t.Fatalf("published in-house lease windows %+v / %+v, want none (P2)", ipub, bpub)
 	}
 	d2, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(4, 2))
 	d2.SeedLeaseSamplesForTest(testOrigin, ClassExternal, 60, time.Second)

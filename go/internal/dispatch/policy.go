@@ -401,7 +401,8 @@ type Settings struct {
 	// A-E2 no. 1: policy data, not a constant, rank.go): both admission
 	// predicates serve the classes in this order. Hot: a swap acts on the
 	// next wake. The zero value reads as the default order (DefaultRankOrder:
-	// interactive, background), like an empty Fairness reads as fifo —
+	// o1 — interactive, external, background, external bulk), like an empty
+	// Fairness reads as fifo —
 	// ClassInteractive is 0, so an all-interactive order IS the zero value.
 	// Any other order must be a permutation of all classes with
 	// ClassInteractive on rank 0 (I-03-2); otherwise the default is in
@@ -413,7 +414,8 @@ type Settings struct {
 	// (A03-W3, design/03 §3.3; defaults 8/32/64, 0 = that cap off), checked
 	// consumer → tenant → aggregate like the interactive one but with
 	// counters of their own — a consumer never shares a cap with the humans
-	// (K-03-6). The per-tenant cap is the C8 factorization brake: N consumers
+	// (K-03-6) — per external class: XU and XB apply the same values to
+	// separate counters (A03-W9, design/03 §4.1 C7 (5) "own counters"). The per-tenant cap is the C8 factorization brake: N consumers
 	// of one tenant cannot multiply the per-consumer cap.
 	ExternalQueuePerConsumer int
 	ExternalQueuePerTenant   int
@@ -423,8 +425,10 @@ type Settings struct {
 	// cancel path of an external lease, independent of alias timeouts up to
 	// 3600 s). ≤ 0 = no external cap, the general reap reference applies.
 	ExternalLeaseMax time.Duration
-	// ExternalMaxWait is the ONE wait budget of an external acquire (A03-W5,
-	// design/03 §4.9, A-E2 no. 2; default 20 s): an external acquire that
+	// ExternalMaxWait is the ONE wait budget of an external acquire of either
+	// external class (A03-W5, design/03 §4.9, A-E2 no. 2; A03-W9 lead
+	// decision 2: XU and XB, no key of its own; default 20 s): an external
+	// acquire that
 	// has to wait ends with ErrWaitExpired when it runs out (Request.MaxWait
 	// and Request.ServeBy can only shorten it, waitbudget.go). ≤ 0 = an
 	// external acquire never WAITS — admitted at once when admissible, else
@@ -432,8 +436,8 @@ type Settings struct {
 	// classes have no wait budget. Hot like every setting: a swap acts on
 	// the next acquire; a waiting acquire keeps the budget it started with.
 	ExternalMaxWait time.Duration
-	// ExternalRetryAfterSteps are the Retry-After steps of the external class
-	// (A03-W6, DECISIONS A-E2 no. 2: a setting, not a constant; config key
+	// ExternalRetryAfterSteps are the Retry-After steps of the external
+	// classes (A03-W6, DECISIONS A-E2 no. 2: a setting, not a constant; config key
 	// dispatch.external_retry_after_steps, V46): the Retry-After an external
 	// rejection carries rounds UP to the next step, and the largest step caps
 	// it (for the external class it replaces retryAfterCap). Strictly

@@ -84,12 +84,13 @@ func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 		depth = st.interactive.total
 	case ClassBackground:
 		depth = st.background.len()
-	case ClassExternal:
-		// The external window includes the censored samples of expired
+	case ClassExternal, ClassExternalBulk:
+		// The external windows include the censored samples of expired
 		// waiters (A03-W5, metrics.go) — the estimate does not read only
 		// the survivors; the depth includes waiting continuations (A03-W17),
-		// which are served before a newcomer.
-		return quantizeRetryAfter(classEstimate(st.external.total, st.ring(class).published().p95),
+		// which are served before a newcomer. Each external class reads its
+		// own queue and window (A03-W9).
+		return quantizeRetryAfter(classEstimate(st.extQueue(class).total, st.ring(class).published().p95),
 			d.currentSettings().ExternalRetryAfterSteps)
 	default:
 		// Fail-closed (A03-W1): no estimate for a class without a case here
@@ -166,8 +167,9 @@ type RejectionError struct {
 	// ErrTenantSaturated, ErrTargetSaturated).
 	Err error
 	// RetryAfter is Q(ŵ) of the rejected acquire's OWN position (identity
-	// weight queued ahead, waiting tenants and consumers, E_eff, the
-	// remaining time of the oldest held external lease, lease p50), or on a
+	// weight queued ahead, waiting tenants and consumers, E_eff, r̂ — the
+	// least remaining time of the held external leases, each at the lease
+	// p50 of its class —, the lease p50 of its own class), or on a
 	// cold lease window the class formula of the external class, quantized
 	// onto Settings.ExternalRetryAfterSteps — always one of the steps; for an
 	// expired waiter never below the time it waited. Without jitter: the

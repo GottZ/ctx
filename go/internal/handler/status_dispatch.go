@@ -62,26 +62,31 @@ type dispatchTarget struct {
 	// foreign-load detector contract); held_internal + held_external == held.
 	Held     int `json:"held"`
 	Inflight int `json:"inflight"`
-	// The external class (A03-W3, design/03 §4.14) — server-admin only: the
-	// internal/external split, the internal partition R, the external offer
-	// and its capacity E, the external wait view and its refusals.
-	HeldInternal     int                     `json:"held_internal"`
-	HeldExternal     int                     `json:"held_external"`
-	InflightInternal int                     `json:"inflight_internal"`
-	InternalReserved int                     `json:"internal_reserved"`
-	ExternalOffered  bool                    `json:"external_offered"`
-	ExternalCapacity int                     `json:"external_capacity"`
-	External         dispatchWait            `json:"external"`
-	ExternalRejects  dispatchExternalRejects `json:"external_rejects"`
-	Interactive      dispatchWait            `json:"interactive"`
-	Background       dispatchWait            `json:"background"`
-	Preempt          dispatchPreempt         `json:"preempt"`
-	Buckets          []dispatchBucket        `json:"buckets"`
+	// The external classes (A03-W3, design/03 §4.14) — server-admin only:
+	// the internal/external split (held_external counts the leases of both
+	// external classes), the internal partition R, the external offer and
+	// its capacity E, and per external class the wait view and its refusals
+	// — external / external_rejects for XU, external_bulk /
+	// external_bulk_rejects for XB (A03-W9, design/03 §3.4 per class).
+	HeldInternal        int                     `json:"held_internal"`
+	HeldExternal        int                     `json:"held_external"`
+	InflightInternal    int                     `json:"inflight_internal"`
+	InternalReserved    int                     `json:"internal_reserved"`
+	ExternalOffered     bool                    `json:"external_offered"`
+	ExternalCapacity    int                     `json:"external_capacity"`
+	External            dispatchWait            `json:"external"`
+	ExternalRejects     dispatchExternalRejects `json:"external_rejects"`
+	ExternalBulk        dispatchWait            `json:"external_bulk"`
+	ExternalBulkRejects dispatchExternalRejects `json:"external_bulk_rejects"`
+	Interactive         dispatchWait            `json:"interactive"`
+	Background          dispatchWait            `json:"background"`
+	Preempt             dispatchPreempt         `json:"preempt"`
+	Buckets             []dispatchBucket        `json:"buckets"`
 }
 
-// dispatchExternalRejects counts the external refusals of one target per
-// reason: cap (the external cap ladder) and not_offered (the target does not
-// offer the external class).
+// dispatchExternalRejects counts the refusals of one external class on one
+// target per reason: cap (the external cap ladder) and not_offered (the
+// target does not offer the external classes).
 type dispatchExternalRejects struct {
 	Cap        int64 `json:"cap"`
 	NotOffered int64 `json:"not_offered"`
@@ -108,7 +113,8 @@ type dispatchPreempt struct {
 // dispatchBucket is the per-fair-key detail — SERVER-ADMIN ONLY. fair_key is
 // principal detail (HomeScope; for an external consumer the identity key
 // _consumer:<id>); it never appears in the tenant shape. class names the
-// queue ("interactive" | "external"), tenant_id the bucket's tenant.
+// queue ("interactive" | "external" | "external_bulk"), tenant_id the
+// bucket's tenant.
 type dispatchBucket struct {
 	FairKey      string `json:"fair_key"`
 	TenantID     string `json:"tenant_id"`
@@ -196,25 +202,24 @@ func buildDispatchAdmin(snap dispatch.Snapshot, enforcing bool, guardAt, digestA
 	}
 	for _, t := range snap.Targets {
 		dt := dispatchTarget{
-			Origin:            t.Origin,
-			Slots:             t.Slots,
-			PreemptBackground: t.PreemptBackground,
-			HeraldScope:       string(t.HeraldScope),
-			Held:              t.Held,
-			Inflight:          t.Inflight,
-			HeldInternal:      t.HeldInternal,
-			HeldExternal:      t.HeldExternal,
-			InflightInternal:  t.InflightInternal,
-			InternalReserved:  t.InternalReserved,
-			ExternalOffered:   t.ExternalOffered,
-			ExternalCapacity:  t.ExternalCapacity,
-			External:          waitOf(t.External),
-			ExternalRejects: dispatchExternalRejects{
-				Cap:        t.ExternalRejects.Cap,
-				NotOffered: t.ExternalRejects.NotOffered,
-			},
-			Interactive: waitOf(t.Interactive),
-			Background:  waitOf(t.Background),
+			Origin:              t.Origin,
+			Slots:               t.Slots,
+			PreemptBackground:   t.PreemptBackground,
+			HeraldScope:         string(t.HeraldScope),
+			Held:                t.Held,
+			Inflight:            t.Inflight,
+			HeldInternal:        t.HeldInternal,
+			HeldExternal:        t.HeldExternal,
+			InflightInternal:    t.InflightInternal,
+			InternalReserved:    t.InternalReserved,
+			ExternalOffered:     t.ExternalOffered,
+			ExternalCapacity:    t.ExternalCapacity,
+			External:            waitOf(t.External),
+			ExternalRejects:     externalRejectsOf(t.ExternalRejects),
+			ExternalBulk:        waitOf(t.ExternalBulk),
+			ExternalBulkRejects: externalRejectsOf(t.ExternalBulkRejects),
+			Interactive:         waitOf(t.Interactive),
+			Background:          waitOf(t.Background),
 			Preempt: dispatchPreempt{
 				PreemptsTotal:       t.Preempt.PreemptsTotal,
 				WastedMsTotal:       t.Preempt.WastedMsTotal,
@@ -241,6 +246,11 @@ func buildDispatchAdmin(snap dispatch.Snapshot, enforcing bool, guardAt, digestA
 		out.Targets = append(out.Targets, dt)
 	}
 	return out
+}
+
+// externalRejectsOf renders the refusal counters of one external class.
+func externalRejectsOf(r dispatch.ExternalRejectStats) dispatchExternalRejects {
+	return dispatchExternalRejects{Cap: r.Cap, NotOffered: r.NotOffered}
 }
 
 func waitOf(w dispatch.WaitStats) dispatchWait {

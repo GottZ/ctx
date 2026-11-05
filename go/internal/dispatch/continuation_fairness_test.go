@@ -44,7 +44,7 @@ func continuationBeforeFairnessPick(t *testing.T, mode FairnessMode) {
 	st := d.targetLocked(testOrigin)
 	grown := partitionPolicy(3, 1) // one unit free without the wake: the head view must name the continuation
 	d.policy.Store(&grown)
-	seen, _ := d.externalPickLocked(st, 3)
+	seen, _ := d.externalPickLocked(st, ClassExternal, 3)
 	d.policy.Store(&Policy{Targets: map[string]TargetPolicy{testOrigin: {Slots: 2, InternalReserved: 1}}})
 	d.mu.Unlock()
 	if seen == nil || !seen.cont {

@@ -91,14 +91,19 @@ type targetState struct {
 	// held is the sum of the weights (Σw, A03-W7, design/03 §4.7) of the
 	// slot-holding leases (pass-through leases excluded) of ALL classes —
 	// internal and external: the unit of every admission term, of the wake
-	// scan and of the preempt need. heldExt is its external part (an
-	// external lease always holds units of the external partition, it is
-	// never pass-through); extLeases counts the external leases. An in-house
-	// lease weighs 1, so held − heldExt is both the internal weight and the
-	// number of internal slot-holding leases.
+	// scan and of the preempt need. heldExt is its external part over BOTH
+	// external classes (one partition E for XU and XB, A03-W9; an external
+	// lease always holds units of the external partition, it is never
+	// pass-through); extLeases counts the external leases. An in-house lease
+	// weighs 1, so held − heldExt is both the internal weight and the number
+	// of internal slot-holding leases. classHeld splits held by class (A03-W9):
+	// what the classes ranked above one class hold is the sum over its rank
+	// predecessors (aboveLocked) — Σ classHeld == held, classHeld[XU] +
+	// classHeld[XB] == heldExt, classHeld[background] == len(cancelable).
 	held      int
 	heldExt   int
 	extLeases int
+	classHeld [numClasses]int
 	// inflight is the registry of ALL leases incl. pass-through (telemetry,
 	// divergence metric, reaper).
 	inflight map[*Lease]struct{}
@@ -117,12 +122,20 @@ type targetState struct {
 	extCancel   map[*Lease]context.CancelCauseFunc
 	interactive *classQueue
 	background  bgQueue
-	// external is the wait queue of the external class (identity buckets
-	// _consumer:<id>, its own cap ladder — A03-W3).
-	external *classQueue
-	// extRejects counts the external refusals per reason (design/03 §3.4:
-	// no llmlog line per external rejection, a counter instead).
-	extRejects ExternalRejectStats
+	// external is the wait queue of the external class XU (identity buckets
+	// _consumer:<id>, its own cap ladder — A03-W3), externalBulk the one of
+	// XB (A03-W9: own buckets, own cap counters, the same cap values). Both
+	// share ONE fairness record set (external.fair == externalBulk.fair):
+	// T_act, heldBy and Σ fair_weight count the two external classes
+	// together (design/03 §4.5 no. 2), the pick runs per class in its own
+	// queue. extQueue is the only class-indexed access.
+	external     *classQueue
+	externalBulk *classQueue
+	// extRejects counts the external refusals per class and reason (design/03
+	// §3.4 "per target × class × reason": no llmlog line per external
+	// rejection, a counter instead; A03-W5 review 2 F-5), indexed by the
+	// external class — the in-house rows stay zero.
+	extRejects [numClasses]ExternalRejectStats
 	// usage is the per-fairness-bucket token meter (MW22/F2, usage.go).
 	usage map[string]*usageWindow
 	// preempt is the MW18 preempt-path bookkeeping (victims in eviction +
@@ -348,7 +361,7 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	budget, err := d.waitBudgetLocked(st, w, req, now)
 	if err == nil {
 		err = d.enqueueLocked(st, w)
-		if err == nil && class == ClassExternal {
+		if err == nil && class.External() {
 			// The prediction against the budget runs first (A03-W6,
 			// prediction.go): a predicted waiter leaves the queue again in
 			// this section, before any wake and any timer — never one the
@@ -362,6 +375,12 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 				d.wakeLocked(st)
 			}
 		}
+	}
+	if err != nil {
+		// A refusal without an enqueue wake (a spent or predicted wait
+		// budget, a cap) leaves no unit idle behind an aged background head
+		// (A03-W9 review 1 F-1).
+		d.yieldToEscapeLocked(st)
 	}
 	if err == nil && class == ClassInteractive {
 		// Preempt trigger (MW18, design/02 §4.2.1): only an interactive
@@ -433,16 +452,17 @@ func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, w, slots in
 }
 
 // continuationEligibleNowLocked is eligibleNowLocked for a continuation of
-// weight w (A03-W17): it is the head of the external class, so only a
-// waiting continuation is ahead of it — the waiting non-continuations are
-// behind it, whatever their bucket. Partition and rank order apply
-// unchanged: admissible within E and S, and no higher-ranked class with a
-// waiting, admissible head.
-func (d *Dispatcher) continuationEligibleNowLocked(st *targetState, w, slots int) bool {
-	if !d.admissibleLocked(st, ClassExternal, w, slots) || len(st.external.cont) > 0 {
+// weight w in the external class c (A03-W17; XB since A03-W9): it is the head
+// of its class, so only a waiting continuation of that class is ahead of it
+// — the waiting non-continuations are behind it, whatever their bucket.
+// Partition and rank order apply unchanged: admissible within E and S (for
+// XB beyond the units a waiting head of XU claims), and no higher-ranked
+// class with a waiting, admissible head.
+func (d *Dispatcher) continuationEligibleNowLocked(st *targetState, c Class, w, slots int) bool {
+	if !d.admissibleLocked(st, c, w, slots) || len(st.extQueue(c).cont) > 0 {
 		return false
 	}
-	return d.rankClearLocked(st, ClassExternal, slots)
+	return d.rankClearLocked(st, c, slots)
 }
 
 // rankClearLocked reports whether no class ranked above class in
@@ -474,11 +494,11 @@ func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 	case ClassInteractive:
 		return d.pushCappedLocked(st, st.interactive, w,
 			set.InteractiveQueuePerPrincipal, set.InteractiveQueuePerTenant, set.InteractiveQueueMax)
-	case ClassExternal:
+	case ClassExternal, ClassExternalBulk:
 		if w.cont {
 			st.seq++
 			w.seq = st.seq
-			st.external.pushCont(w)
+			st.extQueue(w.class).pushCont(w)
 			return nil
 		}
 		return d.enqueueExternalLocked(st, w, set)
@@ -566,10 +586,11 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 		// in-house classes by construction (requestWeight).
 		l.weight = w.weight
 		st.held += l.weight
+		st.bookClassHeld(l.class, l.weight)
 		switch l.class {
 		case ClassBackground:
 			st.cancelable[l] = w.cancel
-		case ClassExternal:
+		case ClassExternal, ClassExternalBulk:
 			// Reaper-only cancel (I-03-3): never in cancelable.
 			st.heldExt += l.weight
 			st.extLeases++
@@ -623,7 +644,8 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 	delete(l.st.extCancel, l)
 	if l.slotHeld {
 		l.st.held -= l.weight
-		if l.class == ClassExternal {
+		l.st.bookClassHeld(l.class, -l.weight)
+		if l.class.External() {
 			l.st.heldExt -= l.weight
 			l.st.extLeases--
 			l.st.external.fair.leaseLeave(l, d.fairClock(now), d.usageWindowDur())
@@ -643,26 +665,23 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 // Interactive precedence is structural: interactive holds rank 0
 // (validRankOrder), so the escape is consulted only after the interactive
 // pick returned nil. With slots ≤ 0 (emergency stop or cleared policy) every
-// in-house waiter drains as pass-through. External waiters NEVER drain as
-// pass-through (X9): on a target that stopped offering the external class
-// (emergency stop, R removed, external_offer withdrawn) they end with
-// ErrExternalNotOffered through the waiter error channel, and so do the
-// external waiters heavier than the target's current external capacity (a
-// policy swap shrank E below their weight — they could never be admitted,
-// A03-W7); on an offered self-admitting target (no slots) they are admitted
-// against external_max_inflight.
+// in-house waiter drains as pass-through. External waiters of both external
+// classes NEVER drain as pass-through (X9): on a target that stopped
+// offering the external classes (emergency stop, R removed, external_offer
+// withdrawn) they end with ErrExternalNotOffered through the waiter error
+// channel, and so do the external waiters heavier than the target's current
+// external capacity (a policy swap shrank E below their weight — they could
+// never be admitted, A03-W7) — drainExternalLocked; on an offered
+// self-admitting target (no slots) they are admitted against
+// external_max_inflight, the external classes in rank order (XB only beyond
+// what a waiting XU head claims, A03-W9).
 func (d *Dispatcher) wakeLocked(st *targetState) {
-	// The wake re-reads the fairness order of the external class at this
+	// The wake re-reads the fairness order of the external classes at this
 	// instant (A03-W4 review 4 FR4-2: frozen between events).
 	st.external.fair.touch(d.fairClock(time.Now()))
-	if st.external.total > 0 {
-		if capacity := d.externalWeightCap(st.origin); capacity == 0 {
-			d.failExternalWaitersLocked(st, ErrExternalNotOffered)
-		} else {
-			d.failOverweightExternalWaitersLocked(st, capacity)
-		}
-	}
+	d.drainExternalLocked(st)
 	slots := d.slotsLocked(st.origin)
+	set := d.currentSettings()
 	if slots <= 0 {
 		for {
 			w := st.interactive.pick(FairnessFIFO)
@@ -674,15 +693,16 @@ func (d *Dispatcher) wakeLocked(st *targetState) {
 			}
 			d.handoffLocked(st, w, false)
 		}
-		for {
-			w := d.pickAdmissibleLocked(st, ClassExternal, FairnessFIFO, slots)
-			if w == nil {
-				return
+		for _, c := range set.RankOrder {
+			if !c.External() {
+				continue
 			}
-			d.handoffLocked(st, w, true)
+			for w := d.pickAdmissibleLocked(st, c, FairnessFIFO, slots); w != nil; w = d.pickAdmissibleLocked(st, c, FairnessFIFO, slots) {
+				d.handoffLocked(st, w, true)
+			}
 		}
+		return
 	}
-	set := d.currentSettings()
 scan:
 	for st.held < slots {
 		for _, c := range set.RankOrder {
@@ -692,6 +712,27 @@ scan:
 			}
 		}
 		return
+	}
+}
+
+// drainExternalLocked ends the waiters of each external class that can
+// never be admitted on st right now (the first half of every wake, X9 and
+// A03-W7): all of them when the target does not offer the external classes,
+// else those heavier than its external capacity.
+func (d *Dispatcher) drainExternalLocked(st *targetState) {
+	capacity := -1 // resolved once, on the first non-empty queue
+	for _, q := range st.extQueues() {
+		if q.total == 0 {
+			continue
+		}
+		if capacity < 0 {
+			capacity = d.externalWeightCap(st.origin)
+		}
+		if capacity == 0 {
+			d.failExternalWaitersLocked(st, q, ErrExternalNotOffered)
+		} else {
+			d.failOverweightExternalWaitersLocked(st, q, capacity)
+		}
 	}
 }
 
@@ -718,8 +759,8 @@ func (d *Dispatcher) dropWaiterLocked(st *targetState, w *waiter) {
 		st.interactive.remove(w)
 	case ClassBackground:
 		st.background.remove(w)
-	case ClassExternal:
-		st.external.remove(w)
+	case ClassExternal, ClassExternalBulk:
+		st.extQueue(w.class).remove(w)
 		d.wakeLocked(st)
 	default:
 		// Fail-closed (A03-W1), unreachable: a class without a case here
@@ -795,18 +836,49 @@ func (d *Dispatcher) refusePrincipal(site string, p Principal, req Request) erro
 func (d *Dispatcher) targetLocked(origin string) *targetState {
 	st, ok := d.targets[origin]
 	if !ok {
+		fair := newExtFair() // one record set for both external classes (A03-W9)
 		st = &targetState{
-			origin:      origin,
-			inflight:    make(map[*Lease]struct{}),
-			cancelable:  make(map[*Lease]context.CancelCauseFunc),
-			extCancel:   make(map[*Lease]context.CancelCauseFunc),
-			interactive: newClassQueue(),
-			external:    newExternalQueue(),
-			usage:       make(map[string]*usageWindow),
+			origin:       origin,
+			inflight:     make(map[*Lease]struct{}),
+			cancelable:   make(map[*Lease]context.CancelCauseFunc),
+			extCancel:    make(map[*Lease]context.CancelCauseFunc),
+			interactive:  newClassQueue(),
+			external:     newExternalQueue(ClassExternal, fair),
+			externalBulk: newExternalQueue(ClassExternalBulk, fair),
+			usage:        make(map[string]*usageWindow),
 		}
 		d.targets[origin] = st
 	}
 	return st
+}
+
+// extQueue returns the wait queue of the external class c — XU's or XB's —
+// and nil for any other value; callers pass only external classes (every
+// class switch routes them here by case).
+func (st *targetState) extQueue(c Class) *classQueue {
+	switch c {
+	case ClassExternal:
+		return st.external
+	case ClassExternalBulk:
+		return st.externalBulk
+	}
+	return nil
+}
+
+// extQueues lists the wait queues of both external classes (class order, not
+// rank order) for the passes that treat them alike: the drain of a withdrawn
+// offer, the snapshot.
+func (st *targetState) extQueues() [2]*classQueue {
+	return [...]*classQueue{st.external, st.externalBulk}
+}
+
+// bookClassHeld moves classHeld of c by dw — a no-op outside the class table
+// (unreachable behind the doors; never an index panic under d.mu, A03-W1
+// review 2 F2).
+func (st *targetState) bookClassHeld(c Class, dw int) {
+	if c.valid() {
+		st.classHeld[c] += dw
+	}
 }
 
 // slotsLocked resolves the effective slot cap of one origin: 0 when the
@@ -945,7 +1017,7 @@ func reapDeadline(l *Lease, set Settings) time.Time {
 	if ref.IsZero() {
 		ref = l.admitted.Add(set.LeaseMaxAge)
 	}
-	if l.class == ClassExternal && set.ExternalLeaseMax > 0 {
+	if l.class.External() && set.ExternalLeaseMax > 0 {
 		if lim := l.admitted.Add(set.ExternalLeaseMax); lim.Before(ref) {
 			ref = lim
 		}
@@ -1024,16 +1096,25 @@ type TargetSnapshot struct {
 	ExternalCapacity int
 	Interactive      WaitStats
 	Background       WaitStats
-	// External is the wait view of the external class (own queue, own
-	// K = 512 window).
-	External WaitStats
+	// External is the wait view of the external class XU (own queue, own
+	// K = 512 window), ExternalBulk the one of the external bulk class XB
+	// (A03-W9: its own queue and window — design/03 §3.4 per class).
+	External     WaitStats
+	ExternalBulk WaitStats
 	// LeaseDur is the lease-duration view per class, indexed by Class
 	// (A03-W6): p50/p90 over the window of the last waitRingK lease ends —
 	// exact here, the server-admin pull (design/03 §4.14); the external
-	// prediction reads the published copy.
+	// prediction reads the published copy. Only the external classes carry
+	// a view (A03-W9 lead decision P2, A03-W6 review 1 F-8: publish only what
+	// is read — the prediction reads only the external windows); the
+	// in-house rows stay zero, their windows keep sampling until a reader
+	// exists.
 	LeaseDur [numClasses]LeaseDurStats
-	// ExternalRejects counts the external refusals per reason.
-	ExternalRejects ExternalRejectStats
+	// ExternalRejects counts the refusals of the external class XU per
+	// reason, ExternalBulkRejects those of XB (A03-W9, A03-W5 review 2 F-5:
+	// per target × class × reason).
+	ExternalRejects     ExternalRejectStats
+	ExternalBulkRejects ExternalRejectStats
 	// Buckets is the per-fairness-bucket wait + token-window view (MW22,
 	// usage.go) — the primary gate source for the fairness/budget waves.
 	Buckets []BucketSnapshot
@@ -1109,9 +1190,11 @@ func (d *Dispatcher) Snapshot() Snapshot {
 			Interactive:       WaitStats{Waiting: st.interactive.total},
 			Background:        WaitStats{Waiting: st.background.len()},
 			External:          WaitStats{Waiting: st.external.total},
-			ExternalRejects:   st.extRejects,
+			ExternalBulk:      WaitStats{Waiting: st.externalBulk.total},
+			ExternalRejects:   st.extRejects[ClassExternal],
 			Preempt:           st.preempt.statsLocked(),
 		}
+		ts.ExternalBulkRejects = st.extRejects[ClassExternalBulk]
 		// Σw next to the lease counts (A03-W7): Held stays the lease count.
 		ts.HeldWeight, ts.HeldExternalWeight = st.held, st.heldExt
 		if set.Enabled {
@@ -1126,11 +1209,17 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		if t := st.external.oldest(); !t.IsZero() {
 			ts.External.OldestWait = now.Sub(t)
 		}
+		if t := st.externalBulk.oldest(); !t.IsZero() {
+			ts.ExternalBulk.OldestWait = now.Sub(t)
+		}
 		st.ring(ClassInteractive).statsInto(&ts.Interactive)
 		st.ring(ClassBackground).statsInto(&ts.Background)
 		st.ring(ClassExternal).statsInto(&ts.External)
+		st.ring(ClassExternalBulk).statsInto(&ts.ExternalBulk)
 		for c := range ts.LeaseDur {
-			st.leaseRing(Class(c)).leaseStatsInto(&ts.LeaseDur[c])
+			if Class(c).External() { // P2: only the windows the prediction reads
+				st.leaseRing(Class(c)).leaseStatsInto(&ts.LeaseDur[c])
+			}
 		}
 		ts.Buckets = d.bucketSnapshotsLocked(st, now)
 		out.Targets = append(out.Targets, ts)

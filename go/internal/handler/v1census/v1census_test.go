@@ -45,6 +45,14 @@ func consumer() *auth.ConsumerAuth {
 		FairWeight: 1, IsValid: true, AdmissionLane: handler.LaneUrgent}
 }
 
+// bulkConsumer is the census consumer on the lane bulk (A03-W9: the external
+// bulk class XB).
+func bulkConsumer() *auth.ConsumerAuth {
+	ca := consumer()
+	ca.AdmissionLane = handler.LaneBulk
+	return ca
+}
+
 // rig is a real dispatcher behind a Recorder, the principal hook resolving
 // every context to the census consumer (the door's part in production).
 func rig(t *testing.T) (*v1census.Recorder, *handler.V1Admission) {
@@ -68,10 +76,11 @@ func served(context.Context, *backends.Backend, *dispatch.Lease, time.Duration) 
 }
 
 // chatHandler is the non-stream route shape on the contract: plan, walk,
-// answer — an admission error goes to the planner's writer.
-func chatHandler(adm *handler.V1Admission, chain []backends.Backend) http.HandlerFunc {
+// answer — an admission error goes to the planner's writer. who is the
+// consumer the door resolved.
+func chatHandler(adm *handler.V1Admission, chain []backends.Backend, who func() *auth.ConsumerAuth) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		plan, err := adm.Plan(r.Context(), consumer(), oai.AdmissionInput{Chain: chain})
+		plan, err := adm.Plan(r.Context(), who(), oai.AdmissionInput{Chain: chain})
 		if err == nil {
 			_, _, err = llm.WalkChain(r.Context(), plan.Chain, "chat", plan.Acquirer, nil, llm.WalkRules{AllowedClasses: adm.AllowedClasses()}, served)
 		}
@@ -82,9 +91,9 @@ func chatHandler(adm *handler.V1Admission, chain []backends.Backend) http.Handle
 // embedHandler walks a sub-block request: First, then one continuation per
 // further block of the plan, all on the attempt's row, each after the
 // previous block's lease went back.
-func embedHandler(adm *handler.V1Admission, chain []backends.Backend) http.HandlerFunc {
+func embedHandler(adm *handler.V1Admission, chain []backends.Backend, who func() *auth.ConsumerAuth) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		plan, err := adm.Plan(r.Context(), consumer(), oai.AdmissionInput{Chain: chain, Units: 8, SubBatch: 4})
+		plan, err := adm.Plan(r.Context(), who(), oai.AdmissionInput{Chain: chain, Units: 8, SubBatch: 4})
 		if err == nil {
 			_, _, err = llm.WalkChain(r.Context(), plan.Chain, "embed", plan.Acquirer, nil, llm.WalkRules{AllowedClasses: adm.AllowedClasses()},
 				func(_ context.Context, b *backends.Backend, first *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
@@ -137,8 +146,8 @@ func TestCensusFixtureMount(t *testing.T) {
 	chain := []backends.Backend{row("lan", hostLAN), row("a", hostA)}
 	r := chi.NewRouter()
 	r.Route("/v1", func(g chi.Router) {
-		g.Post("/chat/completions", chatHandler(adm, chain))
-		g.Post("/embeddings", embedHandler(adm, chain))
+		g.Post("/chat/completions", chatHandler(adm, chain, consumer))
+		g.Post("/embeddings", embedHandler(adm, chain, consumer))
 		g.Get("/models", models)
 		g.Get("/models/{model}", models)
 	})
@@ -154,6 +163,52 @@ func TestCensusFixtureMount(t *testing.T) {
 		r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}")))
 		if w.Code != http.StatusOK {
 			t.Fatalf("%s: status %d, want 200 (body %s)", path, w.Code, w.Body)
+		}
+	}
+}
+
+// TestCensusFixtureMountBulk is gate (m) of A03-W9: the same fixture mount
+// for a consumer on the lane bulk — the census holds with Allowed =
+// AllowedClasses() (0 violations), both admitting routes acquire, every
+// acquire is in the external bulk class XB ("external_bulk", compared by
+// name so the gate compiles against the tree before A03-W9, where bulk
+// planned no acquire: rule 6 "no acquire on an admitting route", 503), and
+// both routes answer 200. An AllowedClasses without XB fails the walk's
+// class assert (llm.ErrWalkClass) before any acquire — red here too.
+func TestCensusFixtureMountBulk(t *testing.T) {
+	rec, adm := rig(t)
+	chain := []backends.Backend{row("lan", hostLAN), row("a", hostA)}
+	r := chi.NewRouter()
+	r.Route("/v1", func(g chi.Router) {
+		g.Post("/chat/completions", chatHandler(adm, chain, bulkConsumer))
+		g.Post("/embeddings", embedHandler(adm, chain, bulkConsumer))
+		g.Get("/models", models)
+		g.Get("/models/{model}", models)
+	})
+	v1census.Assert(t, r, rec, v1census.Options{
+		Allowed:   adm.AllowedClasses(),
+		Hosts:     []string{hostA, hostLAN},
+		Admitting: []string{"POST /v1/chat/completions", "POST /v1/embeddings"},
+	})
+	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings"} {
+		rec.Take()
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}")))
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200 (body %s)", path, w.Code, w.Body)
+		}
+		acquires := 0
+		for _, e := range rec.Take() {
+			if e.Kind != v1census.KindAcquire && e.Kind != v1census.KindTry {
+				continue
+			}
+			acquires++
+			if e.Class.String() != "external_bulk" {
+				t.Errorf("%s: %s (continuation %v) in class %s, want external_bulk", path, e.Kind, e.Continuation, e.Class)
+			}
+		}
+		if acquires == 0 {
+			t.Errorf("%s: no acquire for a bulk consumer", path)
 		}
 	}
 }

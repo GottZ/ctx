@@ -420,6 +420,8 @@ func TestStatusGoldenKeys(t *testing.T) {
 		"origin", "slots", "preempt_background", "herald_scope", "held", "inflight",
 		"held_internal", "held_external", "inflight_internal", "internal_reserved",
 		"external_offered", "external_capacity", "external", "external_rejects",
+		// A03-W9: the wait view and the refusals of the external bulk class XB.
+		"external_bulk", "external_bulk_rejects",
 		"interactive", "background", "preempt", "buckets",
 	})
 	var dbk []json.RawMessage
