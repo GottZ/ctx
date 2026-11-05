@@ -85,7 +85,7 @@ ctx stats     # Block count, categories, storage
 }
 ```
 
-`ctx brief` injects the `agent-briefing` blocks tagged with the project (the nearest directory at or above the subagent's working directory that holds a `.git` directory, else the working directory itself). When none carry that tag, it falls back to the `agent-briefing` blocks that have no tag at all, never to blocks tagged for another project. The search API has no "no tags" filter, so the CLI filters the fallback itself and looks for them among at most the 500 most recently updated `agent-briefing` blocks the key can read.
+`ctx brief` injects the `agent-briefing` blocks tagged with the project. The current resolver uses the nearest directory at or above the subagent's working directory that holds a `.git` directory, else the working directory itself. Canonical project identity for linked worktrees, bare repositories, submodules and `--separate-git-dir` layouts is tracked in #146. When the project lookup returns nothing or fails, one server-side request selects blocks carrying the producer-set `briefing:global` marker instead. Producers mark general briefings explicitly, for example with `ctx save agent-briefing <title> --tag briefing:global` or the equivalent MCP `store` tag. Untagged blocks, topic-only tags and blocks tagged only for another project are not injected. A block may carry both the marker and project paths; the project lookup wins on a match. Both paths use the same `--limit` default and the REST ceiling of 50 blocks.
 
 ## Environment variables
 

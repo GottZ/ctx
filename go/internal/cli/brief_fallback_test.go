@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,17 +20,16 @@ type fakeBriefBlock struct {
 	tags  []string
 }
 
-// newFakeBriefSearch serves POST /api/search the way the real handler answers
-// the empty-query browse `ctx brief` sends (go/internal/handler/context_search.go):
-// category filter, tag filter (the block carries one of the requested tags),
-// limit capped at 50, newest first, a keyset cursor `next_after`
-// {after_updated, after_id} on a full page that the next request sends back as
-// `after`, and every result carrying its `tags` (store.BlockPreview).
-// blocks are given newest first.
-func newFakeBriefSearch(t *testing.T, blocks []fakeBriefBlock, hits *atomic.Int32) *httptest.Server {
+// newFakeBriefSearch models the real handler's empty-query browse contract:
+// category and server-side overlap-tag filters, limit default 10/cap 50,
+// compact defaulting to true, and success:false error envelopes. Every result
+// carries tags, as store.BlockPreview does. Blocks are given newest first.
+func newFakeBriefSearch(t *testing.T, blocks []fakeBriefBlock, hits *atomic.Int32, failingTags ...string) *httptest.Server {
 	t.Helper()
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	updated := func(i int) time.Time { return base.Add(-time.Duration(i) * time.Minute) }
+	fail := map[string]bool{}
+	for _, tag := range failingTags {
+		fail[tag] = true
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/search" {
 			http.NotFound(w, r)
@@ -41,13 +42,47 @@ func newFakeBriefSearch(t *testing.T, blocks []fakeBriefBlock, hits *atomic.Int3
 			Category string   `json:"category"`
 			Tags     []string `json:"tags"`
 			Limit    int      `json:"limit"`
-			After    *struct {
-				ID string `json:"after_id"`
-			} `json:"after"`
+			Compact  *bool    `json:"compact"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("bad search body: %v", err)
 			return
+		}
+		compact := true
+		if req.Compact != nil {
+			compact = *req.Compact
+		}
+		if compact {
+			t.Errorf("brief must request compact:false so content is returned")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if len(req.Tags) == 1 {
+			tag := req.Tags[0]
+			if fail["transport:"+tag] {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					t.Errorf("response writer cannot hijack transport")
+					return
+				}
+				conn, _, err := hijacker.Hijack()
+				if err != nil {
+					t.Errorf("hijack transport: %v", err)
+					return
+				}
+				_ = conn.Close()
+				return
+			}
+			if fail["malformed:"+tag] {
+				_, _ = w.Write([]byte("{not-json"))
+				return
+			}
+			if fail[tag] {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false, "error": "injected search failure",
+				})
+				return
+			}
 		}
 		limit := req.Limit
 		if limit <= 0 {
@@ -56,18 +91,8 @@ func newFakeBriefSearch(t *testing.T, blocks []fakeBriefBlock, hits *atomic.Int3
 		if limit > 50 {
 			limit = 50
 		}
-		start := 0
-		if req.After != nil {
-			for i, b := range blocks {
-				if b.id == req.After.ID {
-					start = i + 1
-				}
-			}
-		}
 		results := []map[string]any{}
-		var next any
-		for i := start; i < len(blocks); i++ {
-			b := blocks[i]
+		for i, b := range blocks {
 			if req.Category != briefCategory || !hasAnyTag(b.tags, req.Tags) {
 				continue
 			}
@@ -78,16 +103,15 @@ func newFakeBriefSearch(t *testing.T, blocks []fakeBriefBlock, hits *atomic.Int3
 			results = append(results, map[string]any{
 				"id": b.id, "category": briefCategory, "title": b.title,
 				"content": "content of " + b.title, "tags": tags,
-				"updated_at": updated(i),
+				"updated_at": time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(-time.Duration(i) * time.Minute),
 			})
 			if len(results) == limit {
-				next = map[string]any{"after_updated": updated(i), "after_id": b.id}
 				break
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"success": true, "count": len(results), "results": results, "next_after": next,
+			"success": true, "count": len(results), "compact": compact,
+			"results": results, "next_after": nil,
 		})
 	}))
 }
@@ -118,115 +142,225 @@ func runBriefAgainst(t *testing.T, srv *httptest.Server, hook bool, limit int, p
 	})
 }
 
-// TestBriefFallbackIsUntaggedOnly pins issue #58: a project without its own
-// agent-briefing blocks falls back to the UNTAGGED ones, as the command's Long
-// text says, and never to a block tagged for another project. Both output
-// modes go through the same block selection.
-func TestBriefFallbackIsUntaggedOnly(t *testing.T) {
+// TestBriefFallbackRequiresGlobalTag pins #58: untagged content is not global
+// evidence. Only the producer-set marker makes a block eligible for fallback.
+func TestBriefFallbackRequiresGlobalTag(t *testing.T) {
 	srv := newFakeBriefSearch(t, []fakeBriefBlock{
 		{id: "b1", title: "Other project briefing", tags: []string{"/srv/other"}},
-		{id: "b2", title: "General briefing"},
+		{id: "b2", title: "Untagged foreign briefing"},
+		{id: "b3", title: "Topic-only briefing", tags: []string{"topic:operations"}},
+		{id: "b4", title: "Global briefing", tags: []string{briefGlobalTag, "/srv/other"}},
 	}, nil)
 	defer srv.Close()
 
 	for _, hook := range []bool{false, true} {
 		t.Run(fmt.Sprintf("hook=%v", hook), func(t *testing.T) {
 			out := runBriefAgainst(t, srv, hook, 20, "/srv/mine")
-			if !strings.Contains(out, "General briefing") {
-				t.Errorf("fallback lost the untagged block:\n%s", out)
+			if !strings.Contains(out, "Global briefing") {
+				t.Errorf("fallback lost the marked global block:\n%s", out)
 			}
-			if strings.Contains(out, "Other project briefing") {
-				t.Errorf("fallback injected another project's briefing:\n%s", out)
+			for _, unwanted := range []string{"Other project briefing", "Untagged foreign briefing", "Topic-only briefing"} {
+				if strings.Contains(out, unwanted) {
+					t.Errorf("fallback injected %s:\n%s", unwanted, out)
+				}
 			}
 		})
 	}
 }
 
-// TestBriefProjectBlocksWin: when the project has tagged blocks, only those are
-// used and the fallback does not run.
 func TestBriefProjectBlocksWin(t *testing.T) {
-	srv := newFakeBriefSearch(t, []fakeBriefBlock{
-		{id: "b1", title: "Mine", tags: []string{"/srv/mine"}},
-		{id: "b2", title: "General briefing"},
-	}, nil)
-	defer srv.Close()
-
-	out := runBriefAgainst(t, srv, false, 20, "/srv/mine")
-	if !strings.Contains(out, "--- Mine ---") || strings.Contains(out, "General briefing") {
-		t.Errorf("want only the project's block:\n%s", out)
-	}
-}
-
-// TestBriefFallbackPagesPastTaggedBlocks: the untagged filter runs on the
-// client, so pages full of other projects' blocks must not starve the
-// fallback. It pages on until it has `limit` untagged blocks or the store
-// runs out.
-func TestBriefFallbackPagesPastTaggedBlocks(t *testing.T) {
-	var blocks []fakeBriefBlock
-	for i := 0; i < 120; i++ {
-		blocks = append(blocks, fakeBriefBlock{
-			id: fmt.Sprintf("t%03d", i), title: fmt.Sprintf("Tagged %03d", i), tags: []string{"/srv/other"},
-		})
-	}
-	blocks = append(blocks,
-		fakeBriefBlock{id: "u1", title: "Untagged one"},
-		fakeBriefBlock{id: "u2", title: "Untagged two"},
-		fakeBriefBlock{id: "u3", title: "Untagged three"},
-	)
-	srv := newFakeBriefSearch(t, blocks, nil)
-	defer srv.Close()
-
-	out := runBriefAgainst(t, srv, false, 2, "/srv/mine")
-	if !strings.Contains(out, "(2 blocks)") || !strings.Contains(out, "Untagged one") || !strings.Contains(out, "Untagged two") {
-		t.Errorf("want the two newest untagged blocks:\n%s", out)
-	}
-	if strings.Contains(out, "Tagged 0") || strings.Contains(out, "Untagged three") {
-		t.Errorf("want nothing beyond the two newest untagged blocks:\n%s", out)
-	}
-}
-
-// TestBriefNoProjectUsesUntagged: with no project left after resolution there
-// is no tag to scope by, so the result is the untagged set, not every briefing
-// block the key can read.
-func TestBriefNoProjectUsesUntagged(t *testing.T) {
 	var hits atomic.Int32
 	srv := newFakeBriefSearch(t, []fakeBriefBlock{
-		{id: "b1", title: "Other project briefing", tags: []string{"/srv/other"}},
-		{id: "b2", title: "General briefing"},
+		{id: "b1", title: "Mine", tags: []string{"/srv/mine", briefGlobalTag}},
+		{id: "b2", title: "Global briefing", tags: []string{briefGlobalTag}},
 	}, &hits)
 	defer srv.Close()
 
-	c := &Client{BaseURL: srv.URL, Key: "test-key", HTTPClient: srv.Client()}
-	blocks := searchUntaggedBriefBlocks(c, 20)
-	if len(blocks) != 1 || blocks[0].Title != "General briefing" {
-		t.Errorf("want only the untagged block, got %+v", blocks)
+	out := runBriefAgainst(t, srv, false, 20, "/srv/mine")
+	if !strings.Contains(out, "--- Mine ---") || strings.Contains(out, "Global briefing") {
+		t.Errorf("want only the project's block:\n%s", out)
 	}
 	if got := hits.Load(); got != 1 {
-		t.Errorf("want 1 search request for a single short page, got %d", got)
+		t.Errorf("project hit must not run fallback: requests = %d, want 1", got)
 	}
 }
 
-// TestBriefFallbackPageCap: a category with no untagged block among its newest
-// briefMaxPages*briefPageSize rows ends the fallback after briefMaxPages
-// requests with nothing, instead of walking the whole store from a hook.
-func TestBriefFallbackPageCap(t *testing.T) {
-	var blocks []fakeBriefBlock
-	for i := 0; i < briefMaxPages*briefPageSize+5; i++ {
+func TestBriefFallbackUsesOneRequest(t *testing.T) {
+	var hits atomic.Int32
+	srv := newFakeBriefSearch(t, []fakeBriefBlock{
+		{id: "b1", title: "Global briefing", tags: []string{briefGlobalTag}},
+	}, &hits)
+	defer srv.Close()
+
+	out := runBriefAgainst(t, srv, true, 20, "/srv/mine")
+	if !strings.Contains(out, "Global briefing") {
+		t.Fatalf("fallback output missing global block:\n%s", out)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("project miss + one global request = 2, got %d", got)
+	}
+}
+
+type limitRecordingTransport struct {
+	base   http.RoundTripper
+	limits *[]int
+}
+
+func (t *limitRecordingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Body != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		_ = r.Body.Close()
+		var payload struct {
+			Limit int `json:"limit"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, err
+		}
+		*t.limits = append(*t.limits, payload.Limit)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	return t.base.RoundTrip(r)
+}
+
+// TestBriefLimitClampedToFiftyOnBothPaths checks the resulting block count.
+func TestBriefLimitClampedToFiftyOnBothPaths(t *testing.T) {
+	blocks := make([]fakeBriefBlock, 0, 120)
+	for i := 0; i < 60; i++ {
 		blocks = append(blocks, fakeBriefBlock{
-			id: fmt.Sprintf("t%04d", i), title: fmt.Sprintf("Tagged %04d", i), tags: []string{"/srv/other"},
+			id: fmt.Sprintf("p%02d", i), title: fmt.Sprintf("Project %02d", i), tags: []string{"/srv/mine"},
 		})
 	}
-	blocks = append(blocks, fakeBriefBlock{id: "u1", title: "Untagged beyond the cap"})
+	for i := 0; i < 60; i++ {
+		blocks = append(blocks, fakeBriefBlock{
+			id: fmt.Sprintf("g%02d", i), title: fmt.Sprintf("Global %02d", i), tags: []string{briefGlobalTag},
+		})
+	}
+	for _, tc := range []struct {
+		name    string
+		project string
+	}{
+		{name: "project", project: "/srv/mine"},
+		{name: "global fallback", project: "/srv/missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeBriefSearch(t, blocks, nil)
+			defer srv.Close()
+			out := runBriefAgainst(t, srv, false, 100, tc.project)
+			if !strings.Contains(out, "(50 blocks)") {
+				t.Errorf("--limit 100 must be clamped to the REST ceiling 50:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestBriefOutgoingLimitUsesClampAndDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		inputLimit   int
+		wantLimit    int
+		project      string
+		wantRequests int
+	}{
+		{name: "project clamp", inputLimit: 100, wantLimit: 50, project: "/srv/mine", wantRequests: 1},
+		{name: "global clamp", inputLimit: 100, wantLimit: 50, project: "/srv/missing", wantRequests: 2},
+		{name: "project default", inputLimit: 0, wantLimit: 10, project: "/srv/mine", wantRequests: 1},
+		{name: "global default", inputLimit: 0, wantLimit: 10, project: "/srv/missing", wantRequests: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeBriefSearch(t, []fakeBriefBlock{
+				{id: "p1", title: "Mine", tags: []string{"/srv/mine"}},
+				{id: "g1", title: "Global", tags: []string{briefGlobalTag}},
+			}, nil)
+			defer srv.Close()
+			limits := []int{}
+			client := srv.Client()
+			client.Transport = &limitRecordingTransport{base: client.Transport, limits: &limits}
+			getClient := func() (*Client, error) {
+				return &Client{BaseURL: srv.URL, Key: "test-key", HTTPClient: client}, nil
+			}
+			_ = captureStdout(t, func() {
+				if err := runBrief(getClient, false, tc.inputLimit, tc.project); err != nil {
+					t.Errorf("runBrief: %v", err)
+				}
+			})
+			if len(limits) != tc.wantRequests {
+				t.Fatalf("requests = %d, want %d (limits %v)", len(limits), tc.wantRequests, limits)
+			}
+			for _, got := range limits {
+				if got != tc.wantLimit {
+					t.Errorf("outgoing limit = %d, want %d (all %v)", got, tc.wantLimit, limits)
+				}
+			}
+		})
+	}
+}
+
+func TestBriefSearchSeparatesEmptyAndError(t *testing.T) {
+	srv := newFakeBriefSearch(t, []fakeBriefBlock{
+		{id: "b1", title: "Global briefing", tags: []string{briefGlobalTag}},
+	}, nil, "/srv/error")
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Key: "test-key", HTTPClient: srv.Client()}
+
+	blocks, err := searchBriefBlocks(c, 20, "/srv/missing")
+	if err != nil || len(blocks) != 0 {
+		t.Errorf("legitimate empty result: blocks=%v err=%v", blocks, err)
+	}
+	blocks, err = searchBriefBlocks(c, 20, "/srv/error")
+	if err == nil {
+		t.Errorf("failed request must return an error, got blocks=%v", blocks)
+	}
+}
+
+func TestBriefFailedProjectRequestFallsBack(t *testing.T) {
 	var hits atomic.Int32
-	srv := newFakeBriefSearch(t, blocks, &hits)
+	srv := newFakeBriefSearch(t, []fakeBriefBlock{
+		{id: "b1", title: "Global briefing", tags: []string{briefGlobalTag}},
+	}, &hits, "/srv/error")
+	defer srv.Close()
+
+	out := runBriefAgainst(t, srv, false, 20, "/srv/error")
+	if !strings.Contains(out, "Global briefing") {
+		t.Errorf("project transport/API failure must still reach global fallback:\n%s", out)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("failed project request + global request = 2, got %d", got)
+	}
+}
+
+func TestBriefResponseFailuresFallBack(t *testing.T) {
+	for _, failure := range []string{"transport", "malformed"} {
+		t.Run(failure, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := newFakeBriefSearch(t, []fakeBriefBlock{
+				{id: "b1", title: "Global briefing", tags: []string{briefGlobalTag}},
+			}, &hits, failure+":/srv/error")
+			defer srv.Close()
+
+			out := runBriefAgainst(t, srv, false, 20, "/srv/error")
+			if !strings.Contains(out, "Global briefing") {
+				t.Errorf("%s failure must reach global fallback:\n%s", failure, out)
+			}
+			if got := hits.Load(); got != 2 {
+				t.Errorf("failed project request + global request = 2, got %d", got)
+			}
+		})
+	}
+}
+
+func TestBriefFailedGlobalRequestProducesNoOutput(t *testing.T) {
+	var hits atomic.Int32
+	srv := newFakeBriefSearch(t, nil, &hits, briefGlobalTag)
 	defer srv.Close()
 
 	out := runBriefAgainst(t, srv, true, 20, "/srv/mine")
 	if out != "" {
-		t.Errorf("want no hook output past the page cap, got:\n%s", out)
+		t.Errorf("failed project and global requests must not invent output:\n%s", out)
 	}
-	// 1 project-scoped request + briefMaxPages fallback pages.
-	if got, want := hits.Load(), int32(1+briefMaxPages); got != want {
-		t.Errorf("search requests = %d, want %d", got, want)
+	if got := hits.Load(); got != 2 {
+		t.Errorf("failed project + failed global = 2, got %d", got)
 	}
 }
