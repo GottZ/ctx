@@ -206,7 +206,9 @@ func TestRepeatInsideTheWindowIsRefused(t *testing.T) {
 		past       string // the answer past the window: "" refused as unknown, "ok" accepted
 	}{
 		{"top level", "", func(in string) string { return hMsg + `,` + in + `}` }, diffLimits[0], ""},
-		{"message", "messages[0]", func(in string) string { return `{"model":"chat","messages":[{"role":"user","content":"x",` + in + `}]}` }, diffLimits[0], ""},
+		{"message", "messages[0]", func(in string) string {
+			return `{"model":"chat","messages":[{"role":"user","content":"x",` + in + `}]}`
+		}, diffLimits[0], ""},
 		{"part", "messages[0].content[0]", func(in string) string {
 			return `{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x",` + in + `}]}]}`
 		}, diffLimits[0], ""},
@@ -268,7 +270,9 @@ func TestEscapedAndSurrogateKeys(t *testing.T) {
 		l    policyLimits
 	}{
 		{"", func(in string) string { return hMsg + `,` + in + `}` }, diffLimits[0]},
-		{"messages[0]", func(in string) string { return `{"model":"chat","messages":[{"role":"user","content":"x",` + in + `}]}` }, diffLimits[0]},
+		{"messages[0]", func(in string) string {
+			return `{"model":"chat","messages":[{"role":"user","content":"x",` + in + `}]}`
+		}, diffLimits[0]},
 		{"messages[0].content[0]", func(in string) string {
 			return `{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x",` + in + `}]}]}`
 		}, diffLimits[0]},

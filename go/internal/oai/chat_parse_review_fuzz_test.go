@@ -573,4 +573,3 @@ func FuzzReviewSmuggle(f *testing.F) {
 		}
 	})
 }
-

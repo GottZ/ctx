@@ -823,8 +823,11 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 	}
 	if errors.Is(err, ErrBudgetExhausted) {
 		// The budget refused an attempt's upstream body (reserveUpstream):
-		// the stage's 503. Without a wire call no row and no Settle — the
-		// limiter's reservation ends with Abort (close).
+		// the stage's 503. Without a wire call no row, and the meter's
+		// reservation goes back in full (close: Abort); on a failover attempt
+		// after a wire call the earlier attempt's row stands and the
+		// reservation settles or keeps its charge (answer) — never a full
+		// refund after the wire (W06-10).
 		c.rec.Reason = CodeServerOverloaded
 		WriteOverloaded(c.w)
 		finish := llmlog.FinishError

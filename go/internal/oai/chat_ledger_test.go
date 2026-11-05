@@ -47,6 +47,21 @@ func (r *ledgerAbortReader) Read(p []byte) (int, error) {
 }
 
 func TestChatBudgetReturnsToZero(t *testing.T) {
+	rig := &chatRig{}
+	ledgerProbe(t, nil, func(r *chatRig) { rig = r })
+	l := rig.limiter
+	if ended := l.settles.Load() + l.keeps.Load() + l.aborts.Load() + l.rejects.Load(); ended != l.admits.Load() {
+		t.Errorf("%d meter reservations admitted, %d ended (settle %d, keep %d, abort %d, reject %d)", l.admits.Load(), ended,
+			l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load())
+	}
+}
+
+// ledgerProbe sends CTX_FOLGEP_LEDGER_N (default 3000) requests of every form
+// from 16 goroutines over a rig built with opts — its first row answering
+// 404 and carrying extra as its extra_body — and checks that the budget is
+// back at 0 and every form was answered; it returns the outcomes.
+func ledgerProbe(t *testing.T, extra map[string]any, opts ...rigOption) map[string]int {
+	t.Helper()
 	n := 3000
 	if v, err := strconv.Atoi(os.Getenv("CTX_FOLGEP_LEDGER_N")); err == nil {
 		n = v
@@ -55,10 +70,11 @@ func TestChatBudgetReturnsToZero(t *testing.T) {
 	failing.setRespond(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
 	ok := newUpstream(t, answerSGLang)
 	rows := []backends.Backend{failing.row("rowa", backends.TrustFull, 100), ok.row("rowb", backends.TrustFull, 90)}
-	rig := newChatRig(t, rows, 8, 1)
+	rows[0].ExtraBody = extra
+	rig := newChatRig(t, rows, 8, 1, opts...)
 	var maxResp int64
 	rig.setSettings(func(s *oai.Settings) {
-		s.InflightBudget = 6*(3*(1<<20) + 2*s.MaxResponseBytes) // six served requests at a time, then contention
+		s.InflightBudget = 6 * (3*(1<<20) + 2*s.MaxResponseBytes) // six served requests at a time, then contention
 		maxResp = s.MaxResponseBytes
 	})
 	big := strings.Repeat("a", 1<<19)
@@ -152,17 +168,15 @@ func TestChatBudgetReturnsToZero(t *testing.T) {
 		fmt.Fprintf(&b, "%s ×%d\n", k, outcomes[k])
 	}
 	t.Logf("n=%d maxResp=%d peak InUse=%d outcomes:\n%s", n, maxResp, peak.Load(), b.String())
-	t.Logf("limiter admits=%d settles=%d aborts=%d rejects=%d rows=%d", rig.limiter.admits.Load(), rig.limiter.settles.Load(), rig.limiter.aborts.Load(), rig.limiter.rejects.Load(), len(rig.rows.all()))
+	t.Logf("limiter admits=%d settles=%d keeps=%d aborts=%d rejects=%d rows=%d", rig.limiter.admits.Load(), rig.limiter.settles.Load(),
+		rig.limiter.keeps.Load(), rig.limiter.aborts.Load(), rig.limiter.rejects.Load(), len(rig.rows.all()))
 	if got := rig.budget.InUse(); got != 0 {
 		t.Fatalf("the budget holds %d bytes after %d requests", got, n)
-	}
-	l := rig.limiter
-	if ended := l.settles.Load() + l.aborts.Load() + l.rejects.Load(); ended != l.admits.Load() {
-		t.Errorf("%d meter reservations admitted, %d ended (settle %d, abort %d, reject %d)", l.admits.Load(), ended, l.settles.Load(), l.aborts.Load(), l.rejects.Load())
 	}
 	for _, f := range forms {
 		if !slices.ContainsFunc(keys, func(k string) bool { return strings.HasPrefix(k, f.name+" ") }) {
 			t.Errorf("form %s never answered", f.name)
 		}
 	}
+	return outcomes
 }
