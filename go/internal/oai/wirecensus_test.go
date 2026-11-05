@@ -277,9 +277,9 @@ func parseDir(t *testing.T, fset *token.FileSet, dir string, keep func(name stri
 
 // TestOAIWireCallsOnlyInsideWalkChainAttempts: the files of internal/oai —
 // production and tests alike (a test that dials a backend past the walker
-// is the same hole in the harness) — hold exactly one ChatRaw* call site
-// (the non-stream attempt; W02-08 adds the stream one), and it obeys the X13
-// rule.
+// is the same hole in the harness) — hold exactly two ChatRaw* call sites
+// (the non-stream attempt, W02-07, and the stream attempt, W02-08), and
+// both obey the X13 rule.
 func TestOAIWireCallsOnlyInsideWalkChainAttempts(t *testing.T) {
 	fset := token.NewFileSet()
 	files := parseDir(t, fset, ".", func(string) bool { return true })
@@ -287,8 +287,8 @@ func TestOAIWireCallsOnlyInsideWalkChainAttempts(t *testing.T) {
 	for _, f := range findings {
 		t.Errorf("%s: %s", f.pos, f.what)
 	}
-	if sites != 1 {
-		t.Errorf("ChatRaw* call sites in internal/oai = %d, want 1 (the non-stream attempt, W02-07)", sites)
+	if sites != 2 {
+		t.Errorf("ChatRaw* call sites in internal/oai = %d, want 2 (the non-stream attempt W02-07, the stream attempt W02-08)", sites)
 	}
 }
 

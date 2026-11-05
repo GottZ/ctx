@@ -364,6 +364,20 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 		t.Fatalf("after the /v1 route failover: acquires=%d wire=%d, want 17/17", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
+	// --- Site 10 through the real /v1 handler (W02-08, G14): the stream
+	// form of oai.ChatCompletions walks with its stream attempt
+	// (ChatRawStream) — one served stream +1/+1, the down primary in front
+	// of it +2/+2 (the failover before the first data frame). A03-W10
+	// takes this over as the shared gate. ---
+	postCensusStream(t, oaiCensusRoute(t, ca, []backends.Backend{invariantBackend(srv.URL, backends.ProtocolOpenAI)}))
+	if ca.count() != 18 || atomic.LoadInt64(&wireHits) != 18 {
+		t.Fatalf("after the /v1 stream: acquires=%d wire=%d, want 18/18", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+	postCensusStream(t, oaiCensusRoute(t, ca, []backends.Backend{downRow, invariantBackend(srv.URL, backends.ProtocolOpenAI)}))
+	if ca.count() != 20 || atomic.LoadInt64(&wireHits) != 20 {
+		t.Fatalf("after the /v1 stream failover: acquires=%d wire=%d, want 20/20", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+
 	// --- Lease-free without wire contact (the cache-hit clause's structural
 	// twin, reachable cross-package): the rerank early-out below
 	// RerankMinResults never touches the admitter and never contacts a

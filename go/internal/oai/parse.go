@@ -153,6 +153,7 @@ type chatRequest struct {
 	pass         map[string]json.RawMessage
 	messages     json.RawMessage
 	stream       bool
+	includeUsage bool // stream_options.include_usage (W02-08: the usage chunk reaches the client only then)
 	n            int
 	maxTokens    int // the client's max_tokens / max_completion_tokens, 0 = not sent
 	serviceTier  string
@@ -222,8 +223,9 @@ func classOf(k string) keyClass {
 	return classReject
 }
 
-// readCTX reads one CTX key. stream: true and n > 1 are refused here (E4:
-// n > 1 is RC-F; streaming is W02-08) — before any alias is resolved.
+// readCTX reads one CTX key. n > 1 is refused here (E4: RC-F) — before any
+// alias is resolved. stream and stream_options.include_usage are read (W02-08);
+// upstream, a stream always asks for usage (llm.BuildUpstreamBody).
 func (req *chatRequest) readCTX(k string, v json.RawMessage) *paramError {
 	if isNull(v) {
 		return nil
@@ -239,10 +241,22 @@ func (req *chatRequest) readCTX(k string, v json.RawMessage) *paramError {
 		if err := json.Unmarshal(v, &req.stream); err != nil {
 			return invalidType(k, "a boolean")
 		}
-		if req.stream {
-			return unsupportedValue(k, "streaming is not supported on this endpoint yet")
+	case "stream_options":
+		if !hasKind(v, kindObject) {
+			return invalidType(k, "an object")
 		}
-	case "stream_options", "reasoning":
+		var o struct {
+			IncludeUsage *json.RawMessage `json:"include_usage"`
+		}
+		if err := json.Unmarshal(v, &o); err != nil {
+			return invalidType(k, "an object")
+		}
+		if o.IncludeUsage != nil && !isNull(*o.IncludeUsage) {
+			if err := json.Unmarshal(*o.IncludeUsage, &req.includeUsage); err != nil {
+				return invalidType(k+".include_usage", "a boolean")
+			}
+		}
+	case "reasoning":
 		if !hasKind(v, kindObject) {
 			return invalidType(k, "an object")
 		}

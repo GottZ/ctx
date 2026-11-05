@@ -26,19 +26,26 @@ import (
 	"github.com/GottZ/ctx/internal/modelalias"
 )
 
-// POST /v1/chat/completions, non-stream (wave W02-07; design/02 §4.5, §4.6,
-// §4.10–§4.12; design/06 §4.1 steps 4–12). The order of one request:
+// POST /v1/chat/completions (wave W02-07 non-stream, W02-08 stream;
+// design/02 §4.5–§4.7, §4.10–§4.12; design/06 §4.1 steps 4–12). The order
+// of one request:
 //
 //	invariants (admit, inference dependencies) → write deadline at entry →
-//	request deadline on the request context → body → top-level parse →
-//	Resolve → kind → policy parse (messages, vision, caps) → effective
-//	max_tokens → answer reserve → RequiredSensitivity + scan → chain build
-//	(Pool.Chain, gateway wire, federation, export) → GateTenant → limiter →
-//	planner → watcher → WalkChain(BuildUpstreamBody, ChatRaw) → check before
-//	the write → answer rewrite → one llmlog row, one access record.
+//	body → top-level parse → the request's frame (non-stream: the request
+//	deadline on the request context; stream: none, the commit grace and its
+//	write deadline instead) → Resolve → kind → policy parse (messages,
+//	vision, caps) → effective max_tokens → answer reserve →
+//	RequiredSensitivity + scan → chain build (Pool.Chain, gateway wire,
+//	federation, export) → GateTenant → limiter → planner → watcher →
+//	WalkChain(BuildUpstreamBody, ChatRaw | ChatRawStream + relay) → check
+//	before the write (non-stream) → answer rewrite → one llmlog row, one
+//	access record.
 //
 // Nothing is written before the planner's First acquire returned (design/03
-// §4.9 step 6). Every refusal names its code as the access record's reason.
+// §4.9 step 6, masterplan K7) — a stream commits at max(admission, entry +
+// grace_eff) or with its first data frame (sse.go). Every refusal names its
+// code as the access record's reason; after a stream's commit a refusal is
+// the stream's error frame (reply).
 
 // writeMargin is the margin of every write deadline over the request's own
 // frame (design/02 §4.12: "Eintritt + MaxWait + request_deadline + 30 s",
@@ -64,9 +71,12 @@ const (
 	modelKindMessage     = "The model does not support chat completions."
 	shutdownMessage      = "The server is shutting down; retry."
 	internalErrorMessage = "The server could not complete the request."
+	// authUnavailableMessage is the re-authentication's 503 (D6, O-08-2):
+	// the key could not be checked again, so the request is not served on.
+	authUnavailableMessage = "The API key could not be verified; retry later."
 )
 
-// ChatCompletions is the handler of POST /v1/chat/completions (non-stream).
+// ChatCompletions is the handler of POST /v1/chat/completions.
 func ChatCompletions(d Deps) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entry := time.Now()
@@ -113,6 +123,11 @@ type chatCall struct {
 	// goroutines. Without it the reservation goes back in full (Abort);
 	// after it, never (Keep without a usage).
 	wired atomic.Bool
+
+	// sse is the relay writer of a stream (nil: non-stream); grace is its
+	// effective commit grace (sse.go).
+	sse   *streamWriter
+	grace time.Duration
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
@@ -126,15 +141,11 @@ func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.Consum
 	// The write deadline at entry (§4.12, B23): the server's WriteTimeout
 	// counts from the end of the header read, and an answer written after
 	// it — a 429 after the queue wait — would reach the client as a broken
-	// connection. Entry + the longest wait + the whole request frame.
+	// connection. Entry + the longest wait + the whole request frame; a
+	// stream shortens it once the parse knows the form (frame).
 	setWriteDeadline(w, entry.Add(d.MaxWait()+s.RequestDeadline+writeMargin))
-	// The request deadline lives on the request context BEFORE the planner
-	// (W02-07 (k), lead decision 5): A03-W8 reads Request.ServeBy from it.
-	c.dl = entry.Add(s.RequestDeadline)
-	ctx, cancelDl := context.WithDeadline(r.Context(), c.dl)
-	ctx, cancel := context.WithCancelCause(ctx)
+	ctx, cancel := context.WithCancelCause(r.Context())
 	c.ctx, c.cancel = ctx, cancel
-	c.stops = append(c.stops, func() bool { cancelDl(); return true })
 	if d.Lifecycle != nil {
 		c.stops = append(c.stops, context.AfterFunc(d.Lifecycle, func() { cancel(errShutdown) }))
 		// AfterFunc runs f in its own goroutine even when the lifecycle has
@@ -158,8 +169,11 @@ func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.Consum
 // close ends the request's contexts and a reservation nobody ended — after
 // wire contact (a panic inside ChatRaw once the request was written, or in
 // the answer path) by keeping its charge, the usage is unknown; without it
-// by Abort.
+// by Abort — and stops a stream's timer (a panic can leave it armed).
 func (c *chatCall) close() {
+	if c.sse != nil {
+		c.sse.freeze()
+	}
 	if c.limit != nil && !c.limitEnd {
 		if c.wired.Load() {
 			c.limit.Keep()
@@ -176,13 +190,33 @@ func (c *chatCall) close() {
 // refuse answers code and names it as the access record's reason.
 func (c *chatCall) refuse(code, message string, shouldRetry bool) {
 	c.rec.Reason = code
-	WriteCode(c.w, code, message, shouldRetry)
+	c.reply(func(w http.ResponseWriter) { WriteCode(w, code, message, shouldRetry) })
 }
 
 func (c *chatCall) internal(msg string, args ...any) {
 	slog.Error("gateway: "+msg, append(args, "path", c.r.URL.Path, "request_id", c.w.Header().Get("X-Request-ID"))...)
 	c.rec.Reason = CodeInternalError
-	WriteInternal(c.w)
+	c.reply(WriteInternal)
+}
+
+// reply writes one refusal: as the response itself while nothing is out,
+// as the stream's error frame once a stream has committed (design/02 §4.6
+// "Fehler nach Commit": the envelope as a data frame, no [DONE]). The
+// refusal helpers stay the one source of every code's envelope; after the
+// commit their status and headers are dropped — no second status ever
+// reaches the response (Z2). A stream's timer must be frozen before a
+// refusal after the walk (answerStream), so the commit cannot land between
+// the check and the write.
+func (c *chatCall) reply(write func(w http.ResponseWriter)) {
+	if c.sse == nil || !c.sse.committed() {
+		write(c.w)
+		return
+	}
+	fc := &frameCapture{}
+	write(fc)
+	if err := c.sse.errorFrame(fc.buf.Bytes()); err != nil {
+		slog.Warn("gateway: failed to write the stream's error frame", "error", err, "request_id", c.w.Header().Get("X-Request-ID"))
+	}
 }
 
 func (c *chatCall) serve() {
@@ -201,6 +235,7 @@ func (c *chatCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
+	c.frame(req.stream)
 	if !c.resolve(req.model) {
 		return
 	}
@@ -229,9 +264,38 @@ func (c *chatCall) serve() {
 		return
 	}
 	c.walk(chain, llm.UpstreamSpec{
-		Client: req.pass, Messages: req.messages, Role: c.alias.Role, Stream: false, MaxTokens: maxTokens,
+		Client: req.pass, Messages: req.messages, Role: c.alias.Role, Stream: req.stream, MaxTokens: maxTokens,
 		ReasoningOff: reasoningOff(c.alias),
 	})
+}
+
+// frame derives the request's time frame once the top-level parse knows its
+// form (W02-08 lead decision 2, RC-C Index F3). Non-stream: the request
+// deadline on the request context, measured from entry and set before the
+// planner (W02-07 lead decision 5: A03-W8 reads Request.ServeBy from it).
+// Stream: no deadline at all — a stream lasts as long as its attempt's wire
+// timeout (§4.12), and a deadline would make the dispatcher refuse a long
+// stream in the queue as "predicted" (briefing (c)) — but the commit grace
+// clamped to [MaxWait + 5 s, 50 s] and the write deadline entry + grace +
+// 30 s (§4.7, §4.12). The lifecycle binding (newChatCall) holds for both.
+func (c *chatCall) frame(stream bool) {
+	c.rec.Stream = stream
+	if stream {
+		maxWait := c.d.MaxWait()
+		grace, clamped := effectiveGrace(c.s.StreamCommitGrace, maxWait)
+		if clamped {
+			warnClampedGrace(c.s.StreamCommitGrace, maxWait, grace)
+		}
+		c.grace = grace
+		setWriteDeadline(c.w, c.entry.Add(grace+writeMargin))
+		c.sse = newStreamWriter(c.w, c.s, func(error) { c.cancel(errClientGone) })
+		return
+	}
+	c.dl = c.entry.Add(c.s.RequestDeadline)
+	ctx, cancelDl := context.WithDeadline(c.ctx, c.dl)
+	c.stops = append(c.stops, func() bool { cancelDl(); return true })
+	c.ctx = ctx
+	c.r = c.r.WithContext(ctx)
 }
 
 // reasoningOff is the alias's reasoning policy (design/02 §3.2: default off).
@@ -307,14 +371,21 @@ func (c *chatCall) resolve(name string) bool {
 }
 
 // reserveAnswer takes the answer's share of the in-flight budget (§4.2.1):
-// the upstream body and the rewritten one exist at the same time.
+// the upstream body and the rewritten one exist at the same time — for a
+// stream one frame and its rewrite (briefing (d): 2 × max_stream_frame_bytes),
+// at the same place as non-stream (after the parse, before the queue; the
+// open user decision N-3 would move both).
 func (c *chatCall) reserveAnswer() bool {
 	res := ReservationFrom(c.ctx)
 	if res == nil {
 		c.internal("inference handler outside the in-flight budget stage (wiring defect)")
 		return false
 	}
-	if !res.Grow(2 * c.s.MaxResponseBytes) {
+	share := c.s.MaxResponseBytes
+	if c.sse != nil {
+		share = c.s.MaxStreamFrameBytes
+	}
+	if !res.Grow(2 * share) {
 		c.rec.Reason = CodeServerOverloaded
 		WriteOverloaded(c.w)
 		return false
@@ -415,12 +486,27 @@ func (c *chatCall) endLimit(fn func(LimitReservation)) {
 // walkState is what the attempts of one walk leave behind.
 type walkState struct {
 	n        int
-	wired    int // attempts that called the wire (ChatRaw)
+	wired    int // attempts that called the wire (ChatRaw, ChatRawStream)
 	admitted time.Time
 	result   *llm.RawChatResult
 	failed   []failedAttempt
 	last     failedAttempt
 	lease    *dispatch.Lease
+
+	// The request's token counts for Settle, the row and the access record,
+	// and their source (llmlog.UsageBackend, llmlog.UsageEstimated or "").
+	tokens    dispatch.Usage
+	usageKind string
+
+	// stream (W02-08): the last attempt's relay — its result, the frames it
+	// handed to the client, the runes it generated, its usage chunk and
+	// llama.cpp's timings.prompt_n.
+	stream    *llm.RawStreamResult
+	relayed   int
+	runes     int
+	usage     *[2]int
+	promptN   int
+	streamErr error // the relay's own failure (a chunk that is no JSON), the attempt's error
 }
 
 // walk runs the planner and the chain walk, then answers.
@@ -456,23 +542,35 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		c.endLimit(func(l LimitReservation) { l.Abort() })
 		return
 	}
-	stop := c.d.watch(c.ctx, c.cancel, watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen})
+	target := watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen}
+	if c.sse != nil {
+		target.committed = c.sse.committed
+	}
+	stop := c.d.watch(c.ctx, c.cancel, target)
 	defer stop()
 
 	var st walkState
 	rules := llm.WalkRules{WindowRule: true, AllowedClasses: c.d.Planner.AllowedClasses(), Timeout: c.attemptTimeout}
 	served, attempts, werr := llm.WalkChain(c.ctx, plan.Chain, c.alias.Role, plan.Acquirer, llm.PoolReporter(c.d.Pool), rules,
 		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+			if c.sse != nil {
+				return c.streamAttempt(&st, spec, plan.Lane, runCtx, b, lease, timeout)
+			}
 			return c.attempt(&st, spec, runCtx, b, lease, timeout)
 		})
 	stop()
+	if c.sse != nil {
+		c.answerStream(plan, served, attempts, werr, &st)
+		return
+	}
 	c.answer(plan, served, attempts, werr, &st)
 }
 
 // attemptTimeout is one attempt's wire deadline (§4.12): the alias's
 // timeout_s, else the row's role timeout over gateway.request_timeout,
-// capped by the tenant ceiling for a tenant alias and by what is left of the
-// request deadline (non-stream: every attempt lives inside it).
+// capped by the tenant ceiling for a tenant alias and, non-stream, by what
+// is left of the request deadline (every attempt lives inside it). A stream
+// has no request deadline: its attempt timeout is its whole duration.
 func (c *chatCall) attemptTimeout(b *backends.Backend) time.Duration {
 	t := b.TimeoutFor(c.alias.Role, c.s.RequestTimeout)
 	if c.alias.Policy.TimeoutS.Set {
@@ -481,9 +579,12 @@ func (c *chatCall) attemptTimeout(b *backends.Backend) time.Duration {
 	if tenantAlias(c.alias) && c.s.TenantAliasCeiling.Timeout > 0 {
 		t = min(t, c.s.TenantAliasCeiling.Timeout)
 	}
+	if !c.dl.IsZero() {
+		t = min(t, time.Until(c.dl))
+	}
 	// ≥ 1 ms: a non-positive value would make the walker fall back to the
 	// house chat timeout; an expired deadline ends the acquire anyway.
-	return max(min(t, time.Until(c.dl)), time.Millisecond)
+	return max(t, time.Millisecond)
 }
 
 // attempt is one wire attempt under its lease: the body for this row, the
@@ -586,7 +687,8 @@ func (c *chatCall) wireTrace(conn *atomic.Bool) *httptrace.ClientTrace {
 // writer — only these (A03-W8 handover: plan errors, acquire errors, the
 // class assert); waited is the time the request queued.
 func (c *chatCall) admissionRefused(err error, waited time.Duration, wired bool) {
-	reason := c.d.Planner.WriteAdmissionError(c.ctx, c.w, err)
+	var reason string
+	c.reply(func(w http.ResponseWriter) { reason = c.d.Planner.WriteAdmissionError(c.ctx, w, err) })
 	if reason == "" {
 		// The writer wrote nothing: it saw the run context canceled. The
 		// route answers its own cause (shutdown 503, watcher 404) — the
@@ -621,34 +723,46 @@ func isAdmissionFailure(err error) bool {
 
 // answer writes the outcome of the walk and its one llmlog row.
 func (c *chatCall) answer(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState) {
-	var usage dispatch.Usage
 	if st.result != nil {
-		usage = dispatch.Usage{PromptTokens: st.result.PromptTokens, CompletionTokens: st.result.CompletionTokens}
+		st.tokens = dispatch.Usage{PromptTokens: st.result.PromptTokens, CompletionTokens: st.result.CompletionTokens}
+		if usageTotal(st.tokens.PromptTokens, st.tokens.CompletionTokens) > 0 {
+			st.usageKind = llmlog.UsageBackend
+		}
 	}
+	c.leaseStats(st)
+	out := c.outcome(plan, attempts, err, st)
+	c.book(plan, served, attempts, err, st, out)
+}
+
+// leaseStats puts the queue wait and the class of the last lease on the
+// access record.
+func (c *chatCall) leaseStats(st *walkState) {
 	if st.lease != nil {
 		c.rec.QueueWaitMs = st.lease.WaitDur().Milliseconds()
 		c.rec.Class = st.lease.Class().String()
 	}
-	out := c.outcome(plan, attempts, err, st)
-	// A row and Settle only for a request that reached the wire, or whose
-	// walk failed on its own: a run that ended before any wire call
-	// (aborted, no ChatRaw) is no LLM call — close() aborts its reservation.
-	// After wire contact without a usage (an upstream error, an answer
-	// without usage, the client gone during the call) the reservation keeps
-	// its charge: never a full refund after the wire (W06-10 hardening H-7).
-	// Wire calls of which no byte reached a backend (wireTrace) give it back:
-	// Abort (H2-4, H3-1). The counters are tested one by one — their int sum
-	// can overflow (H2-5).
+}
+
+// book ends the reservation with the request's usage and writes its row —
+// only for a request that reached the wire, or whose walk failed on its
+// own: a run that ended before any wire call (aborted, no wire) is no LLM
+// call, and close() aborts its reservation. After wire contact without a
+// usage (an upstream error, an answer without usage, the client gone during
+// the call) the reservation keeps its charge: never a full refund after the
+// wire (W06-10 hardening H-7). Wire calls of which no byte reached a backend
+// (wireTrace) give it back: Abort (H2-4, H3-1). The counters are tested one
+// by one — their int sum can overflow (H2-5).
+func (c *chatCall) book(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState, out chatOutcome) {
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
 		wired := c.wired.Load()
 		c.endLimit(func(l LimitReservation) {
 			switch {
 			case st.wired > 0 && !wired:
 				l.Abort()
-			case wired && usage.PromptTokens <= 0 && usage.CompletionTokens <= 0:
+			case wired && st.tokens.PromptTokens <= 0 && st.tokens.CompletionTokens <= 0:
 				l.Keep()
 			default:
-				l.Settle(usage)
+				l.Settle(st.tokens)
 			}
 		})
 		c.record(plan, served, attempts, err, st, out)
@@ -672,6 +786,13 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 	if err == nil {
 		return c.success(plan, st)
 	}
+	return c.outcomeError(plan, attempts, err, st)
+}
+
+// outcomeError answers a failed walk: the admission writer's domain, an
+// empty walk, and the route's own attempt mapping — as a status, or as the
+// error frame of a committed stream (reply).
+func (c *chatCall) outcomeError(plan Plan, attempts []llm.ChainAttempt, err error, st *walkState) chatOutcome {
 	if isAdmissionFailure(err) {
 		waited := time.Duration(0)
 		if st.lease == nil {
@@ -696,8 +817,11 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 	a := mapAttemptFailure(st.last, st.failed, lastClass, answerContext{
 		alias: c.alias, chain: plan.Chain, relay4xx: c.s.RelayUpstream4xxMessages, snapshot: c.d.Pool.Snapshot,
 	})
-	writeRetryAfter(c.w.Header(), a.retryAfter)
-	c.refuse(a.code, a.message, a.shouldRetry)
+	c.rec.Reason = a.code
+	c.reply(func(w http.ResponseWriter) {
+		writeRetryAfter(w.Header(), a.retryAfter)
+		WriteCode(w, a.code, a.message, a.shouldRetry)
+	})
 	return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: a.class, Status: a.status, Code: a.code}}
 }
 
@@ -710,14 +834,25 @@ func (c *chatCall) verdict() (ended bool, code string) {
 	switch {
 	case errors.Is(cause, errGatewayOff):
 		c.rec.Reason = CodeNotFound
-		NotFound(c.w, c.r)
+		c.reply(func(w http.ResponseWriter) { NotFound(w, c.r) })
 		return true, CodeNotFound
 	case errors.Is(cause, errModelGone):
-		refuseModelNotFound(c.w, c.r)
+		c.reply(func(w http.ResponseWriter) { refuseModelNotFound(w, c.r) })
 		return true, CodeModelNotFound
 	case errors.Is(cause, errShutdown):
 		c.refuse(CodeInternalError, shutdownMessage, true)
 		return true, CodeInternalError
+	case errors.Is(cause, errKeyRevoked):
+		c.rec.Reason = CodeInvalidAPIKey
+		c.reply(WriteInvalidAPIKey)
+		return true, CodeInvalidAPIKey
+	case errors.Is(cause, errAuthUnavailable):
+		c.refuse(CodeAuthUnavailable, authUnavailableMessage, false)
+		return true, CodeAuthUnavailable
+	case errors.Is(cause, errClientGone):
+		// A write to the client failed (it stopped reading): nothing more
+		// can reach it (D4).
+		return true, ""
 	case c.client.Err() != nil:
 		// The client is gone: nothing reaches it (design/02 §4.10.2 "Client
 		// weg"); the row says aborted.
@@ -758,10 +893,8 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 		c.refuse(CodeUpstreamError, upstreamErrorMessage, false)
 		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "server_fault", Code: CodeUpstreamError}}
 	}
-	c.rec.PromptTokens, c.rec.CompletionTokens = st.result.PromptTokens, st.result.CompletionTokens
-	if usageTotal(st.result.PromptTokens, st.result.CompletionTokens) > 0 {
-		c.rec.Usage = llmlog.UsageBackend
-	}
+	c.rec.PromptTokens, c.rec.CompletionTokens = st.tokens.PromptTokens, st.tokens.CompletionTokens
+	c.rec.Usage = st.usageKind
 	// The meter's view of the request's op bucket, on the successful answer
 	// only (design/06 §4.4; lead decision M2 (c)).
 	if c.limit != nil {
@@ -802,10 +935,15 @@ func usageTotal(prompt, completion int) int {
 // telemetry, every wire attempt in metadata.chain, a RedactedErr — never the
 // walk's raw error, which can carry the upstream body (B20).
 func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState, out chatOutcome) {
-	tel := llmlog.Entry{RequiredSensitivity: string(c.required), Metadata: map[string]any{}}
-	if st.result != nil {
-		tel.PromptTokens, tel.CompletionTokens = st.result.PromptTokens, st.result.CompletionTokens
+	// The token columns carry the estimate too (design/06 §4.2 B-06-8): the
+	// rollup and the boot seed read the columns, not metadata.
+	tel := llmlog.Entry{RequiredSensitivity: string(c.required), Metadata: map[string]any{},
+		PromptTokens: st.tokens.PromptTokens, CompletionTokens: st.tokens.CompletionTokens}
+	switch {
+	case st.result != nil:
 		tel.CostUSD = st.result.CostUSD
+	case st.stream != nil:
+		tel.CostUSD = st.stream.CostUSD
 	}
 	llm.StampServed(&tel, c.alias.Role, served)
 	var class dispatch.Class
@@ -813,9 +951,12 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		class = plan.Acquirer.Class()
 	}
 	llm.ApplyDispatchOutcome(&tel, attempts, err, class)
-	usage := ""
-	if st.result != nil && usageTotal(st.result.PromptTokens, st.result.CompletionTokens) > 0 {
-		usage = llmlog.UsageBackend
+	var ttft *int64
+	if c.sse != nil {
+		if first := c.sse.firstFrame(); !first.IsZero() {
+			ms := first.Sub(c.entry).Milliseconds()
+			ttft = &ms
+		}
 	}
 	request := ""
 	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
@@ -825,8 +966,8 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		Pipeline:   chatPipeline,
 		ConsumerID: c.ca.ConsumerID,
 		Gateway: llmlog.Gateway{
-			Alias: c.alias.Name, Hop: c.rec.Hop, Usage: usage, ClientReqID: clientRequestID(c.r),
-			Finish: out.finish, ModelKeyID: c.ca.ModelKeyID,
+			Alias: c.alias.Name, Hop: c.rec.Hop, Usage: st.usageKind, ClientReqID: clientRequestID(c.r),
+			Finish: out.finish, ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil, TTFTMs: ttft,
 		},
 		Telemetry:   tel,
 		Attempts:    attempts,

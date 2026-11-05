@@ -2547,10 +2547,12 @@ type GatewayConfig struct {
 
 	// StreamCommitGrace is the latest header commit of a stream, measured
 	// from handler entry; at most 50 s (V39) so it stays under a typical
-	// 60 s proxy idle timeout. The lower clamp (dispatch.external_max_wait
-	// + 5 s, design/02 §4.7) is not enforced yet: the key exists since
-	// A03-W5, the clamp is an open hand-over (the key's <= 45 s ceiling is
-	// wave A03-W17).
+	// 60 s proxy idle timeout. The stream route clamps it per request to
+	// [dispatch.external_max_wait + 5 s, 50 s] (design/02 §4.7, W02-08;
+	// oai.StreamCommitDistance/StreamCommitGraceCeiling mirror the bounds)
+	// and logs a throttled WARN when it does; the commit never comes before
+	// the admission (masterplan K7). V43 keeps external_max_wait <= 45 s, so
+	// the lower bound never exceeds the ceiling.
 	StreamCommitGrace time.Duration `key:"gateway.stream_commit_grace" env:"CTX_GATEWAY_STREAM_COMMIT_GRACE" default:"40" mut:"hot" tenancy:"global-only"`
 	// KeepaliveInterval spaces the ": keepalive" comments of a committed
 	// stream in silence.
