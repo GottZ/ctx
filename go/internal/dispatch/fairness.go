@@ -41,10 +41,11 @@ import "time"
 //     share s, a head of weight w stays in stage (ii) while w + (s − 1)
 //     exceeds the tenant share (that consumer ranks in stage (i) up to s − 1
 //     held units, so the tenant never drops below them and every freed unit
-//     goes to it). The head of a consumer that holds nothing ages once it
-//     waited externalAgingRounds · L_p50 of its class (on a warm lease
-//     window) or once its class admitted externalAgingTurnovers · E_eff
-//     units to OTHER consumers since its push, whichever comes first. An
+//     goes to it). The head of a consumer that holds nothing ages once,
+//     counted from the later of its push and its consumer's last drop to
+//     zero held units, it waited externalAgingRounds · L_p50 of its class
+//     (on a warm lease window) or its class admitted externalAgingTurnovers
+//     · E_eff units to OTHER consumers, whichever comes first. An
 //     aged head counts towards its tenant's share as one unit (it is in
 //     stage (i) while its tenant has room for one more unit) and ranks
 //     first inside its tenant (before the consumers that hold units, whatever
@@ -147,6 +148,13 @@ type fairConsumer struct {
 	// per class while the record lives (leaseEnter): the own part that
 	// extFair.others leaves out of the aging count (A03-W8a).
 	admitted [numClasses]uint64
+	// zeroAt is the view clock when the consumer last dropped to zero held
+	// units and zeroOthers the aging count of each class then (leaseLeave):
+	// the age of its heads counts from the later of their push and this
+	// instant (A03-W8a, review 2 H-1) — a head that queued while its
+	// consumer still held units has not waited for anything yet.
+	zeroAt     time.Time
+	zeroOthers [numClasses]uint64
 }
 
 // fairTenant is the record of one tenant on one target.
@@ -195,15 +203,21 @@ type extFair struct {
 // The aging thresholds of a queued external head (A03-W8a; lead decision
 // O3, Q1 (c) relational — mechanism constants like relationalCapFactor, no
 // setting); the first one reached ages the head:
-//   - externalAgingRounds · L_p50 of its class's lease window since its
-//     arrival, fixed at the push (waiter.agesAt) and compared with the view
-//     clock viewAt — so it takes effect at the next event of the order,
-//     never between events (review 4 FR4-2); only on a warm window;
+//   - externalAgingRounds · L_p50 of its class's lease window (read at the
+//     push, waiter.agingDur; only on a warm window) on the view clock viewAt
+//     — so it takes effect at the next event of the order, never between
+//     events (review 4 FR4-2);
 //   - externalAgingTurnovers · E_eff units its class admitted to other
-//     consumers since its push — one turnover of E went past it. The count
-//     moves only at external lease starts, events of the view (leaseEnter
-//     touches viewAt); it needs no lease window, so it is the rule on a
-//     cold window (below leaseColdSamples) and on a fake view clock.
+//     consumers — one turnover of E went past it. The count moves only at
+//     external lease starts, events of the view (leaseEnter touches
+//     viewAt); it needs no lease window, so it ages heads on a cold window
+//     (below leaseColdSamples) too, and on a warm one it ages a head first
+//     when the others turn E over faster than one L_p50 (review 2 F-3,
+//     confirmed by the lead: both thresholds in both states).
+//
+// Both count from the later of the head's push and the instant its consumer
+// last dropped to zero held units (fairConsumer.zeroAt/zeroOthers, review 2
+// H-1).
 //
 // A threshold crossed between events needs no own wake: aging makes no head
 // fit, it changes who is first and holds, and every event that moves the
@@ -380,6 +394,14 @@ func (f *extFair) leaseLeave(l *Lease, now time.Time, win time.Duration) {
 	c.tenant.settle(l.weight, l.slotStart, now, win)
 	f.leave(c)
 	f.touch(now)
+	if c.held == 0 {
+		// The consumer holds nothing from now on: the age of its heads
+		// starts here (A03-W8a, review 2 H-1).
+		c.zeroAt = f.viewAt
+		for k := range c.zeroOthers {
+			c.zeroOthers[k] = f.others(c, Class(k))
+		}
+	}
 }
 
 // sweep drops the records without activity whose window ran out (reaper
@@ -499,15 +521,25 @@ func (d *Dispatcher) fairViewLocked(f *extFair, capacity int) fairView {
 }
 
 // aged reports whether the queued head h of the consumer record c has aged
-// (A03-W8a): its consumer holds nothing, and its arrival lies at least
-// externalAgingRounds · L_p50 before the view (h.agesAt, warm window) or its
-// class admitted at least v.aging units to other consumers since h's push.
-// Never without an external cap (no shares). O(1).
+// (A03-W8a): its consumer holds nothing, and since the later of h's push and
+// the instant its consumer last dropped to zero held units (review 2 H-1:
+// a consumer with a backlog drops to zero at every own release, and a head
+// queued long before has not waited for anything since) either the view
+// moved on by h.agingDur (externalAgingRounds · L_p50 of its class, warm
+// window at the push) or its class admitted at least v.aging units to other
+// consumers. Never without an external cap (no shares). O(1).
 func (v fairView) aged(f *extFair, c *fairConsumer, h *waiter) bool {
 	if v.aging == 0 || c.held > 0 {
 		return false
 	}
-	return (!h.agesAt.IsZero() && !v.now.Before(h.agesAt)) || f.others(c, h.class)-h.passBase >= v.aging
+	base, since := h.passBase, h.pushAt
+	if b := c.zeroOthers[h.class]; b > base {
+		base = b
+	}
+	if c.zeroAt.After(since) {
+		since = c.zeroAt
+	}
+	return (h.agingDur > 0 && !v.now.Before(since.Add(h.agingDur))) || f.others(c, h.class)-base >= v.aging
 }
 
 // key is the fairness order of a head of weight w and arrival seq of the

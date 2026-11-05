@@ -135,9 +135,14 @@ func (d *Dispatcher) fairAuditForTest(origin string) (string, int) {
 		}
 	}
 	var ownAdmitted [numClasses]uint64
-	for _, c := range f.consumers {
+	for key, c := range f.consumers {
 		for k, n := range c.admitted {
 			ownAdmitted[k] += n
+			// The count at the last drop to zero (review 2 H-1) never runs
+			// ahead of the live count.
+			if n <= f.admitted[k] && c.zeroOthers[k] > f.others(c, Class(k)) {
+				return fmt.Sprintf("%s record %s: aging count at the last zero %d above the live count %d", Class(k), key, c.zeroOthers[k], f.others(c, Class(k))), 0
+			}
 		}
 	}
 	for k := range ownAdmitted {

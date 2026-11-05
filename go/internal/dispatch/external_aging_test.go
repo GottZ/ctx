@@ -826,3 +826,102 @@ func TestExternalAgedLightHeadsKeepTheShareOrder(t *testing.T) {
 		t.Fatalf("phase C: nobody admitted")
 	}
 }
+
+// TestExternalBackfillOrdersAgedHeadsFirst pins the aging rule inside d1
+// (review 2 F-6: a backfill without the aging term was red only in one seed
+// of the aging trace). Interactive holds 4 of S = 7, so the fairness-first
+// head — tenant-b's w = E head, its tenant without slot time — is kept out
+// and holds nothing; the freed units go to the backfill, the first head in
+// fairness order that fits. There A (tenant-a, 100 unit-seconds of past slot
+// time, pushed at T0, holding nothing) and B (tenant-a, no slot time, pushed
+// at T0 + 8 s) wait with w = 1; the lease window is warm (L_p50 10 s). At T0 +
+// 12 s a unit frees: A has aged (12 ≥ 10), B has not (4 < 10) — the unit
+// goes to A, the aged head first inside its tenant, not to B with less
+// consumer slot time.
+func TestExternalBackfillOrdersAgedHeadsFirst(t *testing.T) {
+	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
+	seedLeases(d, testOrigin, 4*leaseColdSamples, 10*time.Second)
+	d.Close() // the window stays as seeded
+	clk := fakeFairClock(d)
+	bg := context.Background()
+	a0 := mustAcquire(t, d, xctx(bg, "a", "tenant-a"), weightedReq(1))
+	clk.Add(int64(100 * time.Second))
+	a0.Release()
+	var held []*Lease
+	defer func() {
+		for _, l := range held {
+			l.Release()
+		}
+	}()
+	for i := 0; i < 4; i++ {
+		held = append(held, mustAcquire(t, d, ictx(principal(fmt.Sprint("i", i))), interactiveReq()))
+	}
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	heavyCh := make(chan admission, 1)
+	startWaiter(xctx(ctx, "heavy", "tenant-b"), d, "heavy", weightedReq(weightE), heavyCh)
+	waitQueued(t, d, heavyCh, 1, "heavy head queued (kept out by interactive)")
+	var occ []*Lease
+	for i := 0; i < 3; i++ {
+		occ = append(occ, mustAcquire(t, d, xctx(bg, "occ", "tenant-c"), weightedReq(1)))
+	}
+	defer func() {
+		for _, l := range occ {
+			l.Release()
+		}
+	}()
+	aCh, bCh := make(chan admission, 1), make(chan admission, 1)
+	startWaiter(xctx(ctx, "a", "tenant-a"), d, "a", weightedReq(1), aCh)
+	waitQueued(t, d, aCh, 2, "A queued")
+	clk.Add(int64(8 * time.Second))
+	startWaiter(xctx(ctx, "b", "tenant-a"), d, "b", weightedReq(1), bCh)
+	waitQueued(t, d, bCh, 3, "B queued")
+	clk.Add(int64(4 * time.Second))
+	occ[0].Release()
+	occ = occ[1:]
+	select {
+	case a := <-aCh:
+		if a.err != nil {
+			t.Fatalf("A: %v", a.err)
+		}
+		held = append(held, a.lease)
+	case b := <-bCh:
+		if b.lease != nil {
+			held = append(held, b.lease)
+		}
+		t.Fatalf("the freed unit went to B (err %v) — the backfill ignored A's age (A aged one L_p50 after its push, B not)", b.err)
+	case <-time.After(time.Second):
+		t.Fatal("nobody admitted after the occupant's release")
+	}
+}
+
+// TestExternalNoCapNoAging pins the guard of fairView.aged (review 2 F-6,
+// mutant R14): without an external cap there are no shares and no aging —
+// the view carries no threshold and no head counts as aged, even one whose
+// consumer holds nothing and whose turnover count and time threshold are
+// both met; with a cap the same head has aged (control). Unit level: on a
+// target without a cap no external acquire waits (every weight fits), so
+// the stock API never reaches the state.
+func TestExternalNoCapNoAging(t *testing.T) {
+	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
+	f := newExtFair()
+	w := &waiter{class: ClassExternal, principal: xuPrincipal("c", "tenant-a"), weight: 1}
+	f.waiterEnter(w.principal.identityKey(), w)
+	w.pushAt, w.agingDur = time.Unix(0, 0), time.Second
+	f.viewAt = time.Unix(100, 0)
+	f.admitted[ClassExternal] = 1000 // far beyond any turnover
+	for _, tc := range []struct {
+		capacity int
+		want     bool
+	}{{0, false}, {weightE, true}} {
+		d.mu.Lock()
+		v := d.fairViewLocked(f, tc.capacity)
+		d.mu.Unlock()
+		if got := v.aged(f, w.fair, w); got != tc.want {
+			t.Fatalf("capacity %d: aged = %v, want %v (aging %d)", tc.capacity, got, tc.want, v.aging)
+		}
+		if k := v.key(w.fair, w.fair.fw, w.weight, w.seq, v.aged(f, w.fair, w)); k.aged != tc.want {
+			t.Fatalf("capacity %d: key.aged = %v, want %v", tc.capacity, k.aged, tc.want)
+		}
+	}
+}

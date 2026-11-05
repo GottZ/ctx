@@ -391,10 +391,11 @@ func (d *Dispatcher) enqueueExternalLocked(st *targetState, w *waiter, set Setti
 	if c := q.fair.consumers[w.principal.identityKey()]; c != nil && c.refs > 0 {
 		w.fwBefore = c.fw // the push may reweigh the active record; a refusal undoes it
 	}
+	// The time threshold of the aging rule (A03-W8a, fairView.aged): the
+	// push on the view clock and, on a warm window, one round of L_p50.
+	w.pushAt = d.fairClock(w.enqueued)
 	if lv := st.externalLeaseView(w.class); lv.warm {
-		// The time threshold of the aging rule (A03-W8a, fairView.aged),
-		// fixed at the push on the view clock.
-		w.agesAt = d.fairClock(w.enqueued).Add(externalAgingRounds * lv.p50)
+		w.agingDur = externalAgingRounds * lv.p50
 	}
 	pushLocked(st, q, w)
 	return nil

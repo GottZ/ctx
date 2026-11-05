@@ -61,10 +61,12 @@ type waiter struct {
 	// once that count grew by externalAgingTurnovers · E_eff since. 0
 	// in-house.
 	passBase uint64
-	// agesAt is its arrival on the view clock plus externalAgingRounds ·
-	// L_p50 of its class, fixed at the push when the class's lease window
-	// was warm (enqueueExternalLocked, A03-W8a); zero otherwise.
-	agesAt time.Time
+	// pushAt is its push on the view clock and agingDur externalAgingRounds
+	// · L_p50 of its class read at the push when the class's lease window
+	// was warm, else 0 (enqueueExternalLocked; the time threshold of the
+	// aging rule, A03-W8a).
+	pushAt   time.Time
+	agingDur time.Duration
 }
 
 // classQueue is a per-principal wait queue of one target: per-bucket FIFOs
