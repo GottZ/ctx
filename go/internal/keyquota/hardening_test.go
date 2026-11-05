@@ -199,3 +199,44 @@ func TestWallClockStepLeavesTheMeterAlone(t *testing.T) {
 		}
 	}
 }
+
+// TestAbsurdUsageLocksTheOpNamedLimit pins the named limit of review 2 F-2
+// (W06-10 hardening H-3, not built): the debt has no bound. A usage report
+// of 2³¹ tokens at 60 000 tpm books 2 147 483.648 s of debt on (consumer,
+// op) — 24 h later the same request is still refused with Retry-After
+// 572h30m24.728s (the debt minus the day, plus its own 1 080 tokens, minus
+// the burst tolerance of one minute). Nothing resets it short of a process
+// restart: the state is never removed and there is no admin action. The
+// lock is narrow: the other ops of the same consumer and other consumers
+// stay free. A byte bound on the settled usage is refuted by measurement
+// (tool requests on SGLang and llama.cpp report more tokens than the body
+// has bytes, logs/h3-usage-bound.log); this pin turns red when a usage
+// bound, a debt cap or a reset lands — then rewrite it into that gate.
+func TestAbsurdUsageLocksTheOpNamedLimit(t *testing.T) {
+	c := newClock()
+	m := seeded(c)
+	l := keyquota.Limits{RPM: 30, TPM: 60000, CompletionReserve: 1024}
+	e := keyquota.Estimate{PromptRunes: 100} // 56 prompt tokens + 1 024 reserve
+	locked := keyquota.Subject{ConsumerID: "c1", TenantID: "t1", Op: keyquota.OpChat}
+	r, d := m.Admit(locked, l, e)
+	if !d.Allowed {
+		t.Fatalf("first request refused: %+v", d)
+	}
+	r.Settle(keyquota.Usage{PromptTokens: 1 << 31})
+	c.add(24 * time.Hour)
+
+	_, d = m.Admit(locked, l, e)
+	const want = 572*time.Hour + 30*time.Minute + 24*time.Second + 728*time.Millisecond
+	if d.Allowed || d.Reason != keyquota.ReasonTokens || d.RetryAfter != want || !d.Retryable {
+		t.Fatalf("24 h after a usage of 2^31 tokens: %+v, want refused rate_tokens with Retry-After %v — the named limit changed; rewrite this pin into the gate of the usage bound", d, want)
+	}
+	for _, free := range []keyquota.Subject{
+		{ConsumerID: "c1", TenantID: "t1", Op: keyquota.OpEmbed},
+		{ConsumerID: "c2", TenantID: "t1", Op: keyquota.OpChat},
+	} {
+		if _, d := m.Admit(free, l, e); !d.Allowed {
+			t.Fatalf("%s/%s after c1/chat's absurd usage: %+v, want admitted — the lock reaches beyond (consumer, op)", free.ConsumerID, free.Op, d)
+		}
+	}
+	t.Logf("named limit: a usage of 2^31 tokens locks c1/chat, 24 h later Retry-After %v; c1/embed and c2/chat stay free", d.RetryAfter)
+}
