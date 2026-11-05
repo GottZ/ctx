@@ -253,38 +253,10 @@ func TestResolveLaneTable(t *testing.T) {
 	}
 }
 
-// TestPlanBulkLaneNotOffered (§3.2 Pflicht 6): every bulk outcome is a 503
-// model_unavailable without a single acquire — a bulk consumer, an urgent
-// peer without Ctx-Path, an urgent peer's background hint, service_tier flex.
-func TestPlanBulkLaneNotOffered(t *testing.T) {
-	r := newV1Rig(t, dispatch.DefaultSettings(), v1Policy(4, 1, v1HostA))
-	chain := []backends.Backend{v1Row("a", v1HostA)}
-	for _, tc := range []struct {
-		name string
-		ca   *auth.ConsumerAuth
-		in   fedhop.Inbound
-		tier string
-	}{
-		{"bulk consumer", app(LaneBulk), fedhop.Inbound{}, ""},
-		{"peer without Ctx-Path", peer(LaneUrgent), fedhop.Inbound{Class: "interactive"}, ""},
-		{"peer background", peer(LaneUrgent), fedhop.Inbound{Class: "background", Path: withPath}, ""},
-		{"flex", app(LaneUrgent), fedhop.Inbound{}, "flex"},
-	} {
-		ctx := fedhop.WithInbound(consumerCtx(tc.ca), tc.in)
-		plan, err := r.adm.Plan(ctx, tc.ca, oai.AdmissionInput{Chain: chain, ServiceTier: tc.tier})
-		if !errors.Is(err, ErrLaneNotOffered) || plan.Lane != LaneBulk {
-			t.Fatalf("%s: Plan = (lane %q, %v), want lane bulk and ErrLaneNotOffered", tc.name, plan.Lane, err)
-		}
-		rr := httptest.NewRecorder()
-		if reason := r.adm.WriteAdmissionError(context.Background(), rr, err); reason != oai.CodeModelUnavailable {
-			t.Fatalf("%s: reason %q, want model_unavailable", tc.name, reason)
-		}
-		assertEnvelope(t, rr, oai.CodeModelUnavailable, "true")
-		if evs := r.disp.take(); countDoor(evs, "acquire")+countDoor(evs, "try") != 0 {
-			t.Fatalf("%s: %d acquires for a bulk request, want 0", tc.name, countDoor(evs, "acquire")+countDoor(evs, "try"))
-		}
-	}
-}
+// TestPlanBulkLaneNotOffered (A03-W8, §3.2 Pflicht 6) pinned every bulk
+// outcome as a 503 model_unavailable without an acquire — the rule A03-W9
+// retires: bulk binds the external bulk class XB now. Its successor is
+// TestPlanBulkLaneAcquiresExternalBulk (v1_admission_bulk_test.go).
 
 // --- (h) chain filter.
 
@@ -881,7 +853,9 @@ func TestWriteAdmissionErrorTable(t *testing.T) {
 		{"bare would block: no header", wrap(dispatch.ErrWouldBlock), oai.CodeServerBusy, "true", "", ""},
 		{"not offered", wrap(dispatch.ErrExternalNotOffered), oai.CodeModelUnavailable, "true", "10", ""},
 		{"empty chain", ErrChainNotOffered, oai.CodeModelUnavailable, "true", "10", ""},
-		{"bulk lane", ErrLaneNotOffered, oai.CodeModelUnavailable, "true", "10", ""},
+		// A lane without a class (fail-closed sentinel, unreachable since
+		// A03-W9 bound bulk to XB) stays a 503 model_unavailable.
+		{"lane without a class", ErrLaneNotOffered, oai.CodeModelUnavailable, "true", "10", ""},
 		{"class unauthorized", wrap(dispatch.ErrClassUnauthorized), oai.CodeInternalError, "false", "", ""},
 		{"principal conflict", wrap(dispatch.ErrPrincipalConflict), oai.CodeInternalError, "false", "", ""},
 		{"invalid class", wrap(dispatch.ErrInvalidClass), oai.CodeInternalError, "false", "", ""},

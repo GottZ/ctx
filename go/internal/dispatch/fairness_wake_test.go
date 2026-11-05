@@ -160,7 +160,7 @@ func TestExternalFairnessViewFreezesBetweenEvents(t *testing.T) {
 	pickNow := func() string {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		w, _ := d.externalPickLocked(d.targetLocked(testOrigin), weightSlots)
+		w, _ := d.externalPickLocked(d.targetLocked(testOrigin), ClassExternal, weightSlots)
 		return waiterLabel(w)
 	}
 	before := pickNow()

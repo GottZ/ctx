@@ -37,6 +37,20 @@ func (d *Dispatcher) SeedLeaseSamplesForTest(origin string, class Class, n int, 
 	d.publishWaits()
 }
 
+// leaseSamplesForTest is the sample count of one target × class
+// lease-duration window, read under the mutex — the in-house windows keep
+// sampling although the snapshot no longer carries them (A03-W9 lead
+// decision P2: publish only what is read).
+func (d *Dispatcher) leaseSamplesForTest(origin string, class Class) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st := d.targets[canonicalOrigin(origin)]
+	if st == nil {
+		return 0
+	}
+	return st.leaseRing(class).count
+}
+
 // SeedInteractiveDepthForTest raises the interactive queue depth counter of a
 // target to n (the peers-ahead factor of the B1 estimate) without staging real
 // waiters — the depth is all RetryAfterHint reads.

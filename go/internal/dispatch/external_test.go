@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -939,14 +940,15 @@ func TestExternalRetryAfterHint(t *testing.T) {
 	}
 }
 
-// TestNamedRankOrders pins the A-E2 data table: o1 = (I, XU, B), o2 = (I, B,
-// XU), both valid; the default order is o1; an unknown name is not an order;
-// a duplicate with interactive on rank 0 — representable since numClasses = 3
-// — reads as the default with one WARN (A03-W2 handover 4).
+// TestNamedRankOrders pins the A-E2 data table: o1 = (I, XU, B, XB), o2 =
+// (I, B, XU, XB) — XB last in both (DECISIONS E2, A03-W9) — both valid; the
+// default order is o1; an unknown name is not an order; a duplicate with
+// interactive on rank 0 — representable since numClasses ≥ 3 — reads as the
+// default with one WARN (A03-W2 handover 4).
 func TestNamedRankOrders(t *testing.T) {
 	want := map[string][numClasses]Class{
-		ExternalOrderO1: {ClassInteractive, ClassExternal, ClassBackground},
-		ExternalOrderO2: {ClassInteractive, ClassBackground, ClassExternal},
+		ExternalOrderO1: {ClassInteractive, ClassExternal, ClassBackground, ClassExternalBulk},
+		ExternalOrderO2: {ClassInteractive, ClassBackground, ClassExternal, ClassExternalBulk},
 	}
 	for name, w := range want {
 		got, ok := RankOrderFor(name)
@@ -963,29 +965,45 @@ func TestNamedRankOrders(t *testing.T) {
 		}
 	}
 	s := DefaultSettings()
-	s.RankOrder = [numClasses]Class{ClassInteractive, ClassInteractive, ClassBackground}
+	s.RankOrder = [numClasses]Class{ClassInteractive, ClassInteractive, ClassBackground, ClassExternalBulk}
 	d, h := newTestDispatcher(t, s, onSlotPolicy(1))
 	if got := h.count("dispatch: invalid rank order"); got != 1 {
-		t.Errorf("(I, I, B): %d WARN, want 1", got)
+		t.Errorf("(I, I, B, XB): %d WARN, want 1", got)
 	}
 	if got := d.currentSettings().RankOrder; got != DefaultRankOrder() {
-		t.Errorf("(I, I, B): effective order %v, want the default", got)
+		t.Errorf("(I, I, B, XB): effective order %v, want the default", got)
 	}
 	if !strings.Contains(fmt.Sprint(DefaultRankOrder()), "external") {
 		t.Errorf("rank order rendering %q lacks the external class", fmt.Sprint(DefaultRankOrder()))
 	}
 }
 
-// TestExternalClassRow pins the class-table row of XU (design/03 §4.1 C7):
-// String "external" (the persisted dispatch_class value and the fedhop
-// urgency vocabulary key), External() true — the only external class until
-// A03-W9.
+// TestExternalClassRow pins the class-table rows of XU and XB (design/03
+// §4.1 C7): String "external" and "external_bulk" (the persisted
+// dispatch_class values and the fedhop urgency vocabulary keys), External()
+// true for both — the two external classes since A03-W9 — and false for
+// both in-house classes.
 func TestExternalClassRow(t *testing.T) {
 	if got := ClassExternal.String(); got != "external" {
 		t.Fatalf("ClassExternal.String() = %q, want external", got)
 	}
 	if !ClassExternal.External() || !ClassExternal.valid() {
 		t.Fatal("ClassExternal must be a valid external class")
+	}
+	if got := ClassExternalBulk.String(); got != "external_bulk" {
+		t.Fatalf("ClassExternalBulk.String() = %q, want external_bulk", got)
+	}
+	if !ClassExternalBulk.External() || !ClassExternalBulk.valid() {
+		t.Fatal("ClassExternalBulk must be a valid external class")
+	}
+	var external []Class
+	for c := Class(0); c < numClasses; c++ {
+		if c.External() {
+			external = append(external, c)
+		}
+	}
+	if !slices.Equal(external, []Class{ClassExternal, ClassExternalBulk}) {
+		t.Fatalf("external classes %v, want exactly [external external_bulk]", external)
 	}
 	if got := (Principal{ConsumerID: "c1"}).identityKey(); got != "_consumer:c1" {
 		t.Fatalf("identityKey = %q, want _consumer:c1", got)

@@ -23,9 +23,11 @@ package dispatch
 // Lease durations (A03-W6, design/03 §4.9): the same fixed window type holds,
 // per target × class, the last waitRingK lease durations (finish − admitted,
 // one sample per lease end in finishLocked); the same publication pass
-// publishes their p50/p90 next to the wait aggregates. The prediction, ŝ and
-// the relational cap of the external class read only that published value —
-// never a sort under the dispatcher mutex. design/03 §4.9 recomputes "every
+// publishes their p50/p90 next to the wait aggregates — for the external
+// classes only (A03-W9 lead decision P2, A03-W6 review 1 F-8: publish only
+// what is read; the in-house windows keep sampling until a reader exists).
+// The prediction, ŝ and the relational cap of each external class read only
+// its own published value — never a sort under the dispatcher mutex. design/03 §4.9 recomputes "every
 // 32 samples"; the publication of A03-W17 (K21: at most once per
 // waitPublishInterval, outside the mutex) replaces that cadence.
 
@@ -197,7 +199,7 @@ func (d *Dispatcher) publishWaits() {
 			if r := &st.waits[c]; r.gen != r.copied {
 				rings = append(rings, r)
 			}
-			if r := &st.leases[c]; r.gen != r.copied {
+			if r := &st.leases[c]; Class(c).External() && r.gen != r.copied {
 				rings = append(rings, r)
 			}
 		}

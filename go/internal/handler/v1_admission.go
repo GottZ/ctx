@@ -25,9 +25,9 @@ import (
 // design/02 §4.11): V1Admission is the planner every /v1 inference handler
 // runs before its walk (oai.AdmissionPlanner). Per request it
 //
-//  1. resolves the lane (ResolveLane): urgent ⇒ the external class XU; bulk
-//     ⇒ 503 model_unavailable without an acquire until XB exists (A03-W9,
-//     masterplan §3.2 duty 6);
+//  1. resolves the lane (ResolveLane): urgent ⇒ the external class XU, bulk
+//     ⇒ the external bulk class XB (A03-W9; until then bulk was 503
+//     model_unavailable without an acquire, masterplan §3.2 duty 6);
 //  2. filters the chain to the rows whose origin offers the external class
 //     (ExternalAdmissible, read with b.Host per row); none ⇒ 503
 //     model_unavailable without an acquire;
@@ -66,9 +66,10 @@ const serviceTierFlex = "flex"
 
 // The planner's own refusals.
 var (
-	// ErrLaneNotOffered refuses a request whose lane resolved to bulk: the
-	// bulk class XB does not exist yet (A03-W9) — 503 model_unavailable,
-	// fail-closed, before any acquire.
+	// ErrLaneNotOffered refuses a request whose lane has no admission class
+	// (laneClass) — 503 model_unavailable, fail-closed, before any acquire.
+	// Unreachable since A03-W9 (ResolveLane yields urgent or bulk, both
+	// bound); it stays the fail-closed default of a lane outside the table.
 	ErrLaneNotOffered = errors.New("handler: the admission lane of the request is not offered")
 	// ErrChainNotOffered refuses a request none of whose chain rows offers
 	// the external class — 503 model_unavailable before any acquire.
@@ -151,16 +152,21 @@ func (a *V1Admission) log() *slog.Logger {
 }
 
 // AllowedClasses is the ONE source of WalkRules.AllowedClasses of the /v1
-// routes: the external classes the planner binds — XU today, XB joins here
-// with A03-W9 (Index §4).
+// routes: the external classes the planner binds — XU (lane urgent) and XB
+// (lane bulk, A03-W9; Index §4). No route writes a class list of its own.
 func (a *V1Admission) AllowedClasses() []dispatch.Class {
-	return []dispatch.Class{dispatch.ClassExternal}
+	return []dispatch.Class{dispatch.ClassExternal, dispatch.ClassExternalBulk}
 }
 
-// laneClass is the admission class of a lane; bulk has none yet (A03-W9).
+// laneClass is the admission class of a lane (design/03 §4.4): urgent ⇒ XU,
+// bulk ⇒ XB (A03-W9). Any other value has none — the planner refuses it
+// fail-closed (ErrLaneNotOffered).
 func laneClass(lane string) (dispatch.Class, bool) {
-	if lane == LaneUrgent {
+	switch lane {
+	case LaneUrgent:
 		return dispatch.ClassExternal, true
+	case LaneBulk:
+		return dispatch.ClassExternalBulk, true
 	}
 	return 0, false
 }
@@ -198,8 +204,9 @@ func peerHintUrgent(in fedhop.Inbound) bool {
 	return fedhop.MergeClass(urgent, in.Class) == urgent
 }
 
-// Plan implements oai.AdmissionPlanner: lane, chain filter, acquirer. The
-// bulk lane and an empty filtered chain are refusals before any acquire.
+// Plan implements oai.AdmissionPlanner: lane, chain filter, acquirer — the
+// acquirer binds the lane's class (urgent ⇒ XU, bulk ⇒ XB). A lane without
+// a class and an empty filtered chain are refusals before any acquire.
 func (a *V1Admission) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.AdmissionInput) (oai.Plan, error) {
 	lane := ResolveLane(ca, fedhop.InboundFrom(ctx), in.ServiceTier)
 	class, ok := laneClass(lane)
@@ -393,9 +400,10 @@ func (q *v1Acquirer) attempt(host string, blocks []int) {
 //     gateway.retry_after_jitter: Retry-After = ⌈RA·u⌉ s, retry-after-ms =
 //     round(RA·u) ms. A rejection without a RejectionError (an admitter
 //     that is no dispatcher) gets no header: no fabricated value;
-//   - ErrExternalNotOffered, the bulk lane and an empty filtered chain ⇒
-//     503 model_unavailable, x-should-retry true, Retry-After = the largest
-//     step of dispatch.external_retry_after_steps;
+//   - ErrExternalNotOffered, a lane without a class (fail-closed, A03-W9:
+//     unreachable) and an empty filtered chain ⇒ 503 model_unavailable,
+//     x-should-retry true, Retry-After = the largest step of
+//     dispatch.external_retry_after_steps;
 //   - everything else — the code-bug sentinels ErrClassUnauthorized,
 //     ErrPrincipalConflict, ErrInvalidClass, llm.ErrWalkClass,
 //     ErrAcquireOrder, llm.ErrNoTryAdmitter, and any error outside the

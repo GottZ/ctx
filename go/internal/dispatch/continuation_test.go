@@ -431,7 +431,7 @@ func TestContinuationTryDoor(t *testing.T) {
 func TestContinuationBeforeEveryBucketPick(t *testing.T) {
 	for _, mode := range []FairnessMode{FairnessFIFO, FairnessPrincipalRR} {
 		t.Run(string(mode), func(t *testing.T) {
-			q := newExternalQueue()
+			q := newExternalQueue(ClassExternal, newExtFair())
 			mk := func(consumer string, seq uint64, cont bool) *waiter {
 				return &waiter{seq: seq, class: ClassExternal, principal: xuPrincipal(consumer, "tenant-a"), weight: 1, cont: cont}
 			}
@@ -505,7 +505,7 @@ func TestContinuationEligibleNowKeepsRank(t *testing.T) {
 			if err := d.enqueueLocked(st, w); err != nil {
 				t.Fatalf("enqueue %s: %v", tc.queued, err)
 			}
-			if got := d.continuationEligibleNowLocked(st, 1, d.slotsLocked(st.origin)); got != tc.want {
+			if got := d.continuationEligibleNowLocked(st, ClassExternal, 1, d.slotsLocked(st.origin)); got != tc.want {
 				t.Fatalf("continuation eligible with a waiting %s (cont %v) under %s = %v, want %v", tc.queued, tc.cont, tc.order, got, tc.want)
 			}
 		})

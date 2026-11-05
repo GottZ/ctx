@@ -91,6 +91,13 @@ func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, conte
 		// RetryAfterHint (it leaks the class depth, A03-W6).
 		err = d.externalRejectLocked(st, w, ErrWouldBlock, 0)
 	}
+	if l == nil {
+		// A would-block never wakes — except for an aged background head
+		// the escape admits now (A03-W9 review 1 F-1): the newcomer was
+		// refused because of it, the unit must not idle until the next
+		// release or reaper tick.
+		d.yieldToEscapeLocked(st)
+	}
 	d.opDone(opStart)
 	d.mu.Unlock()
 	if l != nil {

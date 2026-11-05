@@ -77,6 +77,39 @@ func TestBuildDispatchAdminExposesExternal(t *testing.T) {
 			t.Errorf("admin payload lacks %s: %s", want, b)
 		}
 	}
+
+	// A03-W9 gate (i): the external bulk class XB on the admin side — its
+	// own wait view and refusal counters (not folded into XU's) and its
+	// buckets with class external_bulk.
+	xb := externalSnapshot()
+	xt := &xb.Targets[0]
+	xt.Held, xt.Inflight, xt.HeldExternal = 3, 3, 3
+	xt.ExternalBulk = dispatch.WaitStats{Waiting: 7, OldestWait: 650 * time.Millisecond, P95Wait: 250 * time.Millisecond, MaxWait: 950 * time.Millisecond, Samples: 11}
+	xt.ExternalBulkRejects = dispatch.ExternalRejectStats{Cap: 10, NotOffered: 6}
+	xt.Buckets = append(xt.Buckets, dispatch.BucketSnapshot{FairKey: "_consumer:bulk-app", TenantID: "tenant-bulk", Class: dispatch.ClassExternalBulk, Waiting: 7, Inflight: 1})
+	xds := buildDispatchAdmin(xb, false, nil, nil, nil, nil)
+	xtgt := xds.Targets[0]
+	if xtgt.HeldExternal != 3 {
+		t.Errorf("held_external = %d, want 3 (XU + XB leases)", xtgt.HeldExternal)
+	}
+	if xtgt.ExternalBulk.Waiting != 7 || xtgt.ExternalBulk.OldestWaitMs != 650 || xtgt.ExternalBulk.P95WaitMs != 250 || xtgt.ExternalBulk.MaxWaitMs != 950 || xtgt.ExternalBulk.Samples != 11 {
+		t.Errorf("external_bulk wait stats wrong: %+v", xtgt.ExternalBulk)
+	}
+	if xtgt.ExternalBulkRejects.Cap != 10 || xtgt.ExternalBulkRejects.NotOffered != 6 {
+		t.Errorf("external_bulk rejects wrong: %+v", xtgt.ExternalBulkRejects)
+	}
+	if xtgt.External.Waiting != 5 || xtgt.ExternalRejects.Cap != 3 || xtgt.ExternalRejects.NotOffered != 4 {
+		t.Errorf("XU view changed by XB: external %+v, rejects %+v — want waiting 5, cap 3, not_offered 4", xtgt.External, xtgt.ExternalRejects)
+	}
+	if len(xtgt.Buckets) != 3 || xtgt.Buckets[2].Class != "external_bulk" || xtgt.Buckets[2].TenantID != "tenant-bulk" || xtgt.Buckets[2].FairKey != "_consumer:bulk-app" {
+		t.Errorf("external bulk bucket wrong: %+v", xtgt.Buckets)
+	}
+	xb2, _ := json.Marshal(xds)
+	for _, want := range []string{`"external_bulk":{"waiting":7,`, `"external_bulk_rejects":{"cap":10,"not_offered":6}`, `"external_rejects":{"cap":3,"not_offered":4}`, `"class":"external_bulk"`, `"tenant_id":"tenant-bulk"`} {
+		if !strings.Contains(string(xb2), want) {
+			t.Errorf("admin payload lacks %s: %s", want, xb2)
+		}
+	}
 }
 
 // TestBuildDispatchTenantExcludesExternal is the X23 negative probe: external

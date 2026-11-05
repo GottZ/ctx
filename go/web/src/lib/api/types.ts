@@ -418,11 +418,11 @@ export interface DispatchPreempt {
 // Source: status_dispatch.go (dispatchBucket) — per-fair-key detail. SERVER-
 // ADMIN ONLY: fair_key is principal identity (HomeScope, or _consumer:<id> for
 // an external consumer bucket) and NEVER appears in the tenant shape. `class`
-// names the queue of the bucket.
+// names the queue of the bucket (external_bulk: the XB queue, A03-W9).
 export interface DispatchBucket {
   fair_key: string
   tenant_id: string
-  class: 'interactive' | 'external'
+  class: 'interactive' | 'external' | 'external_bulk'
   waiting: number
   oldest_wait_ms: number
   inflight: number
@@ -437,8 +437,9 @@ export interface DispatchEmbedTokens {
   prompt_tokens: number
 }
 
-// Source: status_dispatch.go (dispatchExternalRejects) — the external class's
-// refusals per reason (A03-W3): the cap ladder and "target does not offer".
+// Source: status_dispatch.go (dispatchExternalRejects) — one external class's
+// refusals per reason (A03-W3; per class since A03-W9): the cap ladder and
+// "target does not offer".
 export interface DispatchExternalRejects {
   cap: number
   not_offered: number
@@ -447,7 +448,9 @@ export interface DispatchExternalRejects {
 // Source: status_dispatch.go (dispatchTarget) — one backend target's live
 // occupancy + wait/preempt aggregates + per-fair-key buckets. SERVER-ADMIN.
 // `held` counts internal AND external slot-holding leases (held_internal +
-// held_external); the external fields are the A03-W3 partition view.
+// held_external, both external classes); the external fields are the A03-W3
+// partition view — external/external_rejects for XU, external_bulk/
+// external_bulk_rejects for XB (A03-W9).
 export interface DispatchTarget {
   origin: string
   slots: number
@@ -463,6 +466,8 @@ export interface DispatchTarget {
   external_capacity: number
   external: DispatchWait
   external_rejects: DispatchExternalRejects
+  external_bulk: DispatchWait
+  external_bulk_rejects: DispatchExternalRejects
   interactive: DispatchWait
   background: DispatchWait
   preempt: DispatchPreempt

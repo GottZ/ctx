@@ -69,9 +69,13 @@ type waiter struct {
 // (identityKey) and counts its own tenant dimension: two consumers are two
 // buckets with two caps, never one "" bucket.
 type classQueue struct {
-	// external selects the identity keys of the external queue.
+	// external selects the identity keys of an external queue; class is its
+	// external class (XU or XB, A03-W9 — the index of the per-class waiting
+	// counters in the shared fairness records), the zero value on the
+	// interactive queue.
 	external bool
-	buckets map[string][]*waiter
+	class    Class
+	buckets  map[string][]*waiter
 	// ring holds bucket keys in join order; cursor is the next principal_rr
 	// pick (pattern: scheduler tenantCursor). Only active buckets stay in
 	// map+ring (eviction pattern of the webchat semaphore).
@@ -79,10 +83,13 @@ type classQueue struct {
 	cursor int
 	// byKey / byTenant / total are the Deckel-Staffel counters (waiting
 	// acquires per cap key — ApiKeyID, or the consumer identity in the
-	// external queue — / per TenantID / per target).
+	// external queue — / per TenantID / per target); weight is the sum of
+	// the waiting weights (A03-W9: the units a lower-ranked external class
+	// waits behind, prediction.go aheadLocked).
 	byKey    map[string]int
 	byTenant map[string]int
 	total    int
+	weight   int
 	// maxWeight is an upper bound of the waiting weights (A03-W7): raised on
 	// push, reset when the queue empties, recomputed by the overweight drain
 	// — the O(1) guard that keeps the drain off the release path while every
@@ -114,11 +121,15 @@ func newClassQueue() *classQueue {
 	}
 }
 
-// newExternalQueue builds the external wait queue of one target.
-func newExternalQueue() *classQueue {
+// newExternalQueue builds the wait queue of the external class c of one
+// target on the target's fairness records fair — ONE record set for both
+// external classes (A03-W9, design/03 §4.5 no. 2: T_act, heldBy and Σ
+// fair_weight count XU and XB together; A03-W4 handover).
+func newExternalQueue(c Class, fair *extFair) *classQueue {
 	q := newClassQueue()
 	q.external = true
-	q.fair = newExtFair()
+	q.class = c
+	q.fair = fair
 	return q
 }
 
@@ -174,6 +185,7 @@ func (q *classQueue) count(w *waiter) {
 		q.byTenant[w.principal.TenantID]++
 	}
 	q.total++
+	q.weight += w.weight
 }
 
 // pick dequeues the next waiter under the given fairness mode, or nil. A
@@ -320,6 +332,7 @@ func (q *classQueue) uncount(w *waiter) {
 		}
 	}
 	q.total--
+	q.weight -= w.weight
 	if q.total == 0 {
 		q.maxWeight = 0
 	}

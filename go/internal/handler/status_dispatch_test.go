@@ -109,6 +109,60 @@ func TestBuildDispatchTenantNoForeignPrincipal(t *testing.T) {
 			t.Errorf("F-B3 leak: tenant payload contains %q\n%s", forbidden, payload)
 		}
 	}
+
+	// A03-W9 gate (i): load of the external bulk class XB — leases (Held,
+	// HeldExternal), waiters (ExternalBulk), refusals and a FOREIGN XB bucket
+	// plus one keyed like the caller's own — changes neither Busy nor Depth
+	// nor the own detail, and nothing of it reaches the tenant shape.
+	xb := withExternalBulkLoad(sampleSnapshot())
+	tsXB := buildDispatchTenant(xb, visible, "private")
+	if len(tsXB.Targets) != 1 {
+		t.Fatalf("XB load: want 1 visible target, got %d", len(tsXB.Targets))
+	}
+	if got := tsXB.Targets[0]; got != tt {
+		t.Errorf("XB load changed the tenant view: %+v, without XB load %+v", got, tt)
+	}
+	// On a target whose internal side is idle the tenant view stays
+	// busy=false/leer under XB load alone (the discriminating case: the
+	// fixture above is already busy/hoch from internal load).
+	idle := withExternalBulkLoad(dispatch.Snapshot{Targets: []dispatch.TargetSnapshot{{
+		Origin: "http://xb-only:30000", Slots: 4, InternalReserved: 1, ExternalOffered: true, ExternalCapacity: 3,
+	}}})
+	idleView := buildDispatchTenant(idle, map[string]bool{"http://xb-only:30000": true}, "private")
+	idleTT := idleView.Targets[0]
+	if idleTT.Busy || idleTT.Depth != "leer" || idleTT.OwnWaiting != 0 || idleTT.OwnInflight != 0 || idleTT.OwnOldestWaitMs != 0 {
+		t.Errorf("XB load alone leaks into the tenant view: %+v, want busy=false depth=leer and no own detail", idleTT)
+	}
+	for _, view := range []any{tsXB, idleView} {
+		raw, err := json.Marshal(view)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		for _, forbidden := range []string{"_consumer:", "acme-bulk", "tenant-acme-bulk", "external_bulk", "external", "held_external", "777"} {
+			if strings.Contains(string(raw), forbidden) {
+				t.Errorf("XB leak: tenant payload contains %q\n%s", forbidden, raw)
+			}
+		}
+	}
+}
+
+// withExternalBulkLoad adds XB load to the first target of snap: two XB
+// leases (Held and HeldExternal, the internal split untouched), seven XB
+// waiters, refusals, a foreign XB consumer bucket, and an XB bucket keyed
+// like the caller's own fair key ("private") — only a class filter keeps it
+// out of the own detail.
+func withExternalBulkLoad(snap dispatch.Snapshot) dispatch.Snapshot {
+	t := &snap.Targets[0]
+	t.Held += 2
+	t.Inflight += 2
+	t.HeldExternal += 2
+	t.ExternalBulk = dispatch.WaitStats{Waiting: 7, OldestWait: 777 * time.Millisecond, P95Wait: 300 * time.Millisecond, MaxWait: 900 * time.Millisecond, Samples: 4}
+	t.ExternalBulkRejects = dispatch.ExternalRejectStats{Cap: 7, NotOffered: 1}
+	t.Buckets = append(append([]dispatch.BucketSnapshot(nil), t.Buckets...),
+		dispatch.BucketSnapshot{FairKey: "_consumer:acme-bulk", TenantID: "tenant-acme-bulk", Class: dispatch.ClassExternalBulk, Waiting: 5, Inflight: 1, OldestWait: 777 * time.Millisecond},
+		dispatch.BucketSnapshot{FairKey: "private", TenantID: "tenant-1", Class: dispatch.ClassExternalBulk, Waiting: 2, Inflight: 1, OldestWait: 777 * time.Millisecond},
+	)
+	return snap
 }
 
 // TestBuildDispatchTenantNoOwnBucketWhenScopeEmpty proves the empty-scope caller

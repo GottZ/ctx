@@ -6,14 +6,17 @@ import (
 	"time"
 )
 
-// The external class XU (design/03 §4.1–§4.3, wave A03-W3): the admission
-// half shared by both doors, the waiter error channel of a withdrawn offer,
-// the chain filter, and the per-target opt-in derived from
+// The external classes XU (design/03 §4.1–§4.3, wave A03-W3) and XB (wave
+// A03-W9 — the same terms, its own queue and counters, last in rank): the
+// admission half shared by both doors, the waiter error channel of a
+// withdrawn offer, the chain filter, and the per-target opt-in derived from
 // context_backends.limits. Rank and admission terms live in rank.go, the cap
 // ladder in dispatcher.go (pushCappedLocked), the reaper cap in reapDeadline.
 
-// ExternalRejectStats counts the external refusals of one target per reason
-// (design/03 §3.4: an external rejection writes no llmlog line — the rollup's
+// ExternalRejectStats counts the refusals of one external class on one
+// target per reason (design/03 §3.4 per target × class × reason — one value
+// per external class since A03-W9, A03-W5 review 2 F-5: an external
+// rejection writes no llmlog line — the rollup's
 // rejected_admission comes from the /v1 helper, the snapshot from here). Cap
 // counts the cap-ladder refusals (consumer, tenant, aggregate),
 // NotOffered the ErrExternalNotOffered answers — immediate ones (no offer, or
@@ -43,18 +46,19 @@ type ExternalRejectStats struct {
 // not a rejection). An external newcomer is admitted at once when
 // externalEligibleNowLocked holds (A03-W4: it passes waiting heads of other
 // consumers that do not fit); a continuation (A03-W17) is eligible as the
-// head of the external class. In-house requests keep the clause unchanged:
-// pass-through with slots ≤ 0, else the rank scan's eligibleNow.
+// head of its external class. Both external classes take this path (A03-W9).
+// In-house requests keep the clause unchanged: pass-through with slots ≤ 0,
+// else the rank scan's eligibleNow.
 func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (*Lease, error) {
 	slots := d.slotsLocked(st.origin)
-	if w.class == ClassExternal {
+	if w.class.External() {
 		capacity := d.externalWeightCap(st.origin)
 		if capacity == 0 {
-			st.extRejects.NotOffered++
+			st.extRejects[w.class].NotOffered++
 			return nil, ErrExternalNotOffered
 		}
 		if w.weight < 1 || w.weight > capacity {
-			st.extRejects.NotOffered++
+			st.extRejects[w.class].NotOffered++
 			d.logger.Warn("dispatch: external acquire heavier than its target's external capacity (or with a negative weight) refused — a configuration error, not offered",
 				"target", st.origin, "role", w.role, "weight", w.weight, "capacity", capacity)
 			return nil, ErrExternalNotOffered
@@ -67,28 +71,48 @@ func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (
 	var eligible bool
 	switch {
 	case w.cont:
-		eligible = d.continuationEligibleNowLocked(st, w.weight, slots)
-	case w.class == ClassExternal:
+		eligible = d.continuationEligibleNowLocked(st, w.class, w.weight, slots)
+	case w.class.External():
 		eligible = d.externalEligibleNowLocked(st, w, slots)
 	default:
 		eligible = d.eligibleNowLocked(st, w.class, w.weight, slots)
 	}
 	if eligible {
 		l := d.admitLocked(st, w, now, true)
-		if st.external.total > 0 && (w.class == ClassInteractive || w.class == ClassExternal || !d.externalBeforeBackground()) {
+		if d.admissionMovesExternalLocked(st, w.class) {
 			// An admission can change the fairness-first external head or
-			// end its hold (A03-W4 reviews 3 and 4): units an in-house class
-			// ranked above the external class just took can keep that head
-			// out on its own (externalHeadHoldsLocked, externalReservedLocked
-			// for background); an external newcomer that ranked before the
-			// holding head changes heldBy, the shares and with them the
-			// fairness-first head, which may fit now (FR4-1). Whatever the
-			// pick is now goes to its units at once, not at the next release.
+			// end its hold (A03-W4 reviews 3 and 4): units a class ranked
+			// above an external class just took can keep that head out on
+			// its own (externalHeadHoldsLocked, externalReservedLocked for
+			// background, the claim for XB); an external newcomer changes
+			// heldBy, the shares and with them the fairness-first head of
+			// either external class (one record set, A03-W9), which may fit
+			// now (FR4-1). Whatever the pick is now goes to its units at
+			// once, not at the next release.
 			d.wakeLocked(st)
 		}
 		return l, nil
 	}
 	return nil, nil
+}
+
+// admissionMovesExternalLocked reports whether an admission of class c can
+// change the pick of a waiting external class (the wake after an immediate
+// admission): some external class h has waiters, and c is external (the
+// shared shares moved) or ranks above h (its units can end h's hold). Not
+// for background under o1 while only XU waits — d2 keeps background off the
+// units XU's head needs.
+func (d *Dispatcher) admissionMovesExternalLocked(st *targetState, c Class) bool {
+	above := false // c already passed in the rank scan below
+	for _, h := range d.currentSettings().RankOrder {
+		if h.External() && st.extQueue(h).total > 0 && (above || c.External()) {
+			return true
+		}
+		if h == c {
+			above = true
+		}
+	}
+	return false
 }
 
 // requestWeight resolves Request.Weight into the slot units of one waiter
@@ -138,15 +162,15 @@ func (d *Dispatcher) externalWeightCap(origin string) int {
 	return capacity
 }
 
-// failOverweightExternalWaitersLocked ends the waiting external acquires of
-// st that are heavier than capacity — a policy or settings swap shrank E_eff
-// below their weight, so they could never be admitted and would block their
-// class head-of-line (A03-W7, the swap twin of the door refusal). They end
-// with ErrExternalNotOffered through the waiter error channel; lighter
-// waiters stay queued. O(1) unless capacity lies below the queue's weight
-// bound (classQueue.maxWeight), one WARN per drain.
-func (d *Dispatcher) failOverweightExternalWaitersLocked(st *targetState, capacity int) {
-	q := st.external
+// failOverweightExternalWaitersLocked ends the waiting acquires of the
+// external queue q of st that are heavier than capacity — a policy or
+// settings swap shrank E_eff below their weight, so they could never be
+// admitted and would block their class head-of-line (A03-W7, the swap twin
+// of the door refusal). They end with ErrExternalNotOffered through the
+// waiter error channel, counted in q's class; lighter waiters stay queued.
+// O(1) unless capacity lies below the queue's weight bound
+// (classQueue.maxWeight), one WARN per drain.
+func (d *Dispatcher) failOverweightExternalWaitersLocked(st *targetState, q *classQueue, capacity int) {
 	if capacity >= q.maxWeight {
 		return
 	}
@@ -160,7 +184,7 @@ func (d *Dispatcher) failOverweightExternalWaitersLocked(st *targetState, capaci
 		q.remove(w)
 		w.err = ErrExternalNotOffered
 		close(w.admitCh)
-		st.extRejects.NotOffered++
+		st.extRejects[q.class].NotOffered++
 	}
 	q.maxWeight = 0
 	q.each(func(w *waiter) {
@@ -170,29 +194,30 @@ func (d *Dispatcher) failOverweightExternalWaitersLocked(st *targetState, capaci
 	})
 	if len(heavy) > 0 {
 		d.logger.Warn("dispatch: external acquire heavier than its target's external capacity — waiting acquires ended after the capacity shrank",
-			"target", st.origin, "capacity", capacity, "ended", len(heavy))
+			"target", st.origin, "class", q.class.String(), "capacity", capacity, "ended", len(heavy))
 	}
 }
 
-// failExternalWaitersLocked ends every waiting external acquire of st with
-// err through the waiter error channel (w.err before close(admitCh)) — the
-// drain of a target that stopped offering the external class (emergency stop,
-// R removed, external_offer withdrawn). Never a handoff: no external lease
-// without a slot exists (X9). One WARN per drain, not per waiter.
-func (d *Dispatcher) failExternalWaitersLocked(st *targetState, err error) {
+// failExternalWaitersLocked ends every waiting acquire of the external
+// queue q of st with err through the waiter error channel (w.err before
+// close(admitCh)) — the drain of a target that stopped offering the external
+// classes (emergency stop, R removed, external_offer withdrawn), counted in
+// q's class. Never a handoff: no external lease without a slot exists (X9).
+// One WARN per drained queue, not per waiter.
+func (d *Dispatcher) failExternalWaitersLocked(st *targetState, q *classQueue, err error) {
 	n := 0
 	for {
-		w := st.external.pick(FairnessFIFO)
+		w := q.pick(FairnessFIFO)
 		if w == nil {
 			break
 		}
 		w.err = err
 		close(w.admitCh)
-		st.extRejects.NotOffered++
+		st.extRejects[q.class].NotOffered++
 		n++
 	}
 	d.logger.Warn("dispatch: target stopped offering the external class — waiting external acquires ended",
-		"target", st.origin, "ended", n)
+		"target", st.origin, "class", q.class.String(), "ended", n)
 }
 
 // ExternalAdmissible reports whether origin offers the external class right
