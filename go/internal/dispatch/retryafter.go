@@ -165,10 +165,12 @@ type RejectionError struct {
 	// ErrTenantSaturated, ErrTargetSaturated).
 	Err error
 	// RetryAfter is Q(ŵ) of the rejected acquire's OWN position (identity
-	// weight queued ahead, waiting identities, E_eff, lease p50), or on a cold
-	// lease window the class formula of the external class, quantized onto
-	// Settings.ExternalRetryAfterSteps — always one of the steps. Without
-	// jitter: the header carries the jitter (A03-W8, gateway.retry_after_jitter).
+	// weight queued ahead, waiting tenants and consumers, E_eff, the
+	// remaining time of the oldest held external lease, lease p50), or on a
+	// cold lease window the class formula of the external class, quantized
+	// onto Settings.ExternalRetryAfterSteps — always one of the steps; for an
+	// expired waiter never below the time it waited. Without jitter: the
+	// header carries the jitter (A03-W8, gateway.retry_after_jitter).
 	RetryAfter time.Duration
 }
 
@@ -206,10 +208,11 @@ func ParseRetryAfterSteps(raw string) ([]time.Duration, error) {
 }
 
 // validRetryAfterSteps reports whether steps is a usable step list: at least
-// one step, every step > 0, strictly ascending.
+// one step, every step whole seconds ≥ 1 s — the grammar of the setting, the
+// Settings doc (review 2 F-7) — strictly ascending.
 func validRetryAfterSteps(steps []time.Duration) bool {
 	for i, s := range steps {
-		if s <= 0 || (i > 0 && s <= steps[i-1]) {
+		if s < time.Second || s%time.Second != 0 || (i > 0 && s <= steps[i-1]) {
 			return false
 		}
 	}

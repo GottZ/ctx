@@ -111,6 +111,9 @@ type targetState struct {
 	// the reaper (I-03-3: an external lease is never a preempt victim; the
 	// leak net past admitted + external_lease_max is its only cancel path).
 	// A map of its own, so pickVictimsLocked cannot reach it structurally.
+	// Its keys are exactly the held external leases: the prediction reads
+	// their admission instants for r̂ (A03-W6, prediction.go
+	// firstRoundLocked), never a cancel func.
 	extCancel   map[*Lease]context.CancelCauseFunc
 	interactive *classQueue
 	background  bgQueue
@@ -341,17 +344,23 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	// The wait budget (A03-W5, waitbudget.go): external only, resolved
 	// before the enqueue — a budget already ≤ 0 is ErrWaitExpired at once; a
 	// continuation has none (A03-W17). The external enqueue runs the cap
-	// ladder and the prediction against it (A03-W6, prediction.go).
+	// ladder and the relational cap (A03-W6, prediction.go).
 	budget, err := d.waitBudgetLocked(st, w, req, now)
 	if err == nil {
-		err = d.enqueueLocked(st, w, budget)
+		err = d.enqueueLocked(st, w)
 		if err == nil && class == ClassExternal {
-			// An external enqueue changes T_act and Σ fair_weight and with
-			// them the shares: the fairness-first head can change — the
-			// waiter itself may be it now and fit (A03-W4 review 4 FR4-1).
-			// The wake hands the pick its units (it may admit w itself;
-			// the wait below then returns at once).
-			d.wakeLocked(st)
+			// The prediction against the budget runs first (A03-W6,
+			// prediction.go): a predicted waiter leaves the queue again in
+			// this section, before any wake and any timer — never one the
+			// wake would admit (review 2 F-1). An external enqueue changes
+			// T_act and Σ fair_weight and with them the shares: the
+			// fairness-first head can change — the waiter itself may be it
+			// now and fit (A03-W4 review 4 FR4-1). The wake hands the pick
+			// its units (it may admit w itself; the wait below then
+			// returns at once) — only for a waiter that stays (review 3 C1).
+			if err = d.predictAfterPushLocked(st, w, budget); err == nil {
+				d.wakeLocked(st)
+			}
 		}
 	}
 	if err == nil && class == ClassInteractive {
@@ -455,11 +464,11 @@ func (d *Dispatcher) rankClearLocked(st *targetState, class Class, slots int) bo
 // of the Deckel-Staffel: principal → tenant → aggregate (the most specific
 // offender first, D3-U4/E-U6). The external class runs the same ladder over
 // its own queue and its own caps (consumer → tenant → aggregate, A03-W3; the
-// aggregate cap relational since A03-W6), then the prediction against budget,
-// its MaxWait_eff (enqueueExternalLocked). A continuation (A03-W17) skips
-// both: it goes to the class head and is never refused — it still counts in
-// the depth the ladder reads.
-func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter, budget time.Duration) error {
+// aggregate cap relational since A03-W6, enqueueExternalLocked; the
+// prediction follows the push in Acquire). A continuation (A03-W17)
+// skips both: it goes to the class head and is never refused — it still
+// counts in the depth the ladder reads.
+func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 	set := d.currentSettings()
 	switch w.class {
 	case ClassInteractive:
@@ -472,7 +481,7 @@ func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter, budget time.Durat
 			st.external.pushCont(w)
 			return nil
 		}
-		return d.enqueueExternalLocked(st, w, set, budget)
+		return d.enqueueExternalLocked(st, w, set)
 	case ClassBackground:
 		if set.BackgroundQueueMax > 0 && st.background.len() >= set.BackgroundQueueMax {
 			return ErrQueueFull

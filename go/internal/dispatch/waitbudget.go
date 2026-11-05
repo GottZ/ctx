@@ -48,8 +48,8 @@ func externalWaitBudget(set Settings, req Request, now time.Time, sHat time.Dura
 // (> 0) for an external class, or ErrWaitExpired when that budget is already
 // ≤ 0 (reason predicted, counted; the acquire is never queued and never
 // touches the cap ladder; the error carries the Retry-After of its own
-// position, RejectionError). The prediction ŵ against this budget runs at the
-// enqueue, after the cap ladder (enqueueExternalLocked).
+// position, RejectionError). The prediction ŵ against this budget runs after
+// the push, before the enqueue wake (predictAfterPushLocked, A03-W6).
 func (d *Dispatcher) waitBudgetLocked(st *targetState, w *waiter, req Request, now time.Time) (time.Duration, error) {
 	if !w.class.External() || w.cont {
 		return 0, nil
@@ -57,7 +57,7 @@ func (d *Dispatcher) waitBudgetLocked(st *targetState, w *waiter, req Request, n
 	budget := externalWaitBudget(d.currentSettings(), req, now, st.externalLeaseView().p90)
 	if budget <= 0 {
 		st.extRejects.Predicted++
-		return 0, d.externalRejectLocked(st, w, ErrWaitExpired)
+		return 0, d.externalRejectLocked(st, w, ErrWaitExpired, 0)
 	}
 	return budget, nil
 }
@@ -87,9 +87,12 @@ func waitTimer(budget time.Duration, arrived time.Time) (<-chan time.Time, func(
 // its waited time goes into its class's wait window as a CENSORED sample
 // (else the external p95 measures only the survivors), Expired counts it, and
 // the answer is ErrWaitExpired with the Retry-After of its own position once
-// it left the queue (RejectionError, A03-W6). The section is measured like
-// Acquire's (OpsTotal/MaxOpDur, A03-W5 review F7): the drop wakes the target
-// and the Retry-After reads the position, both under this mutex.
+// it left the queue (RejectionError, A03-W6), floored at the time it waited
+// (review 2 F-4: on a stale window of short leases ŵ ≈ 0 would tell the
+// waiter that just waited its budget out to retry at the smallest step). The
+// section is measured like Acquire's (OpsTotal/MaxOpDur, A03-W5 review F7):
+// the drop wakes the target and the Retry-After reads the position, both
+// under this mutex.
 func (d *Dispatcher) expireWaiter(st *targetState, w *waiter) (*Lease, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -102,7 +105,8 @@ func (d *Dispatcher) expireWaiter(st *targetState, w *waiter) (*Lease, error) {
 		return nil, w.err
 	}
 	d.dropWaiterLocked(st, w)
-	st.ring(w.class).add(time.Since(w.enqueued))
+	waited := time.Since(w.enqueued)
+	st.ring(w.class).add(waited)
 	st.extRejects.Expired++
-	return nil, d.externalRejectLocked(st, w, ErrWaitExpired)
+	return nil, d.externalRejectLocked(st, w, ErrWaitExpired, waited)
 }

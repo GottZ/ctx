@@ -277,7 +277,14 @@ func (q *classQueue) remove(w *waiter) {
 		if cand != w {
 			continue
 		}
-		b = append(b[:i], b[i+1:]...)
+		// Shift in place and clear the vacated tail slot, the hygiene of
+		// the cont path: a refusal predicted after its push (A03-W6) leaves
+		// the newest waiter of a bucket, and the backing array must keep no
+		// reference to it until the next push into that bucket.
+		last := len(b) - 1
+		copy(b[i:], b[i+1:])
+		b[last] = nil
+		b = b[:last]
 		if len(b) == 0 {
 			delete(q.buckets, key)
 			q.dropRingKey(key)

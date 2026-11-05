@@ -84,9 +84,15 @@ func queueAt(t *testing.T, d *Dispatcher, ctx context.Context, origin, consumer,
 // A03-W6 (a): E = 2, L = 5 s, external_max_wait 5 s, 20 simultaneous
 // acquires of 20 consumers. Before A03-W6 18 of them queue and wait the 5 s
 // out (ErrWaitExpired after waiting); now the prediction
-// ŵ = ⌈(Σw + w) · n_w / E⌉ · L_p50 refuses at least 15 of them at once,
-// without an enqueue and without a timer, and each refusal carries the
-// Retry-After of its own position (n_w = 3 ⇒ ⌈3/2⌉ · 5 s = 10 s).
+// ŵ = r̂ + (⌈(Σw + w) · n_w / E⌉ − 1) · L_p50 refuses at least 15 of them at
+// once, without a lasting enqueue and without a timer, and each refusal
+// carries the Retry-After of its own position (n_w = 3 ⇒ r̂ + 5 s ≈ 10 s,
+// the two leases just started). Since the hardening after review 2 (F-1) the
+// prediction runs after the push: a predicted acquire is pushed and removed
+// again inside its own mutex section, before any wake, so the arrival
+// counter counts it — the lasting enqueues are the pushes minus the
+// predicted refusals (every refusal here is one: the budget is never ≤ 0 at
+// the door).
 func TestPredictiveSheddingRejectsWithoutEnqueue(t *testing.T) {
 	s := budgetSettings(5 * time.Second)
 	s.ExternalQueuePerConsumer, s.ExternalQueuePerTenant = 0, 0
@@ -130,9 +136,10 @@ collect:
 		}
 	}
 	ts := target(t, d)
-	enqueued := targetSeq(d) - seq0
-	t.Logf("20 acquires: %d admitted, %d refused within 1 s, %d enqueued, waiting %d, rejects %+v",
-		len(leases), len(refused), enqueued, ts.External.Waiting, ts.ExternalRejects)
+	pushes := targetSeq(d) - seq0
+	enqueued := pushes - uint64(ts.ExternalRejects.Predicted)
+	t.Logf("20 acquires: %d admitted, %d refused within 1 s, %d pushes, %d enqueued (pushes − predicted), waiting %d, rejects %+v",
+		len(leases), len(refused), pushes, enqueued, ts.External.Waiting, ts.ExternalRejects)
 	cancel()
 	for i := len(leases) + len(refused); i < 20; i++ {
 		if o := <-out; o.l != nil {
@@ -157,7 +164,7 @@ collect:
 			t.Fatalf("refusal after %v, want at once (< 50 ms, no timer)", o.el)
 		}
 		if ra := retryAfterOf(t, o.err); ra != 10*time.Second {
-			t.Fatalf("Retry-After %v, want 10s (own position: ⌈(0+1)·3/2⌉ · 5 s)", ra)
+			t.Fatalf("Retry-After %v, want 10s (own position: r̂ + (⌈(0+1)·3/2⌉ − 1) · 5 s, r̂ ≤ 5 s)", ra)
 		}
 	}
 }
@@ -526,25 +533,34 @@ func TestRelationalTenantShareRoundsUp(t *testing.T) {
 
 // TestExpiredRetryAfterIsTheOwnPosition pins review 1 F-4: an expired waiter's
 // Retry-After is computed after it left the queue — its own weight counts
-// once. E = 1, L_p50 = 100 ms, budget 150 ms, steps {150 ms, 250 ms}: one
-// round (100 ms) ⇒ 150 ms; counting the waiter twice would give 200 ms ⇒
-// 250 ms. (Sub-second steps are reachable only through Settings, never
-// through the whole-second config grammar.)
+// once. E = 1 held by a lease that never ends, budget 1 s, steps 1…5 s. The
+// waiter queues on a window of L_p50 500 ms (ŵ = r̂ ≤ 500 ms); while it waits
+// the window turns to L_p50 2.5 s. At its expiry (holder lease ≈ 1 s old)
+// one round at the own position is r̂ = 2.5 s − age ≈ 1.5 s ⇒ 2 s, above the
+// 1 s it waited (the floor of review 2 F-4 does not decide here); counting
+// the waiter twice would add a full round: ≈ 4 s ⇒ 4 s. (Whole-second steps
+// since review 2 F-7: sub-second ones read as the default.)
 func TestExpiredRetryAfterIsTheOwnPosition(t *testing.T) {
-	s := budgetSettings(150 * time.Millisecond)
-	s.ExternalRetryAfterSteps = []time.Duration{150 * time.Millisecond, 250 * time.Millisecond}
+	s := budgetSettings(time.Second)
+	s.ExternalRetryAfterSteps = []time.Duration{time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second}
 	d, _ := newTestDispatcher(t, s, partitionPolicy(2, 1)) // E = 1
 	holdExternal(t, d, testOrigin, 1)
-	seedLeases(d, testOrigin, waitRingK, 100*time.Millisecond)
-	l, el, err := timedExternalFor(t, d, "c", externalReq(), 3*time.Second)
-	if l != nil || !errors.Is(err, ErrWaitExpired) || !within(el, 150*time.Millisecond, 50*time.Millisecond) {
-		t.Fatalf("waiter = (lease %v, %v) after %v, want ErrWaitExpired after the 150-ms budget", l != nil, err, el)
+	seedLeases(d, testOrigin, waitRingK, 500*time.Millisecond)
+	ch := make(chan admission, 1)
+	start := time.Now()
+	startWaiter(xctx(context.Background(), "c", "tenant-a"), d, "c", externalReq(), ch)
+	waitQueued(t, d, ch, 1, "waiter queued (ŵ ≤ 500 ms ≤ 1 s)")
+	seedLeases(d, testOrigin, waitRingK, 2500*time.Millisecond)
+	a := recvAdmission(t, ch, "waiter expires")
+	el := time.Since(start)
+	if a.lease != nil || !errors.Is(a.err, ErrWaitExpired) || !within(el, time.Second, 200*time.Millisecond) {
+		t.Fatalf("waiter = (lease %v, %v) after %v, want ErrWaitExpired after the 1-s budget", a.lease != nil, a.err, el)
 	}
 	if rej := target(t, d).ExternalRejects; rej != (ExternalRejectStats{Expired: 1}) {
-		t.Fatalf("rejects %+v, want expired=1 (it queued: ŵ 100 ms ≤ 150 ms)", rej)
+		t.Fatalf("rejects %+v, want expired=1", rej)
 	}
-	if ra := retryAfterOf(t, err); ra != 150*time.Millisecond {
-		t.Fatalf("expired Retry-After %v, want 150ms (one round at the own position after leaving the queue)", ra)
+	if ra := retryAfterOf(t, a.err); ra != 2*time.Second {
+		t.Fatalf("expired Retry-After %v, want 2s (one round r̂ ≈ 1.5 s at the own position after leaving the queue)", ra)
 	}
 }
 
@@ -936,6 +952,7 @@ func TestExpireWaiterIsMeasured(t *testing.T) {
 	}
 	ts := target(t, d)
 	got := d.Snapshot().OpsTotal - ops0
+	t.Logf("1000 expiries: expired %d, OpsTotal +%d", ts.ExternalRejects.Expired, got)
 	if ts.ExternalRejects.Expired != 1000 || got != 2000 {
 		t.Fatalf("1000 expiries: expired %d, OpsTotal +%d, want 1000 / +2000 (Acquire + expireWaiter each)", ts.ExternalRejects.Expired, got)
 	}

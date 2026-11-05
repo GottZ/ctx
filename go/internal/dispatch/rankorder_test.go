@@ -164,7 +164,7 @@ func TestRankOrderSteersEligibleNow(t *testing.T) {
 			d.mu.Lock()
 			st := d.targetLocked(testOrigin)
 			w := &waiter{class: tc.queued, principal: principal("w"), role: "test", cancel: func(error) {}, admitCh: make(chan struct{})}
-			if err := d.enqueueLocked(st, w, 0); err != nil {
+			if err := d.enqueueLocked(st, w); err != nil {
 				d.mu.Unlock()
 				t.Fatalf("enqueue %s: %v", tc.queued, err)
 			}

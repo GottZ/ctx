@@ -157,7 +157,7 @@ func TestInvalidClassSecondLine(t *testing.T) {
 		if d.eligibleNowLocked(st, c, 1, 1) {
 			t.Errorf("eligibleNowLocked(Class(%d)) = true, want false", c)
 		}
-		if err := d.enqueueLocked(st, w, 0); !errors.Is(err, ErrInvalidClass) {
+		if err := d.enqueueLocked(st, w); !errors.Is(err, ErrInvalidClass) {
 			t.Errorf("enqueueLocked(Class(%d)) = %v, want ErrInvalidClass", c, err)
 		}
 		d.dropWaiterLocked(st, w)
@@ -216,7 +216,7 @@ func TestEveryClassHasEveryBranch(t *testing.T) {
 	for c := Class(0); c < numClasses; c++ {
 		w := &waiter{class: c, principal: principal("x"), role: "test", cancel: func(error) {}}
 		d.eligibleNowLocked(st, c, 1, 1)
-		if err := d.enqueueLocked(st, w, 0); err != nil {
+		if err := d.enqueueLocked(st, w); err != nil {
 			t.Errorf("enqueueLocked(%s) = %v, want nil", c, err)
 		}
 		d.dropWaiterLocked(st, w)

@@ -437,7 +437,8 @@ type Settings struct {
 	// dispatch.external_retry_after_steps, V46): the Retry-After an external
 	// rejection carries rounds UP to the next step, and the largest step caps
 	// it (for the external class it replaces retryAfterCap). Strictly
-	// ascending, every step ≥ 1 s. The zero value (nil) reads as the default
+	// ascending, every step whole seconds ≥ 1 s (the grammar of the setting).
+	// The zero value (nil) reads as the default
 	// steps, like a zero RankOrder; an invalid list — reachable only past the
 	// config validation — reads as the default with one WARN
 	// (resolveRetryAfterSteps). New/UpdateSettings keep their own copy.

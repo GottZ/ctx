@@ -178,7 +178,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"dispatch.external_queue_max":                    "Aggregate cap on waiting external acquires per target; 0 = off",
 	"dispatch.external_lease_max":                    "Seconds after admission past which the reaper force-releases a leaked external lease, whatever its own deadline; 0 = no external cap",
 	"dispatch.external_max_wait":                     "Seconds an external acquire may wait for a slot before it is refused as busy; a request can only shorten it; 0 = external acquires never wait",
-	"dispatch.external_retry_after_steps":            "Retry-After steps of a busy refusal of an external request, comma-separated whole seconds in ascending order; the hint from the request's own queue position rounds up to the next step, the largest step caps it",
+	"dispatch.external_retry_after_steps":            "Retry-After steps of a busy refusal of an external request, comma-separated whole seconds in strictly ascending order; the hint from the request's own queue position rounds up to the next step, the largest step caps it",
 	"contract.mode":                                  "Schema-contract check level (off, warn, enforce); enforcement resolves env-over-DB, so an operator env override always wins",
 	"contract.recheck_interval":                      "Seconds between periodic schema-drift re-checks; 0 runs no checks while the ticker keeps polling so a later hot enable takes effect",
 	"status.channel_probe_interval":                  "Seconds between latency probes of the four retrieval channels (semantic, fts_de, fts_en, trigram); 0 (default) disables the probe",

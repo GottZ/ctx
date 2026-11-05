@@ -291,9 +291,10 @@ type Request struct {
 	MaxWait time.Duration
 	// ServeBy is the absolute time by which the requester needs the FINISHED
 	// answer; zero = not set. External classes only, like MaxWait: the wait
-	// budget shrinks to ServeBy − now − serveMargin (minus the predicted
-	// lease duration once A03-W6 measures it), and a budget that is already
-	// ≤ 0 when the acquire would have to wait is ErrWaitExpired at once.
+	// budget shrinks to ServeBy − now − serveMargin − ŝ (ŝ = the published
+	// p90 lease duration of the external class on a warm window, A03-W6),
+	// and a budget that is already ≤ 0 when the acquire would have to wait
+	// is ErrWaitExpired at once.
 	ServeBy time.Time
 	// Continuation marks the next sub-block of an EXTERNAL request whose
 	// earlier sub-block already held a lease (masterplan K21, wave A03-W17;
@@ -353,9 +354,12 @@ var (
 	ErrTargetSaturated = errors.New("dispatch: target wait cap reached")
 	// ErrWaitExpired — the wait budget of an external acquire ran out
 	// (design/03 §4.9, wave A03-W5): before any wait when the effective
-	// budget is already ≤ 0 (reason predicted — no enqueue), or after waiting
-	// it out in the queue (reason expired). Both reasons are counted per
-	// target (ExternalRejectStats); the /v1 mapping is 429 server_busy
+	// budget is already ≤ 0 (reason predicted — no enqueue) or when the
+	// predicted wait of an acquire its enqueue does not make the pick
+	// exceeds it (reason predicted — removed again in the same mutex
+	// section, before any wake, A03-W6), or
+	// after waiting it out in the queue (reason expired). Both reasons are
+	// counted per target (ExternalRejectStats); the /v1 mapping is 429 server_busy
 	// (A03-W8). The in-house classes never get it.
 	ErrWaitExpired = errors.New("dispatch: external wait budget expired")
 )

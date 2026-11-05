@@ -67,7 +67,10 @@ func externalQueueResidue(d *Dispatcher) int {
 }
 
 // targetSeq reads the per-target arrival counter — every enqueue bumps it,
-// so an unchanged seq proves that no waiter was ever queued.
+// so an unchanged seq proves that no waiter was ever queued. Since the A03-W6
+// hardening (review 2 F-1) a refusal predicted after the push is a push
+// removed again in the same mutex section: it bumps seq too (the cap ladder,
+// the relational cap and a budget ≤ 0 still refuse before any push).
 func targetSeq(d *Dispatcher) uint64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
