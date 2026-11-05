@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,8 +178,17 @@ func TestStreamDisconnectPhases(t *testing.T) {
 				held, _ := heldOn(rig.disp, u.srv.URL)
 				t.Fatalf("held %d 500 ms after the abort, want 0", held)
 			}
-			if !waitFor(time.Second, func() bool { return rig.limiter.settles.Load() == 1 }) || rig.limiter.aborts.Load() != 0 {
-				t.Errorf("settle/abort %d/%d, want 1/0 (the abort reached the wire)", rig.limiter.settles.Load(), rig.limiter.aborts.Load())
+			// The abort reached the wire: never Abort. After a frame the
+			// backend's 200 is in, the estimate settles; in phase B the
+			// client can leave before the route read the upstream's 200 —
+			// then the reservation keeps its charge (the W02-08 rebase round
+			// changed this pin from one Settle, of 0 tokens without the 200,
+			// to Settle or Keep).
+			l := rig.limiter
+			ended := func() bool { return l.settles.Load()+l.keeps.Load() == 1 }
+			if !waitFor(time.Second, ended) || l.aborts.Load()+l.rejects.Load() != 0 || (phase == "C relaying" && l.settles.Load() != 1) {
+				t.Errorf("settle/keep/abort/reject %d/%d/%d/%d, want one Settle (phase C) or one Settle or Keep (phase B), never Abort (the abort reached the wire)",
+					l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load())
 			}
 		})
 	}
@@ -244,9 +254,15 @@ func TestStreamLeakProbe(t *testing.T) {
 	if !waitFor(2*time.Second, func() bool { return rig.budget.InUse() == 0 }) {
 		t.Fatalf("in-flight budget %d after the streams, want 0", rig.budget.InUse())
 	}
+	// Four ends since the meter rule holds for streams (W02-08 rebase round):
+	// Keep is the end of a stream whose backend had the request but sent no
+	// 200 before the abort.
 	l := rig.limiter
-	if !waitFor(2*time.Second, func() bool { return l.settles.Load()+l.aborts.Load()+l.rejects.Load() == l.admits.Load() }) {
-		t.Errorf("reservations: %d admitted, %d settled + %d aborted + %d rejected", l.admits.Load(), l.settles.Load(), l.aborts.Load(), l.rejects.Load())
+	if !waitFor(2*time.Second, func() bool {
+		return l.settles.Load()+l.keeps.Load()+l.aborts.Load()+l.rejects.Load() == l.admits.Load()
+	}) {
+		t.Errorf("reservations: %d admitted, %d settled + %d kept + %d aborted + %d rejected", l.admits.Load(), l.settles.Load(), l.keeps.Load(),
+			l.aborts.Load(), l.rejects.Load())
 	}
 	if !waitFor(3*time.Second, func() bool { return routeGoroutines() <= baseRoute }) {
 		t.Errorf("route goroutines %d after the streams, %d before", routeGoroutines(), baseRoute)
@@ -267,8 +283,8 @@ func TestStreamLeakProbe(t *testing.T) {
 		t.Errorf("goroutines %d after the streams and closed connections, %d before", runtime.NumGoroutine(), baseTotal)
 	}
 	acquires := len(clock.returned) + int(clock.tries.Load())
-	t.Logf("200 streams: %d acquires, %d wire, %d settled, %d aborted, %d rejected; route goroutines %d → %d, all goroutines %d → %d (connections closed)",
-		acquires, u.hits.Load(), l.settles.Load(), l.aborts.Load(), l.rejects.Load(), baseRoute, routeGoroutines(), baseTotal, runtime.NumGoroutine())
+	t.Logf("200 streams: %d acquires, %d wire, %d settled, %d kept, %d aborted, %d rejected; route goroutines %d → %d, all goroutines %d → %d (connections closed)",
+		acquires, u.hits.Load(), l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load(), baseRoute, routeGoroutines(), baseTotal, runtime.NumGoroutine())
 }
 
 // smallBufListener shrinks the send buffer of every accepted connection, so
@@ -723,38 +739,43 @@ func TestStreamWriterDomain(t *testing.T) {
 // TestStreamReservationEndsOnce is Z5 (W02-07 review 1 F-7 LM1): every end
 // of a stream ends the limiter's reservation exactly once — Abort without
 // wire contact (queued abort), Settle with partial or estimated usage after
-// it (admitted abort, error frame, success), Reject on an admission refusal.
-// Red: no Settle on the abort path (close() aborts instead).
+// it (error frame, success), Settle or Keep for a client that left after
+// the upstream had the request (admitted abort: Keep when the route had not
+// read the upstream's 200 yet), Reject on an admission refusal. Red: no
+// Settle on the abort path (close() aborts instead). The W02-08 rebase
+// round counts Keep as the fourth end and changed "admitted abort" from one
+// Settle to one Settle or Keep.
 func TestStreamReservationEndsOnce(t *testing.T) {
-	type ends struct{ settle, abort, reject int64 }
-	run := func(t *testing.T, name string, want ends, drive func(t *testing.T) *fakeLimiter) {
+	type ends struct{ settle, keep, abort, reject int64 }
+	run := func(t *testing.T, name string, want []ends, drive func(t *testing.T) *fakeLimiter) {
 		t.Run(name, func(t *testing.T) {
 			l := drive(t)
-			if !waitFor(2*time.Second, func() bool { return l.settles.Load()+l.aborts.Load()+l.rejects.Load() >= 1 }) {
+			if !waitFor(2*time.Second, func() bool { return l.settles.Load()+l.keeps.Load()+l.aborts.Load()+l.rejects.Load() >= 1 }) {
 				t.Fatal("the reservation never ended")
 			}
 			time.Sleep(50 * time.Millisecond)
-			got := ends{l.settles.Load(), l.aborts.Load(), l.rejects.Load()}
-			if got != want || l.admits.Load() != 1 {
-				t.Errorf("admits %d, settle/abort/reject %+v, want 1 and %+v", l.admits.Load(), got, want)
+			got := ends{l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load()}
+			if !slices.Contains(want, got) || l.admits.Load() != 1 {
+				t.Errorf("admits %d, settle/keep/abort/reject %+v, want 1 and one of %+v", l.admits.Load(), got, want)
 			}
 		})
 	}
-	run(t, "success", ends{1, 0, 0}, func(t *testing.T) *fakeLimiter {
+	one := func(e ends) []ends { return []ends{e} }
+	run(t, "success", one(ends{1, 0, 0, 0}), func(t *testing.T) *fakeLimiter {
 		u := newUpstream(t, "")
 		u.setRespond(sseRespond(streamShapes[0].steps(), nil, nil))
 		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings)
 		postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
 		return rig.limiter
 	})
-	run(t, "error frame", ends{1, 0, 0}, func(t *testing.T) *fakeLimiter {
+	run(t, "error frame", one(ends{1, 0, 0, 0}), func(t *testing.T) *fakeLimiter {
 		u := newUpstream(t, "")
 		u.setRespond(sseRespond([]sseStep{{data: sglangChunk("hello", "")}, {data: `{"error":{"message":"x","code":"internal"}}`}}, nil, nil))
 		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings)
 		postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
 		return rig.limiter
 	})
-	run(t, "admitted abort", ends{1, 0, 0}, func(t *testing.T) *fakeLimiter {
+	run(t, "admitted abort", []ends{{1, 0, 0, 0}, {0, 1, 0, 0}}, func(t *testing.T) *fakeLimiter {
 		hold := make(chan struct{})
 		t.Cleanup(func() { close(hold) })
 		entered := make(chan struct{}, 1)
@@ -768,7 +789,7 @@ func TestStreamReservationEndsOnce(t *testing.T) {
 		_ = ls.Close()
 		return rig.limiter
 	})
-	run(t, "queued abort", ends{0, 1, 0}, func(t *testing.T) *fakeLimiter {
+	run(t, "queued abort", one(ends{0, 0, 1, 0}), func(t *testing.T) *fakeLimiter {
 		u := newUpstream(t, "")
 		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 2, 1, withStreamSettings)
 		t.Cleanup(occupyExternal(t, rig.disp, u.srv.URL))
@@ -779,7 +800,7 @@ func TestStreamReservationEndsOnce(t *testing.T) {
 		_ = ls.Close()
 		return rig.limiter
 	})
-	run(t, "admission refusal", ends{0, 0, 1}, func(t *testing.T) *fakeLimiter {
+	run(t, "admission refusal", one(ends{0, 0, 0, 1}), func(t *testing.T) *fakeLimiter {
 		u := newUpstream(t, "")
 		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 2, 1, withStreamSettings, withWait(50*time.Millisecond))
 		t.Cleanup(occupyExternal(t, rig.disp, u.srv.URL))

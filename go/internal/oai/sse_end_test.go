@@ -14,7 +14,7 @@ func TestStreamWriterEndsOnce(t *testing.T) {
 	const chunk = `{"x":1}`
 	t.Run("error frame, then error frame and [DONE]", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		s := newStreamWriter(rec, Settings{}, func(error) {})
+		s := newStreamWriter(rec, Settings{}, func(error) {}, nil)
 		if err := s.frame([]byte(chunk)); err != nil {
 			t.Fatal(err)
 		}
@@ -33,7 +33,7 @@ func TestStreamWriterEndsOnce(t *testing.T) {
 	})
 	t.Run("[DONE], then error frame and [DONE]", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		s := newStreamWriter(rec, Settings{}, func(error) {})
+		s := newStreamWriter(rec, Settings{}, func(error) {}, nil)
 		if err := s.frame([]byte(chunk)); err != nil {
 			t.Fatal(err)
 		}

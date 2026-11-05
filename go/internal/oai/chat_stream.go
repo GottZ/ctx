@@ -57,10 +57,15 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 		st.failed = append(st.failed, st.last)
 		return dispatch.Usage{}, false, err
 	}
+	// As non-stream: st.wired for the census, c.wired — the meter's wire
+	// contact — from the attempt's trace (wireContext; ChatRawStream goes
+	// through httpx.DoRetryOnce as ChatRaw does). A stream marks it at the
+	// latest with the backend's first response byte, before any frame.
 	st.wired++
 	st.stream, st.relayed, st.runes, st.usage, st.promptN, st.streamErr = nil, 0, 0, nil, 0, nil
 	id, created, reasoning, include := "chatcmpl-"+c.id, st.admitted.Unix(), reasoningOff(c.alias), c.req.includeUsage
-	res, err := llm.ChatRawStream(runCtx, *b, body, timeout, c.s.MaxStreamFrameBytes, func(payload []byte) error {
+	actx, done := c.wireContext(runCtx, timeout)
+	res, err := llm.ChatRawStream(actx, *b, body, timeout, c.s.MaxStreamFrameBytes, func(payload []byte) error {
 		chunk, rerr := rewriteChunk(payload, id, created, c.alias.Name, lane, reasoning, include)
 		if rerr != nil {
 			st.streamErr = fmt.Errorf("%w: %w", errChunkRewrite, rerr)
@@ -82,6 +87,7 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 		st.relayed++
 		return nil
 	})
+	done(err)
 	st.stream = res
 	var usage dispatch.Usage
 	if res != nil {
@@ -103,12 +109,18 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 // the generated runes — the estimate errs high, never low). A last attempt
 // the backend refused before its stream (a 400, a 502, a dial error) books
 // nothing, as non-stream: the estimate is for a stream cut short, not for a
-// prompt no engine processed (Fremd-Review 1 F-2).
+// prompt no engine processed (Fremd-Review 1 F-2). The meter books the same
+// (book): the usage chunk or the estimate by Settle — a stream cut short
+// generated tokens, a full refund would hand them out free (B-06-8) — and
+// a stream without a 200 after wire contact keeps its reservation. The
+// usage chunk's counters are summed saturated (usageTotal): an int sum of
+// two reported counters can overflow and turn the backend's usage into an
+// estimate.
 func (c *chatCall) streamTokens(st *walkState) {
 	if st.wired == 0 || st.stream == nil {
 		return
 	}
-	if st.usage != nil && st.usage[0]+st.usage[1] > 0 {
+	if st.usage != nil && usageTotal(st.usage[0], st.usage[1]) > 0 {
 		st.tokens = dispatch.Usage{PromptTokens: st.usage[0], CompletionTokens: st.usage[1]}
 		st.usageKind = llmlog.UsageBackend
 		return

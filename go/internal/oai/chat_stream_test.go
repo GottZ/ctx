@@ -246,7 +246,11 @@ func TestStreamUsageEstimated(t *testing.T) {
 	t.Run("a refusal before the stream books nothing", func(t *testing.T) {
 		// Fremd-Review 1 F-2: an engine that refuses the request with a
 		// status (here 400) processed no prompt — no estimate, as
-		// non-stream. Red: the estimate for every wired attempt.
+		// non-stream. Red: the estimate for every wired attempt. The
+		// reservation: the backend had the request (wire contact) and no
+		// usage came — it keeps its charge, as non-stream (W06-10 H-7;
+		// the W02-08 rebase round changed this pin from one Settle of 0,
+		// a full refund, to Keep).
 		u := newUpstream(t, "")
 		u.setRespond(chRespond(http.StatusBadRequest, `{"error":{"message":"bad"}}`))
 		lim := &usageLimiter{}
@@ -259,8 +263,8 @@ func TestStreamUsageEstimated(t *testing.T) {
 		if len(rows) != 1 || rows[0].Gateway.Usage != "" || rows[0].Telemetry.PromptTokens != 0 || rows[0].Telemetry.CompletionTokens != 0 {
 			t.Errorf("rows %+v, want one row without usage and 0 tokens", rows)
 		}
-		if us := lim.usages(); len(us) != 1 || us[0].PromptTokens+us[0].CompletionTokens != 0 {
-			t.Errorf("Settle %+v, want one Settle of 0 tokens", us)
+		if us := lim.usages(); len(us) != 0 || lim.keeps.Load() != 1 || lim.aborts.Load()+lim.rejects.Load() != 0 {
+			t.Errorf("Settle %+v, keep/abort/reject %d/%d/%d, want no Settle and one Keep", us, lim.keeps.Load(), lim.aborts.Load(), lim.rejects.Load())
 		}
 	})
 	t.Run("client abort books at least what was streamed", func(t *testing.T) {

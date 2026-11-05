@@ -122,6 +122,12 @@ type streamWriter struct {
 	// broken ends the request's run with errClientGone (D4 → D3); called
 	// outside mu.
 	broken func(error)
+	// headers are the response headers of the commit beyond the SSE ones —
+	// the meter's x-ratelimit-* of the admission (W06-10 lead decision M2
+	// (c): on the successful answer, before its first byte); read under mu
+	// when the commit writes the status, on the handler's goroutine or the
+	// timer's. nil adds none.
+	headers func() http.Header
 
 	mu        sync.Mutex
 	state     streamState
@@ -134,9 +140,9 @@ type streamWriter struct {
 	noFlushed bool      // the "not flushable" WARN was logged
 }
 
-func newStreamWriter(w http.ResponseWriter, s Settings, broken func(error)) *streamWriter {
+func newStreamWriter(w http.ResponseWriter, s Settings, broken func(error), headers func() http.Header) *streamWriter {
 	return &streamWriter{w: w, rc: http.NewResponseController(w), keepalive: s.KeepaliveInterval,
-		window: s.ClientWriteWindow, broken: broken}
+		window: s.ClientWriteWindow, broken: broken, headers: headers}
 }
 
 // arm starts phase B: the commit at the latest at `at`, keepalives after it.
@@ -292,11 +298,20 @@ func (s *streamWriter) errorFrame(envelope []byte) error {
 	return err
 }
 
-// commitLocked sends the status and the SSE headers. Nothing of an upstream
+// commitLocked sends the status and the SSE headers — the one commit point,
+// called by tick (the grace commit), frame and done. Nothing of an upstream
 // response is ever copied: the headers are the ones the stack set (request
-// id, security headers, the ingress's own Ctx-Instance) plus these three.
+// id, security headers, the ingress's own Ctx-Instance), the header source
+// (the admission's x-ratelimit-*: the state when the stream commits; what
+// the request books after it — a failover refused, an error frame, a cut
+// stream — no header can show any more) plus these three.
 func (s *streamWriter) commitLocked() error {
 	h := s.w.Header()
+	if s.headers != nil {
+		for k, v := range s.headers() {
+			h[k] = v
+		}
+	}
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")

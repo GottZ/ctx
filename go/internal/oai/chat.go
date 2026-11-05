@@ -295,7 +295,7 @@ func (c *chatCall) frame(stream bool) {
 		}
 		c.grace = grace
 		setWriteDeadline(c.w, c.entry.Add(grace+writeMargin))
-		c.sse = newStreamWriter(c.w, c.s, func(error) { c.cancel(errClientGone) })
+		c.sse = newStreamWriter(c.w, c.s, func(error) { c.cancel(errClientGone) }, c.rateHeaders)
 		return
 	}
 	c.dl = c.entry.Add(c.s.RequestDeadline)
@@ -488,6 +488,20 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	return true
 }
 
+// rateHeaders are the meter's x-ratelimit-* headers of the request's
+// admission (nil before it, and without a limiter): the one source of both
+// forms — written on a non-streamed answer before its first byte (success),
+// with a stream's status at its commit (streamWriter.commitLocked), which
+// comes after the admission. A stream's commit runs on the handler's or the
+// grace timer's goroutine; c.limit is set before the attempt arms the timer
+// (time.AfterFunc orders the write before the timer's read) and never again.
+func (c *chatCall) rateHeaders() http.Header {
+	if c.limit == nil {
+		return nil
+	}
+	return c.limit.Headers()
+}
+
 func (c *chatCall) endLimit(fn func(LimitReservation)) {
 	if c.limit != nil && !c.limitEnd {
 		c.limitEnd = true
@@ -632,24 +646,11 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 		return dispatch.Usage{}, false, err
 	}
 	// st.wired counts the wire calls for the census (Σ acquire = Σ wire);
-	// c.wired is the meter's wire contact, marked from inside net/http by
-	// the attempt's trace (W06-10 hardening 3, H3-1). The trace rides on the
-	// request context, and req.Clone carries it into httpx.DoRetryOnce's
-	// retry: every try of the attempt reports.
+	// c.wired is the meter's wire contact (wireContext).
 	st.wired++
-	// The attempt's deadline (ChatRaw sets the same one inside) is held here
-	// too, so its end is read off the context, not off the error.
-	var conn atomic.Bool
-	actx, cancel := context.WithTimeout(httptrace.WithClientTrace(runCtx, c.wireTrace(&conn)), timeout)
+	actx, done := c.wireContext(runCtx, timeout)
 	res, err := llm.ChatRaw(actx, *b, body, timeout, c.s.MaxResponseBytes)
-	ended := actx.Err() != nil
-	cancel()
-	// An attempt that ended by its context with a connection in hand may
-	// still write: HTTP/2 returns on the context without waiting for the
-	// stream's writer. Counted as wire contact — the conservative side.
-	if err != nil && conn.Load() && ended {
-		c.wired.Store(true)
-	}
+	done(err)
 	if err != nil {
 		st.last = failedAttempt{b: b, err: err}
 		st.failed = append(st.failed, st.last)
@@ -666,6 +667,30 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 // RequestID middleware (internal/handler/middleware.go isValidRequestID)
 // share: [0-9A-Fa-f-]{1,64} (F-W3 review FR2-4). 36 + 2 + digits ≤ 64.
 func attemptRequestID(id string, n int) string { return fmt.Sprintf("%s-a%d", id, n) }
+
+// wireContext is the context of one wire call of an attempt — ChatRaw or
+// ChatRawStream, the one mechanism of both forms (W06-10 hardening 3, H3-1;
+// W02-08 rebase round): runCtx with the attempt's trace (wireTrace), which
+// marks c.wired, the meter's wire contact, from inside net/http, and with
+// the attempt's deadline — the wire call sets the same one inside; it is
+// held here too, so the call's end is read off the context, not off its
+// error. The trace rides on the request context, and req.Clone carries it
+// into httpx.DoRetryOnce's retry: every try of the attempt reports. done,
+// called with the wire call's error right after it returned, applies the
+// context rule: an attempt that ended by its context with a connection in
+// hand may still write — HTTP/2 returns on the context without waiting for
+// the stream's writer — and counts as wire contact, the conservative side.
+func (c *chatCall) wireContext(runCtx context.Context, timeout time.Duration) (ctx context.Context, done func(err error)) {
+	var conn atomic.Bool
+	actx, cancel := context.WithTimeout(httptrace.WithClientTrace(runCtx, c.wireTrace(&conn)), timeout)
+	return actx, func(err error) {
+		ended := actx.Err() != nil
+		cancel()
+		if err != nil && conn.Load() && ended {
+			c.wired.Store(true)
+		}
+	}
+}
 
 // wireTrace marks wire contact where a byte of the request can leave for a
 // backend, in any try, instead of reading it off the error of the last try
@@ -908,10 +933,8 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 	c.rec.Usage = st.usageKind
 	// The meter's view of the request's op bucket, on the successful answer
 	// only (design/06 §4.4; lead decision M2 (c)).
-	if c.limit != nil {
-		for k, v := range c.limit.Headers() {
-			c.w.Header()[k] = v
-		}
+	for k, v := range c.rateHeaders() {
+		c.w.Header()[k] = v
 	}
 	c.w.Header().Set("Content-Type", "application/json")
 	c.w.WriteHeader(http.StatusOK)
