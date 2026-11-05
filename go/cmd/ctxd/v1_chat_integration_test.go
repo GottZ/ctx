@@ -135,6 +135,7 @@ type v1ChatLimiter struct{ admits atomic.Int64 }
 type v1ChatReservation struct{}
 
 func (v1ChatReservation) Settle(dispatch.Usage)        {}
+func (v1ChatReservation) Keep()                        {}
 func (v1ChatReservation) Abort()                       {}
 func (v1ChatReservation) Reject(string, time.Duration) {}
 func (v1ChatReservation) Headers() http.Header         { return nil }

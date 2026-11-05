@@ -286,11 +286,11 @@ func classSamples(d *dispatch.Dispatcher, host string) (xu, xb int) {
 // /v1 group with POST /v1/chat/completions admitting, driven with a valid
 // chat body and the census key, whose consumer has the default lane (bulk ⇒
 // XB). The chat route is the one gatewayDeps builds for buildRouter — the
-// router's alias registry, config store and dispatcher — with two seams:
-// the admitting limiter (production has none yet, L11: the route would
-// answer 503 before its planner) and the planner, built like gatewayDeps
-// builds it but over a census recorder that wraps the router's own
-// dispatcher (gatewayDeps takes the concrete dispatcher). Allowed is
+// router's alias registry, config store, dispatcher and per-consumer meter
+// (W06-10: the production meter, f.gateway.meter, not a stand-in) — with
+// one seam: the planner, built like gatewayDeps builds it but over a census
+// recorder that wraps the router's own dispatcher (gatewayDeps takes the
+// concrete dispatcher). Allowed is
 // AllowedClasses() of that mounted planner: census green, and every XB
 // acquire the census made is an admission of the router's dispatcher (not
 // of a copy). The allowance trimmed to {XU} is census red.
@@ -319,8 +319,7 @@ func TestV1AdmissionCensusChatRoute(t *testing.T) {
 	backendPool.SeedSnapshotForTest([]backends.Backend{eng.row("census", 1)})
 	f.disp.UpdatePolicy(dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{eng.srv.URL: {Slots: 4, InternalReserved: 1}}})
 	rec := v1census.NewRecorder(f.disp)
-	d := gatewayDeps(life, f.pool, f.cfgStore, f.aliases, backendPool, backends.NewQuotaAccountant(f.pool, 30*time.Second), f.disp)
-	d.Limiter = &v1ChatLimiter{}
+	d := gatewayDeps(life, f.pool, f.cfgStore, f.aliases, backendPool, backends.NewQuotaAccountant(f.pool, 30*time.Second), f.disp, f.gateway.meter)
 	d.Planner = handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: rec, Settings: d.Settings})
 	h := oai.ChatCompletions(d)
 	chat.Store(&h)

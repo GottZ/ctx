@@ -1,0 +1,201 @@
+package keyquota_test
+
+// Hardening after the second review of W06-10 (Fremd-Review 2): the refund
+// of a reservation is bounded by what is still unexpired of its own charge
+// (H-1), a debt is booked from the settle on (H-2), the reset header rounds
+// up (H-5, R9) and the meter does not follow a step of the wall clock (H-6).
+
+import (
+	"sync"
+	"testing"
+	"time"
+	"unsafe"
+
+	"github.com/GottZ/ctx/internal/keyquota"
+)
+
+// TestHeldDecoysBuyNoBurst is H-1 (review 2 F-1): k reservations of the
+// whole TPM bucket are held one minute each while their charges run off,
+// then a request books the whole bucket and uses it, and each held decoy
+// ends with usage 0 (a refusal after the wait, a client gone, an upstream
+// error) followed by another whole-bucket request. The refund of an expired
+// charge must not erase the charge of a later request: within the short
+// window at most L real tokens pass, never (k+1)·L.
+func TestHeldDecoysBuyNoBurst(t *testing.T) {
+	const L = 60000
+	l := keyquota.Limits{RPM: 30, TPM: L, CompletionReserve: 1024}
+	whole := keyquota.Estimate{MaxCompletion: L, ClientMax: true} // capped at L
+	for _, decoys := range []int{1, 2, 9} {
+		c := newClock()
+		m := seeded(c)
+		s := chat(keyquota.LaneUrgent)
+		var held []*keyquota.Reservation
+		for i := range decoys {
+			r, d := m.Admit(s, l, whole)
+			if !d.Allowed {
+				t.Fatalf("decoys=%d: decoy %d refused: %+v", decoys, i, d)
+			}
+			held = append(held, r)
+			c.add(time.Minute)
+		}
+		start := c.now()
+		real, served := 0, 0
+		var lastRefusal keyquota.Decision
+		if r, d := m.Admit(s, l, whole); d.Allowed {
+			r.Settle(keyquota.Usage{PromptTokens: L})
+			real += L
+			served++
+		}
+		for _, h := range held {
+			c.add(10 * time.Millisecond)
+			h.Abort()
+			r, d := m.Admit(s, l, whole)
+			if d.Allowed {
+				r.Settle(keyquota.Usage{PromptTokens: L})
+				real += L
+				served++
+				continue
+			}
+			lastRefusal = d
+		}
+		t.Logf("decoys=%d held up to %v: %d requests admitted with %d real tokens within %v (limit %d/min, ratio %.1f×L); last refusal Retry-After %v",
+			decoys, time.Duration(decoys)*time.Minute, served, real, c.now().Sub(start), L, float64(real)/L, lastRefusal.RetryAfter)
+		if real > L {
+			t.Errorf("decoys=%d: %d real tokens within %v at TPM %d — the expired decoys' refunds erased a later charge", decoys, real, c.now().Sub(start), L)
+		}
+		if lastRefusal.RetryAfter < 59*time.Second {
+			t.Errorf("decoys=%d: the last follow-up's Retry-After %v, want ≥ 59 s (the whole bucket is still owed)", decoys, lastRefusal.RetryAfter)
+		}
+	}
+}
+
+// TestSettleBeforeExpiryRefundsTheUnexpiredPart is the counter-check of H-1:
+// A books 1 042 tokens at t = 0 (1 ms per token at 60 000 tpm, its charge
+// runs until 1.042 s), B books 1 000 behind it; A settles at 1 s with 14
+// real tokens. What is still unexpired of A's charge — 42 ms — comes back
+// in full, nothing beyond it (B's charge stays): the bucket then holds
+// exactly B's 1 000 tokens.
+func TestSettleBeforeExpiryRefundsTheUnexpiredPart(t *testing.T) {
+	c := newClock()
+	m := seeded(c)
+	l := keyquota.Limits{RPM: 100, TPM: 60000}
+	s := chat(keyquota.LaneUrgent)
+	a, _ := m.Admit(s, l, keyquota.Estimate{MaxCompletion: 1042, ClientMax: true})
+	if _, d := m.Admit(s, l, keyquota.Estimate{MaxCompletion: 1000, ClientMax: true}); !d.Allowed || d.Headers.ResetTokens != 2042*time.Millisecond {
+		t.Fatalf("B: %+v, want admitted behind A (bucket 2.042 s)", d)
+	}
+	c.add(time.Second)
+	a.Settle(keyquota.Usage{PromptTokens: 14})
+	_, d := m.Admit(s, l, keyquota.Estimate{ClientMax: true})
+	if d.Headers.ResetTokens != time.Second || d.Headers.RemainingTokens != 59000 {
+		t.Errorf("after A settled 14 at 1 s: bucket %v, remaining %d — want 1 s and 59000 (A's unexpired 42 ms back, B's 1 000 kept)",
+			d.Headers.ResetTokens, d.Headers.RemainingTokens)
+	}
+}
+
+// TestAbortRightAfterAdmissionRefundsInFull: a reservation that ends at once
+// (no wire call) gets its whole charge back — the bound of H-1 never takes
+// a legitimate credit.
+func TestAbortRightAfterAdmissionRefundsInFull(t *testing.T) {
+	c := newClock()
+	m := seeded(c)
+	l := keyquota.Limits{RPM: 100, TPM: 60000}
+	s := chat(keyquota.LaneUrgent)
+	if _, d := m.Admit(s, l, keyquota.Estimate{MaxCompletion: 20000, ClientMax: true}); !d.Allowed {
+		t.Fatal(d)
+	}
+	r, _ := m.Admit(s, l, keyquota.Estimate{MaxCompletion: 30000, ClientMax: true})
+	c.add(10 * time.Second)
+	r.Abort()
+	_, d := m.Admit(s, l, keyquota.Estimate{ClientMax: true})
+	if d.Headers.ResetTokens != 10*time.Second || d.Headers.RemainingTokens != 50000 {
+		t.Errorf("after the abort: bucket %v, remaining %d — want 10 s and 50000 (the first charge ran 10 s of its 20 s, the aborted one came back whole)",
+			d.Headers.ResetTokens, d.Headers.RemainingTokens)
+	}
+}
+
+// TestDebtIsBookedFromTheSettle is H-2: an overrun is booked from the settle
+// on (max(tat, now)), also when the request's own charge ran off long ago —
+// the overrun was used, its moment inside the request is unknown, and
+// booking it from the settle never counts too little. A small request
+// settled two minutes after its admission with 90 000 real tokens leaves the
+// next one 30 s of debt to wait off at 60 000 tpm.
+func TestDebtIsBookedFromTheSettle(t *testing.T) {
+	c := newClock()
+	m := seeded(c)
+	l := keyquota.Limits{RPM: 100, TPM: 60000}
+	s := chat(keyquota.LaneUrgent)
+	r, _ := m.Admit(s, l, small)
+	c.add(2 * time.Minute)
+	r.Settle(keyquota.Usage{PromptTokens: 89000, CompletionTokens: 1000})
+	_, d := m.Admit(s, l, small)
+	if d.Allowed || d.Reason != keyquota.ReasonTokens || d.RetryAfter != 30*time.Second {
+		t.Errorf("after an overrun settled late: %+v, want refused rate_tokens with Retry-After exactly 30s", d)
+	}
+}
+
+// TestResetRoundsUp is H-5 (review 2 R9): a reset with a fraction of a
+// millisecond is rounded up — at 7 rpm one request leaves 8.571428571 s.
+func TestResetRoundsUp(t *testing.T) {
+	m := seeded(newClock())
+	r, _ := m.Admit(chat(keyquota.LaneUrgent), keyquota.Limits{RPM: 7, TPM: 60000}, small)
+	if got := r.Headers().Get("x-ratelimit-reset-requests"); got != "8.572s" {
+		t.Errorf("x-ratelimit-reset-requests %q, want 8.572s (8.571428571 s rounded up)", got)
+	}
+}
+
+// TestWallClockStepLeavesTheMeterAlone is H-6 (review 2 F-7, taken over
+// from its probe): a time.Time whose wall reading steps by ±1 h while its
+// monotonic reading does not (built over the field layout of time.Time,
+// Go 1.25) leaves the meter untouched — no consumer locked out for an hour,
+// no bucket refilled.
+func TestWallClockStepLeavesTheMeterAlone(t *testing.T) {
+	type rawTime struct {
+		wall uint64
+		ext  int64
+		loc  *time.Location
+	}
+	const hasMonotonic = 1 << 63
+	const nsecShift = 30
+	stepWall := func(tm time.Time, d time.Duration) time.Time {
+		r := (*rawTime)(unsafe.Pointer(&tm))
+		if r.wall&hasMonotonic == 0 {
+			t.Fatal("no monotonic reading")
+		}
+		secs := int64(r.wall<<1>>(nsecShift+1)) + int64(d/time.Second)
+		r.wall = hasMonotonic | uint64(secs)<<nsecShift | (r.wall & (1<<nsecShift - 1))
+		return tm
+	}
+	for _, step := range []time.Duration{-time.Hour, time.Hour} {
+		var mu sync.Mutex
+		wallStep := time.Duration(0)
+		now := func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			tm := time.Now()
+			if wallStep != 0 {
+				tm = stepWall(tm, wallStep)
+			}
+			return tm
+		}
+		probe := now()
+		stepped := stepWall(probe, step)
+		if stepped.Sub(probe) != 0 || stepped.Round(0).Sub(probe.Round(0)) != step {
+			t.Fatalf("construction: monotonic diff %v, wall diff %v", stepped.Sub(probe), stepped.Round(0).Sub(probe.Round(0)))
+		}
+		m := keyquota.New(now)
+		m.MarkSeeded()
+		l := keyquota.Limits{RPM: 2, TPM: 60000, CompletionReserve: 1024}
+		_, d1 := m.Admit(chat(keyquota.LaneUrgent), l, keyquota.Estimate{})
+		mu.Lock()
+		wallStep = step
+		mu.Unlock()
+		_, d2 := m.Admit(chat(keyquota.LaneUrgent), l, keyquota.Estimate{})
+		_, d3 := m.Admit(chat(keyquota.LaneUrgent), l, keyquota.Estimate{})
+		t.Logf("wall step %v (monotonic unchanged): first %v; after the step: second %v, third %v Retry-After %v",
+			step, d1.Allowed, d2.Allowed, d3.Allowed, d3.RetryAfter)
+		if !d1.Allowed || !d2.Allowed || d3.Allowed || d3.RetryAfter > 31*time.Second || d3.RetryAfter < 29*time.Second {
+			t.Errorf("wall step %v changed the meter: %+v / %+v / %+v", step, d1, d2, d3)
+		}
+	}
+}

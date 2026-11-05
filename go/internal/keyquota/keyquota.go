@@ -279,7 +279,7 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 		LimitRequests: req.cap, RemainingRequests: req.remaining(st.req, now), ResetRequests: time.Duration(backlog(st.req, now)),
 		LimitTokens: tok.cap, RemainingTokens: tok.remaining(st.tok, now), ResetTokens: time.Duration(backlog(st.tok, now)),
 	}
-	r := &Reservation{m: m, key: key, tpm: l.TPM, charged: tok.cost(n), headers: h}
+	r := &Reservation{m: m, key: key, tpm: l.TPM, charged: tok.cost(n), end: st.tok, headers: h}
 	return r, Decision{Allowed: true, Retryable: true, Headers: h}
 }
 
@@ -304,32 +304,50 @@ func refused(s Subject, req, tok dim, waitReq, waitTok int64, okReq bool) Decisi
 }
 
 // Reservation is one admitted request's share of the meter. It ends exactly
-// once — Settle, Abort and Reject share one sync.Once — and every later end
-// is a no-op.
+// once — Settle, Keep, Abort and Reject share one sync.Once — and every
+// later end is a no-op.
 type Reservation struct {
 	m       *Meter
 	key     stateKey
 	tpm     int64 // the TPM the admission was charged under
 	charged int64 // ns booked on the token bucket at admission
+	// end is the token bucket's tat right after this admission: where the
+	// reservation's own charge runs off. A refund never reaches behind it
+	// (H-1 of the W06-10 hardening).
+	end     int64
 	headers RateHeaders
 	once    sync.Once
 }
 
 // Settle books the request's real tokens: the token bucket moves by
-// cost(actual) − cost(charged) — a refund down to now, an overrun as debt
-// the next request waits off (design/06 §4.2 TPM-Settle). The request stays
-// counted.
+// cost(actual) − cost(charged). An overrun is debt from now on, the next
+// request waits it off (design/06 §4.2 TPM-Settle). A refund gives back at
+// most what is still unexpired of the reservation's own charge (min(charged
+// − cost(actual), end − now), never below now): a charge that already ran
+// off was a minute the bucket already granted, and refunding it would erase
+// the charge of a request admitted after it (Fremd-Review 2 F-1: held
+// reservations ending with little usage bought (k+1)·L within a second).
+// The request stays counted.
 func (r *Reservation) Settle(u Usage) {
 	r.once.Do(func() {
 		actual := satAdd(int64(max(u.PromptTokens, 0)), int64(max(u.CompletionTokens, 0)))
-		r.m.shift(r.key, dim{limit: r.tpm}.cost(actual)-r.charged)
+		r.m.shift(r.key, dim{limit: r.tpm}.cost(actual)-r.charged, r.end)
 	})
 }
 
-// Abort ends a reservation without a wire call: its tokens go back, the
-// request stays counted (design/06 §4.2).
+// Keep ends a reservation keeping its whole charge: a wire call was made but
+// its usage is unknown (an upstream error, an answer without usage, a panic
+// or a gone client after the wire) — after wire contact nothing is given
+// back in full.
+func (r *Reservation) Keep() {
+	r.once.Do(func() {})
+}
+
+// Abort ends a reservation without a wire call: what is still unexpired of
+// its charge goes back (all of it right after the admission), the request
+// stays counted (design/06 §4.2).
 func (r *Reservation) Abort() {
-	r.once.Do(func() { r.m.shift(r.key, -r.charged) })
+	r.once.Do(func() { r.m.shift(r.key, -r.charged, r.end) })
 }
 
 // Reject ends a reservation the dispatcher refused after Admit. In this
@@ -344,9 +362,13 @@ func (r *Reservation) Reject(reason string, waited time.Duration) {
 // the route writes them on its successful answer before the first byte.
 func (r *Reservation) Headers() http.Header { return r.headers.Header() }
 
-// shift moves the token bucket of key by delta ns: a refund never below now
-// (no credit beyond a full bucket), a debt from now on.
-func (m *Meter) shift(key stateKey, delta int64) {
+// shift moves the token bucket of key by delta ns: a debt from max(tat,
+// now) on — the overrun was used, its moment inside the request is unknown,
+// and booking it from the settle never counts too little (H-2); a refund at
+// most end − now (what is unexpired of the reservation's own charge, end =
+// its tat right after the admission) and never below now (no credit beyond
+// a full bucket).
+func (m *Meter) shift(key stateKey, delta, end int64) {
 	if delta == 0 {
 		return
 	}
@@ -361,6 +383,7 @@ func (m *Meter) shift(key stateKey, delta int64) {
 		st.tok = satAdd(max(st.tok, now), delta)
 		return
 	}
+	delta = max(delta, -max(end-now, 0))
 	st.tok = max(satAdd(st.tok, delta), now)
 }
 

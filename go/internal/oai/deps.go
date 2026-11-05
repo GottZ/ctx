@@ -143,9 +143,14 @@ type Estimate struct {
 	ServiceTier string
 }
 
-// LimitReservation is one admitted request's share of the meter.
+// LimitReservation is one admitted request's share of the meter. It ends
+// exactly once: Settle with the usage of a wire call, Keep after a wire call
+// whose usage is unknown (an upstream error, an answer without usage, a
+// panic or a gone client after the wire — never a full refund after wire
+// contact), Abort without a wire call, Reject when the dispatcher refused.
 type LimitReservation interface {
 	Settle(usage dispatch.Usage)
+	Keep()
 	Abort()
 	Reject(reason string, waited time.Duration)
 	// Headers are the x-ratelimit-* headers of the admission (design/06

@@ -122,10 +122,13 @@ func (p *modePlanner) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.Ad
 
 // TestMeterReservationEndsOncePerExit is gate Z2: 1 000 requests through the
 // real route end in turn by success (Settle 14 tokens), an upstream error
-// after the wire (Settle 0), a planner refusal (Reject), a panic after Admit
-// (close() aborts) and a client gone during Plan (Abort) — afterwards the
-// token bucket of the consumer holds exactly the settled tokens and every
-// request is counted once; only the successful answers carry x-ratelimit-*.
+// after the wire (Keep: the usage is unknown, the reservation of 1 042
+// tokens stays booked — W06-10 hardening H-7; before it, Settle 0 gave it
+// back), a planner refusal (Reject), a panic after Admit (close() aborts)
+// and a client gone during Plan (Abort) — afterwards the token bucket of the
+// consumer holds exactly the settled tokens plus the kept reservations, and
+// every request is counted once; only the successful answers carry
+// x-ratelimit-*.
 func TestMeterReservationEndsOncePerExit(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
 	meter := newRigMeter(keyquota.Limits{RPM: 1 << 20, TPM: 60_000_000, CompletionReserve: 1024}, true)
@@ -136,7 +139,10 @@ func TestMeterReservationEndsOncePerExit(t *testing.T) {
 		d.Limiter = meter
 	}))
 	const n = 1000
-	var settled int64
+	// The reservation of chatBody: TokenEstimate of its 32-rune messages
+	// (18) plus the completion reserve.
+	const reservation = 18 + 1024
+	var settled, kept int64
 	counts := map[string]int{}
 	for i := range n {
 		mode := []string{"success", "upstream", "refuse", "panic", "cancel"}[i%5]
@@ -181,10 +187,13 @@ func TestMeterReservationEndsOncePerExit(t *testing.T) {
 		} else if limitHeader != "" {
 			t.Fatalf("request %d (%s): %d carries x-ratelimit headers %v, want none", i, mode, w.Code, w.Header())
 		}
+		if mode == "upstream" {
+			kept += reservation
+		}
 	}
 	h := meter.probe(t, rig.ca.Load(), keyquota.OpChat)
-	if got := meter.lim.TPM - h.RemainingTokens; got != settled || h.ResetTokens != time.Duration(settled)*time.Microsecond {
-		t.Errorf("token bucket holds %d tokens (%v) after %v, want exactly the settled %d", got, h.ResetTokens, counts, settled)
+	if got := meter.lim.TPM - h.RemainingTokens; got != settled+kept || h.ResetTokens != time.Duration(settled+kept)*time.Microsecond {
+		t.Errorf("token bucket holds %d tokens (%v) after %v, want exactly the settled %d plus the kept %d", got, h.ResetTokens, counts, settled, kept)
 	}
 	if got := meter.lim.RPM - h.RemainingRequests; got != n+1 {
 		t.Errorf("request bucket holds %d, want %d (every request counted once, plus the probe)", got, n+1)

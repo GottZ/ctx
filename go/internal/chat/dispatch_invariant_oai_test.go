@@ -47,6 +47,7 @@ func (censusAcquirer) Blocks() []int { return []int{1} }
 type censusReservation struct{}
 
 func (censusReservation) Settle(dispatch.Usage)        {}
+func (censusReservation) Keep()                        {}
 func (censusReservation) Abort()                       {}
 func (censusReservation) Reject(string, time.Duration) {}
 func (censusReservation) Headers() http.Header         { return nil }

@@ -105,6 +105,7 @@ type chatCall struct {
 	required backends.Sensitivity
 	limit    LimitReservation
 	limitEnd bool
+	wired    bool // a wire call (ChatRaw) was made: the reservation is never given back in full
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
@@ -147,10 +148,16 @@ func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.Consum
 	return c
 }
 
-// close ends the request's contexts and a reservation nobody ended.
+// close ends the request's contexts and a reservation nobody ended — after
+// a wire call (a panic in the answer path) by keeping its charge, the usage
+// is unknown; without one by Abort.
 func (c *chatCall) close() {
 	if c.limit != nil && !c.limitEnd {
-		c.limit.Abort()
+		if c.wired {
+			c.limit.Keep()
+		} else {
+			c.limit.Abort()
+		}
 	}
 	c.cancel(context.Canceled)
 	for _, stop := range c.stops {
@@ -504,6 +511,7 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 		return dispatch.Usage{}, false, err
 	}
 	st.wired++
+	c.wired = true
 	res, err := llm.ChatRaw(runCtx, *b, body, timeout, c.s.MaxResponseBytes)
 	if err != nil {
 		st.last = failedAttempt{b: b, err: err}
@@ -564,8 +572,17 @@ func (c *chatCall) answer(plan Plan, served *backends.Backend, attempts []llm.Ch
 	// A row and Settle only for a request that reached the wire, or whose
 	// walk failed on its own: a run that ended before any wire call
 	// (aborted, no ChatRaw) is no LLM call — close() aborts its reservation.
+	// After wire contact without a usage (an upstream error, an answer
+	// without usage, the client gone during the call) the reservation keeps
+	// its charge: never a full refund after the wire (W06-10 hardening H-7).
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
-		c.endLimit(func(l LimitReservation) { l.Settle(usage) })
+		c.endLimit(func(l LimitReservation) {
+			if st.wired > 0 && usage.PromptTokens+usage.CompletionTokens <= 0 {
+				l.Keep()
+				return
+			}
+			l.Settle(usage)
+		})
 		c.record(plan, served, attempts, err, st, out)
 	}
 }

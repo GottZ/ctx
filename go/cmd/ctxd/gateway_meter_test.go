@@ -156,3 +156,22 @@ func TestMeterLimiterFailsClosed(t *testing.T) {
 		t.Errorf("unseeded: %v %+v, want 429 rate_limit_exceeded, retryable, Retry-After 5s", res, ref)
 	}
 }
+
+// TestMeterLimiterChargesTheClientMaximum is H-5 (review 2 R12): the adapter
+// hands the route's effective max_tokens to the meter. A request with a
+// client maximum of 5 000 (above the reserve 1 024) reserves its prompt
+// estimate (5 tokens for 9 runes) plus the 5 000 — the oai route gates run
+// over a stand-in and do not see this mapping.
+func TestMeterLimiterChargesTheClientMaximum(t *testing.T) {
+	cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_TPM_DEFAULT": "60000"})
+	gw := meterTestGateway(t, cfgStore)
+	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+	res, ref := l.Admit(context.Background(), urgentConsumer("max"), modelalias.Alias{},
+		oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 5000, ClientMaxTokens: true, PromptRunes: 9})
+	if ref != nil {
+		t.Fatalf("refused: %+v", ref)
+	}
+	if got := res.Headers().Get("x-ratelimit-remaining-tokens"); got != "54995" {
+		t.Errorf("x-ratelimit-remaining-tokens %q, want 54995 (60000 − 5 prompt − 5000 client maximum)", got)
+	}
+}
