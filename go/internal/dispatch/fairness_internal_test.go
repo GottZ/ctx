@@ -263,6 +263,22 @@ type traceRun struct {
 	boundXB, claimed, decidedXB     int
 	escapes                         int64
 	admittedXB                      int // XB acquires that got a lease (record)
+	// granted is the weight admitted per external class (0 XU, 1 XB) and
+	// consumer — the trace's own count of the aging rule (A03-W8a);
+	// aged counts the reference keys of aged heads per class (0 XU, 1 XB)
+	// — the trace exercised the rule.
+	granted [2][traceConsumers]uint64
+	aged    [2]int
+	// The age base of the aging rule (review 2 H-1), kept from the trace's
+	// own lease records: zeroAt is the step time when a consumer last
+	// dropped to zero held external units (both classes) and zeroOthers
+	// what its classes had admitted to others then. warmP50 is the L_p50 of
+	// the lease windows the warm run seeds and freezes (0: cold windows);
+	// agedTime counts the reference keys aged by the time threshold alone.
+	zeroAt     [traceConsumers]time.Time
+	zeroOthers [traceConsumers][2]uint64
+	warmP50    time.Duration
+	agedTime   int
 }
 
 type traceReport struct {
@@ -277,6 +293,11 @@ type traceWaiter struct {
 	weight   int
 	external bool
 	bulk     bool // an external waiter of XB (A03-W9)
+	// base is the weight its class had admitted to other consumers when
+	// it arrived and pushAt the step time of its arrival (the aging rule,
+	// A03-W8a; external waiters only).
+	base   uint64
+	pushAt time.Time
 }
 
 type traceLease struct {
@@ -330,13 +351,23 @@ const (
 	traceAgingSeedOffset = 2000
 )
 
-// traceBaseFloors are the XU probe statistics of the base trace before
-// A03-W9 (commit 6fd6bea4, the same main stream without XB; review 2 F2-4,
-// log subA/logs/trace_base.log): per order and seed {choices, decided,
-// bound}. The XB stream must not thin the XU part of the trace below them.
+// traceBaseFloors are the XU probe statistics of the base trace (the main
+// stream without XB): per order and seed {choices, decided, bound}. The XB
+// stream must not thin the XU part of the trace below them. Measured at
+// A03-W8a after review 2 (age base: the later of the push and the last drop
+// to zero held units; identical over 20 runs): the aging rule reorders heads
+// of the same draws (the reference agrees at every probe), so the base run
+// reaches other statistics than before it — sums o1 49/49/108, o2 51/41/96
+// (A03-W8a before review 2: o1 50/48/106, o2 56/44/99, per seed o1 {8,7,20}
+// {11,9,19} {8,9,25} {7,7,10} {10,9,17} {6,7,15}, o2 {7,6,19} {12,8,13}
+// {8,8,20} {11,7,12} {10,9,17} {8,6,18}) against 53/44/106 and 46/46/88
+// of the base trace before A03-W9 (commit 6fd6bea4; review 2 F2-4, log
+// subA/logs/trace_base.log: o1 {8,6,21} {11,8,16} {9,9,24} {8,5,12}
+// {12,9,17} {5,7,16}, o2 {6,5,19} {9,10,5} {7,8,21} {6,7,10} {9,9,16}
+// {9,7,17}).
 var traceBaseFloors = map[string][6][3]int{
-	ExternalOrderO1: {{8, 6, 21}, {11, 8, 16}, {9, 9, 24}, {8, 5, 12}, {12, 9, 17}, {5, 7, 16}},
-	ExternalOrderO2: {{6, 5, 19}, {9, 10, 5}, {7, 8, 21}, {6, 7, 10}, {9, 9, 16}, {9, 7, 17}},
+	ExternalOrderO1: {{8, 6, 21}, {11, 9, 19}, {7, 9, 24}, {6, 8, 13}, {12, 10, 16}, {5, 7, 15}},
+	ExternalOrderO2: {{6, 5, 19}, {12, 9, 12}, {7, 8, 21}, {8, 4, 12}, {10, 10, 15}, {8, 5, 17}},
 }
 
 func traceConsumerKey(c int) string { return consumerKeyPrefix + fmt.Sprintf("c%d", c) }
@@ -354,6 +385,7 @@ func traceFW(c int) int { return 1 + c }
 type refKey struct {
 	over             bool
 	tenant, consumer float64
+	aged             bool // A03-W8a: an aged head goes first inside its tenant
 	seq              uint64
 }
 
@@ -363,6 +395,9 @@ func refLess(a, b refKey) bool {
 	}
 	if a.tenant != b.tenant {
 		return a.tenant < b.tenant
+	}
+	if a.aged != b.aged {
+		return a.aged
 	}
 	if a.consumer != b.consumer {
 		return a.consumer < b.consumer
@@ -430,11 +465,68 @@ func (r *traceRun) record(rep traceReport) {
 	case w.bulk:
 		r.xb[rep.lease] = traceLease{consumer: w.consumer, weight: w.weight, start: r.now()}
 		r.admittedXB++
+		r.granted[1][w.consumer] += uint64(w.weight)
 	case w.external:
 		r.xu[rep.lease] = traceLease{consumer: w.consumer, weight: w.weight, start: r.now()}
+		r.granted[0][w.consumer] += uint64(w.weight)
 	default:
 		r.bg = append(r.bg, rep.lease)
 	}
+}
+
+// grantedToOthers is the weight the trace saw admitted in the external class
+// (XB when bulk) to consumers other than c.
+func (r *traceRun) grantedToOthers(bulk bool, c int) uint64 {
+	k := 0
+	if bulk {
+		k = 1
+	}
+	var n uint64
+	for o, g := range r.granted[k] {
+		if o != c {
+			n += g
+		}
+	}
+	return n
+}
+
+// agedRef is the reference's own statement of the aging rule (A03-W8a,
+// review 2 H-1; stated independently of fairView.aged, from the trace's own
+// records): the head of a consumer — its oldest waiting acquire of the class
+// — has aged once, counted from the later of its arrival and the step at
+// which the consumer last dropped to zero held units, either the view clock
+// moved on by one L_p50 (warm run only) or the units its class admitted to
+// OTHER consumers reach the external capacity E (one turnover).
+func (r *traceRun) agedRef(bulk bool, c, capacity int, now time.Time) bool {
+	waiting := r.waiting
+	if bulk {
+		waiting = r.waitingXB
+	}
+	oldest := -1
+	for id, tw := range waiting {
+		if tw.external && tw.bulk == bulk && tw.consumer == c && (oldest < 0 || id < oldest) {
+			oldest = id
+		}
+	}
+	if oldest < 0 || capacity <= 0 {
+		return false
+	}
+	k := 0
+	if bulk {
+		k = 1
+	}
+	head := waiting[oldest]
+	from, base := head.pushAt, head.base
+	if r.zeroAt[c].After(from) {
+		from = r.zeroAt[c]
+	}
+	base = max(base, r.zeroOthers[c][k])
+	byCount := r.grantedToOthers(bulk, c)-base >= uint64(capacity)
+	byTime := r.warmP50 > 0 && !now.Before(from.Add(r.warmP50))
+	if byTime && !byCount {
+		r.agedTime++
+	}
+	return byTime || byCount
 }
 
 // isWaiting reports whether the acquire id waits (in either stream).
@@ -470,7 +562,7 @@ func (r *traceRun) acquire(kind int) {
 		}
 	}
 	xuWaiting, xbWaiting := r.externalWaiting()
-	tw := traceWaiter{cancel: cancel, consumer: c, weight: w, external: external, bulk: bulk}
+	tw := traceWaiter{cancel: cancel, consumer: c, weight: w, external: external, bulk: bulk, base: r.grantedToOthers(bulk, c), pushAt: r.now()}
 	if bulk {
 		r.waitingXB[id] = tw
 	} else {
@@ -521,6 +613,18 @@ func (r *traceRun) endExternal(l *Lease, tl traceLease) {
 	v := r.now().Sub(tl.start).Seconds() * float64(tl.weight)
 	r.served[traceConsumerKey(tl.consumer)] += v
 	r.served["_tenant:"+traceTenant(tl.consumer)] += v
+	// The caller dropped tl from its map: does the consumer hold nothing
+	// now? Then its heads age from here (the age base of the reference).
+	holds := false
+	for _, leases := range []map[*Lease]traceLease{r.xu, r.xb} {
+		for _, o := range leases {
+			holds = holds || o.consumer == tl.consumer
+		}
+	}
+	if !holds {
+		r.zeroAt[tl.consumer] = r.now()
+		r.zeroOthers[tl.consumer] = [2]uint64{r.grantedToOthers(false, tl.consumer), r.grantedToOthers(true, tl.consumer)}
+	}
 	l.Release()
 }
 
@@ -738,14 +842,34 @@ func (r *traceRun) refOrder(st *targetState, slots int) func(string, *waiter) re
 		sumFW[traceTenant(c)] += traceFW(c)
 	}
 	tShare := max(1, (capacity+len(activeT)-1)/max(len(activeT), 1))
+	for _, k := range []Class{ClassExternal, ClassExternalBulk} {
+		if lv := st.externalLeaseView(k); lv.warm != (r.warmP50 > 0) || (lv.warm && lv.p50 != r.warmP50) {
+			r.t.Fatalf("%s lease window warm %v (p50 %v), the trace seeded %v — the reference's time threshold would not match", k, lv.warm, lv.p50, r.warmP50)
+		}
+	}
 	return func(key string, h *waiter) refKey {
 		c := traceConsumerOf(r.t, key)
 		tk := "_tenant:" + traceTenant(c)
 		cShare := max(1, (tShare*traceFW(c)+sumFW[traceTenant(c)]-1)/sumFW[traceTenant(c)])
+		over := (heldC[key] > 0 && heldC[key]+h.weight > cShare) || (heldT[tk] > 0 && heldT[tk]+h.weight > tShare)
+		// A03-W8a: the head of a consumer holding nothing ages after one
+		// turnover; it then weighs one unit in its tenant's share and goes
+		// first inside its tenant.
+		bulk := h.class == ClassExternalBulk
+		aged := heldC[key] == 0 && r.agedRef(bulk, c, capacity, now)
+		if aged {
+			over = heldT[tk] > 0 && heldT[tk]+1 > tShare
+			if bulk {
+				r.aged[1]++
+			} else {
+				r.aged[0]++
+			}
+		}
 		return refKey{
-			over:     (heldC[key] > 0 && heldC[key]+h.weight > cShare) || (heldT[tk] > 0 && heldT[tk]+h.weight > tShare),
+			over:     over,
 			tenant:   r.served[tk] + slotT[tk],
 			consumer: (r.served[key] + slotC[key]) / float64(traceFW(c)),
+			aged:     aged,
 			seq:      h.seq,
 		}
 	}
@@ -981,6 +1105,11 @@ func TestExternalPickConsistencyTrace(t *testing.T) {
 			})
 		}
 	}
+	// The aging rule in the XB queue: since its age counts from the last
+	// drop to zero held units (review 2 H-1), the cold mixed runs barely
+	// reach it (XB heads mostly wait behind the XU claim, their consumers
+	// hold units); the warm run exercises it in every seed
+	// (TestExternalPickConsistencyTraceWarm, aged XB keys per seed).
 }
 
 // traceXBAdmitFloors are the XB admissions per order and seed the mixed run
@@ -991,10 +1120,14 @@ func TestExternalPickConsistencyTrace(t *testing.T) {
 // it for seed 1 in both orders (floor = the d0ec4399 number); for the other
 // seeds the floor is the measured count of the mixed run (the XU claim
 // under the base trace's XU load caps it, see the XB stream mix) — an open
-// point of H-6, not the target.
+// point of H-6, not the target. A03-W8a: the aging rule reorders XU heads of
+// the same draws, the mixed run admits o1 13/16/2/11/9/9 and o2
+// 26/16/2/11/10/6 — o2 seed 6 re-measured (8 at A03-W9), the sums (o1 60,
+// o2 71) stay above the A03-W9 floors (58, 61); unchanged by the age base of
+// review 2 (identical over 20 runs).
 var traceXBAdmitFloors = map[string][6]int{
 	ExternalOrderO1: {11, 16, 2, 11, 9, 9},
-	ExternalOrderO2: {15, 16, 2, 11, 9, 8},
+	ExternalOrderO2: {15, 16, 2, 11, 9, 6},
 }
 
 // baseFloors: the base run reaches the base trace's XU probe statistics
@@ -1004,8 +1137,11 @@ func (r *traceRun) baseFloors(order string, seed int64) {
 	r.t.Helper()
 	base := traceBaseFloors[order][seed-1]
 	if r.choices < base[0] || r.decided < base[1] || r.bound < base[2] {
-		r.t.Fatalf("seed %d: base run XU probes %d/%d/%d (≥ 2 fitting heads / handoffs / bound backfill), base trace before A03-W9 %d/%d/%d — the trace thinned the XU part",
+		r.t.Fatalf("seed %d: base run XU probes %d/%d/%d (≥ 2 fitting heads / handoffs / bound backfill), base trace %d/%d/%d — the trace thinned the XU part",
 			seed, r.choices, r.decided, r.bound, base[0], base[1], base[2])
+	}
+	if r.aged[0] == 0 {
+		r.t.Fatalf("seed %d: no XU reference key of an aged head — the trace never exercised the aging rule (A03-W8a)", seed)
 	}
 }
 
@@ -1022,6 +1158,9 @@ func (r *traceRun) mixedFloors(order string, seed int64) {
 	}
 	if want := traceXBAdmitFloors[order][seed-1]; r.admittedXB < want {
 		r.t.Fatalf("seed %d: %d XB admissions, floor %d — XB leases (heldBy, slot time, heldExt over both classes) thinned out", seed, r.admittedXB, want)
+	}
+	if r.aged[0] == 0 {
+		r.t.Fatalf("seed %d: no XU reference key of an aged head next to XB — the trace never exercised the aging rule (A03-W8a)", seed)
 	}
 }
 
@@ -1050,11 +1189,54 @@ func TestExternalPickConsistencyTraceAging(t *testing.T) {
 	}
 }
 
+// traceWarmP50 is the L_p50 the warm run seeds into both external lease
+// windows: the trace's clock moves 0–3 s per main step, so heads that wait a
+// few steps age by the time threshold (A03-W8a review 2 H-3).
+const traceWarmP50 = 4 * time.Second
+
+// traceWarmFloors are the probe statistics of the warm run per order and
+// seed — {choices, decided, bound, reference keys aged by the time threshold
+// alone} — measured identical over 20 runs (the run is deterministic: fake
+// clock, frozen windows); the floor is the measured value.
+var traceWarmFloors = map[string][6][4]int{
+	ExternalOrderO1: {{11, 10, 17, 95}, {12, 9, 17, 92}, {9, 7, 25, 119}, {7, 7, 12, 100}, {12, 7, 19, 109}, {4, 3, 20, 116}},
+	ExternalOrderO2: {{8, 5, 19, 64}, {11, 7, 7, 152}, {8, 8, 21, 165}, {8, 7, 9, 88}, {10, 9, 15, 107}, {8, 4, 20, 120}},
+}
+
+// TestExternalPickConsistencyTraceWarm is the mixed run of gate (h) on warm
+// lease windows (review 2 H-3: the cold runs exclude the time threshold of
+// the aging rule by construction): both external windows seeded with
+// L_p50 = traceWarmP50 and frozen; the reference states the time threshold
+// from its own records (arrival or the last drop to zero held units, plus
+// one L_p50 on the trace's view clock). Every check of the trace runs
+// unchanged; per seed the rule is exercised, and the floors pin the probe
+// statistics and the keys aged by the time threshold alone.
+func TestExternalPickConsistencyTraceWarm(t *testing.T) {
+	for _, order := range []string{ExternalOrderO1, ExternalOrderO2} {
+		for seed := int64(1); seed <= 6; seed++ {
+			t.Run(fmt.Sprintf("%s/%d", order, seed), func(t *testing.T) {
+				r := externalPickTrace(t, order, seed, traceMode{xb: true, warm: traceWarmP50})
+				want := traceWarmFloors[order][seed-1]
+				if r.choices < want[0] || r.decided < want[1] || r.bound < want[2] || r.agedTime < want[3] {
+					t.Fatalf("seed %d: warm run probes %d/%d/%d, keys aged by time %d; floors %d/%d/%d/%d", seed, r.choices, r.decided, r.bound, r.agedTime, want[0], want[1], want[2], want[3])
+				}
+				if r.agedTime == 0 || r.aged[1] == 0 {
+					t.Fatalf("seed %d: reference keys aged by the time threshold alone %d, aged XB keys %d — the warm run never exercised the time threshold or the XB queue", seed, r.agedTime, r.aged[1])
+				}
+			})
+		}
+	}
+}
+
 // traceMode is the variant of one trace run: xb runs the XB stream, aging
 // > 0 is the aging run.
 type traceMode struct {
 	xb    bool
 	aging time.Duration
+	// warm > 0 seeds both external lease windows with L_p50 = warm before
+	// the run (frozen: the loops are closed) — the time threshold of the
+	// aging rule (A03-W8a review 2 H-3).
+	warm time.Duration
 }
 
 // externalPickTrace runs one trace and returns it for the floors.
@@ -1069,14 +1251,22 @@ func externalPickTrace(t *testing.T, order string, seed int64, mode traceMode) *
 		slots: 7, reports: make(chan traceReport, 1024), waiting: map[int]traceWaiter{}, waitingXB: map[int]traceWaiter{},
 		xu: map[*Lease]traceLease{}, xb: map[*Lease]traceLease{}, served: map[string]float64{}, o2: order == ExternalOrderO2}
 	r.d, _ = newTestDispatcher(t, s, r.policy(r.slots))
+	if mode.warm > 0 {
+		r.d.SeedLeaseSamplesForTest(testOrigin, ClassExternal, 4*leaseColdSamples, mode.warm)
+		r.d.SeedLeaseSamplesForTest(testOrigin, ClassExternalBulk, 4*leaseColdSamples, mode.warm)
+		r.warmP50 = mode.warm
+	}
 	r.clk.Store(time.Now().Truncate(time.Second).UnixNano())
 	r.d.setFairClockForTest(r.now)
+	// Close stops only the loops (reaper, publish); Acquire and Release do
+	// not use them. With the escape armed the reaper tick wakes every target
+	// (dispatcher.go reapNow) — asynchronously, on the real clock, outside
+	// the trace's event rule; and the publish loop would change the lease
+	// windows on the real clock mid-run, arming or moving the time threshold
+	// of the aging rule (A03-W8a) asynchronously — the trace runs on cold
+	// windows, the warm run on the windows it seeded.
+	r.d.Close()
 	if mode.aging > 0 {
-		// With the escape armed the reaper tick wakes every target
-		// (dispatcher.go reapNow) — asynchronously, on the real clock, outside
-		// the trace's event rule. Close stops only the loops (reaper,
-		// publish); Acquire and Release do not use them.
-		r.d.Close()
 		r.agingRng = rand.New(rand.NewSource(seed + traceAgingSeedOffset))
 		r.demandDone = r.d.InteractiveArrived()
 	}
@@ -1097,8 +1287,8 @@ func externalPickTrace(t *testing.T, order string, seed int64, mode traceMode) *
 	r.d.mu.Lock()
 	r.escapes = r.d.targetLocked(testOrigin).preempt.agedAdmits
 	r.d.mu.Unlock()
-	t.Logf("%s seed %d xb=%v: %d probes, %d with ≥ 2 fitting heads, %d decided a handoff, %d with the backfill bound by a fairness-first head that did not fit; XB: %d admissions, %d picks, %d bound by its own head, %d bound by the XU claim; %d aging escapes",
-		order, seed, mode.xb, r.probes, r.choices, r.decided, r.bound, r.admittedXB, r.decidedXB, r.boundXB, r.claimed, r.escapes)
+	t.Logf("%s seed %d xb=%v: %d probes, %d with ≥ 2 fitting heads, %d decided a handoff, %d with the backfill bound by a fairness-first head that did not fit; XB: %d admissions, %d picks, %d bound by its own head, %d bound by the XU claim; %d aging escapes; reference keys of an aged head (A03-W8a) XU %d, XB %d, by the time threshold alone %d",
+		order, seed, mode.xb, r.probes, r.choices, r.decided, r.bound, r.admittedXB, r.decidedXB, r.boundXB, r.claimed, r.escapes, r.aged[0], r.aged[1], r.agedTime)
 	return r
 }
 

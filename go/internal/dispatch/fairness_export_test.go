@@ -124,6 +124,31 @@ func (d *Dispatcher) fairAuditForTest(origin string) (string, int) {
 		if q.weight != weight {
 			return fmt.Sprintf("%s waiting weight = %d, recomputed %d", k, q.weight, weight), 0
 		}
+		// The aging count of every queued waiter (A03-W8a) never runs back:
+		// the units its class admitted to other consumers since its push.
+		for _, b := range q.buckets {
+			for _, w := range b {
+				if w.fair == nil || f.others(w.fair, k) < w.passBase {
+					return fmt.Sprintf("%s waiter of %s: aging count ran back (base %d)", k, w.principal.identityKey(), w.passBase), 0
+				}
+			}
+		}
+	}
+	var ownAdmitted [numClasses]uint64
+	for key, c := range f.consumers {
+		for k, n := range c.admitted {
+			ownAdmitted[k] += n
+			// The count at the last drop to zero (review 2 H-1) never runs
+			// ahead of the live count.
+			if n <= f.admitted[k] && c.zeroOthers[k] > f.others(c, Class(k)) {
+				return fmt.Sprintf("%s record %s: aging count at the last zero %d above the live count %d", Class(k), key, c.zeroOthers[k], f.others(c, Class(k))), 0
+			}
+		}
+	}
+	for k := range ownAdmitted {
+		if ownAdmitted[k] > f.admitted[k] {
+			return fmt.Sprintf("%s admitted %d, the records count %d", Class(k), f.admitted[k], ownAdmitted[k]), 0
+		}
 	}
 	var waitingCons, waitFW [numClasses]map[string]int
 	for k := range waitingCons {
