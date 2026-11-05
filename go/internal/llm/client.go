@@ -12,10 +12,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -307,13 +309,17 @@ func chatOllama(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	setChatHeaders(req, &b)
+	hop := b.HopTarget(fedhop.WireChat)
+	setChatHeaders(req, &b, hop)
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -382,7 +388,7 @@ func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 			return nil, fmt.Errorf("llm: merge model_map params: %w", err)
 		}
 	}
-	body, err = applyOpenAIBodyExtras(body, &b)
+	body, err = applyOpenAIBodyExtras(body, b.ExtraBody, &b)
 	if err != nil {
 		return nil, fmt.Errorf("llm: merge extra_body: %w", err)
 	}
@@ -394,13 +400,17 @@ func chatOpenAI(ctx context.Context, b backends.Backend, systemPrompt, userPromp
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	setChatHeaders(req, &b)
+	hop := b.HopTarget(fedhop.WireChat)
+	setChatHeaders(req, &b, hop)
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -470,7 +480,7 @@ func mergeJSONFields(body []byte, extra map[string]any) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// applyOpenAIBodyExtras merges b.ExtraBody into the marshaled request (last
+// applyOpenAIBodyExtras merges extra into the marshaled request (last
 // write wins on key collision — the stream path's escape-hatch semantics,
 // buildStreamBody) and then FORCES provider.zdr=true +
 // provider.data_collection="deny" for provider_class=openrouter,
@@ -479,20 +489,33 @@ func mergeJSONFields(body []byte, extra map[string]any) ([]byte, error) {
 // can only tighten, never loosen — the force runs after the merge. The only
 // way out is the explicit metadata.allow_data_collection=true escape,
 // confirm-gated at backend-create/update.
-func applyOpenAIBodyExtras(body []byte, b *backends.Backend) ([]byte, error) {
+//
+// It is the one implementation of the force for both openai chat wires: the
+// force is decided by b alone (provider class + escape), never by extra.
+// chatOpenAI passes b.ExtraBody; ChatStream passes nil, because
+// buildStreamBody already merged its extraBody. Either way the force writes
+// into a clone of the provider map, never into the row's extra_body maps.
+func applyOpenAIBodyExtras(body []byte, extra map[string]any, b *backends.Backend) ([]byte, error) {
 	forceZDR := b.ProviderClass == backends.ProviderOpenRouter && !allowsDataCollection(b)
-	if len(b.ExtraBody) == 0 && !forceZDR {
+	if len(extra) == 0 && !forceZDR {
 		return body, nil
 	}
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, err
 	}
-	for k, v := range b.ExtraBody {
+	for k, v := range extra {
 		m[k] = v
 	}
 	if forceZDR {
-		prov, _ := m["provider"].(map[string]any)
+		// Clone before writing: the flat merge put extra's own provider map
+		// into m, and for chatOpenAI that is the row's — the pool snapshot
+		// every concurrent request on this backend shares. Writing into it
+		// races (the runtime aborts with "concurrent map writes") and leaves
+		// zdr/deny in the snapshot. One level suffices: the force writes
+		// only provider's top-level keys.
+		src, _ := m["provider"].(map[string]any)
+		prov := maps.Clone(src)
 		if prov == nil {
 			prov = map[string]any{}
 		}
@@ -510,14 +533,19 @@ func allowsDataCollection(b *backends.Backend) bool {
 	return ok && v
 }
 
-// setChatHeaders applies the standard headers, then ExtraHeaders (OpenRouter
-// attribution: HTTP-Referer/X-Title). Core headers are set LAST so a row
-// edited past the credential-carrier denylist can not override the
-// Authorization derived from api_key_ref.
-func setChatHeaders(req *http.Request, b *backends.Backend) {
+// setChatHeaders writes the headers of every chat wire on the OpenAI and
+// Ollama shapes, in three layers: the row's ExtraHeaders (OpenRouter
+// attribution: HTTP-Referer/X-Title), then the hop stamp for target hop
+// (fedhop.Stamp: it first removes every Ctx-/X-Ctx- header a row edited past
+// the denylist carries, then sets the hop marker by tier), then the core
+// headers LAST, so such a row can override neither the marker nor the
+// Authorization derived from api_key_ref. Order: ExtraHeaders → Stamp → core
+// (design/04 §4.1).
+func setChatHeaders(req *http.Request, b *backends.Backend, hop fedhop.Target) {
 	for k, v := range b.ExtraHeaders {
 		req.Header.Set(k, v)
 	}
+	fedhop.Stamp(req.Context(), req.Header, hop)
 	req.Header.Set("Content-Type", "application/json")
 	if b.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+b.APIKey)

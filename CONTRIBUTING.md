@@ -90,8 +90,8 @@ not collaborators, not the maintainer; it moves only by merging a pull request
   plus `PR title`. The ruleset will not merge without them.
 - **One approving review** from a code owner ([`.github/CODEOWNERS`](.github/CODEOWNERS)),
   given on the current head: pushing new commits dismisses earlier approvals, and
-  whoever pushed last cannot be the one who approves. All review conversations are
-  resolved before the merge.
+  the approval that counts must come from someone other than whoever pushed last.
+  All review conversations are resolved before the merge.
 
 ### Coding standards
 

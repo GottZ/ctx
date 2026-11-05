@@ -31,6 +31,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
@@ -107,6 +108,7 @@ type Config struct {
 	Events         EventsConfig
 	Project        ProjectConfig
 	LLMLog         LLMLogConfig
+	Audit          AuditConfig
 	WebChat        WebChatConfig
 	Writes         WritesConfig
 	Tenant         TenantConfig
@@ -118,6 +120,8 @@ type Config struct {
 	RecallCheck    RecallCheckConfig
 	Selector       SelectorConfig
 	Distill        DistillConfig
+	Gateway        GatewayConfig
+	Federation     FederationConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -1090,6 +1094,17 @@ type LLMLogConfig struct {
 	MaxLimit int `key:"llmlog.max_limit" env:"CTX_LLMLOG_MAX_LIMIT" default:"200" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
+// AuditConfig is the audit read surface (GET /api/audit, design/06 §4.10).
+type AuditConfig struct {
+	// MaxLimit caps GET /api/audit?limit= — and is the page size when the
+	// parameter is absent. 200 is the endpoint contract of design/06 §4.10;
+	// the cap bounds one page, not the index walk behind it (a tenant-admin
+	// read filters metadata.tenant_id along the entity's created_at range).
+	// Server read-endpoint cap like llmlog.max_limit: global-only, strict (a
+	// typo'd cap aborts boot instead of silently falling back).
+	MaxLimit int `key:"audit.max_limit" env:"CTX_AUDIT_MAX_LIMIT" default:"200" mut:"hot" parse:"strict" tenancy:"global-only"`
+}
+
 // WebChatConfig is the F6 web-chat harness surface (design 06 §3.2). All knobs
 // are hot — a turn reads a fresh config snapshot at start, so a settings flip
 // hits the next turn, not the running one. The integer BUDGETS stay non-strict
@@ -1457,13 +1472,17 @@ type TenantConfig struct {
 // parse:"strict" like their siblings (webchat.concurrent_turns,
 // events.max_connections) — a typo'd cap silently falling back to the
 // default would hide the intended ceiling on the shared llama.cpp backend.
-// The per-TARGET policy (slots, preempt_background, herald_scope) lives in
-// context_backends.limits, not here (mechanism=code, policy=data). The
+// The per-TARGET policy (slots, preempt_background, herald_scope and the
+// external opt-in internal_reserved_slots / external_offer /
+// external_max_inflight) lives in context_backends.limits, not here
+// (mechanism=code, policy=data). The
 // settings reload owner maps this struct onto dispatch.Settings.
 type DispatchConfig struct {
 	// Enabled is the emergency stop, NOT a feature flag (E-U3): false
-	// degrades every Acquire to a pass-through = exactly today's behavior.
-	// The code waves are behavior-neutral through policy emptiness anyway;
+	// degrades every in-house Acquire (interactive, background) to a
+	// pass-through = exactly today's behavior; the external class is
+	// refused instead (ErrExternalNotOffered, never a pass-through). The
+	// code waves are behavior-neutral through policy emptiness anyway;
 	// a default-off switch would be a second activation truth (B7 analog).
 	// Deliberately non-strict: the exact-match bool parser cannot malform,
 	// so a strict tag would be an unreachable classification (see
@@ -1509,6 +1528,56 @@ type DispatchConfig struct {
 	// Activation is an operations decision under the aged-preempt waste
 	// metric (E-F5), not a deploy.
 	BackgroundAgingAfter time.Duration `key:"dispatch.background_aging_after" env:"CTX_DISPATCH_BACKGROUND_AGING_AFTER" default:"0" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalOrder names the admission order of the external class XU
+	// against ctx' own background work (wave A03-W3, DECISIONS A-E2 no. 1):
+	// o1 = interactive > external > background (decision E2, the default),
+	// o2 = interactive > background > external. Interactive always ranks
+	// first, and the internal partition (limits.internal_reserved_slots)
+	// holds in both. Validated against the dispatcher's named orders (V42:
+	// trim + lower, an unknown name aborts boot / fails the settings write).
+	// Hot: a switch acts on the next handoff.
+	ExternalOrder string `key:"dispatch.external_order" env:"CTX_DISPATCH_EXTERNAL_ORDER" default:"o1" mut:"hot" tenancy:"global-only"`
+	// ExternalQueuePerConsumer caps waiting external acquires per consumer
+	// identity per target (design/03 §3.3, A-E2 no. 2) — a memory ceiling;
+	// 0 = off. A refusal is ErrPrincipalSaturated.
+	ExternalQueuePerConsumer int `key:"dispatch.external_queue_per_consumer" env:"CTX_DISPATCH_EXTERNAL_QUEUE_PER_CONSUMER" default:"8" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalQueuePerTenant caps waiting external acquires per tenant per
+	// target with a counter of its own (not the interactive 16): N consumers
+	// of one tenant cannot multiply the per-consumer cap (C8, K-03-6); 0 =
+	// off. A refusal is ErrTenantSaturated.
+	ExternalQueuePerTenant int `key:"dispatch.external_queue_per_tenant" env:"CTX_DISPATCH_EXTERNAL_QUEUE_PER_TENANT" default:"32" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalQueueMax is the aggregate cap on waiting external acquires per
+	// target; 0 = off. A refusal is ErrTargetSaturated.
+	ExternalQueueMax int `key:"dispatch.external_queue_max" env:"CTX_DISPATCH_EXTERNAL_QUEUE_MAX" default:"64" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalLeaseMax (bare seconds) caps the reap reference of an external
+	// lease at admission + this value (I-03-3: the reaper's leak net is the
+	// only cancel path of an external lease; an alias timeout of up to 3600 s
+	// must not hold external partition capacity that long); 0 = no external
+	// cap, the general reap reference applies.
+	ExternalLeaseMax time.Duration `key:"dispatch.external_lease_max" env:"CTX_DISPATCH_EXTERNAL_LEASE_MAX" default:"900" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalMaxWait (bare seconds) is the ONE wait budget of an external
+	// acquire (wave A03-W5, design/03 §4.9, DECISIONS A-E2 no. 2): an
+	// external acquire that has to wait ends with a rejection (429
+	// server_busy) when it runs out — saturation is a 429, never a hang. A
+	// request's own budget (MaxWait, ServeBy) can only shorten it. 0 = an
+	// external acquire never waits (admitted at once or refused at once) —
+	// fail-closed, NOT unbounded. The 20 s default stays below a typical 60 s
+	// proxy idle timeout, so the queue phase needs no keepalive byte. At most
+	// 45 s (V43, A03-W17): the stream commit grace ceiling 50 s minus the 5 s
+	// the header commit keeps above the wait budget.
+	ExternalMaxWait time.Duration `key:"dispatch.external_max_wait" env:"CTX_DISPATCH_EXTERNAL_MAX_WAIT" default:"20" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalRetryAfterSteps are the Retry-After steps of an external
+	// rejection in whole seconds, comma-separated (wave A03-W6, DECISIONS A-E2
+	// no. 2 verbatim: the steps are a setting, not a constant; design/03
+	// §4.9, E-03-13): the Retry-After an external refusal carries — derived
+	// from the refused request's own position, never from the depth of other
+	// tenants' queues — rounds up to the next step, and the largest step caps
+	// it. Validated by V46 (at least one entry, whole numbers >= 1, strictly
+	// ascending, the largest at most dispatch.external_lease_max): a
+	// malformed list aborts boot / fails the settings write. Hot: the next
+	// refusal reads the new steps. Not strict: a string cannot malform at
+	// parse time, V46 refuses instead.
+	ExternalRetryAfterSteps string `key:"dispatch.external_retry_after_steps" env:"CTX_DISPATCH_EXTERNAL_RETRY_AFTER_STEPS" default:"1,2,5,10,20,30" mut:"hot" tenancy:"global-only"`
 }
 
 // ContractConfig is the schema-contract check surface (Evokoa-Clean-Room
@@ -1576,6 +1645,39 @@ type StatusConfig struct {
 	// RecheckInterval/DBStatsInterval — a malformed value falls back to the
 	// default (off) rather than aborting boot.
 	ChannelProbeInterval time.Duration `key:"status.channel_probe_interval" env:"CTX_STATUS_CHANNEL_PROBE_INTERVAL" default:"0" mut:"hot" tenancy:"global-only"`
+
+	// The foreign-load detector (W06-8, design/06 §4.9): on its own cadence
+	// the collector reads GET <origin>/metrics of every '_global' backend
+	// marked metadata.foreign_load_probe and compares the engine's running
+	// requests with the dispatcher's held leases, plus hourly the engine's
+	// request counter with the LLM-usage rollup. The marker on the row is the
+	// switch; these five keys are its policy (A-E2: no magic values).
+	//
+	// ForeignLoadInterval is that cadence (W06-8b): one probe round per
+	// interval, whether or not anyone reads /api/status — the detector is
+	// A-E5's standard observation and runs headless; the ticker also wakes at
+	// each UTC hour boundary for the hourly check. Read per tick, so a change
+	// applies from the next wait on. Must be >= 1 s (V37): 0 would spin the
+	// ticker; and interval + timeout (the hourly grace) must stay below 1 h
+	// (V37), or no hour is ever read. The default is the events.tick_interval
+	// default, the cadence the 2-round hysteresis default was set for.
+	ForeignLoadInterval time.Duration `key:"status.foreign_load_interval" env:"CTX_STATUS_FOREIGN_LOAD_INTERVAL" default:"5" mut:"hot" tenancy:"global-only"`
+	// ForeignLoadTimeout bounds one /metrics GET (and the hourly rollup read).
+	// The pull runs off the status path, so the timeout bounds how long a hung
+	// engine keeps the probe round busy, never a status read. Must be >= 1 s
+	// (V37): 0 would fail every probe on the spot.
+	ForeignLoadTimeout time.Duration `key:"status.foreign_load_timeout" env:"CTX_STATUS_FOREIGN_LOAD_TIMEOUT" default:"2" mut:"hot" tenancy:"global-only"`
+	// ForeignLoadHysteresisTicks is how many CONSECUTIVE probe rounds must see
+	// running > held before a target turns suspected — and how many must see
+	// running <= held before it clears again. Must be >= 1 (V37).
+	ForeignLoadHysteresisTicks int `key:"status.foreign_load_hysteresis_ticks" env:"CTX_STATUS_FOREIGN_LOAD_HYSTERESIS_TICKS" default:"2" mut:"hot" tenancy:"global-only"`
+	// ForeignLoadHourlyMinAbs and ForeignLoadHourlyMinRatio form the hourly
+	// tolerance max(abs, ratio × ctx requests): an hour whose engine request
+	// delta exceeds ctx's own logged requests to that origin by MORE than it
+	// is suspected_hourly. 0 for either term leaves the other one alone; the
+	// ratio must lie in [0,1] (V37).
+	ForeignLoadHourlyMinAbs   int     `key:"status.foreign_load_hourly_min_abs" env:"CTX_STATUS_FOREIGN_LOAD_HOURLY_MIN_ABS" default:"5" mut:"hot" tenancy:"global-only"`
+	ForeignLoadHourlyMinRatio float64 `key:"status.foreign_load_hourly_min_ratio" env:"CTX_STATUS_FOREIGN_LOAD_HOURLY_MIN_RATIO" default:"0.01" mut:"hot" tenancy:"global-only"`
 }
 
 // EmbedBackfillConfig is the Achse-04 W04-2 safety-valve surface for the two
@@ -2383,6 +2485,217 @@ type DistillConfig struct {
 	SeenRetentionDays int `key:"distill.seen_retention_days" env:"CTX_DISTILL_SEEN_RETENTION_DAYS" default:"30" mut:"hot" tenancy:"global-only"`
 }
 
+// GatewayConfig is the OpenAI-compatible gateway (/v1, /v2; design/02 §3.3,
+// prefix gateway.* per masterplan K3; wave W02-02). Every key is hot — the
+// gateway reads one snapshot per request through the getter cmd/ctxd builds
+// over GatewaySettings — and global-only: one gateway per process, one
+// memory budget, one set of caps (the fail-closed default for new keys).
+//
+// Enabled is the one flag (K3). Off (the default, and in production until the
+// release wave W06-20, masterplan §3.2 duty 1) every /v1 and /v2 request gets
+// the same OpenAI 404 BEFORE authentication: no oracle on keys, no database
+// work (K4). The checks come with the keys (V38, V39), not with their later
+// consumers — a check added after a key is configurable would be added
+// against values already in use (precedent validateDistill).
+//
+// The tenant-alias ceiling is one key per dimension
+// (gateway.tenant_alias_ceiling.*) instead of the design's single JSON object:
+// the registry has no object type, and a new field type would need a parser,
+// a typeNames entry (the settings UI dispatches widgets on it — API
+// contract) and an env form, while one int/seconds key per dimension reuses
+// the typed parsers, the generic sign walks (V17, V35) and the per-key
+// settings audit.
+type GatewayConfig struct {
+	//
+	// guard:"federation-ingress" (F-W8, design/04 §7.2 no. 1): the settings
+	// write that would turn it on is a 409 while the router's federation
+	// ingress (the LoopGuard in front of the model groups) is not
+	// registered, and the boot refuses an effective true without it.
+	Enabled bool `key:"gateway.enabled" env:"CTX_GATEWAY_ENABLED" default:"false" mut:"hot" guard:"federation-ingress" tenancy:"global-only"`
+
+	// MaxRequestBytes is the strict body cap of the gateway (stage 3,
+	// handler.MaxBodySizeStrictWith): a declared longer body is a 413 before
+	// the handler runs. 8 MiB ≈ a 262k-token prompt without JSON escaping.
+	MaxRequestBytes int `key:"gateway.max_request_bytes" env:"CTX_GATEWAY_MAX_REQUEST_BYTES" default:"8388608" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// InflightBudget is the process-wide sum of all running gateway
+	// reservations — request share (3 × body) plus response share (§4.2.1);
+	// past it a request is refused at once with 503 server_overloaded
+	// (B9: the container limit is 1 GiB, an OOM kill takes every pipeline).
+	// Must hold at least one request at the cap (V39: >= 3 ×
+	// max_request_bytes), or such a request could never be admitted.
+	InflightBudget int `key:"gateway.inflight_budget" env:"CTX_GATEWAY_INFLIGHT_BUDGET" default:"268435456" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// MaxResponseBytes caps the read of one non-streamed upstream body; the
+	// response reserve of a non-stream call is twice this. At most
+	// httpx.MaxResponseBytes (V39), the transport-wide cap it narrows.
+	MaxResponseBytes int `key:"gateway.max_response_bytes" env:"CTX_GATEWAY_MAX_RESPONSE_BYTES" default:"4194304" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// MaxStreamFrameBytes caps one SSE frame relayed on /v1; the response
+	// reserve of a stream is twice this. At most 4 MiB (V39), the internal
+	// frame cap of the stream reader (llm/stream.go maxSSEFrameBytes).
+	MaxStreamFrameBytes int `key:"gateway.max_stream_frame_bytes" env:"CTX_GATEWAY_MAX_STREAM_FRAME_BYTES" default:"1048576" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// EmbeddingMaxFloats is the ceiling of max_inputs × native_dims per
+	// embedding alias (1048576 floats = 4 MiB of float32).
+	EmbeddingMaxFloats int `key:"gateway.embedding_max_floats" env:"CTX_GATEWAY_EMBEDDING_MAX_FLOATS" default:"1048576" mut:"hot" parse:"strict" tenancy:"global-only"`
+
+	// StreamCommitGrace is the latest header commit of a stream, measured
+	// from handler entry; at most 50 s (V39) so it stays under a typical
+	// 60 s proxy idle timeout. The lower clamp (dispatch.external_max_wait
+	// + 5 s, design/02 §4.7) is not enforced yet: the key exists since
+	// A03-W5, the clamp is an open hand-over (the key's <= 45 s ceiling is
+	// wave A03-W17).
+	StreamCommitGrace time.Duration `key:"gateway.stream_commit_grace" env:"CTX_GATEWAY_STREAM_COMMIT_GRACE" default:"40" mut:"hot" tenancy:"global-only"`
+	// KeepaliveInterval spaces the ": keepalive" comments of a committed
+	// stream in silence.
+	KeepaliveInterval time.Duration `key:"gateway.keepalive_interval" env:"CTX_GATEWAY_KEEPALIVE_INTERVAL" default:"15" mut:"hot" tenancy:"global-only"`
+	// ClientWriteWindow is the rolling write deadline per frame after the
+	// commit: a client that stops reading is cut off and its lease freed.
+	ClientWriteWindow time.Duration `key:"gateway.client_write_window" env:"CTX_GATEWAY_CLIENT_WRITE_WINDOW" default:"30" mut:"hot" tenancy:"global-only"`
+	// RequestTimeout is the stream fallback of the per-role LLM timeout
+	// (= webchat.llm_timeout's default).
+	RequestTimeout time.Duration `key:"gateway.request_timeout" env:"CTX_GATEWAY_REQUEST_TIMEOUT" default:"900" mut:"hot" tenancy:"global-only"`
+	// RequestDeadline is the whole budget of a non-streamed request from
+	// handler entry. Below 600 s (V39), the OpenAI SDKs' default timeout:
+	// at or above it the SDK gives up and retries the whole request while
+	// the first one still runs.
+	RequestDeadline time.Duration `key:"gateway.request_deadline" env:"CTX_GATEWAY_REQUEST_DEADLINE" default:"540" mut:"hot" tenancy:"global-only"`
+
+	// DefaultMaxTokens is the fallback max_tokens when neither the client
+	// nor the alias sets one.
+	DefaultMaxTokens int `key:"gateway.default_max_tokens" env:"CTX_GATEWAY_DEFAULT_MAX_TOKENS" default:"4096" mut:"hot" tenancy:"global-only"`
+	// MaxOutputTokensCeiling is the hard ceiling of every effective
+	// max_tokens, independent of alias and backend-row caps (a row without
+	// a cap means unlimited).
+	MaxOutputTokensCeiling int `key:"gateway.max_output_tokens_ceiling" env:"CTX_GATEWAY_MAX_OUTPUT_TOKENS_CEILING" default:"32768" mut:"hot" parse:"strict" tenancy:"global-only"`
+
+	TenantAliasCeiling GatewayTenantAliasCeiling
+
+	// RelayUpstream4xxMessages: off (default, fail-closed) a client sees only
+	// ctx's own error texts; on, a sanitized upstream 4xx text (E-02-5).
+	RelayUpstream4xxMessages bool `key:"gateway.relay_upstream_4xx_messages" env:"CTX_GATEWAY_RELAY_UPSTREAM_4XX_MESSAGES" default:"false" mut:"hot" tenancy:"global-only"`
+	// RetryAfterJitter widens a saturation hint: retry-after-ms = hint ×
+	// U[1, 1 + jitter] ("treat it as a minimum and add a small random
+	// delay"). Range [0, 1] (V39).
+	RetryAfterJitter float64 `key:"gateway.retry_after_jitter" env:"CTX_GATEWAY_RETRY_AFTER_JITTER" default:"0.5" mut:"hot" tenancy:"global-only"`
+
+	// The model-key door (handler.ModelAuth, design/01 §4.2, §4.9; wave
+	// W01-6). All four are security limits of an unauthenticated path and
+	// parse-strict; V40 checks them.
+	//
+	// AuthFailureLimit is the number of failed checks per (client address
+	// prefix — IPv4 /32, IPv6 /64 — , key-hash prefix) inside one
+	// AuthFailureWindow after which that pair gets 429 rate_limit_exceeded
+	// without a database query. The pair, not the address, is the key: a
+	// stale key behind a shared address locks only itself (B27).
+	AuthFailureLimit int `key:"gateway.auth_failure_limit" env:"CTX_GATEWAY_AUTH_FAILURE_LIMIT" default:"30" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// AuthFailureWindow is the fixed window of that count, from the pair's
+	// first failure; it is also the longest Retry-After of the lock.
+	AuthFailureWindow time.Duration `key:"gateway.auth_failure_window" env:"CTX_GATEWAY_AUTH_FAILURE_WINDOW" default:"60" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// AuthProbeRate is the global token bucket (burst = rate, refill = rate
+	// per second) a key hash without a successful check needs a token from
+	// before it may reach ctx_model_auth; empty ⇒ 503 auth_overloaded. Known
+	// keys pass without a token, so a forgery flood cannot lock them out
+	// (B18, B26).
+	AuthProbeRate int `key:"gateway.auth_probe_rate" env:"CTX_GATEWAY_AUTH_PROBE_RATE" default:"50" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// AuthDBConcurrency caps the concurrent ctx_model_auth calls — the door's
+	// share of the 20-connection pool; ctx's own database work keeps the
+	// rest under any flood. Below the pool size (V40).
+	AuthDBConcurrency int `key:"gateway.auth_db_concurrency" env:"CTX_GATEWAY_AUTH_DB_CONCURRENCY" default:"4" mut:"hot" parse:"strict" tenancy:"global-only"`
+
+	// The telemetry of the /v1 rows and the model groups' access log
+	// (design/06 §4.6, masterplan K10; wave W06-9).
+	//
+	// BodyLogging is the one body policy of /v1 rows in context_llm_log:
+	// none (default) stores no body (''), errors stores the serialized
+	// request and response only on rows with an error, full on every row,
+	// each capped at 64 KiB. Every row is slimmed as for a tenant without
+	// devmode, so a credentials-class row stays sealed under every policy.
+	// V43: trim + lower, empty reads as none, an unknown name aborts boot /
+	// fails the settings write.
+	BodyLogging string `key:"gateway.body_logging" env:"CTX_GATEWAY_BODY_LOGGING" default:"none" mut:"hot" tenancy:"global-only"`
+	// AccessLog writes one INFO line "gateway request" per successful
+	// request of the model groups (identities, op, alias, status, tokens,
+	// timings — no label, no content). Refusals are never logged per
+	// request: they are counted per (consumer, reason) and logged as one
+	// WARN line per minute, whatever this key says.
+	AccessLog bool `key:"gateway.access_log" env:"CTX_GATEWAY_ACCESS_LOG" default:"true" mut:"hot" tenancy:"global-only"`
+	// Consumers is the administration of model consumers and their keys
+	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
+	Consumers GatewayConsumersConfig
+}
+
+// FederationConfig is the federation policy between ctx instances
+// (design/04 §3.1, prefix federation.* per masterplan K3). Every key is
+// settings-only (env:"-"), hot and global-only: the federation topology and
+// its limits are a property of the process, not of a tenant (classification
+// rule above). Wave F-W8 brings the first key; F-W6, F-W10 and F-W12 add
+// theirs here.
+type FederationConfig struct {
+	// MaxDepth is the longest incoming Ctx-Hop chain this instance still
+	// serves (design/04 §4.6 step 3, L5; E-04-7): a request whose chain
+	// already holds MaxDepth entries is refused with 508 federation_depth —
+	// this instance would be hop MaxDepth+1. Read per request by the
+	// LoopGuard of every authenticated group with model egress. Range 1 to
+	// fedhop.MaxHopEntries (V43): 0 would refuse every request, a larger
+	// value could never be reached because ParseInbound refuses a longer
+	// chain with 400 first.
+	MaxDepth int `key:"federation.max_depth" env:"-" default:"3" mut:"hot" parse:"strict" tenancy:"global-only"`
+}
+
+// GatewayConsumersConfig is the policy of the consumer and model-key
+// administration (design/01 §4.6, §4.9; design/05 §3.2; wave W01-5). The
+// manage handler reads it from the _global snapshot per request; it never
+// reaches the /v1 door, which is why GatewaySettings does not carry it.
+// global-only like the rest of the group: a tenant-overridable value would
+// let a tenant-admin grant itself the self-service it is gated by, or lift
+// the expiry ceiling of its own keys (classification rule above).
+type GatewayConsumersConfig struct {
+	// TenantSelfService opens model-consumer-create, model-key-rotate and
+	// the granting fields of model-consumer-update (tier tierSelfService) to
+	// tenant-admins of their own tenant — only while gateway.enabled is on
+	// as well (V-01-c dark launch). Off (default, decision E3): server-admin
+	// only. Revoking stays open to tenant-admins either way.
+	TenantSelfService bool `key:"gateway.tenant_self_service" env:"CTX_GATEWAY_TENANT_SELF_SERVICE" default:"false" mut:"hot" tenancy:"global-only"`
+	// KeyMaxLifetimeApp is the default AND the ceiling of a new key's expiry
+	// for kind=app: a mint or rotation without expires_at expires at now +
+	// value, one beyond it is refused (400). 0 = no expiry required and no
+	// ceiling. Default 365 d (E-01-4).
+	KeyMaxLifetimeApp time.Duration `key:"gateway.key_max_lifetime_app" env:"CTX_GATEWAY_KEY_MAX_LIFETIME_APP" default:"31536000" mut:"hot" tenancy:"global-only"`
+	// KeyMaxLifetimePeer is the same rule for kind=ctx-peer. Default 0: a
+	// peer key never expires unless the mint names an expiry (E-01-4).
+	KeyMaxLifetimePeer time.Duration `key:"gateway.key_max_lifetime_peer" env:"CTX_GATEWAY_KEY_MAX_LIFETIME_PEER" default:"0" mut:"hot" tenancy:"global-only"`
+	// KeyRotationGrace is the grace of a rotation that names none: how long
+	// the predecessor key stays valid beside its successor. At most 7 d
+	// (store.MaxRotationGrace, V40). Default 24 h (E-01-10).
+	KeyRotationGrace time.Duration `key:"gateway.key_rotation_grace" env:"CTX_GATEWAY_KEY_ROTATION_GRACE" default:"86400" mut:"hot" tenancy:"global-only"`
+	// KeyExpiryWarn is the window before a key's expiry in which the
+	// consumer reads as "expiring" (design/05 §3.2). 0 = no warning.
+	// Default 14 d.
+	KeyExpiryWarn time.Duration `key:"gateway.key_expiry_warn" env:"CTX_GATEWAY_KEY_EXPIRY_WARN" default:"1209600" mut:"hot" tenancy:"global-only"`
+	// ListMaxLimit caps the page of model-consumer-list and
+	// model-key-history, and is the page size when the request names none
+	// (precedent audit.max_limit). At least 1 (V40).
+	ListMaxLimit int `key:"gateway.consumer_list_max_limit" env:"CTX_GATEWAY_CONSUMER_LIST_MAX_LIMIT" default:"100" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ChainMax caps the key chain model-consumer-get returns (newest first;
+	// keys_truncated says more exist). At least 1 (V40).
+	ChainMax int `key:"gateway.consumer_chain_max" env:"CTX_GATEWAY_CONSUMER_CHAIN_MAX" default:"50" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// AuditTrailMax caps the audit rows model-consumer-get returns. At least
+	// 1 (V40).
+	AuditTrailMax int `key:"gateway.consumer_audit_trail_max" env:"CTX_GATEWAY_CONSUMER_AUDIT_TRAIL_MAX" default:"20" mut:"hot" parse:"strict" tenancy:"global-only"`
+}
+
+// GatewayTenantAliasCeiling is the server admin's ceiling on tenant-alias
+// policies (design/02 §3.3 "tenant_alias_ceiling", Finding 8b): a tenant
+// alias above it is refused on write (422, W02-04) and clamped with a WARN on
+// reload (W02-03). The design's JSON object, one key per dimension.
+type GatewayTenantAliasCeiling struct {
+	MaxOutputTokens    int           `key:"gateway.tenant_alias_ceiling.max_output_tokens" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_MAX_OUTPUT_TOKENS" default:"8192" mut:"hot" parse:"strict" tenancy:"global-only"`
+	MaxN               int           `key:"gateway.tenant_alias_ceiling.max_n" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_MAX_N" default:"1" mut:"hot" parse:"strict" tenancy:"global-only"`
+	Timeout            time.Duration `key:"gateway.tenant_alias_ceiling.timeout" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_TIMEOUT" default:"600" mut:"hot" tenancy:"global-only"`
+	EmbeddingMaxInputs int           `key:"gateway.tenant_alias_ceiling.embedding_max_inputs" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_EMBEDDING_MAX_INPUTS" default:"32" mut:"hot" parse:"strict" tenancy:"global-only"`
+	RerankMaxDocuments int           `key:"gateway.tenant_alias_ceiling.rerank_max_documents" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_RERANK_MAX_DOCUMENTS" default:"128" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ToolsMaxCount may be 0: tenant aliases then offer no tools.
+	ToolsMaxCount int `key:"gateway.tenant_alias_ceiling.tools_max_count" env:"CTX_GATEWAY_TENANT_ALIAS_CEILING_TOOLS_MAX_COUNT" default:"64" mut:"hot" parse:"strict" tenancy:"global-only"`
+}
+
 // Source reports the origin of a registry key in this snapshot:
 // "env" | "default" (F2 adds "settings"). Unknown keys return "".
 func (c *Config) Source(key string) string {
@@ -2532,6 +2845,47 @@ func (c *Config) SynthesisSettings() llm.SynthesisSettings {
 		ExternalNumCtxFallback: c.Pool.ExternalNumCtxFallback,
 		OpenRouterWindowTTL:    c.Pool.OpenRouterWindowTTL,
 		Devmode:                c.Tenant.Devmode,
+	}
+}
+
+// GatewaySettings converts the gateway group to the oai settings snapshot
+// (design/02 §3.3): internal/oai may not import config (config-layering), so
+// cmd/ctxd hands the gateway a getter over this method. Every gateway.* key
+// maps here — pinned by TestGatewayKeysReachSettings.
+func (c *Config) GatewaySettings() oai.Settings {
+	g := &c.Gateway
+	return oai.Settings{
+		Enabled:                  g.Enabled,
+		MaxRequestBytes:          int64(g.MaxRequestBytes),
+		InflightBudget:           int64(g.InflightBudget),
+		MaxResponseBytes:         int64(g.MaxResponseBytes),
+		MaxStreamFrameBytes:      int64(g.MaxStreamFrameBytes),
+		EmbeddingMaxFloats:       int64(g.EmbeddingMaxFloats),
+		StreamCommitGrace:        g.StreamCommitGrace,
+		KeepaliveInterval:        g.KeepaliveInterval,
+		ClientWriteWindow:        g.ClientWriteWindow,
+		RequestTimeout:           g.RequestTimeout,
+		RequestDeadline:          g.RequestDeadline,
+		DefaultMaxTokens:         g.DefaultMaxTokens,
+		MaxOutputTokensCeiling:   g.MaxOutputTokensCeiling,
+		RelayUpstream4xxMessages: g.RelayUpstream4xxMessages,
+		RetryAfterJitter:         g.RetryAfterJitter,
+		BodyLogging:              g.BodyLogging,
+		AccessLog:                g.AccessLog,
+		Auth: oai.AuthSettings{
+			FailureLimit:  g.AuthFailureLimit,
+			FailureWindow: g.AuthFailureWindow,
+			ProbeRate:     g.AuthProbeRate,
+			DBConcurrency: g.AuthDBConcurrency,
+		},
+		TenantAliasCeiling: oai.AliasCeiling{
+			MaxOutputTokens:    g.TenantAliasCeiling.MaxOutputTokens,
+			MaxN:               g.TenantAliasCeiling.MaxN,
+			Timeout:            g.TenantAliasCeiling.Timeout,
+			EmbeddingMaxInputs: g.TenantAliasCeiling.EmbeddingMaxInputs,
+			RerankMaxDocuments: g.TenantAliasCeiling.RerankMaxDocuments,
+			ToolsMaxCount:      g.TenantAliasCeiling.ToolsMaxCount,
+		},
 	}
 }
 

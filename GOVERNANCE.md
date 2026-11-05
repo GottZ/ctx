@@ -9,35 +9,43 @@ repository, not a way around review.
 
 | Role | Who | May |
 |---|---|---|
-| **Maintainer** | [@GottZ](https://github.com/GottZ) (owner) | everything below, plus: merge pull requests, cut release tags, change repository settings and rulesets, grant and revoke access, publish security advisories |
-| **Code owner** | [Damien Moon](https://github.com/DamieMoon), [derLonius](https://github.com/W4-NERF) and the maintainer, per [`.github/CODEOWNERS`](.github/CODEOWNERS) | a collaborator whose approval satisfies the review requirement on `root`; requested for review automatically |
+| **Maintainer** | [@GottZ](https://github.com/GottZ) (owner) | everything below, plus: merge contributors' pull requests, cut release tags, change repository settings and rulesets, grant and revoke access, publish security advisories |
+| **Code owner** | [Damien Moon](https://github.com/DamieMoon), [derLonius](https://github.com/W4-NERF) and the maintainer, per [`.github/CODEOWNERS`](.github/CODEOWNERS) | a collaborator whose approval satisfies the review requirement on `root`; requested for review automatically; merges their own pull request once it is approved (see *Who merges*) |
 | **Collaborator** (GitHub role *write*) | invited by the maintainer; see [Becoming a collaborator](#becoming-a-collaborator) | push branches to this repository (no fork needed), review pull requests, triage issues, apply labels, approve CI runs of first-time contributors, re-run workflows |
 | **Contributor** | anyone | fork, open pull requests, report issues, join discussions |
 
 Write access does **not** include pushing to `root`, merging without the
-required review, creating or moving `v*` tags, or changing settings. The
-repository rulesets enforce that for every account — with one exception,
-the repository-admin bypass described under *Maintainer escape hatch* and
-*Releases*: it lets the maintainer merge without the approval and create
-tags, never push to `root`.
+required review, or creating, moving or deleting `v*` tags. The repository
+rulesets enforce that for every account — with one exception, the
+repository-admin bypass described under *Maintainer escape hatch* and
+*Releases*: it lets the maintainer merge a pull request past the whole
+`root` ruleset and create, move or delete `v*` tags, never push to `root`.
+Changing settings or rulesets needs the admin role, which collaborators do
+not have; no ruleset is involved there.
 
 ## How `root` changes
 
-`root` is the main branch and the only release line. Two GitHub rulesets
-guard it and apply to all accounts (the admin bypass excepted, see below).
+`root` is the main branch and the only release line. One GitHub ruleset
+guards it (id 25758355, target: the default branch) and applies to all
+accounts, the admin bypass excepted (see below); the second ruleset
+(id 26378757) covers `v*` tags and is described under *Releases*.
 
 1. **Pull request required.** Nothing is pushed to `root` directly; the
    branch moves only by merging a pull request. Force pushes and deletion
    are blocked.
 2. **One approving review** from a code owner
    ([`.github/CODEOWNERS`](.github/CODEOWNERS): GottZ, Damien Moon and
-   derLonius), given on the current head — a new push dismisses earlier
-   approvals, and the last push must be approved by someone other than the
-   one who pushed it. So an author never approves their own pull request,
-   and an owner who pushes hardening commits onto a contributor's branch
-   needs a third owner's approval for them — the maintainer's work is
-   reviewed by another owner like anyone else's. Every review conversation
-   is resolved before the merge.
+   derLonius), given on the current head: a new push dismisses earlier
+   approvals, and the approval that counts must come from someone other
+   than the person who pushed last. A pull request's author cannot approve
+   it at all. Beyond code ownership, that is all GitHub checks about who
+   approves — the last-push rule looks at the last pusher only, so an owner
+   who pushed to a branch earlier can give the counting approval once
+   someone else has pushed after them. The rest is convention: **an owner
+   does not approve a pull request they pushed to**, so every owner's
+   commits, including hardening pushed onto a contributor's branch, are
+   approved by another owner — the maintainer's work like anyone else's.
+   Every review conversation is resolved before the merge.
 3. **Required status checks** (exact context names): `Lint`, `Unit Tests`,
    `Unit Tests (windows, tagged packages)`, `Build`, `Web`,
    `Cross-compile (darwin/arm64)`, `Cross-compile (windows/amd64)`,
@@ -61,8 +69,11 @@ guard it and apply to all accounts (the admin bypass excepted, see below).
    means taking responsibility for the change on the release line.
 
 **Maintainer escape hatch.** The ruleset lets repository admins merge a
-pull request that lacks the approval (bypass mode *pull requests only* — a
-direct push stays blocked); GitHub records every such merge as a bypass. It exists for
+pull request through a bypass (bypass mode *pull requests only* — a direct
+push stays blocked). A bypass merge skips the whole root ruleset for that
+one merge: the approval, the required checks (`PR title` included), thread
+resolution and the last-push rule — not only the missing approval. GitHub
+records every such merge as a bypass. It exists for
 the case where no other owner is available in time, and it is used that
 way: as the exception the merge commit's audit trail shows, not as the
 maintainer's regular path. It is removed by a change to the ruleset once the
@@ -89,17 +100,48 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
   on every push to `root`, and `verify` requires a successful run on the
   exact commit — the repository's "CI is truth" rule extended to the live
   tier. The nightly run of the same job is the daily drift signal, not the
-  gate.
+  gate. Tags are cut on the tip of `root`: a second merge while the first
+  one's run is still going cancels that run, so an earlier commit has no
+  verdict unless its run is re-run by hand. A re-run keeps the original
+  event and ref, so it lands in the concurrency group of `root`'s push
+  runs and cancels the one in progress there: re-run only once no newer
+  `ci.yml` run on `root` is queued or in progress. If a re-run cancels a
+  newer run anyway, no image tag moves to the older commit — `ci.yml`
+  publishes images one job at a time across all refs, pushes only the
+  per-commit `sha-` tag with the build, and promotes `latest` and the date
+  tag only after re-reading the tip of `root` — but the newer commit then
+  needs a re-run of its own for its verdict and its image. The
+  `Dependency Graph` job follows the same rule: it submits the module graph
+  only from the current tip of `root`, so a re-run of an older commit never
+  submits that commit's graph again — as long as the run's own `ci.yml`
+  carries the guard. A re-run executes the `ci.yml` of its original
+  commit: a run created before either guard still re-points the tags or
+  re-submits the graph on a full re-run, so for such a run re-run only its
+  `Web Live Tier` job, never the whole run.
 - Versioning: a `feat` lands as a minor release, fixes as a patch, a
   breaking change as a major. Several merged pull requests may share one
   release.
 - `v*` tags are created, moved or deleted only by the maintainer: the tag
   ruleset blocks creation, update and deletion for everyone, and the
-  maintainer acts through its admin bypass. A published tag never changes.
-- A published release never changes either: `verify` refuses a tag that
-  already has a release, so a re-run or re-dispatch cannot replace binaries,
-  checksums or provenance; manual dispatches are limited to the repository
-  owner.
+  maintainer acts through its admin bypass, which allows all three. The
+  maintainer does not move or delete a published tag; that is a
+  convention, not a ruleset rule.
+- The `Release` workflow as it stands on `root` never rebuilds or replaces
+  a published release: both `verify` and `publish` refuse a tag that
+  already has a release (checked right before the upload, so a re-run of
+  single jobs cannot slip past a reused `verify` result), the upload never
+  overwrites an existing asset, and `verify` stops a manual dispatch by
+  anyone but the repository owner. These guards live in the workflow, not
+  in the repository, and a run executes the copy of `release.yml` at its
+  own ref: a dispatch runs the file on the dispatched branch or tag, a
+  re-run the file of its original run. A collaborator can therefore
+  dispatch a changed copy from their own branch, with its own
+  `permissions:`. The guards hold for the copy on `root`, which changes
+  only through a reviewed pull request, and for the copies on tags from
+  v5.30.2 on; the copies on older tags lack some or all of them.
+  Collaborators with write access can also create and edit releases
+  directly. The repository-level *immutable releases* setting is not
+  enabled yet.
 - Only the newest minor receives fixes ([SECURITY.md](SECURITY.md)).
 
 ## Decisions

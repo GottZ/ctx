@@ -27,6 +27,11 @@ export const RESERVED_SERVER_PREFIXES = [
   // /auth/login/{provider} + /auth/callback/{provider} are server routes —
   // the SPA must never claim the prefix or a deep link would shadow the flow.
   '/auth',
+  // OpenAI-compatible gateway (design 02 §4.2, design 05 K-05-12, W02-02):
+  // /v1/* and /v2/rerank answer in the OpenAI error envelope once mounted,
+  // so no SPA route may claim either prefix.
+  '/v1',
+  '/v2',
 ] as const
 
 /**
@@ -97,6 +102,15 @@ export const areaRoutes = {
   // stays server-side); the nav item gates on caps.viewOpsSurfaces.
   // areaMode('/guard') is unmapped → 'reading'.
   '/guard': () => import('./guard/GuardReviewPage.svelte'),
+  // Model API area (design/05 §4.6, wave W05-05): the gateway consumer list.
+  // Registered flag-independently (the dark-launch line above: a deep link
+  // reaches the guard, never NotFound); guardArea gates it on caps.viewModelApi
+  // (server-admin always, tenant-admin only with model_api.enabled, member
+  // never). Its sub-routes (/gateway/consumers/:id W05-09, /gateway/models
+  // W05-13) inherit the prefix-guard; the peer page stays /admin/peers so the
+  // guard prefixes remain disjoint. Outside the reserved /v1 namespace.
+  // areaMode('/gateway') is unmapped → 'reading'.
+  '/gateway': () => import('./gateway/GatewayPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 

@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"net/http"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -42,4 +44,18 @@ func attributedTx[T any](ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx
 		return nil
 	})
 	return out, err
+}
+
+// auditStamp is the attribution of an API-driven write of an audited key or
+// quota row (migration 160): the authenticated key as actor, the request id,
+// via='api'. The store applies it inside the write transaction, so the audit
+// row the trigger writes names who asked, in which request, through which
+// channel. A nil ar (unreachable past the auth gate) stamps no actor; the row
+// then still reads via='api', never the psql shape.
+func auditStamp(r *http.Request, ar *auth.AuthResult) store.AuditStamp {
+	var actor string
+	if ar != nil {
+		actor = ar.ApiKeyID
+	}
+	return store.APIStamp(actor, RequestIDFromContext(r.Context()))
 }

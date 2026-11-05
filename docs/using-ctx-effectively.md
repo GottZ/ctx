@@ -1,6 +1,6 @@
 # Using ctx effectively
 
-Installing ctx gives an agent memory. Using it *well* takes discipline — because a memory shared across sessions has a failure mode a single chat doesn't: **drift**.
+ctx is the agent's memory, not a tool beside it — how an agent should regard it, and what goes wrong when it treats the store as a tool, is in [ctx as agent memory](ctx-as-agent-memory.md). This page is the drift discipline for that memory: using it *well* takes discipline, because a memory shared across sessions has a failure mode a single chat doesn't: **drift**.
 
 ## Why stored memory drifts
 
@@ -10,7 +10,7 @@ A stored block is also a *point-in-time observation, not live state*. A note tha
 
 ## Discipline — put this in your agent's instructions
 
-- **Load conventions into context before working — don't just file them away.** Effectiveness ranks training-weights > file-instructions > in-context anchors: only an anchor in the *current* context reliably overrides a trained default. A discipline doc that's never loaded gets silently re-undermined by each new session. (`ctx query` your project conventions at session start.)
+- **Load conventions into context before working — don't just file them away.** Conventions loaded into the *current* context before work starts are followed far more reliably than instructions that only sit in a file. A discipline doc that's never loaded gets silently re-undermined by each new session. (`ctx query` your project conventions at session start.)
 - **Trace every stored claim to a source.** Save quote + date; keep verified user statements separate from your own interpretation. An interpretation re-saved as fact is how a "probably" disappears across three persistence layers.
 - **Cross-check stored claims against live state before acting.** Before a destructive or status-dependent step, verify against the authoritative source — live config, a test, the actual file — not the note.
 - **Don't gate on self-reported confidence.** Models are often just as sure when wrong. Gate on external truth: a test, the source, observed behavior.

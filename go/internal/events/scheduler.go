@@ -25,6 +25,7 @@ import (
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/overview"
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/rootmap"
@@ -127,6 +128,11 @@ type Scheduler struct {
 	webhookSync WebhookSyncTrigger  // W13: the inbox arm fires this per drained project; mu-guarded (wired from NewRouter post-Run); inbox arm inert while nil
 	startup     StartupConfig
 	runCycle    dreamCycleFunc
+
+	// modelAliases: W02-03, the listener reloads it on context_model_aliases
+	// NOTIFYs and on every backlog; nil until SetModelAliasRegistry (then the
+	// alias entity branch is inert).
+	modelAliases *modelalias.Registry
 
 	// dispatcher is the process-wide admission layer (Vorhaben E) and, since
 	// A5-W0 (MW15), the SOLE source of the interactive-demand signal the
@@ -449,6 +455,21 @@ func NewScheduler(pool *pgxpool.Pool, store *config.Store, backendPool *backends
 // listener's block_type entity branch is inert.
 func (s *Scheduler) SetBlocktypeRegistry(reg *blocktype.Registry) {
 	s.blocktypes = reg
+}
+
+// SetModelAliasRegistry installs the model-alias registry the NOTIFY listener
+// reloads (W02-03, design/02 §4.4). Same boot contract as
+// SetBlocktypeRegistry: MUST be called before Run — the field is read when Run
+// builds the listener, relying on the boot happens-before.
+func (s *Scheduler) SetModelAliasRegistry(reg *modelalias.Registry) {
+	s.modelAliases = reg
+}
+
+// ModelAliasRegistry returns the registry installed by SetModelAliasRegistry
+// (nil before) — the one instance the router hands to the model-alias-*
+// manage actions, so a write and the listener reload the same snapshot.
+func (s *Scheduler) ModelAliasRegistry() *modelalias.Registry {
+	return s.modelAliases
 }
 
 // SetProjectHub installs the W9 SSE domain-event hub the NOTIFY listener forwards

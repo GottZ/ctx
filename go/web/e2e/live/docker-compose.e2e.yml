@@ -58,6 +58,13 @@ services:
       # exactly this key and expects the label e2e-bootstrap-<run-id>.
       CTX_BOOTSTRAP_ADMIN_KEY: ${CTX_BOOTSTRAP_ADMIN_KEY}
       CTX_BOOTSTRAP_RUN_ID: ${CTX_BOOTSTRAP_RUN_ID}
+      # Model API on (gateway.enabled, wave W05-18): a tenant-admin reaches
+      # /gateway only while it is on (whoami model_api.enabled → viewModelApi),
+      # which model-consumers.spec.ts needs. ONLY this throwaway stack — the
+      # production default stays false. Since F-W8 ctxd refuses to boot with it
+      # unless the model group registers its ingress protection (W02-05, F-W9),
+      # so every live run also proves that boot.
+      CTX_GATEWAY_ENABLED: "true"
     ports:
       - "127.0.0.1:18099:8080"
     # No container healthcheck. Since β1 (E9) `/ctx -health` would in fact pass

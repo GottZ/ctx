@@ -117,6 +117,8 @@ func (d *Dispatcher) maybePreemptLocked(st *targetState, slots int) {
 	if want > slots {
 		want = slots // more waiters than slots: freeing beyond capacity is waste
 	}
+	// Free UNITS (Σw, A03-W7): a waiting interactive acquire needs one unit,
+	// a background victim frees one — an external lease of weight w holds w.
 	free := slots - st.held
 	if free < 0 {
 		free = 0

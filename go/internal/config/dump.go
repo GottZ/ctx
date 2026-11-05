@@ -163,6 +163,16 @@ func renderHours(h Hours) string {
 var dumpGroupOrder = []string{
 	"server", "dream",
 	"rerank", "graph", "query", "scheduler",
+	// W02-02: the gateway flag and caps belong in the boot record — whether
+	// /v1 answers at all is the first thing an operator checks.
+	"gateway",
+	// A03-W3 (DECISIONS A-E2 no. 3): the dispatcher's admission mechanics —
+	// the external order, the cap ladders, the reaper clocks — are visible
+	// in the boot record, never a silent recalibration.
+	"dispatch",
+	// F-W8 (design/04 §3.1): the federation limits — the depth a peer chain
+	// may reach is the first question when a peer is refused with 508.
+	"federation",
 }
 
 // BootDumpArgs renders the effective config + issues as slog args for the

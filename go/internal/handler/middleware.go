@@ -16,6 +16,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/modelkey"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -58,6 +59,11 @@ type contextKey string
 const (
 	requestIDKey contextKey = "request_id"
 	authResultKey contextKey = "auth_result"
+	// consumerAuthKey carries the *auth.ConsumerAuth of a model-key request
+	// (the /v1 door, ModelAuth). A request carries it or an AuthResult,
+	// never both: each door refuses a context the other one filled
+	// (design/01 §4.2 stage 0 and its counterpart in Auth).
+	consumerAuthKey contextKey = "consumer_auth"
 )
 
 // RequestIDFromContext extracts the request ID from the context.
@@ -72,6 +78,15 @@ func RequestIDFromContext(ctx context.Context) string {
 func AuthResultFromContext(ctx context.Context) *auth.AuthResult {
 	if ar, ok := ctx.Value(authResultKey).(*auth.AuthResult); ok {
 		return ar
+	}
+	return nil
+}
+
+// ConsumerAuthFromContext extracts the ConsumerAuth of a model-key request
+// (ModelAuth); nil on every knowledge path.
+func ConsumerAuthFromContext(ctx context.Context) *auth.ConsumerAuth {
+	if ca, ok := ctx.Value(consumerAuthKey).(*auth.ConsumerAuth); ok {
+		return ca
 	}
 	return nil
 }
@@ -95,9 +110,21 @@ func AuthResultFromContext(ctx context.Context) *auth.AuthResult {
 // Alt: ar.TenantID (UUID). Reversible if Achse 01 ever splits a parallel
 // tenant_id away from the scope dimension — then this wrapper and
 // LoadSettingOverrides would key on the UUID (§11.1).
+//
+// A model-key request (W01-6, design/01 §4.5) resolves its consumer's
+// tenant_scope, so tenant overrides apply to the tenant's consumers too;
+// an empty tenant_scope means the base snapshot. A context with both
+// credentials is a wiring defect the doors refuse; should one reach here it
+// stays on the base snapshot.
 func RequestTenantScope(ctx context.Context) string {
-	if ar := AuthResultFromContext(ctx); ar != nil {
+	ar, ca := AuthResultFromContext(ctx), ConsumerAuthFromContext(ctx)
+	switch {
+	case ar != nil && ca != nil:
+		return ""
+	case ar != nil:
 		return ar.HomeScope
+	case ca != nil && ca.IsValid:
+		return ca.TenantScope
 	}
 	return ""
 }
@@ -114,17 +141,43 @@ func RequestTenantScope(ctx context.Context) string {
 // downgrade. Emptiness stays pinned on ApiKeyID inside dispatch: a synthetic
 // AuthResult with an empty key id (chat.go RunQuery, the S9 finding)
 // downgrades too instead of forming an anonymous interactive bucket.
+//
+// A model-key request (ModelAuth, design/01 §4.5, wave W01-7) resolves to a
+// consumer principal: ApiKeyID, HomeScope and PrincipalID stay empty (I-K0 —
+// B8 remains the only interactive entrance for knowledge keys, a consumer
+// has no corpus home and is no person), TenantID is attribution only. The
+// dispatcher refuses it in every class with External() == false (I-K10).
+// A context with both credentials — the doors refuse each other's context,
+// so this is the second line — or with a ConsumerAuth that is invalid or
+// names no consumer (AuthenticateModelKey produces neither: consumer_id is
+// NOT NULL; review 2 FR2-1) yields the poisoned principal {Conflict: true}:
+// never the zero principal, which is ctx' own detached work. The knowledge
+// branch is byte-identical to before.
 func RequestPrincipal(ctx context.Context) dispatch.Principal {
-	ar := AuthResultFromContext(ctx)
-	if ar == nil {
-		return dispatch.Principal{}
+	ar, ca := AuthResultFromContext(ctx), ConsumerAuthFromContext(ctx)
+	switch {
+	case ar != nil && ca != nil:
+		slog.Error("dispatch: request carries both a knowledge and a model credential")
+		return dispatch.Principal{Conflict: true}
+	case ca != nil && ca.IsValid && ca.ConsumerID != "":
+		return dispatch.Principal{
+			TenantID:     ca.TenantID,
+			ConsumerID:   ca.ConsumerID,
+			ConsumerKind: string(ca.Kind),
+			FairWeight:   ca.FairWeight,
+		}
+	case ca != nil:
+		slog.Error("dispatch: request carries an invalid model credential (not valid, or without a consumer id)")
+		return dispatch.Principal{Conflict: true}
+	case ar != nil:
+		return dispatch.Principal{
+			ApiKeyID:    ar.ApiKeyID,
+			TenantID:    ar.TenantID,
+			HomeScope:   ar.HomeScope,
+			PrincipalID: ar.PrincipalID,
+		}
 	}
-	return dispatch.Principal{
-		ApiKeyID:    ar.ApiKeyID,
-		TenantID:    ar.TenantID,
-		HomeScope:   ar.HomeScope,
-		PrincipalID: ar.PrincipalID,
-	}
+	return dispatch.Principal{}
 }
 
 // isValidRequestID checks that a client-supplied request ID contains only
@@ -159,6 +212,29 @@ func RequestID(next http.Handler) http.Handler {
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
+	// logClaimed: a stage further in writes this request's log line
+	// itself (the model groups' access log, W06-9), so Logger stays
+	// silent — a request is one line, not two.
+	logClaimed bool
+}
+
+// claimRequestLog marks the request whose response chain w belongs to as
+// logged by the caller: it walks w's Unwrap chain to Logger's writer. A
+// writer in between that does not unwrap ends the walk, and Logger then
+// logs as usual — the failure direction is a second line, never a missing
+// one.
+func claimRequestLog(w http.ResponseWriter) {
+	for w != nil {
+		if rw, ok := w.(*responseWriter); ok {
+			rw.logClaimed = true
+			return
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = u.Unwrap()
+	}
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
@@ -174,7 +250,14 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 	return rw.ResponseWriter
 }
 
-// Logger logs each HTTP request with method, path, status, and duration.
+// Logger logs each HTTP request with method, path, status, and duration —
+// except the requests a model group (/v1, /v2) logs itself
+// (GatewayAccessLog claims them, W06-9): there the group's own line or
+// throttled refusal count is the request's one log entry, so a refusal
+// flood cannot write a line per request through this logger (B-06-22). The
+// claim, not a path prefix, decides: a /v1 path that never reaches the
+// group (no group mounted, or a raw path chi routes elsewhere) keeps its
+// line here.
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -182,6 +265,9 @@ func Logger(next http.Handler) http.Handler {
 
 		next.ServeHTTP(rw, r)
 
+		if rw.logClaimed {
+			return
+		}
 		slog.Info("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -311,9 +397,16 @@ func stateChanging(method string) bool {
 //   - ctxr_ (refresh token): explicitly rejected — a refresh token is not an
 //     access credential; the SQL token_type='access' filter is only the
 //     second belt.
+//   - ctxm_ (model key of the /v1 model API, modelkey.HasPrefix — also behind
+//     whitespace and the invisible characters a paste carries): explicitly
+//     rejected without a database round-trip (design/01 §4.3, W01-4). Model
+//     keys are their own credential class and never authenticate a knowledge
+//     request (masterplan I-K0); before this branch SanitizeKey reduced one to
+//     a hex remnant and sent that to ctx_auth.
 //   - anything else: the raw-api-key path, byte-identical to the pre-S3
-//     behaviour (SanitizeKey → ctx_auth). Raw keys are pure hex, so a
-//     prefixed token can never be misclassified here and vice versa.
+//     behaviour (auth.AuthenticateRaw: SanitizeKey → ctx_auth). Raw keys are
+//     pure hex, so a prefixed token can never be misclassified here and vice
+//     versa.
 //
 // Both token and key materialise through the SAME ctx_auth_by_id scope-build
 // (095): a revoked key or deactivated principal kills its tokens instantly,
@@ -340,8 +433,10 @@ func resolveCredential(ctx context.Context, pool *pgxpool.Pool, raw string) (*au
 		return auth.AuthenticateByID(ctx, pool, apiKeyID)
 	case strings.HasPrefix(raw, store.RefreshTokenPrefix):
 		return &auth.AuthResult{IsValid: false}, nil
+	case modelkey.HasPrefix(raw):
+		return &auth.AuthResult{IsValid: false}, nil
 	default:
-		return auth.Authenticate(ctx, pool, auth.SanitizeKey(raw))
+		return auth.AuthenticateRaw(ctx, pool, raw)
 	}
 }
 
@@ -352,6 +447,18 @@ func resolveCredential(ctx context.Context, pool *pgxpool.Pool, raw string) (*au
 func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Mutual exclusion, first check (design/01 §4.2, B6): a request
+			// the model-key door already authenticated is a wiring defect
+			// here — the two doors are stacked. A hard 500 instead of a
+			// request that carries both credential classes.
+			if ConsumerAuthFromContext(r.Context()) != nil {
+				slog.Error("auth: request already carries a model-key ConsumerAuth — handler.Auth stacked behind ModelAuth (wiring defect)",
+					"path", r.URL.Path,
+					"request_id", RequestIDFromContext(r.Context()),
+				)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "authentication error"})
+				return
+			}
 			raw, isSession := requestCredential(r)
 			result, csrfSecret, err := resolveRequestCredential(r.Context(), pool, raw, isSession)
 			if err != nil {
@@ -413,7 +520,8 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 // gate admits, the handler scopes reads to the caller's visible scopes).
 // Negative probe: TestTypesMemberGate_NoAuth401 was red against MountTypes with
 // this Use() line removed (the nil AuthResult reached the handler and panicked
-// into typeVisibleScopes — the fail-open trap made visible).
+// — into typeVisibleScopes then, into the store layer since #112 made it
+// nil-safe — the fail-open trap made visible).
 func RequireMember(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ar := AuthResultFromContext(r.Context())
@@ -504,17 +612,39 @@ func MaxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 // through to the wrapping guard — memory stays bounded, only the response shape
 // is the handler's. Declared-length requests are the ones we can answer cleanly,
 // and every MCP client sends one.
+//
+// Since W02-02 a thin wrapper over MaxBodySizeStrictWith with the house 413
+// writer; the bytes it answers are unchanged (TestMaxBodySizeStrictHouseBytes).
 func MaxBodySizeStrict(maxBytes int64) func(http.Handler) http.Handler {
+	return MaxBodySizeStrictWith(func() int64 { return maxBytes }, writeHouseTooLarge)
+}
+
+// writeHouseTooLarge is the house-envelope 413 of MaxBodySizeStrict.
+func writeHouseTooLarge(w http.ResponseWriter, maxBytes int64) {
+	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+		"success": false,
+		"error":   fmt.Sprintf("request body exceeds %s cap", byteCap(maxBytes)),
+	})
+}
+
+// MaxBodySizeStrictWith is MaxBodySizeStrict with the cap and the 413 writer
+// supplied by the surface that mounts it (design/02 §4.2 stage 3): the
+// OpenAI-compatible gateway answers in its own envelope (oai.
+// WriteRequestTooLarge), and its cap is the hot gateway.max_request_bytes, so
+// maxBytes is read once per request. Same mounting rule — AFTER the
+// authenticating middleware — and the same residual for undeclared lengths.
+func MaxBodySizeStrictWith(maxBytes func() int64, onTooLarge func(http.ResponseWriter, int64)) func(http.Handler) http.Handler {
+	if maxBytes == nil || onTooLarge == nil {
+		panic("handler.MaxBodySizeStrictWith: nil cap getter or writer")
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.ContentLength > maxBytes {
-				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-					"success": false,
-					"error":   fmt.Sprintf("request body exceeds %s cap", byteCap(maxBytes)),
-				})
+			limit := maxBytes()
+			if r.ContentLength > limit {
+				onTooLarge(w, limit)
 				return
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 			next.ServeHTTP(w, r)
 		})
 	}

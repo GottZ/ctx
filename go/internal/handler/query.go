@@ -888,7 +888,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			// poisons client retry/alerting. This site runs BEFORE the heartbeat
 			// commits the 200, so the header travels on the wire. Body stays
 			// B6-generic (§3.3): no target, no depth.
-			setRejectRetryAfter(w, h.admitter, err)
+			setRejectRetryAfter(w, h.admitter, err, dispatch.ClassInteractive)
 			slog.Warn("query embed rejected by dispatcher", "error", err, "request_id", requestID)
 			writeJSON(w, http.StatusTooManyRequests, rejectionBody())
 			return
@@ -1472,7 +1472,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// quota_exceeded 429 above does. Best-effort header set is a no-op after
 		// commit but correct should the path ever run heartbeat-free.
 		if dispatch.IsRejection(err) {
-			setRejectRetryAfter(w, h.admitter, err)
+			setRejectRetryAfter(w, h.admitter, err, dispatch.ClassInteractive)
 			hb.finish(http.StatusTooManyRequests, rejectionBody())
 			return
 		}

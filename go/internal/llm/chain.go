@@ -32,18 +32,102 @@ type Admission dispatch.Admission
 // the reap reference by the wait time). Exported since MW5: the stream
 // engine (chat.runStream, N2) and the cross-encoder rerank
 // (rrf.RerankCrossEncoder, N4) share the exact acquire form of the
-// non-stream chain walk instead of growing drift copies.
+// non-stream chain walk instead of growing drift copies. It is AcquireWith
+// without options — the in-house form.
 func (a Admission) Acquire(ctx context.Context, b *backends.Backend, role string, timeout time.Duration) (*dispatch.Lease, context.Context, error) {
+	return a.admit(ctx, b, role, timeout, AdmitOptions{}, doorBlocking)
+}
+
+// AdmitOptions are the per-request admission inputs of the external doors
+// (masterplan K21, wave A03-W17): the caller's own wait budget (MaxWait,
+// Ctx-Max-Wait-Ms), the serve-by time (ServeBy) and the engine parallelism
+// of the request (Weight — chat n, embedding inputs of the sub-block, rerank
+// documents). The /v1 planner sets them (A03-W8); the dispatcher reads them
+// for the external class only (MaxWait/ServeBy can only shorten
+// dispatch.external_max_wait, a continuation reads neither) — see
+// dispatch.Request. The zero value is "not set" everywhere.
+type AdmitOptions struct {
+	MaxWait time.Duration
+	ServeBy time.Time
+	Weight  int
+}
+
+// ErrNoTryAdmitter is TryAcquire's answer when the admitter has no
+// non-blocking door (dispatch.TryAdmitter) — a wiring defect, refused before
+// any acquire and wrapped in AdmissionError (terminal for the walk). Never a
+// silent fallback onto the blocking Acquire: that would add a second wait
+// point to a request whose one wait point already passed (design/02 §4.11.1
+// L5).
+var ErrNoTryAdmitter = errors.New("llm: dispatch admitter without a non-blocking door")
+
+// AcquireWith is Acquire with the request's AdmitOptions — the ONE blocking
+// wait point of a /v1 request (the walk's First, design/02 §4.11.1: the wait
+// budget lives in the dispatcher).
+func (a Admission) AcquireWith(ctx context.Context, b *backends.Backend, role string, timeout time.Duration, opts AdmitOptions) (*dispatch.Lease, context.Context, error) {
+	return a.admit(ctx, b, role, timeout, opts, doorBlocking)
+}
+
+// TryAcquire is the non-blocking door (the walk's Next, attempt ≥ 2 after a
+// failover — design/02 §4.11.1): admitted at once or dispatch.ErrWouldBlock
+// at once (no rejection — the 429 mapping is the planner's), never a wait.
+// The admitter must offer dispatch.TryAdmitter; without it the answer is
+// ErrNoTryAdmitter and no acquire happens.
+func (a Admission) TryAcquire(ctx context.Context, b *backends.Backend, role string, timeout time.Duration, opts AdmitOptions) (*dispatch.Lease, context.Context, error) {
+	return a.admit(ctx, b, role, timeout, opts, doorTry)
+}
+
+// Continue is the continuation door (masterplan K21): the next sub-block of
+// the same attempt after its earlier sub-block's lease was released — a
+// blocking acquire with Request.Continuation, which the dispatcher serves at
+// the head of the external class without cap ladder or wait budget. Only
+// after a First lease of the same request (the planner's census, A03-W8).
+func (a Admission) Continue(ctx context.Context, b *backends.Backend, role string, timeout time.Duration, opts AdmitOptions) (*dispatch.Lease, context.Context, error) {
+	return a.admit(ctx, b, role, timeout, opts, doorContinue)
+}
+
+// admitDoor selects the dispatcher door of one admit call.
+type admitDoor uint8
+
+const (
+	doorBlocking admitDoor = iota
+	doorTry
+	doorContinue
+)
+
+// admit is the one body of the four doors: the same Request form and the
+// same AdmissionError hull with the K9 telemetry payload.
+func (a Admission) admit(ctx context.Context, b *backends.Backend, role string, timeout time.Duration, opts AdmitOptions, door admitDoor) (*dispatch.Lease, context.Context, error) {
 	if a.Admitter == nil {
 		return nil, nil, &AdmissionError{Err: fmt.Errorf("llm: %s call site without dispatch admitter (I-D1)", role)}
 	}
+	var try dispatch.TryAdmitter
+	if door == doorTry {
+		var ok bool
+		if try, ok = a.Admitter.(dispatch.TryAdmitter); !ok {
+			return nil, nil, &AdmissionError{Err: fmt.Errorf("%w: %T (role %s)", ErrNoTryAdmitter, a.Admitter, role)}
+		}
+	}
+	req := dispatch.Request{
+		Target:       dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively (design/01 §4.3)
+		Class:        a.Class,
+		Role:         role,
+		DeadlineIn:   timeout,
+		Weight:       opts.Weight,
+		MaxWait:      opts.MaxWait,
+		ServeBy:      opts.ServeBy,
+		Continuation: door == doorContinue,
+	}
 	enqueued := time.Now()
-	lease, runCtx, err := a.Admitter.Acquire(ctx, dispatch.Request{
-		Target:     dispatch.Target{Origin: b.Host}, // Acquire normalizes defensively (design/01 §4.3)
-		Class:      a.Class,
-		Role:       role,
-		DeadlineIn: timeout,
-	})
+	var (
+		lease  *dispatch.Lease
+		runCtx context.Context
+		err    error
+	)
+	if try != nil {
+		lease, runCtx, err = try.TryAcquire(ctx, req)
+	} else {
+		lease, runCtx, err = a.Admitter.Acquire(ctx, req)
+	}
 	if err != nil {
 		// K9 telemetry payload (MW10): the rejected target and the futile
 		// wait travel with the error so the rejection line can attribute

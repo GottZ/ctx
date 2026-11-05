@@ -34,6 +34,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -326,6 +327,36 @@ func TestSettingsAPI_Integration(t *testing.T) {
 					t.Fatalf("DELETE %s status = %d body=%s", tc.key, rec.Code, rec.Body.String())
 				}
 			})
+		}
+	})
+
+	// V43 (A03-W17, masterplan K21) at the surface an operator touches:
+	// dispatch.external_max_wait above the 45 s ceiling is a 422 with nothing
+	// persisted; the ceiling itself is written, read back and removed again,
+	// so the refusal is a statement about the value, not about the key.
+	t.Run("ExternalMaxWaitCeiling422", func(t *testing.T) {
+		const key = "dispatch.external_max_wait"
+		rec := api.do(t, http.MethodPut, "/api/settings/"+key, `{"value":46}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("PUT %s = 46 status = %d, want 422; body=%s", key, rec.Code, rec.Body.String())
+		}
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM context_settings WHERE key = $1`, key).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("422 on %s persisted a row — validation must run BEFORE persist", key)
+		}
+		rec = api.do(t, http.MethodPut, "/api/settings/"+key, `{"value":45}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT %s = 45 status = %d, want 200; body=%s", key, rec.Code, rec.Body.String())
+		}
+		if got := cfgStore.Snapshot().Dispatch.ExternalMaxWait; got != 45*time.Second {
+			t.Errorf("snapshot %s = %v, want 45s", key, got)
+		}
+		if rec = api.do(t, http.MethodDelete, "/api/settings/"+key, ""); rec.Code != http.StatusOK {
+			t.Fatalf("DELETE %s status = %d body=%s", key, rec.Code, rec.Body.String())
 		}
 	})
 

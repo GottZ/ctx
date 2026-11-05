@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,7 +20,9 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/toolboot"
@@ -548,6 +551,13 @@ func bootstrapAdminKeyBoot(ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
+// daemonLogger is the daemon's log handler: JSON lines at INFO. The boot tests
+// that re-execute a boot step log through it too, so a leak probe sees the
+// production rendering.
+func daemonLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
 func main() {
 	// Health check mode: /ctx -health probes the local server with serving
 	// semantics (E9) and never returns in that case — see healthmode.go.
@@ -565,10 +575,7 @@ func main() {
 	// returns when argv[1] == overview.WorkerCommand (see overviewworker.go).
 	dispatchOverviewWorkerMode()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
+	slog.SetDefault(daemonLogger(os.Stderr))
 
 	// Root context cancelled on SIGINT/SIGTERM. Derived before the boot so the
 	// pool's connect retries answer to the same two signals the rest of the
@@ -614,6 +621,14 @@ func main() {
 		slog.Error("migrations failed", "error", err)
 		os.Exit(1)
 	}
+
+	// F-W2 (design/04 §4.2): the instance identity, or no boot at all — read
+	// right after the migrations that create it, before any other boot step
+	// writes (TestMainLoadsIdentityRightAfterMigrations pins the place). The
+	// default serves the detached scheduler contexts, installed long before
+	// they spawn (boot happens-before, as SetPrincipalHook below); NewRouter
+	// puts it into every request as its first middleware.
+	fedhop.SetDefaultIdentity(bootInstanceIdentity(ctx, pool))
 
 	// W03-1 (Achse 03 Contract/Observability, migration 108): stamp the
 	// _migrations checksum column for rows still NULL (pre-108 applies and
@@ -718,6 +733,12 @@ func main() {
 	// wizard or the web UI. Loading stays non-fatal — a degraded pool must
 	// not block a boot that served queries yesterday.
 	backendPool := backends.NewPool(pool, settings.BackendSecretResolver(pool))
+	// F-W4 (design/04 §4.4): the pool is the observer of every wire answer —
+	// a row that answers as a ctx instance shows as a status hint. Installed
+	// right after the pool exists, before any wire call: the scheduler's
+	// detached contexts carry no observer of their own (boot happens-before,
+	// as SetDefaultIdentity; TestMainInstallsPoolObserverBeforeScheduler).
+	fedhop.SetDefaultObserver(backendPool)
 	// A04-W4 (design/04 §3.2b): the reconcile below is the boot half of the
 	// embed-cache coupled diff. The listener's diff rides the NOTIFY funnel and
 	// therefore only sees edits made while this process runs; a pool row or
@@ -777,6 +798,10 @@ func main() {
 	// Boot happens-before (SetOverlay pattern): installed before Run starts
 	// the listener goroutine, so the unsynchronized field write is safe.
 	scheduler.SetBlocktypeRegistry(blocktypeReg)
+	// W02-03: the /v1 model namespace, loaded before Run builds the listener
+	// that keeps it hot (same boot happens-before). W02-04: with the ceiling
+	// getter the reload clamps tenant aliases to gateway.tenant_alias_ceiling.*.
+	scheduler.SetModelAliasRegistry(bootModelAliases(ctx, pool, modelAliasCeilings(cfgStore)))
 	// W9: the SSE domain-event hub. Its flush loop is bound to ctx (server
 	// lifecycle); the scheduler's listener forwards ctx_project_write (081) to it.
 	// Installed before Run for the same boot happens-before contract.
@@ -796,8 +821,20 @@ func main() {
 	// HTTP server. ListenAddr is restart-only, read once from the effective
 	// snapshot (== env value; the settings overlay rejects restart-only keys).
 	listenAddr := cfgStore.Snapshot().Server.ListenAddr //nolint:forbidigo // MT 06 BLIND: restart-only server.listen_addr is a process-global env value (the overlay rejects restart-only keys), read once at boot.
-	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
+	router, ingress, gateway := newRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
+	// F-W8 (design/04 §4.6, §7.2 no. 1): no /v1 without its ingress
+	// protection — gateway.enabled effectively true on a router that mounts no
+	// model group with its LoopGuard is no boot (TestMainAssertsGatewayIngressRightAfterRouter pins the place).
+	if err := gatewayIngressAssert(cfgStore.Snapshot(), ingress); err != nil { //nolint:forbidigo // MT 06 BLIND: gateway.enabled is global-only, read once at boot before the server serves.
+		slog.Error("gateway: refusing to start", "error", err)
+		os.Exit(1)
+	}
 	srv := newHTTPServer(listenAddr, router)
+	// W02-05: the model gateway's loops (batched last_used_at, the access
+	// log's rejection window) on a context of their own — shutdownSequence
+	// ends them after the HTTP drain, so the drained requests' stamps make
+	// the final flush (W01-3 F-7).
+	stopGateway := startModelGateway(gateway)
 
 	// Start HTTP server in background
 	errCh := make(chan error, 1)
@@ -820,21 +857,103 @@ func main() {
 		}
 	}
 
-	// Graceful shutdown: HTTP Stop -> Background Cancel -> Listener Stop -> Pool Close
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Graceful shutdown: HTTP Stop -> gateway flush -> llmlog Settle ->
+	// Background Cancel -> Listener Stop -> llmlog Settle -> Pool Close (the
+	// pool closes via the sess.Stop defer above).
+	shutdownSequence(srv, scheduler, pool, stopGateway)
+	slog.Info("shutdown complete")
+}
+
+// Shutdown budget after SIGTERM (W06-1). docker-compose.yml gives the ctx
+// service a stop_grace_period that must cover shutdownHTTPTimeout +
+// max(gatewayStopTimeout, llmlogSettleTimeout) + llmlogSettleTimeout — the
+// gateway stop runs alongside the first settle (W02-05) — or Docker SIGKILLs
+// the daemon mid-teardown (compose default: 10 s); internal/config
+// TestComposeCtxStopGracePeriod pins it at no less than that sum (25 s).
+// scheduler.Wait between the two settles is unbounded and lives in the margin
+// above it (5 s at the shipped 30 s). A new shutdown step (K-06-29) adds its
+// budget here, in that test and in the compose file — or runs alongside an
+// existing one and says so.
+const (
+	// shutdownHTTPTimeout bounds srv.Shutdown: in-flight requests finish, new
+	// ones are refused.
+	shutdownHTTPTimeout = 15 * time.Second
+	// gatewayStopTimeout bounds the model gateway's stop (W02-05): the final
+	// last_used_at flush, itself bounded by the store's own timeout, and the
+	// access log's last rejection lines. It runs alongside the first llmlog
+	// settle, so it adds nothing to the sum while it stays <= that settle.
+	gatewayStopTimeout = store.ModelKeyUsageFinalFlushTimeout
+	// llmlogSettleTimeout bounds EACH of the two llmlog.Settle calls: queued
+	// and running context_llm_log inserts land before the teardown moves on.
+	// Rows still pending after the second one are lost when the pool closes.
+	llmlogSettleTimeout = 5 * time.Second
+)
+
+// drainer is the scheduler step shutdownSequence orders — *events.Scheduler
+// in production, a stand-in in the W06-1 shutdown probes.
+type drainer interface {
+	Wait()
+}
+
+// shutdownSequence is the daemon's teardown after the serve loop ended and the
+// root context was cancelled; the caller closes the pool afterwards.
+//
+// stopGateway (startModelGateway) runs right after srv.Shutdown, alongside
+// the first settle: no request can stamp a model key any more, so the final
+// usage flush carries every accepted request's last_used_at (W01-3 F-7). The
+// two touch different tables and are bounded on their own (5 s each), so
+// running them side by side keeps the bounded part at 15 + 5 + 5 s instead
+// of adding a step (Fremd-Review 1 L-2, RC-C-INDEX Q-06-9).
+//
+// The llmlog queue is settled TWICE. First right after srv.Shutdown: no request
+// can Record any more, so the rows of the HTTP side land before the teardown
+// enters scheduler.Wait. That wait is unbounded — a running dream cycle does not
+// stop on SIGTERM, it runs on its own context up to dream.cycle_timeout (700 s
+// by default) — and when it outlasts the stop grace period, Docker's SIGKILL
+// takes whatever is still queued; settling only after Wait would hand the HTTP
+// rows to that same fate. Second after Wait returns: the dream workers and the
+// other scheduler arms have written their last rows by then.
+func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool, stopGateway func()) {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
 	defer shutdownCancel()
 
 	slog.Info("shutting down HTTP server")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("HTTP server shutdown error", "error", err)
 	}
+	gatewayStopped := make(chan struct{})
+	go func() {
+		defer close(gatewayStopped)
+		stopGateway()
+	}()
+	settleLLMLog(pool, llmlogSettleTimeout, "http")
+	<-gatewayStopped
 
 	// Wait for scheduler to finish (drains active dream cycle before pool closes).
 	slog.Info("waiting for scheduler shutdown")
-	scheduler.Wait()
+	sched.Wait()
 
-	// Pool is closed via defer above.
-	slog.Info("shutdown complete")
+	settleLLMLog(pool, llmlogSettleTimeout, "scheduler")
+}
+
+// settleLLMLog waits up to timeout for the pool's pending llmlog inserts and
+// logs the outcome with the process-wide loss totals. after names the shutdown
+// step the settle follows ("http" or "scheduler").
+func settleLLMLog(pool *pgxpool.Pool, timeout time.Duration, after string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	begin := time.Now()
+	if err := llmlog.Settle(ctx, pool); err != nil {
+		slog.Warn("llmlog: settle at shutdown incomplete, pending rows are lost",
+			"after", after, "error", err, "timeout", timeout,
+			"insert_failures_total", llmlog.InsertFailures(),
+			"insert_dropped_total", llmlog.InsertDropped())
+		return
+	}
+	slog.Info("llmlog: settled at shutdown",
+		"after", after, "elapsed", time.Since(begin).Round(time.Millisecond),
+		"insert_failures_total", llmlog.InsertFailures(),
+		"insert_dropped_total", llmlog.InsertDropped())
 }
 
 // maxHeaderValueCount is the per-request cap on header VALUES that ctxd will

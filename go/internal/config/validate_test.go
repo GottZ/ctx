@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -393,7 +394,7 @@ func TestV17bIsAdvisoryOnly(t *testing.T) {
 // changes TYPE (seconds → int, or a struct field that stops being a
 // time.Duration) would leave the walk without anyone noticing. Raise this
 // number in the same commit that adds a duration key.
-const wantDurationKeys = 47 // +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered
+const wantDurationKeys = 62 // +1 on 2026-11-04 (A03-W5): dispatch.external_max_wait, V17 sign (+ V43 ceiling 45 s from A03-W17, K21); +1 on 2026-11-04 (W01-6): gateway.auth_failure_window (strict, V40); +2 on 2026-10-09: embed_backfill.sync_budget and embed_backfill.interval, both V17-covered; +1 on 2026-11-03 (W06-8): status.foreign_load_timeout, V17 sign + V37 floor; +1 on 2026-11-03 (W06-8b): status.foreign_load_interval, V17 sign + V37 floor; +6 on 2026-11-03 (W02-02): gateway.{stream_commit_grace,keepalive_interval,client_write_window,request_timeout,request_deadline,tenant_alias_ceiling.timeout}, V17 sign + V38 floor (+ V39 caps for stream_commit_grace and request_deadline); +4 on 2026-11-04 (W01-5): gateway.{key_max_lifetime_app,key_max_lifetime_peer,key_rotation_grace,key_expiry_warn}, V17 sign (+ V41 ceiling for key_rotation_grace); +1 on 2026-11-04 (A03-W3): dispatch.external_lease_max, V17 sign
 
 // TestValidateRejectsNegativeOnEveryDurationKey is the registry-wide form of
 // V17 (issue #29): before it, exactly two of the seconds keys had a sign check
@@ -462,13 +463,14 @@ func TestValidateFoldedSignChecksReportOnce(t *testing.T) {
 // wantIntKeys is the number of typInt keys in the registry, MEASURED on the
 // stand this wave was built against (90, the same number design/05 §2 Naht 5
 // counted from config.go's field tags; 89 since root_map.label_budget was
-// retired without a successor). Like wantDurationKeys above it is a
+// retired without a successor; 90 again with W06-7's audit.max_limit). Like
+// wantDurationKeys above it is a
 // DRIFT GUARD, not a fact worth asserting for its own sake: V35 is a generic
 // walk, so an int key added later is covered without an edit here — but a key
 // that silently changes TYPE (int → float, or a leaf that stops being an int)
 // would leave the walk without anyone noticing. Raise this number in the same
 // commit that adds an int key.
-const wantIntKeys = 89
+const wantIntKeys = 114 // +1 on 2026-11-04 (F-W8): federation.max_depth (strict, settings-only), V35 sign + V45 range 1..fedhop.MaxHopEntries; +3 on 2026-11-04 (W01-6): gateway.auth_failure_limit, gateway.auth_probe_rate, gateway.auth_db_concurrency (strict, V40); +2 on 2026-11-03 (W06-8): status.foreign_load_hysteresis_ticks and status.foreign_load_hourly_min_abs, V35 sign (+ V37 floor for the ticks); +1 on 2026-11-03 (W06-7): audit.max_limit, V35 sign; +12 on 2026-11-03 (W02-02): gateway.{max_request_bytes,inflight_budget,max_response_bytes,max_stream_frame_bytes,embedding_max_floats,default_max_tokens,max_output_tokens_ceiling} and gateway.tenant_alias_ceiling.{max_output_tokens,max_n,embedding_max_inputs,rerank_max_documents,tools_max_count}, V35 sign (+ V38 floor for all but tools_max_count, V39 caps for the byte sizes); +3 on 2026-11-04 (W01-5): gateway.{consumer_list_max_limit,consumer_chain_max,consumer_audit_trail_max}, V35 sign + V41 floor; +3 on 2026-11-04 (A03-W3): dispatch.external_queue_{per_consumer,per_tenant,max}, V35 sign
 
 // intSignWarnKeys is the OTHER half of the classification, and the reason V35
 // runs last. These three keys are served by NORMALIZING passes that write the
@@ -780,5 +782,57 @@ func TestValidateRerankHeartbeatWarnsRetired(t *testing.T) {
 func TestDecideTieOddsDefaultMirrorsDream(t *testing.T) {
 	if got := Defaults().Dream.DecideTieOdds; got != dream.DecideTieOddsDefault {
 		t.Fatalf("registry default %v != dream.DecideTieOddsDefault %v", got, dream.DecideTieOddsDefault)
+	}
+}
+
+// TestValidateStatusForeignLoad pins V37 (W06-8): the floors of the
+// foreign-load detector's timeout and hysteresis and the [0,1] range of its
+// hourly ratio. The registry defaults pass; each broken value is exactly one
+// error on its own key (signs stay with V17/V35).
+func TestValidateStatusForeignLoad(t *testing.T) {
+	if issues := validateStatusForeignLoad(Defaults()); len(issues) != 0 {
+		t.Fatalf("defaults raise V37 issues: %+v", issues)
+	}
+	cases := []struct {
+		key string
+		mut func(c *Config)
+	}{
+		{"status.foreign_load_timeout", func(c *Config) { c.Status.ForeignLoadTimeout = 0 }},
+		// W06-8b: 0 would spin the detector's ticker without a pause, and
+		// interval + timeout >= 1 h (here 3598 s + the 2 s default) puts the
+		// hourly rollup read past the next boundary — no hour is ever read.
+		{"status.foreign_load_interval", func(c *Config) { c.Status.ForeignLoadInterval = 0 }},
+		{"status.foreign_load_interval", func(c *Config) { c.Status.ForeignLoadInterval = 3598 * time.Second }},
+		{"status.foreign_load_hysteresis_ticks", func(c *Config) { c.Status.ForeignLoadHysteresisTicks = 0 }},
+		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = -0.01 }},
+		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = 1.5 }},
+		// Fremd-Review 2, F3: NaN parses (strconv.ParseFloat) and fails every
+		// comparison, so a bare range check lets it through and the hourly
+		// verdict is silently dead (excess > NaN is always false).
+		{"status.foreign_load_hourly_min_ratio", func(c *Config) { c.Status.ForeignLoadHourlyMinRatio = math.NaN() }},
+	}
+	for _, tc := range cases {
+		c := Defaults()
+		tc.mut(c)
+		var hits []Issue
+		for _, is := range Validate(c) {
+			if is.Field == tc.key {
+				hits = append(hits, is)
+			}
+		}
+		if len(hits) != 1 || hits[0].Severity != SeverityError {
+			t.Errorf("%s: want exactly one error, got %+v", tc.key, hits)
+		}
+	}
+	c := Defaults()
+	c.Status.ForeignLoadHourlyMinAbs = 0
+	c.Status.ForeignLoadHourlyMinRatio = 0
+	if issues := validateStatusForeignLoad(c); len(issues) != 0 {
+		t.Errorf("0 for either tolerance term is legal, got %+v", issues)
+	}
+	c = Defaults()
+	c.Status.ForeignLoadInterval = 3597 * time.Second // + 2 s timeout = 59m59s
+	if issues := validateStatusForeignLoad(c); len(issues) != 0 {
+		t.Errorf("interval + timeout just below 1 h is legal, got %+v", issues)
 	}
 }

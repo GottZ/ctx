@@ -56,9 +56,11 @@ type usageStats struct {
 	// (preempt, wire error, reap before the usage arrived) — charge 0 plus
 	// visibility instead of a made-up estimate (C1).
 	unchargedCalls atomic.Int64
-	// opsTotal counts Acquire+Release mutex sections (ops/s source) and
-	// maxOpNs holds the longest observed section — the two hot-path
-	// measurement hooks of design/04 §6.
+	// opsTotal counts the measured mutex sections — Acquire, TryAcquire,
+	// Release, and since A03-W17 the Retry-After hint (a /v1 hot path) and
+	// the wait publication's copy sections (ops/s source) — and maxOpNs
+	// holds the longest observed section: the two hot-path measurement hooks
+	// of design/04 §6.
 	opsTotal atomic.Int64
 	maxOpNs  atomic.Int64
 }
@@ -153,12 +155,22 @@ func (d *Dispatcher) opDone(start time.Time) {
 // F-B3, binding for every consumer): FairKey is principal detail —
 // status surfaces must be server-admin-only or filter Buckets to the
 // caller's own tenant; a foreign fairKey must never reach a tenant pull.
+// Since A03-W3 the view also carries the external identity buckets
+// (FairKey _consumer:<id>, Class ClassExternal): server-admin only — a
+// tenant surface filters on Class, never on a key comparison (design/03
+// §4.14, X23).
 type BucketSnapshot struct {
-	FairKey    string
+	FairKey string
+	// TenantID is the tenant of the bucket's principals (attribution; a
+	// fair key is one tenant's scope or one consumer).
+	TenantID string
+	// Class is the queue the bucket belongs to: ClassInteractive (fair key
+	// HomeScope) or ClassExternal (identity key _consumer:<id>).
+	Class      Class
 	Waiting    int
 	OldestWait time.Duration
-	// Inflight counts running interactive leases of this bucket on the
-	// target (incl. pass-through) — "a running lease counts as busy".
+	// Inflight counts running leases of this bucket's class on the target
+	// (interactive incl. pass-through) — "a running lease counts as busy".
 	Inflight    int
 	WindowStart time.Time
 	Tokens      int64
@@ -169,29 +181,52 @@ type BucketSnapshot struct {
 // path only — never in the pick/charge path). Expired windows read as absent
 // (sweep is lazy; the view must not resurrect a rolled-over window).
 func (d *Dispatcher) bucketSnapshotsLocked(st *targetState, now time.Time) []BucketSnapshot {
-	byKey := make(map[string]*BucketSnapshot)
-	get := func(key string) *BucketSnapshot {
-		bs, ok := byKey[key]
+	type bucketID struct {
+		class Class
+		key   string
+	}
+	byKey := make(map[bucketID]*BucketSnapshot)
+	get := func(class Class, key, tenant string) *BucketSnapshot {
+		id := bucketID{class: class, key: key}
+		bs, ok := byKey[id]
 		if !ok {
-			bs = &BucketSnapshot{FairKey: key}
-			byKey[key] = bs
+			bs = &BucketSnapshot{FairKey: key, Class: class}
+			byKey[id] = bs
+		}
+		if bs.TenantID == "" {
+			bs.TenantID = tenant
 		}
 		return bs
 	}
-	for key, b := range st.interactive.buckets {
-		if len(b) == 0 {
-			continue
+	for _, q := range []*classQueue{st.interactive, st.external} {
+		class := ClassInteractive
+		if q.external {
+			class = ClassExternal
 		}
-		bs := get(key)
-		bs.Waiting = len(b)
-		bs.OldestWait = now.Sub(b[0].enqueued) // per-bucket FIFO: head is oldest
+		for key, b := range q.buckets {
+			if len(b) == 0 {
+				continue
+			}
+			bs := get(class, key, b[0].principal.TenantID)
+			bs.Waiting = len(b)
+			bs.OldestWait = now.Sub(b[0].enqueued) // per-bucket FIFO: head is oldest
+		}
+		// A waiting continuation (A03-W17) belongs to its consumer's bucket
+		// view although it waits at the class head (classQueue.cont).
+		for _, w := range q.cont {
+			bs := get(class, q.bucketKey(w.principal), w.principal.TenantID)
+			bs.Waiting++
+			bs.OldestWait = max(bs.OldestWait, now.Sub(w.enqueued))
+		}
 	}
 	for l := range st.inflight {
-		if l.class != ClassInteractive {
-			continue
-		}
-		if key := l.principal.fairKey(); key != "" {
-			get(key).Inflight++
+		switch l.class {
+		case ClassInteractive:
+			if key := l.principal.fairKey(); key != "" {
+				get(ClassInteractive, key, l.principal.TenantID).Inflight++
+			}
+		case ClassExternal:
+			get(ClassExternal, st.external.bucketKey(l.principal), l.principal.TenantID).Inflight++
 		}
 	}
 	win := d.usageWindowDur()
@@ -199,7 +234,7 @@ func (d *Dispatcher) bucketSnapshotsLocked(st *targetState, now time.Time) []Buc
 		if now.Sub(w.windowStart) >= win {
 			continue
 		}
-		bs := get(key)
+		bs := get(ClassInteractive, key, "")
 		bs.WindowStart = w.windowStart
 		bs.Tokens = w.tokens
 		bs.Charges = w.charges
@@ -211,6 +246,11 @@ func (d *Dispatcher) bucketSnapshotsLocked(st *targetState, now time.Time) []Buc
 	for _, bs := range byKey {
 		out = append(out, *bs)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].FairKey < out[j].FairKey })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Class != out[j].Class {
+			return out[i].Class < out[j].Class
+		}
+		return out[i].FairKey < out[j].FairKey
+	})
 	return out
 }

@@ -50,7 +50,8 @@ func heraldRank(h HeraldScope) int {
 // pass-through (no admission limit — exactly today's behavior), which keeps
 // every code wave behavior-neutral until the deliberate data activation.
 type TargetPolicy struct {
-	// Slots caps concurrent slot-holding leases on the origin; 0 = pass-through.
+	// Slots caps the slot units held on the origin (Σw, A03-W7: an in-house
+	// lease holds one, an external lease its weight); 0 = pass-through.
 	Slots int
 	// PreemptBackground allows the dispatcher to cancel background leases in
 	// favor of waiting interactive acquires (consumer: preempt path, MW18;
@@ -64,11 +65,46 @@ type TargetPolicy struct {
 	// preempt_background). NEVER part of declared(): metadata must not turn a
 	// pass-through target into a declared one.
 	InteractiveRole bool
+	// InternalReserved is the validated internal partition R of a
+	// slot-managed target (limits.internal_reserved_slots, design/03 §3.2;
+	// MAX over the authoritative rows, valid only with 1 ≤ R ≤ Slots−1): the
+	// slots ctx keeps for itself — the external class gets E = Slots − R.
+	// 0 = no valid R: the target does not offer the external class (I-03-6).
+	InternalReserved int
+	// ExternalOffer is the validated limits.external_offer of a
+	// SELF-ADMITTING target (every authoritative row a ctx peer or an
+	// external locality; AND over the rows): the external opt-in of a target
+	// whose own admission acts remotely (design/03 §4.3 kind P).
+	ExternalOffer bool
+	// ExternalMaxInflight caps the external leases on an offered
+	// self-admitting target (limits.external_max_inflight, MIN); 0 = no cap.
+	ExternalMaxInflight int
 }
 
 // declared reports whether any effective dispatch key survived the merge.
 func (t TargetPolicy) declared() bool {
-	return t.Slots > 0 || t.PreemptBackground || (t.HeraldScope != "" && t.HeraldScope != HeraldGlobal)
+	return t.Slots > 0 || t.PreemptBackground || (t.HeraldScope != "" && t.HeraldScope != HeraldGlobal) ||
+		t.ExternalOffer
+}
+
+// externalCapacity is the external offer of one target (I-03-6, design/03
+// §4.3): a slot-managed target (Slots > 0, also a self-admitting row that
+// carries slots) offers with a valid R and E = Slots − R, narrowed by
+// external_max_inflight where the derivation kept one; a target without
+// slots offers only with external_offer, capacity external_max_inflight
+// (0 = no external cap). Everything else does not offer — fail-closed.
+func (t TargetPolicy) externalCapacity() (offered bool, capacity int) {
+	if t.Slots > 0 {
+		if t.InternalReserved < 1 || t.InternalReserved > t.Slots-1 {
+			return false, 0
+		}
+		capacity = t.Slots - t.InternalReserved
+		if t.ExternalMaxInflight > 0 && t.ExternalMaxInflight < capacity {
+			capacity = t.ExternalMaxInflight
+		}
+		return true, capacity
+	}
+	return t.ExternalOffer, t.ExternalMaxInflight
 }
 
 // Policy is the derived admission policy over all origins, hot-swapped as
@@ -104,20 +140,36 @@ type BackendRow struct {
 	// External marks locality='external' rows (openrouter): exempt from the
 	// Enforcing coverage term — "external skaliert selbst" (design/01 §3.2).
 	External bool
+	// SelfAdmitting marks a row whose target admits on its own, remotely:
+	// provider_class ctx (a peer instance) or locality external (design/03
+	// §3.2, kind P). Its sole consumer is the external opt-in: such a target
+	// offers the external class through external_offer, a slot-managed one
+	// through internal_reserved_slots. Authentication (api_key_ref) is NO
+	// offer condition (DECISIONS A-E5: ctx is the admission authority by
+	// deployment convention; backend.auth_ref is the Tier-G capability of
+	// A03-W0).
+	SelfAdmitting bool
 }
 
 // The limits keys the dispatcher derives policy from. background_reserved_slots
 // is VALIDATED here (R ≤ S−1) but deliberately has no predicate consumer:
 // option A stays a named, un-built follow-up (K7) — the validation exists so
-// a data step typo surfaces as WARN before any consumer lands.
+// a data step typo surfaces as WARN before any consumer lands. The three
+// external keys (A03-W3, design/03 §3.2) carry the opt-in per target kind;
+// their FORM is checked on the write path too (backends.ValidateBackend), the
+// checks across rows stay here.
 const (
-	limitSlots         = "slots"
-	limitPreempt       = "preempt_background"
-	limitHeraldScope   = "herald_scope"
-	limitReservedSlots = "background_reserved_slots"
+	limitSlots               = "slots"
+	limitPreempt             = "preempt_background"
+	limitHeraldScope         = "herald_scope"
+	limitReservedSlots       = "background_reserved_slots"
+	limitInternalReserved    = "internal_reserved_slots"
+	limitExternalOffer       = "external_offer"
+	limitExternalMaxInflight = "external_max_inflight"
 )
 
-var dispatchLimitKeys = []string{limitSlots, limitPreempt, limitHeraldScope, limitReservedSlots}
+var dispatchLimitKeys = []string{limitSlots, limitPreempt, limitHeraldScope, limitReservedSlots,
+	limitInternalReserved, limitExternalOffer, limitExternalMaxInflight}
 
 func hasDispatchKeys(limits map[string]any) bool {
 	for _, k := range dispatchLimitKeys {
@@ -261,6 +313,7 @@ func mergeRows(origin string, auth []BackendRow, logger *slog.Logger) TargetPoli
 		logger.Warn("dispatch: limits.background_reserved_slots exceeds slots-1, ignored (C4)",
 			"origin", origin, "reserved", reserved, "slots", pol.Slots)
 	}
+	applyExternalPolicy(&pol, origin, auth, reserved, logger)
 	return pol
 }
 
@@ -297,14 +350,16 @@ func intFromAny(v any) (int, bool) {
 	return 0, false
 }
 
-// Settings are the config-derived dispatcher knobs (the 7 dispatch.* keys,
-// all hot + global-only). The owner side maps config.DispatchConfig onto
-// this struct and calls UpdateSettings on reload; dispatch never imports
-// config (layering rule).
+// Settings are the config-derived dispatcher knobs (the 16 dispatch.* keys,
+// all hot + global-only; Fairness and UsageWindow have no key yet). The owner
+// side maps config.DispatchConfig onto this struct and calls UpdateSettings on
+// reload; dispatch never imports config (layering rule).
 type Settings struct {
-	// Enabled false degrades every Acquire to a pass-through — the emergency
-	// stop (E-U3: default true; the waves are behavior-neutral through
-	// policy emptiness, a second activation truth would drift, B7).
+	// Enabled false degrades every in-house Acquire (interactive,
+	// background) to a pass-through and refuses the external class with
+	// ErrExternalNotOffered — the emergency stop (E-U3: default true; the
+	// waves are behavior-neutral through policy emptiness, a second
+	// activation truth would drift, B7).
 	Enabled bool
 	// BackgroundQueueMax caps waiting background acquires per target;
 	// above it Acquire fails fast with ErrQueueFull. 0 = uncapped.
@@ -342,6 +397,52 @@ type Settings struct {
 	// interactive-role targets). ≤ 0 (default) = off — herald term
 	// unweakened, behavior byte-identical (E-F5/K6).
 	BackgroundAgingAfter time.Duration
+	// RankOrder is the rank table of the admission scan (design/03 §4.2,
+	// A-E2 no. 1: policy data, not a constant, rank.go): both admission
+	// predicates serve the classes in this order. Hot: a swap acts on the
+	// next wake. The zero value reads as the default order (DefaultRankOrder:
+	// interactive, background), like an empty Fairness reads as fifo —
+	// ClassInteractive is 0, so an all-interactive order IS the zero value.
+	// Any other order must be a permutation of all classes with
+	// ClassInteractive on rank 0 (I-03-2); otherwise the default is in
+	// effect and New/UpdateSettings log one WARN. An array, not a slice: a
+	// fixed size, no shared backing array. Its config key is dispatch.external_order:
+	// the owner side maps the named order (RankOrderFor) onto this field.
+	RankOrder [numClasses]Class
+	// ExternalQueuePerConsumer / PerTenant / Max are the external cap ladder
+	// (A03-W3, design/03 §3.3; defaults 8/32/64, 0 = that cap off), checked
+	// consumer → tenant → aggregate like the interactive one but with
+	// counters of their own — a consumer never shares a cap with the humans
+	// (K-03-6). The per-tenant cap is the C8 factorization brake: N consumers
+	// of one tenant cannot multiply the per-consumer cap.
+	ExternalQueuePerConsumer int
+	ExternalQueuePerTenant   int
+	ExternalQueueMax         int
+	// ExternalLeaseMax caps the reap reference of an external lease at
+	// admitted + ExternalLeaseMax (I-03-3: the reaper's leak net is the only
+	// cancel path of an external lease, independent of alias timeouts up to
+	// 3600 s). ≤ 0 = no external cap, the general reap reference applies.
+	ExternalLeaseMax time.Duration
+	// ExternalMaxWait is the ONE wait budget of an external acquire (A03-W5,
+	// design/03 §4.9, A-E2 no. 2; default 20 s): an external acquire that
+	// has to wait ends with ErrWaitExpired when it runs out (Request.MaxWait
+	// and Request.ServeBy can only shorten it, waitbudget.go). ≤ 0 = an
+	// external acquire never WAITS — admitted at once when admissible, else
+	// ErrWaitExpired at once — fail-closed, NOT unbounded. The in-house
+	// classes have no wait budget. Hot like every setting: a swap acts on
+	// the next acquire; a waiting acquire keeps the budget it started with.
+	ExternalMaxWait time.Duration
+	// ExternalRetryAfterSteps are the Retry-After steps of the external class
+	// (A03-W6, DECISIONS A-E2 no. 2: a setting, not a constant; config key
+	// dispatch.external_retry_after_steps, V46): the Retry-After an external
+	// rejection carries rounds UP to the next step, and the largest step caps
+	// it (for the external class it replaces retryAfterCap). Strictly
+	// ascending, every step whole seconds ≥ 1 s (the grammar of the setting).
+	// The zero value (nil) reads as the default
+	// steps, like a zero RankOrder; an invalid list — reachable only past the
+	// config validation — reads as the default with one WARN
+	// (resolveRetryAfterSteps). New/UpdateSettings keep their own copy.
+	ExternalRetryAfterSteps []time.Duration
 }
 
 // DefaultSettings mirrors the config registry defaults of the dispatch.* keys.
@@ -357,6 +458,15 @@ func DefaultSettings() Settings {
 		PreemptReleaseTimeout:        defaultPreemptReleaseTimeout,
 		Fairness:                     FairnessFIFO,
 		UsageWindow:                  time.Hour,
+		RankOrder:                    defaultRankOrder,
+		ExternalQueuePerConsumer:     8,
+		ExternalQueuePerTenant:       32,
+		ExternalQueueMax:             64,
+		ExternalLeaseMax:             900 * time.Second,
+		ExternalMaxWait:              20 * time.Second,
+		ExternalRetryAfterSteps: []time.Duration{
+			1 * time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second,
+		},
 	}
 }
 

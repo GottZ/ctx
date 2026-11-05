@@ -108,6 +108,11 @@ func bw2Config() *config.Config {
 		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		Distill:        config.Defaults().Distill,
+		Status:         config.Defaults().Status,     // W06-8: V37 floors
+		Gateway:        config.Defaults().Gateway,    // W02-02: V38/V39 floors
+		Federation:     config.Defaults().Federation, // F-W8: V43 range
+		// A03-W6: dispatch.external_retry_after_steps is fatal when empty (V46).
+		Dispatch: config.DispatchConfig{ExternalRetryAfterSteps: config.Defaults().Dispatch.ExternalRetryAfterSteps},
 	}
 }
 

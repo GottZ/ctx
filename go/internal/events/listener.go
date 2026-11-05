@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/embedcache"
+	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5"
@@ -126,7 +127,9 @@ func (h *LinkWriteHandler) HandleBacklog(ctx context.Context, channel string, co
 // notifications (G16 hot-reload path for psql/break-glass edits; redundant
 // but idempotent for API writes, whose handlers reload after commit). Since
 // F3-P1 the 053 trigger fires the SAME channel for context_backends rows —
-// the payload's entity field dispatches to the backend-pool reload instead.
+// the payload's entity field dispatches to the backend-pool reload instead;
+// since migration 162 likewise context_model_aliases to the model-alias
+// registry.
 type SettingsWriteHandler struct {
 	pool        *pgxpool.Pool
 	cfg         *config.Store
@@ -146,6 +149,10 @@ type SettingsWriteHandler struct {
 	// (log-and-continue, but coupledPrev stays behind so the NEXT notification
 	// retries) is only pinnable with an injectable error. nil = the real flush.
 	flush func(ctx context.Context, pool *pgxpool.Pool) (int64, error)
+	// modelAliases is the /v1 model namespace (W02-03, migration 162), reloaded
+	// on context_model_aliases NOTIFYs and on every backlog. nil (tests,
+	// pre-wire) leaves the alias entity branch inert.
+	modelAliases *modelalias.Registry
 }
 
 // NewSettingsWriteHandler creates the hot-reload notification handler.
@@ -311,6 +318,23 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 		h.flushIfCoupledChanged(ctx)
 		return nil
 	}
+	// Model-alias entity branch (W02-03, design/02 §4.4): the 162 notify
+	// trigger rides this channel with entity=context_model_aliases. The
+	// registry is the only reader of the table, so the write reaches it and
+	// nothing else — not settings.Reload (the fall-through would rebuild the
+	// config base and wipe every tenant generation per alias write, the
+	// warning at 113_baseline.sql:9552-9556), and not the tenant invalidation
+	// below (a tenant alias's scope is a pool scope, no config write).
+	// Trigger, not Reload: this loop serves every channel of the listener,
+	// and a full table read per alias write would hold all of them — a burst
+	// of N writes is coalesced into at most two reads (Registry.Trigger). A
+	// failed reload keeps the previous snapshot and is logged by the registry.
+	if p.Entity == "context_model_aliases" {
+		if h.modelAliases != nil {
+			h.modelAliases.Trigger(ctx)
+		}
+		return nil
+	}
 	// Disable-profile entity branch (Web-UX U01-W1, design/01 §4.1/N9): the 092
 	// notify triggers ride the same channel. Profiles/memberships live in the
 	// backend-pool snapshot, so a write here reloads the pool — but does NOT
@@ -418,6 +442,14 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 	// §3.1). Only on this _global branch: the keys are global-only, so a
 	// tenant-scope write (early return above) can never change them.
 	h.refreshDispatchSettings()
+	// The model-alias registry clamps tenant aliases to the global-only
+	// gateway.tenant_alias_ceiling.* at reload (W02-04, design/02 §3.3): a
+	// lowered ceiling must reach the snapshot now, not with the next alias
+	// write. Trigger is single-flight and returns at once (one table read per
+	// burst, off this loop).
+	if h.modelAliases != nil {
+		h.modelAliases.Trigger(ctx)
+	}
 	return nil
 }
 
@@ -444,9 +476,10 @@ func (h *SettingsWriteHandler) refreshDispatchPolicy() {
 }
 
 // HandleBacklog reloads unconditionally after a reconnect — a settings,
-// backend or block-type write during the disconnect window would otherwise
-// stay invisible until the next write or restart. Entity is unknown here:
-// reload all three (listener.go:139-150 pattern, extended per design 01 §4.3).
+// backend, block-type or model-alias write during the disconnect window would
+// otherwise stay invisible until the next write or restart. Entity is unknown
+// here: reload all four (listener.go:139-150 pattern, extended per design 01
+// §4.3 and design/02 §4.4).
 func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string, conn *pgx.Conn) error {
 	slog.Info("listener: processing settings backlog, reloading snapshots")
 	if err := settings.Reload(ctx, h.pool, h.cfg); err != nil {
@@ -468,6 +501,11 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 		if err := h.blocktypes.Reload(ctx, h.pool); err != nil {
 			slog.Warn("listener: blocktype backlog reload failed — previous snapshot stays active", "error", err)
 		}
+	}
+	// An alias write during the disconnect window lost its NOTIFY with it.
+	// Asynchronous like the entity branch (Registry.Trigger).
+	if h.modelAliases != nil {
+		h.modelAliases.Trigger(ctx)
 	}
 	return nil
 }
@@ -504,6 +542,9 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 	// and flush the embed cache on the first backend write after every boot.
 	settingsHandler := NewSettingsWriteHandler(pool, cfg, backendPool, blocktypes)
 	settingsHandler.dispatcher = scheduler.dispatcher
+	// The model-alias registry comes from the owning scheduler as well
+	// (SetModelAliasRegistry, boot happens-before Run; nil = inert).
+	settingsHandler.modelAliases = scheduler.modelAliases
 	listener.Handle(channelSettingsWrite, settingsHandler)
 	// W9: forward ctx_project_write (081) to the SSE domain-event hub. Registered
 	// ONLY when the hub is wired — a nil hub leaves the channel un-LISTENed, so

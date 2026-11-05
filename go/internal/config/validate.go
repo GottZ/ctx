@@ -13,7 +13,11 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/derived"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/fedhop"
+	"github.com/GottZ/ctx/internal/httpx"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
 
@@ -75,6 +79,24 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
 	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
+	// V37 (W06-8): the foreign-load detector's floors and ratio range.
+	issues = append(issues, validateStatusForeignLoad(c)...)
+	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation;
+	// V40 (W01-6): the model-key door's limits.
+	issues = append(issues, validateGateway(c)...)
+	// V41 (W01-5): the consumer administration's grace ceiling and page floors.
+	issues = append(issues, validateGatewayConsumers(c)...)
+	// V42 (A03-W3): dispatch.external_order names a known admission order.
+	issues = append(issues, validateDispatchExternalOrder(c)...)
+	// V43 (A03-W17): dispatch.external_max_wait at most 45 s.
+	issues = append(issues, validateDispatchExternalMaxWait(c)...)
+	// V44 (W06-9): gateway.body_logging names a known body policy.
+	issues = append(issues, validateGatewayBodyLogging(c)...)
+	// V45 (F-W8): federation.max_depth in 1..fedhop.MaxHopEntries.
+	issues = append(issues, validateFederation(c)...)
+	// V46 (A03-W6): dispatch.external_retry_after_steps parses, at most
+	// dispatch.external_lease_max.
+	issues = append(issues, validateDispatchRetryAfterSteps(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -637,6 +659,52 @@ func validateEmbedBackoff(c *Config) []Issue {
 	return issues
 }
 
+// validateStatusForeignLoad is V37 (waves W06-8, W06-8b): the floors and the
+// ratio range of the foreign-load detector's policy keys (design/06 §4.9).
+// The signs stay with the generic walks (V17 for the timeout and the
+// interval, V35 for the two counts); this check owns the values that parse,
+// are not negative, and still cannot mean what the surface would render:
+//   - status.foreign_load_timeout 0: every /metrics GET fails before it is
+//     sent, so the detector reports probe errors forever instead of readings.
+//   - status.foreign_load_interval 0 (W06-8b): the detector's ticker would
+//     start the next round without a pause.
+//   - status.foreign_load_interval + status.foreign_load_timeout >= 1 h
+//     (W06-8b, cross-field): that sum is the hourly check's grace, and the
+//     rollup read of hour H is due grace after H ends — at or past the next
+//     boundary, whose round has already replaced H, so no hour is ever
+//     compared and nothing says so.
+//   - status.foreign_load_hysteresis_ticks 0: a target would turn suspected
+//     and clear on the same round, one WARN pair per tick.
+//   - status.foreign_load_hourly_min_ratio outside [0,1] (float keys have no
+//     generic walk): a negative tolerance flags every hour, one above 1 hides
+//     an hour in which foreign requests outnumber ctx's own, and NaN — which
+//     ParseFloat accepts and every comparison rejects — switches the hourly
+//     verdict off silently.
+func validateStatusForeignLoad(c *Config) []Issue {
+	var issues []Issue
+	if c.Status.ForeignLoadTimeout == 0 {
+		issues = append(issues, Issue{Field: "status.foreign_load_timeout", Severity: SeverityError,
+			Msg: "status.foreign_load_timeout must be >= 1 second — 0 fails every foreign-load probe before it is sent"})
+	}
+	if c.Status.ForeignLoadInterval == 0 {
+		issues = append(issues, Issue{Field: "status.foreign_load_interval", Severity: SeverityError,
+			Msg: "status.foreign_load_interval must be >= 1 second — 0 would start the next foreign-load probe round without a pause"})
+	}
+	if iv, to := c.Status.ForeignLoadInterval, c.Status.ForeignLoadTimeout; iv > 0 && to >= 0 && iv+to >= time.Hour {
+		issues = append(issues, Issue{Field: "status.foreign_load_interval", Severity: SeverityError,
+			Msg: fmt.Sprintf("status.foreign_load_interval (%v) + status.foreign_load_timeout (%v) must stay below 1 hour — the hourly foreign-load check would never read an hour", iv, to)})
+	}
+	if c.Status.ForeignLoadHysteresisTicks == 0 {
+		issues = append(issues, Issue{Field: "status.foreign_load_hysteresis_ticks", Severity: SeverityError,
+			Msg: "status.foreign_load_hysteresis_ticks must be >= 1 — 0 would suspect and clear a target in the same probe round"})
+	}
+	if r := c.Status.ForeignLoadHourlyMinRatio; math.IsNaN(r) || r < 0 || r > 1 {
+		issues = append(issues, Issue{Field: "status.foreign_load_hourly_min_ratio", Severity: SeverityError,
+			Msg: fmt.Sprintf("status.foreign_load_hourly_min_ratio %g must be in [0,1]", r)})
+	}
+	return issues
+}
+
 // validateGraphOverview holds the label arm's cross-field invariants.
 //
 // V17b — graph_overview.label_timeout against graph_overview.label_interval.
@@ -1117,6 +1185,131 @@ func validateDreamDecideMode(c *Config) []Issue {
 	}
 }
 
+// validateDispatchExternalOrder is V42 (wave A03-W3, DECISIONS A-E2 no. 1):
+// dispatch.external_order in the V21 shape — trim + lower IN PLACE, then the
+// name must be one of the dispatcher's own named orders (dispatch.RankOrderFor:
+// config validates against the consumer's vocabulary, never a second copy of
+// it). Empty reads as o1, like the zero value of the rank table. Fatal, not
+// warn-and-reset: an operator reaching for this key wants the order they
+// typed, and a typo silently keeping o1 would let the settings surface show
+// their value while the dispatcher serves the other — boot aborts, the
+// settings PUT is a 422.
+func validateDispatchExternalOrder(c *Config) []Issue {
+	c.Dispatch.ExternalOrder = strings.ToLower(strings.TrimSpace(c.Dispatch.ExternalOrder))
+	if c.Dispatch.ExternalOrder == "" {
+		return nil
+	}
+	if _, ok := dispatch.RankOrderFor(c.Dispatch.ExternalOrder); ok {
+		return nil
+	}
+	return []Issue{{Field: "dispatch.external_order", Severity: SeverityError,
+		Msg: fmt.Sprintf("external order %q must be %q (interactive, external, background) or %q (interactive, background, external) — empty reads as %q",
+			c.Dispatch.ExternalOrder, dispatch.ExternalOrderO1, dispatch.ExternalOrderO2, dispatch.ExternalOrderO1)}}
+}
+
+// Dispatch bounds derived from the gateway caps (design/02 §4.11.2) — named
+// so V43 says where its number comes from.
+const (
+	// gatewayCommitDistance is the distance the stream header commit keeps
+	// above the external wait budget (design/02 §4.7: the commit grace is
+	// clamped to at least dispatch.external_max_wait + 5 s, so no byte goes
+	// out before the acquire returns — a refusal must still be able to be a
+	// 429).
+	gatewayCommitDistance = 5 * time.Second
+	// dispatchExternalMaxWaitCeiling is the V43 ceiling: the commit grace
+	// ceiling (gatewayCommitGraceCeiling, 50 s, V39) minus that distance —
+	// a larger wait budget would push the commit clamp above the grace a
+	// typical 60 s proxy idle timeout allows.
+	dispatchExternalMaxWaitCeiling = gatewayCommitGraceCeiling - gatewayCommitDistance
+)
+
+// validateDispatchExternalMaxWait is V43 (wave A03-W17, masterplan K21,
+// design/02 §4.11.2): dispatch.external_max_wait — the one wait budget of an
+// external acquire (A03-W5) — at most dispatchExternalMaxWaitCeiling (45 s),
+// so the stream commit clamp of W02-08 never has to rise above the V39 grace
+// ceiling. The key came with A03-W5 and its ceiling only now (K21 assigns it
+// to this wave — the exception to the "checks come WITH the keys" precedent
+// of validateDistill): no installation sets it (live 2026-11-04: no
+// dispatch.* settings row, the env var unset). Negative values stay with the
+// V17 sign walk — no second, contradicting issue here; 0 is legitimate
+// ("never wait"). Fatal: boot abort, settings write 422.
+func validateDispatchExternalMaxWait(c *Config) []Issue {
+	w := c.Dispatch.ExternalMaxWait
+	if w <= dispatchExternalMaxWaitCeiling {
+		return nil
+	}
+	return []Issue{{Field: "dispatch.external_max_wait", Severity: SeverityError,
+		Msg: fmt.Sprintf("external max wait %v must be <= %v: the stream commit grace ceiling %v minus the %v the header commit keeps above the wait budget",
+			w, dispatchExternalMaxWaitCeiling, gatewayCommitGraceCeiling, gatewayCommitDistance)}}
+}
+
+// validateDispatchRetryAfterSteps is V46 (wave A03-W6, DECISIONS A-E2 no. 2,
+// design/03 §4.9): dispatch.external_retry_after_steps in the dispatcher's own
+// grammar (dispatch.ParseRetryAfterSteps — config validates against the
+// consumer's parser, never a second copy of it: at least one entry, whole
+// seconds >= 1, strictly ascending), and the largest step at most
+// dispatch.external_lease_max when that is set (> 0): no external lease
+// outlives admission + external_lease_max (+ the reap grace), so a larger
+// Retry-After would tell a client to stay away past the moment every lease
+// held now has ended. external_lease_max = 0 (no external cap) sets no bound
+// here. Fatal: boot abort, settings write 422 — the settings surface must
+// never show steps the dispatcher replaces by its default.
+func validateDispatchRetryAfterSteps(c *Config) []Issue {
+	steps, err := dispatch.ParseRetryAfterSteps(c.Dispatch.ExternalRetryAfterSteps)
+	if err != nil {
+		return []Issue{{Field: "dispatch.external_retry_after_steps", Severity: SeverityError,
+			Msg: fmt.Sprintf("retry-after steps %q: %v", c.Dispatch.ExternalRetryAfterSteps, err)}}
+	}
+	if largest := steps[len(steps)-1]; c.Dispatch.ExternalLeaseMax > 0 && largest > c.Dispatch.ExternalLeaseMax {
+		return []Issue{{Field: "dispatch.external_retry_after_steps", Severity: SeverityError,
+			Msg: fmt.Sprintf("largest retry-after step %v must be <= dispatch.external_lease_max %v", largest, c.Dispatch.ExternalLeaseMax)}}
+	}
+	return nil
+}
+
+// validateGatewayBodyLogging is V44 (wave W06-9, design/06 §4.6, masterplan
+// K10): gateway.body_logging in the V42 shape — trim + lower IN PLACE, then
+// the name must be one of llmlog's policies (llmlog.BodyLoggingValid: config
+// validates against the consumer's vocabulary, never a second copy of it).
+// Empty reads as none and is written back as none, so the settings surface
+// and the boot record show the policy that is served. Fatal, not
+// warn-and-reset: a typo must not silently keep a policy the operator did
+// not choose — in either direction (bodies stored that were meant to stay
+// out, or missing that were meant to be there). Boot aborts, the settings
+// PUT is a 422.
+func validateGatewayBodyLogging(c *Config) []Issue {
+	c.Gateway.BodyLogging = strings.ToLower(strings.TrimSpace(c.Gateway.BodyLogging))
+	if c.Gateway.BodyLogging == "" {
+		c.Gateway.BodyLogging = llmlog.BodyLoggingNone
+		return nil
+	}
+	if llmlog.BodyLoggingValid(c.Gateway.BodyLogging) {
+		return nil
+	}
+	return []Issue{{Field: "gateway.body_logging", Severity: SeverityError,
+		Msg: fmt.Sprintf("body logging %q must be %q (no bodies), %q (bodies on error rows only) or %q (bodies on every row, 64 KiB each) — empty reads as %q",
+			c.Gateway.BodyLogging, llmlog.BodyLoggingNone, llmlog.BodyLoggingErrors, llmlog.BodyLoggingFull, llmlog.BodyLoggingNone)}}
+}
+
+// validateFederation is V45 (wave F-W8, design/04 §3.1): federation.max_depth
+// must lie in 1..fedhop.MaxHopEntries. Negative values stay with V35 (one
+// issue per field). 0 would refuse every request — a chain of length 0 is
+// already "≥ 0" — and a value above MaxHopEntries can never be reached:
+// ParseInbound refuses a longer Ctx-Hop with 400 first, so the setting would
+// show a limit nobody enforces. Fatal like V42: the key is settings-only, so
+// a settings PUT answers 422, and a psql-written row (which replaces the one
+// row of the key) is dropped by the reload with a WARN — Build's override
+// tolerance falls back to the registry default 3, never to an invalid limit.
+func validateFederation(c *Config) []Issue {
+	d := c.Federation.MaxDepth
+	if d < 0 || (d >= 1 && d <= fedhop.MaxHopEntries) {
+		return nil
+	}
+	return []Issue{{Field: "federation.max_depth", Severity: SeverityError,
+		Msg: fmt.Sprintf("federation.max_depth (%d) must be between 1 and %d (the Ctx-Hop parse limit) — 0 refuses every request, a larger value is never reached",
+			d, fedhop.MaxHopEntries)}}
+}
+
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO
 // between the anchor link and a near-tie, so its readings are 0 (rule off)
 // and anything from 1 up (1 = anchor and exact ties). A value in (0, 1) would
@@ -1176,4 +1369,243 @@ func defaultFor(key string) any {
 		}
 	}
 	panic("config: unknown registry key " + key)
+}
+
+// Gateway bounds that are external facts, not policy (design/02 §3.3) — named
+// so V39 says where each comes from.
+const (
+	// gatewayFrameCeiling is the internal SSE frame cap of the stream reader
+	// (llm/stream.go maxSSEFrameBytes, unexported there): a relayed frame
+	// larger than what the reader accepts can never arrive.
+	gatewayFrameCeiling = 4 << 20
+	// gatewaySDKTimeout is the OpenAI SDKs' default request timeout
+	// (design/02 §3.3, extern-recherche §1.7 DEFAULT_TIMEOUT): a request
+	// deadline at or above it lets the SDK give up and resend the whole
+	// request while the first one still runs.
+	gatewaySDKTimeout = 600 * time.Second
+	// gatewayCommitGraceCeiling keeps the stream header commit under a typical
+	// 60 s proxy idle timeout (design/02 §3.3, handler/sse.go).
+	gatewayCommitGraceCeiling = 50 * time.Second
+	// gatewayRequestReserve mirrors oai's request share per body byte
+	// (design/02 §4.2.1: body, RawMessage copy, upstream body).
+	gatewayRequestReserve = 3
+	// gatewayResponseCopies is the response share per capped unit (design/02
+	// §4.2.1): raw upstream body plus rewritten copy (non-stream), one frame
+	// raw plus rewritten (stream).
+	gatewayResponseCopies = 2
+	// gatewayFloatBytes and gatewayEmbedEncoderReserve size the embeddings
+	// response share (design/02 §4.2.1): vectors held as float32, plus the
+	// 64 KiB buffer of the streamed encoder.
+	gatewayFloatBytes          = 4
+	gatewayEmbedEncoderReserve = 64 << 10
+)
+
+// validateGateway is V38 and V39 (wave W02-02, design/02 §3.3). The keys come
+// with their checks although their consumers arrive in later waves — the
+// precedent of validateDistill: a check added after a key is configurable
+// would be added against values already in use. Negative values stay with
+// the generic walks (V17 durations, V35 ints); these checks own the values
+// that parse, are not negative, and still cannot mean what they say:
+//
+// V38 — floors. 0 for any byte size, token count or duration of the group is
+// refused: a 0 budget or cap refuses every request, a 0 timeout or window
+// ends every request at once, a 0 keepalive spins. The one legal 0 is
+// gateway.tenant_alias_ceiling.tools_max_count (tenant aliases without
+// tools).
+//
+// V39 — caps and the one relation:
+//   - gateway.max_response_bytes <= httpx.MaxResponseBytes: the transport cap
+//     it narrows; above it the setting would claim a read the transport never
+//     delivers.
+//   - gateway.max_stream_frame_bytes <= 4 MiB: the stream reader's frame cap.
+//   - gateway.request_deadline < 600 s: the SDKs' default timeout.
+//   - gateway.stream_commit_grace <= 50 s: under a typical proxy idle.
+//   - gateway.inflight_budget >= one request at every cap: 3 ×
+//     gateway.max_request_bytes (request share) plus the largest response
+//     share — 2 × gateway.max_response_bytes, 2 ×
+//     gateway.max_stream_frame_bytes, or 4 B × gateway.embedding_max_floats
+//     plus 64 KiB (design/02 §4.2.1). A smaller budget could never serve such a
+//     request, and the client would read "overloaded, retry in 1 s" forever.
+//   - gateway.retry_after_jitter in [0, 1] (float keys have no generic sign
+//     walk; NaN fails every comparison and is refused explicitly).
+func validateGateway(c *Config) []Issue {
+	var issues []Issue
+	g := &c.Gateway
+	bad := func(field, msg string) {
+		issues = append(issues, Issue{Field: field, Severity: SeverityError, Msg: msg})
+	}
+	for _, f := range []struct {
+		key string
+		v   int
+	}{
+		{"gateway.max_request_bytes", g.MaxRequestBytes},
+		{"gateway.inflight_budget", g.InflightBudget},
+		{"gateway.max_response_bytes", g.MaxResponseBytes},
+		{"gateway.max_stream_frame_bytes", g.MaxStreamFrameBytes},
+		{"gateway.embedding_max_floats", g.EmbeddingMaxFloats},
+		{"gateway.default_max_tokens", g.DefaultMaxTokens},
+		{"gateway.max_output_tokens_ceiling", g.MaxOutputTokensCeiling},
+		{"gateway.tenant_alias_ceiling.max_output_tokens", g.TenantAliasCeiling.MaxOutputTokens},
+		{"gateway.tenant_alias_ceiling.max_n", g.TenantAliasCeiling.MaxN},
+		{"gateway.tenant_alias_ceiling.embedding_max_inputs", g.TenantAliasCeiling.EmbeddingMaxInputs},
+		{"gateway.tenant_alias_ceiling.rerank_max_documents", g.TenantAliasCeiling.RerankMaxDocuments},
+	} {
+		if f.v == 0 {
+			bad(f.key, f.key+" must be >= 1 — 0 would refuse or truncate every gateway request")
+		}
+	}
+	for _, f := range []struct {
+		key string
+		v   time.Duration
+	}{
+		{"gateway.stream_commit_grace", g.StreamCommitGrace},
+		{"gateway.keepalive_interval", g.KeepaliveInterval},
+		{"gateway.client_write_window", g.ClientWriteWindow},
+		{"gateway.request_timeout", g.RequestTimeout},
+		{"gateway.request_deadline", g.RequestDeadline},
+		{"gateway.tenant_alias_ceiling.timeout", g.TenantAliasCeiling.Timeout},
+	} {
+		if f.v == 0 {
+			bad(f.key, f.key+" must be >= 1 second — 0 would end every gateway request (or spin the keepalive) at once")
+		}
+	}
+
+	if int64(g.MaxResponseBytes) > httpx.MaxResponseBytes {
+		bad("gateway.max_response_bytes", fmt.Sprintf("gateway.max_response_bytes (%d) must not exceed the transport cap httpx.MaxResponseBytes (%d)", g.MaxResponseBytes, httpx.MaxResponseBytes))
+	}
+	if g.MaxStreamFrameBytes > gatewayFrameCeiling {
+		bad("gateway.max_stream_frame_bytes", fmt.Sprintf("gateway.max_stream_frame_bytes (%d) must not exceed the stream reader's frame cap (%d)", g.MaxStreamFrameBytes, gatewayFrameCeiling))
+	}
+	if g.RequestDeadline >= gatewaySDKTimeout {
+		bad("gateway.request_deadline", fmt.Sprintf("gateway.request_deadline (%v) must stay below the OpenAI SDKs' default timeout (%v) — the SDK would resend a request still running", g.RequestDeadline, gatewaySDKTimeout))
+	}
+	if g.StreamCommitGrace > gatewayCommitGraceCeiling {
+		bad("gateway.stream_commit_grace", fmt.Sprintf("gateway.stream_commit_grace (%v) must be <= %v — a later commit runs into a typical 60 s proxy idle timeout", g.StreamCommitGrace, gatewayCommitGraceCeiling))
+	}
+	if need, ok := gatewayBudgetFloor(g); ok && g.InflightBudget > 0 {
+		switch {
+		case need < 0:
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + the largest response share) exceed any representable budget", g.InflightBudget, gatewayRequestReserve))
+		case int64(g.InflightBudget) < need:
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap (%d = %d × gateway.max_request_bytes + the largest response share) — such a request could never be served", g.InflightBudget, need, gatewayRequestReserve))
+		}
+	}
+	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {
+		bad("gateway.retry_after_jitter", fmt.Sprintf("gateway.retry_after_jitter (%v) must be in [0, 1]", j))
+	}
+	return append(issues, validateGatewayAuth(g)...)
+}
+
+// gatewayDBPoolConns mirrors the pool size of store/pool.go (tunePool
+// MaxConns): config may not import the store, so V40 checks against this
+// mirror, and TestGatewayDBPoolMirror reads store/pool.go to keep it equal.
+const gatewayDBPoolConns = 20
+
+// validateGatewayAuth is V40 (wave W01-6, design/01 §4.2, §4.9): the
+// model-key door's four limits. Negative values stay with V17/V35.
+//
+//   - gateway.auth_failure_limit >= 1: 0 would lock a pair before its first
+//     failure has been counted against anything.
+//   - gateway.auth_failure_window >= 1 s: 0 would make the lock a no-op.
+//   - gateway.auth_probe_rate >= 1: 0 would never let an unknown hash reach
+//     the database — after a restart no key could authenticate at all.
+//   - 1 <= gateway.auth_db_concurrency < the pool size (20): 0 refuses every
+//     check with 503; at the pool size a forgery flood could hold every
+//     connection, which is what the semaphore exists to prevent (B18).
+func validateGatewayAuth(g *GatewayConfig) []Issue {
+	var issues []Issue
+	bad := func(field, msg string) {
+		issues = append(issues, Issue{Field: field, Severity: SeverityError, Msg: msg})
+	}
+	if g.AuthFailureLimit == 0 {
+		bad("gateway.auth_failure_limit", "gateway.auth_failure_limit must be >= 1 — 0 would lock a key before any failure")
+	}
+	if g.AuthFailureWindow == 0 {
+		bad("gateway.auth_failure_window", "gateway.auth_failure_window must be >= 1 second — 0 would make the failure lock a no-op")
+	}
+	if g.AuthProbeRate == 0 {
+		bad("gateway.auth_probe_rate", "gateway.auth_probe_rate must be >= 1 — 0 would never let a key without a past success reach the database")
+	}
+	switch n := g.AuthDBConcurrency; {
+	case n == 0:
+		bad("gateway.auth_db_concurrency", "gateway.auth_db_concurrency must be >= 1 — 0 would refuse every model-key check with 503")
+	case n >= gatewayDBPoolConns:
+		bad("gateway.auth_db_concurrency", fmt.Sprintf("gateway.auth_db_concurrency (%d) must stay below the database pool size (%d) — a forgery flood could otherwise hold every connection", n, gatewayDBPoolConns))
+	}
+	return issues
+}
+
+// gatewayMaxRotationGrace is store.MaxRotationGrace (the store refuses a
+// longer grace; config may not import store). The equality is pinned in
+// internal/handler (TestRotationGraceCeilingMatchesStore).
+const gatewayMaxRotationGrace = 7 * 24 * time.Hour
+
+// validateGatewayConsumers is V41 (wave W01-5, design/01 §4.9). Negative
+// values stay with the generic walks (V17, V35); these checks own what parses
+// and is not negative, yet cannot mean what it says:
+//   - gateway.key_rotation_grace <= 7 d: the store refuses a longer grace, so
+//     every rotation without an explicit grace would answer 400.
+//   - the three page caps >= 1: 0 would serve empty pages forever while the
+//     settings surface renders a configured cap.
+//
+// The lifetimes and the expiry warning may be 0 (no ceiling, no warning).
+func validateGatewayConsumers(c *Config) []Issue {
+	var issues []Issue
+	g := &c.Gateway.Consumers
+	if g.KeyRotationGrace > gatewayMaxRotationGrace {
+		issues = append(issues, Issue{Field: "gateway.key_rotation_grace", Severity: SeverityError,
+			Msg: fmt.Sprintf("gateway.key_rotation_grace (%v) must be <= %v — the store refuses a longer grace, every rotation without its own grace would fail", g.KeyRotationGrace, gatewayMaxRotationGrace)})
+	}
+	for _, f := range []struct {
+		key string
+		v   int
+	}{
+		{"gateway.consumer_list_max_limit", g.ListMaxLimit},
+		{"gateway.consumer_chain_max", g.ChainMax},
+		{"gateway.consumer_audit_trail_max", g.AuditTrailMax},
+	} {
+		if f.v == 0 {
+			issues = append(issues, Issue{Field: f.key, Severity: SeverityError,
+				Msg: f.key + " must be >= 1 — 0 would serve an empty page on every read"})
+		}
+	}
+	return issues
+}
+
+// gatewayBudgetFloor is the in-flight reservation of one request at every
+// gateway cap (V39). ok is false while a size is not positive — V35/V38
+// report those, and a floor over them would only add a second error. The
+// arithmetic saturates (Fremd-Review 2, FR2-3): a floor beyond int64 is
+// reported as -1 — "no budget can hold it" — instead of wrapping around into
+// a negative value every budget clears.
+func gatewayBudgetFloor(g *GatewayConfig) (int64, bool) {
+	if g.MaxRequestBytes <= 0 || g.MaxResponseBytes <= 0 || g.MaxStreamFrameBytes <= 0 || g.EmbeddingMaxFloats <= 0 {
+		return 0, false
+	}
+	response := max(
+		gatewayMulSat(gatewayResponseCopies, int64(g.MaxResponseBytes)),
+		gatewayMulSat(gatewayResponseCopies, int64(g.MaxStreamFrameBytes)),
+		gatewayAddSat(gatewayMulSat(gatewayFloatBytes, int64(g.EmbeddingMaxFloats)), gatewayEmbedEncoderReserve),
+	)
+	floor := gatewayAddSat(gatewayMulSat(gatewayRequestReserve, int64(g.MaxRequestBytes)), response)
+	if floor == math.MaxInt64 {
+		return -1, true
+	}
+	return floor, true
+}
+
+// gatewayMulSat and gatewayAddSat are a·b and a+b for non-negative operands,
+// saturating at math.MaxInt64.
+func gatewayMulSat(a, b int64) int64 {
+	if a != 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
+}
+
+func gatewayAddSat(a, b int64) int64 {
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
 }

@@ -34,6 +34,23 @@ const serverAdmin = capabilitiesFor(whoami({ admin: true, role: 'owner' }))
 // stacks onto ANY tier. A plain member with the flag gets the workflow section.
 const memberWorkflow = capabilitiesFor(whoami({ admin: false, role: 'member', capabilities: { workflow: true } }))
 const serverAdminWorkflow = capabilitiesFor(whoami({ admin: true, role: 'owner', capabilities: { workflow: true } }))
+// Gateway policy (W05-01 whoami.capabilities.model_api, design/05 §4.6): only
+// `enabled` decides the Model API item.
+function modelApi(enabled: boolean): WhoamiResponse['capabilities'] {
+  return {
+    model_api: {
+      enabled,
+      self_service: false,
+      key_max_lifetime_s: 31_536_000,
+      rotation_grace_s: 86_400,
+      expiry_warn_s: 1_209_600,
+    },
+  }
+}
+const memberGatewayOn = capabilitiesFor(whoami({ admin: false, role: 'member', capabilities: modelApi(true) }))
+const tenantAdminGatewayOff = capabilitiesFor(whoami({ admin: false, role: 'owner', capabilities: modelApi(false) }))
+const tenantAdminGatewayOn = capabilitiesFor(whoami({ admin: false, role: 'owner', capabilities: modelApi(true) }))
+const serverAdminGatewayOff = capabilitiesFor(whoami({ admin: true, role: 'owner', capabilities: modelApi(false) }))
 
 const hrefs = (caps: Capabilities) => navItems(caps).map((i) => i.href)
 
@@ -44,6 +61,10 @@ const WORKFLOW = ['/issues', '/board']
 // Guard W4: /guard (review queue) joins the tenant section, gated on
 // viewOpsSurfaces (tenant-admin-or-up).
 const TENANT = ['/tenant', '/tenant/backends', '/guard']
+// W05-05: the Model API item closes the tenant section, gated on viewModelApi —
+// a server-admin always carries it (the area is prepared before the gateway is
+// switched on), a tenant-admin only with gateway.enabled.
+const GATEWAY = ['/gateway']
 const SERVER = ['/admin', '/settings', '/status', '/settings/backends']
 
 describe('navItems', () => {
@@ -74,7 +95,7 @@ describe('navItems', () => {
   })
 
   it('workflow section sits between corpus and tenant/server for a full tier (U04)', () => {
-    expect(hrefs(serverAdminWorkflow)).toEqual([...CORPUS, ...WORKFLOW, ...TENANT, ...SERVER])
+    expect(hrefs(serverAdminWorkflow)).toEqual([...CORPUS, ...WORKFLOW, ...TENANT, ...GATEWAY, ...SERVER])
     const rank = { corpus: 0, workflow: 1, tenant: 2, server: 3 }
     const seq = navItems(serverAdminWorkflow).map((i) => rank[i.section])
     expect(seq).toEqual([...seq].sort((a, b) => a - b))
@@ -84,8 +105,28 @@ describe('navItems', () => {
     expect(hrefs(tenantAdmin)).toEqual([...CORPUS, ...TENANT])
   })
 
-  it('server-admin → corpus + tenant + server section', () => {
-    expect(hrefs(serverAdmin)).toEqual([...CORPUS, ...TENANT, ...SERVER])
+  it('server-admin → corpus + tenant (incl. Model API) + server section', () => {
+    expect(hrefs(serverAdmin)).toEqual([...CORPUS, ...TENANT, ...GATEWAY, ...SERVER])
+  })
+
+  it('Model API item only with viewModelApi (W05-05, design/05 §4.6)', () => {
+    // member: never, gateway on or off
+    expect(hrefs(member)).not.toContain('/gateway')
+    expect(hrefs(memberGatewayOn)).toEqual(CORPUS)
+    // tenant-admin: not before the switch, not against an older server without model_api
+    expect(hrefs(tenantAdminGatewayOff)).toEqual([...CORPUS, ...TENANT])
+    expect(hrefs(tenantAdmin)).not.toContain('/gateway')
+    // tenant-admin with the gateway on: the item closes the tenant section
+    expect(hrefs(tenantAdminGatewayOn)).toEqual([...CORPUS, ...TENANT, ...GATEWAY])
+    // server-admin: also with enabled=false (preparation)
+    expect(hrefs(serverAdminGatewayOff)).toEqual([...CORPUS, ...TENANT, ...GATEWAY, ...SERVER])
+    // loading: nothing
+    expect(navItems(loading)).toEqual([])
+  })
+
+  it('Model API item shape: label, gateway icon, tenant section, prefix-active leaf (W05-05)', () => {
+    const item = navItems(tenantAdminGatewayOn).find((i) => i.href === '/gateway')
+    expect(item).toEqual({ href: '/gateway', label: 'Model API', iconKey: 'gateway', section: 'tenant' })
   })
 
   it('containment: member ⊆ tenant-admin ⊆ server-admin', () => {

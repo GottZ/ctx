@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func TestSetRejectRetryAfterWithHinter(t *testing.T) {
 	adm := hintAdmitter{origin: "http://gpu:8089", hint: 12 * time.Second}
 	err := &llm.AdmissionError{Err: dispatch.ErrTargetSaturated, Host: "http://gpu:8089"}
 	rr := httptest.NewRecorder()
-	setRejectRetryAfter(rr, adm, err)
+	setRejectRetryAfter(rr, adm, err, dispatch.ClassInteractive)
 	if got := rr.Header().Get("Retry-After"); got != "12" {
 		t.Fatalf("Retry-After = %q, want \"12\"", got)
 	}
@@ -63,16 +64,47 @@ func TestSetRejectRetryAfterEmbedcacheError(t *testing.T) {
 	adm := hintAdmitter{origin: "http://embed:8081", hint: 3 * time.Second}
 	err := &embedcache.AdmissionError{Err: dispatch.ErrPrincipalSaturated, Host: "http://embed:8081"}
 	rr := httptest.NewRecorder()
-	setRejectRetryAfter(rr, adm, err)
+	setRejectRetryAfter(rr, adm, err, dispatch.ClassInteractive)
 	if got := rr.Header().Get("Retry-After"); got != "3" {
 		t.Fatalf("Retry-After = %q, want \"3\" (embedcache host extracted)", got)
+	}
+}
+
+// classHinter records the class the mapping asks the estimator for.
+type classHinter struct {
+	hintAdmitter
+	asked *[]dispatch.Class
+}
+
+func (a classHinter) RetryAfterHint(origin string, c dispatch.Class) time.Duration {
+	*a.asked = append(*a.asked, c)
+	return a.hintAdmitter.RetryAfterHint(origin, c)
+}
+
+// TestSetRejectRetryAfterClassParameter (A03-W8 (g), design/02 A03-3): the
+// class is the caller's parameter — the in-house sites pass interactive (B1
+// byte-identical: same estimate, same header), and the estimator is asked
+// for exactly the class it was given, never a fixed one.
+func TestSetRejectRetryAfterClassParameter(t *testing.T) {
+	var asked []dispatch.Class
+	adm := classHinter{hintAdmitter: hintAdmitter{origin: "http://gpu:8089", hint: 12 * time.Second}, asked: &asked}
+	err := &llm.AdmissionError{Err: dispatch.ErrTargetSaturated, Host: "http://gpu:8089"}
+	for _, c := range []dispatch.Class{dispatch.ClassInteractive, dispatch.ClassBackground} {
+		rr := httptest.NewRecorder()
+		setRejectRetryAfter(rr, adm, err, c)
+		if got := rr.Header().Get("Retry-After"); got != "12" {
+			t.Fatalf("class %v: Retry-After = %q, want \"12\"", c, got)
+		}
+	}
+	if want := []dispatch.Class{dispatch.ClassInteractive, dispatch.ClassBackground}; !slices.Equal(asked, want) {
+		t.Fatalf("estimator asked for %v, want %v (the caller's class, passed through)", asked, want)
 	}
 }
 
 func TestSetRejectRetryAfterNoHinter(t *testing.T) {
 	err := &llm.AdmissionError{Err: dispatch.ErrTargetSaturated, Host: "http://gpu:8089"}
 	rr := httptest.NewRecorder()
-	setRejectRetryAfter(rr, plainAdmitter{}, err)
+	setRejectRetryAfter(rr, plainAdmitter{}, err, dispatch.ClassInteractive)
 	if got := rr.Header().Get("Retry-After"); got != "" {
 		t.Fatalf("Retry-After = %q, want omitted (admitter is no RetryHinter)", got)
 	}
@@ -83,7 +115,7 @@ func TestSetRejectRetryAfterUnknownHost(t *testing.T) {
 	// Error carries a DIFFERENT host ⇒ hint 0 ⇒ header omitted.
 	err := &llm.AdmissionError{Err: dispatch.ErrTargetSaturated, Host: "http://other:1234"}
 	rr := httptest.NewRecorder()
-	setRejectRetryAfter(rr, adm, err)
+	setRejectRetryAfter(rr, adm, err, dispatch.ClassInteractive)
 	if got := rr.Header().Get("Retry-After"); got != "" {
 		t.Fatalf("Retry-After = %q, want omitted (unknown host, no fabricated value)", got)
 	}

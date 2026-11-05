@@ -52,7 +52,12 @@ import (
 )
 
 const (
-	c24Tenant = "tenant-a"
+	// c24Tenant is the tenant's type namespace: the HomeScope its keys carry,
+	// the key the registry resolves it by (#112). c24TenantID is the tenant
+	// UUID, deliberately a different string — a fixture whose TenantID equals
+	// its HomeScope cannot tell the two keys apart.
+	c24Tenant   = "tenant-a"
+	c24TenantID = "00000000-0000-0000-0000-0000000c24a0"
 	// c24Damped is the after-E-4 shape: damped with a bounded factor and a
 	// closed intent-pattern list — the two axes a policy/boolean check cannot
 	// see.
@@ -162,8 +167,8 @@ func TestC24OverlayWriteGate(t *testing.T) {
 		t.Fatalf("create actor key: %v", err)
 	}
 	tenantAdmin := &auth.AuthResult{
-		IsValid: true, ApiKeyID: actor.ID, HomeScope: "private",
-		ReadScopes: []string{"private"}, TenantID: c24Tenant, TenantRole: auth.RoleAdmin,
+		IsValid: true, ApiKeyID: actor.ID, HomeScope: c24Tenant,
+		ReadScopes: []string{c24Tenant}, TenantID: c24TenantID, TenantRole: auth.RoleAdmin,
 	}
 	serverAdmin := &auth.AuthResult{
 		IsValid: true, IsAdmin: true, ApiKeyID: actor.ID, HomeScope: "private",
@@ -391,9 +396,10 @@ func TestC24OverlayWriteGate(t *testing.T) {
 
 	// ── C. The SECOND transport: manage type-update ──────────────────────────
 	//
-	// blocktype_manage.go:241 patches through typeVisibleScopes(ar), which
-	// carries ar.TenantID — a server-admin key with a tenant id reaches the
-	// tenant row from the manage family too. One write logic, two transports:
+	// handleTypeUpdate (blocktype_manage.go) patches through
+	// typeVisibleScopes(ar), which carries the caller's tenant namespace (its
+	// HomeScope, #112) — a server-admin key homed in the tenant's scope reaches
+	// the tenant row from the manage family too. One write logic, two transports:
 	// a gate on only one of them is the divergent-gate anti-pattern the file
 	// header of types_write.go names.
 	t.Run("C_manage_type_update_cannot_loosen_an_overlay", func(t *testing.T) {
@@ -403,8 +409,8 @@ func TestC24OverlayWriteGate(t *testing.T) {
 		}
 		mh := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, reg)
 		adminInTenant := &auth.AuthResult{
-			IsValid: true, IsAdmin: true, ApiKeyID: actor.ID, HomeScope: "private",
-			ReadScopes: []string{"private"}, TenantID: c24Tenant, TenantRole: auth.RoleAdmin,
+			IsValid: true, IsAdmin: true, ApiKeyID: actor.ID, HomeScope: c24Tenant,
+			ReadScopes: []string{c24Tenant}, TenantID: c24TenantID, TenantRole: auth.RoleAdmin,
 		}
 		rec := typeManageReq(t, mh, adminInTenant, map[string]any{
 			"action": "type-update", "id": row.ID,

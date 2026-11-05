@@ -135,8 +135,42 @@ linters:
             - pkg: "github.com/GottZ/ctx/internal/config"
               desc: "internal/config may only be imported by cmd/**, internal/handler, internal/events, internal/settings (F1 layering rule — pass values as parameters instead)"
 
+        # W02-02 (design/02 §4.1, L6; B15c): internal/oai is the
+        # OpenAI-compatible wire surface that external model keys reach. It
+        # serves models, never the knowledge corpus: a corpus package imported
+        # here is one handler bug away from handing a model-key holder
+        # retrieval, chat over the corpus, dream state, the event stream or
+        # the block store. internal/config is already refused by
+        # config-layering above — values arrive through the injected
+        # func() oai.Settings getter. Tests are included: the harness has no
+        # business with the corpus either. depguard checks direct imports
+        # only; that the oai test binary is corpus-free transitively as well
+        # (go list -deps -test ./internal/oai/ = oai, plus backends and its
+        # leaves httpx, ssrfguard, pgxdb, llmusage for the W02-11 classifier
+        # totality test) is kept by the tests, which use a stand-in for the
+        # house Recovery instead of importing internal/handler. Deny
+        # prefixes end in "$" (exact match, see the leaf rules below).
+        oai-isolation:
+          files:
+            - "**/go/internal/oai/**"
+          deny:
+            - pkg: "github.com/GottZ/ctx/internal/rrf$"
+              desc: "internal/oai serves models, not the corpus — retrieval (rrf) is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "github.com/GottZ/ctx/internal/chat$"
+              desc: "internal/oai serves models, not the corpus — corpus chat is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "github.com/GottZ/ctx/internal/dream$"
+              desc: "internal/oai serves models, not the corpus — dream state is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "github.com/GottZ/ctx/internal/events$"
+              desc: "internal/oai serves models, not the corpus — the event stream is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "github.com/GottZ/ctx/internal/store$"
+              desc: "internal/oai serves models, not the corpus — the block store is out of reach of a model key (design/02 §4.1 L6, B15c)"
+            - pkg: "net/http/httputil$"
+              desc: "internal/oai never proxies to a backend itself — every upstream call is llm.ChatRaw/ChatRawStream under llm.WalkChain (admission, overlay, egress choice, header rule; design/02 §4.1 L4, B14/B19)"
+            - pkg: "crypto/tls$"
+              desc: "internal/oai dials no backend — TLS to a backend lives in the httpx pool clients behind the llm wire sites (design/02 §4.1 L4, B14/B19)"
+
         # Leaf doctrine (design/01-schnitt.md §4.5, masterplan K7/K11 + A-4).
-        # Five packages are leaves BY DESIGN; until now the doctrine lived only
+        # Seven packages are leaves BY DESIGN; until now the doctrine lived only
         # in their package comments, and a comment is not a gate. Every rule
         # below matches today's import graph exactly — nothing in the tree
         # changes, the NEXT violation just becomes a CI failure instead of a
@@ -144,7 +178,7 @@ linters:
         # above), and a deny prefix ending in "$" is an EXACT match in depguard
         # v2 — without it "…/internal/llm" would also block "…/internal/llmlog".
         #
-        # 1/5 — internal/util. The K11 wording verbatim: "sprachnahe
+        # 1/7 — internal/util. The K11 wording verbatim: "sprachnahe
         # Text-Primitiven — Runen, Tokens, Wörter-Tabellen; ausschließlich
         # stdlib." The package comment (util/strings.go:1-9) states the same
         # boundary in English — the standard library and NOTHING ELSE, no
@@ -161,7 +195,7 @@ linters:
             - pkg: "github.com/GottZ/ctx"
               desc: "internal/util is the stdlib-only leaf of language-near text primitives — runes, tokens, word tables (K11). A helper that needs a ctx package does not belong here; it belongs next to the thing it needs (util/strings.go:4-9)"
 
-        # 2/5 — internal/clientconfig: the ONE resolution rule for base URL and
+        # 2/7 — internal/clientconfig: the ONE resolution rule for base URL and
         # API key, shared by internal/cli and cmd/ctx-armsweep (T01-6).
         # Stdlib-only on purpose (clientconfig/config.go:6-10): a tool that
         # merely needs those two values must not link the command tree, and with
@@ -175,7 +209,7 @@ linters:
             - pkg: "github.com/GottZ/ctx"
               desc: "internal/clientconfig is the stdlib-only leaf that resolves base URL and API key for every ctx client — importing a ctx package here drags the command tree back into the tools that only wanted those two values (T01-6, clientconfig/config.go:6-10)"
 
-        # 3/5 — internal/visibility: THE shared "this block is visible" SQL
+        # 3/7 — internal/visibility: THE shared "this block is visible" SQL
         # fragment (WF T6). It lives OUTSIDE internal/store because rrf cannot
         # import store (store → blocktype → rrf would cycle); store, rrf and
         # overview all embed this package directly (visibility.go:4-11).
@@ -186,7 +220,7 @@ linters:
             - pkg: "github.com/GottZ/ctx/internal/store$"
               desc: "internal/visibility is a leaf so store, rrf and overview can share ONE visibility predicate — an import of store here re-creates the cycle the package exists to break (visibility.go:4-11)"
 
-        # 4/5 — internal/clustersql: THE shared "cluster membership, scope-pure"
+        # 4/7 — internal/clustersql: THE shared "cluster membership, scope-pure"
         # SQL fragment, a leaf for exactly the reason visibility is one — rrf
         # cannot import store, and the filter is needed by rrf, store and
         # potentially handler (clustersql.go:4-9).
@@ -199,7 +233,7 @@ linters:
             - pkg: "github.com/GottZ/ctx/internal/rrf$"
               desc: "internal/clustersql is a leaf so rrf, store and handler can share ONE cluster-membership fragment — rrf imports clustersql, so the reverse import is the cycle itself (clustersql.go:4-9)"
 
-        # 5/5 — internal/derived: the leaf property is a RULE, not the current
+        # 5/7 — internal/derived: the leaf property is a RULE, not the current
         # import list (derived.go:14-20). The DB-facing half of the contract
         # (store.ResolveSources) lives in store and calls INTO this package —
         # the same cut internal/visibility uses — and echo.go is an independent
@@ -216,6 +250,93 @@ linters:
               desc: "internal/derived must not import store, llm, blocktype or topiclabel — the derived type vocabulary stays independent of the registry package (derived.go:14-20)"
             - pkg: "github.com/GottZ/ctx/internal/topiclabel$"
               desc: "internal/derived must not import store, llm, blocktype or topiclabel — echo.go is deliberately an independent implementation of the topiclabel/guard.go index, not an import (derived.go:14-20)"
+
+        # 6/7 — internal/llmusage: THE reader of the hourly LLM-usage rollup
+        # (design/06 §4.7, W06-4). Its consumers are the quota accountant
+        # (internal/backends), the status rollups (internal/handler) and the
+        # usage API, so it imports none of them and no config: the pgxdb
+        # handle atoms, pgx and the standard library are all it needs
+        # (llmusage/window.go package comment). Tests are exempt — the
+        # integration test seeds through internal/testdb.
+        llmusage-leaf:
+          files:
+            - "**/go/internal/llmusage/**"
+            - "!$test"
+          # The allow list is the whole rule: anything else is refused
+          # ("not allowed from list 'llmusage-leaf'"). An import of one of
+          # its consumers or of config/store fails earlier still, as an
+          # import cycle (backends imports llmusage; config and store reach
+          # backends).
+          allow:
+            - "$gostd"
+            - "github.com/GottZ/ctx/internal/pgxdb$"
+            - "github.com/jackc/pgx/v5"
+
+        # 7/7 — internal/modelkey: the ctxm_ credential format of the model
+        # API (design/01 §4.1, W01-2) — Base62 body from crypto/rand, CRC32
+        # checksum, SHA-256 hash, hint. The store that mints keys, the knowledge
+        # paths that refuse them and the /v1 middleware that checks them all
+        # import it, so it imports none of them; and nothing third-party
+        # either, because whatever it imports sits on every authentication
+        # path. Hence allow = $gostd, with the ctx half carrying the message.
+        # $gostd includes math/rand and math/rand/v2, and both are named
+        # "rand" like crypto/rand — one wrong import and keys become
+        # predictable while every test stays green (unique, uniform: a
+        # seeded ChaCha8 passes both). The two denies close that.
+        modelkey-leaf:
+          files:
+            - "**/go/internal/modelkey/**"
+          allow:
+            - "$gostd"
+          deny:
+            - pkg: "github.com/GottZ/ctx"
+              desc: "internal/modelkey is the stdlib-only leaf that defines the ctxm_ model-key format — store, auth, handler and the /v1 middleware import it, so a ctx import here inverts that layering or closes a cycle (modelkey/modelkey.go package comment, design/01 §4.1)"
+            - pkg: "math/rand$"
+              desc: "model keys are secrets: their only randomness source is crypto/rand (modelkey.Generate) — math/rand is predictable, and no test can tell its output from crypto/rand's"
+            - pkg: "math/rand/v2$"
+              desc: "model keys are secrets: their only randomness source is crypto/rand (modelkey.Generate) — math/rand/v2 (also ChaCha8/PCG) is seedable and therefore predictable, and no test can tell its output from crypto/rand's"
+
+        # 8 (a leaf by design since F-W2, after the seven above) —
+        # internal/fedhop: the hop contract between ctx instances
+        # (design/04 §4.1, F-W2): the instance identity now, the hop header
+        # grammar, the hop token and the stamp of outgoing calls with the
+        # waves that follow. llm, embed, rerank, backends, httpx and handler
+        # import it, so it imports none of them and nothing of ctx at all —
+        # the standard library only (fedhop/identity.go package comment).
+        # Tests are included: the package needs nothing else to be tested.
+        # The hop token is minted from crypto/rand (F-W3); math/rand would
+        # make the nonce predictable while every uniqueness test stays green,
+        # hence the two denies of modelkey-leaf.
+        fedhop-leaf:
+          files:
+            - "**/go/internal/fedhop/**"
+          allow:
+            - "$gostd"
+          deny:
+            - pkg: "github.com/GottZ/ctx"
+              desc: "internal/fedhop is the stdlib-only leaf of the hop contract between ctx instances — llm, embed, rerank, backends, httpx and handler import it, so a ctx import here inverts that layering or closes a cycle (fedhop/identity.go package comment, design/04 §4.1)"
+            - pkg: "math/rand$"
+              desc: "the hop token's nonce and the instance key are secrets: their only randomness source is crypto/rand — math/rand is predictable, and no test can tell its output from crypto/rand's"
+            - pkg: "math/rand/v2$"
+              desc: "the hop token's nonce and the instance key are secrets: their only randomness source is crypto/rand — math/rand/v2 (also ChaCha8/PCG) is seedable and therefore predictable, and no test can tell its output from crypto/rand's"
+
+        # internal/federation (F-W9, design/04 §4.5–§4.7): the ingress policy
+        # of the model API — PeerIngress, ResolvePolicy, ScanRaise,
+        # FilterChain. It takes the consumer through an injected accessor and
+        # policy values as arguments, so it needs neither the HTTP handlers
+        # nor the store (config is refused by config-layering above): a
+        # handler or store import here would let the policy reach around the
+        # door it sits behind. The mesh test package fedtest is exempt — it
+        # assembles the real stack (handler.LoopGuard) on purpose.
+        federation-layering:
+          files:
+            - "**/go/internal/federation/**"
+            - "!**/go/internal/federation/fedtest/**"
+          deny:
+            - pkg: "github.com/GottZ/ctx/internal/handler$"
+              desc: "internal/federation takes the consumer through an injected accessor (PeerIngressConfig.Consumer) — importing handler inverts the layering of the /v1 stack (cmd/ctxd wires handler.ConsumerAuthFromContext in; design/04 §4.6, F-W9)"
+            - pkg: "github.com/GottZ/ctx/internal/store$"
+              desc: "internal/federation is pure policy over the request — no database: the consumer row arrives as auth.ConsumerAuth, the learned instances as a map (design/04 §4.5–§4.7, F-W9)"
 
         # evalscore stays TOOLING (design/06 §4.7, masterplan K18 + A-15).
         # internal/evalscore is the measurement vocabulary of the gold bench —

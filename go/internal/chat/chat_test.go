@@ -90,26 +90,6 @@ func TestToWireRoundtripsToolCalls(t *testing.T) {
 	}
 }
 
-func TestBackendMaxTokens(t *testing.T) {
-	cases := []struct {
-		name   string
-		limits map[string]any
-		want   int
-	}{
-		{"absent", nil, 0},
-		{"json float", map[string]any{"chat_max_tokens": float64(512)}, 512},
-		{"int", map[string]any{"chat_max_tokens": 512}, 512},
-		{"other key ignored", map[string]any{"foo": 1.0}, 0},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := backendMaxTokens(backends.Backend{Limits: c.limits}); got != c.want {
-				t.Errorf("backendMaxTokens = %d; want %d", got, c.want)
-			}
-		})
-	}
-}
-
 func TestTokenClampPrefersSmallest(t *testing.T) {
 	e := NewEngine(nil, nil, nil, Config{MaxTokens: 2048}, nil)
 	// Backend CPU clamp 512 beats the global 2048; budget 300 beats both.

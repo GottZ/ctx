@@ -41,6 +41,27 @@ export interface WhoamiResponse {
   capabilities?: {
     /** The issue/board workflow surface is enabled for this key's tenant. */
     workflow?: boolean
+    /**
+     * The gateway policy (handler/whoami.go WhoamiModelAPI, design/05 §4.6,
+     * wave W05-01) — server data, folded into capabilitiesFor → viewModelApi /
+     * mintModelKeys. Durations are whole seconds straight from the server's
+     * settings (gateway.key_max_lifetime_app, gateway.key_rotation_grace,
+     * gateway.key_expiry_warn); the SPA carries no copy of them. OPTIONAL +
+     * additive: absent on a pre-W05-01 server ⇒ both caps false below
+     * server-admin. The server enforces minting on its own (V-01-c).
+     */
+    model_api?: {
+      /** gateway.enabled. */
+      enabled: boolean
+      /** gateway.tenant_self_service — opens minting to tenant-admins only with `enabled`. */
+      self_service: boolean
+      /** Default and ceiling of a new app key's expiry; 0 = no ceiling. */
+      key_max_lifetime_s: number
+      /** Default grace of a rotation: how long the predecessor key stays valid. */
+      rotation_grace_s: number
+      /** Window before expiry in which a key reads as expiring (display only — status is server-side). */
+      expiry_warn_s: number
+    }
   }
   // Per-Session CSRF-Synchronizer (design 05 §4.4, OAuth R4). NUR am Cookie-
   // Pfad gesetzt (whoami.go, omitempty) — Header-Credential-Calls sehen das
@@ -395,10 +416,13 @@ export interface DispatchPreempt {
 }
 
 // Source: status_dispatch.go (dispatchBucket) — per-fair-key detail. SERVER-
-// ADMIN ONLY: fair_key is principal identity (HomeScope) and NEVER appears in
-// the tenant shape.
+// ADMIN ONLY: fair_key is principal identity (HomeScope, or _consumer:<id> for
+// an external consumer bucket) and NEVER appears in the tenant shape. `class`
+// names the queue of the bucket.
 export interface DispatchBucket {
   fair_key: string
+  tenant_id: string
+  class: 'interactive' | 'external'
   waiting: number
   oldest_wait_ms: number
   inflight: number
@@ -413,8 +437,17 @@ export interface DispatchEmbedTokens {
   prompt_tokens: number
 }
 
+// Source: status_dispatch.go (dispatchExternalRejects) — the external class's
+// refusals per reason (A03-W3): the cap ladder and "target does not offer".
+export interface DispatchExternalRejects {
+  cap: number
+  not_offered: number
+}
+
 // Source: status_dispatch.go (dispatchTarget) — one backend target's live
 // occupancy + wait/preempt aggregates + per-fair-key buckets. SERVER-ADMIN.
+// `held` counts internal AND external slot-holding leases (held_internal +
+// held_external); the external fields are the A03-W3 partition view.
 export interface DispatchTarget {
   origin: string
   slots: number
@@ -422,6 +455,14 @@ export interface DispatchTarget {
   herald_scope: string
   held: number
   inflight: number
+  held_internal: number
+  held_external: number
+  inflight_internal: number
+  internal_reserved: number
+  external_offered: boolean
+  external_capacity: number
+  external: DispatchWait
+  external_rejects: DispatchExternalRejects
   interactive: DispatchWait
   background: DispatchWait
   preempt: DispatchPreempt
@@ -436,6 +477,8 @@ export interface DispatchStatus {
   demand: number
   reaps_total: number
   class_downgrades: number
+  class_unauthorized: number
+  principal_conflicts: number
   uncharged_calls: number
   ops_total: number
   max_op_ms: number
@@ -1379,4 +1422,142 @@ export interface SyncStatusResponse {
 export interface SyncStartResponse {
   success: true
   run: SyncRunStatus
+}
+
+// =============================================================================
+// Model API consumers — read wire contract (design/05 §3.2, wave W05-05).
+// Drift anchor = the Go structs consumerView / keyView / peerView in
+// internal/handler/model_consumers_read.go, whose JSON keys are pinned by
+// TestConsumerViewGoldenKeys. No type here has a field for a key hash or a
+// plaintext key — the secret is absent by structure, exactly like the Go side.
+// The status strings are the SERVER's verdict at its own clock (B-11); the SPA
+// renders them and never derives a status from expires_at.
+// =============================================================================
+
+/** Consumer status (store.ConsumerStatuses, design/05 §3.2). */
+export type ConsumerStatus = 'active' | 'expiring' | 'rotating' | 'no_key' | 'inactive'
+
+/** Model-key status in precedence order revoked ≻ expired ≻ superseded ≻ expiring ≻ active. */
+export type ModelKeyStatus = 'revoked' | 'expired' | 'superseded' | 'expiring' | 'active'
+
+/** One model key: its hint and lifecycle, never the secret (keyView). */
+export interface KeyView {
+  id: string
+  /** key_hint, e.g. "ctxm_…a9Fq" — the only part of a key the read path carries. */
+  hint: string
+  status: ModelKeyStatus
+  created_at: string
+  expires_at: string | null
+  revoked_at: string | null
+  rotated_from: string | null
+  /** Throttled to one write per minute per key server-side — render as ±1 min. */
+  last_used_at: string | null
+}
+
+/** Binding of a ctx-peer consumer to the instance that proved itself — server-admin only (peerView). */
+export interface PeerView {
+  instance_id: string
+  bound_at: string
+}
+
+/** One model consumer as the administration answers it (consumerView). */
+export interface ConsumerView {
+  id: string
+  tenant_id: string
+  tenant_slug: string
+  label: string
+  description: string
+  /** app | ctx-peer — derived at create, immutable. Bare string for forward-compat. */
+  kind: string
+  /** null = only the _global catalog. */
+  tenant_scope: string | null
+  /** true = every offered model incl. future ones. */
+  all_models: boolean
+  /** The model aliases granted one by one (W01-9): sorted alias IDS, [] = none (never a name, never "*"). */
+  models: string[]
+  prompt_sensitivity: string
+  fair_weight: number
+  admission_lane: string
+  /** null = any source address. */
+  allowed_cidrs: string[] | null
+  allow_plaintext: boolean
+  active: boolean
+  status: ConsumerStatus
+  /** max over the keys, 60 s precision. */
+  last_used_at: string | null
+  created_at: string
+  /** Masked below server-admin unless the creator is a key of the reader's own tenant. */
+  created_by_label: string | null
+  /** list: the live keys (≤ 2); get: the chain. */
+  keys: KeyView[]
+  /** Length of the whole key chain. */
+  keys_total: number
+  /** null = no peer binding, or a reader below server-admin. */
+  peer: PeerView | null
+}
+
+/** model-consumer-list answer: one keyset page; next_cursor is opaque, null on the last page. */
+export interface ConsumerListResponse {
+  success: true
+  consumers: ConsumerView[]
+  next_cursor: string | null
+}
+
+// --- Model API mutations + picker reads (wave W05-06, design/05 §4.2). Drift
+// anchor = internal/handler/model_consumers.go (create/delete/update/revoke
+// answers) and model_alias_manage.go modelAliasView + the list's `writable`.
+
+/**
+ * model-consumer-create answer: the consumer with its first key, and the key's
+ * PLAINTEXT exactly once (`api_key`, ctxm_…). The caller reveals it through
+ * RevealOnceKey and drops it — no store, no storage, no log ever holds it
+ * (design/05 §5 B-6).
+ */
+export interface ConsumerCreateResult {
+  success: true
+  consumer: ConsumerView
+  api_key: string
+}
+
+/** model-consumer-update answer (reactivation). */
+export interface ConsumerUpdateResult {
+  success: true
+  consumer: ConsumerView
+}
+
+/**
+ * model-consumer-delete / model-key-revoke answer. cancelled_inflight is the
+ * number of running requests the server ended — null until it can end and
+ * count them (W01-8), never a 0 that would claim none ran (V-01-e).
+ */
+export interface ConsumerRevokeResult {
+  success: true
+  cancelled_inflight: number | null
+}
+
+/** One model alias as model-alias-list answers it (modelAliasView + writable). */
+export interface ModelAliasView {
+  id: string
+  /** '_global' or the tenant scope the alias belongs to. */
+  scope: string
+  /** The OpenAI model id external callers name. */
+  name: string
+  /** chat | embedding | rerank (immutable). Bare string for forward-compat. */
+  kind: string
+  role: string
+  sensitivity: string
+  policy: Record<string, unknown>
+  description: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+  /** The caller may edit this row (server-admin: all; tenant-admin: its home scope). */
+  writable: boolean
+}
+
+/** model-alias-list answer — a tenant-admin reads _global + its home scope, a server-admin every scope. */
+export interface ModelAliasListResponse {
+  success: true
+  model_aliases: ModelAliasView[]
+  count: number
 }

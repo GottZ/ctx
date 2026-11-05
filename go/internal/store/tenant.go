@@ -152,6 +152,14 @@ type Tenant struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 	MaxScopes   *int      `json:"max_scopes"` // nil = unlimited (069 max_scopes)
 	MaxKeys     *int      `json:"max_keys"`   // nil = unlimited (069 max_keys)
+	// MaxModelConsumers caps the tenant's ACTIVE model consumers (161
+	// max_model_consumers, default 64); nil = unlimited. NOT part of
+	// tenantCols: the tenant read path is shared with repair tests that run
+	// the store against a schema before 161 (SetupTestDBUpTo(t, 155) +
+	// CreateTenant), so the 161 column is read on demand by
+	// TenantModelConsumerCap — today only for the echo of tenant-limit-set —
+	// and is absent from every other tenant response.
+	MaxModelConsumers *int `json:"max_model_consumers,omitempty"`
 }
 
 // ErrTenantNotFound is returned by GetTenant/UpdateTenant when no tenant matches
@@ -417,6 +425,49 @@ func SetTenantLimits(ctx context.Context, pool *pgxpool.Pool, tenantID string, m
 	return nil
 }
 
+// SetTenantLimitsWithModelConsumers is SetTenantLimits plus the model
+// consumer cap (161 max_model_consumers, N22) in the same UPDATE: the
+// optional field of tenant-limit-set, written only when the request carries
+// it — an absent field keeps the column as it is, which is why this is a
+// second function and not a third pointer on SetTenantLimits (nil already
+// means unlimited there). nil = unlimited; the 161 CHECK (>= 0) is the
+// backstop, the range check is the handler's.
+func SetTenantLimitsWithModelConsumers(ctx context.Context, pool *pgxpool.Pool, tenantID string, maxScopes, maxKeys, maxModelConsumers *int) error {
+	if tenantID == "" {
+		return ErrTenantNotFound
+	}
+	tag, err := pool.Exec(ctx,
+		`UPDATE context_tenants
+		    SET max_scopes = $2, max_keys = $3, max_model_consumers = $4, updated_at = now()
+		  WHERE id = $1::uuid`, tenantID, maxScopes, maxKeys, maxModelConsumers)
+	if err != nil {
+		if pgxdb.AbsentOrMalformed(err) {
+			return ErrTenantNotFound
+		}
+		return fmt.Errorf("store: set tenant limits: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrTenantNotFound
+	}
+	return nil
+}
+
+// TenantModelConsumerCap reads max_model_consumers (161) of one tenant —
+// nil = unlimited. The one reader of the column on the tenant row: the echo
+// of tenant-limit-set (see Tenant.MaxModelConsumers for why it is not in
+// tenantCols). An unknown or malformed id is ErrTenantNotFound.
+func TenantModelConsumerCap(ctx context.Context, pool *pgxpool.Pool, tenantID string) (*int, error) {
+	var capacity *int
+	err := pool.QueryRow(ctx, `SELECT max_model_consumers FROM context_tenants WHERE id = $1::uuid`, tenantID).Scan(&capacity)
+	if errors.Is(err, pgx.ErrNoRows) || pgxdb.AbsentOrMalformed(err) {
+		return nil, ErrTenantNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: tenant model consumer cap: %w", err)
+	}
+	return capacity, nil
+}
+
 // SetTenantLimitsTx is the tx-composable column write behind the compound
 // tenant-create limit seeding: the same typed-column UPDATE as SetTenantLimits,
 // but against a caller-owned transaction (pgx.Tx) so the caps commit IN THE SAME
@@ -469,7 +520,8 @@ const pruneBatchSize = 2000
 //	blocks/blobs/sources/sessions have no hard inter-ordering among themselves.
 //
 // TENANT-DECISION(tenant-prune-order): dream_links→blocks→blobs→sources→
-// chat_sessions, then keys (HARD), then tenant (CASCADE clears tenant_scopes).
+// chat_sessions, then model keys + model consumers + knowledge keys
+// (context_api_keys; HARD, one tx), then tenant (CASCADE clears tenant_scopes).
 // Umentscheidbar only if a future migration sets the dream_links FK to ON DELETE
 // CASCADE (then step 1 would be redundant) — while 016:18-19 has no ON DELETE,
 // links-first is forced (design/01 §4.3.1).
@@ -496,7 +548,7 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 
 // PruneTenant is the full-prune behind tenant-delete (T05b, design/01 §4.3.1): an
 // FK-ordered, batched mass-DELETE of the tenant's scope-carried data, then its
-// keys, then the tenant row. It is deliberately NOT a metadata-only step and NOT a
+// model consumers and keys (step 7b), then its knowledge keys, then the tenant row. It is deliberately NOT a metadata-only step and NOT a
 // single-Tx CASCADE: the data (blocks/links/blobs/sources/sessions) is tenant-LESS
 // (scope-discriminated, Modell C), there is no implicit CASCADE onto
 // context_blocks, and at 1M+ blocks a single mass-DELETE would be an over-large
@@ -517,7 +569,32 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 // to Option A (DELETE ... WHERE api_key_id = ANY(keys) BEFORE the key delete) when
 // a deployment needs a full compliance body-wipe on offboarding — but that is the
 // Policy axis (§9 N11), not this mechanism wave.
-func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string) error {
+//
+// MODEL CONSUMERS (step 7b, design/01 §4.6 I-K6, B25): context_model_consumers
+// .tenant_id and context_model_keys.consumer_id are ON DELETE RESTRICT (161), so
+// a tenant with a consumer would fail step 8 with 23001 AFTER steps 1-7 already
+// ran (a half-pruned tenant). Step 7b hard-deletes the tenant's model keys, then
+// its consumers — two statements, keys first, so each key's prune row still
+// resolves metadata.tenant_id through its consumer (a single CTE over both
+// would lose it) — after locking the tenant's consumer rows FOR UPDATE, the
+// consumer-then-keys order of every consumer writer (model_keys.go), which
+// keeps a concurrent rotation or deactivation from deadlocking against it. It runs inside the step-7 transaction BEFORE the knowledge-key
+// delete: the consumers' and keys' created_by_key/revoked_by_key reference
+// context_api_keys ON DELETE SET NULL, and deleting the dependants first spares
+// those updates on rows that are about to go. A rotation chain goes in one
+// statement (rotated_from is SET NULL, the successor dies in the same
+// statement). No batching: max_model_consumers caps a tenant at 64 consumers by
+// default, a few rows each. This is the ONE delete path of both tables.
+// The consumers' model grants (164) would go by ON DELETE CASCADE, but a
+// cascaded grant's ungrant row finds its consumer gone (no metadata.tenant_id,
+// scope '_global': server-admin-only history of a tenant-admin's grants) — so
+// they are deleted first, in a statement of their own, under the same lock.
+//
+// stamp attributes the hard deletes of steps 7b and 7 in the audit trail
+// (migrations 160, 161): they run in one transaction stamped with the caller's
+// actor and request id and ALWAYS via='offboarding' — whatever stamp.Via says —
+// so the prune/delete rows name the offboarding, never a psql edit.
+func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp AuditStamp) error {
 	// Existence + the malformed/absent → ErrTenantNotFound contract, reusing the
 	// same oracle as GetTenant (no 22P02 → 500 side-channel).
 	if _, err := GetTenant(ctx, pool, tenantID); err != nil {
@@ -566,10 +643,40 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string) error
 	if _, err := pool.Exec(ctx, `DELETE FROM context_projects WHERE tenant_id = $1::uuid`, tenantID); err != nil {
 		return fmt.Errorf("store: prune tenant projects: %w", err)
 	}
-	// 7: HARD-delete the tenant's keys. DeleteApiKey is a SOFT delete (active=
+	// 7b + 7: HARD-delete the tenant's model keys and model consumers (7b, see
+	// above), then its knowledge keys (7). DeleteApiKey is a SOFT delete (active=
 	// false, api_keys.go:102) which would leave the RESTRICT FK and block step 8
-	// with 23001.
-	if _, err := pool.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID); err != nil {
+	// with 23001; so would a deactivated consumer.
+	stamp.Via = ViaOffboarding
+	if err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		if err := stampAudit(ctx, tx, stamp); err != nil {
+			return err
+		}
+		// Consumer rows first, keys after: the lock order of every consumer
+		// writer (RotateKey/UpdateConsumer lock the consumer FOR UPDATE, then
+		// write its keys; so does the deactivation trigger). Deleting the keys
+		// first would hold them while waiting for a consumer such a writer
+		// holds — a deadlock (40P01) that rolls this step back.
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM context_model_consumers WHERE tenant_id = $1::uuid ORDER BY id FOR UPDATE`, tenantID); err != nil {
+			return fmt.Errorf("model consumers lock: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM context_model_consumer_grants WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
+			tenantID); err != nil {
+			return fmt.Errorf("model grants: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM context_model_keys WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
+			tenantID); err != nil {
+			return fmt.Errorf("model keys: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM context_model_consumers WHERE tenant_id = $1::uuid`, tenantID); err != nil {
+			return fmt.Errorf("model consumers: %w", err)
+		}
+		_, err := tx.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID)
+		return err
+	}); err != nil {
 		return fmt.Errorf("store: prune tenant keys: %w", err)
 	}
 	// 8: the tenant row last; ON DELETE CASCADE clears context_tenant_scopes.

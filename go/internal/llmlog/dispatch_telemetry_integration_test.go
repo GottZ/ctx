@@ -139,8 +139,10 @@ func TestDispatchTelemetryMigrationOnChunkedHypertable(t *testing.T) {
 	ctx := context.Background()
 
 	// Revert 091 so the replay hits a populated table (SetupTestDB already
-	// applied everything).
+	// applied everything). The rollup trigger of 159 reads the 091 columns,
+	// and a database at 091 predates it, so it goes first.
 	if _, err := pool.Exec(ctx, `
+		DROP TRIGGER IF EXISTS trg_llm_usage_rollup ON context_llm_log;
 		DROP INDEX IF EXISTS idx_llm_log_dispatch_abort;
 		ALTER TABLE context_llm_log
 		    DROP COLUMN IF EXISTS queue_wait_ms,

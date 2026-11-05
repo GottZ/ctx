@@ -47,7 +47,7 @@ func TestTenantBootstrapTx_Integration(t *testing.T) {
 			_ = tx.Rollback(ctx)
 			t.Fatalf("AssignTenantScopeTx: %v", err)
 		}
-		if _, _, err := store.MintOwnerKey(ctx, tx, "txb owner", "txb-acme:main", []string{"txb-acme:main"}, tn.ID); err != nil {
+		if _, _, err := store.MintOwnerKey(ctx, tx, "txb owner", "txb-acme:main", []string{"txb-acme:main"}, tn.ID, store.AuditStamp{}); err != nil {
 			_ = tx.Rollback(ctx)
 			t.Fatalf("MintOwnerKey: %v", err)
 		}
@@ -102,7 +102,7 @@ func TestTenantBootstrapTx_Integration(t *testing.T) {
 			_ = tx.Rollback(ctx)
 			t.Fatal("cap-free assign reported created=false")
 		}
-		key, plaintext, err := store.MintOwnerKey(ctx, tx, "txb owner", "txb-globex:main", []string{"txb-globex:main"}, tn.ID)
+		key, plaintext, err := store.MintOwnerKey(ctx, tx, "txb owner", "txb-globex:main", []string{"txb-globex:main"}, tn.ID, store.AuditStamp{})
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			t.Fatalf("MintOwnerKey: %v", err)

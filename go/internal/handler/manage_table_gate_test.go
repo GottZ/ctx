@@ -115,7 +115,7 @@ func TestManageTable_RowsAreWellFormed(t *testing.T) {
 			}
 		case row.tier == tierUnset:
 			t.Errorf("manageActions[%q]: no tier — the row would be refused with a 500 at dispatch", action)
-		case row.tier != tierOpen && row.tier != tierTenantAdmin && row.tier != tierServerAdmin:
+		case row.tier != tierOpen && row.tier != tierTenantAdmin && row.tier != tierServerAdmin && row.tier != tierSelfService:
 			t.Errorf("manageActions[%q]: tier %d is outside the declared adminTier set", action, row.tier)
 		}
 	}

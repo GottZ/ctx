@@ -34,7 +34,7 @@ It speaks **MCP, a CLI, and a plain HTTP API**, ships an embedded web UI, and is
 | **Multi-tenancy** | Three-level tenant/scope/block isolation, grants, quotas, self-service onboarding — [multi-tenancy](docs/multi-tenancy.md) |
 | **Issues & forge sync** | Per-project issue/comment corpus (own scope = own repo), kanban board, policy-validated workflow-status transitions, and GitHub pull/push sync — [api](docs/api.md#project-issues-read-surface) · [cli](docs/cli.md#issues) |
 | **Sealed secrets** | AES-256-GCM provider credentials + trust×sensitivity egress gating — [security](docs/security.md) |
-| **Web UI** | Embedded Svelte 5 admin SPA: settings, graph, corpus, status, chat, issues, type-registry admin — [development](docs/development.md#web-ui-svelte-5--typescript--vite-bun) |
+| **Web UI** | Embedded Svelte 5 admin SPA: settings, graph, corpus, status, chat, issues, type-registry admin, model API consumers (create with a reveal-once key, revoke) — [development](docs/development.md#web-ui-svelte-5--typescript--vite-bun) |
 | **MCP / CLI / HTTP** | Three access paths to the same store, OAuth 2.1 for remote MCP — [api](docs/api.md) |
 
 ## Quick install
@@ -84,9 +84,9 @@ Running the server (Go daemon + PostgreSQL 18 + pgvector) is `docker compose up 
 
 ## How LLMs use ctx
 
-ctx is designed to be the persistent memory layer for LLM agents. Five primitives, composable:
+ctx is not a tool an agent picks up beside its work — it is the agent's persistent memory. "LLM" here means every agent that works against the store: the interactive session, and each subagent or workflow agent it starts, alike. Each one retrieves before it works and persists its own findings after: **retrieve before, persist after**. Five primitives, composable:
 
-| Use case | Tool | When |
+| Use case | Call | When |
 |----------|------|------|
 | **Retrieve** prior knowledge before answering | `ctx query "question"` | Whenever the answer might depend on past sessions, project state, or stored decisions |
 | **Persist** a new finding | `ctx save <category> <title> - <content>` | After non-obvious discoveries, architecture decisions, resolved bugs, config changes |
@@ -102,7 +102,9 @@ ctx is designed to be the persistent memory layer for LLM agents. Five primitive
 2. **CLI** — `/usr/local/bin/ctx` — shell pipelines, cron, scripts. Config in `~/.config/ctx/config`.
 3. **HTTP** — `POST /api/{query,store,search,manage}` direct — fallback when MCP/CLI unavailable.
 
-Using a shared memory *well* takes discipline against drift — see [using ctx effectively](docs/using-ctx-effectively.md).
+**Hooks are for agents without a conversation of their own.** A subagent starts with nothing but its prompt and ends with a single final message. `ctx brief --hook` (Claude Code `SubagentStart`) injects the project's most recently updated `agent-briefing` blocks (up to `--limit`, default 20) into its context — and, when the project-tagged lookup returns nothing or fails (a transport error, a malformed or unsuccessful response), the most recently updated `agent-briefing` blocks the key can read, whatever their tags (#58); `ctx persist --hook` (`SubagentStop`) sends each `[PERSIST:category:title]` marker line in its last message, with the non-empty content that follows it, to `store` — an upsert on category and title, so a title that already exists in the key's scope replaces that block. A write the store never receives or rejects is dropped silently and not counted as saved. They give such an agent the same loop a session runs by hand — they are not tools for the session. Setup in [operations](docs/operations.md#claude-code-integration-optional).
+
+How an agent should regard ctx, and what goes wrong when it treats the store as a tool: [ctx as agent memory](docs/ctx-as-agent-memory.md). Keeping that memory from drifting is a separate discipline: [using ctx effectively](docs/using-ctx-effectively.md).
 
 ## Documentation
 
@@ -116,9 +118,10 @@ Using a shared memory *well* takes discipline against drift — see [using ctx e
 | [Security](docs/security.md) | Admin tier, sealed secrets & break-glass, trust×sensitivity gating, sensitivity classification |
 | [Operations](docs/operations.md) | Setup, environment variables, boot validation, backups, deploy & migrations |
 | [Development](docs/development.md) | Building, the Svelte web UI, tests, visual baseline governance, git hooks |
+| [ctx as agent memory](docs/ctx-as-agent-memory.md) | ctx is the agent's memory, not a tool beside it: the loop for sessions and subagents, and the failure modes of treating it as a tool |
 | [Using ctx effectively](docs/using-ctx-effectively.md) | Memory drift, agent discipline, RLHF calibration |
 | [Contributing](CONTRIBUTING.md) · [Governance](GOVERNANCE.md) | Pull requests, coding standards, roles, how `root` changes, releases |
-| [Hermes integration](integrations/hermes/README.md) | `ctx_checkpoint`, the ctx memory provider for [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent): durable, fail-closed pre-compaction checkpoints over Hermes' MCP dispatch (no credentials of its own) and, with `memory: true`, recall, `ctx_*` agent tools, memory mirror, fact extraction, session digests and a bundled skill — the memory engine contributed by derLonius (W4-NERF) as [hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin), folded in with 0.6.0; the checkpoint side is listed in the [Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint) (`hermes plugins install ctx_checkpoint`, then the Desktop memory form or `hermes memory setup ctx_checkpoint` — no YAML editing); the checkpoint contract version is negotiated at runtime against the loading host and recorded in every block's metadata |
+| [Hermes integration](integrations/hermes/README.md) | `ctx_checkpoint`, the ctx memory provider for [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent): durable, fail-closed pre-compaction checkpoints over Hermes' MCP dispatch (no credentials of its own) and, with `memory: true`, recall, `ctx_*` agent tools, memory mirror, fact extraction, session digests and a bundled skill — the memory engine contributed by derLonius (W4-NERF) as [hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin), folded in with 0.6.0; both sides are listed in the [Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint) (`hermes plugins install ctx_checkpoint`, then the Desktop memory form or `hermes memory setup ctx_checkpoint` — no YAML editing); the checkpoint contract version is negotiated at runtime against the loading host and recorded in every block's metadata |
 
 ## Built with AI agents
 

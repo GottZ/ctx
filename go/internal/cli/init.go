@@ -17,6 +17,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/clientconfig"
+	"github.com/GottZ/ctx/internal/modelkey"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -244,9 +245,12 @@ const maxKeyAttempts = 3
 const maxListedPositions = 8
 
 // The server's credential grammar (handler.resolveCredential): these prefixes
-// mark OAuth tokens, everything else is a raw key. Mirrored rather than
-// imported — the CLI does not link the store; TestOAuthPrefixesMirrorServer
-// pins the two values.
+// mark OAuth tokens, ctxm_ marks a model key, everything else is a raw key.
+// The token prefixes are mirrored rather than imported — the CLI does not link
+// the store; TestOAuthPrefixesMirrorServer pins the two values. The model-key
+// check is imported instead: internal/modelkey is a stdlib-only leaf (depguard
+// modelkey-leaf), so the CLI asks the server's own predicate and nothing can
+// drift.
 const (
 	oauthAccessTokenPrefix  = "ctxt_"
 	oauthRefreshTokenPrefix = "ctxr_"
@@ -260,6 +264,9 @@ const (
 func keyFormProblem(key string) string {
 	if strings.HasPrefix(key, oauthAccessTokenPrefix) || strings.HasPrefix(key, oauthRefreshTokenPrefix) {
 		return "this is an OAuth token, not an API key — tokens expire, the config needs the API key itself"
+	}
+	if modelkey.HasPrefix(key) {
+		return "this is a model key for the /v1 model API, not a ctx API key — the server refuses it on every knowledge path, the config needs the 64-hex API key"
 	}
 	var nonHex, upper []int
 	n := 0

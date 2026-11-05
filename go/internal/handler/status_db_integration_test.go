@@ -440,6 +440,15 @@ func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 		// the whole-config re-validation Replace runs. Taken WHOLE from the
 		// registry so a key added to the group needs no edit here.
 		Distill: config.Defaults().Distill,
+		// W06-8: the foreign-load detector's timeout and hysteresis carry
+		// fatal floors (V37) — same class, taken whole from the registry.
+		Status: config.Defaults().Status,
+		// W02-02: the gateway group's sizes and durations carry fatal floors
+		// (V38/V39) — same class, taken whole from the registry.
+		Gateway:    config.Defaults().Gateway,
+		Federation: config.Defaults().Federation, // F-W8: V43 range
+		// A03-W6: dispatch.external_retry_after_steps is fatal when empty (V46).
+		Dispatch: config.DispatchConfig{ExternalRetryAfterSteps: config.Defaults().Dispatch.ExternalRetryAfterSteps},
 	}
 }
 

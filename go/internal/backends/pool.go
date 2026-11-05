@@ -53,6 +53,9 @@ type healthState struct {
 	lastErrClass     ErrClass
 	lastErrAt        time.Time
 	lastOK           time.Time
+	// peerInstance is the last Ctx-Instance the row answered with ("" =
+	// never; NotePeerInstance, F-W4) — the source of HintAnswersAsCtxInstance.
+	peerInstance string
 }
 
 // Profile is one row of context_disable_profiles (092, Web-UX U01-W1): a named,
@@ -626,10 +629,17 @@ func (p *Pool) cooldownSet(list []Backend, now time.Time) map[string]bool {
 	return out
 }
 
+// failBackoffCap bounds the doubling of ReportFailure — the back-off, never
+// the class cooldown itself.
+const failBackoffCap = 10 * time.Minute
+
 // ReportFailure records one failed attempt: class cooldown (doubled after
-// ≥3 consecutive fails, capped at 10 minutes — cheap backoff, no circuit
-// breaker state machine) and the sanitized error class. Full error strings
-// (URLs, provider bodies) exist in slog only — never here, never in status.
+// ≥3 consecutive fails up to 10 minutes — cheap backoff, no circuit breaker
+// state machine) and the sanitized error class. The doubling never shortens
+// a class cooldown longer than its cap (W02-11): billing and no_providers
+// keep their hour, auth its 15 minutes, a peer's spent quota its full
+// Retry-After (design/06 K-06-26). Full error strings (URLs, provider bodies)
+// exist in slog only — never here, never in status.
 func (p *Pool) ReportFailure(backendID string, class ErrClass, retryAfter time.Duration) {
 	p.healthM.Lock()
 	defer p.healthM.Unlock()
@@ -643,10 +653,7 @@ func (p *Pool) ReportFailure(backendID string, class ErrClass, retryAfter time.D
 	h.lastErrAt = time.Now()
 	cd := class.Cooldown(retryAfter)
 	if h.consecutiveFails >= 3 && cd > 0 {
-		cd *= 2
-		if cd > 10*time.Minute {
-			cd = 10 * time.Minute
-		}
+		cd = max(cd, min(2*cd, failBackoffCap))
 	}
 	if cd > 0 {
 		h.cooldownUntil = time.Now().Add(cd)
@@ -689,6 +696,10 @@ type BackendStatus struct {
 	ConsecutiveFails   int      `json:"consecutive_fails"`
 	LastErrorClass     string   `json:"last_error_class,omitempty"`
 	LastOK             string   `json:"last_ok,omitempty"`
+	// Hints are machine codes of what the wire learned about the row and the
+	// admin should act on (F-W4: HintAnswersAsCtxInstance); omitted when none.
+	// Codes only — no instance id, no URL.
+	Hints []string `json:"hints,omitempty"`
 }
 
 // AdvisorySubjectPool and AdvisoryStateEmpty name the empty-pool advisory
@@ -747,6 +758,9 @@ func (p *Pool) Status() []BackendStatus {
 			if b.Enabled && s.EffectiveState == "active" && h.cooldownUntil.After(now) {
 				s.EffectiveState = "cooldown"
 				s.CooldownRemaining = int(time.Until(h.cooldownUntil).Seconds())
+			}
+			if h.peerInstance != "" {
+				s.Hints = []string{HintAnswersAsCtxInstance}
 			}
 		}
 		out = append(out, s)

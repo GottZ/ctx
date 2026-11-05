@@ -71,7 +71,7 @@ func (h *ManageHandler) handleTenantQuotaGet(w http.ResponseWriter, r *http.Requ
 // action tier). The scope must be a real tenant scope — never _global or a
 // '_'-reserved system scope (063 keeps the global default in a settings key, not
 // this table). on_exceed is validated before the DB CHECK for a clean 422.
-func (h *ManageHandler) handleTenantQuotaSet(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, req manageRequest) {
+func (h *ManageHandler) handleTenantQuotaSet(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	if len(req.Data) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "data payload required"})
@@ -114,7 +114,7 @@ func (h *ManageHandler) handleTenantQuotaSet(w http.ResponseWriter, r *http.Requ
 		OnExceed:       onExceed,
 		Enabled:        enabled,
 	}
-	if err := store.UpsertTenantQuota(ctx, h.pool, spec.Scope, q, actorID(r)); err != nil {
+	if err := store.UpsertTenantQuota(ctx, h.pool, spec.Scope, q, auditStamp(r, ar)); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}

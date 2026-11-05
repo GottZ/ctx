@@ -1,0 +1,233 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/fedhop"
+	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/modelalias"
+	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/settings"
+	"github.com/GottZ/ctx/internal/store"
+)
+
+// gatewaySettingsGetter is the settings source of the OpenAI-compatible
+// gateway (design/02 §3.3): internal/oai may not import config, so cmd/ctxd
+// hands it this getter. Every call takes one snapshot of the live store, so
+// the gateway reads each hot gateway.* key per request and a settings write
+// applies from the next request on. The keys are global-only — one gateway
+// per process — which is why the tenant-less Snapshot is the right read.
+// Its consumers are the model groups' gate, door, access log, body cap and
+// budget (newModelGateway).
+func gatewaySettingsGetter(cfgStore *config.Store) func() oai.Settings {
+	return func() oai.Settings {
+		return cfgStore.Snapshot().GatewaySettings() //nolint:forbidigo // MT 06 BLIND: gateway.* is global-only (one gateway, one budget per process); the gate runs before any credential, so no tenant exists to resolve.
+	}
+}
+
+// whoamiModelAPIGetter is the source of the whoami capability model_api
+// (design/05 §4.6, W05-01): gateway.enabled, gateway.tenant_self_service and
+// the app-key lifetime, rotation grace and expiry warning in whole seconds —
+// the data the SPA derives viewModelApi/mintModelKeys from. One snapshot per
+// call, so a settings write shows on the next whoami. The peer lifetime is not
+// carried (the peer page, W05-14, owns it).
+func whoamiModelAPIGetter(cfgStore *config.Store) func() handler.WhoamiModelAPI {
+	return func() handler.WhoamiModelAPI {
+		c := cfgStore.Snapshot() //nolint:forbidigo // MT 06 BLIND: gateway.enabled and the gateway.* consumer policy are global-only switches over a host-global good (design/01 §4.6) — the same _global read the manage handlers enforce with.
+		g := c.Gateway.Consumers
+		return handler.WhoamiModelAPI{
+			Enabled:               c.Gateway.Enabled,
+			SelfService:           g.TenantSelfService,
+			KeyMaxLifetimeSeconds: int64(g.KeyMaxLifetimeApp / time.Second),
+			RotationGraceSeconds:  int64(g.KeyRotationGrace / time.Second),
+			ExpiryWarnSeconds:     int64(g.KeyExpiryWarn / time.Second),
+		}
+	}
+}
+
+// federationMaxDepthGetter is the federation.max_depth source of the
+// LoopGuards (F-W8, design/04 §4.6 step 3): one snapshot per call, so the
+// hot key applies from the next request on. Global-only like gateway.*: the
+// guard runs before any tenant is resolved on /v1, and the depth of a chain
+// is a property of the federation topology, not of a tenant.
+func federationMaxDepthGetter(cfgStore *config.Store) func() int {
+	return func() int {
+		return cfgStore.Snapshot().Federation.MaxDepth //nolint:forbidigo // MT 06 BLIND: federation.max_depth is global-only (one federation topology per process); the guard runs before any tenant is resolved.
+	}
+}
+
+// gatewayIngressAssert is the boot half of "no /v1 without its ingress
+// protection" (F-W8, design/04 §4.6, §7.2 no. 1): gateway.enabled
+// effectively true — from CTX_GATEWAY_ENABLED or a settings override, the
+// snapshot does not care which — while the router's federation ingress is
+// not registered refuses the boot; since F-W9 registered means the LoopGuard
+// and the PeerIngress (fedhop.Ingress). The settings write of the key is the
+// other half (handler/settings.go, 409); a psql write is caught here at the
+// next start.
+//
+// The remedy names the layer that set the value: the settings API is not
+// reachable while the boot refuses, and an env value does not beat a
+// settings row (Fremd-Review FR-2).
+func gatewayIngressAssert(c *config.Config, in *fedhop.Ingress) error {
+	if !c.Gateway.Enabled || in.Registered() {
+		return nil
+	}
+	src := c.Source("gateway.enabled")
+	remedy := "unset CTX_GATEWAY_ENABLED or set it to false"
+	if src == "settings" {
+		remedy = "remove the settings row (psql: DELETE FROM context_settings WHERE key = 'gateway.enabled'), or — with CTX_GATEWAY_ENABLED unset or false — start once with " +
+			settings.EnvDisable + "=1 and DELETE /api/settings/gateway.enabled"
+	}
+	return fmt.Errorf("gateway.enabled is true (source: %s) but no model group with its federation ingress (LoopGuard and PeerIngress) is mounted — the model API cannot be enabled before its federation ingress is mounted; %s, or run a build that mounts /v1",
+		src, remedy)
+}
+
+// modelGateway is the process-wide part of the model groups (design/02 §4.2,
+// masterplan K23): ONE access log, ONE model-key door, ONE in-flight budget
+// and ONE usage batcher, shared by /v1 and (W02-10) /v2 — so two groups
+// never hold twice the door's database share, twice the budget or two
+// rejection windows. newRouter builds it and mounts the groups from it; main
+// drives its background loops (run, startModelGateway).
+type modelGateway struct {
+	settings func() oai.Settings
+	access   *handler.GatewayAccessLog
+	door     *handler.ModelDoor
+	usage    *store.ModelKeyUsage
+	budget   oai.Budget
+}
+
+// newModelGateway wires the gateway over pool and the live config store.
+// The door's trusted proxy is CTX_TRUSTED_PROXY as read at boot.
+func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
+	get := gatewaySettingsGetter(cfgStore)
+	usage := store.NewModelKeyUsage(pool)
+	return &modelGateway{
+		settings: get,
+		access:   handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get}),
+		door: handler.ModelAuth(handler.ModelAuthConfig{
+			Pool: pool, Settings: get, Usage: usage, Reject: renderModelAuthRejection,
+			TrustedProxy: strings.TrimSpace(os.Getenv(handler.EnvTrustedProxy)),
+		}),
+		usage: usage,
+	}
+}
+
+// group is the modelGroupDeps of one prefix over the shared parts: the gate
+// before the door (K4), and as inner stages the strict body cap after the
+// door (no cap oracle for an anonymous caller, design/02 §4.2 stage 3) and
+// the in-flight budget (stage 5). routes are the group's endpoints.
+func (g *modelGateway) group(ingress *fedhop.Ingress, maxDepth func() int, routes []modelRoute) modelGroupDeps {
+	return modelGroupDeps{
+		access: g.access, gate: oai.EnabledGate(g.settings), door: g.door, ingress: ingress, maxDepth: maxDepth,
+		inner: []func(http.Handler) http.Handler{
+			handler.MaxBodySizeStrictWith(func() int64 { return g.settings().MaxRequestBytes }, oai.WriteRequestTooLarge),
+			oai.InflightBudget(&g.budget, g.settings),
+		},
+		routes: routes,
+	}
+}
+
+// run drives the gateway's two background loops until ctx ends — the access
+// log's rejection window and the batched last_used_at flush — and returns
+// once both have made their final flush (the usage flush is bounded by
+// store.ModelKeyUsageFinalFlushTimeout).
+func (g *modelGateway) run(ctx context.Context) {
+	var wg sync.WaitGroup
+	wg.Go(func() { g.access.Run(ctx) })
+	wg.Go(func() { g.usage.Run(ctx) })
+	wg.Wait()
+}
+
+// startModelGateway runs g's loops on a context of their own and returns the
+// shutdown step that ends them: not the root context, which ends at SIGTERM
+// while the HTTP server still drains — the stamps and refusals of the
+// drained requests would miss the final flush (W01-3 F-7). The step cancels,
+// waits for the final flushes and gives up after gatewayStopTimeout (a WARN;
+// the loops then finish on their own, the budget stays bounded).
+func startModelGateway(g *modelGateway) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		g.run(ctx)
+		close(done)
+	}()
+	return func() {
+		cancel()
+		begin := time.Now()
+		t := time.NewTimer(gatewayStopTimeout)
+		defer t.Stop()
+		select {
+		case <-done:
+			slog.Info("gateway: usage stamps and rejection counts flushed at shutdown", "elapsed", time.Since(begin).Round(time.Millisecond))
+		case <-t.C:
+			slog.Warn("gateway: final flush incomplete at shutdown, pending last_used_at stamps may be lost", "timeout", gatewayStopTimeout)
+		}
+	}
+}
+
+// gatewayDeps are the request-time dependencies of the gateway handlers
+// (oai.Deps): the door's consumer from the context, the knowledge-credential
+// probe, the process's alias registry, and the two grant reads over pool —
+// the store primitives of W01-9, adapted here because internal/oai may not
+// import internal/store (depguard oai-isolation).
+func gatewayDeps(pool *pgxpool.Pool, aliases *modelalias.Registry) oai.Deps {
+	return oai.Deps{
+		Consumer:      handler.ConsumerAuthFromContext,
+		KnowledgeAuth: func(ctx context.Context) bool { return handler.AuthResultFromContext(ctx) != nil },
+		Aliases:       aliases,
+		GrantIDs: func(ctx context.Context, consumerID string) ([]string, error) {
+			return store.ConsumerGrantIDs(ctx, pool, consumerID)
+		},
+		HasGrant: func(ctx context.Context, consumerID, aliasID string) (bool, error) {
+			return store.ConsumerGrantsAlias(ctx, pool, consumerID, aliasID)
+		},
+	}
+}
+
+// v1Routes are the endpoints of the /v1 group (design/02 §4.2 route
+// table); the inference waves (W02-07ff.) add theirs here. The model route
+// is a wildcard: alias names may contain "/" (§3.1).
+func v1Routes(d oai.Deps) []modelRoute {
+	return []modelRoute{
+		{http.MethodGet, "/models", oai.ListModels(d)},
+		{http.MethodGet, "/models/*", oai.GetModel(d)},
+	}
+}
+
+// doorMessages are the texts of the door's refusals other than the 401 —
+// fixed per code, nothing of the request in them.
+var doorMessages = map[string]string{
+	oai.CodeRateLimitExceeded:  "Too many failed authentication attempts; retry later.",
+	oai.CodeProxyMisconfigured: "The server cannot determine the client address; the operator must configure the trusted proxy.",
+	oai.CodeAuthOverloaded:     "Authentication is temporarily overloaded; retry shortly.",
+	oai.CodeAuthUnavailable:    "Authentication is temporarily unavailable; retry shortly.",
+	oai.CodeInternalError:      "The server could not complete the request.",
+}
+
+// renderModelAuthRejection is the door's renderer (ModelAuthConfig.Reject,
+// the W01-6 contract): the 401 through oai.WriteInvalidAPIKey — its
+// WWW-Authenticate: Bearer realm="ctx" replaces the door's bare Bearer (lead
+// decision W02-05; design/02 §4.10.2) — every other refusal through
+// oai.WriteCode with the door's x-should-retry. The Retry-After the door set
+// stays.
+func renderModelAuthRejection(w http.ResponseWriter, _ *http.Request, rej handler.ModelAuthRejection) {
+	if rej.Status == http.StatusUnauthorized {
+		oai.WriteInvalidAPIKey(w)
+		return
+	}
+	msg, ok := doorMessages[rej.Code]
+	if !ok {
+		msg = doorMessages[oai.CodeInternalError]
+	}
+	oai.WriteCode(w, rej.Code, msg, rej.ShouldRetry)
+}

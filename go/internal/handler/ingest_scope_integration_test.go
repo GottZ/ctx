@@ -109,7 +109,7 @@ func TestIngestChunkScopeBinding(t *testing.T) {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
-	h := NewIngestHandler(pool, nil)
+	h := NewIngestHandler(pool, nil, nil)
 	keyCtx, _ := ingestKey(t, pool, "s9e-attacker")
 
 	chunk := func(sourceID string, idx int, title, content string) map[string]any {
@@ -261,7 +261,7 @@ func TestIngestRateLimitBucket(t *testing.T) {
 		return n
 	}
 
-	h := NewIngestHandler(pool, staticConfigStore{cfg: &config.Config{Query: config.QueryConfig{RateLimitWrite: 2}}})
+	h := NewIngestHandler(pool, staticConfigStore{cfg: &config.Config{Query: config.QueryConfig{RateLimitWrite: 2}}}, nil)
 	for i, title := range []string{"s9e rl a", "s9e rl b"} {
 		if status, resp := postIngest(t, h, keyCtx, body(title)); status != http.StatusOK {
 			t.Fatalf("request %d: status = %d, want 200 (body %v)", i, status, resp)
@@ -284,7 +284,7 @@ func TestIngestRateLimitBucket(t *testing.T) {
 
 	// 0 = disabled, and the bucket is per action: the "write" rows of the
 	// chunks above do not count here, and a disabled limit books nothing.
-	off := NewIngestHandler(pool, staticConfigStore{cfg: &config.Config{Query: config.QueryConfig{RateLimitWrite: 0}}})
+	off := NewIngestHandler(pool, staticConfigStore{cfg: &config.Config{Query: config.QueryConfig{RateLimitWrite: 0}}}, nil)
 	if status, _ := postIngest(t, off, keyCtx, body("s9e rl d")); status != http.StatusOK {
 		t.Fatalf("limit 0: status = %d, want 200", status)
 	}

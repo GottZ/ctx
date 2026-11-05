@@ -11,6 +11,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/events"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/forge"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/settings"
@@ -36,7 +37,34 @@ const (
 // process-wide dispatch admission layer (MW3, I-D1) feeding the query
 // pipeline, the daily-synthesis trigger and the backend chat probe.
 func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher) *chi.Mux {
+	r, _, _ := newRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher)
+	return r
+}
+
+// newRouter is NewRouter plus the router's federation-ingress registration
+// (F-W8, design/04 §4.6) and its model gateway (W02-05). The ingress is a
+// value of THIS router — the model groups mark it when they mount
+// (mountModelGroup), its settings handler and main's boot assert read it;
+// per router, so two routers in one test process never see each other's
+// registration. The gateway carries the background loops main runs
+// (startModelGateway).
+func newRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher) (*chi.Mux, *fedhop.Ingress, *modelGateway) {
+	return buildRouter(ctx, pool, cfgStore, scheduler, backendPool, blocktypeReg, projectHub, dispatcher, nil)
+}
+
+// buildRouter is newRouter with the model groups' route seam (K-02-2):
+// wrapRoutes, when non-nil, replaces a group's route table before the mount
+// — the door census (v1door) puts its probe behind every real route this
+// way. Production passes nil.
+func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher, wrapRoutes func([]modelRoute) []modelRoute) (*chi.Mux, *fedhop.Ingress, *modelGateway) {
 	r := chi.NewRouter()
+	ingress := &fedhop.Ingress{}
+	// F-W8 (design/04 §4.6, masterplan K14): the federation loop and depth
+	// guard of the knowledge groups — directly after Auth (an anonymous probe
+	// gets 401, never an instance oracle), before the body cap and every
+	// handler, in the house envelope. The model groups carry their own in
+	// the OpenAI envelope (mountModelGroup).
+	loopGuard := handler.LoopGuard(handler.LoopGuardConfig{MaxDepth: federationMaxDepthGetter(cfgStore)})
 
 	// MT 06-C5: wire the request→tenant-scope hook so SnapshotForRequest can
 	// derive the caller's tenant from the auth result. This is the cycle-free
@@ -55,7 +83,12 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// then inherits the base pointer byte-for-byte — default-tenant equivalence).
 	blocktype.SetRequestScopeHook(handler.RequestTenantScope)
 
-	// Global middleware
+	// Global middleware. F-W2 (design/04 §4.2): the instance identity first —
+	// it only puts the identity into the request context (ctx's own: the boot
+	// default unless the caller's ctx carries another, as two routers in one
+	// test process do), so every handler and every outgoing call below reads
+	// the identity of the router that serves it.
+	r.Use(fedhop.IdentityMiddleware(fedhop.IdentityFrom(ctx)))
 	r.Use(handler.SecurityHeaders)
 	r.Use(handler.RequestID)
 	r.Use(handler.Logger)
@@ -143,6 +176,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	manageH.SetAdmitter(dispatcher)
 	// overview-rebuild-start (A2): manual kick of the cluster-overview rebuild.
 	manageH.SetOverviewController(scheduler)
+	// model-alias-* (W02-04): the registry the scheduler's listener keeps hot
+	// (Trigger after each committed write) and the same ceiling getter the
+	// registry clamps with.
+	manageH.SetModelAliases(scheduler.ModelAliasRegistry(), modelAliasCeilings(cfgStore))
 	// Forge PULL sync engine (Achse-02 I-F). Fail-closed gates: the tenant gate
 	// is store.TenantStatusForScope (found=false ⇒ skip + disable, S13); the
 	// issue-policy gate refuses a run unless the registry resolves an `issue`
@@ -192,7 +229,8 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		_, err := forgeSync.StartSync(ctx, project, false)
 		return err
 	})
-	whoamiH := handler.NewWhoamiHandler(pool)
+	// W05-01: capabilities.model_api reads the _global gateway policy per request.
+	whoamiH := handler.NewWhoamiHandler(pool, whoamiModelAPIGetter(cfgStore))
 	// Camo image proxy service (design 07-camo). Fail-closed: disabled unless
 	// CTX_CAMO_ENABLED is set AND the sealbox master key is present; a misconfig
 	// logs and disables rather than crashing boot. Shared by both /api/img routes.
@@ -210,7 +248,16 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// refresh, not N. scheduler supplies the dream mode (GetDreamMode).
 	statusCollector := handler.NewStatusCollector(pool, backendPool, scheduler, cfgStore, blocktypeReg, dispatcher)
 	statusH := handler.NewStatusHandler(statusCollector)
+	// W06-8b: the foreign-load detector probes on its own cadence
+	// (status.foreign_load_interval), not when a status reader refreshes the
+	// collector — A-E5's standard observation runs headless. Bound to the
+	// server lifecycle like the SSE hub below: it ends with ctx at shutdown,
+	// and a round in flight then is cancelled, not recorded.
+	go statusCollector.RunForeignLoad(ctx)
 	llmlogH := handler.NewLLMLogHandler(pool, cfgStore)
+	// Audit read surface (W06-7, design/06 §4.10): context_settings_audit for
+	// the served entity types, tenant-filtered in SQL, foreign actors redacted.
+	auditH := handler.NewAuditHandler(pool, cfgStore)
 	// SSE live updates (F4-W7/G34): GET /api/events broadcasts from the SAME
 	// collector — one diff per tick fans out to all connections. ctx is the
 	// server lifecycle (cancelled on shutdown) so streams end before
@@ -234,6 +281,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// /mcp exists and where its limit sits.
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(loopGuard)
 		r.Use(handler.MaxBodySizeStrict(DefaultMaxBodySize))
 		r.Handle("/mcp", mcpH)
 	})
@@ -241,6 +289,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// ── API routes (canonical) ──────────────────────────────────────
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(DefaultMaxBodySize))
 
 		// Query — RRF + LLM synthesis
@@ -323,7 +372,9 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		// N8a).
 		r.Post("/api/synthesize/daily", handler.WithScheduler(dispatcher, synthH.HandleDaily))
 		// Settings — runtime overrides (F2-W5); admin-gated inside the mount.
-		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore))
+		// F-W8: gateway.enabled → true is a 409 while this router's
+		// federation ingress is not registered (no model group mounted).
+		handler.MountSettings(r, handler.NewSettingsHandler(pool, cfgStore).WithIngress(ingress))
 		// Secrets — write-only sealed credentials (F2-W6); admin-gated inside.
 		handler.MountSecrets(r, handler.NewSecretsHandler(pool, cfgStore))
 		// Schema contract — full drift report, admin-gated inside the mount
@@ -358,6 +409,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 			// under the SAME tenant gate (server-admin = any row; tenant-admin =
 			// only its own keys' rows, uniform 404 otherwise).
 			r.Get("/api/llmlog/{id}", llmlogH.HandleLLMLogDetail)
+			// Audit history (W06-7): a tenant-admin reads only rows whose
+			// metadata.tenant_id is its own tenant, with server-admin and
+			// foreign actors masked; a server-admin reads everything.
+			r.Get("/api/audit", auditH.HandleAudit)
 		})
 		// Web-chat (F6-C4/G37): POST /api/chat/stream runs one turn and streams
 		// SSE — wrapped in WithScheduler so the turn raises the interactive-demand
@@ -386,9 +441,10 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	})
 
 	// Ingest — larger body limit (10 MB for bulk chunk import)
-	ingestH := handler.NewIngestHandler(pool, cfgStore)
+	ingestH := handler.NewIngestHandler(pool, cfgStore, blocktypeReg)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(IngestMaxBodySize))
 		r.Post("/api/ingest", ingestH.HandleIngest)
 	})
@@ -396,6 +452,7 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 	// Blob Store — larger body limit (75 MB for base64-encoded files)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.Auth(pool))
+		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(BlobMaxBodySize))
 		r.Post("/api/blob/store", blobH.HandleBlobStore)
 	})
@@ -421,10 +478,23 @@ func NewRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 		r.Get("/api/img/{sig}", camoH.HandleFetch)
 	})
 
+	// The OpenAI-compatible model API (W02-05, design/02 §4.2): /v1 behind
+	// access log → recovery → EnabledGate → ModelAuth → LoopGuard → body cap
+	// → in-flight budget (mountModelGroup, masterplan K14). gateway.enabled
+	// off (the default) ⇒ the group answers every request with the same JSON
+	// 404 before any credential is read. Mounted before the SPA fallback; the
+	// group's own catch-alls keep /v1/* out of it.
+	gateway := newModelGateway(pool, cfgStore)
+	v1 := v1Routes(gatewayDeps(pool, scheduler.ModelAliasRegistry()))
+	if wrapRoutes != nil {
+		v1 = wrapRoutes(v1)
+	}
+	mountModelGroup(r, "/v1", gateway.group(ingress, federationMaxDepthGetter(cfgStore), v1))
+
 	// Embedded SPA — mounted last: chi matches registered routes first, only
 	// unknown paths fall through (history-API fallback for HTML navigations
 	// only; mistyped API URLs stay 404, known path + wrong method stays 405).
 	r.NotFound(web.Handler().ServeHTTP)
 
-	return r
+	return r, ingress, gateway
 }

@@ -13,6 +13,11 @@ on:
   pull_request:
     branches: [root]
   workflow_dispatch:
+    inputs:
+      publish_images:
+        description: "Build and push the container image (only the current tip of root ever publishes; off skips the image job)"
+        type: boolean
+        default: true
   # Nightly cadence for the PV10 live tier (design 06 §4.7/§9.5, decision E3).
   # The whole workflow re-runs at 03:00 UTC, but only web-live is scheduled-
   # gated to actually do live work; docker is gated OFF schedule so a nightly
@@ -30,6 +35,10 @@ permissions: {}
 # that run is the release gate (release.yml verify); the nightly stays as
 # the daily drift signal. Two parallel runs on the same ref cannot conflict:
 # docker (image push) is gated OFF schedule.
+# A re-run keeps the event and ref of its original run, so it lands in this
+# group as well and, as a push run, cancels the newer run in progress on the
+# same ref — GOVERNANCE.md (Releases) says to re-run an older root run only
+# once no newer one is queued or in progress.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
@@ -308,19 +317,21 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-  # ─── Stage 1c: Web Live Tier (PV10, nightly + on-demand) ─────────────────────
+  # ─── Stage 1c: Web Live Tier (PV10: root push + nightly + on-demand) ─────────
   # Wave PV10 (design 06 §4.7/§9.5): the ≤15 @live specs run against a REAL,
   # throwaway ctxd + Postgres (docker-compose.e2e.yml), seeded ONLY through
   # production write paths (fail-closed target gate, §3.6). It proves classes
   # the mock `web` job cannot — server enforcement (tenant isolation), fixture-
   # shape truth (W10), real SSE transport — so it is intentionally OFF the
-  # per-PR path: nightly (schedule) + on-demand (dispatch) + PR opt-in via the
-  # `e2e-live` label (decision E3). run-live.sh needs only docker on the host;
-  # bun + Playwright run INSIDE the pinned toolchain image (--network host).
+  # per-PR path: every push to root (= every merge, the release candidates),
+  # nightly (schedule), on-demand (dispatch) and PR opt-in via the `e2e-live`
+  # label (decision E3). run-live.sh needs only docker on the host; bun +
+  # Playwright run INSIDE the pinned toolchain image (--network host).
   #
-  # RELEASE-GATE RULE (design 06 §9.5, README): a version tag is pushed only
-  # after a GREEN nightly run of THIS job — the live-tier extension of the
-  # repo's "CI is truth, not local" rule.
+  # RELEASE-GATE RULE (design 06 §9.5, README, GOVERNANCE.md): a version tag
+  # needs a GREEN run of THIS job on the tagged commit — release.yml's verify
+  # job refuses the tag otherwise. The live-tier extension of the repo's
+  # "CI is truth, not local" rule.
   web-live:
     name: Web Live Tier
     runs-on: ubuntu-latest
@@ -888,14 +899,33 @@ jobs:
     needs: [build, integration-tests, web]
     # Off-schedule gate (PV10): the nightly run is a verification pass for the
     # live tier — it must never re-push an image of an unchanged ref.
+    # A push publishes from root only; a manual run only with publish_images
+    # on. Either way the tip check below (`Publish only from the current tip
+    # of root`) lets only the current tip of root publish, so a re-run or
+    # dispatch of an older commit never re-points the mutable tags.
     if: >-
       github.event_name != 'schedule' &&
-      (github.ref == 'refs/heads/root' ||
-      github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'push' && github.ref == 'refs/heads/root') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_images == true))
 
     permissions:
       contents: read
       packages: write
+
+    # One image publication at a time across ALL refs: ci.yml's workflow
+    # group is per ref, so a dispatch on a tag and a push to root would run
+    # side by side and the older build could land its mutable tags last.
+    # Without `queue` a group keeps ONE pending job and a later entrant
+    # cancels it, so an old-tag dispatch could displace the pending root
+    # publication; `queue: max` (2026-05) lets up to 100 jobs wait. GitHub
+    # starts them first-in-first-out by the time each began waiting, but
+    # does not guarantee that order, and correctness does not need it: the
+    # tip is re-read right before the mutable tags are promoted, so a job
+    # for an older commit backs off whenever it runs.
+    concurrency:
+      group: ctx-image-publish
+      cancel-in-progress: false
+      queue: max
 
     # Der Index-Digest des gepushten Images (Manifest-Liste inkl. SBOM- und
     # Provenance-Manifeste) — docker-attest signiert genau diesen.
@@ -905,11 +935,35 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `latest` and the date tag name "the newest root"; a re-run or a
+      # dispatch of an older commit (release.yml's recovery path for a missing
+      # live-tier verdict, or any manual re-run) must not re-point them. The
+      # tip is read live from origin, not from the event: only the commit that
+      # IS root right now publishes. `sha-<short>` would be harmless, but one
+      # rule for the whole job is simpler than three.
+      - name: Publish only from the current tip of root
+        id: tip
+        run: |
+          set -eu
+          git fetch --no-tags --depth=1 origin root
+          TIP="$(git rev-parse FETCH_HEAD)"
+          if [ "$TIP" = "$GITHUB_SHA" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "ok: $GITHUB_SHA is the tip of root"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::image not published — $GITHUB_SHA is not the tip of root ($TIP); a re-run of an older commit never re-points latest or the date tag"
+          fi
 
       - name: Setup Docker Buildx
+        if: steps.tip.outputs.publish == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Login to GitHub Container Registry
+        if: steps.tip.outputs.publish == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -917,14 +971,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker metadata
+        if: steps.tip.outputs.publish == 'true'
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_NAME }}
+          # Only the immutable per-commit tag is pushed with the build. The
+          # mutable tags (latest, date) are promoted in the step after it,
+          # behind a second tip check, by re-tagging the same digest.
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/root' }}
             type=sha,prefix=sha-,format=short
-            type=raw,value={{date 'YYYY-MM-DD'}}
           labels: |
             org.opencontainers.image.title=ctx
             org.opencontainers.image.description=The memory your LLM pretends to have. GottZ 4-Way RRF + GottZ Scope Model.
@@ -934,6 +990,7 @@ jobs:
             org.opencontainers.image.licenses=MPL-2.0
 
       - name: Build and push Docker image
+        if: steps.tip.outputs.publish == 'true'
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -964,6 +1021,32 @@ jobs:
             type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
             type=gha,mode=max
 
+      # The build above may have taken minutes; root may have moved meanwhile
+      # and the newer commit's job may be queued behind this one. Re-read the
+      # tip and promote only if this commit still is it. `imagetools create`
+      # re-tags the pushed manifest — same digest, no rebuild — so the
+      # attestation below covers latest and the date tag as well.
+      - name: Promote latest and the date tag (re-checked against root)
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          IMAGE: ${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -eu
+          git fetch --no-tags --depth=1 origin root
+          TIP="$(git rev-parse FETCH_HEAD)"
+          if [ "$TIP" != "$GITHUB_SHA" ]; then
+            echo "::notice::mutable tags not promoted — root moved to $TIP during the build; sha-tag of $GITHUB_SHA stays published, latest/date untouched"
+            exit 0
+          fi
+          TAGS="-t ${IMAGE}:$(date -u +%Y-%m-%d)"
+          if [ "$GITHUB_REF" = "refs/heads/root" ]; then
+            TAGS="$TAGS -t ${IMAGE}:latest"
+          fi
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $TAGS "${IMAGE}@${DIGEST}"
+          echo "promoted ${DIGEST} ->${TAGS}"
+
   # ─── Stage 6: Image-Attestation ───────────────────────────────────────────────
   # #49 Punkt 2, Image-Hälfte: Sigstore-signierte Build-Provenance für genau den
   # Index-Digest, den docker gepusht hat — `gh attestation verify
@@ -979,6 +1062,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [docker]
+    # Attest whenever an image was pushed: the build step publishes the sha-
+    # tag and sets the digest before the promotion step, so a failed
+    # promotion must not leave a pushed image without provenance. Skipped
+    # when docker did not publish (not the tip) or was cancelled.
+    if: ${{ !cancelled() && (needs.docker.result == 'success' || needs.docker.result == 'failure') && needs.docker.outputs.digest != '' }}
     permissions:
       contents: read
       id-token: write
@@ -1007,7 +1095,10 @@ jobs:
   # this job submits the real module graph (go list, build target all) on
   # every root push so Dependabot always matches go.mod. Push-only: PR runs
   # (forks above all) get no write token, and the submission needs
-  # contents: write.
+  # contents: write. A re-run keeps its push event and ref, so a full re-run
+  # of an older root run would submit that commit's graph again, after the
+  # tip's. The step before the submission lets only the current tip of root
+  # submit — the same rule as docker's.
   dependency-graph:
     name: Dependency Graph
     runs-on: ubuntu-latest
@@ -1027,7 +1118,23 @@ jobs:
           cache: true
           cache-dependency-path: go/go.sum
 
+      # Read the tip live, right before the submission, as docker does.
+      - name: Submit only from the current tip of root
+        id: tip
+        run: |
+          set -eu
+          git fetch --no-tags --depth=1 origin root
+          TIP="$(git rev-parse FETCH_HEAD)"
+          if [ "$TIP" = "$GITHUB_SHA" ]; then
+            echo "submit=true" >> "$GITHUB_OUTPUT"
+            echo "ok: $GITHUB_SHA is the tip of root"
+          else
+            echo "submit=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::dependency graph not submitted — $GITHUB_SHA is not the tip of root ($TIP); a re-run of an older commit never rolls the graph back"
+          fi
+
       - name: Submit Go module graph
+        if: steps.tip.outputs.submit == 'true'
         uses: actions/go-dependency-submission@f35d5c9af13ce9cc32f7930b171e315e878f6921 # v2.0.3
         with:
           go-mod-path: go/go.mod

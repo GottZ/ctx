@@ -3,6 +3,7 @@ package backends
 import (
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/url"
 	"slices"
@@ -49,13 +50,30 @@ var bodyCredentialKeys = map[string]bool{
 	"token": true, "secret": true, "password": true, "authorization": true,
 }
 
-func deniedHeader(name string) bool {
+// federationHeaderPrefixes are the names of the hop contract between ctx
+// instances (internal/fedhop, design/04 §4.3): ctx sets them on the wire
+// itself, so a row may set none — on every provider class. X-Ctx- covers the
+// older spelling. The psql path, which skips this validation, is covered on
+// every model wire call by fedhop.Stamp, which removes both prefixes; the
+// backend-test reachability probe (probeBackendURL) and the OpenRouter
+// endpoint discovery (EndpointCache.fetch, orwindow.go) are not stamped yet
+// and still send a psql-written row's headers as they are.
+var federationHeaderPrefixes = []string{"ctx-", "x-ctx-"}
+
+// deniedHeader says why name may not be an extra_headers key ("" = allowed):
+// a reserved federation header, or a credential carrier.
+func deniedHeader(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
-	if headerDenylist[n] {
-		return true
+	for _, p := range federationHeaderPrefixes {
+		if strings.HasPrefix(n, p) {
+			return "is a reserved federation header — ctx sets it on the wire itself"
+		}
 	}
-	return strings.HasSuffix(n, "-token") || strings.HasSuffix(n, "-key") ||
-		strings.HasSuffix(n, "_token") || strings.HasSuffix(n, "_key")
+	if headerDenylist[n] || strings.HasSuffix(n, "-token") || strings.HasSuffix(n, "-key") ||
+		strings.HasSuffix(n, "_token") || strings.HasSuffix(n, "_key") {
+		return "is a credential carrier — use api_key_ref (create the secret first)"
+	}
+	return ""
 }
 
 func findCredentialBodyKey(m map[string]any) string {
@@ -126,7 +144,75 @@ func ValidateBackend(b *Backend) (warnings []string, errs []FieldError) {
 	errs = append(errs, e...)
 	errs = append(errs, validateCarriers(b)...)
 	errs = append(errs, validateAnthropic(b)...)
+	errs = append(errs, validateForeignLoadProbe(b)...)
+	errs = append(errs, validateDispatchExternalLimits(b)...)
 	return warnings, errs
+}
+
+// dispatchExternalIntLimits / dispatchExternalBoolLimits are the external
+// opt-in keys of the admission dispatcher (wave A03-W3, design/03 §3.2) —
+// the same names internal/dispatch derives policy from (policy.go
+// limitInternalReserved / limitExternalOffer / limitExternalMaxInflight;
+// dispatch is a leaf and backends does not import it, the owner side pins
+// the pair: events TestDispatchExternalLimitsWritePathAndDerivationAgree).
+var (
+	dispatchExternalIntLimits  = []string{"internal_reserved_slots", "external_max_inflight"}
+	dispatchExternalBoolLimits = []string{"external_offer"}
+)
+
+// validateDispatchExternalLimits checks the FORM of the external limits keys
+// on the write path (design/03 §3.2): internal_reserved_slots and
+// external_max_inflight an integer 1..math.MaxInt32, external_offer a bool —
+// a 422 at write time instead of a WARN at the next policy derivation. What needs
+// more than this one row (the merge against slots, R <= slots-1, the target
+// kind) stays in the derivation. Every other limits key stays unvalidated
+// as before.
+func validateDispatchExternalLimits(b *Backend) (errs []FieldError) {
+	for _, key := range dispatchExternalIntLimits {
+		v, ok := b.Limits[key]
+		if !ok {
+			continue
+		}
+		if !positiveInteger(v) {
+			errs = append(errs, FieldError{"limits." + key, "must be an integer from 1 to 2147483647"})
+		}
+	}
+	for _, key := range dispatchExternalBoolLimits {
+		v, ok := b.Limits[key]
+		if !ok {
+			continue
+		}
+		if _, isBool := v.(bool); !isBool {
+			errs = append(errs, FieldError{"limits." + key, "must be true or false"})
+		}
+	}
+	return errs
+}
+
+// validateForeignLoadProbe guards metadata.foreign_load_probe (W06-8,
+// design/06 §4.9). The marker makes the status collector GET <origin>/metrics
+// every tick and publish the reading in the server-admin status frame — an
+// observation of the GPU host the server operator runs, so it is legal on a
+// shared row only: a tenant row carrying it is refused, whatever the value.
+// Both tiers write backends through the same backend-create/-update path; a
+// tenant-admin's rows are pinned to its home scope before this runs, and a
+// tenant-admin cannot update a '_global' row at all, so this scope rule alone
+// keeps the marker server-admin-only. The value must name a known probe kind;
+// a typo would otherwise switch the detector off silently (ForeignLoadProbe
+// resolves an unknown value to "not probed").
+func validateForeignLoadProbe(b *Backend) []FieldError {
+	raw, ok := b.Metadata[foreignLoadProbeKey]
+	if !ok {
+		return nil
+	}
+	if b.EgressGuarded() {
+		return []FieldError{{"metadata.foreign_load_probe",
+			"foreign load probing observes the GPU host and is reserved to _global (server-admin) backends"}}
+	}
+	if v, isStr := raw.(string); !isStr || v != ForeignLoadProbeSGLang {
+		return []FieldError{{"metadata.foreign_load_probe", "must be one of: sglang"}}
+	}
+	return nil
 }
 
 // validateIdentity covers name, URL, enums and the locality cross-check.
@@ -493,12 +579,12 @@ func validateRoles(b *Backend) (warnings []string, errs []FieldError) {
 	return warnings, errs
 }
 
-// validateCarriers covers the credential-carrier denylist and timeouts.
+// validateCarriers covers the header denylist (credential carriers and the
+// reserved federation prefixes), credential body keys and timeouts.
 func validateCarriers(b *Backend) (errs []FieldError) {
 	for name := range b.ExtraHeaders {
-		if deniedHeader(name) {
-			errs = append(errs, FieldError{"extra_headers",
-				fmt.Sprintf("header %q is a credential carrier — use api_key_ref (create the secret first)", name)})
+		if why := deniedHeader(name); why != "" {
+			errs = append(errs, FieldError{"extra_headers", fmt.Sprintf("header %q %s", name, why)})
 		}
 	}
 
@@ -514,4 +600,22 @@ func validateCarriers(b *Backend) (errs []FieldError) {
 		}
 	}
 	return errs
+}
+
+// positiveInteger reports whether a decoded limits value is an integer
+// 1..math.MaxInt32 (JSON numbers decode as float64; int forms come from
+// in-process callers) — the rule of the derivation's limitCount
+// (dispatch/external.go, maxLimitCount = math.MaxInt32): a value the
+// derivation refuses is a 422 here, never a stored row that silently offers
+// nothing. The upper bound also excludes +Inf; NaN fails n >= 1.
+func positiveInteger(v any) bool {
+	switch n := v.(type) {
+	case float64:
+		return n >= 1 && n <= math.MaxInt32 && n == math.Trunc(n)
+	case int:
+		return n >= 1 && n <= math.MaxInt32
+	case int64:
+		return n >= 1 && n <= math.MaxInt32
+	}
+	return false
 }

@@ -251,6 +251,118 @@ func TestQuotaAccountant_TenantWide(t *testing.T) {
 	}
 }
 
+// TestQuotaAccountant_ConsumerRowsNeverCount (W06-4 gate d, K17, B-06-18):
+// the internal tenant spend counts knowledge-key rows only. n calls of a /v1
+// consumer of the tenant — consumer_id set, api_key_id NULL, external and
+// costly — leave daily_calls and the cost budget untouched, so they can
+// never lock the tenant's people out of /api/query and the web chat. The
+// control half makes the pin non-vacuous: the same n calls on the tenant's
+// knowledge key do exhaust daily_calls.
+func TestQuotaAccountant_ConsumerRowsNeverCount(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	const n = 5
+	scope, key := seedQuotaTenant(t, pool, "w064-asym", "w064-asym")
+	setQuota(t, pool, scope, fpv(0.001), ipv(n), "block")
+	const consumer = "0196f0a0-0000-7000-8000-0000000000c1" // fictitious consumer of this tenant
+	for i := 0; i < n; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_llm_log (pipeline, model, host, duration_ms, consumer_id, cost_usd, backend_locality)
+			 VALUES ('gateway-chat','m','h',10,$1::uuid,0.5,'external')`, consumer); err != nil {
+			t.Fatalf("consumer call: %v", err)
+		}
+	}
+
+	a := backends.NewQuotaAccountant(pool, time.Minute)
+	if err := a.RefreshNow(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	sp, ok := a.SpendForTest(scope)
+	if !ok || sp.DayCalls != 0 || sp.DayCost != 0 || sp.MonthCost != 0 {
+		t.Errorf("consumer rows counted into the tenant spend: %+v (found %v)", sp, ok)
+	}
+	if got, err := a.Gate(scope, mixedChain()); err != nil || len(got) != 2 {
+		t.Fatalf("consumer traffic must not gate the tenant: got %d backends, err %v", len(got), err)
+	}
+
+	for i := 0; i < n; i++ {
+		logCall(t, pool, key, 0, "local")
+	}
+	if err := a.RefreshNow(ctx); err != nil {
+		t.Fatalf("refresh 2: %v", err)
+	}
+	if sp, _ := a.SpendForTest(scope); sp.DayCalls != n {
+		t.Fatalf("control: %d knowledge-key calls counted as %d", n, sp.DayCalls)
+	}
+	_, err := a.Gate(scope, mixedChain())
+	var qe *backends.ErrQuotaExceeded
+	if err == nil || !errorsAs(err, &qe) || qe.Reason != "daily_calls" {
+		t.Fatalf("control: %d knowledge-key calls must exhaust daily_calls=%d, got %v", n, n, err)
+	}
+}
+
+// TestQuotaAccountant_Relief (W06-4 gate e): with the accountant's clock
+// pinned, each spend figure carries its earliest relief — the oldest row it
+// counts + its window — to the microsecond, also when that row sits in a
+// rollup hour rather than in the window's raw edge.
+func TestQuotaAccountant_Relief(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	scope, key := seedQuotaTenant(t, pool, "w064-relief", "w064-relief")
+	setQuota(t, pool, scope, fpv(100), ipv(1000), "external_off")
+	at := func(s string) time.Time {
+		v, err := time.Parse("2006-01-02 15:04:05.999999", s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	now := at("2026-11-03 10:20:00") // since 24 h = 11-02 10:20, since 30 d = 10-04 10:20
+	for _, r := range []struct {
+		at, cost, locality string
+	}{
+		{"2026-10-04 10:10:00", "0.3", "external"},        // before the 30-day window
+		{"2026-10-04 10:30:00.000005", "0.2", "external"}, // oldest cost of the month, in its raw edge
+		{"2026-11-02 10:19:00", "0", "local"},             // before the 24-hour window
+		{"2026-11-02 11:07:30.25", "0", "local"},          // oldest call of the day, in a rollup hour
+		{"2026-11-02 16:00:00", "0", "external"},          // external without a cost
+		{"2026-11-03 08:00:00", "0.1", "external"},        // oldest cost of the day
+	} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO context_llm_log (created_at, pipeline, model, host, duration_ms, api_key_id, cost_usd, backend_locality)
+			 VALUES ($1,'query-synthesize','m','h',10,$2::uuid,$3::numeric,$4)`, at(r.at), key, r.cost, r.locality); err != nil {
+			t.Fatalf("log %s: %v", r.at, err)
+		}
+	}
+
+	a := backends.NewQuotaAccountant(pool, time.Minute)
+	a.SetClockForTest(func() time.Time { return now })
+	if err := a.RefreshNow(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	sp, ok := a.SpendForTest(scope)
+	if !ok {
+		t.Fatal("tenant missing from the generation")
+	}
+	want := backends.SpendForTest{
+		DayCalls: 3, DayCost: 0.1, MonthCost: 0.3,
+		DayCallsRelief:  at("2026-11-03 11:07:30.25"),
+		DayCostRelief:   at("2026-11-04 08:00:00"),
+		MonthCostRelief: at("2026-11-03 10:30:00.000005"),
+	}
+	if sp.DayCalls != want.DayCalls || sp.DayCost != want.DayCost || sp.MonthCost != want.MonthCost ||
+		!sp.DayCallsRelief.Equal(want.DayCallsRelief) || !sp.DayCostRelief.Equal(want.DayCostRelief) ||
+		!sp.MonthCostRelief.Equal(want.MonthCostRelief) {
+		t.Fatalf("spend = %+v\nwant    %+v", sp, want)
+	}
+}
+
 // TestQuotaAccountant_Race drives concurrent Gate reads against repeated
 // RefreshNow swaps — the lock-free read path must hold under -race.
 func TestQuotaAccountant_Race(t *testing.T) {

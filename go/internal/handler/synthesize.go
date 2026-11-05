@@ -222,7 +222,7 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 			// a dispatcher target, so no snapshot estimate exists for it — a
 			// fabricated Retry-After there would violate the honesty rule).
 			// This branch runs heartbeat-free, so the header travels.
-			setRejectRetryAfter(w, h.admitter, err)
+			setRejectRetryAfter(w, h.admitter, err, dispatch.ClassInteractive)
 			slog.Warn("synthesize: daily rejected by dispatcher", "scope", scope, "request_id", requestID)
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "server busy — retry shortly"})
 			return

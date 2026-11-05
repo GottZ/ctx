@@ -26,7 +26,7 @@ function mobileCell(c: PageContract): string {
 }
 
 function denyCell(c: PageContract): string {
-  if (c.role === 'member') return '— (role member: guard gated ist nur /admin,/tenant)'
+  if (c.role === 'member') return '— (role member: guard gated ist nur /admin,/tenant,/gateway)'
   return `✓ generiert (${c.role} → nächst-niedrigere Rolle)`
 }
 

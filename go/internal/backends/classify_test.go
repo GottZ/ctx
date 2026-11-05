@@ -60,6 +60,8 @@ func TestClassNextAndCooldown(t *testing.T) {
 		ClassNoProviders: true,
 		ClassServerFault: false, ClassTimeout: false, ClassCanceled: false,
 		ClassOK: false,
+		// Fail-closed until their walk rules land (F-W10, W06-14).
+		ClassBusy: false, ClassQuotaExhausted: false,
 	}
 	for class, want := range next {
 		if got := class.Next(); got != want {
@@ -87,5 +89,23 @@ func TestClassNextAndCooldown(t *testing.T) {
 	}
 	if d := ClassBadRequest.Cooldown(0); d != 0 {
 		t.Errorf("400 must not punish the backend, got %s", d)
+	}
+	if d := ClassBusy.Cooldown(30 * time.Second); d != 0 {
+		t.Errorf("busy is a capacity signal, not health — cooldown = %s", d)
+	}
+	if d := ClassQuotaExhausted.Cooldown(0); d != time.Hour {
+		t.Errorf("quota default cooldown = %s, want 1h", d)
+	}
+	if d := ClassQuotaExhausted.Cooldown(6 * time.Hour); d != 6*time.Hour {
+		t.Errorf("quota Retry-After not honored in full: %s", d)
+	}
+	if d := ClassQuotaExhausted.Cooldown(48 * time.Hour); d != 24*time.Hour {
+		t.Errorf("quota cap missed: %s", d)
+	}
+	if s := ClassBusy.String(); s != "busy" {
+		t.Errorf("busy renders as %q", s)
+	}
+	if s := ClassQuotaExhausted.String(); s != "quota_exhausted" {
+		t.Errorf("quota renders as %q", s)
 	}
 }

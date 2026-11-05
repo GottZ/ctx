@@ -134,6 +134,7 @@ func (h *ManageHandler) handleProjectProvision(w http.ResponseWriter, r *http.Re
 		SeedKeys:    pr.MaxKeys,
 		Quota:       quota,
 		CreatedBy:   ar.ApiKeyID,
+		RequestID:   RequestIDFromContext(ctx),
 	})
 	if err != nil {
 		writeProvisionError(w, err)

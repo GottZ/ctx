@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -105,10 +106,13 @@ func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) 
 
 	var raw []float64
 
+	// The hop target comes from the row alone and goes down with the client:
+	// both wires stamp the request and observe the answer with it.
+	hop := b.HopTarget(fedhop.WireEmbed)
 	if b.Protocol == backends.ProtocolOpenAI {
-		raw, promptTokens, err = embedOpenAI(ctx, httpClients.For(b.EgressGuarded()), b.Host, b.APIKey, b.Model, input)
+		raw, promptTokens, err = embedOpenAI(ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, b.Model, input)
 	} else {
-		raw, promptTokens, err = embedOllama(ctx, httpClients.For(b.EgressGuarded()), b.Host, b.APIKey, b.Model, input, b.NumCtx)
+		raw, promptTokens, err = embedOllama(ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, b.Model, input, b.NumCtx)
 	}
 	if err != nil {
 		return nil, 0, err
@@ -127,7 +131,7 @@ func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) 
 	return vec, promptTokens, nil
 }
 
-func embedOllama(ctx context.Context, client *http.Client, host, apiKey, model, input string, numCtx int) ([]float64, int, error) {
+func embedOllama(ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model, input string, numCtx int) ([]float64, int, error) {
 	reqBody := ollamaEmbedRequest{Model: model, Input: input}
 	if numCtx > 0 {
 		reqBody.Options = &ollamaOpts{NumCtx: numCtx}
@@ -146,6 +150,8 @@ func embedOllama(ctx context.Context, client *http.Client, host, apiKey, model, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("embed: create request: %w", err)
 	}
+	// No row extra_headers on the embed wires; the stamp, then the core.
+	fedhop.Stamp(ctx, req.Header, hop)
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -156,6 +162,9 @@ func embedOllama(ctx context.Context, client *http.Client, host, apiKey, model, 
 		return nil, 0, fmt.Errorf("embed: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, 0, fmt.Errorf("embed: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -174,7 +183,7 @@ func embedOllama(ctx context.Context, client *http.Client, host, apiKey, model, 
 	return result.Embeddings[0], result.PromptEvalCount, nil
 }
 
-func embedOpenAI(ctx context.Context, client *http.Client, host, apiKey, model, input string) ([]float64, int, error) {
+func embedOpenAI(ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model, input string) ([]float64, int, error) {
 	reqBody := openAIEmbedRequest{Model: model, Input: input}
 
 	body, err := json.Marshal(reqBody)
@@ -187,6 +196,7 @@ func embedOpenAI(ctx context.Context, client *http.Client, host, apiKey, model, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("embed: create request: %w", err)
 	}
+	fedhop.Stamp(ctx, req.Header, hop)
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -197,6 +207,9 @@ func embedOpenAI(ctx context.Context, client *http.Client, host, apiKey, model, 
 		return nil, 0, fmt.Errorf("embed: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, 0, fmt.Errorf("embed: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

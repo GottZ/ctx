@@ -1,0 +1,89 @@
+{
+  "x-ctx-provenance": {
+    "source": "https://github.com/openai/openai-openapi/blob/c2aecc2fbe1ddff3e7500a0eaa5c2bc4c19c5318/openapi.json",
+    "commit": "c2aecc2fbe1ddff3e7500a0eaa5c2bc4c19c5318",
+    "commit_date": "2026-10-31T17:43:04Z",
+    "source_sha256": "d80bb28992f6c2a86876d866dcae0b1f15e130de94238592bc57a4a579448b5f",
+    "license": "MIT (Copyright (c) OpenAI), see LICENSE.openai-openapi",
+    "extract": "components.schemas: ListModelsResponse and its transitive $ref closure (Model), values equal to the source, re-serialized with key order preserved"
+  },
+  "openapi": "3.1.0",
+  "info": {
+    "version": "2.3.0"
+  },
+  "components": {
+    "schemas": {
+      "ListModelsResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "enum": [
+              "list"
+            ],
+            "x-stainless-const": true
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Model"
+            }
+          }
+        },
+        "required": [
+          "object",
+          "data"
+        ]
+      },
+      "Model": {
+        "title": "Model",
+        "description": "Describes an OpenAI model offering that can be used with the API.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The model identifier, which can be referenced in the API endpoints."
+          },
+          "created": {
+            "type": "integer",
+            "format": "unixtime",
+            "description": "The Unix timestamp (in seconds) when the model was created."
+          },
+          "object": {
+            "type": "string",
+            "description": "The object type, which is always \"model\".",
+            "enum": [
+              "model"
+            ],
+            "x-stainless-const": true
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "The organization that owns the model."
+          },
+          "shutdown_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The date when the model will shut down, or null if not announced."
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "created",
+          "owned_by"
+        ],
+        "x-oaiMeta": {
+          "name": "The model object",
+          "example": "{\n  \"id\": \"gpt-6-astra\",\n  \"object\": \"model\",\n  \"created\": 1686935002,\n  \"owned_by\": \"openai\",\n  \"shutdown_date\": \"2026-10-23\"\n}\n"
+        }
+      }
+    }
+  }
+}

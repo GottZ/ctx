@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -72,26 +73,40 @@ func GetEffectiveTenantQuota(ctx context.Context, pool *pgxpool.Pool, scope stri
 }
 
 // UpsertTenantQuota writes (insert-or-replace) one tenant scope's quota policy,
-// keyed on the UNIQUE(scope) constraint. by is the acting key id for the
-// updated_by provenance column (nil/"" → NULL; the FK tolerates it). The DB
-// CHECK on on_exceed ('block'|'external_off') is the last line — the handler
+// keyed on the UNIQUE(scope) constraint. stamp.ActorKeyID is the acting key id
+// for the updated_by provenance column ("" → NULL; the FK tolerates it) AND the
+// audit actor: the write runs in a transaction stamped with stamp (migration
+// 160), so every audit row this write produces names the key updated_by names.
+// A re-set of an unchanged policy moves updated_by but writes no audit row
+// (the trigger records state changes only). The
+// DB CHECK on on_exceed ('block'|'external_off') is the last line — the handler
 // validates first for a clean 422.
-func UpsertTenantQuota(ctx context.Context, pool *pgxpool.Pool, scope string, q backends.TenantQuota, by *string) error {
-	_, err := pool.Exec(ctx, `
-		INSERT INTO context_tenant_quota
-		    (scope, daily_cost_usd, monthly_cost_usd, daily_calls, on_exceed, enabled, updated_by, updated_by_principal)
-		VALUES ($1,$2,$3,$4,$5,$6,$7::uuid,
-		        (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $7::uuid))
-		ON CONFLICT (scope) DO UPDATE SET
-		    daily_cost_usd  = EXCLUDED.daily_cost_usd,
-		    monthly_cost_usd = EXCLUDED.monthly_cost_usd,
-		    daily_calls     = EXCLUDED.daily_calls,
-		    on_exceed       = EXCLUDED.on_exceed,
-		    enabled         = EXCLUDED.enabled,
-		    updated_by      = EXCLUDED.updated_by,
-		    updated_by_principal = EXCLUDED.updated_by_principal,
-		    updated_at      = now()`,
-		scope, q.DailyCostUSD, q.MonthlyCostUSD, q.DailyCalls, q.OnExceed, q.Enabled, by)
+func UpsertTenantQuota(ctx context.Context, pool *pgxpool.Pool, scope string, q backends.TenantQuota, stamp AuditStamp) error {
+	var by *string
+	if stamp.ActorKeyID != "" {
+		by = &stamp.ActorKeyID
+	}
+	err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		if err := stampAudit(ctx, tx, stamp); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO context_tenant_quota
+			    (scope, daily_cost_usd, monthly_cost_usd, daily_calls, on_exceed, enabled, updated_by, updated_by_principal)
+			VALUES ($1,$2,$3,$4,$5,$6,$7::uuid,
+			        (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $7::uuid))
+			ON CONFLICT (scope) DO UPDATE SET
+			    daily_cost_usd  = EXCLUDED.daily_cost_usd,
+			    monthly_cost_usd = EXCLUDED.monthly_cost_usd,
+			    daily_calls     = EXCLUDED.daily_calls,
+			    on_exceed       = EXCLUDED.on_exceed,
+			    enabled         = EXCLUDED.enabled,
+			    updated_by      = EXCLUDED.updated_by,
+			    updated_by_principal = EXCLUDED.updated_by_principal,
+			    updated_at      = now()`,
+			scope, q.DailyCostUSD, q.MonthlyCostUSD, q.DailyCalls, q.OnExceed, q.Enabled, by)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("store: upsert tenant quota: %w", err)
 	}

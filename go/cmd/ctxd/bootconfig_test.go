@@ -329,6 +329,7 @@ func TestBootCrossFieldChecksPinned(t *testing.T) {
 		{"V9 blend weight range", map[string]string{"CTX_RERANK_BLEND_WEIGHT": "1.5"}, "rerank.blend_weight"},
 		{"V9 hop depth zero", map[string]string{"CTX_GRAPH_EXPAND_HOP_DEPTH": "0"}, "graph.hop_depth"},
 		{"V9 negative rate limit", map[string]string{"CTX_RATE_LIMIT_WRITE": "-1"}, "query.rate_limit_write"},
+		{"V43 external max wait above 45 s", map[string]string{"CTX_DISPATCH_EXTERNAL_MAX_WAIT": "46"}, "dispatch.external_max_wait"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -336,6 +337,9 @@ func TestBootCrossFieldChecksPinned(t *testing.T) {
 			_, issues := loadFromEnv()
 			if !hasErrorOn(issues, c.field) {
 				t.Errorf("want SeverityError on %s, got %v", c.field, issues)
+			}
+			if !config.HasErrors(issues) {
+				t.Error("HasErrors must be true — main exits on this")
 			}
 			// The leak-hygiene assertion (an issue message must not echo the
 			// password out of a userinfo host — (*url.Error).Error() embeds the

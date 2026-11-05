@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -273,7 +274,8 @@ type openAIStreamRequest struct {
 // anyway). TopP/TopK/MinP/NumCtx are not part of the openai wire — parity
 // with chatOpenAI, sampling parity comes from the server start profile.
 // extraBody entries are merged last and win on key collision (F3's escape
-// hatch: OpenRouter provider/zdr objects, per-backend reasoning override).
+// hatch: OpenRouter provider/zdr objects, per-backend reasoning override);
+// ChatStream then runs the OpenRouter ZDR force on top (applyOpenAIBodyExtras).
 func buildStreamBody(model string, msgs []ChatMsg, tools []ToolDef, opts Options, extraBody map[string]any) ([]byte, error) {
 	req := openAIStreamRequest{
 		Model:         model,
@@ -337,12 +339,19 @@ func ChatStreamBackend(ctx context.Context, b backends.Backend, model string,
 //
 // b carries host, key and scope; the scope picks the client (a tenant row
 // dials through ssrfguard, Backend.EgressGuarded). extraBody stays a separate
-// parameter so tests can drive the wire without a full row.
+// parameter so tests can drive the wire without a full row. Body and header
+// policy are chatOpenAI's (W02-01): the OpenRouter ZDR force and the row's
+// extra_headers come from b, never from extraBody.
 func ChatStream(ctx context.Context, b backends.Backend, model string,
 	msgs []ChatMsg, tools []ToolDef, opts Options, extraBody map[string]any,
 	timeout time.Duration, onEvent func(StreamEvent) error) (*StreamResult, error) {
 	body, err := buildStreamBody(model, msgs, tools, opts, extraBody)
 	if err != nil {
+		return nil, fmt.Errorf("llm: marshal request: %w", err)
+	}
+	// The ZDR force runs AFTER the extraBody merge, so extra_body can only
+	// tighten. nil: buildStreamBody already merged; the force is b's alone.
+	if body, err = applyOpenAIBodyExtras(body, nil, &b); err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
 
@@ -353,17 +362,23 @@ func ChatStream(ctx context.Context, b backends.Backend, model string,
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	// extra_headers first, then the hop stamp, core headers last
+	// (setChatHeaders); Accept is the stream's core header and goes on after
+	// them.
+	hop := b.HopTarget(fedhop.WireChat)
+	setChatHeaders(req, &b, hop)
 	req.Header.Set("Accept", "text/event-stream")
-	if b.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+b.APIKey)
-	}
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), req, body)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// The answer headers before the status and before the first SSE byte: a
+	// 508 echoing the own token must reach the observer, too.
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -511,11 +526,17 @@ const (
 // (terminator included) is returned with the reader's error, exactly like
 // ReadString, unless it grows past maxSSEFrameBytes.
 func readSSELine(br *bufio.Reader) (string, error) {
+	return readSSELineMax(br, maxSSEFrameBytes)
+}
+
+// readSSELineMax is readSSELine with a caller-chosen cap (the gateway relay's
+// gateway frame cap, ChatRawStream); limit is at most maxSSEFrameBytes there.
+func readSSELineMax(br *bufio.Reader, limit int) (string, error) {
 	var line []byte
 	for {
 		chunk, err := br.ReadSlice('\n')
-		if len(line)+len(chunk) > maxSSEFrameBytes {
-			return "", fmt.Errorf("%w: SSE line over %d bytes", httpx.ErrResponseTooLarge, maxSSEFrameBytes)
+		if len(line)+len(chunk) > limit {
+			return "", fmt.Errorf("%w: SSE line over %d bytes", httpx.ErrResponseTooLarge, limit)
 		}
 		line = append(line, chunk...)
 		if !errors.Is(err, bufio.ErrBufferFull) {
@@ -535,15 +556,22 @@ func readSSELine(br *bufio.Reader) (string, error) {
 type sseFrame struct {
 	buf   strings.Builder
 	lines int
+	// limit is the frame cap; 0 = maxSSEFrameBytes (every chat-harness
+	// parser). The gateway relay sets its own (ChatRawStream's maxFrame).
+	limit int
 }
 
 func (f *sseFrame) add(v string) error {
+	limit := f.limit
+	if limit <= 0 {
+		limit = maxSSEFrameBytes
+	}
 	sep := 0
 	if f.lines > 0 {
 		sep = 1
 	}
-	if f.buf.Len()+sep+len(v) > maxSSEFrameBytes {
-		return fmt.Errorf("llm: %w: SSE frame over %d bytes", httpx.ErrResponseTooLarge, maxSSEFrameBytes)
+	if f.buf.Len()+sep+len(v) > limit {
+		return fmt.Errorf("llm: %w: SSE frame over %d bytes", httpx.ErrResponseTooLarge, limit)
 	}
 	if sep > 0 {
 		f.buf.WriteByte('\n')

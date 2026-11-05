@@ -81,6 +81,9 @@ func TestRegistryStrictSet(t *testing.T) {
 		// F4-W6 (G33) read cap: a malformed limit is an operator typo worth
 		// surfacing loudly, same as its telemetry sibling above.
 		"llmlog.max_limit": true,
+		// W06-7 audit read cap: the same class as llmlog.max_limit (one bounded
+		// page of a read endpoint), same loud-abort treatment.
+		"audit.max_limit": true,
 		// F4-W7 (G34) SSE connection cap: an int ceiling like llmlog.max_limit,
 		// so it shares the loud-abort treatment — a typo'd cap that silently
 		// falls back to the default would hide the intended ceiling. The events.*
@@ -128,6 +131,43 @@ func TestRegistryStrictSet(t *testing.T) {
 		// global partition break, and someone who writes engine=leiden and gets
 		// a gonum partition would have no way to notice.
 		"graph_overview.engine": true,
+		// W02-02 (design/02 §3.3, §4.2.1, B9) gateway ceilings: the request
+		// body cap, the process-wide in-flight budget, the response and frame
+		// read caps, the embedding float ceiling, the hard output-token
+		// ceiling and the five tenant-alias ceilings — int caps like
+		// events.max_connections; a typo'd cap silently falling back to the
+		// default would hide the intended memory or policy bound, so each
+		// aborts loudly. The gateway DURATIONS (commit grace, keepalive,
+		// write window, timeouts) stay non-strict like the other cadences, and
+		// gateway.default_max_tokens is a fallback value, not a ceiling.
+		"gateway.max_request_bytes":                         true,
+		"gateway.inflight_budget":                           true,
+		"gateway.max_response_bytes":                        true,
+		"gateway.max_stream_frame_bytes":                    true,
+		"gateway.embedding_max_floats":                      true,
+		"gateway.max_output_tokens_ceiling":                 true,
+		"gateway.tenant_alias_ceiling.max_output_tokens":    true,
+		"gateway.tenant_alias_ceiling.max_n":                true,
+		"gateway.tenant_alias_ceiling.embedding_max_inputs": true,
+		"gateway.tenant_alias_ceiling.rerank_max_documents": true,
+		"gateway.tenant_alias_ceiling.tools_max_count":      true,
+		// W01-6 (design/01 §4.9, A-E2) the model-key door's limits: the
+		// failure lock (count and window), the probe rate and the DB
+		// semaphore — security ceilings of an unauthenticated path; a typo'd
+		// value silently falling back to the default would hide the intended
+		// bound, so each aborts loudly. The window is a duration and strict
+		// all the same: it is a lock length, not a cadence.
+		"gateway.auth_failure_limit":  true,
+		"gateway.auth_failure_window": true,
+		"gateway.auth_probe_rate":     true,
+		"gateway.auth_db_concurrency": true,
+		// W01-5 (design/01 §4.6, design/05 §3.2): the page ceilings of the
+		// consumer administration bound one read of the consumer, key and
+		// audit tables — a typo'd value silently defaulting would hide the
+		// ceiling the operator meant to set (precedent audit.max_limit).
+		"gateway.consumer_list_max_limit":  true,
+		"gateway.consumer_chain_max":       true,
+		"gateway.consumer_audit_trail_max": true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.
@@ -156,6 +196,25 @@ func TestRegistryStrictSet(t *testing.T) {
 		// to 0 would hide an intended activation, a malformed one must never
 		// guess a weakening window, so it aborts loudly.
 		"dispatch.background_aging_after": true,
+		// A03-W3 (design/03 §3.3, A-E2 no. 2): the external cap ladder and the
+		// external lease ceiling are ceilings and a reaper clock like their
+		// interactive siblings above — a typo'd value silently defaulting
+		// would hide the intended bound on the shared GPU. dispatch.
+		// external_order is NOT here: a string enum cannot malform at parse
+		// time, V42 refuses an unknown name instead.
+		"dispatch.external_queue_per_consumer": true,
+		"dispatch.external_queue_per_tenant":   true,
+		"dispatch.external_queue_max":          true,
+		"dispatch.external_lease_max":          true,
+		// A03-W5: the one external wait budget bounds every external wait —
+		// a typo'd value silently defaulting to 20 s would hide the intended
+		// bound (and 0 is a switch, "external never waits").
+		"dispatch.external_max_wait": true,
+		// F-W8 (design/04 §3.1): the federation depth limit bounds how many
+		// instances one request may pass — a typo'd value silently defaulting
+		// to 3 would present as the operator's limit while the guard enforced
+		// another, so it aborts loudly.
+		"federation.max_depth": true,
 		// B2: the blob write budget is a CEILING like its rate-limit siblings —
 		// a typo'd value silently defaulting to 10 would hide the intended cap
 		// on the one write surface that costs disk per request.
@@ -278,6 +337,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"pool.openrouter_window_ttl":            true, // E10-W2: AUTO-window discovery TTL, born in settings like its pool siblings
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
 		"tenant.allow_cross_tenant_block_grant": true, // MT T43 (07-W6): operator-set per-tenant cross-tenant block-grant opt-in (global-only)
+		"federation.max_depth":                  true, // F-W8: federation topology is settings-only (design/04 §3.1), like every federation.* key
 		"tenant.devmode":                        true, // C6-C: developer-transparency umbrella; settings-only ON PURPOSE — an env would let the privacy default fall without an audit row
 	}
 	seen := map[string]string{}

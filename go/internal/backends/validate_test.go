@@ -1,6 +1,7 @@
 package backends
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,36 @@ func TestHeaderDenylist(t *testing.T) {
 	b.ExtraHeaders = map[string]string{"HTTP-Referer": "https://github.com/GottZ/ctx", "X-Title": "ctx"}
 	if _, errs := ValidateBackend(&b); fieldHit(errs, "extra_headers") {
 		t.Errorf("harmless headers rejected: %+v", errs)
+	}
+}
+
+// TestHeaderDenylistFederationPrefixes — F-W4 (design/04 §4.3 Härtung, §5.2
+// S4): the hop contract's prefixes Ctx- and X-Ctx- are reserved on every
+// provider class, in any case, with a message of their own (no credential
+// wording: the header carries no secret, ctx sets it on the wire itself).
+// Names that only contain the prefix elsewhere pass.
+func TestHeaderDenylistFederationPrefixes(t *testing.T) {
+	for _, class := range []string{ProviderGeneric, ProviderLlamaCpp, ProviderOpenRouter} {
+		for _, h := range []string{"Ctx-Hop", "ctx-hop", "CTX-PATH", "Ctx-Instance", "X-Ctx-Foo", "x-ctx-dispatch-class", " Ctx-Hop"} {
+			b := validBackend()
+			b.ProviderClass = class
+			b.ExtraHeaders = map[string]string{h: "x"}
+			_, errs := ValidateBackend(&b)
+			var msg string
+			for _, e := range errs {
+				if e.Field == "extra_headers" {
+					msg = e.Message
+				}
+			}
+			if !strings.Contains(msg, "reserved federation header") || strings.Contains(msg, "credential") {
+				t.Errorf("%s header %q: extra_headers error %q, want the reserved-federation-header message", class, h, msg)
+			}
+		}
+	}
+	b := validBackend()
+	b.ExtraHeaders = map[string]string{"Ctxfoo": "x", "X-Ctxt": "x", "My-Ctx-Hop": "x", "Accept-Ctx": "x"}
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "extra_headers") {
+		t.Errorf("headers that merely contain the prefix rejected: %+v", errs)
 	}
 }
 
@@ -700,6 +731,106 @@ func TestTenantBackendDeniedLiteralIP(t *testing.T) {
 		b.Scope = GlobalScope
 		if _, errs := ValidateBackend(&b); fieldHit(errs, "base_url") {
 			t.Errorf("_global row with %s rejected: %+v", host, errs)
+		}
+	}
+}
+
+// TestValidateForeignLoadProbe (W06-8, design/06 §4.9): metadata.
+// foreign_load_probe turns the status collector's /metrics pull on for the
+// row's origin. It is a server-admin observation of the GPU host, so it is
+// legal on a '_global' row only — a tenant row carrying it is a FieldError
+// (422), as is any value outside the probe vocabulary ({sglang}).
+func TestValidateForeignLoadProbe(t *testing.T) {
+	b := validBackend()
+	b.Scope = GlobalScope
+	b.Metadata = map[string]any{"foreign_load_probe": "sglang"}
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "metadata.foreign_load_probe") {
+		t.Errorf("_global row with foreign_load_probe=sglang rejected: %+v", errs)
+	}
+
+	b = validBackend()
+	b.Scope = "acme"
+	b.Host = "https://gpu.example.com"
+	b.Metadata = map[string]any{"foreign_load_probe": "sglang"}
+	if _, errs := ValidateBackend(&b); !fieldHit(errs, "metadata.foreign_load_probe") {
+		t.Errorf("tenant row with foreign_load_probe passed, want a metadata.foreign_load_probe FieldError: %+v", errs)
+	}
+
+	for _, bad := range []any{"vllm", "SGLang", "", 1, true, nil, map[string]any{"kind": "sglang"}} {
+		b = validBackend()
+		b.Scope = GlobalScope
+		b.Metadata = map[string]any{"foreign_load_probe": bad}
+		if _, errs := ValidateBackend(&b); !fieldHit(errs, "metadata.foreign_load_probe") {
+			t.Errorf("foreign_load_probe=%#v passed, want a FieldError", bad)
+		}
+	}
+
+	b = validBackend()
+	b.Scope = "acme"
+	b.Host = "https://gpu.example.com"
+	b.Metadata = map[string]any{"score_domain": "auto"}
+	if _, errs := ValidateBackend(&b); fieldHit(errs, "metadata.foreign_load_probe") {
+		t.Errorf("tenant row without the marker hit the foreign_load_probe rule: %+v", errs)
+	}
+}
+
+// TestValidateDispatchExternalLimits (A03-W3, design/03 §3.2): the write path
+// checks the FORM of the three external limits keys — internal_reserved_slots
+// and external_max_inflight an integer 1..math.MaxInt32, external_offer a
+// bool — as a limits.<key> FieldError (422) instead of a later derivation
+// WARN. Checks across rows (the merge against slots, the target kind) stay in
+// the derivation; other limits keys stay unvalidated as before.
+func TestValidateDispatchExternalLimits(t *testing.T) {
+	for _, ok := range []map[string]any{
+		{"internal_reserved_slots": float64(1)},
+		{"internal_reserved_slots": float64(7), "slots": float64(8)},
+		{"external_offer": true},
+		{"external_offer": false},
+		{"external_max_inflight": float64(3), "external_offer": true},
+		{"slots": "unvalidated as before"},
+		{"internal_reserved_slots": 2, "external_max_inflight": int64(4), "external_offer": true},
+		// The upper bound of the derivation (dispatch limitCount) is inclusive.
+		{"external_max_inflight": float64(math.MaxInt32), "external_offer": true},
+		{"internal_reserved_slots": math.MaxInt32},
+	} {
+		b := validBackend()
+		b.Limits = ok
+		if _, errs := ValidateBackend(&b); len(errs) != 0 {
+			t.Errorf("limits %v refused: %+v", ok, errs)
+		}
+	}
+	for _, bad := range []struct {
+		key string
+		val any
+	}{
+		{"internal_reserved_slots", float64(0)},
+		{"internal_reserved_slots", float64(-2)},
+		{"internal_reserved_slots", 2.5},
+		{"internal_reserved_slots", "2"},
+		{"internal_reserved_slots", nil},
+		{"external_offer", "true"},
+		{"external_offer", float64(1)},
+		{"external_offer", nil},
+		{"external_max_inflight", float64(0)},
+		{"external_max_inflight", 0.5},
+		{"external_max_inflight", true},
+		// Review M15/M16: +Inf and the in-process int forms.
+		{"external_max_inflight", math.Inf(1)},
+		{"internal_reserved_slots", 0},
+		{"external_max_inflight", int64(-1)},
+		// Review 2 F-B: above math.MaxInt32 the derivation refuses (dispatch
+		// limitCount), so the write path does too — not a stored row that
+		// silently offers nothing.
+		{"internal_reserved_slots", 1e19},
+		{"internal_reserved_slots", float64(3000000000)},
+		{"external_max_inflight", 1e19},
+		{"external_max_inflight", float64(math.MaxInt32 + 1)},
+		{"external_max_inflight", int64(math.MaxInt32 + 1)},
+	} {
+		b := validBackend()
+		b.Limits = map[string]any{bad.key: bad.val}
+		if _, errs := ValidateBackend(&b); !fieldHit(errs, "limits."+bad.key) {
+			t.Errorf("limits.%s=%#v passed, want a limits.%s FieldError: %+v", bad.key, bad.val, bad.key, errs)
 		}
 	}
 }

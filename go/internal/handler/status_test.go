@@ -162,6 +162,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	// recall fixture pointers (no address-of-literal in composite literals).
 	recallScope := "shared"
 	recallAvg, recallMin := 0.98, 0.91
+	flRunning, flHeld, flDelta := int64(3), 0, int64(3)
 	resp := statusResponse{
 		Success:  true,
 		Health:   healthResponse{Status: "ok", Services: map[string]string{"database": "ok"}},
@@ -252,6 +253,21 @@ func TestStatusGoldenKeys(t *testing.T) {
 			"shared": {NeedsReview: 3, NearDuplicate: 0, PossibleDuplicate: 1,
 				OldestUpdatedAt: &next, BuiltAt: &next},
 		},
+		// W06-1 (design/06 §7): the llmlog write-path section is server-admin
+		// PRESENT (this fixture, and even at 0); TestStatusPerTenantView's
+		// server_global_fields_zero_for_tenant subtest pins ABSENT on the tenant path.
+		LLMLog: &llmlogWriteStatus{InsertFailures: 1, InsertDropped: 0},
+		// W06-8 (design/06 §4.9): the foreign_load section is server-admin
+		// PRESENT while a target is marked (this fixture: one suspected
+		// target with an evaluated hour); TestForeignLoadExposure pins ABSENT
+		// on the tenant path and without a marked target.
+		ForeignLoad: &[]foreignLoadRow{{
+			Target: "http://spark:30000", Probe: "sglang", Backends: []string{"spark-chat"},
+			Running: &flRunning, Active: &flRunning, Held: &flHeld, Delta: &flDelta, Suspected: true, Since: &next,
+			SuspectedHourly: false,
+			Hourly:          &foreignLoadHour{Hour: next, EngineRequests: 102, CtxRequests: 100},
+			ProbeError:      nil, ProbedAt: &next,
+		}},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -260,7 +276,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "advisories", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
 		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration", "guard_review",
-		"guard_review_by_scope",
+		"guard_review_by_scope", "llmlog", "foreign_load",
 	})
 
 	var top map[string]json.RawMessage
@@ -274,6 +290,28 @@ func TestStatusGoldenKeys(t *testing.T) {
 		t.Fatalf("unmarshal advisories: %v", err)
 	}
 	assertKeys(t, "advisories.row", advs[0], []string{"subject", "state"})
+
+	// W06-1: the llmlog write-path section — two process-wide loss counters,
+	// nothing else (no pipeline names, no error text: those are log material).
+	assertKeys(t, "llmlog", top["llmlog"], []string{"insert_failures", "insert_dropped"})
+
+	// W06-8: one foreign_load row per marked origin. probe_error/held/running/
+	// active are null-capable but always present (null = not measured, never omitted),
+	// the hourly sub-object carries the last evaluated hour. A03-W8: held_weight
+	// (Σw of the held leases, the partner of running) — null-capable like held.
+	var fls []json.RawMessage
+	if err := json.Unmarshal(top["foreign_load"], &fls); err != nil {
+		t.Fatalf("unmarshal foreign_load: %v", err)
+	}
+	assertKeys(t, "foreign_load.row", fls[0], []string{
+		"target", "probe", "backends", "running", "active", "held", "held_weight", "delta", "suspected", "since",
+		"suspected_hourly", "hourly", "probe_error", "probed_at",
+	})
+	var fl map[string]json.RawMessage
+	if err := json.Unmarshal(fls[0], &fl); err != nil {
+		t.Fatalf("unmarshal foreign_load row: %v", err)
+	}
+	assertKeys(t, "foreign_load.hourly", fl["hourly"], []string{"hour", "engine_requests", "ctx_requests"})
 
 	assertKeys(t, "dream", top["dream"], []string{
 		"mode", "throttle_interval_s", "pickable_now", "in_cooldown", "never_dreamed",
@@ -370,6 +408,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	// MW12 dispatch section (server-admin) wire pins.
 	assertKeys(t, "dispatch", top["dispatch"], []string{
 		"enabled", "enforcing", "demand", "reaps_total", "class_downgrades",
+		"class_unauthorized", "principal_conflicts",
 		"uncharged_calls", "ops_total", "max_op_ms", "last_guard_at", "last_digest_at",
 		"last_overview_at", "embed_tokens", "targets",
 	})
@@ -379,6 +418,8 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "dispatch.target", dts[0], []string{
 		"origin", "slots", "preempt_background", "herald_scope", "held", "inflight",
+		"held_internal", "held_external", "inflight_internal", "internal_reserved",
+		"external_offered", "external_capacity", "external", "external_rejects",
 		"interactive", "background", "preempt", "buckets",
 	})
 	var dbk []json.RawMessage
@@ -389,7 +430,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	// (asserted by TestStatusDispatchTenantNoForeignPrincipal). Here it is pinned
 	// as present on the admin side.
 	assertKeys(t, "dispatch.bucket", dbk[0], []string{
-		"fair_key", "waiting", "oldest_wait_ms", "inflight", "tokens", "charges",
+		"fair_key", "tenant_id", "class", "waiting", "oldest_wait_ms", "inflight", "tokens", "charges",
 	})
 
 	var be []json.RawMessage

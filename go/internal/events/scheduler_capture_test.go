@@ -101,6 +101,19 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		// instead of field by field, so a key added to the group needs no edit
 		// here. Not wire-active in these tests: distill.enabled stays false.
 		Distill: config.Defaults().Distill,
+		// W06-8: the foreign-load detector's timeout and hysteresis carry
+		// fatal floors (V37), the same class again — taken whole from the
+		// registry like Distill above. Not wire-active: no row is marked.
+		Status: config.Defaults().Status,
+		// W02-02: the gateway group's sizes and durations carry fatal floors
+		// (V38/V39) — taken whole like Status. Not wire-active: nothing mounts
+		// the gateway in these tests.
+		Gateway:    config.Defaults().Gateway,
+		Federation: config.Defaults().Federation, // F-W8: V43 range
+		// A03-W6: dispatch.external_retry_after_steps is fatal when empty
+		// (V46) — the registry default steps, every other dispatch field
+		// stays at its zero value as before.
+		Dispatch: config.DispatchConfig{ExternalRetryAfterSteps: config.Defaults().Dispatch.ExternalRetryAfterSteps},
 		Query: config.QueryConfig{
 			ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: "v5.2",
 		},

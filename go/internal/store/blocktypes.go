@@ -288,9 +288,11 @@ func UpdateBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 
 // DeleteBlockType removes one row by id inside an attributed transaction.
 // Guards (§5.1(c)), both checked in the SAME transaction as the delete:
-// builtin ⇒ ErrBlockTypeBuiltin (always); referencing blocks — counted over
-// ALL rows, archived included — ⇒ *BlockTypeInUseError naming the split.
-// found=false ⇒ no row with that id in the given scopes.
+// builtin ⇒ ErrBlockTypeBuiltin (always); referencing blocks — archived
+// included — ⇒ *BlockTypeInUseError naming the split. A '_global' row counts
+// the blocks of every scope; a tenant row only those of the scopes a block
+// typed by it can live in (typeRefScopeFilter). found=false ⇒ no row with that
+// id in the given scopes.
 func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes []string, by *string, requestID string) (found bool, err error) {
 	if err = pgxdb.Write(ctx, pool,
 		pgxdb.Stages{Begin: "store: delete block type begin", Commit: "store: delete block type commit"},
@@ -299,12 +301,12 @@ func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 				return err
 			}
 
-			var name string
+			var name, scope string
 			var builtin bool
 			err := tx.QueryRow(ctx,
-				`SELECT name, builtin FROM context_block_types
+				`SELECT name, scope, builtin FROM context_block_types
 				  WHERE id = $1::uuid AND scope = ANY($2::text[]) FOR UPDATE`,
-				id, scopes).Scan(&name, &builtin)
+				id, scopes).Scan(&name, &scope, &builtin)
 			if errors.Is(err, pgx.ErrNoRows) {
 				// (false, nil) before the commit in the straight-line form —
 				// pgxdb.ErrRollback keeps that a rollback instead of a commit.
@@ -318,11 +320,16 @@ func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 				return ErrBlockTypeBuiltin
 			}
 
+			refSQL := `SELECT count(*) FILTER (WHERE NOT is_archived)::int,
+			                  count(*) FILTER (WHERE is_archived)::int
+			             FROM context_blocks WHERE type_name = $1`
+			refArgs := []any{name}
+			if scope != GlobalScope {
+				refSQL += typeRefScopeFilter
+				refArgs = append(refArgs, scope)
+			}
 			var active, archived int
-			if err := tx.QueryRow(ctx,
-				`SELECT count(*) FILTER (WHERE NOT is_archived)::int,
-				        count(*) FILTER (WHERE is_archived)::int
-				   FROM context_blocks WHERE type_name = $1`, name).Scan(&active, &archived); err != nil {
+			if err := tx.QueryRow(ctx, refSQL, refArgs...).Scan(&active, &archived); err != nil {
 				return fmt.Errorf("store: delete block type ref count: %w", err)
 			}
 			if active > 0 || archived > 0 {
@@ -342,6 +349,39 @@ func DeleteBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 	}
 	return true, nil
 }
+
+// typeRefScopeFilter narrows the delete guard's reference count for a TENANT
+// row ($2 = its scope) to the scopes a block typed by that row can live in. A
+// tenant type is resolved by the HomeScope of the writing key (#112), so such a
+// block lies in a scope some key homed in $2 may write — the
+// writableBlockScopes set (handler/context_store.go) over every key with
+// home_scope = $2: the home scope itself, 'shared' when the key holds it, and
+// each write_scope the key may also read. Inactive keys count too, their
+// blocks outlive them. A tenant-minted key stays inside its tenant (T22), but
+// an operator-minted key can bridge into another tenant's scope, and a block
+// it writes there references this row just the same — so that scope is
+// counted. On top: every scope the row's tenant owns (context_tenant_scopes),
+// and the row's own scope, which also covers a scope that is not registered.
+// Everything outside the set is left out: a block in another tenant's scope
+// that no key of this home scope can write carries a same-named type of its
+// OWN tenant, and counting it would refuse a tenant the delete of its own
+// unused type and answer it with a foreign block count (a cross-tenant
+// existence and size oracle). Inside a bridged scope that exposure remains, and
+// only an operator can open such a bridge. A '_global' row keeps the unfiltered
+// count: every tenant's blocks resolve through it.
+const typeRefScopeFilter = `
+			    AND (scope = $2
+			      OR scope IN (
+			        SELECT o.scope FROM context_tenant_scopes t
+			          JOIN context_tenant_scopes o ON o.tenant_id = t.tenant_id
+			         WHERE t.scope = $2)
+			      OR scope IN (
+			        SELECT w.scope FROM context_api_keys k
+			          CROSS JOIN LATERAL unnest(k.write_scopes) AS w(scope)
+			         WHERE k.home_scope = $2 AND w.scope = ANY(k.allowed_scopes))
+			      OR (scope = 'shared' AND EXISTS (
+			        SELECT 1 FROM context_api_keys k
+			         WHERE k.home_scope = $2 AND 'shared' = ANY(k.allowed_scopes))))`
 
 // stampBlockTypeTx applies the audit attribution GUCs (settings.go:249-270
 // pattern; third user after settings and backends).

@@ -18,6 +18,8 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/events"
 	"github.com/GottZ/ctx/internal/graphcache"
+	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/llmusage"
 	"github.com/GottZ/ctx/internal/recall"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/GottZ/ctx/internal/store"
@@ -214,6 +216,31 @@ type statusResponse struct {
 	// verify_report content (those live ONLY on the admin-gated manage endpoint,
 	// embed_migration_manage.go).
 	EmbedMigration *embedMigrationStatus `json:"embed_migration,omitempty"`
+	// LLMLog is the server-admin-only llmlog write-path section (W06-1,
+	// design/06 §7): the process-wide loss counters of the async
+	// context_llm_log writer — inserts the database refused or that timed out,
+	// and rows dropped because the bounded insert queue was full. Pointer +
+	// omitempty, the Profiles/DB/GraphCache/Recall convention: PRESENT on the
+	// server-admin path whenever the counter source is wired (always in
+	// production) — INCLUDING at 0/0, because "nothing lost" and "not measured"
+	// must not look alike. ABSENT on the per-tenant path (SnapshotForTenant never
+	// sets it — the counters sum every tenant's and the background's rows, a
+	// server-global figure) and when no source is wired (test fakes).
+	LLMLog *llmlogWriteStatus `json:"llmlog,omitempty"`
+	// ForeignLoad is the foreign-load detector section (W06-8, design/06
+	// §4.9, foreign_load.go): one row per '_global' backend origin marked
+	// metadata.foreign_load_probe — engine requests vs. dispatcher held
+	// leases, the hourly engine-response vs. rollup comparison, the probe
+	// error. Pointer + omitempty, PRESENT on the server-admin path whenever at
+	// least one target is probed (marked, enabled, not parked by a disable
+	// profile — one row per target from the tick it qualified, readings null
+	// until the first round lands). ABSENT otherwise, deliberately unlike
+	// llmlog's always-present 0/0: llmlog always measures, the detector
+	// measures only what an operator marked, and an empty list would read as
+	// "probed, nothing foreign" for a GPU nobody looks at. ABSENT on the per-tenant path (SnapshotForTenant never sets
+	// it): the running requests of a shared GPU are a live activity oracle
+	// over every tenant's load (dispatcher.go TargetSnapshot exposure rule).
+	ForeignLoad *[]foreignLoadRow `json:"foreign_load,omitempty"`
 	// GuardReview is the needs_review pipeline's push signal (guard W2): the
 	// flagged-block counts + the oldest flagged stamp, so an unworked review
 	// queue is VISIBLE instead of discoverable-on-pull only (guard-stats).
@@ -254,6 +281,21 @@ type statusResponse struct {
 	// TestStatusEventCarriesEveryDualPathField — the push frame cannot carry a
 	// per-caller predicate before the per-scope frame build (S11).
 	GuardReviewByScope map[string]*guardReviewStatus `json:"guard_review_by_scope,omitempty"`
+}
+
+// llmlogWriteStatus is the /api/status llmlog block wire shape (W06-1): two
+// monotone counters since process start (llmlog.InsertFailures,
+// llmlog.InsertDropped). Each unit is one context_llm_log row that never
+// landed. Deliberately no pipeline names and no error text — the throttled
+// WARN line in the log carries those.
+type llmlogWriteStatus struct {
+	InsertFailures int64 `json:"insert_failures"`
+	InsertDropped  int64 `json:"insert_dropped"`
+}
+
+// readLLMLogWriteStatus is the production llmlogStats source.
+func readLLMLogWriteStatus() llmlogWriteStatus {
+	return llmlogWriteStatus{InsertFailures: llmlog.InsertFailures(), InsertDropped: llmlog.InsertDropped()}
 }
 
 // advisoryRow is one named reason on the admin status surface (A02-W4):
@@ -690,6 +732,10 @@ type StatusCollector struct {
 	tenantRollupAt      atomic.Int64 // unix nano of last per-tenant rollup refresh
 	tenantRollupRefresh atomic.Bool  // CAS single-flight guard
 
+	// llm24hNow anchors the llm_24h window of both views (llm24hAnchor); nil
+	// is the wall clock. Tests pin it to lay rows on the window's boundaries.
+	llm24hNow func() time.Time
+
 	// guard_review generation (RC-1 wave S1, status_guard.go): ONE ROLLUP
 	// aggregate per events.tick_interval carries the global row AND every
 	// scope's row, so the server-admin path, the tenant path and every future
@@ -702,6 +748,20 @@ type StatusCollector struct {
 	guardGen        atomic.Pointer[guardGen]
 	guardGenRefresh atomic.Bool // CAS single-flight guard
 	guardGenBuild   func(ctx context.Context, pool *pgxpool.Pool) *guardGen
+
+	// llmlogStats reads the llmlog write-path loss counters (W06-1) — process
+	// memory, no I/O, so assemble reads it per call instead of per tick.
+	// Defaults to readLLMLogWriteStatus and is swappable in tests, the same
+	// injection point dbStatsBuild/guardGenBuild already are; nil (a collector
+	// literal in a test) omits the section.
+	llmlogStats func() llmlogWriteStatus
+
+	// foreignLoad is the W06-8 foreign-load detector (foreign_load.go): its
+	// own ticker (RunForeignLoad, W06-8b) kicks the async single-flight
+	// rounds, assemble reads its last published rows (process memory, like
+	// llmlogStats). nil (a collector literal in a test) ⇒ no probing, no
+	// section.
+	foreignLoad *foreignLoadDetector
 
 	// broadcasting is set while an SSE broadcast loop (G34) is refreshing the
 	// cache every tick. A poll then serves that cache instead of triggering its
@@ -725,6 +785,8 @@ func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams d
 		dbStatsBuild:    buildDBStatus,
 		channelProbeRun: runChannelProbe,
 		guardGenBuild:   buildGuardReviewGeneration,
+		llmlogStats:     readLLMLogWriteStatus,
+		foreignLoad:     newForeignLoadDetector(pool, dispatchSrc),
 	}
 }
 
@@ -1147,6 +1209,11 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// generation's per-scope slot, so both paths share this single aggregate
 	// instead of each running their own.
 	snap.guardReview = c.guardReviewGlobal(ctx, cfg.Events.TickInterval)
+	// The W06-8 foreign-load detector is deliberately NOT kicked here: since
+	// W06-8b its rounds run on their own cadence (RunForeignLoad), so a status
+	// reader neither starts one nor changes the round cadence the hysteresis
+	// and the hourly grace are defined over; assemble serves the last landed
+	// round.
 	c.stampLiveness(snap, failsBefore)
 	return snap
 }
@@ -1465,6 +1532,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		rows := cheap.derivedCoverage
 		dcov = &rows
 	}
+	var lw *llmlogWriteStatus
+	if c.llmlogStats != nil {
+		v := c.llmlogStats()
+		lw = &v
+	}
 	return statusResponse{
 		Success:        true,
 		AsOf:           cheap.asOf,
@@ -1505,57 +1577,76 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// aggregate from the tick; the tenant path builds its own scope-filtered
 		// read in SnapshotForTenant.
 		GuardReview: cheap.guardReview,
+		// llmlog is server-admin-only and PRESENT whenever the counter source is
+		// wired, at 0/0 too (pointer). The per-tenant SnapshotForTenant never
+		// calls assemble, so its field stays nil → absent (process-wide counters
+		// sum every tenant's rows).
+		LLMLog: lw,
+		// foreign_load is server-admin-only and PRESENT while a target is
+		// probed (pointer; nil → omitted otherwise). The per-tenant
+		// SnapshotForTenant never calls assemble, so its field stays nil →
+		// absent.
+		ForeignLoad: c.foreignLoad.section(),
 	}
 }
 
-// queryLLM24h aggregates the last 24h of telemetry by (backend, pipeline). The
-// backend key is backend_name with a host fallback; complete reports whether
-// every row in the window is attributed — it carried a backend_name OR it is an
-// error row. A failed call (error IS NOT NULL) may legitimately have no
-// backend_name (it failed before a backend was selected); that is a known failure
-// surfaced by the errors count, NOT a telemetry gap, so it must not flip the flag.
-// Only a SUCCESSFUL un-attributed row flips complete false → the UI shows the
+// llm24hSpan is the window of the llm_24h rows: the 24 hours the wire field is
+// named after, a fixed part of the contract, not a setting.
+const llm24hSpan = 24 * time.Hour
+
+// llm24hAnchor is where the llm_24h window ends (server and tenant view):
+// llm24hNow when a test pinned it, the wall clock otherwise.
+func (c *StatusCollector) llm24hAnchor() time.Time {
+	if c.llm24hNow != nil {
+		return c.llm24hNow()
+	}
+	return time.Now()
+}
+
+// queryLLM24h aggregates the last 24h of telemetry by (backend, pipeline),
+// ordered by calls (ties by backend, then pipeline). The backend key is
+// backend_name with a host fallback; complete reports whether every row in the
+// window is attributed — it carried a backend_name OR it is an error row. A
+// failed call (error IS NOT NULL) may legitimately have no backend_name (it
+// failed before a backend was selected); that is a known failure surfaced by
+// the errors count, NOT a telemetry gap, so it must not flip the flag. Only a
+// SUCCESSFUL un-attributed row flips complete false → the UI shows the
 // "telemetry incomplete" disclaimer. NO body columns.
+//
+// The figures come from the hourly rollup plus the window's raw edge hour
+// (llmusage.Groups, W06-5), equal to the raw-row aggregate they replace for
+// every backend and pipeline name up to 100 characters (the rollup's width;
+// longer names show cut); the rollup counts the successful un-attributed rows
+// as unattributed_ok.
 func (c *StatusCollector) queryLLM24h(ctx context.Context) ([]llm24hRow, bool) {
-	rows, err := c.pool.Query(ctx, `
-		SELECT COALESCE(backend_name, host) AS backend, pipeline,
-		       count(*)::int AS calls,
-		       COALESCE(avg(duration_ms), 0)::int AS avg_ms,
-		       (count(*) FILTER (WHERE error IS NOT NULL))::int AS errors,
-		       COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens,
-		       COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens,
-		       COALESCE(sum(cost_usd), 0)::float8 AS cost_usd,
-		       bool_and(backend_name IS NOT NULL OR error IS NOT NULL) AS attributed
-		FROM context_llm_log
-		WHERE created_at > now() - interval '24 hours'
-		GROUP BY 1, 2
-		ORDER BY calls DESC`)
+	groups, err := llmusage.Groups(ctx, c.pool, c.llm24hAnchor(), llm24hSpan)
 	if err != nil {
 		c.noteDBFail("status: llm_24h query failed", err)
 		return nil, false
 	}
-	defer rows.Close()
-
-	out := []llm24hRow{}
+	out := make([]llm24hRow, 0, len(groups))
 	complete := true
-	for rows.Next() {
-		var r llm24hRow
-		var attributed bool
-		if err := rows.Scan(&r.Backend, &r.Pipeline, &r.Calls, &r.AvgMs, &r.Errors,
-			&r.PromptTokens, &r.CompletionTokens, &r.CostUSD, &attributed); err != nil {
-			c.noteDBFail("status: llm_24h scan failed", err)
-			return out, false
-		}
-		if !attributed {
+	for _, g := range groups {
+		if g.UnattributedOK > 0 {
 			complete = false
 		}
-		out = append(out, r)
-	}
-	if rows.Err() != nil {
-		c.noteDBFail("status: llm_24h rows error", rows.Err())
-		return out, false
+		out = append(out, llm24hRowOf(g))
 	}
 	return out, complete
+}
+
+// llm24hRowOf is the status row of one usage group.
+func llm24hRowOf(g llmusage.Group) llm24hRow {
+	return llm24hRow{
+		Backend:          g.Backend,
+		Pipeline:         g.Pipeline,
+		Calls:            int(g.Calls),
+		AvgMs:            int(g.AvgMs),
+		Errors:           int(g.Errors),
+		PromptTokens:     g.PromptTokens,
+		CompletionTokens: g.CompletionTokens,
+		CostUSD:          g.Cost,
+	}
 }
 
 // queryLastCycleAt returns the timestamp of the last dream-cycle LLM call

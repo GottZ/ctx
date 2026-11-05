@@ -55,6 +55,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -408,7 +409,8 @@ func chatStreamAnthropic(ctx context.Context, b backends.Backend, model string,
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	SetAnthropicHeaders(httpReq, &b)
+	hop := b.HopTarget(fedhop.WireChat)
+	setAnthropicWireHeaders(httpReq, &b, hop)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	resp, err := httpx.DoRetryOnce(httpClients.For(b.EgressGuarded()), httpReq, body)
@@ -416,6 +418,9 @@ func chatStreamAnthropic(ctx context.Context, b backends.Backend, model string,
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := fedhop.Observe(ctx, hop, resp.StatusCode, resp.Header); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		// Typed StatusError for the failover classifier, as on every wire.

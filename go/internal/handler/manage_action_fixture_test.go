@@ -104,6 +104,24 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"mcp-client-create", "", tierServerAdmin, "handleMCPClientCreate"},
 	{"mcp-client-delete", "", tierServerAdmin, "handleMCPClientDelete"},
 	{"mcp-client-list", "", tierServerAdmin, "handleMCPClientList"},
+	// model-alias-* (W02-04, design/02 §4.4.2): tenant-admin tier with the
+	// field tiers in the handler (_global and foreign scopes 404-equivalent,
+	// lowering a sensitivity server-admin + confirm).
+	{"model-alias-create", "", tierTenantAdmin, "handleModelAliasCreate"},
+	{"model-alias-delete", "", tierTenantAdmin, "handleModelAliasDelete"},
+	{"model-alias-list", "", tierTenantAdmin, "handleModelAliasList"},
+	{"model-alias-update", "", tierTenantAdmin, "handleModelAliasUpdate"},
+	// W01-5: the model consumer administration — NEW surface, not pre-table
+	// (design/01 §4.6). Granting a credential is tierSelfService, reading and
+	// revoking tierTenantAdmin; the field tiers live in the handlers.
+	{"model-consumer-create", "", tierSelfService, "handleModelConsumerCreate"},
+	{"model-consumer-delete", "", tierTenantAdmin, "handleModelConsumerDelete"},
+	{"model-consumer-get", "", tierTenantAdmin, "handleModelConsumerGet"},
+	{"model-consumer-list", "", tierTenantAdmin, "handleModelConsumerList"},
+	{"model-consumer-update", "", tierTenantAdmin, "handleModelConsumerUpdate"},
+	{"model-key-history", "", tierTenantAdmin, "handleModelKeyHistory"},
+	{"model-key-revoke", "", tierTenantAdmin, "handleModelKeyRevoke"},
+	{"model-key-rotate", "", tierSelfService, "handleModelKeyRotate"},
 	{"oauth-identity-link", "", tierServerAdmin, "handleOAuthIdentityLink"},
 	{"oauth-identity-list", "", tierServerAdmin, "handleOAuthIdentityList"},
 	{"oauth-identity-unlink", "", tierServerAdmin, "handleOAuthIdentityUnlink"},
@@ -136,8 +154,10 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"update", "", tierOpen, "handleUpdate"},
 }
 
-// fixtureActionNames is the deduplicated enumeration (89 names; three actions
-// carry two rows for their two data shapes).
+// fixtureActionNames is the deduplicated enumeration (101 names: the 89 of the
+// pre-table tree plus the four model alias actions of W02-04 and the eight model
+// consumer actions of W01-5; three
+// actions carry two rows for their two data shapes).
 func fixtureActionNames() map[string]struct{} {
 	names := make(map[string]struct{}, len(manageActionFixture))
 	for _, row := range manageActionFixture {
@@ -146,14 +166,14 @@ func fixtureActionNames() map[string]struct{} {
 	return names
 }
 
-// TestManageActionFixture_Shape guards the fixture itself: 89 distinct actions
-// in 92 rows, alphabetically ordered so a merge conflict is a real conflict.
+// TestManageActionFixture_Shape guards the fixture itself: 101 distinct actions
+// in 104 rows, alphabetically ordered so a merge conflict is a real conflict.
 func TestManageActionFixture_Shape(t *testing.T) {
-	if got := len(manageActionFixture); got != 92 {
-		t.Fatalf("fixture rows = %d, want 92 (89 actions, three of them twice)", got)
+	if got := len(manageActionFixture); got != 104 {
+		t.Fatalf("fixture rows = %d, want 104 (101 actions, three of them twice)", got)
 	}
-	if got := len(fixtureActionNames()); got != 89 {
-		t.Fatalf("fixture actions = %d, want 89", got)
+	if got := len(fixtureActionNames()); got != 101 {
+		t.Fatalf("fixture actions = %d, want 101", got)
 	}
 	for i := 1; i < len(manageActionFixture); i++ {
 		if manageActionFixture[i-1].action > manageActionFixture[i].action {

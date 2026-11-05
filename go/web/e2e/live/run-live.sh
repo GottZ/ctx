@@ -53,7 +53,7 @@ docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up --build -d
 # serves, which is the readiness signal.
 echo "run-live: waiting for ctxd to serve at $BASE_URL"
 for i in $(seq 1 90); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/whoami" 2>/dev/null || echo 000)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/whoami" 2>/dev/null || true)"
   if [ "$code" != "000" ]; then echo "run-live: ctxd serving (HTTP $code) after ${i}s"; break; fi
   if [ "$i" -eq 90 ]; then
     echo "run-live: ctxd never started serving — dumping logs" >&2
@@ -72,6 +72,7 @@ LIVE_ENV=(
   -e "CTX_E2E_BASE_URL=$BASE_URL"
   -e "CTX_E2E_STATE_FILE=/work/e2e/live/.results/seed-state.json"
   -e "CTX_E2E_LEAK_INJECT=${CTX_E2E_LEAK_INJECT:-}"
+  -e "CTX_E2E_MODELKEY_SWAP=${CTX_E2E_MODELKEY_SWAP:-}"
   -e "CI=${CI:-}"
 )
 

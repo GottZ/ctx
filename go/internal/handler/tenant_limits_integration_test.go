@@ -316,7 +316,7 @@ func TestTenantCreateSeeding_Integration(t *testing.T) {
 
 	// WITH limits → echoed on create AND persisted (a follow-up tenant-get echoes).
 	t.Run("WithLimits", func(t *testing.T) {
-		rec := be5ScopeManageAs(t, h, adminAR(), map[string]any{
+		rec := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tlcs-acme", "display_name": "Acme", "max_scopes": 3, "max_keys": 4},
 		})
@@ -325,13 +325,13 @@ func TestTenantCreateSeeding_Integration(t *testing.T) {
 		}
 		tlAssertLimits(t, rec, 3, 4)
 		id, _ := tlTenant(t, rec)["id"].(string)
-		g := be5ScopeManageAs(t, h, adminAR(), map[string]any{"action": "tenant-get", "id": id})
+		g := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{"action": "tenant-get", "id": id})
 		tlAssertLimits(t, g, 3, 4)
 	})
 
 	// WITHOUT limits → the 069 column DEFAULT 25/50 (no seeding).
 	t.Run("WithoutLimits_Default2550", func(t *testing.T) {
-		rec := be5ScopeManageAs(t, h, adminAR(), map[string]any{
+		rec := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tlcs-globex", "display_name": "Globex"},
 		})
@@ -343,7 +343,7 @@ func TestTenantCreateSeeding_Integration(t *testing.T) {
 
 	// Partial seeding: only max_scopes given → it caps, max_keys keeps the DEFAULT 50.
 	t.Run("PartialKeepsDefault", func(t *testing.T) {
-		rec := be5ScopeManageAs(t, h, adminAR(), map[string]any{
+		rec := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tlcs-partial", "display_name": "Partial", "max_scopes": 2},
 		})
@@ -355,7 +355,7 @@ func TestTenantCreateSeeding_Integration(t *testing.T) {
 
 	// Shared range gate on create: a negative limit 400s, and NO tenant is created.
 	t.Run("RangeGate400", func(t *testing.T) {
-		rec := be5ScopeManageAs(t, h, adminAR(), map[string]any{
+		rec := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tlcs-bad", "display_name": "Bad", "max_scopes": -5, "max_keys": 1},
 		})
@@ -364,7 +364,7 @@ func TestTenantCreateSeeding_Integration(t *testing.T) {
 		}
 		// Proof the tenant was NOT created (the range gate runs before the insert):
 		// re-creating with the same slug must succeed (200), not 409.
-		ok := be5ScopeManageAs(t, h, adminAR(), map[string]any{
+		ok := be5ScopeManageAs(t, h, tccAdminAR(), map[string]any{
 			"action": "tenant-create",
 			"data":   map[string]any{"slug": "tlcs-bad", "display_name": "Bad", "max_scopes": 5, "max_keys": 1},
 		})

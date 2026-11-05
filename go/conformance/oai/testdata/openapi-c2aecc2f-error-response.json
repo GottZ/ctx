@@ -1,0 +1,132 @@
+{
+  "x-ctx-provenance": {
+    "source": "https://github.com/openai/openai-openapi/blob/c2aecc2fbe1ddff3e7500a0eaa5c2bc4c19c5318/openapi.json",
+    "commit": "c2aecc2fbe1ddff3e7500a0eaa5c2bc4c19c5318",
+    "commit_date": "2026-10-31T17:43:04Z",
+    "source_sha256": "d80bb28992f6c2a86876d866dcae0b1f15e130de94238592bc57a4a579448b5f",
+    "license": "MIT (Copyright (c) OpenAI), see LICENSE.openai-openapi",
+    "extract": "components.schemas: ErrorResponse and its transitive $ref closure, values equal to the source, re-serialized with key order preserved"
+  },
+  "openapi": "3.1.0",
+  "info": {
+    "version": "2.3.0"
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "misalignment": {
+            "$ref": "#/components/schemas/MisalignmentErrorDetailsResource"
+          }
+        },
+        "required": [
+          "type",
+          "message",
+          "param",
+          "code"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "MisalignmentErrorDetailsResource": {
+        "properties": {
+          "review_target": {
+            "anyOf": [
+              {
+                "not": {
+                  "pattern": "[^A-Za-z0-9._~:-]"
+                },
+                "type": "string",
+                "maxLength": 96,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._~:-]+$",
+                "description": "An opaque target for explicitly continuing this review, or null when unavailable."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error_type": {
+            "$ref": "#/components/schemas/_MisalignmentErrorType",
+            "description": "An optional classification; clients must accept additional values."
+          },
+          "detailed_explanation": {
+            "type": "string",
+            "description": "The public explanation for this block."
+          },
+          "steer": {
+            "$ref": "#/components/schemas/_MisalignmentSteer",
+            "description": "An optional public continuation instruction."
+          }
+        },
+        "type": "object",
+        "required": []
+      },
+      "_MisalignmentErrorType": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string",
+            "enum": [
+              "potentially_unintended_data_transfer",
+              "potentially_unintended_data_access",
+              "potentially_unintended_destructive_activity",
+              "other"
+            ]
+          }
+        ]
+      },
+      "_MisalignmentSteer": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The public continuation instruction."
+          }
+        },
+        "type": "object",
+        "required": [
+          "message"
+        ]
+      }
+    }
+  }
+}

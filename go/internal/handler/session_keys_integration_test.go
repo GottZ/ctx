@@ -38,7 +38,7 @@ import (
 // through the REAL middleware chain).
 func skServer(pool *pgxpool.Pool) *httptest.Server {
 	sessH := NewSessionHandler(pool)
-	whoH := NewWhoamiHandler(pool)
+	whoH := NewWhoamiHandler(pool, nil)
 	r := chi.NewRouter()
 	r.Post("/auth/login", sessH.HandleLogin)
 	r.Group(func(r chi.Router) {

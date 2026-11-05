@@ -154,6 +154,17 @@ func TestStatusPerTenantView(t *testing.T) {
 		if strings.Contains(string(b), `"advisories"`) {
 			t.Errorf("tenant /api/status wire payload carries an advisories key (server-global leak): %s", b)
 		}
+		// W06-1 (design/06 §7): the llmlog write-path loss counters are
+		// process-wide — every tenant's rows and the background's in one
+		// number — so server-admin-only, same nil + wire-absence pin.
+		if snap.LLMLog != nil || strings.Contains(string(b), `"llmlog"`) {
+			t.Errorf("tenant /api/status carries the llmlog section (server-global leak): %s", b)
+		}
+		// ... while the server-admin frame of the same collector carries it,
+		// even at zero.
+		if admin := col.Snapshot(ctx); admin.LLMLog == nil {
+			t.Error("server-admin /api/status lacks the llmlog section")
+		}
 	})
 
 	t.Run("dispatch_exposure_matrix", func(t *testing.T) {

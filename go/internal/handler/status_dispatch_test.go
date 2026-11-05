@@ -18,9 +18,13 @@ func sampleSnapshot() dispatch.Snapshot {
 		Demand:          2,
 		ReapsTotal:      3,
 		ClassDowngrades: 1,
-		UnchargedCalls:  4,
-		OpsTotal:        99,
-		MaxOpDur:        7 * time.Millisecond,
+		// W01-7 (design/01 §4.5 I-K10): the two principal-gate refusal
+		// counters, server-admin only.
+		ClassUnauthorized:  5,
+		PrincipalConflicts: 6,
+		UnchargedCalls:     4,
+		OpsTotal:           99,
+		MaxOpDur:           7 * time.Millisecond,
 		Targets: []dispatch.TargetSnapshot{
 			{
 				Origin:            "http://herbert:8089",
@@ -29,12 +33,19 @@ func sampleSnapshot() dispatch.Snapshot {
 				HeraldScope:       dispatch.HeraldGlobal,
 				Held:              1,
 				Inflight:          1,
-				Interactive:       dispatch.WaitStats{Waiting: 2, OldestWait: 500 * time.Millisecond, P95Wait: 400 * time.Millisecond, MaxWait: 600 * time.Millisecond, Samples: 10},
+				// A03-W3: a real snapshot always carries the internal split;
+				// the tenant occupancy reads only these two.
+				HeldInternal:     1,
+				InflightInternal: 1,
+				Interactive:      dispatch.WaitStats{Waiting: 2, OldestWait: 500 * time.Millisecond, P95Wait: 400 * time.Millisecond, MaxWait: 600 * time.Millisecond, Samples: 10},
 				Background:        dispatch.WaitStats{Waiting: 3},
 				Preempt:           dispatch.PreemptStats{PreemptsTotal: 5, WastedMsTotal: 20, AgedAdmitsTotal: 2, AgedPreemptsTotal: 1},
 				Buckets: []dispatch.BucketSnapshot{
 					{FairKey: "private", Waiting: 1, OldestWait: 300 * time.Millisecond, Inflight: 1, Tokens: 111, Charges: 2},
 					{FairKey: "acme-secret", Waiting: 4, OldestWait: 900 * time.Millisecond, Inflight: 2, Tokens: 999, Charges: 9},
+					// A03-W3: an external consumer bucket of a foreign tenant —
+					// server-admin detail, never in the tenant shape.
+					{FairKey: "_consumer:acme-app", TenantID: "acme", Class: dispatch.ClassExternal, Waiting: 6, Inflight: 1},
 				},
 			},
 			{
@@ -93,7 +104,7 @@ func TestBuildDispatchTenantNoForeignPrincipal(t *testing.T) {
 	}
 	payload := string(b)
 	// F-B3: no foreign fairKey, no foreign token/charge leak, no "fair_key" field.
-	for _, forbidden := range []string{"acme-secret", "fair_key", "999", "sidecar"} {
+	for _, forbidden := range []string{"acme-secret", "fair_key", "999", "sidecar", "class_unauthorized", "principal_conflicts", "_consumer:", "acme-app"} {
 		if strings.Contains(payload, forbidden) {
 			t.Errorf("F-B3 leak: tenant payload contains %q\n%s", forbidden, payload)
 		}
@@ -127,6 +138,10 @@ func TestBuildDispatchAdminExposesFullDetail(t *testing.T) {
 
 	if !ds.Enforcing || ds.ClassDowngrades != 1 || ds.UnchargedCalls != 4 || ds.MaxOpMs != 7 {
 		t.Errorf("admin scalar detail wrong: %+v", ds)
+	}
+	if ds.ClassUnauthorized != 5 || ds.PrincipalConflicts != 6 {
+		t.Errorf("principal-gate counters wrong: class_unauthorized=%d principal_conflicts=%d, want 5/6",
+			ds.ClassUnauthorized, ds.PrincipalConflicts)
 	}
 	if ds.LastGuardAt == nil || !ds.LastGuardAt.Equal(guard) || ds.LastDigestAt != nil {
 		t.Errorf("last-run stamps wrong: guard=%v digest=%v", ds.LastGuardAt, ds.LastDigestAt)
