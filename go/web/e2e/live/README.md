@@ -26,6 +26,21 @@ bun run e2e:live          # = bash e2e/live/run-live.sh
    (`e2e/toolchain.lock`, `--network host`).
 5. Tears the stack down — the DB, and every key with it, dies.
 
+The stack runs with `CTX_GATEWAY_ENABLED=true` (only here; the production
+default stays off): a tenant-admin reaches `/gateway` only while the model API
+is on, and since F-W8 ctxd refuses that boot unless the model group registers
+its ingress protection — so every live run also proves the gateway-on boot.
+
+## Specs
+
+| spec | proves |
+|---|---|
+| `login.spec.ts` | real key → shell; wrong key → error band, no shell |
+| `store-roundtrip.spec.ts` | store → search → detail over the real handlers |
+| `tenant-isolation.spec.ts` | B finds its own sentinel block, never A's |
+| `sse-transport.spec.ts` | real `/api/events` frames + client reconnect |
+| `model-consumers.spec.ts` | B's `/gateway` lists B's consumer, never A's; a `ctxm_` model key at the login form and at `POST /auth/login` ⇒ 401, no session |
+
 ## Fail-closed target gate (`seed.ts`, §3.6)
 
 Three layers, ALL before the first write; any failure ⇒ `SEED-REFUSAL
@@ -50,8 +65,14 @@ writes=0` + abort:
 - **(b) target-gate** — run `seed.ts` against a non-e2e target (no run key):
   `SEED-REFUSAL writes=0`, abort before the first write.
 - **(c) leak detector** — `CTX_E2E_LEAK_INJECT=1 bun run e2e:live` injects
-  tenant A's sentinel into tenant B; `tenant-isolation.spec.ts` goes RED,
-  proving the isolation detector detects.
+  tenant A's sentinel into tenant B (a block, and a model consumer carrying A's
+  consumer label); `tenant-isolation.spec.ts` and the `/gateway` probe of
+  `model-consumers.spec.ts` go RED, proving the isolation detectors detect.
+- **(d) model-key swap** — `CTX_E2E_MODELKEY_SWAP=1 bun run e2e:live` hands
+  B's knowledge owner key to the specs as B's model key; the login form and
+  `POST /auth/login` then sign in and the two model-key probes of
+  `model-consumers.spec.ts` go RED, proving the "model key is no web login"
+  probe detects a credential that does sign in.
 
 ## Secrets in artifacts (§4.8)
 
@@ -61,6 +82,13 @@ and the tenant-create response carries the reveal-once `owner_key` in clear.
 valid ONLY against the job-local, end-of-run-destroyed instance.** Live traces
 therefore get `retention-days: 3` in CI (mock reports get 14 — no real keys
 flow there).
+
+`model-consumers.spec.ts` goes further and leaves no clear key in its own
+artifacts: B's reveal-once `ctxm_` key lives only in the seed state file. A
+trace records every fill value and request body, and a failing locator
+matcher embeds an aria snapshot carrying a password input's value
+(`error-context.md`) — so that file runs with `trace: 'off'`, blanks every
+input right after the login exchange, and blanks them again in `afterEach`.
 
 > **Staging-redaction caveat.** The moment the live tier is pointed at a
 > **long-lived staging instance** instead of a throwaway one, invariant 3

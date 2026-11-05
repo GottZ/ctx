@@ -1,9 +1,10 @@
 // e2e live-tier seed (design 06 §3.6 / §4.7, wave PV10). Builds the test corpus
 // EXCLUSIVELY through production write paths (tenant-create → store →
-// issue-create) against the throwaway ctxd — so the seed itself IS an
-// integration test of those paths and no hand-written fixture shape can drift
-// from the server. Runs as the live Playwright globalSetup; also runnable
-// standalone (`bun seed.ts`) for the PV10 negative gates.
+// issue-create → model-consumer-create) against the throwaway ctxd — so the
+// seed itself IS an integration test of those paths and no hand-written
+// fixture shape can drift from the server. Runs as the live Playwright
+// globalSetup; also runnable standalone (`bun seed.ts`) for the PV10 negative
+// gates.
 //
 // FAIL-CLOSED TARGET GATE (§3.6, three layers, ALL before the first write):
 //   1. Env-gate: CTX_E2E_LIVE=1 AND the baseURL host is localhost/127.0.0.1 or
@@ -45,6 +46,7 @@ interface SeedConfig {
   adminKey: string
   stateFile: string
   leakInject: boolean
+  modelKeySwap: boolean
 }
 
 function readConfig(): SeedConfig {
@@ -71,7 +73,13 @@ function readConfig(): SeedConfig {
   const stateFile = process.env.CTX_E2E_STATE_FILE ?? ''
   if (!stateFile) refuse('CTX_E2E_STATE_FILE is unset')
 
-  return { baseURL, adminKey, stateFile, leakInject: process.env.CTX_E2E_LEAK_INJECT === '1' }
+  return {
+    baseURL,
+    adminKey,
+    stateFile,
+    leakInject: process.env.CTX_E2E_LEAK_INJECT === '1',
+    modelKeySwap: process.env.CTX_E2E_MODELKEY_SWAP === '1',
+  }
 }
 
 async function whoami(baseURL: string, key: string): Promise<Record<string, unknown>> {
@@ -101,6 +109,7 @@ async function post(baseURL: string, key: string, path: string, body: unknown): 
 
 interface TenantSeed {
   slug: string
+  id: string
   scope: string
   ownerKey: string
   sentinel: string
@@ -111,13 +120,44 @@ async function createTenant(baseURL: string, adminKey: string, slug: string, dis
     action: 'tenant-create',
     data: { slug, display_name: display },
   })
+  const id = (res.tenant as { id?: unknown } | undefined)?.id
   const scope = res.scope as string
   const ownerKey = res.owner_key as string
-  if (!scope || !ownerKey) throw new Error(`tenant-create ${slug} returned no scope/owner_key`)
+  if (typeof id !== 'string' || !id || !scope || !ownerKey) {
+    throw new Error(`tenant-create ${slug} returned no tenant id/scope/owner_key`)
+  }
   // High-entropy sentinel (NOT a dictionary word — avoids collision with UI
   // copy, design 06 §5.6b). Stored as its OWN block in the tenant's scope.
   const sentinel = `${slug.toUpperCase()}-SENTINEL-${crypto.randomUUID()}`
-  return { slug, scope, ownerKey, sentinel }
+  return { slug, id, scope, ownerKey, sentinel }
+}
+
+// MODEL_KEY_PREFIX is the credential class of the /v1 model API
+// (go/internal/modelkey Prefix). A consumer key without it would make the
+// "a model key is no web login" probe vacuous, so the seed refuses it.
+const MODEL_KEY_PREFIX = 'ctxm_'
+
+// createConsumer mints a model consumer and its first key through the
+// production path (server-admin model-consumer-create, tenant_id = the
+// tenant's UUID) and returns the reveal-once ctxm_ key. The key goes ONLY into
+// the gitignored state file — never into a log line or an error message.
+async function createConsumer(baseURL: string, adminKey: string, tenantId: string, label: string): Promise<string> {
+  const res = await post(baseURL, adminKey, '/api/manage', {
+    action: 'model-consumer-create',
+    data: { tenant_id: tenantId, label },
+  })
+  const key = res.api_key
+  if (typeof key !== 'string' || !key.startsWith(MODEL_KEY_PREFIX)) {
+    // Never echo the value — only that it lacks the class prefix.
+    throw new Error(`model-consumer-create ${label} returned no ${MODEL_KEY_PREFIX} api_key`)
+  }
+  return key
+}
+
+// consumerLabel is a consumer's high-entropy sentinel label (the label is
+// what /gateway renders; UNIQUE per tenant, ≤ 100 runes).
+function consumerLabel(t: TenantSeed): string {
+  return `${t.slug.toUpperCase()}-CONSUMER-${crypto.randomUUID()}`
 }
 
 async function storeBlock(baseURL: string, key: string, scope: string, title: string, content: string): Promise<void> {
@@ -173,6 +213,18 @@ export async function runSeed(): Promise<void> {
     issueTitle = null
   }
 
+  // Model consumers (wave W05-18): one per tenant through the server-admin
+  // production path. A's is what B's /gateway must never list; B's is the
+  // positive control there, and B's ctxm_ key is the "a model key is no web
+  // login" probe. A's key is not kept — no spec needs it.
+  const consumerA = { label: consumerLabel(a) }
+  await createConsumer(cfg.baseURL, cfg.adminKey, a.id, consumerA.label)
+  const consumerBLabel = consumerLabel(b)
+  const consumerB = {
+    label: consumerBLabel,
+    modelKey: await createConsumer(cfg.baseURL, cfg.adminKey, b.id, consumerBLabel),
+  }
+
   // Leak-detector negative gate (design 06 §5.6b / PV10 gate c): when armed,
   // inject tenant A's sentinel INTO tenant B's scope. The isolation spec then
   // finds the A-sentinel under B's session ⇒ the isolation probe goes red,
@@ -180,6 +232,19 @@ export async function runSeed(): Promise<void> {
   if (cfg.leakInject) {
     await storeBlock(cfg.baseURL, b.ownerKey, b.scope, `LEAK-INJECT ${a.sentinel}`, `Injected A sentinel: ${a.sentinel}`)
     console.warn('seed: LEAK INJECTED — A sentinel written into tenant B (negative gate c)')
+    // The same detector for the consumer list: a consumer carrying A's label
+    // IN tenant B — model-consumers.spec.ts then finds it on B's /gateway.
+    await createConsumer(cfg.baseURL, cfg.adminKey, b.id, consumerA.label)
+    console.warn('seed: LEAK INJECTED — consumer with A’s label created in tenant B (negative gate c)')
+  }
+
+  // Model-key swap detector (wave W05-18): when armed, the state hands B's
+  // KNOWLEDGE owner key to the specs as B's "model key". The web login then
+  // succeeds and model-consumers.spec.ts goes red, proving the probe detects a
+  // credential that does sign in. The minted ctxm_ key is dropped.
+  if (cfg.modelKeySwap) {
+    consumerB.modelKey = b.ownerKey
+    console.warn('seed: MODEL KEY SWAPPED — state carries B’s owner key as B’s model key (negative gate)')
   }
 
   const state = {
@@ -190,6 +255,9 @@ export async function runSeed(): Promise<void> {
     tenants: { a, b },
     roundtripTitle,
     issueTitle,
+    // bRows: consumerB is tenant B's only seeded consumer — the leak overlay's
+    // extra row is deliberately not counted (it is the foreign row).
+    consumers: { a: consumerA, b: consumerB, bRows: 1 },
     writes: writeCount,
   }
   mkdirSync(dirname(cfg.stateFile), { recursive: true })
