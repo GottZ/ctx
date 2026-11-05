@@ -73,19 +73,26 @@ type rowQuerier interface {
 // of a row.
 func seedLLMLog(ctx context.Context, t *testing.T, pool *pgxpool.Pool, rows, days, keyEvery, bodyLen int) {
 	t.Helper()
+	seedLLMLogUntil(ctx, t, pool, nil, rows, days, keyEvery, bodyLen)
+}
+
+// seedLLMLogUntil is seedLLMLog with the newest row just before until
+// instead of now() (nil = now()).
+func seedLLMLogUntil(ctx context.Context, t *testing.T, pool *pgxpool.Pool, until *time.Time, rows, days, keyEvery, bodyLen int) {
+	t.Helper()
 	stepSecs := float64(days) * 86400 / float64(rows)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO context_llm_log
 		    (created_at, pipeline, model, host, duration_ms, prompt_tokens, completion_tokens,
 		     request_user, metadata, backend_name, backend_locality, api_key_id)
-		SELECT now() - make_interval(secs => g * $2::float8),
+		SELECT COALESCE($5::timestamptz, now()) - make_interval(secs => g * $2::float8),
 		       'm158-seed', 'qwen', 'h', 100, 10, 20,
 		       repeat('u', $4::int),
 		       jsonb_build_object('note', repeat('m', $4::int)),
 		       'local', 'local',
 		       CASE WHEN g % $3::int = 0 THEN gen_random_uuid() END
 		  FROM generate_series(1, $1::int) g`,
-		rows, stepSecs, keyEvery, bodyLen); err != nil {
+		rows, stepSecs, keyEvery, bodyLen, until); err != nil {
 		t.Fatalf("seed %d rows: %v", rows, err)
 	}
 }
@@ -98,6 +105,23 @@ func llmLogChunks(ctx context.Context, t *testing.T, q rowQuerier) int {
 		t.Fatalf("count chunks: %v", err)
 	}
 	return n
+}
+
+// llmLogChunkStart is the start of the context_llm_log chunk that holds
+// now(): the hypertable's chunk interval laid on the grid TimescaleDB lays its
+// chunks on, the Unix epoch. time_bucket's own default origin is the Monday
+// 2000-01-03, three days off the chunk grid (7-day chunks start on Thursdays
+// 00:00 UTC), hence the explicit origin.
+func llmLogChunkStart(ctx context.Context, t *testing.T, q rowQuerier) time.Time {
+	t.Helper()
+	var at time.Time
+	if err := q.QueryRow(ctx, `
+		SELECT time_bucket(d.time_interval, now(), origin => 'epoch'::timestamptz)
+		  FROM timescaledb_information.dimensions d
+		 WHERE d.hypertable_name = 'context_llm_log' AND d.column_name = 'created_at'`).Scan(&at); err != nil {
+		t.Fatalf("chunk start of now(): %v", err)
+	}
+	return at
 }
 
 // llmLogCatalog renders what `\d context_llm_log` shows — columns,
@@ -308,11 +332,29 @@ func TestMigration158OnPopulatedHypertable(t *testing.T) {
 	pool := testdb.SetupTestDBUpTo(t, m158Version-1)
 	ctx := context.Background()
 
+	// The seed and the window plan below end at anchor, the start of the
+	// chunk that holds now(), not at now(): a seed ending at now() leaves the
+	// newest chunk with whatever part of its seven days has passed — one heap
+	// page of rows in the first hours after a chunk boundary (Thursday 00:00
+	// UTC) — and on that chunk a Seq Scan is the cheaper plan, correctly. Ended
+	// at anchor, every chunk the window touches holds the seed's full density
+	// at every clock, and the plan gate below stays exact: one index scan on
+	// idx_llm_log_consumer per chunk, no seq scan.
+	anchor := llmLogChunkStart(ctx, t, pool)
 	const seedRows, seedDays, keyEvery = 20000, 60, 50
-	seedLLMLog(ctx, t, pool, seedRows, seedDays, keyEvery, 32)
+	seedLLMLogUntil(ctx, t, pool, &anchor, seedRows, seedDays, keyEvery, 32)
 	chunks := llmLogChunks(ctx, t, pool)
 	if chunks < 5 {
 		t.Fatalf("seed spans %d chunks, want >= 5 (the CHECK must be validated across chunks)", chunks)
+	}
+	var newestEnd time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT max(range_end) FROM timescaledb_information.chunks
+		 WHERE hypertable_name = 'context_llm_log'`).Scan(&newestEnd); err != nil {
+		t.Fatalf("newest chunk: %v", err)
+	}
+	if !newestEnd.Equal(anchor) {
+		t.Fatalf("the newest chunk ends at %s, want the anchor %s — the anchor is off the chunk grid", newestEnd, anchor)
 	}
 
 	if err := store.RunMigrationsUpTo(ctx, pool, m158Version); err != nil {
@@ -388,10 +430,11 @@ func TestMigration158OnPopulatedHypertable(t *testing.T) {
 	})
 
 	t.Run("per-consumer window plans onto idx_llm_log_consumer", func(t *testing.T) {
-		consumer := m158Consumer
 		for i := 0; i < 40; i++ {
-			age := time.Duration(i) * 36 * time.Hour // 0 … 58.5 days, every chunk of the seed
-			if err := insertIdentities(ctx, pool, "w06-2-consumer", age, nil, &consumer); err != nil {
+			at := anchor.Add(-time.Hour - time.Duration(i)*36*time.Hour) // 1 h … 58.5 days before anchor, every chunk of the seed
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO context_llm_log (created_at, pipeline, model, host, consumer_id)
+				 VALUES ($1, 'w06-2-consumer', 'm', 'h', $2)`, at, m158Consumer); err != nil {
 				t.Fatalf("insert consumer row %d: %v", i, err)
 			}
 		}
@@ -403,7 +446,7 @@ func TestMigration158OnPopulatedHypertable(t *testing.T) {
 			EXPLAIN (FORMAT JSON)
 			SELECT id, created_at, pipeline FROM context_llm_log
 			 WHERE consumer_id = $1 AND created_at > $2`,
-			m158Consumer, time.Now().Add(-30*24*time.Hour)).Scan(&plan); err != nil {
+			m158Consumer, anchor.Add(-30*24*time.Hour)).Scan(&plan); err != nil {
 			t.Fatalf("explain: %v", err)
 		}
 		indexes, seqScans := planIndexes(t, plan)
