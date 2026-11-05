@@ -8,8 +8,9 @@ package dispatch
 //     admitted within one light hold time — while the fairness-first head
 //     does not fit it holds the class (no backfill), and a consumer or
 //     tenant that holds nothing is within its share; a same-tenant head with
-//     w + (s − 1) > tenantShare next to a busy consumer of share s is the
-//     named limit (pinned, it still starves);
+//     w + (s − 1) > tenantShare next to a busy consumer of share s was the
+//     named limit, served since the aging rule (A03-W8a,
+//     external_aging_test.go);
 //   - d2 follows the head the freed units serve first (the fairness-first
 //     head, not the lightest one);
 //   - the backfill reservation never binds while the in-house classes
@@ -119,83 +120,12 @@ func TestExternalHeavyHeadUnderLightStream(t *testing.T) {
 	}
 }
 
-// TestExternalHeavyHeadSameTenantNamedLimit pins the named limit of F-1
-// (review 2; review 3 F3-2, F3-6; handoff "aging rule before A03-W8") as a
-// scripted, deterministic sequence on the fake clock: a heavy head of weight
-// w of the SAME tenant as a busy consumer c with consumer share s stays over
-// its tenant share while w + (s − 1) exceeds the tenant share — c ranks
-// first up to s − 1 held units and keeps the tenant at s − 1 or more. One
-// active tenant, E = 5 (tenantShare 5), equal fair weights (s = ⌈5·10/20⌉ =
-// 3): c holds 2, the head queues, c's third request ranks before it; then
-// six times c queues one more request and one of its leases ends — every
-// freed unit goes to c, the head (w = 5 and w = 4) keeps waiting. Control:
-// w = 3 (3 + 2 ≤ 5) is admitted on arrival. This pin turns red when an
-// aging rule lands (then rewrite it into its gate).
-func TestExternalHeavyHeadSameTenantNamedLimit(t *testing.T) {
-	for _, w := range []int{weightE, weightE - 1, weightE - 2} {
-		t.Run(fmt.Sprintf("w%d", w), func(t *testing.T) { sameTenantLimit(t, w) })
-	}
-}
-
-func sameTenantLimit(t *testing.T, w int) {
-	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
-	clk := fakeFairClock(d)
-	bg := context.Background()
-	light := []*Lease{
-		mustAcquire(t, d, xctx(bg, "light", "tenant-a"), weightedReq(1)),
-		mustAcquire(t, d, xctx(bg, "light", "tenant-a"), weightedReq(1)),
-	}
-	defer func() {
-		for _, l := range light {
-			l.Release()
-		}
-	}()
-	clk.Add(int64(time.Second))
-	ctx, cancel := context.WithCancel(bg)
-	defer cancel()
-	heavyCh := make(chan admission, 1)
-	startWaiter(xctx(ctx, "heavy", "tenant-a"), d, "heavy", weightedReq(w), heavyCh)
-	if w+2 <= weightE {
-		a := recvAdmission(t, heavyCh, "control head")
-		if a.err != nil {
-			t.Fatalf("w=%d: %v, want admitted on arrival (w + 2 ≤ tenantShare)", w, a.err)
-		}
-		a.lease.Release()
-		return
-	}
-	waitQueued(t, d, heavyCh, 1, "heavy head queued")
-	l3, _, err := d.TryAcquire(xctx(bg, "light", "tenant-a"), weightedReq(1))
-	if err != nil || l3 == nil {
-		t.Fatalf("light's third request (within its share 3, the head over the tenant share): (lease %v, err %v), want an admission", l3 != nil, err)
-	}
-	light = append(light, l3)
-	ch := make(chan admission, 1)
-	for cycle := 0; cycle < 6; cycle++ {
-		startWaiter(xctx(ctx, "light", "tenant-a"), d, "light", weightedReq(1), ch)
-		waitFor(t, "light request queued", func() bool { return waitingExternal(d) == 2 })
-		clk.Add(int64(time.Second))
-		light[0].Release()
-		light = light[1:]
-		a := recvAdmission(t, ch, "light after the release")
-		if a.err != nil {
-			t.Fatalf("cycle %d: light: %v", cycle, a.err)
-		}
-		light = append(light, a.lease)
-		if n := waitingExternal(d); n != 1 {
-			t.Fatalf("cycle %d: external waiting %d, want 1 (the heavy head)", cycle, n)
-		}
-	}
-	select {
-	case a := <-heavyCh:
-		t.Fatalf("w=%d head ended (err %v) — the named limit changed; rewrite this pin into the gate of the aging rule", w, a.err)
-	default:
-	}
-	t.Logf("named limit: same-tenant w=%d head still waits after 6 releases, each went to the busy consumer (share 3)", w)
-	cancel()
-	if a := recvAdmission(t, heavyCh, "heavy canceled"); !errors.Is(a.err, context.Canceled) {
-		t.Fatalf("heavy after cancel: %v, want context.Canceled", a.err)
-	}
-}
+// The named limit of F-1 (review 2; review 3 F3-2, F3-6) — a same-tenant
+// head with w + (s − 1) above the tenant share starves next to a busy
+// consumer of share s — was pinned here as
+// TestExternalHeavyHeadSameTenantNamedLimit; the aging rule (A03-W8a) ends
+// it, the pin is rewritten into its gate TestExternalHeavyHeadSameTenantAges
+// (external_aging_test.go, the same script on the fake clock).
 
 // TestExternalReservationServesTheFairnessFirstHead (F-1 (i) × d2): under
 // 16 background workers a light head of consumer "light" (tenant-a, 30 ms of

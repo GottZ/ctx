@@ -56,6 +56,15 @@ type waiter struct {
 	// refusal predicted after the push writes it back (A03-W6 review 4
 	// FR4-2, predictAfterPushLocked).
 	fwBefore int
+	// passBase is the weight its external class had admitted to other
+	// consumers at its push (extFair.others, A03-W8a): the head has aged
+	// once that count grew by externalAgingTurnovers · E_eff since. 0
+	// in-house.
+	passBase uint64
+	// agesAt is its arrival on the view clock plus externalAgingRounds ·
+	// L_p50 of its class, fixed at the push when the class's lease window
+	// was warm (enqueueExternalLocked, A03-W8a); zero otherwise.
+	agesAt time.Time
 }
 
 // classQueue is a per-principal wait queue of one target: per-bucket FIFOs
