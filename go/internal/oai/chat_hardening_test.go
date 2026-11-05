@@ -8,12 +8,16 @@ package oai_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/handler/v1census"
 	"github.com/GottZ/ctx/internal/oai"
 )
@@ -26,19 +30,33 @@ import (
 // internal_error with x-should-retry true, never an empty 200, and never
 // the refusal's model_unavailable (the lifecycle ended first). Control: the
 // same shutdown without the refusal.
+//
+// The shutdown lands inside Plan, before the real planner refuses: since
+// H-1 a lifecycle that already ended when the request enters is answered at
+// the entry and never reaches the planner (TestShutdownAtEntryReachesNoPlanNoWire),
+// so a shutdown before the request would leave the refusal unreached and
+// the case equal to its control (FOLGE-M M2). Each case asserts that the
+// planner ran once, and whether it refused.
 func TestShutdownBeforePlanRefusalIsNoEmpty200(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		prep func(*chatRig)
-	}{{"plan refusal", notOffered}, {"control", func(*chatRig) {}}} {
+		name    string
+		prep    func(*chatRig)
+		refused int64 // Plan calls refused with ErrChainNotOffered
+	}{{"plan refusal", notOffered, 1}, {"control", func(*chatRig) {}, 0}} {
 		u := newUpstream(t, answerSGLang)
 		life, cancel := context.WithCancel(context.Background())
-		cancel()
+		probe := &shStopProbe{}
 		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 2, 1, func(r *chatRig) {
 			tc.prep(r)
 			r.deps.Lifecycle = life
+			r.deps.Planner = shStopPlanner{AdmissionPlanner: r.planner, stop: cancel, probe: probe}
 		})
 		a := rig.post(t, chatBody("chat"))
+		cancel()
+		if p, rf := probe.plans.Load(), probe.refused.Load(); p != 1 || rf != tc.refused {
+			t.Fatalf("%s: Plan calls %d, refused with ErrChainNotOffered %d — want 1 and %d (the case does not reach its trigger)",
+				tc.name, p, rf, tc.refused)
+		}
 		code, _, _ := a.envelope(t)
 		if a.status != http.StatusServiceUnavailable || code != oai.CodeInternalError || a.header.Get("x-should-retry") != "true" {
 			t.Errorf("%s: %d %q (x-should-retry %q), want 503 internal_error, x-should-retry true", tc.name, a.status, a.body, a.header.Get("x-should-retry"))
@@ -47,6 +65,28 @@ func TestShutdownBeforePlanRefusalIsNoEmpty200(t *testing.T) {
 			t.Errorf("%s: wire hits = %d, want 0", tc.name, n)
 		}
 	}
+}
+
+// shStopProbe counts the Plan calls of shStopPlanner and the refusals of
+// its real planner with handler.ErrChainNotOffered.
+type shStopProbe struct{ plans, refused atomic.Int64 }
+
+// shStopPlanner ends the lifecycle when Plan is entered and only then lets
+// the real planner plan (and refuse).
+type shStopPlanner struct {
+	oai.AdmissionPlanner
+	stop  func()
+	probe *shStopProbe
+}
+
+func (p shStopPlanner) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.AdmissionInput) (oai.Plan, error) {
+	p.probe.plans.Add(1)
+	p.stop()
+	plan, err := p.AdmissionPlanner.Plan(ctx, ca, in)
+	if errors.Is(err, handler.ErrChainNotOffered) {
+		p.probe.refused.Add(1)
+	}
+	return plan, err
 }
 
 // consecutiveFails reads a row's failure streak from the pool status.

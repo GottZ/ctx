@@ -269,3 +269,94 @@ func TestV1AdmissionCensusModelRoutes(t *testing.T) {
 		}
 	})
 }
+
+// classSamples reads the admitted-wait samples of host's two external
+// classes from d's snapshot (XU, XB).
+func classSamples(d *dispatch.Dispatcher, host string) (xu, xb int) {
+	for _, ts := range d.Snapshot().Targets {
+		if ts.Origin == host {
+			return ts.External.Samples, ts.ExternalBulk.Samples
+		}
+	}
+	return 0, 0
+}
+
+// TestV1AdmissionCensusChatRoute is gate (m) over the real mount (FOLGE-M
+// M3, A03-W9 review 2 deviation 4): the census over the production router's
+// /v1 group with POST /v1/chat/completions admitting, driven with a valid
+// chat body and the census key, whose consumer has the default lane (bulk ⇒
+// XB). The chat route is the one gatewayDeps builds for buildRouter — the
+// router's alias registry, config store and dispatcher — with two seams:
+// the admitting limiter (production has none yet, L11: the route would
+// answer 503 before its planner) and the planner, built like gatewayDeps
+// builds it but over a census recorder that wraps the router's own
+// dispatcher (gatewayDeps takes the concrete dispatcher). Allowed is
+// AllowedClasses() of that mounted planner: census green, and every XB
+// acquire the census made is an admission of the router's dispatcher (not
+// of a copy). The allowance trimmed to {XU} is census red.
+func TestV1AdmissionCensusChatRoute(t *testing.T) {
+	eng := newV1ChatEngine(t, http.StatusOK)
+	var chat atomic.Pointer[http.Handler]
+	f := newV1Fixture(t, nil, func(routes []modelRoute) []modelRoute {
+		out := slices.Clone(routes)
+		for i := range out {
+			if out[i].method == http.MethodPost && out[i].pattern == "/chat/completions" {
+				out[i].handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { (*chat.Load()).ServeHTTP(w, r) })
+			}
+		}
+		return out
+	})
+	dispatch.SetPrincipalHook(handler.RequestPrincipal) // as cmd/ctxd/main.go
+	t.Cleanup(func() { dispatch.SetPrincipalHook(nil) })
+	var lane string
+	if err := f.seed.QueryRow(context.Background(),
+		`SELECT admission_lane FROM context_model_consumers WHERE label = 'w02-05-all'`).Scan(&lane); err != nil || lane != handler.LaneBulk {
+		t.Fatalf("census key lane %q (%v), want the default %q", lane, err, handler.LaneBulk)
+	}
+	life, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	backendPool := backends.NewPool(f.pool, nil)
+	backendPool.SeedSnapshotForTest([]backends.Backend{eng.row("census", 1)})
+	f.disp.UpdatePolicy(dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{eng.srv.URL: {Slots: 4, InternalReserved: 1}}})
+	rec := v1census.NewRecorder(f.disp)
+	d := gatewayDeps(life, f.pool, f.cfgStore, f.aliases, backendPool, backends.NewQuotaAccountant(f.pool, 30*time.Second), f.disp)
+	d.Limiter = &v1ChatLimiter{}
+	d.Planner = handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: rec, Settings: d.Settings})
+	h := oai.ChatCompletions(d)
+	chat.Store(&h)
+	f.setEnabled(t, true)
+	opts := func(allowed []dispatch.Class) v1census.Options {
+		return v1census.Options{
+			Allowed:   allowed,
+			Hosts:     []string{eng.srv.URL},
+			Admitting: []string{"POST /v1/chat/completions"},
+			Body: func(method, _ string) string {
+				if method == http.MethodPost {
+					return `{"model":"other","messages":[{"role":"user","content":"census"}]}`
+				}
+				return "{}"
+			},
+			Prepare: func(r *http.Request) *http.Request {
+				r.RemoteAddr = "192.0.2.1:40000"
+				r.TLS = &tls.ConnectionState{}
+				r.Header.Set("Authorization", "Bearer "+f.allKey)
+				r.Header.Set("Content-Type", "application/json")
+				return r
+			},
+		}
+	}
+	allowed := d.Planner.AllowedClasses()
+	if v := v1census.Check(f.router, rec, opts(allowed)); len(v) != 0 {
+		t.Fatalf("census with the mounted planner's AllowedClasses() %v: violations %q", allowed, v)
+	}
+	if xu, xb := classSamples(f.disp, eng.srv.URL); xu != 0 || xb != 1 || eng.hits.Load() != 1 {
+		t.Fatalf("after the census: the router's dispatcher admitted XU %d, XB %d; engine hits %d — want 0, 1 and 1 (the census acquire did not reach the router's dispatcher in class XB)",
+			xu, xb, eng.hits.Load())
+	}
+	trimmed := v1census.Check(f.router, rec, opts([]dispatch.Class{dispatch.ClassExternal}))
+	if !slices.ContainsFunc(trimmed, func(v string) bool {
+		return strings.HasPrefix(v, "POST /v1/chat/completions: acquire in class "+dispatch.ClassExternalBulk.String())
+	}) {
+		t.Fatalf("census with the allowance trimmed to {XU}: violations %q, want the XB acquire of the chat route", trimmed)
+	}
+}
