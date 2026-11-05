@@ -271,10 +271,48 @@ func TestQuotaSpendPlan(t *testing.T) {
 		keys); err != nil {
 		t.Fatalf("seed log: %v", err)
 	}
-	for _, st := range []string{"ANALYZE context_llm_log", "ANALYZE context_llm_usage_hourly"} {
+	// The seed is discrete: every key logs at the same two instants of every
+	// hour, so a seven-day chunk holds about 336 distinct created_at values
+	// of a hundred rows each. Under the default statistics target those
+	// equally common instants are too many for the most-common-value list
+	// and land in a histogram. For the edge's strict lower bound
+	// (created_at > since) the planner then subtracts the share of
+	// created_at = since, one instant's worth (1/n_distinct, ~100 rows), from
+	// a share the histogram interpolates at a few rows per minute: for an
+	// edge shorter than about forty minutes the estimate went negative and
+	// was clamped to one row while the edge holds a hundred (one instant of
+	// every key), and the custom plan read it through the chunk's smaller
+	// created_at index — every key's edge row instead of the tenant's, at
+	// about half of all clocks (#129). Production timestamps are all but
+	// unique (n_distinct ≈ −1), so that share is about one row there.
+	// seedStatsTarget keeps every instant of a chunk as a most-common value
+	// (and makes ANALYZE read every row of it): the planner sees the seeded
+	// data exactly, at every clock, and the gate measures the access path,
+	// not an estimation artifact. The check below fails the test when that
+	// stops holding (a denser seed, a longer chunk interval).
+	const seedStatsTarget = 1000 // ≥ a chunk's ~336 instants; 300 × target sample rows ≥ its 33 600 rows
+	for _, st := range []string{
+		fmt.Sprintf("ALTER TABLE context_llm_log ALTER COLUMN created_at SET STATISTICS %d", seedStatsTarget),
+		"ANALYZE context_llm_log",
+		"ANALYZE context_llm_usage_hourly",
+	} {
 		if _, err := pool.Exec(ctx, st); err != nil {
 			t.Fatalf("%s: %v", st, err)
 		}
+	}
+	var chunks, exact int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE s.histogram_bounds IS NULL
+		                          AND abs((SELECT sum(f::float8) FROM unnest(s.most_common_freqs) f) - 1) < 1e-4)
+		  FROM timescaledb_information.chunks c
+		  LEFT JOIN pg_stats s ON s.schemaname = c.chunk_schema AND s.tablename = c.chunk_name
+		                      AND s.attname = 'created_at'
+		 WHERE c.hypertable_name = 'context_llm_log'`).Scan(&chunks, &exact); err != nil {
+		t.Fatalf("read chunk statistics: %v", err)
+	}
+	if chunks == 0 || exact != chunks {
+		t.Fatalf("created_at statistics are exact (every row in a most-common value) on %d of %d chunks of context_llm_log — the planner would estimate the discrete seed from a histogram (#129)", exact, chunks)
 	}
 	var perHour, inThirtyDays int64
 	if err := pool.QueryRow(ctx, `
