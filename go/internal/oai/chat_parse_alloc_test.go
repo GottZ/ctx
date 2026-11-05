@@ -146,8 +146,16 @@ func TestReadRequestBodySpendsWhatItBooks(t *testing.T) {
 	if _, _, err := readRequestBody(struct{ io.Reader }{io.MultiReader(bytes.NewReader(body[:10]), brokenReader{})}, -1); err == nil {
 		t.Error("a broken undeclared body reads as complete")
 	}
-	if _, _, err := readRequestBody(bytes.NewReader(body[:10]), 20); err == nil {
-		t.Error("a declared body cut short reads as complete")
+	// A7 (hardening H-7, Fremd-Review 1 B7): a body that delivers fewer bytes
+	// than it declares — any number short, not only none — is a read error,
+	// answered 400 invalid_json "The request body could not be read." (the
+	// base parsed the bytes it got: "… is not a valid JSON object."). Over
+	// net/http the server's body reader fails such a body itself
+	// (io.ErrUnexpectedEOF); only another body implementation reaches this.
+	for _, got := range []int{0, 10, 19} {
+		if _, _, err := readRequestBody(bytes.NewReader(body[:got]), 20); err == nil {
+			t.Errorf("a declared body of 20 bytes that delivers %d reads as complete", got)
+		}
 	}
 }
 

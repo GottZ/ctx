@@ -276,6 +276,31 @@ func memForm(t testing.TB, name string, lim int) memShape {
 			memConst(`{"type":"image_url","image_url":{"url":"data:image\/png;base64,AAAA"}}`))
 	case "f11_n_huge":
 		s.body = []byte(msg + `,"n":1` + strings.Repeat("0", lim-len(msg)-8) + `}`)
+	// H-9: one key of the whole body, named in the refusal (an answer of
+	// twelve times the body before the name was cut).
+	case "f12a_echo_key_lt":
+		s.body = []byte(msg + `,"` + strings.Repeat("<", lim-len(msg)-8) + `":0}`)
+	case "f12b_echo_key_escaped":
+		s.body = []byte(msg + `,"` + strings.Repeat(fmt.Sprintf("%cu003c", '\\'), (lim-len(msg)-8)/6) + `":0}`)
+	case "f12c_echo_key_repeated":
+		k := strings.Repeat("<", (lim-len(msg)-16)/2)
+		s.body = []byte(msg + `,"` + k + `":0,"` + k + `":1}`)
+	case "f12d_echo_message":
+		pre := `{"model":"` + model + `","messages":[{"role":"user","content":"x","`
+		s.body = []byte(pre + strings.Repeat("<", lim-len(pre)-8) + `":0}]}`)
+	case "f12e_echo_part":
+		pre := `{"model":"` + model + `","messages":[{"role":"user","content":[{"type":"text","text":"x","`
+		s.body = []byte(pre + strings.Repeat("<", lim-len(pre)-10) + `":0}]}]}`)
+	case "f12f_echo_hull":
+		k := strings.Repeat("<", (lim-len(msg)-48)/2)
+		s.body = []byte(msg + `,"tool_choice":{"type":"function","` + k + `":0,"` + k + `":1}}`)
+	case "f12g_echo_logit_bias":
+		k := strings.Repeat("<", (lim-len(msg)-32)/2)
+		s.body = []byte(msg + `,"logit_bias":{"` + k + `":0,"` + k + `":1}}`)
+	// H-8: the scan's most expensive text per byte (short secret-like
+	// assignments), for the public alias.
+	case "f13_scan_assign":
+		s.body = text("apikey:x ")
 	default:
 		t.Fatalf("unknown form %q", name)
 	}
@@ -283,6 +308,15 @@ func memForm(t testing.TB, name string, lim int) memShape {
 		t.Fatalf("form %s: invalid JSON", name)
 	}
 	return s
+}
+
+func memMaxInt(a *atomic.Int64, v int64) {
+	for {
+		p := a.Load()
+		if v <= p || a.CompareAndSwap(p, v) {
+			return
+		}
+	}
 }
 
 type memRes struct {
@@ -356,6 +390,7 @@ func TestChatParseHeapGate(t *testing.T) {
 		}
 	}()
 	out := make([]memRes, n)
+	var answerMax atomic.Int64
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := 0; i < n; i++ {
@@ -381,6 +416,7 @@ func TestChatParseHeapGate(t *testing.T) {
 				code = *e.Error.Code
 			}
 			out[i] = memRes{w.Code, code}
+			memMaxInt(&answerMax, int64(w.Body.Len()))
 		}(i)
 	}
 	t0 := time.Now()
@@ -407,17 +443,34 @@ func TestChatParseHeapGate(t *testing.T) {
 	sum, handled := held.sum()
 	growth := int64(peak.Load()) - int64(base)
 	bound := sum + int64(n)*heapGateBaseLoad
+	// Two stricter bounds (hardening H-8): without the answer share of the
+	// served requests — the parse and the scan are covered by the request
+	// share alone, not by bytes meant for the answer — and, for requests that
+	// all run at once (n ≤ 10), the budget's own peak. The harness load is
+	// counted per wire attempt here (a failover row is one more fake engine
+	// call: f7d's two 404 rows add 0.1 MiB).
+	served := int64(cnt["200/"])
+	attempts := int64(n) * int64(1+shape.failover)
+	boundNoAnswer := sum - served*2*memRespCap + attempts*heapGateBaseLoad
+	boundPeak := budgetPeak.Load() + attempts*heapGateBaseLoad
 	mib := func(v int64) float64 { return float64(v) / (1 << 20) }
 	verdict := "ok"
-	if growth > bound {
+	switch {
+	case growth > bound:
 		verdict = "OVER"
+	case n == 1 && growth > boundNoAnswer:
+		verdict = "OVER_NOANSWER"
+	case n > 1 && n <= 10 && growth > boundPeak:
+		verdict = "OVER_PEAK"
 	}
 	fmt.Printf("FOLGEP form=%s n=%d gomemlimit=%q body=%d answers=[%s] growth_MiB=%.1f held_sum_MiB=%.1f handled=%d bound_MiB=%.1f "+
-		"base_MiB=%.1f budget_peak_MiB=%.1f numgc=%d dur=%v up_hits=%d up_max_body=%d up_total=%d verdict=%s\n",
+		"bound_noanswer_MiB=%.1f bound_peak_MiB=%.1f base_MiB=%.1f budget_peak_MiB=%.1f numgc=%d dur=%v up_hits=%d up_max_body=%d up_total=%d "+
+		"answer_max_B=%d verdict=%s\n",
 		form, n, os.Getenv("GOMEMLIMIT"), len(body), strings.TrimSpace(sb.String()), mib(growth), mib(sum), handled, mib(bound),
-		mib(int64(base)), mib(budgetPeak.Load()), ms.NumGC-gc0, dur.Round(time.Millisecond), up.hits.Load(), up.max.Load(), up.total.Load(), verdict)
-	if growth > bound {
-		t.Errorf("form %s, n=%d: heap growth %.1f MiB > reserved %.1f MiB + %d × base load %.0f KiB = %.1f MiB",
-			form, n, mib(growth), mib(sum), n, float64(heapGateBaseLoad)/1024, mib(bound))
+		mib(boundNoAnswer), mib(boundPeak), mib(int64(base)), mib(budgetPeak.Load()), ms.NumGC-gc0, dur.Round(time.Millisecond),
+		up.hits.Load(), up.max.Load(), up.total.Load(), answerMax.Load(), verdict)
+	if verdict != "ok" {
+		t.Errorf("form %s, n=%d: heap growth %.1f MiB > reserved %.1f MiB + %d × base load %.0f KiB = %.1f MiB (without the answer share %.1f, the budget's peak %.1f): %s",
+			form, n, mib(growth), mib(sum), n, float64(heapGateBaseLoad)/1024, mib(bound), mib(boundNoAnswer), mib(boundPeak), verdict)
 	}
 }

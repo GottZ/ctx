@@ -17,10 +17,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // diffLimits are the policy limits the differential runs every body under:
@@ -136,41 +140,294 @@ func sameOutcome(body []byte, n, o parseOutcome) string {
 }
 
 // The FOLGE-P deviations from the base answer (bau report FOLGE-P
-// §Antwort-Änderungen), each with its condition:
+// §Antwort-Änderungen), each held to its exact condition — read off the
+// level the base named, its members counted on that level (Fremd-Review 1
+// B1: a coarse count let an accepting parse through on any repeat):
 //
-//   - repeatBeyondWindow (P-1): the base named a repeated key; FOLGE-P finds a
-//     repeat of a key the level does not name only when the first of the two
-//     is among the level's first pairwiseKeys such keys. The body then has
-//     more than pairwiseKeys members on one level.
-//   - logitBiasCapFirst (P-2): logit_bias past its cap is the cap's
-//     unsupported_value even when a token id repeats beyond the window (the
-//     base decoded the whole map to find the repeat first).
-//   - oracleMapOrder: the base ranged over a Go map (message fields, a part's
-//     or image_url's unknown keys, a decoded hull's case variants) and named
-//     one of several refused keys at random; FOLGE-P names one of them
+//   - repeatBeyondWindow (A1): on a level that refuses unknown keys (the top
+//     level, a message, a part, an image_url) — or on a hull for a case
+//     variant of a hull key — the base named a repeated key the level does
+//     not name whose first occurrence is past the level's first pairwiseKeys
+//     such keys. FOLGE-P must still refuse (a 400).
+//   - hullRepeatBeyondWindow (A2): the same on a hull (tool_choice, a tool,
+//     response_format, its json_schema) for a vendor key: FOLGE-P accepts
+//     — the hull goes upstream as sent — or refuses.
+//   - logitBiasCapFirst (A3): logit_bias past its cap, the repeat past the
+//     window: FOLGE-P answers the cap's unsupported_value.
+//   - oracleMapOrder (A4): the base ranged over a Go map (message fields, a
+//     part's or image_url's unknown keys, a decoded hull's case variants) and
+//     named one of several refused keys at random; FOLGE-P names one of them
 //     deterministically. Allowed when one of 64 base runs gives FOLGE-P's
 //     answer.
+//   - echoClipped (A8, hardening H-9): the base named a key longer than
+//     echoNameMax bytes; FOLGE-P names it cut to its first echoNameMax bytes
+//     at a rune boundary, marked "…" — the answer is the same otherwise.
+//
+// A repeated key the level names (model, role, image_url.url, a hull's
+// type) is never a deviation: such a repeat is always found.
 func allowedDeviation(body []byte, l policyLimits, n, o parseOutcome) string {
-	repeat := o.code == CodeInvalidJSON && strings.HasPrefix(o.message, "The request repeats the key")
-	if repeat && manyMembers(body) {
-		if n.code == CodeUnsupportedValue && n.param == "logit_bias" && strings.HasPrefix(o.param, "logit_bias.") {
-			return "logitBiasCapFirst"
+	for _, c := range clippedOutcomes(o) {
+		if sameOutcome(body, n, c) == "" {
+			return "echoClipped"
 		}
-		return "repeatBeyondWindow"
+	}
+	if o.code == CodeInvalidJSON && strings.HasPrefix(o.message, "The request repeats the key") {
+		if kind := repeatDeviation(body, l, n, o); kind != "" {
+			return kind
+		}
 	}
 	for range 64 {
-		if sameOutcome(body, n, baseParse(body, l)) == "" {
-			return "oracleMapOrder"
+		b := baseParse(body, l)
+		for _, c := range append(clippedOutcomes(b), b) {
+			if sameOutcome(body, n, c) == "" {
+				return "oracleMapOrder"
+			}
 		}
 	}
 	return ""
 }
 
-// manyMembers reports an object level with more than pairwiseKeys members
-// somewhere in body (a coarse, conservative test: the members of all levels
-// are counted together).
-func manyMembers(body []byte) bool {
-	return bytes.Count(body, []byte(":")) > pairwiseKeys
+// diffLevel is one object level a base param can name: its kind, the key
+// the param names on it and the members of the level (decoded keys in body
+// order), nil when the body has no such level.
+type diffLevel struct {
+	kind    string // "top", "message", "part", "image_url", "hull", "logit_bias"
+	key     string
+	named   []string
+	members []string
+}
+
+// The param prefixes of the levels a key check runs on (FOLGE-P: the
+// level's path, then the key).
+var diffLevelParams = []struct {
+	re    *regexp.Regexp
+	kind  string
+	named []string
+}{
+	{regexp.MustCompile(`^messages\[(\d+)\]\.content\[(\d+)\]\.image_url\.(.+)$`), "image_url", []string{"url", "detail"}},
+	{regexp.MustCompile(`^messages\[(\d+)\]\.content\[(\d+)\]\.(.+)$`), "part", []string{"type", "text", "image_url"}},
+	{regexp.MustCompile(`^messages\[(\d+)\]\.(.+)$`), "message", messageNames},
+	{regexp.MustCompile(`^tools\[(\d+)\]\.(.+)$`), "hull", toolHullKeys},
+	{regexp.MustCompile(`^tool_choice\.(.+)$`), "hull", toolHullKeys},
+	{regexp.MustCompile(`^response_format\.json_schema\.(.+)$`), "hull", responseFormatJSONKeys},
+	{regexp.MustCompile(`^response_format\.(.+)$`), "hull", responseFormatKeys},
+	{regexp.MustCompile(`^logit_bias\.(.+)$`), "logit_bias", nil},
+}
+
+// diffLevels are the levels param may name in body — every reading of it (a
+// key may itself hold a dot or a bracket), the top level always among them.
+// Navigated with encoding/json, independent of the parse under test; an
+// outer repeat would have been the base's answer, so the first member of a
+// name is the one meant.
+func diffLevels(body []byte, param string) []diffLevel {
+	top := diffLevel{kind: "top", key: param, named: topLevelNames, members: jsonKeys(body)}
+	out := []diffLevel{top}
+	for _, p := range diffLevelParams {
+		m := p.re.FindStringSubmatch(param)
+		if m == nil {
+			continue
+		}
+		var obj []byte
+		switch p.kind {
+		case "image_url":
+			obj = jsonMember(jsonIndex(jsonMember(jsonIndex(jsonMember(body, "messages"), m[1]), "content"), m[2]), "image_url")
+		case "part":
+			obj = jsonIndex(jsonMember(jsonIndex(jsonMember(body, "messages"), m[1]), "content"), m[2])
+		case "message":
+			obj = jsonIndex(jsonMember(body, "messages"), m[1])
+		default:
+			switch {
+			case strings.HasPrefix(param, "tools["):
+				obj = jsonIndex(jsonMember(body, "tools"), m[1])
+			case strings.HasPrefix(param, "tool_choice."):
+				obj = jsonMember(body, "tool_choice")
+			case strings.HasPrefix(param, "response_format.json_schema."):
+				obj = jsonMember(jsonMember(body, "response_format"), "json_schema")
+			case strings.HasPrefix(param, "response_format."):
+				obj = jsonMember(body, "response_format")
+			case strings.HasPrefix(param, "logit_bias."):
+				obj = jsonMember(body, "logit_bias")
+			}
+		}
+		if members := jsonKeys(obj); members != nil {
+			out = append(out, diffLevel{kind: p.kind, key: m[len(m)-1], named: p.named, members: members})
+		}
+	}
+	return out
+}
+
+// beyondWindow reports the level's key as one the window cannot see: no
+// named key of the level, repeated, its first occurrence past the first
+// pairwiseKeys keys the level does not name.
+func (lv diffLevel) beyondWindow() bool {
+	if slices.Contains(lv.named, lv.key) {
+		return false
+	}
+	unknown, first, count := 0, -1, 0
+	for _, k := range lv.members {
+		if slices.Contains(lv.named, k) {
+			continue
+		}
+		if k == lv.key {
+			count++
+			if first < 0 {
+				first = unknown
+			}
+		}
+		unknown++
+	}
+	return count >= 2 && first >= pairwiseKeys
+}
+
+// variant reports the level's key as a case variant of a named key.
+func (lv diffLevel) variant() bool {
+	return slices.ContainsFunc(lv.named, func(k string) bool { return strings.EqualFold(k, lv.key) })
+}
+
+// repeatDeviation is A1, A2 or A3 for a base answer that named a repeat.
+func repeatDeviation(body []byte, l policyLimits, n, o parseOutcome) string {
+	refused := n.stage != "ok" && statusOf(n.code) == http.StatusBadRequest
+	for _, lv := range diffLevels(body, o.param) {
+		if !lv.beyondWindow() {
+			continue
+		}
+		switch {
+		case lv.kind == "logit_bias":
+			if len(lv.members) > l.logitBiasMaxEntries && n.stage == "policy" && n.code == CodeUnsupportedValue && n.param == "logit_bias" {
+				return "logitBiasCapFirst"
+			}
+		case lv.kind == "hull" && !lv.variant():
+			if refused || n.stage == "ok" && passAsSent(body, n) {
+				return "hullRepeatBeyondWindow"
+			}
+		case refused:
+			return "repeatBeyondWindow"
+		}
+	}
+	return ""
+}
+
+// passAsSent reports every PASS value of n as the body's member value.
+func passAsSent(body []byte, n parseOutcome) bool {
+	for k, v := range n.pass {
+		if m := jsonMember(body, k); !bytes.Equal(bytes.TrimSpace(m), bytes.TrimSpace([]byte(v))) {
+			return false
+		}
+	}
+	return true
+}
+
+// statusOf is the HTTP status of an error code (the route's vocabulary).
+func statusOf(code string) int {
+	if i := slices.IndexFunc(codes, func(s CodeSpec) bool { return s.Code == code }); i >= 0 {
+		return codes[i].Status
+	}
+	return 0
+}
+
+// clippedOutcomes are o with the key its param names cut as FOLGE-P cuts an
+// echoed name (A8) — one per reading of the param whose key is longer than
+// echoNameMax; none when no key is.
+func clippedOutcomes(o parseOutcome) []parseOutcome {
+	if o.param == "" {
+		return nil
+	}
+	var out []parseOutcome
+	readings := []string{""}
+	for _, p := range diffLevelParams {
+		if m := p.re.FindStringSubmatchIndex(o.param); m != nil {
+			readings = append(readings, o.param[:m[len(m)-2]])
+		}
+	}
+	for _, prefix := range readings {
+		key := o.param[len(prefix):]
+		if len(key) <= echoNameMax {
+			continue
+		}
+		cut := echoNameMax
+		for cut > 0 && !utf8.RuneStart(key[cut]) {
+			cut--
+		}
+		c := o
+		c.param = prefix + key[:cut] + "…"
+		c.message = strings.ReplaceAll(o.message, o.param, c.param)
+		out = append(out, c)
+	}
+	return out
+}
+
+// jsonMember is the raw value of the first member name of the JSON object
+// raw, nil when there is none (encoding/json: the test's own reading).
+func jsonMember(raw []byte, name string) []byte {
+	var m []byte
+	jsonWalk(raw, '{', func(k string, v json.RawMessage) bool {
+		if k == name {
+			m = v
+			return false
+		}
+		return true
+	})
+	return m
+}
+
+// jsonIndex is the raw element i (decimal) of the JSON array raw, nil when
+// there is none.
+func jsonIndex(raw []byte, i string) []byte {
+	want, err := strconv.Atoi(i)
+	if err != nil {
+		return nil
+	}
+	var e []byte
+	n := 0
+	jsonWalk(raw, '[', func(_ string, v json.RawMessage) bool {
+		if n == want {
+			e = v
+			return false
+		}
+		n++
+		return true
+	})
+	return e
+}
+
+// jsonKeys are the decoded member names of the JSON object raw in body
+// order, nil when raw is no object.
+func jsonKeys(raw []byte) []string {
+	keys := []string{}
+	if !jsonWalk(raw, '{', func(k string, _ json.RawMessage) bool { keys = append(keys, k); return true }) {
+		return nil
+	}
+	return keys
+}
+
+// jsonWalk calls f for every member (open '{') or element (open '[') of
+// raw until f returns false; false when raw is no such container.
+func jsonWalk(raw []byte, open json.Delim, f func(k string, v json.RawMessage) bool) bool {
+	if raw == nil {
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != open {
+		return false
+	}
+	for dec.More() {
+		var k string
+		if open == '{' {
+			t, err := dec.Token()
+			if err != nil {
+				return false
+			}
+			k, _ = t.(string)
+		}
+		var v json.RawMessage
+		if dec.Decode(&v) != nil {
+			return false
+		}
+		if !f(k, v) {
+			return true
+		}
+	}
+	return true
 }
 
 // diffCheck compares both parses of body under every diffLimits entry.
@@ -297,6 +554,27 @@ func generatedCorpus() [][]byte {
 		`{"model":"chat","messages":[{"role":"user","content":"x",`+keys(40)+`,"k030":1}]}`,
 		msg+`,"tool_choice":{"type":"function","function":{"name":"f"},`+keys(40)+`,"k030":1}}`,
 		msg+`,"logit_bias":{`+join(func(i int) string { return fmt.Sprintf(`"%d":0`, i) }, 100)+`,"50":1}}`,
+	)
+	// Escaped named keys and emoji keys sent as surrogate pairs on every
+	// level (Fremd-Review 1 B5: MR1, MR15), key names past echoNameMax (H-9).
+	e := func(k string) string { return k[:1] + escU(rune(k[1])) + k[2:] }
+	pair := escU(0xd83d) + escU(0xde00)
+	longName := strings.Repeat("n", echoNameMax-1) + "é" + "tail"
+	c = append(c,
+		`{"`+e("model")+`":"chat","`+e("messages")+`":[{"`+e("role")+`":"user","`+e("content")+`":"x"}]}`,
+		`{"model":"vis","messages":[{"role":"user","content":[{"`+e("type")+`":"text","`+e("text")+`":"x"},{"type":"image_url","`+e("image_url")+`":{"`+e("url")+`":"data:image/png;base64,AAAA","`+e("detail")+`":"low"}}]}]}`,
+		msg+`,"tool_choice":{"`+e("type")+`":"function","`+e("function")+`":{"name":"f"}},"response_format":{"`+e("type")+`":"json_schema","`+e("json_schema")+`":{"`+e("name")+`":"s"}}}`,
+		msg+`,"😀":1,"`+pair+`":2}`,
+		msg+`,"`+pair+`":1,"`+escU(0xffff)+`":2}`,
+		`{"model":"chat","messages":[{"role":"user","content":"x","😀":1,"`+pair+`":2}]}`,
+		`{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x","`+pair+`":1,"😀":2}]}]}`,
+		`{"model":"vis","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","😀":1,"`+pair+`":2}}]}]}`,
+		msg+`,"tool_choice":{"type":"function","function":{"name":"f"},"😀":1,"`+pair+`":2}}`,
+		msg+`,"logit_bias":{"`+pair+`":1,"😀":2}}`,
+		msg+`,"`+longName+`":1}`,
+		msg+`,"`+longName+`":1,"`+longName+`":2}`,
+		`{"model":"chat","messages":[{"role":"user","content":"x","`+strings.Repeat(escU('<'), 100)+`":1}]}`,
+		msg+`,"`+strings.Repeat("q", echoNameMax)+`":1}`,
 	)
 	out := make([][]byte, len(c))
 	for i, s := range c {

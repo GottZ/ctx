@@ -237,7 +237,13 @@ func (c *chatCall) serve() {
 	if !c.reserveAnswer() {
 		return
 	}
-	c.required = c.d.Federation.Scan(c.sensitivity(), body)
+	required := c.sensitivity()
+	if !c.coverScan(required, body) {
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
+	c.required = c.d.Federation.Scan(required, body)
 	chain, ok := c.chain()
 	if !ok {
 		return
@@ -368,6 +374,20 @@ func (c *chatCall) cover(n int64) bool {
 	c.spent += n
 	c.held = c.spent
 	return true
+}
+
+// coverScan books the heap of the sensitivity scan of the body before it
+// runs (FOLGE-P hardening H-8): federation.ScanRaise decodes every token of
+// the body into a string and runs the scanner's patterns over each — up to
+// scanReserveFactor × the body + scanReserveBase. At credentials the scan
+// returns at once (its short circuit, pinned) and nothing is booked. The
+// booking stays until the request ends: the scan's garbage is heap until the
+// collector runs, and a reservation has no partial release.
+func (c *chatCall) coverScan(required backends.Sensitivity, body []byte) bool {
+	if required.Rank() >= backends.SensCredentials.Rank() {
+		return true
+	}
+	return c.cover(scanReserveFactor*int64(len(body)) + scanReserveBase)
 }
 
 // reserveUpstream is UpstreamSpec.Reserve: an attempt's upstream body is

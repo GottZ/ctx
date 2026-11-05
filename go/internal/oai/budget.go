@@ -16,6 +16,25 @@ import (
 // shape, not a policy knob — the policy is gateway.inflight_budget.
 const requestReserveFactor = 3
 
+// scanReserveFactor and scanReserveBase are the heap the route books before
+// the sensitivity scan of a request below credentials — factor × body +
+// base (FOLGE-P hardening H-8; federation.ScanRaise, internal/federation/
+// policy.go, is not changed here). Measured, not chosen: TotalAlloc of
+// ScanRaise per body byte at 256 B … 8 MiB, the scanner's pattern pools cold
+// — prose, text with spaces, many messages, escaped text 3.0–3.8 at 1 MiB;
+// tokens in tool_calls up to 12.4; a text of short secret-like assignments
+// ("apikey:x ", each one a pattern match the scanner collects) 22.3, the
+// largest found (bau report FOLGE-P §Härtung H-8). The factor is the ceiling
+// of that maximum, the base the largest remainder of a small body (47 334
+// bytes at 2 KiB: the patterns' matchers, allocated anew after a
+// collection) rounded up. TestScanReserveIsTheMeasuredOne fails when a form
+// needs more (the booking would no longer be true) or when the largest
+// needs a whole byte less per body byte (it would cost requests for nothing).
+const (
+	scanReserveFactor = 23
+	scanReserveBase   = 64 << 10
+)
+
 // ErrBudgetExhausted is the read error of a body without a declared length
 // once its running reservation would pass the in-flight budget. A handler
 // that sees it answers WriteOverloaded.

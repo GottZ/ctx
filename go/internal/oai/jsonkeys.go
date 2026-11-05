@@ -2,7 +2,9 @@ package oai
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"hash/maphash"
 	"slices"
 	"sort"
 	"strings"
@@ -223,7 +225,7 @@ func checkHull(at string, idx int, raw []byte, known []string, vals [][]byte) (i
 		}
 		for _, p := range seen[:n] {
 			if bytes.Equal(p, k) {
-				return true, repeated(levelPath(at, idx), string(k))
+				return true, repeated(levelPath(at, idx), decodeKey(k))
 			}
 		}
 		seen[n] = k
@@ -233,7 +235,7 @@ func checkHull(at string, idx int, raw []byte, known []string, vals [][]byte) (i
 			case string(k) == kn:
 				vals[i] = v
 			case asciiEqualFold(k, kn):
-				return true, unsupportedParameter(keyPath(levelPath(at, idx), string(k)))
+				return true, unsupportedParameter(keyPath(levelPath(at, idx), decodeKey(k)))
 			}
 		}
 	}
@@ -433,6 +435,72 @@ func (d *strDecoder) next() (byte, bool) {
 	return d.buf[0], true
 }
 
+// read decodes the next bytes of the string into dst — the bytes next would
+// yield — and returns how many, 0 at the end: a run of plain bytes is copied
+// at once, an escape of an ASCII byte written directly (locals, not fields,
+// in the loop: it is the digest's whole cost on a key of escapes).
+func (d *strDecoder) read(dst []byte) int {
+	n := 0
+	for n < len(dst) && d.bi < d.bn {
+		dst[n] = d.buf[d.bi]
+		d.bi++
+		n++
+	}
+	raw, i := d.raw, d.i
+	for n < len(dst) && i < len(raw) {
+		c := raw[i]
+		switch {
+		case c != '\\' && c < utf8.RuneSelf:
+			dst[n] = c
+			n++
+			i++
+			continue
+		case c == '\\' && i+5 < len(raw) && raw[i+1] == 'u':
+			if r := hex4(raw[i+2:]); 0 <= r && r < utf8.RuneSelf {
+				dst[n] = byte(r)
+				n++
+				i += 6
+				continue
+			}
+		case c == '\\' && i+1 < len(raw) && raw[i+1] != 'u':
+			dst[n] = unescapeByte(raw[i+1])
+			n++
+			i += 2
+			continue
+		}
+		// a non-ASCII rune: through next, which buffers its UTF-8 bytes
+		d.i = i
+		b, _ := d.next()
+		dst[n] = b
+		n++
+		i = d.i
+		for n < len(dst) && d.bi < d.bn {
+			dst[n] = d.buf[d.bi]
+			d.bi++
+			n++
+		}
+	}
+	d.i = i
+	return n
+}
+
+// unescapeByte is the byte of the two-byte escape \c (c is not 'u').
+func unescapeByte(c byte) byte {
+	switch c {
+	case 'b':
+		return '\b'
+	case 'f':
+		return '\f'
+	case 'n':
+		return '\n'
+	case 'r':
+		return '\r'
+	case 't':
+		return '\t'
+	}
+	return c // '"', '\\', '/'
+}
+
 // escape resolves the escape sequence at d.i (encoding/json's unquote: a
 // surrogate escape pairs with a following low one, else it is U+FFFD).
 func (d *strDecoder) escape() rune {
@@ -479,31 +547,37 @@ func hex4(s []byte) rune {
 	if len(s) < 4 {
 		return -1
 	}
-	var r rune
-	for _, c := range s[:4] {
-		switch {
-		case '0' <= c && c <= '9':
-			c -= '0'
-		case 'a' <= c && c <= 'f':
-			c = c - 'a' + 10
-		case 'A' <= c && c <= 'F':
-			c = c - 'A' + 10
-		default:
-			return -1
-		}
-		r = r*16 + rune(c)
+	a, b, c, d := hexDigit[s[0]], hexDigit[s[1]], hexDigit[s[2]], hexDigit[s[3]]
+	if a|b|c|d > 0xf {
+		return -1
 	}
-	return r
+	return rune(a)<<12 | rune(b)<<8 | rune(c)<<4 | rune(d)
 }
+
+// hexDigit is the value of a hex digit, 0xff for any other byte.
+var hexDigit = func() (t [256]byte) {
+	for i := range t {
+		t[i] = 0xff
+	}
+	for i := range 10 {
+		t['0'+i] = byte(i)
+	}
+	for i := range 6 {
+		t['a'+i], t['A'+i] = byte(10+i), byte(10+i)
+	}
+	return t
+}()
 
 // cmpKeys compares the decoded forms of the raw JSON string contents a and b
 // byte by byte — the order sort.Strings gave the decoded keys — without
-// allocating.
+// allocating. The tokens both begin with alike are skipped undecoded
+// (sameTokens: a key compared with the smallest refused one, FOLGE-P H-6).
 func cmpKeys(a, b []byte) int {
 	if !needsDecode(a) && !needsDecode(b) {
 		return bytes.Compare(a, b)
 	}
-	da, db := strDecoder{raw: a}, strDecoder{raw: b}
+	i := sameTokens(a, b)
+	da, db := strDecoder{raw: a, i: i}, strDecoder{raw: b, i: i}
 	for {
 		ca, oka := da.next()
 		cb, okb := db.next()
@@ -514,6 +588,47 @@ func cmpKeys(a, b []byte) int {
 			return int(ca) - int(cb)
 		}
 	}
+}
+
+// sameTokens is the length of the longest prefix a and b share token by
+// token — a plain byte, an escape that is not a surrogate (one that is may
+// pair with the next), a UTF-8 sequence — each token sent alike in both:
+// up to there both decode alike, and a decoder of either may start there.
+// Eight plain bytes alike are skipped at once.
+func sameTokens(a, b []byte) int {
+	n := min(len(a), len(b))
+	i := 0
+	for i < n {
+		if i+8 <= n {
+			w := binary.LittleEndian.Uint64(a[i:])
+			if w == binary.LittleEndian.Uint64(b[i:]) && !wordNeedsDecode(w) {
+				i += 8
+				continue
+			}
+		}
+		c := a[i]
+		switch {
+		case c != b[i]:
+			return i
+		case c != '\\' && c < utf8.RuneSelf:
+			i++
+		case c >= utf8.RuneSelf:
+			_, na := utf8.DecodeRune(a[i:])
+			if _, nb := utf8.DecodeRune(b[i:]); na != nb || string(a[i:i+na]) != string(b[i:i+na]) {
+				return i
+			}
+			i += na
+		case i+1 >= n || a[i+1] != b[i+1]:
+			return i
+		case a[i+1] != 'u':
+			i += 2
+		case i+6 > n || string(a[i:i+6]) != string(b[i:i+6]) || a[i+2]|0x20 == 'd' && a[i+3] >= '8':
+			return i // a surrogate escape (D800–DFFF) may pair with the one after it
+		default:
+			i += 6
+		}
+	}
+	return i
 }
 
 // cmpKeyName compares the decoded form of the raw JSON string content raw
@@ -545,6 +660,9 @@ func boolCmp(a, b bool) int {
 // decodeShort decodes the raw JSON string content raw into dst; false when
 // it does not fit.
 func decodeShort(raw, dst []byte) (int, bool) {
+	if len(raw) > 6*len(dst) { // a decoded byte takes at most six sent ones (an escape)
+		return 0, false
+	}
 	if !needsDecode(raw) {
 		return copy(dst, raw), len(raw) <= len(dst)
 	}
@@ -560,18 +678,30 @@ func decodeShort(raw, dst []byte) (int, bool) {
 	return n, true
 }
 
+// echoNameMax bounds a client's key name in an error answer, in its param
+// and its message (FOLGE-P hardening H-9): longer than every name a level
+// knows (max_completion_tokens, 21 bytes) and than the vendor keys real
+// clients send, short enough that a refusal stays a few hundred bytes. Uncut,
+// an 8 MiB key named twice and HTML-escaped by the answer's writer was an
+// answer of 100 MB, twelve times the body, outside every reservation. A
+// longer name is cut at a rune boundary and marked with "…".
+const echoNameMax = 64
+
 // decodeKey is the decoded form of the raw JSON string content raw as a Go
-// string — the refusal path only (a param, a message), so it may allocate.
+// string, cut to echoNameMax bytes — the refusal path only (a param, a
+// message): it decodes no more than it returns.
 func decodeKey(raw []byte) string {
-	if !needsDecode(raw) {
-		return string(raw)
-	}
-	var b strings.Builder
+	var buf [echoNameMax + utf8.UTFMax]byte
 	d := strDecoder{raw: raw}
-	for c, ok := d.next(); ok; c, ok = d.next() {
-		b.WriteByte(c)
+	n := d.read(buf[:])
+	if n <= echoNameMax {
+		return string(buf[:n])
 	}
-	return b.String()
+	cut := echoNameMax
+	for cut > 0 && buf[cut]&0xc0 == 0x80 { // buf[cut] continues a rune: the rune does not fit
+		cut--
+	}
+	return string(buf[:cut]) + "…"
 }
 
 // levelKeyDecodeMax bounds the decoded key the level lookups read (the
@@ -629,12 +759,18 @@ const pairwiseKeys = 16
 type levelKeys struct {
 	seen    uint64 // bit i: the level's named key i was seen
 	unknown [pairwiseKeys][]byte
+	digest  [pairwiseKeys]keyDigest // digest[i] belongs to unknown[i]
 	n       int
 	reject  []byte // the smallest unknown key so far (raw), nil none
 }
 
 // add notes member key k of named index idx (-1: a key the level does not
-// name) and reports a repeat (see pairwiseKeys).
+// name) and reports a repeat (see pairwiseKeys). An unknown key is decoded
+// once, into its digest; it is compared in full only with a window key of
+// the same digest (FOLGE-P hardening H-6: a full comparison against every
+// window key cost a key up to pairwiseKeys decodes of itself — 8 MiB of long
+// escaped keys took ten times the base parse). Equal keys have equal
+// digests, so the answer is the full comparison's.
 func (s *levelKeys) add(k []byte, idx int) bool {
 	if idx >= 0 {
 		bit := uint64(1) << uint(idx)
@@ -644,16 +780,49 @@ func (s *levelKeys) add(k []byte, idx int) bool {
 		s.seen |= bit
 		return false
 	}
-	for _, u := range s.unknown[:s.n] {
-		if cmpKeys(u, k) == 0 {
+	d := digestKey(k)
+	for i, u := range s.unknown[:s.n] {
+		if s.digest[i] == d && cmpKeys(u, k) == 0 {
 			return true
 		}
 	}
 	if s.n < pairwiseKeys {
-		s.unknown[s.n] = k
+		s.unknown[s.n], s.digest[s.n] = k, d
 		s.n++
 	}
 	return false
+}
+
+// keyDigest is the length and a seeded hash of a key's decoded form.
+type keyDigest struct {
+	n int
+	h uint64
+}
+
+// keySeed seeds the key digests of the process: a client cannot aim its keys
+// at one hash value. A collision costs a full comparison, never an answer.
+var keySeed = maphash.MakeSeed()
+
+// digestKey is the digest of the decoded form of the raw JSON string content
+// raw, decoded once and without allocating (maphash hashes the same bytes
+// to the same value however they are split across writes).
+func digestKey(raw []byte) keyDigest {
+	if !needsDecode(raw) {
+		return keyDigest{len(raw), maphash.Bytes(keySeed, raw)}
+	}
+	var h maphash.Hash
+	h.SetSeed(keySeed)
+	var buf [128]byte
+	total := 0
+	d := strDecoder{raw: raw}
+	for {
+		n := d.read(buf[:])
+		if n == 0 {
+			return keyDigest{total, h.Sum64()}
+		}
+		_, _ = h.Write(buf[:n])
+		total += n
+	}
 }
 
 // refuse notes the unknown key k: the level refuses the smallest in sort
@@ -667,12 +836,25 @@ func (s *levelKeys) refuse(k []byte) {
 // needsDecode reports a key the byte comparison cannot judge: an escape or
 // a non-ASCII byte.
 func needsDecode(k []byte) bool {
-	for _, c := range k {
+	i := 0
+	for ; i+8 <= len(k); i += 8 { // eight bytes a step: a key can be megabytes long
+		if wordNeedsDecode(binary.LittleEndian.Uint64(k[i:])) {
+			return true
+		}
+	}
+	for _, c := range k[i:] {
 		if c == '\\' || c >= 0x80 {
 			return true
 		}
 	}
 	return false
+}
+
+// wordNeedsDecode is needsDecode over the eight bytes of w.
+func wordNeedsDecode(w uint64) bool {
+	const ones, highs, backslashes = 0x0101010101010101, 0x8080808080808080, 0x5c5c5c5c5c5c5c5c
+	x := w ^ backslashes // a zero byte where w holds a backslash
+	return (w|(x-ones)&^x)&highs != 0
 }
 
 // asciiEqualFold is strings.EqualFold for an ASCII key against a known key.

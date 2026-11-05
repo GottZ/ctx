@@ -29,6 +29,10 @@ func upstreamMaps() []map[string]json.RawMessage {
 		{"messages": json.RawMessage(`[{"role":"user","content":"` + "\xff\xfe" + `"}]`), "seed": json.RawMessage(`-0`)},
 		{"messages": json.RawMessage(`[` + strings.Repeat("[", 500) + strings.Repeat("]", 500) + `]`), "x<y>": json.RawMessage(`"<&>"`)},
 		{"messages": json.RawMessage(`[]`), "nil": nil, "z": json.RawMessage(`{"a":{"b":[1,2,{"c":"</script>"}]}}`)},
+		// Backslash escapes before whitespace inside a string (Fremd-Review 1
+		// B4, MR13): the whitespace after an escaped quote or backslash is
+		// part of the string and stays.
+		{"messages": json.RawMessage(`[{"role":"user","content":"a\"  b  c"}]`), "stop": json.RawMessage(`["\\  x", "\"  \"  y"]`)},
 		{},
 	}
 }
@@ -58,6 +62,13 @@ func TestEncodeUpstreamIsMarshalWithoutEscaping(t *testing.T) {
 	got, _ := encodeUpstream(upstreamMaps()[0], nil)
 	if want := `"content":"a<b>c&d` + "  " + `"`; !bytes.Contains(got, []byte(want)) {
 		t.Errorf("body %s does not carry %s as sent", got, want)
+	}
+	maps := upstreamMaps()
+	got, _ = encodeUpstream(maps[len(maps)-2], nil)
+	for _, want := range []string{`"content":"a\"  b  c"`, `["\\  x","\"  \"  y"]`} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("body %s does not carry %s as sent", got, want)
+		}
 	}
 }
 

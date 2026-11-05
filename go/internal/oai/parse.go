@@ -1045,8 +1045,8 @@ func checkPart(i, j int, raw []byte, l policyLimits) *paramError {
 		return unsupportedValue(partPath(i, j)+".type", "unsupported content part type")
 	}
 	if keys.reject != nil {
-		if k := decodeKey(keys.reject); !refused || k < other {
-			other, refused = k, true
+		if !refused || cmpKeyName(keys.reject, other) < 0 {
+			other, refused = decodeKey(keys.reject), true
 		}
 	}
 	if refused {
