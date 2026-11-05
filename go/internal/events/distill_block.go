@@ -30,7 +30,8 @@
 //
 //  3. THE METADATA IS BUILT WHITE — keys AND values. There is no reserved-key
 //     filter in this tree beyond UpsertBlock's single `- 'guard_checked_at'`,
-//     and metadata is written as EXCLUDED.metadata otherwise, so anything a
+//     and metadata is written as EXCLUDED.metadata otherwise (merged into the
+//     stored document when the content is identical, issue #64), so anything a
 //     manifest carries would land verbatim in a block that claims to be
 //     derived. Measured red: passing a manifest's own map through put
 //     `platform` (and three more foreign keys) into the block. Every value that

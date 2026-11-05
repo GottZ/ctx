@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -276,18 +277,29 @@ func ClampLimit(limit, defaultVal, maxVal int) int {
 	return limit
 }
 
+// identicalContentWhere is the identity predicate of the identical-content
+// shortcut, ONE text for HashNOOPCheck and IdenticalContentMatch: the live row
+// of ($2 scope, $3 category, $4 title) — the upsert's conflict identity —
+// whose content hashes like $1. Not archived, because the ON CONFLICT target
+// is partial on NOT is_archived (blocks_hashnoop_integration_test.go gate 3).
+const identicalContentWhere = `content_hash = encode(digest($1, 'sha256'), 'hex')
+		   AND NOT is_archived
+		   AND scope = $2
+		   AND category = $3
+		   AND title = $4`
+
 // HashNOOPCheck returns the existing block ID if an identical content hash
 // already exists for the same scope+category+title (not archived).
 // Returns empty string if no match.
+//
+// It compares the content only. A caller that answers "nothing to do" on its
+// hit drops the request's tags and metadata (issue #64); REST /api/store asks
+// IdenticalContentMatch instead.
 func HashNOOPCheck(ctx context.Context, pool *pgxpool.Pool, content, scope, category, title string) (string, error) {
 	var id string
 	err := pool.QueryRow(ctx,
 		`SELECT id FROM context_blocks
-		 WHERE content_hash = encode(digest($1, 'sha256'), 'hex')
-		   AND NOT is_archived
-		   AND scope = $2
-		   AND category = $3
-		   AND title = $4
+		 WHERE `+identicalContentWhere+`
 		 LIMIT 1`,
 		content, scope, category, title,
 	).Scan(&id)
@@ -298,6 +310,197 @@ func HashNOOPCheck(ctx context.Context, pool *pgxpool.Pool, content, scope, cate
 		return "", fmt.Errorf("store: hash noop check: %w", err)
 	}
 	return id, nil
+}
+
+// guardVerdictSQL is the duplicate guard's part of the metadata document doc:
+// every key with the guard_ prefix (the decision applyDecision writes, the
+// person's trace GuardResolve writes, the repair marks of M121/M156/M157), as a
+// jsonb object — '{}' when there is none, and for a document that is NULL or
+// not an object.
+//
+// The guard decides on the embedding (ctx_guard_check reads embedding and
+// scope, never tags or metadata), so these keys are a verdict about the
+// CONTENT. identicalMetadataSQL lets them win over a request's guard_* keys
+// for exactly the reason UpsertBlock keeps the embedding on identical content
+// (W04-8): nothing they were derived from has changed.
+func guardVerdictSQL(doc string) string {
+	return `CASE WHEN jsonb_typeof(` + doc + `) = 'object' THEN COALESCE((
+		  SELECT jsonb_object_agg(g.key, g.value) FROM jsonb_each(` + doc + `) AS g
+		   WHERE starts_with(g.key, 'guard_')), '{}'::jsonb)
+		ELSE '{}'::jsonb END`
+}
+
+// identicalMetadataSQL is the metadata an upsert writes when the stored
+// content is IDENTICAL to the incoming one (issue #64): the incoming document,
+// minus guard_checked_at, MERGED into the stored one, with the stored guard
+// verdict on top.
+//
+//   - Merged, not replaced: keys the request does not name stay. Those are the
+//     keys other writers put there — the guard's verdict, the sensitivity
+//     audit trail of a confirmed downgrade (UpdateBlock), the M154
+//     supersedes_repair record, the forge/issue sync keys, a key set through
+//     manage update. Every one of them is a statement about a content that has
+//     not changed, and a replace would delete them on a byte-identical
+//     re-save of a client that never sent them. A key the request does name
+//     takes the request's value: the second write is the truth for what it
+//     says (session_id, project, agent_type of `ctx persist --hook`).
+//   - The stored guard verdict on top: a request cannot forge or reset it.
+//     Wiping it would put the block back into the guard queue for an
+//     unchanged vector, and a block a person KEPT through guard-resolve could
+//     then be archived by the re-check (operations.md, "A guard-resolve
+//     trace").
+//
+// stored is a column reference and incoming an already-typed jsonb
+// expression; both are code-owned SQL text, never input. A stored document
+// that is NULL or not an object counts as '{}'. A content CHANGE keeps the
+// replace semantics (UpsertBlock): the annotations then describe a content
+// that is gone.
+func identicalMetadataSQL(stored, incoming string) string {
+	return `((CASE WHEN jsonb_typeof(` + stored + `) = 'object' THEN ` + stored + ` ELSE '{}'::jsonb END)
+		|| (` + incoming + ` - 'guard_checked_at')
+		|| ` + guardVerdictSQL(stored) + `)`
+}
+
+// sensConflict is how UpsertBlock's ON CONFLICT clause treats a sensitivity
+// intent: whether it touches the two sensitivity columns at all, the rank
+// comparison that decides an upgrade, and the source it stamps. ONE function
+// for UpsertBlock and IdenticalContentMatch, so the noop decision cannot drift
+// from the write it predicts.
+func sensConflict(sens SensitivityWrite) (applies bool, op, source string) {
+	source = "default"
+	switch {
+	case sens.Detector:
+		source = "pattern"
+	case sens.Manual:
+		source = "manual"
+	case sens.Derived:
+		source = "derived"
+	}
+	if sens.Value == "" || (!sens.Manual && !sens.Detector && !sens.Derived) {
+		return false, "", source
+	}
+	// Upgrade-only on conflict: a write-path downgrade would bypass the
+	// confirm-gated update path (F3 §3.5). Manual uses >= (re-asserting the
+	// same level re-stamps source='manual'); the pattern detector and the
+	// derived fold use strict > so they re-stamp only on a real elevation and
+	// never flip an already-credentials block's source (manual stays intact —
+	// design/01 §4.8.2).
+	op = ">="
+	if sens.Detector || sens.Derived {
+		op = ">"
+	}
+	return true, op, source
+}
+
+// IdenticalContent is IdenticalContentMatch's answer for one write.
+type IdenticalContent struct {
+	// ID is the live block of the write's (category, title, scope) whose
+	// content is byte-identical to the write's — "" when there is none.
+	ID string
+	// The four report whether the upsert of the write would leave that part
+	// of the row as it is. Meaningless when ID is "".
+	TagsEqual        bool
+	MetadataEqual    bool
+	SensitivityEqual bool
+	TypeEqual        bool
+}
+
+// Unchanged reports whether the write is a true no-op: identical content AND
+// nothing the upsert would rewrite differs.
+func (m IdenticalContent) Unchanged() bool {
+	return m.ID != "" && m.TagsEqual && m.MetadataEqual && m.SensitivityEqual && m.TypeEqual
+}
+
+// Changed names what an identical-content upsert of the write would rewrite,
+// in a fixed order. nil when there is no identical-content block — the write
+// is then an ordinary create or content update.
+func (m IdenticalContent) Changed() []string {
+	if m.ID == "" {
+		return nil
+	}
+	changed := make([]string, 0, 4)
+	if !m.TagsEqual {
+		changed = append(changed, "tags")
+	}
+	if !m.MetadataEqual {
+		changed = append(changed, "metadata")
+	}
+	if !m.SensitivityEqual {
+		changed = append(changed, "sensitivity")
+	}
+	if !m.TypeEqual {
+		changed = append(changed, "type")
+	}
+	return changed
+}
+
+// IdenticalContentMatch is HashNOOPCheck widened to everything else the upsert
+// of the same write would rewrite (issue #64). HashNOOPCheck compares the
+// content hash only, so a caller that answered "noop" on its hit dropped the
+// request's tags and metadata behind a success answer — `ctx persist --hook`
+// from a second project left the block tagged with the first one and counted
+// it as saved — and with them an explicit sensitivity upgrade or type.
+//
+// The arguments are UpsertBlock's, and each part is judged against what
+// UpsertBlock would WRITE for them on this row, not against the raw request:
+//
+//   - tags as given (nil = empty; the array order is part of the stored value);
+//   - metadata after the credentials detector, through identicalMetadataSQL —
+//     the very expression UpsertBlock assigns on identical content;
+//   - sensitivity through sensConflict: equal unless the conflict clause would
+//     fire AND produce another value or source (a downgrade is not applied, so
+//     it changes nothing);
+//   - type: equal unless typeName is set and the row is not already that type
+//     with type_source='manual'.
+//
+// NULL in the stored row compares like the empty value the upsert writes.
+// metadata is not modified; the detector runs on a copy.
+func IdenticalContentMatch(ctx context.Context, pool *pgxpool.Pool, content, scope, category, title string,
+	tags []string, metadata map[string]any, sens SensitivityWrite, typeName string,
+) (IdenticalContent, error) {
+	if tags == nil {
+		tags = []string{}
+	}
+	sens, md, _ := ApplyWriteDetector(content, sens, maps.Clone(metadata))
+	if md == nil {
+		md = map[string]any{}
+	}
+	args := []any{content, scope, category, title, tags, md}
+
+	sensEqual := "true"
+	if applies, op, source := sensConflict(sens); applies {
+		args = append(args, string(sens.Value), source)
+		v, s := len(args)-1, len(args)
+		sensEqual = fmt.Sprintf(
+			`NOT (%s %s %s AND (sensitivity IS DISTINCT FROM $%d::text OR sensitivity_source IS DISTINCT FROM $%d::text))`,
+			sensRankSQL(fmt.Sprintf("$%d::text", v)), op, sensRankSQL("sensitivity"), v, s)
+	}
+	typeEqual := "true"
+	if typeName != "" {
+		args = append(args, typeName)
+		typeEqual = fmt.Sprintf(
+			`(type_name IS NOT DISTINCT FROM $%d::text AND type_source IS NOT DISTINCT FROM 'manual')`, len(args))
+	}
+
+	var m IdenticalContent
+	err := pool.QueryRow(ctx,
+		`SELECT id,
+		        COALESCE(tags, '{}') = $5::text[],
+		        COALESCE(metadata, '{}'::jsonb) = `+identicalMetadataSQL("metadata", "$6::jsonb")+`,
+		        `+sensEqual+`,
+		        `+typeEqual+`
+		   FROM context_blocks
+		  WHERE `+identicalContentWhere+`
+		  LIMIT 1`,
+		args...,
+	).Scan(&m.ID, &m.TagsEqual, &m.MetadataEqual, &m.SensitivityEqual, &m.TypeEqual)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return IdenticalContent{}, nil
+	}
+	if err != nil {
+		return IdenticalContent{}, fmt.Errorf("store: identical content match: %w", err)
+	}
+	return m, nil
 }
 
 // ErrProvenanceProtected is the S3 refusal (design D-01 §4.3.1, invariant I7):
@@ -435,8 +638,9 @@ func foreignProvenanceClaim(ctx context.Context, q pgxdb.Rower, category, title,
 // the review found:
 //
 //   - #1: the badge did not require the write to carry a provenance of its own.
-//     The ON CONFLICT clause replaces metadata WHOLESALE (there is no merge), so
-//     a badged write with empty metadata DELETED the target's provenance — and
+//     The ON CONFLICT clause replaces metadata WHOLESALE whenever the content
+//     changes (it merges only on identical content, issue #64), so a badged
+//     write with empty metadata DELETED the target's provenance — and
 //     from that moment the title was client-writable again, because S3 hangs on
 //     `metadata ? 'provenance'`. One aborted arm run reopened B14; no attacker
 //     needed. A badged write must therefore name itself.
@@ -560,6 +764,16 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	// is the already-evaluated insert value, so the conflict clause's strip is
 	// belt-and-braces: it keeps the invariant local to the assignment that
 	// actually writes the conflicting row.
+	//
+	// On a conflict whose content is IDENTICAL the metadata is merged, not
+	// replaced, and the stored guard verdict wins (identicalMetadataSQL, issue
+	// #64): keys other writers put there describe a content that has not
+	// changed, and since the REST identical-content shortcut answers noop only
+	// when nothing would change, a tags- or metadata-only rewrite reaches this
+	// clause routinely. `context_blocks.content` in a SET expression is the
+	// stored row's value, whatever the content assignment next to it says. A
+	// content change keeps the replace below: the annotations then describe a
+	// content that is gone, and the next guard batch re-checks the new vector.
 	insertCols := "category, tags, title, content, metadata, scope"
 	insertVals := "$1, $2, $3, $4, $5::jsonb - 'guard_checked_at', $6"
 	args := []any{category, tags, title, content, metadata, scope}
@@ -567,36 +781,20 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	setClauses := []string{
 		"content = EXCLUDED.content",
 		"tags = EXCLUDED.tags",
-		"metadata = EXCLUDED.metadata - 'guard_checked_at'",
+		"metadata = CASE WHEN context_blocks.content = EXCLUDED.content THEN " +
+			identicalMetadataSQL("context_blocks.metadata", "EXCLUDED.metadata") +
+			" ELSE EXCLUDED.metadata - 'guard_checked_at' END",
 		"updated_at = now()",
 	}
 	if scopeExplicit {
 		setClauses = append(setClauses, "scope = EXCLUDED.scope")
 	}
 	if sens.Value != "" {
-		source := "default"
-		switch {
-		case sens.Detector:
-			source = "pattern"
-		case sens.Manual:
-			source = "manual"
-		case sens.Derived:
-			source = "derived"
-		}
+		applies, op, source := sensConflict(sens)
 		insertCols += ", sensitivity, sensitivity_source"
 		insertVals += ", $7, $8"
 		args = append(args, string(sens.Value), source)
-		if sens.Manual || sens.Detector || sens.Derived {
-			// Upgrade-only on conflict: a write-path downgrade would bypass the
-			// confirm-gated update path (F3 §3.5). Manual uses >= (re-asserting
-			// the same level re-stamps source='manual'); the pattern detector
-			// and the derived fold use strict > so they re-stamp only on a real
-			// elevation and never flip an already-credentials block's source
-			// (manual stays intact — design/01 §4.8.2).
-			op := ">="
-			if sens.Detector || sens.Derived {
-				op = ">"
-			}
+		if applies {
 			upgrades := fmt.Sprintf("%s %s %s",
 				sensRankSQL("EXCLUDED.sensitivity"), op, sensRankSQL("context_blocks.sensitivity"))
 			setClauses = append(setClauses,

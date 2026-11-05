@@ -3,6 +3,8 @@
 // T02-12 (design/02 Naht 8, E02-6 = A): the integration gates for
 // store.HashNOOPCheck — the dedup chokepoint of THREE write surfaces
 // (handler/context_store.go:105, handler/ingest.go:234, handler/mcp.go:544).
+// Since issue #64 the REST surface asks store.IdenticalContentMatch, which
+// shares the identity predicate (identicalContentWhere) these gates pin.
 // Until this file the function had zero integration coverage; its only written
 // trace was a t.Skip skeleton naming four cases (blocks_test.go:156-162), which
 // this file replaces with the real thing.

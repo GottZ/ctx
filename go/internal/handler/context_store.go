@@ -142,29 +142,43 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash NOOP check: skip if identical content already exists.
+	// Identical-content shortcut: answer noop when the write would change
+	// nothing.
+	//
+	// "Nothing" covers everything the upsert would rewrite, not only the
+	// content (issue #64): a content-hash-only check answered noop for a write
+	// whose tags, metadata, sensitivity upgrade or type differed and dropped
+	// them behind a success answer. Such a write now takes the upsert below —
+	// tags are the request's; on identical content its metadata is merged into
+	// the stored document and the embedding and the guard verdict stay
+	// (store.UpsertBlock) — and the answer says so (action "updated",
+	// changed [...]), so no client has to infer from a missing action field
+	// what happened.
 	//
 	// A write that NAMES a parent never takes the shortcut: the shortcut answers
 	// "identical_content" without touching the row, so a repeat save that adds a
 	// parent would be told "nothing to do" while the parent it asked for was
 	// never written. The condition costs one upsert on a payload that is
 	// otherwise a no-op and is the only way the field can mean what it says.
+	var changed []string
 	if req.ParentID == "" {
-		existingID, err := store.HashNOOPCheck(ctx, h.pool, req.Content, res.WriteScope, req.Category, req.Title)
+		match, err := store.IdenticalContentMatch(ctx, h.pool, req.Content, res.WriteScope, req.Category, req.Title,
+			req.Tags, res.Metadata, res.Sens, req.Type)
 		if err != nil {
 			slog.Error("store: hash noop check error", "error", err, "request_id", reqID)
 			h.reject(w, ctx, authResult, req, classInternal.reject("Internal server error"))
 			return
 		}
-		if existingID != "" {
+		if match.Unchanged() {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"success":     true,
 				"action":      "noop",
 				"reason":      "identical_content",
-				"existing_id": existingID,
+				"existing_id": match.ID,
 			})
 			return
 		}
+		changed = match.Changed()
 	}
 
 	// F6-C6 scope boundary (D-E1, DECISIONS §Klarstellung): REST stays a
@@ -225,6 +239,18 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"success": true,
 		"block":   block,
+	}
+	if changed != nil {
+		// The content was identical when checked, and these are the parts
+		// the check found different — the reason this write was not a noop.
+		// Absent on every other upsert, whose answer keeps its {success,
+		// block} shape. The check runs outside the upsert's transaction: a
+		// concurrent writer changing the content in between makes this
+		// answer stale, never the row (UpsertBlock decides on its own locked
+		// pre-read).
+		resp["action"] = "updated"
+		resp["reason"] = "identical_content"
+		resp["changed"] = changed
 	}
 	if res.Sens.Manual && block.Sensitivity != string(res.Sens.Value) {
 		// Upsert-conflict downgrade rejected (upgrade-only write path): say so
