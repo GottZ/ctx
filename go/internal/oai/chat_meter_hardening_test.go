@@ -260,14 +260,14 @@ func TestMeterFailoverRefusalAfterTheWireKeeps(t *testing.T) {
 // TestMeterConnectRefusedGivesBack is H2-4 (review 3 F-4): a row whose host
 // refuses the connection — no byte of the request reached any backend — is
 // no wire contact for the meter: the reservation goes back (Abort), the
-// client sees 503 upstream_unavailable.
+// client sees 503 upstream_unavailable. The refused address is a held port
+// that stopped listening (refusedAddr): no other listener can take it —
+// a closed httptest server's port came back to the next listener of the
+// test (Fremd-Review 4 F4-3, hardening 3 H3-2).
 func TestMeterConnectRefusedGivesBack(t *testing.T) {
-	dead := httptest.NewServer(http.NotFoundHandler())
-	host := dead.URL
-	dead.Close()
 	u := newUpstream(t, answerSGLang)
 	row := u.row("dead", backends.TrustFull, 10)
-	row.Host = host
+	row.Host = "http://" + refusedAddr(t)
 	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
 	rig := newChatRig(t, []backends.Backend{row}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	a := rig.post(t, chatBody("chat"))

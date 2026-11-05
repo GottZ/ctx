@@ -3,7 +3,8 @@ package keyquota_test
 // Hardening after the second review of W06-10 (Fremd-Review 2) and the
 // delta review 3: the refund of a reservation is what booking its real
 // usage at the admission would have left — min(charged − cost(actual),
-// smallest backlog since the admission) (H-1, made exact in H2-1;
+// backlog − its shadow's backlog), the shadow being the bucket of the
+// charges after its admission (H-1, made exact by the shadow rule in H2-1;
 // oracle_internal_test.go holds the differential), a debt is booked from
 // the settle on (H-2), the reset header rounds up (H-5, R9) and the meter
 // does not follow a step of the wall clock (H-6).

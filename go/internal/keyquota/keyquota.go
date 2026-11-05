@@ -275,7 +275,8 @@ func (m *Meter) Seeded() bool { return m.seeded.Load() }
 
 // Admit is design/06 §4.1 steps 7 and 8 for one request: seeded?, then the
 // request and token buckets of (consumer, op) — both pass or nothing is
-// booked. O(1) under one mutex; a refusal changes no state.
+// booked. O(open reservations of the key) under one mutex (the admission
+// raises their shadows); a refusal changes no state.
 func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) {
 	if s.ConsumerID == "" || s.TenantID == "" || l.RPM < 1 || l.TPM < 1 || s.Lane > LaneBulk {
 		return nil, invalid()

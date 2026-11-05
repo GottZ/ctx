@@ -3,12 +3,17 @@ package keyquota
 // The refund rule against its oracle (W06-10 hardening 2, H2-1; taken over
 // from the delta review 3 probes): "the real usage is booked at the
 // admission" — a token bucket with full knowledge, the same cap rule and the
-// same rounding. A reservation inflates the bucket by d = charged −
-// cost(actual); that inflation drains exactly while the oracle's bucket
-// would be empty, and then the real backlog equals what is left of it — so
-// the smallest backlog since the admission is the inflation still there.
-// Refunding min(d, smallest backlog) makes the meter equal to the oracle
-// whenever no answer uses more than its reservation.
+// same rounding. The meter's rule is the shadow rule: the bucket is a
+// max-plus sum, tat = max(A, B), where A are the terms that hold a
+// reservation's charge and B — its shadow — is the bucket that started
+// empty at its admission and saw only the later charges. Taking d =
+// charged − cost(actual) out of the charge leaves max(A − d, B), so the
+// refund is min(d, max(tat, now) − max(shadow, now)), applied to the bucket
+// and to the shadow of every older open reservation. That makes the meter
+// equal to the oracle whenever no answer uses more than its reservation.
+// (The minimum-backlog rule of the hardening 2 dispatch is not: two
+// overlapping reservations count the same low point twice —
+// TestRefundOfOverlappingReservationsUnderLoad.)
 
 import (
 	"fmt"

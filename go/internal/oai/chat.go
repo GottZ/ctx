@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
+	"math"
 	"net/http"
+	"net/http/httptrace"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -106,10 +108,11 @@ type chatCall struct {
 	required backends.Sensitivity
 	limit    LimitReservation
 	limitEnd bool
-	// wired: a wire call (ChatRaw) sent the request to a backend — any
-	// outcome except a failed connect (dialFailed). After it the
-	// reservation is never given back (Keep without a usage).
-	wired bool
+	// wired: a byte of the request can have reached a backend in some
+	// attempt (wireTrace) — set from inside net/http, on its transport
+	// goroutines. Without it the reservation goes back in full (Abort);
+	// after it, never (Keep without a usage).
+	wired atomic.Bool
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
@@ -153,11 +156,12 @@ func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.Consum
 }
 
 // close ends the request's contexts and a reservation nobody ended — after
-// a wire call (a panic in the answer path) by keeping its charge, the usage
-// is unknown; without one by Abort.
+// wire contact (a panic inside ChatRaw once the request was written, or in
+// the answer path) by keeping its charge, the usage is unknown; without it
+// by Abort.
 func (c *chatCall) close() {
 	if c.limit != nil && !c.limitEnd {
-		if c.wired {
+		if c.wired.Load() {
 			c.limit.Keep()
 		} else {
 			c.limit.Abort()
@@ -514,14 +518,24 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 		st.failed = append(st.failed, st.last)
 		return dispatch.Usage{}, false, err
 	}
+	// st.wired counts the wire calls for the census (Σ acquire = Σ wire);
+	// c.wired is the meter's wire contact, marked from inside net/http by
+	// the attempt's trace (W06-10 hardening 3, H3-1). The trace rides on the
+	// request context, and req.Clone carries it into httpx.DoRetryOnce's
+	// retry: every try of the attempt reports.
 	st.wired++
-	res, err := llm.ChatRaw(runCtx, *b, body, timeout, c.s.MaxResponseBytes)
-	// A connect that failed sent no byte of the request: no backend saw it,
-	// so the meter gives the reservation back (W06-10 hardening 2, H2-4).
-	// st.wired counts the wire calls for the census (Σ acquire = Σ wire) and
-	// keeps doing so.
-	if err == nil || !dialFailed(err) {
-		c.wired = true
+	// The attempt's deadline (ChatRaw sets the same one inside) is held here
+	// too, so its end is read off the context, not off the error.
+	var conn atomic.Bool
+	actx, cancel := context.WithTimeout(httptrace.WithClientTrace(runCtx, c.wireTrace(&conn)), timeout)
+	res, err := llm.ChatRaw(actx, *b, body, timeout, c.s.MaxResponseBytes)
+	ended := actx.Err() != nil
+	cancel()
+	// An attempt that ended by its context with a connection in hand may
+	// still write: HTTP/2 returns on the context without waiting for the
+	// stream's writer. Counted as wire contact — the conservative side.
+	if err != nil && conn.Load() && ended {
+		c.wired.Store(true)
 	}
 	if err != nil {
 		st.last = failedAttempt{b: b, err: err}
@@ -540,18 +554,32 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 // share: [0-9A-Fa-f-]{1,64} (F-W3 review FR2-4). 36 + 2 + digits ≤ 64.
 func attemptRequestID(id string, n int) string { return fmt.Sprintf("%s-a%d", id, n) }
 
-// dialFailed reports whether err is a failed connect — the dial (TCP
-// connect, DNS lookup, the egress guard) failed, so no byte of the request
-// reached a backend (the forms httpx.IsBackendUnavailable names for a dial).
-// A reset or an EOF after the connect is not one: the request may have
-// arrived.
-func dialFailed(err error) bool {
-	var op *net.OpError
-	if errors.As(err, &op) && op.Op == "dial" {
-		return true
+// wireTrace marks wire contact where a byte of the request can leave for a
+// backend, in any try, instead of reading it off the error of the last try
+// (Fremd-Review 4 F4-1, F4-2, F4-7). conn records a connection in hand.
+//
+//   - WroteHeaderField, WroteHeaders, WroteRequest (any Err — a partly
+//     written body reached the backend): the request is being written on an
+//     established connection. HTTP/1.1 writes every request byte inside
+//     Request.write, which calls WroteHeaderField after the request line
+//     and the Host line, and WroteRequest when it returns, failed writes
+//     included; HTTP/2 calls WroteHeaderField while it encodes the HEADERS
+//     frame, before any of it is written. A dial, a refused or timed-out
+//     connect and a failed TLS handshake reach none of them. Before an error
+//     returns, HTTP/1.1 waits for its write loop, HTTP/2 for the stream's
+//     writer unless the context ended (attempt), so the mark is visible when
+//     ChatRaw returns.
+//   - GotFirstResponseByte: the backend answered — wire contact by
+//     definition; the hook runs before net/http hands the response over.
+func (c *chatCall) wireTrace(conn *atomic.Bool) *httptrace.ClientTrace {
+	mark := func() { c.wired.Store(true) }
+	return &httptrace.ClientTrace{
+		GotConn:              func(httptrace.GotConnInfo) { conn.Store(true) },
+		WroteHeaderField:     func(string, []string) { mark() },
+		WroteHeaders:         mark,
+		WroteRequest:         func(httptrace.WroteRequestInfo) { mark() },
+		GotFirstResponseByte: mark,
 	}
-	var dns *net.DNSError
-	return errors.As(err, &dns)
 }
 
 // admissionRefused answers an admission failure through the planner's
@@ -608,14 +636,16 @@ func (c *chatCall) answer(plan Plan, served *backends.Backend, attempts []llm.Ch
 	// After wire contact without a usage (an upstream error, an answer
 	// without usage, the client gone during the call) the reservation keeps
 	// its charge: never a full refund after the wire (W06-10 hardening H-7).
-	// Wire calls that all failed to connect reached no backend: Abort (H2-4).
-	// The counters are tested one by one — their int sum can overflow (H2-5).
+	// Wire calls of which no byte reached a backend (wireTrace) give it back:
+	// Abort (H2-4, H3-1). The counters are tested one by one — their int sum
+	// can overflow (H2-5).
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
+		wired := c.wired.Load()
 		c.endLimit(func(l LimitReservation) {
 			switch {
-			case st.wired > 0 && !c.wired:
+			case st.wired > 0 && !wired:
 				l.Abort()
-			case c.wired && usage.PromptTokens <= 0 && usage.CompletionTokens <= 0:
+			case wired && usage.PromptTokens <= 0 && usage.CompletionTokens <= 0:
 				l.Keep()
 			default:
 				l.Settle(usage)
@@ -647,7 +677,7 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 		if st.lease == nil {
 			waited = time.Since(c.entry)
 		}
-		c.admissionRefused(err, waited, c.wired)
+		c.admissionRefused(err, waited, c.wired.Load())
 		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: c.rec.Reason}}
 	}
 	if len(attempts) == 0 {
@@ -729,7 +759,7 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "server_fault", Code: CodeUpstreamError}}
 	}
 	c.rec.PromptTokens, c.rec.CompletionTokens = st.result.PromptTokens, st.result.CompletionTokens
-	if st.result.PromptTokens+st.result.CompletionTokens > 0 {
+	if usageTotal(st.result.PromptTokens, st.result.CompletionTokens) > 0 {
 		c.rec.Usage = llmlog.UsageBackend
 	}
 	// The meter's view of the request's op bucket, on the successful answer
@@ -756,6 +786,18 @@ func finishOf(f string) string {
 	return ""
 }
 
+// usageTotal is prompt + completion as the meter counts them (keyquota
+// Settle): a negative counter counts 0, the sum saturates at the int range
+// — an int sum of two reported counters can overflow and drop the usage
+// marker of the access record and the row (Fremd-Review 4 F4-6).
+func usageTotal(prompt, completion int) int {
+	p, q := max(prompt, 0), max(completion, 0)
+	if p > math.MaxInt-q {
+		return math.MaxInt
+	}
+	return p + q
+}
+
 // record writes the request's ONE llmlog row (design/06 §4.6): the walk's
 // telemetry, every wire attempt in metadata.chain, a RedactedErr — never the
 // walk's raw error, which can carry the upstream body (B20).
@@ -772,7 +814,7 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 	}
 	llm.ApplyDispatchOutcome(&tel, attempts, err, class)
 	usage := ""
-	if st.result != nil && st.result.PromptTokens+st.result.CompletionTokens > 0 {
+	if st.result != nil && usageTotal(st.result.PromptTokens, st.result.CompletionTokens) > 0 {
 		usage = llmlog.UsageBackend
 	}
 	request := ""
