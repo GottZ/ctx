@@ -46,11 +46,15 @@ var (
 )
 
 // watchTarget is what the watcher re-checks: the consumer, the alias name it
-// asked for and the id that name resolved to at entry.
+// asked for, the id that name resolved to at entry and the registry
+// generation read right before that Resolve (gen): the watcher starts from
+// it, so a change between the entry and the watcher start is resolved on
+// the first tick (Copilot review on PR #144).
 type watchTarget struct {
 	ca      *auth.ConsumerAuth
 	name    string
 	aliasID string
+	gen     uint64
 }
 
 // watch starts the watcher of one request; stop ends it and returns once the
@@ -59,7 +63,7 @@ type watchTarget struct {
 func (d Deps) watch(ctx context.Context, cancel context.CancelCauseFunc, t watchTarget) (stop func()) {
 	done := make(chan struct{})
 	quit := make(chan struct{})
-	gen := d.Aliases.Generation()
+	gen := t.gen
 	go func() {
 		defer close(done)
 		tick := time.NewTicker(watchEvery)

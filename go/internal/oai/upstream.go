@@ -216,6 +216,13 @@ func upstreamMessage(body string) string {
 
 // The scrubbers of a relayed text (§4.10.1): URLs, userinfo authorities,
 // IP addresses and absolute paths go before the text reaches a client.
+// pathPattern and winPattern take a path behind every quoting or bracket
+// delimiter — whitespace, quotes, "(=,:" and "[{<>`|;" (Copilot review on
+// PR #144: "[/srv/cache/x.db]" and a backtick-quoted path kept theirs) —
+// and stop before the closing one; winPattern also behind "_". An IP
+// address takes its path, query or fragment with it (identitySuffix): the
+// path scrubber runs before the IP scrubbers and sees no delimiter in
+// "10.1.2.3:80/x?key=y".
 // userinfoPattern is user[:password]@host[:port] without a scheme, taken as
 // a whole — the host behind the @ too, a pool identity already replaced by
 // the alias or not (Fremd-Review 2 F2-6 H-7 2). ipv6Pattern starts at a
@@ -225,10 +232,10 @@ func upstreamMessage(body string) string {
 var (
 	urlPattern      = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
 	userinfoPattern = regexp.MustCompile(`[^\s"'<>()\[\]{},;=@]+@[^\s"'<>(){},;]*`)
-	ipv4Pattern     = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
-	ipv6Pattern     = regexp.MustCompile(`(?i)\[?(?:\b[0-9a-f]{1,4}|:)(?::[0-9a-f]{0,4}){1,8}(?:%[0-9a-z_.~-]+)?\]?(?::\d+)?`)
-	pathPattern     = regexp.MustCompile(`(?:^|[\s"'(=,:])(/[^\s"'),]+)`)
-	winPattern      = regexp.MustCompile(`\b[A-Za-z]:\\[^\s"']+`)
+	ipv4Pattern     = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b` + identitySuffix)
+	ipv6Pattern     = regexp.MustCompile(`(?i)\[?(?:\b[0-9a-f]{1,4}|:)(?::[0-9a-f]{0,4}){1,8}(?:%[0-9a-z_.~-]+)?\]?(?::\d+)?` + identitySuffix)
+	pathPattern     = regexp.MustCompile("(?:^|[\\s\"'(=,:\\[{<>`|;])(/[^\\s\"'),\\]}>`|;]+)")
+	winPattern      = regexp.MustCompile("(^|[^A-Za-z0-9])[A-Za-z]:\\\\[^\\s\"'\\]}>`|;]+")
 	spacePattern    = regexp.MustCompile(`\s+`)
 	zonePattern     = regexp.MustCompile(`(?i)%(?:25)?[0-9a-z_.~-]+`)
 )
@@ -244,6 +251,12 @@ var (
 // text. Matching is on bytes after Unicode case folding; homoglyphs are not
 // folded (docs/security.md).
 func sanitizeUpstreamText(text, alias string, snap []backends.Backend) string {
+	// Whole URLs and userinfo authorities go FIRST: replacing an identity
+	// inside one first leaves "<alias>/private/x?key=…", which neither the
+	// URL scrubber (no scheme left) nor the path scrubber (no delimiter)
+	// recognizes (Copilot review on PR #144).
+	text = urlPattern.ReplaceAllString(text, "")
+	text = userinfoPattern.ReplaceAllString(text, "")
 	if re := identityPattern(snap); re != nil {
 		text = re.ReplaceAllLiteralString(text, alias)
 	}
@@ -251,9 +264,7 @@ func sanitizeUpstreamText(text, alias string, snap []backends.Backend) string {
 	// identity of a row ("fd00::17%25en0" ⇒ "<alias>%25en0"): every zone
 	// suffix goes (Fremd-Review 3 R3-3; over-replacement is accepted).
 	text = zonePattern.ReplaceAllString(text, "")
-	text = urlPattern.ReplaceAllString(text, "")
-	text = userinfoPattern.ReplaceAllString(text, "")
-	text = winPattern.ReplaceAllString(text, "")
+	text = winPattern.ReplaceAllString(text, "${1}")
 	text = pathPattern.ReplaceAllStringFunc(text, func(m string) string {
 		if i := strings.IndexByte(m, '/'); i >= 0 {
 			return m[:i]
@@ -354,6 +365,10 @@ func foldKey(s string) string {
 
 // identityPattern is one case-insensitive alternation over the identities,
 // longest first; short ones only as whole words. nil = nothing to replace.
+// A match takes what is glued to the identity with it — a port and a path,
+// query or fragment (identitySuffix): "gpu.internal:8000/private/x?key=y"
+// without a scheme, or a row name used as a path prefix, goes as a whole
+// (Copilot review on PR #144: the path and the query value stayed).
 // The order is the reverse lexical order of the lower-cased strings: at one
 // position of the text only identities that are prefixes of one another
 // compete, and each comes before its own prefixes, so the longest still
@@ -378,8 +393,12 @@ func identityPattern(snap []backends.Backend) *regexp.Regexp {
 			alts[i] = `\b` + alts[i] + `\b`
 		}
 	}
-	return regexp.MustCompile(`(?i)(?:` + strings.Join(alts, "|") + `)`)
+	return regexp.MustCompile(`(?i)(?:` + strings.Join(alts, "|") + `)` + identitySuffix)
 }
+
+// identitySuffix is the port and the path, query or fragment glued to an
+// identity, up to the next whitespace, quote or angle bracket.
+const identitySuffix = "(?::[0-9]+)?(?:[/?#][^\\s\"'<>`]*)?"
 
 // cutRunes cuts s to at most n bytes on a rune boundary.
 func cutRunes(s string, n int) string {

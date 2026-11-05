@@ -99,6 +99,7 @@ type chatCall struct {
 	id     string
 
 	alias    modelalias.Alias
+	gen      uint64 // the alias registry generation read right before the entry Resolve (B-3)
 	req      *chatRequest
 	required backends.Sensitivity
 	limit    LimitReservation
@@ -260,6 +261,13 @@ func (c *chatCall) refuseParam(perr *paramError) {
 // resolve is §4.4 steps 1–6: the alias in the consumer's scope, released by
 // all_models or a grant (the one 404 for every reason), then the kind.
 func (c *chatCall) resolve(name string) bool {
+	// The generation the watcher starts from is the one this Resolve saw at
+	// most: read BEFORE it, a change between the Resolve and the watcher
+	// start (limiter, plan, the queue) moves the generation past it and the
+	// first tick resolves again (Copilot review on PR #144). Read after, the
+	// watcher would start from a generation that already holds the change
+	// and skip every Resolve until the check before the write.
+	c.gen = c.d.Aliases.Generation()
 	a, found, err := c.d.Resolve(c.ctx, c.ca, name)
 	switch {
 	case err != nil:
@@ -386,6 +394,7 @@ func (c *chatCall) endLimit(fn func(LimitReservation)) {
 // walkState is what the attempts of one walk leave behind.
 type walkState struct {
 	n        int
+	wired    int // attempts that called the wire (ChatRaw)
 	admitted time.Time
 	result   *llm.RawChatResult
 	failed   []failedAttempt
@@ -419,7 +428,14 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		c.admissionRefused(err, 0)
 		return
 	}
-	stop := c.d.watch(c.ctx, c.cancel, watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID})
+	// A run ended while the planner built the plan never reaches an acquire
+	// (Fremd-Review 4 R4-1: a shutdown here used to book an attempt on the
+	// ended run — no wire contact, but a row and Settle).
+	if ended, _ := c.verdict(); ended {
+		c.endLimit(func(l LimitReservation) { l.Abort() })
+		return
+	}
+	stop := c.d.watch(c.ctx, c.cancel, watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen})
 	defer stop()
 
 	var st walkState
@@ -470,6 +486,18 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 	// <oaiReqID>-a<n>: hex and "-", ≤ 64 — the grammar fedhop and the
 	// house middleware check (FR2-4); sent to ctx rows only (K28, tier F).
 	runCtx = fedhop.WithRequestID(runCtx, attemptRequestID(c.id, st.n))
+	// A run that ended while the lease was acquired does not dial: the
+	// attempt fails with the run's cause (a cancellation, no health report)
+	// and, without any wire call, the request books no row and aborts its
+	// reservation (answer; Fremd-Review 4 R4-1, the window inside the walk).
+	c.syncLifecycle()
+	if runCtx.Err() != nil {
+		err := fmt.Errorf("oai: the run ended before the wire call: %w", context.Cause(runCtx))
+		st.last = failedAttempt{b: b, err: err}
+		st.failed = append(st.failed, st.last)
+		return dispatch.Usage{}, false, err
+	}
+	st.wired++
 	res, err := llm.ChatRaw(runCtx, *b, body, timeout, c.s.MaxResponseBytes)
 	if err != nil {
 		st.last = failedAttempt{b: b, err: err}
@@ -527,7 +555,10 @@ func (c *chatCall) answer(plan Plan, served *backends.Backend, attempts []llm.Ch
 		c.rec.Class = st.lease.Class().String()
 	}
 	out := c.outcome(plan, attempts, err, st)
-	if len(attempts) > 0 {
+	// A row and Settle only for a request that reached the wire, or whose
+	// walk failed on its own: a run that ended before any wire call
+	// (aborted, no ChatRaw) is no LLM call — close() aborts its reservation.
+	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
 		c.endLimit(func(l LimitReservation) { l.Settle(usage) })
 		c.record(plan, served, attempts, err, st, out)
 	}
@@ -583,13 +614,7 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 // ended reports one of them, code is what was written ("" when the client
 // is gone and nothing could be).
 func (c *chatCall) verdict() (ended bool, code string) {
-	// The lifecycle is read here too, synchronously: AfterFunc delivers its
-	// cause from a goroutine of its own, so a shutdown that landed after the
-	// entry need not be on the run yet when the route asks (Fremd-Review 3
-	// R3-1). A cause already set (client gone, watcher) stays the cause.
-	if c.d.Lifecycle != nil && c.d.Lifecycle.Err() != nil {
-		c.cancel(errShutdown)
-	}
+	c.syncLifecycle()
 	cause := context.Cause(c.ctx)
 	switch {
 	case errors.Is(cause, errGatewayOff):
@@ -610,9 +635,20 @@ func (c *chatCall) verdict() (ended bool, code string) {
 	return false, ""
 }
 
+// syncLifecycle puts an ended lifecycle on the run synchronously: AfterFunc
+// delivers its cause from a goroutine of its own, so a shutdown that landed
+// after the entry need not be on the run yet when the route asks
+// (Fremd-Review 3 R3-1). A cause already set (client gone, watcher) stays
+// the cause.
+func (c *chatCall) syncLifecycle() {
+	if c.d.Lifecycle != nil && c.d.Lifecycle.Err() != nil {
+		c.cancel(errShutdown)
+	}
+}
+
 // success checks once more before the write (D8), rewrites and writes.
 func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
-	t := watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID}
+	t := watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen}
 	switch err := c.d.stillServes(c.ctx, t); {
 	case errors.Is(err, errGatewayOff), errors.Is(err, errModelGone):
 		c.cancel(err)
