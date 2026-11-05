@@ -30,9 +30,10 @@ import (
 
 // Class is the admission priority of one wire call. Two in-house classes by
 // decision E-U1 (no ctx consumer has a requirement between "a human waits
-// synchronously" and "nobody waits"); the external class XU of /v1 consumers
-// came with its own wave and authorization decision (design/03 §4.1, A03-W3),
-// its order against the in-house classes is policy data (A-E2 no. 1).
+// synchronously" and "nobody waits"); the external classes XU and XB of /v1
+// consumers came each with its own wave and authorization decision (design/03
+// §4.1, A03-W3 and A03-W9), their order against the in-house classes is
+// policy data (A-E2 no. 1).
 // Extension rule (design/03 C7): a new
 // class only as its own wave including an authorization decision, and
 // structurally — since A03-W1 — in three places the compiler or the table
@@ -63,6 +64,18 @@ const (
 	// pass-through lease. Its rank against background is the policy datum
 	// dispatch.external_order (A-E2 no. 1).
 	ClassExternal
+	// ClassExternalBulk (XB, design/03 §4.1 C7 column XB, wave A03-W9) — a
+	// peer's background work or a batch application behind /v1: nobody waits
+	// synchronously. The lane bulk of a model consumer resolves to it (the
+	// consumer's ceiling, a peer's Ctx-Class hint or service_tier flex, each
+	// only lowering — design/03 §4.4). Everything XU is, XB is too —
+	// consumer-principal only, inside the external partition E (one Σw heldExt
+	// over both external classes), never a preempt victim and never
+	// pass-through — with its own queue, cap counters and windows; it ranks
+	// LAST in both named orders (decision E2: o1 I ≻ XU ≻ B ≻ XB, o2 I ≻ B ≻
+	// XU ≻ XB), so it never takes a unit a waiting head of a higher-ranked
+	// class needs (rank.go, fairness.go externalClaimLocked).
+	ClassExternalBulk
 	// numClasses is the enum end, not a class: every value >= numClasses is
 	// invalid, and classTable carries exactly numClasses rows.
 	numClasses
@@ -82,17 +95,17 @@ type classInfo struct {
 	// external marks a class of external consumers (design/01 §4.5 I-K10: a
 	// consumer principal is admitted only in an external class, wave W01-7;
 	// an external class only for a consumer principal, wave A03-W3). Both
-	// in-house classes are false; XU is true (A03-W3), XB follows with
-	// A03-W9.
+	// in-house classes are false; XU (A03-W3) and XB (A03-W9) are true.
 	external bool
 }
 
 // classTable is the single source of String, valid and External: one row per
 // class below numClasses, keyed by the constant.
 var classTable = [...]classInfo{
-	ClassInteractive: {name: "interactive"},
-	ClassBackground:  {name: "background"},
-	ClassExternal:    {name: "external", external: true},
+	ClassInteractive:  {name: "interactive"},
+	ClassBackground:   {name: "background"},
+	ClassExternal:     {name: "external", external: true},
+	ClassExternalBulk: {name: "external_bulk", external: true},
 }
 
 // Compile-time half of the C7 gate: len(classTable) == numClasses in both
@@ -125,8 +138,9 @@ func (c Class) String() string {
 // classifier of the principal gate in both directions (design/01 §4.5: a
 // consumer principal in a class with External() == false is refused with
 // ErrClassUnauthorized, wave W01-7; an external class without a consumer
-// principal likewise, wave A03-W3). True for ClassExternal, false for both
-// in-house classes and fail-closed false outside the class table.
+// principal likewise, wave A03-W3). True for ClassExternal and
+// ClassExternalBulk, false for both in-house classes and fail-closed false
+// outside the class table.
 func (c Class) External() bool {
 	return c.valid() && classTable[c].external
 }

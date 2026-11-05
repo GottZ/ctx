@@ -291,7 +291,9 @@ func TestLeaseSampleIsPerLease(t *testing.T) {
 
 // TestPassThroughLeaseIsSampled pins the build report's claim (review 2
 // R18b): a pass-through lease (no declared policy, slotHeld false) is one
-// lease-duration sample of its class like a slot-holding one.
+// lease-duration sample of its class like a slot-holding one — counted in
+// the class's window itself since A03-W9 (lead decision P2: the snapshot
+// carries only the external windows, the in-house ones keep sampling).
 func TestPassThroughLeaseIsSampled(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), Policy{})
 	l := mustAcquire(t, d, ictx(principal("p")), interactiveReq())
@@ -300,10 +302,9 @@ func TestPassThroughLeaseIsSampled(t *testing.T) {
 	}
 	l.Release()
 	mustAcquire(t, d, context.Background(), backgroundReq()).Release()
-	ts := target(t, d)
-	if ts.LeaseDur[ClassInteractive].Samples != 1 || ts.LeaseDur[ClassBackground].Samples != 1 {
-		t.Fatalf("pass-through lease samples interactive %d background %d, want 1/1",
-			ts.LeaseDur[ClassInteractive].Samples, ts.LeaseDur[ClassBackground].Samples)
+	ia, bg := d.leaseSamplesForTest(testOrigin, ClassInteractive), d.leaseSamplesForTest(testOrigin, ClassBackground)
+	if ia != 1 || bg != 1 {
+		t.Fatalf("pass-through lease samples interactive %d background %d, want 1/1", ia, bg)
 	}
 }
 
@@ -571,7 +572,7 @@ func TestRefusedNewcomerIsNoEvent(t *testing.T) {
 	pickNow := func() string {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		w, _ := d.externalPickLocked(d.targetLocked(testOrigin), weightSlots)
+		w, _ := d.externalPickLocked(d.targetLocked(testOrigin), ClassExternal, weightSlots)
 		return waiterLabel(w)
 	}
 	before := pickNow()
@@ -745,7 +746,7 @@ func TestContinuationHeadIsNotTheNewcomers(t *testing.T) {
 // cleared, as in the continuation path, so no reference to the refused
 // waiter outlives its section.
 func TestRemovedTailLeavesNoReference(t *testing.T) {
-	q := newExternalQueue()
+	q := newExternalQueue(ClassExternal, newExtFair())
 	p := xuPrincipal("c", "tenant-a")
 	a, b := &waiter{class: ClassExternal, principal: p, weight: 1}, &waiter{class: ClassExternal, principal: p, weight: 1}
 	q.push(a)

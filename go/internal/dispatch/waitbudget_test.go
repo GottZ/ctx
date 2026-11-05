@@ -561,7 +561,7 @@ func TestExternalTimerYieldsToOfferWithdrawal(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(2, 1))
 		holder := mustAcquire(t, d, xctx(context.Background(), "holder", "tenant-a"), externalReq())
-		a := holdMutexPastExpiry(t, d, func(st *targetState) { d.failExternalWaitersLocked(st, ErrExternalNotOffered) })
+		a := holdMutexPastExpiry(t, d, func(st *targetState) { d.failExternalWaitersLocked(st, st.external, ErrExternalNotOffered) })
 		if a.lease != nil || !errors.Is(a.err, ErrExternalNotOffered) {
 			t.Fatalf("round %d: withdrawal before the timer branch = (lease %v, %v), want ErrExternalNotOffered", i, a.lease != nil, a.err)
 		}

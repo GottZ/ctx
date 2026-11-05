@@ -84,12 +84,13 @@ func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 		depth = st.interactive.total
 	case ClassBackground:
 		depth = st.background.len()
-	case ClassExternal:
-		// The external window includes the censored samples of expired
+	case ClassExternal, ClassExternalBulk:
+		// The external windows include the censored samples of expired
 		// waiters (A03-W5, metrics.go) — the estimate does not read only
 		// the survivors; the depth includes waiting continuations (A03-W17),
-		// which are served before a newcomer.
-		return quantizeRetryAfter(classEstimate(st.external.total, st.ring(class).published().p95),
+		// which are served before a newcomer. Each external class reads its
+		// own queue and window (A03-W9).
+		return quantizeRetryAfter(classEstimate(st.extQueue(class).total, st.ring(class).published().p95),
 			d.currentSettings().ExternalRetryAfterSteps)
 	default:
 		// Fail-closed (A03-W1): no estimate for a class without a case here
