@@ -7,9 +7,10 @@
 // route's production dependencies (gatewayDeps: the real planner over the
 // real dispatcher, the pool, the tenant quota, the federation filter, the
 // llmlog writer) against a throwaway database. The one stand-in: the
-// limiter. Production wires none yet (W06-10, L11: every chat request
-// answers 503 service_unavailable), so the route is rebuilt from
-// gatewayDeps with a limiter that admits everything.
+// limiter. Production wires the per-consumer meter (W06-10; its gate runs
+// against the unwrapped production router, v1_chat_meter_integration_test.go),
+// but these tests are about the route, not the meter, so the route is rebuilt
+// from gatewayDeps with a limiter that admits everything.
 //
 //	go test -tags=integration -p 1 -count=1 -run 'TestV1Chat' -v ./cmd/ctxd/
 //
@@ -128,14 +129,16 @@ func (e *v1ChatEngine) sawValue(v string) (inBody, inHeader, requestIDHeader boo
 	return inBody, inHeader, requestIDHeader
 }
 
-// v1ChatLimiter admits every request (the stand-in for W06-10's meter).
+// v1ChatLimiter admits every request (the stand-in for the meter).
 type v1ChatLimiter struct{ admits atomic.Int64 }
 
 type v1ChatReservation struct{}
 
 func (v1ChatReservation) Settle(dispatch.Usage)        {}
+func (v1ChatReservation) Keep()                        {}
 func (v1ChatReservation) Abort()                       {}
 func (v1ChatReservation) Reject(string, time.Duration) {}
+func (v1ChatReservation) Headers() http.Header         { return nil }
 
 func (l *v1ChatLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	l.admits.Add(1)
@@ -216,7 +219,7 @@ func newV1ChatFixture(t *testing.T, rows []backends.Backend) *v1ChatFixture {
 		out := append([]modelRoute(nil), routes...)
 		for i, r := range out {
 			if r.method == http.MethodPost && r.pattern == "/chat/completions" {
-				d := gatewayDeps(sctx, f.pool, cfgStore, aliases, backendPool, quota, disp)
+				d := gatewayDeps(sctx, f.pool, cfgStore, aliases, backendPool, quota, disp, nil)
 				d.Limiter = f.limiter
 				out[i].handler = oai.ChatCompletions(d)
 			}

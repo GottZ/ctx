@@ -187,8 +187,8 @@ func TestWalkWithoutWireAttemptAbortsReservation(t *testing.T) {
 	if a.status != http.StatusServiceUnavailable || code != oai.CodeNoEligibleBackend {
 		t.Fatalf("answer %d %s, want 503 no_eligible_backend", a.status, a.body)
 	}
-	if ab, se, rj := rig.limiter.aborts.Load(), rig.limiter.settles.Load(), rig.limiter.rejects.Load(); ab != 1 || se != 0 || rj != 0 {
-		t.Errorf("reservation ends: abort %d settle %d reject %d, want 1/0/0", ab, se, rj)
+	if ab, se, rj, kp := rig.limiter.aborts.Load(), rig.limiter.settles.Load(), rig.limiter.rejects.Load(), rig.limiter.keeps.Load(); ab != 1 || se != 0 || rj != 0 || kp != 0 {
+		t.Errorf("reservation ends: abort %d settle %d reject %d keep %d, want 1/0/0/0 (no wire call: never Keep)", ab, se, rj, kp)
 	}
 	if n := len(rig.rows.all()); n != 0 || u.hits.Load() != 0 {
 		t.Errorf("rows %d, hits %d, want 0/0", n, u.hits.Load())

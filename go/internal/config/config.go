@@ -2634,6 +2634,38 @@ type GatewayConfig struct {
 	// request: they are counted per (consumer, reason) and logged as one
 	// WARN line per minute, whatever this key says.
 	AccessLog bool `key:"gateway.access_log" env:"CTX_GATEWAY_ACCESS_LOG" default:"true" mut:"hot" tenancy:"global-only"`
+
+	// The per-consumer meter L0 of the model API (design/06 §4.2, §4.11;
+	// wave W06-10): one GCRA bucket for requests and one for tokens per
+	// minute per (model consumer, op). Until the limits rows of W06-15 these
+	// defaults are every consumer's limits. A reservation above TPM is
+	// charged at TPM and the rest settles as debt (B-06-28), so TPM never
+	// refuses a large request for good. V47: each int >= 1 (0 would refuse
+	// every request), negatives are V35's; parse-strict — a typo'd limit
+	// must not fall back to a default silently.
+	//
+	// ChatRPMDefault / ChatTPMDefault: chat requests and tokens per minute
+	// (E-06-2).
+	ChatRPMDefault int `key:"gateway.chat_rpm_default" env:"CTX_GATEWAY_CHAT_RPM_DEFAULT" default:"30" mut:"hot" parse:"strict" tenancy:"global-only"`
+	ChatTPMDefault int `key:"gateway.chat_tpm_default" env:"CTX_GATEWAY_CHAT_TPM_DEFAULT" default:"60000" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// EmbedRPMDefault / EmbedTPMDefault: embedding requests and tokens per
+	// minute; TPM above the OpenAI request maximum of 300 000 tokens, so a
+	// spec-maximal batch fits a fresh minute.
+	EmbedRPMDefault int `key:"gateway.embed_rpm_default" env:"CTX_GATEWAY_EMBED_RPM_DEFAULT" default:"120" mut:"hot" parse:"strict" tenancy:"global-only"`
+	EmbedTPMDefault int `key:"gateway.embed_tpm_default" env:"CTX_GATEWAY_EMBED_TPM_DEFAULT" default:"500000" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// RerankRPMDefault / RerankTPMDefault: rerank requests and tokens per
+	// minute (conservative until the first measurement).
+	RerankRPMDefault int `key:"gateway.rerank_rpm_default" env:"CTX_GATEWAY_RERANK_RPM_DEFAULT" default:"60" mut:"hot" parse:"strict" tenancy:"global-only"`
+	RerankTPMDefault int `key:"gateway.rerank_tpm_default" env:"CTX_GATEWAY_RERANK_TPM_DEFAULT" default:"200000" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// TPMReserveDefault is the completion share of a chat reservation when
+	// the client names no max_tokens / max_completion_tokens; the effective
+	// max_tokens (alias and ceiling clamp) caps it.
+	TPMReserveDefault int `key:"gateway.tpm_reserve_default" env:"CTX_GATEWAY_TPM_RESERVE_DEFAULT" default:"1024" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// XUReserveRatio is r (E-06-15): a bulk-lane (XB) request is admitted
+	// only up to the share 1 − r of each bucket, so the urgent lane (XU) of
+	// the same consumer keeps a quarter of it by default. Range [0, 1) (V47).
+	XUReserveRatio float64 `key:"gateway.xu_reserve_ratio" env:"CTX_GATEWAY_XU_RESERVE_RATIO" default:"0.25" mut:"hot" parse:"strict" tenancy:"global-only"`
+
 	// Consumers is the administration of model consumers and their keys
 	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
 	Consumers GatewayConsumersConfig
@@ -2889,6 +2921,13 @@ func (c *Config) GatewaySettings() oai.Settings {
 		RetryAfterJitter:         g.RetryAfterJitter,
 		BodyLogging:              g.BodyLogging,
 		AccessLog:                g.AccessLog,
+		Meter: oai.MeterSettings{
+			Chat:           oai.OpLimits{RPM: int64(g.ChatRPMDefault), TPM: int64(g.ChatTPMDefault)},
+			Embed:          oai.OpLimits{RPM: int64(g.EmbedRPMDefault), TPM: int64(g.EmbedTPMDefault)},
+			Rerank:         oai.OpLimits{RPM: int64(g.RerankRPMDefault), TPM: int64(g.RerankTPMDefault)},
+			TPMReserve:     int64(g.TPMReserveDefault),
+			XUReserveRatio: g.XUReserveRatio,
+		},
 		Auth: oai.AuthSettings{
 			FailureLimit:  g.AuthFailureLimit,
 			FailureWindow: g.AuthFailureWindow,

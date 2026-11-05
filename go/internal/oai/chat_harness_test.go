@@ -205,19 +205,21 @@ func (g *gateCount) GateTenant(tenantID string, chain []backends.Backend) ([]bac
 
 // fakeLimiter admits everything and counts how each reservation ended.
 type fakeLimiter struct {
-	admits, settles, aborts, rejects atomic.Int64
-	refuse                           *oai.LimitRefusal
-	lastReason                       atomic.Value
+	admits, settles, keeps, aborts, rejects atomic.Int64
+	refuse                                  *oai.LimitRefusal
+	lastReason                              atomic.Value
 }
 
 type fakeReservation struct{ l *fakeLimiter }
 
 func (r fakeReservation) Settle(dispatch.Usage) { r.l.settles.Add(1) }
+func (r fakeReservation) Keep()                 { r.l.keeps.Add(1) }
 func (r fakeReservation) Abort()                { r.l.aborts.Add(1) }
 func (r fakeReservation) Reject(reason string, _ time.Duration) {
 	r.l.rejects.Add(1)
 	r.l.lastReason.Store(reason)
 }
+func (r fakeReservation) Headers() http.Header { return nil }
 
 func (l *fakeLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	l.admits.Add(1)

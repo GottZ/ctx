@@ -168,6 +168,8 @@ linters:
               desc: "internal/oai never proxies to a backend itself — every upstream call is llm.ChatRaw/ChatRawStream under llm.WalkChain (admission, overlay, egress choice, header rule; design/02 §4.1 L4, B14/B19)"
             - pkg: "crypto/tls$"
               desc: "internal/oai dials no backend — TLS to a backend lives in the httpx pool clients behind the llm wire sites (design/02 §4.1 L4, B14/B19)"
+            - pkg: "github.com/GottZ/ctx/internal/embedcache$"
+              desc: "/v1 never uses the internal embedding cache: it keys across tenants, and a hit booked with 0 tokens would make x-ratelimit-remaining-tokens and latency an oracle for what ctx has embedded (design/06 B-06-24, W06-10; GHSA 2026-10-31 §8)"
 
         # Leaf doctrine (design/01-schnitt.md §4.5, masterplan K7/K11 + A-4).
         # Seven packages are leaves BY DESIGN; until now the doctrine lived only
@@ -337,6 +339,21 @@ linters:
               desc: "internal/federation takes the consumer through an injected accessor (PeerIngressConfig.Consumer) — importing handler inverts the layering of the /v1 stack (cmd/ctxd wires handler.ConsumerAuthFromContext in; design/04 §4.6, F-W9)"
             - pkg: "github.com/GottZ/ctx/internal/store$"
               desc: "internal/federation is pure policy over the request — no database: the consumer row arrives as auth.ConsumerAuth, the learned instances as a map (design/04 §4.5–§4.7, F-W9)"
+
+        # internal/keyquota (W06-10, design/06 §4.2): the per-consumer meter
+        # of the model API is a leaf by design — it imports neither config
+        # (config-layering refuses that already) nor handler nor a database:
+        # the limits arrive per call from the hot gateway.* keys, the subject
+        # from the model-key door, and cmd/ctxd adapts it to the /v1 Limiter
+        # hook. The one ctx import is promptguard, the house rune-to-token
+        # estimate. Tests are exempt (the op pin reads llmlog's vocabulary).
+        keyquota-leaf:
+          files:
+            - "**/go/internal/keyquota/**"
+            - "!$test"
+          allow:
+            - "$gostd"
+            - "github.com/GottZ/ctx/internal/promptguard$"
 
         # evalscore stays TOOLING (design/06 §4.7, masterplan K18 + A-15).
         # internal/evalscore is the measurement vocabulary of the gold bench —

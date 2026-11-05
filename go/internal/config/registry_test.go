@@ -168,6 +168,20 @@ func TestRegistryStrictSet(t *testing.T) {
 		"gateway.consumer_list_max_limit":  true,
 		"gateway.consumer_chain_max":       true,
 		"gateway.consumer_audit_trail_max": true,
+		// W06-10 (design/06 §4.2, §4.11, A-E2): the per-consumer meter's
+		// limits and its two reservation knobs — enforcement ceilings like the
+		// door's limits above; a typo'd limit silently falling back to the
+		// default would hide the bound the operator meant to set, so each
+		// aborts loudly. The ratio is a float and strict all the same: it is
+		// the urgent lane's guaranteed share, not a cadence.
+		"gateway.chat_rpm_default":    true,
+		"gateway.chat_tpm_default":    true,
+		"gateway.embed_rpm_default":   true,
+		"gateway.embed_tpm_default":   true,
+		"gateway.rerank_rpm_default":  true,
+		"gateway.rerank_tpm_default":  true,
+		"gateway.tpm_reserve_default": true,
+		"gateway.xu_reserve_ratio":    true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.
