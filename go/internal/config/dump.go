@@ -96,6 +96,11 @@ func renderField(e entry, v reflect.Value, surface Surface) any {
 			return ScopeFloor{}
 		}
 		return val // JSON object; empty default renders as {}
+	case RoleList:
+		// Never nil, so the empty list renders as [] (not null) in the boot
+		// record and the settings API; a copy, so no rendering shares the
+		// snapshot's or the registry default's backing array.
+		return append([]string{}, val...)
 	default:
 		return val // string, int, float64, bool, []string render natively
 	}

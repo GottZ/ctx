@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -746,7 +747,7 @@ func WalkChain(ctx context.Context, chain []backends.Backend, role string, acq A
 			report(b.ID, class, retryAfterOf(err))
 		}
 		slog.Warn("llm: gateway attempt failed", "role", role, "backend", b.Name,
-			"attempt", len(attempts), "class", class.String(), "committed", committed, "error", err)
+			"attempt", len(attempts), "class", class.String(), "committed", committed, "error", logSafeError(err))
 		if ctx.Err() != nil || committed || !class.Next() {
 			return nil, attempts, lastErr
 		}
@@ -765,6 +766,20 @@ func WalkChain(ctx context.Context, chain []backends.Backend, role string, acq A
 		return nil, attempts, fmt.Errorf("llm: no chain backend serves role %q", role)
 	}
 	return nil, attempts, fmt.Errorf("llm: chain exhausted for role %q: %w", role, lastErr)
+}
+
+// logSafeError is the log form of a gateway attempt error (design/02 B20):
+// a status error's body can echo the prompt of an external caller
+// (httpx.StatusError.Error() carries up to 1 KiB of it), so the line names
+// the status and the body's length and hash — enough to correlate, never the
+// body. Every other error is its own text (transport, decode, deadline).
+func logSafeError(err error) string {
+	var se *httpx.StatusError
+	if !errors.As(err, &se) {
+		return err.Error()
+	}
+	sum := sha256.Sum256([]byte(se.Body))
+	return fmt.Sprintf("upstream status %d (body %d bytes, sha256 %x)", se.Code, len(se.Body), sum[:8])
 }
 
 // acquireFor leases one attempt: First for the walk's first acquire, Next

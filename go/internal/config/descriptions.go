@@ -271,6 +271,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.tenant_alias_ceiling.embedding_max_inputs": "Ceiling of a tenant alias's embedding max_inputs policy",
 	"gateway.tenant_alias_ceiling.rerank_max_documents": "Ceiling of a tenant alias's rerank max_documents policy",
 	"gateway.tenant_alias_ceiling.tools_max_count":      "Ceiling of a tenant alias's tools count policy; 0 = tenant aliases offer no tools",
+	"gateway.exportable_roles":                          "Comma-separated pool roles whose operator rows (_global or unscoped backends) a tenant alias's chain may reach; empty (default) = a tenant alias reaches only its own tenant's rows; _global aliases are not filtered",
 	"gateway.relay_upstream_4xx_messages":               "Relay sanitized upstream 4xx error texts to gateway clients; off (default) clients see only ctx's own texts",
 	"gateway.retry_after_jitter":                        "Jitter of gateway saturation hints: retry-after-ms = hint x U[1, 1 + value]; range [0, 1]",
 	// W01-6: the model-key door's limits (design/01 §4.2, §4.9).

@@ -117,6 +117,22 @@ func (s *Snapshot) Generation() uint64 { return s.gen }
 // included, ordered by scope and name.
 func (s *Snapshot) Aliases() []Alias { return append([]Alias(nil), s.aliases...) }
 
+// Shadowed returns the _global alias a tenant alias of the same name shadows
+// — by presence, enabled or not, valid or not: its sensitivity stays the
+// floor of the shadow at request time (design/02 §4.4.2, W02-04 handover 2:
+// a psql edit can bypass the write rule, the request does not). nil
+// snapshot or no _global alias of that name ⇒ false.
+func (s *Snapshot) Shadowed(name string) (Alias, bool) {
+	if s == nil {
+		return Alias{}, false
+	}
+	i, ok := s.global[name]
+	if !ok {
+		return Alias{}, false
+	}
+	return s.aliases[i], true
+}
+
 // winner is the alias that decides name for tenantScope: a visible tenant
 // alias when one exists — enabled or not, valid or not (shadowing is decided
 // by presence) — else the _global one.

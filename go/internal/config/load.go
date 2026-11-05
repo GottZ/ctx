@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -84,6 +85,8 @@ func parserFor(t reflect.Type) parser {
 		return parseLocationValue
 	case typScopes:
 		return parseScopesValue
+	case typRoles:
+		return parseRoleListValue
 	case typSensitivity:
 		return parseSensitivityValue
 	case typScopeFloor:
@@ -204,6 +207,37 @@ func parseScopesValue(raw string, def any) (any, error) {
 	return result, nil
 }
 
+// roleNameRE is the pool-role rule of the model aliases: the CHECK
+// ck_model_aliases_role of migration 162, which handler/model_alias_manage.go
+// mirrors as modelAliasRoleRE. A role list names alias roles, so a part this
+// rule refuses could never match one. config cannot import the handler (the
+// handler imports config); TestRoleNameRuleIsTheAliasRoleCheck pins the
+// pattern to the migration instead.
+var roleNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9:_-]{0,63}$`)
+
+// parseRoleListValue parses a RoleList. The empty list is a value: "" (or
+// only blanks and commas) yields an empty, non-nil list — the difference to
+// parseScopesValue. Parts are comma-split and trimmed, empty parts drop out
+// (the scopes rule), a repeated role keeps its first position: the list is a
+// set, and refusing a harmless repeat would cost a tolerant key its whole
+// value (WARN + default). Every part must pass roleNameRE; one invalid part
+// refuses the whole value.
+func parseRoleListValue(raw string, _ any) (any, error) {
+	parts := strings.Split(raw, ",")
+	out := make(RoleList, 0, len(parts))
+	for _, p := range parts {
+		role := strings.TrimSpace(p)
+		if role == "" || slices.Contains(out, role) {
+			continue
+		}
+		if !roleNameRE.MatchString(role) {
+			return nil, fmt.Errorf("invalid role %q (want a pool role: 1-64 characters of [a-z0-9:_-], starting with a letter or digit)", role)
+		}
+		out = append(out, role)
+	}
+	return out, nil
+}
+
 // cooldownUnitHours maps the domain duration suffixes to hours. Deliberately
 // NOT Go's time.ParseDuration: that uses m=minutes / s=seconds (meaningless
 // for re-dream intervals, and m=minutes is a months trap). Here the units are
@@ -277,6 +311,9 @@ func fromSources(lookup func(key string) (string, bool)) (*Config, []Issue) {
 			// Fresh slice per config generation — snapshots never share
 			// mutable backing arrays (immutability convention).
 			val = slices.Clone(s)
+		}
+		if r, isRoles := val.(RoleList); isRoles {
+			val = slices.Clone(r) // same rule for the role lists
 		}
 		rv.FieldByIndex(e.path).Set(reflect.ValueOf(val))
 		c.sources[e.Key] = src

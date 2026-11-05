@@ -1,0 +1,15 @@
+package probe
+
+// census-want: 1
+// A lease-taking wire function, but called outside any walk attempt.
+
+import "github.com/GottZ/ctx/internal/llm"
+
+func (c *call) attempt(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration) error {
+	_, err := llm.ChatRawStream(runCtx, *b, nil, t, 0, nil)
+	return err
+}
+
+func (c *call) serve(ctx context.Context, b *backends.Backend) {
+	_ = c.attempt(ctx, b, nil, time.Second)
+}

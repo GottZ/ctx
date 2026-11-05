@@ -26,6 +26,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -1180,6 +1181,14 @@ func (f ScopeFloor) Apply(s backends.Sensitivity, scope string) backends.Sensiti
 	}
 	return s
 }
+
+// RoleList is the registry list of pool roles (parser parseRoleListValue,
+// wire type "roles"): comma-separated in env and settings, and — unlike the
+// scopes list ([]string), which refuses an empty value and falls back to its
+// default — the empty list is a value, so a key can default to empty and a
+// settings write can put it back to empty. Loader builds a fresh slice per
+// generation; consumers are read-only (immutability convention above).
+type RoleList []string
 
 // PoolConfig holds the per-tenant POOL policy: the F3 trust-gating surface it
 // was born as, plus the blob write budget B2 added to it (settings-only, no env
@@ -2567,6 +2576,14 @@ type GatewayConfig struct {
 	MaxOutputTokensCeiling int `key:"gateway.max_output_tokens_ceiling" env:"CTX_GATEWAY_MAX_OUTPUT_TOKENS_CEILING" default:"32768" mut:"hot" parse:"strict" tenancy:"global-only"`
 
 	TenantAliasCeiling GatewayTenantAliasCeiling
+	// ExportableRoles are the roles whose operator rows (_global or unscoped
+	// backends) a TENANT alias's chain may reach — the export filter of
+	// design/02 §4.4.2, §4.4.3 no. 3 (Finding 8b): for a tenant alias whose
+	// role is not listed the chain drops every such row, so a tenant-admin
+	// cannot reach an operator row (openrouter with the operator's key, say)
+	// the server admin has not exported. Default empty: a tenant alias
+	// reaches only its own tenant's rows. _global aliases are not filtered.
+	ExportableRoles RoleList `key:"gateway.exportable_roles" env:"CTX_GATEWAY_EXPORTABLE_ROLES" default:"" mut:"hot" tenancy:"global-only"`
 
 	// RelayUpstream4xxMessages: off (default, fail-closed) a client sees only
 	// ctx's own error texts; on, a sanitized upstream 4xx text (E-02-5).
@@ -2886,6 +2903,7 @@ func (c *Config) GatewaySettings() oai.Settings {
 			RerankMaxDocuments: g.TenantAliasCeiling.RerankMaxDocuments,
 			ToolsMaxCount:      g.TenantAliasCeiling.ToolsMaxCount,
 		},
+		ExportableRoles: slices.Clone([]string(g.ExportableRoles)),
 	}
 }
 

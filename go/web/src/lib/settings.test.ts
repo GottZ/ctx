@@ -29,7 +29,7 @@ describe('widgetFor', () => {
     expect(widgetFor('float')).toBe('number')
     expect(widgetFor('protocol')).toBe('select')
     expect(widgetFor('think')).toBe('select')
-    for (const t of ['string', 'seconds', 'hours', 'timezone', 'scopes']) {
+    for (const t of ['string', 'seconds', 'hours', 'timezone', 'scopes', 'roles']) {
       expect(widgetFor(t)).toBe('text')
     }
   })
@@ -115,6 +115,14 @@ describe('parseDraft', () => {
   it('rejects empty drafts toward the reset affordance', () => {
     const r = parseDraft(intView, '  ')
     expect(r.ok).toBe(false)
+  })
+
+  it('sends the empty role list as a value (gateway.exportable_roles)', () => {
+    const roles = view({ key: 'gateway.exportable_roles', type: 'roles' })
+    expect(parseDraft(roles, '  ')).toEqual({ ok: true, value: '' })
+    expect(parseDraft(roles, 'chat,embed')).toEqual({ ok: true, value: 'chat,embed' })
+    expect(draftFor(view({ key: 'gateway.exportable_roles', type: 'roles', value: [] }))).toBe('')
+    expect(formatValue([])).toBe('(empty)')
   })
 
   it('types the scalar for the PUT body', () => {

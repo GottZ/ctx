@@ -485,7 +485,7 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// 404 before any credential is read. Mounted before the SPA fallback; the
 	// group's own catch-alls keep /v1/* out of it.
 	gateway := newModelGateway(pool, cfgStore)
-	v1 := v1Routes(gatewayDeps(pool, scheduler.ModelAliasRegistry()))
+	v1 := v1Routes(gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher))
 	if wrapRoutes != nil {
 		v1 = wrapRoutes(v1)
 	}

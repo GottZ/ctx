@@ -73,7 +73,10 @@ var pipelineMarkers = []string{"Pipeline:", "newChainEntry(", "newDreamEntry("}
 // confirmRecurrenceDecide). Same pipeline names, own prompt builders, each
 // wired to promptguard (Wrap/GuardLine/GuardText/Rule) in its own file, so the
 // per-file heuristic sees them as guarded without an exception entry.
-const wantPipelineSites = 16
+//
+// 17 since W02-07: gateway-chat, the one llmlog row of POST
+// /v1/chat/completions (internal/oai/chat.go, value the llmlog constant).
+const wantPipelineSites = 17
 
 // noPromptGuard is the CLOSED list of pipelines whose site carries no guard
 // and needs none. One justification line each; a reason that does not survive
@@ -89,6 +92,13 @@ var noPromptGuard = map[string]string{
 	// a scoring API without a chat template: it returns a number, never a turn,
 	// so no role switch is constructible from the document text.
 	"query-rerank": "internal/handler/query.go",
+
+	// The model API relays an external caller's OWN messages (allowlist-
+	// checked, values verbatim — design/02 §4.5) to a model and its answer
+	// back to the same caller: ctx builds no prompt, wraps no foreign text
+	// into a template of its own and acts on nothing the model says, so
+	// there is no ctx role to escalate into (W02-07).
+	"gateway-chat": "internal/oai/chat.go",
 }
 
 // guardedElsewhere is the CLOSED list of Pipeline: sites that sit in a
@@ -129,6 +139,8 @@ type constPipelineSite struct {
 var constPipelineSites = map[string]constPipelineSite{
 	"internal/events:distillPipeline": {PipelineDistill, "internal/events/distill.go"},
 	"internal/topiclabel:Pipeline":    {"cluster-label", "internal/topiclabel/topiclabel.go"},
+	// W02-07: the chat route names its pipeline by the llmlog constant.
+	"internal/oai:chatPipeline": {"gateway-chat", "internal/oai/chat.go"},
 }
 
 // passthroughPipelineIdents is the counter-list: Pipeline: values that name NO
@@ -213,7 +225,7 @@ func TestPromptPipelineCallSitesAreGuarded(t *testing.T) {
 
 	// The closed lists do not grow, shrink or drift. Compared against literals
 	// on purpose: reading the expectation out of the maps would assert nothing.
-	if got, want := slices.Sorted(maps.Keys(noPromptGuard)), []string{"query-rerank", "query-temporal", "query-translate"}; !slices.Equal(got, want) {
+	if got, want := slices.Sorted(maps.Keys(noPromptGuard)), []string{"gateway-chat", "query-rerank", "query-temporal", "query-translate"}; !slices.Equal(got, want) {
 		t.Errorf("noPromptGuard list changed: got %v, want %v — a new unguarded pipeline needs wiring (H2-H8 pattern), not an exception", got, want)
 	}
 	if got, want := slices.Sorted(maps.Keys(guardedElsewhere)), []string{"web-chat"}; !slices.Equal(got, want) {

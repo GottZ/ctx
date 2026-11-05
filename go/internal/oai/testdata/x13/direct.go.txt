@@ -1,0 +1,10 @@
+package probe
+
+// census-want: 1
+// A handler that calls the wire site itself: no lease, no walk.
+
+import "github.com/GottZ/ctx/internal/llm"
+
+func handle(ctx context.Context, b backends.Backend, body []byte) {
+	_, _ = llm.ChatRaw(ctx, b, body, time.Second, 0)
+}

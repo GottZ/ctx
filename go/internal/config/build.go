@@ -176,6 +176,9 @@ func buildCandidate(adm []admittedOverride) (*Config, []Issue) {
 			// generation.
 			val = slices.Clone(s)
 		}
+		if r, isRoles := val.(RoleList); isRoles {
+			val = slices.Clone(r)
+		}
 		rv.FieldByIndex(a.e.path).Set(reflect.ValueOf(val))
 		src := a.source
 		if src == "" {

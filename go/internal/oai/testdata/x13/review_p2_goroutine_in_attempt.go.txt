@@ -1,0 +1,19 @@
+// census-want: 1
+// Fremd-Review 1 F-6 probe.
+package oai
+
+import (
+	"context"
+	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/llm"
+)
+
+func goroutineInAttempt(ctx context.Context) {
+	llm.WalkChain(ctx, nil, "chat", nil, nil, llm.WalkRules{}, func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+		go llm.ChatRaw(context.Background(), *b, nil, timeout, 0)
+		return dispatch.Usage{}, false, nil
+	})
+}

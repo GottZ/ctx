@@ -81,6 +81,17 @@ const (
 	// or rerank request may fan out into.
 	MaxSubBlocks = 8
 
+	// The chat defaults of an unset key (design/02 §3.2 column "Default";
+	// the W02-03 handover: named next to the ceilings, read by the chat
+	// endpoint, W02-07). Data of the design, not policy knobs: an operator
+	// sets the alias key instead.
+	DefaultToolsMaxCount          = 64
+	DefaultToolsMaxBytes          = 256 << 10
+	DefaultResponseFormatMaxBytes = 64 << 10
+	DefaultLogitBiasMaxEntries    = 64
+	DefaultStopMaxEntries         = 4
+	DefaultVisionMaxBytes         = 4 << 20
+
 	// The defaults the sub-block invariant assumes for an unset key.
 	DefaultEmbeddingMaxInputs = 32
 	DefaultEmbeddingSubBatch  = 32
