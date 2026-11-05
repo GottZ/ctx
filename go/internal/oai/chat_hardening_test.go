@@ -19,24 +19,33 @@ import (
 )
 
 // TestShutdownBeforePlanRefusalIsNoEmpty200 (F-1): the server stops before
-// the planner refuses (service_tier flex ⇒ the bulk lane, not offered yet).
-// The writer stays silent on the canceled request context — the route must
-// answer the shutdown itself: 503 internal_error with x-should-retry true,
-// never an empty 200. Control: the same shutdown without the refusal.
+// the planner refuses (a chain whose host the dispatcher does not offer
+// externally ⇒ ErrChainNotOffered — a refusal that holds before and after
+// A03-W9, Fremd-Review 2 H-6). The writer stays silent on the canceled
+// request context — the route must answer the shutdown itself: 503
+// internal_error with x-should-retry true, never an empty 200, and never
+// the refusal's model_unavailable (the lifecycle ended first). Control: the
+// same shutdown without the refusal.
 func TestShutdownBeforePlanRefusalIsNoEmpty200(t *testing.T) {
-	u := newUpstream(t, answerSGLang)
-	life, cancel := context.WithCancel(context.Background())
-	cancel()
-	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 2, 1, func(r *chatRig) { r.deps.Lifecycle = life })
-	for _, body := range []string{chatBody("chat", `"service_tier":"flex"`), chatBody("chat")} {
-		a := rig.post(t, body)
+	for _, tc := range []struct {
+		name string
+		prep func(*chatRig)
+	}{{"plan refusal", notOffered}, {"control", func(*chatRig) {}}} {
+		u := newUpstream(t, answerSGLang)
+		life, cancel := context.WithCancel(context.Background())
+		cancel()
+		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 2, 1, func(r *chatRig) {
+			tc.prep(r)
+			r.deps.Lifecycle = life
+		})
+		a := rig.post(t, chatBody("chat"))
 		code, _, _ := a.envelope(t)
 		if a.status != http.StatusServiceUnavailable || code != oai.CodeInternalError || a.header.Get("x-should-retry") != "true" {
-			t.Errorf("%s: %d %q (x-should-retry %q), want 503 internal_error, x-should-retry true", body, a.status, a.body, a.header.Get("x-should-retry"))
+			t.Errorf("%s: %d %q (x-should-retry %q), want 503 internal_error, x-should-retry true", tc.name, a.status, a.body, a.header.Get("x-should-retry"))
 		}
-	}
-	if n := u.hits.Load(); n != 0 {
-		t.Errorf("wire hits = %d, want 0", n)
+		if n := u.hits.Load(); n != 0 {
+			t.Errorf("%s: wire hits = %d, want 0", tc.name, n)
+		}
 	}
 }
 

@@ -127,6 +127,14 @@ func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.Consum
 	c.stops = append(c.stops, func() bool { cancelDl(); return true })
 	if d.Lifecycle != nil {
 		c.stops = append(c.stops, context.AfterFunc(d.Lifecycle, func() { cancel(errShutdown) }))
+		// AfterFunc runs f in its own goroutine even when the lifecycle has
+		// already ended: a request that enters during the shutdown would
+		// otherwise race that goroutine through plan, acquire and wire
+		// (Fremd-Review 2 F2-1). Synchronously, so the run is ended before
+		// serve looks at it.
+		if d.Lifecycle.Err() != nil {
+			cancel(errShutdown)
+		}
 	}
 	c.r = r.WithContext(ctx)
 	id, err := uuid.NewV7()
@@ -161,6 +169,12 @@ func (c *chatCall) internal(msg string, args ...any) {
 }
 
 func (c *chatCall) serve() {
+	// A run that ended before the request did anything (the lifecycle was
+	// already done at entry) is answered at once: no parse, no grant read
+	// on a canceled context, no meter reservation (H-1).
+	if ended, _ := c.verdict(); ended {
+		return
+	}
 	body, ok := c.readBody()
 	if !ok {
 		return
@@ -249,6 +263,11 @@ func (c *chatCall) resolve(name string) bool {
 	a, found, err := c.d.Resolve(c.ctx, c.ca, name)
 	switch {
 	case err != nil:
+		// A grant read the shutdown or the watcher ended is their answer
+		// (503 with x-should-retry true, resp. 404), not a read fault.
+		if ended, _ := c.verdict(); ended {
+			return false
+		}
 		grantReadFailed(c.w, c.r, err)
 		return false
 	case !found:
@@ -376,6 +395,13 @@ type walkState struct {
 
 // walk runs the planner and the chain walk, then answers.
 func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
+	// A run ended while the request was parsed and its chain built never
+	// reaches the planner, an acquire or the wire; the reservation the
+	// limiter just took ends with Abort (no wire call, design/06 §4.2).
+	if ended, _ := c.verdict(); ended {
+		c.endLimit(func(l LimitReservation) { l.Abort() })
+		return
+	}
 	if c.d.Planner == nil {
 		c.endLimit(func(l LimitReservation) { l.Abort() })
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
@@ -467,6 +493,19 @@ func attemptRequestID(id string, n int) string { return fmt.Sprintf("%s-a%d", id
 // class assert); waited is the time the request queued.
 func (c *chatCall) admissionRefused(err error, waited time.Duration) {
 	reason := c.d.Planner.WriteAdmissionError(c.ctx, c.w, err)
+	if reason == "" {
+		// The writer wrote nothing: it saw the run context canceled. The
+		// route answers its own cause (shutdown 503, watcher 404) — the
+		// cause can land after the route's own verdict() and before the
+		// writer's context check (Fremd-Review 2 F2-1). Only a gone client
+		// stays unanswered; anything else is a defect and gets the 503.
+		if ended, code := c.verdict(); ended {
+			reason = code
+		} else {
+			c.internal("the admission writer wrote nothing on a live request", "error", err)
+			reason = CodeInternalError
+		}
+	}
 	c.rec.Reason = reason
 	c.endLimit(func(l LimitReservation) { l.Reject(reason, waited) })
 }
@@ -544,6 +583,13 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 // ended reports one of them, code is what was written ("" when the client
 // is gone and nothing could be).
 func (c *chatCall) verdict() (ended bool, code string) {
+	// The lifecycle is read here too, synchronously: AfterFunc delivers its
+	// cause from a goroutine of its own, so a shutdown that landed after the
+	// entry need not be on the run yet when the route asks (Fremd-Review 3
+	// R3-1). A cause already set (client gone, watcher) stays the cause.
+	if c.d.Lifecycle != nil && c.d.Lifecycle.Err() != nil {
+		c.cancel(errShutdown)
+	}
 	cause := context.Cause(c.ctx)
 	switch {
 	case errors.Is(cause, errGatewayOff):
@@ -573,6 +619,9 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 		_, code := c.verdict()
 		return chatOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: backends.ClassCanceled.String(), Code: code}}
 	case err != nil:
+		if ended, code := c.verdict(); ended {
+			return chatOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: backends.ClassCanceled.String(), Code: code}}
+		}
 		grantReadFailed(c.w, c.r, err)
 		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Code: CodeInternalError}}
 	}

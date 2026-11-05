@@ -143,15 +143,17 @@ func (l *v1ChatLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Al
 }
 
 // v1ChatFixture is the production router over a throwaway database: one
-// _global chat alias, an urgent-lane consumer and a bulk-lane consumer,
-// both with all models, and the fake engines as the pool's chat rows.
+// _global chat alias, an urgent-lane consumer with all models, and the fake
+// engines as the pool's chat rows. disp is the router's dispatcher (a test
+// withdraws the external offer of its targets for a planner refusal).
 type v1ChatFixture struct {
 	router                *chi.Mux
 	seed, pool            *pgxpool.Pool
 	limiter               *v1ChatLimiter
-	urgentKey, bulkKey    string
+	disp                  *dispatch.Dispatcher
+	policy                dispatch.Policy
+	urgentKey             string
 	urgentID, urgentKeyID string
-	bulkID                string
 }
 
 func newV1ChatFixture(t *testing.T, rows []backends.Backend) *v1ChatFixture {
@@ -178,12 +180,6 @@ func newV1ChatFixture(t *testing.T, rows []backends.Backend) *v1ChatFixture {
 		t.Fatalf("urgent consumer: %v", err)
 	}
 	f.urgentKey, f.urgentID, f.urgentKeyID = ukey.Plaintext(), uc.ID, uk.ID
-	bc, _, bkey, err := store.CreateConsumerWithKey(ctx, seed,
-		store.ModelConsumerSpec{TenantID: store.DefaultTenantID, Label: "w02-07-bulk", AllModels: true, AdmissionLane: handler.LaneBulk}, nil, stamp)
-	if err != nil {
-		t.Fatalf("bulk consumer: %v", err)
-	}
-	f.bulkKey, f.bulkID = bkey.Plaintext(), bc.ID
 
 	f.pool, err = pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -208,6 +204,7 @@ func newV1ChatFixture(t *testing.T, rows []backends.Backend) *v1ChatFixture {
 		pol.Targets[b.Host] = dispatch.TargetPolicy{Slots: 4, InternalReserved: 1}
 	}
 	disp.UpdatePolicy(pol)
+	f.disp, f.policy = disp, pol
 	scheduler.SetDispatcher(disp)
 	ident := fedhop.NewIdentity("00000000-0000-4000-8000-000000000207", bytes.Repeat([]byte{0x27}, 32))
 	sctx := fedhop.WithIdentity(ctx, ident)
@@ -391,17 +388,20 @@ func TestV1ChatFailoverOneRow(t *testing.T) {
 	}
 }
 
-// TestV1ChatPlannerRejectionNoRow is G17's refusal: a bulk-lane consumer
-// (no bulk class before A03-W9) is refused by the planner with 503
-// model_unavailable before any wire attempt ⇒ no row; the engine is not
-// reached. The urgent consumer's request after it writes its one row — the
-// control that the writer is live in the same fixture.
+// TestV1ChatPlannerRejectionNoRow is G17's refusal: the dispatcher offers
+// the chain's target no external share (its policy withdrawn) ⇒ the planner
+// refuses with ErrChainNotOffered, 503 model_unavailable, before any wire
+// attempt ⇒ no row; the engine is not reached. A refusal that holds before
+// and after A03-W9 (Fremd-Review 2 H-6: the bulk lane is served there). The
+// request after the offer is restored writes its one row — the control that
+// the writer is live in the same fixture.
 func TestV1ChatPlannerRejectionNoRow(t *testing.T) {
 	eng := newV1ChatEngine(t, http.StatusOK)
 	f := newV1ChatFixture(t, []backends.Backend{eng.row("primary", 1)})
-	a := f.post(t, f.bulkKey, v1ChatBody())
+	f.disp.UpdatePolicy(dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{}})
+	a := f.post(t, f.urgentKey, v1ChatBody())
 	if a.status != http.StatusServiceUnavailable || a.code() != oai.CodeModelUnavailable {
-		t.Fatalf("bulk consumer: status %d code %q (%s), want 503 %s", a.status, a.code(), a.body, oai.CodeModelUnavailable)
+		t.Fatalf("target not offered: status %d code %q (%s), want 503 %s", a.status, a.code(), a.body, oai.CodeModelUnavailable)
 	}
 	if n := eng.hits.Load(); n != 0 {
 		t.Fatalf("the engine saw %d request(s) for a refused request", n)
@@ -409,6 +409,7 @@ func TestV1ChatPlannerRejectionNoRow(t *testing.T) {
 	if rows := f.rows(t); len(rows) != 0 {
 		t.Fatalf("%d gateway-chat rows after a planner refusal, want 0", len(rows))
 	}
+	f.disp.UpdatePolicy(f.policy)
 	if a := f.post(t, f.urgentKey, v1ChatBody()); a.status != http.StatusOK {
 		t.Fatalf("control: status %d (%s), want 200", a.status, a.body)
 	}

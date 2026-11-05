@@ -169,6 +169,9 @@ func parseTopLevel(body []byte) (*chatRequest, *paramError) {
 	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
 		return nil, &paramError{CodeInvalidJSON, "", "The request body is not a valid JSON object."}
 	}
+	if perr := uniqueMembers("", body, raw); perr != nil {
+		return nil, perr // H-2: the checked value is the sent value
+	}
 	req := &chatRequest{raw: raw, pass: make(map[string]json.RawMessage, len(raw))}
 	keys := make([]string, 0, len(raw))
 	for k := range raw {
@@ -386,25 +389,33 @@ func checkPassCaps(pass map[string]json.RawMessage, l policyLimits) *paramError 
 		if len(v) > l.toolsMaxBytes {
 			return unsupportedValue("tools", "the tool definitions exceed the size limit of this model")
 		}
-		if n := arrayLen(v); n > l.toolsMaxCount {
-			return unsupportedValue("tools", fmt.Sprintf("at most %d tools are allowed for this model", l.toolsMaxCount))
+		if perr := checkTools(v, l.toolsMaxCount); perr != nil {
+			return perr
 		}
 	}
 	if v, ok := pass["response_format"]; ok {
 		if len(v) > l.responseFormatMaxBytes {
 			return unsupportedValue("response_format", "the response format exceeds the size limit of this model")
 		}
-		var rf struct {
-			Type string `json:"type"`
+		if perr := checkResponseFormat(v); perr != nil {
+			return perr
 		}
-		if err := json.Unmarshal(v, &rf); err != nil || !responseFormatTypes[rf.Type] {
-			return unsupportedValue("response_format.type", "must be text, json_object or json_schema")
+	}
+	if v, ok := pass["tool_choice"]; ok {
+		var vals [2][]byte
+		if _, perr := checkHull("tool_choice", -1, v, toolHullKeys, vals[:]); perr != nil {
+			return perr
 		}
 	}
 	if v, ok := pass["logit_bias"]; ok {
 		var m map[string]json.RawMessage
 		if err := json.Unmarshal(v, &m); err != nil {
 			return invalidType("logit_bias", "an object")
+		}
+		// A repeated token id would count once and reach the wire as
+		// often as sent: the entry cap counts the map (H-2).
+		if perr := uniqueMembers("logit_bias", v, m); perr != nil {
+			return perr
 		}
 		if len(m) > l.logitBiasMaxEntries {
 			return unsupportedValue("logit_bias", fmt.Sprintf("at most %d entries are allowed", l.logitBiasMaxEntries))
@@ -423,6 +434,54 @@ func checkPassCaps(pass map[string]json.RawMessage, l policyLimits) *paramError 
 		n, err := strconv.Atoi(string(bytes.TrimSpace(v)))
 		if err != nil || n < 0 || n > topLogprobsMax {
 			return unsupportedValue("top_logprobs", fmt.Sprintf("must be between 0 and %d", topLogprobsMax))
+		}
+	}
+	return nil
+}
+
+// The known keys of the checked hulls whose other keys pass verbatim (H-2):
+// a tool and tool_choice ({type, function}), response_format and its
+// json_schema hull. Their free payloads (function, schema) keep their keys.
+var (
+	toolHullKeys           = []string{"type", "function"}
+	responseFormatKeys     = []string{"type", "json_schema"}
+	responseFormatJSONKeys = []string{"name", "description", "schema", "strict"}
+)
+
+// checkTools counts the tools against the cap and checks every tool hull.
+func checkTools(v json.RawMessage, maxCount int) *paramError {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(v, &arr); err != nil {
+		return nil // the PASS type check let an array through; nothing to count
+	}
+	if len(arr) > maxCount {
+		return unsupportedValue("tools", fmt.Sprintf("at most %d tools are allowed for this model", maxCount))
+	}
+	var vals [2][]byte
+	for i, t := range arr {
+		if _, perr := checkHull("tools", i, t, toolHullKeys, vals[:]); perr != nil {
+			return perr
+		}
+	}
+	return nil
+}
+
+// checkResponseFormat reads response_format.type from the exact key "type"
+// (never a case-insensitive struct match) and checks the json_schema hull.
+func checkResponseFormat(v json.RawMessage) *paramError {
+	var vals [2][]byte // type, json_schema
+	isObject, perr := checkHull("response_format", -1, v, responseFormatKeys, vals[:])
+	if perr != nil {
+		return perr
+	}
+	var typ string
+	if !isObject || vals[0] == nil || json.Unmarshal(vals[0], &typ) != nil || !responseFormatTypes[typ] {
+		return unsupportedValue("response_format.type", "must be text, json_object or json_schema")
+	}
+	if vals[1] != nil {
+		var hull [4][]byte
+		if _, perr := checkHull("response_format.json_schema", -1, vals[1], responseFormatJSONKeys, hull[:]); perr != nil {
+			return perr
 		}
 	}
 	return nil
@@ -477,6 +536,9 @@ func parseMessage(i int, raw json.RawMessage, l policyLimits) (json.RawMessage, 
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
 		return nil, nil, false, invalidType(at, "a message object")
+	}
+	if perr := uniqueMembers(at, raw, m); perr != nil {
+		return nil, nil, false, perr // an unchanged message goes upstream byte for byte
 	}
 	var dropped []string
 	keys := make([]string, 0, len(m))
@@ -580,6 +642,9 @@ func checkPart(at string, raw json.RawMessage, l policyLimits) *paramError {
 	if err := json.Unmarshal(raw, &p); err != nil || p == nil {
 		return invalidType(at, "a content part object")
 	}
+	if perr := uniqueMembers(at, raw, p); perr != nil {
+		return perr
+	}
 	var typ string
 	if err := json.Unmarshal(p["type"], &typ); err != nil {
 		return missingParameter(at + ".type")
@@ -617,6 +682,9 @@ func checkImageURL(at string, raw json.RawMessage, maxBytes int) *paramError {
 	var img map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &img); err != nil || img == nil {
 		return invalidType(at, "an object")
+	}
+	if perr := uniqueMembers(at, raw, img); perr != nil {
+		return perr // two urls: the checked one and the one an engine reads may differ (B18)
 	}
 	for k := range img {
 		if k != "url" && k != "detail" {
@@ -715,13 +783,4 @@ func kindName(k jsonKind) string {
 		}
 	}
 	return strings.Join(names, " or ")
-}
-
-// arrayLen counts the elements of a raw JSON array without decoding them.
-func arrayLen(v json.RawMessage) int {
-	var arr []json.RawMessage
-	if err := json.Unmarshal(v, &arr); err != nil {
-		return 0
-	}
-	return len(arr)
 }

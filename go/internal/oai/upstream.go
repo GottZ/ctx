@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -213,29 +214,45 @@ func upstreamMessage(body string) string {
 	return body
 }
 
-// The scrubbers of a relayed text (§4.10.1): URLs, IP addresses and
-// absolute paths go before the text reaches a client.
+// The scrubbers of a relayed text (§4.10.1): URLs, userinfo authorities,
+// IP addresses and absolute paths go before the text reaches a client.
+// userinfoPattern is user[:password]@host[:port] without a scheme, taken as
+// a whole — the host behind the @ too, a pool identity already replaced by
+// the alias or not (Fremd-Review 2 F2-6 H-7 2). ipv6Pattern starts at a
+// hex group or at a leading :: (::1, and the ::ffff: an IPv4-mapped address
+// leaves once ipv4Pattern took its dotted tail, H-7 3) and takes the zone
+// index (%eth0, %25eth0 in the URI form, H-7 1), the brackets and the port.
 var (
-	urlPattern   = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
-	ipv4Pattern  = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
-	ipv6Pattern  = regexp.MustCompile(`(?i)\[?\b(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}\b\]?(?::\d+)?`)
-	pathPattern  = regexp.MustCompile(`(?:^|[\s"'(=,:])(/[^\s"'),]+)`)
-	winPattern   = regexp.MustCompile(`\b[A-Za-z]:\\[^\s"']+`)
-	spacePattern = regexp.MustCompile(`\s+`)
+	urlPattern      = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
+	userinfoPattern = regexp.MustCompile(`[^\s"'<>()\[\]{},;=@]+@[^\s"'<>(){},;]*`)
+	ipv4Pattern     = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
+	ipv6Pattern     = regexp.MustCompile(`(?i)\[?(?:\b[0-9a-f]{1,4}|:)(?::[0-9a-f]{0,4}){1,8}(?:%[0-9a-z_.~-]+)?\]?(?::\d+)?`)
+	pathPattern     = regexp.MustCompile(`(?:^|[\s"'(=,:])(/[^\s"'),]+)`)
+	winPattern      = regexp.MustCompile(`\b[A-Za-z]:\\[^\s"']+`)
+	spacePattern    = regexp.MustCompile(`\s+`)
+	zonePattern     = regexp.MustCompile(`(?i)%(?:25)?[0-9a-z_.~-]+`)
 )
 
 // sanitizeUpstreamText makes an upstream 4xx text relayable (§4.10.1,
 // E-02-5): every identity string of the CURRENT pool snapshot (identities)
 // is replaced by the alias name in ONE pass — case-insensitive, longest
 // first, so the inserted alias is never rewritten again and a longer name
-// wins over its prefix — then URLs, IP addresses and absolute paths are
-// removed, whitespace is folded and the text is cut to relayTextMax bytes
-// on a rune boundary.
+// wins over its prefix — then URLs, userinfo authorities, IP addresses and
+// absolute paths are removed, whitespace is folded and the text is cut to
+// relayTextMax bytes on a rune boundary. Over-replacement is accepted,
+// under-replacement is not (H-7): an empty result falls back to ctx's own
+// text. Matching is on bytes after Unicode case folding; homoglyphs are not
+// folded (docs/security.md).
 func sanitizeUpstreamText(text, alias string, snap []backends.Backend) string {
 	if re := identityPattern(snap); re != nil {
 		text = re.ReplaceAllLiteralString(text, alias)
 	}
+	// A zone index outlives the replacement of an address that is itself an
+	// identity of a row ("fd00::17%25en0" ⇒ "<alias>%25en0"): every zone
+	// suffix goes (Fremd-Review 3 R3-3; over-replacement is accepted).
+	text = zonePattern.ReplaceAllString(text, "")
 	text = urlPattern.ReplaceAllString(text, "")
+	text = userinfoPattern.ReplaceAllString(text, "")
 	text = winPattern.ReplaceAllString(text, "")
 	text = pathPattern.ReplaceAllStringFunc(text, func(m string) string {
 		if i := strings.IndexByte(m, '/'); i >= 0 {
@@ -259,11 +276,20 @@ func sanitizeUpstreamText(text, alias string, snap []backends.Backend) string {
 // text. A mechanism bound of the replacement, not a policy.
 const shortIdentity = 3
 
+// modelCuts are the separators a model id is cut at for its prefixes
+// (Fremd-Review 2 F2-6 H-7 5): the - of a family, version or size segment,
+// the : of an Ollama or OpenRouter tag, the / of a namespace.
+const modelCuts = "-:/"
+
 // identities are the identity strings of a pool snapshot the relayed text
 // must not carry (§4.10.1): every row's name, its host with and without
 // scheme, with and without port, its model and every model_map model — each
 // also by its last path segment (meta-llama/Llama-3.3 ⇒ Llama-3.3) — and its
-// provider class.
+// provider class. A model also counts by every prefix of the full id and of
+// the basename that ends at a modelCuts separator and still holds one
+// (H-7 5: meta-llama, meta-llama/Llama-3.3-70B, Llama-3.3-70B, Llama-3.3); a
+// one-segment prefix (Llama, meta, the MODEL of MODEL-CANARY) is a word of
+// ordinary error text, not an identity of the row.
 func identities(snap []backends.Backend) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -274,10 +300,20 @@ func identities(snap []backends.Backend) []string {
 			out = append(out, s)
 		}
 	}
+	addPrefixes := func(m string) {
+		for i := 0; i < len(m); i++ {
+			if p := m[:i]; strings.IndexByte(modelCuts, m[i]) >= 0 && strings.ContainsAny(p, modelCuts) {
+				add(p)
+			}
+		}
+	}
 	addModel := func(m string) {
+		m = strings.TrimSpace(m)
 		add(m)
+		addPrefixes(m)
 		if i := strings.LastIndexByte(m, '/'); i >= 0 {
 			add(m[i+1:])
+			addPrefixes(m[i+1:])
 		}
 	}
 	for i := range snap {
@@ -300,14 +336,41 @@ func identities(snap []backends.Backend) []string {
 	return out
 }
 
+// foldKey is the canonical case fold of s for the sort of identityPattern:
+// every rune replaced by the smallest member of its unicode.SimpleFold
+// orbit — the folding (?i) matches by. strings.ToLower is not that fold
+// ("ſ" stays "ſ" but matches "s"), and a sort by it could put a prefix
+// before the identity it is a prefix of (Fremd-Review 3 R3-2: row "ſpark"
+// next to host "spark-gpu" left "ALIAS-gpu").
+func foldKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		m := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			m = min(m, f)
+		}
+		return m
+	}, s)
+}
+
 // identityPattern is one case-insensitive alternation over the identities,
 // longest first; short ones only as whole words. nil = nothing to replace.
+// The order is the reverse lexical order of the lower-cased strings: at one
+// position of the text only identities that are prefixes of one another
+// compete, and each comes before its own prefixes, so the longest still
+// wins — and the prefixes of one model id stay adjacent, so regexp/syntax
+// factors them into one branch. Sorted by length, the model prefixes of a
+// 20-row pool made the match about 50 times slower (Fremd-Review 2 F2-6
+// H-7 cost, BenchmarkSanitizeUpstreamText512).
 func identityPattern(snap []backends.Backend) *regexp.Regexp {
 	ids := identities(snap)
 	if len(ids) == 0 {
 		return nil
 	}
-	sort.SliceStable(ids, func(i, j int) bool { return len(ids[i]) > len(ids[j]) })
+	keys := make(map[string]string, len(ids))
+	for _, id := range ids {
+		keys[id] = foldKey(id)
+	}
+	sort.SliceStable(ids, func(i, j int) bool { return keys[ids[i]] > keys[ids[j]] })
 	alts := make([]string, len(ids))
 	for i, id := range ids {
 		alts[i] = regexp.QuoteMeta(id)

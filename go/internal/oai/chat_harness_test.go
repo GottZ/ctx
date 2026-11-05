@@ -124,6 +124,7 @@ type upstream struct {
 	answer  string
 	mu      sync.Mutex
 	bodies  []map[string]any
+	raws    [][]byte // the bodies as sent (a decoded map hides repeated keys)
 	headers []http.Header
 	hits    atomic.Int64
 	// respond, when set, answers instead of the shape (status, headers).
@@ -140,6 +141,7 @@ func newUpstream(t testing.TB, answer string) *upstream {
 		_ = json.Unmarshal(raw, &body)
 		u.mu.Lock()
 		u.bodies = append(u.bodies, body)
+		u.raws = append(u.raws, raw)
 		u.headers = append(u.headers, r.Header.Clone())
 		respond := u.respond
 		u.mu.Unlock()

@@ -62,8 +62,25 @@ func TestChainFederationFiltersByHopState(t *testing.T) {
 	if f := fed.Floor(context.Background()); f != backends.SensCredentials {
 		t.Errorf("floor without a policy = %q, want credentials (fail-closed default)", f)
 	}
-	if s := fed.Scan(backends.SensPublic, []byte(`{"messages":[{"role":"user","content":"password: hunter2-Xq9!vB7#mK2$"}]}`)); s != backends.SensCredentials {
-		t.Logf("scan of a password assignment = %q (the scanner decides; only a raise is pinned below)", s)
+	// The floor follows the request's policy, never a constant (Fremd-Review
+	// 2 F2-4 F4): a public policy is a public floor.
+	for _, req := range []backends.Sensitivity{backends.SensPublic, backends.SensPersonal} {
+		if f := fed.Floor(federation.WithPolicy(context.Background(), federation.Policy{Required: req})); f != req {
+			t.Errorf("floor under a %s policy = %q, want %s (PolicyFrom(ctx).Required)", req, f, req)
+		}
+	}
+	// The scan is federation.ScanRaise (Fremd-Review 2 F2-4 F5): a body the
+	// real scanner raises from public is raised by the binding too, a
+	// harmless one is not.
+	raising := []byte(`{"messages":[{"role":"user","content":"hi"}],"api_key":"sk-proj-ab12CD34ef56GH78ij90KL12mn34OP56qr78"}`)
+	if got := federation.ScanRaise(backends.SensPublic, raising); got != backends.SensCredentials {
+		t.Fatalf("fixture: federation.ScanRaise(public, %s) = %q, want credentials — the pin needs a body the scanner raises", raising, got)
+	}
+	if s := fed.Scan(backends.SensPublic, raising); s != backends.SensCredentials {
+		t.Errorf("scan of an api_key member from public = %q, want credentials (the binding is federation.ScanRaise)", s)
+	}
+	if s := fed.Scan(backends.SensPublic, []byte(`{"messages":[{"role":"user","content":"hello"}]}`)); s != backends.SensPublic {
+		t.Errorf("scan of a harmless body raised public to %q", s)
 	}
 	if s := fed.Scan(backends.SensCredentials, []byte(`{}`)); s != backends.SensCredentials {
 		t.Errorf("scan lowered credentials to %q", s)
