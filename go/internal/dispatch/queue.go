@@ -51,6 +51,11 @@ type waiter struct {
 	// the external queue (A03-W4, extFair.waiterEnter) — the pick reads it
 	// without a map lookup; nil in-house.
 	fair *fairConsumer
+	// fwBefore is the fair weight of the consumer's record before this
+	// waiter's push when the record was active then (0: it was not): a
+	// refusal predicted after the push writes it back (A03-W6 review 4
+	// FR4-2, predictAfterPushLocked).
+	fwBefore int
 }
 
 // classQueue is a per-principal wait queue of one target: per-bucket FIFOs

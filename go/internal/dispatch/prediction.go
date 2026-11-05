@@ -72,7 +72,10 @@ import (
 // can be overestimated and refused (fail-closed), a heavy tenant whose leases
 // hold much of E underestimated (fail-open, the wait timer bounds it); with
 // every held lease fresh and L_p50 above MaxWait_eff, r̂ ≈ L_p50 still refuses
-// at once (fail-closed). r̂ is a proxy, not an oracle, on both sides: one
+// at once (fail-closed): r̂ assumes every lease lasts L_p50 — it reads
+// neither the spread of the lease durations nor the earliest end among the
+// E held leases, so with widely spread durations a unit often frees well
+// before L_p50 and the acquire is refused all the same (review 4 FR4-4). r̂ is a proxy, not an oracle, on both sides: one
 // held lease past L_p50 (a long stream) makes the first round free, r̂ = 0,
 // however fresh the others are, and the fairness-first head of weight w > 1
 // waits only for the first freed unit although it needs w (fail-open by at
@@ -289,6 +292,9 @@ func (d *Dispatcher) enqueueExternalLocked(st *targetState, w *waiter, set Setti
 			return d.externalRejectLocked(st, w, ErrTargetSaturated, 0)
 		}
 	}
+	if c := q.fair.consumers[w.principal.identityKey()]; c != nil && c.refs > 0 {
+		w.fwBefore = c.fw // the push may reweigh the active record; a refusal undoes it
+	}
 	pushLocked(st, q, w)
 	return nil
 }
@@ -304,14 +310,19 @@ func (d *Dispatcher) enqueueExternalLocked(st *targetState, w *waiter, set Setti
 // a request that never waits (review 3 C1). So the decision comes first and
 // the wake follows only for a w that stays (Acquire). The pick and the
 // fairness-first head are read on the order the wake would read, at now
-// (review 3 delta D-1); a refusal restores the view of the last event. Only a queued w that is
-// no continuation (A03-W17), on a warm window of a target with an external
-// cap: w stays when ŵ = r̂ + (rounds − 1) · L_p50 ≤ budget, when it is the
-// pick, or when r̂ ≤ budget and it is the fairness-first head (rounds = 1,
-// review 2 F-2 (a)). Otherwise it leaves the queue again without a wake — the
-// queue is back to the state before its push, which the last wake left
-// without an admissible head — and no timer is armed (Acquire arms it only
-// after a nil error), no goroutine parks: counted Predicted, answered
+// (review 3 delta D-1); a refusal restores the view of the last event. Only
+// a queued w that is no continuation (A03-W17), on a warm window of a
+// target with an external cap: w stays when ŵ = r̂ + (rounds − 1) · L_p50 ≤
+// budget, when it is the pick, or when r̂ ≤ budget and it is the
+// fairness-first head (rounds = 1, review 2 F-2 (a)). Otherwise it leaves
+// the queue again without a wake, and the order is back to the state before
+// its push, which the last wake left without an admissible head: the queue
+// counters, the activity and waiting sums, the view clock, and the fair
+// weight its push brought to an active record (written back, review 4
+// FR4-2). What stays is bookkeeping without a share in the order: a record
+// the push created (refs 0, swept by the reaper), the arrival seq and the
+// upper bound maxWeight. No timer is armed (Acquire arms it only after a nil
+// error), no goroutine parks: counted Predicted, answered
 // ErrWaitExpired with the Retry-After Q(ŵ) of the comparison. O(1) while the
 // rounds bound fits (r̂ ≤ L_p50); beyond it one pass over the held external
 // leases (r̂), the pick (O(1) while not even the lightest head fits, else one
@@ -346,6 +357,9 @@ func (d *Dispatcher) predictAfterPushLocked(st *targetState, w *waiter, budget t
 	}
 	f.viewAt = viewAt
 	st.external.remove(w) // no wake: nothing the push changed may act (C1)
+	if c := w.fair; w.fwBefore > 0 && c.refs > 0 {
+		c.reweigh(w.fwBefore) // nor the fair weight it brought (review 4 FR4-2)
+	}
 	st.extRejects.Predicted++
 	return &RejectionError{Err: ErrWaitExpired, RetryAfter: quantizeRetryAfter(est, d.currentSettings().ExternalRetryAfterSteps)}
 }

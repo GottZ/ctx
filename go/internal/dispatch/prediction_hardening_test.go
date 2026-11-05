@@ -867,3 +867,46 @@ func TestFairnessFirstReadsTheWakesView(t *testing.T) {
 	recvAdmission(t, chX, "X ends")
 	recvAdmission(t, chN, "n ends")
 }
+
+// TestPredictedRefusalRestoresRecordWeight is review 4 FR4-2: a refusal
+// predicted after the push leaves the fair weight of an active record as it
+// was — no event of the order (F3-1), so no share moves without a wake.
+// Consumer c (tenant tA) holds a lease at fair weight 2 next to a holder
+// (E 2 full); c's next request arrives with fair weight 7 on a warm window
+// (L_p50 10 s, MaxWait 5 s, r̂ ≈ 10 s) and is predicted: the record keeps
+// fw 2 and its tenant Σ fair_weight 2 (red with the push's reweigh kept:
+// 2 → 7), the bookkeeping equals its recomputation.
+func TestPredictedRefusalRestoresRecordWeight(t *testing.T) {
+	d, _ := newTestDispatcher(t, budgetSettings(5*time.Second), partitionPolicy(3, 1)) // E = 2
+	bg := context.Background()
+	lc := mustAcquire(t, d, fairXctx(bg, "c", "tA", 2), externalReq())
+	defer lc.Release()
+	lh := mustAcquire(t, d, fairXctx(bg, "holder", "tenant-h", 1), externalReq())
+	defer lh.Release()
+	seedLeases(d, testOrigin, waitRingK, 10*time.Second)
+	record := func() (int, int) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		c := d.targets[canonicalOrigin(testOrigin)].external.fair.consumers[fairPrincipalKey("c", "tA")]
+		return c.fw, c.tenant.sumFW
+	}
+	fw0, sum0 := record()
+	seq0 := targetSeq(d)
+	_, _, err := d.Acquire(fairXctx(bg, "c", "tA", 7), externalReq())
+	fw1, sum1 := record()
+	t.Logf("refused request at fw 7 of c (holds at fw 2): %v, pushes %d; record fw %d → %d, tenant Σfw %d → %d", err, targetSeq(d)-seq0, fw0, fw1, sum0, sum1)
+	if !errors.Is(err, ErrWaitExpired) || targetSeq(d)-seq0 != 1 {
+		t.Fatalf("request = %v after %d pushes, want predicted after its push", err, targetSeq(d)-seq0)
+	}
+	if fw0 != 2 || fw1 != fw0 || sum1 != sum0 {
+		t.Fatalf("record fw %d → %d, Σfw %d → %d, want 2 → 2 (a refusal moves no share)", fw0, fw1, sum0, sum1)
+	}
+	if diff, _ := d.fairAuditForTest(testOrigin); diff != "" {
+		t.Fatalf("fairness bookkeeping after the refusal: %s", diff)
+	}
+}
+
+// fairPrincipalKey is the record key of consumer of tenant.
+func fairPrincipalKey(consumer, tenant string) string {
+	return Principal{ConsumerID: consumer, TenantID: tenant, ConsumerKind: "app"}.identityKey()
+}

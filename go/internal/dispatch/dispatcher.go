@@ -905,7 +905,9 @@ func (d *Dispatcher) reapNow(now time.Time) {
 				cancel(ErrReaped)
 			} else if cancel, ok := st.extCancel[l]; ok {
 				// I-03-3: the reaper is the ONLY canceller of an external
-				// lease (leak net), extCancel is read nowhere else.
+				// lease (leak net); the cancel funcs of extCancel are read
+				// nowhere else (the prediction reads only its keys' admission
+				// instants, prediction.go firstRoundLocked).
 				cancel(ErrReaped)
 			}
 			d.reapsTotal.Add(1)

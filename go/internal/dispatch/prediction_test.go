@@ -531,36 +531,60 @@ func TestRelationalTenantShareRoundsUp(t *testing.T) {
 	}
 }
 
-// TestExpiredRetryAfterIsTheOwnPosition pins review 1 F-4: an expired waiter's
-// Retry-After is computed after it left the queue — its own weight counts
-// once. E = 1 held by a lease that never ends, budget 1 s, steps 1…5 s. The
-// waiter queues on a window of L_p50 500 ms (ŵ = r̂ ≤ 500 ms); while it waits
-// the window turns to L_p50 2.5 s. At its expiry (holder lease ≈ 1 s old)
-// one round at the own position is r̂ = 2.5 s − age ≈ 1.5 s ⇒ 2 s, above the
-// 1 s it waited (the floor of review 2 F-4 does not decide here); counting
-// the waiter twice would add a full round: ≈ 4 s ⇒ 4 s. (Whole-second steps
-// since review 2 F-7: sub-second ones read as the default.)
+// TestExpiredRetryAfterIsTheOwnPosition pins review 1 F-4 and the floor of
+// review 2 F-4 apart (review 4 FR4-1): an expired waiter's Retry-After is
+// Q(max(ŵ, waited)) with ŵ computed after it left the queue — its own weight
+// counts once. E = 1 held by a lease that never ends, steps 1…5 s, the two
+// terms on different steps:
+//   - position above the floor: budget 1 s; the waiter queues on a window of
+//     L_p50 500 ms (ŵ = r̂ ≤ 500 ms), which turns to L_p50 4.5 s while it
+//     waits. At its expiry (holder lease ≈ 1 s old) one round at the own
+//     position is r̂ = 4.5 s − age ≈ 3.5 s ⇒ 4 s, the floor Q(≈ 1.0 s) = 2 s:
+//     RA 4 s (the floor alone: 2 s; position plus floor: ≈ 4.5 s ⇒ 5 s;
+//     the waiter counted twice: a full round more, ≈ 8 s ⇒ 5 s);
+//   - floor above the position: budget 2 s on a stale window of L_p50
+//     100 ms ⇒ ŵ = 0 ⇒ 1 s, the floor Q(≈ 2.0 s) = 3 s: RA 3 s (the
+//     position alone: 1 s).
+//
+// (Whole-second steps since review 2 F-7: sub-second ones read as the
+// default.)
 func TestExpiredRetryAfterIsTheOwnPosition(t *testing.T) {
-	s := budgetSettings(time.Second)
-	s.ExternalRetryAfterSteps = []time.Duration{time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second}
-	d, _ := newTestDispatcher(t, s, partitionPolicy(2, 1)) // E = 1
-	holdExternal(t, d, testOrigin, 1)
-	seedLeases(d, testOrigin, waitRingK, 500*time.Millisecond)
-	ch := make(chan admission, 1)
-	start := time.Now()
-	startWaiter(xctx(context.Background(), "c", "tenant-a"), d, "c", externalReq(), ch)
-	waitQueued(t, d, ch, 1, "waiter queued (ŵ ≤ 500 ms ≤ 1 s)")
-	seedLeases(d, testOrigin, waitRingK, 2500*time.Millisecond)
-	a := recvAdmission(t, ch, "waiter expires")
-	el := time.Since(start)
-	if a.lease != nil || !errors.Is(a.err, ErrWaitExpired) || !within(el, time.Second, 200*time.Millisecond) {
-		t.Fatalf("waiter = (lease %v, %v) after %v, want ErrWaitExpired after the 1-s budget", a.lease != nil, a.err, el)
-	}
-	if rej := target(t, d).ExternalRejects; rej != (ExternalRejectStats{Expired: 1}) {
-		t.Fatalf("rejects %+v, want expired=1", rej)
-	}
-	if ra := retryAfterOf(t, a.err); ra != 2*time.Second {
-		t.Fatalf("expired Retry-After %v, want 2s (one round r̂ ≈ 1.5 s at the own position after leaving the queue)", ra)
+	for _, tc := range []struct {
+		name           string
+		budget         time.Duration
+		queuedOn, then time.Duration // L_p50 at the enqueue and while waiting
+		ra             time.Duration
+	}{
+		{"position above the floor", time.Second, 500 * time.Millisecond, 4500 * time.Millisecond, 4 * time.Second},
+		{"floor above the position", 2 * time.Second, 100 * time.Millisecond, 100 * time.Millisecond, 3 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := budgetSettings(tc.budget)
+			s.ExternalRetryAfterSteps = []time.Duration{time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second}
+			d, _ := newTestDispatcher(t, s, partitionPolicy(2, 1)) // E = 1
+			holdExternal(t, d, testOrigin, 1)
+			seedLeases(d, testOrigin, waitRingK, tc.queuedOn)
+			ch := make(chan admission, 1)
+			start := time.Now()
+			startWaiter(xctx(context.Background(), "c", "tenant-a"), d, "c", externalReq(), ch)
+			waitQueued(t, d, ch, 1, "waiter queued (ŵ ≤ L_p50 ≤ budget)")
+			if tc.then != tc.queuedOn {
+				seedLeases(d, testOrigin, waitRingK, tc.then)
+			}
+			a := recvAdmission(t, ch, "waiter expires")
+			el := time.Since(start)
+			if a.lease != nil || !errors.Is(a.err, ErrWaitExpired) || !within(el, tc.budget, 200*time.Millisecond) {
+				t.Fatalf("waiter = (lease %v, %v) after %v, want ErrWaitExpired after the %v budget", a.lease != nil, a.err, el, tc.budget)
+			}
+			if rej := target(t, d).ExternalRejects; rej != (ExternalRejectStats{Expired: 1}) {
+				t.Fatalf("rejects %+v, want expired=1", rej)
+			}
+			ra := retryAfterOf(t, a.err)
+			t.Logf("%s: expired after %v, Retry-After %v", tc.name, el, ra)
+			if ra != tc.ra {
+				t.Fatalf("%s: expired Retry-After %v, want %v", tc.name, ra, tc.ra)
+			}
+		})
 	}
 }
 

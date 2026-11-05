@@ -203,14 +203,25 @@ func (f *extFair) enter(c *fairConsumer, fw int) {
 		t.consumers++
 		c.fw = fw
 		t.sumFW += fw
-	} else if c.fw != fw {
-		t.sumFW += fw - c.fw
-		if c.waiting > 0 {
-			t.waitFW += fw - c.fw
-		}
-		c.fw = fw
+	} else {
+		c.reweigh(fw)
 	}
 	c.refs++
+}
+
+// reweigh moves the fair weight of an active record to fw, its tenant's Σ
+// fair_weight and waiting Σ fair_weight with it (enter, and the undo of a
+// refused push, A03-W6 review 4 FR4-2).
+func (c *fairConsumer) reweigh(fw int) {
+	if c.fw == fw {
+		return
+	}
+	t := c.tenant
+	t.sumFW += fw - c.fw
+	if c.waiting > 0 {
+		t.waitFW += fw - c.fw
+	}
+	c.fw = fw
 }
 
 // leave uncounts one waiter or lease of c.
