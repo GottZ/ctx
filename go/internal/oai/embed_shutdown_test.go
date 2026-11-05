@@ -26,13 +26,15 @@ import (
 )
 
 // reservationsEndedOnce checks the fake limiter: every admitted reservation
-// ended exactly once, and settled iff the request made a wire call.
-func reservationsEndedOnce(t *testing.T, l *fakeLimiter, settled int64) {
+// ended exactly once; settled of them with a usage (a wire call whose blocks
+// reported one) and kept of them (wire contact without a usage — never a
+// full refund after the wire, the meter rule of W06-10 hardening H-7).
+func reservationsEndedOnce(t *testing.T, l *fakeLimiter, settled, kept int64) {
 	t.Helper()
-	ends := l.settles.Load() + l.aborts.Load() + l.rejects.Load()
-	if ends != l.admits.Load() || l.settles.Load() != settled {
-		t.Errorf("reservations: admits %d settles %d aborts %d rejects %d, want each ended once, %d settled",
-			l.admits.Load(), l.settles.Load(), l.aborts.Load(), l.rejects.Load(), settled)
+	ends := l.settles.Load() + l.keeps.Load() + l.aborts.Load() + l.rejects.Load()
+	if ends != l.admits.Load() || l.settles.Load() != settled || l.keeps.Load() != kept {
+		t.Errorf("reservations: admits %d settles %d keeps %d aborts %d rejects %d, want each ended once, %d settled, %d kept",
+			l.admits.Load(), l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load(), settled, kept)
 	}
 }
 
@@ -112,7 +114,7 @@ func TestEmbedRunEndedWhileQueued(t *testing.T) {
 			if e.hits.Load() != 0 || len(rig.rows.all()) != 0 {
 				t.Errorf("wire hits %d rows %d, want 0/0", e.hits.Load(), len(rig.rows.all()))
 			}
-			reservationsEndedOnce(t, rig.limiter, 0)
+			reservationsEndedOnce(t, rig.limiter, 0, 0)
 			noLeaseHeld(t, rig.disp, e.srv.URL)
 		})
 	}
@@ -205,7 +207,13 @@ func TestEmbedRunEndedBetweenBlocks(t *testing.T) {
 			if len(rows) != 1 || rows[0].Gateway.Finish != "aborted" || rows[0].Telemetry.Metadata["sub_batches_done"] != tc.blocksDone {
 				t.Fatalf("rows %+v, want one aborted row with %d block(s) done", rows, tc.blocksDone)
 			}
-			reservationsEndedOnce(t, rig.limiter, 1)
+			// The blocks that answered settle their usage; block one aborted
+			// during its wire call (none answered) keeps the charge.
+			settled, kept := int64(1), int64(0)
+			if tc.blocksDone == 0 {
+				settled, kept = 0, 1
+			}
+			reservationsEndedOnce(t, rig.limiter, settled, kept)
 			noLeaseHeld(t, rig.disp, e.srv.URL)
 			if n := consecutiveFails(rig.pool, "spark-embed"); n != 0 {
 				t.Errorf("consecutive_fails %d, want 0", n)
@@ -254,7 +262,7 @@ func TestEmbedShutdownWhileAContinuationWaits(t *testing.T) {
 	if h := e.hits.Load(); h != 1 {
 		t.Errorf("wire hits %d, want 1", h)
 	}
-	reservationsEndedOnce(t, rig.limiter, 1)
+	reservationsEndedOnce(t, rig.limiter, 1, 0)
 	if rows := rig.rows.all(); len(rows) != 1 || rows[0].Gateway.Finish != "aborted" {
 		t.Errorf("rows %+v, want one aborted row", rows)
 	}
@@ -278,7 +286,7 @@ func TestEmbedShutdownInTheWriterWindow(t *testing.T) {
 		t.Fatalf("writer calls %d, want 1", calls.Load())
 	}
 	wantShutdownAnswer(t, "writer window", a)
-	reservationsEndedOnce(t, rig.limiter, 1)
+	reservationsEndedOnce(t, rig.limiter, 1, 0)
 	noLeaseHeld(t, rig.disp, e.srv.URL)
 }
 
@@ -319,7 +327,7 @@ func TestEmbedClientGoneDuringABlock(t *testing.T) {
 	if rows := rig.rows.all(); len(rows) != 1 || rows[0].Gateway.Finish != "aborted" {
 		t.Errorf("rows %+v, want one aborted row", rows)
 	}
-	reservationsEndedOnce(t, rig.limiter, 1)
+	reservationsEndedOnce(t, rig.limiter, 1, 0)
 	noLeaseHeld(t, rig.disp, e.srv.URL)
 }
 
@@ -407,7 +415,7 @@ func TestEmbedClientGoneWhileWaiting(t *testing.T) {
 		if w.written.Load() || e.hits.Load() != 0 || len(rig.rows.all()) != 0 {
 			t.Errorf("written %v wire hits %d rows %d, want nothing", w.written.Load(), e.hits.Load(), len(rig.rows.all()))
 		}
-		reservationsEndedOnce(t, rig.limiter, 0)
+		reservationsEndedOnce(t, rig.limiter, 0, 0)
 	})
 	t.Run("continuation", func(t *testing.T) {
 		e := newEmbedEngine(t, 8)
@@ -424,7 +432,7 @@ func TestEmbedClientGoneWhileWaiting(t *testing.T) {
 		if rows := rig.rows.all(); len(rows) != 1 || rows[0].Gateway.Finish != "aborted" {
 			t.Errorf("rows %+v, want one aborted row", rows)
 		}
-		reservationsEndedOnce(t, rig.limiter, 1)
+		reservationsEndedOnce(t, rig.limiter, 1, 0)
 		hold.release()
 		noLeaseHeld(t, rig.disp, e.srv.URL)
 	})
@@ -450,7 +458,7 @@ func TestEmbedKillSwitchWhileAContinuationWaits(t *testing.T) {
 	if rows := rig.rows.all(); len(rows) != 1 || rows[0].Gateway.Finish != "aborted" || e.hits.Load() != 1 {
 		t.Errorf("rows %+v hits %d, want one aborted row, 1 hit", rows, e.hits.Load())
 	}
-	reservationsEndedOnce(t, rig.limiter, 1)
+	reservationsEndedOnce(t, rig.limiter, 1, 0)
 }
 
 // TestEmbedModelGoneDuringABlock (F-7): the alias is disabled while block
@@ -480,7 +488,7 @@ func TestEmbedModelGoneDuringABlock(t *testing.T) {
 	if n := consecutiveFails(rig.pool, "spark-embed"); n != 0 || e.hits.Load() != 1 {
 		t.Errorf("consecutive_fails %d hits %d, want 0 and 1", n, e.hits.Load())
 	}
-	reservationsEndedOnce(t, rig.limiter, 1)
+	reservationsEndedOnce(t, rig.limiter, 0, 1) // the engine had block one, no usage: kept
 }
 
 // TestEmbedGrantWithdrawnBeforeTheWrite (F-7, D8): the consumer's grant is
@@ -506,7 +514,7 @@ func TestEmbedGrantWithdrawnBeforeTheWrite(t *testing.T) {
 	if rows := rig.rows.all(); len(rows) != 1 || rows[0].Gateway.Finish != "aborted" || rows[0].Telemetry.Metadata["sub_batches_done"] != 3 {
 		t.Errorf("rows %+v, want one aborted row with 3 blocks done", rows)
 	}
-	reservationsEndedOnce(t, rig.limiter, 1)
+	reservationsEndedOnce(t, rig.limiter, 1, 0)
 }
 
 // brokenWriter accepts the header and fails every body write: the client
@@ -528,6 +536,6 @@ func TestEmbedClientGoneDuringTheAnswer(t *testing.T) {
 	if rows := rig.rows.all(); len(rows) != 1 || rows[0].Gateway.Finish != "aborted" {
 		t.Errorf("rows %+v, want one aborted row", rows)
 	}
-	reservationsEndedOnce(t, rig.limiter, 1)
+	reservationsEndedOnce(t, rig.limiter, 1, 0)
 	noLeaseHeld(t, rig.disp, e.srv.URL)
 }

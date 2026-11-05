@@ -12,9 +12,11 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/http/httptrace"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -175,6 +177,12 @@ type embedCall struct {
 	decoding int64 // the decode transient's share (one block at a time)
 	limit    LimitReservation
 	limitEnd bool
+	// wired: a byte of the request can have reached a backend in some try
+	// of some block (wireContactTrace) — set from inside net/http, on its
+	// transport goroutines. Without it the reservation goes back in full
+	// (Abort); after it, never (Settle with the usage, Keep without one;
+	// the chat route's rule, W06-10 hardening H-7).
+	wired atomic.Bool
 	// own is the answer of a route refusal after an acquire (errRouteRefused).
 	own func() string
 }
@@ -213,10 +221,17 @@ func newEmbedCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.Consu
 	return c
 }
 
-// close ends the request's contexts and a reservation nobody ended.
+// close ends the request's contexts and a reservation nobody ended — after
+// wire contact (a panic inside EmbedRaw once a block was written, or in the
+// answer path) by keeping its charge, the usage is unknown; without it by
+// Abort.
 func (c *embedCall) close() {
 	if c.limit != nil && !c.limitEnd {
-		c.limit.Abort()
+		if c.wired.Load() {
+			c.limit.Keep()
+		} else {
+			c.limit.Abort()
+		}
 	}
 	c.cancel(context.Canceled)
 	for _, stop := range c.stops {
@@ -469,7 +484,10 @@ func (c *embedCall) admitLimiter() bool {
 	res, refusal := c.d.Limiter.Admit(c.ctx, c.ca, c.alias,
 		Estimate{Op: llmlog.GatewayOpEmbed, PromptBytes: c.req.bytesSum, InputRunes: c.req.runesSum})
 	if refusal != nil {
+		// The meter's Retry-After is exact (design/06 §4.4): both headers,
+		// no jitter — the jitter is the L2 contract (A03-W8).
 		writeRetryAfter(c.w.Header(), refusal.RetryAfter)
+		writeRetryAfterMs(c.w.Header(), refusal.RetryAfter)
 		c.refuse(refusal.Code, refusal.Message, refusal.ShouldRetry)
 		return false
 	}
@@ -491,14 +509,14 @@ func (c *embedCall) endLimit(fn func(LimitReservation)) {
 // embedState is what the attempts of one walk leave behind.
 type embedState struct {
 	n        int // attempts
-	wires    int // wire calls (EmbedRaw), over every attempt
+	wires    int // wire calls (EmbedRaw), over every attempt — the census count (Σ acquire = Σ wire); the meter reads c.wired
 	admitted time.Time
 	lease    *dispatch.Lease // the First/Next lease of the latest attempt
 	k        int             // blocks of the latest attempt's weight plan
 	done     int             // its blocks with a result
 	vecs     [][]float32
 	dims     int            // the vectors' length (policy or learned)
-	usage    dispatch.Usage // Σ over every block with a result
+	usage    dispatch.Usage // Σ over every block with a result, saturated (usageTotal)
 	// failedBlock is the block whose wire call ended the latest attempt
 	// (-1: none); ≥ 1 is the sticky stop.
 	failedBlock int
@@ -525,7 +543,7 @@ func (c *embedCall) walk(chain []backends.Backend) {
 			c.endLimit(func(l LimitReservation) { l.Reject(code, 0) })
 			return
 		}
-		c.admissionRefused(err, 0, false)
+		c.admissionRefused(err, 0, false, dispatch.Usage{})
 		return
 	}
 	if ended, _ := c.verdict(); ended {
@@ -653,11 +671,21 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 		err := c.blockFailure(st, b, i, rc, fmt.Errorf("oai: the run ended before the wire call: %w", context.Cause(rc)))
 		return dispatch.Usage{}, err
 	}
+	// st.wires counts the wire calls for the census; c.wired is the meter's
+	// wire contact, marked from inside net/http by the block's trace — on
+	// every try of httpx.DoRetryOnce (wireContactTrace).
 	st.wires++
-	wctx, cancel := context.WithTimeout(rc, timeout)
+	var conn atomic.Bool
+	wctx, cancel := context.WithTimeout(httptrace.WithClientTrace(rc, wireContactTrace(&c.wired, &conn)), timeout)
 	defer cancel()
 	vecs, promptTokens, err := embed.EmbedRaw(wctx, *b, model, c.req.inputs[lo:hi], st.dims,
 		embedReadCap(hi-lo, st.dims, c.s.EmbeddingMaxFloats))
+	// A block that ended by its context with a connection in hand may still
+	// write (HTTP/2 returns on the context without waiting for the stream's
+	// writer): wire contact — the conservative side, as at the chat route.
+	if err != nil && conn.Load() && wctx.Err() != nil {
+		c.wired.Store(true)
+	}
 	if err != nil {
 		return dispatch.Usage{}, c.blockFailure(st, b, i, rc, err)
 	}
@@ -670,7 +698,10 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 	copy(st.vecs[lo:hi], vecs)
 	st.done++
 	u := dispatch.Usage{PromptTokens: promptTokens}
-	st.usage.PromptTokens += promptTokens
+	// Summed as the meter counts (usageTotal): a negative count is 0, the
+	// sum saturates — an overflowed negative sum would settle as 0, a full
+	// refund (Fremd-Review 3 N-2).
+	st.usage.PromptTokens = usageTotal(st.usage.PromptTokens, promptTokens)
 	return u, nil
 }
 
@@ -691,9 +722,11 @@ func (c *embedCall) blockFailure(st *embedState, b *backends.Backend, i int, rc 
 }
 
 // admissionRefused answers an admission failure through the planner's
-// writer (A03-W8 handover). wired: the request already made wire calls —
-// its reservation is settled with their usage (answer), not rejected.
-func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool) {
+// writer (A03-W8 handover). wired: a byte of the request reached a backend
+// in an earlier attempt (a failover acquire refused behind a row that had
+// the request) — the reservation settles with the usage or keeps its
+// charge (endAfterWire), it is not rejected.
+func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool, usage dispatch.Usage) {
 	reason := c.d.Planner.WriteAdmissionError(c.ctx, c.w, err)
 	if reason == "" {
 		// The writer saw the run context canceled: the route answers its
@@ -706,9 +739,32 @@ func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool
 		}
 	}
 	c.rec.Reason = reason
-	if !wired {
-		c.endLimit(func(l LimitReservation) { l.Reject(reason, waited) })
+	if wired {
+		c.endAfterWire(usage)
+		return
 	}
+	c.endLimit(func(l LimitReservation) { l.Reject(reason, waited) })
+}
+
+// endAfterWire ends the reservation of a request that made wire calls: no
+// byte reached a backend in any of them (c.wired unset — a refused or
+// timed-out connect, a failed handshake) ⇒ Abort, the full refund; after
+// wire contact never: Settle with the usage the blocks reported, Keep
+// without one (the chat route's rule, W06-10 hardening H-7). A block that
+// failed after earlier ones answered settles their usage: its own is
+// unknown, the blocks after it never reached a backend (the sticky stop).
+func (c *embedCall) endAfterWire(usage dispatch.Usage) {
+	wired := c.wired.Load()
+	c.endLimit(func(l LimitReservation) {
+		switch {
+		case !wired:
+			l.Abort()
+		case usage.PromptTokens <= 0:
+			l.Keep()
+		default:
+			l.Settle(usage)
+		}
+	})
 }
 
 // answer writes the outcome of the walk and its one llmlog row.
@@ -718,9 +774,9 @@ func (c *embedCall) answer(plan Plan, served *backends.Backend, attempts []llm.C
 		c.rec.Class = st.lease.Class().String()
 	}
 	out := c.outcome(plan, attempts, err, st)
-	// A row and Settle only for a request that reached the wire: without a
-	// wire call there is no LLM call (close() aborts the reservation, or the
-	// admission refusal rejected it).
+	// A row and the end of the reservation (endAfterWire) only for a request
+	// that made wire calls: without one there is no LLM call (close() aborts
+	// the reservation, or the admission refusal rejected it).
 	if st.wires > 0 {
 		// The access record carries what the reservation settles and the
 		// row books — also for an answer that is no 200 (F-9 (a)).
@@ -728,7 +784,7 @@ func (c *embedCall) answer(plan Plan, served *backends.Backend, attempts []llm.C
 		if st.usage.PromptTokens > 0 {
 			c.rec.Usage = llmlog.UsageBackend
 		}
-		c.endLimit(func(l LimitReservation) { l.Settle(st.usage) })
+		c.endAfterWire(st.usage)
 		c.record(plan, served, attempts, err, st, out)
 	}
 }
@@ -758,7 +814,7 @@ func (c *embedCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, s
 		if st.lease == nil {
 			waited = time.Since(c.entry)
 		}
-		c.admissionRefused(err, waited, st.wires > 0)
+		c.admissionRefused(err, waited, st.wires > 0 && c.wired.Load(), st.usage)
 		return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: c.rec.Reason}}
 	}
 	if len(attempts) == 0 {
@@ -869,6 +925,13 @@ func (c *embedCall) success(st *embedState) embedOutcome {
 	dims := st.dims
 	if c.req.dims > 0 {
 		dims = c.req.dims
+	}
+	// The meter's view of the request's op bucket, on the successful answer
+	// only (design/06 §4.4; lead decision M2 (c)).
+	if c.limit != nil {
+		for k, v := range c.limit.Headers() {
+			c.w.Header()[k] = v
+		}
 	}
 	c.w.Header().Set("Content-Type", "application/json")
 	c.w.WriteHeader(http.StatusOK)

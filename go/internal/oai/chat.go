@@ -714,30 +714,10 @@ func attemptRequestID(id string, n int) string { return fmt.Sprintf("%s-a%d", id
 
 // wireTrace marks wire contact where a byte of the request can leave for a
 // backend, in any try, instead of reading it off the error of the last try
-// (Fremd-Review 4 F4-1, F4-2, F4-7). conn records a connection in hand.
-//
-//   - WroteHeaderField, WroteHeaders, WroteRequest (any Err — a partly
-//     written body reached the backend): the request is being written on an
-//     established connection. HTTP/1.1 writes every request byte inside
-//     Request.write, which calls WroteHeaderField after the request line
-//     and the Host line, and WroteRequest when it returns, failed writes
-//     included; HTTP/2 calls WroteHeaderField while it encodes the HEADERS
-//     frame, before any of it is written. A dial, a refused or timed-out
-//     connect and a failed TLS handshake reach none of them. Before an error
-//     returns, HTTP/1.1 waits for its write loop, HTTP/2 for the stream's
-//     writer unless the context ended (attempt), so the mark is visible when
-//     ChatRaw returns.
-//   - GotFirstResponseByte: the backend answered — wire contact by
-//     definition; the hook runs before net/http hands the response over.
+// (Fremd-Review 4 F4-1, F4-2, F4-7): the hooks are wireContactTrace's,
+// shared with the embeddings route. conn records a connection in hand.
 func (c *chatCall) wireTrace(conn *atomic.Bool) *httptrace.ClientTrace {
-	mark := func() { c.wired.Store(true) }
-	return &httptrace.ClientTrace{
-		GotConn:              func(httptrace.GotConnInfo) { conn.Store(true) },
-		WroteHeaderField:     func(string, []string) { mark() },
-		WroteHeaders:         mark,
-		WroteRequest:         func(httptrace.WroteRequestInfo) { mark() },
-		GotFirstResponseByte: mark,
-	}
+	return wireContactTrace(&c.wired, conn)
 }
 
 // admissionRefused answers an admission failure through the planner's

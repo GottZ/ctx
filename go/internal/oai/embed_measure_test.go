@@ -134,7 +134,7 @@ func TestEmbedBulkContinuationUnderUrgentLoad(t *testing.T) {
 		rows[0].Telemetry.DispatchClass != dispatch.ClassExternalBulk.String() {
 		t.Errorf("rows %+v, want one XB row with block one's 2 tokens", rows)
 	}
-	reservationsEndedOnce(t, rig.limiter, 2) // the warm-up and the request under test
+	reservationsEndedOnce(t, rig.limiter, 2, 0) // the warm-up and the request under test
 	noLeaseHeld(t, rig.disp, host)
 	deadlineG := time.Now().Add(2 * time.Second)
 	for runtime.NumGoroutine() > before && time.Now().Before(deadlineG) {
