@@ -238,7 +238,9 @@ func TestInternalEmbedNumbersUnchanged(t *testing.T) {
 
 // rawBodyOverhead is the JSON frame of a gateway sub-block body beyond its
 // texts: {"model":"…","input":[…]} plus quotes and a comma per input.
-func rawBodyOverhead(model string, n int) int { return len(`{"model":"","input":[]}`) + len(model) + 3*n }
+func rawBodyOverhead(model string, n int) int {
+	return len(`{"model":"","input":[]}`) + len(model) + 3*n
+}
 
 // TestEmbedRawBodyIsNotHTMLEscaped (hardening H-2, Fremd-Review 2 R2-10):
 // the list body of a gateway sub-block carries the client's texts as sent
