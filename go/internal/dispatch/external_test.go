@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1078,11 +1079,20 @@ func TestExternalReapEarlierHintWins(t *testing.T) {
 	}
 }
 
-// TestExternalPickIsFIFOAcrossConsumers (review M38): until the fairness
-// pick of A03-W4 the external queue hands slots in arrival order over all
-// identity buckets.
-func TestExternalPickIsFIFOAcrossConsumers(t *testing.T) {
+// TestExternalPickServesLeastSlotTimeConsumerFirst (review M38, rewritten
+// by A03-W4 from the FIFO pin TestExternalPickIsFIFOAcrossConsumers): the
+// external queue hands a freed unit to the consumer with the least slot time
+// (running leases included), FIFO only inside a bucket and between equal
+// slot times. Arrival c1, c1, c2 on E = 1: c1's first (both consumers at 0
+// slot time — arrival order breaks the tie), then c2 (c1 has served one
+// lease), then c1's second.
+func TestExternalPickServesLeastSlotTimeConsumerFirst(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(2, 1))
+	var clk atomic.Int64
+	clk.Store(time.Now().UnixNano())
+	if cs, ok := any(d).(fairClockSetter); ok {
+		cs.setFairClockForTest(func() time.Time { return time.Unix(0, clk.Load()) })
+	}
 	occ := mustAcquire(t, d, xctx(context.Background(), "occ", "tenant-a"), externalReq())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1093,11 +1103,12 @@ func TestExternalPickIsFIFOAcrossConsumers(t *testing.T) {
 		waitFor(t, "external waiter queued", func() bool { return waitingExternal(d) == n })
 	}
 	holder := occ
-	for _, want := range []string{"c1-0", "c1-1", "c2-2"} {
+	for _, want := range []string{"c1-0", "c2-2", "c1-1"} {
+		clk.Add(int64(time.Second))
 		holder.Release()
 		got := recvAdmission(t, ch, "external handoff")
 		if got.label != want {
-			t.Fatalf("handoff = %s, want %s (FIFO over the identity buckets)", got.label, want)
+			t.Fatalf("handoff = %s, want %s (least slot time first, FIFO inside a bucket)", got.label, want)
 		}
 		holder = got.lease
 	}

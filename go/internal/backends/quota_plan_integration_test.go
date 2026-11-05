@@ -260,34 +260,108 @@ func TestQuotaSpendPlan(t *testing.T) {
 		}
 		keys = append(keys, k)
 	}
+	// The test clock is not the wall clock: it is the wall clock's minute of
+	// the hour, one to two hours before anchor, the start of the
+	// context_llm_log chunk (7 days, boundaries Thursday 00:00 UTC) that holds
+	// now(). The seed ends at the test clock and the accountant reads its
+	// windows at it, so the newest chunk holds almost seven days of the seed
+	// and the oldest one about three, at every wall clock. A seed ending at
+	// now() leaves the newest chunk with whatever part of its seven days has
+	// passed — on Thursday morning a few rows of every key — and the plan the
+	// relief lookups get on such a chunk (their created_at bound is a runtime
+	// value, so every chunk is planned) reads the chunk's created_at index:
+	// the right plan for a chunk of a few pages, and one that says nothing
+	// about the access path at scale, which is what the index check below
+	// pins. The minute of the hour stays the wall clock's, so the edges keep
+	// every width (#129) — only the chunk layout is fixed. Every row the seed
+	// writes lies before the test clock's next full hour, so the rollup is the
+	// one a seed at now() writes, moved by the same interval: no bucket after
+	// the windows' end, no window sum changed.
+	var anchor time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT time_bucket(d.time_interval, now(), origin => 'epoch'::timestamptz)
+		  FROM timescaledb_information.dimensions d
+		 WHERE d.hypertable_name = 'context_llm_log' AND d.column_name = 'created_at'`).Scan(&anchor); err != nil {
+		t.Fatalf("chunk start of now(): %v", err)
+	}
+	wall := time.Now()
+	testNow := anchor.Add(-2*time.Hour + wall.Sub(wall.Truncate(time.Hour)))
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO context_llm_log (created_at, pipeline, model, host, duration_ms, api_key_id, cost_usd, backend_locality)
 		SELECT h + v.off, 'query-synthesize', 'm', 'h', 10, k::uuid, v.cost, v.loc
 		  FROM unnest($1::text[]) k,
-		       generate_series(date_trunc('hour', now()) - interval '31 days', now(), interval '1 hour') h,
+		       generate_series(date_trunc('hour', $2::timestamptz, 'UTC') - interval '31 days', $2::timestamptz, interval '1 hour') h,
 		       (VALUES (interval '0', 0.00100000::numeric, 'external'),
 		               (interval '1 hour' - interval '1 microsecond', NULL::numeric, 'local')) v(off, cost, loc)
 		 ORDER BY h + v.off, k`,
-		keys); err != nil {
+		keys, testNow); err != nil {
 		t.Fatalf("seed log: %v", err)
 	}
-	for _, st := range []string{"ANALYZE context_llm_log", "ANALYZE context_llm_usage_hourly"} {
+	var newestEnd time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT max(range_end) FROM timescaledb_information.chunks
+		 WHERE hypertable_name = 'context_llm_log'`).Scan(&newestEnd); err != nil {
+		t.Fatalf("newest chunk: %v", err)
+	}
+	if !newestEnd.Equal(anchor) {
+		t.Fatalf("the newest chunk ends at %s, want the anchor %s — the test clock %s is off the chunk grid", newestEnd, anchor, testNow)
+	}
+	// The seed is discrete: every key logs at the same two instants of every
+	// hour, so a seven-day chunk holds about 336 distinct created_at values
+	// of a hundred rows each. Under the default statistics target those
+	// equally common instants are too many for the most-common-value list
+	// and land in a histogram. For the edge's strict lower bound
+	// (created_at > since) the planner then subtracts the share of
+	// created_at = since, one instant's worth (1/n_distinct, ~100 rows), from
+	// a share the histogram interpolates at a few rows per minute: for an
+	// edge shorter than about forty minutes the estimate went negative and
+	// was clamped to one row while the edge holds a hundred (one instant of
+	// every key), and the custom plan read it through the chunk's smaller
+	// created_at index — every key's edge row instead of the tenant's, at
+	// about half of all clocks (#129). Production timestamps are all but
+	// unique (n_distinct ≈ −1), so that share is about one row there.
+	// seedStatsTarget keeps every instant of a chunk as a most-common value
+	// (and makes ANALYZE read every row of it): the planner sees the seeded
+	// data exactly, at every clock, and the gate measures the access path,
+	// not an estimation artifact. The check below fails the test when that
+	// stops holding (a denser seed, a longer chunk interval).
+	const seedStatsTarget = 1000 // ≥ a chunk's ~336 instants; 300 × target sample rows ≥ its 33 600 rows
+	for _, st := range []string{
+		fmt.Sprintf("ALTER TABLE context_llm_log ALTER COLUMN created_at SET STATISTICS %d", seedStatsTarget),
+		"ANALYZE context_llm_log",
+		"ANALYZE context_llm_usage_hourly",
+	} {
 		if _, err := pool.Exec(ctx, st); err != nil {
 			t.Fatalf("%s: %v", st, err)
 		}
+	}
+	var chunks, exact int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE s.histogram_bounds IS NULL
+		                          AND abs((SELECT sum(f::float8) FROM unnest(s.most_common_freqs) f) - 1) < 1e-4)
+		  FROM timescaledb_information.chunks c
+		  LEFT JOIN pg_stats s ON s.schemaname = c.chunk_schema AND s.tablename = c.chunk_name
+		                      AND s.attname = 'created_at'
+		 WHERE c.hypertable_name = 'context_llm_log'`).Scan(&chunks, &exact); err != nil {
+		t.Fatalf("read chunk statistics: %v", err)
+	}
+	if chunks == 0 || exact != chunks {
+		t.Fatalf("created_at statistics are exact (every row in a most-common value) on %d of %d chunks of context_llm_log — the planner would estimate the discrete seed from a histogram (#129)", exact, chunks)
 	}
 	var perHour, inThirtyDays int64
 	if err := pool.QueryRow(ctx, `
 		SELECT (SELECT max(c) FROM (SELECT count(*) AS c FROM context_llm_log WHERE api_key_id = $1::uuid
 		                             GROUP BY date_trunc('hour', created_at, 'UTC')) h),
 		       (SELECT count(*) FROM context_llm_log WHERE api_key_id = $1::uuid
-		                          AND created_at > now() - interval '30 days')`, keys[0]).Scan(&perHour, &inThirtyDays); err != nil {
+		                          AND created_at > $2::timestamptz - interval '30 days')`, keys[0], testNow).Scan(&perHour, &inThirtyDays); err != nil {
 		t.Fatalf("count tenant rows: %v", err)
 	}
 	setQuota(t, pool, scope, fpv(1.0), ipv(1_000_000), "external_off")
 
 	rec := &recordingDB{pool: pool}
 	a := backends.NewQuotaAccountant(rec, time.Hour)
+	a.SetClockForTest(func() time.Time { return testNow })
 	if err := a.RefreshNow(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}

@@ -97,6 +97,44 @@ func dsSeedPipeline(t *testing.T, pool *pgxpool.Pool, pipeline string, n, durati
 	}
 }
 
+// dsAgePipeline moves every context_llm_log row of pipeline back by age. It
+// cannot be an UPDATE of created_at: context_llm_log is a hypertable with
+// 7-day chunks (boundaries Thursday 00:00 UTC), and an UPDATE that moves a row
+// across a chunk boundary is refused by the chunk's range CHECK (SQLSTATE
+// 23514) instead of being re-routed — for the first `age` after every
+// boundary the rows seeded at now() would have to leave the newest chunk.
+// The rows are re-inserted instead, in one transaction, so each lands in the
+// chunk its new created_at belongs to and the arm never sees a half-aged log.
+// The insert trigger of migration 159 counts the moved rows into the hourly
+// rollup a second time; the guard reads the raw log (distillWindow), never
+// the rollup, so the window it sees is the one an in-place UPDATE would give.
+func dsAgePipeline(t *testing.T, pool *pgxpool.Pool, pipeline string, age time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("age the llm log: begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, st := range []struct {
+		sql  string
+		args []any
+	}{
+		{`CREATE TEMP TABLE ds_aged (LIKE context_llm_log) ON COMMIT DROP`, nil},
+		{`INSERT INTO ds_aged SELECT * FROM context_llm_log WHERE pipeline = $1`, []any{pipeline}},
+		{`DELETE FROM context_llm_log WHERE pipeline = $1`, []any{pipeline}},
+		{`UPDATE ds_aged SET created_at = created_at - make_interval(secs => $1)`, []any{age.Seconds()}},
+		{`INSERT INTO context_llm_log SELECT * FROM ds_aged`, nil},
+	} {
+		if _, err := tx.Exec(ctx, st.sql, st.args...); err != nil {
+			t.Fatalf("age the llm log: %v", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("age the llm log: commit: %v", err)
+	}
+}
+
 // dsSeedTrip plants a trip row of the given age — the ONLY durable state the
 // back-off has (135:190-192).
 func dsSeedTrip(t *testing.T, pool *pgxpool.Pool, key, sess string, age time.Duration) {
@@ -246,11 +284,7 @@ func TestDistillSpendGuard(t *testing.T) {
 
 		// The calls age out of the window, the trip ages out of the back-off.
 		// NO code change between this tick and the last one.
-		if _, err := pool.Exec(ctx, `
-			UPDATE context_llm_log SET created_at = created_at - interval '3 hours'
-			 WHERE pipeline = $1`, distillPipeline); err != nil {
-			t.Fatalf("age the llm log: %v", err)
-		}
+		dsAgePipeline(t, pool, distillPipeline, 3*time.Hour)
 		if _, err := pool.Exec(ctx, `
 			UPDATE distill_run SET started_at = started_at - interval '3 hours',
 			                       finished_at = finished_at - interval '3 hours'`); err != nil {

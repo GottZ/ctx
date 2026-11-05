@@ -40,9 +40,11 @@ type ExternalRejectStats struct {
 // external capacity E_eff (or with a negative weight) is refused as well, at
 // once and with one WARN: it could never be admitted, so it must never wait
 // (design/03 §4.7 — a configuration error such as a sub-batch or n above E,
-// not a rejection). In-house requests keep the clause unchanged:
-// pass-through with slots ≤ 0, else the rank scan's eligibleNow; a
-// continuation (A03-W17) is eligible as the head of the external class.
+// not a rejection). An external newcomer is admitted at once when
+// externalEligibleNowLocked holds (A03-W4: it passes waiting heads of other
+// consumers that do not fit); a continuation (A03-W17) is eligible as the
+// head of the external class. In-house requests keep the clause unchanged:
+// pass-through with slots ≤ 0, else the rank scan's eligibleNow.
 func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (*Lease, error) {
 	slots := d.slotsLocked(st.origin)
 	if w.class == ClassExternal {
@@ -62,14 +64,29 @@ func (d *Dispatcher) admitNowLocked(st *targetState, w *waiter, now time.Time) (
 		// behavior, tracked for telemetry only.
 		return d.admitLocked(st, w, now, false), nil
 	}
-	eligible := false
-	if w.cont {
+	var eligible bool
+	switch {
+	case w.cont:
 		eligible = d.continuationEligibleNowLocked(st, w.weight, slots)
-	} else {
+	case w.class == ClassExternal:
+		eligible = d.externalEligibleNowLocked(st, w, slots)
+	default:
 		eligible = d.eligibleNowLocked(st, w.class, w.weight, slots)
 	}
 	if eligible {
-		return d.admitLocked(st, w, now, true), nil
+		l := d.admitLocked(st, w, now, true)
+		if st.external.total > 0 && (w.class == ClassInteractive || w.class == ClassExternal || !d.externalBeforeBackground()) {
+			// An admission can change the fairness-first external head or
+			// end its hold (A03-W4 reviews 3 and 4): units an in-house class
+			// ranked above the external class just took can keep that head
+			// out on its own (externalHeadHoldsLocked, externalReservedLocked
+			// for background); an external newcomer that ranked before the
+			// holding head changes heldBy, the shares and with them the
+			// fairness-first head, which may fit now (FR4-1). Whatever the
+			// pick is now goes to its units at once, not at the next release.
+			d.wakeLocked(st)
+		}
+		return l, nil
 	}
 	return nil, nil
 }
