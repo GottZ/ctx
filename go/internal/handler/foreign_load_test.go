@@ -182,7 +182,7 @@ func TestForeignLoadHysteresis(t *testing.T) {
 			now := time.Date(2026, 11, 3, 15, 0, 30, 0, time.UTC)
 			step := func(p foreignLoadProbe, held int, known bool) {
 				now = now.Add(5 * time.Second)
-				st.observe(now, p, held, known, set, log)
+				st.observe(now, p, held, held, known, set, log) // in-house leases weigh 1: HeldWeight = Held
 			}
 			for i := 1; i < hyst; i++ {
 				step(okProbe(3, 0), 0, true)
@@ -239,34 +239,41 @@ func TestForeignLoadHysteresis(t *testing.T) {
 // acquired since boot) ⇒ a factual 0, no dispatcher ⇒ not; the two snapshots
 // around a probe merge to the larger count.
 func TestHeldOfAndMerge(t *testing.T) {
-	snap := func(enabled bool, slots, held int) dispatch.Snapshot {
-		return dispatch.Snapshot{Enabled: enabled, Targets: []dispatch.TargetSnapshot{{Origin: "http://gpu:30000", Slots: slots, Held: held}}}
+	snap := func(enabled bool, slots, held, weight int) dispatch.Snapshot {
+		return dispatch.Snapshot{Enabled: enabled, Targets: []dispatch.TargetSnapshot{{Origin: "http://gpu:30000", Slots: slots, Held: held, HeldWeight: weight}}}
 	}
 	for _, tc := range []struct {
-		name  string
-		s     dispatch.Snapshot
-		held  int
-		known bool
+		name   string
+		s      dispatch.Snapshot
+		held   int
+		weight int
+		known  bool
 	}{
-		{"slotted", snap(true, 4, 3), 3, true},
-		{"no slots", snap(true, 0, 0), 0, false},
-		{"dispatcher disabled", snap(false, 4, 0), 0, false},
-		{"absent", dispatch.Snapshot{Enabled: true}, 0, true},
-		{"absent, dispatcher disabled", dispatch.Snapshot{Enabled: false}, 0, false},
+		{"slotted", snap(true, 4, 3, 3), 3, 3, true},
+		{"no slots", snap(true, 0, 0, 0), 0, 0, false},
+		{"dispatcher disabled", snap(false, 4, 0, 0), 0, 0, false},
+		{"absent", dispatch.Snapshot{Enabled: true}, 0, 0, true},
+		{"absent, dispatcher disabled", dispatch.Snapshot{Enabled: false}, 0, 0, false},
 		// A03-W3 (A-E5 no. 3): Held is the sum of internal and external
 		// slot-holding leases — the detector reads the sum, never the
 		// internal half, or external load would read as foreign.
 		{"internal plus external", dispatch.Snapshot{Enabled: true, Targets: []dispatch.TargetSnapshot{{
-			Origin: "http://gpu:30000", Slots: 4, Held: 3, HeldInternal: 1, HeldExternal: 2}}}, 3, true},
+			Origin: "http://gpu:30000", Slots: 4, Held: 3, HeldInternal: 1, HeldExternal: 2, HeldWeight: 3}}}, 3, 3, true},
+		// A03-W8 (detector pairing): one external lease of weight 3 next to
+		// an in-house lease — two leases, four engine sequences.
+		{"weighted external lease", dispatch.Snapshot{Enabled: true, Targets: []dispatch.TargetSnapshot{{
+			Origin: "http://gpu:30000", Slots: 8, Held: 2, HeldInternal: 1, HeldExternal: 1, HeldWeight: 4, HeldExternalWeight: 3}}}, 2, 4, true},
 	} {
-		if h, k := heldOf(tc.s, "http://gpu:30000"); h != tc.held || k != tc.known {
-			t.Errorf("%s: heldOf = %d/%v, want %d/%v", tc.name, h, k, tc.held, tc.known)
+		if h, w, k := heldOf(tc.s, "http://gpu:30000"); h != tc.held || w != tc.weight || k != tc.known {
+			t.Errorf("%s: heldOf = %d/%d/%v, want %d/%d/%v", tc.name, h, w, k, tc.held, tc.weight, tc.known)
 		}
 	}
-	if h, k := mergeHeld(snap(true, 4, 1), snap(true, 4, 3), true, "http://gpu:30000"); h != 3 || !k {
-		t.Errorf("merge = %d/%v, want 3/true", h, k)
+	// The two snapshots around a probe merge each count to its larger value
+	// (a lease taken or released during the GET counts in ctx's favour).
+	if h, w, k := mergeHeld(snap(true, 8, 1, 3), snap(true, 8, 2, 2), true, "http://gpu:30000"); h != 2 || w != 3 || !k {
+		t.Errorf("merge = %d/%d/%v, want 2/3/true", h, w, k)
 	}
-	if _, k := mergeHeld(dispatch.Snapshot{}, dispatch.Snapshot{}, false, "http://gpu:30000"); k {
+	if _, _, k := mergeHeld(dispatch.Snapshot{}, dispatch.Snapshot{}, false, "http://gpu:30000"); k {
 		t.Error("no dispatcher wired must not be comparable")
 	}
 }

@@ -45,19 +45,23 @@ func admissionHost(err error) string {
 	return ""
 }
 
-// setRejectRetryAfter sets the Retry-After header for an interactive
-// dispatcher rejection using the B1 snapshot estimate, IF the admitter exposes
-// the estimator (dispatch.RetryHinter). A test fake admitter or an unknown
-// origin ⇒ no header: an honest absence beats a fabricated constant (design/03
-// §3.3 rationale, overridden by B1 only where the snapshot source exists).
-// No effect after the response header is committed (net/http drops late header
-// writes) — call it before writing the status.
-func setRejectRetryAfter(w http.ResponseWriter, adm dispatch.Admitter, err error) {
+// setRejectRetryAfter sets the Retry-After header for a dispatcher rejection
+// of class using the B1 snapshot estimate, IF the admitter exposes the
+// estimator (dispatch.RetryHinter). The class is the caller's (design/02
+// A03-3, wave A03-W8): the in-house sites pass ClassInteractive — the B1
+// header byte for byte as before. An external rejection never comes here:
+// /v1 reads the Retry-After from its RejectionError (V1Admission). A test
+// fake admitter or an unknown origin ⇒ no header: an honest absence beats a
+// fabricated constant (design/03 §3.3 rationale, overridden by B1 only where
+// the snapshot source exists). No effect after the response header is
+// committed (net/http drops late header writes) — call it before writing the
+// status.
+func setRejectRetryAfter(w http.ResponseWriter, adm dispatch.Admitter, err error, class dispatch.Class) {
 	hinter, ok := adm.(dispatch.RetryHinter)
 	if !ok {
 		return
 	}
-	d := hinter.RetryAfterHint(admissionHost(err), dispatch.ClassInteractive)
+	d := hinter.RetryAfterHint(admissionHost(err), class)
 	if secs := retryAfterSeconds(d); secs > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
 	}

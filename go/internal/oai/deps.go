@@ -7,6 +7,9 @@ import (
 	"strings"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/modelalias"
 )
 
@@ -38,6 +41,76 @@ type Deps struct {
 	// HasGrant probes one grant — one primary-key probe
 	// (store.ConsumerGrantsAlias); read once per resolved alias.
 	HasGrant func(ctx context.Context, consumerID, aliasID string) (bool, error)
+}
+
+// AdmissionPlanner is the admission contract of every /v1 inference handler
+// (design/02 §4.13, design/03 §4.9; wave A03-W8). handler.V1Admission
+// implements it; W02-07 wires it into Deps for the first inference route.
+// The interface lives here because the handlers do and internal/oai cannot
+// import internal/handler. The handler's order (design/03 §4.9 "Ablaufvertrag"):
+// Plan, then llm.WalkChain over Plan.Chain with Plan.Acquirer and
+// WalkRules{AllowedClasses: AllowedClasses()}; an error of Plan, an acquire
+// error of the walk (llm.IsAdmissionError) or the walk's class assert
+// (llm.ErrWalkClass) goes to WriteAdmissionError before anything else is
+// written — no byte and no status before the First acquire returned. An
+// attempt error (an upstream status, a wire timeout) is the route's own
+// mapping, never the admission writer's.
+type AdmissionPlanner interface {
+	// AllowedClasses is the ONE source of WalkRules.AllowedClasses of every
+	// /v1 route (the external classes the planner binds); no route writes
+	// the class list itself.
+	AllowedClasses() []dispatch.Class
+	// Plan resolves the request's lane, filters its chain to the rows that
+	// offer the external class and returns the request's acquirer. ctx is
+	// the request's: its deadline becomes Request.ServeBy, its inbound
+	// federation state (Ctx-Class, Ctx-Path, Ctx-Max-Wait-Ms) is read
+	// through fedhop.InboundFrom. A lane or chain that is not offered is an
+	// error for WriteAdmissionError, before any acquire.
+	Plan(ctx context.Context, ca *auth.ConsumerAuth, in AdmissionInput) (Plan, error)
+	// WriteAdmissionError answers an admission failure (an error of Plan,
+	// an acquire error of the walk, the walk's class assert) and returns
+	// the code it wrote (the refusal reason of the access log and the
+	// ledger, W06-9/W06-12) — "" when it wrote nothing because the acquire
+	// ended with the request's context; the route then answers its own
+	// deadline, if it set one.
+	WriteAdmissionError(w http.ResponseWriter, err error) string
+}
+
+// AdmissionInput is what a route hands the planner: the request's chain
+// (resolved and sensitivity-filtered, W02-07), the service_tier of the body,
+// and the engine work of the request for the weight plan (design/03 §4.7).
+type AdmissionInput struct {
+	Chain       []backends.Backend
+	ServiceTier string
+	// Units is the request's engine parallelism: 1 for chat (n > 1 is RC-F,
+	// E4), the inputs of an embedding request, the documents of a rerank
+	// request; 0 reads as 1.
+	Units int
+	// SubBatch is the alias policy's per-lease cap (embedding.sub_batch,
+	// rerank.sub_batch); 0 = none. A lease carries at most
+	// min(SubBatch, ExternalWeightCap(origin)) units.
+	SubBatch int
+}
+
+// Plan is the planner's answer for one request.
+type Plan struct {
+	// Acquirer is the request's acquirer: First blocks (the one wait point),
+	// Next never blocks (failover), Continue serves the further sub-blocks
+	// of the attempt's row; Blocks is the weight plan of that row.
+	Acquirer RequestAcquirer
+	// Chain is the input chain filtered to the rows whose origin offers the
+	// external class, in order.
+	Chain []backends.Backend
+	// Lane is the resolved lane, "urgent" or "bulk".
+	Lane string
+}
+
+// RequestAcquirer is the per-request acquirer of a Plan: llm.Acquirer plus
+// the weight plan of the current attempt's row (W02-09/W02-10 split their
+// inputs by it: block i carries Blocks()[i] units).
+type RequestAcquirer interface {
+	llm.Acquirer
+	Blocks() []int
 }
 
 // missing names the unset fields ("" = complete).

@@ -30,6 +30,8 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -73,6 +75,39 @@ var sdkCases = []sdkCase{
 		shouldRetry: "false", maxRetries: 2, wantHits: 1},
 	{name: "server_overloaded", status: http.StatusServiceUnavailable, errType: "service_unavailable_error", code: "server_overloaded",
 		shouldRetry: "true", maxRetries: 1, wantHits: 2, headers: map[string]string{"Retry-After": "1"}},
+	// The admission writer of /v1 (A03-W8, handler.V1Admission): the
+	// dispatcher's saturation (429 server_busy, both Retry-After headers from
+	// the rejection's own estimate, retried after it) and a model no target
+	// offers (503 model_unavailable, Retry-After = the largest step).
+	{name: "server_busy", status: http.StatusTooManyRequests, errType: "rate_limit_error", code: "server_busy",
+		shouldRetry: "true", maxRetries: 1, wantHits: 2, headers: map[string]string{"Retry-After": "1", "retry-after-ms": "1000"}},
+	{name: "model_unavailable", status: http.StatusServiceUnavailable, errType: "service_unavailable_error", code: "model_unavailable",
+		shouldRetry: "true", maxRetries: 0, wantHits: 1, headers: map[string]string{"Retry-After": "2"}},
+}
+
+// confDispatch is the dispatcher behind the admission writer cases: steps
+// {1 s, 2 s}, nothing offered (the writer reads only the steps).
+type confDispatch struct{}
+
+func (confDispatch) Acquire(context.Context, dispatch.Request) (*dispatch.Lease, context.Context, error) {
+	return nil, nil, dispatch.ErrExternalNotOffered
+}
+
+func (confDispatch) TryAcquire(context.Context, dispatch.Request) (*dispatch.Lease, context.Context, error) {
+	return nil, nil, dispatch.ErrExternalNotOffered
+}
+
+func (confDispatch) ExternalAdmissible(string) bool { return false }
+func (confDispatch) ExternalWeightCap(string) int   { return 0 }
+func (confDispatch) ExternalRetryAfterSteps() []time.Duration {
+	return []time.Duration{time.Second, 2 * time.Second}
+}
+
+// admissionWriter answers err through the /v1 admission writer, jitter 0
+// (the headers are pinned per case).
+func admissionWriter(err error) http.HandlerFunc {
+	adm := handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: confDispatch{}, Settings: func() oai.Settings { return oai.Settings{} }})
+	return func(w http.ResponseWriter, _ *http.Request) { adm.WriteAdmissionError(w, err) }
 }
 
 // writerSet maps a case name to the handler that answers it.
@@ -98,6 +133,8 @@ func oaiWriters() writerSet {
 		},
 		"internal_error":    func(w http.ResponseWriter, _ *http.Request) { oai.WriteInternal(w) },
 		"server_overloaded": func(w http.ResponseWriter, _ *http.Request) { oai.WriteOverloaded(w) },
+		"server_busy":       admissionWriter(&dispatch.RejectionError{Err: dispatch.ErrWaitExpired, RetryAfter: time.Second}),
+		"model_unavailable": admissionWriter(dispatch.ErrExternalNotOffered),
 	}
 }
 
@@ -129,6 +166,10 @@ func houseWriters() writerSet {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		},
 		"server_overloaded": houseJSON(http.StatusServiceUnavailable, map[string]any{"success": false, "error": "server busy — retry shortly"}),
+		// Before A03-W8 a /v1 saturation had only the house 429 body of the
+		// in-house rejection mapping, and a not-offered model no writer at all.
+		"server_busy":       houseJSON(http.StatusTooManyRequests, map[string]any{"success": false, "error": "server busy — retry shortly"}),
+		"model_unavailable": houseJSON(http.StatusServiceUnavailable, map[string]any{"success": false, "error": "server busy — retry shortly"}),
 	}
 }
 

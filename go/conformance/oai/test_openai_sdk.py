@@ -59,6 +59,12 @@ CASES = [
      {}),
     ("server_overloaded", openai.InternalServerError, 503, "service_unavailable_error", "server_overloaded", "true", 1,
      2, {"retry-after": "1"}),
+    # The /v1 admission writer (A03-W8): dispatcher saturation and a model no
+    # target offers.
+    ("server_busy", openai.RateLimitError, 429, "rate_limit_error", "server_busy", "true", 1, 2,
+     {"retry-after": "1", "retry-after-ms": "1000"}),
+    ("model_unavailable", openai.InternalServerError, 503, "service_unavailable_error", "model_unavailable", "true", 0,
+     1, {"retry-after": "2"}),
 ]
 
 

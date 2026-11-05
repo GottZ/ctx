@@ -297,13 +297,14 @@ func TestStatusGoldenKeys(t *testing.T) {
 
 	// W06-8: one foreign_load row per marked origin. probe_error/held/running/
 	// active are null-capable but always present (null = not measured, never omitted),
-	// the hourly sub-object carries the last evaluated hour.
+	// the hourly sub-object carries the last evaluated hour. A03-W8: held_weight
+	// (Σw of the held leases, the partner of running) — null-capable like held.
 	var fls []json.RawMessage
 	if err := json.Unmarshal(top["foreign_load"], &fls); err != nil {
 		t.Fatalf("unmarshal foreign_load: %v", err)
 	}
 	assertKeys(t, "foreign_load.row", fls[0], []string{
-		"target", "probe", "backends", "running", "active", "held", "delta", "suspected", "since",
+		"target", "probe", "backends", "running", "active", "held", "held_weight", "delta", "suspected", "since",
 		"suspected_hourly", "hourly", "probe_error", "probed_at",
 	})
 	var fl map[string]json.RawMessage

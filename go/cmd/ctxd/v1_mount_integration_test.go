@@ -82,6 +82,7 @@ type v1Fixture struct {
 	tracer   *v1Tracer
 	cfgStore *config.Store
 	aliases  *modelalias.Registry
+	disp     *dispatch.Dispatcher // the router's dispatcher (A03-W8 census: no /v1 model route acquires)
 
 	adminID          string
 	modelKey, allKey string
@@ -158,6 +159,7 @@ func newV1Fixture(t *testing.T, env map[string]string, wrap func([]modelRoute) [
 	projectHub := events.NewProjectHub(ctx, f.pool, cfgStore)
 	d := dispatch.New(nil, dispatch.DefaultSettings())
 	t.Cleanup(d.Close)
+	f.disp = d
 	scheduler.SetDispatcher(d)
 	ident := fedhop.NewIdentity("00000000-0000-4000-8000-000000000205", bytes.Repeat([]byte{0x25}, 32))
 	f.router, f.ingress, f.gateway = buildRouter(fedhop.WithIdentity(ctx, ident), f.pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d, wrap)

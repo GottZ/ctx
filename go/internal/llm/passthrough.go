@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -68,15 +69,37 @@ func mustMarshal(v any) json.RawMessage {
 	return raw
 }
 
-// isClientCTXKey reports a key ctx sets itself (design/02 §4.5 class CTX);
-// the client's value never reaches the wire.
+// isClientCTXKey reports a key ctx sets itself (design/02 §4.5 class CTX)
+// or never lets a client set (the engine scheduling fields); the client's
+// value never reaches the wire. priority is a CTX key since A03-W8
+// (design/03 §5 X4, design/04 I-H5): a client priority would rank foreign
+// traffic inside the engine above ctx's own order — ctx alone sets the
+// engine priority, from its band (A03-W13).
 func isClientCTXKey(k string) bool {
 	switch k {
 	case "model", "messages", "stream", "stream_options", "max_tokens", "max_completion_tokens", "n", "service_tier":
 		return true
 	}
-	return strings.HasPrefix(k, "reasoning")
+	return strings.HasPrefix(k, "reasoning") || slices.Contains(engineSchedulingKeys, k)
 }
+
+// engineSchedulingKeys are the body fields with which a client could steer
+// an engine's scheduling or placement past ctx's admission (design/03 §4.9
+// step 7, §3.5 table: "priority and every engine scheduling field — always
+// removed"; names from the DROP class of design/02 §4.5):
+//
+//   - priority — request priority of vLLM and SGLang (SGLang with priority
+//     scheduling: higher first, design/03 §4.11);
+//   - id_slot — llama.cpp server: pins the request to one slot;
+//   - bootstrap_host, bootstrap_port, bootstrap_room — SGLang
+//     prefill/decode disaggregation: the pairing of the request;
+//   - kv_transfer_params — vLLM disaggregated prefill: the KV transfer of
+//     the request.
+//
+// The other DROP-class keys (prompt caching, metadata, …) are W02-06's body
+// parse; these are stripped here as well because they reach the engine's
+// scheduler.
+var engineSchedulingKeys = []string{"priority", "id_slot", "bootstrap_host", "bootstrap_port", "bootstrap_room", "kv_transfer_params"}
 
 // BuildUpstreamBody renders one attempt's request body for row b. Stages in
 // ascending precedence (design/02 §4.5.2, a later stage wins on a key):
