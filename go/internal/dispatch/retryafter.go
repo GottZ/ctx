@@ -3,6 +3,7 @@ package dispatch
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -178,6 +179,16 @@ func (e *RejectionError) Error() string { return e.Err.Error() }
 
 // Unwrap exposes the sentinel to errors.Is (IsRejection).
 func (e *RejectionError) Unwrap() error { return e.Err }
+
+// ExternalRetryAfterSteps returns the resolved Retry-After steps of the
+// external class — Settings.ExternalRetryAfterSteps after
+// resolveRetryAfterSteps (the default for nil or an invalid list), as a copy:
+// the caller cannot reach the dispatcher's list. The /v1 admission mapping
+// (A03-W8) answers an ErrExternalNotOffered and an empty chain with the
+// largest step. Lock-free: one atomic settings load and one copy.
+func (d *Dispatcher) ExternalRetryAfterSteps() []time.Duration {
+	return slices.Clone(d.currentSettings().ExternalRetryAfterSteps)
+}
 
 // errRetryAfterSteps is the cause of every malformed step list.
 var errRetryAfterSteps = errors.New("dispatch: retry-after steps must be comma-separated whole seconds >= 1, strictly ascending, at least one")

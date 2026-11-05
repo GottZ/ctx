@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -68,15 +69,37 @@ func mustMarshal(v any) json.RawMessage {
 	return raw
 }
 
-// isClientCTXKey reports a key ctx sets itself (design/02 §4.5 class CTX);
-// the client's value never reaches the wire.
+// isClientCTXKey reports a key ctx sets itself (design/02 §4.5 class CTX)
+// or never lets a client set (the engine scheduling fields); the client's
+// value never reaches the wire. priority is a CTX key since A03-W8
+// (design/03 §5 X4, design/04 I-H5): a client priority would rank foreign
+// traffic inside the engine above ctx's own order — ctx alone sets the
+// engine priority, from its band (A03-W13).
 func isClientCTXKey(k string) bool {
 	switch k {
 	case "model", "messages", "stream", "stream_options", "max_tokens", "max_completion_tokens", "n", "service_tier":
 		return true
 	}
-	return strings.HasPrefix(k, "reasoning")
+	return strings.HasPrefix(k, "reasoning") || slices.Contains(engineSchedulingKeys, k)
 }
+
+// engineSchedulingKeys are the body fields with which a client could steer
+// an engine's scheduling or placement past ctx's admission (design/03 §4.9
+// step 7, §3.5 table: "priority and every engine scheduling field — always
+// removed"; names from the DROP class of design/02 §4.5):
+//
+//   - priority — request priority of vLLM and SGLang (SGLang with priority
+//     scheduling: higher first, design/03 §4.11);
+//   - id_slot — llama.cpp server: pins the request to one slot;
+//   - bootstrap_host, bootstrap_port, bootstrap_room — SGLang
+//     prefill/decode disaggregation: the pairing of the request;
+//   - kv_transfer_params — vLLM disaggregated prefill: the KV transfer of
+//     the request.
+//
+// The other DROP-class keys (prompt caching, metadata, …) are W02-06's body
+// parse; these are stripped here as well because they reach the engine's
+// scheduler.
+var engineSchedulingKeys = []string{"priority", "id_slot", "bootstrap_host", "bootstrap_port", "bootstrap_room", "kv_transfer_params"}
 
 // BuildUpstreamBody renders one attempt's request body for row b. Stages in
 // ascending precedence (design/02 §4.5.2, a later stage wins on a key):
@@ -536,6 +559,11 @@ func (rl *sseRelay) result() *RawStreamResult {
 
 // --- the gateway chain walker (design/02 §4.11.1) ---.
 
+// attemptClassAdmission is the chain-entry class (metadata.chain err_class)
+// of an attempt that ended because a continuation acquire inside it failed
+// — an admission outcome, never a backend error class.
+const attemptClassAdmission = "admission"
+
 // ErrNoContinuation is Acquirer.Continue's answer from an Acquirer without a
 // continuation door (K21): a sub-block walk then stays at k = 1. The
 // dispatcher's continuation acquire exists since A03-W17
@@ -643,6 +671,9 @@ func windowAbove(cand, floor int) bool {
 //   - an acquire error is terminal (no attempt, no Classify, no report),
 //     always an AdmissionError, so no llmlog line is written for it;
 //   - a dispatcher abort (preempt/reap) is terminal without a report;
+//   - an admission error the attempt returns (a continuation acquire of a
+//     sub-block walk) is terminal without Classify and report, its entry
+//     class attemptClassAdmission;
 //   - otherwise Classify + report, then STOP on a parent cancel, on a
 //     committed attempt (no failover after the first data frame) and on the
 //     STOP classes (server_fault, timeout);
@@ -704,9 +735,8 @@ func WalkChain(ctx context.Context, chain []backends.Backend, role string, acq A
 			}
 			return b, attempts, nil
 		}
-		if abort := llmlog.AbortClass(runCtx); abort != "" {
-			attempts = append(attempts, ChainAttempt{Backend: b.Name, Class: abort, Ms: elapsed.Milliseconds(), WaitMs: waitMs})
-			slog.Warn("llm: gateway attempt aborted by dispatcher", "role", role, "backend", b.Name, "abort", abort, "error", err)
+		if class := terminalAttempt(runCtx, err, role, b); class != "" {
+			attempts = append(attempts, ChainAttempt{Backend: b.Name, Class: class, Ms: elapsed.Milliseconds(), WaitMs: waitMs})
 			return nil, attempts, err
 		}
 		class := backends.Classify(err, b.ProviderClass)
@@ -770,6 +800,25 @@ func acquireFor(ctx context.Context, acq Acquirer, rules *WalkRules, acquired bo
 		return nil, nil, cerr
 	}
 	return lease, runCtx, nil
+}
+
+// terminalAttempt is the chain-entry class of a failed attempt that ends the
+// walk without Classify and without a health report, "" for every other
+// failure: a dispatcher abort of its lease (preempt/reap, WARN), or an
+// admission error the attempt returns — a continuation acquire of the
+// sub-block walk (Acquirer.Continue) failed: an admission outcome, not the
+// row's, terminal like an acquire error of First/Next (doctrine §4.3; PR
+// #142 bot review 4477069054). The attempt keeps its entry either way: its
+// earlier wire work happened.
+func terminalAttempt(runCtx context.Context, err error, role string, b *backends.Backend) string {
+	if abort := llmlog.AbortClass(runCtx); abort != "" {
+		slog.Warn("llm: gateway attempt aborted by dispatcher", "role", role, "backend", b.Name, "abort", abort, "error", err)
+		return abort
+	}
+	if IsAdmissionError(err) {
+		return attemptClassAdmission
+	}
+	return ""
 }
 
 // laterWindowAbove reports whether a later row may still serve the prompt.

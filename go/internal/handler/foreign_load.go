@@ -11,15 +11,20 @@ package handler
 // export, not reading a foreign one) and comparing them with what ctx itself
 // put on the engine:
 //
-//	(a) per probe round: the requests the engine holds — the larger of its
-//	    scheduler's running requests and its in-flight HTTP requests on the
-//	    model endpoints — against the dispatcher's held leases on that
-//	    origin. Lease and engine lag only in the direction engine <= held (a
-//	    lease is taken before the request is sent and released after it
-//	    ends), so engine > held for status.foreign_load_hysteresis_ticks
-//	    consecutive rounds is load ctx did not admit ⇒ suspected. The HTTP
-//	    gauge is what still sees foreign requests waiting in a saturated
-//	    engine's queue, where the scheduler gauge reads running = held.
+//	(a) per probe round: what the engine holds against what ctx holds on
+//	    that origin, each gauge in its own unit (detector pairing, A03-W8):
+//	    the scheduler's running requests (engine sequences) against the
+//	    dispatcher's HeldWeight (Σw of the held leases — an external lease
+//	    of weight w is w sequences: chat n, embedding inputs, rerank
+//	    documents), and the in-flight HTTP requests on the model endpoints
+//	    against Held (one HTTP request per lease). Lease and engine lag only
+//	    in the direction engine <= held (a lease is taken before the request
+//	    is sent and released after it ends), so running > HeldWeight or
+//	    active > Held for status.foreign_load_hysteresis_ticks consecutive
+//	    rounds is load ctx did not admit ⇒ suspected; without the HTTP gauge
+//	    running alone is compared with HeldWeight. The HTTP gauge is what
+//	    still sees foreign requests waiting in a saturated engine's queue,
+//	    where the scheduler gauge reads running = HeldWeight.
 //	(b) per hour: the engine's model-endpoint RESPONSE counter delta against
 //	    the LLM-usage rollup's duration_n of every backend row on that origin
 //	    (ctx's own logged calls) ⇒ suspected_hourly beyond
@@ -143,9 +148,13 @@ type foreignLoadRow struct {
 	Active  *int64 `json:"active"`
 	// Held is the dispatcher's held leases on the origin, null when the target
 	// is pass-through (no slots / dispatcher disabled) or no dispatcher is
-	// wired: then only the hourly comparison applies.
-	Held *int `json:"held"`
-	// Delta is max(running, active) − held.
+	// wired: then only the hourly comparison applies. HeldWeight is the sum
+	// of their weights (engine sequences), null in the same cases; running
+	// pairs with HeldWeight, active with Held.
+	Held       *int `json:"held"`
+	HeldWeight *int `json:"held_weight"`
+	// Delta is max(running − held_weight, active − held), running −
+	// held_weight without the active gauge.
 	Delta     *int64     `json:"delta"`
 	Suspected bool       `json:"suspected"`
 	Since     *time.Time `json:"since"`
@@ -331,10 +340,11 @@ type foreignLoadState struct {
 	target          foreignLoadTarget
 	running         *int64
 	held            *int
+	heldWeight      *int
 	delta           *int64
 	suspected       bool
 	since           *time.Time
-	excess, clean   int // consecutive rounds with engine > held / engine <= held
+	excess, clean   int // consecutive rounds with / without an engine excess over the held counts
 	probeErr        string
 	probedAt        *time.Time
 	mark            foreignLoadMark
@@ -519,8 +529,8 @@ func (d *foreignLoadDetector) round(ctx context.Context, targets []foreignLoadTa
 		if st == nil {
 			continue // unmarked while the round ran
 		}
-		held, known := mergeHeld(before, after, wired, t.origin)
-		st.observe(now, probes[i], held, known, set, log)
+		held, weight, known := mergeHeld(before, after, wired, t.origin)
+		st.observe(now, probes[i], held, weight, known, set, log)
 	}
 	d.publishLocked()
 }
@@ -579,37 +589,38 @@ func (d *foreignLoadDetector) heldView() (dispatch.Snapshot, bool) {
 	return d.dispatch.Snapshot(), true
 }
 
-// heldOf reads the held leases of origin from one dispatcher snapshot. known
-// is false for a pass-through target (dispatcher disabled, or the origin has
-// no slots): its leases are not counted in Held, so engine > held would be
-// ctx's own traffic. An origin absent from an ENABLED dispatcher's snapshot
-// never saw an Acquire since boot (targets are created lazily) — 0 leases,
-// and that 0 is a fact; with the dispatcher disabled every target is
-// pass-through, absent or not.
-func heldOf(snap dispatch.Snapshot, origin string) (int, bool) {
+// heldOf reads the held leases of origin and the sum of their weights
+// (HeldWeight) from one dispatcher snapshot. known is false for a
+// pass-through target (dispatcher disabled, or the origin has no slots): its
+// leases are not counted in Held, so engine > held would be ctx's own
+// traffic. An origin absent from an ENABLED dispatcher's snapshot never saw
+// an Acquire since boot (targets are created lazily) — 0 leases, and that 0
+// is a fact; with the dispatcher disabled every target is pass-through,
+// absent or not.
+func heldOf(snap dispatch.Snapshot, origin string) (held, weight int, known bool) {
 	for i := range snap.Targets {
-		if snap.Targets[i].Origin == origin {
-			return snap.Targets[i].Held, snap.Enabled && snap.Targets[i].Slots > 0
+		if ts := &snap.Targets[i]; ts.Origin == origin {
+			return ts.Held, ts.HeldWeight, snap.Enabled && ts.Slots > 0
 		}
 	}
-	return 0, snap.Enabled
+	return 0, 0, snap.Enabled
 }
 
-// mergeHeld takes the larger held count of the two snapshots around the GETs:
-// a lease taken or released while the GET was in flight then counts in ctx's
-// favour, which keeps the lag in the engine <= held direction the comparison
-// relies on.
-func mergeHeld(before, after dispatch.Snapshot, wired bool, origin string) (int, bool) {
+// mergeHeld takes the larger held count and the larger held weight of the
+// two snapshots around the GETs, each on its own: a lease taken or released
+// while the GET was in flight then counts in ctx's favour, which keeps the
+// lag in the engine <= held direction the comparison relies on.
+func mergeHeld(before, after dispatch.Snapshot, wired bool, origin string) (held, weight int, known bool) {
 	if !wired {
-		return 0, false
+		return 0, 0, false
 	}
-	hb, kb := heldOf(before, origin)
-	ha, ka := heldOf(after, origin)
-	return max(hb, ha), kb && ka
+	hb, wb, kb := heldOf(before, origin)
+	ha, wa, ka := heldOf(after, origin)
+	return max(hb, ha), max(wb, wa), kb && ka
 }
 
 // observe folds one probe round into the state.
-func (s *foreignLoadState) observe(now time.Time, p foreignLoadProbe, held int, heldKnown bool, set foreignLoadSettings, log *slog.Logger) {
+func (s *foreignLoadState) observe(now time.Time, p foreignLoadProbe, held, heldWeight int, heldKnown bool, set foreignLoadSettings, log *slog.Logger) {
 	stamp := now
 	s.probedAt = &stamp
 	if p.errText != "" {
@@ -617,7 +628,7 @@ func (s *foreignLoadState) observe(now time.Time, p foreignLoadProbe, held int, 
 			log.Warn("status: foreign load probe failed", "target", s.target.origin, "error", p.errText, "cause", p.cause)
 		}
 		s.probeErr = p.errText
-		s.running, s.active, s.held, s.delta = nil, nil, nil, nil
+		s.running, s.active, s.held, s.heldWeight, s.delta = nil, nil, nil, nil, nil
 		s.excess, s.clean = 0, 0 // an unmeasured round breaks "consecutive"
 		return
 	}
@@ -627,16 +638,14 @@ func (s *foreignLoadState) observe(now time.Time, p foreignLoadProbe, held int, 
 	}
 	running := p.reading.running
 	s.running = &running
-	engine := running
 	s.active = nil
 	if p.reading.hasActive {
 		active := p.reading.active
 		s.active = &active
-		engine = max(engine, active)
 	}
 	s.observeHour(now, p.reading.responses, set)
 	if !heldKnown {
-		s.held, s.delta = nil, nil
+		s.held, s.heldWeight, s.delta = nil, nil, nil
 		s.excess, s.clean = 0, 0
 		if s.suspected {
 			log.Warn("status: foreign load cleared", "target", s.target.origin, "reason", "held is no longer comparable (pass-through target)")
@@ -644,18 +653,26 @@ func (s *foreignLoadState) observe(now time.Time, p foreignLoadProbe, held int, 
 		}
 		return
 	}
-	s.compare(now, engine, held, set, log)
+	s.compare(now, held, heldWeight, set, log)
 }
 
-// compare is check (a) with the symmetric hysteresis: N consecutive rounds of
-// engine > held enter suspected, N consecutive rounds of engine <= held
+// compare is check (a) with the symmetric hysteresis: N consecutive rounds
+// with an engine excess enter suspected, N consecutive rounds without one
 // leave it — a bursty foreign client must not toggle a WARN pair per tick.
-// engine is max(running, active) of the round.
-func (s *foreignLoadState) compare(now time.Time, engine int64, held int, set foreignLoadSettings, log *slog.Logger) {
-	h := held
-	delta := engine - int64(held)
-	s.held, s.delta = &h, &delta
-	if engine > int64(held) {
+// The excess of a round is the detector pairing (A03-W8, DECISIONS A-E5 no.
+// 3): running − heldWeight (sequences against the leases' summed weights)
+// and, when the engine exposes the gauge, active − held (HTTP requests
+// against leases); an excess is either one above 0, delta the larger of the
+// two — so a weighted lease is not foreign load, while a foreign request
+// (one more HTTP request) or a foreign sequence still is.
+func (s *foreignLoadState) compare(now time.Time, held, heldWeight int, set foreignLoadSettings, log *slog.Logger) {
+	h, hw := held, heldWeight
+	delta := *s.running - int64(heldWeight)
+	if s.active != nil {
+		delta = max(delta, *s.active-int64(held))
+	}
+	s.held, s.heldWeight, s.delta = &h, &hw, &delta
+	if delta > 0 {
 		s.excess, s.clean = s.excess+1, 0
 	} else {
 		s.excess, s.clean = 0, s.clean+1
@@ -664,13 +681,22 @@ func (s *foreignLoadState) compare(now time.Time, engine int64, held int, set fo
 	case !s.suspected && s.excess >= set.hysteresis:
 		since := now
 		s.suspected, s.since = true, &since
-		log.Warn("status: foreign load suspected", "target", s.target.origin, "engine", engine, "held", held,
-			"delta", delta, "rounds", s.excess)
+		log.Warn("status: foreign load suspected", "target", s.target.origin, "running", *s.running, "active", optionalGauge(s.active),
+			"held", held, "held_weight", heldWeight, "delta", delta, "rounds", s.excess)
 	case s.suspected && s.clean >= set.hysteresis:
-		log.Warn("status: foreign load cleared", "target", s.target.origin, "engine", engine, "held", held,
-			"suspected_since", *s.since)
+		log.Warn("status: foreign load cleared", "target", s.target.origin, "running", *s.running, "active", optionalGauge(s.active),
+			"held", held, "held_weight", heldWeight, "suspected_since", *s.since)
 		s.suspected, s.since = false, nil
 	}
+}
+
+// optionalGauge is a nullable gauge as a log value: the number, or nil when
+// the engine does not expose it (never a pointer address).
+func optionalGauge(p *int64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // observeHour records the response-counter sample that stands for the current hour's
@@ -735,7 +761,7 @@ func (d *foreignLoadDetector) publishLocked() {
 		st := d.states[origin]
 		row := foreignLoadRow{
 			Target: origin, Probe: st.target.kind, Backends: append([]string{}, st.target.names...),
-			Running: st.running, Active: st.active, Held: st.held, Delta: st.delta,
+			Running: st.running, Active: st.active, Held: st.held, HeldWeight: st.heldWeight, Delta: st.delta,
 			Suspected: st.suspected, Since: st.since,
 			SuspectedHourly: st.suspectedHourly, ProbedAt: st.probedAt,
 		}

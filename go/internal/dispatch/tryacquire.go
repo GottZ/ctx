@@ -10,16 +10,23 @@ import (
 // eligible right now (slot busy, waiters ahead, or the herald term gating a
 // background acquire). It is deliberately NOT part of IsRejection: a
 // would-block is defer semantics for consumers that must not wait (Q-I3,
-// design/03 §4.4 — no blocking acquire under a held DB transaction), never a
-// client-facing 429. Like every admission error it is terminal for a chain
-// walk (doctrine §4.3: not an attempt — no Classify, no health report, no
-// llmlog row).
+// design/03 §4.4 — no blocking acquire under a held DB transaction). For the
+// in-house classes it is the bare sentinel and never a client-facing 429; an
+// EXTERNAL would-block (the /v1 failover attempt, design/02 §4.11.1) comes
+// wrapped in a RejectionError carrying the Retry-After of its own position
+// (A03-W8 lead decision O1: one contract for every external refusal), which
+// the /v1 mapping answers as 429 server_busy — errors.Is still sees the
+// sentinel and IsRejection stays false. Like every admission error it is
+// terminal for a chain walk (doctrine §4.3: not an attempt — no Classify, no
+// health report, no llmlog row).
 var ErrWouldBlock = errors.New("dispatch: target busy, would block")
 
 // TryAcquire is the non-blocking Acquire variant (Q-I3, design/03 §4.4,
 // built for D3-W5's tx-holding backfill): an eligible-now request is
 // admitted through the exact same predicate and lease bookkeeping as
-// Acquire; every other outcome returns ErrWouldBlock immediately — no
+// Acquire; every other outcome returns ErrWouldBlock immediately (for an
+// external request inside a RejectionError with the Retry-After of its own
+// position, the resolver of Acquire's refusals, A03-W8 O1) — no
 // waiter is enqueued, no wait slot taken, no preempt opened (preemption is
 // reserved for WAITING interactive acquires, design/02 §4.2.1). No-barging
 // holds by construction: eligibleNowLocked admits only when no same-or-
@@ -78,6 +85,12 @@ func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, conte
 	// in-house classes on a target without slots, ErrExternalNotOffered for
 	// an external request on a target that does not offer it.
 	l, err := d.admitNowLocked(st, w, now)
+	if l == nil && err == nil && w.class.External() {
+		// O1 (A03-W8): the Retry-After of an external would-block is the
+		// own position's, read in this mutex section — never the class-wide
+		// RetryAfterHint (it leaks the class depth, A03-W6).
+		err = d.externalRejectLocked(st, w, ErrWouldBlock, 0)
+	}
 	d.opDone(opStart)
 	d.mu.Unlock()
 	if l != nil {

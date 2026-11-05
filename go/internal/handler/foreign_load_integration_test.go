@@ -139,8 +139,11 @@ type flDispatch struct {
 func (d *flDispatch) Snapshot() dispatch.Snapshot {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// HeldWeight = Held: in-house leases weigh 1 — the invariant of a real
+	// dispatcher snapshot (every lease weighs ≥ 1), which the detector
+	// pairing reads since A03-W8 (running against HeldWeight).
 	return dispatch.Snapshot{Enabled: true, Targets: []dispatch.TargetSnapshot{{
-		Origin: d.origin, Slots: d.slots, Held: d.held, Inflight: d.held,
+		Origin: d.origin, Slots: d.slots, Held: d.held, HeldWeight: d.held, Inflight: d.held,
 	}}}
 }
 
