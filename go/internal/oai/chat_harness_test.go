@@ -473,6 +473,7 @@ func (a chatAnswer) envelope(t testing.TB) (code, param, typ string) {
 // post sends body to the route; hdr are extra request headers.
 func (r *chatRig) post(t testing.TB, body string, hdr ...string) chatAnswer {
 	t.Helper()
+	recordCorpus(body)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	for i := 0; i+1 < len(hdr); i += 2 {

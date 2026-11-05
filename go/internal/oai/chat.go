@@ -1,6 +1,7 @@
 package oai
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -36,6 +37,12 @@ import (
 //	(Pool.Chain, gateway wire, federation, export) → GateTenant → limiter →
 //	planner → watcher → WalkChain(BuildUpstreamBody, ChatRaw) → check before
 //	the write → answer rewrite → one llmlog row, one access record.
+//
+// Memory (FOLGE-P): what the request allocates in proportion to its body —
+// the body, a rewritten message array, every attempt's upstream body — is
+// booked against the request share of its reservation (cover) before it is
+// allocated; past that share the reservation grows, and a budget that cannot
+// hold it is the 503 server_overloaded of §4.10.2.
 //
 // Nothing is written before the planner's First acquire returned (design/03
 // §4.9 step 6). Every refusal names its code as the access record's reason.
@@ -113,6 +120,11 @@ type chatCall struct {
 	// goroutines. Without it the reservation goes back in full (Abort);
 	// after it, never (Keep without a usage).
 	wired atomic.Bool
+
+	// held is the request share of the reservation (the stage's
+	// requestReserveFactor × body, grown by cover), spent what the request
+	// has allocated against it (cover).
+	held, spent int64
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
@@ -196,6 +208,11 @@ func (c *chatCall) serve() {
 	if !ok {
 		return
 	}
+	if !c.cover(jsonStateBytes(body)) { // the JSON check's nesting state, booked before it runs
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
 	req, perr := parseTopLevel(body)
 	if perr != nil {
 		c.refuseParam(perr)
@@ -204,7 +221,7 @@ func (c *chatCall) serve() {
 	if !c.resolve(req.model) {
 		return
 	}
-	if perr := req.parsePolicy(limitsOf(c.alias, c.s)); perr != nil {
+	if perr := req.parsePolicy(limitsOf(c.alias, c.s), c.cover); perr != nil {
 		c.refuseParam(perr)
 		return
 	}
@@ -230,7 +247,7 @@ func (c *chatCall) serve() {
 	}
 	c.walk(chain, llm.UpstreamSpec{
 		Client: req.pass, Messages: req.messages, Role: c.alias.Role, Stream: false, MaxTokens: maxTokens,
-		ReasoningOff: reasoningOff(c.alias),
+		ReasoningOff: reasoningOff(c.alias), Reserve: c.reserveUpstream,
 	})
 }
 
@@ -241,11 +258,23 @@ func reasoningOff(a modelalias.Alias) bool {
 
 // readBody reads the body under the strict cap and the in-flight budget: a
 // chunked body past the budget is the budget's 503, never a 400 (§4.2.1).
+// The ledger starts here: the stage reserved requestReserveFactor × the
+// body, the read spent what readRequestBody allocated.
 func (c *chatCall) readBody() ([]byte, bool) {
-	body, err := io.ReadAll(c.r.Body)
+	body, spent, err := readRequestBody(c.r.Body, c.r.ContentLength)
 	var tooLarge *http.MaxBytesError
 	switch {
 	case err == nil:
+		reserved := int64(len(body))
+		if cl := c.r.ContentLength; cl > 0 {
+			reserved = cl
+		}
+		c.held, c.spent = requestReserveFactor*reserved, 0
+		if !c.cover(spent) { // a small undeclared body's first chunk can pass its share
+			c.rec.Reason = CodeServerOverloaded
+			WriteOverloaded(c.w)
+			return nil, false
+		}
 		return body, true
 	case errors.Is(err, ErrBudgetExhausted):
 		c.rec.Reason = CodeServerOverloaded
@@ -261,9 +290,106 @@ func (c *chatCall) readBody() ([]byte, bool) {
 	return nil, false
 }
 
+// readRequestBody reads the body with what it costs on the heap: a declared
+// length is read into one buffer of that size (io.ReadAll grows its way
+// there and spends about twice the body), an undeclared one in chunks that
+// double up to readChunkMax and are joined into one buffer at the end.
+func readRequestBody(r io.Reader, declared int64) ([]byte, int64, error) {
+	if declared > 0 {
+		buf := make([]byte, declared)
+		n, err := io.ReadFull(r, buf)
+		if err == nil {
+			var probe [1]byte
+			if k, _ := r.Read(probe[:]); k > 0 { // more than declared: never from net/http
+				rest, spent, err := readRequestBody(io.MultiReader(bytes.NewReader(probe[:k]), r), -1)
+				return append(buf, rest...), declared + spent + int64(len(buf)+len(rest)), err
+			}
+			return buf, declared, nil
+		}
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return buf[:n], declared, err
+	}
+	var chunks [][]byte
+	var spent int64
+	total, size := 0, readChunkMin
+	for {
+		chunk := make([]byte, size)
+		spent += int64(size)
+		n := 0
+		var err error
+		for n < size && err == nil {
+			var k int
+			k, err = r.Read(chunk[n:])
+			n += k
+		}
+		total += n
+		chunks = append(chunks, chunk[:n])
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, spent, err
+		}
+		size = min(2*size, readChunkMax)
+	}
+	if len(chunks) == 1 {
+		return chunks[0], spent, nil
+	}
+	body := make([]byte, 0, total)
+	for _, ch := range chunks {
+		body = append(body, ch...)
+	}
+	return body, spent + int64(total), nil
+}
+
+// The chunk sizes of an undeclared body: the first chunk holds a small
+// request whole, the largest bounds what is allocated ahead of the bytes the
+// budget stage reserves while they are read.
+const (
+	readChunkMin = 512
+	readChunkMax = 1 << 20
+)
+
+// cover books n more bytes against the request share before they are
+// allocated (FOLGE-P) and grows the reservation by what the bookings pass
+// the share; false when the budget cannot hold them — nothing is reserved
+// then, and the caller answers 503 server_overloaded.
+func (c *chatCall) cover(n int64) bool {
+	if c.spent+n <= c.held {
+		c.spent += n
+		return true
+	}
+	res := ReservationFrom(c.ctx)
+	if res == nil || !res.Grow(c.spent+n-c.held) {
+		return false
+	}
+	c.spent += n
+	c.held = c.spent
+	return true
+}
+
+// reserveUpstream is UpstreamSpec.Reserve: an attempt's upstream body is
+// booked before it is built — every attempt's, the earlier ones stay on the
+// heap until the collector runs. A refusal ends the walk as an admission
+// outcome (no health report for the row) and is answered 503 (outcome).
+func (c *chatCall) reserveUpstream(n int) error {
+	if !c.cover(int64(n)) {
+		return ErrBudgetExhausted
+	}
+	return nil
+}
+
 // refuseParam answers a parse refusal with its param (the envelope's
 // "param" names the field, §4.10.1), bound to the vocabulary like WriteCode.
+// errParseOverloaded is the in-flight budget's 503.
 func (c *chatCall) refuseParam(perr *paramError) {
+	if perr == errParseOverloaded {
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
 	i := slices.IndexFunc(codes, func(s CodeSpec) bool { return s.Code == perr.code })
 	if i < 0 {
 		c.internal("parse error code outside the vocabulary", "code", perr.code)
@@ -499,6 +625,9 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 	// (§4.12 "bei jeder Admission jetzt + Restfrist + 30 s").
 	setWriteDeadline(c.w, time.Now().Add(time.Until(c.dl)+writeMargin))
 	body, err := llm.BuildUpstreamBody(spec, b)
+	if errors.Is(err, ErrBudgetExhausted) {
+		err = &llm.AdmissionError{Err: err, Backend: b.Name, Host: b.Host}
+	}
 	if err != nil {
 		st.last = failedAttempt{b: b, err: err}
 		st.failed = append(st.failed, st.last)
@@ -671,6 +800,18 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 	}
 	if err == nil {
 		return c.success(plan, st)
+	}
+	if errors.Is(err, ErrBudgetExhausted) {
+		// The budget refused an attempt's upstream body (reserveUpstream):
+		// the stage's 503. Without a wire call no row and no Settle — the
+		// limiter's reservation ends with Abort (close).
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		finish := llmlog.FinishError
+		if st.wired == 0 {
+			finish = llmlog.FinishAborted
+		}
+		return chatOutcome{finish: finish, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeServerOverloaded}}
 	}
 	if isAdmissionFailure(err) {
 		waited := time.Duration(0)

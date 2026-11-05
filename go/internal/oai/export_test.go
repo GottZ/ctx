@@ -20,3 +20,11 @@ func SetWatchEvery(d time.Duration) (restore func()) {
 
 // WatchTick is the production period (O2 (a) pin).
 const WatchTick = watchTick
+
+// ReservationHeld reports what r holds right now (FOLGE-P: the heap gates
+// compare the parse's memory with the request's reservation).
+func ReservationHeld(r *Reservation) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.held
+}
