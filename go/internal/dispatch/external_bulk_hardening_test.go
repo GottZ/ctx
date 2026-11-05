@@ -432,7 +432,8 @@ func TestRefusalBesideABackgroundWaiterIsNoEvent(t *testing.T) {
 // (F2-2, H-4): under sustained urgent load above the external capacity bulk
 // is never served — a light and a heavy XB acquire end at the wait budget
 // with ErrWaitExpired (reason expired) and a Retry-After, no goroutine left
-// behind (external_bulk_aging_after is named, not built; A03-W8a). With
+// behind (external_bulk_aging_after is named, not built — design/03 §4.8:
+// an escape over background only, never over interactive or urgent). With
 // urgent load below E both are served (control).
 func TestExternalBulkStarvationEndsAtTheBudget(t *testing.T) {
 	const budget = 300 * time.Millisecond
