@@ -292,8 +292,8 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 }
 
 // meterReservation is a meter reservation as the route holds it: the usage
-// of the wire arrives as dispatch.Usage. Abort, Reject and Headers are the
-// meter's.
+// of the wire arrives as dispatch.Usage. Keep, Abort, Reject and Headers
+// are the meter's.
 type meterReservation struct{ *keyquota.Reservation }
 
 func (r meterReservation) Settle(u dispatch.Usage) {

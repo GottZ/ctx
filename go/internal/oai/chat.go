@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -105,7 +106,10 @@ type chatCall struct {
 	required backends.Sensitivity
 	limit    LimitReservation
 	limitEnd bool
-	wired    bool // a wire call (ChatRaw) was made: the reservation is never given back in full
+	// wired: a wire call (ChatRaw) sent the request to a backend — any
+	// outcome except a failed connect (dialFailed). After it the
+	// reservation is never given back (Keep without a usage).
+	wired bool
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
@@ -438,7 +442,7 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 			c.endLimit(func(l LimitReservation) { l.Reject(code, 0) })
 			return
 		}
-		c.admissionRefused(err, 0)
+		c.admissionRefused(err, 0, false)
 		return
 	}
 	// A run ended while the planner built the plan never reaches an acquire
@@ -511,8 +515,14 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 		return dispatch.Usage{}, false, err
 	}
 	st.wired++
-	c.wired = true
 	res, err := llm.ChatRaw(runCtx, *b, body, timeout, c.s.MaxResponseBytes)
+	// A connect that failed sent no byte of the request: no backend saw it,
+	// so the meter gives the reservation back (W06-10 hardening 2, H2-4).
+	// st.wired counts the wire calls for the census (Σ acquire = Σ wire) and
+	// keeps doing so.
+	if err == nil || !dialFailed(err) {
+		c.wired = true
+	}
 	if err != nil {
 		st.last = failedAttempt{b: b, err: err}
 		st.failed = append(st.failed, st.last)
@@ -530,10 +540,24 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 // share: [0-9A-Fa-f-]{1,64} (F-W3 review FR2-4). 36 + 2 + digits ≤ 64.
 func attemptRequestID(id string, n int) string { return fmt.Sprintf("%s-a%d", id, n) }
 
+// dialFailed reports whether err is a failed connect — the dial (TCP
+// connect, DNS lookup, the egress guard) failed, so no byte of the request
+// reached a backend (the forms httpx.IsBackendUnavailable names for a dial).
+// A reset or an EOF after the connect is not one: the request may have
+// arrived.
+func dialFailed(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	var dns *net.DNSError
+	return errors.As(err, &dns)
+}
+
 // admissionRefused answers an admission failure through the planner's
 // writer — only these (A03-W8 handover: plan errors, acquire errors, the
 // class assert); waited is the time the request queued.
-func (c *chatCall) admissionRefused(err error, waited time.Duration) {
+func (c *chatCall) admissionRefused(err error, waited time.Duration, wired bool) {
 	reason := c.d.Planner.WriteAdmissionError(c.ctx, c.w, err)
 	if reason == "" {
 		// The writer wrote nothing: it saw the run context canceled. The
@@ -549,7 +573,16 @@ func (c *chatCall) admissionRefused(err error, waited time.Duration) {
 		}
 	}
 	c.rec.Reason = reason
-	c.endLimit(func(l LimitReservation) { l.Reject(reason, waited) })
+	// After a wire call (a failover acquire refused behind a row that
+	// answered) the reservation keeps its charge: the first row did the
+	// work (W06-10 hardening 2, H2-3; the ledger reason is W06-12's).
+	c.endLimit(func(l LimitReservation) {
+		if wired {
+			l.Keep()
+			return
+		}
+		l.Reject(reason, waited)
+	})
 }
 
 // isAdmissionFailure is the writer's domain (A03-W8 §Übergaben): an acquire
@@ -575,13 +608,18 @@ func (c *chatCall) answer(plan Plan, served *backends.Backend, attempts []llm.Ch
 	// After wire contact without a usage (an upstream error, an answer
 	// without usage, the client gone during the call) the reservation keeps
 	// its charge: never a full refund after the wire (W06-10 hardening H-7).
+	// Wire calls that all failed to connect reached no backend: Abort (H2-4).
+	// The counters are tested one by one — their int sum can overflow (H2-5).
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
 		c.endLimit(func(l LimitReservation) {
-			if st.wired > 0 && usage.PromptTokens+usage.CompletionTokens <= 0 {
+			switch {
+			case st.wired > 0 && !c.wired:
+				l.Abort()
+			case c.wired && usage.PromptTokens <= 0 && usage.CompletionTokens <= 0:
 				l.Keep()
-				return
+			default:
+				l.Settle(usage)
 			}
-			l.Settle(usage)
 		})
 		c.record(plan, served, attempts, err, st, out)
 	}
@@ -609,7 +647,7 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 		if st.lease == nil {
 			waited = time.Since(c.entry)
 		}
-		c.admissionRefused(err, waited)
+		c.admissionRefused(err, waited, c.wired)
 		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: c.rec.Reason}}
 	}
 	if len(attempts) == 0 {

@@ -1,9 +1,12 @@
 package keyquota_test
 
-// Hardening after the second review of W06-10 (Fremd-Review 2): the refund
-// of a reservation is bounded by what is still unexpired of its own charge
-// (H-1), a debt is booked from the settle on (H-2), the reset header rounds
-// up (H-5, R9) and the meter does not follow a step of the wall clock (H-6).
+// Hardening after the second review of W06-10 (Fremd-Review 2) and the
+// delta review 3: the refund of a reservation is what booking its real
+// usage at the admission would have left — min(charged − cost(actual),
+// smallest backlog since the admission) (H-1, made exact in H2-1;
+// oracle_internal_test.go holds the differential), a debt is booked from
+// the settle on (H-2), the reset header rounds up (H-5, R9) and the meter
+// does not follow a step of the wall clock (H-6).
 
 import (
 	"sync"
@@ -17,11 +20,23 @@ import (
 // TestHeldDecoysBuyNoBurst is H-1 (review 2 F-1): k reservations of the
 // whole TPM bucket are held one minute each while their charges run off,
 // then a request books the whole bucket and uses it, and each held decoy
-// ends with usage 0 (a refusal after the wait, a client gone, an upstream
-// error) followed by another whole-bucket request. The refund of an expired
-// charge must not erase the charge of a later request: within the short
-// window at most L real tokens pass, never (k+1)·L.
+// ends with usage 0 followed by another whole-bucket request. The refund of
+// an expired charge must not erase the charge of a later request: within
+// the short window at most L real tokens pass, never (k+1)·L — whichever
+// end the decoys take: Abort (a client gone), Settle with no usage, Reject
+// (a refusal after the dispatcher wait, the realistic path; review 3 F-7).
 func TestHeldDecoysBuyNoBurst(t *testing.T) {
+	ends := map[string]func(*keyquota.Reservation){
+		"abort":  func(r *keyquota.Reservation) { r.Abort() },
+		"settle": func(r *keyquota.Reservation) { r.Settle(keyquota.Usage{}) },
+		"reject": func(r *keyquota.Reservation) { r.Reject("server_busy", 20*time.Second) },
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) { heldDecoys(t, end) })
+	}
+}
+
+func heldDecoys(t *testing.T, end func(*keyquota.Reservation)) {
 	const L = 60000
 	l := keyquota.Limits{RPM: 30, TPM: L, CompletionReserve: 1024}
 	whole := keyquota.Estimate{MaxCompletion: L, ClientMax: true} // capped at L
@@ -48,7 +63,7 @@ func TestHeldDecoysBuyNoBurst(t *testing.T) {
 		}
 		for _, h := range held {
 			c.add(10 * time.Millisecond)
-			h.Abort()
+			end(h)
 			r, d := m.Admit(s, l, whole)
 			if d.Allowed {
 				r.Settle(keyquota.Usage{PromptTokens: L})
@@ -69,12 +84,15 @@ func TestHeldDecoysBuyNoBurst(t *testing.T) {
 	}
 }
 
-// TestSettleBeforeExpiryRefundsTheUnexpiredPart is the counter-check of H-1:
-// A books 1 042 tokens at t = 0 (1 ms per token at 60 000 tpm, its charge
-// runs until 1.042 s), B books 1 000 behind it; A settles at 1 s with 14
-// real tokens. What is still unexpired of A's charge — 42 ms — comes back
-// in full, nothing beyond it (B's charge stays): the bucket then holds
-// exactly B's 1 000 tokens.
+// TestSettleBeforeExpiryRefundsTheUnexpiredPart is the counter-check of the
+// refund rule: A books 1 042 tokens at t = 0 (1 ms per token at 60 000 tpm),
+// B books 1 000 behind it at the same instant; A settles at 1 s with 14
+// real tokens. The bucket never drained below 1.042 s while A was open, so
+// none of A's inflation ran off: all 1 028 unused tokens come back, as if A
+// had booked its 14 at the admission — the bucket holds 14 ms (59 986
+// remaining). Until hardening 2 this gate pinned the FIFO approximation of
+// H-1 (only A's "unexpired" 42 ms back, 59 000 remaining), 986 tokens
+// stricter than the oracle for up to 1 s (review 3 F-2 (b)).
 func TestSettleBeforeExpiryRefundsTheUnexpiredPart(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
@@ -87,15 +105,16 @@ func TestSettleBeforeExpiryRefundsTheUnexpiredPart(t *testing.T) {
 	c.add(time.Second)
 	a.Settle(keyquota.Usage{PromptTokens: 14})
 	_, d := m.Admit(s, l, keyquota.Estimate{ClientMax: true})
-	if d.Headers.ResetTokens != time.Second || d.Headers.RemainingTokens != 59000 {
-		t.Errorf("after A settled 14 at 1 s: bucket %v, remaining %d — want 1 s and 59000 (A's unexpired 42 ms back, B's 1 000 kept)",
+	if d.Headers.ResetTokens != 14*time.Millisecond || d.Headers.RemainingTokens != 59986 {
+		t.Errorf("after A settled 14 at 1 s: bucket %v, remaining %d — want 14ms and 59986 (the oracle: A's 14 and B's 1 000 booked at 0, 1 s run off)",
 			d.Headers.ResetTokens, d.Headers.RemainingTokens)
 	}
 }
 
-// TestAbortRightAfterAdmissionRefundsInFull: a reservation that ends at once
-// (no wire call) gets its whole charge back — the bound of H-1 never takes
-// a legitimate credit.
+// TestAbortRightAfterAdmissionRefundsInFull: an aborted reservation whose
+// charge the bucket still holds (it never drained below 40 s while the
+// reservation was open) gets its whole charge back — the oracle's value:
+// the first charge (20 000, never ended) ran 10 s, the aborted one booked 0.
 func TestAbortRightAfterAdmissionRefundsInFull(t *testing.T) {
 	c := newClock()
 	m := seeded(c)

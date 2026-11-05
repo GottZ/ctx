@@ -1,8 +1,10 @@
 package oai_test
 
-// Hardening of the meter at the route after the second review of W06-10:
-// the refund of a held reservation (H-1), the debt (H-4), retry-after-ms
-// rounded up (H-5, R10) and no full refund after wire contact (H-7).
+// Hardening of the meter at the route after the second review of W06-10
+// and the delta review 3: the refund of a held reservation (H-1), the debt
+// (H-4), retry-after-ms rounded up (H-5, R10), no full refund after wire
+// contact (H-7, the failover refusal H2-3), a refused connection is no wire
+// contact (H2-4) and the usage counters are tested one by one (H2-5).
 
 import (
 	"context"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/oai"
 )
@@ -215,5 +218,92 @@ func TestMeterWireContactNeverRefundsInFull(t *testing.T) {
 					tc.name, w.Code, got, reservation)
 			}
 		})
+	}
+}
+
+// TestMeterFailoverRefusalAfterTheWireKeeps is H2-3 (review 3 F-1, over the
+// rig's real planner and dispatcher): the first row answers 503 after the
+// wire, the failover row's only external slot is held, the dispatcher
+// refuses the failover acquire — the route answers through the admission
+// writer (429 server_busy), and the reservation stays booked: the first
+// row did the work.
+func TestMeterFailoverRefusalAfterTheWireKeeps(t *testing.T) {
+	first := newUpstream(t, answerSGLang)  // prio 20: tried first
+	second := newUpstream(t, answerSGLang) // prio 10: the failover row
+	first.setRespond(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"message":"engine busy"}}`)
+	})
+	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
+	rig := newChatRig(t, []backends.Backend{second.row("spark1", backends.TrustFull, 10), first.row("spark2", backends.TrustFull, 20)}, 2, 1,
+		withDeps(func(d *oai.Deps) { d.Limiter = meter }))
+	hctx := context.WithValue(context.Background(), consumerKey{}, rig.ca.Load())
+	hold, _, err := rig.disp.Acquire(hctx, dispatch.Request{Target: dispatch.Target{Origin: second.srv.URL}, Class: dispatch.ClassExternal, Role: "chat"})
+	if err != nil {
+		t.Fatalf("holding the failover row's external slot: %v", err)
+	}
+	defer hold.Release()
+	a := rig.post(t, chatBody("chat"))
+	code, _, _ := a.envelope(t)
+	ca := *rig.ca.Load()
+	held := meter.lim.TPM - meter.probe(t, &ca, keyquota.OpChat).RemainingTokens
+	t.Logf("first row 503 after the wire, failover row full: answer %d %s; upstream hits first %d, failover %d; the bucket holds %d tokens",
+		a.status, code, first.hits.Load(), second.hits.Load(), held)
+	if a.status != http.StatusTooManyRequests || code != "server_busy" || first.hits.Load() != 1 || second.hits.Load() != 0 {
+		t.Fatalf("answer %d %s, hits %d/%d — want 429 server_busy after one wire call on the first row", a.status, code, first.hits.Load(), second.hits.Load())
+	}
+	if held != 1042 {
+		t.Errorf("the bucket holds %d tokens after a failover refusal behind a wire call, want the whole reservation 1042 (no refund after wire contact)", held)
+	}
+}
+
+// TestMeterConnectRefusedGivesBack is H2-4 (review 3 F-4): a row whose host
+// refuses the connection — no byte of the request reached any backend — is
+// no wire contact for the meter: the reservation goes back (Abort), the
+// client sees 503 upstream_unavailable.
+func TestMeterConnectRefusedGivesBack(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	host := dead.URL
+	dead.Close()
+	u := newUpstream(t, answerSGLang)
+	row := u.row("dead", backends.TrustFull, 10)
+	row.Host = host
+	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
+	rig := newChatRig(t, []backends.Backend{row}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
+	a := rig.post(t, chatBody("chat"))
+	code, _, _ := a.envelope(t)
+	ca := *rig.ca.Load()
+	held := meter.lim.TPM - meter.probe(t, &ca, keyquota.OpChat).RemainingTokens
+	t.Logf("connection refused before any byte: answer %d %s; the bucket holds %d tokens", a.status, code, held)
+	if a.status != http.StatusServiceUnavailable || code != oai.CodeUpstreamUnavailable {
+		t.Fatalf("answer %d %s, want 503 upstream_unavailable", a.status, code)
+	}
+	if held != 0 {
+		t.Errorf("the bucket holds %d tokens for a request no backend saw, want 0 (the reservation goes back)", held)
+	}
+}
+
+// TestMeterUsageCountersOneByOne is H2-5 (review 3 F-5): the route tests
+// each usage counter on its own, not their int sum — prompt_tokens
+// MaxInt64 with completion_tokens 1 is a usage (Settle, a saturated debt),
+// not "no usage" (Keep) by an overflowed sum.
+func TestMeterUsageCountersOneByOne(t *testing.T) {
+	u := newUpstream(t, answerSGLang)
+	u.setRespond(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, strings.Replace(answerSGLang,
+			`"usage":{"prompt_tokens":11,"total_tokens":14,"completion_tokens":3`,
+			`"usage":{"prompt_tokens":9223372036854775807,"total_tokens":1,"completion_tokens":1`, 1))
+	})
+	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
+	if a := rig.post(t, chatBody("chat")); a.status != http.StatusOK {
+		t.Fatalf("answer %d %s", a.status, a.body)
+	}
+	ca := *rig.ca.Load()
+	_, d := meter.m.Admit(keyquota.Subject{ConsumerID: ca.ConsumerID, TenantID: ca.TenantID, Op: keyquota.OpChat}, meter.lim, keyquota.Estimate{ClientMax: true})
+	t.Logf("usage prompt MaxInt64, completion 1: next admission allowed=%v Retry-After %v", d.Allowed, d.RetryAfter)
+	if d.Allowed || d.RetryAfter < 24*time.Hour {
+		t.Errorf("after a usage of MaxInt64 + 1 tokens: %+v, want refused behind the saturated debt (settled, not kept)", d)
 	}
 }

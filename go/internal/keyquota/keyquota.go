@@ -216,9 +216,44 @@ type stateKey struct {
 }
 
 // buckets are the theoretical arrival times (GCRA tat, ns since the meter's
-// base) of one (consumer, op): requests and tokens. 0 = never used (empty
-// bucket).
-type buckets struct{ req, tok int64 }
+// base) of one (consumer, op): requests and tokens (0 = never used, an
+// empty bucket), and the reservations of the key that have not ended yet,
+// each with its shadow (the refund rule, Reservation.Settle).
+type buckets struct {
+	req, tok int64
+	open     []*Reservation
+	seq      uint64 // admission order of the key's reservations
+}
+
+// raise books a charge of c ns at now into every open reservation's shadow:
+// each shadow is a bucket that started empty at its reservation's admission
+// and sees every later charge (admissions and debts).
+func (st *buckets) raise(now, c int64) {
+	for _, r := range st.open {
+		r.shadow = satAdd(max(r.shadow, now), c)
+	}
+}
+
+// add enters r into the open set.
+func (st *buckets) add(r *Reservation) {
+	st.seq++
+	r.seq = st.seq
+	r.slot = len(st.open)
+	st.open = append(st.open, r)
+}
+
+// drop takes r out of the open set (swap with the last).
+func (st *buckets) drop(r *Reservation) {
+	if r.slot < 0 || r.slot >= len(st.open) || st.open[r.slot] != r {
+		return
+	}
+	last := len(st.open) - 1
+	st.open[r.slot] = st.open[last]
+	st.open[r.slot].slot = r.slot
+	st.open[last] = nil
+	st.open = st.open[:last]
+	r.slot = -1
+}
 
 // New returns an unseeded meter over the clock now: until MarkSeeded every
 // Admit answers warming (design/06 §4.1 step 7).
@@ -274,12 +309,14 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 		return nil, refused(s, req, tok, waitReq, waitTok, okReq)
 	}
 	m.state[key] = st
+	st.raise(now, nextTok-max(st.tok, now))
 	st.req, st.tok = nextReq, nextTok
 	h := RateHeaders{
 		LimitRequests: req.cap, RemainingRequests: req.remaining(st.req, now), ResetRequests: time.Duration(backlog(st.req, now)),
 		LimitTokens: tok.cap, RemainingTokens: tok.remaining(st.tok, now), ResetTokens: time.Duration(backlog(st.tok, now)),
 	}
-	r := &Reservation{m: m, key: key, tpm: l.TPM, charged: tok.cost(n), end: st.tok, headers: h}
+	r := &Reservation{m: m, key: key, tpm: l.TPM, charged: tok.cost(n), shadow: now, headers: h}
+	st.add(r)
 	return r, Decision{Allowed: true, Retryable: true, Headers: h}
 }
 
@@ -311,43 +348,50 @@ type Reservation struct {
 	key     stateKey
 	tpm     int64 // the TPM the admission was charged under
 	charged int64 // ns booked on the token bucket at admission
-	// end is the token bucket's tat right after this admission: where the
-	// reservation's own charge runs off. A refund never reaches behind it
-	// (H-1 of the W06-10 hardening).
-	end     int64
+	// shadow is the tat (ns) of a bucket that started empty at this
+	// admission and saw only the charges after it, corrected by the refunds
+	// of younger reservations — kept by the meter under its mutex while the
+	// reservation is open; seq is its admission order, slot its place in the
+	// key's open set (-1 once ended).
+	shadow  int64
+	seq     uint64
+	slot    int
 	headers RateHeaders
 	once    sync.Once
 }
 
 // Settle books the request's real tokens: the token bucket moves by
 // cost(actual) − cost(charged). An overrun is debt from now on, the next
-// request waits it off (design/06 §4.2 TPM-Settle). A refund gives back at
-// most what is still unexpired of the reservation's own charge (min(charged
-// − cost(actual), end − now), never below now): a charge that already ran
-// off was a minute the bucket already granted, and refunding it would erase
-// the charge of a request admitted after it (Fremd-Review 2 F-1: held
-// reservations ending with little usage bought (k+1)·L within a second).
-// The request stays counted.
+// request waits it off (design/06 §4.2 TPM-Settle). A refund leaves the
+// bucket exactly where it would stand had the real usage been booked at
+// the admission (the oracle; W06-10 hardening 2, H2-1). The bucket is a
+// max-plus sum: tat = max(A, B), where A are the terms that contain this
+// reservation's charge and B = its shadow, the bucket of the charges after
+// it alone; taking d = charged − cost(actual) out of the charge gives
+// max(A − d, B), a refund of min(d, tat − shadow). A held reservation that
+// ends with little usage therefore cannot erase the charge of requests
+// admitted after it (Fremd-Review 2 F-1), and one that ends early loses no
+// credit (Fremd-Review 3 F-2). The request stays counted.
 func (r *Reservation) Settle(u Usage) {
 	r.once.Do(func() {
 		actual := satAdd(int64(max(u.PromptTokens, 0)), int64(max(u.CompletionTokens, 0)))
-		r.m.shift(r.key, dim{limit: r.tpm}.cost(actual)-r.charged, r.end)
+		r.m.end(r, dim{limit: r.tpm}.cost(actual)-r.charged)
 	})
 }
 
 // Keep ends a reservation keeping its whole charge: a wire call was made but
 // its usage is unknown (an upstream error, an answer without usage, a panic
 // or a gone client after the wire) — after wire contact nothing is given
-// back in full.
+// back.
 func (r *Reservation) Keep() {
-	r.once.Do(func() {})
+	r.once.Do(func() { r.m.end(r, 0) })
 }
 
-// Abort ends a reservation without a wire call: what is still unexpired of
-// its charge goes back (all of it right after the admission), the request
-// stays counted (design/06 §4.2).
+// Abort ends a reservation without a wire call: its charge goes back as far
+// as the bucket still holds it (all of it unless the bucket drained below it
+// meanwhile), the request stays counted (design/06 §4.2).
 func (r *Reservation) Abort() {
-	r.once.Do(func() { r.m.shift(r.key, -r.charged, r.end) })
+	r.once.Do(func() { r.m.end(r, -r.charged) })
 }
 
 // Reject ends a reservation the dispatcher refused after Admit. In this
@@ -362,29 +406,43 @@ func (r *Reservation) Reject(reason string, waited time.Duration) {
 // the route writes them on its successful answer before the first byte.
 func (r *Reservation) Headers() http.Header { return r.headers.Header() }
 
-// shift moves the token bucket of key by delta ns: a debt from max(tat,
-// now) on — the overrun was used, its moment inside the request is unknown,
-// and booking it from the settle never counts too little (H-2); a refund at
-// most end − now (what is unexpired of the reservation's own charge, end =
-// its tat right after the admission) and never below now (no credit beyond
-// a full bucket).
-func (m *Meter) shift(key stateKey, delta, end int64) {
-	if delta == 0 {
-		return
-	}
+// end closes r and moves the token bucket by delta ns. A debt is a new
+// charge at now — booked from max(tat, now) on (the overrun was used, its
+// moment inside the request is unknown, and booking it from the settle
+// never counts too little; H-2) and into every open shadow. A refund of d
+// takes min(d, max(tat, now) − max(shadow, now)) out of the bucket, and out
+// of the shadow of every older open reservation the same way (r's charge is
+// one of the charges after their admission) — never below now.
+func (m *Meter) end(r *Reservation, delta int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	st := m.state[key]
+	st := m.state[r.key]
 	if st == nil {
 		return
 	}
 	now := m.clock()
-	if delta > 0 {
+	st.drop(r)
+	switch {
+	case delta > 0:
 		st.tok = satAdd(max(st.tok, now), delta)
-		return
+		st.raise(now, delta)
+	case delta < 0:
+		from := max(r.shadow, now)
+		st.tok = refund(st.tok, now, from, -delta)
+		for _, o := range st.open {
+			if o.seq < r.seq {
+				o.shadow = refund(o.shadow, now, from, -delta)
+			}
+		}
 	}
-	delta = max(delta, -max(end-now, 0))
-	st.tok = max(satAdd(st.tok, delta), now)
+}
+
+// refund takes d out of the bucket tat as far as the part of it that
+// precedes the bucket from (the charges after the refunded reservation)
+// allows: max(tat, now) − min(d, max(tat, now) − from), never below from.
+func refund(tat, now, from, d int64) int64 {
+	cur := max(tat, now)
+	return cur - min(d, max(cur-from, 0))
 }
 
 // dim is one GCRA bucket of a limit as a lane sees it.
