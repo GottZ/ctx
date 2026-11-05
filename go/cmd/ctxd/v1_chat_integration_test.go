@@ -418,3 +418,89 @@ func TestV1ChatPlannerRejectionNoRow(t *testing.T) {
 		t.Fatalf("control: %d rows (%+v), want 1 of the urgent consumer", len(rows), rows)
 	}
 }
+
+// classRows settles the writer and reads consumer_id and dispatch_class of
+// every gateway-chat row, oldest first.
+func (f *v1ChatFixture) classRows(t *testing.T) [][2]string {
+	t.Helper()
+	f.settle(t)
+	rs, err := f.seed.Query(context.Background(), `
+		SELECT COALESCE(consumer_id::text, '<NULL>'), COALESCE(dispatch_class, '<NULL>')
+		  FROM context_llm_log WHERE pipeline = $1 ORDER BY created_at`, llmlog.PipelineGatewayChat)
+	if err != nil {
+		t.Fatalf("read rows: %v", err)
+	}
+	defer rs.Close()
+	var out [][2]string
+	for rs.Next() {
+		var r [2]string
+		if err := rs.Scan(&r[0], &r[1]); err != nil {
+			t.Fatalf("scan row: %v", err)
+		}
+		out = append(out, r)
+	}
+	if err := rs.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	return out
+}
+
+// TestV1ChatBulkLaneIsExternalBulk is W02-07 × A03-W9 over the production
+// router (FOLGE-M M1): a consumer whose admission_lane is bulk is served —
+// 200, service_tier "flex", one wire contact, exactly one gateway-chat row
+// with dispatch_class external_bulk and the consumer's id. The comparison is
+// the same consumer with its lane raised to urgent (the door reads the lane
+// per request, no cache): service_tier "default", a second row with
+// dispatch_class external.
+func TestV1ChatBulkLaneIsExternalBulk(t *testing.T) {
+	eng := newV1ChatEngine(t, http.StatusOK)
+	f := newV1ChatFixture(t, []backends.Backend{eng.row("primary", 1)})
+	ctx := context.Background()
+	admin, _, err := store.CreateApiKey(ctx, f.seed, "folge-m-bulk", "private", nil, "")
+	if err != nil {
+		t.Fatalf("admin key: %v", err)
+	}
+	stamp := store.APIStamp(admin.ID, "folge-m")
+	consumer, _, key, err := store.CreateConsumerWithKey(ctx, f.seed,
+		store.ModelConsumerSpec{TenantID: store.DefaultTenantID, Label: "folge-m-bulk", AllModels: true, AdmissionLane: handler.LaneBulk}, nil, stamp)
+	if err != nil {
+		t.Fatalf("bulk consumer: %v", err)
+	}
+	for i, tc := range []struct {
+		lane, tier, class string
+	}{
+		{handler.LaneBulk, "flex", dispatch.ClassExternalBulk.String()},
+		{handler.LaneUrgent, "default", dispatch.ClassExternal.String()},
+	} {
+		if i > 0 {
+			lane := tc.lane
+			if _, err := store.UpdateConsumer(ctx, f.seed, consumer.ID, store.ModelAccess{ServerAdmin: true},
+				store.ModelConsumerPatch{AdmissionLane: &lane}, stamp); err != nil {
+				t.Fatalf("lane %s: %v", tc.lane, err)
+			}
+		}
+		a := f.post(t, key.Plaintext(), v1ChatBody())
+		if a.status != http.StatusOK {
+			t.Fatalf("lane %s: status %d (%s), want 200", tc.lane, a.status, a.body)
+		}
+		var out struct {
+			ServiceTier string `json:"service_tier"`
+		}
+		if err := json.Unmarshal(a.body, &out); err != nil {
+			t.Fatalf("lane %s: answer %q: %v", tc.lane, a.body, err)
+		}
+		if out.ServiceTier != tc.tier {
+			t.Errorf("lane %s: service_tier %q, want %q", tc.lane, out.ServiceTier, tc.tier)
+		}
+		if n := eng.hits.Load(); n != int64(i+1) {
+			t.Errorf("lane %s: the engine saw %d request(s), want %d", tc.lane, n, i+1)
+		}
+		rows := f.classRows(t)
+		if len(rows) != i+1 {
+			t.Fatalf("lane %s: %d gateway-chat rows %v, want %d", tc.lane, len(rows), rows, i+1)
+		}
+		if got, want := rows[i], [2]string{consumer.ID, tc.class}; got != want {
+			t.Errorf("lane %s: row (consumer_id, dispatch_class) = %v, want %v", tc.lane, got, want)
+		}
+	}
+}

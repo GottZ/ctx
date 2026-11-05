@@ -289,6 +289,16 @@ type rigOption func(*chatRig)
 // withDeps edits the dependencies (a missing planner, limiter, …).
 func withDeps(f func(*oai.Deps)) rigOption { return func(r *chatRig) { f(&r.deps) } }
 
+// withLane runs the rig's consumer (urgentApp) with the admission lane lane
+// instead of urgent.
+func withLane(lane string) rigOption {
+	return func(r *chatRig) {
+		ca := urgentApp()
+		ca.AdmissionLane = lane
+		r.ca.Store(ca)
+	}
+}
+
 type consumerKey struct{}
 
 // rigIdentity is the harness instance's identity (cmd/ctxd puts the boot
