@@ -276,7 +276,7 @@ func TestPlanBulkLaneNotOffered(t *testing.T) {
 			t.Fatalf("%s: Plan = (lane %q, %v), want lane bulk and ErrLaneNotOffered", tc.name, plan.Lane, err)
 		}
 		rr := httptest.NewRecorder()
-		if reason := r.adm.WriteAdmissionError(rr, err); reason != oai.CodeModelUnavailable {
+		if reason := r.adm.WriteAdmissionError(context.Background(), rr, err); reason != oai.CodeModelUnavailable {
 			t.Fatalf("%s: reason %q, want model_unavailable", tc.name, reason)
 		}
 		assertEnvelope(t, rr, oai.CodeModelUnavailable, "true")
@@ -330,7 +330,7 @@ func TestPlanChainFilter(t *testing.T) {
 		t.Fatalf("no row offered: %v, want ErrChainNotOffered", err)
 	}
 	rr := httptest.NewRecorder()
-	r.adm.WriteAdmissionError(rr, err)
+	r.adm.WriteAdmissionError(context.Background(), rr, err)
 	assertEnvelope(t, rr, oai.CodeModelUnavailable, "true")
 	if evs := r.disp.take(); countDoor(evs, "acquire")+countDoor(evs, "try") != 0 || countDoor(evs, "admissible") != 1 {
 		t.Fatalf("empty chain: events %v, want one admissible read and no acquire", evs)
@@ -560,7 +560,7 @@ func TestAcquirerDoorOrder(t *testing.T) {
 			t.Fatalf("%s: %v, want ErrAcquireOrder", name, err)
 		}
 		rr := httptest.NewRecorder()
-		if reason := r.adm.WriteAdmissionError(rr, &llm.AdmissionError{Err: err, Host: v1HostA}); reason != oai.CodeInternalError {
+		if reason := r.adm.WriteAdmissionError(context.Background(), rr, &llm.AdmissionError{Err: err, Host: v1HostA}); reason != oai.CodeInternalError {
 			t.Fatalf("%s: reason %q, want internal_error", name, reason)
 		}
 		assertEnvelope(t, rr, oai.CodeInternalError, "false")
@@ -652,7 +652,7 @@ func TestFirstServeByFromRequestDeadline(t *testing.T) {
 		t.Fatalf("Predicted = %d, want 1", got)
 	}
 	rr := httptest.NewRecorder()
-	r.adm.WriteAdmissionError(rr, err)
+	r.adm.WriteAdmissionError(context.Background(), rr, err)
 	assertEnvelope(t, rr, oai.CodeServerBusy, "true")
 	evs := r.disp.take()
 	if len(evs) == 0 {
@@ -676,20 +676,29 @@ func TestFirstWaitBudgetFromCtxMaxWait(t *testing.T) {
 		min, max time.Duration
 	}
 	for _, tc := range []struct {
-		name    string
-		setting time.Duration
-		in      fedhop.Inbound
-		want    expect
+		name     string
+		setting  time.Duration
+		in       fedhop.Inbound
+		deadline time.Duration // request context deadline (0 = none)
+		want     expect
 	}{
-		{"Ctx-Max-Wait-Ms 100", 20 * time.Second, fedhop.Inbound{MaxWait: 100 * time.Millisecond, HasMaxWait: true}, expect{"expired", 80 * time.Millisecond, 400 * time.Millisecond}},
-		{"Ctx-Max-Wait-Ms 0", 20 * time.Second, fedhop.Inbound{MaxWait: 0, HasMaxWait: true}, expect{"predicted", 0, 50 * time.Millisecond}},
-		{"Ctx-Max-Wait-Ms 60000 above the setting", 200 * time.Millisecond, fedhop.Inbound{MaxWait: time.Minute, HasMaxWait: true}, expect{"expired", 180 * time.Millisecond, 600 * time.Millisecond}},
-		{"no header: the setting", 150 * time.Millisecond, fedhop.Inbound{}, expect{"expired", 130 * time.Millisecond, 500 * time.Millisecond}},
+		{"Ctx-Max-Wait-Ms 100", 20 * time.Second, fedhop.Inbound{MaxWait: 100 * time.Millisecond, HasMaxWait: true}, 0, expect{"expired", 80 * time.Millisecond, 400 * time.Millisecond}},
+		{"Ctx-Max-Wait-Ms 0", 20 * time.Second, fedhop.Inbound{MaxWait: 0, HasMaxWait: true}, 0, expect{"predicted", 0, 50 * time.Millisecond}},
+		// Review 2 F-4: a zero budget beats a later request deadline — the
+		// deadline's ServeBy must not survive as the wait bound.
+		{"Ctx-Max-Wait-Ms 0 with a later request deadline", 20 * time.Second, fedhop.Inbound{MaxWait: 0, HasMaxWait: true}, 3 * time.Second, expect{"predicted", 0, 50 * time.Millisecond}},
+		{"Ctx-Max-Wait-Ms 60000 above the setting", 200 * time.Millisecond, fedhop.Inbound{MaxWait: time.Minute, HasMaxWait: true}, 0, expect{"expired", 180 * time.Millisecond, 600 * time.Millisecond}},
+		{"no header: the setting", 150 * time.Millisecond, fedhop.Inbound{}, 0, expect{"expired", 130 * time.Millisecond, 500 * time.Millisecond}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, row := fullTargetRig(t, tc.setting)
 			before := extRejects(r)
 			ctx := fedhop.WithInbound(consumerCtx(urgentConsumer()), tc.in)
+			if tc.deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.deadline)
+				defer cancel()
+			}
 			took, err := firstOn(t, r, ctx, row)
 			if !errors.Is(err, dispatch.ErrWaitExpired) || took < tc.want.min || took > tc.want.max {
 				t.Fatalf("(%v after %v), want ErrWaitExpired after [%v, %v]", err, took, tc.want.min, tc.want.max)
@@ -709,7 +718,7 @@ func TestFirstWaitBudgetFromCtxMaxWait(t *testing.T) {
 				if e.door != "acquire" {
 					continue
 				}
-				if tc.want.reason == "expired" && !e.serveBy.IsZero() {
+				if tc.want.reason == "expired" && tc.deadline == 0 && !e.serveBy.IsZero() {
 					t.Fatalf("ServeBy %v set without a request deadline", e.serveBy)
 				}
 				if wait, has := tc.in.Wait(); has && wait > 0 && (e.maxWait <= 0 || e.maxWait > wait) {
@@ -836,11 +845,17 @@ func TestWriteAdmissionErrorTable(t *testing.T) {
 		// never an empty 200.
 		{"upstream timeout outside the hull", fmt.Errorf("Post \"http://x\": %w", context.DeadlineExceeded), oai.CodeInternalError, "false", "", ""},
 		{"upstream status outside the hull", fmt.Errorf("llm: chain exhausted: %w", &httpx.StatusError{Code: http.StatusBadGateway, Body: "x"}), oai.CodeInternalError, "false", "", ""},
+		// Inside the acquire hull a context error with the client still
+		// there is answered too (review 2 F-1): the route's deadline during
+		// an acquire, a foreign (released lease's) run context.
+		{"route deadline inside the hull, client waiting", wrap(context.DeadlineExceeded), oai.CodeInternalError, "false", "", ""},
+		{"foreign canceled context inside the hull, client waiting", wrap(context.Canceled), oai.CodeInternalError, "false", "", ""},
+		{"wrapped twice, client waiting", fmt.Errorf("walk: %w", wrap(context.DeadlineExceeded)), oai.CodeInternalError, "false", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			before := countPrefix(r.logs, "ERROR ")
+			before := countPrefix(r.logs, "ERROR ") + countPrefix(r.logs, "WARN gateway:")
 			rr := httptest.NewRecorder()
-			if reason := r.adm.WriteAdmissionError(rr, tc.err); reason != tc.code {
+			if reason := r.adm.WriteAdmissionError(context.Background(), rr, tc.err); reason != tc.code {
 				t.Fatalf("reason %q, want %q", reason, tc.code)
 			}
 			assertEnvelope(t, rr, tc.code, tc.shouldRetry)
@@ -850,15 +865,20 @@ func TestWriteAdmissionErrorTable(t *testing.T) {
 			if got := rr.Header().Get("retry-after-ms"); got != tc.retryMs {
 				t.Fatalf("retry-after-ms %q, want %q", got, tc.retryMs)
 			}
-			if tc.code == oai.CodeInternalError && countPrefix(r.logs, "ERROR ") == before {
-				t.Fatal("a code-bug answer without an ERROR line")
+			if tc.code == oai.CodeInternalError && countPrefix(r.logs, "ERROR ")+countPrefix(r.logs, "WARN gateway:") == before {
+				t.Fatal("an internal_error answer without its log line")
 			}
 		})
 	}
-	for _, err := range []error{wrap(context.Canceled), wrap(context.DeadlineExceeded), fmt.Errorf("walk: %w", wrap(context.DeadlineExceeded))} {
+	// The client is gone (the request's own context ended): nothing is
+	// written, whatever the error — a rejection, a context error, any other.
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, err := range []error{wrap(context.Canceled), wrap(context.DeadlineExceeded), fmt.Errorf("walk: %w", wrap(context.DeadlineExceeded)),
+		wrap(&dispatch.RejectionError{Err: dispatch.ErrWaitExpired, RetryAfter: 5 * time.Second}), ErrLaneNotOffered, errors.New("other")} {
 		rr := httptest.NewRecorder()
-		if reason := r.adm.WriteAdmissionError(rr, err); reason != "" || rr.Code != http.StatusOK || rr.Body.Len() != 0 || len(rr.Header()) != 0 {
-			t.Fatalf("caller gone (%v): reason %q, status %d, %d body bytes, headers %v — want no write", err, reason, rr.Code, rr.Body.Len(), rr.Header())
+		if reason := r.adm.WriteAdmissionError(gone, rr, err); reason != "" || rr.Code != http.StatusOK || rr.Body.Len() != 0 || len(rr.Header()) != 0 {
+			t.Fatalf("client gone (%v): reason %q, status %d, %d body bytes, headers %v — want no write", err, reason, rr.Code, rr.Body.Len(), rr.Header())
 		}
 	}
 	if evs := r.disp.take(); countDoor(evs, "hint") != 0 {
@@ -878,7 +898,7 @@ func TestWriteAdmissionErrorRetryAfterFromErrorValue(t *testing.T) {
 	adm := NewV1Admission(V1AdmissionConfig{Dispatch: hintedDispatch{countingDispatch: r.disp, hinterFake: hint},
 		Settings: func() oai.Settings { return oai.Settings{} }})
 	rr := httptest.NewRecorder()
-	adm.WriteAdmissionError(rr, err)
+	adm.WriteAdmissionError(context.Background(), rr, err)
 	if got := rr.Header().Get("Retry-After"); got != "1" {
 		t.Fatalf("Retry-After %q, want \"1\" from the error value (the class hint says 30)", got)
 	}
@@ -908,7 +928,7 @@ func TestRetryAfterJitter(t *testing.T) {
 		secs, ms = map[int]int{}, map[int]int{}
 		for i := 0; i < 100; i++ {
 			rr := httptest.NewRecorder()
-			r.adm.WriteAdmissionError(rr, err)
+			r.adm.WriteAdmissionError(context.Background(), rr, err)
 			s, err1 := strconv.Atoi(rr.Header().Get("Retry-After"))
 			m, err2 := strconv.Atoi(rr.Header().Get("retry-after-ms"))
 			if err1 != nil || err2 != nil {
@@ -986,7 +1006,7 @@ func fixtureStream(r *v1Rig, chain []backends.Backend, events *[]string) http.Ha
 		ca := ConsumerAuthFromContext(req.Context())
 		plan, err := r.adm.Plan(req.Context(), ca, oai.AdmissionInput{Chain: chain})
 		if err != nil {
-			r.adm.WriteAdmissionError(ow, err)
+			r.adm.WriteAdmissionError(req.Context(), ow, err)
 			return
 		}
 		if commitBeforeAcquire {
@@ -1008,7 +1028,7 @@ func fixtureStream(r *v1Rig, chain []backends.Backend, events *[]string) http.Ha
 				return
 			}
 			if llm.IsAdmissionError(err) || errors.Is(err, llm.ErrWalkClass) {
-				r.adm.WriteAdmissionError(ow, err)
+				r.adm.WriteAdmissionError(req.Context(), ow, err)
 				return
 			}
 			oai.WriteCode(ow, oai.CodeUpstreamUnavailable, "The upstream failed.", true)
@@ -1075,7 +1095,7 @@ func TestAdmissionRace(t *testing.T) {
 				return
 			}
 			rr := httptest.NewRecorder()
-			switch r.adm.WriteAdmissionError(rr, err) {
+			switch r.adm.WriteAdmissionError(context.Background(), rr, err) {
 			case oai.CodeServerBusy:
 				busy.Add(1)
 			case oai.CodeModelUnavailable:

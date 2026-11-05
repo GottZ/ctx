@@ -107,7 +107,7 @@ func (confDispatch) ExternalRetryAfterSteps() []time.Duration {
 // (the headers are pinned per case).
 func admissionWriter(err error) http.HandlerFunc {
 	adm := handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: confDispatch{}, Settings: func() oai.Settings { return oai.Settings{} }})
-	return func(w http.ResponseWriter, _ *http.Request) { adm.WriteAdmissionError(w, err) }
+	return func(w http.ResponseWriter, r *http.Request) { adm.WriteAdmissionError(r.Context(), w, err) }
 }
 
 // writerSet maps a case name to the handler that answers it.

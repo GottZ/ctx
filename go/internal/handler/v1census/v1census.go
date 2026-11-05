@@ -24,7 +24,14 @@
 //     an external rejection travels in its RejectionError; the class-wide
 //     hint leaks the class depth, A03-W6);
 //  6. a route marked admitting acquires at least once, every other route not
-//     at all (GET /v1/models: 0 acquires).
+//     at all (GET /v1/models: 0 acquires);
+//  7. no continuation while the request still holds a lease of its own —
+//     the block lease goes back before the next block asks: a continuation
+//     waits at the class head for units, and units its own request holds
+//     never come (a self-deadlock on a full E; with units left, the head
+//     held against every other consumer; A03-W8 review 2 F-2). Held =
+//     the run context of a lease the request got is not yet done
+//     (Lease.Release cancels it).
 //
 // The mount under test hands its planner the Recorder as dispatcher. The
 // census holds no database and no key of its own: Prepare puts what the
@@ -72,15 +79,22 @@ type Event struct {
 	Class        dispatch.Class
 	Continuation bool
 	Weight       int
+	// Holding is, for a continuation, the number of leases the recorder
+	// handed out since the last Take whose run context was not yet done
+	// when the continuation asked (rule 7).
+	Holding int
 }
 
 // Recorder is the counting dispatcher of the census: every call is recorded
-// in order and passed to Inner.
+// in order and passed to Inner. It serves one request at a time (Check
+// drives them sequentially): the leases it tracks for rule 7 are those
+// granted since the last Take.
 type Recorder struct {
 	Inner handler.V1Dispatch
 
-	mu     sync.Mutex
-	events []Event
+	mu      sync.Mutex
+	events  []Event
+	granted []context.Context // run contexts of the leases since the last Take
 }
 
 var (
@@ -97,25 +111,57 @@ func (r *Recorder) add(e Event) {
 	r.mu.Unlock()
 }
 
-// Take returns the events since the last Take and clears them.
+// Take returns the events since the last Take and clears them (and the
+// tracked leases).
 func (r *Recorder) Take() []Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := r.events
-	r.events = nil
+	r.events, r.granted = nil, nil
 	return out
+}
+
+// holding counts the tracked leases whose run context is not done.
+func (r *Recorder) holding() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, c := range r.granted {
+		if c.Err() == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// grant tracks the run context of a lease handed out.
+func (r *Recorder) grant(runCtx context.Context, err error) {
+	if err != nil || runCtx == nil {
+		return
+	}
+	r.mu.Lock()
+	r.granted = append(r.granted, runCtx)
+	r.mu.Unlock()
 }
 
 // Acquire implements dispatch.Admitter.
 func (r *Recorder) Acquire(ctx context.Context, req dispatch.Request) (*dispatch.Lease, context.Context, error) {
-	r.add(Event{Kind: KindAcquire, Origin: req.Target.Origin, Class: req.Class, Continuation: req.Continuation, Weight: req.Weight})
-	return r.Inner.Acquire(ctx, req)
+	e := Event{Kind: KindAcquire, Origin: req.Target.Origin, Class: req.Class, Continuation: req.Continuation, Weight: req.Weight}
+	if req.Continuation {
+		e.Holding = r.holding()
+	}
+	r.add(e)
+	l, runCtx, err := r.Inner.Acquire(ctx, req)
+	r.grant(runCtx, err)
+	return l, runCtx, err
 }
 
 // TryAcquire implements dispatch.TryAdmitter.
 func (r *Recorder) TryAcquire(ctx context.Context, req dispatch.Request) (*dispatch.Lease, context.Context, error) {
 	r.add(Event{Kind: KindTry, Origin: req.Target.Origin, Class: req.Class, Continuation: req.Continuation, Weight: req.Weight})
-	return r.Inner.TryAcquire(ctx, req)
+	l, runCtx, err := r.Inner.TryAcquire(ctx, req)
+	r.grant(runCtx, err)
+	return l, runCtx, err
 }
 
 // ExternalAdmissible records the chain-filter read.
@@ -240,7 +286,7 @@ func Check(router chi.Router, rec *Recorder, opts Options) []string {
 	return out
 }
 
-// checkRequest applies rules 1–6 to the events of one request.
+// checkRequest applies rules 1–7 to the events of one request.
 func checkRequest(evs []Event, admitting bool, opts Options) []string {
 	var out []string
 	var acquires, admissible, caps int
@@ -263,6 +309,9 @@ func checkRequest(evs []Event, admitting bool, opts Options) []string {
 				first = true
 			case !first:
 				out = append(out, fmt.Sprintf("%s (continuation %v) before the first acquire of the request", e.Kind, e.Continuation))
+			}
+			if e.Continuation && e.Holding > 0 {
+				out = append(out, fmt.Sprintf("continuation while the request holds %d lease(s) of its own — it waits for its own units (release the block lease first)", e.Holding))
 			}
 		case KindAdmissible:
 			admissible++

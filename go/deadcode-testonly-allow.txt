@@ -158,6 +158,7 @@ internal/handler/v1_admission.go	V1Admission.AllowedClasses	# wartet: W02-07 (Pl
 internal/handler/v1_admission.go	V1Admission.Plan	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	V1Admission.WriteAdmissionError	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	V1Admission.log	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
+internal/handler/v1_admission.go	V1Admission.logInternal	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	V1Admission.setRetryAfter	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	laneClass	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	peerHintUrgent	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
@@ -179,6 +180,8 @@ internal/handler/v1census/v1census.go	Recorder.RetryAfterHint	# v1census: Admiss
 internal/handler/v1census/v1census.go	Recorder.Take	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	Recorder.TryAcquire	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	Recorder.add	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
+internal/handler/v1census/v1census.go	Recorder.grant	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
+internal/handler/v1census/v1census.go	Recorder.holding	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	checkRequest	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	concrete	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	underPrefix	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door

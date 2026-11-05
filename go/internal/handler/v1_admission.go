@@ -41,8 +41,9 @@ import (
 //     weight of every block comes from ExternalWeightPlan with the clamp
 //     min(sub_batch, ExternalWeightCap(b.Host)) (design/03 §4.7);
 //  4. answers every failure of the plan or of the walk's acquires through
-//     WriteAdmissionError — before any byte: the handler gets a lease or an
-//     error from First, and only then writes (design/03 §4.9 step 6).
+//     WriteAdmissionError(r.Context(), w, err) — before any byte: the
+//     handler gets a lease or an error from First, and only then writes
+//     (design/03 §4.9 step 6).
 //
 // The handler is no WithScheduler mount (design/03 §4.8a: a /v1 request
 // never raises the herald), the planner writes no llmlog row (an external
@@ -392,20 +393,23 @@ func (q *v1Acquirer) attempt(host string, blocks []int) {
 //     domain above (a route that hands in an attempt error) ⇒ 503
 //     internal_error, x-should-retry false, one ERROR line naming which of
 //     the two it was — never an empty answer;
-//   - a context error INSIDE the acquire hull (Canceled, DeadlineExceeded:
-//     the acquire ended with the request's context) ⇒ nothing is written,
-//     "" returned. The writer cannot tell a client that hung up from a
-//     deadline the handler set itself — the route reads its own context on
-//     "" and answers its own deadline (W02-07). Outside the hull a context
-//     error is no admission outcome (an upstream timeout, say) and is
-//     answered like any error outside the domain.
+//   - a context error inside the acquire hull while the client still
+//     waits — the route's own deadline fired during an acquire (a Continue
+//     has no wait budget), or an acquire on a context the request did not
+//     end (the run context of a lease the route already released) ⇒ the
+//     same 503 internal_error, x-should-retry false (an A-internal fault,
+//     K5/K29), with a WARN for the route deadline and an ERROR for the
+//     foreign context — never an empty 200 (A03-W8 review 2 F-1);
+//   - the request's own context ended (ctx, which must be r.Context() — not
+//     a context the route derived with a deadline of its own): the client
+//     is gone, nothing reaches it ⇒ nothing is written, "" returned.
 //
 // Bodies are generic: no origin, no number, no row name (B6).
-func (a *V1Admission) WriteAdmissionError(w http.ResponseWriter, err error) string {
-	acquire := llm.IsAdmissionError(err)
-	if acquire && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+func (a *V1Admission) WriteAdmissionError(ctx context.Context, w http.ResponseWriter, err error) string {
+	if ctx != nil && ctx.Err() != nil {
 		return ""
 	}
+	acquire := llm.IsAdmissionError(err)
 	busy := dispatch.IsRejection(err) || errors.Is(err, dispatch.ErrWouldBlock)
 	var re *dispatch.RejectionError
 	switch {
@@ -423,15 +427,30 @@ func (a *V1Admission) WriteAdmissionError(w http.ResponseWriter, err error) stri
 		oai.WriteCode(w, oai.CodeModelUnavailable, unavailableMessage, true)
 		return oai.CodeModelUnavailable
 	}
-	if acquire || errors.Is(err, llm.ErrWalkClass) {
+	a.logInternal(err, acquire)
+	oai.WriteInternal(w)
+	return oai.CodeInternalError
+}
+
+// logInternal names what an internal_error answer of the writer stands for:
+// the route's deadline during an acquire (WARN — capacity under a deadline
+// of the route, not a code bug), an acquire on a foreign context, a planner
+// or wiring defect, or an error outside the writer's domain (each ERROR).
+func (a *V1Admission) logInternal(err error, acquire bool) {
+	switch {
+	case acquire && errors.Is(err, context.DeadlineExceeded):
+		a.log().Warn("gateway: an admission ended with a deadline of the route while the client waited — answered as internal_error",
+			"error", err)
+	case acquire && errors.Is(err, context.Canceled):
+		a.log().Error("gateway: an admission ended on a context the request did not end (the run context of a released lease?) — answered as internal_error",
+			"error", err)
+	case acquire || errors.Is(err, llm.ErrWalkClass):
 		a.log().Error("gateway: admission failed on a path that only a planner or wiring defect reaches — answered as internal_error",
 			"error", err)
-	} else {
+	default:
 		a.log().Error("gateway: the admission writer got an error that is no admission failure (the route must map attempt errors itself) — answered as internal_error",
 			"error", err)
 	}
-	oai.WriteInternal(w)
-	return oai.CodeInternalError
 }
 
 // setRetryAfter sets both Retry-After headers of a saturation answer from

@@ -51,8 +51,8 @@ type Deps struct {
 // Plan, then llm.WalkChain over Plan.Chain with Plan.Acquirer and
 // WalkRules{AllowedClasses: AllowedClasses()}; an error of Plan, an acquire
 // error of the walk (llm.IsAdmissionError) or the walk's class assert
-// (llm.ErrWalkClass) goes to WriteAdmissionError before anything else is
-// written — no byte and no status before the First acquire returned. An
+// (llm.ErrWalkClass) goes to WriteAdmissionError(r.Context(), w, err)
+// before anything else is written — no byte and no status before the First acquire returned. An
 // attempt error (an upstream status, a wire timeout) is the route's own
 // mapping, never the admission writer's.
 type AdmissionPlanner interface {
@@ -70,10 +70,12 @@ type AdmissionPlanner interface {
 	// WriteAdmissionError answers an admission failure (an error of Plan,
 	// an acquire error of the walk, the walk's class assert) and returns
 	// the code it wrote (the refusal reason of the access log and the
-	// ledger, W06-9/W06-12) — "" when it wrote nothing because the acquire
-	// ended with the request's context; the route then answers its own
-	// deadline, if it set one.
-	WriteAdmissionError(w http.ResponseWriter, err error) string
+	// ledger, W06-9/W06-12). ctx is the request's own context
+	// (r.Context()), never one the route derived with a deadline: only when
+	// it ended — the client is gone — nothing is written and "" returned.
+	// Every other context error of an acquire (the route's deadline, a
+	// released lease's run context) is a 503 with a body.
+	WriteAdmissionError(ctx context.Context, w http.ResponseWriter, err error) string
 }
 
 // AdmissionInput is what a route hands the planner: the request's chain

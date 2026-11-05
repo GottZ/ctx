@@ -114,7 +114,7 @@ func newHeraldRig(t *testing.T, wrap func(http.HandlerFunc) http.HandlerFunc) *h
 			w.WriteHeader(http.StatusOK)
 		case llm.IsAdmissionError(err), errors.Is(err, llm.ErrWalkClass),
 			errors.Is(err, handler.ErrLaneNotOffered), errors.Is(err, handler.ErrChainNotOffered):
-			adm.WriteAdmissionError(w, err)
+			adm.WriteAdmissionError(r.Context(), w, err)
 		default:
 			oai.WriteCode(w, oai.CodeUpstreamUnavailable, "The upstream failed.", true)
 		}

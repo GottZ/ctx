@@ -74,7 +74,7 @@ func chatHandler(adm *handler.V1Admission, chain []backends.Backend) http.Handle
 		if err == nil {
 			_, _, err = llm.WalkChain(r.Context(), plan.Chain, "chat", plan.Acquirer, nil, llm.WalkRules{AllowedClasses: adm.AllowedClasses()}, served)
 		}
-		answer(w, adm, err)
+		answer(w, r, adm, err)
 	}
 }
 
@@ -104,24 +104,20 @@ func embedHandler(adm *handler.V1Admission, chain []backends.Backend) http.Handl
 					return dispatch.Usage{PromptTokens: 1}, true, nil
 				})
 		}
-		answer(w, adm, err)
+		answer(w, r, adm, err)
 	}
 }
 
 // answer is the route's error split: an admission failure (Plan, an acquire
 // error of the walk, its class assert) goes to the planner's writer, an
 // attempt error to the route's own mapping (W02-07), success is a 200.
-func answer(w http.ResponseWriter, adm *handler.V1Admission, err error) {
+func answer(w http.ResponseWriter, r *http.Request, adm *handler.V1Admission, err error) {
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusOK)
 	case llm.IsAdmissionError(err), errors.Is(err, llm.ErrWalkClass),
 		errors.Is(err, handler.ErrLaneNotOffered), errors.Is(err, handler.ErrChainNotOffered):
-		if adm.WriteAdmissionError(w, err) == "" {
-			// The acquire ended with the request's context: the fixture
-			// marks it, so a test reading 200 never reads a silent end.
-			w.WriteHeader(http.StatusGatewayTimeout)
-		}
+		adm.WriteAdmissionError(r.Context(), w, err)
 	default:
 		oai.WriteCode(w, oai.CodeUpstreamUnavailable, "The upstream failed.", true)
 	}
@@ -230,6 +226,18 @@ func TestCensusCatchesDefects(t *testing.T) {
 			release(rec.Acquire(r.Context(), req(false, dispatch.ClassExternal)))
 		}, true, "without reading ExternalAdmissible"},
 		{"admitting route without acquire", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }, true, "no acquire on an admitting route"},
+		// Review 2 F-2 / H-3: a continuation asked while the request still
+		// holds its previous block's lease waits for its own units — on a
+		// full E a self-deadlock, else the class head held against others.
+		{"continue while holding the block lease", func(_ http.ResponseWriter, r *http.Request) {
+			reads()
+			first, _, err := rec.Acquire(r.Context(), req(false, dispatch.ClassExternal))
+			if err != nil {
+				return
+			}
+			release(rec.Acquire(r.Context(), req(true, dispatch.ClassExternal)))
+			first.Release()
+		}, true, "while the request holds"},
 		{"model list acquires", func(_ http.ResponseWriter, r *http.Request) {
 			reads()
 			release(rec.Acquire(r.Context(), req(false, dispatch.ClassExternal)))
