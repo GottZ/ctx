@@ -452,16 +452,20 @@ func (d *discardWriter) Write(p []byte) (int, error) { d.n += len(p); return len
 
 // TestEmbeddingResponseReserved (G8, B9b): the answer share is reserved
 // before the acquire. A request of 256 × 65 536 floats (the ceiling raised
-// for the test) reserves 64 MiB + 64 KiB and holds it in the engine; with a
-// budget of 96 MiB a second one is 503 server_overloaded at once, without an
-// acquire (with the briefing's 64 MiB not even the first fits: 64 MiB of
-// vectors + the encoder buffer > 64 MiB). The first one then serves its
-// 64 MiB of vectors: the heap peak over the baseline stays below the budget
-// plus a constant (the decode transient of one block).
+// for the test) reserves 64 MiB + 64 KiB for its answer, and since the
+// hardening (H-3) the decode transient of its largest block, 3 × the 16 MiB
+// read cap of a 32-input block, before the first wire call — 112 MiB it
+// holds in the engine; with a budget of 128 MiB (96 MiB before H-3: the
+// transient was outside the reserve) a second one is 503
+// server_overloaded at once, without an acquire (with the briefing's 64 MiB
+// not even the first fits: 64 MiB of vectors + the encoder buffer > 64 MiB).
+// The first one then serves its 64 MiB of vectors: the live heap peak over
+// the baseline stays below the answer reserve plus a constant (the decode
+// transient of one block) — the bound of the gate is unchanged by H-3.
 func TestEmbeddingResponseReserved(t *testing.T) {
 	const (
 		dims   = 65536
-		budget = 96 << 20
+		budget = 128 << 20
 		slack  = 32 << 20
 	)
 	e := newEmbedEngine(t, dims)

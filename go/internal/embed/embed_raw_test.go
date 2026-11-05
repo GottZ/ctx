@@ -8,6 +8,7 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -19,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/httpx"
 )
 
 // rawEngine is a dual-protocol embed engine for the raw path: it records
@@ -136,7 +138,7 @@ func TestEmbedRawSendsTheTextsAsAList(t *testing.T) {
 	for _, proto := range []backends.Protocol{backends.ProtocolOpenAI, backends.ProtocolOllama} {
 		e := newRawEngine(t, dims)
 		inputs := []string{"alpha", "beta", "gamma"}
-		vecs, tokens, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, proto, 0), "RAWMODEL", inputs, 0)
+		vecs, tokens, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, proto, 0), "RAWMODEL", inputs, 0, 0)
 		if err != nil {
 			t.Fatalf("%s: EmbedRaw: %v", proto, err)
 		}
@@ -160,7 +162,7 @@ func TestEmbedRawSendsTheTextsAsAList(t *testing.T) {
 				t.Errorf("%s: vector %d starts with %v, want %v (re-aligned by index)", proto, i, v[0], float32(i+1))
 			}
 		}
-		one, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, proto, 0), "RAWMODEL", []string{"solo"}, dims)
+		one, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, proto, 0), "RAWMODEL", []string{"solo"}, dims, 0)
 		if err != nil || len(one) != 1 {
 			t.Fatalf("%s: one input: %v (%d vectors)", proto, err, len(one))
 		}
@@ -193,16 +195,16 @@ func TestEmbedRawRefusesMisalignedAnswers(t *testing.T) {
 	} {
 		e := newRawEngine(t, 2)
 		e.answer = func(string, int) string { return tc.answer }
-		if vecs, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOpenAI, 0), "m", []string{"a", "b"}, tc.dims); err == nil {
+		if vecs, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOpenAI, 0), "m", []string{"a", "b"}, tc.dims, 0); err == nil {
 			t.Errorf("%s: accepted (%v)", tc.name, vecs)
 		}
 	}
 	e := newRawEngine(t, 2)
 	e.answer = func(string, int) string { return `{"embeddings":[[1,2]]}` }
-	if _, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOllama, 0), "m", []string{"a", "b"}, 0); err == nil {
+	if _, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOllama, 0), "m", []string{"a", "b"}, 0, 0); err == nil {
 		t.Error("ollama: one vector for two inputs accepted")
 	}
-	if _, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOllama, 0), "m", nil, 0); err == nil {
+	if _, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOllama, 0), "m", nil, 0, 0); err == nil {
 		t.Error("no input accepted")
 	}
 }
@@ -231,5 +233,67 @@ func TestInternalEmbedNumbersUnchanged(t *testing.T) {
 		if math.Float32bits(got[j]) != math.Float32bits(want[j]) {
 			t.Fatalf("component %d: %v, want the float64-path value %v bit for bit", j, got[j], want[j])
 		}
+	}
+}
+
+// rawBodyOverhead is the JSON frame of a gateway sub-block body beyond its
+// texts: {"model":"…","input":[…]} plus quotes and a comma per input.
+func rawBodyOverhead(model string, n int) int { return len(`{"model":"","input":[]}`) + len(model) + 3*n }
+
+// TestEmbedRawBodyIsNotHTMLEscaped (hardening H-2, Fremd-Review 2 R2-10):
+// the list body of a gateway sub-block carries the client's texts as sent
+// — json.Marshal would escape every <, > and & into six bytes, so a batch of
+// HTML grew six-fold on its way upstream, outside any reserve. The body is
+// at most the texts plus the JSON frame (rawBodyOverhead), on both wires.
+// The internal path keeps json.Marshal (TestInternalEmbedBodyByteIdentical,
+// TestInternalEmbedBitIdenticalToBase).
+func TestEmbedRawBodyIsNotHTMLEscaped(t *testing.T) {
+	texts := []string{strings.Repeat("<a href='x'>&amp;</a>", 400), strings.Repeat("<>&", 1000), "a<b"}
+	sum := 0
+	for _, s := range texts {
+		sum += len(s)
+	}
+	for _, proto := range []backends.Protocol{backends.ProtocolOpenAI, backends.ProtocolOllama} {
+		e := newRawEngine(t, 4)
+		if _, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, proto, 0), "m", texts, 0, 0); err != nil {
+			t.Fatalf("%s: EmbedRaw: %v", proto, err)
+		}
+		body := e.lastBody()
+		if max := sum + rawBodyOverhead("m", len(texts)); len(body) > max {
+			t.Errorf("%s: upstream body %d B for %d B of texts, want ≤ %d (no HTML escaping on the gateway path)", proto, len(body), sum, max)
+		}
+		var sent struct {
+			Input []string `json:"input"`
+		}
+		if err := json.Unmarshal([]byte(body), &sent); err != nil || len(sent.Input) != 3 || sent.Input[0] != texts[0] || sent.Input[1] != texts[1] {
+			t.Errorf("%s: the body does not carry the texts as sent (%v)", proto, err)
+		}
+	}
+}
+
+// TestEmbedRawRefusesSurplusOllamaVectors (hardening H-5, E05): /api/embed
+// carries no index — an answer with more vectors than inputs is refused,
+// never cut to the first n (which of them belongs to which input is
+// unknowable).
+func TestEmbedRawRefusesSurplusOllamaVectors(t *testing.T) {
+	e := newRawEngine(t, 2)
+	e.answer = func(string, int) string { return `{"embeddings":[[1,2],[3,4],[5,6]]}` }
+	vecs, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOllama, 0), "m", []string{"a", "b"}, 0, 0)
+	if err == nil || !strings.Contains(err.Error(), "3 embeddings returned for 2 inputs") {
+		t.Fatalf("surplus vectors: %v (%d vectors), want the count refusal", err, len(vecs))
+	}
+}
+
+// TestEmbedRawReadsAtMostTheCap (hardening H-3): an answer past maxBytes
+// ends with httpx.ErrResponseTooLarge after maxBytes bytes — the read stops
+// there; maxBytes 0 is the transport cap.
+func TestEmbedRawReadsAtMostTheCap(t *testing.T) {
+	e := newRawEngine(t, 64)
+	_, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOpenAI, 0), "m", []string{"a", "b"}, 0, 256)
+	if !errors.Is(err, httpx.ErrResponseTooLarge) {
+		t.Fatalf("answer past a 256-byte cap: %v, want httpx.ErrResponseTooLarge", err)
+	}
+	if _, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOpenAI, 0), "m", []string{"a", "b"}, 0, 0); err != nil {
+		t.Fatalf("cap 0 (the transport cap): %v", err)
 	}
 }

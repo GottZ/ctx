@@ -167,6 +167,9 @@ func TestCheckBlocks(t *testing.T) {
 		ok     bool
 	}{
 		{[]int{1}, 1, true}, {[]int{4, 4, 2}, 10, true}, {nil, 1, false}, {[]int{4, 0}, 4, false}, {[]int{4, 4}, 9, false},
+		// a plan covering more units than the request (S03): refused, never
+		// a slice past the inputs
+		{[]int{5, 5}, 9, false}, {[]int{4, 4, 2}, 9, false}, {[]int{2}, 1, false},
 	} {
 		if err := checkBlocks(c.blocks, c.units); (err == nil) != c.ok {
 			t.Errorf("checkBlocks(%v, %d) = %v, want ok=%v", c.blocks, c.units, err, c.ok)
@@ -271,6 +274,69 @@ func TestFloat32FormIsEncodingJSONs(t *testing.T) {
 	for _, x := range []float32{float32(math.Inf(1)), float32(math.Inf(-1)), float32(math.NaN())} {
 		if _, err := appendFloat32(nil, x); err == nil {
 			t.Errorf("%v accepted", x)
+		}
+	}
+}
+
+// breachAcquirer answers Continue with a real lease of the dispatcher and a
+// breach of the door's contract: a lease of another class than the plan's
+// (S01), or no run context (S04).
+type breachAcquirer struct {
+	RequestAcquirer
+	d       *dispatch.Dispatcher
+	class   dispatch.Class
+	noRun   bool
+	granted *dispatch.Lease
+}
+
+func (a *breachAcquirer) Class() dispatch.Class { return dispatch.ClassExternal }
+func (a *breachAcquirer) Continue(ctx context.Context, b *backends.Backend, _ string, _ time.Duration) (*dispatch.Lease, context.Context, error) {
+	l, rc, err := a.d.Acquire(ctx, dispatch.Request{Target: dispatch.Target{Origin: b.Host}, Class: a.class, Role: "embed"})
+	a.granted = l
+	if a.noRun {
+		rc = nil
+	}
+	return l, rc, err
+}
+
+// TestSubBlockContinuationBreachesGiveTheLeaseBack (hardening H-5, S01,
+// S04, S05): a continuation lease in another class than the plan's, and one
+// without a run context, are refused inside the acquire hull (ErrWalkClass
+// resp. errNoLease) — and the lease goes back: the target holds nothing
+// afterwards (a kept lease would hold its units for good).
+func TestSubBlockContinuationBreachesGiveTheLeaseBack(t *testing.T) {
+	d := dispatch.New(slog.New(slog.DiscardHandler), dispatch.DefaultSettings())
+	t.Cleanup(d.Close)
+	const host = "http://breach.invalid:9000"
+	d.UpdatePolicy(dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{host: {Slots: 4}}})
+	held := func() int {
+		for _, ts := range d.Snapshot().Targets {
+			if ts.Origin == host {
+				return ts.Held
+			}
+		}
+		return 0
+	}
+	b := &backends.Backend{Name: "row", Host: host}
+	for _, tc := range []struct {
+		name  string
+		acq   *breachAcquirer
+		cause error
+	}{
+		{"lease in another class (S01)", &breachAcquirer{d: d, class: dispatch.ClassBackground}, llm.ErrWalkClass},
+		{"no run context (S04)", &breachAcquirer{d: d, class: dispatch.ClassBackground, noRun: true}, errNoLease},
+	} {
+		run := subBlockRun{ctx: context.Background(), acq: tc.acq, role: "embed",
+			timeout: func(*backends.Backend) time.Duration { return time.Second }, alive: func() error { return nil }}
+		l, rc, err := run.continueBlock(b, time.Second)
+		if l != nil || rc != nil || !llm.IsAdmissionError(err) || !errors.Is(err, tc.cause) {
+			t.Errorf("%s: lease %v err %v, want no lease and %v in the acquire hull", tc.name, l, err, tc.cause)
+		}
+		if tc.acq.granted == nil {
+			t.Fatalf("%s: the fake granted no lease", tc.name)
+		}
+		if h := held(); h != 0 {
+			t.Errorf("%s: the target holds %d lease(s) after the refusal (S05: the breach must give the lease back)", tc.name, h)
 		}
 	}
 }

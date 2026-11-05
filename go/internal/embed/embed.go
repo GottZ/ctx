@@ -125,6 +125,25 @@ func (in wireInput) value() any {
 	return in.texts
 }
 
+// marshal encodes the request body. The internal path keeps json.Marshal —
+// its body stays byte-identical to the single-string wire (W02-09 G2,
+// TestInternalEmbedBitIdenticalToBase). A gateway list goes out without
+// HTML escaping: json.Marshal turns each <, > and & into six bytes, and a
+// batch of HTML would grow six-fold on its way upstream, past every reserve
+// (W02-09 hardening H-2); the backend reads JSON, not HTML.
+func (in wireInput) marshal(v any) ([]byte, error) {
+	if in.bare {
+		return json.Marshal(v)
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), nil
+}
+
 // Embed generates an embedding via the backend tuple, truncates to 1024d,
 // and L2-normalizes. Host and Protocol arrive as one backends.Backend value
 // (F1-W5) — the wire path (/api/embed vs /v1/embeddings) can never diverge
@@ -136,7 +155,7 @@ func (in wireInput) value() any {
 func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) (vec []float32, promptTokens int, err error) {
 	in := wireInput{texts: []string{prefix.text() + text}, bare: true}
 
-	raw, promptTokens, err := embedWire[float64](ctx, b, b.Model, in)
+	raw, promptTokens, err := embedWire[float64](ctx, b, b.Model, in, httpx.MaxResponseBytes)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -162,13 +181,21 @@ func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) 
 // model is the row's model for the role. dims > 0 is the expected length
 // (the alias's embedding.native_dims); 0 lets the first vector set it, and
 // every other vector must match. The quality check (rawQuality) is finite
-// components, the expected length and a norm > 0. The wire sites and the
-// client choice are Embed's: httpClients.For(b.EgressGuarded()).
-func EmbedRaw(ctx context.Context, b backends.Backend, model string, inputs []string, dims int) (vecs [][]float32, promptTokens int, err error) {
+// components, the expected length and a norm > 0. maxBytes caps the
+// answer the wire reads (the caller sizes it from the block and reserves the
+// decode transient for it, W02-09 hardening H-3); ≤ 0 or above
+// httpx.MaxResponseBytes is that transport cap. An answer past the cap
+// fails with httpx.ErrResponseTooLarge (a malformed answer for the failover
+// classifier: stop the chain). The wire sites and the client choice are
+// Embed's: httpClients.For(b.EgressGuarded()).
+func EmbedRaw(ctx context.Context, b backends.Backend, model string, inputs []string, dims int, maxBytes int64) (vecs [][]float32, promptTokens int, err error) {
 	if len(inputs) == 0 {
 		return nil, 0, errors.New("embed: no input")
 	}
-	vecs, promptTokens, err = embedWire[float32](ctx, b, model, wireInput{texts: inputs})
+	if maxBytes <= 0 || maxBytes > httpx.MaxResponseBytes {
+		maxBytes = httpx.MaxResponseBytes
+	}
+	vecs, promptTokens, err = embedWire[float32](ctx, b, model, wireInput{texts: inputs}, maxBytes)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -181,14 +208,14 @@ func EmbedRaw(ctx context.Context, b backends.Backend, model string, inputs []st
 // embedWire is the protocol choice of both embed paths: the row's wire
 // (/v1/embeddings for "openai", /api/embed for every other protocol — the
 // pre-W5 dispatch semantics, incl. empty) with the row's egress client.
-func embedWire[T floatElem](ctx context.Context, b backends.Backend, model string, in wireInput) ([][]T, int, error) {
+func embedWire[T floatElem](ctx context.Context, b backends.Backend, model string, in wireInput, limit int64) ([][]T, int, error) {
 	// The hop target comes from the row alone and goes down with the client:
 	// both wires stamp the request and observe the answer with it.
 	hop := b.HopTarget(fedhop.WireEmbed)
 	if b.Protocol == backends.ProtocolOpenAI {
-		return embedOpenAI[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in)
+		return embedOpenAI[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, limit)
 	}
-	return embedOllama[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, b.NumCtx)
+	return embedOllama[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, b.NumCtx, limit)
 }
 
 // rawQuality is EmbedRaw's quality check: every component finite, every
@@ -219,13 +246,13 @@ func rawQuality(vecs [][]float32, dims int) error {
 	return nil
 }
 
-func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, numCtx int) ([][]T, int, error) {
+func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, numCtx int, limit int64) ([][]T, int, error) {
 	reqBody := ollamaEmbedRequest{Model: model, Input: in.value()}
 	if numCtx > 0 {
 		reqBody.Options = &ollamaOpts{NumCtx: numCtx}
 	}
 
-	body, err := json.Marshal(reqBody)
+	body, err := in.marshal(reqBody)
 	if err != nil {
 		return nil, 0, fmt.Errorf("embed: marshal: %w", err)
 	}
@@ -260,7 +287,7 @@ func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedh
 	}
 
 	var result ollamaEmbedResponse[T]
-	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, limit)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 
@@ -271,10 +298,10 @@ func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedh
 	return result.Embeddings, result.PromptEvalCount, nil
 }
 
-func embedOpenAI[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput) ([][]T, int, error) {
+func embedOpenAI[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, limit int64) ([][]T, int, error) {
 	reqBody := openAIEmbedRequest{Model: model, Input: in.value()}
 
-	body, err := json.Marshal(reqBody)
+	body, err := in.marshal(reqBody)
 	if err != nil {
 		return nil, 0, fmt.Errorf("embed: marshal: %w", err)
 	}
@@ -305,7 +332,7 @@ func embedOpenAI[T floatElem](ctx context.Context, client *http.Client, hop fedh
 	}
 
 	var result openAIEmbedResponse[T]
-	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, limit)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 

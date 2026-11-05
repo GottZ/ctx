@@ -54,9 +54,22 @@ var (
 // refused) and the types of encoding_format and dimensions. The limits of
 // the alias follow once it is known (checkEmbedPolicy).
 func parseEmbedTop(body []byte) (*embedRequest, *paramError) {
+	// The shape is checked before anything is materialized (hardening H-1,
+	// Fremd-Review 2 R2-1): json.Valid and the member walk allocate
+	// nothing, so a body of a million keys is refused at the cost of a
+	// scan, not of a map of a million entries.
+	if !json.Valid(body) {
+		return nil, notAnObject()
+	}
+	switch n := objectMembers(body); {
+	case n < 0:
+		return nil, notAnObject()
+	case n > len(embedKeys)+len(embedDropKeys):
+		return nil, tooManyMembers(body)
+	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
-		return nil, &paramError{CodeInvalidJSON, "", "The request body is not a valid JSON object."}
+		return nil, notAnObject()
 	}
 	if perr := uniqueMembers("", body, raw); perr != nil {
 		return nil, perr
@@ -88,6 +101,46 @@ func parseEmbedTop(body []byte) (*embedRequest, *paramError) {
 		return nil, perr
 	}
 	return req, nil
+}
+
+func notAnObject() *paramError {
+	return &paramError{CodeInvalidJSON, "", "The request body is not a valid JSON object."}
+}
+
+// tooManyMembers refuses a top level with more members than the parse knows
+// names: one of them is unknown or repeated. Only the first members are
+// decoded — one more than the known names, which is enough to hold an
+// unknown or a repeated one — so the refusal costs no more than their keys.
+func tooManyMembers(body []byte) *paramError {
+	it, _ := newMemberIter(body)
+	limit := len(embedKeys) + len(embedDropKeys) + 1
+	seen := make(map[string]bool, limit)
+	var unknown []string
+	repeatedName := ""
+	for range limit {
+		key, _, more := it.next()
+		if !more {
+			break
+		}
+		var k string
+		if err := json.Unmarshal(append(append([]byte{'"'}, key...), '"'), &k); err != nil {
+			k = string(key)
+		}
+		if seen[k] && repeatedName == "" {
+			repeatedName = k
+		}
+		seen[k] = true
+		if !embedKeys[k] && !embedDropKeys[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	// The order of the parse below: a repeated key first (uniqueMembers),
+	// then the first unknown key.
+	if repeatedName != "" || len(unknown) == 0 {
+		return repeated("", repeatedName)
+	}
+	sort.Strings(unknown)
+	return unsupportedParameter(unknown[0])
 }
 
 func (req *embedRequest) readModel(v json.RawMessage) *paramError {
@@ -124,28 +177,39 @@ func (req *embedRequest) readInput(v json.RawMessage) *paramError {
 		}
 		req.inputs = []string{s}
 	case kindArray:
-		var elems []json.RawMessage
-		if err := json.Unmarshal(v, &elems); err != nil {
-			return invalidType("input", "a string or an array of strings")
-		}
-		if len(elems) == 0 {
+		// The elements are counted before one of them is decoded (H-1): a
+		// count past the code ceiling of embedding.max_inputs is refused at
+		// the cost of a scan; the alias's own max_inputs follows once it is
+		// resolved (checkEmbedPolicy).
+		n, over := arrayElems(v, modelalias.CeilingEmbeddingMaxInputs)
+		switch {
+		case over:
+			return unsupportedValue("input", fmt.Sprintf("at most %d inputs per request", modelalias.CeilingEmbeddingMaxInputs))
+		case n == 0:
 			return unsupportedValue("input", "at least one input is required")
 		}
-		if hasKind(elems[0], kindNumber|kindArray) {
-			return unsupportedValue("input", "token arrays are not supported; send the texts")
-		}
-		req.inputs = make([]string, len(elems))
-		for i, e := range elems {
+		req.inputs = make([]string, 0, n)
+		var perr *paramError
+		eachArrayElem(v, func(i int, e []byte) bool {
+			if i == 0 && hasKind(e, kindNumber|kindArray) {
+				perr = unsupportedValue("input", "token arrays are not supported; send the texts")
+				return false
+			}
 			param := fmt.Sprintf("input[%d]", i)
-			if kindOf(e) != kindString {
-				return invalidType(param, "a string")
+			var s string
+			if kindOf(e) != kindString || json.Unmarshal(e, &s) != nil {
+				perr = invalidType(param, "a string")
+				return false
 			}
-			if err := json.Unmarshal(e, &req.inputs[i]); err != nil {
-				return invalidType(param, "a string")
+			if s == "" {
+				perr = unsupportedValue(param, "an input must not be empty")
+				return false
 			}
-			if req.inputs[i] == "" {
-				return unsupportedValue(param, "an input must not be empty")
-			}
+			req.inputs = append(req.inputs, s)
+			return true
+		})
+		if perr != nil {
+			return perr
 		}
 	default:
 		return invalidType("input", "a string or an array of strings")
@@ -260,6 +324,16 @@ func checkInputRunes(req *embedRequest, limit int) *paramError {
 // the design, like modelalias.Default*: an operator sets the alias key.
 const embedFallbackWindow = 2048
 
+// embedEarlyRuneLimit is the part of the rune limit that needs no chain:
+// the alias's embedding.max_input_runes, else the code ceiling
+// (CeilingEmbeddingMaxInputRunes) every chain-derived limit stays under.
+func embedEarlyRuneLimit(l embedLimits) int {
+	if l.maxInputRunes > 0 {
+		return l.maxInputRunes
+	}
+	return modelalias.CeilingEmbeddingMaxInputRunes
+}
+
 // embedRuneLimit is the per-input rune limit (design/02 §3.2
 // embedding.max_input_runes): the alias's value, else the 9/5 rune budget
 // (promptguard.RuneBudget, the measured densest tokenization) of the
@@ -280,4 +354,35 @@ func embedRuneLimit(l embedLimits, chain []backends.Backend) int {
 		window = embedFallbackWindow
 	}
 	return min(promptguard.RuneBudget(window), modelalias.CeilingEmbeddingMaxInputRunes)
+}
+
+// arrayElems counts the elements of the JSON array raw without decoding one
+// (raw must be valid JSON — the body passed json.Valid); over reports more
+// than limit elements, and the count stops there.
+func arrayElems(raw []byte, limit int) (n int, over bool) {
+	eachArrayElem(raw, func(int, []byte) bool {
+		n++
+		return n <= limit
+	})
+	return min(n, limit), n > limit
+}
+
+// eachArrayElem hands every element of the JSON array raw, as its raw bytes,
+// to fn until fn returns false; it allocates nothing.
+func eachArrayElem(raw []byte, fn func(i int, elem []byte) bool) {
+	i := skipSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '[' {
+		return
+	}
+	i = skipSpace(raw, i+1)
+	for n := 0; i < len(raw) && raw[i] != ']'; n++ {
+		end := skipValue(raw, i)
+		if !fn(n, raw[i:end]) {
+			return
+		}
+		i = skipSpace(raw, end)
+		if i < len(raw) && raw[i] == ',' {
+			i = skipSpace(raw, i+1)
+		}
+	}
 }

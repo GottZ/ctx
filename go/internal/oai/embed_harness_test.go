@@ -40,6 +40,8 @@ const (
 	idEmbSmall  = "00000000-0000-4000-8000-0000000e4b02"
 	idEmbBig    = "00000000-0000-4000-8000-0000000e4b03"
 	idEmbOne    = "00000000-0000-4000-8000-0000000e4b04"
+	idEmbTenant = "00000000-0000-4000-8000-0000000e4b05"
+	idEmbRunes  = "00000000-0000-4000-8000-0000000e4b06"
 )
 
 // embedAliases extends the chat fixture: "emb" (no policy: native dimension
@@ -47,7 +49,9 @@ const (
 // 128 inputs in sub-blocks of 32), "embsmall" (native 8, max 4 inputs,
 // sub_batch 2, 16 runes per input), "embbig" (native 65536, 256 inputs in
 // blocks of 256 — the reserve gate's ceiling, raised for the test) and
-// "emb1" (native 8, max 8 inputs, one input per block).
+// "emb1" (native 8, max 8 inputs, one input per block), "embrunes" (native
+// 8, 2000 runes per input — above a small chain window) and the tenant
+// alias "temb" of the consumer's tenant (native 8, max 32 inputs).
 func embedAliases() []chatAlias {
 	return append(chatAliases(),
 		chatAlias{idEmbNative, backends.GlobalScope, "emb4k", "embedding", "embed", backends.SensCredentials,
@@ -58,6 +62,10 @@ func embedAliases() []chatAlias {
 			`{"embedding.native_dims":65536,"embedding.max_inputs":256,"embedding.sub_batch":256}`, true},
 		chatAlias{idEmbOne, backends.GlobalScope, "emb1", "embedding", "embed", backends.SensCredentials,
 			`{"embedding.native_dims":8,"embedding.max_inputs":8,"embedding.sub_batch":1}`, true},
+		chatAlias{idEmbRunes, backends.GlobalScope, "embrunes", "embedding", "embed", backends.SensCredentials,
+			`{"embedding.native_dims":8,"embedding.max_input_runes":2000}`, true},
+		chatAlias{idEmbTenant, tenantScope, "temb", "embedding", "embed", backends.SensCredentials,
+			`{"embedding.native_dims":8,"embedding.max_inputs":32}`, true},
 	)
 }
 

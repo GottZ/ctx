@@ -68,6 +68,44 @@ const EmbedEncodeBuffer = 64 << 10
 // (exported for the same pin).
 const EmbedFloatBytes = 4
 
+// The byte bound of one block's upstream answer (W02-09 hardening H-3,
+// Fremd-Review 2 R2-9): EmbedRaw reads at most embedReadCap bytes, and the
+// route reserves embedDecodeFactor times that before the block's wire call —
+// the decode buffer is part of the in-flight budget, not beside it. Derived
+// mechanism constants of the wire format, not policy (the policy values are
+// embedding.sub_batch, embedding.native_dims, gateway.embedding_max_floats
+// and gateway.inflight_budget).
+const (
+	// embedWireComponentBytes: the longest float64 literal in shortest
+	// round-trip form (-2.2250738585072014e-308, 24 bytes) and its separator
+	// — a backend that prints float64 (llama.cpp, vLLM, Ollama) stays
+	// inside; one that pads every number with whitespace does not.
+	embedWireComponentBytes = 25
+	// embedWireItemBytes: the frame of one OpenAI data entry
+	// ({"object":"embedding","index":N,"embedding":[…]}, ≈ 50 bytes) with
+	// room for fields a backend adds.
+	embedWireItemBytes = 256
+	// embedWireAnswerBytes: the frame of the answer (the list, the model,
+	// usage and fields a backend adds).
+	embedWireAnswerBytes = 4 << 10
+	// embedDecodeFactor: json.Decoder holds the whole value and grows its
+	// buffer by doubling — at the last step the old and the new buffer live
+	// together, less than three times the value.
+	embedDecodeFactor = 3
+)
+
+// embedReadCap is the byte bound of the answer to a block of inputs at dims
+// components each; dims ≤ 0 (unknown) takes the floats ceiling
+// gateway.embedding_max_floats. Never above httpx.MaxResponseBytes, the
+// transport cap of every embed answer.
+func embedReadCap(inputs, dims int, maxFloats int64) int64 {
+	floats := int64(inputs) * int64(dims)
+	if dims <= 0 {
+		floats = maxFloats
+	}
+	return min(floats*embedWireComponentBytes+int64(inputs)*embedWireItemBytes+embedWireAnswerBytes, httpx.MaxResponseBytes)
+}
+
 // The texts of the route's own refusals.
 const embedKindMessage = "The model does not support embeddings."
 
@@ -134,6 +172,7 @@ type embedCall struct {
 	lim      embedLimits
 	required backends.Sensitivity
 	reserved int64 // the answer's share of the in-flight budget
+	decoding int64 // the decode transient's share (one block at a time)
 	limit    LimitReservation
 	limitEnd bool
 	// own is the answer of a route refusal after an acquire (errRouteRefused).
@@ -229,6 +268,14 @@ func (c *embedCall) serve() {
 	}
 	c.lim = embedLimitsOf(c.alias, c.s)
 	if perr := checkEmbedPolicy(req, c.lim); perr != nil {
+		c.refuseParam(perr)
+		return
+	}
+	// The rune limit that holds without a chain — the alias's
+	// max_input_runes, else the code ceiling — before the reserve, the scan
+	// and the chain build (hardening H-7): an input over it is the client's
+	// 400, never a 503 of the budget. The chain's window narrows it below.
+	if perr := checkInputRunes(req, embedEarlyRuneLimit(c.lim)); perr != nil {
 		c.refuseParam(perr)
 		return
 	}
@@ -342,6 +389,22 @@ func (c *embedCall) learnReserve(dims int) bool {
 		return false
 	}
 	c.reserved = need
+	return true
+}
+
+// reserveDecode grows the decode transient to the bound of a block of
+// inputs (embedDecodeFactor × embedReadCap at the policy's native dimension,
+// the floats ceiling without one).
+func (c *embedCall) reserveDecode(inputs int) bool {
+	need := embedDecodeFactor * embedReadCap(inputs, c.lim.nativeDims, c.s.EmbeddingMaxFloats)
+	if need <= c.decoding {
+		return true
+	}
+	res := ReservationFrom(c.ctx)
+	if res == nil || !res.Grow(need-c.decoding) {
+		return false
+	}
+	c.decoding = need
 	return true
 }
 
@@ -528,6 +591,17 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 			return CodeUnsupportedValue
 		})
 	}
+	// The decode transient of the largest block of this row's plan, before
+	// its first wire call — the blocks run one after the other, so one
+	// transient is held at a time; a later attempt with larger blocks grows
+	// it (H-3). Refused ⇒ 503 server_overloaded before any wire contact.
+	if !c.reserveDecode(slices.Max(blocks)) {
+		return dispatch.Usage{}, false, c.refuseAfterAcquire(func() string {
+			c.rec.Reason = CodeServerOverloaded
+			WriteOverloaded(c.w)
+			return CodeServerOverloaded
+		})
+	}
 	st.k, st.done, st.failedBlock, st.abort = len(blocks), 0, -1, ""
 	st.vecs = make([][]float32, n)
 	st.dims = c.lim.nativeDims
@@ -582,7 +656,8 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 	st.wires++
 	wctx, cancel := context.WithTimeout(rc, timeout)
 	defer cancel()
-	vecs, promptTokens, err := embed.EmbedRaw(wctx, *b, model, c.req.inputs[lo:hi], st.dims)
+	vecs, promptTokens, err := embed.EmbedRaw(wctx, *b, model, c.req.inputs[lo:hi], st.dims,
+		embedReadCap(hi-lo, st.dims, c.s.EmbeddingMaxFloats))
 	if err != nil {
 		return dispatch.Usage{}, c.blockFailure(st, b, i, rc, err)
 	}

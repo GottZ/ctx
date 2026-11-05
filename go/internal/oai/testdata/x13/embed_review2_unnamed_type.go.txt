@@ -1,0 +1,34 @@
+// census-want: 1
+// Review 2 probe C: the wire closure of the attempt handed to a helper whose
+// parameter has the unnamed func type of blockFunc; the helper runs it in a
+// goroutine, outside the walker's lease.
+package oai
+
+import (
+	"context"
+	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/llm"
+)
+
+func spawn(do func(i, lo, hi int, l *dispatch.Lease, rc context.Context, t time.Duration) (dispatch.Usage, error)) {
+	go func() { _, _ = do(0, 0, 1, nil, nil, 0) }()
+}
+
+func (c *call) wireBlock(b *backends.Backend, lo, hi int, lease *dispatch.Lease, rc context.Context) error {
+	_, _, err := embed.EmbedRaw(rc, *b, "m", c.inputs[lo:hi], 0)
+	return err
+}
+
+func (c *call) walk(ctx context.Context, chain []backends.Backend) {
+	_, _, _ = llm.WalkChain(ctx, chain, "embed", c.acq, nil, llm.WalkRules{},
+		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration) (dispatch.Usage, bool, error) {
+			spawn(func(i, lo, hi int, l *dispatch.Lease, rc context.Context, t time.Duration) (dispatch.Usage, error) {
+				return dispatch.Usage{}, c.wireBlock(b, lo, hi, l, rc)
+			})
+			return dispatch.Usage{}, true, nil
+		})
+}

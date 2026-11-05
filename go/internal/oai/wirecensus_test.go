@@ -202,6 +202,7 @@ func wireCensus(fset *token.FileSet, files []*ast.File) ([]wireFinding, map[stri
 	findings = append(findings, closeWireFuncs(fset, files, wireFuncs, wireDecls, attemptLits)...)
 	bf, bfSites := blockFuncCalls(fset, files)
 	findings = append(findings, bf...)
+	findings = append(findings, blockFuncValues(fset, files, wireFuncs, attemptLits)...)
 	if bfSites > 0 {
 		sites["blockFunc"] = bfSites
 	}
@@ -280,6 +281,7 @@ const blockFuncType = "blockFunc"
 func blockFuncCalls(fset *token.FileSet, files []*ast.File) ([]wireFinding, int) {
 	var findings []wireFinding
 	sites := 0
+	fields := blockFuncFields(files)
 	for _, f := range files {
 		var stack []ast.Node
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -292,8 +294,17 @@ func blockFuncCalls(fset *token.FileSet, files []*ast.File) ([]wireFinding, int)
 			if !ok {
 				return true
 			}
-			id, ok := call.Fun.(*ast.Ident)
-			if !ok || !blockFuncInScope(stack, id.Name) {
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				if !blockFuncInScope(stack, fun.Name) {
+					return true
+				}
+			case *ast.SelectorExpr:
+				// a field of type blockFunc (Review 2 probe A)
+				if !fields[fun.Sel.Name] {
+					return true
+				}
+			default:
 				return true
 			}
 			sites++
@@ -301,7 +312,6 @@ func blockFuncCalls(fset *token.FileSet, files []*ast.File) ([]wireFinding, int)
 				switch e := stack[i].(type) {
 				case *ast.GoStmt:
 					findings = append(findings, wireFinding{fset.Position(call.Pos()), "a blockFunc call in a goroutine: it outlives the block's lease"})
-					continue
 				case *ast.FuncDecl:
 					if !takesLease(e.Type) {
 						findings = append(findings, wireFinding{fset.Position(call.Pos()), "a blockFunc call in " + e.Name.Name + ", which runs under no lease"})
@@ -346,6 +356,148 @@ func blockFuncInScope(stack []ast.Node, name string) bool {
 		}
 	}
 	return false
+}
+
+// blockFuncFields names the struct fields of type blockFunc.
+func blockFuncFields(files []*ast.File) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if st, ok := n.(*ast.StructType); ok {
+				for _, fl := range st.Fields.List {
+					if id, ok := fl.Type.(*ast.Ident); ok && id.Name == blockFuncType {
+						for _, nm := range fl.Names {
+							out[nm.Name] = true
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// blockFuncParam reports whether argument idx of a call of name goes to a
+// parameter of type blockFunc of a function or method of that name in the
+// files (AST only: every declaration of the name is asked).
+func blockFuncParam(files []*ast.File, name string, idx int) bool {
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Name.Name != name || fd.Type.Params == nil {
+				continue
+			}
+			i := 0
+			for _, p := range fd.Type.Params.List {
+				names := max(len(p.Names), 1)
+				if idx < i+names {
+					if id, ok := p.Type.(*ast.Ident); ok && id.Name == blockFuncType {
+						return true
+					}
+					break
+				}
+				i += names
+			}
+		}
+	}
+	return false
+}
+
+// calleeName is the name a call goes to (f(…) or x.f(…)), "" otherwise.
+func calleeName(call *ast.CallExpr) string {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name
+	case *ast.SelectorExpr:
+		return fun.Sel.Name
+	}
+	return ""
+}
+
+// blockFuncValues finds every use of a blockFunc value that is no call of
+// it (Review 2 R2-2, hardening H-8): a parameter or field of type blockFunc
+// copied into a variable, stored, returned — anything but a call or an
+// argument to another parameter of type blockFunc — and a function literal
+// holding a wire function that is neither a WalkChain attempt literal nor
+// handed to a parameter of type blockFunc (probe C: a helper with the
+// unnamed func type). Either way the later call is out of the census's
+// sight, and with it the lease it runs under.
+func blockFuncValues(fset *token.FileSet, files []*ast.File, wireFuncs map[string]token.Pos, attemptLits []*ast.FuncLit) []wireFinding {
+	var findings []wireFinding
+	fields := blockFuncFields(files)
+	for _, f := range files {
+		allowed := map[ast.Node]bool{} // arguments handed to a blockFunc parameter
+		decl := map[*ast.Ident]bool{}  // declaring names
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CallExpr:
+				name := calleeName(x)
+				for i, a := range x.Args {
+					if name != "" && blockFuncParam(files, name, i) {
+						allowed[a] = true
+					}
+				}
+				switch fun := x.Fun.(type) {
+				case *ast.Ident:
+					decl[fun] = true // a call of the name, not a value
+				case *ast.SelectorExpr:
+					decl[fun.Sel] = true
+				}
+			case *ast.Field:
+				for _, nm := range x.Names {
+					decl[nm] = true
+				}
+			case *ast.ValueSpec:
+				for _, nm := range x.Names {
+					decl[nm] = true
+				}
+			}
+			return true
+		})
+		var stack []ast.Node
+		ast.Inspect(f, func(n ast.Node) bool {
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			stack = append(stack, n)
+			switch x := n.(type) {
+			case *ast.Ident:
+				if decl[x] || allowed[x] {
+					return true
+				}
+				if blockFuncInScope(stack, x.Name) {
+					findings = append(findings, wireFinding{fset.Position(x.Pos()), "the blockFunc " + x.Name + " used as a value: its call is out of the census's sight"})
+				}
+			case *ast.SelectorExpr:
+				if fields[x.Sel.Name] && !decl[x.Sel] && !allowed[x] {
+					findings = append(findings, wireFinding{fset.Position(x.Pos()), "the blockFunc field " + x.Sel.Name + " used as a value"})
+				}
+			case *ast.FuncLit:
+				if containsLit(attemptLits, x) || allowed[x] || !refersTo(x, wireFuncs) {
+					return true
+				}
+				findings = append(findings, wireFinding{fset.Position(x.Pos()), "a function literal holding a wire function, handed to no blockFunc parameter and no WalkChain attempt"})
+			}
+			return true
+		})
+	}
+	return findings
+}
+
+// refersTo reports whether the literal's body names a wire function.
+func refersTo(lit *ast.FuncLit, wireFuncs map[string]token.Pos) bool {
+	found := false
+	ast.Inspect(lit.Body, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			if _, w := wireFuncs[id.Name]; w {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // closeWireFuncs adds every named function that references a wire function
