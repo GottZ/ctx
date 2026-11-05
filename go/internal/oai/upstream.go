@@ -419,3 +419,13 @@ func writeRetryAfter(h http.Header, d time.Duration) {
 	}
 	h.Set("Retry-After", strconv.Itoa(int(math.Ceil(d.Seconds()))))
 }
+
+// writeRetryAfterMs sets retry-after-ms in whole milliseconds, rounded up
+// (0 = none): the OpenAI SDKs read it before Retry-After (extern-recherche
+// §1.7), so it carries the exact wait the seconds header rounds away.
+func writeRetryAfterMs(h http.Header, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	h.Set("retry-after-ms", strconv.FormatInt(int64((d+time.Millisecond-1)/time.Millisecond), 10))
+}

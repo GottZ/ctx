@@ -203,7 +203,7 @@ func modelRouteCensus(t *testing.T, f *v1Fixture, rec *v1census.Recorder) (viola
 	}
 	// The planner's own class source (RC-C-INDEX §4: no second class list;
 	// A03-W9 adds XB there): the planner the router itself builds.
-	allowed := gatewayDeps(context.Background(), f.pool, f.cfgStore, f.aliases, nil, nil, f.disp).Planner.AllowedClasses()
+	allowed := gatewayDeps(context.Background(), f.pool, f.cfgStore, f.aliases, nil, nil, f.disp, nil).Planner.AllowedClasses()
 	violations = v1census.Check(f.router, rec, v1census.Options{
 		Allowed: allowed,
 		Prepare: func(r *http.Request) *http.Request {

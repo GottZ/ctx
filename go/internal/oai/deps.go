@@ -122,12 +122,25 @@ type Limiter interface {
 	Admit(ctx context.Context, ca *auth.ConsumerAuth, alias modelalias.Alias, est Estimate) (LimitReservation, *LimitRefusal)
 }
 
-// Estimate is what the limiter charges ahead: the op, the effective
-// max_tokens (design/06 K-06-11) and the size of the prompt.
+// Estimate is what the limiter charges ahead (design/06 §4.2 "Reservierung
+// je op"): the op, the effective max_tokens (design/06 K-06-11) and whether
+// the client named it, the size of the prompt in bytes and in runes (the
+// meter counts runes, lead decision M3 (a)), and the body's service_tier
+// (the lane input, lead decision O-10-3 (a)).
 type Estimate struct {
-	Op          string
-	MaxTokens   int
-	PromptBytes int
+	Op        string
+	MaxTokens int
+	// ClientMaxTokens reports whether the client sent max_tokens or
+	// max_completion_tokens; without it the meter reserves
+	// gateway.tpm_reserve_default (capped by MaxTokens) for the completion.
+	ClientMaxTokens bool
+	PromptBytes     int
+	// PromptRunes are the runes of the chat messages as they go upstream.
+	PromptRunes int
+	// InputRunes are Σ input runes of an embedding request, Σ (query +
+	// document) runes of a rerank request (W02-09, W02-10).
+	InputRunes  int
+	ServiceTier string
 }
 
 // LimitReservation is one admitted request's share of the meter.
@@ -135,6 +148,10 @@ type LimitReservation interface {
 	Settle(usage dispatch.Usage)
 	Abort()
 	Reject(reason string, waited time.Duration)
+	// Headers are the x-ratelimit-* headers of the admission (design/06
+	// §4.4): a route writes them on its successful answer before its first
+	// byte, never on a refusal (lead decision M2 (c)).
+	Headers() http.Header
 }
 
 // LimitRefusal is the limiter's answer for a refused request: a code of the

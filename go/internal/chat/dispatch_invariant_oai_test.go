@@ -49,6 +49,7 @@ type censusReservation struct{}
 func (censusReservation) Settle(dispatch.Usage)        {}
 func (censusReservation) Abort()                       {}
 func (censusReservation) Reject(string, time.Duration) {}
+func (censusReservation) Headers() http.Header         { return nil }
 
 type censusLimiter struct{}
 

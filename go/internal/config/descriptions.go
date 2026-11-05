@@ -281,6 +281,15 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.auth_db_concurrency": "Concurrent ctx_model_auth calls of the model-key door (its share of the 20-connection pool); below 20",
 	"gateway.body_logging":        "Body policy of gateway rows in the LLM log: none (default) stores no prompt or answer, errors only on rows with an error, full on every row (64 KiB each); credentials-class rows stay sealed under every policy",
 	"gateway.access_log":          "One log line per successful gateway request (identities, op, status, tokens, timings; no content); refusals are logged as one counted line per consumer, reason and minute either way",
+	// W06-10: the per-consumer meter (design/06 §4.2, §4.11).
+	"gateway.chat_rpm_default":    "Chat requests per minute per model consumer (meter L0); above it 429 rate_limit_exceeded with the exact Retry-After; at least 1",
+	"gateway.chat_tpm_default":    "Chat tokens per minute per model consumer (meter L0); a larger reservation is charged at this limit and the rest settles as debt; at least 1",
+	"gateway.embed_rpm_default":   "Embedding requests per minute per model consumer (meter L0); at least 1",
+	"gateway.embed_tpm_default":   "Embedding tokens per minute per model consumer (meter L0); at least 1",
+	"gateway.rerank_rpm_default":  "Rerank requests per minute per model consumer (meter L0); at least 1",
+	"gateway.rerank_tpm_default":  "Rerank tokens per minute per model consumer (meter L0); at least 1",
+	"gateway.tpm_reserve_default": "Completion tokens a chat request reserves when the client names no max_tokens (capped by the effective max_tokens); at least 1",
+	"gateway.xu_reserve_ratio":    "Share of each meter bucket the urgent lane keeps from the bulk lane of the same consumer; range [0, 1)",
 	// W01-5: consumer and model-key administration (design/01 §4.6, §4.9).
 	"gateway.tenant_self_service":      "Lets tenant-admins create model consumers, rotate their keys and grant consumer fields in their own tenant — only while gateway.enabled is on too; off (default) these stay server-admin, revoking stays open to tenant-admins",
 	"gateway.key_max_lifetime_app":     "Default and ceiling in seconds of a new model key's expiry for kind=app consumers (365 d); 0 = no expiry required and no ceiling",

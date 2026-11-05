@@ -42,7 +42,30 @@ type Settings struct {
 	BodyLogging string
 	AccessLog   bool
 
+	// Meter are the limits of the per-consumer meter (gateway.<op>_rpm_default,
+	// gateway.<op>_tpm_default, gateway.tpm_reserve_default,
+	// gateway.xu_reserve_ratio; W06-10), read by the limiter cmd/ctxd wires
+	// into Deps.Limiter.
+	Meter MeterSettings
+
 	Auth AuthSettings
+}
+
+// MeterSettings are the meter's limits per op (design/06 §4.11): until the
+// limits rows of W06-15 they hold for every consumer.
+type MeterSettings struct {
+	Chat, Embed, Rerank OpLimits
+	// TPMReserve is the completion share of a chat reservation without a
+	// client maximum.
+	TPMReserve int64
+	// XUReserveRatio is the share r of each bucket the urgent lane keeps
+	// from the bulk lane of the same consumer, [0, 1).
+	XUReserveRatio float64
+}
+
+// OpLimits are one op's requests and tokens per minute.
+type OpLimits struct {
+	RPM, TPM int64
 }
 
 // AuthSettings are the limits of the model-key door (gateway.auth_*,

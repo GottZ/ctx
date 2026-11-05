@@ -12,12 +12,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
@@ -97,17 +99,20 @@ func gatewayIngressAssert(c *config.Config, in *fedhop.Ingress) error {
 }
 
 // modelGateway is the process-wide part of the model groups (design/02 §4.2,
-// masterplan K23): ONE access log, ONE model-key door, ONE in-flight budget
-// and ONE usage batcher, shared by /v1 and (W02-10) /v2 — so two groups
-// never hold twice the door's database share, twice the budget or two
-// rejection windows. newRouter builds it and mounts the groups from it; main
-// drives its background loops (run, startModelGateway).
+// masterplan K23): ONE access log, ONE model-key door, ONE in-flight budget,
+// ONE usage batcher and ONE per-consumer meter (W06-10, design/06 §4.2
+// "Single-Process-Annahme"), shared by /v1 and (W02-10) /v2 — so two groups
+// never hold twice the door's database share, twice the budget, two
+// rejection windows or two buckets per consumer. newRouter builds it and
+// mounts the groups from it; main drives its background loops (run,
+// startModelGateway).
 type modelGateway struct {
 	settings func() oai.Settings
 	access   *handler.GatewayAccessLog
 	door     *handler.ModelDoor
 	usage    *store.ModelKeyUsage
 	budget   oai.Budget
+	meter    *keyquota.Meter
 }
 
 // newModelGateway wires the gateway over pool and the live config store.
@@ -115,7 +120,13 @@ type modelGateway struct {
 func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 	get := gatewaySettingsGetter(cfgStore)
 	usage := store.NewModelKeyUsage(pool)
+	// The meter is seeded at once: its RPM and TPM windows need no history.
+	// W06-13 replaces this with the boot seed of the day and month budgets
+	// from the rollup (until it lands, an unseeded meter answers warming).
+	meter := keyquota.New(time.Now)
+	meter.MarkSeeded()
 	return &modelGateway{
+		meter:    meter,
 		settings: get,
 		access:   handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get}),
 		door: handler.ModelAuth(handler.ModelAuthConfig{
@@ -189,11 +200,11 @@ func startModelGateway(g *modelGateway) func() {
 // cannot import internal/federation, which imports it), the tenant overlay
 // of RequiredSensitivity (K30), the llmlog writer, the dispatcher's wait
 // budget and Retry-After steps, the planner (A03-W8) and the lifecycle
-// context (D7). The limiter is W06-10's: nil until then, and the chat route
-// answers 503 service_unavailable without it (L11) — the model API is dark
-// (gateway.enabled=false) until then anyway.
+// context (D7), and the limiter over the process's meter (W06-10,
+// meterLimiter). A nil meter leaves the limiter nil, and the chat route then
+// answers 503 service_unavailable (L11: never served without it).
 func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config.Store, aliases *modelalias.Registry,
-	backendPool *backends.Pool, quota *backends.QuotaAccountant, dispatcher *dispatch.Dispatcher) oai.Deps {
+	backendPool *backends.Pool, quota *backends.QuotaAccountant, dispatcher *dispatch.Dispatcher, meter *keyquota.Meter) oai.Deps {
 	settings := gatewaySettingsGetter(cfgStore)
 	d := oai.Deps{
 		Consumer:      handler.ConsumerAuthFromContext,
@@ -224,7 +235,69 @@ func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config
 		d.RetryAfterSteps = dispatcher.ExternalRetryAfterSteps
 		d.Planner = handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: dispatcher, Settings: settings})
 	}
+	if meter != nil {
+		d.Limiter = meterLimiter{meter: meter, settings: settings}
+	}
 	return d
+}
+
+// meterLimiter adapts the per-consumer meter to the Limiter hook of the
+// /v1 routes (W06-10, lead decision 2: internal/keyquota stays a leaf, the
+// adapter lives here like chainFederation). Per request it reads the meter
+// limits from one settings snapshot (hot keys), resolves the lane with the
+// planner's own rule (handler.ResolveLane over the consumer, the inbound
+// federation state and service_tier — lead decision O-10-3 (a): one lane
+// logic, the meter stays before Plan) and maps the meter's decision onto the
+// oai refusal vocabulary.
+type meterLimiter struct {
+	meter    *keyquota.Meter
+	settings func() oai.Settings
+}
+
+func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
+	s := l.settings().Meter
+	op, _ := keyquota.ParseOp(est.Op) // an unknown op stays "" and is refused as invalid
+	var lim oai.OpLimits
+	switch op {
+	case keyquota.OpChat:
+		lim = s.Chat
+	case keyquota.OpEmbed:
+		lim = s.Embed
+	case keyquota.OpRerank:
+		lim = s.Rerank
+	}
+	lane := keyquota.LaneUrgent
+	if handler.ResolveLane(ca, fedhop.InboundFrom(ctx), est.ServiceTier) != handler.LaneUrgent {
+		lane = keyquota.LaneBulk
+	}
+	var consumer, tenant string // a nil consumer stays empty and is refused as invalid
+	if ca != nil {
+		consumer, tenant = ca.ConsumerID, ca.TenantID
+	}
+	sub := keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op, Lane: lane}
+	res, d := l.meter.Admit(sub,
+		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio},
+		keyquota.Estimate{PromptRunes: est.PromptRunes, MaxCompletion: est.MaxTokens, ClientMax: est.ClientMaxTokens, InputRunes: est.InputRunes})
+	switch {
+	case d.Allowed:
+		return meterReservation{res}, nil
+	case d.Reason == keyquota.ReasonInvalid:
+		slog.Error("gateway: the meter refused an invalid subject (wiring defect)", "op", est.Op,
+			"consumer", sub.ConsumerID != "", "tenant", sub.TenantID != "", "rpm", lim.RPM, "tpm", lim.TPM)
+		return nil, &oai.LimitRefusal{Code: oai.CodeInternalError, Message: d.Message, ShouldRetry: false}
+	}
+	// rate_requests, rate_tokens and warming: 429 rate_limit_exceeded with
+	// the exact Retry-After (design/06 §4.4).
+	return nil, &oai.LimitRefusal{Code: oai.CodeRateLimitExceeded, Message: d.Message, RetryAfter: d.RetryAfter, ShouldRetry: d.Retryable}
+}
+
+// meterReservation is a meter reservation as the route holds it: the usage
+// of the wire arrives as dispatch.Usage. Abort, Reject and Headers are the
+// meter's.
+type meterReservation struct{ *keyquota.Reservation }
+
+func (r meterReservation) Settle(u dispatch.Usage) {
+	r.Reservation.Settle(keyquota.Usage{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens})
 }
 
 // chainFederation binds the federation half of the chain build (F-W9

@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/keyquota"
+	"github.com/GottZ/ctx/internal/oai"
 )
 
 // The Python packages the harness pins: openai per design/02 §7; jsonschema
@@ -44,7 +46,8 @@ const (
 // W02-05) under CTX_MODELS_BASE_URL for test_models.py and the chat fixture
 // (conformanceChat, W02-07) under CTX_CHAT_BASE_URL for test_chat.py — the
 // same in both runs, so the house-format run still fails exactly the error
-// cases.
+// cases. The meter fixture (conformanceMeter, W06-10) is served under
+// CTX_METER_BASE_URL for test_meter_retry.py, fresh per run.
 func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Helper()
 	uv, err := exec.LookPath("uv")
@@ -56,6 +59,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Cleanup(models.Close)
 	chat := httptest.NewServer(conformanceChat(t))
 	t.Cleanup(chat.Close)
+	meter := httptest.NewServer(conformanceMeter(t))
+	t.Cleanup(meter.Close)
 	moduleRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +72,7 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 		"pytest", "-p", "no:cacheprovider", "-v", "conformance/oai")
 	cmd.Dir = moduleRoot
 	cmd.Env = append(os.Environ(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/",
-		"CTX_CHAT_BASE_URL="+chat.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
+		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -87,6 +92,20 @@ func conformanceChat(t *testing.T) http.Handler {
 		mux.Handle("/"+sh.name+"/", http.StripPrefix("/"+sh.name, rig.router))
 	}
 	return mux
+}
+
+// conformanceMeter is the meter fixture of test_meter_retry.py: the chat
+// route over the real meter on the real clock, 12 requests per minute — the
+// 429 after the burst asks for up to five seconds, so the SDK's request
+// still meets an empty bucket under host load (Fremd-Review 1 F-7).
+func conformanceMeter(t *testing.T) http.Handler {
+	t.Helper()
+	up := newUpstream(t, answerSGLang)
+	m := keyquota.New(time.Now)
+	m.MarkSeeded()
+	meter := &rigMeter{m: m, lim: keyquota.Limits{RPM: 12, TPM: 1 << 30, CompletionReserve: 1024}}
+	rig := newChatRig(t, []backends.Backend{up.row("spark", backends.TrustFull, 1)}, 64, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
+	return rig.router
 }
 
 // TestConformancePythonSDK: every case parses in the Python SDK with the

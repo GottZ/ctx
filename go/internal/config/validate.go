@@ -97,6 +97,9 @@ func Validate(c *Config) []Issue {
 	// V46 (A03-W6): dispatch.external_retry_after_steps parses, at most
 	// dispatch.external_lease_max.
 	issues = append(issues, validateDispatchRetryAfterSteps(c)...)
+	// V47 (W06-10): the per-consumer meter's limits >= 1, the XU reserve
+	// ratio in [0, 1).
+	issues = append(issues, validateGatewayMeter(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1289,6 +1292,42 @@ func validateGatewayBodyLogging(c *Config) []Issue {
 	return []Issue{{Field: "gateway.body_logging", Severity: SeverityError,
 		Msg: fmt.Sprintf("body logging %q must be %q (no bodies), %q (bodies on error rows only) or %q (bodies on every row, 64 KiB each) — empty reads as %q",
 			c.Gateway.BodyLogging, llmlog.BodyLoggingNone, llmlog.BodyLoggingErrors, llmlog.BodyLoggingFull, llmlog.BodyLoggingNone)}}
+}
+
+// validateGatewayMeter is V47 (wave W06-10, design/06 §4.2, §4.11): the
+// meter's six limits and the completion reserve must be at least 1 — a
+// limit of 0 would refuse every request of its op, a reserve of 0 would
+// book a chat request without a client maximum at its prompt alone.
+// Negatives stay with V35 (one issue per field). gateway.xu_reserve_ratio
+// must lie in [0, 1): at 1 the urgent lane would keep the whole bucket and
+// the bulk lane could never be served; NaN fails every comparison and is
+// refused explicitly (float keys have no generic sign walk). Fatal like
+// V38: boot aborts, the settings PUT is a 422.
+func validateGatewayMeter(c *Config) []Issue {
+	g := &c.Gateway
+	var issues []Issue
+	for _, f := range []struct {
+		key string
+		v   int
+	}{
+		{"gateway.chat_rpm_default", g.ChatRPMDefault},
+		{"gateway.chat_tpm_default", g.ChatTPMDefault},
+		{"gateway.embed_rpm_default", g.EmbedRPMDefault},
+		{"gateway.embed_tpm_default", g.EmbedTPMDefault},
+		{"gateway.rerank_rpm_default", g.RerankRPMDefault},
+		{"gateway.rerank_tpm_default", g.RerankTPMDefault},
+		{"gateway.tpm_reserve_default", g.TPMReserveDefault},
+	} {
+		if f.v == 0 {
+			issues = append(issues, Issue{Field: f.key, Severity: SeverityError,
+				Msg: f.key + " must be >= 1 — 0 would refuse every request of its op (or reserve no completion at all)"})
+		}
+	}
+	if r := g.XUReserveRatio; !(r >= 0 && r < 1) {
+		issues = append(issues, Issue{Field: "gateway.xu_reserve_ratio", Severity: SeverityError,
+			Msg: fmt.Sprintf("gateway.xu_reserve_ratio (%v) must be in [0, 1) — at 1 the bulk lane could never be served", r)})
+	}
+	return issues
 }
 
 // validateFederation is V45 (wave F-W8, design/04 §3.1): federation.max_depth

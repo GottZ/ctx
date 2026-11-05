@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -369,10 +370,15 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 		c.refuse(CodeServiceUnavailable, limiterMissingText, true)
 		return false
 	}
-	res, refusal := c.d.Limiter.Admit(c.ctx, c.ca, c.alias,
-		Estimate{Op: llmlog.GatewayOpChat, MaxTokens: maxTokens, PromptBytes: len(c.req.messages)})
+	res, refusal := c.d.Limiter.Admit(c.ctx, c.ca, c.alias, Estimate{
+		Op: llmlog.GatewayOpChat, MaxTokens: maxTokens, ClientMaxTokens: c.req.maxTokens > 0,
+		PromptBytes: len(c.req.messages), PromptRunes: utf8.RuneCount(c.req.messages), ServiceTier: c.req.serviceTier,
+	})
 	if refusal != nil {
+		// The meter's Retry-After is exact (design/06 §4.4): both headers,
+		// no jitter — the jitter is the L2 contract (A03-W8).
 		writeRetryAfter(c.w.Header(), refusal.RetryAfter)
+		writeRetryAfterMs(c.w.Header(), refusal.RetryAfter)
 		c.refuse(refusal.Code, refusal.Message, refusal.ShouldRetry)
 		return false
 	}
@@ -670,6 +676,13 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 	c.rec.PromptTokens, c.rec.CompletionTokens = st.result.PromptTokens, st.result.CompletionTokens
 	if st.result.PromptTokens+st.result.CompletionTokens > 0 {
 		c.rec.Usage = llmlog.UsageBackend
+	}
+	// The meter's view of the request's op bucket, on the successful answer
+	// only (design/06 §4.4; lead decision M2 (c)).
+	if c.limit != nil {
+		for k, v := range c.limit.Headers() {
+			c.w.Header()[k] = v
+		}
 	}
 	c.w.Header().Set("Content-Type", "application/json")
 	c.w.WriteHeader(http.StatusOK)

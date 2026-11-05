@@ -218,6 +218,7 @@ func (r fakeReservation) Reject(reason string, _ time.Duration) {
 	r.l.rejects.Add(1)
 	r.l.lastReason.Store(reason)
 }
+func (r fakeReservation) Headers() http.Header { return nil }
 
 func (l *fakeLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	l.admits.Add(1)
