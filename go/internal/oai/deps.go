@@ -91,11 +91,13 @@ type Deps struct {
 	// masterplan K22; W02-08) = handler.ReauthConsumer: the door that
 	// accepted the request (taken from ctx, the request's context), under
 	// its database semaphore — never the knowledge credential path, which
-	// refuses every ctxm_ key. true: still valid; false: revoked, disabled
-	// or expired; an error: the check could not run. The watcher calls it
+	// refuses every ctxm_ key. It returns the consumer as the door reads it
+	// now (all_models, tenant_scope — the watcher resolves the alias with
+	// it, Fremd-Review 2 M-1); nil with no error: revoked, disabled or
+	// expired; an error: the check could not run. The watcher calls it
 	// every reauthEvery for stream and non-stream requests. W01-8's
 	// revocation registry replaces it (K22).
-	Reauth func(ctx context.Context, ca *auth.ConsumerAuth) (bool, error)
+	Reauth func(ctx context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error)
 }
 
 // TenantGate is the tenant quota gate of a /v1 chain (masterplan K17):

@@ -20,8 +20,12 @@ type reauthFake struct {
 	calls  atomic.Int64
 }
 
+// reauthAnswer is one scripted answer: ok with ca nil hands the consumer
+// back as it came in; ca set hands back that consumer (the door read it
+// changed); not ok and no error: no longer valid.
 type reauthAnswer struct {
 	ok  bool
+	ca  *auth.ConsumerAuth
 	err error
 }
 
@@ -31,15 +35,23 @@ func (f *reauthFake) set(script ...reauthAnswer) {
 	f.mu.Unlock()
 }
 
-func (f *reauthFake) reauth(context.Context, *auth.ConsumerAuth) (bool, error) {
+func (f *reauthFake) reauth(_ context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) {
 	n := f.calls.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.script) == 0 {
-		return true, nil
+		return ca, nil
 	}
-	i := min(int(n)-1, len(f.script)-1)
-	return f.script[i].ok, f.script[i].err
+	a := f.script[min(int(n)-1, len(f.script)-1)]
+	switch {
+	case a.err != nil:
+		return nil, a.err
+	case !a.ok:
+		return nil, nil
+	case a.ca != nil:
+		return a.ca, nil
+	}
+	return ca, nil
 }
 
 func withReauth(f *reauthFake) rigOption {

@@ -11,6 +11,10 @@ const (
 	ReauthFailLimit = reauthFailLimit
 )
 
+// GrantReadDeadline is the bound of every grant read of the alias
+// resolution (Fremd-Review 2 H-1 pin).
+const GrantReadDeadline = grantReadDeadline
+
 // SetReauthEvery shortens the re-auth period for one test.
 func SetReauthEvery(d time.Duration) (restore func()) {
 	prev := reauthEvery

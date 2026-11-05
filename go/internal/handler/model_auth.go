@@ -455,22 +455,27 @@ func (d *ModelDoor) warn(msg string, args ...any) {
 // watcher's re-check (W02-08) until W01-8's revocation registry replaces it.
 // It runs on the door that accepted the request (taken from ctx), under the
 // same semaphore and deadline, with the address and transport of the
-// original request. true: the key still authenticates; false: it no longer
-// does; an error (ErrModelAuthUnavailable or a wiring error): the caller
-// answers 503.
-func ReauthConsumer(ctx context.Context, ca *auth.ConsumerAuth) (bool, error) {
+// original request. The consumer as the door reads it now — all_models and
+// tenant_scope may have changed since the request entered; the watcher
+// resolves the alias with it (Fremd-Review 2 M-1): the key still
+// authenticates. nil with no error: it no longer does. An error
+// (ErrModelAuthUnavailable or a wiring error): the caller answers 503.
+func ReauthConsumer(ctx context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) {
 	d, _ := ctx.Value(modelDoorKey{}).(*ModelDoor)
 	if d == nil {
-		return false, errNoModelDoor
+		return nil, errNoModelDoor
 	}
 	if ca == nil {
-		return false, auth.ErrNoModelCredential
+		return nil, auth.ErrNoModelCredential
 	}
 	got, err := d.check(ctx, d.settings().Auth.DBConcurrency, func(c context.Context) (*auth.ConsumerAuth, error) {
 		return auth.ReauthenticateModelKey(c, d.pool, ca)
 	})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return got.IsValid && got.ModelKeyID == ca.ModelKeyID, nil
+	if !got.IsValid || got.ModelKeyID != ca.ModelKeyID {
+		return nil, nil
+	}
+	return got, nil
 }

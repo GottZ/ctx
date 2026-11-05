@@ -113,7 +113,8 @@ type chatCall struct {
 	id     string
 
 	alias    modelalias.Alias
-	gen      uint64 // the alias registry generation read right before the entry Resolve (B-3)
+	gen      uint64      // the alias registry generation read right before the entry Resolve (B-3)
+	target   watchTarget // what the watcher and the check before the write re-check (the consumer the last re-auth read)
 	req      *chatRequest
 	required backends.Sensitivity
 	limit    LimitReservation
@@ -214,6 +215,12 @@ func (c *chatCall) reply(write func(w http.ResponseWriter)) {
 	}
 	fc := &frameCapture{}
 	write(fc)
+	if fc.buf.Len() == 0 {
+		// The writer wrote nothing (the admission writer on a canceled run):
+		// no frame — an empty data event would end the stream before the
+		// caller's own verdict (Fremd-Review 2 L-1).
+		return
+	}
 	if err := c.sse.errorFrame(fc.buf.Bytes()); err != nil {
 		slog.Warn("gateway: failed to write the stream's error frame", "error", err, "request_id", c.w.Header().Get("X-Request-ID"))
 	}
@@ -348,7 +355,12 @@ func (c *chatCall) resolve(name string) bool {
 	// watcher would start from a generation that already holds the change
 	// and skip every Resolve until the check before the write.
 	c.gen = c.d.Aliases.Generation()
-	a, found, err := c.d.Resolve(c.ctx, c.ca, name)
+	// The grant read under the door's deadline (Fremd-Review 2 H-1): a stream
+	// carries no request deadline, and a locked grants table would hold it
+	// until the client gives up; past the deadline it is a failed grant read.
+	rctx, cancel := context.WithTimeout(c.ctx, grantReadDeadline)
+	a, found, err := c.d.Resolve(rctx, c.ca, name)
+	cancel()
 	switch {
 	case err != nil:
 		// A grant read the shutdown or the watcher ended is their answer
@@ -542,11 +554,11 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		c.endLimit(func(l LimitReservation) { l.Abort() })
 		return
 	}
-	target := watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen}
+	c.target = newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen)
 	if c.sse != nil {
-		target.committed = c.sse.committed
+		c.target.committed = c.sse.committed
 	}
-	stop := c.d.watch(c.ctx, c.cancel, target)
+	stop := c.d.watch(c.ctx, c.cancel, c.target)
 	defer stop()
 
 	var st walkState
@@ -874,8 +886,7 @@ func (c *chatCall) syncLifecycle() {
 
 // success checks once more before the write (D8), rewrites and writes.
 func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
-	t := watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen}
-	switch err := c.d.stillServes(c.ctx, t); {
+	switch err := c.d.stillServes(c.ctx, c.target); {
 	case errors.Is(err, errGatewayOff), errors.Is(err, errModelGone):
 		c.cancel(err)
 		_, code := c.verdict()

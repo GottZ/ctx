@@ -56,7 +56,7 @@ const reauthTenant = "00000000-0000-0000-0000-0000000d3fa0"
 // probe rate 50, DB concurrency 4).
 var reauthProdAuth = oai.AuthSettings{FailureLimit: 30, FailureWindow: 60 * time.Second, ProbeRate: 50, DBConcurrency: 4}
 
-type reauthFunc = func(context.Context, *auth.ConsumerAuth) (bool, error)
+type reauthFunc = func(context.Context, *auth.ConsumerAuth) (*auth.ConsumerAuth, error)
 
 // reauthCall is one recorded re-authentication.
 type reauthCall struct {
@@ -148,14 +148,14 @@ func (e *reauthEnv) setDBConcurrency(n int) {
 
 // counted wraps f: every call is numbered and recorded.
 func (e *reauthEnv) counted(f reauthFunc) reauthFunc {
-	return func(ctx context.Context, ca *auth.ConsumerAuth) (bool, error) {
+	return func(ctx context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) {
 		n := e.n.Add(1)
 		t0 := time.Now()
-		ok, err := f(ctx, ca)
+		got, err := f(ctx, ca)
 		e.mu.Lock()
-		e.calls = append(e.calls, reauthCall{n: n, at: t0, took: time.Since(t0), ok: ok, err: err})
+		e.calls = append(e.calls, reauthCall{n: n, at: t0, took: time.Since(t0), ok: got != nil, err: err})
 		e.mu.Unlock()
-		return ok, err
+		return got, err
 	}
 }
 
@@ -198,7 +198,7 @@ func (e *reauthEnv) logCalls(t *testing.T, since time.Time) {
 func (e *reauthEnv) knowledgeReauth() reauthFunc {
 	knowledge := handler.Auth(e.pool)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	plain := e.key.Plaintext()
-	return func(context.Context, *auth.ConsumerAuth) (bool, error) {
+	return func(_ context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/whoami", nil)
@@ -207,11 +207,11 @@ func (e *reauthEnv) knowledgeReauth() reauthFunc {
 		knowledge.ServeHTTP(rec, req)
 		switch rec.Code {
 		case http.StatusNoContent:
-			return true, nil
+			return ca, nil
 		case http.StatusUnauthorized:
-			return false, nil
+			return nil, nil
 		}
-		return false, fmt.Errorf("knowledge auth answered %d", rec.Code)
+		return nil, fmt.Errorf("knowledge auth answered %d", rec.Code)
 	}
 }
 
@@ -387,11 +387,11 @@ func TestModelKeySurvivesLongStream(t *testing.T) {
 		// pre-commit 401.
 		committed := make(chan struct{})
 		knowledge := e.knowledgeReauth()
-		srv := e.serve(t, e.counted(func(ctx context.Context, ca *auth.ConsumerAuth) (bool, error) {
+		srv := e.serve(t, e.counted(func(ctx context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) {
 			select {
 			case <-committed:
 			case <-ctx.Done():
-				return false, ctx.Err()
+				return nil, ctx.Err()
 			}
 			return knowledge(ctx, ca)
 		}))
@@ -470,7 +470,7 @@ func TestRevokedKeyEndsStreamOnReauth(t *testing.T) {
 
 	t.Run("red: no re-check (Reauth always true)", func(t *testing.T) {
 		e := newReauthEnv(t, steps)
-		srv := e.serve(t, e.counted(func(context.Context, *auth.ConsumerAuth) (bool, error) { return true, nil }))
+		srv := e.serve(t, e.counted(func(_ context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) { return ca, nil }))
 		ls := openReauthLive(t, srv, streamBody("chat"), e.bearer()...)
 		ls.firstData(t, 5*time.Second)
 		revokedAt := time.Now()
@@ -493,7 +493,7 @@ func TestRevokedKeyEndsStreamOnReauth(t *testing.T) {
 // ReauthConsumer waits out the door's deadline and reports
 // ErrModelAuthUnavailable, as under saturation.
 func (e *reauthEnv) starve(fail ...int64) reauthFunc {
-	return func(ctx context.Context, ca *auth.ConsumerAuth) (bool, error) {
+	return func(ctx context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) {
 		n := e.n.Load() // counted numbers the call before it reaches here
 		for _, f := range fail {
 			if f == n {

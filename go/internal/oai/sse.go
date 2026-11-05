@@ -190,7 +190,8 @@ func (s *streamWriter) frame(chunk []byte) error {
 		return errClientGone
 	}
 	var err error
-	if s.state == streamOpen {
+	commit := s.state == streamOpen
+	if commit {
 		err = s.commitLocked()
 	}
 	if err == nil {
@@ -203,6 +204,11 @@ func (s *streamWriter) frame(chunk []byte) error {
 			s.first = s.last
 		}
 		s.frames++
+		if commit && s.timer != nil && !s.frozen && s.keepalive > 0 {
+			// Committed by this frame, before entry + grace: the keepalive
+			// counts from this frame, not from the grace (Fremd-Review 2 L-2).
+			s.timer.Reset(s.keepalive)
+		}
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -246,12 +252,16 @@ func (s *streamWriter) firstFrame() time.Time {
 }
 
 // done ends a successful stream with [DONE] (committing first when no
-// frame was written — an upstream that answered nothing but its end).
+// frame was written — an upstream that answered nothing but its end). On an
+// ended stream it writes nothing.
 func (s *streamWriter) done() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
 		return s.err
+	}
+	if s.state == streamEnded {
+		return nil // a stream ends once (Fremd-Review 2 L-1)
 	}
 	if s.state == streamOpen {
 		if err := s.commitLocked(); err != nil {
@@ -265,12 +275,16 @@ func (s *streamWriter) done() error {
 
 // errorFrame ends a committed stream with the error envelope as its last
 // data frame (design/02 §4.6: no [DONE] after it). envelope is the JSON the
-// envelope writer produced; a trailing newline is dropped.
+// envelope writer produced; a trailing newline is dropped. On an ended
+// stream it writes nothing (Fremd-Review 2 L-1).
 func (s *streamWriter) errorFrame(envelope []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
 		return s.err
+	}
+	if s.state == streamEnded {
+		return nil
 	}
 	line := append(append([]byte("data: "), bytes.TrimRight(envelope, "\n")...), "\n\n"...)
 	err := s.writeLocked(line)

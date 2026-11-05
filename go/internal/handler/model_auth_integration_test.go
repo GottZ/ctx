@@ -432,7 +432,9 @@ func TestModelAuthSuccessAndRevoke_Integration(t *testing.T) {
 }
 
 // ReauthConsumer (K22): same check, same semaphore, original address and
-// transport. Valid ⇒ true; revoked ⇒ false; database error ⇒ error.
+// transport. Valid ⇒ the consumer as the door reads it now (a changed
+// all_models comes back changed, Fremd-Review 2 M-1 of W02-08); revoked ⇒
+// nil; database error ⇒ error.
 func TestReauthConsumer_Integration(t *testing.T) {
 	e := madSetup(t)
 	ctx := context.Background()
@@ -442,9 +444,15 @@ func TestReauthConsumer_Integration(t *testing.T) {
 		t.Fatalf("first request: %d", r.Code)
 	}
 	reqCtx, ca := rec.ctx, rec.ca
-	ok, err := ReauthConsumer(reqCtx, ca)
-	if err != nil || !ok {
-		t.Fatalf("live key: ok=%v err=%v, want true (the allowlist needs the original address)", ok, err)
+	got, err := ReauthConsumer(reqCtx, ca)
+	if err != nil || got == nil || got.ModelKeyID != ca.ModelKeyID || got.AllModels != ca.AllModels {
+		t.Fatalf("live key: %+v err=%v, want the consumer back (the allowlist needs the original address)", got, err)
+	}
+	if _, err := e.seed.Exec(ctx, `UPDATE context_model_consumers SET all_models = NOT all_models WHERE id = $1::uuid`, ca.ConsumerID); err != nil {
+		t.Fatalf("flip all_models: %v", err)
+	}
+	if got, err := ReauthConsumer(reqCtx, ca); err != nil || got == nil || got.AllModels == ca.AllModels {
+		t.Fatalf("all_models flipped: %+v err=%v, want the consumer as it reads now (all_models %v)", got, err, !ca.AllModels)
 	}
 	if _, err := ReauthConsumer(ctx, ca); err == nil {
 		t.Fatal("a context without the door: no error")
@@ -469,12 +477,12 @@ func TestReauthConsumer_Integration(t *testing.T) {
 	if err := store.RevokeKey(ctx, e.seed, k.ID, store.ModelAccess{ServerAdmin: true}, e.stamp); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if ok, err := ReauthConsumer(reqCtx, ca); err != nil || ok {
-		t.Fatalf("revoked key: ok=%v err=%v, want false", ok, err)
+	if got, err := ReauthConsumer(reqCtx, ca); err != nil || got != nil {
+		t.Fatalf("revoked key: %+v err=%v, want nil", got, err)
 	}
 	e.pool.Close()
-	if ok, err := ReauthConsumer(reqCtx, ca); err == nil || ok {
-		t.Fatalf("closed pool: ok=%v err=%v, want an error", ok, err)
+	if got, err := ReauthConsumer(reqCtx, ca); err == nil || got != nil {
+		t.Fatalf("closed pool: %+v err=%v, want an error", got, err)
 	}
 }
 

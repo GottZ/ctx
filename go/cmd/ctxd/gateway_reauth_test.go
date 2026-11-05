@@ -39,7 +39,7 @@ func TestGatewayDepsBindsReauthConsumer(t *testing.T) {
 	if got := reflect.ValueOf(d.Reauth).Pointer(); got != want {
 		t.Fatalf("Deps.Reauth is %#x, want handler.ReauthConsumer %#x", got, want)
 	}
-	wrapper := func(ctx context.Context, ca *auth.ConsumerAuth) (bool, error) { return handler.ReauthConsumer(ctx, ca) }
+	wrapper := func(ctx context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) { return handler.ReauthConsumer(ctx, ca) }
 	if reflect.ValueOf(wrapper).Pointer() == want {
 		t.Fatal("a wrapper compares equal to handler.ReauthConsumer — the pin could not see a wrong binding")
 	}
