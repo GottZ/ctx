@@ -52,6 +52,10 @@ type Lease struct {
 	// aging.go): a preempt of it bumps aged_preempts — the waste metric
 	// that is the NEGATIVE condition of the FA activation gate.
 	agedAdmit bool
+	// fair / slotStart are the external lease's fairness record and the
+	// start of its slot time on the fairness clock (A03-W4, fairness.go).
+	fair      *fairConsumer
+	slotStart time.Time
 }
 
 // Release returns the slot and wakes the next waiter (strict class order,
@@ -178,6 +182,10 @@ type Dispatcher struct {
 	stopLoops chan struct{}
 	stopOnce  sync.Once
 	loops     sync.WaitGroup
+
+	// fairNow is the test-only clock seam of the external fairness meter
+	// (fairClock, A03-W4); nil in production. Guarded by mu.
+	fairNow func() time.Time
 }
 
 // New constructs the dispatcher and starts its two goroutines: the reaper
@@ -329,6 +337,14 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	budget, err := d.waitBudgetLocked(st, w, req, now)
 	if err == nil {
 		err = d.enqueueLocked(st, w)
+		if err == nil && class == ClassExternal {
+			// An external enqueue changes T_act and Σ fair_weight and with
+			// them the shares: the fairness-first head can change — the
+			// waiter itself may be it now and fit (A03-W4 review 4 FR4-1).
+			// The wake hands the pick its units (it may admit w itself;
+			// the wait below then returns at once).
+			d.wakeLocked(st)
+		}
 	}
 	if err == nil && class == ClassInteractive {
 		// Preempt trigger (MW18, design/02 §4.2.1): only an interactive
@@ -389,7 +405,9 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 // A03-W1; pre-A03-W1 it got the background predicate, K6); a class absent
 // from the rank table — reachable only through the unvalidated test hook —
 // is never eligible either. A continuation newcomer has its own own-queue
-// term (continuationEligibleNowLocked).
+// term (continuationEligibleNowLocked); an external newcomer takes
+// externalEligibleNowLocked (A03-W4: its own bucket, not its class, must be
+// empty — d1).
 func (d *Dispatcher) eligibleNowLocked(st *targetState, class Class, w, slots int) bool {
 	if !d.admissibleLocked(st, class, w, slots) || d.queuedLocked(st, class) {
 		return false
@@ -528,6 +546,7 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 			st.heldExt += l.weight
 			st.extLeases++
 			st.extCancel[l] = w.cancel
+			st.external.fair.leaseEnter(l, w.fair, d.fairClock(now))
 		}
 	}
 	wait := now.Sub(w.enqueued)
@@ -561,7 +580,8 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 		return
 	}
 	l.done = true
-	d.chargeLocked(l, time.Now())
+	now := time.Now()
+	d.chargeLocked(l, now)
 	d.preemptSettledLocked(l) // release-latency sample for a regular victim release (MW18)
 	delete(l.st.inflight, l)
 	delete(l.st.cancelable, l)
@@ -571,6 +591,7 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 		if l.class == ClassExternal {
 			l.st.heldExt -= l.weight
 			l.st.extLeases--
+			l.st.external.fair.leaseLeave(l, d.fairClock(now), d.usageWindowDur())
 		}
 		d.wakeLocked(l.st)
 	}
@@ -596,6 +617,9 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 // A03-W7); on an offered self-admitting target (no slots) they are admitted
 // against external_max_inflight.
 func (d *Dispatcher) wakeLocked(st *targetState) {
+	// The wake re-reads the fairness order of the external class at this
+	// instant (A03-W4 review 4 FR4-2: frozen between events).
+	st.external.fair.touch(d.fairClock(time.Now()))
 	if st.external.total > 0 {
 		if capacity := d.externalWeightCap(st.origin); capacity == 0 {
 			d.failExternalWaitersLocked(st, ErrExternalNotOffered)
@@ -862,6 +886,7 @@ func (d *Dispatcher) reapNow(now time.Time) {
 			}
 		})
 		d.sweepUsageLocked(st, now)
+		st.external.fair.sweep(d.fairClock(now), d.usageWindowDur())
 		if set.BackgroundAgingAfter > 0 {
 			// FA trigger (b), design/04 §4.6: with the escape armed the reaper
 			// tick re-evaluates admission — an IDLE target (free slot, no
