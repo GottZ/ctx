@@ -546,8 +546,9 @@ External programs that hold a model key (`ctxm_…`, see [model consumers](#mode
 |---|---|---|
 | `GET` | `/v1/models` | `{"object":"list","data":[…]}` — the model aliases the key may use, sorted by `id`; nothing released ⇒ `"data":[]` |
 | `GET` | `/v1/models/{id}` | one model object, or `404 model_not_found`. Alias names may contain `/` (`qwen/x`); the path takes the name as is or percent-encoded (`qwen%2Fx`, what the SDKs send) |
+| `POST` | `/v1/chat/completions` | a chat completion, non-streamed ([chat completions](#chat-completions-post-v1chatcompletions)); `stream: true` is a `400` until streaming lands |
 
-Inference (`/v1/chat/completions`, `/v1/embeddings`, `/v1/rerank`) follows in later releases.
+`/v1/embeddings` and `/v1/rerank` follow in later releases.
 
 **Which models a key sees.** The aliases visible to the consumer's tenant scope (a tenant alias of the same name replaces the `_global` one; a consumer without a tenant scope sees `_global` only; a `ctx-peer` consumer always resolves `_global` aliases only), enabled and with a valid policy — and of those, with `all_models` every one, otherwise those whose **id** the consumer holds a grant on ([model grants](#model-consumer-administration)). A grant binds the alias id: an alias deleted and created again under the same name is not granted. The grant is read per request (one primary-key probe for `/v1/models/{id}`, one index range for the list), so a grant change applies to the next request.
 
@@ -575,7 +576,7 @@ Inference (`/v1/chat/completions`, `/v1/embeddings`, `/v1/rerank`) follows in la
 
 ### Admission
 
-Every inference route under `/v1` admits its request through one planner before anything is written (`handler.V1Admission`, the contract `oai.AdmissionPlanner`). The contract is in place; the inference routes that run it follow in later releases.
+Every inference route under `/v1` admits its request through one planner before anything is written (`handler.V1Admission`, the contract `oai.AdmissionPlanner`). `POST /v1/chat/completions` runs it; the embedding and rerank routes follow.
 
 - **Lane.** A consumer's `admission_lane` is its ceiling. `urgent` requests run in the dispatcher's external class; `bulk` requests are refused with `503 model_unavailable` before any GPU work (the bulk class follows in a later release). The lane is the minimum of the ceiling, the federation hint and `service_tier`: `service_tier: "flex"` lowers to `bulk`; a `ctx-peer` consumer's `Ctx-Class` counts only together with a `Ctx-Path` (`interactive` and `external` keep `urgent`, `background` and `external_bulk` lower to `bulk`), and a peer without such a hint is `bulk`; an app's `Ctx-Class` is ignored. Nothing raises a request above its ceiling.
 - **Chain.** The chain keeps only the rows whose target offers the external class ([external offer](operations.md#external-offer-per-target)); when none does, the answer is `503 model_unavailable`.
@@ -591,6 +592,47 @@ Every inference route under `/v1` admits its request through one planner before 
 | an internal fault (a planner or wiring defect) | `503`, `service_unavailable_error` | `internal_error` | `x-should-retry: false` |
 
 `server_busy` is distinct from `rate_limit_exceeded` (the door's failure lock, later the key's own limits) and `concurrency_limit_exceeded`: it says that the GPUs are busy, not that the key exceeded anything. Its Retry-After is the dispatcher's estimate for the refused request's own place in the queue ([operations](operations.md#external-offer-per-target)), rounded up to a step of `dispatch.external_retry_after_steps`, then multiplied by one random factor in `[1, 1 + gateway.retry_after_jitter]` that both headers share — `Retry-After` rounded up to whole seconds, `retry-after-ms` to milliseconds. The estimate is a minimum; the factor spreads retries that would otherwise arrive together. At the smallest steps the seconds header barely spreads — at the default jitter (0.5) an estimate of 1 s reads `Retry-After: 2` for practically every draw and 2 s reads `3`; with the jitter at 0 nothing spreads at all — so `retry-after-ms` carries the spread there; at any jitter, a client that reads only `Retry-After` never retries before the estimate. Bodies are generic: no target, number or row name. A client that hung up gets nothing written.
+
+### Chat completions (`POST /v1/chat/completions`)
+
+The OpenAI chat completion, non-streamed. `model` is an alias name the key may use (see [which models a key sees](#openai-compatible-api-v1)); an alias of another kind is `400 model_not_supported`. The answer is an OpenAI `chat.completion` object: `id` is `chatcmpl-<uuid>` minted by ctx for this request (never the client's `X-Request-ID`, which is only recorded as `metadata.gw.client_req_id`), `created` is the admission time, `model` is the alias name, `choices` come from the backend as they are (tool calls, refusal, logprobs; the reasoning traces `reasoning_content`/`reasoning`/`reasoning_details` are removed unless the alias's `reasoning` policy is `passthrough`), `usage` keeps the spec fields only (`prompt_tokens`, `completion_tokens`, `total_tokens`, `*_details`), `service_tier` is the lane (`default`; `flex` for the bulk lane). Every other field of the backend's answer — its model name, `system_fingerprint`, `timings`, `provider`, cost — is dropped, and no response header of the backend is relayed.
+
+**Parameters.** The body is checked key by key — top level, every message, every content part — against an allowlist; an allowed value reaches the backend byte for byte:
+
+| Class | Keys | Treatment |
+|---|---|---|
+| passed | `messages`, `temperature`, `top_p`, `stop`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs` (0–20), `seed`, `response_format` (`text`, `json_object`, `json_schema`), `tools`, `tool_choice`, `parallel_tool_calls`, `top_k`, `min_p`, `repetition_penalty` | type-checked (`400 invalid_type`) and size-capped by the alias policy (`400 unsupported_value`); `null` = the default, not sent |
+| set by ctx | `model`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `n`, `service_tier`, `reasoning`, `reasoning_effort` | read, then overwritten: the client's value never reaches the backend as sent |
+| ignored | `priority`, `chat_template_kwargs`, `user`, `safety_identifier`, `prompt_cache_key`, `prompt_cache_retention`, `prompt_cache_options`, `metadata`, `store`, `verbosity`, `moderation`, `modalities` (`["text"]` only), and the engine internals `rid`, `request_id`, `id_slot`, `cache_prompt`, `lora`, `lora_path`, `return_hidden_states`, `custom_logit_processor`, `bootstrap_host`, `bootstrap_port`, `bootstrap_room`, `kv_transfer_params`, `vllm_xargs`, `cache_salt`, `session_params` | removed; their names are listed in the answer header `X-Ctx-Ignored-Params` (comma-separated, `messages[].<key>` for message keys) |
+| refused | everything else — e.g. `functions`, `function_call`, `audio`, `prediction`, `web_search_options` | `400 unsupported_parameter`, `param` = the key |
+
+- **Messages.** Roles `system`, `developer` (sent as `system`), `user`, `assistant`, `tool`; message keys `role`, `content`, `name`, `tool_calls` (assistant), `tool_call_id`, `refusal`; `reasoning` and `reasoning_content` of earlier turns are ignored. `content` is a string, an array of parts, or `null` for an assistant turn. Any other message key is `400 unsupported_parameter` with `param: messages[i].<key>`.
+- **Content parts.** `text`, and `image_url` only for an alias with `vision: true` and only as a base64 data URI that starts exactly with `data:image/png;base64,`, `data:image/jpeg;base64,`, `data:image/webp;base64,` or `data:image/gif;base64,` (lowercase, no parameters), valid base64, decoded at most the alias's `vision_max_bytes` (default 4 MiB, at most 8 MiB and the request cap); `image_url.detail` is passed. A URL, a file path or any other form is `400 unsupported_value` before any backend is contacted — ctx never lets an engine fetch an image ([security](security.md#model-api-chat-completions)). Other part types (`input_audio`, `file`, …) are `400 unsupported_value`.
+- **`n`.** Only `1` (or absent): more choices per request are a later release.
+- **`max_tokens`.** `max_completion_tokens` is read as `max_tokens`; both with different values is a `400`. The value sent is the client's (else the alias's `default_max_tokens`, else `gateway.default_max_tokens`), capped by the alias's `max_output_tokens`, by `gateway.max_output_tokens_ceiling` and, for a tenant alias, by `gateway.tenant_alias_ceiling.max_output_tokens` — the ceiling holds when neither the alias nor the backend sets a cap. A backend row lowers it further through `limits.chat_max_tokens` or `model_map` (`max_tokens`/`num_predict`); a `max_tokens` in a row's `extra_body` does not count.
+- **Size caps** (alias policy, default in brackets): `tools.max_count` [64], `tools.max_bytes` [256 KiB], `response_format.max_bytes` [64 KiB], `logit_bias.max_entries` [64], `stop.max_entries` [4]; for a tenant alias also `gateway.tenant_alias_ceiling.tools_max_count`, whether the alias sets the key or not.
+
+**Which backends serve it.** The alias's role chain of the pool, filtered in this order: the rows the consumer's tenant may see whose trust admits the request's **sensitivity** — the highest of the consumer's `prompt_sensitivity`, a `Ctx-Sensitivity` header, the alias's sensitivity, the `_global` alias a tenant alias of the same name shadows, and the tenant's `pool.default_query_sensitivity`; a secret found in the body raises it to `credentials` — then the rows whose wire serves the OpenAI chat shape (`openai`, `ollama`), the [federation filter](security.md#federation-ingress-policy-peeringress), and for a tenant alias the export rule: operator rows (`_global`) only for the roles in `gateway.exportable_roles` (default none). Then the tenant's quota (`daily_calls`, cost budget with `on_exceed = block`), the per-consumer limits and the [admission](#admission). An attempt that fails over moves to the next row as for ctx's own calls; a `400` of a row with a known context window moves only to a row with a larger or unknown window.
+
+**Errors of this route** (besides the stack's and the admission's):
+
+| Situation | Status | `code` |
+|---|---|---|
+| malformed body, missing `model`/`messages`, wrong type, unknown key, value outside the policy | `400` | `invalid_json`, `missing_required_parameter`, `invalid_type`, `unsupported_parameter`, `unsupported_value` (with `param`) |
+| alias of another kind | `400` | `model_not_supported` |
+| the backend rejected the prompt as too long | `400` | `context_length_exceeded` — the text names the alias's `context_length` (else the smallest known window of its rows), never the backend's words |
+| any other request-specific backend `4xx` | `400` | `upstream_rejected` — ctx's own text; with `gateway.relay_upstream_4xx_messages=true` the backend's text, cut to 512 bytes, with every row name, host, model name and provider of the pool replaced by the alias name and URLs, IP addresses and paths removed |
+| the tenant's quota is exhausted | `429` | `insufficient_quota`, `x-should-retry: false`, `Retry-After` until the next full hour |
+| no row eligible (sensitivity, trust, export, federation filter, none configured), or no planner | `503` | `no_eligible_backend`, no `Retry-After` |
+| the per-consumer limiter is not in place yet | `503` | `service_unavailable`, `x-should-retry: true`, `Retry-After` = the largest step of `dispatch.external_retry_after_steps` |
+| every row failed (transport, `5xx` other than `500`, rate limit, the backend's own `401`/`403`, a last `404`) | `503` | `upstream_unavailable` — never a `401`: ctx's own backend credentials are not the client's key; `Retry-After` = the smallest one a backend sent |
+| the backend answered `500` | `500` | `upstream_error` — the only `500` of the gateway |
+| the backend did not answer in time | `504` | `upstream_timeout` |
+| `gateway.enabled` switched off, or the alias disabled, removed or no longer granted while the request ran | `404` | `not_found` resp. `model_not_found` — the request is ended within 5 s, nothing of the answer is sent |
+
+**Deadlines.** A request has `gateway.request_deadline` (540 s) from its arrival for everything — the queue wait and every attempt; one attempt is bounded by the alias's `timeout_s`, else the row's role timeout or `gateway.request_timeout`. The answer is written as one piece at the end, so a **reverse proxy in front of `/v1` needs a read timeout of at least `dispatch.external_max_wait` + `gateway.request_deadline`** (20 s + 540 s by default); a shorter one cuts a long request off with nothing the client can retry on.
+
+**Not yet:** streaming (`stream: true` is `400 unsupported_value` with `param: "stream"`), `n > 1`, Anthropic-protocol rows, the per-consumer limiter (until it lands every chat request is the `503 service_unavailable` above — the model API is dark by default anyway).
 
 ### Telemetry & logging
 

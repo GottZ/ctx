@@ -36,6 +36,7 @@ var typeNames = map[reflect.Type]string{
 	typHours:       "hours",
 	typLocation:    "timezone",
 	typScopes:      "scopes",
+	typRoles:       "roles",
 	typSensitivity: "sensitivity",
 	typScopeFloor:  "scope_floor",
 }

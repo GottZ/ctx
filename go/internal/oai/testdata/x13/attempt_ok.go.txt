@@ -1,0 +1,18 @@
+package probe
+
+// census-want: 0
+// The production shape: the wire function runs only inside the attempt.
+
+import "github.com/GottZ/ctx/internal/llm"
+
+func (c *call) attempt(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration) error {
+	_, err := llm.ChatRaw(runCtx, *b, nil, t, 0)
+	return err
+}
+
+func (c *call) walk(ctx context.Context, chain []backends.Backend) {
+	_, _, _ = llm.WalkChain(ctx, chain, "chat", c.acq, nil, llm.WalkRules{},
+		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration) (dispatch.Usage, bool, error) {
+			return dispatch.Usage{}, false, c.attempt(runCtx, b, lease, t)
+		})
+}

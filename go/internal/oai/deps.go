@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
 )
 
@@ -41,6 +43,109 @@ type Deps struct {
 	// HasGrant probes one grant — one primary-key probe
 	// (store.ConsumerGrantsAlias); read once per resolved alias.
 	HasGrant func(ctx context.Context, consumerID, aliasID string) (bool, error)
+
+	// The inference routes (W02-07: POST /v1/chat/completions). None of
+	// these is in missing(): the model list does not read them, and a
+	// missing one must not take GET /v1/models down (A03-W8 "Vertragsform");
+	// the inference handler checks them itself (inferenceMissing).
+
+	// Settings is the gateway settings getter: one snapshot per request.
+	Settings func() Settings
+	// Pool is the backend pool: the chain (Pool.Chain), the health report
+	// of every attempt (llm.PoolReporter) and the identity strings the
+	// upstream-text sanitizer replaces (Pool.Snapshot).
+	Pool *backends.Pool
+	// Quota is the tenant gate of the chain (masterplan K17, design/02
+	// §4.4.3 step 5): backends.QuotaAccountant.GateTenant.
+	Quota TenantGate
+	// Federation is the federation half of the chain build (F-W9).
+	Federation Federation
+	// TenantSensitivity is the tenant-overlay term of RequiredSensitivity:
+	// pool.default_query_sensitivity of the request's tenant
+	// (config.Store.SnapshotForRequest, which resolves the consumer's tenant
+	// under /v1).
+	TenantSensitivity func(context.Context) backends.Sensitivity
+	// Record writes the request's ONE llmlog row (llmlog.RecordGateway over
+	// the process pool, design/06 §4.6).
+	Record func(llmlog.GatewayRow)
+	// MaxWait is the dispatcher's external wait budget
+	// (dispatch.external_max_wait): the write deadline at entry covers it
+	// (design/02 §4.12).
+	MaxWait func() time.Duration
+	// RetryAfterSteps are the dispatcher's resolved Retry-After steps
+	// ((*dispatch.Dispatcher).ExternalRetryAfterSteps): the 503 of a missing
+	// limiter carries the largest one (lead decision O5 (b), the
+	// not-offered contract of A03-W8) — no literal on the Retry-After path.
+	RetryAfterSteps func() []time.Duration
+	// Planner is the admission contract (A03-W8, handler.V1Admission). nil
+	// ⇒ 503 no_eligible_backend before any acquire (design/02 §4.11.4, L11:
+	// no fallback class).
+	Planner AdmissionPlanner
+	// Limiter is the per-consumer meter (design/06 §4.1 steps 7–9, W06-10).
+	// nil ⇒ 503 service_unavailable (L11).
+	Limiter Limiter
+	// Lifecycle, when set, ends every running request at server shutdown
+	// (design/02 §4.11.3 D7): the request context is bound to it.
+	Lifecycle context.Context
+}
+
+// TenantGate is the tenant quota gate of a /v1 chain (masterplan K17):
+// *backends.QuotaAccountant implements it. An empty tenant is an error
+// (backends.ErrNoTenant), never an ungated chain.
+type TenantGate interface {
+	GateTenant(tenantID string, chain []backends.Backend) ([]backends.Backend, error)
+}
+
+// Federation is the federation half of the chain build (design/04 §4.5,
+// §4.7; F-W9). Injected: internal/federation imports this package (its
+// PeerIngress answers in the envelope), so it cannot be imported here.
+// cmd/ctxd binds federation.PolicyFrom, federation.ScanRaise and
+// federation.FilterChain.
+type Federation struct {
+	// Floor is federation.PolicyFrom(ctx).Required — the first term of
+	// RequiredSensitivity.
+	Floor func(context.Context) backends.Sensitivity
+	// Scan is federation.ScanRaise over the request body.
+	Scan func(required backends.Sensitivity, body []byte) backends.Sensitivity
+	// Filter is federation.FilterChain with the request's inbound hop
+	// state, its policy carrying the EFFECTIVE requirement (F-W9 review 2
+	// F2-7), and one Pool.LearnedInstances snapshot.
+	Filter func(ctx context.Context, chain []backends.Backend, required backends.Sensitivity) ([]backends.Backend, error)
+}
+
+// Limiter is the per-consumer meter hook of the model API (design/06 §4.1
+// steps 7–9: seeded?, Admit L0, L1 concurrency; wave W06-10 implements it).
+// It refuses at once, never waits (L5). The handler holds the reservation
+// for the request and ends it exactly once: Settle after a wire call, Abort
+// without one, Reject when the dispatcher refused after Admit.
+type Limiter interface {
+	Admit(ctx context.Context, ca *auth.ConsumerAuth, alias modelalias.Alias, est Estimate) (LimitReservation, *LimitRefusal)
+}
+
+// Estimate is what the limiter charges ahead: the op, the effective
+// max_tokens (design/06 K-06-11) and the size of the prompt.
+type Estimate struct {
+	Op          string
+	MaxTokens   int
+	PromptBytes int
+}
+
+// LimitReservation is one admitted request's share of the meter.
+type LimitReservation interface {
+	Settle(usage dispatch.Usage)
+	Abort()
+	Reject(reason string, waited time.Duration)
+}
+
+// LimitRefusal is the limiter's answer for a refused request: a code of the
+// vocabulary (rate_limit_exceeded, concurrency_limit_exceeded,
+// insufficient_quota, service_unavailable), its text, the Retry-After and
+// whether a retry can help.
+type LimitRefusal struct {
+	Code        string
+	Message     string
+	RetryAfter  time.Duration
+	ShouldRetry bool
 }
 
 // AdmissionPlanner is the admission contract of every /v1 inference handler
@@ -133,6 +238,27 @@ func (d Deps) missing() string {
 	}
 	if d.HasGrant == nil {
 		m = append(m, "HasGrant")
+	}
+	return strings.Join(m, ", ")
+}
+
+// inferenceMissing names the unset fields an inference route needs beyond
+// missing() ("" = complete). Planner and Limiter are not here: each has its
+// own fail-closed answer (L11).
+func (d Deps) inferenceMissing() string {
+	var m []string
+	for _, f := range []struct {
+		name  string
+		unset bool
+	}{
+		{"Settings", d.Settings == nil}, {"Pool", d.Pool == nil}, {"Quota", d.Quota == nil},
+		{"Federation.Floor", d.Federation.Floor == nil}, {"Federation.Scan", d.Federation.Scan == nil},
+		{"Federation.Filter", d.Federation.Filter == nil}, {"TenantSensitivity", d.TenantSensitivity == nil},
+		{"Record", d.Record == nil}, {"MaxWait", d.MaxWait == nil}, {"RetryAfterSteps", d.RetryAfterSteps == nil},
+	} {
+		if f.unset {
+			m = append(m, f.name)
+		}
 	}
 	return strings.Join(m, ", ")
 }

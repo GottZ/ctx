@@ -350,6 +350,20 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 		t.Fatalf("after passthrough failover: acquires=%d wire=%d, want 14/14", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
+	// --- Site 9 through the real /v1 handler (W02-07): oai.ChatCompletions
+	// walks with its own attempt — one served request is +1/+1, the down
+	// primary in front of it +2/+2 (dispatch_invariant_oai_test.go). ---
+	postCensus(t, oaiCensusRoute(t, ca, []backends.Backend{invariantBackend(srv.URL, backends.ProtocolOpenAI)}))
+	if ca.count() != 15 || atomic.LoadInt64(&wireHits) != 15 {
+		t.Fatalf("after the /v1 route: acquires=%d wire=%d, want 15/15", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+	downRow := invariantBackend(down.URL, backends.ProtocolOpenAI)
+	downRow.ID, downRow.Name, downRow.Priority = "b-down", "down", 10
+	postCensus(t, oaiCensusRoute(t, ca, []backends.Backend{downRow, invariantBackend(srv.URL, backends.ProtocolOpenAI)}))
+	if ca.count() != 17 || atomic.LoadInt64(&wireHits) != 17 {
+		t.Fatalf("after the /v1 route failover: acquires=%d wire=%d, want 17/17", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+
 	// --- Lease-free without wire contact (the cache-hit clause's structural
 	// twin, reachable cross-package): the rerank early-out below
 	// RerankMinResults never touches the admitter and never contacts a

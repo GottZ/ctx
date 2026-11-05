@@ -38,11 +38,6 @@ cmd/ctxd/overviewworker_priority_linux.go	ioprioGet	# Prod setzt nur (IOPRIO_SET
 cmd/ctxd/server.go	NewRouter	# Test-Fassade: Prod baut den Router über newRouter (main.go, F-W8: Router + Ingress-Registrierung für den Boot-Assert); die cmd/ctxd-Integrationstests bauen den Produktions-Router hierüber
 internal/armsweep/report.go	ReadReportBody	# Schreib-Hälfte WriteReport ist prod; den Leser braucht nur das Determinismus-Gate, 7x in 4 *_test.go
 internal/auth/consumer.go	ReauthenticateModelKey	# wartet: W02-08 — Re-Check des Stream-Watchers über handler.ReauthConsumer (K22); entfällt mit W01-8
-internal/backends/hopchain.go	ExcludeForEgressLocal	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
-internal/backends/hopchain.go	ExcludeHopChain	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
-internal/backends/hopchain.go	TransitCap	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
-internal/backends/hopchain.go	isInstanceHop	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
-internal/backends/hopchain.go	keep	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
 internal/config/envonly.go	EnvOnlyServerNames	# Zubringer des Env-only-Gates envonly_test.go:94/170/192; die Map ist Daten, Prod liest sie nie
 internal/config/envscan.go	EnvNameRef.String	# Stringer nur implizit über %s in envonly_test.go:138 und cmd/envnames_test.go:181 (Gate-Fehlertexte)
 internal/config/envscan.go	ScanEnvNames	# AST-Scanner beider Env-Zäune; 5 Aufrufe in envonly_test.go + cmd/envnames_test.go, kein Prod-Leser
@@ -125,13 +120,7 @@ internal/evalscore/diversity.go	rankedAlphaDCG	# Nur Aufrufer AlphaNDCG:113, das
 internal/evalscore/diversity.go	serveFacets	# Nur über rankedAlphaDCG:173/idealAlphaDCG:207 unter AlphaNDCG — kein eigener Testaufrufer
 internal/events/distill_block.go	distillShardOrdinal	# Prod nutzt die Basis-Form distillShardOrdinalFrom (:1742, W-L1 #6); den Wrapper nur 5 Tests
 internal/events/scheduler.go	Scheduler.backgroundTenantScopes	# Live-Pipeline liest backgroundTenantsFn direkt; Projektion nur für tenant_iteration_integration_test.go
-internal/federation/chain.go	FilterChain	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
 internal/federation/ingress.go	CounterSnapshot	# wartet: W06-16 (Status-Sektion federation: federation_peer_without_path; Runbook-Grundlage für require_peer_hop, F-W12)
-internal/federation/policy.go	PolicyFrom	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
-internal/federation/policy.go	ScanRaise	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
-internal/federation/policy.go	assignmentProbe	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
-internal/federation/policy.go	bodyHasCredentials	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
-internal/federation/policy.go	scanBody	# wartet: W02-07 (Kettenbau der Route-Handler: RequiredSensitivity ab federation.PolicyFrom, ScanRaise nach dem Parse, Pool.Chain → federation.FilterChain → Export-Filter → llm.WalkChain; F-W9)
 internal/fedhop/grammar.go	ReasonFrom	# wartet: F-W10 (StatusError.CtxReason auf B; SetReason in den Fehler-Writern auf A, 02/03)
 internal/fedhop/merge.go	ClassVocabulary	# Vokabular-Pin: einziger Leser ist internal/dispatch/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb); A03-W3/A03-W9 ergänzen dort
 internal/fedhop/merge.go	SensitivityVocabulary	# Vokabular-Pin: einziger Leser ist internal/backends/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb)
@@ -140,7 +129,6 @@ internal/fedhop/stamp.go	CounterSnapshot	# wartet: W06-16 (Status-Sektion federa
 internal/fedhop/stamp.go	SetPeerMaxWait	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Settings federation.peer_max_wait_* im Reload
 internal/fedhop/stamp.go	WireTimeout	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Sites client.go/stream.go/rerank.go
 internal/fedhop/stamp.go	WithCall	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Admission.Acquire, ChainCall.Do
-internal/fedhop/stamp.go	WithRequestID	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — RequestID-Middleware (K28)
 internal/goldset/generate_slices.go	AcceptGeneratedQuery	# Nur slices_test.go:19/41/55: bool-Fassade über InspectGeneratedQuery, das cmd/ctx-goldset/slices.go:72 ruft
 internal/goldset/judge.go	JudgeGates	# Nur judge_test.go:421: Kopie-Getter auf judgeGates; Prod liest die Var direkt (judge.go:666, calibrate.go:453)
 internal/goldset/pool.go	PooledCase.Key	# Nur pool_test.go (13 Stellen); Prod schlüsselt über die gleichnamigen PoolEntry.Key und Case.Key
@@ -151,25 +139,6 @@ internal/graphcache/validate.go	checkRangeOrder	# Einziger Aufrufer ist checkOrd
 internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_gate_test.go:156 u. a.); Prod gated über enforceManageActionTier
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
 internal/handler/model_auth.go	ReauthConsumer	# wartet: W02-08 — Re-Check des Stream-Watchers (K22), gleicher Semaphor wie ModelAuth; entfällt mit W01-8
-internal/handler/v1_admission.go	ExternalWeightPlan	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	NewV1Admission	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	ResolveLane	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	V1Admission.AllowedClasses	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	V1Admission.Plan	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	V1Admission.WriteAdmissionError	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	V1Admission.log	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	V1Admission.logInternal	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	V1Admission.setRetryAfter	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	laneClass	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	orderError	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	peerHintUrgent	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	v1Acquirer.Blocks	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	v1Acquirer.Class	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	v1Acquirer.Continue	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	v1Acquirer.First	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	v1Acquirer.Next	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	v1Acquirer.attempt	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
-internal/handler/v1_admission.go	waitOptions	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1census/v1census.go	Assert	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	Check	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	NewRecorder	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
@@ -202,41 +171,15 @@ internal/handler/v1door/v1door.go	probe.ServeHTTP	# v1door: integration-getaggte
 internal/handler/v1door/v1door.go	probe.take	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	routeTargets	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	underModelPrefix	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
-internal/llm/passthrough.go	BuildUpstreamBody	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	ChatRaw	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	ChatRawStream	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	WalkChain	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	WalkRules.admits	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	WalkRules.timeoutFor	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	acquireFor	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	applyRowBody	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	effectiveMaxTokens	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	isClientCTXKey	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	isSamplingKey	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	laterWindowAbove	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	passthroughRow	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	putFrame	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	putSamplingDefaults	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	runAttempt	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	sseRelay.dispatch	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	sseRelay.result	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	sseRelay.run	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	terminalAttempt	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	windowAbove	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llm/passthrough.go	windowBound	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
-internal/llmlog/gateway.go	GatewayEntry	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
-internal/llmlog/gateway.go	GatewayOp	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
-internal/llmlog/gateway.go	RecordGateway	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
-internal/llmlog/gateway.go	RedactedErr.Error	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
-internal/llmlog/gateway.go	bodiesAllowed	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
-internal/llmlog/gateway.go	capBody	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
-internal/llmlog/gateway.go	redactedToken	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go
+internal/llm/passthrough.go	ChatRawStream	# wartet: W02-08 — Stream-Relay (W02-07 verdrahtet nur ChatRaw/WalkChain non-stream; ChatRawStream und sseRelay bekommen ihren Aufrufer mit dem SSE-Writer)
+internal/llm/passthrough.go	sseRelay.dispatch	# wartet: W02-08 — Stream-Relay (W02-07 verdrahtet nur ChatRaw/WalkChain non-stream; ChatRawStream und sseRelay bekommen ihren Aufrufer mit dem SSE-Writer)
+internal/llm/passthrough.go	sseRelay.result	# wartet: W02-08 — Stream-Relay (W02-07 verdrahtet nur ChatRaw/WalkChain non-stream; ChatRawStream und sseRelay bekommen ihren Aufrufer mit dem SSE-Writer)
+internal/llm/passthrough.go	sseRelay.run	# wartet: W02-08 — Stream-Relay (W02-07 verdrahtet nur ChatRaw/WalkChain non-stream; ChatRawStream und sseRelay bekommen ihren Aufrufer mit dem SSE-Writer)
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
 internal/modelkey/modelkey.go	Key.GoString	# Hint-Darstellung für fmt %#v (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
 internal/modelkey/modelkey.go	Key.LogValue	# Hint-Darstellung für slog (LogValuer) (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
 internal/modelkey/modelkey.go	Key.String	# Hint-Darstellung für fmt %v/%s und jeden Stringer-Verbraucher (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
-internal/oai/budget.go	ReservationFrom	# wartet: W02-07 — Antwort-Reserve der Inferenz-Handler (design/02 §4.2.1); die Budget-Stufe ist seit W02-05 montiert, /v1/models reserviert keine Antwort; heute nur internal/oai-Tests
 internal/promptguard/promptguard.go	Canonicalize	# Nonce zu Null-Nonce für den Fixture-Determinismus der Prompt-Golden; 26 Aufrufe in 8 _test.go
 internal/prompts/prompts.go	All	# Nur prompts_test.go:52/85/125: Registry-Vollständigkeit und Sortierung; Prod stempelt über Register
 internal/prompts/prompts.go	Lookup	# Nur prompts_test.go:103 und completeness_test.go:534/611: ID-zu-Identity-Probe der Registry-Gates

@@ -26,6 +26,11 @@ type Settings struct {
 	DefaultMaxTokens       int
 	MaxOutputTokensCeiling int
 	TenantAliasCeiling     AliasCeiling
+	// ExportableRoles (gateway.exportable_roles) are the roles whose operator
+	// rows (_global or unscoped backends) a tenant alias's chain may reach;
+	// empty = none (the export filter, design/02 §4.4.3 no. 3). Each snapshot
+	// carries its own copy.
+	ExportableRoles []string
 
 	RelayUpstream4xxMessages bool
 	RetryAfterJitter         float64

@@ -1,0 +1,13 @@
+package probe
+
+// census-want: 1
+// A lease-taking literal that is no WalkChain attempt.
+
+import wire "github.com/GottZ/ctx/internal/llm"
+
+func serve(ctx context.Context, b backends.Backend) {
+	f := func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration) {
+		_, _ = wire.ChatRaw(runCtx, *b, nil, t, 0)
+	}
+	f(ctx, &b, nil, time.Second)
+}

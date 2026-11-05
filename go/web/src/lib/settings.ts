@@ -29,6 +29,7 @@ export function widgetFor(type: string): Widget {
     case 'hours':
     case 'timezone':
     case 'scopes':
+    case 'roles':
     case 'scope_floor':
       return 'text'
     default:
@@ -65,6 +66,8 @@ export function typeHint(type: string): string | null {
       return 'hours or suffix form, e.g. 12h or 45d'
     case 'scopes':
       return 'comma-separated, e.g. private,shared'
+    case 'roles':
+      return 'comma-separated pool roles, e.g. chat,embed; empty = none'
     case 'timezone':
       return 'IANA name, e.g. Europe/Berlin'
     case 'scope_floor':
@@ -171,7 +174,7 @@ export function draftFor(s: SettingView): string {
 
 /** Human form of an effective value (placeholder / reset affordance). */
 export function formatValue(v: unknown): string {
-  if (Array.isArray(v)) return v.join(',')
+  if (Array.isArray(v)) return v.length === 0 ? '(empty)' : v.join(',')
   if (v === null || v === undefined || v === '') return '(empty)'
   return String(v)
 }
@@ -186,6 +189,9 @@ export type ParsedDraft = { ok: true; value: string | number | boolean } | { ok:
 export function parseDraft(s: SettingView, draft: string): ParsedDraft {
   const t = draft.trim()
   if (t === '') {
+    // A role list is the one type whose empty value is a value — the empty
+    // list (config.RoleList): the PUT sends "" instead of pointing at reset.
+    if (s.type === 'roles') return { ok: true, value: '' }
     return { ok: false, error: 'empty value — use reset to remove the override instead' }
   }
   switch (s.type) {

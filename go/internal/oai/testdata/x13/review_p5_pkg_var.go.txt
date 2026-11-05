@@ -1,0 +1,9 @@
+// census-want: 1
+// Fremd-Review 1 F-6 probe.
+package oai
+
+import "github.com/GottZ/ctx/internal/llm"
+
+var chatRaw = llm.ChatRaw
+
+func viaVar() { chatRaw(nil, zero, nil, 0, 0) }

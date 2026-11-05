@@ -3,6 +3,7 @@ package config
 import (
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -167,6 +168,9 @@ func bumpedValue(t *testing.T, e entry) string {
 		if v, ok := gatewayStringBumps[e.Key]; ok && v != def {
 			return v
 		}
+	case RoleList:
+		// One role more than the default; "bump" is a valid pool role.
+		return strings.Join(append(slices.Clone([]string(def)), "bump"), ",")
 	}
 	t.Fatalf("%s: no bump for default type %T", e.Key, e.defVal)
 	return ""

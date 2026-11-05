@@ -12,9 +12,13 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/settings"
@@ -179,9 +183,19 @@ func startModelGateway(g *modelGateway) func() {
 // (oai.Deps): the door's consumer from the context, the knowledge-credential
 // probe, the process's alias registry, and the two grant reads over pool —
 // the store primitives of W01-9, adapted here because internal/oai may not
-// import internal/store (depguard oai-isolation).
-func gatewayDeps(pool *pgxpool.Pool, aliases *modelalias.Registry) oai.Deps {
-	return oai.Deps{
+// import internal/store (depguard oai-isolation). The inference routes
+// (W02-07) add the gateway settings, the backend pool, the tenant quota
+// gate (K17), the federation half of the chain build (F-W9: internal/oai
+// cannot import internal/federation, which imports it), the tenant overlay
+// of RequiredSensitivity (K30), the llmlog writer, the dispatcher's wait
+// budget and Retry-After steps, the planner (A03-W8) and the lifecycle
+// context (D7). The limiter is W06-10's: nil until then, and the chat route
+// answers 503 service_unavailable without it (L11) — the model API is dark
+// (gateway.enabled=false) until then anyway.
+func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config.Store, aliases *modelalias.Registry,
+	backendPool *backends.Pool, quota *backends.QuotaAccountant, dispatcher *dispatch.Dispatcher) oai.Deps {
+	settings := gatewaySettingsGetter(cfgStore)
+	d := oai.Deps{
 		Consumer:      handler.ConsumerAuthFromContext,
 		KnowledgeAuth: func(ctx context.Context) bool { return handler.AuthResultFromContext(ctx) != nil },
 		Aliases:       aliases,
@@ -191,16 +205,56 @@ func gatewayDeps(pool *pgxpool.Pool, aliases *modelalias.Registry) oai.Deps {
 		HasGrant: func(ctx context.Context, consumerID, aliasID string) (bool, error) {
 			return store.ConsumerGrantsAlias(ctx, pool, consumerID, aliasID)
 		},
+		Settings:   settings,
+		Pool:       backendPool,
+		Federation: chainFederation(backendPool),
+		TenantSensitivity: func(ctx context.Context) backends.Sensitivity {
+			return cfgStore.SnapshotForRequest(ctx).Pool.DefaultQuerySensitivity
+		},
+		Record: func(row llmlog.GatewayRow) { llmlog.RecordGateway(pool, row) },
+		MaxWait: func() time.Duration {
+			return cfgStore.Snapshot().Dispatch.ExternalMaxWait //nolint:forbidigo // MT 06 BLIND: dispatch.external_max_wait is global-only (one dispatcher per process); the write deadline at entry covers the wait budget of every consumer alike.
+		},
+		Lifecycle: lifecycle,
+	}
+	if quota != nil {
+		d.Quota = quota
+	}
+	if dispatcher != nil {
+		d.RetryAfterSteps = dispatcher.ExternalRetryAfterSteps
+		d.Planner = handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: dispatcher, Settings: settings})
+	}
+	return d
+}
+
+// chainFederation binds the federation half of the chain build (F-W9
+// handover, lead decision W02-07 no. 1): the floor is the PeerIngress's
+// policy, the scan runs over the body, and the filter gets the request's
+// inbound hop state, the policy with the EFFECTIVE requirement (F2-7 — the
+// empty-chain error then names what the chain was built for) and one
+// learned-instance snapshot per request.
+func chainFederation(backendPool *backends.Pool) oai.Federation {
+	return oai.Federation{
+		Floor: func(ctx context.Context) backends.Sensitivity { return federation.PolicyFrom(ctx).Required },
+		Scan:  federation.ScanRaise,
+		Filter: func(ctx context.Context, chain []backends.Backend, required backends.Sensitivity) ([]backends.Backend, error) {
+			pol := federation.PolicyFrom(ctx)
+			pol.Required = required
+			return federation.FilterChain(chain, fedhop.InboundFrom(ctx), pol, backendPool.LearnedInstances())
+		},
 	}
 }
 
 // v1Routes are the endpoints of the /v1 group (design/02 §4.2 route
 // table); the inference waves (W02-07ff.) add theirs here. The model route
-// is a wildcard: alias names may contain "/" (§3.1).
+// is a wildcard: alias names may contain "/" (§3.1). No route is a
+// WithScheduler mount: a /v1 request never raises the herald (design/02
+// §4.11.4, B11).
 func v1Routes(d oai.Deps) []modelRoute {
 	return []modelRoute{
 		{http.MethodGet, "/models", oai.ListModels(d)},
 		{http.MethodGet, "/models/*", oai.GetModel(d)},
+		{http.MethodPost, "/chat/completions", oai.ChatCompletions(d)},
 	}
 }
 

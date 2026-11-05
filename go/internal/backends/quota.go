@@ -2,6 +2,7 @@ package backends
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -167,6 +168,41 @@ func (a *QuotaAccountant) Gate(scope string, chain []Backend) ([]Backend, error)
 	if !ok {
 		return chain, nil // no tenant, or a tenant without an enabled policy
 	}
+	return gateState(gen, tenant, scope, chain)
+}
+
+// ErrNoTenant refuses a tenant gate without a tenant: on the model API every
+// request has one (design/02 §4.2 stage 6), so an empty id is a wiring
+// defect — never an ungated chain (design/02 §5 B21).
+var ErrNoTenant = errors.New("quota: tenant gate without a tenant")
+
+// GateTenant is Gate keyed by the TENANT instead of a scope (masterplan K17,
+// design/02 §4.4.3 step 5): the model API sees the tenant's internal state
+// — its call budget and its cost budget — by the consumer's tenant id, the
+// same policy and spend Gate reads through a scope of that tenant. The two
+// differences to Gate are deliberate: an empty tenant is ErrNoTenant (Gate
+// lets "" and _global through ungated — right for the sentinel callers of
+// the knowledge paths, fail-open on /v1, B21), and there is no scope
+// indirection, so a consumer whose tenant has no scope row of its own is
+// still gated. Fail-open otherwise exactly like Gate (cold cache, no or a
+// disabled policy). The spend stays api_key_id-based (K17 asymmetric: the
+// external traffic does not count into the tenant's internal budget here).
+func (a *QuotaAccountant) GateTenant(tenantID string, chain []Backend) ([]Backend, error) {
+	if tenantID == "" {
+		return nil, ErrNoTenant
+	}
+	a.ensureFresh()
+	gen := a.cache.Load()
+	if gen == nil {
+		return chain, nil // cold start: fail-open until the first refresh lands
+	}
+	return gateState(gen, tenantID, "tenant:"+tenantID, chain)
+}
+
+// gateState applies the budgets of tenant (one generation) to chain; label
+// names the gated scope or tenant in the error.
+func gateState(gen *quotaGen, tenant, label string, chain []Backend) ([]Backend, error) {
+	scope := label
 	st, ok := gen.tenants[tenant]
 	if !ok || !st.quota.Enabled {
 		return chain, nil // no quota row (or disabled) = unlimited
@@ -201,6 +237,20 @@ func (a *QuotaAccountant) SeedForTest(scope string, q TenantQuota, dayCalls int,
 	gen := quotaGen{
 		scopeTenant: map[string]string{scope: tenant},
 		tenants:     map[string]tenantState{tenant: {quota: q, dayCalls: dayCalls, dayCost: dayCost}},
+	}
+	a.ttl = 24 * time.Hour
+	a.cache.Store(&gen)
+	a.cacheAt.Store(a.nowFn().UnixNano())
+}
+
+// SeedTenantForTest stores a fresh generation holding tenantID's policy q and
+// its rolling call count / daily external cost, mapped from no scope — the
+// GateTenant twin of SeedForTest (test seam only): the /v1 route proves it
+// gates by the consumer's tenant id, not by a scope (W02-07 G8).
+func (a *QuotaAccountant) SeedTenantForTest(tenantID string, q TenantQuota, dayCalls int, dayCost float64) {
+	gen := quotaGen{
+		scopeTenant: map[string]string{},
+		tenants:     map[string]tenantState{tenantID: {quota: q, dayCalls: dayCalls, dayCost: dayCost}},
 	}
 	a.ttl = 24 * time.Hour
 	a.cache.Store(&gen)

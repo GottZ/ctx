@@ -43,6 +43,7 @@ var (
 	typHours       = reflect.TypeOf(Hours(0))
 	typLocation    = reflect.TypeOf((*time.Location)(nil))
 	typScopes      = reflect.TypeOf([]string(nil))
+	typRoles       = reflect.TypeOf(RoleList(nil))
 	typSensitivity = reflect.TypeOf(backends.Sensitivity(""))
 	typScopeFloor  = reflect.TypeOf(ScopeFloor(nil))
 )
