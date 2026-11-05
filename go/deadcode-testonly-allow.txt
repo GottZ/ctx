@@ -161,6 +161,7 @@ internal/handler/v1_admission.go	V1Admission.log	# wartet: W02-07 (Planner V1Adm
 internal/handler/v1_admission.go	V1Admission.logInternal	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	V1Admission.setRetryAfter	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	laneClass	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
+internal/handler/v1_admission.go	orderError	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	peerHintUrgent	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	v1Acquirer.Blocks	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
 internal/handler/v1_admission.go	v1Acquirer.Class	# wartet: W02-07 (Planner V1Admission in oai.Deps, erste /v1-Inferenz-Route; A03-W8 liefert den Vertrag ohne Route)
@@ -220,6 +221,7 @@ internal/llm/passthrough.go	runAttempt	# wartet: W02-07 — Gateway-Passthrough 
 internal/llm/passthrough.go	sseRelay.dispatch	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llm/passthrough.go	sseRelay.result	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llm/passthrough.go	sseRelay.run	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
+internal/llm/passthrough.go	terminalAttempt	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llm/passthrough.go	windowAbove	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llm/passthrough.go	windowBound	# wartet: W02-07 — Gateway-Passthrough (W02-06 baut BuildUpstreamBody/ChatRaw/ChatRawStream/WalkChain, Konsument W02-07; HTTP-Route ist Tabu); heute nur internal/llm- und internal/chat-Tests
 internal/llmlog/gateway.go	GatewayEntry	# wartet: W02-07 — /v1-Zeilenvertrag W06-9 (GatewayEntry/RecordGateway, RedactedErr), erste Zeile schreibt POST /v1/chat/completions; Gates in llmlog/gateway*_test.go

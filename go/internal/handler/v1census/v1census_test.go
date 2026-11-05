@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -238,6 +239,18 @@ func TestCensusCatchesDefects(t *testing.T) {
 			release(rec.Acquire(r.Context(), req(true, dispatch.ClassExternal)))
 			first.Release()
 		}, true, "while the request holds"},
+		// Review 3 FR3-2: after a failover the held lease is the Next
+		// (TryAcquire) one — the same rule.
+		{"continue while holding the failover lease", func(_ http.ResponseWriter, r *http.Request) {
+			reads()
+			release(rec.Acquire(r.Context(), req(false, dispatch.ClassExternal))) // the first row failed over
+			next, _, err := rec.TryAcquire(r.Context(), req(false, dispatch.ClassExternal))
+			if err != nil {
+				return
+			}
+			release(rec.Acquire(r.Context(), req(true, dispatch.ClassExternal)))
+			next.Release()
+		}, true, "while the request holds"},
 		{"model list acquires", func(_ http.ResponseWriter, r *http.Request) {
 			reads()
 			release(rec.Acquire(r.Context(), req(false, dispatch.ClassExternal)))
@@ -260,6 +273,37 @@ func TestCensusCatchesDefects(t *testing.T) {
 			}
 		})
 	}
+	// PR #142 bot review 4477069089: the held block fills the partition, so
+	// the continuation would wait forever for its own units — the census
+	// must report rule 7 at once, not hang in the request.
+	t.Run("continue while holding a full partition", func(t *testing.T) {
+		r := chi.NewRouter()
+		r.Route("/v1", func(g chi.Router) {
+			g.Post("/x", func(_ http.ResponseWriter, hr *http.Request) {
+				reads()
+				full := dispatch.Request{Target: dispatch.Target{Origin: hostA}, Class: dispatch.ClassExternal, Role: "embed", Weight: 4} // E = 4
+				first, _, err := rec.Acquire(hr.Context(), full)
+				if err != nil {
+					return
+				}
+				defer first.Release()
+				full.Continuation = true
+				release(rec.Acquire(hr.Context(), full))
+			})
+		})
+		done := make(chan []string, 1)
+		go func() {
+			done <- v1census.Check(r, rec, v1census.Options{Allowed: adm.AllowedClasses(), Hosts: []string{hostA}, Admitting: []string{"POST /v1/x"}})
+		}()
+		select {
+		case got := <-done:
+			if !slices.ContainsFunc(got, func(v string) bool { return strings.Contains(v, "while the request holds") }) {
+				t.Fatalf("violations %q, want rule 7", got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Check hung in a continuation that waits for its own units — rule 7 must refuse it before the dispatcher")
+		}
+	})
 	if got := v1census.Check(chi.NewRouter(), rec, v1census.Options{}); len(got) == 0 {
 		t.Fatal("a census over an empty /v1 passed — it must refuse to prove nothing")
 	}

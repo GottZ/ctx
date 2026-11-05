@@ -71,10 +71,11 @@ type AdmissionPlanner interface {
 	// an acquire error of the walk, the walk's class assert) and returns
 	// the code it wrote (the refusal reason of the access log and the
 	// ledger, W06-9/W06-12). ctx is the request's own context
-	// (r.Context()), never one the route derived with a deadline: only when
-	// it ended — the client is gone — nothing is written and "" returned.
-	// Every other context error of an acquire (the route's deadline, a
-	// released lease's run context) is a 503 with a body.
+	// (r.Context(), with or without a request deadline on it): only when it
+	// was canceled — the client is gone — nothing is written and ""
+	// returned. A deadline that ended it, and every other context error of
+	// an acquire (the route's deadline, a released lease's run context), is
+	// a 503 with a body.
 	WriteAdmissionError(ctx context.Context, w http.ResponseWriter, err error) string
 }
 

@@ -42,6 +42,7 @@ package v1census
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,6 +85,10 @@ type Event struct {
 	// when the continuation asked (rule 7).
 	Holding int
 }
+
+// errHeldContinuation is the Recorder's answer to a continuation asked while
+// the request still holds a lease of its own (rule 7).
+var errHeldContinuation = errors.New("v1census: continuation refused — the request still holds a lease of its own")
 
 // Recorder is the counting dispatcher of the census: every call is recorded
 // in order and passed to Inner. It serves one request at a time (Check
@@ -151,6 +156,13 @@ func (r *Recorder) Acquire(ctx context.Context, req dispatch.Request) (*dispatch
 		e.Holding = r.holding()
 	}
 	r.add(e)
+	if e.Holding > 0 {
+		// Rule 7 violated: refuse before the dispatcher — the continuation
+		// would wait for units its own request holds and, on a full
+		// partition, never return to the census (PR #142 bot review
+		// 4477069089).
+		return nil, nil, fmt.Errorf("%w (%d held)", errHeldContinuation, e.Holding)
+	}
 	l, runCtx, err := r.Inner.Acquire(ctx, req)
 	r.grant(runCtx, err)
 	return l, runCtx, err

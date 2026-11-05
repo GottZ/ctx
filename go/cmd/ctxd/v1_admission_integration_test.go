@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -185,20 +186,22 @@ func TestV1DoesNotRaiseHerald(t *testing.T) {
 	})
 }
 
-// TestV1AdmissionCensusModelRoutes: the census over the /v1 routes W02-05
-// mounted on the production router (buildRouter) with a live model key —
-// GET /v1/models and /v1/models/* acquire nothing: no recorded door and no
-// target created on the router's own dispatcher.
-func TestV1AdmissionCensusModelRoutes(t *testing.T) {
-	f := newV1Fixture(t, nil, nil)
-	f.setEnabled(t, true)
+// modelRouteCensus runs the admission census over the /v1 group of a
+// production-router fixture with a live model key: the recorded doors of
+// rec and the targets of the router's own dispatcher, counted BEFORE the
+// first request (PR #142 bot review 4477068967: sampled after the
+// reachability GET, a target that GET created would hide every later
+// acquire on it). The model routes hold no dispatcher, so rec sees only
+// what a route hands it — the router's dispatcher is the evidence for the
+// real routes, rec the evidence for an acquiring control route.
+func modelRouteCensus(t *testing.T, f *v1Fixture, rec *v1census.Recorder) (violations []string, targetsBefore, targetsAfter int) {
+	t.Helper()
+	targetsBefore = len(f.disp.Snapshot().Targets)
 	// The census requests reach the handlers (not a vacuous run over 401s).
 	if a := f.do(http.MethodGet, "/v1/models", withBearer(f.allKey)); a.status != http.StatusOK {
 		t.Fatalf("GET /v1/models with the census key = %d %s, want 200", a.status, a.body)
 	}
-	before := len(f.disp.Snapshot().Targets)
-	rec := v1census.NewRecorder(f.disp)
-	v1census.Assert(t, f.router, rec, v1census.Options{
+	violations = v1census.Check(f.router, rec, v1census.Options{
 		Allowed: []dispatch.Class{dispatch.ClassExternal},
 		Prepare: func(r *http.Request) *http.Request {
 			r.RemoteAddr = "192.0.2.1:40000"
@@ -207,7 +210,59 @@ func TestV1AdmissionCensusModelRoutes(t *testing.T) {
 			return r
 		},
 	})
-	if after := len(f.disp.Snapshot().Targets); after != before {
-		t.Fatalf("the router's dispatcher has %d targets after the census, %d before — a model route acquired", after, before)
-	}
+	return violations, targetsBefore, len(f.disp.Snapshot().Targets)
+}
+
+// TestV1AdmissionCensusModelRoutes: the census over the /v1 routes W02-05
+// mounted on the production router (buildRouter) with a live model key —
+// GET /v1/models and /v1/models/* acquire nothing: no violation and no
+// target created on the router's own dispatcher. The negative control
+// replaces GET /v1/models by a route that acquires — through the recorder
+// and on the router's dispatcher — and must fail both checks.
+func TestV1AdmissionCensusModelRoutes(t *testing.T) {
+	t.Run("real model routes", func(t *testing.T) {
+		f := newV1Fixture(t, nil, nil)
+		f.setEnabled(t, true)
+		violations, before, after := modelRouteCensus(t, f, v1census.NewRecorder(f.disp))
+		if len(violations) != 0 {
+			t.Fatalf("census violations %q", violations)
+		}
+		if after != before {
+			t.Fatalf("the router's dispatcher has %d targets after the census, %d before — a model route acquired", after, before)
+		}
+	})
+	t.Run("control: an acquiring model route", func(t *testing.T) {
+		var rec atomic.Pointer[v1census.Recorder]
+		var disp atomic.Pointer[dispatch.Dispatcher]
+		f := newV1Fixture(t, nil, func(routes []modelRoute) []modelRoute {
+			out := slices.Clone(routes)
+			for i := range out {
+				if out[i].pattern != "/models" {
+					continue
+				}
+				out[i].handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if l, _, err := disp.Load().Acquire(r.Context(), dispatch.Request{Target: dispatch.Target{Origin: "http://census-probe.invalid:8000"},
+						Class: dispatch.ClassBackground, Role: "probe"}); err == nil {
+						l.Release()
+					}
+					if l, _, err := rec.Load().Acquire(r.Context(), dispatch.Request{Target: dispatch.Target{Origin: "http://census-probe.invalid:8000"},
+						Class: dispatch.ClassExternal, Role: "probe"}); err == nil {
+						l.Release()
+					}
+					w.WriteHeader(http.StatusOK)
+				})
+			}
+			return out
+		})
+		disp.Store(f.disp)
+		rec.Store(v1census.NewRecorder(f.disp))
+		f.setEnabled(t, true)
+		violations, before, after := modelRouteCensus(t, f, rec.Load())
+		if !slices.ContainsFunc(violations, func(v string) bool { return strings.Contains(v, "on a route that must not admit") }) {
+			t.Fatalf("census violations %q, want the acquiring model route caught", violations)
+		}
+		if after == before {
+			t.Fatalf("targets %d before and after — the target count missed an acquiring model route", before)
+		}
+	})
 }

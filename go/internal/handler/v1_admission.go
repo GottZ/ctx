@@ -307,7 +307,7 @@ func (q *v1Acquirer) First(ctx context.Context, b *backends.Backend, role string
 	q.started = true
 	q.mu.Unlock()
 	if again {
-		return nil, nil, fmt.Errorf("%w: a second first acquire (a second wait point)", ErrAcquireOrder)
+		return nil, nil, orderError(b, "a second first acquire (a second wait point)")
 	}
 	blocks := ExternalWeightPlan(q.units, q.subBatch, q.capOf(b.Host))
 	opts := waitOptions(ctx)
@@ -326,7 +326,7 @@ func (q *v1Acquirer) Next(ctx context.Context, b *backends.Backend, role string,
 	leased := q.leased
 	q.mu.Unlock()
 	if !leased {
-		return nil, nil, fmt.Errorf("%w: a failover acquire before the first lease", ErrAcquireOrder)
+		return nil, nil, orderError(b, "a failover acquire before the first lease")
 	}
 	blocks := ExternalWeightPlan(q.units, q.subBatch, q.capOf(b.Host))
 	lease, runCtx, err := q.adm.TryAcquire(ctx, b, role, timeout, llm.AdmitOptions{Weight: blocks[0]})
@@ -349,9 +349,18 @@ func (q *v1Acquirer) Continue(ctx context.Context, b *backends.Backend, role str
 	}
 	q.mu.Unlock()
 	if !ok {
-		return nil, nil, fmt.Errorf("%w: a continuation without a lease of the request on its row, or past its block plan", ErrAcquireOrder)
+		return nil, nil, orderError(b, "a continuation without a lease of the request on its row, or past its block plan")
 	}
 	return q.adm.Continue(ctx, b, role, timeout, llm.AdmitOptions{Weight: weight})
+}
+
+// orderError is the refusal of a door used out of order, inside the acquire
+// hull like every other door failure (dispatch.AdmissionError): a Continue
+// is called from inside the route's attempt, where no acquireFor wraps it,
+// and the route's error split and the walker read the hull (PR #142 bot
+// review 4477069015).
+func orderError(b *backends.Backend, what string) error {
+	return &llm.AdmissionError{Err: fmt.Errorf("%w: %s", ErrAcquireOrder, what), Backend: b.Name, Host: b.Host}
 }
 
 // Blocks is the weight plan of the current attempt's row (nil before a
@@ -400,13 +409,17 @@ func (q *v1Acquirer) attempt(host string, blocks []int) {
 //     same 503 internal_error, x-should-retry false (an A-internal fault,
 //     K5/K29), with a WARN for the route deadline and an ERROR for the
 //     foreign context — never an empty 200 (A03-W8 review 2 F-1);
-//   - the request's own context ended (ctx, which must be r.Context() — not
-//     a context the route derived with a deadline of its own): the client
-//     is gone, nothing reaches it ⇒ nothing is written, "" returned.
+//   - the request's own context was CANCELED (ctx = r.Context()): the client
+//     is gone — a client can only cancel the server's request context
+//     (connection closed, stream reset), nothing reaches it ⇒ nothing is
+//     written, "" returned. A request context that ended by its deadline
+//     (gateway.request_deadline on r.Context(), W02-07 (k), or any other
+//     deadline) is a live client and gets the answer of its error
+//     (A03-W8 review 3 FR3-1).
 //
 // Bodies are generic: no origin, no number, no row name (B6).
 func (a *V1Admission) WriteAdmissionError(ctx context.Context, w http.ResponseWriter, err error) string {
-	if ctx != nil && ctx.Err() != nil {
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
 		return ""
 	}
 	acquire := llm.IsAdmissionError(err)

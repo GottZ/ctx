@@ -56,7 +56,16 @@ func (w *writeWatch) Write(p []byte) (int, error) {
 // wireServer serves one admission per request on the contract: Plan, the
 // scripted doors on ctx (the route's context: the request's, narrowed by
 // routeDeadline when > 0), on an error the writer with the REQUEST context.
+// requestDeadline > 0 puts a deadline on the request itself first
+// (r.WithContext, the form W02-07 (k) uses for gateway.request_deadline) —
+// then the writer's r.Context() carries it.
 func wireServer(t *testing.T, r *v1Rig, chain []backends.Backend, routeDeadline time.Duration, units, subBatch int,
+	doors func(ctx context.Context, plan oai.Plan) error, out chan<- wireOutcome,
+) *httptest.Server {
+	return wireServerWith(t, r, chain, 0, routeDeadline, units, subBatch, doors, out)
+}
+
+func wireServerWith(t *testing.T, r *v1Rig, chain []backends.Backend, requestDeadline, routeDeadline time.Duration, units, subBatch int,
 	doors func(ctx context.Context, plan oai.Plan) error, out chan<- wireOutcome,
 ) *httptest.Server {
 	t.Helper()
@@ -64,6 +73,11 @@ func wireServer(t *testing.T, r *v1Rig, chain []backends.Backend, routeDeadline 
 		ww := &writeWatch{ResponseWriter: w}
 		ca := urgentConsumer()
 		req = req.WithContext(withConsumerAuth(req.Context(), ca))
+		if requestDeadline > 0 {
+			rctx, cancel := context.WithTimeout(req.Context(), requestDeadline)
+			defer cancel()
+			req = req.WithContext(rctx)
+		}
 		ctx := req.Context()
 		if routeDeadline > 0 {
 			var cancel context.CancelFunc
@@ -153,6 +167,36 @@ func TestWriterAnswersNonClientContextErrorsOnTheWire(t *testing.T) {
 		if res.reason != oai.CodeInternalError {
 			t.Fatalf("reason %q, want internal_error", res.reason)
 		}
+	})
+	// Review 3 FR3-1: the request deadline sits on r.Context() itself —
+	// the writer gets a context that ended by its deadline while the client
+	// still waits. Only a cancel means "client gone".
+	t.Run("request deadline on r.Context() during Continue", func(t *testing.T) {
+		r := newV1Rig(t, dispatch.DefaultSettings(), v1Policy(2, 1, v1HostA)) // E = 1
+		out := make(chan wireOutcome, 1)
+		doors := func(ctx context.Context, plan oai.Plan) error {
+			l, _, err := plan.Acquirer.First(ctx, &plan.Chain[0], "embed", time.Minute)
+			if err != nil {
+				return err
+			}
+			l.Release()
+			occupy(t, r.disp.Dispatcher, v1HostA, 1)
+			l2, _, err := plan.Acquirer.Continue(ctx, &plan.Chain[0], "embed", time.Minute)
+			if l2 != nil {
+				l2.Release()
+			}
+			return err
+		}
+		srv := wireServerWith(t, r, []backends.Backend{row}, 300*time.Millisecond, 0, 2, 1, doors, out)
+		resp, body, err := getWire(t, context.Background(), srv.URL)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		res := <-out
+		if !errors.Is(res.err, context.DeadlineExceeded) {
+			t.Fatalf("server error %v, want the request deadline inside the acquire hull", res.err)
+		}
+		assertWireInternal(t, resp, body)
 	})
 	t.Run("Continue on the released lease's run context", func(t *testing.T) {
 		r := newV1Rig(t, dispatch.DefaultSettings(), v1Policy(4, 1, v1HostA))

@@ -533,6 +533,55 @@ func TestAcquirerContinueAfterFailover(t *testing.T) {
 	}
 }
 
+// TestAcquirerOrderErrorsAreAdmissionErrors (PR #142 bot review
+// 4477069015): a door used out of order answers inside the acquire hull
+// (dispatch.AdmissionError) like every other door failure — also a Continue,
+// which the route calls from inside its attempt, where no acquireFor wraps
+// it. The route's error split (admission failure ⇒ the writer, attempt
+// error ⇒ its own mapping) then answers 503 internal_error, not the
+// retryable upstream answer; the walker reports no row for it.
+func TestAcquirerOrderErrorsAreAdmissionErrors(t *testing.T) {
+	r := newV1Rig(t, dispatch.DefaultSettings(), v1Policy(4, 1, v1HostA, v1HostB))
+	ca := urgentConsumer()
+	ctx := consumerCtx(ca)
+	a, b := v1Row("a", v1HostA), v1Row("b", v1HostB)
+	plan, err := r.adm.Plan(ctx, ca, oai.AdmissionInput{Chain: []backends.Backend{a, b}, Units: 2, SubBatch: 1})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if _, _, err := plan.Acquirer.Continue(ctx, &a, "embed", time.Minute); !errors.Is(err, ErrAcquireOrder) || !llm.IsAdmissionError(err) {
+		t.Fatalf("Continue without a lease: %v, want ErrAcquireOrder inside an AdmissionError", err)
+	}
+	if _, _, err := plan.Acquirer.Next(ctx, &b, "embed", time.Minute); !errors.Is(err, ErrAcquireOrder) || !llm.IsAdmissionError(err) {
+		t.Fatalf("Next before First: %v, want ErrAcquireOrder inside an AdmissionError", err)
+	}
+	var reports []backends.ErrClass
+	report := func(_ string, c backends.ErrClass, _ time.Duration) { reports = append(reports, c) }
+	plan, err = r.adm.Plan(ctx, ca, oai.AdmissionInput{Chain: []backends.Backend{a, b}, Units: 2, SubBatch: 1})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	_, _, werr := llm.WalkChain(ctx, plan.Chain, "embed", plan.Acquirer, report, llm.WalkRules{AllowedClasses: r.adm.AllowedClasses()},
+		func(_ context.Context, _ *backends.Backend, first *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+			first.Release()
+			l, _, cerr := plan.Acquirer.Continue(ctx, &b, "embed", timeout) // the wrong row
+			if l != nil {
+				l.Release()
+			}
+			return dispatch.Usage{}, true, cerr
+		})
+	if !llm.IsAdmissionError(werr) || !errors.Is(werr, ErrAcquireOrder) {
+		t.Fatalf("walk error %v, want the continuation's ErrAcquireOrder inside an AdmissionError", werr)
+	}
+	if len(reports) != 0 {
+		t.Fatalf("health reports %v for a door used out of order", reports)
+	}
+	rr := httptest.NewRecorder()
+	if reason := r.adm.WriteAdmissionError(context.Background(), rr, werr); reason != oai.CodeInternalError {
+		t.Fatalf("reason %q, want internal_error", reason)
+	}
+}
+
 // TestAcquirerDoorOrder: the acquirer's own state refuses every out-of-order
 // door as a code bug (ErrAcquireOrder ⇒ 503 internal_error, x-should-retry
 // false) — Continue without a First lease, Next before First, a second
@@ -870,8 +919,32 @@ func TestWriteAdmissionErrorTable(t *testing.T) {
 			}
 		})
 	}
-	// The client is gone (the request's own context ended): nothing is
-	// written, whatever the error — a rejection, a context error, any other.
+	// A request context that ended by its DEADLINE (the request deadline on
+	// r.Context(), W02-07 (k)) is a live client (review 3 FR3-1): answered.
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	for _, err := range []error{wrap(context.DeadlineExceeded), wrap(&dispatch.RejectionError{Err: dispatch.ErrWaitExpired, RetryAfter: 5 * time.Second})} {
+		rr := httptest.NewRecorder()
+		if reason := r.adm.WriteAdmissionError(expired, rr, err); reason == "" || rr.Body.Len() == 0 {
+			t.Fatalf("request deadline passed, client waiting (%v): reason %q, %d body bytes — want an answer", err, reason, rr.Body.Len())
+		}
+	}
+	// The log level names the case (review 3 FR3-6): a route deadline
+	// inside the hull is a WARN (capacity under the route's deadline), a
+	// foreign canceled context an ERROR.
+	warn, errs := countPrefix(r.logs, "WARN gateway: an admission ended with a deadline"), countPrefix(r.logs, "ERROR ")
+	r.adm.WriteAdmissionError(context.Background(), httptest.NewRecorder(), wrap(context.DeadlineExceeded))
+	if countPrefix(r.logs, "WARN gateway: an admission ended with a deadline") != warn+1 || countPrefix(r.logs, "ERROR ") != errs {
+		t.Fatal("a route deadline inside the hull must log one WARN and no ERROR")
+	}
+	foreign := countPrefix(r.logs, "ERROR gateway: an admission ended on a context the request did not end")
+	r.adm.WriteAdmissionError(context.Background(), httptest.NewRecorder(), wrap(context.Canceled))
+	if countPrefix(r.logs, "ERROR gateway: an admission ended on a context the request did not end") != foreign+1 {
+		t.Fatal("a foreign canceled context inside the hull must log one ERROR")
+	}
+	// The client is gone (the request's own context was canceled): nothing
+	// is written, whatever the error — a rejection, a context error, any
+	// other.
 	gone, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, err := range []error{wrap(context.Canceled), wrap(context.DeadlineExceeded), fmt.Errorf("walk: %w", wrap(context.DeadlineExceeded)),
