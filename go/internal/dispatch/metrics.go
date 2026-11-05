@@ -18,8 +18,16 @@ package dispatch
 // per waitPublishInterval: it copies the window under the mutex, sorts the
 // copy OUTSIDE it and stores p95/max/samples atomically (waitRing.pub). The
 // hint reads only that published value. Snapshot keeps computing exactly
-// (statsInto, the server-admin pull). The lease-duration ring of A03-W6
-// hangs onto the same pass.
+// (statsInto, the server-admin pull).
+//
+// Lease durations (A03-W6, design/03 §4.9): the same fixed window type holds,
+// per target × class, the last waitRingK lease durations (finish − admitted,
+// one sample per lease end in finishLocked); the same publication pass
+// publishes their p50/p90 next to the wait aggregates. The prediction, ŝ and
+// the relational cap of the external class read only that published value —
+// never a sort under the dispatcher mutex. design/03 §4.9 recomputes "every
+// 32 samples"; the publication of A03-W17 (K21: at most once per
+// waitPublishInterval, outside the mutex) replaces that cadence.
 
 import (
 	"slices"
@@ -61,10 +69,12 @@ type waitRing struct {
 	pub atomic.Pointer[waitAgg]
 }
 
-// waitAgg is one published aggregate of a wait window.
+// waitAgg is one published aggregate of a window: the wait aggregates p95 and
+// max, and the lease-duration aggregates p50 and p90 (A03-W6) — one sort
+// yields all four, each window reads the ones it means.
 type waitAgg struct {
-	p95, max time.Duration
-	samples  int
+	p50, p90, p95, max time.Duration
+	samples            int
 }
 
 // add records one admitted wait — O(1), hot path (admitLocked). A nil ring
@@ -104,14 +114,40 @@ func (r *waitRing) statsInto(ws *WaitStats) {
 
 // aggregate sorts buf in place and returns its window aggregates — the ONE
 // formula of the exact snapshot and of the publication: max and the
-// nearest-rank p95, the ⌈0.95·n⌉-th smallest sample.
+// nearest-rank quantiles, the ⌈q·n⌉-th smallest sample.
 func aggregate(buf []int64) waitAgg {
 	n := len(buf)
 	if n == 0 {
 		return waitAgg{}
 	}
 	slices.Sort(buf)
-	return waitAgg{p95: time.Duration(buf[(n*95+99)/100-1]), max: time.Duration(buf[n-1]), samples: n}
+	return waitAgg{
+		p50: nearestRank(buf, 50), p90: nearestRank(buf, 90), p95: nearestRank(buf, 95),
+		max: time.Duration(buf[n-1]), samples: n,
+	}
+}
+
+// nearestRank is the nearest-rank pct-th percentile of the sorted, non-empty
+// buf: the ⌈pct·n/100⌉-th smallest sample.
+func nearestRank(buf []int64, pct int) time.Duration {
+	return time.Duration(buf[(len(buf)*pct+99)/100-1])
+}
+
+// leaseStatsInto fills the lease-duration view of one class (A03-W6): p50,
+// p90 and the sample count, exact like statsInto (the server-admin pull, never
+// the admission path). A nil ring leaves ls untouched.
+func (r *waitRing) leaseStatsInto(ls *LeaseDurStats) {
+	if r == nil {
+		return
+	}
+	ls.Samples = r.count
+	if r.count == 0 {
+		return
+	}
+	buf := make([]int64, r.count)
+	copy(buf, r.samples[:r.count])
+	a := aggregate(buf)
+	ls.P50, ls.P90 = a.p50, a.p90
 }
 
 // published returns the last published aggregate of the window — zero before
@@ -142,7 +178,8 @@ func (d *Dispatcher) publishLoop() {
 }
 
 // publishWaits is one publication pass: under the mutex it collects the
-// windows that took samples since their last copy, then per window it copies
+// windows — wait and lease-duration windows alike — that took samples since
+// their last copy, then per window it copies
 // the samples under the mutex (one short measured section each), sorts the
 // copy outside it and stores the aggregate atomically. Passes are serialized
 // (pubMu), so a published value never goes back in time.
@@ -158,6 +195,9 @@ func (d *Dispatcher) publishWaits() {
 	for _, st := range d.targets {
 		for c := range st.waits {
 			if r := &st.waits[c]; r.gen != r.copied {
+				rings = append(rings, r)
+			}
+			if r := &st.leases[c]; r.gen != r.copied {
 				rings = append(rings, r)
 			}
 		}
@@ -192,4 +232,13 @@ func (st *targetState) ring(c Class) *waitRing {
 		return nil
 	}
 	return &st.waits[c]
+}
+
+// leaseRing returns class c's lease-duration window (A03-W6) — the only index
+// into targetState.leases, nil outside the class table like ring.
+func (st *targetState) leaseRing(c Class) *waitRing {
+	if !c.valid() {
+		return nil
+	}
+	return &st.leases[c]
 }

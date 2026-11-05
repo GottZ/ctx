@@ -53,9 +53,13 @@ func TestRetryAfterHintAllocFree(t *testing.T) {
 }
 
 // TestRetryAfterHintPublishedWithinInterval is the staleness gate: after 600
-// new samples the hint reflects the new p95 within waitPublishInterval (plus
-// a scheduling allowance for the ticker under -race and host load) — and it
-// reads the PUBLISHED value, not the live window.
+// new samples the hint reflects the new p95 within waitPublishInterval PLUS
+// a scheduling allowance of 250 ms — the gate's bound is 1 s + 250 ms, not
+// 1 s (A03-W17 review 2 F-1, disclosed): in this setup the ticker phase lies
+// practically at the interval (measured 990–1 000 ms in 10/10 runs), so a hard
+// 1-s bound would be flaky under -race and host load, and the published value
+// is documented as at most one interval "plus the pass itself" old
+// (waitPublishInterval). It reads the PUBLISHED value, not the live window.
 func TestRetryAfterHintPublishedWithinInterval(t *testing.T) {
 	const schedulingAllowance = 250 * time.Millisecond
 	// The bound itself is the design figure (design/02 §9.2 A03-9: at most
@@ -87,7 +91,7 @@ func TestRetryAfterHintPublishedWithinInterval(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Logf("new p95 published %v after the samples (bound %v)", time.Since(added), waitPublishInterval)
+	t.Logf("new p95 published %v after the samples (bound %v + %v scheduling allowance)", time.Since(added), waitPublishInterval, schedulingAllowance)
 	if ws := target(t, d).Interactive; ws.P95Wait != 5*time.Second || ws.Samples != waitRingK {
 		t.Fatalf("snapshot p95 %v samples %d, want the exact 5s / %d", ws.P95Wait, ws.Samples, waitRingK)
 	}

@@ -5,14 +5,16 @@ package dispatch
 // Gate (i) of A03-W4 measures wall time of dispatcher mutex sections, so it
 // is excluded from -race builds (the race detector inflates every section: a
 // tree without A03-W4 measured 3.0–4.8 ms under -race at load 11–15, 0.12–
-// 0.69 ms without) and from -short runs: on a loaded host one descheduled
-// mutex holder lands in the maximum regardless of the pick (the same tree
-// without A03-W4 measured up to 15.7 ms at load 21–28). Run it explicitly,
-// without -race and -short, next to the same file on the base tree under the
-// same load (the A03-W2 measurement precedent, rankscan_bench_test.go), and
-// record the load (uptime):
+// 0.69 ms without), from -short runs, and it is opt-in: it runs only with
+// CTX_FAIRNESS_COST_GATE set (A03-W6, the PR #132 bot review) — on a loaded
+// host one descheduled mutex holder lands in the maximum regardless of the
+// pick (the same tree without A03-W4 measured up to 15.7 ms at load 21–28),
+// so a plain `go test ./internal/dispatch/` must not depend on it. Run it
+// explicitly, without -race and -short, next to the same file on the base
+// tree under the same load (the A03-W2 measurement precedent,
+// rankscan_bench_test.go), and record the load (uptime):
 //
-//	go test -count=1 -v -run TestExternalFairPickCost ./internal/dispatch/
+//	CTX_FAIRNESS_COST_GATE=1 go test -count=1 -v -run TestExternalFairPickCost ./internal/dispatch/
 //
 // The complexity of the pick is gated in every mode by the median-based
 // TestExternalPickCostScales (fairness_internal_test.go).
@@ -20,6 +22,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,8 +37,8 @@ import (
 // mutex holder on a loaded host lands in a single run's maximum regardless
 // of the pick (the A03-W2 measurement note), a pick cost recurs in all three.
 func TestExternalFairPickCost(t *testing.T) {
-	if testing.Short() {
-		t.Skip("wall-time measurement of mutex sections: run explicitly without -short (see the file comment)")
+	if testing.Short() || os.Getenv("CTX_FAIRNESS_COST_GATE") == "" {
+		t.Skip("wall-time measurement of mutex sections: opt-in with CTX_FAIRNESS_COST_GATE=1, without -short (see the file comment)")
 	}
 	best := time.Duration(-1)
 	for run := 0; run < 3; run++ {

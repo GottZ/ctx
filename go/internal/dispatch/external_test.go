@@ -914,7 +914,9 @@ func TestExternalKillSwitchEndsExternalWaiters(t *testing.T) {
 }
 
 // TestExternalRetryAfterHint: Retry-After knows the external class — its own
-// queue depth and its own wait window.
+// queue depth and its own wait window — and, since A03-W6, quantizes the
+// external estimate onto dispatch.external_retry_after_steps (3 × 2 s = 6 s
+// rounds up to the step 10 s); the interactive estimate keeps the B1 clamp.
 func TestExternalRetryAfterHint(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(2, 1))
 	occ := mustAcquire(t, d, xctx(context.Background(), "occ", "tenant-a"), externalReq())
@@ -929,8 +931,8 @@ func TestExternalRetryAfterHint(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		d.SeedWaitSampleForTest(testOrigin, ClassExternal, 2*time.Second)
 	}
-	if got := d.RetryAfterHint(testOrigin, ClassExternal); got != 6*time.Second {
-		t.Fatalf("RetryAfterHint(external) = %v, want 6s (3 waiting × p95 2s)", got)
+	if got := d.RetryAfterHint(testOrigin, ClassExternal); got != 10*time.Second {
+		t.Fatalf("RetryAfterHint(external) = %v, want 10s (3 waiting × p95 2s = 6s, quantized up)", got)
 	}
 	if got := d.RetryAfterHint(testOrigin, ClassInteractive); got != time.Second {
 		t.Fatalf("RetryAfterHint(interactive) = %v, want the 1s floor (no interactive depth)", got)

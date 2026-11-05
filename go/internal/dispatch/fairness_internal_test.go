@@ -114,7 +114,7 @@ func reservationCase(t *testing.T, d *Dispatcher, st *targetState, order string,
 	}
 	head := func(consumer string, w int) *waiter {
 		hw := &waiter{class: ClassExternal, principal: xuPrincipal(consumer, "tenant-h"), weight: w, admitCh: make(chan struct{})}
-		if err := d.enqueueLocked(st, hw); err != nil {
+		if err := d.enqueueLocked(st, hw, 0); err != nil {
 			t.Fatalf("enqueue %s: %v", consumer, err)
 		}
 		return hw
@@ -703,7 +703,7 @@ func TestExternalPickCostScales(t *testing.T) {
 		for i := 0; i < n; i++ {
 			w := &waiter{class: ClassExternal, principal: xuPrincipal(fmt.Sprintf("cost-%d", i), fmt.Sprintf("tenant-%d", i%8)),
 				weight: 1, admitCh: make(chan struct{}), cancel: func(error) {}}
-			if err := d.enqueueLocked(st, w); err != nil {
+			if err := d.enqueueLocked(st, w, 0); err != nil {
 				t.Fatalf("enqueue %d: %v", i, err)
 			}
 		}

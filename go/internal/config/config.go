@@ -1566,6 +1566,18 @@ type DispatchConfig struct {
 	// 45 s (V43, A03-W17): the stream commit grace ceiling 50 s minus the 5 s
 	// the header commit keeps above the wait budget.
 	ExternalMaxWait time.Duration `key:"dispatch.external_max_wait" env:"CTX_DISPATCH_EXTERNAL_MAX_WAIT" default:"20" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExternalRetryAfterSteps are the Retry-After steps of an external
+	// rejection in whole seconds, comma-separated (wave A03-W6, DECISIONS A-E2
+	// no. 2 verbatim: the steps are a setting, not a constant; design/03
+	// §4.9, E-03-13): the Retry-After an external refusal carries — derived
+	// from the refused request's own position, never from the depth of other
+	// tenants' queues — rounds up to the next step, and the largest step caps
+	// it. Validated by V46 (at least one entry, whole numbers >= 1, strictly
+	// ascending, the largest at most dispatch.external_lease_max): a
+	// malformed list aborts boot / fails the settings write. Hot: the next
+	// refusal reads the new steps. Not strict: a string cannot malform at
+	// parse time, V46 refuses instead.
+	ExternalRetryAfterSteps string `key:"dispatch.external_retry_after_steps" env:"CTX_DISPATCH_EXTERNAL_RETRY_AFTER_STEPS" default:"1,2,5,10,20,30" mut:"hot" tenancy:"global-only"`
 }
 
 // ContractConfig is the schema-contract check surface (Evokoa-Clean-Room

@@ -94,6 +94,9 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGatewayBodyLogging(c)...)
 	// V45 (F-W8): federation.max_depth in 1..fedhop.MaxHopEntries.
 	issues = append(issues, validateFederation(c)...)
+	// V46 (A03-W6): dispatch.external_retry_after_steps parses, at most
+	// dispatch.external_lease_max.
+	issues = append(issues, validateDispatchRetryAfterSteps(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1238,6 +1241,30 @@ func validateDispatchExternalMaxWait(c *Config) []Issue {
 	return []Issue{{Field: "dispatch.external_max_wait", Severity: SeverityError,
 		Msg: fmt.Sprintf("external max wait %v must be <= %v: the stream commit grace ceiling %v minus the %v the header commit keeps above the wait budget",
 			w, dispatchExternalMaxWaitCeiling, gatewayCommitGraceCeiling, gatewayCommitDistance)}}
+}
+
+// validateDispatchRetryAfterSteps is V46 (wave A03-W6, DECISIONS A-E2 no. 2,
+// design/03 §4.9): dispatch.external_retry_after_steps in the dispatcher's own
+// grammar (dispatch.ParseRetryAfterSteps — config validates against the
+// consumer's parser, never a second copy of it: at least one entry, whole
+// seconds >= 1, strictly ascending), and the largest step at most
+// dispatch.external_lease_max when that is set (> 0): no external lease
+// outlives admission + external_lease_max (+ the reap grace), so a larger
+// Retry-After would tell a client to stay away past the moment every lease
+// held now has ended. external_lease_max = 0 (no external cap) sets no bound
+// here. Fatal: boot abort, settings write 422 — the settings surface must
+// never show steps the dispatcher replaces by its default.
+func validateDispatchRetryAfterSteps(c *Config) []Issue {
+	steps, err := dispatch.ParseRetryAfterSteps(c.Dispatch.ExternalRetryAfterSteps)
+	if err != nil {
+		return []Issue{{Field: "dispatch.external_retry_after_steps", Severity: SeverityError,
+			Msg: fmt.Sprintf("retry-after steps %q: %v", c.Dispatch.ExternalRetryAfterSteps, err)}}
+	}
+	if largest := steps[len(steps)-1]; c.Dispatch.ExternalLeaseMax > 0 && largest > c.Dispatch.ExternalLeaseMax {
+		return []Issue{{Field: "dispatch.external_retry_after_steps", Severity: SeverityError,
+			Msg: fmt.Sprintf("largest retry-after step %v must be <= dispatch.external_lease_max %v", largest, c.Dispatch.ExternalLeaseMax)}}
+	}
+	return nil
 }
 
 // validateGatewayBodyLogging is V44 (wave W06-9, design/06 §4.6, masterplan

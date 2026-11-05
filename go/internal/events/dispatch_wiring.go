@@ -20,11 +20,18 @@ import (
 // is pinned here so the mapping stays total. RankOrder is the named order of
 // dispatch.external_order (A-E2 no. 1, A03-W3: o1 or o2, validated by V42);
 // an empty or unknown name — only a literal Config bypassing Validate can
-// carry one — maps to the default order o1.
+// carry one — maps to the default order o1. ExternalRetryAfterSteps is the
+// parsed dispatch.external_retry_after_steps (A03-W6, the grammar of V46);
+// an empty or malformed list — again only past Validate — maps to the
+// default steps.
 func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 	order, ok := dispatch.RankOrderFor(c.ExternalOrder)
 	if !ok {
 		order = dispatch.DefaultRankOrder()
+	}
+	steps, err := dispatch.ParseRetryAfterSteps(c.ExternalRetryAfterSteps)
+	if err != nil {
+		steps = dispatch.DefaultSettings().ExternalRetryAfterSteps
 	}
 	return dispatch.Settings{
 		Enabled:                      c.Enabled,
@@ -43,6 +50,7 @@ func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 		ExternalQueueMax:             c.ExternalQueueMax,
 		ExternalLeaseMax:             c.ExternalLeaseMax,
 		ExternalMaxWait:              c.ExternalMaxWait,
+		ExternalRetryAfterSteps:      steps,
 		// UsageWindow stays zero (= package default): its config key belongs
 		// to the fairness activation wave (MW23), the Fairness pattern.
 	}

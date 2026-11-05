@@ -128,6 +128,10 @@ type targetState struct {
 	// waits are the per-class rolling wait-sample windows (MW7/D3-W3), one
 	// per class below numClasses, accessed ONLY through ring — see metrics.go.
 	waits [numClasses]waitRing
+	// leases are the per-class lease-duration windows (A03-W6, design/03
+	// §4.9): finish − admitted of every lease end, accessed ONLY through
+	// leaseRing — the published p50/p90 feed the external prediction.
+	leases [numClasses]waitRing
 }
 
 // Dispatcher is the process-wide admission layer (I-D1: exactly one). Policy
@@ -203,6 +207,7 @@ func New(logger *slog.Logger, s Settings) *Dispatcher {
 		stopLoops: make(chan struct{}),
 	}
 	s.RankOrder = d.resolveRankOrder(s.RankOrder)
+	s.ExternalRetryAfterSteps = d.resolveRetryAfterSteps(s.ExternalRetryAfterSteps)
 	d.settings.Store(&s)
 	d.policy.Store(&Policy{})
 	d.loops.Add(1)
@@ -225,9 +230,11 @@ func (d *Dispatcher) Close() {
 // stop must never leave goroutines stuck behind a dead gate; X9: never an
 // external pass-through). The
 // rank table resolves here once per swap (rank.go: zero ⇒ default, invalid ⇒
-// default + one WARN); the next wake reads it.
+// default + one WARN); the next wake reads it. The external Retry-After steps
+// resolve the same way (resolveRetryAfterSteps).
 func (d *Dispatcher) UpdateSettings(s Settings) {
 	s.RankOrder = d.resolveRankOrder(s.RankOrder)
+	s.ExternalRetryAfterSteps = d.resolveRetryAfterSteps(s.ExternalRetryAfterSteps)
 	d.settings.Store(&s)
 	d.wakeAll()
 }
@@ -333,10 +340,11 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 	}
 	// The wait budget (A03-W5, waitbudget.go): external only, resolved
 	// before the enqueue — a budget already ≤ 0 is ErrWaitExpired at once; a
-	// continuation has none (A03-W17).
+	// continuation has none (A03-W17). The external enqueue runs the cap
+	// ladder and the prediction against it (A03-W6, prediction.go).
 	budget, err := d.waitBudgetLocked(st, w, req, now)
 	if err == nil {
-		err = d.enqueueLocked(st, w)
+		err = d.enqueueLocked(st, w, budget)
 		if err == nil && class == ClassExternal {
 			// An external enqueue changes T_act and Σ fair_weight and with
 			// them the shares: the fairness-first head can change — the
@@ -446,10 +454,12 @@ func (d *Dispatcher) rankClearLocked(st *targetState, class Class, slots int) bo
 // enqueueLocked places w in its class queue or rejects it fast. Check order
 // of the Deckel-Staffel: principal → tenant → aggregate (the most specific
 // offender first, D3-U4/E-U6). The external class runs the same ladder over
-// its own queue and its own caps (consumer → tenant → aggregate, A03-W3). A
-// continuation (A03-W17) skips the ladder: it goes to the class head and is
-// never refused — it still counts in the depth the ladder reads.
-func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
+// its own queue and its own caps (consumer → tenant → aggregate, A03-W3; the
+// aggregate cap relational since A03-W6), then the prediction against budget,
+// its MaxWait_eff (enqueueExternalLocked). A continuation (A03-W17) skips
+// both: it goes to the class head and is never refused — it still counts in
+// the depth the ladder reads.
+func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter, budget time.Duration) error {
 	set := d.currentSettings()
 	switch w.class {
 	case ClassInteractive:
@@ -462,12 +472,7 @@ func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 			st.external.pushCont(w)
 			return nil
 		}
-		err := d.pushCappedLocked(st, st.external, w,
-			set.ExternalQueuePerConsumer, set.ExternalQueuePerTenant, set.ExternalQueueMax)
-		if err != nil {
-			st.extRejects.Cap++
-		}
-		return err
+		return d.enqueueExternalLocked(st, w, set, budget)
 	case ClassBackground:
 		if set.BackgroundQueueMax > 0 && st.background.len() >= set.BackgroundQueueMax {
 			return ErrQueueFull
@@ -486,12 +491,22 @@ func (d *Dispatcher) enqueueLocked(st *targetState, w *waiter) error {
 }
 
 // pushCappedLocked runs the Deckel-Staffel of one per-principal queue and
-// enqueues w: per principal (the queue's cap key) → per tenant → aggregate,
-// each cap off at 0. The tenant cap applies only to a non-empty TenantID: an
-// "" bucket would couple unrelated sentinel principals into one shared cap;
-// the aggregate cap still bounds them (an external principal always carries
-// a tenant — the door refuses it otherwise).
+// enqueues w (capLadder, then pushLocked).
 func (d *Dispatcher) pushCappedLocked(st *targetState, q *classQueue, w *waiter, perPrincipal, perTenant, maxTotal int) error {
+	if err := capLadder(q, w, perPrincipal, perTenant, maxTotal); err != nil {
+		return err
+	}
+	pushLocked(st, q, w)
+	return nil
+}
+
+// capLadder is the Deckel-Staffel check of one per-principal queue, without
+// a side effect: per principal (the queue's cap key) → per tenant →
+// aggregate, each cap off at 0. The tenant cap applies only to a non-empty
+// TenantID: an "" bucket would couple unrelated sentinel principals into one
+// shared cap; the aggregate cap still bounds them (an external principal
+// always carries a tenant — the door refuses it otherwise).
+func capLadder(q *classQueue, w *waiter, perPrincipal, perTenant, maxTotal int) error {
 	if perPrincipal > 0 && q.byKey[q.capKey(w.principal)] >= perPrincipal {
 		return ErrPrincipalSaturated
 	}
@@ -501,10 +516,14 @@ func (d *Dispatcher) pushCappedLocked(st *targetState, q *classQueue, w *waiter,
 	if maxTotal > 0 && q.total >= maxTotal {
 		return ErrTargetSaturated
 	}
+	return nil
+}
+
+// pushLocked enqueues w with the next arrival seq of its target.
+func pushLocked(st *targetState, q *classQueue, w *waiter) {
 	st.seq++
 	w.seq = st.seq
 	q.push(w)
-	return nil
 }
 
 // admitLocked turns a waiter into a live lease (immediate admission and
@@ -574,13 +593,20 @@ func (d *Dispatcher) handoffLocked(st *targetState, w *waiter, slotHeld bool) {
 }
 
 // finishLocked settles a lease exactly once: registry out, slot back, next
-// waiter in (release, reap and the cancel-race path all end here).
+// waiter in (release, reap and the cancel-race path all end here). Every
+// lease end — pass-through or slot-holding, continuation leases (A03-W17)
+// included — is one sample finish − admitted of its class's lease-duration
+// window (A03-W6), next to the slot-time booking of an external lease
+// (leaseLeave). The sample is per LEASE, not per weight unit: ŝ is the time a
+// lease of the class takes to end, and L_p50 the length of one round of
+// freed units — the weight enters the prediction through the units ahead.
 func (d *Dispatcher) finishLocked(l *Lease) {
 	if l.done {
 		return
 	}
 	l.done = true
 	now := time.Now()
+	l.st.leaseRing(l.class).add(now.Sub(l.admitted))
 	d.chargeLocked(l, now)
 	d.preemptSettledLocked(l) // release-latency sample for a regular victim release (MW18)
 	delete(l.st.inflight, l)
@@ -933,6 +959,14 @@ type WaitStats struct {
 	Samples int
 }
 
+// LeaseDurStats is one class's lease-duration window in a target snapshot
+// (A03-W6): nearest-rank p50 and p90 of finish − admitted and the window
+// size they were computed from (window honesty, like WaitStats.Samples).
+type LeaseDurStats struct {
+	P50, P90 time.Duration
+	Samples  int
+}
+
 // TargetSnapshot is the introspection view of one origin (queue depths,
 // inflight, policy) — data source for WARN correlation and the status waves.
 // Exposure rule (design/01 §6, binding): registry-derived status data is
@@ -982,6 +1016,11 @@ type TargetSnapshot struct {
 	// External is the wait view of the external class (own queue, own
 	// K = 512 window).
 	External WaitStats
+	// LeaseDur is the lease-duration view per class, indexed by Class
+	// (A03-W6): p50/p90 over the window of the last waitRingK lease ends —
+	// exact here, the server-admin pull (design/03 §4.14); the external
+	// prediction reads the published copy.
+	LeaseDur [numClasses]LeaseDurStats
 	// ExternalRejects counts the external refusals per reason.
 	ExternalRejects ExternalRejectStats
 	// Buckets is the per-fairness-bucket wait + token-window view (MW22,
@@ -1079,6 +1118,9 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		st.ring(ClassInteractive).statsInto(&ts.Interactive)
 		st.ring(ClassBackground).statsInto(&ts.Background)
 		st.ring(ClassExternal).statsInto(&ts.External)
+		for c := range ts.LeaseDur {
+			st.leaseRing(Class(c)).leaseStatsInto(&ts.LeaseDur[c])
+		}
 		ts.Buckets = d.bucketSnapshotsLocked(st, now)
 		out.Targets = append(out.Targets, ts)
 	}

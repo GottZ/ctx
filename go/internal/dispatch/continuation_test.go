@@ -502,7 +502,7 @@ func TestContinuationEligibleNowKeepsRank(t *testing.T) {
 			d.mu.Lock()
 			defer d.mu.Unlock()
 			st := d.targetLocked(testOrigin)
-			if err := d.enqueueLocked(st, w); err != nil {
+			if err := d.enqueueLocked(st, w, 0); err != nil {
 				t.Fatalf("enqueue %s: %v", tc.queued, err)
 			}
 			if got := d.continuationEligibleNowLocked(st, 1, d.slotsLocked(st.origin)); got != tc.want {

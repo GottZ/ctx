@@ -18,20 +18,23 @@ const serveMargin = 500 * time.Millisecond
 // externalWaitBudget is MaxWait_eff of an external acquire that would have to
 // wait (design/03 §4.9): the minimum of the setting, Request.MaxWait when > 0
 // and ServeBy − now − ŝ − serveMargin when ServeBy is set. Request values can
-// only shorten the setting (I-03-5). ŝ, the p90 lease duration of the target ×
-// class, is 0 until the lease-duration ring exists (A03-W6; the cold-ring rule
-// of §4.9). A setting ≤ 0 is a budget of 0: the external class never waits
-// (fail-closed, never "unbounded").
-func externalWaitBudget(set Settings, req Request, now time.Time) time.Duration {
+// only shorten the setting (I-03-5). ŝ is the published p90 lease duration of
+// the target's external class (A03-W6, prediction.go), 0 on a cold window
+// (the cold-ring rule of §4.9): a lease admitted now is predicted to end ŝ
+// later, so ServeBy minus ŝ is the latest useful admission. A setting ≤ 0 is
+// a budget of 0: the external class never waits (fail-closed, never
+// "unbounded").
+func externalWaitBudget(set Settings, req Request, now time.Time, sHat time.Duration) time.Duration {
 	budget := max(set.ExternalMaxWait, 0)
 	if req.MaxWait > 0 && req.MaxWait < budget {
 		budget = req.MaxWait
 	}
 	if !req.ServeBy.IsZero() {
-		// ServeBy.Add(-m).Sub(now), not ServeBy.Sub(now)-m: Sub saturates at
-		// minDuration for a ServeBy more than ~292 years back, and minDuration
-		// minus the margin would wrap into a huge positive budget (review 2 F-1).
-		budget = min(budget, req.ServeBy.Add(-serveMargin).Sub(now))
+		// ServeBy.Add(-(m+ŝ)).Sub(now), not ServeBy.Sub(now)-m-ŝ: Sub
+		// saturates at minDuration for a ServeBy more than ~292 years back,
+		// and minDuration minus the margin would wrap into a huge positive
+		// budget (A03-W5 review 2 F-1).
+		budget = min(budget, req.ServeBy.Add(-(serveMargin + sHat)).Sub(now))
 	}
 	return budget
 }
@@ -44,15 +47,17 @@ func externalWaitBudget(set Settings, req Request, now time.Time) time.Duration 
 // stands BEFORE every budget term, A03-W6's prediction included), MaxWait_eff
 // (> 0) for an external class, or ErrWaitExpired when that budget is already
 // ≤ 0 (reason predicted, counted; the acquire is never queued and never
-// touches the cap ladder).
+// touches the cap ladder; the error carries the Retry-After of its own
+// position, RejectionError). The prediction ŵ against this budget runs at the
+// enqueue, after the cap ladder (enqueueExternalLocked).
 func (d *Dispatcher) waitBudgetLocked(st *targetState, w *waiter, req Request, now time.Time) (time.Duration, error) {
 	if !w.class.External() || w.cont {
 		return 0, nil
 	}
-	budget := externalWaitBudget(d.currentSettings(), req, now)
+	budget := externalWaitBudget(d.currentSettings(), req, now, st.externalLeaseView().p90)
 	if budget <= 0 {
 		st.extRejects.Predicted++
-		return 0, ErrWaitExpired
+		return 0, d.externalRejectLocked(st, w, ErrWaitExpired)
 	}
 	return budget, nil
 }
@@ -81,10 +86,15 @@ func waitTimer(budget time.Duration, arrived time.Time) (<-chan time.Time, func(
 // waiter leaves its queue (dropWaiterLocked corrects byKey/byTenant/total),
 // its waited time goes into its class's wait window as a CENSORED sample
 // (else the external p95 measures only the survivors), Expired counts it, and
-// the answer is ErrWaitExpired.
+// the answer is ErrWaitExpired with the Retry-After of its own position once
+// it left the queue (RejectionError, A03-W6). The section is measured like
+// Acquire's (OpsTotal/MaxOpDur, A03-W5 review F7): the drop wakes the target
+// and the Retry-After reads the position, both under this mutex.
 func (d *Dispatcher) expireWaiter(st *targetState, w *waiter) (*Lease, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	opStart := time.Now()
+	defer d.opDone(opStart)
 	if w.admitted {
 		return w.lease, nil
 	}
@@ -94,5 +104,5 @@ func (d *Dispatcher) expireWaiter(st *targetState, w *waiter) (*Lease, error) {
 	d.dropWaiterLocked(st, w)
 	st.ring(w.class).add(time.Since(w.enqueued))
 	st.extRejects.Expired++
-	return nil, ErrWaitExpired
+	return nil, d.externalRejectLocked(st, w, ErrWaitExpired)
 }
