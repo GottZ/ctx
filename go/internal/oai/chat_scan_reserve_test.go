@@ -69,11 +69,13 @@ func scanForms(lim int) ([]string, map[string][]byte) {
 }
 
 // scanAlloc is what ScanRaise allocates over body (TotalAlloc, the minimum
-// of two runs, each after a collection: the patterns' matcher pools cold, as
-// after any collection in production).
+// of two runs, each after two collections: the patterns' matcher pools cold
+// — one collection leaves them in sync.Pool's victim cache, and a measurement
+// then depends on which matchers survived there).
 func scanAlloc(required backends.Sensitivity, body []byte) (alloc int64, raised backends.Sensitivity) {
 	alloc = 1 << 62
 	for range 2 {
+		runtime.GC()
 		runtime.GC()
 		var a, b runtime.MemStats
 		runtime.ReadMemStats(&a)
