@@ -24,6 +24,19 @@ func (d *Dispatcher) SeedWaitSampleForTest(origin string, class Class, wait time
 	d.publishWaits()
 }
 
+// SeedLeaseSamplesForTest stages n lease-duration samples of dur into a
+// target × class lease window (A03-W6) and runs one publication pass — the
+// fake lease durations of the prediction gates, without live leases ending.
+func (d *Dispatcher) SeedLeaseSamplesForTest(origin string, class Class, n int, dur time.Duration) {
+	d.mu.Lock()
+	st := d.targetLocked(canonicalOrigin(origin))
+	for i := 0; i < n; i++ {
+		st.leaseRing(class).add(dur)
+	}
+	d.mu.Unlock()
+	d.publishWaits()
+}
+
 // SeedInteractiveDepthForTest raises the interactive queue depth counter of a
 // target to n (the peers-ahead factor of the B1 estimate) without staging real
 // waiters — the depth is all RetryAfterHint reads.

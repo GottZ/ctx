@@ -350,7 +350,7 @@ func intFromAny(v any) (int, bool) {
 	return 0, false
 }
 
-// Settings are the config-derived dispatcher knobs (the 15 dispatch.* keys,
+// Settings are the config-derived dispatcher knobs (the 16 dispatch.* keys,
 // all hot + global-only; Fairness and UsageWindow have no key yet). The owner
 // side maps config.DispatchConfig onto this struct and calls UpdateSettings on
 // reload; dispatch never imports config (layering rule).
@@ -405,8 +405,8 @@ type Settings struct {
 	// ClassInteractive is 0, so an all-interactive order IS the zero value.
 	// Any other order must be a permutation of all classes with
 	// ClassInteractive on rank 0 (I-03-2); otherwise the default is in
-	// effect and New/UpdateSettings log one WARN. An array, not a slice, so
-	// Settings stays comparable. Its config key is dispatch.external_order:
+	// effect and New/UpdateSettings log one WARN. An array, not a slice: a
+	// fixed size, no shared backing array. Its config key is dispatch.external_order:
 	// the owner side maps the named order (RankOrderFor) onto this field.
 	RankOrder [numClasses]Class
 	// ExternalQueuePerConsumer / PerTenant / Max are the external cap ladder
@@ -432,6 +432,17 @@ type Settings struct {
 	// classes have no wait budget. Hot like every setting: a swap acts on
 	// the next acquire; a waiting acquire keeps the budget it started with.
 	ExternalMaxWait time.Duration
+	// ExternalRetryAfterSteps are the Retry-After steps of the external class
+	// (A03-W6, DECISIONS A-E2 no. 2: a setting, not a constant; config key
+	// dispatch.external_retry_after_steps, V46): the Retry-After an external
+	// rejection carries rounds UP to the next step, and the largest step caps
+	// it (for the external class it replaces retryAfterCap). Strictly
+	// ascending, every step whole seconds ≥ 1 s (the grammar of the setting).
+	// The zero value (nil) reads as the default
+	// steps, like a zero RankOrder; an invalid list — reachable only past the
+	// config validation — reads as the default with one WARN
+	// (resolveRetryAfterSteps). New/UpdateSettings keep their own copy.
+	ExternalRetryAfterSteps []time.Duration
 }
 
 // DefaultSettings mirrors the config registry defaults of the dispatch.* keys.
@@ -453,6 +464,9 @@ func DefaultSettings() Settings {
 		ExternalQueueMax:             64,
 		ExternalLeaseMax:             900 * time.Second,
 		ExternalMaxWait:              20 * time.Second,
+		ExternalRetryAfterSteps: []time.Duration{
+			1 * time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second,
+		},
 	}
 }
 

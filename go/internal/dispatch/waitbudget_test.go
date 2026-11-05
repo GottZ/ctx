@@ -67,7 +67,10 @@ func externalQueueResidue(d *Dispatcher) int {
 }
 
 // targetSeq reads the per-target arrival counter — every enqueue bumps it,
-// so an unchanged seq proves that no waiter was ever queued.
+// so an unchanged seq proves that no waiter was ever queued. Since the A03-W6
+// hardening (review 2 F-1) a refusal predicted after the push is a push
+// removed again in the same mutex section: it bumps seq too (the cap ladder,
+// the relational cap and a budget ≤ 0 still refuse before any push).
 func targetSeq(d *Dispatcher) uint64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -466,11 +469,17 @@ func TestExternalWaitBudgetHandoffRace(t *testing.T) {
 		t.Fatalf("after the race: held %d inflight %d heldExt %d waiting %d residue %d, want all 0 (phantom lease or waiter)",
 			ts.Held, ts.Inflight, ts.HeldExternal, ts.External.Waiting, externalQueueResidue(d))
 	}
-	if ts.ExternalRejects != (ExternalRejectStats{Expired: int64(expired)}) {
-		t.Fatalf("external rejects = %+v, want expired=%d only", ts.ExternalRejects, expired)
+	// Since A03-W6 the holder's ~1-ms leases warm the external lease window,
+	// and the prediction refuses part of the racers at once (ŵ = L_p50 ≈ the
+	// 1-ms budget) — never queued, never on the timer path. Every refusal is
+	// still exactly one ErrWaitExpired, counted once as predicted or expired;
+	// the race itself needs timer expiries.
+	rej := ts.ExternalRejects
+	if rej.Cap != 0 || rej.NotOffered != 0 || rej.Predicted+rej.Expired != int64(expired) {
+		t.Fatalf("external rejects = %+v, want predicted + expired = %d and nothing else", rej, expired)
 	}
-	if leases == 0 || expired == 0 {
-		t.Fatalf("race vacuous: %d leases, %d expiries — both outcomes must occur", leases, expired)
+	if leases == 0 || rej.Expired == 0 {
+		t.Fatalf("race vacuous: %d leases, %d timer expiries — both outcomes must occur", leases, rej.Expired)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for gateGoroutines(self) != before && time.Now().Before(deadline) {
@@ -479,7 +488,8 @@ func TestExternalWaitBudgetHandoffRace(t *testing.T) {
 	if after := gateGoroutines(self); after != before {
 		t.Fatalf("goroutines before %d, after %d — want ±0", before, after)
 	}
-	t.Logf("1000 iterations: %d leases, %d ErrWaitExpired, gate goroutines %d → %d", leases, expired, before, gateGoroutines(self))
+	t.Logf("1000 iterations: %d leases, %d ErrWaitExpired (predicted %d, expired %d), gate goroutines %d → %d",
+		leases, expired, rej.Predicted, rej.Expired, before, gateGoroutines(self))
 }
 
 // holdMutexPastExpiry queues one external waiter with a 100-ms budget behind

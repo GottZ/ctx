@@ -51,6 +51,11 @@ type waiter struct {
 	// the external queue (A03-W4, extFair.waiterEnter) — the pick reads it
 	// without a map lookup; nil in-house.
 	fair *fairConsumer
+	// fwBefore is the fair weight of the consumer's record before this
+	// waiter's push when the record was active then (0: it was not): a
+	// refusal predicted after the push writes it back (A03-W6 review 4
+	// FR4-2, predictAfterPushLocked).
+	fwBefore int
 }
 
 // classQueue is a per-principal wait queue of one target: per-bucket FIFOs
@@ -277,7 +282,14 @@ func (q *classQueue) remove(w *waiter) {
 		if cand != w {
 			continue
 		}
-		b = append(b[:i], b[i+1:]...)
+		// Shift in place and clear the vacated tail slot, the hygiene of
+		// the cont path: a refusal predicted after its push (A03-W6) leaves
+		// the newest waiter of a bucket, and the backing array must keep no
+		// reference to it until the next push into that bucket.
+		last := len(b) - 1
+		copy(b[i:], b[i+1:])
+		b[last] = nil
+		b = b[:last]
 		if len(b) == 0 {
 			delete(q.buckets, key)
 			q.dropRingKey(key)

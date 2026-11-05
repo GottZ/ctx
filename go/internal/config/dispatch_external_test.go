@@ -74,6 +74,7 @@ func TestBootDumpCarriesDispatchGroup(t *testing.T) {
 		"external_queue_max":          64,
 		"external_lease_max":          (900 * time.Second).String(),
 		"external_max_wait":           (20 * time.Second).String(),
+		"external_retry_after_steps":  "1,2,5,10,20,30",
 		"enabled":                     true,
 	} {
 		if got := group[key]; got != want {
@@ -164,5 +165,51 @@ func TestDispatchExternalMaxWaitCeilingV43(t *testing.T) {
 		if err := NewStore(validCfg(t, map[string]string{})).Replace(cfg); err == nil || !strings.Contains(err.Error(), "dispatch.external_max_wait") {
 			t.Fatalf("settings write with dispatch.external_max_wait=%s accepted: %v", tc.raw, err)
 		}
+	}
+}
+
+// TestDispatchExternalRetryAfterStepsV46 is the A03-W6 config gate (DECISIONS
+// A-E2 no. 2 verbatim: the Retry-After steps are a setting): the default
+// "1,2,5,10,20,30" is clean, blanks around the entries are fine, and every
+// malformed list — an entry below 1, not ascending, not a whole number, an
+// explicitly empty value, or a largest step above dispatch.external_lease_max
+// (no Retry-After may outlast the longest external lease) — is a fatal V46
+// issue: boot abort, settings write rejected (422).
+func TestDispatchExternalRetryAfterStepsV46(t *testing.T) {
+	if got := defaultFor("dispatch.external_retry_after_steps"); got != "1,2,5,10,20,30" {
+		t.Fatalf("dispatch.external_retry_after_steps default = %q, want 1,2,5,10,20,30", got)
+	}
+	for _, tc := range []struct {
+		name  string
+		src   map[string]string
+		fatal bool
+	}{
+		{name: "default", src: map[string]string{}},
+		{name: "two steps", src: map[string]string{"dispatch.external_retry_after_steps": "3,7"}},
+		{name: "blanks", src: map[string]string{"dispatch.external_retry_after_steps": " 3 , 7 "}},
+		{name: "largest == lease max", src: map[string]string{"dispatch.external_retry_after_steps": "1,20", "dispatch.external_lease_max": "20"}},
+		{name: "lease max 0 sets no bound", src: map[string]string{"dispatch.external_retry_after_steps": "1,3600", "dispatch.external_lease_max": "0"}},
+		{name: "entry 0", src: map[string]string{"dispatch.external_retry_after_steps": "0,5"}, fatal: true},
+		{name: "descending", src: map[string]string{"dispatch.external_retry_after_steps": "5,2"}, fatal: true},
+		{name: "not a number", src: map[string]string{"dispatch.external_retry_after_steps": "a"}, fatal: true},
+		{name: "explicitly empty", src: map[string]string{"dispatch.external_retry_after_steps": ""}, fatal: true},
+		{name: "largest above lease max", src: map[string]string{"dispatch.external_retry_after_steps": "1,30", "dispatch.external_lease_max": "20"}, fatal: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validCfg(t, tc.src)
+			got := severityFor(Validate(cfg), "dispatch.external_retry_after_steps")
+			if !tc.fatal {
+				if got != -1 {
+					t.Fatalf("%v: severity %d, want no issue", tc.src, got)
+				}
+				return
+			}
+			if got != SeverityError {
+				t.Fatalf("%v: severity %d (-1 = no issue), want ERROR (boot abort / 422)", tc.src, got)
+			}
+			if err := NewStore(validCfg(t, map[string]string{})).Replace(cfg); err == nil || !strings.Contains(err.Error(), "dispatch.external_retry_after_steps") {
+				t.Fatalf("settings write with %v accepted: %v", tc.src, err)
+			}
+		})
 	}
 }

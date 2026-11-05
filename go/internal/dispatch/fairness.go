@@ -113,6 +113,11 @@ type fairConsumer struct {
 	// consumer is active while refs > 0.
 	fw   int
 	refs int
+	// waiting / waitW are the consumer's queued waiters (continuations
+	// included) and the sum of their weights — the own position of the
+	// external prediction and Retry-After (A03-W6, prediction.go).
+	waiting int
+	waitW   int
 }
 
 // fairTenant is the record of one tenant on one target.
@@ -125,6 +130,11 @@ type fairTenant struct {
 	consumers int
 	sumFW     int
 	records   int
+	// waitingConsumers counts its consumers with a queued waiter and waitFW
+	// their fair weights (A03-W6): the own tenant's part of the share in the
+	// external prediction (prediction.go).
+	waitingConsumers int
+	waitFW           int
 }
 
 // extFair is the fairness bookkeeping of one target's external queue. A
@@ -134,6 +144,9 @@ type extFair struct {
 	consumers     map[string]*fairConsumer
 	tenants       map[string]*fairTenant
 	activeTenants int
+	// waitingTenants counts the tenants with at least one queued waiter —
+	// the tenant term of the share in the external prediction (A03-W6).
+	waitingTenants int
 	// viewAt is the clock of the fairness order (review 4 FR4-2): the
 	// running slot time of the held leases is read at viewAt, which moves
 	// only at events — every wake (wakeLocked) and every external lease
@@ -190,11 +203,25 @@ func (f *extFair) enter(c *fairConsumer, fw int) {
 		t.consumers++
 		c.fw = fw
 		t.sumFW += fw
-	} else if c.fw != fw {
-		t.sumFW += fw - c.fw
-		c.fw = fw
+	} else {
+		c.reweigh(fw)
 	}
 	c.refs++
+}
+
+// reweigh moves the fair weight of an active record to fw, its tenant's Σ
+// fair_weight and waiting Σ fair_weight with it (enter, and the undo of a
+// refused push, A03-W6 review 4 FR4-2).
+func (c *fairConsumer) reweigh(fw int) {
+	if c.fw == fw {
+		return
+	}
+	t := c.tenant
+	t.sumFW += fw - c.fw
+	if c.waiting > 0 {
+		t.waitFW += fw - c.fw
+	}
+	c.fw = fw
 }
 
 // leave uncounts one waiter or lease of c.
@@ -214,26 +241,57 @@ func (f *extFair) leave(c *fairConsumer) {
 // waiterEnter / waiterLeave keep the activity in step with the external
 // queue (classQueue.push and its two exits, popHead and remove).
 func (f *extFair) waiterEnter(key string, w *waiter) {
-	w.fair = f.consumer(key, w.principal)
-	f.enter(w.fair, fairWeightOf(w.principal))
+	c := f.consumer(key, w.principal)
+	w.fair = c
+	f.enter(c, fairWeightOf(w.principal))
+	if c.waiting == 0 {
+		t := c.tenant
+		if t.waitingConsumers == 0 {
+			f.waitingTenants++
+		}
+		t.waitingConsumers++
+		t.waitFW += c.fw
+	}
+	c.waiting++
+	c.waitW += w.weight
 }
 
 func (f *extFair) waiterLeave(key string, w *waiter) {
-	if c := w.fair; c != nil {
-		f.leave(c)
-	} else if c := f.consumers[key]; c != nil {
-		f.leave(c)
+	c := w.fair
+	if c == nil {
+		if c = f.consumers[key]; c == nil {
+			return
+		}
+	}
+	f.leave(c)
+	c.waiting--
+	c.waitW -= w.weight
+	if c.waiting == 0 {
+		t := c.tenant
+		t.waitFW -= c.fw
+		t.waitingConsumers--
+		if t.waitingConsumers == 0 {
+			f.waitingTenants--
+		}
 	}
 }
 
 // leaseEnter books an admitted external lease (admitLocked): activity, heldBy
 // of its consumer and tenant, and the start of its slot time. c is the
 // record the waiter carried out of the queue, nil for an immediate admission.
+// The fair weight comes from the principal only on an immediate admission; a
+// handed-off waiter keeps the record's current weight (A03-W6, the PR #132
+// bot-review hand-over): a newer waiter of the same consumer may have
+// brought a newer fair_weight, and the older waiter's stale value must not
+// reset the record and its tenant's Σ fair_weight.
 func (f *extFair) leaseEnter(l *Lease, c *fairConsumer, start time.Time) {
+	fw := fairWeightOf(l.principal)
 	if c == nil {
 		c = f.consumer(l.principal.identityKey(), l.principal)
+	} else {
+		fw = c.fw
 	}
-	f.enter(c, fairWeightOf(l.principal))
+	f.enter(c, fw)
 	c.add(l.weight, start)
 	c.tenant.add(l.weight, start)
 	l.fair, l.slotStart = c, start

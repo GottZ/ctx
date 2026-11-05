@@ -114,7 +114,6 @@ internal/derived/validate.go	checkSources	# wartet: E01-2 C (C2-12) — Gen-1-Ga
 internal/derived/validate.go	checkStrata	# wartet: E01-2 C (C2-12) — Gen-1-Gate (W01-1); das Paket ist verdrahtet, diese Hälfte nicht
 internal/derived/validate.go	checkUntrusted	# wartet: E01-2 C (C2-12) — Gen-1-Gate (W01-1); das Paket ist verdrahtet, diese Hälfte nicht
 internal/derived/validate.go	fail	# wartet: E01-2 C (C2-12) — Gen-1-Gate (W01-1); das Paket ist verdrahtet, diese Hälfte nicht
-internal/dispatch/policy.go	DefaultSettings	# Prod verdrahtet events.DispatchSettings (main.go:624); Registry-Spiegel für 133 Testaufrufe
 internal/dream/evaluate.go	DreamOptions	# Kein-Config-Kurzform von DreamOptionsFor(0); Prod reicht cfg.Dream.NumPredict durch, 8 Testnutzer
 internal/dream/evaluate.go	EvaluateRelationships	# Prod läuft über evaluateRelationships(capped) dream.go:406; die capped=0-Hülle rufen nur Tests
 internal/evalscore/diversity.go	AlphaNDCG	# Nur diversity_test.go; α-nDCG-Instrument der pausierten B-Lane (Wissens-Ebenen design/05:1083)

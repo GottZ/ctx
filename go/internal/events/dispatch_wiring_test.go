@@ -37,6 +37,8 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		ExternalLeaseMax:         41 * time.Second,
 		// A03-W5: the external wait budget.
 		ExternalMaxWait: 43 * time.Second,
+		// A03-W6: the Retry-After steps of the external class.
+		ExternalRetryAfterSteps: "3,7",
 	}
 	o2, ok := dispatch.RankOrderFor(dispatch.ExternalOrderO2)
 	if !ok {
@@ -59,8 +61,9 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		ExternalQueueMax:             37,
 		ExternalLeaseMax:             41 * time.Second,
 		ExternalMaxWait:              43 * time.Second,
+		ExternalRetryAfterSteps:      []time.Duration{3 * time.Second, 7 * time.Second},
 	}
-	if got := DispatchSettings(in); got != want {
+	if got := DispatchSettings(in); !reflect.DeepEqual(got, want) {
 		t.Fatalf("DispatchSettings = %+v, want %+v", got, want)
 	}
 	// o1 is the default reading; an empty value (a literal Config) reads as
@@ -69,6 +72,14 @@ func TestDispatchSettingsMapping(t *testing.T) {
 		in.ExternalOrder = name
 		if got := DispatchSettings(in).RankOrder; got != dispatch.DefaultRankOrder() {
 			t.Fatalf("external_order %q maps to %v, want the default o1", name, got)
+		}
+	}
+	// An empty or malformed step list — only a literal Config bypassing
+	// Validate (V46) can carry one — maps to the default steps.
+	for _, raw := range []string{"", "5,2", "a"} {
+		in.ExternalRetryAfterSteps = raw
+		if got := DispatchSettings(in).ExternalRetryAfterSteps; !reflect.DeepEqual(got, dispatch.DefaultSettings().ExternalRetryAfterSteps) {
+			t.Fatalf("external_retry_after_steps %q maps to %v, want the default steps", raw, got)
 		}
 	}
 }

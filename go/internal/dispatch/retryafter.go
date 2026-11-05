@@ -1,6 +1,12 @@
 package dispatch
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
 
 // Retry-After estimate for interactive dispatcher rejections (MW8, D3-W4).
 //
@@ -44,7 +50,11 @@ type RetryHinter interface {
 // 429 of an external request asks for it, so it is a hot path: one short
 // measured mutex section, no sort, no window copy, no allocation — the origin
 // spelling is parsed once (outside the mutex) and then resolved through
-// Dispatcher.spellings.
+// Dispatcher.spellings. For the external class the estimate is the class
+// formula quantized onto Settings.ExternalRetryAfterSteps (A03-W6) — the
+// value for a caller WITHOUT an error value; an external rejection carries
+// the Retry-After of its own position (RejectionError), which is what the
+// /v1 mapping reads (A03-W8). Interactive and background keep B1 unchanged.
 func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 	d.mu.Lock()
 	st, cached := d.spellings[origin]
@@ -78,7 +88,8 @@ func (d *Dispatcher) RetryAfterHint(origin string, class Class) time.Duration {
 		// waiters (A03-W5, metrics.go) — the estimate does not read only
 		// the survivors; the depth includes waiting continuations (A03-W17),
 		// which are served before a newcomer.
-		depth = st.external.total
+		return quantizeRetryAfter(classEstimate(st.external.total, st.ring(class).published().p95),
+			d.currentSettings().ExternalRetryAfterSteps)
 	default:
 		// Fail-closed (A03-W1): no estimate for a class without a case here
 		// — 0 omits the header (pre-A03-W1: interactive depth × the
@@ -108,4 +119,119 @@ func retryAfterEstimate(depth int, perPosition time.Duration) time.Duration {
 		est = retryAfterCap
 	}
 	return est
+}
+
+// classEstimate is the unclamped class formula depth × per-position wait of
+// the external class (A03-W6): the B1 product without the 1/30-s clamp — the
+// steps of the setting floor and cap it (quantizeRetryAfter). Saturates
+// instead of overflowing.
+func classEstimate(depth int, perPosition time.Duration) time.Duration {
+	if depth <= 0 || perPosition <= 0 {
+		return 0
+	}
+	if perPosition > maxDuration/time.Duration(depth) {
+		return maxDuration
+	}
+	return time.Duration(depth) * perPosition
+}
+
+// maxDuration is the largest representable time.Duration (a saturation
+// bound, not a policy value).
+const maxDuration = time.Duration(1<<63 - 1)
+
+// quantizeRetryAfter is Q of design/03 §4.9 (E-03-13): est rounded UP to the
+// next step, the largest step when est lies above it — the largest step caps
+// the external Retry-After, the smallest floors it ("retry now" is never
+// advertised). steps is the resolved setting (strictly ascending, non-empty;
+// resolveRetryAfterSteps), so the answer is always one of its steps.
+func quantizeRetryAfter(est time.Duration, steps []time.Duration) time.Duration {
+	for _, s := range steps {
+		if est <= s {
+			return s
+		}
+	}
+	return steps[len(steps)-1]
+}
+
+// RejectionError is the error value of an external rejection (A03-W6,
+// design/03 §4.9): the Retry-After travels WITH the rejection, so the /v1
+// mapping (A03-W8) needs neither a second mutex section nor a class-depth
+// reader. It wraps the rejection sentinel — errors.Is and IsRejection see the
+// sentinel unchanged, the server-side text is the sentinel's. The in-house
+// classes keep the bare sentinels and RetryAfterHint (B1).
+type RejectionError struct {
+	// Err is the rejection sentinel: ErrWaitExpired (reasons predicted and
+	// expired) or a cap-ladder sentinel (ErrPrincipalSaturated,
+	// ErrTenantSaturated, ErrTargetSaturated).
+	Err error
+	// RetryAfter is Q(ŵ) of the rejected acquire's OWN position (identity
+	// weight queued ahead, waiting tenants and consumers, E_eff, the
+	// remaining time of the oldest held external lease, lease p50), or on a
+	// cold lease window the class formula of the external class, quantized
+	// onto Settings.ExternalRetryAfterSteps — always one of the steps; for an
+	// expired waiter never below the time it waited. Without jitter: the
+	// header carries the jitter (A03-W8, gateway.retry_after_jitter).
+	RetryAfter time.Duration
+}
+
+func (e *RejectionError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes the sentinel to errors.Is (IsRejection).
+func (e *RejectionError) Unwrap() error { return e.Err }
+
+// errRetryAfterSteps is the cause of every malformed step list.
+var errRetryAfterSteps = errors.New("dispatch: retry-after steps must be comma-separated whole seconds >= 1, strictly ascending, at least one")
+
+// ParseRetryAfterSteps parses dispatch.external_retry_after_steps (A03-W6):
+// comma-separated whole seconds, blanks around an entry ignored, at least one
+// entry, every entry 1..maxLimitCount (a representation bound), strictly
+// ascending. The one grammar of the setting validator (config V46) and the
+// owner mapping (events.DispatchSettings).
+func ParseRetryAfterSteps(raw string) ([]time.Duration, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("%w: empty", errRetryAfterSteps)
+	}
+	parts := strings.Split(raw, ",")
+	steps := make([]time.Duration, 0, len(parts))
+	for _, part := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || n < 1 || n > maxLimitCount {
+			return nil, fmt.Errorf("%w: entry %q", errRetryAfterSteps, part)
+		}
+		step := time.Duration(n) * time.Second
+		if len(steps) > 0 && step <= steps[len(steps)-1] {
+			return nil, fmt.Errorf("%w: %q not above its predecessor", errRetryAfterSteps, part)
+		}
+		steps = append(steps, step)
+	}
+	return steps, nil
+}
+
+// validRetryAfterSteps reports whether steps is a usable step list: at least
+// one step, every step whole seconds ≥ 1 s — the grammar of the setting, the
+// Settings doc (review 2 F-7) — strictly ascending.
+func validRetryAfterSteps(steps []time.Duration) bool {
+	for i, s := range steps {
+		if s < time.Second || s%time.Second != 0 || (i > 0 && s <= steps[i-1]) {
+			return false
+		}
+	}
+	return len(steps) > 0
+}
+
+// resolveRetryAfterSteps resolves Settings.ExternalRetryAfterSteps once per
+// settings swap (New, UpdateSettings), the resolveRankOrder pattern: nil
+// reads as the default steps silently (the zero value), an invalid list —
+// only reachable past the config validation — reads as the default with one
+// WARN; a valid list is copied, so no caller-owned backing array is shared.
+func (d *Dispatcher) resolveRetryAfterSteps(steps []time.Duration) []time.Duration {
+	switch {
+	case steps == nil:
+		return DefaultSettings().ExternalRetryAfterSteps
+	case !validRetryAfterSteps(steps):
+		d.logger.Warn("dispatch: invalid external retry-after steps — the default steps are in effect",
+			"steps", steps)
+		return DefaultSettings().ExternalRetryAfterSteps
+	}
+	return append([]time.Duration(nil), steps...)
 }

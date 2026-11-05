@@ -110,6 +110,10 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		// the gateway in these tests.
 		Gateway:    config.Defaults().Gateway,
 		Federation: config.Defaults().Federation, // F-W8: V43 range
+		// A03-W6: dispatch.external_retry_after_steps is fatal when empty
+		// (V46) — the registry default steps, every other dispatch field
+		// stays at its zero value as before.
+		Dispatch: config.DispatchConfig{ExternalRetryAfterSteps: config.Defaults().Dispatch.ExternalRetryAfterSteps},
 		Query: config.QueryConfig{
 			ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: "v5.2",
 		},
