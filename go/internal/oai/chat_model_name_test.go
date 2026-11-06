@@ -26,7 +26,10 @@ import (
 	"github.com/GottZ/ctx/internal/oai"
 )
 
-const idLongName = "00000000-0000-4000-8000-0000000c4a7f"
+const (
+	idLongName  = "00000000-0000-4000-8000-0000000c4a7f"
+	idEmptyName = "00000000-0000-4000-8000-0000000c4aee"
+)
 
 // longestAliasName is an alias name of the full length migration 162 allows
 // (^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$).
@@ -42,7 +45,7 @@ func overlongModels() []struct{ name, raw string } {
 	esc := strings.Repeat(`\u0061`, 128)
 	return []struct{ name, raw string }{
 		{"one past the bound, escaped", esc + "a"},
-		{"one escape past the bound", esc + `a`},
+		{"one escape past the bound", esc + `\u0061`},
 		{"1 MiB plain", strings.Repeat("a", 1<<20)},
 		{"1 MiB invalid UTF-8", strings.Repeat("\xff", 1<<20)},
 		{"1 MiB escapes", strings.Repeat(`\u00e9`, (1<<20)/6)},
@@ -81,7 +84,11 @@ func TestOverlongModelAnswersLikeAnUnknownModel(t *testing.T) {
 					return inner(ctx, consumerID, aliasID)
 				}
 			}))
-			rig.reg.reload(t, append(chatAliases(), chatAlias{idLongName, backends.GlobalScope, longestAliasName, "chat", "chat", backends.SensCredentials, `{}`, true}))
+			// A row named "" (hardening 6, P-4; Delta-Review 5 L-1): only
+			// migration 162's CHECK keeps it out, the registry loads it.
+			// An overlong name is looked up nowhere, so it never matches it.
+			rig.reg.reload(t, append(chatAliases(), chatAlias{idLongName, backends.GlobalScope, longestAliasName, "chat", "chat", backends.SensCredentials, `{}`, true},
+				chatAlias{idEmptyName, backends.GlobalScope, "", "chat", "chat", backends.SensCredentials, `{}`, true}))
 			ca := urgentApp()
 			ca.AllModels = allModels
 			rig.ca.Store(ca)
@@ -100,15 +107,21 @@ func TestOverlongModelAnswersLikeAnUnknownModel(t *testing.T) {
 				return nil, nil
 			}
 
+			rows := len(rig.rows.all())
 			ref := rig.post(t, nameBody("nosuchmodel"))
 			refProbes, refRec := take()
+			refRows := len(rig.rows.all()) - rows
 			if code, _, _ := ref.envelope(t); ref.status != http.StatusNotFound || code != oai.CodeModelNotFound {
 				t.Fatalf("unknown model: %d %s, want 404 model_not_found", ref.status, ref.body)
 			}
 			fmt.Fprintf(&dump, "all_models=%v reference probes=%v\n%s\n", allModels, refProbes, normalized(ref))
 			for _, m := range overlongModels() {
+				rows := len(rig.rows.all())
 				a := rig.post(t, nameBody(m.raw))
 				p, rec := take()
+				if n := len(rig.rows.all()) - rows; n != refRows {
+					t.Errorf("%s: %d llmlog rows, want the unknown model's %d", m.name, n, refRows)
+				}
 				if got, want := normalized(a), normalized(ref); got != want {
 					t.Errorf("%s: answer\n%s\nwant the unknown model's\n%s", m.name, got, want)
 				}

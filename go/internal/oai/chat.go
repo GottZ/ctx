@@ -218,7 +218,7 @@ func (c *chatCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
-	if !c.resolve(req.model) {
+	if !c.resolve(req.model, req.modelOverlong) {
 		return
 	}
 	if perr := req.parsePolicy(limitsOf(c.alias, c.s), c.cover); perr != nil {
@@ -430,8 +430,12 @@ func (c *chatCall) refuseParam(perr *paramError) {
 }
 
 // resolve is §4.4 steps 1–6: the alias in the consumer's scope, released by
-// all_models or a grant (the one 404 for every reason), then the kind.
-func (c *chatCall) resolve(name string) bool {
+// all_models or a grant (the one 404 for every reason), then the kind. An
+// overlong name (the parse did not decode it) is looked up nowhere: it
+// takes the grant probe of a name that is no alias and gets the 404
+// (hardening 6, P-4 — looked up as "", it matched a registry row named "",
+// which only migration 162's CHECK keeps out).
+func (c *chatCall) resolve(name string, overlong bool) bool {
 	// The generation the watcher starts from is the one this Resolve saw at
 	// most: read BEFORE it, a change between the Resolve and the watcher
 	// start (limiter, plan, the queue) moves the generation past it and the
@@ -439,7 +443,14 @@ func (c *chatCall) resolve(name string) bool {
 	// watcher would start from a generation that already holds the change
 	// and skip every Resolve until the check before the write.
 	c.gen = c.d.Aliases.Generation()
-	a, found, err := c.d.Resolve(c.ctx, c.ca, name)
+	var a modelalias.Alias
+	var found bool
+	var err error
+	if overlong {
+		err = c.d.probeNoAlias(c.ctx, c.ca)
+	} else {
+		a, found, err = c.d.Resolve(c.ctx, c.ca, name)
+	}
 	switch {
 	case err != nil:
 		// A grant read the shutdown or the watcher ended is their answer
