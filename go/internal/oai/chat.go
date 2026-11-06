@@ -387,7 +387,11 @@ func (c *chatCall) cover(n int64) bool {
 // TestScanTwiceHoldsOneScanAtOnce, see scanReserveFactor). At credentials the
 // scan returns at once (its short circuit, pinned) and nothing is booked. The
 // booking stays until the request ends: the scan's garbage is heap until the
-// collector runs, and a reservation has no partial release.
+// collector runs, and a reservation has no partial release. Past the end it
+// is garbage the booking no longer covers while the next request books the
+// freed budget: the heap stays within the bookings under a set GOMEMLIMIT
+// (the image's 200MiB), not without one (Delta-Review 3 R3-1, the numbers at
+// scanReserveFactor).
 func (c *chatCall) coverScan(required backends.Sensitivity, body []byte) bool {
 	if required.Rank() >= backends.SensCredentials.Rank() {
 		return true

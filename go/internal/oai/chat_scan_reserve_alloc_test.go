@@ -81,8 +81,13 @@ func TestScanReserveIsTheMeasuredOne(t *testing.T) {
 // scanner's result slice while append copies it reads the upper mode). The
 // booking, factor × body + base, covers one scan call with its garbage
 // (TestScanReserveIsTheMeasuredOne); here: at most 2 × factor × body + base
-// allocated (a third scan of the body fails it) and at most factor × body +
-// base held at once (the live heap no collector can bring under the booking).
+// allocated (a third scan of the body fails it), at most factor × body +
+// base held at once (the live heap no collector can bring under the
+// booking), and at most scanHeldPerByteMax × body + base held at once, by
+// the form scanned once as by the two scanned twice (Delta-Review 3 §3: a
+// scanner whose matches of both calls live until the end of the body scan
+// holds 16.0 or 19.4, under the factor — only this bound tells one scan
+// held at once from two).
 func TestScanTwiceHoldsOneScanAtOnce(t *testing.T) {
 	names, forms := scanTwiceForms(1 << 20)
 	for _, name := range names {
@@ -104,6 +109,10 @@ func TestScanTwiceHoldsOneScanAtOnce(t *testing.T) {
 	names, forms = scanTwiceForms(size)
 	held := scanHeldAtOnce(single)
 	t.Logf("FOLGEP scan once: tc_hugekey_null %d B holds %.2f bytes per body byte at once", len(single), float64(held)/float64(len(single)))
+	if want := scanHeldPerByteMax*int64(len(single)) + oai.ScanReserveBase; held > want {
+		t.Errorf("form tc_hugekey_null, %d bytes: one scan holds %d bytes at once, more than %d × body + %d (measured 9.5–11.6 × body: measure again)",
+			len(single), held, scanHeldPerByteMax, oai.ScanReserveBase)
+	}
 	for _, name := range names {
 		body := forms[name]
 		got := scanHeldAtOnce(body)
@@ -112,8 +121,22 @@ func TestScanTwiceHoldsOneScanAtOnce(t *testing.T) {
 			t.Errorf("form %s, %d bytes: the scan holds %d bytes at once, the route books %d (%d × body + %d)",
 				name, len(body), got, want, oai.ScanReserveFactor, oai.ScanReserveBase)
 		}
+		if want := scanHeldPerByteMax*int64(len(body)) + oai.ScanReserveBase; got > want {
+			t.Errorf("form %s, %d bytes: the two scans hold %d bytes at once, more than one scan's %d × body + %d — both calls' heap lives at once",
+				name, len(body), got, scanHeldPerByteMax, oai.ScanReserveBase)
+		}
 	}
 }
+
+// scanHeldPerByteMax bounds what a scan of the body holds at once per body
+// byte: the hold of one scan call plus a margin, not the factor (which binds
+// the call's allocation with its garbage). Measured (bau report FOLGE-P
+// §Härtung 2, §Härtung 3; Delta-Review 3 §3): one scan 9.5–11.6, the form
+// scanned twice 8.9–12.6 (200 runs; two modes, the upper one a cycle that
+// catches the scanner's result slice while append copies it); both calls'
+// matches alive at once 16.0 or 19.4 (the same two modes). 14 lies between:
+// 1.4 above the largest hold measured, 2.0 under the mutant's lower mode.
+const scanHeldPerByteMax = 14
 
 // scanHeldAtOnce is the largest live heap the collector marks while
 // ScanRaise runs over body, above the live heap before it (the largest of

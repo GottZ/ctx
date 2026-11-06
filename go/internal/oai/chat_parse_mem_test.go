@@ -19,7 +19,8 @@ package oai_test
 // answer). Load-sensitive, so it is a measurement test outside the default
 // suite (skipped without CTX_FOLGEP_FORM); the deterministic halves — bytes
 // allocated per parse, the reservation covering the second copy — are the
-// pins of chat_parse_alloc_test.go.
+// pins of chat_parse_alloc_test.go. TestChatParseHeapGateSustained is the
+// closed-loop case (CTX_FOLGEP_DUR seconds), run under GOMEMLIMIT=200MiB.
 
 import (
 	"bytes"
@@ -344,18 +345,10 @@ func memMax(a *atomic.Uint64, v uint64) {
 	}
 }
 
-func TestChatParseHeapGate(t *testing.T) {
-	form := os.Getenv("CTX_FOLGEP_FORM")
-	if form == "" {
-		t.Skip("CTX_FOLGEP_FORM not set (measurement test, see the file comment)")
-	}
-	n, _ := strconv.Atoi(os.Getenv("CTX_FOLGEP_N"))
-	n = max(n, 1)
-	lim := memCap - 16
-	if v, err := strconv.Atoi(os.Getenv("CTX_FOLGEP_BYTES")); err == nil && v > 0 {
-		lim = v
-	}
-	shape := memForm(t, form, lim)
+// newMemRig is the gate's route for n clients of shape: the shape's failover
+// rows before the serving one, the production caps, the strict body cap and
+// the reservation probe (memMount).
+func newMemRig(t *testing.T, shape memShape, n int, held *heldSum) (*chatRig, *memEngine) {
 	var rows []backends.Backend
 	for i := 0; i < shape.failover; i++ { // the chain walks higher priorities first
 		rows = append(rows, newMemEngine(t, true).row(fmt.Sprintf("bad%d", i), 100-i))
@@ -369,8 +362,24 @@ func TestChatParseHeapGate(t *testing.T) {
 	rig.setSettings(func(s *oai.Settings) {
 		s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = memBudget, memCap, memRespCap
 	})
+	rig.router = memMount(rig, oai.ChatCompletions(rig.deps), held)
+	return rig, up
+}
+
+func TestChatParseHeapGate(t *testing.T) {
+	form := os.Getenv("CTX_FOLGEP_FORM")
+	if form == "" {
+		t.Skip("CTX_FOLGEP_FORM not set (measurement test, see the file comment)")
+	}
+	n, _ := strconv.Atoi(os.Getenv("CTX_FOLGEP_N"))
+	n = max(n, 1)
+	lim := memCap - 16
+	if v, err := strconv.Atoi(os.Getenv("CTX_FOLGEP_BYTES")); err == nil && v > 0 {
+		lim = v
+	}
+	shape := memForm(t, form, lim)
 	var held heldSum
-	rig.router = memMount(rig, oai.ChatCompletions(rig.deps), &held)
+	rig, up := newMemRig(t, shape, n, &held)
 
 	body := shape.body
 	runtime.GC()
@@ -483,5 +492,130 @@ func TestChatParseHeapGate(t *testing.T) {
 	if verdict != "ok" {
 		t.Errorf("form %s, n=%d: heap growth %.1f MiB > reserved %.1f MiB + %d × base load %.0f KiB = %.1f MiB (without the answer share %.1f, the budget's peak %.1f): %s",
 			form, n, mib(growth), mib(sum), n, float64(heapGateBaseLoad)/1024, mib(bound), mib(boundNoAnswer), mib(boundPeak), verdict)
+	}
+}
+
+// TestChatParseHeapGateSustained is the gate's sustained case (FOLGE-P
+// hardening 3, Delta-Review 3 R3-1): n hostile clients send the form in a
+// closed loop for CTX_FOLGEP_DUR seconds — again at once after an answer,
+// after a 503 too, without waiting for its Retry-After — so the budget a
+// finished request frees is booked again while that request's garbage is
+// still on the heap. The bound is the budget's peak plus n × the harness
+// load, and the budget itself. It holds under a set process memory limit
+// (GOMEMLIMIT=200MiB, as the image sets it); without one the pacer lets the
+// garbage of finished requests grow to GOGC × the live heap and the heap
+// passed the bound in 7 of 13 of the reviewer's runs of the form scanned
+// twice (up to 294.0 MiB against 248.8 MiB). One case per process:
+//
+//	GOMEMLIMIT=200MiB CTX_FOLGEP_FORM=f14a_scan_hugekey_num_pub CTX_FOLGEP_N=40 \
+//	  CTX_FOLGEP_BYTES=1048576 CTX_FOLGEP_DUR=20 \
+//	  go test -run '^TestChatParseHeapGateSustained$' ./internal/oai/
+func TestChatParseHeapGateSustained(t *testing.T) {
+	form := os.Getenv("CTX_FOLGEP_FORM")
+	dur, _ := strconv.Atoi(os.Getenv("CTX_FOLGEP_DUR"))
+	if form == "" || dur <= 0 {
+		t.Skip("CTX_FOLGEP_FORM or CTX_FOLGEP_DUR not set (measurement test, see the file comment)")
+	}
+	n, _ := strconv.Atoi(os.Getenv("CTX_FOLGEP_N"))
+	n = max(n, 1)
+	lim := memCap - 16
+	if v, err := strconv.Atoi(os.Getenv("CTX_FOLGEP_BYTES")); err == nil && v > 0 {
+		lim = v
+	}
+	shape := memForm(t, form, lim)
+	var held heldSum
+	rig, _ := newMemRig(t, shape, n, &held)
+
+	runtime.GC()
+	runtime.GC()
+	debug.FreeOSMemory()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	base, gc0 := ms.HeapInuse, ms.NumGC
+	var peak atomic.Uint64
+	var budgetPeak atomic.Int64
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		var s runtime.MemStats
+		for {
+			runtime.ReadMemStats(&s)
+			memMax(&peak, s.HeapInuse)
+			memMaxInt(&budgetPeak, rig.budget.InUse())
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+	var mu sync.Mutex
+	cnt := map[string]int{}
+	deadline := time.Now().Add(time.Duration(dur) * time.Second)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for time.Now().Before(deadline) {
+				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(shape.body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				rig.router.ServeHTTP(w, req)
+				var e struct {
+					Error struct {
+						Code *string `json:"code"`
+					} `json:"error"`
+				}
+				code := ""
+				if w.Code != http.StatusOK && json.Unmarshal(w.Body.Bytes(), &e) == nil && e.Error.Code != nil {
+					code = *e.Error.Code
+				}
+				mu.Lock()
+				cnt[fmt.Sprintf("%d/%s", w.Code, code)]++
+				mu.Unlock()
+				if w.Code == http.StatusServiceUnavailable {
+					time.Sleep(2 * time.Millisecond) // hostile: no Retry-After
+				}
+			}
+		}()
+	}
+	t0 := time.Now()
+	close(start)
+	wg.Wait()
+	el := time.Since(t0)
+	close(stop)
+	<-done
+	runtime.ReadMemStats(&ms)
+
+	keys := make([]string, 0, len(cnt))
+	for k := range cnt {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&sb, "%s×%d ", k, cnt[k])
+	}
+	mib := func(v int64) float64 { return float64(v) / (1 << 20) }
+	growth := int64(peak.Load()) - int64(base)
+	boundPeak := budgetPeak.Load() + int64(n)*heapGateBaseLoad
+	verdict := "ok"
+	switch {
+	case growth > memBudget:
+		verdict = "OVER_BUDGET"
+	case growth > boundPeak:
+		verdict = "OVER_PEAK"
+	}
+	fmt.Printf("FOLGEP sustained form=%s n=%d dur=%ds gomemlimit=%q body=%d answers=[%s] growth_MiB=%.1f budget_peak_MiB=%.1f bound_peak_MiB=%.1f "+
+		"base_MiB=%.1f numgc=%d elapsed=%v verdict=%s\n",
+		form, n, dur, os.Getenv("GOMEMLIMIT"), len(shape.body), strings.TrimSpace(sb.String()), mib(growth), mib(budgetPeak.Load()), mib(boundPeak),
+		mib(int64(base)), ms.NumGC-gc0, el.Round(time.Millisecond), verdict)
+	if verdict != "ok" {
+		t.Errorf("form %s, n=%d, %d s closed loop, GOMEMLIMIT %q: heap growth %.1f MiB > the budget's peak %.1f MiB + %d × base load %.0f KiB = %.1f MiB (budget %.0f MiB): %s",
+			form, n, dur, os.Getenv("GOMEMLIMIT"), mib(growth), mib(budgetPeak.Load()), n, float64(heapGateBaseLoad)/1024, mib(boundPeak), mib(memBudget), verdict)
 	}
 }

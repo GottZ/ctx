@@ -43,6 +43,21 @@ const requestReserveFactor = 3
 // heap grew 142–150 MiB against the gate's 200.3 MiB (Delta-Review 2 §5b).
 // TestScanTwiceHoldsOneScanAtOnce pins the form: at most two bookings in
 // total, at most one held at once.
+//
+// The promise "the heap holds no more than the bookings" is made under a set
+// process memory limit (GOMEMLIMIT; the image sets 200MiB, go/Dockerfile) —
+// a bare ctxd without one does not get it. A request's booking ends with
+// the request, its scan's garbage stays on the heap until the next
+// collection, and the next request books the budget the first one freed;
+// without a limit the pacer lets that garbage grow to GOGC × the live heap.
+// Hostile clients in a closed loop (no Retry-After, 40 × 1 MiB or 3 × 8 MiB
+// of this form for 20–30 s, Delta-Review 3 R3-1): without GOMEMLIMIT the
+// heap passed the budget's peak plus the harness load in 7 of 13 runs, up to
+// 294.0 MiB against 248.8 MiB (the form scanned once: 1 of 7); with
+// GOMEMLIMIT=200MiB in none (151.5–198.1 MiB). The heap gate's sustained
+// case runs it under that limit (chat_parse_mem_test.go; bau report
+// §Härtung 3): 9 of 9 runs within the bound, 183.7–202.8 MiB; without the
+// limit 4 of 6 over it (up to 281.4 MiB).
 const (
 	scanReserveFactor = 23
 	scanReserveBase   = 64 << 10
