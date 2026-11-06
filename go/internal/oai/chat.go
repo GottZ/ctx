@@ -1021,7 +1021,11 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 	}
 	request := ""
 	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
-		request = string(c.req.messages)
+		// The row's text of the array is sized, then booked, then written
+		// (hardening 6): under an exhausted budget the row goes without it.
+		if n := bodyLogSize(c.req.messages); c.cover(int64(n)) {
+			request = bodyLogText(c.req.messages, n)
+		}
 	}
 	c.d.Record(llmlog.GatewayRow{
 		Pipeline:   chatPipeline,
@@ -1037,6 +1041,68 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		Response:    out.response,
 		BodyLogging: c.s.BodyLogging,
 	})
+}
+
+// bodyLogTextMax is how much of the message array's text the route hands to
+// the log row: the row stores at most llmlog's gateway body cap (64 KiB) of
+// a body, cut on a rune boundary, so every longer prefix of the same text
+// stores the same. Pinned by TestBodyLogTextStoresWhatTheArrayStored.
+const bodyLogTextMax = 64<<10 + utf8.UTFMax
+
+// bodyLogWalk yields the text of the message array raw for the log row as
+// the row stores it before its cut — valid UTF-8 with each run of invalid
+// bytes one U+FFFD and no NUL (llmlog's storable) — piece by piece to put,
+// up to bodyLogTextMax bytes (hardening 6, the class gate: string(raw)
+// copied the whole array outside the reservation, and the row's cleaning
+// grew a text of invalid bytes between ASCII ones to 8 × its size before
+// cutting it).
+func bodyLogWalk(raw []byte, put func(p []byte)) {
+	n := 0
+	invalid := false // the byte before was part of an invalid sequence
+	for i := 0; i < len(raw) && n < bodyLogTextMax; {
+		c := raw[i]
+		size := 1
+		switch {
+		case c == 0:
+			invalid = false
+		case c < utf8.RuneSelf:
+			put(raw[i : i+1])
+			n++
+			invalid = false
+		default:
+			_, size = utf8.DecodeRune(raw[i:])
+			switch {
+			case size > 1:
+				put(raw[i : i+size])
+				n += size
+				invalid = false
+			case !invalid:
+				put(replacementChar)
+				n += len(replacementChar)
+				invalid = true
+			}
+		}
+		i += size
+	}
+}
+
+// replacementChar is U+FFFD, what the log row writes for invalid bytes.
+var replacementChar = []byte(string(utf8.RuneError))
+
+// bodyLogSize is the length of bodyLogText(raw).
+func bodyLogSize(raw []byte) int {
+	n := 0
+	bodyLogWalk(raw, func(p []byte) { n += len(p) })
+	return n
+}
+
+// bodyLogText is the log row's text of raw, written once into size bytes
+// (bodyLogSize).
+func bodyLogText(raw []byte, size int) string {
+	var b strings.Builder
+	b.Grow(size)
+	bodyLogWalk(raw, func(p []byte) { b.Write(p) })
+	return b.String()
 }
 
 // clientRequestID is the client's own request id (X-Request-ID, else
