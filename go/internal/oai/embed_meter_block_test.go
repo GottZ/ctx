@@ -146,31 +146,42 @@ func TestEmbedMeterBlockContactBooksItsEstimate(t *testing.T) {
 	}
 }
 
-// rawEmbedAnswer answers one OpenAI embeddings request read from br with two
-// prompt tokens per input and Connection: close (one connection per block).
-func rawEmbedAnswer(c net.Conn, br *bufio.Reader) bool {
+// readEmbedInputs reads one OpenAI embeddings request from br and returns
+// its inputs.
+func readEmbedInputs(br *bufio.Reader) ([]string, bool) {
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	raw, err := io.ReadAll(req.Body)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	var in struct {
 		Input []string `json:"input"`
 	}
-	_ = json.Unmarshal(raw, &in)
-	ans := embedAnswerUsage(in.Input, 8, 2*len(in.Input))
+	if json.Unmarshal(raw, &in) != nil || len(in.Input) == 0 {
+		return nil, false
+	}
+	return in.Input, true
+}
+
+// rawEmbedAnswer answers inputs with two prompt tokens per input and
+// Connection: close (one connection per block).
+func rawEmbedAnswer(c net.Conn, inputs []string) {
+	ans := embedAnswerUsage(inputs, 8, 2*len(inputs))
 	_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(ans), ans)
-	return true
 }
 
 // TestEmbedMeterBlockTransportFault (F4-1): block 3 of 8 meets a transport
 // fault after two served blocks (raw backend, one connection per block).
 // The connect refused ⇒ block 3 reached no backend: settle 4, the served
 // blocks' usage exactly. The backend read block 3 and died (RST), the retry's
-// connect refused ⇒ block 3 had wire contact: settle 4 + 5 = 9.
+// connect refused ⇒ block 3 had wire contact: settle 4 + 5 = 9. The blocks
+// are told apart by their input, not by the order of the connections, and
+// the listener stops before block 2's answer leaves — the route dials block 3
+// only after it read that answer (under -race the stop after the answer lost
+// the race 9 times in 200).
 func TestEmbedMeterBlockTransportFault(t *testing.T) {
 	cases := []struct {
 		mode    string
@@ -181,19 +192,25 @@ func TestEmbedMeterBlockTransportFault(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
-			var reqs atomic.Int64
+			var reqs, served atomic.Int64
+			inputs := embedInputs(8)
 			b := newRawBackend(t, func(b *rawBackend, c net.Conn, br *bufio.Reader, _ int64) {
-				k := reqs.Add(1)
-				if k == 3 && tc.contact {
-					if b.read(br) {
-						b.l.stop()
-						reset(c)
-					}
+				in, ok := readEmbedInputs(br)
+				if !ok {
 					return
 				}
-				if rawEmbedAnswer(c, br) && k == 2 && !tc.contact {
+				reqs.Add(1)
+				switch {
+				case tc.contact && in[0] == inputs[2]:
+					b.requests.Add(1)
+					b.l.stop()
+					reset(c)
+					return
+				case !tc.contact && in[0] == inputs[1]:
 					b.l.stop()
 				}
+				served.Add(1)
+				rawEmbedAnswer(c, in)
 			})
 			rig, m := embedMeterRig(t, embedWireRow("raw", b.host(), 10))
 			a := rig.postEmbed(t, embedBody("emb1", embedInputs(8)))
@@ -202,10 +219,10 @@ func TestEmbedMeterBlockTransportFault(t *testing.T) {
 			if tc.contact {
 				want += embedReservation(1)
 			}
-			t.Logf("block 3 %s: answer %d %.80s; conns %d, requests read %d; ends %s; settled %+v; held %d (want settle %d)",
-				tc.mode, a.status, a.body, b.conns.Load(), b.requests.Load(), ends, settled, held, want)
-			if a.status == http.StatusOK || reqs.Load() < 2 {
-				t.Fatalf("answer %d, requests %d — want block 3 to fail after two served blocks", a.status, reqs.Load())
+			t.Logf("block 3 %s: answer %d %.80s; conns %d, requests %d, served %d, block 3 read %d; ends %s; settled %+v; held %d (want settle %d)",
+				tc.mode, a.status, a.body, b.conns.Load(), reqs.Load(), served.Load(), b.requests.Load(), ends, settled, held, want)
+			if a.status == http.StatusOK || served.Load() != 2 {
+				t.Fatalf("answer %d, served %d — want block 3 to fail after two served blocks", a.status, served.Load())
 			}
 			if tc.contact && b.requests.Load() != 1 {
 				t.Fatalf("the backend read %d requests of block 3, want 1", b.requests.Load())
