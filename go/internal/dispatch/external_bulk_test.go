@@ -18,6 +18,7 @@ import (
 	"math/rand"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -882,7 +883,12 @@ func TestExternalBulkMixedFloodBookkeeping(t *testing.T) {
 // each XB pick resolves the claim (one pass over the XU buckets) and orders
 // every XB bucket. One pass per queue: the median grows linearly from 64 to
 // 512 buckets per class (factor 8), a pick quadratic in either grows by 64;
-// the bound is the gate's 22.
+// the bound is the gate's 22. The absolute bound (the small median far below
+// opWarnThreshold) is load-sensitive: a shared CI runner put it at 1.06 ms
+// once (nightly 2026-11-06, run 42154383471) with the growth at 7.5 — so both
+// medians are measured up to xbPickCostPasses times and the gate fails only
+// when every pass exceeds a bound (FOLGE-P hardening 4's rule: the bounds
+// stay, one pass that holds every bound is the gate's answer).
 func TestExternalBulkPickCostScales(t *testing.T) {
 	med := func(n int) time.Duration {
 		s := DefaultSettings()
@@ -916,13 +922,41 @@ func TestExternalBulkPickCostScales(t *testing.T) {
 		slices.Sort(samples)
 		return samples[len(samples)/2]
 	}
-	small, large := med(64), med(512)
-	ratio := float64(large) / float64(small)
-	t.Logf("median XB pick: %v at 64+64 buckets, %v at 512+512 buckets — growth %.1f (linear 8, quadratic 64)", small, large, ratio)
-	if ratio >= 22 {
-		t.Fatalf("XB pick cost grows by %.1f from 64 to 512 buckets per class, want < 22 (one pass per queue)", ratio)
+	var over []string
+	for pass := 1; pass <= xbPickCostPasses; pass++ {
+		small, large := med(64), med(512)
+		ratio := float64(large) / float64(small)
+		t.Logf("pass %d: median XB pick: %v at 64+64 buckets, %v at 512+512 buckets — growth %.1f (linear 8, quadratic 64)", pass, small, large, ratio)
+		var bad []string
+		if ratio >= 22 {
+			bad = append(bad, fmt.Sprintf("XB pick cost grows by %.1f from 64 to 512 buckets per class, want < 22 (one pass per queue)", ratio))
+		}
+		if small >= opWarnThreshold {
+			msg := fmt.Sprintf("median XB pick %v at 64+64 buckets, want far below %v", small, opWarnThreshold)
+			if mode := testing.CoverMode(); mode != "" {
+				// Under coverage instrumentation (the nightly: -race with
+				// -covermode=atomic) the absolute bound measures the
+				// instrumentation, not the pick: 1.057 ms there against 6 µs
+				// bare. The growth bound holds either way and stays; the
+				// absolute one is logged, not judged (FOLGE-P Delta-Review 2
+				// F-2's rule, skipUnderCoverage in oai).
+				t.Logf("pass %d: %s — not judged under -covermode=%s", pass, msg, mode)
+			} else {
+				bad = append(bad, msg)
+			}
+		}
+		if len(bad) == 0 {
+			return
+		}
+		over = append(over, fmt.Sprintf("pass %d: %s", pass, strings.Join(bad, "; ")))
+		if pass < xbPickCostPasses {
+			t.Logf("XB pick cost retry pass=%d of %d: %s — measuring again", pass, xbPickCostPasses, strings.Join(bad, "; "))
+		}
 	}
-	if small >= opWarnThreshold {
-		t.Fatalf("median XB pick %v at 64+64 buckets, want far below %v", small, opWarnThreshold)
-	}
+	t.Fatalf("each of %d passes exceeds a bound — %s", xbPickCostPasses, strings.Join(over, " | "))
 }
+
+// xbPickCostPasses is how often TestExternalBulkPickCostScales measures
+// before it fails: a single pass under runner load is a sample, not a
+// verdict; three passes that all exceed a bound are.
+const xbPickCostPasses = 3
