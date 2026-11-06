@@ -37,14 +37,26 @@ import (
 const noL1 = math.MaxInt64
 
 // heldUpstream answers every request with the engine's shape once release is
-// closed; arrived gets one value per request that reached it.
-func heldUpstream(t *testing.T) (u *upstream, arrived chan struct{}, release chan struct{}) {
+// called; arrived gets one value per request that reached it. A test that
+// fails before it releases does not hang (Fremd-Review 1 F-7): the cleanup
+// releases — registered after newUpstream's, it runs before the server's
+// Close, which waits for its handlers — and a held handler also ends with its
+// request.
+func heldUpstream(t *testing.T) (u *upstream, arrived chan struct{}, release func()) {
 	t.Helper()
 	u = newUpstream(t, answerSGLang)
-	arrived, release = make(chan struct{}, 64), make(chan struct{})
-	u.setRespond(func(w http.ResponseWriter, _ *http.Request) {
+	arrived = make(chan struct{}, 64)
+	gate := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	u.setRespond(func(w http.ResponseWriter, r *http.Request) {
 		arrived <- struct{}{}
-		<-release
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, answerSGLang)
 	})
@@ -118,7 +130,7 @@ func TestL1ConcurrencyOneAtTheRoute(t *testing.T) {
 	if n := len(rig.serveBy.all()); n != acquires {
 		t.Errorf("acquires %d after the L1 refusal, %d before — the refused request reached the dispatcher", n, acquires)
 	}
-	close(release)
+	release()
 	if a := <-first; a.status != http.StatusOK {
 		t.Fatalf("first: %d %s, want 200", a.status, a.body)
 	}
@@ -153,7 +165,7 @@ func TestL1LaneAtTheRoute(t *testing.T) {
 	if n := len(rig.serveBy.all()); n != acquires+1 {
 		t.Errorf("acquires %d after the urgent request, want %d (it reached L2)", n, acquires+1)
 	}
-	close(release)
+	release()
 	for range 2 {
 		if a := <-answers; a.status != http.StatusOK {
 			t.Errorf("bulk or urgent request: %d %s, want 200", a.status, a.body)
