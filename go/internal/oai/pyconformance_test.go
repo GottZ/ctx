@@ -71,13 +71,30 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 		"--with", "openai=="+pythonSDKVersion, "--with", "jsonschema=="+jsonschemaVersion, "--with", "pytest=="+pytestVersion,
 		"pytest", "-p", "no:cacheprovider", "-v", "conformance/oai")
 	cmd.Dir = moduleRoot
-	cmd.Env = append(os.Environ(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/",
+	cmd.Env = append(childEnv(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/",
 		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err = cmd.Run()
 	return out.String(), err
+}
+
+// childEnv is the environment of the uv child: the test binary's own, with
+// SSL_CERT_FILE as the process started with it — TestMain (wire_tls_test.go)
+// points it at the binary's CA, and uv would then trust nothing but that CA
+// and fail to fetch its packages ("invalid peer certificate: UnknownIssuer").
+func childEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "SSL_CERT_FILE=") {
+			env = append(env, kv)
+		}
+	}
+	if sslCertFileSet {
+		env = append(env, "SSL_CERT_FILE="+sslCertFile)
+	}
+	return env
 }
 
 // conformanceChat is the chat fixture of test_chat.py: one chat rig per
