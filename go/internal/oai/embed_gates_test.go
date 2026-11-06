@@ -437,16 +437,26 @@ func TestEmbeddingsUnknownDimensionReservesTheCeiling(t *testing.T) {
 		transportCap = 16 << 20 // httpx.MaxResponseBytes: a block's read cap at this ceiling
 	)
 	body := embedBody("emb", []string{"x"})
-	shares := 3*int64(len(body)) + // the request share of the budget stage
-		ceiling*floatBytes + encodeBuffer + // the answer at the ceiling
+	// The request part: the stage's share, or the ledger's bookings past it
+	// (FOLGE-E: the read, the decoded text, the upstream body of the one
+	// block).
+	answer := int64(ceiling*floatBytes+encodeBuffer) + // the answer at the ceiling
 		decodeFactor*transportCap // the decode share of the one-input block
+	entry := embedLedgerRequest(body, 2, []string{"x"}, false, -1, "") + answer
+	shares := embedLedgerRequest(body, 2, []string{"x"}, false, 1, "EMBED-MODEL") + answer
+	// FOLGE-E: the last booking is the frame of the block's upstream body,
+	// at the attempt — one byte short of all shares is refused after the
+	// acquire, before any wire call; one byte short of what the entry books
+	// is refused at the entry.
 	for _, tc := range []struct {
-		name   string
-		budget int64
-		served bool
+		name     string
+		budget   int64
+		served   bool
+		acquired int64
 	}{
-		{"one byte short of the shares", shares - 1, false},
-		{"exactly the shares", shares, true},
+		{"one byte short of the entry shares", entry - 1, false, 0},
+		{"one byte short of the shares", shares - 1, false, 1},
+		{"exactly the shares", shares, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEmbedEngine(t, 8)
@@ -467,8 +477,8 @@ func TestEmbeddingsUnknownDimensionReservesTheCeiling(t *testing.T) {
 			if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded {
 				t.Fatalf("%d %s, want 503 server_overloaded — the answer at the ceiling does not fit", a.status, a.body)
 			}
-			if n != 0 || e.hits.Load() != 0 {
-				t.Errorf("acquires %d wire hits %d, want 0/0 (the refusal stands at the entry)", n, e.hits.Load())
+			if int64(n) != tc.acquired || e.hits.Load() != 0 {
+				t.Errorf("acquires %d wire hits %d, want %d/0 (the refusal stands before any wire call; at the entry for the entry's shares)", n, e.hits.Load(), tc.acquired)
 			}
 		})
 	}
@@ -547,10 +557,13 @@ func TestEmbeddingResponseReserved(t *testing.T) {
 		return min(int64(inputs)*dims*wireComponent+int64(inputs)*wireItem+wireFrame, transportCap)
 	}
 	body := embedBody("embbig", embedInputs(count))
-	bodyShare := 3 * int64(len(body))
+	// The request part (FOLGE-E, the ledger): before the acquire the read
+	// and the decoded texts; in the engine also the upstream bodies of the
+	// attempt's count/block blocks.
+	bodyShare := embedLedgerRequest(body, 2, embedInputs(count), false, count/block, "EMBED-MODEL")
 	answerShare := int64(count*dims*floatBytes + encodeBuffer)
-	holds := bodyShare + answerShare + decodeFactor*readCap(block) // the first request in the engine
-	books := bodyShare + answerShare + decodeFactor*readCap(1)     // a request before its acquire
+	holds := bodyShare + answerShare + decodeFactor*readCap(block)                                              // the first request in the engine
+	books := embedLedgerRequest(body, 2, embedInputs(count), false, -1, "") + answerShare + decodeFactor*readCap(1) // a request before its acquire
 	budget := holds + books - 1                                    // the second does not fit by one byte
 	e := newEmbedEngine(t, dims)
 	row := []byte(strings.TrimSuffix(strings.Repeat("1.5,", dims), ","))
@@ -624,7 +637,7 @@ func TestEmbeddingResponseReserved(t *testing.T) {
 		}
 	}
 	if got := rig.budget.InUse(); got != holds {
-		t.Errorf("the budget holds %d B while the first request is in the engine, want exactly %d B = 3 × body %d + answer %d + decode %d (3 × the read cap of a %d-input block)",
+		t.Errorf("the budget holds %d B while the first request is in the engine, want exactly %d B = request %d (the ledger's) + answer %d + decode %d (3 × the read cap of a %d-input block)",
 			got, holds, bodyShare, answerShare, holds-bodyShare-answerShare, block)
 	}
 	_ = rig.recorder.Take()

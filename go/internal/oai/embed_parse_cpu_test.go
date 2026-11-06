@@ -98,7 +98,7 @@ func embedCPURatio(body []byte, rounds int) (ratio float64, minNew, minBase time
 	minNew, minBase = time.Duration(1<<62), time.Duration(1<<62)
 	for range rounds {
 		t0 := time.Now()
-		_, _ = parseEmbedTop(body)
+		_, _ = parseEmbedTop(body, nil)
 		minNew = min(minNew, time.Since(t0))
 		t0 = time.Now()
 		_, _ = baseEmbedTop(body)

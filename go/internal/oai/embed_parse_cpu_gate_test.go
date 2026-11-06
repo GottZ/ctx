@@ -30,7 +30,7 @@ func TestEmbedParseCPUAgainstTheBase(t *testing.T) {
 		}
 		gateForm(t, f.name, func(pass int) []string {
 			ratio, mn, mb := embedCPURatio(f.body, 7)
-			t.Logf("W0209 cpu form=%s bytes=%d answer=%s new=%v base=%v ratio=%.2f pass=%d", f.name, len(f.body), embedOutcomeOf(parseEmbedTop(f.body)), mn, mb, ratio, pass)
+			t.Logf("W0209 cpu form=%s bytes=%d answer=%s new=%v base=%v ratio=%.2f pass=%d", f.name, len(f.body), embedOutcomeOf(parseEmbedTop(f.body, nil)), mn, mb, ratio, pass)
 			if ratio > f.bound() {
 				return []string{fmt.Sprintf("the parse takes %v, %.2f × the base parse's %v (at most %g ×)", mn, ratio, mb, f.bound())}
 			}
@@ -52,17 +52,17 @@ func TestEmbedParseCPUIsLinearInASharedPrefix(t *testing.T) {
 			for range 7 {
 				runtime.GC()
 				t0 := time.Now()
-				_, _ = parseEmbedTop(s.body)
+				_, _ = parseEmbedTop(s.body, nil)
 				minS = min(minS, time.Since(t0))
 				t0 = time.Now()
-				_, _ = parseEmbedTop(l.body)
+				_, _ = parseEmbedTop(l.body, nil)
 				minL = min(minL, time.Since(t0))
 				t0 = time.Now()
 				_, _ = baseEmbedTop(l.body)
 				minB = min(minB, time.Since(t0))
 			}
 			growth, ratio := float64(minL)/float64(max(minS, 1)), float64(minL)/float64(max(minB, 1))
-			t.Logf("W0209 cpu prefix form=%s bytes=%d/%d answer=%s new=%v/%v growth=%.2f base=%v ratio=%.2f pass=%d", l.name, len(s.body), len(l.body), embedOutcomeOf(parseEmbedTop(l.body)), minS, minL, growth, minB, ratio, pass)
+			t.Logf("W0209 cpu prefix form=%s bytes=%d/%d answer=%s new=%v/%v growth=%.2f base=%v ratio=%.2f pass=%d", l.name, len(s.body), len(l.body), embedOutcomeOf(parseEmbedTop(l.body, nil)), minS, minL, growth, minB, ratio, pass)
 			var over []string
 			if growth > cpuGrowthMax {
 				over = append(over, fmt.Sprintf("the parse takes %v at %d B and %v at %d B, %.2f × for 4 × the body (at most %d ×: the cost is not linear)", minS, len(s.body), minL, len(l.body), growth, cpuGrowthMax))

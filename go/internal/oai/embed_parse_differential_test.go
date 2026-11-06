@@ -9,6 +9,11 @@ package oai
 //   - echoClipped: a refusal that names a client's key names it cut to
 //     echoNameMax bytes and "…" (FOLGE-P H-9, decodeKey); the parse before
 //     the port named the whole decoded key, of up to the body cap.
+//   - modelOverlong (FOLGE-E): a model value past modelRawMax raw bytes is
+//     not decoded — the request carries no model name and the route
+//     resolves no alias for it (probeNoAlias), the 404 of every unknown
+//     name; the parse before decoded it whole (8 MiB of invalid bytes into
+//     24 MiB). No alias name is longer than aliasNameMaxBytes.
 //   - emptyKeyRepeatInWindow: a body of more than five members whose first
 //     repeat among its first six is the empty key "" is refused as that
 //     repeat (invalid_json, param ""). The parse before the port kept the
@@ -51,7 +56,7 @@ func embedOutcomeOf(req *embedRequest, perr *paramError) string {
 // (both refuse with one code, or both accept) — the CPU gate's check that it
 // times like answers.
 func embedOutcomeDiff(body []byte) string {
-	nr, np := parseEmbedTop(body)
+	nr, np := parseEmbedTop(body, nil)
 	or, op := baseEmbedTop(body)
 	nc, oc := "ok", "ok"
 	if np != nil {
@@ -82,12 +87,22 @@ func clipEchoed(s string) string {
 // embedDeviation compares the answers of the two parses: "" alike, the name
 // of an allowed deviation, or "unallowed: …".
 func embedDeviation(body []byte) string {
-	nr, np := parseEmbedTop(body)
+	nr, np := parseEmbedTop(body, nil)
 	or, op := baseEmbedTop(body)
 	switch {
 	case np == nil && op == nil:
 		if reflect.DeepEqual(nr, or) {
 			return ""
+		}
+		// FOLGE-E: a model value past modelRawMax raw bytes is not decoded
+		// (no alias name can stand there; the route answers 404 for it as
+		// for every unknown name, probeNoAlias).
+		if nr.modelOverlong && nr.model == "" && len(or.model) > aliasNameMaxBytes {
+			n := *nr
+			n.model, n.modelOverlong = or.model, false
+			if reflect.DeepEqual(&n, or) {
+				return "modelOverlong"
+			}
 		}
 		return fmt.Sprintf("unallowed: both accept, new %+v, base %+v", *nr, *or)
 	case np == nil || op == nil:
