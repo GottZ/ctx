@@ -2665,6 +2665,16 @@ type GatewayConfig struct {
 	// only up to the share 1 − r of each bucket, so the urgent lane (XU) of
 	// the same consumer keeps a quarter of it by default. Range [0, 1) (V47).
 	XUReserveRatio float64 `key:"gateway.xu_reserve_ratio" env:"CTX_GATEWAY_XU_RESERVE_RATIO" default:"0.25" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ConsumerConcurrencyDefault is C, the meter's L1 (wave W06-11,
+	// design/06 §4.2, §4.11): the requests per model consumer and op that may
+	// be open at once, waiting in the dispatcher's queue or running; one more
+	// is 429 concurrency_limit_exceeded with Retry-After 1 s. The bulk lane
+	// holds at most max(1, ⌊C·(1 − xu_reserve_ratio)⌋) of them, so at the
+	// default 2 the urgent lane keeps one; at 1 there is no urgent reserve.
+	// Until the limits rows of W06-15 the default holds for every consumer.
+	// V48: >= 1 (L1 is never unbounded, design/04 R-06-4) and, while
+	// dispatch.external_queue_per_consumer caps the queue, at most that cap.
+	ConsumerConcurrencyDefault int `key:"gateway.consumer_concurrency_default" env:"CTX_GATEWAY_CONSUMER_CONCURRENCY_DEFAULT" default:"2" mut:"hot" parse:"strict" tenancy:"global-only"`
 
 	// Consumers is the administration of model consumers and their keys
 	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
@@ -2927,6 +2937,7 @@ func (c *Config) GatewaySettings() oai.Settings {
 			Rerank:         oai.OpLimits{RPM: int64(g.RerankRPMDefault), TPM: int64(g.RerankTPMDefault)},
 			TPMReserve:     int64(g.TPMReserveDefault),
 			XUReserveRatio: g.XUReserveRatio,
+			Concurrency:    int64(g.ConsumerConcurrencyDefault),
 		},
 		Auth: oai.AuthSettings{
 			FailureLimit:  g.AuthFailureLimit,

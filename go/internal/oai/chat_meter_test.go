@@ -71,7 +71,11 @@ func (r *rigMeter) Admit(_ context.Context, ca *auth.ConsumerAuth, _ modelalias.
 	res, d := r.m.Admit(keyquota.Subject{ConsumerID: ca.ConsumerID, TenantID: ca.TenantID, Op: op, Lane: lane}, r.lim,
 		keyquota.Estimate{PromptRunes: est.PromptRunes, MaxCompletion: est.MaxTokens, ClientMax: est.ClientMaxTokens, InputRunes: est.InputRunes})
 	if !d.Allowed {
-		return nil, &oai.LimitRefusal{Code: oai.CodeRateLimitExceeded, Message: d.Message, RetryAfter: d.RetryAfter, ShouldRetry: d.Retryable}
+		code := oai.CodeRateLimitExceeded
+		if d.Reason == keyquota.ReasonConcurrency { // L1 (W06-11), as meterLimiter maps it
+			code = oai.CodeConcurrencyLimitExceeded
+		}
+		return nil, &oai.LimitRefusal{Code: code, Message: d.Message, RetryAfter: d.RetryAfter, ShouldRetry: d.Retryable}
 	}
 	return rigReservation{res}, nil
 }
@@ -131,7 +135,7 @@ func (p *modePlanner) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.Ad
 // x-ratelimit-*.
 func TestMeterReservationEndsOncePerExit(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
-	meter := newRigMeter(keyquota.Limits{RPM: 1 << 20, TPM: 60_000_000, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 1 << 20, TPM: 60_000_000, CompletionReserve: 1024}, true)
 	mp := &modePlanner{}
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 64, 1, withDeps(func(d *oai.Deps) {
 		mp.AdmissionPlanner = d.Planner
@@ -205,7 +209,7 @@ func TestMeterReservationEndsOncePerExit(t *testing.T) {
 // before the meter — its buckets stay untouched.
 func TestMeterAfterTheChainRules(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
-	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	a := rig.post(t, chatBody("tchat")) // a tenant alias whose tenant has no row
 	if code, _, _ := a.envelope(t); a.status != http.StatusServiceUnavailable || code != oai.CodeNoEligibleBackend {
@@ -233,7 +237,7 @@ func TestMeterAfterTheChainRules(t *testing.T) {
 // refusal names only the caller's own limit.
 func TestMeterHeaderAndTextContract(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
-	meter := newRigMeter(keyquota.Limits{RPM: 10, TPM: 60000, CompletionReserve: 1024, XUReserve: 0.25}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 10, TPM: 60000, CompletionReserve: 1024, XUReserve: 0.25}, true)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	ca := rig.ca.Load()
 	// The same consumer's embed bucket and another consumer's chat bucket,
@@ -313,7 +317,7 @@ func TestMeterHeaderAndTextContract(t *testing.T) {
 // lead decision O-10-2 (a)).
 func TestMeterWarmingAtTheRoute(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
-	meter := newRigMeter(keyquota.Limits{RPM: 10, TPM: 60000, CompletionReserve: 1024}, false)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 10, TPM: 60000, CompletionReserve: 1024}, false)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	rig.recorder.Take()
 	a := rig.post(t, chatBody("chat"))
@@ -345,7 +349,7 @@ func TestMeterCapAtTheRoute(t *testing.T) {
 			`"usage":{"prompt_tokens":11,"total_tokens":14,"completion_tokens":3`,
 			`"usage":{"prompt_tokens":44000,"total_tokens":45000,"completion_tokens":1000`, 1))
 	})
-	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	big := fmt.Sprintf(`{"model":"chat","messages":[{"role":"user","content":%q}]}`, strings.Repeat("a", 110000))
 	a := rig.post(t, big)

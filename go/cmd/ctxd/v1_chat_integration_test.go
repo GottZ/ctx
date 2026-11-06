@@ -77,6 +77,7 @@ type v1ChatEngine struct {
 	bodies  [][]byte
 	headers []http.Header
 	hits    atomic.Int64
+	hold    atomic.Int64 // ns each request is held before the answer (W06-11 concurrency gates)
 }
 
 func newV1ChatEngine(t *testing.T, status int) *v1ChatEngine {
@@ -85,6 +86,9 @@ func newV1ChatEngine(t *testing.T, status int) *v1ChatEngine {
 	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.hits.Add(1)
 		raw, _ := io.ReadAll(r.Body)
+		if d := time.Duration(e.hold.Load()); d > 0 {
+			time.Sleep(d)
+		}
 		e.mu.Lock()
 		e.bodies = append(e.bodies, raw)
 		e.headers = append(e.headers, r.Header.Clone())

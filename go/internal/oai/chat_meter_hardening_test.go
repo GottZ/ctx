@@ -70,7 +70,7 @@ func (p *holdPlanner) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.Ad
 // refund must not erase B's: C at 61 s is 429 with Retry-After 59.
 func TestMeterHeldRefundAtTheRoute(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
-	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
 	hp := &holdPlanner{entered: make(chan struct{}), release: make(chan struct{})}
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) {
 		hp.AdmissionPlanner = d.Planner
@@ -112,7 +112,7 @@ func TestMeterHeldRefundAtTheRoute(t *testing.T) {
 func TestMeterDebtAtTheRoute(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
 	u.setRespond(usageAnswer(85000, 5000))
-	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	if a := rig.post(t, bigChat()); a.status != http.StatusOK {
 		t.Fatalf("first: %d %s", a.status, a.body)
@@ -131,7 +131,7 @@ func TestMeterDebtAtTheRoute(t *testing.T) {
 // eighth request of a burst waits 8.571428568 s.
 func TestMeterRetryAfterMsRoundsUp(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
-	meter := newRigMeter(keyquota.Limits{RPM: 7, TPM: 1 << 30, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 7, TPM: 1 << 30, CompletionReserve: 1024}, true)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	var a chatAnswer
 	for range 8 {
@@ -175,7 +175,7 @@ func TestMeterWireContactNeverRefundsInFull(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			u := newUpstream(t, answerSGLang)
-			meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
+			meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
 			var grants atomic.Int64
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -234,7 +234,7 @@ func TestMeterFailoverRefusalAfterTheWireKeeps(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"error":{"message":"engine busy"}}`)
 	})
-	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
 	rig := newChatRig(t, []backends.Backend{second.row("spark1", backends.TrustFull, 10), first.row("spark2", backends.TrustFull, 20)}, 2, 1,
 		withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	hctx := context.WithValue(context.Background(), consumerKey{}, rig.ca.Load())
@@ -268,7 +268,7 @@ func TestMeterConnectRefusedGivesBack(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
 	row := u.row("dead", backends.TrustFull, 10)
 	row.Host = "http://" + refusedAddr(t)
-	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60_000_000, CompletionReserve: 1024}, true)
 	rig := newChatRig(t, []backends.Backend{row}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	a := rig.post(t, chatBody("chat"))
 	code, _, _ := a.envelope(t)
@@ -295,7 +295,7 @@ func TestMeterUsageCountersOneByOne(t *testing.T) {
 			`"usage":{"prompt_tokens":11,"total_tokens":14,"completion_tokens":3`,
 			`"usage":{"prompt_tokens":9223372036854775807,"total_tokens":1,"completion_tokens":1`, 1))
 	})
-	meter := newRigMeter(keyquota.Limits{RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
+	meter := newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000, CompletionReserve: 1024}, true)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	if a := rig.post(t, chatBody("chat")); a.status != http.StatusOK {
 		t.Fatalf("answer %d %s", a.status, a.body)
