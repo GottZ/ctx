@@ -16,7 +16,7 @@ func BenchmarkAdmitSettle(b *testing.B) {
 		b.Run(fmt.Sprintf("open%d", open), func(b *testing.B) {
 			c := newClock()
 			m := seeded(c)
-			l := keyquota.Limits{RPM: 1 << 40, TPM: 1 << 40}
+			l := keyquota.Limits{Concurrency: noL1, RPM: 1 << 40, TPM: 1 << 40}
 			e := keyquota.Estimate{MaxCompletion: 100, ClientMax: true}
 			s := chat(keyquota.LaneUrgent)
 			held := make([]*keyquota.Reservation, 0, open)

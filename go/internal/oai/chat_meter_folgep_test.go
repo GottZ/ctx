@@ -69,7 +69,7 @@ func meterRig(t *testing.T, lim keyquota.Limits, rows ...backends.Backend) (*cha
 	return newChatRig(t, rows, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m })), m
 }
 
-var wideMeter = keyquota.Limits{RPM: 1 << 30, TPM: 1 << 50, CompletionReserve: 1024}
+var wideMeter = keyquota.Limits{RPM: 1 << 30, TPM: 1 << 50, CompletionReserve: 1024, Concurrency: noL1}
 
 // TestMeterUpstreamCopyPastTheBudget (1): A6 with the real meter.
 func TestMeterUpstreamCopyPastTheBudget(t *testing.T) {

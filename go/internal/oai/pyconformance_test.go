@@ -17,12 +17,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,7 +49,9 @@ const (
 // (conformanceChat, W02-07) under CTX_CHAT_BASE_URL for test_chat.py — the
 // same in both runs, so the house-format run still fails exactly the error
 // cases. The meter fixture (conformanceMeter, W06-10) is served under
-// CTX_METER_BASE_URL for test_meter_retry.py, fresh per run.
+// CTX_METER_BASE_URL for test_meter_retry.py, the L1 fixture
+// (conformanceConcurrency, W06-11) under CTX_CONCURRENCY_BASE_URL for
+// test_concurrency_retry.py, both fresh per run.
 func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Helper()
 	uv, err := exec.LookPath("uv")
@@ -61,6 +65,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Cleanup(chat.Close)
 	meter := httptest.NewServer(conformanceMeter(t))
 	t.Cleanup(meter.Close)
+	concurrency := httptest.NewServer(conformanceConcurrency(t))
+	t.Cleanup(concurrency.Close)
 	moduleRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +78,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 		"pytest", "-p", "no:cacheprovider", "-v", "conformance/oai")
 	cmd.Dir = moduleRoot
 	cmd.Env = append(childEnv(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/",
-		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
+		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/",
+		"CTX_CONCURRENCY_BASE_URL="+concurrency.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -120,9 +127,55 @@ func conformanceMeter(t *testing.T) http.Handler {
 	up := newUpstream(t, answerSGLang)
 	m := keyquota.New(time.Now)
 	m.MarkSeeded()
-	meter := &rigMeter{m: m, lim: keyquota.Limits{RPM: 12, TPM: 1 << 30, CompletionReserve: 1024}}
+	meter := &rigMeter{m: m, lim: keyquota.Limits{Concurrency: noL1, RPM: 12, TPM: 1 << 30, CompletionReserve: 1024}}
 	rig := newChatRig(t, []backends.Backend{up.row("spark", backends.TrustFull, 1)}, 64, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	return rig.router
+}
+
+// conformanceConcurrency is the L1 fixture of test_concurrency_retry.py
+// (W06-11): the chat route over the real meter with C = 1. The engine holds
+// a request whose message is "hold" until POST /release (at most 30 s), so
+// the consumer's one slot stays taken until the test lets it go. GET /held
+// answers 204 once that request reached the engine — it holds the slot from
+// then on, so the test probes only after it (a probe racing the holder could
+// take the one slot first and leave the holder refused) — and 504 after 10 s.
+func conformanceConcurrency(t *testing.T) http.Handler {
+	t.Helper()
+	release, held := make(chan struct{}), make(chan struct{})
+	var once, heldOnce sync.Once
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if bytes.Contains(raw, []byte(`"hold"`)) {
+			heldOnce.Do(func() { close(held) })
+			select {
+			case <-release:
+			case <-time.After(30 * time.Second):
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, answerSGLang)
+	}))
+	t.Cleanup(engine.Close)
+	m := keyquota.New(time.Now)
+	m.MarkSeeded()
+	meter := &rigMeter{m: m, lim: keyquota.Limits{RPM: 1000, TPM: 1 << 30, CompletionReserve: 1024, Concurrency: 1}}
+	up := &upstream{srv: engine} // for its row
+	rig := newChatRig(t, []backends.Backend{up.row("spark", backends.TrustFull, 1)}, 64, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", rig.router)
+	mux.HandleFunc("GET /held", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-held:
+			w.WriteHeader(http.StatusNoContent)
+		case <-time.After(10 * time.Second):
+			w.WriteHeader(http.StatusGatewayTimeout)
+		}
+	})
+	mux.HandleFunc("POST /release", func(w http.ResponseWriter, _ *http.Request) {
+		once.Do(func() { close(release) })
+		w.WriteHeader(http.StatusNoContent)
+	})
+	return mux
 }
 
 // TestConformancePythonSDK: every case parses in the Python SDK with the
