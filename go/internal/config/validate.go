@@ -18,6 +18,7 @@ import (
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
 
@@ -1425,9 +1426,13 @@ const (
 	// gatewayCommitGraceCeiling keeps the stream header commit under a typical
 	// 60 s proxy idle timeout (design/02 §3.3, handler/sse.go).
 	gatewayCommitGraceCeiling = 50 * time.Second
-	// gatewayRequestReserve mirrors oai's request share per body byte
-	// (design/02 §4.2.1: body, RawMessage copy, upstream body).
-	gatewayRequestReserve = 3
+	// gatewayRequestReserve is the request share per body byte of one request
+	// at the body cap below credentials: oai's share at the door (design/02
+	// §4.2.1: body, RawMessage copy, upstream body) plus the sensitivity
+	// scan's booking on top (FOLGE-P H-8, oai coverScan), whose fixed rest is
+	// oai.ScanReserveBase. Read from oai, not mirrored: a re-measured factor
+	// moves the floor with it.
+	gatewayRequestReserve = oai.RequestReserveFactor + oai.ScanReserveFactor
 	// gatewayResponseCopies is the response share per capped unit (design/02
 	// §4.2.1): raw upstream body plus rewritten copy (non-stream), one frame
 	// raw plus rewritten (stream).
@@ -1459,12 +1464,17 @@ const (
 //   - gateway.max_stream_frame_bytes <= 4 MiB: the stream reader's frame cap.
 //   - gateway.request_deadline < 600 s: the SDKs' default timeout.
 //   - gateway.stream_commit_grace <= 50 s: under a typical proxy idle.
-//   - gateway.inflight_budget >= one request at every cap: 3 ×
-//     gateway.max_request_bytes (request share) plus the largest response
-//     share — 2 × gateway.max_response_bytes, 2 ×
+//   - gateway.inflight_budget >= one request at every cap: 26 ×
+//     gateway.max_request_bytes + 64 KiB (the request share of 3 × the body
+//     plus the sensitivity scan's booking of 23 × the body + 64 KiB, which a
+//     request to an alias below credentials takes before the scan runs —
+//     the configuration does not know the aliases' sensitivity, so the scan
+//     always counts; FOLGE-P H-8, Delta-Review 2 F-0) plus the largest
+//     response share — 2 × gateway.max_response_bytes, 2 ×
 //     gateway.max_stream_frame_bytes, or 4 B × gateway.embedding_max_floats
 //     plus 64 KiB (design/02 §4.2.1). A smaller budget could never serve such a
 //     request, and the client would read "overloaded, retry in 1 s" forever.
+//     The defaults need 216.06 MiB of their 256 MiB.
 //   - gateway.retry_after_jitter in [0, 1] (float keys have no generic sign
 //     walk; NaN fails every comparison and is refused explicitly).
 func validateGateway(c *Config) []Issue {
@@ -1524,9 +1534,9 @@ func validateGateway(c *Config) []Issue {
 	if need, ok := gatewayBudgetFloor(g); ok && g.InflightBudget > 0 {
 		switch {
 		case need < 0:
-			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + the largest response share) exceed any representable budget", g.InflightBudget, gatewayRequestReserve))
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + %d + the largest response share) exceed any representable budget", g.InflightBudget, gatewayRequestReserve, oai.ScanReserveBase))
 		case int64(g.InflightBudget) < need:
-			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap (%d = %d × gateway.max_request_bytes + the largest response share) — such a request could never be served", g.InflightBudget, need, gatewayRequestReserve))
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap (%d = %d × gateway.max_request_bytes + %d for the sensitivity scan's booking + the largest response share) — such a request could never be served", g.InflightBudget, need, gatewayRequestReserve, oai.ScanReserveBase))
 		}
 	}
 	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {
@@ -1626,7 +1636,8 @@ func gatewayBudgetFloor(g *GatewayConfig) (int64, bool) {
 		gatewayMulSat(gatewayResponseCopies, int64(g.MaxStreamFrameBytes)),
 		gatewayAddSat(gatewayMulSat(gatewayFloatBytes, int64(g.EmbeddingMaxFloats)), gatewayEmbedEncoderReserve),
 	)
-	floor := gatewayAddSat(gatewayMulSat(gatewayRequestReserve, int64(g.MaxRequestBytes)), response)
+	request := gatewayAddSat(gatewayMulSat(gatewayRequestReserve, int64(g.MaxRequestBytes)), oai.ScanReserveBase)
+	floor := gatewayAddSat(request, response)
 	if floor == math.MaxInt64 {
 		return -1, true
 	}

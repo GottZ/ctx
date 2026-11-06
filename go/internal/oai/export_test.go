@@ -21,10 +21,6 @@ func SetWatchEvery(d time.Duration) (restore func()) {
 // WatchTick is the production period (O2 (a) pin).
 const WatchTick = watchTick
 
-// ScanReserveFactor is the heap per body byte the route books before the
-// sensitivity scan (FOLGE-P H-8: the pin measures federation.ScanRaise).
-const ScanReserveFactor, ScanReserveBase = scanReserveFactor, scanReserveBase
-
 // EchoNameMax bounds an echoed client key name (FOLGE-P H-9).
 const EchoNameMax = echoNameMax
 

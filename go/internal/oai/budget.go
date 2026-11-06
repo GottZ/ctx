@@ -35,6 +35,17 @@ const (
 	scanReserveBase   = 64 << 10
 )
 
+// RequestReserveFactor, ScanReserveFactor and ScanReserveBase are the
+// constants above as the configuration's budget floor reads them (V39,
+// config/validate.go gatewayBudgetFloor: one request at every cap must fit
+// gateway.inflight_budget). config imports oai, never the reverse (depguard
+// config-layering), so the values are defined here once and read there.
+const (
+	RequestReserveFactor = requestReserveFactor
+	ScanReserveFactor    = scanReserveFactor
+	ScanReserveBase      = scanReserveBase
+)
+
 // ErrBudgetExhausted is the read error of a body without a declared length
 // once its running reservation would pass the in-flight budget. A handler
 // that sees it answers WriteOverloaded.
