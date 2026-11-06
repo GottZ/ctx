@@ -1341,8 +1341,14 @@ func validateGatewayMeter(c *Config) []Issue {
 // counterpart — a larger C would promise a consumer more concurrent requests
 // than the queue lets it wait with on one target (deviation from design/06
 // §4.11, which names dispatch.interactive_queue_per_principal: since A03-W3
-// the external class has a cap of its own). Fatal like V47: boot aborts, a
-// settings PUT of either key is a 422.
+// the external class has a cap of its own). Fatal like V47: boot aborts, and
+// a settings PUT of gateway.consumer_concurrency_default that breaks the rule
+// is a 422. The issue hangs on that one field, so a PUT that lowers
+// dispatch.external_queue_per_consumer under a stored C is a 200 with a
+// warning: the stored C is dropped and C falls back to its environment value
+// or the default (the mechanism V39 has for gateway.inflight_budget) — the
+// effective C never exceeds the cap. Only when that fallback breaks the rule
+// too is the PUT of the cap a 422.
 func validateGatewayConcurrency(c *Config) []Issue {
 	const key = "gateway.consumer_concurrency_default"
 	conc, queue := c.Gateway.ConsumerConcurrencyDefault, c.Dispatch.ExternalQueuePerConsumer
