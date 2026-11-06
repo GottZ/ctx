@@ -24,7 +24,9 @@ import (
 // Measured on the forms below (bau report FOLGE-P §Härtung H-6, §Härtung 3):
 // at most 0.75 on keys of ASCII and escapes after H-6, at 256 KiB and at
 // 8 MiB — before it up to 10 (long escaped keys: each key was compared in
-// full against the sixteen of the window).
+// full against the sixteen of the window). Beside ten busy loops on 12 cores
+// at most 1.00 (Delta-Review 4) and 0.92 (hardening 4, 1 000 measurements);
+// a form over its bound is measured again (cpuPasses).
 const parseCPURatioMax = 2
 
 // parseCPURatioMaxUTF8 bounds the forms whose keys share a prefix of literal
@@ -37,7 +39,10 @@ const parseCPURatioMax = 2
 // backslash scan restarted at every invalid byte and made the comparison
 // quadratic in a prefix of invalid bytes two keys share (Delta-Review 3
 // R3-0: 11 min for one 8 MiB request); that path is withdrawn, this bound is
-// the cost of the one that stands.
+// the cost of the one that stands. Beside ten busy loops on 12 cores single
+// measurements reached 4.91 (Delta-Review 4 R4-1) and 4.56 (hardening 4,
+// 2 of 301 over 4): a form over the bound is measured again (cpuPasses)
+// rather than the bound raised.
 const parseCPURatioMaxUTF8 = 4
 
 // cpuGrowthMax bounds the cost of a prefix form at 4 × the body against the
@@ -46,8 +51,27 @@ const parseCPURatioMaxUTF8 = 4
 // §Härtung 3): 2.71–4.82 on every prefix form, 1 080 measurements; 17.2–18.2
 // on the forms of invalid bytes with hardening 2's run copy, 15.7–15.8 on
 // those of é before 0xff with an early exit at an invalid first rune added
-// to it (the reviewer's partial fix).
+// to it (the reviewer's partial fix). Under load single measurements of the
+// linear cost pass it: beside ten busy loops on 12 cores up to 14.89
+// (Delta-Review 4 R4-1) and 12.37 (hardening 4, 10 of 1 811 over 8, the
+// valid é forms among them), in the CI form at a host load of about 45 9.9
+// (message_lone_ff, Delta-Review 4); against the base parse the prefix
+// forms of invalid bytes reached 2.02 and 2.52 there (bound 2). A form over
+// a bound is measured again (cpuPasses).
 const cpuGrowthMax = 8
+
+// cpuPasses is how many passes a CPU gate gives a form at most (Delta-Review
+// 4 R4-1, gateForm): a form that exceeds a bound is measured again, up to
+// two more passes with the same rounds, and fails the gate only when every
+// pass exceeds — the bounds above stay, and no pass is averaged with another.
+// Load inflates single passes: beside ten busy loops 3 of 150 gate runs
+// were red without it, none with it, 6 runs measured a form again and 2
+// forms needed the third pass (hardening 4). A cost that is not linear goes
+// over in each pass: the quadratic copy (growth 12.4–23.1 under that load,
+// Delta-Review 4), and a backslash scan over a 32nd of the rest at every
+// invalid byte — growth 5.6–6.4 and so caught by the base bound on the
+// top-level forms — stayed red in 10 of 10 runs quiet and loaded alike.
+const cpuPasses = 3
 
 // cpuPrefixBytes is the smaller body of the prefix forms; the gate parses
 // each at it and at 4 ×.

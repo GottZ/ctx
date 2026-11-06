@@ -1,10 +1,12 @@
-// Package keyquota is the per-consumer meter of the model API, level L0
-// (design/06 §4.2, wave W06-10): a GCRA bucket for requests per minute and
-// one for tokens per minute per (consumer, op), lane-aware with the XU
-// reserve, with the reservation capped at the limit and the overrun booked
-// as debt when the request settles. The meter refuses at once and never
-// waits (design/06 §4.1 step 8: "L0 lehnt ab, wartet nie"); only the
-// dispatcher's L2 waits.
+// Package keyquota is the per-consumer meter of the model API, levels L0
+// and L1 (design/06 §4.2, waves W06-10 and W06-11): a GCRA bucket for
+// requests per minute and one for tokens per minute per (consumer, op),
+// lane-aware with the XU reserve, with the reservation capped at the limit
+// and the overrun booked as debt when the request settles; and the
+// concurrency limit C per (consumer, op), counted from Admit to the
+// reservation's end — waiting in L2 and running alike — with the same XU
+// reserve. The meter refuses at once and never waits (design/06 §4.1 steps 8
+// and 9: "L0/L1 lehnen ab, NUR L2 wartet"); only the dispatcher's L2 waits.
 //
 // A leaf by design (design/06 §4.2, masterplan K-Meter): it imports neither
 // config nor handler nor a database — the limits arrive per call (Limits,
@@ -85,8 +87,15 @@ type Limits struct {
 	// the client named no maximum (gateway.tpm_reserve_default).
 	CompletionReserve int64
 	// XUReserve is r (gateway.xu_reserve_ratio, [0, 1)): bulk requests are
-	// admitted only up to the share 1 − r of each bucket.
+	// admitted only up to the share 1 − r of each bucket and of the
+	// concurrency slots.
 	XUReserve float64
+	// Concurrency is C, L1 (gateway.consumer_concurrency_default): the
+	// requests of the subject's op that may be open at once — admitted and
+	// not ended, waiting in L2 or running. At least 1 (V48): L1 is never
+	// unbounded (design/04 R-06-4), a smaller value is refused as a wiring
+	// defect.
+	Concurrency int64
 }
 
 // Estimate is what a request is expected to cost (design/06 §4.2
@@ -131,19 +140,26 @@ type Usage struct {
 // Reason is why Admit refused (the ledger reasons of design/06 §4.1).
 type Reason string
 
-// The refusal reasons of L0. ReasonInvalid is a wiring defect (no consumer,
-// no tenant, an unknown op, a limit below 1) — never a client's fault.
+// The refusal reasons of L0 and L1. ReasonInvalid is a wiring defect (no
+// consumer, no tenant, an unknown op, a limit below 1) — never a client's
+// fault.
 const (
-	ReasonRequests Reason = "rate_requests"
-	ReasonTokens   Reason = "rate_tokens"
-	ReasonWarming  Reason = "warming"
-	ReasonInvalid  Reason = "invalid"
+	ReasonRequests    Reason = "rate_requests"
+	ReasonTokens      Reason = "rate_tokens"
+	ReasonConcurrency Reason = "concurrency"
+	ReasonWarming     Reason = "warming"
+	ReasonInvalid     Reason = "invalid"
 )
 
 // WarmingRetryAfter is the Retry-After of an unseeded meter: the retry
 // cadence of the boot seed (design/06 §4.2 "Retry mit Backoff 5 s", §4.4
 // row warming; lead decision O-10-1 (a): a named constant, not a setting).
 const WarmingRetryAfter = 5 * time.Second
+
+// ConcurrencyRetryAfter is the Retry-After of an L1 refusal: the honest lower
+// bound — the meter cannot know when one of the open requests ends
+// (design/06 §4.2 row "L1 Concurrency", §4.4 row concurrency: 1 / 1000).
+const ConcurrencyRetryAfter = time.Second
 
 // window is W of design/06 §4.2: the limits are per minute by definition,
 // the emission interval of a limit L is W/L and the burst tolerance τ = W.
@@ -218,10 +234,13 @@ type stateKey struct {
 // buckets are the theoretical arrival times (GCRA tat, ns since the meter's
 // base) of one (consumer, op): requests and tokens (0 = never used, an
 // empty bucket), and the reservations of the key that have not ended yet,
-// each with its shadow (the refund rule, Reservation.Settle).
+// each with its shadow (the refund rule, Reservation.Settle). The open set
+// is also L1's count: len(open) requests in flight, bulk of them on the bulk
+// lane (kept by add and drop, the only two places the set changes).
 type buckets struct {
 	req, tok int64
 	open     []*Reservation
+	bulk     int64
 	seq      uint64 // admission order of the key's reservations
 }
 
@@ -240,6 +259,9 @@ func (st *buckets) add(r *Reservation) {
 	r.seq = st.seq
 	r.slot = len(st.open)
 	st.open = append(st.open, r)
+	if r.lane == LaneBulk {
+		st.bulk++
+	}
 }
 
 // drop takes r out of the open set (swap with the last).
@@ -253,7 +275,45 @@ func (st *buckets) drop(r *Reservation) {
 	st.open[last] = nil
 	st.open = st.open[:last]
 	r.slot = -1
+	if r.lane == LaneBulk {
+		st.bulk--
+	}
 }
+
+// l1 is L1 of design/06 §4.2 for a request on lane: the key's open
+// reservations stay below C, and those of the bulk lane below its share
+// bulkSlots(C, r), so the urgent lane of the same consumer keeps the rest of
+// the slots and reaches L2. It returns the limit that refuses (false) — the
+// lane's share when the bulk count is the bound.
+func (st *buckets) l1(lane Lane, l Limits) (limit int64, bulkBound, ok bool) {
+	if int64(len(st.open)) >= l.Concurrency {
+		return l.Concurrency, false, false
+	}
+	if lane == LaneBulk {
+		if share := bulkSlots(l.Concurrency, l.XUReserve); st.bulk >= share {
+			return share, true, false
+		}
+	}
+	return 0, false, true
+}
+
+// bulkSlots is the bulk lane's share of C: ⌊C·(1 − r)⌋, at least one slot —
+// a bulk request is never refused for good; at C = 1 (or r = 0, or no r at
+// all, like newDim) there is no urgent reserve, the named bound of design/06
+// §4.2 "Bei C = 1 ist kein Reservat möglich". r is taken to the millionth and
+// the floor counted in integers: in float64, 1 − r of a decimal r can lie
+// just under its exact value and the truncation then lands one slot short
+// (Fremd-Review 1 F-1: C 10 at r 0.8 gave 1, not 2).
+func bulkSlots(c int64, r float64) int64 {
+	if !(r > 0) {
+		return c
+	}
+	keep := reserveScale - int64(math.Round(min(r, 1)*reserveScale))
+	return max(mulDiv(c, keep, reserveScale), 1)
+}
+
+// reserveScale is the resolution of r in the bulk share: the millionth.
+const reserveScale = 1_000_000
 
 // New returns an unseeded meter over the clock now: until MarkSeeded every
 // Admit answers warming (design/06 §4.1 step 7).
@@ -273,12 +333,13 @@ func (m *Meter) MarkSeeded() { m.seeded.Store(true) }
 // Seeded reports whether the meter admits at all.
 func (m *Meter) Seeded() bool { return m.seeded.Load() }
 
-// Admit is design/06 §4.1 steps 7 and 8 for one request: seeded?, then the
-// request and token buckets of (consumer, op) — both pass or nothing is
-// booked. O(open reservations of the key) under one mutex (the admission
-// raises their shadows); a refusal changes no state.
+// Admit is design/06 §4.1 steps 7 to 9 for one request: seeded?, then the
+// request and token buckets of (consumer, op), then L1 — all pass or nothing
+// is booked. O(open reservations of the key) under one mutex (the admission
+// raises their shadows; L1 bounds the open set at C); a refusal changes no
+// state.
 func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) {
-	if s.ConsumerID == "" || s.TenantID == "" || l.RPM < 1 || l.TPM < 1 || s.Lane > LaneBulk {
+	if s.ConsumerID == "" || s.TenantID == "" || l.RPM < 1 || l.TPM < 1 || l.Concurrency < 1 || s.Lane > LaneBulk {
 		return nil, invalid()
 	}
 	if _, ok := ParseOp(string(s.Op)); !ok {
@@ -309,6 +370,9 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 	if !okReq || !okTok {
 		return nil, refused(s, req, tok, waitReq, waitTok, okReq)
 	}
+	if limit, bulkBound, ok := st.l1(s.Lane, l); !ok {
+		return nil, concurrencyRefused(s, limit, bulkBound)
+	}
 	m.state[key] = st
 	st.raise(now, nextTok-max(st.tok, now))
 	st.req, st.tok = nextReq, nextTok
@@ -316,9 +380,21 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 		LimitRequests: req.cap, RemainingRequests: req.remaining(st.req, now), ResetRequests: time.Duration(backlog(st.req, now)),
 		LimitTokens: tok.cap, RemainingTokens: tok.remaining(st.tok, now), ResetTokens: time.Duration(backlog(st.tok, now)),
 	}
-	r := &Reservation{m: m, key: key, tpm: l.TPM, charged: tok.cost(n), held: n, shadow: now, headers: h}
+	r := &Reservation{m: m, key: key, lane: s.Lane, tpm: l.TPM, charged: tok.cost(n), held: n, shadow: now, headers: h}
 	st.add(r)
 	return r, Decision{Allowed: true, Retryable: true, Headers: h}
+}
+
+// concurrencyRefused is the decision of an L1 refusal: Retry-After is the
+// honest lower bound, the message names the limit that refused — C, or the
+// bulk lane's share of it.
+func concurrencyRefused(s Subject, limit int64, bulkBound bool) Decision {
+	lane := ""
+	if bulkBound {
+		lane = ", bulk lane"
+	}
+	return Decision{Reason: ReasonConcurrency, RetryAfter: ConcurrencyRetryAfter, Retryable: true,
+		Message: fmt.Sprintf("Concurrency limit reached for requests (%s%s): %d at a time.", s.Op, lane, limit)}
 }
 
 func invalid() Decision {
@@ -341,12 +417,13 @@ func refused(s Subject, req, tok dim, waitReq, waitTok int64, okReq bool) Decisi
 		Message: fmt.Sprintf("Rate limit reached for %s (%s%s): %d/min.", what, s.Op, lane, d.cap)}
 }
 
-// Reservation is one admitted request's share of the meter. It ends exactly
-// once — Settle, Keep, Abort and Reject share one sync.Once — and every
-// later end is a no-op.
+// Reservation is one admitted request's share of the meter, its L1 slot
+// included. It ends exactly once — Settle, Keep, Abort and Reject share one
+// sync.Once, and each frees the slot — and every later end is a no-op.
 type Reservation struct {
 	m       *Meter
 	key     stateKey
+	lane    Lane  // the lane of the admission: which L1 count the slot is in
 	tpm     int64 // the TPM the admission was charged under
 	charged int64 // ns booked on the token bucket at admission
 	held    int64 // the tokens charged at admission (Held)

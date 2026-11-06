@@ -19,7 +19,7 @@ func TestReservationHeldIsTheAdmissionsCharge(t *testing.T) {
 	sub := func(id string, op keyquota.Op, lane keyquota.Lane) keyquota.Subject {
 		return keyquota.Subject{ConsumerID: id, TenantID: "t1", Op: op, Lane: lane}
 	}
-	lim := keyquota.Limits{RPM: 1000, TPM: 100, CompletionReserve: 64, XUReserve: 0.5}
+	lim := keyquota.Limits{RPM: 1000, TPM: 100, CompletionReserve: 64, XUReserve: 0.5, Concurrency: noL1}
 	for _, tc := range []struct {
 		name string
 		s    keyquota.Subject

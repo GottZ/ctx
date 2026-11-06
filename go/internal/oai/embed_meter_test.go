@@ -93,7 +93,7 @@ func embedWireRow(name, host string, prio int) backends.Backend {
 // embedMeter.
 func embedMeterRig(t *testing.T, rows ...backends.Backend) (*chatRig, *embedMeter) {
 	t.Helper()
-	m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: 60_000_000, CompletionReserve: 1024})
+	m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: 60_000_000, CompletionReserve: 1024, Concurrency: noL1})
 	return newEmbedRig(t, rows, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m })), m
 }
 
@@ -262,7 +262,7 @@ func TestEmbedMeterWireContactNeverRefundsInFull(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEmbedEngine(t, 8)
-			m := newEmbedMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024})
+			m := newEmbedMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024, Concurrency: noL1})
 			var grants atomic.Int64
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -395,7 +395,7 @@ func TestEmbedMeterFailoverRefusalAfterTheWireKeeps(t *testing.T) {
 		_, _ = io.WriteString(w, `{"error":{"message":"engine busy"}}`)
 		return true
 	})
-	m := newEmbedMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024})
+	m := newEmbedMeter(keyquota.Limits{RPM: 100, TPM: 60_000_000, CompletionReserve: 1024, Concurrency: noL1})
 	rig := newEmbedRig(t, []backends.Backend{second.row("spark1", backends.ProtocolOpenAI, 10), first.row("spark2", backends.ProtocolOpenAI, 20)}, 2, 1,
 		withDeps(func(d *oai.Deps) { d.Limiter = m }))
 	hctx := context.WithValue(context.Background(), consumerKey{}, rig.ca.Load())
@@ -423,7 +423,7 @@ func TestEmbedMeterFailoverRefusalAfterTheWireKeeps(t *testing.T) {
 // the admission left them.
 func TestEmbedMeterSuccessCarriesRateLimitHeaders(t *testing.T) {
 	e := newEmbedEngine(t, 8)
-	m := newEmbedMeter(keyquota.Limits{RPM: 10, TPM: 60000, CompletionReserve: 1024})
+	m := newEmbedMeter(keyquota.Limits{RPM: 10, TPM: 60000, CompletionReserve: 1024, Concurrency: noL1})
 	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m }))
 	a := rig.postEmbed(t, embedBody("emb1", embedInputs(1)))
 	if a.status != http.StatusOK {
@@ -449,7 +449,7 @@ func TestEmbedMeterSuccessCarriesRateLimitHeaders(t *testing.T) {
 // the embeddings route carries Retry-After AND retry-after-ms, exact.
 func TestEmbedMeterRefusalCarriesRetryAfterMs(t *testing.T) {
 	e := newEmbedEngine(t, 8)
-	m := newEmbedMeter(keyquota.Limits{RPM: 1, TPM: 60000, CompletionReserve: 1024})
+	m := newEmbedMeter(keyquota.Limits{RPM: 1, TPM: 60000, CompletionReserve: 1024, Concurrency: noL1})
 	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m }))
 	if a := rig.postEmbed(t, embedBody("emb1", embedInputs(1))); a.status != http.StatusOK {
 		t.Fatalf("first: %d %.300s", a.status, a.body)

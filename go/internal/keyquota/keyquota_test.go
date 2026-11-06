@@ -81,7 +81,7 @@ func TestOpMatchesTheRowVocabulary(t *testing.T) {
 func TestGCRABurstAndRetryAfter(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 2, TPM: 1000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 2, TPM: 1000}
 	for i, want := range []int64{1, 0} {
 		res, d := m.Admit(chat(keyquota.LaneUrgent), l, small)
 		if !d.Allowed || res == nil {
@@ -114,7 +114,7 @@ func TestGCRABurstAndRetryAfter(t *testing.T) {
 func TestGCRAUnevenLimit(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 7, TPM: 1000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 7, TPM: 1000}
 	for i := range 7 {
 		if _, d := m.Admit(chat(keyquota.LaneUrgent), l, small); !d.Allowed {
 			t.Fatalf("request %d of the burst refused: %+v", i+1, d)
@@ -133,7 +133,7 @@ func TestGCRAUnevenLimit(t *testing.T) {
 func TestLaneReserve(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 4, TPM: 1 << 20, XUReserve: 0.25}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 4, TPM: 1 << 20, XUReserve: 0.25}
 	for i, want := range []int64{2, 1, 0} {
 		_, d := m.Admit(chat(keyquota.LaneBulk), l, small)
 		if !d.Allowed {
@@ -162,11 +162,13 @@ func TestLaneReserveFloor(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
 	for _, r := range []float64{0.25, 0.99, 1, 2} {
-		l := keyquota.Limits{RPM: 1, TPM: 1000, XUReserve: r}
+		l := keyquota.Limits{Concurrency: noL1, RPM: 1, TPM: 1000, XUReserve: r}
 		s := keyquota.Subject{ConsumerID: "floor", TenantID: "t", Op: keyquota.OpChat, Lane: keyquota.LaneBulk}
-		_, d := m.Admit(s, l, small)
+		res, d := m.Admit(s, l, small)
 		if !d.Allowed {
 			t.Errorf("r=%v: a fresh bulk request at rpm 1 refused: %+v", r, d)
+		} else {
+			res.Abort() // its L1 slot: at r >= 1 the bulk lane's share of C is the floor 1
 		}
 		c.add(time.Minute)
 	}
@@ -179,7 +181,7 @@ func TestLaneReserveFloor(t *testing.T) {
 func TestCapAndDebt(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 100, TPM: 60000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000}
 	big := keyquota.Estimate{PromptRunes: runesFor(61000), MaxCompletion: 1000, ClientMax: true}
 	if got := big.Tokens(keyquota.OpChat, l); got <= 60000 {
 		t.Fatalf("estimate %d, want > 60000", got)
@@ -223,7 +225,7 @@ func TestCapAndDebt(t *testing.T) {
 func TestBulkCapIsTheLaneCapacity(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 100, TPM: 60000, XUReserve: 0.25}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000, XUReserve: 0.25}
 	e := keyquota.Estimate{PromptRunes: runesFor(49000), MaxCompletion: 1000, ClientMax: true}
 	if got := e.Tokens(keyquota.OpChat, l); got != 50000 {
 		t.Fatalf("estimate %d, want 50000", got)
@@ -247,7 +249,7 @@ func TestBulkCapIsTheLaneCapacity(t *testing.T) {
 func TestUsageSumSaturates(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 100, TPM: 60000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000}
 	res, _ := m.Admit(chat(keyquota.LaneUrgent), l, small)
 	res.Settle(keyquota.Usage{PromptTokens: math.MaxInt, CompletionTokens: math.MaxInt})
 	if _, d := m.Admit(chat(keyquota.LaneUrgent), l, small); d.Allowed || d.RetryAfter <= 0 {
@@ -260,7 +262,7 @@ func TestUsageSumSaturates(t *testing.T) {
 func TestOpBuckets(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 100, TPM: 1000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 1000}
 	emb := keyquota.Subject{ConsumerID: "c1", TenantID: "t1", Op: keyquota.OpEmbed}
 	res, d := m.Admit(emb, l, keyquota.Estimate{InputRunes: runesFor(1000)})
 	if !d.Allowed {
@@ -280,7 +282,7 @@ func TestOpBuckets(t *testing.T) {
 // the registry defaults of embed (120 rpm, 500 000 tpm) is admitted.
 func TestEmbedBatchFitsTheDefaults(t *testing.T) {
 	m := seeded(newClock())
-	l := keyquota.Limits{RPM: 120, TPM: 500000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 120, TPM: 500000}
 	e := keyquota.Estimate{InputRunes: runesFor(2048 * 128)}
 	if got := e.Tokens(keyquota.OpEmbed, l); got != 2048*128 {
 		t.Fatalf("batch estimate %d, want %d", got, 2048*128)
@@ -294,7 +296,7 @@ func TestEmbedBatchFitsTheDefaults(t *testing.T) {
 // same embed input twice books the same tokens twice (no cheaper repeat).
 func TestSameEstimateBooksTheSame(t *testing.T) {
 	m := seeded(newClock())
-	l := keyquota.Limits{RPM: 100, TPM: 100000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 100000}
 	s := keyquota.Subject{ConsumerID: "c", TenantID: "t", Op: keyquota.OpEmbed}
 	e := keyquota.Estimate{InputRunes: 900}
 	_, d1 := m.Admit(s, l, e)
@@ -309,7 +311,7 @@ func TestSameEstimateBooksTheSame(t *testing.T) {
 // TestChatReservation is the chat formula of design/06 §4.2: prompt
 // estimate + the client's clamped maximum, or min(reserve, clamp) without one.
 func TestChatReservation(t *testing.T) {
-	l := keyquota.Limits{CompletionReserve: 1024}
+	l := keyquota.Limits{Concurrency: noL1, CompletionReserve: 1024}
 	p := promptguard.TokenEstimate(900)
 	for _, tc := range []struct {
 		e    keyquota.Estimate
@@ -334,7 +336,7 @@ func TestChatReservation(t *testing.T) {
 func TestWarming(t *testing.T) {
 	c := newClock()
 	m := keyquota.New(c.now)
-	l := keyquota.Limits{RPM: 1, TPM: 1000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 1, TPM: 1000}
 	res, d := m.Admit(chat(keyquota.LaneUrgent), l, small)
 	if d.Allowed || res != nil || d.Reason != keyquota.ReasonWarming || d.RetryAfter != 5*time.Second || !d.Retryable {
 		t.Fatalf("unseeded: %+v, want warming, Retry-After 5s, retryable", d)
@@ -349,7 +351,7 @@ func TestWarming(t *testing.T) {
 // limit below 1 is a wiring defect — refused, not retryable, nothing booked.
 func TestInvalidSubjectFailsClosed(t *testing.T) {
 	m := seeded(newClock())
-	l := keyquota.Limits{RPM: 10, TPM: 1000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 10, TPM: 1000}
 	for name, tc := range map[string]struct {
 		s keyquota.Subject
 		l keyquota.Limits
@@ -358,8 +360,8 @@ func TestInvalidSubjectFailsClosed(t *testing.T) {
 		"no tenant":   {keyquota.Subject{ConsumerID: "c", Op: keyquota.OpChat}, l},
 		"unknown op":  {keyquota.Subject{ConsumerID: "c", TenantID: "t", Op: "images"}, l},
 		"bad lane":    {keyquota.Subject{ConsumerID: "c", TenantID: "t", Op: keyquota.OpChat, Lane: 7}, l},
-		"rpm 0":       {chat(keyquota.LaneUrgent), keyquota.Limits{TPM: 1000}},
-		"tpm 0":       {chat(keyquota.LaneUrgent), keyquota.Limits{RPM: 10}},
+		"rpm 0":       {chat(keyquota.LaneUrgent), keyquota.Limits{Concurrency: noL1, TPM: 1000}},
+		"tpm 0":       {chat(keyquota.LaneUrgent), keyquota.Limits{Concurrency: noL1, RPM: 10}},
 	} {
 		res, d := m.Admit(tc.s, tc.l, small)
 		if d.Allowed || res != nil || d.Reason != keyquota.ReasonInvalid || d.Retryable {
@@ -374,7 +376,7 @@ func TestInvalidSubjectFailsClosed(t *testing.T) {
 func TestReservationEndsOnce(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 10, TPM: 10000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 10, TPM: 10000}
 	e := keyquota.Estimate{PromptRunes: 900, MaxCompletion: 500, ClientMax: true}
 	n := e.Tokens(keyquota.OpChat, l)
 	for name, end := range map[string]func(*keyquota.Reservation){
@@ -412,7 +414,7 @@ func TestReservationEndsOnce(t *testing.T) {
 func TestMixedEndsEqualTheSettles(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 1 << 20, TPM: 60_000_000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 1 << 20, TPM: 60_000_000}
 	s := chat(keyquota.LaneUrgent)
 	rng := rand.New(rand.NewPCG(10, 6))
 	var settled int64
@@ -449,7 +451,7 @@ func TestConcurrentAdmitsNeverExceedTheLimit(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
 	const limit = 50
-	l := keyquota.Limits{RPM: limit, TPM: 1 << 30}
+	l := keyquota.Limits{Concurrency: noL1, RPM: limit, TPM: 1 << 30}
 	var admitted atomic.Int64
 	var wg sync.WaitGroup
 	for range 64 {
@@ -485,7 +487,7 @@ func TestConcurrentAdmitsNeverExceedTheLimit(t *testing.T) {
 // TestHeaderForm: the six x-ratelimit-* headers, reset as a Go duration.
 func TestHeaderForm(t *testing.T) {
 	m := seeded(newClock())
-	l := keyquota.Limits{RPM: 2, TPM: 60000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 2, TPM: 60000}
 	r, d := m.Admit(chat(keyquota.LaneUrgent), l, keyquota.Estimate{PromptRunes: 9, MaxCompletion: 995, ClientMax: true})
 	h := r.Headers()
 	want := map[string]string{

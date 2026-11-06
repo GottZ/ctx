@@ -18,11 +18,22 @@ package oai
 // package's parse and not the oracle in the test file — the ratio measures
 // the instrumentation there (up to 5.5 against 2, 4 of 4 runs red), not the
 // parse. The gate skips itself then, with the reason in the skip.
+//
+// A form that exceeds a bound is measured again (Delta-Review 4 R4-1,
+// gateForm): up to cpuPasses passes of the same rounds, and the gate fails
+// only when every pass exceeds. A loaded host inflated single measurements
+// past the bounds (growth up to 14.89 beside ten busy loops, 9.9 in the CI
+// form at a host load of about 45) where the cost is linear; a cost that is
+// not linear exceeds in every pass. Each pass that leads to another is
+// logged ("FOLGEP cpu retry"), so a green run with repeats stays visible.
+// The bounds stay as they are, and no pass is averaged with another.
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,11 +54,14 @@ func TestParseCPUAgainstTheBase(t *testing.T) {
 		if n.stage != o.stage || n.code != o.code {
 			t.Fatalf("form %s: new %s %q, base %s %q", f.name, n.stage, n.code, o.stage, o.code)
 		}
-		ratio, mn, mb := cpuRatio(f, 7)
-		t.Logf("FOLGEP cpu form=%s bytes=%d answer=%s/%s new=%v base=%v ratio=%.2f", f.name, len(f.body), n.stage, n.code, mn, mb, ratio)
-		if ratio > f.bound() {
-			t.Errorf("form %s: the parse takes %v, %.1f × the base parse's %v (at most %g ×)", f.name, mn, ratio, mb, f.bound())
-		}
+		gateForm(t, f.name, func(pass int) []string {
+			ratio, mn, mb := cpuRatio(f, 7)
+			t.Logf("FOLGEP cpu form=%s bytes=%d answer=%s/%s new=%v base=%v ratio=%.2f pass=%d", f.name, len(f.body), n.stage, n.code, mn, mb, ratio, pass)
+			if ratio > f.bound() {
+				return []string{fmt.Sprintf("the parse takes %v, %.2f × the base parse's %v (at most %g ×)", mn, ratio, mb, f.bound())}
+			}
+			return nil
+		})
 	}
 }
 
@@ -69,28 +83,55 @@ func TestParseCPUIsLinearInASharedPrefix(t *testing.T) {
 		if n.stage != o.stage || n.code != o.code {
 			t.Fatalf("form %s: new %s %q, base %s %q", l.name, n.stage, n.code, o.stage, o.code)
 		}
-		minS, minL, minB := time.Duration(1<<62), time.Duration(1<<62), time.Duration(1<<62)
-		for range 7 {
-			runtime.GC() // the base parse's garbage of the round before is not marked during this one
-			t0 := time.Now()
-			_ = newParse(s.body, s.l)
-			minS = min(minS, time.Since(t0))
-			t0 = time.Now()
-			_ = newParse(l.body, l.l)
-			minL = min(minL, time.Since(t0))
-			t0 = time.Now()
-			_ = baseParse(l.body, l.l)
-			minB = min(minB, time.Since(t0))
+		gateForm(t, l.name, func(pass int) []string {
+			minS, minL, minB := time.Duration(1<<62), time.Duration(1<<62), time.Duration(1<<62)
+			for range 7 {
+				runtime.GC() // the base parse's garbage of the round before is not marked during this one
+				t0 := time.Now()
+				_ = newParse(s.body, s.l)
+				minS = min(minS, time.Since(t0))
+				t0 = time.Now()
+				_ = newParse(l.body, l.l)
+				minL = min(minL, time.Since(t0))
+				t0 = time.Now()
+				_ = baseParse(l.body, l.l)
+				minB = min(minB, time.Since(t0))
+			}
+			growth, ratio := float64(minL)/float64(max(minS, 1)), float64(minL)/float64(max(minB, 1))
+			t.Logf("FOLGEP cpu prefix form=%s bytes=%d/%d answer=%s/%s new=%v/%v growth=%.2f base=%v ratio=%.2f pass=%d", l.name, len(s.body), len(l.body), n.stage, n.code, minS, minL, growth, minB, ratio, pass)
+			var over []string
+			if growth > cpuGrowthMax {
+				over = append(over, fmt.Sprintf("the parse takes %v at %d B and %v at %d B, %.2f × for 4 × the body (at most %d ×: the cost is not linear)", minS, len(s.body), minL, len(l.body), growth, cpuGrowthMax))
+			}
+			if ratio > l.bound() {
+				over = append(over, fmt.Sprintf("the parse takes %v, %.2f × the base parse's %v (at most %g ×)", minL, ratio, minB, l.bound()))
+			}
+			return over
+		})
+	}
+}
+
+// gateForm decides one form of a CPU gate (Delta-Review 4 R4-1). measure
+// runs one pass — the form's rounds, as many as every pass has — and returns
+// each bound the pass exceeds as the text of its error, none when the pass
+// holds. The form holds as soon as one pass holds every bound. A pass that
+// exceeds one is logged with the form, the pass and the values, and the form
+// is measured again, cpuPasses passes at most; the gate fails only when
+// every pass exceeds, and its error names each of them.
+func gateForm(t *testing.T, form string, measure func(pass int) []string) {
+	t.Helper()
+	var passes []string
+	for pass := 1; pass <= cpuPasses; pass++ {
+		over := measure(pass)
+		if len(over) == 0 {
+			return
 		}
-		growth, ratio := float64(minL)/float64(max(minS, 1)), float64(minL)/float64(max(minB, 1))
-		t.Logf("FOLGEP cpu prefix form=%s bytes=%d/%d answer=%s/%s new=%v/%v growth=%.2f base=%v ratio=%.2f", l.name, len(s.body), len(l.body), n.stage, n.code, minS, minL, growth, minB, ratio)
-		if growth > cpuGrowthMax {
-			t.Errorf("form %s: the parse takes %v at %d B and %v at %d B, %.1f × for 4 × the body (at most %d ×: the cost is not linear)", l.name, minS, len(s.body), minL, len(l.body), growth, cpuGrowthMax)
-		}
-		if ratio > l.bound() {
-			t.Errorf("form %s: the parse takes %v, %.1f × the base parse's %v (at most %g ×)", l.name, minL, ratio, minB, l.bound())
+		passes = append(passes, fmt.Sprintf("pass %d: %s", pass, strings.Join(over, "; ")))
+		if pass < cpuPasses {
+			t.Logf("FOLGEP cpu retry form=%s pass=%d of %d: %s — measuring the form again", form, pass, cpuPasses, strings.Join(over, "; "))
 		}
 	}
+	t.Errorf("form %s: each of %d passes exceeds a bound — %s", form, cpuPasses, strings.Join(passes, " | "))
 }
 
 // skipUnderCoverage skips a CPU gate under coverage instrumentation

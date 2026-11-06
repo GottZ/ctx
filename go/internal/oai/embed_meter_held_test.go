@@ -48,7 +48,7 @@ func TestEmbedMeterHeldSurvivesALimitReload(t *testing.T) {
 			e := newEmbedEngine(t, 8)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: 100, CompletionReserve: 1024})
+			m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: 100, CompletionReserve: 1024, Concurrency: noL1})
 			rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m }))
 			rig.setSettings(func(s *oai.Settings) { s.Meter.Embed = oai.OpLimits{RPM: 1000, TPM: 100} })
 			var reloaded atomic.Bool

@@ -382,7 +382,7 @@ func TestEmbedMeterFailoverBooksEachInputOnce(t *testing.T) {
 			if tpm == 0 {
 				tpm = 60_000_000
 			}
-			m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: tpm, CompletionReserve: 1024})
+			m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: tpm, CompletionReserve: 1024, Concurrency: noL1})
 			rig := newEmbedRig(t, []backends.Backend{r2, r1}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m }))
 			if tc.firstE > 0 {
 				rig.disp.UpdatePolicy(dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{
@@ -441,7 +441,7 @@ func embedReservationOf(inputs []string) int64 {
 // headers set after WriteHeader).
 func TestEmbedMeterRateLimitHeadersBeforeTheFirstByte(t *testing.T) {
 	e := newEmbedEngine(t, 8)
-	m := newEmbedMeter(keyquota.Limits{RPM: 10, TPM: 60000, CompletionReserve: 1024})
+	m := newEmbedMeter(keyquota.Limits{RPM: 10, TPM: 60000, CompletionReserve: 1024, Concurrency: noL1})
 	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m }))
 	resp, body, err := postEmbedOverSocket(t, rig, context.Background(), embedBody("emb1", embedInputs(1)))
 	if err != nil {
@@ -656,7 +656,7 @@ func TestEmbedMeterEstimateNeverAboveKeep(t *testing.T) {
 				_, _ = io.WriteString(w, embedAnswerUsage(in, 8, tc.u))
 				return true
 			})
-			m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: 100, CompletionReserve: 1024})
+			m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: 100, CompletionReserve: 1024, Concurrency: noL1})
 			var lim oai.Limiter = m
 			if tc.hidden {
 				lim = capacityHidden{m}

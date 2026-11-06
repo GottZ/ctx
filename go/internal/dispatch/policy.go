@@ -137,8 +137,11 @@ type BackendRow struct {
 	// Roles are the routing roles of the row (context_backends.roles) — the
 	// coverage term derives background reachability from them (enforcing.go).
 	Roles []string
-	// External marks locality='external' rows (openrouter): exempt from the
-	// Enforcing coverage term — "external skaliert selbst" (design/01 §3.2).
+	// External marks locality='external' rows that scale on their own
+	// (openrouter, a cloud generic row): exempt from the Enforcing coverage
+	// term — "external skaliert selbst" (design/01 §3.2). Never a ctx row:
+	// ctx targets count as local, B's own order must hold up to A's door
+	// (design/04 §4.14, F-W7; the projection is events.DispatchBackendRows).
 	External bool
 	// SelfAdmitting marks a row whose target admits on its own, remotely:
 	// provider_class ctx (a peer instance) or locality external (design/03
