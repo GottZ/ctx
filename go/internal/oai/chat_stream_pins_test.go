@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/oai"
 )
 
 // TestPinStreamTimerFrozenOnPanicBeforeCommit pins that the route freezes a
@@ -118,10 +119,12 @@ func TestPinKeepaliveRollsTheWriteDeadline(t *testing.T) {
 }
 
 // TestPinStreamReserveIsTwoFrames pins the size of a stream's in-flight
-// budget share: 2 × max_stream_frame_bytes on top of the request's 3 ×
-// Content-Length — under the production defaults (256 MiB budget, 1 MiB
-// frame cap) 127 concurrent streams. Red: Fremd-Review 2 R2-01 (the stream
-// reserves 2 × max_response_bytes like non-stream: 8 MiB, 31 streams).
+// budget share: 2 × max_stream_frame_bytes on top of the request's share —
+// 3 × Content-Length, grown by FOLGE-P's ledger past it (the read, the JSON
+// check's nesting state, the attempt's upstream body; rebase round 2, A2)
+// — under the production defaults (256 MiB budget, 1 MiB frame cap) 127
+// concurrent streams. Red: Fremd-Review 2 R2-01 (the stream reserves 2 ×
+// max_response_bytes like non-stream: 8 MiB, 31 streams).
 func TestPinStreamReserveIsTwoFrames(t *testing.T) {
 	hold := make(chan struct{})
 	entered := make(chan struct{}, 1)
@@ -145,9 +148,17 @@ func TestPinStreamReserveIsTwoFrames(t *testing.T) {
 	inUse := rig.budget.InUse()
 	close(hold)
 	a := <-done
-	want := 3*int64(len(body)) + 2*frame
-	if inUse != want {
-		t.Errorf("in-flight budget in use during the stream: %d bytes, want 3 × %d (body) + 2 × %d (frame cap) = %d", inUse, len(body), frame, want)
+	raws := rawsOf(u)
+	if len(raws) != 1 {
+		t.Fatalf("%d upstream requests, want 1", len(raws))
+	}
+	const upstreamSlack = 8 // the upstream body is booked at its encoder's size bound
+	b, depth := int64(len(body)), oai.JSONDepth([]byte(body))
+	share := max(3*b, b+depth*jsonStateBytesPerLevel+int64(len(raws[0])))
+	want := share + 2*frame
+	if inUse < want || inUse > want+upstreamSlack {
+		t.Errorf("in-flight budget in use during the stream: %d bytes, want the request share max(3 × %d, %d + %d × %d + %d upstream) = %d + 2 × %d (frame cap) = %d (+ ≤ %d)",
+			inUse, b, b, depth, jsonStateBytesPerLevel, len(raws[0]), share, frame, want, upstreamSlack)
 	}
 	const defaultBudget = 256 << 20 // the production default of gateway.inflight_budget
 	if n := defaultBudget / inUse; n != 127 {

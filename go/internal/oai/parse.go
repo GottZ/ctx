@@ -416,22 +416,42 @@ func (req *chatRequest) readCTX(k string, v json.RawMessage) *paramError {
 	return nil
 }
 
-// readStreamOptions reads stream_options (W02-08): an object, its
-// include_usage a boolean or null.
+// streamOptionsKeys are the keys of stream_options the parse reads
+// (W02-08); every other member passes unread.
+var streamOptionsKeys = []string{"include_usage"}
+
+// readStreamOptions reads stream_options (W02-08) as encoding/json's struct
+// decode did, walking the object instead of decoding it (FOLGE-P: the decode
+// walked every member and held the nesting state of a deep one — 715 432
+// bytes for a 60 KB body): an object; of its members whose decoded name is
+// include_usage or differs from it only in letter case (Unicode folding,
+// "ſ" for "s"), the last one counts, a null one as absent; any other value
+// than a boolean is the 400 at stream_options.include_usage.
 func (req *chatRequest) readStreamOptions(v json.RawMessage) *paramError {
-	if !hasKind(v, kindObject) {
+	it, ok := newMemberIter(v)
+	if !ok {
 		return invalidType("stream_options", "an object")
 	}
-	var o struct {
-		IncludeUsage *json.RawMessage `json:"include_usage"`
-	}
-	if err := json.Unmarshal(v, &o); err != nil {
-		return invalidType("stream_options", "an object")
-	}
-	if o.IncludeUsage != nil && !isNull(*o.IncludeUsage) {
-		if err := json.Unmarshal(*o.IncludeUsage, &req.includeUsage); err != nil {
-			return invalidType("stream_options.include_usage", "a boolean")
+	var include []byte
+	for {
+		k, val, more := it.next()
+		if !more {
+			break
 		}
+		if idx, fold := hullKey(k, streamOptionsKeys); idx >= 0 || fold {
+			include = val
+		}
+	}
+	if include == nil || isNull(include) {
+		return nil
+	}
+	switch t := bytes.TrimSpace(include); string(t) {
+	case "true":
+		req.includeUsage = true
+	case "false":
+		req.includeUsage = false
+	default:
+		return invalidType("stream_options.include_usage", "a boolean")
 	}
 	return nil
 }

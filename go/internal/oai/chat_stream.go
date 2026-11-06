@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
@@ -45,6 +44,13 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 		c.sse.arm(c.entry.Add(c.grace))
 	}
 	body, err := llm.BuildUpstreamBody(spec, b)
+	if errors.Is(err, ErrBudgetExhausted) {
+		// As attempt: the budget refused this attempt's upstream body
+		// (reserveUpstream) — an admission outcome that ends the walk, no
+		// health report for the row; 503 before the commit, the error frame
+		// after it (outcomeError).
+		err = &llm.AdmissionError{Err: err, Backend: b.Name, Host: b.Host}
+	}
 	if err != nil {
 		st.last = failedAttempt{b: b, err: err}
 		st.failed = append(st.failed, st.last)
@@ -135,7 +141,7 @@ func (c *chatCall) streamTokens(st *walkState) {
 	}
 	prompt := st.promptN
 	if prompt <= 0 {
-		prompt = promptguard.TokenEstimate(utf8.RuneCount(c.req.messages))
+		prompt = promptguard.TokenEstimate(runeCount(c.req.messages))
 	}
 	st.tokens = dispatch.Usage{PromptTokens: prompt, CompletionTokens: min(promptguard.TokenEstimate(st.runes), c.maxTokens)}
 	st.usageKind = llmlog.UsageEstimated

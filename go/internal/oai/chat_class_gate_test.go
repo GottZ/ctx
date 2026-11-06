@@ -212,6 +212,11 @@ func cgTables() []cgTable {
 		{"toolHullKeys/tool_choice", toolHullKeys, func(k string) cgSlot {
 			return cgSlot{depth: 2, body: func(v string) string { return cgTop("tool_choice", cgHull(toolHullKeys, toolValid, k, v)) }}
 		}},
+		// W02-08 (rebase round 2, A5): stream_options.include_usage is read,
+		// by a walk over the object (readStreamOptions).
+		{"streamOptionsKeys", streamOptionsKeys, func(k string) cgSlot {
+			return free("stream_options", 2, func(v string) string { return `{"` + k + `":` + v + `}` })
+		}},
 		{"free", []string{"stream_options.*", "reasoning.*", "logit_bias.*", "stop.*"}, func(k string) cgSlot {
 			switch k {
 			case "stop.*":
@@ -426,7 +431,7 @@ func TestClassGateBytesPerParse(t *testing.T) {
 // table moves them (and asks for a look at its body), a key left out of the
 // gate moves them too.
 const (
-	cgKeyCount   = 80
+	cgKeyCount   = 81 // 80 on FOLGE-P; + stream_options.include_usage (W02-08)
 	cgComboCount = cgKeyCount * 9
 )
 
@@ -486,6 +491,7 @@ func TestClassGateCoversEveryKeyTable(t *testing.T) {
 		"partIndex": cgNamesOf(partIndex), "imageIndex": cgNamesOf(imageIndex),
 		"responseFormatKeys": responseFormatKeys, "responseFormatJSONKeys": responseFormatJSONKeys,
 		"toolHullKeys/tools": toolHullKeys, "toolHullKeys/tool_choice": toolHullKeys,
+		"streamOptionsKeys": streamOptionsKeys,
 	}
 	got := map[string][]string{}
 	for _, s := range cgSlots() {

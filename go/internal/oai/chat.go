@@ -689,7 +689,7 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 		return false
 	}
 	c.limit = res
-	c.meterHeld = reservedTokens(utf8.RuneCount(c.req.messages), maxTokens, c.req.maxTokens > 0, c.s.Meter.TPMReserve, res.Headers())
+	c.meterHeld = reservedTokens(runeCount(c.req.messages), maxTokens, c.req.maxTokens > 0, c.s.Meter.TPMReserve, res.Headers())
 	return true
 }
 
@@ -1031,9 +1031,10 @@ func (c *chatCall) outcomeError(plan Plan, attempts []llm.ChainAttempt, err erro
 		// reservation goes back in full (close: Abort); on a failover attempt
 		// after a wire call the earlier attempt's row stands and the
 		// reservation settles or keeps its charge (answer) — never a full
-		// refund after the wire (W06-10).
+		// refund after the wire (W06-10). A committed stream gets it as its
+		// error frame, never a second status (reply, Z2).
 		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		c.reply(WriteOverloaded)
 		finish := llmlog.FinishError
 		if st.wired == 0 {
 			finish = llmlog.FinishAborted
