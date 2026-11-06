@@ -60,12 +60,39 @@ func scanForms(lim int) ([]string, map[string][]byte) {
 		"tc_kv_keyassign":   memGen(tc+`{`, `}]}]}`, lim, memConst(`"apikey:x":1`)),
 		"tc_objs_valassign": memGen(tc, `]}]}`, lim, memConst(`{"a":"apikey:x"}`)),
 		"msgs_assign":       memGen(`{"model":"pub","messages":[`, `]}`, lim, memConst(`{"role":"user","content":"apikey:x"}`)),
+		// Delta-Review 2 F-1: one key of the whole body. With null it is
+		// scanned once, as a key; with a number or a string the scan reads
+		// it a second time (scanTwiceForms).
+		"tc_hugekey_null": scanHugeKey(lim, "null"),
 	}
 	names := make([]string, 0, len(f))
 	for k := range f {
 		names = append(names, k)
 	}
 	return names, f
+}
+
+// scanTwiceForms are the forms the scan reads twice in a row (Delta-Review 2
+// F-1): one key of the whole body with a scalar value — federation's
+// bodyHasCredentials scans the key as a token, then the probe
+// key + ": " + value (the assignment rule's view of a member, policy.go).
+// The one form whose scan allocates more than one booking in total; what it
+// holds at once is one scan's (TestScanTwiceHoldsOneScanAtOnce).
+func scanTwiceForms(lim int) ([]string, map[string][]byte) {
+	return []string{"tc_hugekey_num", "tc_hugekey_str"}, map[string][]byte{
+		"tc_hugekey_num": scanHugeKey(lim, "1"),
+		"tc_hugekey_str": scanHugeKey(lim, `"v"`),
+	}
+}
+
+// scanHugeKey is an assistant message whose one tool call has one key of
+// short secret-like assignments that fills the body to about lim, and value
+// val.
+func scanHugeKey(lim int, val string) []byte {
+	pre := `{"model":"pub","messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[{"`
+	suf := `":` + val + `}]}]}`
+	const fill = "apikey:x "
+	return []byte(pre + strings.Repeat(fill, max(lim-len(pre)-len(suf), len(fill))/len(fill)) + suf)
 }
 
 // scanAlloc is what ScanRaise allocates over body (TotalAlloc, the minimum

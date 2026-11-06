@@ -379,8 +379,13 @@ func (c *chatCall) cover(n int64) bool {
 // coverScan books the heap of the sensitivity scan of the body before it
 // runs (FOLGE-P hardening H-8): federation.ScanRaise decodes every token of
 // the body into a string and runs the scanner's patterns over each — up to
-// scanReserveFactor × the body + scanReserveBase. At credentials the scan
-// returns at once (its short circuit, pinned) and nothing is booked. The
+// scanReserveFactor × the body + scanReserveBase, what one scan call holds at
+// once. One form is scanned twice in a row — a key of the whole body with a
+// scalar value, as a key and in the probe "key: value" (Delta-Review 2 F-1):
+// it allocates about two bookings in total, but never more than one at once
+// (the first call's garbage is dead before the second begins; pinned by
+// TestScanTwiceHoldsOneScanAtOnce, see scanReserveFactor). At credentials the
+// scan returns at once (its short circuit, pinned) and nothing is booked. The
 // booking stays until the request ends: the scan's garbage is heap until the
 // collector runs, and a reservation has no partial release.
 func (c *chatCall) coverScan(required backends.Sensitivity, body []byte) bool {

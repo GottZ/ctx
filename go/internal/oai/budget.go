@@ -19,17 +19,30 @@ const requestReserveFactor = 3
 // scanReserveFactor and scanReserveBase are the heap the route books before
 // the sensitivity scan of a request below credentials — factor × body +
 // base (FOLGE-P hardening H-8; federation.ScanRaise, internal/federation/
-// policy.go, is not changed here). Measured, not chosen: TotalAlloc of
-// ScanRaise per body byte at 256 B … 8 MiB, the scanner's pattern pools cold
-// — prose, text with spaces, many messages, escaped text 3.0–3.8 at 1 MiB;
-// tokens in tool_calls up to 12.4; a text of short secret-like assignments
-// ("apikey:x ", each one a pattern match the scanner collects) 22.3, the
-// largest found (bau report FOLGE-P §Härtung H-8). The factor is the ceiling
-// of that maximum, the base the largest remainder of a small body (47 334
-// bytes at 2 KiB: the patterns' matchers, allocated anew after a
-// collection) rounded up. TestScanReserveIsTheMeasuredOne fails when a form
-// needs more (the booking would no longer be true) or when the largest
-// needs a whole byte less per body byte (it would cost requests for nothing).
+// policy.go, is not changed here). Measured, not chosen: TotalAlloc of one
+// scan call (the scanner's matches and the garbage it leaves, pattern pools
+// cold) per body byte at 256 B … 8 MiB — prose, text with spaces, many
+// messages, escaped text 3.0–3.8 at 1 MiB; tokens in tool_calls up to 17.8;
+// a text of short secret-like assignments ("apikey:x ", each one a pattern
+// match the scanner collects) 22.23 at 2 MiB (22.21 at 1 MiB, 22.06 at
+// 4 MiB), the largest found (bau report FOLGE-P §Härtung H-8, §Härtung 2).
+// The factor is the ceiling of that maximum, the base the largest remainder
+// of a small body (47 334 bytes at 2 KiB: the patterns' matchers, allocated
+// anew after a collection) rounded up. TestScanReserveIsTheMeasuredOne fails
+// when a form needs more (the booking would no longer be true) or when the
+// largest needs a whole byte less per body byte (it would cost requests for
+// nothing).
+//
+// What the factor binds is what one scan call holds on the heap at once. One
+// form is scanned twice in a row (Delta-Review 2 F-1): one key of the whole
+// body with a scalar value, read as a key and again in the probe
+// key + ": " + value — 40.4 (256 KiB) … 42.4 (1 MiB) bytes per body byte in
+// total, but the first call's garbage is dead before the second begins: the
+// live heap the collector marks during both is one scan's (9–11.6 bytes per
+// body byte, as for the key scanned once), and over the route at 8 MiB the
+// heap grew 142–150 MiB against the gate's 200.3 MiB (Delta-Review 2 §5b).
+// TestScanTwiceHoldsOneScanAtOnce pins the form: at most two bookings in
+// total, at most one held at once.
 const (
 	scanReserveFactor = 23
 	scanReserveBase   = 64 << 10

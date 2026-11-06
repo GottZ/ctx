@@ -301,6 +301,17 @@ func memForm(t testing.TB, name string, lim int) memShape {
 	// assignments), for the public alias.
 	case "f13_scan_assign":
 		s.body = text("apikey:x ")
+	// Delta-Review 2 F-1: one key of the whole body with a scalar value — the
+	// scan reads it twice in a row (as a key, then in the probe "key:
+	// value"), about two bookings in total, one at a time.
+	case "f14a_scan_hugekey_num", "f14b_scan_hugekey_str":
+		val := "1"
+		if strings.HasPrefix(name, "f14b") {
+			val = `"v"`
+		}
+		pre := `{"model":"` + model + `","messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[{"`
+		suf := `":` + val + `}]}]}`
+		s.body = []byte(pre + strings.Repeat("apikey:x ", (lim-len(pre)-len(suf))/9) + suf)
 	default:
 		t.Fatalf("unknown form %q", name)
 	}

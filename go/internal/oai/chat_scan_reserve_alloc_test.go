@@ -2,48 +2,161 @@
 
 package oai_test
 
-// The relational pin of the scan's booking (FOLGE-P hardening H-8), outside
-// -race builds: under the race detector sync.Pool drops a quarter of what is
-// put back, so the scanner's pattern matchers are allocated anew on calls
-// that reuse them in production — a tiny body then allocates up to 600 KB
-// (measured), which says nothing about the production heap. Every plain
-// `go test` runs it, the CI in its integration job (no -race).
+// The relational pins of the scan's booking (FOLGE-P hardening H-8,
+// hardening 2 after Delta-Review 2 F-1), outside -race builds: under the race
+// detector sync.Pool drops a quarter of what is put back, so the scanner's
+// pattern matchers are allocated anew on calls that reuse them in production
+// — a tiny body then allocates up to 600 KB (measured), which says nothing
+// about the production heap. Every plain `go test` runs them, the CI in its
+// integration job (no -race).
 
 import (
+	"runtime"
+	"runtime/debug"
+	"runtime/metrics"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
-// TestScanReserveIsTheMeasuredOne is the relational pin of the booking: at
-// 256 B … 256 KiB every form allocates at most factor × body + base, and the
-// largest per body byte at 256 KiB needs more than factor − 2 (the ratio
-// grows with the body: assign_text 21.3 at 256 KiB, 22.2 at 1 MiB, 21.8 at
-// 8 MiB — the larger bodies are the bau report's measurement).
+// scanPeakForms are the forms the scan reads once that cost it the most per
+// body byte, and scanPeakBytes the size where their ratio peaks (h2 probe,
+// TotalAlloc − base per body byte: assign_semi/assign_text 21.36 at 256 KiB,
+// 22.21 at 1 MiB, 22.23 at 2 MiB, 22.06 at 4 MiB).
+var scanPeakForms = []string{"assign_semi", "assign_text", "assign_upper", "tc_hugekey_null"}
+
+const scanPeakBytes = 2 << 20
+
+// TestScanReserveIsTheMeasuredOne is the relational pin of the booking for
+// the forms the scan reads once: at 256 B … 256 KiB every form allocates at
+// most factor × body + base, and so do the most expensive ones at 2 MiB,
+// where their ratio peaks; the largest of those needs more than factor − 1
+// per body byte. So the pin tells 22 from 23 (the booking would be untrue)
+// and 24 from 23 (it would cost requests for nothing).
 func TestScanReserveIsTheMeasuredOne(t *testing.T) {
-	var largest float64
-	var largestForm string
+	check := func(name string, body []byte) float64 {
+		alloc, raised := scanAlloc(backends.SensPublic, body)
+		if raised != backends.SensPublic {
+			t.Fatalf("form %s: the scan raised to %s (a form without a credential)", name, raised)
+		}
+		if want := oai.ScanReserveFactor*int64(len(body)) + oai.ScanReserveBase; alloc > want {
+			t.Errorf("form %s, %d bytes: the scan allocates %d bytes, the route books %d (%d × body + %d)",
+				name, len(body), alloc, want, oai.ScanReserveFactor, oai.ScanReserveBase)
+		}
+		return float64(alloc-oai.ScanReserveBase) / float64(len(body))
+	}
 	for _, size := range []int{256, 2 << 10, 64 << 10, 256 << 10} {
 		names, forms := scanForms(size)
 		for _, name := range names {
-			body := forms[name]
-			alloc, raised := scanAlloc(backends.SensPublic, body)
-			if raised != backends.SensPublic {
-				t.Fatalf("form %s: the scan raised to %s (a form without a credential)", name, raised)
-			}
-			want := oai.ScanReserveFactor*int64(len(body)) + oai.ScanReserveBase
-			if alloc > want {
-				t.Errorf("form %s, %d bytes: the scan allocates %d bytes, the route books %d (%d × body + %d)",
-					name, len(body), alloc, want, oai.ScanReserveFactor, oai.ScanReserveBase)
-			}
-			if f := float64(alloc-oai.ScanReserveBase) / float64(len(body)); size == 256<<10 && f > largest {
-				largest, largestForm = f, name
-			}
+			check(name, forms[name])
 		}
 	}
-	t.Logf("FOLGEP scan: largest %.2f bytes per body byte at 256 KiB (%s), factor %d, base %d", largest, largestForm, oai.ScanReserveFactor, oai.ScanReserveBase)
-	if largest <= oai.ScanReserveFactor-2 {
-		t.Errorf("the largest form needs %.2f bytes per body byte (%s), the factor %d books two more: measure again and lower it", largest, largestForm, oai.ScanReserveFactor)
+	var largest float64
+	var largestForm string
+	_, forms := scanForms(scanPeakBytes)
+	for _, name := range scanPeakForms {
+		if f := check(name, forms[name]); f > largest {
+			largest, largestForm = f, name
+		}
 	}
+	t.Logf("FOLGEP scan: largest %.3f bytes per body byte at %d B (%s), factor %d, base %d", largest, scanPeakBytes, largestForm, oai.ScanReserveFactor, oai.ScanReserveBase)
+	if largest <= oai.ScanReserveFactor-1 {
+		t.Errorf("the largest form needs %.3f bytes per body byte at %d B (%s), the factor %d books a whole byte more: measure again and lower it",
+			largest, scanPeakBytes, largestForm, oai.ScanReserveFactor)
+	}
+}
+
+// TestScanTwiceHoldsOneScanAtOnce pins the one form whose scan allocates more
+// than one booking in total (Delta-Review 2 F-1): one key of the whole body
+// with a scalar value is scanned twice in a row — the key as a token, then
+// the probe key + ": " + value. The two scans allocate 40.4 (256 KiB) …
+// 42.4 (1 MiB, 2 MiB) bytes per body byte together, but the first one's
+// garbage is dead before the second begins: what the scan holds at once — the
+// live heap the collector marks, read at every cycle under GOGC=1 — is one
+// scan's, as for the same key scanned once (tc_hugekey_null; 9.1–12.5 against
+// 9.5–11.6 bytes per body byte in 30 runs — a cycle that catches the
+// scanner's result slice while append copies it reads the upper mode). The
+// booking, factor × body + base, covers one scan call with its garbage
+// (TestScanReserveIsTheMeasuredOne); here: at most 2 × factor × body + base
+// allocated (a third scan of the body fails it) and at most factor × body +
+// base held at once (the live heap no collector can bring under the booking).
+func TestScanTwiceHoldsOneScanAtOnce(t *testing.T) {
+	names, forms := scanTwiceForms(1 << 20)
+	for _, name := range names {
+		body := forms[name]
+		alloc, raised := scanAlloc(backends.SensPublic, body)
+		if raised != backends.SensPublic {
+			t.Fatalf("form %s: the scan raised to %s (a form without a credential)", name, raised)
+		}
+		t.Logf("FOLGEP scan twice: %s %d B allocates %.3f bytes per body byte", name, len(body), float64(alloc-oai.ScanReserveBase)/float64(len(body)))
+		if want := 2*oai.ScanReserveFactor*int64(len(body)) + oai.ScanReserveBase; alloc > want {
+			t.Errorf("form %s, %d bytes: the scan allocates %d bytes, more than two scans of the body (%d = 2 × %d × body + %d)",
+				name, len(body), alloc, want, oai.ScanReserveFactor, oai.ScanReserveBase)
+		}
+	}
+
+	const size = 256 << 10
+	_, once := scanForms(size)
+	single := once["tc_hugekey_null"]
+	names, forms = scanTwiceForms(size)
+	held := scanHeldAtOnce(single)
+	t.Logf("FOLGEP scan once: tc_hugekey_null %d B holds %.2f bytes per body byte at once", len(single), float64(held)/float64(len(single)))
+	for _, name := range names {
+		body := forms[name]
+		got := scanHeldAtOnce(body)
+		t.Logf("FOLGEP scan twice: %s %d B holds %.2f bytes per body byte at once", name, len(body), float64(got)/float64(len(body)))
+		if want := oai.ScanReserveFactor*int64(len(body)) + oai.ScanReserveBase; got > want {
+			t.Errorf("form %s, %d bytes: the scan holds %d bytes at once, the route books %d (%d × body + %d)",
+				name, len(body), got, want, oai.ScanReserveFactor, oai.ScanReserveBase)
+		}
+	}
+}
+
+// scanHeldAtOnce is the largest live heap the collector marks while
+// ScanRaise runs over body, above the live heap before it (the largest of
+// three runs): the collector runs at GOGC=1, and a finalizer re-armed at
+// every cycle reads /gc/heap/live:bytes, the heap the last cycle marked. A
+// cycle missed by the finalizer can only lower the reading.
+func scanHeldAtOnce(body []byte) int64 {
+	defer debug.SetGCPercent(debug.SetGCPercent(1))
+	var most int64
+	for range 3 {
+		runtime.GC()
+		runtime.GC()
+		base := liveHeap()
+		var peak atomic.Int64
+		var stop atomic.Bool
+		var arm func()
+		arm = func() {
+			s := &scanSentinel{}
+			runtime.SetFinalizer(s, func(*scanSentinel) {
+				memMaxInt(&peak, liveHeap())
+				if !stop.Load() {
+					arm()
+				}
+			})
+		}
+		arm()
+		federation.ScanRaise(backends.SensPublic, body)
+		stop.Store(true)
+		most = max(most, peak.Load()-base)
+	}
+	return most
+}
+
+// scanSentinel carries a pointer so the allocator never folds it into a tiny
+// block (a finalizer there could wait for its neighbours).
+type scanSentinel struct {
+	_ *int
+	_ [8]int
+}
+
+// liveHeap is the heap the last collection marked.
+func liveHeap() int64 {
+	s := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
+	metrics.Read(s)
+	return int64(s[0].Value.Uint64())
 }
