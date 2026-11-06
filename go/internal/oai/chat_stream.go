@@ -5,9 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
-	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -145,37 +142,6 @@ func (c *chatCall) streamTokens(st *walkState) {
 	}
 	st.tokens = dispatch.Usage{PromptTokens: prompt, CompletionTokens: min(promptguard.TokenEstimate(st.runes), c.maxTokens)}
 	st.usageKind = llmlog.UsageEstimated
-}
-
-// bucketCapacityHeader is the token bucket's capacity as the request's lane
-// sees it (design/06 §4.4), one of the admission's x-ratelimit-* headers.
-const bucketCapacityHeader = "x-ratelimit-limit-tokens"
-
-// reservedTokens lives here, not in chat.go: the promptguard call-site
-// census (internal/promptguard) reads any promptguard call in the file of a
-// Pipeline: site as a guard, and chat.go holds the route's unguarded one.
-//
-// reservedTokens is what an admitted chat reservation holds — the tokens
-// Keep books (Delta-Review 4 F4-1): the Estimate the limiter charged, by the
-// rule Estimate documents (design/06 §4.2 "Reservierung je op": TokenEstimate
-// over the prompt's runes plus the effective max_tokens when the client named
-// one, else gateway.tpm_reserve_default capped by it), at most the bucket's
-// capacity the admission reports in x-ratelimit-limit-tokens (B-06-28: a
-// larger reservation is charged at the capacity). The reserve comes from the
-// request's settings snapshot; the production limiter reads the same key
-// from the same snapshot source at its Admit (cmd/ctxd meterLimiter), so a
-// hot change in between moves the result by that change. A limiter that
-// reports no capacity leaves the estimate uncapped.
-func reservedTokens(promptRunes, maxTokens int, clientMax bool, reserve int64, h http.Header) int {
-	share := max(maxTokens, 0)
-	if !clientMax && (share == 0 || reserve < int64(share)) {
-		share = int(min(max(reserve, 0), math.MaxInt))
-	}
-	n := usageTotal(promptguard.TokenEstimate(promptRunes), share)
-	if capacity, err := strconv.Atoi(h.Get(bucketCapacityHeader)); err == nil && capacity > 0 {
-		n = min(n, capacity)
-	}
-	return n
 }
 
 // answerStream ends a stream: the timer frozen first (no commit between

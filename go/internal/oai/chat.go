@@ -129,11 +129,12 @@ type chatCall struct {
 	// maxTokens is the effective max_tokens the request sends upstream
 	// (serve; a row can lower it further, never raise it): no backend
 	// generates more, so a stream's completion estimate stops there
-	// (streamTokens). meterHeld is what the meter's reservation holds — the
-	// tokens Keep books (reservedTokens), the ceiling of a stream's estimate
-	// (book); held/spent below are the request's byte ledger (FOLGE-P).
+	// (streamTokens). meterHeld is what the meter's admission charged —
+	// LimitReservation.Held, the tokens Keep books — the ceiling of a
+	// stream's estimate (book); held/spent below are the request's byte
+	// ledger (FOLGE-P).
 	maxTokens int
-	meterHeld int
+	meterHeld int64
 	// wired: a byte of the request can have reached a backend in some
 	// attempt (wireTrace) — set from inside net/http, on its transport
 	// goroutines. Without it the reservation goes back in full (Abort);
@@ -689,7 +690,10 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 		return false
 	}
 	c.limit = res
-	c.meterHeld = reservedTokens(runeCount(c.req.messages), maxTokens, c.req.maxTokens > 0, c.s.Meter.TPMReserve, res.Headers())
+	// What the admission charged, from the admission itself (W02-09: one
+	// source; a rebuild here missed a reserve reloaded since the request's
+	// settings snapshot and a limiter without the capacity header).
+	c.meterHeld = res.Held()
 	return true
 }
 
@@ -991,7 +995,7 @@ func (c *chatCall) book(plan Plan, served *backends.Backend, attempts []llm.Chai
 				l.Abort()
 			case wired && st.tokens.PromptTokens <= 0 && st.tokens.CompletionTokens <= 0:
 				l.Keep()
-			case st.usageKind == llmlog.UsageEstimated && usageTotal(st.tokens.PromptTokens, st.tokens.CompletionTokens) >= c.meterHeld:
+			case st.usageKind == llmlog.UsageEstimated && int64(usageTotal(st.tokens.PromptTokens, st.tokens.CompletionTokens)) >= c.meterHeld:
 				l.Keep()
 			default:
 				l.Settle(st.tokens)

@@ -509,7 +509,10 @@ type streamUsageLimiter struct {
 	settled []dispatch.Usage
 }
 
-type streamUsageReservation struct{ l *streamUsageLimiter }
+type streamUsageReservation struct {
+	l    *streamUsageLimiter
+	held int64
+}
 
 func (r streamUsageReservation) Settle(u dispatch.Usage) {
 	r.l.settles.Add(1)
@@ -525,12 +528,12 @@ func (r streamUsageReservation) Reject(reason string, _ time.Duration) {
 }
 func (r streamUsageReservation) Headers() http.Header { return nil }
 
-// Held: the fake charges nothing (as W02-09's test reservations).
-func (r streamUsageReservation) Held() int64 { return 0 }
+// Held is what the rig meters charge for the request (fakeChatCharge).
+func (r streamUsageReservation) Held() int64 { return r.held }
 
-func (l *streamUsageLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
+func (l *streamUsageLimiter) Admit(_ context.Context, _ *auth.ConsumerAuth, _ modelalias.Alias, e oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	l.admits.Add(1)
-	return streamUsageReservation{l}, nil
+	return streamUsageReservation{l: l, held: fakeChatCharge(e)}, nil
 }
 
 func (l *streamUsageLimiter) usages() []dispatch.Usage {
