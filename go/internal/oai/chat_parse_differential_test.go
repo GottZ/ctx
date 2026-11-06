@@ -214,7 +214,9 @@ var baseMessageFieldKinds = map[string]baseJSONKind{"name": baseKindString, "too
 // of its known keys (baseCheckHullDecoded): unsupported_parameter; a
 // message's PASS fields of the wrong JSON kind (baseCheckMessageFields):
 // invalid_type. Each answer is o with its code, param and message replaced
-// by the oracle's own constructor's.
+// by the oracle's own constructor's. Only when o itself is an answer of that
+// loop (fromMapLoop, Delta-Review 3 R3-2): where the base answered before
+// its loop or in another check, it answers that one thing every time.
 func mapOrderAnswers(body []byte, o parseOutcome) []parseOutcome {
 	if o.stage != "policy" {
 		return nil
@@ -227,15 +229,14 @@ func mapOrderAnswers(body []byte, o parseOutcome) []parseOutcome {
 	}
 	for _, lv := range diffLevels(body, o.param) {
 		at, ok := strings.CutSuffix(o.param, "."+lv.key)
-		if !ok {
+		if !ok || !lv.fromMapLoop(o) {
 			continue
 		}
 		switch lv.kind {
 		case "part":
-			var typ string
-			_ = json.Unmarshal(jsonMember(lv.obj, "type"), &typ)
+			typ := lv.partType()
 			for _, k := range lv.members {
-				if k != "type" && (k != "text" || typ != "text") && (k != "image_url" || typ != "image_url") {
+				if partRefuses(typ, k) {
 					add(unsupportedParameter(at + "." + k))
 				}
 			}
@@ -247,7 +248,7 @@ func mapOrderAnswers(body []byte, o parseOutcome) []parseOutcome {
 			}
 		case "hull":
 			for _, k := range lv.members {
-				if slices.ContainsFunc(lv.named, func(kn string) bool { return k != kn && strings.EqualFold(k, kn) }) {
+				if lv.caseVariant(k) {
 					add(unsupportedParameter(baseKeyPath(at, k)))
 				}
 			}
@@ -260,6 +261,71 @@ func mapOrderAnswers(body []byte, o parseOutcome) []parseOutcome {
 		}
 	}
 	return out
+}
+
+// fromMapLoop reports o as an answer the base's map loop on the level gives
+// (Delta-Review 3 R3-2): unsupported_parameter of a key a part's type
+// refuses (baseCheckPart reaches its loop only for text and image_url), of
+// an image_url key besides url and detail, of a hull's case variant while
+// the base decodes the hull (baseHullDecodes; its byte walk names the first
+// variant in body order); invalid_type of a message's PASS field.
+func (lv diffLevel) fromMapLoop(o parseOutcome) bool {
+	switch lv.kind {
+	case "part":
+		typ := lv.partType()
+		return o.code == CodeUnsupportedParameter && (typ == "text" || typ == "image_url") && partRefuses(typ, lv.key)
+	case "image_url":
+		return o.code == CodeUnsupportedParameter && lv.key != "url" && lv.key != "detail"
+	case "hull":
+		return o.code == CodeUnsupportedParameter && lv.caseVariant(lv.key) && baseHullDecodes(lv.obj, lv.named)
+	case "message":
+		_, pass := baseMessageFieldKinds[lv.key]
+		return o.code == CodeInvalidType && pass
+	}
+	return false
+}
+
+// partType is the type a part level declares ("" when it has none).
+func (lv diffLevel) partType() string {
+	var typ string
+	_ = json.Unmarshal(jsonMember(lv.obj, "type"), &typ)
+	return typ
+}
+
+// partRefuses reports a key the base's part loop refuses for a part of typ.
+func partRefuses(typ, k string) bool {
+	return k != "type" && (k != "text" || typ != "text") && (k != "image_url" || typ != "image_url")
+}
+
+// caseVariant reports k as a case variant of a named key of the level.
+func (lv diffLevel) caseVariant(k string) bool {
+	return slices.ContainsFunc(lv.named, func(kn string) bool { return k != kn && strings.EqualFold(k, kn) })
+}
+
+// baseHullDecodes reports the base checking the hull obj over its decoded
+// map (baseCheckHull): its byte walk meets a key that needs decoding, or a
+// key past baseHullPairwiseMax, before it answers a repeat or a case
+// variant of a known key.
+func baseHullDecodes(obj []byte, known []string) bool {
+	it, ok := baseNewMemberIter(obj)
+	if !ok {
+		return false
+	}
+	var seen [][]byte
+	for n := 0; ; n++ {
+		k, _, more := it.next()
+		switch {
+		case !more:
+			return false
+		case n == baseHullPairwiseMax || baseNeedsDecode(k):
+			return true
+		case slices.ContainsFunc(seen, func(p []byte) bool { return bytes.Equal(p, k) }):
+			return false
+		case slices.ContainsFunc(known, func(kn string) bool { return string(k) != kn && baseAsciiEqualFold(k, kn) }):
+			return false
+		}
+		seen = append(seen, k)
+	}
 }
 
 // diffLevel is one object level a base param can name: its kind, the key

@@ -198,6 +198,81 @@ func TestOracleMapOrderIsEnumerated(t *testing.T) {
 	}
 }
 
+// TestOracleMapOrderNeedsTheBasesLoop (Delta-Review 3 R3-2): A4 enumerates
+// the answers of a map loop of the base only when the base's own answer
+// comes from that loop. The reviewer's four bodies, where the base answers
+// one thing in 2000 of 2000 runs before its loop (a part's text of the wrong
+// kind, an unknown part type, an image without vision) or in another check
+// (a message's unknown key), and a hull whose case variants the base's byte
+// walk names in body order: no other answer of that level is allowed. Two
+// controls where the base does range over a map — a message's PASS fields
+// of the wrong kind, a hull it decodes — keep both answers allowed.
+func TestOracleMapOrderNeedsTheBasesLoop(t *testing.T) {
+	const msg = `{"model":"chat","messages":[{"role":"user","content":`
+	cases := []struct {
+		name, body, base string
+		code, param      string // the hypothetical answer
+		limits           int
+		allowed          bool
+	}{
+		{"part: text of the wrong kind, an unknown key", msg + `[{"type":"text","text":5,"zz":1}]}]}`,
+			"messages[0].content[0].text", CodeUnsupportedParameter, "messages[0].content[0].zz", 0, false},
+		{"part: an unknown type, an unknown key", msg + `[{"type":"audio","zz":1}]}]}`,
+			"messages[0].content[0].type", CodeUnsupportedParameter, "messages[0].content[0].zz", 0, false},
+		{"message: an unknown key, a name of the wrong kind", msg + `"x","zzz":1,"name":5}]}`,
+			"messages[0].zzz", CodeInvalidType, "messages[0].name", 0, false},
+		{"image_url without vision, an unknown key", msg + `[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","zz":1}}]}]}`,
+			"messages[0].content[0].image_url.url", CodeUnsupportedParameter, "messages[0].content[0].image_url.zz", 0, false},
+		{"hull: two case variants on the byte walk", msg + `"x"}],"tool_choice":{"type":"function","function":{"name":"f"},"Type":1,"TYPE":2}}`,
+			"tool_choice.Type", CodeUnsupportedParameter, "tool_choice.TYPE", 0, false},
+		{"control: a message's PASS fields of the wrong kind", msg + `"x","name":5,"refusal":5}]}`,
+			"", CodeInvalidType, "", 0, true},
+		{"control: a hull the base decodes", msg + `"x"}],"tool_choice":{"type":"function","function":{"name":"f"},"TYP` + escU('E') + `":2,"Type":1}}`,
+			"", CodeUnsupportedParameter, "", 0, true},
+	}
+	for _, tc := range cases {
+		body, l := []byte(tc.body), diffLimits[tc.limits]
+		o := baseParse(body, l)
+		if !tc.allowed {
+			for range 200 { // the base answers one thing: its answer is not drawn from a map
+				if b := baseParse(body, l); b.param != tc.base {
+					t.Fatalf("%s: the base answers %s %q, want %q", tc.name, b.code, b.param, tc.base)
+				}
+			}
+			hypo := o
+			perr := unsupportedParameter(tc.param)
+			if tc.code == CodeInvalidType {
+				perr = invalidType(tc.param, "a string")
+			}
+			hypo.code, hypo.param, hypo.message = perr.code, perr.param, perr.message
+			if got := allowedDeviation(body, l, hypo, o); got != "" {
+				t.Errorf("%s: base %s %q, a hypothetical %s %q is allowed as %q — the base never gives it", tc.name, o.code, o.param, hypo.code, hypo.param, got)
+			}
+			continue
+		}
+		// a control: every answer the base gives over 200 runs is allowed
+		// against every other, and there are two
+		seen := map[string]parseOutcome{}
+		for range 200 {
+			b := baseParse(body, l)
+			seen[b.param] = b
+		}
+		if len(seen) != 2 {
+			t.Fatalf("%s: the base gives %d answers over 200 runs, want 2 (a map loop)", tc.name, len(seen))
+		}
+		for _, a := range seen {
+			for _, b := range seen {
+				if a.code != tc.code {
+					t.Fatalf("%s: the base answers %s %q, want %s", tc.name, a.code, a.param, tc.code)
+				}
+				if got := allowedDeviation(body, l, a, b); a.param != b.param && got != "oracleMapOrder" {
+					t.Errorf("%s: %q against the base's %q allowed as %q, want oracleMapOrder", tc.name, a.param, b.param, got)
+				}
+			}
+		}
+	}
+}
+
 // lbEntries are n logit_bias entries "0":0,… comma-terminated.
 func lbEntries(n int) string {
 	var b strings.Builder
