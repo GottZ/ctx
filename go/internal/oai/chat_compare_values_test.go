@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/oai"
 )
 
 // perRequest are the answer fields that differ per request (the answer's id
@@ -36,43 +37,44 @@ func streamBody(raw string) string {
 var compareValueCases = []struct {
 	name, body string
 	status     int
+	code       string // the error code of a refusal
 }{
-	{"rf text", rfBody(`"text"`), http.StatusOK},
-	{"rf json_object", rfBody(`"json_object"`), http.StatusOK},
-	{"rf json_schema", rfBody(`"json_schema"`), http.StatusOK},
-	{"rf text escaped", rfBody(`"text"`), http.StatusOK},
-	{"rf json_schema, every character escaped (66 raw bytes)", rfBody(`"` + escapeAll("json_schema") + `"`), http.StatusOK},
-	{"rf json_schema escaped, one byte past (67)", rfBody(`"` + escapeAll("json_schema") + ` "`), http.StatusBadRequest},
-	{"rf text, whitespace around", rfBody(" \"text\" \n"), http.StatusOK},
-	{"rf bogus", rfBody(`"bogus"`), http.StatusBadRequest},
-	{"rf TEXT", rfBody(`"TEXT"`), http.StatusBadRequest},
-	{"rf text with a space", rfBody(`"text "`), http.StatusBadRequest},
-	{"rf empty", rfBody(`""`), http.StatusBadRequest},
-	{"rf lone surrogate", rfBody(`"\ud800"`), http.StatusBadRequest},
-	{"rf invalid UTF-8", rfBody("\"te\xffxt\""), http.StatusBadRequest},
-	{"rf 67 bytes plain", rfBody(`"` + strings.Repeat("a", 67) + `"`), http.StatusBadRequest},
-	{"rf 64 KiB invalid UTF-8", rfBody(`"` + strings.Repeat("\xff", 65536-len(`{"type":"","json_schema":{"name":"s"}}`)) + `"`), http.StatusBadRequest},
-	{"rf 64 KiB lone surrogates", rfBody(`"` + strings.Repeat(`\ud800`, (65536-len(`{"type":"","json_schema":{"name":"s"}}`))/6) + `"`), http.StatusBadRequest},
-	{"rf past the policy cap", rfBody(`"` + strings.Repeat("a", 65536) + `"`), http.StatusBadRequest},
-	{"rf null", rfBody(`null`), http.StatusBadRequest},
-	{"rf 1", rfBody(`1`), http.StatusBadRequest},
-	{"rf true", rfBody(`true`), http.StatusBadRequest},
-	{"rf array", rfBody(`["text"]`), http.StatusBadRequest},
-	{"rf object", rfBody(`{"text":1}`), http.StatusBadRequest},
-	{"rf deep array", rfBody(strings.Repeat("[", 9990) + strings.Repeat("]", 9990)), http.StatusBadRequest},
-	{"rf type absent", `{"model":"chat","messages":[{"role":"user","content":"hi"}],"response_format":{"json_schema":{"name":"s"}}}`, http.StatusBadRequest},
-	{"stream false", streamBody(`false`), http.StatusOK},
-	{"stream false, whitespace", streamBody(" false\n"), http.StatusOK},
-	{"stream null", streamBody(`null`), http.StatusOK},
-	{"stream true", streamBody(`true`), http.StatusBadRequest},
-	{"stream \"true\"", streamBody(`"true"`), http.StatusBadRequest},
-	{"stream 1", streamBody(`1`), http.StatusBadRequest},
-	{"stream 0", streamBody(`0`), http.StatusBadRequest},
-	{"stream object", streamBody(`{}`), http.StatusBadRequest},
-	{"stream array", streamBody(`[true]`), http.StatusBadRequest},
-	{"stream deep array", streamBody(strings.Repeat("[", 9997) + strings.Repeat("]", 9997)), http.StatusBadRequest},
-	{"stream deep object", streamBody(strings.Repeat(`{"a":`, 9997) + "0" + strings.Repeat("}", 9997)), http.StatusBadRequest},
-	{"stream long string", streamBody(`"` + strings.Repeat("\xff", 1<<16) + `"`), http.StatusBadRequest},
+	{"rf text", rfBody(`"text"`), http.StatusOK, ""},
+	{"rf json_object", rfBody(`"json_object"`), http.StatusOK, ""},
+	{"rf json_schema", rfBody(`"json_schema"`), http.StatusOK, ""},
+	{"rf text escaped", rfBody(`"text"`), http.StatusOK, ""},
+	{"rf json_schema, every character escaped (66 raw bytes)", rfBody(`"` + escapeAll("json_schema") + `"`), http.StatusOK, ""},
+	{"rf json_schema escaped, one byte past (67)", rfBody(`"` + escapeAll("json_schema") + ` "`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf text, whitespace around", rfBody(" \"text\" \n"), http.StatusOK, ""},
+	{"rf bogus", rfBody(`"bogus"`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf TEXT", rfBody(`"TEXT"`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf text with a space", rfBody(`"text "`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf empty", rfBody(`""`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf lone surrogate", rfBody(`"\ud800"`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf invalid UTF-8", rfBody("\"te\xffxt\""), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf 67 bytes plain", rfBody(`"` + strings.Repeat("a", 67) + `"`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf 64 KiB invalid UTF-8", rfBody(`"` + strings.Repeat("\xff", 65536-len(`{"type":"","json_schema":{"name":"s"}}`)) + `"`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf 64 KiB lone surrogates", rfBody(`"` + strings.Repeat(`\ud800`, (65536-len(`{"type":"","json_schema":{"name":"s"}}`))/6) + `"`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf past the policy cap", rfBody(`"` + strings.Repeat("a", 65536) + `"`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf null", rfBody(`null`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf 1", rfBody(`1`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf true", rfBody(`true`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf array", rfBody(`["text"]`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf object", rfBody(`{"text":1}`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf deep array", rfBody(strings.Repeat("[", 9990) + strings.Repeat("]", 9990)), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"rf type absent", `{"model":"chat","messages":[{"role":"user","content":"hi"}],"response_format":{"json_schema":{"name":"s"}}}`, http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"stream false", streamBody(`false`), http.StatusOK, ""},
+	{"stream false, whitespace", streamBody(" false\n"), http.StatusOK, ""},
+	{"stream null", streamBody(`null`), http.StatusOK, ""},
+	{"stream true", streamBody(`true`), http.StatusBadRequest, oai.CodeUnsupportedValue},
+	{"stream \"true\"", streamBody(`"true"`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream 1", streamBody(`1`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream 0", streamBody(`0`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream object", streamBody(`{}`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream array", streamBody(`[true]`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream deep array", streamBody(strings.Repeat("[", 9997) + strings.Repeat("]", 9997)), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream deep object", streamBody(strings.Repeat(`{"a":`, 9997) + "0" + strings.Repeat("}", 9997)), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream long string", streamBody(`"` + strings.Repeat("\xff", 1<<16) + `"`), http.StatusBadRequest, oai.CodeInvalidType},
 }
 
 // escapeAll writes s with every character as a \u escape.
@@ -90,8 +92,12 @@ func TestComparedValuesAnswerAsBefore(t *testing.T) {
 	var dump strings.Builder
 	for _, tc := range compareValueCases {
 		a := rig.post(t, tc.body)
-		if a.status != tc.status {
-			t.Errorf("%s: %d %s, want %d", tc.name, a.status, a.body, tc.status)
+		code := ""
+		if a.status != http.StatusOK {
+			code, _, _ = a.envelope(t)
+		}
+		if a.status != tc.status || code != tc.code {
+			t.Errorf("%s: %d %s, want %d %s", tc.name, a.status, a.body, tc.status, tc.code)
 		}
 		fmt.Fprintf(&dump, "== %s\n%s\n", tc.name, perRequest.ReplaceAllString(normalized(a), "…"))
 	}
