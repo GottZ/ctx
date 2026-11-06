@@ -107,10 +107,12 @@ func (u *memEngine) row(name string, prio int) backends.Backend {
 }
 
 // heldSum collects the reservation every request held at the end of its
-// handler.
+// handler, and counts the requests that reached it without a declared
+// length — the ones readRequestBody reads in chunks (hardening 5, B-3).
 type heldSum struct {
-	mu   sync.Mutex
-	vals []int64
+	mu         sync.Mutex
+	vals       []int64
+	undeclared atomic.Int64
 }
 
 func (h *heldSum) add(v int64) {
@@ -149,6 +151,9 @@ func memMount(r *chatRig, h http.Handler, held *heldSum) chi.Router {
 		g.Use(oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.ContentLength < 0 {
+					held.undeclared.Add(1)
+				}
 				next.ServeHTTP(w, req)
 				if res := oai.ReservationFrom(req.Context()); res != nil {
 					held.add(oai.ReservationHeld(res))
@@ -185,6 +190,13 @@ func memGen(prefix, suffix string, limit int, elem func(i int) string) []byte {
 }
 
 func memConst(s string) func(int) string { return func(int) string { return s } }
+
+func memBool(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 func memNest(d int) string { return strings.Repeat("[", d) + strings.Repeat("]", d) }
 
@@ -467,6 +479,9 @@ func TestChatParseHeapGate(t *testing.T) {
 		fmt.Fprintf(&sb, "%s×%d ", k, cnt[k])
 	}
 	sum, handled := held.sum()
+	if want := int64(handled) * memBool(shape.chunked); held.undeclared.Load() != want {
+		t.Errorf("form %s: %d of %d requests reached the handler without a declared length, want %d (chunked %v)", form, held.undeclared.Load(), handled, want, shape.chunked)
+	}
 	growth := int64(peak.Load()) - int64(base)
 	bound := sum + int64(n)*heapGateBaseLoad
 	// Two stricter bounds (hardening H-8): without the answer share of the
@@ -568,6 +583,10 @@ func TestChatParseHeapGateSustained(t *testing.T) {
 			<-start
 			for time.Now().Before(deadline) {
 				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(shape.body))
+				if shape.chunked { // as TestChatParseHeapGate: no declared length (hardening 5, B-3)
+					req.ContentLength = -1
+					req.Body = io.NopCloser(struct{ io.Reader }{bytes.NewReader(shape.body)})
+				}
 				req.Header.Set("Content-Type", "application/json")
 				w := httptest.NewRecorder()
 				rig.router.ServeHTTP(w, req)
@@ -616,10 +635,14 @@ func TestChatParseHeapGateSustained(t *testing.T) {
 	case growth > boundPeak:
 		verdict = "OVER_PEAK"
 	}
+	_, handled := held.sum()
 	fmt.Printf("FOLGEP sustained form=%s n=%d dur=%ds gomemlimit=%q body=%d answers=[%s] growth_MiB=%.1f budget_peak_MiB=%.1f bound_peak_MiB=%.1f "+
-		"base_MiB=%.1f numgc=%d elapsed=%v verdict=%s\n",
+		"base_MiB=%.1f numgc=%d elapsed=%v handled=%d undeclared=%d verdict=%s\n",
 		form, n, dur, os.Getenv("GOMEMLIMIT"), len(shape.body), strings.TrimSpace(sb.String()), mib(growth), mib(budgetPeak.Load()), mib(boundPeak),
-		mib(int64(base)), ms.NumGC-gc0, el.Round(time.Millisecond), verdict)
+		mib(int64(base)), ms.NumGC-gc0, el.Round(time.Millisecond), handled, held.undeclared.Load(), verdict)
+	if want := int64(handled) * memBool(shape.chunked); held.undeclared.Load() != want || handled == 0 {
+		t.Errorf("form %s: %d of %d requests reached the handler without a declared length, want %d (chunked %v)", form, held.undeclared.Load(), handled, want, shape.chunked)
+	}
 	if verdict != "ok" {
 		t.Errorf("form %s, n=%d, %d s closed loop, GOMEMLIMIT %q: heap growth %.1f MiB > the budget's peak %.1f MiB + %d × base load %.0f KiB = %.1f MiB (budget %.0f MiB): %s",
 			form, n, dur, os.Getenv("GOMEMLIMIT"), mib(growth), mib(budgetPeak.Load()), n, float64(heapGateBaseLoad)/1024, mib(boundPeak), mib(memBudget), verdict)
