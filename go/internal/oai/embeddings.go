@@ -179,8 +179,9 @@ type embedCall struct {
 	decoding int64 // the decode transient's share (one block at a time)
 	limit    LimitReservation
 	limitEnd bool
-	// held is what the reservation holds — the tokens Keep books
-	// (reservedTokens), the ceiling of a block estimate's charge (meterEnd).
+	// held is what the reservation holds — the tokens Keep books, read from
+	// the admission (LimitReservation.Held), the ceiling of a block
+	// estimate's charge (meterEnd).
 	held int
 	// wired: a byte of the request can have reached a backend in some try
 	// of some block (wireContactTrace) — set from inside net/http, on its
@@ -532,7 +533,7 @@ func (c *embedCall) admitLimiter() bool {
 		return false
 	}
 	c.limit = res
-	c.held = c.reservedTokens(res.Headers())
+	c.held = int(res.Held())
 	return true
 }
 

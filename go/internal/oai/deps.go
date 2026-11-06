@@ -157,6 +157,11 @@ type LimitReservation interface {
 	// §4.4): a route writes them on its successful answer before its first
 	// byte, never on a refusal (lead decision M2 (c)).
 	Headers() http.Header
+	// Held is the tokens the admission charged — what Keep books (the
+	// meter's estimate, at most the bucket's capacity). A route that weighs
+	// its own booking against the reservation reads it here, never rebuilds
+	// it (one source, lead decision 2026-11-06).
+	Held() int64
 }
 
 // LimitRefusal is the limiter's answer for a refused request: a code of the

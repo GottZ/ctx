@@ -139,6 +139,7 @@ func (v1ChatReservation) Keep()                        {}
 func (v1ChatReservation) Abort()                       {}
 func (v1ChatReservation) Reject(string, time.Duration) {}
 func (v1ChatReservation) Headers() http.Header         { return nil }
+func (v1ChatReservation) Held() int64                  { return 0 }
 
 func (l *v1ChatLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	l.admits.Add(1)

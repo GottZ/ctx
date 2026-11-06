@@ -618,10 +618,12 @@ func postEmbedAndWait(t *testing.T, rig *chatRig, ctx context.Context, body stri
 // away while the engine holds block `gone`. u + 445 ≥ 100 with u below it ⇒
 // keep: the bucket keeps 100 and the next admission passes (before: settle
 // 447 and 3 min 28 s of debt). A reported usage above the reservation (300)
-// is booked as reported. A limiter that reports no capacity leaves the
-// estimate as the ceiling: 2 + 445 = 447 < 449 settles 447 (named); 4 + 445
-// = 449 reaches it ⇒ keep, and the bucket keeps what the admission charged
-// (100) — a Settle of the ceiling would book 449.
+// is booked as reported. A limiter that reports no capacity in its headers
+// changes nothing: the route reads what the admission charged from the
+// reservation (LimitReservation.Held, W02-09 rebase round 2, part C) — 2 +
+// 445 and 4 + 445 both reach 100 ⇒ keep 100, the next admission passes
+// (before, the estimate stood in as the ceiling: 2 + 445 = 447 < 449
+// settled 447, 3 min 28 s of debt, against a charge of 100).
 func TestEmbedMeterEstimateNeverAboveKeep(t *testing.T) {
 	inputs := []string{"text 000", strings.Repeat("x", 800)}
 	cases := []struct {
@@ -636,8 +638,8 @@ func TestEmbedMeterEstimateNeverAboveKeep(t *testing.T) {
 		{"client gone in block 1", 1, 2, false, "keep", 100, true},
 		{"client gone in block 2 after 2 reported", 2, 2, false, "keep", 100, true},
 		{"block 1 reports 300 above the reservation, gone in block 2", 2, 300, false, "settle", 300, false},
-		{"no capacity reported, 2 + 445 below the estimate", 2, 2, true, "settle", 447, false},
-		{"no capacity reported, 4 + 445 reaches the estimate", 2, 4, true, "keep", 100, true},
+		{"no capacity reported, 2 + 445 above what the admission charged", 2, 2, true, "keep", 100, true},
+		{"no capacity reported, 4 + 445 above what the admission charged", 2, 4, true, "keep", 100, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
