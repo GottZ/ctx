@@ -245,16 +245,17 @@ func diffLevels(body []byte, param string) []diffLevel {
 		case "message":
 			obj = jsonIndex(jsonMember(body, "messages"), m[1])
 		default:
+			pp := strings.TrimSuffix(param, ".") + "." // an empty key's param names the hull itself
 			switch {
-			case strings.HasPrefix(param, "tools["):
+			case strings.HasPrefix(pp, "tools["):
 				obj = jsonIndex(jsonMember(body, "tools"), m[1])
-			case strings.HasPrefix(param, "tool_choice."):
+			case strings.HasPrefix(pp, "tool_choice."):
 				obj = jsonMember(body, "tool_choice")
-			case strings.HasPrefix(param, "response_format.json_schema."):
+			case strings.HasPrefix(pp, "response_format.json_schema."):
 				obj = jsonMember(jsonMember(body, "response_format"), "json_schema")
-			case strings.HasPrefix(param, "response_format."):
+			case strings.HasPrefix(pp, "response_format."):
 				obj = jsonMember(body, "response_format")
-			case strings.HasPrefix(param, "logit_bias."):
+			case strings.HasPrefix(pp, "logit_bias."):
 				obj = jsonMember(body, "logit_bias")
 			}
 		}

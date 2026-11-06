@@ -96,6 +96,7 @@ func TestAllowedDeviationIsExact(t *testing.T) {
 		{"A1 part", `{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x",` + hKeys(40) + `"k030":1}]}]}`, "repeatBeyondWindow", def},
 		{"A1 image_url", hImg + hKeys(40) + `"k030":1}}]}]}`, "repeatBeyondWindow", vis},
 		{"A2 tool_choice", hMsg + `,"tool_choice":{"type":"function","function":{"name":"f"},` + hKeys(40) + `"k030":1}}`, "hullRepeatBeyondWindow", def},
+		{"A2 tool_choice, an empty key past the window", hMsg + `,"tool_choice":{"type":"function","function":{"name":"f"},` + hKeys(16) + `"":0,"":1}}`, "hullRepeatBeyondWindow", def},
 		{"A2 a tool", hMsg + `,"tools":[{"type":"function","function":{"name":"f"},` + hKeys(40) + `"k030":1}]}`, "hullRepeatBeyondWindow", def},
 		{"A2 response_format", hMsg + `,"response_format":{"type":"json_object",` + hKeys(40) + `"k030":1}}`, "hullRepeatBeyondWindow", def},
 		{"A2 json_schema", hMsg + `,"response_format":{"type":"json_schema","json_schema":{"name":"s",` + hKeys(40) + `"k030":1}}}`, "hullRepeatBeyondWindow", def},
