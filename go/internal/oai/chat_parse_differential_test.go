@@ -152,8 +152,11 @@ func sameOutcome(body []byte, n, o parseOutcome) string {
 //   - hullRepeatBeyondWindow (A2): the same on a hull (tool_choice, a tool,
 //     response_format, its json_schema) for a vendor key: FOLGE-P accepts
 //     — the hull goes upstream as sent — or refuses.
-//   - logitBiasCapFirst (A3): logit_bias past its cap, the repeat past the
-//     window: FOLGE-P answers the cap's unsupported_value.
+//   - logitBiasCapFirst, logitBiasLaterRepeat (A3): logit_bias past its cap,
+//     its first repeat past the window: FOLGE-P answers the cap's
+//     unsupported_value, or the invalid_json of a later repeat the window
+//     holds (the base named the first repeat in body order; found by the
+//     fuzzer of the lead once this rule was exact).
 //   - oracleMapOrder (A4): the base ranged over a Go map (message fields, a
 //     part's or image_url's unknown keys, a decoded hull's case variants) and
 //     named one of several refused keys at random; FOLGE-P names one of them
@@ -293,8 +296,11 @@ func repeatDeviation(body []byte, l policyLimits, n, o parseOutcome) string {
 		}
 		switch {
 		case lv.kind == "logit_bias":
-			if len(lv.members) > l.logitBiasMaxEntries && n.stage == "policy" && n.code == CodeUnsupportedValue && n.param == "logit_bias" {
+			switch past := len(lv.members) > l.logitBiasMaxEntries && n.stage == "policy"; {
+			case past && n.code == CodeUnsupportedValue && n.param == "logit_bias":
 				return "logitBiasCapFirst"
+			case past && n.code == CodeInvalidJSON && strings.HasPrefix(n.message, "The request repeats the key"):
+				return "logitBiasLaterRepeat"
 			}
 		case lv.kind == "hull" && !lv.variant():
 			if refused || n.stage == "ok" && passAsSent(body, n) {

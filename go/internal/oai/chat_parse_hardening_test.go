@@ -60,6 +60,7 @@ func TestAllowedDeviationIsExact(t *testing.T) {
 		{"A1: a repeat inside the window, another 400", hMsg + `,"v1":1,"v2":1,"v2":2}`, def, refuse(CodeUnsupportedParameter, "v1")},
 		{"A2: a hull's type past the window, accepted", hMsg + `,"tool_choice":{` + hKeys(40) + `"type":"function","function":{"name":"f"},"type":"none"}}`, def, accept},
 		{"A2: a case variant past the window, accepted", hMsg + `,"tool_choice":{"type":"function","function":{"name":"f"},` + hKeys(40) + `"Type":1,"Type":2}}`, def, accept},
+		{"A3: logit_bias past its cap, accepted", hMsg + `,"logit_bias":{` + lbEntries(16) + `"30":0,"30":1,"5":1,` + lbEntries(200)[len(lbEntries(100)):] + `"999":0}}`, def, accept},
 		{"A3: logit_bias within its cap, the cap's answer", hMsg + `,"logit_bias":{` + lbEntries(40) + `"30":1}}`, def,
 			func([]byte, policyLimits) parseOutcome {
 				return parseOutcome{stage: "policy", code: CodeUnsupportedValue, param: "logit_bias", message: "x"}
@@ -98,6 +99,8 @@ func TestAllowedDeviationIsExact(t *testing.T) {
 		{"A2 response_format", hMsg + `,"response_format":{"type":"json_object",` + hKeys(40) + `"k030":1}}`, "hullRepeatBeyondWindow", def},
 		{"A2 json_schema", hMsg + `,"response_format":{"type":"json_schema","json_schema":{"name":"s",` + hKeys(40) + `"k030":1}}}`, "hullRepeatBeyondWindow", def},
 		{"A3 logit_bias past its cap", hMsg + `,"logit_bias":{` + lbEntries(100) + `"50":1}}`, "logitBiasCapFirst", def},
+		{"A3 logit_bias past its cap, a later repeat in the window", hMsg + `,"logit_bias":{` + lbEntries(16) + `"30":0,"30":1,"5":1,` + lbEntries(200)[len(lbEntries(100)):] + `"999":0}}`,
+			"logitBiasLaterRepeat", def},
 		{"A8 top level", hMsg + `,"` + long + `":1}`, "echoClipped", def},
 		{"A8 message", `{"model":"chat","messages":[{"role":"user","content":"x","` + long + `":1}]}`, "echoClipped", def},
 		{"A8 a repeat", hMsg + `,"` + long + `":1,"` + long + `":2}`, "echoClipped", def},
