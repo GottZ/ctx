@@ -320,3 +320,34 @@ func TestEmbedMeterRateLimitHeadersBeforeTheFirstByte(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbedMeterRetryAfterAFailedHandshakeSettles (Delta-Review 4 F4-7) is
+// the chat pin TestMeterWireRetryAfterAFailedHandshakeSettles over the
+// embeddings route: HTTP/2, the first try's handshake is reset (no byte of
+// the request left), DoRetryOnce's retry reaches the backend, which answers
+// with usage 7 — the retry's wire contact counts: one Settle of 7, not the
+// full refund of a served answer.
+func TestEmbedMeterRetryAfterAFailedHandshakeSettles(t *testing.T) {
+	rl := &resetFirst{Listener: newHeldListener(t)}
+	var hits atomic.Int64
+	url := serveH2(t, rl, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		raw, _ := io.ReadAll(r.Body)
+		var in struct {
+			Input []string `json:"input"`
+		}
+		_ = json.Unmarshal(raw, &in)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, embedAnswerUsage(in.Input, 8, 7))
+	}))
+	rig, m := embedMeterRig(t, embedWireRow("flaky", url, 10))
+	a := rig.postEmbed(t, embedBody("emb1", embedInputs(1)))
+	held, ends, settled := m.heldEmbed(t, rig), m.endsOf(), m.settledNow()
+	t.Logf("handshake reset, retry served: answer %d; accepted %d; hits %d; ends %s; settled %+v; held %d", a.status, rl.n.Load(), hits.Load(), ends, settled, held)
+	if a.status != http.StatusOK || rl.n.Load() != 2 || hits.Load() != 1 {
+		t.Fatalf("answer %d %.200s, accepted %d, hits %d — want the retry served", a.status, a.body, rl.n.Load(), hits.Load())
+	}
+	if ends != "settle" || held != 7 || len(settled) != 1 || settled[0].PromptTokens != 7 {
+		t.Errorf("ends %q, settled %+v, the bucket holds %d — want the retry's usage 7 settled", ends, settled, held)
+	}
+}
