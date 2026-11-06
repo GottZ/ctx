@@ -29,6 +29,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/keyquota"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -168,13 +169,17 @@ const (
 	l1Panic             // the planner panics after Admit: close() aborts
 	l1CancelPlan        // the client goes away while Plan runs: Abort
 	l1CancelWire        // the client goes away while the engine holds the request: Keep
+	l1PanicWire         // the grant check before the write panics after the wire: close() keeps
 	l1Modes
 )
 
-// l1Run is one request of the leak gate: its exit and the client's cancel.
+// l1Run is one request of the leak gate: its exit, its lane, the client's
+// cancel and the grant checks it made.
 type l1Run struct {
 	mode   int
+	flex   bool
 	cancel context.CancelFunc
+	grants atomic.Int32
 }
 
 type l1RunKey struct{}
@@ -197,19 +202,25 @@ func (p l1Planner) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.Admis
 }
 
 // TestL1LeaksNothing is the leak gate (B-06-16; run it under -race): 10 000
-// requests of four consumers, eight at a time, each with a random exit —
-// success, an engine error, a planner refusal, a panic after Admit, the
-// client gone during Plan or during the backend call — and every one of them
-// either refused by L1 (C = 2) or admitted. Afterwards every consumer has
-// all C slots free (C admissions pass, one more is refused by L1), its token
+// requests of five consumers, eight at a time, a third of them on the bulk
+// lane (service_tier flex), each with a random exit — success, an engine
+// error, a planner refusal, a panic after Admit, the client gone during Plan
+// or during the backend call, a panic in the grant check before the write
+// (after the wire) — and the fifth consumer's every row panics in Record;
+// every request is either refused by L1 (C = 2, the bulk share 1) or
+// admitted. Afterwards every consumer has all its slots free (the bulk
+// share passes on the bulk lane and one more bulk request is refused, the
+// rest of C passes on the urgent lane and one more is refused), its token
 // bucket holds exactly the settled usage plus the kept reservations, its
 // request bucket exactly the admitted requests, and the process runs no
-// more goroutines than before.
+// more goroutines than before (Fremd-Review 1 F-6: lanes, panics after the
+// wire and in Record).
 func TestL1LeaksNothing(t *testing.T) {
 	const (
-		requests = 10000
-		workers  = 8
-		c        = 2
+		requests  = 10000
+		workers   = 8
+		c         = 2
+		bulkShare = 1 // max(1, ⌊2·(1 − 0.25)⌋)
 	)
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.DiscardHandler)) // ≈ 1 700 recovered panics would log their stacks
@@ -254,22 +265,41 @@ func TestL1LeaksNothing(t *testing.T) {
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 64, 1, withDeps(func(d *oai.Deps) {
 		d.Planner = l1Planner{d.Planner}
 		d.Limiter = meter
+		// The consumers hold a grant instead of all_models, so the grant
+		// check runs twice: at the Resolve and right before the write.
+		d.HasGrant = func(ctx context.Context, _, _ string) (bool, error) {
+			if run, ok := ctx.Value(l1RunKey{}).(*l1Run); ok && run.mode == l1PanicWire && run.grants.Add(1) == 2 {
+				panic("w06-11: the grant check before the write panics after the wire")
+			}
+			return true, nil
+		}
+		record := d.Record
+		d.Record = func(row llmlog.GatewayRow) {
+			if row.ConsumerID == "leak-4" {
+				panic("w06-11: Record panics")
+			}
+			record(row)
+		}
 	}))
-	consumers := make([]*auth.ConsumerAuth, 4)
+	consumers := make([]*auth.ConsumerAuth, 5)
 	for i := range consumers {
 		ca := urgentApp()
-		ca.ConsumerID = fmt.Sprintf("leak-%d", i)
+		ca.ConsumerID, ca.AllModels = fmt.Sprintf("leak-%d", i), false
 		consumers[i] = ca
 	}
 	rig.ca.Store(nil) // each request carries its own consumer
 	send := func(ca *auth.ConsumerAuth, content string, run *l1Run) chatAnswer {
 		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), consumerKey{}, ca))
 		defer cancel()
+		tier := ""
 		if run != nil {
 			run.cancel = cancel
 			ctx = context.WithValue(ctx, l1RunKey{}, run)
+			if run.flex {
+				tier = `,"service_tier":"flex"`
+			}
 		}
-		body := fmt.Sprintf(`{"model":"chat","messages":[{"role":"user","content":%q}]}`, content)
+		body := fmt.Sprintf(`{"model":"chat","messages":[{"role":"user","content":%q}]%s}`, content, tier)
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -303,6 +333,7 @@ func TestL1LeaksNothing(t *testing.T) {
 	tallies := make([]tally, len(consumers))
 	var mu sync.Mutex
 	modes := make([]int64, l1Modes)
+	var flexAdmitted int64
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for w := range workers {
@@ -314,7 +345,7 @@ func TestL1LeaksNothing(t *testing.T) {
 					return
 				}
 				ci := rng.IntN(len(consumers))
-				run := &l1Run{mode: rng.IntN(l1Modes)}
+				run := &l1Run{mode: rng.IntN(l1Modes), flex: rng.IntN(3) == 0}
 				content := fmt.Sprintf("q%06d", id)
 				runs.Store(content, run)
 				a := send(consumers[ci], content, run)
@@ -332,13 +363,16 @@ func TestL1LeaksNothing(t *testing.T) {
 				default:
 					tallies[ci].admitted++
 					modes[run.mode]++
+					if run.flex {
+						flexAdmitted++
+					}
 					switch run.mode {
 					case l1Success:
 						if a.status != http.StatusOK {
 							t.Errorf("request %d (success): %d %s", id, a.status, a.body)
 						}
 						tallies[ci].tokens += 11 + 3
-					case l1Upstream, l1CancelWire:
+					case l1Upstream, l1CancelWire, l1PanicWire:
 						tallies[ci].tokens += reservation
 					}
 				}
@@ -355,18 +389,28 @@ func TestL1LeaksNothing(t *testing.T) {
 		if i == 0 {
 			tl.tokens += 11 + 3 // the warm-up request
 		}
+		// The bulk share on the bulk lane, then the rest of C on the urgent
+		// lane; each followed by one more that L1 must refuse.
+		subject := func(lane keyquota.Lane) keyquota.Subject {
+			return keyquota.Subject{ConsumerID: ca.ConsumerID, TenantID: ca.TenantID, Op: keyquota.OpChat, Lane: lane}
+		}
 		var probes []*keyquota.Reservation
 		var last keyquota.Decision
-		for range c {
-			r, d := meter.m.Admit(keyquota.Subject{ConsumerID: ca.ConsumerID, TenantID: ca.TenantID, Op: keyquota.OpChat}, meter.lim, keyquota.Estimate{ClientMax: true})
-			if !d.Allowed {
-				t.Errorf("%s: a probe of its C = %d slots refused (%s) — a slot leaked; %+v", ca.ConsumerID, c, d.Reason, tl)
-				break
+		for _, step := range []struct {
+			lane keyquota.Lane
+			n    int
+		}{{keyquota.LaneBulk, bulkShare}, {keyquota.LaneUrgent, c - bulkShare}} {
+			for range step.n {
+				r, d := meter.m.Admit(subject(step.lane), meter.lim, keyquota.Estimate{ClientMax: true})
+				if !d.Allowed {
+					t.Errorf("%s: a probe of its slots on lane %d refused (%s) — a slot leaked; %+v", ca.ConsumerID, step.lane, d.Message, tl)
+					break
+				}
+				probes, last = append(probes, r), d
 			}
-			probes, last = append(probes, r), d
-		}
-		if _, d := meter.m.Admit(keyquota.Subject{ConsumerID: ca.ConsumerID, TenantID: ca.TenantID, Op: keyquota.OpChat}, meter.lim, keyquota.Estimate{ClientMax: true}); d.Reason != keyquota.ReasonConcurrency {
-			t.Errorf("%s: probe C+1: %+v, want refused by L1", ca.ConsumerID, d)
+			if _, d := meter.m.Admit(subject(step.lane), meter.lim, keyquota.Estimate{ClientMax: true}); d.Reason != keyquota.ReasonConcurrency {
+				t.Errorf("%s: one probe more on lane %d: %+v, want refused by L1", ca.ConsumerID, step.lane, d)
+			}
 		}
 		if len(probes) == c {
 			if got := meter.lim.TPM - last.Headers.RemainingTokens; got != tl.tokens {
@@ -384,24 +428,30 @@ func TestL1LeaksNothing(t *testing.T) {
 		}
 	}
 	after := settledGoroutines(engine)
-	t.Logf("%d requests: admitted by exit (success, engine error, refuse, panic, cancel in plan, cancel on the wire) %v, refused by L1 %d; reservation %d tokens; goroutines before %d, after %d",
-		requests, modes, refused, reservation, before, after)
+	t.Logf("%d requests: admitted by exit (success, engine error, refuse, panic in plan, cancel in plan, cancel on the wire, panic after the wire) %v, on the bulk lane %d, refused by L1 %d; reservation %d tokens; goroutines before %d, after %d",
+		requests, modes, flexAdmitted, refused, reservation, before, after)
 	if after > before {
 		buf := make([]byte, 1<<20)
 		t.Errorf("goroutines %d after the run, %d before:\n%s", after, before, buf[:runtime.Stack(buf, true)])
 	}
-	if refused == 0 || modes[l1Panic] == 0 || modes[l1CancelWire] == 0 {
+	if refused == 0 || flexAdmitted == 0 || modes[l1Panic] == 0 || modes[l1CancelWire] == 0 || modes[l1PanicWire] == 0 {
 		t.Errorf("the run did not exercise every exit and L1: refused %d, modes %v", refused, modes)
 	}
 }
 
 // settledGoroutines closes every connection the engine holds and returns the
-// goroutine count once it has not changed for 100 ms (at most 10 s).
+// goroutine count once it has not changed for 100 ms (at most 10 s). It
+// closes again on every look: a dial a canceled request started can finish
+// after the first close, and net/http then parks that connection in its idle
+// pool (seen in 9 of 200 runs under load: one persistConn read and write loop
+// plus the engine's conn, 5 → 8). A goroutine of a request that never ended
+// is not a connection and stays counted.
 func settledGoroutines(engine *httptest.Server) int {
 	engine.CloseClientConnections()
 	n, stable := runtime.NumGoroutine(), 0
 	for deadline := time.Now().Add(10 * time.Second); stable < 5 && time.Now().Before(deadline); {
 		time.Sleep(20 * time.Millisecond)
+		engine.CloseClientConnections()
 		if m := runtime.NumGoroutine(); m == n {
 			stable++
 		} else {
