@@ -13,10 +13,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -682,5 +684,134 @@ func TestEmbedMeterEstimateNeverAboveKeep(t *testing.T) {
 				t.Errorf("the bucket holds %d, want %d", m.lim.TPM-next.Headers.RemainingTokens, tc.want)
 			}
 		})
+	}
+}
+
+// TestEmbedMeterContextRuleMarksTheBlock (Delta-Review 5 F5-3, the probe
+// TestR5ContextRuleInBlock2): the context rule (a block that ended by its
+// context with a connection in hand) marks the block's own contact, not only
+// the request's. HTTP/2, emb1 × 2: block 1 is served (two tokens), block 2's
+// try stalls in GotConn past its 1 s attempt deadline — no write hook fires,
+// the h2 writer could still write: block 2 books its estimate, settle
+// 2 + 5 = 7 (with the rule marking only the request: settle 2).
+func TestEmbedMeterContextRuleMarksTheBlock(t *testing.T) {
+	var hits atomic.Int64
+	url := serveH2(t, newHeldListener(t), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		raw, _ := io.ReadAll(r.Body)
+		var in struct {
+			Input []string `json:"input"`
+		}
+		_ = json.Unmarshal(raw, &in)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, embedAnswerUsage(in.Input, 8, 2*len(in.Input)))
+	}))
+	row := embedWireRow("h2", url, 10)
+	row.Timeouts = nil
+	rig, m := embedMeterRig(t, row)
+	const attemptDeadline = time.Second
+	rig.setSettings(func(s *oai.Settings) { s.RequestTimeout = attemptDeadline })
+	pt := &h2Trace{}
+	tr := pt.trace()
+	record := tr.GotConn
+	var gets, start atomic.Int64
+	tr.GetConn = func(string) {
+		if gets.Add(1) == 2 {
+			start.Store(time.Now().UnixNano())
+		}
+	}
+	tr.GotConn = func(i httptrace.GotConnInfo) {
+		record(i)
+		if gets.Load() == 2 {
+			time.Sleep(time.Until(time.Unix(0, start.Load()).Add(attemptDeadline + 200*time.Millisecond)))
+		}
+	}
+	a := postEmbedCtx(t, rig, httptrace.WithClientTrace(context.Background(), tr), embedBody("emb1", embedInputs(2)))
+	held, ends, settled := m.heldEmbed(t, rig), m.endsOf(), m.settledNow()
+	want := 2 + embedReservation(1)
+	t.Logf("context rule in block 2: answer %d %.60s; tries %d; connections %s; handler hits %d; ends %s; settled %+v; held %d (want settle %d)",
+		a.status, a.body, gets.Load(), pt, hits.Load(), ends, settled, held, want)
+	if gets.Load() < 2 || hits.Load() != 1 || !strings.HasPrefix(pt.String(), "h2") || a.status == http.StatusOK {
+		t.Fatalf("tries %d, handler hits %d, connections %q, answer %d — want block 1 served over h2 and block 2 ended at its deadline", gets.Load(), hits.Load(), pt, a.status)
+	}
+	if ends != "settle" || held != want || len(settled) != 1 || int64(settled[0].PromptTokens) != want {
+		t.Errorf("ends %q, settled %+v, the bucket holds %d — want one Settle of %d", ends, settled, held, want)
+	}
+}
+
+// resetAt resets the raw connections a listener accepts whose number (from
+// 1) reset selects — before the TLS handshake: no byte of a request leaves.
+type resetAt struct {
+	net.Listener
+	n     atomic.Int64
+	reset func(k int64) bool
+}
+
+func (l *resetAt) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if l.reset(l.n.Add(1)) {
+			reset(c)
+			continue
+		}
+		return c, nil
+	}
+}
+
+// serveTLSH1 serves h over TLS with the test CA the rig trusts, HTTP/1.1
+// only; with Connection: close on every answer each block has its own
+// connection and handshake.
+func serveTLSH1(t *testing.T, l net.Listener, h http.Handler) string {
+	t.Helper()
+	h1 := new(http.Protocols)
+	h1.SetHTTP1(true)
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ErrorLog: log.New(io.Discard, "", 0), Protocols: h1}
+	go func() { _ = srv.ServeTLS(l, wireCertFile, wireKeyFile) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return "https://" + l.Addr().String()
+}
+
+// TestEmbedMeterRetryContactMarksTheBlock (Delta-Review 5 F5-4, the probe
+// TestR5TLSHandshakeInBlock3 "retry 502"): the block's own trace marks in
+// every try of httpx.DoRetryOnce, not only in the first. TLS, HTTP/1.1, one
+// connection per block, emb1 × 8: blocks 1–2 are served (two tokens each);
+// block 3's first handshake is reset (no byte leaves), its retry reaches the
+// backend, which answers 502 — the retry's contact books block 3's
+// estimate: settle 4 + 5 = 9 (with the block trace marking only the first
+// try: settle 4).
+func TestEmbedMeterRetryContactMarksTheBlock(t *testing.T) {
+	rl := &resetAt{Listener: newHeldListener(t), reset: func(k int64) bool { return k == 3 }}
+	inputs := embedInputs(8)
+	var hits atomic.Int64
+	url := serveTLSH1(t, rl, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		raw, _ := io.ReadAll(r.Body)
+		var in struct {
+			Input []string `json:"input"`
+		}
+		_ = json.Unmarshal(raw, &in)
+		w.Header().Set("Connection", "close")
+		if len(in.Input) > 0 && in.Input[0] == inputs[2] {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":{"message":"down"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, embedAnswerUsage(in.Input, 8, 2*len(in.Input)))
+	}))
+	rig, m := embedMeterRig(t, embedWireRow("tls", url, 10))
+	a := rig.postEmbed(t, embedBody("emb1", inputs))
+	held, ends, settled := m.heldEmbed(t, rig), m.endsOf(), m.settledNow()
+	want := 4 + embedReservation(1)
+	t.Logf("block 3 handshake reset, retry 502: answer %d %.60s; accepted %d; handler hits %d; ends %s; settled %+v; held %d (want settle %d)",
+		a.status, a.body, rl.n.Load(), hits.Load(), ends, settled, held, want)
+	if rl.n.Load() != 4 || hits.Load() != 3 || a.status == http.StatusOK {
+		t.Fatalf("accepted %d, handler hits %d, answer %d — want blocks 1–2 served, block 3's first handshake reset and its retry answered 502", rl.n.Load(), hits.Load(), a.status)
+	}
+	if ends != "settle" || held != want || len(settled) != 1 || int64(settled[0].PromptTokens) != want {
+		t.Errorf("ends %q, settled %+v, the bucket holds %d — want one Settle of %d", ends, settled, held, want)
 	}
 }
