@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llmlog"
@@ -196,6 +197,11 @@ func TestReservationCoversEveryCopy(t *testing.T) {
 			}
 			if got := held - answerShare; got < want {
 				t.Errorf("the request share held %d bytes at the end, want ≥ %d (reads + copies)", got, want)
+			}
+			// The row gets the bounded text the route booked, not a copy of
+			// the whole array (hardening 6).
+			if rows := rig.rows.all(); tc.bodyLog && (len(rows) == 0 || len(rows[len(rows)-1].Request) > oai.BodyLogTextMax+utf8.UTFMax-1) {
+				t.Errorf("the log row's request text: %d rows, want one with at most %d bytes", len(rows), oai.BodyLogTextMax+utf8.UTFMax-1)
 			}
 		})
 	}
