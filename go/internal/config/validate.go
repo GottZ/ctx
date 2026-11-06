@@ -100,6 +100,7 @@ func Validate(c *Config) []Issue {
 	// V47 (W06-10): the per-consumer meter's limits >= 1, the XU reserve
 	// ratio in [0, 1).
 	issues = append(issues, validateGatewayMeter(c)...)
+	issues = append(issues, validateGatewayConcurrency(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1328,6 +1329,38 @@ func validateGatewayMeter(c *Config) []Issue {
 			Msg: fmt.Sprintf("gateway.xu_reserve_ratio (%v) must be in [0, 1) — at 1 the bulk lane could never be served", r)})
 	}
 	return issues
+}
+
+// validateGatewayConcurrency is V48 (wave W06-11, design/06 §4.2, §4.11):
+// gateway.consumer_concurrency_default is C, the meter's L1 per (consumer,
+// op). At least 1 — 0 would refuse every request, and L1 is never unbounded
+// (design/04 R-06-4); negatives stay with V35 (one issue per field). While
+// dispatch.external_queue_per_consumer caps the queue (> 0; 0 = off) C is at
+// most that cap: L1 counts a consumer's requests waiting in the queue and
+// running, and the per-consumer cap of the external class is its L2
+// counterpart — a larger C would promise a consumer more concurrent requests
+// than the queue lets it wait with on one target (deviation from design/06
+// §4.11, which names dispatch.interactive_queue_per_principal: since A03-W3
+// the external class has a cap of its own). Fatal like V47: boot aborts, and
+// a settings PUT of gateway.consumer_concurrency_default that breaks the rule
+// is a 422. The issue hangs on that one field, so a PUT that lowers
+// dispatch.external_queue_per_consumer under a stored C is a 200 with a
+// warning: the stored C is dropped and C falls back to its environment value
+// or the default (the mechanism V39 has for gateway.inflight_budget) — the
+// effective C never exceeds the cap. Only when that fallback breaks the rule
+// too is the PUT of the cap a 422.
+func validateGatewayConcurrency(c *Config) []Issue {
+	const key = "gateway.consumer_concurrency_default"
+	conc, queue := c.Gateway.ConsumerConcurrencyDefault, c.Dispatch.ExternalQueuePerConsumer
+	switch {
+	case conc == 0:
+		return []Issue{{Field: key, Severity: SeverityError,
+			Msg: key + " must be >= 1 — 0 would refuse every request, and the concurrency limit is never unbounded"}}
+	case queue > 0 && conc > queue:
+		return []Issue{{Field: key, Severity: SeverityError,
+			Msg: fmt.Sprintf("%s (%d) must not exceed dispatch.external_queue_per_consumer (%d) — the queue would refuse a consumer what its concurrency limit admits", key, conc, queue)}}
+	}
+	return nil
 }
 
 // validateFederation is V45 (wave F-W8, design/04 §3.1): federation.max_depth

@@ -182,6 +182,9 @@ func TestRegistryStrictSet(t *testing.T) {
 		"gateway.rerank_tpm_default":  true,
 		"gateway.tpm_reserve_default": true,
 		"gateway.xu_reserve_ratio":    true,
+		// W06-11: the meter's L1 — a typo'd concurrency limit must not fall back
+		// to the default silently either.
+		"gateway.consumer_concurrency_default": true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.
