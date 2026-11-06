@@ -1474,7 +1474,17 @@ const (
 //     gateway.max_stream_frame_bytes, or 4 B × gateway.embedding_max_floats
 //     plus 64 KiB (design/02 §4.2.1). A smaller budget could never serve such a
 //     request, and the client would read "overloaded, retry in 1 s" forever.
-//     The defaults need 216.06 MiB of their 256 MiB.
+//     The defaults need 216.06 MiB of their 256 MiB. What the floor promises
+//     is one attempt without failover (Delta-Review 3 R3-4): every further
+//     attempt of the chain books one more upstream body (oai reserveUpstream,
+//     about the body + 160 B), which the floor does not hold — with one
+//     failover attempt such a request gets 503 at a budget equal to the
+//     floor. Without failover it is conservative by up to 1 × the body: such
+//     a request at 1 MiB held 34 668 704 B, served from the floor − 1.000 ×
+//     the body on. The error names both ways out (gatewayCapWayOut).
+//     Stricter since FOLGE-P: budgets under 216.06 MiB at the 8 MiB cap and
+//     caps above 9 999 281 B at the default budget were valid before (see
+//     docs/operations.md, the upgrade note).
 //   - gateway.retry_after_jitter in [0, 1] (float keys have no generic sign
 //     walk; NaN fails every comparison and is refused explicitly).
 func validateGateway(c *Config) []Issue {
@@ -1534,9 +1544,10 @@ func validateGateway(c *Config) []Issue {
 	if need, ok := gatewayBudgetFloor(g); ok && g.InflightBudget > 0 {
 		switch {
 		case need < 0:
-			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + %d + the largest response share) exceed any representable budget", g.InflightBudget, gatewayRequestReserve, oai.ScanReserveBase))
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + %d + the largest response share) exceed any representable budget: lower gateway.max_request_bytes%s and the response caps", g.InflightBudget, gatewayRequestReserve, oai.ScanReserveBase, gatewayCapWayOut(g)))
 		case int64(g.InflightBudget) < need:
-			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap (%d = %d × gateway.max_request_bytes + %d for the sensitivity scan's booking + the largest response share) — such a request could never be served", g.InflightBudget, need, gatewayRequestReserve, oai.ScanReserveBase))
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap: %d = %d × gateway.max_request_bytes + %d + the largest response share (%d), one attempt without failover — raise gateway.inflight_budget to >= %d%s. A request at the body cap to an alias below credentials could never be served: %d × its body + %d of it is the sensitivity scan's booking, which a request at credentials does not take",
+				g.InflightBudget, need, gatewayRequestReserve, oai.ScanReserveBase, gatewayResponseShare(g), need, gatewayCapWayOut(g), oai.ScanReserveFactor, oai.ScanReserveBase))
 		}
 	}
 	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {
@@ -1631,17 +1642,34 @@ func gatewayBudgetFloor(g *GatewayConfig) (int64, bool) {
 	if g.MaxRequestBytes <= 0 || g.MaxResponseBytes <= 0 || g.MaxStreamFrameBytes <= 0 || g.EmbeddingMaxFloats <= 0 {
 		return 0, false
 	}
-	response := max(
-		gatewayMulSat(gatewayResponseCopies, int64(g.MaxResponseBytes)),
-		gatewayMulSat(gatewayResponseCopies, int64(g.MaxStreamFrameBytes)),
-		gatewayAddSat(gatewayMulSat(gatewayFloatBytes, int64(g.EmbeddingMaxFloats)), gatewayEmbedEncoderReserve),
-	)
 	request := gatewayAddSat(gatewayMulSat(gatewayRequestReserve, int64(g.MaxRequestBytes)), oai.ScanReserveBase)
-	floor := gatewayAddSat(request, response)
+	floor := gatewayAddSat(request, gatewayResponseShare(g))
 	if floor == math.MaxInt64 {
 		return -1, true
 	}
 	return floor, true
+}
+
+// gatewayResponseShare is the largest response share of the floor (saturating;
+// the sizes are positive, gatewayBudgetFloor checks it).
+func gatewayResponseShare(g *GatewayConfig) int64 {
+	return max(
+		gatewayMulSat(gatewayResponseCopies, int64(g.MaxResponseBytes)),
+		gatewayMulSat(gatewayResponseCopies, int64(g.MaxStreamFrameBytes)),
+		gatewayAddSat(gatewayMulSat(gatewayFloatBytes, int64(g.EmbeddingMaxFloats)), gatewayEmbedEncoderReserve),
+	)
+}
+
+// gatewayCapWayOut is the floor error's second way out (Delta-Review 3
+// R3-3): " or lower gateway.max_request_bytes to <= X", X the largest body
+// cap the budget holds at the response caps as they are — "" when the
+// response share and the scan's fixed rest alone fill the budget.
+func gatewayCapWayOut(g *GatewayConfig) string {
+	room := int64(g.InflightBudget) - oai.ScanReserveBase - gatewayResponseShare(g)
+	if room < gatewayRequestReserve {
+		return ""
+	}
+	return fmt.Sprintf(" or lower gateway.max_request_bytes to <= %d", room/gatewayRequestReserve)
 }
 
 // gatewayMulSat and gatewayAddSat are a·b and a+b for non-negative operands,

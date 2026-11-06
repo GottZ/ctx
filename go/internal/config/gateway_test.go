@@ -299,6 +299,60 @@ func TestBudgetFloorHoldsTheScanBooking(t *testing.T) {
 	}
 }
 
+// TestBudgetFloorNamesTheWaysOut (FOLGE-P hardening 3, Delta-Review 3 R3-3):
+// the floor's error names both ways out with their numbers — the budget it
+// needs, the largest body cap the budget holds — and that the scan's share
+// is booked only below credentials. Each way out is checked to be one: the
+// budget it names, and the cap it names, validate; one byte past the cap
+// does not. A budget that holds no body at all names the budget alone.
+func TestBudgetFloorNamesTheWaysOut(t *testing.T) {
+	const mib = 1 << 20
+	for _, tc := range []struct {
+		budget, request int
+		need, cap       int64 // hand-computed: 26 × request + 64 KiB + 8 MiB; (budget − 64 KiB − 8 MiB) / 26
+	}{
+		{256 * mib, 10 * mib, 281083904, 9999281},
+		{128 * mib, 8 * mib, 226557952, 4837060},
+		{64 * mib, 8 * mib, 226557952, 2255950},
+		{8 * mib, 8 * mib, 226557952, 0}, // the response share alone fills it
+	} {
+		c := Defaults()
+		c.Gateway.InflightBudget, c.Gateway.MaxRequestBytes = tc.budget, tc.request
+		hits := issuesOn(Validate(c), "gateway.inflight_budget")
+		if len(hits) != 1 {
+			t.Fatalf("budget %d MiB, max_request_bytes %d MiB: want one error, got %+v", tc.budget/mib, tc.request/mib, hits)
+		}
+		msg := hits[0].Msg
+		t.Logf("FOLGEP floor error, budget %d MiB, max_request_bytes %d MiB: %s", tc.budget/mib, tc.request/mib, msg)
+		want := []string{"raise gateway.inflight_budget to >= " + strconv.FormatInt(tc.need, 10), "below credentials", "one attempt without failover"}
+		if tc.cap > 0 {
+			want = append(want, "lower gateway.max_request_bytes to <= "+strconv.FormatInt(tc.cap, 10))
+		} else if strings.Contains(msg, "lower gateway.max_request_bytes") {
+			t.Errorf("budget %d MiB: no body cap fits it, but the error names one: %s", tc.budget/mib, msg)
+		}
+		for _, w := range want {
+			if !strings.Contains(msg, w) {
+				t.Errorf("budget %d MiB, max_request_bytes %d MiB: the error lacks %q: %s", tc.budget/mib, tc.request/mib, w, msg)
+			}
+		}
+		raised := Defaults()
+		raised.Gateway.InflightBudget, raised.Gateway.MaxRequestBytes = int(tc.need), tc.request
+		if hits := issuesOn(Validate(raised), "gateway.inflight_budget"); len(hits) != 0 {
+			t.Errorf("the budget the error names (%d) does not validate: %+v", tc.need, hits)
+		}
+		if tc.cap == 0 {
+			continue
+		}
+		for _, d := range []int64{0, 1} {
+			lowered := Defaults()
+			lowered.Gateway.InflightBudget, lowered.Gateway.MaxRequestBytes = tc.budget, int(tc.cap+d)
+			if hits := issuesOn(Validate(lowered), "gateway.inflight_budget"); len(hits) != int(d) {
+				t.Errorf("budget %d MiB, max_request_bytes %d (the named cap + %d): want %d errors, got %+v", tc.budget/mib, tc.cap+d, d, d, hits)
+			}
+		}
+	}
+}
+
 // TestBootDumpShowsGateway: the boot record "config: effective" carries the
 // gateway group, so the operator sees gateway.enabled and the caps at boot.
 func TestBootDumpShowsGateway(t *testing.T) {
