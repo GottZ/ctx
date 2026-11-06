@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 )
@@ -75,8 +76,13 @@ func newParse(body []byte, l policyLimits) parseOutcome {
 	return o
 }
 
+// baseParseRuns counts the base parses (TestOracleMapOrderIsEnumerated: A4
+// enumerates the base's answers instead of sampling them).
+var baseParseRuns atomic.Int64
+
 // baseParse runs the base parse (the oracle).
 func baseParse(body []byte, l policyLimits) parseOutcome {
+	baseParseRuns.Add(1)
 	req, perr := baseParseTopLevel(body)
 	if perr != nil {
 		return errOutcome("top", perr)
@@ -151,17 +157,24 @@ func sameOutcome(body []byte, n, o parseOutcome) string {
 //     such keys. FOLGE-P must still refuse (a 400).
 //   - hullRepeatBeyondWindow (A2): the same on a hull (tool_choice, a tool,
 //     response_format, its json_schema) for a vendor key: FOLGE-P accepts
-//     — the hull goes upstream as sent — or refuses.
+//     — the hull goes upstream as sent — or refuses; accepts only while no
+//     named key of the hull is repeated as well (Delta-Review 2 F-4: the
+//     base named the vendor key because it sorts first, and an acceptance
+//     would have let the named repeat through).
 //   - logitBiasCapFirst, logitBiasLaterRepeat (A3): logit_bias past its cap,
 //     its first repeat past the window: FOLGE-P answers the cap's
 //     unsupported_value, or the invalid_json of a later repeat the window
 //     holds (the base named the first repeat in body order; found by the
-//     fuzzer of the lead once this rule was exact).
+//     fuzzer of the lead once this rule was exact) — a key the body does
+//     repeat (Delta-Review 2 F-5).
 //   - oracleMapOrder (A4): the base ranged over a Go map (message fields, a
 //     part's or image_url's unknown keys, a decoded hull's case variants) and
 //     named one of several refused keys at random; FOLGE-P names one of them
-//     deterministically. Allowed when one of 64 base runs gives FOLGE-P's
-//     answer.
+//     deterministically. Allowed when FOLGE-P's answer is one the base could
+//     give: the answers are enumerated from the base's map loops (each key
+//     of the level it refuses alike, mapOrderAnswers), not sampled — 64 base
+//     runs missed the rarer of two keys 2.2·10⁻⁴ of the time (Delta-Review 2
+//     F-8).
 //   - echoClipped (A8, hardening H-9): the base named a key longer than
 //     echoNameMax bytes; FOLGE-P names it cut to its first echoNameMax bytes
 //     at a rune boundary, marked "…" — the answer is the same otherwise.
@@ -179,8 +192,7 @@ func allowedDeviation(body []byte, l policyLimits, n, o parseOutcome) string {
 			return kind
 		}
 	}
-	for range 64 {
-		b := baseParse(body, l)
+	for _, b := range mapOrderAnswers(body, o) {
 		for _, c := range append(clippedOutcomes(b), b) {
 			if sameOutcome(body, n, c) == "" {
 				return "oracleMapOrder"
@@ -188,6 +200,66 @@ func allowedDeviation(body []byte, l policyLimits, n, o parseOutcome) string {
 		}
 	}
 	return ""
+}
+
+// baseMessageFieldKinds are the PASS fields of a message the base
+// type-checks ranging over a map (baseCheckMessageFields).
+var baseMessageFieldKinds = map[string]baseJSONKind{"name": baseKindString, "tool_call_id": baseKindString, "tool_calls": baseKindArray, "refusal": baseKindString}
+
+// mapOrderAnswers are the answers the base parse can give where it ranges
+// over a Go map and names the first refused key it meets (A4), for its
+// answer o: on the level o names, every key the base's loop refuses alike —
+// a part's keys its type does not allow (baseCheckPart), an image_url's keys
+// besides url and detail (baseCheckImageURL), a decoded hull's case variants
+// of its known keys (baseCheckHullDecoded): unsupported_parameter; a
+// message's PASS fields of the wrong JSON kind (baseCheckMessageFields):
+// invalid_type. Each answer is o with its code, param and message replaced
+// by the oracle's own constructor's.
+func mapOrderAnswers(body []byte, o parseOutcome) []parseOutcome {
+	if o.stage != "policy" {
+		return nil
+	}
+	var out []parseOutcome
+	add := func(perr *paramError) {
+		c := o
+		c.code, c.param, c.message = perr.code, perr.param, perr.message
+		out = append(out, c)
+	}
+	for _, lv := range diffLevels(body, o.param) {
+		at, ok := strings.CutSuffix(o.param, "."+lv.key)
+		if !ok {
+			continue
+		}
+		switch lv.kind {
+		case "part":
+			var typ string
+			_ = json.Unmarshal(jsonMember(lv.obj, "type"), &typ)
+			for _, k := range lv.members {
+				if k != "type" && (k != "text" || typ != "text") && (k != "image_url" || typ != "image_url") {
+					add(unsupportedParameter(at + "." + k))
+				}
+			}
+		case "image_url":
+			for _, k := range lv.members {
+				if k != "url" && k != "detail" {
+					add(unsupportedParameter(at + "." + k))
+				}
+			}
+		case "hull":
+			for _, k := range lv.members {
+				if slices.ContainsFunc(lv.named, func(kn string) bool { return k != kn && strings.EqualFold(k, kn) }) {
+					add(unsupportedParameter(baseKeyPath(at, k)))
+				}
+			}
+		case "message":
+			for k, want := range baseMessageFieldKinds {
+				if v := jsonMember(lv.obj, k); v != nil && !baseIsNull(v) && !baseHasKind(v, want) {
+					add(invalidType(at+"."+k, baseKindName(want)))
+				}
+			}
+		}
+	}
+	return out
 }
 
 // diffLevel is one object level a base param can name: its kind, the key
@@ -198,6 +270,7 @@ type diffLevel struct {
 	key     string
 	named   []string
 	members []string
+	obj     []byte // the level's raw object
 }
 
 // The param prefixes of the levels a key check runs on (FOLGE-P: the
@@ -223,7 +296,7 @@ var diffLevelParams = []struct {
 // outer repeat would have been the base's answer, so the first member of a
 // name is the one meant.
 func diffLevels(body []byte, param string) []diffLevel {
-	top := diffLevel{kind: "top", key: param, named: topLevelNames, members: jsonKeys(body)}
+	top := diffLevel{kind: "top", key: param, named: topLevelNames, members: jsonKeys(body), obj: body}
 	out := []diffLevel{top}
 	for _, p := range diffLevelParams {
 		m := p.re.FindStringSubmatch(param)
@@ -260,7 +333,7 @@ func diffLevels(body []byte, param string) []diffLevel {
 			}
 		}
 		if members := jsonKeys(obj); members != nil {
-			out = append(out, diffLevel{kind: p.kind, key: m[len(m)-1], named: p.named, members: members})
+			out = append(out, diffLevel{kind: p.kind, key: m[len(m)-1], named: p.named, members: members, obj: obj})
 		}
 	}
 	return out
@@ -289,6 +362,45 @@ func (lv diffLevel) beyondWindow() bool {
 	return count >= 2 && first >= pairwiseKeys
 }
 
+// namedRepeated reports a named key of the level that occurs twice or more.
+func (lv diffLevel) namedRepeated() bool {
+	for _, kn := range lv.named {
+		if occurrences(lv.members, kn) >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// occurrences is how often key occurs in members.
+func occurrences(members []string, key string) int {
+	n := 0
+	for _, k := range members {
+		if k == key {
+			n++
+		}
+	}
+	return n
+}
+
+// repeatedName reports the key a logit_bias repeat answer n names as one
+// the body repeats on the level (its param is "logit_bias.<key>", an empty
+// key's "logit_bias"; a key over echoNameMax bytes is named cut, A8).
+func (lv diffLevel) repeatedName(n parseOutcome) bool {
+	key, ok := strings.CutPrefix(n.param, "logit_bias.")
+	if !ok && n.param != "logit_bias" {
+		return false
+	}
+	o := parseOutcome{param: n.param}
+	for _, k := range lv.members {
+		o.param = "logit_bias." + k
+		if k == key || n.param == "logit_bias" && k == "" || slices.ContainsFunc(clippedOutcomes(o), func(c parseOutcome) bool { return c.param == n.param }) {
+			return occurrences(lv.members, k) >= 2
+		}
+	}
+	return false
+}
+
 // variant reports the level's key as a case variant of a named key.
 func (lv diffLevel) variant() bool {
 	return slices.ContainsFunc(lv.named, func(k string) bool { return strings.EqualFold(k, lv.key) })
@@ -306,11 +418,11 @@ func repeatDeviation(body []byte, l policyLimits, n, o parseOutcome) string {
 			switch past := len(lv.members) > l.logitBiasMaxEntries && n.stage == "policy"; {
 			case past && n.code == CodeUnsupportedValue && n.param == "logit_bias":
 				return "logitBiasCapFirst"
-			case past && n.code == CodeInvalidJSON && strings.HasPrefix(n.message, "The request repeats the key"):
+			case past && n.code == CodeInvalidJSON && strings.HasPrefix(n.message, "The request repeats the key") && lv.repeatedName(n):
 				return "logitBiasLaterRepeat"
 			}
 		case lv.kind == "hull" && !lv.variant():
-			if refused || n.stage == "ok" && passAsSent(body, n) {
+			if refused || n.stage == "ok" && passAsSent(body, n) && !lv.namedRepeated() {
 				return "hullRepeatBeyondWindow"
 			}
 		case refused:

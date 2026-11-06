@@ -46,6 +46,14 @@ func TestAllowedDeviationIsExact(t *testing.T) {
 		}
 	}
 	long := strings.Repeat("a", 63) + "é" + strings.Repeat("b", 30) // é straddles byte 64
+	// Delta-Review 2 F-5: logit_bias past its cap, "30" repeated in the
+	// window, every other key once.
+	lbBody := hMsg + `,"logit_bias":{` + lbRange(100, 16) + `"30":0,"30":1,` + lbRange(200, 120) + `"999":0}}`
+	lbRepeat := func(key string) func([]byte, policyLimits) parseOutcome {
+		return func([]byte, policyLimits) parseOutcome {
+			return parseOutcome{stage: "policy", code: CodeInvalidJSON, param: "logit_bias." + key, message: "The request repeats the key logit_bias." + key + "."}
+		}
+	}
 	for _, tc := range []struct {
 		name, body string
 		l          policyLimits
@@ -60,6 +68,16 @@ func TestAllowedDeviationIsExact(t *testing.T) {
 		{"A1: a repeat inside the window, another 400", hMsg + `,"v1":1,"v2":1,"v2":2}`, def, refuse(CodeUnsupportedParameter, "v1")},
 		{"A2: a hull's type past the window, accepted", hMsg + `,"tool_choice":{` + hKeys(40) + `"type":"function","function":{"name":"f"},"type":"none"}}`, def, accept},
 		{"A2: a case variant past the window, accepted", hMsg + `,"tool_choice":{"type":"function","function":{"name":"f"},` + hKeys(40) + `"Type":1,"Type":2}}`, def, accept},
+		// Delta-Review 2 F-4: a vendor key repeated past the window next to a
+		// repeated named key — the base names the vendor key (it sorts first),
+		// an acceptance would let the named repeat through.
+		{"A2: a vendor repeat beside a repeated type, tool_choice", hMsg + `,"tool_choice":{"type":"function","function":{"name":"f"},` + hKeys(16) + `"aaa":1,"aaa":2,"type":"none"}}`, def, accept},
+		{"A2: a vendor repeat beside a repeated type, tool_choice, both past the window", hMsg + `,"tool_choice":{` + hKeys(16) + `"aaa":1,"type":"function","function":{"name":"f"},"aaa":2,"type":"none"}}`, def, accept},
+		{"A2: a vendor repeat beside a repeated function, a tool", hMsg + `,"tools":[{"type":"function","function":{"name":"f"},` + hKeys(16) + `"aaa":1,"aaa":2,"function":{"name":"g"}}]}`, def, accept},
+		{"A2: a vendor repeat beside a repeated type, response_format", hMsg + `,"response_format":{"type":"json_object",` + hKeys(16) + `"aaa":1,"aaa":2,"type":"text"}}`, def, accept},
+		{"A3: a later repeat of a key sent once", lbBody, def, lbRepeat("999")},
+		{"A3: a later repeat of a key the window holds once", lbBody, def, lbRepeat("100")},
+		{"A3: a later repeat of a key the body lacks", lbBody, def, lbRepeat("nope")},
 		{"A3: logit_bias past its cap, accepted", hMsg + `,"logit_bias":{` + lbEntries(16) + `"30":0,"30":1,"5":1,` + lbEntries(200)[len(lbEntries(100)):] + `"999":0}}`, def, accept},
 		{"A3: logit_bias within its cap, the cap's answer", hMsg + `,"logit_bias":{` + lbEntries(40) + `"30":1}}`, def,
 			func([]byte, policyLimits) parseOutcome {
@@ -129,6 +147,53 @@ func TestAllowedDeviationIsExact(t *testing.T) {
 		}
 		if i == 1000 {
 			t.Fatal("A4: the base named the smallest key in 1000 runs")
+		}
+	}
+}
+
+// lbRange are n logit_bias entries from key from on, "from":0,…
+// comma-terminated.
+func lbRange(from, n int) string {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, `"%d":0,`, from+i)
+	}
+	return b.String()
+}
+
+// TestOracleMapOrderIsEnumerated (Delta-Review 2 F-8): A4 allows FOLGE-P's
+// answer whenever the base can give it, every time. The base names "aa" of
+// this part in 1 of 8 runs (its map loop starts at a random slot), and 64
+// sampled runs missed it 2.2·10⁻⁴ of the time — 2 of 400 runs of the
+// review's -count=200 were red without a defect. Enumerated, the rule runs
+// no base parse and allows the answer in every try; and only the base's
+// answers are allowed: a key the part allows or lacks is not.
+func TestOracleMapOrderIsEnumerated(t *testing.T) {
+	body := []byte(`{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x","zz":1,"aa":1}]}]}`)
+	l := diffLimits[0]
+	n := newParse(body, l)
+	answer := func(key string) parseOutcome {
+		o := baseParse(body, l)
+		perr := unsupportedParameter("messages[0].content[0]." + key)
+		o.code, o.param, o.message = perr.code, perr.param, perr.message
+		return o
+	}
+	if want := answer("aa"); sameOutcome(body, n, want) != "" {
+		t.Fatalf("FOLGE-P answers %s %q, want the smallest refused key: %s", n.code, n.param, sameOutcome(body, n, want))
+	}
+	o := answer("zz")
+	runs := baseParseRuns.Load()
+	for i := range 1000 {
+		if got := allowedDeviation(body, l, n, o); got != "oracleMapOrder" {
+			t.Fatalf("try %d: FOLGE-P's aa against the base's zz allowed as %q, want oracleMapOrder", i, got)
+		}
+	}
+	if d := baseParseRuns.Load() - runs; d != 0 {
+		t.Errorf("A4 ran the base parse %d times in 1000 tries: a sampled answer set misses a rare answer (F-8)", d)
+	}
+	for _, key := range []string{"text", "type", "qq"} {
+		if got := allowedDeviation(body, l, answer(key), o); got != "" {
+			t.Errorf("a hypothetical answer naming %s (the part allows it or lacks it) is allowed as %q", key, got)
 		}
 	}
 }
