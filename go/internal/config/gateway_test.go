@@ -177,8 +177,14 @@ func bumpedValue(t *testing.T, e entry) string {
 }
 
 // gatewayCapFloor is V39's floor at the default caps: 26 × 8 MiB + 64 KiB +
-// 2 × 4 MiB = 216.06 MiB (TestBudgetFloorHoldsTheScanBooking).
-const gatewayCapFloor = 26*8<<20 + 64<<10 + 2*4<<20
+// the JSON check's nesting state (10 001 levels × 24 B, FOLGE-P hardening 5
+// B-2) + 2 × 4 MiB = 216.29 MiB (TestBudgetFloorHoldsTheScanBooking).
+const gatewayCapFloor = 26*8<<20 + 64<<10 + gatewayNestingState + 2*4<<20
+
+// gatewayNestingState is the most the chat route books for the JSON check's
+// nesting state before it runs: one past the decoder's depth limit of
+// 10 000, 24 B per level (oai jsonStateBytes) — hand-computed here.
+const gatewayNestingState = (10000 + 1) * 24
 
 // TestValidateGateway is V38/V39 (wave W02-02): every refused value of the
 // gateway group, one error each, plus the legal edges.
@@ -215,16 +221,17 @@ func TestValidateGateway(t *testing.T) {
 		{"gateway.request_deadline", func(c *Config) { g(c).RequestDeadline = 600 * time.Second }},
 		{"gateway.stream_commit_grace", func(c *Config) { g(c).StreamCommitGrace = 51 * time.Second }},
 		// One request at every cap: 26 × 8 MiB + 64 KiB (request share and
-		// scan booking, FOLGE-P F-0) + max(2 × 4 MiB, 2 × 1 MiB, 4 × 1048576 +
-		// 64 KiB) = 216.06 MiB; one byte less is refused.
+		// scan booking, FOLGE-P F-0) + the nesting state (240 024 B, hardening
+		// 5 B-2) + max(2 × 4 MiB, 2 × 1 MiB, 4 × 1048576 + 64 KiB) =
+		// 216.29 MiB; one byte less is refused.
 		{"gateway.inflight_budget", func(c *Config) { g(c).InflightBudget = gatewayCapFloor - 1 }},
 		// The response share alone decides the floor here (Fremd-Review
 		// finding 5): the request share with the scan would fit, 2 ×
 		// response cap does not.
-		{"gateway.inflight_budget", func(c *Config) { g(c).InflightBudget = 26*g(c).MaxRequestBytes + 64<<10 }},
+		{"gateway.inflight_budget", func(c *Config) { g(c).InflightBudget = 26*g(c).MaxRequestBytes + 64<<10 + gatewayNestingState }},
 		{"gateway.inflight_budget", func(c *Config) {
 			g(c).EmbeddingMaxFloats = 16 << 20 // 64 MiB of float32 vectors
-			g(c).InflightBudget = 26*g(c).MaxRequestBytes + 64<<10 + 2*g(c).MaxResponseBytes
+			g(c).InflightBudget = 26*g(c).MaxRequestBytes + 64<<10 + gatewayNestingState + 2*g(c).MaxResponseBytes
 		}},
 		// Fremd-Review 2, FR2-3: caps whose reservation overflows int64 must
 		// not wrap around into a negative floor that every budget clears.
@@ -274,27 +281,28 @@ func TestValidateGateway(t *testing.T) {
 // serve, so the floor always counts the scan. The review's three
 // configurations passed with 0 issues while a public request at the body
 // cap was answered "overloaded, retry in 1 s" on every try; the defaults
-// stay valid (216.06 MiB under 256 MiB).
+// stay valid (216.29 MiB under 256 MiB, with the nesting state of hardening
+// 5 B-2).
 func TestBudgetFloorHoldsTheScanBooking(t *testing.T) {
 	const mib = 1 << 20
 	def := Defaults()
 	if need, ok := gatewayBudgetFloor(&def.Gateway); !ok || need != gatewayCapFloor {
-		t.Errorf("default floor = %d (ok %v), want %d (26 × 8 MiB + 64 KiB + 2 × 4 MiB)", need, ok, gatewayCapFloor)
+		t.Errorf("default floor = %d (ok %v), want %d (26 × 8 MiB + 64 KiB + 240 024 + 2 × 4 MiB)", need, ok, gatewayCapFloor)
 	}
 	if issues := validateGateway(def); len(issues) != 0 {
 		t.Errorf("the defaults must stay valid under the floor with the scan booking, got %+v", issues)
 	}
 	for _, tc := range []struct{ budget, request int }{
-		{256 * mib, 10 * mib}, // 268.06 MiB needed
-		{128 * mib, 8 * mib},  // 216.06 MiB needed
-		{64 * mib, 8 * mib},   // 216.06 MiB needed
+		{256 * mib, 10 * mib}, // 268.29 MiB needed
+		{128 * mib, 8 * mib},  // 216.29 MiB needed
+		{64 * mib, 8 * mib},   // 216.29 MiB needed
 	} {
 		c := Defaults()
 		c.Gateway.InflightBudget, c.Gateway.MaxRequestBytes = tc.budget, tc.request
 		hits := issuesOn(Validate(c), "gateway.inflight_budget")
 		if len(hits) != 1 || hits[0].Severity != SeverityError {
 			t.Errorf("budget %d MiB, max_request_bytes %d MiB: a request at the body cap below credentials needs %d B — want exactly one error, got %+v",
-				tc.budget/mib, tc.request/mib, 26*tc.request+64<<10+2*4*mib, hits)
+				tc.budget/mib, tc.request/mib, 26*tc.request+64<<10+gatewayNestingState+2*4*mib, hits)
 		}
 	}
 }
@@ -309,12 +317,12 @@ func TestBudgetFloorNamesTheWaysOut(t *testing.T) {
 	const mib = 1 << 20
 	for _, tc := range []struct {
 		budget, request int
-		need, cap       int64 // hand-computed: 26 × request + 64 KiB + 8 MiB; (budget − 64 KiB − 8 MiB) / 26
+		need, cap       int64 // hand-computed: 26 × request + 64 KiB + 240 024 + 8 MiB; (budget − 64 KiB − 240 024 − 8 MiB) / 26
 	}{
-		{256 * mib, 10 * mib, 281083904, 9999281},
-		{128 * mib, 8 * mib, 226557952, 4837060},
-		{64 * mib, 8 * mib, 226557952, 2255950},
-		{8 * mib, 8 * mib, 226557952, 0}, // the response share alone fills it
+		{256 * mib, 10 * mib, 281323928, 9990049},
+		{128 * mib, 8 * mib, 226797976, 4827829},
+		{64 * mib, 8 * mib, 226797976, 2246719},
+		{8 * mib, 8 * mib, 226797976, 0}, // the response share alone fills it
 	} {
 		c := Defaults()
 		c.Gateway.InflightBudget, c.Gateway.MaxRequestBytes = tc.budget, tc.request

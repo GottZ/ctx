@@ -68,10 +68,16 @@ const (
 // config/validate.go gatewayBudgetFloor: one request at every cap must fit
 // gateway.inflight_budget). config imports oai, never the reverse (depguard
 // config-layering), so the values are defined here once and read there.
+// JSONStateReserve is the most the chat route books for the JSON check's
+// nesting state before it runs (jsonStateBytes: one level past the
+// decoder's limit) — on top of the request share wherever the share's rest
+// is spent, by a small body or by a rewritten message array (hardening 5,
+// B-2), so the floor counts it at every cap.
 const (
 	RequestReserveFactor = requestReserveFactor
 	ScanReserveFactor    = scanReserveFactor
 	ScanReserveBase      = scanReserveBase
+	JSONStateReserve     = (jsonMaxDepth + 1) * jsonDepthStateBytes
 )
 
 // ErrBudgetExhausted is the read error of a body without a declared length

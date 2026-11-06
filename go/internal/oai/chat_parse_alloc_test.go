@@ -185,6 +185,10 @@ func TestJSONStateIsBooked(t *testing.T) {
 			t.Errorf("jsonStateBytes(%.40q…) = %d, want depth %d × %d", tc.body, got, tc.depth, jsonDepthStateBytes)
 		}
 	}
+	// The floor's nesting term (hardening 5, B-2) is the most the route books.
+	if got := jsonStateBytes(nest(20000)); got != JSONStateReserve {
+		t.Errorf("jsonStateBytes at most %d, JSONStateReserve %d", got, JSONStateReserve)
+	}
 	for _, body := range [][]byte{nest(jsonMaxDepth + 1), []byte(`{"a":` + strings.Repeat("[", jsonMaxDepth-1)), nest(jsonMaxDepth)} {
 		if got, booked := allocatedBy(func() { _ = json.Valid(body) }), jsonStateBytes(body); got > uint64(booked) {
 			t.Errorf("json.Valid allocates %d bytes on a body nested %d deep, booked %d", got, booked/jsonDepthStateBytes, booked)
