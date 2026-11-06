@@ -9,7 +9,10 @@ package oai
 // prefix of 1 KiB, as escapes and as plain bytes, on the top level and on a
 // message) plus every other level that holds a key window (a part, an
 // image_url, a hull, logit_bias), and long keys of literal UTF-8 with two-,
-// three- and four-byte runes (Delta-Review 2 F-3).
+// three- and four-byte runes (Delta-Review 2 F-3). The prefix forms
+// (Delta-Review 3 R3-0) are two keys sharing one prefix across the whole
+// body: their gate is the growth of the cost with the body, not only the
+// ratio.
 
 import (
 	"fmt"
@@ -18,23 +21,57 @@ import (
 )
 
 // parseCPURatioMax bounds the parse cost against the base parse per form.
-// Measured on the forms below (bau report FOLGE-P §Härtung H-6, §Härtung 2):
+// Measured on the forms below (bau report FOLGE-P §Härtung H-6, §Härtung 3):
 // at most 0.75 on keys of ASCII and escapes after H-6, at 256 KiB and at
 // 8 MiB — before it up to 10 (long escaped keys: each key was compared in
-// full against the sixteen of the window); on keys of literal UTF-8 2.4–2.6
-// after H-6 (rune by rune through the byte decoder) and 0.82–0.98 after
-// hardening 2 (runs of valid UTF-8 copied and compared at once).
+// full against the sixteen of the window).
 const parseCPURatioMax = 2
+
+// parseCPURatioMaxUTF8 bounds the forms whose keys share a prefix of literal
+// UTF-8: the byte decoder takes such a key rune by rune (strDecoder.next
+// decodes and re-encodes each, sameTokens decodes each on both sides), the
+// base parse decodes it at once. Measured 2.16–2.90 × the base parse at
+// 256 KiB on a quiet host (bau report FOLGE-P §Härtung 3, 30 runs), 2.0–3.4
+// in Delta-Review 2 (8 MiB: 110–238 ms against 38–180 ms). Hardening 2 had
+// copied and compared runs of valid UTF-8 at once (0.63–1.00), but the run's
+// backslash scan restarted at every invalid byte and made the comparison
+// quadratic in a prefix of invalid bytes two keys share (Delta-Review 3
+// R3-0: 11 min for one 8 MiB request); that path is withdrawn, this bound is
+// the cost of the one that stands.
+const parseCPURatioMaxUTF8 = 4
+
+// cpuGrowthMax bounds the cost of a prefix form at 4 × the body against the
+// same form at 1 × (the minimum of the rounds each): a linear cost grows 4 ×,
+// a quadratic one 16 × — 8 halves either way. Measured (bau report FOLGE-P
+// §Härtung 3): 2.71–4.82 on every prefix form, 1 080 measurements; 17.2–18.2
+// on the forms of invalid bytes with hardening 2's run copy, 15.7–15.8 on
+// those of é before 0xff with an early exit at an invalid first rune added
+// to it (the reviewer's partial fix).
+const cpuGrowthMax = 8
+
+// cpuPrefixBytes is the smaller body of the prefix forms; the gate parses
+// each at it and at 4 ×.
+const cpuPrefixBytes = 64 << 10
 
 // escU is the JSON escape of r (built at run time: the source holds no
 // escape sequence an editor could decode).
 func escU(r rune) string { return fmt.Sprintf("%cu%04x", '\\', r) }
 
-// cpuForm is one body of the gate and the limits it runs under.
+// cpuForm is one body of the gate and the limits it runs under; ratioMax
+// is its bound against the base parse (0: parseCPURatioMax).
 type cpuForm struct {
-	name string
-	body []byte
-	l    policyLimits
+	name     string
+	body     []byte
+	l        policyLimits
+	ratioMax float64
+}
+
+// bound is the form's bound against the base parse.
+func (f cpuForm) bound() float64 {
+	if f.ratioMax > 0 {
+		return f.ratioMax
+	}
+	return parseCPURatioMax
 }
 
 // cpuForms builds the gate's forms at about size bytes each.
@@ -90,20 +127,62 @@ func cpuForms(size int) []cpuForm {
 	typical.WriteString(`]}`)
 	pre, suf := `{"model":"chat","messages":[{"role":"user","content":"`, `"}]}`
 	return []cpuForm{
-		{"typical_2k", []byte(typical.String()), def},
-		{"text", []byte(pre + strings.Repeat("a", size-len(pre)-len(suf)) + suf), def},
-		{"top_unknown_keys", fill(msg, `}`, short), def},
-		{"top_escaped_long_keys", fill(msg, `}`, esc), def},
-		{"top_plain_long_keys", fill(msg, `}`, plain), def},
-		{"top_utf8_2byte_long_keys", fill(msg, `}`, utf8Key(0xe9, 512)), def},    // é
-		{"top_utf8_3byte_long_keys", fill(msg, `}`, utf8Key(0x4e2d, 342)), def},  // 中
-		{"top_utf8_4byte_long_keys", fill(msg, `}`, utf8Key(0x1f600, 256)), def}, // 😀
-		{"message_escaped_long_keys", fill(`{"model":"chat","messages":[{"role":"user","content":"x"`, `}]}`, esc), def},
-		{"part_escaped_long_keys", fill(`{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x"`, `}]}]}`, esc), def},
-		{"image_escaped_long_keys", fill(img, `}}]}]}`, esc), vis},
-		{"hull_escaped_long_keys", fill(msg+`,"tool_choice":{"type":"function","function":{"name":"f"}`, `}}`, esc), def},
-		{"logit_bias_escaped_long_keys", lbKeys(), def},
+		{"typical_2k", []byte(typical.String()), def, 0},
+		{"text", []byte(pre + strings.Repeat("a", size-len(pre)-len(suf)) + suf), def, 0},
+		{"top_unknown_keys", fill(msg, `}`, short), def, 0},
+		{"top_escaped_long_keys", fill(msg, `}`, esc), def, 0},
+		{"top_plain_long_keys", fill(msg, `}`, plain), def, 0},
+		{"top_utf8_2byte_long_keys", fill(msg, `}`, utf8Key(0xe9, 512)), def, parseCPURatioMaxUTF8},    // é
+		{"top_utf8_3byte_long_keys", fill(msg, `}`, utf8Key(0x4e2d, 342)), def, parseCPURatioMaxUTF8},  // 中
+		{"top_utf8_4byte_long_keys", fill(msg, `}`, utf8Key(0x1f600, 256)), def, parseCPURatioMaxUTF8}, // 😀
+		{"message_escaped_long_keys", fill(`{"model":"chat","messages":[{"role":"user","content":"x"`, `}]}`, esc), def, 0},
+		{"part_escaped_long_keys", fill(`{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x"`, `}]}]}`, esc), def, 0},
+		{"image_escaped_long_keys", fill(img, `}}]}]}`, esc), vis, 0},
+		{"hull_escaped_long_keys", fill(msg+`,"tool_choice":{"type":"function","function":{"name":"f"}`, `}}`, esc), def, 0},
+		{"logit_bias_escaped_long_keys", lbKeys(), def, 0},
 	}
+}
+
+// cpuPrefixUnits are the units the prefix forms repeat (Delta-Review 3
+// R3-0, R3-0b): invalid UTF-8 — a lone 0xff, a stray continuation byte
+// after a plain one, an invalid byte every third, a valid two-byte rune
+// before an invalid byte, a raw surrogate (ED A0 80, invalid as UTF-8) — and
+// valid é beside them.
+var cpuPrefixUnits = []struct{ name, unit string }{
+	{"lone_ff", "\xff"},
+	{"stray_continuation", "a\x80"},
+	{"ff_every_third", "ab\xff"},
+	{"utf8_then_ff", "é\xff"},
+	{"raw_surrogate", "\xed\xa0\x80"},
+	{"utf8_2byte", "é"},
+}
+
+// prefixForms are two keys sharing one prefix of a unit across the whole
+// body of about size bytes, on the top level, on a message and on a part:
+// both keys are refused and compared with each other through the whole
+// prefix (cmpKeys: the smaller refused key is the one named), so a cost per
+// shared byte that grows with the rest of the prefix makes the parse
+// quadratic in the body. The forms with a valid rune in their unit carry
+// the UTF-8 bound.
+func prefixForms(size int) []cpuForm {
+	levels := []struct{ name, pre, suf string }{
+		{"top", `{"model":"chat","messages":[{"role":"user","content":"x"}],`, `}`},
+		{"message", `{"model":"chat","messages":[{"role":"user","content":"x",`, `}]}`},
+		{"part", `{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x",`, `}]}]}`},
+	}
+	var out []cpuForm
+	for _, u := range cpuPrefixUnits {
+		var bound float64
+		if strings.ContainsRune(u.unit, 'é') {
+			bound = parseCPURatioMaxUTF8
+		}
+		for _, lv := range levels {
+			p := strings.Repeat(u.unit, max((size-len(lv.pre)-len(lv.suf)-12)/2/len(u.unit), 1))
+			body := lv.pre + `"` + p + `1":0,"` + p + `2":0` + lv.suf
+			out = append(out, cpuForm{lv.name + "_" + u.name, []byte(body), diffLimits[0], bound})
+		}
+	}
+	return out
 }
 
 // cpuRatio is the minimum time of the parse over rounds against the base

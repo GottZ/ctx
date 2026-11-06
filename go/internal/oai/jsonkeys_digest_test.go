@@ -133,8 +133,10 @@ func TestSameTokensIsAStart(t *testing.T) {
 
 // sameTokensPairs are keys alike up to a run of literal UTF-8 and apart right
 // after it — in a plain byte, at the end, in an escape, inside a sequence (a
-// continuation byte, a longer sequence): the edge where a run sameTokens
-// skips at once must end at the shared bytes, not past them.
+// continuation byte, a longer sequence): the edge where a comparison that
+// skips a run at once must end at the shared bytes, not past them. Found
+// against hardening 2's run copy (withdrawn in hardening 3, Delta-Review 3
+// R3-0); the rune-by-rune sameTokens holds it too, so it stays as a pin.
 func sameTokensPairs() [][2]string {
 	var out [][2]string
 	for _, p := range []string{"é", strings.Repeat("中", 3), "😀", "aé中😀", strings.Repeat("é", 70)} {

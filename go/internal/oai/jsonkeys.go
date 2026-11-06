@@ -437,11 +437,11 @@ func (d *strDecoder) next() (byte, bool) {
 
 // read decodes the next bytes of the string into dst — the bytes next would
 // yield — and returns how many, 0 at the end: a run of plain bytes is copied
-// at once, a run of valid UTF-8 sequences too (each decodes to itself), an
-// escape of an ASCII byte written directly (locals, not fields, in the loop:
-// it is the digest's whole cost on a key of escapes). Everything else — an
-// invalid UTF-8 byte, a sequence past dst, an escape of a non-ASCII rune, a
-// backslash before a non-ASCII byte (Delta-Review 2 F-6) — goes through next.
+// at once, an escape of an ASCII byte written directly (locals, not fields,
+// in the loop: it is the digest's whole cost on a key of escapes). A
+// backslash before a non-ASCII byte goes through next like a non-ASCII rune
+// (Delta-Review 2 F-6: outside a valid string's content, where read gave the
+// raw byte and next U+0080…U+00FF).
 func (d *strDecoder) read(dst []byte) int {
 	n := 0
 	for n < len(dst) && d.bi < d.bn {
@@ -458,12 +458,6 @@ func (d *strDecoder) read(dst []byte) int {
 			n++
 			i++
 			continue
-		case c >= utf8.RuneSelf:
-			if j := validRun(raw[i:], len(dst)-n); j > 0 {
-				n += copy(dst[n:], raw[i:i+j])
-				i += j
-				continue
-			}
 		case c == '\\' && i+5 < len(raw) && raw[i+1] == 'u':
 			if r := hex4(raw[i+2:]); 0 <= r && r < utf8.RuneSelf {
 				dst[n] = byte(r)
@@ -477,8 +471,7 @@ func (d *strDecoder) read(dst []byte) int {
 			i += 2
 			continue
 		}
-		// a rune next decodes and re-encodes: through next, which buffers its
-		// UTF-8 bytes
+		// a non-ASCII rune: through next, which buffers its UTF-8 bytes
 		d.i = i
 		b, _ := d.next()
 		dst[n] = b
@@ -492,39 +485,6 @@ func (d *strDecoder) read(dst []byte) int {
 	}
 	d.i = i
 	return n
-}
-
-// validRun is the length of the longest prefix of s, at most room bytes and
-// before the first backslash, made of plain bytes and whole valid UTF-8
-// sequences — bytes that decode to themselves, whatever follows them (a valid
-// sequence is decided by its own bytes). 0 when s begins with an invalid
-// sequence or one longer than room. The run is checked by utf8.Valid at once
-// (Delta-Review 2 F-3: rune by rune it was the whole cost of a key of literal
-// UTF-8); an invalid byte in it ends it, rune by rune.
-func validRun(s []byte, room int) int {
-	j := min(len(s), room)
-	if k := bytes.IndexByte(s[:j], '\\'); k >= 0 {
-		j = k
-	}
-	if j < len(s) && !utf8.RuneStart(s[j]) { // room cut a sequence: end before it
-		k := j - 1
-		for k > 0 && k > j-utf8.UTFMax && !utf8.RuneStart(s[k]) {
-			k--
-		}
-		j = k
-	}
-	if utf8.Valid(s[:j]) {
-		return j
-	}
-	k := 0
-	for k < j {
-		r, size := utf8.DecodeRune(s[k:j])
-		if r == utf8.RuneError && size == 1 {
-			break
-		}
-		k += size
-	}
-	return k
 }
 
 // unescapeByte is the byte of the two-byte escape \c (c is not 'u').
@@ -637,49 +597,35 @@ func cmpKeys(a, b []byte) int {
 // token — a plain byte, an escape that is not a surrogate (one that is may
 // pair with the next), a UTF-8 sequence — each token sent alike in both:
 // up to there both decode alike, and a decoder of either may start there.
-// The bytes both share are found eight at a time first (m); the tokens are
-// then walked in a alone, since inside the shared bytes both hold the same
-// ones: a run of whole valid UTF-8 sequences is one token run at once
-// (validRun, Delta-Review 2 F-3: rune by rune, two decodes and a comparison
-// each, it cost a key of literal UTF-8 up to 3.4 × the base parse), and only
-// a sequence whose decoding may read past m is decoded on both sides. Eight
-// plain bytes are skipped at once.
+// Eight plain bytes alike are skipped at once.
 func sameTokens(a, b []byte) int {
 	n := min(len(a), len(b))
-	m := 0
-	for m+8 <= n && binary.LittleEndian.Uint64(a[m:]) == binary.LittleEndian.Uint64(b[m:]) {
-		m += 8
-	}
-	for m < n && a[m] == b[m] {
-		m++
-	}
 	i := 0
-	for i < m {
-		if i+8 <= m && !wordNeedsDecode(binary.LittleEndian.Uint64(a[i:])) {
-			i += 8
-			continue
+	for i < n {
+		if i+8 <= n {
+			w := binary.LittleEndian.Uint64(a[i:])
+			if w == binary.LittleEndian.Uint64(b[i:]) && !wordNeedsDecode(w) {
+				i += 8
+				continue
+			}
 		}
 		c := a[i]
 		switch {
+		case c != b[i]:
+			return i
 		case c != '\\' && c < utf8.RuneSelf:
 			i++
 		case c >= utf8.RuneSelf:
-			if j := validRun(a[i:], m-i); j > 0 {
-				i += j
-				continue
-			}
-			_, na := utf8.DecodeRune(a[i:]) // an invalid byte: decided by at most utf8.UTFMax bytes
-			if i+utf8.UTFMax > m {
-				if _, nb := utf8.DecodeRune(b[i:]); na != nb || i+na > m {
-					return i
-				}
+			_, na := utf8.DecodeRune(a[i:])
+			if _, nb := utf8.DecodeRune(b[i:]); na != nb || string(a[i:i+na]) != string(b[i:i+na]) {
+				return i
 			}
 			i += na
-		case i+1 >= m:
+		case i+1 >= n || a[i+1] != b[i+1]:
 			return i
 		case a[i+1] != 'u':
 			i += 2
-		case i+6 > m || a[i+2]|0x20 == 'd' && a[i+3] >= '8':
+		case i+6 > n || string(a[i:i+6]) != string(b[i:i+6]) || a[i+2]|0x20 == 'd' && a[i+3] >= '8':
 			return i // a surrogate escape (D800–DFFF) may pair with the one after it
 		default:
 			i += 6

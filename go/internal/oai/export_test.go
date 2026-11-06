@@ -24,6 +24,11 @@ const WatchTick = watchTick
 // EchoNameMax bounds an echoed client key name (FOLGE-P H-9).
 const EchoNameMax = echoNameMax
 
+// BaseParse runs the base parse (the parse of 4839a958, the oracle of
+// parse_oracle_test.go) on body under the default limits: the route's CPU
+// pin weighs a request against it (FOLGE-P, Delta-Review 3 R3-0).
+func BaseParse(body []byte) { _ = baseParse(body, diffLimits[0]) }
+
 // ReservationHeld reports what r holds right now (FOLGE-P: the heap gates
 // compare the parse's memory with the request's reservation).
 func ReservationHeld(r *Reservation) int64 {
