@@ -55,18 +55,6 @@ func postEmbedOverSocket(t *testing.T, rig *chatRig, ctx context.Context, body s
 	return resp, string(b), nil
 }
 
-// waitEnded waits until the meter recorded an end: after a gone client the
-// route ends the reservation asynchronously to the client's return.
-func (m *embedMeter) waitEnded(t *testing.T) {
-	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); m.endsOf() == ""; {
-		if time.Now().After(deadline) {
-			t.Fatalf("the reservation did not end within 10 s")
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 // settledNow is the usage of every Settle so far.
 func (m *embedMeter) settledNow() []dispatch.Usage {
 	m.mu.Lock()
@@ -92,7 +80,10 @@ func blockCharge(k int) (string, int64) {
 // connection while the engine holds the block. The reservation (36) ends
 // once: block 1 ⇒ keep 36; block 3 ⇒ settle 4 + 5 = 9; block 8 ⇒ settle
 // 14 + 5 = 19. Before the rule the touched block went back in full (settle
-// 4 / 14: a client paid for k−1 of the k blocks a backend had).
+// 4 / 14: a client paid for k−1 of the k blocks a backend had). The bucket
+// is read once the route's handler returned (postEmbedAndWait), not once
+// the meter named the end: the rig names it before the booking, and a read
+// in between saw the bucket before the settle (Delta-Review 6 F6-4).
 func TestEmbedMeterBlockContactBooksItsEstimate(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -127,14 +118,9 @@ func TestEmbedMeterBlockContactBooksItsEstimate(t *testing.T) {
 				return true
 			})
 			rig, m := embedMeterRig(t, e.row("spark-embed", backends.ProtocolOpenAI, 10))
-			resp, body, err := postEmbedOverSocket(t, rig, ctx, embedBody("emb1", embedInputs(8)))
-			m.waitEnded(t)
+			status, body, err := postEmbedAndWait(t, rig, ctx, embedBody("emb1", embedInputs(8)))
 			held := m.heldEmbed(t, rig)
 			ends, settled := m.endsOf(), m.settledNow()
-			status := 0
-			if resp != nil {
-				status = resp.StatusCode
-			}
 			wantEnd, want := blockCharge(int(tc.block))
 			t.Logf("%s: answer %d err=%v %.80s; engine hits %d (block %d reached: %v); ends %s; settled %+v; held %d (want %s %d; reservation %d, per block %d)",
 				tc.name, status, err, body, e.hits.Load(), tc.block, touched.Load(), ends, settled, held, wantEnd, want, embedReservation(8), embedReservation(1))
