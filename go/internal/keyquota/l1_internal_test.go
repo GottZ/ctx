@@ -176,3 +176,40 @@ func TestL1BoundsTheOpenSet(t *testing.T) {
 		t.Errorf("after 10000 admissions that never end: %d admitted, open set %d — want both %d", admitted, got, c)
 	}
 }
+
+// TestL1BulkShareIsExact (Fremd-Review 1 F-1): the bulk share is
+// max(1, ⌊C·(1 − r)⌋) for every r a setting can name to the millionth,
+// counted exactly. In float64, 1 − r of a decimal r can lie just under its
+// exact value, and the truncation then lands one slot short (C 10 at r 0.8
+// gave 1 instead of 2). Every C from 1 to 256 against every r = k/100 and
+// k/1000, the reference in integers.
+func TestL1BulkShareIsExact(t *testing.T) {
+	bad := 0
+	for c := int64(1); c <= 256; c++ {
+		for _, den := range []int64{100, 1000} {
+			for k := int64(0); k < den; k++ {
+				want := c
+				if k > 0 {
+					want = max(c*(den-k)/den, 1)
+				}
+				if got := bulkSlots(c, float64(k)/float64(den)); got != want {
+					bad++
+					if bad <= 5 {
+						t.Errorf("C %d, r %d/%d: bulk share %d, want %d", c, k, den, got, want)
+					}
+				}
+			}
+		}
+	}
+	if bad > 0 {
+		t.Errorf("%d of %d pairs off", bad, 256*1100)
+	}
+	for _, tc := range []struct {
+		r    float64
+		want int64
+	}{{1, 1}, {2, 1}, {0.9999999, 1}, {-0.5, 8}, {math.NaN(), 8}} {
+		if got := bulkSlots(8, tc.r); got != tc.want {
+			t.Errorf("C 8, r %v: bulk share %d, want %d", tc.r, got, tc.want)
+		}
+	}
+}

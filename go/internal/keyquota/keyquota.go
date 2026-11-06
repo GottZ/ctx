@@ -298,15 +298,22 @@ func (st *buckets) l1(lane Lane, l Limits) (limit int64, bulkBound, ok bool) {
 }
 
 // bulkSlots is the bulk lane's share of C: ⌊C·(1 − r)⌋, at least one slot —
-// a bulk request is never refused for good; at C = 1 (or r = 0) there is no
-// urgent reserve, the named bound of design/06 §4.2 "Bei C = 1 ist kein
-// Reservat möglich".
+// a bulk request is never refused for good; at C = 1 (or r = 0, or no r at
+// all, like newDim) there is no urgent reserve, the named bound of design/06
+// §4.2 "Bei C = 1 ist kein Reservat möglich". r is taken to the millionth and
+// the floor counted in integers: in float64, 1 − r of a decimal r can lie
+// just under its exact value and the truncation then lands one slot short
+// (Fremd-Review 1 F-1: C 10 at r 0.8 gave 1, not 2).
 func bulkSlots(c int64, r float64) int64 {
-	if r <= 0 {
+	if !(r > 0) {
 		return c
 	}
-	return max(int64(float64(c)*(1-r)), 1)
+	keep := reserveScale - int64(math.Round(min(r, 1)*reserveScale))
+	return max(mulDiv(c, keep, reserveScale), 1)
 }
+
+// reserveScale is the resolution of r in the bulk share: the millionth.
+const reserveScale = 1_000_000
 
 // New returns an unseeded meter over the clock now: until MarkSeeded every
 // Admit answers warming (design/06 §4.1 step 7).
