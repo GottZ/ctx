@@ -714,15 +714,20 @@ func TestEmbedMeterContextRuleMarksTheBlock(t *testing.T) {
 	pt := &h2Trace{}
 	tr := pt.trace()
 	record := tr.GotConn
+	// Block 2 is the first connection asked for after the handler served
+	// block 1 — not the second GetConn: net/http can ask twice for block 1's
+	// connection (1 of 200 under -race: tries 2, hits 0).
 	var gets, start atomic.Int64
+	var armed atomic.Bool
 	tr.GetConn = func(string) {
-		if gets.Add(1) == 2 {
+		gets.Add(1)
+		if hits.Load() >= 1 && armed.CompareAndSwap(false, true) {
 			start.Store(time.Now().UnixNano())
 		}
 	}
 	tr.GotConn = func(i httptrace.GotConnInfo) {
 		record(i)
-		if gets.Load() == 2 {
+		if armed.Load() {
 			time.Sleep(time.Until(time.Unix(0, start.Load()).Add(attemptDeadline + 200*time.Millisecond)))
 		}
 	}
@@ -731,7 +736,7 @@ func TestEmbedMeterContextRuleMarksTheBlock(t *testing.T) {
 	want := 2 + embedReservation(1)
 	t.Logf("context rule in block 2: answer %d %.60s; tries %d; connections %s; handler hits %d; ends %s; settled %+v; held %d (want settle %d)",
 		a.status, a.body, gets.Load(), pt, hits.Load(), ends, settled, held, want)
-	if gets.Load() < 2 || hits.Load() != 1 || !strings.HasPrefix(pt.String(), "h2") || a.status == http.StatusOK {
+	if !armed.Load() || hits.Load() != 1 || !strings.HasPrefix(pt.String(), "h2") || a.status == http.StatusOK {
 		t.Fatalf("tries %d, handler hits %d, connections %q, answer %d — want block 1 served over h2 and block 2 ended at its deadline", gets.Load(), hits.Load(), pt, a.status)
 	}
 	if ends != "settle" || held != want || len(settled) != 1 || int64(settled[0].PromptTokens) != want {
