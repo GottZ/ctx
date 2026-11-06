@@ -32,7 +32,8 @@ import (
 // decoded (for Resolve), and only while its raw form can still be an alias
 // name (modelRawMax); every other value the parse reads — stream,
 // response_format.type, service_tier, a role, a part type — is compared in
-// place (hardening 6).
+// place (hardening 6; TestClassGateBytesPerParse runs every key of these
+// tables with every hostile value form).
 // Everything unknown is refused: an engine knob that is not listed here
 // (SGLang custom_logit_processor, vLLM kv_transfer_params, a new one of the
 // next engine release) cannot be smuggled past a list that names what is

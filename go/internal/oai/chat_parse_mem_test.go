@@ -48,6 +48,7 @@ import (
 	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -64,6 +65,7 @@ const (
 	memRespCap  = 4 << 20
 	memVisionID = "00000000-0000-4000-8000-0000000c4b01"
 	memTcapID   = "00000000-0000-4000-8000-0000000c4b02"
+	memCeilID   = "00000000-0000-4000-8000-0000000c4b03"
 )
 
 // memEngine is a fake engine that counts and discards what it gets; fail
@@ -212,6 +214,16 @@ type memShape struct {
 // memForm builds form name at lim bytes: the thirteen forms of the probe
 // (2026-11-05, .gotmp/chatparse-probe) and the ones FOLGE-P found.
 func memForm(t testing.TB, name string, lim int) memShape {
+	// Hardening 6, the class gate: "cg:<table>.<key>:<value form>" is one
+	// combination of chat_class_gate_test.go at lim bytes, for the alias
+	// with the policy ceilings.
+	if cg, ok := strings.CutPrefix(name, "cg:"); ok {
+		body, found := oai.ClassGateBody(cg, lim)
+		if !found || !json.Valid(body) {
+			t.Fatalf("class-gate form %q: found %v, valid JSON %v", cg, found, found && json.Valid(body))
+		}
+		return memShape{body: body, model: oai.CGModel}
+	}
 	model := "chat"
 	if strings.HasSuffix(name, "_pub") {
 		model = "pub"
@@ -376,10 +388,20 @@ func newMemRig(t *testing.T, shape memShape, n int, held *heldSum) (*chatRig, *m
 	rig := newChatRig(t, rows, 4*n, 1)
 	rig.reg.reload(t, append(chatAliases(),
 		chatAlias{memVisionID, backends.GlobalScope, "visbig", "chat", "chat", backends.SensCredentials, `{"vision":true,"vision_max_bytes":8388608}`, true},
-		chatAlias{memTcapID, backends.GlobalScope, "tcap", "chat", "chat", backends.SensCredentials, `{"tools.max_bytes":1048576,"tools.max_count":256}`, true}))
+		chatAlias{memTcapID, backends.GlobalScope, "tcap", "chat", "chat", backends.SensCredentials, `{"tools.max_bytes":1048576,"tools.max_count":256}`, true},
+		chatAlias{memCeilID, backends.GlobalScope, oai.CGModel, "chat", "chat", backends.SensCredentials, oai.CGCeilPolicy, true}))
 	rig.setSettings(func(s *oai.Settings) {
 		s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = memBudget, memCap, memRespCap
+		// CTX_FOLGEP_BODYLOG (hardening 6): body logging on, so the route's
+		// copy of the message array for the log row is measured too.
+		if v := os.Getenv("CTX_FOLGEP_BODYLOG"); v != "" {
+			s.BodyLogging = v
+		}
 	})
+	// The log row goes where production sends it (llmlog.RecordGateway:
+	// the capped entry, written asynchronously), not into the harness's
+	// row list, which would keep every logged body for the test's life.
+	rig.deps.Record = func(row llmlog.GatewayRow) { _ = llmlog.GatewayEntry(row) }
 	rig.router = memMount(rig, oai.ChatCompletions(rig.deps), held)
 	return rig, up
 }
@@ -504,10 +526,10 @@ func TestChatParseHeapGate(t *testing.T) {
 	case n > 1 && n <= 10 && growth > boundPeak:
 		verdict = "OVER_PEAK"
 	}
-	fmt.Printf("FOLGEP form=%s n=%d gomemlimit=%q body=%d answers=[%s] growth_MiB=%.1f held_sum_MiB=%.1f handled=%d bound_MiB=%.1f "+
+	fmt.Printf("FOLGEP form=%s n=%d gomemlimit=%q bodylog=%q body=%d answers=[%s] growth_MiB=%.1f held_sum_MiB=%.1f handled=%d bound_MiB=%.1f "+
 		"bound_noanswer_MiB=%.1f bound_peak_MiB=%.1f base_MiB=%.1f budget_peak_MiB=%.1f numgc=%d dur=%v up_hits=%d up_max_body=%d up_total=%d "+
 		"answer_max_B=%d verdict=%s\n",
-		form, n, os.Getenv("GOMEMLIMIT"), len(body), strings.TrimSpace(sb.String()), mib(growth), mib(sum), handled, mib(bound),
+		form, n, os.Getenv("GOMEMLIMIT"), os.Getenv("CTX_FOLGEP_BODYLOG"), len(body), strings.TrimSpace(sb.String()), mib(growth), mib(sum), handled, mib(bound),
 		mib(boundNoAnswer), mib(boundPeak), mib(int64(base)), mib(budgetPeak.Load()), ms.NumGC-gc0, dur.Round(time.Millisecond),
 		up.hits.Load(), up.max.Load(), up.total.Load(), answerMax.Load(), verdict)
 	if verdict != "ok" {
