@@ -3,7 +3,8 @@ package oai
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -48,56 +49,77 @@ var (
 	embedDropKeys = map[string]bool{"user": true}
 )
 
+// embedNames and embedIndex are the named keys of the top level in sort
+// order and their index: a key is classified by its index, a repeat of a
+// named key is one bit (FOLGE-P levelKeys, as the chat parse's levels).
+var embedNames, embedIndex = levelNames(slices.Collect(maps.Keys(embedKeys)), slices.Collect(maps.Keys(embedDropKeys)))
+
+// embedWindow is how many members the parse reads: one more than the level
+// names. Past them a body holds an unknown or a repeated key among them (six
+// members, five names), so the answer is a 400 from them alone and the rest
+// is never read — a body of a million keys costs the JSON check and six keys
+// (hardening H-1, Fremd-Review 2 R2-1). A repeat or an unknown key past the
+// window is not seen; the answer is a 400 either way, only the named param
+// can differ from a parse of the whole object (Fremd-Review 3 F3-4).
+var embedWindow = len(embedNames) + 1
+
 // parseEmbedTop is the alias-independent half of the parse: JSON, the class
 // of every key (unknown ⇒ 400 before the model is resolved), the model, the
 // shape of input (a string, or a list of non-empty strings; token arrays are
 // refused) and the types of encoding_format and dimensions. The limits of
 // the alias follow once it is known (checkEmbedPolicy).
+//
+// The order of the answers: no valid JSON object ⇒ invalid_json; a repeated
+// key ⇒ invalid_json (H-2: the checked value is the sent value; the first
+// repeat in body order); else an unknown key ⇒ unsupported_parameter, the
+// smallest in sort order (levelKeys.reject); then the CTX values in the
+// order model, input, encoding_format, dimensions. The keys are read with
+// FOLGE-P's helpers (W02-09 rebase round 2): no key is decoded into a
+// string — a named key up to the longest name (keyIndex), an unknown one
+// into a digest (levelKeys.add) and, for a refusal, up to echoNameMax bytes
+// (decodeKey, FOLGE-P H-9) — and no value is copied, the values are the
+// body's own bytes.
 func parseEmbedTop(body []byte) (*embedRequest, *paramError) {
-	// The shape is checked before anything is materialized (hardening H-1,
-	// Fremd-Review 2 R2-1): json.Valid and the member walk allocate
-	// nothing, so a body of a million keys is refused at the cost of a
-	// scan, not of a map of a million entries.
-	if !json.Valid(body) {
+	it, isObject := newMemberIter(body)
+	if !isObject || !json.Valid(body) {
 		return nil, notAnObject()
 	}
-	switch n := objectMembers(body); {
-	case n < 0:
-		return nil, notAnObject()
-	case n > len(embedKeys)+len(embedDropKeys):
-		return nil, tooManyMembers(body)
+	var vals [maxLevelKeys][]byte
+	var keys levelKeys
+	for range embedWindow {
+		k, v, more := it.next()
+		if !more {
+			break
+		}
+		idx := keyIndex(k, embedIndex)
+		if keys.add(k, idx) {
+			return nil, repeated("", decodeKey(k))
+		}
+		if idx < 0 {
+			keys.refuse(k)
+			continue
+		}
+		vals[idx] = v
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
-		return nil, notAnObject()
+	if keys.reject != nil {
+		return nil, unsupportedParameter(decodeKey(keys.reject))
 	}
-	if perr := uniqueMembers("", body, raw); perr != nil {
-		return nil, perr
-	}
-	keys := make([]string, 0, len(raw))
-	for k := range raw {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys) // the first refused key is deterministic
 	req := &embedRequest{}
-	for _, k := range keys {
-		switch {
-		case embedDropKeys[k]:
+	for i, k := range embedNames { // sorted, as the header names them
+		if vals[i] != nil && embedDropKeys[k] {
 			req.ignored = append(req.ignored, k)
-		case !embedKeys[k]:
-			return nil, unsupportedParameter(k)
 		}
 	}
-	if perr := req.readModel(raw["model"]); perr != nil {
+	if perr := req.readModel(vals[embedIndex["model"]]); perr != nil {
 		return nil, perr
 	}
-	if perr := req.readInput(raw["input"]); perr != nil {
+	if perr := req.readInput(vals[embedIndex["input"]]); perr != nil {
 		return nil, perr
 	}
-	if perr := req.readEncoding(raw["encoding_format"]); perr != nil {
+	if perr := req.readEncoding(vals[embedIndex["encoding_format"]]); perr != nil {
 		return nil, perr
 	}
-	if perr := req.readDimensions(raw["dimensions"]); perr != nil {
+	if perr := req.readDimensions(vals[embedIndex["dimensions"]]); perr != nil {
 		return nil, perr
 	}
 	return req, nil
@@ -105,45 +127,6 @@ func parseEmbedTop(body []byte) (*embedRequest, *paramError) {
 
 func notAnObject() *paramError {
 	return &paramError{CodeInvalidJSON, "", "The request body is not a valid JSON object."}
-}
-
-// tooManyMembers refuses a top level with more members than the parse knows
-// names: one of them is unknown or repeated. Only the first members are
-// decoded — one more than the known names, which is enough to hold an
-// unknown or a repeated one — so the refusal costs no more than their keys.
-func tooManyMembers(body []byte) *paramError {
-	it, _ := newMemberIter(body)
-	limit := len(embedKeys) + len(embedDropKeys) + 1
-	seen := make(map[string]bool, limit)
-	var unknown []string
-	repeatedName := ""
-	for range limit {
-		key, _, more := it.next()
-		if !more {
-			break
-		}
-		var k string
-		if err := json.Unmarshal(append(append([]byte{'"'}, key...), '"'), &k); err != nil {
-			k = string(key)
-		}
-		if seen[k] && repeatedName == "" {
-			repeatedName = k
-		}
-		seen[k] = true
-		if !embedKeys[k] && !embedDropKeys[k] {
-			unknown = append(unknown, k)
-		}
-	}
-	// Within these first members the order of the parse below holds: a
-	// repeated key first (uniqueMembers), then the first unknown key in
-	// sort order. A repeat or an unknown key past them is not seen — the body
-	// is a 400 either way, only the named param can differ from the parse of
-	// the whole object (Fremd-Review 3 F3-4).
-	if repeatedName != "" || len(unknown) == 0 {
-		return repeated("", repeatedName)
-	}
-	sort.Strings(unknown)
-	return unsupportedParameter(unknown[0])
 }
 
 func (req *embedRequest) readModel(v json.RawMessage) *paramError {
