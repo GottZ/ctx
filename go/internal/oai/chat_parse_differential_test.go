@@ -228,7 +228,13 @@ func diffLevels(body []byte, param string) []diffLevel {
 	for _, p := range diffLevelParams {
 		m := p.re.FindStringSubmatch(param)
 		if m == nil {
-			continue
+			// An empty key: repeated names the level itself ("messages[0]"),
+			// unsupportedParameter the level and a dot ("messages[0].").
+			m = p.re.FindStringSubmatch(strings.TrimSuffix(param, ".") + ".\x00")
+			if m == nil {
+				continue
+			}
+			m[len(m)-1] = ""
 		}
 		var obj []byte
 		switch p.kind {

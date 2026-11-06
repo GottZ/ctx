@@ -92,6 +92,7 @@ func TestAllowedDeviationIsExact(t *testing.T) {
 	}{
 		{"A1 top level", hMsg + `,` + hKeys(40) + `"k030":1}`, "repeatBeyondWindow", def},
 		{"A1 message", `{"model":"chat","messages":[{"role":"user","content":"x",` + hKeys(40) + `"k030":1}]}`, "repeatBeyondWindow", def},
+		{"A1 message, an empty key past the window", `{"model":"chat","messages":[{"role":"user","content":"x",` + hKeys(16) + `"":0,"":1}]}`, "repeatBeyondWindow", def},
 		{"A1 part", `{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x",` + hKeys(40) + `"k030":1}]}]}`, "repeatBeyondWindow", def},
 		{"A1 image_url", hImg + hKeys(40) + `"k030":1}}]}]}`, "repeatBeyondWindow", vis},
 		{"A2 tool_choice", hMsg + `,"tool_choice":{"type":"function","function":{"name":"f"},` + hKeys(40) + `"k030":1}}`, "hullRepeatBeyondWindow", def},
