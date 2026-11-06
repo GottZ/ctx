@@ -122,12 +122,15 @@ func nextData(each <-chan sseEvent, d time.Duration) (sseEvent, bool) {
 
 // TestStreamDisconnectPhases is G8 (D2–D4 with abort_settle_ms 0): the
 // client goes away in phase A (queued), B (admitted, before any frame and
-// the commit) and C (after a frame) ⇒ no waiter left, the upstream sees the
-// abort and the lease is free, each within 500 ms; the reservation ends
-// once (Abort without wire, Settle with). Red: the upstream call detached
-// from the request (context.WithoutCancel) — the upstream runs on.
+// the commit — before the backend's 200, and after the route read it) and C
+// (after a frame) ⇒ no waiter left, the upstream sees the abort and the
+// lease is free, each within 500 ms; the reservation ends once: Abort
+// without wire (A), Keep with wire contact and no 200 (B before), Settle of
+// the estimate with the 200 (B after: the prompt estimate, C). Red: the
+// upstream call detached from the request (context.WithoutCancel) — the
+// upstream runs on; O14 (no frame after the 200 ⇒ Keep) — B after the 200.
 func TestStreamDisconnectPhases(t *testing.T) {
-	for _, phase := range []string{"A queued", "B admitted", "C relaying"} {
+	for _, phase := range []string{"A queued", "B admitted, before the 200", "B admitted, after the 200", "C relaying"} {
 		t.Run(phase, func(t *testing.T) {
 			hold := make(chan struct{})
 			defer close(hold)
@@ -139,6 +142,9 @@ func TestStreamDisconnectPhases(t *testing.T) {
 				steps = []sseStep{{data: sglangChunk("hello", "")}, {hold: hold}}
 			}
 			u.setRespond(sseRespond(steps, entered, end))
+			if phase == "B admitted, before the 200" {
+				u.setRespond(holdBeforeStatus(hold, entered, end))
+			}
 			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 2, 1, withStreamSettings, withWait(5*time.Second))
 			srv := serveHTTP(t, rig.router)
 			var release func()
@@ -151,8 +157,13 @@ func TestStreamDisconnectPhases(t *testing.T) {
 			switch phase {
 			case "A queued":
 				waitExternalWaiting(t, rig.disp, u.srv.URL)
-			case "B admitted":
+			case "B admitted, before the 200":
 				waitEnter(t, entered)
+			case "B admitted, after the 200":
+				waitEnter(t, entered)
+				if !relayReading(5 * time.Second) {
+					t.Fatal("the route never read the upstream's 200")
+				}
 			case "C relaying":
 				if _, ok := nextData(each, 5*time.Second); !ok {
 					t.Fatal("no frame")
@@ -178,20 +189,57 @@ func TestStreamDisconnectPhases(t *testing.T) {
 				held, _ := heldOn(rig.disp, u.srv.URL)
 				t.Fatalf("held %d 500 ms after the abort, want 0", held)
 			}
-			// The abort reached the wire: never Abort. After a frame the
-			// backend's 200 is in, the estimate settles; in phase B the
-			// client can leave before the route read the upstream's 200 —
-			// then the reservation keeps its charge (the W02-08 rebase round
-			// changed this pin from one Settle, of 0 tokens without the 200,
-			// to Settle or Keep).
+			// The abort reached the wire: never Abort. Before the backend's 200
+			// the reservation keeps its charge; with the 200 in, the estimate
+			// settles — after the route read the 200 and no frame, the prompt
+			// estimate alone (Delta-Review 4 F4-3 split the rebase round's
+			// "Settle or Keep" of phase B into these two exact cases).
 			l := rig.limiter
+			wantSettle, wantKeep := int64(1), int64(0)
+			if phase == "B admitted, before the 200" {
+				wantSettle, wantKeep = 0, 1
+			}
 			ended := func() bool { return l.settles.Load()+l.keeps.Load() == 1 }
-			if !waitFor(time.Second, ended) || l.aborts.Load()+l.rejects.Load() != 0 || (phase == "C relaying" && l.settles.Load() != 1) {
-				t.Errorf("settle/keep/abort/reject %d/%d/%d/%d, want one Settle (phase C) or one Settle or Keep (phase B), never Abort (the abort reached the wire)",
-					l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load())
+			if !waitFor(time.Second, ended) || l.settles.Load() != wantSettle || l.keeps.Load() != wantKeep || l.aborts.Load()+l.rejects.Load() != 0 {
+				t.Errorf("settle/keep/abort/reject %d/%d/%d/%d, want %d/%d/0/0 (the abort reached the wire)",
+					l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load(), wantSettle, wantKeep)
+			}
+			if phase == "B admitted, after the 200" {
+				if !waitFor(time.Second, func() bool { return len(rig.rows.all()) == 1 }) {
+					t.Fatal("no row")
+				}
+				r, prompt := rig.rows.all()[0], promptEstimate(streamBody("chat"))
+				if r.Gateway.Usage != llmlog.UsageEstimated || int64(r.Telemetry.PromptTokens) != prompt || r.Telemetry.CompletionTokens != 0 {
+					t.Errorf("row %q %d/%d, want the prompt estimate %d/0", r.Gateway.Usage, r.Telemetry.PromptTokens, r.Telemetry.CompletionTokens, prompt)
+				}
 			}
 		})
 	}
+}
+
+// holdBeforeStatus is an upstream that signals entered and holds before its
+// status line until hold closes or the request ends: the request reached
+// the backend (wire contact), the 200 never came.
+func holdBeforeStatus(hold <-chan struct{}, entered chan<- struct{}, ended *upstreamEnd) func(http.ResponseWriter, *http.Request) {
+	return func(_ http.ResponseWriter, r *http.Request) {
+		entered <- struct{}{}
+		select {
+		case <-hold:
+			ended.mark(false)
+		case <-r.Context().Done():
+			ended.mark(true)
+		}
+	}
+}
+
+// relayReading waits until a goroutine reads an upstream stream's body
+// (llm's sseRelay.run runs only once the backend's 200 is in): the route
+// has the 200.
+func relayReading(d time.Duration) bool {
+	return waitFor(d, func() bool {
+		buf := make([]byte, 1<<22)
+		return strings.Contains(string(buf[:runtime.Stack(buf, true)]), "llm.(*sseRelay).run")
+	})
 }
 
 // routeGoroutines counts the goroutines that run code of the route or the
@@ -739,12 +787,13 @@ func TestStreamWriterDomain(t *testing.T) {
 // TestStreamReservationEndsOnce is Z5 (W02-07 review 1 F-7 LM1): every end
 // of a stream ends the limiter's reservation exactly once — Abort without
 // wire contact (queued abort), Settle with partial or estimated usage after
-// it (error frame, success), Settle or Keep for a client that left after
-// the upstream had the request (admitted abort: Keep when the route had not
-// read the upstream's 200 yet), Reject on an admission refusal. Red: no
-// Settle on the abort path (close() aborts instead). The W02-08 rebase
-// round counts Keep as the fourth end and changed "admitted abort" from one
-// Settle to one Settle or Keep.
+// it (error frame, success), Keep for a client that left after the upstream
+// had the request and before its 200, Settle (the prompt estimate) for one
+// that left after the route read the 200, Reject on an admission refusal.
+// Red: no Settle on the abort path (close() aborts instead); O14 (no frame
+// after the 200 ⇒ Keep). The W02-08 rebase round counts Keep as the fourth
+// end; Delta-Review 4 F4-3 split its "admitted abort: Settle or Keep" into
+// the two exact cases.
 func TestStreamReservationEndsOnce(t *testing.T) {
 	type ends struct{ settle, keep, abort, reject int64 }
 	run := func(t *testing.T, name string, want []ends, drive func(t *testing.T) *fakeLimiter) {
@@ -775,20 +824,32 @@ func TestStreamReservationEndsOnce(t *testing.T) {
 		postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
 		return rig.limiter
 	})
-	run(t, "admitted abort", []ends{{1, 0, 0, 0}, {0, 1, 0, 0}}, func(t *testing.T) *fakeLimiter {
-		hold := make(chan struct{})
-		t.Cleanup(func() { close(hold) })
-		entered := make(chan struct{}, 1)
-		u := newUpstream(t, "")
-		u.setRespond(sseRespond([]sseStep{{hold: hold}}, entered, nil))
-		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings)
-		ctx, cancel := context.WithCancel(context.Background())
-		ls, _ := openAndRead(t, ctx, serveHTTP(t, rig.router), streamBody("chat"))
-		waitEnter(t, entered)
-		cancel()
-		_ = ls.Close()
-		return rig.limiter
-	})
+	for _, after := range []bool{false, true} {
+		name, want := "admitted abort before the 200", ends{0, 1, 0, 0}
+		if after {
+			name, want = "admitted abort after the 200", ends{1, 0, 0, 0}
+		}
+		run(t, name, one(want), func(t *testing.T) *fakeLimiter {
+			hold := make(chan struct{})
+			t.Cleanup(func() { close(hold) })
+			entered := make(chan struct{}, 1)
+			u := newUpstream(t, "")
+			u.setRespond(sseRespond([]sseStep{{hold: hold}}, entered, nil))
+			if !after {
+				u.setRespond(holdBeforeStatus(hold, entered, newUpstreamEnd()))
+			}
+			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings)
+			ctx, cancel := context.WithCancel(context.Background())
+			ls, _ := openAndRead(t, ctx, serveHTTP(t, rig.router), streamBody("chat"))
+			waitEnter(t, entered)
+			if after && !relayReading(5*time.Second) {
+				t.Fatal("the route never read the upstream's 200")
+			}
+			cancel()
+			_ = ls.Close()
+			return rig.limiter
+		})
+	}
 	run(t, "queued abort", one(ends{0, 0, 1, 0}), func(t *testing.T) *fakeLimiter {
 		u := newUpstream(t, "")
 		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 2, 1, withStreamSettings)
