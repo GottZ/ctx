@@ -41,6 +41,7 @@ type parseOutcome struct {
 	stage                      string // "top", "policy" or "ok"
 	code, param, message       string
 	model, serviceTier         string
+	modelOverlong              bool // the new parse left a raw name past modelRawMax undecoded
 	stream                     bool
 	n, maxTokens, messageCount int
 	ignored                    []string
@@ -59,8 +60,8 @@ func newParse(body []byte, l policyLimits) parseOutcome {
 	if perr != nil {
 		return errOutcome("top", perr)
 	}
-	o := parseOutcome{model: req.model, serviceTier: req.serviceTier, stream: req.stream, n: req.n, maxTokens: req.maxTokens,
-		pass: map[string]string{}}
+	o := parseOutcome{model: req.model, modelOverlong: req.modelOverlong, serviceTier: req.serviceTier, stream: req.stream, n: req.n,
+		maxTokens: req.maxTokens, pass: map[string]string{}}
 	for k, v := range req.pass {
 		o.pass[k] = string(v)
 	}
@@ -121,7 +122,7 @@ func sameOutcome(body []byte, n, o parseOutcome) string {
 	if n.stage == "top" {
 		return ""
 	}
-	if n.model != o.model || n.serviceTier != o.serviceTier || n.stream != o.stream || n.n != o.n || n.maxTokens != o.maxTokens {
+	if !sameModel(n, o) || n.serviceTier != o.serviceTier || n.stream != o.stream || n.n != o.n || n.maxTokens != o.maxTokens {
 		return fmt.Sprintf("CTX values: new %+v, base %+v", n, o)
 	}
 	if !maps.Equal(n.pass, o.pass) {
@@ -627,6 +628,22 @@ func jsonWalk(raw []byte, open json.Delim, f func(k string, v json.RawMessage) b
 	return true
 }
 
+// sameModel compares the name Resolve looks up (hardening 5, B-1): the same
+// name, or — where the new parse left a raw name past modelRawMax undecoded
+// and Resolve looks up the empty name — a base name that is no alias name
+// either: longer than aliasNameMaxBytes or not ASCII. Both answer the
+// unknown model's 404 (TestOverlongModelAnswersLikeAnUnknownModel).
+func sameModel(n, o parseOutcome) bool {
+	if !n.modelOverlong {
+		return n.model == o.model
+	}
+	ascii := true
+	for i := 0; i < len(o.model); i++ {
+		ascii = ascii && o.model[i] < utf8.RuneSelf
+	}
+	return n.model == "" && (len(o.model) > aliasNameMaxBytes || !ascii)
+}
+
 // diffCheck compares both parses of body under every diffLimits entry.
 func diffCheck(t testing.TB, body []byte, deviations map[string]int) {
 	t.Helper()
@@ -635,6 +652,9 @@ func diffCheck(t testing.TB, body []byte, deviations map[string]int) {
 		d := sameOutcome(body, n, o)
 		if d == "" {
 			deviations["equal"]++
+			if n.modelOverlong {
+				deviations["equal, model past the bound"]++ // counted inside equal, named for the report
+			}
 			continue
 		}
 		if kind := allowedDeviation(body, l, n, o); kind != "" {
@@ -773,6 +793,17 @@ func generatedCorpus() [][]byte {
 		`{"model":"chat","messages":[{"role":"user","content":"x","`+strings.Repeat(escU('<'), 100)+`":1}]}`,
 		msg+`,"`+strings.Repeat("q", echoNameMax)+`":1}`,
 	)
+	// Hardening 5, B-1: model names at and past modelRawMax — escaped,
+	// invalid UTF-8, plain, a surrogate pair — with a key that sorts before
+	// and after model, and a non-string past the bound.
+	esc := strings.Repeat(`\u0061`, aliasNameMaxBytes)
+	tail := `","messages":[{"role":"user","content":"x"}]`
+	for _, raw := range []string{esc, esc + "a", esc + `\u0061`, rep("\xff", modelRawMax), rep("\xff", modelRawMax+1),
+		rep("a", modelRawMax+1), rep(pair, modelRawMax/12+1), rep("a", aliasNameMaxBytes+1)} {
+		c = append(c, `{"model":"`+raw+tail+`}`, `{"model":"`+raw+tail+`,"aa":1}`, `{"model":"`+raw+tail+`,"zz":1}`,
+			`{"model":"`+raw+tail+`,"stream":true}`)
+	}
+	c = append(c, `{"model":["`+esc+`a"],"messages":[]}`)
 	out := make([][]byte, len(c))
 	for i, s := range c {
 		out[i] = []byte(s)

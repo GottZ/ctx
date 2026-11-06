@@ -368,11 +368,13 @@ const jsonMaxDepth = 10000
 // level, allocated anew on every call that fails), rounded up.
 const jsonDepthStateBytes = 24
 
-// jsonStateBytes is the heap the JSON check of raw keeps for its nesting at
-// the deepest point (FOLGE-P: a 20 KB body nested to the limit costs
-// json.Valid 190 KB, nine times its share of the budget) — counted without
-// allocating, so the route books it before the check runs.
-func jsonStateBytes(raw []byte) int64 {
+// jsonDepth is the deepest nesting of raw outside strings, counted up to one
+// past the decoder's limit, without allocating — so the route books the
+// nesting state of the JSON check (jsonDepthStateBytes per level; FOLGE-P: a
+// 20 KB body nested to the limit costs json.Valid 190 KB, nine times its
+// share of the budget) and of the sensitivity scan (scanDepthStateBytes,
+// coverScan) before either runs.
+func jsonDepth(raw []byte) int64 {
 	depth, deepest := 0, 0
 	for i := 0; i < len(raw) && deepest <= jsonMaxDepth; i++ {
 		switch raw[i] {
@@ -385,7 +387,7 @@ func jsonStateBytes(raw []byte) int64 {
 			depth--
 		}
 	}
-	return int64(deepest) * jsonDepthStateBytes
+	return int64(deepest)
 }
 
 // stringContent is the raw content between the quotes of the JSON string v;

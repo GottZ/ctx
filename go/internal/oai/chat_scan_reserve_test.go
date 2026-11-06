@@ -191,3 +191,59 @@ func TestScanIsBookedBeforeItRuns(t *testing.T) {
 		})
 	}
 }
+
+// TestScanDepthIsBookedBeforeTheScan (hardening 7, S-H6-1): the scan's
+// booking includes its nesting state, scanDepthStateBytes per level of the
+// body, and the route takes it before the scan runs. The deepest request
+// the route accepts at a 32 KiB cap to the public alias is served at the
+// floor; at the floor without the scan's nesting term it is 503
+// server_overloaded — before the scan, before the meter, no wire call
+// (without the term in the booking it was served there: the floor of
+// hardening 5 had 32 704 B to spare for it, the term takes 1 040 000).
+func TestScanDepthIsBookedBeforeTheScan(t *testing.T) {
+	const capBytes, resp = 32 << 10, 4 << 20
+	body := strings.Replace(deepestBody(capBytes, "pub", "user"), `"content":"`+strings.Repeat("a", len(ledgerMark)), `"content":"`+ledgerMark, 1)
+	floor := chatFloor(capBytes, resp)
+	for _, tc := range []struct {
+		name   string
+		budget int64
+		status int
+		scans  int64
+	}{
+		{"floor without the scan's nesting term", floor - oai.ScanDepthReserve, http.StatusServiceUnavailable, 0},
+		{"floor", floor, http.StatusOK, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := newUpstream(t, answerSGLang)
+			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
+			rig.setSettings(func(s *oai.Settings) {
+				s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = tc.budget, capBytes, resp
+			})
+			var scans atomic.Int64
+			scan := rig.deps.Federation.Scan
+			rig.deps.Federation.Scan = func(r backends.Sensitivity, b []byte) backends.Sensitivity {
+				scans.Add(1)
+				return scan(r, b)
+			}
+			w, _ := ledgerPost(t, rig, []byte(body), false)
+			if w.Code != tc.status {
+				t.Fatalf("budget %d (floor %d): %d %.300s, want %d", tc.budget, floor, w.Code, w.Body.Bytes(), tc.status)
+			}
+			if got := scans.Load(); got != tc.scans {
+				t.Errorf("%d scans, want %d", got, tc.scans)
+			}
+			if tc.status != http.StatusOK {
+				var e struct {
+					Error struct{ Code string } `json:"error"`
+				}
+				_ = json.Unmarshal(w.Body.Bytes(), &e)
+				if e.Error.Code != oai.CodeServerOverloaded || w.Header().Get("Retry-After") != "1" {
+					t.Errorf("answer %s (Retry-After %q), want server_overloaded, Retry-After 1", w.Body.Bytes(), w.Header().Get("Retry-After"))
+				}
+				if n := rig.limiter.admits.Load(); n != 0 || len(ownRaws(u)) != 0 {
+					t.Errorf("%d meter admits, %d wire hits, want none", n, len(ownRaws(u)))
+				}
+			}
+		})
+	}
+}

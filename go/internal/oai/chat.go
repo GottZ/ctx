@@ -208,7 +208,8 @@ func (c *chatCall) serve() {
 	if !ok {
 		return
 	}
-	if !c.cover(jsonStateBytes(body)) { // the JSON check's nesting state, booked before it runs
+	depth := jsonDepth(body)
+	if !c.cover(depth * jsonDepthStateBytes) { // the JSON check's nesting state, booked before it runs
 		c.rec.Reason = CodeServerOverloaded
 		WriteOverloaded(c.w)
 		return
@@ -218,7 +219,7 @@ func (c *chatCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
-	if !c.resolve(req.model) {
+	if !c.resolve(req.model, req.modelOverlong) {
 		return
 	}
 	if perr := req.parsePolicy(limitsOf(c.alias, c.s), c.cover); perr != nil {
@@ -238,7 +239,7 @@ func (c *chatCall) serve() {
 		return
 	}
 	required := c.sensitivity()
-	if !c.coverScan(required, body) {
+	if !c.coverScan(required, body, depth) {
 		c.rec.Reason = CodeServerOverloaded
 		WriteOverloaded(c.w)
 		return
@@ -255,6 +256,24 @@ func (c *chatCall) serve() {
 		Client: req.pass, Messages: req.messages, Role: c.alias.Role, Stream: false, MaxTokens: maxTokens,
 		ReasoningOff: reasoningOff(c.alias), Reserve: c.reserveUpstream,
 	})
+}
+
+// runeCount is utf8.RuneCount without its copy (hardening 6, the class
+// gate): on go1.27 RuneCount converts the bytes after the first non-ASCII
+// one into a string — a copy of the message array outside the reservation,
+// the fourth one of a rewritten array. The same count: an invalid byte is
+// one rune, as for range over a string.
+func runeCount(p []byte) int {
+	n := 0
+	for i := 0; i < len(p); n++ {
+		if p[i] < utf8.RuneSelf {
+			i++
+			continue
+		}
+		_, size := utf8.DecodeRune(p[i:])
+		i += size
+	}
+	return n
 }
 
 // reasoningOff is the alias's reasoning policy (design/02 §3.2: default off).
@@ -379,8 +398,11 @@ func (c *chatCall) cover(n int64) bool {
 // coverScan books the heap of the sensitivity scan of the body before it
 // runs (FOLGE-P hardening H-8): federation.ScanRaise decodes every token of
 // the body into a string and runs the scanner's patterns over each — up to
-// scanReserveFactor × the body + scanReserveBase, what one scan call holds at
-// once. One form is scanned twice in a row — a key of the whole body with a
+// scanBooking, what one scan call holds at once: scanReserveFactor × the
+// body + scanReserveBase, and scanDepthStateBytes for each level of the
+// body's nesting (depth, jsonDepth; hardening 7: a 20 KB body nested to the
+// decoder's limit held up to 891 000 bytes more than the body's share). One
+// form is scanned twice in a row — a key of the whole body with a
 // scalar value, as a key and in the probe "key: value" (Delta-Review 2 F-1):
 // it allocates about two bookings in total, but never more than one at once
 // (the first call's garbage is dead before the second begins; pinned by
@@ -392,11 +414,16 @@ func (c *chatCall) cover(n int64) bool {
 // freed budget: the heap stays within the bookings under a set GOMEMLIMIT
 // (the image's 200MiB), not without one (Delta-Review 3 R3-1, the numbers at
 // scanReserveFactor).
-func (c *chatCall) coverScan(required backends.Sensitivity, body []byte) bool {
+func (c *chatCall) coverScan(required backends.Sensitivity, body []byte, depth int64) bool {
 	if required.Rank() >= backends.SensCredentials.Rank() {
 		return true
 	}
-	return c.cover(scanReserveFactor*int64(len(body)) + scanReserveBase)
+	return c.cover(scanBooking(body, depth))
+}
+
+// scanBooking is what coverScan books for the scan of body nested depth deep.
+func scanBooking(body []byte, depth int64) int64 {
+	return scanReserveFactor*int64(len(body)) + scanReserveBase + depth*scanDepthStateBytes
 }
 
 // reserveUpstream is UpstreamSpec.Reserve: an attempt's upstream body is
@@ -430,8 +457,12 @@ func (c *chatCall) refuseParam(perr *paramError) {
 }
 
 // resolve is §4.4 steps 1–6: the alias in the consumer's scope, released by
-// all_models or a grant (the one 404 for every reason), then the kind.
-func (c *chatCall) resolve(name string) bool {
+// all_models or a grant (the one 404 for every reason), then the kind. An
+// overlong name (the parse did not decode it) is looked up nowhere: it
+// takes the grant probe of a name that is no alias and gets the 404
+// (hardening 6, P-4 — looked up as "", it matched a registry row named "",
+// which only migration 162's CHECK keeps out).
+func (c *chatCall) resolve(name string, overlong bool) bool {
 	// The generation the watcher starts from is the one this Resolve saw at
 	// most: read BEFORE it, a change between the Resolve and the watcher
 	// start (limiter, plan, the queue) moves the generation past it and the
@@ -439,7 +470,14 @@ func (c *chatCall) resolve(name string) bool {
 	// watcher would start from a generation that already holds the change
 	// and skip every Resolve until the check before the write.
 	c.gen = c.d.Aliases.Generation()
-	a, found, err := c.d.Resolve(c.ctx, c.ca, name)
+	var a modelalias.Alias
+	var found bool
+	var err error
+	if overlong {
+		err = c.d.probeNoAlias(c.ctx, c.ca)
+	} else {
+		a, found, err = c.d.Resolve(c.ctx, c.ca, name)
+	}
 	switch {
 	case err != nil:
 		// A grant read the shutdown or the watcher ended is their answer
@@ -542,7 +580,7 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	}
 	res, refusal := c.d.Limiter.Admit(c.ctx, c.ca, c.alias, Estimate{
 		Op: llmlog.GatewayOpChat, MaxTokens: maxTokens, ClientMaxTokens: c.req.maxTokens > 0,
-		PromptBytes: len(c.req.messages), PromptRunes: utf8.RuneCount(c.req.messages), ServiceTier: c.req.serviceTier,
+		PromptBytes: len(c.req.messages), PromptRunes: runeCount(c.req.messages), ServiceTier: c.req.serviceTier,
 	})
 	if refusal != nil {
 		// The meter's Retry-After is exact (design/06 §4.4): both headers,
@@ -972,7 +1010,11 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 	}
 	request := ""
 	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
-		request = string(c.req.messages)
+		// The row's text of the array is sized, then booked, then written
+		// (hardening 6): under an exhausted budget the row goes without it.
+		if n := bodyLogSize(c.req.messages); c.cover(int64(n)) {
+			request = bodyLogText(c.req.messages, n)
+		}
 	}
 	c.d.Record(llmlog.GatewayRow{
 		Pipeline:   chatPipeline,
@@ -988,6 +1030,68 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		Response:    out.response,
 		BodyLogging: c.s.BodyLogging,
 	})
+}
+
+// bodyLogTextMax is how much of the message array's text the route hands to
+// the log row: the row stores at most llmlog's gateway body cap (64 KiB) of
+// a body, cut on a rune boundary, so every longer prefix of the same text
+// stores the same. Pinned by TestBodyLogTextStoresWhatTheArrayStored.
+const bodyLogTextMax = 64<<10 + utf8.UTFMax
+
+// bodyLogWalk yields the text of the message array raw for the log row as
+// the row stores it before its cut — valid UTF-8 with each run of invalid
+// bytes one U+FFFD and no NUL (llmlog's storable) — piece by piece to put,
+// up to bodyLogTextMax bytes (hardening 6, the class gate: string(raw)
+// copied the whole array outside the reservation, and the row's cleaning
+// grew a text of invalid bytes between ASCII ones to 8 × its size before
+// cutting it).
+func bodyLogWalk(raw []byte, put func(p []byte)) {
+	n := 0
+	invalid := false // the byte before was part of an invalid sequence
+	for i := 0; i < len(raw) && n < bodyLogTextMax; {
+		c := raw[i]
+		size := 1
+		switch {
+		case c == 0:
+			invalid = false
+		case c < utf8.RuneSelf:
+			put(raw[i : i+1])
+			n++
+			invalid = false
+		default:
+			_, size = utf8.DecodeRune(raw[i:])
+			switch {
+			case size > 1:
+				put(raw[i : i+size])
+				n += size
+				invalid = false
+			case !invalid:
+				put(replacementChar)
+				n += len(replacementChar)
+				invalid = true
+			}
+		}
+		i += size
+	}
+}
+
+// replacementChar is U+FFFD, what the log row writes for invalid bytes.
+var replacementChar = []byte(string(utf8.RuneError))
+
+// bodyLogSize is the length of bodyLogText(raw).
+func bodyLogSize(raw []byte) int {
+	n := 0
+	bodyLogWalk(raw, func(p []byte) { n += len(p) })
+	return n
+}
+
+// bodyLogText is the log row's text of raw, written once into size bytes
+// (bodyLogSize).
+func bodyLogText(raw []byte, size int) string {
+	var b strings.Builder
+	b.Grow(size)
+	bodyLogWalk(raw, func(p []byte) { b.Write(p) })
+	return b.String()
 }
 
 // clientRequestID is the client's own request id (X-Request-ID, else

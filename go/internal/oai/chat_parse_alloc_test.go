@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/GottZ/ctx/internal/modelalias"
 )
 
 // parseAllocSlack is what one parse may allocate whatever its body: the
@@ -66,6 +68,13 @@ func allocForms(size int) []allocForm {
 		pre, suf := `{"model":"chat","messages":[{"role":"user","content":"`, `"}]}`
 		return []byte(pre + strings.Repeat(fill, (size-len(pre)-len(suf))/len(fill)) + suf)
 	}
+	rfcap := def
+	rfcap.responseFormatMaxBytes = modelalias.CeilingResponseFormatMaxBytes
+	rfType := func(fill string) []byte {
+		pre, suf := msg+`,"response_format":{"type":"`, `"}}`
+		n := min(size, rfcap.responseFormatMaxBytes+len(msg)+20) - len(pre) - len(suf)
+		return []byte(pre + strings.Repeat(fill, n/len(fill)) + suf)
+	}
 	developer := allocGen(`{"model":"chat","messages":[`, `]}`, size, allocConst(`{"role":"developer","content":"x"}`))
 	reasoning := allocGen(`{"model":"chat","messages":[`, `]}`, size, allocConst(`{"role":"assistant","content":"x","reasoning_content":"r"}`))
 	return []allocForm{
@@ -80,9 +89,23 @@ func allocForms(size int) []allocForm {
 		{"max_tokens huge", []byte(msg + `,"max_tokens":1` + strings.Repeat("0", size-len(msg)-17) + `}`), def, 0},
 		{"service_tier huge", []byte(`{"model":"chat","service_tier":"` + strings.Repeat("a", size-90) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
 		// model is the one CTX value decoded into a string (Resolve needs
-		// it): at most one copy of it — a served model is an alias name of
-		// at most 128 bytes (migration 162 CHECK), a longer one is 404.
-		{"model huge", []byte(`{"model":"` + strings.Repeat("a", size-70) + `","messages":[{"role":"user","content":"x"}]}`), def, size - 70},
+		// it), and only while its raw form can still be an alias name
+		// (hardening 5, B-1): a longer one is never decoded — not as plain
+		// text, not as invalid UTF-8 (each byte one U+FFFD of 3 bytes: the
+		// decode held 3 × the value), not as escapes.
+		{"model huge", []byte(`{"model":"` + strings.Repeat("a", size-70) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
+		{"model huge, invalid UTF-8", []byte(`{"model":"` + strings.Repeat("\xff", size-70) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
+		{"model huge, escaped", []byte(`{"model":"` + strings.Repeat(`\u00e9`, (size-70)/6) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
+		// response_format.type is compared, never decoded (hardening 6, P-1):
+		// up to the policy ceiling the decode held 15 × the value for
+		// invalid UTF-8, 12 × for lone surrogate escapes.
+		{"response_format.type huge, invalid UTF-8", rfType("\xff"), rfcap, 0},
+		{"response_format.type huge, lone surrogates", rfType(`\ud800`), rfcap, 0},
+		{"response_format.type huge", rfType("a"), rfcap, 0},
+		// stream is compared with its two literals (hardening 6, P-2): a
+		// decode into a bool walked a nested value and held its state.
+		{"stream nested 9997 deep", []byte(msg + `,"stream":` + strings.Repeat("[", 9997) + strings.Repeat("]", 9997) + `}`), def, 0},
+		{"stream, object nested 9997 deep", []byte(msg + `,"stream":` + strings.Repeat(`{"a":`, 9997) + "0" + strings.Repeat("}", 9997) + `}`), def, 0},
 		{"messages", allocGen(`{"model":"chat","messages":[`, `]}`, size, allocConst(`{"role":"user","content":"x"}`)), def, 0},
 		{"messages, last one refused", allocGen(`{"model":"chat","messages":[`, `,{"role":"user","content":"x","foo":1}]}`, size,
 			allocConst(`{"role":"user","content":"x"}`)), def, 0},
@@ -164,6 +187,10 @@ type brokenReader struct{}
 
 func (brokenReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
+// jsonStateBytes is what the route books for the JSON check's nesting state
+// of raw (chat.go serve: jsonDepth × jsonDepthStateBytes, before the check).
+func jsonStateBytes(raw []byte) int64 { return jsonDepth(raw) * jsonDepthStateBytes }
+
 // TestJSONStateIsBooked (gate 1, the JSON check): jsonStateBytes counts the
 // deepest nesting outside strings, up to one past the decoder's limit, and
 // covers what json.Valid really allocates on a body that fails at the limit
@@ -180,6 +207,10 @@ func TestJSONStateIsBooked(t *testing.T) {
 		if got := jsonStateBytes(tc.body); got != tc.depth*jsonDepthStateBytes {
 			t.Errorf("jsonStateBytes(%.40q…) = %d, want depth %d × %d", tc.body, got, tc.depth, jsonDepthStateBytes)
 		}
+	}
+	// The floor's nesting term (hardening 5, B-2) is the most the route books.
+	if got := jsonStateBytes(nest(20000)); got != JSONStateReserve {
+		t.Errorf("jsonStateBytes at most %d, JSONStateReserve %d", got, JSONStateReserve)
 	}
 	for _, body := range [][]byte{nest(jsonMaxDepth + 1), []byte(`{"a":` + strings.Repeat("[", jsonMaxDepth-1)), nest(jsonMaxDepth)} {
 		if got, booked := allocatedBy(func() { _ = json.Valid(body) }), jsonStateBytes(body); got > uint64(booked) {

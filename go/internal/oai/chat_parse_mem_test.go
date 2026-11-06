@@ -32,8 +32,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,6 +50,7 @@ import (
 	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -64,6 +67,8 @@ const (
 	memRespCap  = 4 << 20
 	memVisionID = "00000000-0000-4000-8000-0000000c4b01"
 	memTcapID   = "00000000-0000-4000-8000-0000000c4b02"
+	memCeilID   = "00000000-0000-4000-8000-0000000c4b03"
+	memCeilPub  = "00000000-0000-4000-8000-0000000c4b04"
 )
 
 // memEngine is a fake engine that counts and discards what it gets; fail
@@ -107,10 +112,12 @@ func (u *memEngine) row(name string, prio int) backends.Backend {
 }
 
 // heldSum collects the reservation every request held at the end of its
-// handler.
+// handler, and counts the requests that reached it without a declared
+// length — the ones readRequestBody reads in chunks (hardening 5, B-3).
 type heldSum struct {
-	mu   sync.Mutex
-	vals []int64
+	mu         sync.Mutex
+	vals       []int64
+	undeclared atomic.Int64
 }
 
 func (h *heldSum) add(v int64) {
@@ -149,6 +156,9 @@ func memMount(r *chatRig, h http.Handler, held *heldSum) chi.Router {
 		g.Use(oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.ContentLength < 0 {
+					held.undeclared.Add(1)
+				}
 				next.ServeHTTP(w, req)
 				if res := oai.ReservationFrom(req.Context()); res != nil {
 					held.add(oai.ReservationHeld(res))
@@ -186,6 +196,13 @@ func memGen(prefix, suffix string, limit int, elem func(i int) string) []byte {
 
 func memConst(s string) func(int) string { return func(int) string { return s } }
 
+func memBool(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func memNest(d int) string { return strings.Repeat("[", d) + strings.Repeat("]", d) }
 
 // memShape is one form of the gate: its body, how it is sent and the rows it
@@ -200,6 +217,21 @@ type memShape struct {
 // memForm builds form name at lim bytes: the thirteen forms of the probe
 // (2026-11-05, .gotmp/chatparse-probe) and the ones FOLGE-P found.
 func memForm(t testing.TB, name string, lim int) memShape {
+	// Hardening 6, the class gate: "cg:<table>.<key>:<value form>" is one
+	// combination of chat_class_gate_test.go at lim bytes, for the alias
+	// with the policy ceilings.
+	if cg, ok := strings.CutPrefix(name, "cg:"); ok {
+		cg, pub := strings.CutSuffix(cg, "@pub") // the public alias: the scan runs, the log row stores bodies
+		body, found := oai.ClassGateBody(cg, lim)
+		if !found || !json.Valid(body) {
+			t.Fatalf("class-gate form %q: found %v, valid JSON %v", cg, found, found && json.Valid(body))
+		}
+		if pub {
+			body = bytes.Replace(body, []byte(`"model":"`+oai.CGModel+`"`), []byte(`"model":"`+oai.CGModel+`pub"`), 1)
+			return memShape{body: body, model: oai.CGModel + "pub"}
+		}
+		return memShape{body: body, model: oai.CGModel}
+	}
 	model := "chat"
 	if strings.HasSuffix(name, "_pub") {
 		model = "pub"
@@ -313,6 +345,23 @@ func memForm(t testing.TB, name string, lim int) memShape {
 		pre := `{"model":"` + model + `","messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[{"`
 		suf := `":` + val + `}]}]}`
 		s.body = []byte(pre + strings.Repeat("apikey:x ", (lim-len(pre)-len(suf))/9) + suf)
+	// Hardening 5, B-1: a model name of the whole body — plain, invalid
+	// UTF-8 (the decode made each byte a U+FFFD of 3 bytes), escaped.
+	// Hardening 6: message text of invalid bytes between ASCII ones — with
+	// body logging on, the log row's cleaning (each invalid byte one
+	// U+FFFD) grew a copy of the whole array to 8 × its size.
+	case "f16_text_ffa":
+		s.body = text("\xffa")
+	// Hardening 6: a developer message of non-ASCII text — the rewritten
+	// array is the request's second copy, the upstream body its third, and
+	// the meter's rune count (utf8.RuneCount) copied the array once more.
+	case "f17_developer_utf8":
+		pre, suf := `{"model":"`+model+`","messages":[{"role":"developer","content":"`, `"}]}`
+		s.body = []byte(pre + strings.Repeat("é", (lim-len(pre)-len(suf))/2) + suf)
+	case "f15a_model_long", "f15b_model_ff", "f15c_model_escaped":
+		pre, suf := `{"model":"`, `","messages":[{"role":"user","content":"x"}]}`
+		fill := map[string]string{"f15a": "a", "f15b": "\xff", "f15c": `\u00e9`}[name[:4]]
+		s.body = []byte(pre + strings.Repeat(fill, (lim-len(pre)-len(suf))/len(fill)) + suf)
 	default:
 		t.Fatalf("unknown form %q", name)
 	}
@@ -348,6 +397,15 @@ func memMax(a *atomic.Uint64, v uint64) {
 // newMemRig is the gate's route for n clients of shape: the shape's failover
 // rows before the serving one, the production caps, the strict body cap and
 // the reservation probe (memMount).
+// memCGAliases are the two aliases of the class gate over the route, the
+// policy ceilings at credentials (no sensitivity scan) and below it (public:
+// the scan runs, the log row stores bodies) — TestClassGateOverTheRoute runs
+// every combination with both.
+var memCGAliases = []chatAlias{
+	{memCeilID, backends.GlobalScope, oai.CGModel, "chat", "chat", backends.SensCredentials, oai.CGCeilPolicy, true},
+	{memCeilPub, backends.GlobalScope, oai.CGModel + "pub", "chat", "chat", backends.SensPublic, oai.CGCeilPolicy, true},
+}
+
 func newMemRig(t *testing.T, shape memShape, n int, held *heldSum) (*chatRig, *memEngine) {
 	var rows []backends.Backend
 	for i := 0; i < shape.failover; i++ { // the chain walks higher priorities first
@@ -358,10 +416,20 @@ func newMemRig(t *testing.T, shape memShape, n int, held *heldSum) (*chatRig, *m
 	rig := newChatRig(t, rows, 4*n, 1)
 	rig.reg.reload(t, append(chatAliases(),
 		chatAlias{memVisionID, backends.GlobalScope, "visbig", "chat", "chat", backends.SensCredentials, `{"vision":true,"vision_max_bytes":8388608}`, true},
-		chatAlias{memTcapID, backends.GlobalScope, "tcap", "chat", "chat", backends.SensCredentials, `{"tools.max_bytes":1048576,"tools.max_count":256}`, true}))
+		chatAlias{memTcapID, backends.GlobalScope, "tcap", "chat", "chat", backends.SensCredentials, `{"tools.max_bytes":1048576,"tools.max_count":256}`, true},
+		memCGAliases[0], memCGAliases[1]))
 	rig.setSettings(func(s *oai.Settings) {
 		s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = memBudget, memCap, memRespCap
+		// CTX_FOLGEP_BODYLOG (hardening 6): body logging on, so the route's
+		// copy of the message array for the log row is measured too.
+		if v := os.Getenv("CTX_FOLGEP_BODYLOG"); v != "" {
+			s.BodyLogging = v
+		}
 	})
+	// The log row goes where production sends it (llmlog.RecordGateway:
+	// the capped entry, written asynchronously), not into the harness's
+	// row list, which would keep every logged body for the test's life.
+	rig.deps.Record = func(row llmlog.GatewayRow) { _ = llmlog.GatewayEntry(row) }
 	rig.router = memMount(rig, oai.ChatCompletions(rig.deps), held)
 	return rig, up
 }
@@ -461,6 +529,9 @@ func TestChatParseHeapGate(t *testing.T) {
 		fmt.Fprintf(&sb, "%s×%d ", k, cnt[k])
 	}
 	sum, handled := held.sum()
+	if want := int64(handled) * memBool(shape.chunked); held.undeclared.Load() != want {
+		t.Errorf("form %s: %d of %d requests reached the handler without a declared length, want %d (chunked %v)", form, held.undeclared.Load(), handled, want, shape.chunked)
+	}
 	growth := int64(peak.Load()) - int64(base)
 	bound := sum + int64(n)*heapGateBaseLoad
 	// Two stricter bounds (hardening H-8): without the answer share of the
@@ -483,16 +554,154 @@ func TestChatParseHeapGate(t *testing.T) {
 	case n > 1 && n <= 10 && growth > boundPeak:
 		verdict = "OVER_PEAK"
 	}
-	fmt.Printf("FOLGEP form=%s n=%d gomemlimit=%q body=%d answers=[%s] growth_MiB=%.1f held_sum_MiB=%.1f handled=%d bound_MiB=%.1f "+
+	fmt.Printf("FOLGEP form=%s n=%d gomemlimit=%q bodylog=%q body=%d answers=[%s] growth_MiB=%.1f held_sum_MiB=%.1f handled=%d bound_MiB=%.1f "+
 		"bound_noanswer_MiB=%.1f bound_peak_MiB=%.1f base_MiB=%.1f budget_peak_MiB=%.1f numgc=%d dur=%v up_hits=%d up_max_body=%d up_total=%d "+
 		"answer_max_B=%d verdict=%s\n",
-		form, n, os.Getenv("GOMEMLIMIT"), len(body), strings.TrimSpace(sb.String()), mib(growth), mib(sum), handled, mib(bound),
+		form, n, os.Getenv("GOMEMLIMIT"), os.Getenv("CTX_FOLGEP_BODYLOG"), len(body), strings.TrimSpace(sb.String()), mib(growth), mib(sum), handled, mib(bound),
 		mib(boundNoAnswer), mib(boundPeak), mib(int64(base)), mib(budgetPeak.Load()), ms.NumGC-gc0, dur.Round(time.Millisecond),
 		up.hits.Load(), up.max.Load(), up.total.Load(), answerMax.Load(), verdict)
 	if verdict != "ok" {
 		t.Errorf("form %s, n=%d: heap growth %.1f MiB > reserved %.1f MiB + %d × base load %.0f KiB = %.1f MiB (without the answer share %.1f, the budget's peak %.1f): %s",
 			form, n, mib(growth), mib(sum), n, float64(heapGateBaseLoad)/1024, mib(bound), mib(boundNoAnswer), mib(boundPeak), verdict)
 	}
+}
+
+// cgRouteRun is one run of the class gate over the route: the heap gate's
+// form, concurrency and body size.
+type cgRouteRun struct {
+	form  string
+	n     int
+	bytes int
+}
+
+// cgRouteSizes and cgRouteNs are the body sizes and concurrencies of the
+// class gate over the route (hardening 6 P-3 (b)).
+var (
+	cgRouteSizes = []int{20100, 65600, 262144}
+	cgRouteNs    = []int{1, 10}
+)
+
+// cgRouteRuns is the matrix of the class gate over the route: every
+// combination with both aliases of memCGAliases — "cg:<combo>" at
+// credentials, "cg:<combo>@pub" below it, where the sensitivity scan runs
+// (hardening 7: the scan side was a special run, and its 211 red runs went
+// unseen by the gate) — at every size and concurrency.
+func cgRouteRuns(combos []string) []cgRouteRun {
+	var runs []cgRouteRun
+	for _, c := range combos {
+		for _, alias := range []string{"", "@pub"} {
+			for _, size := range cgRouteSizes {
+				for _, n := range cgRouteNs {
+					runs = append(runs, cgRouteRun{"cg:" + c + alias, n, size})
+				}
+			}
+		}
+	}
+	return runs
+}
+
+// TestClassGateRouteRunsBothAliases pins the matrix of the class gate over
+// the route (hardening 7): every combination runs with the alias at
+// credentials and with the public one, at every size and concurrency, and
+// the two forms reach those two aliases.
+func TestClassGateRouteRunsBothAliases(t *testing.T) {
+	combos := oai.ClassGateCombos()
+	runs := cgRouteRuns(combos)
+	per := len(cgRouteSizes) * len(cgRouteNs)
+	sens := map[string]backends.Sensitivity{}
+	for _, a := range memCGAliases {
+		sens[a.name] = a.sens
+	}
+	forms := map[string]int{}
+	for _, r := range runs {
+		forms[r.form]++
+	}
+	count := map[backends.Sensitivity]int{}
+	for f, k := range forms {
+		if k != per {
+			t.Errorf("form %s runs %d times, want %d (every size and concurrency)", f, k, per)
+		}
+		count[sens[memForm(t, f, cgRouteSizes[0]).model]]++
+	}
+	if len(runs) != 2*len(combos)*per || count[backends.SensCredentials] != len(combos) || count[backends.SensPublic] != len(combos) {
+		t.Errorf("the route gate runs %d times (want %d): %d combinations at credentials, %d below (want %d each)",
+			len(runs), 2*len(combos)*per, count[backends.SensCredentials], count[backends.SensPublic], len(combos))
+	}
+}
+
+// TestClassGateOverTheRoute is the class gate over the real route (hardening
+// 6 P-3 (b), hardening 7): every run of cgRouteRuns is TestChatParseHeapGate
+// in a process of its own — this test binary run again with the form in its
+// environment (GOMEMLIMIT, 200MiB when unset, and CTX_FOLGEP_BODYLOG pass
+// through) — and every verdict must be ok. A measurement test outside the
+// suite (load-sensitive, about 8 640 processes):
+//
+//	CTX_CLASSGATE_ROUTE=1 [CTX_FOLGEP_BODYLOG=full] [CTX_CLASSGATE_ROUTE_OUT=<file>] \
+//	  go test -run '^TestClassGateOverTheRoute$' -timeout 2h ./internal/oai/
+//
+// CTX_CLASSGATE_ROUTE=<file> runs the combinations named in the file (one
+// per line) instead of all; CTX_CLASSGATE_ROUTE_OUT gets the gate's line of
+// every run.
+func TestClassGateOverTheRoute(t *testing.T) {
+	sel := os.Getenv("CTX_CLASSGATE_ROUTE")
+	if sel == "" {
+		t.Skip("CTX_CLASSGATE_ROUTE not set (measurement test, see the comment)")
+	}
+	combos := oai.ClassGateCombos()
+	if sel != "1" {
+		raw, err := os.ReadFile(sel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		combos = strings.Fields(string(raw))
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "CTX_CLASSGATE_ROUTE") && !strings.HasPrefix(kv, "CTX_FOLGEP_FORM=") &&
+			!strings.HasPrefix(kv, "CTX_FOLGEP_N=") && !strings.HasPrefix(kv, "CTX_FOLGEP_BYTES=") {
+			env = append(env, kv)
+		}
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		env = append(env, "GOMEMLIMIT=200MiB")
+	}
+	var lines strings.Builder
+	runs := cgRouteRuns(combos)
+	bad := map[string]int{}
+	for _, r := range runs {
+		cmd := exec.Command(exe, "-test.run", "^TestChatParseHeapGate$", "-test.count=1")
+		cmd.Env = append(slices.Clone(env), "CTX_FOLGEP_FORM="+r.form, "CTX_FOLGEP_N="+strconv.Itoa(r.n), "CTX_FOLGEP_BYTES="+strconv.Itoa(r.bytes))
+		out, _ := cmd.CombinedOutput()
+		line := ""
+		for _, l := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(l, "FOLGEP form=") {
+				line = l
+			}
+		}
+		alias := "credentials"
+		if strings.HasSuffix(r.form, "@pub") {
+			alias = "public"
+		}
+		if line == "" {
+			line = fmt.Sprintf("NOLINE form=%s n=%d bytes=%d %.300s", r.form, r.n, r.bytes, out)
+		}
+		fmt.Fprintf(&lines, "size=%d %s\n", r.bytes, line)
+		if !strings.HasSuffix(line, "verdict=ok") {
+			bad[alias]++
+			t.Errorf("%s n=%d at %d B: %s", r.form, r.n, r.bytes, line)
+		}
+	}
+	if p := os.Getenv("CTX_CLASSGATE_ROUTE_OUT"); p != "" {
+		if err := os.WriteFile(p, []byte(lines.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Logf("FOLGEP class gate route: combos=%d runs=%d (each alias %d) not ok: credentials %d, public %d, bodylog %q",
+		len(combos), len(runs), len(runs)/2, bad["credentials"], bad["public"], os.Getenv("CTX_FOLGEP_BODYLOG"))
 }
 
 // TestChatParseHeapGateSustained is the gate's sustained case (FOLGE-P
@@ -562,6 +771,10 @@ func TestChatParseHeapGateSustained(t *testing.T) {
 			<-start
 			for time.Now().Before(deadline) {
 				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(shape.body))
+				if shape.chunked { // as TestChatParseHeapGate: no declared length (hardening 5, B-3)
+					req.ContentLength = -1
+					req.Body = io.NopCloser(struct{ io.Reader }{bytes.NewReader(shape.body)})
+				}
 				req.Header.Set("Content-Type", "application/json")
 				w := httptest.NewRecorder()
 				rig.router.ServeHTTP(w, req)
@@ -610,10 +823,14 @@ func TestChatParseHeapGateSustained(t *testing.T) {
 	case growth > boundPeak:
 		verdict = "OVER_PEAK"
 	}
+	_, handled := held.sum()
 	fmt.Printf("FOLGEP sustained form=%s n=%d dur=%ds gomemlimit=%q body=%d answers=[%s] growth_MiB=%.1f budget_peak_MiB=%.1f bound_peak_MiB=%.1f "+
-		"base_MiB=%.1f numgc=%d elapsed=%v verdict=%s\n",
+		"base_MiB=%.1f numgc=%d elapsed=%v handled=%d undeclared=%d verdict=%s\n",
 		form, n, dur, os.Getenv("GOMEMLIMIT"), len(shape.body), strings.TrimSpace(sb.String()), mib(growth), mib(budgetPeak.Load()), mib(boundPeak),
-		mib(int64(base)), ms.NumGC-gc0, el.Round(time.Millisecond), verdict)
+		mib(int64(base)), ms.NumGC-gc0, el.Round(time.Millisecond), handled, held.undeclared.Load(), verdict)
+	if want := int64(handled) * memBool(shape.chunked); held.undeclared.Load() != want || handled == 0 {
+		t.Errorf("form %s: %d of %d requests reached the handler without a declared length, want %d (chunked %v)", form, held.undeclared.Load(), handled, want, shape.chunked)
+	}
 	if verdict != "ok" {
 		t.Errorf("form %s, n=%d, %d s closed loop, GOMEMLIMIT %q: heap growth %.1f MiB > the budget's peak %.1f MiB + %d × base load %.0f KiB = %.1f MiB (budget %.0f MiB): %s",
 			form, n, dur, os.Getenv("GOMEMLIMIT"), mib(growth), mib(budgetPeak.Load()), n, float64(heapGateBaseLoad)/1024, mib(boundPeak), mib(memBudget), verdict)

@@ -17,8 +17,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -145,11 +147,13 @@ func TestReservationCoversEveryCopy(t *testing.T) {
 		extra      map[string]any // the serving row's extra_body
 		readFactor int64          // body reads the ledger books at least (an undeclared body: chunks + join)
 		rewrite    bool
+		bodyLog    bool // body logging full: the log row's text of the array is booked too (hardening 6)
 	}{
 		{name: "declared text", body: text, readFactor: 1},
 		{name: "undeclared text", body: text, chunked: true, readFactor: 2},
 		{name: "three attempts", body: text, failing: 2, readFactor: 1},
 		{name: "undeclared, rewritten developer messages", body: dev, chunked: true, readFactor: 2, rewrite: true},
+		{name: "rewritten developer messages, body logging full", body: dev, readFactor: 1, rewrite: true, bodyLog: true},
 		{name: "a small body and a large row frame", body: []byte(chatBody("chat", `"stop":["`+ledgerMark+`"]`)), readFactor: 1,
 			extra: map[string]any{"vendor_blob": strings.Repeat("z", 64<<10)}},
 	} {
@@ -168,6 +172,9 @@ func TestReservationCoversEveryCopy(t *testing.T) {
 				ups, rows = append(ups, u), append(rows, b)
 			}
 			rig := newChatRig(t, rows, 4, 1)
+			if tc.bodyLog {
+				rig.setSettings(func(s *oai.Settings) { s.BodyLogging = llmlog.BodyLoggingFull })
+			}
 			w, held := ledgerPost(t, rig, tc.body, tc.chunked)
 			if w.Code != http.StatusOK {
 				t.Fatalf("status %d %s", w.Code, w.Body.Bytes())
@@ -181,10 +188,20 @@ func TestReservationCoversEveryCopy(t *testing.T) {
 						_ = json.Unmarshal(raw, &m)
 						want += int64(len(m["messages"])) // the rewritten array the upstream body copied
 					}
+					if tc.bodyLog {
+						var m map[string]json.RawMessage
+						_ = json.Unmarshal(raw, &m)
+						want += int64(min(len(m["messages"]), oai.BodyLogTextMax)) // the log row's text of the array (ASCII: as long as the array, at most the bound)
+					}
 				}
 			}
 			if got := held - answerShare; got < want {
 				t.Errorf("the request share held %d bytes at the end, want ≥ %d (reads + copies)", got, want)
+			}
+			// The row gets the bounded text the route booked, not a copy of
+			// the whole array (hardening 6).
+			if rows := rig.rows.all(); tc.bodyLog && (len(rows) == 0 || len(rows[len(rows)-1].Request) > oai.BodyLogTextMax+utf8.UTFMax-1) {
+				t.Errorf("the log row's request text: %d rows, want one with at most %d bytes", len(rows), oai.BodyLogTextMax+utf8.UTFMax-1)
 			}
 		})
 	}
