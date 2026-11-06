@@ -28,8 +28,11 @@ import (
 // its value is looked at, an array is counted before it is checked, no value
 // is copied and no object becomes a map. The one copy it makes, the message
 // array with a rewritten message, is sized first and reserved through grow
-// before it is allocated (parsePolicy). The model name is decoded for
-// Resolve only while its raw form can still be an alias name (modelRawMax).
+// before it is allocated (parsePolicy). The model name is the one value
+// decoded (for Resolve), and only while its raw form can still be an alias
+// name (modelRawMax); every other value the parse reads —
+// response_format.type, service_tier, a role, a part type — is compared in
+// place (hardening 6).
 // Everything unknown is refused: an engine knob that is not listed here
 // (SGLang custom_logit_processor, vLLM kv_transfer_params, a new one of the
 // next engine release) cannot be smuggled past a list that names what is
@@ -160,6 +163,35 @@ func requestTierOf(s []byte) string {
 // responseFormatTypes are the response_format.type values PASS admits
 // (§4.5: text, json_object, json_schema).
 var responseFormatTypes = map[string]bool{"text": true, "json_object": true, "json_schema": true}
+
+// responseFormatTypeRawMax is the longest raw JSON form of an allowed
+// response_format.type: its longest name with every character a 6-byte \u
+// escape. A longer raw value names no allowed type.
+var responseFormatTypeRawMax = func() int {
+	n := 0
+	for t := range responseFormatTypes {
+		n = max(n, len(t))
+	}
+	return n * len(`\u0000`)
+}()
+
+// responseFormatType reports whether the raw value v is an allowed
+// response_format.type — compared in its decoded form, never decoded, and
+// not read past responseFormatTypeRawMax (hardening 6, P-1: the decode of a
+// 64 KiB value of invalid UTF-8 held 1 MB, at the policy ceiling of 256 KiB
+// 3.9 MB). A non-string (null included) is no allowed type, as before.
+func responseFormatType(v []byte) bool {
+	s, ok := stringContent(v)
+	if !ok || len(s) > responseFormatTypeRawMax {
+		return false
+	}
+	for t := range responseFormatTypes {
+		if cmpKeyName(s, t) == 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // visionPrefixes are the only image_url.url forms (§4.5.1, B18): a data URI
 // of one of four image types, lowercase, without parameters. Engines fetch
@@ -702,8 +734,7 @@ func checkResponseFormat(v json.RawMessage) *paramError {
 	if perr != nil {
 		return perr
 	}
-	var typ string
-	if !isObject || vals[0] == nil || json.Unmarshal(vals[0], &typ) != nil || !responseFormatTypes[typ] {
+	if !isObject || vals[0] == nil || !responseFormatType(vals[0]) {
 		return unsupportedValue("response_format.type", "must be text, json_object or json_schema")
 	}
 	if vals[1] != nil {

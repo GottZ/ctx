@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/GottZ/ctx/internal/modelalias"
 )
 
 // parseAllocSlack is what one parse may allocate whatever its body: the
@@ -66,6 +68,13 @@ func allocForms(size int) []allocForm {
 		pre, suf := `{"model":"chat","messages":[{"role":"user","content":"`, `"}]}`
 		return []byte(pre + strings.Repeat(fill, (size-len(pre)-len(suf))/len(fill)) + suf)
 	}
+	rfcap := def
+	rfcap.responseFormatMaxBytes = modelalias.CeilingResponseFormatMaxBytes
+	rfType := func(fill string) []byte {
+		pre, suf := msg+`,"response_format":{"type":"`, `"}}`
+		n := min(size, rfcap.responseFormatMaxBytes+len(msg)+20) - len(pre) - len(suf)
+		return []byte(pre + strings.Repeat(fill, n/len(fill)) + suf)
+	}
 	developer := allocGen(`{"model":"chat","messages":[`, `]}`, size, allocConst(`{"role":"developer","content":"x"}`))
 	reasoning := allocGen(`{"model":"chat","messages":[`, `]}`, size, allocConst(`{"role":"assistant","content":"x","reasoning_content":"r"}`))
 	return []allocForm{
@@ -87,6 +96,12 @@ func allocForms(size int) []allocForm {
 		{"model huge", []byte(`{"model":"` + strings.Repeat("a", size-70) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
 		{"model huge, invalid UTF-8", []byte(`{"model":"` + strings.Repeat("\xff", size-70) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
 		{"model huge, escaped", []byte(`{"model":"` + strings.Repeat(`\u00e9`, (size-70)/6) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
+		// response_format.type is compared, never decoded (hardening 6, P-1):
+		// up to the policy ceiling the decode held 15 × the value for
+		// invalid UTF-8, 12 × for lone surrogate escapes.
+		{"response_format.type huge, invalid UTF-8", rfType("\xff"), rfcap, 0},
+		{"response_format.type huge, lone surrogates", rfType(`\ud800`), rfcap, 0},
+		{"response_format.type huge", rfType("a"), rfcap, 0},
 		{"messages", allocGen(`{"model":"chat","messages":[`, `]}`, size, allocConst(`{"role":"user","content":"x"}`)), def, 0},
 		{"messages, last one refused", allocGen(`{"model":"chat","messages":[`, `,{"role":"user","content":"x","foo":1}]}`, size,
 			allocConst(`{"role":"user","content":"x"}`)), def, 0},
