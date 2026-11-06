@@ -201,20 +201,26 @@ func TestEmbedMeterConnectTimeoutGivesBack(t *testing.T) {
 // context without waiting for the stream's writer, which may still write —
 // keeps the reservation. The request goroutine stalls in GotConn (a trace on
 // the inbound context, composed with the route's) past the attempt deadline,
-// so no write hook fires: only the context rule marks the wire contact.
+// so no write hook fires: only the context rule marks the wire contact. The
+// attempt deadline is 1 s, so the h2 connection has a second to stand under
+// load (Delta-Review 4 F4-9: once not within 250 ms at load 27), and the
+// stall lasts until 200 ms past it, counted from the try's GetConn.
 func TestEmbedMeterHTTP2DeadlineWithAConnectionKeeps(t *testing.T) {
 	var hits atomic.Int64
 	url := serveH2(t, newHeldListener(t), http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	row := embedWireRow("h2slow", url, 10)
 	row.Timeouts = nil
 	rig, m := embedMeterRig(t, row)
-	shortAttempts(rig)
+	const attempt = time.Second
+	rig.setSettings(func(s *oai.Settings) { s.RequestTimeout = attempt })
 	pt := &h2Trace{}
 	stall := pt.trace()
 	record := stall.GotConn
+	var start atomic.Int64
+	stall.GetConn = func(string) { start.CompareAndSwap(0, time.Now().UnixNano()) }
 	stall.GotConn = func(i httptrace.GotConnInfo) {
 		record(i)
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(time.Until(time.Unix(0, start.Load()).Add(attempt + 200*time.Millisecond)))
 	}
 	a := postEmbedCtx(t, rig, httptrace.WithClientTrace(context.Background(), stall), embedBody("emb1", embedInputs(1)))
 	held := m.heldEmbed(t, rig)
