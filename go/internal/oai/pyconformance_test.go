@@ -118,14 +118,18 @@ func conformanceMeter(t *testing.T) http.Handler {
 // conformanceConcurrency is the L1 fixture of test_concurrency_retry.py
 // (W06-11): the chat route over the real meter with C = 1. The engine holds
 // a request whose message is "hold" until POST /release (at most 30 s), so
-// the consumer's one slot stays taken until the test lets it go.
+// the consumer's one slot stays taken until the test lets it go. GET /held
+// answers 204 once that request reached the engine — it holds the slot from
+// then on, so the test probes only after it (a probe racing the holder could
+// take the one slot first and leave the holder refused) — and 504 after 10 s.
 func conformanceConcurrency(t *testing.T) http.Handler {
 	t.Helper()
-	release := make(chan struct{})
-	var once sync.Once
+	release, held := make(chan struct{}), make(chan struct{})
+	var once, heldOnce sync.Once
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		if bytes.Contains(raw, []byte(`"hold"`)) {
+			heldOnce.Do(func() { close(held) })
 			select {
 			case <-release:
 			case <-time.After(30 * time.Second):
@@ -142,6 +146,14 @@ func conformanceConcurrency(t *testing.T) http.Handler {
 	rig := newChatRig(t, []backends.Backend{up.row("spark", backends.TrustFull, 1)}, 64, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", rig.router)
+	mux.HandleFunc("GET /held", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-held:
+			w.WriteHeader(http.StatusNoContent)
+		case <-time.After(10 * time.Second):
+			w.WriteHeader(http.StatusGatewayTimeout)
+		}
+	})
 	mux.HandleFunc("POST /release", func(w http.ResponseWriter, _ *http.Request) {
 		once.Do(func() { close(release) })
 		w.WriteHeader(http.StatusNoContent)
