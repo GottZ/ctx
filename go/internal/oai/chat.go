@@ -208,7 +208,8 @@ func (c *chatCall) serve() {
 	if !ok {
 		return
 	}
-	if !c.cover(jsonStateBytes(body)) { // the JSON check's nesting state, booked before it runs
+	depth := jsonDepth(body)
+	if !c.cover(depth * jsonDepthStateBytes) { // the JSON check's nesting state, booked before it runs
 		c.rec.Reason = CodeServerOverloaded
 		WriteOverloaded(c.w)
 		return
@@ -238,7 +239,7 @@ func (c *chatCall) serve() {
 		return
 	}
 	required := c.sensitivity()
-	if !c.coverScan(required, body) {
+	if !c.coverScan(required, body, depth) {
 		c.rec.Reason = CodeServerOverloaded
 		WriteOverloaded(c.w)
 		return
@@ -397,8 +398,11 @@ func (c *chatCall) cover(n int64) bool {
 // coverScan books the heap of the sensitivity scan of the body before it
 // runs (FOLGE-P hardening H-8): federation.ScanRaise decodes every token of
 // the body into a string and runs the scanner's patterns over each — up to
-// scanReserveFactor × the body + scanReserveBase, what one scan call holds at
-// once. One form is scanned twice in a row — a key of the whole body with a
+// scanBooking, what one scan call holds at once: scanReserveFactor × the
+// body + scanReserveBase, and scanDepthStateBytes for each level of the
+// body's nesting (depth, jsonDepth; hardening 7: a 20 KB body nested to the
+// decoder's limit held up to 891 000 bytes more than the body's share). One
+// form is scanned twice in a row — a key of the whole body with a
 // scalar value, as a key and in the probe "key: value" (Delta-Review 2 F-1):
 // it allocates about two bookings in total, but never more than one at once
 // (the first call's garbage is dead before the second begins; pinned by
@@ -410,11 +414,16 @@ func (c *chatCall) cover(n int64) bool {
 // freed budget: the heap stays within the bookings under a set GOMEMLIMIT
 // (the image's 200MiB), not without one (Delta-Review 3 R3-1, the numbers at
 // scanReserveFactor).
-func (c *chatCall) coverScan(required backends.Sensitivity, body []byte) bool {
+func (c *chatCall) coverScan(required backends.Sensitivity, body []byte, depth int64) bool {
 	if required.Rank() >= backends.SensCredentials.Rank() {
 		return true
 	}
-	return c.cover(scanReserveFactor*int64(len(body)) + scanReserveBase)
+	return c.cover(scanBooking(body, depth))
+}
+
+// scanBooking is what coverScan books for the scan of body nested depth deep.
+func scanBooking(body []byte, depth int64) int64 {
+	return scanReserveFactor*int64(len(body)) + scanReserveBase + depth*scanDepthStateBytes
 }
 
 // reserveUpstream is UpstreamSpec.Reserve: an attempt's upstream body is

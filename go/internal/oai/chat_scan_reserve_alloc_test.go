@@ -11,9 +11,13 @@ package oai_test
 // integration job (no -race).
 
 import (
+	"encoding/json"
+	"fmt"
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -66,6 +70,89 @@ func TestScanReserveIsTheMeasuredOne(t *testing.T) {
 	if largest <= oai.ScanReserveFactor-1 {
 		t.Errorf("the largest form needs %.3f bytes per body byte at %d B (%s), the factor %d books a whole byte more: measure again and lower it",
 			largest, scanPeakBytes, largestForm, oai.ScanReserveFactor)
+	}
+}
+
+// scanDepthForms are the deepest bodies the route accepts per kind of
+// nesting (hardening 7, S-H6-1): a bare array, objects with a one-byte key
+// and both alternating, nested at a top-level key, in a message member and
+// in a tool call — at the decoder's limit and at 9 216 levels, where the
+// scan's stacks have just grown and its allocation per level peaks (every
+// third depth measured from 300 to 10 000, bau report FOLGE-P §Härtung 7).
+// The bracket bytes are the fewest a level can take, so these forms leave
+// the factor the least to book.
+func scanDepthForms() ([]string, map[string][]byte) {
+	wraps := map[string]func(v string) string{
+		"top": func(v string) string {
+			return `{"model":"pub","messages":[{"role":"user","content":"x"}],"bootstrap_host":` + v + `}`
+		},
+		"msg": func(v string) string { return `{"model":"pub","messages":[{"role":"user","content":"x","reasoning":` + v + `}]}` },
+		"tc": func(v string) string {
+			return `{"model":"pub","messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[` + v + `]}]}`
+		},
+	}
+	nests := map[string]func(d int) string{
+		"arr": func(d int) string { return strings.Repeat("[", d) + strings.Repeat("]", d) },
+		"obj": func(d int) string { return strings.Repeat(`{"a":`, d) + "0" + strings.Repeat("}", d) },
+		"mixed": func(d int) string {
+			return strings.Repeat(`[{"a":`, d/2) + "0" + strings.Repeat("}]", d/2)
+		},
+	}
+	f := map[string][]byte{}
+	for wn, w := range wraps {
+		for nn, n := range nests {
+			for _, d := range []int{9216, 9990} {
+				f[fmt.Sprintf("%s_%s_%d", wn, nn, d)] = []byte(w(n(d)))
+			}
+		}
+	}
+	names := make([]string, 0, len(f))
+	for k := range f {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names, f
+}
+
+// TestScanDepthReserveIsTheMeasuredOne is the relational pin of the scan's
+// booking per nesting level (hardening 7, S-H6-1): every deepest form
+// allocates at most what coverScan books for it (oai.ScanBooking: factor ×
+// body + base + ScanDepthStateBytes × depth), and the largest needs more
+// than ScanDepthStateBytes − 8 per level beyond factor × body + base — so the
+// pin tells 96 from 104 (the booking would be untrue) and 112 from 104 (it
+// would cost deep requests for nothing). The floor's term
+// (ScanDepthReserve) is the most the booking takes for the depth: the
+// depth's count saturates one past the decoder's limit.
+func TestScanDepthReserveIsTheMeasuredOne(t *testing.T) {
+	var largest float64
+	var largestForm string
+	names, forms := scanDepthForms()
+	for _, name := range names {
+		body := forms[name]
+		if !json.Valid(body) {
+			t.Fatalf("form %s is not valid JSON (the scan runs after the parse)", name)
+		}
+		depth := oai.JSONDepth(body)
+		alloc, raised := scanAlloc(backends.SensPublic, body)
+		if raised != backends.SensPublic {
+			t.Fatalf("form %s: the scan raised to %s (a form without a credential)", name, raised)
+		}
+		if want := oai.ScanBooking(body, depth); alloc > want {
+			t.Errorf("form %s, %d bytes, %d deep: the scan allocates %d bytes, the route books %d (%d × body + %d + %d × depth)",
+				name, len(body), depth, alloc, want, oai.ScanReserveFactor, oai.ScanReserveBase, oai.ScanDepthStateBytes)
+		}
+		if f := float64(alloc-oai.ScanReserveFactor*int64(len(body))-oai.ScanReserveBase) / float64(depth); f > largest {
+			largest, largestForm = f, name
+		}
+	}
+	t.Logf("FOLGEP scan depth: largest %.1f bytes per level beyond %d × body + %d (%s), booked %d", largest, oai.ScanReserveFactor, oai.ScanReserveBase, largestForm, oai.ScanDepthStateBytes)
+	if largest <= oai.ScanDepthStateBytes-8 {
+		t.Errorf("the largest form needs %.1f bytes per level (%s), the booking of %d per level is 8 more: measure again and lower it",
+			largest, largestForm, oai.ScanDepthStateBytes)
+	}
+	nest := []byte(strings.Repeat("[", 20000) + strings.Repeat("]", 20000))
+	if got := oai.ScanBooking(nil, oai.JSONDepth(nest)) - oai.ScanReserveBase; got != oai.ScanDepthReserve {
+		t.Errorf("the scan's booking takes at most %d bytes for the depth, ScanDepthReserve is %d", got, oai.ScanDepthReserve)
 	}
 }
 

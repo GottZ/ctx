@@ -1467,13 +1467,17 @@ const (
 	// moves the floor with it.
 	gatewayRequestReserve = oai.RequestReserveFactor + oai.ScanReserveFactor
 	// gatewayRequestFixed is the fixed rest of that request: the scan's
-	// oai.ScanReserveBase and the JSON check's nesting state at the
-	// decoder's depth limit, oai.JSONStateReserve, which the route books
-	// before the check on top of the request share wherever the share's
-	// rest is spent — by a body under 120 012 B, or by a rewritten message
-	// array at any cap (FOLGE-P hardening 5, B-2). It does not hold the
-	// upstream frame of a rewritten request (see V39 below).
-	gatewayRequestFixed = oai.ScanReserveBase + oai.JSONStateReserve
+	// oai.ScanReserveBase and its nesting state at the decoder's depth
+	// limit, oai.ScanDepthReserve, which the route books before the scan
+	// with the rest of the scan's booking (FOLGE-P hardening 7: at a body
+	// under 85 KiB the factor's share alone did not hold a deep body's
+	// scan), and the JSON check's nesting state at the same limit,
+	// oai.JSONStateReserve, which the route books before the check on top of
+	// the request share wherever the share's rest is spent — by a body under
+	// 120 012 B, or by a rewritten message array at any cap (hardening 5,
+	// B-2). It does not hold the upstream frame of a rewritten request (see
+	// V39 below).
+	gatewayRequestFixed = oai.ScanReserveBase + oai.ScanDepthReserve + oai.JSONStateReserve
 	// gatewayResponseCopies is the response share per capped unit (design/02
 	// §4.2.1): raw upstream body plus rewritten copy (non-stream), one frame
 	// raw plus rewritten (stream).
@@ -1506,40 +1510,48 @@ const (
 //   - gateway.request_deadline < 600 s: the SDKs' default timeout.
 //   - gateway.stream_commit_grace <= 50 s: under a typical proxy idle.
 //   - gateway.inflight_budget >= one request at every cap: 26 ×
-//     gateway.max_request_bytes + 64 KiB + 240 024 B (the request share of
-//     3 × the body plus the sensitivity scan's booking of 23 × the body +
-//     64 KiB, which a request to an alias below credentials takes before the
-//     scan runs — the configuration does not know the aliases' sensitivity,
-//     so the scan always counts; FOLGE-P H-8, Delta-Review 2 F-0; plus the
-//     JSON check's nesting state at the decoder's depth limit, 10 001 × 24 B,
-//     which the route books before the check — the deepest request at a cap
-//     up to 128 KiB got 503 at the old floor, hardening 5 B-2) plus the
+//     gateway.max_request_bytes + 64 KiB + 1 040 104 B + 240 024 B (the
+//     request share of 3 × the body plus the sensitivity scan's booking of
+//     23 × the body + 64 KiB + its nesting state at the decoder's depth
+//     limit, 10 001 × 104 B, which a request to an alias below credentials
+//     takes before the scan runs — the configuration does not know the
+//     aliases' sensitivity, so the scan always counts; FOLGE-P H-8,
+//     Delta-Review 2 F-0, hardening 7: a deep body under 85 KiB held up to
+//     891 000 B of scan the factor's share did not book; plus the JSON
+//     check's nesting state at the same limit, 10 001 × 24 B, which the
+//     route books before the check — the deepest request at a cap up to
+//     128 KiB got 503 at the floor without it, hardening 5 B-2) plus the
 //     largest response share — 2 × gateway.max_response_bytes, 2 ×
 //     gateway.max_stream_frame_bytes, or 4 B × gateway.embedding_max_floats
 //     plus 64 KiB (design/02 §4.2.1). A smaller budget could never serve such a
 //     request, and the client would read "overloaded, retry in 1 s" forever.
-//     The defaults need 216.29 MiB of their 256 MiB. What the floor promises
+//     The defaults need 217.28 MiB of their 256 MiB. What the floor promises
 //     is one attempt without failover and without a rewritten message array
 //     (Delta-Review 3 R3-4, Delta-Review 5 L-2). A rewritten request (a
 //     developer message, a dropped reasoning key) holds the body, the
 //     rewritten array and the upstream body at once, and the upstream body
 //     carries the frame of its backend row — the row's model name and
 //     parameters, which the configuration does not know and the schema
-//     does not bound. The nesting term leaves room for that frame unless the
-//     request is nested to the decoder's limit: the deepest such request at
-//     the cap gets 503 at a budget equal to the floor at every cap, 31 B
-//     short with a 12-byte backend model name, growing 1:1 with the name and
-//     the row's parameters (pinned by oai's
-//     TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame). Every further
+//     does not bound. The nesting terms leave room for that frame unless
+//     the request is nested to the decoder's limit; there, what is left is
+//     the one level past the limit both terms count (24 + 104 B) and the
+//     client body's own frame: the deepest such request at the cap is
+//     served at a budget equal to the floor while its row's upstream frame
+//     is at most 187 B (73 B to spare with a 12-byte backend model name,
+//     whose frame is 114 B) and gets 503 beyond, short by what the frame
+//     grows past that, 1:1 with the name and the row's parameters (pinned by
+//     oai's TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame: with a
+//     212-byte name 503 at the floor, 200 at the floor plus its frame). Every further
 //     attempt of the chain books one more upstream body (oai reserveUpstream,
 //     about the body + 160 B), which the floor does not hold — with one
 //     failover attempt such a request gets 503 at a budget equal to the
 //     floor. Without failover and without a rewritten message array it is
-//     conservative by up to 1 × the body: such
-//     a request at 1 MiB held 34 668 704 B, served from the floor − 1.000 ×
-//     the body on. The error names both ways out (gatewayCapWayOut).
-//     Stricter since FOLGE-P: budgets under 216.29 MiB at the 8 MiB cap and
-//     caps above 9 990 049 B at the default budget were valid before (see
+//     conservative by up to 1 × the body plus the nesting terms a flat
+//     request leaves unused: such a request at 1 MiB held 34 668 704 B and
+//     is served from the floor − 2 328 232 B on (1 × the body + 1 279 656 B,
+//     hardening 7). The error names both ways out (gatewayCapWayOut).
+//     Stricter since FOLGE-P: budgets under 217.28 MiB at the 8 MiB cap and
+//     caps above 9 950 045 B at the default budget were valid before (see
 //     docs/operations.md, the upgrade note).
 //   - gateway.retry_after_jitter in [0, 1] (float keys have no generic sign
 //     walk; NaN fails every comparison and is refused explicitly).
@@ -1602,8 +1614,8 @@ func validateGateway(c *Config) []Issue {
 		case need < 0:
 			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + %d + the largest response share) exceed any representable budget — lower gateway.max_request_bytes or the response caps", g.InflightBudget, gatewayRequestReserve, gatewayRequestFixed))
 		case int64(g.InflightBudget) < need:
-			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap: %d = %d × gateway.max_request_bytes + %d + the largest response share (%d), one attempt without failover and without a rewritten message array (one adds its backend row's upstream frame) — raise gateway.inflight_budget to >= %d%s. A request at the body cap to an alias below credentials could never be served: %d × its body + %d of it is the sensitivity scan's booking, which a request at credentials does not take, and %d the JSON check's nesting state at the decoder's depth limit",
-				g.InflightBudget, need, gatewayRequestReserve, gatewayRequestFixed, gatewayResponseShare(g), need, gatewayCapWayOut(g), oai.ScanReserveFactor, oai.ScanReserveBase, oai.JSONStateReserve))
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap: %d = %d × gateway.max_request_bytes + %d + the largest response share (%d), one attempt without failover and without a rewritten message array (one adds its backend row's upstream frame) — raise gateway.inflight_budget to >= %d%s. A request at the body cap to an alias below credentials could never be served: %d × its body + %d + %d (the scan's nesting state at the decoder's depth limit) of it is the sensitivity scan's booking, which a request at credentials does not take, and %d the JSON check's nesting state at the same limit",
+				g.InflightBudget, need, gatewayRequestReserve, gatewayRequestFixed, gatewayResponseShare(g), need, gatewayCapWayOut(g), oai.ScanReserveFactor, oai.ScanReserveBase, oai.ScanDepthReserve, oai.JSONStateReserve))
 		}
 	}
 	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {

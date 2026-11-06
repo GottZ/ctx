@@ -39,3 +39,13 @@ func ReservationHeld(r *Reservation) int64 {
 
 // BodyLogTextMax bounds the log row's text of a message array (hardening 6).
 const BodyLogTextMax = bodyLogTextMax
+
+// ScanBooking and JSONDepth expose what coverScan books for the scan of a
+// body and the depth it books it for (hardening 7: the scan's nesting state).
+var (
+	ScanBooking = scanBooking
+	JSONDepth   = jsonDepth
+)
+
+// ScanDepthStateBytes is the scan's booking per nesting level (hardening 7).
+const ScanDepthStateBytes = scanDepthStateBytes

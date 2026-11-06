@@ -2,8 +2,8 @@ package oai_test
 
 // Hardening 5, B-2 (Copilot on PR #155): the configuration's budget floor
 // (config/validate.go V39) promises one request at every cap. The route
-// books the JSON check's nesting state before it runs (chat.go
-// c.cover(jsonStateBytes(body))), up to the decoder's depth limit, on top of
+// books the JSON check's nesting state before it runs (chat.go serve,
+// jsonDepth × 24 B), up to the decoder's depth limit, on top of
 // the request share — a request at the cap with the deepest nesting the
 // route accepts, to an alias below credentials, must be served with the
 // budget exactly at the floor. Below a body of 120 012 B the request share's
@@ -25,9 +25,10 @@ import (
 // chatFloor is the floor of config/validate.go gatewayBudgetFloor for a
 // chat request (its largest response share is 2 × max_response_bytes here);
 // the red run against 22bfacae used it without oai.JSONStateReserve, the
-// floor as it was.
+// floor as it was, and the red run of hardening 7 without
+// oai.ScanDepthReserve (the scan's nesting state, booked before the scan).
 func chatFloor(maxRequest, maxResponse int64) int64 {
-	return (oai.RequestReserveFactor+oai.ScanReserveFactor)*maxRequest + oai.ScanReserveBase + oai.JSONStateReserve + 2*maxResponse
+	return (oai.RequestReserveFactor+oai.ScanReserveFactor)*maxRequest + oai.ScanReserveBase + oai.ScanDepthReserve + oai.JSONStateReserve + 2*maxResponse
 }
 
 // deepestBody is a body of exactly size bytes to model whose nesting is the
@@ -63,44 +64,59 @@ func TestDeepestRequestAtTheCapFitsTheFloor(t *testing.T) {
 }
 
 // TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame (hardening 6, P-5;
-// Delta-Review 5 L-2) holds what the floor's comment and docs say: the
-// floor does not hold the deepest request at the cap whose message array is
-// rewritten — 503 at a budget equal to the floor — and what it lacks is the
-// upstream frame of the backend row (the upstream body's bytes besides the
-// rewritten array): 200 at the floor plus that frame.
+// Delta-Review 5 L-2; hardening 7) holds what the floor's comment and docs
+// say: the floor does not hold the upstream frame of the backend row (the
+// upstream body's bytes besides the rewritten array) of the deepest request
+// at the cap whose message array is rewritten — beyond the little the floor
+// has to spare there: it counts both nesting states one level past the
+// decoder's limit (24 + 104 B), and the request is nested at most to it.
+// With the test row's 12-byte model name (frame 114 B) the request is served
+// at a budget equal to the floor (73 B to spare, TestFloorNeedOfTheDeepestForms);
+// with a 212-byte name (frame 314 B) it is 503 at the floor and 200 at the
+// floor plus that frame.
 func TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame(t *testing.T) {
 	const resp = 4 << 20
 	for _, maxRequest := range []int64{32 << 10, 128 << 10, 1 << 20, 8 << 20} {
-		t.Run(fmt.Sprintf("cap=%d", maxRequest), func(t *testing.T) {
-			u := newUpstream(t, answerSGLang)
-			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
-			body := deepestBody(int(maxRequest), "pub", "developer")
-			floor := chatFloor(maxRequest, resp)
-			post := func(budget int64) chatAnswer {
-				rig.setSettings(func(s *oai.Settings) {
-					s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = budget, maxRequest, resp
-				})
-				return rig.post(t, body)
-			}
-			if a := post(10 * floor); a.status != http.StatusOK {
-				t.Fatalf("budget 10 × floor: %d %s", a.status, a.body)
-			}
-			u.mu.Lock()
-			upstream := len(u.raws[len(u.raws)-1])
-			u.mu.Unlock()
-			// The rewritten array: the client's, "developer" → "system".
-			rewritten := len(body) - len(`{"model":"pub","messages":`) - len(`}`) - (len("developer") - len("system"))
-			frame := int64(upstream - rewritten)
-			a := post(floor)
-			code, _, _ := a.envelope(t)
-			if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded {
-				t.Errorf("budget = floor %d: %d %s, want 503 server_overloaded (the floor lacks the upstream frame)", floor, a.status, a.body)
-			}
-			if a := post(floor + frame); a.status != http.StatusOK {
-				t.Errorf("budget = floor %d + frame %d: %d %s, want 200", floor, frame, a.status, a.body)
-			}
-			t.Logf("FOLGEP floor developer cap=%d body=%d upstream=%d frame=%d floor=%d", maxRequest, len(body), upstream, frame, floor)
-		})
+		for _, pad := range []int{0, 200} {
+			t.Run(fmt.Sprintf("cap=%d/model_pad=%d", maxRequest, pad), func(t *testing.T) {
+				u := newUpstream(t, answerSGLang)
+				row := u.row("spark", backends.TrustFull, 10)
+				row.Model += strings.Repeat("M", pad)
+				rig := newChatRig(t, []backends.Backend{row}, 4, 1)
+				body := deepestBody(int(maxRequest), "pub", "developer")
+				floor := chatFloor(maxRequest, resp)
+				post := func(budget int64) chatAnswer {
+					rig.setSettings(func(s *oai.Settings) {
+						s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = budget, maxRequest, resp
+					})
+					return rig.post(t, body)
+				}
+				if a := post(10 * floor); a.status != http.StatusOK {
+					t.Fatalf("budget 10 × floor: %d %s", a.status, a.body)
+				}
+				u.mu.Lock()
+				upstream := len(u.raws[len(u.raws)-1])
+				u.mu.Unlock()
+				// The rewritten array: the client's, "developer" → "system".
+				rewritten := len(body) - len(`{"model":"pub","messages":`) - len(`}`) - (len("developer") - len("system"))
+				frame := int64(upstream - rewritten)
+				a := post(floor)
+				t.Logf("FOLGEP floor developer cap=%d model_pad=%d body=%d upstream=%d frame=%d floor=%d status=%d", maxRequest, pad, len(body), upstream, frame, floor, a.status)
+				if pad == 0 {
+					if a.status != http.StatusOK {
+						t.Errorf("budget = floor %d, frame %d: %d %s, want 200 (the floor's slack at the depth limit holds this frame)", floor, frame, a.status, a.body)
+					}
+					return
+				}
+				code, _, _ := a.envelope(t)
+				if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded {
+					t.Errorf("budget = floor %d, frame %d: %d %s, want 503 server_overloaded (the floor lacks the upstream frame)", floor, frame, a.status, a.body)
+				}
+				if a := post(floor + frame); a.status != http.StatusOK {
+					t.Errorf("budget = floor %d + frame %d: %d %s, want 200", floor, frame, a.status, a.body)
+				}
+			})
+		}
 	}
 }
 

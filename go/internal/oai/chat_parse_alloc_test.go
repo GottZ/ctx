@@ -187,6 +187,10 @@ type brokenReader struct{}
 
 func (brokenReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
+// jsonStateBytes is what the route books for the JSON check's nesting state
+// of raw (chat.go serve: jsonDepth × jsonDepthStateBytes, before the check).
+func jsonStateBytes(raw []byte) int64 { return jsonDepth(raw) * jsonDepthStateBytes }
+
 // TestJSONStateIsBooked (gate 1, the JSON check): jsonStateBytes counts the
 // deepest nesting outside strings, up to one past the decoder's limit, and
 // covers what json.Valid really allocates on a body that fails at the limit

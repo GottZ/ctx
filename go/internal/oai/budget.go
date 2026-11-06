@@ -63,21 +63,46 @@ const (
 	scanReserveBase   = 64 << 10
 )
 
+// scanDepthStateBytes is what the sensitivity scan allocates per nesting
+// level of the body beyond scanReserveFactor × the body + scanReserveBase
+// (FOLGE-P hardening 7, stop finding S-H6-1 of hardening 6): federation's
+// body walk keeps one frame per open container (stack []jsonFrame, grown by
+// append) and its json.Decoder the token state of each level, garbage of
+// every growth included — 132 bytes per array level and 188 per object
+// level at the decoder's limit, up to 143 and 201 at the depths where the
+// stacks have just grown (TotalAlloc of one scan call, pattern pools cold,
+// every third depth from 300 to 10 000, with and without GOMEMLIMIT=200MiB,
+// identical in three runs). The bracket bytes are body bytes the factor
+// books already (23 × 2 per array level, 23 × 6 per object level with a
+// one-byte key), so the level's own share is what is left: at most 96.7
+// bytes, a bare array at depth 9 216 (891 000 bytes the old booking did not
+// hold); objects at most 63.2, mixed nesting 69.8. A longer key, a scalar
+// beside each container or more members per level only add body bytes the
+// factor books with room to spare (bau report FOLGE-P §Härtung 7). 104 is
+// the next multiple of 8 above 96.7: 7.3 bytes per level (7.5 %) of margin,
+// more than ten times what the depth step of the measurement and the body
+// around the nesting move it (under 0.5). TestScanDepthReserveIsTheMeasuredOne fails when a
+// form needs more or when the largest needs 8 bytes per level less.
+const scanDepthStateBytes = 104
+
 // RequestReserveFactor, ScanReserveFactor and ScanReserveBase are the
 // constants above as the configuration's budget floor reads them (V39,
 // config/validate.go gatewayBudgetFloor: one request at every cap must fit
 // gateway.inflight_budget). config imports oai, never the reverse (depguard
 // config-layering), so the values are defined here once and read there.
 // JSONStateReserve is the most the chat route books for the JSON check's
-// nesting state before it runs (jsonStateBytes: one level past the
-// decoder's limit) — on top of the request share wherever the share's rest
-// is spent, by a small body or by a rewritten message array (hardening 5,
-// B-2), so the floor counts it at every cap.
+// nesting state before it runs (jsonDepth: one level past the decoder's
+// limit) — on top of the request share wherever the share's rest is spent,
+// by a small body or by a rewritten message array (hardening 5, B-2), so the
+// floor counts it at every cap. ScanDepthReserve is the most coverScan books
+// for the scan's nesting state (hardening 7) at the same depth: part of the
+// scan's booking, which the floor always counts.
 const (
 	RequestReserveFactor = requestReserveFactor
 	ScanReserveFactor    = scanReserveFactor
 	ScanReserveBase      = scanReserveBase
 	JSONStateReserve     = (jsonMaxDepth + 1) * jsonDepthStateBytes
+	ScanDepthReserve     = (jsonMaxDepth + 1) * scanDepthStateBytes
 )
 
 // ErrBudgetExhausted is the read error of a body without a declared length

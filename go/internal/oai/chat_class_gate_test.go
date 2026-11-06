@@ -333,6 +333,19 @@ func ClassGateBody(name string, size int) ([]byte, bool) {
 // CGModel is the alias name of the class-gate bodies.
 const CGModel = cgModel
 
+// ClassGateCombos are the gate's combination names "<table>.<key>:<form>",
+// every slot with every value form (the scan side, chat_class_gate_scan_test.go,
+// and the route side, TestClassGateOverTheRoute, run each of them).
+func ClassGateCombos() []string {
+	var out []string
+	for _, s := range cgSlots() {
+		for _, f := range cgForms {
+			out = append(out, s.name()+":"+f.name)
+		}
+	}
+	return out
+}
+
 // cgException is a combination whose allocation is fixed and small, named
 // with its measured upper bound (no silent tolerance): the gate allows it
 // at most that many bytes beyond the slack.
