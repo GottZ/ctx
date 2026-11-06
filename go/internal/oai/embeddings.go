@@ -563,29 +563,56 @@ type embedState struct {
 	last        failedAttempt
 	// unpaid are the wire calls of blocks that reported no usage (a failed
 	// block, an answer without usage), over every attempt: each one whose
-	// trace saw wire contact books its estimate (endAfterWire, Delta-Review 4
-	// F4-1).
+	// trace saw wire contact books the estimate of its inputs that no block
+	// with a usage served (endAfterWire, Delta-Review 4 F4-1 and 5).
 	unpaid []*blockWire
+	// paid marks the inputs a block with a usage served, on any row (nil
+	// until the first one): their usage is what they book, a failed try on
+	// a row the request failed over from books nothing for them.
+	paid []bool
 }
 
 // blockWire is one block's wire call as the meter sees it: contact is marked
 // from inside net/http by the block's own trace (wireContactTrace, beside the
-// request's c.wired); tokens is the meter's estimate of the block's inputs —
-// the function the reservation is booked with (inputEstimate,
-// embed_estimate.go).
+// request's c.wired); [lo, hi) are the block's inputs — a later row's blocks
+// can be cut differently, so the meter reads inputs, not block numbers.
 type blockWire struct {
 	contact atomic.Bool
-	tokens  int
+	lo, hi  int
 }
 
-// unpaidEstimate is Σ of the estimates of the blocks that met a backend and
-// reported no usage, saturated (usageTotal). A flag is read here, at the end
-// of the request: a hook that fires after EmbedRaw returned still counts.
-func (st *embedState) unpaidEstimate() int {
+// markPaid marks the inputs [lo, hi) of the request's n as served by a block
+// with a usage.
+func (st *embedState) markPaid(lo, hi, n int) {
+	if st.paid == nil {
+		st.paid = make([]bool, n)
+	}
+	for i := lo; i < hi; i++ {
+		st.paid[i] = true
+	}
+}
+
+// unpaidEstimate is Σ over the blocks that met a backend and reported no
+// usage of the meter's estimate of their inputs that no block with a usage
+// served (restEstimate), saturated (usageTotal) — each input at most once:
+// an input two rows had without a usage (a failover, then a later failure on
+// a row cut into other blocks) is counted by the first of those blocks. A
+// flag is read here, at the end of the request: a hook that fires after
+// EmbedRaw returned still counts.
+func (c *embedCall) unpaidEstimate(st *embedState) int {
 	sum := 0
+	var counted []bool // the paid inputs, then every input an estimate counted
 	for _, bw := range st.unpaid {
-		if bw.contact.Load() {
-			sum = usageTotal(sum, bw.tokens)
+		if !bw.contact.Load() {
+			continue
+		}
+		if counted == nil {
+			counted = make([]bool, len(c.req.inputs))
+			copy(counted, st.paid)
+		}
+		sum = usageTotal(sum, c.restEstimate(bw.lo, bw.hi, counted))
+		for i := bw.lo; i < bw.hi; i++ {
+			counted[i] = true
 		}
 	}
 	return sum
@@ -767,7 +794,7 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 	// every try of httpx.DoRetryOnce (wireContactTrace).
 	st.wires++
 	var conn atomic.Bool
-	bw := &blockWire{tokens: c.inputEstimate(lo, hi)}
+	bw := &blockWire{lo: lo, hi: hi}
 	tctx := httptrace.WithClientTrace(rc, wireContactTrace(&c.wired, &conn))
 	tctx = httptrace.WithClientTrace(tctx, wireContactTrace(&bw.contact, &conn))
 	wctx, cancel := context.WithTimeout(tctx, timeout)
@@ -781,10 +808,14 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 		c.wired.Store(true)
 		bw.contact.Store(true)
 	}
-	// A block without a usage — failed, or answered without one — books its
-	// estimate if it met a backend (endAfterWire).
+	// A block without a usage — failed, or answered without one — books the
+	// estimate of its inputs if it met a backend and no block with a usage
+	// served them by the end of the request (endAfterWire); a block with a
+	// usage marks its inputs paid.
 	if err != nil || promptTokens <= 0 {
 		st.unpaid = append(st.unpaid, bw)
+	} else {
+		st.markPaid(lo, hi, len(c.req.inputs))
 	}
 	if err != nil {
 		return dispatch.Usage{}, c.blockFailure(st, b, i, rc, err)
@@ -857,8 +888,13 @@ func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool
 // rule, W06-10 hardening H-7), else Settle with the usage the blocks
 // reported plus the estimate of every block that met a backend without
 // reporting one — the client gone during it, an upstream error, an answer
-// without usage: the chat route's rule per block (Delta-Review 4 F4-1).
-// The estimate never books more than Keep (meterEnd): a charge that reaches
+// without usage: the chat route's rule per block (Delta-Review 4 F4-1) —
+// counted over its inputs that no block with a usage served by the end of
+// the request (unpaidEstimate). A failover follows the chat route: inputs a
+// later row served with a usage book that usage once, the failed try on the
+// row the walk left books nothing for them, a block served only in part the
+// estimate of the rest (Delta-Review 5; the rows' blocks can be cut
+// differently, the inputs decide). The estimate never books more than Keep (meterEnd): a charge that reaches
 // what the reservation holds — the estimate of all inputs, at most the
 // bucket's capacity the admission reported (held) — ends with Keep, unless
 // the reported usage alone reaches it, which settles as reported
@@ -874,7 +910,7 @@ func (c *embedCall) endAfterWire(st *embedState) {
 		case usage.PromptTokens <= 0:
 			l.Keep()
 		default:
-			n, keep := meterEnd(usage.PromptTokens, st.unpaidEstimate(), c.held)
+			n, keep := meterEnd(usage.PromptTokens, c.unpaidEstimate(st), c.held)
 			if keep {
 				l.Keep()
 				return

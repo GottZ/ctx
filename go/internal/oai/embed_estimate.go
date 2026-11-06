@@ -13,12 +13,17 @@ import (
 // "gateway-embeddings") — it only borrows the rune→token ratio, as
 // embedRuneLimit does.
 
-// inputEstimate is the meter's estimate of the inputs [lo, hi): the token
-// estimate of their runes, as the reservation is the estimate of all runes.
-func (c *embedCall) inputEstimate(lo, hi int) int {
+// restEstimate is the meter's estimate of the inputs [lo, hi) that counted
+// (one flag per input of the request) does not mark — the token estimate of
+// their runes, as the reservation is the estimate of all runes
+// (Delta-Review 5: an input a block with a usage served books that usage,
+// not an estimate on top).
+func (c *embedCall) restEstimate(lo, hi int, counted []bool) int {
 	runes := 0
-	for _, n := range c.req.runes[lo:hi] {
-		runes += n
+	for i, n := range c.req.runes[lo:hi] {
+		if !counted[lo+i] {
+			runes += n
+		}
 	}
 	return promptguard.TokenEstimate(runes)
 }

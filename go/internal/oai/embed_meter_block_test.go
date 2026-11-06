@@ -28,6 +28,7 @@ import (
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/promptguard"
 )
 
 // postEmbedOverSocket posts body to the rig's route over a real socket (an
@@ -276,32 +277,159 @@ func TestEmbedMeterBlockWithoutUsageBooksItsEstimate(t *testing.T) {
 	}
 }
 
-// TestEmbedMeterFailoverAfterTheWireBooksTheFirstRowsBlock (F4-1, every wire
-// call of a block): emb1, eight inputs; the first row (prio 20) reads block
-// 1 and answers 503, the walker fails over to the second row, which serves
-// all eight blocks (two prompt tokens each). Block 1's wire call on the first
-// row met a backend without a usage: settle 16 + 5 = 21 (before the rule:
-// 16 — the first row's work went back in full).
-func TestEmbedMeterFailoverAfterTheWireBooksTheFirstRowsBlock(t *testing.T) {
-	first := newEmbedEngine(t, 8)  // prio 20: tried first
-	second := newEmbedEngine(t, 8) // prio 10: the failover row
-	first.setRespond(func(w http.ResponseWriter, _ *http.Request, _ int64, _ []string) bool {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, `{"error":{"message":"engine busy"}}`)
-		return true
+// failoverCase is one case of TestEmbedMeterFailoverBooksEachInputOnce: the
+// first row (prio 20) is an engine that refuses every block it reads; the
+// second (prio 10) is built by second (it reports two prompt tokens per
+// input); firstE, when set, is the first row's external capacity E (the
+// rig's is 3).
+type failoverCase struct {
+	name     string
+	model    string
+	inputs   []string
+	tpm      int64
+	refusal  int // the first row's answer: 503 (gateway) or 400 (the window, num_ctx 64 against 4096)
+	firstE   int
+	second   func(t *testing.T, cancel func(), inputs []string) (backends.Backend, func() int64)
+	status   int // 0: any failure
+	firstHit int64
+	hits     int64 // the second row's
+	end      string
+	want     int64
+}
+
+// servingEngine is a second row that serves every block; failAt > 0 makes
+// its block failAt answer 502 (gone: the client goes away while the engine
+// holds it).
+func servingEngine(failAt int64, gone bool) func(*testing.T, func(), []string) (backends.Backend, func() int64) {
+	return func(t *testing.T, cancel func(), _ []string) (backends.Backend, func() int64) {
+		e := newEmbedEngine(t, 8)
+		e.setRespond(func(w http.ResponseWriter, r *http.Request, n int64, _ []string) bool {
+			if n != failAt {
+				return false
+			}
+			if gone {
+				cancel()
+				<-r.Context().Done()
+				return true
+			}
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":{"message":"down"}}`)
+			return true
+		})
+		return e.row("serving", backends.ProtocolOpenAI, 10), e.hits.Load
+	}
+}
+
+// TestEmbedMeterFailoverBooksEachInputOnce (Delta-Review 5, the chat route's
+// failover rule): an input a later row served with a usage books that usage
+// once — the failed try on the row the walk left books nothing for it; an
+// input no block with a usage served by the end of the request books its
+// estimate once, also when only part of a block was served (the rows cut
+// the request into different blocks: the inputs decide, not the block
+// numbers). Engine two prompt tokens per input, 8 runes per input.
+//
+//   - emb1 ×8, 503 on block 1, the failover serves all: settle 16 (before 21)
+//   - emb ×6 (blocks of 3): 12 (before 26); emb ×3 (one block): 6 (before 14)
+//   - the first row refuses block 1 with a window 400 (num_ctx 64), the
+//     failover row (4096) serves, emb ×3: 6 (before 14) — a refusal the
+//     client can provoke
+//   - emb1 ×8, failover, then the failover row's block 2 answers 502 or the
+//     client goes away during it: 2 + 5 = 7 (before 12)
+//   - emb ×12, the first row cut into blocks of 6 (E 6) refuses block 1; the
+//     failover row (E 3) serves inputs 1–3, its block 2 (inputs 4–6) answers
+//     502: 6 + the estimate of inputs 4–6 once = 20 (before 47); the same with
+//     block 2's connect refused (no contact on the failover row): 6 + the
+//     first row's unserved rest = 20 (before 33)
+//   - TPM 100, emb ×3 of 100 runes (estimate 167 above the bucket), failover
+//     served: 6 (before 167)
+func TestEmbedMeterFailoverBooksEachInputOnce(t *testing.T) {
+	long := []string{strings.Repeat("a", 100), strings.Repeat("b", 100), strings.Repeat("c", 100)}
+	cases := []failoverCase{
+		{"emb1 x8, 503 in block 1, the failover serves", "emb1", embedInputs(8), 0, 503, 0, servingEngine(0, false), 200, 1, 8, "settle", 16},
+		{"emb x6 in blocks of 3, 503 in block 1, the failover serves", "emb", embedInputs(6), 0, 503, 0, servingEngine(0, false), 200, 1, 2, "settle", 12},
+		{"emb x3 in one block, 503, the failover serves", "emb", embedInputs(3), 0, 503, 0, servingEngine(0, false), 200, 1, 1, "settle", 6},
+		{"emb x3, a window 400 on the first row, the failover serves", "emb", embedInputs(3), 0, 400, 0, servingEngine(0, false), 200, 1, 1, "settle", 6},
+		{"emb1 x8, failover, its block 2 answers 502", "emb1", embedInputs(8), 0, 503, 0, servingEngine(2, false), 0, 1, 2, "settle", 2 + embedReservation(1)},
+		{"emb1 x8, failover, the client gone in its block 2", "emb1", embedInputs(8), 0, 503, 0, servingEngine(2, true), 0, 1, 2, "settle", 2 + embedReservation(1)},
+		{"emb x12, first row E 6, failover E 3 serves block 1, its block 2 answers 502", "emb", embedInputs(12), 0, 503, 6, servingEngine(2, false), 0, 1, 2, "settle", 6 + embedReservation(3)},
+		{"emb x12, first row E 6, failover E 3 serves block 1, its block 2 connect refused", "emb", embedInputs(12), 0, 503, 6, refusingAfterBlock1, 0, 1, 1, "settle", 6 + embedReservation(3)},
+		{"TPM 100, emb x3 of 100 runes above the bucket, 503, the failover serves", "emb", long, 100, 503, 0, servingEngine(0, false), 200, 1, 1, "settle", 6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			first := newEmbedEngine(t, 8)
+			var firstInputs atomic.Int64
+			first.setRespond(func(w http.ResponseWriter, _ *http.Request, _ int64, in []string) bool {
+				firstInputs.Store(int64(len(in)))
+				w.WriteHeader(tc.refusal)
+				if tc.refusal == http.StatusBadRequest {
+					_, _ = io.WriteString(w, `{"error":{"message":"input is too long for the context window","type":"invalid_request_error"}}`)
+					return true
+				}
+				_, _ = io.WriteString(w, `{"error":{"message":"engine busy"}}`)
+				return true
+			})
+			r1 := first.row("first", backends.ProtocolOpenAI, 20)
+			r2, hits := tc.second(t, cancel, tc.inputs)
+			if tc.refusal == http.StatusBadRequest {
+				r1.NumCtx, r2.NumCtx = 64, 4096
+			}
+			tpm := tc.tpm
+			if tpm == 0 {
+				tpm = 60_000_000
+			}
+			m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: tpm, CompletionReserve: 1024})
+			rig := newEmbedRig(t, []backends.Backend{r2, r1}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m }))
+			if tc.firstE > 0 {
+				rig.disp.UpdatePolicy(dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{
+					r1.Host: {Slots: tc.firstE + 1, InternalReserved: 1}, r2.Host: {Slots: 4, InternalReserved: 1},
+				}})
+			}
+			status, body, err := postEmbedAndWait(t, rig, ctx, embedBody(tc.model, tc.inputs))
+			ends, settled := m.endsOf(), m.settledNow()
+			t.Logf("%s: answer %d err=%v %.80s; hits first %d (%d inputs), failover %d; ends %s; settled %+v (want %s %d, reservation %d)",
+				tc.name, status, err, body, first.hits.Load(), firstInputs.Load(), hits(), ends, settled, tc.end, tc.want, embedReservationOf(tc.inputs))
+			if first.hits.Load() != tc.firstHit || hits() != tc.hits || (tc.status != 0 && status != tc.status) || (tc.status == 0 && status == http.StatusOK) {
+				t.Fatalf("answer %d, hits first %d failover %d — want %d/%d and status %d (0: a failure)", status, first.hits.Load(), hits(), tc.firstHit, tc.hits, tc.status)
+			}
+			if tc.firstE > 0 && firstInputs.Load() != int64(tc.firstE) {
+				t.Fatalf("the first row's block carried %d inputs, want %d — the rows must be cut differently", firstInputs.Load(), tc.firstE)
+			}
+			if ends != tc.end || len(settled) != 1 || int64(settled[0].PromptTokens) != tc.want {
+				t.Errorf("ends %q, settled %+v — want one %s of %d", ends, settled, tc.end, tc.want)
+			}
+		})
+	}
+}
+
+// refusingAfterBlock1 is a second row (raw backend, E 3) that serves block 1
+// and stops listening before its answer leaves: block 2's connect is refused,
+// no byte of it reaches a backend.
+func refusingAfterBlock1(t *testing.T, _ func(), inputs []string) (backends.Backend, func() int64) {
+	var served atomic.Int64
+	b := newRawBackend(t, func(b *rawBackend, c net.Conn, br *bufio.Reader, _ int64) {
+		in, ok := readEmbedInputs(br)
+		if !ok {
+			return
+		}
+		if in[0] == inputs[0] {
+			b.l.stop()
+		}
+		served.Add(1)
+		rawEmbedAnswer(c, in)
 	})
-	rig, m := embedMeterRig(t, second.row("spark1", backends.ProtocolOpenAI, 10), first.row("spark2", backends.ProtocolOpenAI, 20))
-	a := rig.postEmbed(t, embedBody("emb1", embedInputs(8)))
-	held, ends, settled := m.heldEmbed(t, rig), m.endsOf(), m.settledNow()
-	want := 16 + embedReservation(1)
-	t.Logf("first row 503 after the wire, failover served: answer %d; hits first %d, failover %d; ends %s; settled %+v; held %d (want settle %d, reservation %d)",
-		a.status, first.hits.Load(), second.hits.Load(), ends, settled, held, want, embedReservation(8))
-	if a.status != http.StatusOK || first.hits.Load() != 1 || second.hits.Load() != 8 {
-		t.Fatalf("answer %d %.200s, hits %d/%d — want 200 after one wire call on the first row and eight on the second", a.status, a.body, first.hits.Load(), second.hits.Load())
+	return embedWireRow("raw", b.host(), 10), served.Load
+}
+
+// embedReservationOf is the meter's estimate of inputs.
+func embedReservationOf(inputs []string) int64 {
+	runes := 0
+	for _, in := range inputs {
+		runes += len([]rune(in))
 	}
-	if ends != "settle" || held != want || len(settled) != 1 || int64(settled[0].PromptTokens) != want {
-		t.Errorf("ends %q, settled %+v, the bucket holds %d — want one Settle of %d", ends, settled, held, want)
-	}
+	return int64(promptguard.TokenEstimate(runes))
 }
 
 // TestEmbedMeterRateLimitHeadersBeforeTheFirstByte (Delta-Review 4 F4-8):
