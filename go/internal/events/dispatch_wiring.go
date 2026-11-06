@@ -64,6 +64,22 @@ func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 // are projected, including disabled ones: a disabled row's declared slots
 // still joins the K2 MIN merge on a shared origin (fail-closed toward the
 // protected good — a row flip must never silently widen a cap).
+//
+// External and SelfAdmitting are two predicates for two purposes (design/04
+// §4.14, W-11), and a ctx row is the case where they part:
+//   - External = external locality ∧ class ≠ ctx exempts the row from the
+//     Enforcing coverage term — only for targets that scale on their own and
+//     need none of this instance's order. A peer ctx instance serves us
+//     under one consumer with a concurrency limit of its own; without slots
+//     our background calls pass through and fill that limit until our
+//     interactive calls meet the peer's 429 (Finding 14). So a ctx row is
+//     never exempt, whatever its locality (F-W7): with a background role it
+//     needs a slots cap, or Enforcing stays off with a WARN.
+//   - SelfAdmitting = class ctx ∨ external locality is target kind P of the
+//     external offer (design/03 §3.2, A03-W3): the target admits on its own,
+//     its external opt-in is limits.external_offer.
+//
+// A ctx row is therefore kind P AND coverage-bound.
 func DispatchBackendRows(bs []backends.Backend) []dispatch.BackendRow {
 	rows := make([]dispatch.BackendRow, 0, len(bs))
 	for _, b := range bs {
@@ -74,7 +90,7 @@ func DispatchBackendRows(bs []backends.Backend) []dispatch.BackendRow {
 			ProviderClass: b.ProviderClass,
 			Limits:        b.Limits,
 			Roles:         b.Roles,
-			External:      b.Locality == backends.LocalityExternal,
+			External:      b.Locality == backends.LocalityExternal && b.ProviderClass != backends.ProviderCtx,
 			// Self-admitting (design/03 §3.2 kind P, A03-W3): a peer ctx
 			// instance or an external locality admits on its own — the
 			// external opt-in there is limits.external_offer.

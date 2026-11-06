@@ -6,6 +6,7 @@ import (
 	"math"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,6 +118,17 @@ func TestDispatchBackendRowsMapping(t *testing.T) {
 			Locality:      backends.LocalityLAN,
 			Enabled:       true,
 		},
+		{
+			// F-W7: a publicly routable peer ctx instance is self-admitting
+			// (kind P) and still never coverage-exempt (design/04 §4.14).
+			Name:          "peer-ctx-public",
+			Scope:         "_global",
+			Host:          "https://a.example.com",
+			ProviderClass: backends.ProviderCtx,
+			Locality:      backends.LocalityExternal,
+			Roles:         []string{"dream"},
+			Enabled:       true,
+		},
 	}
 	// The projection is the cross-wave seam: Roles/External feed the MW14
 	// Enforcing coverage term, ProviderClass feeds the MW18 external guard.
@@ -126,9 +138,116 @@ func TestDispatchBackendRowsMapping(t *testing.T) {
 		{Name: "herbert-chat", Scope: "_global", BaseURL: "http://HOST:8089/v1", ProviderClass: "llamacpp", Limits: map[string]any{"slots": float64(1)}, Roles: []string{"chat", "dream"}},
 		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com", ProviderClass: "openrouter", External: true, SelfAdmitting: true},
 		{Name: "peer-ctx", Scope: "_global", BaseURL: "http://peer:8077", ProviderClass: "ctx", SelfAdmitting: true},
+		{Name: "peer-ctx-public", Scope: "_global", BaseURL: "https://a.example.com", ProviderClass: "ctx", Roles: []string{"dream"}, External: false, SelfAdmitting: true},
 	}
 	if got := DispatchBackendRows(in); !reflect.DeepEqual(got, want) {
 		t.Fatalf("DispatchBackendRows = %+v, want %+v", got, want)
+	}
+}
+
+// warnRecord is one WARN-or-above record of warnRecorder: the message and
+// its attributes rendered as strings.
+type warnRecord struct {
+	msg   string
+	attrs map[string]string
+}
+
+// warnRecorder keeps every record at WARN or above — the coverage gate counts
+// ALL warnings of one derivation, not only the one it expects.
+type warnRecorder struct {
+	mu   sync.Mutex
+	recs []warnRecord
+}
+
+func (h *warnRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *warnRecorder) Handle(_ context.Context, r slog.Record) error {
+	if r.Level < slog.LevelWarn {
+		return nil
+	}
+	rec := warnRecord{msg: r.Message, attrs: map[string]string{}}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.recs = append(h.recs, rec)
+	h.mu.Unlock()
+	return nil
+}
+func (h *warnRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *warnRecorder) WithGroup(string) slog.Handler      { return h }
+
+func (h *warnRecorder) records() []warnRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]warnRecord(nil), h.recs...)
+}
+
+// TestCtxRowsNeverCoverageExempt pins F-W7 (design/04 §4.14, §7 F-W7 (a),
+// Finding 14) through the owner-side projection: a ctx row counts as LOCAL
+// for the Enforcing coverage term whatever its locality — B's own order
+// (interactive before background, the herald) must hold up to the peer's
+// door, so a ctx row reachable by a background role without a slots cap
+// keeps Enforcing off and WARNs once with its origin and roles. Only the
+// targets that scale themselves (generic, openrouter on an external
+// locality) stay exempt. The local llamacpp dream row with slots keeps the
+// policy non-empty, so Enforcing turns on the coverage term alone.
+func TestCtxRowsNeverCoverageExempt(t *testing.T) {
+	const peerURL = "https://a.example.com"
+	peerOrigin, err := dispatch.NormalizeOrigin(peerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := backends.Backend{
+		Name: "gpu-dream", Scope: dispatch.GlobalScope, Host: "http://gpu:8089",
+		ProviderClass: backends.ProviderLlamaCpp, Locality: backends.LocalityLocal,
+		Roles: []string{"dream"}, Limits: map[string]any{"slots": float64(1)}, Enabled: true,
+	}
+	peer := func(class, locality string, limits map[string]any) backends.Backend {
+		return backends.Backend{
+			Name: "peer-a", Scope: dispatch.GlobalScope, Host: peerURL,
+			ProviderClass: class, Locality: locality,
+			Roles: []string{"dream"}, Limits: limits, Enabled: true,
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		row           backends.Backend
+		wantEnforcing bool
+	}{
+		{"external ctx row without slots is not exempt", peer(backends.ProviderCtx, backends.LocalityExternal, nil), false},
+		{"external ctx row with slots is covered", peer(backends.ProviderCtx, backends.LocalityExternal, map[string]any{"slots": float64(4)}), true},
+		{"lan ctx row without slots is not exempt", peer(backends.ProviderCtx, backends.LocalityLAN, nil), false},
+		{"external generic row without slots stays exempt", peer(backends.ProviderGeneric, backends.LocalityExternal, nil), true},
+		{"external openrouter row without slots stays exempt", peer(backends.ProviderOpenRouter, backends.LocalityExternal, nil), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &warnRecorder{}
+			logger := slog.New(h)
+			d := dispatch.New(logger, dispatch.DefaultSettings())
+			t.Cleanup(d.Close)
+			d.UpdatePolicy(dispatch.DerivePolicy(DispatchBackendRows([]backends.Backend{local, tc.row}), logger))
+
+			if got := d.Enforcing(); got != tc.wantEnforcing {
+				t.Errorf("Enforcing() = %v, want %v", got, tc.wantEnforcing)
+			}
+			recs := h.records()
+			if tc.wantEnforcing {
+				if len(recs) != 0 {
+					t.Errorf("covered derivation logged %d warnings, want 0: %+v", len(recs), recs)
+				}
+				return
+			}
+			if len(recs) != 1 {
+				t.Fatalf("uncovered derivation logged %d warnings, want exactly 1: %+v", len(recs), recs)
+			}
+			w := recs[0]
+			t.Logf("WARN %s origin=%s roles=%s", w.msg, w.attrs["origin"], w.attrs["roles"])
+			if !strings.Contains(w.msg, "background-reachable local target without slots cap") ||
+				w.attrs["origin"] != peerOrigin || w.attrs["roles"] != "dream" {
+				t.Errorf("warning = %+v, want the coverage WARN with origin=%s roles=dream", w, peerOrigin)
+			}
+		})
 	}
 }
 
