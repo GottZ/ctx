@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -66,6 +67,31 @@ var doneLine = []byte("data: [DONE]\n\n")
 // cancellation, never as a health fault of a healthy row (Fremd-Review 1
 // F-3 of W02-07).
 var errClientGone = fmt.Errorf("oai: the client stopped receiving the stream: %w", context.Canceled)
+
+// errTimerPanic is the writer's failure once its timer caught a panic: every
+// later write fails, the run ends like after a failed write, and the route
+// raises the panic again on the handler's goroutine (rethrow).
+var errTimerPanic = fmt.Errorf("oai: the stream timer panicked: %w", context.Canceled)
+
+// timerPanic is a panic of the stream's timer goroutine, raised again on the
+// handler's (rethrow) so that it reaches oai.Recover like a panic of the
+// handler (Delta-Review 4 F4-2): the value and the timer's stack — the one
+// oai.Recover logs is the handler's.
+type timerPanic struct {
+	value any
+	stack []byte
+}
+
+func (p *timerPanic) Error() string {
+	return fmt.Sprintf("oai: the stream timer panicked: %v\n%s", p.value, p.stack)
+}
+
+// Unwrap keeps errors.Is on an error value: a timer that panicked with
+// http.ErrAbortHandler stays an abort for oai.Recover.
+func (p *timerPanic) Unwrap() error {
+	err, _ := p.value.(error)
+	return err
+}
 
 // commitDistance is the distance in use; tests shorten it
 // (export_stream_test.go) so a phase B runs in milliseconds.
@@ -131,8 +157,9 @@ type streamWriter struct {
 
 	mu        sync.Mutex
 	state     streamState
-	frozen    bool  // the route owns the outcome: the timer writes nothing more
-	err       error // the first failed write
+	frozen    bool        // the route owns the outcome: the timer writes nothing more
+	err       error       // the first failed write
+	panicked  *timerPanic // a panic the timer caught, for rethrow
 	timer     *time.Timer
 	last      time.Time // the last write
 	frames    int       // data frames written
@@ -160,12 +187,30 @@ func (s *streamWriter) arm(at time.Time) {
 // tick is the timer: the grace commit (status, headers, a keepalive), then
 // a keepalive after keepalive_interval of silence.
 func (s *streamWriter) tick() {
-	s.mu.Lock()
-	if s.frozen || s.err != nil || s.state == streamEnded {
-		s.mu.Unlock()
-		return
+	if err := s.tickLocked(); err != nil {
+		s.broken(err)
 	}
-	var err error
+}
+
+// tickLocked is tick's section under mu. Every section of the writer
+// releases mu by defer, also when a writer of the chain or the header
+// source panics inside it (Delta-Review 4 F4-2): the route's close() takes
+// mu to freeze the writer. The timer's goroutine has no oai.Recover, so a
+// panic here is caught: kept for rethrow (the handler raises it again after
+// freeze, oai.Recover answers it), the writer failed with errTimerPanic and
+// the run ended like after a failed write (tick calls broken).
+func (s *streamWriter) tickLocked() (err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer func() {
+		if v := recover(); v != nil {
+			s.panicked = &timerPanic{value: v, stack: debug.Stack()}
+			s.err, err = errTimerPanic, errTimerPanic
+		}
+	}()
+	if s.frozen || s.err != nil || s.state == streamEnded {
+		return nil
+	}
 	switch {
 	case s.state == streamOpen:
 		if err = s.commitLocked(); err == nil {
@@ -181,47 +226,54 @@ func (s *streamWriter) tick() {
 		}
 		s.timer.Reset(next)
 	}
-	s.mu.Unlock()
-	if err != nil {
-		s.broken(err)
-	}
+	return err
 }
 
 // frame writes one data frame (committing first in phase B). A failed write
 // ends the run (D4) and comes back as errClientGone for the relay.
 func (s *streamWriter) frame(chunk []byte) error {
-	s.mu.Lock()
-	if s.err != nil {
-		s.mu.Unlock()
-		return errClientGone
-	}
-	var err error
-	commit := s.state == streamOpen
-	if commit {
-		err = s.commitLocked()
-	}
-	if err == nil {
-		line := make([]byte, 0, len(chunk)+8)
-		line = append(append(append(line, "data: "...), chunk...), "\n\n"...)
-		err = s.writeLocked(line)
-	}
-	if err == nil {
-		if s.frames == 0 {
-			s.first = s.last
-		}
-		s.frames++
-		if commit && s.timer != nil && !s.frozen && s.keepalive > 0 {
-			// Committed by this frame, before entry + grace: the keepalive
-			// counts from this frame, not from the grace (Fremd-Review 2 L-2).
-			s.timer.Reset(s.keepalive)
-		}
-	}
-	s.mu.Unlock()
+	gone, err := s.frameLocked(chunk)
 	if err != nil {
 		s.broken(err)
 		return errClientGone
 	}
+	if gone {
+		return errClientGone
+	}
 	return nil
+}
+
+// frameLocked is frame's section under mu, released by defer: a panic of a
+// writer of the chain (Write, Flush, WriteHeader) or of the header source
+// runs on, on the handler's goroutine, to the route's close() — which takes
+// mu — and to oai.Recover (F4-2). gone: an earlier write had failed.
+func (s *streamWriter) frameLocked(chunk []byte) (gone bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return true, nil
+	}
+	commit := s.state == streamOpen
+	if commit {
+		if err = s.commitLocked(); err != nil {
+			return false, err
+		}
+	}
+	line := make([]byte, 0, len(chunk)+8)
+	line = append(append(append(line, "data: "...), chunk...), "\n\n"...)
+	if err = s.writeLocked(line); err != nil {
+		return false, err
+	}
+	if s.frames == 0 {
+		s.first = s.last
+	}
+	s.frames++
+	if commit && s.timer != nil && !s.frozen && s.keepalive > 0 {
+		// Committed by this frame, before entry + grace: the keepalive
+		// counts from this frame, not from the grace (Fremd-Review 2 L-2).
+		s.timer.Reset(s.keepalive)
+	}
+	return false, nil
 }
 
 // freeze hands the outcome to the route: the timer writes nothing more.
@@ -234,6 +286,20 @@ func (s *streamWriter) freeze() (committed bool) {
 		s.timer.Stop()
 	}
 	return s.state != streamOpen
+}
+
+// rethrow raises a panic the timer caught on the calling goroutine — the
+// handler's, after freeze — so that it reaches oai.Recover like a panic of
+// the handler and the route's close() ends the reservation (F4-2). Without
+// one it does nothing.
+func (s *streamWriter) rethrow() {
+	s.mu.Lock()
+	p := s.panicked
+	s.panicked = nil
+	s.mu.Unlock()
+	if p != nil {
+		panic(p)
+	}
 }
 
 // committed reports whether the status is out.

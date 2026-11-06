@@ -9,15 +9,23 @@ package oai_test
 import (
 	"bufio"
 	"context"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"runtime"
+	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/promptguard"
 )
@@ -210,4 +218,199 @@ func TestStreamMeterCutEstimateNeverAboveKeep(t *testing.T) {
 			}
 		})
 	}
+}
+
+// F4-2 (Delta-Review 4): a panic while the stream writer holds its mutex — a
+// writer of the chain in the relay's write on the handler's goroutine, the
+// header source in the grace commit on the timer's — must not leave the
+// mutex held: the route's close() freezes the writer under it.
+
+// relayPanicWriter panics on the n-th data frame written through it.
+type relayPanicWriter struct {
+	http.ResponseWriter
+	n     int
+	count *atomic.Int64
+}
+
+func (p relayPanicWriter) Write(b []byte) (int, error) {
+	if strings.HasPrefix(string(b), "data: {") && int(p.count.Add(1)) == p.n {
+		panic("hardening 3: panic in the relay's write")
+	}
+	return p.ResponseWriter.Write(b)
+}
+
+func (p relayPanicWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
+
+// tickPanicMeter is the rig's endMeter whose reservations' header source
+// panics when the stream's timer goroutine reads it (the grace commit).
+type tickPanicMeter struct{ *endMeter }
+
+func (m tickPanicMeter) Admit(ctx context.Context, ca *auth.ConsumerAuth, a modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
+	res, ref := m.endMeter.Admit(ctx, ca, a, est)
+	if res == nil {
+		return nil, ref
+	}
+	return tickPanicReservation{res}, nil
+}
+
+type tickPanicReservation struct{ oai.LimitReservation }
+
+func (r tickPanicReservation) Headers() http.Header {
+	if strings.Contains(string(debug.Stack()), "(*streamWriter).tick") {
+		panic("hardening 3: the header source panics at the grace commit")
+	}
+	return r.LimitReservation.Headers()
+}
+
+// writerGoroutines counts the goroutines inside a method of the stream
+// writer — a handler or a timer waiting on its mutex.
+func writerGoroutines() int {
+	buf := make([]byte, 1<<22)
+	buf = buf[:runtime.Stack(buf, true)]
+	n := 0
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "oai.(*streamWriter)") {
+			n++
+		}
+	}
+	return n
+}
+
+// serveUnwaited serves h on a plain server whose cleanup closes the listener
+// without waiting for handlers: a hung handler fails the gate instead of
+// hanging the test binary.
+func serveUnwaited(t *testing.T, h http.Handler) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = hs.Serve(ln) }()
+	t.Cleanup(func() { _ = ln.Close() })
+	return "http://" + ln.Addr().String()
+}
+
+// recovered reports whether oai.Recover logged a recovered panic whose error
+// names want.
+func recovered(sink *logSink, want string) bool {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for _, r := range sink.recs {
+		if r.Message != "gateway: panic recovered" {
+			continue
+		}
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "error" && strings.Contains(fmt.Sprint(a.Value.Any()), want) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// TestStreamPanicUnderTheWriterLock is F4-2 (Delta-Review 4): the handler
+// returns within 6 s, the panic reaches oai.Recover (its log names it), the
+// reservation keeps its charge (the backend had the request), the lease and
+// the in-flight budget are free and no goroutine is left in the writer.
+//
+//   - the relay's write panics at the second frame (handler goroutine): red
+//     before — close() blocks on the mutex the panicking frame held, the
+//     reservation never ends, 2 MiB of in-flight budget stay held;
+//   - the header source panics at the grace commit (timer goroutine, before
+//     the status): red before — the timer's panic is unrecovered and ends
+//     the process. Now the timer catches it, ends the run, and the handler
+//     raises it again after freeze: the client gets oai.Recover's 503
+//     internal_error.
+func TestStreamPanicUnderTheWriterLock(t *testing.T) {
+	check := func(t *testing.T, rig *chatRig, m *endMeter, host string, returned <-chan struct{}, sink *logSink, want string) {
+		t.Helper()
+		select {
+		case <-returned:
+		case <-time.After(6 * time.Second):
+			lease, _ := heldOn(rig.disp, host)
+			t.Fatalf("the handler did not return within 6 s: ends %q, lease %d, in-flight budget %d, writer goroutines %d",
+				m.endsOf(), lease, rig.budget.InUse(), writerGoroutines())
+		}
+		if !waitEnded(m) {
+			t.Fatal("the reservation never ended")
+		}
+		budgetFree := waitFor(2*time.Second, func() bool { return rig.budget.InUse() == 0 })
+		leaseFree := waitHeld(rig.disp, host, 0, 2*time.Second)
+		noWriter := waitFor(2*time.Second, func() bool { return writerGoroutines() == 0 })
+		held := m.held(t, rig)
+		t.Logf("%s: ends %s, the bucket holds %d tokens; in-flight budget %d, lease free %v, writer goroutines %d; oai.Recover logged it %v",
+			want, m.endsOf(), held, rig.budget.InUse(), leaseFree, writerGoroutines(), recovered(sink, want))
+		if m.endsOf() != "keep" || held != wireReservation {
+			t.Errorf("ends %s, the bucket holds %d tokens — want Keep of %d (a panic after wire contact)", m.endsOf(), held, wireReservation)
+		}
+		if !budgetFree || !leaseFree || !noWriter {
+			t.Errorf("in-flight budget %d, lease free %v, writer goroutines %d — want 0, true, 0", rig.budget.InUse(), leaseFree, writerGoroutines())
+		}
+		if !recovered(sink, want) {
+			t.Errorf("oai.Recover logged no recovered panic naming %q", want)
+		}
+	}
+	t.Run("the relay's write panics at the second frame", func(t *testing.T) {
+		sink := captureLog(t)
+		u := newUpstream(t, "")
+		u.setRespond(sseRespond([]sseStep{{data: sglangChunk("a", "")}, {data: sglangChunk("b", "")}, {data: sglangChunk("c", "stop")}, {data: "[DONE]"}}, nil, nil))
+		rig, m := streamMeterRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
+		var count atomic.Int64
+		returned := make(chan struct{})
+		url := serveUnwaited(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer close(returned)
+			defer func() { _ = recover() }()
+			rig.router.ServeHTTP(relayPanicWriter{ResponseWriter: w, n: 2, count: &count}, r)
+		}))
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		answer := make(chan streamAnswer, 1)
+		go func() { answer <- postStream(ctx, t, &httptest.Server{URL: url}, streamBody("chat")) }()
+		check(t, rig, m, u.srv.URL, returned, sink, "panic in the relay's write")
+		select {
+		case a := <-answer:
+			if a.status != http.StatusOK || a.readErr == nil {
+				t.Errorf("answer %d, read error %v — want the committed stream cut (no clean end)", a.status, a.readErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("the client's read did not end")
+		}
+	})
+	t.Run("the header source panics at the grace commit", func(t *testing.T) {
+		fastPhaseB(t, 200*time.Millisecond)
+		sink := captureLog(t)
+		hold := make(chan struct{})
+		defer close(hold)
+		u := newUpstream(t, "")
+		u.setRespond(sseRespond([]sseStep{{hold: hold}}, nil, nil))
+		m := newEndMeter()
+		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings,
+			withWait(100*time.Millisecond), withStream(0, 10*time.Second, 5*time.Second),
+			withDeps(func(d *oai.Deps) { d.Limiter = tickPanicMeter{m} }))
+		returned := make(chan struct{})
+		url := serveUnwaited(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer close(returned)
+			rig.router.ServeHTTP(w, r)
+		}))
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		answer := make(chan streamAnswer, 1)
+		go func() { answer <- postStream(ctx, t, &httptest.Server{URL: url}, streamBody("chat")) }()
+		check(t, rig, m, u.srv.URL, returned, sink, "the header source panics at the grace commit")
+		select {
+		case a := <-answer:
+			if a.status != http.StatusServiceUnavailable || !strings.Contains(a.raw, `"internal_error"`) {
+				t.Errorf("answer %d %q — want oai.Recover's 503 internal_error (the panic came before the status)", a.status, a.raw)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("the client got no answer")
+		}
+	})
 }

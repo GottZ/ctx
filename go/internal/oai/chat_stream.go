@@ -144,6 +144,11 @@ func (c *chatCall) streamTokens(st *walkState) {
 // stopped reading is aborted (the connection closed, never a clean end).
 func (c *chatCall) answerStream(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState) {
 	committed := c.sse.freeze()
+	// A panic the timer caught (a writer of the chain or the header source
+	// in its commit or keepalive) runs on here, on the handler's goroutine:
+	// close() ends the reservation (Keep after wire contact), oai.Recover
+	// answers it (Delta-Review 4 F4-2).
+	c.sse.rethrow()
 	c.streamTokens(st)
 	c.leaseStats(st)
 	c.rec.PromptTokens, c.rec.CompletionTokens, c.rec.Usage = st.tokens.PromptTokens, st.tokens.CompletionTokens, st.usageKind
