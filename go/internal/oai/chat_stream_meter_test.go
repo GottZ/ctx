@@ -72,7 +72,7 @@ func postStreamTraced(t *testing.T, rig *chatRig, trace *httptrace.ClientTrace) 
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	rig.router.ServeHTTP(w, req)
-	return chatAnswer{status: w.Code, header: w.Header(), body: w.Body.Bytes()}
+	return chatAnswer{status: w.Code, header: w.Result().Header, body: w.Body.Bytes()}
 }
 
 // TestStreamMeterReadThenResetKeeps (F4-1 for the stream): the backend reads

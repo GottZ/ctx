@@ -475,7 +475,10 @@ func (a chatAnswer) envelope(t testing.TB) (code, param, typ string) {
 	return deref(e.Error.Code), deref(e.Error.Param), e.Error.Type
 }
 
-// post sends body to the route; hdr are extra request headers.
+// post sends body to the route; hdr are extra request headers. The
+// answer's header is the recorder's snapshot at the status (Result), what
+// a client receives: a header set after WriteHeader is not in it
+// (Delta-Review 4 F4-6 — the live map would show it).
 func (r *chatRig) post(t testing.TB, body string, hdr ...string) chatAnswer {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -485,7 +488,7 @@ func (r *chatRig) post(t testing.TB, body string, hdr ...string) chatAnswer {
 	}
 	w := httptest.NewRecorder()
 	r.router.ServeHTTP(w, req)
-	return chatAnswer{status: w.Code, header: w.Header(), body: w.Body.Bytes()}
+	return chatAnswer{status: w.Code, header: w.Result().Header, body: w.Body.Bytes()}
 }
 
 // chatBody is a minimal valid request for model.

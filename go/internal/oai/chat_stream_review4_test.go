@@ -10,10 +10,12 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -413,4 +415,98 @@ func TestStreamPanicUnderTheWriterLock(t *testing.T) {
 			t.Error("the client got no answer")
 		}
 	})
+}
+
+// F4-5 (Delta-Review 4): the stream half of the wire trace — the retry of
+// httpx.DoRetryOnce and the failover to a second row both report wire
+// contact into the stream's reservation, and the context rule of
+// wireContext (done) runs for the stream's wire call.
+
+// TestStreamMeterRetriesReachTheTrace: a stream whose first try reached no
+// backend books what its next try streamed (usage 11 + 3 by Settle), never a
+// refund by Abort.
+//
+//   - DoRetryOnce's retry after a reset TLS handshake (h2, no request byte in
+//     the first try) — red: O10 (the retry's context hides the trace), T3
+//     (the trace marks only the first dial);
+//   - the failover to a second row after a refused connect (a second
+//     attempt, a second wireContext) — red: R5 (the trace only on the
+//     request's first wire call).
+func TestStreamMeterRetriesReachTheTrace(t *testing.T) {
+	t.Run("DoRetryOnce after a reset handshake (h2)", func(t *testing.T) {
+		rl := &resetFirst{Listener: newHeldListener(t)}
+		var hits atomic.Int64
+		steps := sseRespond(streamShapes[0].steps(), nil, nil)
+		url := serveH2(t, rl, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			_, _ = io.ReadAll(r.Body)
+			steps(w, r)
+		}))
+		rig, m := streamMeterRig(t, []backends.Backend{wireRow("flaky", url, 10)}, 4, 1)
+		a := postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
+		if !waitEnded(m) {
+			t.Fatal("the reservation never ended")
+		}
+		held := m.held(t, rig)
+		t.Logf("stream, handshake reset, retry served: answer %d, [DONE] %d; accepted %d, handler hits %d; ends %s; the bucket holds %d tokens",
+			a.status, a.dones(), rl.n.Load(), hits.Load(), m.endsOf(), held)
+		if a.status != http.StatusOK || a.dones() != 1 || rl.n.Load() != 2 || hits.Load() != 1 {
+			t.Fatalf("answer %d, [DONE] %d, accepted %d, hits %d — want the retry's whole stream", a.status, a.dones(), rl.n.Load(), hits.Load())
+		}
+		if held != 14 || m.endsOf() != "settle" {
+			t.Errorf("the bucket holds %d tokens (ends %s), want the retry's usage 14 by Settle", held, m.endsOf())
+		}
+	})
+	t.Run("failover after a refused connect", func(t *testing.T) {
+		u := newUpstream(t, "")
+		u.setRespond(sseRespond(streamShapes[0].steps(), nil, nil))
+		rig, m := streamMeterRig(t, []backends.Backend{wireRow("refused", "http://"+refusedAddr(t), 20), u.row("two", backends.TrustFull, 10)}, 4, 1)
+		a := postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
+		if !waitEnded(m) {
+			t.Fatal("the reservation never ended")
+		}
+		held := m.held(t, rig)
+		t.Logf("stream, first row refused, second row streams: answer %d, [DONE] %d; second row hits %d; ends %s; the bucket holds %d tokens",
+			a.status, a.dones(), u.hits.Load(), m.endsOf(), held)
+		if a.status != http.StatusOK || a.dones() != 1 || u.hits.Load() != 1 {
+			t.Fatalf("answer %d, [DONE] %d, second row hits %d — want the second row's whole stream", a.status, a.dones(), u.hits.Load())
+		}
+		if held != 14 || m.endsOf() != "settle" {
+			t.Errorf("the bucket holds %d tokens (ends %s), want the second row's usage 14 by Settle", held, m.endsOf())
+		}
+	})
+}
+
+// TestStreamMeterDeadlineWithAConnectionKeeps is the context rule for the
+// stream (wireContext's done; TestMeterWireHTTP2 pins it non-stream): an
+// HTTP/2 stream whose attempt deadline ends while it holds a connection,
+// before its HEADERS frame is written — net/http's HTTP/2 client returns on
+// the context without waiting for the stream's writer, which may still
+// write — keeps its reservation. Red: O8 (done never called in the stream:
+// Abort), O9 (the rule removed).
+func TestStreamMeterDeadlineWithAConnectionKeeps(t *testing.T) {
+	var hits atomic.Int64
+	url := serveH2(t, newHeldListener(t), http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	rig, m := streamMeterRig(t, []backends.Backend{noTimeouts(wireRow("h2slow", url, 10))}, 4, 1)
+	shortAttempts(rig)
+	pt := &h2Trace{}
+	stall := pt.trace()
+	record := stall.GotConn
+	stall.GotConn = func(i httptrace.GotConnInfo) {
+		record(i)
+		time.Sleep(400 * time.Millisecond)
+	}
+	a := postStreamTraced(t, rig, stall)
+	if !waitEnded(m) {
+		t.Fatal("the reservation never ended")
+	}
+	held := m.held(t, rig)
+	t.Logf("h2 stream, deadline before the headers: answer %d; connections %s; handler hits %d; ends %s; the bucket holds %d tokens",
+		a.status, pt, hits.Load(), m.endsOf(), held)
+	if pt.String() != "h2" || hits.Load() != 0 {
+		t.Fatalf("connections %q, handler hits %d — want one h2 connection and no request", pt, hits.Load())
+	}
+	if held != wireReservation || m.endsOf() != "keep" {
+		t.Errorf("the bucket holds %d tokens (ends %s), want the reservation %d kept (the writer may still write)", held, m.endsOf(), wireReservation)
+	}
 }

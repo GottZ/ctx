@@ -433,7 +433,7 @@ func chDirect(t *testing.T, h http.Handler, ca *auth.ConsumerAuth, method, path,
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	return chatAnswer{status: w.Code, header: w.Header(), body: w.Body.Bytes()}
+	return chatAnswer{status: w.Code, header: w.Result().Header, body: w.Body.Bytes()}
 }
 
 // G14: an invariant broken behind the door — a knowledge AuthResult, no
