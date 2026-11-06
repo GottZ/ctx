@@ -8,7 +8,8 @@ package oai
 // The forms are the reviewer's (many keys, long keys sharing a decoded
 // prefix of 1 KiB, as escapes and as plain bytes, on the top level and on a
 // message) plus every other level that holds a key window (a part, an
-// image_url, a hull, logit_bias).
+// image_url, a hull, logit_bias), and long keys of literal UTF-8 with two-,
+// three- and four-byte runes (Delta-Review 2 F-3).
 
 import (
 	"fmt"
@@ -17,9 +18,12 @@ import (
 )
 
 // parseCPURatioMax bounds the parse cost against the base parse per form.
-// Measured on the forms below (bau report FOLGE-P §Härtung H-6): 0.1–1.2
-// after H-6 at 256 KiB and at 8 MiB; before it, up to 10 (long escaped
-// keys: each key was compared in full against the sixteen of the window).
+// Measured on the forms below (bau report FOLGE-P §Härtung H-6, §Härtung 2):
+// at most 0.75 on keys of ASCII and escapes after H-6, at 256 KiB and at
+// 8 MiB — before it up to 10 (long escaped keys: each key was compared in
+// full against the sixteen of the window); on keys of literal UTF-8 2.4–2.6
+// after H-6 (rune by rune through the byte decoder) and 0.82–0.98 after
+// hardening 2 (runs of valid UTF-8 copied and compared at once).
 const parseCPURatioMax = 2
 
 // escU is the JSON escape of r (built at run time: the source holds no
@@ -50,6 +54,12 @@ func cpuForms(size int) []cpuForm {
 	short := func(i int) string { return fmt.Sprintf("k%07d", i) }
 	esc := func(i int) string { return fmt.Sprintf("%s%07d", escPrefix, 9999999-i) }
 	plain := func(i int) string { return fmt.Sprintf("%s%07d", plainPrefix, 9999999-i) }
+	// Delta-Review 2 F-3: long keys sharing a literal UTF-8 prefix of about
+	// 1 KiB — two-, three- and four-byte runes.
+	utf8Key := func(r rune, n int) func(i int) string {
+		p := strings.Repeat(string(r), n)
+		return func(i int) string { return fmt.Sprintf("%s%07d", p, 9999999-i) }
+	}
 	lbKeys := func() []byte {
 		// logit_bias at its cap (64): every key repeat is searched among
 		// all of them, the keys long and alike.
@@ -85,6 +95,9 @@ func cpuForms(size int) []cpuForm {
 		{"top_unknown_keys", fill(msg, `}`, short), def},
 		{"top_escaped_long_keys", fill(msg, `}`, esc), def},
 		{"top_plain_long_keys", fill(msg, `}`, plain), def},
+		{"top_utf8_2byte_long_keys", fill(msg, `}`, utf8Key(0xe9, 512)), def},    // é
+		{"top_utf8_3byte_long_keys", fill(msg, `}`, utf8Key(0x4e2d, 342)), def},  // 中
+		{"top_utf8_4byte_long_keys", fill(msg, `}`, utf8Key(0x1f600, 256)), def}, // 😀
 		{"message_escaped_long_keys", fill(`{"model":"chat","messages":[{"role":"user","content":"x"`, `}]}`, esc), def},
 		{"part_escaped_long_keys", fill(`{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x"`, `}]}]}`, esc), def},
 		{"image_escaped_long_keys", fill(img, `}}]}]}`, esc), vis},

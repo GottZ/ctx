@@ -5,8 +5,10 @@ package oai
 // the byte-wise decoder and encoding/json.
 
 import (
+	"bytes"
 	"encoding/json"
 	"hash/maphash"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -38,7 +40,11 @@ func TestNeedsDecodeIsTheByteLoop(t *testing.T) {
 }
 
 // strDecoderReadSeeds are JSON string contents for the read pins: plain
-// runs, every escape form, surrogate pairs and lone halves, invalid UTF-8.
+// runs, every escape form, surrogate pairs and lone halves, invalid UTF-8;
+// runs of literal UTF-8 across the digest's 128-byte buffer, broken by an
+// invalid byte or cut at the end (Delta-Review 2 F-3), and a backslash
+// before a non-ASCII byte — outside a valid string's content, where read
+// gave the raw byte and next U+0080…U+00FF (Delta-Review 2 F-6).
 func strDecoderReadSeeds() []string {
 	return []string{
 		"", "a", strings.Repeat("plain ", 40),
@@ -46,6 +52,10 @@ func strDecoderReadSeeds() []string {
 		escU(0xd83d) + escU(0xde00) + "x" + escU(0xd800) + "y" + escU(0xdc00) + escU(0xd800) + escU(0xd800) + escU(0xdc00),
 		"\xff\xfe" + "é€😀" + "\xe2\x82" + "z" + "\xc3",
 		strings.Repeat(escU('a'), 300) + strings.Repeat("é", 70),
+		strings.Repeat("中", 50) + "x" + strings.Repeat("😀", 40) + escU(0xe9) + strings.Repeat("é", 63),
+		strings.Repeat("é", 64) + "\xff" + strings.Repeat("😀", 33) + "\xed\xa0\x80" + "€" + "\xe2\x82",
+		strings.Repeat("a", 127) + "😀" + strings.Repeat("b", 126) + "中\\é",
+		"\\\x80", "a\\\xc3\xa9", "\\\xff" + strings.Repeat("é", 70),
 	}
 }
 
@@ -57,18 +67,88 @@ func TestStrDecoderReadIsNext(t *testing.T) {
 	}
 }
 
-// FuzzStrDecoderRead is TestStrDecoderReadIsNext under the fuzzer (inputs
-// json.Valid accepts as a string).
+// FuzzStrDecoderRead is TestStrDecoderReadIsNext under the fuzzer, on every
+// input: read is next byte for byte also outside a valid string's content
+// (Delta-Review 2 F-6); encoding/json is the reference where it accepts the
+// string.
 func FuzzStrDecoderRead(f *testing.F) {
 	for _, s := range strDecoderReadSeeds() {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		if !json.Valid([]byte(`"` + string(raw) + `"`)) {
-			return
-		}
 		checkStrDecoderRead(t, raw)
 	})
+}
+
+// decodeAll is next's decoding of raw from byte i on.
+func decodeAll(raw []byte, i int) []byte {
+	var out []byte
+	d := strDecoder{raw: raw, i: i}
+	for c, ok := d.next(); ok; c, ok = d.next() {
+		out = append(out, c)
+	}
+	return out
+}
+
+// checkSameTokens pins sameTokens and cmpKeys on the pair a, b (contents of
+// valid strings): the prefix sameTokens skips decodes alike in both and is a
+// start a decoder of either may take (prefix + rest from there = the whole
+// decoding), cmpKeys is the order of the decoded keys, and equal decoded
+// keys have equal digests.
+func checkSameTokens(t *testing.T, a, b []byte) {
+	t.Helper()
+	da, db := decodeAll(a, 0), decodeAll(b, 0)
+	if got, want := cmpKeys(a, b), bytes.Compare(da, db); (got < 0) != (want < 0) || (got > 0) != (want > 0) {
+		t.Fatalf("cmpKeys(%q, %q) = %d, the decoded order %d", a, b, got, want)
+	}
+	i := sameTokens(a, b)
+	if i < 0 || i > min(len(a), len(b)) {
+		t.Fatalf("sameTokens(%q, %q) = %d, out of range", a, b, i)
+	}
+	pa, pb := decodeAll(a[:i], 0), decodeAll(b[:i], 0)
+	if !bytes.Equal(pa, pb) {
+		t.Fatalf("sameTokens(%q, %q) = %d: the prefixes decode apart, %q and %q", a, b, i, pa, pb)
+	}
+	if !bytes.Equal(append(pa, decodeAll(a, i)...), da) || !bytes.Equal(append(pb, decodeAll(b, i)...), db) {
+		t.Fatalf("sameTokens(%q, %q) = %d is no start a decoder may take", a, b, i)
+	}
+	if bytes.Equal(da, db) && digestKey(a) != digestKey(b) {
+		t.Fatalf("equal keys %q and %q, different digests", a, b)
+	}
+}
+
+// TestSameTokensIsAStart is checkSameTokens on the read seeds, each against
+// the others, its halves joined with them and itself extended by them.
+func TestSameTokensIsAStart(t *testing.T) {
+	seeds := strDecoderReadSeeds()
+	for i, s := range seeds {
+		for _, o := range seeds[i:] {
+			fuzzSameTokens(t, []byte(s), []byte(o))
+		}
+	}
+}
+
+// FuzzSameTokensIsAStart is TestSameTokensIsAStart under the fuzzer (contents
+// json.Valid accepts as strings: sameTokens' contract).
+func FuzzSameTokensIsAStart(f *testing.F) {
+	seeds := strDecoderReadSeeds()
+	for i, s := range seeds {
+		f.Add([]byte(s), []byte(seeds[(i+3)%len(seeds)]))
+	}
+	f.Fuzz(fuzzSameTokens)
+}
+
+func fuzzSameTokens(t *testing.T, a, other []byte) {
+	valid := func(b []byte) bool { return json.Valid(append(append([]byte{'"'}, b...), '"')) }
+	if len(a) > 4096 || len(other) > 4096 || !valid(a) || !valid(other) {
+		return
+	}
+	for _, b := range [][]byte{other, append(slices.Clone(a[:len(a)/2]), other...), append(slices.Clone(a), other...)} {
+		if valid(b) {
+			checkSameTokens(t, a, b)
+			checkSameTokens(t, b, a)
+		}
+	}
 }
 
 func checkStrDecoderRead(t *testing.T, raw []byte) {

@@ -7,8 +7,11 @@ package oai
 // race detector weighs the byte-wise decoder far more than encoding/json —
 // at most 1.66 against the base under -race on a quiet host, 2.2–2.6 under
 // a host load of 9–15 in 4 of the runs of -count=200 (bau report) — while
-// without it the parse stays at 0.75 or less. Every plain `go test` runs it,
-// the CI in its integration job (no -race) on every push and pull request.
+// without it the parse stays at 0.75 or less on keys of ASCII and escapes,
+// at 0.82–0.98 on keys of literal UTF-8 (2.4–2.6 before hardening 2, which
+// copies and compares runs of valid UTF-8 at once; Delta-Review 2 F-3). Every
+// plain `go test` runs it, the CI in its integration job (no -race) on every
+// push and pull request.
 //
 // Not under coverage (Delta-Review 2 F-2): the nightly and the dispatched
 // integration job run with -covermode=atomic, which instruments this
