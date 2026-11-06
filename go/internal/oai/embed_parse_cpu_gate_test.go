@@ -11,8 +11,12 @@ package oai
 // hardening 2) would have reached this parse through the same cmpKeys
 // (FOLGE-P Fremd-Review 3 §10). Every form stays within its bound against the
 // parse before the port, and the prefix forms grow linearly with the body.
+// A form over a bound is measured again like the chat parse's (gateForm,
+// cpuPasses; FOLGE-P Delta-Review 4 R4-1): the gate fails only when every
+// pass exceeds, each repeat is logged, the bounds stay.
 
 import (
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -24,11 +28,14 @@ func TestEmbedParseCPUAgainstTheBase(t *testing.T) {
 		if d := embedOutcomeDiff(f.body); d != "" {
 			t.Fatalf("form %s: the parses answer differently: %s", f.name, d)
 		}
-		ratio, mn, mb := embedCPURatio(f.body, 7)
-		t.Logf("W0209 cpu form=%s bytes=%d answer=%s new=%v base=%v ratio=%.2f", f.name, len(f.body), embedOutcomeOf(parseEmbedTop(f.body)), mn, mb, ratio)
-		if ratio > f.bound() {
-			t.Errorf("form %s: the parse takes %v, %.1f × the base parse's %v (at most %g ×)", f.name, mn, ratio, mb, f.bound())
-		}
+		gateForm(t, f.name, func(pass int) []string {
+			ratio, mn, mb := embedCPURatio(f.body, 7)
+			t.Logf("W0209 cpu form=%s bytes=%d answer=%s new=%v base=%v ratio=%.2f pass=%d", f.name, len(f.body), embedOutcomeOf(parseEmbedTop(f.body)), mn, mb, ratio, pass)
+			if ratio > f.bound() {
+				return []string{fmt.Sprintf("the parse takes %v, %.2f × the base parse's %v (at most %g ×)", mn, ratio, mb, f.bound())}
+			}
+			return nil
+		})
 	}
 }
 
@@ -40,26 +47,30 @@ func TestEmbedParseCPUIsLinearInASharedPrefix(t *testing.T) {
 		if d := embedOutcomeDiff(l.body); d != "" {
 			t.Fatalf("form %s: the parses answer differently: %s", l.name, d)
 		}
-		minS, minL, minB := time.Duration(1<<62), time.Duration(1<<62), time.Duration(1<<62)
-		for range 7 {
-			runtime.GC()
-			t0 := time.Now()
-			_, _ = parseEmbedTop(s.body)
-			minS = min(minS, time.Since(t0))
-			t0 = time.Now()
-			_, _ = parseEmbedTop(l.body)
-			minL = min(minL, time.Since(t0))
-			t0 = time.Now()
-			_, _ = baseEmbedTop(l.body)
-			minB = min(minB, time.Since(t0))
-		}
-		growth, ratio := float64(minL)/float64(max(minS, 1)), float64(minL)/float64(max(minB, 1))
-		t.Logf("W0209 cpu prefix form=%s bytes=%d/%d answer=%s new=%v/%v growth=%.2f base=%v ratio=%.2f", l.name, len(s.body), len(l.body), embedOutcomeOf(parseEmbedTop(l.body)), minS, minL, growth, minB, ratio)
-		if growth > cpuGrowthMax {
-			t.Errorf("form %s: the parse takes %v at %d B and %v at %d B, %.1f × for 4 × the body (at most %d ×: the cost is not linear)", l.name, minS, len(s.body), minL, len(l.body), growth, cpuGrowthMax)
-		}
-		if ratio > l.bound() {
-			t.Errorf("form %s: the parse takes %v, %.1f × the base parse's %v (at most %g ×)", l.name, minL, ratio, minB, l.bound())
-		}
+		gateForm(t, l.name, func(pass int) []string {
+			minS, minL, minB := time.Duration(1<<62), time.Duration(1<<62), time.Duration(1<<62)
+			for range 7 {
+				runtime.GC()
+				t0 := time.Now()
+				_, _ = parseEmbedTop(s.body)
+				minS = min(minS, time.Since(t0))
+				t0 = time.Now()
+				_, _ = parseEmbedTop(l.body)
+				minL = min(minL, time.Since(t0))
+				t0 = time.Now()
+				_, _ = baseEmbedTop(l.body)
+				minB = min(minB, time.Since(t0))
+			}
+			growth, ratio := float64(minL)/float64(max(minS, 1)), float64(minL)/float64(max(minB, 1))
+			t.Logf("W0209 cpu prefix form=%s bytes=%d/%d answer=%s new=%v/%v growth=%.2f base=%v ratio=%.2f pass=%d", l.name, len(s.body), len(l.body), embedOutcomeOf(parseEmbedTop(l.body)), minS, minL, growth, minB, ratio, pass)
+			var over []string
+			if growth > cpuGrowthMax {
+				over = append(over, fmt.Sprintf("the parse takes %v at %d B and %v at %d B, %.2f × for 4 × the body (at most %d ×: the cost is not linear)", minS, len(s.body), minL, len(l.body), growth, cpuGrowthMax))
+			}
+			if ratio > l.bound() {
+				over = append(over, fmt.Sprintf("the parse takes %v, %.2f × the base parse's %v (at most %g ×)", minL, ratio, minB, l.bound()))
+			}
+			return over
+		})
 	}
 }
