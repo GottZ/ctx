@@ -22,9 +22,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/keyquota"
+	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -369,20 +371,29 @@ func TestEmbedMeterRetryAfterAFailedHandshakeSettles(t *testing.T) {
 	}
 }
 
-// TestEmbedMeterBlockEstimateStopsAtTheReservation (F4-1, settleCharge):
-// emb1, eight blocks, block 8 answers 502 after seven served blocks that
-// report more tokens than the estimate (reservation 36, block estimate 5).
-// Five tokens each ⇒ 35 + 5 = 40 > 36: the estimate lifts the charge only
-// to the reservation, settle 36. Six each ⇒ the reported 42 is above the
-// reservation already: booked as reported, settle 42, no estimate on top.
+// TestEmbedMeterBlockEstimateStopsAtTheReservation (F4-1, Delta-Review 5
+// F5-1): emb1, eight blocks, block 8 answers 502 after seven served blocks
+// (reservation 36, block estimate 5). Five tokens each ⇒ 35 + 5 = 40 ≥ 36
+// while the reported 35 is below it: the reservation ends with Keep, the
+// bucket keeps 36 — never a Settle of more than it holds. 25 + six × 1 = 31
+// ⇒ 31 + 5 = 36 reaches it exactly: keep as well. Six each ⇒ the reported
+// 42 is above the reservation already: booked as reported, settle 42, no
+// estimate on top.
 func TestEmbedMeterBlockEstimateStopsAtTheReservation(t *testing.T) {
 	cases := []struct {
 		name     string
-		perBlock int
+		perBlock func(n int64) int
+		end      string
 		want     int64
 	}{
-		{"served 35, estimate up to the reservation", 5, embedReservation(8)},
-		{"served 42 above the reservation", 6, 42},
+		{"served 35, estimate past the reservation", func(int64) int { return 5 }, "keep", embedReservation(8)},
+		{"served 31, estimate up to the reservation", func(n int64) int {
+			if n == 1 {
+				return 25
+			}
+			return 1
+		}, "keep", embedReservation(8)},
+		{"served 42 above the reservation", func(int64) int { return 6 }, "settle", 42},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -394,18 +405,153 @@ func TestEmbedMeterBlockEstimateStopsAtTheReservation(t *testing.T) {
 					return true
 				}
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, embedAnswerUsage(inputs, 8, tc.perBlock))
+				_, _ = io.WriteString(w, embedAnswerUsage(inputs, 8, tc.perBlock(n)))
 				return true
 			})
 			rig, m := embedMeterRig(t, e.row("spark-embed", backends.ProtocolOpenAI, 10))
 			a := rig.postEmbed(t, embedBody("emb1", embedInputs(8)))
 			held, ends, settled := m.heldEmbed(t, rig), m.endsOf(), m.settledNow()
-			t.Logf("%s: answer %d; hits %d; ends %s; settled %+v; held %d (want settle %d, reservation %d)", tc.name, a.status, e.hits.Load(), ends, settled, held, tc.want, embedReservation(8))
+			t.Logf("%s: answer %d; hits %d; ends %s; settled %+v; held %d (want %s %d, reservation %d)", tc.name, a.status, e.hits.Load(), ends, settled, held, tc.end, tc.want, embedReservation(8))
 			if a.status == http.StatusOK || e.hits.Load() != 8 {
 				t.Fatalf("answer %d, hits %d — want block 8 to fail after seven served", a.status, e.hits.Load())
 			}
-			if ends != "settle" || held != tc.want || len(settled) != 1 || int64(settled[0].PromptTokens) != tc.want {
-				t.Errorf("ends %q, settled %+v, the bucket holds %d — want one Settle of %d", ends, settled, held, tc.want)
+			if ends != tc.end || held != tc.want {
+				t.Errorf("ends %q, the bucket holds %d — want %s %d", ends, held, tc.end, tc.want)
+			}
+			switch {
+			case tc.end == "settle" && (len(settled) != 1 || int64(settled[0].PromptTokens) != tc.want):
+				t.Errorf("settled %+v, want one Settle of %d", settled, tc.want)
+			case tc.end == "keep" && len(settled) != 0:
+				t.Errorf("settled %+v, want none — the reservation keeps its charge", settled)
+			}
+		})
+	}
+}
+
+// capacityHidden is the rig's real meter behind a limiter whose admission
+// reports no bucket capacity (no x-ratelimit-limit-tokens).
+type capacityHidden struct{ *embedMeter }
+
+func (m capacityHidden) Admit(ctx context.Context, ca *auth.ConsumerAuth, a modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
+	res, ref := m.embedMeter.Admit(ctx, ca, a, est)
+	if res == nil {
+		return nil, ref
+	}
+	return capacityHiddenReservation{res}, nil
+}
+
+type capacityHiddenReservation struct{ oai.LimitReservation }
+
+func (r capacityHiddenReservation) Headers() http.Header {
+	h := r.LimitReservation.Headers()
+	h.Del("x-ratelimit-limit-tokens")
+	return h
+}
+
+// nextEmbedAdmission is one zero-token admission of the rig's consumer under
+// op embed (it counts a request): refused exactly when the token bucket holds
+// more than its capacity — debt the next request waits off.
+func (m *embedMeter) nextEmbedAdmission(rig *chatRig) keyquota.Decision {
+	ca := *rig.ca.Load()
+	_, d := m.m.Admit(keyquota.Subject{ConsumerID: ca.ConsumerID, TenantID: ca.TenantID, Op: keyquota.OpEmbed}, m.lim, keyquota.Estimate{ClientMax: true})
+	return d
+}
+
+// postEmbedAndWait is postEmbedOverSocket that returns only after the route's
+// handler returned (httptest.Server.Close waits for it): the reservation has
+// ended, also behind a client that went away.
+func postEmbedAndWait(t *testing.T, rig *chatRig, ctx context.Context, body string) (int, string, error) {
+	t.Helper()
+	srv := httptest.NewServer(rig.router)
+	defer srv.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/v1/embeddings", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	srv.Close() // idempotent; the deferred one covers the error path
+	return resp.StatusCode, string(b), nil
+}
+
+// TestEmbedMeterEstimateNeverAboveKeep (Delta-Review 5 F5-1): the estimate
+// of the blocks that met a backend without a usage never charges more than
+// the reservation holds — the estimate of all inputs, at most the bucket's
+// capacity the admission reports (keyquota charges a reservation above it at
+// the capacity, B-06-28). TPM 100, emb1, inputs of 8 and 800 runes: estimate
+// 449 (block 2: 445), charged 100. Block 1 reports u tokens, the client goes
+// away while the engine holds block `gone`. u + 445 ≥ 100 with u below it ⇒
+// keep: the bucket keeps 100 and the next admission passes (before: settle
+// 447 and 3 min 28 s of debt). A reported usage above the reservation (300)
+// is booked as reported. A limiter that reports no capacity leaves the
+// estimate as the ceiling: 2 + 445 = 447 < 449 settles 447 (named); 4 + 445
+// = 449 reaches it ⇒ keep, and the bucket keeps what the admission charged
+// (100) — a Settle of the ceiling would book 449.
+func TestEmbedMeterEstimateNeverAboveKeep(t *testing.T) {
+	inputs := []string{"text 000", strings.Repeat("x", 800)}
+	cases := []struct {
+		name   string
+		gone   int64
+		u      int
+		hidden bool
+		end    string
+		want   int64 // the one Settle, or what the bucket keeps
+		next   bool  // a zero-token admission right after passes
+	}{
+		{"client gone in block 1", 1, 2, false, "keep", 100, true},
+		{"client gone in block 2 after 2 reported", 2, 2, false, "keep", 100, true},
+		{"block 1 reports 300 above the reservation, gone in block 2", 2, 300, false, "settle", 300, false},
+		{"no capacity reported, 2 + 445 below the estimate", 2, 2, true, "settle", 447, false},
+		{"no capacity reported, 4 + 445 reaches the estimate", 2, 4, true, "keep", 100, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEmbedEngine(t, 8)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			e.setRespond(func(w http.ResponseWriter, r *http.Request, n int64, in []string) bool {
+				if n == tc.gone {
+					cancel()
+					<-r.Context().Done()
+					return true
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, embedAnswerUsage(in, 8, tc.u))
+				return true
+			})
+			m := newEmbedMeter(keyquota.Limits{RPM: 1000, TPM: 100, CompletionReserve: 1024})
+			var lim oai.Limiter = m
+			if tc.hidden {
+				lim = capacityHidden{m}
+			}
+			rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = lim }))
+			status, body, err := postEmbedAndWait(t, rig, ctx, embedBody("emb1", inputs))
+			ends, settled := m.endsOf(), m.settledNow()
+			next := m.nextEmbedAdmission(rig)
+			t.Logf("%s: answer %d err=%v %.80s; engine hits %d; ends %s; settled %+v; next admission allowed %v retry-after %v remaining %d (want %s %d, next %v)",
+				tc.name, status, err, body, e.hits.Load(), ends, settled, next.Allowed, next.RetryAfter, next.Headers.RemainingTokens, tc.end, tc.want, tc.next)
+			if e.hits.Load() != tc.gone {
+				t.Fatalf("engine hits %d — want the client gone during block %d", e.hits.Load(), tc.gone)
+			}
+			if ends != tc.end {
+				t.Errorf("ends %q, want %s", ends, tc.end)
+			}
+			switch {
+			case tc.end == "settle" && (len(settled) != 1 || int64(settled[0].PromptTokens) != tc.want):
+				t.Errorf("settled %+v, want one Settle of %d", settled, tc.want)
+			case tc.end == "keep" && len(settled) != 0:
+				t.Errorf("settled %+v, want none — the reservation keeps its charge", settled)
+			}
+			if next.Allowed != tc.next {
+				t.Errorf("the next admission allowed %v (retry-after %v), want %v", next.Allowed, next.RetryAfter, tc.next)
+			}
+			if tc.next && m.lim.TPM-next.Headers.RemainingTokens != tc.want {
+				t.Errorf("the bucket holds %d, want %d", m.lim.TPM-next.Headers.RemainingTokens, tc.want)
 			}
 		})
 	}

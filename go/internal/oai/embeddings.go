@@ -179,6 +179,9 @@ type embedCall struct {
 	decoding int64 // the decode transient's share (one block at a time)
 	limit    LimitReservation
 	limitEnd bool
+	// held is what the reservation holds — the tokens Keep books
+	// (reservedTokens), the ceiling of a block estimate's charge (meterEnd).
+	held int
 	// wired: a byte of the request can have reached a backend in some try
 	// of some block (wireContactTrace) — set from inside net/http, on its
 	// transport goroutines. Without it the reservation goes back in full
@@ -529,6 +532,7 @@ func (c *embedCall) admitLimiter() bool {
 		return false
 	}
 	c.limit = res
+	c.held = c.reservedTokens(res.Headers())
 	return true
 }
 
@@ -587,16 +591,22 @@ func (st *embedState) unpaidEstimate() int {
 	return sum
 }
 
-// settleCharge is the prompt tokens a request whose blocks reported a usage
-// settles with: that usage, plus the estimate of its blocks that met a
-// backend without one (F4-1). The estimate lifts the charge at most to the
-// reservation — what Keep would have held; a reported usage above the
-// reservation is booked as reported. The sum saturates (usageTotal).
-func settleCharge(usage, estimate, reservation int) int {
-	if estimate <= 0 || usage >= reservation {
-		return usage
+// meterEnd is how a request whose blocks reported a usage ends its
+// reservation: Settle with that usage plus the estimate of its blocks that
+// met a backend without one (F4-1), while the sum (saturated, usageTotal)
+// stays below held — what the reservation holds; at or above it Keep, which
+// books exactly that (Delta-Review 5 F5-1: the estimate never charges more
+// than Keep, also when the estimate of all inputs is above the bucket's
+// capacity). A reported usage at or above held is booked as reported, with
+// no estimate on top.
+func meterEnd(usage, estimate, held int) (settle int, keep bool) {
+	if estimate <= 0 || usage >= held {
+		return usage, false
 	}
-	return min(usageTotal(usage, estimate), reservation)
+	if charge := usageTotal(usage, estimate); charge < held {
+		return charge, false
+	}
+	return 0, true
 }
 
 // walk runs the planner and the chain walk, then answers.
@@ -847,10 +857,13 @@ func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool
 // rule, W06-10 hardening H-7), else Settle with the usage the blocks
 // reported plus the estimate of every block that met a backend without
 // reporting one — the client gone during it, an upstream error, an answer
-// without usage — up to the reservation (settleCharge): the chat route's
-// rule per block (Delta-Review 4 F4-1). A block that reached no backend
-// books nothing; the blocks after a failed one never reached one (the
-// sticky stop).
+// without usage: the chat route's rule per block (Delta-Review 4 F4-1).
+// The estimate never books more than Keep (meterEnd): a charge that reaches
+// what the reservation holds — the estimate of all inputs, at most the
+// bucket's capacity the admission reported (held) — ends with Keep, unless
+// the reported usage alone reaches it, which settles as reported
+// (Delta-Review 5 F5-1). A block that reached no backend books nothing; the
+// blocks after a failed one never reached one (the sticky stop).
 func (c *embedCall) endAfterWire(st *embedState) {
 	wired := c.wired.Load()
 	usage := st.usage
@@ -861,7 +874,12 @@ func (c *embedCall) endAfterWire(st *embedState) {
 		case usage.PromptTokens <= 0:
 			l.Keep()
 		default:
-			usage.PromptTokens = settleCharge(usage.PromptTokens, st.unpaidEstimate(), c.reservedTokens())
+			n, keep := meterEnd(usage.PromptTokens, st.unpaidEstimate(), c.held)
+			if keep {
+				l.Keep()
+				return
+			}
+			usage.PromptTokens = n
 			l.Settle(usage)
 		}
 	})
