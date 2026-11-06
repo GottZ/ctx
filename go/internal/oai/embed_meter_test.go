@@ -211,8 +211,8 @@ func TestEmbedMeterHTTP2DeadlineWithAConnectionKeeps(t *testing.T) {
 	row := embedWireRow("h2slow", url, 10)
 	row.Timeouts = nil
 	rig, m := embedMeterRig(t, row)
-	const attempt = time.Second
-	rig.setSettings(func(s *oai.Settings) { s.RequestTimeout = attempt })
+	const attemptDeadline = time.Second
+	rig.setSettings(func(s *oai.Settings) { s.RequestTimeout = attemptDeadline })
 	pt := &h2Trace{}
 	stall := pt.trace()
 	record := stall.GotConn
@@ -220,7 +220,7 @@ func TestEmbedMeterHTTP2DeadlineWithAConnectionKeeps(t *testing.T) {
 	stall.GetConn = func(string) { start.CompareAndSwap(0, time.Now().UnixNano()) }
 	stall.GotConn = func(i httptrace.GotConnInfo) {
 		record(i)
-		time.Sleep(time.Until(time.Unix(0, start.Load()).Add(attempt + 200*time.Millisecond)))
+		time.Sleep(time.Until(time.Unix(0, start.Load()).Add(attemptDeadline + 200*time.Millisecond)))
 	}
 	a := postEmbedCtx(t, rig, httptrace.WithClientTrace(context.Background(), stall), embedBody("emb1", embedInputs(1)))
 	held := m.heldEmbed(t, rig)
