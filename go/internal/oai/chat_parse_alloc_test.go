@@ -102,6 +102,10 @@ func allocForms(size int) []allocForm {
 		{"response_format.type huge, invalid UTF-8", rfType("\xff"), rfcap, 0},
 		{"response_format.type huge, lone surrogates", rfType(`\ud800`), rfcap, 0},
 		{"response_format.type huge", rfType("a"), rfcap, 0},
+		// stream is compared with its two literals (hardening 6, P-2): a
+		// decode into a bool walked a nested value and held its state.
+		{"stream nested 9997 deep", []byte(msg + `,"stream":` + strings.Repeat("[", 9997) + strings.Repeat("]", 9997) + `}`), def, 0},
+		{"stream, object nested 9997 deep", []byte(msg + `,"stream":` + strings.Repeat(`{"a":`, 9997) + "0" + strings.Repeat("}", 9997) + `}`), def, 0},
 		{"messages", allocGen(`{"model":"chat","messages":[`, `]}`, size, allocConst(`{"role":"user","content":"x"}`)), def, 0},
 		{"messages, last one refused", allocGen(`{"model":"chat","messages":[`, `,{"role":"user","content":"x","foo":1}]}`, size,
 			allocConst(`{"role":"user","content":"x"}`)), def, 0},

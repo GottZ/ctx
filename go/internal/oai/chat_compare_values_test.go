@@ -1,7 +1,7 @@
 package oai_test
 
-// Hardening 6, P-1 (Delta-Review 5 M-1): response_format.type is compared
-// in place, no longer decoded. The answers stay what
+// Hardening 6, P-1 and P-2 (Delta-Review 5 M-1, L-3): response_format.type
+// and stream are compared in place, no longer decoded. The answers stay what
 // they were — for every allowed name in any JSON spelling, for short unknown
 // names, for values past the longest allowed name, for type errors. With
 // CTX_FOLGEP_H6_DUMP the normalized answers go to a file for a byte
@@ -26,6 +26,10 @@ var perRequest = regexp.MustCompile(`"id":"chatcmpl-[^"]*"|"created":[0-9]+`)
 // value as sent) and, for json_schema, its hull.
 func rfBody(raw string) string {
 	return `{"model":"chat","messages":[{"role":"user","content":"hi"}],"response_format":{"type":` + raw + `,"json_schema":{"name":"s"}}}`
+}
+
+func streamBody(raw string) string {
+	return `{"model":"chat","messages":[{"role":"user","content":"hi"}],"stream":` + raw + `}`
 }
 
 // The cases and the status each answers with (on the base and here).
@@ -57,6 +61,18 @@ var compareValueCases = []struct {
 	{"rf object", rfBody(`{"text":1}`), http.StatusBadRequest},
 	{"rf deep array", rfBody(strings.Repeat("[", 9990) + strings.Repeat("]", 9990)), http.StatusBadRequest},
 	{"rf type absent", `{"model":"chat","messages":[{"role":"user","content":"hi"}],"response_format":{"json_schema":{"name":"s"}}}`, http.StatusBadRequest},
+	{"stream false", streamBody(`false`), http.StatusOK},
+	{"stream false, whitespace", streamBody(" false\n"), http.StatusOK},
+	{"stream null", streamBody(`null`), http.StatusOK},
+	{"stream true", streamBody(`true`), http.StatusBadRequest},
+	{"stream \"true\"", streamBody(`"true"`), http.StatusBadRequest},
+	{"stream 1", streamBody(`1`), http.StatusBadRequest},
+	{"stream 0", streamBody(`0`), http.StatusBadRequest},
+	{"stream object", streamBody(`{}`), http.StatusBadRequest},
+	{"stream array", streamBody(`[true]`), http.StatusBadRequest},
+	{"stream deep array", streamBody(strings.Repeat("[", 9997) + strings.Repeat("]", 9997)), http.StatusBadRequest},
+	{"stream deep object", streamBody(strings.Repeat(`{"a":`, 9997) + "0" + strings.Repeat("}", 9997)), http.StatusBadRequest},
+	{"stream long string", streamBody(`"` + strings.Repeat("\xff", 1<<16) + `"`), http.StatusBadRequest},
 }
 
 // escapeAll writes s with every character as a \u escape.

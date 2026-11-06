@@ -30,7 +30,7 @@ import (
 // array with a rewritten message, is sized first and reserved through grow
 // before it is allocated (parsePolicy). The model name is the one value
 // decoded (for Resolve), and only while its raw form can still be an alias
-// name (modelRawMax); every other value the parse reads —
+// name (modelRawMax); every other value the parse reads — stream,
 // response_format.type, service_tier, a role, a part type — is compared in
 // place (hardening 6).
 // Everything unknown is refused: an engine knob that is not listed here
@@ -370,7 +370,14 @@ func (req *chatRequest) readCTX(k string, v json.RawMessage) *paramError {
 	case "messages":
 		req.messages = v
 	case "stream":
-		if err := json.Unmarshal(v, &req.stream); err != nil {
+		// The literal, not a decode (hardening 6, P-2: a decode into a bool
+		// walked a 10 000-deep array and held 358 KB before refusing it).
+		switch t := bytes.TrimSpace(v); {
+		case string(t) == "true":
+			req.stream = true
+		case string(t) == "false":
+			req.stream = false
+		default:
 			return invalidType(k, "a boolean")
 		}
 		if req.stream {
