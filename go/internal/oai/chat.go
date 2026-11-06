@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
+	"github.com/GottZ/ctx/internal/promptguard"
 )
 
 // POST /v1/chat/completions (wave W02-07 non-stream, W02-08 stream;
@@ -119,6 +121,13 @@ type chatCall struct {
 	required backends.Sensitivity
 	limit    LimitReservation
 	limitEnd bool
+	// maxTokens is the effective max_tokens the request sends upstream
+	// (serve; a row can lower it further, never raise it): no backend
+	// generates more, so a stream's completion estimate stops there
+	// (streamTokens). held is what the reservation holds — the tokens Keep
+	// books (reservedTokens), the ceiling of a stream's estimate (book).
+	maxTokens int
+	held      int
 	// wired: a byte of the request can have reached a backend in some
 	// attempt (wireTrace) — set from inside net/http, on its transport
 	// goroutines. Without it the reservation goes back in full (Abort);
@@ -259,6 +268,7 @@ func (c *chatCall) serve() {
 		c.internal("effective max_tokens is not positive (settings defect)", "max_tokens", maxTokens)
 		return
 	}
+	c.maxTokens = maxTokens
 	if !c.reserveAnswer() {
 		return
 	}
@@ -485,7 +495,35 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 		return false
 	}
 	c.limit = res
+	c.held = reservedTokens(utf8.RuneCount(c.req.messages), maxTokens, c.req.maxTokens > 0, c.s.Meter.TPMReserve, res.Headers())
 	return true
+}
+
+// bucketCapacityHeader is the token bucket's capacity as the request's lane
+// sees it (design/06 §4.4), one of the admission's x-ratelimit-* headers.
+const bucketCapacityHeader = "x-ratelimit-limit-tokens"
+
+// reservedTokens is what an admitted chat reservation holds — the tokens
+// Keep books (Delta-Review 4 F4-1): the Estimate the limiter charged, by the
+// rule Estimate documents (design/06 §4.2 "Reservierung je op": TokenEstimate
+// over the prompt's runes plus the effective max_tokens when the client named
+// one, else gateway.tpm_reserve_default capped by it), at most the bucket's
+// capacity the admission reports in x-ratelimit-limit-tokens (B-06-28: a
+// larger reservation is charged at the capacity). The reserve comes from the
+// request's settings snapshot; the production limiter reads the same key
+// from the same snapshot source at its Admit (cmd/ctxd meterLimiter), so a
+// hot change in between moves the result by that change. A limiter that
+// reports no capacity leaves the estimate uncapped.
+func reservedTokens(promptRunes, maxTokens int, clientMax bool, reserve int64, h http.Header) int {
+	share := max(maxTokens, 0)
+	if !clientMax && (share == 0 || reserve < int64(share)) {
+		share = int(min(max(reserve, 0), math.MaxInt))
+	}
+	n := usageTotal(promptguard.TokenEstimate(promptRunes), share)
+	if capacity, err := strconv.Atoi(h.Get(bucketCapacityHeader)); err == nil && capacity > 0 {
+		n = min(n, capacity)
+	}
+	return n
 }
 
 // rateHeaders are the meter's x-ratelimit-* headers of the request's
@@ -788,7 +826,12 @@ func (c *chatCall) leaseStats(st *walkState) {
 // the call) the reservation keeps its charge: never a full refund after the
 // wire (W06-10 hardening H-7). Wire calls of which no byte reached a backend
 // (wireTrace) give it back: Abort (H2-4, H3-1). The counters are tested one
-// by one — their int sum can overflow (H2-5).
+// by one — their int sum can overflow (H2-5). A stream's estimate (no usage
+// chunk, streamTokens) books at most what the reservation holds: below it
+// Settle, at or above it Keep (Delta-Review 4 F4-1) — the estimate of a
+// stream cut short never charges more than a request whose usage is unknown,
+// however large its prompt (a reservation above the bucket is charged at the
+// bucket's capacity). A non-streamed answer never carries an estimate.
 func (c *chatCall) book(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState, out chatOutcome) {
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
 		wired := c.wired.Load()
@@ -797,6 +840,8 @@ func (c *chatCall) book(plan Plan, served *backends.Backend, attempts []llm.Chai
 			case st.wired > 0 && !wired:
 				l.Abort()
 			case wired && st.tokens.PromptTokens <= 0 && st.tokens.CompletionTokens <= 0:
+				l.Keep()
+			case st.usageKind == llmlog.UsageEstimated && usageTotal(st.tokens.PromptTokens, st.tokens.CompletionTokens) >= c.held:
 				l.Keep()
 			default:
 				l.Settle(st.tokens)

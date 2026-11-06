@@ -106,16 +106,21 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 // 200 arrived): the usage chunk's counts (backend), else the estimate
 // (design/06 §4.2 B-06-8: prompt = llama.cpp's timings.prompt_n or
 // TokenEstimate over the request's runes, completion = TokenEstimate over
-// the generated runes — the estimate errs high, never low). A last attempt
-// the backend refused before its stream (a 400, a 502, a dial error) books
-// nothing, as non-stream: the estimate is for a stream cut short, not for a
-// prompt no engine processed (Fremd-Review 1 F-2). The meter books the same
-// (book): the usage chunk or the estimate by Settle — a stream cut short
-// generated tokens, a full refund would hand them out free (B-06-8) — and
-// a stream without a 200 after wire contact keeps its reservation. The
-// usage chunk's counters are summed saturated (usageTotal): an int sum of
-// two reported counters can overflow and turn the backend's usage into an
-// estimate.
+// the runes the relay read, at most the max_tokens that went upstream — no
+// backend generates more; Delta-Review 4 F4-1). The estimate is meant to
+// err high (1.8 characters per token) but is not a bound: text with fewer
+// characters per token (CJK, emoji) and tokens an engine generated after the
+// relay stopped reading are not in it (N-2). A last attempt the backend
+// refused before its stream (a 400, a 502, a dial error) books nothing, as
+// non-stream: the estimate is for a stream cut short, not for a prompt no
+// engine processed (Fremd-Review 1 F-2). The meter books the same (book):
+// the usage chunk by Settle, the estimate by Settle while it is below what
+// the reservation holds, else Keep — a stream cut short generated tokens, a
+// full refund would hand them out free (B-06-8), and its estimate never
+// charges more than the reservation — and a stream without a 200 after wire
+// contact keeps its reservation. The usage chunk's counters are summed
+// saturated (usageTotal): an int sum of two reported counters can overflow
+// and turn the backend's usage into an estimate.
 func (c *chatCall) streamTokens(st *walkState) {
 	if st.wired == 0 || st.stream == nil {
 		return
@@ -129,7 +134,7 @@ func (c *chatCall) streamTokens(st *walkState) {
 	if prompt <= 0 {
 		prompt = promptguard.TokenEstimate(utf8.RuneCount(c.req.messages))
 	}
-	st.tokens = dispatch.Usage{PromptTokens: prompt, CompletionTokens: promptguard.TokenEstimate(st.runes)}
+	st.tokens = dispatch.Usage{PromptTokens: prompt, CompletionTokens: min(promptguard.TokenEstimate(st.runes), c.maxTokens)}
 	st.usageKind = llmlog.UsageEstimated
 }
 

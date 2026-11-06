@@ -257,6 +257,10 @@ func chatSettings() oai.Settings {
 		TenantAliasCeiling: oai.AliasCeiling{MaxOutputTokens: 8192, MaxN: 1, Timeout: 600 * time.Second,
 			EmbeddingMaxInputs: 32, RerankMaxDocuments: 128, ToolsMaxCount: 64},
 		RetryAfterJitter: 0.5, BodyLogging: llmlog.BodyLoggingNone,
+		// The completion reserve of the rig meters (CompletionReserve 1024):
+		// the route reads it to know what a reservation holds (reservedTokens),
+		// as production reads both from one settings snapshot.
+		Meter: oai.MeterSettings{TPMReserve: 1024},
 	}
 }
 
