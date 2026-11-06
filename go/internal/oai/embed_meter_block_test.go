@@ -24,6 +24,8 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/keyquota"
+	"github.com/GottZ/ctx/internal/oai"
 )
 
 // postEmbedOverSocket posts body to the rig's route over a real socket (an
@@ -280,5 +282,41 @@ func TestEmbedMeterFailoverAfterTheWireBooksTheFirstRowsBlock(t *testing.T) {
 	}
 	if ends != "settle" || held != want || len(settled) != 1 || int64(settled[0].PromptTokens) != want {
 		t.Errorf("ends %q, settled %+v, the bucket holds %d — want one Settle of %d", ends, settled, held, want)
+	}
+}
+
+// TestEmbedMeterRateLimitHeadersBeforeTheFirstByte (Delta-Review 4 F4-8):
+// the 200's x-ratelimit-* headers of op embed, read over a real socket —
+// what a client sees, the headers as they stood when the status line left
+// (an httptest.ResponseRecorder's Header() is the live map and also shows
+// headers set after WriteHeader).
+func TestEmbedMeterRateLimitHeadersBeforeTheFirstByte(t *testing.T) {
+	e := newEmbedEngine(t, 8)
+	m := newEmbedMeter(keyquota.Limits{RPM: 10, TPM: 60000, CompletionReserve: 1024})
+	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withDeps(func(d *oai.Deps) { d.Limiter = m }))
+	resp, body, err := postEmbedOverSocket(t, rig, context.Background(), embedBody("emb1", embedInputs(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("on the wire: %d; limit-requests %q remaining-requests %q limit-tokens %q remaining-tokens %q reset-requests %q reset-tokens %q",
+		resp.StatusCode, resp.Header.Get("x-ratelimit-limit-requests"), resp.Header.Get("x-ratelimit-remaining-requests"),
+		resp.Header.Get("x-ratelimit-limit-tokens"), resp.Header.Get("x-ratelimit-remaining-tokens"),
+		resp.Header.Get("x-ratelimit-reset-requests"), resp.Header.Get("x-ratelimit-reset-tokens"))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("answer %d %.300s", resp.StatusCode, body)
+	}
+	want := map[string]string{
+		"x-ratelimit-limit-requests": "10", "x-ratelimit-remaining-requests": "9",
+		"x-ratelimit-limit-tokens": "60000", "x-ratelimit-remaining-tokens": fmt.Sprint(60000 - embedReservation(1)),
+	}
+	for k, v := range want {
+		if got := resp.Header.Get(k); got != v {
+			t.Errorf("the 200 on the wire: %s = %q, want %q", k, got, v)
+		}
+	}
+	for _, k := range []string{"x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"} {
+		if resp.Header.Get(k) == "" {
+			t.Errorf("the 200 on the wire: %s missing", k)
+		}
 	}
 }
