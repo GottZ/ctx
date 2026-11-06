@@ -32,8 +32,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -395,6 +397,15 @@ func memMax(a *atomic.Uint64, v uint64) {
 // newMemRig is the gate's route for n clients of shape: the shape's failover
 // rows before the serving one, the production caps, the strict body cap and
 // the reservation probe (memMount).
+// memCGAliases are the two aliases of the class gate over the route, the
+// policy ceilings at credentials (no sensitivity scan) and below it (public:
+// the scan runs, the log row stores bodies) — TestClassGateOverTheRoute runs
+// every combination with both.
+var memCGAliases = []chatAlias{
+	{memCeilID, backends.GlobalScope, oai.CGModel, "chat", "chat", backends.SensCredentials, oai.CGCeilPolicy, true},
+	{memCeilPub, backends.GlobalScope, oai.CGModel + "pub", "chat", "chat", backends.SensPublic, oai.CGCeilPolicy, true},
+}
+
 func newMemRig(t *testing.T, shape memShape, n int, held *heldSum) (*chatRig, *memEngine) {
 	var rows []backends.Backend
 	for i := 0; i < shape.failover; i++ { // the chain walks higher priorities first
@@ -406,8 +417,7 @@ func newMemRig(t *testing.T, shape memShape, n int, held *heldSum) (*chatRig, *m
 	rig.reg.reload(t, append(chatAliases(),
 		chatAlias{memVisionID, backends.GlobalScope, "visbig", "chat", "chat", backends.SensCredentials, `{"vision":true,"vision_max_bytes":8388608}`, true},
 		chatAlias{memTcapID, backends.GlobalScope, "tcap", "chat", "chat", backends.SensCredentials, `{"tools.max_bytes":1048576,"tools.max_count":256}`, true},
-		chatAlias{memCeilID, backends.GlobalScope, oai.CGModel, "chat", "chat", backends.SensCredentials, oai.CGCeilPolicy, true},
-		chatAlias{memCeilPub, backends.GlobalScope, oai.CGModel + "pub", "chat", "chat", backends.SensPublic, oai.CGCeilPolicy, true}))
+		memCGAliases[0], memCGAliases[1]))
 	rig.setSettings(func(s *oai.Settings) {
 		s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = memBudget, memCap, memRespCap
 		// CTX_FOLGEP_BODYLOG (hardening 6): body logging on, so the route's
@@ -554,6 +564,144 @@ func TestChatParseHeapGate(t *testing.T) {
 		t.Errorf("form %s, n=%d: heap growth %.1f MiB > reserved %.1f MiB + %d × base load %.0f KiB = %.1f MiB (without the answer share %.1f, the budget's peak %.1f): %s",
 			form, n, mib(growth), mib(sum), n, float64(heapGateBaseLoad)/1024, mib(bound), mib(boundNoAnswer), mib(boundPeak), verdict)
 	}
+}
+
+// cgRouteRun is one run of the class gate over the route: the heap gate's
+// form, concurrency and body size.
+type cgRouteRun struct {
+	form  string
+	n     int
+	bytes int
+}
+
+// cgRouteSizes and cgRouteNs are the body sizes and concurrencies of the
+// class gate over the route (hardening 6 P-3 (b)).
+var (
+	cgRouteSizes = []int{20100, 65600, 262144}
+	cgRouteNs    = []int{1, 10}
+)
+
+// cgRouteRuns is the matrix of the class gate over the route: every
+// combination with both aliases of memCGAliases — "cg:<combo>" at
+// credentials, "cg:<combo>@pub" below it, where the sensitivity scan runs
+// (hardening 7: the scan side was a special run, and its 211 red runs went
+// unseen by the gate) — at every size and concurrency.
+func cgRouteRuns(combos []string) []cgRouteRun {
+	var runs []cgRouteRun
+	for _, c := range combos {
+		for _, alias := range []string{"", "@pub"} {
+			for _, size := range cgRouteSizes {
+				for _, n := range cgRouteNs {
+					runs = append(runs, cgRouteRun{"cg:" + c + alias, n, size})
+				}
+			}
+		}
+	}
+	return runs
+}
+
+// TestClassGateRouteRunsBothAliases pins the matrix of the class gate over
+// the route (hardening 7): every combination runs with the alias at
+// credentials and with the public one, at every size and concurrency, and
+// the two forms reach those two aliases.
+func TestClassGateRouteRunsBothAliases(t *testing.T) {
+	combos := oai.ClassGateCombos()
+	runs := cgRouteRuns(combos)
+	per := len(cgRouteSizes) * len(cgRouteNs)
+	sens := map[string]backends.Sensitivity{}
+	for _, a := range memCGAliases {
+		sens[a.name] = a.sens
+	}
+	forms := map[string]int{}
+	for _, r := range runs {
+		forms[r.form]++
+	}
+	count := map[backends.Sensitivity]int{}
+	for f, k := range forms {
+		if k != per {
+			t.Errorf("form %s runs %d times, want %d (every size and concurrency)", f, k, per)
+		}
+		count[sens[memForm(t, f, cgRouteSizes[0]).model]]++
+	}
+	if len(runs) != 2*len(combos)*per || count[backends.SensCredentials] != len(combos) || count[backends.SensPublic] != len(combos) {
+		t.Errorf("the route gate runs %d times (want %d): %d combinations at credentials, %d below (want %d each)",
+			len(runs), 2*len(combos)*per, count[backends.SensCredentials], count[backends.SensPublic], len(combos))
+	}
+}
+
+// TestClassGateOverTheRoute is the class gate over the real route (hardening
+// 6 P-3 (b), hardening 7): every run of cgRouteRuns is TestChatParseHeapGate
+// in a process of its own — this test binary run again with the form in its
+// environment (GOMEMLIMIT, 200MiB when unset, and CTX_FOLGEP_BODYLOG pass
+// through) — and every verdict must be ok. A measurement test outside the
+// suite (load-sensitive, about 8 640 processes):
+//
+//	CTX_CLASSGATE_ROUTE=1 [CTX_FOLGEP_BODYLOG=full] [CTX_CLASSGATE_ROUTE_OUT=<file>] \
+//	  go test -run '^TestClassGateOverTheRoute$' -timeout 2h ./internal/oai/
+//
+// CTX_CLASSGATE_ROUTE=<file> runs the combinations named in the file (one
+// per line) instead of all; CTX_CLASSGATE_ROUTE_OUT gets the gate's line of
+// every run.
+func TestClassGateOverTheRoute(t *testing.T) {
+	sel := os.Getenv("CTX_CLASSGATE_ROUTE")
+	if sel == "" {
+		t.Skip("CTX_CLASSGATE_ROUTE not set (measurement test, see the comment)")
+	}
+	combos := oai.ClassGateCombos()
+	if sel != "1" {
+		raw, err := os.ReadFile(sel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		combos = strings.Fields(string(raw))
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "CTX_CLASSGATE_ROUTE") && !strings.HasPrefix(kv, "CTX_FOLGEP_FORM=") &&
+			!strings.HasPrefix(kv, "CTX_FOLGEP_N=") && !strings.HasPrefix(kv, "CTX_FOLGEP_BYTES=") {
+			env = append(env, kv)
+		}
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		env = append(env, "GOMEMLIMIT=200MiB")
+	}
+	var lines strings.Builder
+	runs := cgRouteRuns(combos)
+	bad := map[string]int{}
+	for _, r := range runs {
+		cmd := exec.Command(exe, "-test.run", "^TestChatParseHeapGate$", "-test.count=1")
+		cmd.Env = append(slices.Clone(env), "CTX_FOLGEP_FORM="+r.form, "CTX_FOLGEP_N="+strconv.Itoa(r.n), "CTX_FOLGEP_BYTES="+strconv.Itoa(r.bytes))
+		out, _ := cmd.CombinedOutput()
+		line := ""
+		for _, l := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(l, "FOLGEP form=") {
+				line = l
+			}
+		}
+		alias := "credentials"
+		if strings.HasSuffix(r.form, "@pub") {
+			alias = "public"
+		}
+		if line == "" {
+			line = fmt.Sprintf("NOLINE form=%s n=%d bytes=%d %.300s", r.form, r.n, r.bytes, out)
+		}
+		fmt.Fprintf(&lines, "size=%d %s\n", r.bytes, line)
+		if !strings.HasSuffix(line, "verdict=ok") {
+			bad[alias]++
+			t.Errorf("%s n=%d at %d B: %s", r.form, r.n, r.bytes, line)
+		}
+	}
+	if p := os.Getenv("CTX_CLASSGATE_ROUTE_OUT"); p != "" {
+		if err := os.WriteFile(p, []byte(lines.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Logf("FOLGEP class gate route: combos=%d runs=%d (each alias %d) not ok: credentials %d, public %d, bodylog %q",
+		len(combos), len(runs), len(runs)/2, bad["credentials"], bad["public"], os.Getenv("CTX_FOLGEP_BODYLOG"))
 }
 
 // TestChatParseHeapGateSustained is the gate's sustained case (FOLGE-P

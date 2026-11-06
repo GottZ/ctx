@@ -6,13 +6,19 @@ package oai
 // the class as a whole: every key the parse knows — taken from the parse's
 // own tables, not from a hand list — with every hostile value form, each as
 // large as the cap that holds for that key (the body, or the alias policy's
-// ceiling for a capped value). Two measurements share the bodies: the bytes
-// one parse allocates (TestClassGateBytesPerParse, in the suite) and the
-// live heap over the real route at small bodies (TestChatParseHeapGate with
-// the form "cg:<slot>:<value form>", chat_parse_mem_test.go, a measurement
-// test outside the suite). TestClassGateCoversEveryKeyTable is the count
-// pin: a new key table, a key added to one, or a key left out of the gate
-// turns it red.
+// ceiling for a capped value). Three measurements share the bodies, each
+// for both kinds of alias — one at credentials (no sensitivity scan) and one
+// below it (the scan runs; hardening 7: the scan side was a special run and
+// held what the gate did not see): the bytes one parse allocates
+// (TestClassGateBytesPerParse, in the suite; the parse does not depend on
+// the alias's sensitivity), the bytes the scan allocates against what the
+// route books for it (TestClassGateBytesPerScan, chat_class_gate_scan_test.go,
+// in every build without -race) and the live heap over the real route at
+// small bodies with both aliases (TestClassGateOverTheRoute, which runs
+// TestChatParseHeapGate with the form "cg:<slot>:<value form>[@pub]" one
+// process per run, chat_parse_mem_test.go, a measurement test outside the
+// suite). TestClassGateCoversEveryKeyTable is the count pin: a new key
+// table, a key added to one, or a key left out of the gate turns it red.
 
 import (
 	"fmt"
