@@ -307,7 +307,13 @@ func (c *embedCall) serve() {
 	if !c.reserveAnswer() {
 		return
 	}
-	c.required = c.d.Federation.Scan(c.sensitivity(), body)
+	required := c.sensitivity()
+	if !c.coverScan(required, len(body)) {
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
+	c.required = c.d.Federation.Scan(required, body)
 	chain, ok := c.chain()
 	if !ok {
 		return
@@ -320,6 +326,26 @@ func (c *embedCall) serve() {
 		return
 	}
 	c.walk(chain)
+}
+
+// coverScan books the heap of the sensitivity scan of the body before it
+// runs, as the chat route does (FOLGE-P hardening H-8, chatCall.coverScan;
+// W02-09 rebase round 2, part D — measured: without it the route's heap
+// passed its bookings, bau report): scanReserveFactor × the body +
+// scanReserveBase for an alias below credentials, nothing at credentials
+// (federation.ScanRaise returns at once there). The route keeps no ledger
+// of its request share (3 × the body, booked by the budget stage), so the
+// booking comes on top of the share in full — as the budget floor (V39)
+// counts it. It lasts until the request ends: the scan's garbage is heap
+// until the collector runs, and the promise "the heap stays within the
+// bookings" holds under a set GOMEMLIMIT (scanReserveFactor). false: the
+// budget cannot hold it, nothing is booked.
+func (c *embedCall) coverScan(required backends.Sensitivity, n int) bool {
+	if required.Rank() >= backends.SensCredentials.Rank() {
+		return true
+	}
+	res := ReservationFrom(c.ctx)
+	return res != nil && res.Grow(scanReserveFactor*int64(n)+scanReserveBase)
 }
 
 // readBody reads the body under the strict cap and the in-flight budget.
