@@ -86,7 +86,9 @@ func scanDepthForms() ([]string, map[string][]byte) {
 		"top": func(v string) string {
 			return `{"model":"pub","messages":[{"role":"user","content":"x"}],"bootstrap_host":` + v + `}`
 		},
-		"msg": func(v string) string { return `{"model":"pub","messages":[{"role":"user","content":"x","reasoning":` + v + `}]}` },
+		"msg": func(v string) string {
+			return `{"model":"pub","messages":[{"role":"user","content":"x","reasoning":` + v + `}]}`
+		},
 		"tc": func(v string) string {
 			return `{"model":"pub","messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[` + v + `]}]}`
 		},
