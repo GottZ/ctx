@@ -351,3 +351,45 @@ func TestEmbedMeterRetryAfterAFailedHandshakeSettles(t *testing.T) {
 		t.Errorf("ends %q, settled %+v, the bucket holds %d — want the retry's usage 7 settled", ends, settled, held)
 	}
 }
+
+// TestEmbedMeterBlockEstimateStopsAtTheReservation (F4-1, settleCharge):
+// emb1, eight blocks, block 8 answers 502 after seven served blocks that
+// report more tokens than the estimate (reservation 36, block estimate 5).
+// Five tokens each ⇒ 35 + 5 = 40 > 36: the estimate lifts the charge only
+// to the reservation, settle 36. Six each ⇒ the reported 42 is above the
+// reservation already: booked as reported, settle 42, no estimate on top.
+func TestEmbedMeterBlockEstimateStopsAtTheReservation(t *testing.T) {
+	cases := []struct {
+		name     string
+		perBlock int
+		want     int64
+	}{
+		{"served 35, estimate up to the reservation", 5, embedReservation(8)},
+		{"served 42 above the reservation", 6, 42},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEmbedEngine(t, 8)
+			e.setRespond(func(w http.ResponseWriter, _ *http.Request, n int64, inputs []string) bool {
+				if n == 8 {
+					w.WriteHeader(http.StatusBadGateway)
+					_, _ = io.WriteString(w, `{"error":{"message":"down"}}`)
+					return true
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, embedAnswerUsage(inputs, 8, tc.perBlock))
+				return true
+			})
+			rig, m := embedMeterRig(t, e.row("spark-embed", backends.ProtocolOpenAI, 10))
+			a := rig.postEmbed(t, embedBody("emb1", embedInputs(8)))
+			held, ends, settled := m.heldEmbed(t, rig), m.endsOf(), m.settledNow()
+			t.Logf("%s: answer %d; hits %d; ends %s; settled %+v; held %d (want settle %d, reservation %d)", tc.name, a.status, e.hits.Load(), ends, settled, held, tc.want, embedReservation(8))
+			if a.status == http.StatusOK || e.hits.Load() != 8 {
+				t.Fatalf("answer %d, hits %d — want block 8 to fail after seven served", a.status, e.hits.Load())
+			}
+			if ends != "settle" || held != tc.want || len(settled) != 1 || int64(settled[0].PromptTokens) != tc.want {
+				t.Errorf("ends %q, settled %+v, the bucket holds %d — want one Settle of %d", ends, settled, held, tc.want)
+			}
+		})
+	}
+}
