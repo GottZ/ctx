@@ -486,11 +486,14 @@ func (r *Reservation) Reject(reason string, waited time.Duration) {
 func (r *Reservation) Headers() http.Header { return r.headers.Header() }
 
 // Held is the tokens the admission charged: the op's estimate, at most the
-// capacity of the lane's token bucket (B-06-28) — what Keep books. A route
-// compares what it would book with it instead of rebuilding it from the
-// estimate and the limits (lead decision 2026-11-06, one source: a settings
-// reload between the admission and the end of a request moves a rebuilt
-// value, not this one).
+// capacity of the lane's token bucket (B-06-28) — what Keep books. It is
+// set at the admission; Keep, Settle and Abort move the bucket, never it. A
+// route compares what it would book with it instead of rebuilding it (lead
+// decision 2026-11-06, one source): what it weighs its booking against is
+// then what Keep books by construction, in every lane and under every cap.
+// A rebuild from the admission's own headers misses only a limiter that
+// reports no capacity; one from the settings also moves with a reload
+// between the admission and the end of the request.
 func (r *Reservation) Held() int64 { return r.held }
 
 // end closes r and moves the token bucket by delta ns. A debt is a new
