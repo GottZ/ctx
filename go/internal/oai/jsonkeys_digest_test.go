@@ -126,6 +126,23 @@ func TestSameTokensIsAStart(t *testing.T) {
 			fuzzSameTokens(t, []byte(s), []byte(o))
 		}
 	}
+	for _, p := range sameTokensPairs() {
+		fuzzSameTokens(t, []byte(p[0]), []byte(p[1]))
+	}
+}
+
+// sameTokensPairs are keys alike up to a run of literal UTF-8 and apart right
+// after it — in a plain byte, at the end, in an escape, inside a sequence (a
+// continuation byte, a longer sequence): the edge where a run sameTokens
+// skips at once must end at the shared bytes, not past them.
+func sameTokensPairs() [][2]string {
+	var out [][2]string
+	for _, p := range []string{"é", strings.Repeat("中", 3), "😀", "aé中😀", strings.Repeat("é", 70)} {
+		for _, d := range [][2]string{{"x", "y"}, {"x", ""}, {`\n`, `\t`}, {"x", escU('x')}, {"é", "ê"}, {"中", "丰"}, {"😀", "😁"}, {"é", "中"}} {
+			out = append(out, [2]string{p + d[0], p + d[1]})
+		}
+	}
+	return out
 }
 
 // FuzzSameTokensIsAStart is TestSameTokensIsAStart under the fuzzer (contents
@@ -134,6 +151,9 @@ func FuzzSameTokensIsAStart(f *testing.F) {
 	seeds := strDecoderReadSeeds()
 	for i, s := range seeds {
 		f.Add([]byte(s), []byte(seeds[(i+3)%len(seeds)]))
+	}
+	for _, p := range sameTokensPairs() {
+		f.Add([]byte(p[0]), []byte(p[1]))
 	}
 	f.Fuzz(fuzzSameTokens)
 }
