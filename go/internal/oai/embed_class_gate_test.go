@@ -175,11 +175,18 @@ const ecgModel = "embsec"
 // value form at every gate size allocates at most parseAllocSlack plus what
 // the route books for it — the JSON check's nesting state before the parse
 // (jsonDepth × jsonDepthStateBytes) and the decoded inputs inside it (cover).
-// CTX_EMBED_CLASSGATE_OUT names a file for one line per combination.
+// -short measures the three small sizes; the cap (96 parses of 8 MiB, three
+// times each — past the suite's timeout under -race on a loaded host) runs
+// without it, as in the CI's integration job. CTX_EMBED_CLASSGATE_OUT names
+// a file for one line per combination.
 func TestEmbedClassGateBytesPerParse(t *testing.T) {
 	var out strings.Builder
 	red := 0
-	for _, size := range EmbedClassGateSizes {
+	sizes := EmbedClassGateSizes
+	if testing.Short() {
+		sizes = sizes[:len(sizes)-1]
+	}
+	for _, size := range sizes {
 		for _, s := range ecgSlots() {
 			for _, f := range ecgForms {
 				combo := s.name() + ":" + f.name
@@ -204,8 +211,8 @@ func TestEmbedClassGateBytesPerParse(t *testing.T) {
 			}
 		}
 	}
-	fmt.Fprintf(&out, "ECG summary slots=%d forms=%d sizes=%d runs=%d red=%d\n", len(ecgSlots()), len(ecgForms), len(EmbedClassGateSizes), len(ecgSlots())*len(ecgForms)*len(EmbedClassGateSizes), red)
-	t.Logf("FOLGEE class gate parse: slots=%d forms=%d sizes=%d red=%d", len(ecgSlots()), len(ecgForms), len(EmbedClassGateSizes), red)
+	fmt.Fprintf(&out, "ECG summary slots=%d forms=%d sizes=%d runs=%d red=%d\n", len(ecgSlots()), len(ecgForms), len(sizes), len(ecgSlots())*len(ecgForms)*len(sizes), red)
+	t.Logf("FOLGEE class gate parse: slots=%d forms=%d sizes=%d red=%d", len(ecgSlots()), len(ecgForms), len(sizes), red)
 	if p := os.Getenv("CTX_EMBED_CLASSGATE_OUT"); p != "" {
 		if err := os.WriteFile(p, []byte(out.String()), 0o600); err != nil {
 			t.Fatal(err)
