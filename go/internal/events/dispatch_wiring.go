@@ -69,12 +69,13 @@ func DispatchSettings(c config.DispatchConfig) dispatch.Settings {
 // §4.14, W-11), and a ctx row is the case where they part:
 //   - External = external locality ∧ class ≠ ctx exempts the row from the
 //     Enforcing coverage term — only for targets that scale on their own and
-//     need none of this instance's order. A peer ctx instance serves us
-//     under one consumer with a concurrency limit of its own; without slots
-//     our background calls pass through and fill that limit until our
-//     interactive calls meet the peer's 429 (Finding 14). So a ctx row is
-//     never exempt, whatever its locality (F-W7): with a background role it
-//     needs a slots cap, or Enforcing stays off with a WARN.
+//     need none of this instance's order. A peer ctx instance serves the
+//     calls of one row under one consumer with a concurrency limit of its
+//     own; without slots our background calls pass through and fill that
+//     limit until our interactive calls meet the peer's 429 (Finding 14).
+//     So a ctx row is never exempt, whatever its locality (F-W7): with a
+//     background role it needs a slots cap, or Enforcing stays off with a
+//     WARN.
 //   - SelfAdmitting = class ctx ∨ external locality is target kind P of the
 //     external offer (design/03 §3.2, A03-W3): the target admits on its own,
 //     its external opt-in is limits.external_offer.
