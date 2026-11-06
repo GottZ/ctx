@@ -30,6 +30,7 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
+	"github.com/GottZ/ctx/internal/promptguard"
 )
 
 // POST /v1/embeddings (wave W02-09; design/02 §4.8, §4.2.1, §4.11.1, §4.12;
@@ -557,6 +558,56 @@ type embedState struct {
 	abort       string // the dispatcher abort of that block's lease, if any
 	failed      []failedAttempt
 	last        failedAttempt
+	// unpaid are the wire calls of blocks that reported no usage (a failed
+	// block, an answer without usage), over every attempt: each one whose
+	// trace saw wire contact books its estimate (endAfterWire, Delta-Review 4
+	// F4-1).
+	unpaid []*blockWire
+}
+
+// blockWire is one block's wire call as the meter sees it: contact is marked
+// from inside net/http by the block's own trace (wireContactTrace, beside the
+// request's c.wired); tokens is the meter's estimate of the block's inputs —
+// the function the reservation is booked with (keyquota.Estimate.Tokens for
+// op embed: promptguard.TokenEstimate of the input runes).
+type blockWire struct {
+	contact atomic.Bool
+	tokens  int
+}
+
+// unpaidEstimate is Σ of the estimates of the blocks that met a backend and
+// reported no usage, saturated (usageTotal). A flag is read here, at the end
+// of the request: a hook that fires after EmbedRaw returned still counts.
+func (st *embedState) unpaidEstimate() int {
+	sum := 0
+	for _, bw := range st.unpaid {
+		if bw.contact.Load() {
+			sum = usageTotal(sum, bw.tokens)
+		}
+	}
+	return sum
+}
+
+// inputEstimate is the meter's estimate of the inputs [lo, hi): the token
+// estimate of their runes, as the reservation is the estimate of all runes.
+func (c *embedCall) inputEstimate(lo, hi int) int {
+	runes := 0
+	for _, n := range c.req.runes[lo:hi] {
+		runes += n
+	}
+	return promptguard.TokenEstimate(runes)
+}
+
+// settleCharge is the prompt tokens a request whose blocks reported a usage
+// settles with: that usage, plus the estimate of its blocks that met a
+// backend without one (F4-1). The estimate lifts the charge at most to the
+// reservation — what Keep would have held; a reported usage above the
+// reservation is booked as reported. The sum saturates (usageTotal).
+func settleCharge(usage, estimate, reservation int) int {
+	if estimate <= 0 || usage >= reservation {
+		return usage
+	}
+	return min(usageTotal(usage, estimate), reservation)
 }
 
 // walk runs the planner and the chain walk, then answers.
@@ -577,7 +628,7 @@ func (c *embedCall) walk(chain []backends.Backend) {
 			c.endLimit(func(l LimitReservation) { l.Reject(code, 0) })
 			return
 		}
-		c.admissionRefused(err, 0, false, dispatch.Usage{})
+		c.admissionRefused(err, 0, false, nil)
 		return
 	}
 	if ended, _ := c.verdict(); ended {
@@ -712,11 +763,15 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 		return dispatch.Usage{}, err
 	}
 	// st.wires counts the wire calls for the census; c.wired is the meter's
-	// wire contact, marked from inside net/http by the block's trace — on
+	// wire contact of the request, bw.contact the block's — both marked from
+	// inside net/http by the block's traces (composed on its context) — on
 	// every try of httpx.DoRetryOnce (wireContactTrace).
 	st.wires++
 	var conn atomic.Bool
-	wctx, cancel := context.WithTimeout(httptrace.WithClientTrace(rc, wireContactTrace(&c.wired, &conn)), timeout)
+	bw := &blockWire{tokens: c.inputEstimate(lo, hi)}
+	tctx := httptrace.WithClientTrace(rc, wireContactTrace(&c.wired, &conn))
+	tctx = httptrace.WithClientTrace(tctx, wireContactTrace(&bw.contact, &conn))
+	wctx, cancel := context.WithTimeout(tctx, timeout)
 	defer cancel()
 	vecs, promptTokens, err := embed.EmbedRaw(wctx, *b, model, c.req.inputs[lo:hi], st.dims,
 		embedReadCap(hi-lo, st.dims, c.s.EmbeddingMaxFloats))
@@ -725,6 +780,12 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 	// writer): wire contact — the conservative side, as at the chat route.
 	if err != nil && conn.Load() && wctx.Err() != nil {
 		c.wired.Store(true)
+		bw.contact.Store(true)
+	}
+	// A block without a usage — failed, or answered without one — books its
+	// estimate if it met a backend (endAfterWire).
+	if err != nil || promptTokens <= 0 {
+		st.unpaid = append(st.unpaid, bw)
 	}
 	if err != nil {
 		return dispatch.Usage{}, c.blockFailure(st, b, i, rc, err)
@@ -768,9 +829,9 @@ func (c *embedCall) blockFailure(st *embedState, b *backends.Backend, i int, rc 
 // admissionRefused answers an admission failure through the planner's
 // writer (A03-W8 handover). wired: a byte of the request reached a backend
 // in an earlier attempt (a failover acquire refused behind a row that had
-// the request) — the reservation settles with the usage or keeps its
-// charge (endAfterWire), it is not rejected.
-func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool, usage dispatch.Usage) {
+// the request) — the reservation ends as after the wire (endAfterWire over
+// st), it is not rejected.
+func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool, st *embedState) {
 	reason := c.d.Planner.WriteAdmissionError(c.ctx, c.w, err)
 	if reason == "" {
 		// The writer saw the run context canceled: the route answers its
@@ -784,7 +845,7 @@ func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool
 	}
 	c.rec.Reason = reason
 	if wired {
-		c.endAfterWire(usage)
+		c.endAfterWire(st)
 		return
 	}
 	c.endLimit(func(l LimitReservation) { l.Reject(reason, waited) })
@@ -793,12 +854,17 @@ func (c *embedCall) admissionRefused(err error, waited time.Duration, wired bool
 // endAfterWire ends the reservation of a request that made wire calls: no
 // byte reached a backend in any of them (c.wired unset — a refused or
 // timed-out connect, a failed handshake) ⇒ Abort, the full refund; after
-// wire contact never: Settle with the usage the blocks reported, Keep
-// without one (the chat route's rule, W06-10 hardening H-7). A block that
-// failed after earlier ones answered settles their usage: its own is
-// unknown, the blocks after it never reached a backend (the sticky stop).
-func (c *embedCall) endAfterWire(usage dispatch.Usage) {
+// wire contact never: Keep when no block reported a usage (the chat route's
+// rule, W06-10 hardening H-7), else Settle with the usage the blocks
+// reported plus the estimate of every block that met a backend without
+// reporting one — the client gone during it, an upstream error, an answer
+// without usage — up to the reservation (settleCharge): the chat route's
+// rule per block (Delta-Review 4 F4-1). A block that reached no backend
+// books nothing; the blocks after a failed one never reached one (the
+// sticky stop).
+func (c *embedCall) endAfterWire(st *embedState) {
 	wired := c.wired.Load()
+	usage := st.usage
 	c.endLimit(func(l LimitReservation) {
 		switch {
 		case !wired:
@@ -806,6 +872,7 @@ func (c *embedCall) endAfterWire(usage dispatch.Usage) {
 		case usage.PromptTokens <= 0:
 			l.Keep()
 		default:
+			usage.PromptTokens = settleCharge(usage.PromptTokens, st.unpaidEstimate(), promptguard.TokenEstimate(c.req.runesSum))
 			l.Settle(usage)
 		}
 	})
@@ -822,13 +889,15 @@ func (c *embedCall) answer(plan Plan, served *backends.Backend, attempts []llm.C
 	// that made wire calls: without one there is no LLM call (close() aborts
 	// the reservation, or the admission refusal rejected it).
 	if st.wires > 0 {
-		// The access record carries what the reservation settles and the
-		// row books — also for an answer that is no 200 (F-9 (a)).
+		// The access record carries the usage the backends reported, as the
+		// row books it — also for an answer that is no 200 (F-9 (a)); the
+		// reservation settles it plus the estimate of the blocks that met a
+		// backend without one (endAfterWire).
 		c.rec.PromptTokens = st.usage.PromptTokens
 		if st.usage.PromptTokens > 0 {
 			c.rec.Usage = llmlog.UsageBackend
 		}
-		c.endAfterWire(st.usage)
+		c.endAfterWire(st)
 		c.record(plan, served, attempts, err, st, out)
 	}
 }
@@ -858,7 +927,7 @@ func (c *embedCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, s
 		if st.lease == nil {
 			waited = time.Since(c.entry)
 		}
-		c.admissionRefused(err, waited, st.wires > 0 && c.wired.Load(), st.usage)
+		c.admissionRefused(err, waited, st.wires > 0 && c.wired.Load(), st)
 		return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: c.rec.Reason}}
 	}
 	if len(attempts) == 0 {

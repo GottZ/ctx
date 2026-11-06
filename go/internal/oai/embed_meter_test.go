@@ -301,9 +301,10 @@ func TestEmbedMeterWireContactNeverRefundsInFull(t *testing.T) {
 // TestEmbedMeterFailedBlockSettlesTheServedBlocks pins the end of a request
 // whose block 3 of 8 fails on the wire after two blocks answered (two
 // prompt tokens each): the reservation settles with the usage of the served
-// blocks (4 tokens) — the backend reported them; blocks 4…8 never reached a
-// backend, and the sticky stop ends the request at the failed block, so the
-// one block whose usage is unknown is the failed one (named in the report).
+// blocks (4 tokens) plus the meter's estimate of the failed block, which
+// reached the backend without a usage (5 tokens: Delta-Review 4 F4-1, the
+// rule per block — before it, 4); blocks 4…8 never reached a backend (the
+// sticky stop ends the request at the failed block) and book nothing.
 func TestEmbedMeterFailedBlockSettlesTheServedBlocks(t *testing.T) {
 	e := newEmbedEngine(t, 8)
 	e.setRespond(func(w http.ResponseWriter, _ *http.Request, n int64, _ []string) bool {
@@ -322,23 +323,29 @@ func TestEmbedMeterFailedBlockSettlesTheServedBlocks(t *testing.T) {
 	if e.hits.Load() != 3 {
 		t.Fatalf("engine hits %d, want 3 (two served blocks, the failed third, nothing after the sticky stop)", e.hits.Load())
 	}
-	if held != 4 || m.endsOf() != "settle" || len(m.settled) != 1 || m.settled[0].PromptTokens != 4 {
-		t.Errorf("the bucket holds %d tokens (ends %s, settled %+v), want the served blocks' usage 4 settled", held, m.endsOf(), m.settled)
+	want := 4 + embedReservation(1)
+	if held != want || m.endsOf() != "settle" || len(m.settled) != 1 || int64(m.settled[0].PromptTokens) != want {
+		t.Errorf("the bucket holds %d tokens (ends %s, settled %+v), want the served blocks' usage 4 and the failed block's estimate %d settled (%d)",
+			held, m.endsOf(), m.settled, embedReservation(1), want)
 	}
 }
 
 // TestEmbedMeterUsageSumSaturates (N-2): the usage of the blocks is summed
 // as the meter counts it — a negative counter counts 0, the sum saturates at
 // the int range. Two blocks of 2⁶² prompt tokens each overflow an int sum
-// into a negative one, which the meter would read as 0: a full refund.
+// into a negative one, which the meter would read as 0: a full refund. A
+// block that reports a negative count reported no usage: the reservation
+// settles the other block's 2 plus its estimate (5 — Delta-Review 4 F4-1;
+// before it, 2); the access record and the row carry the reported sum, 2.
 func TestEmbedMeterUsageSumSaturates(t *testing.T) {
 	cases := []struct {
 		name   string
 		tokens [2]int
-		want   int
+		want   int // the reported sum: access record and row
+		settle int // what the reservation settles
 	}{
-		{"two blocks of 2^62", [2]int{1 << 62, 1 << 62}, math.MaxInt},
-		{"a negative block", [2]int{-5, 2}, 2},
+		{"two blocks of 2^62", [2]int{1 << 62, 1 << 62}, math.MaxInt, math.MaxInt},
+		{"a negative block", [2]int{-5, 2}, 2, 2 + int(embedReservation(1))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -356,8 +363,8 @@ func TestEmbedMeterUsageSumSaturates(t *testing.T) {
 			rec := <-rig.recs
 			rows := rig.rows.all()
 			t.Logf("%s: ends %s; settled %+v; access record prompt %d usage %q; rows %d", tc.name, m.endsOf(), m.settled, rec.PromptTokens, rec.Usage, len(rows))
-			if m.endsOf() != "settle" || len(m.settled) != 1 || m.settled[0].PromptTokens != tc.want {
-				t.Errorf("%s: ends %s, settled %+v — want one Settle of %d prompt tokens", tc.name, m.endsOf(), m.settled, tc.want)
+			if m.endsOf() != "settle" || len(m.settled) != 1 || m.settled[0].PromptTokens != tc.settle {
+				t.Errorf("%s: ends %s, settled %+v — want one Settle of %d prompt tokens", tc.name, m.endsOf(), m.settled, tc.settle)
 			}
 			if rec.PromptTokens != tc.want || rec.Usage != llmlog.UsageBackend {
 				t.Errorf("%s: access record prompt %d usage %q, want %d and %q", tc.name, rec.PromptTokens, rec.Usage, tc.want, llmlog.UsageBackend)
