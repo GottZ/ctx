@@ -36,3 +36,6 @@ func ReservationHeld(r *Reservation) int64 {
 	defer r.mu.Unlock()
 	return r.held
 }
+
+// BodyLogTextMax bounds the log row's text of a message array (hardening 6).
+const BodyLogTextMax = bodyLogTextMax
