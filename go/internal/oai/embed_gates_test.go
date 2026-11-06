@@ -417,25 +417,84 @@ func TestEmbeddingsDeadlineInTheMiddleOfTheBlocks(t *testing.T) {
 // TestEmbeddingsUnknownDimensionReservesTheCeiling (O-09-3 (a)): without a
 // native dimension the reserve is gateway.embedding_max_floats × 4 B + the
 // encoder buffer — before any acquire; a budget that does not hold it is
-// 503 server_overloaded at once, no acquire, no wire contact.
+// 503 server_overloaded at once, no acquire, no wire contact. The ceiling
+// 2²⁴ floats (64 MiB of answer) lies above the decode share's clamp (3 × the
+// 16-MiB transport cap of a block's answer): the decode share fits, only the
+// answer's does not (Delta-Review 6 F6-2: at a ceiling of 2²⁰ the decode
+// share refused on its own, and a route that reserved nothing for an unknown
+// dimension passed the gate). The budget is the sum of the request's shares,
+// computed here from the named factors: one byte short ⇒ 503 at the entry;
+// the sum itself serves the request — the refusal is the ceiling's reserve,
+// exactly.
 func TestEmbeddingsUnknownDimensionReservesTheCeiling(t *testing.T) {
-	e := newEmbedEngine(t, 8)
-	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 2, 1)
-	rig.setSettings(func(s *oai.Settings) { s.EmbeddingMaxFloats = 1 << 20; s.InflightBudget = 4<<20 + 32<<10 })
-	_ = rig.recorder.Take()
-	start := time.Now()
-	a := rig.postEmbed(t, embedBody("emb", []string{"x"}))
-	took := time.Since(start)
-	code, _, _ := a.envelope(t)
-	if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded || took > 50*time.Millisecond {
-		t.Fatalf("%d %s after %v, want 503 server_overloaded within 50 ms", a.status, a.body, took)
+	// The factors as the gate's own constants: a mutated factor in the
+	// route must not move the expectation with it.
+	const (
+		ceiling      = 1 << 24  // gateway.embedding_max_floats for the test
+		floatBytes   = 4        // one float32 component held for the answer
+		encodeBuffer = 64 << 10 // the answer's encoder buffer
+		decodeFactor = 3        // the decoder buffer's doubling
+		transportCap = 16 << 20 // httpx.MaxResponseBytes: a block's read cap at this ceiling
+	)
+	body := embedBody("emb", []string{"x"})
+	shares := 3*int64(len(body)) + // the request share of the budget stage
+		ceiling*floatBytes + encodeBuffer + // the answer at the ceiling
+		decodeFactor*transportCap // the decode share of the one-input block
+	for _, tc := range []struct {
+		name   string
+		budget int64
+		served bool
+	}{
+		{"one byte short of the shares", shares - 1, false},
+		{"exactly the shares", shares, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEmbedEngine(t, 8)
+			rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 2, 1)
+			rig.setSettings(func(s *oai.Settings) { s.EmbeddingMaxFloats = ceiling; s.InflightBudget = tc.budget })
+			_ = rig.recorder.Take()
+			a := rig.postEmbed(t, body)
+			n := acquires(rig.recorder.Take())
+			t.Logf("budget %d (shares %d): answer %d %.120s; acquires %d, wire hits %d", tc.budget, shares, a.status, a.body, n, e.hits.Load())
+			if tc.served {
+				decodeEmbed(t, a)
+				if n != 1 || e.hits.Load() != 1 {
+					t.Errorf("acquires %d wire hits %d, want 1/1", n, e.hits.Load())
+				}
+				return
+			}
+			code, _, _ := a.envelope(t)
+			if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded {
+				t.Fatalf("%d %s, want 503 server_overloaded — the answer at the ceiling does not fit", a.status, a.body)
+			}
+			if n != 0 || e.hits.Load() != 0 {
+				t.Errorf("acquires %d wire hits %d, want 0/0 (the refusal stands at the entry)", n, e.hits.Load())
+			}
+		})
 	}
-	if n := acquires(rig.recorder.Take()); n != 0 || e.hits.Load() != 0 {
-		t.Errorf("acquires %d wire hits %d, want 0/0", n, e.hits.Load())
-	}
-	// A known native dimension reserves n × native × 4 B: the same budget
-	// serves it.
-	decodeEmbed(t, rig.postEmbed(t, embedBody("embsmall", []string{"x"})))
+	// A ceiling below the decode clamp and a small budget: an unknown
+	// dimension is refused at the entry within 50 ms (by the answer's share
+	// or the decode share's, whichever comes first), and a known native
+	// dimension is served at the same budget — it pays n × native × 4 B and
+	// the decode share of a one-input block at its dimension, never the
+	// ceiling.
+	t.Run("a known dimension does not pay the ceiling", func(t *testing.T) {
+		e := newEmbedEngine(t, 8)
+		rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 2, 1)
+		rig.setSettings(func(s *oai.Settings) { s.EmbeddingMaxFloats = 1 << 20; s.InflightBudget = 4<<20 + 32<<10 })
+		_ = rig.recorder.Take()
+		start := time.Now()
+		a := rig.postEmbed(t, embedBody("emb", []string{"x"}))
+		took := time.Since(start)
+		code, _, _ := a.envelope(t)
+		if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded || took > 50*time.Millisecond {
+			t.Fatalf("%d %s after %v, want 503 server_overloaded within 50 ms", a.status, a.body, took)
+		}
+		if n := acquires(rig.recorder.Take()); n != 0 || e.hits.Load() != 0 {
+			t.Errorf("acquires %d wire hits %d, want 0/0", n, e.hits.Load())
+		}
+		decodeEmbed(t, rig.postEmbed(t, embedBody("embsmall", []string{"x"})))
+	})
 }
 
 // discardWriter is a ResponseWriter that counts the answer and keeps
