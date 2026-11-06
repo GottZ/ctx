@@ -66,6 +66,7 @@ const (
 	memVisionID = "00000000-0000-4000-8000-0000000c4b01"
 	memTcapID   = "00000000-0000-4000-8000-0000000c4b02"
 	memCeilID   = "00000000-0000-4000-8000-0000000c4b03"
+	memCeilPub  = "00000000-0000-4000-8000-0000000c4b04"
 )
 
 // memEngine is a fake engine that counts and discards what it gets; fail
@@ -218,9 +219,14 @@ func memForm(t testing.TB, name string, lim int) memShape {
 	// combination of chat_class_gate_test.go at lim bytes, for the alias
 	// with the policy ceilings.
 	if cg, ok := strings.CutPrefix(name, "cg:"); ok {
+		cg, pub := strings.CutSuffix(cg, "@pub") // the public alias: the scan runs, the log row stores bodies
 		body, found := oai.ClassGateBody(cg, lim)
 		if !found || !json.Valid(body) {
 			t.Fatalf("class-gate form %q: found %v, valid JSON %v", cg, found, found && json.Valid(body))
+		}
+		if pub {
+			body = bytes.Replace(body, []byte(`"model":"`+oai.CGModel+`"`), []byte(`"model":"`+oai.CGModel+`pub"`), 1)
+			return memShape{body: body, model: oai.CGModel + "pub"}
 		}
 		return memShape{body: body, model: oai.CGModel}
 	}
@@ -339,6 +345,17 @@ func memForm(t testing.TB, name string, lim int) memShape {
 		s.body = []byte(pre + strings.Repeat("apikey:x ", (lim-len(pre)-len(suf))/9) + suf)
 	// Hardening 5, B-1: a model name of the whole body — plain, invalid
 	// UTF-8 (the decode made each byte a U+FFFD of 3 bytes), escaped.
+	// Hardening 6: message text of invalid bytes between ASCII ones — with
+	// body logging on, the log row's cleaning (each invalid byte one
+	// U+FFFD) grew a copy of the whole array to 8 × its size.
+	case "f16_text_ffa":
+		s.body = text("\xffa")
+	// Hardening 6: a developer message of non-ASCII text — the rewritten
+	// array is the request's second copy, the upstream body its third, and
+	// the meter's rune count (utf8.RuneCount) copied the array once more.
+	case "f17_developer_utf8":
+		pre, suf := `{"model":"`+model+`","messages":[{"role":"developer","content":"`, `"}]}`
+		s.body = []byte(pre + strings.Repeat("é", (lim-len(pre)-len(suf))/2) + suf)
 	case "f15a_model_long", "f15b_model_ff", "f15c_model_escaped":
 		pre, suf := `{"model":"`, `","messages":[{"role":"user","content":"x"}]}`
 		fill := map[string]string{"f15a": "a", "f15b": "\xff", "f15c": `\u00e9`}[name[:4]]
@@ -389,7 +406,8 @@ func newMemRig(t *testing.T, shape memShape, n int, held *heldSum) (*chatRig, *m
 	rig.reg.reload(t, append(chatAliases(),
 		chatAlias{memVisionID, backends.GlobalScope, "visbig", "chat", "chat", backends.SensCredentials, `{"vision":true,"vision_max_bytes":8388608}`, true},
 		chatAlias{memTcapID, backends.GlobalScope, "tcap", "chat", "chat", backends.SensCredentials, `{"tools.max_bytes":1048576,"tools.max_count":256}`, true},
-		chatAlias{memCeilID, backends.GlobalScope, oai.CGModel, "chat", "chat", backends.SensCredentials, oai.CGCeilPolicy, true}))
+		chatAlias{memCeilID, backends.GlobalScope, oai.CGModel, "chat", "chat", backends.SensCredentials, oai.CGCeilPolicy, true},
+		chatAlias{memCeilPub, backends.GlobalScope, oai.CGModel + "pub", "chat", "chat", backends.SensPublic, oai.CGCeilPolicy, true}))
 	rig.setSettings(func(s *oai.Settings) {
 		s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = memBudget, memCap, memRespCap
 		// CTX_FOLGEP_BODYLOG (hardening 6): body logging on, so the route's

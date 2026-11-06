@@ -257,6 +257,24 @@ func (c *chatCall) serve() {
 	})
 }
 
+// runeCount is utf8.RuneCount without its copy (hardening 6, the class
+// gate): on go1.27 RuneCount converts the bytes after the first non-ASCII
+// one into a string — a copy of the message array outside the reservation,
+// the fourth one of a rewritten array. The same count: an invalid byte is
+// one rune, as for range over a string.
+func runeCount(p []byte) int {
+	n := 0
+	for i := 0; i < len(p); n++ {
+		if p[i] < utf8.RuneSelf {
+			i++
+			continue
+		}
+		_, size := utf8.DecodeRune(p[i:])
+		i += size
+	}
+	return n
+}
+
 // reasoningOff is the alias's reasoning policy (design/02 §3.2: default off).
 func reasoningOff(a modelalias.Alias) bool {
 	return !a.Policy.Reasoning.Set || a.Policy.Reasoning.V != modelalias.ReasoningPassthrough
@@ -553,7 +571,7 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	}
 	res, refusal := c.d.Limiter.Admit(c.ctx, c.ca, c.alias, Estimate{
 		Op: llmlog.GatewayOpChat, MaxTokens: maxTokens, ClientMaxTokens: c.req.maxTokens > 0,
-		PromptBytes: len(c.req.messages), PromptRunes: utf8.RuneCount(c.req.messages), ServiceTier: c.req.serviceTier,
+		PromptBytes: len(c.req.messages), PromptRunes: runeCount(c.req.messages), ServiceTier: c.req.serviceTier,
 	})
 	if refusal != nil {
 		// The meter's Retry-After is exact (design/06 §4.4): both headers,
