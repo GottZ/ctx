@@ -13,6 +13,7 @@ package main
 //	go test -tags=integration -p 1 -count=1 -run 'TestV1ChatConcurrency' -v ./cmd/ctxd/
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -128,5 +129,50 @@ func TestV1ChatConcurrencyOneOnTheRealRouter(t *testing.T) {
 	}
 	if n := r.engine.hits.Load(); n != 2 {
 		t.Errorf("engine hits %d, want 2", n)
+	}
+}
+
+// TestV1ChatConcurrencyBulkLaneOnTheRealRouter is the lane gate over the
+// production router (Fremd-Review 2 N-5: the route's lane gate runs on a
+// stand-in meter, the adapter's without a router). The lane of a request is
+// what handler.ResolveLane gives meterLimiter.Admit — here service_tier flex
+// of an urgent-lane consumer. With the registry defaults (C 2, XU reserve
+// 0.25) the bulk lane holds max(1, ⌊2 × 0.75⌋) = 1 slot: while one flex
+// request is held, a second flex is 429 concurrency_limit_exceeded naming the
+// bulk lane and never reaches the engine; an urgent request beside them is
+// served.
+func TestV1ChatConcurrencyBulkLaneOnTheRealRouter(t *testing.T) {
+	r := newV1MeterRig(t, map[string]string{}, nil)
+	r.engine.hold.Store(int64(2 * time.Second))
+	flex := `{"model":"` + v1ChatAlias + `","messages":[{"role":"user","content":"hi"}],"service_tier":"flex"}`
+	urgent := `{"model":"` + v1ChatAlias + `","messages":[{"role":"user","content":"hi"}]}`
+	send := func(body string) <-chan v1MeterAnswer {
+		out := make(chan v1MeterAnswer, 1)
+		go func() {
+			st, h, b := r.do(http.MethodPost, "/v1/chat/completions", body)
+			out <- v1MeterAnswer{st, h.Clone(), b}
+		}()
+		return out
+	}
+	first := send(flex)
+	r.waitHits(t, 1)
+	second := <-send(flex)
+	third := send(urgent)
+	r.waitHits(t, 2)
+	a1, a3 := <-first, <-third
+	t.Logf("flex, held: %s", a1)
+	t.Logf("flex, parallel: %s", second)
+	t.Logf("urgent, parallel: %s", a3)
+	if a1.status != http.StatusOK || a3.status != http.StatusOK {
+		t.Errorf("flex held %d, urgent %d, want 200 and 200", a1.status, a3.status)
+	}
+	if why := concurrencyRefusal(second); why != "" {
+		t.Errorf("flex, parallel: %s — %s", second, why)
+	}
+	if !bytes.Contains(second.body, []byte("bulk lane")) {
+		t.Errorf("flex, parallel: the refusal does not name the bulk lane: %s", second.body)
+	}
+	if n := r.engine.hits.Load(); n != 2 {
+		t.Errorf("engine hits %d, want 2 (the refused flex request never reaches the engine)", n)
 	}
 }
