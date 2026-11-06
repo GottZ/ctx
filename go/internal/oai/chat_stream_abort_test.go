@@ -330,7 +330,13 @@ func TestStreamLeakProbe(t *testing.T) {
 	}) {
 		t.Errorf("goroutines %d after the streams and closed connections, %d before", runtime.NumGoroutine(), baseTotal)
 	}
-	acquires := len(clock.returned) + int(clock.tries.Load())
+	// Under clock.mu: acqClock.Acquire appends under it, and a late acquire
+	// can still return here (Delta-Review 4 F4-4: 5 of 1 000 -race runs
+	// reported this read).
+	clock.mu.Lock()
+	returned := len(clock.returned)
+	clock.mu.Unlock()
+	acquires := returned + int(clock.tries.Load())
 	t.Logf("200 streams: %d acquires, %d wire, %d settled, %d kept, %d aborted, %d rejected; route goroutines %d → %d, all goroutines %d → %d (connections closed)",
 		acquires, u.hits.Load(), l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load(), baseRoute, routeGoroutines(), baseTotal, runtime.NumGoroutine())
 }
