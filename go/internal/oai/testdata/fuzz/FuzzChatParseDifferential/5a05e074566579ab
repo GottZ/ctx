@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"model\":\"0\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"\":\"\",\"image_url\":{\"url\":\"data:image/png;base64,0000\"}}]}]}")

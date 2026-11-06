@@ -220,6 +220,7 @@ func (r fakeReservation) Reject(reason string, _ time.Duration) {
 	r.l.lastReason.Store(reason)
 }
 func (r fakeReservation) Headers() http.Header { return nil }
+func (r fakeReservation) Held() int64          { return 0 }
 
 func (l *fakeLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	l.admits.Add(1)
@@ -481,6 +482,7 @@ func (a chatAnswer) envelope(t testing.TB) (code, param, typ string) {
 // (Delta-Review 4 F4-6 — the live map would show it).
 func (r *chatRig) post(t testing.TB, body string, hdr ...string) chatAnswer {
 	t.Helper()
+	recordCorpus(body)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	for i := 0; i+1 < len(hdr); i += 2 {

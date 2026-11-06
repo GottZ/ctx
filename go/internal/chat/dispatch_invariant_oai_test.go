@@ -51,6 +51,7 @@ func (censusReservation) Keep()                        {}
 func (censusReservation) Abort()                       {}
 func (censusReservation) Reject(string, time.Duration) {}
 func (censusReservation) Headers() http.Header         { return nil }
+func (censusReservation) Held() int64                  { return 0 }
 
 type censusLimiter struct{}
 

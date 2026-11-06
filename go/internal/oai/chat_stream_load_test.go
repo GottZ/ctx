@@ -41,8 +41,8 @@ func loadConsumer(r *chatRig, h http.Handler) http.Handler {
 	})
 }
 
-// heapPeak samples the heap every 5 ms until stop is closed.
-func heapPeak(stop <-chan struct{}) <-chan uint64 {
+// streamHeapPeak samples the heap every 5 ms until stop is closed.
+func streamHeapPeak(stop <-chan struct{}) <-chan uint64 {
 	out := make(chan uint64, 1)
 	go func() {
 		var peak uint64
@@ -90,7 +90,7 @@ func TestStreamLoadGate(t *testing.T) {
 		runtime.ReadMemStats(&ms)
 		base := ms.HeapAlloc
 		stop := make(chan struct{})
-		peak := heapPeak(stop)
+		peak := streamHeapPeak(stop)
 		var ok, other atomic.Int64
 		var wg sync.WaitGroup
 		start := time.Now()

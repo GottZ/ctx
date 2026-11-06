@@ -44,8 +44,8 @@ type Settings struct {
 
 	// Meter are the limits of the per-consumer meter (gateway.<op>_rpm_default,
 	// gateway.<op>_tpm_default, gateway.tpm_reserve_default,
-	// gateway.xu_reserve_ratio; W06-10), read by the limiter cmd/ctxd wires
-	// into Deps.Limiter.
+	// gateway.xu_reserve_ratio; W06-10; gateway.consumer_concurrency_default;
+	// W06-11), read by the limiter cmd/ctxd wires into Deps.Limiter.
 	Meter MeterSettings
 
 	Auth AuthSettings
@@ -58,9 +58,14 @@ type MeterSettings struct {
 	// TPMReserve is the completion share of a chat reservation without a
 	// client maximum.
 	TPMReserve int64
-	// XUReserveRatio is the share r of each bucket the urgent lane keeps
-	// from the bulk lane of the same consumer, [0, 1).
+	// XUReserveRatio is the share r of each bucket and of the concurrency
+	// slots the urgent lane keeps from the bulk lane of the same consumer,
+	// [0, 1).
 	XUReserveRatio float64
+	// Concurrency is C, L1: the requests per consumer and op that may be
+	// open at once, waiting in the queue or running
+	// (gateway.consumer_concurrency_default; W06-11), at least 1.
+	Concurrency int64
 }
 
 // OpLimits are one op's requests and tokens per minute.

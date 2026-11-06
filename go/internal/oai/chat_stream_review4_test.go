@@ -200,8 +200,8 @@ func TestStreamMeterCutEstimateNeverAboveKeep(t *testing.T) {
 		prompt int64
 		wait   string
 	}{
-		{"a prompt above the bucket, TPM 2 000", keyquota.Limits{RPM: 1000, TPM: 2000, CompletionReserve: 1024}, big, nil, 4462, "31260"},
-		{"vision under the default chat TPM 60 000", keyquota.Limits{RPM: 30, TPM: 60000, CompletionReserve: 1024}, image, []rigOption{visbig}, 166741, "1042"},
+		{"a prompt above the bucket, TPM 2 000", keyquota.Limits{RPM: 1000, TPM: 2000, CompletionReserve: 1024, Concurrency: noL1}, big, nil, 4462, "31260"},
+		{"vision under the default chat TPM 60 000", keyquota.Limits{RPM: 30, TPM: 60000, CompletionReserve: 1024, Concurrency: noL1}, image, []rigOption{visbig}, 166741, "1042"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if p := promptEstimate(tc.body); p != tc.prompt {

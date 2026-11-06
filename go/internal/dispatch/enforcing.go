@@ -42,9 +42,12 @@ func (d *Dispatcher) Enforcing() bool {
 // background-capable role on a LOCAL row must carry a slots cap in the
 // derived policy. External-only origins are exempt — a deliberately uncapped
 // external target ("external skaliert selbst", design/01 §3.2) must not
-// force the fallback forever. Each uncovered origin logs ONE WARN per
-// derivation (reload), naming origin + the background roles that reach it —
-// the operator sees WHY Enforcing is off.
+// force the fallback forever. ctx targets count as local: B's own order must
+// hold up to A's door (design/04 §4.14) — the owner-side projection never
+// marks a provider_class ctx row External, whatever its locality (F-W7).
+// Each uncovered origin logs ONE WARN per derivation (reload), naming origin
+// + the background roles that reach it — the operator sees WHY Enforcing is
+// off.
 func deriveCoverage(byOrigin map[string][]BackendRow, targets map[string]TargetPolicy, logger *slog.Logger) bool {
 	origins := make([]string, 0, len(byOrigin))
 	for o := range byOrigin {

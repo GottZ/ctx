@@ -168,6 +168,11 @@ type LimitReservation interface {
 	// §4.4): a route writes them on its successful answer before its first
 	// byte, never on a refusal (lead decision M2 (c)).
 	Headers() http.Header
+	// Held is the tokens the admission charged — what Keep books (the
+	// meter's estimate, at most the bucket's capacity). A route that weighs
+	// its own booking against the reservation reads it here, never rebuilds
+	// it (one source, lead decision 2026-11-06).
+	Held() int64
 }
 
 // LimitRefusal is the limiter's answer for a refused request: a code of the
@@ -244,6 +249,12 @@ type Plan struct {
 	Chain []backends.Backend
 	// Lane is the resolved lane, "urgent" or "bulk".
 	Lane string
+	// Continuation reports that Acquirer.Continue is the continuation door
+	// of the dispatcher (A03-W17, masterplan K21): a request whose weight
+	// plan has more than one block may run them. false ⇒ k = 1 — a route
+	// refuses a request that needs a second block with 400 unsupported_value
+	// (design/02 §4.8, fail-closed). handler.V1Admission sets it.
+	Continuation bool
 }
 
 // RequestAcquirer is the per-request acquirer of a Plan: llm.Acquirer plus

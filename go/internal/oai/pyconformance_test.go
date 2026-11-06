@@ -17,12 +17,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,7 +51,10 @@ const (
 // CTX_CHAT_STREAM_BASE_URL for test_chat_stream.py — the same in both runs,
 // so the house-format run still fails exactly the error cases. The meter
 // fixture (conformanceMeter, W06-10) is served under CTX_METER_BASE_URL for
-// test_meter_retry.py, fresh per run.
+// test_meter_retry.py, the L1 fixture (conformanceConcurrency, W06-11) under
+// CTX_CONCURRENCY_BASE_URL for test_concurrency_retry.py, both fresh per run.
+// The embeddings fixture (conformanceEmbeddings, W02-09) is served under
+// CTX_EMBED_BASE_URL for test_embeddings.py.
 func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Helper()
 	uv, err := exec.LookPath("uv")
@@ -65,6 +70,10 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Cleanup(meter.Close)
 	chatStream := httptest.NewServer(conformanceChatStream(t))
 	t.Cleanup(chatStream.Close)
+	embeddings := httptest.NewServer(conformanceEmbeddings(t))
+	t.Cleanup(embeddings.Close)
+	concurrency := httptest.NewServer(conformanceConcurrency(t))
+	t.Cleanup(concurrency.Close)
 	moduleRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -76,8 +85,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 		"pytest", "-p", "no:cacheprovider", "-v", "conformance/oai")
 	cmd.Dir = moduleRoot
 	cmd.Env = append(childEnv(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/",
-		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/",
-		"CTX_CHAT_STREAM_BASE_URL="+chatStream.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
+		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/", "CTX_EMBED_BASE_URL="+embeddings.URL+"/",
+		"CTX_CONCURRENCY_BASE_URL="+concurrency.URL+"/", "CTX_CHAT_STREAM_BASE_URL="+chatStream.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -125,7 +134,7 @@ func conformanceMeter(t *testing.T) http.Handler {
 	up := newUpstream(t, answerSGLang)
 	m := keyquota.New(time.Now)
 	m.MarkSeeded()
-	meter := &rigMeter{m: m, lim: keyquota.Limits{RPM: 12, TPM: 1 << 30, CompletionReserve: 1024}}
+	meter := &rigMeter{m: m, lim: keyquota.Limits{Concurrency: noL1, RPM: 12, TPM: 1 << 30, CompletionReserve: 1024}}
 	rig := newChatRig(t, []backends.Backend{up.row("spark", backends.TrustFull, 1)}, 64, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	return rig.router
 }
@@ -164,6 +173,60 @@ func conformanceChatStream(t *testing.T) http.Handler {
 	mount("busy", llama.steps(), 2, 1, withWait(100*time.Millisecond))
 	mount("keepalive", append([]sseStep{{wait: cfKeepaliveSilence}}, llama.steps()...), 4, 1,
 		withWait(0), withStream(5*time.Second, time.Second, 30*time.Second))
+	return mux
+}
+
+// conformanceEmbeddings is the fixture of test_embeddings.py: the
+// embeddings route over a fake engine of native dimension 4096.
+func conformanceEmbeddings(t *testing.T) http.Handler {
+	t.Helper()
+	e := newEmbedEngine(t, 4096)
+	return newEmbedRig(t, []backends.Backend{e.row("conf", backends.ProtocolOpenAI, 1)}, 33, 1).router
+}
+
+// conformanceConcurrency is the L1 fixture of test_concurrency_retry.py
+// (W06-11): the chat route over the real meter with C = 1. The engine holds
+// a request whose message is "hold" until POST /release (at most 30 s), so
+// the consumer's one slot stays taken until the test lets it go. GET /held
+// answers 204 once that request reached the engine — it holds the slot from
+// then on, so the test probes only after it (a probe racing the holder could
+// take the one slot first and leave the holder refused) — and 504 after 10 s.
+func conformanceConcurrency(t *testing.T) http.Handler {
+	t.Helper()
+	release, held := make(chan struct{}), make(chan struct{})
+	var once, heldOnce sync.Once
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if bytes.Contains(raw, []byte(`"hold"`)) {
+			heldOnce.Do(func() { close(held) })
+			select {
+			case <-release:
+			case <-time.After(30 * time.Second):
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, answerSGLang)
+	}))
+	t.Cleanup(engine.Close)
+	m := keyquota.New(time.Now)
+	m.MarkSeeded()
+	meter := &rigMeter{m: m, lim: keyquota.Limits{RPM: 1000, TPM: 1 << 30, CompletionReserve: 1024, Concurrency: 1}}
+	up := &upstream{srv: engine} // for its row
+	rig := newChatRig(t, []backends.Backend{up.row("spark", backends.TrustFull, 1)}, 64, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", rig.router)
+	mux.HandleFunc("GET /held", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-held:
+			w.WriteHeader(http.StatusNoContent)
+		case <-time.After(10 * time.Second):
+			w.WriteHeader(http.StatusGatewayTimeout)
+		}
+	})
+	mux.HandleFunc("POST /release", func(w http.ResponseWriter, _ *http.Request) {
+		once.Do(func() { close(release) })
+		w.WriteHeader(http.StatusNoContent)
+	})
 	return mux
 }
 

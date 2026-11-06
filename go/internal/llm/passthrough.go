@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -51,6 +52,11 @@ type UpstreamSpec struct {
 	MaxTokens int
 	// ReasoningOff applies the reasoning-off policy (stage 4).
 	ReasoningOff bool
+	// Reserve, when set, is offered the exact size of the body before
+	// BuildUpstreamBody allocates it; its error is BuildUpstreamBody's
+	// (internal/oai books the copy against the request's in-flight
+	// reservation, FOLGE-P).
+	Reserve func(n int) error
 }
 
 // samplingKeys are the spec-named sampling parameters a row's model_map
@@ -118,6 +124,12 @@ var engineSchedulingKeys = []string{"priority", "id_slot", "bootstrap_host", "bo
 // absent n (E4). Its keys are disjoint from every other stage's, so the
 // ZDR force is still the last word on provider. Stage 6 (band priority,
 // A03-W13) does not exist yet; it goes after stage 5.
+//
+// The body is the merged map written by encodeUpstream: keys sorted, every
+// value as it stands but its insignificant whitespace — a client value
+// reaches the engine with the bytes it sent, no HTML or JS escaping — in one
+// allocation of the exact size, offered to s.Reserve first. Its size is
+// bounded by the client values plus the frame and row stages.
 func BuildUpstreamBody(s UpstreamSpec, b *backends.Backend) ([]byte, error) {
 	if s.MaxTokens <= 0 {
 		return nil, fmt.Errorf("llm: passthrough spec max_tokens %d: the ceiling comes from the caller", s.MaxTokens)
@@ -166,7 +178,79 @@ func BuildUpstreamBody(s UpstreamSpec, b *backends.Backend) ([]byte, error) {
 	// model_map param and no extra_body (a row misconfiguration, silent
 	// otherwise) can replace what the client sent.
 	m["messages"] = s.Messages
-	return json.Marshal(m)
+	return encodeUpstream(m, s.Reserve)
+}
+
+// encodeUpstream writes m as one JSON object — the keys in sorted order and
+// spelled as json.Marshal spells a map key, every value checked and compacted
+// (insignificant whitespace removed, nothing escaped: json.Marshal rewrote <,
+// >, & and U+2028/U+2029 inside a client string to six bytes each, FOLGE-P
+// P-4) — into one buffer whose size is fixed and offered to reserve before it
+// is allocated (compacting only shrinks a value). json.Compact is not used:
+// the jsonv2 implementation buffers the whole value once more.
+func encodeUpstream(m map[string]json.RawMessage, reserve func(int) error) ([]byte, error) {
+	keys := slices.Sorted(maps.Keys(m))
+	quoted := make([][]byte, len(keys))
+	size := 2 // the braces
+	for i, k := range keys {
+		q, err := json.Marshal(k)
+		if err != nil {
+			return nil, fmt.Errorf("llm: encode key %q: %w", k, err)
+		}
+		quoted[i] = q
+		size += len(q) + 1 + max(len(m[k]), len("null")) + 1 // key, colon, value, comma
+	}
+	if reserve != nil {
+		if err := reserve(size); err != nil {
+			return nil, err
+		}
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, size))
+	buf.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(quoted[i])
+		buf.WriteByte(':')
+		v := m[k]
+		if v == nil {
+			buf.WriteString("null") // json.Marshal's form of a nil RawMessage
+			continue
+		}
+		if !json.Valid(v) {
+			return nil, fmt.Errorf("llm: encode %s: the value is no valid JSON", k)
+		}
+		buf.Write(appendCompact(buf.AvailableBuffer(), v))
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+// appendCompact appends the valid JSON value v without the whitespace
+// between its tokens — json.Compact's output — and nothing else changed.
+func appendCompact(dst, v []byte) []byte {
+	inString, escaped := false, false
+	start := 0
+	for i, c := range v {
+		switch {
+		case inString:
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+		case c == '"':
+			inString = true
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			dst = append(dst, v[start:i]...)
+			start = i + 1
+		}
+	}
+	return append(dst, v[start:]...)
 }
 
 func isSamplingKey(k string) bool {

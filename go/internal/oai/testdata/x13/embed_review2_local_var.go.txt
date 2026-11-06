@@ -1,0 +1,12 @@
+// census-want: 1
+// Review 2 probe B: the blockFunc parameter copied into a local variable and
+// that variable started as a goroutine after the lease went back.
+package oai
+
+import "github.com/GottZ/ctx/internal/dispatch"
+
+func (r subBlockRun) relay(do blockFunc, lease *dispatch.Lease) {
+	g := do
+	lease.Release()
+	go g(0, 0, 1, lease, nil, 0)
+}

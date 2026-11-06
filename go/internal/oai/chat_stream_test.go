@@ -221,7 +221,7 @@ func TestStreamUsageEstimated(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			u := newUpstream(t, "")
 			u.setRespond(sseRespond(tc.steps, nil, nil))
-			lim := &usageLimiter{}
+			lim := &streamUsageLimiter{}
 			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings, withUsageLimiter(lim))
 			body := streamBody("chat")
 			a := postStream(context.Background(), t, serveHTTP(t, rig.router), body)
@@ -253,7 +253,7 @@ func TestStreamUsageEstimated(t *testing.T) {
 		// a full refund, to Keep).
 		u := newUpstream(t, "")
 		u.setRespond(chRespond(http.StatusBadRequest, `{"error":{"message":"bad"}}`))
-		lim := &usageLimiter{}
+		lim := &streamUsageLimiter{}
 		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings, withUsageLimiter(lim))
 		a := postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
 		if a.status != http.StatusBadRequest {
@@ -273,7 +273,7 @@ func TestStreamUsageEstimated(t *testing.T) {
 		end := newUpstreamEnd()
 		u := newUpstream(t, "")
 		u.setRespond(sseRespond([]sseStep{{data: sglangChunk("hello", "")}, {data: sglangChunk(" from", "")}, {hold: hold}}, nil, end))
-		lim := &usageLimiter{}
+		lim := &streamUsageLimiter{}
 		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings, withUsageLimiter(lim))
 		srv := serveHTTP(t, rig.router)
 		ctx, cancel := context.WithCancel(context.Background())

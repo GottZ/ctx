@@ -1,0 +1,28 @@
+// census-want: 1
+// Fremd-Review 1 F-2 probe: the block function bound as a method value in
+// the attempt and started as a goroutine.
+package oai
+
+import (
+	"context"
+	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/llm"
+)
+
+func (c *call) wireBlock(b *backends.Backend, lo, hi int, lease *dispatch.Lease, rc context.Context) error {
+	_, _, err := embed.EmbedRaw(rc, *b, "m", c.inputs[lo:hi], 0)
+	return err
+}
+
+func (c *call) walk(ctx context.Context, chain []backends.Backend) {
+	_, _, _ = llm.WalkChain(ctx, chain, "embed", c.acq, nil, llm.WalkRules{},
+		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration) (dispatch.Usage, bool, error) {
+			f := c.wireBlock
+			go f(b, 0, 1, lease, context.Background())
+			return dispatch.Usage{}, true, nil
+		})
+}

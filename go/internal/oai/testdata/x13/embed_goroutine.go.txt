@@ -1,0 +1,21 @@
+// census-want: 1
+// W02-09 Z4 probe: embed.EmbedRaw started as a goroutine inside the attempt
+// — it outlives the lease of the block.
+package oai
+
+import (
+	"context"
+	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/llm"
+)
+
+func goroutineEmbed(ctx context.Context) {
+	llm.WalkChain(ctx, nil, "embed", nil, nil, llm.WalkRules{}, func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+		go embed.EmbedRaw(context.Background(), *b, "m", []string{"x"}, 0)
+		return dispatch.Usage{}, false, nil
+	})
+}

@@ -502,41 +502,44 @@ func (a streamAnswer) commentsBeforeData() int {
 	return n
 }
 
-// usageLimiter is a fake limiter that records the usage of every Settle.
-type usageLimiter struct {
+// streamUsageLimiter is a fake limiter that records the usage of every Settle.
+type streamUsageLimiter struct {
 	fakeLimiter
 	mu      sync.Mutex
 	settled []dispatch.Usage
 }
 
-type usageReservation struct{ l *usageLimiter }
+type streamUsageReservation struct{ l *streamUsageLimiter }
 
-func (r usageReservation) Settle(u dispatch.Usage) {
+func (r streamUsageReservation) Settle(u dispatch.Usage) {
 	r.l.settles.Add(1)
 	r.l.mu.Lock()
 	r.l.settled = append(r.l.settled, u)
 	r.l.mu.Unlock()
 }
-func (r usageReservation) Keep()  { r.l.keeps.Add(1) }
-func (r usageReservation) Abort() { r.l.aborts.Add(1) }
-func (r usageReservation) Reject(reason string, _ time.Duration) {
+func (r streamUsageReservation) Keep()  { r.l.keeps.Add(1) }
+func (r streamUsageReservation) Abort() { r.l.aborts.Add(1) }
+func (r streamUsageReservation) Reject(reason string, _ time.Duration) {
 	r.l.rejects.Add(1)
 	r.l.lastReason.Store(reason)
 }
-func (r usageReservation) Headers() http.Header { return nil }
+func (r streamUsageReservation) Headers() http.Header { return nil }
 
-func (l *usageLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
+// Held: the fake charges nothing (as W02-09's test reservations).
+func (r streamUsageReservation) Held() int64 { return 0 }
+
+func (l *streamUsageLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	l.admits.Add(1)
-	return usageReservation{l}, nil
+	return streamUsageReservation{l}, nil
 }
 
-func (l *usageLimiter) usages() []dispatch.Usage {
+func (l *streamUsageLimiter) usages() []dispatch.Usage {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]dispatch.Usage(nil), l.settled...)
 }
 
-func withUsageLimiter(l *usageLimiter) rigOption {
+func withUsageLimiter(l *streamUsageLimiter) rigOption {
 	return func(r *chatRig) { r.deps.Limiter = l }
 }
 

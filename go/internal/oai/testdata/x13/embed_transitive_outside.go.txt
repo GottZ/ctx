@@ -1,0 +1,22 @@
+// census-want: 1
+// W02-09 Z4 probe: the block function takes a lease, but it is reached
+// from a function that runs under none (outside any WalkChain attempt) —
+// the closure over the referencing functions finds it.
+package oai
+
+import (
+	"context"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/embed"
+)
+
+func (c *call) wireBlock(rc context.Context, b *backends.Backend, lease *dispatch.Lease) error {
+	_, _, err := embed.EmbedRaw(rc, *b, "m", c.inputs, 0)
+	return err
+}
+
+func (c *call) prefetch(ctx context.Context, b *backends.Backend) error {
+	return c.wireBlock(ctx, b, nil)
+}

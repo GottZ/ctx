@@ -57,7 +57,7 @@ func darkLaunchRouter(t *testing.T) *chi.Mux {
 // TestDarkLaunchRouterInventory logs every "METHOD pattern" of the router,
 // sorted, the model-group entries marked; it requires that every route under
 // /v1 or /v2 is one the /v1 group registers (W02-05; W02-07 adds the chat
-// route).
+// route, W02-09 the embeddings route).
 func TestDarkLaunchRouterInventory(t *testing.T) {
 	r := darkLaunchRouter(t)
 	var lines []string
@@ -68,7 +68,8 @@ func TestDarkLaunchRouterInventory(t *testing.T) {
 			mark = "  [model group]"
 			model++
 			switch name := method + " " + route; name {
-			case "GET /v1/models", "GET /v1/models/*", "POST /v1/chat/completions": // W02-05, W02-07
+			case "GET /v1/models", "GET /v1/models/*", "POST /v1/chat/completions", // W02-05, W02-07
+				"POST /v1/embeddings": // W02-09
 			default:
 				t.Errorf("unexpected model-group route %s", name)
 			}
@@ -100,6 +101,7 @@ var goldenRequests = []struct {
 	{name: "GET /v1/models (HTML)", method: http.MethodGet, path: "/v1/models", accept: "text/html", v1: true},
 	{name: "DELETE /v1/models", method: http.MethodDelete, path: "/v1/models", v1: true},
 	{name: "POST /v1/chat/completions", method: http.MethodPost, path: "/v1/chat/completions", v1: true},
+	{name: "POST /v1/embeddings", method: http.MethodPost, path: "/v1/embeddings", v1: true},
 }
 
 // goldenVolatile are the headers that vary per request by design.

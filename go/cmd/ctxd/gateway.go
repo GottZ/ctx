@@ -279,15 +279,19 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 	}
 	sub := keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op, Lane: lane}
 	res, d := l.meter.Admit(sub,
-		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio},
+		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: s.Concurrency},
 		keyquota.Estimate{PromptRunes: est.PromptRunes, MaxCompletion: est.MaxTokens, ClientMax: est.ClientMaxTokens, InputRunes: est.InputRunes})
 	switch {
 	case d.Allowed:
 		return meterReservation{res}, nil
 	case d.Reason == keyquota.ReasonInvalid:
 		slog.Error("gateway: the meter refused an invalid subject (wiring defect)", "op", est.Op,
-			"consumer", sub.ConsumerID != "", "tenant", sub.TenantID != "", "rpm", lim.RPM, "tpm", lim.TPM)
+			"consumer", sub.ConsumerID != "", "tenant", sub.TenantID != "", "rpm", lim.RPM, "tpm", lim.TPM, "concurrency", s.Concurrency)
 		return nil, &oai.LimitRefusal{Code: oai.CodeInternalError, Message: d.Message, ShouldRetry: false}
+	case d.Reason == keyquota.ReasonConcurrency:
+		// L1 (W06-11): 429 concurrency_limit_exceeded, Retry-After 1 s, the
+		// honest lower bound (design/06 §4.4).
+		return nil, &oai.LimitRefusal{Code: oai.CodeConcurrencyLimitExceeded, Message: d.Message, RetryAfter: d.RetryAfter, ShouldRetry: d.Retryable}
 	}
 	// rate_requests, rate_tokens and warming: 429 rate_limit_exceeded with
 	// the exact Retry-After (design/06 §4.4).
@@ -331,6 +335,7 @@ func v1Routes(d oai.Deps) []modelRoute {
 		{http.MethodGet, "/models", oai.ListModels(d)},
 		{http.MethodGet, "/models/*", oai.GetModel(d)},
 		{http.MethodPost, "/chat/completions", oai.ChatCompletions(d)},
+		{http.MethodPost, "/embeddings", oai.Embeddings(d)},
 	}
 }
 

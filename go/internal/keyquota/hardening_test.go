@@ -39,7 +39,7 @@ func TestHeldDecoysBuyNoBurst(t *testing.T) {
 
 func heldDecoys(t *testing.T, end func(*keyquota.Reservation)) {
 	const L = 60000
-	l := keyquota.Limits{RPM: 30, TPM: L, CompletionReserve: 1024}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 30, TPM: L, CompletionReserve: 1024}
 	whole := keyquota.Estimate{MaxCompletion: L, ClientMax: true} // capped at L
 	for _, decoys := range []int{1, 2, 9} {
 		c := newClock()
@@ -97,7 +97,7 @@ func heldDecoys(t *testing.T, end func(*keyquota.Reservation)) {
 func TestSettleBeforeExpiryRefundsTheUnexpiredPart(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 100, TPM: 60000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000}
 	s := chat(keyquota.LaneUrgent)
 	a, _ := m.Admit(s, l, keyquota.Estimate{MaxCompletion: 1042, ClientMax: true})
 	if _, d := m.Admit(s, l, keyquota.Estimate{MaxCompletion: 1000, ClientMax: true}); !d.Allowed || d.Headers.ResetTokens != 2042*time.Millisecond {
@@ -119,7 +119,7 @@ func TestSettleBeforeExpiryRefundsTheUnexpiredPart(t *testing.T) {
 func TestAbortRightAfterAdmissionRefundsInFull(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 100, TPM: 60000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000}
 	s := chat(keyquota.LaneUrgent)
 	if _, d := m.Admit(s, l, keyquota.Estimate{MaxCompletion: 20000, ClientMax: true}); !d.Allowed {
 		t.Fatal(d)
@@ -143,7 +143,7 @@ func TestAbortRightAfterAdmissionRefundsInFull(t *testing.T) {
 func TestDebtIsBookedFromTheSettle(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 100, TPM: 60000}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 100, TPM: 60000}
 	s := chat(keyquota.LaneUrgent)
 	r, _ := m.Admit(s, l, small)
 	c.add(2 * time.Minute)
@@ -158,7 +158,7 @@ func TestDebtIsBookedFromTheSettle(t *testing.T) {
 // millisecond is rounded up — at 7 rpm one request leaves 8.571428571 s.
 func TestResetRoundsUp(t *testing.T) {
 	m := seeded(newClock())
-	r, _ := m.Admit(chat(keyquota.LaneUrgent), keyquota.Limits{RPM: 7, TPM: 60000}, small)
+	r, _ := m.Admit(chat(keyquota.LaneUrgent), keyquota.Limits{Concurrency: noL1, RPM: 7, TPM: 60000}, small)
 	if got := r.Headers().Get("x-ratelimit-reset-requests"); got != "8.572s" {
 		t.Errorf("x-ratelimit-reset-requests %q, want 8.572s (8.571428571 s rounded up)", got)
 	}
@@ -205,7 +205,7 @@ func TestWallClockStepLeavesTheMeterAlone(t *testing.T) {
 		}
 		m := keyquota.New(now)
 		m.MarkSeeded()
-		l := keyquota.Limits{RPM: 2, TPM: 60000, CompletionReserve: 1024}
+		l := keyquota.Limits{Concurrency: noL1, RPM: 2, TPM: 60000, CompletionReserve: 1024}
 		_, d1 := m.Admit(chat(keyquota.LaneUrgent), l, keyquota.Estimate{})
 		mu.Lock()
 		wallStep = step
@@ -235,7 +235,7 @@ func TestWallClockStepLeavesTheMeterAlone(t *testing.T) {
 func TestAbsurdUsageLocksTheOpNamedLimit(t *testing.T) {
 	c := newClock()
 	m := seeded(c)
-	l := keyquota.Limits{RPM: 30, TPM: 60000, CompletionReserve: 1024}
+	l := keyquota.Limits{Concurrency: noL1, RPM: 30, TPM: 60000, CompletionReserve: 1024}
 	e := keyquota.Estimate{PromptRunes: 100} // 56 prompt tokens + 1 024 reserve
 	locked := keyquota.Subject{ConsumerID: "c1", TenantID: "t1", Op: keyquota.OpChat}
 	r, d := m.Admit(locked, l, e)

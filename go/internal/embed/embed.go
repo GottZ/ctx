@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -54,17 +55,24 @@ func (p Prefix) text() string {
 // --- Ollama wire format ---.
 
 type ollamaEmbedRequest struct {
-	Model   string       `json:"model"`
-	Input   string       `json:"input"`
-	Options *ollamaOpts  `json:"options,omitempty"`
+	Model string `json:"model"`
+	// Input is the bare string of the internal path's one input (the body
+	// stays byte-identical to the single-string wire, W02-09 G2) or the list
+	// of a gateway sub-block (wireInput.value).
+	Input   any         `json:"input"`
+	Options *ollamaOpts `json:"options,omitempty"`
 }
 
 type ollamaOpts struct {
 	NumCtx int `json:"num_ctx,omitempty"`
 }
 
-type ollamaEmbedResponse struct {
-	Embeddings [][]float64 `json:"embeddings"`
+// ollamaEmbedResponse decodes the vectors straight into the element type the
+// caller holds: float64 for the internal 1024-d path (its normalization stays
+// bit-identical), float32 for the gateway (design/02 §4.2.1: the vectors of
+// an embeddings answer are held as float32 from the wire on).
+type ollamaEmbedResponse[T floatElem] struct {
+	Embeddings [][]T `json:"embeddings"`
 	// PromptEvalCount is ollama's token count of the embedded input — the
 	// MW22/C1 charge dimension of an embed wire call (prompt side only).
 	// Absent field ⇒ 0 ⇒ the call site charges nothing (uncharged, never an
@@ -76,12 +84,15 @@ type ollamaEmbedResponse struct {
 
 type openAIEmbedRequest struct {
 	Model string `json:"model"`
-	Input string `json:"input"`
+	Input any    `json:"input"` // see ollamaEmbedRequest.Input
 }
 
-type openAIEmbedResponse struct {
+type openAIEmbedResponse[T floatElem] struct {
 	Data []struct {
-		Embedding []float64 `json:"embedding"`
+		// Index is the position of the input the vector belongs to: the
+		// answer is re-aligned by it (alignVectors), never read in order.
+		Index     int `json:"index"`
+		Embedding []T `json:"embedding"`
 	} `json:"data"`
 	// Usage carries the standard OpenAI-wire token accounting (same charge
 	// role as ollama's prompt_eval_count above). Voyage AI reports
@@ -93,6 +104,46 @@ type openAIEmbedResponse struct {
 	} `json:"usage"`
 }
 
+// floatElem is the element type a wire answer decodes into.
+type floatElem interface{ ~float32 | ~float64 }
+
+// wireInput is the input of one embed wire call: the texts and whether the
+// one text of the internal path goes out as a bare string. Only Embed sets
+// bare — its body is byte-identical to the single-string wire every
+// deployed backend has seen (design/02 §4.8 "Wire"); a gateway sub-block is
+// always a list, also with one input.
+type wireInput struct {
+	texts []string
+	bare  bool
+}
+
+// value is the JSON value of the body's "input" key.
+func (in wireInput) value() any {
+	if in.bare {
+		return in.texts[0]
+	}
+	return in.texts
+}
+
+// marshal encodes the request body. The internal path keeps json.Marshal —
+// its body stays byte-identical to the single-string wire (W02-09 G2,
+// TestInternalEmbedBitIdenticalToBase). A gateway list goes out without
+// HTML escaping: json.Marshal turns each <, > and & into six bytes, and a
+// batch of HTML would grow six-fold on its way upstream, past every reserve
+// (W02-09 hardening H-2); the backend reads JSON, not HTML.
+func (in wireInput) marshal(v any) ([]byte, error) {
+	if in.bare {
+		return json.Marshal(v)
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), nil
+}
+
 // Embed generates an embedding via the backend tuple, truncates to 1024d,
 // and L2-normalizes. Host and Protocol arrive as one backends.Backend value
 // (F1-W5) — the wire path (/api/embed vs /v1/embeddings) can never diverge
@@ -102,27 +153,18 @@ type openAIEmbedResponse struct {
 // prompt tokens into the dispatch usage meter); 0 when the backend reports
 // none — the call site then charges nothing instead of estimating (C1).
 func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) (vec []float32, promptTokens int, err error) {
-	input := prefix.text() + text
+	in := wireInput{texts: []string{prefix.text() + text}, bare: true}
 
-	var raw []float64
-
-	// The hop target comes from the row alone and goes down with the client:
-	// both wires stamp the request and observe the answer with it.
-	hop := b.HopTarget(fedhop.WireEmbed)
-	if b.Protocol == backends.ProtocolOpenAI {
-		raw, promptTokens, err = embedOpenAI(ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, b.Model, input)
-	} else {
-		raw, promptTokens, err = embedOllama(ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, b.Model, input, b.NumCtx)
-	}
+	raw, promptTokens, err := embedWire[float64](ctx, b, b.Model, in, httpx.MaxResponseBytes)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	if len(raw) < TargetDims {
-		return nil, 0, fmt.Errorf("embed: embedding too short: got %d, need >= %d", len(raw), TargetDims)
+	if len(raw[0]) < TargetDims {
+		return nil, 0, fmt.Errorf("embed: embedding too short: got %d, need >= %d", len(raw[0]), TargetDims)
 	}
 
-	vec = l2Normalize(raw[:TargetDims])
+	vec = l2Normalize(raw[0][:TargetDims])
 
 	if err := qualityGate(vec); err != nil {
 		return nil, 0, err
@@ -131,13 +173,86 @@ func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) 
 	return vec, promptTokens, nil
 }
 
-func embedOllama(ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model, input string, numCtx int) ([]float64, int, error) {
-	reqBody := ollamaEmbedRequest{Model: model, Input: input}
+// EmbedRaw embeds the inputs of one gateway sub-block (design/02 §4.8,
+// §4.13; wave W02-09): the texts as the client sent them — no instruct
+// prefix (an embedding client prepends its own, a second one would move the
+// vector space), no 1024-d cut, no normalization — one vector per input, in
+// input order (re-aligned by data[].index), at the row's native length.
+// model is the row's model for the role. dims > 0 is the expected length
+// (the alias's embedding.native_dims); 0 lets the first vector set it, and
+// every other vector must match. The quality check (rawQuality) is finite
+// components, the expected length and a norm > 0. maxBytes caps the
+// answer the wire reads (the caller sizes it from the block and reserves the
+// decode transient for it, W02-09 hardening H-3); ≤ 0 or above
+// httpx.MaxResponseBytes is that transport cap. An answer past the cap
+// fails with httpx.ErrResponseTooLarge (a malformed answer for the failover
+// classifier: stop the chain). The wire sites and the client choice are
+// Embed's: httpClients.For(b.EgressGuarded()).
+func EmbedRaw(ctx context.Context, b backends.Backend, model string, inputs []string, dims int, maxBytes int64) (vecs [][]float32, promptTokens int, err error) {
+	if len(inputs) == 0 {
+		return nil, 0, errors.New("embed: no input")
+	}
+	if maxBytes <= 0 || maxBytes > httpx.MaxResponseBytes {
+		maxBytes = httpx.MaxResponseBytes
+	}
+	vecs, promptTokens, err = embedWire[float32](ctx, b, model, wireInput{texts: inputs}, maxBytes)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := rawQuality(vecs, dims); err != nil {
+		return nil, 0, err
+	}
+	return vecs, promptTokens, nil
+}
+
+// embedWire is the protocol choice of both embed paths: the row's wire
+// (/v1/embeddings for "openai", /api/embed for every other protocol — the
+// pre-W5 dispatch semantics, incl. empty) with the row's egress client.
+func embedWire[T floatElem](ctx context.Context, b backends.Backend, model string, in wireInput, limit int64) ([][]T, int, error) {
+	// The hop target comes from the row alone and goes down with the client:
+	// both wires stamp the request and observe the answer with it.
+	hop := b.HopTarget(fedhop.WireEmbed)
+	if b.Protocol == backends.ProtocolOpenAI {
+		return embedOpenAI[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, limit)
+	}
+	return embedOllama[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, b.NumCtx, limit)
+}
+
+// rawQuality is EmbedRaw's quality check: every component finite, every
+// vector of the expected length (dims, or the first vector's when dims is
+// 0) and of a norm above zero. The internal gate (qualityGate: norm ≈ 1,
+// variance floor) is a property of the normalized 1024-d space and does not
+// apply to raw vectors.
+func rawQuality(vecs [][]float32, dims int) error {
+	if dims <= 0 && len(vecs) > 0 {
+		dims = len(vecs[0])
+	}
+	for i, v := range vecs {
+		if len(v) != dims {
+			return fmt.Errorf("embed: raw quality: vector %d has %d dimensions, want %d", i, len(v), dims)
+		}
+		var sumSq float64
+		for _, x := range v {
+			f := float64(x)
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				return fmt.Errorf("embed: raw quality: vector %d has a non-finite component", i)
+			}
+			sumSq += f * f
+		}
+		if !(sumSq > 0) {
+			return fmt.Errorf("embed: raw quality: vector %d has norm 0", i)
+		}
+	}
+	return nil
+}
+
+func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, numCtx int, limit int64) ([][]T, int, error) {
+	reqBody := ollamaEmbedRequest{Model: model, Input: in.value()}
 	if numCtx > 0 {
 		reqBody.Options = &ollamaOpts{NumCtx: numCtx}
 	}
 
-	body, err := json.Marshal(reqBody)
+	body, err := in.marshal(reqBody)
 	if err != nil {
 		return nil, 0, fmt.Errorf("embed: marshal: %w", err)
 	}
@@ -171,22 +286,22 @@ func embedOllama(ctx context.Context, client *http.Client, hop fedhop.Target, ho
 		return nil, 0, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
 	}
 
-	var result ollamaEmbedResponse
-	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
+	var result ollamaEmbedResponse[T]
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, limit)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 
-	if len(result.Embeddings) == 0 || len(result.Embeddings[0]) == 0 {
-		return nil, 0, fmt.Errorf("embed: empty embedding returned")
+	// /api/embed answers in input order and carries no index.
+	if err := checkVectors(result.Embeddings, len(in.texts)); err != nil {
+		return nil, 0, err
 	}
-
-	return result.Embeddings[0], result.PromptEvalCount, nil
+	return result.Embeddings, result.PromptEvalCount, nil
 }
 
-func embedOpenAI(ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model, input string) ([]float64, int, error) {
-	reqBody := openAIEmbedRequest{Model: model, Input: input}
+func embedOpenAI[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, limit int64) ([][]T, int, error) {
+	reqBody := openAIEmbedRequest{Model: model, Input: in.value()}
 
-	body, err := json.Marshal(reqBody)
+	body, err := in.marshal(reqBody)
 	if err != nil {
 		return nil, 0, fmt.Errorf("embed: marshal: %w", err)
 	}
@@ -216,13 +331,16 @@ func embedOpenAI(ctx context.Context, client *http.Client, hop fedhop.Target, ho
 		return nil, 0, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
 	}
 
-	var result openAIEmbedResponse
-	if err := json.NewDecoder(httpx.CapBody(resp.Body, httpx.MaxResponseBytes)).Decode(&result); err != nil {
+	var result openAIEmbedResponse[T]
+	if err := json.NewDecoder(httpx.CapBody(resp.Body, limit)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
 	}
 
-	if len(result.Data) == 0 || len(result.Data[0].Embedding) == 0 {
-		return nil, 0, fmt.Errorf("embed: empty embedding returned")
+	vecs, err := alignVectors(result.Data, len(in.texts), func(i int) (int, []T) {
+		return result.Data[i].Index, result.Data[i].Embedding
+	})
+	if err != nil {
+		return nil, 0, err
 	}
 
 	// Voyage AI reports total_tokens; OpenAI-compatible servers report
@@ -240,7 +358,49 @@ func embedOpenAI(ctx context.Context, client *http.Client, hop fedhop.Target, ho
 		})
 	}
 
-	return result.Data[0].Embedding, promptTokens, nil
+	return vecs, promptTokens, nil
+}
+
+// alignVectors re-aligns the n entries of an OpenAI-wire answer by their
+// index (the pattern of rerank's result resolve): exactly n entries, every
+// index in [0, n) exactly once, no empty vector. An answer that misses,
+// repeats or invents an index is refused — a vector in the wrong place is a
+// silently wrong embedding.
+func alignVectors[E any, T floatElem](data []E, n int, at func(i int) (int, []T)) ([][]T, error) {
+	if len(data) == 0 {
+		return nil, errors.New("embed: empty embedding returned")
+	}
+	if len(data) != n {
+		return nil, fmt.Errorf("embed: %d embeddings returned for %d inputs", len(data), n)
+	}
+	out := make([][]T, n)
+	for i := range data {
+		idx, v := at(i)
+		if idx < 0 || idx >= n || out[idx] != nil {
+			return nil, fmt.Errorf("embed: embedding index %d outside [0, %d) or repeated", idx, n)
+		}
+		if len(v) == 0 {
+			return nil, errors.New("embed: empty embedding returned")
+		}
+		out[idx] = v
+	}
+	return out, nil
+}
+
+// checkVectors is the in-order twin for the ollama wire: n non-empty vectors.
+func checkVectors[T floatElem](vecs [][]T, n int) error {
+	if len(vecs) == 0 {
+		return errors.New("embed: empty embedding returned")
+	}
+	if len(vecs) != n {
+		return fmt.Errorf("embed: %d embeddings returned for %d inputs", len(vecs), n)
+	}
+	for _, v := range vecs {
+		if len(v) == 0 {
+			return errors.New("embed: empty embedding returned")
+		}
+	}
+	return nil
 }
 
 var embedTotalTokensFallbackOnce sync.Once

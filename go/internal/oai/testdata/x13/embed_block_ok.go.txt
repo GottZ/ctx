@@ -1,0 +1,40 @@
+// census-want: 0
+// W02-09 Z4: the production shape of the sub-block walk — the attempt
+// literal calls the attempt method, which hands each block (under its
+// lease) to the block function holding the one EmbedRaw call; the closure
+// goes to the walk's parameter of type blockFunc, which calls it under the
+// block's lease (hardening H-8: the census asks the callee's parameter type).
+package oai
+
+import (
+	"context"
+	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/embed"
+	"github.com/GottZ/ctx/internal/llm"
+)
+
+func (c *call) wireBlock(b *backends.Backend, lo, hi int, lease *dispatch.Lease, rc context.Context) (dispatch.Usage, error) {
+	_, _, err := embed.EmbedRaw(rc, *b, "m", c.inputs[lo:hi], 0)
+	return dispatch.Usage{}, err
+}
+
+func (r *subBlockRun) run(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration, do blockFunc) (dispatch.Usage, bool, error) {
+	u, err := do(0, 1, lease, runCtx)
+	return u, true, err
+}
+
+func (c *call) attempt(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration) (dispatch.Usage, bool, error) {
+	return c.run.run(runCtx, b, lease, t, func(lo, hi int, bl *dispatch.Lease, rc context.Context) (dispatch.Usage, error) {
+		return c.wireBlock(b, lo, hi, bl, rc)
+	})
+}
+
+func (c *call) walk(ctx context.Context, chain []backends.Backend) {
+	_, _, _ = llm.WalkChain(ctx, chain, "embed", c.acq, nil, llm.WalkRules{},
+		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, t time.Duration) (dispatch.Usage, bool, error) {
+			return c.attempt(runCtx, b, lease, t)
+		})
+}

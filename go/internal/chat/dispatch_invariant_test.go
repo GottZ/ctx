@@ -191,10 +191,10 @@ func serveWireShape(t *testing.T, w http.ResponseWriter, r *http.Request, body [
 			return
 		}
 		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
-	case "/api/embed": // embed.go:144 (ollama)
-		fmt.Fprintf(w, `{"embeddings":[[%s]],"prompt_eval_count":7}`, vec)
-	case "/v1/embeddings": // embed.go:185 (openai)
-		fmt.Fprintf(w, `{"data":[{"embedding":[%s]}]}`, vec)
+	case "/api/embed": // embed.go embedOllama
+		fmt.Fprintf(w, `{"embeddings":[%s],"prompt_eval_count":7}`, wireVecs(body, vec, false))
+	case "/v1/embeddings": // embed.go embedOpenAI (the internal one-string body, or a gateway sub-block's list — W02-09)
+		fmt.Fprintf(w, `{"data":[%s]}`, wireVecs(body, vec, true))
 	case "/v1/messages": // anthropic.go (non-stream) OR anthropic_stream.go
 		if bytes.Contains(body, []byte(`"stream":true`)) {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -221,6 +221,30 @@ func serveWireShape(t *testing.T, w http.ResponseWriter, r *http.Request, body [
 	default:
 		t.Errorf("unexpected wire path %q — a new inference wire site escaped the gate", r.URL.Path)
 	}
+}
+
+// wireVecs answers one vector per input of an embed body: one for the bare
+// string of the internal path, len(input) for a list (a gateway sub-block,
+// W02-09) — as OpenAI data entries with their index, or as ollama's bare
+// vectors.
+func wireVecs(body []byte, vec string, indexed bool) string {
+	var req struct {
+		Input json.RawMessage `json:"input"`
+	}
+	_ = json.Unmarshal(body, &req)
+	n := 1
+	var list []string
+	if json.Unmarshal(req.Input, &list) == nil {
+		n = len(list)
+	}
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = "[" + vec + "]"
+		if indexed {
+			parts[i] = fmt.Sprintf(`{"index":%d,"embedding":%s}`, i, parts[i])
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 func invariantBackend(host string, proto backends.Protocol) backends.Backend {
@@ -376,6 +400,16 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 	postCensusStream(t, oaiCensusRoute(t, ca, []backends.Backend{downRow, invariantBackend(srv.URL, backends.ProtocolOpenAI)}))
 	if ca.count() != 20 || atomic.LoadInt64(&wireHits) != 20 {
 		t.Fatalf("after the /v1 stream failover: acquires=%d wire=%d, want 20/20", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+
+	// --- Site 11: embed.go EmbedRaw (W02-09, G3) through the real
+	// POST /v1/embeddings — five inputs in the census planner's blocks
+	// [2, 2, 1]: block one under the First lease, blocks two and three each
+	// under its own continuation lease. One lease per sub-block: +3/+3; one
+	// lease over all blocks would leave Σacquire < Σwire. ---
+	postEmbedCensus(t, oaiEmbedCensusRoute(t, ca, []backends.Backend{invariantBackend(srv.URL, backends.ProtocolOpenAI)}), 5)
+	if ca.count() != 23 || atomic.LoadInt64(&wireHits) != 23 {
+		t.Fatalf("after the /v1 embeddings route: acquires=%d wire=%d, want 23/23", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
 	// --- Lease-free without wire contact (the cache-hit clause's structural

@@ -39,7 +39,7 @@ func oMeter() (*Meter, *oClock) {
 
 var oSubj = Subject{ConsumerID: "c1", TenantID: "t1", Op: OpChat, Lane: LaneUrgent}
 
-func oLim(L int64) Limits { return Limits{RPM: 1 << 30, TPM: L} }
+func oLim(L int64) Limits { return Limits{RPM: 1 << 30, TPM: L, Concurrency: noL1} }
 
 func oEst(n int64) Estimate { return Estimate{MaxCompletion: int(n), ClientMax: true} }
 

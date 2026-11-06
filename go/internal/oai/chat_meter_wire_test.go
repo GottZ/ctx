@@ -46,7 +46,7 @@ type endMeter struct {
 }
 
 func newEndMeter() *endMeter {
-	return &endMeter{rigMeter: newRigMeter(keyquota.Limits{RPM: 1000, TPM: 60_000_000, CompletionReserve: 1024}, true)}
+	return &endMeter{rigMeter: newRigMeter(keyquota.Limits{Concurrency: noL1, RPM: 1000, TPM: 60_000_000, CompletionReserve: 1024}, true)}
 }
 
 func (m *endMeter) Admit(ctx context.Context, ca *auth.ConsumerAuth, a modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {

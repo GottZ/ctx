@@ -78,6 +78,19 @@ func (d Deps) Resolve(ctx context.Context, ca *auth.ConsumerAuth, name string) (
 	return a, true, nil
 }
 
+// probeNoAlias is Resolve for a name that cannot be an alias name (the chat
+// parse's overlong model, hardening 6 P-4): no lookup — so no registry row
+// matches it, whatever name the row carries — and, without all_models, the
+// one grant probe of a name that resolves to no alias (noAliasID), so its
+// 404 costs what every other 404 costs. err is a failed grant read.
+func (d Deps) probeNoAlias(ctx context.Context, ca *auth.ConsumerAuth) error {
+	if ca.AllModels {
+		return nil
+	}
+	_, err := d.HasGrant(ctx, ca.ConsumerID, noAliasID)
+	return err
+}
+
 // released returns the offers whose id is in ids (the consumer's grants).
 func released(offers []modelalias.Alias, ids []string) []modelalias.Alias {
 	set := make(map[string]bool, len(ids))

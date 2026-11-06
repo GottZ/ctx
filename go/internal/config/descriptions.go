@@ -254,7 +254,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	// W02-02: the OpenAI-compatible gateway (design/02 §3.3, masterplan K3).
 	"gateway.enabled":                                   "Turns the OpenAI-compatible gateway (/v1, /v2) on; off (default) every gateway request gets the same OpenAI 404 before any authentication",
 	"gateway.max_request_bytes":                         "Strict request-body cap of the gateway in bytes; a longer declared body is a 413 request_too_large before the handler runs",
-	"gateway.inflight_budget":                           "Process-wide in-flight memory budget of the gateway in bytes (3 x body plus response reserve per request); past it requests get 503 server_overloaded at once; >= 3 x gateway.max_request_bytes",
+	"gateway.inflight_budget":                           "Process-wide in-flight memory budget of the gateway in bytes (3 x body plus response reserve per request, plus 23 x body + 64 KiB + 104 B per nesting level (up to 1040104 B) for the sensitivity scan of a request to an alias below credentials, plus up to 240024 B for the JSON check's nesting state); past it requests get 503 server_overloaded at once; >= 26 x gateway.max_request_bytes + 64 KiB + 1040104 B + 240024 B + the largest response share (one attempt without failover and without a rewritten message array: a rewritten request also needs its backend row's upstream frame)",
 	"gateway.max_response_bytes":                        "Read cap in bytes of one non-streamed upstream response on the gateway; at most httpx.MaxResponseBytes (16 MiB)",
 	"gateway.max_stream_frame_bytes":                    "Cap in bytes of one relayed SSE frame on the gateway; at most 4 MiB (the stream reader's frame cap)",
 	"gateway.embedding_max_floats":                      "Ceiling of max_inputs x native_dims per embedding alias (1048576 floats = 4 MiB float32)",
@@ -290,6 +290,8 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.rerank_tpm_default":  "Rerank tokens per minute per model consumer (meter L0); at least 1",
 	"gateway.tpm_reserve_default": "Completion tokens a chat request reserves when the client names no max_tokens (capped by the effective max_tokens); at least 1",
 	"gateway.xu_reserve_ratio":    "Share of each meter bucket the urgent lane keeps from the bulk lane of the same consumer; range [0, 1)",
+	// W06-11: the meter's L1 (design/06 §4.2, §4.11).
+	"gateway.consumer_concurrency_default": "Requests per model consumer and operation that may be open at once, queued or running (meter L1); one more is 429 concurrency_limit_exceeded with Retry-After 1 s; the bulk lane holds at most max(1, floor(C·(1 − xu_reserve_ratio))) of them; at least 1, at most dispatch.external_queue_per_consumer",
 	// W01-5: consumer and model-key administration (design/01 §4.6, §4.9).
 	"gateway.tenant_self_service":      "Lets tenant-admins create model consumers, rotate their keys and grant consumer fields in their own tenant — only while gateway.enabled is on too; off (default) these stay server-admin, revoking stays open to tenant-admins",
 	"gateway.key_max_lifetime_app":     "Default and ceiling in seconds of a new model key's expiry for kind=app consumers (365 d); 0 = no expiry required and no ceiling",
