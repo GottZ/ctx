@@ -30,7 +30,6 @@ import (
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
-	"github.com/GottZ/ctx/internal/promptguard"
 )
 
 // POST /v1/embeddings (wave W02-09; design/02 §4.8, §4.2.1, §4.11.1, §4.12;
@@ -568,8 +567,8 @@ type embedState struct {
 // blockWire is one block's wire call as the meter sees it: contact is marked
 // from inside net/http by the block's own trace (wireContactTrace, beside the
 // request's c.wired); tokens is the meter's estimate of the block's inputs —
-// the function the reservation is booked with (keyquota.Estimate.Tokens for
-// op embed: promptguard.TokenEstimate of the input runes).
+// the function the reservation is booked with (inputEstimate,
+// embed_estimate.go).
 type blockWire struct {
 	contact atomic.Bool
 	tokens  int
@@ -586,16 +585,6 @@ func (st *embedState) unpaidEstimate() int {
 		}
 	}
 	return sum
-}
-
-// inputEstimate is the meter's estimate of the inputs [lo, hi): the token
-// estimate of their runes, as the reservation is the estimate of all runes.
-func (c *embedCall) inputEstimate(lo, hi int) int {
-	runes := 0
-	for _, n := range c.req.runes[lo:hi] {
-		runes += n
-	}
-	return promptguard.TokenEstimate(runes)
 }
 
 // settleCharge is the prompt tokens a request whose blocks reported a usage
@@ -872,7 +861,7 @@ func (c *embedCall) endAfterWire(st *embedState) {
 		case usage.PromptTokens <= 0:
 			l.Keep()
 		default:
-			usage.PromptTokens = settleCharge(usage.PromptTokens, st.unpaidEstimate(), promptguard.TokenEstimate(c.req.runesSum))
+			usage.PromptTokens = settleCharge(usage.PromptTokens, st.unpaidEstimate(), c.reservedTokens())
 			l.Settle(usage)
 		}
 	})
