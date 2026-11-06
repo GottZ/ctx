@@ -932,7 +932,18 @@ func TestExternalBulkPickCostScales(t *testing.T) {
 			bad = append(bad, fmt.Sprintf("XB pick cost grows by %.1f from 64 to 512 buckets per class, want < 22 (one pass per queue)", ratio))
 		}
 		if small >= opWarnThreshold {
-			bad = append(bad, fmt.Sprintf("median XB pick %v at 64+64 buckets, want far below %v", small, opWarnThreshold))
+			msg := fmt.Sprintf("median XB pick %v at 64+64 buckets, want far below %v", small, opWarnThreshold)
+			if mode := testing.CoverMode(); mode != "" {
+				// Under coverage instrumentation (the nightly: -race with
+				// -covermode=atomic) the absolute bound measures the
+				// instrumentation, not the pick: 1.057 ms there against 6 µs
+				// bare. The growth bound holds either way and stays; the
+				// absolute one is logged, not judged (FOLGE-P Delta-Review 2
+				// F-2's rule, skipUnderCoverage in oai).
+				t.Logf("pass %d: %s — not judged under -covermode=%s", pass, msg, mode)
+			} else {
+				bad = append(bad, msg)
+			}
 		}
 		if len(bad) == 0 {
 			return
