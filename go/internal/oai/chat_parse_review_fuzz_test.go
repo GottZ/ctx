@@ -112,9 +112,12 @@ func rvCompare(raw []byte, path string, depth int) string {
 			if i >= len(want) {
 				return fmt.Sprintf("%s: iterator yields member %d (%q), encoding/json has %d", path, i, k, len(want))
 			}
-			dk := decodeKey(k)
+			dk := rvFullDecode(k)
 			if dk != want[i].key {
 				return fmt.Sprintf("%s: member %d key iterator %q != encoding/json %q (raw %q)", path, i, dk, want[i].key, k)
+			}
+			if g, w := decodeKey(k), rvCut(dk); g != w {
+				return fmt.Sprintf("%s: member %d key echoed as %q, want %q (H-9: cut to echoNameMax at a rune boundary)", path, i, g, w)
 			}
 			if !bytes.Equal(v, bytes.TrimSpace(want[i].val)) {
 				return fmt.Sprintf("%s.%q: value iterator %q != encoding/json %q", path, dk, v, want[i].val)
@@ -155,7 +158,7 @@ func rvCompare(raw []byte, path string, depth int) string {
 				}
 			}
 			for _, o := range keys {
-				if g, w := sgn(cmpKeys(o, k)), sgn(strings.Compare(decodeKey(o), dk)); g != w {
+				if g, w := sgn(cmpKeys(o, k)), sgn(strings.Compare(rvFullDecode(o), dk)); g != w {
 					return fmt.Sprintf("%s: cmpKeys(%q, %q) = %d want %d", path, o, k, g, w)
 				}
 			}
@@ -165,7 +168,7 @@ func rvCompare(raw []byte, path string, depth int) string {
 				if err := json.Unmarshal(v, &ws); err != nil {
 					return path + ": unmarshal string: " + err.Error()
 				}
-				if g := decodeKey(s); g != ws {
+				if g := rvFullDecode(s); g != ws {
 					return fmt.Sprintf("%s.%q: string value decodes %q, encoding/json %q", path, dk, g, ws)
 				}
 				for _, n := range rvNames {
@@ -572,4 +575,29 @@ func FuzzReviewSmuggle(f *testing.F) {
 			t.Fatalf("accepted, upstream: %s\nbody %q\nupstream %q", d, data, up)
 		}
 	})
+}
+
+// rvFullDecode is the whole decoded form of the raw JSON string content raw
+// (decodeKey cuts an echoed name since FOLGE-P H-9; the differential
+// compares the decoder itself).
+func rvFullDecode(raw []byte) string {
+	var b strings.Builder
+	d := strDecoder{raw: raw}
+	for c, ok := d.next(); ok; c, ok = d.next() {
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// rvCut is the echo of a decoded name: its first echoNameMax bytes at a rune
+// boundary and "…" when it is longer (an independent statement of H-9).
+func rvCut(s string) string {
+	if len(s) <= echoNameMax {
+		return s
+	}
+	cut := echoNameMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
