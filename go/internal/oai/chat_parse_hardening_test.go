@@ -225,6 +225,8 @@ func TestOracleMapOrderNeedsTheBasesLoop(t *testing.T) {
 			"messages[0].content[0].image_url.url", CodeUnsupportedParameter, "messages[0].content[0].image_url.zz", 0, false},
 		{"hull: two case variants on the byte walk", msg + `"x"}],"tool_choice":{"type":"function","function":{"name":"f"},"Type":1,"TYPE":2}}`,
 			"tool_choice.Type", CodeUnsupportedParameter, "tool_choice.TYPE", 0, false},
+		{"image_url with vision, an unknown key in it and one in its part", msg + `[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","zz":1},"qq":1}]}]}`,
+			"messages[0].content[0].image_url.zz", CodeUnsupportedParameter, "messages[0].content[0].qq", 1, false},
 		{"control: a message's PASS fields of the wrong kind", msg + `"x","name":5,"refusal":5}]}`,
 			"", CodeInvalidType, "", 0, true},
 		{"control: a hull the base decodes", msg + `"x"}],"tool_choice":{"type":"function","function":{"name":"f"},"TYP` + escU('E') + `":2,"Type":1}}`,

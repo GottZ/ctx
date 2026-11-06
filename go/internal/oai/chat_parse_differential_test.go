@@ -268,8 +268,14 @@ func mapOrderAnswers(body []byte, o parseOutcome) []parseOutcome {
 // refuses (baseCheckPart reaches its loop only for text and image_url), of
 // an image_url key besides url and detail, of a hull's case variant while
 // the base decodes the hull (baseHullDecodes; its byte walk names the first
-// variant in body order); invalid_type of a message's PASS field.
+// variant in body order); invalid_type of a message's PASS field. The key o
+// names must be a member of the level: a param reads as several levels
+// ("…content[0].image_url.zz" also as the part's key "image_url.zz"), and
+// only the level that holds the key ran the loop that named it.
 func (lv diffLevel) fromMapLoop(o parseOutcome) bool {
+	if !slices.Contains(lv.members, lv.key) {
+		return false
+	}
 	switch lv.kind {
 	case "part":
 		typ := lv.partType()
