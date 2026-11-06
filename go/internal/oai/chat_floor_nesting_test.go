@@ -62,6 +62,48 @@ func TestDeepestRequestAtTheCapFitsTheFloor(t *testing.T) {
 	}
 }
 
+// TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame (hardening 6, P-5;
+// Delta-Review 5 L-2) holds what the floor's comment and docs say: the
+// floor does not hold the deepest request at the cap whose message array is
+// rewritten — 503 at a budget equal to the floor — and what it lacks is the
+// upstream frame of the backend row (the upstream body's bytes besides the
+// rewritten array): 200 at the floor plus that frame.
+func TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame(t *testing.T) {
+	const resp = 4 << 20
+	for _, maxRequest := range []int64{32 << 10, 128 << 10, 1 << 20, 8 << 20} {
+		t.Run(fmt.Sprintf("cap=%d", maxRequest), func(t *testing.T) {
+			u := newUpstream(t, answerSGLang)
+			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
+			body := deepestBody(int(maxRequest), "pub", "developer")
+			floor := chatFloor(maxRequest, resp)
+			post := func(budget int64) chatAnswer {
+				rig.setSettings(func(s *oai.Settings) {
+					s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = budget, maxRequest, resp
+				})
+				return rig.post(t, body)
+			}
+			if a := post(10 * floor); a.status != http.StatusOK {
+				t.Fatalf("budget 10 × floor: %d %s", a.status, a.body)
+			}
+			u.mu.Lock()
+			upstream := len(u.raws[len(u.raws)-1])
+			u.mu.Unlock()
+			// The rewritten array: the client's, "developer" → "system".
+			rewritten := len(body) - len(`{"model":"pub","messages":`) - len(`}`) - (len("developer") - len("system"))
+			frame := int64(upstream - rewritten)
+			a := post(floor)
+			code, _, _ := a.envelope(t)
+			if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded {
+				t.Errorf("budget = floor %d: %d %s, want 503 server_overloaded (the floor lacks the upstream frame)", floor, a.status, a.body)
+			}
+			if a := post(floor + frame); a.status != http.StatusOK {
+				t.Errorf("budget = floor %d + frame %d: %d %s, want 200", floor, frame, a.status, a.body)
+			}
+			t.Logf("FOLGEP floor developer cap=%d body=%d upstream=%d frame=%d floor=%d", maxRequest, len(body), upstream, frame, floor)
+		})
+	}
+}
+
 // TestFloorNeedOfTheDeepestForms is the measurement behind the floor's
 // nesting term (CTX_FOLGEP_FLOOR_PROBE=1): the least budget that serves one
 // request at the cap, against the floor — deepest and flat, with and
