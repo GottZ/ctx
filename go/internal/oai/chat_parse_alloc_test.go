@@ -80,9 +80,13 @@ func allocForms(size int) []allocForm {
 		{"max_tokens huge", []byte(msg + `,"max_tokens":1` + strings.Repeat("0", size-len(msg)-17) + `}`), def, 0},
 		{"service_tier huge", []byte(`{"model":"chat","service_tier":"` + strings.Repeat("a", size-90) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
 		// model is the one CTX value decoded into a string (Resolve needs
-		// it): at most one copy of it — a served model is an alias name of
-		// at most 128 bytes (migration 162 CHECK), a longer one is 404.
-		{"model huge", []byte(`{"model":"` + strings.Repeat("a", size-70) + `","messages":[{"role":"user","content":"x"}]}`), def, size - 70},
+		// it), and only while its raw form can still be an alias name
+		// (hardening 5, B-1): a longer one is never decoded — not as plain
+		// text, not as invalid UTF-8 (each byte one U+FFFD of 3 bytes: the
+		// decode held 3 × the value), not as escapes.
+		{"model huge", []byte(`{"model":"` + strings.Repeat("a", size-70) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
+		{"model huge, invalid UTF-8", []byte(`{"model":"` + strings.Repeat("\xff", size-70) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
+		{"model huge, escaped", []byte(`{"model":"` + strings.Repeat(`\u00e9`, (size-70)/6) + `","messages":[{"role":"user","content":"x"}]}`), def, 0},
 		{"messages", allocGen(`{"model":"chat","messages":[`, `]}`, size, allocConst(`{"role":"user","content":"x"}`)), def, 0},
 		{"messages, last one refused", allocGen(`{"model":"chat","messages":[`, `,{"role":"user","content":"x","foo":1}]}`, size,
 			allocConst(`{"role":"user","content":"x"}`)), def, 0},

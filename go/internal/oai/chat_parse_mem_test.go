@@ -313,6 +313,12 @@ func memForm(t testing.TB, name string, lim int) memShape {
 		pre := `{"model":"` + model + `","messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[{"`
 		suf := `":` + val + `}]}]}`
 		s.body = []byte(pre + strings.Repeat("apikey:x ", (lim-len(pre)-len(suf))/9) + suf)
+	// Hardening 5, B-1: a model name of the whole body — plain, invalid
+	// UTF-8 (the decode made each byte a U+FFFD of 3 bytes), escaped.
+	case "f15a_model_long", "f15b_model_ff", "f15c_model_escaped":
+		pre, suf := `{"model":"`, `","messages":[{"role":"user","content":"x"}]}`
+		fill := map[string]string{"f15a": "a", "f15b": "\xff", "f15c": `\u00e9`}[name[:4]]
+		s.body = []byte(pre + strings.Repeat(fill, (lim-len(pre)-len(suf))/len(fill)) + suf)
 	default:
 		t.Fatalf("unknown form %q", name)
 	}

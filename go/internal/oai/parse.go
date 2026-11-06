@@ -28,7 +28,8 @@ import (
 // its value is looked at, an array is counted before it is checked, no value
 // is copied and no object becomes a map. The one copy it makes, the message
 // array with a rewritten message, is sized first and reserved through grow
-// before it is allocated (parsePolicy).
+// before it is allocated (parsePolicy). The model name is decoded for
+// Resolve only while its raw form can still be an alias name (modelRawMax).
 // Everything unknown is refused: an engine knob that is not listed here
 // (SGLang custom_logit_processor, vLLM kv_transfer_params, a new one of the
 // next engine release) cannot be smuggled past a list that names what is
@@ -205,6 +206,10 @@ type chatRequest struct {
 	serviceTier  string
 	ignored      []string
 	messageCount int
+
+	// modelOverlong: the raw model value is past modelRawMax — not
+	// decoded, model stays empty and Resolve finds no alias for it.
+	modelOverlong bool
 }
 
 // parseTopLevel is the alias-independent half of the parse: JSON, the class
@@ -274,11 +279,28 @@ func parseTopLevel(body []byte) (*chatRequest, *paramError) {
 	if keys.reject != nil {
 		return nil, unsupportedParameter(decodeKey(keys.reject))
 	}
-	if req.model == "" {
+	if req.model == "" && !req.modelOverlong {
 		return nil, missingParameter("model")
 	}
 	return req, nil
 }
+
+// aliasNameMaxBytes is the longest alias name: migration 162's CHECK
+// ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ on every alias row the registry loads
+// (handler modelAliasNameRE refuses a longer one before the write) — ASCII
+// only, one byte per character. Pinned to the migrations by
+// TestAliasNameBoundIsTheMigrationCheck.
+const aliasNameMaxBytes = 128
+
+// modelRawMax is the longest raw JSON form of an alias name: every character
+// written as a \u escape of 6 bytes. A raw model value past it cannot decode
+// to an alias name — fewer than 6 raw bytes per character leave more than
+// aliasNameMaxBytes characters, a non-ASCII character is no alias character —
+// so the parse does not decode it (hardening 5, B-1: the decode turned each
+// invalid UTF-8 byte into a U+FFFD of 3 bytes, a 256 KiB name allocated
+// 3.9 MB) and Resolve looks up the empty name: the answer of an unknown
+// model, byte for byte, with its one grant probe.
+const modelRawMax = aliasNameMaxBytes * len(`\u0000`)
 
 func classOf(k string) keyClass {
 	switch {
@@ -302,6 +324,14 @@ func (req *chatRequest) readCTX(k string, v json.RawMessage) *paramError {
 	}
 	switch k {
 	case "model":
+		s, ok := stringContent(v)
+		if !ok {
+			return invalidType(k, "a string")
+		}
+		if len(s) > modelRawMax {
+			req.modelOverlong = true
+			return nil
+		}
 		if err := json.Unmarshal(v, &req.model); err != nil {
 			return invalidType(k, "a string")
 		}
