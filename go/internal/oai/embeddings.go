@@ -65,7 +65,9 @@ import (
 // (upstreamBooking: each body's exact length, embed.WireBodyLen — internal/embed
 // writes it in one allocation of that length since FOLGE-E hardening 1 —
 // with the allocation's rounding, the transport's copy buffer and the wire
-// call; its texts' part before the acquire, reserveUpstreamTexts) and the log
+// call, and the copy and the fresh connection of the call's retry
+// (httpx.DoRetryOnce), booked with the first call; its texts' part before
+// the acquire, reserveUpstreamTexts) and the log
 // row's text of the inputs (bodyLogSize). The request share the budget stage
 // reserved (requestReserveFactor × the body) is spent first, the
 // reservation grows past it, never shrinks. A booking the budget cannot hold
@@ -884,13 +886,25 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 // booked eight times it) — the allocation's rounding to a size class
 // (embed.WireBodySlack), the transport's copy of the body onto the
 // connection (embed.WireCopyBuffer, or the body's length when shorter) and
-// embedWireCallBytes for its call.
+// embedWireCallBytes for its call — and the retry of the call: the copy once
+// more and embedWireRetryBytes (FOLGE-E hardening 2, L-4).
+//
+// The retry is booked with the first call, for every block, whether it
+// happens or not: httpx.DoRetryOnce decides it inside embed.EmbedRaw, after
+// the first call died before its answer, and sends the same body once more
+// on a fresh connection; the route gets control back only when the retry
+// has returned, so there is no point between the two calls where it could
+// book. A booking at the retry itself would take a callback through
+// httpx.DoRetryOnce and embed.EmbedRaw (and a refusal between the two
+// calls); the booking with the first call holds the same bound without it,
+// for at most EmbedWireRetryCeiling at a block per input.
 func (c *embedCall) upstreamBooking(b backends.Backend, model string, blocks []int) int64 {
 	var n int64
 	lo := 0
 	for _, size := range blocks {
 		body := embed.WireBodyLen(b, model, c.req.inputs[lo:lo+size])
-		n += int64(body) + embed.WireBodySlack + int64(min(body, embed.WireCopyBuffer)) + embedWireCallBytes
+		copied := int64(min(body, embed.WireCopyBuffer))
+		n += int64(body) + embed.WireBodySlack + copied + embedWireCallBytes + copied + embedWireRetryBytes
 		lo += size
 	}
 	return n
@@ -929,6 +943,25 @@ func (c *embedCall) upstreamTexts() int64 {
 // more than one 4-KiB step less.
 const embedWireCallBytes = 14 << 10
 
+// embedWireRetryBytes is what the retry of a wire call allocates beside the
+// second copy of its body (embed.WireCopyBuffer, or the body's length when
+// shorter): httpx.DoRetryOnce answers a transient transport error of the
+// first call — the connection died before the answer — with the same body
+// on a fresh connection, so the retry is a second call with the
+// connection's state (dial, its buffers and the transport's read and write
+// loops; the in-process engine's side of the new connection included),
+// the first call's error and the retry's log line. Measured over the route
+// (TotalAlloc of a request of 256 three-byte texts at E = 1 on an engine
+// that drops the first call of every block, against the same request
+// answered at once; FOLGE-E hardening 2, bau report §Härtung 2): 27 783 …
+// 29 039 bytes per block (12 runs at load 2–5), rounded up to the next
+// 2 KiB. A request of k blocks books it k times — once per block, whether
+// the block is retried or not (upstreamBooking) — at most
+// EmbedWireRetryCeiling with the copies. A derived mechanism constant, not
+// policy; TestEmbedWireRetryReserveIsTheMeasuredOne fails when a retry
+// needs more or more than one 4-KiB step less.
+const embedWireRetryBytes = 30 << 10
+
 // The terms of the embeddings route as the configuration's budget floor
 // reads them (FOLGE-E, lead decision 5; V39 counts none of them yet — the
 // budget dimensioning before the flip does): EmbedInputSlotReserve per
@@ -937,9 +970,11 @@ const embedWireCallBytes = 14 << 10
 // block of an attempt and their ceilings at a block per input
 // (EmbedWireCallCeiling, EmbedUpstreamSlackCeiling, EmbedWireCopyCeiling;
 // the copy is the body's length when that is shorter, so the three
-// ceilings are an upper bound); the upstream bodies themselves are the texts
-// as the wire encodes them (embed.WireStringLen, at most six bytes per
-// decoded byte) and embed.WireFrameMax with the model per block.
+// ceilings are an upper bound); the retry of every block's call books a
+// second copy and EmbedWireRetryReserve (EmbedWireRetryCeiling: both at a
+// block per input); the upstream bodies themselves are the texts as the
+// wire encodes them (embed.WireStringLen, at most six bytes per decoded
+// byte) and embed.WireFrameMax with the model per block.
 // EmbedEncodingRawMax and EmbedDimensionsRawMax are the longest raw values
 // of encoding_format and dimensions the route decodes — a longer one is
 // refused before its decode, so neither books more than its own bytes.
@@ -951,6 +986,8 @@ const (
 	EmbedUpstreamSlackCeiling = embed.WireBodySlack * modelalias.CeilingEmbeddingMaxInputs
 	EmbedWireCopyReserve      = embed.WireCopyBuffer
 	EmbedWireCopyCeiling      = embed.WireCopyBuffer * modelalias.CeilingEmbeddingMaxInputs
+	EmbedWireRetryReserve     = embedWireRetryBytes
+	EmbedWireRetryCeiling     = (embed.WireCopyBuffer + embedWireRetryBytes) * modelalias.CeilingEmbeddingMaxInputs
 	EmbedEncodingRawMax       = encodingRawMax
 	EmbedDimensionsRawMax     = jsonIntMax
 )

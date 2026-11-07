@@ -20,6 +20,11 @@ package oai_test
 // class gate's forms "ecg:<slot>:<value form>[@pub]" (TestEmbedClassGateOverTheRoute,
 // embed_class_gate_test.go). CTX_FOLGEE_BYTES sets the body size (default:
 // the cap), CTX_FOLGEE_BODYLOG the body logging (none when unset).
+// CTX_FOLGEE_RETRY=1 puts the requests on retryEmbedEngine, which drops
+// the first call of every block, so httpx.DoRetryOnce sends every block
+// twice (FOLGE-E hardening 2, L-4); with more than one request, each
+// request's inputs start with a byte of their own (markReader), so no two
+// requests send the same block body.
 //
 // The bound: peak HeapInuse − the heap before the requests ≤ the sum of the
 // reservations the requests held plus n × heapGateBaseLoad — no allowance
@@ -56,16 +61,68 @@ import (
 // engine calls), counts the texts of "input" (the strings two levels deep)
 // without keeping any, and answers dims components per text.
 func leanEmbedEngine(t testing.TB, dims int) *httptest.Server {
+	srv := httptest.NewServer(leanEmbedHandler(dims, nil))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// retryEmbedEngine is leanEmbedEngine that drops the connection of the
+// first call of every body before it answers (FOLGE-E hardening 2, L-4):
+// it reads the body, then closes the connection without a byte of answer —
+// a transient transport error, which httpx.DoRetryOnce answers by sending
+// the same body once more on a fresh connection; the engine answers that
+// second call. The body is told by its FNV-1a hash: a block's retry is the
+// same bytes, and blocks run one after another, so a request's blocks are
+// each dropped once even when they are equal. aborts counts the dropped
+// calls.
+func retryEmbedEngine(t testing.TB, dims int) (srv *httptest.Server, aborts *atomic.Int64) {
+	aborts = new(atomic.Int64)
+	var mu sync.Mutex
+	pending := map[uint64]bool{}
+	srv = httptest.NewServer(leanEmbedHandler(dims, func(w http.ResponseWriter, sum uint64) bool {
+		mu.Lock()
+		first := !pending[sum]
+		if first {
+			pending[sum] = true
+		} else {
+			delete(pending, sum)
+		}
+		mu.Unlock()
+		if !first {
+			return false
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			return false
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			return false
+		}
+		aborts.Add(1)
+		_ = conn.Close()
+		return true
+	}))
+	t.Cleanup(srv.Close)
+	return srv, aborts
+}
+
+// leanEmbedHandler is the handler of leanEmbedEngine: afterRead, when set,
+// sees the body's FNV-1a hash after the body is read and before the answer
+// is written; true means it answered (or dropped the connection) itself.
+func leanEmbedHandler(dims int, afterRead func(w http.ResponseWriter, sum uint64) bool) http.HandlerFunc {
 	pool := sync.Pool{New: func() any { b := make([]byte, 4<<10); return &b }}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		bp := pool.Get().(*[]byte)
 		defer pool.Put(bp)
 		buf := *bp
 		depth, texts := 0, 0
 		inString, escaped := false, false
+		sum := uint64(14695981039346656037)
 		for {
 			n, err := r.Body.Read(buf)
 			for _, c := range buf[:n] {
+				sum = (sum ^ uint64(c)) * 1099511628211
 				switch {
 				case inString:
 					switch {
@@ -91,6 +148,9 @@ func leanEmbedEngine(t testing.TB, dims int) *httptest.Server {
 				break
 			}
 		}
+		if afterRead != nil && afterRead(w, sum) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"object":"list","data":[`)
 		vec := "[" + strings.TrimSuffix(strings.Repeat("0.5,", dims), ",") + "]"
@@ -101,9 +161,7 @@ func leanEmbedEngine(t testing.TB, dims int) *httptest.Server {
 			_, _ = fmt.Fprintf(w, `{"object":"embedding","index":%d,"embedding":%s}`, i, vec)
 		}
 		_, _ = fmt.Fprintf(w, `],"model":"m","usage":{"prompt_tokens":%d,"total_tokens":%d}}`, 2*texts, 2*texts)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	}
 }
 
 // embedInvalidForm is a body of about lim bytes to model: "input_ff" =
@@ -168,6 +226,11 @@ func TestEmbedInvalidBytesHeapGate(t *testing.T) {
 		lim = v
 	}
 	srv := leanEmbedEngine(t, 8)
+	retry := os.Getenv("CTX_FOLGEE_RETRY") != ""
+	var aborts *atomic.Int64
+	if retry {
+		srv, aborts = retryEmbedEngine(t, 8)
+	}
 	row := backends.Backend{
 		ID: "id-lean", Name: "lean", Host: srv.URL, Protocol: backends.ProtocolOpenAI, Model: "EMBED-MODEL",
 		Roles: []string{"embed"}, Trust: backends.TrustFull, Locality: "local", Scope: backends.GlobalScope, Enabled: true,
@@ -190,6 +253,10 @@ func TestEmbedInvalidBytesHeapGate(t *testing.T) {
 	rig.deps.Record = func(row llmlog.GatewayRow) { _ = llmlog.GatewayEntry(row) }
 	rig.router = embedMemMount(rig, oai.Embeddings(rig.deps), &held)
 	body := embedGateBody(t, form, lim)
+	var marks []int
+	if retry && n > 1 {
+		marks = inputStarts(body)
+	}
 
 	runtime.GC()
 	runtime.GC()
@@ -225,6 +292,10 @@ func TestEmbedInvalidBytesHeapGate(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", bytes.NewReader(body))
+			if marks != nil {
+				req = httptest.NewRequest(http.MethodPost, "/v1/embeddings", &markReader{b: body, marks: marks, mark: byte('A' + i%26)})
+				req.ContentLength = int64(len(body))
+			}
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			<-start
@@ -263,11 +334,78 @@ func TestEmbedInvalidBytesHeapGate(t *testing.T) {
 	if growth > bound {
 		verdict = "OVER"
 	}
-	t.Logf("FOLGEE form=%s n=%d bytes=%d bodylog=%q answers=%s handled=%d dur=%v growth=%.1fMiB held_sum=%.1fMiB bound=%.1fMiB budget_peak=%.1fMiB gomemlimit=%d verdict=%s",
+	dropped := int64(-1)
+	if aborts != nil {
+		dropped = aborts.Load()
+	}
+	t.Logf("FOLGEE form=%s n=%d bytes=%d bodylog=%q answers=%s handled=%d dur=%v growth=%.1fMiB held_sum=%.1fMiB bound=%.1fMiB budget_peak=%.1fMiB gomemlimit=%d retried=%d verdict=%s",
 		form, n, len(body), os.Getenv("CTX_FOLGEE_BODYLOG"), strings.Join(answers, ","), handled, dur.Round(time.Millisecond),
-		float64(growth)/(1<<20), float64(sum)/(1<<20), float64(bound)/(1<<20), float64(budgetPeak.Load())/(1<<20), debug.SetMemoryLimit(-1), verdict)
+		float64(growth)/(1<<20), float64(sum)/(1<<20), float64(bound)/(1<<20), float64(budgetPeak.Load())/(1<<20), debug.SetMemoryLimit(-1), dropped, verdict)
 	if growth > bound {
 		t.Errorf("HeapInuse grew %.1f MiB, more than the %d requests' reservations (%.1f MiB) plus %d × %d KiB harness load = %.1f MiB",
 			float64(growth)/(1<<20), handled, float64(sum)/(1<<20), n, heapGateBaseLoad>>10, float64(bound)/(1<<20))
 	}
+}
+
+// inputStarts are the offsets of the first byte of every non-empty string
+// two levels deep in body — the texts of "input" in the gate's forms.
+func inputStarts(body []byte) []int {
+	var out []int
+	depth := 0
+	inString, escaped := false, false
+	for i, c := range body {
+		switch {
+		case inString:
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+		case c == '"':
+			inString = true
+			if depth == 2 && i+1 < len(body) && body[i+1] != '"' && body[i+1] != '\\' {
+				out = append(out, i+1)
+			}
+		case c == '[' || c == '{':
+			depth++
+		case c == ']' || c == '}':
+			depth--
+		}
+	}
+	return out
+}
+
+// markReader reads b with the byte at every offset of marks replaced by
+// mark — a body of its own per request without a copy of b.
+type markReader struct {
+	b     []byte
+	off   int
+	marks []int
+	mark  byte
+}
+
+func (r *markReader) Read(p []byte) (int, error) {
+	if r.off >= len(r.b) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.b[r.off:])
+	for _, m := range r.marks {
+		if m >= r.off && m < r.off+n {
+			p[m-r.off] = r.mark
+		}
+	}
+	r.off += n
+	return n, nil
+}
+
+// repeatInputs is n inputs of s.
+func repeatInputs(s string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = s
+	}
+	return out
 }

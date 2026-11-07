@@ -24,7 +24,9 @@ import (
 // block, each body once (FOLGE-E hardening 1: one allocation of its exact
 // length) — with the allocation's slack, the transport's copy of the body
 // (every block body of these tests is shorter than its 32 KiB buffer, so
-// the copy is the body's length) and the wire call per block. The
+// the copy is the body's length) and the wire call per block, and the
+// retry of every block's call: the copy again and the retry's call on a
+// fresh connection (FOLGE-E hardening 2, L-4). The
 // constants are the gate's own: a mutated term in the route must not move
 // the expectation with it.
 func embedLedgerRequest(body string, depth int, inputs []string, scan bool, blocks int, model string) int64 {
@@ -38,6 +40,7 @@ func embedLedgerRequest(body string, depth int, inputs []string, scan bool, bloc
 		frame          = 23       // a block body's frame on the openai wire: {"model":"","input":[]}
 		upstreamSlack  = 8 << 10  // the size-class rounding of a block body's one allocation
 		wireCall       = 14 << 10 // one wire call beside its body and its copy
+		wireRetry      = 30 << 10 // the retry of a wire call beside its copy
 	)
 	b := int64(len(body))
 	spent := b + int64(depth)*depthState
@@ -54,7 +57,7 @@ func embedLedgerRequest(body string, depth int, inputs []string, scan bool, bloc
 		}
 		if blocks > 0 {
 			enc += int64(blocks)*int64(frame+len(model)) - int64(blocks) // a separator fewer per block
-			spent += enc + int64(blocks)*(upstreamSlack+wireCall)         // the copy of each body, the slack, the call
+			spent += 2*enc + int64(blocks)*(upstreamSlack+wireCall+wireRetry) // the copy of each body and of its retry, the slack, the call, the retry
 		}
 		spent += enc
 	}

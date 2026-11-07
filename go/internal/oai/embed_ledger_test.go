@@ -157,11 +157,13 @@ func embedWireReplica(model string, texts []string, ollama bool, numCtx int) []b
 	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})
 }
 
-// EmbedWireReplica exports embedWireReplica to the route test, and
-// EmbedWireCallBytes the per-call term to its pin.
+// EmbedWireReplica exports embedWireReplica to the route test,
+// EmbedWireCallBytes the per-call term and EmbedWireRetryBytes the retry's
+// term to their pins.
 var (
-	EmbedWireReplica   = embedWireReplica
-	EmbedWireCallBytes = int64(embedWireCallBytes)
+	EmbedWireReplica    = embedWireReplica
+	EmbedWireCallBytes  = int64(embedWireCallBytes)
+	EmbedWireRetryBytes = int64(embedWireRetryBytes)
 )
 
 // upstreamRows are the rows of the booking pins: the openai wire, the ollama
@@ -178,9 +180,10 @@ func upstreamRows() []backends.Backend {
 // checkUpstreamBooking compares the booking of an attempt of blocks on row b
 // with the bodies the wire sends (embedWireReplica, the encoder pinned to the
 // route's bodies): exactly their bytes, the transport's copy of each
-// (embed.WireCopyBuffer, the body's length when shorter) and, per block,
-// embed.WireBodySlack and embedWireCallBytes — and at least the texts booked
-// before the acquire.
+// (embed.WireCopyBuffer, the body's length when shorter) twice — the call
+// and its retry (FOLGE-E hardening 2, L-4) — and, per block,
+// embed.WireBodySlack, embedWireCallBytes and embedWireRetryBytes — and at
+// least the texts booked before the acquire.
 func checkUpstreamBooking(t *testing.T, b backends.Backend, model string, inputs []string, blocks []int) {
 	t.Helper()
 	sent, copied, lo := 0, 0, 0
@@ -191,9 +194,9 @@ func checkUpstreamBooking(t *testing.T, b backends.Backend, model string, inputs
 	}
 	c := &embedCall{req: &embedRequest{inputs: inputs}}
 	booked := c.upstreamBooking(b, model, blocks)
-	if want := int64(sent+copied) + int64(len(blocks))*(embed.WireBodySlack+embedWireCallBytes); booked != want {
-		t.Errorf("%s/%d, model %q, blocks %v: the attempt books %d B, the bodies hold %d B, their copies %d B (want %d: both, %d B slack and %d B per call)",
-			b.Protocol, b.NumCtx, model, blocks, booked, sent, copied, want, embed.WireBodySlack, embedWireCallBytes)
+	if want := int64(sent+2*copied) + int64(len(blocks))*(embed.WireBodySlack+embedWireCallBytes+embedWireRetryBytes); booked != want {
+		t.Errorf("%s/%d, model %q, blocks %v: the attempt books %d B, the bodies hold %d B, their copies %d B (want %d: the bodies, their copies twice, %d B slack, %d B per call and %d B per retry)",
+			b.Protocol, b.NumCtx, model, blocks, booked, sent, copied, want, embed.WireBodySlack, embedWireCallBytes, embedWireRetryBytes)
 	}
 	if texts := c.upstreamTexts(); texts > booked {
 		t.Errorf("%s/%d, blocks %v: %d B of texts booked before the acquire, more than the attempt's %d B", b.Protocol, b.NumCtx, blocks, texts, booked)
