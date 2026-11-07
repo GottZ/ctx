@@ -187,6 +187,15 @@ func TestRerankMeterBooksOverTheRealMeter(t *testing.T) {
 			_, _ = io.WriteString(w, strings.Replace(e.answer(c), `"prompt_tokens":4,"total_tokens":4`, `"prompt_tokens":26,"total_tokens":26`, 1))
 			return true
 		}, http.StatusServiceUnavailable, rerankEstimate("q", docs)},
+		{"block two answers without a usage: usage of block one + estimate of block two", func(w http.ResponseWriter, _ *http.Request, n int64, c rerankCall) bool {
+			// a 200 without prompt_tokens is no payment (external review 2
+			// F-6 o): its documents are estimated on top
+			if n%2 != 0 {
+				return false
+			}
+			_, _ = io.WriteString(w, strings.Replace(e.answer(c), `"prompt_tokens":4,"total_tokens":4`, `"prompt_tokens":0`, 1))
+			return true
+		}, http.StatusOK, min(4+rerankEstimate("q", docs[2:]), rerankEstimate("q", docs))},
 	} {
 		e.setRespond(tc.respond)
 		e.hits.Store(0)
@@ -198,6 +207,26 @@ func TestRerankMeterBooksOverTheRealMeter(t *testing.T) {
 		if a.status != tc.status || charge != tc.charge {
 			t.Errorf("%s: %d %.200s, charged %d tokens — want %d and %d", tc.name, a.status, a.body, charge, tc.status, tc.charge)
 		}
+	}
+
+	// Failover after wire contact (external review 2 F-6 n): row A answers
+	// the one block (E ≥ 4) 502, row B serves it with a usage — the bucket holds
+	// row B's usage only (the documents B paid for are not estimated again),
+	// and the next probe over the same meter is admitted (one slot, back).
+	rowA, rowB := newRerankEngine(t), newRerankEngine(t)
+	rowA.setRespond(func(w http.ResponseWriter, _ *http.Request, _ int64, _ rerankCall) bool {
+		w.WriteHeader(http.StatusBadGateway)
+		return true
+	})
+	pair := newRerankRig(t, []backends.Backend{rowA.row("row-a", 20), rowB.row("row-b", 10)}, 200, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
+	a := pair.postRerank(t, "/v2/rerank", rerankBody("rr", "q", docs))
+	now := spent()
+	charge := now - base
+	t.Logf("W0210 real meter %-60s %d: row A hits %d, row B hits %d, charged %d tokens, want %d",
+		"failover after contact: row B's usage", a.status, rowA.hits.Load(), rowB.hits.Load(), charge, 2*len(docs))
+	if a.status != http.StatusOK || rowA.hits.Load() != 1 || rowB.hits.Load() != 1 || charge != int64(2*len(docs)) {
+		t.Errorf("failover after contact: %d %.200s, row A hits %d, row B hits %d, charged %d tokens — want 200, 1/1 and %d (row B's usage)",
+			a.status, a.body, rowA.hits.Load(), rowB.hits.Load(), charge, 2*len(docs))
 	}
 }
 
