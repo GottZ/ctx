@@ -17,4 +17,3 @@
 # ein //nolint:unused mit ausgeschriebenem Grund an der Deklaration.
 
 internal/schemacontract/manifest.go	MarshalManifest	# Aufrufer generate_test.go:136 unter //go:build genmanifest; deadcode kennt den Tag nicht
-internal/llmusage/usage.go	ReadConsumerDays	# wartet: RC-D S2 W06-16 — Batch der /api/usage/consumers-Generation (V-06-f); S1-Stub ohne Aufrufer

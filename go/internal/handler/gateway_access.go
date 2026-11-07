@@ -13,6 +13,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/usageevents"
 )
 
 // gatewayRejectionWindow is the window of the throttled refusal line: per
@@ -56,6 +57,10 @@ type GatewayAccessLog struct {
 	reasons map[string]bool
 	// ledger counts the declared refusals (nil: they count here directly).
 	ledger *keyquota.Ledger
+	// events and ring take every successful request (W06-18 first_use per
+	// model key, W06-16 top_consumers_1h); nil = none.
+	events usageevents.Sink
+	ring   *ConsumerRing
 
 	mu        sync.Mutex
 	counts    map[gatewayRejectionKey]int64
@@ -81,6 +86,11 @@ type GatewayAccessLogConfig struct {
 	// is noted there. Nil counts it in the window directly, like an
 	// undeclared one.
 	Ledger *keyquota.Ledger
+	// Events receives first_use for every successful request with a model
+	// key (the recorder keeps one per key, W06-18); Ring counts the request
+	// for top_consumers_1h (W06-16). Both optional.
+	Events usageevents.Sink
+	Ring   *ConsumerRing
 }
 
 // NewGatewayAccessLog builds the access log. A missing getter is a wiring
@@ -100,8 +110,24 @@ func NewGatewayAccessLog(cfg GatewayAccessLogConfig) *GatewayAccessLog {
 		reasons[c.Code] = true
 	}
 	return &GatewayAccessLog{
-		settings: cfg.Settings, log: log, now: time.Now, reasons: reasons, ledger: cfg.Ledger,
+		settings: cfg.Settings, log: log, now: time.Now, reasons: reasons, ledger: cfg.Ledger, events: cfg.Events, ring: cfg.Ring,
 		counts: map[gatewayRejectionKey]int64{}, lastFlush: time.Now(),
+	}
+}
+
+// noteSuccess hands a successful request of a consumer to the usage events
+// (first_use of its model key — Note never blocks) and to the top-consumers
+// ring. A request without a consumer (the door did not accept) is nobody's.
+func (a *GatewayAccessLog) noteSuccess(rec *oai.AccessRecord) {
+	if rec.ConsumerID == "" {
+		return
+	}
+	if a.events != nil && rec.ModelKeyID != "" {
+		a.events.Note(usageevents.Event{Kind: usageevents.KindFirstUse, ConsumerID: rec.ConsumerID,
+			TenantID: rec.TenantID, Op: rec.Op, ModelKeyID: rec.ModelKeyID})
+	}
+	if a.ring != nil {
+		a.ring.Add(rec.ConsumerID, rec.TenantID, int64(rec.PromptTokens)+int64(rec.CompletionTokens))
 	}
 }
 
@@ -125,6 +151,7 @@ func (a *GatewayAccessLog) Handler(next http.Handler) http.Handler {
 			a.reject(rec.ConsumerID, a.rejectionReason(rec, status))
 			return
 		}
+		a.noteSuccess(rec)
 		if !a.settings().AccessLog {
 			return
 		}

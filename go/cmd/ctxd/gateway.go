@@ -123,7 +123,18 @@ type modelGateway struct {
 	seedRead meterSeedRead
 	ledger   *keyquota.Ledger
 	flusher  *rejectionFlusher
+	// events records the consumers' usage events (W06-18: first_use from
+	// the access log, soft_limit/hard_limit from the meter adapter); ring
+	// counts top_consumers_1h for the status (W06-16).
+	events *usageevents.Recorder
+	ring   *handler.ConsumerRing
 }
+
+// usageEventsFlushTimeout bounds the final flush of the usage events at
+// shutdown; it runs inside the gateway's stop step (gatewayStopTimeout) and
+// is shorter, so the step's own bound holds. Hardcoded like
+// meterSeedTimeout: it bounds the process's own write, not a policy.
+const usageEventsFlushTimeout = 4 * time.Second
 
 // meterSeedRead reads what the consumers used in the UTC day and month of
 // now (llmusage.SeedConsumers).
@@ -203,8 +214,12 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 	}
 	seedMeterOnce(context.Background(), meter, read)
 	ledger := keyquota.NewLedger(time.Now)
-	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get, Ledger: ledger})
+	events := usageevents.NewRecorder(pool, nil)
+	ring := handler.NewConsumerRing(nil)
+	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get, Ledger: ledger, Events: events, Ring: ring})
 	return &modelGateway{
+		events:   events,
+		ring:     ring,
 		meter:    meter,
 		seedRead: read,
 		ledger:   ledger,
@@ -252,7 +267,63 @@ func (g *modelGateway) run(ctx context.Context) {
 	if g.seedRead != nil {
 		wg.Go(func() { seedMeter(ctx, g.meter, g.seedRead, keyquota.WarmingRetryAfter) })
 	}
+	if g.events != nil {
+		// The usage events queued by the drained requests land with the
+		// other final flushes (W06-18).
+		wg.Go(func() {
+			<-ctx.Done()
+			fctx, cancel := context.WithTimeout(context.Background(), usageEventsFlushTimeout)
+			defer cancel()
+			if err := g.events.Flush(fctx); err != nil {
+				slog.Warn("gateway: usage events not flushed at shutdown", "error", err, "stats", g.events.Stats())
+			}
+		})
+	}
 	wg.Wait()
+}
+
+// withUsageEvents hands the meter adapter of d the usage-event sink
+// (W06-18). A separate step instead of a gatewayDeps parameter: the
+// signature stays as it is for the other clusters of RC-D.
+func withUsageEvents(d oai.Deps, sink usageevents.Sink) oai.Deps {
+	if l, ok := d.Limiter.(meterLimiter); ok {
+		l.events = sink
+		d.Limiter = l
+	}
+	return d
+}
+
+// usageMeterView is the meter's view for GET /api/usage/consumers
+// (handler.UsageMeter): the limits the meter would apply to the consumer's
+// op now (meterLimits) and its snapshot under them.
+type usageMeterView struct {
+	meter    *keyquota.Meter
+	settings func() oai.Settings
+}
+
+func (v usageMeterView) View(consumerID, tenantID string, op keyquota.Op) (keyquota.Snapshot, keyquota.Limits, bool) {
+	sub, lim, _ := meterLimits(v.settings().Meter, &auth.ConsumerAuth{ConsumerID: consumerID, TenantID: tenantID}, string(op))
+	snap, ok := v.meter.Snapshot(sub, lim)
+	return snap, lim, ok
+}
+
+// statusFeed is the status collector's gateway feed (W06-16): the enabled
+// flag, the door's counters, the ring, the event counters, the federation
+// counters and usage_split_24h over pool.
+func (g *modelGateway) statusFeed(pool *pgxpool.Pool) *handler.GatewayFeed {
+	return &handler.GatewayFeed{
+		Enabled:    func() bool { return g.settings().Enabled },
+		DoorStats:  g.door.Stats,
+		Ring:       g.ring,
+		Events:     g.events.Stats,
+		FedHop:     fedhop.CounterSnapshot,
+		Federation: federation.CounterSnapshot,
+		Split: func(now time.Time) ([]llmusage.SplitRow, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), meterSeedTimeout)
+			defer cancel()
+			return llmusage.ReadSplit24h(ctx, pool, now)
+		},
+	}
 }
 
 // startModelGateway runs g's loops on a context of their own and returns the

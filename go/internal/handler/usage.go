@@ -185,6 +185,11 @@ func (h *UsageHandler) visibleConsumers(ctx context.Context, admin bool, tenant,
 	return ids, nil
 }
 
+// SetMeter wires the meter's view after construction — the routes are
+// mounted before the model gateway exists (cmd/ctxd/server.go). Call it
+// before serving; nil keeps the live part null.
+func (h *UsageHandler) SetMeter(m UsageMeter) { h.meter = m }
+
 // HandleUsage serves GET /api/usage (W06-16).
 func (h *UsageHandler) HandleUsage(w http.ResponseWriter, r *http.Request) {
 	admin, tenant := usageCaller(r)
