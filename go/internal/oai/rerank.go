@@ -90,8 +90,10 @@ func (d RerankDialect) returnDocuments() bool { return d == RerankJina }
 
 // rerankResultBytes is the answer's share per document (design/02 §4.2.1:
 // "n_docs × 64 B"): the document's logit, turned into its relevance score in
-// place (8 bytes), its slot in the sort order (8 bytes) and the room of the
-// result's frame in the encoder buffer. The document echo of
+// place (8 bytes), its slot in the sort order (8 bytes) and the meter's two
+// flags of the block walk (rerankState.paid, unpaidEstimate's counted: a
+// byte each) — 18 bytes, the rest is margin; the result's frame goes
+// through the fixed encoder buffer (rerankEncodeBuffer). The document echo of
 // return_documents is no part of it: the echo is the decoded document the
 // parse booked (rerank_parse.go), written straight from it through the
 // encoder buffer — never copied, never booked twice. A derived mechanism
@@ -926,13 +928,15 @@ func (c *rerankCall) success(st *rerankState) embedOutcome {
 // (design/02 §4.9: Cohere and Jina clients read [0, 1]).
 func sigmoid(x float64) float64 { return 1 / (1 + math.Exp(-x)) }
 
-// rankDocuments turns logits into relevance scores in place and returns the
-// documents' order: descending by score, ties in index order (a stable sort
-// of the input order), cut to topN (0: all; more than n: all).
+// rankDocuments returns the documents' order — descending by logit, which
+// is the order of their relevance scores and finer where the sigmoid
+// saturates (past a logit of about 36.7 the score is 1.0 in float64;
+// lead review 1 R-5), equal logits in index order (a stable sort of the
+// input order) — cut to topN (0: all; more than n: all), and turns the
+// logits into relevance scores in place.
 func rankDocuments(logits []float64, topN int) []int {
 	order := make([]int, len(logits)) // booked with the answer (rerankResultBytes)
-	for i, x := range logits {
-		logits[i] = sigmoid(x)
+	for i := range order {
 		order[i] = i
 	}
 	slices.SortStableFunc(order, func(a, b int) int {
@@ -944,6 +948,9 @@ func rankDocuments(logits []float64, topN int) []int {
 		}
 		return 0
 	})
+	for i, x := range logits {
+		logits[i] = sigmoid(x)
+	}
 	if topN > 0 && topN < len(order) {
 		order = order[:topN]
 	}

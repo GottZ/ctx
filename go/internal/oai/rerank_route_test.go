@@ -231,6 +231,14 @@ func TestRerankMaxTokensPerDoc(t *testing.T) {
 	if want := []string{"documents", "model", "query"}; !slices.Equal(calls[0].keys, want) {
 		t.Errorf("upstream keys %v, want %v (nothing of the client's request but the texts)", calls[0].keys, want)
 	}
+	// A count whose 9/5 budget overflows an int cuts nothing: 2 049 638 230
+	// 412 172 402 × 9 wraps to 2 — without the guard every document would go
+	// upstream empty (lead review 1 R-7).
+	decodeRerank(t, rig.postRerank(t, "/v1/rerank", rerankBody("rr", "q", []string{long, "short"}, `"max_tokens_per_doc":2049638230412172402`)))
+	calls = e.allCalls()
+	if last := calls[len(calls)-1]; last.Documents[0] != long || last.Documents[1] != "short" {
+		t.Errorf("max_tokens_per_doc past the budget's range: upstream documents %q, want them as sent", last.Documents)
+	}
 }
 
 // TestRerankSubBlocksSticky (G8): 300 documents at sub_batch 128 with the

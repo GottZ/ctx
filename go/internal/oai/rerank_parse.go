@@ -377,10 +377,12 @@ func (req *rerankRequest) cut() {
 // rerankDocRunes is the rune limit of a document under max_tokens_per_doc
 // tokens (design/02 §4.9): the 9/5 rune budget of promptguard.RuneBudget —
 // the measured densest tokenization, so the cut keeps at most what the
-// tokens can hold. 0 (not sent) and a count whose budget overflows an int
-// cut nothing.
+// tokens can hold. 0 (not sent) cuts nothing, and so does a count past
+// math.MaxInt32: no document of a request holds that many runes (the body
+// cap is far below), and RuneBudget's product stays in range below it (lead
+// review 1 R-7: no copy of promptguard's ratio here).
 func rerankDocRunes(tokens int) int {
-	if tokens <= 0 || tokens > math.MaxInt/9 {
+	if tokens <= 0 || tokens > math.MaxInt32 {
 		return math.MaxInt
 	}
 	return promptguard.RuneBudget(tokens)

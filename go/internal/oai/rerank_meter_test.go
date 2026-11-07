@@ -159,6 +159,16 @@ func TestRerankMeterBooksOverTheRealMeter(t *testing.T) {
 			}
 			return false
 		}, http.StatusServiceUnavailable, min(4+rerankEstimate("q", docs[2:]), rerankEstimate("q", docs))},
+		{"usage + estimate past the reservation: Keep, never more", func(w http.ResponseWriter, _ *http.Request, n int64, c rerankCall) bool {
+			if n%2 == 0 {
+				w.WriteHeader(http.StatusBadGateway)
+				return true
+			}
+			// block one reports 26 tokens: 26 + the estimate of block two
+			// passes what the reservation holds
+			_, _ = io.WriteString(w, strings.Replace(e.answer(c), `"prompt_tokens":4,"total_tokens":4`, `"prompt_tokens":26,"total_tokens":26`, 1))
+			return true
+		}, http.StatusServiceUnavailable, rerankEstimate("q", docs)},
 	} {
 		e.setRespond(tc.respond)
 		e.hits.Store(0)
