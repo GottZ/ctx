@@ -458,6 +458,9 @@ export interface DispatchTarget {
   herald_scope: string
   held: number
   inflight: number
+  // A03-W10: the part of `held` that settles — released after its run ended,
+  // still booked for the target's abort_settle_ms (the engine still runs it).
+  settling: number
   held_internal: number
   held_external: number
   inflight_internal: number

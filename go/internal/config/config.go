@@ -2560,6 +2560,21 @@ type GatewayConfig struct {
 	// ClientWriteWindow is the rolling write deadline per frame after the
 	// commit: a client that stops reading is cut off and its lease freed.
 	ClientWriteWindow time.Duration `key:"gateway.client_write_window" env:"CTX_GATEWAY_CLIENT_WRITE_WINDOW" default:"30" mut:"hot" tenancy:"global-only"`
+	// StreamRelayBufferBytes is the bounded buffer between a /v1 stream's
+	// upstream reader and its client writer (A03-W10, design/03 §4.10 no. 1):
+	// the lease ends at the upstream's end, the client drains from the
+	// buffer; a stream whose client falls this far behind is cut with an
+	// error frame. Booked in the request's ledger before it is allocated, once
+	// per stream; it joins the stream's response share of V39 (2 ×
+	// max_stream_frame_bytes + this) and must hold one frame at the frame cap.
+	StreamRelayBufferBytes int `key:"gateway.stream_relay_buffer_bytes" env:"CTX_GATEWAY_STREAM_RELAY_BUFFER_BYTES" default:"2097152" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// StreamMinDrainRate and StreamMinDrainWindow are the slowest drain a
+	// /v1 stream's client may keep up while the stream has frames waiting for
+	// it (A03-W10, design/03 §4.10 no. 1): fewer than rate × window bytes in a
+	// window ⇒ the stream is cut. They complement client_write_window, which
+	// only catches a client that reads nothing at all.
+	StreamMinDrainRate   int           `key:"gateway.stream_min_drain_rate" env:"CTX_GATEWAY_STREAM_MIN_DRAIN_RATE" default:"1024" mut:"hot" parse:"strict" tenancy:"global-only"`
+	StreamMinDrainWindow time.Duration `key:"gateway.stream_min_drain_window" env:"CTX_GATEWAY_STREAM_MIN_DRAIN_WINDOW" default:"30" mut:"hot" parse:"strict" tenancy:"global-only"`
 	// RequestTimeout is the stream fallback of the per-role LLM timeout
 	// (= webchat.llm_timeout's default).
 	RequestTimeout time.Duration `key:"gateway.request_timeout" env:"CTX_GATEWAY_REQUEST_TIMEOUT" default:"900" mut:"hot" tenancy:"global-only"`
@@ -2936,6 +2951,9 @@ func (c *Config) GatewaySettings() oai.Settings {
 		StreamCommitGrace:        g.StreamCommitGrace,
 		KeepaliveInterval:        g.KeepaliveInterval,
 		ClientWriteWindow:        g.ClientWriteWindow,
+		StreamRelayBufferBytes:   int64(g.StreamRelayBufferBytes),
+		StreamMinDrainRate:       int64(g.StreamMinDrainRate),
+		StreamMinDrainWindow:     g.StreamMinDrainWindow,
 		RequestTimeout:           g.RequestTimeout,
 		RequestDeadline:          g.RequestDeadline,
 		DefaultMaxTokens:         g.DefaultMaxTokens,

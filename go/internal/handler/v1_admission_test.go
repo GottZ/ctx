@@ -70,6 +70,7 @@ type v1Event struct {
 	weight  int
 	maxWait time.Duration
 	serveBy time.Time
+	stream  bool // Request.Stream (A03-W10)
 }
 
 // countingDispatch is the zählende Admitter of the gates: every door and
@@ -95,12 +96,12 @@ func (c *countingDispatch) take() []v1Event {
 }
 
 func (c *countingDispatch) Acquire(ctx context.Context, req dispatch.Request) (*dispatch.Lease, context.Context, error) {
-	c.add(v1Event{door: "acquire", origin: req.Target.Origin, class: req.Class, cont: req.Continuation, weight: req.Weight, maxWait: req.MaxWait, serveBy: req.ServeBy})
+	c.add(v1Event{door: "acquire", origin: req.Target.Origin, class: req.Class, cont: req.Continuation, weight: req.Weight, maxWait: req.MaxWait, serveBy: req.ServeBy, stream: req.Stream})
 	return c.Dispatcher.Acquire(ctx, req)
 }
 
 func (c *countingDispatch) TryAcquire(ctx context.Context, req dispatch.Request) (*dispatch.Lease, context.Context, error) {
-	c.add(v1Event{door: "try", origin: req.Target.Origin, class: req.Class, cont: req.Continuation, weight: req.Weight, maxWait: req.MaxWait, serveBy: req.ServeBy})
+	c.add(v1Event{door: "try", origin: req.Target.Origin, class: req.Class, cont: req.Continuation, weight: req.Weight, maxWait: req.MaxWait, serveBy: req.ServeBy, stream: req.Stream})
 	return c.Dispatcher.TryAcquire(ctx, req)
 }
 

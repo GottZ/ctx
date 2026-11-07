@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/oai"
 )
 
 // gatewayKeys lists the registry keys of the gateway group.
@@ -271,7 +273,12 @@ func TestValidateGateway(t *testing.T) {
 		mut  func(c *Config)
 	}{
 		{"response cap at httpx.MaxResponseBytes", func(c *Config) { g(c).MaxResponseBytes = 16 << 20 }},
-		{"frame cap at the internal 4 MiB", func(c *Config) { g(c).MaxStreamFrameBytes = 4 << 20 }},
+		// A03-W10: a frame cap above the default relay buffer needs a buffer
+		// that holds one frame at the cap (V39) — the legal 4 MiB cap comes
+		// with a buffer of 4 MiB + the record header.
+		{"frame cap at the internal 4 MiB", func(c *Config) {
+			g(c).MaxStreamFrameBytes, g(c).StreamRelayBufferBytes = 4<<20, 4<<20+oai.RelayRecordHeader
+		}},
 		{"deadline just below the SDK timeout", func(c *Config) { g(c).RequestDeadline = 599 * time.Second }},
 		{"grace at 50 s", func(c *Config) { g(c).StreamCommitGrace = 50 * time.Second }},
 		{"budget exactly one request at every cap", func(c *Config) { g(c).InflightBudget = gatewayCapFloor }},
