@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/llmusage"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/settings"
@@ -113,6 +115,72 @@ type modelGateway struct {
 	usage    *store.ModelKeyUsage
 	budget   oai.Budget
 	meter    *keyquota.Meter
+	// seedRead is the meter's boot seed read (llmusage.SeedConsumers over
+	// the pool): run retries it while the meter is not seeded.
+	seedRead meterSeedRead
+}
+
+// meterSeedRead reads what the consumers used in the UTC day and month of
+// now (llmusage.SeedConsumers).
+type meterSeedRead func(ctx context.Context, now time.Time) ([]llmusage.ConsumerUsage, error)
+
+// meterSeedTimeout bounds one boot seed read. Hardcoded on purpose, like the
+// quota accountant's refresh timeout: it bounds one statement of the process
+// about itself, not anybody's policy.
+const meterSeedTimeout = 10 * time.Second
+
+// seedMeterOnce runs one seed read and, when it succeeds, opens meter with
+// it. It reports whether the meter is seeded afterwards.
+func seedMeterOnce(ctx context.Context, meter *keyquota.Meter, read meterSeedRead) bool {
+	if meter.Seeded() {
+		return true
+	}
+	rctx, cancel := context.WithTimeout(ctx, meterSeedTimeout)
+	defer cancel()
+	now := time.Now()
+	rows, err := read(rctx, now)
+	if err != nil {
+		slog.Warn("gateway: meter boot seed failed, /v1 answers 429 warming until a retry succeeds",
+			"error", err, "retry", keyquota.WarmingRetryAfter)
+		return false
+	}
+	seed := meterSeedRows(rows)
+	if err := meter.Seed(now, seed); err != nil && !errors.Is(err, keyquota.ErrSeeded) {
+		slog.Error("gateway: meter boot seed refused", "error", err)
+		return false
+	}
+	slog.Info("gateway: meter seeded from the usage rollup", "consumer_rows", len(seed))
+	return true
+}
+
+// seedMeter retries the boot seed every retry until it succeeded or ctx
+// ended (design/06 §4.2: fail-closed, Retry mit Backoff 5 s —
+// keyquota.WarmingRetryAfter in production).
+func seedMeter(ctx context.Context, meter *keyquota.Meter, read meterSeedRead, retry time.Duration) {
+	t := time.NewTicker(retry)
+	defer t.Stop()
+	for !seedMeterOnce(ctx, meter, read) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// meterSeedRows maps the rollup's rows onto the meter's: the pipeline names
+// the op (llmlog.GatewayOp); a row of any other pipeline is dropped.
+func meterSeedRows(rows []llmusage.ConsumerUsage) []keyquota.SeedRow {
+	out := make([]keyquota.SeedRow, 0, len(rows))
+	for _, r := range rows {
+		op, ok := keyquota.ParseOp(llmlog.GatewayOp(r.Pipeline))
+		if !ok {
+			continue
+		}
+		out = append(out, keyquota.SeedRow{ConsumerID: r.ConsumerID, TenantID: r.TenantID, Op: op,
+			DayTokens: r.DayTokens, DayRequests: r.DayCalls, MonthTokens: r.MonthTokens})
+	}
+	return out
 }
 
 // newModelGateway wires the gateway over pool and the live config store.
@@ -120,13 +188,18 @@ type modelGateway struct {
 func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 	get := gatewaySettingsGetter(cfgStore)
 	usage := store.NewModelKeyUsage(pool)
-	// The meter is seeded at once: its RPM and TPM windows need no history.
-	// W06-13 replaces this with the boot seed of the day and month budgets
-	// from the rollup (until it lands, an unseeded meter answers warming).
+	// The meter opens with the boot seed of its day and month budgets from
+	// the rollup (W06-13): one read right here, before the server serves,
+	// so a healthy boot never answers warming; a failed read is retried by
+	// run (seedMeter) and /v1 answers 429 warming until it succeeds.
 	meter := keyquota.New(time.Now)
-	meter.MarkSeeded()
+	read := func(ctx context.Context, now time.Time) ([]llmusage.ConsumerUsage, error) {
+		return llmusage.SeedConsumers(ctx, pool, now)
+	}
+	seedMeterOnce(context.Background(), meter, read)
 	return &modelGateway{
 		meter:    meter,
+		seedRead: read,
 		settings: get,
 		access:   handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get}),
 		door: handler.ModelAuth(handler.ModelAuthConfig{
@@ -163,6 +236,9 @@ func (g *modelGateway) run(ctx context.Context) {
 	wg.Go(func() { g.access.Run(ctx) })
 	wg.Go(func() { g.usage.Run(ctx) })
 	wg.Go(func() { g.door.Inflight().Run(ctx) })
+	if g.seedRead != nil {
+		wg.Go(func() { seedMeter(ctx, g.meter, g.seedRead, keyquota.WarmingRetryAfter) })
+	}
 	wg.Wait()
 }
 

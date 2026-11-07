@@ -35,8 +35,20 @@ func meterTestStore(t *testing.T, env map[string]string) *config.Store {
 }
 
 // meterTestGateway is the process's model gateway over a pool that never
-// connects (the meter needs no database; the door's constructor wants a pool).
+// connects (the meter needs no database; the door's constructor wants a
+// pool). Its boot seed read fails, so the meter is closed (warming, W06-13);
+// the helper opens it as a meter that has been running for a while
+// (MarkSeeded: no rollup figures, no burst damping) — the minute buckets and
+// L1 under test need no history.
 func meterTestGateway(t *testing.T, cfgStore *config.Store) *modelGateway {
+	t.Helper()
+	gw := meterTestGatewayUnseeded(t, cfgStore)
+	gw.meter.MarkSeeded()
+	return gw
+}
+
+// meterTestGatewayUnseeded is meterTestGateway without opening the meter.
+func meterTestGatewayUnseeded(t *testing.T, cfgStore *config.Store) *modelGateway {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), "postgres://ctx:ctx@127.0.0.1:1/ctx?connect_timeout=1")
 	if err != nil {
@@ -47,13 +59,16 @@ func meterTestGateway(t *testing.T, cfgStore *config.Store) *modelGateway {
 }
 
 // TestGatewayDepsWiresTheMeter is the wiring pin of gate Z1: the model
-// gateway holds a seeded meter and gatewayDeps hands it to the chat route as
-// its Limiter; without a meter the Limiter stays nil (L11 fail-closed).
+// gateway holds one meter, its seed read wired, and gatewayDeps hands it to
+// the chat route as its Limiter; without a meter the Limiter stays nil (L11
+// fail-closed). A boot seed read that fails leaves the meter closed
+// (warming, W06-13 (h)) — fail-closed, never open without the rollup.
 func TestGatewayDepsWiresTheMeter(t *testing.T) {
 	cfgStore := meterTestStore(t, map[string]string{})
-	gw := meterTestGateway(t, cfgStore)
-	if gw.meter == nil || !gw.meter.Seeded() {
-		t.Fatalf("model gateway meter %v (seeded %v), want one seeded meter per process", gw.meter, gw.meter != nil && gw.meter.Seeded())
+	gw := meterTestGatewayUnseeded(t, cfgStore)
+	if gw.meter == nil || gw.meter.Seeded() || gw.seedRead == nil {
+		t.Fatalf("model gateway meter %v (seeded %v, seed read %v), want one closed meter with its seed read after a failed seed",
+			gw.meter, gw.meter != nil && gw.meter.Seeded(), gw.seedRead != nil)
 	}
 	if d := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter); d.Limiter == nil {
 		t.Error("gatewayDeps with the process meter: Limiter nil, want the meter")

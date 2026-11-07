@@ -678,7 +678,7 @@ Every model consumer has its own meter per operation — `chat`, `embed`, `reran
 |---|---|---|---|
 | the request or token bucket of the operation is empty | `429`, `rate_limit_error` | `rate_limit_exceeded` | `Retry-After` (seconds, rounded up), `retry-after-ms` (rounded up to the millisecond), `x-should-retry: true` — the moment the same request would pass if nothing else arrives; no jitter |
 | the consumer's requests of the operation open at once are at the limit | `429`, `rate_limit_error` | `concurrency_limit_exceeded` | `Retry-After: 1`, `retry-after-ms: 1000`, `x-should-retry: true` — the meter cannot know when a running request ends, so one second is the honest lower bound |
-| the meter is starting | `429`, `rate_limit_error` | `rate_limit_exceeded` | `Retry-After: 5`, `retry-after-ms: 5000`, `x-should-retry: true` |
+| the meter is starting (its boot read of the day and month budgets has not succeeded yet) | `429`, `rate_limit_error` | `rate_limit_exceeded` | `Retry-After: 5`, `retry-after-ms: 5000`, `x-should-retry: true` |
 | a daily or monthly budget of the consumer, or an envelope of its tenant or of the instance, is used up | `429`, `insufficient_quota` | `insufficient_quota` | `Retry-After` / `retry-after-ms` until the window resets — the next 00:00 UTC, for a monthly budget the 1st of the next month at 00:00 UTC; `x-should-retry: false` (an SDK does not retry it) |
 
 The message names the caller's own limit and nothing else, e.g. `Rate limit reached for tokens (chat): 60000/min.` or `Concurrency limit reached for requests (chat): 2 at a time.` — on the bulk lane `(chat, bulk lane)` with its share.

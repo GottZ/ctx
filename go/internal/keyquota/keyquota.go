@@ -33,6 +33,7 @@
 package keyquota
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/bits"
@@ -298,6 +299,12 @@ type Meter struct {
 	now    func() time.Time
 	base   time.Time
 	seeded atomic.Bool
+	// seededAt is the meter's clock at Seed and damp the (consumer, op) keys
+	// the seed loaded (both under mu): a GCRA state of such a key born within
+	// one window after the seed starts half full (burst damping); damp is
+	// dropped once that window is over.
+	seededAt int64
+	damp     map[stateKey]struct{}
 
 	mu    sync.Mutex
 	state map[stateKey]*buckets
@@ -487,8 +494,8 @@ func bulkSlots(c int64, r float64) int64 {
 // reserveScale is the resolution of r in the bulk share: the millionth.
 const reserveScale = 1_000_000
 
-// New returns an unseeded meter over the clock now: until MarkSeeded every
-// Admit answers warming (design/06 §4.1 step 7).
+// New returns an unseeded meter over the clock now: until Seed every Admit
+// answers warming (design/06 §4.1 step 7).
 func New(now func() time.Time) *Meter {
 	return &Meter{now: now, base: now(), state: map[stateKey]*buckets{}, budgets: map[budgetKey]*usage{}}
 }
@@ -497,10 +504,73 @@ func New(now func() time.Time) *Meter {
 // carries one.
 func (m *Meter) clock() int64 { return int64(m.now().Sub(m.base)) }
 
-// MarkSeeded opens the meter. RPM and TPM windows need no history, so until
-// W06-13 seeds the day and month budgets from the rollup, ctxd marks the
-// meter seeded at start.
+// MarkSeeded opens the meter without the boot seed and without the burst
+// damping: a meter that has been running for a while, the test seam of the
+// minute buckets and L1. ctxd opens its meter with Seed (W06-13).
 func (m *Meter) MarkSeeded() { m.seeded.Store(true) }
+
+// SeedRow is what one consumer used of one op in the running UTC day and
+// month before this process started (llmusage.SeedConsumers over the rollup,
+// design/06 §4.2 "Boot-Seed"): its tokens and requests of the day and its
+// tokens of the month.
+type SeedRow struct {
+	ConsumerID, TenantID string
+	Op                   Op
+	DayTokens, DayRequests, MonthTokens int64
+}
+
+// ErrSeeded refuses a second seed: it would count the rollup twice.
+var ErrSeeded = errors.New("keyquota: meter already seeded")
+
+// Seed loads rows, read at at, into the three budget levels — each row into
+// its consumer, its tenant's envelope and the instance's — and opens the
+// meter (design/06 §4.2 "Boot-Seed", fail-closed until it ran: the caller
+// retries a failed read and the meter answers warming meanwhile). A row
+// counts into the UTC day and month of at: a seed read before 00:00 UTC
+// whose meter admits after it keeps the month and loses the day that is
+// over, exactly like any window. A row without consumer, tenant or a known
+// op counts nowhere. Because the seed loads every consumer with rollup rows
+// in the running month, a consumer without a row has used exactly 0 — no
+// lazy seed per subject (B-06-19). From the seed on, a GCRA state of a
+// (consumer, op) the seed loaded that is born within one window starts at
+// tat = now + τ/2 (burst damping): after a restart no consumer that was
+// active gets the whole burst at once again. A (consumer, op) without a row
+// in the running month used nothing in it — its buckets were full before
+// the restart too, and it keeps them (deviation from design/06 §4.2 "jeder
+// GCRA-Zustand", W06-13 report). Exactly once: a second call is ErrSeeded
+// and changes nothing.
+func (m *Meter) Seed(at time.Time, rows []SeedRow) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.seeded.Load() {
+		return ErrSeeded
+	}
+	day, month := calendarOf(at)
+	m.damp = map[stateKey]struct{}{}
+	for _, row := range rows {
+		if _, ok := ParseOp(string(row.Op)); !ok || row.ConsumerID == "" || row.TenantID == "" {
+			continue
+		}
+		m.damp[stateKey{row.ConsumerID, row.Op}] = struct{}{}
+		for _, key := range [3]budgetKey{
+			{levelConsumer, row.ConsumerID, row.Op}, {levelTenant, row.TenantID, row.Op}, {levelInstance, "", row.Op},
+		} {
+			u := m.budgets[key]
+			if u == nil {
+				u = &usage{}
+				m.budgets[key] = u
+			}
+			u.roll(day, month)
+			u.dayTokens = satAdd(u.dayTokens, max(row.DayTokens, 0))
+			u.dayRequests = satAdd(u.dayRequests, max(row.DayRequests, 0))
+			u.monthTokens = satAdd(u.monthTokens, max(row.MonthTokens, 0))
+		}
+	}
+	m.month = month
+	m.seededAt = m.clock()
+	m.seeded.Store(true)
+	return nil
+}
 
 // Seeded reports whether the meter admits at all.
 func (m *Meter) Seeded() bool { return m.seeded.Load() }
@@ -534,9 +604,17 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 	defer m.mu.Unlock()
 	wall := m.now()
 	now := int64(wall.Sub(m.base))
+	if m.damp != nil && now-m.seededAt >= window {
+		m.damp = nil
+	}
 	st := m.state[key]
 	if st == nil {
 		st = &buckets{}
+		if _, ok := m.damp[key]; ok {
+			// Burst damping (design/06 §4.2): a state of a key the seed
+			// loaded, born in the first window after it, starts half full.
+			st.req, st.tok = now+window/2, now+window/2
+		}
 	}
 	levels := m.levels(s, l, wall)
 	// A budget refusal comes first: its window outlasts any minute bucket and
