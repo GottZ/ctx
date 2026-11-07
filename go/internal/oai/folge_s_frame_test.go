@@ -23,7 +23,6 @@ package oai_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,7 +41,6 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
-	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -176,27 +174,6 @@ func folgeSRoute(t *testing.T, frameCap int64, payload string, k int, sample boo
 	return r
 }
 
-// folgeSRelay measures llm.ChatRawStream alone (the relay reader) with a
-// no-op callback — the llm share of S1, logged beside the route's.
-func folgeSRelay(t *testing.T, frameCap int64, payload string, k int) uint64 {
-	row := folgeSEngine(t, payload, k, nil, nil).row("good", 10)
-	body := []byte(`{"model":"MODEL-CANARY","messages":[{"role":"user","content":"hi"}],"stream":true}`)
-	cb := func([]byte) error { return nil }
-	if _, err := llm.ChatRawStream(context.Background(), row, body, 30*time.Second, frameCap, cb); err != nil {
-		t.Fatal(err)
-	}
-	runtime.GC()
-	runtime.GC()
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	a0 := ms.TotalAlloc
-	if _, err := llm.ChatRawStream(context.Background(), row, body, 30*time.Second, frameCap, cb); err != nil {
-		t.Fatal(err)
-	}
-	runtime.ReadMemStats(&ms)
-	return ms.TotalAlloc - a0
-}
-
 func folgeSMedian(v []float64) float64 {
 	s := append([]float64(nil), v...)
 	sort.Float64s(s)
@@ -214,8 +191,10 @@ func folgeSSkip(t *testing.T) {
 // TestStreamFrameWorkPerFrame is S1: TotalAlloc per relayed frame over the
 // route — (k frames of F) − (k frames of a minimal chunk), per frame byte —
 // at most folgeSFrameMax for F of 1 KiB, 64 KiB, the 1-MiB default cap − 64
-// and the 4-MiB cap − 64. Median of three. The llm share (the relay reader
-// alone) is logged beside it.
+// and the 4-MiB cap − 64. Median of three. The stages are pinned where a
+// wire call is allowed: the relay reader in internal/llm
+// (TestReadSSELineIntoReusesItsBuffer, TestDecodeChunkMetaSkipsTheText) —
+// internal/oai's X13 census admits no llm.ChatRawStream outside a lease.
 func TestStreamFrameWorkPerFrame(t *testing.T) {
 	folgeSSkip(t)
 	tiny := folgeSPayload(len(sglangChunk("", "")) + 1)
@@ -226,16 +205,14 @@ func TestStreamFrameWorkPerFrame(t *testing.T) {
 		{1 << 20, 1 << 10, 64}, {1 << 20, 64 << 10, 16}, {1 << 20, 1<<20 - 64, 8}, {4 << 20, 4<<20 - 64, 4},
 	} {
 		big := folgeSPayload(c.size)
-		var route, relay []float64
+		var route []float64
 		for range 3 {
 			rb := folgeSRoute(t, c.frameCap, big, c.k, false)
 			rt := folgeSRoute(t, c.frameCap, tiny, c.k, false)
-			per := float64(c.k * (len(big) - len(tiny)))
-			route = append(route, (float64(rb.alloc)-float64(rt.alloc))/per)
-			relay = append(relay, (float64(folgeSRelay(t, c.frameCap, big, c.k))-float64(folgeSRelay(t, c.frameCap, tiny, c.k)))/per)
+			route = append(route, (float64(rb.alloc)-float64(rt.alloc))/float64(c.k*(len(big)-len(tiny))))
 		}
 		f := folgeSMedian(route)
-		t.Logf("FOLGE-S S1: cap=%d frame=%d k=%d route %.2f × (runs %.2f) — llm share %.2f ×, oai share %.2f ×", c.frameCap, len(big), c.k, f, route, folgeSMedian(relay), f-folgeSMedian(relay))
+		t.Logf("FOLGE-S S1: cap=%d frame=%d k=%d route %.2f × (runs %.2f)", c.frameCap, len(big), c.k, f, route)
 		if f > folgeSFrameMax {
 			t.Errorf("cap %d, frames of %d B: a relayed frame allocates %.2f × its bytes, want at most %.1f × (FOLGE-S S1)", c.frameCap, len(big), f, folgeSFrameMax)
 		}
