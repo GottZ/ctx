@@ -152,6 +152,14 @@ type Gateway struct {
 	// PeerPipeline is the pipeline a ctx peer names for its call — set it
 	// only for a ctx-peer consumer.
 	PeerPipeline string
+	// PeerInstance is the instance a ctx-peer request proved at the
+	// PeerIngress (fedhop.PeerInstanceFrom, wave F-W12): the binding in
+	// force when the request ran — a reset_peer_binding later does not
+	// re-attribute the row. Stored as metadata.gw.peer_instance (a UUID,
+	// else dropped); "" for an app and a pathless peer.
+	//
+	// RC-D S1 stub: not written yet (wire ignores it).
+	PeerInstance string
 	// Usage is UsageBackend or UsageEstimated.
 	Usage string
 	// TTFTMs is the time to the first token of a stream in ms; nil =

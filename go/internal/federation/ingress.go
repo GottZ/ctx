@@ -22,6 +22,22 @@ type PeerIngressConfig struct {
 	// Logger takes the ERROR of step 5 and the WARN of step 6; nil is
 	// slog.Default().
 	Logger *slog.Logger
+
+	// The peer stage (design/04 §4.6 steps 6–8, §4.8; wave F-W12). RC-D S1:
+	// declared, not read yet — S2 makes Binder required (nil panics at
+	// construction like Consumer) and wires all three in cmd/ctxd.
+	//
+	// Binder writes the trust-on-first-use binding of a ctx-peer
+	// (auth.PeerBindings).
+	Binder PeerBinder
+	// RequirePeerHop is the federation.require_peer_hop getter (hot,
+	// global-only): true ⇒ a ctx-peer request without Ctx-Path is refused
+	// with 400 federation_hop_required; false (and nil) ⇒ served without
+	// hints, counted and warned as before.
+	RequirePeerHop func() bool
+	// Events receives EventPeerBound for every binding the stage created;
+	// nil notes nothing.
+	Events EventNoter
 }
 
 // PeerIngress is the second federation stage of the model groups (design/04

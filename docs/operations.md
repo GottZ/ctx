@@ -246,6 +246,17 @@ Boot and write validation (V45): `1 ≤ max_depth ≤ 16` — `0` would refuse e
 - **Upgrade note.** Up to 5.31 `PUT /api/settings/gateway.enabled {"value":true}` was accepted (nothing was mounted, so it changed nothing). An install that stored that row does not boot after this release until the row is removed as above. Check before the upgrade: `SELECT scope, value FROM context_settings WHERE key = 'gateway.enabled';`.
 - The same flag gates the model-consumer self-service (`gateway.tenant_self_service` takes effect only while `gateway.enabled` is on), so that stays closed too until a build mounts `/v1`.
 
+## `federation.require_peer_hop`
+
+**`federation.require_peer_hop`** (settings-only, `bool`, default **false**, `hot`, global-only): what the model API does with a request of a `ctx-peer` consumer that carries no `Ctx-Path` — a peer instance of a version before the federation stamp, or one that registered this instance as a `generic` backend. Off: served without class or pipeline hints and as `Ctx-Egress: local`, counted in `federation_peer_without_path` (status) and logged as one WARN per consumer. On: refused with `400 federation_hop_required` (`Ctx-Reason: hop_required`, ledger `federation/hop_required`); the sending instance classifies that as a bad request and stops using this instance for the row — silently from its users' view. **Switch it on only after `federation_peer_without_path` stayed 0 over an observation window** that covers every peer's traffic pattern (design 04 §7.2 no. 5):
+
+```bash
+curl -sS -X PUT https://<host>/api/settings/federation.require_peer_hop \
+  -H "Authorization: Bearer $CTX_KEY" -H 'Content-Type: application/json' -d '{"value":true}'
+```
+
+No validation rule (a boolean has no invalid value). The peer binding itself needs no setting: it is written on a peer's first request with `Ctx-Path` ([security](security.md#peer-binding)).
+
 ## Write rejections in the server log
 
 A write `POST /api/store` refuses after its body parsed leaves a `WARN` record `store: write rejected` — at most one per key, code and minute (see *Throttled* below); the request logger's `http request` line names method, path, status and `request_id`, but not the key, and `ctx persist --hook` is silent on the client by design. The record carries:
