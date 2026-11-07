@@ -426,11 +426,17 @@ var streamOptionsKeys = []string{"include_usage"}
 // bytes for a 60 KB body): an object; of its members whose decoded name is
 // include_usage or differs from it only in letter case (Unicode folding,
 // "ſ" for "s"), the last one counts, a null one as absent; any other value
-// than a boolean is the 400 at stream_options.include_usage.
+// than a boolean is the 400 at stream_options.include_usage. Only on a
+// stream (hardening 4, F5-1): without stream: true — stream sorts before
+// stream_options, so req.stream is final here — stream_options only has to
+// be an object, its members unread, as before W02-08.
 func (req *chatRequest) readStreamOptions(v json.RawMessage) *paramError {
 	it, ok := newMemberIter(v)
 	if !ok {
 		return invalidType("stream_options", "an object")
+	}
+	if !req.stream {
+		return nil
 	}
 	var include []byte
 	for {

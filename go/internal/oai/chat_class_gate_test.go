@@ -214,9 +214,13 @@ func cgTables() []cgTable {
 			return cgSlot{depth: 2, body: func(v string) string { return cgTop("tool_choice", cgHull(toolHullKeys, toolValid, k, v)) }}
 		}},
 		// W02-08 (rebase round 2, A5): stream_options.include_usage is read,
-		// by a walk over the object (readStreamOptions).
+		// by a walk over the object (readStreamOptions) — on a stream only
+		// (hardening 4, F5-1), so its bodies carry stream: true.
 		{"streamOptionsKeys", streamOptionsKeys, func(k string) cgSlot {
-			return free("stream_options", 2, func(v string) string { return `{"` + k + `":` + v + `}` })
+			s := free("stream_options", 2, func(v string) string { return `{"` + k + `":` + v + `}` })
+			body := s.body
+			s.body = func(v string) string { return `{"stream":true,` + body(v)[1:] }
+			return s
 		}},
 		{"free", []string{"stream_options.*", "reasoning.*", "logit_bias.*", "stop.*"}, func(k string) cgSlot {
 			switch k {
