@@ -109,6 +109,47 @@ func TestRerankTextsAreBookedBeforeTheMeter(t *testing.T) {
 	}
 }
 
+// TestRerankAnswerIsBookedBeforeTheMeter (hardening 1, external review 2
+// F-6 a2): the answer's share — n × 64 B and the 16 KiB encoder buffer — is
+// booked at the entry, before the meter and the queue. The least budget at
+// which the limiter is reached is exactly the sum of every term booked
+// before it, computed from the gate's own constants: the read, the nesting
+// state, the decoded model, query and documents with their slots, the
+// answer, the scan (rrpub is public) and the wire calls' certain part. An
+// answer booked after the admit lowers that least budget by its share.
+func TestRerankAnswerIsBookedBeforeTheMeter(t *testing.T) {
+	const query = "q"
+	docs := rerankDocs(1000)
+	body := rerankBody("rrpub", query, docs)
+	e := newRerankEngine(t)
+	rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 2000, 1, withoutCensus)
+	admitted := func() bool {
+		before := rig.limiter.admits.Load()
+		rig.postRerank(t, "/v1/rerank", body)
+		return rig.limiter.admits.Load() > before
+	}
+	least := leastBudget(t, rig, admitted)
+	n := int64(len(docs))
+	texts := int64(len("rrpub") + len(query)) // decoded: model, query, documents
+	wire := int64(len(query) + 2)               // escaped on the wire: query, documents and their commas
+	for _, d := range docs {
+		texts += int64(len(d))
+		wire += int64(len(d)+2) + 1
+	}
+	const depth = 2
+	answer := n*gateResult + gateEncodeBuffer
+	certain := (gateBodyNum*wire+gateBodyDen-1)/gateBodyDen + n*gateAnswerDoc
+	spent := int64(len(body)) + depth*gateDepthState + texts + n*gateDocSlot + answer +
+		gateScanFactor*int64(len(body)) + gateScanBase + depth*gateScanDepth + certain
+	want := max(gateReserveFactor*int64(len(body)), spent)
+	t.Logf("W0210 answer order: least admitting budget %d B, want %d B (body %d B, answer share %d B, wire certain part %d B; Δ %d)",
+		least, want, len(body), answer, certain, least-want)
+	if least != want {
+		t.Errorf("the limiter is reached at %d B, want exactly the terms before it %d B (Δ %d; the answer's share is %d B — booked after the admit?)",
+			least, want, least-want, answer)
+	}
+}
+
 // TestRerankWireTermIsBookedBeforeTheCall: the wire calls of an attempt are
 // booked after the acquire, before the first call. At the least budget that
 // serves the request, one byte less is 503 server_overloaded after the
