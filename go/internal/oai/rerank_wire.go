@@ -54,8 +54,16 @@ func rerankWireBodyLen(model, query string, docs []string) int {
 // allocates nothing, the encoder's share alone, bau report W02-10
 // §Wire-Term): 5.58–7.05 × the body at 0.5 MB and more over the 1/128/1000
 // × 64 B/4 KiB/64 KiB matrix, a saw tooth of 5.77–7.085 × between its
-// points (the largest 7.085 × at 7 427 102 B); a warm pool saves the growth
-// unreliably and is not booked. Not a fixed multiple of the documents'
+// points (the largest 7.085 × at 7 427 102 B). A warm pool is no upper
+// bound and is not booked: the encoder pool (encoding/json/jsontext, one
+// sync.Pool for the process) drops an under-used large buffer after four
+// strikes and remembers the length of the encode that dropped it, and the
+// next json.Marshal on that entry allocates the next power of two above that
+// length up front, however small its own body — up to the size of an
+// earlier Marshal anywhere in the process, unbooked (external review 2 F-3:
+// 8 429 960 B for a 169 B body against 85 708 B booked). Only a wire that
+// writes its body without json.Marshal removes it (the hardening wave of the
+// rerank wire, before the flip). Not a fixed multiple of the documents'
 // bytes: json.Marshal writes <, > and & as six bytes and a control
 // character as up to six (38.2 × the documents at 128 × 4 KiB of "<"), so
 // the factor applies to the body's exact length (rerankWireBodyLen). A
