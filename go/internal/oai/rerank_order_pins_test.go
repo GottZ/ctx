@@ -83,7 +83,7 @@ func TestRerankDepthIsBookedBeforeTheCheck(t *testing.T) {
 // request, one byte less is 503 server_overloaded with the chain built, no
 // admit, no acquire and no wire call.
 func TestRerankTextsAreBookedBeforeTheMeter(t *testing.T) {
-	docs := rerankDocsOf(64, 4<<10) // 256 KiB of documents: their wire term (7 × the texts) passes the share of 3 × the body
+	docs := rerankDocsOf(64, 4<<10) // 256 KiB of documents: the body, its decoded texts and their wire term (2 × the texts) pass the share of 3 × the body
 	body := rerankBody("rr", "q", docs)
 	e := newRerankEngine(t)
 	rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 200, 1)
@@ -138,7 +138,7 @@ func TestRerankAnswerIsBookedBeforeTheMeter(t *testing.T) {
 	}
 	const depth = 2
 	answer := n*gateResult + gateEncodeBuffer
-	certain := (gateBodyNum*wire+gateBodyDen-1)/gateBodyDen + n*gateAnswerDoc
+	certain := (gateBodyNum*wire+gateBodyDen-1)/gateBodyDen + gateEcho*wire + n*gateAnswerDoc
 	spent := int64(len(body)) + depth*gateDepthState + texts + n*gateDocSlot + answer +
 		gateScanFactor*int64(len(body)) + gateScanBase + depth*gateScanDepth + certain
 	want := max(gateReserveFactor*int64(len(body)), spent)
@@ -153,8 +153,10 @@ func TestRerankAnswerIsBookedBeforeTheMeter(t *testing.T) {
 // TestRerankWireTermIsBookedBeforeTheCall: the wire calls of an attempt are
 // booked after the acquire, before the first call. At the least budget that
 // serves the request, one byte less is 503 server_overloaded after the
-// acquire with no wire call — and it allocated at least the body's twice
-// less than the served request (rerank.Score's body never built).
+// acquire with no wire call — and it allocated at least the body's length
+// less than the served request (rerank.Score's body never built: one
+// allocation of its length since FOLGE-R, 29/4 × before — the bound was
+// twice the body then).
 func TestRerankWireTermIsBookedBeforeTheCall(t *testing.T) {
 	docs := rerankDocsOf(128, 4<<10)
 	body := rerankBody("rr", "q", docs)
@@ -178,7 +180,7 @@ func TestRerankWireTermIsBookedBeforeTheCall(t *testing.T) {
 	if rig.limiter.rejects.Load()+rig.limiter.aborts.Load() == 0 {
 		t.Errorf("one byte short: the meter's reservation was not ended without wire contact")
 	}
-	if saved := int64(ok) - int64(short); saved < 2*int64(len(body)) {
+	if saved := int64(ok) - int64(short); saved < int64(len(body)) {
 		t.Errorf("one byte short of the wire term the request allocated only %d B less than served (body %d B) — the call ran before its booking", saved, len(body))
 	}
 }

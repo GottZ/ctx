@@ -7,6 +7,7 @@ package oai_test
 // term moves the route's sum and not the expectation).
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -28,19 +29,41 @@ const (
 	gateScanFactor    = 23          // the scan's booking per body byte below credentials
 	gateScanBase      = 128 << 10   // and its fixed part
 	gateScanDepth     = 104         // and per nesting level
-	gateBodyNum       = 29          // the wire body's build: 29/4 × its length
-	gateBodyDen       = 4
-	gateCopy          = 32 << 10 // the transport's copy, at most
-	gateAnswerDoc     = 176      // the answer's decode per document
-	gateCall          = 52 << 10 // one call
-	gateRetry         = 30 << 10 // the retry's connection state
+	gateBodyNum       = 1           // the wire body's build: one allocation of its length (FOLGE-R; 29/4 before)
+	gateBodyDen       = 1
+	gateBodySlack     = 8 << 10                        // and the allocation's size class
+	gateCopy          = 32 << 10                       // the transport's copy, at most
+	gateEcho          = 1                              // the answer's room for an echo: the body's length once more
+	gateAnswerDoc     = 2*128 + 16                     // per document: the answer's entry share for both read buffers and the decode (176 before)
+	gateCall          = 2*(4<<10) + 2*(8<<10) + 60<<10 // one call: the answer's frame and size class for both read buffers, the call's own (52 KiB before)
+	gateRetry         = 30 << 10                       // the retry's connection state
 )
 
 // gateWireCall is the booking of one wire call of a body of b bytes over
 // docs documents, its retry included.
 func gateWireCall(b, docs int64) int64 {
 	c := min(b, gateCopy)
-	return (gateBodyNum*b+gateBodyDen-1)/gateBodyDen + c + docs*gateAnswerDoc + gateCall + c + gateRetry
+	return (gateBodyNum*b+gateBodyDen-1)/gateBodyDen + gateBodySlack + c + gateEcho*b + docs*gateAnswerDoc + gateCall + c + gateRetry
+}
+
+// gateWireBody is the length of rerank.Score's body for model, query and
+// docs as encoding/json writes it without HTML escaping (FOLGE-R's byte
+// writer: model, query, documents, return_documents false, no newline) —
+// the gate's own oracle, not rerank.RequestBodyLen.
+func gateWireBody(t *testing.T, model, query string, docs []string) int64 {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(struct {
+		Model           string   `json:"model"`
+		Query           string   `json:"query"`
+		Documents       []string `json:"documents"`
+		ReturnDocuments bool     `json:"return_documents"`
+	}{model, query, docs, false}); err != nil {
+		t.Fatal(err)
+	}
+	return int64(buf.Len() - 1)
 }
 
 // TestRerankBudgetHoldsTheTerms: 128 documents of 4 KiB in one block (E and
@@ -66,16 +89,9 @@ func TestRerankBudgetHoldsTheTerms(t *testing.T) {
 			const query = "which document is relevant"
 			docs := rerankDocsOf(128, 4<<10)
 			body := rerankBody(alias, query, docs)
-			// The wire body the route books its call on (json.Marshal's length
-			// of rerank.Score's body: model of the row, query, documents).
-			wire, err := json.Marshal(struct {
-				Model     string   `json:"model"`
-				Query     string   `json:"query"`
-				Documents []string `json:"documents"`
-			}{"RERANK-MODEL", query, docs})
-			if err != nil {
-				t.Fatal(err)
-			}
+			// The wire body the route books its call on (rerank.Score's body:
+			// model of the row, query, documents).
+			wire := gateWireBody(t, "RERANK-MODEL", query, docs)
 			n := int64(len(docs))
 			texts := int64(len(alias) + len(query))
 			for _, d := range docs {
@@ -83,7 +99,7 @@ func TestRerankBudgetHoldsTheTerms(t *testing.T) {
 			}
 			const depth = 2
 			spent := int64(len(body)) + depth*gateDepthState + texts + n*gateDocSlot + n*gateResult + gateEncodeBuffer +
-				gateWireCall(int64(len(wire)), n)
+				gateWireCall(wire, n)
 			if alias == "rrpub" {
 				spent += gateScanFactor*int64(len(body)) + gateScanBase + depth*gateScanDepth
 			}
@@ -98,7 +114,7 @@ func TestRerankBudgetHoldsTheTerms(t *testing.T) {
 			open()
 			a := <-done
 			t.Logf("W0210 budget %s: body %d B, wire body %d B; held in the engine %d B, want %d B (spent %d, share %d)",
-				alias, len(body), len(wire), got, want, spent, gateReserveFactor*int64(len(body)))
+				alias, len(body), wire, got, want, spent, gateReserveFactor*int64(len(body)))
 			if a.status != http.StatusOK {
 				t.Fatalf("answer %d %.200s", a.status, a.body)
 			}
@@ -138,14 +154,7 @@ func TestRerankFailoverBooksTheSecondAttempt(t *testing.T) {
 	const query = "which document is relevant"
 	docs := rerankDocsOf(128, 4<<10)
 	body := rerankBody("rrwide", query, docs)
-	wire, err := json.Marshal(struct {
-		Model     string   `json:"model"`
-		Query     string   `json:"query"`
-		Documents []string `json:"documents"`
-	}{"RERANK-MODEL", query, docs})
-	if err != nil {
-		t.Fatal(err)
-	}
+	wire := gateWireBody(t, "RERANK-MODEL", query, docs)
 	n := int64(len(docs))
 	texts := int64(len("rrwide") + len(query))
 	for _, d := range docs {
@@ -153,7 +162,7 @@ func TestRerankFailoverBooksTheSecondAttempt(t *testing.T) {
 	}
 	const depth = 2
 	want := int64(len(body)) + depth*gateDepthState + texts + n*gateDocSlot + n*gateResult + gateEncodeBuffer +
-		2*gateWireCall(int64(len(wire)), n)
+		2*gateWireCall(wire, n)
 	done := make(chan chatAnswer)
 	go func() { done <- rig.postRerank(t, "/v1/rerank", body) }()
 	deadline := time.Now().Add(10 * time.Second)

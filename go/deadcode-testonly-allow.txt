@@ -218,7 +218,6 @@ internal/testdb/setup.go	newDatabase	# testdb: integration-getaggtes Container-/
 internal/testdb/setup.go	prepareDatabase	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
 migrations/fold.go	IsFolded	# Prod iteriert Folded() (store/migrations.go:268, check.go:164); IsFolded nur in fold_test.go:84/87
 migrations/fold.go	Section	# Nur Tests lesen Migrations-SQL über Section (fold_test.go:34 + 33 Integrationstests); Runner nutzt FS
-internal/rerank/wire_body.go	RequestBodyLen	# wartet: RC-D S2 FOLGE-R (internal/oai rerankWireBodyLen liest es, Faktor 1); S1 nur Tests
 internal/llm/stream_frame.go	decodeChunkMeta	# wartet: RC-D S2 FOLGE-S (sseRelay.dispatch liest es); S1 nur Tests
 internal/llm/stream_frame.go	readSSELineInto	# wartet: RC-D S2 FOLGE-S (sseRelay.run liest damit); S1 nur Tests
 internal/oai/rewrite_into.go	rewriteChunkInto	# wartet: RC-D S2 FOLGE-S (chat_stream.go Callback); S1 nur Tests
