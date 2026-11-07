@@ -63,10 +63,13 @@ func TestSeedAcrossMidnight(t *testing.T) {
 	c := newClock()
 	at := time.Date(2026, 11, 5, 23, 59, 59, 0, time.UTC)
 	m := keyquota.New(c.now)
+	// The read happened before midnight, the meter opens after it (the
+	// day's rows belong to the day of the read, not of the open — Fremd-
+	// Review 1 L-3 pins Seed(at) against calendarOf(now)).
+	c.add(12*time.Hour + time.Minute) // 2026-11-06 00:01 UTC
 	if err := m.Seed(at, []keyquota.SeedRow{{ConsumerID: "c1", TenantID: "t1", Op: keyquota.OpChat, DayTokens: 1000, MonthTokens: 1000}}); err != nil {
 		t.Fatal(err)
 	}
-	c.add(12*time.Hour + time.Minute) // 2026-11-06 00:01 UTC
 	l := budgetLimits(keyquota.Budget{DailyTokens: 1000, MonthlyTokens: 1500}, keyquota.Budget{}, keyquota.Budget{})
 	admit(t, "the day after the seed", m, consumerOf("c1", "t1"), l, tokens(500)).Settle(keyquota.Usage{CompletionTokens: 500})
 	_, d := m.Admit(consumerOf("c1", "t1"), l, tokens(1))

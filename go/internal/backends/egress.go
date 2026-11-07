@@ -63,6 +63,11 @@ type EgressPolicy struct {
 	AllowExternal  bool
 	AllowUnmetered bool
 	CostExhausted  bool
+	// CostUntracked: the op's route books no provider cost (embeddings and
+	// rerank add none to the meter), so a cost-reporting row could never
+	// move the budget there — it counts as unmetered for the op (Fremd-
+	// Review 1 L-6).
+	CostUntracked bool
 }
 
 // keeps reports whether p keeps a row of class c: free always; metered with
@@ -74,7 +79,9 @@ func (p EgressPolicy) keeps(c Billing) bool {
 	case BillingFree:
 		return true
 	case BillingMetered:
-		return p.AllowExternal && !p.CostExhausted
+		if !p.CostUntracked {
+			return p.AllowExternal && !p.CostExhausted
+		}
 	}
 	return p.AllowExternal && p.AllowUnmetered
 }

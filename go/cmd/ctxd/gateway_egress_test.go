@@ -49,8 +49,11 @@ func TestMeterLimiterEgress(t *testing.T) {
 			t.Fatalf("after %v USD: exhausted %v", []float64{0.7, 1.1}[i], got)
 		}
 	}
-	if l.Egress(ctx, urgentConsumer("c1"), llmlog.GatewayOpEmbed).CostExhausted {
-		t.Error("chat's cost exhausted embed of the same consumer")
+	if p := l.Egress(ctx, urgentConsumer("c1"), llmlog.GatewayOpEmbed); p.CostExhausted || !p.CostUntracked {
+		t.Errorf("embed: %+v — chat's cost must not exhaust embed, and embed books no provider cost (CostUntracked)", p)
+	}
+	if p := l.Egress(ctx, urgentConsumer("c1"), llmlog.GatewayOpChat); p.CostUntracked {
+		t.Error("chat books the provider cost: CostUntracked must be false")
 	}
 	// Tenant envelope 2 × 1.0: c1 booked 1.1, c2 of the same tenant 0.9.
 	res, _ := l.Admit(ctx, urgentConsumer("c2"), modelalias.Alias{}, est)

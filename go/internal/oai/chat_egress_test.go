@@ -160,6 +160,13 @@ func TestTenantQuotaRetryAfterIsTheRelief(t *testing.T) {
 	if r.limiter.admits.Load() != 0 || local.hits.Load() != 0 {
 		t.Errorf("the refused chain reached the meter (%d) or the backend (%d)", r.limiter.admits.Load(), local.hits.Load())
 	}
+	// A relief already past (a refresh older than the relief): at least one
+	// second, never a 429 without Retry-After (Fremd-Review 1 L-4).
+	past := newChatRig(t, []backends.Backend{local.row("spark", backends.TrustFull, 10)}, 4, 1,
+		func(r *chatRig) { r.deps.Quota = reliefGate{relief: time.Now().Add(-time.Hour)} })
+	if a := past.post(t, chatBody("chat")); a.status != http.StatusTooManyRequests || a.header.Get("Retry-After") != "1" {
+		t.Errorf("relief in the past: %d Retry-After %q, want 429 with 1", a.status, a.header.Get("Retry-After"))
+	}
 	unknown := newChatRig(t, []backends.Backend{local.row("spark", backends.TrustFull, 10)}, 4, 1,
 		func(r *chatRig) { r.deps.Quota = reliefGate{} })
 	a = unknown.post(t, chatBody("chat"))

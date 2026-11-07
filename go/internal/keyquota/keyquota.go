@@ -559,8 +559,12 @@ var ErrSeeded = errors.New("keyquota: meter already seeded")
 // active gets the whole burst at once again. A (consumer, op) without a row
 // in the running month used nothing in it — its buckets were full before
 // the restart too, and it keeps them (deviation from design/06 §4.2 "jeder
-// GCRA-Zustand", W06-13 report). Exactly once: a second call is ErrSeeded
-// and changes nothing.
+// GCRA-Zustand", W06-13 report). Named bounds (Fremd-Review 1 L-5, I-1): the
+// seed reads the running month only, so on the 1st a consumer active only
+// in the month before keeps its full burst; requests that wrote no llmlog
+// row (ended before the wire) are neither damped nor in the seeded request
+// count (the meter counted them when admitted). Exactly once: a second call
+// is ErrSeeded and changes nothing.
 func (m *Meter) Seed(at time.Time, rows []SeedRow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -641,11 +645,21 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 	}
 	levels := m.levels(s, l, wall)
 	// A budget refusal comes first: its window outlasts any minute bucket and
-	// a retry cannot help before it resets (design/06 §4.4).
+	// a retry cannot help before it resets (design/06 §4.4). Of several
+	// refusing levels the one that resets last names the refusal (a tie
+	// keeps the first, the consumer's own): Retry-After is the earliest time
+	// the request could pass, never a moment another level still refuses
+	// (Fremd-Review 1 M-1).
+	var refusal *Decision
 	for _, lv := range levels {
 		if reason, ok := lv.u.check(lv.b, s.Lane, l.XUReserve, n); !ok {
-			return nil, quotaRefused(s, lv, reason, l, wall)
+			if d := quotaRefused(s, lv, reason, l, wall); refusal == nil || d.RetryAfter > refusal.RetryAfter {
+				refusal = &d
+			}
 		}
+	}
+	if refusal != nil {
+		return nil, *refusal
 	}
 	nextReq, waitReq, okReq := req.admit(st.req, now, 1)
 	nextTok, waitTok, okTok := tok.admit(st.tok, now, n)

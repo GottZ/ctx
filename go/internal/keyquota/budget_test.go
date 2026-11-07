@@ -257,3 +257,21 @@ func TestBudgetRefusalsInTheLedger(t *testing.T) {
 		t.Errorf("ledger cells %d, dropped %d — want 5 and 0", n, led.Dropped())
 	}
 }
+
+// TestRefusalNamesTheLatestReset (Fremd-Review 1 M-1): when several levels
+// refuse, the refusal is the one whose window resets last — a client sent
+// back at the consumer's 00:00 UTC must not meet the tenant envelope's month
+// still full. Ties keep the first level (the consumer's message with its
+// value).
+func TestRefusalNamesTheLatestReset(t *testing.T) {
+	c := newClock() // 2026-11-05 12:00 UTC
+	m := seeded(c)
+	l := budgetLimits(keyquota.Budget{DailyTokens: 100}, keyquota.Budget{DailyTokens: 1 << 40, MonthlyTokens: 150}, keyquota.Budget{})
+	admit(t, "A", m, consumerOf("a", "t-m1"), l, tokens(1)).Settle(keyquota.Usage{CompletionTokens: 100})
+	admit(t, "B", m, consumerOf("b", "t-m1"), l, tokens(1)).Settle(keyquota.Usage{CompletionTokens: 50})
+	_, d := m.Admit(consumerOf("a", "t-m1"), l, tokens(1))
+	refusedQuota(t, "A: own day and the tenant's month full", d, keyquota.ReasonTenantEnvelope, time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC).Sub(c.now()))
+	tie := budgetLimits(keyquota.Budget{DailyTokens: 100}, keyquota.Budget{DailyTokens: 150}, keyquota.Budget{})
+	_, d = m.Admit(consumerOf("a", "t-m1"), tie, tokens(1))
+	refusedQuota(t, "tie at 00:00 UTC", d, keyquota.ReasonDailyTokens, 12*time.Hour)
+}

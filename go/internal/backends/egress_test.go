@@ -39,6 +39,11 @@ func TestWithoutBillableMatrix(t *testing.T) {
 		{"permission and unmetered", EgressPolicy{AllowExternal: true, AllowUnmetered: true}, []string{"local", "lan", "peer", "openrouter", "generic-ext", "unknown-locality"}},
 		{"unmetered without permission", EgressPolicy{AllowUnmetered: true}, []string{"local", "lan", "peer"}},
 		{"unmetered, cost used up", EgressPolicy{AllowExternal: true, AllowUnmetered: true, CostExhausted: true}, []string{"local", "lan", "peer", "generic-ext", "unknown-locality"}},
+		// An op whose route books no provider cost (embeddings, rerank —
+		// Fremd-Review 1 L-6): an openrouter row cannot move the budget there,
+		// so it is unmetered for that op.
+		{"permission, cost untracked", EgressPolicy{AllowExternal: true, CostUntracked: true}, []string{"local", "lan", "peer"}},
+		{"permission, unmetered, cost untracked", EgressPolicy{AllowExternal: true, AllowUnmetered: true, CostUntracked: true}, []string{"local", "lan", "peer", "openrouter", "generic-ext", "unknown-locality"}},
 	} {
 		var got []string
 		for _, b := range WithoutBillable(chain, tc.p) {

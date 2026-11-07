@@ -10,6 +10,7 @@ package oai_test
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -146,5 +147,45 @@ func TestStreamForcedSettleWritesOneRow(t *testing.T) {
 	if lim.settles.Load()+lim.keeps.Load()+lim.aborts.Load()+lim.rejects.Load() != 0 {
 		t.Errorf("the route ended the forced reservation again: settle/keep/abort/reject %d/%d/%d/%d",
 			lim.settles.Load(), lim.keeps.Load(), lim.aborts.Load(), lim.rejects.Load())
+	}
+}
+
+// TestEmbedForcedSettleWritesOneRow (Fremd-Review 1 L-2): the embeddings
+// route registers its row writer too and writes no row of its own after the
+// forced settle ended its reservation while the engine held the request.
+// Red: a route without the check writes a second row.
+func TestEmbedForcedSettleWritesOneRow(t *testing.T) {
+	e := newEmbedEngine(t, 8)
+	hold := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	e.setRespond(func(http.ResponseWriter, *http.Request, int64, []string) bool {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-hold
+		return false
+	})
+	lim := &forcedLimiter{admitted: make(chan *forcedReservation, 1)}
+	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, func(r *chatRig) { r.deps.Limiter = lim })
+	done := make(chan chatAnswer, 1)
+	go func() { done <- rig.postEmbed(t, embedBody("emb", embedInputs(2))) }()
+	r := <-lim.admitted
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the engine never saw the request")
+	}
+	if !r.force(dispatch.Usage{PromptTokens: 9}) {
+		t.Fatal("the forced settle lost against a route that had not ended")
+	}
+	close(hold)
+	a := <-done
+	if a.status != http.StatusOK {
+		t.Fatalf("%d %s", a.status, a.body)
+	}
+	rows := rig.rows.all()
+	if len(rows) != 1 || rows[0].Pipeline != llmlog.PipelineGatewayEmbeddings || rows[0].Gateway.Usage != llmlog.UsageEstimated || rows[0].Telemetry.PromptTokens != 9 {
+		t.Fatalf("rows %+v, want exactly the forced gateway-embeddings row (estimated, 9 prompt tokens)", rows)
 	}
 }

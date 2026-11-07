@@ -491,12 +491,16 @@ func meterLimits(s oai.MeterSettings, ca *auth.ConsumerAuth, opName string) (key
 
 // Egress is the consumer's egress policy for op (W06-14, oai.EgressSource):
 // the permission from gateway.consumer_allow_external_default (hot), no
-// unmetered permission (no source before W06-15), and whether the
-// consumer's or its tenant envelope's monthly cost budget is used up.
+// unmetered permission (no source before W06-15), whether the consumer's or
+// its tenant envelope's monthly cost budget is used up, and — for every op
+// but chat, whose route is the only one that adds the provider-reported cost
+// to the meter — that the cost is untracked, so a cost-reporting row counts
+// as unmetered there (Fremd-Review 1 L-6).
 func (l meterLimiter) Egress(_ context.Context, ca *auth.ConsumerAuth, op string) backends.EgressPolicy {
 	s := l.settings().Meter
 	sub, lim, _ := meterLimits(s, ca, op)
-	return backends.EgressPolicy{AllowExternal: s.AllowExternal, CostExhausted: l.meter.CostExhausted(sub, lim)}
+	return backends.EgressPolicy{AllowExternal: s.AllowExternal, CostExhausted: l.meter.CostExhausted(sub, lim),
+		CostUntracked: sub.Op != keyquota.OpChat}
 }
 
 func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
