@@ -26,12 +26,23 @@ const requestReserveFactor = 3
 // a text of short secret-like assignments ("apikey:x ", each one a pattern
 // match the scanner collects) 22.23 at 2 MiB (22.21 at 1 MiB, 22.06 at
 // 4 MiB), the largest found (bau report FOLGE-P §Härtung H-8, §Härtung 2).
-// The factor is the ceiling of that maximum, the base the largest remainder
-// of a small body (47 334 bytes at 2 KiB: the patterns' matchers, allocated
-// anew after a collection) rounded up. TestScanReserveIsTheMeasuredOne fails
-// when a form needs more (the booking would no longer be true) or when the
-// largest needs a whole byte less per body byte (it would cost requests for
-// nothing).
+// The factor is the ceiling of that maximum. The base holds two remainders
+// beyond it: a small body's (47 334 bytes at 2 KiB: the patterns' matchers,
+// allocated anew after a collection; 64 KiB held it until hardening 8) and
+// the one of a string value of invalid UTF-8 whose length crosses 64 KiB or
+// 128 KiB (FOLGE-P hardening 8, Delta-Review 6 M-1): at 65 534 bytes of
+// value and from 131 071 bytes on, one scan call allocated more than
+// 23 × the body + 64 KiB + the depth term — up to 50 229 bytes more (4 000
+// calls at the largest points, in a message's content, in metadata, in the
+// drop key user and in the ctx key n; 6–14 KB in most calls, 6–36 KB more
+// in others; the smaller of two calls under it again 1 KiB before and 1 KiB
+// past 128 KiB). 128 KiB holds both remainders, 15 307 bytes to spare at
+// the largest call.
+// TestScanReserveIsTheMeasuredOne fails when a form needs more (the booking
+// would no longer be true) or when the largest needs a whole byte less per
+// body byte (it would cost requests for nothing); TestClassGateBytesPerScan
+// scans the boundary lengths as a fixed part, each as the larger of two
+// calls.
 //
 // What the factor binds is what one scan call holds on the heap at once. One
 // form is scanned twice in a row (Delta-Review 2 F-1): one key of the whole
@@ -60,7 +71,7 @@ const requestReserveFactor = 3
 // limit 4 of 6 over it (up to 281.4 MiB).
 const (
 	scanReserveFactor = 23
-	scanReserveBase   = 64 << 10
+	scanReserveBase   = 128 << 10
 )
 
 // scanDepthStateBytes is what the sensitivity scan allocates per nesting
