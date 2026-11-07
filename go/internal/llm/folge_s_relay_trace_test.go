@@ -30,7 +30,9 @@ type folgeSRelayCase struct {
 }
 
 func folgeSRelayCorpus() [][2]string {
-	c := func(s string) string { return `{"id":"I","model":"M","choices":[{"index":0,"delta":{"content":"` + s + `"},"finish_reason":null}]}` }
+	c := func(s string) string {
+		return `{"id":"I","model":"M","choices":[{"index":0,"delta":{"content":"` + s + `"},"finish_reason":null}]}`
+	}
 	fin := `{"id":"I2","model":"M2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`
 	return [][2]string{
 		{"plain", "data: " + c("a") + "\n\ndata: " + fin + "\n\ndata: [DONE]\n\n"},

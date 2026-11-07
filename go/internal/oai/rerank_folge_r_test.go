@@ -6,7 +6,7 @@ package oai
 // red against the S1 stub — the route still books 29/4 × the body, the
 // cold json.Marshal's growth, where the byte writer needs one allocation of
 // the body's length (FOLGE-R S2 sets the factor to 1 and rerankWireBodyLen
-// to rerank.WireBodyLen).
+// to rerank.RequestBodyLen).
 
 import (
 	"strings"
@@ -22,7 +22,7 @@ func TestRerankRouteBooksTheByteWriter(t *testing.T) {
 			for i := range docs {
 				docs[i] = doc
 			}
-			if got, want := rerankWireBodyLen("bge-"+doc, "q "+doc, docs), rerank.WireBodyLen("bge-"+doc, "q "+doc, docs); got != want {
+			if got, want := rerankWireBodyLen("bge-"+doc, "q "+doc, docs), rerank.RequestBodyLen("bge-"+doc, "q "+doc, docs); got != want {
 				t.Errorf("doc %q n=%d: the route books a %d B body, the wire writes %d B", doc, n, got, want)
 			}
 		}

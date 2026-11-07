@@ -69,7 +69,7 @@ type folgeRRequest struct {
 // TestWireBodyDecodesToTheRequest is the shape of the body (FOLGE-R, F-1):
 // it decodes to exactly the members model, query, documents and
 // return_documents — the first three as json.Marshal's body decodes, the
-// last false — and its length is WireBodyLen. Red on the S1 stub: the
+// last false — and its length is RequestBodyLen. Red on the S1 stub: the
 // base's body has no return_documents.
 func TestWireBodyDecodesToTheRequest(t *testing.T) {
 	for _, f := range folgeRForms {
@@ -80,8 +80,8 @@ func TestWireBodyDecodesToTheRequest(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s n=%d: %v", f.name, n, err)
 			}
-			if got := WireBodyLen(model, query, docs); got != len(body) {
-				t.Errorf("%s n=%d: WireBodyLen %d, body %d B", f.name, n, got, len(body))
+			if got := RequestBodyLen(model, query, docs); got != len(body) {
+				t.Errorf("%s n=%d: RequestBodyLen %d, body %d B", f.name, n, got, len(body))
 			}
 			var members map[string]json.RawMessage
 			if err := json.Unmarshal(body, &members); err != nil {
@@ -223,7 +223,7 @@ type baseRerankResult struct {
 
 type baseRerankResponse struct {
 	Results []baseRerankResult `json:"results"`
-	Data    json.RawMessage `json:"data"`
+	Data    json.RawMessage    `json:"data"`
 	Usage   struct {
 		PromptTokens int `json:"prompt_tokens"`
 		TotalTokens  int `json:"total_tokens"`

@@ -14,7 +14,7 @@ import (
 // RCD-c8-hardening-S1 §Vertrag). The contract:
 //
 //   - wireBody writes Score's body in one allocation of its exact length
-//     (WireBodyLen), without json.Marshal: the encoder's pooled buffer grows a
+//     (RequestBodyLen), without json.Marshal: the encoder's pooled buffer grows a
 //     quarter at a time and is copied out (up to 7.25 × the body cold), and a
 //     warm pool allocates up to the size of an earlier Marshal anywhere in the
 //     process (W02-10 review 2 F-3: 8 429 960 B for a 169 B body). The bytes
@@ -42,11 +42,11 @@ import (
 // at the embed wire). Unused by the base decode — its tests are the contract.
 var errSurplusResults = errors.New("rerank: more results than documents")
 
-// WireBodyLen is the exact length of the body Score sends for model, query
+// RequestBodyLen is the exact length of the body Score sends for model, query
 // and docs — the length the gateway's rerank route books the body's build
 // at (internal/oai rerankWireBodyLen reads it in FOLGE-R S2, factor 1).
 // RC-D S1: the length of the base's json.Marshal body, built to be measured.
-func WireBodyLen(model, query string, docs []string) int {
+func RequestBodyLen(model, query string, docs []string) int {
 	body, err := wireBody(model, query, docs)
 	if err != nil {
 		return 0

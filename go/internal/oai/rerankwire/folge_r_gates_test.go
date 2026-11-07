@@ -47,7 +47,7 @@ func TestFolgeRWireFactorIsAboutOne(t *testing.T) {
 	h := newWireHarness(t)
 	small := newWireCase(t, h.query, "n128/64B", 128, 64, wireText(64), nil, false)
 	aSmall := folgeRMost(t, h, small)
-	lSmall := rerank.WireBodyLen("M", h.query, small.docs)
+	lSmall := rerank.RequestBodyLen("M", h.query, small.docs)
 	dSmall := small.d()
 	for _, c := range []struct {
 		name     string
@@ -62,7 +62,7 @@ func TestFolgeRWireFactorIsAboutOne(t *testing.T) {
 	} {
 		big := newWireCase(t, h.query, c.name, 128, c.size, c.doc, small.resp, false)
 		a := folgeRMost(t, h, big)
-		den := float64(rerank.WireBodyLen("M", h.query, big.docs) - lSmall)
+		den := float64(rerank.RequestBodyLen("M", h.query, big.docs) - lSmall)
 		if c.perDocB {
 			den = float64(big.d() - dSmall)
 		}
@@ -104,7 +104,7 @@ func TestFolgeRAnswerReadIsBooked(t *testing.T) {
 	cases = append(cases, echo)
 	for _, c := range cases {
 		a := folgeRMost(t, h, c)
-		l := rerank.WireBodyLen("M", h.query, c.docs)
+		l := rerank.RequestBodyLen("M", h.query, c.docs)
 		bound := wireCallBooking(l, c.n) + int64(l)
 		t.Logf("FOLGE-R answer read: %-20s answer=%d B n=%d allocated=%d B bound=%d B (%.1f ×)", c.name, len(c.resp), c.n, a, bound, float64(a)/float64(bound))
 		if int64(a) > bound {

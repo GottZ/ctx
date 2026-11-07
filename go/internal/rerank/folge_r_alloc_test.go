@@ -47,14 +47,14 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 					continue // 8–29 MiB bodies: outside -short
 				}
 				docs := folgeRDocs(f.unit, n, size)
-				want := WireBodyLen("bge-reranker-v2-m3", "query "+f.unit, docs)
+				want := RequestBodyLen("bge-reranker-v2-m3", "query "+f.unit, docs)
 				var got int
 				b, m := folgeRMeasure(true, func() {
 					folgeRSink, _ = wireBody("bge-reranker-v2-m3", "query "+f.unit, docs)
 					got = len(folgeRSink)
 				})
 				if got != want || m != 1 || b > uint64(want)+folgeRBodySlack {
-					t.Errorf("%s n=%d size=%d cold: %d allocations, %d B for a %d B body (%.3f ×; WireBodyLen %d) — want one allocation of at most the body + %d B",
+					t.Errorf("%s n=%d size=%d cold: %d allocations, %d B for a %d B body (%.3f ×; RequestBodyLen %d) — want one allocation of at most the body + %d B",
 						f.name, n, size, m, b, got, float64(b)/float64(max(got, 1)), want, folgeRBodySlack)
 				}
 			}
@@ -70,7 +70,7 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 		folgeRSink, _ = wireBody("m", "q", quarter)
 	}
 	folgeRSink = nil
-	want := WireBodyLen("m", "q", small)
+	want := RequestBodyLen("m", "q", small)
 	var worst uint64
 	for range 4 {
 		b, _ := folgeRMeasure(false, func() { folgeRSink, _ = wireBody("m", "q", small) })
