@@ -513,8 +513,7 @@ type meterLimiter struct {
 	// RC-D cluster C2): one soft_limit note per Decision.Warnings entry of
 	// an admission, one hard_limit note per budget refusal
 	// (Reason.Quota()); the usageevents.Recorder dedupes per consumer × op
-	// × dimension × window. nil = no events. RC-D S1: declared, not yet
-	// read.
+	// × dimension × level × window. nil = no events.
 	events usageevents.Sink
 }
 
@@ -541,7 +540,7 @@ func meterLimits(s oai.MeterSettings, ca *auth.ConsumerAuth, opName string) (key
 	own := keyquota.Budget{DailyTokens: lim.DailyTokens, MonthlyTokens: s.MonthlyTokens, DailyRequests: s.DailyRequests, MonthlyCostUSD: s.MonthlyCostUSD}
 	return keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op},
 		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: s.Concurrency,
-			Consumer: own, Tenant: own.Scale(s.TenantEnvelopeFactor), Instance: own.Scale(s.InstanceEnvelopeFactor)},
+			Consumer: own, Tenant: own.Scale(s.TenantEnvelopeFactor), Instance: own.Scale(s.InstanceEnvelopeFactor), SoftRatio: s.SoftRatio},
 		lim
 }
 
@@ -573,6 +572,7 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 	// request's record, which this adapter holds and the leaf does not.
 	reason, detail := d.LedgerReason()
 	oai.NoteRejection(ctx, reason, detail)
+	l.noteUsage(sub, d)
 	switch {
 	case d.Allowed:
 		return meterReservation{Reservation: res, rec: oai.AccessRecordFrom(ctx)}, nil
@@ -592,6 +592,26 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 	// rate_requests, rate_tokens and warming: 429 rate_limit_exceeded with
 	// the exact Retry-After (design/06 §4.4).
 	return nil, &oai.LimitRefusal{Code: oai.CodeRateLimitExceeded, Message: d.Message, RetryAfter: d.RetryAfter, ShouldRetry: d.Retryable}
+}
+
+// noteUsage hands the meter's answer to the usage events (W06-18): every
+// warning of an admission is a soft_limit, the exceeded dimension of a
+// budget refusal a hard_limit. The sink dedupes per consumer × op ×
+// dimension × level × window and never blocks.
+func (l meterLimiter) noteUsage(sub keyquota.Subject, d keyquota.Decision) {
+	if l.events == nil {
+		return
+	}
+	note := func(kind usageevents.Kind, w keyquota.Warning) {
+		l.events.Note(usageevents.Event{Kind: kind, ConsumerID: sub.ConsumerID, TenantID: sub.TenantID, Op: string(sub.Op),
+			Dimension: string(w.Dimension), Level: string(w.Level), WindowStart: w.WindowStart, Used: w.Used, Limit: w.Limit})
+	}
+	for _, w := range d.Warnings {
+		note(usageevents.KindSoftLimit, w)
+	}
+	if d.Exceeded != nil && d.Reason.Quota() {
+		note(usageevents.KindHardLimit, *d.Exceeded)
+	}
 }
 
 // meterReservation is a meter reservation as the route holds it: the usage

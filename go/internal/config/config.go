@@ -3021,6 +3021,7 @@ func (c *Config) GatewaySettings() oai.Settings {
 			InstanceEnvelopeFactor: g.InstanceEnvelopeFactor,
 			AllowExternal:          g.ConsumerAllowExternalDefault,
 			MonthlyCostUSD:         g.ConsumerMonthlyCostUSDDefault,
+			SoftRatio:              g.SoftRatio,
 		},
 		Auth: oai.AuthSettings{
 			FailureLimit:          g.AuthFailureLimit,

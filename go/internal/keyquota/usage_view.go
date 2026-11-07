@@ -1,6 +1,10 @@
 package keyquota
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // RC-D cluster C2 (W06-16, W06-18) — the meter's read view and its soft
 // threshold. Contract (RC-D S1: fail-closed stubs):
@@ -82,16 +86,138 @@ type Snapshot struct {
 	DayReset, MonthReset time.Time
 }
 
-// Snapshot returns the meter's view of s under l at the meter's clock. ok is
-// false for an invalid subject or an unseeded meter. S1 stub: always false.
-func (m *Meter) Snapshot(s Subject, l Limits) (Snapshot, bool) {
-	_, _, _ = m, s, l
-	return Snapshot{}, false
+// levelName maps the meter's internal level to its exported name.
+func levelName(l budgetLevel) BudgetLevel {
+	switch l {
+	case levelTenant:
+		return LevelTenant
+	case levelInstance:
+		return LevelInstance
+	}
+	return LevelConsumer
 }
 
+// windowStarts are the UTC starts of the day and the month of t.
+func windowStarts(t time.Time) (day, month time.Time) {
+	u := t.UTC()
+	y, mo, d := u.Date()
+	return time.Date(y, mo, d, 0, 0, 0, 0, time.UTC), time.Date(y, mo, 1, 0, 0, 0, 0, time.UTC)
+}
+
+// softWarnings are the dimensions of the three levels at or over the soft
+// share after an admission (W06-18): used + reserved — the admitted request's
+// reservation and request included — against the lane's limit, in the order
+// level (consumer, tenant, instance) × month, day, requests. A share of 0
+// (off), not a number or ≥ 1 warns nothing; an unbounded dimension never
+// warns. Called under m.mu with the levels the admission just booked.
+func softWarnings(levels [3]budgetLevelOf, lane Lane, l Limits, wall time.Time) []Warning {
+	ratio := l.SoftRatio
+	if !(ratio > 0) || ratio >= 1 {
+		return nil
+	}
+	day, month := windowStarts(wall)
+	var out []Warning
+	for _, lv := range levels {
+		for _, d := range [...]struct {
+			dim   Reason
+			limit int64
+			used  int64
+			start time.Time
+		}{
+			{ReasonMonthlyTokens, lv.b.MonthlyTokens, satAdd(lv.u.monthTokens, lv.u.reserved), month},
+			{ReasonDailyTokens, lv.b.DailyTokens, satAdd(lv.u.dayTokens, lv.u.reserved), day},
+			{ReasonDailyRequests, lv.b.DailyRequests, lv.u.dayRequests, day},
+		} {
+			limit := laneLimit(d.limit, lane, l.XUReserve)
+			if limit <= 0 || float64(d.used) < ratio*float64(limit) {
+				continue
+			}
+			out = append(out, Warning{Level: levelName(lv.level), Dimension: d.dim, Used: d.used, Limit: limit, WindowStart: d.start})
+		}
+	}
+	return out
+}
+
+// Snapshot returns the meter's view of s under l at the meter's clock: the
+// three levels' counters rolled into the current windows (a key the meter
+// has not seen reads as zero and is not stored), the binding level, the
+// subject's open requests and the units its minute buckets admit now, as
+// its lane sees them. ok is false for an invalid subject or limits and for
+// an unseeded meter. No statement — the meter's lock only.
+func (m *Meter) Snapshot(s Subject, l Limits) (Snapshot, bool) {
+	if s.ConsumerID == "" || s.TenantID == "" || l.RPM < 1 || l.TPM < 1 || s.Lane > LaneBulk || !m.Seeded() {
+		return Snapshot{}, false
+	}
+	if _, ok := ParseOp(string(s.Op)); !ok {
+		return Snapshot{}, false
+	}
+	req := newDim(l.RPM, s.Lane, l.XUReserve)
+	tok := newDim(l.TPM, s.Lane, l.XUReserve)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	wall := m.now()
+	now := int64(wall.Sub(m.base))
+	out := Snapshot{RPMRemaining: req.cap, TPMRemaining: tok.cap}
+	if st := m.state[stateKey{s.ConsumerID, s.Op}]; st != nil {
+		out.Inflight = int64(len(st.open))
+		out.RPMRemaining, out.TPMRemaining = req.remaining(st.req, now), tok.remaining(st.tok, now)
+	}
+	var headroom int64
+	for _, lv := range m.levels(s, l, wall) {
+		st := LevelState{Level: levelName(lv.level), DayTokens: lv.u.dayTokens, MonthTokens: lv.u.monthTokens,
+			DayRequests: lv.u.dayRequests, Reserved: lv.u.reserved, Open: lv.u.open, MonthCostUSD: lv.u.monthCost, Budget: lv.b}
+		switch lv.level {
+		case levelConsumer:
+			out.Consumer = st
+		case levelTenant:
+			out.Tenant = st
+		default:
+			out.Instance = st
+		}
+		if limit := laneLimit(lv.b.DailyTokens, s.Lane, l.XUReserve); limit > 0 {
+			if h := limit - satAdd(lv.u.dayTokens, lv.u.reserved); out.Binding == "" || h < headroom {
+				out.Binding, headroom = st.Level, h
+			}
+		}
+	}
+	day, month := windowStarts(wall)
+	out.DayReset, out.MonthReset = day.AddDate(0, 0, 1), month.AddDate(0, 1, 0)
+	return out, true
+}
+
+// warningOrder is the header's fixed order of the consumer's own dimensions.
+var warningOrder = [...]Reason{ReasonMonthlyTokens, ReasonDailyTokens, ReasonDailyRequests}
+
 // WarningHeader renders ws as the value of QuotaWarningHeader ("" for no
-// warning). S1 stub: always "".
+// warning): the consumer level's dimensions in the order monthly_tokens,
+// daily_tokens, daily_requests, each with pct = ⌊used·100 / limit⌋ (at most
+// 100), then tenant_envelope and instance_envelope once each and without a
+// value (B6: an envelope is not the caller's own limit).
 func WarningHeader(ws []Warning) string {
-	_ = ws
-	return ""
+	if len(ws) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, dim := range warningOrder {
+		for _, w := range ws {
+			if w.Level != LevelConsumer || w.Dimension != dim || w.Limit <= 0 {
+				continue
+			}
+			pct := min(mulDiv(max(w.Used, 0), 100, w.Limit), 100)
+			parts = append(parts, string(dim)+";pct="+strconv.FormatInt(pct, 10))
+			break
+		}
+	}
+	for _, lv := range [...]struct {
+		level BudgetLevel
+		token string
+	}{{LevelTenant, string(ReasonTenantEnvelope)}, {LevelInstance, string(ReasonInstanceEnvelope)}} {
+		for _, w := range ws {
+			if w.Level == lv.level {
+				parts = append(parts, lv.token)
+				break
+			}
+		}
+	}
+	return strings.Join(parts, ", ")
 }

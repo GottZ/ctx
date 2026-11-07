@@ -88,8 +88,6 @@ type MeterSettings struct {
 	MonthlyCostUSD float64
 	// SoftRatio is the warning share of the day and month budgets
 	// (gateway.soft_ratio, W06-18; [0, 1), 0 = off) — keyquota.Limits.SoftRatio.
-	// RC-D S1: declared, not yet filled by config.GatewaySettings nor read
-	// by meterLimits (S2).
 	SoftRatio float64
 }
 

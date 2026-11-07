@@ -1,6 +1,11 @@
 package handler
 
 import (
+	"context"
+	"log/slog"
+	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GottZ/ctx/internal/federation"
@@ -12,8 +17,6 @@ import (
 // W06-16 status sections of the model API (design/06 §4.8 rows
 // "/api/status server-admin" and "tenant-admin"; design/05 V-06-d).
 //
-// Contract (RC-D S1 — the fields exist on statusResponse, nothing fills
-// them yet; SetGatewayFeed is a no-op, the ring is empty):
 //
 //   - gateway: PRESENT on both paths while gateway.enabled is on and a feed
 //     is wired; ABSENT (JSON null for the SPA: tile off) otherwise. The
@@ -46,9 +49,11 @@ const ringBuckets = 60
 
 // gatewayStatus is the gateway section of /api/status.
 type gatewayStatus struct {
-	Enabled           bool                    `json:"enabled"`
-	Consumers         int64                   `json:"consumers"`
-	ReservationsOpen  int64                   `json:"reservations_open"`
+	Enabled   bool  `json:"enabled"`
+	Consumers int64 `json:"consumers"`
+	// ReservationsOpen and Rejections5m are null until the meter and the
+	// in-memory ledger feed them (null ≠ 0).
+	ReservationsOpen  *int64                  `json:"reservations_open"`
 	Rejections5m      map[string]int64        `json:"rejections_5m"`
 	TopConsumers1h    []TopConsumer           `json:"top_consumers_1h"`
 	ConsumersUsed1h   int64                   `json:"consumers_used_1h"`
@@ -73,14 +78,17 @@ type envelopeUse struct {
 // ledger's federation details of the last hour (loop, depth,
 // header_invalid; reason 'federation').
 type federationStatus struct {
-	LoopRejects          int64  `json:"loop_rejects"`
-	DepthRejects         int64  `json:"depth_rejects"`
-	HeaderInvalid        int64  `json:"header_invalid"`
+	// The ledger-derived counts (loop, depth, header_invalid, peer_mismatch,
+	// embed_space_rejects, busy) are null until a source feeds them — the
+	// refusal ledger is flushed per hour, the status reads no ledger yet.
+	LoopRejects          *int64 `json:"loop_rejects"`
+	DepthRejects         *int64 `json:"depth_rejects"`
+	HeaderInvalid        *int64 `json:"header_invalid"`
 	HeaderIgnored        uint64 `json:"header_ignored"`
 	PeerWithoutPath      uint64 `json:"peer_without_path"`
-	PeerMismatch         int64  `json:"peer_mismatch"`
-	EmbedSpaceRejects    int64  `json:"embed_space_rejects"`
-	Busy                 int64  `json:"busy"`
+	PeerMismatch         *int64 `json:"peer_mismatch"`
+	EmbedSpaceRejects    *int64 `json:"embed_space_rejects"`
+	Busy                 *int64 `json:"busy"`
 	StampWithoutIdentity uint64 `json:"stamp_without_identity"`
 	PeerBound            int64  `json:"peer_bound"`
 }
@@ -106,14 +114,162 @@ type GatewayFeed struct {
 	Split func(now time.Time) ([]llmusage.SplitRow, error)
 }
 
-// SetGatewayFeed wires the gateway sections. S1 stub: no-op.
-func (c *StatusCollector) SetGatewayFeed(f *GatewayFeed) { _, _ = c, f }
+// SetGatewayFeed wires the gateway sections (nil = none).
+func (c *StatusCollector) SetGatewayFeed(f *GatewayFeed) { c.gateway.feed.Store(f) }
 
-// ConsumerRing is the in-memory top-consumers ring (V-06-d): 60 one-minute
-// buckets of requests and tokens per consumer; a bucket older than 60
-// minutes is dropped on the next Add or Top. Cardinality = the consumers.
+// gatewayStatusState is the collector's gateway part: the feed and the
+// 30-second generation of the database counts (V-06-d).
+type gatewayStatusState struct {
+	feed atomic.Pointer[GatewayFeed]
+	mu   sync.Mutex // serializes generation builds (single-flight)
+	gen  atomic.Pointer[gatewayGeneration]
+}
+
+// gatewayGeneration is one build of the database-backed gateway counts.
+type gatewayGeneration struct {
+	at       time.Time
+	byTenant map[string]gatewayCounts
+	split    []llmusage.SplitRow
+}
+
+// gatewayCounts are the consumers of one tenant: active ones, those whose
+// keys were used in the last hour, those with a live key expiring within
+// gateway.key_expiry_warn.
+type gatewayCounts struct{ consumers, used1h, expiring int64 }
+
+// gatewayCountsSQL is the generation's one statement on the consumers and
+// their keys (idx_model_consumers_tenant_active; the key probes are per
+// consumer).
+const gatewayCountsSQL = `
+SELECT c.tenant_id::text, count(*)::bigint,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM context_model_keys k
+                                       WHERE k.consumer_id = c.id AND k.last_used_at > $1))::bigint,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM context_model_keys k
+                                       WHERE k.consumer_id = c.id AND k.revoked_at IS NULL
+                                         AND k.expires_at > $2 AND k.expires_at <= $3))::bigint
+FROM context_model_consumers c
+WHERE c.active
+GROUP BY 1`
+
+// gatewayGenNow returns the generation, building it when it is older than
+// gatewayGenTTL (one build at a time; a failed build keeps the old one).
+func (c *StatusCollector) gatewayGenNow(ctx context.Context, f *GatewayFeed) *gatewayGeneration {
+	now := time.Now()
+	if g := c.gateway.gen.Load(); g != nil && now.Sub(g.at) < gatewayGenTTL {
+		return g
+	}
+	c.gateway.mu.Lock()
+	defer c.gateway.mu.Unlock()
+	if g := c.gateway.gen.Load(); g != nil && now.Sub(g.at) < gatewayGenTTL {
+		return g
+	}
+	warn := c.cfg.Snapshot().Gateway.Consumers.KeyExpiryWarn //nolint:forbidigo // MT 06 BLIND: the key-expiry warning window is a server-global gateway setting, not tenant-scoped.
+	g := &gatewayGeneration{at: now, byTenant: map[string]gatewayCounts{}}
+	rows, err := c.pool.Query(ctx, gatewayCountsSQL, now.Add(-time.Hour), now, now.Add(warn))
+	if err == nil {
+		for rows.Next() {
+			var tenant string
+			var n gatewayCounts
+			if err = rows.Scan(&tenant, &n.consumers, &n.used1h, &n.expiring); err != nil {
+				break
+			}
+			g.byTenant[tenant] = n
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+	}
+	if err == nil && f.Split != nil {
+		g.split, err = f.Split(now)
+	}
+	if err != nil {
+		slog.Warn("status: gateway generation failed", "error", err)
+		if old := c.gateway.gen.Load(); old != nil {
+			return old
+		}
+		return nil
+	}
+	c.gateway.gen.Store(g)
+	return g
+}
+
+// topConsumersN is the length of top_consumers_1h.
+const topConsumersN = 10
+
+// stampGateway sets the gateway sections of one caller's answer: every
+// field for a server-admin, the tenant's own consumers for a tenant-admin
+// (nothing without a tenant). No section while the feed is missing, the
+// gateway is off or no generation could be built.
+func (c *StatusCollector) stampGateway(ctx context.Context, resp *statusResponse, admin bool, tenant string) {
+	f := c.gateway.feed.Load()
+	if f == nil || f.Enabled == nil || !f.Enabled() || (!admin && tenant == "") {
+		return
+	}
+	g := c.gatewayGenNow(ctx, f)
+	if g == nil {
+		return
+	}
+	gw := &gatewayStatus{Enabled: true, GeneratedAt: &g.at}
+	if admin {
+		for _, n := range g.byTenant {
+			gw.Consumers += n.consumers
+			gw.ConsumersUsed1h += n.used1h
+			gw.ConsumersExpiring += n.expiring
+		}
+	} else {
+		n := g.byTenant[tenant]
+		gw.Consumers, gw.ConsumersUsed1h, gw.ConsumersExpiring = n.consumers, n.used1h, n.expiring
+	}
+	gw.TopConsumers1h = []TopConsumer{}
+	if f.Ring != nil {
+		gw.TopConsumers1h = f.Ring.Top(topConsumersN, tenant)
+	}
+	if admin {
+		if f.DoorStats != nil {
+			st := f.DoorStats()
+			gw.Auth = &st
+		}
+		if f.Events != nil {
+			ev := f.Events()
+			gw.Events = &ev
+		}
+		split := g.split
+		if split == nil {
+			split = []llmusage.SplitRow{}
+		}
+		resp.UsageSplit24h = &split
+		fs := &federationStatus{}
+		if f.FedHop != nil {
+			h := f.FedHop()
+			fs.HeaderIgnored, fs.StampWithoutIdentity = h.HeaderIgnored, h.StampWithoutIdentity
+		}
+		if f.Federation != nil {
+			fs.PeerWithoutPath = f.Federation().PeerWithoutPath
+		}
+		if gw.Events != nil {
+			fs.PeerBound = gw.Events.PeerBound
+		}
+		resp.Federation = fs
+	}
+	resp.Gateway = gw
+}
+
+// ConsumerRing is the in-memory top-consumers ring (V-06-d): ringBuckets
+// one-minute buckets of requests and tokens per consumer; buckets older
+// than ringBuckets minutes are dropped on the next Add or Top.
+// Cardinality = the consumers active within the hour.
 type ConsumerRing struct {
 	now func() time.Time
+	mu  sync.Mutex
+	// minutes are the per-minute counts, keyed by the minute (unix
+	// minutes); each holds the consumers seen in it.
+	minutes map[int64]map[string]*ringCount
+}
+
+type ringCount struct {
+	tenant           string
+	requests, tokens int64
 }
 
 // NewConsumerRing returns an empty ring; now nil = time.Now.
@@ -121,18 +277,79 @@ func NewConsumerRing(now func() time.Time) *ConsumerRing {
 	if now == nil {
 		now = time.Now
 	}
-	return &ConsumerRing{now: now}
+	return &ConsumerRing{now: now, minutes: map[int64]map[string]*ringCount{}}
+}
+
+// rotate drops the minutes outside the window ending at minute m. Under r.mu.
+func (r *ConsumerRing) rotate(m int64) {
+	for k := range r.minutes {
+		if k <= m-ringBuckets {
+			delete(r.minutes, k)
+		}
+	}
 }
 
 // Add counts one admitted request of consumerID (tenantID kept for the
-// tenant view) with its tokens. S1 stub: drops.
+// tenant view) with its tokens.
 func (r *ConsumerRing) Add(consumerID, tenantID string, tokens int64) {
-	_, _, _, _ = r, consumerID, tenantID, tokens
+	if consumerID == "" {
+		return
+	}
+	m := r.now().Unix() / 60
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rotate(m)
+	slot := r.minutes[m]
+	if slot == nil {
+		slot = map[string]*ringCount{}
+		r.minutes[m] = slot
+	}
+	c := slot[consumerID]
+	if c == nil {
+		c = &ringCount{tenant: tenantID}
+		slot[consumerID] = c
+	}
+	c.requests++
+	c.tokens += max(tokens, 0)
 }
 
 // Top returns at most n consumers of the last 60 minutes by requests
-// (ties: tokens, then id); tenantID "" = every tenant. S1 stub: nil.
+// (ties: tokens, then id); tenantID "" = every tenant.
 func (r *ConsumerRing) Top(n int, tenantID string) []TopConsumer {
-	_, _, _ = r, n, tenantID
-	return nil
+	m := r.now().Unix() / 60
+	r.mu.Lock()
+	sum := map[string]*TopConsumer{}
+	r.rotate(m)
+	for _, slot := range r.minutes {
+		for id, c := range slot {
+			if tenantID != "" && c.tenant != tenantID {
+				continue
+			}
+			t := sum[id]
+			if t == nil {
+				t = &TopConsumer{ConsumerID: id}
+				sum[id] = t
+			}
+			t.Requests += c.requests
+			t.Tokens += c.tokens
+		}
+	}
+	r.mu.Unlock()
+	out := make([]TopConsumer, 0, len(sum))
+	for _, t := range sum {
+		out = append(out, *t)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Requests != out[j].Requests {
+			return out[i].Requests > out[j].Requests
+		}
+		if out[i].Tokens != out[j].Tokens {
+			return out[i].Tokens > out[j].Tokens
+		}
+		return out[i].ConsumerID < out[j].ConsumerID
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
 }
