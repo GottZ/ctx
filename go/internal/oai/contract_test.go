@@ -403,7 +403,21 @@ func retryAfterOutsideBand(header string, step int, jitter float64) string {
 // ladder itself is the dispatcher's (TestRetryAfterStepsAreWholeSeconds,
 // TestExternalRetryAfterHint in internal/dispatch).
 func TestContractRetryAfterBand(t *testing.T) {
-	const jitter = 0.2
+	// 0.5 is the default of gateway.retry_after_jitter (config.go
+	// RetryAfterJitter), 0.2 a narrower setting.
+	for _, jitter := range []float64{0.2, 0.5} {
+		retryAfterBand(t, jitter)
+	}
+	// Counterproof: the band check rejects a value outside.
+	if retryAfterOutsideBand("4", 2, 0.2) == "" || retryAfterOutsideBand("0", 1, 0.2) == "" || retryAfterOutsideBand("x", 1, 0.2) == "" ||
+		retryAfterOutsideBand("46", 30, 0.5) == "" {
+		t.Error("counterproof: the band check accepts a value outside the band")
+	}
+}
+
+// retryAfterBand is TestContractRetryAfterBand for one jitter setting.
+func retryAfterBand(t *testing.T, jitter float64) {
+	t.Helper()
 	adm := handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: confDispatch{},
 		Settings: func() oai.Settings { return oai.Settings{RetryAfterJitter: jitter} }})
 	for _, step := range contractRetryAfterSteps {
@@ -414,17 +428,13 @@ func TestContractRetryAfterBand(t *testing.T) {
 			adm.WriteAdmissionError(req.Context(), rec, &dispatch.RejectionError{Err: dispatch.ErrWaitExpired, RetryAfter: time.Duration(step) * time.Second})
 			got := rec.Header().Get("Retry-After")
 			if msg := retryAfterOutsideBand(got, step, jitter); msg != "" {
-				t.Fatalf("step %d s: %s", step, msg)
+				t.Fatalf("jitter %.1f, step %d s: %s", jitter, step, msg)
 			}
 			distinct[got] = true
 		}
 		if step == 10 && len(distinct) < 2 {
 			t.Errorf("step 10 s, jitter %.2f: one Retry-After value over 200 refusals (%v) — no spread", jitter, distinct)
 		}
-	}
-	// Counterproof: the band check rejects a value outside.
-	if retryAfterOutsideBand("4", 2, jitter) == "" || retryAfterOutsideBand("0", 1, jitter) == "" || retryAfterOutsideBand("x", 1, jitter) == "" {
-		t.Error("counterproof: the band check accepts a value outside the band")
 	}
 }
 
@@ -468,13 +478,45 @@ func TestContractCIJobs(t *testing.T) {
 	if conf == "" {
 		t.Error(`ci.yml has no job "conformance" — the Go contract is not a CI gate`)
 	} else {
-		for _, want := range []string{"name: Conformance", "go test", "-run", "^Test(Contract|Conformance)", "./internal/oai/", "./cmd/ctxd/"} {
+		for _, want := range []string{"name: Conformance", "go test", "-run", "./internal/oai/", "./cmd/ctxd/"} {
 			if !strings.Contains(conf, want) {
 				t.Errorf("job conformance lacks %q", want)
 			}
 		}
-		if strings.Contains(conf, "github.event_name == 'schedule'") {
-			t.Error("job conformance is gated on schedule — a required check must run on every pull request")
+		// A required check runs unconditionally: GitHub counts a skipped
+		// job as passed (Fremd-Review S2 finding 6 — an if: on push
+		// survived the S1 form of this check).
+		if strings.Contains(conf, "github.event_name == 'schedule'") || regexp.MustCompile(`(?m)^    if:`).MatchString(conf) {
+			t.Error("job conformance is conditional (if:) — a required check must run on every pull request")
+		}
+		// The job runs every contract and conformance test of the package
+		// and every test the manifest pins a form with (finding 1: route
+		// refusals in the house form survived a job that ran only the
+		// generic envelope rig).
+		m := regexp.MustCompile(`-run '([^']+)'`).FindStringSubmatch(conf)
+		if m == nil {
+			t.Error("job conformance has no -run '<pattern>'")
+		} else if re, err := regexp.Compile(m[1]); err != nil {
+			t.Errorf("job conformance -run %q: %v", m[1], err)
+		} else {
+			want := map[string]bool{}
+			for name := range testFuncs(t) {
+				if strings.HasPrefix(name, "TestContract") || strings.HasPrefix(name, "TestConformance") && !strings.HasPrefix(name, "TestConformancePython") {
+					want[name] = true
+				}
+			}
+			for _, rt := range loadContract(t).Routes {
+				for _, f := range rt.Forms {
+					for _, name := range f.PinnedBy {
+						want[name] = true
+					}
+				}
+			}
+			for name := range want {
+				if !re.MatchString(name) {
+					t.Errorf("job conformance -run %q does not run %s", m[1], name)
+				}
+			}
 		}
 	}
 	smoke := ciJob(wf, "gateway-sdk-smoke")

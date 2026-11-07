@@ -1,5 +1,5 @@
 {
-  "comment": "W06-19 contract manifest (design/06 §4.14, masterplan W06-19): every route of the model groups (cmd/ctxd v1Routes/v2Routes) with every answer form it sends, the schema each form is validated against and the Go tests that pin the form. Rule for every change under /v1 and /v2: a new route or a new answer form is added here in the same change (TestContractCoversEveryModelRoute fails on a route without a contract, TestContractSchemaSetComplete on a form without a pinned schema or with a missing pinning test); a new error code goes into oai.Codes, which TestContractEnvelopeEveryCode walks by itself. Schema files live in testdata/ and are pinned by SHA-256: openapi-<schema_commit>-*.json are excerpts of openai-openapi, ctx-*.json are ctx-owned (forms OpenAI does not define, e.g. rerank); a file there that is not listed fails too.",
+  "comment": "W06-19 contract manifest (design/06 §4.14, masterplan W06-19): every route of the model groups (cmd/ctxd v1Routes/v2Routes) with every answer form it sends, the schema each form is validated against and the Go tests that pin the form. Rule for every change under /v1 and /v2: a new route or a new answer form is added here in the same change (TestContractCoversEveryModelRoute fails on a route without a contract, TestContractSchemaSetComplete on a form without a pinned schema or with a missing pinning test); a new error code goes into oai.Codes, which TestContractEnvelopeEveryCode walks by itself. Every form names at least one test that drives the ROUTE to that form (not only the generic envelope rig), and every pinning test is run by the required CI job Conformance (TestContractCIJobs matches its -run pattern against them). Schema files live in testdata/ and are pinned by SHA-256: openapi-<schema_commit>-*.json are excerpts of openai-openapi, ctx-*.json are ctx-owned (forms OpenAI does not define, e.g. rerank); a file there that is not listed fails too.",
   "schema_commit": "c2aecc2f",
   "files": {
     "openapi-c2aecc2f-create-chat-completion-response.json": "107ffa11ec00a1c7d660f6c249a2e1f5551c6adb8bd64dd50cdefcb3d8d2aba0",
@@ -33,7 +33,7 @@
         {"form": "success", "file": "openapi-c2aecc2f-create-chat-completion-response.json", "schema": "CreateChatCompletionResponse", "pinned_by": ["TestConformanceGoSDKChat", "TestConformanceChatSchemaHasTeeth"]},
         {"form": "stream_chunk", "file": "openapi-c2aecc2f-create-chat-completion-stream-response.json", "schema": "CreateChatCompletionStreamResponse", "pinned_by": ["TestConformanceGoSDKChatStream", "TestConformanceChatStreamSchemaHasTeeth"]},
         {"form": "stream_error_frame", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestConformanceGoSDKChatStreamErrorFrame"]},
-        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestConformanceGoSDKChatStreamBusy", "TestContractEnvelopeEveryCode"]}
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestConformanceGoSDKChatStreamBusy", "TestPlannerNilRefusesNoEligible", "TestLimiterNilRefusesServiceUnavailable", "TestContractEnvelopeEveryCode"]}
       ]
     },
     {
@@ -41,7 +41,7 @@
       "path": "/v1/embeddings",
       "forms": [
         {"form": "success", "file": "openapi-c2aecc2f-create-embedding-response.json", "schema": "CreateEmbeddingResponse", "pinned_by": ["TestConformanceGoSDKEmbeddings", "TestConformanceEmbeddingSchemaHasTeeth"]},
-        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestContractEnvelopeEveryCode"]}
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestEmbeddingsInputRefusals", "TestContractEnvelopeEveryCode"]}
       ]
     },
     {
@@ -49,7 +49,7 @@
       "path": "/v1/rerank",
       "forms": [
         {"form": "success", "file": "ctx-rerank-response.json", "schema": "RerankResponse", "pinned_by": ["TestConformanceRerank", "TestConformanceRerankSchema"]},
-        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestContractEnvelopeEveryCode"]}
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestRerankEnvelopePins", "TestContractEnvelopeEveryCode"]}
       ]
     },
     {
@@ -57,7 +57,7 @@
       "path": "/v2/rerank",
       "forms": [
         {"form": "success", "file": "ctx-rerank-response.json", "schema": "RerankResponse", "pinned_by": ["TestConformanceRerank", "TestConformanceRerankSchema"]},
-        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestContractEnvelopeEveryCode"]}
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestRerankEnvelopePins", "TestContractEnvelopeEveryCode"]}
       ]
     }
   ]

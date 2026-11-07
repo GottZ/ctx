@@ -39,7 +39,8 @@ class Fake:
     """A fake ctx. mode: off | on | door-first | proxy-unset | house-errors |
     bad-chat | retry-ok | retry-bad | slow-prefill | cut | heap |
     no-ratelimit | reasoning | reasoning-stream | no-www-auth |
-    rerank-ascending.
+    rerank-ascending | create-no-key | proxy-ok | proxy-wrong | no-rerank |
+    prefill-refused | retry-max.
 
     In mode heap every stream takes ~0.6 s and the fake writes its own
     "container memory" to ``mem_file``: 100 MB + 20 MB per open stream, so
@@ -56,6 +57,8 @@ class Fake:
         self.mem_file = None
         self.foreign_load = []
         self.backends = []
+        self.created = []
+        self.xff = []
         self.lock = threading.Lock()
         fake = self
 
@@ -100,7 +103,11 @@ class Fake:
         with self.lock:
             self.open_streams += delta
             if self.mem_file is not None:
-                self.mem_file.write_text(f"{self.MEM_BASE + self.MEM_PER_STREAM * self.open_streams}\n")
+                # Atomic: a reader never sees the truncated file between the
+                # truncate and the write of write_text (Fremd-Review finding 4).
+                tmp = self.mem_file.with_suffix(".tmp")
+                tmp.write_text(f"{self.MEM_BASE + self.MEM_PER_STREAM * self.open_streams}\n")
+                os.replace(tmp, self.mem_file)
 
     def route(self, h, method, body):
         path = h.path.split("?")[0]
@@ -118,6 +125,11 @@ class Fake:
             if body.get("action") == "backend-list":
                 return h._send(200, {"success": True, "backends": self.backends})
             if body.get("action") == "model-consumer-create":
+                self.created.append(body.get("data") or {})
+                if (body.get("data") or {}).get("allowed_cidrs"):
+                    return h._send(200, {"success": True, "consumer": {"id": "c-cidr"}, "api_key": "ctxm_cidr"})
+                if self.mode == "create-no-key":
+                    return h._send(200, {"success": True, "consumer": {"id": "c-1"}})
                 return h._send(200, {"success": True, "consumer": {"id": "c-1"}, "api_key": KEY})
             if body.get("action") == "model-consumer-delete":
                 return h._send(200, {"success": True, "cancelled_inflight": 0})
@@ -130,6 +142,14 @@ class Fake:
         unauth = (401, _envelope("invalid_api_key", "invalid_request_error"),
                   {"x-should-retry": "false", "WWW-Authenticate": 'Bearer realm="ctx"'})
         bearer = h.headers.get("Authorization", "")
+        with self.lock:
+            self.xff.append(h.headers.get("X-Forwarded-For"))
+        if self.mode == "proxy-wrong" and bearer == "Bearer ctxm_cidr" and path == "/v1/models":
+            # The door takes the proxy for the client: the allowlist that
+            # names only the proxy lets the request through.
+            return h._send(200, {"object": "list", "data": []})
+        if self.mode == "prefill-refused" and body.get("stream"):
+            return h._send(429, _envelope("rate_limit_exceeded", "rate_limit_error"), {"x-should-retry": "true", "Retry-After": "2"})
         if self.mode == "proxy-unset":
             return h._send(503, _envelope("proxy_misconfigured", "service_unavailable_error"), {"x-should-retry": "false"})
         if self.mode == "off":
@@ -138,11 +158,13 @@ class Fake:
             return h._send(*unauth)
         if self.mode == "door-first":
             return h._send(*nf)
-        if self.mode in ("retry-ok", "retry-bad"):
+        if self.mode in ("retry-ok", "retry-bad", "retry-max"):
             if bearer != f"Bearer {KEY}":
                 return h._send(*unauth)
             if n % 2:
-                ra = "5" if self.mode == "retry-ok" else "45"
+                # 60 lies outside [1, ceil(30 × 1.5)] = [1, 45] at the default
+                # jitter 0.5 (S2: 45 is a legal value there — Fremd-Review finding 2).
+                ra = {"retry-ok": "5", "retry-max": "45"}.get(self.mode, "60")
                 return h._send(429, _envelope("rate_limit_exceeded", "rate_limit_error"),
                                {"x-should-retry": "true", "Retry-After": ra})
             return h._send(200, _chat())
@@ -153,9 +175,11 @@ class Fake:
                 return h._send(401, unauth[1], {"x-should-retry": "false"})
             return h._send(*unauth)
         if method == "GET" and path == "/v1/models":
+            kinds = (("chat", "chat"), ("embed", "embedding"), ("rerank", "rerank"))
+            if self.mode == "no-rerank":
+                kinds = kinds[:2]
             return h._send(200, {"object": "list", "data": [
-                {"id": m, "object": "model", "created": 0, "owned_by": "ctx", "ctx": {"kind": k}}
-                for m, k in (("chat", "chat"), ("embed", "embedding"), ("rerank", "rerank"))]})
+                {"id": m, "object": "model", "created": 0, "owned_by": "ctx", "ctx": {"kind": k}} for m, k in kinds]})
         if method == "POST" and path == "/v1/chat/completions":
             if self.mode == "bad-chat":
                 return h._send(200, {"choices": "nope"})
@@ -330,6 +354,9 @@ def test_measure_heap(fake, tmp_path):
     fake.mem_file = mem
     fake.set_mem(0)
     for budget, ok in ((256 << 20, True), (10 << 20, False)):
+        deadline = time.monotonic() + 5
+        while fake.open_streams and time.monotonic() < deadline:
+            time.sleep(0.05)
         rc, last, out = _run(MEASURE, "heap", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY", "--model", "chat",
                              "--streams", "4", "--consumers-keys-env", "CTX_SELFTEST_KEY", "--mem-file", str(mem),
                              "--budget-bytes", str(budget))
@@ -462,3 +489,74 @@ def test_run_rerank_order(fake):
     """W02-15 rerank probe: results come in descending relevance order."""
     rc, last, out = _run(SMOKE, "run", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY")
     assert rc == 1 and "rerank: results not in descending order" in last, f"ascending rerank: {rc} {last!r}\n{out}"
+
+
+@pytest.mark.parametrize("fake", ["create-no-key"], indirect=True)
+def test_t25_deletes_a_consumer_without_key(fake):
+    """W02-15: a create answer without the key fails T25 and the consumer it
+    did create is deleted — T25 never leaves a test consumer behind."""
+    rc, last, out = _run(SMOKE, "t25", "--base-url", fake.url, "--admin-key-env", "CTX_SELFTEST_ADMIN")
+    assert rc == 1 and "no key" in last, f"create without key: {rc} {last!r}\n{out}"
+    assert fake.count("model-consumer-delete") == 1, f"consumer not deleted: {fake.calls}"
+
+
+@pytest.mark.parametrize("fake,verdict,allowlist,want_rc", [
+    ("proxy-ok", "trusted_proxy_set", "judges_client", 0),
+    ("proxy-wrong", "trusted_proxy_set", "sees_proxy", 1),
+], indirect=["fake"])
+def test_measure_proxy_allowlist(fake, verdict, allowlist, want_rc):
+    """E-01-13/R8 (Fremd-Review S2 finding 3): a SET but WRONG
+    CTX_TRUSTED_PROXY passes stage 1; the allowlist step tells it — a
+    consumer limited to the proxy's address must be refused (401). The probe
+    sends its own X-Forwarded-For and deletes the consumer either way."""
+    rc, last, out = _run(MEASURE, "proxy", "--base-url", fake.url, "--admin-key-env", "CTX_SELFTEST_ADMIN",
+                         "--proxy-addr", "172.18.0.5")
+    got = json.loads(last) if last.startswith("{") else {}
+    assert rc == want_rc and got.get("verdict") == verdict and got.get("allowlist") == allowlist, \
+        f"proxy allowlist against {fake.mode}: {rc} {last!r}\n{out}"
+    assert fake.created and fake.created[0].get("allowed_cidrs") == ["172.18.0.5/32"], fake.created
+    assert fake.count("model-consumer-delete") == 1, "the probe consumer was not deleted"
+    assert "192.0.2.1" in fake.xff, f"the probe sent no X-Forwarded-For: {fake.xff}"
+
+
+@pytest.mark.parametrize("fake", ["no-rerank"], indirect=True)
+def test_run_without_rerank_model(fake):
+    """W02-15 (design/02 §7: chat, embeddings, models): a stack that offers no
+    rerank model passes and says so in the verdict (Fremd-Review finding 5)."""
+    rc, last, out = _run(SMOKE, "run", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY")
+    assert rc == 0 and "rerank not offered" in last, f"no rerank model: {rc} {last!r}\n{out}"
+    assert fake.count("POST /v1/rerank") == 0
+
+
+@pytest.mark.parametrize("fake", ["on"], indirect=True)
+def test_t25_test_key_expires(fake):
+    """W02-15 (Fremd-Review finding 7): the test consumer's key carries an
+    expiry within 15 minutes, so a run killed before its cleanup leaves no
+    live all_models key behind."""
+    import datetime
+    rc, last, out = _run(SMOKE, "t25", "--base-url", fake.url, "--admin-key-env", "CTX_SELFTEST_ADMIN")
+    assert rc == 0, out
+    exp = fake.created[0].get("expires_at")
+    assert exp, f"model-consumer-create without expires_at: {fake.created[0]}"
+    left = datetime.datetime.strptime(exp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.UTC) - datetime.datetime.now(datetime.UTC)
+    assert datetime.timedelta(minutes=1) < left <= datetime.timedelta(minutes=15), f"expires_at {exp} ({left})"
+
+
+@pytest.mark.parametrize("fake", ["prefill-refused"], indirect=True)
+def test_measure_prefill_refusal_is_no_cut(fake):
+    """W02-15 (Fremd-Review finding 8): a refused stream (429) is an error of
+    the measurement, not a cut-off prefill."""
+    rc, last, out = _run(MEASURE, "prefill", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY", "--model", "chat",
+                         "--tokens", "100")
+    got = json.loads(last) if last.startswith("{") else {}
+    assert rc == 1 and got.get("cut_off") is False and got.get("status") == 429, f"refused prefill: {rc} {last!r}\n{out}"
+
+
+@pytest.mark.parametrize("fake", ["retry-max"], indirect=True)
+def test_measure_retry_after_allows_the_jitter(fake):
+    """W02-15 (Fremd-Review finding 2): the 30-s step with the default
+    jitter 0.5 may answer Retry-After 45 — legal, not a violation."""
+    rc, last, out = _run(MEASURE, "retry-after", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY",
+                         "--model", "chat", "--requests", "10")
+    got = json.loads(last) if last.startswith("{") else {}
+    assert rc == 0 and got.get("ok") is True and got.get("max_allowed") == 45, f"Retry-After 45: {rc} {last!r}\n{out}"

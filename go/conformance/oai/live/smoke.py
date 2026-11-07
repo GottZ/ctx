@@ -41,6 +41,7 @@ verdict; ``--json`` adds one JSON object per probe before it.
 """
 
 import argparse
+import datetime
 import json
 import os
 import ssl
@@ -283,7 +284,7 @@ def run(base_url: str, key: str, chat: str | None, embed: str | None, rerank: st
     chat = chat or kinds.get("chat")
     embed = embed or kinds.get("embedding")
     rerank = rerank or kinds.get("rerank")
-    for probe, model in (("chat", chat), ("embeddings", embed), ("rerank", rerank)):
+    for probe, model in (("chat", chat), ("embeddings", embed)):
         _need(model is not None, probe, f"the key sees no model of this kind ({sorted(kinds)})")
     probe_chat(b, auth, chat, sdk)
     report("chat", True)
@@ -291,12 +292,19 @@ def run(base_url: str, key: str, chat: str | None, embed: str | None, rerank: st
     report("chat_stream", True)
     probe_embeddings(b, auth, embed)
     report("embeddings", True)
-    probe_rerank(b, auth, rerank)
-    report("rerank", True)
+    # Rerank is optional (design/02 W02-15 names chat, embeddings, models):
+    # a stack that offers no rerank model passes and says so.
+    if rerank is not None:
+        probe_rerank(b, auth, rerank)
+        report("rerank", True)
+    else:
+        report("rerank", True, skipped="no rerank model offered")
     probe_unauth(b)
     report("unauth", True)
     probe_envelope(b, auth)
     report("envelope", True)
+    if rerank is None:
+        return f"PASS: 6 probes (chat {chat}, embeddings {embed}; rerank not offered)"
     return f"PASS: 7 probes (chat {chat}, embeddings {embed}, rerank {rerank})"
 
 
@@ -324,13 +332,20 @@ def t25(base_url: str, admin: str, chat, embed, rerank, report) -> tuple[int, st
         raise ProbeFailure("t25", "503 proxy_misconfigured — set CTX_TRUSTED_PROXY to the proxy's address as ctxd sees it")
     if not (status == 401 and code == "invalid_api_key"):
         raise ProbeFailure("t25", f"anonymous GET /v1/models: {status} {raw[:120]!r}, want 404 (flag off) or 401 (flag on)")
+    # The test key expires on its own after 15 minutes: a run killed before
+    # its cleanup leaves no live key behind.
+    expires = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
     created = manage(b, admin, "model-consumer-create",
-                     {"label": f"__t25_probe_{int(time.time())}", "all_models": True,
+                     {"label": f"__t25_probe_{int(time.time())}", "all_models": True, "expires_at": expires,
                       "description": "test.sh T25 — deleted at the end of the run"})
     cid = (created.get("consumer") or {}).get("id")
     key = created.get("api_key")
-    if not cid or not key:
-        raise ProbeFailure("t25", "model-consumer-create answered no consumer id or key")
+    if not cid:
+        raise ProbeFailure("t25", "model-consumer-create answered no consumer id")
+    if not key:
+        # Created but unusable: delete it before failing, never leave it behind.
+        manage(b, admin, "model-consumer-delete", {"id": cid})
+        raise ProbeFailure("t25", f"model-consumer-create answered no key (test consumer {cid} deleted)")
     failure: ProbeFailure | None = None
     verdict = ""
     try:
@@ -342,7 +357,7 @@ def t25(base_url: str, admin: str, chat, embed, rerank, report) -> tuple[int, st
     try:
         manage(b, admin, "model-consumer-delete", {"id": cid})
         report("cleanup", True)
-    except ProbeFailure as e:
+    except Exception as e:  # noqa: BLE001 — any delete failure is named with the consumer id, never lost
         # The probe's own failure stays the verdict; a failed delete is named with it.
         if failure is None:
             raise ProbeFailure("cleanup", f"test consumer {cid} not deleted: {e}") from None

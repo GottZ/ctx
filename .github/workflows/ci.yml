@@ -582,7 +582,9 @@ jobs:
 
       - name: Go contract of the model API
         working-directory: go
-        run: go test -count=1 -run '^Test(Contract|Conformance)' ./internal/oai/ ./cmd/ctxd/
+        # The pattern runs every Test(Contract|Conformance)* and every test
+        # go/conformance/oai/contract.json pins a form with (TestContractCIJobs).
+        run: go test -count=1 -run '^Test(Contract|Conformance|EmbeddingsInputRefusals|RerankEnvelopePins|PlannerNilRefusesNoEligible|LimiterNilRefusesServiceUnavailable)' ./internal/oai/ ./cmd/ctxd/
 
   # ─── Nightly: SDK smoke of the model API (W06-19 stage 2, not required) ─────
   # The official OpenAI (and Cohere) Python SDK against the in-process
