@@ -10,6 +10,7 @@ package gatewaylimits
 import (
 	"context"
 	"errors"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -345,5 +346,70 @@ func TestConsumerTiers(t *testing.T) {
 	}
 	if _, ok := got["c3"]; ok {
 		t.Error("c3 has no rows, but is in the answer")
+	}
+}
+
+// TestRegistryTriggerDuringLoadPublishesNewest: a trigger that arrives while
+// a load runs is not lost — the drain loads once more, and the snapshot ends
+// at the rows committed after the first read (a NOTIFY during a reload must
+// reach the meter).
+func TestRegistryTriggerDuringLoadPublishesNewest(t *testing.T) {
+	var loads atomic.Int64
+	inFirst, release := make(chan struct{}), make(chan struct{})
+	r := NewRegistry(func(context.Context) ([]Row, error) {
+		if loads.Add(1) == 1 {
+			close(inFirst)
+			<-release
+			return []Row{consumerRow("c1", TierServer, Values{RPM: i64(1)})}, nil
+		}
+		return []Row{consumerRow("c1", TierServer, Values{RPM: i64(2)})}, nil
+	})
+	r.Trigger(context.Background())
+	<-inFirst
+	r.Trigger(context.Background()) // the write committed during the first read
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for r.Snapshot().Resolve("c1", "t1", keyquota.OpChat, floor).RPM != 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("snapshot rpm %d after a trigger during the load (loads=%d), want 2 — the pending reload was lost",
+				r.Snapshot().Resolve("c1", "t1", keyquota.OpChat, floor).RPM, loads.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestValidateValuesColumnBounds: a value at its column's maximum is valid,
+// one above is refused at the write (never SQLSTATE 22003 from the
+// database): INTEGER for rpm/tpm/daily_requests, SMALLINT for
+// max_concurrency (without a V48 cap), BIGINT for the token budgets,
+// NUMERIC(14,8) and finite for the cost.
+func TestValidateValuesColumnBounds(t *testing.T) {
+	noCap := floor
+	noCap.ConcurrencyCap = 0
+	f := func(v float64) *float64 { return &v }
+	cases := []struct {
+		name      string
+		v         Values
+		wantField string
+	}{
+		{"rpm at INTEGER max", Values{RPM: i64(2147483647)}, ""},
+		{"rpm above INTEGER max", Values{RPM: i64(2147483648)}, "rpm"},
+		{"daily_requests above INTEGER max", Values{DailyRequests: i64(2147483648)}, "daily_requests"},
+		{"max_concurrency at SMALLINT max", Values{MaxConcurrency: i64(32767)}, ""},
+		{"max_concurrency above SMALLINT max", Values{MaxConcurrency: i64(32768)}, "max_concurrency"},
+		{"daily_tokens at BIGINT max", Values{DailyTokens: i64(9223372036854775807)}, ""},
+		{"cost at NUMERIC(14,8) max", Values{MonthlyCostUSD: f(999999.99999999)}, ""},
+		{"cost above NUMERIC(14,8) max", Values{MonthlyCostUSD: f(1000000)}, "monthly_cost_usd"},
+		{"cost NaN", Values{MonthlyCostUSD: f(math.NaN())}, "monthly_cost_usd"},
+		{"cost +Inf", Values{MonthlyCostUSD: f(math.Inf(1))}, "monthly_cost_usd"},
+	}
+	for _, tc := range cases {
+		fe := ValidateValues(SubjectConsumer, TierServer, tc.v, noCap)
+		switch {
+		case tc.wantField == "" && fe != nil:
+			t.Errorf("%s: refused %+v, want valid", tc.name, fe)
+		case tc.wantField != "" && (fe == nil || fe.Field != tc.wantField):
+			t.Errorf("%s: %+v, want a refusal at %q", tc.name, fe, tc.wantField)
+		}
 	}
 }

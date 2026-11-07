@@ -296,3 +296,32 @@ func TestGatewayLimitsManageGetShape(t *testing.T) {
 		t.Errorf("chat without a ceiling: %v", chat)
 	}
 }
+
+// TestGatewayLimitsManageTenantDelete: a tenant-admin's delete removes its
+// own tenant-tier row and nothing else — the server row of the same subject
+// and op stays and binds again; a second delete answers deleted:false.
+func TestGatewayLimitsManageTenantDelete(t *testing.T) {
+	f := newGLFixture(t)
+	if code, body, _ := f.set(t, f.admin, glData("consumer", "consumer_id", f.cA.id, "chat", map[string]any{"rpm": 10})); code != http.StatusOK {
+		t.Fatalf("server row: %d %s", code, body)
+	}
+	if code, body, _ := f.set(t, f.a.ar, glData("consumer", "consumer_id", f.cA.id, "chat", map[string]any{"rpm": 5})); code != http.StatusOK {
+		t.Fatalf("tenant row: %d %s", code, body)
+	}
+	if got := f.reg.Snapshot().Resolve(f.cA.id, f.a.id, keyquota.OpChat, glFloor).RPM; got != 5 {
+		t.Fatalf("with both rows: rpm %d, want 5", got)
+	}
+	for i, want := range []bool{true, false} {
+		status, body, resp := mcCall(t, f.h, f.a.ar, "gateway-limits-delete", glData("consumer", "consumer_id", f.cA.id, "chat", nil))
+		if deleted, _ := resp["deleted"].(bool); status != http.StatusOK || deleted != want {
+			t.Errorf("tenant-admin delete #%d: %d %s, want deleted=%v", i+1, status, body, want)
+		}
+	}
+	p := f.reg.Snapshot().ConsumerTiers([]string{f.cA.id})[f.cA.id][keyquota.OpChat]
+	if p.Server == nil || p.Server.RPM == nil || *p.Server.RPM != 10 || p.Tenant != nil {
+		t.Errorf("after the tenant-admin delete: %+v, want the server row rpm 10 kept and no tenant row", p)
+	}
+	if got := f.reg.Snapshot().Resolve(f.cA.id, f.a.id, keyquota.OpChat, glFloor).RPM; got != 10 {
+		t.Errorf("after the tenant-admin delete: rpm %d, want the server row's 10", got)
+	}
+}
