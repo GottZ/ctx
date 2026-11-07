@@ -11,8 +11,12 @@ package llm
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func folgeSGrowthStream(k, size int) string {
@@ -70,5 +74,37 @@ func TestGrowthBookingRidesTheContext(t *testing.T) {
 	}
 	if growthBookingFrom(WithGrowthBooking(context.Background(), book)) == nil {
 		t.Fatal("WithGrowthBooking's context carries none")
+	}
+}
+
+// TestChatRawStreamBooksEveryBuffer: through the wire site, the context's
+// booking reaches the line, the spare and the frame buffer — frames of two
+// data lines that grow from 8 KiB to 64 KiB each book what the same bytes
+// book through a relay whose three buffers all carry the booking.
+func TestChatRawStreamBooksEveryBuffer(t *testing.T) {
+	line := func(n int) string { return "data: " + strings.Repeat(" ", n) }
+	stream := line(8<<10) + "\n" + line(8<<10) + "{\"choices\":[]}\n\n" +
+		line(64<<10) + "\n" + line(64<<10) + "{\"choices\":[]}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	var direct int
+	rl := &sseRelay{onFrame: func([]byte) error { return nil }, data: sseFrame{limit: 1 << 20}}
+	rl.grow = func(n int) error { direct += n; return nil }
+	rl.data.grow = rl.grow
+	if err := rl.run(strings.NewReader(stream), 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, stream)
+	}))
+	t.Cleanup(srv.Close)
+	var wire int
+	ctx := WithGrowthBooking(context.Background(), func(n int) error { wire += n; return nil })
+	if _, err := ChatRawStream(ctx, ptRow(srv.URL), []byte(`{"stream":true}`), 5*time.Second, 1<<20, func([]byte) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("FOLGE-S (d): two-line frames booked %d B through the wire site, %d B through a fully booked relay", wire, direct)
+	if wire != direct || direct == 0 {
+		t.Errorf("ChatRawStream booked %d B, a relay booking all three buffers %d B — every buffer's growth goes through the context's booking", wire, direct)
 	}
 }
