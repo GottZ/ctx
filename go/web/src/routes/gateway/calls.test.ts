@@ -51,6 +51,9 @@ describe('callRows (W05-09: last calls, body-free)', () => {
     expect(rows, 'gate W05-09: seeded call visible').toHaveLength(1)
     expect(rows[0]).toMatchObject({ id: 'L-0001', model: 'chat', pipeline: 'gateway-chat', outcome: 'ok' })
     expect(rows[0]?.detailId, 'gate W05-09: tenant-admin — kein Link auf /api/llmlog/{id}').toBeNull()
+    // S2 hardening (drawn mutant #5 survived): recorded tokens and duration render as numbers
+    expect(rows[0]?.tokensText, 'recorded tokens are shown').toBe('120 → 48')
+    expect(rows[0]?.durationText, 'recorded duration is shown').toBe('812ms')
   })
 
   it('server-admin rows carry the detail id', () => {

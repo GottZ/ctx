@@ -93,6 +93,8 @@ describe('hist:false (W05-10: marked means instead of an empty column)', () => {
     const l = latencyCells(point({ p50_ms: null, p95_ms: null, queue_p50_ms: null, queue_p95_ms: null, ttft_p50_ms: null, ttft_p95_ms: null }), false)
     expect(l.mean, 'gate W05-10: means flagged').toBe(true)
     expect(l.total.text, 'gate W05-10: hist:false ⇒ Ø-Wert (rot gegen leere Spalte)').toBe(`${MEAN_MARK} 820ms`)
+    // S2 hardening (drawn mutant #7 survived): the mean IS a recorded value (not styled as missing)
+    expect(l.total.recorded, 'the marked mean counts as recorded').toBe(true)
     // queue wait and TTFT have no mean on the wire (C2) — not recorded, never empty, never 0
     expect(l.queue.text).toBe(NOT_RECORDED)
     expect(l.ttft.text).toBe(NOT_RECORDED)
