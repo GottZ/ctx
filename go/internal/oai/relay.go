@@ -119,13 +119,13 @@ type streamRelay struct {
 	// — and bigAt its place: the number of records put before it; puts and
 	// takes count every record put and taken, handBig marks the one in the
 	// writer's hand, handIdx its buffer.
-	big              []byte
-	bigAt            uint64
-	puts, takes      uint64
-	handBig          bool
-	bigs             [2][]byte
-	bigIdx, handIdx  int
-	book             func(int64) bool // books an oversize buffer before it is made (nil: none)
+	big             []byte
+	bigAt           uint64
+	puts, takes     uint64
+	handBig         bool
+	bigs            [2][]byte
+	bigIdx, handIdx int
+	book            func(int64) bool // books an oversize buffer before it is made (nil: none)
 
 	// until is the attempt's deadline (bound; zero: none): no write ends
 	// after it, the drain included — a stream lasts at most its attempt's
