@@ -497,6 +497,10 @@ type RawStreamResult struct {
 // with finish_reason "error". maxFrame caps one line and one data frame
 // (≤ the harness cap 4 MiB; ≤ 0 means that cap), the whole stream keeps the
 // harness's 64 MiB. Client choice and headers as ChatRaw, plus Accept.
+//
+// The payload onFrame gets is valid only during the call (FOLGE-S): it is a
+// slice of the relay's line buffer, which the next line overwrites — a
+// caller copies what it keeps beyond the callback.
 func ChatRawStream(ctx context.Context, b backends.Backend, body []byte, timeout time.Duration, maxFrame int64,
 	onFrame func(payload []byte) error) (*RawStreamResult, error) {
 	if err := passthroughRow(&b, timeout); err != nil {
@@ -540,34 +544,53 @@ func ChatRawStream(ctx context.Context, b backends.Backend, body []byte, timeout
 }
 
 // sseRelay is ChatRawStream's frame loop over the harness's SSE building
-// blocks (readSSELineMax, sseFrame, streamChunk): the same line grammar and
-// lenient end as parseSSEStream, but frames go out raw instead of as events.
+// blocks (the line reader, sseFrame, the chunk decode): the same line grammar
+// and lenient end as parseSSEStream, but frames go out raw instead of as
+// events. FOLGE-S: the loop reads every line into one buffer (line) that is
+// reused for the whole stream — the second buffer (spare) takes the lines
+// read while a frame of one line still holds the first (sseFrame.holds) —
+// a frame of one line goes to onFrame as a slice of that buffer, and a
+// chunk's text is never decoded (decodeChunkMeta): what one relayed frame
+// costs the reader is its bytes, read once.
 type sseRelay struct {
-	onFrame func([]byte) error
-	data    sseFrame
-	frames  int
-	finish  string
-	done    bool
-	usage   *usageBody
-	timings *timingsBody
-	id      string
-	model   string
+	onFrame     func([]byte) error
+	data        sseFrame
+	line, spare []byte
+	frames      int
+	finish      string
+	done        bool
+	usage       *usageBody
+	timings     *timingsBody
+	id          string
+	model       string
 }
+
+// dataPrefix is the field name of an SSE data line.
+var dataPrefix = []byte("data:")
 
 func (rl *sseRelay) run(r io.Reader, frameCap int) error {
 	br := bufio.NewReader(httpx.CapBody(r, maxStreamBytes))
 	for !rl.done {
-		line, readErr := readSSELineMax(br, frameCap)
+		buf := &rl.line
+		if rl.data.holds() {
+			buf = &rl.spare
+		}
+		line, readErr := readSSELineInto(br, *buf, frameCap)
+		*buf = line
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("llm: read stream: %w", readErr)
 		}
-		line = strings.TrimRight(line, "\r\n")
+		line = bytes.TrimRight(line, "\r\n")
 		var err error
 		switch {
-		case line == "":
+		case len(line) == 0:
 			err = rl.dispatch()
-		case strings.HasPrefix(line, "data:"):
-			err = rl.data.add(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		case bytes.HasPrefix(line, dataPrefix):
+			v := line[len(dataPrefix):]
+			if len(v) > 0 && v[0] == ' ' {
+				v = v[1:]
+			}
+			err = rl.data.addBytes(v)
 		}
 		if err != nil {
 			return err
@@ -586,28 +609,26 @@ func (rl *sseRelay) run(r io.Reader, frameCap int) error {
 }
 
 func (rl *sseRelay) dispatch() error {
-	payload, ok := rl.data.take()
+	payload, ok := rl.data.takeBytes()
 	if !ok {
 		return nil
 	}
-	if strings.TrimSpace(payload) == doneSentinel {
+	if string(bytes.TrimSpace(payload)) == doneSentinel {
 		rl.done = true
 		return nil
 	}
-	var chunk streamChunk
-	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+	chunk, err := decodeChunkMeta(payload)
+	if err != nil {
 		return fmt.Errorf("llm: malformed stream chunk: %w", err)
 	}
 	if chunk.Error != nil {
 		return chunk.Error.toStreamError()
 	}
-	if len(chunk.Choices) > 0 {
-		switch fr := chunk.Choices[0].FinishReason; {
-		case fr == "error":
-			return &StreamError{Message: "stream finished with finish_reason \"error\""}
-		case fr != "" && rl.finish == "":
-			rl.finish = fr
-		}
+	switch fr := chunk.FinishReason; {
+	case fr == "error":
+		return &StreamError{Message: "stream finished with finish_reason \"error\""}
+	case fr != "" && rl.finish == "":
+		rl.finish = fr
 	}
 	if chunk.ID != "" {
 		rl.id = chunk.ID
@@ -622,7 +643,7 @@ func (rl *sseRelay) dispatch() error {
 		rl.timings = chunk.Timings
 	}
 	rl.frames++
-	if err := rl.onFrame([]byte(payload)); err != nil {
+	if err := rl.onFrame(payload); err != nil {
 		return fmt.Errorf("llm: stream frame callback: %w", err)
 	}
 	return nil
