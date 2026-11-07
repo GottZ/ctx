@@ -70,6 +70,9 @@ test.describe('gateway models W05-13 alias catalog (RC-D C5)', () => {
     await editor.getByLabel('role', { exact: true }).fill('chat')
     const enabled = editor.getByRole('checkbox', { name: 'enabled' })
     await expect(enabled, 'W05-13: enabled is an explicit control').toBeVisible()
+    // review C5 S2 #3: a new alias starts disabled — enabling is a deliberate tick
+    await expect(enabled, 'fail-closed default: unchecked').not.toBeChecked()
+    await enabled.check()
     await enabled.uncheck()
     await editor.getByRole('button', { name: 'Create alias' }).click()
     await expect(editor).toHaveCount(0)

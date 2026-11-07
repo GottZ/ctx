@@ -117,6 +117,18 @@ describe('W05-13 AliasesModel', () => {
     expect(m.busyId).toBeNull()
   })
 
+  it('W05-13: a later failure after a created draft reloads the catalog and names the draft (review #8)', async () => {
+    const f = fakeApi()
+    f.create.mockImplementationOnce(async (spec) => ({ success: true, model_alias: aliasOf(`new-${spec.name}`, '_global', spec.name, { enabled: false }) }))
+    f.create.mockRejectedValueOnce(new ApiError(409, 'constraint', 'a model alias of that name already exists in the scope'))
+    const m = new AliasesModel(f.api)
+    await m.load()
+    await expect(m.suggestFromPool(), 'the refusal still rethrows').rejects.toMatchObject({ status: 409 })
+    expect(f.create, 'positive control: two creates were tried').toHaveBeenCalledTimes(2)
+    expect(f.list, 'the catalog reloads to show the draft that exists').toHaveBeenCalledTimes(2)
+    expect(m.actionError, 'the partial success is named').toContain('qwen38-27b')
+  })
+
   it('W05-13: loadPreview keeps the C7 answer per alias id (request by name through one consumer)', async () => {
     const f = fakeApi()
     const m = new AliasesModel(f.api)

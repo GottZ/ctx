@@ -77,7 +77,9 @@
   let role = $state(initial?.role ?? '')
   let description = $state(initial?.description ?? '')
   let sensitivity = $state<AliasSensitivity>(current ?? 'credentials')
-  let enabled = $state(initial?.enabled ?? true)
+  // a NEW alias starts disabled (fail-closed — the handler: "a new alias is
+  // never live by default"; Fremd-Review C5 S2 #3); enabling is a deliberate tick
+  let enabled = $state(initial?.enabled ?? false)
   let policy = $state<Record<string, unknown>>({ ...(initial?.policy ?? {}) })
   let tenantId = $state('')
   let scope = $state('')

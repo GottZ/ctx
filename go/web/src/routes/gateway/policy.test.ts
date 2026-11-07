@@ -95,6 +95,16 @@ describe('W05-07 widening tier (mintModelKeys)', () => {
     expect(cidrsWiden(['::/0'], ['10.0.0.0/8']), 'an IPv4 prefix is never inside an IPv6 one').toBe(true)
     expect(cidrsWiden(['fd00::/8'], ['fd00::1::2/128']), 'malformed (two ::) counts as widening, fail-closed').toBe(true)
   })
+
+  // Fremd-Review C5 S2 #1 (mutants RV-A family check, RV-B prefix length, RV-J
+  // IPv6 group shift): cases where only that one rule separates the verdict.
+  it('W05-07: cidrsWiden separates by prefix length, by family and by IPv6 group (review RV-A/B/J)', () => {
+    expect(cidrsWiden(['10.0.0.0/16'], ['10.0.0.0/8']), 'RV-B: same address, shorter prefix widens').toBe(true)
+    expect(cidrsWiden(['0.0.0.0/0'], ['::/0']), 'RV-A: all-IPv4 never covers all-IPv6').toBe(true)
+    expect(cidrsWiden(['::ffff:10.0.0.0/104'], ['10.0.0.0/8']), 'RV-A: an IPv4-mapped IPv6 prefix never covers IPv4').toBe(true)
+    expect(cidrsWiden(['2001:db8::/32'], ['2001:DB8:ffff::/48']), 'RV-J: an IPv6 sub-prefix (upper case) narrows').toBe(false)
+    expect(cidrsWiden(['2001:db8::/32'], ['2001:db9::/48']), 'RV-J: the neighbour /32 lies outside').toBe(true)
+  })
 })
 
 function form(c: ReturnType<typeof consumerOf>, p: Partial<EditFormInput> = {}): EditFormInput {
@@ -150,6 +160,13 @@ describe('W05-07 update patch', () => {
     const r = buildUpdatePatch(c, form(c, { label: 'x', description: 'y', sensitivity: 'credentials' }), editTiers(c, SERVER))
     expect('patch' in r, 'positive control: a patch is built').toBe(true)
     if ('patch' in r) for (const k of ['kind', 'tenant_id', 'expires_at', 'id']) expect(Object.keys(r.patch), `no ${k}`).not.toContain(k)
+  })
+
+  it('W05-11: a tenant-admin patch that raises the lane bulk → urgent is refused before the request (review RV-K)', () => {
+    const c = consumerOf('ci-chat')
+    const r = buildUpdatePatch(c, form(c, { lane: 'urgent' }), editTiers(c, TENANT_SELF))
+    expect('error' in r && r.error, 'the second line behind the disabled radio').toContain('server-admin only')
+    expect(buildUpdatePatch(consumerOf('u', { admission_lane: 'urgent' }), form(consumerOf('u', { admission_lane: 'urgent' }), { lane: 'bulk' }), editTiers(consumerOf('u'), TENANT_NO_SELF)), 'lowering stays allowed').toEqual({ patch: { admission_lane: 'bulk' } })
   })
 
   it('W05-07: a server-admin may lower and raise the lane in one patch', () => {

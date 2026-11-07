@@ -18,7 +18,9 @@
 //           E11-2 server-admin raises the lane ⇒ {admission_lane:'urgent'}
 // RC-D S1: red against the stubs (no Edit/Rotate control on the page yet).
 
+import { AxeBuilder } from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
+import { AXE_TAGS } from './contract/axe'
 import { FIXED_NOW } from './contract/contract'
 import { MODEL_ALIASES, ROTATE_MARKER, SENTINEL, gotoArea, modelApiCapabilities, seedSession, type SeededSession, type SeedOptions } from './fixtures'
 
@@ -164,6 +166,9 @@ test.describe('gateway forms W05-07 policy edit (RC-D C5)', () => {
 
 test.describe('gateway forms W05-08 rotation (RC-D C5)', () => {
   test('gateway forms E08-1: "Leak — revoke now" is preselected and sends grace 0; the new key shows exactly once', async ({ page }) => {
+    // review C5 S2 #2: the console is a leak channel too (RV-H survived without this)
+    const consoleLines: string[] = []
+    page.on('console', (m) => consoleLines.push(m.text()))
     const session = await open(page)
     const dialog = await openRotate(page, 'ci-chat')
     const reason = dialog.getByRole('group', { name: 'reason' })
@@ -179,6 +184,7 @@ test.describe('gateway forms W05-08 rotation (RC-D C5)', () => {
     expect(await markerCount(page, ROTATE_MARKER), 'B-6: gone after the ack').toBe(0)
     expect(await markerCount(page, 'TESTKEY'), 'B-6: no fragment either').toBe(0)
     await storageClean(page, 'TESTKEY')
+    expect(consoleLines.filter((l) => l.includes('TESTKEY')), 'B-6: the console never carries the plaintext').toEqual([])
     // leak: the predecessor is gone at once, the row holds the new key only
     await expect(row(page, 'ci-chat').locator('[data-key-status]')).toHaveText(['active'])
     await expect(row(page, 'ci-chat')).toContainText('ctxm_…sist')
@@ -266,4 +272,41 @@ test.describe('gateway forms W05-11 lane (RC-D C5)', () => {
     await expect(dialog).toHaveCount(0)
     expect(bodies(session, 'model-consumer-update'), 'W05-11: the raise').toEqual([{ id: CI_CHAT, admission_lane: 'urgent' }])
   })
+})
+
+// Fremd-Review C5 S2 #6: the contract runner scans only the default state; the
+// new dialogs get their own axe gate (precedent gateway-mint.spec.ts a11y) —
+// a NEW surface carries no ledger debt (design 06 §3.3).
+test.describe('gateway forms a11y (RC-D C5)', () => {
+  for (const theme of ['dark', 'light'] as const) {
+    test(`gateway forms a11y (${theme}): edit dialog with a refusal, rotate dialog, reveal and the end-grace confirm carry no axe violation`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      await open(page, { theme, faults: [{ action: 'model-consumer-update', status: 403, error: 'admin key required' }] })
+      const scan = async (what: string) => {
+        await page.waitForTimeout(400)
+        const res = await new AxeBuilder({ page }).withTags([...AXE_TAGS]).analyze()
+        expect(res.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`), what).toEqual([])
+      }
+      const edit = await openEdit(page, 'ci-chat')
+      await expect(edit.getByLabel('label', { exact: true }), 'focus lands in the dialog').toBeFocused()
+      await scan('edit dialog')
+      await edit.getByLabel('description').fill('axe-probe')
+      await edit.getByRole('button', { name: 'Save' }).click()
+      await expect(edit.getByRole('alert')).toContainText('admin key required')
+      await scan('edit dialog with the refusal')
+      await edit.getByRole('button', { name: 'Cancel' }).click()
+      const rot = await openRotate(page, 'ci-chat')
+      await rot.getByRole('group', { name: 'reason' }).getByRole('radio', { name: /Planned change/ }).check()
+      await scan('rotate dialog (planned)')
+      await rot.getByRole('button', { name: 'Rotate key' }).click()
+      await expect(rot.getByRole('textbox', { name: 'new api key — plaintext, shown once' })).toBeVisible()
+      await scan('rotate reveal')
+      await rot.getByRole('button', { name: "I've stored it — done" }).click()
+      // ctx-peer-b is rotating in the mock world (ci-chat's predecessor a9Fq is past its expiry at the mock clock)
+      await row(page, 'ctx-peer-b').getByRole('button', { name: 'End grace period of key ctxm_…mP2c' }).click()
+      const confirm = page.getByRole('dialog', { name: 'End grace period' })
+      await confirm.getByRole('button', { name: 'End grace period', exact: true }).click()
+      await scan('end-grace confirm (armed)')
+    })
+  }
 })

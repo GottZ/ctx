@@ -1373,6 +1373,15 @@ class GatewayWorld {
     if (changes.length === 0) return { status: 400, json: { success: false, error: 'nothing to update' } }
     const cur = a.sensitivity ?? 'public'
     const next = (d.sensitivity as string | undefined) ?? cur
+    // shadow floor (V-02-c) on the update path too — the handler checks it
+    // before the downgrade confirm (MA:546-579, 675-678 / 774-777)
+    if (a.scope !== '_global') {
+      const floor = this.aliasRows.find((x) => x.scope === '_global' && x.name === a.name)
+      const fs = floor?.sensitivity ?? 'public'
+      if (floor && SENS_RANK[next] > SENS_RANK[fs]) {
+        return { status: 422, json: { success: false, error: 'validation failed', fields: [{ field: 'sensitivity', message: `${next} is below ${fs}, the sensitivity of the _global alias "${a.name}" this alias shadows — a shadow may redirect, never lower the floor` }] } }
+      }
+    }
     const warnings: string[] = []
     if (SENS_RANK[next] > SENS_RANK[cur]) {
       if (role !== 'server-admin') return { status: 403, json: { success: false, error: 'admin key required' } }

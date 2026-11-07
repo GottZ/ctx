@@ -62,6 +62,8 @@
   let labelInputEl = $state<HTMLInputElement>()
 
   const scopes = $derived.by(() => {
+    // without the granting tier only the current scope (and "none", narrowing) is offered (review #7)
+    if (!tiers.mayChangeScope) return consumer.tenant_scope !== null ? [consumer.tenant_scope] : []
     const own = scopeOptions({ serverAdmin, tenantScopes, homeScope: session.homeScope })
     return consumer.tenant_scope !== null && !own.includes(consumer.tenant_scope) ? [consumer.tenant_scope, ...own] : own
   })
@@ -154,7 +156,7 @@
 
       <div class="field">
         <label class="lbl" for="ce-scope">scope</label>
-        <select id="ce-scope" aria-describedby="ce-scope-hint" bind:value={scope} disabled={busy || !tiers.mayChangeScope}>
+        <select id="ce-scope" aria-describedby="ce-scope-hint" bind:value={scope} disabled={busy || tiers.locked || (!tiers.mayChangeScope && consumer.tenant_scope === null)}>
           <option value="">none — global models only</option>
           {#each scopes as s (s)}
             <option value={s}>{s}</option>
@@ -163,7 +165,7 @@
         <span class="hint" id="ce-scope-hint">
           {tiers.mayChangeScope
             ? 'the scope whose models the consumer is offered besides the global ones.'
-            : 'changing the scope widens access — self-service is off, a server-admin can change it.'}
+            : 'self-service is off: the scope can only be removed (global models only); a server-admin can change it.'}
         </span>
       </div>
 
@@ -222,7 +224,11 @@
 
       <div class="field">
         <label class="check">
-          <input type="checkbox" bind:checked={anySource} disabled={busy || (!anySource && !tiers.mayWidenCidrs)} />
+          <input
+            type="checkbox"
+            bind:checked={anySource}
+            disabled={busy || (!anySource && !tiers.mayWidenCidrs && consumer.allowed_cidrs !== null)}
+          />
           any source
         </label>
         <label class="field">

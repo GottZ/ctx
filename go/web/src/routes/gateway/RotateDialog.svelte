@@ -51,8 +51,9 @@
     error = null
     try {
       const res = await model.rotate(rotateSpec(consumer.id, { reason, graceS: reason === 'leak' ? 0 : Number(graceValue) }))
-      newHint = res.key.hint ?? ''
+      // the plaintext first: an answer without `key` must not lose it (review #10)
       revealKey = res.api_key
+      newHint = res.key?.hint ?? ''
       revealing = true
       // RevealOnceKey snapshots the prop at mount; drop the dialog's copy right after.
       await tick()

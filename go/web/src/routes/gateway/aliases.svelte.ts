@@ -97,21 +97,31 @@ export class AliasesModel {
    * primary already is a _global alias, is skipped; one reload at the end.
    */
   async suggestFromPool(): Promise<SuggestOutcome> {
-    return this.#mutate('', async () => {
-      const created: ModelAliasView[] = []
-      const skipped: string[] = []
-      for (const { role, kind } of POOL_ROLES) {
-        const ans = await this.#api.rolePrimary({ role })
-        const draft = suggestDraft(role, kind, ans.primary_model)
-        if (draft === null || this.aliases.some((a) => a.scope === '_global' && a.name === draft.name)) {
-          skipped.push(role)
-          continue
+    const created: ModelAliasView[] = []
+    try {
+      return await this.#mutate('', async () => {
+        const skipped: string[] = []
+        for (const { role, kind } of POOL_ROLES) {
+          const ans = await this.#api.rolePrimary({ role })
+          const draft = suggestDraft(role, kind, ans.primary_model)
+          if (draft === null || this.aliases.some((a) => a.scope === '_global' && a.name === draft.name)) {
+            skipped.push(role)
+            continue
+          }
+          const res = await this.#api.create({ ...draft, enabled: false })
+          created.push(res.model_alias)
         }
-        const res = await this.#api.create({ ...draft, enabled: false })
-        created.push(res.model_alias)
+        return { created, skipped }
+      })
+    } catch (err) {
+      // a later role failed after earlier drafts exist server-side: show them
+      // and say so (Fremd-Review C5 S2 #8) — the refusal still rethrows
+      if (created.length > 0) {
+        await this.load()
+        this.actionError = `${this.actionError ?? 'suggest failed'} — ${created.length} draft(s) were created before: ${created.map((a) => a.name).join(', ')}`
       }
-      return { created, skipped }
-    })
+      throw err
+    }
   }
 
   /** Preview the /v1 chain of `row` (by name) through one consumer (server-admin). */

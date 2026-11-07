@@ -55,6 +55,13 @@ describe('W05-08 end grace period now', () => {
     expect(endGraceTarget(flipped)?.id, 'predecessor regardless of order').toBe('k-pred-Z9y8')
   })
 
+  it('W05-08: an ambiguous answer (two superseded keys) yields no target — never a guess (review RV-C)', () => {
+    const c = rotatingConsumer()
+    const two = { ...c, keys: c.keys.map((k) => ({ ...k, status: 'superseded' as const })) }
+    expect(endGraceTarget(c)?.id, 'positive control').toBe('k-pred-Z9y8')
+    expect(endGraceTarget(two), 'B-20: no control rather than a guessed key').toBeNull()
+  })
+
   it('W05-08: no target outside status rotating', () => {
     expect(endGraceTarget(rotatingConsumer())?.id, 'positive control').toBe('k-pred-Z9y8')
     expect(endGraceTarget(consumerOf('one')), 'one live key: nothing to end').toBeNull()
