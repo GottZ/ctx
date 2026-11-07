@@ -18,7 +18,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -63,8 +62,10 @@ import (
 // sensitivity scan below credentials (scanBooking: scanReserveFactor × the
 // body + scanReserveBase + scanDepthStateBytes per level), the upstream body
 // of every block of an attempt before its first wire call
-// (upstreamBooking: embedUpstreamFactor × the encoded body; its texts'
-// part before the acquire, reserveUpstreamTexts) and the log
+// (upstreamBooking: each body's exact length, embed.WireBodyLen — internal/embed
+// writes it in one allocation of that length since FOLGE-E hardening 1 —
+// with the allocation's rounding and the wire call; its texts' part before
+// the acquire, reserveUpstreamTexts) and the log
 // row's text of the inputs (bodyLogSize). The request share the budget stage
 // reserved (requestReserveFactor × the body) is spent first, the
 // reservation grows past it, never shrinks. A booking the budget cannot hold
@@ -218,7 +219,7 @@ type embedCall struct {
 	ledger requestLedger
 	// textsBooked is the texts' part of the first attempt's upstream bodies,
 	// booked before the acquire (reserveUpstreamTexts); the first attempt
-	// books only the rest (its blocks' frames).
+	// books only the rest of its bodies (frames, slack, wire calls).
 	textsBooked int64
 }
 
@@ -373,13 +374,13 @@ func (c *embedCall) serve() {
 
 // reserveUpstreamTexts books the texts' part of the upstream bodies before
 // the acquire (FOLGE-E, as reserveAnswer the certain decode share): every
-// attempt sends every text once, so embedUpstreamFactor × the encoded texts
-// is certain at the entry, and a request whose upstream bodies the budget
-// cannot hold is refused there — no queue wait, no queue place, no unit.
-// Only the blocks' frames (their number and the row's model are known at
-// the attempt) follow at the first attempt.
+// attempt sends every text once, so the encoded texts are certain at the
+// entry, and a request whose upstream bodies the budget cannot hold is
+// refused there — no queue wait, no queue place, no unit. Only the rest of
+// the blocks' bodies (their number, the row's model and its wire are known
+// at the attempt) follows at the first attempt.
 func (c *embedCall) reserveUpstreamTexts() bool {
-	c.textsBooked = embedUpstreamFactor * c.upstreamTexts()
+	c.textsBooked = c.upstreamTexts()
 	if !c.ledger.cover(c.textsBooked) {
 		c.rec.Reason = CodeServerOverloaded
 		WriteOverloaded(c.w)
@@ -851,7 +852,7 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 	// (reserveUpstreamTexts). Refused ⇒ 503 server_overloaded after the
 	// queue wait, before any wire contact, as the decode share above.
 	model := b.ModelFor(c.alias.Role).Model
-	need := c.upstreamBooking(len(blocks), model) - c.textsBooked
+	need := c.upstreamBooking(*b, model, blocks) - c.textsBooked
 	c.textsBooked = 0
 	if !c.ledger.cover(need) {
 		return dispatch.Usage{}, false, c.refuseAfterAcquire(func() string {
@@ -874,91 +875,73 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 		})
 }
 
-// upstreamBooking is what the wire calls of k blocks over all of the
-// request's inputs to model allocate at most: embedUpstreamFactor × their
-// bodies' encoded size — every text as the wire encodes it (wireStringLen)
-// and its separator, and each block's frame (embedWireFrameBytes and the
-// model) — and embedWireCallBytes for each call.
-func (c *embedCall) upstreamBooking(k int, model string) int64 {
-	return embedUpstreamFactor*(c.upstreamTexts()+int64(k)*int64(embedWireFrameBytes+wireStringLen(model))) +
-		int64(k)*embedWireCallBytes
+// upstreamBooking is what the wire calls of an attempt of blocks (their
+// sizes, in input order) on row b to model allocate at most: each block's
+// body — one allocation of its exact length, embed.WireBodyLen (FOLGE-E
+// hardening 1: internal/embed sizes the body before it writes it; the
+// json.Encoder before it allocated up to 7.105 × the body and the route
+// booked eight times it) — the allocation's rounding to a size class
+// (embed.WireBodySlack) and embedWireCallBytes for its call.
+func (c *embedCall) upstreamBooking(b backends.Backend, model string, blocks []int) int64 {
+	var n int64
+	lo := 0
+	for _, size := range blocks {
+		n += int64(embed.WireBodyLen(b, model, c.req.inputs[lo:lo+size])) + embed.WireBodySlack + embedWireCallBytes
+		lo += size
+	}
+	return n
 }
 
 // upstreamTexts is the encoded size of the request's texts in the upstream
-// bodies: every text as the wire encodes it and its separator.
+// bodies: every text as the wire encodes it (embed.WireStringLen) and its
+// separator — at most what an attempt's bodies hold of them, whatever its
+// blocks.
 func (c *embedCall) upstreamTexts() int64 {
 	var n int64
 	for _, s := range c.req.inputs {
-		n += int64(wireStringLen(s)) + 1
+		n += int64(embed.WireStringLen(s)) + 1
 	}
 	return n
 }
 
-// The upstream body of a block (FOLGE-E): embed.EmbedRaw (internal/embed,
-// not changed here) encodes the block with a json.Encoder, which appends the
-// value into a buffer that grows by a quarter at a time once it is large
-// and copies the result once more into the body — the allocations sum to
-// at most about 7.25 × the encoded body (the growth series 5 ×, the
-// newline's growth 1.25 ×, the copy 1 ×). Measured (TotalAlloc of one
-// encode, pools cold, 64 KiB … 24 MiB, one and 255 texts of plain text,
-// U+FFFD, newlines, control characters, quotes, U+2028 and mixed): at most
-// 7.105 × (plain text and U+FFFD, 255 texts, 24 MiB). embedUpstreamFactor
-// is the ceiling of that maximum; TestEmbedUpstreamReserveIsTheMeasuredOne
-// fails when a form needs more or when the largest needs a whole byte less
-// per encoded byte. Derived mechanism constants of the wire encoder, not
-// policy.
+// embedWireCallBytes is what one wire call allocates beside its body — the
+// request, its headers and traces, the block's contexts and lease, the
+// answer's reader and decoder state. A request of k blocks makes k calls
+// (up to embedding.max_inputs one-input blocks when a row's capacity E is
+// 1). Measured over the route: 12 943 bytes per call (TotalAlloc of one
+// request of 256 three-byte texts at E = 1 … 256, the slope over 1 … 256
+// blocks, the in-process engine's server side included — an upper bound of
+// the route's own), rounded up to the next 4 KiB (FOLGE-E, bau report).
+// The only term of the route that grows with something other than the
+// body's bytes and its nesting (S-2): k, and k is capped by
+// modelalias.CeilingEmbeddingMaxInputs (every block holds an input), so a
+// request books at most EmbedWireCallCeiling (4 MiB) for its calls — for
+// the budget floor (V39) a constant at that ceiling. A derived mechanism
+// constant, not policy; TestEmbedWireCallReserveIsTheMeasuredOne fails when
+// a call needs more or more than one 4-KiB step less.
+const embedWireCallBytes = 16 << 10
+
+// The terms of the embeddings route as the configuration's budget floor
+// reads them (FOLGE-E, lead decision 5; V39 counts none of them yet — the
+// budget dimensioning before the flip does): EmbedInputSlotReserve per
+// input (at most modelalias.CeilingEmbeddingMaxInputs of them),
+// EmbedWireCallReserve and EmbedUpstreamSlack per block of an attempt and
+// their ceilings at a block per input (EmbedWireCallCeiling,
+// EmbedUpstreamSlackCeiling); the upstream bodies themselves are the texts
+// as the wire encodes them (embed.WireStringLen, at most six bytes per
+// decoded byte) and embed.WireFrameMax with the model per block.
+// EmbedEncodingRawMax and EmbedDimensionsRawMax are the longest raw values
+// of encoding_format and dimensions the route decodes — a longer one is
+// refused before its decode, so neither books more than its own bytes.
 const (
-	embedUpstreamFactor = 8
-	// embedWireFrameBytes: the frame of one block's body around the model
-	// and the texts — the openai wire's {"model":,"input":[]}, the ollama
-	// wire's options with num_ctx (an int, at most jsonIntMax characters)
-	// and the encoder's newline.
-	embedWireFrameBytes = len(`{"model":,"input":[],"options":{"num_ctx":}}`) + jsonIntMax + len("\n")
-	// embedWireCallBytes: what one wire call allocates beside its body —
-	// the request, its headers and traces, the block's contexts and lease,
-	// the answer's reader and decoder state. A request of k blocks makes k
-	// calls (up to embedding.max_inputs one-input blocks when a row's
-	// capacity E is 1). Measured over the route: 12 943 bytes per call
-	// (TotalAlloc of one request of 256 three-byte texts at E = 1 … 256, the
-	// slope over 1 … 256 blocks, the in-process engine's server side
-	// included — an upper bound of the route's own), rounded up to the next
-	// 4 KiB (FOLGE-E, bau report).
-	embedWireCallBytes = 16 << 10
+	EmbedInputSlotReserve     = embedInputSlotBytes
+	EmbedWireCallReserve      = embedWireCallBytes
+	EmbedWireCallCeiling      = embedWireCallBytes * modelalias.CeilingEmbeddingMaxInputs
+	EmbedUpstreamSlack        = embed.WireBodySlack
+	EmbedUpstreamSlackCeiling = embed.WireBodySlack * modelalias.CeilingEmbeddingMaxInputs
+	EmbedEncodingRawMax       = encodingRawMax
+	EmbedDimensionsRawMax     = jsonIntMax
 )
-
-// wireStringLen is the length of s as the upstream body writes it — the
-// encoder without HTML escaping (wireInput.marshal): quotes around it, a
-// quote and a backslash escaped to two bytes, \b \f \n \r \t to two, every
-// other control character to six (\u00XX), U+2028 and U+2029 to six, an
-// invalid byte (never in a decoded input) to six (\ufffd). Pinned against
-// the encoder by TestEmbedWireLenIsTheEncoders.
-func wireStringLen(s string) int {
-	n := len(`""`)
-	for i := 0; i < len(s); {
-		c := s[i]
-		if c < utf8.RuneSelf {
-			switch {
-			case c == '"' || c == '\\' || c == '\b' || c == '\f' || c == '\n' || c == '\r' || c == '\t':
-				n += 2
-			case c < ' ':
-				n += len(`\u0000`)
-			default:
-				n++
-			}
-			i++
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		switch {
-		case r == '\u2028' || r == '\u2029', r == utf8.RuneError && size == 1:
-			n += len(`\u0000`)
-		default:
-			n += size
-		}
-		i += size
-	}
-	return n
-}
 
 // refuseAfterAcquire ends the run with the route's own answer (written by
 // verdict) and returns the cause the attempt ends with: a cancellation —

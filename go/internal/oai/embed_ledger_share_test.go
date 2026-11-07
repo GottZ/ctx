@@ -19,9 +19,12 @@ import (
 // depth, every text of inputs (plain ASCII: decoded and encoded as sent) and
 // its slot, the scan's booking below credentials (scan) and the upstream
 // bodies: blocks 0 none yet, −1 their texts (booked before the acquire), k
-// the texts, the frames and the wire calls of an attempt of k blocks to
-// model. The constants are the gate's own: a mutated term in the route must
-// not move the expectation with it.
+// the bodies of an attempt of k blocks to model on the openai wire — every
+// text, a separator between two texts of a block, a frame with the model per
+// block, each body once (FOLGE-E hardening 1: one allocation of its exact
+// length) — with the allocation's slack and the wire call per block. The
+// constants are the gate's own: a mutated term in the route must not move
+// the expectation with it.
 func embedLedgerRequest(body string, depth int, inputs []string, scan bool, blocks int, model string) int64 {
 	const (
 		reserveFactor  = 3       // the budget stage's request share per body byte
@@ -30,8 +33,8 @@ func embedLedgerRequest(body string, depth int, inputs []string, scan bool, bloc
 		scanFactor     = 23      // the scan per body byte
 		scanBase       = 64 << 10
 		scanDepth      = 104     // the scan per nesting level
-		upstreamFactor = 8       // json.Encoder's allocations per encoded byte
-		frame          = 44 + 21 // a block body's frame: openai and ollama keys, num_ctx (20 digits), newline
+		frame          = 23       // a block body's frame on the openai wire: {"model":"","input":[]}
+		upstreamSlack  = 8 << 10  // the size-class rounding of a block body's one allocation
 		wireCall       = 16 << 10 // one wire call beside its body
 	)
 	b := int64(len(body))
@@ -48,10 +51,10 @@ func embedLedgerRequest(body string, depth int, inputs []string, scan bool, bloc
 			enc += int64(len(s)) + 2 + 1 // quotes and separator
 		}
 		if blocks > 0 {
-			enc += int64(blocks) * int64(frame+len(model)+2)
-			spent += int64(blocks) * wireCall
+			enc += int64(blocks)*int64(frame+len(model)) - int64(blocks) // a separator fewer per block
+			spent += int64(blocks) * (upstreamSlack + wireCall)
 		}
-		spent += upstreamFactor * enc
+		spent += enc
 	}
 	return max(reserveFactor*b, spent)
 }

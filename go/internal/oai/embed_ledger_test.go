@@ -3,10 +3,12 @@ package oai
 // The pins of the embeddings route's ledger terms (FOLGE-E): the size run of
 // an input is the length json.Unmarshal decodes and the decode writes that
 // string (TestEmbedInputDecodeIsUnmarshal, FuzzEmbedInputDecode), the size
-// run of the upstream body is the encoder's (TestEmbedWireLenIsTheEncoders),
-// the booking of an attempt holds the bodies of both wires
-// (TestEmbedUpstreamBookingHoldsTheBodies) and embedUpstreamFactor is the
-// measured one (TestEmbedUpstreamReserveIsTheMeasuredOne); the ledger
+// run of the upstream body (embed.WireStringLen, internal/embed since
+// FOLGE-E hardening 1) is the encoder's (TestEmbedWireLenIsTheEncoders),
+// the booking of an attempt is the bodies of both wires byte for byte, with
+// the allocation's rounding and the wire call per block
+// (TestEmbedUpstreamBookingHoldsTheBodies, and over the forms of the
+// encoder measurement TestEmbedUpstreamReserveIsTheMeasuredOne); the ledger
 // books against the share first (TestRequestLedgerCover).
 
 import (
@@ -16,6 +18,9 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/embed"
 )
 
 // decodeForms are raw JSON string contents: every escape, surrogate pairs,
@@ -119,8 +124,8 @@ func TestEmbedWireLenIsTheEncoders(t *testing.T) {
 		}
 	}
 	for _, s := range forms {
-		if got, want := wireStringLen(s), len(wireOf(s)); got != want {
-			t.Errorf("%q: wireStringLen %d, the encoder writes %d bytes (%s)", s, got, want, wireOf(s))
+		if got, want := embed.WireStringLen(s), len(wireOf(s)); got != want {
+			t.Errorf("%q: embed.WireStringLen %d, the encoder writes %d bytes (%s)", s, got, want, wireOf(s))
 		}
 	}
 }
@@ -159,24 +164,50 @@ var (
 	EmbedWireCallBytes = int64(embedWireCallBytes)
 )
 
-// TestEmbedUpstreamBookingHoldsTheBodies: the encoded size the attempt books
-// (upstreamBooking less the wire calls, ÷ embedUpstreamFactor) is at least
-// the bodies of the blocks, on the openai and the ollama wire (with a 20-digit
-// num_ctx), and at most the frame more per block.
+// upstreamRows are the rows of the booking pins: the openai wire, the ollama
+// wire without num_ctx and with it, up to the longest int.
+func upstreamRows() []backends.Backend {
+	return []backends.Backend{
+		{Protocol: backends.ProtocolOpenAI, NumCtx: 4096},
+		{Protocol: backends.ProtocolOllama},
+		{Protocol: backends.ProtocolOllama, NumCtx: 4096},
+		{Protocol: backends.ProtocolOllama, NumCtx: math.MaxInt64},
+	}
+}
+
+// checkUpstreamBooking compares the booking of an attempt of blocks on row b
+// with the bodies the wire sends (embedWireReplica, the encoder pinned to the
+// route's bodies): exactly their bytes and, per block, embed.WireBodySlack
+// and embedWireCallBytes — and at least the texts booked before the acquire.
+func checkUpstreamBooking(t *testing.T, b backends.Backend, model string, inputs []string, blocks []int) {
+	t.Helper()
+	sent, lo := 0, 0
+	for _, size := range blocks {
+		sent += len(embedWireReplica(model, inputs[lo:lo+size], b.Protocol == backends.ProtocolOllama, b.NumCtx))
+		lo += size
+	}
+	c := &embedCall{req: &embedRequest{inputs: inputs}}
+	booked := c.upstreamBooking(b, model, blocks)
+	if want := int64(sent) + int64(len(blocks))*(embed.WireBodySlack+embedWireCallBytes); booked != want {
+		t.Errorf("%s/%d, model %q, blocks %v: the attempt books %d B, the bodies hold %d B (want %d: the bodies, %d B slack and %d B per call)",
+			b.Protocol, b.NumCtx, model, blocks, booked, sent, want, embed.WireBodySlack, embedWireCallBytes)
+	}
+	if texts := c.upstreamTexts(); texts > booked {
+		t.Errorf("%s/%d, blocks %v: %d B of texts booked before the acquire, more than the attempt's %d B", b.Protocol, b.NumCtx, blocks, texts, booked)
+	}
+}
+
+// TestEmbedUpstreamBookingHoldsTheBodies: the booking of an attempt is the
+// bodies of its blocks byte for byte (factor 1: internal/embed writes each
+// in one allocation of its exact length, FOLGE-E hardening 1), the slack and
+// the wire call per block, on the openai and the ollama wire (num_ctx up to
+// 20 digits), for texts of every escape class and blocks of every split.
 func TestEmbedUpstreamBookingHoldsTheBodies(t *testing.T) {
 	inputs := []string{"a", "<b>&\"c\"", "\u2028\x01\n", "ä😀", strings.Repeat("x", 5000), "\ufffd"}
 	for _, model := range []string{"m", "a-very-long/model:name\u2028\x01"} {
-		for _, ollama := range []bool{false, true} {
-			for _, k := range []int{1, 2, 6} {
-				sent, per := 0, len(inputs)/k
-				for lo := 0; lo < len(inputs); lo += per {
-					sent += len(embedWireReplica(model, inputs[lo:min(lo+per, len(inputs))], ollama, math.MaxInt64))
-				}
-				c := &embedCall{req: &embedRequest{inputs: inputs}}
-				booked := (c.upstreamBooking(k, model) - int64(k)*embedWireCallBytes) / embedUpstreamFactor
-				if int64(sent) > booked || booked-int64(sent) > int64(k*(embedWireFrameBytes+wireStringLen(model))) {
-					t.Errorf("ollama %v, model %q, %d blocks: the bodies hold %d bytes, the booking %d × %d", ollama, model, k, sent, embedUpstreamFactor, booked)
-				}
+		for _, b := range upstreamRows() {
+			for _, blocks := range [][]int{{6}, {3, 3}, {1, 1, 1, 1, 1, 1}, {5, 1}} {
+				checkUpstreamBooking(t, b, model, inputs, blocks)
 			}
 		}
 	}

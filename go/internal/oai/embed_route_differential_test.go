@@ -8,7 +8,10 @@ package oai_test
 // route — the strict body cap and the in-flight budget in front of the
 // handler with the production defaults (memBudget 256 MiB, memCap 8 MiB) —
 // one at a time (n = 1), to both kinds of alias (credentials: no scan;
-// public: the scan runs) and with body logging none, errors and full. Each
+// public: the scan runs), each with embedding.native_dims (8) and without it
+// (FOLGE-E hardening 1: the answer then reserves the ceiling of
+// embedding_max_floats and the decode its transport cap), and with body
+// logging none, errors and full. Each
 // combination is one JSON line of the dump: under "gate" the status, the
 // answer body (UUIDs normalized), the headers (without X-Request-ID and
 // Date), every upstream body (length and sha256, sorted), the stored llmlog
@@ -22,6 +25,9 @@ package oai_test
 //
 // Skipped without CTX_FOLGEE_DUMP: a comparison tool, not a gate of the
 // default suite. CTX_FOLGEE_DUMP_MAX limits the corpus bodies (a smoke run).
+// A tree that sets rdumpExtra (embed_route_dump_classgate_test.go, copied
+// into the trees that have the class gate) adds the class gate's bodies to
+// the alias classes with native_dims, body logging none.
 
 import (
 	"bytes"
@@ -228,6 +234,27 @@ func rdumpGateBody(form, model string, lim int) []byte {
 type rdumpItem struct {
 	key  string // corpus:<index> or gate:<form>:<size>
 	body []byte
+	logs []string // the body loggings of the item; nil: all three
+}
+
+// rdumpExtra, when set, adds bodies to model to the dump's alias classes
+// with native_dims.
+var rdumpExtra func(model string) []rdumpItem
+
+// rdumpNoDims are the dump's aliases without embedding.native_dims: the
+// public and the credentials alias of embedScanAliases with the same policy
+// less the dimension.
+func rdumpNoDims(pub bool) []chatAlias {
+	policy := `{"embedding.max_inputs":256,"embedding.sub_batch":256,"embedding.max_input_runes":32768}`
+	out := append(embedAliases(),
+		chatAlias{"00000000-0000-4000-8000-0000000e4b21", backends.GlobalScope, "embpub0", "embedding", "embed", backends.SensPublic, policy, true},
+		chatAlias{"00000000-0000-4000-8000-0000000e4b22", backends.GlobalScope, "embsec0", "embedding", "embed", backends.SensCredentials, policy, true})
+	for i := range out {
+		if pub && out[i].name == "emb" {
+			out[i].sens = backends.SensPublic
+		}
+	}
+	return out
 }
 
 var rdumpUUID = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
@@ -258,9 +285,12 @@ func TestEmbedRouteDump(t *testing.T) {
 	classes := []struct {
 		name, model string
 		aliases     []chatAlias
+		dims        bool
 	}{
-		{"cred", "embsec", embedScanAliases()},
-		{"pub", "embpub", pub},
+		{"cred", "embsec", embedScanAliases(), true},
+		{"pub", "embpub", pub, true},
+		{"cred0", "embsec0", rdumpNoDims(false), false},
+		{"pub0", "embpub0", rdumpNoDims(true), false},
 	}
 	sizes := []struct {
 		name string
@@ -273,12 +303,15 @@ func TestEmbedRouteDump(t *testing.T) {
 	for _, cl := range classes {
 		items := make([]rdumpItem, 0, len(corpus)+len(forms)*len(sizes))
 		for i, b := range corpus {
-			items = append(items, rdumpItem{fmt.Sprintf("corpus:%d", i), b})
+			items = append(items, rdumpItem{key: fmt.Sprintf("corpus:%d", i), body: b})
 		}
 		for _, fm := range forms {
 			for _, sz := range sizes {
-				items = append(items, rdumpItem{fmt.Sprintf("gate:%s:%s", fm, sz.name), rdumpGateBody(fm, cl.model, sz.lim)})
+				items = append(items, rdumpItem{key: fmt.Sprintf("gate:%s:%s", fm, sz.name), body: rdumpGateBody(fm, cl.model, sz.lim)})
 			}
+		}
+		if rdumpExtra != nil && cl.dims {
+			items = append(items, rdumpExtra(cl.model)...)
 		}
 
 		e := newEmbedEngine(t, 8)
@@ -294,7 +327,11 @@ func TestEmbedRouteDump(t *testing.T) {
 		rig.router = rdumpMount(rig, oai.Embeddings(rig.deps), &c)
 
 		for _, it := range items {
-			for _, lg := range logs {
+			itLogs := logs
+			if it.logs != nil {
+				itLogs = it.logs
+			}
+			for _, lg := range itLogs {
 				rig.setSettings(func(s *oai.Settings) { s.BodyLogging = lg })
 				e.mu.Lock()
 				e.bodies, e.calls = nil, nil
@@ -349,6 +386,63 @@ func TestEmbedRouteDump(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("FOLGE-E G5 dump: %d combinations (%d corpus bodies + %d gate bodies, 2 alias classes, 3 body loggings) in %v to %s",
-		total, len(corpus), len(forms)*len(sizes), time.Since(start).Round(time.Millisecond), path)
+	t.Logf("FOLGE-E G5 dump: %d combinations (%d corpus bodies + %d gate bodies, 4 alias classes, 3 body loggings; class gate bodies %v) in %v to %s",
+		total, len(corpus), len(forms)*len(sizes), rdumpExtra != nil, time.Since(start).Round(time.Millisecond), path)
+}
+
+// TestEmbedCapBodiesAtTheDefaultBudget is the pin of S-1 (FOLGE-E hardening
+// 1): the route dump's gate bodies at the body cap, n = 1, the production
+// defaults (budget 256 MiB, cap 8 MiB), body logging none, to all four alias
+// classes answer as the route dump of the end state measured — the forms
+// 4abba96b served at the cap are served again (84ffc7a8 refused plain text,
+// control escapes and 0xff to the public alias, and 0xff to credentials
+// without native_dims, 503: the upstream bodies booked at eight times their
+// size). Plain text and 0xff to the public alias without native_dims stay
+// 503 (they need 261.33 and 293.21 MiB; 4abba96b refused them too, at its
+// scan booking). Outside -short: eight-MiB bodies over the public scan.
+func TestEmbedCapBodiesAtTheDefaultBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("8 MiB bodies over the public scan: outside -short (the CI's integration job)")
+	}
+	want := map[string]int{
+		"cred/input_ascii": 200, "pub/input_ascii": 200, "cred0/input_ascii": 200, "pub0/input_ascii": 503,
+		"cred/input_esc": 200, "pub/input_esc": 200, "cred0/input_esc": 200, "pub0/input_esc": 200,
+		"cred/input_ff": 200, "pub/input_ff": 200, "cred0/input_ff": 200, "pub0/input_ff": 503,
+		"cred/input_surr": 200, "pub/input_surr": 200, "cred0/input_surr": 200, "pub0/input_surr": 200,
+		"cred/model_ff": 404, "pub/model_ff": 404, "cred0/model_ff": 404, "pub0/model_ff": 404,
+	}
+	pub := embedScanAliases()
+	for i := range pub {
+		if pub[i].name == "emb" {
+			pub[i].sens = backends.SensPublic
+		}
+	}
+	for _, cl := range []struct {
+		name, model string
+		aliases     []chatAlias
+	}{
+		{"cred", "embsec", embedScanAliases()},
+		{"pub", "embpub", pub},
+		{"cred0", "embsec0", rdumpNoDims(false)},
+		{"pub0", "embpub0", rdumpNoDims(true)},
+	} {
+		e := newEmbedEngine(t, 8)
+		rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withoutCensus)
+		rig.reg.reload(t, cl.aliases)
+		rig.setSettings(func(s *oai.Settings) {
+			s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = memBudget, memCap, memRespCap
+			s.BodyLogging = llmlog.BodyLoggingNone
+		})
+		var c rdumpCapture
+		rig.router = rdumpMount(rig, oai.Embeddings(rig.deps), &c)
+		for _, form := range []string{"input_ascii", "input_esc", "input_ff", "input_surr", "model_ff"} {
+			req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", bytes.NewReader(rdumpGateBody(form, cl.model, memCap-16)))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			rig.router.ServeHTTP(w, req)
+			if k := cl.name + "/" + form; w.Code != want[k] {
+				t.Errorf("%s at the cap: %d, want %d (held %.2f MiB)", k, w.Code, want[k], float64(c.held)/(1<<20))
+			}
+		}
+	}
 }

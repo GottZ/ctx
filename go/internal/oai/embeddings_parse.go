@@ -282,8 +282,7 @@ const encodingRawMax = len(encodingBase64) * len(`\u0000`)
 // jsonIntMax is the longest JSON integer an int holds: -9223372036854775808.
 // A longer dimensions value (JSON has no leading zeros) overflows it and is
 // refused without being decoded (FOLGE-E, the class gate: an 8 MiB integer
-// allocated 16 MB in json.Unmarshal); the upstream frame books a num_ctx of
-// that length (embedWireFrameBytes).
+// allocated 16 MB in json.Unmarshal).
 const jsonIntMax = len("-9223372036854775808")
 
 func (req *embedRequest) readEncoding(v json.RawMessage) *paramError {
