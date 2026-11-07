@@ -705,6 +705,7 @@ A refused request writes no LLM-log row (nothing is logged before the wire). It 
 | the chain's rules (sensitivity, egress, federation, the tenant gate) left no row | `503 no_eligible_backend` | `capacity` / `egress_denied` |
 | no row of the chain serves the role now | `503 no_eligible_backend` | `capacity` / `not_offered` |
 | the tenant's daily calls or cost budget | `429 insufficient_quota` | `quota` / `tenant_daily_calls`, `tenant_cost` |
+| a daily or monthly budget of the consumer, its tenant's envelope, the instance's envelope | `429 insufficient_quota` | `quota` / `daily_tokens`, `monthly_tokens`, `daily_requests`, `tenant_envelope`, `instance_envelope` |
 | the request or token bucket of the operation | `429 rate_limit_exceeded` | `rate` / `rate_requests`, `rate_tokens` |
 | the consumer's concurrency | `429 concurrency_limit_exceeded` | `concurrency` |
 | the meter is starting | `429 rate_limit_exceeded` | `capacity` / `warming` |

@@ -215,3 +215,45 @@ func TestBudgetSurvivesRotation(t *testing.T) {
 		t.Fatalf("after rotation: %+v, want daily_tokens", d)
 	}
 }
+
+// TestMonthSweepKeepsOpenReservations (design/06 §4.2
+// "Zustands-Lebensdauer"): the first request of a new UTC month drops the
+// counters of the months before — never those an open reservation still
+// holds tokens in: a request open across the change keeps holding its
+// tenant's envelope, and its tokens book into the new month when it ends.
+func TestMonthSweepKeepsOpenReservations(t *testing.T) {
+	c := newClock()
+	c.add(25*24*time.Hour + 11*time.Hour + 59*time.Minute) // 2026-11-30 23:59 UTC
+	m := seeded(c)
+	l := budgetLimits(keyquota.Budget{DailyTokens: 1 << 40}, keyquota.Budget{DailyTokens: 1000}, keyquota.Budget{})
+	open := admit(t, "open across the month", m, consumerOf("c-open", "t-sweep"), l, tokens(600))
+	c.add(2 * time.Minute) // 2026-12-01 00:01 UTC
+	_, d := m.Admit(consumerOf("c-other", "t-sweep"), l, tokens(600))
+	refusedQuota(t, "a tenant mate while 600 are held across the change", d, keyquota.ReasonTenantEnvelope,
+		time.Date(2026, 12, 2, 0, 0, 0, 0, time.UTC).Sub(c.now()))
+	open.Settle(keyquota.Usage{CompletionTokens: 500})
+	_, d = m.Admit(consumerOf("c-other", "t-sweep"), l, tokens(600))
+	refusedQuota(t, "500 booked into the new day and month", d, keyquota.ReasonTenantEnvelope, time.Date(2026, 12, 2, 0, 0, 0, 0, time.UTC).Sub(c.now()))
+	admit(t, "500 still fit", m, consumerOf("c-other", "t-sweep"), l, tokens(500))
+}
+
+// TestBudgetRefusalsInTheLedger is the W06-12 coupling of W06-13: every
+// budget refusal declares reason "quota" with its dimension as the detail
+// (daily_tokens, monthly_tokens, daily_requests, tenant_envelope,
+// instance_envelope), and the ledger counts it — none is dropped as outside
+// the vocabulary.
+func TestBudgetRefusalsInTheLedger(t *testing.T) {
+	c := newClock()
+	led := keyquota.NewLedger(c.now)
+	for _, r := range []keyquota.Reason{keyquota.ReasonDailyTokens, keyquota.ReasonMonthlyTokens, keyquota.ReasonDailyRequests,
+		keyquota.ReasonTenantEnvelope, keyquota.ReasonInstanceEnvelope} {
+		reason, detail := keyquota.Decision{Reason: r}.LedgerReason()
+		if reason != keyquota.RejectQuota || detail != string(r) {
+			t.Errorf("%s: ledger %q/%q, want quota/%s", r, reason, detail, r)
+		}
+		led.Note(keyquota.Rejection{ConsumerID: "0196f0a0-0000-7000-8000-0000000000c1", Op: "chat", Reason: reason, Detail: detail})
+	}
+	if n := len(led.Drain()); n != 5 || led.Dropped() != 0 {
+		t.Errorf("ledger cells %d, dropped %d — want 5 and 0", n, led.Dropped())
+	}
+}

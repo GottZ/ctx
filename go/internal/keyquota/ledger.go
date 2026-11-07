@@ -46,6 +46,13 @@ const (
 	DetailWarming         = "warming"            // capacity: the meter is not seeded yet (429)
 	DetailServerBusy      = "server_busy"        // capacity: L2 refused (cap ladder, queue full)
 	DetailWaitExpired     = "wait_expired"       // capacity: L2's wait budget ran out
+	// The budget refusals of the meter (W06-13): the detail is the meter's
+	// Reason — the consumer's own dimension or the envelope that bound.
+	DetailDailyTokens      = string(ReasonDailyTokens)      // quota: the consumer's tokens per UTC day (429)
+	DetailMonthlyTokens    = string(ReasonMonthlyTokens)    // quota: the consumer's tokens per UTC month (429)
+	DetailDailyRequests    = string(ReasonDailyRequests)    // quota: the consumer's requests per UTC day (429)
+	DetailTenantEnvelope   = string(ReasonTenantEnvelope)   // quota: the tenant envelope of the op (429)
+	DetailInstanceEnvelope = string(ReasonInstanceEnvelope) // quota: the instance envelope of the op (429)
 )
 
 // UnresolvedAlias is the alias of every refusal before the model name was
@@ -75,6 +82,8 @@ var (
 		DetailNotFound: true, DetailNotSupported: true, DetailEgressDenied: true, DetailNotOffered: true,
 		DetailTenantCalls: true, DetailTenantCost: true, DetailTenant: true, DetailRateRequests: true,
 		DetailRateTokens: true, DetailWarming: true, DetailServerBusy: true, DetailWaitExpired: true,
+		DetailDailyTokens: true, DetailMonthlyTokens: true, DetailDailyRequests: true,
+		DetailTenantEnvelope: true, DetailInstanceEnvelope: true,
 	}
 )
 
@@ -274,9 +283,13 @@ func (l *Ledger) Dropped() uint64 { return l.dropped.Load() }
 
 // LedgerReason is the ledger's reason and detail of a refused admission
 // (design/06 §4.1 steps 7–9): rate for both buckets, concurrency for L1,
-// capacity/warming for an unseeded meter. An invalid subject is a wiring
-// defect, no refusal of the client: "" (not counted).
+// capacity/warming for an unseeded meter, quota with the dimension for a
+// day or month budget (W06-13). An invalid subject is a wiring defect, no
+// refusal of the client: "" (not counted).
 func (d Decision) LedgerReason() (reason, detail string) {
+	if d.Reason.Quota() {
+		return RejectQuota, string(d.Reason)
+	}
 	switch d.Reason {
 	case ReasonRequests:
 		return RejectRate, DetailRateRequests
