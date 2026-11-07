@@ -181,6 +181,9 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// (Trigger after each committed write) and the same ceiling getter the
 	// registry clamps with.
 	manageH.SetModelAliases(scheduler.ModelAliasRegistry(), modelAliasCeilings(cfgStore))
+	// gateway-limits-* (W06-15): the registry the meter adapter reads and the
+	// listener keeps hot, and the settings floor per op.
+	manageH.SetGatewayLimits(scheduler.GatewayLimitsRegistry(), gatewayLimitDefaults(cfgStore))
 	// Forge PULL sync engine (Achse-02 I-F). Fail-closed gates: the tenant gate
 	// is store.TenantStatusForScope (found=false ⇒ skip + disable, S13); the
 	// issue-policy gate refuses a run unless the registry resolves an `issue`
@@ -495,7 +498,8 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// (cancelled_inflight), the NOTIFY listener (migration 165) feeds it.
 	manageH.SetInflight(gateway.door.Inflight())
 	scheduler.SetModelAccessSink(gateway.door.Inflight())
-	deps := gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter)
+	deps := gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter,
+		scheduler.GatewayLimitsRegistry())
 	v1, v2 := v1Routes(deps), v2Routes(deps)
 	if wrapRoutes != nil {
 		v1, v2 = wrapRoutes(v1), wrapRoutes(v2)

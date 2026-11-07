@@ -3013,6 +3013,7 @@ func (c *Config) GatewaySettings() oai.Settings {
 			InstanceEnvelopeFactor: g.InstanceEnvelopeFactor,
 			AllowExternal:          g.ConsumerAllowExternalDefault,
 			MonthlyCostUSD:         g.ConsumerMonthlyCostUSDDefault,
+			ConcurrencyCap:         int64(c.Dispatch.ExternalQueuePerConsumer),
 		},
 		Auth: oai.AuthSettings{
 			FailureLimit:          g.AuthFailureLimit,

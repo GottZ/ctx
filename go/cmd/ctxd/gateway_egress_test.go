@@ -62,10 +62,10 @@ func TestMeterLimiterEgress(t *testing.T) {
 	if !l.Egress(ctx, urgentConsumer("c3"), llmlog.GatewayOpChat).CostExhausted {
 		t.Error("tenant envelope 2.0 with 2.0 booked: c3 not exhausted")
 	}
-	if d := gatewayDeps(ctx, nil, cfgStore, nil, nil, nil, nil, meter); d.Egress == nil {
+	if d := gatewayDeps(ctx, nil, cfgStore, nil, nil, nil, nil, meter, nil); d.Egress == nil {
 		t.Error("gatewayDeps with the meter: Egress nil")
 	}
-	if d := gatewayDeps(ctx, nil, cfgStore, nil, nil, nil, nil, nil); d.Egress != nil {
+	if d := gatewayDeps(ctx, nil, cfgStore, nil, nil, nil, nil, nil, nil); d.Egress != nil {
 		t.Errorf("gatewayDeps without a meter: Egress %T, want nil (fail-closed: free rows only)", d.Egress)
 	}
 	if rows := meterSeedRows([]llmusage.ConsumerUsage{{ConsumerID: "c", TenantID: "t", Pipeline: llmlog.PipelineGatewayChat, MonthExternalCost: 0.25}}); len(rows) != 1 || rows[0].MonthCostUSD != 0.25 {

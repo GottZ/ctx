@@ -26,7 +26,7 @@ import (
 func TestMeterLimiterMapsL1(t *testing.T) {
 	cfgStore := meterTestStore(t, map[string]string{})
 	gw := meterTestGateway(t, cfgStore)
-	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
 	ctx := context.Background()
 	est := func(tier string) oai.Estimate {
 		return oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 1, ClientMaxTokens: true, PromptRunes: 9, ServiceTier: tier}

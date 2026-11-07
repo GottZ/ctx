@@ -172,6 +172,24 @@ var auditClassification = []auditedTable{
 		},
 		updTrig: "trg_instance_audit_upd",
 	},
+	{
+		// One trigger for INSERT, UPDATE and DELETE (like tenant_quota): an
+		// UPDATE that leaves the whitelist as it was writes no row (wave
+		// W06-15, migration 168).
+		table:   "context_gateway_limits",
+		stateFn: "audit_state_gateway_limit",
+		audited: []string{
+			"subject_kind", "consumer_id", "tenant_id", "tier", "op", "rpm", "tpm", "max_concurrency",
+			"daily_tokens", "monthly_tokens", "daily_requests", "monthly_cost_usd", "allow_external", "allow_unmetered_external",
+		},
+		excluded: map[string]string{
+			"id":                   "surrogate key the API never exposes; a row is addressed by (subject, tier, op) and audited under its subject's id (entity_key)",
+			"created_at":           "insert time; the audit row carries its own created_at",
+			"updated_at":           "bookkeeping time of the last write",
+			"updated_by":           "actor attribution, carried by api_key_id / actor_label (and the trigger's actor fallback)",
+			"updated_by_principal": "actor attribution, carried by metadata.actor_principal",
+		},
+	},
 }
 
 // auditLegacyTables carry audit triggers from before the whitelist doctrine
@@ -559,7 +577,60 @@ var auditColumnProbes = map[string]auditProbeSet{
 		keyCol:  "singleton",
 		keyType: "boolean",
 	},
+	"context_gateway_limits": {
+		audited: map[string]string{
+			"subject_kind":             "'tenant_envelope'",
+			"consumer_id":              "'%[7]s'::uuid",
+			"tenant_id":                "'%[1]s'::uuid",
+			"tier":                     "'tenant'",
+			"op":                       "CASE op WHEN 'chat' THEN 'embed' ELSE 'chat' END",
+			"rpm":                      "COALESCE(rpm, 1) + 1",
+			"tpm":                      "COALESCE(tpm, 1) + 1",
+			"max_concurrency":          "COALESCE(max_concurrency, 1) + 1",
+			"daily_tokens":             "COALESCE(daily_tokens, 1) + 1",
+			"monthly_tokens":           "COALESCE(monthly_tokens, 1) + 1",
+			"daily_requests":           "COALESCE(daily_requests, 1) + 1",
+			"monthly_cost_usd":         "COALESCE(monthly_cost_usd, 1) + 1",
+			"allow_external":           "NOT COALESCE(allow_external, false)",
+			"allow_unmetered_external": "NOT COALESCE(allow_unmetered_external, false)",
+		},
+		excluded: map[string]string{
+			"created_at":           "created_at - interval '1 minute'",
+			"updated_at":           "updated_at - interval '1 minute'",
+			"updated_by":           "'%[3]s'::uuid",
+			"updated_by_principal": "'%[2]s'::uuid",
+		},
+		// Every probe starts from a valid state for its one-column change:
+		// the consumer/server row, a tenant row for the subject_kind and
+		// tenant_id probes (ck_gl_subject binds the ids to the kind).
+		prep: map[string]string{
+			"subject_kind":             glPrepTenant,
+			"tenant_id":                glPrepTenant,
+			"consumer_id":              glPrepConsumer,
+			"tier":                     glPrepConsumer,
+			"op":                       glPrepConsumer,
+			"rpm":                      glPrepConsumer,
+			"tpm":                      glPrepConsumer,
+			"max_concurrency":          glPrepConsumer,
+			"daily_tokens":             glPrepConsumer,
+			"monthly_tokens":           glPrepConsumer,
+			"daily_requests":           glPrepConsumer,
+			"monthly_cost_usd":         glPrepConsumer,
+			"allow_external":           glPrepConsumer,
+			"allow_unmetered_external": glPrepConsumer,
+		},
+	},
 }
+
+// glPrepConsumer and glPrepTenant put the probed context_gateway_limits row
+// into the consumer/server state and the tenant/server state (no rate or
+// unmetered column, so subject_kind can move to tenant_envelope).
+const (
+	glPrepConsumer = `UPDATE context_gateway_limits SET subject_kind = 'consumer', consumer_id = '%[4]s'::uuid, tenant_id = NULL,
+		tier = 'server', allow_external = NULL, allow_unmetered_external = NULL WHERE id = $1::uuid`
+	glPrepTenant = `UPDATE context_gateway_limits SET subject_kind = 'tenant', consumer_id = NULL, tenant_id = '%[8]s'::uuid,
+		tier = 'server', rpm = NULL, tpm = NULL, max_concurrency = NULL, allow_unmetered_external = NULL WHERE id = $1::uuid`
+)
 
 func TestAuditClassificationPerColumn(t *testing.T) {
 	if testing.Short() {
@@ -574,6 +645,7 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	m162Apply(ctx, t, pool)
 	m163Apply(ctx, t, pool)
 	m164Apply(ctx, t, pool)
+	m168ApplyRest(ctx, t, pool)
 
 	otherTenant := freshTenant(t, ctx, pool, "ka-pin-other")
 	var otherPrincipal string
@@ -609,17 +681,20 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	consumerG := mcConsumer(ctx, t, pool, modelTenant, "ka-pin-g", nil)
 	mgGrant(ctx, t, pool, consumerG, grantAlias)
 
+	// The probed limits row (migration 168): consumer A's chat row, server tier.
+	limitsRow := glProbeRow(ctx, t, pool, consumerA)
+
 	rowID := map[string]string{"context_api_keys": key.ID, "context_tenant_quota": quotaID,
 		"context_model_consumers": consumerA, "context_model_keys": modelKey, "context_model_aliases": modelAlias,
-		"context_model_consumer_grants": consumerG, "context_instance": "true"}
+		"context_model_consumer_grants": consumerG, "context_instance": "true", "context_gateway_limits": limitsRow}
 	entity := map[string]string{"context_api_keys": "api_key", "context_tenant_quota": "tenant_quota",
 		"context_model_consumers": "model_consumer", "context_model_keys": "model_key", "context_model_aliases": "model_alias",
-		"context_model_consumer_grants": "model_grant", "context_instance": "instance"}
+		"context_model_consumer_grants": "model_grant", "context_instance": "instance", "context_gateway_limits": "gateway_limits"}
 	fill := func(expr string) string {
 		if !strings.Contains(expr, "%[") {
 			return expr
 		}
-		return fmt.Sprintf(expr, otherTenant, otherPrincipal, key.ID, consumerA, secondModelKey, secondAlias)
+		return fmt.Sprintf(expr, otherTenant, otherPrincipal, key.ID, consumerA, secondModelKey, secondAlias, consumerB, modelTenant)
 	}
 
 	for _, c := range auditClassification {

@@ -589,7 +589,7 @@ func TestAuditTriggerSetPerTable(t *testing.T) {
 		    AND t.tgrelid IN ('context_api_keys'::regclass, 'context_tenant_quota'::regclass,
 		                      'context_model_consumers'::regclass, 'context_model_keys'::regclass,
 		                      'context_model_aliases'::regclass, 'context_instance'::regclass,
-		                      'context_model_consumer_grants'::regclass)
+		                      'context_model_consumer_grants'::regclass, 'context_gateway_limits'::regclass)
 		    AND (p.proname LIKE 'audit%' OR t.tgname LIKE '%audit%'
 		         OR p.prosrc ILIKE '%context_settings_audit%')
 		  ORDER BY 1`)
@@ -599,6 +599,7 @@ func TestAuditTriggerSetPerTable(t *testing.T) {
 	want := []string{
 		"context_api_keys.trg_api_keys_audit_ins_del -> audit_api_keys_write",
 		"context_api_keys.trg_api_keys_audit_upd -> audit_api_keys_write",
+		"context_gateway_limits.trg_gateway_limits_audit -> audit_gateway_limits_write",
 		"context_instance.trg_instance_audit_ins_del -> audit_instance_write",
 		"context_instance.trg_instance_audit_upd -> audit_instance_write",
 		"context_model_aliases.trg_model_aliases_audit_ins_del -> audit_model_aliases_write",

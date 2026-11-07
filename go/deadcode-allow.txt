@@ -17,3 +17,4 @@
 # ein //nolint:unused mit ausgeschriebenem Grund an der Deklaration.
 
 internal/schemacontract/manifest.go	MarshalManifest	# Aufrufer generate_test.go:136 unter //go:build genmanifest; deadcode kennt den Tag nicht
+internal/gatewaylimits/gatewaylimits.go	ParseSubjectKind	# wartet: RC-D S2 W06-15 (gateway-limits-* parst subject_kind; S1 Stub ohne Aufrufer)

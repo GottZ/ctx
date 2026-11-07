@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedcache"
+	"github.com/GottZ/ctx/internal/gatewaylimits"
 	"github.com/GottZ/ctx/internal/graphcache"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
@@ -133,6 +134,11 @@ type Scheduler struct {
 	// NOTIFYs and on every backlog; nil until SetModelAliasRegistry (then the
 	// alias entity branch is inert).
 	modelAliases *modelalias.Registry
+
+	// gatewayLimits: W06-15, the listener reloads it on context_gateway_limits
+	// NOTIFYs and on every backlog; nil until SetGatewayLimitsRegistry (then
+	// the limits entity branch is inert).
+	gatewayLimits *gatewaylimits.Registry
 
 	// modelAccess is the receiver of ctx_model_access_write (W01-8): the
 	// model-key door's in-flight registry, installed after Run
@@ -475,6 +481,20 @@ func (s *Scheduler) SetModelAliasRegistry(reg *modelalias.Registry) {
 // manage actions, so a write and the listener reload the same snapshot.
 func (s *Scheduler) ModelAliasRegistry() *modelalias.Registry {
 	return s.modelAliases
+}
+
+// SetGatewayLimitsRegistry installs the limits registry of the model API's
+// meter (W06-15, migration 168) the NOTIFY listener reloads. Same boot
+// contract as SetModelAliasRegistry: MUST be called before Run.
+func (s *Scheduler) SetGatewayLimitsRegistry(reg *gatewaylimits.Registry) {
+	s.gatewayLimits = reg
+}
+
+// GatewayLimitsRegistry returns the registry installed by
+// SetGatewayLimitsRegistry (nil before) — the one instance the meter adapter
+// and the gateway-limits-* manage actions share with the listener.
+func (s *Scheduler) GatewayLimitsRegistry() *gatewaylimits.Registry {
+	return s.gatewayLimits
 }
 
 // SetProjectHub installs the W9 SSE domain-event hub the NOTIFY listener forwards

@@ -88,6 +88,11 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"forge-token-set", "", tierTenantAdmin, "handleForgeTokenSet"},
 	{"gaming-mode", `{}`, tierOpen, "handleGamingMode"},
 	{"gaming-mode", `{"mode":"on"}`, tierServerAdmin, "handleGamingMode"},
+	// gateway-limits-* (W06-15, design/06 §4.3): tenant-admin tier with the
+	// field tiers in the handler.
+	{"gateway-limits-delete", "", tierTenantAdmin, "handleGatewayLimitsDelete"},
+	{"gateway-limits-get", "", tierTenantAdmin, "handleGatewayLimitsGet"},
+	{"gateway-limits-set", "", tierTenantAdmin, "handleGatewayLimitsSet"},
 	{"get", "", tierOpen, "handleGet"},
 	{"guard-list", "", tierOpen, "handleGuardList"},
 	{"guard-resolve", "", tierOpen, "handleGuardResolve"},

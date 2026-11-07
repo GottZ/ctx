@@ -355,6 +355,19 @@ linters:
             - "$gostd"
             - "github.com/GottZ/ctx/internal/promptguard$"
 
+        # internal/gatewaylimits (W06-15, design/06 §4.3): the limits rows of
+        # migration 168 and the one rule that resolves them. A leaf like the
+        # meter it feeds: the rows arrive through a Loader (store, wired in
+        # cmd/ctxd), the result is keyquota's vocabulary; no config, no
+        # handler, no database.
+        gatewaylimits-leaf:
+          files:
+            - "**/go/internal/gatewaylimits/**"
+            - "!$test"
+          allow:
+            - "$gostd"
+            - "github.com/GottZ/ctx/internal/keyquota$"
+
         # evalscore stays TOOLING (design/06 §4.7, masterplan K18 + A-15).
         # internal/evalscore is the measurement vocabulary of the gold bench —
         # nDCG, MRR, recall, rank diversity. The server answers a query; it

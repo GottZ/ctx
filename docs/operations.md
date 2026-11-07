@@ -1107,6 +1107,14 @@ The only writer is ctxd's rejection flusher: every 10 seconds and once at shutdo
 
 **Downgrading** below 167 needs no schema change: an older binary neither reads nor writes the table. With `/v1` unmounted (`gateway.enabled=false`) nothing is refused and the table stays empty. To remove it: `DROP TABLE context_llm_rejections_hourly; DELETE FROM _migrations WHERE version = 167;` (the last statement lets a later upgrade apply 167 again).
 
+### Migration 168: the meter's limits as data
+
+`context_gateway_limits` holds the limits of the model API's meter per subject — a consumer, a tenant (the default of its consumers), the instance (above the `gateway.*` settings, which stay the floor) and a tenant envelope — per op (`chat`, `embed`, `rerank`) and per tier (`server` = written by a server-admin, `tenant` = written by a tenant-admin, narrowing only). Every numeric column is `> 0` or `NULL` (= inherits; no 0 sentinel); a tenant-tier row can only withdraw the egress permission (`ck_gl_tenant_narrow`); one row per subject, tier and op (`uq_gateway_limits`, `NULLS NOT DISTINCT`). A consumer's rows go with the consumer (`ON DELETE CASCADE`; the tenant prune deletes them first so their audit rows keep the tenant), a tenant's rows with the tenant. Writes are audited (`entity_type` `gateway_limits`) and notify `ctx_settings_write` (entity `context_gateway_limits`), so a psql edit reaches the running meter without a restart. The migration also asserts the peer-binding CHECKs of 161 (a binding only at a `ctx-peer` consumer).
+
+**Boot time.** One new table with three indexes and two triggers; no existing row is read or locked. `T07_EXPECT_TABLES` goes from `65` to `66`. An empty table is the behaviour before: every consumer meters under the settings.
+
+**Downgrading** below 168: an older binary neither reads nor writes the table — the limits rows stop applying and every consumer falls back to the settings. To remove it: `DROP TABLE context_gateway_limits; DROP FUNCTION audit_gateway_limits_write(), audit_state_gateway_limit(context_gateway_limits); DELETE FROM _migrations WHERE version = 168;`.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.
