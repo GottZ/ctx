@@ -102,6 +102,8 @@ func Validate(c *Config) []Issue {
 	// ratio in [0, 1).
 	issues = append(issues, validateGatewayMeter(c)...)
 	issues = append(issues, validateGatewayConcurrency(c)...)
+	// V49 (W01-8): gateway.inflight_sweep_interval at least 1 s.
+	issues = append(issues, validateGatewayInflightSweep(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1360,6 +1362,28 @@ func validateGatewayConcurrency(c *Config) []Issue {
 	case queue > 0 && conc > queue:
 		return []Issue{{Field: key, Severity: SeverityError,
 			Msg: fmt.Sprintf("%s (%d) must not exceed dispatch.external_queue_per_consumer (%d) — the queue would refuse a consumer what its concurrency limit admits", key, conc, queue)}}
+	}
+	return nil
+}
+
+// gatewayInflightSweepFloor is V49's floor of gateway.inflight_sweep_interval.
+const gatewayInflightSweepFloor = time.Second
+
+// validateGatewayInflightSweep is V49 (wave W01-8, design/01 §4.2):
+// gateway.inflight_sweep_interval is the period of the in-flight registry's
+// periodic sweep — one ctx_model_auth_live query over the key IDs of every
+// running /v1 request, the second line behind the ctx_model_access_write
+// notifications. At least 1 s: 0 has no period (time.NewTicker panics on
+// it), and a sub-second sweep would put one query after another on the
+// database pool. The seconds parser yields whole seconds only, so from a
+// setting or the environment this refuses exactly 0; the floor still holds
+// for a hand-built snapshot. Negatives stay with V17 (one issue per field).
+// Fatal like V48: boot aborts, the settings PUT is a 422.
+func validateGatewayInflightSweep(c *Config) []Issue {
+	const key = "gateway.inflight_sweep_interval"
+	if d := c.Gateway.InflightSweepInterval; d >= 0 && d < gatewayInflightSweepFloor {
+		return []Issue{{Field: key, Severity: SeverityError,
+			Msg: fmt.Sprintf("%s (%v) must be >= %v (V49) — 0 has no period, and a shorter sweep would put one ctx_model_auth_live query after another on the database pool", key, d, gatewayInflightSweepFloor)}}
 	}
 	return nil
 }

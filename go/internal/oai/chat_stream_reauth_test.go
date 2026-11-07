@@ -1,12 +1,16 @@
 package oai_test
 
-// The re-authentication of running requests (W02-08; design/02 §4.11.3 D6,
-// masterplan K22) and the envelope pins of the stream path (G13): a revoked
-// key, the failure rule N = 2 after the commit (lead decision O-08-2), the
-// forced grant read of the re-auth period (O-08-5), re-auth for non-stream
-// (Z6), the code-bug sentinels before and after the commit. The real door
-// (handler.ReauthConsumer over a database) is the integration half
-// (chat_stream_reauth_integration_test.go).
+// A key that stops authenticating ends its running requests (W01-8,
+// masterplan K22): the model-key door's in-flight registry cancels the
+// request context it handed to the route with auth.ErrCredentialRevoked,
+// and the route answers that cause — 401 invalid_api_key before the commit,
+// the error frame invalid_api_key after it — instead of reading it as a gone
+// client. Here on the revoker (chat_stream_reauth_harness_test.go), the
+// stand-in of that registry; the real door and registry over a database is
+// the integration half. A narrowed policy (a withdrawn grant) does not end
+// a running request — it applies from the next one (design/01 §4.6
+// "Grenze"). Plus the envelope pins of the stream path (G13 of W02-08): the
+// code-bug sentinels before and after the commit.
 
 import (
 	"context"
@@ -23,52 +27,93 @@ import (
 	"github.com/GottZ/ctx/internal/oai"
 )
 
-// errAuthDB stands for ErrModelAuthUnavailable (the door's database share).
-var errAuthDB = errors.New("model auth: check unavailable (fake)")
+// revokeFrameBound is how soon after the revocation the error frame is due
+// at the client: the route reads the cause as soon as the canceled upstream
+// read returns — no tick in between. revokeFrameSlack is the scheduler's
+// share on a loaded host; under -race both are logged, not judged.
+const (
+	revokeFrameBound = 50 * time.Millisecond
+	revokeFrameSlack = 200 * time.Millisecond
+)
 
-// reauthRig is a stream rig on one upstream that sends a frame and then
-// holds until hold closes (or sends frames over d when d > 0), with a
-// shortened re-auth period and the fake.
-func reauthRig(t *testing.T, f *reauthFake, frames []sseStep, opts ...rigOption) (*chatRig, *upstream, *upstreamEnd) {
+// revokeRig is a stream rig on one upstream that answers steps; entered
+// (optional) gets a value when the upstream sees the request.
+func revokeRig(t *testing.T, steps []sseStep, entered chan<- struct{}, opts ...rigOption) (*chatRig, *upstream, *upstreamEnd) {
 	t.Helper()
-	t.Cleanup(oai.SetReauthEvery(100 * time.Millisecond))
 	end := newUpstreamEnd()
 	u := newUpstream(t, "")
-	u.setRespond(sseRespond(frames, nil, end))
+	u.setRespond(sseRespond(steps, entered, end))
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1,
-		append([]rigOption{withStreamSettings, withReauth(f)}, opts...)...)
+		append([]rigOption{withStreamSettings}, opts...)...)
 	return rig, u, end
 }
 
-// TestReauthPins: the re-auth period is the design's 60 s (O-08-1 (a): a
-// named constant next to the watcher tick) and the failure limit 2 (O-08-2).
-func TestReauthPins(t *testing.T) {
-	if oai.ReauthTick != 60*time.Second || oai.ReauthFailLimit != 2 || oai.WatchTick != 5*time.Second {
-		t.Fatalf("reauth tick %v, limit %d, watch tick %v — want 60s, 2, 5s", oai.ReauthTick, oai.ReauthFailLimit, oai.WatchTick)
+// drainEvents collects the stream's remaining events until its body ends
+// (false: it did not end within d).
+func drainEvents(each <-chan sseEvent, d time.Duration) ([]sseEvent, bool) {
+	var evs []sseEvent
+	timeout := time.After(d)
+	for {
+		select {
+		case e, ok := <-each:
+			if !ok {
+				return evs, true
+			}
+			evs = append(evs, e)
+		case <-timeout:
+			return evs, false
+		}
 	}
 }
 
-// TestRevokedKeyEndsStream is G10's revocation half on the fake (the real
-// door: TestRevokedKeyEndsStreamOnReauth): the re-auth answers "no longer
-// valid" ⇒ a committed stream ends with the error frame invalid_api_key
-// within a period + 1 s (lease free, upstream aborted, no health fault —
-// Z3), a stream before its commit with 401 invalid_api_key and
-// WWW-Authenticate. Red: no re-auth in the watcher — the stream runs on.
+// TestWatchTickPin: the watcher's period is the design's 5 s (design/02
+// §4.11.3 D8, lead decision O2 (a): a named constant).
+func TestWatchTickPin(t *testing.T) {
+	if oai.WatchTick != 5*time.Second {
+		t.Fatalf("watch tick %v, want 5s", oai.WatchTick)
+	}
+}
+
+// TestRevokedKeyEndsStream: the registry revokes the key of a running
+// stream ⇒ (committed) the error frame invalid_api_key as the last event,
+// no [DONE], at once (≤ revokeFrameBound + slack), the upstream aborted,
+// the lease free, no health fault of the row (Z3), the row's attempt
+// canceled; (before the commit, the upstream holding before its first
+// frame) 401 invalid_api_key with WWW-Authenticate. Red (the route without
+// the ErrCredentialRevoked verdict): it reads the cause as a gone client —
+// no frame, an empty 200.
 func TestRevokedKeyEndsStream(t *testing.T) {
 	t.Run("committed", func(t *testing.T) {
 		hold := make(chan struct{})
 		defer close(hold)
-		f := &reauthFake{}
-		f.set(reauthAnswer{ok: true}, reauthAnswer{ok: false})
-		rig, u, end := reauthRig(t, f, []sseStep{{data: sglangChunk("hello", "")}, {hold: hold}})
-		ls, each := openAndRead(t, context.Background(), serveHTTP(t, rig.router), streamBody("chat"))
+		rv := newRevoker()
+		rig, u, end := revokeRig(t, []sseStep{{data: sglangChunk("hello", "")}, {hold: hold}}, nil)
+		ls, each := openAndRead(t, context.Background(), serveHTTP(t, rv.wrap(rig.router)), streamBody("chat"))
 		defer func() { _ = ls.Close() }()
 		if _, ok := nextData(each, 5*time.Second); !ok {
 			t.Fatal("no frame")
 		}
-		e, ok := nextData(each, 2*100*time.Millisecond+time.Second)
-		if !ok || !strings.Contains(e.data, `"code":"invalid_api_key"`) {
-			t.Fatalf("frame %q, want the invalid_api_key error frame within the second period + 1 s", e.data)
+		at := time.Now()
+		if n := rv.revoke(); n != 1 {
+			t.Fatalf("revoked %d running requests, want 1", n)
+		}
+		evs, ended := drainEvents(each, 5*time.Second)
+		a := streamAnswer{events: evs}
+		code, last := a.errorFrame(t)
+		took := time.Duration(-1) // -1: no frame
+		for _, e := range evs {
+			if strings.Contains(e.data, `"error"`) {
+				took = e.at.Sub(at)
+				break
+			}
+		}
+		t.Logf("revoke → error frame %q after %v (bound %v + %v; race %v)", code, took, revokeFrameBound, revokeFrameSlack, raceEnabled)
+		if !ended || code != oai.CodeInvalidAPIKey || !last || a.dones() != 0 {
+			t.Fatalf("frame %q last %v, [DONE] %d, body ended %v: %+v — want the invalid_api_key error frame as the last event, no [DONE]",
+				code, last, a.dones(), ended, evs)
+		}
+		if !raceEnabled && took > revokeFrameBound+revokeFrameSlack {
+			t.Errorf("error frame %v after the revocation, want ≤ %v + %v: the route waited for something else than the cause", took, revokeFrameBound, revokeFrameSlack)
 		}
 		if !end.wait(time.Second) || !end.canceled || !waitHeld(rig.disp, u.srv.URL, 0, time.Second) {
 			t.Error("the upstream was not aborted or the lease not freed")
@@ -78,152 +123,138 @@ func TestRevokedKeyEndsStream(t *testing.T) {
 		}
 		// The row is written after the frame went out: wait for it.
 		waitFor(time.Second, func() bool { return len(rig.rows.all()) == 1 })
-		if rows := rig.rows.all(); len(rows) != 1 || rows[0].Attempts[0].Class != backends.ClassCanceled.String() {
+		if rows := rig.rows.all(); len(rows) != 1 || len(rows[0].Attempts) == 0 || rows[0].Attempts[0].Class != backends.ClassCanceled.String() {
 			t.Errorf("rows %+v, want one row whose attempt is canceled", rows)
+		}
+		if !waitFor(time.Second, func() bool { return rv.running.Load() == 0 }) {
+			t.Errorf("%d requests still inside the registry", rv.running.Load())
 		}
 	})
 	t.Run("before the commit", func(t *testing.T) {
 		hold := make(chan struct{})
 		defer close(hold)
-		f := &reauthFake{}
-		f.set(reauthAnswer{ok: false})
-		rig, _, _ := reauthRig(t, f, []sseStep{{hold: hold}})
-		a := postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
+		rv := newRevoker()
+		entered := make(chan struct{}, 1)
+		rig, u, end := revokeRig(t, []sseStep{{hold: hold}}, entered)
+		srv := serveHTTP(t, rv.wrap(rig.router))
+		done := make(chan streamAnswer, 1)
+		go func() { done <- postStream(context.Background(), t, srv, streamBody("chat")) }()
+		waitEnter(t, entered)
+		at := time.Now()
+		if n := rv.revoke(); n != 1 {
+			t.Fatalf("revoked %d running requests, want 1", n)
+		}
+		var a streamAnswer
+		select {
+		case a = <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no answer within 5 s of the revocation")
+		}
+		t.Logf("revoke before the commit → %d after %v: %s", a.status, a.end.Sub(at), strings.TrimSpace(a.raw))
 		if a.status != http.StatusUnauthorized || a.header.Get("WWW-Authenticate") == "" || !strings.Contains(a.raw, `"code":"invalid_api_key"`) {
 			t.Fatalf("answer %d %v %s, want 401 invalid_api_key with WWW-Authenticate", a.status, a.header, a.raw)
 		}
-	})
-}
-
-// TestReauthFailureRule is lead decision O-08-2 (b), N = 2, after the
-// commit: (i) one failure, then a success ⇒ the stream runs on and the
-// count starts again (alternating failures never end it); (ii) two
-// failures in a row ⇒ the error frame auth_unavailable, the lease free;
-// (iii) "no longer valid" ends it at once (TestRevokedKeyEndsStream). Red:
-// N = 1 ((i) ends), no limit ((ii) runs on).
-func TestReauthFailureRule(t *testing.T) {
-	t.Run("alternating failures run through", func(t *testing.T) {
-		f := &reauthFake{}
-		script := make([]reauthAnswer, 0, 40)
-		for i := 0; i < 20; i++ {
-			script = append(script, reauthAnswer{err: errAuthDB}, reauthAnswer{ok: true})
+		if !end.wait(time.Second) || !end.canceled || !waitHeld(rig.disp, u.srv.URL, 0, time.Second) {
+			t.Error("the upstream was not aborted or the lease not freed")
 		}
-		f.set(script...)
-		steps := []sseStep{{data: sglangChunk("hello", "")}, {wait: 600 * time.Millisecond, data: sglangChunk(" from", "")},
-			{wait: 600 * time.Millisecond, data: sglangChunk(" the engine", "stop")}, {data: "[DONE]"}}
-		rig, _, _ := reauthRig(t, f, steps)
-		a := postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
-		checkRelay(t, a)
-		if n := f.calls.Load(); n < 6 {
-			t.Errorf("%d re-auth calls during 1.2 s at 100 ms, want >= 6", n)
-		}
-	})
-	t.Run("two failures in a row end it", func(t *testing.T) {
-		hold := make(chan struct{})
-		defer close(hold)
-		f := &reauthFake{}
-		f.set(reauthAnswer{ok: true}, reauthAnswer{err: errAuthDB}, reauthAnswer{err: errAuthDB})
-		rig, u, _ := reauthRig(t, f, []sseStep{{data: sglangChunk("hello", "")}, {hold: hold}})
-		a := postStream(context.Background(), t, serveHTTP(t, rig.router), streamBody("chat"))
-		code, last := a.errorFrame(t)
-		if code != oai.CodeAuthUnavailable || !last || a.dones() != 0 || f.calls.Load() != 3 {
-			t.Fatalf("frame %q last %v, [DONE] %d, %d re-auth calls: %s — want auth_unavailable after the second failure in a row",
-				code, last, a.dones(), f.calls.Load(), a.raw)
-		}
-		if !waitHeld(rig.disp, u.srv.URL, 0, time.Second) {
-			t.Error("the lease is still held")
+		if !waitFor(time.Second, func() bool { return rv.running.Load() == 0 }) {
+			t.Errorf("%d requests still inside the registry", rv.running.Load())
 		}
 	})
 }
 
-// TestReauthErrorBeforeTheCommit is G13's first pin: a re-auth that cannot
-// run before the answer began — a stream before its commit, any
-// non-stream request — is 503 auth_unavailable with x-should-retry false.
-func TestReauthErrorBeforeTheCommit(t *testing.T) {
-	for _, stream := range []bool{true, false} {
-		t.Run(map[bool]string{true: "stream", false: "non-stream"}[stream], func(t *testing.T) {
-			hold := make(chan struct{})
-			defer close(hold)
-			f := &reauthFake{}
-			f.set(reauthAnswer{err: errAuthDB}, reauthAnswer{ok: true}) // one failure, then the check works again
-			rig, _, _ := reauthRig(t, f, []sseStep{{hold: hold}})
-			body := chatBody("chat")
-			if stream {
-				body = streamBody("chat")
-			} else {
-				b := newBlocker()
-				defer b.open()
-				u2 := newUpstream(t, answerSGLang)
-				u2.setRespond(b.respond(answerSGLang))
-				rig = newChatRig(t, []backends.Backend{u2.row("spark", backends.TrustFull, 10)}, 4, 1, withReauth(f))
-			}
-			a := postStream(context.Background(), t, serveHTTP(t, rig.router), body)
-			if a.status != http.StatusServiceUnavailable || a.header.Get("x-should-retry") != "false" || !strings.Contains(a.raw, `"code":"auth_unavailable"`) {
-				t.Fatalf("answer %d %v %s, want 503 auth_unavailable, x-should-retry false", a.status, a.header, a.raw)
-			}
-			if n := f.calls.Load(); n != 1 {
-				t.Errorf("%d re-auth calls, want 1 (the first failure before the answer began is the answer)", n)
-			}
-		})
-	}
-}
-
-// TestGrantWithdrawnEndsStream is lead decision O-08-5 (a): a consumer
+// TestGrantWithdrawnKeepsRunningStream is the boundary of design/01 §4.6
+// ("Grenze"): a narrowed policy applies from the next request. A consumer
 // without all_models whose grant is withdrawn during a committed stream ⇒
-// the error frame model_not_found within a re-auth period + 1 s, the lease
-// free — the forced grant read of the re-auth period (the alias generation
-// does not move, W02-07 review 2 F2-3). Red: the re-auth period resolves
-// without force (the grant read is skipped, the stream runs on).
-func TestGrantWithdrawnEndsStream(t *testing.T) {
+// the stream runs to its [DONE] — the watcher reads the grant only when the
+// alias registry moved, and it did not; no grant read during the run — and
+// the next request is 404 model_not_found. Red (a tick that always reads
+// the grant, force): the stream ends with the error frame model_not_found
+// at the first tick after the withdrawal.
+func TestGrantWithdrawnKeepsRunningStream(t *testing.T) {
+	const tick = 50 * time.Millisecond
+	t.Cleanup(oai.SetWatchEvery(tick))
 	hold := make(chan struct{})
-	defer close(hold)
-	f := &reauthFake{}
-	rig, u, end := reauthRig(t, f, []sseStep{{data: sglangChunk("hello", "")}, {hold: hold}})
+	h := &grantHang{} // counts the grant reads; none hangs
+	rig, u, end := revokeRig(t, []sseStep{{data: sglangChunk("hello", "")}, {hold: hold},
+		{data: sglangChunk(" again", "stop")}, {data: sglangUsage}, {data: "[DONE]"}}, nil, withGrantHang(h))
 	ca := urgentApp()
 	ca.AllModels = false
 	rig.ca.Store(ca)
 	rig.setGrant(idChat, true)
-	ls, each := openAndRead(t, context.Background(), serveHTTP(t, rig.router), streamBody("chat"))
+	srv := serveHTTP(t, rig.router)
+	ls, each := openAndRead(t, context.Background(), srv, streamBody("chat"))
 	defer func() { _ = ls.Close() }()
 	if _, ok := nextData(each, 5*time.Second); !ok {
+		close(hold)
 		t.Fatal("no frame")
 	}
-	at := time.Now()
+	reads := h.reads.Load()
 	rig.setGrant(idChat, false)
-	e, ok := nextData(each, 100*time.Millisecond+time.Second)
-	if !ok || !strings.Contains(e.data, `"code":"model_not_found"`) {
-		t.Fatalf("frame %q, want model_not_found within a period + 1 s", e.data)
+	time.Sleep(10 * tick) // ten watcher ticks with the grant withdrawn
+	close(hold)
+	evs, ended := drainEvents(each, 5*time.Second)
+	a := streamAnswer{events: evs}
+	code, _ := a.errorFrame(t)
+	t.Logf("grant withdrawn mid-stream: error frame %q, [DONE] %d, grant reads during the run %d", code, a.dones(), h.reads.Load()-reads)
+	if !ended || code != "" || a.dones() != 1 {
+		t.Fatalf("frame %q, [DONE] %d, body ended %v: %+v — want the stream to run to its [DONE] (the withdrawal applies from the next request)",
+			code, a.dones(), ended, evs)
 	}
-	if !end.wait(time.Second) || !waitHeld(rig.disp, u.srv.URL, 0, time.Second) {
-		t.Error("the upstream was not aborted or the lease not freed")
+	if n := h.reads.Load() - reads; n != 0 {
+		t.Errorf("%d grant reads during the run, want 0: the alias registry did not move", n)
 	}
-	t.Logf("grant withdrawn: frame %v later", e.at.Sub(at))
+	if !end.wait(time.Second) || end.canceled || !waitHeld(rig.disp, u.srv.URL, 0, time.Second) {
+		t.Error("the upstream was aborted or the lease not freed")
+	}
+	next := postStream(context.Background(), t, srv, streamBody("chat"))
+	if next.status != http.StatusNotFound || !strings.Contains(next.raw, `"code":"model_not_found"`) {
+		t.Fatalf("next request %d %s, want 404 model_not_found", next.status, next.raw)
+	}
 }
 
-// TestReauthNonStream is Z6: the re-auth runs for non-stream requests too —
-// "no longer valid" during the attempt ⇒ 401 invalid_api_key, never a 200,
-// the upstream aborted within a period + 1 s. Red: re-auth for streams
-// only.
-func TestReauthNonStream(t *testing.T) {
-	t.Cleanup(oai.SetReauthEvery(100 * time.Millisecond))
-	f := &reauthFake{}
-	f.set(reauthAnswer{ok: false})
+// TestRevokedKeyEndsNonStream: the registry revokes the key of a running
+// non-stream request ⇒ 401 invalid_api_key with WWW-Authenticate, never a
+// 200, the upstream aborted within 1 s, the lease free. Red (the route
+// without the ErrCredentialRevoked verdict): an empty 200.
+func TestRevokedKeyEndsNonStream(t *testing.T) {
+	rv := newRevoker()
 	u := newUpstream(t, answerSGLang)
 	b := newBlocker()
 	defer b.open()
 	u.setRespond(b.respond(answerSGLang))
-	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withReauth(f))
-	start := time.Now()
-	a := rig.post(t, chatBody("chat"))
-	code, _, _ := a.envelope(t)
-	if a.status != http.StatusUnauthorized || code != oai.CodeInvalidAPIKey || a.header.Get("WWW-Authenticate") == "" {
-		t.Fatalf("answer %d %s, want 401 invalid_api_key", a.status, a.body)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
+	srv := serveHTTP(t, rv.wrap(rig.router))
+	done := make(chan streamAnswer, 1)
+	go func() { done <- postStream(context.Background(), t, srv, chatBody("chat")) }()
+	waitEntered(t, b, 1)
+	at := time.Now()
+	if n := rv.revoke(); n != 1 {
+		t.Fatalf("revoked %d running requests, want 1", n)
 	}
-	if d := time.Since(start); d > 100*time.Millisecond+time.Second {
-		t.Errorf("answered after %v, want within a period + 1 s", d)
+	var a streamAnswer
+	select {
+	case a = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer within 5 s of the revocation")
+	}
+	t.Logf("revoke → %d after %v: %s", a.status, a.end.Sub(at), strings.TrimSpace(a.raw))
+	if a.status != http.StatusUnauthorized || !strings.Contains(a.raw, `"code":"invalid_api_key"`) || a.header.Get("WWW-Authenticate") == "" {
+		t.Fatalf("answer %d %v %s, want 401 invalid_api_key with WWW-Authenticate", a.status, a.header, a.raw)
+	}
+	select {
+	case abortedAt := <-b.aborted:
+		if d := abortedAt.Sub(at); d > time.Second {
+			t.Errorf("the upstream was aborted %v after the revocation, want ≤ 1 s", d)
+		}
+	case <-time.After(time.Second):
+		t.Error("the upstream was not aborted within 1 s")
 	}
 	if !waitHeld(rig.disp, u.srv.URL, 0, time.Second) {
 		t.Error("the lease is still held")
+	}
+	if !waitFor(time.Second, func() bool { return rv.running.Load() == 0 }) {
+		t.Errorf("%d requests still inside the registry", rv.running.Load())
 	}
 }
 

@@ -111,7 +111,6 @@ func oaiCensusRoute(t *testing.T, ca *countingAdmitter, chain []backends.Backend
 		RetryAfterSteps:   func() []time.Duration { return nil },
 		Planner:           censusPlanner{ca: ca},
 		Limiter:           censusLimiter{},
-		Reauth:            func(_ context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) { return ca, nil },
 	}
 	var budget oai.Budget
 	return oai.InflightBudget(&budget, get)(oai.ChatCompletions(d))

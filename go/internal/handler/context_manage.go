@@ -80,7 +80,16 @@ type ManageHandler struct {
 	// (server.go); a nil getter ⇒ the writing actions answer 503.
 	modelAliases  *modelalias.Registry
 	aliasCeilings func() modelalias.Ceilings
+	// inflight is the model-key door's in-flight registry (W01-8):
+	// model-key-revoke and model-consumer-delete end the running requests
+	// of what they revoked through it, right after the commit, and answer
+	// how many (cancelled_inflight). Wired via SetInflight (server.go); nil
+	// ⇒ cancelled_inflight is null (unknown, never a 0 — V-01-e).
+	inflight *InflightRegistry
 }
+
+// SetInflight wires the model-key door's in-flight registry (W01-8).
+func (h *ManageHandler) SetInflight(r *InflightRegistry) { h.inflight = r }
 
 // SetOverviewController wires the scheduler's overview-kick surface.
 // Boot happens-before: called in server.go before the server serves.

@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,12 +23,15 @@ const (
 )
 
 // ErrCredentialRevoked is the cancel cause of a running /v1 request whose
-// model key was revoked or expired (W01-8, K-02-7).
-var ErrCredentialRevoked = errors.New("auth: model credential revoked or expired")
-
-// ErrNoModelCredential: ReauthenticateModelKey got a ConsumerAuth that
-// AuthenticateModelKey did not produce.
-var ErrNoModelCredential = errors.New("auth: consumer auth carries no model credential")
+// model key stopped authenticating — revoked, expired, its consumer
+// deactivated, its tenant suspended or gone, its tenant_scope moved to
+// another tenant (W01-8, K-02-7): the in-flight registry of the model-key
+// door (handler.InflightRegistry) ends the request's context with it, and
+// the route answers 401 invalid_api_key, in a committed stream its error
+// frame. It wraps context.Canceled: net/http hands the cause to the aborted
+// wire call, and the walker classifies by it — a cancellation (no health
+// report of a healthy backend row), never a server fault.
+var ErrCredentialRevoked = fmt.Errorf("auth: model credential revoked or expired: %w", context.Canceled)
 
 // ConsumerAuth is the outcome of a model-key check (design/01 §4.4): every
 // column of ctx_model_auth (migration 161, K20). It is NOT an AuthResult and
@@ -46,28 +50,6 @@ type ConsumerAuth struct {
 	IsValid           bool
 	AdmissionLane     string // 'urgent' | 'bulk' — the external lane ceiling (design/03)
 	PeerInstanceID    string // a ctx-peer's bound instance id; "" = not bound
-
-	// cred is what ReauthenticateModelKey re-checks: the key hash and the
-	// address and transport of the request that authenticated. A closure
-	// on purpose: fmt formats an unexported field by reflection, and a
-	// pointer to a struct is dereferenced on fmt's bad-verb path (%s of a
-	// ConsumerAuth printed the hash in the first draft of this wave), while
-	// a func value prints as an address under every verb and
-	// reflection-based dumpers cannot look inside it; encoding/json skips
-	// the field.
-	cred func() modelCredential
-}
-
-type modelCredential struct {
-	hash   string
-	ip     netip.Addr
-	secure bool
-}
-
-// credentialOf captures the re-check input in a closure (see
-// ConsumerAuth.cred).
-func credentialOf(hash string, ip netip.Addr, secure bool) func() modelCredential {
-	return func() modelCredential { return modelCredential{hash: hash, ip: ip, secure: secure} }
 }
 
 // consumerKind maps the kind column; anything but 'ctx-peer' is an app.
@@ -134,7 +116,6 @@ func AuthenticateModelKey(ctx context.Context, pool *pgxpool.Pool, keyHash strin
 		KeyExpiresAt:      expires,
 		IsValid:           true,
 		AdmissionLane:     lane,
-		cred:              credentialOf(keyHash, ip, secure),
 	}
 	if scope != nil {
 		ca.TenantScope = *scope
@@ -145,16 +126,24 @@ func AuthenticateModelKey(ctx context.Context, pool *pgxpool.Pool, keyHash strin
 	return ca, nil
 }
 
-// ReauthenticateModelKey runs the same check again for the credential
-// behind ca, with the address and transport of the request that produced it
-// (K22: the stream watcher's re-check until W01-8's revocation registry
-// replaces it). ca must come from AuthenticateModelKey; anything else is
-// ErrNoModelCredential. The caller bounds the database share (the door's
-// semaphore, handler.ReauthConsumer).
-func ReauthenticateModelKey(ctx context.Context, pool *pgxpool.Pool, ca *ConsumerAuth) (*ConsumerAuth, error) {
-	if ca == nil || ca.cred == nil {
-		return nil, ErrNoModelCredential
+// DeadModelKeys returns the ids among keyIDs whose key no longer
+// authenticates — ctx_model_auth_live (migration 165): gates 1-4 of
+// ctx_model_auth by key id (the key lives, its consumer is active, its
+// tenant is active and still owns the consumer's tenant_scope); a deleted
+// key is dead. One statement for all ids, however many: the in-flight
+// registry's sweep and its check of the keys a NOTIFY touched (W01-8). The
+// order of the result is the function's; an empty keyIDs asks nothing.
+func DeadModelKeys(ctx context.Context, pool *pgxpool.Pool, keyIDs []string) ([]string, error) {
+	if len(keyIDs) == 0 {
+		return nil, nil
 	}
-	c := ca.cred()
-	return AuthenticateModelKey(ctx, pool, c.hash, c.ip, c.secure)
+	rows, err := pool.Query(ctx, `SELECT id::text FROM ctx_model_auth_live($1::text[]::uuid[]) AS d(id)`, keyIDs)
+	if err != nil {
+		return nil, fmt.Errorf("auth: query ctx_model_auth_live: %w", err)
+	}
+	dead, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("auth: read ctx_model_auth_live: %w", err)
+	}
+	return dead, nil
 }

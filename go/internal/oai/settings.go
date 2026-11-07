@@ -90,6 +90,13 @@ type AuthSettings struct {
 	FailureWindow time.Duration
 	ProbeRate     int
 	DBConcurrency int
+	// InflightSweepInterval is the period of the in-flight registry's
+	// periodic sweep (gateway.inflight_sweep_interval; wave W01-8): one
+	// ctx_model_auth_live query over the key IDs of every running /v1
+	// request of this process, whatever their number — the second line
+	// behind the ctx_model_access_write notifications and the backlog sweep
+	// after a listener reconnect. At least 1 s (V49).
+	InflightSweepInterval time.Duration
 }
 
 // AliasCeiling is the server admin's ceiling on tenant-alias policies

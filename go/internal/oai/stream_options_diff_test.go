@@ -12,7 +12,9 @@ package oai
 // includeUsage among them).
 
 import (
+	"bytes"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -70,4 +72,63 @@ func TestStreamOptionsAnswerAsTheStructDecode(t *testing.T) {
 	if on == 0 || off == 0 || refused == 0 {
 		t.Errorf("include_usage true %d, false %d, refused %d — the cases miss an answer", on, off, refused)
 	}
+}
+
+// TestStreamOptionsIncludeUsageOnlyOnAStream (W02-08 hardening 4, F5-1;
+// Delta-Review 5 §6): include_usage is read only on a stream. Without
+// stream: true (absent, false, null) stream_options answers as on root
+// 829a45ec — an object, its members unread: the answer of the same body
+// with stream_options {}, whatever include_usage holds (the replay of the
+// differential corpus over the route answered 400 invalid_type for 222
+// non-stream bodies before this hardening); with stream: true a value other
+// than a boolean or null is the 400 invalid_type at
+// stream_options.include_usage.
+func TestStreamOptionsIncludeUsageOnlyOnAStream(t *testing.T) {
+	with := func(body []byte, member string) []byte {
+		tb := bytes.TrimLeft(body, " \t\r\n")
+		if len(tb) == 0 || tb[0] != '{' || bytes.HasPrefix(bytes.TrimLeft(tb[1:], " \t\r\n"), []byte("}")) {
+			return nil
+		}
+		return append([]byte("{"+member+","), tb[1:]...)
+	}
+	values := []string{`"x"`, `"true"`, `""`, `1`, `0`, `-1.5`, `{}`, `{"a":true}`, `[]`, `[true]`}
+	for _, v := range values {
+		so := `"stream_options":{"include_usage":` + v + `}`
+		for _, stream := range []string{``, `"stream":false,`, `"stream":null,`} {
+			base := []byte(`{"model":"chat",` + stream + `"messages":[{"role":"user","content":"hi"}]}`)
+			body, empty := with(base, so), with(base, `"stream_options":{}`)
+			for li, l := range diffLimits {
+				got, want := newParse(body, l), newParse(empty, l)
+				if !reflect.DeepEqual(got, want) || got.stage != "ok" || got.includeUsage {
+					t.Errorf("limits %d, %s: %+v, want the answer without include_usage %+v", li, body, got, want)
+				}
+			}
+			diffCheck(t, body, map[string]int{})
+		}
+		body := with([]byte(`{"model":"chat","stream":true,"messages":[{"role":"user","content":"hi"}]}`), so)
+		if got := newParse(body, diffLimits[0]); got.stage != "top" || got.code != CodeInvalidType || got.param != "stream_options.include_usage" {
+			t.Errorf("%s: %s %q at %q, want 400 %s at stream_options.include_usage", body, got.stage, got.code, got.param, CodeInvalidType)
+		}
+		diffCheck(t, body, map[string]int{})
+	}
+	// The differential corpus, every body without stream: true.
+	corpus, compared := diffCorpus(t), 0
+	for _, b := range corpus {
+		if s := jsonMember(b, "stream"); s != nil && string(bytes.TrimSpace(s)) == "true" {
+			continue
+		}
+		body, empty := with(b, `"stream_options":{"include_usage":"x"}`), with(b, `"stream_options":{}`)
+		if body == nil {
+			continue
+		}
+		compared++
+		if got, want := newParse(body, diffLimits[0]), newParse(empty, diffLimits[0]); !reflect.DeepEqual(got, want) {
+			t.Errorf("corpus body %.200q with include_usage \"x\": %s %q at %q, want the answer without it: %s %q at %q",
+				b, got.stage, got.code, got.param, want.stage, want.code, want.param)
+		}
+	}
+	if compared < 250 {
+		t.Errorf("%d corpus bodies compared, want at least the 250 of testdata/chat_parse_corpus.jsonl", compared)
+	}
+	t.Logf("include_usage only on a stream: %d values, %d corpus bodies", len(values), compared)
 }

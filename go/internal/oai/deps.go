@@ -87,17 +87,6 @@ type Deps struct {
 	// Lifecycle, when set, ends every running request at server shutdown
 	// (design/02 §4.11.3 D7): the request context is bound to it.
 	Lifecycle context.Context
-	// Reauth checks the request's model key again (design/02 §4.11.3 D6,
-	// masterplan K22; W02-08) = handler.ReauthConsumer: the door that
-	// accepted the request (taken from ctx, the request's context), under
-	// its database semaphore — never the knowledge credential path, which
-	// refuses every ctxm_ key. It returns the consumer as the door reads it
-	// now (all_models, tenant_scope — the watcher resolves the alias with
-	// it, Fremd-Review 2 M-1); nil with no error: revoked, disabled or
-	// expired; an error: the check could not run. The watcher calls it
-	// every reauthEvery for stream and non-stream requests. W01-8's
-	// revocation registry replaces it (K22).
-	Reauth func(ctx context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error)
 }
 
 // TenantGate is the tenant quota gate of a /v1 chain (masterplan K17):
@@ -303,7 +292,6 @@ func (d Deps) inferenceMissing() string {
 		{"Federation.Floor", d.Federation.Floor == nil}, {"Federation.Scan", d.Federation.Scan == nil},
 		{"Federation.Filter", d.Federation.Filter == nil}, {"TenantSensitivity", d.TenantSensitivity == nil},
 		{"Record", d.Record == nil}, {"MaxWait", d.MaxWait == nil}, {"RetryAfterSteps", d.RetryAfterSteps == nil},
-		{"Reauth", d.Reauth == nil},
 	} {
 		if f.unset {
 			m = append(m, f.name)

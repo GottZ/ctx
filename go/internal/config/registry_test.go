@@ -194,6 +194,13 @@ func TestRegistryStrictSet(t *testing.T) {
 		"gateway.stream_relay_buffer_bytes": true,
 		"gateway.stream_min_drain_rate":     true,
 		"gateway.stream_min_drain_window":   true,
+		// W01-8 (design/01 §4.2): the in-flight sweep period is the clock of
+		// the revocation backstop — the longest a revoked key whose
+		// notification was lost keeps its running requests. A security clock
+		// like the dispatch.* reaper clocks below, not a stream cadence: a
+		// typo'd value silently defaulting to 30 s would hide the bound the
+		// operator meant to set, so it aborts loudly.
+		"gateway.inflight_sweep_interval": true,
 		// W13 (design/03 §3.4/§4.4) webhook inbound per-project rate ceiling — an
 		// int cap like events.max_connections; a typo'd cap silently defaulting
 		// would hide the intended Denial-of-Sync protection, so it aborts loudly.

@@ -923,9 +923,30 @@ func validateUpdateTexts(p store.ModelConsumerPatch) error {
 }
 
 // Revoking is always allowed (design/01 §4.6): both actions run for a
-// tenant-admin of the consumer's tenant regardless of self-service.
-// cancelled_inflight is null until the in-flight registry of W01-8 can count
-// the requests it ends — never a 0 that would claim none ran (V-01-e).
+// tenant-admin of the consumer's tenant regardless of self-service. After
+// the commit both end the running requests of what they revoked through the
+// door's in-flight registry (W01-8) and answer cancelled_inflight: how many
+// requests were running on it in THIS process — another ctx process on the
+// same database ends its own through the NOTIFY of migration 165 and is not
+// counted. null only without a registry (unknown — never a 0 that would
+// claim none ran, V-01-e).
+
+// cancelledInflight is the cancelled_inflight of an answer: end(id) through
+// the registry, null without one.
+func (h *ManageHandler) cancelledInflight(end func(*InflightRegistry) int) any {
+	if h.inflight == nil {
+		return nil
+	}
+	return end(h.inflight)
+}
+
+// revocationID is the one spelling both halves of a revocation use: the
+// store takes any spelling of a uuid ($1::uuid), the in-flight registry
+// only the canonical one its ids came in (store.CanonicalUUID, PostgreSQL's
+// text form) — an upper-case id would revoke the key and end nothing
+// (Fremd-Review 2 F1). An id CanonicalUUID does not take names no row: the
+// store's not-found answer, before anything is revoked.
+func revocationID(raw string) (string, bool) { return store.CanonicalUUID(raw) }
 
 func (h *ManageHandler) handleModelConsumerDelete(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	var d struct {
@@ -935,11 +956,17 @@ func (h *ManageHandler) handleModelConsumerDelete(w http.ResponseWriter, r *http
 		writeConsumerError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	if err := store.DeleteConsumer(r.Context(), h.pool, d.ID, accessOf(ar), auditStamp(r, ar)); err != nil {
+	id, ok := revocationID(d.ID)
+	if !ok {
+		writeConsumerStoreError(w, r, store.ErrModelConsumerNotFound, "model-consumer-delete")
+		return
+	}
+	if err := store.DeleteConsumer(r.Context(), h.pool, id, accessOf(ar), auditStamp(r, ar)); err != nil {
 		writeConsumerStoreError(w, r, err, "model-consumer-delete")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cancelled_inflight": nil})
+	n := h.cancelledInflight(func(reg *InflightRegistry) int { return reg.CancelConsumer(id) })
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cancelled_inflight": n})
 }
 
 func (h *ManageHandler) handleModelKeyRevoke(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
@@ -950,11 +977,17 @@ func (h *ManageHandler) handleModelKeyRevoke(w http.ResponseWriter, r *http.Requ
 		writeConsumerError(w, http.StatusBadRequest, "key_id is required")
 		return
 	}
-	if err := store.RevokeKey(r.Context(), h.pool, d.KeyID, accessOf(ar), auditStamp(r, ar)); err != nil {
+	id, ok := revocationID(d.KeyID)
+	if !ok {
+		writeConsumerStoreError(w, r, store.ErrModelKeyNotFound, "model-key-revoke")
+		return
+	}
+	if err := store.RevokeKey(r.Context(), h.pool, id, accessOf(ar), auditStamp(r, ar)); err != nil {
 		writeConsumerStoreError(w, r, err, "model-key-revoke")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cancelled_inflight": nil})
+	n := h.cancelledInflight(func(reg *InflightRegistry) int { return reg.CancelKey(id) })
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cancelled_inflight": n})
 }
 
 // consumerRotateRequest: grace in seconds (0 = revoke the predecessor at once,

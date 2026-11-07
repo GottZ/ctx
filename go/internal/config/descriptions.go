@@ -284,6 +284,8 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.auth_db_concurrency": "Concurrent ctx_model_auth calls of the model-key door (its share of the 20-connection pool); below 20",
 	"gateway.body_logging":        "Body policy of gateway rows in the LLM log: none (default) stores no prompt or answer, errors only on rows with an error, full on every row (64 KiB each); credentials-class rows stay sealed under every policy",
 	"gateway.access_log":          "One log line per successful gateway request (identities, op, status, tokens, timings; no content); refusals are logged as one counted line per consumer, reason and minute either way",
+	// W01-8: the in-flight registry's periodic sweep (design/01 §4.2).
+	"gateway.inflight_sweep_interval": "Seconds between the periodic sweeps of the model-key door's in-flight registry: one ctx_model_auth_live query over the keys of all running gateway requests of the process; behind the ctx_model_access_write notifications and the reconnect backlog sweep, a revoked or expired key whose notification was lost ends its running requests within one interval; a failing sweep ends nothing; at least 1",
 	// W06-10: the per-consumer meter (design/06 §4.2, §4.11).
 	"gateway.chat_rpm_default":    "Chat requests per minute per model consumer (meter L0); above it 429 rate_limit_exceeded with the exact Retry-After; at least 1",
 	"gateway.chat_tpm_default":    "Chat tokens per minute per model consumer (meter L0); a larger reservation is charged at this limit and the rest settles as debt; at least 1",

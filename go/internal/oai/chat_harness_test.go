@@ -416,7 +416,6 @@ func newChatRig(t testing.TB, rows []backends.Backend, slots, reserved int, opts
 		RetryAfterSteps:   r.disp.ExternalRetryAfterSteps,
 		Planner:           r.planner,
 		Limiter:           r.limiter,
-		Reauth:            func(_ context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) { return ca, nil },
 	}
 	for _, o := range opts {
 		o(r)

@@ -1,0 +1,14 @@
+// census-want: 1
+// W02-10 probe: rerank.Score in a function that runs under no lease.
+package oai
+
+import (
+	"context"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/rerank"
+)
+
+func directRerank(ctx context.Context, b backends.Backend) {
+	_, _, _ = rerank.Score(ctx, b, "m", "q", []string{"x"}, rerank.DomainAuto)
+}

@@ -87,9 +87,12 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 	st.wired++
 	st.stream, st.relayed, st.runes, st.usage, st.promptN, st.streamErr = nil, 0, 0, nil, 0, nil
 	id, created, reasoning, include := "chatcmpl-"+c.id, st.admitted.Unix(), reasoningOff(c.alias), c.req.includeUsage
+	// The role carry is the attempt's: a failover's stream starts without
+	// the role the previous attempt dropped (W02-08 hardening 5).
+	roles := &roleCarry{}
 	actx, done := c.wireContext(runCtx, timeout)
 	res, err := llm.ChatRawStream(actx, *b, body, timeout, c.s.MaxStreamFrameBytes, func(payload []byte) error {
-		chunk, rerr := rewriteChunk(payload, id, created, c.alias.Name, lane, reasoning, include)
+		chunk, rerr := rewriteChunk(payload, id, created, c.alias.Name, lane, reasoning, include, roles)
 		if rerr != nil {
 			st.streamErr = fmt.Errorf("%w: %w", errChunkRewrite, rerr)
 			return st.streamErr

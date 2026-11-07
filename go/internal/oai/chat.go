@@ -78,9 +78,6 @@ const (
 	modelKindMessage     = "The model does not support chat completions."
 	shutdownMessage      = "The server is shutting down; retry."
 	internalErrorMessage = "The server could not complete the request."
-	// authUnavailableMessage is the re-authentication's 503 (D6, O-08-2):
-	// the key could not be checked again, so the request is not served on.
-	authUnavailableMessage = "The API key could not be verified; retry later."
 )
 
 // ChatCompletions is the handler of POST /v1/chat/completions.
@@ -792,9 +789,6 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		return
 	}
 	c.target = newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen)
-	if c.sse != nil {
-		c.target.committed = c.sse.committed
-	}
 	stop := c.d.watch(c.ctx, c.cancel, c.target)
 	defer stop()
 
@@ -1129,13 +1123,13 @@ func (c *chatCall) verdict() (ended bool, code string) {
 	case errors.Is(cause, errShutdown):
 		c.refuse(CodeInternalError, shutdownMessage, true)
 		return true, CodeInternalError
-	case errors.Is(cause, errKeyRevoked):
+	case errors.Is(cause, auth.ErrCredentialRevoked):
+		// The door's in-flight registry ended the request: its key stopped
+		// authenticating (W01-8, K22). Before the client check — the
+		// request's context is the one the registry canceled.
 		c.rec.Reason = CodeInvalidAPIKey
 		c.reply(WriteInvalidAPIKey)
 		return true, CodeInvalidAPIKey
-	case errors.Is(cause, errAuthUnavailable):
-		c.refuse(CodeAuthUnavailable, authUnavailableMessage, false)
-		return true, CodeAuthUnavailable
 	case errors.Is(cause, errRelayOverflow):
 		// The client fell behind by more than the relay buffer (A03-W10):
 		// it still reads — the stream ends with its error frame.

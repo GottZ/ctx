@@ -137,6 +137,8 @@ internal/graphcache/validate.go	checkOrdering	# Nur export_test.go:72 (CheckOrde
 internal/graphcache/validate.go	checkRangeOrder	# Einziger Aufrufer ist checkOrdering (validate.go:103/108), das selbst nur über export_test.go:72 lebt
 internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_gate_test.go:156 u. a.); Prod gated über enforceManageActionTier
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
+internal/handler/model_auth.go	ModelDoor.Stats	# wartet: design/06 Status-Exposition der Tür-Zähler (K-06-7, Übergabe W01-6); bis W01-8 nur per Reflexion erreichbar (die Tür lag als any im Request-Kontext für ReauthConsumer)
+internal/handler/model_inflight.go	InflightRegistry.stats	# wartet: design/06 Status-Exposition (K-06-7); einziger Aufrufer ModelDoor.Stats (W01-8)
 internal/handler/v1census/v1census.go	Assert	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	Check	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	NewRecorder	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door

@@ -43,7 +43,15 @@ type madTracer struct {
 	mu     sync.Mutex
 	byTag  map[string][]string
 	probes []madProbe
+	live   atomic.Int64 // ctx_model_auth_live statements (W01-8 sweep cost)
+	// afterAuth, when set, runs once when a ctx_model_auth statement has
+	// returned its row and before the door goes on — inside the door's
+	// database step (W01-8: a revocation while the check runs).
+	afterAuth atomic.Pointer[func()]
 }
+
+// madAuthQuery marks the trace context of a ctx_model_auth statement.
+type madAuthQuery struct{}
 
 func (m *madTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
 	tag, _ := ctx.Value(madTag{}).(string)
@@ -51,14 +59,28 @@ func (m *madTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.Trac
 	if tag != "" {
 		m.byTag[tag] = append(m.byTag[tag], d.SQL)
 	}
-	if strings.Contains(d.SQL, "ctx_model_auth(") {
+	if strings.Contains(d.SQL, "ctx_model_auth_live(") {
+		m.live.Add(1)
+	}
+	auth := strings.Contains(d.SQL, "ctx_model_auth(")
+	if auth {
 		m.probes = append(m.probes, madProbe{tag: tag, at: time.Now()})
 	}
 	m.mu.Unlock()
+	if auth {
+		return context.WithValue(ctx, madAuthQuery{}, true)
+	}
 	return ctx
 }
 
-func (m *madTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (m *madTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if ctx.Value(madAuthQuery{}) == nil {
+		return
+	}
+	if f := m.afterAuth.Swap(nil); f != nil {
+		(*f)()
+	}
+}
 
 func (m *madTracer) of(tag string) []string {
 	m.mu.Lock()
@@ -113,6 +135,7 @@ func (l *madLogs) String() string              { l.mu.Lock(); defer l.mu.Unlock(
 
 type madEnv struct {
 	seed     *pgxpool.Pool
+	dsn      string // the test database (a LISTEN connection of its own, W01-8)
 	pool     *pgxpool.Pool // traced, production-sized (MaxConns 20)
 	tracer   *madTracer
 	settings *madSettings
@@ -143,7 +166,7 @@ func madSetup(t *testing.T) *madEnv {
 	}
 	t.Cleanup(pool.Close)
 	return &madEnv{
-		seed: seed, pool: pool, tracer: tr,
+		seed: seed, dsn: dsn, pool: pool, tracer: tr,
 		settings: &madSettings{s: config.Defaults().GatewaySettings()},
 		usage:    &madUsage{}, logs: &madLogs{},
 		stamp: store.APIStamp(admin.ID, "mad"),
