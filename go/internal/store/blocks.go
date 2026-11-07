@@ -277,40 +277,17 @@ func ClampLimit(limit, defaultVal, maxVal int) int {
 	return limit
 }
 
-// identicalContentWhere is the identity predicate of the identical-content
-// shortcut, ONE text for HashNOOPCheck and IdenticalContentMatch: the live row
-// of ($2 scope, $3 category, $4 title) — the upsert's conflict identity —
-// whose content hashes like $1. Not archived, because the ON CONFLICT target
-// is partial on NOT is_archived (blocks_hashnoop_integration_test.go gate 3).
+// identicalContentWhere is the identity predicate of IdenticalContentMatch:
+// the live row of ($2 scope, $3 category, $4 title) — the upsert's conflict
+// identity — whose content hashes like $1. Not archived, because the ON
+// CONFLICT target is partial on NOT is_archived. The integration gates in
+// blocks_identical_match_integration_test.go pin this predicate through
+// IdenticalContentMatch.
 const identicalContentWhere = `content_hash = encode(digest($1, 'sha256'), 'hex')
 		   AND NOT is_archived
 		   AND scope = $2
 		   AND category = $3
 		   AND title = $4`
-
-// HashNOOPCheck returns the existing block ID if an identical content hash
-// already exists for the same scope+category+title (not archived).
-// Returns empty string if no match.
-//
-// It compares the content only. A caller that answers "nothing to do" on its
-// hit drops the request's tags and metadata (issue #64); REST /api/store asks
-// IdenticalContentMatch instead.
-func HashNOOPCheck(ctx context.Context, pool *pgxpool.Pool, content, scope, category, title string) (string, error) {
-	var id string
-	err := pool.QueryRow(ctx,
-		`SELECT id FROM context_blocks
-		 WHERE `+identicalContentWhere+`
-		 LIMIT 1`,
-		content, scope, category, title,
-	).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("store: hash noop check: %w", err)
-	}
-	return id, nil
-}
 
 // guardVerdictSQL is the duplicate guard's part of the metadata document doc:
 // every key with the guard_ prefix (the decision applyDecision writes, the
@@ -434,11 +411,10 @@ func (m IdenticalContent) Changed() []string {
 	return changed
 }
 
-// IdenticalContentMatch is HashNOOPCheck widened to everything else the upsert
-// of the same write would rewrite (issue #64). HashNOOPCheck compares the
-// content hash only, so a caller that answered "noop" on its hit dropped the
+// IdenticalContentMatch reports everything the upsert of the same write would
+// rewrite (issue #64). A content-hash-only check that answers "noop" drops the
 // request's tags and metadata behind a success answer — `ctx persist --hook`
-// from a second project left the block tagged with the first one and counted
+// from a second project leaves the block tagged with the first one and counts
 // it as saved — and with them an explicit sensitivity upgrade or type.
 //
 // The arguments are UpsertBlock's, and each part is judged against what

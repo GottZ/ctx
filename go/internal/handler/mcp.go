@@ -542,9 +542,8 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		//     answer "No change needed" for a block that does not exist
 		//     where the caller asked for it. REST has always ordered it this
 		//     way (context_store.go: scope gate, then its identical-content
-		//     check — since #64 store.IdenticalContentMatch, which also
-		//     compares tags, metadata, sensitivity and type; this check
-		//     still compares the content alone).
+		//     check — store.IdenticalContentMatch, which compares content,
+		//     tags, metadata, sensitivity and type).
 		//   - a refusal here also precedes the D-W5 stage branch, so a
 		//     flagged key never gets a CARD for a scope it may not write.
 		//
@@ -555,13 +554,20 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			return errResultReject(scopeRej), nil, nil
 		}
 
-		// Hash NOOP check. Runs BEFORE the D-W5 stage branch on purpose: an
-		// identical-content call is a no-op for flagged keys too — no card
-		// for a write that would change nothing (D-W2 note 3).
-		existingID, err := store.HashNOOPCheck(ctx, cfg.Pool, input.Content, scope, input.Category, input.Title)
-		if err == nil && existingID != "" {
+		// Identical-content check. Runs BEFORE the D-W5 stage branch on purpose:
+		// an identical write is a no-op for flagged keys too — no card for a
+		// write that would change nothing (D-W2 note 3). The raw metadata and
+		// sensitivity are the write intent: IdenticalContentMatch applies the
+		// detector itself, and an omitted sensitivity leaves an existing row
+		// untouched just as the resolved settings default does in UpsertBlock.
+		match, err := store.IdenticalContentMatch(ctx, cfg.Pool, input.Content, scope, input.Category, input.Title,
+			input.Tags, input.Metadata, store.SensitivityWrite{
+				Value:  backends.Sensitivity(input.Sensitivity),
+				Manual: input.Sensitivity != "",
+			}, input.Type)
+		if err == nil && match.Unchanged() {
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{textContent(fmt.Sprintf("No change needed — identical content already exists (id: %s)", existingID))},
+				Content: []mcp.Content{textContent(fmt.Sprintf("No change needed — identical content already exists (id: %s)", match.ID))},
 			}, nil, nil
 		}
 
