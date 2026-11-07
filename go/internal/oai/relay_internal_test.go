@@ -444,3 +444,73 @@ func TestRelayRingRefusesAWrapIntoATooSmallGap(t *testing.T) {
 			len(got), len(got) > 1 && bytes.Equal(got[1], b), len(got) > 2 && bytes.Equal(got[2], c))
 	}
 }
+
+// TestRelayBufferHoldsAFrame (Fremd-Review 2 mutant Y7): the relay buffer is
+// at least one frame at the frame cap plus its header — V39 keeps the
+// setting there; a hand-built smaller value is raised to it, else every
+// frame above the buffer would be an overflow.
+func TestRelayBufferHoldsAFrame(t *testing.T) {
+	for _, tc := range []struct{ buffer, frame, want int64 }{
+		{buffer: 2 << 20, frame: 1 << 20, want: 2 << 20},
+		{buffer: 1 << 20, frame: 1 << 20, want: 1<<20 + RelayRecordHeader},
+		{buffer: 0, frame: 4096, want: 4096 + RelayRecordHeader},
+	} {
+		if got := relayBufferBytes(Settings{StreamRelayBufferBytes: tc.buffer, MaxStreamFrameBytes: tc.frame}); got != tc.want {
+			t.Errorf("buffer %d, frame cap %d: %d B, want %d", tc.buffer, tc.frame, got, tc.want)
+		}
+	}
+}
+
+// TestRelayRingWrapFitsTheGapExactly (Fremd-Review 2 mutant Y9): a record
+// that fits the gap before the record the writer holds exactly is taken at
+// offset 0 — the edge of TestRelayRingRefusesAWrapIntoATooSmallGap, one byte
+// further: A [0, 12), B [12, 40), C [40, 90); the writer wrote A (r = 12) and
+// holds B; D needs 12 B: 10 B at the end, exactly 12 B before B. Red with
+// the wrap asking for one byte more (r > need): an overflow of a record that
+// fits.
+func TestRelayRingWrapFitsTheGapExactly(t *testing.T) {
+	gate := make(chan struct{})
+	var got [][]byte
+	var mu sync.Mutex
+	write := func(p []byte) error {
+		<-gate
+		mu.Lock()
+		got = append(got, bytes.Clone(p))
+		mu.Unlock()
+		return nil
+	}
+	rl := newStreamRelay(time.Time{}, make([]byte, 100), write, make(chan struct{}), nil, drainMeter{}, nil)
+	a, b, c, d := relayChunk(1, 8), relayChunk(2, 24), relayChunk(3, 46), relayChunk(4, 8)
+	for _, x := range [][]byte{a, b, c} {
+		if err := rl.put(x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gate <- struct{}{}
+	if !waitRelay(rl, func() bool { return rl.r == 12 }) {
+		t.Fatal("the writer did not take A")
+	}
+	if err := rl.put(d); err != nil {
+		t.Fatalf("a 12 B record with 10 B at the end and a 12 B gap: %v, want it taken at 0", err)
+	}
+	close(gate)
+	rl.wait()
+	if len(got) != 4 || !bytes.Equal(got[1], b) || !bytes.Equal(got[2], c) || !bytes.Equal(got[3], d) {
+		t.Fatalf("writer got %d records, want A, B, C, D intact and in order", len(got))
+	}
+}
+
+// waitRelay polls cond under the relay's mutex for up to 2 s.
+func waitRelay(rl *streamRelay, cond func() bool) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rl.mu.Lock()
+		ok := cond()
+		rl.mu.Unlock()
+		if ok {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
+}
