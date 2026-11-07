@@ -442,3 +442,59 @@ func TestPeerStageAppNeverBinds(t *testing.T) {
 		t.Errorf("app: status %d, %d statements, events %q, proved %q — want 200, 0, none, \"\"", r.rec.Code, b.n(), ev.all(), r.seen.peerInstance)
 	}
 }
+
+// deadlineBinder records the deadline of the context BindPeer ran with.
+type deadlineBinder struct {
+	mu       sync.Mutex
+	deadline time.Time
+	has      bool
+}
+
+func (b *deadlineBinder) BindPeer(ctx context.Context, _, instanceID string) (auth.PeerBinding, error) {
+	b.mu.Lock()
+	b.deadline, b.has = ctx.Deadline()
+	b.mu.Unlock()
+	return auth.PeerBinding{Instance: instanceID, Created: true}, nil
+}
+
+// TestPeerStageBindHasDeadline (S2 hardening): the bind statement runs
+// under the stage's own deadline (peerBindDeadline, 1 s like the door's
+// database step), not under the request's — a hanging pool answers 503
+// quickly instead of holding the peer's first request.
+func TestPeerStageBindHasDeadline(t *testing.T) {
+	b := &deadlineBinder{}
+	start := time.Now()
+	r := psServe(t, psPeer(""), psChain(psB), b, nil, false)
+	if r.rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", r.rec.Code)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.has {
+		t.Fatal("BindPeer ran without a deadline")
+	}
+	if left := b.deadline.Sub(start); left > peerBindDeadline+time.Second || left <= 0 {
+		t.Errorf("BindPeer deadline %v after the request started, want about %v", left, peerBindDeadline)
+	}
+}
+
+// TestPeerStageBindErrorLogThrottled (Fremd-Review T-1): a database outage
+// under peer traffic logs one ERROR line, not one per request — 50 failing
+// binds inside the throttle window give exactly one ERROR, every request
+// still gets its 503.
+func TestPeerStageBindErrorLogThrottled(t *testing.T) {
+	bindErrorWarn.Store(0)
+	t.Cleanup(func() { bindErrorWarn.Store(0) })
+	b := &fakeBinder{err: errors.New("pool exhausted")}
+	errs := 0
+	for i := range 50 {
+		r := psServe(t, psPeer(""), psChain(psB), b, nil, false)
+		if r.rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("request %d: %d, want 503", i, r.rec.Code)
+		}
+		errs += strings.Count(r.logs, "level=ERROR")
+	}
+	if errs != 1 {
+		t.Errorf("%d ERROR lines over 50 failing binds, want exactly 1 (throttled to one per minute)", errs)
+	}
+}

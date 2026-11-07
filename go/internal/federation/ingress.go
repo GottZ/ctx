@@ -168,6 +168,15 @@ var (
 	bindErrorWarn atomic.Int64
 )
 
+// peerBindDeadline is the whole budget of step 7's bind — pool acquire and
+// up to two statements — before a 503, the door's database deadline
+// (handler modelAuthDBDeadline): a pool that is exhausted or a database that
+// hangs refuses the peer's first request quickly instead of holding it for
+// the request deadline. Hardcoded on purpose like the door's: it bounds one
+// step of the process about itself, not anybody's policy; it is paid once
+// per peer consumer (first contact).
+const peerBindDeadline = time.Second
+
 // The fixed texts of the peer stage's refusals: they never name an
 // instance, a chain or a binding (design/04 §4.6, oracle doctrine).
 const (
@@ -207,7 +216,9 @@ func (ps *peerStage) serve(ctx context.Context, w http.ResponseWriter, ca *auth.
 	last := in.Path[len(in.Path)-1]
 	bound := ca.PeerInstanceID
 	if bound == "" {
-		b, err := ps.binder.BindPeer(ctx, ca.ConsumerID, last)
+		bctx, cancel := context.WithTimeout(ctx, peerBindDeadline)
+		b, err := ps.binder.BindPeer(bctx, ca.ConsumerID, last)
+		cancel()
 		if err != nil {
 			ps.bindFailed(ctx, ca, err)
 			refusePeer(ctx, w, oai.CodeAuthUnavailable, msgBindFailed, "", "")

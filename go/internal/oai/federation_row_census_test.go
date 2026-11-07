@@ -19,8 +19,14 @@ func TestGatewayRowsCarryFederation(t *testing.T) {
 		t.Fatal(err)
 	}
 	lit := regexp.MustCompile(`llmlog\.Gateway\{`)
-	wrapped := regexp.MustCompile(`withFederation\([^,]+, llmlog\.Gateway\{`)
-	total := 0
+	// The request's own context, nothing else: a row built over another
+	// context (context.Background(), a detached one) would lose the claimed
+	// chain and the proved instance (Fremd-Review T-2).
+	wrapped := regexp.MustCompile(`withFederation\(c\.r\.Context\(\), llmlog\.Gateway\{`)
+	// A GatewayRow whose Gateway comes from a variable would slip past the
+	// literal count: the rows are counted too.
+	rowLit := regexp.MustCompile(`llmlog\.GatewayRow\{`)
+	total, rows := 0, 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -29,6 +35,7 @@ func TestGatewayRowsCarryFederation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		rows += len(rowLit.FindAllIndex(b, -1))
 		for i, line := range strings.Split(string(b), "\n") {
 			n := len(lit.FindAllStringIndex(line, -1))
 			if n == 0 {
@@ -41,7 +48,7 @@ func TestGatewayRowsCarryFederation(t *testing.T) {
 		}
 	}
 	// chat, embeddings, rerank: the forced row and the final row each.
-	if total != 6 {
-		t.Errorf("%d llmlog.Gateway literals in internal/oai, the census expects 6 — a new row site needs withFederation and this count", total)
+	if total != 6 || rows != 6 {
+		t.Errorf("%d llmlog.Gateway and %d llmlog.GatewayRow literals in internal/oai, the census expects 6 each — a new row site needs withFederation and this count", total, rows)
 	}
 }
