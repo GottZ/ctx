@@ -215,12 +215,9 @@ func cgTables() []cgTable {
 		}},
 		// W02-08 (rebase round 2, A5): stream_options.include_usage is read,
 		// by a walk over the object (readStreamOptions) — on a stream only
-		// (hardening 4, F5-1), so its bodies carry stream: true.
+		// (hardening 4, F5-1; TestClassGateBytesPerParseOnAStream).
 		{"streamOptionsKeys", streamOptionsKeys, func(k string) cgSlot {
-			s := free("stream_options", 2, func(v string) string { return `{"` + k + `":` + v + `}` })
-			body := s.body
-			s.body = func(v string) string { return `{"stream":true,` + body(v)[1:] }
-			return s
+			return free("stream_options", 2, func(v string) string { return `{"` + k + `":` + v + `}` })
 		}},
 		{"free", []string{"stream_options.*", "reasoning.*", "logit_bias.*", "stop.*"}, func(k string) cgSlot {
 			switch k {
@@ -429,6 +426,44 @@ func TestClassGateBytesPerParse(t *testing.T) {
 		if err := os.WriteFile(p, []byte(out.String()), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// cgStreamSlots are the slots whose value the parse reads only on a stream
+// (W02-08 hardening 4, F5-1: readStreamOptions walks stream_options only
+// with stream: true).
+var cgStreamSlots = []string{"ctxKeys.stream_options", "streamOptionsKeys.include_usage", "free.stream_options.*"}
+
+// TestClassGateBytesPerParseOnAStream: the slots of cgStreamSlots once more
+// with stream: true, every value form, under the bound of
+// TestClassGateBytesPerParse. The scan and route sides keep the bodies
+// without stream: the route gate's rig answers no stream and books no
+// stream reservation (with stream: true the null form ran 500
+// upstream_error against a bound of the harness load alone).
+func TestClassGateBytesPerParseOnAStream(t *testing.T) {
+	measured := 0
+	for _, s := range cgSlots() {
+		if !slices.Contains(cgStreamSlots, s.name()) {
+			continue
+		}
+		for _, f := range cgForms {
+			body := append([]byte(`{"stream":true,`), cgBody(s, f, cgSize, cgLimits)[1:]...)
+			var booked int64
+			alloc := allocatedBy(func() {
+				booked = 0
+				if req, p := parseTopLevel(body); p == nil {
+					_ = req.parsePolicy(cgLimits, func(n int64) bool { booked += n; return true })
+				}
+			})
+			if bound := uint64(parseAllocSlack) + uint64(booked); alloc > bound {
+				t.Errorf("%s:%s with stream: true: the parse of %d bytes allocates %d bytes, want ≤ %d (slack %d + booked %d)",
+					s.name(), f.name, len(body), alloc, bound, parseAllocSlack, booked)
+			}
+			measured++
+		}
+	}
+	if measured != len(cgStreamSlots)*len(cgForms) {
+		t.Errorf("%d combinations measured on a stream, want %d slots × %d forms", measured, len(cgStreamSlots), len(cgForms))
 	}
 }
 
