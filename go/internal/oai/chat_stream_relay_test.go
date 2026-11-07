@@ -138,6 +138,7 @@ type slowReaderCase struct {
 	pause    time.Duration // client pause after each event
 	heldBy   time.Duration // after the request: the lease must be free by then
 	minDrain time.Duration // the client drain lasts at least this (the slow-reader regime)
+	heldAlso time.Duration // on a red run: also report held at this time after the request (0: no)
 }
 
 // TestRelaySlowReaderReleasesAtTheUpstreamEnd is gate (b), the shared gate of
@@ -148,16 +149,19 @@ type slowReaderCase struct {
 // relay (writes in the upstream callback): the lease is held until the
 // client has drained. Scaled by default (5 × 32 KiB, 200 ms per frame);
 // CTX_A03W10_REALTIME=1 runs the design's numbers (upstream in 2 s, one frame
-// per 25 s, the lease checked at ≥ 60 s for the red side).
+// per 25 s — 6 frames, so the drain outlasts 60 s against loopback buffers —
+// the lease reported at 60 s for the red side).
 func TestRelaySlowReaderReleasesAtTheUpstreamEnd(t *testing.T) {
 	tc := slowReaderCase{frames: 5, gap: 0, pause: 200 * time.Millisecond, heldBy: 700 * time.Millisecond, minDrain: 800 * time.Millisecond}
 	if os.Getenv("CTX_A03W10_REALTIME") == "1" {
-		tc = slowReaderCase{frames: 4, gap: 500 * time.Millisecond, pause: 25 * time.Second, heldBy: 4500 * time.Millisecond, minDrain: 75 * time.Second}
+		tc = slowReaderCase{frames: 6, gap: 333 * time.Millisecond, pause: 25 * time.Second, heldBy: 4500 * time.Millisecond, minDrain: 120 * time.Second, heldAlso: 60 * time.Second}
 	}
 	end := newUpstreamEnd()
 	u := newUpstream(t, "")
 	u.setRespond(sseRespond(bigFrames(tc.frames, 32<<10, tc.gap), nil, end))
-	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings)
+	row := u.row("spark", backends.TrustFull, 10)
+	row.Timeouts = map[string]int{"chat": 600} // the drain lasts the attempt's timeout at most
+	rig := newChatRig(t, []backends.Backend{row}, 4, 1, withStreamSettings)
 	start := time.Now()
 	c := startSlowClient(t, rig)
 	if c.resp.StatusCode != http.StatusOK {
@@ -192,6 +196,12 @@ func TestRelaySlowReaderReleasesAtTheUpstreamEnd(t *testing.T) {
 	}()
 	if !waitFor(tc.heldBy, func() bool { h, _ := heldOn(rig.disp, u.srv.URL); return h == 0 && !end.at.IsZero() }) {
 		held, _ := heldOn(rig.disp, u.srv.URL)
+		if tc.heldAlso > 0 {
+			// The design's red side (realtime): the lease is still held at ≥ 60 s.
+			time.Sleep(time.Until(start.Add(tc.heldAlso)))
+			later, _ := heldOn(rig.disp, u.srv.URL)
+			t.Logf("held %d at %v after the request", later, time.Since(start))
+		}
 		t.Fatalf("held %d at %v after the request (upstream ended: %v) — want 0 by %v, within 2.5 s of the upstream's end while the client drains",
 			held, time.Since(start), !end.at.IsZero(), tc.heldBy)
 	}
@@ -559,4 +569,47 @@ func TestRelayOversizeChunkReachesAFastClient(t *testing.T) {
 			t.Logf("char %q: %d bytes, dones %d", ch, len(a.raw), a.dones())
 		})
 	}
+}
+
+// TestRelayDrainEndsWithTheAttempt (Fremd-Review 1 F3 (a), through the
+// route): the row's attempt timeout is 1 s; the upstream ends at once (the
+// lease with it), the client would need ≈ 2 s to drain — the stream is cut
+// at the attempt's deadline, no [DONE]: a stream lasts its attempt's
+// timeout, the rest from the buffer included.
+func TestRelayDrainEndsWithTheAttempt(t *testing.T) {
+	end := newUpstreamEnd()
+	u := newUpstream(t, "")
+	u.setRespond(sseRespond(bigFrames(6, 32<<10, 0), nil, end))
+	row := u.row("spark", backends.TrustFull, 10)
+	row.Timeouts = map[string]int{"chat": 1}
+	rig := newChatRig(t, []backends.Backend{row}, 4, 1, withStreamSettings)
+	start := time.Now()
+	c := startSlowClient(t, rig)
+	if !end.wait(5*time.Second) || end.canceled {
+		t.Fatal("the upstream did not run to its end")
+	}
+	if !waitHeld(rig.disp, u.srv.URL, 0, 500*time.Millisecond) {
+		t.Fatal("the lease outlived the upstream's end")
+	}
+	frames, done := 0, false
+	for {
+		data, err := c.event()
+		if err != nil {
+			break
+		}
+		if data == "[DONE]" {
+			done = true
+			break
+		}
+		frames++
+		time.Sleep(400 * time.Millisecond)
+	}
+	took := time.Since(start)
+	if done || frames >= 6 {
+		t.Fatalf("client got %d frames, [DONE] %v after %v — want the stream cut at the 1 s attempt deadline", frames, done, took)
+	}
+	if took > 5*time.Second {
+		t.Fatalf("the cut came after %v, want about the 1 s attempt deadline", took)
+	}
+	t.Logf("cut after %d frames, %v", frames, took)
 }

@@ -197,7 +197,6 @@ func TestDrainMeter(t *testing.T) {
 	}
 }
 
-
 // TestRelayRingWrappedBoundary (Fremd-Review 1 F4, mutant M6): the wrapped
 // ring takes a record exactly when it fits the gap [w, r) — a record one
 // byte larger is refused, the one that fits lands without touching the
@@ -369,5 +368,50 @@ func TestRelayDrainEndsAtTheAttemptDeadline(t *testing.T) {
 	}
 	if len(caps) == 0 {
 		t.Fatal("no cap set")
+	}
+}
+
+// TestRelayRingRefusesAWrapIntoATooSmallGap (mutant R7): a record that fits
+// neither the end of the ring nor the gap before the record the writer holds
+// is refused — a wrap into a gap smaller than the record would overwrite it.
+func TestRelayRingRefusesAWrapIntoATooSmallGap(t *testing.T) {
+	gate := make(chan struct{})
+	var got [][]byte
+	var mu sync.Mutex
+	write := func(p []byte) error {
+		<-gate
+		mu.Lock()
+		got = append(got, bytes.Clone(p))
+		mu.Unlock()
+		return nil
+	}
+	rl := newStreamRelay(make([]byte, 100), write, make(chan struct{}), nil, drainMeter{}, nil)
+	// A [0, 12), B [12, 40), C [40, 90); the writer writes A (r = 12) and
+	// holds B. D needs 20 B: 10 B at the end, 12 B before B — refused.
+	a, b, c := relayChunk(1, 8), relayChunk(2, 24), relayChunk(3, 46)
+	for _, x := range [][]byte{a, b, c} {
+		if err := rl.put(x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gate <- struct{}{}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		rl.mu.Lock()
+		r := rl.r
+		rl.mu.Unlock()
+		if r == 12 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := rl.put(relayChunk(4, 16)); !errors.Is(err, errRelayOverflow) {
+		t.Fatalf("a 20 B record with 10 B at the end and a 12 B gap: %v, want an overflow", err)
+	}
+	close(gate)
+	rl.wait()
+	if len(got) != 3 || !bytes.Equal(got[1], b) || !bytes.Equal(got[2], c) {
+		t.Fatalf("writer got %d records, B intact %v, C intact %v — a wrap overwrote a queued record",
+			len(got), len(got) > 1 && bytes.Equal(got[1], b), len(got) > 2 && bytes.Equal(got[2], c))
 	}
 }
