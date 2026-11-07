@@ -537,14 +537,15 @@ func (d *discardWriter) Write(p []byte) (int, error) { d.n += len(p); return len
 // server_overloaded at once, without an acquire, exactly when every share is
 // right. The first one then serves its 64 MiB of vectors: the live heap peak
 // over the baseline stays below the answer reserve plus a constant (the
-// decode transient of one block).
+// decode transient of one block). Under the race detector with
+// embedResponseCount's shortened form.
 func TestEmbeddingResponseReserved(t *testing.T) {
 	const (
 		dims  = 65536
-		count = 256
-		block = 32 // min(count, sub_batch 256, E 32)
 		slack = 32 << 20
 	)
+	count := embedResponseCount()
+	block := min(count, 32) // min(count, sub_batch 256, E 32)
 	// The factors of the reserve (design/02 §4.2.1, hardening H-3), as the
 	// gate's own constants: a mutated factor in the route must not move the
 	// expectation with it.
@@ -559,6 +560,9 @@ func TestEmbeddingResponseReserved(t *testing.T) {
 	)
 	readCap := func(inputs int) int64 {
 		return min(int64(inputs)*dims*wireComponent+int64(inputs)*wireItem+wireFrame, transportCap)
+	}
+	if readCap(block) != transportCap {
+		t.Fatalf("fixture: a %d-input block is read up to %d B, want the transport cap %d B (the bound the largest block's decode share stands on)", block, readCap(block), transportCap)
 	}
 	body := embedBody("embbig", embedInputs(count))
 	bodyShare := 3 * int64(len(body))
@@ -589,7 +593,7 @@ func TestEmbeddingResponseReserved(t *testing.T) {
 		return true
 	})
 	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 33, 1)
-	rig.setSettings(func(s *oai.Settings) { s.InflightBudget = budget; s.EmbeddingMaxFloats = 256 * dims })
+	rig.setSettings(func(s *oai.Settings) { s.InflightBudget = budget; s.EmbeddingMaxFloats = int64(count) * dims })
 	runtime.GC()
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
@@ -656,11 +660,11 @@ func TestEmbeddingResponseReserved(t *testing.T) {
 	<-done
 	close(stop)
 	<-sampled
-	if first.status != http.StatusOK || first.n < 256*dims*2 {
+	if first.status != http.StatusOK || first.n < count*dims*2 {
 		t.Fatalf("first: status %d, %d bytes", first.status, first.n)
 	}
 	over := live.Load() - base
-	reserved := uint64(256*dims*oai.EmbedFloatBytes + oai.EmbedEncodeBuffer)
+	reserved := uint64(count*dims*oai.EmbedFloatBytes + oai.EmbedEncodeBuffer)
 	t.Logf("live heap peak %d MiB over a baseline of %d MiB (reserve %d MiB + %d MiB slack, budget %d MiB); HeapAlloc peak incl. garbage %d MiB; answer %d MiB streamed",
 		over>>20, base>>20, reserved>>20, slack>>20, budget>>20, (peak.Load()-base)>>20, first.n>>20)
 	// Bounded by the request's own reserve plus the decode transient of one
@@ -668,6 +672,26 @@ func TestEmbeddingResponseReserved(t *testing.T) {
 	if over > reserved+slack {
 		t.Errorf("live heap peak %d MiB over the baseline, want < reserve + slack = %d MiB", over>>20, (reserved+slack)>>20)
 	}
+}
+
+// The input counts of TestEmbeddingResponseReserved (embedResponseCount).
+const embedResponseInputs, embedResponseRaceInputs = 256, 11
+
+// embedResponseCount is the input count of TestEmbeddingResponseReserved:
+// 256 inputs of 65 536 floats — eight blocks of 32, a 64-MiB answer. Under
+// the race detector (W02-09 hardening 7) 11: the fewest inputs whose block
+// is still read up to the 16-MiB transport cap (11 × 65 536 × 25 B is past
+// it, 10 × is not), one block and a 2.75-MiB answer. The exact hold, the
+// second request's 503 before its acquire and the transport-capped decode
+// share stay race-checked; the eight-block answer and its live-heap bound
+// measure the decode and the encoder, which the detector weighs (100.6 s
+// of the CI unit job's package timeout under -race, GOMAXPROCS=2), and run
+// in every build without -race.
+func embedResponseCount() int {
+	if raceEnabled {
+		return embedResponseRaceInputs
+	}
+	return embedResponseInputs
 }
 
 // TestEmbeddingsFinding14 (G4): 100 inputs, sub_batch 32, E = 32, the

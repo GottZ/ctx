@@ -151,21 +151,46 @@ func (d *discardAnswer) Flush() {}
 // × the read cap before its wire call, the rest are 503 server_overloaded
 // before any wire contact, and the live heap stays under the peak of the
 // reserves plus parseMemSlack. Red before H-3: every request is admitted
-// with the answer reserve alone (4 MiB).
+// with the answer reserve alone (4 MiB). Under the race detector the
+// shortened form of nearCapForms.
 func TestEmbedNearCapAnswersStayInTheReserves(t *testing.T) {
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(parseMemGoMemLimit))
-	const largest, pastAStep = 31 << 19, 8<<20 + 64<<10
-	for _, tc := range []struct {
-		name     string
-		bytes, n int
-		slack    int64
-	}{
-		{"largest answer under the cap, one request", largest, 1, nearCapSlack},
-		{"just past a buffer growth step, one request", pastAStep, 1, nearCapSlack},
-		{"largest answer under the cap, 32 at once", largest, 32, parseMemSlack},
-		{"just past a buffer growth step, 32 at once", pastAStep, 32, parseMemSlack},
-	} {
+	for _, tc := range nearCapForms() {
 		t.Run(tc.name, func(t *testing.T) { nearCapAnswers(t, tc.bytes, tc.n, tc.slack) })
+	}
+}
+
+// The answer sizes of TestEmbedNearCapAnswersStayInTheReserves: the
+// largest the wire accepts, one just past a growth step of json.Decoder's
+// buffer, and the race build's (nearCapForms).
+const nearCapLargest, nearCapPastAStep, nearCapRaceBytes = 31 << 19, 8<<20 + 64<<10, 1 << 20
+
+// nearCapForm is one case of TestEmbedNearCapAnswersStayInTheReserves.
+type nearCapForm struct {
+	name     string
+	bytes, n int
+	slack    int64
+}
+
+// nearCapForms are the cases of TestEmbedNearCapAnswersStayInTheReserves:
+// both near-cap answers, one request and 32 at once. Under the race
+// detector (W02-09 hardening 7) one case: 32 at once against a 1-MiB
+// answer. The admission under contention — each admitted request reserves
+// embedDecodeFactor × the alias's 16-MiB read cap before its wire call,
+// the rest are 503 server_overloaded before any wire contact — does not
+// depend on the answer's size and stays race-checked; the near-cap sizes
+// and the one-request heap bounds measure the decode, which the detector
+// weighs (44.9 s of the CI unit job's package timeout under -race,
+// GOMAXPROCS=2), and run in every build without -race.
+func nearCapForms() []nearCapForm {
+	if raceEnabled {
+		return []nearCapForm{{"a 1-MiB answer, 32 at once", nearCapRaceBytes, 32, parseMemSlack}}
+	}
+	return []nearCapForm{
+		{"largest answer under the cap, one request", nearCapLargest, 1, nearCapSlack},
+		{"just past a buffer growth step, one request", nearCapPastAStep, 1, nearCapSlack},
+		{"largest answer under the cap, 32 at once", nearCapLargest, 32, parseMemSlack},
+		{"just past a buffer growth step, 32 at once", nearCapPastAStep, 32, parseMemSlack},
 	}
 }
 

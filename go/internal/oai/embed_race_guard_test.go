@@ -9,12 +9,14 @@ package oai_test
 // memory access and allocation is shadowed, sync.Pool drops items at
 // random, the parse and the decode run 5–8 × slower — not the reserve
 // they bound. A pin that measures only that is skipped under -race
-// (skipUnderRace). Every pin runs
+// (skipUnderRace); a pin that also states a concurrent behavior keeps it
+// in a shortened form (nearCapForms, embedResponseCount). Every pin runs
 // in full in each build without -race: the plain `go test` and the CI's
 // integration job (TestEmbedPinsWithoutRaceRunInFull pins it).
 
 import (
 	"runtime/debug"
+	"slices"
 	"testing"
 )
 
@@ -30,8 +32,8 @@ func skipUnderRace(t *testing.T, measures string) {
 
 // TestEmbedPinsWithoutRaceRunInFull pins the race guard: raceEnabled tells
 // the truth (the build's -race setting), skipUnderRace skips only in a
-// race build — a guard active in every build would leave the pins behind
-// it pinned nowhere.
+// race build, and the shortened forms are the race build's alone — a guard
+// active in every build would leave the full forms pinned nowhere.
 func TestEmbedPinsWithoutRaceRunInFull(t *testing.T) {
 	race := false
 	if bi, ok := debug.ReadBuildInfo(); ok {
@@ -51,5 +53,24 @@ func TestEmbedPinsWithoutRaceRunInFull(t *testing.T) {
 	})
 	if ran == raceEnabled {
 		t.Errorf("race build %v: a pin behind skipUnderRace ran %v, want %v", raceEnabled, ran, !raceEnabled)
+	}
+	type shape struct{ bytes, n int }
+	var got []shape
+	for _, f := range nearCapForms() {
+		got = append(got, shape{f.bytes, f.n})
+	}
+	want := []shape{{nearCapLargest, 1}, {nearCapPastAStep, 1}, {nearCapLargest, 32}, {nearCapPastAStep, 32}}
+	if raceEnabled {
+		want = []shape{{nearCapRaceBytes, 32}}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("race build %v: TestEmbedNearCapAnswersStayInTheReserves runs the forms %v, want %v", raceEnabled, got, want)
+	}
+	wantCount := embedResponseInputs
+	if raceEnabled {
+		wantCount = embedResponseRaceInputs
+	}
+	if c := embedResponseCount(); c != wantCount {
+		t.Errorf("race build %v: TestEmbeddingResponseReserved sends %d inputs, want %d", raceEnabled, c, wantCount)
 	}
 }
