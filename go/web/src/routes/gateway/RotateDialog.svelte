@@ -240,7 +240,9 @@
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     border: 1px solid var(--danger);
-    color: var(--danger);
+    /* --text, not --danger: light-theme --danger on --danger-dim over the
+       dialog surface computes to ≈ 4.3:1 (< 4.5 AA for small text) */
+    color: var(--text);
     background: var(--danger-dim);
   }
   .created {

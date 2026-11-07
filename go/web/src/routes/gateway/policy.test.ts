@@ -82,6 +82,19 @@ describe('W05-07 widening tier (mintModelKeys)', () => {
     expect(cidrsWiden(null, ['10.0.0.0/8']), 'a list over any-source narrows').toBe(false)
     expect(cidrsWiden(null, null), 'any-source over any-source does not widen').toBe(false)
   })
+
+  // RC-D S2 hardening: the drawn mutant `policy.ts` IPv6 fill check (!== → ===)
+  // survived the S1 suite — no IPv6 case existed. Mirror of cidrsNarrow over
+  // netip.Prefix for IPv6 (compressed and full form, families never mix).
+  it('W05-07: cidrsWiden handles IPv6 like the handler (compressed and full form, no family mixing)', () => {
+    expect(cidrsWiden(['fd00::/8'], ['fd12:3456::/32']), 'an IPv6 sub-prefix narrows').toBe(false)
+    expect(cidrsWiden(['fd00::/8'], ['fd00:0:0:0:0:0:0:1/128']), 'the full 8-group form parses and narrows').toBe(false)
+    expect(cidrsWiden(['fd00::/8'], ['2001:db8::/32']), 'an IPv6 prefix outside widens').toBe(true)
+    expect(cidrsWiden(['fd00::/8'], ['fd00::/7']), 'a wider IPv6 prefix widens').toBe(true)
+    expect(cidrsWiden(['10.0.0.0/8'], ['::ffff:10.0.0.1/128']), 'an IPv4-mapped IPv6 prefix is another family — widens').toBe(true)
+    expect(cidrsWiden(['::/0'], ['10.0.0.0/8']), 'an IPv4 prefix is never inside an IPv6 one').toBe(true)
+    expect(cidrsWiden(['fd00::/8'], ['fd00::1::2/128']), 'malformed (two ::) counts as widening, fail-closed').toBe(true)
+  })
 })
 
 function form(c: ReturnType<typeof consumerOf>, p: Partial<EditFormInput> = {}): EditFormInput {
