@@ -124,7 +124,12 @@ func scanDepthForms() ([]string, map[string][]byte) {
 // pin tells 96 from 104 (the booking would be untrue) and 112 from 104 (it
 // would cost deep requests for nothing). The floor's term
 // (ScanDepthReserve) is the most the booking takes for the depth: the
-// depth's count saturates one past the decoder's limit.
+// depth's count saturates one past the decoder's limit. Since hardening 8
+// the base holds a second remainder, that of a long invalid string value
+// at 64 KiB and 128 KiB (scanReserveBase); these deep bodies of 20 KB are
+// far from it, so the pin measures and bounds the depth term beyond
+// factor × body + scanDepthPinBase, the base without that share — the
+// depth term holds the nesting on its own.
 func TestScanDepthReserveIsTheMeasuredOne(t *testing.T) {
 	var largest float64
 	var largestForm string
@@ -139,15 +144,15 @@ func TestScanDepthReserveIsTheMeasuredOne(t *testing.T) {
 		if raised != backends.SensPublic {
 			t.Fatalf("form %s: the scan raised to %s (a form without a credential)", name, raised)
 		}
-		if want := oai.ScanBooking(body, depth); alloc > want {
-			t.Errorf("form %s, %d bytes, %d deep: the scan allocates %d bytes, the route books %d (%d × body + %d + %d × depth)",
-				name, len(body), depth, alloc, want, oai.ScanReserveFactor, oai.ScanReserveBase, oai.ScanDepthStateBytes)
+		if want := oai.ScanReserveFactor*int64(len(body)) + scanDepthPinBase + depth*oai.ScanDepthStateBytes; alloc > want {
+			t.Errorf("form %s, %d bytes, %d deep: the scan allocates %d bytes, more than %d (%d × body + %d + %d × depth; the route books %d)",
+				name, len(body), depth, alloc, want, oai.ScanReserveFactor, scanDepthPinBase, oai.ScanDepthStateBytes, oai.ScanBooking(body, depth))
 		}
-		if f := float64(alloc-oai.ScanReserveFactor*int64(len(body))-oai.ScanReserveBase) / float64(depth); f > largest {
+		if f := float64(alloc-oai.ScanReserveFactor*int64(len(body))-scanDepthPinBase) / float64(depth); f > largest {
 			largest, largestForm = f, name
 		}
 	}
-	t.Logf("FOLGEP scan depth: largest %.1f bytes per level beyond %d × body + %d (%s), booked %d", largest, oai.ScanReserveFactor, oai.ScanReserveBase, largestForm, oai.ScanDepthStateBytes)
+	t.Logf("FOLGEP scan depth: largest %.1f bytes per level beyond %d × body + %d (%s), booked %d", largest, oai.ScanReserveFactor, scanDepthPinBase, largestForm, oai.ScanDepthStateBytes)
 	if largest <= oai.ScanDepthStateBytes-8 {
 		t.Errorf("the largest form needs %.1f bytes per level (%s), the booking of %d per level is 8 more: measure again and lower it",
 			largest, largestForm, oai.ScanDepthStateBytes)
@@ -157,6 +162,12 @@ func TestScanDepthReserveIsTheMeasuredOne(t *testing.T) {
 		t.Errorf("the scan's booking takes at most %d bytes for the depth, ScanDepthReserve is %d", got, oai.ScanDepthReserve)
 	}
 }
+
+// scanDepthPinBase is scanReserveBase without the share hardening 8 added
+// for long invalid string values at 64 KiB and 128 KiB: the remainder of a
+// small body (47 334 bytes at 2 KiB, rounded up), the base the depth term
+// was measured beyond (hardening 7).
+const scanDepthPinBase = 64 << 10
 
 // TestScanTwiceHoldsOneScanAtOnce pins the one form whose scan allocates more
 // than one booking in total (Delta-Review 2 F-1): one key of the whole body

@@ -1510,9 +1510,9 @@ const (
 //   - gateway.request_deadline < 600 s: the SDKs' default timeout.
 //   - gateway.stream_commit_grace <= 50 s: under a typical proxy idle.
 //   - gateway.inflight_budget >= one request at every cap: 26 ×
-//     gateway.max_request_bytes + 64 KiB + 1 040 104 B + 240 024 B (the
+//     gateway.max_request_bytes + 128 KiB + 1 040 104 B + 240 024 B (the
 //     request share of 3 × the body plus the sensitivity scan's booking of
-//     23 × the body + 64 KiB + its nesting state at the decoder's depth
+//     23 × the body + 128 KiB + its nesting state at the decoder's depth
 //     limit, 10 001 × 104 B, which a request to an alias below credentials
 //     takes before the scan runs — the configuration does not know the
 //     aliases' sensitivity, so the scan always counts; FOLGE-P H-8,
@@ -1525,7 +1525,7 @@ const (
 //     gateway.max_stream_frame_bytes, or 4 B × gateway.embedding_max_floats
 //     plus 64 KiB (design/02 §4.2.1). A smaller budget could never serve such a
 //     request, and the client would read "overloaded, retry in 1 s" forever.
-//     The defaults need 217.28 MiB of their 256 MiB. What the floor promises
+//     The defaults need 217.35 MiB of their 256 MiB. What the floor promises
 //     is one attempt without failover and without a rewritten message array
 //     (Delta-Review 3 R3-4, Delta-Review 5 L-2). A rewritten request (a
 //     developer message, a dropped reasoning key) holds the body, the
@@ -1547,11 +1547,11 @@ const (
 //     failover attempt such a request gets 503 at a budget equal to the
 //     floor. Without failover and without a rewritten message array it is
 //     conservative by up to 1 × the body plus the nesting terms a flat
-//     request leaves unused: such a request at 1 MiB held 34 668 704 B and
+//     request leaves unused: such a request at 1 MiB held 34 734 240 B and
 //     is served from the floor − 2 328 232 B on (1 × the body + 1 279 656 B,
 //     hardening 7). The error names both ways out (gatewayCapWayOut).
-//     Stricter since FOLGE-P: budgets under 217.28 MiB at the 8 MiB cap and
-//     caps above 9 950 045 B at the default budget were valid before (see
+//     Stricter since FOLGE-P: budgets under 217.35 MiB at the 8 MiB cap and
+//     caps above 9 947 524 B at the default budget were valid before (see
 //     docs/operations.md, the upgrade note).
 //   - gateway.retry_after_jitter in [0, 1] (float keys have no generic sign
 //     walk; NaN fails every comparison and is refused explicitly).
