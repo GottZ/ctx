@@ -130,18 +130,34 @@ func (in wireInput) value() any {
 // TestInternalEmbedBitIdenticalToBase). A gateway list goes out without
 // HTML escaping: json.Marshal turns each <, > and & into six bytes, and a
 // batch of HTML would grow six-fold on its way upstream, past every reserve
-// (W02-09 hardening H-2); the backend reads JSON, not HTML.
+// (W02-09 hardening H-2); the backend reads JSON, not HTML. The gateway
+// body is one allocation of its exact length (FOLGE-E hardening 1, S-1,
+// wire_body.go): wireBodyLen sizes it from the model, the texts and the
+// options before a byte is written, appendWireBody writes the encoder's
+// bytes into that capacity — the json.Encoder it replaces allocated up to
+// 7.105 × the body (its own buffer's growth and a copy), which the route
+// booked as eight times the body. A length the writer does not meet is an
+// error, never a second allocation.
 func (in wireInput) marshal(v any) ([]byte, error) {
 	if in.bare {
 		return json.Marshal(v)
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
+	var model string
+	var opts *ollamaOpts
+	switch r := v.(type) {
+	case ollamaEmbedRequest:
+		model, opts = r.Model, r.Options
+	case openAIEmbedRequest:
+		model = r.Model
+	default:
+		return nil, fmt.Errorf("embed: no gateway body for %T", v)
 	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), nil
+	n := wireBodyLen(model, in.texts, opts)
+	body := appendWireBody(make([]byte, 0, n), model, in.texts, opts)
+	if len(body) != n || cap(body) != n {
+		return nil, fmt.Errorf("embed: gateway body of %d bytes, sized %d", len(body), n)
+	}
+	return body, nil
 }
 
 // Embed generates an embedding via the backend tuple, truncates to 1024d,
