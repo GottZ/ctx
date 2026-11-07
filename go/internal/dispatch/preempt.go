@@ -123,7 +123,13 @@ func (d *Dispatcher) maybePreemptLocked(st *targetState, slots int) {
 	if free < 0 {
 		free = 0
 	}
-	need := want - free - len(st.preempt.preempting)
+	// A settling victim (A03-W10, settle.go) covers like a victim in
+	// eviction: its unit frees once its settle ends, and no cancel could free
+	// it sooner — counting it keeps a settle from cascading into more victims
+	// (single-preempt guard). Only victims: another settling lease (a client
+	// gone) frees its units on its own clock, which G1a does not count
+	// (Fremd-Review 1 F5). 0 with abort_settle_ms 0/0.
+	need := want - free - len(st.preempt.preempting) - st.settlingVictims
 	if need <= 0 {
 		return
 	}
@@ -145,6 +151,7 @@ func (d *Dispatcher) maybePreemptLocked(st *targetState, slots int) {
 	now := time.Now()
 	for _, l := range victims {
 		cancel := st.cancelable[l]
+		l.preempted = true
 		st.preempt.preempting[l] = now
 		st.preempt.preemptsTotal++
 		st.preempt.wastedMs += now.Sub(l.admitted).Milliseconds()
@@ -171,7 +178,9 @@ func (d *Dispatcher) maybePreemptLocked(st *targetState, slots int) {
 func pickVictimsLocked(st *targetState, need int) []*Lease {
 	cands := make([]*Lease, 0, len(st.cancelable))
 	for l := range st.cancelable {
-		if _, evicting := st.preempt.preempting[l]; evicting {
+		if _, evicting := st.preempt.preempting[l]; evicting || l.settling {
+			// A settling lease's run already ended (A03-W10): a cancel frees
+			// nothing.
 			continue
 		}
 		cands = append(cands, l)
@@ -207,7 +216,11 @@ func (d *Dispatcher) preemptWatchdog(l *Lease) {
 	l.st.preempt.forcedReleases++
 	d.logger.Error("dispatch: preempted lease force-released after preempt_release_timeout",
 		"target", l.st.origin, "role", l.role, "age", time.Since(l.admitted))
-	d.finishLocked(l)
+	// The Go half is forced; the engine half is appended like after a
+	// regular release (design/03 §4.10 no. 3): the victim's run is canceled,
+	// so it settles for abort_settle_ms.nonstream/.stream when the target
+	// has one (settle.go), else it ends here.
+	d.releaseLocked(l)
 }
 
 // preemptSettledLocked is the finishLocked hook: a victim released through

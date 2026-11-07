@@ -166,10 +166,11 @@ var (
 // validateDispatchExternalLimits checks the FORM of the external limits keys
 // on the write path (design/03 §3.2): internal_reserved_slots and
 // external_max_inflight an integer 1..math.MaxInt32, external_offer a bool —
-// a 422 at write time instead of a WARN at the next policy derivation. What needs
-// more than this one row (the merge against slots, R <= slots-1, the target
-// kind) stays in the derivation. Every other limits key stays unvalidated
-// as before.
+// a 422 at write time instead of a WARN at the next policy derivation; since
+// A03-W10 also abort_settle_ms (abortSettleForm). What needs more than this
+// one row (the merge against slots, R <= slots-1, the target kind, the MAX
+// of abort_settle_ms) stays in the derivation. Every other limits key stays
+// unvalidated as before.
 func validateDispatchExternalLimits(b *Backend) (errs []FieldError) {
 	for _, key := range dispatchExternalIntLimits {
 		v, ok := b.Limits[key]
@@ -189,7 +190,52 @@ func validateDispatchExternalLimits(b *Backend) (errs []FieldError) {
 			errs = append(errs, FieldError{"limits." + key, "must be true or false"})
 		}
 	}
+	if v, ok := b.Limits[limitAbortSettle]; ok && !abortSettleForm(v) {
+		errs = append(errs, FieldError{"limits." + limitAbortSettle,
+			fmt.Sprintf(`must be an object {"stream": ms, "nonstream": ms} with integer values from 0 to %d`, abortSettleMaxMs)})
+	}
 	return errs
+}
+
+// limitAbortSettle / abortSettleMaxMs are dispatch's abort_settle_ms key and
+// its bound (A03-W10, design/03 §3.2; dispatch.AbortSettleMaxMs — the same
+// leaf rule as the external keys above, pinned equal by events'
+// TestAbortSettleWritePathAndDerivationAgree).
+const (
+	limitAbortSettle = "abort_settle_ms"
+	abortSettleMaxMs = 30000
+)
+
+// abortSettleForm is the write path's form check of abort_settle_ms: an
+// object with no fields but stream and nonstream (each optional), every
+// value an integer 0..abortSettleMaxMs — the rule of the derivation
+// (dispatch parseAbortSettle), as a 422 at write time instead of a WARN and a
+// 0 at the next derivation.
+func abortSettleForm(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	for k, f := range m {
+		if k != "stream" && k != "nonstream" {
+			return false
+		}
+		var n float64
+		switch x := f.(type) {
+		case float64:
+			n = x
+		case int:
+			n = float64(x)
+		case int64:
+			n = float64(x)
+		default:
+			return false
+		}
+		if n < 0 || n > abortSettleMaxMs || n != math.Trunc(n) {
+			return false
+		}
+	}
+	return true
 }
 
 // validateForeignLoadProbe guards metadata.foreign_load_probe (W06-8,

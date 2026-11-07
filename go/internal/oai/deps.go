@@ -225,6 +225,10 @@ type AdmissionInput struct {
 	// rerank.sub_batch); 0 = none. A lease carries at most
 	// min(SubBatch, ExternalWeightCap(origin)) units.
 	SubBatch int
+	// Stream marks a streamed request (A03-W10): the acquirer passes it to
+	// every acquire of the request (llm.AdmitOptions.Stream), so a settle
+	// reads the target's abort_settle_ms.stream instead of .nonstream.
+	Stream bool
 }
 
 // Plan is the planner's answer for one request.

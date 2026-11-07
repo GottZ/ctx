@@ -276,6 +276,9 @@ func chatSettings() oai.Settings {
 		TenantAliasCeiling: oai.AliasCeiling{MaxOutputTokens: 8192, MaxN: 1, Timeout: 600 * time.Second,
 			EmbeddingMaxInputs: 32, RerankMaxDocuments: 128, ToolsMaxCount: 64},
 		RetryAfterJitter: 0.5, BodyLogging: llmlog.BodyLoggingNone,
+		// The relay keys at their registry defaults (A03-W10): every stream
+		// of the suite runs through the relay buffer.
+		StreamRelayBufferBytes: 2 << 20, StreamMinDrainRate: 1024, StreamMinDrainWindow: 30 * time.Second,
 	}
 }
 

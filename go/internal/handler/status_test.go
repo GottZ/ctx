@@ -418,6 +418,8 @@ func TestStatusGoldenKeys(t *testing.T) {
 	}
 	assertKeys(t, "dispatch.target", dts[0], []string{
 		"origin", "slots", "preempt_background", "herald_scope", "held", "inflight",
+		// A03-W10: the settling part of held.
+		"settling",
 		"held_internal", "held_external", "inflight_internal", "internal_reserved",
 		"external_offered", "external_capacity", "external", "external_rejects",
 		// A03-W9: the wait view and the refusals of the external bulk class XB.
