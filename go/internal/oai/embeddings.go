@@ -779,6 +779,7 @@ func (c *embedCall) walk(chain []backends.Backend) {
 		c.endLimit(func(l LimitReservation) { l.Abort() })
 		return
 	}
+	c.rec.Class = planClass(plan) // the class of an L2 refusal (W06-12); a lease names it again
 	// k = 1 without the continuation door (design/02 §4.8): more inputs than
 	// one upstream request carries are refused before any acquire.
 	if !plan.Continuation && n > c.lim.subBatch {

@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/keyquota"
@@ -208,5 +210,86 @@ func TestRejectionFlusherRetriesWithoutDoubleLogCount(t *testing.T) {
 	lines, logged := sink.counts("gateway rejections")
 	if lines != 1 || logged != 1005 {
 		t.Fatalf("log: %d line(s) counting %d, want one line counting 1005 (no count twice after the retry)", lines, logged)
+	}
+}
+
+// TestRejectionFlusherFinalCancelsAStuckTick (Fremd-Review F-3): a periodic
+// flush stuck on a slow database is cancelled by the shutdown step, whose
+// own flush then writes everything — the step takes one timeout, not two.
+func TestRejectionFlusherFinalCancelsAStuckTick(t *testing.T) {
+	cfg := config.Defaults().GatewaySettings()
+	ledger := keyquota.NewLedger(time.Now)
+	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: func() oai.Settings { return cfg }, Logger: slog.New(&ledgerLogSink{}), Ledger: ledger})
+	started := make(chan struct{})
+	var mu sync.Mutex
+	var calls int
+	var written int64
+	write := func(ctx context.Context, rows []llmusage.RejectionRow) error {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			close(started)
+			<-ctx.Done() // the slow database
+			return ctx.Err()
+		}
+		mu.Lock()
+		for _, r := range rows {
+			written += r.N
+		}
+		mu.Unlock()
+		return nil
+	}
+	f := newRejectionFlusher(ledger, access, write)
+	for range 10 {
+		ledger.Note(keyquota.Rejection{Reason: keyquota.RejectAuth, Detail: keyquota.DetailInvalidKey})
+	}
+	tickDone := make(chan struct{})
+	go func() { f.tick(context.Background()); close(tickDone) }()
+	<-started
+	for range 5 {
+		ledger.Note(keyquota.Rejection{Reason: keyquota.RejectAuth, Detail: keyquota.DetailInvalidKey})
+	}
+	begin := time.Now()
+	f.final()
+	took := time.Since(begin)
+	<-tickDone
+	t.Logf("shutdown flush with a stuck tick: %s (bound %s)", took.Round(time.Millisecond), rejectionFlushTimeout)
+	if took >= rejectionFlushTimeout/2 {
+		t.Fatalf("final took %s with a stuck tick, want well under %s (the tick is cancelled, not waited out)", took, rejectionFlushTimeout)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if written != 15 || calls != 2 {
+		t.Fatalf("written %d in %d write(s), want 15 in 2 (the stuck batch retried by final)", written, calls)
+	}
+}
+
+// TestRejectionFlusherDropsAPoisonBatch (Fremd-Review F-4): a batch the
+// database refuses as such (SQLSTATE 21/22/23) is dropped, not retried —
+// a retry would fail again and take every fresh count with it.
+func TestRejectionFlusherDropsAPoisonBatch(t *testing.T) {
+	cfg := config.Defaults().GatewaySettings()
+	ledger := keyquota.NewLedger(time.Now)
+	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: func() oai.Settings { return cfg }, Logger: slog.New(&ledgerLogSink{}), Ledger: ledger})
+	w := &fakeWrite{fail: &pgconn.PgError{Code: "21000"}}
+	f := newRejectionFlusher(ledger, access, w.write)
+	ledger.Note(keyquota.Rejection{Reason: keyquota.RejectAuth, Detail: keyquota.DetailInvalidKey})
+	f.flush(context.Background())
+	w.fail = nil
+	for range 3 {
+		ledger.Note(keyquota.Rejection{Reason: keyquota.RejectAuth, Detail: keyquota.DetailInvalidKey})
+	}
+	f.flush(context.Background())
+	var sum int64
+	for _, r := range w.rows {
+		sum += r.N
+	}
+	if sum != 3 {
+		t.Fatalf("written %d, want 3 (the refused batch dropped, the fresh counts written)", sum)
+	}
+	if !permanentFlushError(&pgconn.PgError{Code: "23514"}) || permanentFlushError(errors.New("conn reset")) || permanentFlushError(&pgconn.PgError{Code: "57014"}) {
+		t.Fatal("permanentFlushError: want classes 21/22/23 permanent, a connection error and 57014 (cancel) transient")
 	}
 }

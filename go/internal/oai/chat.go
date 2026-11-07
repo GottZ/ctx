@@ -794,6 +794,7 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		c.endLimit(func(l LimitReservation) { l.Abort() })
 		return
 	}
+	c.rec.Class = planClass(plan) // the class of an L2 refusal (W06-12); a lease names it again
 	c.target = newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen)
 	stop := c.d.watch(c.ctx, c.cancel, c.target)
 	defer stop()

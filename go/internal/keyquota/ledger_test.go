@@ -195,3 +195,15 @@ func TestDecisionLedgerReason(t *testing.T) {
 		}
 	}
 }
+
+// TestLedgerConsumerSpellingIsOneCell (Fremd-Review F-4): two spellings of
+// one consumer id are one cell — the database compares uuid values, and two
+// cells of one row would fail the flush statement (SQLSTATE 21000).
+func TestLedgerConsumerSpellingIsOneCell(t *testing.T) {
+	l := keyquota.NewLedger(fixedClock(time.Date(2026, 11, 7, 18, 0, 0, 0, time.UTC)))
+	l.Note(keyquota.Rejection{ConsumerID: consumerA, Reason: keyquota.RejectAuth})
+	l.Note(keyquota.Rejection{ConsumerID: strings.ToUpper(consumerA), Reason: keyquota.RejectAuth})
+	if d := l.Drain(); len(d) != 1 || d[0].N != 2 || d[0].ConsumerID != consumerA {
+		t.Fatalf("drain %+v, want one cell of %s n=2", d, consumerA)
+	}
+}

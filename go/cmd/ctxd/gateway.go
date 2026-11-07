@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -206,7 +207,9 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 		meter:    meter,
 		seedRead: read,
 		ledger:   ledger,
-		flusher:  newRejectionFlusher(ledger, access, func(ctx context.Context, rows []llmusage.RejectionRow) error { return llmusage.FlushRejections(ctx, pool, rows) }),
+		flusher: newRejectionFlusher(ledger, access, func(ctx context.Context, rows []llmusage.RejectionRow) error {
+			return llmusage.FlushRejections(ctx, pool, rows)
+		}),
 		settings: get,
 		access:   access,
 		door: handler.ModelAuth(handler.ModelAuthConfig{
@@ -355,6 +358,9 @@ type rejectionFlusher struct {
 	mu      sync.Mutex // one flush at a time: the ticks and the shutdown step
 	retry   *keyquota.Ledger
 	dropped uint64 // ledger.Dropped() at the last report
+
+	tickMu     sync.Mutex
+	tickCancel context.CancelFunc // the running tick's write, cancelled by final
 }
 
 func newRejectionFlusher(ledger *keyquota.Ledger, access *handler.GatewayAccessLog, write func(context.Context, []llmusage.RejectionRow) error) *rejectionFlusher {
@@ -372,18 +378,37 @@ func (f *rejectionFlusher) run(ctx context.Context) {
 			f.final()
 			return
 		case <-t.C:
-			tctx, cancel := context.WithTimeout(ctx, rejectionFlushTimeout)
-			f.flush(tctx)
-			cancel()
-			f.access.FlushDue()
+			f.tick(ctx)
 		}
 	}
 }
 
-// final is the shutdown flush: the ledger (bounded by rejectionFlushTimeout,
-// on a context of its own — the cancelled one cannot carry it) and the
-// window's last lines.
+// tick is one periodic flush, bounded by rejectionFlushTimeout and
+// cancellable by final: a tick stuck on a slow database must not hold the
+// shutdown step for a second timeout (Fremd-Review F-3) — its batch goes to
+// retry, and final writes it.
+func (f *rejectionFlusher) tick(ctx context.Context) {
+	tctx, cancel := context.WithTimeout(ctx, rejectionFlushTimeout)
+	defer cancel()
+	f.tickMu.Lock()
+	f.tickCancel = cancel
+	f.tickMu.Unlock()
+	f.flush(tctx)
+	f.tickMu.Lock()
+	f.tickCancel = nil
+	f.tickMu.Unlock()
+	f.access.FlushDue()
+}
+
+// final is the shutdown flush: it cancels a running tick, then flushes the
+// ledger (bounded by rejectionFlushTimeout, on a context of its own — the
+// cancelled one cannot carry it) and writes the window's last lines.
 func (f *rejectionFlusher) final() {
+	f.tickMu.Lock()
+	if f.tickCancel != nil {
+		f.tickCancel()
+	}
+	f.tickMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), rejectionFlushTimeout)
 	defer cancel()
 	f.flush(ctx)
@@ -399,7 +424,15 @@ func (f *rejectionFlusher) flush(ctx context.Context) {
 	f.access.CountRejections(fresh)
 	batch := append(f.retry.Drain(), fresh...)
 	if len(batch) > 0 {
-		if err := f.write(ctx, rejectionRows(batch)); err != nil {
+		switch err := f.write(ctx, rejectionRows(batch)); {
+		case err == nil:
+		case permanentFlushError(err):
+			// The database refused the batch itself (a value, a constraint):
+			// a retry would fail the same way and take every fresh count
+			// with it (Fremd-Review F-4) — the batch is dropped.
+			slog.Error("gateway: the database refused the refusal ledger batch, its counts are dropped",
+				"error", err, "cells", len(batch))
+		default:
 			lost := f.retry.Restore(batch)
 			slog.Warn("gateway: refusal ledger flush failed, the counts wait for the next flush",
 				"error", err, "cells", len(batch), "lost_refusals", lost)
@@ -410,6 +443,21 @@ func (f *rejectionFlusher) flush(ctx context.Context) {
 		slog.Error("gateway: refusals with a reason outside the ledger vocabulary or a consumer that is no UUID were not counted (a hook defect)",
 			"dropped_total", d)
 	}
+}
+
+// permanentFlushError reports a refusal of the batch by the database that a
+// retry cannot heal: SQLSTATE class 21 (cardinality), 22 (data exception),
+// 23 (integrity constraint). A connection or timeout error is transient.
+func permanentFlushError(err error) bool {
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || len(pe.Code) < 2 {
+		return false
+	}
+	switch pe.Code[:2] {
+	case "21", "22", "23":
+		return true
+	}
+	return false
 }
 
 // rejectionRows adapts drained ledger cells to the flush rows (internal/

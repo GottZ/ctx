@@ -17,10 +17,10 @@
       "min_version": "1.0"
     },
     "timescaledb": {
-      "min_version": "2.31.0"
+      "min_version": "2.30.1"
     },
     "vector": {
-      "min_version": "0.8.7"
+      "min_version": "0.8.6"
     }
   },
   "tables": {
