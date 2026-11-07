@@ -328,3 +328,22 @@ func TestRegistryTriggerLoads(t *testing.T) {
 		t.Errorf("10 triggers during a running load: %d loads, want at most 2 (coalesced)", n)
 	}
 }
+
+// TestConsumerTiers is the interface to C2 (W06-16 /api/usage/consumers):
+// the stored server and tenant rows per asked consumer and op; consumers
+// not asked for, consumers without rows and tenant rows stay out.
+func TestConsumerTiers(t *testing.T) {
+	s := NewSnapshot([]Row{consumerRow("c1", TierServer, Values{RPM: i64(5)}), consumerRow("c1", TierTenant, Values{RPM: i64(3)}),
+		consumerRow("c2", TierServer, Values{TPM: i64(9)}), tenantRow("t1", TierServer, Values{RPM: i64(1)})})
+	got := s.ConsumerTiers([]string{"c1", "c3"})
+	p, ok := got["c1"][keyquota.OpChat]
+	if !ok || p.Server == nil || p.Server.RPM == nil || *p.Server.RPM != 5 || p.Tenant == nil || p.Tenant.RPM == nil || *p.Tenant.RPM != 3 {
+		t.Errorf("c1 chat = %+v (present %v), want the server row rpm 5 and the tenant row rpm 3", p, ok)
+	}
+	if _, ok := got["c2"]; ok {
+		t.Error("c2 was not asked for, but is in the answer")
+	}
+	if _, ok := got["c3"]; ok {
+		t.Error("c3 has no rows, but is in the answer")
+	}
+}

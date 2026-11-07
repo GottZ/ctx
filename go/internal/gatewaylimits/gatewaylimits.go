@@ -197,6 +197,23 @@ func (s *Snapshot) Resolve(consumerID, tenantID string, op keyquota.Op, d Defaul
 		AllowExternal: d.AllowExternal}
 }
 
+// TierPair are a consumer's stored rows of one op: the server-tier and the
+// tenant-tier row (nil = no row).
+type TierPair struct {
+	Server, Tenant *Values
+}
+
+// ConsumerTiers are the stored rows of each given consumer per op — the
+// source of C2's handler.UsageLimitTiers (/api/usage/consumers, W06-16). A
+// consumer without rows is absent from the map; tenant, instance and
+// envelope rows never appear.
+//
+// RC-D S1 stub: an empty map.
+func (s *Snapshot) ConsumerTiers(consumerIDs []string) map[string]map[keyquota.Op]TierPair {
+	_ = consumerIDs
+	return map[string]map[keyquota.Op]TierPair{}
+}
+
 // Ceiling is the bound a tenant-tier write of (kind, consumerID|tenantID,
 // op) must stay at or under: for a consumer the effective value without
 // that consumer's own tenant-tier row, for a tenant the server-tier tenant
