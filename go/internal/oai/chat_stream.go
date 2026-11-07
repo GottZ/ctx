@@ -90,9 +90,17 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 	// The role carry is the attempt's: a failover's stream starts without
 	// the role the previous attempt dropped (W02-08 hardening 5).
 	roles := &roleCarry{}
+	// The attempt's line buffer (FOLGE-S): every chunk is rewritten into it
+	// as its client SSE line; it grows to the largest line once and the
+	// relay copies what it queues. payload is ChatRawStream's line buffer,
+	// valid only during this call — nothing of it is kept.
+	var line []byte
 	actx, done := c.wireContext(runCtx, timeout)
 	res, err := llm.ChatRawStream(actx, *b, body, timeout, c.s.MaxStreamFrameBytes, func(payload []byte) error {
-		chunk, rerr := rewriteChunk(payload, id, created, c.alias.Name, lane, reasoning, include, roles)
+		chunk, rerr := rewriteChunkInto(line, payload, id, created, c.alias.Name, lane, reasoning, include, roles)
+		if chunk.out != nil {
+			line = chunk.out
+		}
 		if rerr != nil {
 			st.streamErr = fmt.Errorf("%w: %w", errChunkRewrite, rerr)
 			return st.streamErr
@@ -112,6 +120,13 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 		// client writer drains it on its own goroutine, so this attempt —
 		// and its lease — ends with the upstream, not with the client.
 		if werr := c.relay.put(chunk.out); werr != nil {
+			if errors.Is(werr, ErrBudgetExhausted) {
+				// The ledger refused the copy of an oversize chunk (FOLGE-S):
+				// an admission outcome, as a refused upstream body — the
+				// upstream ends with this callback, no health report, the
+				// error frame server_overloaded (outcomeError).
+				return &llm.AdmissionError{Err: werr, Backend: b.Name, Host: b.Host}
+			}
 			if errors.Is(werr, errRelayOverflow) {
 				// The client fell behind by more than the buffer: the run
 				// ends — the upstream is aborted and the lease sees the ended

@@ -446,7 +446,7 @@ func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
-	raw, err := io.ReadAll(httpx.CapBody(resp.Body, maxResp))
+	raw, err := readAnswer(resp, maxResp)
 	if err != nil {
 		return nil, fmt.Errorf("llm: read response: %w", err)
 	}
@@ -470,6 +470,40 @@ func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.
 		out.ProviderRequestID = meta.ID
 	}
 	return out, nil
+}
+
+// readAnswer reads a non-streamed answer of at most maxResp bytes, as
+// io.ReadAll over httpx.CapBody did, into one buffer (FOLGE-S S4): an answer
+// with a Content-Length within the cap is one allocation of its length (and
+// one byte to see the end), any other grows by doubling from 512 bytes up to
+// the cap — io.ReadAll grows a large buffer by a quarter, about 5 × the
+// answer in allocations at the 4-MiB cap.
+func readAnswer(resp *http.Response, maxResp int64) ([]byte, error) {
+	r := httpx.CapBody(resp.Body, maxResp)
+	size := int64(512)
+	if cl := resp.ContentLength; cl >= 0 && cl <= maxResp {
+		size = cl + 1
+	}
+	buf := make([]byte, 0, size)
+	for {
+		if len(buf) == cap(buf) {
+			c := min(2*int64(cap(buf)), maxResp+1)
+			if c <= int64(cap(buf)) { // the cap reader delivers at most maxResp bytes: unreachable
+				return buf, fmt.Errorf("%w (%d bytes)", httpx.ErrResponseTooLarge, maxResp)
+			}
+			grown := make([]byte, len(buf), c)
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return buf, nil
+			}
+			return buf, err
+		}
+	}
 }
 
 // RawStreamResult is the outcome of one relayed upstream stream. ChatRawStream

@@ -84,10 +84,18 @@ func (p *relayPanic) Unwrap() error {
 //
 // A chunk larger than the whole ring (a rewrite grew it: json.Marshal escapes
 // <, > and & six-fold, Fremd-Review 1 F1) is no sign of a slow client: it
-// waits by reference in the one oversize slot, in its place in the order,
-// and the writer takes it when the records before it are written. A second
-// oversize chunk while one still waits is an overflow — then the client is
-// behind by at least that chunk.
+// waits in the one oversize slot, in its place in the order, and the writer
+// takes it when the records before it are written. A second oversize chunk
+// while one still waits is an overflow — then the client is behind by at
+// least that chunk.
+//
+// put copies every chunk (FOLGE-S): the caller's chunk is the attempt's line
+// buffer, which the next rewrite overwrites (rewriteChunkInto). A record goes
+// into the ring; an oversize chunk into one of two buffers of the relay's
+// own (bigs) — one may wait while the writer writes the other — each grown
+// to the largest oversize chunk and booked in the request's ledger before it
+// is made (book; a refusal is ErrBudgetExhausted, the attempt ends like a
+// refused upstream body).
 type streamRelay struct {
 	write  func([]byte) error // the stream writer's frame
 	stop   <-chan struct{}    // the run's end: the writer drops what is queued
@@ -107,13 +115,17 @@ type streamRelay struct {
 	done    chan struct{} // closed when the writer ended
 	pan     *relayPanic
 
-	// big is the oversize chunk waiting by reference (nil: none), bigAt its
-	// place: the number of records put before it; puts and takes count every
-	// record put and taken, handBig marks the one in the writer's hand.
-	big         []byte
-	bigAt       uint64
-	puts, takes uint64
-	handBig     bool
+	// big is the oversize chunk waiting (nil: none) — a copy in bigs[bigIdx]
+	// — and bigAt its place: the number of records put before it; puts and
+	// takes count every record put and taken, handBig marks the one in the
+	// writer's hand, handIdx its buffer.
+	big              []byte
+	bigAt            uint64
+	puts, takes      uint64
+	handBig          bool
+	bigs             [2][]byte
+	bigIdx, handIdx  int
+	book             func(int64) bool // books an oversize buffer before it is made (nil: none)
 
 	// until is the attempt's deadline (bound; zero: none): no write ends
 	// after it, the drain included — a stream lasts at most its attempt's
@@ -133,11 +145,11 @@ func newStreamRelay(until time.Time, ring []byte, write func([]byte) error, stop
 	return rl
 }
 
-// put queues one chunk (the reader). It never waits for the client: nil when
-// the chunk is queued, errRelayOverflow when it does not fit, the writer's
-// error once the writer failed (the client is gone). An oversize chunk is
-// kept by reference until it is written: the caller must not reuse it
-// (rewriteChunk returns a fresh slice per chunk).
+// put queues a copy of one chunk (the reader). It never waits for the
+// client: nil when the chunk is queued, errRelayOverflow when it does not
+// fit, ErrBudgetExhausted when the ledger refuses the buffer of an oversize
+// chunk, the writer's error once the writer failed (the client is gone). The
+// caller may reuse chunk at once.
 func (rl *streamRelay) put(chunk []byte) error {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -152,7 +164,19 @@ func (rl *streamRelay) put(chunk []byte) error {
 		if rl.big != nil {
 			return errRelayOverflow
 		}
-		rl.big, rl.bigAt = chunk, rl.puts
+		slot := 0
+		if rl.handBig && rl.handIdx == 0 {
+			slot = 1 // the writer writes from bigs[0]
+		}
+		buf := rl.bigs[slot]
+		if cap(buf) < len(chunk) {
+			if rl.book != nil && !rl.book(int64(len(chunk)-cap(buf))) {
+				return ErrBudgetExhausted
+			}
+			buf = make([]byte, 0, len(chunk))
+		}
+		rl.bigs[slot] = append(buf[:0], chunk...)
+		rl.big, rl.bigAt, rl.bigIdx = rl.bigs[slot], rl.puts, slot
 		rl.puts++
 		rl.signal()
 		return nil
@@ -325,7 +349,7 @@ func (rl *streamRelay) next() ([]byte, bool) {
 			return nil, false
 		case rl.big != nil && rl.takes == rl.bigAt:
 			rec := rl.big
-			rl.big, rl.handBig = nil, true
+			rl.big, rl.handBig, rl.handIdx = nil, true, rl.bigIdx
 			rl.mu.Unlock()
 			select {
 			case <-rl.stop:
@@ -465,8 +489,9 @@ func (c *chatCall) startRelay(until time.Time) error {
 	if !c.cover(size) {
 		return ErrBudgetExhausted
 	}
-	c.relay = newStreamRelay(until, make([]byte, size), c.sse.frame, c.ctx.Done(), c.cancel,
+	c.relay = newStreamRelay(until, make([]byte, size), c.sse.frameLine, c.ctx.Done(), c.cancel,
 		drainMeter{rate: c.s.StreamMinDrainRate, window: c.s.StreamMinDrainWindow}, c.sse.capWrites)
+	c.relay.book = c.cover // the reader's goroutine, as every booking of the request
 	return nil
 }
 

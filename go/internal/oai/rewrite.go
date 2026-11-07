@@ -3,28 +3,44 @@ package oai
 import (
 	"encoding/json"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/modelalias"
 )
 
 // The answer rewrite of a non-streamed chat completion (design/02 §4.6, B4):
-// the upstream body is read as a map of raw values and only the spec keys
-// survive — id, created and model are ctx's, usage keeps its spec subkeys,
-// service_tier comes from the planner's lane, and every other key (the
-// backend's model name, system_fingerprint, timings, provider, cost, engine
-// internals) is dropped. choices pass verbatim (tool calls, refusal,
-// logprobs: ctx-B reads them, L7), except the reasoning traces of a
-// reasoning-off alias and the spec's required logprobs key, which an engine
-// that leaves it out gets as null (CreateChatCompletionResponse).
+// only the spec keys of the upstream body survive — id, created and model
+// are ctx's, usage keeps its spec subkeys, service_tier comes from the
+// planner's lane, and every other key (the backend's model name,
+// system_fingerprint, timings, provider, cost, engine internals) is dropped.
+// choices pass verbatim (tool calls, refusal, logprobs: ctx-B reads them,
+// L7), except the reasoning traces of a reasoning-off alias and the spec's
+// required logprobs key, which an engine that leaves it out gets as null
+// (CreateChatCompletionResponse). The non-stream rewrite is still the map
+// rewrite below: its walk (FOLGE-S, the stream's writer in rewrite_walk.go)
+// waits for an exception at the route's answer write (gosec G705:
+// json.Marshal is the HTML escape its taint check knows, the walk's identical
+// escape is not). TestRewriteChatTraceIsTheBase pins the bytes.
 
 // usageKeys are the spec subkeys of usage (OpenAI CompletionUsage);
 // OpenRouter's cost and every engine extra are dropped.
 var usageKeys = map[string]bool{
 	"prompt_tokens": true, "completion_tokens": true, "total_tokens": true,
 	"prompt_tokens_details": true, "completion_tokens_details": true,
+}
+
+// usageKeyOrder are usageKeys in the order json.Marshal writes them.
+var usageKeyOrder = sortedNames(usageKeys)
+
+func sortedNames(set map[string]bool) []string {
+	names := make([]string, 0, len(set))
+	for k := range set {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // reasoningMessageKeys are the reasoning traces engines put next to a
@@ -48,6 +64,70 @@ func serviceTierOf(lane string) string {
 
 // errNoChoices refuses an upstream body without a choices array.
 var errNoChoices = errors.New("oai: upstream answer without choices")
+
+// rewriteOverhead is what the stream rewrite may add to an upstream chunk
+// besides the escapes of id and alias: the keys ctx sets, created, the
+// index and delta a choice may lack, the SSE frame. The output buffer starts
+// at the upstream length plus this; a chunk that grows past it (HTML
+// escapes, many choices) grows the buffer by doubling.
+const rewriteOverhead = 256
+
+// rewriteBufferLen is the first size of a rewrite's output buffer.
+func rewriteBufferLen(upstream int, id, alias string) int {
+	return upstream + rewriteOverhead + 6*(len(id)+len(alias))
+}
+
+// topMembers is the last value of choices, usage and timings in the
+// upstream object raw (nil: absent) — the values the map rewrite read.
+func topMembers(raw []byte) (choices, usage, timings []byte) {
+	it, _ := newMemberIter(raw)
+	for {
+		k, v, more := it.next()
+		if !more {
+			return choices, usage, timings
+		}
+		switch {
+		case keyIs(k, "choices"):
+			choices = v
+		case keyIs(k, "usage"):
+			usage = v
+		case keyIs(k, "timings"):
+			timings = v
+		}
+	}
+}
+
+// upstreamObject validates an upstream body as the map rewrite's
+// json.Unmarshal did: the trimmed object, or null (true) for a JSON null —
+// the map rewrite read no member of it — or the decode's own error.
+func upstreamObject(upstream []byte) (obj []byte, null bool, err error) {
+	if !json.Valid(upstream) {
+		return nil, false, mapError[map[string]json.RawMessage](upstream)
+	}
+	t := trimJSON(upstream)
+	switch {
+	case isNull(t):
+		return nil, true, nil
+	case t[0] != '{':
+		return nil, false, mapError[map[string]json.RawMessage](upstream)
+	}
+	return t, false, nil
+}
+
+// checkChoiceKinds refuses a choices array with an element that is neither
+// an object nor null, with the error the map rewrite's decode gave.
+func checkChoiceKinds(choices []byte) error {
+	it, _ := newArrayIter(choices)
+	for {
+		e, more := it.next()
+		if !more {
+			return nil
+		}
+		if !isNull(e) && !hasKind(e, kindObject) {
+			return mapError[[]map[string]json.RawMessage](choices)
+		}
+	}
+}
 
 // rewriteChat renders the client body of an upstream answer: id, created and
 // model replaced, object and choices kept, usage filtered, service_tier set.
@@ -134,24 +214,46 @@ func stripReasoning(c map[string]json.RawMessage) {
 	}
 }
 
+// nullValue is the raw JSON null the rewrite adds.
+var nullValue = []byte("null")
+
+// appendUsage writes a usage object (valid JSON) with its spec subkeys only;
+// a *_details value that is no object (SGLang sends null) is not the spec's
+// CompletionUsage and is dropped like an extra.
+func appendUsage(dst, usage []byte) []byte {
+	var buf [levelMembersMax]member
+	um := collectMembers(buf[:0], usage)
+	dst = append(growBy(dst, 2), '{')
+	first := true
+	for _, name := range usageKeyOrder {
+		at := findMember(um, name)
+		if at < 0 || strings.HasSuffix(name, "_details") && !hasKind(um[at].val, kindObject) {
+			continue
+		}
+		dst = appendMember(dst, first, um[at].key, um[at].val)
+		first = false
+	}
+	return append(growBy(dst, 1), '}')
+}
+
 // The stream rewrite (design/02 §4.6 "Stream", W02-08): every upstream
-// chunk is read as a map of raw values once and leaves with the key
-// allowlist {id, object, created, model, choices, usage, service_tier} — id,
-// created and model the same in every chunk (ctx's, as non-stream), object
-// chat.completion.chunk, service_tier from the lane. choices pass verbatim
-// except what the non-stream rewrite normalizes too (lead decision O-08-3
-// (b)): a reasoning-off alias's deltas lose every reasoning trace (a choice
-// left empty is dropped, its role carried — roleCarry), and a
-// choice without the required delta/index gets them
+// chunk leaves with the key allowlist {id, object, created, model, choices,
+// usage, service_tier} — id, created and model the same in every chunk
+// (ctx's, as non-stream), object chat.completion.chunk, service_tier from the
+// lane. choices pass verbatim except what the non-stream rewrite normalizes
+// too (lead decision O-08-3 (b)): a reasoning-off alias's deltas lose every
+// reasoning trace (a choice left empty is dropped, its role carried —
+// roleCarry), and a choice without the required delta/index gets them
 // (CreateChatCompletionStreamResponse). The usage chunk reaches only a
 // client that asked for it (stream_options.include_usage); for every other
 // client it is swallowed and usage is removed from every chunk — ctx counts
-// it either way (upstream include_usage is always on, llm.putFrame).
+// it either way (upstream include_usage is always on, llm.putFrame). The
+// walk is rewriteChunkInto (rewrite_into.go).
 
 // streamChunk is what the relay learns from one upstream chunk besides its
 // client form.
 type streamChunk struct {
-	out  []byte // the client chunk; nil when skip
+	out  []byte // the client chunk's SSE line; nil when skip
 	skip bool   // nothing for the client: the usage chunk of a client without include_usage, or a chunk emptied by the reasoning strip
 	// runes are the runes the engine generated in this chunk (content,
 	// reasoning, refusal, tool-call names and arguments) — the completion
@@ -167,125 +269,94 @@ type streamChunk struct {
 // counts.
 var streamDeltaKeys = []string{"content", "reasoning_content", "reasoning", "refusal"}
 
-// rewriteChunk renders the client form of one upstream stream chunk; roles
-// is the role carry of the attempt the chunk belongs to.
-func rewriteChunk(upstream []byte, id string, created int64, alias, lane string, reasoningOff, includeUsage bool, roles *roleCarry) (streamChunk, error) {
-	var in map[string]json.RawMessage
-	if err := json.Unmarshal(upstream, &in); err != nil {
-		return streamChunk{}, err
-	}
-	var sc streamChunk
-	choices, ok := in["choices"]
-	switch {
-	case !ok || isNull(choices):
-		choices = json.RawMessage("[]")
-	case !hasKind(choices, kindArray):
-		return streamChunk{}, errNoChoices
-	}
-	choices, n, err := normalizeChunkChoices(choices, reasoningOff, &sc, roles)
-	if err != nil {
-		return streamChunk{}, err
-	}
-	readStreamUsage(in, &sc)
-	usageObj := false
-	if u, ok := in["usage"]; ok && hasKind(u, kindObject) {
-		usageObj = true
-	}
-	// Nothing for the client: the usage chunk without include_usage, an
-	// empty chunk that is no usage chunk (client code reads choices[0] of
-	// every chunk), and a chunk the reasoning strip emptied.
-	if n == 0 && (!usageObj || !includeUsage) {
-		sc.skip = true
-		return sc, nil
-	}
-	out := map[string]json.RawMessage{
-		"id":           mustJSON(id),
-		"object":       json.RawMessage(`"chat.completion.chunk"`),
-		"created":      json.RawMessage(strconv.FormatInt(created, 10)),
-		"model":        mustJSON(alias),
-		"choices":      choices,
-		"service_tier": mustJSON(serviceTierOf(lane)),
-	}
-	if u, ok := in["usage"]; ok && includeUsage {
-		out["usage"] = json.RawMessage("null")
-		if usageObj {
-			out["usage"] = filterUsage(u)
-		}
-	}
-	sc.out, err = json.Marshal(out)
-	return sc, err
-}
-
-// filterUsage keeps the spec subkeys of a usage object (as rewriteChat).
-func filterUsage(u json.RawMessage) json.RawMessage {
-	var usage map[string]json.RawMessage
-	if err := json.Unmarshal(u, &usage); err != nil {
-		return json.RawMessage("null")
-	}
-	for k, v := range usage {
-		if !usageKeys[k] || (strings.HasSuffix(k, "_details") && !hasKind(v, kindObject)) {
-			delete(usage, k)
-		}
-	}
-	return mustJSON(usage)
-}
-
 // readStreamUsage reads the token counts of a chunk: its usage object and
-// llama.cpp's timings.prompt_n.
-func readStreamUsage(in map[string]json.RawMessage, sc *streamChunk) {
-	if u, ok := in["usage"]; ok && hasKind(u, kindObject) {
+// llama.cpp's timings.prompt_n (small values, decoded as the map rewrite
+// decoded them).
+func readStreamUsage(usage, timings []byte, sc *streamChunk) {
+	if usage != nil && hasKind(usage, kindObject) {
 		var v struct {
 			Prompt     int `json:"prompt_tokens"`
 			Completion int `json:"completion_tokens"`
 		}
-		if json.Unmarshal(u, &v) == nil {
+		if json.Unmarshal(usage, &v) == nil {
 			sc.usage = &[2]int{v.Prompt, v.Completion}
 		}
 	}
-	if t, ok := in["timings"]; ok && hasKind(t, kindObject) {
+	if timings != nil && hasKind(timings, kindObject) {
 		var v struct {
 			PromptN int `json:"prompt_n"`
 		}
-		if json.Unmarshal(t, &v) == nil {
+		if json.Unmarshal(timings, &v) == nil {
 			sc.promptN = v.PromptN
 		}
 	}
 }
 
-// normalizeChunkChoices brings a chunk's choices into the stream schema and
-// counts the generated runes. It returns the choices left: a choice the
-// reasoning strip emptied is dropped, its role carried (roleCarry).
-func normalizeChunkChoices(choices json.RawMessage, reasoningOff bool, sc *streamChunk, roles *roleCarry) (json.RawMessage, int, error) {
-	var arr []map[string]json.RawMessage
-	if err := json.Unmarshal(choices, &arr); err != nil {
-		return nil, 0, err
-	}
-	kept := arr[:0]
-	for i, c := range arr {
-		if c == nil {
+// appendChunkChoices writes the choices of a chunk (a valid array of objects
+// and nulls) in the stream schema and counts the generated runes. It
+// returns the choices kept: a null is dropped, and a choice the reasoning
+// strip emptied is dropped with its role carried (roleCarry).
+func appendChunkChoices(dst, choices []byte, reasoningOff bool, sc *streamChunk, roles *roleCarry) ([]byte, int) {
+	dst = append(growBy(dst, 2), '[')
+	it, _ := newArrayIter(choices)
+	kept := 0
+	for i := 0; ; i++ {
+		e, more := it.next()
+		if !more {
+			break
+		}
+		if isNull(e) {
 			continue
 		}
-		if _, ok := c["index"]; !ok {
-			c["index"] = json.RawMessage(strconv.Itoa(i))
+		var cbuf, dbuf [levelMembersMax]member
+		var ibuf [20]byte
+		cm := collectMembers(cbuf[:0], e)
+		at := findMember(cm, "index")
+		if at < 0 {
+			cm = insertMember(cm, "index", strconv.AppendInt(ibuf[:0], int64(i), 10))
+			at = findMember(cm, "index")
 		}
-		delta := map[string]json.RawMessage{}
-		if raw, ok := c["delta"]; ok && hasKind(raw, kindObject) {
-			if err := json.Unmarshal(raw, &delta); err != nil {
-				return nil, 0, err
-			}
+		index := cm[at].val
+		dm := dbuf[:0]
+		if d := findMember(cm, "delta"); d >= 0 && hasKind(cm[d].val, kindObject) {
+			dm = collectMembers(dm, cm[d].val)
 		}
-		sc.runes += deltaRunes(delta)
-		dropNullDeltaKeys(delta)
-		if reasoningOff && stripDelta(delta) && emptyChoice(c, delta) {
-			roles.dropped(c["index"], delta)
+		sc.runes += deltaRunes(dm)
+		dropNullDeltaKeys(dm)
+		if reasoningOff && stripDelta(dm) && emptyChoice(cm, dm) {
+			roles.dropped(index, dm)
 			continue
 		}
-		roles.relaying(c["index"], delta)
-		c["delta"] = mustJSON(delta)
-		kept = append(kept, c)
+		dm = roles.relaying(index, dm)
+		if findMember(cm, "delta") < 0 {
+			cm = insertMember(cm, "delta", nil)
+		}
+		if kept > 0 {
+			dst = append(dst, ',')
+		}
+		dst = appendChoice(dst, cm, dm)
+		kept++
 	}
-	out, err := json.Marshal(kept)
-	return out, len(kept), err
+	return append(growBy(dst, 1), ']'), kept
+}
+
+// appendChoice writes a stream choice: its members in key order, delta as
+// the rewritten delta dm.
+func appendChoice(dst []byte, cm, dm []member) []byte {
+	dst = append(growBy(dst, 2), '{')
+	for j, m := range cm {
+		if !keyIs(m.key, "delta") {
+			dst = appendMember(dst, j == 0, m.key, m.val)
+			continue
+		}
+		if j > 0 {
+			dst = append(dst, ',')
+		}
+		dst = appendKey(dst, m.key)
+		dst = append(dst, ':')
+		dst = appendLevel(dst, dm)
+	}
+	return append(growBy(dst, 1), '}')
 }
 
 // nullableDeltaKeys are the delta keys the stream schema allows as null
@@ -295,23 +366,27 @@ func normalizeChunkChoices(choices json.RawMessage, reasoningOff bool, sc *strea
 // nothing, so it is dropped (O-08-3 (b), CreateChatCompletionStreamResponse).
 var nullableDeltaKeys = map[string]bool{"content": true, "refusal": true}
 
-// dropNullDeltaKeys removes the null values the schema does not allow.
-func dropNullDeltaKeys(delta map[string]json.RawMessage) {
-	for k, v := range delta {
-		if isNull(v) && !nullableDeltaKeys[k] {
-			delete(delta, k)
+// dropNullDeltaKeys drops the null values the schema does not allow.
+func dropNullDeltaKeys(dm []member) {
+	for j := range dm {
+		if dm[j].gone || !isNull(dm[j].val) {
+			continue
 		}
+		nullable := false
+		for k := range nullableDeltaKeys {
+			nullable = nullable || keyIs(dm[j].key, k)
+		}
+		dm[j].gone = !nullable
 	}
 }
 
-// stripDelta removes the reasoning traces from a delta; true when one was
+// stripDelta drops the reasoning traces of a delta; true when one was
 // there.
-func stripDelta(delta map[string]json.RawMessage) bool {
+func stripDelta(dm []member) bool {
 	changed := false
 	for _, k := range reasoningMessageKeys {
-		if _, ok := delta[k]; ok {
-			delete(delta, k)
-			changed = true
+		if at := findMember(dm, k); at >= 0 {
+			dm[at].gone, changed = true, true
 		}
 	}
 	return changed
@@ -321,14 +396,14 @@ func stripDelta(delta map[string]json.RawMessage) bool {
 // reads: no delta value but nulls and the role, no finish_reason, no
 // logprobs. Such a chunk is the reasoning trace itself (its timing) and is
 // not relayed; its role moves to the next relayed choice (roleCarry).
-func emptyChoice(c, delta map[string]json.RawMessage) bool {
-	for k, v := range delta {
-		if k != "role" && !isNull(v) {
+func emptyChoice(cm, dm []member) bool {
+	for _, m := range dm {
+		if !m.gone && !keyIs(m.key, "role") && !isNull(m.val) {
 			return false
 		}
 	}
 	for _, k := range []string{"finish_reason", "logprobs"} {
-		if v, ok := c[k]; ok && !isNull(v) {
+		if at := findMember(cm, k); at >= 0 && !isNull(cm[at].val) {
 			return false
 		}
 	}
@@ -354,58 +429,93 @@ type roleCarry struct {
 // streamRoles are the roles of ChatCompletionStreamResponseDelta.
 var streamRoles = map[string]bool{"developer": true, "system": true, "user": true, "assistant": true, "tool": true}
 
+// quotedRoles are the roles as the rewrite writes a carried one.
+var quotedRoles = func() map[string][]byte {
+	q := make(map[string][]byte, len(streamRoles))
+	for r := range streamRoles {
+		q[r] = appendString(nil, r)
+	}
+	return q
+}()
+
 // roleSlot is the carry slot of a choice index (false: not tracked).
-func roleSlot(index json.RawMessage) (int, bool) {
-	i, err := strconv.Atoi(string(index))
-	return i, err == nil && i >= 0 && i < modelalias.CeilingMaxN
+func roleSlot(index []byte) (int, bool) {
+	i, ok := rawInt(index)
+	return i, ok && i >= 0 && i < modelalias.CeilingMaxN
 }
 
 // dropped keeps the role of a choice the strip dropped, unless its index
 // relayed one.
-func (r *roleCarry) dropped(index json.RawMessage, delta map[string]json.RawMessage) {
+func (r *roleCarry) dropped(index []byte, dm []member) {
 	i, ok := roleSlot(index)
-	raw, has := delta["role"]
-	var role string
-	if !ok || !has || r.relayed[i] || json.Unmarshal(raw, &role) != nil || !streamRoles[role] {
+	at := findMember(dm, "role")
+	if !ok || at < 0 || r.relayed[i] {
 		return
 	}
-	r.pending[i] = role
+	if role, ok := rawStringIn(dm[at].val, streamRoles); ok {
+		r.pending[i] = role
+	}
 }
 
-// relaying sets a kept role into a relayed choice without one and marks its
-// index's role relayed.
-func (r *roleCarry) relaying(index json.RawMessage, delta map[string]json.RawMessage) {
+// relaying sets a kept role into a relayed choice's delta without one and
+// marks its index's role relayed; it returns the delta.
+func (r *roleCarry) relaying(index []byte, dm []member) []member {
 	i, ok := roleSlot(index)
 	if !ok {
-		return
+		return dm
 	}
-	if _, has := delta["role"]; !has && r.pending[i] != "" {
-		delta["role"] = mustJSON(r.pending[i])
+	if findMember(dm, "role") < 0 && r.pending[i] != "" {
+		dm = insertMember(dm, "role", quotedRoles[r.pending[i]])
 	}
-	if _, has := delta["role"]; has {
+	if findMember(dm, "role") >= 0 {
 		r.relayed[i], r.pending[i] = true, ""
 	}
+	return dm
 }
 
-// deltaRunes counts the generated runes of a delta.
-func deltaRunes(delta map[string]json.RawMessage) int {
+// errNotText refuses a value that is no JSON string where a tool call's
+// name or arguments are read (deltaRunes): the map rewrite's decode failed
+// there and counted none of the tool calls.
+var errNotText = errors.New("oai: not a JSON string")
+
+// runeText is a string field the estimate counts: the runes of the decoded
+// JSON string, read in place (a tool call's arguments can be megabytes);
+// null keeps the count, any other value is refused.
+type runeText int
+
+// UnmarshalJSON counts the runes of b.
+func (n *runeText) UnmarshalJSON(b []byte) error {
+	c, ok := stringRunes(b)
+	if !ok {
+		return errNotText
+	}
+	if !isNull(b) {
+		*n = runeText(c)
+	}
+	return nil
+}
+
+// deltaRunes counts the generated runes of a delta (its members before the
+// null drop).
+func deltaRunes(dm []member) int {
 	n := 0
 	for _, k := range streamDeltaKeys {
-		var s string
-		if raw, ok := delta[k]; ok && json.Unmarshal(raw, &s) == nil {
-			n += utf8.RuneCountInString(s)
+		if at := findMember(dm, k); at >= 0 {
+			if c, ok := stringRunes(dm[at].val); ok {
+				n += c
+			}
 		}
 	}
-	if raw, ok := delta["tool_calls"]; ok {
+	if at := findMember(dm, "tool_calls"); at >= 0 {
 		var calls []struct {
 			Function struct {
-				Name      string `json:"name"`
-				Arguments string `json:"arguments"`
+				Name      runeText `json:"name"`
+				Arguments runeText `json:"arguments"`
 			} `json:"function"`
 		}
-		if json.Unmarshal(raw, &calls) == nil {
+		if json.Unmarshal(dm[at].val, &calls) == nil {
 			for _, tc := range calls {
-				n += utf8.RuneCountInString(tc.Function.Name) + utf8.RuneCountInString(tc.Function.Arguments)
+				n += int(tc.Function.Name) + int(tc.Function.Arguments)
 			}
 		}
 	}

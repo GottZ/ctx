@@ -65,6 +65,18 @@ var folgeSMetaCorpus = []string{
 	`{"choices":[`,
 	`{"id":"a"}{}`,
 	``,
+	`{"choices":[{"finish_reason":"a"}],"choices":[{"finish_reason":"b"}]}`,
+	`{"choices":[{"finish_reason":"a"},{"finish_reason":"c"}],"choices":[{"index":0}]}`,
+	`{"usage":{"prompt_tokens":1},"usage":{"completion_tokens":2}}`,
+	"{\"choices\":[{\"delta\":{\"content\":\"a\x01b\"}}]}",
+	"{\"id\":\"a\tb\"}",
+	`{"id":"a\x"}`,
+	`{"id":"a\u12"}`,
+	`{"usage":{"prompt_tokens":01}}`,
+	`{"usage":{"prompt_tokens":1.}}`,
+	`{"usage":{"cost":-}}`,
+	`{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":{"k":[1,{"x":"\u00e4"}]}}}]}}],"id":"t"}`,
+	`{"a":[1,"x",{"b":null},[true,false]],"id":"skip"}`,
 }
 
 func folgeSMetaSame(t *testing.T, payload []byte) {
