@@ -5,6 +5,7 @@ package oai_test
 // sub-blocks with sticky rows, and the error envelope pins.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -209,6 +210,48 @@ func TestRerankFormAndDefaults(t *testing.T) {
 			t.Errorf("unknown alias: %d %s, want 404", a.status, a.body)
 		}
 	})
+}
+
+// TestRerankTiesKeepTheIndexOrder (G7 past n = 12, external review 2 F-6 f):
+// documents of equal logit keep their index order at any size.
+func TestRerankTiesKeepTheIndexOrder(t *testing.T) {
+	// slices.SortFunc (pdqsort) keeps ties in order only up to 12
+	// elements, where it sorts by insertion, and on input it finds already
+	// sorted (one logit for all) — 200 documents in three tie classes of
+	// 66–67 are neither; over the route in two blocks (rrwide, sub_batch 128)
+	docs := rerankDocs(200)
+	for _, tc := range []struct {
+		name  string
+		logit func(i int) float64
+	}{
+		{"one logit for all", func(int) float64 { return 0.75 }},
+		{"three tie classes", func(i int) float64 { return float64(i % 3) }},
+	} {
+		te := newRerankEngine(t)
+		te.logits = make(map[string]float64, len(docs))
+		var want []int
+		for i, d := range docs {
+			te.logits[d] = tc.logit(i)
+		}
+		for i := range docs {
+			want = append(want, i)
+		}
+		slices.SortStableFunc(want, func(a, b int) int { return cmp.Compare(tc.logit(b), tc.logit(a)) })
+		trig := newRerankRig(t, []backends.Backend{te.row("spark-rerank", 10)}, 200, 1)
+		r := decodeRerank(t, trig.postRerank(t, "/v1/rerank", rerankBody("rrwide", "q", docs)))
+		idx := make([]int, 0, len(r.Results))
+		for _, res := range r.Results {
+			idx = append(idx, res.Index)
+		}
+		k := 0
+		for k < min(len(idx), len(want)) && idx[k] == want[k] {
+			k++
+		}
+		t.Logf("W0210 ties %s: %d results, %d engine calls, first difference from the index order at %d of %d", tc.name, len(idx), te.hits.Load(), k, len(want))
+		if !slices.Equal(idx, want) {
+			t.Fatalf("%s: order leaves the index order at position %d: %v…, want %v…", tc.name, k, idx[k:min(k+5, len(idx))], want[k:min(k+5, len(want))])
+		}
+	}
 }
 
 // TestRerankMaxTokensPerDoc: max_tokens_per_doc cuts every document to its
