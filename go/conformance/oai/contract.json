@@ -1,0 +1,63 @@
+{
+  "comment": "W06-19 contract manifest (design/06 §4.14, masterplan W06-19): every route of the model groups (cmd/ctxd v1Routes/v2Routes) with every answer form it sends, the vendored schema each form is validated against and the Go tests that pin the form. A form whose schema is null is a gap in the schema set and fails TestContractSchemaSetComplete. Schema files live in testdata/ and are pinned by SHA-256; a vendored file not listed here fails too.",
+  "schema_commit": "c2aecc2f",
+  "files": {
+    "openapi-c2aecc2f-create-chat-completion-response.json": "107ffa11ec00a1c7d660f6c249a2e1f5551c6adb8bd64dd50cdefcb3d8d2aba0",
+    "openapi-c2aecc2f-create-chat-completion-stream-response.json": "e3a70a3ca8c2b020b4a7372df8a111da49d982eb4dbaa24bd490a5ab01580357",
+    "openapi-c2aecc2f-create-embedding-response.json": "15d83876f7c1dff1f65492b06611b74d2396b2244e979bf8ce86f8511ef858a8",
+    "openapi-c2aecc2f-error-response.json": "bd197bbabc5047e20fc5bd16cfeffb9e920863be90c316fc57992343f674eca7",
+    "openapi-c2aecc2f-list-models-response.json": "2ea11339272293c12fd44554f92930ffe723a5b67114053fc27845ee91500c12"
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/v1/models",
+      "forms": [
+        {"form": "success", "file": "openapi-c2aecc2f-list-models-response.json", "schema": "ListModelsResponse", "pinned_by": ["TestConformanceGoSDKModels"]},
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestConformanceGoSDK", "TestContractEnvelopeEveryCode"]}
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/models/*",
+      "forms": [
+        {"form": "success", "file": "openapi-c2aecc2f-list-models-response.json", "schema": "Model", "pinned_by": ["TestConformanceGoSDKModels"]},
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestConformanceGoSDKModels", "TestContractEnvelopeEveryCode"]}
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "forms": [
+        {"form": "success", "file": "openapi-c2aecc2f-create-chat-completion-response.json", "schema": "CreateChatCompletionResponse", "pinned_by": ["TestConformanceGoSDKChat", "TestConformanceChatSchemaHasTeeth"]},
+        {"form": "stream_chunk", "file": "openapi-c2aecc2f-create-chat-completion-stream-response.json", "schema": "CreateChatCompletionStreamResponse", "pinned_by": ["TestConformanceGoSDKChatStream", "TestConformanceChatStreamSchemaHasTeeth"]},
+        {"form": "stream_error_frame", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestConformanceGoSDKChatStreamErrorFrame"]},
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestConformanceGoSDKChatStreamBusy", "TestContractEnvelopeEveryCode"]}
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/embeddings",
+      "forms": [
+        {"form": "success", "file": "openapi-c2aecc2f-create-embedding-response.json", "schema": "CreateEmbeddingResponse", "pinned_by": ["TestConformanceGoSDKEmbeddings", "TestConformanceEmbeddingSchemaHasTeeth"]},
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestContractEnvelopeEveryCode"]}
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/rerank",
+      "forms": [
+        {"form": "success", "file": null, "schema": null, "pinned_by": ["TestConformanceRerank"]},
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestContractEnvelopeEveryCode"]}
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v2/rerank",
+      "forms": [
+        {"form": "success", "file": null, "schema": null, "pinned_by": ["TestConformanceRerank"]},
+        {"form": "error", "file": "openapi-c2aecc2f-error-response.json", "schema": "ErrorResponse", "pinned_by": ["TestContractEnvelopeEveryCode"]}
+      ]
+    }
+  ]
+}
