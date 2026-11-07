@@ -241,6 +241,13 @@ type statusResponse struct {
 	// it): the running requests of a shared GPU are a live activity oracle
 	// over every tenant's load (dispatcher.go TargetSnapshot exposure rule).
 	ForeignLoad *[]foreignLoadRow `json:"foreign_load,omitempty"`
+	// Gateway, UsageSplit24h and Federation are the model API's sections
+	// (W06-16, status_gateway.go): gateway on both paths (tenant path: own
+	// consumers only), the other two server-admin only. RC-D S1: declared,
+	// never set.
+	Gateway       *gatewayStatus       `json:"gateway,omitempty"`
+	UsageSplit24h *[]llmusage.SplitRow `json:"usage_split_24h,omitempty"`
+	Federation    *federationStatus    `json:"federation,omitempty"`
 	// GuardReview is the needs_review pipeline's push signal (guard W2): the
 	// flagged-block counts + the oldest flagged stamp, so an unworked review
 	// queue is VISIBLE instead of discoverable-on-pull only (guard-stats).

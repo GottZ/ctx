@@ -2741,6 +2741,14 @@ type GatewayConfig struct {
 	// only matters with the permission above. V51: > 0, finite — no 0
 	// sentinel (B-06-20).
 	ConsumerMonthlyCostUSDDefault float64 `key:"gateway.consumer_monthly_cost_usd_default" env:"CTX_GATEWAY_CONSUMER_MONTHLY_COST_USD_DEFAULT" default:"1.0" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// SoftRatio is the warning share of the day and month budgets (wave
+	// W06-18, design/06 §4.11): an admitted /v1 request that brings a bounded
+	// budget dimension of its consumer, tenant envelope or instance envelope
+	// to at least this share of its limit carries the response header
+	// x-ctx-quota-warning, and the first such request of a consumer, op,
+	// dimension and window writes one soft_limit event (consumer_usage in
+	// the audit trail). 0 = off. Range [0, 1) (V54).
+	SoftRatio float64 `key:"gateway.soft_ratio" env:"CTX_GATEWAY_SOFT_RATIO" default:"0.8" mut:"hot" parse:"strict" tenancy:"global-only"`
 
 	// Consumers is the administration of model consumers and their keys
 	// (/api/manage model-consumer-* and model-key-*, wave W01-5).

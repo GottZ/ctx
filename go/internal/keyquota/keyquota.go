@@ -116,6 +116,11 @@ type Limits struct {
 	// instance's over all consumers (gateway.instance_envelope_factor × the
 	// consumer's). A zero dimension is unbounded.
 	Consumer, Tenant, Instance Budget
+	// SoftRatio is the warning share of every bounded day and month
+	// dimension (gateway.soft_ratio, [0, 1), V54; wave W06-18): an admission
+	// that brings a dimension's used + reserved share to at least SoftRatio
+	// lists it in Decision.Warnings. 0 = off.
+	SoftRatio float64
 }
 
 // Budget is one level's calendar-UTC budgets of an op (design/06 §4.2 rows
@@ -275,6 +280,10 @@ type Decision struct {
 	// Headers is the state of the op's buckets right after an admission,
 	// as the request's lane sees it (zero for a refusal).
 	Headers RateHeaders
+	// Warnings are the day and month dimensions at or over Limits.SoftRatio
+	// after this admission (W06-18, usage_view.go); nil for a refusal and
+	// while SoftRatio is 0.
+	Warnings []Warning
 }
 
 // RateHeaders are the x-ratelimit-* values of one admission (design/06
