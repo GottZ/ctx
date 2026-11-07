@@ -339,6 +339,115 @@ func TestInflightRevokeEndsRunningRequest(t *testing.T) {
 	})
 }
 
+// ifSpellings are spellings of an id that the store takes ($1::uuid) besides
+// the canonical one the registry is keyed by.
+var ifSpellings = []struct {
+	name  string
+	spell func(id string) string
+}{
+	{"upper case", strings.ToUpper},
+	{"braces", func(id string) string { return "{" + strings.ToUpper(id) + "}" }},
+	{"no hyphens", func(id string) string { return strings.ReplaceAll(id, "-", "") }},
+}
+
+// ifHyphenEveryFour is PostgreSQL's spelling with a hyphen after every four
+// digits: $1::uuid takes it, the canonical form (uuid.Parse) does not.
+func ifHyphenEveryFour(id string) string {
+	hex := strings.ReplaceAll(id, "-", "")
+	parts := make([]string, 0, len(hex)/4)
+	for i := 0; i < len(hex); i += 4 {
+		parts = append(parts, hex[i:i+4])
+	}
+	return strings.Join(parts, "-")
+}
+
+// TestInflightRevokeTakesAnySpellingOfTheID is Fremd-Review 2 F1: the store
+// takes a key or consumer id in any spelling ($1::uuid), the registry is
+// keyed by the canonical one (PostgreSQL's text form of a uuid, which
+// ctx_model_auth hands the door). model-key-revoke and model-consumer-delete
+// with an upper-case, braced or unhyphenated id end the running request
+// without a listener (the synchronous trigger alone, sweep an hour) within
+// 5 s and answer cancelled_inflight 1. An id the canonical form does not
+// take (a hyphen after every four digits) is not found, byte-identical to
+// an unknown id: nothing revoked, nothing ended. The NOTIFY half of the
+// class (psql with an upper-case id in the WHERE) ends the same way — the
+// payload carries the row's id, never the statement's spelling. Red against
+// eacef68f: the action revokes, answers cancelled_inflight 0, and the
+// request runs on.
+func TestInflightRevokeTakesAnySpellingOfTheID(t *testing.T) {
+	for _, a := range []struct {
+		action, field, notFound string
+		id                      func(c store.ModelConsumer, k store.ModelKeyInfo) string
+	}{
+		{"model-key-revoke", "key_id", errModelKeyNotFound, func(_ store.ModelConsumer, k store.ModelKeyInfo) string { return k.ID }},
+		{"model-consumer-delete", "id", errConsumerNotFound, func(c store.ModelConsumer, _ store.ModelKeyInfo) string { return c.ID }},
+	} {
+		t.Run(a.action, func(t *testing.T) {
+			e := ifSetup(t, ifOpts{sweep: ifLongSweep})
+			admin := ifServerAdmin(t, e)
+			mh := mcHandler(t, e.seed, true, false)
+			mh.SetInflight(e.door.Inflight())
+			for _, s := range ifSpellings {
+				t.Run(s.name, func(t *testing.T) {
+					c, k, key := e.consumer(t, store.ModelConsumerSpec{})
+					e.open(t, key)
+					id := s.spell(a.id(c, k))
+					at := time.Now()
+					status, body, resp := mcCall(t, mh, admin, a.action, map[string]any{a.field: id})
+					if v, ok := resp["cancelled_inflight"].(float64); status != http.StatusOK || !ok || v != 1 {
+						t.Errorf("%s %s: %d %s, want 200 with cancelled_inflight 1", a.action, id, status, body)
+					}
+					e.revokedWithin(t, at, ifBound, a.action+" "+id)
+					if e.door.known.contains(key.Hash()) {
+						t.Error("the revoked key's hash stays known-good")
+					}
+				})
+			}
+			t.Run("hyphen after every four digits", func(t *testing.T) {
+				c, k, key := e.consumer(t, store.ModelConsumerSpec{})
+				e.open(t, key)
+				id := ifHyphenEveryFour(a.id(c, k))
+				status, body, _ := mcCall(t, mh, admin, a.action, map[string]any{a.field: id})
+				_, unknown, _ := mcCall(t, mh, admin, a.action, map[string]any{a.field: "00000000-0000-7000-8000-000000000000"})
+				if status != http.StatusNotFound || string(body) != string(unknown) {
+					t.Errorf("%s %s: %d %s, want 404 byte-identical to an unknown id (%s)", a.action, id, status, body, unknown)
+				}
+				var dead bool
+				if err := e.seed.QueryRow(context.Background(),
+					`SELECT revoked_at IS NOT NULL FROM context_model_keys WHERE id = $1::uuid`, k.ID).Scan(&dead); err != nil {
+					t.Fatalf("read the key: %v", err)
+				}
+				if dead {
+					t.Errorf("%s %s revoked the key without ending its request", a.action, id)
+				}
+				e.still(t, 300*time.Millisecond, "an id the action does not take")
+				at := time.Now()
+				if status, body, _ := mcCall(t, mh, admin, a.action, map[string]any{a.field: a.id(c, k)}); status != http.StatusOK {
+					t.Fatalf("%s with the canonical id: %d %s", a.action, status, body)
+				}
+				e.revokedWithin(t, at, ifBound, a.action+" canonical id")
+			})
+			e.emptyAfter(t)
+		})
+	}
+	t.Run("psql with an upper-case id (NOTIFY)", func(t *testing.T) {
+		e := ifSetup(t, ifOpts{sweep: ifLongSweep, listen: true})
+		_, k, key := e.consumer(t, store.ModelConsumerSpec{})
+		e.open(t, key)
+		at := time.Now()
+		ifExec(t, e, `UPDATE context_model_keys SET revoked_at = now() WHERE id = $1::uuid`, strings.ToUpper(k.ID))
+		e.revokedWithin(t, at, ifBound, "psql revoke by an upper-case key id")
+		scope := "ifspell"
+		tenant := ifTenant(t, e, "if-spell", scope)
+		_, _, key = e.consumer(t, store.ModelConsumerSpec{TenantID: tenant, TenantScope: &scope})
+		e.open(t, key)
+		at = time.Now()
+		ifExec(t, e, `UPDATE context_tenants SET status = 'suspended' WHERE id = $1::uuid`, strings.ToUpper(tenant))
+		e.revokedWithin(t, at, ifBound, "psql tenant suspend by an upper-case tenant id")
+		e.emptyAfter(t)
+	})
+}
+
 // TestInflightExpiryEndsRunningRequest is B19: a key whose expires_at
 // passes while a request runs ends it within 2 s of the expiry — (entry)
 // the expiry the door read at the request's entry arms the key's timer, no
