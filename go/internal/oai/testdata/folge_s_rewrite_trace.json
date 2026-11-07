@@ -1,0 +1,440 @@
+[
+ {
+  "seq": "plain",
+  "i": 0,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "plain",
+  "i": 1,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"Hallo ä € 😀 \\u003cb\\u003e\\u0026amp;\\u003c/b\\u003e \\u2028 \\\"q\\\" \\\\ \\n\\t\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 35,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "plain",
+  "i": 2,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "plain",
+  "i": 3,
+  "out": "",
+  "skip": true,
+  "runes": 0,
+  "usage": [
+   11,
+   3
+  ],
+  "prompt_n": 0
+ },
+ {
+  "seq": "plain-usage",
+  "i": 0,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"flex\",\"usage\":null}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "plain-usage",
+  "i": 1,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"Hallo ä € 😀 \\u003cb\\u003e\\u0026amp;\\u003c/b\\u003e \\u2028 \\\"q\\\" \\\\ \\n\\t\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"flex\",\"usage\":null}\n\n",
+  "skip": false,
+  "runes": 35,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "plain-usage",
+  "i": 2,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"flex\",\"usage\":null}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "plain-usage",
+  "i": 3,
+  "out": "data: {\"choices\":[],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"flex\",\"usage\":{\"completion_tokens\":3,\"prompt_tokens\":11,\"prompt_tokens_details\":{\"cached_tokens\":2},\"total_tokens\":14}}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": [
+   11,
+   3
+  ],
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-off",
+  "i": 0,
+  "out": "",
+  "skip": true,
+  "runes": 5,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-off",
+  "i": 1,
+  "out": "",
+  "skip": true,
+  "runes": 5,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-off",
+  "i": 2,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat-noreason\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\",\"usage\":null}\n\n",
+  "skip": false,
+  "runes": 6,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-off",
+  "i": 3,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat-noreason\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\",\"usage\":null}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-off",
+  "i": 4,
+  "out": "data: {\"choices\":[],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat-noreason\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\",\"usage\":{\"completion_tokens\":3,\"prompt_tokens\":11,\"prompt_tokens_details\":{\"cached_tokens\":2},\"total_tokens\":14}}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": [
+   11,
+   3
+  ],
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-on",
+  "i": 0,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":null,\"reasoning_content\":\"THINK\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 5,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-on",
+  "i": 1,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":null,\"reasoning\":\"x\",\"reasoning_content\":\"more\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 5,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-on",
+  "i": 2,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 6,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-on",
+  "i": 3,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "think-on",
+  "i": 4,
+  "out": "",
+  "skip": true,
+  "runes": 0,
+  "usage": [
+   11,
+   3
+  ],
+  "prompt_n": 0
+ },
+ {
+  "seq": "llama",
+  "i": 0,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":null,\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"a-very-long-alias-name-for-the-rewrite-to-grow-the-chunk\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "llama",
+  "i": 1,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"tok\"},\"finish_reason\":null,\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"a-very-long-alias-name-for-the-rewrite-to-grow-the-chunk\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 3,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "llama",
+  "i": 2,
+  "out": "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"a-very-long-alias-name-for-the-rewrite-to-grow-the-chunk\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":5,\"total_tokens\":7}}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": [
+   5,
+   2
+  ],
+  "prompt_n": 5
+ },
+ {
+  "seq": "tools",
+  "i": 0,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 11,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "tools",
+  "i": 1,
+  "out": "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\"}}]},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 8,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "tools",
+  "i": 2,
+  "out": "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Berlin\\\"}\"}}]},\"finish_reason\":null,\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 9,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "tools",
+  "i": 3,
+  "out": "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0,\"logprobs\":null,\"matched_stop\":null}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 0,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"no index\"},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 8,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 1,
+  "out": "data: {\"choices\":[{\"delta\":{},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 2,
+  "out": "",
+  "skip": true,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 3,
+  "out": "",
+  "skip": true,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 4,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"a\"},\"index\":0},{\"delta\":{\"content\":\"b\",\"refusal\":\"no\",\"role\":\"assistant\"},\"index\":1}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 4,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 5,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"lp\"},\"index\":0,\"logprobs\":{\"content\":[{\"token\":\"lp\",\"logprob\":-0.1,\"bytes\":[108,112],\"top_logprobs\":[]}]}}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 2,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 6,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"u\"},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\",\"usage\":null}\n\n",
+  "skip": false,
+  "runes": 1,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 7,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"u2\"},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\",\"usage\":{\"completion_tokens\":1,\"prompt_tokens\":1,\"total_tokens\":2}}\n\n",
+  "skip": false,
+  "runes": 2,
+  "usage": [
+   1,
+   1
+  ],
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge",
+  "i": 8,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"  spaced  \"},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 10,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 0,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"no index\"},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 8,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 1,
+  "out": "data: {\"choices\":[{\"delta\":{},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 2,
+  "out": "",
+  "skip": true,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 3,
+  "out": "",
+  "skip": true,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 4,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"a\"},\"index\":0},{\"delta\":{\"content\":\"b\",\"refusal\":\"no\",\"role\":\"assistant\"},\"index\":1}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 4,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 5,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"lp\"},\"index\":0,\"logprobs\":{\"content\":[{\"token\":\"lp\",\"logprob\":-0.1,\"bytes\":[108,112],\"top_logprobs\":[]}]}}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 2,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 6,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"u\"},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 1,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 7,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"u2\"},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 2,
+  "usage": [
+   1,
+   1
+  ],
+  "prompt_n": 0
+ },
+ {
+  "seq": "edge-off",
+  "i": 8,
+  "out": "data: {\"choices\":[{\"delta\":{\"content\":\"  spaced  \"},\"index\":0}],\"created\":1700000000,\"id\":\"chatcmpl-GOLDEN\",\"model\":\"chat\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"default\"}\n\n",
+  "skip": false,
+  "runes": 10,
+  "usage": null,
+  "prompt_n": 0
+ },
+ {
+  "seq": "bad",
+  "i": 0,
+  "out": "",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0,
+  "err": "oai: upstream answer without choices"
+ },
+ {
+  "seq": "bad",
+  "i": 1,
+  "out": "",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0,
+  "err": "unexpected end of JSON input"
+ },
+ {
+  "seq": "bad",
+  "i": 2,
+  "out": "",
+  "skip": false,
+  "runes": 0,
+  "usage": null,
+  "prompt_n": 0,
+  "err": "invalid character 'o' in literal null (expecting 'u')"
+ }
+]
