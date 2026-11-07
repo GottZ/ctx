@@ -18,11 +18,9 @@ import (
 // choices pass verbatim (tool calls, refusal, logprobs: ctx-B reads them,
 // L7), except the reasoning traces of a reasoning-off alias and the spec's
 // required logprobs key, which an engine that leaves it out gets as null
-// (CreateChatCompletionResponse). The non-stream rewrite is still the map
-// rewrite below: its walk (FOLGE-S, the stream's writer in rewrite_walk.go)
-// waits for an exception at the route's answer write (gosec G705:
-// json.Marshal is the HTML escape its taint check knows, the walk's identical
-// escape is not). TestRewriteChatTraceIsTheBase pins the bytes.
+// (CreateChatCompletionResponse). Since FOLGE-S the rewrite walks the
+// upstream bytes into one output buffer (rewrite_walk.go) — the bytes are
+// the ones the map rewrite wrote (TestRewriteChatTraceIsTheBase).
 
 // usageKeys are the spec subkeys of usage (OpenAI CompletionUsage);
 // OpenRouter's cost and every engine extra are dropped.
@@ -65,11 +63,12 @@ func serviceTierOf(lane string) string {
 // errNoChoices refuses an upstream body without a choices array.
 var errNoChoices = errors.New("oai: upstream answer without choices")
 
-// rewriteOverhead is what the stream rewrite may add to an upstream chunk
-// besides the escapes of id and alias: the keys ctx sets, created, the
-// index and delta a choice may lack, the SSE frame. The output buffer starts
-// at the upstream length plus this; a chunk that grows past it (HTML
-// escapes, many choices) grows the buffer by doubling.
+// rewriteOverhead is what the rewrite may add to an upstream body besides
+// the escapes of id and alias: the keys ctx sets, created, the null
+// logprobs and index a choice may lack, the SSE frame of a chunk. The
+// output buffer starts at the upstream length plus this; an answer that
+// grows past it (HTML escapes, many choices without logprobs) grows the
+// buffer by doubling.
 const rewriteOverhead = 256
 
 // rewriteBufferLen is the first size of a rewrite's output buffer.
@@ -131,91 +130,115 @@ func checkChoiceKinds(choices []byte) error {
 
 // rewriteChat renders the client body of an upstream answer: id, created and
 // model replaced, object and choices kept, usage filtered, service_tier set.
+// The body has room for one more byte (the route appends the newline).
 func rewriteChat(upstream []byte, id string, created int64, alias, lane string, reasoningOff bool) ([]byte, error) {
-	var in map[string]json.RawMessage
-	if err := json.Unmarshal(upstream, &in); err != nil {
-		return nil, err
-	}
-	choices, ok := in["choices"]
-	if !ok || !hasKind(choices, kindArray) {
-		return nil, errNoChoices
-	}
-	choices, err := normalizeChoices(choices, reasoningOff)
+	obj, null, err := upstreamObject(upstream)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]json.RawMessage{
-		"id":           mustJSON(id),
-		"object":       json.RawMessage(`"chat.completion"`),
-		"created":      json.RawMessage(strconv.FormatInt(created, 10)),
-		"model":        mustJSON(alias),
-		"choices":      choices,
-		"service_tier": mustJSON(serviceTierOf(lane)),
+	if null {
+		return nil, errNoChoices
 	}
-	if u, ok := in["usage"]; ok && hasKind(u, kindObject) {
-		var usage map[string]json.RawMessage
-		if err := json.Unmarshal(u, &usage); err == nil {
-			for k, v := range usage {
-				// A *_details value that is no object (SGLang sends null)
-				// is not the spec's CompletionUsage: dropped like an extra.
-				if !usageKeys[k] || (strings.HasSuffix(k, "_details") && !hasKind(v, kindObject)) {
-					delete(usage, k)
-				}
-			}
-			out["usage"] = mustJSON(usage)
-		}
+	choices, usage, _ := topMembers(obj)
+	if choices == nil || !hasKind(choices, kindArray) {
+		return nil, errNoChoices
 	}
-	return json.Marshal(out)
-}
-
-// normalizeChoices brings the choices into the spec shape with one decode:
-// a choice without logprobs (llama.cpp leaves the key out; the spec requires
-// it, nullable) gets logprobs: null, and for a reasoning-off alias every
-// message loses its reasoning traces. Everything else of a choice stays as
-// the engine sent it — values are never decoded.
-func normalizeChoices(choices json.RawMessage, reasoningOff bool) (json.RawMessage, error) {
-	var arr []map[string]json.RawMessage
-	if err := json.Unmarshal(choices, &arr); err != nil {
+	if err := checkChoiceKinds(choices); err != nil {
 		return nil, err
 	}
-	for _, c := range arr {
-		if c == nil {
-			continue
-		}
-		if _, ok := c["logprobs"]; !ok {
-			c["logprobs"] = json.RawMessage("null")
-		}
-		if reasoningOff {
-			stripReasoning(c)
-		}
+	out := make([]byte, 0, rewriteBufferLen(len(upstream), id, alias)+1)
+	out = append(out, `{"choices":`...)
+	out = appendChatChoices(out, choices, reasoningOff)
+	out = append(growBy(out, 64), `,"created":`...)
+	out = strconv.AppendInt(out, created, 10)
+	// id and alias go through json.Marshal here, as in the map rewrite: the
+	// answer is written to the client in one piece (chat.go), and the
+	// encoder is the HTML escape gosec's taint check (G705) knows; the
+	// stream's writer takes appendString's identical bytes.
+	out = append(out, `,"id":`...)
+	out = append(out, jsonString(id)...)
+	out = append(out, `,"model":`...)
+	out = append(out, jsonString(alias)...)
+	out = append(growBy(out, 64), `,"object":"chat.completion","service_tier":`...)
+	out = appendString(out, serviceTierOf(lane))
+	if usage != nil && hasKind(usage, kindObject) {
+		out = append(out, `,"usage":`...)
+		out = appendUsage(out, usage)
 	}
-	return json.Marshal(arr)
+	return append(growBy(out, 2), '}'), nil
 }
 
-// stripReasoning removes the reasoning traces from a choice's message.
-func stripReasoning(c map[string]json.RawMessage) {
-	raw, ok := c["message"]
-	if !ok {
-		return
-	}
-	var msg map[string]json.RawMessage
-	if json.Unmarshal(raw, &msg) != nil || msg == nil {
-		return
-	}
-	changed := false
-	for _, k := range reasoningMessageKeys {
-		if _, ok := msg[k]; ok {
-			delete(msg, k)
-			changed = true
+// jsonString is json.Marshal of s (a Go string always encodes).
+func jsonString(s string) []byte {
+	b, _ := json.Marshal(s)
+	return b
+}
+
+// appendChatChoices writes the choices of a completion (a valid array of
+// objects and nulls): a choice without logprobs gets logprobs: null, and
+// for a reasoning-off alias its message loses the reasoning traces. A null
+// stays null; everything else of a choice is as the engine sent it.
+func appendChatChoices(dst, choices []byte, reasoningOff bool) []byte {
+	dst = append(growBy(dst, 2), '[')
+	it, _ := newArrayIter(choices)
+	for n := 0; ; n++ {
+		e, more := it.next()
+		if !more {
+			break
 		}
+		if n > 0 {
+			dst = append(dst, ',')
+		}
+		if isNull(e) {
+			dst = append(growBy(dst, 4), "null"...)
+			continue
+		}
+		var buf [levelMembersMax]member
+		cm := collectMembers(buf[:0], e)
+		if findMember(cm, "logprobs") < 0 {
+			cm = insertMember(cm, "logprobs", nullValue)
+		}
+		dst = append(growBy(dst, 2), '{')
+		for j, m := range cm {
+			if reasoningOff && keyIs(m.key, "message") {
+				if j > 0 {
+					dst = append(dst, ',')
+				}
+				dst = appendKey(dst, m.key)
+				dst = append(dst, ':')
+				dst = appendMessage(dst, m.val)
+				continue
+			}
+			dst = appendMember(dst, j == 0, m.key, m.val)
+		}
+		dst = append(growBy(dst, 1), '}')
 	}
-	if changed {
-		c["message"] = mustJSON(msg)
-	}
+	return append(growBy(dst, 1), ']')
 }
 
 // nullValue is the raw JSON null the rewrite adds.
 var nullValue = []byte("null")
+
+// appendMessage writes a message of a reasoning-off alias: without its
+// reasoning traces when it carries one (then its members in key order, as
+// a map writes them), else as it is — like a message that is no object.
+func appendMessage(dst, msg []byte) []byte {
+	if !hasKind(msg, kindObject) {
+		return appendRaw(dst, msg)
+	}
+	var buf [levelMembersMax]member
+	mm := collectMembers(buf[:0], msg)
+	changed := false
+	for _, k := range reasoningMessageKeys {
+		if at := findMember(mm, k); at >= 0 {
+			mm[at].gone, changed = true, true
+		}
+	}
+	if !changed {
+		return appendRaw(dst, msg)
+	}
+	return appendLevel(dst, mm)
+}
 
 // appendUsage writes a usage object (valid JSON) with its spec subkeys only;
 // a *_details value that is no object (SGLang sends null) is not the spec's
@@ -520,12 +543,4 @@ func deltaRunes(dm []member) int {
 		}
 	}
 	return n
-}
-
-func mustJSON(v any) json.RawMessage {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return raw
 }

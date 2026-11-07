@@ -310,3 +310,11 @@ func baseRelaying(r *roleCarry, index json.RawMessage, delta map[string]json.Raw
 		r.relayed[i], r.pending[i] = true, ""
 	}
 }
+
+func mustJSON(v any) json.RawMessage {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}

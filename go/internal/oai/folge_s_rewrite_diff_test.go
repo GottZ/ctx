@@ -5,8 +5,6 @@ package oai
 // rewrite of the base (rewrite_base_test.go) — the client bytes, skip,
 // runes, usage, prompt_n, the role carry after the chunk and the error
 // text — over the golden corpora and, as fuzz targets, over any bytes.
-// rewriteChat is still the map rewrite (rewrite.go: its walk waits for the
-// route's G705 exception); its two gates hold the walk when it lands.
 
 import (
 	"bytes"
@@ -49,6 +47,9 @@ func folgeSChatSame(t *testing.T, upstream []byte, lane string, reasoningOff boo
 	want, werr := baseRewriteChat(upstream, "chatcmpl-<x>&", 1700000000, "alias- ", lane, reasoningOff)
 	if !bytes.Equal(got, want) || fmt.Sprint(gerr) != fmt.Sprint(werr) {
 		t.Fatalf("%q (off=%v):\n got %q err=%v\nbase %q err=%v", upstream, reasoningOff, got, gerr, want, werr)
+	}
+	if gerr == nil && cap(got) == len(got) {
+		t.Fatalf("%q: the body has no room for the route's newline (cap %d = len)", upstream, cap(got))
 	}
 }
 
