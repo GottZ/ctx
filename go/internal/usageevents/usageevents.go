@@ -9,8 +9,11 @@
 //
 //   - One row per event key: first_use once per model key (the key's
 //     consumer is entity_key, the key in metadata.model_key_id); soft_limit
-//     and hard_limit once per consumer × op × dimension × window
-//     (metadata.window_start = the UTC start of the day or month). The key
+//     and hard_limit once per consumer × op × dimension × level × window
+//     (metadata.window_start = the UTC start of the day or month; the level
+//     is part of the key so that the consumer's own limit and, later in the
+//     same window, its tenant's envelope are two exceedances — S1 decision
+//     after the sub-agent's finding). The key
 //     never contains anything the client controls (no Ctx-Hop, no claimed
 //     chain — B-06-21).
 //   - Dedupe in two stages: an in-memory set (bounded to the current and

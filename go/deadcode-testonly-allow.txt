@@ -218,3 +218,21 @@ internal/testdb/setup.go	newDatabase	# testdb: integration-getaggtes Container-/
 internal/testdb/setup.go	prepareDatabase	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
 migrations/fold.go	IsFolded	# Prod iteriert Folded() (store/migrations.go:268, check.go:164); IsFolded nur in fold_test.go:84/87
 migrations/fold.go	Section	# Nur Tests lesen Migrations-SQL über Section (fold_test.go:34 + 33 Integrationstests); Runner nutzt FS
+internal/handler/llmlog_consumer.go	llmlogListQuery	# wartet: RC-D S2 W06-17 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/handler/status_gateway.go	NewConsumerRing	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/handler/usage.go	NewUsageHandler	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/handler/usage.go	UsageHandler.HandleUsage	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/handler/usage.go	UsageHandler.HandleUsageConsumers	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/handler/usage.go	writeUsageNotImplemented	# wartet: RC-D S2 W06-16 (S1-Stub-Antwort, entfällt in S2) — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/keyquota/usage_view.go	WarningHeader	# wartet: RC-D S2 W06-18 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/llmusage/usage.go	Align	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/llmusage/usage.go	Quantile	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/llmusage/usage.go	ReadCover	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/llmusage/usage.go	ReadSeries	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/llmusage/usage.go	ReadSplit24h	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/llmusage/usage.go	SeriesSQL	# wartet: RC-D S2 W06-16 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/usageevents/usageevents.go	DedupeKey	# wartet: RC-D S2 W06-18 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/usageevents/usageevents.go	NewRecorder	# wartet: RC-D S2 W06-18 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/usageevents/usageevents.go	Recorder.Flush	# wartet: RC-D S2 W06-18 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/usageevents/usageevents.go	Recorder.Note	# wartet: RC-D S2 W06-18 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
+internal/usageevents/usageevents.go	Recorder.Stats	# wartet: RC-D S2 W06-18 — Vertrags-Stub (RC-D S1 C2), Produktionsaufrufer in S2
