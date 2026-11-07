@@ -185,6 +185,15 @@ func TestRegistryStrictSet(t *testing.T) {
 		// W06-11: the meter's L1 — a typo'd concurrency limit must not fall back
 		// to the default silently either.
 		"gateway.consumer_concurrency_default": true,
+		// A03-W10 (design/03 §4.10 no. 1, A-E2 no. 2): the stream relay's
+		// buffer is a memory bound per stream (it joins the V39 floor), the
+		// drain rate and its window cut a client that drains too slowly — a
+		// typo'd value silently falling back to the default would hide the
+		// bound the operator meant to set. The window is a duration and
+		// strict all the same: it is a cut-off, not a cadence.
+		"gateway.stream_relay_buffer_bytes": true,
+		"gateway.stream_min_drain_rate":     true,
+		"gateway.stream_min_drain_window":   true,
 		// W01-8 (design/01 §4.2): the in-flight sweep period is the clock of
 		// the revocation backstop — the longest a revoked key whose
 		// notification was lost keeps its running requests. A security clock

@@ -79,6 +79,16 @@ type TargetPolicy struct {
 	// ExternalMaxInflight caps the external leases on an offered
 	// self-admitting target (limits.external_max_inflight, MIN); 0 = no cap.
 	ExternalMaxInflight int
+	// AbortSettleStream / AbortSettleNonstream are limits.abort_settle_ms
+	// (A03-W10, design/03 §3.2, §4.10 no. 2; MAX per field over the
+	// authoritative rows, settle.go): how long a slot-holding lease whose run
+	// context ended before its Release stays booked as settling — the engine
+	// half of the release. 0 (the default, a missing key, a malformed value) =
+	// no settle, the lease ends at its Release as before. Not part of
+	// declared(): a target without slots and without an external offer holds
+	// no unit a settle could keep.
+	AbortSettleStream    time.Duration
+	AbortSettleNonstream time.Duration
 }
 
 // declared reports whether any effective dispatch key survived the merge.
@@ -169,10 +179,13 @@ const (
 	limitInternalReserved    = "internal_reserved_slots"
 	limitExternalOffer       = "external_offer"
 	limitExternalMaxInflight = "external_max_inflight"
+	// limitAbortSettle is abort_settle_ms (A03-W10, design/03 §3.2, §4.10):
+	// {"stream": ms, "nonstream": ms}, settle.go.
+	limitAbortSettle = "abort_settle_ms"
 )
 
 var dispatchLimitKeys = []string{limitSlots, limitPreempt, limitHeraldScope, limitReservedSlots,
-	limitInternalReserved, limitExternalOffer, limitExternalMaxInflight}
+	limitInternalReserved, limitExternalOffer, limitExternalMaxInflight, limitAbortSettle}
 
 func hasDispatchKeys(limits map[string]any) bool {
 	for _, k := range dispatchLimitKeys {
@@ -317,6 +330,7 @@ func mergeRows(origin string, auth []BackendRow, logger *slog.Logger) TargetPoli
 			"origin", origin, "reserved", reserved, "slots", pol.Slots)
 	}
 	applyExternalPolicy(&pol, origin, auth, reserved, logger)
+	pol.AbortSettleStream, pol.AbortSettleNonstream = mergeAbortSettle(origin, auth, logger)
 	return pol
 }
 

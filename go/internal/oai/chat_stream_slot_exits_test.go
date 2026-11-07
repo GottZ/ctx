@@ -377,7 +377,12 @@ func TestStreamEveryExitFreesTheSlotOnce(t *testing.T) {
 		rig := newChatRig(t, []backends.Backend{r1, r2}, 4, 1, withStreamSettings, withDeps(func(d *oai.Deps) { d.Limiter = m }))
 		srv := serveHTTP(t, rig.router)
 		body := streamBody("chat")
-		rig.setSettings(func(s *oai.Settings) { s.InflightBudget = 3*int64(len(body)) + 2*s.MaxStreamFrameBytes + 8<<10 })
+		// + the relay buffer (A03-W10): the first attempt books it before its
+		// wire call — without it the ring is refused first (exit 23), not the
+		// upstream body this exit is about.
+		rig.setSettings(func(s *oai.Settings) {
+			s.InflightBudget = 3*int64(len(body)) + 2*s.MaxStreamFrameBytes + 8<<10 + s.StreamRelayBufferBytes
+		})
 		a := postStream(context.Background(), t, srv, body)
 		t.Logf("R5 0b: answer %d %s, wire hits %d/%d", a.status, r5Code(a.raw), u1.hits.Load(), u2.hits.Load())
 		if a.status != http.StatusServiceUnavailable || r5Code(a.raw) != oai.CodeServerOverloaded || u1.hits.Load()+u2.hits.Load() != 0 {
@@ -398,7 +403,12 @@ func TestStreamEveryExitFreesTheSlotOnce(t *testing.T) {
 			withStream(0, 10*time.Second, 5*time.Second), withDeps(func(d *oai.Deps) { d.Limiter = m }))
 		srv := serveHTTP(t, rig.router)
 		body := streamBody("chat")
-		rig.setSettings(func(s *oai.Settings) { s.InflightBudget = 3*int64(len(body)) + 2*s.MaxStreamFrameBytes + 8<<10 })
+		// + the relay buffer (A03-W10): the first attempt books it before its
+		// wire call — without it the ring is refused first (exit 23), not the
+		// upstream body this exit is about.
+		rig.setSettings(func(s *oai.Settings) {
+			s.InflightBudget = 3*int64(len(body)) + 2*s.MaxStreamFrameBytes + 8<<10 + s.StreamRelayBufferBytes
+		})
 		a := postStream(context.Background(), t, srv, body)
 		code, last := a.errorFrame(t)
 		t.Logf("R5 0c: answer %d, frame %q last=%v, hits %d/%d", a.status, code, last, u1.hits.Load(), u2.hits.Load())
@@ -717,6 +727,57 @@ func TestStreamEveryExitFreesTheSlotOnce(t *testing.T) {
 			t.Errorf("frame %q, want invalid_api_key", e.data)
 		}
 		r5Check(t, "22 registry: key revoked after the commit", m, rig, srv, "settle", r5HoldOn(u))
+	})
+
+	// A03-W10 × W01-8: exit 22 during a drain — the upstream ended (the lease
+	// free), the client reads the rest from the relay buffer; the revocation
+	// ends the drain (the writer stops with the run, the queued chunks are
+	// dropped) with the error frame, and the slot, held for the drain
+	// (hardening 1, F3b), ends once. The gate over the real door and
+	// registry is TestRevokeEndsADrainingStream (integration).
+	t.Run("22 registry: key revoked during the drain", func(t *testing.T) {
+		const frames = 8 // 32 KiB each: all in the relay buffer, the writer on the second
+		end := newUpstreamEnd()
+		rv := newRevoker()
+		u := newUpstream(t, "")
+		u.setRespond(sseRespond(bigFrames(frames, 32<<10, 0), nil, end))
+		m := r5Meter()
+		rig := newChatRig(t, one(u), 4, 1, withStreamSettings, withDeps(func(d *oai.Deps) { d.Limiter = m }))
+		c := startDrainClient(t, rv.wrap(rig.router))
+		if c.resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d", c.resp.StatusCode)
+		}
+		if _, err := c.event(); err != nil {
+			t.Fatalf("first event: %v", err)
+		}
+		if !end.wait(5*time.Second) || end.canceled || !waitHeld(rig.disp, u.srv.URL, 0, 2500*time.Millisecond) {
+			held, _ := heldOn(rig.disp, u.srv.URL)
+			t.Fatalf("upstream ended %v (aborted %v), lease held %d — want the drain after a clean upstream end", !end.at.IsZero(), end.canceled, held)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if n := endCount(m); n != 0 {
+			t.Fatalf("ends %q while the client drains, want none (F3b)", m.endsOf())
+		}
+		if n := rv.revoke(); n != 1 {
+			t.Fatalf("revoked %d running requests, want 1", n)
+		}
+		after, last := 0, ""
+		for {
+			data, err := c.event()
+			if err != nil {
+				break
+			}
+			last = data
+			if strings.Contains(data, `"content":"xxx`) {
+				after++
+			}
+		}
+		t.Logf("R5 22-drain: %d content chunks after the revocation, last %.100q", after, last)
+		if r5Code(last) != oai.CodeInvalidAPIKey || after > 1 {
+			t.Errorf("last %.200q, %d chunks after the revocation — want invalid_api_key last, at most the chunk in the writer's hand", last, after)
+		}
+		_ = c.conn.Close()
+		r5Check(t, "22 registry: key revoked during the drain", m, rig, c.srv, "settle", r5HoldOn(u))
 	})
 
 	t.Run("15 shutdown after the commit", func(t *testing.T) {
