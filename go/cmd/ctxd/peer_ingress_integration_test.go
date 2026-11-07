@@ -149,7 +149,7 @@ func TestModelGroupPeerIngressOrder(t *testing.T) {
 		"/v2": {{http.MethodPost, "/rerank", probe}},
 	} {
 		mountModelGroup(r, prefix, modelGroupDeps{
-			access: testAccessLog(), gate: oai.EnabledGate(get), door: door, ingress: ingress, maxDepth: func() int { return 3 },
+			access: testAccessLog(), gate: oai.EnabledGate(get), door: door, ingress: ingress, maxDepth: func() int { return 3 }, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop,
 			inner:  []func(http.Handler) http.Handler{seen.stage, handler.MaxBodySizeStrictWith(func() int64 { return bodyCap }, oai.RefuseRequestTooLarge)},
 			routes: routes,
 		})

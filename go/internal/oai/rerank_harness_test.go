@@ -234,7 +234,7 @@ func (r *chatRig) mountRerank(v1, v2 http.Handler) chi.Router {
 				})
 			})
 			gr.Use(oai.Recover)
-			gr.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Logger: slog.New(slog.DiscardHandler)}))
+			gr.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Binder: acceptPeerBinder{}, Logger: slog.New(slog.DiscardHandler)}))
 			gr.Use(oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 			gr.Method(http.MethodPost, "/rerank", g.h)
 		})

@@ -75,6 +75,16 @@ func federationMaxDepthGetter(cfgStore *config.Store) func() int {
 	}
 }
 
+// federationRequirePeerHopGetter is the federation.require_peer_hop source
+// of the PeerIngress (F-W12, design/04 §4.6 step 6): one snapshot per call,
+// so the hot key applies from the next request on. Global-only like
+// federation.max_depth: the stage runs before any tenant is resolved.
+func federationRequirePeerHopGetter(cfgStore *config.Store) func() bool {
+	return func() bool {
+		return cfgStore.Snapshot().Federation.RequirePeerHop //nolint:forbidigo // MT 06 BLIND: federation.require_peer_hop is global-only (one federation topology per process); the PeerIngress runs before any tenant is resolved.
+	}
+}
+
 // gatewayIngressAssert is the boot half of "no /v1 without its ingress
 // protection" (F-W8, design/04 §4.6, §7.2 no. 1): gateway.enabled
 // effectively true — from CTX_GATEWAY_ENABLED or a settings override, the
@@ -122,6 +132,11 @@ type modelGateway struct {
 	seedRead meterSeedRead
 	ledger   *keyquota.Ledger
 	flusher  *rejectionFlusher
+	// binder and requirePeerHop are the PeerIngress's peer stage (F-W12):
+	// the TOFU binding over the pool and the federation.require_peer_hop
+	// getter, shared by /v1 and /v2.
+	binder         federation.PeerBinder
+	requirePeerHop func() bool
 }
 
 // meterSeedRead reads what the consumers used in the UTC day and month of
@@ -216,7 +231,9 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 			Pool: pool, Settings: get, Usage: usage, Reject: renderModelAuthRejection,
 			TrustedProxy: strings.TrimSpace(os.Getenv(handler.EnvTrustedProxy)),
 		}),
-		usage: usage,
+		usage:          usage,
+		binder:         auth.PeerBindings{Pool: pool},
+		requirePeerHop: federationRequirePeerHopGetter(cfgStore),
 	}
 }
 
@@ -227,6 +244,7 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 func (g *modelGateway) group(ingress *fedhop.Ingress, maxDepth func() int, routes []modelRoute) modelGroupDeps {
 	return modelGroupDeps{
 		access: g.access, gate: oai.EnabledGate(g.settings), door: g.door, ingress: ingress, maxDepth: maxDepth,
+		binder: g.binder, requirePeerHop: g.requirePeerHop,
 		inner: []func(http.Handler) http.Handler{
 			handler.MaxBodySizeStrictWith(func() int64 { return g.settings().MaxRequestBytes }, oai.RefuseRequestTooLarge),
 			oai.InflightBudget(&g.budget, g.settings),
@@ -554,7 +572,7 @@ func (l meterLimiter) Egress(_ context.Context, ca *auth.ConsumerAuth, op string
 func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	s := l.settings().Meter
 	sub, limits, lim := meterLimits(s, ca, est.Op)
-	if handler.ResolveLane(ca, fedhop.InboundFrom(ctx), est.ServiceTier) != handler.LaneUrgent {
+	if handler.RequestLane(ctx, ca, est.ServiceTier) != handler.LaneUrgent {
 		sub.Lane = keyquota.LaneBulk
 	}
 	res, d := l.meter.Admit(sub, limits,

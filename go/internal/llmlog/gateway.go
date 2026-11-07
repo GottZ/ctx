@@ -156,9 +156,7 @@ type Gateway struct {
 	// PeerIngress (fedhop.PeerInstanceFrom, wave F-W12): the binding in
 	// force when the request ran — a reset_peer_binding later does not
 	// re-attribute the row. Stored as metadata.gw.peer_instance (a UUID,
-	// else dropped); "" for an app and a pathless peer.
-	//
-	// RC-D S1 stub: not written yet (wire ignores it).
+	// canonical, else dropped); "" for an app and a pathless peer.
 	PeerInstance string
 	// Usage is UsageBackend or UsageEstimated.
 	Usage string
@@ -191,6 +189,7 @@ type gatewayWire struct {
 	ClientReqID  string   `json:"client_req_id,omitempty"`
 	Finish       string   `json:"finish,omitempty"`
 	ModelKeyID   string   `json:"model_key_id,omitempty"`
+	PeerInstance string   `json:"peer_instance,omitempty"`
 }
 
 // StampGateway records WHO made a /v1 request and how it ran: the
@@ -254,6 +253,9 @@ func (g Gateway) wire() gatewayWire {
 	}
 	if u, err := uuid.Parse(g.ModelKeyID); err == nil {
 		w.ModelKeyID = u.String()
+	}
+	if u, err := uuid.Parse(g.PeerInstance); err == nil {
+		w.PeerInstance = u.String()
 	}
 	return w
 }

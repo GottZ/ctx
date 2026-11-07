@@ -12,11 +12,8 @@ type peerInstanceKey struct{}
 // federation.PeerIngress step 7; an app or a peer without Ctx-Path carries
 // no mark. Readers: federation.PeerHint (the lane hint counts only for a
 // proved peer, design/04 §4.9) and the /v1 routes (metadata.gw.peer_instance).
-//
-// RC-D S1 stub: returns ctx unchanged — no request is a proved peer yet.
 func WithPeerInstance(ctx context.Context, id string) context.Context {
-	_ = id
-	return ctx
+	return context.WithValue(ctx, peerInstanceKey{}, id)
 }
 
 // PeerInstanceFrom returns the instance id a ctx-peer request proved at the

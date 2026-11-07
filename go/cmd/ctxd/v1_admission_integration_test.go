@@ -124,7 +124,7 @@ func newHeraldRig(t *testing.T, wrap func(http.HandlerFunc) http.HandlerFunc) *h
 	r := chi.NewRouter()
 	r.Use(fedhop.IdentityMiddleware(ident))
 	mountModelGroup(r, "/v1", modelGroupDeps{access: testAccessLog(), gate: oai.EnabledGate(get), door: door, ingress: &fedhop.Ingress{},
-		maxDepth: func() int { return 3 }, routes: []modelRoute{{http.MethodPost, "/chat/completions", wrap(fixture)}}})
+		maxDepth: func() int { return 3 }, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop, routes: []modelRoute{{http.MethodPost, "/chat/completions", wrap(fixture)}}})
 	rig.router = r
 	return rig
 }

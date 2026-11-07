@@ -218,7 +218,3 @@ internal/testdb/setup.go	newDatabase	# testdb: integration-getaggtes Container-/
 internal/testdb/setup.go	prepareDatabase	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
 migrations/fold.go	IsFolded	# Prod iteriert Folded() (store/migrations.go:268, check.go:164); IsFolded nur in fold_test.go:84/87
 migrations/fold.go	Section	# Nur Tests lesen Migrations-SQL über Section (fold_test.go:34 + 33 Integrationstests); Runner nutzt FS
-internal/auth/peer_binding.go	PeerBindings.BindPeer	# wartet: RC-D S2 F-W12 — cmd/ctxd verdrahtet auth.PeerBindings als PeerIngressConfig.Binder
-internal/federation/peer.go	PeerHint	# wartet: RC-D S2 F-W12 — V1Admission.Plan liest den Peer-Hinweis nur noch über PeerHint
-internal/fedhop/peer.go	PeerInstanceFrom	# wartet: RC-D S2 F-W12 — PeerHint und die /v1-Routen (metadata.gw.peer_instance) lesen die Marke
-internal/fedhop/peer.go	WithPeerInstance	# wartet: RC-D S2 F-W12 — PeerIngress Schritt 7 setzt die Marke nach bewiesener Bindung

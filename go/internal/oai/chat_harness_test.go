@@ -310,6 +310,14 @@ type chatRig struct {
 	peerIngress func(*federation.PeerIngressConfig)
 }
 
+// acceptPeerBinder is the PeerIngress binder of the harnesses whose subject
+// is not the peer binding (F-W12): every first contact binds the sender.
+type acceptPeerBinder struct{}
+
+func (acceptPeerBinder) BindPeer(_ context.Context, _, instanceID string) (auth.PeerBinding, error) {
+	return auth.PeerBinding{Instance: instanceID, Created: true}, nil
+}
+
 // rigOption adjusts a rig before the route is mounted.
 type rigOption func(*chatRig)
 
@@ -448,7 +456,7 @@ func (r *chatRig) mount(h http.Handler) chi.Router {
 			})
 		})
 		g.Use(oai.Recover)
-		pcfg := federation.PeerIngressConfig{Consumer: r.deps.Consumer, Logger: slog.New(slog.DiscardHandler)}
+		pcfg := federation.PeerIngressConfig{Consumer: r.deps.Consumer, Binder: acceptPeerBinder{}, Logger: slog.New(slog.DiscardHandler)}
 		if r.peerIngress != nil {
 			r.peerIngress(&pcfg)
 		}

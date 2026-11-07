@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/fedhop"
 )
 
 // PeerBinder is the trust-on-first-use write of a peer binding (design/04
@@ -37,9 +38,13 @@ const EventPeerBound = "peer_bound"
 // PeerIngress never saw have no hint (I-H3). The lane resolve maps the
 // class (handler.ResolveLane, I-H1…I-H4); the hint never raises above the
 // consumer's admission_lane.
-//
-// RC-D S1 stub: no hint for anybody (the restrictive side, I-H3).
 func PeerHint(ctx context.Context) (class string, ok bool) {
-	_ = ctx
-	return "", false
+	if fedhop.PeerInstanceFrom(ctx) == "" {
+		return "", false
+	}
+	in := fedhop.InboundFrom(ctx)
+	if in.Class == "" || len(in.Path) == 0 {
+		return "", false
+	}
+	return in.Class, true
 }

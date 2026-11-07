@@ -60,6 +60,14 @@ func (b *fakeBinder) n() int {
 	return len(b.calls)
 }
 
+// acceptBinder binds every first contact to its sender — the binder of
+// the F-W9 tests, whose subject is not the binding.
+type acceptBinder struct{}
+
+func (acceptBinder) BindPeer(_ context.Context, _, instanceID string) (auth.PeerBinding, error) {
+	return auth.PeerBinding{Instance: instanceID, Created: true}, nil
+}
+
 // fakeEvents records the notes of the C2 hook.
 type fakeEvents struct {
 	mu    sync.Mutex
