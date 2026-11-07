@@ -130,6 +130,12 @@ describe('rejected.auth per consumer (W05-10 / V-06-b)', () => {
     expect(rejectionsText(point({ rejected: [] }), true)).toBe('none')
   })
 
+  it('an incomplete bucket has no final refusals: not recorded (review L3)', () => {
+    const p = point({ complete: false, rejected: [{ reason: 'rate', n: 2, wait_ms_avg: 0 }] })
+    expect(rejectionCells(p, true), 'gate W05-10: complete:false nie als Zahl').toEqual([])
+    expect(rejectionsText(p, true)).toBe(NOT_RECORDED)
+  })
+
   it('an instance-wide (not consumer-scoped) series may show auth', () => {
     const p = point({ rejected: [{ reason: 'auth', n: 7, wait_ms_avg: null }] })
     expect(rejectionCells(p, false)).toEqual([{ reason: 'auth', text: '7' }])

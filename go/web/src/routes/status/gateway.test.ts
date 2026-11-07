@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { DispatchStatus, DispatchTarget, DispatchTenantStatus, DispatchTenantTarget, GatewayStatus } from '../../lib/api/types'
-import { expiringText, gatewayTileMode, partitionRows, tenantGatewayForeignFields, tenantTargetCells } from './gateway'
+import { countText, expiringText, gatewayTileMode, partitionRows, rejectionsText, tenantGatewayForeignFields, tenantTargetCells } from './gateway'
 
 const ADMIN: GatewayStatus = {
   enabled: true,
@@ -149,6 +149,20 @@ describe('partitionRows (W05-17: int/ext split from A03-W3)', () => {
   })
   it('no dispatch section ⇒ no rows', () => {
     expect(partitionRows(null)).toEqual([])
+  })
+})
+
+describe('null ≠ 0 in the tile (W05-17, review M1: C2 sends reservations_open / rejections_5m as null until fed)', () => {
+  it('a null refusal map reads "not recorded", an empty one "none", counts are sorted by reason', () => {
+    expect(rejectionsText(null), 'gate: null ≠ 0').toBe('not recorded')
+    expect(rejectionsText(undefined)).toBe('not recorded')
+    expect(rejectionsText({})).toBe('none')
+    expect(rejectionsText({ rate: 4, quota: 1 })).toBe('quota 1, rate 4')
+  })
+  it('a null counter reads "not recorded", a recorded 0 stays 0', () => {
+    expect(countText(null), 'gate: null ≠ 0').toBe('not recorded')
+    expect(countText(0)).toBe('0')
+    expect(countText(1234)).toBe('1,234')
   })
 })
 

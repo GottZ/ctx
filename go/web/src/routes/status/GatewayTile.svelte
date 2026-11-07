@@ -12,7 +12,7 @@
   import { session } from '../../lib/auth.svelte'
   import Table from '../../lib/ui/Table.svelte'
   import { fmtMs } from './dispatch'
-  import { expiringText, gatewayTileMode, partitionRows, rejectionsText, tenantTargetCells } from './gateway'
+  import { countText, expiringText, gatewayTileMode, partitionRows, rejectionsText, tenantTargetCells } from './gateway'
 
   let { status }: { status: StatusResponse } = $props()
 
@@ -32,9 +32,11 @@
     <div class="metrics">
       <div class="metric"><span class="k">consumers</span><span class="v">{g.consumers}</span></div>
       <div class="metric"><span class="k">used 1h</span><span class="v">{g.consumers_used_1h}</span></div>
-      <div class="metric"><span class="k">open reservations</span><span class="v">{g.reservations_open}</span></div>
+      <div class="metric">
+        <span class="k">open reservations</span><span class="v" data-testid="gateway-reservations">{countText(g.reservations_open)}</span>
+      </div>
     </div>
-    <p class="line">refusals 5 min: {rejectionsText(g.rejections_5m)}</p>
+    <p class="line" data-testid="gateway-rejections">refusals 5 min: {rejectionsText(g.rejections_5m)}</p>
     {#if expiringText(g.consumers_expiring) !== ''}
       <p class="line warn" data-testid="gateway-expiring">{expiringText(g.consumers_expiring)}</p>
     {/if}
@@ -70,9 +72,9 @@
           {/each}
         </Table>
       {/if}
-      {#if g.top_consumers_1h.length > 0}
+      {#if (g.top_consumers_1h ?? []).length > 0}
         <ol class="top" aria-label="top consumers last hour">
-          {#each g.top_consumers_1h as t (t.consumer_id)}
+          {#each g.top_consumers_1h ?? [] as t (t.consumer_id)}
             <li>
               <a href="/gateway/consumers/{t.consumer_id}"><code>{t.consumer_id.slice(-8)}</code></a>
               <span>{t.requests} requests · {t.tokens.toLocaleString('en-US')} tokens</span>

@@ -1875,9 +1875,12 @@ export interface GatewayEnvelopeUse {
 export interface GatewayStatus {
   enabled: boolean
   consumers: number
-  reservations_open: number
-  rejections_5m: Record<string, number>
-  top_consumers_1h: GatewayTopConsumer[]
+  /** null until the meter feeds it (C2: null ≠ 0) — rendered "not recorded". */
+  reservations_open: number | null
+  /** null until the in-memory ledger feeds it (C2) — "not recorded"; {} = no refusals. */
+  rejections_5m: Record<string, number> | null
+  /** A Go nil slice serialises as null — treated as an empty list. */
+  top_consumers_1h: GatewayTopConsumer[] | null
   consumers_used_1h: number
   consumers_expiring: number
   instance_envelope?: Record<string, GatewayEnvelopeUse>
@@ -1897,14 +1900,15 @@ export interface UsageSplit24hRow {
 
 /** /api/status `federation` — the federation counters (server-admin only). */
 export interface FederationStatus {
-  loop_rejects: number
-  depth_rejects: number
-  header_invalid: number
+  // the ledger-fed counters are null until their source exists (C2 *int64)
+  loop_rejects: number | null
+  depth_rejects: number | null
+  header_invalid: number | null
   header_ignored: number
   peer_without_path: number
-  peer_mismatch: number
-  embed_space_rejects: number
-  busy: number
+  peer_mismatch: number | null
+  embed_space_rejects: number | null
+  busy: number | null
   stamp_without_identity: number
   peer_bound: number
 }

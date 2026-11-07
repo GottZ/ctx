@@ -423,13 +423,14 @@ export function gatewayStatusSections(role: Role, seed: PanelSeed | undefined): 
     }
   }
   return {
-    // the tenant answer: own consumers only, no instance_envelope / auth / events
+    // the tenant answer: own consumers only, no instance_envelope / auth / events;
+    // reservations_open / rejections_5m null = not fed yet (C2 4b510735, null ≠ 0)
     gateway: {
       enabled: true,
       consumers: 2,
-      reservations_open: 0,
-      rejections_5m: {},
-      top_consumers_1h: [],
+      reservations_open: null,
+      rejections_5m: null,
+      top_consumers_1h: null,
       consumers_used_1h: 1,
       consumers_expiring: 1,
     },

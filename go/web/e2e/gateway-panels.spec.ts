@@ -77,6 +77,27 @@ test.describe('usage panel (W05-10)', () => {
   })
 })
 
+test.describe('limits card writes (W05-12, review L4)', () => {
+  test('gateway-panels: a tenant-admin saves within the ceiling (flat full row, no tier) and removes the row again', async ({ page }) => {
+    const session = await seedSession(page, { role: 'tenant-admin', theme: 'dark', capabilities: CAPS })
+    await openDetail(page, PANEL_CONSUMER_A)
+    const limits = page.locator('section[aria-label="limits"]')
+    await limits.getByRole('spinbutton', { name: 'chat rpm' }).fill('20')
+    await limits.getByRole('button', { name: 'Save chat limits' }).click()
+    await expect(limits.getByRole('status').filter({ hasText: 'saved' })).toBeVisible()
+    const set = session.calls.filter((c) => c.action === 'gateway-limits-set').at(-1)
+    const data = (set?.body as { data?: Record<string, unknown> } | undefined)?.data
+    expect(data, 'gate W05-12: flat full-row write').toMatchObject({ subject_kind: 'consumer', consumer_id: PANEL_CONSUMER_A, op: 'chat', rpm: 20, tpm: null })
+    expect(Object.keys(data ?? {}), 'gate W05-12: no tier on the wire').not.toContain('tier')
+    await expect(limits.getByRole('spinbutton', { name: 'chat rpm' })).toHaveValue('20')
+    await limits.getByRole('button', { name: 'Remove my chat row' }).click()
+    await expect(limits.getByRole('button', { name: 'Remove my chat row' })).toHaveCount(0)
+    const del = session.calls.filter((c) => c.action === 'gateway-limits-delete').at(-1)
+    expect((del?.body as { data?: unknown } | undefined)?.data).toEqual({ subject_kind: 'consumer', consumer_id: PANEL_CONSUMER_A, op: 'chat' })
+    await expect(limits.getByRole('spinbutton', { name: 'chat rpm' })).toHaveValue('')
+  })
+})
+
 test.describe('status tile "Model API" (W05-17)', () => {
   test('gateway-panels: server-admin tile shows the int/ext partition (positive control)', async ({ page }) => {
     await seedSession(page, { role: 'server-admin', theme: 'dark', capabilities: CAPS, panels: { gatewayStatus: 'on' } })
@@ -87,6 +108,7 @@ test.describe('status tile "Model API" (W05-17)', () => {
     await expect(row).toHaveCount(1)
     await expect(row.first()).toContainText('http://spark:30000')
     await expect(tile, 'gate W05-17: ablaufende Keys').toContainText('2 keys expire soon')
+    await expect(tile.locator('[data-testid="gateway-rejections"]'), 'review L1: the 5-min refusals render').toHaveText('refusals 5 min: quota 1, rate 4')
   })
 
   test('gateway-panels: tile off when the status answer carries gateway = null', async ({ page }) => {
@@ -102,6 +124,9 @@ test.describe('status tile "Model API" (W05-17)', () => {
     const tile = page.locator('section[aria-label="model api"]')
     await expect(tile.locator('[data-tenant-depth]'), 'gate W05-17: Tiefe-Klasse').toHaveText(['high'])
     await expect(tile, 'gate W05-17: rot gegen numerische Fremdtiefe').not.toContainText('37')
+    // review M1: C2 sends reservations_open / rejections_5m as null until fed — never "0"/"none"
+    await expect(tile.locator('[data-testid="gateway-reservations"]'), 'null ≠ 0').toHaveText('not recorded')
+    await expect(tile.locator('[data-testid="gateway-rejections"]'), 'null ≠ 0').toHaveText('refusals 5 min: not recorded')
     const panelCalls = session.calls.filter((c) => c.path === '/api/usage' || c.action === 'model-consumer-list')
     expect(panelCalls, 'gate W05-17: the tile rides the status poll (no own request)').toEqual([])
   })

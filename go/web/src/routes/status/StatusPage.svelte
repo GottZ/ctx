@@ -89,16 +89,20 @@
   // RC-D C6 W05-17: a tenant-admin with the Model API switched on sees the
   // Model API tile under the read-only banner. It rides the pull path the
   // server opened for tenant-admins (/api/status, T37b — the per-tenant view;
-  // the SSE push stays server-admin only), polled like the admin fallback and
-  // only while the tab is visible. The rest of the dashboard stays
+  // the SSE push stays server-admin only), polled every 30 s and only while
+  // the tab is visible. The rest of the dashboard stays
   // server-admin (unchanged).
+  // 30 s = the age of C2's gateway status generation (gatewayGenTTL) and of the
+  // tenant rollup (tenantRollupTTL): a faster poll would only re-read the same
+  // generation (review I2). A UX cadence tied to the server's, not policy.
+  const TENANT_GATEWAY_POLL_MS = 30_000
   const tenantGateway = $derived(!session.admin && session.caps.tier === 'tenant-admin' && session.caps.viewModelApi)
   $effect(() => {
     if (!tenantGateway) return
     void status.reload()
     const timer = setInterval(() => {
       if (document.visibilityState === 'visible') void status.reload()
-    }, POLL_MS)
+    }, TENANT_GATEWAY_POLL_MS)
     return () => clearInterval(timer)
   })
 

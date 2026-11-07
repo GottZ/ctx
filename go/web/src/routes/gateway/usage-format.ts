@@ -14,8 +14,8 @@
 //     the wire (llmusage.Point), so without histograms they read NOT_RECORDED.
 //   - rejected.auth is never a number per consumer (V-06-b: a 401 has no
 //     consumer); rejectionCells drops it for a consumer-scoped series even
-//     if the wire carries one. rejected:null (before the ledger) reads
-//     NOT_RECORDED, [] reads "none".
+//     if the wire carries one. rejected:null (before the ledger) and every
+//     refusal of an incomplete bucket read NOT_RECORDED, [] reads "none".
 
 import type { UsagePoint, UsageSeries } from '../../lib/api/types'
 import { fmtMs } from '../status/dispatch'
@@ -152,7 +152,8 @@ function reasonRank(r: string): number {
 
 /** The refusal cells of one point (n summed over details); `consumerScoped` drops `auth` (V-06-b). */
 export function rejectionCells(point: UsagePoint, consumerScoped: boolean): RejectionCell[] {
-  if (point.rejected === null) return []
+  // an incomplete bucket (running, or before coverage) has no final refusals either
+  if (!point.complete || point.rejected === null) return []
   const sums = new Map<string, number>()
   for (const r of point.rejected) {
     if (consumerScoped && r.reason === 'auth') continue
@@ -167,7 +168,7 @@ export function rejectionCells(point: UsagePoint, consumerScoped: boolean): Reje
 
 /** The refusals of one point as one text. */
 export function rejectionsText(point: UsagePoint, consumerScoped: boolean): string {
-  if (point.rejected === null) return NOT_RECORDED
+  if (!point.complete || point.rejected === null) return NOT_RECORDED
   const cells = rejectionCells(point, consumerScoped)
   return cells.length === 0 ? 'none' : cells.map((c) => `${c.reason} ${c.text}`).join(', ')
 }

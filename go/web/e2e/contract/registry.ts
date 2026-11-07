@@ -1109,7 +1109,7 @@ export const contracts: PageContract[] = [
     mode: 'reading',
     path: `/gateway/consumers/${PANEL_CONSUMER_A}`,
     capabilities: modelApiCapabilities(true, true),
-    adminCalls: ['model-consumer-get', 'gateway-limits-get', '/api/usage'],
+    adminCalls: ['model-consumer-get', 'gateway-limits-get', 'gateway-limits-set', 'gateway-limits-delete', '/api/usage', '/api/llmlog'],
     states: [
       { name: 'default', seed: {} },
       // server-admin: call detail control present, server tier of the limits form
@@ -1150,12 +1150,19 @@ export const contracts: PageContract[] = [
       await expect(table.locator('tbody tr').nth(2).locator('[data-col="calls"]'), 'gate W05-10: null ⇒ not recorded').toHaveText('not recorded')
       await expect(table.locator('tbody tr').first().locator('[data-col="latency"]'), 'gate W05-10: hist:false ⇒ Ø').toHaveText('Ø 820ms')
       await expect(usage.locator('[data-reject-reason="auth"]'), 'gate W05-10: rejected.auth je Konsument nie als Zahl').toHaveCount(0)
+      // review L1: the chart draws the two unrecorded buckets as gaps (never a zero bar), the total is partial
+      await expect(usage.locator('[data-bar-gap]'), 'gate W05-10: Lücke statt 0-Balken').toHaveCount(2)
+      await expect(usage.locator('[data-bar]')).toHaveCount(1)
+      await expect(usage.locator('[data-total="calls"]'), 'gate W05-10: partial total, never 0').toHaveText('≥ 12')
       expect(session.calls.some((c) => c.path === '/api/usage'), 'the panel reads /api/usage').toBe(true)
       // W05-12 — limits: tenant tier, max = server(d), no unlimited, 422 at the field
       const limits = content.locator('section[aria-label="limits"]')
       await expect(limits.getByRole('spinbutton', { name: 'chat rpm' }), 'gate W05-12: Eingabe-Maximum = server(d)').toHaveAttribute('max', '30')
       await expect(limits.getByRole('spinbutton', { name: 'chat max_concurrency' })).toHaveAttribute('max', '4')
       await expect(limits.getByRole('checkbox', { name: /unlimited/i }), 'gate W05-12: kein „unbegrenzt"-Schalter').toHaveCount(0)
+      // review L1/L2: the tenant tier can only deny external backends; an unbounded effective budget reads "no limit"
+      await expect(limits.getByLabel('chat external backends').locator('option'), 'tenant tier narrows only').toHaveText(['inherit', 'deny'])
+      await expect(limits.locator(`[id="lim-${PANEL_CONSUMER_A}-chat.monthly_tokens-eff"]`)).toContainText('effective no limit')
       // over the ceiling: the client hint first, then the server's 400 {param} at the same field
       await limits.getByRole('spinbutton', { name: 'chat max_concurrency' }).fill('5')
       await expect(limits.locator('[data-field-error="chat.max_concurrency"]')).toHaveText('at most 4 (server limit)')

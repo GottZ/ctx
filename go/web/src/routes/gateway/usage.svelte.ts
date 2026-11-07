@@ -33,6 +33,8 @@ export class UsageModel {
   hist = $state<boolean | null>(null)
   status = $state<ResourceStatus>('idle')
   loadError = $state<ApiError | null>(null)
+  /** A re-read failed while an older answer stays shown (marked stale in the panel). */
+  stale = $state(false)
 
   readonly #consumerId: string
   readonly #api: UsageApi
@@ -55,21 +57,31 @@ export class UsageModel {
     try {
       const res = await this.#api.usage({ consumer: this.#consumerId, window: this.window })
       if (gen !== this.#gen) return
-      this.series = res.series
+      // a Go nil slice arrives as null: no series (the panel says "no usage recorded"), never a 0
+      this.series = (res.series ?? []).map((s) => ({ ...s, points: s.points ?? [] }))
       this.complete = res.complete
       this.hist = res.hist
       this.loadError = null
+      this.stale = false
       this.status = 'ready'
     } catch (err) {
       if (gen !== this.#gen) return
       this.loadError = toApiError(err)
-      this.status = 'error'
+      // keep the last answer on screen, but say it is stale (I1); no answer yet ⇒ error state
+      if (this.series.length > 0) this.stale = true
+      else this.status = 'error'
     }
   }
 
   /** Switch the window and re-read. */
   async setWindow(w: UsageWindow): Promise<void> {
     this.window = w
+    // never show the old window's series under the new radio
+    this.series = []
+    this.complete = null
+    this.hist = null
+    this.stale = false
+    this.status = 'loading'
     await this.load()
   }
 

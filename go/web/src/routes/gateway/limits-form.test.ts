@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../../lib/api'
 import type { LimitEffective, LimitValues, LimitsOpView } from '../../lib/api/types'
-import { LIMIT_DIMENSIONS, limitFieldErrors, limitFieldSpec, serverCeiling, tenantInputError } from './limits-form'
+import { LIMIT_DIMENSIONS, limitFieldErrors, limitFieldSpec, serverCeiling, tenantInputError, unsendableInput } from './limits-form'
 
 function values(over: Partial<LimitValues> = {}): LimitValues {
   return {
@@ -131,5 +131,14 @@ describe('no ceiling known (fail-closed, S2)', () => {
     expect(spec.disabled).toBe(true)
     expect(spec.unlimitedOption).toBe(false)
     expect(tenantInputError({ server: null, tenant: null }, 'rpm', '5')).not.toBeNull()
+  })
+})
+
+describe('unsendable input (review I4)', () => {
+  it('a non-finite number is refused before the wire (JSON would turn it into null and clear the row)', () => {
+    expect(unsendableInput('1e400'), 'Infinity never goes out as null').toBe(true)
+    expect(unsendableInput('abc')).toBe(true)
+    expect(unsendableInput('')).toBe(false)
+    expect(unsendableInput(' 5 ')).toBe(false)
   })
 })

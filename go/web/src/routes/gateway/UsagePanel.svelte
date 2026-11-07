@@ -50,7 +50,7 @@
       {/each}
     </fieldset>
   </header>
-  {#if model.status === 'idle' || (model.status === 'loading' && series === null)}
+  {#if model.status === 'idle' || model.status === 'loading'}
     <p class="state" aria-busy="true">loading usage…</p>
   {:else if model.status === 'error' && series === null}
     <div class="error" role="alert">
@@ -70,6 +70,9 @@
       <dt>completion tokens</dt>
       <dd data-total="completion_tokens">{totalText(windowTotal(points, 'completion_tokens'))}</dd>
     </dl>
+    {#if model.stale}
+      <p class="note" role="status">Refresh failed ({model.loadError?.message ?? 'error'}) — showing the last loaded window.</p>
+    {/if}
     {#if model.complete === false}
       <p class="note" role="status">Some buckets are not recorded — they read "not recorded", never 0.</p>
     {/if}

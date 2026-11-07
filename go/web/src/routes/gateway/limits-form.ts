@@ -95,6 +95,17 @@ export function limitFieldSpec(view: LimitsOpView, dim: LimitDimension, tier: Li
   }
 }
 
+/**
+ * A raw input the wire cannot carry: non-empty but not a finite number
+ * (e.g. "1e400" ⇒ Infinity, which JSON turns into null — the row would be
+ * cleared silently). Blocks the submit for every tier; everything else the
+ * server decides.
+ */
+export function unsendableInput(raw: string): boolean {
+  const t = raw.trim()
+  return t !== '' && !Number.isFinite(Number(t))
+}
+
 /** Client-side check of one tenant-admin input (UX only): null = ok, else the message. */
 export function tenantInputError(view: LimitsOpView, dim: LimitDimension, raw: string): string | null {
   const t = raw.trim()

@@ -84,7 +84,7 @@
             - cell "not recorded"
             - cell "not recorded"
             - cell "rate 3"
-          - row /\d+\/\d+\/\d+, \d+:\d+ AM not recorded not recorded not recorded not recorded not recorded not recorded rate 3/:
+          - row /\d+\/\d+\/\d+, \d+:\d+ AM not recorded not recorded not recorded not recorded not recorded not recorded not recorded/:
             - cell /\d+\/\d+\/\d+, \d+:\d+ AM/
             - cell "not recorded"
             - cell "not recorded"
@@ -92,7 +92,7 @@
             - cell "not recorded"
             - cell "not recorded"
             - cell "not recorded"
-            - cell "rate 3"
+            - cell "not recorded"
           - row /\d+\/\d+\/\d+, \d+:\d+ AM not recorded 1 \d+,\d+ Ø \d+[hmsp]+ not recorded not recorded rate 2/:
             - cell /\d+\/\d+\/\d+, \d+:\d+ AM/
             - cell "not recorded"
@@ -117,9 +117,9 @@
       - spinbutton "chat daily_tokens"
       - text: /effective \d+,\d+,\d+· max \d+,\d+,\d+ chat monthly_tokens/
       - spinbutton "chat monthly_tokens"
-      - text: effective none chat daily_requests
+      - text: effective no limit chat daily_requests
       - spinbutton "chat daily_requests"
-      - text: effective none chat monthly_cost_usd
+      - text: effective no limit chat monthly_cost_usd
       - spinbutton "chat monthly_cost_usd"
       - text: effective $1· max $1 chat external backends
       - combobox "chat external backends":
@@ -138,9 +138,9 @@
       - spinbutton "embed daily_tokens"
       - text: /effective \d+,\d+,\d+· max \d+,\d+,\d+ embed monthly_tokens/
       - spinbutton "embed monthly_tokens"
-      - text: effective none embed daily_requests
+      - text: effective no limit embed daily_requests
       - spinbutton "embed daily_requests"
-      - text: effective none embed monthly_cost_usd
+      - text: effective no limit embed monthly_cost_usd
       - spinbutton "embed monthly_cost_usd"
       - text: effective $1· max $1 embed external backends
       - combobox "embed external backends":
@@ -159,9 +159,9 @@
       - spinbutton "rerank daily_tokens"
       - text: /effective \d+,\d+,\d+· max \d+,\d+,\d+ rerank monthly_tokens/
       - spinbutton "rerank monthly_tokens"
-      - text: effective none rerank daily_requests
+      - text: effective no limit rerank daily_requests
       - spinbutton "rerank daily_requests"
-      - text: effective none rerank monthly_cost_usd
+      - text: effective no limit rerank monthly_cost_usd
       - spinbutton "rerank monthly_cost_usd"
       - text: effective $1· max $1 rerank external backends
       - combobox "rerank external backends":

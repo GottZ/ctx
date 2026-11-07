@@ -12,7 +12,7 @@
   import { session } from '../../lib/auth.svelte'
   import type { GatewayOp, LimitDimension, LimitTier, LimitValues, LimitsOpView } from '../../lib/api/types'
   import { LimitsModel } from './limits.svelte'
-  import { LIMIT_DIMENSIONS, fmtLimit, limitFieldSpec, tenantInputError } from './limits-form'
+  import { LIMIT_DIMENSIONS, fmtLimit, limitFieldSpec, tenantInputError, unsendableInput } from './limits-form'
 
   let { consumerId }: { consumerId: string } = $props()
 
@@ -56,8 +56,17 @@
     return out
   }
 
+  /** Inputs the wire cannot carry (non-finite) — they block the submit (I4). */
+  let unsendable = $state<Record<string, string>>({})
+
   async function save(op: GatewayOp, view: LimitsOpView): Promise<void> {
     saved = null
+    const bad: Record<string, string> = {}
+    for (const d of LIMIT_DIMENSIONS) {
+      if (unsendableInput(draftOf(op, view, d))) bad[`${op}.${d}`] = 'not a finite number'
+    }
+    unsendable = bad
+    if (Object.keys(bad).length > 0) return
     const values: Partial<LimitValues> = {}
     for (const d of LIMIT_DIMENSIONS) {
       const raw = draftOf(op, view, d).trim()
@@ -92,7 +101,8 @@
     const e = view.effective
     if (e === undefined) return '—'
     const v = e[d]
-    return v === null ? 'none' : fmtLimit(d, v)
+    // null in an effective budget is the server's "no limit" (settings floor 0, C1) — never "none"/"0"
+    return v === null ? 'no limit' : fmtLimit(d, v)
   }
 </script>
 
@@ -131,7 +141,7 @@
           {#each LIMIT_DIMENSIONS as d (d)}
             {@const spec = limitFieldSpec(view, d, tier)}
             {@const key = `${op}.${d}`}
-            {@const err = model.fieldErrors[key] ?? local[key]}
+            {@const err = unsendable[key] ?? model.fieldErrors[key] ?? local[key]}
             <div class="field">
               <label for="lim-{consumerId}-{key}">{op} {d}</label>
               <input

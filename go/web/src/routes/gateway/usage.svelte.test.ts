@@ -89,6 +89,40 @@ describe('UsageModel (W05-10)', () => {
     expect(m.status).toBe('ready')
   })
 
+  it('a null series list is no series (never a 0); a failed re-read keeps the shown window marked stale (review I1)', async () => {
+    const usage = vi
+      .fn()
+      .mockResolvedValueOnce(answer({ series: null as unknown as UsageResponse['series'] }))
+      .mockResolvedValueOnce(answer())
+      .mockRejectedValueOnce(new Error('down'))
+    const m = new UsageModel('c1', { usage })
+    await m.load()
+    expect(m.series).toEqual([])
+    expect(m.status).toBe('ready')
+    await m.load()
+    expect(m.series).toHaveLength(1)
+    await m.load()
+    expect(m.status, 'the shown answer stays').toBe('ready')
+    expect(m.stale, 'but is marked stale').toBe(true)
+    expect(m.series).toHaveLength(1)
+  })
+
+  it('setWindow never shows the old window under the new radio (review I1)', async () => {
+    let release: (v: UsageResponse) => void = () => {}
+    const usage = vi
+      .fn()
+      .mockResolvedValueOnce(answer())
+      .mockImplementationOnce(() => new Promise<UsageResponse>((r) => (release = r)))
+    const m = new UsageModel('c1', { usage })
+    await m.load()
+    const pending = m.setWindow('7d')
+    expect(m.series, 'old series dropped at once').toEqual([])
+    expect(m.status).toBe('loading')
+    release(answer())
+    await pending
+    expect(m.status).toBe('ready')
+  })
+
   it('polls every 60 s only while visible; dispose stops it', async () => {
     vi.useFakeTimers()
     const usage = vi.fn().mockResolvedValue(answer())

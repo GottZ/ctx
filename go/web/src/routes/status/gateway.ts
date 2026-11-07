@@ -19,7 +19,9 @@
 //                        · external held/waiting (XU/XB) · reserved · p95
 //                        internal/external" from dispatch.targets (A03-W3).
 //   expiringText(n)      the expiring-keys line ("2 keys expire soon").
-//   rejectionsText(m)    the 5-min refusals as "rate 4, quota 1" ('none' when empty).
+//   rejectionsText(m)    the 5-min refusals as "quota 1, rate 4" ('none' when empty,
+//                        'not recorded' when null — C2 feeds it later; null ≠ 0).
+//   countText(n)         a nullable counter (reservations_open) — 'not recorded' for null.
 
 import type { DispatchStatus, DispatchTenantStatus, DispatchTenantTarget, StatusResponse } from '../../lib/api/types'
 import type { Tier } from '../../lib/auth/capabilities'
@@ -87,9 +89,18 @@ export function expiringText(n: number): string {
   return n === 1 ? '1 key expires soon' : `${n} keys expire soon`
 }
 
-/** The 5-minute refusals per reason as one line. */
+/** What a missing status value reads as (C2 null ≠ 0). */
+export const NOT_RECORDED = 'not recorded'
+
+/** A status counter that may be null (not fed yet): the number, or NOT_RECORDED — never "0" for null. */
+export function countText(n: number | null | undefined): string {
+  return typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString('en-US') : NOT_RECORDED
+}
+
+/** The 5-minute refusals per reason as one line; null (no source yet) reads NOT_RECORDED, {} reads 'none'. */
 export function rejectionsText(m: Record<string, number> | null | undefined): string {
-  const parts = Object.entries(m ?? {})
+  if (m === null || m === undefined) return NOT_RECORDED
+  const parts = Object.entries(m)
     .filter(([, n]) => typeof n === 'number' && n > 0)
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([r, n]) => `${r} ${n.toLocaleString('en-US')}`)
