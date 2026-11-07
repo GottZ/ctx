@@ -32,6 +32,8 @@ func TestDecodeAnswerFollowsTheBaseOnRepeatedMembers(t *testing.T) {
 		{"three lists", `{"results":[{"index":2}],"results":[{"relevance_score":1},{"index":1,"relevance_score":2}],"results":[{},{},{"index":0,"relevance_score":4}]}`, 3, true},
 		{"null resets", `{"results":[{"index":0,"relevance_score":1}],"results":null,"results":[{"index":0}]}`, 1, true},
 		{"empty list resets", `{"results":[{"index":0,"relevance_score":1}],"results":[],"results":[{"index":0}]}`, 1, true},
+		{"null resets before a fold", `{"results":[{"index":0,"relevance_score":1}],"results":null,"results":[{"index":0}],"results":[{}]}`, 1, true},
+		{"empty list resets before a fold", `{"results":[{"index":0,"relevance_score":1}],"results":[],"results":[{"index":0}],"results":[null]}`, 1, true},
 		{"data after a reset", `{"results":[{"index":0,"relevance_score":0.5}],"results":[],"data":[{"index":0,"relevance_score":0.25}]}`, 1, true},
 		{"data repeated, the last counts", `{"data":[{"index":0,"relevance_score":0.5}],"data":[{"index":0,"relevance_score":0.75}]}`, 1, true},
 		{"data null after a list", `{"data":[{"index":0,"relevance_score":0.5}],"data":null}`, 1, true},
@@ -146,6 +148,11 @@ func TestReadAnswerStaysWithinItsCap(t *testing.T) {
 		}
 		if b > uint64(AnswerReadMax(docs, body)) {
 			t.Errorf("%s: the read allocated %d B, AnswerReadMax is %d B", c.name, b, AnswerReadMax(docs, body))
+		}
+		// An answer without an echo and without a length takes the first
+		// buffer only (the cap less the body), not the cap.
+		if !c.known && c.size <= limit-body && b > uint64(limit-body+AnswerReadSlack) {
+			t.Errorf("%s: an answer of %d B without a length allocated %d B, want its first buffer of %d B", c.name, c.size, b, limit-body)
 		}
 	}
 	if _, err := readAnswer(iotest.ErrReader(errors.New("boom")), -1, docs, body); err == nil {

@@ -112,3 +112,27 @@ func TestFolgeRAnswerReadIsBooked(t *testing.T) {
 		}
 	}
 }
+
+// TestFolgeRCallOnAFreshConnectionIsBooked pins the call's own term
+// (oai.RerankWireCallReserve less the answer's read shares) at its largest:
+// a call whose answer is refused at its length — W02-10's hostile 1-MiB
+// answers past the read cap — reads nothing and closes its connection, so
+// every call after the first dials a fresh one (the transport's connection
+// state and buffers). Such a call allocates at most the route's term
+// without the read (rerank.AnswerReadMax's shares beside the body): the
+// body's build, its copy, the decode's share and the call's own. RC-D S2
+// FOLGE-R (mutant M27: the call's own term at 44 KiB, under the 56–59 KB a
+// fresh connection takes, passed every other gate).
+func TestFolgeRCallOnAFreshConnectionIsBooked(t *testing.T) {
+	h := newWireHarness(t)
+	for _, c := range wireHostileCases(t, h.query) {
+		a := folgeRMost(t, h, c)
+		l := rerank.RequestBodyLen("M", h.query, c.docs)
+		read := int64(c.n)*2*rerank.AnswerEntryMax + 2*rerank.AnswerFixed + 2*rerank.AnswerReadSlack
+		bound := wireCallBooking(l, c.n) - read
+		t.Logf("FOLGE-R fresh connection: %-18s allocated=%d B bound=%d B (the call's term without the read's %d B)", c.name, a, bound, read)
+		if int64(a) > bound {
+			t.Errorf("%s: a call on a fresh connection whose answer is refused at its length allocates %d B, the call's own term books %d B", c.name, a, bound)
+		}
+	}
+}

@@ -57,7 +57,7 @@ const rerankWireDocBytes = 2*rerank.AnswerEntryMax + rerankDecodeDocBytes
 // stamp, the transport's connection state and the answer's reader, and
 // rerank.Score's own. Measured (internal/oai/rerankwire, Score against a raw
 // upstream, pools cold, the largest of three): 45.7 KB on a pooled
-// connection (1 × 64 B), 56.3–58.8 KB on a fresh one — the transport dials
+// connection (1 × 64 B), 56.3–59.0 KB on a fresh one — the transport dials
 // it, its state and buffers — with an answer refused at its length
 // (TestFolgeRAnswerReadIsBooked's hostile forms, which close the
 // connection); booked at the fresh connection's, rounded up to 60 KiB. A
