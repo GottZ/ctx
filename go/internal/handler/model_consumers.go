@@ -923,9 +923,22 @@ func validateUpdateTexts(p store.ModelConsumerPatch) error {
 }
 
 // Revoking is always allowed (design/01 §4.6): both actions run for a
-// tenant-admin of the consumer's tenant regardless of self-service.
-// cancelled_inflight is null until the in-flight registry of W01-8 can count
-// the requests it ends — never a 0 that would claim none ran (V-01-e).
+// tenant-admin of the consumer's tenant regardless of self-service. After
+// the commit both end the running requests of what they revoked through the
+// door's in-flight registry (W01-8) and answer cancelled_inflight: how many
+// requests were running on it in THIS process — another ctx process on the
+// same database ends its own through the NOTIFY of migration 165 and is not
+// counted. null only without a registry (unknown — never a 0 that would
+// claim none ran, V-01-e).
+
+// cancelledInflight is the cancelled_inflight of an answer: end(id) through
+// the registry, null without one.
+func (h *ManageHandler) cancelledInflight(end func(*InflightRegistry) int) any {
+	if h.inflight == nil {
+		return nil
+	}
+	return end(h.inflight)
+}
 
 func (h *ManageHandler) handleModelConsumerDelete(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	var d struct {
@@ -939,7 +952,8 @@ func (h *ManageHandler) handleModelConsumerDelete(w http.ResponseWriter, r *http
 		writeConsumerStoreError(w, r, err, "model-consumer-delete")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cancelled_inflight": nil})
+	n := h.cancelledInflight(func(reg *InflightRegistry) int { return reg.CancelConsumer(d.ID) })
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cancelled_inflight": n})
 }
 
 func (h *ManageHandler) handleModelKeyRevoke(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
@@ -954,7 +968,8 @@ func (h *ManageHandler) handleModelKeyRevoke(w http.ResponseWriter, r *http.Requ
 		writeConsumerStoreError(w, r, err, "model-key-revoke")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cancelled_inflight": nil})
+	n := h.cancelledInflight(func(reg *InflightRegistry) int { return reg.CancelKey(d.KeyID) })
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cancelled_inflight": n})
 }
 
 // consumerRotateRequest: grace in seconds (0 = revoke the predecessor at once,

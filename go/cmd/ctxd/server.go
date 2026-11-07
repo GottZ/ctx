@@ -485,6 +485,11 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// 404 before any credential is read. Mounted before the SPA fallback; the
 	// group's own catch-alls keep /v1/* out of it.
 	gateway := newModelGateway(pool, cfgStore)
+	// W01-8: the door's in-flight registry — the revoke actions end a dead
+	// key's running requests through it and report how many
+	// (cancelled_inflight), the NOTIFY listener (migration 165) feeds it.
+	manageH.SetInflight(gateway.door.Inflight())
+	scheduler.SetModelAccessSink(gateway.door.Inflight())
 	v1 := v1Routes(gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter))
 	if wrapRoutes != nil {
 		v1 = wrapRoutes(v1)

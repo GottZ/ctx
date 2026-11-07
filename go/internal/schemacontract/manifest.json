@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 164,
-    "migration_count": 52,
+    "migration_max": 165,
+    "migration_count": 53,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -5675,6 +5675,9 @@
     "ctx_model_auth(p_key_hash text, p_client_ip inet, p_secure boolean)": {
       "src_hash": "4a53d01644bbb648173d964f2ffb2670e3cde0c9b81a1e98b9391edde7a20b45"
     },
+    "ctx_model_auth_live(p_key_ids uuid[])": {
+      "src_hash": "77d45df5527e257664bbb72a5ed5fd698b04c4718185b07da76be131964dd737"
+    },
     "ctx_rrf(p_embedding halfvec, p_query text, p_query_spaced text, p_scopes text[], p_category text, p_tags text[], p_limit integer, p_temporal text, p_query_or text, p_types_visible text[], p_damped_types text[], p_damped_factors double precision[], p_categories_exclude text[], p_types_exclude text[], p_granted_block_ids uuid[], p_semantic_mode text, p_scan_tuples integer, p_exact_cap integer)": {
       "src_hash": "575f15445f49c284e838a67656062ffc63aa42f570e29498ea0968852f182d28"
     },
@@ -5725,6 +5728,9 @@
     },
     "notify_link_write()": {
       "src_hash": "8b27e29afab05b2175ab8d22ad88de901da9e7e8f5038df554c208ed0b8615fd"
+    },
+    "notify_model_access_write()": {
+      "src_hash": "c8657aa28e49282f91bf76b8ff14528f2236800832164aacfc82b7da72016862"
     },
     "notify_project_delete()": {
       "src_hash": "94444f2e3d1184fecb5b61c4d80e17e7f4a80fc9a47bba7845d644339cd96a60"
@@ -5824,6 +5830,9 @@
     "context_model_consumer_grants.trg_model_grants_identity": {
       "def_hash": "a4152c2fd7cfa2bb596dfdf0f91f305811858434cb9cccdb5749c799a778e27f"
     },
+    "context_model_consumers.trg_model_consumers_access_notify": {
+      "def_hash": "4effde1b1fa38f8209a3c83906f717a6bfa40f618717d1d8eb61539d82266096"
+    },
     "context_model_consumers.trg_model_consumers_audit_ins_del": {
       "def_hash": "bda1f75b177103c18e9499e9a1881991628cdd55aaf8ab405d9e88d6a0eadc2c"
     },
@@ -5835,6 +5844,9 @@
     },
     "context_model_consumers.trg_model_consumers_identity": {
       "def_hash": "0b5d2b77739de04a25996a641ade8e2acd9fb6b0c937ff44010e27ba8a86baf3"
+    },
+    "context_model_keys.trg_model_keys_access_notify": {
+      "def_hash": "8f13a4905f8049a0c788332dcb82ebf8456983d2cc90dba962a897ec01a4b996"
     },
     "context_model_keys.trg_model_keys_audit_ins_del": {
       "def_hash": "331e049f656fe193bedb5e711f794f006b4a7e1f6529e7e5e62c55f8672ce2db"
@@ -5871,6 +5883,12 @@
     },
     "context_tenant_quota.trg_tenant_quota_notify": {
       "def_hash": "ca700af91d2761d07412425be0b9c3b889c3487d8ad77b3f8537e8ee127f38bc"
+    },
+    "context_tenant_scopes.trg_tenant_scopes_access_notify": {
+      "def_hash": "926fb0593fe92ae1b889151e41787e968172e1095405464e85ae92f23b58c4ad"
+    },
+    "context_tenants.trg_tenants_access_notify": {
+      "def_hash": "4a475477486530b4379423b5f8d718b22a4b655bac78fc7ad862349a75ed4fc4"
     }
   },
   "rules": {},

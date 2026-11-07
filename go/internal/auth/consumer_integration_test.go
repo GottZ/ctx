@@ -1,16 +1,15 @@
 //go:build integration
 
-// W01-6: AuthenticateModelKey and ReauthenticateModelKey against a real
-// ctx_model_auth (migration 161). Every K20 column reaches ConsumerAuth, the
-// address and transport arguments reach gates 5 and 6, and the re-check uses
-// the credential of the original request.
+// W01-6: AuthenticateModelKey against a real ctx_model_auth (migration 161).
+// Every K20 column reaches ConsumerAuth, and the address and transport
+// arguments reach gates 5 and 6. W01-8: DeadModelKeys over
+// ctx_model_auth_live (migration 165) — one statement, the dead ids only.
 //
 //	go test -tags=integration -p 1 -count=1 -run 'Consumer|ModelKey' ./internal/auth/
 package auth_test
 
 import (
 	"context"
-	"errors"
 	"net/netip"
 	"testing"
 	"time"
@@ -106,43 +105,54 @@ func TestAuthenticateModelKeyFields_Integration(t *testing.T) {
 	}
 }
 
-func TestReauthenticateModelKey_Integration(t *testing.T) {
+// TestDeadModelKeys_Integration: of a live key, a revoked key, a key of a
+// deactivated consumer and an id no key carries, DeadModelKeys names the
+// three dead ones — gates 5 and 6 do not apply (the live key's consumer has
+// an allowlist the call knows nothing of); an empty list asks nothing; a
+// closed pool is an error. Red against 164: SQLSTATE 42883.
+func TestDeadModelKeys_Integration(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
-	admin, _, err := store.CreateApiKey(ctx, pool, "w016-admin", "private", nil, "")
+	admin, _, err := store.CreateApiKey(ctx, pool, "w018-admin", "private", nil, "")
 	if err != nil {
 		t.Fatalf("admin key: %v", err)
 	}
-	stamp := store.APIStamp(admin.ID, "w016")
-	_, k, key, err := store.CreateConsumerWithKey(ctx, pool, store.ModelConsumerSpec{
-		TenantID: store.DefaultTenantID, Label: "w016-cidr", AllowedCIDRs: []string{"10.0.0.0/8"},
-	}, nil, stamp)
-	if err != nil {
-		t.Fatalf("create consumer: %v", err)
+	stamp := store.APIStamp(admin.ID, "w018")
+	mk := func(label string) (string, string) {
+		c, k, _, err := store.CreateConsumerWithKey(ctx, pool, store.ModelConsumerSpec{
+			TenantID: store.DefaultTenantID, Label: label, AllowedCIDRs: []string{"10.0.0.0/8"},
+		}, nil, stamp)
+		if err != nil {
+			t.Fatalf("create consumer %s: %v", label, err)
+		}
+		return c.ID, k.ID
 	}
-	ca, err := auth.AuthenticateModelKey(ctx, pool, key.Hash(), netip.MustParseAddr("10.9.9.9"), true)
-	if err != nil || !ca.IsValid {
-		t.Fatalf("first auth: ca=%+v err=%v", ca, err)
-	}
-	// The re-check runs with the ORIGINAL address and transport: with NULL
-	// it would fail the allowlist.
-	again, err := auth.ReauthenticateModelKey(ctx, pool, ca)
-	if err != nil || !again.IsValid || again.ModelKeyID != k.ID {
-		t.Fatalf("re-auth of a live key: ca=%+v err=%v", again, err)
-	}
-	if err := store.RevokeKey(ctx, pool, k.ID, store.ModelAccess{ServerAdmin: true}, stamp); err != nil {
+	_, live := mk("w018-live")
+	_, revoked := mk("w018-revoked")
+	inactiveConsumer, inactive := mk("w018-inactive")
+	if err := store.RevokeKey(ctx, pool, revoked, store.ModelAccess{ServerAdmin: true}, stamp); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if again, err := auth.ReauthenticateModelKey(ctx, pool, ca); err != nil || again.IsValid {
-		t.Errorf("re-auth after revoke: ca=%+v err=%v, want invalid", again, err)
+	if err := store.DeleteConsumer(ctx, pool, inactiveConsumer, store.ModelAccess{ServerAdmin: true}, stamp); err != nil {
+		t.Fatalf("deactivate: %v", err)
 	}
-	for name, in := range map[string]*auth.ConsumerAuth{"nil": nil, "no-credential": {IsValid: true, ModelKeyID: k.ID}} {
-		if _, err := auth.ReauthenticateModelKey(ctx, pool, in); !errors.Is(err, auth.ErrNoModelCredential) {
-			t.Errorf("%s: err=%v, want ErrNoModelCredential", name, err)
-		}
+	const unknown = "00000000-0000-0000-0000-00000000feed"
+	dead, err := auth.DeadModelKeys(ctx, pool, []string{live, revoked, inactive, unknown})
+	if err != nil {
+		t.Fatalf("DeadModelKeys: %v", err)
+	}
+	got := map[string]bool{}
+	for _, id := range dead {
+		got[id] = true
+	}
+	if len(dead) != 3 || !got[revoked] || !got[inactive] || !got[unknown] || got[live] {
+		t.Fatalf("dead = %v, want exactly the revoked, the deactivated and the unknown id (live %s)", dead, live)
+	}
+	if dead, err := auth.DeadModelKeys(ctx, pool, nil); err != nil || dead != nil {
+		t.Errorf("empty list: %v, %v — want nothing asked", dead, err)
 	}
 	pool.Close()
-	if _, err := auth.ReauthenticateModelKey(ctx, pool, ca); err == nil {
-		t.Error("re-auth on a closed pool: no error")
+	if _, err := auth.DeadModelKeys(ctx, pool, []string{live}); err == nil {
+		t.Error("closed pool: no error")
 	}
 }

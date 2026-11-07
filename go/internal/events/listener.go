@@ -546,6 +546,11 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 	// (SetModelAliasRegistry, boot happens-before Run; nil = inert).
 	settingsHandler.modelAliases = scheduler.modelAliases
 	listener.Handle(channelSettingsWrite, settingsHandler)
+	// W01-8: revocations of model keys reach the model-key door's in-flight
+	// registry, which ends the running /v1 requests of a dead key; the
+	// backlog of every reconnect sweeps it. Always LISTENed: the sink is
+	// installed after Run (SetModelAccessSink) and read per notification.
+	listener.Handle(channelModelAccessWrite, &ModelAccessHandler{scheduler: scheduler})
 	// W9: forward ctx_project_write (081) to the SSE domain-event hub. Registered
 	// ONLY when the hub is wired — a nil hub leaves the channel un-LISTENed, so
 	// the 081 notifies are Postgres no-ops (the listener-discard invariant also

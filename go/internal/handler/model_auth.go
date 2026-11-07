@@ -40,11 +40,8 @@ const (
 )
 
 // ErrModelAuthUnavailable wraps every failure of the door's database step
-// (semaphore deadline, pool, query); a caller of ReauthConsumer maps it to
-// 503.
+// (semaphore deadline, pool, query).
 var ErrModelAuthUnavailable = errors.New("handler: model-key check unavailable")
-
-var errNoModelDoor = errors.New("handler: ReauthConsumer outside a request the model-key door accepted")
 
 // ModelAuthRejection is the door's decision on a refused request: status,
 // code, Retry-After and x-should-retry, decided by ModelAuth. The door sets
@@ -118,6 +115,17 @@ type ModelAuthStats struct {
 	SemaphoreWaitTotal time.Duration
 	ProxyMisconfigured uint64 // stage 1
 	WiringConflicts    uint64 // stage 0
+
+	// The in-flight registry (W01-8): requests running now, the distinct
+	// model keys behind them and their expiry timers (≤ keys), requests
+	// ended because their key stopped authenticating, liveness statements
+	// (ctx_model_auth_live) run and failed.
+	Inflight            int
+	InflightKeys        int
+	InflightTimers      int
+	InflightCancelled   uint64
+	InflightSweeps      uint64
+	InflightSweepErrors uint64
 }
 
 type modelAuthCounters struct {
@@ -138,19 +146,16 @@ type ModelDoor struct {
 	reject       func(http.ResponseWriter, *http.Request, ModelAuthRejection)
 	log          *slog.Logger
 
-	limiter *failLimiter
-	known   *knownGoodLRU
-	probes  *probeBucket
-	sem     *authSemaphore
+	limiter  *failLimiter
+	known    *knownGoodLRU
+	probes   *probeBucket
+	sem      *authSemaphore
+	inflight *InflightRegistry
 
 	proxyOnce sync.Once
 	lastWarn  atomic.Int64 // unix nanos of the last throttled warning
 	st        modelAuthCounters
 }
-
-// modelDoorKey carries the door that accepted a request, for
-// ReauthConsumer.
-type modelDoorKey struct{}
 
 // ModelAuth builds the model-key door; cmd/ctxd builds it once per process
 // and mounts it in the model groups (mountModelGroup, W02-05).
@@ -182,7 +187,7 @@ func ModelAuth(cfg ModelAuthConfig) *ModelDoor {
 			"(a port or brackets are accepted and stripped, a host name is not)", "value", trusted)
 		trusted = ""
 	}
-	return &ModelDoor{
+	d := &ModelDoor{
 		pool: cfg.Pool, settings: cfg.Settings, trustedProxy: trusted, trustedAddr: trustedAddr,
 		usage: cfg.Usage, reject: cfg.Reject, log: log,
 		limiter: newFailLimiter(modelAuthLimiterCap, time.Now),
@@ -190,11 +195,26 @@ func ModelAuth(cfg ModelAuthConfig) *ModelDoor {
 		probes:  newProbeBucket(time.Now),
 		sem:     newAuthSemaphore(),
 	}
+	pool := cfg.Pool
+	d.inflight = newInflightRegistry(
+		func(ctx context.Context, ids []string) ([]string, error) { return auth.DeadModelKeys(ctx, pool, ids) },
+		func() time.Duration { return cfg.Settings().Auth.InflightSweepInterval },
+		d.known.remove, time.Now, log)
+	return d
 }
+
+// Inflight is the door's in-flight registry (W01-8): the manage actions end
+// a revoked key's running requests through it, the NOTIFY listener feeds it
+// (events.ModelAccessSink), and its Run is one of the gateway's background
+// loops.
+func (d *ModelDoor) Inflight() *InflightRegistry { return d.inflight }
 
 // Stats returns a snapshot of the counters.
 func (d *ModelDoor) Stats() ModelAuthStats {
+	in := d.inflight.stats()
 	return ModelAuthStats{
+		Inflight: in.running, InflightKeys: in.keys, InflightTimers: in.timers,
+		InflightCancelled: in.cancelled, InflightSweeps: in.sweeps, InflightSweepErrors: in.sweepErrors,
 		Accepted: d.st.accepted.Load(), NoCredential: d.st.noCredential.Load(),
 		FormFailures: d.st.formFailures.Load(), Locked: d.st.locked.Load(),
 		ProbeRejected: d.st.probeRejected.Load(), Invalid: d.st.invalid.Load(),
@@ -264,7 +284,10 @@ func (d *ModelDoor) Handler(next http.Handler) http.Handler {
 			d.refuse(w, r, rejOverloaded)
 			return
 		}
-		// 7 — the database check under the semaphore.
+		// 7 — the database check under the semaphore. The registry's mark
+		// before it: a revocation signal during the check is caught at
+		// registration (stage 8).
+		mark := d.inflight.touchMark()
 		ca, err := d.check(ctx, s.DBConcurrency, func(c context.Context) (*auth.ConsumerAuth, error) {
 			return auth.AuthenticateModelKey(c, d.pool, hash, ip, secure)
 		})
@@ -282,15 +305,23 @@ func (d *ModelDoor) Handler(next http.Handler) http.Handler {
 		}
 		// 8 — accepted. The identity goes into the access record; the
 		// group's access log writes the request's one line from it (W06-9:
-		// no line of the door's own per request).
+		// no line of the door's own per request). The request runs on a
+		// context the in-flight registry can end (W01-8): a key that stops
+		// authenticating while the request runs cancels it with
+		// auth.ErrCredentialRevoked. It leaves the registry when the
+		// handler returns — a panic included.
 		d.known.add(hash)
 		d.usage.Touch(ca.ModelKeyID)
 		d.st.accepted.Add(1)
 		if rec := oai.AccessRecordFrom(ctx); rec != nil {
 			rec.ConsumerID, rec.ModelKeyID, rec.TenantID = ca.ConsumerID, ca.ModelKeyID, ca.TenantID
 		}
-		ctx = context.WithValue(ctx, consumerAuthKey, ca)
-		ctx = context.WithValue(ctx, modelDoorKey{}, d)
+		ctx, cancel := context.WithCancelCause(context.WithValue(ctx, consumerAuthKey, ca))
+		unregister := d.inflight.register(ca, hash, cancel, mark)
+		defer func() {
+			unregister()
+			cancel(context.Canceled)
+		}()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -401,9 +432,6 @@ func (d *ModelDoor) check(ctx context.Context, limit int, run func(context.Conte
 	defer release()
 	ca, err := run(dctx)
 	if err != nil {
-		if errors.Is(err, auth.ErrNoModelCredential) {
-			return nil, err
-		}
 		d.countUnavailable(ctx, &d.st.dbErrors)
 		return nil, fmt.Errorf("%w: %w", ErrModelAuthUnavailable, err)
 	}
@@ -449,33 +477,4 @@ func (d *ModelDoor) warn(msg string, args ...any) {
 		return
 	}
 	d.log.Warn(msg+" (throttled to one line per second; the door's counters carry the volume)", args...)
-}
-
-// ReauthConsumer checks the credential behind ca again (K22) — the stream
-// watcher's re-check (W02-08) until W01-8's revocation registry replaces it.
-// It runs on the door that accepted the request (taken from ctx), under the
-// same semaphore and deadline, with the address and transport of the
-// original request. The consumer as the door reads it now — all_models and
-// tenant_scope may have changed since the request entered; the watcher
-// resolves the alias with it (Fremd-Review 2 M-1): the key still
-// authenticates. nil with no error: it no longer does. An error
-// (ErrModelAuthUnavailable or a wiring error): the caller answers 503.
-func ReauthConsumer(ctx context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) {
-	d, _ := ctx.Value(modelDoorKey{}).(*ModelDoor)
-	if d == nil {
-		return nil, errNoModelDoor
-	}
-	if ca == nil {
-		return nil, auth.ErrNoModelCredential
-	}
-	got, err := d.check(ctx, d.settings().Auth.DBConcurrency, func(c context.Context) (*auth.ConsumerAuth, error) {
-		return auth.ReauthenticateModelKey(c, d.pool, ca)
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !got.IsValid || got.ModelKeyID != ca.ModelKeyID {
-		return nil, nil
-	}
-	return got, nil
 }

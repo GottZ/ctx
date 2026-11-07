@@ -43,6 +43,7 @@ type madTracer struct {
 	mu     sync.Mutex
 	byTag  map[string][]string
 	probes []madProbe
+	live   atomic.Int64 // ctx_model_auth_live statements (W01-8 sweep cost)
 }
 
 func (m *madTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
@@ -50,6 +51,9 @@ func (m *madTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.Trac
 	m.mu.Lock()
 	if tag != "" {
 		m.byTag[tag] = append(m.byTag[tag], d.SQL)
+	}
+	if strings.Contains(d.SQL, "ctx_model_auth_live(") {
+		m.live.Add(1)
 	}
 	if strings.Contains(d.SQL, "ctx_model_auth(") {
 		m.probes = append(m.probes, madProbe{tag: tag, at: time.Now()})
@@ -113,6 +117,7 @@ func (l *madLogs) String() string              { l.mu.Lock(); defer l.mu.Unlock(
 
 type madEnv struct {
 	seed     *pgxpool.Pool
+	dsn      string // the test database (a LISTEN connection of its own, W01-8)
 	pool     *pgxpool.Pool // traced, production-sized (MaxConns 20)
 	tracer   *madTracer
 	settings *madSettings
@@ -143,7 +148,7 @@ func madSetup(t *testing.T) *madEnv {
 	}
 	t.Cleanup(pool.Close)
 	return &madEnv{
-		seed: seed, pool: pool, tracer: tr,
+		seed: seed, dsn: dsn, pool: pool, tracer: tr,
 		settings: &madSettings{s: config.Defaults().GatewaySettings()},
 		usage:    &madUsage{}, logs: &madLogs{},
 		stamp: store.APIStamp(admin.ID, "mad"),

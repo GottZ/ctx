@@ -2619,6 +2619,17 @@ type GatewayConfig struct {
 	// rest under any flood. Below the pool size (V40).
 	AuthDBConcurrency int `key:"gateway.auth_db_concurrency" env:"CTX_GATEWAY_AUTH_DB_CONCURRENCY" default:"4" mut:"hot" parse:"strict" tenancy:"global-only"`
 
+	// InflightSweepInterval is the period of the periodic sweep of the
+	// door's in-flight registry (design/01 §4.2; wave W01-8): one query
+	// ctx_model_auth_live($ids) over the key IDs of every /v1 request this
+	// process is running, whatever their number. It is the second line
+	// behind the NOTIFY channel ctx_model_access_write (migration 165) and
+	// the backlog sweep after a listener reconnect: a revoked or expired key
+	// whose notification was lost ends its running requests within one
+	// interval at the latest. A failing sweep ends nothing (a throttled
+	// WARN). Parse-strict like the door's other limits; at least 1 s (V49).
+	InflightSweepInterval time.Duration `key:"gateway.inflight_sweep_interval" env:"CTX_GATEWAY_INFLIGHT_SWEEP_INTERVAL" default:"30" mut:"hot" parse:"strict" tenancy:"global-only"`
+
 	// The telemetry of the /v1 rows and the model groups' access log
 	// (design/06 §4.6, masterplan K10; wave W06-9).
 	//
@@ -2942,10 +2953,11 @@ func (c *Config) GatewaySettings() oai.Settings {
 			Concurrency:    int64(g.ConsumerConcurrencyDefault),
 		},
 		Auth: oai.AuthSettings{
-			FailureLimit:  g.AuthFailureLimit,
-			FailureWindow: g.AuthFailureWindow,
-			ProbeRate:     g.AuthProbeRate,
-			DBConcurrency: g.AuthDBConcurrency,
+			FailureLimit:          g.AuthFailureLimit,
+			FailureWindow:         g.AuthFailureWindow,
+			ProbeRate:             g.AuthProbeRate,
+			DBConcurrency:         g.AuthDBConcurrency,
+			InflightSweepInterval: g.InflightSweepInterval,
 		},
 		TenantAliasCeiling: oai.AliasCeiling{
 			MaxOutputTokens:    g.TenantAliasCeiling.MaxOutputTokens,
