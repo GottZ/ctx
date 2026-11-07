@@ -17,8 +17,11 @@ import (
 //
 //   - gateway: PRESENT on both paths while gateway.enabled is on and a feed
 //     is wired; ABSENT (JSON null for the SPA: tile off) otherwise. The
-//     server-admin path carries every field; the tenant path
-//     (SnapshotForTenant) carries only the tenant's own consumers' figures —
+//     server-admin path carries every field (set in assemble from the
+//     generation). The tenant path is per caller: HandleStatus stamps it
+//     from the same generation keyed by AuthResult.TenantID (SnapshotForTenant
+//     knows only the home scope; pattern GuardReviewByScope) and carries
+//     only the tenant's own consumers' figures —
 //     consumers, consumers_used_1h, consumers_expiring, top_consumers_1h,
 //     reservations_open and rejections_5m of its consumers — and never
 //     instance_envelope, auth or events (pointers left nil).

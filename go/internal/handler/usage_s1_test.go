@@ -66,7 +66,7 @@ func (c *ringClock) add(d time.Duration) {
 // TestConsumerRingRotates is V-06-d: three requests of c1 and one of c2
 // (other tenant) ⇒ Top lists c1 then c2; the tenant view lists only its
 // own; 61 minutes later (ringBuckets + 1 one-minute buckets) the ring is
-// empty — rot gegen einen Ring ohne Rotation.
+// empty — red against a ring without rotation.
 func TestConsumerRingRotates(t *testing.T) {
 	c := &ringClock{t: time.Date(2026, 11, 7, 20, 0, 0, 0, time.UTC)}
 	r := NewConsumerRing(c.now)

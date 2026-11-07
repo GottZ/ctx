@@ -178,7 +178,9 @@ func ReadSeries(ctx context.Context, q pgxdb.Querier, sq SeriesQuery, c Cover) (
 }
 
 // SeriesSQL returns the statement text ReadSeries runs for sq (the plan
-// gate EXPLAINs it). S1 stub: "".
+// gate EXPLAINs it): $1 From, $2 To (timestamptz), $3 ConsumerIDs (uuid[]
+// as text[]) when sq.ConsumerIDs is non-nil; bucket, group, source and the
+// exposure are fixed in the text. S1 stub: "".
 func SeriesSQL(sq SeriesQuery) string {
 	_ = sq
 	return ""
