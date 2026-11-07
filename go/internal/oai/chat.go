@@ -371,7 +371,9 @@ func readRequestBody(r io.Reader, declared int64) ([]byte, int64, error) {
 
 // The chunk sizes of an undeclared body: the first chunk holds a small
 // request whole, the largest bounds what is allocated ahead of the bytes the
-// budget stage reserves while they are read.
+// budget stage reserves while they are read. What the chunks and their join
+// spend beyond a declared read is ChunkedReadReserve, which the
+// configuration's budget floor counts.
 const (
 	readChunkMin = 512
 	readChunkMax = 1 << 20

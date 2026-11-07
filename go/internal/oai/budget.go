@@ -107,14 +107,50 @@ const scanDepthStateBytes = 104
 // by a small body or by a rewritten message array (hardening 5, B-2), so the
 // floor counts it at every cap. ScanDepthReserve is the most coverScan books
 // for the scan's nesting state (hardening 7) at the same depth: part of the
-// scan's booking, which the floor always counts.
+// scan's booking, which the floor always counts. ReadChunkMin and
+// ReadChunkMax are readRequestBody's chunk sizes, the two parts of
+// ChunkedReadReserve's formula, which the floor's error spells out.
 const (
+	ReadChunkMin         = readChunkMin
+	ReadChunkMax         = readChunkMax
 	RequestReserveFactor = requestReserveFactor
 	ScanReserveFactor    = scanReserveFactor
 	ScanReserveBase      = scanReserveBase
 	JSONStateReserve     = (jsonMaxDepth + 1) * jsonDepthStateBytes
 	ScanDepthReserve     = (jsonMaxDepth + 1) * scanDepthStateBytes
 )
+
+// ChunkedReadReserve is the most the read of a body of n bytes without a
+// declared length (readRequestBody) spends beyond the read of one with it,
+// which takes one buffer of n bytes (Nachtrag C-1 of FOLGE-P, Copilot on
+// PR #155). The chunks double from readChunkMin up to readChunkMax; one more
+// is allocated as long as every earlier one is full and no EOF came — and a
+// reader that reports EOF only on the read after the last byte (net/http's
+// chunked body, bytes.Reader) allocates one more, empty, when n is exactly
+// the sum S(m) of the chunks before it. The chunks are joined into one
+// buffer of n bytes. With S(m) <= n they sum to S(m) + c(m) <= n + c(m), and
+// the last chunk c(m) is S(m) + readChunkMin <= n + readChunkMin while the
+// chunks double, readChunkMax from S(11) = readChunkMax − readChunkMin on:
+// the read spends at most 2 × n + min(n + readChunkMin, readChunkMax),
+// reached at n = S(m). That read spends the request share (3 × n) up to
+// readChunkMin; a rewritten message array (about n) and the upstream body
+// (about n plus its frame) book past it — so the configuration's floor (V39)
+// counts this term at every cap. Over the route, the deepest rewritten
+// request without a declared length at the chunk sums 32 256 B and
+// 1 048 064 B needed exactly this term more than the declared one: at a
+// budget equal to the floor without the term it lacked the term less the
+// 73 B the declared one has to spare; with it, it has those 73 B. An empty
+// body (n = 0) spends one chunk.
+func ChunkedReadReserve(n int64) int64 {
+	if n < 0 {
+		return 0
+	}
+	last := min(n, readChunkMax-readChunkMin) + readChunkMin
+	if n > math.MaxInt64-last {
+		return math.MaxInt64
+	}
+	return n + last
+}
 
 // ErrBudgetExhausted is the read error of a body without a declared length
 // once its running reservation would pass the in-flight budget. A handler
