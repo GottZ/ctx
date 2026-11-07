@@ -22,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/fedhop"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
@@ -269,8 +270,7 @@ func (c *chatCall) serve() {
 	}
 	depth := jsonDepth(body)
 	if !c.cover(depth * jsonDepthStateBytes) { // the JSON check's nesting state, booked before it runs
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 		return
 	}
 	req, perr := parseTopLevel(body)
@@ -301,8 +301,7 @@ func (c *chatCall) serve() {
 	}
 	required := c.sensitivity()
 	if !c.coverScan(required, body, depth) {
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 		return
 	}
 	c.required = c.d.Federation.Scan(required, body)
@@ -386,17 +385,14 @@ func (c *chatCall) readBody() ([]byte, bool) {
 		}
 		c.held, c.spent = requestReserveFactor*reserved, 0
 		if !c.cover(spent) { // a small undeclared body's first chunk can pass its share
-			c.rec.Reason = CodeServerOverloaded
-			WriteOverloaded(c.w)
+			refuseOverloaded(c.rec, c.w)
 			return nil, false
 		}
 		return body, true
 	case errors.Is(err, ErrBudgetExhausted):
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 	case errors.As(err, &tooLarge):
-		c.rec.Reason = CodeRequestTooLarge
-		WriteRequestTooLarge(c.w, tooLarge.Limit)
+		refuseTooLarge(c.rec, c.w, tooLarge.Limit)
 	case c.client.Err() != nil:
 		// the client went away while sending
 	default:
@@ -534,8 +530,7 @@ func (c *chatCall) reserveUpstream(n int) error {
 // errParseOverloaded is the in-flight budget's 503.
 func (c *chatCall) refuseParam(perr *paramError) {
 	if perr == errParseOverloaded {
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 		return
 	}
 	i := slices.IndexFunc(codes, func(s CodeSpec) bool { return s.Code == perr.code })
@@ -587,9 +582,11 @@ func (c *chatCall) resolve(name string, overlong bool) bool {
 		grantReadFailed(c.w, c.r, err)
 		return false
 	case !found:
+		c.rec.NoteRejection(keyquota.RejectModel, keyquota.DetailNotFound)
 		refuseModelNotFound(c.w, c.r)
 		return false
 	case a.Kind != modelalias.KindChat:
+		c.rec.NoteRejection(keyquota.RejectModel, keyquota.DetailNotSupported)
 		c.refuse(CodeModelNotSupported, modelKindMessage, false)
 		return false
 	}
@@ -614,8 +611,7 @@ func (c *chatCall) reserveAnswer() bool {
 		share = c.s.MaxStreamFrameBytes
 	}
 	if !res.Grow(2 * share) {
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 		return false
 	}
 	return true
@@ -644,31 +640,35 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 	case errors.As(err, &ne):
 		slog.Warn("gateway: no eligible backend", "alias", c.alias.Name, "role", ne.Role, "required", string(ne.Required),
 			"excluded", fmt.Sprintf("%+v", ne.Excluded), "request_id", c.w.Header().Get("X-Request-ID"))
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailEgressDenied)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return nil, false
 	case err != nil:
 		c.internal("chain build failed", "error", err)
 		return nil, false
 	}
-	gated, err := c.d.Quota.GateTenant(c.ca.TenantID, chain)
+	gated, err := c.d.gateChain(c.ctx, c.ca, llmlog.GatewayOpChat, chain)
 	var qe *backends.ErrQuotaExceeded
 	switch {
 	case errors.As(err, &qe):
-		writeRetryAfter(c.w.Header(), untilNextHour(time.Now()))
+		writeRetryAfter(c.w.Header(), tenantQuotaRetryAfter(qe, time.Now()))
+		c.rec.NoteRejection(keyquota.RejectQuota, tenantQuotaDetail(qe))
 		c.refuse(CodeInsufficientQuota, quotaMessage, false)
 		return nil, false
 	case err != nil:
 		c.internal("tenant quota gate refused the request (wiring defect)", "error", err)
 		return nil, false
 	case len(gated) == 0:
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailEgressDenied)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return nil, false
 	}
 	return gated, true
 }
 
-// untilNextHour is the Retry-After of the tenant quota (design/02 §4.10.2:
-// "bis zur nächsten vollen Stunde"); at least one second.
+// untilNextHour is the Retry-After of a tenant quota refusal whose relief is
+// unknown (design/02 §4.10.2: "bis zur nächsten vollen Stunde";
+// tenantQuotaRetryAfter, W06-14); at least one second.
 func untilNextHour(now time.Time) time.Duration {
 	return max(now.Truncate(time.Hour).Add(time.Hour).Sub(now), time.Second)
 }
@@ -705,6 +705,12 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	// source; a rebuild here missed a reserve reloaded since the request's
 	// settings snapshot and a limiter without the capacity header).
 	c.meterHeld = res.Held()
+	// The row the shutdown's forced settle writes should the request still
+	// be open after the HTTP drain (W06-13 (e)).
+	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
+		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID,
+			Gateway: llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil}}
+	}, string(c.required))
 	return true
 }
 
@@ -788,6 +794,7 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		c.endLimit(func(l LimitReservation) { l.Abort() })
 		return
 	}
+	c.rec.Class = planClass(plan) // the class of an L2 refusal (W06-12); a lease names it again
 	c.target = newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen)
 	stop := c.d.watch(c.ctx, c.cancel, c.target)
 	defer stop()
@@ -1009,7 +1016,18 @@ func (c *chatCall) leaseStats(st *walkState) {
 // bucket's capacity). A non-streamed answer never carries an estimate.
 func (c *chatCall) book(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState, out chatOutcome) {
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
+		// The provider-reported cost (an openrouter row) moves the
+		// consumer's monthly cost budget (W06-14); it books on the end below.
+		switch {
+		case st.result != nil:
+			addCost(c.limit, st.result.CostUSD)
+		case st.stream != nil:
+			addCost(c.limit, st.stream.CostUSD)
+		}
 		c.endMeter(st)
+		if forcedEnded(c.limit) {
+			return // the shutdown's forced settle wrote the request's row (W06-13)
+		}
 		c.record(plan, served, attempts, err, st, out)
 	}
 }
@@ -1066,8 +1084,7 @@ func (c *chatCall) outcomeError(plan Plan, attempts []llm.ChainAttempt, err erro
 		// reservation settles or keeps its charge (answer) — never a full
 		// refund after the wire (W06-10). A committed stream gets it as its
 		// error frame, never a second status (reply, Z2).
-		c.rec.Reason = CodeServerOverloaded
-		c.reply(WriteOverloaded)
+		c.reply(func(w http.ResponseWriter) { refuseOverloaded(c.rec, w) })
 		finish := llmlog.FinishError
 		if st.wired == 0 {
 			finish = llmlog.FinishAborted
@@ -1088,6 +1105,7 @@ func (c *chatCall) outcomeError(plan Plan, attempts []llm.ChainAttempt, err erro
 		// every row window-skipped) — nothing eligible, no upstream fault.
 		slog.Warn("gateway: the walk found no row to try", "alias", c.alias.Name, "role", c.alias.Role,
 			"error", err, "request_id", c.w.Header().Get("X-Request-ID"))
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailNotOffered)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Code: CodeNoEligibleBackend}}
 	}

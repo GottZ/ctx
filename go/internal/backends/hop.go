@@ -35,7 +35,8 @@ func (b *Backend) HopTarget(kind fedhop.WireKind) fedhop.Target {
 // HintAnswersAsCtxInstance is the BackendStatus hint of a row that answered
 // with Ctx-Instance (design/04 §4.4): the backend is a ctx instance, but the
 // row does not say so, so its calls carry the loop marker only and none of
-// the federation context. A machine code — the admin UI words it.
+// the federation context. A machine code — the admin UI words it. Never on
+// a provider_class ctx row: that row already says so (F-W5).
 const HintAnswersAsCtxInstance = "answers_as_ctx_instance"
 
 // NotePeerInstance is the fedhop.Observer half that learns from answers: a

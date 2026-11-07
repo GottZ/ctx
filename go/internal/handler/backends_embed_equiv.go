@@ -61,6 +61,11 @@ func (h *ManageHandler) handleEmbedEquivalence(w http.ResponseWriter, r *http.Re
 	ctx := r.Context()
 
 	cand, failure := h.equivCandidate(ctx, req, spec)
+	if failure == "" && cand.ProviderClass == backends.ProviderCtx {
+		// The write refuses every embed role on a ctx row (validateCtx); a
+		// proof for one would arm nothing the write accepts (F-W5).
+		failure = "provider_class ctx carries no embed role (vector-space pin not available for ctx rows yet) — no equivalence probe"
+	}
 	if failure == "" && cand.Model == "" {
 		failure = "candidate has no embed model (model_map needs an embed or default entry)"
 	}

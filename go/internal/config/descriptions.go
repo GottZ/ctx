@@ -297,6 +297,17 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.xu_reserve_ratio":    "Share of each meter bucket the urgent lane keeps from the bulk lane of the same consumer; range [0, 1)",
 	// W06-11: the meter's L1 (design/06 §4.2, §4.11).
 	"gateway.consumer_concurrency_default": "Requests per model consumer and operation that may be open at once, queued or running (meter L1); one more is 429 concurrency_limit_exceeded with Retry-After 1 s; the bulk lane holds at most max(1, floor(C·(1 − xu_reserve_ratio))) of them; at least 1, at most dispatch.external_queue_per_consumer",
+	// W06-13: the meter's day and month budgets and envelopes (design/06 §4.2, §4.3, §4.11).
+	"gateway.chat_daily_tokens_default":       "Chat tokens per model consumer and UTC day; over it 429 insufficient_quota (not retryable) until 00:00 UTC; at least 1",
+	"gateway.embed_daily_tokens_default":      "Embedding tokens per model consumer and UTC day; over it 429 insufficient_quota (not retryable) until 00:00 UTC; at least 1",
+	"gateway.rerank_daily_tokens_default":     "Rerank tokens per model consumer and UTC day; over it 429 insufficient_quota (not retryable) until 00:00 UTC; at least 1",
+	"gateway.consumer_monthly_tokens_default": "Tokens per model consumer, operation and UTC month; over it 429 insufficient_quota until the 1st at 00:00 UTC; 0 = unbounded",
+	"gateway.consumer_daily_requests_default": "Requests per model consumer, operation and UTC day; over it 429 insufficient_quota until 00:00 UTC; 0 = unbounded",
+	"gateway.tenant_envelope_factor":          "Tenant envelope per operation = this factor × the consumer budgets: all consumers of a tenant together use at most that much (consumer tokens only); at least 1",
+	"gateway.instance_envelope_factor":        "Instance envelope per operation = this factor × the consumer budgets: all consumers of this ctx together use at most that much; at least 1",
+	// W06-14: the egress and cost rule of the /v1 chains (design/06 §4.3, §4.5).
+	"gateway.consumer_allow_external_default":   "Model consumers may reach billable rows that report their cost (openrouter) while their monthly cost budget lasts; off = local, lan and ctx-peer rows only; rows without a cost report stay closed either way",
+	"gateway.consumer_monthly_cost_usd_default": "Provider-reported cost in USD per model consumer, operation and UTC month; once used up, cost-reporting rows drop from the consumer's chains (no 429); the tenant envelope is tenant_envelope_factor × it; > 0, no 0 sentinel",
 	// W01-5: consumer and model-key administration (design/01 §4.6, §4.9).
 	"gateway.tenant_self_service":      "Lets tenant-admins create model consumers, rotate their keys and grant consumer fields in their own tenant — only while gateway.enabled is on too; off (default) these stay server-admin, revoking stays open to tenant-admins",
 	"gateway.key_max_lifetime_app":     "Default and ceiling in seconds of a new model key's expiry for kind=app consumers (365 d); 0 = no expiry required and no ceiling",

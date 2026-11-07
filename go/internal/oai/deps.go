@@ -84,9 +84,22 @@ type Deps struct {
 	// Limiter is the per-consumer meter (design/06 §4.1 steps 7–9, W06-10).
 	// nil ⇒ 503 service_unavailable (L11).
 	Limiter Limiter
+	// Egress is the consumer's egress policy of the chain rule (design/06
+	// §4.1 step 6, §4.5; W06-14): after the tenant gate the chain keeps the
+	// rows backends.WithoutBillable keeps under it. nil ⇒ the policy that
+	// keeps only the free rows (fail-closed, E-06-14).
+	Egress EgressSource
 	// Lifecycle, when set, ends every running request at server shutdown
 	// (design/02 §4.11.3 D7): the request context is bound to it.
 	Lifecycle context.Context
+}
+
+// EgressSource is the consumer's egress policy per op (W06-14):
+// cmd/ctxd's meterLimiter answers it from the settings (until the limits rows
+// of W06-15 gateway.consumer_allow_external_default) and the meter's cost
+// budgets.
+type EgressSource interface {
+	Egress(ctx context.Context, ca *auth.ConsumerAuth, op string) backends.EgressPolicy
 }
 
 // TenantGate is the tenant quota gate of a /v1 chain (masterplan K17):

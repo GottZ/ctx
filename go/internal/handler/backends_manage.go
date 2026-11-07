@@ -49,8 +49,12 @@ type backendSpec struct {
 	// metadata.score_domain of a rerank-capable backend — the change
 	// reinterprets every future ranking this backend produces and cuts
 	// the comparability of the access-log score trail at the switch.
-	ConfirmScoreDomainChange bool    `json:"confirm_score_domain_change"`
-	Locality                 *string `json:"locality"`
+	ConfirmScoreDomainChange bool `json:"confirm_score_domain_change"`
+	// ConfirmPlaintextCredential guards storing a plain http:// base_url
+	// whose api_key_ref holds a ctx model key (B24/K-04-6, F-W5): every call
+	// would carry the key unencrypted (backends_plaintext.go).
+	ConfirmPlaintextCredential bool    `json:"confirm_plaintext_credential"`
+	Locality                   *string `json:"locality"`
 	// Scope is the tenant dimension (062, Modell C). HONORED ONLY for a
 	// server-admin on create (free choice, defaults to _global); a tenant-admin
 	// always has it forced to ar.HomeScope, and update ignores it entirely
@@ -492,6 +496,11 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 	if !h.checkBackendSecretRef(w, r, b.APIKeyRef, b.Scope, b.Host) {
 		return
 	}
+	if warn, ok := h.checkPlaintextModelKey(w, r, b, b.Scope, true, spec.ConfirmPlaintextCredential); !ok {
+		return
+	} else if warn != "" {
+		warnings = append(warnings, warn)
+	}
 
 	// disable_profiles: resolve names → ids against the caller's visible+acceptable
 	// profile set (§5.2) BEFORE opening the tx, so an unknown name is a 422 without
@@ -549,9 +558,10 @@ func isBrakeOnly(spec *backendSpec, keys map[string]json.RawMessage) bool {
 }
 
 // gateBackendUpdate runs the whole-row gates of backend-update on next:
-// ValidateBackend, the embed-equivalence claim and the api_key_ref gate.
-// Returns the validator's warnings, or false after writing the 422.
-func (h *ManageHandler) gateBackendUpdate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, prev, next *backends.Backend) ([]string, bool) {
+// ValidateBackend, the embed-equivalence claim, the api_key_ref gate and the
+// plaintext model-key confirm (B24; confirmed = confirm_plaintext_credential).
+// Returns the warnings, or false after writing the 422/400.
+func (h *ManageHandler) gateBackendUpdate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, prev, next *backends.Backend, confirmed bool) ([]string, bool) {
 	warnings, fieldErrs := backends.ValidateBackend(next)
 	if len(fieldErrs) > 0 {
 		writeBackendValidation(w, fieldErrs)
@@ -565,6 +575,16 @@ func (h *ManageHandler) gateBackendUpdate(w http.ResponseWriter, r *http.Request
 	// re-hosting a row away from the operator's provider drops the fallback.
 	if !h.checkBackendSecretRef(w, r, next.APIKeyRef, prev.Scope, next.Host) {
 		return nil, false
+	}
+	// B24 arms when the write moves the key to another target or puts
+	// another credential on it; scope is immutable through update.
+	armed := next.Host != prev.Host || next.APIKeyRef != prev.APIKeyRef
+	warn, ok := h.checkPlaintextModelKey(w, r, next, prev.Scope, armed, confirmed)
+	if !ok {
+		return nil, false
+	}
+	if warn != "" {
+		warnings = append(warnings, warn)
 	}
 	return warnings, true
 }
@@ -633,7 +653,7 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 	var warnings []string
 	if !isBrakeOnly(spec, keys) {
 		var ok bool
-		if warnings, ok = h.gateBackendUpdate(w, r, ar, prev, &next); !ok {
+		if warnings, ok = h.gateBackendUpdate(w, r, ar, prev, &next, spec.ConfirmPlaintextCredential); !ok {
 			return
 		}
 	}

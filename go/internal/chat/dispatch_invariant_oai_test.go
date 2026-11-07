@@ -111,6 +111,7 @@ func oaiCensusRoute(t *testing.T, ca *countingAdmitter, chain []backends.Backend
 		RetryAfterSteps:   func() []time.Duration { return nil },
 		Planner:           censusPlanner{ca: ca},
 		Limiter:           censusLimiter{},
+		Egress:            censusEgress{}, // every row stays: the census counts wire sites, not the egress rule (W06-14)
 	}
 	var budget oai.Budget
 	return oai.InflightBudget(&budget, get)(oai.ChatCompletions(d))
@@ -139,4 +140,12 @@ func postCensus(t *testing.T, h http.Handler) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("the /v1 route answered %d %s", w.Code, w.Body.String())
 	}
+}
+
+// censusEgress keeps every row of the census chains (W06-14): the census
+// rows carry no locality, which the /v1 egress rule counts as billable.
+type censusEgress struct{}
+
+func (censusEgress) Egress(context.Context, *auth.ConsumerAuth, string) backends.EgressPolicy {
+	return backends.EgressPolicy{AllowExternal: true, AllowUnmetered: true}
 }

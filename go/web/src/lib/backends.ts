@@ -65,7 +65,7 @@ export function isTrustElevation(prev: string, next: string): boolean {
 // undercounted locality). locality is also auto-derived from base_url on create
 // and cross-checked against the host, so '' (auto) is the sane default.
 export const PROTOCOLS = ['openai', 'ollama', 'anthropic', 'rerank'] as const
-export const PROVIDER_CLASSES = ['generic', 'llamacpp', 'openrouter'] as const
+export const PROVIDER_CLASSES = ['generic', 'llamacpp', 'openrouter', 'ctx'] as const
 export const LOCALITIES = ['local', 'lan', 'external'] as const
 
 // Core roles (backend.go); free-text proxy roles are allowed but warn server-side.

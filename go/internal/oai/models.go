@@ -8,6 +8,7 @@ import (
 	"net/url"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/modelalias"
 )
 
@@ -210,6 +211,7 @@ func GetModel(d Deps) http.Handler {
 		}
 		name, ok := modelName(r)
 		if !ok {
+			NoteRejection(r.Context(), keyquota.RejectModel, keyquota.DetailNotFound)
 			refuseModelNotFound(w, r)
 			return
 		}
@@ -218,6 +220,7 @@ func GetModel(d Deps) http.Handler {
 		case err != nil:
 			grantReadFailed(w, r, err)
 		case !found:
+			NoteRejection(r.Context(), keyquota.RejectModel, keyquota.DetailNotFound)
 			refuseModelNotFound(w, r)
 		default:
 			writeJSON(w, newModelObject(a))

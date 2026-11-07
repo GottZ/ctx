@@ -512,7 +512,7 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 13
     permissions:
       contents: read
     steps:
@@ -543,7 +543,7 @@ jobs:
             -short \
             -race \
             -count=1 \
-            -timeout=5m \
+            -timeout=8m \
             ./...
 
       - name: Upload coverage

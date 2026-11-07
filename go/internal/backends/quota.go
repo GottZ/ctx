@@ -74,6 +74,14 @@ const (
 type ErrQuotaExceeded struct {
 	Scope  string
 	Reason string // "daily_calls" | "cost_budget"
+	// ReliefAt is the earliest moment the figure that tripped can drop
+	// (W06-14, design/06 §4.4 "früheste Entlastung"; W06-4 handover 2): the
+	// oldest row it counts + its window — for daily_calls the call relief,
+	// for the cost budget the relief of the window over its limit, the later
+	// one when both are. It is the moment the number sinks, not necessarily
+	// the one the gate opens: over by k, k + 1 rows have to fall out. Zero
+	// when unknown (no counted row found, see llmusage.Totals).
+	ReliefAt time.Time
 }
 
 func (e *ErrQuotaExceeded) Error() string {
@@ -93,8 +101,9 @@ type tenantState struct {
 
 	// The earliest moment each figure above can drop: the oldest row it
 	// counts + its window (zero = nothing to relieve, see llmusage.Totals).
-	// Nothing reads them yet; the /v1 tenant gate turns them into
-	// Retry-After (W06-14).
+	// gateState hands the one of the figure that tripped to
+	// ErrQuotaExceeded.ReliefAt; the /v1 routes turn it into Retry-After
+	// (W06-14).
 	dayCallsRelief  time.Time
 	dayCostRelief   time.Time
 	monthCostRelief time.Time
@@ -211,20 +220,43 @@ func gateState(gen *quotaGen, tenant, label string, chain []Backend) ([]Backend,
 	// Call budget FIRST: it gates every backend (local included), before any
 	// attempt, so a tenant over its call cap is stopped even on local.
 	if st.quota.DailyCalls != nil && st.dayCalls >= *st.quota.DailyCalls {
-		return nil, &ErrQuotaExceeded{Scope: scope, Reason: "daily_calls"}
+		return nil, &ErrQuotaExceeded{Scope: scope, Reason: "daily_calls", ReliefAt: st.dayCallsRelief}
 	}
 
 	// Cost budget: external only. Over budget → block hard-errors, external_off
 	// drops external (local stays reachable — cost never locks the own GPU).
-	costOver := (st.quota.DailyCostUSD != nil && st.dayCost >= *st.quota.DailyCostUSD) ||
-		(st.quota.MonthlyCostUSD != nil && st.monthCost >= *st.quota.MonthlyCostUSD)
-	if costOver {
+	dayOver := st.quota.DailyCostUSD != nil && st.dayCost >= *st.quota.DailyCostUSD
+	monthOver := st.quota.MonthlyCostUSD != nil && st.monthCost >= *st.quota.MonthlyCostUSD
+	if dayOver || monthOver {
 		if st.quota.OnExceed == QuotaExceedBlock {
-			return nil, &ErrQuotaExceeded{Scope: scope, Reason: "cost_budget"}
+			return nil, &ErrQuotaExceeded{Scope: scope, Reason: "cost_budget", ReliefAt: costRelief(st, dayOver, monthOver)}
 		}
 		return withoutExternal(chain), nil
 	}
 	return chain, nil
+}
+
+// costRelief is the relief of a cost refusal: the relief of each window over
+// its limit — both over, both figures must drop, so the later one; a window
+// over its limit whose relief is unknown (zero) makes the whole relief
+// unknown, never an earlier guess.
+func costRelief(st tenantState, dayOver, monthOver bool) time.Time {
+	var relief time.Time
+	for _, w := range []struct {
+		over bool
+		at   time.Time
+	}{{dayOver, st.dayCostRelief}, {monthOver, st.monthCostRelief}} {
+		if !w.over {
+			continue
+		}
+		if w.at.IsZero() {
+			return time.Time{}
+		}
+		if w.at.After(relief) {
+			relief = w.at
+		}
+	}
+	return relief
 }
 
 // SeedForTest stores a fresh generation in which scope is the only scope of

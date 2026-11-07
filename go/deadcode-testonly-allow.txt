@@ -171,6 +171,7 @@ internal/handler/v1door/v1door.go	probe.ServeHTTP	# v1door: integration-getaggte
 internal/handler/v1door/v1door.go	probe.take	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	routeTargets	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	underModelPrefix	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/llmusage/seed.go	SeedSQL	# Messnaht (W06-13): TestSeedPlanAtOneMillionRows erklärt mit EXPLAIN (ANALYZE, BUFFERS) genau das Produktions-Statement von SeedConsumers, keine Kopie
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
 internal/modelkey/modelkey.go	Key.GoString	# Hint-Darstellung für fmt %#v (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen

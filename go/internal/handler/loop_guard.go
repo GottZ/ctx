@@ -14,6 +14,7 @@ import (
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/fedhop"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -120,10 +121,10 @@ func (g *loopGuard) middleware(next http.Handler) http.Handler {
 		if err != nil {
 			var dup *fedhop.DuplicateEntryError
 			if errors.As(err, &dup) {
-				g.refuse(w, g.loop, loopGuardTextLoop, fedhop.ReasonLoop)
+				g.refuse(w, r, g.loop, loopGuardTextLoop, fedhop.ReasonLoop, keyquota.DetailLoop)
 				return
 			}
-			g.refuse(w, g.invalid, loopGuardTextInvalid, "")
+			g.refuse(w, r, g.invalid, loopGuardTextInvalid, "", keyquota.DetailHeaderInvalid)
 			return
 		}
 		ctx := r.Context()
@@ -135,14 +136,14 @@ func (g *loopGuard) middleware(next http.Handler) http.Handler {
 			}
 			slog.ErrorContext(ctx, "federation: hop chain on a router without instance identity — refused, own tokens cannot be recognised (wiring defect)",
 				"path", r.URL.Path, "request_id", RequestIDFromContext(ctx))
-			g.refuse(w, g.internal, loopGuardTextInternal, "")
+			g.refuse(w, r, g.internal, loopGuardTextInternal, "", "")
 			return
 		}
 		if tok, loop := in.LoopFor(id); loop {
 			if tok != "" {
 				w.Header().Set(fedhop.HeaderLoopToken, tok)
 			}
-			g.refuse(w, g.loop, loopGuardTextLoop, fedhop.ReasonLoop)
+			g.refuse(w, r, g.loop, loopGuardTextLoop, fedhop.ReasonLoop, keyquota.DetailLoop)
 			return
 		}
 		// A request without chain is no federated request: the depth limit
@@ -150,7 +151,7 @@ func (g *loopGuard) middleware(next http.Handler) http.Handler {
 		// without the federation group reads 0 — V43 refuses that value, a
 		// test router might not), and it costs no snapshot read.
 		if len(in.Hop) > 0 && len(in.Hop) >= g.maxDepth() {
-			g.refuse(w, g.depth, loopGuardTextDepth, fedhop.ReasonDepth)
+			g.refuse(w, r, g.depth, loopGuardTextDepth, fedhop.ReasonDepth, keyquota.DetailDepth)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(fedhop.WithInbound(ctx, fedhop.Inbound{Hop: in.Hop, Path: in.Path})))
@@ -158,8 +159,13 @@ func (g *loopGuard) middleware(next http.Handler) http.Handler {
 }
 
 // refuse writes one refusal in the guard's envelope. reason "" sets no
-// Ctx-Reason (fedhop.SetReason sets only vocabulary values).
-func (g *loopGuard) refuse(w http.ResponseWriter, spec oai.CodeSpec, text string, reason fedhop.Reason) {
+// Ctx-Reason (fedhop.SetReason sets only vocabulary values). detail is the
+// refusal's federation entry in the refusal ledger (W06-12, design/06 §4.1
+// step 3); "" for the wiring defect, which is no rule's refusal.
+func (g *loopGuard) refuse(w http.ResponseWriter, r *http.Request, spec oai.CodeSpec, text string, reason fedhop.Reason, detail string) {
+	if detail != "" {
+		oai.NoteRejection(r.Context(), keyquota.RejectFederation, detail)
+	}
 	fedhop.SetReason(w.Header(), reason)
 	if g.envelope == LoopGuardOpenAI {
 		oai.Write(w, oai.Error{Status: spec.Status, Type: spec.Type, Code: spec.Code, Message: text})

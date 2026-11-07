@@ -15,6 +15,7 @@ import {
   isEmptySpec,
   isTrustElevation,
   modelMapToRows,
+  PROVIDER_CLASSES,
   rowsToModelMap,
   secretUsage,
   sortBackends,
@@ -53,6 +54,14 @@ function item(p: Partial<BackendListItem> & Pick<BackendListItem, 'name'>): Back
 function setting(p: Partial<SettingView> & Pick<SettingView, 'key'>): SettingView {
   return { type: 'string', mutability: 'hot', value: '', source: 'env', default: '', ...p }
 }
+
+// Wire enum of provider_class, pinned against backends/validate.go
+// validateIdentity: ctx is writable since F-W5 (migration 166).
+describe('PROVIDER_CLASSES', () => {
+  it('matches the validate.go enum, ctx included', () => {
+    expect([...PROVIDER_CLASSES]).toEqual(['generic', 'llamacpp', 'openrouter', 'ctx'])
+  })
+})
 
 describe('trust', () => {
   it('ranks the four FIX levels, unknown admits nothing', () => {

@@ -17,6 +17,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/fedhop"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/oai"
 )
@@ -441,13 +442,16 @@ func (a *V1Admission) WriteAdmissionError(ctx context.Context, w http.ResponseWr
 	var re *dispatch.RejectionError
 	switch {
 	case busy && errors.As(err, &re):
+		noteAdmissionRefusal(ctx, busyDetail(err), err)
 		a.setRetryAfter(w.Header(), re.RetryAfter)
 		oai.WriteCode(w, oai.CodeServerBusy, busyMessage, true)
 		return oai.CodeServerBusy
 	case busy:
+		noteAdmissionRefusal(ctx, busyDetail(err), err)
 		oai.WriteCode(w, oai.CodeServerBusy, busyMessage, true)
 		return oai.CodeServerBusy
 	case errors.Is(err, dispatch.ErrExternalNotOffered), errors.Is(err, ErrLaneNotOffered), errors.Is(err, ErrChainNotOffered):
+		noteAdmissionRefusal(ctx, keyquota.DetailNotOffered, err)
 		if steps := a.dispatch.ExternalRetryAfterSteps(); len(steps) > 0 {
 			w.Header().Set(headerRetryAfter, strconv.Itoa(int(math.Ceil(steps[len(steps)-1].Seconds()))))
 		}
@@ -457,6 +461,36 @@ func (a *V1Admission) WriteAdmissionError(ctx context.Context, w http.ResponseWr
 	a.logInternal(err, acquire)
 	oai.WriteInternal(w)
 	return oai.CodeInternalError
+}
+
+// noteAdmissionRefusal declares an L2 refusal on the request's access
+// record for the refusal ledger (W06-12, design/06 §4.1 step 10): reason
+// capacity, detail the refusing rule, target the dispatcher target of the
+// refused acquire (dispatch.AdmissionError.Host; "" for a refusal of the
+// plan, before any acquire). The route hands the queue wait over with the
+// meter reservation's Reject (oai.AccessRecord.NoteRejectionWait). An
+// internal_error is no refusal by a rule and declares nothing.
+func noteAdmissionRefusal(ctx context.Context, detail string, err error) {
+	if ctx == nil {
+		return
+	}
+	var ae *dispatch.AdmissionError
+	target := ""
+	if errors.As(err, &ae) {
+		target = ae.Host
+	}
+	oai.NoteRejectionAt(ctx, keyquota.RejectCapacity, detail, target)
+}
+
+// busyDetail is the ledger detail of a busy answer: wait_expired when the
+// external wait budget ran out or was predicted out (dispatch.ErrWaitExpired
+// — the two are one sentinel; the dispatcher's own counters keep the split),
+// server_busy for the cap ladder, a full queue and a busy failover row.
+func busyDetail(err error) string {
+	if errors.Is(err, dispatch.ErrWaitExpired) {
+		return keyquota.DetailWaitExpired
+	}
+	return keyquota.DetailServerBusy
 }
 
 // logInternal names what an internal_error answer of the writer stands for:
