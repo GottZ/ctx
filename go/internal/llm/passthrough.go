@@ -476,8 +476,8 @@ func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.
 // io.ReadAll over httpx.CapBody did, into one buffer (FOLGE-S S4): an answer
 // with a Content-Length within the cap is one allocation of its length (and
 // one byte to see the end), any other grows by doubling from 512 bytes up to
-// the cap — io.ReadAll grows a large buffer by a quarter, about 5 × the
-// answer in allocations at the 4-MiB cap.
+// the cap. A full buffer is grown only when a small probe read finds more:
+// an answer that ends exactly at the buffer's end costs no doubled buffer.
 func readAnswer(resp *http.Response, maxResp int64) ([]byte, error) {
 	r := httpx.CapBody(resp.Body, maxResp)
 	size := int64(512)
@@ -485,18 +485,27 @@ func readAnswer(resp *http.Response, maxResp int64) ([]byte, error) {
 		size = cl + 1
 	}
 	buf := make([]byte, 0, size)
+	var probe []byte
 	for {
-		if len(buf) == cap(buf) {
-			c := min(2*int64(cap(buf)), maxResp+1)
-			if c <= int64(cap(buf)) { // the cap reader delivers at most maxResp bytes: unreachable
-				return buf, fmt.Errorf("%w (%d bytes)", httpx.ErrResponseTooLarge, maxResp)
+		var n int
+		var err error
+		if len(buf) < cap(buf) {
+			n, err = r.Read(buf[len(buf):cap(buf)])
+			buf = buf[:len(buf)+n]
+		} else {
+			if probe == nil {
+				probe = make([]byte, 512)
 			}
-			grown := make([]byte, len(buf), c)
-			copy(grown, buf)
-			buf = grown
+			if n, err = r.Read(probe); n > 0 {
+				c := min(2*int64(cap(buf)), maxResp+1)
+				if c < int64(len(buf)+n) { // the cap reader delivers at most maxResp bytes: unreachable
+					return buf, fmt.Errorf("%w (%d bytes)", httpx.ErrResponseTooLarge, maxResp)
+				}
+				grown := make([]byte, len(buf), c)
+				copy(grown, buf)
+				buf = append(grown, probe[:n]...)
+			}
 		}
-		n, err := r.Read(buf[len(buf):cap(buf)])
-		buf = buf[:len(buf)+n]
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return buf, nil
