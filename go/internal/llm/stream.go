@@ -567,6 +567,9 @@ type sseFrame struct {
 	// limit is the frame cap; 0 = maxSSEFrameBytes (every chat-harness
 	// parser). The gateway relay sets its own (ChatRawStream's maxFrame).
 	limit int
+	// grow books the buffer a growth of buf discards (the relay's growth
+	// booking; nil: none).
+	grow func(int) error
 }
 
 // room checks that a line of n bytes fits the frame and returns the bytes
@@ -597,7 +600,7 @@ func (f *sseFrame) add(v string) error {
 	if f.lines == 0 {
 		f.buf = f.buf[:0]
 	}
-	f.buf = growLine(f.buf, sep+len(v), limit)
+	f.buf, _ = growLine(f.buf, sep+len(v), limit, nil)
 	if sep > 0 {
 		f.buf = append(f.buf, '\n')
 	}
@@ -633,11 +636,15 @@ func (f *sseFrame) addBytes(v []byte) error {
 	case f.lines == 0:
 		f.one, f.held = v, true
 	case f.held:
-		f.buf = growLine(f.buf[:0], len(f.one)+1+len(v), limit)
+		if f.buf, err = growLine(f.buf[:0], len(f.one)+1+len(v), limit, f.grow); err != nil {
+			return err
+		}
 		f.buf = append(append(append(f.buf, f.one...), '\n'), v...)
 		f.one, f.held = nil, false
 	default:
-		f.buf = growLine(f.buf, sep+len(v), limit)
+		if f.buf, err = growLine(f.buf, sep+len(v), limit, f.grow); err != nil {
+			return err
+		}
 		f.buf = append(append(f.buf, '\n'), v...)
 	}
 	f.lines++

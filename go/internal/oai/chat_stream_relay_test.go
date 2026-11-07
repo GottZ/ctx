@@ -430,6 +430,12 @@ func TestRelaySlotEndsWithTheDrain(t *testing.T) {
 			s := *rig.settings.Load()
 			body := streamBody("chat")
 			perStream := max(s.StreamRelayBufferBytes, s.MaxStreamFrameBytes+oai.RelayRecordHeader) + 2*s.MaxStreamFrameBytes + 3*int64(len(body)) + 4<<10
+			// FOLGE-S (d): the relay reader books the buffers its line
+			// doubling discards — from the 4-KiB piece bufio hands over to
+			// the frames' line ("data: " + chunk + "\n").
+			for c, line := int64(4096), int64(len("data: "+sglangChunk(strings.Repeat("x", 32<<10), "")+"\n")); c < line; c *= 2 {
+				perStream += c
+			}
 
 			clients := make([]*slowClient, 0, k)
 			for i := range k {

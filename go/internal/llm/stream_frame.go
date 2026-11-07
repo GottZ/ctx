@@ -34,10 +34,21 @@ const sseLineMin = 512
 // (from sseLineMin) until the bytes fit, and never exceeds limit — Go's
 // append grows a large slice by a quarter only, which made a line of F
 // bytes cost about 5 F. The caller has checked len(line)+n <= limit.
-func growLine(line []byte, n, limit int) []byte {
+//
+// book, when set, is told the capacity of the buffer a growth discards,
+// before the new one is made (FOLGE-S (d)): the discarded buffer stays on
+// the heap until the next collection — on the first frame near the cap the
+// doubling leaves up to one cap of them, which no upfront share covers. An
+// error of book refuses the growth and is returned.
+func growLine(line []byte, n, limit int, book func(int) error) ([]byte, error) {
 	need := len(line) + n
 	if need <= cap(line) {
-		return line
+		return line, nil
+	}
+	if book != nil && cap(line) > 0 {
+		if err := book(cap(line)); err != nil {
+			return line, err
+		}
 	}
 	c := max(2*cap(line), sseLineMin)
 	for c < need {
@@ -46,7 +57,7 @@ func growLine(line []byte, n, limit int) []byte {
 	c = max(min(c, limit), need)
 	grown := make([]byte, len(line), c)
 	copy(grown, line)
-	return grown
+	return grown, nil
 }
 
 // readSSELineInto reads one SSE line (its terminator included) into
@@ -54,15 +65,25 @@ func growLine(line []byte, n, limit int) []byte {
 // readSSELineMax returns its string: a line over limit is
 // httpx.ErrResponseTooLarge (and an empty line), a line cut by any other
 // error comes back with it. The buffer is the caller's to hand back on the
-// next call; it grows only when a line does not fit (growLine).
-func readSSELineInto(br *bufio.Reader, line []byte, limit int) ([]byte, error) {
+// next call; it grows only when a line does not fit (growLine). book (at
+// most one; the relay's growth booking, WithGrowthBooking) is told every
+// buffer a growth discards; its error ends the read.
+func readSSELineInto(br *bufio.Reader, line []byte, limit int, book ...func(int) error) ([]byte, error) {
+	var bk func(int) error
+	if len(book) > 0 {
+		bk = book[0]
+	}
 	line = line[:0]
 	for {
 		chunk, err := br.ReadSlice('\n')
 		if len(line)+len(chunk) > limit {
 			return line[:0], fmt.Errorf("%w: SSE line over %d bytes", httpx.ErrResponseTooLarge, limit)
 		}
-		line = append(growLine(line, len(chunk), limit), chunk...)
+		grown, gerr := growLine(line, len(chunk), limit, bk)
+		if gerr != nil {
+			return line[:0], gerr
+		}
+		line = append(grown, chunk...)
 		if !errors.Is(err, bufio.ErrBufferFull) {
 			return line, err
 		}

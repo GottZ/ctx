@@ -95,8 +95,18 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 	// relay copies what it queues. payload is ChatRawStream's line buffer,
 	// valid only during this call — nothing of it is kept.
 	var line []byte
+	// The growth of the attempt's line buffer is booked (FOLGE-S (d)), as the
+	// relay reader's is (the request context's llm.WithGrowthBooking, set by
+	// the budget stage): a buffer a larger one replaces stays on the heap
+	// until the next collection, so its capacity goes into the request's
+	// ledger before the replacement is made. A refusal is an admission
+	// outcome, as a refused upstream body (outcomeError: 503 before the
+	// commit, the error frame server_overloaded after it).
 	actx, done := c.wireContext(runCtx, timeout)
 	res, err := llm.ChatRawStream(actx, *b, body, timeout, c.s.MaxStreamFrameBytes, func(payload []byte) error {
+		if need := rewriteBufferLen(len(payload), id, c.alias.Name); cap(line) > 0 && cap(line) < need && !c.cover(int64(cap(line))) {
+			return &llm.AdmissionError{Err: ErrBudgetExhausted, Backend: b.Name, Host: b.Host}
+		}
 		chunk, rerr := rewriteChunkInto(line, payload, id, created, c.alias.Name, lane, reasoning, include, roles)
 		if chunk.out != nil {
 			line = chunk.out

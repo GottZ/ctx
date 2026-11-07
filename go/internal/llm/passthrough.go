@@ -446,7 +446,7 @@ func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
-	raw, err := readAnswer(resp, maxResp)
+	raw, err := readAnswer(resp, maxResp, growthBookingFrom(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("llm: read response: %w", err)
 	}
@@ -474,15 +474,17 @@ func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.
 
 // readAnswer reads a non-streamed answer of at most maxResp bytes, as
 // io.ReadAll over httpx.CapBody did, into one buffer (FOLGE-S S4): an answer
-// with a Content-Length within the cap is one allocation of its length (and
-// one byte to see the end), any other grows by doubling from 512 bytes up to
-// the cap. A full buffer is grown only when a small probe read finds more:
+// with a Content-Length within the cap is one allocation of exactly its
+// length, any other grows by doubling from 512 bytes up to the cap. A full buffer is grown only when a small probe read finds more:
 // an answer that ends exactly at the buffer's end costs no doubled buffer.
-func readAnswer(resp *http.Response, maxResp int64) ([]byte, error) {
+// book (nil: none) is told the capacity of every buffer a growth discards,
+// before the larger one is made (WithGrowthBooking); its error ends the
+// read.
+func readAnswer(resp *http.Response, maxResp int64, book func(int) error) ([]byte, error) {
 	r := httpx.CapBody(resp.Body, maxResp)
 	size := int64(512)
 	if cl := resp.ContentLength; cl >= 0 && cl <= maxResp {
-		size = cl + 1
+		size = cl // the end is seen by the probe read, not by a byte more: cl + 1 cost a page at a power of two
 	}
 	buf := make([]byte, 0, size)
 	var probe []byte
@@ -497,9 +499,14 @@ func readAnswer(resp *http.Response, maxResp int64) ([]byte, error) {
 				probe = make([]byte, 512)
 			}
 			if n, err = r.Read(probe); n > 0 {
-				c := min(2*int64(cap(buf)), maxResp+1)
+				c := min(max(2*int64(cap(buf)), int64(len(buf)+n)), maxResp+1)
 				if c < int64(len(buf)+n) { // the cap reader delivers at most maxResp bytes: unreachable
 					return buf, fmt.Errorf("%w (%d bytes)", httpx.ErrResponseTooLarge, maxResp)
+				}
+				if book != nil {
+					if berr := book(cap(buf)); berr != nil {
+						return buf, berr
+					}
 				}
 				grown := make([]byte, len(buf), c)
 				copy(grown, buf)
@@ -577,13 +584,38 @@ func ChatRawStream(ctx context.Context, b backends.Backend, body []byte, timeout
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
-	rl := &sseRelay{onFrame: onFrame, data: sseFrame{limit: frameCap}}
+	rl := &sseRelay{onFrame: onFrame, grow: growthBookingFrom(ctx), data: sseFrame{limit: frameCap}}
+	rl.data.grow = rl.grow
 	err = rl.run(resp.Body, frameCap)
 	res := rl.result()
 	if b.ProviderClass != backends.ProviderOpenRouter {
 		res.CostUSD, res.ServedModel, res.ProviderRequestID = nil, "", ""
 	}
 	return res, err
+}
+
+// growthBookingKey carries the relay's growth booking in a context.
+type growthBookingKey struct{}
+
+// WithGrowthBooking returns ctx carrying a booking for the growth of the
+// wire sites' buffers (FOLGE-S (d)), as httptrace carries its hooks — the
+// wire signatures stay as R-02-2 pins them: before ChatRawStream's line,
+// spare or frame buffer, or ChatRaw's answer buffer, is replaced by a
+// larger one, book is told the old buffer's capacity — it is garbage until
+// the next collection, and the caller's ledger holds it. Both start small
+// and grow by doubling, so a stream of token frames and an answer with a
+// Content-Length book nothing, a stream with frames near the cap or an
+// answer without a length up to about one cap or the answer's size. An
+// error of book ends the read with it; the gateway's book returns an
+// admission outcome (oai.InflightBudget).
+func WithGrowthBooking(ctx context.Context, book func(n int) error) context.Context {
+	return context.WithValue(ctx, growthBookingKey{}, book)
+}
+
+// growthBookingFrom is ctx's growth booking (nil: none — nothing is booked).
+func growthBookingFrom(ctx context.Context) func(int) error {
+	book, _ := ctx.Value(growthBookingKey{}).(func(int) error)
+	return book
 }
 
 // sseRelay is ChatRawStream's frame loop over the harness's SSE building
@@ -597,6 +629,7 @@ func ChatRawStream(ctx context.Context, b backends.Backend, body []byte, timeout
 // costs the reader is its bytes, read once.
 type sseRelay struct {
 	onFrame     func([]byte) error
+	grow        func(int) error // the context's WithGrowthBooking (nil: none)
 	data        sseFrame
 	line, spare []byte
 	frames      int
@@ -618,7 +651,7 @@ func (rl *sseRelay) run(r io.Reader, frameCap int) error {
 		if rl.data.holds() {
 			buf = &rl.spare
 		}
-		line, readErr := readSSELineInto(br, *buf, frameCap)
+		line, readErr := readSSELineInto(br, *buf, frameCap, rl.grow)
 		*buf = line
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("llm: read stream: %w", readErr)
