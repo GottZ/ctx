@@ -12,6 +12,7 @@ package oai_test
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -137,11 +138,21 @@ func TestRefusalLedgerGateB_Survivorship(t *testing.T) {
 	rig.deps.Planner = slowFaultPlanner{AdmissionPlanner: rig.planner, wait: maxWait,
 		err: &dispatch.RejectionError{Err: dispatch.ErrWaitExpired, RetryAfter: time.Second}}
 	rig.router = rig.mount(oai.ChatCompletions(rig.deps))
+	// The 100 requests wait side by side (the wait is the acquirer's sleep,
+	// not a shared queue): the probe costs one MaxWait, not a hundred.
 	const n = 100
-	for i := range n {
-		a := rig.post(t, chatBody("chat"))
+	var wg sync.WaitGroup
+	answers := make(chan chatAnswer, n)
+	begin := time.Now()
+	for range n {
+		wg.Go(func() { answers <- rig.post(t, chatBody("chat")) })
+	}
+	wg.Wait()
+	close(answers)
+	t.Logf("survivorship: %d requests in %s", n, time.Since(begin).Round(time.Millisecond))
+	for a := range answers {
 		if code, _, _ := a.envelope(t); a.status != http.StatusTooManyRequests || code != oai.CodeServerBusy {
-			t.Fatalf("request %d: %d %s, want 429 server_busy", i, a.status, a.body)
+			t.Fatalf("a request answered %d %s, want 429 server_busy", a.status, a.body)
 		}
 	}
 	d := ledgerOf(t, rig, n)
