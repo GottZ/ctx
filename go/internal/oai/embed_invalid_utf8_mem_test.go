@@ -133,9 +133,14 @@ func embedInvalidForm(t testing.TB, form, model string, lim int) []byte {
 }
 
 // embedGateBody is the body of the gate's form at lim bytes: a form of
-// embedInvalidForm to the credentials alias, or a class-gate form
-// "ecg:<combo>[@pub]" to its alias (oai.EmbedClassGateBody).
+// embedInvalidForm to the credentials alias, a class-gate form
+// "ecg:<combo>[@pub]" to its alias (oai.EmbedClassGateBody), or a gate body
+// of the route dump "<form>@<alias>" (rdumpGateBody; an alias ending in 0
+// is one without embedding.native_dims, rdumpNoDims — FOLGE-E hardening 1).
 func embedGateBody(t testing.TB, form string, lim int) []byte {
+	if f, alias, ok := strings.Cut(form, "@"); ok && !strings.HasPrefix(form, "ecg:") {
+		return rdumpGateBody(f, alias, lim)
+	}
 	if cg, ok := strings.CutPrefix(form, "ecg:"); ok {
 		combo, pub := strings.CutSuffix(cg, "@pub")
 		model := "embsec"
@@ -171,6 +176,9 @@ func TestEmbedInvalidBytesHeapGate(t *testing.T) {
 	var held heldSum
 	rig := newEmbedRig(t, []backends.Backend{row}, 4*n, 1, withoutCensus)
 	rig.reg.reload(t, embedScanAliases())
+	if _, alias, ok := strings.Cut(form, "@"); ok && strings.HasSuffix(alias, "0") {
+		rig.reg.reload(t, rdumpNoDims(strings.HasPrefix(alias, "embpub")))
+	}
 	rig.setSettings(func(s *oai.Settings) {
 		s.InflightBudget, s.MaxRequestBytes, s.MaxResponseBytes = memBudget, memCap, memRespCap
 		if v := os.Getenv("CTX_FOLGEE_BODYLOG"); v != "" {
