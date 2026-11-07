@@ -650,11 +650,11 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 		c.internal("chain build failed", "error", err)
 		return nil, false
 	}
-	gated, err := c.d.Quota.GateTenant(c.ca.TenantID, chain)
+	gated, err := c.d.gateChain(c.ctx, c.ca, llmlog.GatewayOpChat, chain)
 	var qe *backends.ErrQuotaExceeded
 	switch {
 	case errors.As(err, &qe):
-		writeRetryAfter(c.w.Header(), untilNextHour(time.Now()))
+		writeRetryAfter(c.w.Header(), tenantQuotaRetryAfter(qe, time.Now()))
 		c.refuse(CodeInsufficientQuota, quotaMessage, false)
 		return nil, false
 	case err != nil:
@@ -667,8 +667,9 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 	return gated, true
 }
 
-// untilNextHour is the Retry-After of the tenant quota (design/02 §4.10.2:
-// "bis zur nächsten vollen Stunde"); at least one second.
+// untilNextHour is the Retry-After of a tenant quota refusal whose relief is
+// unknown (design/02 §4.10.2: "bis zur nächsten vollen Stunde";
+// tenantQuotaRetryAfter, W06-14); at least one second.
 func untilNextHour(now time.Time) time.Duration {
 	return max(now.Truncate(time.Hour).Add(time.Hour).Sub(now), time.Second)
 }
@@ -1015,6 +1016,14 @@ func (c *chatCall) leaseStats(st *walkState) {
 // bucket's capacity). A non-streamed answer never carries an estimate.
 func (c *chatCall) book(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState, out chatOutcome) {
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
+		// The provider-reported cost (an openrouter row) moves the
+		// consumer's monthly cost budget (W06-14); it books on the end below.
+		switch {
+		case st.result != nil:
+			addCost(c.limit, st.result.CostUSD)
+		case st.stream != nil:
+			addCost(c.limit, st.stream.CostUSD)
+		}
 		c.endMeter(st)
 		if forcedEnded(c.limit) {
 			return // the shutdown's forced settle wrote the request's row (W06-13)

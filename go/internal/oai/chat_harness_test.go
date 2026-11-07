@@ -416,6 +416,8 @@ func newChatRig(t testing.TB, rows []backends.Backend, slots, reserved int, opts
 		RetryAfterSteps:   r.disp.ExternalRetryAfterSteps,
 		Planner:           r.planner,
 		Limiter:           r.limiter,
+		// Every row stays (the W06-14 gates set their own policy, withEgress).
+		Egress: fixedEgress(backends.EgressPolicy{AllowExternal: true, AllowUnmetered: true}),
 	}
 	for _, o := range opts {
 		o(r)

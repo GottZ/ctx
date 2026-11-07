@@ -178,7 +178,7 @@ func meterSeedRows(rows []llmusage.ConsumerUsage) []keyquota.SeedRow {
 			continue
 		}
 		out = append(out, keyquota.SeedRow{ConsumerID: r.ConsumerID, TenantID: r.TenantID, Op: op,
-			DayTokens: r.DayTokens, DayRequests: r.DayCalls, MonthTokens: r.MonthTokens})
+			DayTokens: r.DayTokens, DayRequests: r.DayCalls, MonthTokens: r.MonthTokens, MonthCostUSD: r.MonthExternalCost})
 	}
 	return out
 }
@@ -318,6 +318,7 @@ func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config
 	}
 	if meter != nil {
 		d.Limiter = meterLimiter{meter: meter, settings: settings}
+		d.Egress = meterLimiter{meter: meter, settings: settings}
 	}
 	return d
 }
@@ -335,9 +336,13 @@ type meterLimiter struct {
 	settings func() oai.Settings
 }
 
-func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
-	s := l.settings().Meter
-	op, _ := keyquota.ParseOp(est.Op) // an unknown op stays "" and is refused as invalid
+// meterLimits are the meter limits of op for ca from one settings snapshot s: the
+// subject (lane only for an admission) and the minute, L1, budget and
+// envelope limits. Until the limits rows of W06-15 the registry defaults
+// hold for every consumer and the envelopes are the factors × them
+// (design/06 §4.3; W06-13 budgets, W06-14 cost).
+func meterLimits(s oai.MeterSettings, ca *auth.ConsumerAuth, opName string) (keyquota.Subject, keyquota.Limits, oai.OpLimits) {
+	op, _ := keyquota.ParseOp(opName) // an unknown op stays "" and is refused as invalid
 	var lim oai.OpLimits
 	switch op {
 	case keyquota.OpChat:
@@ -347,22 +352,34 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 	case keyquota.OpRerank:
 		lim = s.Rerank
 	}
-	lane := keyquota.LaneUrgent
-	if handler.ResolveLane(ca, fedhop.InboundFrom(ctx), est.ServiceTier) != handler.LaneUrgent {
-		lane = keyquota.LaneBulk
-	}
 	var consumer, tenant string // a nil consumer stays empty and is refused as invalid
 	if ca != nil {
 		consumer, tenant = ca.ConsumerID, ca.TenantID
 	}
-	sub := keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op, Lane: lane}
-	// The day and month budgets (W06-13): until the limits rows of W06-15
-	// the registry defaults for every consumer, the envelopes the factors ×
-	// them (design/06 §4.3).
-	own := keyquota.Budget{DailyTokens: lim.DailyTokens, MonthlyTokens: s.MonthlyTokens, DailyRequests: s.DailyRequests}
-	res, d := l.meter.Admit(sub,
+	own := keyquota.Budget{DailyTokens: lim.DailyTokens, MonthlyTokens: s.MonthlyTokens, DailyRequests: s.DailyRequests, MonthlyCostUSD: s.MonthlyCostUSD}
+	return keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op},
 		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: s.Concurrency,
 			Consumer: own, Tenant: own.Scale(s.TenantEnvelopeFactor), Instance: own.Scale(s.InstanceEnvelopeFactor)},
+		lim
+}
+
+// Egress is the consumer's egress policy for op (W06-14, oai.EgressSource):
+// the permission from gateway.consumer_allow_external_default (hot), no
+// unmetered permission (no source before W06-15), and whether the
+// consumer's or its tenant envelope's monthly cost budget is used up.
+func (l meterLimiter) Egress(_ context.Context, ca *auth.ConsumerAuth, op string) backends.EgressPolicy {
+	s := l.settings().Meter
+	sub, lim, _ := meterLimits(s, ca, op)
+	return backends.EgressPolicy{AllowExternal: s.AllowExternal, CostExhausted: l.meter.CostExhausted(sub, lim)}
+}
+
+func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
+	s := l.settings().Meter
+	sub, limits, lim := meterLimits(s, ca, est.Op)
+	if handler.ResolveLane(ca, fedhop.InboundFrom(ctx), est.ServiceTier) != handler.LaneUrgent {
+		sub.Lane = keyquota.LaneBulk
+	}
+	res, d := l.meter.Admit(sub, limits,
 		keyquota.Estimate{PromptRunes: est.PromptRunes, MaxCompletion: est.MaxTokens, ClientMax: est.ClientMaxTokens, InputRunes: est.InputRunes})
 	switch {
 	case d.Allowed:
@@ -403,9 +420,12 @@ func (r meterReservation) OnForcedSettle(fn func(dispatch.Usage)) {
 	})
 }
 
-// The production reservation carries the forced-settle half (a route skips
-// it for a reservation without it).
-var _ oai.ForcedSettler = meterReservation{}
+// The production reservation carries the forced-settle and the cost half (a
+// route skips them for a reservation without them).
+var (
+	_ oai.ForcedSettler = meterReservation{}
+	_ oai.CostAdder     = meterReservation{}
+)
 
 // chainFederation binds the federation half of the chain build (F-W9
 // handover, lead decision W02-07 no. 1): the floor is the PeerIngress's

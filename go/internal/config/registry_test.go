@@ -195,6 +195,9 @@ func TestRegistryStrictSet(t *testing.T) {
 		"gateway.consumer_daily_requests_default": true,
 		"gateway.tenant_envelope_factor":          true,
 		"gateway.instance_envelope_factor":        true,
+		// W06-14: a typo'd cost budget falling back to 1.0 would change what
+		// a consumer may spend without anybody noticing.
+		"gateway.consumer_monthly_cost_usd_default": true,
 		// A03-W10 (design/03 §4.10 no. 1, A-E2 no. 2): the stream relay's
 		// buffer is a memory bound per stream (it joins the V39 floor), the
 		// drain rate and its window cut a client that drains too slowly — a

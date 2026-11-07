@@ -2727,6 +2727,20 @@ type GatewayConfig struct {
 	// factors hold for every tenant. V50: >= 1.
 	TenantEnvelopeFactor   float64 `key:"gateway.tenant_envelope_factor" env:"CTX_GATEWAY_TENANT_ENVELOPE_FACTOR" default:"5" mut:"hot" parse:"strict" tenancy:"global-only"`
 	InstanceEnvelopeFactor float64 `key:"gateway.instance_envelope_factor" env:"CTX_GATEWAY_INSTANCE_ENVELOPE_FACTOR" default:"10" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ConsumerAllowExternalDefault lets a model consumer's chains keep the
+	// billable rows that report their cost (openrouter) while its monthly
+	// cost budget lasts (wave W06-14, design/06 §4.3, §4.5, E-06-14). Off
+	// by default: a consumer reaches the local and lan rows and the ctx
+	// peers only. Rows that report no cost stay closed either way (no source
+	// for allow_unmetered_external before W06-15).
+	ConsumerAllowExternalDefault bool `key:"gateway.consumer_allow_external_default" env:"CTX_GATEWAY_CONSUMER_ALLOW_EXTERNAL_DEFAULT" default:"false" mut:"hot" tenancy:"global-only"`
+	// ConsumerMonthlyCostUSDDefault is the provider-reported cost per model
+	// consumer, op and UTC month (W06-14): once used up, the cost-reporting
+	// rows drop from the consumer's chains (a degrade, never a 429); the
+	// tenant envelope's is gateway.tenant_envelope_factor × it. The budget
+	// only matters with the permission above. V51: > 0, finite — no 0
+	// sentinel (B-06-20).
+	ConsumerMonthlyCostUSDDefault float64 `key:"gateway.consumer_monthly_cost_usd_default" env:"CTX_GATEWAY_CONSUMER_MONTHLY_COST_USD_DEFAULT" default:"1.0" mut:"hot" parse:"strict" tenancy:"global-only"`
 
 	// Consumers is the administration of model consumers and their keys
 	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
@@ -2997,6 +3011,8 @@ func (c *Config) GatewaySettings() oai.Settings {
 			DailyRequests:          int64(g.ConsumerDailyRequestsDefault),
 			TenantEnvelopeFactor:   g.TenantEnvelopeFactor,
 			InstanceEnvelopeFactor: g.InstanceEnvelopeFactor,
+			AllowExternal:          g.ConsumerAllowExternalDefault,
+			MonthlyCostUSD:         g.ConsumerMonthlyCostUSDDefault,
 		},
 		Auth: oai.AuthSettings{
 			FailureLimit:          g.AuthFailureLimit,

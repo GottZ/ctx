@@ -604,11 +604,11 @@ func (c *embedCall) chain() ([]backends.Backend, bool) {
 		c.internal("chain build failed", "error", err)
 		return nil, false
 	}
-	gated, err := c.d.Quota.GateTenant(c.ca.TenantID, chain)
+	gated, err := c.d.gateChain(c.ctx, c.ca, llmlog.GatewayOpEmbed, chain)
 	var qe *backends.ErrQuotaExceeded
 	switch {
 	case errors.As(err, &qe):
-		writeRetryAfter(c.w.Header(), untilNextHour(time.Now()))
+		writeRetryAfter(c.w.Header(), tenantQuotaRetryAfter(qe, time.Now()))
 		c.refuse(CodeInsufficientQuota, quotaMessage, false)
 		return nil, false
 	case err != nil:

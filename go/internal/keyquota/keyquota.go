@@ -126,6 +126,12 @@ type Limits struct {
 // budget at every level.
 type Budget struct {
 	DailyTokens, MonthlyTokens, DailyRequests int64
+	// MonthlyCostUSD is the provider-reported cost per UTC month (wave
+	// W06-14, design/06 §4.3 cost_budget; gateway.consumer_monthly_cost_usd_default,
+	// > 0 by V51 — no 0 sentinel, B-06-20). It refuses no admission: the
+	// chain rule drops the cost-reporting rows once it is used up
+	// (CostExhausted). 0 = no cost dimension.
+	MonthlyCostUSD float64
 }
 
 // Scale is b with every bounded dimension multiplied by f, floored and
@@ -138,7 +144,7 @@ func (b Budget) Scale(f float64) Budget {
 		f = 1
 	}
 	return Budget{DailyTokens: scaleLimit(b.DailyTokens, f), MonthlyTokens: scaleLimit(b.MonthlyTokens, f),
-		DailyRequests: scaleLimit(b.DailyRequests, f)}
+		DailyRequests: scaleLimit(b.DailyRequests, f), MonthlyCostUSD: max(b.MonthlyCostUSD, 0) * f}
 }
 
 func scaleLimit(l int64, f float64) int64 {
@@ -358,13 +364,15 @@ type usage struct {
 	dayTokens, dayRequests, monthTokens int64
 	reserved                            int64
 	open                                int64
+	// monthCost is the provider-reported cost of the UTC month (W06-14).
+	monthCost float64
 }
 
 // roll moves u into the windows of day and month: a window that is over
 // starts empty.
 func (u *usage) roll(day, month int64) {
 	if u.month != month {
-		u.month, u.monthTokens = month, 0
+		u.month, u.monthTokens, u.monthCost = month, 0, 0
 	}
 	if u.day != day {
 		u.day, u.dayTokens, u.dayRequests = day, 0, 0
@@ -528,6 +536,9 @@ type SeedRow struct {
 	ConsumerID, TenantID                string
 	Op                                  Op
 	DayTokens, DayRequests, MonthTokens int64
+	// MonthCostUSD is the external provider-reported cost of the month
+	// (W06-14).
+	MonthCostUSD float64
 }
 
 // ErrSeeded refuses a second seed: it would count the rollup twice.
@@ -575,6 +586,7 @@ func (m *Meter) Seed(at time.Time, rows []SeedRow) error {
 			u.dayTokens = satAdd(u.dayTokens, max(row.DayTokens, 0))
 			u.dayRequests = satAdd(u.dayRequests, max(row.DayRequests, 0))
 			u.monthTokens = satAdd(u.monthTokens, max(row.MonthTokens, 0))
+			u.monthCost += max(row.MonthCostUSD, 0)
 		}
 	}
 	m.month = month
@@ -808,6 +820,48 @@ type Reservation struct {
 	streamed                 atomic.Int64
 	finalizer                atomic.Pointer[func(Usage)]
 	forced                   atomic.Bool
+	// cost is the provider-reported cost the route added (AddCost, W06-14),
+	// as float64 bits.
+	cost atomic.Uint64
+}
+
+// AddCost adds the provider-reported cost of the request's wire calls (an
+// openrouter row's usage.cost, W06-14): booked into the consumer's and its
+// tenant envelope's month when the reservation ends with a wire call
+// (Settle, Keep, the forced settle), never on Abort or Reject. A negative or
+// non-finite amount counts nothing.
+func (r *Reservation) AddCost(usd float64) {
+	if !(usd > 0) || math.IsInf(usd, 1) {
+		return
+	}
+	for {
+		old := r.cost.Load()
+		if r.cost.CompareAndSwap(old, math.Float64bits(math.Float64frombits(old)+usd)) {
+			return
+		}
+	}
+}
+
+// CostExhausted reports whether the provider-reported cost of s's consumer ×
+// op, or of its tenant envelope × op, reached its monthly budget in the
+// running UTC month (design/06 §4.5: the chain rule then drops the
+// cost-reporting rows). A level without a cost budget (0) never is.
+func (m *Meter) CostExhausted(s Subject, l Limits) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, month := calendarOf(m.now())
+	for _, lv := range []struct {
+		key   budgetKey
+		limit float64
+	}{
+		{budgetKey{levelConsumer, s.ConsumerID, s.Op}, l.Consumer.MonthlyCostUSD},
+		{budgetKey{levelTenant, s.TenantID, s.Op}, l.Tenant.MonthlyCostUSD},
+	} {
+		if u := m.budgets[lv.key]; lv.limit > 0 && u != nil && u.month == month && u.monthCost >= lv.limit {
+			return true
+		}
+	}
+	return false
 }
 
 // AddStreamed counts runes a stream handed on to its client (design/06 §4.2:
@@ -882,10 +936,10 @@ func (r *Reservation) forceSettle() bool {
 		ran = true
 		actual := satAdd(r.promptEst, completion)
 		if actual >= r.held {
-			r.m.end(r, 0, r.held)
+			r.m.end(r, 0, r.held, true)
 			return
 		}
-		r.m.end(r, dim{limit: r.tpm}.cost(actual)-r.charged, actual)
+		r.m.end(r, dim{limit: r.tpm}.cost(actual)-r.charged, actual, true)
 	})
 	if ran {
 		if fn := r.finalizer.Load(); fn != nil {
@@ -910,7 +964,7 @@ func (r *Reservation) forceSettle() bool {
 func (r *Reservation) Settle(u Usage) {
 	r.once.Do(func() {
 		actual := satAdd(int64(max(u.PromptTokens, 0)), int64(max(u.CompletionTokens, 0)))
-		r.m.end(r, dim{limit: r.tpm}.cost(actual)-r.charged, actual)
+		r.m.end(r, dim{limit: r.tpm}.cost(actual)-r.charged, actual, true)
 	})
 }
 
@@ -919,14 +973,14 @@ func (r *Reservation) Settle(u Usage) {
 // or a gone client after the wire) — after wire contact nothing is given
 // back.
 func (r *Reservation) Keep() {
-	r.once.Do(func() { r.m.end(r, 0, r.held) })
+	r.once.Do(func() { r.m.end(r, 0, r.held, true) })
 }
 
 // Abort ends a reservation without a wire call: its charge goes back as far
 // as the bucket still holds it (all of it unless the bucket drained below it
 // meanwhile), the request stays counted (design/06 §4.2).
 func (r *Reservation) Abort() {
-	r.once.Do(func() { r.m.end(r, -r.charged, 0) })
+	r.once.Do(func() { r.m.end(r, -r.charged, 0, false) })
 }
 
 // Reject ends a reservation the dispatcher refused after Admit. In this
@@ -961,17 +1015,24 @@ func (r *Reservation) Held() int64 { return r.held }
 // takes min(d, max(tat, now) − max(shadow, now)) out of the bucket, and out
 // of the shadow of every older open reservation the same way (r's charge is
 // one of the charges after their admission) — never below now.
-func (m *Meter) end(r *Reservation, delta, used int64) {
+func (m *Meter) end(r *Reservation, delta, used int64, wired bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r.budget[0] != nil {
 		day, month := calendarOf(m.now())
-		for _, u := range r.budget {
+		cost := 0.0
+		if wired {
+			cost = math.Float64frombits(r.cost.Load())
+		}
+		for i, u := range r.budget {
 			u.roll(day, month)
 			u.reserved = max(u.reserved-r.held, 0)
 			u.open--
 			u.dayTokens = satAdd(u.dayTokens, used)
 			u.monthTokens = satAdd(u.monthTokens, used)
+			if budgetLevel(i) != levelInstance {
+				u.monthCost += cost
+			}
 		}
 	}
 	st := m.state[r.key]

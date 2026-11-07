@@ -81,6 +81,11 @@ type MeterSettings struct {
 	// budgets of an op to the envelope of its tenant and of the instance
 	// (W06-13), at least 1.
 	TenantEnvelopeFactor, InstanceEnvelopeFactor float64
+	// AllowExternal is the consumer's permission for cost-reporting billable
+	// rows and MonthlyCostUSD its monthly cost budget per op (W06-14,
+	// design/06 §4.3; > 0).
+	AllowExternal  bool
+	MonthlyCostUSD float64
 }
 
 // OpLimits are one op's requests and tokens per minute and its tokens per

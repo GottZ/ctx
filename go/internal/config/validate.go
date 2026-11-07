@@ -106,6 +106,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGatewayInflightSweep(c)...)
 	// V50 (W06-13): the daily token defaults >= 1, the envelope factors >= 1.
 	issues = append(issues, validateGatewayBudgets(c)...)
+	// V51 (W06-14): gateway.consumer_monthly_cost_usd_default > 0, finite.
+	issues = append(issues, validateGatewayCostBudget(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1374,6 +1376,21 @@ func validateGatewayBudgets(c *Config) []Issue {
 		}
 	}
 	return issues
+}
+
+// validateGatewayCostBudget is V51 (wave W06-14, design/06 §4.11, B-06-20):
+// gateway.consumer_monthly_cost_usd_default is a finite amount > 0. There is
+// no 0 sentinel: 0 would read as "no budget" in one place and "nothing left"
+// in another — the permission to reach billable rows is its own key
+// (gateway.consumer_allow_external_default), the budget only bounds it.
+// Fatal: boot aborts, a settings PUT is a 422.
+func validateGatewayCostBudget(c *Config) []Issue {
+	v := c.Gateway.ConsumerMonthlyCostUSDDefault
+	if v > 0 && !math.IsInf(v, 1) {
+		return nil
+	}
+	return []Issue{{Field: "gateway.consumer_monthly_cost_usd_default", Severity: SeverityError,
+		Msg: fmt.Sprintf("gateway.consumer_monthly_cost_usd_default (%v) must be a finite amount > 0 — there is no 0 sentinel; to keep consumers off billable rows leave gateway.consumer_allow_external_default false", v)}}
 }
 
 // validateGatewayConcurrency is V48 (wave W06-11, design/06 §4.2, §4.11):
