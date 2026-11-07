@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"runtime/debug"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -167,11 +166,6 @@ type streamWriter struct {
 	frames    int       // data frames written
 	first     time.Time // the first data frame
 	noFlushed bool      // the "not flushable" WARN was logged
-
-	// hasPanic mirrors panicked != nil without mu (A03-W10): the route asks
-	// at the upstream's end while the client writer may hold mu in a slow
-	// write.
-	hasPanic atomic.Bool
 }
 
 func newStreamWriter(w http.ResponseWriter, s Settings, broken func(error), headers func() http.Header) *streamWriter {
@@ -212,7 +206,6 @@ func (s *streamWriter) tickLocked() (err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			s.panicked = &timerPanic{value: v, stack: debug.Stack()}
-			s.hasPanic.Store(true)
 			s.err, err = errTimerPanic, errTimerPanic
 		}
 	}()
@@ -311,11 +304,6 @@ func (s *streamWriter) rethrow() {
 		panic(p)
 	}
 }
-
-// panicking reports whether the timer caught a panic that rethrow will
-// raise (A03-W10: the stream's meter then ends through close(), not at the
-// upstream's end). Without mu: the client writer can hold it in a write.
-func (s *streamWriter) panicking() bool { return s.hasPanic.Load() }
 
 // committed reports whether the status is out.
 func (s *streamWriter) committed() bool {

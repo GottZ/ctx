@@ -411,11 +411,12 @@ func TestStreamPanicUnderTheWriterLock(t *testing.T) {
 		}
 	})
 	t.Run("the client writer panics after the upstream ended", func(t *testing.T) {
-		// A03-W10: the lease and the reservation ended with the upstream —
-		// its usage was known then (the chunks are counted before the relay
-		// buffer) — so a panic of the client writer during the drain no
-		// longer turns the booking into Keep: Settle of the usage, the
-		// panic still reaches oai.Recover, nothing is left.
+		// A03-W10 hardening 1 (Fremd-Review 2 F3b): the lease ended with the
+		// upstream, the reservation — the consumer's slot — stays open while
+		// the client writer drains; a panic of the writer during the drain
+		// ends it through close(): Keep after wire contact, the rule of a
+		// panic (W02-08 F4-2, exit 20 again). The panic still reaches
+		// oai.Recover, nothing is left.
 		sink := captureLog(t)
 		end := newUpstreamEnd()
 		u := newUpstream(t, "")
@@ -437,8 +438,12 @@ func TestStreamPanicUnderTheWriterLock(t *testing.T) {
 		if !end.wait(5*time.Second) || end.canceled {
 			t.Fatal("the upstream did not run to its end")
 		}
-		if !waitEnded(m) {
-			t.Fatal("the reservation did not end with the upstream")
+		if !waitHeld(rig.disp, u.srv.URL, 0, 2500*time.Millisecond) {
+			t.Fatal("the lease did not end with the upstream")
+		}
+		time.Sleep(50 * time.Millisecond)
+		if got := m.endsOf(); got != "" {
+			t.Fatalf("ends %q while the writer drains, want none (the slot ends at the drain's end)", got)
 		}
 		open() // now the writer reaches its second frame and panics
 		select {
@@ -446,8 +451,8 @@ func TestStreamPanicUnderTheWriterLock(t *testing.T) {
 		case <-time.After(6 * time.Second):
 			t.Fatal("the handler did not return within 6 s")
 		}
-		if got := m.endsOf(); got != "settle" {
-			t.Fatalf("ends %s, want settle (the upstream's usage, booked at its end)", got)
+		if got := m.endsOf(); got != "keep" {
+			t.Fatalf("ends %s, want keep (a panic after wire contact ends the reservation through close())", got)
 		}
 		if !waitHeld(rig.disp, u.srv.URL, 0, 2*time.Second) || !waitFor(2*time.Second, func() bool { return rig.budget.InUse() == 0 && writerGoroutines() == 0 }) {
 			t.Fatalf("lease, budget %d or writer goroutines %d left", rig.budget.InUse(), writerGoroutines())

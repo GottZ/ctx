@@ -808,17 +808,16 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 			return c.attempt(&st, spec, runCtx, b, lease, timeout)
 		})
 	if c.relay != nil {
-		// The lease ended with the upstream (A03-W10, I-03-7) — so does the
-		// meter's reservation, and the consumer's concurrency slot with it
-		// (W06-11: one slot end per exit, endLimit): the drain holds no
-		// engine capacity, only the buffer and the socket. Then the client
-		// writer drains what the upstream left, under the watcher. A panic
-		// of the client writer or of the timer that already happened ends
-		// the reservation through close() instead — Keep after wire contact,
-		// the rule of a panic (W02-08 F4-2).
-		if !c.relay.panicked() && !c.sse.panicking() {
-			c.endMeterAtTheUpstreamEnd(attempts, &st)
-		}
+		// The lease ended with the upstream (A03-W10, I-03-7); the client
+		// writer drains what the upstream left, under the watcher. The
+		// meter's reservation — and the consumer's concurrency slot with it
+		// (W06-11: one slot end per exit, endLimit) — ends after the drain,
+		// in answerStream's book (A03-W10 hardening 1, Fremd-Review 2 F3b):
+		// a draining stream holds no engine capacity, but it binds the
+		// buffer in the in-flight budget, a socket and the writer — a slot
+		// that ended with the lease let one consumer fill the instance's
+		// budget with draining streams. The usage booked there is the
+		// upstream's (the chunks were counted before the buffer).
 		c.relay.wait()
 	}
 	stop()
@@ -1039,19 +1038,6 @@ func (c *chatCall) endMeter(st *walkState) {
 			l.Settle(st.tokens)
 		}
 	})
-}
-
-// endMeterAtTheUpstreamEnd ends a stream's reservation when its upstream
-// ended (A03-W10): the usage is the upstream's (the chunks were rewritten
-// and counted before the relay buffer, streamTokens), the slot follows the
-// lease. Only after wire contact — the case book always ends, whatever the
-// outcome; before it the reservation ends where it did (book, close).
-func (c *chatCall) endMeterAtTheUpstreamEnd(attempts []llm.ChainAttempt, st *walkState) {
-	if len(attempts) == 0 || st.wired == 0 {
-		return
-	}
-	c.streamTokens(st)
-	c.endMeter(st)
 }
 
 // chatOutcome is what the client got, for the row.

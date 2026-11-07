@@ -26,8 +26,11 @@ import (
 //
 // The buffer sits after the rewrite on purpose: what the request books (the
 // usage chunk, the estimate's runes) and a chunk the relay cannot render are
-// the upstream's, settled when the upstream ends — a client that leaves
-// during the drain changes neither the meter nor the attempt's outcome.
+// the upstream's, counted when the upstream ends — a client that leaves
+// during the drain changes neither the meter's booking nor the attempt's
+// outcome. The meter's reservation, and the consumer's concurrency slot with
+// it, ends when the drain ends (hardening 1, Fremd-Review 2 F3b): a draining
+// stream binds the buffer in the in-flight budget, its socket and the writer.
 //
 // Bounds (gateway.stream_relay_buffer_bytes, stream_min_drain_rate,
 // stream_min_drain_window — A-E2 no. 2): the buffer is one allocation of the
@@ -271,13 +274,6 @@ func (rl *streamRelay) uncap() {
 	if rl.capAt != nil {
 		rl.capAt(time.Time{})
 	}
-}
-
-// panicked reports whether the writer panicked (wait raises it).
-func (rl *streamRelay) panicked() bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	return rl.pan != nil
 }
 
 // run is the writer goroutine.

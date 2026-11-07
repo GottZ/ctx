@@ -379,63 +379,115 @@ func TestStreamClientAbortSettles(t *testing.T) {
 	}
 }
 
-// TestRelaySlotEndsWithTheLease (lead decision: the consumer's L1 slot ends
-// with the lease, W06-11 — one end per exit): a consumer with one open
-// request at a time; its first stream's upstream ends while the client still
-// drains — the reservation ended with the upstream, so a second stream of the
-// same consumer is served (200 with [DONE]) before the first client finished.
-// Red against the W02-08 relay (the reservation ends after the client's
-// drain): the second stream is 429 concurrency_limit_exceeded.
-func TestRelaySlotEndsWithTheLease(t *testing.T) {
-	end := newUpstreamEnd()
-	u := newUpstream(t, "")
-	first := true
-	var mu sync.Mutex
-	u.setRespond(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		f := first
-		first = false
-		mu.Unlock()
-		if f {
-			sseRespond(bigFrames(5, 32<<10, 0), nil, end)(w, r)
-			return
-		}
-		sseRespond(streamShapes[0].steps(), nil, nil)(w, r)
-	})
-	m := &endMeter{rigMeter: newRigMeter(l1One, true)}
-	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings,
-		withDeps(func(d *oai.Deps) { d.Limiter = m }))
-	c := startSlowClient(t, rig)
-	if c.resp.StatusCode != http.StatusOK {
-		t.Fatalf("first stream: status %d", c.resp.StatusCode)
-	}
-	if _, err := c.event(); err != nil {
-		t.Fatalf("first stream: %v", err)
-	}
-	if !end.wait(5*time.Second) || end.canceled {
-		t.Fatal("the first stream's upstream did not run to its end")
-	}
-	if !waitFor(2*time.Second, func() bool { return endCount(m) == 1 }) {
-		t.Fatalf("ends %q after the first upstream ended, want its one end while the client drains", m.endsOf())
-	}
-	second := postStream(context.Background(), t, c.srv, streamBody("chat"))
-	if second.status != http.StatusOK || second.dones() != 1 {
-		t.Fatalf("second stream of the consumer while the first client drains: %d dones %d — want 200 (the slot followed the lease)",
-			second.status, second.dones())
-	}
-	frames := 1
-	for {
-		data, err := c.event()
-		if err != nil {
-			t.Fatalf("first stream after %d frames: %v", frames, err)
-		}
-		if data == "[DONE]" {
-			break
-		}
-		frames++
-	}
-	if frames != 5 {
-		t.Fatalf("first stream: %d frames, want its 5 content chunks (the usage chunk is not asked for)", frames)
+// TestRelaySlotEndsWithTheDrain (Fremd-Review 2 F3b; lead decision of
+// hardening 1: the consumer's L1 slot ends at the drain's end, the lease
+// still at the upstream's end — the lease measures engine capacity, the
+// slot what a consumer binds on the instance: the buffer in the in-flight
+// budget, a socket, the writer). A consumer with max_concurrency k opens k
+// streams whose upstreams run to their end while the clients read nothing
+// more: each lease is free within 2.5 s of its upstream's end, but no
+// reservation ends — every further stream of the consumer is 429
+// concurrency_limit_exceeded, so the budget its draining streams hold stays
+// within k × (buffer + stream reserve + request share), and a consumer of
+// another tenant is served (200). When one client has read its stream to
+// [DONE], its reservation ends — exactly once. Red against d22c8423 (the
+// slot ended with the lease): the reservation ends at the upstream's end,
+// the next stream of the consumer is 200 — 63 such streams fill the
+// production budget and every other consumer gets 503 (the review's probe).
+func TestRelaySlotEndsWithTheDrain(t *testing.T) {
+	for _, k := range []int{1, 2} {
+		t.Run(fmt.Sprintf("max_concurrency %d", k), func(t *testing.T) {
+			var ended atomic.Int64
+			u := newUpstream(t, "")
+			inner := sseRespond(bigFrames(5, 32<<10, 0), nil, nil)
+			u.setRespond(func(w http.ResponseWriter, r *http.Request) { inner(w, r); ended.Add(1) })
+			lim := l1One
+			lim.Concurrency = int64(k)
+			m := &endMeter{rigMeter: newRigMeter(lim, true)}
+			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings,
+				withDeps(func(d *oai.Deps) { d.Limiter = m }))
+			const budget = 268435456 // gateway.inflight_budget's default
+			rig.setSettings(func(s *oai.Settings) { s.InflightBudget = budget })
+			s := *rig.settings.Load()
+			body := streamBody("chat")
+			perStream := max(s.StreamRelayBufferBytes, s.MaxStreamFrameBytes+oai.RelayRecordHeader) + 2*s.MaxStreamFrameBytes + 3*int64(len(body)) + 4<<10
+
+			clients := make([]*slowClient, 0, k)
+			for i := range k {
+				c := startSlowClient(t, rig)
+				if c.resp.StatusCode != http.StatusOK {
+					t.Fatalf("stream %d of the consumer: status %d", i, c.resp.StatusCode)
+				}
+				if _, err := c.event(); err != nil {
+					t.Fatalf("stream %d: %v", i, err)
+				}
+				clients = append(clients, c)
+				if !waitFor(5*time.Second, func() bool { return ended.Load() == int64(i+1) }) {
+					t.Fatalf("stream %d: the upstream did not run to its end", i)
+				}
+				if !waitHeld(rig.disp, u.srv.URL, 0, 2500*time.Millisecond) {
+					held, _ := heldOn(rig.disp, u.srv.URL)
+					t.Fatalf("stream %d: lease held %d 2.5 s after its upstream's end — the lease ends with the upstream", i, held)
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			if got := endCount(m); got != 0 {
+				t.Fatalf("ends %q while %d clients drain, want none — the slot ends at the drain's end", m.endsOf(), k)
+			}
+			for j := range 3 {
+				a := postStream(context.Background(), t, clients[0].srv, body)
+				if a.status == http.StatusOK {
+					t.Fatalf("stream %d of the consumer while %d drain: 200 — want 429 concurrency_limit_exceeded (a draining stream holds its slot); budget in use %d B",
+						k+j, k, rig.budget.InUse())
+				}
+				checkL1Refusal(t, fmt.Sprintf("stream %d of the consumer while %d drain", k+j, k), a)
+			}
+			inUse := rig.budget.InUse()
+			t.Logf("max_concurrency %d: %d draining streams hold %d B of %d (bound %d B = k × %d); ends %q",
+				k, k, inUse, budget, int64(k)*perStream, perStream, m.endsOf())
+			if inUse > int64(k)*perStream {
+				t.Fatalf("budget in use %d B with %d draining streams, want ≤ %d (k × buffer + stream reserve + request share)", inUse, k, int64(k)*perStream)
+			}
+
+			other := urgentApp()
+			other.ConsumerID, other.TenantID, other.ModelKeyID = "00000000-0000-4000-8000-0000000000c9", "00000000-0000-4000-8000-0000000000f9", "00000000-0000-4000-8000-0000000000e9"
+			rig.ca.Store(other)
+			b := postStream(context.Background(), t, clients[0].srv, body)
+			if b.status != http.StatusOK || b.dones() != 1 {
+				t.Fatalf("consumer of another tenant while %d streams drain: %d dones %d %q — want 200", k, b.status, b.dones(), b.raw)
+			}
+			if !waitFor(2*time.Second, func() bool { return endCount(m) == 1 }) {
+				t.Fatalf("ends %q after the other consumer's stream, want its one end", m.endsOf())
+			}
+
+			frames := 1
+			for {
+				data, err := clients[0].event()
+				if err != nil {
+					t.Fatalf("first stream after %d frames: %v", frames, err)
+				}
+				if data == "[DONE]" {
+					break
+				}
+				frames++
+			}
+			if frames != 5 {
+				t.Fatalf("first stream: %d frames, want its 5 content chunks", frames)
+			}
+			if !waitFor(2*time.Second, func() bool { return endCount(m) == 2 }) {
+				t.Fatalf("ends %q after the first client read [DONE], want its one end at the drain's end", m.endsOf())
+			}
+			for _, c := range clients {
+				_ = c.conn.Close()
+			}
+			if !waitFor(5*time.Second, func() bool { return endCount(m) == k+1 && rig.budget.InUse() == 0 }) {
+				t.Fatalf("after the clients left: ends %q, budget in use %d B — want %d ends, 0 B", m.endsOf(), rig.budget.InUse(), k+1)
+			}
+			time.Sleep(50 * time.Millisecond)
+			if got := endCount(m); got != k+1 {
+				t.Fatalf("ends %q, want exactly %d — one end per exit", m.endsOf(), k+1)
+			}
+		})
 	}
 }
 
