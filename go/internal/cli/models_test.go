@@ -604,3 +604,61 @@ func TestModelsInventoryFlipsToExit1(t *testing.T) {
 		}
 	}
 }
+
+// ── S2 additions: hunks of the implementation the S1 gates did not reach ────.
+
+// TestModelsUnparseableMintWithholdsBody: an answer to a key-minting call that
+// is not JSON (here: cut off mid-object) may still carry the key — the server
+// writes "api_key" first (sorted map keys). checkEnvelope would quote up to
+// 300 bytes of it into the error, so the body is withheld instead.
+func TestModelsUnparseableMintWithholdsBody(t *testing.T) {
+	cut := `{"api_key":"` + modelsTestCreatedKey + `","consumer":{"id":"` + modelsTestConsumerID
+	for _, args := range [][]string{
+		{"consumers", "create", "--label", "ci-bot"},
+		{"consumers", "rotate", modelsTestConsumerID},
+	} {
+		t.Run(args[1], func(t *testing.T) {
+			_, getClient := newModelsFixture(t, http.StatusOK, cut)
+			r := runModels(t, getClient, false, args...)
+			if r.err == nil {
+				t.Fatal("unparseable mint answer: err = nil, want exit 1")
+			}
+			if strings.Contains(r.err.Error(), "ctxm_") || strings.Contains(r.stderr, "ctxm_") {
+				t.Fatalf("unparseable mint answer: key material in the error/stderr: err=%q stderr=%q", r.err, r.stderr)
+			}
+		})
+	}
+}
+
+// TestModelsTTYSanitizesTenantText: labels, kinds and alias names are
+// tenant-admin input; on a terminal they pass sanitizeTerminal, so a crafted
+// label cannot drive escape sequences into a server admin's terminal.
+func TestModelsTTYSanitizesTenantText(t *testing.T) {
+	evil := `evil\u001b[31m\u009b2J`
+	cases := []struct {
+		name, resp string
+		args       []string
+	}{
+		{"consumers_list", `{"success":true,"consumers":[` + modelsConsumerJSON(evil, "") + `],"next_cursor":null}`,
+			[]string{"consumers", "list"}},
+		{"create", `{"success":true,"consumer":` + modelsConsumerJSON(evil, "") + `,"api_key":"` + modelsTestCreatedKey + `"}`,
+			[]string{"consumers", "create", "--label", "x"}},
+		{"aliases_list", strings.Replace(modelsAliasesJSON(), `"name":"chat-default"`, `"name":"`+evil+`"`, 1),
+			[]string{"aliases", "list"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, getClient := newModelsFixture(t, http.StatusOK, c.resp)
+			r := runModels(t, getClient, true, c.args...)
+			if r.err != nil {
+				t.Fatalf("sanitize: failed with %q", r.err)
+			}
+			if !strings.Contains(r.stdout, "evil") {
+				t.Fatalf("sanitize: the crafted text was not printed at all: %q", r.stdout)
+			}
+			if strings.ContainsAny(r.stdout, "\x1b\u009b") {
+				t.Fatalf("sanitize: an escape sequence reached the terminal: %q", r.stdout)
+			}
+		})
+	}
+}

@@ -365,3 +365,40 @@ func TestPreviewChainParityExternalOffer(t *testing.T) {
 			got, pv.Excluded, err, v1, oai.PreviewStageExternalOffer)
 	}
 }
+
+// TestPreviewNamesWireAndExportStages covers the two BuildChain steps the
+// trace reads off keepRows (S2, per production hunk): a row whose protocol
+// does not serve chat on /v1 is listed at gateway_wire; a tenant alias
+// whose role the server admin did not export loses every operator row at
+// export (the no-credentials rows leave earlier, at the pool), the chain
+// is empty and the note is the request's 503
+// no_eligible_backend — and the /v1 request of the same pair is that 503.
+// Red against a trace that drops either stage.
+func TestPreviewNamesWireAndExportStages(t *testing.T) {
+	rows, _ := previewRows(t)
+	anth := newUpstream(t, answerSGLang)
+	wireRow := anth.row("claude", backends.TrustFull, 30)
+	wireRow.Protocol = backends.ProtocolAnthropic
+	rows = append(rows, wireRow)
+	ca := consumerWithFloor(backends.SensPublic)
+	r := newChatRig(t, rows, 4, 1, withPersonalAlias(t), withConsumer(ca),
+		withEgress(backends.EgressPolicy{AllowExternal: true, AllowUnmetered: true}))
+	pv, err := r.deps.PreviewChain(previewCtx(ca), ca, "personal")
+	if err != nil || slices.Contains(previewNames(pv.Chain), "claude") || !excludedAt(pv, "claude", oai.PreviewStageWire) {
+		t.Errorf("W05-04 wire stage: chain %v excluded %+v (err %v) — want claude at stage %q", previewNames(pv.Chain), pv.Excluded, err, oai.PreviewStageWire)
+	}
+	pv, err = r.deps.PreviewChain(previewCtx(ca), ca, "tchat")
+	if err != nil || len(pv.Chain) != 0 || !slices.Contains(pv.Notes, oai.PreviewNoteNoEligible) {
+		t.Fatalf("W05-04 export stage: chain %v notes %v (err %v) — want no chain and %q", previewNames(pv.Chain), pv.Notes, err, oai.PreviewNoteNoEligible)
+	}
+	// tchat is credentials: the no-credentials rows leave at the pool, the
+	// operator row spark at the export filter.
+	for name, stage := range map[string]string{"spark": oai.PreviewStageExport, "lanbox": oai.PreviewStagePool, "openrouter": oai.PreviewStagePool} {
+		if !excludedAt(pv, name, stage) {
+			t.Errorf("W05-04 export stage: %q not listed at stage %q: %+v", name, stage, pv.Excluded)
+		}
+	}
+	if a := r.post(t, chatBody("tchat")); a.status != http.StatusServiceUnavailable {
+		t.Errorf("W05-04 export stage: the /v1 request answers %d %s, want the 503 the note names", a.status, a.body)
+	}
+}

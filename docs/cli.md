@@ -97,8 +97,6 @@ Tenant semantics are documented in [multi-tenancy](multi-tenancy.md).
 
 ## Model API: consumers & aliases
 
-**Status: contract (RC-D S1) — the commands are registered and end with `ctx models: not implemented` (exit 1) until RC-D S2.**
-
 Consumers are the external programs that call the OpenAI-compatible `/v1` API with a `ctxm_` key; a consumer belongs to one tenant. Model aliases are the model names a consumer may be granted. All commands wrap the existing `model-consumer-*`, `model-key-*` and `model-alias-list` manage actions.
 
 | Command | Description |
@@ -110,9 +108,9 @@ Consumers are the external programs that call the OpenAI-compatible `/v1` API wi
 | `ctx models consumers deactivate <consumer-id>` | Soft delete (**tenant-admin key**): the consumer stays listed as `inactive`, all its keys are revoked, its running requests end; prints `cancelled_inflight` like `revoke` |
 | `ctx models aliases list` | The model aliases your key can read, with `writable` (**tenant-admin key**) |
 
-**The key plaintext is shown exactly once.** `create` and `rotate` print the minted `ctxm_` key once on stdout — never on stderr, never in an error message — and it cannot be retrieved later (rotate mints a new one). Even when the answer is otherwise broken, a minted key is still printed once before the command exits 1.
+**The key plaintext is shown exactly once.** `create` and `rotate` print the minted `ctxm_` key once on stdout — never on stderr, never in an error message — and it cannot be retrieved later (rotate mints a new one). The key is taken out of the answer before anything else is judged: even when the answer is otherwise broken (no `success` field, `success:false`, a missing or invalid consumer/key object) the minted key is printed once, then the command exits 1 with an error that names the defect and never quotes the answer.
 
-On a TTY the output is a table (lists) or a key-value block (`create`, `rotate`); piped, or with `--json`, it is JSON. Both are a projection over the documented fields — a list never passes the raw server body through. Invalid flag values (`--lane`, `--sensitivity`, `--fair-weight`, a negative `--grace`, a non-RFC3339 `--expires`, `--limit` ≤ 0, an unknown `--status`) fail before any request is sent. A `success:false` envelope (403, 404, 400, …) exits 1 with the server's reason.
+On a TTY the output is a table (lists; a further page is announced as `more: --cursor C`), a key-value block followed by the `api_key:` line and the save warning (`create`, `rotate`), or `cancelled_inflight: N` (`revoke`, `deactivate`); labels and other tenant-supplied text pass the same terminal-escape allowlist as issue titles. Piped, or with `--json`, it is JSON: `{consumers, next_cursor}`, `{model_aliases, count}`, `{consumer, api_key}`, `{key, api_key}`, `{cancelled_inflight}` (`null` = unknown). Both forms are a projection over the documented fields — a list never passes the raw server body through. A missing `--label` and invalid flag values (`--lane`, `--sensitivity`, `--fair-weight`, a negative or fractional `--grace`, a non-RFC3339 `--expires`, `--limit` ≤ 0, an unknown `--status`) fail before any request is sent. A `success:false` envelope (403, 404, 400, …) exits 1 with the server's reason.
 
 ## Projects
 
