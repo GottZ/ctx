@@ -107,7 +107,7 @@ func TestDispatchBackendRowsMapping(t *testing.T) {
 			Host:          "https://api.example.com",
 			ProviderClass: "openrouter",
 			Locality:      backends.LocalityExternal,
-			Enabled:       false, // disabled rows are projected too
+			Enabled:       false, // disabled rows are projected too, marked Disabled (FOLGE-C)
 		},
 		{
 			// A03-W3: a peer ctx instance on the LAN is self-admitting too.
@@ -136,7 +136,7 @@ func TestDispatchBackendRowsMapping(t *testing.T) {
 	// in internal/dispatch noticing — this pin is their owner-side anchor.
 	want := []dispatch.BackendRow{
 		{Name: "herbert-chat", Scope: "_global", BaseURL: "http://HOST:8089/v1", ProviderClass: "llamacpp", Limits: map[string]any{"slots": float64(1)}, Roles: []string{"chat", "dream"}},
-		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com", ProviderClass: "openrouter", External: true, SelfAdmitting: true},
+		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com", ProviderClass: "openrouter", External: true, SelfAdmitting: true, Disabled: true},
 		{Name: "peer-ctx", Scope: "_global", BaseURL: "http://peer:8077", ProviderClass: "ctx", SelfAdmitting: true},
 		{Name: "peer-ctx-public", Scope: "_global", BaseURL: "https://a.example.com", ProviderClass: "ctx", Roles: []string{"dream"}, External: false, SelfAdmitting: true},
 	}
@@ -299,6 +299,9 @@ func TestRefreshDispatchPolicy_DerivesFromPoolSnapshot(t *testing.T) {
 		Scope:  "_global",
 		Host:   "http://HOST:8089/v1", // canonicalizes to http://host:8089
 		Limits: map[string]any{"slots": float64(2)},
+		// An enabled row: since FOLGE-C a disabled row takes no part in the
+		// policy (the fixture relied on the zero value counting).
+		Enabled: true,
 	}})
 
 	d := dispatch.New(nil, dispatch.DefaultSettings())

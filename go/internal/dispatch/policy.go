@@ -155,6 +155,12 @@ type BackendRow struct {
 	// ctx targets count as local, B's own order must hold up to A's door
 	// (design/04 §4.14, F-W7; the projection is events.DispatchBackendRows).
 	External bool
+	// Disabled marks a row with context_backends.enabled = false (FOLGE-C):
+	// it routes nothing, so it takes no part in the policy — not in the
+	// coverage term, not in the K2 authority, not in the merge. The zero
+	// value is an enabled row, so a producer that does not set the field
+	// keeps every row in the policy (the behaviour before FOLGE-C).
+	Disabled bool
 	// SelfAdmitting marks a row whose target admits on its own, remotely:
 	// provider_class ctx (a peer instance) or locality external (design/03
 	// §3.2, kind P). Its sole consumer is the external opt-in: such a target
@@ -206,12 +212,20 @@ func hasDispatchKeys(limits map[string]any) bool {
 // the origin). A foreign row's dispatch keys are ignored + WARN. An origin
 // shared by several tenants WITHOUT a '_global' row has no authority at all:
 // dispatch keys ignored + WARN, pass-through (no peer may cap the other).
+// Disabled rows take no part (FOLGE-C).
 func DerivePolicy(rows []BackendRow, logger *slog.Logger) Policy {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	byOrigin := make(map[string][]BackendRow)
 	for _, r := range rows {
+		if r.Disabled {
+			// FOLGE-C: a disabled row routes nothing — it neither carries
+			// the K2 authority of its origin, nor narrows its merge, nor
+			// binds the coverage term (one disabled row without slots
+			// switched Enforcing off for the instance).
+			continue
+		}
 		origin, err := NormalizeOrigin(r.BaseURL)
 		if err != nil {
 			if hasDispatchKeys(r.Limits) {
