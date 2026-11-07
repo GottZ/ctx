@@ -15,11 +15,21 @@
 // /v1 routes. The one ctx import is promptguard.TokenEstimate, the house
 // rule that turns runes into a token estimate (depguard keyquota-leaf).
 //
+// The day and month budgets (wave W06-13, design/06 §4.2, §4.3) are
+// calendar-UTC windows at three levels — the consumer × op, its tenant × op
+// (the tenant envelope, counting only consumer tokens) and the op over all
+// consumers (the instance envelope): per window the tokens and requests used,
+// and per level the window-independent tokens the open reservations hold. A
+// request passes when used + reserved + its own cost fits each bounded
+// dimension of each level; a refusal waits until the window resets and is
+// not retryable (insufficient_quota).
+//
 // State lives per (consumer, op) for the life of the process and is never
 // removed when a key is revoked, rotated or its consumer disabled (B-06-19):
-// a consumer cannot reset its own window by cycling keys. Single process: one
-// meter per instance, like the dispatcher (design/06 §4.2
-// "Single-Process-Annahme").
+// a consumer cannot reset its own window by cycling keys. Only the budget
+// counters of a level without an open reservation are dropped at the change
+// of the UTC month, once their month is over. Single process: one meter per
+// instance, like the dispatcher (design/06 §4.2 "Single-Process-Annahme").
 package keyquota
 
 import (
@@ -96,6 +106,48 @@ type Limits struct {
 	// unbounded (design/04 R-06-4), a smaller value is refused as a wiring
 	// defect.
 	Concurrency int64
+	// Consumer, Tenant and Instance are the calendar-UTC budgets of the
+	// subject's op (wave W06-13, design/06 §4.3): the consumer's own
+	// (gateway.<op>_daily_tokens_default, consumer_monthly_tokens_default,
+	// consumer_daily_requests_default), the envelope of its tenant over all
+	// its consumers (gateway.tenant_envelope_factor × the consumer's) and the
+	// instance's over all consumers (gateway.instance_envelope_factor × the
+	// consumer's). A zero dimension is unbounded.
+	Consumer, Tenant, Instance Budget
+}
+
+// Budget is one level's calendar-UTC budgets of an op (design/06 §4.2 rows
+// "Tag/Monat", "Tenant-Hülle", "Instanz-Hülle"): tokens per UTC day, tokens
+// per UTC month and requests per UTC day. 0 = the dimension is unbounded —
+// the registry's "off" of the month and request budgets (design/06 §4.3);
+// the daily token defaults are at least 1 (V50), so every op has a day
+// budget at every level.
+type Budget struct {
+	DailyTokens, MonthlyTokens, DailyRequests int64
+}
+
+// Scale is b with every bounded dimension multiplied by f, floored and
+// saturated: an envelope as a factor of the consumer's budget (design/06
+// §4.3, tenant_env = factor × registry). An unbounded dimension stays
+// unbounded. A factor below 1 (V50 refuses it) or not a number counts as 1:
+// an envelope is never unbounded and never below the consumer's own budget.
+func (b Budget) Scale(f float64) Budget {
+	if !(f >= 1) {
+		f = 1
+	}
+	return Budget{DailyTokens: scaleLimit(b.DailyTokens, f), MonthlyTokens: scaleLimit(b.MonthlyTokens, f),
+		DailyRequests: scaleLimit(b.DailyRequests, f)}
+}
+
+func scaleLimit(l int64, f float64) int64 {
+	if l <= 0 {
+		return 0
+	}
+	p := math.Floor(float64(l) * f)
+	if !(p < math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return max(int64(p), l)
 }
 
 // Estimate is what a request is expected to cost (design/06 §4.2
@@ -151,6 +203,28 @@ const (
 	ReasonInvalid     Reason = "invalid"
 )
 
+// The refusals of the day and month budgets (W06-13): the consumer's own
+// dimension, or the envelope of its tenant or of the instance that bound.
+// They are the ledger details of reason "quota" (design/06 §4.1 step 8).
+const (
+	ReasonDailyTokens      Reason = "daily_tokens"
+	ReasonMonthlyTokens    Reason = "monthly_tokens"
+	ReasonDailyRequests    Reason = "daily_requests"
+	ReasonTenantEnvelope   Reason = "tenant_envelope"
+	ReasonInstanceEnvelope Reason = "instance_envelope"
+)
+
+// Quota reports whether r is a refusal of a day or month budget: 429
+// insufficient_quota, not retryable, Retry-After until the window resets
+// (design/06 §4.4).
+func (r Reason) Quota() bool {
+	switch r {
+	case ReasonDailyTokens, ReasonMonthlyTokens, ReasonDailyRequests, ReasonTenantEnvelope, ReasonInstanceEnvelope:
+		return true
+	}
+	return false
+}
+
 // WarmingRetryAfter is the Retry-After of an unseeded meter: the retry
 // cadence of the boot seed (design/06 §4.2 "Retry mit Backoff 5 s", §4.4
 // row warming; lead decision O-10-1 (a): a named constant, not a setting).
@@ -170,9 +244,12 @@ type Decision struct {
 	Allowed bool
 	Reason  Reason
 	// RetryAfter is GCRA-exact: the earliest time the same request could
-	// pass if nothing else arrives (WarmingRetryAfter while unseeded).
+	// pass if nothing else arrives (WarmingRetryAfter while unseeded); for
+	// a budget refusal the time until its window resets — 00:00 UTC, or the
+	// first of the next month at 00:00 UTC.
 	RetryAfter time.Duration
-	// Retryable is false only for ReasonInvalid.
+	// Retryable is false for ReasonInvalid and the budget refusals
+	// (Reason.Quota): x-should-retry false.
 	Retryable bool
 	// Message names only the caller's own limit (B6 doctrine): the op, the
 	// dimension and the limit as the request's lane sees it.
@@ -224,11 +301,106 @@ type Meter struct {
 
 	mu    sync.Mutex
 	state map[stateKey]*buckets
+	// budgets are the day and month counters of every level (W06-13);
+	// month is the UTC month the meter last saw (the sweep's trigger).
+	budgets map[budgetKey]*usage
+	month   int64
 }
 
 type stateKey struct {
 	consumer string
 	op       Op
+}
+
+// budgetLevel is one of the three levels of the day and month budgets.
+type budgetLevel uint8
+
+const (
+	levelConsumer budgetLevel = iota
+	levelTenant
+	levelInstance
+)
+
+// budgetKey names one level's counters: the consumer, the tenant or the
+// instance ("") with the op.
+type budgetKey struct {
+	level budgetLevel
+	id    string
+	op    Op
+}
+
+// usage are one level's counters (W06-13): the tokens and requests used in
+// the UTC day day and the tokens used in the UTC month month (the calendar
+// keys of calendarOf), and the tokens the level's open reservations hold —
+// window-independent, they end with their reservation whatever the window.
+// open counts those reservations: counters with an open reservation are
+// never dropped.
+type usage struct {
+	day, month                         int64
+	dayTokens, dayRequests, monthTokens int64
+	reserved                            int64
+	open                                int64
+}
+
+// roll moves u into the windows of day and month: a window that is over
+// starts empty.
+func (u *usage) roll(day, month int64) {
+	if u.month != month {
+		u.month, u.monthTokens = month, 0
+	}
+	if u.day != day {
+		u.day, u.dayTokens, u.dayRequests = day, 0, 0
+	}
+}
+
+// check is the admission of a request of n tokens on lane against b (each
+// bounded dimension as the lane sees it, laneLimit): used + reserved + n_d ≤
+// L with n_d = min(n, L) — a reservation above the budget is charged at it,
+// so it passes an empty budget and is never refused for good (B-06-28) —
+// and requests used + 1 ≤ L. The dimension that refuses with the longest
+// wait names the refusal: the month before the day.
+func (u *usage) check(b Budget, lane Lane, r float64, n int64) (Reason, bool) {
+	if l := laneLimit(b.MonthlyTokens, lane, r); l > 0 && satAdd(satAdd(u.monthTokens, u.reserved), min(n, l)) > l {
+		return ReasonMonthlyTokens, false
+	}
+	if l := laneLimit(b.DailyTokens, lane, r); l > 0 && satAdd(satAdd(u.dayTokens, u.reserved), min(n, l)) > l {
+		return ReasonDailyTokens, false
+	}
+	if l := laneLimit(b.DailyRequests, lane, r); l > 0 && satAdd(u.dayRequests, 1) > l {
+		return ReasonDailyRequests, false
+	}
+	return "", true
+}
+
+// laneLimit is a budget limit as lane sees it: the whole limit for the urgent
+// lane, ⌊L·(1 − r)⌋ (at least 1) for the bulk lane (design/06 §4.2 "XB ≤ (1 −
+// r)·L"); 0 stays unbounded. r is taken to the millionth like bulkSlots.
+func laneLimit(l int64, lane Lane, r float64) int64 {
+	if l <= 0 || lane != LaneBulk {
+		return max(l, 0)
+	}
+	return bulkSlots(l, r)
+}
+
+// calendarOf are the calendar keys of t: the UTC day (days since the epoch)
+// and the UTC month (year·12 + month).
+func calendarOf(t time.Time) (day, month int64) {
+	u := t.UTC()
+	y, mo, d := u.Date()
+	return time.Date(y, mo, d, 0, 0, 0, 0, time.UTC).Unix() / 86400, int64(y)*12 + int64(mo)
+}
+
+// untilReset is the time from t to the reset of the window of reason r: the
+// first of the next UTC month at 00:00 for the month, the next 00:00 UTC for
+// the day.
+func untilReset(t time.Time, r Reason) time.Duration {
+	u := t.UTC()
+	y, mo, d := u.Date()
+	next := time.Date(y, mo, d+1, 0, 0, 0, 0, time.UTC)
+	if r == ReasonMonthlyTokens {
+		next = time.Date(y, mo+1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	return next.Sub(u)
 }
 
 // buckets are the theoretical arrival times (GCRA tat, ns since the meter's
@@ -318,7 +490,7 @@ const reserveScale = 1_000_000
 // New returns an unseeded meter over the clock now: until MarkSeeded every
 // Admit answers warming (design/06 §4.1 step 7).
 func New(now func() time.Time) *Meter {
-	return &Meter{now: now, base: now(), state: map[stateKey]*buckets{}}
+	return &Meter{now: now, base: now(), state: map[stateKey]*buckets{}, budgets: map[budgetKey]*usage{}}
 }
 
 // clock is the meter's time: ns since base on the monotonic clock when now
@@ -360,10 +532,19 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := m.clock()
+	wall := m.now()
+	now := int64(wall.Sub(m.base))
 	st := m.state[key]
 	if st == nil {
 		st = &buckets{}
+	}
+	levels := m.levels(s, l, wall)
+	// A budget refusal comes first: its window outlasts any minute bucket and
+	// a retry cannot help before it resets (design/06 §4.4).
+	for _, lv := range levels {
+		if reason, ok := lv.u.check(lv.b, s.Lane, l.XUReserve, n); !ok {
+			return nil, quotaRefused(s, lv, reason, l, wall)
+		}
 	}
 	nextReq, waitReq, okReq := req.admit(st.req, now, 1)
 	nextTok, waitTok, okTok := tok.admit(st.tok, now, n)
@@ -374,15 +555,104 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 		return nil, concurrencyRefused(s, limit, bulkBound)
 	}
 	m.state[key] = st
+	var held [3]*usage
+	for i, lv := range levels {
+		m.budgets[lv.key] = lv.u
+		lv.u.reserved = satAdd(lv.u.reserved, n)
+		lv.u.dayRequests = satAdd(lv.u.dayRequests, 1)
+		lv.u.open++
+		held[i] = lv.u
+	}
 	st.raise(now, nextTok-max(st.tok, now))
 	st.req, st.tok = nextReq, nextTok
 	h := RateHeaders{
 		LimitRequests: req.cap, RemainingRequests: req.remaining(st.req, now), ResetRequests: time.Duration(backlog(st.req, now)),
 		LimitTokens: tok.cap, RemainingTokens: tok.remaining(st.tok, now), ResetTokens: time.Duration(backlog(st.tok, now)),
 	}
-	r := &Reservation{m: m, key: key, lane: s.Lane, tpm: l.TPM, charged: tok.cost(n), held: n, shadow: now, headers: h}
+	r := &Reservation{m: m, key: key, lane: s.Lane, tpm: l.TPM, charged: tok.cost(n), held: n, shadow: now, headers: h, budget: held}
 	st.add(r)
 	return r, Decision{Allowed: true, Retryable: true, Headers: h}
+}
+
+// budgetLevelOf is one level of a request's budgets: its counters (rolled
+// into the request's windows, not yet stored for a new key) and its limits.
+type budgetLevelOf struct {
+	key   budgetKey
+	u     *usage
+	b     Budget
+	level budgetLevel
+}
+
+// levels are the three budget levels of s under l at wall, in the order the
+// admission checks them: the consumer, its tenant, the instance. Called
+// under m.mu; a key seen for the first time gets fresh counters, stored only
+// when the request is admitted (a refusal changes no state). The first
+// request of a new UTC month drops the counters of the months before that
+// hold no open reservation.
+func (m *Meter) levels(s Subject, l Limits, wall time.Time) [3]budgetLevelOf {
+	day, month := calendarOf(wall)
+	if month != m.month {
+		m.sweep(month)
+	}
+	out := [3]budgetLevelOf{
+		{key: budgetKey{levelConsumer, s.ConsumerID, s.Op}, b: l.Consumer, level: levelConsumer},
+		{key: budgetKey{levelTenant, s.TenantID, s.Op}, b: l.Tenant, level: levelTenant},
+		{key: budgetKey{levelInstance, "", s.Op}, b: l.Instance, level: levelInstance},
+	}
+	for i := range out {
+		u := m.budgets[out[i].key]
+		if u == nil {
+			u = &usage{}
+		}
+		u.roll(day, month)
+		out[i].u = u
+	}
+	return out
+}
+
+// sweep drops the budget counters of the months before month that hold no
+// open reservation (design/06 §4.2 "Zustands-Lebensdauer": removed only at
+// the change of the UTC month, when the key has no activity in the new
+// month — a key that comes back starts at 0 used, which is what it used in
+// the new month). O(keys), once per month. Called under m.mu.
+func (m *Meter) sweep(month int64) {
+	for k, u := range m.budgets {
+		if u.month < month && u.open == 0 {
+			delete(m.budgets, k)
+		}
+	}
+	m.month = month
+}
+
+// quotaRefused is the decision of a budget refusal: insufficient quota, not
+// retryable, Retry-After until the window resets. The message names the
+// consumer's own limit as its lane sees it; an envelope refusal names no
+// value — the tenant's sum is not the consumer's own limit, the instance's
+// is the deployment's (B6 doctrine, design/06 §4.4).
+func quotaRefused(s Subject, lv budgetLevelOf, dim Reason, l Limits, wall time.Time) Decision {
+	what, unit, limit := "Daily token", "tokens per UTC day", lv.b.DailyTokens
+	switch dim {
+	case ReasonMonthlyTokens:
+		what, unit, limit = "Monthly token", "tokens per UTC month", lv.b.MonthlyTokens
+	case ReasonDailyRequests:
+		what, unit, limit = "Daily request", "requests per UTC day", lv.b.DailyRequests
+	}
+	d := Decision{Reason: dim, RetryAfter: untilReset(wall, dim)}
+	switch lv.level {
+	case levelTenant:
+		d.Reason = ReasonTenantEnvelope
+		d.Message = fmt.Sprintf("%s quota of your tenant reached (%s).", what, s.Op)
+	case levelInstance:
+		d.Reason = ReasonInstanceEnvelope
+		d.Message = fmt.Sprintf("Capacity quota for this deployment reached (%s).", s.Op)
+	default:
+		lane := ""
+		if s.Lane == LaneBulk {
+			lane = ", bulk lane"
+		}
+		d.Message = fmt.Sprintf("%s quota reached (%s%s): %d %s.", what, s.Op, lane, laneLimit(limit, s.Lane, l.XUReserve), unit)
+	}
+	return d
 }
 
 // concurrencyRefused is the decision of an L1 refusal: Retry-After is the
@@ -436,7 +706,10 @@ type Reservation struct {
 	seq     uint64
 	slot    int
 	headers RateHeaders
-	once    sync.Once
+	// budget are the counters of the request's three budget levels: each
+	// holds held tokens of it in reserved until the reservation ends.
+	budget [3]*usage
+	once   sync.Once
 }
 
 // Settle books the request's real tokens: the token bucket moves by
@@ -454,7 +727,7 @@ type Reservation struct {
 func (r *Reservation) Settle(u Usage) {
 	r.once.Do(func() {
 		actual := satAdd(int64(max(u.PromptTokens, 0)), int64(max(u.CompletionTokens, 0)))
-		r.m.end(r, dim{limit: r.tpm}.cost(actual)-r.charged)
+		r.m.end(r, dim{limit: r.tpm}.cost(actual)-r.charged, actual)
 	})
 }
 
@@ -463,14 +736,14 @@ func (r *Reservation) Settle(u Usage) {
 // or a gone client after the wire) — after wire contact nothing is given
 // back.
 func (r *Reservation) Keep() {
-	r.once.Do(func() { r.m.end(r, 0) })
+	r.once.Do(func() { r.m.end(r, 0, r.held) })
 }
 
 // Abort ends a reservation without a wire call: its charge goes back as far
 // as the bucket still holds it (all of it unless the bucket drained below it
 // meanwhile), the request stays counted (design/06 §4.2).
 func (r *Reservation) Abort() {
-	r.once.Do(func() { r.m.end(r, -r.charged) })
+	r.once.Do(func() { r.m.end(r, -r.charged, 0) })
 }
 
 // Reject ends a reservation the dispatcher refused after Admit. In this
@@ -496,16 +769,28 @@ func (r *Reservation) Headers() http.Header { return r.headers.Header() }
 // between the admission and the end of the request.
 func (r *Reservation) Held() int64 { return r.held }
 
-// end closes r and moves the token bucket by delta ns. A debt is a new
+// end closes r, books used tokens into the day and month windows of its
+// budget levels (where the reservation's hold ends) and moves the token
+// bucket by delta ns. A debt is a new
 // charge at now — booked from max(tat, now) on (the overrun was used, its
 // moment inside the request is unknown, and booking it from the settle
 // never counts too little; H-2) and into every open shadow. A refund of d
 // takes min(d, max(tat, now) − max(shadow, now)) out of the bucket, and out
 // of the shadow of every older open reservation the same way (r's charge is
 // one of the charges after their admission) — never below now.
-func (m *Meter) end(r *Reservation, delta int64) {
+func (m *Meter) end(r *Reservation, delta, used int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if r.budget[0] != nil {
+		day, month := calendarOf(m.now())
+		for _, u := range r.budget {
+			u.roll(day, month)
+			u.reserved = max(u.reserved-r.held, 0)
+			u.open--
+			u.dayTokens = satAdd(u.dayTokens, used)
+			u.monthTokens = satAdd(u.monthTokens, used)
+		}
+	}
 	st := m.state[r.key]
 	if st == nil {
 		return

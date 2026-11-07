@@ -2703,6 +2703,30 @@ type GatewayConfig struct {
 	// V48: >= 1 (L1 is never unbounded, design/04 R-06-4) and, while
 	// dispatch.external_queue_per_consumer caps the queue, at most that cap.
 	ConsumerConcurrencyDefault int `key:"gateway.consumer_concurrency_default" env:"CTX_GATEWAY_CONSUMER_CONCURRENCY_DEFAULT" default:"2" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ChatDailyTokensDefault / EmbedDailyTokensDefault /
+	// RerankDailyTokensDefault are the tokens per model consumer and UTC
+	// day of each op (wave W06-13, design/06 §4.11, E-06-2): chat 2 M ≈ 36 %
+	// of the measured own load per consumer, embed 20 M (its own process),
+	// rerank 5 M (conservative until the first measurement). Over it 429
+	// insufficient_quota until 00:00 UTC. V50: >= 1.
+	ChatDailyTokensDefault   int `key:"gateway.chat_daily_tokens_default" env:"CTX_GATEWAY_CHAT_DAILY_TOKENS_DEFAULT" default:"2000000" mut:"hot" parse:"strict" tenancy:"global-only"`
+	EmbedDailyTokensDefault  int `key:"gateway.embed_daily_tokens_default" env:"CTX_GATEWAY_EMBED_DAILY_TOKENS_DEFAULT" default:"20000000" mut:"hot" parse:"strict" tenancy:"global-only"`
+	RerankDailyTokensDefault int `key:"gateway.rerank_daily_tokens_default" env:"CTX_GATEWAY_RERANK_DAILY_TOKENS_DEFAULT" default:"5000000" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ConsumerMonthlyTokensDefault / ConsumerDailyRequestsDefault are the
+	// tokens per UTC month and the requests per UTC day per model consumer
+	// and op; 0 (the default) = unbounded — the day budget and the requests
+	// per minute bound already (design/06 §4.11). V35: >= 0.
+	ConsumerMonthlyTokensDefault int `key:"gateway.consumer_monthly_tokens_default" env:"CTX_GATEWAY_CONSUMER_MONTHLY_TOKENS_DEFAULT" default:"0" mut:"hot" parse:"strict" tenancy:"global-only"`
+	ConsumerDailyRequestsDefault int `key:"gateway.consumer_daily_requests_default" env:"CTX_GATEWAY_CONSUMER_DAILY_REQUESTS_DEFAULT" default:"0" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// TenantEnvelopeFactor / InstanceEnvelopeFactor scale the consumer
+	// budgets of an op to its envelopes (design/06 §4.3, B-06-6): a tenant's
+	// consumers together use at most factor × the consumer budget per op
+	// (chat 10 M/day at the defaults), all consumers of the instance at most
+	// instance factor × it (chat 20 M/day ≈ 3.6 × the measured own load).
+	// Both count consumer tokens only; until the limits rows of W06-15 the
+	// factors hold for every tenant. V50: >= 1.
+	TenantEnvelopeFactor   float64 `key:"gateway.tenant_envelope_factor" env:"CTX_GATEWAY_TENANT_ENVELOPE_FACTOR" default:"5" mut:"hot" parse:"strict" tenancy:"global-only"`
+	InstanceEnvelopeFactor float64 `key:"gateway.instance_envelope_factor" env:"CTX_GATEWAY_INSTANCE_ENVELOPE_FACTOR" default:"10" mut:"hot" parse:"strict" tenancy:"global-only"`
 
 	// Consumers is the administration of model consumers and their keys
 	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
@@ -2963,12 +2987,16 @@ func (c *Config) GatewaySettings() oai.Settings {
 		BodyLogging:              g.BodyLogging,
 		AccessLog:                g.AccessLog,
 		Meter: oai.MeterSettings{
-			Chat:           oai.OpLimits{RPM: int64(g.ChatRPMDefault), TPM: int64(g.ChatTPMDefault)},
-			Embed:          oai.OpLimits{RPM: int64(g.EmbedRPMDefault), TPM: int64(g.EmbedTPMDefault)},
-			Rerank:         oai.OpLimits{RPM: int64(g.RerankRPMDefault), TPM: int64(g.RerankTPMDefault)},
-			TPMReserve:     int64(g.TPMReserveDefault),
-			XUReserveRatio: g.XUReserveRatio,
-			Concurrency:    int64(g.ConsumerConcurrencyDefault),
+			Chat:                   oai.OpLimits{RPM: int64(g.ChatRPMDefault), TPM: int64(g.ChatTPMDefault), DailyTokens: int64(g.ChatDailyTokensDefault)},
+			Embed:                  oai.OpLimits{RPM: int64(g.EmbedRPMDefault), TPM: int64(g.EmbedTPMDefault), DailyTokens: int64(g.EmbedDailyTokensDefault)},
+			Rerank:                 oai.OpLimits{RPM: int64(g.RerankRPMDefault), TPM: int64(g.RerankTPMDefault), DailyTokens: int64(g.RerankDailyTokensDefault)},
+			TPMReserve:             int64(g.TPMReserveDefault),
+			XUReserveRatio:         g.XUReserveRatio,
+			Concurrency:            int64(g.ConsumerConcurrencyDefault),
+			MonthlyTokens:          int64(g.ConsumerMonthlyTokensDefault),
+			DailyRequests:          int64(g.ConsumerDailyRequestsDefault),
+			TenantEnvelopeFactor:   g.TenantEnvelopeFactor,
+			InstanceEnvelopeFactor: g.InstanceEnvelopeFactor,
 		},
 		Auth: oai.AuthSettings{
 			FailureLimit:          g.AuthFailureLimit,

@@ -185,6 +185,16 @@ func TestRegistryStrictSet(t *testing.T) {
 		// W06-11: the meter's L1 — a typo'd concurrency limit must not fall back
 		// to the default silently either.
 		"gateway.consumer_concurrency_default": true,
+		// W06-13: the day and month budgets and the envelope factors — a
+		// typo'd budget falling back to its default would change what a
+		// consumer may use per day without anybody noticing.
+		"gateway.chat_daily_tokens_default":       true,
+		"gateway.embed_daily_tokens_default":      true,
+		"gateway.rerank_daily_tokens_default":     true,
+		"gateway.consumer_monthly_tokens_default": true,
+		"gateway.consumer_daily_requests_default": true,
+		"gateway.tenant_envelope_factor":          true,
+		"gateway.instance_envelope_factor":        true,
 		// A03-W10 (design/03 §4.10 no. 1, A-E2 no. 2): the stream relay's
 		// buffer is a memory bound per stream (it joins the V39 floor), the
 		// drain rate and its window cut a client that drains too slowly — a

@@ -104,6 +104,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGatewayConcurrency(c)...)
 	// V49 (W01-8): gateway.inflight_sweep_interval at least 1 s.
 	issues = append(issues, validateGatewayInflightSweep(c)...)
+	// V50 (W06-13): the daily token defaults >= 1, the envelope factors >= 1.
+	issues = append(issues, validateGatewayBudgets(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1330,6 +1332,46 @@ func validateGatewayMeter(c *Config) []Issue {
 	if r := g.XUReserveRatio; !(r >= 0 && r < 1) {
 		issues = append(issues, Issue{Field: "gateway.xu_reserve_ratio", Severity: SeverityError,
 			Msg: fmt.Sprintf("gateway.xu_reserve_ratio (%v) must be in [0, 1) — at 1 the bulk lane could never be served", r)})
+	}
+	return issues
+}
+
+// validateGatewayBudgets is V50 (wave W06-13, design/06 §4.11): the daily
+// token defaults of the three ops are at least 1 — 0 would refuse every
+// request of its op for the rest of the UTC day, and the day budget is the
+// one every op always has (the month and request budgets may be 0 =
+// unbounded; their negatives, like those of the daily ones, stay with V35,
+// one issue per field); the two envelope factors are at least 1 — an
+// envelope below the consumer's own budget would bind a lone consumer under
+// its own limit — and finite. Fatal like V47: boot aborts, a settings PUT is
+// a 422.
+func validateGatewayBudgets(c *Config) []Issue {
+	g := &c.Gateway
+	var issues []Issue
+	for _, f := range []struct {
+		key string
+		v   int
+	}{
+		{"gateway.chat_daily_tokens_default", g.ChatDailyTokensDefault},
+		{"gateway.embed_daily_tokens_default", g.EmbedDailyTokensDefault},
+		{"gateway.rerank_daily_tokens_default", g.RerankDailyTokensDefault},
+	} {
+		if f.v == 0 {
+			issues = append(issues, Issue{Field: f.key, Severity: SeverityError,
+				Msg: f.key + " must be >= 1 — 0 would refuse every request of its op until 00:00 UTC"})
+		}
+	}
+	for _, f := range []struct {
+		key string
+		v   float64
+	}{
+		{"gateway.tenant_envelope_factor", g.TenantEnvelopeFactor},
+		{"gateway.instance_envelope_factor", g.InstanceEnvelopeFactor},
+	} {
+		if !(f.v >= 1) || math.IsInf(f.v, 1) {
+			issues = append(issues, Issue{Field: f.key, Severity: SeverityError,
+				Msg: fmt.Sprintf("%s (%v) must be a finite number >= 1 — an envelope below the consumer's own budget would bind a lone consumer under its own limit", f.key, f.v)})
+		}
 	}
 	return issues
 }

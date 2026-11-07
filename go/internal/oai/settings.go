@@ -74,11 +74,20 @@ type MeterSettings struct {
 	// open at once, waiting in the queue or running
 	// (gateway.consumer_concurrency_default; W06-11), at least 1.
 	Concurrency int64
+	// MonthlyTokens and DailyRequests are the consumer's tokens per UTC
+	// month and requests per UTC day per op (W06-13); 0 = unbounded.
+	MonthlyTokens, DailyRequests int64
+	// TenantEnvelopeFactor and InstanceEnvelopeFactor scale the consumer's
+	// budgets of an op to the envelope of its tenant and of the instance
+	// (W06-13), at least 1.
+	TenantEnvelopeFactor, InstanceEnvelopeFactor float64
 }
 
-// OpLimits are one op's requests and tokens per minute.
+// OpLimits are one op's requests and tokens per minute and its tokens per
+// model consumer and UTC day (W06-13, at least 1).
 type OpLimits struct {
-	RPM, TPM int64
+	RPM, TPM    int64
+	DailyTokens int64
 }
 
 // AuthSettings are the limits of the model-key door (gateway.auth_*,

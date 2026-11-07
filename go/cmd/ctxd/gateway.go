@@ -280,12 +280,21 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 		consumer, tenant = ca.ConsumerID, ca.TenantID
 	}
 	sub := keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op, Lane: lane}
+	// The day and month budgets (W06-13): until the limits rows of W06-15
+	// the registry defaults for every consumer, the envelopes the factors ×
+	// them (design/06 §4.3).
+	own := keyquota.Budget{DailyTokens: lim.DailyTokens, MonthlyTokens: s.MonthlyTokens, DailyRequests: s.DailyRequests}
 	res, d := l.meter.Admit(sub,
-		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: s.Concurrency},
+		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: s.Concurrency,
+			Consumer: own, Tenant: own.Scale(s.TenantEnvelopeFactor), Instance: own.Scale(s.InstanceEnvelopeFactor)},
 		keyquota.Estimate{PromptRunes: est.PromptRunes, MaxCompletion: est.MaxTokens, ClientMax: est.ClientMaxTokens, InputRunes: est.InputRunes})
 	switch {
 	case d.Allowed:
 		return meterReservation{res}, nil
+	case d.Reason.Quota():
+		// A day or month budget (W06-13): 429 insufficient_quota, not
+		// retryable, Retry-After until the window resets (design/06 §4.4).
+		return nil, &oai.LimitRefusal{Code: oai.CodeInsufficientQuota, Message: d.Message, RetryAfter: d.RetryAfter, ShouldRetry: false}
 	case d.Reason == keyquota.ReasonInvalid:
 		slog.Error("gateway: the meter refused an invalid subject (wiring defect)", "op", est.Op,
 			"consumer", sub.ConsumerID != "", "tenant", sub.TenantID != "", "rpm", lim.RPM, "tpm", lim.TPM, "concurrency", s.Concurrency)
