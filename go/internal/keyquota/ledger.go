@@ -3,6 +3,7 @@ package keyquota
 import (
 	"cmp"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -163,7 +164,9 @@ func ledgerKeyOf(r Rejection, now time.Time) (ledgerKey, bool) {
 		return ledgerKey{}, false
 	}
 	k := ledgerKey{
-		bucket: now.UTC().Truncate(time.Hour).Unix(), consumer: r.ConsumerID,
+		// One spelling per consumer: the database compares uuid values, the
+		// cell key compares strings (Fremd-Review F-4).
+		bucket: now.UTC().Truncate(time.Hour).Unix(), consumer: strings.ToLower(r.ConsumerID),
 		alias: r.Alias, reason: r.Reason, detail: r.Detail,
 	}
 	if _, ok := ParseOp(r.Op); ok {
