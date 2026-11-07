@@ -3,27 +3,26 @@
 // One named function per server call, mirroring modelapi.ts (kept in its own
 // module so the RC-D clusters C5 and C6 do not edit the same client file):
 //
-//   getConsumer          POST /api/manage  model-consumer-get {id}          (root, W05-02)
-//   listConsumerCalls    GET  /api/llmlog?consumer_id=<id>[&limit=]         (C2 W06-17)
-//   getUsage             GET  /api/usage?from&to&bucket&consumer=<id>       (C2 W06-16)
-//   getGatewayLimits     POST /api/manage  gateway-limits-get {consumer_id} (C1 W06-15)
-//   setGatewayLimits     POST /api/manage  gateway-limits-set {consumer_id, op, values}
-//   clearGatewayLimits   POST /api/manage  gateway-limits-clear {consumer_id, op, fields?}
+//   getConsumer          POST /api/manage  model-consumer-get {id}                        (root, W05-02)
+//   listConsumerCalls    GET  /api/llmlog?consumer_id=<id>[&limit=]                       (C2 W06-17)
+//   getUsage             GET  /api/usage?from&to&bucket&group=consumer&consumer=<id>      (C2 W06-16)
+//   getGatewayLimits     POST /api/manage  gateway-limits-get {subject_kind:'consumer', consumer_id}  (C1 W06-15)
+//   setGatewayLimits     POST /api/manage  gateway-limits-set {subject_kind, consumer_id, op, <every dimension>}
+//   deleteGatewayLimits  POST /api/manage  gateway-limits-delete {subject_kind, consumer_id, op}
 //
 // No limits payload ever carries a tier: the server derives it from the
-// caller (design/06 §4.3 "Tier aus dem Aufrufer abgeleitet, nie aus dem Body").
-//
-// RC-D S1: contract stubs — every call answers fail-closed with a 503
-// ApiError (`service_unavailable`), usageRange answers null. S2 wires them.
+// caller (C1: a `tier` field is an unknown field ⇒ 400). Bodies are built from
+// explicit field lists, never a spread of the caller's object.
 
-import { ApiError } from '../api'
+import { apiFetch } from '../api'
 import type {
   ConsumerCallsResponse,
   ConsumerGetResponse,
-  GatewayLimitsClearSpec,
+  GatewayLimitsDeleteResponse,
   GatewayLimitsGetResponse,
-  GatewayLimitsSetSpec,
-  GatewayLimitsWriteResponse,
+  GatewayLimitsSetResponse,
+  GatewayOp,
+  LimitValues,
   UsageBucket,
   UsageResponse,
   UsageWindow,
@@ -58,57 +57,93 @@ export interface UsageParams {
   window: UsageWindow
 }
 
-function notWired(what: string): Promise<never> {
-  return Promise.reject(new ApiError(503, 'service_unavailable', `${what}: not implemented (RC-D S1 stub)`))
-}
+/** The limit values the wire carries, in the server's column order (a write sends every one). */
+const LIMIT_FIELDS: readonly (keyof LimitValues)[] = [
+  'rpm',
+  'tpm',
+  'max_concurrency',
+  'daily_tokens',
+  'monthly_tokens',
+  'daily_requests',
+  'monthly_cost_usd',
+  'allow_external',
+  'allow_unmetered_external',
+]
 
 /**
  * The from/to/bucket of a window ending at `nowMs`. Building a REQUEST value
  * is the only use of a client clock here (precedent createConsumer's
- * expires_in_days); the server validates the range against its own clock and
- * answers 400 beyond 92 d. Never used to derive a status (B-11).
- * null = not computable (S1 stub).
+ * expires_in_days); the server cuts the range to whole UTC buckets with its
+ * own clock and answers 400 beyond 92 d. Never used to derive a status (B-11).
+ * null = an unknown window (fail-closed: no request).
  */
 export function usageRange(window: UsageWindow, nowMs: number): UsageRange | null {
-  void window
-  void nowMs
-  return null
+  const span = USAGE_WINDOW_MS[window]
+  const bucket = USAGE_WINDOW_BUCKET[window]
+  if (span === undefined || bucket === undefined || !Number.isFinite(nowMs)) return null
+  return { from: new Date(nowMs - span).toISOString(), to: new Date(nowMs).toISOString(), bucket }
 }
 
 /** model-consumer-get — the consumer, its key chain and audit trail (No-Oracle refusal as ApiError). */
 export function getConsumer(id: string): Promise<ConsumerGetResponse> {
-  void id
-  return notWired('model-consumer-get')
+  return apiFetch<ConsumerGetResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'model-consumer-get', data: { id } }),
+  })
 }
 
 /** GET /api/llmlog?consumer_id= — the consumer's newest calls, metadata only (no bodies). */
 export function listConsumerCalls(consumerId: string, limit?: number): Promise<ConsumerCallsResponse> {
-  void consumerId
-  void limit
-  return notWired('GET /api/llmlog?consumer_id')
+  const q = new URLSearchParams({ consumer_id: consumerId })
+  if (limit !== undefined) q.set('limit', String(limit))
+  return apiFetch<ConsumerCallsResponse>(`/api/llmlog?${q.toString()}`)
 }
 
 /** GET /api/usage — one consumer's series over a panel window. `now` is injectable for vitest. */
 export function getUsage(params: UsageParams, now: () => number = Date.now): Promise<UsageResponse> {
-  void params
-  void now
-  return notWired('GET /api/usage')
+  const range = usageRange(params.window, now())
+  if (range === null) return Promise.reject(new Error(`unknown usage window ${String(params.window)}`))
+  const q = new URLSearchParams({
+    from: range.from,
+    to: range.to,
+    bucket: range.bucket,
+    group: 'consumer',
+    consumer: params.consumer,
+  })
+  return apiFetch<UsageResponse>(`/api/usage?${q.toString()}`)
 }
 
-/** gateway-limits-get — the consumer's limits per op (server, tenant, defaults, effective). */
+/** gateway-limits-get — the consumer's limits per op (server, tenant, ceiling, effective, sources). */
 export function getGatewayLimits(consumerId: string): Promise<GatewayLimitsGetResponse> {
-  void consumerId
-  return notWired('gateway-limits-get')
+  return apiFetch<GatewayLimitsGetResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'gateway-limits-get', data: { subject_kind: 'consumer', consumer_id: consumerId } }),
+  })
 }
 
-/** gateway-limits-set — write the caller-tier row of one op (422 + fields[] above the ceiling). */
-export function setGatewayLimits(spec: GatewayLimitsSetSpec): Promise<GatewayLimitsWriteResponse> {
-  void spec
-  return notWired('gateway-limits-set')
+/**
+ * gateway-limits-set — FULL replacement of the caller-tier row of one op: every
+ * dimension goes on the wire, an absent one as null (C1: "die SPA sendet die
+ * ganze Zeile"). The tier is the server's; a `tier` property on `values` is
+ * not read.
+ */
+export function setGatewayLimits(
+  consumerId: string,
+  op: GatewayOp,
+  values: Partial<LimitValues>,
+): Promise<GatewayLimitsSetResponse> {
+  const data: Record<string, unknown> = { subject_kind: 'consumer', consumer_id: consumerId, op }
+  for (const f of LIMIT_FIELDS) data[f] = values[f] ?? null
+  return apiFetch<GatewayLimitsSetResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'gateway-limits-set', data }),
+  })
 }
 
-/** gateway-limits-clear — drop the caller-tier row (or some of its fields) of one op. */
-export function clearGatewayLimits(spec: GatewayLimitsClearSpec): Promise<GatewayLimitsWriteResponse> {
-  void spec
-  return notWired('gateway-limits-clear')
+/** gateway-limits-delete — drop the caller-tier row of one op (the subject then inherits). */
+export function deleteGatewayLimits(consumerId: string, op: GatewayOp): Promise<GatewayLimitsDeleteResponse> {
+  return apiFetch<GatewayLimitsDeleteResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'gateway-limits-delete', data: { subject_kind: 'consumer', consumer_id: consumerId, op } }),
+  })
 }

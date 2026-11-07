@@ -8,12 +8,10 @@
 //   - `complete` and `hist` are the SERVER's flags, carried unchanged — the
 //     model never fills a missing value (null stays null, never 0).
 //   - Poll every USAGE_POLL_MS only while visible (VisibilitySource of
-//     ConsumersModel); dispose() stops it.
-//
-// RC-D S1: contract stub — load() ends in 'error' (503), start() arms no
-// timer.
+//     ConsumersModel); a tick in a hidden phase is caught up once on the
+//     next visible change; dispose() stops it and drops in-flight answers.
 
-import { ApiError } from '../../lib/api'
+import { toApiError, type ApiError } from '../../lib/api'
 import { getUsage } from '../../lib/api/gatewaypanels'
 import type { UsageSeries, UsageWindow } from '../../lib/api/types'
 import type { ResourceStatus } from '../../lib/resource.svelte'
@@ -23,7 +21,7 @@ import { documentVisibility, type VisibilitySource } from './consumers.svelte'
 export const USAGE_POLL_MS = 60_000
 
 interface UsageApi {
-  usage: typeof getUsage
+  usage: (params: { consumer: string; window: UsageWindow }) => ReturnType<typeof getUsage>
 }
 
 export class UsageModel {
@@ -39,19 +37,34 @@ export class UsageModel {
   readonly #consumerId: string
   readonly #api: UsageApi
   readonly #visibility: VisibilitySource
+  #gen = 0
+  #timer: ReturnType<typeof setInterval> | null = null
+  #unsubscribe: (() => void) | null = null
+  #missed = false
 
   constructor(consumerId: string, api: Partial<UsageApi> = {}, visibility: VisibilitySource = documentVisibility) {
     this.#consumerId = consumerId
-    this.#api = { usage: getUsage, ...api }
+    this.#api = { usage: (p) => getUsage(p), ...api }
     this.#visibility = visibility
   }
 
   /** Read the current window. */
   async load(): Promise<void> {
-    void this.#consumerId
-    void this.#api
-    this.status = 'error'
-    this.loadError = new ApiError(503, 'service_unavailable', 'usage panel: not implemented (RC-D S1 stub)')
+    const gen = ++this.#gen
+    if (this.status !== 'ready') this.status = 'loading'
+    try {
+      const res = await this.#api.usage({ consumer: this.#consumerId, window: this.window })
+      if (gen !== this.#gen) return
+      this.series = res.series
+      this.complete = res.complete
+      this.hist = res.hist
+      this.loadError = null
+      this.status = 'ready'
+    } catch (err) {
+      if (gen !== this.#gen) return
+      this.loadError = toApiError(err)
+      this.status = 'error'
+    }
   }
 
   /** Switch the window and re-read. */
@@ -60,11 +73,31 @@ export class UsageModel {
     await this.load()
   }
 
-  /** Arm the visible-only poll. */
+  /** Arm the visible-only poll and read once if visible. */
   start(): void {
-    void this.#visibility
+    if (this.#timer !== null) return
+    this.#timer = setInterval(() => this.#tick(), USAGE_POLL_MS)
+    this.#unsubscribe = this.#visibility.subscribe(() => {
+      if (this.#visibility.visible() && this.#missed) {
+        this.#missed = false
+        void this.load()
+      }
+    })
+    if (this.#visibility.visible()) void this.load()
+    else this.#missed = true
+  }
+
+  #tick(): void {
+    if (this.#visibility.visible()) void this.load()
+    else this.#missed = true
   }
 
   /** Stop the poll and drop in-flight answers. */
-  dispose(): void {}
+  dispose(): void {
+    if (this.#timer !== null) clearInterval(this.#timer)
+    this.#timer = null
+    this.#unsubscribe?.()
+    this.#unsubscribe = null
+    this.#gen++
+  }
 }

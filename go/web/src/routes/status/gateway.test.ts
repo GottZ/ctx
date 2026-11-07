@@ -2,10 +2,15 @@
 // `gateway = null` ⇒ Kachel aus; tenant-Shape zeigt nur Tiefe-Klasse — rot
 // gegen numerische Fremdtiefe"; V-03-b; the int/ext partition of A03-W3).
 // Red against the S1 stubs (mode 'off', []).
+// S2 (Go wins, C2 W06-16): there is ONE `gateway` field for both tiers (the
+// tenant answer carries only its own consumers' figures) — the S1 assumption
+// gateway/gateway_tenant is gone. The tile mode therefore comes from the
+// field's presence AND the caller's tier, and the tenant tile's depth class
+// comes from dispatch_tenant.targets (A03-W3), the existing coarse shape.
 
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import type { DispatchStatus, DispatchTarget, GatewayStatus, GatewayTenantStatus } from '../../lib/api/types'
+import type { DispatchStatus, DispatchTarget, DispatchTenantStatus, DispatchTenantTarget, GatewayStatus } from '../../lib/api/types'
 import { expiringText, gatewayTileMode, partitionRows, tenantGatewayForeignFields, tenantTargetCells } from './gateway'
 
 const ADMIN: GatewayStatus = {
@@ -20,34 +25,43 @@ const ADMIN: GatewayStatus = {
   auth: { invalid_key: 5 },
 }
 
-const TENANT: GatewayTenantStatus = {
+// the tenant answer of the same field: own consumers only, no envelope/auth/events
+const TENANT_GATEWAY: GatewayStatus = {
   enabled: true,
   consumers: 2,
+  reservations_open: 0,
+  rejections_5m: {},
+  top_consumers_1h: [],
   consumers_used_1h: 1,
   consumers_expiring: 0,
-  rejections_5m: {},
-  targets: [
-    { origin: 'http://spark:30000', depth: 'hoch' },
-    { origin: 'http://spark:30001', depth: 'leer' },
-  ],
+}
+
+function tt(origin: string, depth: string): DispatchTenantTarget {
+  return { origin, busy: depth !== 'leer', depth: depth as DispatchTenantTarget['depth'], own_waiting: 0, own_inflight: 0, own_oldest_wait_ms: 0 }
+}
+
+const TENANT_DISPATCH: DispatchTenantStatus = {
+  targets: [tt('http://spark:30000', 'hoch'), tt('http://spark:30001', 'leer')],
 }
 
 describe('gatewayTileMode (W05-17: tile off on null)', () => {
-  it('server-admin shape ⇒ admin tile (positive control)', () => {
-    expect(gatewayTileMode({ gateway: ADMIN, gateway_tenant: null }), 'gate W05-17: tile shown for the admin shape').toBe('admin')
+  it('server-admin with the gateway section ⇒ admin tile (positive control)', () => {
+    expect(gatewayTileMode({ gateway: ADMIN }, 'server-admin'), 'gate W05-17: tile shown for the admin shape').toBe('admin')
   })
-  it('tenant shape ⇒ tenant tile', () => {
-    expect(gatewayTileMode({ gateway: null, gateway_tenant: TENANT }), 'gate W05-17: tile shown for the tenant shape').toBe('tenant')
+  it('tenant-admin with the gateway section ⇒ tenant tile', () => {
+    expect(gatewayTileMode({ gateway: TENANT_GATEWAY }, 'tenant-admin'), 'gate W05-17: tile shown for the tenant shape').toBe('tenant')
   })
-  it('gateway = null (and no tenant shape) ⇒ off; absent sections (pre-RC-D server) ⇒ off', () => {
-    expect(gatewayTileMode({ gateway: null, gateway_tenant: null }), 'gate W05-17: gateway=null ⇒ Kachel aus').toBe('off')
-    expect(gatewayTileMode({})).toBe('off')
+  it('gateway = null ⇒ off for every tier; absent section (pre-RC-D server, switched off) ⇒ off; member ⇒ off', () => {
+    expect(gatewayTileMode({ gateway: null }, 'server-admin'), 'gate W05-17: gateway=null ⇒ Kachel aus').toBe('off')
+    expect(gatewayTileMode({ gateway: null }, 'tenant-admin')).toBe('off')
+    expect(gatewayTileMode({}, 'server-admin')).toBe('off')
+    expect(gatewayTileMode({ gateway: ADMIN }, 'member')).toBe('off')
   })
 })
 
-describe('tenant shape shows the depth class only (W05-17 / V-03-b)', () => {
+describe('tenant tile shows the depth class only (W05-17 / V-03-b)', () => {
   it('per target: origin + depth label', () => {
-    expect(tenantTargetCells(TENANT), 'gate W05-17: Tiefe-Klasse je Ziel').toEqual([
+    expect(tenantTargetCells(TENANT_DISPATCH), 'gate W05-17: Tiefe-Klasse je Ziel').toEqual([
       { origin: 'http://spark:30000', depth: 'high' },
       { origin: 'http://spark:30001', depth: 'idle' },
     ])
@@ -55,9 +69,8 @@ describe('tenant shape shows the depth class only (W05-17 / V-03-b)', () => {
 
   it('a numeric foreign depth on the wire never reaches a cell (rot gegen Zahl)', () => {
     const leaky = {
-      ...TENANT,
-      targets: [{ origin: 'http://spark:30000', depth: 'niedrig', waiting: 37, held_external: 5 }],
-    } as unknown as GatewayTenantStatus
+      targets: [{ ...tt('http://spark:30000', 'niedrig'), waiting: 37, held_external: 5 }],
+    } as unknown as DispatchTenantStatus
     const cells = tenantTargetCells(leaky)
     expect(cells, 'gate W05-17: only the class').toEqual([{ origin: 'http://spark:30000', depth: 'low' }])
     for (const c of cells) expect(c.depth, 'no number in a tenant depth cell').not.toMatch(/\d/)
@@ -68,7 +81,7 @@ describe('tenant shape shows the depth class only (W05-17 / V-03-b)', () => {
   })
 
   it('an unknown depth value reads "—", never echoed raw', () => {
-    const odd = { ...TENANT, targets: [{ origin: 'o', depth: '42' }] } as unknown as GatewayTenantStatus
+    const odd = { targets: [{ origin: 'o', depth: '42' }] } as unknown as DispatchTenantStatus
     expect(tenantTargetCells(odd)).toEqual([{ origin: 'o', depth: '—' }])
   })
 })

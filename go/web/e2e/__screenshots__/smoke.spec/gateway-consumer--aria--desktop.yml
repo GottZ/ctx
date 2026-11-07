@@ -1,0 +1,250 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+      - listitem:
+        - link "Backends":
+          - /url: /tenant/backends
+      - listitem:
+        - link "Guard Review":
+          - /url: /guard
+      - listitem:
+        - link "Model API":
+          - /url: /gateway
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - paragraph:
+    - link "← Model API":
+      - /url: /gateway
+  - heading "rotated-app" [level=1]
+  - paragraph: app rotating
+  - region "policy":
+    - heading "policy" [level=2]
+    - term: description
+    - definition: rotated twice — chain fixture
+    - term: scope
+    - definition: global models only
+    - term: models
+    - definition: none
+    - term: prompt sensitivity
+    - definition: credentials
+    - term: lane
+    - definition: bulk
+    - term: network
+    - definition: any source
+    - term: last used
+    - definition: /\d+\/\d+\/\d+, \d+:\d+ AM/
+  - region "credentials":
+    - heading "key chain" [level=2]
+    - text: "3"
+    - list "key chain":
+      - listitem:
+        - code: ctxm_…CCC3
+        - text: /active created \d+\/\d+\/\d+ rotated from/
+        - code: ctxm_…BBB2
+      - listitem:
+        - code: ctxm_…BBB2
+        - text: /superseded created \d+\/\d+\/\d+ rotated from/
+        - code: ctxm_…AAA1
+      - listitem:
+        - code: ctxm_…AAA1
+        - text: /revoked created \d+\/\d+\/\d+/
+        - code
+  - region "usage":
+    - heading "usage" [level=2]
+    - radiogroup "usage window":
+      - text: ""
+      - radio /\d+[hmsp]+/ [checked]
+      - text: /\d+[hmsp]+/
+      - radio "7d"
+      - text: 7d
+      - radio "30d"
+      - text: 30d
+      - radio "90d"
+      - text: 90d
+    - term: calls
+    - definition: /≥ \d+/
+    - term: errors
+    - definition: ≥ 2
+    - term: prompt tokens
+    - definition: /≥ \d+,\d+/
+    - term: completion tokens
+    - definition: /≥ \d+,\d+/
+    - status: Some buckets are not recorded — they read "not recorded", never 0.
+    - status: "No latency histograms for this window: Ø marks the mean instead of p50/p95."
+    - region "usage table, scrollable":
+      - table "usage table":
+        - rowgroup:
+          - row "bucket calls errors tokens latency queue ttft refusals":
+            - columnheader "bucket"
+            - columnheader "calls"
+            - columnheader "errors"
+            - columnheader "tokens"
+            - columnheader "latency"
+            - columnheader "queue"
+            - columnheader "ttft"
+            - columnheader "refusals"
+        - rowgroup:
+          - row /\d+\/\d+\/\d+, \d+:\d+ AM \d+ 1 \d+,\d+ Ø \d+[hmsp]+ not recorded not recorded rate 3/:
+            - cell /\d+\/\d+\/\d+, \d+:\d+ AM/
+            - cell /\d+/
+            - cell "1"
+            - cell /\d+,\d+/
+            - cell /Ø \d+[hmsp]+/
+            - cell "not recorded"
+            - cell "not recorded"
+            - cell "rate 3"
+          - row /\d+\/\d+\/\d+, \d+:\d+ AM not recorded not recorded not recorded not recorded not recorded not recorded rate 3/:
+            - cell /\d+\/\d+\/\d+, \d+:\d+ AM/
+            - cell "not recorded"
+            - cell "not recorded"
+            - cell "not recorded"
+            - cell "not recorded"
+            - cell "not recorded"
+            - cell "not recorded"
+            - cell "rate 3"
+          - row /\d+\/\d+\/\d+, \d+:\d+ AM not recorded 1 \d+,\d+ Ø \d+[hmsp]+ not recorded not recorded rate 2/:
+            - cell /\d+\/\d+\/\d+, \d+:\d+ AM/
+            - cell "not recorded"
+            - cell "1"
+            - cell /\d+,\d+/
+            - cell /Ø \d+[hmsp]+/
+            - cell "not recorded"
+            - cell "not recorded"
+            - cell "rate 2"
+  - region "limits":
+    - heading "limits" [level=2]
+    - text: tenant tier — narrowing only
+    - form "chat limits":
+      - heading "chat" [level=3]
+      - text: chat rpm
+      - spinbutton "chat rpm"
+      - text: /effective \d+· max \d+ chat tpm/
+      - spinbutton "chat tpm"
+      - text: /effective \d+,\d+· max \d+,\d+ chat max_concurrency/
+      - spinbutton "chat max_concurrency"
+      - text: effective 4· max 4 chat daily_tokens
+      - spinbutton "chat daily_tokens"
+      - text: /effective \d+,\d+,\d+· max \d+,\d+,\d+ chat monthly_tokens/
+      - spinbutton "chat monthly_tokens"
+      - text: effective none chat daily_requests
+      - spinbutton "chat daily_requests"
+      - text: effective none chat monthly_cost_usd
+      - spinbutton "chat monthly_cost_usd"
+      - text: effective $1· max $1 chat external backends
+      - combobox "chat external backends":
+        - option "inherit" [selected]
+        - option "deny"
+      - button "Save chat limits"
+    - form "embed limits":
+      - heading "embed" [level=3]
+      - text: embed rpm
+      - spinbutton "embed rpm"
+      - text: /effective \d+· max \d+ embed tpm/
+      - spinbutton "embed tpm"
+      - text: /effective \d+,\d+· max \d+,\d+ embed max_concurrency/
+      - spinbutton "embed max_concurrency"
+      - text: effective 2· max 2 embed daily_tokens
+      - spinbutton "embed daily_tokens"
+      - text: /effective \d+,\d+,\d+· max \d+,\d+,\d+ embed monthly_tokens/
+      - spinbutton "embed monthly_tokens"
+      - text: effective none embed daily_requests
+      - spinbutton "embed daily_requests"
+      - text: effective none embed monthly_cost_usd
+      - spinbutton "embed monthly_cost_usd"
+      - text: effective $1· max $1 embed external backends
+      - combobox "embed external backends":
+        - option "inherit" [selected]
+        - option "deny"
+      - button "Save embed limits"
+    - form "rerank limits":
+      - heading "rerank" [level=3]
+      - text: rerank rpm
+      - spinbutton "rerank rpm"
+      - text: /effective \d+· max \d+ rerank tpm/
+      - spinbutton "rerank tpm"
+      - text: /effective \d+,\d+· max \d+,\d+ rerank max_concurrency/
+      - spinbutton "rerank max_concurrency"
+      - text: effective 2· max 2 rerank daily_tokens
+      - spinbutton "rerank daily_tokens"
+      - text: /effective \d+,\d+,\d+· max \d+,\d+,\d+ rerank monthly_tokens/
+      - spinbutton "rerank monthly_tokens"
+      - text: effective none rerank daily_requests
+      - spinbutton "rerank daily_requests"
+      - text: effective none rerank monthly_cost_usd
+      - spinbutton "rerank monthly_cost_usd"
+      - text: effective $1· max $1 rerank external backends
+      - combobox "rerank external backends":
+        - option "inherit" [selected]
+        - option "deny"
+      - button "Save rerank limits"
+  - region "calls":
+    - heading "last calls" [level=2]
+    - text: "2"
+    - region "last calls, scrollable":
+      - table "last calls":
+        - rowgroup:
+          - row "time model pipeline outcome duration tokens":
+            - columnheader "time"
+            - columnheader "model"
+            - columnheader "pipeline"
+            - columnheader "outcome"
+            - columnheader "duration"
+            - columnheader "tokens"
+        - rowgroup:
+          - row /\d+\/\d+\/\d+, \d+:\d+ AM chat gateway-chat ok \d+[hmsp]+ \d+ → \d+/:
+            - cell /\d+\/\d+\/\d+, \d+:\d+ AM/
+            - cell "chat"
+            - cell "gateway-chat":
+              - code: gateway-chat
+            - cell "ok"
+            - cell /\d+[hmsp]+/
+            - cell /\d+ → \d+/
+          - row /\d+\/\d+\/\d+, \d+:\d+ AM chat gateway-chat http_502 not recorded not recorded/:
+            - cell /\d+\/\d+\/\d+, \d+:\d+ AM/
+            - cell "chat"
+            - cell "gateway-chat":
+              - code: gateway-chat
+            - cell "http_502"
+            - cell "not recorded"
+            - cell "not recorded"
+  - region "audit":
+    - heading "audit trail" [level=2]
+    - text: "4"
+    - list "audit trail":
+      - listitem:
+        - text: /\d+\/\d+\/\d+, \d+:\d+ AM key create/
+        - code: ctxm_…CCC3 ← ctxm_…BBB2
+        - text: rotated_from, status ops-key · via manage
+      - listitem: /\d+\/\d+\/\d+, \d+:\d+ AM consumer update description ops-key · via manage/
+      - listitem:
+        - text: /\d+\/\d+\/\d+, \d+:\d+ AM key create/
+        - code: ctxm_…BBB2 ← ctxm_…AAA1
+        - text: rotated_from, status ops-key · via manage
+      - listitem:
+        - text: /\d+\/\d+\/\d+, \d+:\d+ AM key update/
+        - code: ctxm_…AAA1
+        - text: status ops-key · via manage

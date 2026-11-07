@@ -1,68 +1,105 @@
-// Limits panel state (RC-D C6, wave W05-12, design/05 §4.6 LimitsCard,
-// design/06 §4.3 gateway-limits-get|set|clear).
+// Limits panel state (RC-D C6, wave W05-12, design/05 §4.6 LimitsCard; wire =
+// C1 gateway-limits-get|set|delete).
 //
 // Rules this model owns:
-//   - load(consumerId) reads gateway-limits-get (all ops).
-//   - save(op, values) / clear(op, fields?) write the CALLER-tier row; no
-//     tier ever goes on the wire (the server derives it). A 422 puts the
-//     server's fields[] messages on fieldErrors["<op>.<field>"] — the message
-//     stands at the field, not as a generic toast — and rethrows; any other
-//     refusal lands on actionError.
-//   - After a successful write the op's view is replaced by the server's
-//     answer (no client-side merge).
-//
-// RC-D S1: contract stub — load() ends in 'error' (503); save/clear reject
-// with the 503 and set nothing.
+//   - load(consumerId) reads gateway-limits-get (all three ops) for the
+//     consumer subject.
+//   - save(op, values) writes the CALLER-tier row of one op as a full
+//     replacement; clear(op) deletes it. No tier ever goes on the wire (the
+//     server derives it). After a successful write the view is re-read from
+//     the server (no client-side merge, C1: the write answers the stored row).
+//   - A 400 with `param` puts the server's message on fieldErrors
+//     ["<op>.<param>"] — the message stands at the field, not as a generic
+//     toast — and rethrows; any other refusal lands on actionError and
+//     rethrows.
 
-import { ApiError } from '../../lib/api'
-import { clearGatewayLimits, getGatewayLimits, setGatewayLimits } from '../../lib/api/gatewaypanels'
-import type { GatewayOp, LimitDimension, LimitValues, LimitsOpView } from '../../lib/api/types'
+import { toApiError, type ApiError } from '../../lib/api'
+import { deleteGatewayLimits, getGatewayLimits, setGatewayLimits } from '../../lib/api/gatewaypanels'
+import type { GatewayLimitsView, GatewayOp, LimitValues, LimitsOpView } from '../../lib/api/types'
 import type { ResourceStatus } from '../../lib/resource.svelte'
+import { limitFieldErrors } from './limits-form'
 
 interface LimitsApi {
   get: typeof getGatewayLimits
   set: typeof setGatewayLimits
-  clear: typeof clearGatewayLimits
+  del: typeof deleteGatewayLimits
 }
 
-const DEFAULT_API: LimitsApi = { get: getGatewayLimits, set: setGatewayLimits, clear: clearGatewayLimits }
+const DEFAULT_API: LimitsApi = { get: getGatewayLimits, set: setGatewayLimits, del: deleteGatewayLimits }
+
+/** The ops in display order. */
+export const LIMIT_OPS: readonly GatewayOp[] = ['chat', 'embed', 'rerank']
 
 export class LimitsModel {
-  ops = $state<LimitsOpView[]>([])
+  view = $state<GatewayLimitsView | null>(null)
   status = $state<ResourceStatus>('idle')
   loadError = $state<ApiError | null>(null)
-  /** 422 field messages keyed "<op>.<field>". */
+  /** 400 field messages keyed "<op>.<field>". */
   fieldErrors = $state<Record<string, string>>({})
   actionError = $state<string | null>(null)
   busyOp = $state<GatewayOp | null>(null)
 
   readonly #api: LimitsApi
   #consumerId: string | null = null
+  #gen = 0
 
   constructor(api: Partial<LimitsApi> = {}) {
     this.#api = { ...DEFAULT_API, ...api }
   }
 
+  /** The ops the server answered, in display order. */
+  get ops(): { op: GatewayOp; view: LimitsOpView }[] {
+    const ops = this.view?.ops ?? {}
+    return LIMIT_OPS.flatMap((op) => {
+      const v = ops[op]
+      return v === undefined ? [] : [{ op, view: v }]
+    })
+  }
+
   /** Read the consumer's limits. */
   async load(consumerId: string): Promise<void> {
     this.#consumerId = consumerId
-    void this.#api
-    this.status = 'error'
-    this.loadError = new ApiError(503, 'service_unavailable', 'limits panel: not implemented (RC-D S1 stub)')
+    const gen = ++this.#gen
+    if (this.status !== 'ready') this.status = 'loading'
+    try {
+      const res = await this.#api.get(consumerId)
+      if (gen !== this.#gen) return
+      this.view = res.limits
+      this.loadError = null
+      this.status = 'ready'
+    } catch (err) {
+      if (gen !== this.#gen) return
+      this.loadError = toApiError(err)
+      this.status = 'error'
+    }
   }
 
-  /** Write the caller-tier values of one op. */
+  /** Write the caller-tier values of one op (full replacement of that row). */
   async save(op: GatewayOp, values: Partial<LimitValues>): Promise<void> {
-    void op
-    void values
-    void this.#consumerId
-    throw new ApiError(503, 'service_unavailable', 'gateway-limits-set: not implemented (RC-D S1 stub)')
+    await this.#write(op, (id) => this.#api.set(id, op, values))
   }
 
-  /** Clear the caller-tier row (or some fields) of one op. */
-  async clear(op: GatewayOp, fields?: LimitDimension[]): Promise<void> {
-    void op
-    void fields
-    throw new ApiError(503, 'service_unavailable', 'gateway-limits-clear: not implemented (RC-D S1 stub)')
+  /** Delete the caller-tier row of one op (the consumer then inherits). */
+  async clear(op: GatewayOp): Promise<void> {
+    await this.#write(op, (id) => this.#api.del(id, op))
+  }
+
+  async #write(op: GatewayOp, call: (consumerId: string) => Promise<unknown>): Promise<void> {
+    const id = this.#consumerId
+    if (id === null) throw new Error('limits not loaded')
+    this.busyOp = op
+    this.actionError = null
+    this.fieldErrors = Object.fromEntries(Object.entries(this.fieldErrors).filter(([k]) => !k.startsWith(`${op}.`)))
+    try {
+      await call(id)
+    } catch (err) {
+      const fields = limitFieldErrors(err, op)
+      if (Object.keys(fields).length > 0) this.fieldErrors = { ...this.fieldErrors, ...fields }
+      else this.actionError = toApiError(err).message
+      throw err
+    } finally {
+      this.busyOp = null
+    }
+    await this.load(id)
   }
 }

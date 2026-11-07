@@ -13,12 +13,18 @@
 //   - Usage carries the hard cases on purpose: a complete:false bucket whose
 //     wire values are 0, a null value, hist:false, and an auth refusal COUNT
 //     on a consumer series (a server bug the panel must not render, V-06-b).
-//   - gateway-limits-set derives the tier from the caller and answers 422 with
-//     fields[] above server(d) for a tenant-admin.
-//   - /api/status carries exactly one of gateway / gateway_tenant per role,
-//     and a tenant target with a numeric `waiting` leak the tile must drop.
+//   - gateway-limits-set derives the tier from the caller and answers 400
+//     {error:'limit widens: <field>', param} above the ceiling for a
+//     tenant-admin; a `tier` field is an unknown field ⇒ 400.
+//   - /api/status carries `gateway` for both tiers (the tenant one without
+//     envelope/auth/events) and, for a tenant-admin, a dispatch_tenant target
+//     with a numeric `waiting` leak the tile must drop.
 // Kept apart from fixtures.ts so the RC-D SPA clusters C5/C6 do not edit the
 // same mock body; fixtures.ts calls in through three hooks.
+// S2 (rc-d-s2-common.md §1, Go wins): the mocks follow C1's
+// gateway-limits-get|set|delete (subject_kind, ops map, ceiling, flat full-row
+// set, 400 {error, param}, delete) and C2's llmusage.Result / status `gateway`
+// (one field for both tiers; the tenant depth class rides dispatch_tenant).
 
 import type { Role, TenantKey } from './fixtures'
 import { SENTINEL } from './fixtures'
@@ -135,7 +141,7 @@ function visible(id: unknown, role: Role, tenant: TenantKey): DetailEntry | null
   return null
 }
 
-function calls(id: string, role: Role): Record<string, unknown>[] {
+function calls(id: string): Record<string, unknown>[] {
   if (id !== PANEL_CONSUMER_A) return []
   const ok = {
     id: PANEL_CALL_ID,
@@ -150,6 +156,8 @@ function calls(id: string, role: Role): Record<string, unknown>[] {
     completion_tokens: 48,
     cost_usd: null,
     queue_wait_ms: 3,
+    dispatch_class: 'external',
+    dispatch_abort: null,
   }
   const failed = {
     ...ok,
@@ -158,8 +166,9 @@ function calls(id: string, role: Role): Record<string, unknown>[] {
     duration_ms: null,
     prompt_tokens: null,
     completion_tokens: null,
-    // below server-admin the server never sends the detail (design/05 §4.3)
-    error: role === 'server-admin' ? { class: 'upstream', status: 502, detail: 'provider body' } : { class: 'upstream', status: 502 },
+    // llmlogError {class, detail} (C2 keeps it): the capped raw text may carry a
+    // provider body — the panels show the class only, never this detail
+    error: { class: 'http_502', detail: 'unexpected status 502: PROMPT-FRAGMENT-DO-NOT-RENDER' },
   }
   return [ok, failed]
 }
@@ -174,17 +183,15 @@ function point(bucket: string, over: Record<string, unknown> = {}): Record<strin
     prompt_tokens: 3400,
     completion_tokens: 900,
     gpu_ms: 15_000,
-    cost_usd: null,
     avg_ms: 820,
-    avg_queue_ms: 14,
-    avg_ttft_ms: 210,
     p50_ms: null,
     p95_ms: null,
-    p50_queue_ms: null,
-    p95_queue_ms: null,
-    p50_ttft_ms: null,
-    p95_ttft_ms: null,
-    rejected: { rate: { count: 3, wait_ms_avg: 0 } },
+    queue_p50_ms: null,
+    queue_p95_ms: null,
+    ttft_p50_ms: null,
+    ttft_p95_ms: null,
+    cost_usd: null,
+    rejected: [{ reason: 'rate', detail: 'rate_requests', n: 3, wait_ms_avg: 0 }],
     ...over,
   }
 }
@@ -197,7 +204,7 @@ function usage(search: URLSearchParams): Record<string, unknown> {
     from: search.get('from') ?? '',
     to: search.get('to') ?? '',
     bucket,
-    group: null,
+    group: search.get('group') ?? 'consumer',
     complete: false,
     hist: false,
     series:
@@ -205,14 +212,18 @@ function usage(search: URLSearchParams): Record<string, unknown> {
         ? [
             {
               key: consumer,
-              label: 'rotated-app',
-              op: 'chat',
               points: [
                 point('2026-06-29T09:00:00Z'),
-                // the rollup does not cover this bucket — its wire zeros must read "not recorded"
+                // the running bucket: partial wire values, complete:false — must read "not recorded"
                 point('2026-06-29T10:00:00Z', { complete: false, calls: 0, errors: 0, prompt_tokens: 0, completion_tokens: 0 }),
                 // a server bug the panel must survive: an auth COUNT on a consumer series
-                point('2026-06-29T11:00:00Z', { calls: null, rejected: { auth: { count: 7, wait_ms_avg: null }, rate: { count: 2, wait_ms_avg: 0 } } }),
+                point('2026-06-29T11:00:00Z', {
+                  calls: null,
+                  rejected: [
+                    { reason: 'auth', detail: 'invalid_key', n: 7, wait_ms_avg: null },
+                    { reason: 'rate', detail: 'rate_tokens', n: 2, wait_ms_avg: 0 },
+                  ],
+                }),
               ],
             },
           ]
@@ -235,50 +246,55 @@ function limitValues(over: Record<string, unknown> = {}): Record<string, unknown
   }
 }
 
-const LIMIT_DEFAULTS: Record<string, Record<string, unknown>> = {
-  chat: limitValues({ rpm: 30, tpm: 60_000, max_concurrency: 2, daily_tokens: 2_000_000, monthly_cost_usd: 1 }),
-  embed: limitValues({ rpm: 120, tpm: 500_000, max_concurrency: 2, daily_tokens: 20_000_000, monthly_cost_usd: 1 }),
-  rerank: limitValues({ rpm: 60, tpm: 200_000, max_concurrency: 2, daily_tokens: 5_000_000, monthly_cost_usd: 1 }),
+/** The settings floor per op (gateway.<op>_rpm_default …; monthly_tokens/daily_requests 0 = unbounded ⇒ null). */
+const LIMIT_SETTINGS: Record<string, Record<string, unknown>> = {
+  chat: limitValues({ rpm: 30, tpm: 60_000, max_concurrency: 2, daily_tokens: 2_000_000, monthly_cost_usd: 1, allow_external: false }),
+  embed: limitValues({ rpm: 120, tpm: 500_000, max_concurrency: 2, daily_tokens: 20_000_000, monthly_cost_usd: 1, allow_external: false }),
+  rerank: limitValues({ rpm: 60, tpm: 200_000, max_concurrency: 2, daily_tokens: 5_000_000, monthly_cost_usd: 1, allow_external: false }),
 }
 
 const LIMIT_DIMS = ['rpm', 'tpm', 'max_concurrency', 'daily_tokens', 'monthly_tokens', 'daily_requests', 'monthly_cost_usd']
+const LIMIT_FIELDS = [...LIMIT_DIMS, 'allow_external', 'allow_unmetered_external']
+/** dispatch.external_queue_per_consumer — the V48 cap of max_concurrency (C1 A9). */
+const CONCURRENCY_CAP = 8
 
-/** The stateful panel world of one session (limits rows survive a set). */
+/** The stateful panel world of one session (limits rows survive a write). */
 export class PanelWorld {
-  /** consumer → op → tier → values */
+  /** "<consumer>|<op>|<tier>" → stored row (absent = no row) */
   #rows = new Map<string, Record<string, unknown>>()
 
-  #row(consumer: string, op: string, tier: 'server' | 'tenant'): Record<string, unknown> {
-    const k = `${consumer}|${op}|${tier}`
-    let r = this.#rows.get(k)
-    if (r === undefined) {
-      // the detail consumer carries a server row for chat max_concurrency (4)
-      r = limitValues(consumer === PANEL_CONSUMER_A && op === 'chat' && tier === 'server' ? { max_concurrency: 4 } : {})
-      this.#rows.set(k, r)
-    }
-    return r
+  constructor() {
+    // the detail consumer carries a server row for chat (max_concurrency 4)
+    this.#rows.set(`${PANEL_CONSUMER_A}|chat|server`, limitValues({ max_concurrency: 4 }))
   }
 
-  #view(consumer: string, op: string, role: Role): Record<string, unknown> {
+  #row(consumer: string, op: string, tier: 'server' | 'tenant'): Record<string, unknown> | null {
+    return this.#rows.get(`${consumer}|${op}|${tier}`) ?? null
+  }
+
+  /** C1 Snapshot.Ceiling for a consumer: server row ?? settings (no tenant rows in this world). */
+  #ceiling(consumer: string, op: string): Record<string, unknown> {
     const server = this.#row(consumer, op, 'server')
+    const base = LIMIT_SETTINGS[op] ?? limitValues()
+    const out: Record<string, unknown> = {}
+    for (const f of LIMIT_FIELDS) out[f] = (server?.[f] as unknown) ?? base[f] ?? null
+    return out
+  }
+
+  #opView(consumer: string, op: string, role: Role): Record<string, unknown> {
+    const ceiling = this.#ceiling(consumer, op)
     const tenant = this.#row(consumer, op, 'tenant')
-    const defaults = LIMIT_DEFAULTS[op] ?? limitValues()
-    const effective: Record<string, unknown> = limitValues()
+    const effective: Record<string, unknown> = {}
     for (const d of LIMIT_DIMS) {
-      const s = (server[d] as number | null) ?? (defaults[d] as number | null)
-      const t = tenant[d] as number | null
-      effective[d] = s === null ? t : t === null ? s : Math.min(s, t)
+      const c = ceiling[d] as number | null
+      const t = (tenant?.[d] as number | null | undefined) ?? null
+      effective[d] = c === null ? t : t === null ? c : Math.min(c, t)
     }
-    return {
-      op,
-      server,
-      tenant,
-      defaults,
-      effective,
-      binding: 'consumer',
-      tenant_envelope: null,
-      instance_envelope: role === 'server-admin' ? limitValues({ daily_tokens: 20_000_000 }) : null,
-    }
+    effective.allow_external = ceiling.allow_external === true && tenant?.allow_external !== false
+    effective.allow_unmetered_external = false
+    effective.tenant_envelope = { daily_tokens: 10_000_000, monthly_tokens: null, daily_requests: null, monthly_cost_usd: 5 }
+    if (role === 'server-admin') effective.instance_envelope = { daily_tokens: 20_000_000, monthly_tokens: null, daily_requests: null, monthly_cost_usd: 10 }
+    return { server: this.#row(consumer, op, 'server'), tenant, ceiling, effective }
   }
 
   /** The /api/manage panel actions; null = not a panel action. */
@@ -287,38 +303,55 @@ export class PanelWorld {
       const d = visible(data?.id, role, tenant)
       return d === null ? NOT_FOUND : { status: 200, json: d.get }
     }
-    if (action !== 'gateway-limits-get' && action !== 'gateway-limits-set' && action !== 'gateway-limits-clear') return null
+    if (action !== 'gateway-limits-get' && action !== 'gateway-limits-set' && action !== 'gateway-limits-delete') return null
     if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
-    const consumer = data?.consumer_id
+    if (data?.subject_kind !== 'consumer') {
+      // instance / tenant_envelope are server-admin only; this world serves consumer subjects
+      return role === 'server-admin'
+        ? { status: 400, json: { success: false, error: 'invalid data: subject_kind', param: 'subject_kind' } }
+        : { status: 403, json: { success: false, error: 'admin key required' } }
+    }
+    const consumer = data.consumer_id
     if (visible(consumer, role, tenant) === null) return NOT_FOUND
     const id = consumer as string
     if (action === 'gateway-limits-get') {
-      return { status: 200, json: { success: true, consumer_id: id, ops: ['chat', 'embed', 'rerank'].map((o) => this.#view(id, o, role)) } }
+      const ops: Record<string, unknown> = {}
+      for (const o of ['chat', 'embed', 'rerank']) ops[o] = this.#opView(id, o, role)
+      return { status: 200, json: { success: true, limits: { subject_kind: 'consumer', consumer_id: id, ops } } }
     }
-    const op = typeof data?.op === 'string' ? data.op : ''
-    if (!(op in LIMIT_DEFAULTS)) return { status: 400, json: { success: false, error: 'op must be chat, embed or rerank' } }
-    if (data !== undefined && 'tier' in data) return { status: 400, json: { success: false, error: 'unknown field: tier' } }
+    const op = typeof data.op === 'string' ? data.op : ''
+    if (!(op in LIMIT_SETTINGS)) return { status: 400, json: { success: false, error: 'invalid data: op', param: 'op' } }
     const tier = role === 'server-admin' ? 'server' : 'tenant'
-    const row = this.#row(id, op, tier)
-    if (action === 'gateway-limits-clear') {
-      const fields = Array.isArray(data?.fields) ? (data.fields as string[]) : LIMIT_DIMS
-      for (const f of fields) row[f] = null
-      return { status: 200, json: { success: true, limits: this.#view(id, op, role) } }
+    const key = `${id}|${op}|${tier}`
+    if (action === 'gateway-limits-delete') {
+      const existed = this.#rows.delete(key)
+      return { status: 200, json: { success: true, deleted: existed } }
     }
-    const values = (data?.values ?? {}) as Record<string, unknown>
-    const view = this.#view(id, op, role)
-    const errs: { field: string; message: string }[] = []
-    for (const [f, v] of Object.entries(values)) {
-      if (!LIMIT_DIMS.includes(f)) continue
-      if (v !== null && (typeof v !== 'number' || !(v > 0))) errs.push({ field: f, message: 'must be > 0' })
-      if (tier === 'tenant' && typeof v === 'number') {
-        const ceiling = ((view.server as Record<string, unknown>)[f] as number | null) ?? ((view.defaults as Record<string, unknown>)[f] as number | null)
-        if (ceiling !== null && v > ceiling) errs.push({ field: f, message: `at most ${ceiling} (server limit)` })
+    // set: DisallowUnknownFields + full replacement of the caller-tier row
+    for (const k of Object.keys(data)) {
+      if (k !== 'subject_kind' && k !== 'consumer_id' && k !== 'op' && !LIMIT_FIELDS.includes(k))
+        return { status: 400, json: { success: false, error: `invalid data: unknown field "${k}"`, param: k } }
+    }
+    const row = limitValues()
+    for (const f of LIMIT_FIELDS) row[f] = data[f] ?? null
+    for (const d of LIMIT_DIMS) {
+      const v = row[d]
+      if (v !== null && (typeof v !== 'number' || !(v > 0))) return { status: 400, json: { success: false, error: `invalid data: ${d} must be > 0`, param: d } }
+    }
+    const mc = row.max_concurrency
+    if (typeof mc === 'number' && mc > CONCURRENCY_CAP) return { status: 400, json: { success: false, error: 'invalid data: max_concurrency over the cap', param: 'max_concurrency' } }
+    if (tier === 'tenant') {
+      const ceiling = this.#ceiling(id, op)
+      for (const d of LIMIT_DIMS) {
+        const v = row[d]
+        const c = ceiling[d] as number | null
+        if (typeof v === 'number' && c !== null && v > c) return { status: 400, json: { success: false, error: `limit widens: ${d}`, param: d } }
       }
+      if (row.allow_external === true) return { status: 400, json: { success: false, error: 'limit widens: allow_external', param: 'allow_external' } }
+      if (row.allow_unmetered_external !== null) return { status: 400, json: { success: false, error: 'limit widens: allow_unmetered_external', param: 'allow_unmetered_external' } }
     }
-    if (errs.length > 0) return { status: 422, json: { success: false, error: 'limit exceeds the server limit', fields: errs } }
-    for (const [f, v] of Object.entries(values)) if (LIMIT_DIMS.includes(f)) row[f] = v
-    return { status: 200, json: { success: true, limits: this.#view(id, op, role) } }
+    this.#rows.set(key, row)
+    return { status: 200, json: { success: true, limits: { ...row, subject_kind: 'consumer', op, tier } } }
   }
 }
 
@@ -327,7 +360,7 @@ export function panelGet(path: string, search: URLSearchParams, role: Role, tena
   if (path === '/api/llmlog' && search.has('consumer_id')) {
     const id = search.get('consumer_id') ?? ''
     // the server's tenant filter: a foreign consumer answers an EMPTY list (no oracle)
-    return { status: 200, json: { success: true, entries: visible(id, role, tenant) === null ? [] : calls(id, role) } }
+    return { status: 200, json: { success: true, entries: visible(id, role, tenant) === null ? [] : calls(id) } }
   }
   if (path === '/api/usage') {
     if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
@@ -338,10 +371,10 @@ export function panelGet(path: string, search: URLSearchParams, role: Role, tena
   return null
 }
 
-/** The /api/status gateway sections of a role (exactly one non-null); {} = absent. */
+/** The /api/status gateway sections of a role (C2: one `gateway` field for both tiers); {} = absent. */
 export function gatewayStatusSections(role: Role, seed: PanelSeed | undefined): Record<string, unknown> {
   if (seed?.gatewayStatus === undefined) return {}
-  if (seed.gatewayStatus === 'null') return { gateway: null, gateway_tenant: null }
+  if (seed.gatewayStatus === 'null') return { gateway: null }
   if (role === 'server-admin') {
     return {
       gateway: {
@@ -349,13 +382,26 @@ export function gatewayStatusSections(role: Role, seed: PanelSeed | undefined): 
         consumers: 7,
         reservations_open: 2,
         rejections_5m: { rate: 4, quota: 1 },
-        instance_envelope: { chat: { used: 1200, limit: 600_000 } },
-        top_consumers_1h: [{ consumer_id: PANEL_CONSUMER_A, label: 'rotated-app', tenant_slug: 'acme', requests: 42, tokens: 9000 }],
+        top_consumers_1h: [{ consumer_id: PANEL_CONSUMER_A, requests: 42, tokens: 9000 }],
         consumers_used_1h: 3,
         consumers_expiring: 2,
+        instance_envelope: { chat: { used: 1200, limit: 600_000 } },
         auth: { invalid_key: 5 },
+        events: { first_use: 1 },
       },
-      gateway_tenant: null,
+      usage_split_24h: [{ target: 'http://spark:30000', source: 'external', class: 'external', calls: 40, gpu_ms: 90_000 }],
+      federation: {
+        loop_rejects: 0,
+        depth_rejects: 0,
+        header_invalid: 0,
+        header_ignored: 0,
+        peer_without_path: 0,
+        peer_mismatch: 0,
+        embed_space_rejects: 0,
+        busy: 0,
+        stamp_without_identity: 0,
+        peer_bound: 0,
+      },
       dispatch: {
         enabled: true,
         enforcing: true,
@@ -373,19 +419,24 @@ export function gatewayStatusSections(role: Role, seed: PanelSeed | undefined): 
         embed_tokens: [],
         targets: [dispatchTarget()],
       },
-      usage_split_24h: [],
+      dispatch_tenant: null,
     }
   }
   return {
-    gateway: null,
-    gateway_tenant: {
+    // the tenant answer: own consumers only, no instance_envelope / auth / events
+    gateway: {
       enabled: true,
       consumers: 2,
+      reservations_open: 0,
+      rejections_5m: {},
+      top_consumers_1h: [],
       consumers_used_1h: 1,
       consumers_expiring: 1,
-      rejections_5m: {},
+    },
+    dispatch: null,
+    dispatch_tenant: {
       // `waiting: 37` is a leak the tile must never render (V-03-b)
-      targets: [{ origin: 'http://spark:30000', depth: 'hoch', waiting: 37 }],
+      targets: [{ origin: 'http://spark:30000', busy: true, depth: 'hoch', own_waiting: 0, own_inflight: 0, own_oldest_wait_ms: 0, waiting: 37 }],
     },
   }
 }

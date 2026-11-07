@@ -74,6 +74,8 @@ const CALLS: ConsumerCallsResponse = {
       completion_tokens: 1,
       cost_usd: null,
       queue_wait_ms: 0,
+      dispatch_class: null,
+      dispatch_abort: null,
     },
   ],
 }

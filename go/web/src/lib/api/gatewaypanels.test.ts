@@ -4,13 +4,17 @@
 // /api/llmlog?consumer_id + /api/usage, C1 gateway-limits-*), no limits
 // payload carries a tier, and the usage window becomes a ≤ 92-d range with
 // the window's bucket. Pure node, fetch stubbed — mirrors modelapi.test.ts.
+// S2 (rc-d-s2-common.md §1, Go wins): the limits wire follows C1 — subject_kind
+// in every payload, a FLAT full-replacement set body, gateway-limits-delete
+// instead of -clear, field errors as 400 {error, param} instead of 422
+// fields[]; the usage query carries group=consumer (C2 llmusage.GroupBy).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, configureApi } from '../api'
 import {
   USAGE_WINDOW_BUCKET,
   USAGE_WINDOW_MS,
-  clearGatewayLimits,
+  deleteGatewayLimits,
   getConsumer,
   getGatewayLimits,
   getUsage,
@@ -102,14 +106,14 @@ describe('W05-10 /api/usage (wire)', () => {
     })
   })
 
-  it('getUsage GETs /api/usage?from&to&bucket&consumer for the consumer panel', async () => {
+  it('getUsage GETs /api/usage?from&to&bucket&group=consumer&consumer for the consumer panel', async () => {
     const mock = stubFetch(
       jsonResponse(200, {
         success: true,
         from: '',
         to: '',
         bucket: 'day',
-        group: null,
+        group: 'consumer',
         complete: true,
         hist: true,
         series: [],
@@ -119,6 +123,7 @@ describe('W05-10 /api/usage (wire)', () => {
     const url = sentUrl(mock)
     expect(url.pathname, 'gate W05-10: GET /api/usage (C2 W06-16)').toBe('/api/usage')
     expect(url.searchParams.get('consumer')).toBe(CID)
+    expect(url.searchParams.get('group'), 'one series keyed by the consumer').toBe('consumer')
     expect(url.searchParams.get('bucket')).toBe('day')
     expect(url.searchParams.get('from')).toBe(new Date(NOW - 30 * 86_400_000).toISOString())
     expect(url.searchParams.get('to')).toBe(new Date(NOW).toISOString())
@@ -126,53 +131,59 @@ describe('W05-10 /api/usage (wire)', () => {
 })
 
 describe('W05-12 gateway-limits-* (wire)', () => {
-  it('getGatewayLimits POSTs gateway-limits-get {consumer_id}', async () => {
-    const mock = stubFetch(jsonResponse(200, { success: true, consumer_id: CID, ops: [] }))
+  it('getGatewayLimits POSTs gateway-limits-get {subject_kind: consumer, consumer_id}', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, limits: { subject_kind: 'consumer', consumer_id: CID, ops: {} } }))
     await getGatewayLimits(CID).catch((e: unknown) => e)
     expect(sentBody(mock), 'gate W05-12: action + payload (C1 W06-15)').toEqual({
       action: 'gateway-limits-get',
-      data: { consumer_id: CID },
+      data: { subject_kind: 'consumer', consumer_id: CID },
     })
   })
 
-  it('setGatewayLimits sends consumer_id, op and values — and NO tier (derived from the caller)', async () => {
+  it('setGatewayLimits sends a flat full row (every dimension, unset = null) — and NO tier (derived from the caller)', async () => {
     const mock = stubFetch(jsonResponse(200, { success: true, limits: { op: 'chat' } }))
-    await setGatewayLimits({ consumer_id: CID, op: 'chat', values: { rpm: 20, max_concurrency: 1 } }).catch((e: unknown) => e)
+    await setGatewayLimits(CID, 'chat', { rpm: 20, max_concurrency: 1 }).catch((e: unknown) => e)
     const body = sentBody(mock)
     expect(body.action, 'gate W05-12: gateway-limits-set').toBe('gateway-limits-set')
-    expect(body.data).toEqual({ consumer_id: CID, op: 'chat', values: { rpm: 20, max_concurrency: 1 } })
+    expect(body.data).toEqual({
+      subject_kind: 'consumer',
+      consumer_id: CID,
+      op: 'chat',
+      rpm: 20,
+      tpm: null,
+      max_concurrency: 1,
+      daily_tokens: null,
+      monthly_tokens: null,
+      daily_requests: null,
+      monthly_cost_usd: null,
+      allow_external: null,
+      allow_unmetered_external: null,
+    })
     expect(JSON.stringify(body), 'gate W05-12: the tier is never on the wire').not.toMatch(/"tier"/)
   })
 
-  it('setGatewayLimits drops an extra tier property smuggled into the spec', async () => {
+  it('setGatewayLimits drops an extra tier property smuggled into the values', async () => {
     const mock = stubFetch(jsonResponse(200, { success: true, limits: { op: 'chat' } }))
-    const spec = { consumer_id: CID, op: 'chat' as const, values: { rpm: 20 }, tier: 'server' }
-    await setGatewayLimits(spec).catch((e: unknown) => e)
+    const values = { rpm: 20, tier: 'server' } as unknown as Parameters<typeof setGatewayLimits>[2]
+    await setGatewayLimits(CID, 'chat', values).catch((e: unknown) => e)
     expect(JSON.stringify(sentBody(mock)), 'gate W05-12: explicit field list, never a spread').not.toMatch(/tier/)
   })
 
-  it('a 422 keeps its fields[] on the ApiError details (the panel shows it at the field)', async () => {
-    stubFetch(
-      jsonResponse(422, {
-        success: false,
-        error: 'limit exceeds the server limit',
-        fields: [{ field: 'max_concurrency', message: 'at most 2 (server limit)' }],
-      }),
-    )
-    const err = (await setGatewayLimits({ consumer_id: CID, op: 'chat', values: { max_concurrency: 9 } }).catch(
-      (e: unknown) => e,
-    )) as ApiError
-    expect(err, 'gate W05-12: 422 is an ApiError').toBeInstanceOf(ApiError)
-    expect(err.status, 'gate W05-12: the 422 of the server, not a client error').toBe(422)
-    expect(err.details?.fields).toEqual([{ field: 'max_concurrency', message: 'at most 2 (server limit)' }])
+  it('a 400 keeps its param on the ApiError details (the panel shows it at the field)', async () => {
+    stubFetch(jsonResponse(400, { success: false, error: 'limit widens: max_concurrency', param: 'max_concurrency' }))
+    const err = (await setGatewayLimits(CID, 'chat', { max_concurrency: 9 }).catch((e: unknown) => e)) as ApiError
+    expect(err, 'gate W05-12: the refusal is an ApiError').toBeInstanceOf(ApiError)
+    expect(err.status, 'gate W05-12: the 400 of the server, not a client error').toBe(400)
+    expect(err.details?.param).toBe('max_concurrency')
+    expect(err.message).toBe('limit widens: max_concurrency')
   })
 
-  it('clearGatewayLimits POSTs gateway-limits-clear {consumer_id, op, fields?}', async () => {
-    const mock = stubFetch(jsonResponse(200, { success: true, limits: { op: 'embed' } }))
-    await clearGatewayLimits({ consumer_id: CID, op: 'embed', fields: ['tpm'] }).catch((e: unknown) => e)
-    expect(sentBody(mock), 'gate W05-12: clear action').toEqual({
-      action: 'gateway-limits-clear',
-      data: { consumer_id: CID, op: 'embed', fields: ['tpm'] },
+  it('deleteGatewayLimits POSTs gateway-limits-delete {subject_kind, consumer_id, op}', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, deleted: true }))
+    await deleteGatewayLimits(CID, 'embed').catch((e: unknown) => e)
+    expect(sentBody(mock), 'gate W05-12: delete action').toEqual({
+      action: 'gateway-limits-delete',
+      data: { subject_kind: 'consumer', consumer_id: CID, op: 'embed' },
     })
   })
 })

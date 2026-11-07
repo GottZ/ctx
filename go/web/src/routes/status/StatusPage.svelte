@@ -86,6 +86,22 @@
     void publicHealth.load()
   })
 
+  // RC-D C6 W05-17: a tenant-admin with the Model API switched on sees the
+  // Model API tile under the read-only banner. It rides the pull path the
+  // server opened for tenant-admins (/api/status, T37b — the per-tenant view;
+  // the SSE push stays server-admin only), polled like the admin fallback and
+  // only while the tab is visible. The rest of the dashboard stays
+  // server-admin (unchanged).
+  const tenantGateway = $derived(!session.admin && session.caps.tier === 'tenant-admin' && session.caps.viewModelApi)
+  $effect(() => {
+    if (!tenantGateway) return
+    void status.reload()
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') void status.reload()
+    }, POLL_MS)
+    return () => clearInterval(timer)
+  })
+
   // --- Profile quick-toggles (§4.6) ------------------------------------------
   // The toggles card loops over the live s.profiles. A flip ON first dry-runs to
   // learn the role-blackout impact; an emptying role raises the shared Klartext
@@ -215,6 +231,9 @@
       <p class="state error">health probe failed: {publicHealth.error?.message}</p>
     {:else}
       <p class="state" aria-busy="true">loading health…</p>
+    {/if}
+    {#if tenantGateway && status.data}
+      <GatewayTile status={status.data} />
     {/if}
   {:else if (status.status === 'loading' && status.data === null) || status.status === 'idle'}
     <!-- Nur der ERSTE Load zeigt den Loading-Zweig. Ein Hintergrund-Reload

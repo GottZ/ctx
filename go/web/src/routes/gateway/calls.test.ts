@@ -22,6 +22,8 @@ const OK: ConsumerCallEntry = {
   completion_tokens: 48,
   cost_usd: null,
   queue_wait_ms: 3,
+  dispatch_class: null,
+  dispatch_abort: null,
 }
 
 const FAILED: ConsumerCallEntry = {
@@ -30,7 +32,8 @@ const FAILED: ConsumerCallEntry = {
   duration_ms: null,
   prompt_tokens: null,
   completion_tokens: null,
-  error: { class: 'upstream', status: 502, detail: 'provider said: <prompt fragment SECRET-PROMPT>' },
+  // S2: the Go shape is llmlogError {class, detail} (C2 keeps it) — the class carries the status (http_502)
+  error: { class: 'http_502', detail: 'unexpected status 502: provider said: <prompt fragment SECRET-PROMPT>' },
 }
 
 describe('callDetailAllowed (W05-09: no llmlog detail below server-admin)', () => {
@@ -54,9 +57,9 @@ describe('callRows (W05-09: last calls, body-free)', () => {
     expect(callRows([OK], 'server-admin')[0]?.detailId, 'gate W05-09: server-admin detail').toBe('L-0001')
   })
 
-  it('an error shows class + status only, never the raw detail', () => {
+  it('an error shows its class only (it carries the status), never the raw detail', () => {
     const [row] = callRows([FAILED], 'tenant-admin')
-    expect(row?.outcome, 'gate W05-09: error = class · status').toBe('upstream · 502')
+    expect(row?.outcome, 'gate W05-09: error = class (incl. status)').toBe('http_502')
     expect(JSON.stringify(row), 'no provider body fragment in the row').not.toContain('SECRET-PROMPT')
   })
 

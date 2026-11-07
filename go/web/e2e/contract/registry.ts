@@ -1122,7 +1122,7 @@ export const contracts: PageContract[] = [
         'Server-capped detail: key chain ≤ gateway.consumer_chain_max (50, keys_truncated), audit ≤ 20 rows, one page of calls, ≤ 92-d usage window — no unbounded list on this page; the 10k list dimension is the /gateway contract.',
     },
     flowDoc:
-      'Tenant-Admin öffnet einen Konsumenten: Kopf mit Label und Server-Status, Key-Kette neueste zuerst mit „rotated from" je Glied, letzte Calls ohne Body und ohne Link auf /api/llmlog/{id}, Audit-Spur mit der Rotation als Kante „neu ← alt"; das Nutzungs-Panel zeigt nicht erfasste Buckets als „not recorded" (nie 0), ohne Histogramme die Ø-Werte markiert und keine Auth-Ablehnungen je Konsument, daneben die Tabelle für Screenreader; die Limits-Karte bietet je Feld höchstens das Server-Limit an, keinen „unbegrenzt"-Schalter, und ein Wert über dem Server-Limit kommt als 422 an genau diesem Feld zurück (W05-09/W05-10/W05-12).',
+      'Tenant-Admin öffnet einen Konsumenten: Kopf mit Label und Server-Status, Key-Kette neueste zuerst mit „rotated from" je Glied, letzte Calls ohne Body und ohne Link auf /api/llmlog/{id}, Audit-Spur mit der Rotation als Kante „neu ← alt"; das Nutzungs-Panel zeigt nicht erfasste Buckets als „not recorded" (nie 0), ohne Histogramme den Ø-Wert markiert und keine Auth-Ablehnungen je Konsument, daneben die Tabelle für Screenreader; die Limits-Karte bietet je Feld höchstens die Server-Decke an, keinen „unbegrenzt"-Schalter, und ein Wert darüber kommt als 400 mit Feldnamen an genau diesem Feld zurück (W05-09/W05-10/W05-12).',
     primaryFlow: async (page, session) => {
       const content = page.locator('main.content')
       await expect(content.getByRole('heading', { level: 1, name: 'rotated-app' }), 'gate W05-09: the consumer renders').toBeVisible()
@@ -1135,7 +1135,9 @@ export const contracts: PageContract[] = [
       await expect(calls.filter({ has: page.locator(`[data-call-id="${PANEL_CALL_ID}"]`) })).toHaveCount(1)
       await expect(content.locator('a[href*="/api/llmlog"]'), 'gate W05-09: kein Link auf /api/llmlog/{id}').toHaveCount(0)
       await expect(content.getByRole('button', { name: /^Open call/ }), 'gate W05-09: no detail control').toHaveCount(0)
-      await expect(calls.nth(1)).toContainText('upstream · 502')
+      // the error shows its class (Go llmlogError.class) — never the capped raw detail
+      await expect(calls.nth(1)).toContainText('http_502')
+      await expect(content, 'gate W05-09: no provider detail in the page').not.toContainText('PROMPT-FRAGMENT-DO-NOT-RENDER')
       // W05-09 — audit trail shows the rotation as one chain edge
       const audit = content.locator('ol[aria-label="audit trail"] > li[data-audit-entry]')
       await expect(audit).toHaveCount(4)
@@ -1154,10 +1156,13 @@ export const contracts: PageContract[] = [
       await expect(limits.getByRole('spinbutton', { name: 'chat rpm' }), 'gate W05-12: Eingabe-Maximum = server(d)').toHaveAttribute('max', '30')
       await expect(limits.getByRole('spinbutton', { name: 'chat max_concurrency' })).toHaveAttribute('max', '4')
       await expect(limits.getByRole('checkbox', { name: /unlimited/i }), 'gate W05-12: kein „unbegrenzt"-Schalter').toHaveCount(0)
-      await limits.getByRole('spinbutton', { name: 'chat max_concurrency' }).fill('9')
+      // over the ceiling: the client hint first, then the server's 400 {param} at the same field
+      await limits.getByRole('spinbutton', { name: 'chat max_concurrency' }).fill('5')
+      await expect(limits.locator('[data-field-error="chat.max_concurrency"]')).toHaveText('at most 4 (server limit)')
       await limits.getByRole('button', { name: 'Save chat limits' }).click()
-      await expect(limits.locator('[data-field-error="chat.max_concurrency"]'), 'gate W05-12: 422 am Feld').toHaveText('at most 4 (server limit)')
+      await expect(limits.locator('[data-field-error="chat.max_concurrency"]'), 'gate W05-12: Fehler mit Feldnamen am Feld').toHaveText('limit widens: max_concurrency')
       const set = session.calls.filter((c) => c.action === 'gateway-limits-set').at(-1)
+      expect(set, 'the write reached the server (it decides)').toBeDefined()
       expect(JSON.stringify(set?.body ?? {}), 'gate W05-12: no tier on the wire').not.toMatch(/"tier"/)
     },
   },

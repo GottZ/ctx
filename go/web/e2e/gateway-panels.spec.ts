@@ -9,8 +9,10 @@
 //     control first)
 //   - W05-10 window switch re-reads with the window's bucket
 //   - W05-17 tile off on gateway=null and on a pre-RC-D answer; tenant tile
-//     shows the depth class only (the mock leaks waiting:37); server-admin
-//     tile carries the int/ext partition; the status page fires no panel call
+//     shows the depth class only (the mock leaks waiting:37 on its
+//     dispatch_tenant target — S2: C2 has one `gateway` field for both tiers,
+//     the tenant depth rides dispatch_tenant); server-admin tile carries the
+//     int/ext partition; the status page fires no panel call
 //   - W05-20 tenant card links /gateway?tenant=<id>; following it filters the
 //     list to that tenant (tenant_id on the wire, only its rows); a
 //     tenant-admin's ?tenant= is ignored

@@ -1,7 +1,8 @@
 // UsageModel gates (RC-D C6 S1, W05-10): the window drives the request,
 // complete/hist are the server's flags carried unchanged (null stays null),
 // polling only while visible (design/05 §4.7: manual + 60 s). Red against
-// the S1 stub.
+// the S1 stub. S2: the fixture follows C2's llmusage.Result (group string,
+// series without label/op, queue_/ttft_ percentile names, rejected list|null).
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { UsageResponse } from '../../lib/api/types'
@@ -14,14 +15,12 @@ function answer(over: Partial<UsageResponse> = {}): UsageResponse {
     from: '2026-06-28T12:00:00Z',
     to: '2026-06-29T12:00:00Z',
     bucket: 'hour',
-    group: null,
+    group: 'consumer',
     complete: false,
     hist: false,
     series: [
       {
         key: 'c1',
-        label: 'ci-chat',
-        op: 'chat',
         points: [
           {
             bucket_start: '2026-06-29T11:00:00Z',
@@ -32,17 +31,15 @@ function answer(over: Partial<UsageResponse> = {}): UsageResponse {
             prompt_tokens: null,
             completion_tokens: null,
             gpu_ms: null,
-            cost_usd: null,
             avg_ms: null,
-            avg_queue_ms: null,
-            avg_ttft_ms: null,
             p50_ms: null,
             p95_ms: null,
-            p50_queue_ms: null,
-            p95_queue_ms: null,
-            p50_ttft_ms: null,
-            p95_ttft_ms: null,
-            rejected: {},
+            queue_p50_ms: null,
+            queue_p95_ms: null,
+            ttft_p50_ms: null,
+            ttft_p95_ms: null,
+            cost_usd: null,
+            rejected: null,
           },
         ],
       },

@@ -4,10 +4,14 @@
 // design/06 §4.3 server(d) = server row ?? tenant default ?? registry,
 // V-06-e "eine fehlende Server-Zeile ist nie unbegrenzt"). Red against the
 // S1 stubs (null / {}).
+// S2 (Go wins, C1 W06-15): server(d) arrives resolved as the op's `ceiling`
+// (C1 Snapshot.Ceiling — consumer server row ?? tenant server row ?? setting);
+// rows are nullable objects; a field error is 400 {error, param} (one field),
+// not 422 fields[].
 
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../../lib/api'
-import type { LimitValues, LimitsOpView } from '../../lib/api/types'
+import type { LimitEffective, LimitValues, LimitsOpView } from '../../lib/api/types'
 import { LIMIT_DIMENSIONS, limitFieldErrors, limitFieldSpec, serverCeiling, tenantInputError } from './limits-form'
 
 function values(over: Partial<LimitValues> = {}): LimitValues {
@@ -25,18 +29,26 @@ function values(over: Partial<LimitValues> = {}): LimitValues {
   }
 }
 
-// chat: the consumer has NO server row for rpm (inherits the registry
-// default 30) but a server row for max_concurrency (4); the tenant row
-// narrows tpm. monthly_tokens: registry 0 = unbounded ⇒ defaults null.
+// chat: the consumer's server row says nothing about rpm (the ceiling still
+// carries the setting's 30 — a missing server value is never unbounded) but
+// sets max_concurrency 4; the tenant row narrows tpm. monthly_tokens and
+// daily_requests: settings floor 0 ⇒ ceiling null = unbounded.
+const EFFECTIVE: LimitEffective = {
+  rpm: 30,
+  tpm: 20_000,
+  max_concurrency: 4,
+  daily_tokens: 2_000_000,
+  monthly_tokens: null,
+  daily_requests: null,
+  monthly_cost_usd: 1,
+  allow_external: false,
+  allow_unmetered_external: false,
+}
 const CHAT: LimitsOpView = {
-  op: 'chat',
   server: values({ max_concurrency: 4 }),
   tenant: values({ tpm: 20_000 }),
-  defaults: values({ rpm: 30, tpm: 60_000, max_concurrency: 2, daily_tokens: 2_000_000, monthly_cost_usd: 1 }),
-  effective: values({ rpm: 30, tpm: 20_000, max_concurrency: 4, daily_tokens: 2_000_000, monthly_cost_usd: 1 }),
-  binding: 'consumer',
-  tenant_envelope: null,
-  instance_envelope: null,
+  ceiling: values({ rpm: 30, tpm: 60_000, max_concurrency: 4, daily_tokens: 2_000_000, monthly_cost_usd: 1, allow_external: false }),
+  effective: EFFECTIVE,
 }
 
 describe('serverCeiling = server(d) (W05-12 / V-06-e)', () => {
@@ -96,21 +108,28 @@ describe('tenantInputError (UX mirror of the server check)', () => {
   })
 })
 
-describe('limitFieldErrors (W05-12: 422 with field name lands at the field)', () => {
-  it('maps fields[] of a 422 onto "<op>.<field>"', () => {
-    const err = new ApiError(422, 'unprocessable', 'limit exceeds the server limit', null, {
+describe('limitFieldErrors (W05-12: a 400 with the field name lands at the field)', () => {
+  it('maps the param of a 400 onto "<op>.<param>"', () => {
+    const err = new ApiError(400, 'bad_request', 'limit widens: max_concurrency', null, {
       success: false,
-      fields: [
-        { field: 'max_concurrency', message: 'at most 4 (server limit)' },
-        { field: 'rpm', message: 'at most 30 (server limit)' },
-      ],
+      error: 'limit widens: max_concurrency',
+      param: 'max_concurrency',
     })
-    expect(limitFieldErrors(err, 'chat'), 'gate W05-12: 422 am Feld').toEqual({
-      'chat.max_concurrency': 'at most 4 (server limit)',
-      'chat.rpm': 'at most 30 (server limit)',
+    expect(limitFieldErrors(err, 'chat'), 'gate W05-12: Fehler mit Feldnamen am Feld').toEqual({
+      'chat.max_concurrency': 'limit widens: max_concurrency',
     })
   })
   it('any other refusal maps to no field', () => {
     expect(limitFieldErrors(new ApiError(403, 'forbidden', 'admin key required'), 'chat')).toEqual({})
+    expect(limitFieldErrors(new ApiError(400, 'bad_request', 'invalid data', null, { success: false }), 'chat')).toEqual({})
+  })
+})
+
+describe('no ceiling known (fail-closed, S2)', () => {
+  it('a tenant-admin field without a ceiling is disabled, never unbounded', () => {
+    const spec = limitFieldSpec({ server: null, tenant: null }, 'rpm', 'tenant')
+    expect(spec.disabled).toBe(true)
+    expect(spec.unlimitedOption).toBe(false)
+    expect(tenantInputError({ server: null, tenant: null }, 'rpm', '5')).not.toBeNull()
   })
 })
