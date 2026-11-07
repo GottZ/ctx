@@ -8,12 +8,13 @@
 //   - model-alias-create: `enabled` always on the wire, false included;
 //   - model-alias-update: the id TOP-LEVEL, name / kind / scope / tenant_id
 //     never in data;
-//   - model-alias-preview: {alias, consumer_id} or {role};
+//   - model-alias-preview (C7 contract, RC-D S2 alignment): {alias: <name>,
+//     consumer_id} (chain mode, consumer required) or {role} (primary_model);
 //   - a {success:false} envelope rejects as ApiError (403, 422 with fields).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, configureApi } from '../api'
-import { createModelAlias, previewModelAlias, rotateModelKey, updateConsumer, updateModelAlias } from './modelapi'
+import { createModelAlias, poolPrimaryModel, previewAliasChain, rotateModelKey, updateConsumer, updateModelAlias } from './modelapi'
 import type { ConsumerUpdateSpec, ModelAliasUpdateSpec } from './types'
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -126,15 +127,35 @@ describe('W05-13 alias writes', () => {
 })
 
 describe('W05-13 preview (C7 contract)', () => {
-  it('W05-13: previewModelAlias sends {alias, consumer_id} or {role}', async () => {
+  // RC-D S2 (W19 decision, contract of C7 RCD-c7-cli-preview-S1 §Übergaben
+  // C5, binding by rc-d-s2-common.md point 1): the alias rides by NAME, the
+  // chain mode REQUIRES consumer_id, the role mode answers primary_model as a
+  // string ('' = nothing offered). The S1 test sent {alias: <id>} and read a
+  // single mixed answer — replaced by one test per mode.
+  it('W05-13: previewAliasChain sends {alias: <name>, consumer_id} and returns the chain answer', async () => {
     const mock = stubFetch(
-      jsonResponse(200, { success: true, alias: 'a-1', scope: null, required_sensitivity: 'credentials', chain: [], omitted: [], primary_model: null }),
-      jsonResponse(200, { success: true, alias: null, scope: null, required_sensitivity: 'credentials', chain: [], omitted: [], primary_model: 'qwen38-27b' }),
+      jsonResponse(200, {
+        success: true,
+        consumer_id: 'c-1',
+        alias: { id: 'a-1', name: 'chat', kind: 'chat', role: 'chat', scope: '_global', sensitivity: 'credentials' },
+        op: 'chat',
+        required_sensitivity: 'credentials',
+        scope: 'home',
+        lane: 'bulk',
+        chain: [{ backend: 'spark-chat', locality: 'lan', provider_class: 'generic', billing: 'free', trust: 'full-trust', priority: 100 }],
+        excluded: [],
+        notes: ['body_scan_may_raise'],
+      }),
     )
-    await sent('W05-13: previewModelAlias', () => previewModelAlias({ alias: 'a-1', consumer_id: 'c-1' }))
-    const res = await sent('W05-13: previewModelAlias', () => previewModelAlias({ role: 'chat' }))
-    expect(sentBody(mock)).toEqual({ action: 'model-alias-preview', data: { alias: 'a-1', consumer_id: 'c-1' } })
-    expect(JSON.parse(String((mock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ action: 'model-alias-preview', data: { role: 'chat' } })
+    const res = await sent('W05-13: previewAliasChain', () => previewAliasChain({ alias: 'chat', consumer_id: 'c-1' }))
+    expect(sentBody(mock), 'W05-13: chain mode request').toEqual({ action: 'model-alias-preview', data: { alias: 'chat', consumer_id: 'c-1' } })
+    expect(res.chain[0]?.backend).toBe('spark-chat')
+  })
+
+  it('W05-13: poolPrimaryModel sends {role} and returns primary_model', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, role: 'chat', primary_model: 'qwen38-27b' }))
+    const res = await sent('W05-13: poolPrimaryModel', () => poolPrimaryModel({ role: 'chat' }))
+    expect(sentBody(mock), 'W05-13: role mode request').toEqual({ action: 'model-alias-preview', data: { role: 'chat' } })
     expect(res.primary_model).toBe('qwen38-27b')
   })
 })

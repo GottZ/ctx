@@ -10,7 +10,9 @@
 //         the confirmed request carries confirm_sensitivity_downgrade
 //   E13-5 "Suggest from pool" drafts only enabled:false aliases
 //   E13-6 a tenant-admin never gets the pool suggestion or the preview
-//   E13-7 server-admin chain preview marks external rows
+//   E13-7 server-admin chain preview through a picked consumer marks external
+//         rows and lists the excluded ones (C7 contract: alias by name,
+//         consumer_id required — RC-D S2 alignment, W19 decision in the S2 report)
 //   E13-8 a 422 `fields` entry lands at its field
 // RC-D S1: red against the stub page.
 
@@ -133,13 +135,29 @@ test.describe('gateway models W05-13 alias catalog (RC-D C5)', () => {
     expect(calls(session, 'model-alias-preview'), 'never fired').toEqual([])
   })
 
-  test('gateway models E13-7: the server-admin chain preview marks external rows', async ({ page }) => {
+  test('gateway models E13-7: the server-admin chain preview runs through a picked consumer and marks external rows', async ({ page }) => {
+    // RC-D S2 (W19): the C7 contract makes the consumer mandatory — the S1 test
+    // clicked the preview and expected a chain at once; now a consumer is picked
+    // first, the request carries the alias NAME and the consumer id.
     const session = await open(page, { role: 'server-admin' })
     await rowOf(page, '_global', 'chat').getByRole('button', { name: 'Preview chain of chat' }).click()
-    const chain = page.locator('[data-testid="alias-preview"]')
-    await expect(chain, 'W05-13: the chain renders').toContainText('spark-chat')
-    await expect(chain.locator('[data-locality="external"]'), 'external rows are marked').toContainText('openrouter')
-    expect(calls(session, 'model-alias-preview').map((b) => b.data), 'C7 request shape').toEqual([{ alias: aliasId('_global', 'chat') }])
+    const panel = page.locator('[data-testid="alias-preview"]')
+    await expect(panel, 'W05-13: the preview panel opens').toBeVisible()
+    expect(calls(session, 'model-alias-preview'), 'no preview before a consumer is picked').toEqual([])
+    const picker = panel.getByLabel('consumer', { exact: true })
+    // nightly-embed takes public prompts: the external row stays in the chain
+    await picker.selectOption({ label: 'nightly-embed (acme)' })
+    await panel.getByRole('button', { name: 'Run preview' }).click()
+    await expect(panel, 'W05-13: the chain renders').toContainText('spark-chat')
+    await expect(panel.locator('[data-locality="external"]'), 'external rows are marked').toContainText('openrouter')
+    expect(calls(session, 'model-alias-preview').map((b) => b.data), 'C7 request shape: alias by name + consumer').toEqual([
+      { alias: 'chat', consumer_id: '0190000000007000800000000000c0a4' },
+    ])
+    // ci-chat sits at credentials: the external row moves to `excluded` with its reason
+    await picker.selectOption({ label: 'ci-chat (acme)' })
+    await panel.getByRole('button', { name: 'Run preview' }).click()
+    await expect(panel.locator('[data-testid="preview-excluded"]'), 'excluded rows carry the reason').toContainText('openrouter')
+    await expect(panel.locator('[data-testid="preview-chain"] [data-locality="external"]'), 'no external row in this chain').toHaveCount(0)
   })
 
   test('gateway models E13-8: a 422 fields entry lands at its field', async ({ page }) => {

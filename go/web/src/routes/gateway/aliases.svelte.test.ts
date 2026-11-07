@@ -5,10 +5,16 @@
 // model-alias-preview {role} per pool role and drafts ONLY enabled:false
 // aliases — none for an empty role, none for a name the _global catalog
 // already holds; a refusal lands on actionError AND rethrows.
+//
+// RC-D S2 (W19 decision, C7 contract RCD-c7-cli-preview-S1 §Übergaben C5,
+// binding by rc-d-s2-common.md point 1): the preview api splits into
+// previewChain {alias: <name>, consumer_id} and rolePrimary {role} ⇒
+// primary_model ('' = none). The fake api and the loadPreview call follow;
+// every assertion of S1 keeps its meaning.
 
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../lib/api'
-import type { ModelAliasCreateSpec, ModelAliasListResponse, ModelAliasPreviewRequest, ModelAliasPreviewResult, ModelAliasUpdateSpec, ModelAliasWriteResult } from '../../lib/api/types'
+import type { AliasChainPreviewRequest, AliasRolePreviewRequest, ChainPreviewAnswer, ModelAliasCreateSpec, ModelAliasListResponse, ModelAliasUpdateSpec, ModelAliasWriteResult, RoleSuggestionAnswer } from '../../lib/api/types'
 import { AliasesModel } from './aliases.svelte'
 import { aliasOf } from './forms.fixtures'
 
@@ -16,7 +22,7 @@ const G_CHAT = aliasOf('a-g-chat', '_global', 'chat', { writable: false })
 const H_CHAT = aliasOf('a-h-chat', 'home', 'chat')
 const QWEN = aliasOf('a-g-qwen', '_global', 'qwen38-27b', { writable: true })
 
-function fakeApi(rows = [G_CHAT, H_CHAT], primaries: Record<string, string | null> = { chat: 'qwen38-27b', embed: 'qwen3-embedding-8b', rerank: null }) {
+function fakeApi(rows = [G_CHAT, H_CHAT], primaries: Record<string, string> = { chat: 'qwen38-27b', embed: 'qwen3-embedding-8b', rerank: '' }) {
   const list = vi.fn(async (): Promise<ModelAliasListResponse> => ({ success: true, model_aliases: rows, count: rows.length }))
   const create = vi.fn(async (spec: ModelAliasCreateSpec): Promise<ModelAliasWriteResult> => ({
     success: true,
@@ -26,16 +32,20 @@ function fakeApi(rows = [G_CHAT, H_CHAT], primaries: Record<string, string | nul
     success: true,
     model_alias: { ...(rows.find((r) => r.id === id) ?? H_CHAT), ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}) },
   }))
-  const preview = vi.fn(async (req: ModelAliasPreviewRequest): Promise<ModelAliasPreviewResult> => ({
+  const preview = vi.fn(async (req: AliasChainPreviewRequest): Promise<ChainPreviewAnswer> => ({
     success: true,
-    alias: req.alias ?? null,
-    scope: null,
+    consumer_id: req.consumer_id,
+    alias: { id: rows.find((r) => r.name === req.alias)?.id ?? '', name: req.alias, kind: 'chat', role: 'chat', scope: 'home', sensitivity: 'credentials' },
+    op: 'chat',
     required_sensitivity: 'credentials',
+    scope: 'home',
+    lane: 'bulk',
     chain: [],
-    omitted: [],
-    primary_model: req.role !== undefined ? (primaries[req.role] ?? null) : null,
+    excluded: [],
+    notes: [],
   }))
-  return { api: { list, create, update, preview }, list, create, update, preview }
+  const rolePrimary = vi.fn(async (req: AliasRolePreviewRequest): Promise<RoleSuggestionAnswer> => ({ success: true, role: req.role, primary_model: primaries[req.role] ?? '' }))
+  return { api: { list, create, update, previewChain: preview, rolePrimary }, list, create, update, preview, rolePrimary }
 }
 
 describe('W05-13 AliasesModel', () => {
@@ -74,7 +84,7 @@ describe('W05-13 AliasesModel', () => {
     const out = await m.suggestFromPool().catch((e: unknown) => {
       throw new Error(`W05-13 gate: suggestFromPool must draft from the pool — it failed: ${String(e)}`)
     })
-    expect(f.preview.mock.calls.map((c) => c[0]), 'W05-13: one role preview per pool role').toEqual([{ role: 'chat' }, { role: 'embed' }, { role: 'rerank' }])
+    expect(f.rolePrimary.mock.calls.map((c) => c[0]), 'W05-13: one role preview per pool role').toEqual([{ role: 'chat' }, { role: 'embed' }, { role: 'rerank' }])
     // chat's primary qwen38-27b is already a _global alias ⇒ skipped; rerank has none ⇒ skipped
     expect(f.create.mock.calls.map((c) => c[0]), 'W05-13 gate: only disabled drafts').toEqual([
       { name: 'qwen3-embedding-8b', kind: 'embedding', role: 'embed', enabled: false },
@@ -85,7 +95,7 @@ describe('W05-13 AliasesModel', () => {
   })
 
   it('W05-13: an empty pool creates nothing (fail-closed)', async () => {
-    const f = fakeApi([G_CHAT], { chat: null, embed: null, rerank: null })
+    const f = fakeApi([G_CHAT], { chat: '', embed: '', rerank: '' })
     const m = new AliasesModel(f.api)
     await m.load()
     expect(f.list, 'positive control: the catalog was read').toHaveBeenCalledTimes(1)
@@ -107,12 +117,12 @@ describe('W05-13 AliasesModel', () => {
     expect(m.busyId).toBeNull()
   })
 
-  it('W05-13: loadPreview keeps the C7 answer per alias id', async () => {
+  it('W05-13: loadPreview keeps the C7 answer per alias id (request by name through one consumer)', async () => {
     const f = fakeApi()
     const m = new AliasesModel(f.api)
     await m.load()
-    await m.loadPreview('a-h-chat', 'c-ci')
-    expect(f.preview.mock.calls[0]?.[0], 'preview request').toEqual({ alias: 'a-h-chat', consumer_id: 'c-ci' })
-    expect(m.preview['a-h-chat']?.alias, 'answer stored under the alias id').toBe('a-h-chat')
+    await m.loadPreview(H_CHAT, 'c-ci')
+    expect(f.preview.mock.calls[0]?.[0], 'preview request').toEqual({ alias: 'chat', consumer_id: 'c-ci' })
+    expect(m.preview['a-h-chat']?.consumer_id, 'answer stored under the alias id').toBe('c-ci')
   })
 })

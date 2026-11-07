@@ -8,44 +8,41 @@
 //   - update(id, patch): never name / kind / scope / tenant_id (the patch type
 //     has no field for them); reload after success;
 //   - suggestFromPool(): server-admin — per pool role model-alias-preview
-//     {role} ⇒ primary_model; a non-null primary that is not yet a _global
+//     {role} ⇒ primary_model; a non-empty primary that is not yet a _global
 //     alias becomes a DRAFT via model-alias-create {enabled:false}; an empty
 //     pool creates nothing (fail-closed, E-02-13);
-//   - loadPreview(aliasId, consumerId?): model-alias-preview (server-admin) —
-//     the chain per row in `preview`;
+//   - loadPreview(row, consumerId): model-alias-preview chain mode
+//     (server-admin; C7 contract: the alias by NAME through ONE consumer) —
+//     the answer per row id in `preview`;
 //   - refusals: busyId / actionError + rethrow (the dialog keeps the error),
 //     exactly like ConsumersModel.#mutate.
-//
-// RC-D S1: contract stub — the store delivers EMPTY data and every mutation
-// fails closed. aliases.svelte.test.ts is red against it; S2 implements.
 
-import { ApiError } from '../../lib/api'
-import { createModelAlias, listModelAliases, previewModelAlias, updateModelAlias } from '../../lib/api/modelapi'
-import type { ModelAliasCreateSpec, ModelAliasPreviewResult, ModelAliasUpdateSpec, ModelAliasView, ModelAliasWriteResult } from '../../lib/api/types'
+import { toApiError, type ApiError } from '../../lib/api'
+import { createModelAlias, listModelAliases, poolPrimaryModel, previewAliasChain, updateModelAlias } from '../../lib/api/modelapi'
+import type { ChainPreviewAnswer, ModelAliasCreateSpec, ModelAliasUpdateSpec, ModelAliasView, ModelAliasWriteResult } from '../../lib/api/types'
 import type { ResourceStatus } from '../../lib/resource.svelte'
+import { POOL_ROLES, suggestDraft } from './catalog'
 
 export interface AliasesApi {
   list: typeof listModelAliases
   create: typeof createModelAlias
   update: typeof updateModelAlias
-  preview: typeof previewModelAlias
+  previewChain: typeof previewAliasChain
+  rolePrimary: typeof poolPrimaryModel
 }
 
 const DEFAULT_API: AliasesApi = {
   list: listModelAliases,
   create: createModelAlias,
   update: updateModelAlias,
-  preview: previewModelAlias,
+  previewChain: previewAliasChain,
+  rolePrimary: poolPrimaryModel,
 }
 
 /** What suggestFromPool did: the drafts created and the roles skipped (no primary / already present). */
 export interface SuggestOutcome {
   created: ModelAliasView[]
   skipped: string[]
-}
-
-function notWired(what: string): ApiError {
-  return new ApiError(503, 'service_unavailable', `${what} is not wired yet (RC-D S1 contract stub)`)
 }
 
 export class AliasesModel {
@@ -55,37 +52,92 @@ export class AliasesModel {
   /** The alias id a write is in flight for ('' = a create / suggest). */
   busyId = $state<string | null>(null)
   actionError = $state<string | null>(null)
-  /** model-alias-preview answer per alias id. */
-  preview = $state<Record<string, ModelAliasPreviewResult>>({})
+  /** model-alias-preview chain answer per alias id. */
+  preview = $state<Record<string, ChainPreviewAnswer>>({})
+  /** A failed preview per alias id (403 / 400 / consumer not found). */
+  previewError = $state<Record<string, string>>({})
 
   #api: AliasesApi
+  #seq = 0
 
-  constructor(api: AliasesApi = DEFAULT_API) {
-    this.#api = api
+  constructor(api: Partial<AliasesApi> = {}) {
+    this.#api = { ...DEFAULT_API, ...api }
   }
 
-  /** Load the visible catalog. S1 stub: empty data, never calls the server. */
+  /** Load the visible catalog (model-alias-list). A stale answer never overwrites a newer one. */
   async load(): Promise<void> {
-    void this.#api
-    this.aliases = []
-    this.status = 'ready'
+    const seq = ++this.#seq
+    if (this.status !== 'ready') this.status = 'loading'
+    try {
+      const res = await this.#api.list()
+      if (seq !== this.#seq) return
+      this.aliases = res.model_aliases
+      this.loadError = null
+      this.status = 'ready'
+    } catch (err) {
+      if (seq !== this.#seq) return
+      this.loadError = toApiError(err)
+      this.status = 'error'
+    }
   }
 
-  /** Create an alias (enabled always sent). S1 stub: fails closed. */
-  async create(_spec: ModelAliasCreateSpec): Promise<ModelAliasWriteResult> {
-    throw notWired('model-alias-create')
+  /** Create an alias (`enabled` passes through untouched); reload on success. */
+  async create(spec: ModelAliasCreateSpec): Promise<ModelAliasWriteResult> {
+    return this.#mutate('', () => this.#api.create(spec))
   }
 
-  /** Update an alias by id (immutable fields never sent). S1 stub: fails closed. */
-  async update(_id: string, _patch: ModelAliasUpdateSpec): Promise<ModelAliasWriteResult> {
-    throw notWired('model-alias-update')
+  /** Update an alias by id (the patch type has no name / kind / scope); reload on success. */
+  async update(id: string, patch: ModelAliasUpdateSpec): Promise<ModelAliasWriteResult> {
+    return this.#mutate(id, () => this.#api.update(id, patch))
   }
 
-  /** Draft disabled aliases from the pool's primary models (server-admin). S1 stub: fails closed. */
+  /**
+   * Draft DISABLED aliases from the pool's primary models (server-admin): one
+   * role preview per pool role, in order; a role without a primary, or whose
+   * primary already is a _global alias, is skipped; one reload at the end.
+   */
   async suggestFromPool(): Promise<SuggestOutcome> {
-    throw notWired('suggest from pool')
+    return this.#mutate('', async () => {
+      const created: ModelAliasView[] = []
+      const skipped: string[] = []
+      for (const { role, kind } of POOL_ROLES) {
+        const ans = await this.#api.rolePrimary({ role })
+        const draft = suggestDraft(role, kind, ans.primary_model)
+        if (draft === null || this.aliases.some((a) => a.scope === '_global' && a.name === draft.name)) {
+          skipped.push(role)
+          continue
+        }
+        const res = await this.#api.create({ ...draft, enabled: false })
+        created.push(res.model_alias)
+      }
+      return { created, skipped }
+    })
   }
 
-  /** Preview the chain of one alias (optionally through a consumer). S1 stub: no-op. */
-  async loadPreview(_aliasId: string, _consumerId?: string): Promise<void> {}
+  /** Preview the /v1 chain of `row` (by name) through one consumer (server-admin). */
+  async loadPreview(row: ModelAliasView, consumerId: string): Promise<void> {
+    const { [row.id]: _drop, ...rest } = this.previewError
+    this.previewError = rest
+    try {
+      const ans = await this.#api.previewChain({ alias: row.name, consumer_id: consumerId })
+      this.preview = { ...this.preview, [row.id]: ans }
+    } catch (err) {
+      this.previewError = { ...this.previewError, [row.id]: toApiError(err).message }
+    }
+  }
+
+  async #mutate<T>(id: string, run: () => Promise<T>): Promise<T> {
+    this.busyId = id
+    this.actionError = null
+    try {
+      const res = await run()
+      await this.load()
+      return res
+    } catch (err) {
+      this.actionError = toApiError(err).message
+      throw err
+    } finally {
+      this.busyId = null
+    }
+  }
 }

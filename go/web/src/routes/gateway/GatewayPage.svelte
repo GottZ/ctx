@@ -23,6 +23,13 @@
   //
   // Every status shown is the server's verdict (B-11): the page renders
   // consumer.status / key.status and never derives one from expires_at.
+  //
+  // RC-D C5: per row "Edit policy" (W05-07, ConsumerEditDialog — lazy chunk,
+  // field tiers mirrored, never on a ctx-peer row below server-admin), "Rotate
+  // key" (W05-08, RotateDialog — lazy chunk, leak = grace 0 preselected, the
+  // second reveal-once path) and on a rotating consumer's predecessor "End
+  // grace period now" — a danger confirm, then model-key-revoke with THAT
+  // key's id; the successor stays valid.
   import { untrack } from 'svelte'
   import { session } from '../../lib/auth.svelte'
   import { CONSUMER_STATUSES, DEFAULT_CONSUMER_STATUSES } from '../../lib/api/modelapi'
@@ -32,6 +39,8 @@
   import ConsumerRow from './ConsumerRow.svelte'
   import { ConsumersModel } from './consumers.svelte'
   import { STATUS_LABEL, cancelledText } from './format'
+  import { canEditPolicy } from './policy'
+  import { canRotate } from './rotate'
   import { canReactivate, deactivateTyped, hintTail } from './rows'
 
   const model = new ConsumersModel()
@@ -84,8 +93,16 @@
   // The create dialog is its own lazy chunk: only a click on "+ New consumer"
   // loads it (the list's first load stays within the default chunk budget).
   const loadCreateDialog = () => import('./ConsumerCreateDialog.svelte')
+  // RC-D C5: the edit and rotate dialogs are lazy chunks of their own too.
+  const loadEditDialog = () => import('./ConsumerEditDialog.svelte')
+  const loadRotateDialog = () => import('./RotateDialog.svelte')
+  let editing = $state<ConsumerView | null>(null)
+  let rotating = $state<ConsumerView | null>(null)
+  const rotationGraceS = $derived(session.whoami?.capabilities?.model_api?.rotation_grace_s ?? null)
+  const tierCaps = $derived({ serverAdmin, mintModelKeys: session.caps.mintModelKeys })
   type Pending =
     | { kind: 'revoke'; consumer: ConsumerView; key: KeyView }
+    | { kind: 'endgrace'; consumer: ConsumerView; key: KeyView }
     | { kind: 'deactivate'; consumer: ConsumerView }
     | { kind: 'reactivate'; consumer: ConsumerView }
   // The row awaiting confirmation (null = no dialog); a fresh ConfirmDialog
@@ -107,7 +124,11 @@
   async function confirmPending(): Promise<void> {
     const p = pending
     if (p === null) return
-    if (p.kind === 'revoke') {
+    if (p.kind === 'endgrace') {
+      // the predecessor's OWN key id — never the consumer, never the successor (B-20)
+      const res = await model.revokeKey(p.key.id)
+      toast = `Grace period of key ${p.key.hint} of ${p.consumer.label} ended — the old key is revoked, the new key stays valid. ${cancelledText(res.cancelled_inflight)}`
+    } else if (p.kind === 'revoke') {
       const res = await model.revokeKey(p.key.id)
       toast = `Key ${p.key.hint} of ${p.consumer.label} revoked — new requests are refused. ${cancelledText(res.cancelled_inflight)}`
     } else if (p.kind === 'deactivate') {
@@ -266,6 +287,17 @@
               onrevoke={(k) => request({ kind: 'revoke', consumer: c, key: k })}
               ondeactivate={() => request({ kind: 'deactivate', consumer: c })}
               onreactivate={() => request({ kind: 'reactivate', consumer: c })}
+              editable={canEditPolicy(c, tierCaps)}
+              rotatable={canRotate(c, tierCaps)}
+              onedit={() => {
+                toast = null
+                editing = c
+              }}
+              onrotate={() => {
+                toast = null
+                rotating = c
+              }}
+              onendgrace={(k) => request({ kind: 'endgrace', consumer: c, key: k })}
             />
           {/each}
         </Table>
@@ -294,7 +326,41 @@
   {/await}
 {/if}
 
-{#if pending?.kind === 'revoke'}
+{#if editing !== null}
+  {#await loadEditDialog()}
+    <p class="sr-status" role="status" aria-busy="true">loading the edit dialog…</p>
+  {:then { default: EditDialog }}
+    <EditDialog
+      {model}
+      consumer={editing}
+      onsaved={(label) => (toast = `Policy of ${label} saved.`)}
+      onclose={() => (editing = null)}
+    />
+  {:catch err}
+    <p class="action-error" role="alert">edit dialog unavailable: {err instanceof Error ? err.message : String(err)}</p>
+  {/await}
+{/if}
+
+{#if rotating !== null}
+  {#await loadRotateDialog()}
+    <p class="sr-status" role="status" aria-busy="true">loading the rotate dialog…</p>
+  {:then { default: RotateDialog }}
+    <RotateDialog {model} consumer={rotating} {rotationGraceS} onclose={() => (rotating = null)} />
+  {:catch err}
+    <p class="action-error" role="alert">rotate dialog unavailable: {err instanceof Error ? err.message : String(err)}</p>
+  {/await}
+{/if}
+
+{#if pending?.kind === 'endgrace'}
+  <ConfirmDialog
+    danger
+    title="End grace period"
+    confirmLabel="End grace period"
+    message={`End the grace period of key ${pending.key.hint} of "${pending.consumer.label}" now? The old key is revoked at once. The new key stays valid.`}
+    onconfirm={confirmPending}
+    oncancel={() => (pending = null)}
+  />
+{:else if pending?.kind === 'revoke'}
   <ConfirmDialog
     danger
     title="Revoke key"

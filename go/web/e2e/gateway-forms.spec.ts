@@ -215,6 +215,11 @@ test.describe('gateway forms W05-08 rotation (RC-D C5)', () => {
     await end.click()
     const confirm = page.getByRole('dialog', { name: 'End grace period' })
     await expect(confirm).toContainText('The new key stays valid')
+    // RC-D S2 (W19): a danger ConfirmDialog arms on the first click and commits
+    // on the second (S1 decision 3: danger, no typed characters) — the S1 test
+    // clicked once; the second click is the commit, nothing is sent before it.
+    await confirm.getByRole('button', { name: 'End grace period', exact: true }).click()
+    expect(bodies(session, 'model-key-revoke'), 'the first click only arms').toEqual([])
     await confirm.getByRole('button', { name: 'End grace period', exact: true }).click()
     await expect(confirm).toHaveCount(0)
     const revokes = bodies(session, 'model-key-revoke')

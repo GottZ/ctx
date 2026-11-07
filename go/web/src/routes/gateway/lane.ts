@@ -12,8 +12,6 @@
 //                           consumer both stay selectable (urgent → bulk lowers)
 //   tenant-admin, ctx-peer  locked (peers are managed by the server-admin)
 //
-// RC-D S1: contract stub — fail-closed (no option, nothing is a lane). The
-// tests in lane.test.ts are red against it; S2 implements.
 
 import type { ExternalLane } from '../../lib/api/types'
 
@@ -25,19 +23,32 @@ export interface LaneOption {
   note?: string
 }
 
-/** Every lane of the closed vocabulary, in display order (urgent first). S1 stub: empty. */
-export const LANE_OPTIONS: readonly ExternalLane[] = []
+/**
+ * Exhaustiveness anchor: a lane added to (or removed from) ExternalLane breaks
+ * this object at compile time, so LANE_OPTIONS can never drift from the type.
+ */
+const LANE_SET: Record<ExternalLane, true> = { urgent: true, bulk: true }
 
-/** True iff `v` is a lane of the closed vocabulary. S1 stub: nothing is. */
-export function isExternalLane(_v: unknown): _v is ExternalLane {
-  return false
+/** Every lane of the closed vocabulary, in display order (urgent first). */
+export const LANE_OPTIONS: readonly ExternalLane[] = (['urgent', 'bulk'] as const).filter((l) => LANE_SET[l])
+
+/** True iff `v` is a lane of the closed vocabulary (exact string, no trimming, no case folding). */
+export function isExternalLane(v: unknown): v is ExternalLane {
+  return typeof v === 'string' && Object.prototype.hasOwnProperty.call(LANE_SET, v)
 }
 
 /**
  * The options of the lane select for one consumer as the caller may set them.
  * `current` is the consumer's admission_lane as the server answered it (a bare
- * string — an unknown value is shown, never offered). S1 stub: no option.
+ * string). Raising = picking `urgent` while the current lane is not `urgent`
+ * (the handler's serverAdminOnly rule) — an unknown current value therefore
+ * only allows `bulk`.
  */
-export function laneOptions(_serverAdmin: boolean, _current: string, _peer: boolean): LaneOption[] {
-  return []
+export function laneOptions(serverAdmin: boolean, current: string, peer: boolean): LaneOption[] {
+  return LANE_OPTIONS.map((value): LaneOption => {
+    if (serverAdmin) return { value, disabled: false }
+    if (peer) return { value, disabled: true, note: 'managed by the server-admin' }
+    if (value === 'urgent' && current !== 'urgent') return { value, disabled: true, note: 'server-admin only' }
+    return { value, disabled: false }
+  })
 }

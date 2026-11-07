@@ -13,8 +13,15 @@
   // Selectors for the live isolation probe (W05-18) are data-testid:
   // consumer-row, consumer-label, key-revoke, consumer-deactivate,
   // consumer-reactivate.
+  //
+  // RC-D C5: the key cell is KeyChain (W05-08 — "Rotate key" where
+  // rotate.canRotate allows, "End grace period now" on the predecessor only),
+  // and the actions cell carries "Edit policy" (W05-07) where
+  // policy.canEditPolicy allows — never on a ctx-peer row below server-admin
+  // (data-testid consumer-edit).
   import type { ConsumerView, KeyView } from '../../lib/api/types'
-  import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute, keyTone } from './format'
+  import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute } from './format'
+  import KeyChain from './KeyChain.svelte'
 
   let {
     consumer: c,
@@ -24,6 +31,11 @@
     onrevoke,
     ondeactivate,
     onreactivate,
+    editable = false,
+    rotatable = false,
+    onedit = () => {},
+    onrotate = () => {},
+    onendgrace = () => {},
   }: {
     consumer: ConsumerView
     /** server-admin view: the tenant column */
@@ -35,6 +47,14 @@
     onrevoke: (k: KeyView) => void
     ondeactivate: () => void
     onreactivate: () => void
+    /** policy.canEditPolicy(c, caps) — RC-D W05-07 */
+    editable?: boolean
+    /** rotate.canRotate(c, caps) — RC-D W05-08 */
+    rotatable?: boolean
+    onedit?: () => void
+    onrotate?: () => void
+    /** the predecessor key whose grace period ends now */
+    onendgrace?: (k: KeyView) => void
   } = $props()
 </script>
 
@@ -49,27 +69,7 @@
   </td>
   {#if crossTenant}<td><span class="chip">{c.tenant_slug}</span></td>{/if}
   <td class="keys">
-    {#if c.keys.length === 0}
-      <span class="dim">no live key</span>
-    {:else}
-      <ul>
-        {#each c.keys as k (k.id)}
-          <li>
-            <code class="hint">{k.hint}</code>
-            <span class="badge {keyTone(k.status)}" data-key-status>{k.status}</span>
-            <span class="when">{k.expires_at ? `expires ${fmtDay(k.expires_at)}` : 'no expiry'}</span>
-            <button
-              type="button"
-              class="act danger"
-              data-testid="key-revoke"
-              aria-label={`Revoke key ${k.hint}`}
-              disabled={busy}
-              onclick={() => onrevoke(k)}>Revoke</button
-            >
-          </li>
-        {/each}
-      </ul>
-    {/if}
+    <KeyChain consumer={c} {busy} {rotatable} {onrevoke} {onendgrace} {onrotate} />
   </td>
   <td class="when">
     {#if c.last_used_at}
@@ -81,6 +81,16 @@
   </td>
   <td class="when">{fmtDay(c.created_at)}</td>
   <td class="actions">
+    {#if editable}
+      <button
+        type="button"
+        class="act"
+        data-testid="consumer-edit"
+        aria-label={`Edit policy of ${c.label}`}
+        disabled={busy}
+        onclick={onedit}>Edit</button
+      >
+    {/if}
     {#if c.active}
       <button
         type="button"
@@ -152,25 +162,6 @@
   .badge.peer {
     color: var(--accent);
     border-color: var(--accent);
-  }
-  .keys ul {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-  .keys li {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    white-space: nowrap;
-  }
-  .hint {
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
   }
   .dim {
     color: var(--text-faint);

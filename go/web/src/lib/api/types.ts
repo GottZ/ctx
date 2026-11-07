@@ -1673,40 +1673,74 @@ export interface ModelAliasWriteResult {
 }
 
 /**
- * model-alias-preview request (W05-04, server-admin; C7 owns the action).
- * Either an alias (its id) — optionally seen through a consumer — or a pool
- * role (the "suggest from pool" source: primary_model of that role).
+ * model-alias-preview, chain mode (W05-04, server-admin; C7 owns the action —
+ * contract RCD-c7-cli-preview-S1 §Vertrag): the alias by NAME as the consumer
+ * resolves it (a tenant alias shadows the _global one), seen through ONE
+ * consumer — consumer_id is required (the /v1 chain is a function of the
+ * consumer: tenant gate, egress policy, lane, floor, tenant overlay).
  */
-export interface ModelAliasPreviewRequest {
-  alias?: string
-  consumer_id?: string
-  role?: string
+export interface AliasChainPreviewRequest {
+  alias: string
+  consumer_id: string
 }
 
-/** One row of the previewed chain — the /v1 chain build without wire contact. */
-export interface AliasPreviewRow {
+/** model-alias-preview, role mode — "Suggest from pool": the pool's primary model of a role. */
+export interface AliasRolePreviewRequest {
+  role: 'chat' | 'embed' | 'rerank'
+}
+
+/** One row of the previewed chain — the /v1 chain build without wire contact (oai.PreviewRow). */
+export interface PreviewRow {
   backend: string
-  locality: 'internal' | 'external'
+  /** local | lan | external (backends.Locality*) — `external` rows are marked in the UI. */
+  locality: string
   provider_class: string
-  billing: string
+  billing: 'free' | 'metered' | 'unmetered'
+  trust: string
+  priority: number
 }
 
-/** A pool row the chain build dropped, and why (sensitivity, tenant gate, billing, admission). */
-export interface AliasPreviewOmitted {
+/** A pool row the chain build dropped, at which stage, and why (oai.PreviewExclusion). */
+export interface PreviewExclusion {
   backend: string
+  stage: 'pool' | 'gateway_wire' | 'federation' | 'export' | 'tenant_quota' | 'egress' | 'external_offer'
   reason: string
 }
 
-/** model-alias-preview answer (C7 contract; mocked in C5 until S3). */
-export interface ModelAliasPreviewResult {
+/** The alias the preview resolved (oai.PreviewAlias); null = alias_not_resolved. */
+export interface PreviewAlias {
+  id: string
+  name: string
+  kind: string
+  role: string
+  scope: string
+  sensitivity: string
+}
+
+/**
+ * model-alias-preview chain answer (oai.ChainPreview). chain / excluded /
+ * notes are never null; op and required_sensitivity are '' without an alias,
+ * lane '' when the chain ends before the planner. notes e.g.
+ * alias_not_resolved, alias_not_granted, no_eligible_backend,
+ * tenant_quota_exhausted, lane_not_offered, chain_not_offered,
+ * body_scan_may_raise, peer_hop_not_modeled.
+ */
+export interface ChainPreviewAnswer {
   success: true
-  /** The alias id previewed; null in role mode. */
-  alias: string | null
-  /** The consumer's tenant_scope the chain was built for; null = _global only. */
-  scope: string | null
-  required_sensitivity: 'credentials' | 'personal' | 'internal' | 'public'
-  chain: AliasPreviewRow[]
-  omitted: AliasPreviewOmitted[]
-  /** Role mode only: Pool.PrimaryModel of the role; null = nothing offered (fail-closed). */
-  primary_model: string | null
+  consumer_id: string
+  alias: PreviewAlias | null
+  op: '' | 'chat' | 'embed' | 'rerank'
+  required_sensitivity: string
+  scope: string
+  lane: string
+  chain: PreviewRow[]
+  excluded: PreviewExclusion[]
+  notes: string[]
+}
+
+/** model-alias-preview role answer: primary_model '' = the pool offers nothing for the role (fail-closed). */
+export interface RoleSuggestionAnswer {
+  success: true
+  role: 'chat' | 'embed' | 'rerank'
+  primary_model: string
 }

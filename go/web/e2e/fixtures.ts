@@ -732,7 +732,9 @@ const CONSUMERS: MockConsumer[] = [
     keys_total: 2,
   },
   { id: '0190000000007000800000000000c0a3', tenant: 'A', label: SENTINEL.A, kind: 'app', status: 'expiring', created_at: '2026-06-15T09:00:00Z', last_used_at: null, keys: [{ hint: 'ctxm_…Xk4d', status: 'expiring', created_at: '2026-06-15T09:00:00Z', expires_at: '2026-07-05T09:00:00Z', last_used_at: null }], keys_total: 1 },
-  { id: '0190000000007000800000000000c0a4', tenant: 'A', label: 'nightly-embed', kind: 'app', status: 'no_key', created_at: '2026-06-10T09:00:00Z', last_used_at: '2026-06-01T03:00:00Z', keys: [], keys_total: 1 },
+  // RC-D C5 (W05-13): nightly-embed takes public prompts, so the chain preview
+  // through it keeps the external row (ci-chat at credentials drops it).
+  { id: '0190000000007000800000000000c0a4', tenant: 'A', label: 'nightly-embed', kind: 'app', status: 'no_key', created_at: '2026-06-10T09:00:00Z', last_used_at: '2026-06-01T03:00:00Z', keys: [], keys_total: 1, prompt_sensitivity: 'public' },
   { id: '0190000000007000800000000000c0a5', tenant: 'A', label: 'legacy-app', kind: 'app', status: 'inactive', created_at: '2026-05-01T09:00:00Z', last_used_at: null, keys: [], keys_total: 1 },
   { id: '0190000000007000800000000000c0b1', tenant: 'B', label: 'globex-app', kind: 'app', status: 'active', created_at: '2026-06-22T09:00:00Z', last_used_at: null, keys: [{ hint: 'ctxm_…Gb1x', status: 'active', created_at: '2026-06-22T09:00:00Z', expires_at: null, last_used_at: null }], keys_total: 1 },
   { id: '0190000000007000800000000000c0b2', tenant: 'B', label: SENTINEL.B, kind: 'app', status: 'active', created_at: '2026-06-12T09:00:00Z', last_used_at: null, keys: [{ hint: 'ctxm_…Sb2y', status: 'active', created_at: '2026-06-12T09:00:00Z', expires_at: '2027-06-12T09:00:00Z', last_used_at: null }], keys_total: 1 },
@@ -1013,13 +1015,19 @@ export const ROTATE_MARKER = 'ctxm_TESTKEY_rotated_once_do_not_persist'
 const ALIAS_FIELDS = new Set(['name', 'kind', 'scope', 'tenant_id', 'role', 'sensitivity', 'policy', 'description', 'enabled', 'confirm_sensitivity_downgrade'])
 const ALIAS_IMMUTABLE = ['name', 'kind', 'scope', 'tenant_id']
 const ALIAS_KINDS = ['chat', 'embedding', 'rerank']
-/** Pool.PrimaryModel per role of the mock pool (model-alias-preview {role}, C7 contract). */
-export const POOL_PRIMARY: Readonly<Record<string, string>> = { chat: 'qwen38-27b', embed: 'qwen3-embedding-8b' }
-/** The previewed chain of the mock pool — one internal row, one external (locality marked). */
-const PREVIEW_CHAIN = [
-  { backend: 'spark-chat', locality: 'internal', provider_class: 'self_hosted', billing: 'none' },
-  { backend: 'openrouter', locality: 'external', provider_class: 'openrouter', billing: 'metered' },
+/** Pool.PrimaryModel per role of the mock pool (model-alias-preview {role}, C7 contract; '' = none). */
+export const POOL_PRIMARY: Readonly<Record<string, string>> = { chat: 'qwen38-27b', embed: 'qwen3-embedding-8b', rerank: '' }
+/**
+ * The mock pool the chain preview walks (C7 oai.PreviewRow shape): one LAN row
+ * with full trust, one external row that serves only prompts at or below
+ * `personal` (trust no-credentials) — so the sensitivity decides whether the
+ * external row is in the chain or in `excluded`.
+ */
+const PREVIEW_POOL = [
+  { row: { backend: 'spark-chat', locality: 'lan', provider_class: 'generic', billing: 'free', trust: 'full-trust', priority: 100 }, maxRank: 0 },
+  { row: { backend: 'openrouter', locality: 'external', provider_class: 'openrouter', billing: 'metered', trust: 'no-credentials', priority: 10 }, maxRank: 1 },
 ]
+const PREVIEW_OP: Record<string, string> = { chat: 'chat', embedding: 'embed', rerank: 'rerank' }
 
 /** cidrsNarrow mirror: every prefix of `next` lies inside some prefix of `stored` (IPv4 only — the mock world). */
 function mockCidrsNarrow(stored: string[] | null, next: string[] | null): boolean {
@@ -1379,19 +1387,54 @@ class GatewayWorld {
     return { status: 200, json: { success: true, model_alias: aliasView(a, true), ...(warnings.length > 0 ? { warnings } : {}) } }
   }
 
-  /** RC-D C5 — model-alias-preview (C7 contract, mocked): server-admin only; role mode ⇒ primary_model. */
+  /**
+   * RC-D C5 — model-alias-preview with the C7 contract (RCD-c7-cli-preview-S1
+   * §Vertrag): server-admin only (403); exactly one mode, unknown fields 400;
+   * role mode {role} ⇒ {role, primary_model} ('' = none); chain mode
+   * {alias: <name>, consumer_id} — consumer_id required (400), unknown
+   * consumer ⇒ 200 {success:false,"consumer not found"} (no oracle); the alias
+   * resolves by NAME in the consumer's scope (a tenant alias shadows the
+   * _global one, ctx-peer ⇒ _global only); required sensitivity = the stricter
+   * of alias and consumer; chain / excluded / notes never null.
+   */
   aliasPreview(role: Role, data: Record<string, unknown> | undefined): MockAnswer {
     if (role !== 'server-admin') return { status: 403, json: { success: false, error: 'admin key required' } }
     const d = data ?? {}
-    if (typeof d.role === 'string') {
-      return { status: 200, json: { success: true, alias: null, scope: null, required_sensitivity: 'credentials', chain: [], omitted: [], primary_model: POOL_PRIMARY[d.role] ?? null } }
+    for (const k of Object.keys(d)) if (k !== 'alias' && k !== 'consumer_id' && k !== 'role') return { status: 400, json: { success: false, error: `invalid data: unknown field "${k}"` } }
+    const roleMode = typeof d.role === 'string'
+    const chainMode = typeof d.alias === 'string'
+    if (roleMode === chainMode) return { status: 400, json: { success: false, error: 'exactly one of alias or role is required' } }
+    if (roleMode) {
+      if (!(d.role === 'chat' || d.role === 'embed' || d.role === 'rerank')) return { status: 400, json: { success: false, error: 'role must be chat, embed or rerank' } }
+      return { status: 200, json: { success: true, role: d.role, primary_model: POOL_PRIMARY[d.role as string] ?? '' } }
     }
-    const a = this.aliasRows.find((x) => x.id === d.alias)
-    if (!a) return { status: 404, json: { success: false, error: 'model alias not found' } }
-    const sens = a.sensitivity ?? 'public'
-    const chain = SENS_RANK[sens] <= SENS_RANK.personal ? PREVIEW_CHAIN.filter((r) => r.locality === 'internal') : PREVIEW_CHAIN
-    const omitted = chain.length < PREVIEW_CHAIN.length ? [{ backend: 'openrouter', reason: `sensitivity ${sens} needs trust full` }] : []
-    return { status: 200, json: { success: true, alias: a.id, scope: a.scope === '_global' ? null : a.scope, required_sensitivity: sens, chain, omitted, primary_model: null } }
+    if (typeof d.consumer_id !== 'string' || d.consumer_id === '') return { status: 400, json: { success: false, error: 'consumer_id is required for a chain preview' } }
+    const c = this.consumers.find((x) => x.id === d.consumer_id)
+    if (!c) return { status: 200, json: { success: false, error: 'consumer not found' } }
+    const name = d.alias as string
+    const scope = c.kind === 'ctx-peer' ? null : (c.tenant_scope ?? null)
+    const a = (scope !== null ? this.aliasRows.find((x) => x.scope === scope && x.name === name) : undefined) ?? this.aliasRows.find((x) => x.scope === '_global' && x.name === name)
+    const base = { success: true, consumer_id: c.id, scope: scope ?? '', chain: [] as unknown[], excluded: [] as unknown[] }
+    if (!a || !a.enabled) {
+      return { status: 200, json: { ...base, alias: null, op: '', required_sensitivity: '', lane: '', notes: ['alias_not_resolved'] } }
+    }
+    const req = Math.min(SENS_RANK[a.sensitivity ?? 'public'] ?? 0, SENS_RANK[c.prompt_sensitivity ?? 'credentials'] ?? 0)
+    const reqName = Object.keys(SENS_RANK).find((k) => SENS_RANK[k] === req) ?? 'credentials'
+    const chain = PREVIEW_POOL.filter((p) => req >= p.maxRank).map((p) => p.row)
+    const excluded = PREVIEW_POOL.filter((p) => req < p.maxRank).map((p) => ({ backend: p.row.backend, stage: 'pool', reason: `trust ${p.row.trust} < required ${reqName}` }))
+    return {
+      status: 200,
+      json: {
+        ...base,
+        alias: { id: a.id, name: a.name, kind: a.kind, role: a.role ?? a.kind, scope: a.scope, sensitivity: a.sensitivity ?? 'public' },
+        op: PREVIEW_OP[a.kind] ?? '',
+        required_sensitivity: reqName,
+        lane: c.admission_lane ?? 'bulk',
+        chain,
+        excluded,
+        notes: chain.length === 0 ? ['no_eligible_backend', 'body_scan_may_raise'] : ['body_scan_may_raise'],
+      },
+    }
   }
 
   aliases(role: Role, tkey: TenantKey): MockAnswer {
