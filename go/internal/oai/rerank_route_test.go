@@ -326,21 +326,27 @@ func TestRerankSubBlocksSticky(t *testing.T) {
 		}
 	})
 	t.Run("without continuation", func(t *testing.T) {
-		e := newRerankEngine(t)
-		rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 200, 1,
-			func(r *chatRig) { r.deps.Planner = noContinuationPlanner{r.planner} })
-		_ = rig.recorder.Take()
-		a := rig.postRerank(t, "/v1/rerank", rerankBody("rrwide", "q", rerankDocs(300)))
-		code, param, _ := a.envelope(t)
-		if a.status != http.StatusBadRequest || code != oai.CodeUnsupportedValue || param != "documents" ||
-			!strings.Contains(string(a.body), "at most 128 documents per request") {
-			t.Fatalf("%d %s, want 400 unsupported_value documents \"at most 128 documents per request\"", a.status, a.body)
-		}
-		if n := acquires(rig.recorder.Take()); n != 0 || e.hits.Load() != 0 {
-			t.Errorf("acquires %d wire hits %d, want 0/0", n, e.hits.Load())
-		}
-		if l := rig.limiter; l.aborts.Load() != 1 || l.settles.Load() != 0 {
-			t.Errorf("limiter aborts %d settles %d, want 1/0", l.aborts.Load(), l.settles.Load())
+		// 300 documents and the boundary sub_batch + 1 = 129 (external
+		// review 2 F-6 s): both refused before any acquire
+		for _, docs := range []int{300, 128 + 1} {
+			e := newRerankEngine(t)
+			rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 200, 1,
+				func(r *chatRig) { r.deps.Planner = noContinuationPlanner{r.planner} })
+			_ = rig.recorder.Take()
+			a := rig.postRerank(t, "/v1/rerank", rerankBody("rrwide", "q", rerankDocs(docs)))
+			code, param, _ := a.envelope(t)
+			n := acquires(rig.recorder.Take())
+			t.Logf("W0210 k = 1 without continuation, %d documents at sub_batch 128: %d %s, acquires %d, wire %d", docs, a.status, code, n, e.hits.Load())
+			if a.status != http.StatusBadRequest || code != oai.CodeUnsupportedValue || param != "documents" ||
+				!strings.Contains(string(a.body), "at most 128 documents per request") {
+				t.Fatalf("%d documents: %d %s, want 400 unsupported_value documents \"at most 128 documents per request\"", docs, a.status, a.body)
+			}
+			if n != 0 || e.hits.Load() != 0 {
+				t.Errorf("%d documents: acquires %d wire hits %d, want 0/0", docs, n, e.hits.Load())
+			}
+			if l := rig.limiter; l.aborts.Load() != 1 || l.settles.Load() != 0 {
+				t.Errorf("%d documents: limiter aborts %d settles %d, want 1/0", docs, l.aborts.Load(), l.settles.Load())
+			}
 		}
 	})
 	t.Run("without continuation past the clamp", func(t *testing.T) {
