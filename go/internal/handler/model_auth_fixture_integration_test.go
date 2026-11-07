@@ -44,7 +44,14 @@ type madTracer struct {
 	byTag  map[string][]string
 	probes []madProbe
 	live   atomic.Int64 // ctx_model_auth_live statements (W01-8 sweep cost)
+	// afterAuth, when set, runs once when a ctx_model_auth statement has
+	// returned its row and before the door goes on — inside the door's
+	// database step (W01-8: a revocation while the check runs).
+	afterAuth atomic.Pointer[func()]
 }
+
+// madAuthQuery marks the trace context of a ctx_model_auth statement.
+type madAuthQuery struct{}
 
 func (m *madTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
 	tag, _ := ctx.Value(madTag{}).(string)
@@ -55,14 +62,25 @@ func (m *madTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.Trac
 	if strings.Contains(d.SQL, "ctx_model_auth_live(") {
 		m.live.Add(1)
 	}
-	if strings.Contains(d.SQL, "ctx_model_auth(") {
+	auth := strings.Contains(d.SQL, "ctx_model_auth(")
+	if auth {
 		m.probes = append(m.probes, madProbe{tag: tag, at: time.Now()})
 	}
 	m.mu.Unlock()
+	if auth {
+		return context.WithValue(ctx, madAuthQuery{}, true)
+	}
 	return ctx
 }
 
-func (m *madTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (m *madTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if ctx.Value(madAuthQuery{}) == nil {
+		return
+	}
+	if f := m.afterAuth.Swap(nil); f != nil {
+		(*f)()
+	}
+}
 
 func (m *madTracer) of(tag string) []string {
 	m.mu.Lock()

@@ -291,3 +291,65 @@ func TestInflightCheckEndsOnlyOlderEntries(t *testing.T) {
 		t.Fatalf("old revoked %v, young revoked %v — want only the request registered before the statement", revoked(old), revoked(young))
 	}
 }
+
+// TestInflightRegistrationTakesTheMovedExpiry (Fremd-Review 1 B1): a
+// rotation's NOTIFY that shortens a key's expiry while a request's database
+// check runs finds no entry; the request registers with the expiry the door
+// read before — and takes the moved one, so it ends at the grace end, not
+// at the next sweep. A registration without a NOTIFY in between keeps its
+// own expiry.
+func TestInflightRegistrationTakesTheMovedExpiry(t *testing.T) {
+	f := &fakeLive{}
+	var forgotten []string
+	r := unitRegistry(f, &forgotten)
+	late := time.Now().Add(time.Hour)
+	mark := r.touchMark()
+	grace := time.Now().Add(150 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+	r.ModelAccessNotify(`{"table":"context_model_keys","op":"UPDATE","id":"k1","consumer_id":"c1","expires_at":"` + grace + `"}`)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	unreg := r.register(&auth.ConsumerAuth{ModelKeyID: "k1", ConsumerID: "c1", TenantID: "t1", KeyExpiresAt: &late, IsValid: true}, "hash-k1", cancel, mark)
+	defer unreg()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the request that raced the rotation did not end at the moved expiry")
+	}
+	if !errors.Is(context.Cause(ctx), auth.ErrCredentialRevoked) {
+		t.Errorf("cause %v, want auth.ErrCredentialRevoked", context.Cause(ctx))
+	}
+	// A later registration (its check began after the NOTIFY) keeps the
+	// expiry it read.
+	fresh := unitRegister(r, "k1", "c1", "t1", "", &late)
+	defer fresh.unreg()
+	time.Sleep(300 * time.Millisecond)
+	if revoked(fresh) {
+		t.Error("a registration after the NOTIFY took the remembered expiry")
+	}
+}
+
+// TestInflightFailedCheckIsRetried (Fremd-Review 1 X11): a NOTIFY's
+// liveness check that meets a database error ends nothing and is asked
+// again after the door's database deadline without a new signal.
+func TestInflightFailedCheckIsRetried(t *testing.T) {
+	f := &fakeLive{dead: map[string]bool{"k1": true}, err: errors.New("database hiccup (fake)")}
+	var forgotten []string
+	r := unitRegistry(f, &forgotten)
+	ctx, cancel := context.WithCancel(context.Background())
+	var done sync.WaitGroup
+	done.Go(func() { r.Run(ctx) })
+	defer func() { cancel(); done.Wait() }()
+	k1 := unitRegister(r, "k1", "c1", "t1", "", nil)
+	defer k1.unreg()
+	r.ModelAccessNotify(`{"table":"context_model_consumers","op":"UPDATE","id":"c1"}`)
+	if !waitUnit(func() bool { return r.sweepErrors.Load() == 1 }) || revoked(k1) {
+		t.Fatalf("first check: errors %d, revoked %v — want one failure, nothing ended", r.sweepErrors.Load(), revoked(k1))
+	}
+	f.mu.Lock()
+	f.err = nil
+	f.mu.Unlock()
+	select {
+	case <-k1.ctx.Done():
+	case <-time.After(modelAuthDBDeadline + time.Second):
+		t.Fatalf("the failed check was not asked again within %v (checks %v)", modelAuthDBDeadline+time.Second, f.calls)
+	}
+}

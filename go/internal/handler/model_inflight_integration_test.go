@@ -703,3 +703,32 @@ func TestInflightLeakProbe(t *testing.T) {
 		t.Errorf("goroutines %d → %d after settling, want ± 0", g0, g1)
 	}
 }
+
+// TestInflightRevocationDuringTheDoorCheck (Fremd-Review 1 B5/X8): the key
+// is revoked — the manage action's write and CancelKey — while the door's
+// ctx_model_auth for a new request has returned "valid" but the request is
+// not registered yet (a pgx tracer hook runs the revocation inside the
+// door's database step). CancelKey finds no entry; the door's mark, read
+// before its check, has moved, so the registration has the key checked once
+// more and the request ends within the bound — not at the next sweep (an
+// hour here). Red: the door reads its mark after the check (X8), or
+// CancelKey moves no mark (X1).
+func TestInflightRevocationDuringTheDoorCheck(t *testing.T) {
+	e := ifSetup(t, ifOpts{sweep: ifLongSweep})
+	_, k, key := e.consumer(t, store.ModelConsumerSpec{})
+	var counted atomic.Int64
+	hook := func() { // runs on the request's goroutine: no t.Fatal here
+		if _, err := e.seed.Exec(context.Background(), `UPDATE context_model_keys SET revoked_at = now() WHERE id = $1::uuid`, k.ID); err != nil {
+			t.Errorf("revoke inside the door's check: %v", err)
+		}
+		counted.Store(int64(e.door.Inflight().CancelKey(k.ID)))
+	}
+	e.tracer.afterAuth.Store(&hook)
+	at := time.Now()
+	e.open(t, key)
+	if n := counted.Load(); n != 0 {
+		t.Fatalf("CancelKey inside the door's check counted %d, want 0 (nothing registered yet)", n)
+	}
+	e.revokedWithin(t, at, ifBound, "revoked while the door's check ran")
+	e.emptyAfter(t)
+}

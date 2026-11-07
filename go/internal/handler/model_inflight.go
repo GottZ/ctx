@@ -73,6 +73,20 @@ type inflightEntry struct {
 	ended                              bool       // canceled with ErrCredentialRevoked already
 }
 
+// recentExpiry is one expiry a NOTIFY moved: the new value (nil = none),
+// the signal count it arrived at, when it arrived.
+type recentExpiry struct {
+	at   *time.Time
+	mark uint64
+	when time.Time
+}
+
+// inflightRecentExpiryHold is how long a moved expiry is remembered for a
+// registration that raced it: twice the door's whole database step
+// (modelAuthDBDeadline bounds the semaphore wait and the query), so a
+// request whose check began before the NOTIFY has registered long before.
+const inflightRecentExpiryHold = 2 * modelAuthDBDeadline
+
 // inflightKey is the entries of one model key and the key's expiry timer.
 type inflightKey struct {
 	entries map[*inflightEntry]struct{}
@@ -95,6 +109,14 @@ type InflightRegistry struct {
 	pending  map[string]struct{} // key ids a NOTIFY touched, for the worker
 	sweepDue bool                // the backlog asked for a sweep
 	wake     chan struct{}       // cap 1: the worker has work
+	retry    *time.Timer         // a failed check asks again after modelAuthDBDeadline
+
+	// recentExpiry is every key expiry a NOTIFY moved in the last
+	// inflightRecentExpiryHold, with the signal count it arrived at: a
+	// request whose database check ran across that NOTIFY registers with
+	// the expiry the door read before it (a rotation's grace shortened
+	// it since) and takes the moved one instead (Fremd-Review 1 B1).
+	recentExpiry map[string]recentExpiry
 
 	// dead is auth.DeadModelKeys over the door's pool (ctx_model_auth_live).
 	dead func(ctx context.Context, keyIDs []string) ([]string, error)
@@ -123,7 +145,7 @@ func newInflightRegistry(dead func(context.Context, []string) ([]string, error),
 	return &InflightRegistry{
 		byKey: map[string]*inflightKey{}, byConsumer: map[string]map[*inflightEntry]struct{}{},
 		byTenant: map[string]map[*inflightEntry]struct{}{}, byScope: map[string]map[*inflightEntry]struct{}{},
-		pending: map[string]struct{}{}, wake: make(chan struct{}, 1),
+		pending: map[string]struct{}{}, wake: make(chan struct{}, 1), recentExpiry: map[string]recentExpiry{},
 		dead: dead, every: every, forget: forget, now: now, log: log,
 	}
 }
@@ -146,6 +168,11 @@ func (r *InflightRegistry) register(ca *auth.ConsumerAuth, hash string, cancel c
 		e.expires = &at
 	}
 	r.mu.Lock()
+	if rec, ok := r.recentExpiry[e.keyID]; ok && rec.mark > mark {
+		// The key's expiry moved while this request's check ran: the
+		// door read the old one.
+		e.expires = rec.at
+	}
 	k := r.byKey[e.keyID]
 	if k == nil {
 		k = &inflightKey{entries: map[*inflightEntry]struct{}{}}
@@ -347,7 +374,7 @@ type accessPayload struct {
 // new expires_at re-arms its timer at once. A payload it cannot read asks
 // for a sweep (fail-closed: the check is never skipped).
 func (r *InflightRegistry) ModelAccessNotify(payload string) {
-	r.touches.Add(1)
+	mark := r.touches.Add(1)
 	var p accessPayload
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
 		r.warn("model auth: unreadable ctx_model_access_write payload; sweeping instead", "error", err)
@@ -358,10 +385,21 @@ func (r *InflightRegistry) ModelAccessNotify(payload string) {
 	var touched map[*inflightEntry]struct{}
 	switch p.Table {
 	case "context_model_keys":
+		var at *time.Time
+		moved := p.Op == "UPDATE" && p.ExpiresAt != nil
+		if moved {
+			var ok bool
+			if at, ok = r.parseExpiry(p.ExpiresAt); !ok {
+				moved = false
+			}
+		}
+		if moved {
+			r.rememberExpiryLocked(p.ID, at, mark)
+		}
 		if k := r.byKey[p.ID]; k != nil {
 			touched = k.entries
-			if p.Op == "UPDATE" && p.ExpiresAt != nil {
-				r.moveExpiryLocked(p.ID, k, p.ExpiresAt)
+			if moved {
+				r.moveExpiryLocked(p.ID, k, at)
 			}
 		}
 	case "context_model_consumers":
@@ -389,22 +427,40 @@ func (r *InflightRegistry) ModelAccessNotify(payload string) {
 	}
 }
 
-// moveExpiryLocked sets the key's expiry from the payload on every entry
-// and re-arms the timer (an expiry already past fires at once).
-func (r *InflightRegistry) moveExpiryLocked(keyID string, k *inflightKey, raw json.RawMessage) {
-	var at *time.Time
-	if string(raw) != "null" {
-		t, err := time.Parse(time.RFC3339Nano, unquote(raw))
-		if err != nil {
-			r.warn("model auth: unreadable expires_at in ctx_model_access_write; the key's timer stays", "error", err)
-			return
-		}
-		at = &t
+// parseExpiry reads the payload's expires_at (null = no expiry); an
+// unreadable value keeps the key's timer as it is.
+func (r *InflightRegistry) parseExpiry(raw json.RawMessage) (*time.Time, bool) {
+	if string(raw) == "null" {
+		return nil, true
 	}
+	t, err := time.Parse(time.RFC3339Nano, unquote(raw))
+	if err != nil {
+		r.warn("model auth: unreadable expires_at in ctx_model_access_write; the key's timer stays", "error", err)
+		return nil, false
+	}
+	return &t, true
+}
+
+// moveExpiryLocked sets the key's expiry on every entry and re-arms the
+// timer (an expiry already past fires at once).
+func (r *InflightRegistry) moveExpiryLocked(keyID string, k *inflightKey, at *time.Time) {
 	for e := range k.entries {
 		e.expires = at
 	}
 	r.rearmLocked(keyID, k)
+}
+
+// rememberExpiryLocked keeps a moved expiry for registrations that raced
+// it and forgets the ones older than inflightRecentExpiryHold (the map
+// holds the key updates of that window, no more).
+func (r *InflightRegistry) rememberExpiryLocked(keyID string, at *time.Time, mark uint64) {
+	now := r.now()
+	for id, rec := range r.recentExpiry {
+		if now.Sub(rec.when) > inflightRecentExpiryHold {
+			delete(r.recentExpiry, id)
+		}
+	}
+	r.recentExpiry[keyID] = recentExpiry{at: at, mark: mark, when: now}
 }
 
 func unquote(raw json.RawMessage) string {
@@ -440,6 +496,13 @@ func (r *InflightRegistry) signal() {
 func (r *InflightRegistry) Run(ctx context.Context) {
 	t := time.NewTimer(r.period())
 	defer t.Stop()
+	defer func() {
+		r.mu.Lock()
+		if r.retry != nil {
+			r.retry.Stop()
+		}
+		r.mu.Unlock()
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -462,8 +525,8 @@ func (r *InflightRegistry) period() time.Duration {
 // NOTIFYs touched, and ends the requests of the dead ones that were
 // registered before the statement — a request registered after it passed
 // its own database check later (a tenant suspended and resumed in between
-// must not end it). A failed statement ends nothing; the keys it was asked
-// about are asked again with the next check.
+// must not end it). A failed statement ends nothing; what it was asked is
+// asked again after modelAuthDBDeadline (and with every check before).
 func (r *InflightRegistry) check(ctx context.Context, all bool) {
 	r.mu.Lock()
 	all = all || r.sweepDue
@@ -487,13 +550,23 @@ func (r *InflightRegistry) check(ctx context.Context, all bool) {
 	r.sweeps.Add(1)
 	if err != nil {
 		r.sweepErrors.Add(1)
-		if !all {
-			r.mu.Lock()
+		r.mu.Lock()
+		if all {
+			r.sweepDue = true
+		} else {
 			for _, id := range ids {
 				r.pending[id] = struct{}{}
 			}
-			r.mu.Unlock()
 		}
+		// Ask again without waiting for the next signal or sweep (a NOTIFY
+		// check that met a database hiccup would otherwise wait for the
+		// period, Fremd-Review 1 X11).
+		if r.retry == nil {
+			r.retry = time.AfterFunc(modelAuthDBDeadline, r.signal)
+		} else {
+			r.retry.Reset(modelAuthDBDeadline)
+		}
+		r.mu.Unlock()
 		if ctx.Err() == nil {
 			r.warn("model auth: in-flight liveness check failed; running requests stay until the next check", "keys", len(ids), "error", err)
 		}
