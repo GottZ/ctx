@@ -34,7 +34,7 @@ const (
 	gateBodySlack     = 8 << 10                        // and the allocation's size class
 	gateCopy          = 32 << 10                       // the transport's copy, at most
 	gateEcho          = 1                              // the answer's room for an echo: the body's length once more
-	gateAnswerDoc     = 2*128 + 16                     // per document: the answer's entry share for both read buffers and the decode (176 before)
+	gateAnswerDoc     = 2*128 + 40                     // per document: the answer's entry share for both read buffers and the decode (176 before)
 	gateCall          = 2*(4<<10) + 2*(8<<10) + 60<<10 // one call: the answer's frame and size class for both read buffers, the call's own (52 KiB before)
 	gateRetry         = 30 << 10                       // the retry's connection state
 )

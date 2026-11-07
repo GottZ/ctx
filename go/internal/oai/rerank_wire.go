@@ -41,10 +41,13 @@ const rerankWireBodySlack = embed.WireBodySlack
 // rerankDecodeDocBytes is what the answer's decode allocates per document:
 // its score (8 B) and its coverage flag (1 B), rounded to the allocator's
 // 16 B (rerank.TestDecodeAnswerAllocatesNoMoreThanItsDocuments bounds the
-// decode at 16 B per document and 4 KiB). An answer that repeats its
-// results list folds its entries first — 24 B more per document, inside
-// the read's share per document (rerank.AnswerEntryMax, booked twice).
-const rerankDecodeDocBytes = 16
+// decode at 16 B per document and 4 KiB), and the 24 B entry an answer that
+// repeats its results list folds first (rerank answerScan.fold) — booked
+// here, not left to the read's share: a chunked answer at the read cap
+// spends that share on its buffers (Fremd-Review S2 F1: 12 760–14 296 B
+// past the read's and the decode's share at 1000 documents;
+// rerankwire TestFolgeRFoldedAnswerIsBooked).
+const rerankDecodeDocBytes = 16 + 24
 
 // rerankWireDocBytes is the per-document part of a wire call beside the
 // body: the read's per-document share as rerank.AnswerReadMax books it

@@ -78,3 +78,29 @@ func TestEveryRowDisabledIsPassThrough(t *testing.T) {
 		t.Fatalf("Enforcing() = true without one enabled row")
 	}
 }
+
+// TestDisabledGlobalRowLeavesASharedOriginUncapped (Fremd-Review S2 F4,
+// lead decision: wanted): the '_global' row of an origin that two tenants'
+// rows share is disabled ⇒ the origin has no authoritative row (K2: tenant
+// rows never cap a shared origin), its slots no longer count, and the
+// tenants' background roles leave it uncovered — Enforcing degrades with
+// the coverage WARN naming the origin. Before FOLGE-C the disabled row kept
+// capping an origin it no longer served.
+func TestDisabledGlobalRowLeavesASharedOriginUncapped(t *testing.T) {
+	rows := []BackendRow{
+		{Name: "shared-global", Scope: GlobalScope, BaseURL: "http://gpu3:8080", Roles: []string{"chat"}, Limits: map[string]any{"slots": float64(2)}, Disabled: true},
+		{Name: "acme-gpu", Scope: "acme", BaseURL: "http://gpu3:8080", Roles: []string{"dream"}},
+		{Name: "beta-gpu", Scope: "beta", BaseURL: "http://gpu3:8080", Roles: []string{"dream"}},
+	}
+	h := &attrHandler{}
+	p := DerivePolicy(rows, slog.New(h))
+	if got := p.Targets["http://gpu3:8080"].Slots; got != 0 {
+		t.Fatalf("slots = %d, want 0: a disabled '_global' row still caps the shared origin", got)
+	}
+	if p.covered {
+		t.Fatalf("covered = true: the tenants' background rows on an uncapped shared origin must degrade Enforcing")
+	}
+	if warns := h.matching(coverageWarn); len(warns) != 1 || !strings.Contains(warns[0], "http://gpu3:8080") {
+		t.Fatalf("coverage WARN %v, want one naming http://gpu3:8080", warns)
+	}
+}

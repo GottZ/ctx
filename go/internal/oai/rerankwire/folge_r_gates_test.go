@@ -136,3 +136,54 @@ func TestFolgeRCallOnAFreshConnectionIsBooked(t *testing.T) {
 		}
 	}
 }
+
+// folgeRChunkedPayload serves body chunked (no Content-Length): the read
+// grows from the buffer of an answer without an echo to the read cap.
+func folgeRChunkedPayload(body []byte) *wirePayload {
+	head := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nDate: Sat, 07 Nov 2026 10:00:00 GMT\r\nTransfer-Encoding: chunked\r\n\r\n"
+	raw := make([]byte, 0, len(head)+len(body)+32)
+	raw = append(raw, head...)
+	raw = append(raw, strconv.FormatInt(int64(len(body)), 16)...)
+	raw = append(raw, "\r\n"...)
+	raw = append(raw, body...)
+	raw = append(raw, "\r\n0\r\n\r\n"...)
+	return &wirePayload{body: body, raw: raw}
+}
+
+// TestFolgeRFoldedAnswerIsBooked (Fremd-Review S2 F1): an answer that
+// repeats its "results" list makes the decode fold every list's entries
+// first (rerank answerScan.fold: one entry of 24 B per document beside the
+// scores) — read chunked up to the read cap, the call stays within what the
+// route books for it.
+func TestFolgeRFoldedAnswerIsBooked(t *testing.T) {
+	h := newWireHarness(t)
+	c := newWireCase(t, h.query, "fold-chunked n1000/64B", 1000, 64, wireText(64), nil, false)
+	list := wireLlamaAnswer(1000, 0)
+	i := bytes.Index(list, []byte(`"results":[`))
+	entries := list[i : len(list)-1] // "results":[…]
+	// Both lists, padded with whitespace to the read cap of the call (the
+	// body once for an echo, AnswerEntryMax per document, AnswerFixed): the
+	// read grows to the cap, the fold allocates its entries on top.
+	l0 := rerank.RequestBodyLen("M", h.query, c.docs)
+	capBytes := l0 + c.n*rerank.AnswerEntryMax + rerank.AnswerFixed
+	c.resp = append(append(append([]byte(`{`), entries...), ','), entries...)
+	if pad := capBytes - len(c.resp) - 1; pad > 0 {
+		c.resp = append(c.resp, bytes.Repeat([]byte(" "), pad)...)
+	}
+	c.resp = append(c.resp, '}')
+	h.rawUp.cur.Store(folgeRChunkedPayload(c.resp))
+	var most uint64
+	for range 3 {
+		b, _, err := h.measureOnce("Traw", c, false)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		most = max(most, b)
+	}
+	l := rerank.RequestBodyLen("M", h.query, c.docs)
+	bound := wireCallBooking(l, c.n) + int64(l)
+	t.Logf("FOLGE-R folded answer: answer=%d B n=%d allocated=%d B bound=%d B (%.3f ×)", len(c.resp), c.n, most, bound, float64(most)/float64(bound))
+	if int64(most) > bound {
+		t.Errorf("%s: a wire call reading a folded %d B answer allocates %d B, the route books %d B", c.name, len(c.resp), most, bound)
+	}
+}

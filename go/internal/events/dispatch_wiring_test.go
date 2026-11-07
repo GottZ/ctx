@@ -108,6 +108,9 @@ func TestDispatchBackendRowsMapping(t *testing.T) {
 			ProviderClass: "openrouter",
 			Locality:      backends.LocalityExternal,
 			Enabled:       false, // disabled rows are projected too, marked Disabled (FOLGE-C)
+			// With limits: the mark must not depend on them (Fremd-Review S2
+			// F3 — a projection that marked only rows without limits passed).
+			Limits: map[string]any{"slots": float64(1)},
 		},
 		{
 			// A03-W3: a peer ctx instance on the LAN is self-admitting too.
@@ -136,7 +139,7 @@ func TestDispatchBackendRowsMapping(t *testing.T) {
 	// in internal/dispatch noticing — this pin is their owner-side anchor.
 	want := []dispatch.BackendRow{
 		{Name: "herbert-chat", Scope: "_global", BaseURL: "http://HOST:8089/v1", ProviderClass: "llamacpp", Limits: map[string]any{"slots": float64(1)}, Roles: []string{"chat", "dream"}},
-		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com", ProviderClass: "openrouter", External: true, SelfAdmitting: true, Disabled: true},
+		{Name: "tenant-private", Scope: "acme", BaseURL: "https://api.example.com", ProviderClass: "openrouter", Limits: map[string]any{"slots": float64(1)}, External: true, SelfAdmitting: true, Disabled: true},
 		{Name: "peer-ctx", Scope: "_global", BaseURL: "http://peer:8077", ProviderClass: "ctx", SelfAdmitting: true},
 		{Name: "peer-ctx-public", Scope: "_global", BaseURL: "https://a.example.com", ProviderClass: "ctx", Roles: []string{"dream"}, External: false, SelfAdmitting: true},
 	}
