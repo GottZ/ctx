@@ -199,7 +199,8 @@ func TestScanIsBookedBeforeItRuns(t *testing.T) {
 // floor; at the floor without the scan's nesting term it is 503
 // server_overloaded — before the scan, before the meter, no wire call
 // (without the term in the booking it was served there: the floor of
-// hardening 5 had 32 704 B to spare for it, the term takes 1 040 000).
+// hardening 5 had 32 704 B to spare for it, the floor with the read term of
+// Nachtrag C-1 98 856 B; the term takes 1 040 000).
 func TestScanDepthIsBookedBeforeTheScan(t *testing.T) {
 	const capBytes, resp = 32 << 10, 4 << 20
 	body := strings.Replace(deepestBody(capBytes, "pub", "user"), `"content":"`+strings.Repeat("a", len(ledgerMark)), `"content":"`+ledgerMark, 1)
