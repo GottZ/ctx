@@ -59,7 +59,7 @@ GO_DIR="$REPO/go"
 MODULE="github.com/GottZ/ctx"
 
 # ── trigger table: path glob (repo-relative, applies to non-test files) → extra gates
-# Gate words: differential · embeddiff · chatheap · chatcpu · embedheap · python · web ·
+# Gate words: differential · embeddiff · chatheap · chatcpu · embedheap · streamheap · python · web ·
 # integ:<pkg> (integration of that package) · short:<pkg> (-short of that package).
 # A glob starting with ^ matches files in the repository root only. One row per
 # line, comment = why.
@@ -68,8 +68,14 @@ TRIGGERS=(
   "go/internal/oai/jsonkeys*.go|differential embeddiff" # key scanner both parses are built on
   "go/internal/oai/embeddings_parse*.go|embeddiff"   # the embeddings parse: its own differential + fuzzer (W02-09) when present
   "go/internal/oai/chat*.go|chatheap chatcpu"         # chat route: heap over the route per form, CPU gates -count=20
-  "go/internal/oai/budget.go|chatheap chatcpu"        # the in-flight reservation the heap gate measures against
+  "go/internal/oai/budget.go|chatheap chatcpu streamheap" # the in-flight reservation the heap gates measure against
   "go/internal/oai/embed*.go|embedheap"               # embeddings route: its heap gate (W02-09) when present
+  "go/internal/oai/chat_stream*.go|streamheap"        # the stream relay: work per frame and heap of streams at the frame cap (FOLGE-S)
+  "go/internal/oai/rewrite*.go|streamheap"            # the chunk and answer rewrite (FOLGE-S, non-stream at the cap included)
+  "go/internal/oai/relay*.go|streamheap"              # the relay buffer between rewrite and client
+  "go/internal/oai/sse*.go|streamheap"                # the stream writer
+  "go/internal/llm/stream*.go|streamheap"             # the relay reader (line buffer, chunk metadata)
+  "go/internal/llm/passthrough*.go|streamheap"        # ChatRaw / ChatRawStream, the wire sites the gates measure
   "go/internal/oai/*.go|python integ:./cmd/ctxd/"     # wire behaviour the Python SDK sees; cmd/ctxd mounts /v1
   "go/cmd/ctxd/*.go|python"                           # the mount of /v1
   "docs/api.md|python"                                # the documented wire contract the harness checks
@@ -94,6 +100,12 @@ CHAT_HEAP_FILE="$GO_DIR/internal/oai/chat_parse_mem_test.go"
 EMBED_HEAP_FILE="$GO_DIR/internal/oai/embed_scan_mem_test.go"
 EMBED_DIFF_FILE="$GO_DIR/internal/oai/embed_parse_differential_test.go"
 EMBED_HEAP_FORMS="text lt assign" # embed_scan_mem_test.go (W02-09): the unit map of embedScanForm
+STREAM_HEAP_FILE="$GO_DIR/internal/oai/folge_s_frame_test.go"
+# folge_s_frame_test.go (FOLGE-S): S1 work per relayed frame, S4 the non-stream
+# answer at its cap, S3 the house metric with 1/4-MiB frames, S2 the live heap
+# of n concurrent streams — the heap gates run one case per child process
+# under GOMEMLIMIT=200MiB themselves
+STREAM_HEAP_GATES='^(TestStreamFrameWorkPerFrame|TestNonStreamWorkAtTheCap|TestStreamHeapGateLargeFrames|TestStreamLiveHeapConcurrent)$'
 
 usage() { sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 64; }
 die() { echo "gates: $*" >&2; exit 64; }
@@ -237,6 +249,7 @@ test_file_gates() { # a changed test file selects the gate it defines
   case "$f" in *conformance*_test.go) add_extra python "$f (conformance harness)" ;; esac
   grep -q 'CTX_FOLGEP_FORM' "$REPO/$f" && add_extra chatheap "$f (defines the chat heap gate)"
   grep -q 'CTX_W0209_SCAN_FORM' "$REPO/$f" && add_extra embedheap "$f (defines the embeddings heap gate)"
+  grep -q 'CTX_FOLGE_S_CHILD' "$REPO/$f" && add_extra streamheap "$f (defines the stream heap gates)"
   grep -q 'func TestParseCPU\|func TestRefusalOfASharedInvalidPrefixIsLinearOverTheRoute' "$REPO/$f" && add_extra chatcpu "$f (defines a chat CPU gate)"
   grep -q '^func FuzzChatParseDifferential\|^func TestChatParseDifferential' "$REPO/$f" && add_extra differential "$f (defines the differential)"
   grep -q '^func FuzzEmbedParseDifferential\|^func TestEmbedParseDifferential' "$REPO/$f" && add_extra embeddiff "$f (defines the embeddings differential)"
@@ -394,6 +407,17 @@ chat_forms() {
 build_bin() { (cd "$GO_DIR" && go test -c -o "$RUN_DIR/bin/$1.test" "$2"); }
 step_chatheap() { build_bin oai ./internal/oai/ && heap_runs "$RUN_DIR/bin/oai.test" TestChatParseHeapGate CTX_FOLGEP_FORM "$1" ${CTX_GATES_HEAP_FORMS:-$(chat_forms)}; }
 step_embedheap() { build_bin oai ./internal/oai/ && heap_runs "$RUN_DIR/bin/oai.test" TestEmbedScanHeapGate CTX_W0209_SCAN_FORM "$1" $EMBED_HEAP_FORMS; }
+step_streamheap() { # wave: once; final: three runs (heap gates by run, the medians inside each)
+  build_bin oai ./internal/oai/ || return 1
+  local n=1 i r bad=0; [ "$1" = final ] && n=3
+  for i in $(seq "$n"); do
+    (cd "$GO_DIR/internal/oai" && "$RUN_DIR/bin/oai.test" -test.count=1 -test.v -test.run "$STREAM_HEAP_GATES") > "$RUN_DIR/streamheap.log" 2>&1; r=$?
+    [ $r -ne 0 ] && bad=$((bad + 1))
+    echo "stream heap run $i: rc=$r pass=$(grep -c '^--- PASS' "$RUN_DIR/streamheap.log") fail=$(grep -c '^--- FAIL' "$RUN_DIR/streamheap.log") skip=$(grep -c '^--- SKIP' "$RUN_DIR/streamheap.log")"
+    grep -hoE 'FOLGES \{.*\}|FOLGE-S S[14]: .*' "$RUN_DIR/streamheap.log" | sed 's/^/  /'
+  done
+  [ "$bad" -eq 0 ]
+}
 step_chatcpu() {
   build_bin oai ./internal/oai/ || return 1
   (cd "$GO_DIR/internal/oai" && "$RUN_DIR/bin/oai.test" -test.count=20 -test.v -test.run "$CPU_GATES") > "$RUN_DIR/cpu.log" 2>&1; local r=$?
@@ -488,6 +512,10 @@ plan() {
     if [ -f "$EMBED_HEAP_FILE" ]; then step 2 embedheap "measurement (CI never runs it): ${EXTRA_WHY[embedheap]:-full}" step_embedheap "$heapmx"
     else skip embedheap "no embeddings heap gate in this tree (W02-09 delivers $EMBED_HEAP_FILE)"; fi
   else skip embedheap "embeddings route untouched"; fi
+  if [ -n "${EXTRA[streamheap]:-}" ] || { [ "$st" = full ] && [ -f "$STREAM_HEAP_FILE" ]; }; then
+    if [ -f "$STREAM_HEAP_FILE" ]; then step 2 streamheap "measurement (CI runs it in the integration job): ${EXTRA_WHY[streamheap]:-full}, matrix $heapmx" step_streamheap "$heapmx"
+    else skip streamheap "no stream heap gates in this tree (FOLGE-S delivers $STREAM_HEAP_FILE)"; fi
+  else skip streamheap "stream path untouched"; fi
   if [ -n "${EXTRA[web]:-}" ]; then step 2 web "${EXTRA_WHY[web]}" step_web; skip web-e2e "Playwright runs in CI's pinned container (web job)"
   else skip web "go/web untouched"; fi
   if [ "$st" = full ]; then
