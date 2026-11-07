@@ -195,16 +195,27 @@ func ifWait(within time.Duration, ok func() bool) bool {
 	return true
 }
 
+// ifClient is the address every probe request comes from.
+const ifClient = "10.7.7.7"
+
 // open starts one request on key in the background; it returns once the
 // request runs behind the door (a refusal at the door fails the test).
 func (e *ifEnv) open(t *testing.T, key modelkey.Key) {
+	t.Helper()
+	e.openOver(t, key, false)
+}
+
+// openOver is open over TLS or, plain, without.
+func (e *ifEnv) openOver(t *testing.T, key modelkey.Key, plain bool) {
 	t.Helper()
 	refused := make(chan int, 1)
 	go func() {
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequestWithContext(e.reqs, http.MethodPost, "/v1/chat/completions", nil)
-		r.RemoteAddr = "10.7.7.7:40000"
-		r.TLS = &tls.ConnectionState{}
+		r.RemoteAddr = ifClient + ":40000"
+		if !plain {
+			r.TLS = &tls.ConnectionState{}
+		}
 		r.Header.Set("Authorization", "Bearer "+key.Plaintext())
 		e.h.ServeHTTP(rec, r)
 		refused <- rec.Code
@@ -512,6 +523,53 @@ func TestInflightRotationGraceKeepsRunning(t *testing.T) {
 	e.still(t, time.Until(exp)-500*time.Millisecond, "inside the grace")
 	e.revokedWithin(t, exp, 2*time.Second, "end of the grace")
 	e.emptyAfter(t)
+}
+
+// TestInflightPolicyNarrowingKeepsRunning pins the boundary of design/01
+// §4.6 for the two policies the door checks besides liveness (gates 5 and
+// 6, Fremd-Review 2 F2): model-consumer-update narrowing allowed_cidrs so
+// the running request's client is outside, or setting allow_plaintext to
+// false under a running plaintext request, ends nothing — the request runs
+// on through two sweeps (1 s) with the listener up — while the next request
+// of the same client is refused at the door. Red: a liveness check that
+// re-reads the narrowed policy (mutant of auth.DeadModelKeys) ends it at
+// the next sweep.
+func TestInflightPolicyNarrowingKeepsRunning(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		spec   store.ModelConsumerSpec
+		plain  bool
+		narrow map[string]any
+	}{
+		{"allowed_cidrs narrowed", store.ModelConsumerSpec{}, false, map[string]any{"allowed_cidrs": []string{"192.168.0.0/16"}}},
+		{"allow_plaintext false", store.ModelConsumerSpec{AllowedCIDRs: []string{"10.0.0.0/8"}, AllowPlaintext: true}, true,
+			map[string]any{"allow_plaintext": false}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := ifSetup(t, ifOpts{sweep: time.Second, listen: true})
+			admin := ifServerAdmin(t, e)
+			mh := mcHandler(t, e.seed, true, false)
+			mh.SetInflight(e.door.Inflight())
+			cons, _, key := e.consumer(t, c.spec)
+			e.openOver(t, key, c.plain)
+			e.still(t, 300*time.Millisecond, "before the narrowing")
+			sweeps := e.door.Stats().InflightSweeps
+			c.narrow["id"] = cons.ID
+			if status, body, _ := mcCall(t, mh, admin, "model-consumer-update", c.narrow); status != http.StatusOK {
+				t.Fatalf("model-consumer-update %v: %d %s", c.narrow, status, body)
+			}
+			e.still(t, 2500*time.Millisecond, c.name)
+			if n := e.door.Stats().InflightSweeps - sweeps; n < 2 {
+				t.Errorf("%d sweeps while the narrowed request ran, want ≥ 2", n)
+			}
+			rec := &madRecorder{}
+			next := madDo(e.door.Handler(rec), madReq{ip: ifClient, bearer: key.Plaintext(), plain: c.plain})
+			t.Logf("%s: the running request ran on 2.5 s (%d notifications); the next request: %d %s", c.name, e.sink.notifies.Load(), next.Code, madCode(next))
+			if next.Code != http.StatusUnauthorized || rec.count() != 0 {
+				t.Errorf("%s: the next request answered %d (reached %d), want 401 at the door", c.name, next.Code, rec.count())
+			}
+		})
+	}
 }
 
 // ifTenant creates an active tenant owning scope.
