@@ -10,7 +10,10 @@ under ``CTX_CHAT_STREAM_BASE_URL``, each rig at ``<base><name>/v1/``:
 * ``busy`` - the one external slot is held by another consumer, wait budget
   100 ms (G3);
 * ``keepalive`` - the engine is silent for 3 x grace_eff (15 s) after the
-  admission, keepalive every second (G5).
+  admission, keepalive every second (G5);
+* ``reasoning-role`` - SGLang sends the assistant role only in its first,
+  reasoning-only chunk, which the reasoning-off alias drops (W02-08
+  hardening 5).
 
 The SDK's HTTP transport is tapped: it counts the requests and keeps every
 byte of the response body with its arrival time, so the wire - every data
@@ -290,6 +293,35 @@ def test_chat_stream_keepalive_through_silence():
             problems.append(f"the stream ended after {elapsed:.1f} s, before the engine's {SILENCE_S} s silence")
         if first_byte >= READ_TIMEOUT_S or (gaps and max(gaps) >= READ_TIMEOUT_S):
             problems.append(f"first byte after {first_byte:.1f} s, largest gap {max(gaps or [0]):.1f} s, want both < {READ_TIMEOUT_S} s")
+    assert not problems, "; ".join(problems)
+
+
+def test_chat_stream_helper_keeps_the_role():
+    """W02-08 hardening 5: the engine sends the assistant role only in its
+    reasoning chunk, which the reasoning-off alias drops; the SDK's stream
+    helper accumulates the chunks into a completion whose message needs the
+    role - the rewrite carries it into the first relayed chunk, once."""
+    tap = Tap()
+    client = _client("reasoning-role", tap)
+    with client.chat.completions.stream(model="chat", messages=MESSAGES) as stream:
+        for _ in stream:
+            pass
+        final = stream.get_final_completion()
+    problems = []
+    message = final.choices[0].message
+    role = getattr(message, "role", None)
+    if role != "assistant":
+        problems.append(f"final message role {role!r}, want 'assistant' - the accumulated stream lost the role")
+    if message.content != STREAM_TEXT:
+        problems.append(f"final content {message.content!r}, want {STREAM_TEXT!r}")
+    chunks, datas, _ = _wire_chunks(tap.wire, problems)
+    roles = [(i, ch["delta"].get("role")) for i, m in enumerate(chunks) for ch in m.get("choices", []) if "role" in ch["delta"]]
+    if roles != [(0, "assistant")]:
+        problems.append(f"roles on the wire {roles!r}, want [(0, 'assistant')] - once, in the first chunk")
+    if datas.count("[DONE]") != 1 or datas[-1] != "[DONE]":
+        problems.append(f"[DONE] {datas.count('[DONE]')} times, want exactly once and last")
+    if b"reasoning_content" in tap.wire or b"THINK-CANARY" in tap.wire:
+        problems.append("the wire carries a reasoning trace")
     assert not problems, "; ".join(problems)
 
 

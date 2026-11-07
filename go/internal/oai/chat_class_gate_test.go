@@ -486,9 +486,10 @@ var cgNotKeyTables = map[string]string{
 	"visionPrefixes":       "value table of an image_url's data URL prefix, compared in place",
 	"usageKeys":            "response side (rewrite.go): the usage object of an upstream answer",
 	"reasoningMessageKeys": "response side (rewrite.go): reasoning members of an upstream answer's message",
-	// The stream rewrite (W02-08) reads two tables of an upstream chunk.
+	// The stream rewrite (W02-08) reads three tables of an upstream chunk.
 	"streamDeltaKeys":   "response side (rewrite.go): the generated text fields of an upstream stream chunk's delta, which the stream's estimate counts",
 	"nullableDeltaKeys": "response side (rewrite.go): the delta keys the stream schema allows as null in an upstream stream chunk",
+	"streamRoles":       "value table (rewrite.go): the role values of the stream schema a dropped reasoning chunk's role is carried with (hardening 5)",
 	// The embeddings parse (W02-09) has its own key tables and its own class
 	// gate (FOLGE-E, embed_class_gate_test.go): outside this gate's bodies,
 	// which are chat requests.

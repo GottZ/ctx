@@ -38,7 +38,9 @@ const pinSGLangThinkEnd = `{"id":"ID-CANARY-sglang","object":"chat.completion.ch
 // TestPinReasoningOffKeepsTheFinishReason pins that a reasoning-off alias's
 // strip never swallows a chunk's finish_reason: a stream that ends inside
 // the reasoning reaches the client as one emptied chunk with finish_reason
-// length and no trace. Red: Fremd-Review 2 S02 (emptyChoice ignores
+// length and no trace — its delta carries only nulls and the role the
+// dropped reasoning chunks sent (hardening 5: carried into the first
+// relayed choice). Red: Fremd-Review 2 S02 (emptyChoice ignores
 // finish_reason — the chunk is dropped, the client never sees a finish).
 func TestPinReasoningOffKeepsTheFinishReason(t *testing.T) {
 	u := newUpstream(t, "")
@@ -60,8 +62,11 @@ func TestPinReasoningOffKeepsTheFinishReason(t *testing.T) {
 	if err := json.Unmarshal(ch[0]["delta"], &delta); err != nil {
 		t.Fatalf("delta %s: %v", ch[0]["delta"], err)
 	}
+	if string(delta["role"]) != `"assistant"` {
+		t.Errorf("finish chunk delta %s: role %s, want the dropped reasoning chunks' \"assistant\"", ch[0]["delta"], delta["role"])
+	}
 	for k, v := range delta {
-		if string(v) != "null" {
+		if k != "role" && string(v) != "null" {
 			t.Errorf("finish chunk delta %s: key %s carries %s, want an emptied delta", ch[0]["delta"], k, v)
 		}
 	}

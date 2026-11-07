@@ -181,6 +181,10 @@ func conformanceChatStream(t *testing.T) http.Handler {
 	mount("busy", llama.steps(), 2, 1, withWait(100*time.Millisecond))
 	mount("keepalive", append([]sseStep{{wait: cfKeepaliveSilence}}, llama.steps()...), 4, 1,
 		withWait(0), withStream(5*time.Second, time.Second, 30*time.Second))
+	// /reasoning-role/: SGLang sends the assistant role only in its first,
+	// reasoning-only chunk, which the reasoning-off alias drops — the role
+	// reaches the client in the first relayed chunk (W02-08 hardening 5).
+	mount("reasoning-role", append([]sseStep{{data: sglangThink}}, streamShapes[0].steps()...), 4, 1)
 	return mux
 }
 
