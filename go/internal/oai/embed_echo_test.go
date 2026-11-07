@@ -43,6 +43,7 @@ import (
 const embedEchoAnswerMax = 4 << 10
 
 func TestEmbedRefusalEchoIsBounded(t *testing.T) {
+	skipUnderRace(t, "the answer and the live heap of refusals that name an 8-MiB key (HeapInuse against 3 × the body + parseMemSlack; the cut itself is TestEmbedRefusalNamesTheKeyCut's in every build)")
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(parseMemGoMemLimit))
 	e := newEmbedEngine(t, 8)
 	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 33, 1)

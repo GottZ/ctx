@@ -276,12 +276,13 @@ func TestEmbedRawBodyIsNotHTMLEscaped(t *testing.T) {
 // TestEmbedRawRefusesSurplusOllamaVectors (hardening H-5, E05): /api/embed
 // carries no index — an answer with more vectors than inputs is refused,
 // never cut to the first n (which of them belongs to which input is
-// unknowable).
+// unknowable). Since hardening 6 the third vector is refused before it is
+// decoded (errSurplusEmbeddings), not counted after the walk.
 func TestEmbedRawRefusesSurplusOllamaVectors(t *testing.T) {
 	e := newRawEngine(t, 2)
 	e.answer = func(string, int) string { return `{"embeddings":[[1,2],[3,4],[5,6]]}` }
 	vecs, _, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, backends.ProtocolOllama, 0), "m", []string{"a", "b"}, 0, 0)
-	if err == nil || !strings.Contains(err.Error(), "3 embeddings returned for 2 inputs") {
+	if !errors.Is(err, errSurplusEmbeddings) {
 		t.Fatalf("surplus vectors: %v (%d vectors), want the count refusal", err, len(vecs))
 	}
 }

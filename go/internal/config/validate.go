@@ -1510,9 +1510,16 @@ const (
 //   - gateway.request_deadline < 600 s: the SDKs' default timeout.
 //   - gateway.stream_commit_grace <= 50 s: under a typical proxy idle.
 //   - gateway.inflight_budget >= one request at every cap: 26 ×
-//     gateway.max_request_bytes + 64 KiB + 1 040 104 B + 240 024 B (the
-//     request share of 3 × the body plus the sensitivity scan's booking of
-//     23 × the body + 64 KiB + its nesting state at the decoder's depth
+//     gateway.max_request_bytes + the read term + 128 KiB + 1 040 104 B +
+//     240 024 B (the read term, gateway.max_request_bytes + min(
+//     gateway.max_request_bytes + 512 B, 1 MiB), is what reading a body
+//     without a declared length spends beyond a declared one — its doubling
+//     chunks and their join, oai.ChunkedReadReserve; that read spends the
+//     request share, so a rewritten message array and the upstream body book
+//     past it, and the deepest rewritten such request at a chunk sum got 503
+//     at the floor without it, short by the term less the 73 B it has to
+//     spare (FOLGE-P, Nachtrag C-1); the request share of 3 × the body plus the sensitivity scan's booking of
+//     23 × the body + 128 KiB + its nesting state at the decoder's depth
 //     limit, 10 001 × 104 B, which a request to an alias below credentials
 //     takes before the scan runs — the configuration does not know the
 //     aliases' sensitivity, so the scan always counts; FOLGE-P H-8,
@@ -1525,33 +1532,42 @@ const (
 //     gateway.max_stream_frame_bytes, or 4 B × gateway.embedding_max_floats
 //     plus 64 KiB (design/02 §4.2.1). A smaller budget could never serve such a
 //     request, and the client would read "overloaded, retry in 1 s" forever.
-//     The defaults need 217.28 MiB of their 256 MiB. What the floor promises
+//     The defaults need 226.35 MiB (237 340 800 B) of their 256 MiB; the
+//     largest cap at the default budget is 9 540 261 B. What the floor promises
 //     is one attempt without failover and without a rewritten message array
-//     (Delta-Review 3 R3-4, Delta-Review 5 L-2). A rewritten request (a
-//     developer message, a dropped reasoning key) holds the body, the
-//     rewritten array and the upstream body at once, and the upstream body
-//     carries the frame of its backend row — the row's model name and
-//     parameters, which the configuration does not know and the schema
-//     does not bound. The nesting terms leave room for that frame unless
-//     the request is nested to the decoder's limit; there, what is left is
-//     the one level past the limit both terms count (24 + 104 B) and the
-//     client body's own frame: the deepest such request at the cap is
-//     served at a budget equal to the floor while its row's upstream frame
-//     is at most 187 B (73 B to spare with a 12-byte backend model name,
-//     whose frame is 114 B) and gets 503 beyond, short by what the frame
-//     grows past that, 1:1 with the name and the row's parameters (pinned by
-//     oai's TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame: with a
-//     212-byte name 503 at the floor, 200 at the floor plus its frame). Every further
-//     attempt of the chain books one more upstream body (oai reserveUpstream,
-//     about the body + 160 B), which the floor does not hold — with one
-//     failover attempt such a request gets 503 at a budget equal to the
-//     floor. Without failover and without a rewritten message array it is
+//     (Delta-Review 3 R3-4, Delta-Review 5 L-2) — for a body read without a
+//     declared length; with one, the read term the read does not spend
+//     holds more. A rewritten request (a developer message, a dropped
+//     reasoning key) holds the body, the rewritten array and the upstream
+//     body at once, and the upstream body carries the frame of its backend
+//     row — the row's model name and parameters, which the configuration
+//     does not know and the schema does not bound. With a declared length
+//     the read term leaves room for that frame; without one the nesting
+//     terms do unless the request is nested to the decoder's limit; there,
+//     what is left is the one level past the limit both terms count (24 +
+//     104 B) and the client body's own frame: the deepest such request at
+//     the cap, its size a sum of the read's chunks (32 256 B, 1 048 064 B,
+//     …, where the read spends the read term exactly), is served at a
+//     budget equal to the floor while its row's upstream frame is at most
+//     187 B (73 B to spare with a 12-byte backend model name, whose frame is
+//     114 B) and gets 503 beyond, short by what the frame grows past that,
+//     1:1 with the name and the row's parameters (pinned by oai's
+//     TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame: with a 212-byte
+//     name 503 at the floor, 200 at the floor plus its frame; with a
+//     declared length 200 with either name). Every further attempt of the
+//     chain books one more upstream body (oai reserveUpstream, about the
+//     body + 160 B): with a declared length the read term holds one
+//     failover attempt (the deepest and flat requests at caps from 32 256 B
+//     to 1 048 064 B were served at a budget equal to the floor), without
+//     one the floor does not — the deepest such request at a chunk sum gets
+//     503 there. Without failover and without a rewritten message array it is
 //     conservative by up to 1 × the body plus the nesting terms a flat
-//     request leaves unused: such a request at 1 MiB held 34 668 704 B and
-//     is served from the floor − 2 328 232 B on (1 × the body + 1 279 656 B,
-//     hardening 7). The error names both ways out (gatewayCapWayOut).
-//     Stricter since FOLGE-P: budgets under 217.28 MiB at the 8 MiB cap and
-//     caps above 9 950 045 B at the default budget were valid before (see
+//     request leaves unused, and with a declared length by the read term as
+//     well: such a request at 1 MiB held 34 734 240 B and is served from the
+//     floor − 4 425 384 B on (1 × the body + 1 279 656 B + the read term of
+//     2 097 152 B). The error names both ways out (gatewayCapWayOut).
+//     Stricter since FOLGE-P: budgets under 226.35 MiB at the 8 MiB cap and
+//     caps above 9 540 261 B at the default budget were valid before (see
 //     docs/operations.md, the upgrade note).
 //   - gateway.retry_after_jitter in [0, 1] (float keys have no generic sign
 //     walk; NaN fails every comparison and is refused explicitly).
@@ -1612,10 +1628,10 @@ func validateGateway(c *Config) []Issue {
 	if need, ok := gatewayBudgetFloor(g); ok && g.InflightBudget > 0 {
 		switch {
 		case need < 0:
-			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + %d + the largest response share) exceed any representable budget — lower gateway.max_request_bytes or the response caps", g.InflightBudget, gatewayRequestReserve, gatewayRequestFixed))
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) cannot hold one request at every cap — the caps (%d × gateway.max_request_bytes + the read of a body without a declared length + %d + the largest response share) exceed any representable budget — lower gateway.max_request_bytes or the response caps", g.InflightBudget, gatewayRequestReserve, gatewayRequestFixed))
 		case int64(g.InflightBudget) < need:
-			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap: %d = %d × gateway.max_request_bytes + %d + the largest response share (%d), one attempt without failover and without a rewritten message array (one adds its backend row's upstream frame) — raise gateway.inflight_budget to >= %d%s. A request at the body cap to an alias below credentials could never be served: %d × its body + %d + %d (the scan's nesting state at the decoder's depth limit) of it is the sensitivity scan's booking, which a request at credentials does not take, and %d the JSON check's nesting state at the same limit",
-				g.InflightBudget, need, gatewayRequestReserve, gatewayRequestFixed, gatewayResponseShare(g), need, gatewayCapWayOut(g), oai.ScanReserveFactor, oai.ScanReserveBase, oai.ScanDepthReserve, oai.JSONStateReserve))
+			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap: %d = %d × gateway.max_request_bytes + %d (the read of a body at the cap without a declared length beyond a declared one: gateway.max_request_bytes + min(gateway.max_request_bytes + %d, %d)) + %d + the largest response share (%d), one attempt without failover and without a rewritten message array (one adds its backend row's upstream frame) — raise gateway.inflight_budget to >= %d%s. A request at the body cap to an alias below credentials could never be served: %d × its body + %d + %d (the scan's nesting state at the decoder's depth limit) of it is the sensitivity scan's booking, which a request at credentials does not take, and %d the JSON check's nesting state at the same limit",
+				g.InflightBudget, need, gatewayRequestReserve, oai.ChunkedReadReserve(int64(g.MaxRequestBytes)), oai.ReadChunkMin, oai.ReadChunkMax, gatewayRequestFixed, gatewayResponseShare(g), need, gatewayCapWayOut(g), oai.ScanReserveFactor, oai.ScanReserveBase, oai.ScanDepthReserve, oai.JSONStateReserve))
 		}
 	}
 	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {
@@ -1710,12 +1726,21 @@ func gatewayBudgetFloor(g *GatewayConfig) (int64, bool) {
 	if g.MaxRequestBytes <= 0 || g.MaxResponseBytes <= 0 || g.MaxStreamFrameBytes <= 0 || g.EmbeddingMaxFloats <= 0 {
 		return 0, false
 	}
-	request := gatewayAddSat(gatewayMulSat(gatewayRequestReserve, int64(g.MaxRequestBytes)), gatewayRequestFixed)
-	floor := gatewayAddSat(request, gatewayResponseShare(g))
+	floor := gatewayAddSat(gatewayRequestNeed(int64(g.MaxRequestBytes)), gatewayResponseShare(g))
 	if floor == math.MaxInt64 {
 		return -1, true
 	}
 	return floor, true
+}
+
+// gatewayRequestNeed is the request part of the floor for a body cap of n
+// bytes (saturating): gatewayRequestReserve × n, the read of such a body
+// without a declared length beyond a declared one (oai.ChunkedReadReserve —
+// n + min(n + 512, 1 MiB): the read spends the request share, a rewritten
+// message array and the upstream body book past it; Nachtrag C-1 of FOLGE-P)
+// and gatewayRequestFixed.
+func gatewayRequestNeed(n int64) int64 {
+	return gatewayAddSat(gatewayAddSat(gatewayMulSat(gatewayRequestReserve, n), oai.ChunkedReadReserve(n)), gatewayRequestFixed)
 }
 
 // gatewayResponseShare is the largest response share of the floor (saturating;
@@ -1731,13 +1756,27 @@ func gatewayResponseShare(g *GatewayConfig) int64 {
 // gatewayCapWayOut is the floor error's second way out (Delta-Review 3
 // R3-3): " or lower gateway.max_request_bytes to <= X", X the largest body
 // cap the budget holds at the response caps as they are — "" when the
-// response share and the scan's fixed rest alone fill the budget.
+// response share and the fixed rest alone fill the budget. The request part
+// is not linear in the cap (the read term bends at 1 048 064 B), so X is
+// found by bisection over the same gatewayRequestNeed the floor uses.
 func gatewayCapWayOut(g *GatewayConfig) string {
-	room := int64(g.InflightBudget) - gatewayRequestFixed - gatewayResponseShare(g)
-	if room < gatewayRequestReserve {
+	budget, response := int64(g.InflightBudget), gatewayResponseShare(g)
+	fits := func(n int64) bool {
+		need := gatewayAddSat(gatewayRequestNeed(n), response)
+		return need < math.MaxInt64 && need <= budget
+	}
+	if !fits(1) {
 		return ""
 	}
-	return fmt.Sprintf(" or lower gateway.max_request_bytes to <= %d", room/gatewayRequestReserve)
+	lo, hi := int64(1), budget // fits(lo); no cap above the budget fits
+	for lo < hi {
+		if m := lo + (hi-lo+1)/2; fits(m) {
+			lo = m
+		} else {
+			hi = m - 1
+		}
+	}
+	return fmt.Sprintf(" or lower gateway.max_request_bytes to <= %d", lo)
 }
 
 // gatewayMulSat and gatewayAddSat are a·b and a+b for non-negative operands,

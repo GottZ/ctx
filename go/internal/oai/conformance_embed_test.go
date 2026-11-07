@@ -13,6 +13,7 @@ package oai_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -67,16 +68,19 @@ func TestConformanceGoSDKEmbeddings(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	inputs := []string{"alpha", "beta", "gamma"}
-	validate := func(name string) {
+	validateBody := func(name string, body []byte) {
 		t.Helper()
 		var v any
-		if err := json.Unmarshal(wire(), &v); err != nil {
+		if err := json.Unmarshal(body, &v); err != nil {
 			t.Fatalf("%s: wire body is not JSON: %v", name, err)
 		}
 		if err := schema.Validate(v); err != nil {
 			t.Errorf("%s: wire body fails CreateEmbeddingResponse: %v", name, err)
 		}
 	}
+	// The SDK reads every float answer to its end, which the server writes
+	// after the handler — and cfEmbedServe's capture — returned.
+	validate := func(name string) { t.Helper(); validateBody(name, wire()) }
 	for _, dims := range []int64{0, 256} {
 		p := openai.EmbeddingNewParams{
 			Model:          "emb4k",
@@ -119,7 +123,10 @@ func TestConformanceGoSDKEmbeddings(t *testing.T) {
 		validate("float")
 	}
 	// The base64 wire (the Python SDK's default) is valid against the same
-	// schema (the Go SDK has no base64 decoder).
+	// schema (the Go SDK has no base64 decoder). Its body is read here and
+	// validated as read: Do returns with the headers, before the capture of
+	// cfEmbedServe, which a validation of wire() could find still holding
+	// the float answer before it (Copilot and CodeRabbit, PR #157).
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/v1/embeddings",
 		strings.NewReader(`{"model":"emb4k","input":["alpha"],"encoding_format":"base64"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -127,11 +134,18 @@ func TestConformanceGoSDKEmbeddings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw, err := io.ReadAll(res.Body)
 	_ = res.Body.Close()
+	if err != nil {
+		t.Fatalf("base64: read the body: %v", err)
+	}
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("base64: %d", res.StatusCode)
 	}
-	validate("base64")
+	if !strings.Contains(string(raw), `"embedding":"`) {
+		t.Fatalf("base64: the body carries no base64 vector: %.200s", raw)
+	}
+	validateBody("base64", raw)
 }
 
 // TestConformanceEmbeddingSchemaHasTeeth is G1's control: the vendored

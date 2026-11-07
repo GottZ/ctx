@@ -26,6 +26,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -435,54 +436,131 @@ const (
 	cgComboCount = cgKeyCount * 9
 )
 
-// TestClassGateCoversEveryKeyTable (P-3, the count pin): the gate names
-// every key table of parse.go — every package-level var named …Keys and
-// every levelNames call over a literal list — and every key of each table
-// (read from the table, not copied), and its size is pinned.
-func TestClassGateCoversEveryKeyTable(t *testing.T) {
+// cgNotKeyTables are the package's string tables that are no key table of
+// the request parse, each with its reason: the census below finds every
+// table by name and by shape, and one it finds must be a gate table or
+// named here.
+var cgNotKeyTables = map[string]string{
+	"messageRoles":         "value table of a message's role, compared in place (cgForms reach it through role)",
+	"serviceTiers":         "value table of service_tier, compared in place",
+	"responseFormatTypes":  "value table of response_format.type, compared in place (P-1)",
+	"visionPrefixes":       "value table of an image_url's data URL prefix, compared in place",
+	"usageKeys":            "response side (rewrite.go): the usage object of an upstream answer",
+	"reasoningMessageKeys": "response side (rewrite.go): reasoning members of an upstream answer's message",
+	// The stream rewrite (W02-08) reads two tables of an upstream chunk.
+	"streamDeltaKeys":   "response side (rewrite.go): the generated text fields of an upstream stream chunk's delta, which the stream's estimate counts",
+	"nullableDeltaKeys": "response side (rewrite.go): the delta keys the stream schema allows as null in an upstream stream chunk",
+	// The embeddings parse (W02-09) has its own key tables and its own class
+	// gate (FOLGE-E, embed_class_gate_test.go): outside this gate's bodies,
+	// which are chat requests.
+	"embedKeys":     "request-key table of the embeddings parse (embeddings_parse.go), gated by the embeddings class gate",
+	"embedDropKeys": "drop-key table of the embeddings parse (embeddings_parse.go), gated by the embeddings class gate",
+}
+
+// cgCensus is the census of the package's string tables over every non-test
+// Go file (Delta-Review 6 L-1: parse.go alone missed a table in another
+// file): every package-level var named …Keys, every var initialised with a
+// map[string]… or []string literal, and every var assigned from a
+// levelNames call with a literal list among its arguments — one list or
+// more.
+func cgCensus(t *testing.T) map[string]string {
+	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "parse.go", nil, 0)
+	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	census := map[string]bool{}
-	for _, d := range f.Decls {
-		g, ok := d.(*ast.GenDecl)
-		if !ok || g.Tok != token.VAR {
+	census := map[string]string{}
+	parsed := 0
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
-		for _, sp := range g.Specs {
-			vs := sp.(*ast.ValueSpec)
-			for i, id := range vs.Names {
-				if strings.HasSuffix(id.Name, "Keys") {
-					census[id.Name] = true
-				}
-				if i < len(vs.Values) || len(vs.Values) == 1 {
-					v := vs.Values[min(i, len(vs.Values)-1)]
-					if c, ok := v.(*ast.CallExpr); ok {
-						if fn, ok := c.Fun.(*ast.Ident); ok && fn.Name == "levelNames" && len(c.Args) == 1 {
-							if _, lit := c.Args[0].(*ast.CompositeLit); lit {
-								census[id.Name] = true
-							}
-						}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed++
+		for _, d := range f.Decls {
+			g, ok := d.(*ast.GenDecl)
+			if !ok || g.Tok != token.VAR {
+				continue
+			}
+			for _, sp := range g.Specs {
+				vs := sp.(*ast.ValueSpec)
+				for i, id := range vs.Names {
+					if id.Name == "_" {
+						continue
+					}
+					if strings.HasSuffix(id.Name, "Keys") {
+						census[id.Name] = path
+					}
+					if len(vs.Values) == 0 || (i >= len(vs.Values) && len(vs.Values) != 1) {
+						continue
+					}
+					if cgIsTable(vs.Values[min(i, len(vs.Values)-1)]) {
+						census[id.Name] = path
 					}
 				}
 			}
 		}
 	}
+	if parsed < 2 {
+		t.Fatalf("the census parsed %d non-test files of the package", parsed)
+	}
+	return census
+}
+
+// cgIsTable reports a string table by shape: a map[string]… or []string
+// literal, or a levelNames call with a literal list among its arguments.
+func cgIsTable(v ast.Expr) bool {
+	switch e := v.(type) {
+	case *ast.CompositeLit:
+		switch ty := e.Type.(type) {
+		case *ast.MapType:
+			k, ok := ty.Key.(*ast.Ident)
+			return ok && k.Name == "string"
+		case *ast.ArrayType:
+			el, ok := ty.Elt.(*ast.Ident)
+			return ok && el.Name == "string"
+		}
+	case *ast.CallExpr:
+		if fn, ok := e.Fun.(*ast.Ident); ok && fn.Name == "levelNames" {
+			for _, a := range e.Args {
+				if _, lit := a.(*ast.CompositeLit); lit {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestClassGateCoversEveryKeyTable (P-3, the count pin): the gate names
+// every key table of the package — every string table the census finds in
+// a non-test file (cgCensus) is a gate table or named in cgNotKeyTables —
+// and every key of each table (read from the table, not copied), and its
+// size is pinned.
+func TestClassGateCoversEveryKeyTable(t *testing.T) {
+	census := cgCensus(t)
 	gate := map[string]bool{}
 	for _, tb := range cgTables() {
 		gate[strings.Split(tb.name, "/")[0]] = true
 	}
 	delete(gate, "free")
-	for name := range census {
-		if !gate[name] && name != "_" {
-			t.Errorf("parse.go table %s has no class-gate entry (cgTables)", name)
+	for name, path := range census {
+		if !gate[name] && cgNotKeyTables[name] == "" {
+			t.Errorf("%s: table %s has no class-gate entry (cgTables) and is not named in cgNotKeyTables", path, name)
 		}
 	}
 	for name := range gate {
-		if !census[name] {
-			t.Errorf("class-gate table %s is not a key table of parse.go", name)
+		if census[name] == "" {
+			t.Errorf("class-gate table %s is not a table of the package", name)
+		}
+	}
+	for name := range cgNotKeyTables {
+		if census[name] == "" {
+			t.Errorf("cgNotKeyTables names %s, which the census does not find", name)
 		}
 	}
 	want := map[string][]string{

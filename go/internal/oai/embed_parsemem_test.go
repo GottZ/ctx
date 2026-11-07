@@ -89,6 +89,7 @@ func heapPeak(stop <-chan struct{}, peak *atomic.Uint64, done chan<- struct{}) {
 // reserves plus the constant. Red (Fremd-Review 2): 177 MiB for one
 // request, 1 316 MiB for ten.
 func TestEmbedParseHeapStaysInTheReserve(t *testing.T) {
+	skipUnderRace(t, "the live heap of the parse over 8-MiB bodies of the smallest elements (HeapInuse against 3 × the body + parseMemSlack, one request and ten at once)")
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(parseMemGoMemLimit))
 	e := newEmbedEngine(t, 8)
 	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 33, 1)

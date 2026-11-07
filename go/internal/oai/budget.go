@@ -26,12 +26,23 @@ const requestReserveFactor = 3
 // a text of short secret-like assignments ("apikey:x ", each one a pattern
 // match the scanner collects) 22.23 at 2 MiB (22.21 at 1 MiB, 22.06 at
 // 4 MiB), the largest found (bau report FOLGE-P §Härtung H-8, §Härtung 2).
-// The factor is the ceiling of that maximum, the base the largest remainder
-// of a small body (47 334 bytes at 2 KiB: the patterns' matchers, allocated
-// anew after a collection) rounded up. TestScanReserveIsTheMeasuredOne fails
-// when a form needs more (the booking would no longer be true) or when the
-// largest needs a whole byte less per body byte (it would cost requests for
-// nothing).
+// The factor is the ceiling of that maximum. The base holds two remainders
+// beyond it: a small body's (47 334 bytes at 2 KiB: the patterns' matchers,
+// allocated anew after a collection; 64 KiB held it until hardening 8) and
+// the one of a string value of invalid UTF-8 whose length crosses 64 KiB or
+// 128 KiB (FOLGE-P hardening 8, Delta-Review 6 M-1): at 65 534 bytes of
+// value and from 131 071 bytes on, one scan call allocated more than
+// 23 × the body + 64 KiB + the depth term — up to 50 229 bytes more (4 000
+// calls at the largest points, in a message's content, in metadata, in the
+// drop key user and in the ctx key n; 6–14 KB in most calls, 6–36 KB more
+// in others; the smaller of two calls under it again 1 KiB before and 1 KiB
+// past 128 KiB). 128 KiB holds both remainders, 15 307 bytes to spare at
+// the largest call.
+// TestScanReserveIsTheMeasuredOne fails when a form needs more (the booking
+// would no longer be true) or when the largest needs a whole byte less per
+// body byte (it would cost requests for nothing); TestClassGateBytesPerScan
+// scans the boundary lengths as a fixed part, each as the larger of two
+// calls.
 //
 // What the factor binds is what one scan call holds on the heap at once. One
 // form is scanned twice in a row (Delta-Review 2 F-1): one key of the whole
@@ -60,7 +71,7 @@ const requestReserveFactor = 3
 // limit 4 of 6 over it (up to 281.4 MiB).
 const (
 	scanReserveFactor = 23
-	scanReserveBase   = 64 << 10
+	scanReserveBase   = 128 << 10
 )
 
 // scanDepthStateBytes is what the sensitivity scan allocates per nesting
@@ -96,14 +107,50 @@ const scanDepthStateBytes = 104
 // by a small body or by a rewritten message array (hardening 5, B-2), so the
 // floor counts it at every cap. ScanDepthReserve is the most coverScan books
 // for the scan's nesting state (hardening 7) at the same depth: part of the
-// scan's booking, which the floor always counts.
+// scan's booking, which the floor always counts. ReadChunkMin and
+// ReadChunkMax are readRequestBody's chunk sizes, the two parts of
+// ChunkedReadReserve's formula, which the floor's error spells out.
 const (
+	ReadChunkMin         = readChunkMin
+	ReadChunkMax         = readChunkMax
 	RequestReserveFactor = requestReserveFactor
 	ScanReserveFactor    = scanReserveFactor
 	ScanReserveBase      = scanReserveBase
 	JSONStateReserve     = (jsonMaxDepth + 1) * jsonDepthStateBytes
 	ScanDepthReserve     = (jsonMaxDepth + 1) * scanDepthStateBytes
 )
+
+// ChunkedReadReserve is the most the read of a body of n bytes without a
+// declared length (readRequestBody) spends beyond the read of one with it,
+// which takes one buffer of n bytes (Nachtrag C-1 of FOLGE-P, Copilot on
+// PR #155). The chunks double from readChunkMin up to readChunkMax; one more
+// is allocated as long as every earlier one is full and no EOF came — and a
+// reader that reports EOF only on the read after the last byte (net/http's
+// chunked body, bytes.Reader) allocates one more, empty, when n is exactly
+// the sum S(m) of the chunks before it. The chunks are joined into one
+// buffer of n bytes. With S(m) <= n they sum to S(m) + c(m) <= n + c(m), and
+// the last chunk c(m) is S(m) + readChunkMin <= n + readChunkMin while the
+// chunks double, readChunkMax from S(11) = readChunkMax − readChunkMin on:
+// the read spends at most 2 × n + min(n + readChunkMin, readChunkMax),
+// reached at n = S(m). That read spends the request share (3 × n) up to
+// readChunkMin; a rewritten message array (about n) and the upstream body
+// (about n plus its frame) book past it — so the configuration's floor (V39)
+// counts this term at every cap. Over the route, the deepest rewritten
+// request without a declared length at the chunk sums 32 256 B and
+// 1 048 064 B needed exactly this term more than the declared one: at a
+// budget equal to the floor without the term it lacked the term less the
+// 73 B the declared one has to spare; with it, it has those 73 B. An empty
+// body (n = 0) spends one chunk.
+func ChunkedReadReserve(n int64) int64 {
+	if n < 0 {
+		return 0
+	}
+	last := min(n, readChunkMax-readChunkMin) + readChunkMin
+	if n > math.MaxInt64-last {
+		return math.MaxInt64
+	}
+	return n + last
+}
 
 // ErrBudgetExhausted is the read error of a body without a declared length
 // once its running reservation would pass the in-flight budget. A handler

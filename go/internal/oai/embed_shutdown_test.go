@@ -244,7 +244,9 @@ func TestEmbedShutdownWhileAContinuationWaits(t *testing.T) {
 					foreign.Store(l)
 				}
 			}()
-			waitWaiting(t, rig.disp, e.srv.URL, 1, false)
+			if err := waitWaitingErr(rig.disp, e.srv.URL, 1, false); err != nil {
+				t.Error(err)
+			}
 		}
 		return false
 	})
@@ -365,7 +367,9 @@ func holdAtBlockOne(t *testing.T, rig *chatRig, e *embedEngine) *foreignHold {
 					h.lease.Store(l)
 				}
 			}()
-			waitWaiting(t, rig.disp, e.srv.URL, 1, false)
+			if err := waitWaitingErr(rig.disp, e.srv.URL, 1, false); err != nil {
+				t.Error(err)
+			}
 		}
 		return false
 	})
@@ -476,7 +480,9 @@ func TestEmbedModelGoneDuringABlock(t *testing.T) {
 					rows[i].enabled = false
 				}
 			}
-			rig.reg.reload(t, rows)
+			if err := rig.reg.reloadErr(rows); err != nil {
+				t.Error(err)
+			}
 			<-r.Context().Done()
 		}
 		return false

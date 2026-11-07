@@ -353,14 +353,14 @@ var diffLevelParams = []struct {
 	kind  string
 	named []string
 }{
-	{regexp.MustCompile(`^messages\[(\d+)\]\.content\[(\d+)\]\.image_url\.(.+)$`), "image_url", []string{"url", "detail"}},
-	{regexp.MustCompile(`^messages\[(\d+)\]\.content\[(\d+)\]\.(.+)$`), "part", []string{"type", "text", "image_url"}},
-	{regexp.MustCompile(`^messages\[(\d+)\]\.(.+)$`), "message", messageNames},
-	{regexp.MustCompile(`^tools\[(\d+)\]\.(.+)$`), "hull", toolHullKeys},
-	{regexp.MustCompile(`^tool_choice\.(.+)$`), "hull", toolHullKeys},
-	{regexp.MustCompile(`^response_format\.json_schema\.(.+)$`), "hull", responseFormatJSONKeys},
-	{regexp.MustCompile(`^response_format\.(.+)$`), "hull", responseFormatKeys},
-	{regexp.MustCompile(`^logit_bias\.(.+)$`), "logit_bias", nil},
+	{regexp.MustCompile(`(?s)^messages\[(\d+)\]\.content\[(\d+)\]\.image_url\.(.+)$`), "image_url", []string{"url", "detail"}},
+	{regexp.MustCompile(`(?s)^messages\[(\d+)\]\.content\[(\d+)\]\.(.+)$`), "part", []string{"type", "text", "image_url"}},
+	{regexp.MustCompile(`(?s)^messages\[(\d+)\]\.(.+)$`), "message", messageNames},
+	{regexp.MustCompile(`(?s)^tools\[(\d+)\]\.(.+)$`), "hull", toolHullKeys},
+	{regexp.MustCompile(`(?s)^tool_choice\.(.+)$`), "hull", toolHullKeys},
+	{regexp.MustCompile(`(?s)^response_format\.json_schema\.(.+)$`), "hull", responseFormatJSONKeys},
+	{regexp.MustCompile(`(?s)^response_format\.(.+)$`), "hull", responseFormatKeys},
+	{regexp.MustCompile(`(?s)^logit_bias\.(.+)$`), "logit_bias", nil},
 }
 
 // diffLevels are the levels param may name in body — every reading of it (a
@@ -804,6 +804,22 @@ func generatedCorpus() [][]byte {
 			`{"model":"`+raw+tail+`,"stream":true}`)
 	}
 	c = append(c, `{"model":["`+esc+`a"],"messages":[]}`)
+	// Delta-Review 6 L-3: the fuzzer's find (509 s, 2 657 204 executions) —
+	// a key past echoNameMax that holds a newline (escaped, \u000A). The new
+	// answer clips it in param and message as wanted (echoClipped); the
+	// oracle has to read the level's key across the newline, so every
+	// regex of diffLevelParams matches with (?s). The find at the message
+	// level, the same key in a part and an image_url, and repeated (the
+	// answer names a repeated key) at each other level a regex names.
+	nlKey := `0\u000A` + rep("0", 72)
+	c = append(c, `{"model":"0","messages":[{"`+nlKey+`":0}]}`,
+		`{"model":"chat","messages":[{"role":"user","content":[{"type":"text","text":"x","`+nlKey+`":0}]}]}`,
+		`{"model":"vis","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","`+nlKey+`":0}}]}]}`,
+		msg+`,"tools":[{"type":"function","function":{"name":"f"},"`+nlKey+`":0,"`+nlKey+`":0}]}`,
+		msg+`,"tool_choice":{"type":"function","function":{"name":"f"},"`+nlKey+`":0,"`+nlKey+`":0}}`,
+		msg+`,"response_format":{"type":"json_schema","json_schema":{"name":"s","`+nlKey+`":0,"`+nlKey+`":0}}}`,
+		msg+`,"response_format":{"type":"json_schema","json_schema":{"name":"s"},"`+nlKey+`":0,"`+nlKey+`":0}}`,
+		msg+`,"logit_bias":{"`+nlKey+`":1,"`+nlKey+`":1}}`)
 	out := make([][]byte, len(c))
 	for i, s := range c {
 		out[i] = []byte(s)
