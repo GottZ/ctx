@@ -2,9 +2,12 @@ package handler
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -30,7 +33,9 @@ import (
 //	suggestion mode: {"success":true, "role":…, "primary_model":"…"|""}
 //	400 {"success":false,"error":…}         neither or both modes, missing
 //	                                          consumer_id, unknown role/field
-//	200 {"success":false,"error":"consumer not found"}   unknown consumer
+//	404 {"success":false,"error":"model consumer not found"}  unknown or
+//	                                          malformed consumer id (the
+//	                                          model-consumer-get answer)
 //	403 {"success":false,"error":"admin key required"}   not server-admin
 //	503 {"success":false,"error":…,"code":"service_unavailable"}  no /v1
 //	                                          dependencies wired
@@ -50,28 +55,110 @@ func (h *ManageHandler) SetChainPreview(chain ChainPreviewer, primary RolePrimar
 	h.chainPreview, h.rolePrimary = chain, primary
 }
 
-// previewNotImplemented is the RC-D S1 stub answer.
-const previewNotImplemented = "model-alias-preview: not implemented"
+// previewRoles are the roles of the suggestion mode (design/05 §3.3).
+var previewRoles = map[string]bool{"chat": true, "embed": true, "rerank": true}
 
-// handleModelAliasPreview answers model-alias-preview.
-//
-// RC-D S1: contract stub — 503 service_unavailable, nothing read.
-func (h *ManageHandler) handleModelAliasPreview(w http.ResponseWriter, _ *http.Request, _ *auth.AuthResult, _ manageRequest) {
+// modelAliasPreviewRequest is the data of model-alias-preview.
+type modelAliasPreviewRequest struct {
+	Alias      string `json:"alias"`
+	ConsumerID string `json:"consumer_id"`
+	Role       string `json:"role"`
+}
+
+// previewAnswer is the chain mode's answer: the envelope, the consumer and
+// the preview's fields at the top level.
+type previewAnswer struct {
+	Success    bool   `json:"success"`
+	ConsumerID string `json:"consumer_id"`
+	oai.ChainPreview
+}
+
+// handleModelAliasPreview answers model-alias-preview. The tier column has
+// already admitted only a server admin.
+func (h *ManageHandler) handleModelAliasPreview(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	var d modelAliasPreviewRequest
+	if err := decodeConsumerPayload(req.Data, &d); err != nil {
+		writeConsumerError(w, http.StatusBadRequest, "invalid data: "+err.Error())
+		return
+	}
+	switch {
+	case d.Role != "" && d.Alias == "" && d.ConsumerID == "":
+		h.previewRole(w, d.Role)
+	case d.Role == "" && d.Alias != "" && d.ConsumerID != "":
+		h.previewChain(w, r, ar, d)
+	default:
+		writeConsumerError(w, http.StatusBadRequest, "model-alias-preview takes either alias and consumer_id or role")
+	}
+}
+
+// previewRole is the suggestion mode: the pool's primary model of the role.
+func (h *ManageHandler) previewRole(w http.ResponseWriter, role string) {
+	if !previewRoles[role] {
+		writeConsumerError(w, http.StatusBadRequest, "role must be one of chat, embed, rerank")
+		return
+	}
+	if h.rolePrimary == nil {
+		writePreviewUnwired(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "role": role, "primary_model": h.rolePrimary(role)})
+}
+
+// previewChain is the chain mode: the stored consumer as the door would
+// build it, its headerless /v1 context, the dry run.
+func (h *ManageHandler) previewChain(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, d modelAliasPreviewRequest) {
+	if h.chainPreview == nil {
+		writePreviewUnwired(w)
+		return
+	}
+	c, err := store.GetConsumer(r.Context(), h.pool, d.ConsumerID, accessOf(ar), time.Now())
+	if err != nil {
+		writeConsumerStoreError(w, r, err, "model-alias-preview")
+		return
+	}
+	ca := previewConsumerAuth(c)
+	pv, err := h.chainPreview(previewContext(r.Context(), ca), ca, d.Alias)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "model-alias-preview: chain dry run failed", "consumer_id", c.ID, "error", err)
+		writeJSONCode(w, http.StatusServiceUnavailable, "service_unavailable", map[string]any{
+			"success": false, "error": "model-alias-preview: the chain dry run failed",
+		})
+		return
+	}
+	if !c.Active {
+		pv.Notes = append(pv.Notes, oai.PreviewNoteConsumerInactive)
+	}
+	writeJSON(w, http.StatusOK, previewAnswer{Success: true, ConsumerID: c.ID, ChainPreview: pv})
+}
+
+// writePreviewUnwired answers a server without the /v1 dependencies.
+func writePreviewUnwired(w http.ResponseWriter) {
 	writeJSONCode(w, http.StatusServiceUnavailable, "service_unavailable", map[string]any{
-		"success": false,
-		"error":   previewNotImplemented,
+		"success": false, "error": "model-alias-preview: the model API is not wired",
 	})
 }
 
 // previewConsumerAuth is the ConsumerAuth a request of consumer c would
 // carry behind the door (the ctx_model_auth columns, migration 161): valid,
 // with its tenant, scope, kind, all_models, prompt_sensitivity, fair_weight,
-// admission_lane and peer binding — no key id (a preview names no key).
-//
-// RC-D S1: contract stub — nil (no consumer: the preview refuses).
+// admission_lane and peer binding — no key id (a preview names no key). An
+// inactive consumer still previews (the door would refuse it — the handler
+// adds the note).
 func previewConsumerAuth(c store.ModelConsumer) *auth.ConsumerAuth {
-	_ = c
-	return nil
+	ca := &auth.ConsumerAuth{
+		ConsumerID: c.ID, TenantID: c.TenantID, Kind: auth.KindApp, AllModels: c.AllModels,
+		PromptSensitivity: c.PromptSensitivity, FairWeight: int(c.FairWeight), AdmissionLane: c.AdmissionLane, IsValid: true,
+	}
+	if c.Kind == string(auth.KindCtxPeer) {
+		ca.Kind = auth.KindCtxPeer
+	}
+	if c.TenantScope != nil {
+		ca.TenantScope = *c.TenantScope
+	}
+	if c.PeerInstanceID != nil {
+		ca.PeerInstanceID = *c.PeerInstanceID
+	}
+	return ca
 }
 
 // previewContext is the context a /v1 request of ca without federation
@@ -80,9 +167,8 @@ func previewConsumerAuth(c store.ModelConsumer) *auth.ConsumerAuth {
 // consumer's tenant_scope only without an AuthResult — with both it stays on
 // the base snapshot, and the tenant overlay of the preview would differ from
 // the request's), and the PeerIngress policy (federation.HeaderlessContext).
-//
-// RC-D S1: contract stub — ctx unchanged.
 func previewContext(ctx context.Context, ca *auth.ConsumerAuth) context.Context {
-	_ = ca
-	return ctx
+	ctx = context.WithValue(ctx, authResultKey, (*auth.AuthResult)(nil))
+	ctx = context.WithValue(ctx, consumerAuthKey, ca)
+	return federation.HeaderlessContext(ctx, ca)
 }

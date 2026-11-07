@@ -496,6 +496,10 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	manageH.SetInflight(gateway.door.Inflight())
 	scheduler.SetModelAccessSink(gateway.door.Inflight())
 	deps := gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter)
+	// W05-04: model-alias-preview runs the dry run over the SAME
+	// dependencies the /v1 routes are built from, and suggests from the
+	// same pool.
+	manageH.SetChainPreview(deps.PreviewChain, backendPool.PrimaryModel)
 	v1, v2 := v1Routes(deps), v2Routes(deps)
 	if wrapRoutes != nil {
 		v1, v2 = wrapRoutes(v1), wrapRoutes(v2)

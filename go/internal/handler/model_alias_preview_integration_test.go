@@ -83,10 +83,16 @@ func TestModelAliasPreviewChainModeIntegration(t *testing.T) {
 			s.hasAdmin, s.inCtxMatch, s.scope, s.policy)
 	}
 
-	// An unknown consumer is the No-Oracle body of model-consumer-get.
-	status, body, resp = mcCall(t, h, admin, "model-alias-preview", map[string]any{"alias": "chat", "consumer_id": "00000000-0000-4000-8000-00000000dead"})
-	if status != http.StatusOK || resp["success"] != false || resp["error"] != "consumer not found" {
-		t.Errorf("W05-04 chain mode: unknown consumer %d %s, want 200 {success:false, consumer not found}", status, body)
+	// An unknown or malformed consumer id is the No-Oracle answer of
+	// model-consumer-get (writeConsumerStoreError: 404 "model consumer not
+	// found"). S2 decision: S1 pinned 200 "consumer not found" after
+	// design/05 §4.3; the code precedent is 404 — Code > Briefing (report
+	// RCD-c7-cli-preview-S2.md §Testentscheidungen).
+	for _, id := range []string{"00000000-0000-4000-8000-00000000dead", "not-a-uuid"} {
+		status, body, resp = mcCall(t, h, admin, "model-alias-preview", map[string]any{"alias": "chat", "consumer_id": id})
+		if status != http.StatusNotFound || resp["success"] != false || resp["error"] != "model consumer not found" {
+			t.Errorf("W05-04 chain mode: consumer %q → %d %s, want 404 {success:false, model consumer not found}", id, status, body)
+		}
 	}
 	// A tenant-admin of the consumer's own tenant: 403 before any read.
 	status, body, _ = mcCall(t, h, a.ar, "model-alias-preview", map[string]any{"alias": "chat", "consumer_id": c.id})
