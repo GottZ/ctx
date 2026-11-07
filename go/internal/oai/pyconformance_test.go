@@ -8,8 +8,8 @@ package oai_test
 //
 //	go test -tags=pyconformance -count=1 -v ./internal/oai/
 //
-// Needs uv on PATH (it fetches openai==3.42.1, jsonschema==4.26.0 and
-// pytest==9.2.0 into its own cache). Without uv the test SKIPS and says why; it never passes
+// Needs uv on PATH (it fetches openai==3.42.1, cohere==7.3.1, jsonschema==4.26.0
+// and pytest==9.2.0 into its own cache). Without uv the test SKIPS and says why; it never passes
 // silently (W21).
 
 import (
@@ -35,9 +35,12 @@ import (
 
 // The Python packages the harness pins: openai per design/02 §7; jsonschema
 // and pytest at the versions measured when the harness was built (W02-02),
-// so a later run resolves the same validator and runner.
+// so a later run resolves the same validator and runner; cohere (the Cohere
+// v2 SDK of test_rerank.py) at the current release on PyPI when W02-10 was
+// built (7.3.1, uploaded 2026-11-04).
 const (
 	pythonSDKVersion  = "3.42.1"
+	cohereSDKVersion  = "7.3.1"
 	jsonschemaVersion = "4.26.0"
 	pytestVersion     = "9.2.0"
 )
@@ -53,7 +56,8 @@ const (
 // (conformanceConcurrency, W06-11) under CTX_CONCURRENCY_BASE_URL for
 // test_concurrency_retry.py, both fresh per run. The embeddings fixture
 // (conformanceEmbeddings, W02-09) is served under CTX_EMBED_BASE_URL for
-// test_embeddings.py.
+// test_embeddings.py, the rerank fixture (conformanceRerank, W02-10) under
+// CTX_RERANK_BASE_URL for test_rerank.py.
 func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Helper()
 	uv, err := exec.LookPath("uv")
@@ -71,6 +75,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Cleanup(embeddings.Close)
 	concurrency := httptest.NewServer(conformanceConcurrency(t))
 	t.Cleanup(concurrency.Close)
+	rerank := httptest.NewServer(conformanceRerank(t))
+	t.Cleanup(rerank.Close)
 	moduleRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -78,12 +84,13 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, uv, "run", "--no-project",
-		"--with", "openai=="+pythonSDKVersion, "--with", "jsonschema=="+jsonschemaVersion, "--with", "pytest=="+pytestVersion,
+		"--with", "openai=="+pythonSDKVersion, "--with", "cohere=="+cohereSDKVersion,
+		"--with", "jsonschema=="+jsonschemaVersion, "--with", "pytest=="+pytestVersion,
 		"pytest", "-p", "no:cacheprovider", "-v", "conformance/oai")
 	cmd.Dir = moduleRoot
 	cmd.Env = append(childEnv(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/",
 		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/", "CTX_EMBED_BASE_URL="+embeddings.URL+"/",
-		"CTX_CONCURRENCY_BASE_URL="+concurrency.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
+		"CTX_CONCURRENCY_BASE_URL="+concurrency.URL+"/", "CTX_RERANK_BASE_URL="+rerank.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -142,6 +149,14 @@ func conformanceEmbeddings(t *testing.T) http.Handler {
 	t.Helper()
 	e := newEmbedEngine(t, 4096)
 	return newEmbedRig(t, []backends.Backend{e.row("conf", backends.ProtocolOpenAI, 1)}, 33, 1).router
+}
+
+// conformanceRerank is the fixture of test_rerank.py: POST /v1/rerank
+// (Jina) and POST /v2/rerank (Cohere v2) over a fake cross-encoder that
+// answers the logits of cfRerankDocs (conformance_rerank_test.go).
+func conformanceRerank(t *testing.T) http.Handler {
+	t.Helper()
+	return newCfRerankRig(t).router
 }
 
 // conformanceConcurrency is the L1 fixture of test_concurrency_retry.py

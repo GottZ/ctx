@@ -79,7 +79,10 @@ var pipelineMarkers = []string{"Pipeline:", "newChainEntry(", "newDreamEntry("}
 //
 // 18 since W02-09: gateway-embeddings, the one llmlog row of POST
 // /v1/embeddings (internal/oai/embeddings.go, value the llmlog constant).
-const wantPipelineSites = 18
+//
+// 19 since W02-10: gateway-rerank, the one llmlog row of POST /v1/rerank
+// and POST /v2/rerank (internal/oai/rerank.go, value the llmlog constant).
+const wantPipelineSites = 19
 
 // noPromptGuard is the CLOSED list of pipelines whose site carries no guard
 // and needs none. One justification line each; a reason that does not survive
@@ -109,6 +112,13 @@ var noPromptGuard = map[string]string{
 	// an embedding model returns numbers, never a turn — no role to escalate
 	// into (W02-09).
 	"gateway-embeddings": "internal/oai/embeddings.go",
+
+	// The rerank routes send an external caller's OWN query and documents,
+	// verbatim (cut at most to max_tokens_per_doc), to a cross-encoder and
+	// return its scores to the same caller: ctx builds no prompt and no
+	// template, and a scoring API returns numbers, never a turn — no role to
+	// escalate into (W02-10; the same reason as query-rerank).
+	"gateway-rerank": "internal/oai/rerank.go",
 }
 
 // guardedElsewhere is the CLOSED list of Pipeline: sites that sit in a
@@ -153,6 +163,8 @@ var constPipelineSites = map[string]constPipelineSite{
 	"internal/oai:chatPipeline": {"gateway-chat", "internal/oai/chat.go"},
 	// W02-09: the embeddings route, the same shape.
 	"internal/oai:embedPipeline": {"gateway-embeddings", "internal/oai/embeddings.go"},
+	// W02-10: the rerank routes, the same shape.
+	"internal/oai:rerankPipeline": {"gateway-rerank", "internal/oai/rerank.go"},
 }
 
 // passthroughPipelineIdents is the counter-list: Pipeline: values that name NO
@@ -237,7 +249,7 @@ func TestPromptPipelineCallSitesAreGuarded(t *testing.T) {
 
 	// The closed lists do not grow, shrink or drift. Compared against literals
 	// on purpose: reading the expectation out of the maps would assert nothing.
-	if got, want := slices.Sorted(maps.Keys(noPromptGuard)), []string{"gateway-chat", "gateway-embeddings", "query-rerank", "query-temporal", "query-translate"}; !slices.Equal(got, want) {
+	if got, want := slices.Sorted(maps.Keys(noPromptGuard)), []string{"gateway-chat", "gateway-embeddings", "gateway-rerank", "query-rerank", "query-temporal", "query-translate"}; !slices.Equal(got, want) {
 		t.Errorf("noPromptGuard list changed: got %v, want %v — a new unguarded pipeline needs wiring (H2-H8 pattern), not an exception", got, want)
 	}
 	if got, want := slices.Sorted(maps.Keys(guardedElsewhere)), []string{"web-chat"}; !slices.Equal(got, want) {
