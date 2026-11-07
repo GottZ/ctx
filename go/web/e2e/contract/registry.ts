@@ -18,6 +18,7 @@
 import { expect } from '@playwright/test'
 import type { PageContract } from './contract'
 import { KEY, REVEAL_MARKER, SENTINEL, modelApiCapabilities, sseRoute, type RecordedCall, type SseFrame } from '../fixtures'
+import { PANEL_CALL_ID, PANEL_CONSUMER_A } from '../gateway-panels-fixtures'
 
 /**
  * Mobile opt-out for the five PV4-Erstbelegung areas: their mobile BASELINES
@@ -1089,6 +1090,75 @@ export const contracts: PageContract[] = [
       await expect(rows).toHaveCount(1)
       await expect(rows.first()).toContainText('ci-chat')
       expect(consumerListBodies(session.calls).at(-1)?.q).toBe('ci')
+    },
+  },
+  {
+    // Consumer detail (RC-D C6, waves W05-09 + W05-10 + W05-12; design/05
+    // §4.6): head, key chain (rotated_from), last calls (body-free, no
+    // llmlog detail below server-admin), audit trail as a chain, usage panel
+    // (null/complete:false = "not recorded", hist:false = marked means, no
+    // auth count per consumer, a11y table) and limits card (tenant tier:
+    // max = server(d), no "unlimited", 422 at the field). The page inherits
+    // the /gateway guard, so the generated deny proves the tier gate with the
+    // gateway on (member ⇒ /home, none of the panel calls fires). The tenant
+    // leak probe needs a per-tenant path — it is e2e/gateway-panels.spec.ts
+    // ("leak: B on A's consumer"), hence tenantScoped stays off here.
+    route: '/gateway/consumers/:id',
+    name: 'gateway-consumer',
+    role: 'tenant-admin',
+    mode: 'reading',
+    path: `/gateway/consumers/${PANEL_CONSUMER_A}`,
+    capabilities: modelApiCapabilities(true, true),
+    adminCalls: ['model-consumer-get', 'gateway-limits-get', '/api/usage'],
+    states: [
+      { name: 'default', seed: {} },
+      // server-admin: call detail control present, server tier of the limits form
+      { name: 'server-admin', seed: { role: 'server-admin' } },
+      // the consumer read fails: error band with Retry (calls/usage/limits do not render)
+      { name: 'error', seed: { faults: [{ action: 'model-consumer-get', status: 500 }] } },
+    ],
+    scale: {
+      exempt:
+        'Server-capped detail: key chain ≤ gateway.consumer_chain_max (50, keys_truncated), audit ≤ 20 rows, one page of calls, ≤ 92-d usage window — no unbounded list on this page; the 10k list dimension is the /gateway contract.',
+    },
+    flowDoc:
+      'Tenant-Admin öffnet einen Konsumenten: Kopf mit Label und Server-Status, Key-Kette neueste zuerst mit „rotated from" je Glied, letzte Calls ohne Body und ohne Link auf /api/llmlog/{id}, Audit-Spur mit der Rotation als Kante „neu ← alt"; das Nutzungs-Panel zeigt nicht erfasste Buckets als „not recorded" (nie 0), ohne Histogramme die Ø-Werte markiert und keine Auth-Ablehnungen je Konsument, daneben die Tabelle für Screenreader; die Limits-Karte bietet je Feld höchstens das Server-Limit an, keinen „unbegrenzt"-Schalter, und ein Wert über dem Server-Limit kommt als 422 an genau diesem Feld zurück (W05-09/W05-10/W05-12).',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(content.getByRole('heading', { level: 1, name: 'rotated-app' }), 'gate W05-09: the consumer renders').toBeVisible()
+      // W05-09 — key chain newest first, each link names its predecessor
+      const links = content.locator('ol[aria-label="key chain"] > li[data-key-link]')
+      await expect(links.locator('[data-key-hint]')).toHaveText(['ctxm_…CCC3', 'ctxm_…BBB2', 'ctxm_…AAA1'])
+      await expect(links.locator('[data-rotated-from]')).toHaveText(['ctxm_…BBB2', 'ctxm_…AAA1', ''])
+      // W05-09 — positive control: the seeded call is a row; no detail link for a tenant-admin
+      const calls = content.locator('table[aria-label="last calls"] tr[data-call-row]')
+      await expect(calls.filter({ has: page.locator(`[data-call-id="${PANEL_CALL_ID}"]`) })).toHaveCount(1)
+      await expect(content.locator('a[href*="/api/llmlog"]'), 'gate W05-09: kein Link auf /api/llmlog/{id}').toHaveCount(0)
+      await expect(content.getByRole('button', { name: /^Open call/ }), 'gate W05-09: no detail control').toHaveCount(0)
+      await expect(calls.nth(1)).toContainText('upstream · 502')
+      // W05-09 — audit trail shows the rotation as one chain edge
+      const audit = content.locator('ol[aria-label="audit trail"] > li[data-audit-entry]')
+      await expect(audit).toHaveCount(4)
+      await expect(audit.first(), 'gate W05-09: Rotation als Kette').toContainText('ctxm_…CCC3 ← ctxm_…BBB2')
+      // W05-10 — usage panel: not recorded instead of 0, marked means, no auth count, a11y table
+      const usage = content.locator('section[aria-label="usage"]')
+      const table = usage.getByRole('table', { name: 'usage table' })
+      await expect(table.locator('tbody tr'), 'gate W05-10: a11y table, one row per bucket').toHaveCount(3)
+      await expect(table.locator('tbody tr').nth(1).locator('[data-col="calls"]'), 'gate W05-10: complete:false ⇒ not recorded').toHaveText('not recorded')
+      await expect(table.locator('tbody tr').nth(2).locator('[data-col="calls"]'), 'gate W05-10: null ⇒ not recorded').toHaveText('not recorded')
+      await expect(table.locator('tbody tr').first().locator('[data-col="latency"]'), 'gate W05-10: hist:false ⇒ Ø').toHaveText('Ø 820ms')
+      await expect(usage.locator('[data-reject-reason="auth"]'), 'gate W05-10: rejected.auth je Konsument nie als Zahl').toHaveCount(0)
+      expect(session.calls.some((c) => c.path === '/api/usage'), 'the panel reads /api/usage').toBe(true)
+      // W05-12 — limits: tenant tier, max = server(d), no unlimited, 422 at the field
+      const limits = content.locator('section[aria-label="limits"]')
+      await expect(limits.getByRole('spinbutton', { name: 'chat rpm' }), 'gate W05-12: Eingabe-Maximum = server(d)').toHaveAttribute('max', '30')
+      await expect(limits.getByRole('spinbutton', { name: 'chat max_concurrency' })).toHaveAttribute('max', '4')
+      await expect(limits.getByRole('checkbox', { name: /unlimited/i }), 'gate W05-12: kein „unbegrenzt"-Schalter').toHaveCount(0)
+      await limits.getByRole('spinbutton', { name: 'chat max_concurrency' }).fill('9')
+      await limits.getByRole('button', { name: 'Save chat limits' }).click()
+      await expect(limits.locator('[data-field-error="chat.max_concurrency"]'), 'gate W05-12: 422 am Feld').toHaveText('at most 4 (server limit)')
+      const set = session.calls.filter((c) => c.action === 'gateway-limits-set').at(-1)
+      expect(JSON.stringify(set?.body ?? {}), 'gate W05-12: no tier on the wire').not.toMatch(/"tier"/)
     },
   },
   {

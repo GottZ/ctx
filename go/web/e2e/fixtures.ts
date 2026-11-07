@@ -10,6 +10,7 @@
 import type { Page, Route } from '@playwright/test'
 import { workflowMock } from './issue-fixtures'
 import { ISSUES_BASE } from '../src/lib/api/issues'
+import { PanelWorld, gatewayStatusSections, panelGet, type PanelSeed } from './gateway-panels-fixtures'
 
 export type Role = 'server-admin' | 'tenant-admin' | 'member'
 
@@ -1208,6 +1209,8 @@ export interface SeedOptions {
    * (W05-06 toast, V-01-e). Default null — the server's word until W01-8.
    */
   cancelledInflight?: number | null
+  /** RC-D C6 panel world switches (gateway-panels-fixtures.ts) — /api/status gateway sections. */
+  panels?: PanelSeed
 }
 
 /** One recorded /api/** request (mock-call recorder, design 06 §4.1 deny dimension). */
@@ -1302,6 +1305,7 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
   const tenantStatus: Record<string, string> = {}
   // W05-06: the stateful model consumer world of this session.
   const gateway = new GatewayWorld()
+  const panels = new PanelWorld()
   const cancelled = opts.cancelledInflight === undefined ? null : opts.cancelledInflight
 
   await page.route('**/health', (route: Route) =>
@@ -1380,7 +1384,12 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
       return route.fulfill({ status: 500, json: { success: false, error: 'Internal server error' } })
     }
 
-    if (path === '/api/status') return route.fulfill({ json: statusFixture() })
+    // RC-D C6 panels: /api/llmlog?consumer_id= and /api/usage (gateway-panels-fixtures.ts)
+    {
+      const r = panelGet(path, url.searchParams, opts.role, tkey)
+      if (r !== null) return route.fulfill({ status: r.status, json: r.json })
+    }
+    if (path === '/api/status') return route.fulfill({ json: { ...statusFixture(), ...gatewayStatusSections(opts.role, opts.panels) } })
     if (path === '/api/llmlog') return route.fulfill({ json: { success: true, entries: [] } })
     if (path === '/api/settings' && method === 'GET') return route.fulfill({ json: { success: true, settings: settingsFixture() } })
     if (path.startsWith('/api/settings/') && method === 'PUT') {
@@ -1485,6 +1494,11 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
       }
       // Model API consumer list (W05-05): role/state-aware, so it is served
       // here rather than in the role-agnostic manageFixture layer.
+      // RC-D C6 panels: model-consumer-get, gateway-limits-* (gateway-panels-fixtures.ts)
+      {
+        const r = panels.manage(action, data, opts.role, tkey)
+        if (r !== null) return route.fulfill({ status: r.status, json: r.json })
+      }
       if (action === 'model-consumer-list') {
         const r = modelConsumerListFixture(opts.role, tkey, data, state, empty, gateway.consumers)
         return route.fulfill({ status: r.status, json: r.json })
