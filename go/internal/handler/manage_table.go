@@ -241,6 +241,9 @@ var manageActions = map[string]manageAction{
 	"model-alias-create": {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelAliasCreate},
 	"model-alias-delete": {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelAliasDelete},
 	"model-alias-list":   {tier: tierTenantAdmin, handle: dropReq((*ManageHandler).handleModelAliasList)},
+	// model-alias-preview (W05-04): the /v1 chain dry run names backends
+	// (design/05 B-8) — server-admin only.
+	"model-alias-preview": {tier: tierServerAdmin, handle: (*ManageHandler).handleModelAliasPreview},
 	"model-alias-update": {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelAliasUpdate},
 	"model-consumer-create":    {tier: tierSelfService, handle: (*ManageHandler).handleModelConsumerCreate},
 	"model-consumer-delete":    {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelConsumerDelete},

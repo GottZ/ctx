@@ -38,6 +38,9 @@ func TestActionTier_Classification(t *testing.T) {
 		{"model-alias-delete", "", tierTenantAdmin},
 		{"model-alias-list", "", tierTenantAdmin},
 		{"model-alias-update", "", tierTenantAdmin},
+		// model-alias-preview (W05-04): the chain dry run names backends
+		// (design/05 B-8) — server-admin only.
+		{"model-alias-preview", "", tierServerAdmin},
 		// server-global (not yet isolated, or operator-level by nature)
 		{"mcp-client-create", "", tierServerAdmin},
 		{"mcp-client-list", "", tierServerAdmin},

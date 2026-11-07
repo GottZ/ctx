@@ -63,6 +63,7 @@ hit it. Not a settings key: changing it is a rebuild, deliberately.
 - **Issue corpus:** `issue-create`/`issue-update`/`issue-get`/`issue-list`/`issue-comment-create`/`issue-link-create`/`issue-link-delete` are the **operator transport** (all tierOpen; isolation is store-layer scope filtering, not an admin tier) over the same store issue logic the REST `/api/project` issue surface (W6/W7) uses — kept reachable for MCP/CLI operators, not the primary UI surface (see [Issue corpus](#issue-corpus)).
 - **Backend pool:** `backend-list`/`create`/`update`/`delete`/`test` — see [Backend pool](#backend-pool).
 - **Model aliases:** `model-alias-list`/`create`/`update`/`delete` — the `/v1` model namespace, see [Model aliases](#model-aliases-model-alias-).
+- **Model alias preview:** `model-alias-preview` (server-admin) — the dry run of a consumer's `/v1` chain for an alias, see [Chain preview](#chain-preview-model-alias-preview).
 - **Model consumers:** `model-consumer-create`/`-list`/`-get`/`-update`/`-delete` and `model-key-rotate`/`-revoke`/`-history` administer the external callers of the OpenAI-compatible gateway and their `ctxm_` keys — see [Model consumer administration](#model-consumer-administration).
 - **Guard review:** `guard-list` returns the flagged blocks of the caller's read scopes (similarity-sorted; each row carries `type_name`, `guard_status`, `similarity` and the matched partner `matched_id`/`matched_title` — cross-scope partners are `[redacted]`). Filters: `status`, `category`, `types[]` (bind parameters, WF-T10 line); `limit` clamps to 200. `guard-stats` is the aggregate pull. `guard-resolve` takes `id` + `data.resolution ∈ {archive, keep}` (unchanged single wire shape) **or** `data.ids[]` (batch, cap 500, one transaction): the batch touches only actually-flagged states (`needs_review`/`near_duplicate`/`possible_duplicate`) and accounts for every id — `resolved[]` plus `skipped[]` with a reason (`invalid_id`/`not_found`/`already_archived`/`not_flagged`; cross-scope ids collapse into `not_found`, no existence oracle). Write gate is `writableBlockScopes`. The **push side** of the same pipeline: `GET /api/status` carries a `guard_review` section (per-state counts + `oldest_updated_at` + `built_at`) on **both** paths — global for server-admin, home-scope-filtered for tenant-admin — and the daily report closes with a `Guard-Review offen` stand section while the queue is non-empty (live reports only, never backfills). Both paths read ONE generation per `events.tick_interval` (a single `GROUP BY ROLLUP (scope)` aggregate carrying the grand total and every scope's row), so N tenant polls inside a tick cost one query, not N. `built_at` is that generation's success stamp: a failed rebuild keeps the previous generation untouched, and once the stamp exceeds three tick intervals the section is **omitted** rather than served stale. A scope with no flagged blocks reads `{0,0,0,null}` (materialized from `context_tenant_scopes`); an unknown or empty scope yields **no section** — the grand total is reachable only through the server-admin path, never through a scope lookup. MCP transport: `guard_list`/`guard_resolve` mirror these actions (REST field parity, golden-pinned); `guard_resolve` refuses `archive` for `confirm_writes` keys (not stageable — fail-closed instead of bypassing the staging policy). SPA surface: `/guard` (tenant-admin-or-up nav, server-side authorization unchanged).
 - **Dream review & link curation:** `dream-review` is the read surface (stats, `low_confidence` candidates — pinned links are excluded from the candidate queue, `supersedes_pairs`, `recent_checked`); each link row carries the resolve identifiers `source_id`/`target_id`/`relationship` plus `rationale` (and `pinned` on supersedes pairs). `dream-link-resolve` (tierOpen, guard-resolve pattern) is the write side — one link per call, addressed by `data.source_id` + `data.target_id` + `data.relationship` (the relationship is matched as a guard: a link re-classified since the review reads as not found instead of being blindly resolved). `data.resolution ∈ {confirm, delete}`: **confirm** sets `pinned=true` (+ optional `data.rationale`, durable; confirm without rationale keeps an earlier one) — a pinned link survives the dream replace sweep (migration 119); **delete** removes the link and, for `supersedes`, reconciles the target against the supersedes links that remain — the same reconcile the dream write path runs: the target returns to `knowledge` (`superseded_by` → `NULL`, reported as `supersedes_reverted`) only when no superseder is left; if its pointer named this source and another superseder remains, `superseded_by` moves to it. Write gate is `writableBlockScopes` on the **source block**; foreign/invisible/absent links and malformed ids collapse into one `Link not found` (no existence oracle). Every resolve is audited in `context_write_log` (`decision='dream_link_resolve'`). Automatic dream writes leave `rationale` NULL — the benchmarked V5 eval prompt emits no reason field.
@@ -807,3 +808,44 @@ A model alias is the `model` id an external program names on `/v1` (migration 16
 | 503 | `model aliases not wired` | the policy ceilings are not wired (tests only) |
 
 A confirmed lowering answers with a warning and its audit row (`GET /api/audit`, entity `model_alias`) carries `metadata.confirm_sensitivity_downgrade = true`. Whether a tenant-admin may write aliases at all is not coupled to `gateway.tenant_self_service` (open question Q13 of the RC-B index; today: tenant-admin tier, the rules above).
+
+### Chain preview (`model-alias-preview`)
+
+**Status: contract (RC-D S1) — the action is registered and answers `503 service_unavailable` until RC-D S2.**
+
+A server-admin asks which backend rows the `/v1` chain of one model consumer reaches for one alias name — the dry run of the chain build, by the same steps a `/v1` request runs, in their order: the consumer's alias resolution (its scope, `all_models` or its grant), the required sensitivity (the maximum of the consumer's `prompt_sensitivity`, the alias, the `_global` alias a tenant alias shadows and the tenant's `pool.default_query_sensitivity` — there is no free sensitivity parameter), the pool chain of the alias's role, the gateway, federation and export filters, the tenant quota gate, the egress and cost rule under the consumer's policy for the alias's kind, and the admission planner's lane and external-class filter. A preview contacts no backend, takes no reservation or slot, books no quota and writes no `llmlog`, ledger or access-log row; it reads the snapshots a request would read at that instant. Tenant-admins get `403 admin key required` — the answer names backends.
+
+Two modes, exactly one per request (`data`, unknown fields are a `400`):
+
+| Request | Answer |
+|---|---|
+| `{"alias": "<name>", "consumer_id": "<uuid>"}` | the chain preview below |
+| `{"role": "chat"\|"embed"\|"rerank"}` | `{"success":true,"role":"chat","primary_model":"…"}` — the pool's primary model of the role (`""` when the pool offers none), the SPA's "suggest from pool" |
+
+```json
+{
+  "success": true,
+  "consumer_id": "0195f3c2-…",
+  "alias": {"id": "0195f3a1-…", "name": "chat", "kind": "chat", "role": "chat", "scope": "_global", "sensitivity": "credentials"},
+  "op": "chat",
+  "required_sensitivity": "credentials",
+  "scope": "acme:main",
+  "lane": "urgent",
+  "chain": [
+    {"backend": "spark-chat", "locality": "lan", "provider_class": "generic", "billing": "free", "trust": "full-trust", "priority": 100}
+  ],
+  "excluded": [
+    {"backend": "openrouter-qwen", "stage": "pool", "reason": "trust no-credentials < required credentials"}
+  ],
+  "notes": ["body_scan_may_raise"]
+}
+```
+
+`chain` is the order the request would walk. `billing` is the row's egress class (`free`: local, LAN or a ctx peer; `metered`: OpenRouter, which reports its cost; `unmetered`: any other external row). `excluded` names the rows a step removed — `stage` is one of `pool` (disabled, disable profile, trust below the requirement), `gateway_wire` (the protocol does not serve the kind on `/v1`), `federation`, `export` (an operator row of a role not exported to tenant aliases), `tenant_quota`, `egress` (the consumer's egress policy does not keep the row's billing class) and `external_offer` (the row's engine does not offer the external class right now). `notes` say what the request would meet instead of a chain, or what the preview cannot model: `alias_not_resolved` and `alias_not_granted` (the request is `404 model_not_found`; `alias` is `null` for the first), `no_eligible_backend` (`503`), `tenant_quota_exhausted` (`429 insufficient_quota`), `lane_not_offered` and `chain_not_offered` (`503 model_unavailable`), `body_scan_may_raise` (always: the request body's sensitivity scan can raise the requirement), `peer_hop_not_modeled` (a `ctx-peer` consumer: the preview models a request without federation headers). `chain`, `excluded` and `notes` are never `null`.
+
+| Status | Body | When |
+|---|---|---|
+| 400 | `{"success":false,"error":"…"}` | neither or both modes, chain mode without `consumer_id`, an unknown role, an unknown field |
+| 200 | `{"success":false,"error":"consumer not found"}` | an unknown consumer id |
+| 403 | `admin key required` | any caller but a server-admin |
+| 503 | `{"success":false,"error":"…","code":"service_unavailable"}` | the server has no `/v1` dependencies wired |

@@ -119,6 +119,7 @@ internal/evalscore/diversity.go	rankedAlphaDCG	# Nur Aufrufer AlphaNDCG:113, das
 internal/evalscore/diversity.go	serveFacets	# Nur über rankedAlphaDCG:173/idealAlphaDCG:207 unter AlphaNDCG — kein eigener Testaufrufer
 internal/events/distill_block.go	distillShardOrdinal	# Prod nutzt die Basis-Form distillShardOrdinalFrom (:1742, W-L1 #6); den Wrapper nur 5 Tests
 internal/events/scheduler.go	Scheduler.backgroundTenantScopes	# Live-Pipeline liest backgroundTenantsFn direkt; Projektion nur für tenant_iteration_integration_test.go
+internal/federation/headerless.go	HeaderlessContext	# wartet: RC-D S2 W05-04 — the preview context of model-alias-preview (handler.previewContext) calls it
 internal/federation/ingress.go	CounterSnapshot	# wartet: W06-16 (Status-Sektion federation: federation_peer_without_path; Runbook-Grundlage für require_peer_hop, F-W12)
 internal/fedhop/grammar.go	ReasonFrom	# wartet: F-W10 (StatusError.CtxReason auf B; SetReason in den Fehler-Writern auf A, 02/03)
 internal/fedhop/merge.go	ClassVocabulary	# Vokabular-Pin: einziger Leser ist internal/dispatch/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb); A03-W3/A03-W9 ergänzen dort
@@ -137,6 +138,9 @@ internal/graphcache/validate.go	checkOrdering	# Nur export_test.go:72 (CheckOrde
 internal/graphcache/validate.go	checkRangeOrder	# Einziger Aufrufer ist checkOrdering (validate.go:103/108), das selbst nur über export_test.go:72 lebt
 internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_gate_test.go:156 u. a.); Prod gated über enforceManageActionTier
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
+internal/handler/model_alias_preview.go	ManageHandler.SetChainPreview	# wartet: RC-D S2 W05-04 — cmd/ctxd wires it next to the /v1 group's dependencies
+internal/handler/model_alias_preview.go	previewConsumerAuth	# wartet: RC-D S2 W05-04 — handleModelAliasPreview maps the stored consumer
+internal/handler/model_alias_preview.go	previewContext	# wartet: RC-D S2 W05-04 — handleModelAliasPreview builds the consumer's headerless /v1 context
 internal/handler/model_auth.go	ModelDoor.Stats	# wartet: design/06 Status-Exposition der Tür-Zähler (K-06-7, Übergabe W01-6); bis W01-8 nur per Reflexion erreichbar (die Tür lag als any im Request-Kontext für ReauthConsumer)
 internal/handler/model_inflight.go	InflightRegistry.stats	# wartet: design/06 Status-Exposition (K-06-7); einziger Aufrufer ModelDoor.Stats (W01-8)
 internal/handler/v1census/v1census.go	Assert	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
@@ -177,6 +181,7 @@ internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1;
 internal/modelkey/modelkey.go	Key.GoString	# Hint-Darstellung für fmt %#v (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
 internal/modelkey/modelkey.go	Key.LogValue	# Hint-Darstellung für slog (LogValuer) (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
 internal/modelkey/modelkey.go	Key.String	# Hint-Darstellung für fmt %v/%s und jeden Stringer-Verbraucher (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
+internal/oai/preview.go	Deps.PreviewChain	# wartet: RC-D S2 W05-04 — the ChainPreviewer cmd/ctxd binds for model-alias-preview
 internal/promptguard/promptguard.go	Canonicalize	# Nonce zu Null-Nonce für den Fixture-Determinismus der Prompt-Golden; 26 Aufrufe in 8 _test.go
 internal/prompts/prompts.go	All	# Nur prompts_test.go:52/85/125: Registry-Vollständigkeit und Sortierung; Prod stempelt über Register
 internal/prompts/prompts.go	Lookup	# Nur prompts_test.go:103 und completeness_test.go:534/611: ID-zu-Identity-Probe der Registry-Gates
