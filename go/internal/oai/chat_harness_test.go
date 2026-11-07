@@ -305,6 +305,9 @@ type chatRig struct {
 	router   chi.Router
 	budget   oai.Budget
 	recs     chan *oai.AccessRecord
+	// peerIngress edits the PeerIngress configuration before the mount
+	// (F-W12: Binder, RequirePeerHop, Events); nil keeps the default.
+	peerIngress func(*federation.PeerIngressConfig)
 }
 
 // rigOption adjusts a rig before the route is mounted.
@@ -445,7 +448,11 @@ func (r *chatRig) mount(h http.Handler) chi.Router {
 			})
 		})
 		g.Use(oai.Recover)
-		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Logger: slog.New(slog.DiscardHandler)}))
+		pcfg := federation.PeerIngressConfig{Consumer: r.deps.Consumer, Logger: slog.New(slog.DiscardHandler)}
+		if r.peerIngress != nil {
+			r.peerIngress(&pcfg)
+		}
+		g.Use(federation.PeerIngress(pcfg))
 		g.Use(oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Method(http.MethodPost, "/chat/completions", h)
 	})
