@@ -1659,6 +1659,17 @@ const (
 //     docs/operations.md, the upgrade note).
 //   - gateway.retry_after_jitter in [0, 1] (float keys have no generic sign
 //     walk; NaN fails every comparison and is refused explicitly).
+//
+// V58 (RC-D C8) — gateway.scan_max_request_bytes >= 1: 0 would answer every
+// request with a body to an alias below credentials with 413. A value above
+// gateway.max_request_bytes is legal and without effect — the body cap
+// refuses first, and the effective scan cap is the smaller of the two
+// (oai.EffectiveScanCap), which is also what V39's floor books for the
+// scanned class. Deliberately no coupling "<= gateway.max_request_bytes":
+// both keys are hot and written one at a time, and a coupling would refuse
+// lowering the body cap alone below the scan cap (the operator would have
+// to know the order of two writes); the min keeps every such write valid
+// and its meaning plain. Negative values stay with V35.
 func validateGateway(c *Config) []Issue {
 	var issues []Issue
 	g := &c.Gateway
@@ -1728,6 +1739,9 @@ func validateGateway(c *Config) []Issue {
 			bad("gateway.inflight_budget", fmt.Sprintf("gateway.inflight_budget (%d) must hold one request at every cap: %d = %d × gateway.max_request_bytes + %d (the read of a body at the cap without a declared length beyond a declared one: gateway.max_request_bytes + min(gateway.max_request_bytes + %d, %d)) + %d + the largest response share (%d), one attempt without failover and without a rewritten message array (one adds its backend row's upstream frame) — raise gateway.inflight_budget to >= %d%s. A request at the body cap to an alias below credentials could never be served: %d × its body + %d + %d (the scan's nesting state at the decoder's depth limit) of it is the sensitivity scan's booking, which a request at credentials does not take, and %d the JSON check's nesting state at the same limit",
 				g.InflightBudget, need, gatewayRequestReserve, oai.ChunkedReadReserve(int64(g.MaxRequestBytes)), oai.ReadChunkMin, oai.ReadChunkMax, gatewayRequestFixed, gatewayResponseShare(g), need, gatewayCapWayOut(g), oai.ScanReserveFactor, oai.ScanReserveBase, oai.ScanDepthReserve, oai.JSONStateReserve))
 		}
+	}
+	if g.ScanMaxRequestBytes == 0 {
+		bad("gateway.scan_max_request_bytes", "gateway.scan_max_request_bytes must be >= 1 — 0 would refuse every request with a body to an alias below credentials with 413 (V58)")
 	}
 	if j := g.RetryAfterJitter; !(j >= 0 && j <= 1) {
 		bad("gateway.retry_after_jitter", fmt.Sprintf("gateway.retry_after_jitter (%v) must be in [0, 1]", j))

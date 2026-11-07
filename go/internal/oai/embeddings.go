@@ -351,6 +351,9 @@ func (c *embedCall) serve() {
 		return
 	}
 	required := c.sensitivity()
+	if overScanCap(c.rec, c.w, required, body, c.s) {
+		return
+	}
 	if !c.coverScan(required, body, depth) {
 		refuseOverloaded(c.rec, c.w)
 		return

@@ -17,6 +17,12 @@ type Settings struct {
 	MaxStreamFrameBytes int64
 	EmbeddingMaxFloats  int64
 
+	// ScanMaxRequestBytes (gateway.scan_max_request_bytes, RC-D C8) is the
+	// largest body the sensitivity scan reads; a longer body to an alias
+	// below credentials is 413 before the scan (overScanCap). 0 (a
+	// snapshot without the key) is the body cap — EffectiveScanCap.
+	ScanMaxRequestBytes int64
+
 	StreamCommitGrace time.Duration
 	KeepaliveInterval time.Duration
 	ClientWriteWindow time.Duration

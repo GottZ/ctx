@@ -254,6 +254,19 @@ func censusCases() []censusCase {
 			},
 			status: http.StatusRequestEntityTooLarge, code: oai.CodeRequestTooLarge,
 			reason: keyquota.RejectCapacity, detail: keyquota.DetailRequestTooLarge},
+		// RC-D C8: the scan cap (gateway.scan_max_request_bytes) refuses a
+		// body to an alias below credentials past it, in the route, before
+		// the scan — a route declaration, not the stage's.
+		{name: "scan cap 413 (alias below credentials)",
+			prep: func(t *testing.T, rt censusRoute, r *chatRig, _ censusEngine) {
+				if rt.op == llmlog.GatewayOpEmbed {
+					r.reg.reload(t, embedScanAliases())
+				}
+				r.setSettings(func(s *oai.Settings) { s.ScanMaxRequestBytes = 16 })
+			},
+			body:   func(rt censusRoute) string { return rt.body(censusScanAliases[rt.op]) },
+			status: http.StatusRequestEntityTooLarge, code: oai.CodeRequestTooLarge,
+			reason: keyquota.RejectCapacity, detail: keyquota.DetailRequestTooLarge},
 		{name: "in-flight budget stage 503",
 			prep: func(_ *testing.T, _ censusRoute, r *chatRig, _ censusEngine) {
 				r.setSettings(func(s *oai.Settings) { s.InflightBudget = 30 })
@@ -410,6 +423,10 @@ func censusCases() []censusCase {
 		{name: "200 served", status: http.StatusOK},
 	}
 }
+
+// censusScanAliases is each route's alias below credentials (the embeddings
+// route's after the scan-cap case reloads embedScanAliases).
+var censusScanAliases = map[string]string{llmlog.GatewayOpChat: "pub", llmlog.GatewayOpEmbed: "embpub", llmlog.GatewayOpRerank: "rrpub"}
 
 // runCensus runs every case against rt.
 func runCensus(t *testing.T, rt censusRoute) {

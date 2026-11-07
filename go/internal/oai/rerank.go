@@ -287,6 +287,9 @@ func (c *rerankCall) serve() {
 		return
 	}
 	required := c.sensitivity()
+	if overScanCap(c.rec, c.w, required, body, c.s) {
+		return
+	}
 	if !c.coverScan(required, body, depth) {
 		c.overloaded()
 		return
