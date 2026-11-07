@@ -53,9 +53,10 @@ var embedRoles = map[string]bool{RoleEmbed: true, RoleDreamEmbed: true}
 // forced zdr/deny, usage.cost, no-providers classification; ctx: a peer ctx
 // instance, whose gateway error codes Classify reads, W02-11).
 //
-// ProviderCtx is not accepted by validation or the provider_class CHECK yet
-// — the class opens for rows with F-W5; until then no row carries it and
-// only the classifier knows it.
+// ProviderCtx is a writable class since F-W5 (migration 166, the named CHECK
+// context_backends_provider_class_check): validateCtx demands protocol
+// openai, an api_key_ref, no embed role and limits.slots with a background
+// role; the hop tier stays Loop until F-W6 (HopTarget).
 const (
 	ProviderGeneric    = "generic"
 	ProviderLlamaCpp   = "llamacpp"

@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 165,
-    "migration_count": 53,
+    "migration_max": 166,
+    "migration_count": 54,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },

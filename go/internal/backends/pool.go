@@ -759,7 +759,9 @@ func (p *Pool) Status() []BackendStatus {
 				s.EffectiveState = "cooldown"
 				s.CooldownRemaining = int(time.Until(h.cooldownUntil).Seconds())
 			}
-			if h.peerInstance != "" {
+			// The hint asks for the row to be registered as ctx — a ctx row
+			// already is one (F-W5).
+			if h.peerInstance != "" && b.ProviderClass != ProviderCtx {
 				s.Hints = []string{HintAnswersAsCtxInstance}
 			}
 		}

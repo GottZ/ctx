@@ -146,6 +146,9 @@ func ValidateBackend(b *Backend) (warnings []string, errs []FieldError) {
 	errs = append(errs, validateAnthropic(b)...)
 	errs = append(errs, validateForeignLoadProbe(b)...)
 	errs = append(errs, validateDispatchExternalLimits(b)...)
+	w, e = validateCtx(b)
+	warnings = append(warnings, w...)
+	errs = append(errs, e...)
 	return warnings, errs
 }
 
@@ -249,9 +252,9 @@ func validateIdentity(b *Backend) (errs []FieldError) {
 	}
 
 	switch b.ProviderClass {
-	case ProviderGeneric, ProviderLlamaCpp, ProviderOpenRouter:
+	case ProviderGeneric, ProviderLlamaCpp, ProviderOpenRouter, ProviderCtx:
 	default:
-		errs = append(errs, FieldError{"provider_class", "must be one of: generic, llamacpp, openrouter"})
+		errs = append(errs, FieldError{"provider_class", "must be one of: generic, llamacpp, openrouter, ctx"})
 	}
 
 	// metadata.score_domain is the rerank dialect slot (see ScoreDomain).

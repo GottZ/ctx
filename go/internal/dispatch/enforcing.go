@@ -37,6 +37,11 @@ func (d *Dispatcher) Enforcing() bool {
 	return len(p.Targets) > 0 && p.covered
 }
 
+// providerClassCtx mirrors backends.ProviderCtx without the import (leaf
+// rule); the owner-side Option-1 matrix (events TestCtxRowsOption1) drives it
+// through the projection, so a drifting literal turns that gate red.
+const providerClassCtx = "ctx"
+
 // deriveCoverage computes the Enforcing coverage term over one derivation
 // (design/05 §4.2, closes B-R2 structurally): every origin reachable by a
 // background-capable role on a LOCAL row must carry a slots cap in the
@@ -44,7 +49,8 @@ func (d *Dispatcher) Enforcing() bool {
 // external target ("external skaliert selbst", design/01 §3.2) must not
 // force the fallback forever. ctx targets count as local: B's own order must
 // hold up to A's door (design/04 §4.14) — the owner-side projection never
-// marks a provider_class ctx row External, whatever its locality (F-W7).
+// marks a provider_class ctx row External, whatever its locality (F-W7) —
+// as long as the row's limits count for its origin (coverageRows, F-W5).
 // Each uncovered origin logs ONE WARN per derivation (reload), naming origin
 // + the background roles that reach it — the operator sees WHY Enforcing is
 // off.
@@ -56,7 +62,7 @@ func deriveCoverage(byOrigin map[string][]BackendRow, targets map[string]TargetP
 	sort.Strings(origins) // deterministic WARN order
 	covered := true
 	for _, origin := range origins {
-		roles := localBackgroundRoles(byOrigin[origin])
+		roles := localBackgroundRoles(coverageRows(byOrigin[origin]))
 		if len(roles) == 0 || targets[origin].Slots > 0 {
 			continue
 		}
@@ -65,6 +71,42 @@ func deriveCoverage(byOrigin map[string][]BackendRow, targets map[string]TargetP
 			"origin", origin, "roles", strings.Join(roles, ","))
 	}
 	return covered
+}
+
+// coverageRows returns one origin's rows as the coverage term sees them
+// (F-W5 Option 1, F-W7 Review-1 finding 1): a ctx row whose limits do not
+// count for the origin under the K2 authority rule — a tenant row on an
+// origin a '_global' row carries, or one of several tenants' rows on an
+// origin without one — counts as External. Its slots never reach the policy
+// (DerivePolicy ignores them with the K2 WARN), so holding it to the slots
+// duty would let one tenant's row switch the instance-wide mode
+// (operations.md: tenant rows never switch other tenants' modes) and leave a
+// remedy only a server-admin has. Its background calls pass through this
+// side's admission, like a cloud target's. An authoritative ctx row — a
+// '_global' row, or the rows of the one scope that carries the origin alone —
+// stays coverage-bound (design/04 §4.14). K2 authority is a property of the
+// scope within the origin (splitAuthority partitions by scope), so the
+// foreign scopes identify the foreign rows. Without a foreign ctx row the
+// group is returned as is.
+func coverageRows(group []BackendRow) []BackendRow {
+	_, foreign := splitAuthority(group)
+	foreignScopes := make(map[string]bool)
+	for _, r := range foreign {
+		if r.ProviderClass == providerClassCtx && !r.External {
+			foreignScopes[r.Scope] = true
+		}
+	}
+	if len(foreignScopes) == 0 {
+		return group
+	}
+	out := make([]BackendRow, len(group))
+	copy(out, group)
+	for i := range out {
+		if out[i].ProviderClass == providerClassCtx && foreignScopes[out[i].Scope] {
+			out[i].External = true
+		}
+	}
+	return out
 }
 
 // localBackgroundRoles returns the sorted background-capable roles of one

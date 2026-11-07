@@ -129,9 +129,11 @@ type BackendRow struct {
 	Scope   string
 	BaseURL string
 	// ProviderClass mirrors context_backends.provider_class (validate.go
-	// enum: generic | llamacpp | openrouter). Sole consumer is the external
+	// enum: generic | llamacpp | openrouter | ctx). Consumers: the external
 	// guard of the preempt derivation (preempt.go, design/02 §3.1 no. 2):
-	// preempt_background counts only on local llama.cpp wire classes.
+	// preempt_background counts only on local llama.cpp wire classes; and
+	// the coverage term, which exempts a non-authoritative ctx row
+	// (enforcing.go coverageRows, F-W5).
 	ProviderClass string
 	Limits        map[string]any
 	// Roles are the routing roles of the row (context_backends.roles) — the
