@@ -7,20 +7,25 @@ import (
 
 // TestAuditViaPin pins the write channels a context_settings_audit row may
 // name in metadata.via (W06-6, design/06 §3.3, B-06-14): the six literals the
-// migration-160 triggers and backfill emit, pairwise distinct, each within
+// migration-160 triggers and backfill emit plus the gateway's (W06-18, the
+// usageevents recorder's consumer_usage rows), pairwise distinct, each within
 // the 32 characters audit_actor_meta keeps, and every one of them accepted by
 // the stamp while anything else is refused.
 func TestAuditViaPin(t *testing.T) {
 	want := map[AuditVia]string{
-		ViaAPI:         "api",
-		ViaBootstrap:   "bootstrap",
-		ViaProvision:   "provision",
-		ViaOffboarding: "offboarding",
-		ViaMigration:   "migration",
-		ViaSQL:         "sql",
+		ViaAPI:          "api",
+		ViaBootstrap:    "bootstrap",
+		ViaProvision:    "provision",
+		ViaOffboarding:  "offboarding",
+		ViaMigration:    "migration",
+		ViaSQL:          "sql",
+		AuditViaGateway: "gateway",
 	}
-	if len(want) != 6 {
-		t.Fatalf("via constants are not pairwise distinct: %d distinct of 6", len(want))
+	if len(want) != 7 {
+		t.Fatalf("via constants are not pairwise distinct: %d distinct of 7", len(want))
+	}
+	if AuditViaGateway != "gateway" {
+		t.Errorf("AuditViaGateway = %q, want \"gateway\" (usageevents.Via, W06-18)", AuditViaGateway)
 	}
 	if len(auditVias) != len(want) {
 		t.Fatalf("auditVias lists %d values, want %d", len(auditVias), len(want))
