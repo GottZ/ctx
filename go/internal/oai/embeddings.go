@@ -113,9 +113,10 @@ const (
 	// embedWireAnswerBytes: the frame of the answer (the list, the model,
 	// usage and fields a backend adds).
 	embedWireAnswerBytes = 4 << 10
-	// embedDecodeFactor: json.Decoder holds the whole value and grows its
-	// buffer by doubling — at the last step the old and the new buffer live
-	// together, less than three times the value.
+	// embedDecodeFactor: the strict decode (internal/embed rawAnswerBuffer)
+	// holds the answer in one buffer that grows by doubling up to the read
+	// cap — less than twice the cap in all — and strconv clones a literal it
+	// refuses (at most the cap): less than three times the read cap.
 	embedDecodeFactor = 3
 )
 

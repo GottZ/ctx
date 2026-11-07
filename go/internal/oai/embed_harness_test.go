@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/pashagolub/pgxmock/v5"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
@@ -67,6 +68,22 @@ func embedAliases() []chatAlias {
 		chatAlias{idEmbTenant, tenantScope, "temb", "embedding", "embed", backends.SensCredentials,
 			`{"embedding.native_dims":8,"embedding.max_inputs":32}`, true},
 	)
+}
+
+// reloadErr is chatRegistry.reload for a goroutine other than the test's —
+// a fake engine's respond callback runs on an httptest handler goroutine,
+// where t.Fatal would end the handler, not the test (CodeRabbit, PR #157):
+// it returns the reload's error for the caller's t.Error.
+func (cr *chatRegistry) reloadErr(rows []chatAlias) error {
+	out := pgxmock.NewRows(aliasColumns)
+	for _, r := range rows {
+		out.AddRow(r.id, r.scope, r.name, r.kind, r.role, string(r.sens), []byte(r.policy), "", r.enabled, aliasCreated, aliasCreated)
+	}
+	cr.mock.ExpectQuery(`SELECT .+ FROM context_model_aliases`).WillReturnRows(out)
+	if err := cr.reg.Reload(context.Background()); err != nil {
+		return fmt.Errorf("reload chat fixture: %w", err)
+	}
+	return nil
 }
 
 // embedEngine is one fake embedding engine.

@@ -33,7 +33,7 @@ func embedLedgerRequest(body string, depth int, inputs []string, scan bool, bloc
 		depthState     = 24      // json.Valid's state per nesting level
 		slot           = 16 + 8  // a string header and a rune count per input
 		scanFactor     = 23      // the scan per body byte
-		scanBase       = 64 << 10
+		scanBase       = 128 << 10 // FOLGE-P hardening 8 (root d0d25650): the scan's base doubled
 		scanDepth      = 104     // the scan per nesting level
 		frame          = 23       // a block body's frame on the openai wire: {"model":"","input":[]}
 		upstreamSlack  = 8 << 10  // the size-class rounding of a block body's one allocation

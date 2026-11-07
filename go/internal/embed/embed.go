@@ -98,10 +98,7 @@ type openAIEmbedResponse[T floatElem] struct {
 	// role as ollama's prompt_eval_count above). Voyage AI reports
 	// total_tokens instead of prompt_tokens on the embed endpoint; the
 	// fallback in embedOpenAI handles both wire formats.
-	Usage struct {
-		PromptTokens int `json:"prompt_tokens"`
-		TotalTokens  int `json:"total_tokens"`
-	} `json:"usage"`
+	Usage openAIUsage `json:"usage"`
 }
 
 // floatElem is the element type a wire answer decodes into.
@@ -171,7 +168,7 @@ func (in wireInput) marshal(v any) ([]byte, error) {
 func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) (vec []float32, promptTokens int, err error) {
 	in := wireInput{texts: []string{prefix.text() + text}, bare: true}
 
-	raw, promptTokens, err := embedWire[float64](ctx, b, b.Model, in, httpx.MaxResponseBytes)
+	raw, promptTokens, err := embedWire[float64](ctx, b, b.Model, in, httpx.MaxResponseBytes, rawAnswer{})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -202,8 +199,12 @@ func Embed(ctx context.Context, b backends.Backend, text string, prefix Prefix) 
 // decode transient for it, W02-09 hardening H-3); ≤ 0 or above
 // httpx.MaxResponseBytes is that transport cap. An answer past the cap
 // fails with httpx.ErrResponseTooLarge (a malformed answer for the failover
-// classifier: stop the chain). The wire sites and the client choice are
-// Embed's: httpClients.For(b.EgressGuarded()).
+// classifier: stop the chain). The answer is read under the strict wire
+// contract (raw_answer.go, W02-09 hardening 6): an entry past the inputs is
+// refused before it is decoded, every entry carries an index, no component
+// is null, and every vector has the expected length before it is
+// allocated. The wire sites and the client choice are Embed's:
+// httpClients.For(b.EgressGuarded()).
 func EmbedRaw(ctx context.Context, b backends.Backend, model string, inputs []string, dims int, maxBytes int64) (vecs [][]float32, promptTokens int, err error) {
 	if len(inputs) == 0 {
 		return nil, 0, errors.New("embed: no input")
@@ -211,7 +212,7 @@ func EmbedRaw(ctx context.Context, b backends.Backend, model string, inputs []st
 	if maxBytes <= 0 || maxBytes > httpx.MaxResponseBytes {
 		maxBytes = httpx.MaxResponseBytes
 	}
-	vecs, promptTokens, err = embedWire[float32](ctx, b, model, wireInput{texts: inputs}, maxBytes)
+	vecs, promptTokens, err = embedWire[float32](ctx, b, model, wireInput{texts: inputs}, maxBytes, rawAnswer{strict: true, dims: dims})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -223,15 +224,16 @@ func EmbedRaw(ctx context.Context, b backends.Backend, model string, inputs []st
 
 // embedWire is the protocol choice of both embed paths: the row's wire
 // (/v1/embeddings for "openai", /api/embed for every other protocol — the
-// pre-W5 dispatch semantics, incl. empty) with the row's egress client.
-func embedWire[T floatElem](ctx context.Context, b backends.Backend, model string, in wireInput, limit int64) ([][]T, int, error) {
+// pre-W5 dispatch semantics, incl. empty) with the row's egress client;
+// ra is how the answer is read.
+func embedWire[T floatElem](ctx context.Context, b backends.Backend, model string, in wireInput, limit int64, ra rawAnswer) ([][]T, int, error) {
 	// The hop target comes from the row alone and goes down with the client:
 	// both wires stamp the request and observe the answer with it.
 	hop := b.HopTarget(fedhop.WireEmbed)
 	if b.Protocol == backends.ProtocolOpenAI {
-		return embedOpenAI[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, limit)
+		return embedOpenAI[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, limit, ra)
 	}
-	return embedOllama[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, b.NumCtx, limit)
+	return embedOllama[T](ctx, httpClients.For(b.EgressGuarded()), hop, b.Host, b.APIKey, model, in, b.NumCtx, limit, ra)
 }
 
 // rawQuality is EmbedRaw's quality check: every component finite, every
@@ -262,7 +264,7 @@ func rawQuality(vecs [][]float32, dims int) error {
 	return nil
 }
 
-func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, numCtx int, limit int64) ([][]T, int, error) {
+func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, numCtx int, limit int64, ra rawAnswer) ([][]T, int, error) {
 	reqBody := ollamaEmbedRequest{Model: model, Input: in.value()}
 	if numCtx > 0 {
 		reqBody.Options = &ollamaOpts{NumCtx: numCtx}
@@ -302,6 +304,9 @@ func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedh
 		return nil, 0, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
 	}
 
+	if ra.strict {
+		return decodeRawOllama[T](resp, httpx.CapBody(resp.Body, limit), limit, len(in.texts), ra.dims)
+	}
 	var result ollamaEmbedResponse[T]
 	if err := json.NewDecoder(httpx.CapBody(resp.Body, limit)).Decode(&result); err != nil {
 		return nil, 0, fmt.Errorf("embed: decode: %w", err)
@@ -314,7 +319,7 @@ func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedh
 	return result.Embeddings, result.PromptEvalCount, nil
 }
 
-func embedOpenAI[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, limit int64) ([][]T, int, error) {
+func embedOpenAI[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, limit int64, ra rawAnswer) ([][]T, int, error) {
 	reqBody := openAIEmbedRequest{Model: model, Input: in.value()}
 
 	body, err := in.marshal(reqBody)
@@ -347,23 +352,32 @@ func embedOpenAI[T floatElem](ctx context.Context, client *http.Client, hop fedh
 		return nil, 0, fmt.Errorf("embed: %w", httpx.NewStatusError(resp, errBody))
 	}
 
-	var result openAIEmbedResponse[T]
-	if err := json.NewDecoder(httpx.CapBody(resp.Body, limit)).Decode(&result); err != nil {
-		return nil, 0, fmt.Errorf("embed: decode: %w", err)
-	}
-
-	vecs, err := alignVectors(result.Data, len(in.texts), func(i int) (int, []T) {
-		return result.Data[i].Index, result.Data[i].Embedding
-	})
-	if err != nil {
-		return nil, 0, err
+	var vecs [][]T
+	var usage openAIUsage
+	if ra.strict {
+		vecs, usage, err = decodeRawOpenAI[T](resp, httpx.CapBody(resp.Body, limit), limit, len(in.texts), ra.dims)
+		if err != nil {
+			return nil, 0, err
+		}
+	} else {
+		var result openAIEmbedResponse[T]
+		if err := json.NewDecoder(httpx.CapBody(resp.Body, limit)).Decode(&result); err != nil {
+			return nil, 0, fmt.Errorf("embed: decode: %w", err)
+		}
+		vecs, err = alignVectors(result.Data, len(in.texts), func(i int) (int, []T) {
+			return result.Data[i].Index, result.Data[i].Embedding
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		usage = result.Usage
 	}
 
 	// Voyage AI reports total_tokens; OpenAI-compatible servers report
 	// prompt_tokens. Prefer prompt_tokens; fall back to total_tokens.
-	promptTokens := result.Usage.PromptTokens
-	if promptTokens <= 0 && result.Usage.TotalTokens > 0 {
-		promptTokens = result.Usage.TotalTokens
+	promptTokens := usage.PromptTokens
+	if promptTokens <= 0 && usage.TotalTokens > 0 {
+		promptTokens = usage.TotalTokens
 		// This flips the MW22 meter semantics for total_tokens-only
 		// backends from "uncharged" to a real measured charge — same
 		// one-time visibility as the rerank pendant (4970856): embeds

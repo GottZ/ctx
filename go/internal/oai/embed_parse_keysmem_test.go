@@ -32,6 +32,7 @@ import (
 )
 
 func TestEmbedParseKeysHeapStaysInTheReserve(t *testing.T) {
+	skipUnderRace(t, "the live heap of the parse over 8-MiB bodies of hostile keys (HeapInuse against 3 × the body + parseMemSlack, one request and ten at once)")
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(parseMemGoMemLimit))
 	e := newEmbedEngine(t, 8)
 	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 33, 1)
