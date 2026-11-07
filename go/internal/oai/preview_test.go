@@ -17,6 +17,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
@@ -327,5 +328,40 @@ func TestPreviewAlwaysNotesBodyScan(t *testing.T) {
 	pv, err := r.deps.PreviewChain(previewCtx(ca), ca, "chat")
 	if err != nil || !slices.Contains(pv.Notes, oai.PreviewNoteBodyScan) {
 		t.Errorf("W05-04 notes: %v (err %v), want %q", pv.Notes, err, oai.PreviewNoteBodyScan)
+	}
+}
+
+// TestPreviewChainParityExternalOffer closes gate W05-04 (a) over the
+// planner's filter: the OpenRouter engine stops offering the external class
+// (internal_reserved_slots 0 — dispatch.TargetPolicy.externalCapacity), so
+// the /v1 chain the planner returns loses the row; the preview loses it too
+// and names the stage external_offer. Red against a preview that stops at
+// the egress rule and skips Planner.Plan (mut/preview-skip-planner.md).
+func TestPreviewChainParityExternalOffer(t *testing.T) {
+	rows, _ := previewRows(t)
+	ca := consumerWithFloor(backends.SensPublic)
+	cp := &capturePlanner{}
+	r := newChatRig(t, rows, 4, 1, withPersonalAlias(t), withConsumer(ca),
+		withEgress(backends.EgressPolicy{AllowExternal: true, AllowUnmetered: true}), withCapture(cp))
+	pol := dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{}}
+	for _, b := range rows {
+		reserved := 1
+		if b.Name == "openrouter" {
+			reserved = 0
+		}
+		pol.Targets[b.Host] = dispatch.TargetPolicy{Slots: 4, InternalReserved: reserved}
+	}
+	r.disp.UpdatePolicy(pol)
+	if a := r.post(t, chatBody("personal")); a.status != http.StatusOK {
+		t.Fatalf("/v1 request: %d %s — want 200", a.status, a.body)
+	}
+	v1 := cp.first(t)
+	if slices.Contains(v1, "openrouter") {
+		t.Fatalf("fixture: the /v1 chain %v still carries openrouter — the offer was not withdrawn", v1)
+	}
+	pv, err := r.deps.PreviewChain(previewCtx(ca), ca, "personal")
+	if got := previewNames(pv.Chain); err != nil || !slices.Equal(got, v1) || !excludedAt(pv, "openrouter", oai.PreviewStageExternalOffer) {
+		t.Errorf("W05-04 parity (external offer): preview %v excluded %+v (err %v), /v1 chain %v — want equal and openrouter at stage %q",
+			got, pv.Excluded, err, v1, oai.PreviewStageExternalOffer)
 	}
 }
