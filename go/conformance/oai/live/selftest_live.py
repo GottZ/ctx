@@ -38,7 +38,8 @@ def _envelope(code, etype, message="m"):
 class Fake:
     """A fake ctx. mode: off | on | door-first | proxy-unset | house-errors |
     bad-chat | retry-ok | retry-bad | slow-prefill | cut | heap |
-    no-ratelimit.
+    no-ratelimit | reasoning | reasoning-stream | no-www-auth |
+    rerank-ascending.
 
     In mode heap every stream takes ~0.6 s and the fake writes its own
     "container memory" to ``mem_file``: 100 MB + 20 MB per open stream, so
@@ -148,6 +149,8 @@ class Fake:
         if bearer != f"Bearer {KEY}":
             if self.mode == "house-errors":
                 return h._send(401, {"success": False, "error": "unauthorized"})
+            if self.mode == "no-www-auth":
+                return h._send(401, unauth[1], {"x-should-retry": "false"})
             return h._send(*unauth)
         if method == "GET" and path == "/v1/models":
             return h._send(200, {"object": "list", "data": [
@@ -160,6 +163,11 @@ class Fake:
                 return _stream(h, self)
             if self.mode == "no-ratelimit":
                 return h._send(200, _chat())
+            if self.mode == "reasoning":
+                c = _chat()
+                c["choices"][0]["message"]["reasoning_content"] = "thinking"
+                return h._send(200, c, {f"x-ratelimit-{k}-{d}": "1" for k in ("limit", "remaining", "reset")
+                                        for d in ("requests", "tokens")})
             return h._send(200, _chat(), {f"x-ratelimit-{k}-{d}": v for k, v in (("limit", "30"), ("remaining", "29"), ("reset", "2s"))
                                           for d in ("requests", "tokens")})
         if method == "POST" and path == "/v1/embeddings":
@@ -171,7 +179,8 @@ class Fake:
         if method == "POST" and path in ("/v1/rerank", "/v2/rerank"):
             docs = body.get("documents") or []
             return h._send(200, {"id": "r", "model": "rerank",
-                                 "results": [{"index": i, "relevance_score": round(0.9 - 0.1 * i, 3)} for i in range(len(docs))],
+                                 "results": [{"index": i, "relevance_score": round(0.9 - 0.1 * i, 3) if self.mode != "rerank-ascending"
+                                              else round(0.1 + 0.1 * i, 3)} for i in range(len(docs))],
                                  "usage": {"prompt_tokens": 3, "total_tokens": 3}})
         return h._send(*nf)
 
@@ -202,8 +211,11 @@ def _stream(h, fake=None):
         fake.set_mem(+1)
         time.sleep(0.6)
     base = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "chat"}
+    first_delta = {"role": "assistant", "content": "h"}
+    if mode == "reasoning-stream":
+        first_delta["reasoning_content"] = "thinking"
     frames = [
-        dict(base, choices=[{"index": 0, "delta": {"role": "assistant", "content": "h"}, "finish_reason": None}]),
+        dict(base, choices=[{"index": 0, "delta": first_delta, "finish_reason": None}]),
         dict(base, choices=[{"index": 0, "delta": {"content": "i"}, "finish_reason": "stop"}]),
         dict(base, choices=[], usage={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}),
     ]
@@ -425,3 +437,28 @@ def test_run_requires_the_meter_headers(fake):
     a served chat without the consumer's x-ratelimit-* headers fails."""
     rc, last, out = _run(SMOKE, "run", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY")
     assert rc == 1 and "x-ratelimit" in last, f"chat without meter headers: {rc} {last!r}, want 1 FAIL naming x-ratelimit\n{out}"
+
+
+@pytest.mark.parametrize("fake,needle", [("reasoning", "chat: message carries reasoning_content"),
+                                         ("reasoning-stream", "chat_stream: a delta carries reasoning_content"),
+                                         ("no-www-auth", "unauth: 401 without WWW-Authenticate")], indirect=["fake"])
+def test_run_refuses_thinking_and_bare_401(fake, needle):
+    """W02-15 (design/02 §7: "kein reasoning_content (Thinking-Zwang live)")
+    and the door's 401 contract: a message or a stream delta with
+    reasoning_content fails, so does a 401 without WWW-Authenticate."""
+    rc, last, out = _run(SMOKE, "run", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY")
+    assert rc == 1 and needle in last, f"run against {fake.mode}: {rc} {last!r}, want 1 with {needle!r}\n{out}"
+
+
+@pytest.mark.parametrize("fake", ["no-www-auth"], indirect=True)
+def test_flip_probe_on_wants_www_authenticate(fake):
+    """W06-20: after the flip the anonymous 401 carries WWW-Authenticate."""
+    rc, last, out = _run(SMOKE, "flip-probe", "--base-url", fake.url, "--expect", "on")
+    assert rc == 1 and "WWW-Authenticate" in last, f"flip-probe on without WWW-Authenticate: {rc} {last!r}\n{out}"
+
+
+@pytest.mark.parametrize("fake", ["rerank-ascending"], indirect=True)
+def test_run_rerank_order(fake):
+    """W02-15 rerank probe: results come in descending relevance order."""
+    rc, last, out = _run(SMOKE, "run", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY")
+    assert rc == 1 and "rerank: results not in descending order" in last, f"ascending rerank: {rc} {last!r}\n{out}"
