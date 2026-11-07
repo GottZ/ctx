@@ -71,13 +71,15 @@ func TestStreamSpecCarriesStreamAndReserve(t *testing.T) {
 	// the bytes sent plus at most a few bytes of its size bound (a comma
 	// counted after the last member) — upstreamSlack.
 	const upstreamSlack = 8
+	// + the relay buffer (A03-W10), booked in the ledger before it is made.
 	b, depth := int64(len(body)), oai.JSONDepth([]byte(body))
-	spent := b + depth*jsonStateBytesPerLevel + int64(len(raws[0]))
+	relay := rig.settings.Load().StreamRelayBufferBytes
+	spent := b + depth*jsonStateBytesPerLevel + int64(len(raws[0])) + relay
 	want := max(3*b, spent) + 2*frame
-	t.Logf("body %d B, depth %d, upstream body %d B: ledger %d (3 × body %d), in use %d, want %d … %d", b, depth, len(raws[0]), spent, 3*b, inUse, want, want+upstreamSlack)
+	t.Logf("body %d B, depth %d, upstream body %d B, relay buffer %d B: ledger %d (3 × body %d), in use %d, want %d … %d", b, depth, len(raws[0]), relay, spent, 3*b, inUse, want, want+upstreamSlack)
 	if inUse < want || inUse > want+upstreamSlack {
-		t.Errorf("in-flight budget in use during the stream: %d bytes, want max(3 × %d, %d read + %d × %d nesting + %d upstream) + 2 × %d frame = %d (+ ≤ %d)",
-			inUse, b, b, depth, jsonStateBytesPerLevel, len(raws[0]), frame, want, upstreamSlack)
+		t.Errorf("in-flight budget in use during the stream: %d bytes, want max(3 × %d, %d read + %d × %d nesting + %d upstream + %d relay buffer) + 2 × %d frame = %d (+ ≤ %d)",
+			inUse, b, b, depth, jsonStateBytesPerLevel, len(raws[0]), relay, frame, want, upstreamSlack)
 	}
 	if !waitFor(2*time.Second, func() bool { return rig.budget.InUse() == 0 }) {
 		t.Errorf("budget in use after the stream: %d, want 0", rig.budget.InUse())
@@ -96,7 +98,11 @@ func bigFrameRow(u *upstream, name string, prio int) backends.Backend {
 // its answer share and a small upstream body (4 KiB of slack), not a
 // bigFrameRow's.
 func streamBudget(rig *chatRig, body string) {
-	rig.setSettings(func(s *oai.Settings) { s.InflightBudget = 3*int64(len(body)) + 2*s.MaxStreamFrameBytes + 4<<10 })
+	// + the relay buffer (A03-W10): the first attempt books it before its
+	// wire call, a failover attempt reuses it.
+	rig.setSettings(func(s *oai.Settings) {
+		s.InflightBudget = 3*int64(len(body)) + 2*s.MaxStreamFrameBytes + 4<<10 + s.StreamRelayBufferBytes
+	})
 }
 
 // TestStreamUpstreamPastTheBudgetEndsTheWalk (A3): the first row's upstream

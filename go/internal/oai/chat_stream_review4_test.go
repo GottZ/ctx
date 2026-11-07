@@ -19,12 +19,14 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
@@ -243,6 +245,23 @@ func (p relayPanicWriter) Write(b []byte) (int, error) {
 
 func (p relayPanicWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
 
+// gatedPanicWriter holds the data frames from the second on until gate is
+// closed, then panics like relayPanicWriter (A03-W10: a panic of the client
+// writer after the upstream ended).
+type gatedPanicWriter struct {
+	relayPanicWriter
+	gate <-chan struct{}
+}
+
+func (p gatedPanicWriter) Write(b []byte) (int, error) {
+	if strings.HasPrefix(string(b), "data: {") && p.count.Load() >= 1 {
+		<-p.gate
+	}
+	return p.relayPanicWriter.Write(b)
+}
+
+func (p gatedPanicWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
+
 // tickPanicMeter is the rig's endMeter whose reservations' header source
 // panics when the stream's timer goroutine reads it (the grace commit).
 type tickPanicMeter struct{ *endMeter }
@@ -362,7 +381,13 @@ func TestStreamPanicUnderTheWriterLock(t *testing.T) {
 	t.Run("the relay's write panics at the second frame", func(t *testing.T) {
 		sink := captureLog(t)
 		u := newUpstream(t, "")
-		u.setRespond(sseRespond([]sseStep{{data: sglangChunk("a", "")}, {data: sglangChunk("b", "")}, {data: sglangChunk("c", "stop")}, {data: "[DONE]"}}, nil, nil))
+		// The upstream is still streaming when the client writer panics
+		// (A03-W10: the writer drains on its own goroutine — the panic ends
+		// the run, the upstream is aborted, close() keeps the charge). A
+		// panic after the upstream ended is the drain's case below.
+		hold := make(chan struct{})
+		defer close(hold)
+		u.setRespond(sseRespond([]sseStep{{data: sglangChunk("a", "")}, {data: sglangChunk("b", "")}, {hold: hold}, {data: sglangChunk("c", "stop")}, {data: "[DONE]"}}, nil, nil))
 		rig, m := streamMeterRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
 		var count atomic.Int64
 		returned := make(chan struct{})
@@ -383,6 +408,57 @@ func TestStreamPanicUnderTheWriterLock(t *testing.T) {
 			}
 		case <-time.After(3 * time.Second):
 			t.Error("the client's read did not end")
+		}
+	})
+	t.Run("the client writer panics after the upstream ended", func(t *testing.T) {
+		// A03-W10 hardening 1 (Fremd-Review 2 F3b): the lease ended with the
+		// upstream, the reservation — the consumer's slot — stays open while
+		// the client writer drains; a panic of the writer during the drain
+		// ends it through close(): Keep after wire contact, the rule of a
+		// panic (W02-08 F4-2, exit 20 again). The panic still reaches
+		// oai.Recover, nothing is left.
+		sink := captureLog(t)
+		end := newUpstreamEnd()
+		u := newUpstream(t, "")
+		u.setRespond(sseRespond([]sseStep{{data: sglangChunk("a", "")}, {data: sglangChunk("b", "")}, {data: sglangChunk("c", "stop")}, {data: sglangUsage}, {data: "[DONE]"}}, nil, end))
+		rig, m := streamMeterRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
+		var count atomic.Int64
+		returned := make(chan struct{})
+		gate := make(chan struct{})
+		open := sync.OnceFunc(func() { close(gate) })
+		defer open() // a failed check must not leave the writer parked for the next case
+		url := serveUnwaited(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer close(returned)
+			defer func() { _ = recover() }()
+			rig.router.ServeHTTP(gatedPanicWriter{relayPanicWriter: relayPanicWriter{ResponseWriter: w, n: 2, count: &count}, gate: gate}, r)
+		}))
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		go func() { _ = postStream(ctx, t, &httptest.Server{URL: url}, streamBody("chat")) }()
+		if !end.wait(5*time.Second) || end.canceled {
+			t.Fatal("the upstream did not run to its end")
+		}
+		if !waitHeld(rig.disp, u.srv.URL, 0, 2500*time.Millisecond) {
+			t.Fatal("the lease did not end with the upstream")
+		}
+		time.Sleep(50 * time.Millisecond)
+		if got := m.endsOf(); got != "" {
+			t.Fatalf("ends %q while the writer drains, want none (the slot ends at the drain's end)", got)
+		}
+		open() // now the writer reaches its second frame and panics
+		select {
+		case <-returned:
+		case <-time.After(6 * time.Second):
+			t.Fatal("the handler did not return within 6 s")
+		}
+		if got := m.endsOf(); got != "keep" {
+			t.Fatalf("ends %s, want keep (a panic after wire contact ends the reservation through close())", got)
+		}
+		if !waitHeld(rig.disp, u.srv.URL, 0, 2*time.Second) || !waitFor(2*time.Second, func() bool { return rig.budget.InUse() == 0 && writerGoroutines() == 0 }) {
+			t.Fatalf("lease, budget %d or writer goroutines %d left", rig.budget.InUse(), writerGoroutines())
+		}
+		if !recovered(sink, "panic in the relay's write") {
+			t.Error("oai.Recover logged no recovered panic of the client writer")
 		}
 	})
 	t.Run("the header source panics at the grace commit", func(t *testing.T) {
@@ -508,5 +584,72 @@ func TestStreamMeterDeadlineWithAConnectionKeeps(t *testing.T) {
 	}
 	if held != wireReservation || m.endsOf() != "keep" {
 		t.Errorf("the bucket holds %d tokens (ends %s), want the reservation %d kept (the writer may still write)", held, m.endsOf(), wireReservation)
+	}
+}
+
+// settlePanicMeter is the rig's endMeter whose reservations panic in Settle —
+// on the handler's goroutine, in answerStream's book: since hardening 1
+// (Fremd-Review 2 F3b) after the relay's drain, no longer at the upstream's
+// end.
+type settlePanicMeter struct{ *endMeter }
+
+func (m settlePanicMeter) Admit(ctx context.Context, ca *auth.ConsumerAuth, a modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
+	res, ref := m.endMeter.Admit(ctx, ca, a, est)
+	if res == nil {
+		return nil, ref
+	}
+	return settlePanicReservation{res}, nil
+}
+
+type settlePanicReservation struct{ oai.LimitReservation }
+
+func (settlePanicReservation) Settle(dispatch.Usage) {
+	panic("A03-W10: the meter panics at its end")
+}
+
+// TestRelayWriterJoinedOnAReaderPanic (Fremd-Review 1 F2, through the route):
+// the relay's writer is stuck in a write to a client that does not read, the
+// meter panics at its end — since hardening 1 (F3b) the meter ends after the
+// drain, so the writer is cut by client_write_window (500 ms) first; the
+// handler returns with no goroutine left in the stream writer and the panic
+// reaches oai.Recover. The join of a writer that still runs when the reader
+// panics is pinned without the route: TestRelayCloseJoinsTheWriter (R13).
+func TestRelayWriterJoinedOnAReaderPanic(t *testing.T) {
+	sink := captureLog(t)
+	u := newUpstream(t, "")
+	u.setRespond(sseRespond(bigFrames(8, 32<<10, 0), nil, nil))
+	m := newEndMeter()
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings,
+		withStream(40*time.Second, 15*time.Second, 500*time.Millisecond),
+		withDeps(func(d *oai.Deps) { d.Limiter = settlePanicMeter{m} }))
+	returned := make(chan int, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { returned <- writerGoroutines() }()
+		defer func() { _ = recover() }()
+		rig.router.ServeHTTP(w, r)
+	}))
+	srv.Listener = smallBufListener{srv.Listener}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.(*net.TCPConn).SetReadBuffer(4096)
+	body := streamBody("chat")
+	if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: ctx\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-returned:
+		if n != 0 {
+			t.Fatalf("%d goroutines still in the stream writer when the handler returned — close() did not join the relay's writer", n)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the handler did not return")
+	}
+	if !recovered(sink, "the meter panics at its end") {
+		t.Error("oai.Recover logged no recovered panic of the meter")
 	}
 }

@@ -331,6 +331,12 @@ type Request struct {
 	// per-request bound on continuations — each request asks for at most one
 	// at a time, so their number is bounded by the requests in flight.
 	Continuation bool
+	// Stream marks a streamed wire call (design/03 §4.15, wave A03-W10): it
+	// selects which abort_settle_ms field of the target applies when the
+	// lease ends after its run context did (settle.go) — stream or
+	// nonstream. The /v1 planner sets it from the request (A03-W8 helper);
+	// every in-house call site leaves it false. It changes nothing else.
+	Stream bool
 }
 
 // Wrap error doctrine (K1, binding since MW1): the two cancel causes WRAP

@@ -62,6 +62,11 @@ type dispatchTarget struct {
 	// foreign-load detector contract); held_internal + held_external == held.
 	Held     int `json:"held"`
 	Inflight int `json:"inflight"`
+	// Settling is the part of held that settles (A03-W10, design/03 §4.10
+	// no. 2): released by its caller after its run ended, still booked until
+	// the target's abort_settle_ms has passed — the engine still runs it.
+	// What runs on the caller side is held − settling.
+	Settling int `json:"settling"`
 	// The external classes (A03-W3, design/03 §4.14) — server-admin only:
 	// the internal/external split (held_external counts the leases of both
 	// external classes), the internal partition R, the external offer and
@@ -208,6 +213,7 @@ func buildDispatchAdmin(snap dispatch.Snapshot, enforcing bool, guardAt, digestA
 			HeraldScope:         string(t.HeraldScope),
 			Held:                t.Held,
 			Inflight:            t.Inflight,
+			Settling:            t.Settling,
 			HeldInternal:        t.HeldInternal,
 			HeldExternal:        t.HeldExternal,
 			InflightInternal:    t.InflightInternal,

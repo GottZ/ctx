@@ -1531,6 +1531,10 @@ const (
 //     it narrows; above it the setting would claim a read the transport never
 //     delivers.
 //   - gateway.max_stream_frame_bytes <= 4 MiB: the stream reader's frame cap.
+//   - gateway.stream_relay_buffer_bytes >= gateway.max_stream_frame_bytes +
+//     oai.RelayRecordHeader (A03-W10): the relay buffer holds one frame at
+//     the cap, or such a frame could never be relayed (every stream that
+//     carries one would be cut as an overflow).
 //   - gateway.request_deadline < 600 s: the SDKs' default timeout.
 //   - gateway.stream_commit_grace <= 50 s: under a typical proxy idle.
 //   - gateway.inflight_budget >= one request at every cap: 26 ×
@@ -1553,7 +1557,8 @@ const (
 //     route books before the check — the deepest request at a cap up to
 //     128 KiB got 503 at the floor without it, hardening 5 B-2) plus the
 //     largest response share — 2 × gateway.max_response_bytes, 2 ×
-//     gateway.max_stream_frame_bytes, or 4 B × gateway.embedding_max_floats
+//     gateway.max_stream_frame_bytes + gateway.stream_relay_buffer_bytes (a
+//     stream's relay buffer, A03-W10), or 4 B × gateway.embedding_max_floats
 //     plus 64 KiB (design/02 §4.2.1). A smaller budget could never serve such a
 //     request, and the client would read "overloaded, retry in 1 s" forever.
 //     The defaults need 226.35 MiB (237 340 800 B) of their 256 MiB; the
@@ -1610,6 +1615,8 @@ func validateGateway(c *Config) []Issue {
 		{"gateway.max_response_bytes", g.MaxResponseBytes},
 		{"gateway.max_stream_frame_bytes", g.MaxStreamFrameBytes},
 		{"gateway.embedding_max_floats", g.EmbeddingMaxFloats},
+		{"gateway.stream_relay_buffer_bytes", g.StreamRelayBufferBytes},
+		{"gateway.stream_min_drain_rate", g.StreamMinDrainRate},
 		{"gateway.default_max_tokens", g.DefaultMaxTokens},
 		{"gateway.max_output_tokens_ceiling", g.MaxOutputTokensCeiling},
 		{"gateway.tenant_alias_ceiling.max_output_tokens", g.TenantAliasCeiling.MaxOutputTokens},
@@ -1628,6 +1635,7 @@ func validateGateway(c *Config) []Issue {
 		{"gateway.stream_commit_grace", g.StreamCommitGrace},
 		{"gateway.keepalive_interval", g.KeepaliveInterval},
 		{"gateway.client_write_window", g.ClientWriteWindow},
+		{"gateway.stream_min_drain_window", g.StreamMinDrainWindow},
 		{"gateway.request_timeout", g.RequestTimeout},
 		{"gateway.request_deadline", g.RequestDeadline},
 		{"gateway.tenant_alias_ceiling.timeout", g.TenantAliasCeiling.Timeout},
@@ -1642,6 +1650,10 @@ func validateGateway(c *Config) []Issue {
 	}
 	if g.MaxStreamFrameBytes > gatewayFrameCeiling {
 		bad("gateway.max_stream_frame_bytes", fmt.Sprintf("gateway.max_stream_frame_bytes (%d) must not exceed the stream reader's frame cap (%d)", g.MaxStreamFrameBytes, gatewayFrameCeiling))
+	}
+	if g.StreamRelayBufferBytes > 0 && g.MaxStreamFrameBytes > 0 && int64(g.StreamRelayBufferBytes) < int64(g.MaxStreamFrameBytes)+oai.RelayRecordHeader {
+		bad("gateway.stream_relay_buffer_bytes", fmt.Sprintf("gateway.stream_relay_buffer_bytes (%d) must hold one frame at the frame cap: >= gateway.max_stream_frame_bytes (%d) + %d (the relay's record header) — a frame at the cap could never be relayed",
+			g.StreamRelayBufferBytes, g.MaxStreamFrameBytes, oai.RelayRecordHeader))
 	}
 	if g.RequestDeadline >= gatewaySDKTimeout {
 		bad("gateway.request_deadline", fmt.Sprintf("gateway.request_deadline (%v) must stay below the OpenAI SDKs' default timeout (%v) — the SDK would resend a request still running", g.RequestDeadline, gatewaySDKTimeout))
@@ -1772,7 +1784,11 @@ func gatewayRequestNeed(n int64) int64 {
 func gatewayResponseShare(g *GatewayConfig) int64 {
 	return max(
 		gatewayMulSat(gatewayResponseCopies, int64(g.MaxResponseBytes)),
-		gatewayMulSat(gatewayResponseCopies, int64(g.MaxStreamFrameBytes)),
+		// A stream: one frame raw plus rewritten, and its relay buffer
+		// (A03-W10), which the route books in the request's ledger before it
+		// allocates it — at the defaults 2 + 2 MiB, below the non-stream share
+		// of 8 MiB, so the default floor stays where it was.
+		gatewayAddSat(gatewayMulSat(gatewayResponseCopies, int64(g.MaxStreamFrameBytes)), max(int64(g.StreamRelayBufferBytes), 0)),
 		gatewayAddSat(gatewayMulSat(gatewayFloatBytes, int64(g.EmbeddingMaxFloats)), gatewayEmbedEncoderReserve),
 	)
 }

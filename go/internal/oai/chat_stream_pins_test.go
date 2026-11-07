@@ -153,16 +153,20 @@ func TestPinStreamReserveIsTwoFrames(t *testing.T) {
 		t.Fatalf("%d upstream requests, want 1", len(raws))
 	}
 	const upstreamSlack = 8 // the upstream body is booked at its encoder's size bound
+	// A03-W10: the request share carries the stream's relay buffer (2 MiB
+	// at the default), booked before it is made — the default budget holds
+	// 63 such streams (N-3: 127 before the relay).
 	b, depth := int64(len(body)), oai.JSONDepth([]byte(body))
-	share := max(3*b, b+depth*jsonStateBytesPerLevel+int64(len(raws[0])))
+	relay := rig.settings.Load().StreamRelayBufferBytes
+	share := max(3*b, b+depth*jsonStateBytesPerLevel+int64(len(raws[0]))+relay)
 	want := share + 2*frame
 	if inUse < want || inUse > want+upstreamSlack {
-		t.Errorf("in-flight budget in use during the stream: %d bytes, want the request share max(3 × %d, %d + %d × %d + %d upstream) = %d + 2 × %d (frame cap) = %d (+ ≤ %d)",
-			inUse, b, b, depth, jsonStateBytesPerLevel, len(raws[0]), share, frame, want, upstreamSlack)
+		t.Errorf("in-flight budget in use during the stream: %d bytes, want the request share max(3 × %d, %d + %d × %d + %d upstream + %d relay buffer) = %d + 2 × %d (frame cap) = %d (+ ≤ %d)",
+			inUse, b, b, depth, jsonStateBytesPerLevel, len(raws[0]), relay, share, frame, want, upstreamSlack)
 	}
 	const defaultBudget = 256 << 20 // the production default of gateway.inflight_budget
-	if n := defaultBudget / inUse; n != 127 {
-		t.Errorf("the default budget holds %d such streams, want 127 (N-3)", n)
+	if n := defaultBudget / inUse; n != 63 {
+		t.Errorf("the default budget holds %d such streams, want 63 (N-3 with the relay buffer; 127 before A03-W10)", n)
 	}
 	if a.status != http.StatusOK || a.dones() != 1 {
 		t.Errorf("answer %d dones %d: %q", a.status, a.dones(), a.raw)
