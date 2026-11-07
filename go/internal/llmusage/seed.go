@@ -13,9 +13,9 @@ import (
 // completion) and calls of the day, the tokens of the month, and the
 // provider-reported external cost of the month.
 type ConsumerUsage struct {
-	ConsumerID, TenantID, Pipeline string
+	ConsumerID, TenantID, Pipeline   string
 	DayTokens, DayCalls, MonthTokens int64
-	MonthExternalCost               float64
+	MonthExternalCost                float64
 }
 
 // seedSQL is the boot seed of the meter (design/06 §4.2 "Boot-Seed", wave

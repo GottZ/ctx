@@ -705,6 +705,12 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	// source; a rebuild here missed a reserve reloaded since the request's
 	// settings snapshot and a limiter without the capacity header).
 	c.meterHeld = res.Held()
+	// The row the shutdown's forced settle writes should the request still
+	// be open after the HTTP drain (W06-13 (e)).
+	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
+		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID,
+			Gateway: llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil}}
+	}, string(c.required))
 	return true
 }
 
@@ -1010,6 +1016,9 @@ func (c *chatCall) leaseStats(st *walkState) {
 func (c *chatCall) book(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState, out chatOutcome) {
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
 		c.endMeter(st)
+		if forcedEnded(c.limit) {
+			return // the shutdown's forced settle wrote the request's row (W06-13)
+		}
 		c.record(plan, served, attempts, err, st, out)
 	}
 }

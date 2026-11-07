@@ -394,6 +394,19 @@ func (r meterReservation) Settle(u dispatch.Usage) {
 	r.Reservation.Settle(keyquota.Usage{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens})
 }
 
+// OnForcedSettle registers the route's row writer for the shutdown's forced
+// settle (W06-13): the meter's estimate arrives as dispatch.Usage.
+// AddStreamed and Forced are the meter's.
+func (r meterReservation) OnForcedSettle(fn func(dispatch.Usage)) {
+	r.Reservation.OnForcedSettle(func(u keyquota.Usage) {
+		fn(dispatch.Usage{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens})
+	})
+}
+
+// The production reservation carries the forced-settle half (a route skips
+// it for a reservation without it).
+var _ oai.ForcedSettler = meterReservation{}
+
 // chainFederation binds the federation half of the chain build (F-W9
 // handover, lead decision W02-07 no. 1): the floor is the PeerIngress's
 // policy, the scan runs over the body, and the filter gets the request's

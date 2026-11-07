@@ -98,6 +98,7 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 			return st.streamErr
 		}
 		st.runes += chunk.runes
+		addStreamed(c.limit, chunk.runes) // the forced settle's completion term (W06-13 (d))
 		if chunk.usage != nil {
 			st.usage = chunk.usage
 		}

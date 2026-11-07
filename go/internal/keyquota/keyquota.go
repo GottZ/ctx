@@ -33,6 +33,7 @@
 package keyquota
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -183,6 +184,16 @@ func (e Estimate) Tokens(op Op, l Limits) int64 {
 		return int64(promptguard.TokenEstimate(e.InputRunes))
 	}
 	return 0
+}
+
+// promptTokens is the prompt share of e for op: TokenEstimate of the chat
+// prompt runes, of the input runes for embed and rerank — the prompt term of
+// a forced settle's estimate (design/06 §4.2 "Usage-Quellen beim Settle").
+func (e Estimate) promptTokens(op Op) int64 {
+	if op == OpChat {
+		return int64(promptguard.TokenEstimate(e.PromptRunes))
+	}
+	return int64(promptguard.TokenEstimate(e.InputRunes))
 }
 
 // Usage is what a request really cost (the backend's usage object).
@@ -343,7 +354,7 @@ type budgetKey struct {
 // open counts those reservations: counters with an open reservation are
 // never dropped.
 type usage struct {
-	day, month                         int64
+	day, month                          int64
 	dayTokens, dayRequests, monthTokens int64
 	reserved                            int64
 	open                                int64
@@ -514,8 +525,8 @@ func (m *Meter) MarkSeeded() { m.seeded.Store(true) }
 // design/06 §4.2 "Boot-Seed"): its tokens and requests of the day and its
 // tokens of the month.
 type SeedRow struct {
-	ConsumerID, TenantID string
-	Op                   Op
+	ConsumerID, TenantID                string
+	Op                                  Op
 	DayTokens, DayRequests, MonthTokens int64
 }
 
@@ -648,6 +659,7 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 		LimitTokens: tok.cap, RemainingTokens: tok.remaining(st.tok, now), ResetTokens: time.Duration(backlog(st.tok, now)),
 	}
 	r := &Reservation{m: m, key: key, lane: s.Lane, tpm: l.TPM, charged: tok.cost(n), held: n, shadow: now, headers: h, budget: held}
+	r.promptEst, r.maxCompletion = e.promptTokens(s.Op), int64(max(e.MaxCompletion, 0))
 	st.add(r)
 	return r, Decision{Allowed: true, Retryable: true, Headers: h}
 }
@@ -788,6 +800,99 @@ type Reservation struct {
 	// holds held tokens of it in reserved until the reservation ends.
 	budget [3]*usage
 	once   sync.Once
+	// The forced settle's inputs (W06-13 (d)): the prompt share of the
+	// admission's estimate, the request's completion maximum (0 = none),
+	// the runes the route handed on (AddStreamed) and the route's writer
+	// (OnForcedSettle); forced reports that ForceSettleAll ended it.
+	promptEst, maxCompletion int64
+	streamed                 atomic.Int64
+	finalizer                atomic.Pointer[func(Usage)]
+	forced                   atomic.Bool
+}
+
+// AddStreamed counts runes a stream handed on to its client (design/06 §4.2:
+// the completion term of an estimate). Safe from the relay's goroutine; a
+// negative count counts nothing.
+func (r *Reservation) AddStreamed(runes int) {
+	if runes > 0 {
+		r.streamed.Add(int64(runes))
+	}
+}
+
+// OnForcedSettle registers fn as the writer of the request's one row should
+// the shutdown's ForceSettleAll end the reservation: fn gets the estimate the
+// meter booked and runs at most once, and only when the forced settle — not
+// the route's own end — ended the reservation (Forced). The last
+// registration wins.
+func (r *Reservation) OnForcedSettle(fn func(Usage)) {
+	if fn != nil {
+		r.finalizer.Store(&fn)
+	}
+}
+
+// Forced reports whether ForceSettleAll ended the reservation: its writer
+// then wrote (or writes) the row, and the route writes none.
+func (r *Reservation) Forced() bool { return r.forced.Load() }
+
+// ForceSettleAll ends every reservation still open with usage=estimated and
+// calls its writer once (design/06 §4.2 "Shutdown-Reihenfolge" step 2, B-06-9:
+// after srv.Shutdown, before the rejection ledger's flush and the llmlog
+// settle, so the rows of requests the HTTP drain left running reach the
+// rollup the next boot seeds from). The estimate is the one of a stream cut
+// short (B-06-8): prompt = TokenEstimate of the admission's prompt or input
+// runes, completion = TokenEstimate of the runes handed on (AddStreamed), at
+// most the request's maximum; the meter books it like a route books a
+// stream's estimate — below what the reservation holds Settle, else Keep. A
+// reservation that ends meanwhile through its route ends once all the same
+// (one sync.Once): exactly one of the two ends it, and the writer runs only
+// for the forced one. A request a revoked key ended (W01-8) is no different.
+// It stops before the next reservation when ctx is done and returns the
+// number it ended.
+func (m *Meter) ForceSettleAll(ctx context.Context) int {
+	m.mu.Lock()
+	var open []*Reservation
+	for _, st := range m.state {
+		open = append(open, st.open...)
+	}
+	m.mu.Unlock()
+	n := 0
+	for _, r := range open {
+		if ctx.Err() != nil {
+			break
+		}
+		if r.forceSettle() {
+			n++
+		}
+	}
+	return n
+}
+
+// forceSettle ends r with its estimate unless it ended already; it reports
+// whether it did. The writer runs after the meter booked, outside the once.
+func (r *Reservation) forceSettle() bool {
+	var u Usage
+	ran := false
+	r.once.Do(func() {
+		completion := int64(promptguard.TokenEstimate(int(min(r.streamed.Load(), math.MaxInt32))))
+		if r.maxCompletion > 0 {
+			completion = min(completion, r.maxCompletion)
+		}
+		u = Usage{PromptTokens: int(min(r.promptEst, math.MaxInt32)), CompletionTokens: int(completion)}
+		r.forced.Store(true)
+		ran = true
+		actual := satAdd(r.promptEst, completion)
+		if actual >= r.held {
+			r.m.end(r, 0, r.held)
+			return
+		}
+		r.m.end(r, dim{limit: r.tpm}.cost(actual)-r.charged, actual)
+	})
+	if ran {
+		if fn := r.finalizer.Load(); fn != nil {
+			(*fn)(u)
+		}
+	}
+	return ran
 }
 
 // Settle books the request's real tokens: the token bucket moves by

@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -82,4 +84,75 @@ func TestGatewayBootSeedRestoresTheBudget(t *testing.T) {
 // urgentConsumerOf is an urgent app consumer of tenant.
 func urgentConsumerOf(id, tenant string) *auth.ConsumerAuth {
 	return &auth.ConsumerAuth{IsValid: true, ConsumerID: id, TenantID: tenant, Kind: auth.KindApp, AdmissionLane: handler.LaneUrgent}
+}
+
+// TestGatewayRestartDuringOpenReservations is gate (d) (B-06-9) on the
+// meter and the row writer: five reservations are open when the process
+// stops (streams that relayed text, no usage chunk), one request settled
+// before; ForceSettleAll ends the five with their estimate and their writers
+// put the rows into context_llm_log, the llmlog settle lands them, and the
+// next process's seed sees at least what the meter had used before the
+// restart. Red against the shutdown without ForceSettleAll: the open
+// requests' tokens are lost and the budget is free again.
+func TestGatewayRestartDuringOpenReservations(t *testing.T) {
+	for _, force := range []bool{true, false} {
+		t.Run(map[bool]string{true: "with ForceSettleAll", false: "without (the old shutdown)"}[force], func(t *testing.T) {
+			pool := testdb.SetupTestDB(t)
+			ctx := context.Background()
+			var consumer string
+			if err := pool.QueryRow(ctx, `INSERT INTO context_model_consumers (tenant_id, label) VALUES ($1::uuid, 'w0613-restart') RETURNING id::text`,
+				store.DefaultTenantID).Scan(&consumer); err != nil {
+				t.Fatal(err)
+			}
+			cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_DAILY_TOKENS_DEFAULT": "1000000", "CTX_GATEWAY_CONSUMER_CONCURRENCY_DEFAULT": "8"})
+			gw := newModelGateway(pool, cfgStore)
+			l := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+			ca := urgentConsumerOf(consumer, store.DefaultTenantID)
+			est := oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 4000, ClientMaxTokens: true, PromptRunes: 900}
+			row := func(u dispatch.Usage, usage string) llmlog.GatewayRow {
+				return llmlog.GatewayRow{Pipeline: llmlog.PipelineGatewayChat, ConsumerID: consumer,
+					Gateway:   llmlog.Gateway{Alias: "w0613", Usage: usage, Finish: llmlog.FinishStop},
+					Telemetry: llmlog.Entry{Model: "m", Host: "h", PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens}}
+			}
+			res, ref := l.Admit(ctx, ca, modelalias.Alias{}, est)
+			if ref != nil {
+				t.Fatal(ref)
+			}
+			done := dispatch.Usage{PromptTokens: 300, CompletionTokens: 200}
+			res.Settle(done)
+			llmlog.RecordGateway(pool, row(done, llmlog.UsageBackend))
+			usedBefore := int64(500)
+			for i := range 5 {
+				res, ref := l.Admit(ctx, ca, modelalias.Alias{}, est)
+				if ref != nil {
+					t.Fatal(ref)
+				}
+				fs := res.(oai.ForcedSettler)
+				fs.AddStreamed(180 * (i + 1))
+				fs.OnForcedSettle(func(u dispatch.Usage) { llmlog.RecordGateway(pool, row(u, llmlog.UsageEstimated)) })
+				usedBefore += int64(promptguard.TokenEstimate(900) + promptguard.TokenEstimate(180*(i+1)))
+			}
+			if force {
+				if n := gw.meter.ForceSettleAll(ctx); n != 5 {
+					t.Fatalf("ForceSettleAll ended %d, want 5", n)
+				}
+			}
+			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if err := llmlog.Settle(sctx, pool); err != nil {
+				t.Fatal(err)
+			}
+			next := *cfgStore.Snapshot()
+			next.Gateway.ChatDailyTokensDefault = int(usedBefore)
+			if err := cfgStore.Replace(&next); err != nil {
+				t.Fatal(err)
+			}
+			gw2 := newModelGateway(pool, cfgStore) // the restart
+			l2 := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw2.meter).Limiter
+			_, ref = l2.Admit(ctx, ca, modelalias.Alias{}, oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 1, ClientMaxTokens: true})
+			if exhausted := ref != nil && ref.Code == oai.CodeInsufficientQuota; exhausted != force {
+				t.Fatalf("after the restart with a budget of the %d tokens used before: refusal %+v — want exhausted=%v", usedBefore, ref, force)
+			}
+		})
+	}
 }
