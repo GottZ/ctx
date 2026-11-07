@@ -176,6 +176,7 @@ func TestEmbedDecodeShareBeforeAndAfterTheAcquire(t *testing.T) {
 // answer but not the grown share ⇒ 503 server_overloaded after block one,
 // block two is never sent.
 func TestEmbedLearnedDimensionGrowsTheDecodeShare(t *testing.T) {
+	skipUnderRace(t, "the decode share grown to a learned dimension of 1.2 million components (two blocks read, decoded and encoded up to 16 MiB)")
 	const (
 		maxFloats = 100_000
 		learned   = 1_200_000

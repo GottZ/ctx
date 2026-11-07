@@ -108,6 +108,7 @@ func TestEmbedMalformedAnswersAreUpstreamErrors(t *testing.T) {
 // bookings plus nearCapSlack. Red before hardening 6: the entries decoded
 // past the reserve (≈ 85 MiB of structs for the OpenAI form).
 func TestEmbedEmptyEntriesAnswerStaysInTheReserves(t *testing.T) {
+	skipUnderRace(t, "the live heap of decoding an 8-MiB answer of empty entries (HeapInuse against the bookings + nearCapSlack)")
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(parseMemGoMemLimit))
 	for _, tc := range []struct {
 		name   string
