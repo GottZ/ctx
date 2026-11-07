@@ -93,9 +93,10 @@ func (p *relayPanic) Unwrap() error {
 // buffer, which the next rewrite overwrites (rewriteChunkInto). A record goes
 // into the ring; an oversize chunk into one of two buffers of the relay's
 // own (bigs) — one may wait while the writer writes the other — each grown
-// to the largest oversize chunk and booked in the request's ledger before it
-// is made (book; a refusal is ErrBudgetExhausted, the attempt ends like a
-// refused upstream body).
+// by doubling to the largest oversize chunk, and every buffer booked in full
+// in the request's ledger before it is made, the one it replaces staying
+// booked as the garbage it is (book; a refusal is ErrBudgetExhausted, the
+// attempt ends like a refused upstream body).
 type streamRelay struct {
 	write  func([]byte) error // the stream writer's frame
 	stop   <-chan struct{}    // the run's end: the writer drops what is queued
@@ -170,10 +171,15 @@ func (rl *streamRelay) put(chunk []byte) error {
 		}
 		buf := rl.bigs[slot]
 		if cap(buf) < len(chunk) {
-			if rl.book != nil && !rl.book(int64(len(chunk)-cap(buf))) {
+			// Doubling, booked gross: the buffer it replaces stays on the
+			// heap until the next collection, so every buffer made is booked
+			// in full (Fremd-Review F2: a growth booked net left k growing
+			// chunks 220 × their booking in allocations).
+			c := max(len(chunk), 2*cap(buf))
+			if rl.book != nil && !rl.book(int64(c)) {
 				return ErrBudgetExhausted
 			}
-			buf = make([]byte, 0, len(chunk))
+			buf = make([]byte, 0, c)
 		}
 		rl.bigs[slot] = append(buf[:0], chunk...)
 		rl.big, rl.bigAt, rl.bigIdx = rl.bigs[slot], rl.puts, slot

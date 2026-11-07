@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -105,5 +106,37 @@ func TestFrameLineWritesTheLineAsItIs(t *testing.T) {
 	})
 	if allocs != 0 {
 		t.Errorf("frameLine allocated %.1f times per line, want 0", allocs)
+	}
+}
+
+// TestRelayOversizeGrowthBooksWhatItAllocates (Fremd-Review F2): k
+// oversize chunks that grow one by one make the relay's oversize buffers
+// grow; every buffer made is booked in full, so the booking covers the
+// allocations (a net booking of the growth covered 1/220 of them).
+func TestRelayOversizeGrowthBooksWhatItAllocates(t *testing.T) {
+	took := make(chan struct{}, 1)
+	rl := newStreamRelay(time.Time{}, make([]byte, 64), func([]byte) error { took <- struct{}{}; return nil }, make(chan struct{}), nil, drainMeter{}, nil)
+	var booked int64
+	rl.book = func(n int64) bool { booked += n; return true }
+	const k = 200
+	chunks := make([][]byte, k)
+	for i := range chunks {
+		chunks[i] = relayChunk(uint64(i), 16<<10+i<<10)
+	}
+	runtime.GC()
+	var a, b runtime.MemStats
+	runtime.ReadMemStats(&a)
+	for _, c := range chunks {
+		if err := rl.put(c); err != nil {
+			t.Fatalf("put %d B: %v", len(c), err)
+		}
+		<-took
+	}
+	runtime.ReadMemStats(&b)
+	rl.wait()
+	alloc := int64(b.TotalAlloc - a.TotalAlloc)
+	t.Logf("FOLGE-S F2: %d oversize chunks of 16 KiB … %d KiB: booked %d B, allocated %d B", k, 16+k-1, booked, alloc)
+	if booked+16<<10 < alloc {
+		t.Errorf("the oversize buffers booked %d B and allocated %d B, want the booking to cover the allocation (every buffer made booked in full)", booked, alloc)
 	}
 }
