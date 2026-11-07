@@ -260,7 +260,7 @@ func InflightBudget(b *Budget, get func() Settings) func(http.Handler) http.Hand
 			switch cl := r.ContentLength; {
 			case cl > 0:
 				if cl > math.MaxInt64/requestReserveFactor || !res.Grow(requestReserveFactor*cl) {
-					WriteOverloaded(w)
+					refuseOverloaded(AccessRecordFrom(r.Context()), w)
 					return
 				}
 			case cl < 0 && r.Body != nil && r.Body != http.NoBody:

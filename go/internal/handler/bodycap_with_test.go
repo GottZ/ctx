@@ -43,7 +43,7 @@ func TestMaxBodySizeStrictWithGatewayWriter(t *testing.T) {
 		_, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
 	})
-	h := MaxBodySizeStrictWith(func() int64 { return limit }, oai.WriteRequestTooLarge)(inner)
+	h := MaxBodySizeStrictWith(func() int64 { return limit }, oai.RefuseRequestTooLarge)(inner)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(strings.Repeat("a", 2048))))
@@ -77,7 +77,7 @@ func TestMaxBodySizeStrictWithGatewayWriter(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(strings.Repeat("a", 2048)))
 	req.ContentLength = -1
 	var readErr error
-	MaxBodySizeStrictWith(func() int64 { return limit }, oai.WriteRequestTooLarge)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	MaxBodySizeStrictWith(func() int64 { return limit }, oai.RefuseRequestTooLarge)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		_, readErr = io.ReadAll(r.Body)
 	})).ServeHTTP(httptest.NewRecorder(), req)
 	var mbe *http.MaxBytesError

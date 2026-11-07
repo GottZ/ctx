@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 166,
-    "migration_count": 54,
+    "migration_max": 167,
+    "migration_count": 55,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -17,10 +17,10 @@
       "min_version": "1.0"
     },
     "timescaledb": {
-      "min_version": "2.30.1"
+      "min_version": "2.31.0"
     },
     "vector": {
-      "min_version": "0.8.6"
+      "min_version": "0.8.7"
     }
   },
   "tables": {
@@ -1852,6 +1852,83 @@
           "name": "consumer_id",
           "type": "uuid",
           "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_llm_rejections_hourly": {
+      "columns": [
+        {
+          "name": "bucket_start",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "consumer_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "op",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "model_alias",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "dispatch_class",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "target",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "detail",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "n",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "wait_ms_sum",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "wait_n",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
           "storage": "p"
         }
       ],
@@ -5334,6 +5411,12 @@
     "idx_llm_log_pipeline": {
       "def_hash": "1020ca37593bb524a6fd456e8c4a241d30b313aed45a98c4cf83fdbab3d37eea"
     },
+    "idx_llm_rejections_bucket": {
+      "def_hash": "2bdc46170c4c02e44f7ae2c94f273ebc01cbea468f25295288a8151a08b443bb"
+    },
+    "idx_llm_rejections_consumer": {
+      "def_hash": "a34c7f9428a154a98c72a4f4075dc889f2c8abdf7c80b875527b05c1f909d865"
+    },
     "idx_llm_usage_bucket": {
       "def_hash": "dc09cef479e88cb5b85f6f533edb4b81e4a84a4b560cb637f13ed726f2d265b9"
     },
@@ -5555,6 +5638,9 @@
     },
     "uq_graph_cat_hue_scope_cat": {
       "def_hash": "e80cfb6737f8b7faa3d0f6c8deacf3dc4c8b83544b289e0d9cbd2bdff066fb5a"
+    },
+    "uq_llm_rejections_hourly": {
+      "def_hash": "4a5a50d017cfa9f943e0eac43810e04f5344a8bff8bf72e2e6ddbe42acd59ba5"
     },
     "uq_llm_usage_hourly": {
       "def_hash": "d653a870c668d587e16a6b81a08dbe187678f6a21c40e6621c92b879b85e5914"

@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/modelkey"
 	"github.com/GottZ/ctx/internal/oai"
 )
@@ -55,16 +56,23 @@ type ModelAuthRejection struct {
 	Code        string
 	RetryAfter  int // seconds; 0 = no Retry-After header
 	ShouldRetry bool
+	// LedgerReason and LedgerDetail are the refusal's entry in the refusal
+	// ledger (W06-12, design/06 §4.1 step 2); empty for a refusal that is a
+	// fault of the server, not a rule (proxy, unavailable, internal).
+	LedgerReason, LedgerDetail string
 }
 
 // The door's rejections. Every 401 is the one rejInvalid — missing,
 // malformed, unknown, revoked, refused by a gate, or a knowledge
 // credential: the answer does not say which.
 var (
-	rejInvalid     = ModelAuthRejection{Status: http.StatusUnauthorized, Code: oai.CodeInvalidAPIKey}
-	rejLocked      = ModelAuthRejection{Status: http.StatusTooManyRequests, Code: oai.CodeRateLimitExceeded}
-	rejProxy       = ModelAuthRejection{Status: http.StatusServiceUnavailable, Code: ModelAuthCodeProxyMisconfigured}
-	rejOverloaded  = ModelAuthRejection{Status: http.StatusServiceUnavailable, Code: ModelAuthCodeOverloaded, RetryAfter: 1}
+	rejInvalid = ModelAuthRejection{Status: http.StatusUnauthorized, Code: oai.CodeInvalidAPIKey,
+		LedgerReason: keyquota.RejectAuth, LedgerDetail: keyquota.DetailInvalidKey}
+	rejLocked = ModelAuthRejection{Status: http.StatusTooManyRequests, Code: oai.CodeRateLimitExceeded,
+		LedgerReason: keyquota.RejectAuth, LedgerDetail: keyquota.DetailLocked}
+	rejProxy      = ModelAuthRejection{Status: http.StatusServiceUnavailable, Code: ModelAuthCodeProxyMisconfigured}
+	rejOverloaded = ModelAuthRejection{Status: http.StatusServiceUnavailable, Code: ModelAuthCodeOverloaded, RetryAfter: 1,
+		LedgerReason: keyquota.RejectCapacity, LedgerDetail: keyquota.DetailAuthOverloaded}
 	rejUnavailable = ModelAuthRejection{Status: http.StatusServiceUnavailable, Code: ModelAuthCodeUnavailable}
 	rejInternal    = ModelAuthRejection{Status: http.StatusServiceUnavailable, Code: oai.CodeInternalError}
 )
@@ -451,11 +459,13 @@ func (d *ModelDoor) countUnavailable(ctx context.Context, c *atomic.Uint64) {
 }
 
 // refuse sets the decision headers, names the code as the refusal reason
-// of the access record (the group's throttled refusal line counts by it)
-// and hands the body to the renderer.
+// of the access record (the group's throttled refusal line counts by it),
+// declares the refusal's ledger entry (W06-12) and hands the body to the
+// renderer.
 func (d *ModelDoor) refuse(w http.ResponseWriter, r *http.Request, rej ModelAuthRejection) {
 	if rec := oai.AccessRecordFrom(r.Context()); rec != nil {
 		rec.Reason = rej.Code
+		rec.NoteRejection(rej.LedgerReason, rej.LedgerDetail)
 	}
 	h := w.Header()
 	if rej.Status == http.StatusUnauthorized {

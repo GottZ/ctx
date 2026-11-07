@@ -688,6 +688,33 @@ Every successful answer carries `x-ratelimit-limit-requests`, `x-ratelimit-remai
 
 The meter lives in the memory of one ctx process: a restart starts with full buckets and no open requests, and two processes behind one load balancer count separately. Daily and monthly budgets follow in later releases.
 
+### Refusal ledger
+
+A refused request writes no LLM-log row (nothing is logged before the wire). It is counted instead: every refusal by a rule of the gateway — authentication, federation, size, budget, model, chain, meter or admission — lands once in an in-memory ledger, which ctxd writes every 10 seconds and at shutdown into `context_llm_rejections_hourly` ([operations — Migration 167](operations.md#migration-167-the-refusal-ledger-of-the-model-api)): per hour, consumer, operation, resolved alias, `reason` and `detail`, with the vain queue wait of the admission refusals. A refused request is counted exactly once and only when it ended as a refusal (status ≥ 400); a stream that already sent its `200` and ends with an error frame is not a refusal.
+
+| Refusal | Status, `code` | `reason` / `detail` |
+|---|---|---|
+| the model-key door refused the key | `401 invalid_api_key` | `auth` / `invalid_key` — `consumer_id` NULL |
+| the door's failure lock | `429 rate_limit_exceeded` | `auth` / `locked` — `consumer_id` NULL |
+| the door's concurrency share is full | `503 auth_overloaded` | `capacity` / `auth_overloaded` — `consumer_id` NULL |
+| a malformed hop header; a loop; the chain too deep | `400`/`508 federation_*` | `federation` / `header_invalid`, `loop`, `depth` |
+| the body is larger than `gateway.max_request_bytes` | `413 request_too_large` | `capacity` / `request_too_large` |
+| the in-flight byte budget cannot hold the request | `503 server_overloaded` | `capacity` / `inflight_budget` |
+| the model does not exist for the key | `404 model_not_found` | `model` / `not_found` |
+| the alias does not serve the operation | `400 model_not_supported` | `model` / `not_supported` |
+| the chain's rules (sensitivity, egress, federation, the tenant gate) left no row | `503 no_eligible_backend` | `capacity` / `egress_denied` |
+| no row of the chain serves the role now | `503 no_eligible_backend` | `capacity` / `not_offered` |
+| the tenant's daily calls or cost budget | `429 insufficient_quota` | `quota` / `tenant_daily_calls`, `tenant_cost` |
+| the request or token bucket of the operation | `429 rate_limit_exceeded` | `rate` / `rate_requests`, `rate_tokens` |
+| the consumer's concurrency | `429 concurrency_limit_exceeded` | `concurrency` |
+| the meter is starting | `429 rate_limit_exceeded` | `capacity` / `warming` |
+| busy: the external queue cap, the wait budget ran out or cannot be met | `429 server_busy` | `capacity` / `server_busy`, `wait_expired` — with the queue wait |
+| no chain row offers the external class | `503 model_unavailable` | `capacity` / `not_offered` |
+
+Not counted: syntax and parameter errors of the body (`400 invalid_json`, `missing_required_parameter`, …), the switched-off flag's `404`, an unknown path or method, internal faults and upstream errors (those are no refusal by a rule), and a request that ends while it runs — the shutdown, the watcher, a client gone, and a request whose key was revoked or expired while it ran: it was admitted, and no reason of the vocabulary describes its end. `model_alias` is the resolved alias name or `_unresolved` for every refusal before the resolution — never the client's string. `dispatch_class` and `target` are kept for `capacity` only; the admission refusal does not know its target origin yet (empty), and a refusal whose wait budget was predicted out counts as `wait_expired` like one that ran out in the queue (the dispatcher's own counters keep that split).
+
+The same counts feed the throttled log: a counted refusal reaches the `gateway rejections` line through the ledger with the ledger's `reason` and its `detail` (the details of the window, comma-separated); a refusal the ledger does not count (the list above) is counted by the access log itself under its error code or `http_<status>`, as before. Either way one refusal is one count, and a consumer gets at most one line per reason and minute.
+
 ### Embeddings (`POST /v1/embeddings`)
 
 The OpenAI embeddings call. `model` is an alias of kind `embedding` (another kind is `400 model_not_supported`). The answer is `{"object":"list","data":[{"object":"embedding","index":i,"embedding":…}, …],"model":<alias>,"usage":{"prompt_tokens":n,"total_tokens":n}}`, one entry per input at its index, `usage` the sum the backends reported. The access-log line and the request's `context_llm_log` row carry the same reported sum; the meter can book more than it — that usage plus the estimate of the inputs a backend had without reporting a usage ([limits](#limits-quotas-and-rate-limit-headers), "Embeddings"), never more than the reservation holds.
@@ -737,7 +764,7 @@ The contract every gateway route writes against (`llmlog.GatewayEntry` / `llmlog
 - **Attribution.** The row names the consumer in `consumer_id`; `api_key_id` is always `NULL` (a row with both is refused by the database). `metadata.gw` (version 1) carries `v`, `op` (`chat`/`embed`/`rerank`), `alias`, `stream`, `hop` (0–16), `claimed_chain` (display only), `peer_pipeline` (ctx peers), `usage` (`backend`/`estimated`), `ttft_ms` (streams), `client_req_id` (`[A-Za-z0-9._:-]{1,128}`, else dropped), `finish` (`stop`, `length`, `tool_calls`, `content_filter`, `error`, `aborted`) and `model_key_id` — never an origin and never a second copy of the consumer. The hourly usage rollup counts such rows as `source = 'gateway'` with the alias.
 - **Bodies.** `gateway.body_logging` (global-only, hot): `none` (default) stores no prompt and no answer (`''`, shown as `bodyless`), `errors` stores the serialized request and the answer only on rows with an error, `full` on every row (a streamed answer is not stored yet — its row carries the request only); each body is capped at 64 KiB with a visible truncation marker. A credentials-class row stays `sealed` under every policy — a tenant's `tenant.devmode` does not open it — and a row with an empty or unknown sensitivity stores no body either.
 - **Errors.** The `error` column of a gateway row is `<class> <status> <code>` (for example `bad_request 400 upstream_rejected`) — never the upstream response body, which can echo the prompt.
-- **Access log.** One INFO line `gateway request` per successful request (`consumer_id`, `model_key_id`, `tenant_id`, `op`, `alias`, `status`, `stream`, token counts, `usage`, `duration_ms`, `queue_wait_ms`, `class`, `hop`, `request_id`), on while `gateway.access_log` is `true` (default). Refusals (status ≥ 400) are never logged per request: they are counted per consumer (empty before authentication) and reason (the error code of the gateway or the model-key door, else `http_<status>`) and written as at most one WARN line `gateway rejections` with `count` and `window="1m"` per minute — the flag's `404` and the door's `401` included. The global `http request` line is not written for these requests: each gateway request is one line or one count.
+- **Access log.** One INFO line `gateway request` per successful request (`consumer_id`, `model_key_id`, `tenant_id`, `op`, `alias`, `status`, `stream`, token counts, `usage`, `duration_ms`, `queue_wait_ms`, `class`, `hop`, `request_id`), on while `gateway.access_log` is `true` (default). Refusals (status ≥ 400) are never logged per request: they are counted per consumer (empty before authentication) and reason — for a refusal the [refusal ledger](#refusal-ledger) counts its `reason`, with the window's details in `detail`; otherwise the error code of the gateway or the model-key door, else `http_<status>` — and written as at most one WARN line `gateway rejections` with `count` and `window="1m"` per minute — the flag's `404` and the door's `401` included. The global `http request` line is not written for these requests: each gateway request is one line or one count.
 
 The keys are listed under [operations](operations.md#environment-variables) (`CTX_GATEWAY_*`).
 

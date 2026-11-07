@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+
+	"github.com/GottZ/ctx/internal/keyquota"
 )
 
 // Error types — the `type` field of the envelope (design/02 §4.10.2). The
@@ -241,10 +243,40 @@ func WriteInvalidAPIKey(w http.ResponseWriter) {
 
 // WriteRequestTooLarge is the 413 of the strict body cap (design/02 §4.2
 // stage 3, mounted after the door, so only an authenticated caller learns
-// the cap). Signature of handler.MaxBodySizeStrictWith's onTooLarge.
+// the cap).
 func WriteRequestTooLarge(w http.ResponseWriter, maxBytes int64) {
 	Write(w, Error{Status: http.StatusRequestEntityTooLarge, Type: TypeInvalidRequest, Code: CodeRequestTooLarge,
 		Message: fmt.Sprintf("The request body exceeds the limit of %d bytes.", maxBytes)})
+}
+
+// RefuseRequestTooLarge is the body cap's refusal as a model group answers
+// it — the signature of handler.MaxBodySizeStrictWith's onTooLarge: the
+// access record's reason, the refusal's ledger entry capacity /
+// request_too_large (W06-12), then WriteRequestTooLarge.
+func RefuseRequestTooLarge(w http.ResponseWriter, r *http.Request, maxBytes int64) {
+	refuseTooLarge(AccessRecordFrom(r.Context()), w, maxBytes)
+}
+
+// refuseTooLarge is RefuseRequestTooLarge on a record in hand (a route that
+// read past the cap); a nil record only writes.
+func refuseTooLarge(rec *AccessRecord, w http.ResponseWriter, maxBytes int64) {
+	if rec != nil {
+		rec.Reason = CodeRequestTooLarge
+	}
+	rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailRequestTooLarge)
+	WriteRequestTooLarge(w, maxBytes)
+}
+
+// refuseOverloaded is the in-flight budget's refusal as a route or the
+// budget stage answers it: the access record's reason, the refusal's ledger
+// entry capacity / inflight_budget (W06-12, design/06 §4.1 step 4), then
+// WriteOverloaded. A nil record only writes.
+func refuseOverloaded(rec *AccessRecord, w http.ResponseWriter) {
+	if rec != nil {
+		rec.Reason = CodeServerOverloaded
+	}
+	rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailInflightBudget)
+	WriteOverloaded(w)
 }
 
 // WriteOverloaded is the 503 of the in-flight budget (design/02 §4.2.1):

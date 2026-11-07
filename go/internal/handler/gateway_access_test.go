@@ -8,6 +8,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/oai"
 )
 
@@ -120,8 +122,10 @@ func TestGatewayAccessLogThrottlesRejections(t *testing.T) {
 		t.Fatalf("lines %v, want exactly two rejection lines", lines)
 	}
 	want := []map[string]any{
-		{"level": "WARN", "consumer_id": "", "reason": oai.CodeInvalidAPIKey, "count": int64(1000), "window": "1m"},
-		{"level": "WARN", "consumer_id": "c-1", "reason": oai.CodeRateLimitExceeded, "count": int64(3), "window": "1m"},
+		// detail is the refusal ledger's (W06-12): empty for a refusal no
+		// stage declared, which the stage counts here directly.
+		{"level": "WARN", "consumer_id": "", "reason": oai.CodeInvalidAPIKey, "detail": "", "count": int64(1000), "window": "1m"},
+		{"level": "WARN", "consumer_id": "c-1", "reason": oai.CodeRateLimitExceeded, "detail": "", "count": int64(3), "window": "1m"},
 	}
 	for i := range want {
 		if !maps.Equal(lines[i], want[i]) {
@@ -135,7 +139,7 @@ func TestGatewayAccessLogThrottlesRejections(t *testing.T) {
 	}
 }
 
-// TestGatewayAccessLogLazyFlush: without the Run goroutine the counts are
+// TestGatewayAccessLogLazyFlush: without the flusher's ticks the counts are
 // not stranded — the first refusal after a window has passed flushes, and
 // the next burst is again at most one line per window.
 func TestGatewayAccessLogLazyFlush(t *testing.T) {
@@ -158,22 +162,82 @@ func TestGatewayAccessLogLazyFlush(t *testing.T) {
 	}
 }
 
-// TestGatewayAccessLogRunFlushesOnStop: Run ends with its context and
-// writes what the window holds, so a shutdown loses no count.
-func TestGatewayAccessLogRunFlushesOnStop(t *testing.T) {
+// TestGatewayAccessLogFlushWritesPending: Flush (the flusher's last step at
+// shutdown) writes what the window holds, so a shutdown loses no count.
+func TestGatewayAccessLogFlushWritesPending(t *testing.T) {
 	e := newGWAccess(t)
 	e.serve(refuse("", "http_404", http.StatusNotFound))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { e.log.Run(ctx); close(done) }()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return after its context ended")
-	}
+	e.log.Flush()
 	if lines := e.sink.lines("gateway rejections"); len(lines) != 1 || lines[0]["count"] != int64(1) {
 		t.Fatalf("lines %v, want the pending count flushed", lines)
+	}
+}
+
+// TestGatewayAccessLogDeclaredRefusalGoesToTheLedger (W06-12): a refusal a
+// stage declared (oai.NoteRejection) is noted in the ledger once — with the
+// record's consumer, op and alias — and NOT counted in the window directly;
+// an undeclared refusal is counted in the window as before; a declaration on
+// a request that did not end as a refusal (status < 400) counts nowhere.
+func TestGatewayAccessLogDeclaredRefusalGoesToTheLedger(t *testing.T) {
+	e := newGWAccess(t)
+	ledger := keyquota.NewLedger(func() time.Time { return e.clock })
+	e.log.ledger = ledger
+	const consumer = "0195f0a0-0000-7000-8000-0000000000c1"
+	declared := func(status int) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			ar := oai.AccessRecordFrom(r.Context())
+			ar.ConsumerID, ar.Op, ar.Reason = consumer, "chat", oai.CodeModelNotFound
+			ar.NoteRejection(keyquota.RejectModel, keyquota.DetailNotFound)
+			ar.NoteRejection(keyquota.RejectAuth, keyquota.DetailInvalidKey) // the second declaration loses
+			w.WriteHeader(status)
+		}
+	}
+	e.serve(declared(http.StatusNotFound))
+	e.serve(declared(http.StatusOK))
+	e.serve(refuse(consumer, oai.CodeInternalError, http.StatusServiceUnavailable))
+	d := ledger.Drain()
+	if len(d) != 1 || d[0].N != 1 || d[0].ConsumerID != consumer || d[0].Op != "chat" || d[0].Alias != keyquota.UnresolvedAlias ||
+		d[0].Reason != keyquota.RejectModel || d[0].Detail != keyquota.DetailNotFound {
+		t.Fatalf("ledger %+v, want one model/not_found note of the 404 only", d)
+	}
+	e.log.Flush()
+	lines := e.sink.lines("gateway rejections")
+	if len(lines) != 1 || lines[0]["reason"] != oai.CodeInternalError || lines[0]["count"] != int64(1) {
+		t.Fatalf("window lines %v, want only the undeclared 503", lines)
+	}
+}
+
+// TestGatewayAccessLogCountRejectionsOneLinePerReason (W06-12, B-06-22):
+// the ledger's counts reach the window through CountRejections — one line
+// per (consumer, reason) with the details of the window, whatever the
+// number of refusals and details.
+func TestGatewayAccessLogCountRejectionsOneLinePerReason(t *testing.T) {
+	e := newGWAccess(t)
+	const consumer = "0195f0a0-0000-7000-8000-0000000000c1"
+	e.log.CountRejections([]keyquota.RejectionDelta{
+		{ConsumerID: consumer, Reason: keyquota.RejectCapacity, Detail: keyquota.DetailServerBusy, N: 600},
+		{ConsumerID: consumer, Reason: keyquota.RejectCapacity, Detail: keyquota.DetailWaitExpired, N: 400},
+		{ConsumerID: consumer, Reason: keyquota.RejectRate, Detail: keyquota.DetailRateTokens, N: 5},
+		{Reason: keyquota.RejectAuth, Detail: keyquota.DetailInvalidKey, N: 7},
+	})
+	e.log.FlushDue()
+	if n := len(e.sink.lines("gateway rejections")); n != 0 {
+		t.Fatalf("%d line(s) before the window ended, want 0", n)
+	}
+	e.clock = e.clock.Add(gatewayRejectionWindow)
+	e.log.FlushDue()
+	lines := e.sink.lines("gateway rejections")
+	got := map[string]string{}
+	for _, l := range lines {
+		got[l["consumer_id"].(string)+"|"+l["reason"].(string)] = fmt.Sprintf("%v|%v", l["count"], l["detail"])
+	}
+	want := map[string]string{
+		consumer + "|capacity": "1000|server_busy,wait_expired",
+		consumer + "|rate":     "5|rate_tokens",
+		"|auth":                "7|invalid_key",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("lines %v, want %v", got, want)
 	}
 }
 
