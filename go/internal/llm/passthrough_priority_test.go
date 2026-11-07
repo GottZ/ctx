@@ -47,8 +47,8 @@ func TestBuildUpstreamBodyStripsPriority(t *testing.T) {
 		}
 	}
 	// Golden: every PASS key carries the client's value. Compared as JSON
-	// values — the wire re-encodes RawMessage with HTML escaping ("</s>" ⇒
-	// "\u003c/s\u003e"), the same string to every JSON parser.
+	// values — the wire compacts a value (FOLGE-P: no escaping any more;
+	// passthrough_bytes_test.go pins the bytes).
 	for _, k := range []string{"temperature", "top_p", "seed", "stop", "logit_bias", "response_format", "tools", "tool_choice", "presence_penalty", "frequency_penalty"} {
 		var want, have any
 		dw, dh := json.NewDecoder(bytesReader(client[k])), json.NewDecoder(bytesReader(got[k]))

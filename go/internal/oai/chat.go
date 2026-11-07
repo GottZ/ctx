@@ -1,6 +1,7 @@
 package oai
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -36,6 +37,12 @@ import (
 //	(Pool.Chain, gateway wire, federation, export) → GateTenant → limiter →
 //	planner → watcher → WalkChain(BuildUpstreamBody, ChatRaw) → check before
 //	the write → answer rewrite → one llmlog row, one access record.
+//
+// Memory (FOLGE-P): what the request allocates in proportion to its body —
+// the body, a rewritten message array, every attempt's upstream body — is
+// booked against the request share of its reservation (cover) before it is
+// allocated; past that share the reservation grows, and a budget that cannot
+// hold it is the 503 server_overloaded of §4.10.2.
 //
 // Nothing is written before the planner's First acquire returned (design/03
 // §4.9 step 6). Every refusal names its code as the access record's reason.
@@ -113,6 +120,11 @@ type chatCall struct {
 	// goroutines. Without it the reservation goes back in full (Abort);
 	// after it, never (Keep without a usage).
 	wired atomic.Bool
+
+	// held is the request share of the reservation (the stage's
+	// requestReserveFactor × body, grown by cover), spent what the request
+	// has allocated against it (cover).
+	held, spent int64
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
@@ -196,15 +208,21 @@ func (c *chatCall) serve() {
 	if !ok {
 		return
 	}
+	depth := jsonDepth(body)
+	if !c.cover(depth * jsonDepthStateBytes) { // the JSON check's nesting state, booked before it runs
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
 	req, perr := parseTopLevel(body)
 	if perr != nil {
 		c.refuseParam(perr)
 		return
 	}
-	if !c.resolve(req.model) {
+	if !c.resolve(req.model, req.modelOverlong) {
 		return
 	}
-	if perr := req.parsePolicy(limitsOf(c.alias, c.s)); perr != nil {
+	if perr := req.parsePolicy(limitsOf(c.alias, c.s), c.cover); perr != nil {
 		c.refuseParam(perr)
 		return
 	}
@@ -220,7 +238,13 @@ func (c *chatCall) serve() {
 	if !c.reserveAnswer() {
 		return
 	}
-	c.required = c.d.Federation.Scan(c.sensitivity(), body)
+	required := c.sensitivity()
+	if !c.coverScan(required, body, depth) {
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
+	c.required = c.d.Federation.Scan(required, body)
 	chain, ok := c.chain()
 	if !ok {
 		return
@@ -230,8 +254,26 @@ func (c *chatCall) serve() {
 	}
 	c.walk(chain, llm.UpstreamSpec{
 		Client: req.pass, Messages: req.messages, Role: c.alias.Role, Stream: false, MaxTokens: maxTokens,
-		ReasoningOff: reasoningOff(c.alias),
+		ReasoningOff: reasoningOff(c.alias), Reserve: c.reserveUpstream,
 	})
+}
+
+// runeCount is utf8.RuneCount without its copy (hardening 6, the class
+// gate): on go1.27 RuneCount converts the bytes after the first non-ASCII
+// one into a string — a copy of the message array outside the reservation,
+// the fourth one of a rewritten array. The same count: an invalid byte is
+// one rune, as for range over a string.
+func runeCount(p []byte) int {
+	n := 0
+	for i := 0; i < len(p); n++ {
+		if p[i] < utf8.RuneSelf {
+			i++
+			continue
+		}
+		_, size := utf8.DecodeRune(p[i:])
+		i += size
+	}
+	return n
 }
 
 // reasoningOff is the alias's reasoning policy (design/02 §3.2: default off).
@@ -241,11 +283,23 @@ func reasoningOff(a modelalias.Alias) bool {
 
 // readBody reads the body under the strict cap and the in-flight budget: a
 // chunked body past the budget is the budget's 503, never a 400 (§4.2.1).
+// The ledger starts here: the stage reserved requestReserveFactor × the
+// body, the read spent what readRequestBody allocated.
 func (c *chatCall) readBody() ([]byte, bool) {
-	body, err := io.ReadAll(c.r.Body)
+	body, spent, err := readRequestBody(c.r.Body, c.r.ContentLength)
 	var tooLarge *http.MaxBytesError
 	switch {
 	case err == nil:
+		reserved := int64(len(body))
+		if cl := c.r.ContentLength; cl > 0 {
+			reserved = cl
+		}
+		c.held, c.spent = requestReserveFactor*reserved, 0
+		if !c.cover(spent) { // a small undeclared body's first chunk can pass its share
+			c.rec.Reason = CodeServerOverloaded
+			WriteOverloaded(c.w)
+			return nil, false
+		}
 		return body, true
 	case errors.Is(err, ErrBudgetExhausted):
 		c.rec.Reason = CodeServerOverloaded
@@ -261,9 +315,137 @@ func (c *chatCall) readBody() ([]byte, bool) {
 	return nil, false
 }
 
+// readRequestBody reads the body with what it costs on the heap: a declared
+// length is read into one buffer of that size (io.ReadAll grows its way
+// there and spends about twice the body), an undeclared one in chunks that
+// double up to readChunkMax and are joined into one buffer at the end.
+func readRequestBody(r io.Reader, declared int64) ([]byte, int64, error) {
+	if declared > 0 {
+		buf := make([]byte, declared)
+		n, err := io.ReadFull(r, buf)
+		if err == nil {
+			var probe [1]byte
+			if k, _ := r.Read(probe[:]); k > 0 { // more than declared: never from net/http
+				rest, spent, err := readRequestBody(io.MultiReader(bytes.NewReader(probe[:k]), r), -1)
+				return append(buf, rest...), declared + spent + int64(len(buf)+len(rest)), err
+			}
+			return buf, declared, nil
+		}
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return buf[:n], declared, err
+	}
+	var chunks [][]byte
+	var spent int64
+	total, size := 0, readChunkMin
+	for {
+		chunk := make([]byte, size)
+		spent += int64(size)
+		n := 0
+		var err error
+		for n < size && err == nil {
+			var k int
+			k, err = r.Read(chunk[n:])
+			n += k
+		}
+		total += n
+		chunks = append(chunks, chunk[:n])
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, spent, err
+		}
+		size = min(2*size, readChunkMax)
+	}
+	if len(chunks) == 1 {
+		return chunks[0], spent, nil
+	}
+	body := make([]byte, 0, total)
+	for _, ch := range chunks {
+		body = append(body, ch...)
+	}
+	return body, spent + int64(total), nil
+}
+
+// The chunk sizes of an undeclared body: the first chunk holds a small
+// request whole, the largest bounds what is allocated ahead of the bytes the
+// budget stage reserves while they are read.
+const (
+	readChunkMin = 512
+	readChunkMax = 1 << 20
+)
+
+// cover books n more bytes against the request share before they are
+// allocated (FOLGE-P) and grows the reservation by what the bookings pass
+// the share; false when the budget cannot hold them — nothing is reserved
+// then, and the caller answers 503 server_overloaded.
+func (c *chatCall) cover(n int64) bool {
+	if c.spent+n <= c.held {
+		c.spent += n
+		return true
+	}
+	res := ReservationFrom(c.ctx)
+	if res == nil || !res.Grow(c.spent+n-c.held) {
+		return false
+	}
+	c.spent += n
+	c.held = c.spent
+	return true
+}
+
+// coverScan books the heap of the sensitivity scan of the body before it
+// runs (FOLGE-P hardening H-8): federation.ScanRaise decodes every token of
+// the body into a string and runs the scanner's patterns over each — up to
+// scanBooking, what one scan call holds at once: scanReserveFactor × the
+// body + scanReserveBase, and scanDepthStateBytes for each level of the
+// body's nesting (depth, jsonDepth; hardening 7: a 20 KB body nested to the
+// decoder's limit held up to 891 000 bytes more than the body's share). One
+// form is scanned twice in a row — a key of the whole body with a
+// scalar value, as a key and in the probe "key: value" (Delta-Review 2 F-1):
+// it allocates about two bookings in total, but never more than one at once
+// (the first call's garbage is dead before the second begins; pinned by
+// TestScanTwiceHoldsOneScanAtOnce, see scanReserveFactor). At credentials the
+// scan returns at once (its short circuit, pinned) and nothing is booked. The
+// booking stays until the request ends: the scan's garbage is heap until the
+// collector runs, and a reservation has no partial release. Past the end it
+// is garbage the booking no longer covers while the next request books the
+// freed budget: the heap stays within the bookings under a set GOMEMLIMIT
+// (the image's 200MiB), not without one (Delta-Review 3 R3-1, the numbers at
+// scanReserveFactor).
+func (c *chatCall) coverScan(required backends.Sensitivity, body []byte, depth int64) bool {
+	if required.Rank() >= backends.SensCredentials.Rank() {
+		return true
+	}
+	return c.cover(scanBooking(body, depth))
+}
+
+// scanBooking is what coverScan books for the scan of body nested depth deep.
+func scanBooking(body []byte, depth int64) int64 {
+	return scanReserveFactor*int64(len(body)) + scanReserveBase + depth*scanDepthStateBytes
+}
+
+// reserveUpstream is UpstreamSpec.Reserve: an attempt's upstream body is
+// booked before it is built — every attempt's, the earlier ones stay on the
+// heap until the collector runs. A refusal ends the walk as an admission
+// outcome (no health report for the row) and is answered 503 (outcome).
+func (c *chatCall) reserveUpstream(n int) error {
+	if !c.cover(int64(n)) {
+		return ErrBudgetExhausted
+	}
+	return nil
+}
+
 // refuseParam answers a parse refusal with its param (the envelope's
 // "param" names the field, §4.10.1), bound to the vocabulary like WriteCode.
+// errParseOverloaded is the in-flight budget's 503.
 func (c *chatCall) refuseParam(perr *paramError) {
+	if perr == errParseOverloaded {
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
 	i := slices.IndexFunc(codes, func(s CodeSpec) bool { return s.Code == perr.code })
 	if i < 0 {
 		c.internal("parse error code outside the vocabulary", "code", perr.code)
@@ -275,8 +457,12 @@ func (c *chatCall) refuseParam(perr *paramError) {
 }
 
 // resolve is §4.4 steps 1–6: the alias in the consumer's scope, released by
-// all_models or a grant (the one 404 for every reason), then the kind.
-func (c *chatCall) resolve(name string) bool {
+// all_models or a grant (the one 404 for every reason), then the kind. An
+// overlong name (the parse did not decode it) is looked up nowhere: it
+// takes the grant probe of a name that is no alias and gets the 404
+// (hardening 6, P-4 — looked up as "", it matched a registry row named "",
+// which only migration 162's CHECK keeps out).
+func (c *chatCall) resolve(name string, overlong bool) bool {
 	// The generation the watcher starts from is the one this Resolve saw at
 	// most: read BEFORE it, a change between the Resolve and the watcher
 	// start (limiter, plan, the queue) moves the generation past it and the
@@ -284,7 +470,14 @@ func (c *chatCall) resolve(name string) bool {
 	// watcher would start from a generation that already holds the change
 	// and skip every Resolve until the check before the write.
 	c.gen = c.d.Aliases.Generation()
-	a, found, err := c.d.Resolve(c.ctx, c.ca, name)
+	var a modelalias.Alias
+	var found bool
+	var err error
+	if overlong {
+		err = c.d.probeNoAlias(c.ctx, c.ca)
+	} else {
+		a, found, err = c.d.Resolve(c.ctx, c.ca, name)
+	}
 	switch {
 	case err != nil:
 		// A grant read the shutdown or the watcher ended is their answer
@@ -387,7 +580,7 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	}
 	res, refusal := c.d.Limiter.Admit(c.ctx, c.ca, c.alias, Estimate{
 		Op: llmlog.GatewayOpChat, MaxTokens: maxTokens, ClientMaxTokens: c.req.maxTokens > 0,
-		PromptBytes: len(c.req.messages), PromptRunes: utf8.RuneCount(c.req.messages), ServiceTier: c.req.serviceTier,
+		PromptBytes: len(c.req.messages), PromptRunes: runeCount(c.req.messages), ServiceTier: c.req.serviceTier,
 	})
 	if refusal != nil {
 		// The meter's Retry-After is exact (design/06 §4.4): both headers,
@@ -499,6 +692,9 @@ func (c *chatCall) attempt(st *walkState, spec llm.UpstreamSpec, runCtx context.
 	// (§4.12 "bei jeder Admission jetzt + Restfrist + 30 s").
 	setWriteDeadline(c.w, time.Now().Add(time.Until(c.dl)+writeMargin))
 	body, err := llm.BuildUpstreamBody(spec, b)
+	if errors.Is(err, ErrBudgetExhausted) {
+		err = &llm.AdmissionError{Err: err, Backend: b.Name, Host: b.Host}
+	}
 	if err != nil {
 		st.last = failedAttempt{b: b, err: err}
 		st.failed = append(st.failed, st.last)
@@ -672,6 +868,21 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 	if err == nil {
 		return c.success(plan, st)
 	}
+	if errors.Is(err, ErrBudgetExhausted) {
+		// The budget refused an attempt's upstream body (reserveUpstream):
+		// the stage's 503. Without a wire call no row, and the meter's
+		// reservation goes back in full (close: Abort); on a failover attempt
+		// after a wire call the earlier attempt's row stands and the
+		// reservation settles or keeps its charge (answer) — never a full
+		// refund after the wire (W06-10).
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		finish := llmlog.FinishError
+		if st.wired == 0 {
+			finish = llmlog.FinishAborted
+		}
+		return chatOutcome{finish: finish, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeServerOverloaded}}
+	}
 	if isAdmissionFailure(err) {
 		waited := time.Duration(0)
 		if st.lease == nil {
@@ -819,7 +1030,11 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 	}
 	request := ""
 	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
-		request = string(c.req.messages)
+		// The row's text of the array is sized, then booked, then written
+		// (hardening 6): under an exhausted budget the row goes without it.
+		if n := bodyLogSize(c.req.messages); c.cover(int64(n)) {
+			request = bodyLogText(c.req.messages, n)
+		}
 	}
 	c.d.Record(llmlog.GatewayRow{
 		Pipeline:   chatPipeline,
@@ -835,6 +1050,68 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		Response:    out.response,
 		BodyLogging: c.s.BodyLogging,
 	})
+}
+
+// bodyLogTextMax is how much of the message array's text the route hands to
+// the log row: the row stores at most llmlog's gateway body cap (64 KiB) of
+// a body, cut on a rune boundary, so every longer prefix of the same text
+// stores the same. Pinned by TestBodyLogTextStoresWhatTheArrayStored.
+const bodyLogTextMax = 64<<10 + utf8.UTFMax
+
+// bodyLogWalk yields the text of the message array raw for the log row as
+// the row stores it before its cut — valid UTF-8 with each run of invalid
+// bytes one U+FFFD and no NUL (llmlog's storable) — piece by piece to put,
+// up to bodyLogTextMax bytes (hardening 6, the class gate: string(raw)
+// copied the whole array outside the reservation, and the row's cleaning
+// grew a text of invalid bytes between ASCII ones to 8 × its size before
+// cutting it).
+func bodyLogWalk(raw []byte, put func(p []byte)) {
+	n := 0
+	invalid := false // the byte before was part of an invalid sequence
+	for i := 0; i < len(raw) && n < bodyLogTextMax; {
+		c := raw[i]
+		size := 1
+		switch {
+		case c == 0:
+			invalid = false
+		case c < utf8.RuneSelf:
+			put(raw[i : i+1])
+			n++
+			invalid = false
+		default:
+			_, size = utf8.DecodeRune(raw[i:])
+			switch {
+			case size > 1:
+				put(raw[i : i+size])
+				n += size
+				invalid = false
+			case !invalid:
+				put(replacementChar)
+				n += len(replacementChar)
+				invalid = true
+			}
+		}
+		i += size
+	}
+}
+
+// replacementChar is U+FFFD, what the log row writes for invalid bytes.
+var replacementChar = []byte(string(utf8.RuneError))
+
+// bodyLogSize is the length of bodyLogText(raw).
+func bodyLogSize(raw []byte) int {
+	n := 0
+	bodyLogWalk(raw, func(p []byte) { n += len(p) })
+	return n
+}
+
+// bodyLogText is the log row's text of raw, written once into size bytes
+// (bodyLogSize).
+func bodyLogText(raw []byte, size int) string {
+	var b strings.Builder
+	b.Grow(size)
+	bodyLogWalk(raw, func(p []byte) { b.Write(p) })
+	return b.String()
 }
 
 // clientRequestID is the client's own request id (X-Request-ID, else

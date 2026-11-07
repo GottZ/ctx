@@ -43,7 +43,7 @@ func BenchmarkChatParse(b *testing.B) {
 				if perr != nil {
 					b.Fatal(perr.message)
 				}
-				if perr := req.parsePolicy(limitsOf(a, s)); perr != nil {
+				if perr := req.parsePolicy(limitsOf(a, s), nil); perr != nil {
 					b.Fatal(perr.message)
 				}
 			}

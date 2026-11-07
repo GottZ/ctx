@@ -36,6 +36,15 @@ import (
 // the binary's CA and its key (PEM).
 var wireCertFile, wireKeyFile string
 
+// sslCertFile is SSL_CERT_FILE as the process started with it (set: whether
+// it was set): a child process the tests start (the Python SDK harness, uv)
+// gets this value back, not the binary's CA, which would leave it trusting
+// nothing but that CA.
+var (
+	sslCertFile    string
+	sslCertFileSet bool
+)
+
 func TestMain(m *testing.M) {
 	os.Exit(runWithWireCA(m))
 }
@@ -51,6 +60,7 @@ func runWithWireCA(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "wire CA:", err)
 		return 1
 	}
+	sslCertFile, sslCertFileSet = os.LookupEnv("SSL_CERT_FILE")
 	if err := os.Setenv("SSL_CERT_FILE", filepath.Join(dir, "ca.pem")); err != nil {
 		fmt.Fprintln(os.Stderr, "wire CA:", err)
 		return 1

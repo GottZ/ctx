@@ -20,3 +20,32 @@ func SetWatchEvery(d time.Duration) (restore func()) {
 
 // WatchTick is the production period (O2 (a) pin).
 const WatchTick = watchTick
+
+// EchoNameMax bounds an echoed client key name (FOLGE-P H-9).
+const EchoNameMax = echoNameMax
+
+// BaseParse runs the base parse (the parse of 4839a958, the oracle of
+// parse_oracle_test.go) on body under the default limits: the route's CPU
+// pin weighs a request against it (FOLGE-P, Delta-Review 3 R3-0).
+func BaseParse(body []byte) { _ = baseParse(body, diffLimits[0]) }
+
+// ReservationHeld reports what r holds right now (FOLGE-P: the heap gates
+// compare the parse's memory with the request's reservation).
+func ReservationHeld(r *Reservation) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.held
+}
+
+// BodyLogTextMax bounds the log row's text of a message array (hardening 6).
+const BodyLogTextMax = bodyLogTextMax
+
+// ScanBooking and JSONDepth expose what coverScan books for the scan of a
+// body and the depth it books it for (hardening 7: the scan's nesting state).
+var (
+	ScanBooking = scanBooking
+	JSONDepth   = jsonDepth
+)
+
+// ScanDepthStateBytes is the scan's booking per nesting level (hardening 7).
+const ScanDepthStateBytes = scanDepthStateBytes
