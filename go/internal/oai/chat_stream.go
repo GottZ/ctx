@@ -58,15 +58,18 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 	// The relay buffer (A03-W10), once per request and before the wire:
 	// booked in the ledger before it is made; a refusal ends the walk like a
 	// refused upstream body (503 before the commit, the error frame after).
-	if err := c.startRelay(); err != nil {
+	// The drain ends with the attempt at the latest: the stream lasts its
+	// attempt's timeout, the client's rest from the buffer included — the
+	// writer starts with the first attempt's deadline, a failover attempt
+	// sets its own (bound).
+	until := time.Now().Add(timeout)
+	if err := c.startRelay(until); err != nil {
 		err = &llm.AdmissionError{Err: err, Backend: b.Name, Host: b.Host}
 		st.last = failedAttempt{b: b, err: err}
 		st.failed = append(st.failed, st.last)
 		return dispatch.Usage{}, false, err
 	}
-	// The drain ends with the attempt at the latest: the stream lasts its
-	// attempt's timeout, the client's rest from the buffer included.
-	c.relay.bound(time.Now().Add(timeout))
+	c.relay.bound(until)
 	runCtx = fedhop.WithRequestID(runCtx, attemptRequestID(c.id, st.n))
 	// As non-stream: a run that ended while the lease was acquired does not
 	// dial (Fremd-Review 4 R4-1 of W02-07).

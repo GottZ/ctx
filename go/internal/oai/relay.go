@@ -122,9 +122,12 @@ type streamRelay struct {
 }
 
 // newStreamRelay starts the writer of a relay over ring (made by the caller
-// after its booking).
-func newStreamRelay(ring []byte, write func([]byte) error, stop <-chan struct{}, broken func(error), d drainMeter, capAt func(time.Time)) *streamRelay {
-	rl := &streamRelay{write: write, stop: stop, broken: broken, drain: d, capAt: capAt, ring: ring,
+// after its booking) with the first attempt's deadline until (zero: none):
+// set before the writer starts, so its first wait is capped by it already
+// (Fremd-Review 2 L-5 — a bound after the start left a writer that went idle
+// first without the cap until its next record).
+func newStreamRelay(until time.Time, ring []byte, write func([]byte) error, stop <-chan struct{}, broken func(error), d drainMeter, capAt func(time.Time)) *streamRelay {
+	rl := &streamRelay{write: write, stop: stop, broken: broken, drain: d, capAt: capAt, ring: ring, until: until,
 		more: make(chan struct{}, 1), done: make(chan struct{})}
 	go rl.run()
 	return rl
@@ -452,8 +455,9 @@ const RelayRecordHeader = 4
 // reuses it) and starts its writer. The buffer is booked in the request's
 // ledger before it is made (FOLGE-P: every term before its allocation) and
 // made once, never grown; a refusal is ErrBudgetExhausted — the attempt ends
-// before the wire like a refused upstream body.
-func (c *chatCall) startRelay() error {
+// before the wire like a refused upstream body. until is the first attempt's
+// deadline, the writer's cap from its start.
+func (c *chatCall) startRelay(until time.Time) error {
 	if c.relay != nil {
 		return nil
 	}
@@ -461,7 +465,7 @@ func (c *chatCall) startRelay() error {
 	if !c.cover(size) {
 		return ErrBudgetExhausted
 	}
-	c.relay = newStreamRelay(make([]byte, size), c.sse.frame, c.ctx.Done(), c.cancel,
+	c.relay = newStreamRelay(until, make([]byte, size), c.sse.frame, c.ctx.Done(), c.cancel,
 		drainMeter{rate: c.s.StreamMinDrainRate, window: c.s.StreamMinDrainWindow}, c.sse.capWrites)
 	return nil
 }

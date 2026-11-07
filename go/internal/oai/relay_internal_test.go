@@ -45,7 +45,7 @@ func TestRelayRingOrderAcrossWraps(t *testing.T) {
 			return nil
 		}
 		stop := make(chan struct{})
-		rl := newStreamRelay(make([]byte, 4<<10), write, stop, nil, drainMeter{}, nil)
+		rl := newStreamRelay(time.Time{}, make([]byte, 4<<10), write, stop, nil, drainMeter{}, nil)
 		var sent [][]byte
 		overflows := 0
 		for i := uint64(0); i < 1500; i++ {
@@ -85,7 +85,7 @@ func TestRelayRingRefusesOnlyWhatDoesNotFit(t *testing.T) {
 	write := func([]byte) error { <-gate; return nil }
 	stop := make(chan struct{})
 	const size = 1000
-	rl := newStreamRelay(make([]byte, size), write, stop, nil, drainMeter{}, nil)
+	rl := newStreamRelay(time.Time{}, make([]byte, size), write, stop, nil, drainMeter{}, nil)
 	queued := 0
 	for i := uint64(0); ; i++ {
 		c := relayChunk(i, 92) // 96 B with the header
@@ -106,7 +106,7 @@ func TestRelayRingRefusesOnlyWhatDoesNotFit(t *testing.T) {
 	// A record of exactly the ring's size fits an empty ring; a larger one is
 	// oversize — taken by reference, never refused for an empty ring (F1,
 	// TestRelayOversizeChunkKeepsItsPlace).
-	empty := newStreamRelay(make([]byte, 64), func([]byte) error { return nil }, make(chan struct{}), nil, drainMeter{}, nil)
+	empty := newStreamRelay(time.Time{}, make([]byte, 64), func([]byte) error { return nil }, make(chan struct{}), nil, drainMeter{}, nil)
 	if err := empty.put(make([]byte, 60)); err != nil {
 		t.Fatalf("a 64 B record in an empty 64 B ring: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestRelayRingRefusesOnlyWhatDoesNotFit(t *testing.T) {
 func TestRelayWriterEndsInEveryPath(t *testing.T) {
 	gone := errors.New("client gone")
 	t.Run("writer fails", func(t *testing.T) {
-		rl := newStreamRelay(make([]byte, 1<<10), func([]byte) error { return gone }, make(chan struct{}), nil, drainMeter{}, nil)
+		rl := newStreamRelay(time.Time{}, make([]byte, 1<<10), func([]byte) error { return gone }, make(chan struct{}), nil, drainMeter{}, nil)
 		_ = rl.put([]byte("one"))
 		deadline := time.Now().Add(2 * time.Second)
 		var err error
@@ -138,7 +138,7 @@ func TestRelayWriterEndsInEveryPath(t *testing.T) {
 		stop := make(chan struct{})
 		gate := make(chan struct{})
 		var wrote int
-		rl := newStreamRelay(make([]byte, 1<<10), func([]byte) error { <-gate; wrote++; return nil }, stop, nil, drainMeter{}, nil)
+		rl := newStreamRelay(time.Time{}, make([]byte, 1<<10), func([]byte) error { <-gate; wrote++; return nil }, stop, nil, drainMeter{}, nil)
 		for i := range 5 {
 			_ = rl.put(relayChunk(uint64(i), 16))
 		}
@@ -151,7 +151,7 @@ func TestRelayWriterEndsInEveryPath(t *testing.T) {
 	})
 	t.Run("writer panics", func(t *testing.T) {
 		var cause error
-		rl := newStreamRelay(make([]byte, 1<<10), func([]byte) error { panic("boom") }, make(chan struct{}), func(err error) { cause = err }, drainMeter{}, nil)
+		rl := newStreamRelay(time.Time{}, make([]byte, 1<<10), func([]byte) error { panic("boom") }, make(chan struct{}), func(err error) { cause = err }, drainMeter{}, nil)
 		_ = rl.put([]byte("one"))
 		defer func() {
 			v := recover()
@@ -227,7 +227,7 @@ func TestRelayRingWrappedBoundary(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	rl := newStreamRelay(make([]byte, 100), write, make(chan struct{}), nil, drainMeter{}, nil)
+	rl := newStreamRelay(time.Time{}, make([]byte, 100), write, make(chan struct{}), nil, drainMeter{}, nil)
 	// Records A [0, 30), B [30, 60), C [60, 90) queued; the writer takes A
 	// and releases it (r = 30) and holds B; D (12 B) does not fit the 10 B
 	// at the end and wraps to [0, 12) (w = 12): the gap [12, 30) is 18 B.
@@ -293,7 +293,7 @@ func TestRelayOversizeChunkKeepsItsPlace(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	rl := newStreamRelay(make([]byte, 64), write, make(chan struct{}), nil, drainMeter{}, nil)
+	rl := newStreamRelay(time.Time{}, make([]byte, 64), write, make(chan struct{}), nil, drainMeter{}, nil)
 	small1, big, small2 := relayChunk(1, 20), relayChunk(2, 200), relayChunk(3, 20)
 	for _, x := range [][]byte{small1, big, small2} {
 		if err := rl.put(x); err != nil {
@@ -335,7 +335,7 @@ func TestRelayNoWriteAfterClose(t *testing.T) {
 		}
 		sw.capWrites(at)
 	}
-	rl := newStreamRelay(make([]byte, 1<<10), sw.frame, stop, nil, drainMeter{rate: 1024, window: time.Second}, capAt)
+	rl := newStreamRelay(time.Time{}, make([]byte, 1<<10), sw.frame, stop, nil, drainMeter{rate: 1024, window: time.Second}, capAt)
 	if err := rl.put([]byte(`{"late":"chunk"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -360,15 +360,28 @@ func TestRelayNoWriteAfterClose(t *testing.T) {
 // TestRelayDrainEndsAtTheAttemptDeadline (Fremd-Review 1 F3 (a)): no write of
 // the relay ends after the attempt's deadline — the drain meter's cap is
 // shortened to it, and while the writer waits the deadline stays the cap;
-// once the writer ended the cap is lifted (the route's last frame).
+// once the writer ended the cap is lifted (the route's last frame). The
+// writer is made to wait before anything else (Fremd-Review 2 L-5: it starts
+// at once and flaked 1/200 when it went idle before a bound after the start
+// — its first cap was none): the first attempt's deadline is the writer's
+// from its start. Red with the deadline set after the start: `cap 0 =
+// 0001-01-01 …` 20/20.
 func TestRelayDrainEndsAtTheAttemptDeadline(t *testing.T) {
 	var mu sync.Mutex
 	var caps []time.Time
-	capAt := func(at time.Time) { mu.Lock(); caps = append(caps, at); mu.Unlock() }
+	idle := make(chan struct{})
+	var once sync.Once
+	capAt := func(at time.Time) {
+		mu.Lock()
+		caps = append(caps, at)
+		mu.Unlock()
+		once.Do(func() { close(idle) })
+	}
 	gate := make(chan struct{})
-	rl := newStreamRelay(make([]byte, 1<<10), func([]byte) error { <-gate; return nil }, make(chan struct{}), nil,
-		drainMeter{rate: 1, window: time.Hour}, capAt)
 	until := time.Now().Add(200 * time.Millisecond)
+	rl := newStreamRelay(until, make([]byte, 1<<10), func([]byte) error { <-gate; return nil }, make(chan struct{}), nil,
+		drainMeter{rate: 1, window: time.Hour}, capAt)
+	<-idle // L-5: the writer goes idle before the first record — the interleaving forced
 	rl.bound(until)
 	if err := rl.put(relayChunk(1, 64)); err != nil {
 		t.Fatal(err)
@@ -401,7 +414,7 @@ func TestRelayRingRefusesAWrapIntoATooSmallGap(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	rl := newStreamRelay(make([]byte, 100), write, make(chan struct{}), nil, drainMeter{}, nil)
+	rl := newStreamRelay(time.Time{}, make([]byte, 100), write, make(chan struct{}), nil, drainMeter{}, nil)
 	// A [0, 12), B [12, 40), C [40, 90); the writer writes A (r = 12) and
 	// holds B. D needs 20 B: 10 B at the end, 12 B before B — refused.
 	a, b, c := relayChunk(1, 8), relayChunk(2, 24), relayChunk(3, 46)
