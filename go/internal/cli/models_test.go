@@ -455,6 +455,9 @@ func TestModelsFlagValidation(t *testing.T) {
 		{"create_fair_weight_101", "fair-weight", []string{"consumers", "create", "--label", "x", "--fair-weight", "101"}},
 		{"create_expires", "expires", []string{"consumers", "create", "--label", "x", "--expires", "2026-13-01"}},
 		{"rotate_grace_negative", "grace", []string{"consumers", "rotate", cid, "--grace", "-1s"}},
+		// A fraction of a second is refused, never rounded: grace is a
+		// security parameter (lead decision S1, report §Offene Punkte 8).
+		{"rotate_grace_fraction", "grace", []string{"consumers", "rotate", cid, "--grace", "1500ms"}},
 		{"rotate_expires", "expires", []string{"consumers", "rotate", cid, "--expires", "tomorrow"}},
 		{"list_limit_0", "limit", []string{"consumers", "list", "--limit", "0"}},
 		{"list_limit_negative", "limit", []string{"consumers", "list", "--limit", "-5"}},
