@@ -248,6 +248,10 @@ func (h *UsageHandler) HandleUsage(w http.ResponseWriter, r *http.Request) {
 				}{true, res})
 				return
 			}
+			if errors.Is(err, llmusage.ErrTooLarge) {
+				writeUsageError(w, http.StatusBadRequest, err.Error()+" — use bucket=day, a shorter window or ?consumer=")
+				return
+			}
 		}
 	}
 	slog.Error("usage: read failed", "error", err, "request_id", RequestIDFromContext(ctx))

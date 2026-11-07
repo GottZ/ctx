@@ -53,6 +53,18 @@ var ErrRange = errors.New("llmusage: empty or invalid range")
 // ErrParam is the refusal of an unknown bucket, group or source (400).
 var ErrParam = errors.New("llmusage: unknown bucket, group or source")
 
+// ErrTooLarge is the refusal of a series answer with more than MaxPoints
+// points (400 at the API: a coarser bucket, a shorter window or a consumer
+// filter).
+var ErrTooLarge = errors.New("llmusage: answer exceeds the point limit")
+
+// MaxPoints bounds one series answer (series × buckets). A named constant
+// like MaxSpan: it bounds the bytes and the memory of one response (about
+// 400 B per point in JSON), it is not a policy; 92 days of day buckets fit
+// for 200 series, a week of hour buckets for 119 (Fremd-Review S2 F1:
+// 92 d × hour × 50 consumers were 110 450 points and 42,7 MB).
+const MaxPoints = 20_000
+
 // ErrForbiddenGroup is the refusal of GroupInstance for a non-server-admin
 // (403 at the API).
 var ErrForbiddenGroup = errors.New("llmusage: group=instance is server-admin only")
@@ -78,13 +90,13 @@ type GroupBy string
 // joins consumer_id → context_model_consumers.peer_instance_id and is
 // server-admin only.
 const (
-	GroupConsumer GroupBy = "consumer"
-	GroupAlias    GroupBy = "alias"
+	GroupConsumer     GroupBy = "consumer"
+	GroupAlias        GroupBy = "alias"
 	GroupPipelineName GroupBy = "pipeline"
-	GroupSource   GroupBy = "source"
-	GroupBackend  GroupBy = "backend"
-	GroupClass    GroupBy = "class"
-	GroupInstance GroupBy = "instance"
+	GroupSource       GroupBy = "source"
+	GroupBackend      GroupBy = "backend"
+	GroupClass        GroupBy = "class"
+	GroupInstance     GroupBy = "instance"
 )
 
 // SeriesQuery selects one series request.
@@ -256,8 +268,14 @@ func Align(q SeriesQuery) (SeriesQuery, error) {
 	}
 	q.Now = q.Now.UTC()
 	q.From = floorBucket(q.From, q.Bucket)
-	to := floorBucket(q.To, q.Bucket)
-	if to.Before(q.To.UTC()) {
+	// No bucket after the running one: the future is not "0" (Fremd-Review
+	// S2 F4a).
+	end := q.To.UTC()
+	if end.After(q.Now) {
+		end = q.Now
+	}
+	to := floorBucket(end, q.Bucket)
+	if to.Before(end) || !to.After(q.From) {
 		to = to.Add(bucketStep(q.Bucket))
 	}
 	q.To = to
@@ -442,6 +460,9 @@ func ReadSeries(ctx context.Context, q pgxdb.Querier, sq SeriesQuery, c Cover) (
 	}
 	sort.Strings(keys)
 	step := bucketStep(sq.Bucket)
+	if buckets := int64(sq.To.Sub(sq.From) / step); int64(len(keys))*buckets > MaxPoints {
+		return Result{}, fmt.Errorf("%w: %d series × %d buckets", ErrTooLarge, len(keys), buckets)
+	}
 	for _, k := range keys {
 		s := Series{Key: k}
 		for at := sq.From; at.Before(sq.To); at = at.Add(step) {

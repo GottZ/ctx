@@ -33,9 +33,10 @@ import (
 //   - Hub load (V-06-d, K-05-19): top_consumers_1h comes from an in-memory
 //     ring (60 one-minute buckets, no statement); consumers,
 //     consumers_used_1h, consumers_expiring, the per-tenant counts and
-//     usage_split_24h come from ONE generation with a 30-second TTL
-//     (gatewayGenTTL) built from the rollup (llmusage.ReadSplit24h — rollup
-//     plus at most one raw edge hour) and context_model_consumers/_keys —
+//     usage_split_24h and the ledger counts of federation come from ONE
+//     generation with a 30-second TTL (gatewayGenTTL) built from the rollup
+//     (llmusage.ReadSplit24h, the last 24 hourly buckets), the refusal
+//     ledger (the same 24 buckets) and context_model_consumers/_keys —
 //     never in the 5-second tick, never a 24-hour raw scan.
 
 // gatewayGenTTL is the age of the gateway status generation (V-06-d; the
@@ -78,9 +79,11 @@ type envelopeUse struct {
 // ledger's federation details of the last hour (loop, depth,
 // header_invalid; reason 'federation').
 type federationStatus struct {
-	// The ledger-derived counts (loop, depth, header_invalid, peer_mismatch,
-	// embed_space_rejects, busy) are null until a source feeds them — the
-	// refusal ledger is flushed per hour, the status reads no ledger yet.
+	// The ledger-derived counts are the refusals of the last 24 hourly
+	// buckets of context_llm_rejections_hourly (flushed every 10 s): loop,
+	// depth, header_invalid and peer_mismatch (reason federation), busy
+	// (capacity/server_busy). embed_space_rejects has no ledger detail yet
+	// and stays null.
 	LoopRejects          *int64 `json:"loop_rejects"`
 	DepthRejects         *int64 `json:"depth_rejects"`
 	HeaderInvalid        *int64 `json:"header_invalid"`
@@ -130,6 +133,46 @@ type gatewayGeneration struct {
 	at       time.Time
 	byTenant map[string]gatewayCounts
 	split    []llmusage.SplitRow
+	// refusals are the ledger's (reason, detail) sums of the last 24 hourly
+	// buckets; nil when the read failed or no feed reads them.
+	refusals map[[2]string]int64
+}
+
+// gatewayRefusalsSQL reads the ledger's refusals per reason and detail
+// over the last 24 hourly buckets (idx_llm_rejections_bucket).
+const gatewayRefusalsSQL = `
+SELECT reason, detail, sum(n)::bigint
+FROM context_llm_rejections_hourly
+WHERE bucket_start >= $1
+GROUP BY 1, 2`
+
+// readGatewayRefusals fills g.refusals.
+func (c *StatusCollector) readGatewayRefusals(ctx context.Context, g *gatewayGeneration, now time.Time) error {
+	rows, err := c.pool.Query(ctx, gatewayRefusalsSQL, now.UTC().Truncate(time.Hour).Add(-23*time.Hour))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	g.refusals = map[[2]string]int64{}
+	for rows.Next() {
+		var reason, detail string
+		var n int64
+		if err := rows.Scan(&reason, &detail, &n); err != nil {
+			return err
+		}
+		g.refusals[[2]string{reason, detail}] = n
+	}
+	return rows.Err()
+}
+
+// refusalCount is a ledger count of the generation, nil without a ledger
+// read (null ≠ 0).
+func (g *gatewayGeneration) refusalCount(reason, detail string) *int64 {
+	if g.refusals == nil {
+		return nil
+	}
+	n := g.refusals[[2]string{reason, detail}]
+	return &n
 }
 
 // gatewayCounts are the consumers of one tenant: active ones, those whose
@@ -182,6 +225,9 @@ func (c *StatusCollector) gatewayGenNow(ctx context.Context, f *GatewayFeed) *ga
 	}
 	if err == nil && f.Split != nil {
 		g.split, err = f.Split(now)
+	}
+	if err == nil {
+		err = c.readGatewayRefusals(ctx, g, now)
 	}
 	if err != nil {
 		slog.Warn("status: gateway generation failed", "error", err)
@@ -250,6 +296,10 @@ func (c *StatusCollector) stampGateway(ctx context.Context, resp *statusResponse
 		if gw.Events != nil {
 			fs.PeerBound = gw.Events.PeerBound
 		}
+		fs.LoopRejects, fs.DepthRejects = g.refusalCount("federation", "loop"), g.refusalCount("federation", "depth")
+		fs.HeaderInvalid = g.refusalCount("federation", "header_invalid")
+		fs.PeerMismatch = g.refusalCount("federation", "peer_mismatch")
+		fs.Busy = g.refusalCount("capacity", "server_busy")
 		resp.Federation = fs
 	}
 	resp.Gateway = gw
