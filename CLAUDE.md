@@ -62,6 +62,7 @@ bash test.sh --with-ollama          # 18 System + Retrieval + MCP Tests
 bash eval.sh                        # 47 Eval Tests (Baseline-Regression)
 bash eval.sh --update-baseline      # Neue Baseline setzen
 cd go && go test ./... -short       # Go Unit-Tests
+bash go/gates.sh wave               # Gates nach Impact (quick|wave [--final]|full|explain|mutant), Shared-Cache; CI bleibt Autorität — docs/development.md
 ```
 
 ## Git Hooks (Pflicht-Setup)
