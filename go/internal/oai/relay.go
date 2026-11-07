@@ -78,6 +78,13 @@ func (p *relayPanic) Unwrap() error {
 // records [length uint32 LE][chunk], contiguous each — a record that does not
 // fit at the end starts again at offset 0 (the end's rest stays unused until
 // the reader passes it). One reader (put, close), one writer goroutine.
+//
+// A chunk larger than the whole ring (a rewrite grew it: json.Marshal escapes
+// <, > and & six-fold, Fremd-Review 1 F1) is no sign of a slow client: it
+// waits by reference in the one oversize slot, in its place in the order,
+// and the writer takes it when the records before it are written. A second
+// oversize chunk while one still waits is an overflow — then the client is
+// behind by at least that chunk.
 type streamRelay struct {
 	write  func([]byte) error // the stream writer's frame
 	stop   <-chan struct{}    // the run's end: the writer drops what is queued
@@ -96,6 +103,19 @@ type streamRelay struct {
 	more    chan struct{} // a record, the close or the error (capacity 1)
 	done    chan struct{} // closed when the writer ended
 	pan     *relayPanic
+
+	// big is the oversize chunk waiting by reference (nil: none), bigAt its
+	// place: the number of records put before it; puts and takes count every
+	// record put and taken, handBig marks the one in the writer's hand.
+	big         []byte
+	bigAt       uint64
+	puts, takes uint64
+	handBig     bool
+
+	// until is the attempt's deadline (bound; zero: none): no write ends
+	// after it, the drain included — a stream lasts at most its attempt's
+	// timeout, as before the relay (Fremd-Review 1 F3 (a)).
+	until time.Time
 }
 
 // newStreamRelay starts the writer of a relay over ring (made by the caller
@@ -109,7 +129,9 @@ func newStreamRelay(ring []byte, write func([]byte) error, stop <-chan struct{},
 
 // put queues one chunk (the reader). It never waits for the client: nil when
 // the chunk is queued, errRelayOverflow when it does not fit, the writer's
-// error once the writer failed (the client is gone).
+// error once the writer failed (the client is gone). An oversize chunk is
+// kept by reference until it is written: the caller must not reuse it
+// (rewriteChunk returns a fresh slice per chunk).
 func (rl *streamRelay) put(chunk []byte) error {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -120,10 +142,20 @@ func (rl *streamRelay) put(chunk []byte) error {
 		return errRelayClosed
 	}
 	need := RelayRecordHeader + len(chunk)
+	if need > len(rl.ring) {
+		if rl.big != nil {
+			return errRelayOverflow
+		}
+		rl.big, rl.bigAt = chunk, rl.puts
+		rl.puts++
+		rl.signal()
+		return nil
+	}
 	at, ok := rl.placeLocked(need)
 	if !ok {
 		return errRelayOverflow
 	}
+	rl.puts++
 	binary.LittleEndian.PutUint32(rl.ring[at:], uint32(len(chunk))) //nolint:gosec // G115: a chunk fits the ring, whose size is an int setting far below 4 GiB (V38/V39)
 	copy(rl.ring[at+RelayRecordHeader:], chunk)
 	rl.n++
@@ -197,6 +229,37 @@ func (rl *streamRelay) wait() {
 	}
 }
 
+// bound sets the attempt's deadline — every attempt calls it with its own
+// (a failover attempt's is later).
+func (rl *streamRelay) bound(t time.Time) {
+	rl.mu.Lock()
+	rl.until = t
+	rl.mu.Unlock()
+}
+
+// capFor is the write-deadline cap of a write of k bytes: the drain meter's,
+// never past the attempt's deadline.
+func (rl *streamRelay) capFor(now time.Time, k int) time.Time {
+	dl := rl.drain.deadline(now, k)
+	rl.mu.Lock()
+	u := rl.until
+	rl.mu.Unlock()
+	if !u.IsZero() && (dl.IsZero() || u.Before(dl)) {
+		return u
+	}
+	return dl
+}
+
+// join closes the relay and returns once its writer ended, without raising
+// its panic — close()'s half (Fremd-Review 1 F2): on a path that did not
+// reach wait (a panic of the reader) nothing may write to the response after
+// the handler returned. The caller failed the relay first, so the writer
+// takes no further record.
+func (rl *streamRelay) join() {
+	rl.close()
+	<-rl.done
+}
+
 // panicked reports whether the writer panicked (wait raises it).
 func (rl *streamRelay) panicked() bool {
 	rl.mu.Lock()
@@ -225,7 +288,7 @@ func (rl *streamRelay) run() {
 			return
 		}
 		if rl.capAt != nil {
-			rl.capAt(rl.drain.deadline(time.Now(), len(rec)))
+			rl.capAt(rl.capFor(time.Now(), len(rec)))
 		}
 		err := rl.write(rec)
 		rl.drain.wrote(time.Now(), len(rec))
@@ -248,6 +311,17 @@ func (rl *streamRelay) next() ([]byte, bool) {
 		case rl.err != nil:
 			rl.mu.Unlock()
 			return nil, false
+		case rl.big != nil && rl.takes == rl.bigAt:
+			rec := rl.big
+			rl.big, rl.handBig = nil, true
+			rl.mu.Unlock()
+			select {
+			case <-rl.stop:
+				rl.fail(context.Canceled)
+				return nil, false
+			default:
+			}
+			return rec, true
 		case rl.n > 0:
 			if rl.wrapped && rl.r == rl.end {
 				rl.r, rl.end, rl.wrapped = 0, 0, false
@@ -267,10 +341,11 @@ func (rl *streamRelay) next() ([]byte, bool) {
 			rl.mu.Unlock()
 			return nil, false
 		}
+		u := rl.until
 		rl.mu.Unlock()
 		rl.drain.idle()
 		if rl.capAt != nil {
-			rl.capAt(time.Time{})
+			rl.capAt(u) // no drain window while the writer waits; the attempt's deadline stays
 		}
 		select {
 		case <-rl.more:
@@ -284,6 +359,12 @@ func (rl *streamRelay) next() ([]byte, bool) {
 // release frees the record of l bytes the writer took.
 func (rl *streamRelay) release(l int) {
 	rl.mu.Lock()
+	rl.takes++
+	if rl.handBig {
+		rl.handBig = false
+		rl.mu.Unlock()
+		return
+	}
 	rl.r += RelayRecordHeader + l
 	rl.n--
 	switch {

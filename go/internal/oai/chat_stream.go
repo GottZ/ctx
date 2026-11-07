@@ -64,6 +64,9 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 		st.failed = append(st.failed, st.last)
 		return dispatch.Usage{}, false, err
 	}
+	// The drain ends with the attempt at the latest: the stream lasts its
+	// attempt's timeout, the client's rest from the buffer included.
+	c.relay.bound(time.Now().Add(timeout))
 	runCtx = fedhop.WithRequestID(runCtx, attemptRequestID(c.id, st.n))
 	// As non-stream: a run that ended while the lease was acquired does not
 	// dial (Fremd-Review 4 R4-1 of W02-07).

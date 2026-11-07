@@ -13,8 +13,9 @@ package dispatch
 // counts in the snapshot's Held/HeldWeight (the foreign-load detector reads
 // those, A-E5 no. 3) and is shown as Settling. Then finishLocked ends it —
 // exactly once: the settle timer, the reaper (a settling lease past its reap
-// deadline is reaped like any other) and Close all end it through
-// finishLocked, whose done flag makes the first of them the only one.
+// deadline ends there — not counted as a reap, its caller did release it) and
+// Close all end it through finishLocked, whose done flag makes the first of
+// them the only one.
 //
 // Nothing is canceled additionally (I-D1 stays untouched): a settle only
 // releases later. The default 0/0 settles nothing — the release is the one
@@ -58,8 +59,8 @@ func mergeAbortSettle(origin string, auth []BackendRow, logger *slog.Logger) (st
 		}
 		s, n, valid := parseAbortSettle(v)
 		if !valid {
-			logger.Warn("dispatch: invalid limits.abort_settle_ms ignored (an object {\"stream\": ms, \"nonstream\": ms}, each 0..30000)",
-				"backend", r.Name, "origin", origin, "value", v)
+			logger.Warn("dispatch: invalid limits.abort_settle_ms ignored (an object {\"stream\": ms, \"nonstream\": ms}, each an integer 0..max_ms)",
+				"backend", r.Name, "origin", origin, "value", v, "max_ms", AbortSettleMaxMs)
 			continue
 		}
 		stream, nonstream = max(stream, s), max(nonstream, n)
@@ -151,6 +152,9 @@ func (d *Dispatcher) settleLocked(l *Lease, wait time.Duration) {
 	l.settling = true
 	l.st.settling++
 	l.st.settlingWeight += l.weight
+	if l.preempted {
+		l.st.settlingVictims += l.weight
+	}
 	l.settleTimer = time.AfterFunc(wait, func() { d.endSettle(l) })
 }
 
@@ -176,6 +180,9 @@ func (st *targetState) leaveSettlingLocked(l *Lease) {
 	}
 	st.settling--
 	st.settlingWeight -= l.weight
+	if l.preempted {
+		st.settlingVictims -= l.weight
+	}
 }
 
 // closeSettlingLeases is Close's half of the settle (A03-W10): no timer

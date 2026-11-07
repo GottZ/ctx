@@ -66,6 +66,10 @@ type Lease struct {
 	// by settleTimer (or the reaper, or Close). Guarded by Dispatcher.mu.
 	settling    bool
 	settleTimer *time.Timer
+	// preempted marks a preempt victim (maybePreemptLocked): settling, it
+	// covers the preempt need like a victim in eviction (Fremd-Review 1 F5:
+	// only victims — G1a counts the victim's settle).
+	preempted bool
 }
 
 // Release returns the slot and wakes the next waiter (strict class order,
@@ -123,6 +127,9 @@ type targetState struct {
 	// it held, the engine still runs it.
 	settling       int
 	settlingWeight int
+	// settlingVictims are the units of the settling preempt victims — the
+	// part of settlingWeight that covers the preempt need.
+	settlingVictims int
 	// inflight is the registry of ALL leases incl. pass-through (telemetry,
 	// divergence metric, reaper).
 	inflight map[*Lease]struct{}
@@ -1003,6 +1010,14 @@ func (d *Dispatcher) reapNow(now time.Time) {
 			}
 		}
 		for _, l := range victims {
+			if l.settling {
+				// A settle past the lease's reap deadline (Fremd-Review 1 F6):
+				// its caller released it — no leak, no reap; it just ends.
+				d.logger.Info("dispatch: settle ended at the lease's reap deadline",
+					"target", st.origin, "class", l.class.String(), "role", l.role)
+				d.finishLocked(l)
+				continue
+			}
 			if cancel, ok := st.cancelable[l]; ok {
 				cancel(ErrReaped)
 			} else if cancel, ok := st.extCancel[l]; ok {
@@ -1115,8 +1130,8 @@ type TargetSnapshot struct {
 	// HeldWeight and the side split like every held lease (the foreign-load
 	// detector compares the engine's running requests with Held); what runs
 	// on the caller side is Held − Settling. 0 with abort_settle_ms 0/0.
-	Settling           int
-	Inflight           int
+	Settling int
+	Inflight int
 	// HeldInternal / HeldExternal split Held by side (design/03 §4.14);
 	// InflightInternal counts the internal leases incl. pass-through (an
 	// external lease is never pass-through, so Inflight − InflightInternal

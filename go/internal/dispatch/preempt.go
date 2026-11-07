@@ -123,11 +123,13 @@ func (d *Dispatcher) maybePreemptLocked(st *targetState, slots int) {
 	if free < 0 {
 		free = 0
 	}
-	// A settling lease (A03-W10, settle.go) covers like a victim in
-	// eviction: its units free once its settle ends, and no cancel could free
-	// them sooner — counting it keeps a settle from cascading into more
-	// victims (single-preempt guard). 0 with abort_settle_ms 0/0.
-	need := want - free - len(st.preempt.preempting) - st.settlingWeight
+	// A settling victim (A03-W10, settle.go) covers like a victim in
+	// eviction: its unit frees once its settle ends, and no cancel could free
+	// it sooner — counting it keeps a settle from cascading into more victims
+	// (single-preempt guard). Only victims: another settling lease (a client
+	// gone) frees its units on its own clock, which G1a does not count
+	// (Fremd-Review 1 F5). 0 with abort_settle_ms 0/0.
+	need := want - free - len(st.preempt.preempting) - st.settlingVictims
 	if need <= 0 {
 		return
 	}
@@ -149,6 +151,7 @@ func (d *Dispatcher) maybePreemptLocked(st *targetState, slots int) {
 	now := time.Now()
 	for _, l := range victims {
 		cancel := st.cancelable[l]
+		l.preempted = true
 		st.preempt.preempting[l] = now
 		st.preempt.preemptsTotal++
 		st.preempt.wastedMs += now.Sub(l.admitted).Milliseconds()

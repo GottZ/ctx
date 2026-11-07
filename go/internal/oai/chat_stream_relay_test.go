@@ -531,3 +531,32 @@ func TestRelayLeakProbe(t *testing.T) {
 		n, l.settles.Load(), l.keeps.Load(), l.aborts.Load(), l.rejects.Load(), int64(peak.Load())-int64(before.HeapInuse),
 		baseRoute, routeGoroutines(), baseTotal, runtime.NumGoroutine())
 }
+
+// TestRelayOversizeChunkReachesAFastClient (Fremd-Review 1 F1): one upstream
+// frame of 400 KiB under the 1 MiB frame cap whose rewrite outgrows the 2 MiB
+// relay buffer — json.Marshal escapes '<' six-fold (2.4 MiB). A fast client is
+// no slow client: it gets the whole chunk and [DONE], as with 'x'. Red
+// before: 503 server_overloaded "the client read the stream slower …" on an
+// empty buffer.
+func TestRelayOversizeChunkReachesAFastClient(t *testing.T) {
+	for _, ch := range []string{"x", "<"} {
+		t.Run(ch, func(t *testing.T) {
+			end := newUpstreamEnd()
+			u := newUpstream(t, "")
+			u.setRespond(sseRespond([]sseStep{{data: sglangChunk(strings.Repeat(ch, 400<<10), "stop")}, {data: sglangUsage}, {data: "[DONE]"}}, nil, end))
+			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings,
+				withFrameCap(1<<20), withRelay(2<<20, 1024, 30*time.Second))
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			a := postStream(ctx, t, serveHTTP(t, rig.router), streamBody("chat"))
+			if a.status != http.StatusOK || a.dones() != 1 || end.canceled {
+				t.Fatalf("char %q: status %d, dones %d, upstream canceled %v, %d bytes: %.200q — want the whole stream",
+					ch, a.status, a.dones(), end.canceled, len(a.raw), a.raw)
+			}
+			if ch == "<" && !strings.Contains(a.raw, strings.Repeat(`\u003c`, 64)) {
+				t.Fatalf("char %q: the escaped content did not arrive (%d bytes)", ch, len(a.raw))
+			}
+			t.Logf("char %q: %d bytes, dones %d", ch, len(a.raw), a.dones())
+		})
+	}
+}

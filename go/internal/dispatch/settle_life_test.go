@@ -7,6 +7,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"runtime"
 	"testing"
@@ -50,8 +51,10 @@ func TestSettleEndsOnce(t *testing.T) {
 		if held, _, w, s := heldNow(t, d); held != 0 || w != 0 || s != 0 {
 			t.Fatalf("after the timer's due time: held=%d weight=%d settling=%d, want 0/0/0", held, w, s)
 		}
-		if snap := d.Snapshot(); snap.ReapsTotal != 1 {
-			t.Fatalf("reaps %d, want 1", snap.ReapsTotal)
+		// Fremd-Review 1 F6: a settle the reaper ends is no leak — its caller
+		// released the lease; no reap is counted.
+		if snap := d.Snapshot(); snap.ReapsTotal != 0 {
+			t.Fatalf("reaps %d, want 0 (a settle past the reap deadline is no leak)", snap.ReapsTotal)
 		}
 	})
 	t.Run("close", func(t *testing.T) {
@@ -189,4 +192,103 @@ func TestSettleTraceSeesASettle(t *testing.T) {
 		t.Fatal("no seed's trace differs with abort_settle_ms 50/50 — the trace cannot see a settle")
 	}
 	t.Logf("%d of 6 seeds differ with a settle", differs)
+}
+
+// TestSettleNeverPicksASettlingVictim (Fremd-Review 1 F4, mutant M3): two
+// background leases on a 2-slot preempt target; the first interactive waiter
+// preempts the younger, which settles; a second waiter needs a second unit —
+// the running lease is the victim, never the settling one (its cancel frees
+// nothing).
+func TestSettleNeverPicksASettlingVictim(t *testing.T) {
+	s := DefaultSettings()
+	s.PreemptReleaseTimeout = 2 * time.Second
+	d, _ := newTestDispatcher(t, s, settlePolicy(t, 2, 0, settleMS(0, 1500), true))
+	var leases []*Lease
+	for range 2 {
+		l, runCtx, err := d.Acquire(context.Background(), backgroundReq())
+		if err != nil {
+			t.Fatalf("background acquire: %v", err)
+		}
+		leases = append(leases, l)
+		go func(l *Lease, rc context.Context) { <-rc.Done(); l.Release() }(l, runCtx)
+	}
+	t.Cleanup(func() {
+		for _, l := range leases {
+			l.Release()
+		}
+	})
+	ich := make(chan admission, 2)
+	startWaiter(withPrincipal(context.Background(), principal("a")), d, "i1", interactiveReq(), ich)
+	waitFor(t, "the victim settling", func() bool { return settlingOf(target(t, d)) == 1 })
+	// A second waiter needs a second unit: the running lease is the victim,
+	// never the settling one (its cancel frees nothing — Fremd-Review 1 F4,
+	// mutant M3).
+	running := leases[0]
+	if settlingOfLease(d, running) {
+		running = leases[1]
+	}
+	startWaiter(withPrincipal(context.Background(), principal("b")), d, "i2", interactiveReq(), ich)
+	waitFor(t, "the second preempt", func() bool { return preemptStats(t, d).PreemptsTotal == 2 })
+	if !errors.Is(context.Cause(runCtxOf(d, running)), ErrPreempted) {
+		t.Fatal("the second preempt did not cancel the running lease (a settling lease was picked again)")
+	}
+	for range 2 {
+		a := recvAdmission(t, ich, "interactive admission")
+		if a.err != nil {
+			t.Fatalf("interactive: %v", a.err)
+		}
+		a.lease.Release()
+	}
+}
+
+// TestSettleOfANonVictimDoesNotCover (Fremd-Review 1 F5): a settling lease
+// that was no preempt victim (an external client gone) frees its units on its
+// own clock — it does not suppress the preempt a waiting interactive acquire
+// needs: the background lease is the victim at once (G1a counts the victim's
+// settle only).
+func TestSettleOfANonVictimDoesNotCover(t *testing.T) {
+	s := DefaultSettings()
+	s.PreemptReleaseTimeout = 2 * time.Second
+	// The external lease is a stream (settles 5 s), the background victim
+	// settles 300 ms (nonstream).
+	d, _ := newTestDispatcher(t, s, settlePolicy(t, 2, 1, settleMS(5000, 300), true))
+	bg, bgRun, err := d.Acquire(context.Background(), backgroundReq())
+	if err != nil {
+		t.Fatalf("background acquire: %v", err)
+	}
+	go func() { <-bgRun.Done(); bg.Release() }()
+	xctx2, cancel := context.WithCancel(xctx(context.Background(), "c1", "t1"))
+	xl, xRun, err := d.Acquire(xctx2, withStream(externalReq()))
+	if err != nil {
+		t.Fatalf("external acquire: %v", err)
+	}
+	cancel()
+	<-xRun.Done()
+	xl.Release() // settles 5 s: not a victim
+	if settlingOf(target(t, d)) != 1 {
+		t.Fatal("the external lease does not settle")
+	}
+	ich := make(chan admission, 1)
+	startWaiter(withPrincipal(context.Background(), principal("a")), d, "i1", interactiveReq(), ich)
+	a := recvAdmission(t, ich, "interactive admission")
+	if a.err != nil {
+		t.Fatalf("interactive: %v", a.err)
+	}
+	a.lease.Release()
+	if !errors.Is(context.Cause(bgRun), ErrPreempted) {
+		t.Fatal("the background lease was not preempted — the settling external lease covered the need")
+	}
+}
+
+// settlingOfLease and runCtxOf read one lease's state under the mutex.
+func settlingOfLease(d *Dispatcher, l *Lease) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return l.settling
+}
+
+func runCtxOf(d *Dispatcher, l *Lease) context.Context {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return l.runCtx
 }

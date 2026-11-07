@@ -196,8 +196,17 @@ func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.Consum
 // the answer path) by keeping its charge, the usage is unknown; without it
 // by Abort — and stops a stream's timer (a panic can leave it armed).
 func (c *chatCall) close() {
+	if c.relay != nil {
+		// The relay's writer takes no further chunk (A03-W10, Fremd-Review 1
+		// F2); freeze below waits for a write in its hand, frameLocked refuses
+		// every later one, join waits for the writer's end.
+		c.relay.fail(context.Canceled)
+	}
 	if c.sse != nil {
 		c.sse.freeze()
+	}
+	if c.relay != nil {
+		c.relay.join()
 	}
 	if c.limit != nil && !c.limitEnd {
 		if c.wired.Load() {

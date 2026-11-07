@@ -177,8 +177,8 @@ func TestSettleAllClasses(t *testing.T) {
 }
 
 // TestSettleOnlyAfterAnEndedRun (pin): a lease whose run is alive at its
-// release ends at once, a settle configured or not; a pass-through lease (no
-// slots on the target) never settles, its run ended or not.
+// release ends at once, a settle configured or not; a pass-through lease (the
+// kill switch) never settles, its run ended or not.
 func TestSettleOnlyAfterAnEndedRun(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), settlePolicy(t, 4, 2, settleMS(2000, 2000), false))
 	l, _, err := d.Acquire(xctx(context.Background(), "c1", "t1"), externalReq())
@@ -189,10 +189,11 @@ func TestSettleOnlyAfterAnEndedRun(t *testing.T) {
 	if held, _, _, settling := heldNow(t, d); held != 0 || settling != 0 {
 		t.Fatalf("live run released: held=%d settling=%d, want 0/0", held, settling)
 	}
-	// A target without slots: in-house leases pass through and hold nothing.
-	rows := []BackendRow{{Name: "gpu", Scope: GlobalScope, BaseURL: testOrigin, ProviderClass: "llamacpp",
-		Limits: map[string]any{"abort_settle_ms": settleMS(2000, 2000)}}}
-	d2, _ := newTestDispatcher(t, DefaultSettings(), DerivePolicy(rows, slog.New(slog.DiscardHandler)))
+	// The kill switch on a target that declares slots and a settle: in-house
+	// leases pass through and hold nothing — nothing to settle.
+	off := DefaultSettings()
+	off.Enabled = false
+	d2, _ := newTestDispatcher(t, off, settlePolicy(t, 4, 2, settleMS(2000, 2000), false))
 	ctx, cancel := context.WithCancel(context.Background())
 	l2, runCtx, err := d2.Acquire(ctx, backgroundReq())
 	if err != nil {

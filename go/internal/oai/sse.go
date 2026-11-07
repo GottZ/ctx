@@ -253,12 +253,14 @@ func (s *streamWriter) frame(chunk []byte) error {
 
 // frameLocked is frame's section under mu, released by defer: a panic of a
 // writer of the chain (Write, Flush, WriteHeader) or of the header source
-// runs on, on the handler's goroutine, to the route's close() — which takes
-// mu — and to oai.Recover (F4-2). gone: an earlier write had failed.
+// runs on — on the relay's writer goroutine since A03-W10, which raises it
+// again on the handler's (relay.go) — to the route's close() — which takes
+// mu — and to oai.Recover (F4-2). gone: an earlier write had failed, or the
+// route owns the outcome (frozen: no frame after freeze, Fremd-Review 1 F2).
 func (s *streamWriter) frameLocked(chunk []byte) (gone bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.err != nil {
+	if s.err != nil || s.frozen {
 		return true, nil
 	}
 	commit := s.state == streamOpen
