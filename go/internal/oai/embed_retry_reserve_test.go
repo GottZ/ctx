@@ -26,7 +26,11 @@ import (
 // retryAlloc is the least TotalAlloc of five requests of inputs to the
 // credentials alias at E = 1 (a block per input) on leanEmbedEngine, or on
 // retryEmbedEngine when retry is set — with the calls the engine dropped
-// per request.
+// per request. Each request starts after two collections, with net/http's
+// pools empty: the cold case the term covers, whatever ran before in the
+// process (in the full package run, after the other tests had warmed the
+// pools, a retried three-byte block measured 26.5 KB against 27.8 … 29.0
+// KB alone).
 func retryAlloc(t *testing.T, inputs []string, retry bool) (best uint64, dropped int64) {
 	t.Helper()
 	var srv *httptest.Server
@@ -51,6 +55,8 @@ func retryAlloc(t *testing.T, inputs []string, retry bool) (best uint64, dropped
 	const runs = 5
 	best = ^uint64(0)
 	for range runs {
+		runtime.GC()
+		runtime.GC()
 		var m0, m1 runtime.MemStats
 		runtime.ReadMemStats(&m0)
 		req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
