@@ -103,17 +103,25 @@ func decodeRawAnswer(resp *http.Response, r io.Reader, limit int64, v any) error
 // stops at its closing brace, as json.Decoder stops after the first value;
 // bytes after it are not read. The buffer takes the header's length when it
 // names one within the cap (the transport then ends the body there), else
-// it grows in steps of the cap halved — at most twice the cap in all, never
-// past it; an answer longer than the cap fails in r (httpx.CapBody). A
-// document that is no object, or ends before its object closes, is an error.
+// it grows by doubling from the cap divided by 2^k, rounded up, so that the
+// last doubling meets the cap and is clamped to it: at most twice the cap
+// in all (the rounding adds less than 2^k, which under the 16-MiB transport
+// cap is at most the first step), never past it. A step rounded down would
+// end below the cap and take one more buffer of the whole cap for the last
+// bytes (Delta-Review 7 F-1: 3.86 × the cap with strconv's clone). An answer
+// longer than the cap fails in r (httpx.CapBody). A document that is no
+// object, or ends before its object closes, is an error.
 func rawAnswerBuffer(r io.Reader, hint, limit int64) ([]byte, error) {
 	size := limit
 	if hint > 0 && hint <= limit {
 		size = hint
 	} else {
+		k := 0
 		for size/2 >= rawAnswerMinStep {
 			size /= 2
+			k++
 		}
+		size = (limit + int64(1)<<k - 1) >> k
 	}
 	buf := make([]byte, 0, size)
 	var sc objectScan

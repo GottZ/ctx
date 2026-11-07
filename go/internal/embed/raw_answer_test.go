@@ -132,8 +132,8 @@ type answerForm struct {
 
 // answerForms are the decode gate's shapes (the four of the hardening order
 // — n vectors of full length, n empty objects, n + 1 entries, a huge number
-// literal — at a known and at an unknown native dimension, and the reviews'
-// answers of ≈ 8 MiB).
+// literal — at a known and at an unknown native dimension, the reviews'
+// answers of ≈ 8 MiB, and answers that fill a cap no buffer step divides).
 func answerForms() []answerForm {
 	const lit24 = "0.0123456789012345678901" // 24 bytes + the comma: embedWireComponentBytes
 	full := func(n, d int) string {
@@ -156,6 +156,18 @@ func answerForms() []answerForm {
 		tail := `]}]}`
 		return head + strings.Repeat("0", capOf(n, d)-len(head)-len(tail)-64) + tail
 	}
+	padTo := func(doc string, size int) string { // blanks before the closing brace
+		return doc[:len(doc)-1] + strings.Repeat(" ", size-len(doc)) + "}"
+	}
+	hugeAt := func(n, d int) string { // vector 0 ends in a literal past float32, the answer exactly at the cap
+		es := make([]string, n)
+		for i := 1; i < n; i++ {
+			es[i] = fmt.Sprintf(`{"index":%d,"embedding":%s}`, i, vectorOf("0.5", d))
+		}
+		es[0] = `{"index":0,"embedding":[` + strings.Repeat("0.5,", d-1) + `1HUGE]}`
+		doc := openAIEntries(es...)
+		return strings.Replace(doc, "HUGE", strings.Repeat("0", capOf(n, d)-len(doc)+len("HUGE")), 1)
+	}
 	overlong := func(n, d int) string {
 		es := make([]string, n)
 		per := (capOf(n, d) - 256) / n
@@ -171,6 +183,10 @@ func answerForms() []answerForm {
 		{"known: n + 1 entries", backends.ProtocolOpenAI, 8, 1024, short(9, 1024), false},
 		{"known: a huge number literal", backends.ProtocolOpenAI, 1, 1, huge(1, 1), false},
 		{"known: overlong vectors at the cap", backends.ProtocolOpenAI, 8, 1024, overlong(8, 1024), false},
+		// A cap that no step divides (255 × 1024: 6 597 376 B, 768 B past
+		// a multiple of 2^10), filled to its last byte — Delta-Review 7 F-1.
+		{"known: a huge literal exactly at a cap no step divides", backends.ProtocolOpenAI, 255, 1024, hugeAt(255, 1024), false},
+		{"known: short vectors padded exactly to a cap no step divides", backends.ProtocolOpenAI, 255, 1024, padTo(short(255, 1024), capOf(255, 1024)), true},
 		{"unknown: n vectors of full length", backends.ProtocolOpenAI, 8, 0, full(8, 1024), true},
 		{"unknown: a huge number literal at the cap", backends.ProtocolOpenAI, 1, 0, huge(1, 0), false},
 		{"unknown: a dense vector at the cap", backends.ProtocolOpenAI, 1, 0,
