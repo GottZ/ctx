@@ -102,8 +102,35 @@ func TestCoverageOption1CtxFreeInvariant(t *testing.T) {
 	t.Logf("ctx-free: %d random row sets value-equal to the F-W7 coverage term; covered in %d", iters, coveredN)
 }
 
-// TestCoverageOption1OnlyExemptsForeignCtxRows bounds Option 1 on row sets
-// WITH ctx rows: it only ever exempts (covered under F-W7 ⇒ covered now, the
+// coverageOption1Oracle computes the Option-1 coverage term independently of
+// coverageRows: per origin, the rows splitAuthority calls foreign are matched
+// back by NAME (the generator's names are unique per set), and exactly the
+// foreign rows of class ctx turn External before the F-W7 rule runs.
+func coverageOption1Oracle(byOrigin map[string][]BackendRow, targets map[string]TargetPolicy) (bool, []string) {
+	adjusted := make(map[string][]BackendRow, len(byOrigin))
+	for origin, group := range byOrigin {
+		_, foreign := splitAuthority(group)
+		foreignCtx := make(map[string]bool)
+		for _, f := range foreign {
+			if f.ProviderClass == "ctx" {
+				foreignCtx[f.Name] = true
+			}
+		}
+		rows := make([]BackendRow, len(group))
+		for i, r := range group {
+			if foreignCtx[r.Name] {
+				r.External = true
+			}
+			rows[i] = r
+		}
+		adjusted[origin] = rows
+	}
+	return coverageWithoutOption1(adjusted, targets)
+}
+
+// TestCoverageOption1OnlyExemptsForeignCtxRows pins Option 1 on row sets
+// WITH ctx rows against the independent oracle above, and bounds it: it only
+// ever exempts (covered under F-W7 ⇒ covered now, the
 // WARN set a subset), and an origin it stops warning about carries a ctx row
 // of a non-authoritative scope (splitAuthority) — authoritative ctx rows stay
 // coverage-bound.
@@ -118,6 +145,9 @@ func TestCoverageOption1OnlyExemptsForeignCtxRows(t *testing.T) {
 			rows[j] = optRow(r, j, classes)
 		}
 		covered, warns, byOrigin, targets := optCoverage(rows)
+		if oc, ow := coverageOption1Oracle(byOrigin, targets); covered != oc || !slices.Equal(warns, ow) {
+			t.Fatalf("iter %d: covered %v warns %v, Option-1 oracle %v %v (rows %+v)", i, covered, warns, oc, ow, rows)
+		}
 		legacyCovered, legacyWarns := coverageWithoutOption1(byOrigin, targets)
 		if legacyCovered && !covered {
 			t.Fatalf("iter %d: Option 1 uncovered a covered derivation: %v (rows %+v)", i, warns, rows)

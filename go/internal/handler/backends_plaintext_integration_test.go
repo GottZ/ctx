@@ -129,8 +129,10 @@ func TestBackendPlaintextModelKeyConfirm(t *testing.T) {
 	wantOK := func(t *testing.T, what string, code int, body string, wantWarn bool) {
 		t.Helper()
 		t.Logf("%s: %d %s", what, code, body)
-		if code != http.StatusOK {
-			t.Fatalf("%s = %d %s, want 200", what, code, body)
+		// A handler that returns without answering leaves the recorder at its
+		// default 200 with an empty body — the success flag is the proof.
+		if code != http.StatusOK || !strings.Contains(body, `"success":true`) {
+			t.Fatalf("%s = %d %s, want 200 with success:true", what, code, body)
 		}
 		var resp struct {
 			Warnings []string `json:"warnings"`
@@ -201,6 +203,10 @@ func TestBackendPlaintextModelKeyConfirm(t *testing.T) {
 		// trust/data-collection doctrine: confirm when the edge arms).
 		rec := ph.doID(ph.admin, "backend-update", id, map[string]any{"priority": 42})
 		wantOK(t, "re-save without confirm", rec.Code, rec.Body.String(), false)
+		var prio int
+		if err := ph.pool.QueryRow(ph.ctx, `SELECT priority FROM context_backends WHERE id = $1`, id).Scan(&prio); err != nil || prio != 42 {
+			t.Fatalf("priority after the re-save = %d (err %v), want 42 stored", prio, err)
+		}
 		// The brake is never gated.
 		rec = ph.doID(ph.admin, "backend-update", id, map[string]any{"enabled": false})
 		wantOK(t, "brake", rec.Code, rec.Body.String(), false)
