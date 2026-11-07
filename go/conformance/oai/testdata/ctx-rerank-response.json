@@ -1,0 +1,50 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ctx rerank answer — POST /v1/rerank (Jina form) and POST /v2/rerank (Cohere v2 form)",
+    "version": "1",
+    "description": "ctx-owned schema of the rerank answer of design/02 §4.9 (OpenAI publishes no rerank endpoint, so there is no openai-openapi excerpt to vendor). It encodes the members the Jina rerank API and the Cohere v2 SDK (cohere==7.3.1, test_rerank.py) read: id, model, results[] with index and relevance_score (and document.text when echoed), usage. Strict: no other member anywhere, relevance_score in [0, 1]. Same $ref layout as the openai-openapi excerpts, so the harness loads it the same way."
+  },
+  "components": {
+    "schemas": {
+      "RerankResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "model", "results", "usage"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "model": {"type": "string", "minLength": 1},
+          "results": {"type": "array", "items": {"$ref": "#/components/schemas/RerankResult"}},
+          "usage": {"$ref": "#/components/schemas/RerankUsage"}
+        }
+      },
+      "RerankResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "relevance_score"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "relevance_score": {"type": "number", "minimum": 0, "maximum": 1},
+          "document": {"$ref": "#/components/schemas/RerankDocument"}
+        }
+      },
+      "RerankDocument": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text"],
+        "properties": {
+          "text": {"type": "string"}
+        }
+      },
+      "RerankUsage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["prompt_tokens", "total_tokens"],
+        "properties": {
+          "prompt_tokens": {"type": "integer", "minimum": 0},
+          "total_tokens": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}

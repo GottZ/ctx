@@ -37,11 +37,24 @@ def _envelope(code, etype, message="m"):
 
 class Fake:
     """A fake ctx. mode: off | on | door-first | proxy-unset | house-errors |
-    bad-chat | retry-ok | retry-bad."""
+    bad-chat | retry-ok | retry-bad | slow-prefill | cut | heap |
+    no-ratelimit.
+
+    In mode heap every stream takes ~0.6 s and the fake writes its own
+    "container memory" to ``mem_file``: 100 MB + 20 MB per open stream, so
+    the measured peak follows the flood instead of a timer (S2: the S1 test
+    raced a writer thread against the tool's start)."""
+
+    MEM_BASE, MEM_PER_STREAM = 100_000_000, 20_000_000
 
     def __init__(self, mode):
         self.mode = mode
         self.calls = []
+        self.n = 0
+        self.open_streams = 0
+        self.mem_file = None
+        self.foreign_load = []
+        self.backends = []
         self.lock = threading.Lock()
         fake = self
 
@@ -82,13 +95,27 @@ class Fake:
         with self.lock:
             return sum(1 for c in self.calls if c == what)
 
+    def set_mem(self, delta):
+        with self.lock:
+            self.open_streams += delta
+            if self.mem_file is not None:
+                self.mem_file.write_text(f"{self.MEM_BASE + self.MEM_PER_STREAM * self.open_streams}\n")
+
     def route(self, h, method, body):
         path = h.path.split("?")[0]
         with self.lock:
             self.calls.append(body.get("action") if path == "/api/manage" else f"{method} {path}")
+            self.n += 1
+            n = self.n
+        if path == "/api/status":
+            if h.headers.get("X-Context-Key") != ADMIN:
+                return h._send(403, {"success": False, "error": "forbidden"})
+            return h._send(200, {"foreign_load": self.foreign_load})
         if path == "/api/manage":
             if h.headers.get("X-Context-Key") != ADMIN:
                 return h._send(403, {"success": False, "error": "forbidden"})
+            if body.get("action") == "backend-list":
+                return h._send(200, {"success": True, "backends": self.backends})
             if body.get("action") == "model-consumer-create":
                 return h._send(200, {"success": True, "consumer": {"id": "c-1"}, "api_key": KEY})
             if body.get("action") == "model-consumer-delete":
@@ -113,7 +140,7 @@ class Fake:
         if self.mode in ("retry-ok", "retry-bad"):
             if bearer != f"Bearer {KEY}":
                 return h._send(*unauth)
-            if len(self.calls) % 2:
+            if n % 2:
                 ra = "5" if self.mode == "retry-ok" else "45"
                 return h._send(429, _envelope("rate_limit_exceeded", "rate_limit_error"),
                                {"x-should-retry": "true", "Retry-After": ra})
@@ -123,19 +150,28 @@ class Fake:
                 return h._send(401, {"success": False, "error": "unauthorized"})
             return h._send(*unauth)
         if method == "GET" and path == "/v1/models":
-            return h._send(200, {"object": "list", "data": [{"id": "chat", "object": "model", "created": 0, "owned_by": "ctx"}]})
+            return h._send(200, {"object": "list", "data": [
+                {"id": m, "object": "model", "created": 0, "owned_by": "ctx", "ctx": {"kind": k}}
+                for m, k in (("chat", "chat"), ("embed", "embedding"), ("rerank", "rerank"))]})
         if method == "POST" and path == "/v1/chat/completions":
             if self.mode == "bad-chat":
                 return h._send(200, {"choices": "nope"})
             if body.get("stream"):
-                return _stream(h)
-            return h._send(200, _chat())
+                return _stream(h, self)
+            if self.mode == "no-ratelimit":
+                return h._send(200, _chat())
+            return h._send(200, _chat(), {f"x-ratelimit-{k}-{d}": v for k, v in (("limit", "30"), ("remaining", "29"), ("reset", "2s"))
+                                          for d in ("requests", "tokens")})
         if method == "POST" and path == "/v1/embeddings":
+            inputs = body.get("input")
+            inputs = inputs if isinstance(inputs, list) else [inputs]
             return h._send(200, {"object": "list", "model": "embed",
-                                 "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+                                 "data": [{"object": "embedding", "index": i, "embedding": [0.1, 0.2]} for i in range(len(inputs))],
                                  "usage": {"prompt_tokens": 2, "total_tokens": 2}})
         if method == "POST" and path in ("/v1/rerank", "/v2/rerank"):
-            return h._send(200, {"id": "r", "model": "rerank", "results": [{"index": 0, "relevance_score": 0.9}],
+            docs = body.get("documents") or []
+            return h._send(200, {"id": "r", "model": "rerank",
+                                 "results": [{"index": i, "relevance_score": round(0.9 - 0.1 * i, 3)} for i in range(len(docs))],
                                  "usage": {"prompt_tokens": 3, "total_tokens": 3}})
         return h._send(*nf)
 
@@ -147,11 +183,24 @@ def _chat():
             "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}}
 
 
-def _stream(h):
+def _stream(h, fake=None):
+    mode = fake.mode if fake else "on"
     h.send_response(200)
     h.send_header("Content-Type", "text/event-stream")
     h.send_header("Connection", "close")
     h.end_headers()
+    h.close_connection = True
+    if mode == "cut":
+        h.wfile.write(b": keepalive\n\n")
+        h.wfile.flush()
+        return
+    if mode == "slow-prefill":
+        h.wfile.write(b": keepalive\n\n")
+        h.wfile.flush()
+        time.sleep(0.4)
+    if mode == "heap":
+        fake.set_mem(+1)
+        time.sleep(0.6)
     base = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "chat"}
     frames = [
         dict(base, choices=[{"index": 0, "delta": {"role": "assistant", "content": "h"}, "finish_reason": None}]),
@@ -163,7 +212,8 @@ def _stream(h):
         h.wfile.flush()
     h.wfile.write(b"data: [DONE]\n\n")
     h.wfile.flush()
-    h.close_connection = True
+    if mode == "heap":
+        fake.set_mem(-1)
 
 
 @pytest.fixture
@@ -258,26 +308,54 @@ def test_measure_retry_after(fake, ok):
     assert 0.3 <= (got.get("share_429") or 0) <= 0.7, f"429 share not recorded: {got}"
 
 
-@pytest.mark.parametrize("fake", ["on"], indirect=True)
+@pytest.mark.parametrize("fake", ["heap"], indirect=True)
 def test_measure_heap(fake, tmp_path):
     """W02-15: the memory peak under the flood is measured against the
-    in-flight budget (peak − base < budget)."""
+    in-flight budget (peak − base < budget). The fake's memory follows its
+    open streams (100 MB + 20 MB each), so 4 concurrent streams lift the
+    peak at least 20 MB above the base."""
     mem = tmp_path / "memory.current"
-    mem.write_text("100000000\n")
-
-    def grow():
-        for v in (100_000_000, 150_000_000, 180_000_000, 120_000_000):
-            mem.write_text(f"{v}\n")
-            time.sleep(0.05)
-
-    threading.Thread(target=grow, daemon=True).start()
+    fake.mem_file = mem
+    fake.set_mem(0)
     for budget, ok in ((256 << 20, True), (10 << 20, False)):
         rc, last, out = _run(MEASURE, "heap", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY", "--model", "chat",
                              "--streams", "4", "--consumers-keys-env", "CTX_SELFTEST_KEY", "--mem-file", str(mem),
                              "--budget-bytes", str(budget))
         got = json.loads(last) if last.startswith("{") else {}
-        assert got.get("ok") is ok and got.get("peak_bytes", 0) >= got.get("base_bytes", 1), \
-            f"heap with budget {budget}: {rc} {last!r}, want ok={ok}\n{out}"
+        assert got.get("ok") is ok and rc == (0 if ok else 1), f"heap with budget {budget}: {rc} {last!r}, want ok={ok}\n{out}"
+        assert got.get("base_bytes") == Fake.MEM_BASE and got.get("peak_bytes", 0) >= Fake.MEM_BASE + Fake.MEM_PER_STREAM, \
+            f"heap with budget {budget}: base/peak {got.get('base_bytes')}/{got.get('peak_bytes')} do not follow the flood"
+        assert got.get("failed_streams") == 0, f"streams failed under the fake: {got}"
+
+
+@pytest.mark.parametrize("fake,cut", [("slow-prefill", False), ("cut", True)], indirect=["fake"])
+def test_measure_prefill(fake, cut):
+    """W02-15: the prefill probe measures the time to the first token
+    (≥ the fake's 0.4 s) and reports a stream cut before its first token."""
+    rc, last, out = _run(MEASURE, "prefill", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY", "--model", "chat",
+                         "--tokens", "2000")
+    got = json.loads(last) if last.startswith("{") else {}
+    assert got.get("cut_off") is cut and rc == (1 if cut else 0), f"prefill against {fake.mode}: {rc} {last!r}, want cut_off={cut}\n{out}"
+    if not cut:
+        assert got.get("prefill_s", 0) >= 0.35 and got.get("first_byte_s", 9) < got["prefill_s"], f"prefill times {got}"
+
+
+@pytest.mark.parametrize("fake,foreign,backends,want_rc,needle", [
+    ("on", [{"target": "http://spark:30000", "suspected": False, "suspected_hourly": False}],
+     [{"name": "spark-chat", "limits": {"internal_reserved_slots": 4, "abort_settle_ms": {"stream": 500}}}], 0, "PASS"),
+    ("on", [{"target": "http://spark:30000", "suspected": True, "suspected_hourly": False}],
+     [{"name": "spark-chat", "limits": {"internal_reserved_slots": 4, "abort_settle_ms": {"stream": 500}}}], 1, "foreign load"),
+    ("on", [], [{"name": "spark-chat", "limits": {"internal_reserved_slots": 2}}], 1, "internal_reserved_slots"),
+    ("on", [], [{"name": "spark-chat", "limits": {"internal_reserved_slots": 4}}], 1, "abort_settle_ms"),
+], indirect=["fake"])
+def test_preflight(fake, foreign, backends, want_rc, needle):
+    """W02-15 checklist items foreign-load and partition: preflight fails on a
+    suspected foreign load, a wrong internal reservation or a missing
+    abort_settle_ms."""
+    fake.foreign_load, fake.backends = foreign, backends
+    rc, last, out = _run(SMOKE, "preflight", "--base-url", fake.url, "--admin-key-env", "CTX_SELFTEST_ADMIN",
+                         "--partition", "spark-chat=4")
+    assert rc == want_rc and needle in last, f"preflight: {rc} {last!r}, want {want_rc} with {needle!r}\n{out}"
 
 
 def test_checklist_tools_are_implemented():
@@ -300,7 +378,7 @@ def test_testsh_t25_maps_skip():
     """W02-15 gate 'T25 ohne Flag ⇒ SKIP mit Grund (nie PASS)': test.sh has a
     T25 that runs smoke.py t25 and maps exit 77 to skip, never to pass."""
     src = (REPO / "test.sh").read_text()
-    m = re.search(r'\nT="T25 [^"]*"\n(.*?)\n(?=# T\d\d |\n# ---|\Z)', src, re.S)
+    m = re.search(r'\nT="T25 [^"]*"\n(.*?)\n(?=# T\d\d |\n# [-=]{3}|\Z)', src, re.S)
     assert m, "test.sh has no T25 block"
     block = m.group(1)
     assert "smoke.py" in block and " t25 " in block + " ", "T25 does not run smoke.py t25"
@@ -320,3 +398,30 @@ def test_docs_list_every_checklist_id():
     ids = [it["id"] for it in json.loads((LIVE / "checklist.json").read_text())["items"]]
     missing = [i for i in ids if f"`{i}`" not in sec]
     assert not missing and "CTX_TRUSTED_PROXY" in sec, f"activation section misses checklist ids {missing}"
+
+
+@pytest.mark.parametrize("fake,want", [("off", "[SKIP] T25 OPENAI_GATEWAY -- gateway.enabled is false"),
+                                       ("on", "[OK]   T25 OPENAI_GATEWAY (7 probes"),
+                                       ("bad-chat", "[FAIL] T25 OPENAI_GATEWAY -- rc=1 FAIL: chat:")], indirect=["fake"])
+def test_testsh_t25_block_runs(fake, want):
+    """W02-15 gate end to end: the T25 block of test.sh, run by bash with
+    test.sh's own pass/fail/skip helpers against a fake stack, reports SKIP
+    with the reason without the flag, OK with it, FAIL on a broken chat."""
+    src = (REPO / "test.sh").read_text()
+    helpers = re.search(r"\npass\(\) \{.*?\n\}\n\nfail\(\) \{.*?\n\}\n\nskip\(\) \{.*?\n\}\n", src, re.S)
+    block = re.search(r'\n(T="T25 [^"]*"\n.*?)\n(?=# T\d\d |\n# [-=]{3}|\Z)', src, re.S)
+    assert helpers and block, "test.sh lacks the helpers or the T25 block"
+    script = "PASS=0; FAIL=0; SKIP=0\n" + helpers.group(0) + block.group(1) + "\n"
+    env = dict(os.environ, WEBHOOK=fake.url, CTX_ADMIN_KEY=ADMIN, SCRIPT_DIR=str(REPO))
+    p = subprocess.run(["bash", "-c", 'SCRIPT_DIR="$SCRIPT_DIR"; WEBHOOK="$WEBHOOK"\n' + script],
+                       capture_output=True, text=True, timeout=180, env=env)
+    out = p.stdout + p.stderr
+    assert want in out, f"T25 block against {fake.mode}: want {want!r} in\n{out}"
+
+
+@pytest.mark.parametrize("fake", ["no-ratelimit"], indirect=True)
+def test_run_requires_the_meter_headers(fake):
+    """W06-20 live probe (design/06 §7 W06-20 "Chat 200 mit x-ratelimit-*"):
+    a served chat without the consumer's x-ratelimit-* headers fails."""
+    rc, last, out = _run(SMOKE, "run", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY")
+    assert rc == 1 and "x-ratelimit" in last, f"chat without meter headers: {rc} {last!r}, want 1 FAIL naming x-ratelimit\n{out}"
