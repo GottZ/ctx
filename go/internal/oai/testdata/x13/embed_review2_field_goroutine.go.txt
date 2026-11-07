@@ -1,0 +1,10 @@
+// census-want: 1
+// Review 2 probe A: the block function kept in a struct field and called
+// from a goroutine (selector call, no parameter of type blockFunc).
+package oai
+
+type pump struct{ do blockFunc }
+
+func (p pump) kick() {
+	go p.do(0, 0, 1, nil, nil, 0)
+}

@@ -442,6 +442,11 @@ var cgNotKeyTables = map[string]string{
 	"visionPrefixes":       "value table of an image_url's data URL prefix, compared in place",
 	"usageKeys":            "response side (rewrite.go): the usage object of an upstream answer",
 	"reasoningMessageKeys": "response side (rewrite.go): reasoning members of an upstream answer's message",
+	// The embeddings parse (W02-09) has its own key tables and its own class
+	// gate (FOLGE-E, embed_class_gate_test.go): outside this gate's bodies,
+	// which are chat requests.
+	"embedKeys":     "request-key table of the embeddings parse (embeddings_parse.go), gated by the embeddings class gate",
+	"embedDropKeys": "drop-key table of the embeddings parse (embeddings_parse.go), gated by the embeddings class gate",
 }
 
 // cgCensus is the census of the package's string tables over every non-test

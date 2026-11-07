@@ -1,0 +1,15 @@
+// census-want: 1
+// Fremd-Review 1 F-2 probe: the sub-block helper starts the block call
+// (a blockFunc value) as a goroutine and hands its lease back.
+package oai
+
+import (
+	"context"
+
+	"github.com/GottZ/ctx/internal/dispatch"
+)
+
+func (r subBlockRun) first(lease *dispatch.Lease, runCtx context.Context, do blockFunc) {
+	go do(0, 1, lease, runCtx)
+	lease.Release()
+}

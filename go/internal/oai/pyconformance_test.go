@@ -51,7 +51,9 @@ const (
 // cases. The meter fixture (conformanceMeter, W06-10) is served under
 // CTX_METER_BASE_URL for test_meter_retry.py, the L1 fixture
 // (conformanceConcurrency, W06-11) under CTX_CONCURRENCY_BASE_URL for
-// test_concurrency_retry.py, both fresh per run.
+// test_concurrency_retry.py, both fresh per run. The embeddings fixture
+// (conformanceEmbeddings, W02-09) is served under CTX_EMBED_BASE_URL for
+// test_embeddings.py.
 func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Helper()
 	uv, err := exec.LookPath("uv")
@@ -65,6 +67,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Cleanup(chat.Close)
 	meter := httptest.NewServer(conformanceMeter(t))
 	t.Cleanup(meter.Close)
+	embeddings := httptest.NewServer(conformanceEmbeddings(t))
+	t.Cleanup(embeddings.Close)
 	concurrency := httptest.NewServer(conformanceConcurrency(t))
 	t.Cleanup(concurrency.Close)
 	moduleRoot, err := filepath.Abs("../..")
@@ -78,7 +82,7 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 		"pytest", "-p", "no:cacheprovider", "-v", "conformance/oai")
 	cmd.Dir = moduleRoot
 	cmd.Env = append(childEnv(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/",
-		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/",
+		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/", "CTX_EMBED_BASE_URL="+embeddings.URL+"/",
 		"CTX_CONCURRENCY_BASE_URL="+concurrency.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -130,6 +134,14 @@ func conformanceMeter(t *testing.T) http.Handler {
 	meter := &rigMeter{m: m, lim: keyquota.Limits{Concurrency: noL1, RPM: 12, TPM: 1 << 30, CompletionReserve: 1024}}
 	rig := newChatRig(t, []backends.Backend{up.row("spark", backends.TrustFull, 1)}, 64, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	return rig.router
+}
+
+// conformanceEmbeddings is the fixture of test_embeddings.py: the
+// embeddings route over a fake engine of native dimension 4096.
+func conformanceEmbeddings(t *testing.T) http.Handler {
+	t.Helper()
+	e := newEmbedEngine(t, 4096)
+	return newEmbedRig(t, []backends.Backend{e.row("conf", backends.ProtocolOpenAI, 1)}, 33, 1).router
 }
 
 // conformanceConcurrency is the L1 fixture of test_concurrency_retry.py

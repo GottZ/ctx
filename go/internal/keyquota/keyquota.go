@@ -380,7 +380,7 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 		LimitRequests: req.cap, RemainingRequests: req.remaining(st.req, now), ResetRequests: time.Duration(backlog(st.req, now)),
 		LimitTokens: tok.cap, RemainingTokens: tok.remaining(st.tok, now), ResetTokens: time.Duration(backlog(st.tok, now)),
 	}
-	r := &Reservation{m: m, key: key, lane: s.Lane, tpm: l.TPM, charged: tok.cost(n), shadow: now, headers: h}
+	r := &Reservation{m: m, key: key, lane: s.Lane, tpm: l.TPM, charged: tok.cost(n), held: n, shadow: now, headers: h}
 	st.add(r)
 	return r, Decision{Allowed: true, Retryable: true, Headers: h}
 }
@@ -426,6 +426,7 @@ type Reservation struct {
 	lane    Lane  // the lane of the admission: which L1 count the slot is in
 	tpm     int64 // the TPM the admission was charged under
 	charged int64 // ns booked on the token bucket at admission
+	held    int64 // the tokens charged at admission (Held)
 	// shadow is the tat (ns) of a bucket that started empty at this
 	// admission and saw only the charges after it, corrected by the refunds
 	// of younger reservations — kept by the meter under its mutex while the
@@ -483,6 +484,17 @@ func (r *Reservation) Reject(reason string, waited time.Duration) {
 // Headers are the x-ratelimit-* headers of the admission (design/06 §4.4):
 // the route writes them on its successful answer before the first byte.
 func (r *Reservation) Headers() http.Header { return r.headers.Header() }
+
+// Held is the tokens the admission charged: the op's estimate, at most the
+// capacity of the lane's token bucket (B-06-28) — what Keep books. It is
+// set at the admission; Keep, Settle and Abort move the bucket, never it. A
+// route compares what it would book with it instead of rebuilding it (lead
+// decision 2026-11-06, one source): what it weighs its booking against is
+// then what Keep books by construction, in every lane and under every cap.
+// A rebuild from the admission's own headers misses only a limiter that
+// reports no capacity; one from the settings also moves with a reload
+// between the admission and the end of the request.
+func (r *Reservation) Held() int64 { return r.held }
 
 // end closes r and moves the token bucket by delta ns. A debt is a new
 // charge at now — booked from max(tat, now) on (the overrun was used, its
