@@ -47,6 +47,9 @@ type waiter struct {
 	// request, A03-W17): it waits in classQueue.cont, the head of the class,
 	// never in a bucket. Always false in-house.
 	cont bool
+	// stream is Request.Stream, carried onto the lease (A03-W10): it picks
+	// the abort_settle_ms field a settle reads.
+	stream bool
 	// fair is the consumer's fairness record while the waiter is queued in
 	// the external queue (A03-W4, extFair.waiterEnter) — the pick reads it
 	// without a map lookup; nil in-house.

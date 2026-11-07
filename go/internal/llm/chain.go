@@ -45,11 +45,14 @@ func (a Admission) Acquire(ctx context.Context, b *backends.Backend, role string
 // documents). The /v1 planner sets them (A03-W8); the dispatcher reads them
 // for the external class only (MaxWait/ServeBy can only shorten
 // dispatch.external_max_wait, a continuation reads neither) — see
-// dispatch.Request. The zero value is "not set" everywhere.
+// dispatch.Request. The zero value is "not set" everywhere. Stream marks a
+// streamed request (A03-W10): the dispatcher picks the abort_settle_ms field
+// of a settle by it (dispatch.Request.Stream).
 type AdmitOptions struct {
 	MaxWait time.Duration
 	ServeBy time.Time
 	Weight  int
+	Stream  bool
 }
 
 // ErrNoTryAdmitter is TryAcquire's answer when the admitter has no
@@ -116,6 +119,7 @@ func (a Admission) admit(ctx context.Context, b *backends.Backend, role string, 
 		MaxWait:      opts.MaxWait,
 		ServeBy:      opts.ServeBy,
 		Continuation: door == doorContinue,
+		Stream:       opts.Stream,
 	}
 	enqueued := time.Now()
 	var (

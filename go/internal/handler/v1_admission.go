@@ -227,6 +227,7 @@ func (a *V1Admission) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.Ad
 		capOf:    a.dispatch.ExternalWeightCap,
 		units:    in.Units,
 		subBatch: in.SubBatch,
+		stream:   in.Stream,
 	}
 	// Continue is llm.Admission.Continue — the dispatcher's continuation
 	// door (A03-W17): a sub-block route may walk every block of the plan.
@@ -296,6 +297,9 @@ type v1Acquirer struct {
 	adm             llm.Admission
 	capOf           func(origin string) int
 	units, subBatch int
+	// stream is AdmissionInput.Stream: every door passes it on
+	// (llm.AdmitOptions.Stream, A03-W10 — the settle field of the lease).
+	stream bool
 
 	mu      sync.Mutex
 	started bool   // First was called
@@ -320,7 +324,7 @@ func (q *v1Acquirer) First(ctx context.Context, b *backends.Backend, role string
 	}
 	blocks := ExternalWeightPlan(q.units, q.subBatch, q.capOf(b.Host))
 	opts := waitOptions(ctx)
-	opts.Weight = blocks[0]
+	opts.Weight, opts.Stream = blocks[0], q.stream
 	lease, runCtx, err := q.adm.AcquireWith(ctx, b, role, timeout, opts)
 	if err == nil {
 		q.attempt(b.Host, blocks)
@@ -338,7 +342,7 @@ func (q *v1Acquirer) Next(ctx context.Context, b *backends.Backend, role string,
 		return nil, nil, orderError(b, "a failover acquire before the first lease")
 	}
 	blocks := ExternalWeightPlan(q.units, q.subBatch, q.capOf(b.Host))
-	lease, runCtx, err := q.adm.TryAcquire(ctx, b, role, timeout, llm.AdmitOptions{Weight: blocks[0]})
+	lease, runCtx, err := q.adm.TryAcquire(ctx, b, role, timeout, llm.AdmitOptions{Weight: blocks[0], Stream: q.stream})
 	if err == nil {
 		q.attempt(b.Host, blocks)
 	}
@@ -360,7 +364,7 @@ func (q *v1Acquirer) Continue(ctx context.Context, b *backends.Backend, role str
 	if !ok {
 		return nil, nil, orderError(b, "a continuation without a lease of the request on its row, or past its block plan")
 	}
-	return q.adm.Continue(ctx, b, role, timeout, llm.AdmitOptions{Weight: weight})
+	return q.adm.Continue(ctx, b, role, timeout, llm.AdmitOptions{Weight: weight, Stream: q.stream})
 }
 
 // orderError is the refusal of a door used out of order, inside the acquire

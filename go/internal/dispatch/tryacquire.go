@@ -74,6 +74,7 @@ func (d *Dispatcher) TryAcquire(ctx context.Context, req Request) (*Lease, conte
 		deadlineIn: req.DeadlineIn,
 		weight:     requestWeight(class, req.Weight),
 		cont:       req.Continuation && class.External(),
+		stream:     req.Stream,
 		runCtx:     runCtx,
 		cancel:     cancel,
 	}

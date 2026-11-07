@@ -23,6 +23,14 @@ type Settings struct {
 	RequestTimeout    time.Duration
 	RequestDeadline   time.Duration
 
+	// The stream relay (A03-W10, design/03 §4.10 no. 1): the bounded buffer
+	// between the upstream reader and the client writer of one stream, and
+	// the slowest drain its client may keep up while frames wait for it
+	// (bytes per second over the window).
+	StreamRelayBufferBytes int64
+	StreamMinDrainRate     int64
+	StreamMinDrainWindow   time.Duration
+
 	DefaultMaxTokens       int
 	MaxOutputTokensCeiling int
 	TenantAliasCeiling     AliasCeiling

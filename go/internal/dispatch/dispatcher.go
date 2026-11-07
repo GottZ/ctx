@@ -56,14 +56,27 @@ type Lease struct {
 	// start of its slot time on the fairness clock (A03-W4, fairness.go).
 	fair      *fairConsumer
 	slotStart time.Time
+	// runCtx is the run context Acquire handed out (A03-W10): Release reads
+	// whether it ended before the release (settle.go); stream is
+	// Request.Stream, the abort_settle_ms field it reads then.
+	runCtx context.Context
+	stream bool
+	// settling marks a lease Release parked as settling (settle.go): still
+	// booked in held/heldExt/classHeld/heldBy and the registry, its end due
+	// by settleTimer (or the reaper, or Close). Guarded by Dispatcher.mu.
+	settling    bool
+	settleTimer *time.Timer
 }
 
 // Release returns the slot and wakes the next waiter (strict class order,
-// direct handoff). Idempotent: double release is a no-op.
+// direct handoff). Idempotent: double release is a no-op. A slot-holding
+// lease whose run context ended before this call stays booked as settling
+// for the target's abort_settle_ms (A03-W10, settle.go) — 0 by default, then
+// it ends here as before.
 func (l *Lease) Release() {
 	l.d.mu.Lock()
 	opStart := time.Now()
-	l.d.finishLocked(l)
+	l.d.releaseLocked(l)
 	l.d.opDone(opStart)
 	l.d.mu.Unlock()
 	// Free the derived runCtx resources — Release means the caller's wire
@@ -104,6 +117,12 @@ type targetState struct {
 	heldExt   int
 	extLeases int
 	classHeld [numClasses]int
+	// settling / settlingWeight count the settling leases and their units
+	// (A03-W10, settle.go) — a part of held (and of heldExt/classHeld for
+	// their classes), never added on top: a settling lease still holds what
+	// it held, the engine still runs it.
+	settling       int
+	settlingWeight int
 	// inflight is the registry of ALL leases incl. pass-through (telemetry,
 	// divergence metric, reaper).
 	inflight map[*Lease]struct{}
@@ -206,6 +225,10 @@ type Dispatcher struct {
 	// fairNow is the test-only clock seam of the external fairness meter
 	// (fairClock, A03-W4); nil in production. Guarded by mu.
 	fairNow func() time.Time
+
+	// closed is set by Close (A03-W10): no settle timer starts after it —
+	// a release then ends its lease at once (settle.go). Guarded by mu.
+	closed bool
 }
 
 // New constructs the dispatcher and starts its two goroutines: the reaper
@@ -234,10 +257,13 @@ func New(logger *slog.Logger, s Settings) *Dispatcher {
 }
 
 // Close stops the reaper and the wait publisher and returns once both have
-// ended (process shutdown; waiters drain via their own ctx). Idempotent.
+// ended (process shutdown; waiters drain via their own ctx), and ends every
+// settling lease with its timer stopped (A03-W10, settle.go): no settle timer
+// outlives Close, and a release after it settles nothing. Idempotent.
 func (d *Dispatcher) Close() {
 	d.stopOnce.Do(func() { close(d.stopLoops) })
 	d.loops.Wait()
+	d.closeSettlingLeases()
 }
 
 // UpdateSettings hot-swaps the config-derived knobs. A flip to
@@ -336,6 +362,7 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		deadlineIn: req.DeadlineIn,
 		weight:     requestWeight(class, req.Weight),
 		cont:       req.Continuation && class.External(),
+		stream:     req.Stream,
 		runCtx:     runCtx,
 		cancel:     cancel,
 		admitCh:    make(chan struct{}),
@@ -579,6 +606,8 @@ func (d *Dispatcher) admitLocked(st *targetState, w *waiter, now time.Time, slot
 		cancel:    w.cancel,
 		slotHeld:  slotHeld,
 		agedAdmit: w.aged,
+		runCtx:    w.runCtx,
+		stream:    w.stream,
 	}
 	st.inflight[l] = struct{}{}
 	if slotHeld {
@@ -635,6 +664,7 @@ func (d *Dispatcher) finishLocked(l *Lease) {
 		return
 	}
 	l.done = true
+	l.st.leaveSettlingLocked(l) // a settling lease ends here too: timer stopped, count out (settle.go)
 	now := time.Now()
 	l.st.leaseRing(l.class).add(now.Sub(l.admitted))
 	d.chargeLocked(l, now)
@@ -1078,6 +1108,14 @@ type TargetSnapshot struct {
 	// == HeldInternal.
 	HeldWeight         int
 	HeldExternalWeight int
+	// Settling is the number of the held leases that are settling (A03-W10,
+	// design/03 §4.10 no. 2): released by their caller after their run
+	// context ended, still booked until the target's abort_settle_ms has
+	// passed — the engine still runs their generation. They count in Held,
+	// HeldWeight and the side split like every held lease (the foreign-load
+	// detector compares the engine's running requests with Held); what runs
+	// on the caller side is Held − Settling. 0 with abort_settle_ms 0/0.
+	Settling           int
 	Inflight           int
 	// HeldInternal / HeldExternal split Held by side (design/03 §4.14);
 	// InflightInternal counts the internal leases incl. pass-through (an
@@ -1197,6 +1235,7 @@ func (d *Dispatcher) Snapshot() Snapshot {
 		ts.ExternalBulkRejects = st.extRejects[ClassExternalBulk]
 		// Σw next to the lease counts (A03-W7): Held stays the lease count.
 		ts.HeldWeight, ts.HeldExternalWeight = st.held, st.heldExt
+		ts.Settling = st.settling
 		if set.Enabled {
 			ts.ExternalOffered, ts.ExternalCapacity = tp.externalCapacity()
 		}

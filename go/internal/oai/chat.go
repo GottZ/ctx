@@ -760,7 +760,7 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return
 	}
-	plan, err := c.d.Planner.Plan(c.ctx, c.ca, AdmissionInput{Chain: chain, ServiceTier: c.req.serviceTier, Units: chatUnits})
+	plan, err := c.d.Planner.Plan(c.ctx, c.ca, AdmissionInput{Chain: chain, ServiceTier: c.req.serviceTier, Units: chatUnits, Stream: c.req.stream})
 	if err != nil {
 		// A run the route itself ended (shutdown, watcher) is answered
 		// first: the writer stays silent on a canceled request context,
