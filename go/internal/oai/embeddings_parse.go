@@ -1,10 +1,12 @@
 package oai
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -21,6 +23,20 @@ import (
 // value); a key that differs from a known one only in letter case is an
 // unknown key, REJECT. The texts reach the wire as sent: no prefix, no
 // rewrite (design/02 §4.8 "Präfix").
+//
+// The parse holds on the heap only what the request's reservation covers
+// (FOLGE-E, the class of FOLGE-P hardenings 5–7 at this route): the model
+// name is decoded only up to modelRawMax raw bytes (a longer one cannot name
+// an alias and is resolved as no alias, probeNoAlias), and the inputs are
+// sized before they are decoded — the exact decoded length of every string
+// (decodedLen over strDecoder: an invalid UTF-8 byte becomes U+FFFD of three
+// bytes, an escape one to four bytes) plus embedInputSlotBytes per input
+// are booked through cover, then the strings are written into one
+// allocation of that size. json.Unmarshal into a string held up to 24 × the decoded text on
+// the way (lone surrogate escapes; 4.8 × for invalid bytes) — none of it
+// booked. A refusal of the budget is errParseOverloaded: 503
+// server_overloaded before the allocation. Every answer is the one the
+// parse gave before (embed_parse_differential_test.go).
 
 // The encoding_format values (design/02 §4.8): float ⇒ float32 JSON
 // numbers, base64 ⇒ little-endian float32, standard base64 — the Python
@@ -32,7 +48,11 @@ const (
 
 // embedRequest is the parsed client request.
 type embedRequest struct {
-	model    string
+	model string
+	// modelOverlong: the raw model value is past modelRawMax — not
+	// decoded, model stays empty and the route resolves no alias for it
+	// (probeNoAlias, the answer of an unknown model).
+	modelOverlong bool
 	input    json.RawMessage // as sent, for the row's body policy
 	inputs   []string
 	dims     int // the client's dimensions, 0 = not sent
@@ -42,6 +62,12 @@ type embedRequest struct {
 	runesSum int
 	bytesSum int
 }
+
+// embedInputSlotBytes is what the parse allocates per input beside its text:
+// the string header in the inputs slice (16 bytes) and the input's rune
+// count (8 bytes, embedRequest.runes). Booked with the texts, before both
+// slices are made.
+const embedInputSlotBytes = 16 + 8
 
 // embedKeys are the CTX keys; embedDropKeys the DROP keys.
 var (
@@ -78,8 +104,9 @@ var embedWindow = len(embedNames) + 1
 // string — a named key up to the longest name (keyIndex), an unknown one
 // into a digest (levelKeys.add) and, for a refusal, up to echoNameMax bytes
 // (decodeKey, FOLGE-P H-9) — and no value is copied, the values are the
-// body's own bytes.
-func parseEmbedTop(body []byte) (*embedRequest, *paramError) {
+// body's own bytes. cover books the decoded inputs before they are
+// allocated (readInput); nil books nothing (the parse outside a request).
+func parseEmbedTop(body []byte, cover func(int64) bool) (*embedRequest, *paramError) {
 	it, isObject := newMemberIter(body)
 	if !isObject || !json.Valid(body) {
 		return nil, notAnObject()
@@ -113,7 +140,7 @@ func parseEmbedTop(body []byte) (*embedRequest, *paramError) {
 	if perr := req.readModel(vals[embedIndex["model"]]); perr != nil {
 		return nil, perr
 	}
-	if perr := req.readInput(vals[embedIndex["input"]]); perr != nil {
+	if perr := req.readInput(vals[embedIndex["input"]], cover); perr != nil {
 		return nil, perr
 	}
 	if perr := req.readEncoding(vals[embedIndex["encoding_format"]]); perr != nil {
@@ -133,6 +160,13 @@ func (req *embedRequest) readModel(v json.RawMessage) *paramError {
 	if v == nil || isNull(v) {
 		return missingParameter("model")
 	}
+	// Past modelRawMax raw bytes no alias name can stand (hardening 5 of
+	// FOLGE-P, B-1, at this route): not decoded — 8 MiB of invalid bytes
+	// decoded to 24 MiB before the 404.
+	if s, ok := stringContent(v); ok && len(s) > modelRawMax {
+		req.modelOverlong = true
+		return nil
+	}
 	if err := json.Unmarshal(v, &req.model); err != nil {
 		return invalidType("model", "a string")
 	}
@@ -146,18 +180,25 @@ func (req *embedRequest) readModel(v json.RawMessage) *paramError {
 // many; an empty text, an empty array, a token array (int[] or int[][]) or
 // any other shape is refused. Token ids presume one tokenizer over the whole
 // chain; a failover between two builds makes that uncheckable (design/02
-// §4.8).
-func (req *embedRequest) readInput(v json.RawMessage) *paramError {
+// §4.8). The texts are sized, booked through cover and decoded into one
+// allocation of the booked size (FOLGE-E): the strings the route holds are
+// the ones json.Unmarshal decoded, byte for byte, without its transients.
+func (req *embedRequest) readInput(v json.RawMessage, cover func(int64) bool) *paramError {
 	if v == nil || isNull(v) {
 		return missingParameter("input")
 	}
 	req.input = v
 	switch kindOf(v) {
 	case kindString:
-		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
-			return invalidType("input", "a string or an array of strings")
+		raw, _ := stringContent(v)
+		size := decodedLen(raw)
+		if cover != nil && !cover(int64(size)+embedInputSlotBytes) {
+			return errParseOverloaded
 		}
+		var text strings.Builder
+		text.Grow(size)
+		writeDecoded(&text, raw)
+		s := text.String()
 		if s == "" {
 			return unsupportedValue("input", "an input must not be empty")
 		}
@@ -176,7 +217,24 @@ func (req *embedRequest) readInput(v json.RawMessage) *paramError {
 		case n == 0:
 			return unsupportedValue("input", "at least one input is required")
 		}
+		// The size run: the decoded length of every string the decode below
+		// reaches (it stops at the first element it refuses), booked with
+		// the slots of all n inputs before anything is allocated.
+		total := 0
+		eachArrayElem(v, func(i int, e []byte) bool {
+			if i == 0 && hasKind(e, kindNumber|kindArray) || kindOf(e) != kindString {
+				return false
+			}
+			raw, _ := stringContent(e)
+			total += decodedLen(raw)
+			return len(raw) > 0
+		})
+		if cover != nil && !cover(int64(total)+int64(n)*embedInputSlotBytes) {
+			return errParseOverloaded
+		}
 		req.inputs = make([]string, 0, n)
+		var texts strings.Builder
+		texts.Grow(total)
 		var perr *paramError
 		eachArrayElem(v, func(i int, e []byte) bool {
 			if i == 0 && hasKind(e, kindNumber|kindArray) {
@@ -184,11 +242,14 @@ func (req *embedRequest) readInput(v json.RawMessage) *paramError {
 				return false
 			}
 			param := fmt.Sprintf("input[%d]", i)
-			var s string
-			if kindOf(e) != kindString || json.Unmarshal(e, &s) != nil {
+			if kindOf(e) != kindString {
 				perr = invalidType(param, "a string")
 				return false
 			}
+			raw, _ := stringContent(e)
+			from := texts.Len()
+			writeDecoded(&texts, raw)
+			s := texts.String()[from:] // the builder never grows past the booked size: no copy, no move
 			if s == "" {
 				perr = unsupportedValue(param, "an input must not be empty")
 				return false
@@ -211,9 +272,25 @@ func (req *embedRequest) readInput(v json.RawMessage) *paramError {
 	return nil
 }
 
+// encodingRawMax is the longest raw JSON form of an encoding_format value
+// the route accepts: base64, every character written as a \u escape. A
+// longer raw value cannot decode to float or base64 and is refused without
+// being decoded (FOLGE-E, the class gate: 8 MiB of invalid bytes decoded
+// into 24 MiB, 120 MB allocated on the way).
+const encodingRawMax = len(encodingBase64) * len(`\u0000`)
+
+// jsonIntMax is the longest JSON integer an int holds: -9223372036854775808.
+// A longer dimensions value (JSON has no leading zeros) overflows it and is
+// refused without being decoded (FOLGE-E, the class gate: an 8 MiB integer
+// allocated 16 MB in json.Unmarshal).
+const jsonIntMax = len("-9223372036854775808")
+
 func (req *embedRequest) readEncoding(v json.RawMessage) *paramError {
 	if v == nil || isNull(v) {
 		return nil // float, the API's default
+	}
+	if raw, ok := stringContent(v); ok && len(raw) > encodingRawMax {
+		return unsupportedValue("encoding_format", "use float or base64")
 	}
 	var s string
 	if err := json.Unmarshal(v, &s); err != nil {
@@ -235,6 +312,9 @@ func (req *embedRequest) readDimensions(v json.RawMessage) *paramError {
 	}
 	if !hasKind(v, kindInteger) {
 		return invalidType("dimensions", "an integer")
+	}
+	if len(bytes.TrimSpace(v)) > jsonIntMax {
+		return unsupportedValue("dimensions", "must be a positive integer")
 	}
 	var d int
 	if err := json.Unmarshal(v, &d); err != nil || d < 1 {
@@ -342,6 +422,43 @@ func embedRuneLimit(l embedLimits, chain []backends.Backend) int {
 		window = embedFallbackWindow
 	}
 	return min(promptguard.RuneBudget(window), modelalias.CeilingEmbeddingMaxInputRunes)
+}
+
+// embedDecodeChunk is the stack buffer the size run and the decode of an
+// input read the decoded text through (strDecoder.read).
+const embedDecodeChunk = 512
+
+// decodedLen is the length of the string json.Unmarshal decodes from the raw
+// JSON string content raw — strDecoder, FOLGE-P's decoder of a key (escapes
+// resolved, an unpaired surrogate escape and every invalid UTF-8 byte
+// U+FFFD) — counted without allocating.
+func decodedLen(raw []byte) int {
+	if !needsDecode(raw) {
+		return len(raw)
+	}
+	var buf [embedDecodeChunk]byte
+	d := strDecoder{raw: raw}
+	total := 0
+	for n := d.read(buf[:]); n > 0; n = d.read(buf[:]) {
+		total += n
+	}
+	return total
+}
+
+// writeDecoded writes the string json.Unmarshal decodes from raw to b — no
+// more than decodedLen(raw) bytes, so a builder grown to the booked size
+// never grows again. Pinned against json.Unmarshal by
+// TestEmbedInputDecodeIsUnmarshal and its fuzzer.
+func writeDecoded(b *strings.Builder, raw []byte) {
+	if !needsDecode(raw) {
+		b.Write(raw)
+		return
+	}
+	var buf [embedDecodeChunk]byte
+	d := strDecoder{raw: raw}
+	for n := d.read(buf[:]); n > 0; n = d.read(buf[:]) {
+		b.Write(buf[:n])
+	}
 }
 
 // arrayElems counts the elements of the JSON array raw without decoding one
