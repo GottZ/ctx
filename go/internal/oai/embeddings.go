@@ -51,6 +51,31 @@ import (
 // Nothing is written before the last block returned: every failure is a
 // real status (design/02 §4.8 "Antwort"). Every refusal names its code as
 // the access record's reason.
+//
+// The route holds on the heap only what its in-flight reservation covers
+// (FOLGE-E, the ledger of FOLGE-P F-0 at this route, requestLedger): every
+// term is booked before its allocation, in the order the request allocates
+// it — the body read into one buffer of its declared length
+// (readRequestBody), the nesting state of the JSON check (jsonDepthStateBytes
+// per level), the decoded inputs (their exact decoded length and
+// embedInputSlotBytes each, sized before the decode — readInput), the
+// sensitivity scan below credentials (scanBooking: scanReserveFactor × the
+// body + scanReserveBase + scanDepthStateBytes per level), the upstream body
+// of every block of an attempt before its first wire call
+// (upstreamBooking: each body's exact length, embed.WireBodyLen — internal/embed
+// writes it in one allocation of that length since FOLGE-E hardening 1 —
+// with the allocation's rounding, the transport's copy buffer and the wire
+// call, and the copy and the fresh connection of the call's retry
+// (httpx.DoRetryOnce), booked with the first call; its texts' part before
+// the acquire, reserveUpstreamTexts) and the log
+// row's text of the inputs (bodyLogSize). The request share the budget stage
+// reserved (requestReserveFactor × the body) is spent first, the
+// reservation grows past it, never shrinks. A booking the budget cannot hold
+// is 503 server_overloaded before the allocation — nothing booked, nothing
+// allocated, no wire; the log row goes without its text. The model name past
+// modelRawMax is never decoded (probeNoAlias, the answer of an unknown
+// model). Every answer, upstream body and log row is the one the route gave
+// before, except where a booking passes the budget.
 
 // embedPipeline is the llmlog pipeline of the route's row (a local name for
 // the llmlog constant, the shape the promptguard census resolves).
@@ -192,6 +217,13 @@ type embedCall struct {
 	wired atomic.Bool
 	// own is the answer of a route refusal after an acquire (errRouteRefused).
 	own func() string
+	// ledger is the request share of the reservation and what the request
+	// allocated against it (FOLGE-E).
+	ledger requestLedger
+	// textsBooked is the texts' part of the first attempt's upstream bodies,
+	// booked before the acquire (reserveUpstreamTexts); the first attempt
+	// books only the rest of its bodies (frames, slack, wire calls).
+	textsBooked int64
 }
 
 func newEmbedCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *embedCall {
@@ -260,6 +292,11 @@ func (c *embedCall) internal(msg string, args ...any) {
 // refuseParam answers a parse refusal with its param, bound to the
 // vocabulary like WriteCode.
 func (c *embedCall) refuseParam(perr *paramError) {
+	if perr == errParseOverloaded {
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
 	i := slices.IndexFunc(codes, func(s CodeSpec) bool { return s.Code == perr.code })
 	if i < 0 {
 		c.internal("parse error code outside the vocabulary", "code", perr.code)
@@ -280,12 +317,18 @@ func (c *embedCall) serve() {
 	if !ok {
 		return
 	}
-	req, perr := parseEmbedTop(body)
+	depth := jsonDepth(body)
+	if !c.ledger.cover(depth * jsonDepthStateBytes) { // the JSON check's nesting state, booked before it runs
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return
+	}
+	req, perr := parseEmbedTop(body, c.ledger.cover)
 	if perr != nil {
 		c.refuseParam(perr)
 		return
 	}
-	if !c.resolve(req.model) {
+	if !c.resolve(req.model, req.modelOverlong) {
 		return
 	}
 	c.lim = embedLimitsOf(c.alias, c.s)
@@ -309,7 +352,7 @@ func (c *embedCall) serve() {
 		return
 	}
 	required := c.sensitivity()
-	if !c.coverScan(required, len(body)) {
+	if !c.coverScan(required, body, depth) {
 		c.rec.Reason = CodeServerOverloaded
 		WriteOverloaded(c.w)
 		return
@@ -323,38 +366,73 @@ func (c *embedCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
+	if !c.reserveUpstreamTexts() {
+		return
+	}
 	if !c.admitLimiter() {
 		return
 	}
 	c.walk(chain)
 }
 
+// reserveUpstreamTexts books the texts' part of the upstream bodies before
+// the acquire (FOLGE-E, as reserveAnswer the certain decode share): every
+// attempt sends every text once, so the encoded texts are certain at the
+// entry, and a request whose upstream bodies the budget cannot hold is
+// refused there — no queue wait, no queue place, no unit. Only the rest of
+// the blocks' bodies (their number, the row's model and its wire are known
+// at the attempt) follows at the first attempt.
+func (c *embedCall) reserveUpstreamTexts() bool {
+	c.textsBooked = c.upstreamTexts()
+	if !c.ledger.cover(c.textsBooked) {
+		c.rec.Reason = CodeServerOverloaded
+		WriteOverloaded(c.w)
+		return false
+	}
+	return true
+}
+
 // coverScan books the heap of the sensitivity scan of the body before it
-// runs, as the chat route does (FOLGE-P hardening H-8, chatCall.coverScan;
-// W02-09 rebase round 2, part D — measured: without it the route's heap
-// passed its bookings, bau report): scanReserveFactor × the body +
-// scanReserveBase for an alias below credentials, nothing at credentials
-// (federation.ScanRaise returns at once there). The route keeps no ledger
-// of its request share (3 × the body, booked by the budget stage), so the
-// booking comes on top of the share in full — as the budget floor (V39)
-// counts it. It lasts until the request ends: the scan's garbage is heap
-// until the collector runs, and the promise "the heap stays within the
-// bookings" holds under a set GOMEMLIMIT (scanReserveFactor). false: the
-// budget cannot hold it, nothing is booked.
-func (c *embedCall) coverScan(required backends.Sensitivity, n int) bool {
+// runs, as the chat route does (FOLGE-P hardening H-8 and hardening 7,
+// chatCall.coverScan; W02-09 rebase round 2, part D — measured: without it
+// the route's heap passed its bookings, bau report): scanBooking —
+// scanReserveFactor × the body + scanReserveBase + scanDepthStateBytes for
+// each level of the body's nesting (depth, jsonDepth; FOLGE-E: the nesting
+// state was not booked here, as it was not at the chat route before
+// hardening 7) — through the ledger for an alias below credentials,
+// nothing at credentials (federation.ScanRaise returns at once there). It
+// lasts until the request ends: the scan's garbage is heap until the
+// collector runs, and the promise "the heap stays within the bookings"
+// holds under a set GOMEMLIMIT (scanReserveFactor). false: the budget
+// cannot hold it, nothing is booked.
+func (c *embedCall) coverScan(required backends.Sensitivity, body []byte, depth int64) bool {
 	if required.Rank() >= backends.SensCredentials.Rank() {
 		return true
 	}
-	res := ReservationFrom(c.ctx)
-	return res != nil && res.Grow(scanReserveFactor*int64(n)+scanReserveBase)
+	return c.ledger.cover(scanBooking(body, depth))
 }
 
-// readBody reads the body under the strict cap and the in-flight budget.
+// readBody reads the body under the strict cap and the in-flight budget: a
+// chunked body past the budget is the budget's 503, never a 400 (§4.2.1).
+// The ledger starts here (FOLGE-E, as chatCall.readBody): the stage reserved
+// requestReserveFactor × the body, the read spent what readRequestBody
+// allocated — one buffer of the declared length, where io.ReadAll grew its
+// way there and spent about twice the body.
 func (c *embedCall) readBody() ([]byte, bool) {
-	body, err := io.ReadAll(c.r.Body)
+	body, spent, err := readRequestBody(c.r.Body, c.r.ContentLength)
 	var tooLarge *http.MaxBytesError
 	switch {
 	case err == nil:
+		reserved := int64(len(body))
+		if cl := c.r.ContentLength; cl > 0 {
+			reserved = cl
+		}
+		c.ledger = newRequestLedger(ReservationFrom(c.ctx), reserved)
+		if !c.ledger.cover(spent) { // a small undeclared body's first chunk can pass its share
+			c.rec.Reason = CodeServerOverloaded
+			WriteOverloaded(c.w)
+			return nil, false
+		}
 		return body, true
 	case errors.Is(err, ErrBudgetExhausted):
 		c.rec.Reason = CodeServerOverloaded
@@ -370,10 +448,19 @@ func (c *embedCall) readBody() ([]byte, bool) {
 	return nil, false
 }
 
-// resolve is §4.4 steps 1–6 with the kind embedding.
-func (c *embedCall) resolve(name string) bool {
+// resolve is §4.4 steps 1–6 with the kind embedding. A model name past
+// modelRawMax (overlong, not decoded) takes the grant probe of a name that
+// is no alias and gets the 404 (FOLGE-E, as chatCall.resolve).
+func (c *embedCall) resolve(name string, overlong bool) bool {
 	c.gen = c.d.Aliases.Generation() // before the Resolve (W02-07 B-3)
-	a, found, err := c.d.Resolve(c.ctx, c.ca, name)
+	var a modelalias.Alias
+	var found bool
+	var err error
+	if overlong {
+		err = c.d.probeNoAlias(c.ctx, c.ca)
+	} else {
+		a, found, err = c.d.Resolve(c.ctx, c.ca, name)
+	}
 	switch {
 	case err != nil:
 		if ended, _ := c.verdict(); ended {
@@ -761,6 +848,22 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 			return CodeServerOverloaded
 		})
 	}
+	// The upstream bodies of this row's blocks, before the first wire call
+	// (FOLGE-E): EmbedRaw encodes each block anew — every attempt's, the
+	// bodies of an earlier attempt stay on the heap until the collector
+	// runs. The first attempt's texts were booked before the acquire
+	// (reserveUpstreamTexts). Refused ⇒ 503 server_overloaded after the
+	// queue wait, before any wire contact, as the decode share above.
+	model := b.ModelFor(c.alias.Role).Model
+	need := c.upstreamBooking(*b, model, blocks) - c.textsBooked
+	c.textsBooked = 0
+	if !c.ledger.cover(need) {
+		return dispatch.Usage{}, false, c.refuseAfterAcquire(func() string {
+			c.rec.Reason = CodeServerOverloaded
+			WriteOverloaded(c.w)
+			return CodeServerOverloaded
+		})
+	}
 	st.k, st.done, st.failedBlock, st.abort = len(blocks), 0, -1, ""
 	st.later = 0
 	if len(blocks) > 1 {
@@ -768,13 +871,128 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 	}
 	st.vecs = make([][]float32, n)
 	st.dims = c.lim.nativeDims
-	model := b.ModelFor(c.alias.Role).Model
 	run := subBlockRun{ctx: c.ctx, acq: plan.Acquirer, role: c.alias.Role, timeout: c.attemptTimeout, alive: c.alive}
 	return run.run(runCtx, b, lease, timeout, blocks,
 		func(i, lo, hi int, bl *dispatch.Lease, rc context.Context, t time.Duration) (dispatch.Usage, error) {
 			return c.wireBlock(st, b, model, i, lo, hi, bl, rc, t)
 		})
 }
+
+// upstreamBooking is what the wire calls of an attempt of blocks (their
+// sizes, in input order) on row b to model allocate at most: each block's
+// body — one allocation of its exact length, embed.WireBodyLen (FOLGE-E
+// hardening 1: internal/embed sizes the body before it writes it; the
+// json.Encoder before it allocated up to 7.105 × the body and the route
+// booked eight times it) — the allocation's rounding to a size class
+// (embed.WireBodySlack), the transport's copy of the body onto the
+// connection (embed.WireCopyBuffer, or the body's length when shorter) and
+// embedWireCallBytes for its call — and the retry of the call: the copy once
+// more and embedWireRetryBytes (FOLGE-E hardening 2, L-4).
+//
+// The retry is booked with the first call, for every block, whether it
+// happens or not: httpx.DoRetryOnce decides it inside embed.EmbedRaw, after
+// the first call died before its answer, and sends the same body once more
+// on a fresh connection; the route gets control back only when the retry
+// has returned, so there is no point between the two calls where it could
+// book. A booking at the retry itself would take a callback through
+// httpx.DoRetryOnce and embed.EmbedRaw (and a refusal between the two
+// calls); the booking with the first call holds the same bound without it,
+// for at most EmbedWireRetryCeiling at a block per input.
+func (c *embedCall) upstreamBooking(b backends.Backend, model string, blocks []int) int64 {
+	var n int64
+	lo := 0
+	for _, size := range blocks {
+		body := embed.WireBodyLen(b, model, c.req.inputs[lo:lo+size])
+		copied := int64(min(body, embed.WireCopyBuffer))
+		n += int64(body) + embed.WireBodySlack + copied + embedWireCallBytes + copied + embedWireRetryBytes
+		lo += size
+	}
+	return n
+}
+
+// upstreamTexts is the encoded size of the request's texts in the upstream
+// bodies: every text as the wire encodes it (embed.WireStringLen) and its
+// separator — at most what an attempt's bodies hold of them, whatever its
+// blocks.
+func (c *embedCall) upstreamTexts() int64 {
+	var n int64
+	for _, s := range c.req.inputs {
+		n += int64(embed.WireStringLen(s)) + 1
+	}
+	return n
+}
+
+// embedWireCallBytes is what one wire call allocates beside its body and
+// its copy (embed.WireCopyBuffer) — the request, its headers and traces,
+// the block's contexts and lease, the answer's reader and decoder state. A
+// request of k blocks makes k calls (up to embedding.max_inputs one-input
+// blocks when a row's capacity E is 1). Measured over the route (TotalAlloc
+// of one request of 256 three-byte texts at E = 1 … 256, the slope over
+// 1 … 256 blocks, the in-process engine's server side included — an upper
+// bound of the route's own): 12 943 bytes per call before FOLGE-E
+// hardening 1, 12 098 … 13 241 bytes after it (18 runs; the json.Encoder's
+// allocations of the tiny bodies are gone), rounded up to the next 2 KiB —
+// the next 4 KiB (16 KiB) sat within the measurements' spread of the pin's
+// lower bound (FOLGE-E, bau report §Härtung 1). The only term of the route
+// that grows with something other than the body's bytes and its nesting
+// (S-2): k, and k is capped by modelalias.CeilingEmbeddingMaxInputs (every
+// block holds an input), so a request books at most EmbedWireCallCeiling
+// (3.5 MiB) for its calls — for the budget floor (V39) a constant at that
+// ceiling. A derived mechanism constant, not policy;
+// TestEmbedWireCallReserveIsTheMeasuredOne fails when a call needs more or
+// more than one 4-KiB step less.
+const embedWireCallBytes = 14 << 10
+
+// embedWireRetryBytes is what the retry of a wire call allocates beside the
+// second copy of its body (embed.WireCopyBuffer, or the body's length when
+// shorter): httpx.DoRetryOnce answers a transient transport error of the
+// first call — the connection died before the answer — with the same body
+// on a fresh connection, so the retry is a second call with the
+// connection's state (dial, its buffers and the transport's read and write
+// loops; the in-process engine's side of the new connection included),
+// the first call's error and the retry's log line. Measured over the route
+// (TotalAlloc of a request of 256 three-byte texts at E = 1 on an engine
+// that drops the first call of every block, against the same request
+// answered at once; FOLGE-E hardening 2, bau report §Härtung 2): 27 783 …
+// 29 039 bytes per block (12 runs at load 2–5), rounded up to the next
+// 2 KiB. A request of k blocks books it k times — once per block, whether
+// the block is retried or not (upstreamBooking) — at most
+// EmbedWireRetryCeiling with the copies. A derived mechanism constant, not
+// policy; TestEmbedWireRetryReserveIsTheMeasuredOne fails when a retry
+// needs more or more than one 4-KiB step less.
+const embedWireRetryBytes = 30 << 10
+
+// The terms of the embeddings route as the configuration's budget floor
+// reads them (FOLGE-E, lead decision 5). Their reader is the budget
+// dimensioning (V39) before the flip: V39 counts none of them yet and no
+// code reads them before it, so TestEmbedExportsAreTheirDerivations holds
+// each against its derivation (FOLGE-E hardening 2, L-2).
+// EmbedInputSlotReserve per input (at most
+// modelalias.CeilingEmbeddingMaxInputs of them), EmbedWireCallReserve, EmbedUpstreamSlack and EmbedWireCopyReserve per
+// block of an attempt and their ceilings at a block per input
+// (EmbedWireCallCeiling, EmbedUpstreamSlackCeiling, EmbedWireCopyCeiling;
+// the copy is the body's length when that is shorter, so the three
+// ceilings are an upper bound); the retry of every block's call books a
+// second copy and EmbedWireRetryReserve (EmbedWireRetryCeiling: both at a
+// block per input); the upstream bodies themselves are the texts as the
+// wire encodes them (embed.WireStringLen, at most six bytes per decoded
+// byte) and embed.WireFrameMax with the model per block.
+// EmbedEncodingRawMax and EmbedDimensionsRawMax are the longest raw values
+// of encoding_format and dimensions the route decodes — a longer one is
+// refused before its decode, so neither books more than its own bytes.
+const (
+	EmbedInputSlotReserve     = embedInputSlotBytes
+	EmbedWireCallReserve      = embedWireCallBytes
+	EmbedWireCallCeiling      = embedWireCallBytes * modelalias.CeilingEmbeddingMaxInputs
+	EmbedUpstreamSlack        = embed.WireBodySlack
+	EmbedUpstreamSlackCeiling = embed.WireBodySlack * modelalias.CeilingEmbeddingMaxInputs
+	EmbedWireCopyReserve      = embed.WireCopyBuffer
+	EmbedWireCopyCeiling      = embed.WireCopyBuffer * modelalias.CeilingEmbeddingMaxInputs
+	EmbedWireRetryReserve     = embedWireRetryBytes
+	EmbedWireRetryCeiling     = (embed.WireCopyBuffer + embedWireRetryBytes) * modelalias.CeilingEmbeddingMaxInputs
+	EmbedEncodingRawMax       = encodingRawMax
+	EmbedDimensionsRawMax     = jsonIntMax
+)
 
 // refuseAfterAcquire ends the run with the route's own answer (written by
 // verdict) and returns the cause the attempt ends with: a cancellation —
@@ -1297,7 +1515,14 @@ func (c *embedCall) record(plan Plan, served *backends.Backend, attempts []llm.C
 	}
 	request := ""
 	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
-		request = string(c.req.input)
+		// The row's text of the input is sized, then booked, then written
+		// (FOLGE-E, as the chat route since FOLGE-P hardening 6):
+		// string(input) copied the whole value outside the reservation, and
+		// the row's cleaning grew invalid bytes up to 8 × before its cut.
+		// Under an exhausted budget the row goes without it.
+		if n := bodyLogSize(c.req.input); c.ledger.cover(int64(n)) {
+			request = bodyLogText(c.req.input, n)
+		}
 	}
 	c.d.Record(llmlog.GatewayRow{
 		Pipeline:   embedPipeline,

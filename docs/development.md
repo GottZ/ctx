@@ -82,6 +82,7 @@ bash eval.sh --no-warmup            # Skip the unscored warm-up pass (developmen
 bash deadcode.sh                    # Unreachable-code gate against go/deadcode-allow.txt
 bash deadcode.sh testonly           # Test-only ratchet against go/deadcode-testonly-allow.txt
 cd go && go test ./... -short       # Go unit tests
+bash go/gates.sh wave               # Gates selected by the diff (see "Gates by impact" below)
 bash coverage.sh                    # Go coverage across all suites (see Coverage below)
 ```
 
@@ -120,6 +121,94 @@ CI and `.hooks/pre-push` run the two modes in that order. The ratchet reaches
 from a `_test.go` shows up in neither tool — `deadcode` reports funcs, and
 `unused` counts a use from a test as a use and stays silent on exported
 identifiers. That class has no gate; measured, not assumed (T02-13).
+
+### Gates by impact (`go/gates.sh`)
+
+Most changes touch one package, yet the complete local list (build, vet, `-short`
+with and without `-race`, integration, Python conformance, lint, deadcode) costs
+about 17 minutes, and the measurement gates of a hardening round another 20–25.
+`go/gates.sh` selects the gates from the diff against the merge base with
+`origin/root` (`--base <ref>`; the working tree and untracked files count). The
+categories stay where they are — build tags, `-short`, env-gated measurement
+tests, packages; the script only chooses among them.
+
+```bash
+bash go/gates.sh explain              # what wave would run for this diff, and why — runs nothing but git and go list
+bash go/gates.sh quick                # build + vet -tags=integration; lint and -short of the touched packages and their reverse dependents
+bash go/gates.sh wave                 # quick + -race of the touched packages and their direct importers + integration + trigger extras
+bash go/gates.sh wave --final         # before the PR: fuzzer 300 s, the full heap-gate matrix, both deadcode ratchets
+bash go/gates.sh full                 # the complete local list, united with whatever wave selects (every stage is a subset)
+bash go/gates.sh mutant m.json '^TestX$' [./internal/oai/] [--race]   # one go test -overlay mutant against the tests that must catch it
+```
+
+| Stage | Runs |
+|---|---|
+| `quick` | `go build ./...`, `go vet -tags=integration ./...`, golangci-lint on the touched packages, `go test -short` on the touched packages plus every package whose test binary depends on one of them (`go list -test -deps`, transitive) |
+| `wave` | `quick` + `go test -short -race` on the touched packages and their direct importers + `go test -tags=integration -p 1` (no `-short`, so it also runs the package's non-short tests) of the touched packages and the trigger rows + the trigger extras; a package that runs in this integration step leaves the `-short` step, since the integration run executes all of its tests (the tree has no `!integration` file and no test that runs only under `-short`) |
+| `full` | build, vet, `-short ./...`, `-short -race ./...`, integration of `internal/oai`, `internal/config`, `cmd/ctxd`, `internal/handler` plus the wave set, Python conformance over the whole package, differential + fuzzer 300 s, the heap gates, the chat CPU gates `-count=20`, golangci-lint (CI form over the tree and the pre-commit form), both deadcode ratchets, a census of numeric literals added to production files |
+
+Trigger table (path → extra gate; applies to non-test files):
+
+| Path | Extra gate |
+|---|---|
+| `internal/oai/{parse,jsonkeys}*.go` | chat differential + fuzzer `FuzzChatParseDifferential` (60 s, 300 s with `--final`) |
+| `internal/oai/{jsonkeys,embeddings_parse}*.go` | embeddings differential + fuzzer `FuzzEmbedParseDifferential` once they exist in the tree |
+| `internal/oai/chat*.go`, `internal/oai/budget.go` | chat heap gate `TestChatParseHeapGate`, one process per form (`CTX_FOLGEP_FORM`: every label of the form switch in `chat_parse_mem_test.go`, each also as `_pub` — the public alias runs the sensitivity scan; n = 1 and 10 under `GOMEMLIMIT=200MiB`; `--final` adds no limit, body logging, 80 × 1 MiB and the sizes 20 100 / 65 600 / 262 144 B with and without body logging; `CTX_GATES_HEAP_FORMS` narrows the list), chat CPU gates `-count=20` |
+| `internal/oai/embed*.go` | embeddings heap gate `TestEmbedScanHeapGate` once it exists in the tree |
+| `internal/oai/*.go`, `cmd/ctxd/*.go`, `docs/api.md`, `go/conformance/**` | Python conformance (`-tags=pyconformance`; in `wave` only `TestConformancePython*`, the rest of the package runs in its integration step); `internal/oai/*.go` also integration of `cmd/ctxd` (it mounts `/v1`); `go/conformance/**` also `-short` of `internal/oai` (the Go half reads the same excerpts) |
+| `*.sh` in the repository root, `.env.example` | `-short` of `internal/config` (its tests glob the scripts and pin the template) |
+| `web/src/lib/api/__fixtures__/**` | `-short` of `internal/cli` (the kanban view reads the board fixture) |
+| `internal/handler/**`, `internal/store/**`, `migrations/**` | integration of `internal/handler` and `internal/store` |
+| `internal/dispatch/**` | integration of `internal/dispatch` |
+| `internal/config/**` | integration of `internal/config` and `cmd/ctxd` |
+| `web/**` | `bun run check` + vitest; Playwright stays in CI's pinned container |
+
+Further rules: when only `_test.go` files changed, `wave` runs `quick` without
+`-race` and without extras — except that a changed test file which is
+integration-tagged or skips parts under `-short` adds its package's integration
+run, a race-tagged one adds its package to the `-race` step, and one that defines
+a measurement gate (heap, CPU, differential, conformance) adds that gate, since
+otherwise nothing would execute it. A non-Go file inside a package directory
+(testdata, fuzz seeds, embedded files, migrations) counts as a change of the
+nearest enclosing package — testdata as a test-only change; any other changed
+non-Go file selects the packages whose tests name it by an exact path literal
+(`"../../../docker-compose.yml"`, `"test.sh"`, `"../../migrations/…"`). Source-census
+tests — tests that walk or parse the source files of other packages without
+importing them (wire-site, marker, call-site and env-name fences) — have no
+import edge to follow, so every Go change runs them in a `census-tests` step
+(`-run` limited to the test functions of those files). The `-short`/`-race` sets
+come from the untagged package graph; a package that exists only under
+`-tags=integration` (`internal/testdb`, `internal/handler/v1door`) moves to the
+integration step, and when it is the touched one, its importers' integration
+suites run. `go.mod`, `go.sum` or a directory `go list` does not know select
+every package (lint over the whole tree, and the script says to run `full`). Every stage
+ends with one line `gates: stufe=… pakete=N gates=[…] ausgelassen=[… with reason]`;
+the exit code is the first red tier (1 quick, 2 wave, 3 full; 4/5 for `mutant`),
+and a red tier stops the run unless `--keep-going`. Logs go to
+`${CTX_GATES_LOG:-$TMPDIR/gates}`. The local `-race` and integration runs use a
+60 m timeout (a loaded dev host); CI's unit job allows 5 m per test binary, and
+the race step warns when a package took longer than that.
+
+**When `full`:** before a release, when `go.mod` changes, or when you want the
+complete list for a reason the trigger table does not know. It is the template,
+not a duty: **CI stays the authority** — every PR runs the whole matrix, the
+nightly runs the unit tests with `-race -covermode=atomic`, and the script never
+touches `ci.yml`. The Python conformance, the fuzzer, the heap gates and the CPU
+gates `-count=20` are local measurement steps that CI never runs.
+
+**Shared build cache.** `GOCACHE` defaults to `<main checkout>/.gotmp/gocache-shared`
+when unset, so a new worktree does not build cold. The lint cache stays per
+worktree (`<worktree>/.gotmp/glci-gates`): a shared golangci-lint cache gets
+poisoned by parallel worktrees (phantom issues pointing at deleted trees — the
+reason `.hooks/pre-commit` keeps its own). The script adds `-trimpath` to `GOFLAGS`
+(`CTX_GATES_TRIMPATH=0` leaves it out): without it the compile action ID of every
+package of the module contains its directory, and a second worktree recompiles
+the whole module — measured (FOLGE-T): cold `go build ./... && go vet
+-tags=integration ./...` 61.7 s, a second checkout against the warm cache 21.9 s
+without `-trimpath` and 2.4 s with it. Tests must therefore not derive source
+paths from `runtime.Caller`; `go test` runs a test binary in its package
+directory, so relative paths work in both forms. `GOTMPDIR` and `TMPDIR` stay per
+wave (default `<worktree>/.gotmp/gates/`; `/tmp` is noexec on the dev host).
 
 `eval.sh` fires every query **twice**: an unscored warm-up pass, then the scored
 pass. That is the old "run it twice, score run 2" rule moved into the script, and

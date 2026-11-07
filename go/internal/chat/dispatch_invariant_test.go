@@ -43,7 +43,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -573,14 +572,17 @@ func TestWireSitePositiveListPinned(t *testing.T) {
 	}
 }
 
-// internalDir locates …/internal from this file.
+// internalDir locates …/internal from the package directory: go test runs a
+// test binary in its package's source directory, and that holds under
+// -trimpath as well, where runtime.Caller names the module path instead of
+// the file (go/gates.sh builds with -trimpath so worktrees share one cache).
 func internalDir(t *testing.T) string {
 	t.Helper()
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed — cannot locate the source tree")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("cannot locate the source tree: %v", err)
 	}
-	return filepath.Dir(filepath.Dir(self)) // …/internal/chat → …/internal
+	return filepath.Dir(wd) // …/internal/chat → …/internal
 }
 
 // censusWireSites counts http.NewRequestWithContext per non-test .go file across
