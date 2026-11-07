@@ -13,11 +13,12 @@ services:
     # the HTTP drain, up to 5 s on the refusal ledger's final flush, and twice
     # up to 5 s settling the async llmlog inserts, before and after the
     # scheduler drain (cmd/ctxd/main.go shutdownSequence); the 10 s compose
-    # default cut the HTTP drain short. 35 s = 30 s budget + 5 s margin for
-    # the (unbounded) scheduler drain; pinned >= 30 s by internal/config
-    # TestComposeCtxStopGracePeriod. Grows with every new shutdown step (the
-    # meter's forced settle, the /v1 drain window, K-06-29).
-    stop_grace_period: 35s
+    # default cut the HTTP drain short. 36 s = 31 s budget (15 s HTTP + 1 s
+    # forced meter settle + 5 s refusal ledger flush + 2 x 5 s llmlog settle)
+    # + 5 s margin for the (unbounded) scheduler drain; pinned >= 31 s by
+    # internal/config TestComposeCtxStopGracePeriod. Grows with every new
+    # shutdown step (the /v1 drain window, K-06-29).
+    stop_grace_period: 36s
     labels:
       - "reversed.host=${CTX_HOSTNAME}"
       - "reversed.port=8080"

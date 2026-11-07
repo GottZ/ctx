@@ -132,7 +132,7 @@ func TestV1RefusalLedgerShutdownProbe(t *testing.T) {
 	if rows := readLedgerTable(t, f); len(rows) != 0 {
 		t.Fatalf("ledger rows before the shutdown: %+v, want none (nothing flushed yet)", rows)
 	}
-	shutdownSequence(&http.Server{}, noDrain{}, f.pool, f.gateway.flushRejections, func() {})
+	shutdownSequence(&http.Server{}, noDrain{}, f.pool, f.gateway.forceSettle, f.gateway.flushRejections, func() {})
 	var sum int64
 	for _, r := range readLedgerTable(t, f) {
 		sum += r.n

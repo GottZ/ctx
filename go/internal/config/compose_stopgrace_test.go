@@ -11,8 +11,9 @@ import (
 
 // minCtxStopGrace is the bounded part of the shutdown ctxd spends after
 // SIGTERM before it lets the pool go (cmd/ctxd/main.go shutdownSequence):
-// shutdownHTTPTimeout (15 s, srv.Shutdown) + rejectionFlushTimeout (5 s, the
-// refusal ledger's final flush, its own step since W06-12) + 2 ×
+// shutdownHTTPTimeout (15 s, srv.Shutdown) + forceSettleTimeout (1 s, the
+// meter's forced settle, its own step since W06-13) + rejectionFlushTimeout
+// (5 s, the refusal ledger's final flush, its own step since W06-12) + 2 ×
 // llmlogSettleTimeout (5 s each: one llmlog.Settle before scheduler.Wait,
 // one after it); the model gateway's final flush (gatewayStopTimeout, 5 s,
 // W02-05) runs alongside the first settle and adds nothing. scheduler.Wait
@@ -21,7 +22,7 @@ import (
 // compose default of 10 s did exactly that to the 15 s HTTP drain alone. When
 // the shutdown grows a step (the /v1 drain window, K-06-29), the step's budget
 // is added here and to docker-compose.yml together.
-const minCtxStopGrace = 30 * time.Second
+const minCtxStopGrace = 31 * time.Second
 
 // TestComposeCtxStopGracePeriod pins W06-1 (d): the ctx service declares a
 // stop_grace_period that covers the daemon's shutdown budget. Same caveat as
@@ -37,7 +38,7 @@ func TestComposeCtxStopGracePeriod(t *testing.T) {
 		t.Fatalf("ctx stop_grace_period %q is not a duration: %v", raw, err)
 	}
 	if d < minCtxStopGrace {
-		t.Errorf("ctx stop_grace_period = %s, want >= %s (15 s HTTP shutdown + 5 s refusal ledger flush + 2 × 5 s llmlog settle, the gateway flush alongside the first)", d, minCtxStopGrace)
+		t.Errorf("ctx stop_grace_period = %s, want >= %s (15 s HTTP shutdown + 1 s forced meter settle + 5 s refusal ledger flush + 2 × 5 s llmlog settle, the gateway flush alongside the first)", d, minCtxStopGrace)
 	}
 }
 

@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -152,6 +153,63 @@ func TestGatewayRestartDuringOpenReservations(t *testing.T) {
 			_, ref = l2.Admit(ctx, ca, modelalias.Alias{}, oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 1, ClientMaxTokens: true})
 			if exhausted := ref != nil && ref.Code == oai.CodeInsufficientQuota; exhausted != force {
 				t.Fatalf("after the restart with a budget of the %d tokens used before: refusal %+v — want exhausted=%v", usedBefore, ref, force)
+			}
+		})
+	}
+}
+
+// TestShutdownSequenceSettlesOpenReservations is the shutdown probe of gate
+// (d) through the daemon's real teardown (shutdownSequence with the
+// gateway's forceSettle, ledger flush and llmlog settles): five reservations
+// open when SIGTERM's HTTP drain ends get their row in context_llm_log
+// before the pool closes, and the next process's seed finds the tokens.
+// Red: the sequence without the step (forceSettle a no-op, the teardown of
+// W06-12) loses them.
+func TestShutdownSequenceSettlesOpenReservations(t *testing.T) {
+	for _, withStep := range []bool{true, false} {
+		t.Run(map[bool]string{true: "with the forced settle", false: "without (W06-12 teardown)"}[withStep], func(t *testing.T) {
+			pool := testdb.SetupTestDB(t)
+			ctx := context.Background()
+			var consumer string
+			if err := pool.QueryRow(ctx, `INSERT INTO context_model_consumers (tenant_id, label) VALUES ($1::uuid, 'w0613-shutdown') RETURNING id::text`,
+				store.DefaultTenantID).Scan(&consumer); err != nil {
+				t.Fatal(err)
+			}
+			cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_DAILY_TOKENS_DEFAULT": "1000000", "CTX_GATEWAY_CONSUMER_CONCURRENCY_DEFAULT": "8"})
+			gw := newModelGateway(pool, cfgStore)
+			l := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+			ca := urgentConsumerOf(consumer, store.DefaultTenantID)
+			est := oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 4000, ClientMaxTokens: true, PromptRunes: 900}
+			var used int64
+			for i := range 5 {
+				res, ref := l.Admit(ctx, ca, modelalias.Alias{}, est)
+				if ref != nil {
+					t.Fatal(ref)
+				}
+				fs := res.(oai.ForcedSettler)
+				fs.AddStreamed(360 * (i + 1))
+				fs.OnForcedSettle(func(u dispatch.Usage) {
+					llmlog.RecordGateway(pool, llmlog.GatewayRow{Pipeline: llmlog.PipelineGatewayChat, ConsumerID: consumer,
+						Gateway:   llmlog.Gateway{Alias: "w0613", Usage: llmlog.UsageEstimated, Finish: llmlog.FinishAborted},
+						Telemetry: llmlog.Entry{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens}})
+				})
+				used += int64(promptguard.TokenEstimate(900) + promptguard.TokenEstimate(360*(i+1)))
+			}
+			force := gw.forceSettle
+			if !withStep {
+				force = func() {}
+			}
+			shutdownSequence(&http.Server{}, noDrain{}, pool, force, gw.flushRejections, func() {})
+			next := *cfgStore.Snapshot()
+			next.Gateway.ChatDailyTokensDefault = int(used)
+			if err := cfgStore.Replace(&next); err != nil {
+				t.Fatal(err)
+			}
+			gw2 := newModelGateway(pool, cfgStore)
+			l2 := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw2.meter).Limiter
+			_, ref := l2.Admit(ctx, ca, modelalias.Alias{}, oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 1, ClientMaxTokens: true})
+			if exhausted := ref != nil && ref.Code == oai.CodeInsufficientQuota; exhausted != withStep {
+				t.Fatalf("after the teardown, budget = the %d tokens the open requests used: refusal %+v — want exhausted=%v", used, ref, withStep)
 			}
 		})
 	}

@@ -430,6 +430,19 @@ func rejectionRows(deltas []keyquota.RejectionDelta) []llmusage.RejectionRow {
 // refused any more, so the final flush carries every refusal of the drained
 // requests. Bounded by rejectionFlushTimeout; the flusher's own final flush
 // when the loops stop finds the ledger empty then.
+// forceSettle is the meter's shutdown step (W06-13, design/06 §4.2 step 2):
+// keyquota.Meter.ForceSettleAll bounded by forceSettleTimeout — every
+// reservation still open ends once with its estimate, and its route's row
+// writer queues the row the first llmlog settle lands.
+func (g *modelGateway) forceSettle() {
+	ctx, cancel := context.WithTimeout(context.Background(), forceSettleTimeout)
+	defer cancel()
+	begin := time.Now()
+	n := g.meter.ForceSettleAll(ctx)
+	slog.Info("gateway: open meter reservations settled with their estimate at shutdown", "reservations", n,
+		"elapsed", time.Since(begin).Round(time.Millisecond))
+}
+
 func (g *modelGateway) flushRejections() {
 	begin := time.Now()
 	g.flusher.final()

@@ -860,19 +860,20 @@ func main() {
 	// Graceful shutdown: HTTP Stop -> refusal ledger flush -> gateway flush
 	// alongside llmlog Settle -> Background Cancel -> Listener Stop -> llmlog
 	// Settle -> Pool Close (the pool closes via the sess.Stop defer above).
-	shutdownSequence(srv, scheduler, pool, gateway.flushRejections, stopGateway)
+	shutdownSequence(srv, scheduler, pool, gateway.forceSettle, gateway.flushRejections, stopGateway)
 	slog.Info("shutdown complete")
 }
 
 // Shutdown budget after SIGTERM (W06-1). docker-compose.yml gives the ctx
 // service a stop_grace_period that must cover shutdownHTTPTimeout +
-// rejectionFlushTimeout + max(gatewayStopTimeout, llmlogSettleTimeout) +
-// llmlogSettleTimeout — the ledger flush is its own step (W06-12), the
-// gateway stop runs alongside the first settle (W02-05) — or Docker SIGKILLs
-// the daemon mid-teardown (compose default: 10 s); internal/config
-// TestComposeCtxStopGracePeriod pins it at no less than that sum (15 + 5 +
-// 5 + 5 = 30 s). scheduler.Wait between the two settles is unbounded and
-// lives in the margin above it (5 s at the shipped 35 s). A new shutdown step
+// forceSettleTimeout + rejectionFlushTimeout + max(gatewayStopTimeout,
+// llmlogSettleTimeout) + llmlogSettleTimeout — the meter's forced settle
+// (W06-13) and the ledger flush (W06-12) are steps of their own, the gateway
+// stop runs alongside the first settle (W02-05) — or Docker SIGKILLs the
+// daemon mid-teardown (compose default: 10 s); internal/config
+// TestComposeCtxStopGracePeriod pins it at no less than that sum (15 + 1 +
+// 5 + 5 + 5 = 31 s). scheduler.Wait between the two settles is unbounded and
+// lives in the margin above it (5 s at the shipped 36 s). A new shutdown step
 // (K-06-29) adds its budget here, in that test and in the compose file — or
 // runs alongside an existing one and says so.
 const (
@@ -893,6 +894,14 @@ const (
 	// srv.Shutdown — every drained request's refusal is noted by then — and
 	// before the first settle; also the bound of each periodic flush.
 	rejectionFlushTimeout = 5 * time.Second
+	// forceSettleTimeout bounds the meter's forced settle (W06-13, design/06
+	// §4.2 Shutdown-Reihenfolge step 2): every reservation still open after
+	// srv.Shutdown ends with its estimate and its route's row writer queues
+	// the row — in memory, O(open reservations), the writers only enqueue
+	// (llmlog.Record never blocks); one second bounds it with room to spare.
+	// A step of its own before the ledger flush and the first settle, which
+	// lands the rows it queued.
+	forceSettleTimeout = time.Second
 )
 
 // drainer is the scheduler step shutdownSequence orders — *events.Scheduler
@@ -904,11 +913,14 @@ type drainer interface {
 // shutdownSequence is the daemon's teardown after the serve loop ended and the
 // root context was cancelled; the caller closes the pool afterwards.
 //
-// flushRejections (modelGateway.flushRejections) runs right after
-// srv.Shutdown as a step of its own (W06-12, design/06 §4.2 step 3): no
-// request can be refused any more, so the refusal ledger's final flush holds
-// every refusal of the drained requests; W06-13 puts the meter's forced
-// settle before it.
+// forceSettle (modelGateway.forceSettle) runs right after srv.Shutdown
+// (W06-13, design/06 §4.2 step 2, B-06-9): every meter reservation the HTTP
+// drain left open — a handler past the 15 s — ends with its estimate, and its
+// route's writer queues the request's one row, so the first settle lands it
+// and the next boot's seed counts it. flushRejections
+// (modelGateway.flushRejections) follows as a step of its own (W06-12,
+// step 3): no request can be refused any more, so the refusal ledger's final
+// flush holds every refusal of the drained requests.
 //
 // stopGateway (startModelGateway) runs after it, alongside
 // the first settle: no request can stamp a model key any more, so the final
@@ -925,7 +937,7 @@ type drainer interface {
 // takes whatever is still queued; settling only after Wait would hand the HTTP
 // rows to that same fate. Second after Wait returns: the dream workers and the
 // other scheduler arms have written their last rows by then.
-func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool, flushRejections, stopGateway func()) {
+func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool, forceSettle, flushRejections, stopGateway func()) {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
 	defer shutdownCancel()
 
@@ -933,6 +945,7 @@ func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool, flush
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("HTTP server shutdown error", "error", err)
 	}
+	forceSettle()
 	flushRejections()
 	gatewayStopped := make(chan struct{})
 	go func() {

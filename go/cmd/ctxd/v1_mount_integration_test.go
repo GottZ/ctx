@@ -528,7 +528,7 @@ func TestV1ModelKeyUsageFlushedAtShutdown(t *testing.T) {
 		stopTook = time.Since(b)
 	}
 	begin := time.Now()
-	shutdownSequence(&http.Server{}, noDrain{}, f.pool, f.gateway.flushRejections, timed)
+	shutdownSequence(&http.Server{}, noDrain{}, f.pool, f.gateway.forceSettle, f.gateway.flushRejections, timed)
 	t.Logf("shutdown sequence %s, of it the gateway stop (final usage flush + access-log flush) %s — budget %s",
 		time.Since(begin).Round(time.Millisecond), stopTook.Round(time.Microsecond), gatewayStopTimeout)
 	if at := lastUsed(); at == nil {
