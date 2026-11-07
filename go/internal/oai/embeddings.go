@@ -963,10 +963,12 @@ const embedWireCallBytes = 14 << 10
 const embedWireRetryBytes = 30 << 10
 
 // The terms of the embeddings route as the configuration's budget floor
-// reads them (FOLGE-E, lead decision 5; V39 counts none of them yet — the
-// budget dimensioning before the flip does): EmbedInputSlotReserve per
-// input (at most modelalias.CeilingEmbeddingMaxInputs of them),
-// EmbedWireCallReserve, EmbedUpstreamSlack and EmbedWireCopyReserve per
+// reads them (FOLGE-E, lead decision 5). Their reader is the budget
+// dimensioning (V39) before the flip: V39 counts none of them yet and no
+// code reads them before it, so TestEmbedExportsAreTheirDerivations holds
+// each against its derivation (FOLGE-E hardening 2, L-2).
+// EmbedInputSlotReserve per input (at most
+// modelalias.CeilingEmbeddingMaxInputs of them), EmbedWireCallReserve, EmbedUpstreamSlack and EmbedWireCopyReserve per
 // block of an attempt and their ceilings at a block per input
 // (EmbedWireCallCeiling, EmbedUpstreamSlackCeiling, EmbedWireCopyCeiling;
 // the copy is the body's length when that is shorter, so the three
