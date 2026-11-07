@@ -261,22 +261,23 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 // processChunk handles a single chunk: hash check, upsert/insert, embed, temporal enrichment.
 // classifySet is the request's block-type snapshot, resolved once in HandleIngest.
 func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk IngestChunk, index int, scope, apiKeyID string, classifySet *blocktype.Set) IngestResult {
-	// 1. Identical-content check for block mode. Chunk mode instead conflicts
-	// on (source_id, chunk_index), and InsertChunk replaces metadata rather
-	// than applying UpsertBlock's identical-content merge. This predicate
-	// therefore describes only the block-mode write below; chunks always go
-	// through InsertChunk so changed tags and metadata cannot be dropped.
-	if chunk.SourceID == "" {
-		match, err := store.IdenticalContentMatch(ctx, h.pool, chunk.Content, scope, chunk.Category, chunk.Title,
-			chunk.Tags, chunk.Metadata, store.SensitivityWrite{}, "")
-		if err != nil {
-			slog.Error("ingest: identical content match error",
-				"error", err, "index", index, "request_id", reqID)
-			return IngestResult{Index: index, Status: "failed", Error: "hash check failed"}
-		}
-		if match.Unchanged() {
-			return IngestResult{Index: index, ID: match.ID, Status: "skipped"}
-		}
+	// 1. Identical-content check for both write modes. Block mode predicts
+	// UpsertBlock's (category, title, scope) conflict and metadata merge.
+	// Chunk mode writes by (source_id, chunk_index), but the same content
+	// identity check prevents a no-op rewrite and a cross-source collision on
+	// uq_context_category_title_scope, which has no lifecycle filter.
+	// IdenticalContentMatch merges metadata while InsertChunk replaces it, so
+	// request metadata that is a subset of the row's metadata can answer
+	// skipped although InsertChunk would remove the unnamed keys.
+	match, matchErr := store.IdenticalContentMatch(ctx, h.pool, chunk.Content, scope, chunk.Category, chunk.Title,
+		chunk.Tags, chunk.Metadata, store.SensitivityWrite{}, "")
+	if matchErr != nil {
+		slog.Error("ingest: identical content match error",
+			"error", matchErr, "index", index, "request_id", reqID)
+		return IngestResult{Index: index, Status: "failed", Error: "hash check failed"}
+	}
+	if match.Unchanged() {
+		return IngestResult{Index: index, ID: match.ID, Status: "skipped"}
 	}
 
 	// 2. Upsert or InsertChunk depending on whether SourceID is set.

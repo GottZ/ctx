@@ -19,6 +19,7 @@ package handler
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -173,4 +174,154 @@ func TestIngestIdenticalContentWritesTagsMetadata(t *testing.T) {
 		t.Errorf("block id changed: seed=%s update=%s", seeded.id, got.id)
 	}
 	assertIdenticalContentFields(t, got, "ingest-updated", "updated")
+}
+
+type identicalChunkState struct {
+	id             string
+	category       string
+	title          string
+	content        string
+	tags           []string
+	metadata       map[string]any
+	scope          string
+	sourceID       string
+	chunkIndex     int
+	lifecycleState string
+	createdAt      time.Time
+	updatedAt      time.Time
+}
+
+func postIdenticalChunk(t *testing.T, h *IngestHandler, keyCtx context.Context, sourceID, title, content string, tags []string, metadata map[string]any) map[string]any {
+	t.Helper()
+	status, resp := postIngest(t, h, keyCtx, map[string]any{"source": "i139-chunk", "chunks": []map[string]any{{
+		"category":    "test",
+		"title":       title,
+		"content":     content,
+		"tags":        tags,
+		"metadata":    metadata,
+		"source_id":   sourceID,
+		"chunk_index": 0,
+	}}})
+	if status != http.StatusOK {
+		t.Fatalf("ingest status = %d, want 200 (body %v)", status, resp)
+	}
+	return firstResult(t, resp)
+}
+
+func readIdenticalChunkState(t *testing.T, pool *pgxpool.Pool, id string) identicalChunkState {
+	t.Helper()
+	var got identicalChunkState
+	if err := pool.QueryRow(context.Background(),
+		`SELECT id::text, category, title, content, COALESCE(tags, '{}'),
+		        COALESCE(metadata, '{}'::jsonb), scope, source_id::text,
+		        chunk_index, lifecycle_state, created_at, updated_at
+		   FROM context_blocks
+		  WHERE id = $1::uuid`, id,
+	).Scan(&got.id, &got.category, &got.title, &got.content, &got.tags, &got.metadata,
+		&got.scope, &got.sourceID, &got.chunkIndex, &got.lifecycleState, &got.createdAt, &got.updatedAt); err != nil {
+		t.Fatalf("read chunk %s: %v", id, err)
+	}
+	return got
+}
+
+func TestIngestIdenticalContentChunkMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	h := NewIngestHandler(pool, nil, nil)
+	keyCtx, _ := ingestKey(t, pool, "i139-ingest-chunk")
+
+	t.Run("identical_reingest_skips_without_rewrite", func(t *testing.T) {
+		sourceID := seedSource(t, pool, "/i139/chunk-identical.md", "private")
+		const (
+			title   = "i139 chunk identical reingest"
+			content = "i139 chunk content that must not be rewritten"
+		)
+		tags := []string{"chunk-seed"}
+		metadata := map[string]any{"run": "seed", "surface": "chunk-seed"}
+		seed := postIdenticalChunk(t, h, keyCtx, sourceID, title, content, tags, metadata)
+		if seed["status"] != "inserted" {
+			t.Fatalf("seed result = %v, want inserted", seed)
+		}
+		seededID, _ := seed["id"].(string)
+		if seededID == "" {
+			t.Fatalf("seed result has no id: %v", seed)
+		}
+		seeded := readIdenticalChunkState(t, pool, seededID)
+
+		again := postIdenticalChunk(t, h, keyCtx, sourceID, title, content, tags, metadata)
+		if again["status"] != "skipped" || again["id"] != seededID {
+			t.Errorf("identical reingest = %v, want skipped id %s", again, seededID)
+		}
+		if got := readIdenticalChunkState(t, pool, seededID); !reflect.DeepEqual(got, seeded) {
+			t.Errorf("identical reingest changed the row:\nseeded: %+v\n     got: %+v", seeded, got)
+		}
+	})
+
+	t.Run("new_tags_and_metadata_are_written", func(t *testing.T) {
+		sourceID := seedSource(t, pool, "/i139/chunk-updated.md", "private")
+		const (
+			title   = "i139 chunk changed fields"
+			content = "i139 chunk content with changed tags and metadata"
+		)
+		seed := postIdenticalChunk(t, h, keyCtx, sourceID, title, content,
+			[]string{"chunk-seed"}, map[string]any{"run": "seed", "surface": "chunk-seed", "seed_only": true})
+		if seed["status"] != "inserted" {
+			t.Fatalf("seed result = %v, want inserted", seed)
+		}
+		seededID, _ := seed["id"].(string)
+		seeded := readIdenticalChunkState(t, pool, seededID)
+
+		wantMetadata := map[string]any{"run": "updated", "surface": "chunk-updated"}
+		updated := postIdenticalChunk(t, h, keyCtx, sourceID, title, content, []string{"chunk-updated"}, wantMetadata)
+		if updated["status"] != "inserted" || updated["id"] != seededID {
+			t.Errorf("changed-fields reingest = %v, want inserted id %s, not skipped", updated, seededID)
+		}
+		got := readIdenticalChunkState(t, pool, seededID)
+		if !slices.Equal(got.tags, []string{"chunk-updated"}) {
+			t.Errorf("stored tags = %v, want [chunk-updated]", got.tags)
+		}
+		if !reflect.DeepEqual(got.metadata, wantMetadata) {
+			t.Errorf("stored metadata = %v, want replacement %v", got.metadata, wantMetadata)
+		}
+		if got.updatedAt.Equal(seeded.updatedAt) {
+			t.Errorf("updated_at did not advance when tags and metadata changed")
+		}
+	})
+
+	t.Run("second_source_skips_not_fails", func(t *testing.T) {
+		firstSource := seedSource(t, pool, "/i139/chunk-first-source.md", "private")
+		secondSource := seedSource(t, pool, "/i139/chunk-second-source.md", "private")
+		const (
+			title   = "i139 chunk second source"
+			content = "i139 identical chunk content under another source"
+		)
+		tags := []string{"chunk-same"}
+		metadata := map[string]any{"run": "same", "surface": "chunk-same"}
+		seed := postIdenticalChunk(t, h, keyCtx, firstSource, title, content, tags, metadata)
+		if seed["status"] != "inserted" {
+			t.Fatalf("seed result = %v, want inserted", seed)
+		}
+		seededID, _ := seed["id"].(string)
+		seeded := readIdenticalChunkState(t, pool, seededID)
+
+		again := postIdenticalChunk(t, h, keyCtx, secondSource, title, content, tags, metadata)
+		if again["status"] != "skipped" || again["id"] != seededID {
+			t.Errorf("second-source ingest = %v, want skipped id %s, not failed", again, seededID)
+		}
+		if got := readIdenticalChunkState(t, pool, seededID); !reflect.DeepEqual(got, seeded) {
+			t.Errorf("second-source ingest changed the first row:\nseeded: %+v\n     got: %+v", seeded, got)
+		}
+		var rows int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM context_blocks
+			  WHERE category = 'test' AND title = $1 AND scope = 'private' AND NOT is_archived`, title,
+		).Scan(&rows); err != nil {
+			t.Fatalf("count second-source chunks: %v", err)
+		}
+		if rows != 1 {
+			t.Errorf("live rows after second-source ingest = %d, want 1", rows)
+		}
+	})
 }

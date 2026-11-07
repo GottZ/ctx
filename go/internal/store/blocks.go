@@ -280,7 +280,9 @@ func ClampLimit(limit, defaultVal, maxVal int) int {
 // identicalContentWhere is the identity predicate of IdenticalContentMatch:
 // the live row of ($2 scope, $3 category, $4 title) — the upsert's conflict
 // identity — whose content hashes like $1. Not archived, because the ON
-// CONFLICT target is partial on NOT is_archived.
+// CONFLICT target is partial on NOT is_archived. The integration gates in
+// blocks_identical_match_integration_test.go pin this predicate through
+// IdenticalContentMatch.
 const identicalContentWhere = `content_hash = encode(digest($1, 'sha256'), 'hex')
 		   AND NOT is_archived
 		   AND scope = $2
