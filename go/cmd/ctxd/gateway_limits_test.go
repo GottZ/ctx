@@ -81,8 +81,10 @@ func TestMeterLimitsRowsReachEveryLevel(t *testing.T) {
 	if lim.RPM != 3 || lim.TPM != 4000 || lim.Concurrency != 1 {
 		t.Errorf("minute/L1 limits = rpm %d tpm %d C %d, want the consumer row 3, the tenant row 4000, the instance row 1", lim.RPM, lim.TPM, lim.Concurrency)
 	}
-	if lim.Consumer.DailyTokens != 1000 || lim.Tenant.DailyTokens != 1500 || lim.Instance.DailyTokens != 10000 {
-		t.Errorf("budgets = consumer %d tenant %d instance %d, want the instance row 1000, the envelope row 1500, factor 10 × 1000",
+	// The instance envelope scales the settings floor (gateway.chat_daily_tokens_default
+	// 2 000 000), not the instance row (S2 decision after Fremd-Review 1 M-2).
+	if lim.Consumer.DailyTokens != 1000 || lim.Tenant.DailyTokens != 1500 || lim.Instance.DailyTokens != 20000000 {
+		t.Errorf("budgets = consumer %d tenant %d instance %d, want the instance row 1000, the envelope row 1500, factor 10 × the setting 2 000 000",
 			lim.Consumer.DailyTokens, lim.Tenant.DailyTokens, lim.Instance.DailyTokens)
 	}
 }

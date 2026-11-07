@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/gatewaylimits"
@@ -82,7 +83,11 @@ func LoadGatewayLimits(ctx context.Context, q pgxdb.Querier) ([]gatewaylimits.Ro
 	return out, nil
 }
 
-// GatewayLimitSubjectTenant resolves key's subject within access: the
+// GatewayLimitSubjectTenant resolves key's subject within access (inside a
+// write transaction it holds FOR KEY SHARE on the subject row, so a
+// concurrent tenant prune either waits for the write and then deletes its
+// row explicitly, or wins and the write finds no subject — Fremd-Review 1
+// N-2): the
 // canonical consumer id (consumer rows) and the tenant the subject belongs
 // to (a consumer's tenant, the tenant itself; "" for the instance), or
 // ErrGatewayLimitSubject for an unknown, malformed or foreign subject and
@@ -97,7 +102,7 @@ func GatewayLimitSubjectTenant(ctx context.Context, q pgxdb.Rower, access ModelA
 			return "", "", ErrGatewayLimitSubject
 		}
 		err = q.QueryRow(ctx, `SELECT c.id::text, c.tenant_id::text FROM context_model_consumers c
-			WHERE c.id = $1::uuid AND ($2::boolean OR c.tenant_id = $3::uuid)`, id, srv, accessTenant).Scan(&consumer, &tenant)
+			WHERE c.id = $1::uuid AND ($2::boolean OR c.tenant_id = $3::uuid) FOR KEY SHARE`, id, srv, accessTenant).Scan(&consumer, &tenant)
 	case gatewaylimits.SubjectTenant, gatewaylimits.SubjectTenantEnvelope:
 		if key.Kind == gatewaylimits.SubjectTenantEnvelope && !access.ServerAdmin {
 			return "", "", ErrGatewayLimitSubject
@@ -107,7 +112,7 @@ func GatewayLimitSubjectTenant(ctx context.Context, q pgxdb.Rower, access ModelA
 			return "", "", ErrGatewayLimitSubject
 		}
 		err = q.QueryRow(ctx, `SELECT t.id::text FROM context_tenants t
-			WHERE t.id = $1::uuid AND ($2::boolean OR t.id = $3::uuid)`, id, srv, accessTenant).Scan(&tenant)
+			WHERE t.id = $1::uuid AND ($2::boolean OR t.id = $3::uuid) FOR KEY SHARE`, id, srv, accessTenant).Scan(&tenant)
 	case gatewaylimits.SubjectInstance:
 		if !access.ServerAdmin {
 			return "", "", ErrGatewayLimitSubject
@@ -186,6 +191,11 @@ func UpsertGatewayLimit(ctx context.Context, pool *pgxpool.Pool, access ModelAcc
 			return err
 		})
 	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			// The subject vanished between the check and the insert (a
+			// prune outside the lock): the same not-found as before it.
+			return gatewaylimits.Row{}, ErrGatewayLimitSubject
+		}
 		return gatewaylimits.Row{}, err
 	}
 	return out, nil

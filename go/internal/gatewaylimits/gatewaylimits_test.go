@@ -172,19 +172,28 @@ func TestResolveEgress(t *testing.T) {
 	}
 }
 
-// TestResolveEnvelopes: the tenant envelope row replaces factor × base, the
-// instance envelope scales the base (instance row over settings).
+// TestResolveEnvelopes: the tenant envelope row replaces factor × settings,
+// the instance envelope scales the settings floor — an instance row lowers
+// every consumer's default, never the envelopes (S2 decision after
+// Fremd-Review 1 M-2: S1 asserted factor × instance row, A8 withdrawn).
 func TestResolveEnvelopes(t *testing.T) {
 	e := NewSnapshot([]Row{envelopeRow("t1", Values{DailyTokens: i64(123), MonthlyCostUSD: f64(9)}),
 		instanceRow(Values{DailyTokens: i64(1000)})}).Resolve("c1", "t1", keyquota.OpChat, floor)
 	if e.Tenant.DailyTokens != 123 || e.Tenant.MonthlyCostUSD != 9 {
 		t.Errorf("tenant envelope = %+v, want the row's 123 tokens / 9 USD", e.Tenant)
 	}
-	if e.Instance.DailyTokens != 10000 {
-		t.Errorf("instance envelope daily tokens = %d, want factor 10 × instance row 1000", e.Instance.DailyTokens)
+	if e.Instance.DailyTokens != floor.DailyTokens*10 {
+		t.Errorf("instance envelope daily tokens = %d, want factor 10 × the settings floor (not × the instance row 1000)", e.Instance.DailyTokens)
 	}
 	if e.Consumer.DailyTokens != 1000 {
 		t.Errorf("consumer daily tokens = %d, want the instance row 1000", e.Consumer.DailyTokens)
+	}
+	// Fremd-Review 1 M-2: a low default for all plus a high grant for one.
+	e = NewSnapshot([]Row{instanceRow(Values{DailyTokens: i64(1000)}), consumerRow("c1", TierServer, Values{DailyTokens: i64(1000000)})}).
+		Resolve("c1", "t1", keyquota.OpChat, floor)
+	if e.Consumer.DailyTokens != 1000000 || e.Tenant.DailyTokens != floor.DailyTokens*5 || e.Instance.DailyTokens != floor.DailyTokens*10 {
+		t.Errorf("instance row 1000 + grant 1 000 000: consumer %d tenant env %d instance env %d, want 1000000, 5 × floor, 10 × floor",
+			e.Consumer.DailyTokens, e.Tenant.DailyTokens, e.Instance.DailyTokens)
 	}
 	e = NewSnapshot([]Row{envelopeRow("t2", Values{DailyTokens: i64(1)})}).Resolve("c1", "t1", keyquota.OpChat, floor)
 	if e.Tenant.DailyTokens != floor.DailyTokens*5 {
@@ -411,5 +420,83 @@ func TestValidateValuesColumnBounds(t *testing.T) {
 		case tc.wantField != "" && (fe == nil || fe.Field != tc.wantField):
 			t.Errorf("%s: %+v, want a refusal at %q", tc.name, fe, tc.wantField)
 		}
+	}
+}
+
+// TestResolveCostDimension (Fremd-Review 1 L-3): monthly_cost_usd through
+// the chain — consumer server over tenant server over instance over the
+// setting, tenant-tier rows only narrow, the ceiling and the narrowing check
+// of a tenant-admin cost; the cost's column resolution (M-1); the source of
+// an unset unmetered permission is the fixed default, not a setting (N-3).
+func TestResolveCostDimension(t *testing.T) {
+	cost := func(rows ...Row) Effective { return NewSnapshot(rows).Resolve("c1", "t1", keyquota.OpChat, floor) }
+	cases := []struct {
+		name string
+		e    Effective
+		want float64
+		src  Source
+	}{
+		{"setting", cost(), 1.0, SourceSettings},
+		{"instance", cost(instanceRow(Values{MonthlyCostUSD: f64(2)})), 2, SourceInstance},
+		{"tenant server over instance", cost(instanceRow(Values{MonthlyCostUSD: f64(2)}), tenantRow("t1", TierServer, Values{MonthlyCostUSD: f64(3)})), 3, SourceTenantServer},
+		{"consumer server over tenant", cost(tenantRow("t1", TierServer, Values{MonthlyCostUSD: f64(3)}), consumerRow("c1", TierServer, Values{MonthlyCostUSD: f64(5)})), 5, SourceConsumerServer},
+		{"tenant-tier tenant narrows", cost(consumerRow("c1", TierServer, Values{MonthlyCostUSD: f64(5)}), tenantRow("t1", TierTenant, Values{MonthlyCostUSD: f64(4)})), 4, SourceTenantTenant},
+		{"tenant-tier consumer narrows", cost(consumerRow("c1", TierServer, Values{MonthlyCostUSD: f64(5)}), consumerRow("c1", TierTenant, Values{MonthlyCostUSD: f64(0.5)})), 0.5, SourceConsumerTenant},
+		{"tenant-tier never widens", cost(consumerRow("c1", TierServer, Values{MonthlyCostUSD: f64(5)}), consumerRow("c1", TierTenant, Values{MonthlyCostUSD: f64(9)})), 5, SourceConsumerServer},
+	}
+	for _, tc := range cases {
+		if tc.e.Consumer.MonthlyCostUSD != tc.want || tc.e.Sources["monthly_cost_usd"] != tc.src {
+			t.Errorf("%s: cost %v (source %s), want %v (%s)", tc.name, tc.e.Consumer.MonthlyCostUSD, tc.e.Sources["monthly_cost_usd"], tc.want, tc.src)
+		}
+	}
+	s := NewSnapshot([]Row{tenantRow("t1", TierServer, Values{MonthlyCostUSD: f64(3)}), tenantRow("t1", TierTenant, Values{MonthlyCostUSD: f64(2)})})
+	ceil, err := s.Ceiling(SubjectConsumer, "c1", "t1", keyquota.OpChat, floor)
+	if err != nil || ceil.MonthlyCostUSD == nil || *ceil.MonthlyCostUSD != 2 {
+		t.Fatalf("cost ceiling of a consumer = %v (%v), want 2 (the tenant's tenant-tier cap)", ceil.MonthlyCostUSD, err)
+	}
+	if fe := CheckNarrowing(Values{MonthlyCostUSD: f64(2.5)}, ceil); fe == nil || fe.Field != "monthly_cost_usd" || fe.Code != CodeWidens {
+		t.Errorf("tenant-admin cost 2.5 over the ceiling 2: %+v, want monthly_cost_usd %s", fe, CodeWidens)
+	}
+	if fe := CheckNarrowing(Values{MonthlyCostUSD: f64(2)}, ceil); fe != nil {
+		t.Errorf("tenant-admin cost at the ceiling refused: %+v", fe)
+	}
+	for _, tc := range []struct {
+		usd   float64
+		valid bool
+	}{{0.00000001, true}, {0.000000004, false}, {0.000000001, false}} {
+		fe := ValidateValues(SubjectConsumer, TierServer, Values{MonthlyCostUSD: f64(tc.usd)}, floor)
+		if (fe == nil) != tc.valid {
+			t.Errorf("cost %g: refusal %+v, want valid=%v (NUMERIC(14,8) stores below 0.000000005 as 0, Fremd-Review 1 M-1)", tc.usd, fe, tc.valid)
+		}
+	}
+	if src := cost().Sources["allow_unmetered_external"]; src != SourceDefault {
+		t.Errorf("source of an unset unmetered permission = %q, want %q (there is no setting)", src, SourceDefault)
+	}
+}
+
+// TestRegistryLoadSerialised (Fremd-Review 1 L-3): a load that starts after
+// another publishes after it — a slower older read never overwrites the
+// newer snapshot (loadMu).
+func TestRegistryLoadSerialised(t *testing.T) {
+	var calls atomic.Int64
+	inFirst, release := make(chan struct{}), make(chan struct{})
+	r := NewRegistry(func(context.Context) ([]Row, error) {
+		if calls.Add(1) == 1 {
+			close(inFirst)
+			<-release
+			return []Row{consumerRow("c1", TierServer, Values{RPM: i64(1)})}, nil
+		}
+		return []Row{consumerRow("c1", TierServer, Values{RPM: i64(2)})}, nil
+	})
+	done := make(chan struct{}, 2)
+	go func() { _ = r.Load(context.Background()); done <- struct{}{} }()
+	<-inFirst
+	go func() { _ = r.Load(context.Background()); done <- struct{}{} }()
+	time.Sleep(20 * time.Millisecond) // the second load is started (blocked on loadMu, or — unserialised — done)
+	close(release)
+	<-done
+	<-done
+	if got := r.Snapshot().Resolve("c1", "t1", keyquota.OpChat, floor).RPM; got != 2 {
+		t.Errorf("after an older slow load and a newer one: rpm %d, want the newer 2", got)
 	}
 }

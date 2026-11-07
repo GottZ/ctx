@@ -15,8 +15,8 @@
 //	server(d)      = consumer[c, server, o].d ?? tenant[t, server, o].d ?? base(d)
 //	tenantCap(d)   = min(consumer[c, tenant, o].d ?? ∞, tenant[t, tenant, o].d ?? ∞)
 //	effective(d)   = min(server(d), tenantCap(d))               (rows are > 0 by CHECK; no 0 sentinel)
-//	tenant_env(d)  = tenant_envelope[t, o].d ?? factor_t × base(d)
-//	instance_env(d)= factor_i × base(d)
+//	tenant_env(d)  = tenant_envelope[t, o].d ?? factor_t × settings(o, d)
+//	instance_env(d)= factor_i × settings(o, d)
 //
 // max_concurrency is never unbounded (settings >= 1 by V48, rows > 0) and
 // never above dispatch.external_queue_per_consumer while that cap is set
@@ -135,6 +135,9 @@ const (
 	SourceTenantEnvelope Source = "tenant_envelope"
 	SourceInstance       Source = "instance"
 	SourceSettings       Source = "settings"
+	// SourceDefault: no row and no setting — the fixed default
+	// (allow_unmetered_external false, design/06 §4.3).
+	SourceDefault Source = "default"
 )
 
 // Effective are the resolved limits of a (consumer, op).
@@ -406,7 +409,7 @@ func (l levels) egress(d Defaults) (external, unmetered bool, extSrc, unmSrc Sou
 			external, extSrc = false, c.src
 		}
 	}
-	unmSrc = SourceSettings
+	unmSrc = SourceDefault
 	for _, c := range []struct {
 		v   *Values
 		src Source
@@ -438,9 +441,13 @@ func (s *Snapshot) Resolve(consumerID, tenantID string, op keyquota.Op, d Defaul
 	e.RPM, e.TPM, e.Concurrency = vals["rpm"], vals["tpm"], vals["max_concurrency"]
 	e.Consumer = keyquota.Budget{DailyTokens: vals["daily_tokens"], MonthlyTokens: vals["monthly_tokens"],
 		DailyRequests: vals["daily_requests"], MonthlyCostUSD: cost.usd}
-	base := keyquota.Budget{DailyTokens: l.base(intDims[3], d).n, MonthlyTokens: l.base(intDims[4], d).n,
-		DailyRequests: l.base(intDims[5], d).n, MonthlyCostUSD: l.costBase(d).usd}
-	e.Tenant = base.Scale(d.TenantEnvelopeFactor)
+	// The envelopes scale the settings floor, not the instance row (design/06
+	// §4.3: factor × registry): an instance row that lowers every consumer's
+	// default must not shrink the aggregates a server-tier grant above it
+	// relies on (Fremd-Review 1 M-2).
+	floorBudget := keyquota.Budget{DailyTokens: d.DailyTokens, MonthlyTokens: d.MonthlyTokens,
+		DailyRequests: d.DailyRequests, MonthlyCostUSD: d.MonthlyCostUSD}
+	e.Tenant = floorBudget.Scale(d.TenantEnvelopeFactor)
 	if l.env != nil {
 		if v := l.env.DailyTokens; v != nil {
 			e.Tenant.DailyTokens = *v
@@ -455,7 +462,7 @@ func (s *Snapshot) Resolve(consumerID, tenantID string, op keyquota.Op, d Defaul
 			e.Tenant.MonthlyCostUSD = *v
 		}
 	}
-	e.Instance = base.Scale(d.InstanceEnvelopeFactor)
+	e.Instance = floorBudget.Scale(d.InstanceEnvelopeFactor)
 	var extSrc, unmSrc Source
 	e.AllowExternal, e.AllowUnmetered, extSrc, unmSrc = l.egress(d)
 	e.Sources["allow_external"], e.Sources["allow_unmetered_external"] = extSrc, unmSrc
@@ -624,8 +631,11 @@ func ValidateValues(kind SubjectKind, tier Tier, v Values, d Defaults) *FieldErr
 		}
 	}
 	if c := v.MonthlyCostUSD; c != nil {
-		if math.IsNaN(*c) || math.IsInf(*c, 0) || *c <= 0 || *c > maxCostUSD {
-			return &FieldError{Field: costSourceField, Code: CodeInvalid, Msg: "must be > 0 and below 1000000, or null (there is no 0 sentinel)"}
+		// NUMERIC(14,8) rounds to 8 decimals: a value under 0.000000005
+		// would be stored as 0 and fail the CHECK (Fremd-Review 1 M-1).
+		if math.IsNaN(*c) || math.IsInf(*c, 0) || math.Round(*c*1e8) < 1 || *c > maxCostUSD {
+			return &FieldError{Field: costSourceField, Code: CodeInvalid,
+				Msg: "must be at least 0.00000001 and below 1000000, or null (there is no 0 sentinel)"}
 		}
 	}
 	if kind == SubjectTenantEnvelope && v.AllowUnmeteredExternal != nil {

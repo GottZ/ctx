@@ -325,3 +325,20 @@ func TestGatewayLimitsManageTenantDelete(t *testing.T) {
 		t.Errorf("after the tenant-admin delete: rpm %d, want the server row's 10", got)
 	}
 }
+
+// TestGatewayLimitsManageTinyCost (Fremd-Review 1 M-1): a cost below the
+// column's resolution (NUMERIC(14,8) stores 0.000000004 as 0, which the
+// CHECK refuses) is a 400 at the field, never a 500; the smallest storable
+// cost passes.
+func TestGatewayLimitsManageTinyCost(t *testing.T) {
+	f := newGLFixture(t)
+	for _, tc := range []struct {
+		usd  float64
+		want int
+	}{{0.000000004, http.StatusBadRequest}, {0.00000001, http.StatusOK}} {
+		code, body, param := f.set(t, f.admin, glData("consumer", "consumer_id", f.cA.id, "chat", map[string]any{"monthly_cost_usd": tc.usd}))
+		if code != tc.want || (tc.want == http.StatusBadRequest && param != "monthly_cost_usd") {
+			t.Errorf("cost %g: %d param %q %s, want %d", tc.usd, code, param, body, tc.want)
+		}
+	}
+}
