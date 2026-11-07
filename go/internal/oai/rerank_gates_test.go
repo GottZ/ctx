@@ -107,16 +107,24 @@ func rerankMemMount(r *chatRig, h http.Handler, held *heldSum) chi.Router {
 }
 
 // liveSampler samples the live heap (HeapAlloc right after a forced
-// collection) every few milliseconds until stop; peak is the largest.
-func liveSampler() (stop func() uint64) {
+// collection) every few milliseconds until stop; peak is the largest, busy
+// the requests in flight (the caller counts them), seen the samples taken
+// while one was (lead review 1 delta D-3: a run between two samples
+// measures nothing).
+func liveSampler(busy *atomic.Int64) (stop func() (peak uint64, seen int64)) {
 	var peak atomic.Uint64
+	var seen atomic.Int64
 	quit, done := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
 		var ms runtime.MemStats
 		for {
+			inFlight := busy.Load() > 0
 			runtime.GC()
 			runtime.ReadMemStats(&ms)
+			if inFlight && busy.Load() > 0 {
+				seen.Add(1)
+			}
 			if ms.HeapAlloc > peak.Load() {
 				peak.Store(ms.HeapAlloc)
 			}
@@ -127,7 +135,7 @@ func liveSampler() (stop func() uint64) {
 			}
 		}
 	}()
-	return func() uint64 { close(quit); <-done; return peak.Load() }
+	return func() (uint64, int64) { close(quit); <-done; return peak.Load(), seen.Load() }
 }
 
 // TestRerankHeapGate: 1, 128 and 1000 documents filling a body, one request
@@ -182,26 +190,40 @@ func TestRerankHeapGate(t *testing.T) {
 					rig.router = rerankMemMount(rig, oai.Rerank(rig.deps, oai.RerankJina), &held)
 					size := (limit - 4096) / docs
 					body := rerankBody(alias, "which document is relevant", rerankDocsOf(docs, size-4))
-					runtime.GC()
-					var ms runtime.MemStats
-					runtime.ReadMemStats(&ms)
-					base := ms.HeapAlloc
-					stop := liveSampler()
-					var wg sync.WaitGroup
+					// A run whose requests no sample saw while they were in
+					// flight measures nothing: it is run again, up to three
+					// times (D-3).
+					var peak, base uint64
+					var seen int64
 					statuses := make([]int, n)
-					for i := range n {
-						wg.Add(1)
-						go func() {
-							defer wg.Done()
-							req := httptest.NewRequest(http.MethodPost, "/v1/rerank", strings.NewReader(body))
-							req.Header.Set(foreignTenantHeader, fmt.Sprintf("heap-%d", i))
-							w := &discardWriter{h: http.Header{}}
-							rig.router.ServeHTTP(w, req)
-							statuses[i] = w.status
-						}()
+					for try := 0; try < 3 && seen == 0; try++ {
+						held = heldSum{}
+						runtime.GC()
+						var ms runtime.MemStats
+						runtime.ReadMemStats(&ms)
+						base = ms.HeapAlloc
+						var busy atomic.Int64
+						stop := liveSampler(&busy)
+						var wg sync.WaitGroup
+						for i := range n {
+							wg.Add(1)
+							busy.Add(1)
+							go func() {
+								defer wg.Done()
+								defer busy.Add(-1)
+								req := httptest.NewRequest(http.MethodPost, "/v1/rerank", strings.NewReader(body))
+								req.Header.Set(foreignTenantHeader, fmt.Sprintf("heap-%d", i))
+								w := &discardWriter{h: http.Header{}}
+								rig.router.ServeHTTP(w, req)
+								statuses[i] = w.status
+							}()
+						}
+						wg.Wait()
+						peak, seen = stop()
 					}
-					wg.Wait()
-					peak := stop()
+					if seen == 0 {
+						t.Fatalf("three runs, no live-heap sample while a request was in flight — the cell measures nothing")
+					}
 					sum, count := held.sum()
 					over := int64(peak) - int64(base)
 					bound := sum + int64(n)*rerankGroundLoad
@@ -211,8 +233,8 @@ func TestRerankHeapGate(t *testing.T) {
 							served++
 						}
 					}
-					t.Logf("W0210 heap %s: body %d B, %d served of %d (%v), live peak +%d KiB, Σ held %d KiB over %d requests, bound %d KiB",
-						t.Name(), len(body), served, n, statuses, over>>10, sum>>10, count, bound>>10)
+					t.Logf("W0210 heap %s: body %d B, %d served of %d (%v), live peak +%d KiB (%d samples in flight), Σ held %d KiB over %d requests, bound %d KiB",
+						t.Name(), len(body), served, n, statuses, over>>10, seen, sum>>10, count, bound>>10)
 					if served == 0 {
 						t.Fatalf("no request served: %v", statuses)
 					}

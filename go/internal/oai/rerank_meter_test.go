@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -85,6 +86,23 @@ func TestRerankMeterEndsOncePerExit(t *testing.T) {
 				return false
 			})
 		}, rerankBody("rrsmall", "q", rerankDocs(4)), ends{admits: 1, settles: 1}},
+		{"panic after the wire", http.StatusServiceUnavailable, func(_ *testing.T, rig *chatRig, _ *rerankEngine, _ *modePlanner) {
+			// the grant probe before the write (stillServes) panics: block one
+			// met the backend, close() keeps the charge (lead review 1 delta D-2)
+			var probes atomic.Int64
+			inner := rig.deps.HasGrant
+			rig.deps.HasGrant = func(ctx context.Context, consumerID, aliasID string) (bool, error) {
+				if probes.Add(1) == 2 {
+					panic("rerank meter gate: panic after the wire")
+				}
+				return inner(ctx, consumerID, aliasID)
+			}
+			rig.setGrant(idRerank, true)
+			ca := *rig.ca.Load()
+			ca.AllModels = false
+			rig.ca.Store(&ca)
+			rig.router = rig.mountRerank(oai.Rerank(rig.deps, oai.RerankJina), oai.Rerank(rig.deps, oai.RerankCohere))
+		}, "", ends{admits: 1, keeps: 1}},
 		{"success", http.StatusOK, nil, "", ends{admits: 1, settles: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

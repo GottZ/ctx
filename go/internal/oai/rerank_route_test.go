@@ -300,6 +300,33 @@ func TestRerankSubBlocksSticky(t *testing.T) {
 			t.Errorf("limiter aborts %d settles %d, want 1/0", l.aborts.Load(), l.settles.Load())
 		}
 	})
+	t.Run("without continuation past the clamp", func(t *testing.T) {
+		// E = 2 below sub_batch 128: the weight plan [2, 2, 1] needs a
+		// second block after the First acquire — the k = 1 refusal comes
+		// after the acquire, before any backend call (lead review 1 delta
+		// D-1), without a row, the lease back, the reservation aborted.
+		e := newRerankEngine(t)
+		rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 3, 1,
+			func(r *chatRig) { r.deps.Planner = noContinuationPlanner{r.planner} })
+		_ = rig.recorder.Take()
+		a := rig.postRerank(t, "/v1/rerank", rerankBody("rr", "q", rerankDocs(5)))
+		code, param, _ := a.envelope(t)
+		if a.status != http.StatusBadRequest || code != oai.CodeUnsupportedValue || param != "documents" ||
+			!strings.Contains(string(a.body), "at most 2 documents per request") {
+			t.Fatalf("%d %s, want 400 unsupported_value documents \"at most 2 documents per request\"", a.status, a.body)
+		}
+		if n := acquires(rig.recorder.Take()); n != 1 || e.hits.Load() != 0 || len(rig.rows.all()) != 0 {
+			t.Errorf("acquires %d wire hits %d rows %d, want 1/0/0", n, e.hits.Load(), len(rig.rows.all()))
+		}
+		if l := rig.limiter; l.aborts.Load() != 1 || l.settles.Load()+l.keeps.Load() != 0 {
+			t.Errorf("limiter aborts %d settles %d keeps %d, want 1/0/0", l.aborts.Load(), l.settles.Load(), l.keeps.Load())
+		}
+		for _, ts := range rig.disp.Snapshot().Targets {
+			if ts.Held != 0 {
+				t.Errorf("%s holds %d leases after the refusal", ts.Origin, ts.Held)
+			}
+		}
+	})
 	t.Run("block two fails", func(t *testing.T) {
 		a := newRerankEngine(t)
 		b := newRerankEngine(t)
