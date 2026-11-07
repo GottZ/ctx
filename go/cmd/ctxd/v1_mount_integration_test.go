@@ -227,10 +227,10 @@ func sameAnswer(a, b v1Answer) bool {
 }
 
 // TestV1EnabledGateNoDBHit is G7 (K4, design/02 §4.2 stage 1): with
-// gateway.enabled=false every request under /v1 — anonymous, a knowledge
-// key, a valid model key, a malformed one; the routes, an unknown path, a
-// wrong method, OPTIONS — gets the byte-identical 404 and costs the pool
-// not one statement.
+// gateway.enabled=false every request under /v1 and (W02-10 G4) /v2 —
+// anonymous, a knowledge key, a valid model key, a malformed one; the
+// routes, an unknown path, a wrong method, OPTIONS — gets the byte-identical
+// 404, the same in both groups, and costs the pool not one statement.
 func TestV1EnabledGateNoDBHit(t *testing.T) {
 	f := newV1Fixture(t, nil, nil)
 	f.setEnabled(t, false)
@@ -242,7 +242,9 @@ func TestV1EnabledGateNoDBHit(t *testing.T) {
 	}
 	targets := [][2]string{
 		{http.MethodGet, "/v1/models"}, {http.MethodGet, "/v1/models/x"}, {http.MethodGet, "/v1/unbekannt"},
-		{http.MethodDelete, "/v1/models"}, {http.MethodOptions, "/v1/models"},
+		{http.MethodDelete, "/v1/models"}, {http.MethodOptions, "/v1/models"}, {http.MethodPost, "/v1/rerank"},
+		// W02-10 G4: the /v2 group behind the same gate.
+		{http.MethodPost, "/v2/rerank"}, {http.MethodGet, "/v2/x"}, {http.MethodOptions, "/v2/rerank"},
 	}
 	var ref *v1Answer
 	before := f.tracer.all.Load()
@@ -382,15 +384,15 @@ func wrapProbe(probe http.Handler) func([]modelRoute) []modelRoute {
 	}
 }
 
-// TestV1DoorCensus is G8 (design/01 §4.2 "Tür-Gate v1door", K23): the
-// census over the production router with the probe behind the real /v1
-// routes — flag off 404 everywhere, flag on anonymous 401, knowledge
-// credentials 401 without a knowledge statement, a model key reaches every
-// route with a ConsumerAuth and without an AuthResult, the unregistered
-// path, the wrong method and OPTIONS reach no handler. Then, on the real
-// handlers: an unregistered /v1 path with Accept: text/html gets the JSON
-// 404 of the group, not the SPA's index.html (the root carries the SPA
-// fallback).
+// TestV1DoorCensus is G8 (design/01 §4.2 "Tür-Gate v1door", K23) and, over
+// both prefixes, G5 of W02-10: the census over the production router with
+// the probe behind the real /v1 and /v2 routes — flag off 404 everywhere,
+// flag on anonymous 401, knowledge credentials 401 without a knowledge
+// statement, a model key reaches every route with a ConsumerAuth and without
+// an AuthResult, the unregistered path, the wrong method and OPTIONS reach no
+// handler. Then, on the real handlers: an unregistered /v1 or /v2 path with
+// Accept: text/html gets the JSON 404 of the group, not the SPA's index.html
+// (the root carries the SPA fallback).
 func TestV1DoorCensus(t *testing.T) {
 	// The fixture exists before the census mounts it (Assert needs its keys
 	// and tracer); the probe the census hands over is reached through a
@@ -402,18 +404,19 @@ func TestV1DoorCensus(t *testing.T) {
 		probe.Store(&p)
 		r.Mount("/", f.router)
 	}, v1door.Options{
-		Prefixes: []string{"/v1"}, SetEnabled: func(on bool) { f.setEnabled(t, on) },
+		Prefixes: []string{"/v1", "/v2"}, SetEnabled: func(on bool) { f.setEnabled(t, on) },
 		KnowledgeKey: v1AdminKey, KnowledgeAuth: &f.tracer.knowledge, ModelKey: f.modelKey,
 	})
 
-	// On the real handlers: an HTML navigation under /v1 — flag off and on,
-	// an unknown path, the bare prefix, a model name that is no alias — is
-	// the group's JSON 404, never the SPA (index.html or its placeholder).
+	// On the real handlers: an HTML navigation under /v1 and /v2 — flag off
+	// and on, an unknown path, the bare prefix, a model name that is no alias,
+	// a path below the rerank route — is the group's JSON 404, never the SPA
+	// (index.html or its placeholder).
 	real := newV1Fixture(t, nil, nil)
 	html := func(r *http.Request) { r.Header.Set("Accept", "text/html,application/xhtml+xml") }
 	for _, on := range []bool{false, true} {
 		real.setEnabled(t, on)
-		for _, path := range []string{"/v1/unbekannt", "/v1", "/v1/models/x/y/z"} {
+		for _, path := range []string{"/v1/unbekannt", "/v1", "/v1/models/x/y/z", "/v2/unbekannt", "/v2", "/v2/rerank/x"} {
 			a := real.do(http.MethodGet, path, func(r *http.Request) { html(r); withBearer(real.modelKey)(r) })
 			if a.status != http.StatusNotFound || !strings.HasPrefix(a.header.Get("Content-Type"), "application/json") || bytes.Contains(a.body, []byte("<html")) || bytes.Contains(a.body, []byte("<!doctype")) {
 				t.Errorf("flag %v, GET %s with Accept text/html: %d %q %.80s, want the JSON 404 of the group", on, path, a.status, a.header.Get("Content-Type"), a.body)

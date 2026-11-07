@@ -74,7 +74,11 @@ func TestEmbedScanIsBookedBeforeItRuns(t *testing.T) {
 		return p.held.Load(), a
 	}
 	body := embedBody("embpub", inputs)
-	booking := int64(oai.ScanReserveFactor)*int64(len(body)) + oai.ScanReserveBase
+	// What the scan adds to the request part (FOLGE-E): the ledger books it
+	// against the share's rest first — scanReserveFactor × the body +
+	// scanReserveBase + the nesting state of its two levels on top of the
+	// read and the decoded texts.
+	booking := embedLedgerRequest(body, 2, inputs, true, 0, "") - embedLedgerRequest(body, 2, inputs, false, 0, "")
 	cred, ac := at("embsec")
 	pub, ap := at("embpub")
 	t.Logf("W0209 scan booking: body %d B; held at the scan: credentials %d, public %d, difference %d (want %d)", len(body), cred, pub, pub-cred, booking)
@@ -82,7 +86,7 @@ func TestEmbedScanIsBookedBeforeItRuns(t *testing.T) {
 		t.Fatalf("answers %d / %d, held at the scan %d — want both served", ac.status, ap.status, cred)
 	}
 	if pub-cred != booking {
-		t.Errorf("at the scan the public request holds %d B more than its twin at credentials, want the scan's booking %d B (%d × %d B + %d)",
+		t.Errorf("at the scan the public request holds %d B more than its twin at credentials, want the scan's booking %d B past the share's rest (%d × %d B + %d + 2 levels)",
 			pub-cred, booking, oai.ScanReserveFactor, len(body), oai.ScanReserveBase)
 	}
 	rig.setSettings(func(s *oai.Settings) { s.InflightBudget = pub - 1 })

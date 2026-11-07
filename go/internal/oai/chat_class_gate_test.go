@@ -494,6 +494,10 @@ var cgNotKeyTables = map[string]string{
 	// which are chat requests.
 	"embedKeys":     "request-key table of the embeddings parse (embeddings_parse.go), gated by the embeddings class gate",
 	"embedDropKeys": "drop-key table of the embeddings parse (embeddings_parse.go), gated by the embeddings class gate",
+	// The rerank parse (W02-10) likewise: its own tables and its own class
+	// gate (rerank_class_gate_test.go).
+	"rerankKeys":    "request-key table of the rerank parse (rerank_parse.go), gated by the rerank class gate",
+	"rerankDocKeys": "document-object key table of the rerank parse (rerank_parse.go), gated by the rerank class gate",
 }
 
 // cgCensus is the census of the package's string tables over every non-test

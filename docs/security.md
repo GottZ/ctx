@@ -118,7 +118,7 @@ ctxm_ │ body: 43 × Base62 (256 random bits) │ checksum: 6 × Base62
 
 ## Model API door (`/v1`, `/v2`)
 
-(`handler.ModelAuth`. Mounted in front of every `/v1` route, behind `gateway.enabled`, which ships `false`; one door per process, which `/v2` will share.) Every request to the model groups passes the same door, in this order, each stage failing closed; stages 0–6 never touch the database:
+(`handler.ModelAuth`. Mounted in front of every `/v1` and `/v2` route, behind `gateway.enabled`, which ships `false`; one door per process: `/v2` is a second group with the same stack in front of the same door instance — one failure lock per (address prefix, key-hash prefix), one probe bucket and one database semaphore for both prefixes, so failures over `/v1` lock the key on `/v2` too and the other way round.) Every request to the model groups passes the same door, in this order, each stage failing closed; stages 0–6 never touch the database:
 
 | # | Stage | Refusal |
 |---|---|---|
@@ -169,7 +169,7 @@ What the gateway writes about a request, and what it never writes (design 06 §4
 
 ## Federation loop guard (ingress)
 
-Every authenticated route group with model egress — the knowledge API under `/api` (including ingest and the blob store), `/mcp`, and the model group `/v1` (and `/v2` once it is mounted) — runs `handler.LoopGuard` **directly after authentication** and before the body cap, the body parse and any admission (design 04 §4.6, masterplan K14). After authentication, so an anonymous probe gets the ordinary `401` and never learns which hop token this instance recognises; before everything else, so a loop costs one authentication round trip and nothing more. The guard reads the hop headers of the request (`Ctx-Hop`, `Ctx-Path`, see [federation hop headers](architecture.md#federation-hop-headers)), never the body, and touches no database:
+Every authenticated route group with model egress — the knowledge API under `/api` (including ingest and the blob store), `/mcp`, and the model groups `/v1` and `/v2` — runs `handler.LoopGuard` **directly after authentication** and before the body cap, the body parse and any admission (design 04 §4.6, masterplan K14). After authentication, so an anonymous probe gets the ordinary `401` and never learns which hop token this instance recognises; before everything else, so a loop costs one authentication round trip and nothing more. The guard reads the hop headers of the request (`Ctx-Hop`, `Ctx-Path`, see [federation hop headers](architecture.md#federation-hop-headers)), never the body, and touches no database:
 
 | # | Check | Refusal |
 |---|---|---|
