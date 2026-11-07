@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/GottZ/ctx/internal/modelalias"
 )
 
 // The answer rewrite of a non-streamed chat completion (design/02 §4.6, B4):
@@ -138,7 +140,8 @@ func stripReasoning(c map[string]json.RawMessage) {
 // created and model the same in every chunk (ctx's, as non-stream), object
 // chat.completion.chunk, service_tier from the lane. choices pass verbatim
 // except what the non-stream rewrite normalizes too (lead decision O-08-3
-// (b)): a reasoning-off alias's deltas lose every reasoning trace, and a
+// (b)): a reasoning-off alias's deltas lose every reasoning trace (a choice
+// left empty is dropped, its role carried — roleCarry), and a
 // choice without the required delta/index gets them
 // (CreateChatCompletionStreamResponse). The usage chunk reaches only a
 // client that asked for it (stream_options.include_usage); for every other
@@ -164,8 +167,9 @@ type streamChunk struct {
 // counts.
 var streamDeltaKeys = []string{"content", "reasoning_content", "reasoning", "refusal"}
 
-// rewriteChunk renders the client form of one upstream stream chunk.
-func rewriteChunk(upstream []byte, id string, created int64, alias, lane string, reasoningOff, includeUsage bool) (streamChunk, error) {
+// rewriteChunk renders the client form of one upstream stream chunk; roles
+// is the role carry of the attempt the chunk belongs to.
+func rewriteChunk(upstream []byte, id string, created int64, alias, lane string, reasoningOff, includeUsage bool, roles *roleCarry) (streamChunk, error) {
 	var in map[string]json.RawMessage
 	if err := json.Unmarshal(upstream, &in); err != nil {
 		return streamChunk{}, err
@@ -178,7 +182,7 @@ func rewriteChunk(upstream []byte, id string, created int64, alias, lane string,
 	case !hasKind(choices, kindArray):
 		return streamChunk{}, errNoChoices
 	}
-	choices, n, err := normalizeChunkChoices(choices, reasoningOff, &sc)
+	choices, n, err := normalizeChunkChoices(choices, reasoningOff, &sc, roles)
 	if err != nil {
 		return streamChunk{}, err
 	}
@@ -250,8 +254,8 @@ func readStreamUsage(in map[string]json.RawMessage, sc *streamChunk) {
 
 // normalizeChunkChoices brings a chunk's choices into the stream schema and
 // counts the generated runes. It returns the choices left: a choice the
-// reasoning strip emptied is dropped.
-func normalizeChunkChoices(choices json.RawMessage, reasoningOff bool, sc *streamChunk) (json.RawMessage, int, error) {
+// reasoning strip emptied is dropped, its role carried (roleCarry).
+func normalizeChunkChoices(choices json.RawMessage, reasoningOff bool, sc *streamChunk, roles *roleCarry) (json.RawMessage, int, error) {
 	var arr []map[string]json.RawMessage
 	if err := json.Unmarshal(choices, &arr); err != nil {
 		return nil, 0, err
@@ -273,8 +277,10 @@ func normalizeChunkChoices(choices json.RawMessage, reasoningOff bool, sc *strea
 		sc.runes += deltaRunes(delta)
 		dropNullDeltaKeys(delta)
 		if reasoningOff && stripDelta(delta) && emptyChoice(c, delta) {
+			roles.dropped(c["index"], delta)
 			continue
 		}
+		roles.relaying(c["index"], delta)
 		c["delta"] = mustJSON(delta)
 		kept = append(kept, c)
 	}
@@ -314,7 +320,7 @@ func stripDelta(delta map[string]json.RawMessage) bool {
 // emptyChoice reports whether a stripped choice carries nothing a client
 // reads: no delta value but nulls and the role, no finish_reason, no
 // logprobs. Such a chunk is the reasoning trace itself (its timing) and is
-// not relayed.
+// not relayed; its role moves to the next relayed choice (roleCarry).
 func emptyChoice(c, delta map[string]json.RawMessage) bool {
 	for k, v := range delta {
 		if k != "role" && !isNull(v) {
@@ -327,6 +333,58 @@ func emptyChoice(c, delta map[string]json.RawMessage) bool {
 		}
 	}
 	return true
+}
+
+// roleCarry is the role state of one stream attempt (W02-08 hardening 5,
+// CodeRabbit on PR #166): SGLang sends "role":"assistant" only in its first
+// chunk — for a reasoning-off alias a reasoning chunk the strip drops — and
+// a client that accumulates the stream needs it (openai-node's helper:
+// "missing role for choice 0"). Per choice index it holds the role a dropped
+// choice carried before the index relayed one, set into the index's next
+// relayed choice (a finish-only one too), and whether a role was relayed (a
+// later dropped role is not set again). Fixed size: the indexes below
+// modelalias.CeilingMaxN, the most choices any alias lets a request ask
+// for; a choice beyond them, and a role outside the stream schema's enum,
+// is relayed as before — an engine's stream cannot grow the state.
+type roleCarry struct {
+	pending [modelalias.CeilingMaxN]string
+	relayed [modelalias.CeilingMaxN]bool
+}
+
+// streamRoles are the roles of ChatCompletionStreamResponseDelta.
+var streamRoles = map[string]bool{"developer": true, "system": true, "user": true, "assistant": true, "tool": true}
+
+// roleSlot is the carry slot of a choice index (false: not tracked).
+func roleSlot(index json.RawMessage) (int, bool) {
+	i, err := strconv.Atoi(string(index))
+	return i, err == nil && i >= 0 && i < modelalias.CeilingMaxN
+}
+
+// dropped keeps the role of a choice the strip dropped, unless its index
+// relayed one.
+func (r *roleCarry) dropped(index json.RawMessage, delta map[string]json.RawMessage) {
+	i, ok := roleSlot(index)
+	raw, has := delta["role"]
+	var role string
+	if !ok || !has || r.relayed[i] || json.Unmarshal(raw, &role) != nil || !streamRoles[role] {
+		return
+	}
+	r.pending[i] = role
+}
+
+// relaying sets a kept role into a relayed choice without one and marks its
+// index's role relayed.
+func (r *roleCarry) relaying(index json.RawMessage, delta map[string]json.RawMessage) {
+	i, ok := roleSlot(index)
+	if !ok {
+		return
+	}
+	if _, has := delta["role"]; !has && r.pending[i] != "" {
+		delta["role"] = mustJSON(r.pending[i])
+	}
+	if _, has := delta["role"]; has {
+		r.relayed[i], r.pending[i] = true, ""
+	}
 }
 
 // deltaRunes counts the generated runes of a delta.
