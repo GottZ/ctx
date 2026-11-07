@@ -4,7 +4,7 @@
 //
 // The rules this file owns (each one a W05-10 gate):
 //   - null ≠ 0: a value that is null, or any value of a point with
-//     complete:false, renders NOT_RECORDED — never "0" (rot gegen `?? 0`).
+//     complete:false, renders NOT_RECORDED — never "0" (the zero-coalescing gate).
 //   - windowTotal sums the recorded values only; if any point is not
 //     recorded the total is partial ("≥ N"), if none is recorded it is null.
 //   - hist:false: the latency cells show the MEANS (avg_ms, avg_queue_ms,
