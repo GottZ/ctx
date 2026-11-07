@@ -338,6 +338,17 @@ func v1Routes(d oai.Deps) []modelRoute {
 		{http.MethodGet, "/models/*", oai.GetModel(d)},
 		{http.MethodPost, "/chat/completions", oai.ChatCompletions(d)},
 		{http.MethodPost, "/embeddings", oai.Embeddings(d)},
+		{http.MethodPost, "/rerank", oai.Rerank(d, oai.RerankJina)},
+	}
+}
+
+// v2Routes are the endpoints of the /v2 group (W02-10, design/02 §4.2 route
+// table): the Cohere-v2 form of rerank only — the same handler as /v1/rerank
+// in the other dialect (return_documents defaults to false). Everything else
+// under /v2 is the group's catch-all, behind the same gate and door as /v1.
+func v2Routes(d oai.Deps) []modelRoute {
+	return []modelRoute{
+		{http.MethodPost, "/rerank", oai.Rerank(d, oai.RerankCohere)},
 	}
 }
 

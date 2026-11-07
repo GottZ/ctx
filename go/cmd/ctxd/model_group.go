@@ -14,10 +14,11 @@ import (
 )
 
 // modelGroupDeps is what one model group (/v1, /v2) is built from
-// (masterplan K23, design/02 K-02-2). newRouter mounts /v1 through
-// mountModelGroup (W02-05; W02-10 adds /v2) from the process's
-// modelGateway (modelGateway.group); the door gate
-// (internal/handler/v1door) runs over that mount.
+// (masterplan K23, design/02 K-02-2). newRouter mounts /v1 (W02-05) and
+// /v2 (W02-10) through mountModelGroup from the process's ONE modelGateway
+// (modelGateway.group); the door gate (internal/handler/v1door) runs over
+// that mount. Mounting a second group marks the router's ingress again —
+// the marks are idempotent (fedhop.Ingress).
 type modelGroupDeps struct {
 	// access is the OUTERMOST stage (W06-9, design/06 §4.6): the access log
 	// of the model groups — one line per success, refusals counted per

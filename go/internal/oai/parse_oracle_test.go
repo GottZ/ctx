@@ -9,7 +9,10 @@ package oai
 // hunk the parse took besides FOLGE-P: W02-08's readCTX (8e00a12e..49289c7b:
 // stream true accepted, stream_options.include_usage read), applied
 // verbatim in the merge of the two waves, so the oracle stays the parse
-// FOLGE-P replaced.
+// FOLGE-P replaced. W02-08 hardening 4 (F5-1) narrowed that hunk to what
+// root 829a45ec answers without a stream: include_usage is read only when
+// stream is true (stream sorts before stream_options); otherwise
+// stream_options only has to be an object, as on 4839a958.
 
 import (
 	"bytes"
@@ -219,6 +222,9 @@ func (req *baseChatRequest) readCTX(k string, v json.RawMessage) *paramError {
 	case "stream_options":
 		if !baseHasKind(v, baseKindObject) {
 			return invalidType(k, "an object")
+		}
+		if !req.stream {
+			break // W02-08 hardening 4 (F5-1): include_usage is read only on a stream
 		}
 		var o struct {
 			IncludeUsage *json.RawMessage `json:"include_usage"`

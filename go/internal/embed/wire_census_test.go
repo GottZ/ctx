@@ -7,8 +7,8 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -18,13 +18,16 @@ import (
 // spelling) once, here — the route imports them (FOLGE-E hardening 1: the
 // route's own wireStringLen moved here), a copy drifts from the writer.
 func TestWireLengthHasOneDefinition(t *testing.T) {
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	// The package directory comes from the working directory, not from
+	// runtime.Caller: under -trimpath (go/gates.sh, FOLGE-T) the caller's file
+	// is the import path, which the filesystem does not know.
+	self, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
 	}
-	internal := filepath.Dir(filepath.Dir(self))
+	internal := filepath.Dir(self)
 	defs := map[string][]string{}
-	err := filepath.WalkDir(internal, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(internal, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return err
 		}

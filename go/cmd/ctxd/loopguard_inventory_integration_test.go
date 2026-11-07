@@ -11,9 +11,9 @@
 // anonymous probe gets no instance oracle. Named exceptions carry their
 // reason; an exception that no longer exists is an error too.
 //
-// /v1 and /v2 are not mounted in this wave (W02-05, W02-10). The inventory
-// covers them already: their routes take the model key (ctxm_), the gateway
-// flag is on, so the mount PR runs this gate unchanged.
+// /v1 (W02-05) and /v2 (W02-10) are mounted by the model groups; their
+// routes take the model key (ctxm_) and the gateway flag is on, so the
+// inventory covers them unchanged.
 //
 //	go test -tags=integration -p 1 -count=1 -run 'TestLoopGuardRouteInventory|TestLoopGuardMaxDepthIsHot' -v ./cmd/ctxd/
 package main
