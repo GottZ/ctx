@@ -140,6 +140,7 @@ type slowReaderCase struct {
 	minDrain time.Duration // the client drain lasts at least this (the slow-reader regime)
 	heldAlso time.Duration // on a red run: also report held at this time after the request (0: no)
 	window   time.Duration // client_write_window (0: the rig's 30 s)
+	rate     int64         // gateway.stream_min_drain_rate (0: the rig's 1 KiB/s)
 }
 
 // TestRelaySlowReaderReleasesAtTheUpstreamEnd is gate (b), the shared gate of
@@ -157,7 +158,7 @@ func TestRelaySlowReaderReleasesAtTheUpstreamEnd(t *testing.T) {
 	tc := slowReaderCase{frames: 5, gap: 0, pause: 200 * time.Millisecond, heldBy: 700 * time.Millisecond, minDrain: 800 * time.Millisecond}
 	if os.Getenv("CTX_A03W10_REALTIME") == "1" {
 		tc = slowReaderCase{frames: 6, gap: 333 * time.Millisecond, pause: 25 * time.Second, heldBy: 4500 * time.Millisecond, minDrain: 120 * time.Second, heldAlso: 60 * time.Second,
-			window: 120 * time.Second}
+			window: 120 * time.Second, rate: 512}
 	}
 	end := newUpstreamEnd()
 	u := newUpstream(t, "")
@@ -170,6 +171,13 @@ func TestRelaySlowReaderReleasesAtTheUpstreamEnd(t *testing.T) {
 		// load: one frame per 25 s would meet the 30 s write window (D4, a
 		// different gate) on both sides.
 		opts = append(opts, withStream(40*time.Second, 15*time.Second, tc.window))
+	}
+	if tc.rate > 0 {
+		// Under host load a 32 KiB frame read through 4 KiB buffers takes
+		// seconds: one frame per 25 s plus the read measured 0.94 KiB/s,
+		// below the 1 KiB/s minimum — the drain rule (its own gate) would cut
+		// the client; this gate is the lease's end and the delivery.
+		opts = append(opts, withRelay(2<<20, tc.rate, 30*time.Second))
 	}
 	rig := newChatRig(t, []backends.Backend{row}, 4, 1, opts...)
 	start := time.Now()
