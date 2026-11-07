@@ -28,6 +28,10 @@ import (
 // errSurplusEmbeddings: the answer has an entry past the inputs.
 var errSurplusEmbeddings = errors.New("more embeddings than inputs")
 
+// maxIndexLiteral is the longest integer literal an index can be: an int64
+// (encoding/json reads an int at 64 bits); a longer literal is no index.
+const maxIndexLiteral = len("-9223372036854775808")
+
 // rawAnswerMinStep is the smallest buffer step of an answer whose length the
 // header does not name: steps are the read cap halved down to here.
 const rawAnswerMinStep = 4 << 10
@@ -332,8 +336,7 @@ func (x *rawIndex) UnmarshalJSON(b []byte) error {
 	if string(b) == "null" {
 		return nil
 	}
-	// An int64 literal has at most 20 bytes; a longer one is no int.
-	if len(b) > 20 || (b[0] != '-' && (b[0] < '0' || b[0] > '9')) {
+	if len(b) > maxIndexLiteral || (b[0] != '-' && (b[0] < '0' || b[0] > '9')) {
 		return fmt.Errorf("an entry's index is no integer (%.24s)", b)
 	}
 	v, err := strconv.ParseInt(string(b), 10, 64)
