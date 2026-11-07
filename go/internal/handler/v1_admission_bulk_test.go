@@ -33,6 +33,12 @@ const (
 func firstLeaseClass(t *testing.T, r *v1Rig, ca *auth.ConsumerAuth, in fedhop.Inbound, tier string, chain []backends.Backend) (lane, bound, leased string, err error) {
 	t.Helper()
 	ctx := fedhop.WithInbound(consumerCtx(ca), in)
+	// Since F-W12 the PeerIngress marks every ctx-peer with Ctx-Path it lets
+	// through as proved against its binding (a peer it cannot prove never
+	// reaches the planner — 403): the context as the PeerIngress leaves it.
+	if ca != nil && ca.Kind == auth.KindCtxPeer && len(in.Path) > 0 {
+		ctx = fedhop.WithPeerInstance(ctx, in.Path[len(in.Path)-1])
+	}
 	plan, err := r.adm.Plan(ctx, ca, oai.AdmissionInput{Chain: chain, ServiceTier: tier})
 	if err != nil {
 		return plan.Lane, "", "", err
@@ -115,7 +121,9 @@ func TestPlanBulkLaneAcquiresExternalBulk(t *testing.T) {
 // Ctx-Class absent or injected past the PeerIngress (it must be ignored); a
 // peer's hint missing (with or without Ctx-Path) or unknown. The peer hint
 // reaches the planner as the PeerIngress leaves it: fedhop.WithInbound on
-// the plan context, read there through fedhop.InboundFrom.
+// the plan context, read there through fedhop.InboundFrom, and — for a peer
+// with Ctx-Path — the proof mark of F-W12 (fedhop.WithPeerInstance; the
+// unproved peer is TestPlanPeerHintNeedsProof).
 //
 // Red fixtures (overlays on v1_admission.go, A03-W9 report): "header wins"
 // — a peer's Ctx-Class interactive overrules the ceiling bulk (case 3/bulk
