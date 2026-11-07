@@ -131,7 +131,7 @@ func TestRerankAnswerIsBookedBeforeTheMeter(t *testing.T) {
 	least := leastBudget(t, rig, admitted)
 	n := int64(len(docs))
 	texts := int64(len("rrpub") + len(query)) // decoded: model, query, documents
-	wire := int64(len(query) + 2)               // escaped on the wire: query, documents and their commas
+	wire := int64(len(query) + 2)             // escaped on the wire: query, documents and their commas
 	for _, d := range docs {
 		texts += int64(len(d))
 		wire += int64(len(d)+2) + 1
