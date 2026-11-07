@@ -353,3 +353,24 @@ func TestInflightFailedCheckIsRetried(t *testing.T) {
 		t.Fatalf("the failed check was not asked again within %v (checks %v)", modelAuthDBDeadline+time.Second, f.calls)
 	}
 }
+
+// TestInflightExtensionMovesTheTimer (Fremd-Review 1 X6): a NOTIFY that
+// moves a key's expiry later moves its timer later — the request does not
+// end at the expiry it was authenticated with.
+func TestInflightExtensionMovesTheTimer(t *testing.T) {
+	f := &fakeLive{}
+	var forgotten []string
+	r := unitRegistry(f, &forgotten)
+	soon := time.Now().Add(150 * time.Millisecond)
+	e := unitRegister(r, "k1", "c1", "t1", "", &soon)
+	defer e.unreg()
+	later := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	r.ModelAccessNotify(`{"table":"context_model_keys","op":"UPDATE","id":"k1","consumer_id":"c1","expires_at":"` + later + `"}`)
+	time.Sleep(400 * time.Millisecond)
+	if revoked(e) {
+		t.Fatal("the request ended at the old expiry although a NOTIFY extended it")
+	}
+	if s := r.stats(); s.timers != 1 {
+		t.Errorf("%d timers, want 1 (moved to the extended expiry)", s.timers)
+	}
+}
