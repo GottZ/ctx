@@ -148,13 +148,21 @@ func TestGatewayLimitsManageTiers(t *testing.T) {
 
 // TestGatewayLimitsManageNoOracle is gate (d): another tenant's consumer, an
 // unknown and a malformed id answer byte-identically (404), for set, get
-// and delete; the same for another tenant's and an unknown tenant.
+// and delete; the same for another tenant's and an unknown tenant. Only set
+// carries a dimension (get and delete decode strictly: an unknown field is
+// a 400 before any subject is looked up — S2 input fix, see the S2 report).
 func TestGatewayLimitsManageNoOracle(t *testing.T) {
 	f := newGLFixture(t)
+	dims := func(action string) map[string]any {
+		if action == "gateway-limits-set" {
+			return map[string]any{"rpm": 1}
+		}
+		return nil
+	}
 	for _, action := range []string{"gateway-limits-get", "gateway-limits-set", "gateway-limits-delete"} {
 		var bodies [][]byte
 		for _, id := range []string{f.cB.id, "00000000-0000-7000-8000-000000000000", "not-a-uuid"} {
-			status, body, _ := mcCall(t, f.h, f.a.ar, action, glData("consumer", "consumer_id", id, "chat", map[string]any{"rpm": 1}))
+			status, body, _ := mcCall(t, f.h, f.a.ar, action, glData("consumer", "consumer_id", id, "chat", dims(action)))
 			if status != http.StatusNotFound {
 				t.Errorf("%s consumer %s: %d %s, want 404", action, id, status, body)
 			}
@@ -163,8 +171,8 @@ func TestGatewayLimitsManageNoOracle(t *testing.T) {
 		if !bytes.Equal(bodies[0], bodies[1]) || !bytes.Equal(bodies[1], bodies[2]) {
 			t.Errorf("%s: foreign/unknown/malformed consumer bodies differ: %q %q %q", action, bodies[0], bodies[1], bodies[2])
 		}
-		s1, b1, _ := mcCall(t, f.h, f.a.ar, action, glData("tenant", "tenant_id", f.b.id, "chat", map[string]any{"rpm": 1}))
-		s2, b2, _ := mcCall(t, f.h, f.a.ar, action, glData("tenant", "tenant_id", "00000000-0000-7000-8000-000000000001", "chat", map[string]any{"rpm": 1}))
+		s1, b1, _ := mcCall(t, f.h, f.a.ar, action, glData("tenant", "tenant_id", f.b.id, "chat", dims(action)))
+		s2, b2, _ := mcCall(t, f.h, f.a.ar, action, glData("tenant", "tenant_id", "00000000-0000-7000-8000-000000000001", "chat", dims(action)))
 		if s1 != http.StatusNotFound || s2 != http.StatusNotFound || !bytes.Equal(b1, b2) {
 			t.Errorf("%s foreign/unknown tenant: %d %s / %d %s, want two identical 404", action, s1, b1, s2, b2)
 		}

@@ -828,15 +828,16 @@ Dimensions: `rpm`, `tpm`, `max_concurrency`, `daily_tokens`, `monthly_tokens`, `
 
 | Action | Request (`data`) | Response |
 |---|---|---|
-| `gateway-limits-get` | `{subject_kind, consumer_id?, tenant_id?, op?}` | `{"success": true, "limits": {subject_kind, consumer_id, tenant_id, ops: {<op>: {server, tenant, ceiling, effective, sources}}}}` — `server`/`tenant` are the stored rows (`null` = none), `ceiling` the bound a tenant-tier write must stay under, `effective` the resolved values with the envelopes, `sources` the level that set each dimension; a tenant-admin sees no instance or envelope values beyond its own tenant's |
+| `gateway-limits-get` | `{subject_kind, consumer_id?, tenant_id?, op?}` | `{"success": true, "limits": {subject_kind, consumer_id, tenant_id, ops: {<op>: {server, tenant, ceiling, effective, sources}}}}` — `server`/`tenant` are the stored rows (`null` = none), `ceiling` the bound a tenant-tier write must stay under, `effective` the resolved values with the envelopes, `sources` the level that set each dimension (`settings`, `instance`, `tenant_server`, `tenant_tenant`, `consumer_server`, `consumer_tenant`); without `op` all three ops; an envelope subject answers its stored rows only; a tenant-admin sees its tenant envelope but never the instance envelope |
 | `gateway-limits-set` | `{subject_kind, consumer_id? \| tenant_id?, op, <dimensions>}` | `{"success": true, "limits": <the row>}` — a full replacement of the caller's tier row: an absent dimension is `null` |
 | `gateway-limits-delete` | `{subject_kind, consumer_id? \| tenant_id?, op}` | `{"success": true, "deleted": true\|false}` — removes the caller's tier row only |
 
 | Status | `error` | When |
 |---|---|---|
 | 400 | `invalid data: …` | unknown field, wrong type, a value `<= 0`, a dimension the subject kind does not carry, an unknown `op` or `subject_kind` (`param` names the field) |
-| 400 | `limit widens: <field>` | a tenant-admin value above its ceiling, or a tenant-tier permission (`param` names the field) |
-| 403 | `admin key required` | not a tenant-admin; a tenant-admin on `instance` or `tenant_envelope` |
+| 400 | `limit widens: <field> — …` | a tenant-admin value above its ceiling (the message names the ceiling, which `gateway-limits-get` shows anyway), or a tenant-tier permission (`param` names the field) |
+| 403 | `admin key required` | not a tenant-admin; a tenant-admin on `instance` or `tenant_envelope` (read and write) |
+| 503 | `gateway limits are not available` | the limits registry is not wired (never on a booted server) |
 | 404 | `model consumer not found` / `tenant not found` | unknown, malformed or another tenant's subject — byte-identical answers (no oracle) |
 
 Every write lands one audit row (`entity_type` `gateway_limits`, `entity_key` = the consumer id, the tenant id or `instance`; visible in the consumer's audit trail); an unchanged write lands none. A psql edit reaches the running process through the `ctx_settings_write` notification. There is no other delete path: a consumer's and a tenant's rows go with the tenant prune.

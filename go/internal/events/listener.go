@@ -512,6 +512,8 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 	if h.modelAliases != nil {
 		h.modelAliases.Trigger(ctx)
 	}
+	// W06-15: a limits write during the disconnect window likewise.
+	h.reloadGatewayLimits(ctx)
 	return nil
 }
 
@@ -569,12 +571,14 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 }
 
 // reloadGatewayLimits schedules a reload of the limits registry (the
-// context_gateway_limits entity branch and every backlog).
-//
-// RC-D S1 stub: inert — the branch swallows the notification (no settings
-// reload either), the registry is not triggered.
+// context_gateway_limits entity branch and every backlog). Asynchronous like
+// the alias registry: the NOTIFY loop serves every channel and never waits
+// for a table read (Registry.Trigger coalesces a burst). nil (tests,
+// pre-wire) is inert.
 func (h *SettingsWriteHandler) reloadGatewayLimits(ctx context.Context) {
-	_, _ = ctx, h.gatewayLimits
+	if h.gatewayLimits != nil {
+		h.gatewayLimits.Trigger(ctx)
+	}
 }
 
 // registryEntity triggers the in-memory registry an entity's table feeds —

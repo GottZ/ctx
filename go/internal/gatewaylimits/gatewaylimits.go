@@ -36,14 +36,15 @@ package gatewaylimits
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"math"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/GottZ/ctx/internal/keyquota"
 )
-
-// ErrNotImplemented is the answer of every RC-D S1 stub of this package.
-var ErrNotImplemented = errors.New("gatewaylimits: not implemented (RC-D S1 stub)")
 
 // SubjectKind is whose limits a row holds.
 type SubjectKind string
@@ -165,14 +166,52 @@ const (
 	CodeInvalid = "invalid_value"
 )
 
-// Snapshot is an immutable set of rows.
-type Snapshot struct {
-	rows []Row
+// ErrNoCeiling: the subject kind has no tenant tier (instance, tenant
+// envelope), so there is no ceiling a tenant-admin write could stay under.
+var ErrNoCeiling = errors.New("gatewaylimits: subject kind is server-tier only")
+
+// Column bounds of migration 168 a value must fit (INTEGER, SMALLINT,
+// NUMERIC(14,8)); a value beyond them is refused as invalid at the write
+// instead of reaching the database as SQLSTATE 22003.
+const (
+	maxInt4         = math.MaxInt32
+	maxInt2         = math.MaxInt16
+	maxCostUSD      = 999999.99999999
+	maxSafeBigint   = math.MaxInt64
+	costSourceField = "monthly_cost_usd"
+)
+
+// rowKey addresses one row: the subject (kind and the id its kind names,
+// "" for the instance), the tier and the op.
+type rowKey struct {
+	kind SubjectKind
+	id   string
+	tier Tier
+	op   keyquota.Op
 }
 
-// NewSnapshot builds a snapshot of rows.
+func keyOf(r Row) rowKey {
+	id := r.TenantID
+	if r.Kind == SubjectConsumer {
+		id = r.ConsumerID
+	}
+	return rowKey{kind: r.Kind, id: id, tier: r.Tier, op: r.Op}
+}
+
+// Snapshot is an immutable set of rows.
+type Snapshot struct {
+	rows  []Row
+	index map[rowKey]*Values
+}
+
+// NewSnapshot builds a snapshot of rows. A later row of the same key wins
+// (the database holds one per key, uq_gateway_limits).
 func NewSnapshot(rows []Row) *Snapshot {
-	return &Snapshot{rows: append([]Row(nil), rows...)}
+	s := &Snapshot{rows: append([]Row(nil), rows...), index: make(map[rowKey]*Values, len(rows))}
+	for i := range s.rows {
+		s.index[keyOf(s.rows[i])] = &s.rows[i].Values
+	}
+	return s
 }
 
 // Rows are the snapshot's rows (a copy).
@@ -183,18 +222,244 @@ func (s *Snapshot) Rows() []Row {
 	return append([]Row(nil), s.rows...)
 }
 
+// row is the values of the row at key, nil without a row (or without an id:
+// a consumer or tenant row is never looked up under "").
+func (s *Snapshot) row(kind SubjectKind, id string, tier Tier, op keyquota.Op) *Values {
+	if s == nil || (kind != SubjectInstance && id == "") {
+		return nil
+	}
+	return s.index[rowKey{kind: kind, id: id, tier: tier, op: op}]
+}
+
+// levels are the rows that bear on (consumer c, tenant t, op): the server
+// and tenant tier of the consumer and of its tenant, the instance row and
+// the tenant envelope. A nil entry has no row.
+type levels struct {
+	cs, ct, ts, tt, in, env *Values
+}
+
+func (s *Snapshot) levelsOf(c, t string, op keyquota.Op) levels {
+	return levels{
+		cs:  s.row(SubjectConsumer, c, TierServer, op),
+		ct:  s.row(SubjectConsumer, c, TierTenant, op),
+		ts:  s.row(SubjectTenant, t, TierServer, op),
+		tt:  s.row(SubjectTenant, t, TierTenant, op),
+		in:  s.row(SubjectInstance, "", TierServer, op),
+		env: s.row(SubjectTenantEnvelope, t, TierServer, op),
+	}
+}
+
+// intDim is one integer dimension: its JSON name, its field in Values and
+// its settings floor.
+type intDim struct {
+	name  string
+	field func(*Values) **int64
+	floor func(Defaults) int64
+}
+
+var intDims = []intDim{
+	{"rpm", func(v *Values) **int64 { return &v.RPM }, func(d Defaults) int64 { return d.RPM }},
+	{"tpm", func(v *Values) **int64 { return &v.TPM }, func(d Defaults) int64 { return d.TPM }},
+	{"max_concurrency", func(v *Values) **int64 { return &v.MaxConcurrency }, func(d Defaults) int64 { return d.Concurrency }},
+	{"daily_tokens", func(v *Values) **int64 { return &v.DailyTokens }, func(d Defaults) int64 { return d.DailyTokens }},
+	{"monthly_tokens", func(v *Values) **int64 { return &v.MonthlyTokens }, func(d Defaults) int64 { return d.MonthlyTokens }},
+	{"daily_requests", func(v *Values) **int64 { return &v.DailyRequests }, func(d Defaults) int64 { return d.DailyRequests }},
+}
+
+// get is the dimension's value in v (nil: v is nil or says nothing).
+func (d intDim) get(v *Values) *int64 {
+	if v == nil {
+		return nil
+	}
+	return *d.field(v)
+}
+
+// limit is a resolved value with the level that set it; 0 = unbounded.
+type limit struct {
+	n   int64
+	src Source
+}
+
+// tighter is the smaller of a and b, 0 counting as unbounded; on a tie a.
+func tighter(a, b limit) limit {
+	switch {
+	case a.n == 0:
+		return b
+	case b.n == 0:
+		return a
+	case b.n < a.n:
+		return b
+	}
+	return a
+}
+
+// pick is the first set value of the chain with its source, else fallback.
+func pick(fallback limit, chain ...struct {
+	v   *int64
+	src Source
+}) limit {
+	for _, c := range chain {
+		if c.v != nil {
+			return limit{n: *c.v, src: c.src}
+		}
+	}
+	return fallback
+}
+
+type at = struct {
+	v   *int64
+	src Source
+}
+
+// base is the instance row over the settings floor.
+func (l levels) base(dim intDim, d Defaults) limit {
+	return pick(limit{n: dim.floor(d), src: SourceSettings}, at{dim.get(l.in), SourceInstance})
+}
+
+// server is the server bound of the consumer level: the consumer's server
+// row, its tenant's server row, the base.
+func (l levels) server(dim intDim, d Defaults) limit {
+	return pick(l.base(dim, d), at{dim.get(l.cs), SourceConsumerServer}, at{dim.get(l.ts), SourceTenantServer})
+}
+
+// effective is the server bound narrowed by the tenant-tier rows; withOwn
+// false leaves the consumer's own tenant-tier row out (its ceiling).
+func (l levels) effective(dim intDim, d Defaults, withOwn bool) limit {
+	eff := l.server(dim, d)
+	if v := dim.get(l.tt); v != nil {
+		eff = tighter(eff, limit{n: *v, src: SourceTenantTenant})
+	}
+	if v := dim.get(l.ct); withOwn && v != nil {
+		eff = tighter(eff, limit{n: *v, src: SourceConsumerTenant})
+	}
+	return eff
+}
+
+// cost is the float dimension monthly_cost_usd through the same chain.
+type costLimit struct {
+	usd float64
+	src Source
+}
+
+func costOf(v *Values) *float64 {
+	if v == nil {
+		return nil
+	}
+	return v.MonthlyCostUSD
+}
+
+func (l levels) costBase(d Defaults) costLimit {
+	if v := costOf(l.in); v != nil {
+		return costLimit{*v, SourceInstance}
+	}
+	return costLimit{d.MonthlyCostUSD, SourceSettings}
+}
+
+func (l levels) costEffective(d Defaults, withOwn bool) costLimit {
+	eff := l.costBase(d)
+	switch {
+	case costOf(l.cs) != nil:
+		eff = costLimit{*l.cs.MonthlyCostUSD, SourceConsumerServer}
+	case costOf(l.ts) != nil:
+		eff = costLimit{*l.ts.MonthlyCostUSD, SourceTenantServer}
+	}
+	narrow := func(v *float64, src Source) {
+		if v != nil && (eff.usd <= 0 || *v < eff.usd) {
+			eff = costLimit{*v, src}
+		}
+	}
+	narrow(costOf(l.tt), SourceTenantTenant)
+	if withOwn {
+		narrow(costOf(l.ct), SourceConsumerTenant)
+	}
+	return eff
+}
+
+// boolOf reads a permission of v (nil: no row or no value).
+func boolOf(v *Values, unmetered bool) *bool {
+	if v == nil {
+		return nil
+	}
+	if unmetered {
+		return v.AllowUnmeteredExternal
+	}
+	return v.AllowExternal
+}
+
+// egress resolves the two permissions (package comment).
+func (l levels) egress(d Defaults) (external, unmetered bool, extSrc, unmSrc Source) {
+	external, extSrc = d.AllowExternal, SourceSettings
+	for _, c := range []struct {
+		v   *Values
+		src Source
+	}{{l.cs, SourceConsumerServer}, {l.ts, SourceTenantServer}, {l.in, SourceInstance}} {
+		if b := boolOf(c.v, false); b != nil {
+			external, extSrc = *b, c.src
+			break
+		}
+	}
+	for _, c := range []struct {
+		v   *Values
+		src Source
+	}{{l.ct, SourceConsumerTenant}, {l.tt, SourceTenantTenant}} {
+		if b := boolOf(c.v, false); b != nil && !*b && external {
+			external, extSrc = false, c.src
+		}
+	}
+	unmSrc = SourceSettings
+	for _, c := range []struct {
+		v   *Values
+		src Source
+	}{{l.cs, SourceConsumerServer}, {l.ts, SourceTenantServer}, {l.in, SourceInstance}} {
+		if b := boolOf(c.v, true); b != nil {
+			unmetered, unmSrc = *b, c.src
+			break
+		}
+	}
+	return external, external && unmetered, extSrc, unmSrc
+}
+
 // Resolve is the effective limits of consumer consumerID of tenant tenantID
-// for op under the settings floor d (package comment).
-//
-// RC-D S1 stub: the rows are not consulted — every consumer gets the
-// settings floor, the behaviour before W06-15.
+// for op under the settings floor d (package comment). Without rows it is
+// the settings floor — the behaviour before W06-15.
 func (s *Snapshot) Resolve(consumerID, tenantID string, op keyquota.Op, d Defaults) Effective {
-	_, _, _ = consumerID, tenantID, op
-	own := keyquota.Budget{DailyTokens: d.DailyTokens, MonthlyTokens: d.MonthlyTokens, DailyRequests: d.DailyRequests,
-		MonthlyCostUSD: d.MonthlyCostUSD}
-	return Effective{RPM: d.RPM, TPM: d.TPM, Concurrency: d.Concurrency,
-		Consumer: own, Tenant: own.Scale(d.TenantEnvelopeFactor), Instance: own.Scale(d.InstanceEnvelopeFactor),
-		AllowExternal: d.AllowExternal}
+	l := s.levelsOf(consumerID, tenantID, op)
+	e := Effective{Sources: make(map[string]Source, len(intDims)+3)}
+	vals := make(map[string]int64, len(intDims))
+	for _, dim := range intDims {
+		eff := l.effective(dim, d, true)
+		if dim.name == "max_concurrency" && d.ConcurrencyCap > 0 && (eff.n == 0 || eff.n > d.ConcurrencyCap) {
+			eff.n = d.ConcurrencyCap
+		}
+		vals[dim.name], e.Sources[dim.name] = eff.n, eff.src
+	}
+	cost := l.costEffective(d, true)
+	e.Sources[costSourceField] = cost.src
+	e.RPM, e.TPM, e.Concurrency = vals["rpm"], vals["tpm"], vals["max_concurrency"]
+	e.Consumer = keyquota.Budget{DailyTokens: vals["daily_tokens"], MonthlyTokens: vals["monthly_tokens"],
+		DailyRequests: vals["daily_requests"], MonthlyCostUSD: cost.usd}
+	base := keyquota.Budget{DailyTokens: l.base(intDims[3], d).n, MonthlyTokens: l.base(intDims[4], d).n,
+		DailyRequests: l.base(intDims[5], d).n, MonthlyCostUSD: l.costBase(d).usd}
+	e.Tenant = base.Scale(d.TenantEnvelopeFactor)
+	if l.env != nil {
+		if v := l.env.DailyTokens; v != nil {
+			e.Tenant.DailyTokens = *v
+		}
+		if v := l.env.MonthlyTokens; v != nil {
+			e.Tenant.MonthlyTokens = *v
+		}
+		if v := l.env.DailyRequests; v != nil {
+			e.Tenant.DailyRequests = *v
+		}
+		if v := l.env.MonthlyCostUSD; v != nil {
+			e.Tenant.MonthlyCostUSD = *v
+		}
+	}
+	e.Instance = base.Scale(d.InstanceEnvelopeFactor)
+	var extSrc, unmSrc Source
+	e.AllowExternal, e.AllowUnmetered, extSrc, unmSrc = l.egress(d)
+	e.Sources["allow_external"], e.Sources["allow_unmetered_external"] = extSrc, unmSrc
+	return e
 }
 
 // TierPair are a consumer's stored rows of one op: the server-tier and the
@@ -207,11 +472,52 @@ type TierPair struct {
 // source of C2's handler.UsageLimitTiers (/api/usage/consumers, W06-16). A
 // consumer without rows is absent from the map; tenant, instance and
 // envelope rows never appear.
-//
-// RC-D S1 stub: an empty map.
 func (s *Snapshot) ConsumerTiers(consumerIDs []string) map[string]map[keyquota.Op]TierPair {
-	_ = consumerIDs
-	return map[string]map[keyquota.Op]TierPair{}
+	out := map[string]map[keyquota.Op]TierPair{}
+	if s == nil {
+		return out
+	}
+	for _, c := range consumerIDs {
+		for _, op := range []keyquota.Op{keyquota.OpChat, keyquota.OpEmbed, keyquota.OpRerank} {
+			sv, tv := s.row(SubjectConsumer, c, TierServer, op), s.row(SubjectConsumer, c, TierTenant, op)
+			if sv == nil && tv == nil {
+				continue
+			}
+			if out[c] == nil {
+				out[c] = map[keyquota.Op]TierPair{}
+			}
+			out[c][op] = TierPair{Server: copyValues(sv), Tenant: copyValues(tv)}
+		}
+	}
+	return out
+}
+
+// copyValues is a deep copy (nil stays nil): a snapshot's rows never leak
+// a pointer a caller could write through.
+func copyValues(v *Values) *Values {
+	if v == nil {
+		return nil
+	}
+	out := Values{}
+	for _, dim := range intDims {
+		if p := dim.get(v); p != nil {
+			n := *p
+			*dim.field(&out) = &n
+		}
+	}
+	if v.MonthlyCostUSD != nil {
+		c := *v.MonthlyCostUSD
+		out.MonthlyCostUSD = &c
+	}
+	if v.AllowExternal != nil {
+		b := *v.AllowExternal
+		out.AllowExternal = &b
+	}
+	if v.AllowUnmeteredExternal != nil {
+		b := *v.AllowUnmeteredExternal
+		out.AllowUnmeteredExternal = &b
+	}
+	return &out
 }
 
 // Ceiling is the bound a tenant-tier write of (kind, consumerID|tenantID,
@@ -220,33 +526,112 @@ func (s *Snapshot) ConsumerTiers(consumerIDs []string) map[string]map[keyquota.O
 // row over the instance row over the settings. nil in the result =
 // unbounded (only monthly_tokens and daily_requests with settings 0 and no
 // row). A missing server row means the settings value, never "unbounded"
-// (05 V-06-e).
-//
-// RC-D S1 stub: answers no ceiling at all — callers refuse the write.
+// (05 V-06-e). The permissions carry no ceiling (CheckNarrowing refuses any
+// tenant-tier grant). ErrNoCeiling for the server-tier-only kinds.
 func (s *Snapshot) Ceiling(kind SubjectKind, consumerID, tenantID string, op keyquota.Op, d Defaults) (Values, error) {
-	_, _, _, _, _ = kind, consumerID, tenantID, op, d
-	return Values{}, ErrNotImplemented
+	var l levels
+	switch kind {
+	case SubjectConsumer:
+		l = s.levelsOf(consumerID, tenantID, op)
+	case SubjectTenant:
+		// The tenant level: its server row over the base. Its own
+		// tenant-tier row is the one being written.
+		l = s.levelsOf("", tenantID, op)
+		l.tt = nil
+	default:
+		return Values{}, ErrNoCeiling
+	}
+	var out Values
+	for _, dim := range intDims {
+		eff := l.effective(dim, d, false)
+		if dim.name == "max_concurrency" && d.ConcurrencyCap > 0 && (eff.n == 0 || eff.n > d.ConcurrencyCap) {
+			eff.n = d.ConcurrencyCap
+		}
+		if eff.n > 0 {
+			n := eff.n
+			*dim.field(&out) = &n
+		}
+	}
+	if c := l.costEffective(d, false); c.usd > 0 {
+		usd := c.usd
+		out.MonthlyCostUSD = &usd
+	}
+	return out, nil
 }
 
 // CheckNarrowing refuses a tenant-tier value above its ceiling (CodeWidens,
 // Field = the dimension) and a tenant-tier permission (allow_external true,
-// any allow_unmetered_external: CodeInvalid). nil = the write narrows.
-//
-// RC-D S1 stub: refuses every write.
+// any allow_unmetered_external: CodeWidens). nil = the write narrows. The
+// dimensions are checked in the order of the row, the first one refuses.
 func CheckNarrowing(v, ceiling Values) *FieldError {
-	_, _ = v, ceiling
-	return &FieldError{Field: "", Code: CodeInvalid, Msg: ErrNotImplemented.Error()}
+	for _, dim := range intDims {
+		got, ceil := dim.get(&v), dim.get(&ceiling)
+		if got != nil && ceil != nil && *got > *ceil {
+			return &FieldError{Field: dim.name, Code: CodeWidens,
+				Msg: fmt.Sprintf("%d is above %d, the limit of the levels above", *got, *ceil)}
+		}
+	}
+	if v.MonthlyCostUSD != nil && ceiling.MonthlyCostUSD != nil && *v.MonthlyCostUSD > *ceiling.MonthlyCostUSD {
+		return &FieldError{Field: costSourceField, Code: CodeWidens,
+			Msg: fmt.Sprintf("%g is above %g, the limit of the levels above", *v.MonthlyCostUSD, *ceiling.MonthlyCostUSD)}
+	}
+	if v.AllowExternal != nil && *v.AllowExternal {
+		return &FieldError{Field: "allow_external", Code: CodeWidens, Msg: "a tenant-tier row can only withdraw the permission (false)"}
+	}
+	if v.AllowUnmeteredExternal != nil {
+		return &FieldError{Field: "allow_unmetered_external", Code: CodeWidens, Msg: "only a server-admin sets the unmetered permission"}
+	}
+	return nil
+}
+
+// intMax is the column bound of an integer dimension.
+func intMax(name string) int64 {
+	switch name {
+	case "max_concurrency":
+		return maxInt2
+	case "daily_tokens", "monthly_tokens":
+		return maxSafeBigint
+	}
+	return maxInt4
 }
 
 // ValidateValues checks a row's shape for (kind, tier) independent of other
-// rows: every numeric value > 0 (no 0 sentinel), the envelope carries no
-// rate, concurrency or unmetered permission, an instance or envelope row is
-// server tier, max_concurrency at most d.ConcurrencyCap while that is set.
-//
-// RC-D S1 stub: refuses every row.
+// rows: every numeric value > 0 and within its column (no 0 sentinel), the
+// envelope carries no rate, concurrency or unmetered permission, an
+// instance or envelope row is server tier, max_concurrency at most
+// d.ConcurrencyCap while that is set. nil = valid.
 func ValidateValues(kind SubjectKind, tier Tier, v Values, d Defaults) *FieldError {
-	_, _, _, _ = kind, tier, v, d
-	return &FieldError{Field: "", Code: CodeInvalid, Msg: ErrNotImplemented.Error()}
+	if tier != TierServer && (kind == SubjectInstance || kind == SubjectTenantEnvelope) {
+		return &FieldError{Field: "subject_kind", Code: CodeInvalid, Msg: string(kind) + " rows are server-admin only"}
+	}
+	for _, dim := range intDims {
+		p := dim.get(&v)
+		if p == nil {
+			continue
+		}
+		if *p <= 0 {
+			return &FieldError{Field: dim.name, Code: CodeInvalid, Msg: "must be > 0 or null (null inherits; there is no 0 sentinel)"}
+		}
+		if *p > intMax(dim.name) {
+			return &FieldError{Field: dim.name, Code: CodeInvalid, Msg: fmt.Sprintf("must be at most %d", intMax(dim.name))}
+		}
+		if kind == SubjectTenantEnvelope && (dim.name == "rpm" || dim.name == "tpm" || dim.name == "max_concurrency") {
+			return &FieldError{Field: dim.name, Code: CodeInvalid, Msg: "a tenant envelope carries day/month budgets only"}
+		}
+		if dim.name == "max_concurrency" && d.ConcurrencyCap > 0 && *p > d.ConcurrencyCap {
+			return &FieldError{Field: dim.name, Code: CodeInvalid,
+				Msg: fmt.Sprintf("must be at most %d (dispatch.external_queue_per_consumer)", d.ConcurrencyCap)}
+		}
+	}
+	if c := v.MonthlyCostUSD; c != nil {
+		if math.IsNaN(*c) || math.IsInf(*c, 0) || *c <= 0 || *c > maxCostUSD {
+			return &FieldError{Field: costSourceField, Code: CodeInvalid, Msg: "must be > 0 and below 1000000, or null (there is no 0 sentinel)"}
+		}
+	}
+	if kind == SubjectTenantEnvelope && v.AllowUnmeteredExternal != nil {
+		return &FieldError{Field: "allow_unmetered_external", Code: CodeInvalid, Msg: "a tenant envelope carries no unmetered permission"}
+	}
+	return nil
 }
 
 // Loader reads every row of context_gateway_limits.
@@ -259,6 +644,13 @@ type Loader func(ctx context.Context) ([]Row, error)
 type Registry struct {
 	load Loader
 	snap atomic.Pointer[Snapshot]
+	// loadMu serialises Load: each load reads the table after the previous
+	// one published, so a slower older read never overwrites a newer
+	// snapshot.
+	loadMu sync.Mutex
+	// flightMu guards running/pending of Trigger's single flight.
+	flightMu         sync.Mutex
+	running, pending bool
 }
 
 // NewRegistry builds a registry over load with an empty snapshot.
@@ -276,18 +668,52 @@ func (r *Registry) Snapshot() *Snapshot {
 	return r.snap.Load()
 }
 
-// Load reads all rows and publishes them as the new snapshot.
-//
-// RC-D S1 stub: loads nothing.
+// Load reads all rows and publishes them as the new snapshot. A failed read
+// keeps the previous snapshot and returns the error.
 func (r *Registry) Load(ctx context.Context) error {
-	_ = ctx
-	return ErrNotImplemented
+	if r == nil || r.load == nil {
+		return errors.New("gatewaylimits: registry without a loader")
+	}
+	r.loadMu.Lock()
+	defer r.loadMu.Unlock()
+	rows, err := r.load(ctx)
+	if err != nil {
+		return err
+	}
+	r.snap.Store(NewSnapshot(rows))
+	return nil
 }
 
-// Trigger schedules a Load without blocking the caller (the NOTIFY loop);
-// a burst of triggers is coalesced into at most two loads.
-//
-// RC-D S1 stub: does nothing.
+// Trigger schedules a Load without blocking the caller (the NOTIFY loop):
+// single flight with a pending bit like modelalias.Registry.Trigger — a
+// burst of triggers costs the running load plus one. A failed load is
+// logged and keeps the previous snapshot; ctx bounds the goroutine.
 func (r *Registry) Trigger(ctx context.Context) {
-	_ = ctx
+	if r == nil {
+		return
+	}
+	r.flightMu.Lock()
+	defer r.flightMu.Unlock()
+	if r.running {
+		r.pending = true
+		return
+	}
+	r.running = true
+	go r.drain(ctx)
+}
+
+func (r *Registry) drain(ctx context.Context) {
+	for {
+		if err := r.Load(ctx); err != nil {
+			slog.Warn("gatewaylimits: registry reload failed — previous snapshot stays active", "error", err)
+		}
+		r.flightMu.Lock()
+		if !r.pending || ctx.Err() != nil {
+			r.running, r.pending = false, false
+			r.flightMu.Unlock()
+			return
+		}
+		r.pending = false
+		r.flightMu.Unlock()
+	}
 }
