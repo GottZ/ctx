@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime/debug"
+	"slices"
 	"strings"
 	"testing"
 
@@ -41,9 +43,57 @@ func deepestBody(size int, model, role string) string {
 	return pre + strings.Repeat("a", size-len(pre)-len(suf)) + suf
 }
 
+// deepestRaceCapMax is the largest cap the two deepest-request route pins
+// run under the race detector (FOLGE-P hardening 8, Delta-Review 6 L-4):
+// their 8 MiB rows took 637 s and 245 s of `go test -short -race` (load
+// 21–35; here, at load 11–13, the two tests 370 s and 161 s with them, 45 s
+// and 20 s without them), and the CI's unit job gives each package 5
+// minutes (-race -timeout=5m). Each pin's statement is the same at every
+// cap; the 8 MiB rows run in every build without -race — the plain
+// `go test` and the CI's integration job
+// (TestDeepestCapsWithoutRaceIncludeTheLargest pins it).
+const deepestRaceCapMax = 1 << 20
+
+// deepestCaps are the caps of the deepest-request route pins: all of them,
+// under the race detector those up to deepestRaceCapMax.
+func deepestCaps(caps ...int64) []int64 {
+	if !raceEnabled {
+		return caps
+	}
+	return slices.DeleteFunc(slices.Clone(caps), func(c int64) bool { return c > deepestRaceCapMax })
+}
+
+// TestDeepestCapsWithoutRaceIncludeTheLargest pins the race guard of the
+// deepest-request route pins: raceEnabled tells the truth (the build's
+// -race setting), and only a race build leaves out the caps above
+// deepestRaceCapMax — a guard active in every build would leave the 8 MiB
+// rows pinned nowhere.
+func TestDeepestCapsWithoutRaceIncludeTheLargest(t *testing.T) {
+	race := false
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			if s.Key == "-race" {
+				race = s.Value == "true"
+			}
+		}
+	}
+	if race != raceEnabled {
+		t.Fatalf("raceEnabled is %v, the build's -race setting says %v", raceEnabled, race)
+	}
+	all := []int64{32 << 10, 64 << 10, 128 << 10, 1 << 20, 8 << 20}
+	got := deepestCaps(all...)
+	want := all
+	if raceEnabled {
+		want = all[:4]
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("race build %v: the deepest-request pins run the caps %v, want %v", raceEnabled, got, want)
+	}
+}
+
 func TestDeepestRequestAtTheCapFitsTheFloor(t *testing.T) {
 	const resp = 4 << 20
-	for _, maxRequest := range []int64{32 << 10, 64 << 10, 128 << 10, 1 << 20, 8 << 20} {
+	for _, maxRequest := range deepestCaps(32<<10, 64<<10, 128<<10, 1<<20, 8<<20) {
 		t.Run(fmt.Sprintf("cap=%d", maxRequest), func(t *testing.T) {
 			u := newUpstream(t, answerSGLang)
 			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
@@ -76,7 +126,7 @@ func TestDeepestRequestAtTheCapFitsTheFloor(t *testing.T) {
 // floor plus that frame.
 func TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame(t *testing.T) {
 	const resp = 4 << 20
-	for _, maxRequest := range []int64{32 << 10, 128 << 10, 1 << 20, 8 << 20} {
+	for _, maxRequest := range deepestCaps(32<<10, 128<<10, 1<<20, 8<<20) {
 		for _, pad := range []int{0, 200} {
 			t.Run(fmt.Sprintf("cap=%d/model_pad=%d", maxRequest, pad), func(t *testing.T) {
 				u := newUpstream(t, answerSGLang)
