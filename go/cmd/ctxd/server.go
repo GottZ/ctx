@@ -490,6 +490,11 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// before the SPA fallback; each group's own catch-alls keep its prefix out
 	// of it. The route seam replaces each group's table alike.
 	gateway := newModelGateway(pool, cfgStore)
+	// W01-8: the door's in-flight registry — the revoke actions end a dead
+	// key's running requests through it and report how many
+	// (cancelled_inflight), the NOTIFY listener (migration 165) feeds it.
+	manageH.SetInflight(gateway.door.Inflight())
+	scheduler.SetModelAccessSink(gateway.door.Inflight())
 	deps := gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter)
 	v1, v2 := v1Routes(deps), v2Routes(deps)
 	if wrapRoutes != nil {

@@ -659,15 +659,17 @@ func TestStreamEveryExitFreesTheSlotOnce(t *testing.T) {
 		r5Check(t, "15 client gone after three frames", m, rig, srv, "settle", r5HoldOn(u))
 	})
 
-	t.Run("15 watcher: grant withdrawn", func(t *testing.T) {
-		t.Cleanup(oai.SetReauthEvery(100 * time.Millisecond))
+	// W01-8 (K22): the watcher reads a withdrawn grant only when the alias
+	// registry moved during the stream — the reload below moves the
+	// generation and keeps the alias, so the next tick reads the grant.
+	t.Run("15 watcher: grant withdrawn, alias registry moved", func(t *testing.T) {
+		t.Cleanup(oai.SetWatchEvery(100 * time.Millisecond))
 		hold := make(chan struct{})
 		defer close(hold)
-		f := &reauthFake{}
 		u := newUpstream(t, "")
 		u.setRespond(sseRespond([]sseStep{{data: sglangChunk("hello", "")}, {hold: hold}}, nil, nil))
 		m := r5Meter()
-		rig := newChatRig(t, one(u), 4, 1, withStreamSettings, withReauth(f), withDeps(func(d *oai.Deps) { d.Limiter = m }))
+		rig := newChatRig(t, one(u), 4, 1, withStreamSettings, withDeps(func(d *oai.Deps) { d.Limiter = m }))
 		ca := urgentApp()
 		ca.AllModels = false
 		rig.ca.Store(ca)
@@ -678,6 +680,7 @@ func TestStreamEveryExitFreesTheSlotOnce(t *testing.T) {
 			t.Fatal("no frame")
 		}
 		rig.setGrant(idChat, false)
+		rig.reg.reload(t, chatAliases()) // the generation moves, the alias stays
 		e, ok := nextData(each, 2*time.Second)
 		_ = ls.Close()
 		t.Logf("R5 15w-grant: frame %v %q", ok, r5Code(e.data))
@@ -685,32 +688,35 @@ func TestStreamEveryExitFreesTheSlotOnce(t *testing.T) {
 			t.Errorf("frame %q, want model_not_found", e.data)
 		}
 		rig.setGrant(idChat, true)
-		r5Check(t, "15 watcher: grant withdrawn", m, rig, srv, "settle", r5HoldOn(u))
+		r5Check(t, "15 watcher: grant withdrawn, alias registry moved", m, rig, srv, "settle", r5HoldOn(u))
 	})
 
-	t.Run("15 watcher: key revoked", func(t *testing.T) {
-		t.Cleanup(oai.SetReauthEvery(100 * time.Millisecond))
+	// W01-8 exit 22: the door's in-flight registry ends the request context
+	// with auth.ErrCredentialRevoked (revoker stands in for it) — after the
+	// 200 the error frame invalid_api_key, the reservation settled once.
+	t.Run("22 registry: key revoked after the commit", func(t *testing.T) {
 		hold := make(chan struct{})
 		defer close(hold)
-		f := &reauthFake{}
-		f.set(reauthAnswer{ok: true}, reauthAnswer{ok: false})
+		rv := newRevoker()
 		u := newUpstream(t, "")
 		u.setRespond(sseRespond([]sseStep{{data: sglangChunk("hello", "")}, {hold: hold}}, nil, nil))
 		m := r5Meter()
-		rig := newChatRig(t, one(u), 4, 1, withStreamSettings, withReauth(f), withDeps(func(d *oai.Deps) { d.Limiter = m }))
-		srv := serveHTTP(t, rig.router)
+		rig := newChatRig(t, one(u), 4, 1, withStreamSettings, withDeps(func(d *oai.Deps) { d.Limiter = m }))
+		srv := serveHTTP(t, rv.wrap(rig.router))
 		ls, each := openAndRead(t, context.Background(), srv, streamBody("chat"))
 		if _, ok := nextData(each, 5*time.Second); !ok {
 			t.Fatal("no frame")
 		}
+		if n := rv.revoke(); n != 1 {
+			t.Fatalf("revoked %d running requests, want 1", n)
+		}
 		e, ok := nextData(each, 2*time.Second)
 		_ = ls.Close()
-		t.Logf("R5 15w-revoke: frame %v %q", ok, r5Code(e.data))
+		t.Logf("R5 22-revoke: frame %v %q", ok, r5Code(e.data))
 		if !ok || r5Code(e.data) != oai.CodeInvalidAPIKey {
 			t.Errorf("frame %q, want invalid_api_key", e.data)
 		}
-		f.set(reauthAnswer{ok: true})
-		r5Check(t, "15 watcher: key revoked", m, rig, srv, "settle", r5HoldOn(u))
+		r5Check(t, "22 registry: key revoked after the commit", m, rig, srv, "settle", r5HoldOn(u))
 	})
 
 	t.Run("15 shutdown after the commit", func(t *testing.T) {

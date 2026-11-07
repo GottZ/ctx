@@ -134,6 +134,11 @@ type Scheduler struct {
 	// alias entity branch is inert).
 	modelAliases *modelalias.Registry
 
+	// modelAccess is the receiver of ctx_model_access_write (W01-8): the
+	// model-key door's in-flight registry, installed after Run
+	// (SetModelAccessSink) and read per notification; nil = inert.
+	modelAccess atomic.Pointer[ModelAccessSink]
+
 	// dispatcher is the process-wide admission layer (Vorhaben E) and, since
 	// A5-W0 (MW15), the SOLE source of the interactive-demand signal the
 	// signal-driven arms defer on: the WithScheduler mounts inject the

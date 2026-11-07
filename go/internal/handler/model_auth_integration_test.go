@@ -431,61 +431,6 @@ func TestModelAuthSuccessAndRevoke_Integration(t *testing.T) {
 	}
 }
 
-// ReauthConsumer (K22): same check, same semaphore, original address and
-// transport. Valid ⇒ the consumer as the door reads it now (a changed
-// all_models comes back changed, Fremd-Review 2 M-1 of W02-08); revoked ⇒
-// nil; database error ⇒ error.
-func TestReauthConsumer_Integration(t *testing.T) {
-	e := madSetup(t)
-	ctx := context.Background()
-	_, k, key := e.consumer(t, store.ModelConsumerSpec{AllowedCIDRs: []string{"10.0.0.0/8"}})
-	d, h, rec := e.door(t, "")
-	if r := madDo(h, madReq{ip: "10.7.7.7", bearer: key.Plaintext()}); r.Code != http.StatusOK {
-		t.Fatalf("first request: %d", r.Code)
-	}
-	reqCtx, ca := rec.ctx, rec.ca
-	got, err := ReauthConsumer(reqCtx, ca)
-	if err != nil || got == nil || got.ModelKeyID != ca.ModelKeyID || got.AllModels != ca.AllModels {
-		t.Fatalf("live key: %+v err=%v, want the consumer back (the allowlist needs the original address)", got, err)
-	}
-	if _, err := e.seed.Exec(ctx, `UPDATE context_model_consumers SET all_models = NOT all_models WHERE id = $1::uuid`, ca.ConsumerID); err != nil {
-		t.Fatalf("flip all_models: %v", err)
-	}
-	if got, err := ReauthConsumer(reqCtx, ca); err != nil || got == nil || got.AllModels == ca.AllModels {
-		t.Fatalf("all_models flipped: %+v err=%v, want the consumer as it reads now (all_models %v)", got, err, !ca.AllModels)
-	}
-	if _, err := ReauthConsumer(ctx, ca); err == nil {
-		t.Fatal("a context without the door: no error")
-	}
-
-	// Same semaphore: with its only slot held, the re-check waits out the
-	// deadline and reports the door unavailable.
-	e.settings.auth(func(a *oai.AuthSettings) { a.DBConcurrency = 1 })
-	release, err := d.sem.acquire(ctx, 1)
-	if err != nil {
-		t.Fatalf("hold the slot: %v", err)
-	}
-	t0 := time.Now()
-	_, err = ReauthConsumer(reqCtx, ca)
-	waited := time.Since(t0)
-	release()
-	t.Logf("re-check with the slot held: err=%v after %v", err, waited.Round(time.Millisecond))
-	if err == nil || waited < modelAuthDBDeadline/2 {
-		t.Fatalf("re-check did not wait on the door's semaphore: err=%v waited=%v", err, waited)
-	}
-
-	if err := store.RevokeKey(ctx, e.seed, k.ID, store.ModelAccess{ServerAdmin: true}, e.stamp); err != nil {
-		t.Fatalf("revoke: %v", err)
-	}
-	if got, err := ReauthConsumer(reqCtx, ca); err != nil || got != nil {
-		t.Fatalf("revoked key: %+v err=%v, want nil", got, err)
-	}
-	e.pool.Close()
-	if got, err := ReauthConsumer(reqCtx, ca); err == nil || got != nil {
-		t.Fatalf("closed pool: %+v err=%v, want an error", got, err)
-	}
-}
-
 // Stage 7 — semaphore deadline, exhausted pool, database error: 503
 // auth_unavailable, x-should-retry false, never 500.
 func TestModelAuthUnavailable_Integration(t *testing.T) {

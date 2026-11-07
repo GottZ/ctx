@@ -152,14 +152,17 @@ func (g *modelGateway) group(ingress *fedhop.Ingress, maxDepth func() int, route
 	}
 }
 
-// run drives the gateway's two background loops until ctx ends — the access
-// log's rejection window and the batched last_used_at flush — and returns
-// once both have made their final flush (the usage flush is bounded by
-// store.ModelKeyUsageFinalFlushTimeout).
+// run drives the gateway's three background loops until ctx ends — the
+// access log's rejection window, the batched last_used_at flush and the
+// in-flight registry's worker (W01-8: the liveness checks a NOTIFY or a
+// listener reconnect asks for, and the periodic sweep) — and returns once
+// the first two have made their final flush (the usage flush is bounded by
+// store.ModelKeyUsageFinalFlushTimeout) and the worker has stopped.
 func (g *modelGateway) run(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Go(func() { g.access.Run(ctx) })
 	wg.Go(func() { g.usage.Run(ctx) })
+	wg.Go(func() { g.door.Inflight().Run(ctx) })
 	wg.Wait()
 }
 
@@ -200,9 +203,9 @@ func startModelGateway(g *modelGateway) func() {
 // cannot import internal/federation, which imports it), the tenant overlay
 // of RequiredSensitivity (K30), the llmlog writer, the dispatcher's wait
 // budget and Retry-After steps, the planner (A03-W8), the lifecycle context
-// (D7), the model-key re-check of running requests (W02-08, D6: the door's
-// own handler.ReauthConsumer, K22 — W01-8's revocation registry replaces it)
-// and the limiter over the process's meter (W06-10, meterLimiter). A nil
+// (D7) and the limiter over the process's meter (W06-10, meterLimiter). A
+// key that stops authenticating ends its running requests through the
+// door's in-flight registry (W01-8, K22), not through a route dependency. A nil
 // meter leaves the limiter nil, and the chat route then answers 503
 // service_unavailable (L11: never served without it).
 func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config.Store, aliases *modelalias.Registry,
@@ -229,7 +232,6 @@ func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config
 			return cfgStore.Snapshot().Dispatch.ExternalMaxWait //nolint:forbidigo // MT 06 BLIND: dispatch.external_max_wait is global-only (one dispatcher per process); the write deadline at entry covers the wait budget of every consumer alike.
 		},
 		Lifecycle: lifecycle,
-		Reauth:    handler.ReauthConsumer,
 	}
 	if quota != nil {
 		d.Quota = quota

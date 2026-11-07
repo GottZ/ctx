@@ -42,8 +42,11 @@ var ErrModelGrantAliasGone = errors.New("store: model grant: the model alias no 
 // ErrModelGrantAliasGone.
 const modelGrantAliasFK = "fk_model_grants_alias"
 
-// canonicalUUID parses s; ok=false names no row.
-func canonicalUUID(s string) (string, bool) {
+// CanonicalUUID parses s and writes it the way PostgreSQL prints a uuid
+// (lower case, 8-4-4-4-12) — the spelling of every id the database hands
+// back, so of the ids the model-key door's in-flight registry is keyed by.
+// ok=false names no row.
+func CanonicalUUID(s string) (string, bool) {
 	u, err := uuid.Parse(s)
 	if err != nil {
 		return "", false
@@ -58,7 +61,7 @@ func CanonicalAliasIDs(ids []string) ([]string, error) {
 	seen := make(map[string]bool, len(ids))
 	out := make([]string, 0, len(ids))
 	for _, s := range ids {
-		id, ok := canonicalUUID(s)
+		id, ok := CanonicalUUID(s)
 		if !ok {
 			return nil, fmt.Errorf("store: model grant: %q is not a model alias id", s)
 		}
@@ -114,7 +117,7 @@ func SetConsumerGrants(ctx context.Context, tx pgx.Tx, consumerID string, aliasI
 // range of the primary key. An unknown or malformed consumer has none. The
 // result is never nil.
 func ConsumerGrantIDs(ctx context.Context, q pgxdb.Querier, consumerID string) ([]string, error) {
-	id, ok := canonicalUUID(consumerID)
+	id, ok := CanonicalUUID(consumerID)
 	if !ok {
 		return []string{}, nil
 	}
@@ -137,8 +140,8 @@ func ConsumerGrantIDs(ctx context.Context, q pgxdb.Querier, consumerID string) (
 // statement, a probe of the primary key — the per-request check of /v1 next
 // to all_models (design/01 §3.8). Malformed ids are not granted.
 func ConsumerGrantsAlias(ctx context.Context, q pgxdb.Rower, consumerID, aliasID string) (bool, error) {
-	c, okC := canonicalUUID(consumerID)
-	a, okA := canonicalUUID(aliasID)
+	c, okC := CanonicalUUID(consumerID)
+	a, okA := CanonicalUUID(aliasID)
 	if !okC || !okA {
 		return false, nil
 	}
@@ -156,7 +159,7 @@ func ConsumerGrantsAlias(ctx context.Context, q pgxdb.Rower, consumerID, aliasID
 // (design/05 V-02-b). all_models is not a grant: a wildcard consumer without
 // a grant row is not counted, one with a grant row is. A malformed id counts 0.
 func CountActiveExplicitGrants(ctx context.Context, q pgxdb.Rower, aliasID string) (int, error) {
-	id, ok := canonicalUUID(aliasID)
+	id, ok := CanonicalUUID(aliasID)
 	if !ok {
 		return 0, nil
 	}

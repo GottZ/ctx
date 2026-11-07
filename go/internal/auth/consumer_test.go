@@ -6,18 +6,19 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
 // TestConsumerAuthNeverPrintsCredential pins the secret freedom of
-// ConsumerAuth (design/01 §4.4, B15): the hash ReauthenticateModelKey needs
-// rides in an unexported closure, so fmt prints an address instead of the
-// hash under every verb — also %+v, %#v and the bad-verb path (%s, %d),
-// which format unexported fields by reflection and dereference a pointer to
-// a struct there — encoding/json skips it, and slog (text and JSON) records
-// no hash.
+// ConsumerAuth (design/01 §4.4, B15): it carries no credential — since
+// W01-8 not even the hash a re-check needed (the periodic re-check is gone,
+// the in-flight registry ends a dead key's requests) — so no formatter can
+// print one: every field is exported and none is a function, a pointer to
+// hidden state or a byte slice; fmt under every verb, encoding/json and slog
+// (text and JSON) render the exported identity fields only.
 func TestConsumerAuthNeverPrintsCredential(t *testing.T) {
 	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	exp := time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -26,7 +27,12 @@ func TestConsumerAuthNeverPrintsCredential(t *testing.T) {
 		TenantID: "33333333-3333-3333-3333-333333333333", TenantScope: "work", Kind: KindCtxPeer,
 		AllModels: true, PromptSensitivity: "internal", FairWeight: 7, KeyExpiresAt: &exp, IsValid: true,
 		AdmissionLane: "urgent", PeerInstanceID: "44444444-4444-4444-4444-444444444444",
-		cred: credentialOf(hash, netip.MustParseAddr("10.1.2.3"), true),
+	}
+	for i, typ := 0, reflect.TypeOf(*ca); i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if !f.IsExported() || f.Type.Kind() == reflect.Func || f.Type.Kind() == reflect.Slice {
+			t.Errorf("ConsumerAuth.%s (%s): a hidden or opaque field could carry a credential", f.Name, f.Type)
+		}
 	}
 	var outs []string
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d"} {

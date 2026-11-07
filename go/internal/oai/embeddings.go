@@ -1289,6 +1289,13 @@ func (c *embedCall) verdict() (ended bool, code string) {
 	case errors.Is(cause, errShutdown):
 		c.refuse(CodeInternalError, shutdownMessage, true)
 		return true, CodeInternalError
+	case errors.Is(cause, auth.ErrCredentialRevoked):
+		// The door's in-flight registry ended the request: its key stopped
+		// authenticating (W01-8). Before the client check — the request's
+		// context is the one the registry canceled.
+		c.rec.Reason = CodeInvalidAPIKey
+		WriteInvalidAPIKey(c.w)
+		return true, CodeInvalidAPIKey
 	case c.client.Err() != nil:
 		return true, "" // the client is gone: nothing reaches it
 	case errors.Is(cause, errAnswerOverloaded):
