@@ -1,7 +1,13 @@
+//go:build !race
+
 package embed
 
 // The measurement pin of WireCopyBuffer (FOLGE-E hardening 1): what a wire
-// call allocates for the transport's copy of its body.
+// call allocates for the transport's copy of its body — outside -race, as
+// the route's measurement pins (embed_wire_call_reserve_test.go): the race
+// detector drops a share of sync.Pool's puts, so a one-byte call allocates
+// more and the difference measures 22-24 KB instead of the production
+// build's 32 KiB; the term books the production build.
 
 import (
 	"context"
