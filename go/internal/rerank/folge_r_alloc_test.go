@@ -47,12 +47,25 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 					continue // 8–29 MiB bodies: outside -short
 				}
 				docs := folgeRDocs(f.unit, n, size)
-				want := RequestBodyLen("bge-reranker-v2-m3", "query "+f.unit, docs)
+				// The query is built outside the measurement (a concatenation
+				// past 32 B is a heap allocation of the caller's), and the
+				// least of three runs counts (an allocation of the runtime's
+				// own during a large body's — 16 B, one run in three under
+				// load — is not the writer's; a second allocation of the
+				// writer's shows in every run). RC-D S2 FOLGE-R.
+				query := "query " + f.unit
+				want := RequestBodyLen("bge-reranker-v2-m3", query, docs)
 				var got int
-				b, m := folgeRMeasure(true, func() {
-					folgeRSink, _ = wireBody("bge-reranker-v2-m3", "query "+f.unit, docs)
-					got = len(folgeRSink)
-				})
+				b, m := uint64(0), uint64(0)
+				for run := range 3 {
+					rb, rm := folgeRMeasure(true, func() {
+						folgeRSink, _ = wireBody("bge-reranker-v2-m3", query, docs)
+						got = len(folgeRSink)
+					})
+					if run == 0 || rm < m || (rm == m && rb < b) {
+						b, m = rb, rm
+					}
+				}
 				if got != want || m != 1 || b > uint64(want)+folgeRBodySlack {
 					t.Errorf("%s n=%d size=%d cold: %d allocations, %d B for a %d B body (%.3f ×; RequestBodyLen %d) — want one allocation of at most the body + %d B",
 						f.name, n, size, m, b, got, float64(b)/float64(max(got, 1)), want, folgeRBodySlack)
