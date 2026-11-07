@@ -99,15 +99,18 @@ func retryPerBlock(t *testing.T, inputs []string) (median float64, passes []floa
 // block is dropped once and retried, allocates per block (median of three
 // passes) at most
 // oai.EmbedWireRetryBytes more than the same request answered at once, and
-// more than one 4-KiB step below it (the copy of a three-byte block is a
-// few bytes); a request of 128 blocks past the transport's copy buffer
+// more than two 4-KiB steps below it (the copy of a three-byte block is a
+// few bytes; the connection state differs by environment — 27 783 … 29 039 B
+// on the build host, 26 433 B on the CI runner, run 42348607681 — so one
+// step would make the pin red on a runner that allocates less, not on a
+// term that books too much); a request of 128 blocks past the transport's copy buffer
 // allocates per block at most embed.WireCopyBuffer more than that — the
 // second copy the route books beside the retry's term.
 func TestEmbedWireRetryReserveIsTheMeasuredOne(t *testing.T) {
 	small, sp := retryPerBlock(t, repeatInputs("abc", 256))
 	t.Logf("FOLGEE wire retry: %.0f B per retried block of three bytes (passes %.0f), booked %d", small, sp, oai.EmbedWireRetryBytes)
-	if small > float64(oai.EmbedWireRetryBytes) || small <= float64(oai.EmbedWireRetryBytes-4<<10) {
-		t.Errorf("a retried call allocates %.0f B, the route books %d B for it (want at most that and more than one 4-KiB step below)", small, oai.EmbedWireRetryBytes)
+	if small > float64(oai.EmbedWireRetryBytes) || small <= float64(oai.EmbedWireRetryBytes-8<<10) {
+		t.Errorf("a retried call allocates %.0f B, the route books %d B for it (want at most that and more than two 4-KiB steps below)", small, oai.EmbedWireRetryBytes)
 	}
 	large, lp := retryPerBlock(t, repeatInputs(strings.Repeat("a", 32<<10), 128))
 	t.Logf("FOLGEE wire retry: %.0f B per retried block of 32 KiB (passes %.0f), booked %d", large, lp, oai.EmbedWireRetryBytes+oai.EmbedWireCopyReserve)
