@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -513,4 +514,69 @@ func waitRelay(rl *streamRelay, cond func() bool) bool {
 		time.Sleep(time.Millisecond)
 	}
 	return false
+}
+
+// TestRelayCloseJoinsTheWriter (Fremd-Review 2 point 7, mutant R13): the
+// route's close() on a path that did not reach wait (a panic of the reader)
+// returns only once the relay's writer ended — the writer is parked through
+// the capAt seam between taking a record and writing it; close() must not
+// return while it is parked, and once it is released close() returns with no
+// goroutine left in the writer's run. Red with close() without the join: it
+// returns at once, the writer still parked.
+func TestRelayCloseJoinsTheWriter(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := newStreamWriter(rec, Settings{}, func(error) {}, func() http.Header { return http.Header{} })
+	ctx, cancel := context.WithCancelCause(context.Background())
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	capAt := func(at time.Time) {
+		if !at.IsZero() {
+			once.Do(func() { close(entered); <-release })
+		}
+		sw.capWrites(at)
+	}
+	rl := newStreamRelay(time.Time{}, make([]byte, 1<<10), sw.frame, ctx.Done(), cancel, drainMeter{rate: 1024, window: time.Second}, capAt)
+	if err := rl.put([]byte(`{"parked":"chunk"}`)); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	if n := relayRuns(); n != 1 {
+		close(release)
+		t.Fatalf("%d goroutines in the relay's run while its writer is parked, want 1 (the count sees it)", n)
+	}
+	c := &chatCall{ctx: ctx, cancel: cancel, relay: rl, sse: sw}
+	closed := make(chan struct{})
+	go func() { c.close(); close(closed) }()
+	select {
+	case <-closed:
+		n := relayRuns()
+		close(release)
+		t.Fatalf("close() returned while the relay's writer is parked (%d goroutines in its run) — no join", n)
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("close() did not return after the writer was released")
+	}
+	if n := relayRuns(); n != 0 {
+		t.Fatalf("%d goroutines in the relay's run after close(), want 0", n)
+	}
+	if strings.Contains(rec.Body.String(), `"parked"`) {
+		t.Fatal("the parked record was written after close()")
+	}
+}
+
+// relayRuns counts the goroutines inside the relay writer's run.
+func relayRuns() int {
+	buf := make([]byte, 1<<22)
+	buf = buf[:runtime.Stack(buf, true)]
+	n := 0
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "oai.(*streamRelay).run(") {
+			n++
+		}
+	}
+	return n
 }

@@ -588,8 +588,9 @@ func TestStreamMeterDeadlineWithAConnectionKeeps(t *testing.T) {
 }
 
 // settlePanicMeter is the rig's endMeter whose reservations panic in Settle —
-// on the handler's goroutine, at the upstream's end, before the relay's drain
-// (A03-W10: a panic of the reader side after the relay started).
+// on the handler's goroutine, in answerStream's book: since hardening 1
+// (Fremd-Review 2 F3b) after the relay's drain, no longer at the upstream's
+// end.
 type settlePanicMeter struct{ *endMeter }
 
 func (m settlePanicMeter) Admit(ctx context.Context, ca *auth.ConsumerAuth, a modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
@@ -603,14 +604,16 @@ func (m settlePanicMeter) Admit(ctx context.Context, ca *auth.ConsumerAuth, a mo
 type settlePanicReservation struct{ oai.LimitReservation }
 
 func (settlePanicReservation) Settle(dispatch.Usage) {
-	panic("A03-W10: the meter panics at the upstream's end")
+	panic("A03-W10: the meter panics at its end")
 }
 
 // TestRelayWriterJoinedOnAReaderPanic (Fremd-Review 1 F2, through the route):
-// the meter panics at the upstream's end while the relay's writer is stuck in
-// a write to a client that does not read — the handler's close() joins the
-// writer before the handler returns: no goroutine is left in the stream
-// writer when ServeHTTP is back, and the panic reaches oai.Recover.
+// the relay's writer is stuck in a write to a client that does not read, the
+// meter panics at its end — since hardening 1 (F3b) the meter ends after the
+// drain, so the writer is cut by client_write_window (500 ms) first; the
+// handler returns with no goroutine left in the stream writer and the panic
+// reaches oai.Recover. The join of a writer that still runs when the reader
+// panics is pinned without the route: TestRelayCloseJoinsTheWriter (R13).
 func TestRelayWriterJoinedOnAReaderPanic(t *testing.T) {
 	sink := captureLog(t)
 	u := newUpstream(t, "")
@@ -646,7 +649,7 @@ func TestRelayWriterJoinedOnAReaderPanic(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the handler did not return")
 	}
-	if !recovered(sink, "the meter panics at the upstream's end") {
+	if !recovered(sink, "the meter panics at its end") {
 		t.Error("oai.Recover logged no recovered panic of the meter")
 	}
 }
