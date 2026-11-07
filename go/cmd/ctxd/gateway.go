@@ -28,6 +28,7 @@ import (
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/usageevents"
 )
 
 // gatewaySettingsGetter is the settings source of the OpenAI-compatible
@@ -508,6 +509,13 @@ func (g *modelGateway) flushRejections() {
 type meterLimiter struct {
 	meter    *keyquota.Meter
 	settings func() oai.Settings
+	// events receives the usage events of the meter's answers (W06-18,
+	// RC-D cluster C2): one soft_limit note per Decision.Warnings entry of
+	// an admission, one hard_limit note per budget refusal
+	// (Reason.Quota()); the usageevents.Recorder dedupes per consumer × op
+	// × dimension × window. nil = no events. RC-D S1: declared, not yet
+	// read.
+	events usageevents.Sink
 }
 
 // meterLimits are the meter limits of op for ca from one settings snapshot s: the
