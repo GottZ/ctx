@@ -19,6 +19,13 @@ import "errors"
 //     (never OR): a foreign or unknown id yields zero rows, no oracle.
 //   - The SQL text is chosen in Go by role; no "$x IS NULL OR …" predicate
 //     (the generic plan of that form cannot use either attribution index).
+//   - Measured in S1 (TestLLMLogConsumerGenericPlan, 20k/40k/200k rows): a
+//     branch written as "= ANY($n) … ORDER BY created_at DESC LIMIT" gets a
+//     generic plan over context_llm_log_created_at_idx, not the attribution
+//     index. Each branch is therefore a per-id top-N probe —
+//     unnest($ids) × LATERAL (… WHERE consumer_id = id AND created_at > floor
+//     ORDER BY created_at DESC LIMIT $n) — the llmusage windowSQL pattern;
+//     UNION ALL of the two branches, outer ORDER BY + LIMIT.
 //   - Every entry carries consumer_id (null for knowledge-key and background
 //     rows). The detail GET /api/llmlog/{id} of a row with consumer_id set
 //     answers a non-server-admin with the uniform 404 (no body link).
