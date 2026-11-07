@@ -663,12 +663,12 @@ func parseDir(t *testing.T, fset *token.FileSet, dir string, keep func(name stri
 // TestOAIWireCallsOnlyInsideWalkChainAttempts: the files of internal/oai —
 // production and tests alike (a test that dials a backend past the walker
 // is the same hole in the harness) — hold exactly one llm.ChatRaw call site
-// (the non-stream chat attempt; W02-08 adds the stream one), one
-// embed.EmbedRaw call site (the block function of the embeddings attempt,
-// W02-09) and one rerank.Score call site (the block function of the rerank
-// attempt, W02-10 — through the same two block calls of the sub-block walk,
-// so blockFunc stays 2), and no other wire call; every one obeys the X13
-// rule.
+// (the non-stream chat attempt, W02-07), one llm.ChatRawStream call site
+// (the stream attempt, W02-08), one embed.EmbedRaw call site (the block
+// function of the embeddings attempt, W02-09) and one rerank.Score call site
+// (the block function of the rerank attempt, W02-10 — through the same two
+// block calls of the sub-block walk, so blockFunc stays 2), and no other
+// wire call; every one obeys the X13 rule.
 func TestOAIWireCallsOnlyInsideWalkChainAttempts(t *testing.T) {
 	fset := token.NewFileSet()
 	files := parseDir(t, fset, ".", func(string) bool { return true })
@@ -676,8 +676,8 @@ func TestOAIWireCallsOnlyInsideWalkChainAttempts(t *testing.T) {
 	for _, f := range findings {
 		t.Errorf("%s: %s", f.pos, f.what)
 	}
-	if want := map[string]int{"llm.ChatRaw": 1, "embed.EmbedRaw": 1, "rerank.Score": 1, "blockFunc": 2}; !maps.Equal(sites, want) {
-		t.Errorf("wire call sites in internal/oai = %v, want %v (the chat attempt W02-07; the embeddings block and the two block calls of the sub-block walk, W02-09; the rerank block, W02-10)", sites, want)
+	if want := map[string]int{"llm.ChatRaw": 1, "llm.ChatRawStream": 1, "embed.EmbedRaw": 1, "rerank.Score": 1, "blockFunc": 2}; !maps.Equal(sites, want) {
+		t.Errorf("wire call sites in internal/oai = %v, want %v (the chat attempts, W02-07 non-stream and W02-08 stream; the embeddings block and the two block calls of the sub-block walk, W02-09; the rerank block, W02-10)", sites, want)
 	}
 }
 

@@ -397,7 +397,7 @@ func TestShutdownDuringTheBodyReadReachesNoPlan(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		rig.router.ServeHTTP(w, req)
-		wantShutdownAnswer(t, "shutdown during the body read", chatAnswer{status: w.Code, header: w.Header(), body: w.Body.Bytes()})
+		wantShutdownAnswer(t, "shutdown during the body read", chatAnswer{status: w.Code, header: w.Result().Header, body: w.Body.Bytes()})
 		rows += len(rig.rows.all())
 		l := rig.limiter
 		if l.settles.Load()+l.aborts.Load()+l.rejects.Load() != l.admits.Load() || l.settles.Load() != 0 {

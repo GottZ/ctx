@@ -107,9 +107,23 @@ func oaiCensusRoute(t *testing.T, ca *countingAdmitter, chain []backends.Backend
 		RetryAfterSteps:   func() []time.Duration { return nil },
 		Planner:           censusPlanner{ca: ca},
 		Limiter:           censusLimiter{},
+		Reauth:            func(_ context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) { return ca, nil },
 	}
 	var budget oai.Budget
 	return oai.InflightBudget(&budget, get)(oai.ChatCompletions(d))
+}
+
+// postCensusStream sends one streamed chat request to h and fails unless
+// it is served to its [DONE] (site 10, W02-08).
+func postCensusStream(t *testing.T, h http.Handler) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"chat","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("the /v1 stream answered %d %q", w.Code, w.Body.String())
+	}
 }
 
 // postCensus sends one chat request to h and fails unless it is served.

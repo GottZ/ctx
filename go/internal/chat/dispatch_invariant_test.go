@@ -387,22 +387,36 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 		t.Fatalf("after the /v1 route failover: acquires=%d wire=%d, want 17/17", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
+	// --- Site 10 through the real /v1 handler (W02-08, G14): the stream
+	// form of oai.ChatCompletions walks with its stream attempt
+	// (ChatRawStream) — one served stream +1/+1, the down primary in front
+	// of it +2/+2 (the failover before the first data frame). A03-W10
+	// takes this over as the shared gate. ---
+	postCensusStream(t, oaiCensusRoute(t, ca, []backends.Backend{invariantBackend(srv.URL, backends.ProtocolOpenAI)}))
+	if ca.count() != 18 || atomic.LoadInt64(&wireHits) != 18 {
+		t.Fatalf("after the /v1 stream: acquires=%d wire=%d, want 18/18", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+	postCensusStream(t, oaiCensusRoute(t, ca, []backends.Backend{downRow, invariantBackend(srv.URL, backends.ProtocolOpenAI)}))
+	if ca.count() != 20 || atomic.LoadInt64(&wireHits) != 20 {
+		t.Fatalf("after the /v1 stream failover: acquires=%d wire=%d, want 20/20", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+
 	// --- Site 11: embed.go EmbedRaw (W02-09, G3) through the real
 	// POST /v1/embeddings — five inputs in the census planner's blocks
 	// [2, 2, 1]: block one under the First lease, blocks two and three each
 	// under its own continuation lease. One lease per sub-block: +3/+3; one
 	// lease over all blocks would leave Σacquire < Σwire. ---
 	postEmbedCensus(t, oaiEmbedCensusRoute(t, ca, []backends.Backend{invariantBackend(srv.URL, backends.ProtocolOpenAI)}), 5)
-	if ca.count() != 20 || atomic.LoadInt64(&wireHits) != 20 {
-		t.Fatalf("after the /v1 embeddings route: acquires=%d wire=%d, want 20/20", ca.count(), atomic.LoadInt64(&wireHits))
+	if ca.count() != 23 || atomic.LoadInt64(&wireHits) != 23 {
+		t.Fatalf("after the /v1 embeddings route: acquires=%d wire=%d, want 23/23", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
 	// --- Site 12: rerank.go Score (W02-10) through the real POST /v1/rerank
 	// — five documents in the census planner's blocks [2, 2, 1], as site 11:
 	// one lease per rerank sub-block, +3/+3. ---
 	postRerankCensus(t, oaiRerankCensusRoute(t, ca, []backends.Backend{invariantBackend(srv.URL, backends.ProtocolOpenAI)}), 5)
-	if ca.count() != 23 || atomic.LoadInt64(&wireHits) != 23 {
-		t.Fatalf("after the /v1 rerank route: acquires=%d wire=%d, want 23/23", ca.count(), atomic.LoadInt64(&wireHits))
+	if ca.count() != 26 || atomic.LoadInt64(&wireHits) != 26 {
+		t.Fatalf("after the /v1 rerank route: acquires=%d wire=%d, want 26/26", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
 	// --- Lease-free without wire contact (the cache-hit clause's structural

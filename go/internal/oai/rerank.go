@@ -572,7 +572,7 @@ func (c *rerankCall) walk(chain []backends.Backend) {
 		c.refuseParam(unsupportedValue("documents", fmt.Sprintf("at most %d documents per request", c.lim.subBatch)))
 		return
 	}
-	stop := c.d.watch(c.ctx, c.cancel, watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen})
+	stop := c.d.watch(c.ctx, c.cancel, newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen))
 	defer stop()
 
 	c.logits = make([]float64, n) // booked with the answer (rerankResultBytes)
@@ -888,7 +888,7 @@ func (c *rerankCall) syncLifecycle() {
 
 // success checks once more before the write (D8) and writes the answer.
 func (c *rerankCall) success(st *rerankState) embedOutcome {
-	t := watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen}
+	t := newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen)
 	switch err := c.d.stillServes(c.ctx, t); {
 	case errors.Is(err, errGatewayOff), errors.Is(err, errModelGone):
 		c.cancel(err)

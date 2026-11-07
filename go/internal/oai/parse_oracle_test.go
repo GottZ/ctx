@@ -5,7 +5,14 @@ package oai
 // differential (chat_parse_differential_test.go): every top-level identifier
 // carries the prefix "base", nothing else changed. The shared vocabulary
 // (paramError and its constructors, policyLimits) is the production one.
-// Not production code; never edit it except to rename.
+// Not production code; never edit it except to rename — and for the one
+// hunk the parse took besides FOLGE-P: W02-08's readCTX (8e00a12e..49289c7b:
+// stream true accepted, stream_options.include_usage read), applied
+// verbatim in the merge of the two waves, so the oracle stays the parse
+// FOLGE-P replaced. W02-08 hardening 4 (F5-1) narrowed that hunk to what
+// root 829a45ec answers without a stream: include_usage is read only when
+// stream is true (stream sorts before stream_options); otherwise
+// stream_options only has to be an object, as on 4839a958.
 
 import (
 	"bytes"
@@ -124,6 +131,7 @@ type baseChatRequest struct {
 	pass         map[string]json.RawMessage
 	messages     json.RawMessage
 	stream       bool
+	includeUsage bool // stream_options.include_usage (W02-08: the usage chunk reaches the client only then)
 	n            int
 	maxTokens    int // the client's max_tokens / max_completion_tokens, 0 = not sent
 	serviceTier  string
@@ -193,8 +201,9 @@ func baseClassOf(k string) baseKeyClass {
 	return baseClassReject
 }
 
-// readCTX reads one CTX key. stream: true and n > 1 are refused here (E4:
-// n > 1 is RC-F; streaming is W02-08) — before any alias is resolved.
+// readCTX reads one CTX key. n > 1 is refused here (E4: RC-F) — before any
+// alias is resolved. stream and stream_options.include_usage are read (W02-08);
+// upstream, a stream always asks for usage (llm.BuildUpstreamBody).
 func (req *baseChatRequest) readCTX(k string, v json.RawMessage) *paramError {
 	if baseIsNull(v) {
 		return nil
@@ -210,10 +219,25 @@ func (req *baseChatRequest) readCTX(k string, v json.RawMessage) *paramError {
 		if err := json.Unmarshal(v, &req.stream); err != nil {
 			return invalidType(k, "a boolean")
 		}
-		if req.stream {
-			return unsupportedValue(k, "streaming is not supported on this endpoint yet")
+	case "stream_options":
+		if !baseHasKind(v, baseKindObject) {
+			return invalidType(k, "an object")
 		}
-	case "stream_options", "reasoning":
+		if !req.stream {
+			break // W02-08 hardening 4 (F5-1): include_usage is read only on a stream
+		}
+		var o struct {
+			IncludeUsage *json.RawMessage `json:"include_usage"`
+		}
+		if err := json.Unmarshal(v, &o); err != nil {
+			return invalidType(k, "an object")
+		}
+		if o.IncludeUsage != nil && !baseIsNull(*o.IncludeUsage) {
+			if err := json.Unmarshal(*o.IncludeUsage, &req.includeUsage); err != nil {
+				return invalidType(k+".include_usage", "a boolean")
+			}
+		}
+	case "reasoning":
 		if !baseHasKind(v, baseKindObject) {
 			return invalidType(k, "an object")
 		}

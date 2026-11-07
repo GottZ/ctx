@@ -783,7 +783,7 @@ func (c *embedCall) walk(chain []backends.Backend) {
 		c.refuseParam(unsupportedValue("input", fmt.Sprintf("at most %d inputs per request", c.lim.subBatch)))
 		return
 	}
-	stop := c.d.watch(c.ctx, c.cancel, watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen})
+	stop := c.d.watch(c.ctx, c.cancel, newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen))
 	defer stop()
 
 	st := embedState{failedBlock: -1}
@@ -1311,7 +1311,7 @@ func (c *embedCall) syncLifecycle() {
 
 // success checks once more before the write (D8) and streams the answer.
 func (c *embedCall) success(st *embedState) embedOutcome {
-	t := watchTarget{ca: c.ca, name: c.req.model, aliasID: c.alias.ID, gen: c.gen}
+	t := newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen)
 	switch err := c.d.stillServes(c.ctx, t); {
 	case errors.Is(err, errGatewayOff), errors.Is(err, errModelGone):
 		c.cancel(err)

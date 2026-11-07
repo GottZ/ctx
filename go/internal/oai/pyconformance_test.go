@@ -49,15 +49,16 @@ const (
 // returns pytest's combined output and its exit error (nil = all passed).
 // Next to the error fake it serves the model fixture (conformanceModels,
 // W02-05) under CTX_MODELS_BASE_URL for test_models.py and the chat fixture
-// (conformanceChat, W02-07) under CTX_CHAT_BASE_URL for test_chat.py — the
-// same in both runs, so the house-format run still fails exactly the error
-// cases. The meter fixture (conformanceMeter, W06-10) is served under
-// CTX_METER_BASE_URL for test_meter_retry.py, the L1 fixture
-// (conformanceConcurrency, W06-11) under CTX_CONCURRENCY_BASE_URL for
-// test_concurrency_retry.py, both fresh per run. The embeddings fixture
-// (conformanceEmbeddings, W02-09) is served under CTX_EMBED_BASE_URL for
-// test_embeddings.py, the rerank fixture (conformanceRerank, W02-10) under
-// CTX_RERANK_BASE_URL for test_rerank.py.
+// (conformanceChat, W02-07) under CTX_CHAT_BASE_URL for test_chat.py and the
+// stream fixture (conformanceChatStream, W02-08) under
+// CTX_CHAT_STREAM_BASE_URL for test_chat_stream.py — the same in both runs,
+// so the house-format run still fails exactly the error cases. The meter
+// fixture (conformanceMeter, W06-10) is served under CTX_METER_BASE_URL for
+// test_meter_retry.py, the L1 fixture (conformanceConcurrency, W06-11) under
+// CTX_CONCURRENCY_BASE_URL for test_concurrency_retry.py, both fresh per run.
+// The embeddings fixture (conformanceEmbeddings, W02-09) is served under
+// CTX_EMBED_BASE_URL for test_embeddings.py, the rerank fixture
+// (conformanceRerank, W02-10) under CTX_RERANK_BASE_URL for test_rerank.py.
 func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Helper()
 	uv, err := exec.LookPath("uv")
@@ -71,6 +72,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	t.Cleanup(chat.Close)
 	meter := httptest.NewServer(conformanceMeter(t))
 	t.Cleanup(meter.Close)
+	chatStream := httptest.NewServer(conformanceChatStream(t))
+	t.Cleanup(chatStream.Close)
 	embeddings := httptest.NewServer(conformanceEmbeddings(t))
 	t.Cleanup(embeddings.Close)
 	concurrency := httptest.NewServer(conformanceConcurrency(t))
@@ -90,7 +93,8 @@ func runPySDK(t *testing.T, ws writerSet) (string, error) {
 	cmd.Dir = moduleRoot
 	cmd.Env = append(childEnv(), "OPENAI_BASE_URL="+srv.URL+"/", "CTX_MODELS_BASE_URL="+models.URL+"/v1/",
 		"CTX_CHAT_BASE_URL="+chat.URL+"/", "CTX_METER_BASE_URL="+meter.URL+"/", "CTX_EMBED_BASE_URL="+embeddings.URL+"/",
-		"CTX_CONCURRENCY_BASE_URL="+concurrency.URL+"/", "CTX_RERANK_BASE_URL="+rerank.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
+		"CTX_CONCURRENCY_BASE_URL="+concurrency.URL+"/", "CTX_CHAT_STREAM_BASE_URL="+chatStream.URL+"/",
+		"CTX_RERANK_BASE_URL="+rerank.URL+"/", "PYTHONDONTWRITEBYTECODE=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -141,6 +145,47 @@ func conformanceMeter(t *testing.T) http.Handler {
 	meter := &rigMeter{m: m, lim: keyquota.Limits{Concurrency: noL1, RPM: 12, TPM: 1 << 30, CompletionReserve: 1024}}
 	rig := newChatRig(t, []backends.Backend{up.row("spark", backends.TrustFull, 1)}, 64, 1, withDeps(func(d *oai.Deps) { d.Limiter = meter }))
 	return rig.router
+}
+
+// cfKeepaliveSilence is the engine's silence after the admission on the
+// keepalive rig: 3 × grace_eff, where grace_eff = clamp(grace 5 s, wait
+// budget 0 + 5 s, 50 s) = 5 s (G5: prefill longer than the grace).
+const cfKeepaliveSilence = 3 * 5 * time.Second
+
+// conformanceChatStream is the stream fixture of test_chat_stream.py
+// (W02-08): one stream rig per engine shape (streamShapes) under /<shape>/
+// (G1), and three rigs for the gates beyond the happy path — /error/ (the
+// engine breaks off after its first chunk with an error object, G7), /busy/
+// (the one external slot held by another consumer, a 100-ms wait budget, G3)
+// and /keepalive/ (the engine silent for cfKeepaliveSilence after the
+// admission, keepalive every second, G5). Each under
+// /<name>/v1/chat/completions.
+func conformanceChatStream(t *testing.T) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	mount := func(name string, steps []sseStep, slots, reserved int, opts ...rigOption) *upstream {
+		up := newUpstream(t, "")
+		up.setRespond(sseRespond(steps, nil, nil))
+		rig := newChatRig(t, []backends.Backend{up.row(name, backends.TrustFull, 1)}, slots, reserved, append([]rigOption{withStreamSettings}, opts...)...)
+		mux.Handle("/"+name+"/", http.StripPrefix("/"+name, rig.router))
+		if name == "busy" {
+			t.Cleanup(occupyExternal(t, rig.disp, up.srv.URL))
+		}
+		return up
+	}
+	for _, sh := range streamShapes {
+		mount(sh.name, sh.steps(), 4, 1)
+	}
+	llama := streamShapes[1]
+	mount("error", []sseStep{{data: llama.chunk("hello", "")}, {data: cfStreamError}}, 4, 1)
+	mount("busy", llama.steps(), 2, 1, withWait(100*time.Millisecond))
+	mount("keepalive", append([]sseStep{{wait: cfKeepaliveSilence}}, llama.steps()...), 4, 1,
+		withWait(0), withStream(5*time.Second, time.Second, 30*time.Second))
+	// /reasoning-role/: SGLang sends the assistant role only in its first,
+	// reasoning-only chunk, which the reasoning-off alias drops — the role
+	// reaches the client in the first relayed chunk (W02-08 hardening 5).
+	mount("reasoning-role", append([]sseStep{{data: sglangThink}}, streamShapes[0].steps()...), 4, 1)
+	return mux
 }
 
 // conformanceEmbeddings is the fixture of test_embeddings.py: the

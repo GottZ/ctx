@@ -234,6 +234,7 @@ type chatRequest struct {
 	pass         map[string]json.RawMessage
 	messages     json.RawMessage
 	stream       bool
+	includeUsage bool // stream_options.include_usage (W02-08: the usage chunk reaches the client only then)
 	n            int
 	maxTokens    int // the client's max_tokens / max_completion_tokens, 0 = not sent
 	serviceTier  string
@@ -349,8 +350,9 @@ func classOf(k string) keyClass {
 	return classReject
 }
 
-// readCTX reads one CTX key. stream: true and n > 1 are refused here (E4:
-// n > 1 is RC-F; streaming is W02-08) — before any alias is resolved.
+// readCTX reads one CTX key. n > 1 is refused here (E4: RC-F) — before any
+// alias is resolved. stream and stream_options.include_usage are read (W02-08);
+// upstream, a stream always asks for usage (llm.BuildUpstreamBody).
 func (req *chatRequest) readCTX(k string, v json.RawMessage) *paramError {
 	if isNull(v) {
 		return nil
@@ -381,10 +383,9 @@ func (req *chatRequest) readCTX(k string, v json.RawMessage) *paramError {
 		default:
 			return invalidType(k, "a boolean")
 		}
-		if req.stream {
-			return unsupportedValue(k, "streaming is not supported on this endpoint yet")
-		}
-	case "stream_options", "reasoning":
+	case "stream_options":
+		return req.readStreamOptions(v)
+	case "reasoning":
 		if !hasKind(v, kindObject) {
 			return invalidType(k, "an object")
 		}
@@ -411,6 +412,52 @@ func (req *chatRequest) readCTX(k string, v json.RawMessage) *paramError {
 		}
 	case "max_tokens", "max_completion_tokens":
 		return req.readMaxTokens(k, v)
+	}
+	return nil
+}
+
+// streamOptionsKeys are the keys of stream_options the parse reads
+// (W02-08); every other member passes unread.
+var streamOptionsKeys = []string{"include_usage"}
+
+// readStreamOptions reads stream_options (W02-08) as encoding/json's struct
+// decode did, walking the object instead of decoding it (FOLGE-P: the decode
+// walked every member and held the nesting state of a deep one — 715 432
+// bytes for a 60 KB body): an object; of its members whose decoded name is
+// include_usage or differs from it only in letter case (Unicode folding,
+// "ſ" for "s"), the last one counts, a null one as absent; any other value
+// than a boolean is the 400 at stream_options.include_usage. Only on a
+// stream (hardening 4, F5-1): without stream: true — stream sorts before
+// stream_options, so req.stream is final here — stream_options only has to
+// be an object, its members unread, as before W02-08.
+func (req *chatRequest) readStreamOptions(v json.RawMessage) *paramError {
+	it, ok := newMemberIter(v)
+	if !ok {
+		return invalidType("stream_options", "an object")
+	}
+	if !req.stream {
+		return nil
+	}
+	var include []byte
+	for {
+		k, val, more := it.next()
+		if !more {
+			break
+		}
+		if idx, fold := hullKey(k, streamOptionsKeys); idx >= 0 || fold {
+			include = val
+		}
+	}
+	if include == nil || isNull(include) {
+		return nil
+	}
+	switch t := bytes.TrimSpace(include); string(t) {
+	case "true":
+		req.includeUsage = true
+	case "false":
+		req.includeUsage = false
+	default:
+		return invalidType("stream_options.include_usage", "a boolean")
 	}
 	return nil
 }

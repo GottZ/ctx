@@ -37,7 +37,6 @@
 cmd/ctxd/overviewworker_priority_linux.go	ioprioGet	# Prod setzt nur (IOPRIO_SET); die Rücklese-Hälfte der Prioritätsprobe, priority_linux_test.go:164/167
 cmd/ctxd/server.go	NewRouter	# Test-Fassade: Prod baut den Router über newRouter (main.go, F-W8: Router + Ingress-Registrierung für den Boot-Assert); die cmd/ctxd-Integrationstests bauen den Produktions-Router hierüber
 internal/armsweep/report.go	ReadReportBody	# Schreib-Hälfte WriteReport ist prod; den Leser braucht nur das Determinismus-Gate, 7x in 4 *_test.go
-internal/auth/consumer.go	ReauthenticateModelKey	# wartet: W02-08 — Re-Check des Stream-Watchers über handler.ReauthConsumer (K22); entfällt mit W01-8
 internal/config/envonly.go	EnvOnlyServerNames	# Zubringer des Env-only-Gates envonly_test.go:94/170/192; die Map ist Daten, Prod liest sie nie
 internal/config/envscan.go	EnvNameRef.String	# Stringer nur implizit über %s in envonly_test.go:138 und cmd/envnames_test.go:181 (Gate-Fehlertexte)
 internal/config/envscan.go	ScanEnvNames	# AST-Scanner beider Env-Zäune; 5 Aufrufe in envonly_test.go + cmd/envnames_test.go, kein Prod-Leser
@@ -138,7 +137,6 @@ internal/graphcache/validate.go	checkOrdering	# Nur export_test.go:72 (CheckOrde
 internal/graphcache/validate.go	checkRangeOrder	# Einziger Aufrufer ist checkOrdering (validate.go:103/108), das selbst nur über export_test.go:72 lebt
 internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_gate_test.go:156 u. a.); Prod gated über enforceManageActionTier
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
-internal/handler/model_auth.go	ReauthConsumer	# wartet: W02-08 — Re-Check des Stream-Watchers (K22), gleicher Semaphor wie ModelAuth; entfällt mit W01-8
 internal/handler/v1census/v1census.go	Assert	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	Check	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	NewRecorder	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
@@ -171,10 +169,6 @@ internal/handler/v1door/v1door.go	probe.ServeHTTP	# v1door: integration-getaggte
 internal/handler/v1door/v1door.go	probe.take	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	routeTargets	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	underModelPrefix	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
-internal/llm/passthrough.go	ChatRawStream	# wartet: W02-08 — Stream-Relay (W02-07 verdrahtet nur ChatRaw/WalkChain non-stream; ChatRawStream und sseRelay bekommen ihren Aufrufer mit dem SSE-Writer)
-internal/llm/passthrough.go	sseRelay.dispatch	# wartet: W02-08 — Stream-Relay (W02-07 verdrahtet nur ChatRaw/WalkChain non-stream; ChatRawStream und sseRelay bekommen ihren Aufrufer mit dem SSE-Writer)
-internal/llm/passthrough.go	sseRelay.result	# wartet: W02-08 — Stream-Relay (W02-07 verdrahtet nur ChatRaw/WalkChain non-stream; ChatRawStream und sseRelay bekommen ihren Aufrufer mit dem SSE-Writer)
-internal/llm/passthrough.go	sseRelay.run	# wartet: W02-08 — Stream-Relay (W02-07 verdrahtet nur ChatRaw/WalkChain non-stream; ChatRawStream und sseRelay bekommen ihren Aufrufer mit dem SSE-Writer)
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
 internal/modelkey/modelkey.go	Key.GoString	# Hint-Darstellung für fmt %#v (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen

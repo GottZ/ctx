@@ -1,0 +1,21 @@
+// census-want: 1
+// W02-08 Z4 probe: the stream wire site in a goroutine inside the attempt —
+// it outlives the attempt's lease (Fremd-Review 1 F-6 of W02-07, for
+// ChatRawStream).
+package oai
+
+import (
+	"context"
+	"time"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/llm"
+)
+
+func streamGoroutineInAttempt(ctx context.Context) {
+	llm.WalkChain(ctx, nil, "chat", nil, nil, llm.WalkRules{}, func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+		go llm.ChatRawStream(context.Background(), *b, nil, timeout, 0, nil)
+		return dispatch.Usage{}, false, nil
+	})
+}
