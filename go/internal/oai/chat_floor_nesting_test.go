@@ -206,6 +206,13 @@ func TestDeepestRequestAtTheCapFitsTheFloor(t *testing.T) {
 // floor plus that frame. With a declared length the read term, which such a
 // read does not spend, holds the frame: 200 at the floor with either name
 // (until Nachtrag C-1 this was the 503 case, at every cap).
+//
+// RC-D C8: the floor now carries oai.UpstreamFrameReserve (config V39: the
+// largest route need + the reserve), so at the floor the 212-byte name is
+// served as well — the pin keeps the old floor (chatFloor, the chat need
+// alone) as the case that shows what the reserve holds: 503 there with the
+// 212-byte name, 200 at chatFloor + the reserve with either name and either
+// read.
 func TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame(t *testing.T) {
 	const resp = 4 << 20
 	type row struct {
@@ -246,6 +253,9 @@ func TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame(t *testing.T) {
 				frame := int64(upstream - rewritten)
 				a := post(floor)
 				t.Logf("FOLGEP floor developer cap=%d undeclared=%v model_pad=%d body=%d upstream=%d frame=%d floor=%d status=%d", maxRequest, undeclared, pad, len(body), upstream, frame, floor, a.status)
+				if a := post(floor + oai.UpstreamFrameReserve); a.status != http.StatusOK {
+					t.Errorf("budget = floor %d + oai.UpstreamFrameReserve, frame %d, undeclared %v: %d %s, want 200 (the reserve holds the row's frame)", floor, frame, undeclared, a.status, a.body)
+				}
 				if pad == 0 || !undeclared {
 					if a.status != http.StatusOK {
 						t.Errorf("budget = floor %d, frame %d, undeclared %v: %d %s, want 200 (the floor's slack at the depth limit, or a declared body's unspent read term, holds this frame)", floor, frame, undeclared, a.status, a.body)
@@ -254,7 +264,7 @@ func TestDeepestDeveloperRequestLacksOnlyTheUpstreamFrame(t *testing.T) {
 				}
 				code, _, _ := a.envelope(t)
 				if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded {
-					t.Errorf("budget = floor %d, frame %d: %d %s, want 503 server_overloaded (the floor lacks the upstream frame)", floor, frame, a.status, a.body)
+					t.Errorf("budget = floor %d, frame %d: %d %s, want 503 server_overloaded (the chat need alone lacks the upstream frame)", floor, frame, a.status, a.body)
 				}
 				if a := post(floor + frame); a.status != http.StatusOK {
 					t.Errorf("budget = floor %d + frame %d: %d %s, want 200", floor, frame, a.status, a.body)

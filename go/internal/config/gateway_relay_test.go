@@ -65,17 +65,28 @@ func TestGatewayStreamRelayKeys(t *testing.T) {
 		t.Errorf("a relay buffer of exactly one frame at the cap + header is refused: %+v", issues)
 	}
 
-	// The floor: at the defaults unchanged (237 340 800 B, the non-stream
-	// share 2 × 4 MiB dominates 2 × 1 MiB + 2 MiB); past the defaults the
-	// buffer counts — a stream share above the non-stream one raises it 1:1.
+	// The chat route's response share: at the defaults the non-stream
+	// share 2 × 4 MiB dominates 2 × 1 MiB + 2 MiB; past the defaults the
+	// buffer counts — a stream share above the non-stream one raises the
+	// chat needs 1:1 (RC-D C8: the floor is the largest route need, so the
+	// chat parts carry the share, not the whole floor).
 	c = Defaults()
-	if floor, _ := gatewayBudgetFloor(&c.Gateway); floor != 237340800 {
-		t.Fatalf("default floor %d, want 237340800 (unchanged by the relay buffer)", floor)
+	if share := gatewayResponseShare(&c.Gateway); share != 8<<20 {
+		t.Fatalf("default chat response share %d, want %d (unchanged by the relay buffer)", share, 8<<20)
 	}
+	base := gatewayFloorParts(&c.Gateway, int64(c.Gateway.MaxRequestBytes), int64(c.Gateway.ScanMaxRequestBytes))
 	c.Gateway.MaxStreamFrameBytes, c.Gateway.StreamRelayBufferBytes = 4<<20, 6<<20
-	floor, _ := gatewayBudgetFloor(&c.Gateway)
-	if want := int64(237340800 - 8<<20 + 8<<20 + 6<<20); floor != want {
-		t.Fatalf("floor with frame 4 MiB and buffer 6 MiB = %d, want %d (2 × frame + buffer replaces the 8 MiB share)", floor, want)
+	parts := gatewayFloorParts(&c.Gateway, int64(c.Gateway.MaxRequestBytes), int64(c.Gateway.ScanMaxRequestBytes))
+	for i := range 2 {
+		if want := base[i].need - 8<<20 + 8<<20 + 6<<20; parts[i].need != want {
+			t.Fatalf("chat %s need with frame 4 MiB and buffer 6 MiB = %d, want %d (2 × frame + buffer replaces the 8 MiB share)", parts[i].class, parts[i].need, want)
+		}
+	}
+	// A relay buffer large enough makes the chat route decide the floor.
+	c.Gateway.StreamRelayBufferBytes = 1 << 30
+	parts = gatewayFloorParts(&c.Gateway, int64(c.Gateway.MaxRequestBytes), int64(c.Gateway.ScanMaxRequestBytes))
+	if floor, _ := gatewayBudgetFloor(&c.Gateway); floor != parts[1].need+oai.UpstreamFrameReserve {
+		t.Fatalf("floor with a 1 GiB relay buffer = %d, want the chat need below credentials %d + the frame reserve", floor, parts[1].need)
 	}
 }
 

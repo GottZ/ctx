@@ -51,7 +51,7 @@ func calcMiB(v int64) float64 { return float64(v) / (1 << 20) }
 // share of the request part).
 func calcLargestCap(budget, response int64, scan bool) int64 {
 	need := func(n int64) int64 {
-		r := gatewayRequestNeed(n)
+		r := gatewayChatNeed(n, true)
 		if !scan {
 			r -= int64(oai.ScanReserveFactor)*n + oai.ScanReserveBase + oai.ScanDepthReserve
 		}
@@ -93,10 +93,10 @@ func TestBudgetDimensionCalc(t *testing.T) {
 		"embedding_max_floats": g.EmbeddingMaxFloats, "httpx_max_response_bytes": httpx.MaxResponseBytes,
 		"request_share_3x": int64(oai.RequestReserveFactor) * capB, "scan_share": scan, "scan_share_mib": calcMiB(scan),
 		"read_term": oai.ChunkedReadReserve(capB), "json_state": oai.JSONStateReserve, "scan_depth": oai.ScanDepthReserve,
-		"scan_base": oai.ScanReserveBase, "fixed": gatewayRequestFixed,
+		"scan_base": oai.ScanReserveBase, "fixed": int64(oai.ScanReserveBase + oai.ScanDepthReserve + oai.JSONStateReserve),
 		"response_nonstream": gatewayResponseCopies * int64(g.MaxResponseBytes),
 		"response_stream":    gatewayResponseCopies*int64(g.MaxStreamFrameBytes) + int64(g.StreamRelayBufferBytes),
-		"response_embed":     gatewayFloatBytes*int64(g.EmbeddingMaxFloats) + gatewayEmbedEncoderReserve,
+		"response_embed":     oai.EmbedFloatBytes*int64(g.EmbeddingMaxFloats) + oai.EmbedEncodeBuffer,
 		"response_share":     resp,
 		"floor":              floor, "floor_mib": calcMiB(floor), "headroom": int64(g.InflightBudget) - floor,
 		"headroom_mib":       calcMiB(int64(g.InflightBudget) - floor),
@@ -107,7 +107,7 @@ func TestBudgetDimensionCalc(t *testing.T) {
 	})
 	// The floor at other body caps, with and without the scan's share.
 	for _, c := range []int64{256 << 10, 1 << 20, 2 << 20, 4 << 20, 8 << 20, 16 << 20} {
-		need := gatewayRequestNeed(c) + resp
+		need := gatewayChatNeed(c, true) + resp
 		s := int64(oai.ScanReserveFactor)*c + oai.ScanReserveBase + oai.ScanDepthReserve
 		calcEmit(t, "calc_floor_by_cap", map[string]any{
 			"cap": c, "floor": need, "floor_mib": calcMiB(need), "scan_share": s, "floor_without_scan": need - s,
@@ -120,7 +120,7 @@ func TestBudgetDimensionCalc(t *testing.T) {
 	// request at the scan cap).
 	for _, sc := range []int64{512 << 10, 1 << 20, 2 << 20, 4 << 20, 8 << 20} {
 		cred := floor - scan
-		pubNeed := gatewayRequestNeed(sc) + resp
+		pubNeed := gatewayChatNeed(sc, true) + resp
 		calcEmit(t, "calc_scan_cap", map[string]any{
 			"scan_max_request_bytes": sc, "scan_booking": int64(oai.ScanReserveFactor)*sc + oai.ScanReserveBase + oai.ScanDepthReserve,
 			"scan_booking_mib":    calcMiB(int64(oai.ScanReserveFactor)*sc + oai.ScanReserveBase + oai.ScanDepthReserve),

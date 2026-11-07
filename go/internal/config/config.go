@@ -2527,12 +2527,15 @@ type GatewayConfig struct {
 	// the handler runs. 8 MiB ≈ a 262k-token prompt without JSON escaping.
 	MaxRequestBytes int `key:"gateway.max_request_bytes" env:"CTX_GATEWAY_MAX_REQUEST_BYTES" default:"8388608" mut:"hot" parse:"strict" tenancy:"global-only"`
 	// InflightBudget is the process-wide sum of all running gateway
-	// reservations — request share (3 × body) plus response share (§4.2.1);
-	// past it a request is refused at once with 503 server_overloaded
-	// (B9: the container limit is 1 GiB, an OOM kill takes every pipeline).
-	// Must hold at least one request at the cap (V39: >= 3 ×
-	// max_request_bytes), or such a request could never be admitted.
-	InflightBudget int `key:"gateway.inflight_budget" env:"CTX_GATEWAY_INFLIGHT_BUDGET" default:"268435456" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// reservations — request share (3 × body) plus what each route books
+	// past it (§4.2.1, the routes' ledgers); past it a request is refused
+	// at once with 503 server_overloaded (B9: an OOM kill takes every
+	// pipeline — the container limit and GOMEMLIMIT sit above it). Must
+	// hold one request at every cap of every route and class (V39), or
+	// such a request could never be admitted. 512 MiB (RC-D C8, bau report
+	// RCD-c8-hardening-S1 §Budget): 256 MiB held 31 non-streamed or 63
+	// streamed small requests at once, 512 MiB holds 63 / 127.
+	InflightBudget int `key:"gateway.inflight_budget" env:"CTX_GATEWAY_INFLIGHT_BUDGET" default:"536870912" mut:"hot" parse:"strict" tenancy:"global-only"`
 	// ScanMaxRequestBytes is the largest body the sensitivity scan reads
 	// (RC-D C8): a request to an alias below credentials whose body is
 	// longer gets 413 request_too_large before the scan — no scan booking
