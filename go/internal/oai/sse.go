@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -161,10 +162,16 @@ type streamWriter struct {
 	err       error       // the first failed write
 	panicked  *timerPanic // a panic the timer caught, for rethrow
 	timer     *time.Timer
+	capAt     time.Time // the relay's drain cap of the write deadline (capWrites; zero: none)
 	last      time.Time // the last write
 	frames    int       // data frames written
 	first     time.Time // the first data frame
 	noFlushed bool      // the "not flushable" WARN was logged
+
+	// hasPanic mirrors panicked != nil without mu (A03-W10): the route asks
+	// at the upstream's end while the client writer may hold mu in a slow
+	// write.
+	hasPanic atomic.Bool
 }
 
 func newStreamWriter(w http.ResponseWriter, s Settings, broken func(error), headers func() http.Header) *streamWriter {
@@ -205,6 +212,7 @@ func (s *streamWriter) tickLocked() (err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			s.panicked = &timerPanic{value: v, stack: debug.Stack()}
+			s.hasPanic.Store(true)
 			s.err, err = errTimerPanic, errTimerPanic
 		}
 	}()
@@ -301,6 +309,11 @@ func (s *streamWriter) rethrow() {
 		panic(p)
 	}
 }
+
+// panicking reports whether the timer caught a panic that rethrow will
+// raise (A03-W10: the stream's meter then ends through close(), not at the
+// upstream's end). Without mu: the client writer can hold it in a write.
+func (s *streamWriter) panicking() bool { return s.hasPanic.Load() }
 
 // committed reports whether the status is out.
 func (s *streamWriter) committed() bool {
@@ -422,15 +435,33 @@ func (s *streamWriter) flushLocked() error {
 	return err
 }
 
-// roll moves the write deadline one client_write_window ahead (D4); a writer
-// without deadline support (a test recorder) ignores it. The settings keep
-// the window and the keepalive interval >= 1 s (V38); a zero value here (a
-// hand-built Settings) rolls nothing and sends no keepalive rather than
-// failing every write or spinning the timer.
+// roll moves the write deadline one client_write_window ahead (D4), never
+// past the relay's drain cap (capWrites, A03-W10); a writer without deadline
+// support (a test recorder) ignores it. The settings keep the window and the
+// keepalive interval >= 1 s (V38); a zero value here (a hand-built Settings)
+// rolls nothing and sends no keepalive rather than failing every write or
+// spinning the timer.
 func (s *streamWriter) roll() {
+	var dl time.Time
 	if s.window > 0 {
-		_ = s.rc.SetWriteDeadline(time.Now().Add(s.window))
+		dl = time.Now().Add(s.window)
 	}
+	if !s.capAt.IsZero() && (dl.IsZero() || s.capAt.Before(dl)) {
+		dl = s.capAt
+	}
+	if !dl.IsZero() {
+		_ = s.rc.SetWriteDeadline(dl)
+	}
+}
+
+// capWrites caps the write deadline of every later write at t (zero: no cap)
+// — the relay's minimum drain rate (A03-W10, drainMeter): a client that
+// drains slower than gateway.stream_min_drain_rate over the window while
+// chunks wait for it fails the write like one that stopped reading (D4).
+func (s *streamWriter) capWrites(t time.Time) {
+	s.mu.Lock()
+	s.capAt = t
+	s.mu.Unlock()
 }
 
 // frameCapture is the response writer a refusal is written into after the

@@ -83,7 +83,11 @@ func oaiCensusRoute(t *testing.T, ca *countingAdmitter, chain []backends.Backend
 	consumer := &auth.ConsumerAuth{ConsumerID: "00000000-0000-4000-8000-0000000c3a02", TenantID: "00000000-0000-4000-8000-0000000c3a03",
 		TenantScope: "acme:main", IsValid: true, AllModels: true, AdmissionLane: "urgent", PromptSensitivity: "public"}
 	settings := oai.Settings{Enabled: true, MaxRequestBytes: 1 << 20, InflightBudget: 1 << 30, MaxResponseBytes: 1 << 20,
-		RequestTimeout: 30 * time.Second, RequestDeadline: 60 * time.Second, DefaultMaxTokens: 16, MaxOutputTokensCeiling: 32}
+		RequestTimeout: 30 * time.Second, RequestDeadline: 60 * time.Second, DefaultMaxTokens: 16, MaxOutputTokensCeiling: 32,
+		// The stream relay's keys at their defaults (A03-W10): the stream site
+		// (Site 10) runs through the relay buffer — a settling lease is still
+		// one acquire and one release.
+		StreamRelayBufferBytes: 2 << 20, StreamMinDrainRate: 1024, StreamMinDrainWindow: 30 * time.Second}
 	get := func() oai.Settings { return settings }
 	d := oai.Deps{
 		Consumer:      func(context.Context) *auth.ConsumerAuth { return consumer },

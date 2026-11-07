@@ -142,9 +142,12 @@ type chatCall struct {
 	wired atomic.Bool
 
 	// sse is the relay writer of a stream (nil: non-stream); grace is its
-	// effective commit grace (sse.go).
+	// effective commit grace (sse.go). relay is the stream's buffer between
+	// the upstream reader and the client writer (A03-W10, relay.go), made by
+	// the first attempt (startRelay).
 	sse   *streamWriter
 	grace time.Duration
+	relay *streamRelay
 
 	// held is the request share of the reservation (the stage's
 	// requestReserveFactor × body, grown by cover), spent what the request
@@ -795,6 +798,20 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 			}
 			return c.attempt(&st, spec, runCtx, b, lease, timeout)
 		})
+	if c.relay != nil {
+		// The lease ended with the upstream (A03-W10, I-03-7) — so does the
+		// meter's reservation, and the consumer's concurrency slot with it
+		// (W06-11: one slot end per exit, endLimit): the drain holds no
+		// engine capacity, only the buffer and the socket. Then the client
+		// writer drains what the upstream left, under the watcher. A panic
+		// of the client writer or of the timer that already happened ends
+		// the reservation through close() instead — Keep after wire contact,
+		// the rule of a panic (W02-08 F4-2).
+		if !c.relay.panicked() && !c.sse.panicking() {
+			c.endMeterAtTheUpstreamEnd(attempts, &st)
+		}
+		c.relay.wait()
+	}
 	stop()
 	if c.sse != nil {
 		c.answerStream(plan, served, attempts, werr, &st)
@@ -990,21 +1007,42 @@ func (c *chatCall) leaseStats(st *walkState) {
 // bucket's capacity). A non-streamed answer never carries an estimate.
 func (c *chatCall) book(plan Plan, served *backends.Backend, attempts []llm.ChainAttempt, err error, st *walkState, out chatOutcome) {
 	if len(attempts) > 0 && (st.wired > 0 || out.finish != llmlog.FinishAborted) {
-		wired := c.wired.Load()
-		c.endLimit(func(l LimitReservation) {
-			switch {
-			case st.wired > 0 && !wired:
-				l.Abort()
-			case wired && st.tokens.PromptTokens <= 0 && st.tokens.CompletionTokens <= 0:
-				l.Keep()
-			case st.usageKind == llmlog.UsageEstimated && int64(usageTotal(st.tokens.PromptTokens, st.tokens.CompletionTokens)) >= c.meterHeld:
-				l.Keep()
-			default:
-				l.Settle(st.tokens)
-			}
-		})
+		c.endMeter(st)
 		c.record(plan, served, attempts, err, st, out)
 	}
+}
+
+// endMeter ends the meter's reservation by book's rule (the one place of
+// it): Abort when no byte reached a backend, Keep after wire contact without
+// usage or with an estimate at or above the charge, else Settle. A
+// reservation already ended stays ended (endLimit).
+func (c *chatCall) endMeter(st *walkState) {
+	wired := c.wired.Load()
+	c.endLimit(func(l LimitReservation) {
+		switch {
+		case st.wired > 0 && !wired:
+			l.Abort()
+		case wired && st.tokens.PromptTokens <= 0 && st.tokens.CompletionTokens <= 0:
+			l.Keep()
+		case st.usageKind == llmlog.UsageEstimated && int64(usageTotal(st.tokens.PromptTokens, st.tokens.CompletionTokens)) >= c.meterHeld:
+			l.Keep()
+		default:
+			l.Settle(st.tokens)
+		}
+	})
+}
+
+// endMeterAtTheUpstreamEnd ends a stream's reservation when its upstream
+// ended (A03-W10): the usage is the upstream's (the chunks were rewritten
+// and counted before the relay buffer, streamTokens), the slot follows the
+// lease. Only after wire contact — the case book always ends, whatever the
+// outcome; before it the reservation ends where it did (book, close).
+func (c *chatCall) endMeterAtTheUpstreamEnd(attempts []llm.ChainAttempt, st *walkState) {
+	if len(attempts) == 0 || st.wired == 0 {
+		return
+	}
+	c.streamTokens(st)
+	c.endMeter(st)
 }
 
 // chatOutcome is what the client got, for the row.
@@ -1103,6 +1141,11 @@ func (c *chatCall) verdict() (ended bool, code string) {
 	case errors.Is(cause, errAuthUnavailable):
 		c.refuse(CodeAuthUnavailable, authUnavailableMessage, false)
 		return true, CodeAuthUnavailable
+	case errors.Is(cause, errRelayOverflow):
+		// The client fell behind by more than the relay buffer (A03-W10):
+		// it still reads — the stream ends with its error frame.
+		c.refuse(CodeServerOverloaded, relayOverflowMessage, true)
+		return true, CodeServerOverloaded
 	case errors.Is(cause, errClientGone):
 		// A write to the client failed (it stopped reading): nothing more
 		// can reach it (D4).

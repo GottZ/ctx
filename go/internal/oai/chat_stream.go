@@ -27,8 +27,10 @@ var errChunkRewrite = errors.New("oai: upstream stream chunk could not be rewrit
 
 // streamAttempt is one wire attempt of a stream under its lease: the body
 // for this row, the attempt's request id, the one stream wire site, every
-// chunk rewritten and relayed. It reports committed once a data frame
-// reached the client — the walker fails over only before that (§4.11.1).
+// chunk rewritten and put into the relay buffer (A03-W10: the client writer
+// drains it, relay.go). It reports committed once a data frame was handed to
+// the relay — it will reach the client unless the client goes away — the
+// walker fails over only before that (§4.11.1).
 func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane string, runCtx context.Context, b *backends.Backend,
 	lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
 	st.n++
@@ -49,6 +51,15 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 		err = &llm.AdmissionError{Err: err, Backend: b.Name, Host: b.Host}
 	}
 	if err != nil {
+		st.last = failedAttempt{b: b, err: err}
+		st.failed = append(st.failed, st.last)
+		return dispatch.Usage{}, false, err
+	}
+	// The relay buffer (A03-W10), once per request and before the wire:
+	// booked in the ledger before it is made; a refusal ends the walk like a
+	// refused upstream body (503 before the commit, the error frame after).
+	if err := c.startRelay(); err != nil {
+		err = &llm.AdmissionError{Err: err, Backend: b.Name, Host: b.Host}
 		st.last = failedAttempt{b: b, err: err}
 		st.failed = append(st.failed, st.last)
 		return dispatch.Usage{}, false, err
@@ -87,7 +98,17 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 		if chunk.skip {
 			return nil
 		}
-		if werr := c.sse.frame(chunk.out); werr != nil {
+		// Into the relay buffer, not to the client (A03-W10, I-03-7): the
+		// client writer drains it on its own goroutine, so this attempt —
+		// and its lease — ends with the upstream, not with the client.
+		if werr := c.relay.put(chunk.out); werr != nil {
+			if errors.Is(werr, errRelayOverflow) {
+				// The client fell behind by more than the buffer: the run
+				// ends — the upstream is aborted and the lease sees the ended
+				// run at its release (abort_settle_ms.stream) — and the route
+				// ends the stream with an error frame (verdict).
+				c.cancel(errRelayOverflow)
+			}
 			return werr
 		}
 		st.relayed++
