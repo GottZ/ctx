@@ -121,7 +121,6 @@ func oaiEmbedCensusRoute(t *testing.T, ca *countingAdmitter, chain []backends.Ba
 		Record:            func(llmlog.GatewayRow) {},
 		MaxWait:           func() time.Duration { return time.Second },
 		RetryAfterSteps:   func() []time.Duration { return nil },
-		Reauth:            func(_ context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) { return ca, nil },
 		Planner:           embedCensusPlanner{ca: ca},
 		Limiter:           censusLimiter{},
 	}
