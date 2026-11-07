@@ -123,6 +123,7 @@ func oaiEmbedCensusRoute(t *testing.T, ca *countingAdmitter, chain []backends.Ba
 		RetryAfterSteps:   func() []time.Duration { return nil },
 		Planner:           embedCensusPlanner{ca: ca},
 		Limiter:           censusLimiter{},
+		Egress:            censusEgress{}, // every row stays: the census counts wire sites, not the egress rule (W06-14)
 	}
 	var budget oai.Budget
 	return oai.InflightBudget(&budget, get)(oai.Embeddings(d))
