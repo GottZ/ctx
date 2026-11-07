@@ -30,7 +30,7 @@
 //     server's answer (cancelled_inflight) back for the toast. Every success
 //     reloads page 1 — the list shows what the server now says.
 
-import { toApiError, type ApiError } from '../../lib/api'
+import { ApiError, toApiError } from '../../lib/api'
 import {
   CONSUMER_STATUSES,
   DEFAULT_CONSUMER_STATUSES,
@@ -39,6 +39,8 @@ import {
   listConsumers,
   reactivateConsumer,
   revokeModelKey,
+  rotateModelKey,
+  updateConsumer,
   type ConsumerCreateSpec,
   type ConsumerListParams,
 } from '../../lib/api/modelapi'
@@ -48,7 +50,10 @@ import type {
   ConsumerRevokeResult,
   ConsumerStatus,
   ConsumerUpdateResult,
+  ConsumerUpdateSpec,
   ConsumerView,
+  ModelKeyRotateResult,
+  ModelKeyRotateSpec,
   Tenant,
 } from '../../lib/api/types'
 import type { ResourceStatus } from '../../lib/resource.svelte'
@@ -84,6 +89,10 @@ interface ConsumersApi {
   del: typeof deleteConsumer
   reactivate: typeof reactivateConsumer
   revoke: typeof revokeModelKey
+  /** RC-D C5 W05-07: model-consumer-update with a policy patch. */
+  update: typeof updateConsumer
+  /** RC-D C5 W05-08: model-key-rotate. */
+  rotate: typeof rotateModelKey
 }
 
 const DEFAULT_API: ConsumersApi = {
@@ -93,6 +102,8 @@ const DEFAULT_API: ConsumersApi = {
   del: deleteConsumer,
   reactivate: reactivateConsumer,
   revoke: revokeModelKey,
+  update: updateConsumer,
+  rotate: rotateModelKey,
 }
 
 /** The list filter: a non-empty status set, a label prefix ('' = none), a tenant (server-admin; null = all). */
@@ -321,6 +332,30 @@ export class ConsumersModel {
   /** Revoke one key by its KEY id (model-key-revoke); returns cancelled_inflight for the toast. */
   async revokeKey(keyId: string): Promise<ConsumerRevokeResult> {
     return this.#mutate(keyId, () => this.#api.revoke(keyId))
+  }
+
+  /**
+   * Change a consumer's policy (model-consumer-update, RC-D C5 W05-07) with
+   * the patch policy.buildUpdatePatch built — busyId / actionError + rethrow
+   * like every row mutation (the edit dialog stays open with a 403 / 400 /
+   * 409 / 429), page 1 reloads on success. RC-D S1: contract stub — fails
+   * closed without calling the server.
+   */
+  async update(_id: string, _patch: ConsumerUpdateSpec): Promise<ConsumerUpdateResult> {
+    void this.#api.update
+    throw new ApiError(503, 'service_unavailable', 'policy editing is not wired yet (RC-D S1 contract stub)')
+  }
+
+  /**
+   * Rotate a consumer's key (model-key-rotate, RC-D C5 W05-08). Returns the
+   * reveal-once answer — WITH the new plaintext `api_key` — for the caller to
+   * show once and drop; the model keeps nothing of it (B-6, the second
+   * reveal-once path). Refusals: busyId / actionError + rethrow; page 1
+   * reloads on success. RC-D S1: contract stub — fails closed.
+   */
+  async rotate(_spec: ModelKeyRotateSpec): Promise<ModelKeyRotateResult> {
+    void this.#api.rotate
+    throw new ApiError(503, 'service_unavailable', 'key rotation is not wired yet (RC-D S1 contract stub)')
   }
 
   async #mutate<T>(id: string, run: () => Promise<T>): Promise<T> {

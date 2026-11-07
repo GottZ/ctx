@@ -1569,3 +1569,144 @@ export interface ModelAliasListResponse {
   model_aliases: ModelAliasView[]
   count: number
 }
+
+// RC-D C5 — spa-forms (W05-07 policy edit, W05-08 rotation, W05-11 lane,
+// W05-13 alias catalog; design/05 §3.3, §4.2, §4.5, §4.6). Drift anchors =
+// internal/handler/model_consumers.go (update / rotate answers),
+// model_alias_manage.go (alias writes) and — for the preview — the C7
+// contract of model-alias-preview (W05-04, RC-D S1 report RCD-c7-cli-preview).
+// Integrator (S3) merges this block next to the `// RC-D C6` block.
+
+/**
+ * Admission lane of a model consumer — CLOSED vocabulary (server CHECK
+ * migrations/161_model_consumers.sql admission_lane IN ('urgent','bulk'),
+ * handler LaneUrgent/LaneBulk; V-03-a). Never the dispatch class list
+ * (DispatchBucket.class), which names queues, not lanes.
+ */
+export type ExternalLane = 'urgent' | 'bulk'
+
+/**
+ * model-consumer-update payload beyond the id (handler field set; kind,
+ * tenant_id and expires_at do not exist — expiry changes need a rotation).
+ * Only CHANGED fields are sent. Tier (server-authoritative, design/05 §4.5):
+ * lowering prompt_sensitivity, raising the lane bulk → urgent, raising
+ * fair_weight, allow_plaintext → true = server-admin only; widening models /
+ * all_models / tenant_scope / the CIDR allowlist (incl. null = any source) =
+ * granting (tenant-admin only with self-service, never on a ctx-peer).
+ */
+export interface ConsumerUpdateSpec {
+  label?: string
+  description?: string
+  /** null = only the _global catalog (narrowing). */
+  tenant_scope?: string | null
+  all_models?: boolean
+  /** Alias IDS; [] removes every grant. */
+  models?: string[]
+  prompt_sensitivity?: 'credentials' | 'personal' | 'internal' | 'public'
+  admission_lane?: ExternalLane
+  /** null = any source (widening when a list is stored). */
+  allowed_cidrs?: string[] | null
+}
+
+/** model-key-rotate payload — grace in SECONDS (0 = revoke the predecessor now; ≤ 604 800). */
+export interface ModelKeyRotateSpec {
+  consumer_id: string
+  grace: number
+  /** Absolute expiry of the new key (RFC 3339); absent = now + key_max_lifetime. */
+  expires_at?: string
+}
+
+/**
+ * model-key-rotate answer: the NEW key's view and its PLAINTEXT exactly once
+ * (`api_key`, ctxm_…) — revealed through RevealOnceKey and dropped (B-6), the
+ * same discipline as ConsumerCreateResult.
+ */
+export interface ModelKeyRotateResult {
+  success: true
+  key: KeyView
+  api_key: string
+}
+
+/** Alias kind vocabulary (migration 162 CHECK). Immutable after create (V-02-a). */
+export type ModelAliasKind = 'chat' | 'embedding' | 'rerank'
+
+/**
+ * model-alias-create payload (data). `enabled` is REQUIRED on the wire — the
+ * handler answers 422 without it and the SPA always sends it (K-05-2; a pool
+ * suggestion is a draft: enabled:false). `scope` absent = the caller's home
+ * scope (tenant-admin) / _global (server-admin); `tenant_id` server-admin only.
+ * Lowering `sensitivity` below credentials needs confirm_sensitivity_downgrade
+ * (server-admin; a tenant-admin gets 403).
+ */
+export interface ModelAliasCreateSpec {
+  name: string
+  kind: ModelAliasKind
+  role: string
+  enabled: boolean
+  scope?: string
+  tenant_id?: string
+  sensitivity?: 'credentials' | 'personal' | 'internal' | 'public'
+  policy?: Record<string, unknown>
+  description?: string
+  confirm_sensitivity_downgrade?: boolean
+}
+
+/**
+ * model-alias-update payload (data; the alias id rides top-level). name, kind,
+ * scope and tenant_id are IMMUTABLE (400 immutable_field) — the type has no
+ * field for them. Only changed fields are sent; none ⇒ 400 "nothing to update".
+ */
+export interface ModelAliasUpdateSpec {
+  role?: string
+  sensitivity?: 'credentials' | 'personal' | 'internal' | 'public'
+  policy?: Record<string, unknown>
+  description?: string
+  enabled?: boolean
+  confirm_sensitivity_downgrade?: boolean
+}
+
+/** model-alias-create / -update answer. warnings e.g. "sensitivity lowered X → Y (confirmed)". */
+export interface ModelAliasWriteResult {
+  success: true
+  model_alias: ModelAliasView
+  warnings?: string[]
+}
+
+/**
+ * model-alias-preview request (W05-04, server-admin; C7 owns the action).
+ * Either an alias (its id) — optionally seen through a consumer — or a pool
+ * role (the "suggest from pool" source: primary_model of that role).
+ */
+export interface ModelAliasPreviewRequest {
+  alias?: string
+  consumer_id?: string
+  role?: string
+}
+
+/** One row of the previewed chain — the /v1 chain build without wire contact. */
+export interface AliasPreviewRow {
+  backend: string
+  locality: 'internal' | 'external'
+  provider_class: string
+  billing: string
+}
+
+/** A pool row the chain build dropped, and why (sensitivity, tenant gate, billing, admission). */
+export interface AliasPreviewOmitted {
+  backend: string
+  reason: string
+}
+
+/** model-alias-preview answer (C7 contract; mocked in C5 until S3). */
+export interface ModelAliasPreviewResult {
+  success: true
+  /** The alias id previewed; null in role mode. */
+  alias: string | null
+  /** The consumer's tenant_scope the chain was built for; null = _global only. */
+  scope: string | null
+  required_sensitivity: 'credentials' | 'personal' | 'internal' | 'public'
+  chain: AliasPreviewRow[]
+  omitted: AliasPreviewOmitted[]
+  /** Role mode only: Pool.PrimaryModel of the role; null = nothing offered (fail-closed). */
+  primary_model: string | null
+}

@@ -33,6 +33,7 @@ const BASE_AREAS = [
   '/board',
   '/chat',
   '/gateway',
+  '/gateway/models',
   '/graph',
   '/home',
   '/issues',

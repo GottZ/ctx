@@ -7,14 +7,22 @@
 // unknown status). W05-05 built the read; W05-06 adds create, deactivate,
 // reactivate, key revoke and the alias catalog the offer picker reads.
 
-import { apiFetch } from '../api'
+import { ApiError, apiFetch } from '../api'
 import type {
   ConsumerCreateResult,
   ConsumerListResponse,
   ConsumerRevokeResult,
   ConsumerStatus,
   ConsumerUpdateResult,
+  ConsumerUpdateSpec,
+  ModelAliasCreateSpec,
   ModelAliasListResponse,
+  ModelAliasPreviewRequest,
+  ModelAliasPreviewResult,
+  ModelAliasUpdateSpec,
+  ModelAliasWriteResult,
+  ModelKeyRotateResult,
+  ModelKeyRotateSpec,
 } from './types'
 
 /** The status vocabulary in the server's order (store.ConsumerStatuses, design/05 §3.2). */
@@ -157,4 +165,60 @@ export function listModelAliases(): Promise<ModelAliasListResponse> {
     method: 'POST',
     body: JSON.stringify({ action: 'model-alias-list' }),
   })
+}
+
+// --- RC-D C5 (W05-07, W05-08, W05-13) — contract stubs (RC-D S1). Each
+// function names its wire shape; S2 replaces the body with the apiFetch call.
+// Until then every call fails closed with a 503 that never reaches the server.
+
+/** RC-D S1: the not-wired answer of a contract stub (503 service_unavailable, nothing sent). */
+function notWired<T>(action: string): Promise<T> {
+  return Promise.reject(new ApiError(503, 'service_unavailable', `${action} is not wired yet (RC-D S1 contract stub)`))
+}
+
+/**
+ * Change a consumer's policy — model-consumer-update {data:{id, ...patch}}
+ * (W05-07). Sends exactly the fields of `patch` (an explicit field list, never
+ * a spread — kind / tenant_id / expires_at can never reach the wire); a
+ * refusal (400 field, 403 "admin key required" tier, 409 label, 429 quota)
+ * rejects as ApiError. RC-D S1: stub.
+ */
+export function updateConsumer(_id: string, _patch: ConsumerUpdateSpec): Promise<ConsumerUpdateResult> {
+  return notWired('model-consumer-update')
+}
+
+/**
+ * Rotate a consumer's key — model-key-rotate {data:{consumer_id, grace,
+ * expires_at?}} (W05-08). grace in seconds, ALWAYS sent (0 = leak: the
+ * predecessor is revoked at once). Returns the reveal-once answer with the
+ * new plaintext for the caller to show once and drop. RC-D S1: stub.
+ */
+export function rotateModelKey(_spec: ModelKeyRotateSpec): Promise<ModelKeyRotateResult> {
+  return notWired('model-key-rotate')
+}
+
+/**
+ * Create a model alias — model-alias-create {data:{...spec}} (W05-13).
+ * `enabled` is always on the wire. RC-D S1: stub.
+ */
+export function createModelAlias(_spec: ModelAliasCreateSpec): Promise<ModelAliasWriteResult> {
+  return notWired('model-alias-create')
+}
+
+/**
+ * Update a model alias — model-alias-update {id, data:{...patch}} (W05-13):
+ * the id rides TOP-LEVEL (the handler reads req.ID; an id in data is 400),
+ * name / kind / scope / tenant_id never (immutable). RC-D S1: stub.
+ */
+export function updateModelAlias(_id: string, _patch: ModelAliasUpdateSpec): Promise<ModelAliasWriteResult> {
+  return notWired('model-alias-update')
+}
+
+/**
+ * Dry-run the chain of an alias (optionally through a consumer) or read the
+ * pool's primary model of a role — model-alias-preview {data:{alias|role,
+ * consumer_id?}} (W05-04, C7; server-admin). RC-D S1: stub.
+ */
+export function previewModelAlias(_req: ModelAliasPreviewRequest): Promise<ModelAliasPreviewResult> {
+  return notWired('model-alias-preview')
 }

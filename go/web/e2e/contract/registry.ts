@@ -988,7 +988,9 @@ export const contracts: PageContract[] = [
     mode: 'reading',
     capabilities: modelApiCapabilities(true, true),
     tenantScoped: true,
-    adminCalls: ['model-consumer-list', 'tenant-list'],
+    // RC-D C5: + the policy edit (W05-07) and the rotation (W05-08) — calls a
+    // member session must never fire (generated deny test).
+    adminCalls: ['model-consumer-list', 'tenant-list', 'model-consumer-update', 'model-key-rotate'],
     states: [
       { name: 'default', seed: {} },
       // W05-06: the create dialog (template row, scope select, offer picker,
@@ -1066,8 +1068,13 @@ export const contracts: PageContract[] = [
       await expect(rows).toHaveCount(5)
       await expect(rows.filter({ hasText: 'flow-app' })).toContainText('ctxm_…sist')
       expect(await page.evaluate((m) => document.documentElement.outerHTML.includes(m), REVEAL_MARKER)).toBe(false)
-      // no rotation, no edit in this wave (W05-07/W05-08)
-      await expect(content.getByRole('button', { name: /rotate|edit/i })).toHaveCount(0)
+      // RC-D W05-07/W05-08: the own app row carries "Edit policy" and "Rotate key"
+      // (tenant-admin with self-service); the ctx-peer row carries neither — peers
+      // are managed by the server-admin (design/05 §4.5, V-01-b mirror).
+      await expect(ci.getByRole('button', { name: 'Edit policy of ci-chat' }), 'W05-07: own app row has an edit control').toHaveCount(1)
+      await expect(ci.getByRole('button', { name: 'Rotate key of ci-chat' }), 'W05-08: own app row has a rotate control').toHaveCount(1)
+      const peerRow = rows.filter({ hasText: 'ctx-peer-b' })
+      await expect(peerRow.getByRole('button', { name: /edit|rotate/i }), 'W05-07: a ctx-peer row carries no edit / rotate control below server-admin').toHaveCount(0)
       // W05-06 — revoke ci-chat's key behind the typed 4-character gate; toast from the server
       await ci.getByRole('button', { name: 'Revoke key ctxm_…a9Fq' }).click()
       const confirm = page.getByRole('dialog', { name: 'Revoke key' })
@@ -1089,6 +1096,56 @@ export const contracts: PageContract[] = [
       await expect(rows).toHaveCount(1)
       await expect(rows.first()).toContainText('ci-chat')
       expect(consumerListBodies(session.calls).at(-1)?.q).toBe('ci')
+    },
+  },
+  {
+    // Alias catalog /gateway/models (design/05 §3.3/§4.6, wave W05-13 — RC-D
+    // C5). Inherits the /gateway prefix guard (viewModelApi), so the contract
+    // carries the same gateway-on world. A tenant-admin reads the _global
+    // catalog + its home scope and writes only the home scope: `_global` rows
+    // carry no write control (inv05 D8 precedent defect). The leak probe reads
+    // tenant B's home sentinel alias (disabled, so no offer changes) and must
+    // never see tenant A's. Detailed gates: e2e/gateway-models.spec.ts.
+    route: '/gateway/models',
+    name: 'gateway-models',
+    role: 'tenant-admin',
+    mode: 'reading',
+    capabilities: modelApiCapabilities(true, true),
+    tenantScoped: true,
+    adminCalls: ['model-alias-list', 'model-alias-create', 'model-alias-update', 'model-alias-preview'],
+    states: [
+      { name: 'default', seed: {} },
+      // every scope, write controls on every row, "Suggest from pool" + preview
+      { name: 'server-admin', seed: { role: 'server-admin' } },
+      // the catalog read fails: error band with Retry
+      { name: 'error', seed: { faults: [{ action: 'model-alias-list', status: 500 }] } },
+    ],
+    scale: {
+      exempt:
+        'Alias-Katalog ist eine Betreiber-Liste (Dutzende Aliase je Scope, Admin-Takt, design/05 §6 Zeile Katalog-Reload) — kein nutzergetriebener 10k-Pfad.',
+    },
+    flowDoc:
+      'Tenant-Admin öffnet „Model catalog“ unter /gateway/models: die _global-Aliase stehen ohne Schreib-Controls in der Liste, die Aliase des Heimat-Scopes tragen „Edit“; „+ New alias“ öffnet den Editor mit explizitem enabled-Schalter, niedrigere Sensitivitäten sind gesperrt; im Bearbeiten sind name und kind schreibgeschützt (W05-13).',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Model catalog', exact: true }), 'W05-13: the catalog page mounts').toBeVisible()
+      const rows = content.locator('tr[data-alias-row]')
+      await expect(rows.filter({ hasText: SENTINEL.A }), 'W05-13: the home-scope alias is listed').toHaveCount(1)
+      const globalChat = rows.filter({ has: page.locator('[data-alias-scope="_global"]') }).filter({ hasText: 'chat' }).first()
+      await expect(globalChat, 'W05-13: the _global chat alias is listed').toBeVisible()
+      await expect(globalChat.getByRole('button'), 'W05-13 gate: a _global row carries no write control for a tenant-admin').toHaveCount(0)
+      const homeChat = rows.filter({ has: page.locator('[data-alias-scope="home"]') }).filter({ hasText: 'chat' }).first()
+      await expect(homeChat.getByRole('button', { name: 'Edit alias chat' }), 'W05-13: a home-scope row is editable').toHaveCount(1)
+      await content.getByRole('button', { name: '+ New alias' }).click()
+      const editor = page.getByRole('dialog', { name: 'New model alias' })
+      await expect(editor.getByRole('checkbox', { name: 'enabled' }), 'W05-13: enabled is an explicit control').toBeVisible()
+      await expect(editor.getByRole('group', { name: 'sensitivity' }).getByRole('radio', { name: 'public' }), 'W05-13: a tenant-admin cannot lower below credentials').toBeDisabled()
+      await editor.getByRole('button', { name: 'Cancel' }).click()
+      await homeChat.getByRole('button', { name: 'Edit alias chat' }).click()
+      const edit = page.getByRole('dialog', { name: 'Edit model alias' })
+      await expect(edit.getByLabel('name', { exact: true }), 'W05-13 gate: name is read-only on edit').toBeDisabled()
+      await expect(edit.getByLabel('kind', { exact: true }), 'W05-13 gate: kind is read-only on edit').toBeDisabled()
+      expect(session.calls.some((c) => c.action === 'model-alias-preview'), 'a tenant-admin never fires the server-admin preview').toBe(false)
     },
   },
   {

@@ -111,6 +111,10 @@ export const areaRoutes = {
   // guard prefixes remain disjoint. Outside the reserved /v1 namespace.
   // areaMode('/gateway') is unmapped → 'reading'.
   '/gateway': () => import('./gateway/GatewayPage.svelte'),
+  // Alias catalog (design/05 §4.6 ModelsPage, wave W05-13 — RC-D C5): inherits
+  // the /gateway prefix-guard (caps.viewModelApi); its own lazy chunk.
+  // areaMode('/gateway/models') is unmapped → 'reading'.
+  '/gateway/models': () => import('./gateway/ModelsPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 
