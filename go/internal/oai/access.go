@@ -56,10 +56,18 @@ type AccessRecord struct {
 // wins (a request is refused once); an empty reason declares nothing. A nil
 // record (outside a model group) ignores it.
 func (rec *AccessRecord) NoteRejection(reason, detail string) {
+	rec.NoteRejectionAt(reason, detail, "")
+}
+
+// NoteRejectionAt is NoteRejection with the target origin of an L2 refusal
+// (the dispatcher target the refused acquire was for; design/06 §3.4
+// "target", server-admin-only). The ledger keeps it for reason capacity
+// only.
+func (rec *AccessRecord) NoteRejectionAt(reason, detail, target string) {
 	if rec == nil || reason == "" || rec.rejection != nil {
 		return
 	}
-	rec.rejection = &keyquota.Rejection{Reason: reason, Detail: detail}
+	rec.rejection = &keyquota.Rejection{Reason: reason, Detail: detail, Target: target}
 }
 
 // NoteRejectionWait sets the vain queue wait of the request's refusal: an
@@ -75,8 +83,9 @@ func (rec *AccessRecord) NoteRejectionWait(waited time.Duration) {
 
 // Rejection is the declared refusal with the request's identity as the
 // record holds it now — the consumer the door accepted ("" before), the op,
-// the resolved alias ("" before the resolution) and the dispatch class —
-// and the wait; false when nothing was declared.
+// the resolved alias ("" before the resolution) and the dispatch class the
+// planner bound (Class, set once a plan exists) — its target and the wait;
+// false when nothing was declared.
 func (rec *AccessRecord) Rejection() (keyquota.Rejection, bool) {
 	if rec == nil || rec.rejection == nil {
 		return keyquota.Rejection{}, false
@@ -91,6 +100,20 @@ func (rec *AccessRecord) Rejection() (keyquota.Rejection, bool) {
 // AccessRecord.NoteRejection); without one it does nothing.
 func NoteRejection(ctx context.Context, reason, detail string) {
 	AccessRecordFrom(ctx).NoteRejection(reason, detail)
+}
+
+// NoteRejectionAt is AccessRecord.NoteRejectionAt on the request's record.
+func NoteRejectionAt(ctx context.Context, reason, detail, target string) {
+	AccessRecordFrom(ctx).NoteRejectionAt(reason, detail, target)
+}
+
+// planClass is the dispatch class a plan's acquirer binds ("" without one):
+// the class of the request's L2 refusal before any lease names it.
+func planClass(p Plan) string {
+	if p.Acquirer == nil {
+		return ""
+	}
+	return p.Acquirer.Class().String()
 }
 
 type accessRecordKey struct{}

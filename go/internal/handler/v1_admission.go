@@ -442,16 +442,16 @@ func (a *V1Admission) WriteAdmissionError(ctx context.Context, w http.ResponseWr
 	var re *dispatch.RejectionError
 	switch {
 	case busy && errors.As(err, &re):
-		noteAdmissionRefusal(ctx, busyDetail(err))
+		noteAdmissionRefusal(ctx, busyDetail(err), err)
 		a.setRetryAfter(w.Header(), re.RetryAfter)
 		oai.WriteCode(w, oai.CodeServerBusy, busyMessage, true)
 		return oai.CodeServerBusy
 	case busy:
-		noteAdmissionRefusal(ctx, busyDetail(err))
+		noteAdmissionRefusal(ctx, busyDetail(err), err)
 		oai.WriteCode(w, oai.CodeServerBusy, busyMessage, true)
 		return oai.CodeServerBusy
 	case errors.Is(err, dispatch.ErrExternalNotOffered), errors.Is(err, ErrLaneNotOffered), errors.Is(err, ErrChainNotOffered):
-		noteAdmissionRefusal(ctx, keyquota.DetailNotOffered)
+		noteAdmissionRefusal(ctx, keyquota.DetailNotOffered, err)
 		if steps := a.dispatch.ExternalRetryAfterSteps(); len(steps) > 0 {
 			w.Header().Set(headerRetryAfter, strconv.Itoa(int(math.Ceil(steps[len(steps)-1].Seconds()))))
 		}
@@ -465,13 +465,21 @@ func (a *V1Admission) WriteAdmissionError(ctx context.Context, w http.ResponseWr
 
 // noteAdmissionRefusal declares an L2 refusal on the request's access
 // record for the refusal ledger (W06-12, design/06 §4.1 step 10): reason
-// capacity, detail the refusing rule. The route hands the queue wait over
-// with the meter reservation's Reject (oai.AccessRecord.NoteRejectionWait).
-// An internal_error is no refusal by a rule and declares nothing.
-func noteAdmissionRefusal(ctx context.Context, detail string) {
-	if ctx != nil {
-		oai.NoteRejection(ctx, keyquota.RejectCapacity, detail)
+// capacity, detail the refusing rule, target the dispatcher target of the
+// refused acquire (dispatch.AdmissionError.Host; "" for a refusal of the
+// plan, before any acquire). The route hands the queue wait over with the
+// meter reservation's Reject (oai.AccessRecord.NoteRejectionWait). An
+// internal_error is no refusal by a rule and declares nothing.
+func noteAdmissionRefusal(ctx context.Context, detail string, err error) {
+	if ctx == nil {
+		return
 	}
+	var ae *dispatch.AdmissionError
+	target := ""
+	if errors.As(err, &ae) {
+		target = ae.Host
+	}
+	oai.NoteRejectionAt(ctx, keyquota.RejectCapacity, detail, target)
 }
 
 // busyDetail is the ledger detail of a busy answer: wait_expired when the
