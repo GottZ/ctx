@@ -42,7 +42,7 @@ type parseOutcome struct {
 	code, param, message       string
 	model, serviceTier         string
 	modelOverlong              bool // the new parse left a raw name past modelRawMax undecoded
-	stream                     bool
+	stream, includeUsage       bool
 	n, maxTokens, messageCount int
 	ignored                    []string
 	pass                       map[string]string
@@ -60,7 +60,7 @@ func newParse(body []byte, l policyLimits) parseOutcome {
 	if perr != nil {
 		return errOutcome("top", perr)
 	}
-	o := parseOutcome{model: req.model, modelOverlong: req.modelOverlong, serviceTier: req.serviceTier, stream: req.stream, n: req.n,
+	o := parseOutcome{model: req.model, modelOverlong: req.modelOverlong, serviceTier: req.serviceTier, stream: req.stream, includeUsage: req.includeUsage, n: req.n,
 		maxTokens: req.maxTokens, pass: map[string]string{}}
 	for k, v := range req.pass {
 		o.pass[k] = string(v)
@@ -88,7 +88,7 @@ func baseParse(body []byte, l policyLimits) parseOutcome {
 	if perr != nil {
 		return errOutcome("top", perr)
 	}
-	o := parseOutcome{model: req.model, serviceTier: req.serviceTier, stream: req.stream, n: req.n, maxTokens: req.maxTokens,
+	o := parseOutcome{model: req.model, serviceTier: req.serviceTier, stream: req.stream, includeUsage: req.includeUsage, n: req.n, maxTokens: req.maxTokens,
 		pass: map[string]string{}}
 	for k, v := range req.pass {
 		o.pass[k] = string(v)
@@ -122,7 +122,7 @@ func sameOutcome(body []byte, n, o parseOutcome) string {
 	if n.stage == "top" {
 		return ""
 	}
-	if !sameModel(n, o) || n.serviceTier != o.serviceTier || n.stream != o.stream || n.n != o.n || n.maxTokens != o.maxTokens {
+	if !sameModel(n, o) || n.serviceTier != o.serviceTier || n.stream != o.stream || n.includeUsage != o.includeUsage || n.n != o.n || n.maxTokens != o.maxTokens {
 		return fmt.Sprintf("CTX values: new %+v, base %+v", n, o)
 	}
 	if !maps.Equal(n.pass, o.pass) {

@@ -9,6 +9,7 @@ package oai_test
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -29,7 +30,7 @@ func rfBody(raw string) string {
 	return `{"model":"chat","messages":[{"role":"user","content":"hi"}],"response_format":{"type":` + raw + `,"json_schema":{"name":"s"}}}`
 }
 
-func streamBody(raw string) string {
+func streamValueBody(raw string) string {
 	return `{"model":"chat","messages":[{"role":"user","content":"hi"}],"stream":` + raw + `}`
 }
 
@@ -63,18 +64,18 @@ var compareValueCases = []struct {
 	{"rf object", rfBody(`{"text":1}`), http.StatusBadRequest, oai.CodeUnsupportedValue},
 	{"rf deep array", rfBody(strings.Repeat("[", 9990) + strings.Repeat("]", 9990)), http.StatusBadRequest, oai.CodeUnsupportedValue},
 	{"rf type absent", `{"model":"chat","messages":[{"role":"user","content":"hi"}],"response_format":{"json_schema":{"name":"s"}}}`, http.StatusBadRequest, oai.CodeUnsupportedValue},
-	{"stream false", streamBody(`false`), http.StatusOK, ""},
-	{"stream false, whitespace", streamBody(" false\n"), http.StatusOK, ""},
-	{"stream null", streamBody(`null`), http.StatusOK, ""},
-	{"stream true", streamBody(`true`), http.StatusBadRequest, oai.CodeUnsupportedValue},
-	{"stream \"true\"", streamBody(`"true"`), http.StatusBadRequest, oai.CodeInvalidType},
-	{"stream 1", streamBody(`1`), http.StatusBadRequest, oai.CodeInvalidType},
-	{"stream 0", streamBody(`0`), http.StatusBadRequest, oai.CodeInvalidType},
-	{"stream object", streamBody(`{}`), http.StatusBadRequest, oai.CodeInvalidType},
-	{"stream array", streamBody(`[true]`), http.StatusBadRequest, oai.CodeInvalidType},
-	{"stream deep array", streamBody(strings.Repeat("[", 9997) + strings.Repeat("]", 9997)), http.StatusBadRequest, oai.CodeInvalidType},
-	{"stream deep object", streamBody(strings.Repeat(`{"a":`, 9997) + "0" + strings.Repeat("}", 9997)), http.StatusBadRequest, oai.CodeInvalidType},
-	{"stream long string", streamBody(`"` + strings.Repeat("\xff", 1<<16) + `"`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream false", streamValueBody(`false`), http.StatusOK, ""},
+	{"stream false, whitespace", streamValueBody(" false\n"), http.StatusOK, ""},
+	{"stream null", streamValueBody(`null`), http.StatusOK, ""},
+	{"stream true", streamValueBody(`true`), http.StatusOK, ""}, // W02-08: served as a stream (FOLGE-P alone: 400 unsupported_value)
+	{"stream \"true\"", streamValueBody(`"true"`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream 1", streamValueBody(`1`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream 0", streamValueBody(`0`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream object", streamValueBody(`{}`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream array", streamValueBody(`[true]`), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream deep array", streamValueBody(strings.Repeat("[", 9997) + strings.Repeat("]", 9997)), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream deep object", streamValueBody(strings.Repeat(`{"a":`, 9997) + "0" + strings.Repeat("}", 9997)), http.StatusBadRequest, oai.CodeInvalidType},
+	{"stream long string", streamValueBody(`"` + strings.Repeat("\xff", 1<<16) + `"`), http.StatusBadRequest, oai.CodeInvalidType},
 }
 
 // escapeAll writes s with every character as a \u escape.
@@ -88,6 +89,19 @@ func escapeAll(s string) string {
 
 func TestComparedValuesAnswerAsBefore(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
+	// A stream request (W02-08) gets a stream; every other one the answer.
+	stream := sseRespond(streamShapes[0].steps(), nil, nil)
+	u.setRespond(func(w http.ResponseWriter, r *http.Request) {
+		u.mu.Lock()
+		last := u.bodies[len(u.bodies)-1]
+		u.mu.Unlock()
+		if last["stream"] == true {
+			stream(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, answerSGLang)
+	})
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
 	var dump strings.Builder
 	for _, tc := range compareValueCases {

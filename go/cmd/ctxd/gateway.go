@@ -199,10 +199,12 @@ func startModelGateway(g *modelGateway) func() {
 // gate (K17), the federation half of the chain build (F-W9: internal/oai
 // cannot import internal/federation, which imports it), the tenant overlay
 // of RequiredSensitivity (K30), the llmlog writer, the dispatcher's wait
-// budget and Retry-After steps, the planner (A03-W8) and the lifecycle
-// context (D7), and the limiter over the process's meter (W06-10,
-// meterLimiter). A nil meter leaves the limiter nil, and the chat route then
-// answers 503 service_unavailable (L11: never served without it).
+// budget and Retry-After steps, the planner (A03-W8), the lifecycle context
+// (D7), the model-key re-check of running requests (W02-08, D6: the door's
+// own handler.ReauthConsumer, K22 — W01-8's revocation registry replaces it)
+// and the limiter over the process's meter (W06-10, meterLimiter). A nil
+// meter leaves the limiter nil, and the chat route then answers 503
+// service_unavailable (L11: never served without it).
 func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config.Store, aliases *modelalias.Registry,
 	backendPool *backends.Pool, quota *backends.QuotaAccountant, dispatcher *dispatch.Dispatcher, meter *keyquota.Meter) oai.Deps {
 	settings := gatewaySettingsGetter(cfgStore)
@@ -227,6 +229,7 @@ func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config
 			return cfgStore.Snapshot().Dispatch.ExternalMaxWait //nolint:forbidigo // MT 06 BLIND: dispatch.external_max_wait is global-only (one dispatcher per process); the write deadline at entry covers the wait budget of every consumer alike.
 		},
 		Lifecycle: lifecycle,
+		Reauth:    handler.ReauthConsumer,
 	}
 	if quota != nil {
 		d.Quota = quota

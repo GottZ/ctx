@@ -121,7 +121,7 @@ func postTraced(t *testing.T, rig *chatRig, trace *httptrace.ClientTrace) chatAn
 		defer func() { _ = recover() }()
 		rig.router.ServeHTTP(w, req)
 	}()
-	return chatAnswer{status: w.Code, header: w.Header(), body: w.Body.Bytes()}
+	return chatAnswer{status: w.Code, header: w.Result().Header, body: w.Body.Bytes()}
 }
 
 // rawBackend is an HTTP/1.1 backend on a held listener; handle runs per

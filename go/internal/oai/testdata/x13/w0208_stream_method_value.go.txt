@@ -1,0 +1,11 @@
+// census-want: 1
+// W02-08 Z4 probe: the stream wire site as a method value (Fremd-Review 1
+// F-6 of W02-07, for ChatRawStream).
+package oai
+
+import "github.com/GottZ/ctx/internal/llm"
+
+func streamMethodValue() {
+	f := llm.ChatRawStream
+	_, _ = f(nil, backendsZero, nil, 0, 0, nil)
+}

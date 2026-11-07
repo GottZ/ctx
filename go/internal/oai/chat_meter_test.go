@@ -182,14 +182,14 @@ func TestMeterReservationEndsOncePerExit(t *testing.T) {
 		// answer after Admit that refused, failed or aborted carries none
 		// (lead decision M2 (c): set ahead, they would count a reservation
 		// that went back).
-		limitHeader := w.Header().Get("x-ratelimit-limit-requests")
+		limitHeader := w.Result().Header.Get("x-ratelimit-limit-requests")
 		if mode == "success" {
 			if w.Code != http.StatusOK || limitHeader == "" {
 				t.Fatalf("request %d (%s): %d %s (x-ratelimit-limit-requests %q)", i, mode, w.Code, w.Body.Bytes(), limitHeader)
 			}
 			settled += 11 + 3
 		} else if limitHeader != "" {
-			t.Fatalf("request %d (%s): %d carries x-ratelimit headers %v, want none", i, mode, w.Code, w.Header())
+			t.Fatalf("request %d (%s): %d carries x-ratelimit headers %v, want none", i, mode, w.Code, w.Result().Header)
 		}
 		if mode == "upstream" {
 			kept += reservation

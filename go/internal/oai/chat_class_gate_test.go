@@ -213,6 +213,12 @@ func cgTables() []cgTable {
 		{"toolHullKeys/tool_choice", toolHullKeys, func(k string) cgSlot {
 			return cgSlot{depth: 2, body: func(v string) string { return cgTop("tool_choice", cgHull(toolHullKeys, toolValid, k, v)) }}
 		}},
+		// W02-08 (rebase round 2, A5): stream_options.include_usage is read,
+		// by a walk over the object (readStreamOptions) — on a stream only
+		// (hardening 4, F5-1; TestClassGateBytesPerParseOnAStream).
+		{"streamOptionsKeys", streamOptionsKeys, func(k string) cgSlot {
+			return free("stream_options", 2, func(v string) string { return `{"` + k + `":` + v + `}` })
+		}},
 		{"free", []string{"stream_options.*", "reasoning.*", "logit_bias.*", "stop.*"}, func(k string) cgSlot {
 			switch k {
 			case "stop.*":
@@ -423,11 +429,49 @@ func TestClassGateBytesPerParse(t *testing.T) {
 	}
 }
 
+// cgStreamSlots are the slots whose value the parse reads only on a stream
+// (W02-08 hardening 4, F5-1: readStreamOptions walks stream_options only
+// with stream: true).
+var cgStreamSlots = []string{"ctxKeys.stream_options", "streamOptionsKeys.include_usage", "free.stream_options.*"}
+
+// TestClassGateBytesPerParseOnAStream: the slots of cgStreamSlots once more
+// with stream: true, every value form, under the bound of
+// TestClassGateBytesPerParse. The scan and route sides keep the bodies
+// without stream: the route gate's rig answers no stream and books no
+// stream reservation (with stream: true the null form ran 500
+// upstream_error against a bound of the harness load alone).
+func TestClassGateBytesPerParseOnAStream(t *testing.T) {
+	measured := 0
+	for _, s := range cgSlots() {
+		if !slices.Contains(cgStreamSlots, s.name()) {
+			continue
+		}
+		for _, f := range cgForms {
+			body := append([]byte(`{"stream":true,`), cgBody(s, f, cgSize, cgLimits)[1:]...)
+			var booked int64
+			alloc := allocatedBy(func() {
+				booked = 0
+				if req, p := parseTopLevel(body); p == nil {
+					_ = req.parsePolicy(cgLimits, func(n int64) bool { booked += n; return true })
+				}
+			})
+			if bound := uint64(parseAllocSlack) + uint64(booked); alloc > bound {
+				t.Errorf("%s:%s with stream: true: the parse of %d bytes allocates %d bytes, want ≤ %d (slack %d + booked %d)",
+					s.name(), f.name, len(body), alloc, bound, parseAllocSlack, booked)
+			}
+			measured++
+		}
+	}
+	if measured != len(cgStreamSlots)*len(cgForms) {
+		t.Errorf("%d combinations measured on a stream, want %d slots × %d forms", measured, len(cgStreamSlots), len(cgForms))
+	}
+}
+
 // cgKeyCount and cgComboCount pin the size of the gate: a key added to a
 // table moves them (and asks for a look at its body), a key left out of the
 // gate moves them too.
 const (
-	cgKeyCount   = 80
+	cgKeyCount   = 81 // 80 on FOLGE-P; + stream_options.include_usage (W02-08)
 	cgComboCount = cgKeyCount * 9
 )
 
@@ -442,6 +486,10 @@ var cgNotKeyTables = map[string]string{
 	"visionPrefixes":       "value table of an image_url's data URL prefix, compared in place",
 	"usageKeys":            "response side (rewrite.go): the usage object of an upstream answer",
 	"reasoningMessageKeys": "response side (rewrite.go): reasoning members of an upstream answer's message",
+	// The stream rewrite (W02-08) reads three tables of an upstream chunk.
+	"streamDeltaKeys":   "response side (rewrite.go): the generated text fields of an upstream stream chunk's delta, which the stream's estimate counts",
+	"nullableDeltaKeys": "response side (rewrite.go): the delta keys the stream schema allows as null in an upstream stream chunk",
+	"streamRoles":       "value table (rewrite.go): the role values of the stream schema a dropped reasoning chunk's role is carried with (hardening 5)",
 	// The embeddings parse (W02-09) has its own key tables and its own class
 	// gate (FOLGE-E, embed_class_gate_test.go): outside this gate's bodies,
 	// which are chat requests.
@@ -565,6 +613,7 @@ func TestClassGateCoversEveryKeyTable(t *testing.T) {
 		"partIndex": cgNamesOf(partIndex), "imageIndex": cgNamesOf(imageIndex),
 		"responseFormatKeys": responseFormatKeys, "responseFormatJSONKeys": responseFormatJSONKeys,
 		"toolHullKeys/tools": toolHullKeys, "toolHullKeys/tool_choice": toolHullKeys,
+		"streamOptionsKeys": streamOptionsKeys,
 	}
 	got := map[string][]string{}
 	for _, s := range cgSlots() {

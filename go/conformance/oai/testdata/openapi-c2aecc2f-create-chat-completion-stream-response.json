@@ -1,0 +1,649 @@
+{
+  "x-ctx-provenance": {
+    "source": "https://github.com/openai/openai-openapi/blob/c2aecc2fbe1ddff3e7500a0eaa5c2bc4c19c5318/openapi.json",
+    "commit": "c2aecc2fbe1ddff3e7500a0eaa5c2bc4c19c5318",
+    "commit_date": "2026-10-31T17:43:04Z",
+    "source_sha256": "d80bb28992f6c2a86876d866dcae0b1f15e130de94238592bc57a4a579448b5f",
+    "license": "MIT (Copyright (c) OpenAI), see LICENSE.openai-openapi",
+    "extract": "components.schemas: CreateChatCompletionStreamResponse and its transitive $ref closure (ChatCompletionStreamResponseDelta, ChatCompletionMessageToolCallChunk, ChatCompletionTokenLogprob, ServiceTier, CompletionUsage, ChatCompletionModeration, ChatCompletionModerationResults, ModerationResultBody, ModerationInputType, ChatCompletionModerationError), values equal to the source, re-serialized with key order preserved"
+  },
+  "openapi": "3.1.0",
+  "info": {
+    "version": "2.3.0"
+  },
+  "components": {
+    "schemas": {
+      "CreateChatCompletionStreamResponse": {
+        "type": "object",
+        "description": "Represents a streamed chunk of a chat completion response returned\nby the model, based on the provided input.\n[Learn more](https://developers.openai.com/api/docs/guides/streaming-responses).\n",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A unique identifier for the chat completion. Each chunk has the same ID."
+          },
+          "choices": {
+            "type": "array",
+            "description": "A list of chat completion choices. Can contain more than one elements if `n` is greater than 1. Can also be empty for the\nlast chunk if you set `stream_options: {\"include_usage\": true}`.\n",
+            "items": {
+              "type": "object",
+              "required": [
+                "delta",
+                "index"
+              ],
+              "properties": {
+                "delta": {
+                  "$ref": "#/components/schemas/ChatCompletionStreamResponseDelta"
+                },
+                "logprobs": {
+                  "description": "Log probability information for the choice.",
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "content": {
+                      "description": "A list of message content tokens with log probability information.",
+                      "type": [
+                        "array",
+                        "null"
+                      ],
+                      "items": {
+                        "$ref": "#/components/schemas/ChatCompletionTokenLogprob"
+                      }
+                    },
+                    "refusal": {
+                      "description": "A list of message refusal tokens with log probability information.",
+                      "type": [
+                        "array",
+                        "null"
+                      ],
+                      "items": {
+                        "$ref": "#/components/schemas/ChatCompletionTokenLogprob"
+                      }
+                    }
+                  },
+                  "required": [
+                    "content",
+                    "refusal"
+                  ]
+                },
+                "finish_reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The reason the model stopped generating tokens. This will be `stop` if the model hit a natural stop point or a provided stop sequence,\n`length` if the maximum number of tokens specified in the request was reached,\n`content_filter` if content was omitted due to a flag from our content filters,\n`tool_calls` if the model called a tool, or `function_call` (deprecated) if the model called a function.\nOmitted from the final audio update containing only `delta.audio.expires_at`.\n",
+                  "enum": [
+                    "stop",
+                    "length",
+                    "tool_calls",
+                    "content_filter",
+                    "function_call",
+                    null
+                  ]
+                },
+                "index": {
+                  "type": "integer",
+                  "description": "The index of the choice in the list of choices."
+                }
+              }
+            }
+          },
+          "created": {
+            "type": "integer",
+            "format": "unixtime",
+            "description": "The Unix timestamp (in seconds) of when the chat completion was created. Each chunk has the same timestamp."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model to generate the completion."
+          },
+          "obfuscation": {
+            "type": "string",
+            "description": "An obfuscation string added to normalize the size of streamed chunks as a\nmitigation to certain side-channel attacks. The field is included by\ndefault and omitted when `stream_options.include_obfuscation` is `false`.\n"
+          },
+          "service_tier": {
+            "$ref": "#/components/schemas/ServiceTier"
+          },
+          "system_fingerprint": {
+            "type": "string",
+            "deprecated": true,
+            "description": "This fingerprint represents the backend configuration that the model runs with.\nCan be used in conjunction with the `seed` request parameter to understand when backend changes have been made that might impact determinism.\n"
+          },
+          "object": {
+            "type": "string",
+            "description": "The object type, which is always `chat.completion.chunk`.",
+            "enum": [
+              "chat.completion.chunk"
+            ],
+            "x-stainless-const": true
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompletionUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An optional field that will only be present when you set\n`stream_options: {\"include_usage\": true}` in your request. When present, it\ncontains a null value **except for the last chunk** which contains the\ntoken usage statistics for the entire request.\n\n**NOTE:** If the stream is interrupted or cancelled, you may not\nreceive the final usage chunk which contains the total token usage for\nthe request.\n"
+          },
+          "moderation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionModeration",
+                "description": "Moderation results for the request input and generated output. Present\non the moderation chunk when moderated completions are requested.\n"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "choices",
+          "created",
+          "id",
+          "model",
+          "object"
+        ],
+        "examples": [
+          {
+            "id": "chatcmpl-123",
+            "object": "chat.completion.chunk",
+            "created": 1694268190,
+            "model": "gpt-6-astra",
+            "system_fingerprint": "fp_44709d6fcb",
+            "choices": [
+              {
+                "index": 0,
+                "delta": {
+                  "content": "Hello"
+                },
+                "logprobs": null,
+                "finish_reason": null
+              }
+            ],
+            "obfuscation": "p9K3xT6w"
+          },
+          {
+            "id": "chatcmpl-123",
+            "object": "chat.completion.chunk",
+            "created": 1694268190,
+            "model": "gpt-6-astra",
+            "system_fingerprint": "fp_44709d6fcb",
+            "choices": [
+              {
+                "index": 0,
+                "delta": {},
+                "logprobs": null,
+                "finish_reason": "stop"
+              }
+            ],
+            "obfuscation": ""
+          }
+        ],
+        "x-oaiMeta": {
+          "name": "The chat completion chunk object",
+          "group": "chat",
+          "example": "{\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-6-astra\", \"system_fingerprint\": \"fp_44709d6fcb\", \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"obfuscation\":\"r4N7vQ2m\"}\n"
+        }
+      },
+      "ChatCompletionStreamResponseDelta": {
+        "type": "object",
+        "description": "A chat completion delta generated by streamed model responses.\nStreamed audio can arrive in partial updates with an ID, base64 data, or\ntranscript text. The final audio update contains only its expiry timestamp.\n",
+        "properties": {
+          "audio": {
+            "type": "object",
+            "description": "A partial audio response. Audio chunks may carry an ID, base64 data, or\ntranscript text; the final audio update contains only its expiry timestamp.\n",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique identifier for this audio response."
+              },
+              "expires_at": {
+                "type": "integer",
+                "format": "unixtime",
+                "description": "The Unix timestamp (in seconds) for when this audio response will no\nlonger be accessible on the server for use in multi-turn conversations.\n"
+              },
+              "data": {
+                "type": "string",
+                "description": "Base64 encoded audio bytes generated by the model, in the format\nspecified in the request.\n"
+              },
+              "transcript": {
+                "type": "string",
+                "description": "Transcript text from this audio chunk."
+              }
+            }
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The contents of the chunk message."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "function_call": {
+            "deprecated": true,
+            "type": "object",
+            "description": "Deprecated and replaced by `tool_calls`. The name and arguments of a function that should be called, as generated by the model.",
+            "properties": {
+              "arguments": {
+                "type": "string",
+                "description": "The arguments to call the function with, as generated by the model in JSON format. Note that the model does not always generate valid JSON, and may hallucinate parameters not defined by your function schema. Validate the arguments in your code before calling your function."
+              },
+              "name": {
+                "type": "string",
+                "description": "The name of the function to call."
+              }
+            }
+          },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionMessageToolCallChunk"
+            }
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "developer",
+              "system",
+              "user",
+              "assistant",
+              "tool"
+            ],
+            "description": "The role of the author of this message."
+          },
+          "refusal": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The refusal message generated by the model."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ChatCompletionMessageToolCallChunk": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the tool call."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "function"
+            ],
+            "description": "The type of the tool. Currently, only `function` is supported.",
+            "x-stainless-const": true
+          },
+          "function": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The name of the function to call."
+              },
+              "arguments": {
+                "type": "string",
+                "description": "The arguments to call the function with, as generated by the model in JSON format. Note that the model does not always generate valid JSON, and may hallucinate parameters not defined by your function schema. Validate the arguments in your code before calling your function."
+              }
+            }
+          }
+        },
+        "required": [
+          "index"
+        ]
+      },
+      "ChatCompletionTokenLogprob": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "description": "The token.",
+            "type": "string"
+          },
+          "logprob": {
+            "description": "The log probability of this token, if it is within the top 20 most likely tokens. Otherwise, the value `-9999.0` is used to signify that the token is very unlikely.",
+            "type": "number"
+          },
+          "bytes": {
+            "anyOf": [
+              {
+                "description": "A list of integers representing the UTF-8 bytes representation of the token. Useful in instances where characters are represented by multiple tokens and their byte representations must be combined to generate the correct text representation. Can be `null` if there is no bytes representation for the token.",
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "top_logprobs": {
+            "description": "List of the most likely tokens and their log probability, at this token position. The number of entries may be fewer than the requested `top_logprobs`.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "token": {
+                  "description": "The token.",
+                  "type": "string"
+                },
+                "logprob": {
+                  "description": "The log probability of this token, if it is within the top 20 most likely tokens. Otherwise, the value `-9999.0` is used to signify that the token is very unlikely.",
+                  "type": "number"
+                },
+                "bytes": {
+                  "anyOf": [
+                    {
+                      "description": "A list of integers representing the UTF-8 bytes representation of the token. Useful in instances where characters are represented by multiple tokens and their byte representations must be combined to generate the correct text representation. Can be `null` if there is no bytes representation for the token.",
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "token",
+                "logprob",
+                "bytes"
+              ]
+            }
+          }
+        },
+        "required": [
+          "token",
+          "logprob",
+          "bytes",
+          "top_logprobs"
+        ]
+      },
+      "ServiceTier": {
+        "anyOf": [
+          {
+            "type": "string",
+            "description": "Specifies the processing type used for serving the request.\n  - If set to 'auto', then the request will be processed with the service tier configured in the Project settings. Unless otherwise configured, the Project will use 'default'.\n  - If set to 'default', then the request will be processed with the standard pricing and performance for the selected model.\n  - If set to '[flex](https://developers.openai.com/api/docs/guides/flex-processing)', then the request will be processed with the Flex Processing service tier.\n  - To opt-in to [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode) at the request level, include the `service_tier=fast` or `service_tier=priority` parameter for Responses or Chat Completions. The response will show `service_tier=priority` regardless of if you specify `service_tier=fast` or `priority` in your request.\n  - When not set, the default behavior is 'auto'.\n\n  When the `service_tier` parameter is set, the response body will include the `service_tier` value based on the processing mode actually used to serve the request. This response value may be different from the value set in the parameter.\n",
+            "enum": [
+              "auto",
+              "default",
+              "flex",
+              "scale",
+              "priority",
+              "fast"
+            ],
+            "default": "auto"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "CompletionUsage": {
+        "type": "object",
+        "description": "Usage statistics for the completion request.",
+        "properties": {
+          "completion_tokens": {
+            "type": "integer",
+            "default": 0,
+            "description": "Number of tokens in the generated completion."
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "default": 0,
+            "description": "Number of tokens in the prompt."
+          },
+          "total_tokens": {
+            "type": "integer",
+            "default": 0,
+            "description": "Total number of tokens used in the request (prompt + completion)."
+          },
+          "completion_tokens_details": {
+            "type": "object",
+            "description": "Breakdown of tokens used in a completion.",
+            "properties": {
+              "accepted_prediction_tokens": {
+                "type": "integer",
+                "default": 0,
+                "description": "When using Predicted Outputs, the number of tokens in the\nprediction that appeared in the completion.\n"
+              },
+              "audio_tokens": {
+                "type": "integer",
+                "default": 0,
+                "description": "Audio input tokens generated by the model."
+              },
+              "reasoning_tokens": {
+                "type": "integer",
+                "default": 0,
+                "description": "Tokens generated by the model for reasoning."
+              },
+              "text_tokens": {
+                "type": "integer",
+                "description": "Text output tokens generated by the model."
+              },
+              "rejected_prediction_tokens": {
+                "type": "integer",
+                "default": 0,
+                "description": "When using Predicted Outputs, the number of tokens in the\nprediction that did not appear in the completion. However, like\nreasoning tokens, these tokens are still counted in the total\ncompletion tokens for purposes of billing, output, and context window\nlimits.\n"
+              }
+            }
+          },
+          "prompt_tokens_details": {
+            "type": "object",
+            "description": "Breakdown of tokens used in the prompt.",
+            "properties": {
+              "audio_tokens": {
+                "type": "integer",
+                "default": 0,
+                "description": "Audio input tokens present in the prompt."
+              },
+              "cached_tokens": {
+                "type": "integer",
+                "default": 0,
+                "description": "Cached tokens present in the prompt."
+              },
+              "text_tokens": {
+                "type": "integer",
+                "description": "Text input tokens present in the prompt."
+              },
+              "image_tokens": {
+                "type": "integer",
+                "description": "Image input tokens present in the prompt."
+              },
+              "cache_write_tokens": {
+                "type": "integer",
+                "default": 0,
+                "description": "The unadjusted number of prompt tokens written to cache."
+              }
+            }
+          }
+        },
+        "required": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ]
+      },
+      "ChatCompletionModeration": {
+        "type": "object",
+        "description": "Moderation results or errors for the request input and generated output.",
+        "properties": {
+          "input": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionModerationResults"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionModerationError"
+              }
+            ],
+            "discriminator": {
+              "propertyName": "type"
+            },
+            "description": "Moderation for the request input."
+          },
+          "output": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionModerationResults"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionModerationError"
+              }
+            ],
+            "discriminator": {
+              "propertyName": "type"
+            },
+            "description": "Moderation for the generated output."
+          }
+        },
+        "required": [
+          "input",
+          "output"
+        ]
+      },
+      "ChatCompletionModerationResults": {
+        "type": "object",
+        "description": "Successful moderation results for the request input or generated output.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "moderation_results"
+            ],
+            "description": "The object type, which is always `moderation_results`.",
+            "x-stainless-const": true
+          },
+          "model": {
+            "type": "string",
+            "description": "The moderation model used to generate the results."
+          },
+          "results": {
+            "type": "array",
+            "description": "A list of moderation results.",
+            "items": {
+              "$ref": "#/components/schemas/ModerationResultBody"
+            }
+          }
+        },
+        "required": [
+          "type",
+          "model",
+          "results"
+        ]
+      },
+      "ModerationResultBody": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "moderation_result"
+            ],
+            "description": "The object type, which was always `moderation_result` for successful moderation results.",
+            "default": "moderation_result",
+            "x-stainless-const": true
+          },
+          "model": {
+            "type": "string",
+            "description": "The moderation model that produced this result."
+          },
+          "flagged": {
+            "type": "boolean",
+            "description": "A boolean indicating whether the content was flagged by any category."
+          },
+          "categories": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "description": "A dictionary of moderation categories to booleans, True if the input is flagged under this category.",
+            "x-oaiTypeLabel": "map"
+          },
+          "category_scores": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "description": "A dictionary of moderation categories to scores.",
+            "x-oaiTypeLabel": "map"
+          },
+          "category_applied_input_types": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/ModerationInputType"
+              },
+              "type": "array"
+            },
+            "type": "object",
+            "description": "Which modalities of input are reflected by the score for each category.",
+            "x-oaiTypeLabel": "map"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "model",
+          "flagged",
+          "categories",
+          "category_scores",
+          "category_applied_input_types"
+        ],
+        "title": "Moderation result",
+        "description": "A moderation result produced for the response input or output."
+      },
+      "ModerationInputType": {
+        "type": "string",
+        "enum": [
+          "text",
+          "image"
+        ]
+      },
+      "ChatCompletionModerationError": {
+        "type": "object",
+        "description": "An error produced while attempting moderation.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "error"
+            ],
+            "description": "The object type, which is always `error`.",
+            "x-stainless-const": true
+          },
+          "code": {
+            "type": "string",
+            "description": "The error code."
+          },
+          "message": {
+            "type": "string",
+            "description": "The error message."
+          }
+        },
+        "required": [
+          "type",
+          "code",
+          "message"
+        ]
+      }
+    }
+  }
+}

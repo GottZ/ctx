@@ -165,16 +165,20 @@ const (
 
 // --- G18 and the alias-independent refusals ---.
 
-// TestChatStreamAndNRefused (G18, E4): stream true is W02-08's, n > 1 is
-// RC-F's — both 400 unsupported_value at their param before any upstream
-// contact; n = 1 and stream false are served, and no n goes upstream.
+// TestChatStreamAndNRefused (G18, E4): n > 1 is RC-F's — 400
+// unsupported_value at its param before any upstream contact; a stream
+// flag that is no boolean and stream_options that are no object (or carry
+// a non-boolean include_usage) are 400 invalid_type; n = 1 and stream false
+// are served, and no n goes upstream. stream true is served since W02-08
+// (chat_stream_test.go).
 func TestChatStreamAndNRefused(t *testing.T) {
 	rig, u := pgRig(t, answerSGLang)
 	for _, tc := range []struct {
 		name, extra, code, param string
 	}{
-		{"stream true", `"stream":true`, oai.CodeUnsupportedValue, "stream"},
 		{"stream not a boolean", `"stream":"yes"`, oai.CodeInvalidType, "stream"},
+		{"stream_options not an object", `"stream":true,"stream_options":true`, oai.CodeInvalidType, "stream_options"},
+		{"include_usage not a boolean", `"stream":true,"stream_options":{"include_usage":"yes"}`, oai.CodeInvalidType, "stream_options.include_usage"},
 		{"n 2", `"n":2`, oai.CodeUnsupportedValue, "n"},
 		{"n 128", `"n":128`, oai.CodeUnsupportedValue, "n"},
 		{"n 0", `"n":0`, oai.CodeUnsupportedValue, "n"},

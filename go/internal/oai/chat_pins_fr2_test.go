@@ -63,7 +63,7 @@ func TestInferenceMissingRefusesPerTerm(t *testing.T) {
 				}()
 				h.ServeHTTP(w, req)
 			}()
-			chInternal(t, c.name+" nil", chatAnswer{status: w.Code, header: w.Header(), body: w.Body.Bytes()})
+			chInternal(t, c.name+" nil", chatAnswer{status: w.Code, header: w.Result().Header, body: w.Body.Bytes()})
 			var named bool
 			for _, line := range strings.Split(logs.String(), "\n") {
 				if strings.Contains(line, "level=ERROR") && strings.Contains(line, " missing="+c.name+" ") {

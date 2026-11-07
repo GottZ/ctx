@@ -34,6 +34,7 @@ import (
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/handler/v1census"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
@@ -203,14 +204,21 @@ func (g *gateCount) GateTenant(tenantID string, chain []backends.Backend) ([]bac
 	return g.inner.GateTenant(tenantID, chain)
 }
 
-// fakeLimiter admits everything and counts how each reservation ended.
+// fakeLimiter admits everything and counts how each reservation ended. A
+// chat reservation reports as Held what the rig meters charge for its
+// estimate (fakeChatCharge): a stream's estimate is weighed against it as
+// against a real admission (W02-08 rebase round 2, part B); any other op's
+// reservation holds nothing (0, as W02-09 set it).
 type fakeLimiter struct {
 	admits, settles, keeps, aborts, rejects atomic.Int64
 	refuse                                  *oai.LimitRefusal
 	lastReason                              atomic.Value
 }
 
-type fakeReservation struct{ l *fakeLimiter }
+type fakeReservation struct {
+	l    *fakeLimiter
+	held int64
+}
 
 func (r fakeReservation) Settle(dispatch.Usage) { r.l.settles.Add(1) }
 func (r fakeReservation) Keep()                 { r.l.keeps.Add(1) }
@@ -220,14 +228,24 @@ func (r fakeReservation) Reject(reason string, _ time.Duration) {
 	r.l.lastReason.Store(reason)
 }
 func (r fakeReservation) Headers() http.Header { return nil }
-func (r fakeReservation) Held() int64          { return 0 }
+func (r fakeReservation) Held() int64          { return r.held }
 
-func (l *fakeLimiter) Admit(context.Context, *auth.ConsumerAuth, modelalias.Alias, oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
+func (l *fakeLimiter) Admit(_ context.Context, _ *auth.ConsumerAuth, _ modelalias.Alias, e oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	l.admits.Add(1)
 	if l.refuse != nil {
 		return nil, l.refuse
 	}
-	return fakeReservation{l}, nil
+	return fakeReservation{l: l, held: fakeChatCharge(e)}, nil
+}
+
+// fakeChatCharge is what the rig meters (CompletionReserve 1024, no bucket
+// cap) charge for a chat estimate — keyquota's own rule; 0 for other ops.
+func fakeChatCharge(e oai.Estimate) int64 {
+	if e.Op != llmlog.GatewayOpChat {
+		return 0
+	}
+	est := keyquota.Estimate{PromptRunes: e.PromptRunes, MaxCompletion: e.MaxTokens, ClientMax: e.ClientMaxTokens}
+	return est.Tokens(keyquota.OpChat, keyquota.Limits{CompletionReserve: 1024})
 }
 
 // rowSink collects the llmlog rows of the route.
@@ -395,6 +413,7 @@ func newChatRig(t testing.TB, rows []backends.Backend, slots, reserved int, opts
 		RetryAfterSteps:   r.disp.ExternalRetryAfterSteps,
 		Planner:           r.planner,
 		Limiter:           r.limiter,
+		Reauth:            func(_ context.Context, ca *auth.ConsumerAuth) (*auth.ConsumerAuth, error) { return ca, nil },
 	}
 	for _, o := range opts {
 		o(r)
@@ -471,7 +490,10 @@ func (a chatAnswer) envelope(t testing.TB) (code, param, typ string) {
 	return deref(e.Error.Code), deref(e.Error.Param), e.Error.Type
 }
 
-// post sends body to the route; hdr are extra request headers.
+// post sends body to the route; hdr are extra request headers. The
+// answer's header is the recorder's snapshot at the status (Result), what
+// a client receives: a header set after WriteHeader is not in it
+// (Delta-Review 4 F4-6 — the live map would show it).
 func (r *chatRig) post(t testing.TB, body string, hdr ...string) chatAnswer {
 	t.Helper()
 	recordCorpus(body)
@@ -482,7 +504,7 @@ func (r *chatRig) post(t testing.TB, body string, hdr ...string) chatAnswer {
 	}
 	w := httptest.NewRecorder()
 	r.router.ServeHTTP(w, req)
-	return chatAnswer{status: w.Code, header: w.Header(), body: w.Body.Bytes()}
+	return chatAnswer{status: w.Code, header: w.Result().Header, body: w.Body.Bytes()}
 }
 
 // chatBody is a minimal valid request for model.
