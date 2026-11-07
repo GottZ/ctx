@@ -398,10 +398,14 @@ func TestEmbedRouteDump(t *testing.T) {
 // control escapes and 0xff to the public alias, and 0xff to credentials
 // without native_dims, 503: the upstream bodies booked at eight times their
 // size). The public alias without native_dims stays 503 for plain text
-// (263.82 MiB), 0xff (295.70) and control escapes (257.17) — the reserves
-// of an unknown dimension and the scan take most of the budget; lone
-// surrogates book 255.84 MiB and are served, where 4abba96b refused all
-// four at its scan booking on top of the whole request share (259.32 MiB).
+// (269.03 MiB), 0xff (300.91), control escapes (262.38) and lone
+// surrogates (261.05) — the reserves of an unknown dimension and the scan
+// take most of the budget. Lone surrogates booked 255.84 MiB and were
+// served before the route booked every block's retry (FOLGE-E hardening 2,
+// L-4: 85 blocks × (32 KiB + 30 KiB) more, booked with the first call);
+// they are refused again, as 4abba96b and root 829a45ec refuse them (there
+// at the scan booking on top of the whole request share, here after the
+// queue — the texts fit before it, the blocks' per-call parts not).
 // Outside -short: eight-MiB bodies over the public scan.
 func TestEmbedCapBodiesAtTheDefaultBudget(t *testing.T) {
 	if testing.Short() {
@@ -411,7 +415,7 @@ func TestEmbedCapBodiesAtTheDefaultBudget(t *testing.T) {
 		"cred/input_ascii": 200, "pub/input_ascii": 200, "cred0/input_ascii": 200, "pub0/input_ascii": 503,
 		"cred/input_esc": 200, "pub/input_esc": 200, "cred0/input_esc": 200, "pub0/input_esc": 503,
 		"cred/input_ff": 200, "pub/input_ff": 200, "cred0/input_ff": 200, "pub0/input_ff": 503,
-		"cred/input_surr": 200, "pub/input_surr": 200, "cred0/input_surr": 200, "pub0/input_surr": 200,
+		"cred/input_surr": 200, "pub/input_surr": 200, "cred0/input_surr": 200, "pub0/input_surr": 503,
 		"cred/model_ff": 404, "pub/model_ff": 404, "cred0/model_ff": 404, "pub0/model_ff": 404,
 	}
 	pub := embedScanAliases()
