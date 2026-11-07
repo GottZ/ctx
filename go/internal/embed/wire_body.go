@@ -37,6 +37,18 @@ const WireFrameMax = len(`{"model":,"input":[],"options":{"num_ctx":}}`) + len("
 // one allocation per body and its rounding below this.
 const WireBodySlack = 8 << 10
 
+// WireCopyBuffer is what net/http's transport allocates per wire call to
+// copy the body onto the connection: it writes the body through io.Copy
+// over a reader limited to the Content-Length, which takes a buffer of
+// 32 KiB, or of the body's length when that is shorter — beside the body,
+// garbage after the call (FOLGE-E hardening 1: the route's per-call term
+// was measured with three-byte texts, where the buffer is a few bytes; the
+// heap gates at factor 1 found the rest, 32 KiB per block of 3 × 32 KiB).
+// A second buffer of 32 KiB (net/http's copy buffer pool) is reused across
+// calls, not allocated per call. Derived from net/http and io, not
+// policy; TestWireCallCopiesThroughOneBuffer measures it.
+const WireCopyBuffer = 32 << 10
+
 // WireStringLen is the length of s as a gateway body writes it — the
 // encoding of encoding/json without HTML escaping: quotes around it, a quote
 // and a backslash escaped to two bytes, \b \f \n \r \t to two, every other

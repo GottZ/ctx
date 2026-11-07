@@ -64,8 +64,8 @@ import (
 // of every block of an attempt before its first wire call
 // (upstreamBooking: each body's exact length, embed.WireBodyLen — internal/embed
 // writes it in one allocation of that length since FOLGE-E hardening 1 —
-// with the allocation's rounding and the wire call; its texts' part before
-// the acquire, reserveUpstreamTexts) and the log
+// with the allocation's rounding, the transport's copy buffer and the wire
+// call; its texts' part before the acquire, reserveUpstreamTexts) and the log
 // row's text of the inputs (bodyLogSize). The request share the budget stage
 // reserved (requestReserveFactor × the body) is spent first, the
 // reservation grows past it, never shrinks. A booking the budget cannot hold
@@ -881,12 +881,15 @@ func (c *embedCall) attempt(st *embedState, plan Plan, runCtx context.Context, b
 // hardening 1: internal/embed sizes the body before it writes it; the
 // json.Encoder before it allocated up to 7.105 × the body and the route
 // booked eight times it) — the allocation's rounding to a size class
-// (embed.WireBodySlack) and embedWireCallBytes for its call.
+// (embed.WireBodySlack), the transport's copy of the body onto the
+// connection (embed.WireCopyBuffer, or the body's length when shorter) and
+// embedWireCallBytes for its call.
 func (c *embedCall) upstreamBooking(b backends.Backend, model string, blocks []int) int64 {
 	var n int64
 	lo := 0
 	for _, size := range blocks {
-		n += int64(embed.WireBodyLen(b, model, c.req.inputs[lo:lo+size])) + embed.WireBodySlack + embedWireCallBytes
+		body := embed.WireBodyLen(b, model, c.req.inputs[lo:lo+size])
+		n += int64(body) + embed.WireBodySlack + int64(min(body, embed.WireCopyBuffer)) + embedWireCallBytes
 		lo += size
 	}
 	return n
@@ -904,30 +907,36 @@ func (c *embedCall) upstreamTexts() int64 {
 	return n
 }
 
-// embedWireCallBytes is what one wire call allocates beside its body — the
-// request, its headers and traces, the block's contexts and lease, the
-// answer's reader and decoder state. A request of k blocks makes k calls
-// (up to embedding.max_inputs one-input blocks when a row's capacity E is
-// 1). Measured over the route: 12 943 bytes per call (TotalAlloc of one
-// request of 256 three-byte texts at E = 1 … 256, the slope over 1 … 256
-// blocks, the in-process engine's server side included — an upper bound of
-// the route's own), rounded up to the next 4 KiB (FOLGE-E, bau report).
-// The only term of the route that grows with something other than the
-// body's bytes and its nesting (S-2): k, and k is capped by
-// modelalias.CeilingEmbeddingMaxInputs (every block holds an input), so a
-// request books at most EmbedWireCallCeiling (4 MiB) for its calls — for
-// the budget floor (V39) a constant at that ceiling. A derived mechanism
-// constant, not policy; TestEmbedWireCallReserveIsTheMeasuredOne fails when
-// a call needs more or more than one 4-KiB step less.
-const embedWireCallBytes = 16 << 10
+// embedWireCallBytes is what one wire call allocates beside its body and
+// its copy (embed.WireCopyBuffer) — the request, its headers and traces,
+// the block's contexts and lease, the answer's reader and decoder state. A
+// request of k blocks makes k calls (up to embedding.max_inputs one-input
+// blocks when a row's capacity E is 1). Measured over the route (TotalAlloc
+// of one request of 256 three-byte texts at E = 1 … 256, the slope over
+// 1 … 256 blocks, the in-process engine's server side included — an upper
+// bound of the route's own): 12 943 bytes per call before FOLGE-E
+// hardening 1, 12 098 … 13 241 bytes after it (18 runs; the json.Encoder's
+// allocations of the tiny bodies are gone), rounded up to the next 2 KiB —
+// the next 4 KiB (16 KiB) sat within the measurements' spread of the pin's
+// lower bound (FOLGE-E, bau report §Härtung 1). The only term of the route
+// that grows with something other than the body's bytes and its nesting
+// (S-2): k, and k is capped by modelalias.CeilingEmbeddingMaxInputs (every
+// block holds an input), so a request books at most EmbedWireCallCeiling
+// (3.5 MiB) for its calls — for the budget floor (V39) a constant at that
+// ceiling. A derived mechanism constant, not policy;
+// TestEmbedWireCallReserveIsTheMeasuredOne fails when a call needs more or
+// more than one 4-KiB step less.
+const embedWireCallBytes = 14 << 10
 
 // The terms of the embeddings route as the configuration's budget floor
 // reads them (FOLGE-E, lead decision 5; V39 counts none of them yet — the
 // budget dimensioning before the flip does): EmbedInputSlotReserve per
 // input (at most modelalias.CeilingEmbeddingMaxInputs of them),
-// EmbedWireCallReserve and EmbedUpstreamSlack per block of an attempt and
-// their ceilings at a block per input (EmbedWireCallCeiling,
-// EmbedUpstreamSlackCeiling); the upstream bodies themselves are the texts
+// EmbedWireCallReserve, EmbedUpstreamSlack and EmbedWireCopyReserve per
+// block of an attempt and their ceilings at a block per input
+// (EmbedWireCallCeiling, EmbedUpstreamSlackCeiling, EmbedWireCopyCeiling;
+// the copy is the body's length when that is shorter, so the three
+// ceilings are an upper bound); the upstream bodies themselves are the texts
 // as the wire encodes them (embed.WireStringLen, at most six bytes per
 // decoded byte) and embed.WireFrameMax with the model per block.
 // EmbedEncodingRawMax and EmbedDimensionsRawMax are the longest raw values
@@ -939,6 +948,8 @@ const (
 	EmbedWireCallCeiling      = embedWireCallBytes * modelalias.CeilingEmbeddingMaxInputs
 	EmbedUpstreamSlack        = embed.WireBodySlack
 	EmbedUpstreamSlackCeiling = embed.WireBodySlack * modelalias.CeilingEmbeddingMaxInputs
+	EmbedWireCopyReserve      = embed.WireCopyBuffer
+	EmbedWireCopyCeiling      = embed.WireCopyBuffer * modelalias.CeilingEmbeddingMaxInputs
 	EmbedEncodingRawMax       = encodingRawMax
 	EmbedDimensionsRawMax     = jsonIntMax
 )

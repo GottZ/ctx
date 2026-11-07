@@ -177,20 +177,23 @@ func upstreamRows() []backends.Backend {
 
 // checkUpstreamBooking compares the booking of an attempt of blocks on row b
 // with the bodies the wire sends (embedWireReplica, the encoder pinned to the
-// route's bodies): exactly their bytes and, per block, embed.WireBodySlack
-// and embedWireCallBytes — and at least the texts booked before the acquire.
+// route's bodies): exactly their bytes, the transport's copy of each
+// (embed.WireCopyBuffer, the body's length when shorter) and, per block,
+// embed.WireBodySlack and embedWireCallBytes — and at least the texts booked
+// before the acquire.
 func checkUpstreamBooking(t *testing.T, b backends.Backend, model string, inputs []string, blocks []int) {
 	t.Helper()
-	sent, lo := 0, 0
+	sent, copied, lo := 0, 0, 0
 	for _, size := range blocks {
-		sent += len(embedWireReplica(model, inputs[lo:lo+size], b.Protocol == backends.ProtocolOllama, b.NumCtx))
+		n := len(embedWireReplica(model, inputs[lo:lo+size], b.Protocol == backends.ProtocolOllama, b.NumCtx))
+		sent, copied = sent+n, copied+min(n, embed.WireCopyBuffer)
 		lo += size
 	}
 	c := &embedCall{req: &embedRequest{inputs: inputs}}
 	booked := c.upstreamBooking(b, model, blocks)
-	if want := int64(sent) + int64(len(blocks))*(embed.WireBodySlack+embedWireCallBytes); booked != want {
-		t.Errorf("%s/%d, model %q, blocks %v: the attempt books %d B, the bodies hold %d B (want %d: the bodies, %d B slack and %d B per call)",
-			b.Protocol, b.NumCtx, model, blocks, booked, sent, want, embed.WireBodySlack, embedWireCallBytes)
+	if want := int64(sent+copied) + int64(len(blocks))*(embed.WireBodySlack+embedWireCallBytes); booked != want {
+		t.Errorf("%s/%d, model %q, blocks %v: the attempt books %d B, the bodies hold %d B, their copies %d B (want %d: both, %d B slack and %d B per call)",
+			b.Protocol, b.NumCtx, model, blocks, booked, sent, copied, want, embed.WireBodySlack, embedWireCallBytes)
 	}
 	if texts := c.upstreamTexts(); texts > booked {
 		t.Errorf("%s/%d, blocks %v: %d B of texts booked before the acquire, more than the attempt's %d B", b.Protocol, b.NumCtx, blocks, texts, booked)
@@ -199,11 +202,12 @@ func checkUpstreamBooking(t *testing.T, b backends.Backend, model string, inputs
 
 // TestEmbedUpstreamBookingHoldsTheBodies: the booking of an attempt is the
 // bodies of its blocks byte for byte (factor 1: internal/embed writes each
-// in one allocation of its exact length, FOLGE-E hardening 1), the slack and
-// the wire call per block, on the openai and the ollama wire (num_ctx up to
-// 20 digits), for texts of every escape class and blocks of every split.
+// in one allocation of its exact length, FOLGE-E hardening 1), the
+// transport's copy of each, the slack and the wire call per block, on the
+// openai and the ollama wire (num_ctx up to 20 digits), for texts of every
+// escape class and blocks of every split (one block past the copy buffer).
 func TestEmbedUpstreamBookingHoldsTheBodies(t *testing.T) {
-	inputs := []string{"a", "<b>&\"c\"", "\u2028\x01\n", "ä😀", strings.Repeat("x", 5000), "\ufffd"}
+	inputs := []string{"a", "<b>&\"c\"", "\u2028\x01\n", "ä😀", strings.Repeat("x", 40<<10), "\ufffd"}
 	for _, model := range []string{"m", "a-very-long/model:name\u2028\x01"} {
 		for _, b := range upstreamRows() {
 			for _, blocks := range [][]int{{6}, {3, 3}, {1, 1, 1, 1, 1, 1}, {5, 1}} {
