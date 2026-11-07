@@ -72,6 +72,7 @@ func revoked(e unitEntry) bool { return errors.Is(context.Cause(e.ctx), auth.Err
 // TestInflightCancelKeyCounts: CancelKey ends every running request of the
 // key and counts them — also the ones already ending for the same reason —,
 // leaves other keys alone, forgets the hash; a key without requests is 0.
+// CancelConsumer counts the same way.
 func TestInflightCancelKeyCounts(t *testing.T) {
 	f := &fakeLive{}
 	var forgotten []string
@@ -96,6 +97,11 @@ func TestInflightCancelKeyCounts(t *testing.T) {
 	}
 	if n := r.CancelConsumer("c1"); n != 1 || !revoked(b) {
 		t.Errorf("CancelConsumer(c1) = %d (k2 revoked %v), want 1", n, revoked(b))
+	}
+	// The same count for a consumer (Fremd-Review 2 Y8): a second
+	// model-consumer-delete while the request still unwinds counts it.
+	if n := r.CancelConsumer("c1"); n != 1 {
+		t.Errorf("a second CancelConsumer(c1) while k2's request still unwinds = %d, want 1 (it ends for the same reason)", n)
 	}
 	b.unreg()
 	if s := r.stats(); s.running != 0 || s.keys != 0 || s.cancelled != 3 {
