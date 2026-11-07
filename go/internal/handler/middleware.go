@@ -620,7 +620,7 @@ func MaxBodySizeStrict(maxBytes int64) func(http.Handler) http.Handler {
 }
 
 // writeHouseTooLarge is the house-envelope 413 of MaxBodySizeStrict.
-func writeHouseTooLarge(w http.ResponseWriter, maxBytes int64) {
+func writeHouseTooLarge(w http.ResponseWriter, _ *http.Request, maxBytes int64) {
 	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
 		"success": false,
 		"error":   fmt.Sprintf("request body exceeds %s cap", byteCap(maxBytes)),
@@ -629,11 +629,12 @@ func writeHouseTooLarge(w http.ResponseWriter, maxBytes int64) {
 
 // MaxBodySizeStrictWith is MaxBodySizeStrict with the cap and the 413 writer
 // supplied by the surface that mounts it (design/02 §4.2 stage 3): the
-// OpenAI-compatible gateway answers in its own envelope (oai.
-// WriteRequestTooLarge), and its cap is the hot gateway.max_request_bytes, so
-// maxBytes is read once per request. Same mounting rule — AFTER the
+// OpenAI-compatible gateway answers in its own envelope and counts the
+// refusal in its ledger (oai.RefuseRequestTooLarge, which needs the request
+// for its access record), and its cap is the hot gateway.max_request_bytes,
+// so maxBytes is read once per request. Same mounting rule — AFTER the
 // authenticating middleware — and the same residual for undeclared lengths.
-func MaxBodySizeStrictWith(maxBytes func() int64, onTooLarge func(http.ResponseWriter, int64)) func(http.Handler) http.Handler {
+func MaxBodySizeStrictWith(maxBytes func() int64, onTooLarge func(http.ResponseWriter, *http.Request, int64)) func(http.Handler) http.Handler {
 	if maxBytes == nil || onTooLarge == nil {
 		panic("handler.MaxBodySizeStrictWith: nil cap getter or writer")
 	}
@@ -641,7 +642,7 @@ func MaxBodySizeStrictWith(maxBytes func() int64, onTooLarge func(http.ResponseW
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			limit := maxBytes()
 			if r.ContentLength > limit {
-				onTooLarge(w, limit)
+				onTooLarge(w, r, limit)
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, limit)

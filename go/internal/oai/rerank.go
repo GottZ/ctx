@@ -24,6 +24,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
@@ -229,8 +230,7 @@ func (c *rerankCall) refuse(code, message string, shouldRetry bool) {
 }
 
 func (c *rerankCall) overloaded() {
-	c.rec.Reason = CodeServerOverloaded
-	WriteOverloaded(c.w)
+	refuseOverloaded(c.rec, c.w)
 }
 
 func (c *rerankCall) internal(msg string, args ...any) {
@@ -325,8 +325,7 @@ func (c *rerankCall) readBody() ([]byte, bool) {
 	case errors.Is(err, ErrBudgetExhausted):
 		c.overloaded()
 	case errors.As(err, &tooLarge):
-		c.rec.Reason = CodeRequestTooLarge
-		WriteRequestTooLarge(c.w, tooLarge.Limit)
+		refuseTooLarge(c.rec, c.w, tooLarge.Limit)
 	case c.client.Err() != nil:
 		// the client went away while sending
 	default:
@@ -354,9 +353,11 @@ func (c *rerankCall) resolve(name string, overlong bool) bool {
 		grantReadFailed(c.w, c.r, err)
 		return false
 	case !found:
+		c.rec.NoteRejection(keyquota.RejectModel, keyquota.DetailNotFound)
 		refuseModelNotFound(c.w, c.r)
 		return false
 	case a.Kind != modelalias.KindRerank:
+		c.rec.NoteRejection(keyquota.RejectModel, keyquota.DetailNotSupported)
 		c.refuse(CodeModelNotSupported, rerankKindMessage, false)
 		return false
 	}
@@ -418,6 +419,7 @@ func (c *rerankCall) chain() ([]backends.Backend, bool) {
 	case errors.As(err, &ne):
 		slog.Warn("gateway: no eligible backend", "alias", c.alias.Name, "role", ne.Role, "required", string(ne.Required),
 			"excluded", fmt.Sprintf("%+v", ne.Excluded), "request_id", c.w.Header().Get("X-Request-ID"))
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailEgressDenied)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return nil, false
 	case err != nil:
@@ -429,12 +431,14 @@ func (c *rerankCall) chain() ([]backends.Backend, bool) {
 	switch {
 	case errors.As(err, &qe):
 		writeRetryAfter(c.w.Header(), untilNextHour(time.Now()))
+		c.rec.NoteRejection(keyquota.RejectQuota, tenantQuotaDetail(qe))
 		c.refuse(CodeInsufficientQuota, quotaMessage, false)
 		return nil, false
 	case err != nil:
 		c.internal("tenant quota gate refused the request (wiring defect)", "error", err)
 		return nil, false
 	case len(gated) == 0:
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailEgressDenied)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return nil, false
 	}
@@ -808,6 +812,7 @@ func (c *rerankCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, 
 	if len(attempts) == 0 {
 		slog.Warn("gateway: the walk found no row to try", "alias", c.alias.Name, "role", c.alias.Role,
 			"error", err, "request_id", c.w.Header().Get("X-Request-ID"))
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailNotOffered)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Code: CodeNoEligibleBackend}}
 	}

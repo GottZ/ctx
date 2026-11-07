@@ -109,7 +109,7 @@ func TestShutdownSequenceSettlesLLMLog(t *testing.T) {
 		}
 	}}
 
-	shutdownSequence(&http.Server{}, sched, pool, func() {})
+	shutdownSequence(&http.Server{}, sched, pool, func() {}, func() {})
 	llmlog.Record(pool, llmlog.Entry{Pipeline: "w06-1-late", Model: "m", Host: "h"})
 	closed := make(chan struct{})
 	go func() { pool.Close(); close(closed) }()
@@ -165,7 +165,7 @@ func TestShutdownSettlesHTTPRowsBeforeSchedulerWait(t *testing.T) {
 		atWait = countLLMLogRows(t, ref, "w06-1-http-before-wait")
 	}}
 
-	shutdownSequence(&http.Server{}, sched, pool, func() {})
+	shutdownSequence(&http.Server{}, sched, pool, func() {}, func() {})
 
 	t.Logf("HTTP-side rows landed when the teardown entered scheduler.Wait: %d of %d", atWait, n)
 	if atWait != n {
@@ -223,7 +223,7 @@ func TestShutdownGatewayStopRunsAlongsideTheSettle(t *testing.T) {
 	}
 	sched := drainingScheduler{wait: func() { _ = lock.Rollback(ctx) }}
 	begin := time.Now()
-	shutdownSequence(&http.Server{}, sched, pool, timed)
+	shutdownSequence(&http.Server{}, sched, pool, gw.flushRejections, timed)
 	total := time.Since(begin)
 	t.Logf("shutdown sequence %s, gateway stop %s (budgets: gateway stop %s, settle %s)",
 		total.Round(time.Millisecond), stopTook.Round(time.Millisecond), gatewayStopTimeout, llmlogSettleTimeout)

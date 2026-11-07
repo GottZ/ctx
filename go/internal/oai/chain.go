@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/modelalias"
 )
 
@@ -168,4 +169,16 @@ func noEligible(err error, role string, required backends.Sensitivity) error {
 		ne.Role, ne.Required = role, required
 	}
 	return err
+}
+
+// tenantQuotaDetail is the ledger detail of a tenant-quota refusal
+// (design/06 §4.1 step 6): the budget the tenant gate named.
+func tenantQuotaDetail(qe *backends.ErrQuotaExceeded) string {
+	switch qe.Reason {
+	case "daily_calls":
+		return keyquota.DetailTenantCalls
+	case "cost_budget":
+		return keyquota.DetailTenantCost
+	}
+	return keyquota.DetailTenant
 }

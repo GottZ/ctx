@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/llmusage"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/settings"
@@ -100,12 +101,13 @@ func gatewayIngressAssert(c *config.Config, in *fedhop.Ingress) error {
 
 // modelGateway is the process-wide part of the model groups (design/02 §4.2,
 // masterplan K23): ONE access log, ONE model-key door, ONE in-flight budget,
-// ONE usage batcher and ONE per-consumer meter (W06-10, design/06 §4.2
-// "Single-Process-Annahme"), shared by /v1 and (W02-10) /v2 — so two groups
-// never hold twice the door's database share, twice the budget, two
-// rejection windows or two buckets per consumer. newRouter builds it and
-// mounts the groups from it; main drives its background loops (run,
-// startModelGateway).
+// ONE usage batcher, ONE per-consumer meter (W06-10, design/06 §4.2
+// "Single-Process-Annahme") and ONE refusal ledger with its flusher
+// (W06-12), shared by /v1 and (W02-10) /v2 — so two groups never hold twice
+// the door's database share, twice the budget, two rejection windows, two
+// ledgers or two buckets per consumer. newRouter builds it and mounts the
+// groups from it; main drives its background loops (run,
+// startModelGateway) and the ledger's shutdown flush (flushRejections).
 type modelGateway struct {
 	settings func() oai.Settings
 	access   *handler.GatewayAccessLog
@@ -113,6 +115,8 @@ type modelGateway struct {
 	usage    *store.ModelKeyUsage
 	budget   oai.Budget
 	meter    *keyquota.Meter
+	ledger   *keyquota.Ledger
+	flusher  *rejectionFlusher
 }
 
 // newModelGateway wires the gateway over pool and the live config store.
@@ -125,10 +129,14 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 	// from the rollup (until it lands, an unseeded meter answers warming).
 	meter := keyquota.New(time.Now)
 	meter.MarkSeeded()
+	ledger := keyquota.NewLedger(time.Now)
+	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get, Ledger: ledger})
 	return &modelGateway{
 		meter:    meter,
+		ledger:   ledger,
+		flusher:  newRejectionFlusher(ledger, access, func(ctx context.Context, rows []llmusage.RejectionRow) error { return llmusage.FlushRejections(ctx, pool, rows) }),
 		settings: get,
-		access:   handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get}),
+		access:   access,
 		door: handler.ModelAuth(handler.ModelAuthConfig{
 			Pool: pool, Settings: get, Usage: usage, Reject: renderModelAuthRejection,
 			TrustedProxy: strings.TrimSpace(os.Getenv(handler.EnvTrustedProxy)),
@@ -145,7 +153,7 @@ func (g *modelGateway) group(ingress *fedhop.Ingress, maxDepth func() int, route
 	return modelGroupDeps{
 		access: g.access, gate: oai.EnabledGate(g.settings), door: g.door, ingress: ingress, maxDepth: maxDepth,
 		inner: []func(http.Handler) http.Handler{
-			handler.MaxBodySizeStrictWith(func() int64 { return g.settings().MaxRequestBytes }, oai.WriteRequestTooLarge),
+			handler.MaxBodySizeStrictWith(func() int64 { return g.settings().MaxRequestBytes }, oai.RefuseRequestTooLarge),
 			oai.InflightBudget(&g.budget, g.settings),
 		},
 		routes: routes,
@@ -153,14 +161,16 @@ func (g *modelGateway) group(ingress *fedhop.Ingress, maxDepth func() int, route
 }
 
 // run drives the gateway's three background loops until ctx ends — the
-// access log's rejection window, the batched last_used_at flush and the
+// rejection flusher (W06-12: the refusal ledger every 10 s, and the access
+// log's rejection window with it), the batched last_used_at flush and the
 // in-flight registry's worker (W01-8: the liveness checks a NOTIFY or a
 // listener reconnect asks for, and the periodic sweep) — and returns once
 // the first two have made their final flush (the usage flush is bounded by
-// store.ModelKeyUsageFinalFlushTimeout) and the worker has stopped.
+// store.ModelKeyUsageFinalFlushTimeout, the ledger's by
+// rejectionFlushTimeout) and the worker has stopped.
 func (g *modelGateway) run(ctx context.Context) {
 	var wg sync.WaitGroup
-	wg.Go(func() { g.access.Run(ctx) })
+	wg.Go(func() { g.flusher.run(ctx) })
 	wg.Go(func() { g.usage.Run(ctx) })
 	wg.Go(func() { g.door.Inflight().Run(ctx) })
 	wg.Wait()
@@ -246,6 +256,110 @@ func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config
 	return d
 }
 
+// rejectionFlushInterval is the cadence of the rejection flusher (design/06
+// §4.2 "alle 10 s, hardcoded-legitim: Telemetrie, nicht Enforcement"): it
+// decides how fresh the refusal ledger's table and the throttled refusal
+// line are, never whether a request is refused — a constant, not a setting.
+const rejectionFlushInterval = 10 * time.Second
+
+// rejectionFlusher is the one writer of context_llm_rejections_hourly
+// (design/06 §4.2 "Rejection-Flusher", W06-12): it drains the process's
+// refusal ledger every rejectionFlushInterval and once at shutdown, writes
+// the counts in one statement (llmusage.FlushRejections), and feeds the same
+// counts into the access log's rejection window, whose lines it writes when
+// a window is due — one goroutine for the table and the log line (no second
+// window). A failed write keeps the counts in retry for the next flush
+// (capped, keyquota.Ledger.Restore); the window has counted them already, so
+// a retry never counts a refusal twice in the log.
+type rejectionFlusher struct {
+	ledger *keyquota.Ledger
+	access *handler.GatewayAccessLog
+	write  func(context.Context, []llmusage.RejectionRow) error
+
+	mu      sync.Mutex // one flush at a time: the ticks and the shutdown step
+	retry   *keyquota.Ledger
+	dropped uint64 // ledger.Dropped() at the last report
+}
+
+func newRejectionFlusher(ledger *keyquota.Ledger, access *handler.GatewayAccessLog, write func(context.Context, []llmusage.RejectionRow) error) *rejectionFlusher {
+	return &rejectionFlusher{ledger: ledger, access: access, write: write, retry: keyquota.NewLedger(time.Now)}
+}
+
+// run flushes every rejectionFlushInterval until ctx ends, then makes the
+// final flush.
+func (f *rejectionFlusher) run(ctx context.Context) {
+	t := time.NewTicker(rejectionFlushInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			f.final()
+			return
+		case <-t.C:
+			tctx, cancel := context.WithTimeout(ctx, rejectionFlushTimeout)
+			f.flush(tctx)
+			cancel()
+			f.access.FlushDue()
+		}
+	}
+}
+
+// final is the shutdown flush: the ledger (bounded by rejectionFlushTimeout,
+// on a context of its own — the cancelled one cannot carry it) and the
+// window's last lines.
+func (f *rejectionFlusher) final() {
+	ctx, cancel := context.WithTimeout(context.Background(), rejectionFlushTimeout)
+	defer cancel()
+	f.flush(ctx)
+	f.access.Flush()
+}
+
+// flush drains the ledger into the window and, with whatever a failed flush
+// left in retry, into the table.
+func (f *rejectionFlusher) flush(ctx context.Context) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fresh := f.ledger.Drain()
+	f.access.CountRejections(fresh)
+	batch := append(f.retry.Drain(), fresh...)
+	if len(batch) > 0 {
+		if err := f.write(ctx, rejectionRows(batch)); err != nil {
+			lost := f.retry.Restore(batch)
+			slog.Warn("gateway: refusal ledger flush failed, the counts wait for the next flush",
+				"error", err, "cells", len(batch), "lost_refusals", lost)
+		}
+	}
+	if d := f.ledger.Dropped(); d != f.dropped {
+		f.dropped = d
+		slog.Error("gateway: refusals with a reason outside the ledger vocabulary or a consumer that is no UUID were not counted (a hook defect)",
+			"dropped_total", d)
+	}
+}
+
+// rejectionRows adapts drained ledger cells to the flush rows (internal/
+// llmusage is a leaf and does not know keyquota).
+func rejectionRows(deltas []keyquota.RejectionDelta) []llmusage.RejectionRow {
+	out := make([]llmusage.RejectionRow, 0, len(deltas))
+	for _, d := range deltas {
+		out = append(out, llmusage.RejectionRow{
+			Bucket: d.Bucket, ConsumerID: d.ConsumerID, Op: d.Op, Alias: d.Alias, Class: d.Class, Target: d.Target,
+			Reason: d.Reason, Detail: d.Detail, N: d.N, WaitMsSum: d.WaitMsSum, WaitN: d.WaitN,
+		})
+	}
+	return out
+}
+
+// flushRejections is the shutdown step "ledger flush" (design/06 §4.2
+// Shutdown-Reihenfolge step 3): after srv.Shutdown no request can be
+// refused any more, so the final flush carries every refusal of the drained
+// requests. Bounded by rejectionFlushTimeout; the flusher's own final flush
+// when the loops stop finds the ledger empty then.
+func (g *modelGateway) flushRejections() {
+	begin := time.Now()
+	g.flusher.final()
+	slog.Info("gateway: refusal ledger flushed at shutdown", "elapsed", time.Since(begin).Round(time.Millisecond))
+}
+
 // meterLimiter adapts the per-consumer meter to the Limiter hook of the
 // /v1 routes (W06-10, lead decision 2: internal/keyquota stays a leaf, the
 // adapter lives here like chainFederation). Per request it reads the meter
@@ -283,9 +397,15 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 	res, d := l.meter.Admit(sub,
 		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: s.Concurrency},
 		keyquota.Estimate{PromptRunes: est.PromptRunes, MaxCompletion: est.MaxTokens, ClientMax: est.ClientMaxTokens, InputRunes: est.InputRunes})
+	// The meter's refusal in the refusal ledger (design/06 §4.1 steps 7–9,
+	// W06-12): its reason and detail are the meter's (Decision.LedgerReason;
+	// an invalid subject declares nothing), the declaration goes on the
+	// request's record, which this adapter holds and the leaf does not.
+	reason, detail := d.LedgerReason()
+	oai.NoteRejection(ctx, reason, detail)
 	switch {
 	case d.Allowed:
-		return meterReservation{res}, nil
+		return meterReservation{Reservation: res, rec: oai.AccessRecordFrom(ctx)}, nil
 	case d.Reason == keyquota.ReasonInvalid:
 		slog.Error("gateway: the meter refused an invalid subject (wiring defect)", "op", est.Op,
 			"consumer", sub.ConsumerID != "", "tenant", sub.TenantID != "", "rpm", lim.RPM, "tpm", lim.TPM, "concurrency", s.Concurrency)
@@ -301,9 +421,21 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 }
 
 // meterReservation is a meter reservation as the route holds it: the usage
-// of the wire arrives as dispatch.Usage. Keep, Abort, Reject and Headers
-// are the meter's.
-type meterReservation struct{ *keyquota.Reservation }
+// of the wire arrives as dispatch.Usage. Keep, Abort and Headers are the
+// meter's; Reject also hands the vain queue wait to the request's record —
+// the admission writer declared the L2 refusal there (W06-12).
+type meterReservation struct {
+	*keyquota.Reservation
+	rec *oai.AccessRecord
+}
+
+// Reject ends the reservation of a request the dispatcher refused (the
+// meter's Reject: the charge goes back, the slot is free) and sets the
+// refusal's queue wait for the ledger (wait_ms_sum, wait_n; B-06-25).
+func (r meterReservation) Reject(reason string, waited time.Duration) {
+	r.Reservation.Reject(reason, waited)
+	r.rec.NoteRejectionWait(waited)
+}
 
 func (r meterReservation) Settle(u dispatch.Usage) {
 	r.Reservation.Settle(keyquota.Usage{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens})

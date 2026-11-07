@@ -150,7 +150,7 @@ func TestModelGroupPeerIngressOrder(t *testing.T) {
 	} {
 		mountModelGroup(r, prefix, modelGroupDeps{
 			access: testAccessLog(), gate: oai.EnabledGate(get), door: door, ingress: ingress, maxDepth: func() int { return 3 },
-			inner:  []func(http.Handler) http.Handler{seen.stage, handler.MaxBodySizeStrictWith(func() int64 { return bodyCap }, oai.WriteRequestTooLarge)},
+			inner:  []func(http.Handler) http.Handler{seen.stage, handler.MaxBodySizeStrictWith(func() int64 { return bodyCap }, oai.RefuseRequestTooLarge)},
 			routes: routes,
 		})
 	}

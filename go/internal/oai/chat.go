@@ -22,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/fedhop"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/modelalias"
@@ -269,8 +270,7 @@ func (c *chatCall) serve() {
 	}
 	depth := jsonDepth(body)
 	if !c.cover(depth * jsonDepthStateBytes) { // the JSON check's nesting state, booked before it runs
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 		return
 	}
 	req, perr := parseTopLevel(body)
@@ -301,8 +301,7 @@ func (c *chatCall) serve() {
 	}
 	required := c.sensitivity()
 	if !c.coverScan(required, body, depth) {
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 		return
 	}
 	c.required = c.d.Federation.Scan(required, body)
@@ -386,17 +385,14 @@ func (c *chatCall) readBody() ([]byte, bool) {
 		}
 		c.held, c.spent = requestReserveFactor*reserved, 0
 		if !c.cover(spent) { // a small undeclared body's first chunk can pass its share
-			c.rec.Reason = CodeServerOverloaded
-			WriteOverloaded(c.w)
+			refuseOverloaded(c.rec, c.w)
 			return nil, false
 		}
 		return body, true
 	case errors.Is(err, ErrBudgetExhausted):
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 	case errors.As(err, &tooLarge):
-		c.rec.Reason = CodeRequestTooLarge
-		WriteRequestTooLarge(c.w, tooLarge.Limit)
+		refuseTooLarge(c.rec, c.w, tooLarge.Limit)
 	case c.client.Err() != nil:
 		// the client went away while sending
 	default:
@@ -534,8 +530,7 @@ func (c *chatCall) reserveUpstream(n int) error {
 // errParseOverloaded is the in-flight budget's 503.
 func (c *chatCall) refuseParam(perr *paramError) {
 	if perr == errParseOverloaded {
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 		return
 	}
 	i := slices.IndexFunc(codes, func(s CodeSpec) bool { return s.Code == perr.code })
@@ -587,9 +582,11 @@ func (c *chatCall) resolve(name string, overlong bool) bool {
 		grantReadFailed(c.w, c.r, err)
 		return false
 	case !found:
+		c.rec.NoteRejection(keyquota.RejectModel, keyquota.DetailNotFound)
 		refuseModelNotFound(c.w, c.r)
 		return false
 	case a.Kind != modelalias.KindChat:
+		c.rec.NoteRejection(keyquota.RejectModel, keyquota.DetailNotSupported)
 		c.refuse(CodeModelNotSupported, modelKindMessage, false)
 		return false
 	}
@@ -614,8 +611,7 @@ func (c *chatCall) reserveAnswer() bool {
 		share = c.s.MaxStreamFrameBytes
 	}
 	if !res.Grow(2 * share) {
-		c.rec.Reason = CodeServerOverloaded
-		WriteOverloaded(c.w)
+		refuseOverloaded(c.rec, c.w)
 		return false
 	}
 	return true
@@ -644,6 +640,7 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 	case errors.As(err, &ne):
 		slog.Warn("gateway: no eligible backend", "alias", c.alias.Name, "role", ne.Role, "required", string(ne.Required),
 			"excluded", fmt.Sprintf("%+v", ne.Excluded), "request_id", c.w.Header().Get("X-Request-ID"))
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailEgressDenied)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return nil, false
 	case err != nil:
@@ -655,12 +652,14 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 	switch {
 	case errors.As(err, &qe):
 		writeRetryAfter(c.w.Header(), untilNextHour(time.Now()))
+		c.rec.NoteRejection(keyquota.RejectQuota, tenantQuotaDetail(qe))
 		c.refuse(CodeInsufficientQuota, quotaMessage, false)
 		return nil, false
 	case err != nil:
 		c.internal("tenant quota gate refused the request (wiring defect)", "error", err)
 		return nil, false
 	case len(gated) == 0:
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailEgressDenied)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return nil, false
 	}
@@ -1066,8 +1065,7 @@ func (c *chatCall) outcomeError(plan Plan, attempts []llm.ChainAttempt, err erro
 		// reservation settles or keeps its charge (answer) — never a full
 		// refund after the wire (W06-10). A committed stream gets it as its
 		// error frame, never a second status (reply, Z2).
-		c.rec.Reason = CodeServerOverloaded
-		c.reply(WriteOverloaded)
+		c.reply(func(w http.ResponseWriter) { refuseOverloaded(c.rec, w) })
 		finish := llmlog.FinishError
 		if st.wired == 0 {
 			finish = llmlog.FinishAborted
@@ -1088,6 +1086,7 @@ func (c *chatCall) outcomeError(plan Plan, attempts []llm.ChainAttempt, err erro
 		// every row window-skipped) — nothing eligible, no upstream fault.
 		slog.Warn("gateway: the walk found no row to try", "alias", c.alias.Name, "role", c.alias.Role,
 			"error", err, "request_id", c.w.Header().Get("X-Request-ID"))
+		c.rec.NoteRejection(keyquota.RejectCapacity, keyquota.DetailNotOffered)
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Code: CodeNoEligibleBackend}}
 	}

@@ -171,19 +171,6 @@ internal/handler/v1door/v1door.go	probe.ServeHTTP	# v1door: integration-getaggte
 internal/handler/v1door/v1door.go	probe.take	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	routeTargets	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	underModelPrefix	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
-internal/keyquota/ledger.go	Ledger.Drain	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	Ledger.Dropped	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	Ledger.Note	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	Ledger.Restore	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	NewLedger	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	bound	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	compareDelta	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	isHex	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	isUUID	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/keyquota/ledger.go	ledgerKeyOf	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/llmusage/rejections.go	FlushRejections	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/llmusage/rejections.go	compareRejectionCell	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
-internal/llmusage/rejections.go	mergeRejectionRows	# wartet: W06-12 Teil 2 (Rejection-Flusher in cmd/ctxd, Hooks am Zugriffslog) — Commit 1 trägt nur Migration 167 und den Ledger-Kern
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
 internal/modelkey/modelkey.go	Key.GoString	# Hint-Darstellung für fmt %#v (W01-2 Abweichung b; den Leak-Schutz trägt der Pointer in Key, gepinnt in TestKeyRendersAsHint). Nur implizit erreichbar: rot wird die Zeile erst, wenn ein Produktionspfad einen Key in ein Interface gibt — dann zuerst diesen Pfad prüfen (TestKeyNeverPrintsBody deckt die Ausgabe), dann löschen
