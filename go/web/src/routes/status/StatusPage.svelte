@@ -16,6 +16,7 @@
   import { StatusStore } from './status-store.svelte'
   import BackendsTile from './BackendsTile.svelte'
   import DispatchTile from './DispatchTile.svelte'
+  import GatewayTile from './GatewayTile.svelte'
   import DreamTile from './DreamTile.svelte'
   import LlmlogTable from './LlmlogTable.svelte'
 
@@ -298,6 +299,7 @@
     <DreamTile dream={s.dream} onApplied={(r) => status.applyDream(r)} />
     <BackendsTile backends={s.backends} />
     <DispatchTile dispatch={s.dispatch} dispatchTenant={s.dispatch_tenant} />
+    <GatewayTile status={s} />
     <LlmlogTable complete={s.llm_24h_complete} live={llmcalls.rows} refetch={llmcalls.refetchToken} />
   {/if}
 </section>
