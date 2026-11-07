@@ -2,8 +2,10 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -116,19 +118,51 @@ func (h *ManageHandler) previewChain(w http.ResponseWriter, r *http.Request, ar 
 		writeConsumerStoreError(w, r, err, "model-alias-preview")
 		return
 	}
-	ca := previewConsumerAuth(c)
-	pv, err := h.chainPreview(previewContext(r.Context(), ca), ca, d.Alias)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "model-alias-preview: chain dry run failed", "consumer_id", c.ID, "error", err)
-		writeJSONCode(w, http.StatusServiceUnavailable, "service_unavailable", map[string]any{
-			"success": false, "error": "model-alias-preview: the chain dry run failed",
-		})
-		return
+	door, err := h.previewDoorNotes(r.Context(), c)
+	if err == nil {
+		ca := previewConsumerAuth(c)
+		var pv oai.ChainPreview
+		if pv, err = h.chainPreview(previewContext(r.Context(), ca), ca, d.Alias); err == nil {
+			pv.Notes = append(pv.Notes, door...)
+			writeJSON(w, http.StatusOK, previewAnswer{Success: true, ConsumerID: c.ID, ChainPreview: pv})
+			return
+		}
 	}
+	slog.ErrorContext(r.Context(), "model-alias-preview: chain dry run failed", "consumer_id", c.ID, "error", err)
+	writeJSONCode(w, http.StatusServiceUnavailable, "service_unavailable", map[string]any{
+		"success": false, "error": "model-alias-preview: the chain dry run failed",
+	})
+}
+
+// previewDoorNotes are the door gates the consumer's keys would fail now
+// (ctx_model_auth, migration 161): gate 2 the consumer is active, gate 3 its
+// tenant is active, gate 4 its tenant still owns its tenant_scope. The
+// preview still computes the chain — what the consumer's configuration
+// reaches — and names why the door refuses.
+func (h *ManageHandler) previewDoorNotes(ctx context.Context, c store.ModelConsumer) ([]string, error) {
+	var notes []string
 	if !c.Active {
-		pv.Notes = append(pv.Notes, oai.PreviewNoteConsumerInactive)
+		notes = append(notes, oai.PreviewNoteConsumerInactive)
 	}
-	writeJSON(w, http.StatusOK, previewAnswer{Success: true, ConsumerID: c.ID, ChainPreview: pv})
+	t, err := store.GetTenant(ctx, h.pool, c.TenantID)
+	switch {
+	case errors.Is(err, store.ErrTenantNotFound):
+		notes = append(notes, oai.PreviewNoteTenantInactive)
+	case err != nil:
+		return nil, err
+	case t.Status != "active":
+		notes = append(notes, oai.PreviewNoteTenantInactive)
+	}
+	if c.TenantScope != nil {
+		scopes, err := store.TenantScopes(ctx, h.pool, c.TenantID)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(scopes, *c.TenantScope) {
+			notes = append(notes, oai.PreviewNoteScopeNotOwned)
+		}
+	}
+	return notes, nil
 }
 
 // writePreviewUnwired answers a server without the /v1 dependencies.
@@ -143,7 +177,7 @@ func writePreviewUnwired(w http.ResponseWriter) {
 // with its tenant, scope, kind, all_models, prompt_sensitivity, fair_weight,
 // admission_lane and peer binding — no key id (a preview names no key). An
 // inactive consumer still previews (the door would refuse it — the handler
-// adds the note).
+// adds the note, previewDoorNotes).
 func previewConsumerAuth(c store.ModelConsumer) *auth.ConsumerAuth {
 	ca := &auth.ConsumerAuth{
 		ConsumerID: c.ID, TenantID: c.TenantID, Kind: auth.KindApp, AllModels: c.AllModels,

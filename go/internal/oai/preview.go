@@ -78,6 +78,13 @@ const (
 	// answers its keys 401 invalid_api_key; the chain is what it would reach
 	// once reactivated (set by model-alias-preview, which reads the row).
 	PreviewNoteConsumerInactive = "consumer_inactive"
+	// PreviewNoteTenantInactive: the consumer's tenant is not active (door
+	// gate 3, migration 161) — the door answers its keys 401.
+	PreviewNoteTenantInactive = "tenant_inactive"
+	// PreviewNoteScopeNotOwned: the consumer's tenant_scope no longer belongs
+	// to its tenant (door gate 4) — the door answers its keys 401; the chain
+	// shown is computed with the stale scope.
+	PreviewNoteScopeNotOwned = "tenant_scope_not_owned"
 )
 
 // PreviewAlias is the alias a preview resolved (the fields a server admin

@@ -304,6 +304,12 @@ func TestModelsMintedKeyNeverLost(t *testing.T) {
 			modelsTestCreatedKey, "success", []string{"consumers", "create", "--label", "ci-bot"}},
 		{"rotate_without_envelope", `{"api_key":"` + modelsTestRotatedKey + `"}`,
 			modelsTestRotatedKey, "success", []string{"consumers", "rotate", modelsTestConsumerID}},
+		// success:false whose reason quotes the minted key (Fremd-Review S2
+		// F3): the key once on stdout, the reason redacted in the error.
+		{"create_success_false_reason_quotes_key", `{"success":false,"error":"commit failed for ` + modelsTestCreatedKey + `","api_key":"` + modelsTestCreatedKey + `"}`,
+			modelsTestCreatedKey, "success:false", []string{"consumers", "create", "--label", "ci-bot"}},
+		{"rotate_success_false_reason_quotes_key", `{"success":false,"error":"commit failed for ` + modelsTestRotatedKey + `","api_key":"` + modelsTestRotatedKey + `"}`,
+			modelsTestRotatedKey, "success:false", []string{"consumers", "rotate", modelsTestConsumerID}},
 	}
 	for _, c := range cases {
 		for _, tty := range []bool{false, true} {

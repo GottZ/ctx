@@ -54,7 +54,9 @@ func TestModelAliasPreviewChainModeIntegration(t *testing.T) {
 	h.SetChainPreview(func(pctx context.Context, ca *auth.ConsumerAuth, alias string) (oai.ChainPreview, error) {
 		seen = append(seen, previewSeen{ca: ca, alias: alias, scope: RequestTenantScope(pctx), hasAdmin: AuthResultFromContext(pctx) != nil,
 			policy: federation.PolicyFrom(pctx), inCtxMatch: ConsumerAuthFromContext(pctx) == ca})
-		return answer, nil
+		out := answer
+		out.Notes = slices.Clone(answer.Notes)
+		return out, nil
 	}, func(string) string { return "" })
 
 	status, body, resp := mcCall(t, h, admin, "model-alias-preview", map[string]any{"alias": "chat", "consumer_id": c.id})
@@ -98,5 +100,47 @@ func TestModelAliasPreviewChainModeIntegration(t *testing.T) {
 	status, body, _ = mcCall(t, h, a.ar, "model-alias-preview", map[string]any{"alias": "chat", "consumer_id": c.id})
 	if status != http.StatusForbidden || len(seen) != 1 {
 		t.Errorf("W05-04 chain mode: own tenant-admin %d %s (previewer calls %d), want 403 and no preview", status, body, len(seen))
+	}
+
+	// The door gates the consumer's keys would fail now (Fremd-Review F2/F4):
+	// gate 4 (the scope moved to another tenant), gate 3 (tenant suspended),
+	// gate 2 (consumer deactivated) — each a note, the chain still computed.
+	b := auMakeTenant(ctx, t, pool, h, admin, "pv-b")
+	notesOf := func(step string) []string {
+		t.Helper()
+		status, body, resp := mcCall(t, h, admin, "model-alias-preview", map[string]any{"alias": "chat", "consumer_id": c.id})
+		if status != http.StatusOK || resp["success"] != true {
+			t.Fatalf("W05-04 door notes (%s): %d %s", step, status, body)
+		}
+		raw, _ := resp["notes"].([]any)
+		out := make([]string, 0, len(raw))
+		for _, n := range raw {
+			s, _ := n.(string)
+			out = append(out, s)
+		}
+		return out
+	}
+	steps := []struct {
+		name, sql string
+		args      []any
+		want      []string
+	}{
+		{"scope moved", `UPDATE context_model_consumers SET tenant_scope = $1 WHERE id = $2::uuid`, []any{b.scope, c.id},
+			[]string{oai.PreviewNoteBodyScan, oai.PreviewNoteScopeNotOwned}},
+		{"tenant suspended", `UPDATE context_tenants SET status = 'suspended' WHERE id = $1::uuid`, []any{a.id},
+			[]string{oai.PreviewNoteBodyScan, oai.PreviewNoteTenantInactive, oai.PreviewNoteScopeNotOwned}},
+		{"consumer deactivated", `UPDATE context_model_consumers SET active = false WHERE id = $1::uuid`, []any{c.id},
+			[]string{oai.PreviewNoteBodyScan, oai.PreviewNoteConsumerInactive, oai.PreviewNoteTenantInactive, oai.PreviewNoteScopeNotOwned}},
+	}
+	if got := notesOf("baseline"); !slices.Equal(got, []string{oai.PreviewNoteBodyScan}) {
+		t.Errorf("W05-04 door notes (baseline): %v, want only %q", got, oai.PreviewNoteBodyScan)
+	}
+	for _, st := range steps {
+		if _, err := pool.Exec(ctx, st.sql, st.args...); err != nil {
+			t.Fatalf("W05-04 door notes (%s): %v", st.name, err)
+		}
+		if got := notesOf(st.name); !slices.Equal(got, st.want) {
+			t.Errorf("W05-04 door notes (%s): %v, want %v", st.name, got, st.want)
+		}
 	}
 }

@@ -402,3 +402,108 @@ func TestPreviewNamesWireAndExportStages(t *testing.T) {
 		t.Errorf("W05-04 export stage: the /v1 request answers %d %s, want the 503 the note names", a.status, a.body)
 	}
 }
+
+// TestPreviewChainParityShadowedAlias is the seventh parity case (Fremd-
+// Review S2 F1): a tenant alias "shadow" at public shadows a _global
+// "shadow" at credentials (the role is exported to tenant aliases); the
+// /v1 chain keeps the shadowed floor credentials, and so must the preview.
+// Red against a preview that drops the Shadowed term of RequiredSensitivity
+// (review mutant X1: preview [spark lanbox openrouter] != /v1 [spark]).
+func TestPreviewChainParityShadowedAlias(t *testing.T) {
+	ca := consumerWithFloor(backends.SensPublic)
+	rows, _ := previewRows(t)
+	cp := &capturePlanner{}
+	withShadow := func(r *chatRig) {
+		al := append(chatAliases(),
+			chatAlias{"00000000-0000-4000-8000-0000000c5a01", backends.GlobalScope, "shadow", "chat", "chat", backends.SensCredentials, `{}`, true},
+			chatAlias{"00000000-0000-4000-8000-0000000c5a02", tenantScope, "shadow", "chat", "chat", backends.SensPublic, `{}`, true})
+		r.reg.reload(t, al)
+	}
+	r := newChatRig(t, rows, 4, 1, withShadow, withConsumer(ca),
+		withEgress(backends.EgressPolicy{AllowExternal: true, AllowUnmetered: true}), withCapture(cp))
+	r.setSettings(func(s *oai.Settings) { s.ExportableRoles = []string{"chat"} })
+	if a := r.post(t, chatBody("shadow")); a.status != http.StatusOK {
+		t.Fatalf("/v1 request: %d %s — want 200", a.status, a.body)
+	}
+	v1 := cp.first(t)
+	pv, err := r.deps.PreviewChain(previewCtx(ca), ca, "shadow")
+	got := previewNames(pv.Chain)
+	if err != nil || !slices.Equal(got, v1) || pv.RequiredSensitivity != string(backends.SensCredentials) ||
+		pv.Alias == nil || pv.Alias.Scope != tenantScope {
+		t.Errorf("W05-04 parity (shadowed alias): preview %v required %q alias %+v (err %v), /v1 chain %v — want equal, credentials, the tenant alias",
+			got, pv.RequiredSensitivity, pv.Alias, err, v1)
+	}
+}
+
+// fixedGate is a tenant gate with a fixed outcome: refuse (ErrQuotaExceeded)
+// or keep only the rows keep accepts (an external_off degrade).
+type fixedGate struct {
+	refuse bool
+	keep   func(backends.Backend) bool
+}
+
+func (g fixedGate) GateTenant(_ string, chain []backends.Backend) ([]backends.Backend, error) {
+	if g.refuse {
+		return nil, &backends.ErrQuotaExceeded{Reason: "daily_calls"}
+	}
+	var out []backends.Backend
+	for _, b := range chain {
+		if g.keep(b) {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+// TestPreviewTenantQuotaNoteAndStage (Fremd-Review S2 F2, X2/X8): a tenant
+// gate that refuses is the note tenant_quota_exhausted — never an error;
+// a gate that degrades (external_off) lists the dropped row at stage
+// tenant_quota.
+func TestPreviewTenantQuotaNoteAndStage(t *testing.T) {
+	ca := consumerWithFloor(backends.SensPublic)
+	all := withEgress(backends.EgressPolicy{AllowExternal: true, AllowUnmetered: true})
+	rows, _ := previewRows(t)
+	r := newChatRig(t, rows, 4, 1, withPersonalAlias(t), withConsumer(ca), all,
+		withDeps(func(d *oai.Deps) { d.Quota = fixedGate{refuse: true} }))
+	pv, err := r.deps.PreviewChain(previewCtx(ca), ca, "personal")
+	if err != nil || len(pv.Chain) != 0 || !slices.Contains(pv.Notes, oai.PreviewNoteTenantQuota) {
+		t.Errorf("W05-04 tenant quota refused: chain %v notes %v (err %v) — want no chain and note %q", previewNames(pv.Chain), pv.Notes, err, oai.PreviewNoteTenantQuota)
+	}
+	rows, _ = previewRows(t)
+	r = newChatRig(t, rows, 4, 1, withPersonalAlias(t), withConsumer(ca), all,
+		withDeps(func(d *oai.Deps) {
+			d.Quota = fixedGate{keep: func(b backends.Backend) bool { return b.Locality != backends.LocalityExternal }}
+		}))
+	pv, err = r.deps.PreviewChain(previewCtx(ca), ca, "personal")
+	if err != nil || !slices.Equal(previewNames(pv.Chain), []string{"spark", "lanbox"}) || !excludedAt(pv, "openrouter", oai.PreviewStageTenantQuota) {
+		t.Errorf("W05-04 tenant quota external_off: chain %v excluded %+v (err %v) — want [spark lanbox] and openrouter at stage %q",
+			previewNames(pv.Chain), pv.Excluded, err, oai.PreviewStageTenantQuota)
+	}
+}
+
+// TestPreviewPeerHopAndFederationStage (Fremd-Review S2 F2, X4/X7): a
+// ctx-peer consumer previews a request without Ctx-Path — egress local, so
+// the federation filter drops the external row (listed at stage
+// federation) — and the answer carries peer_hop_not_modeled; the /v1
+// request of the same peer without federation headers walks the same chain.
+func TestPreviewPeerHopAndFederationStage(t *testing.T) {
+	ca := consumerWithFloor(backends.SensPublic)
+	ca.Kind = auth.KindCtxPeer
+	rows, _ := previewRows(t)
+	cp := &capturePlanner{}
+	r := newChatRig(t, rows, 4, 1, withPersonalAlias(t), withConsumer(ca),
+		withEgress(backends.EgressPolicy{AllowExternal: true, AllowUnmetered: true}), withCapture(cp))
+	pv, err := r.deps.PreviewChain(previewCtx(ca), ca, "personal")
+	if err != nil || !slices.Contains(pv.Notes, oai.PreviewNotePeerHop) || !excludedAt(pv, "openrouter", oai.PreviewStageFederation) ||
+		slices.Contains(previewNames(pv.Chain), "openrouter") {
+		t.Errorf("W05-04 peer: chain %v notes %v excluded %+v (err %v) — want note %q and openrouter at stage %q",
+			previewNames(pv.Chain), pv.Notes, pv.Excluded, err, oai.PreviewNotePeerHop, oai.PreviewStageFederation)
+	}
+	if a := r.post(t, chatBody("personal")); a.status == http.StatusOK {
+		if v1 := cp.first(t); !slices.Equal(previewNames(pv.Chain), v1) {
+			t.Errorf("W05-04 peer parity: preview %v != /v1 chain %v", previewNames(pv.Chain), v1)
+		}
+	} else {
+		t.Logf("peer /v1 request: %d %s (no parity read)", a.status, a.body)
+	}
+}
