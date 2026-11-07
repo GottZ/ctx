@@ -187,9 +187,24 @@ func TestDrainMeter(t *testing.T) {
 	if dl := d.deadline(t0.Add(40*time.Second), 10); !dl.Equal(t0.Add(70 * time.Second)) {
 		t.Fatalf("after a passed window: deadline %v, want 30 s from its end", dl.Sub(t0))
 	}
-	d.idle()
+	d.idle(t0.Add(40 * time.Second))
 	if dl := d.deadline(t0.Add(100*time.Second), 10); !dl.Equal(t0.Add(130 * time.Second)) {
-		t.Fatalf("after idle: deadline %v, want a fresh window", dl.Sub(t0))
+		t.Fatalf("after a 60 s wait for the upstream: deadline %v, want the window moved on by the wait", dl.Sub(t0))
+	}
+	// The real-time gate (b): two frames swallowed by the socket buffers at
+	// once, a short wait for the upstream between them, then one frame per
+	// 25 s — the client keeps 1 KiB/s, the third frame is not cut at 32 s.
+	g := drainMeter{rate: 1024, window: 30 * time.Second}
+	const frame = 33020
+	g.deadline(t0, frame)
+	g.wrote(t0, frame)
+	g.idle(t0)
+	g.deadline(t0.Add(333*time.Millisecond), frame)
+	g.wrote(t0.Add(333*time.Millisecond), frame)
+	g.idle(t0.Add(333 * time.Millisecond))
+	dl := g.deadline(t0.Add(666*time.Millisecond), frame)
+	if done := t0.Add(52 * time.Second); dl.Before(done) {
+		t.Fatalf("third frame: deadline %v after the start, the client takes it at 52 s (1.27 KiB/s ≥ 1 KiB/s) — cut too early", dl.Sub(t0))
 	}
 	off := drainMeter{}
 	if dl := off.deadline(t0, 10); !dl.IsZero() {
@@ -344,7 +359,8 @@ func TestRelayNoWriteAfterClose(t *testing.T) {
 
 // TestRelayDrainEndsAtTheAttemptDeadline (Fremd-Review 1 F3 (a)): no write of
 // the relay ends after the attempt's deadline — the drain meter's cap is
-// shortened to it, and while the writer waits the deadline stays the cap.
+// shortened to it, and while the writer waits the deadline stays the cap;
+// once the writer ended the cap is lifted (the route's last frame).
 func TestRelayDrainEndsAtTheAttemptDeadline(t *testing.T) {
 	var mu sync.Mutex
 	var caps []time.Time
@@ -361,13 +377,13 @@ func TestRelayDrainEndsAtTheAttemptDeadline(t *testing.T) {
 	rl.wait()
 	mu.Lock()
 	defer mu.Unlock()
-	for i, c := range caps {
+	if len(caps) < 2 || !caps[len(caps)-1].IsZero() {
+		t.Fatalf("caps %v: want the writes' caps, then the lift after the writer ended (uncap)", caps)
+	}
+	for i, c := range caps[:len(caps)-1] {
 		if c.IsZero() || c.After(until) {
 			t.Fatalf("cap %d = %v, want none past the attempt's deadline %v (drain window 1 h)", i, c, until)
 		}
-	}
-	if len(caps) == 0 {
-		t.Fatal("no cap set")
 	}
 }
 

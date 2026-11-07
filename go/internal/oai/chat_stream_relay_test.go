@@ -139,6 +139,7 @@ type slowReaderCase struct {
 	heldBy   time.Duration // after the request: the lease must be free by then
 	minDrain time.Duration // the client drain lasts at least this (the slow-reader regime)
 	heldAlso time.Duration // on a red run: also report held at this time after the request (0: no)
+	window   time.Duration // client_write_window (0: the rig's 30 s)
 }
 
 // TestRelaySlowReaderReleasesAtTheUpstreamEnd is gate (b), the shared gate of
@@ -150,18 +151,27 @@ type slowReaderCase struct {
 // client has drained. Scaled by default (5 × 32 KiB, 200 ms per frame);
 // CTX_A03W10_REALTIME=1 runs the design's numbers (upstream in 2 s, one frame
 // per 25 s — 6 frames, so the drain outlasts 60 s against loopback buffers —
-// the lease reported at 60 s for the red side).
+// the lease reported at 60 s for the red side; client_write_window 120 s, so
+// D4 does not cut the client on either side).
 func TestRelaySlowReaderReleasesAtTheUpstreamEnd(t *testing.T) {
 	tc := slowReaderCase{frames: 5, gap: 0, pause: 200 * time.Millisecond, heldBy: 700 * time.Millisecond, minDrain: 800 * time.Millisecond}
 	if os.Getenv("CTX_A03W10_REALTIME") == "1" {
-		tc = slowReaderCase{frames: 6, gap: 333 * time.Millisecond, pause: 25 * time.Second, heldBy: 4500 * time.Millisecond, minDrain: 120 * time.Second, heldAlso: 60 * time.Second}
+		tc = slowReaderCase{frames: 6, gap: 333 * time.Millisecond, pause: 25 * time.Second, heldBy: 4500 * time.Millisecond, minDrain: 120 * time.Second, heldAlso: 60 * time.Second,
+			window: 120 * time.Second}
 	}
 	end := newUpstreamEnd()
 	u := newUpstream(t, "")
 	u.setRespond(sseRespond(bigFrames(tc.frames, 32<<10, tc.gap), nil, end))
 	row := u.row("spark", backends.TrustFull, 10)
 	row.Timeouts = map[string]int{"chat": 600} // the drain lasts the attempt's timeout at most
-	rig := newChatRig(t, []backends.Backend{row}, 4, 1, withStreamSettings)
+	opts := []rigOption{withStreamSettings}
+	if tc.window > 0 {
+		// A 32 KiB frame read through 4 KiB buffers takes seconds under host
+		// load: one frame per 25 s would meet the 30 s write window (D4, a
+		// different gate) on both sides.
+		opts = append(opts, withStream(40*time.Second, 15*time.Second, tc.window))
+	}
+	rig := newChatRig(t, []backends.Backend{row}, 4, 1, opts...)
 	start := time.Now()
 	c := startSlowClient(t, rig)
 	if c.resp.StatusCode != http.StatusOK {

@@ -220,6 +220,7 @@ func (rl *streamRelay) signal() {
 func (rl *streamRelay) wait() {
 	rl.close()
 	<-rl.done
+	rl.uncap()
 	rl.mu.Lock()
 	p := rl.pan
 	rl.pan = nil
@@ -258,6 +259,18 @@ func (rl *streamRelay) capFor(now time.Time, k int) time.Time {
 func (rl *streamRelay) join() {
 	rl.close()
 	<-rl.done
+	rl.uncap()
+}
+
+// uncap lifts the relay's write-deadline cap once its writer ended: the
+// route's own last frame ([DONE] or the error frame, e.g. upstream_timeout
+// right at the attempt's deadline) is written under client_write_window
+// alone — the attempt deadline bounds the drain, not the answer of the
+// stream's end (TestStreamWriterDomain, upstream timeout committed).
+func (rl *streamRelay) uncap() {
+	if rl.capAt != nil {
+		rl.capAt(time.Time{})
+	}
 }
 
 // panicked reports whether the writer panicked (wait raises it).
@@ -303,7 +316,7 @@ func (rl *streamRelay) run() {
 // next is the writer's next record (a slice of the ring, valid until release),
 // waiting for one; false once the relay is closed and empty, failed, or the
 // run ended. While the writer waits the client is not behind: the drain
-// window starts again with the next record.
+// window's start moves on by the wait (drainMeter).
 func (rl *streamRelay) next() ([]byte, bool) {
 	for {
 		rl.mu.Lock()
@@ -343,7 +356,7 @@ func (rl *streamRelay) next() ([]byte, bool) {
 		}
 		u := rl.until
 		rl.mu.Unlock()
-		rl.drain.idle()
+		rl.drain.idle(time.Now())
 		if rl.capAt != nil {
 			rl.capAt(u) // no drain window while the writer waits; the attempt's deadline stays
 		}
@@ -382,14 +395,20 @@ func (rl *streamRelay) release(l int) {
 // no. 1): while chunks wait for it, the client must have taken at least rate
 // bytes per second since its window began, counted when a write ends — a
 // write is never cut before one window has passed, and a large chunk gets
-// the time its bytes take at the rate. A window that passed resets it; the
-// writer waiting for the upstream (no chunk queued) clears it. rate or window
+// the time its bytes take at the rate. A window that passed starts a new
+// one. The time the writer waits for the upstream (no chunk queued) does not
+// count against the client: the window's start moves on by it. It is not a
+// new window: a write that ends at once may only have filled the socket
+// buffers, the client still has to read those bytes — a window cleared at
+// every wait would cut a client that keeps the rate (the real-time gate (b):
+// 64 KiB swallowed by the buffers, then one frame per 25 s). rate or window
 // ≤ 0 (a hand-built Settings; V38 keeps both ≥ 1) disables it.
 type drainMeter struct {
 	rate    int64
 	window  time.Duration
 	start   time.Time
 	drained int64
+	idleAt  time.Time // the writer waits for the upstream since (zero: it does not)
 }
 
 // deadline is the latest a write of k more bytes may end (zero: no cap).
@@ -399,6 +418,10 @@ func (d *drainMeter) deadline(now time.Time, k int) time.Time {
 	}
 	if d.start.IsZero() {
 		d.start, d.drained = now, 0
+	}
+	if !d.idleAt.IsZero() {
+		d.start = d.start.Add(now.Sub(d.idleAt)) // the wait for the upstream is not the client's
+		d.idleAt = time.Time{}
 	}
 	need := time.Duration(float64(d.drained+int64(k)) / float64(d.rate) * float64(time.Second))
 	return d.start.Add(max(d.window, need))
@@ -415,8 +438,12 @@ func (d *drainMeter) wrote(now time.Time, k int) {
 	}
 }
 
-// idle clears the window: the writer waits for the upstream.
-func (d *drainMeter) idle() { d.start, d.drained = time.Time{}, 0 }
+// idle marks that the writer waits for the upstream from now on.
+func (d *drainMeter) idle(now time.Time) {
+	if !d.start.IsZero() && d.idleAt.IsZero() {
+		d.idleAt = now
+	}
+}
 
 // RelayRecordHeader is the size of the length header the relay buffer stores
 // in front of every chunk (a little-endian uint32) — the bytes one chunk
