@@ -4,7 +4,8 @@ package oai_test
 // against what the admission charged — LimitReservation.Held (W02-09, one
 // source in keyquota) — not against a rebuild of the charge in the route
 // from the request's settings snapshot and the admission's headers
-// (reservedTokens, Delta-Review 4 F4-1 as built in hardening 3). The
+// (Delta-Review 4 F4-1 as built in hardening 3; that rebuild, the function
+// reservedTokens, was removed by this part). The
 // rebuild misses (1) a reserve that moved between the request's settings
 // snapshot and the limiter's Admit (a hot reload of
 // gateway.tpm_reserve_default) and (2) a limiter that reports no bucket
