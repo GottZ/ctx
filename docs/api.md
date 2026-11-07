@@ -1,6 +1,6 @@
 # HTTP API
 
-All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization: Bearer` token.
+All endpoints under `/api/*`. Auth via `X-Context-Key` header or `Authorization: Bearer` token. The one exception is the [OpenAI-compatible API](#openai-compatible-api-v1) under `/v1` (and `/v2/rerank`): off by default (`gateway.enabled`), and it takes model keys (`ctxm_…`) only — see [enabling it](operations.md#upgrading-to-5330-enabling-the-openai-compatible-api).
 
 **Request header limit:** ctxd parses at most **100 header values** per request and answers
 `431 Request Header Fields Too Large` above that, before the handler runs (`cmd/ctxd/main.go`,
