@@ -125,7 +125,7 @@ func Score(ctx context.Context, b backends.Backend, model, query string, docs []
 		return nil, 0, nil
 	}
 
-	body, err := json.Marshal(rerankRequest{Model: model, Query: query, Documents: docs})
+	body, err := wireBody(model, query, docs)
 	if err != nil {
 		return nil, 0, fmt.Errorf("rerank: marshal: %w", err)
 	}
@@ -164,10 +164,24 @@ func Score(ctx context.Context, b backends.Backend, model, query string, docs []
 	// can echo a snippet of what the server actually sent. The original
 	// Voyage incident hid behind a generic "count mismatch" for six
 	// production calls because the response was decoded blind.
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, answerReadCap(len(docs), len(body))))
 	if err != nil {
 		return nil, 0, fmt.Errorf("rerank: read body: %w", err)
 	}
+	return decodeAnswer(raw, len(docs), scoreDomain)
+}
+
+// decodeAnswer reads a wire answer to n documents into one score per
+// document in input order and the reported prompt tokens (Score's decode,
+// moved verbatim out of Score in RC-D S1, FOLGE-R). Contract of the strict
+// decoder FOLGE-R S2 puts here (raw_answer.go pattern, bau report
+// RCD-c8-hardening-S1 §Vertrag): the entries are walked in place, the first
+// entry past n is refused before it is decoded (errSurplusResults), an
+// entry's unknown members (a document echo) are skipped without allocating,
+// and nothing past the scores and their coverage flags is allocated per
+// entry; the scores and every error text of an answer of at most n entries
+// stay the ones below (TestInternalRerankBitIdenticalToBase).
+func decodeAnswer(raw []byte, n int, scoreDomain string) ([]float64, int, error) {
 	var result rerankResponse
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, 0, fmt.Errorf("rerank: decode: %w", err)
@@ -183,12 +197,12 @@ func Score(ctx context.Context, b backends.Backend, model, query string, docs []
 	// is meaningless — only Index maps a score back to its document. Validate
 	// the indices cover [0,len) exactly once: any gap, dup, or out-of-range
 	// entry means we cannot trust the mapping, so error → caller fails open.
-	scores := make([]float64, len(docs))
-	seen := make([]bool, len(docs))
+	scores := make([]float64, n)
+	seen := make([]bool, n)
 	got := 0
 	for _, r := range entries {
-		if r.Index < 0 || r.Index >= len(docs) {
-			return nil, 0, fmt.Errorf("rerank: result index %d out of range [0,%d)", r.Index, len(docs))
+		if r.Index < 0 || r.Index >= n {
+			return nil, 0, fmt.Errorf("rerank: result index %d out of range [0,%d)", r.Index, n)
 		}
 		if seen[r.Index] {
 			return nil, 0, fmt.Errorf("rerank: duplicate result index %d", r.Index)
@@ -214,8 +228,8 @@ func Score(ctx context.Context, b backends.Backend, model, query string, docs []
 		scores[r.Index] = score
 		got++
 	}
-	if got != len(docs) {
-		return nil, 0, fmt.Errorf("rerank: result count mismatch: got %d scores for %d documents", got, len(docs))
+	if got != n {
+		return nil, 0, fmt.Errorf("rerank: result count mismatch: got %d scores for %d documents", got, n)
 	}
 
 	// Voyage reports total_tokens; llama.cpp reports prompt_tokens.
