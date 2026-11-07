@@ -77,10 +77,10 @@ type llmlogListFilter struct {
 	// Consumer is the ?consumer_id= parameter ("" = none), lower-case. For a
 	// tenant-admin it is intersected with ConsumerIDs before the query is
 	// built.
-	Consumer   string
-	Pipeline   string
-	ErrorsOnly bool
-	Limit      int
+	Consumer     string
+	PipelineName string
+	ErrorsOnly   bool
+	Limit        int
 }
 
 // llmlogArgs numbers the statement's arguments as the text is built.
@@ -110,8 +110,8 @@ func llmlogListQuery(f llmlogListFilter) (string, []any, error) {
 // prefixed with AND; empty when neither filter is set.
 func llmlogOptional(f llmlogListFilter, args *llmlogArgs) string {
 	var b strings.Builder
-	if f.Pipeline != "" {
-		b.WriteString("\n\t\t   AND pipeline = " + args.add(f.Pipeline))
+	if f.PipelineName != "" {
+		b.WriteString("\n\t\t   AND pipeline = " + args.add(f.PipelineName))
 	}
 	if f.ErrorsOnly {
 		b.WriteString("\n\t\t   AND error IS NOT NULL")

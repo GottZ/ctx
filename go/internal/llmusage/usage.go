@@ -80,7 +80,7 @@ type GroupBy string
 const (
 	GroupConsumer GroupBy = "consumer"
 	GroupAlias    GroupBy = "alias"
-	GroupPipeline GroupBy = "pipeline"
+	GroupPipelineName GroupBy = "pipeline"
 	GroupSource   GroupBy = "source"
 	GroupBackend  GroupBy = "backend"
 	GroupClass    GroupBy = "class"
@@ -232,7 +232,7 @@ func Align(q SeriesQuery) (SeriesQuery, error) {
 		return SeriesQuery{}, fmt.Errorf("%w: bucket %q", ErrParam, q.Bucket)
 	}
 	switch q.Group {
-	case GroupConsumer, GroupAlias, GroupPipeline, GroupSource, GroupBackend, GroupClass:
+	case GroupConsumer, GroupAlias, GroupPipelineName, GroupSource, GroupBackend, GroupClass:
 	case GroupInstance:
 		if !q.ServerAdmin {
 			return SeriesQuery{}, ErrForbiddenGroup
@@ -309,7 +309,7 @@ func keyExpr(g GroupBy) string {
 	switch g {
 	case GroupAlias:
 		return "u.model_alias"
-	case GroupPipeline:
+	case GroupPipelineName:
 		return "u.pipeline"
 	case GroupSource:
 		return "u.source"

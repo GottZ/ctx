@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -359,10 +360,13 @@ func (h *UsageHandler) consumerEntries(ctx context.Context, admin bool, tenant, 
 	if !admin && tenant == "" {
 		return entries, nil
 	}
-	sql := `SELECT id::text, label, tenant_id::text FROM context_model_consumers WHERE ($1 = '' OR id::text = $1)`
-	args := []any{consumer}
+	// The whole view is listed and batched; ?consumer= filters afterwards,
+	// so the generations stay one per view (a key per requested id would
+	// let a caller grow the cache with random ids).
+	sql := `SELECT id::text, label, tenant_id::text FROM context_model_consumers`
+	var args []any
 	if !admin {
-		sql += ` AND tenant_id = $2::uuid`
+		sql += ` WHERE tenant_id = $1::uuid`
 		args = append(args, tenant)
 	}
 	rows, err := h.pool.Query(ctx, sql+` ORDER BY label, id`, args...)
@@ -390,12 +394,22 @@ func (h *UsageHandler) consumerEntries(ctx context.Context, admin bool, tenant, 
 	if admin {
 		genKey = ""
 	}
-	if consumer != "" {
-		genKey += "|" + consumer
-	}
 	gen, err := h.generation(ctx, genKey, ids)
 	if err != nil {
 		return nil, err
+	}
+	if consumer != "" {
+		kept := list[:0]
+		for _, c := range list {
+			if strings.EqualFold(c.id, consumer) {
+				kept = append(kept, c)
+			}
+		}
+		list = kept
+		ids = ids[:0]
+		for _, c := range list {
+			ids = append(ids, c.id)
+		}
 	}
 	var tiers map[string]map[keyquota.Op]UsageTierPair
 	if h.limits != nil && len(ids) > 0 {

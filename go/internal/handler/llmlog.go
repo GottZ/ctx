@@ -134,9 +134,9 @@ func (h *LLMLogHandler) llmlogFilter(w http.ResponseWriter, r *http.Request) (ll
 		maxLimit = 200
 	}
 	f := llmlogListFilter{
-		Limit:      maxLimit,
-		Pipeline:   r.URL.Query().Get("pipeline"),
-		ErrorsOnly: r.URL.Query().Get("errors_only") == "true",
+		Limit:        maxLimit,
+		PipelineName: r.URL.Query().Get("pipeline"),
+		ErrorsOnly:   r.URL.Query().Get("errors_only") == "true",
 	}
 	if q := r.URL.Query().Get("limit"); q != "" {
 		if n, err := strconv.Atoi(q); err == nil && n > 0 && n < f.Limit {
