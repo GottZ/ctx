@@ -463,6 +463,11 @@ func runCensus(t *testing.T, rt censusRoute) {
 				if tc.reason == keyquota.RejectModel && (rej.Alias != "" || rec.Alias != "") {
 					t.Errorf("model refusal alias %q (record %q), want \"\" (ledger %s)", rej.Alias, rec.Alias, keyquota.UnresolvedAlias)
 				}
+				// An acquire refusal carries the class the plan bound (the
+				// route sets it after Plan; review F-2, drawn mutant d06).
+				if (tc.detail == keyquota.DetailServerBusy || tc.detail == keyquota.DetailWaitExpired) && rej.Class != dispatch.ClassExternal.String() {
+					t.Errorf("L2 refusal class %q, want %q", rej.Class, dispatch.ClassExternal)
+				}
 			}
 			if tc.check != nil {
 				tc.check(t, r)
