@@ -173,6 +173,9 @@ func TestBackendPlaintextModelKeyConfirm(t *testing.T) {
 		wantConfirm(t, "loopback create without confirm", rec.Code, rec.Body.String())
 		rec = ph.doRaw(ph.admin, spec("peer-localhost", "http://localhost:8077", "peer-key", nil))
 		wantConfirm(t, "localhost create without confirm", rec.Code, rec.Body.String())
+		// The scheme compares case-insensitively (url.Parse lowercases it).
+		rec = ph.doRaw(ph.admin, spec("peer-upper", "HTTP://10.0.0.10:8077", "peer-key", nil))
+		wantConfirm(t, "HTTP:// create without confirm", rec.Code, rec.Body.String())
 	})
 	t.Run("invisible_prefix_still_a_model_key", func(t *testing.T) {
 		rec := ph.doRaw(ph.admin, spec("peer-bom", "http://10.0.0.8:8077", "bom-key", nil))

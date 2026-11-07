@@ -220,4 +220,37 @@ func TestMigration166FreshChain(t *testing.T) {
 	if pgErr := m166CheckViolation(t, err, "provider_class 'grpc' on a fresh chain"); pgErr.ConstraintName != m166Constraint {
 		t.Errorf("violated constraint = %q, want %q", pgErr.ConstraintName, m166Constraint)
 	}
+	cat := m166Catalog(ctx, t, pool)
+	if n := strings.Count(cat, "(provider_class"); n != 1 || !strings.Contains(cat, "default 'generic'") {
+		t.Errorf("fresh chain catalog: %d CHECK(s) mention provider_class, default line %q — want 1 and 'generic':\n%s",
+			n, cat[strings.LastIndex(cat, "\ndefault ")+1:], cat)
+	}
+}
+
+// TestMigration166CatalogEdgeCases pins the catalog lookup of the DO block on
+// a hand-modified database at 165 (Review 1 finding 7): a renamed baseline
+// constraint is found by its definition and replaced. (A second, hand-made
+// CHECK mentioning provider_class is Review 1 finding 1 — a handoff, see the
+// F-W5 report.)
+func TestMigration166CatalogEdgeCases(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	t.Run("renamed_baseline_constraint", func(t *testing.T) {
+		pool := testdb.SetupTestDBUpTo(t, m166Version-1)
+		if _, err := pool.Exec(ctx, `ALTER TABLE context_backends RENAME CONSTRAINT context_backends_provider_class_check TO legacy_pc_check`); err != nil {
+			t.Fatalf("rename at 165: %v", err)
+		}
+		if err := store.RunMigrationsUpTo(ctx, pool, m166Version); err != nil {
+			t.Fatalf("apply 166 over a renamed constraint: %v", err)
+		}
+		cat := m166Catalog(ctx, t, pool)
+		if strings.Count(cat, "(provider_class") != 1 || !strings.Contains(cat, m166Constraint+" CHECK") || strings.Contains(cat, "legacy_pc_check") {
+			t.Errorf("catalog after 166 over a renamed constraint:\n%s", cat)
+		}
+		if _, err := pool.Exec(ctx, m166CtxRow); err != nil {
+			t.Errorf("ctx row refused: %v", err)
+		}
+	})
 }
