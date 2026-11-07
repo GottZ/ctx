@@ -7,7 +7,7 @@
 //     independently, the consumer's last calls (GET /api/llmlog?consumer_id=).
 //     A failing calls read never hides the consumer (callsError only).
 //   - The No-Oracle refusal of a foreign/unknown id (ApiError "consumer not
-//     found") is the page's notFound state — the model never retries with a
+//     found", 404) is the page's notFound state — the model never retries with a
 //     different id and never reveals which case it was.
 //   - Stale answers are dropped (generation counter), like ConsumersModel.
 //   - The model keeps no body of any call (the list is body-free; the detail

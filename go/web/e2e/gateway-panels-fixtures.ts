@@ -7,7 +7,7 @@
 // contract in src/lib/api/types.ts block "// RC-D C6" and the server rules
 // the panels must survive:
 //   - No-Oracle: a foreign or unknown consumer id answers the byte-equal
-//     {success:false, error:'consumer not found'} (handleModelConsumerGet).
+//     404 {success:false, error:'model consumer not found'} (handleModelConsumerGet).
 //   - The tenant filter is the SERVER's: a tenant-admin sees only its own
 //     tenant's consumers, calls, usage and limits.
 //   - Usage carries the hard cases on purpose: a complete:false bucket whose
@@ -46,7 +46,8 @@ interface MockAnswer {
   json: unknown
 }
 
-const NOT_FOUND: MockAnswer = { status: 200, json: { success: false, error: 'consumer not found' } }
+// writeConsumerStoreError (internal/handler/model_consumers.go:304-305): 404 + the one text for every case
+const NOT_FOUND: MockAnswer = { status: 404, json: { success: false, error: 'model consumer not found' } }
 
 function key(id: string, hint: string, status: string, created: string, rotatedFrom: string | null, revoked: string | null) {
   return { id, hint, status, created_at: created, expires_at: null, revoked_at: revoked, rotated_from: rotatedFrom, last_used_at: null }

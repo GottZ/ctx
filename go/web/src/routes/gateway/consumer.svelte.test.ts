@@ -108,7 +108,7 @@ describe('ConsumerDetailModel.load (W05-09)', () => {
 
   it('the No-Oracle refusal is notFound, with no consumer and no calls fetched result', async () => {
     const m = new ConsumerDetailModel({
-      get: vi.fn().mockRejectedValue(new ApiError(200, 'error', 'consumer not found')),
+      get: vi.fn().mockRejectedValue(new ApiError(404, 'not_found', 'model consumer not found')),
       calls: vi.fn().mockResolvedValue(CALLS),
     })
     await m.load('foreign')

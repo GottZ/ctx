@@ -68,11 +68,11 @@ describe('W05-09 model-consumer-get + last calls (wire)', () => {
     expect(res.consumer.id).toBe(CID)
   })
 
-  it('the No-Oracle refusal surfaces as ApiError "consumer not found"', async () => {
-    stubFetch(jsonResponse(200, { success: false, error: 'consumer not found' }))
+  it('the No-Oracle refusal (404) surfaces as ApiError "model consumer not found"', async () => {
+    stubFetch(jsonResponse(404, { success: false, error: 'model consumer not found' }))
     const err = await getConsumer(CID).catch((e: unknown) => e)
     expect(err, 'gate W05-09: refusal is an ApiError, never a resolved shape').toBeInstanceOf(ApiError)
-    expect((err as ApiError).message, 'gate W05-09: the server’s No-Oracle text, unchanged').toBe('consumer not found')
+    expect((err as ApiError).message, 'gate W05-09: the server’s No-Oracle text, unchanged').toBe('model consumer not found')
   })
 
   it('listConsumerCalls GETs /api/llmlog?consumer_id=<id> (no other filter, no body)', async () => {

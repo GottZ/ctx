@@ -1616,7 +1616,7 @@ export interface ConsumerAuditRow {
  * model-consumer-get answer (handleModelConsumerGet): the consumer with its
  * key CHAIN (newest first, ≤ gateway.consumer_chain_max; keys_truncated when
  * cut) and the newest audit rows of the consumer and its keys. An unknown,
- * foreign or key id answers {success:false,"consumer not found"} byte-equal
+ * foreign or key id answers 404 {success:false,"model consumer not found"} byte-equal
  * (No-Oracle) — raised as ApiError, never this shape.
  */
 export interface ConsumerGetResponse {
