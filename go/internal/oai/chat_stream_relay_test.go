@@ -85,18 +85,37 @@ type slowClient struct {
 
 func startSlowClient(t *testing.T, rig *chatRig) *slowClient {
 	t.Helper()
-	srv := httptest.NewUnstartedServer(rig.router)
+	return startSlowClientDial(t, rig.router, func(addr string) (net.Conn, error) {
+		c, err := net.Dial("tcp", addr)
+		if err == nil {
+			_ = c.(*net.TCPConn).SetReadBuffer(4096)
+		}
+		return c, err
+	})
+}
+
+// startSlowClientDial is startSlowClient against h over a connection from
+// dial, with the header pairs hdr on the request (the A03-W10 landing gate
+// serves the route behind the model-key door and dials with the receive
+// buffer set before the connect — startSlowClient sets it after, when the
+// first window is already announced).
+func startSlowClientDial(t *testing.T, h http.Handler, dial func(addr string) (net.Conn, error), hdr ...string) *slowClient {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
 	srv.Listener = smallBufListener{srv.Listener}
 	srv.Start()
 	t.Cleanup(srv.Close)
-	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	conn, err := dial(srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	_ = conn.(*net.TCPConn).SetReadBuffer(4096)
 	body := streamBody("chat")
-	if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: ctx\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body); err != nil {
+	var extra strings.Builder
+	for i := 0; i+1 < len(hdr); i += 2 {
+		fmt.Fprintf(&extra, "%s: %s\r\n", hdr[i], hdr[i+1])
+	}
+	if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: ctx\r\nContent-Type: application/json\r\n%sContent-Length: %d\r\n\r\n%s", extra.String(), len(body), body); err != nil {
 		t.Fatal(err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Minute))

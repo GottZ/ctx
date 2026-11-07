@@ -169,6 +169,12 @@ func (e *reauthEnv) bearer() []string {
 // → POST /v1/chat/completions.
 func (e *reauthEnv) serve(t *testing.T) *httptest.Server {
 	t.Helper()
+	return serveHTTP(t, e.routes())
+}
+
+// routes is serve's router, unserved (the drain gate serves it behind a
+// small send buffer).
+func (e *reauthEnv) routes() http.Handler {
 	r := e.rig
 	r.deps.Consumer = handler.ConsumerAuthFromContext
 	r.deps.KnowledgeAuth = func(ctx context.Context) bool { return handler.AuthResultFromContext(ctx) != nil }
@@ -190,7 +196,7 @@ func (e *reauthEnv) serve(t *testing.T) *httptest.Server {
 			oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Method(http.MethodPost, "/chat/completions", oai.ChatCompletions(r.deps))
 	})
-	return serveHTTP(t, rt)
+	return rt
 }
 
 // reauthNoTouch is the door's usage stamp (store.ModelKeyUsage batches it).
