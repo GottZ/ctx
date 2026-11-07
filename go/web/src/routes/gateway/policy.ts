@@ -25,6 +25,7 @@ import type { PromptSensitivity } from '../../lib/api/modelapi'
 import type { ConsumerUpdateSpec, ConsumerView, ExternalLane } from '../../lib/api/types'
 import { isExternalLane } from './lane'
 import { parseCidrs } from './mint'
+import { canEditPolicy } from './rows'
 
 /** What the caller may do (session.caps). */
 export interface EditCaps {
@@ -66,10 +67,10 @@ function sensRank(s: string): number {
   return i < 0 ? 0 : i
 }
 
-/** Does the row carry an "Edit policy" control for this caller? server-admin: every row; below: never a ctx-peer. */
-export function canEditPolicy(c: ConsumerView, caps: EditCaps): boolean {
-  return caps.serverAdmin || c.kind !== 'ctx-peer'
-}
+// canEditPolicy lives in rows.ts (the list chunk; this module and mint.ts stay
+// in the lazy edit-dialog chunk) and is re-exported here as part of the
+// policy contract.
+export { canEditPolicy }
 
 /** The field tiers of `c` for `caps` (the UI mirror of model_consumers.go grant / serverAdminOnly). */
 export function editTiers(c: ConsumerView, caps: EditCaps): EditTiers {

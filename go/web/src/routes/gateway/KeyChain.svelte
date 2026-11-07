@@ -5,7 +5,9 @@
   // (data-key-status, B-11), expiry, "Revoke" (the page asks for the 4 hint
   // characters). In status `rotating` ONLY the predecessor
   // (rotate.endGraceTarget — the one key the server marks superseded)
-  // carries "End grace period now" (data-testid="key-end-grace"); its click
+  // carries "End grace period" (data-testid="key-end-grace"; the accessible
+  // name "End grace period of key <hint>" starts with the visible text —
+  // axe label-content-name-mismatch); its click
   // hands THAT key to onendgrace, the page revokes its key_id — never the
   // consumer id, never the successor. "Rotate key" (data-testid="key-rotate")
   // only where rotate.canRotate allows (the page computes `rotatable`).
@@ -53,7 +55,7 @@
               data-testid="key-end-grace"
               aria-label={`End grace period of key ${k.hint}`}
               disabled={busy}
-              onclick={() => onendgrace(k)}>End grace period now</button
+              onclick={() => onendgrace(k)}>End grace period</button
             >
           {/if}
         </li>

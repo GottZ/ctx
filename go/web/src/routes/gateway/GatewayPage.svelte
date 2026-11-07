@@ -39,9 +39,8 @@
   import ConsumerRow from './ConsumerRow.svelte'
   import { ConsumersModel } from './consumers.svelte'
   import { STATUS_LABEL, cancelledText } from './format'
-  import { canEditPolicy } from './policy'
   import { canRotate } from './rotate'
-  import { canReactivate, deactivateTyped, hintTail } from './rows'
+  import { canEditPolicy, canReactivate, deactivateTyped, hintTail } from './rows'
 
   const model = new ConsumersModel()
 
