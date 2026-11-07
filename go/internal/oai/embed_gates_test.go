@@ -276,6 +276,16 @@ func TestEmbeddingsEnvelopePins(t *testing.T) {
 // in class XU (bulk: XB).
 func waitWaiting(t *testing.T, d *dispatch.Dispatcher, host string, n int, bulk bool) {
 	t.Helper()
+	if err := waitWaitingErr(d, host, n, bulk); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitWaitingErr is waitWaiting for a goroutine other than the test's — a
+// fake engine's respond callback runs on an httptest handler goroutine,
+// where t.Fatal would end the handler, not the test (CodeRabbit, PR #157):
+// it returns the timeout, and the caller reports it with t.Error.
+func waitWaitingErr(d *dispatch.Dispatcher, host string, n int, bulk bool) error {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, ts := range d.Snapshot().Targets {
@@ -284,12 +294,12 @@ func waitWaiting(t *testing.T, d *dispatch.Dispatcher, host string, n int, bulk 
 				w = ts.ExternalBulk.Waiting
 			}
 			if ts.Origin == host && w >= n {
-				return
+				return nil
 			}
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("not %d external waiter(s) on %s within 5 s", n, host)
+	return fmt.Errorf("not %d external waiter(s) on %s within 5 s", n, host)
 }
 
 // TestEmbeddingsRequestDeadlineInAContinuation (N-1, the Ist pin until the
@@ -320,7 +330,9 @@ func TestEmbeddingsRequestDeadlineInAContinuation(t *testing.T) {
 					foreign.Store(l)
 				}
 			}()
-			waitWaiting(t, rig.disp, e.srv.URL, 1, false)
+			if err := waitWaitingErr(rig.disp, e.srv.URL, 1, false); err != nil {
+				t.Error(err)
+			}
 		}
 		return false
 	})
@@ -349,7 +361,9 @@ func TestEmbeddingsFairAtTheLeaseBoundary(t *testing.T) {
 			go func() {
 				foreign <- rig.postEmbed(t, embedBody("emb", []string{"foreign"}), foreignTenantHeader, "fair")
 			}()
-			waitWaiting(t, rig.disp, e.srv.URL, 1, false)
+			if err := waitWaitingErr(rig.disp, e.srv.URL, 1, false); err != nil {
+				t.Error(err)
+			}
 		}
 		return false
 	})

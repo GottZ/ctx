@@ -97,7 +97,10 @@ func TestEmbedBulkContinuationUnderUrgentLoad(t *testing.T) {
 	e.setRespond(func(http.ResponseWriter, *http.Request, int64, []string) bool {
 		if e.hits.Load() == 1 {
 			stopLoad = xuLoad(t, rig.disp, host, 2, 30*time.Millisecond)
-			waitWaiting(t, rig.disp, host, 1, false) // an XU head waits before block one ends
+			// An XU head waits before block one ends.
+			if err := waitWaitingErr(rig.disp, host, 1, false); err != nil {
+				t.Error(err)
+			}
 		}
 		return false
 	})
