@@ -180,6 +180,7 @@ func envelopeInventory() map[string]inventoryEntry {
 	skip := func(reason string) inventoryEntry {
 		return inventoryEntry{contract: contractSkip, oldExit: -1, reason: reason}
 	}
+	modelsStub := skip("W05-19 S1 stub: RunE returns errModelsNotImplemented without a request; S2 flips it to e1")
 	return map[string]inventoryEntry{
 		// ── the exit-code change of T03-13: 0 → 1 ──────────────────────────
 		"query":              e1(1, "query", "hello"), // --json was the 0
@@ -283,6 +284,17 @@ func envelopeInventory() map[string]inventoryEntry {
 		// api kept its exit codes and GAINED the printed body on failure — the
 		// behaviour docs/cli.md has always described for this command.
 		"api": echo(1, "api", "GET", "/api/project"),
+
+		// ── W05-19 S1: registered stubs, no request yet ────────────────────
+		// RunE answers errModelsNotImplemented before any request, so these
+		// cannot meet the contract run. S2 replaces each with e1(-1, …) —
+		// TestModelsInventoryFlipsToExit1 pins the args and stays red until then.
+		"models consumers list":       modelsStub,
+		"models consumers create":     modelsStub,
+		"models consumers rotate":     modelsStub,
+		"models consumers revoke":     modelsStub,
+		"models consumers deactivate": modelsStub,
+		"models aliases list":         modelsStub,
 
 		// ── outside the contract: exit 0 stays exit 0 ──────────────────────
 		"health":  e0("health"), // GET /health, no /api envelope at all
