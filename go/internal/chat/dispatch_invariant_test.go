@@ -397,6 +397,14 @@ func TestDispatchAcquireEqualsWireAllSites(t *testing.T) {
 		t.Fatalf("after the /v1 embeddings route: acquires=%d wire=%d, want 20/20", ca.count(), atomic.LoadInt64(&wireHits))
 	}
 
+	// --- Site 12: rerank.go Score (W02-10) through the real POST /v1/rerank
+	// — five documents in the census planner's blocks [2, 2, 1], as site 11:
+	// one lease per rerank sub-block, +3/+3. ---
+	postRerankCensus(t, oaiRerankCensusRoute(t, ca, []backends.Backend{invariantBackend(srv.URL, backends.ProtocolOpenAI)}), 5)
+	if ca.count() != 23 || atomic.LoadInt64(&wireHits) != 23 {
+		t.Fatalf("after the /v1 rerank route: acquires=%d wire=%d, want 23/23", ca.count(), atomic.LoadInt64(&wireHits))
+	}
+
 	// --- Lease-free without wire contact (the cache-hit clause's structural
 	// twin, reachable cross-package): the rerank early-out below
 	// RerankMinResults never touches the admitter and never contacts a

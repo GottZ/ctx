@@ -2,13 +2,13 @@
 
 // W02-05 dark-launch witness (Bestands-Pin, not a gate): the router with
 // gateway.enabled=false (the production state until RC-D) is unchanged
-// outside /v1 — the same route inventory but the /v1 entries, the same
-// bytes for a fixed set of requests. The tests use only what the base of
-// the wave already has (NewRouter), so the same file runs on the base and
-// on the head and the two -v outputs are compared (report W02-05). The /v1
-// rows are listed separately: there the answer changes on purpose, from the
-// plain-text 404 / the SPA's index.html (or its 503 placeholder) to the JSON
-// 404 of the group.
+// outside /v1 and /v2 — the same route inventory but the model-group
+// entries, the same bytes for a fixed set of requests. The tests use only
+// what the base of the wave already has (NewRouter), so the same file runs
+// on the base and on the head and the two -v outputs are compared (reports
+// W02-05, W02-10). The model-group rows are listed separately: there the
+// answer changes on purpose, from the plain-text 404 / the SPA's index.html
+// (or its 503 placeholder) to the JSON 404 of the group.
 //
 //	go test -tags=integration -p 1 -count=1 -run 'TestDarkLaunchRouterInventory|TestDarkLaunchGoldenBytes' -v ./cmd/ctxd/
 package main
@@ -56,8 +56,9 @@ func darkLaunchRouter(t *testing.T) *chi.Mux {
 
 // TestDarkLaunchRouterInventory logs every "METHOD pattern" of the router,
 // sorted, the model-group entries marked; it requires that every route under
-// /v1 or /v2 is one the /v1 group registers (W02-05; W02-07 adds the chat
-// route, W02-09 the embeddings route).
+// /v1 or /v2 is one the model groups register (W02-05; W02-07 adds the chat
+// route, W02-09 the embeddings route, W02-10 the rerank routes of /v1 and
+// /v2).
 func TestDarkLaunchRouterInventory(t *testing.T) {
 	r := darkLaunchRouter(t)
 	var lines []string
@@ -69,7 +70,8 @@ func TestDarkLaunchRouterInventory(t *testing.T) {
 			model++
 			switch name := method + " " + route; name {
 			case "GET /v1/models", "GET /v1/models/*", "POST /v1/chat/completions", // W02-05, W02-07
-				"POST /v1/embeddings": // W02-09
+				"POST /v1/embeddings",                // W02-09
+				"POST /v1/rerank", "POST /v2/rerank": // W02-10
 			default:
 				t.Errorf("unexpected model-group route %s", name)
 			}
@@ -87,21 +89,25 @@ func TestDarkLaunchRouterInventory(t *testing.T) {
 }
 
 // goldenRequests are the requests outside the model groups whose answer
-// must not change, then the /v1 rows whose answer changes on purpose.
+// must not change, then the model-group rows (/v1, and /v2 since W02-10)
+// whose answer changes on purpose.
 var goldenRequests = []struct {
 	name, method, path, accept string
-	v1                         bool
+	model                      bool
 }{
 	{name: "GET /health", method: http.MethodGet, path: "/health"},
 	{name: "GET /api/unbekannt", method: http.MethodGet, path: "/api/unbekannt"},
 	{name: "POST /", method: http.MethodPost, path: "/"},
 	{name: "GET /blocks (HTML)", method: http.MethodGet, path: "/blocks", accept: "text/html"},
 	{name: "GET /.well-known/oauth-authorization-server", method: http.MethodGet, path: "/.well-known/oauth-authorization-server"},
-	{name: "GET /v1/models", method: http.MethodGet, path: "/v1/models", v1: true},
-	{name: "GET /v1/models (HTML)", method: http.MethodGet, path: "/v1/models", accept: "text/html", v1: true},
-	{name: "DELETE /v1/models", method: http.MethodDelete, path: "/v1/models", v1: true},
-	{name: "POST /v1/chat/completions", method: http.MethodPost, path: "/v1/chat/completions", v1: true},
-	{name: "POST /v1/embeddings", method: http.MethodPost, path: "/v1/embeddings", v1: true},
+	{name: "GET /v1/models", method: http.MethodGet, path: "/v1/models", model: true},
+	{name: "GET /v1/models (HTML)", method: http.MethodGet, path: "/v1/models", accept: "text/html", model: true},
+	{name: "DELETE /v1/models", method: http.MethodDelete, path: "/v1/models", model: true},
+	{name: "POST /v1/chat/completions", method: http.MethodPost, path: "/v1/chat/completions", model: true},
+	{name: "POST /v1/embeddings", method: http.MethodPost, path: "/v1/embeddings", model: true},
+	{name: "POST /v1/rerank", method: http.MethodPost, path: "/v1/rerank", model: true},
+	{name: "POST /v2/rerank", method: http.MethodPost, path: "/v2/rerank", model: true},
+	{name: "GET /v2/x (HTML)", method: http.MethodGet, path: "/v2/x", accept: "text/html", model: true},
 }
 
 // goldenVolatile are the headers that vary per request by design.
@@ -109,7 +115,7 @@ var goldenVolatile = map[string]bool{"X-Request-Id": true, "Date": true}
 
 // TestDarkLaunchGoldenBytes logs, per request, the status, the headers
 // without X-Request-ID and Date, and the SHA-256 of status + headers + body
-// (the body itself for the /v1 rows and short bodies) — compared between
+// (the body itself for the model-group rows and short bodies) — compared between
 // base and head in the report.
 func TestDarkLaunchGoldenBytes(t *testing.T) {
 	r := darkLaunchRouter(t)
@@ -129,12 +135,12 @@ func TestDarkLaunchGoldenBytes(t *testing.T) {
 		sort.Strings(hs)
 		sum := sha256.Sum256([]byte(http.StatusText(rec.Code) + "\n" + strings.Join(hs, "\n") + "\n\n" + rec.Body.String()))
 		body := ""
-		if g.v1 || rec.Body.Len() <= 160 {
+		if g.model || rec.Body.Len() <= 160 {
 			body = " body=" + strings.TrimSpace(rec.Body.String())
 		}
 		prefix := "golden"
-		if g.v1 {
-			prefix = "v1 (changes on purpose)"
+		if g.model {
+			prefix = "model group (changes on purpose)"
 		}
 		t.Logf("%s %s: %d sha256=%s headers=[%s]%s", prefix, g.name, rec.Code, hex.EncodeToString(sum[:8]), strings.Join(hs, "; "), body)
 	}

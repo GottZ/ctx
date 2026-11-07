@@ -1,9 +1,10 @@
 package oai_test
 
-// X13 census (W02-06 review N-5, W02-07 G16, W02-09 Z4): internal/oai
-// reaches a backend only through llm.ChatRaw / llm.ChatRawStream and
+// X13 census (W02-06 review N-5, W02-07 G16, W02-09 Z4, W02-10): internal/oai
+// reaches a backend only through llm.ChatRaw / llm.ChatRawStream,
 // embed.EmbedRaw (embed.Embed counts as a wire too: the internal path must
-// never run from here without a lease), and only inside an attempt of
+// never run from here without a lease) and rerank.Score (the rerank
+// routes' block call, W02-10), and only inside an attempt of
 // llm.WalkChain — the walker's lease, or a continuation lease the attempt
 // asked for, is the admission of every wire contact (I-D1). A wire call
 // outside an attempt would be a wire call without a lease, invisible to the
@@ -30,14 +31,16 @@ import (
 )
 
 const (
-	llmImport   = "github.com/GottZ/ctx/internal/llm"
-	embedImport = "github.com/GottZ/ctx/internal/embed"
+	llmImport    = "github.com/GottZ/ctx/internal/llm"
+	embedImport  = "github.com/GottZ/ctx/internal/embed"
+	rerankImport = "github.com/GottZ/ctx/internal/rerank"
 )
 
 // wireSelectors are the wire functions per package (by import path).
 var wireSelectors = map[string][]string{
-	llmImport:   {"ChatRaw", "ChatRawStream"},
-	embedImport: {"EmbedRaw", "Embed"},
+	llmImport:    {"ChatRaw", "ChatRawStream"},
+	embedImport:  {"EmbedRaw", "Embed"},
+	rerankImport: {"Score"},
 }
 
 // wireNames binds each wire package to the name file f imports it as; a
@@ -45,7 +48,7 @@ var wireSelectors = map[string][]string{
 func wireNames(fset *token.FileSet, f *ast.File) (map[string]string, []wireFinding) {
 	names := map[string]string{}
 	var findings []wireFinding
-	for path, def := range map[string]string{llmImport: "llm", embedImport: "embed"} {
+	for path, def := range map[string]string{llmImport: "llm", embedImport: "embed", rerankImport: "rerank"} {
 		switch n := importName(f, path, def); n {
 		case "":
 		case ".":
@@ -660,9 +663,12 @@ func parseDir(t *testing.T, fset *token.FileSet, dir string, keep func(name stri
 // TestOAIWireCallsOnlyInsideWalkChainAttempts: the files of internal/oai —
 // production and tests alike (a test that dials a backend past the walker
 // is the same hole in the harness) — hold exactly one llm.ChatRaw call site
-// (the non-stream chat attempt; W02-08 adds the stream one) and one
+// (the non-stream chat attempt; W02-08 adds the stream one), one
 // embed.EmbedRaw call site (the block function of the embeddings attempt,
-// W02-09), and no other wire call; every one obeys the X13 rule.
+// W02-09) and one rerank.Score call site (the block function of the rerank
+// attempt, W02-10 — through the same two block calls of the sub-block walk,
+// so blockFunc stays 2), and no other wire call; every one obeys the X13
+// rule.
 func TestOAIWireCallsOnlyInsideWalkChainAttempts(t *testing.T) {
 	fset := token.NewFileSet()
 	files := parseDir(t, fset, ".", func(string) bool { return true })
@@ -670,8 +676,8 @@ func TestOAIWireCallsOnlyInsideWalkChainAttempts(t *testing.T) {
 	for _, f := range findings {
 		t.Errorf("%s: %s", f.pos, f.what)
 	}
-	if want := map[string]int{"llm.ChatRaw": 1, "embed.EmbedRaw": 1, "blockFunc": 2}; !maps.Equal(sites, want) {
-		t.Errorf("wire call sites in internal/oai = %v, want %v (the chat attempt W02-07; the embeddings block and the two block calls of the sub-block walk, W02-09)", sites, want)
+	if want := map[string]int{"llm.ChatRaw": 1, "embed.EmbedRaw": 1, "rerank.Score": 1, "blockFunc": 2}; !maps.Equal(sites, want) {
+		t.Errorf("wire call sites in internal/oai = %v, want %v (the chat attempt W02-07; the embeddings block and the two block calls of the sub-block walk, W02-09; the rerank block, W02-10)", sites, want)
 	}
 }
 

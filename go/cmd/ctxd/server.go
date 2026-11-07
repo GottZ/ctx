@@ -53,9 +53,10 @@ func newRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 }
 
 // buildRouter is newRouter with the model groups' route seam (K-02-2):
-// wrapRoutes, when non-nil, replaces a group's route table before the mount
-// — the door census (v1door) puts its probe behind every real route this
-// way. Production passes nil.
+// wrapRoutes, when non-nil, replaces each group's route table (/v1's, then
+// /v2's; the patterns are relative to the prefix) before the mount — the
+// door census (v1door) puts its probe behind every real route this way.
+// Production passes nil.
 func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher, wrapRoutes func([]modelRoute) []modelRoute) (*chi.Mux, *fedhop.Ingress, *modelGateway) {
 	r := chi.NewRouter()
 	ingress := &fedhop.Ingress{}
@@ -478,18 +479,25 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 		r.Get("/api/img/{sig}", camoH.HandleFetch)
 	})
 
-	// The OpenAI-compatible model API (W02-05, design/02 §4.2): /v1 behind
-	// access log → recovery → EnabledGate → ModelAuth → LoopGuard → body cap
-	// → in-flight budget (mountModelGroup, masterplan K14). gateway.enabled
-	// off (the default) ⇒ the group answers every request with the same JSON
-	// 404 before any credential is read. Mounted before the SPA fallback; the
-	// group's own catch-alls keep /v1/* out of it.
+	// The OpenAI-compatible model API (W02-05, design/02 §4.2): /v1 and
+	// (W02-10) /v2 behind access log → recovery → EnabledGate → ModelAuth →
+	// LoopGuard → PeerIngress → body cap → in-flight budget (mountModelGroup,
+	// masterplan K14). gateway.enabled off (the default) ⇒ each group answers
+	// every request with the same JSON 404 before any credential is read.
+	// Both groups come from the ONE gateway (K23): one door — one failure
+	// lock, one probe bucket, one DB semaphore —, one in-flight budget, one
+	// access log and one meter, and one set of handler dependencies. Mounted
+	// before the SPA fallback; each group's own catch-alls keep its prefix out
+	// of it. The route seam replaces each group's table alike.
 	gateway := newModelGateway(pool, cfgStore)
-	v1 := v1Routes(gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter))
+	deps := gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter)
+	v1, v2 := v1Routes(deps), v2Routes(deps)
 	if wrapRoutes != nil {
-		v1 = wrapRoutes(v1)
+		v1, v2 = wrapRoutes(v1), wrapRoutes(v2)
 	}
-	mountModelGroup(r, "/v1", gateway.group(ingress, federationMaxDepthGetter(cfgStore), v1))
+	maxDepth := federationMaxDepthGetter(cfgStore)
+	mountModelGroup(r, "/v1", gateway.group(ingress, maxDepth, v1))
+	mountModelGroup(r, "/v2", gateway.group(ingress, maxDepth, v2))
 
 	// Embedded SPA — mounted last: chi matches registered routes first, only
 	// unknown paths fall through (history-API fallback for HTML navigations

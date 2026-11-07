@@ -186,8 +186,8 @@ func TestV1DoesNotRaiseHerald(t *testing.T) {
 	})
 }
 
-// modelRouteCensus runs the admission census over the /v1 group of a
-// production-router fixture with a live model key: the recorded doors of
+// modelRouteCensus runs the admission census over the /v1 and (W02-10) /v2
+// groups of a production-router fixture with a live model key: the recorded doors of
 // rec and the targets of the router's own dispatcher, counted BEFORE the
 // first request (PR #142 bot review 4477068967: sampled after the
 // reachability GET, a target that GET created would hide every later
@@ -205,7 +205,8 @@ func modelRouteCensus(t *testing.T, f *v1Fixture, rec *v1census.Recorder) (viola
 	// A03-W9 adds XB there): the planner the router itself builds.
 	allowed := gatewayDeps(context.Background(), f.pool, f.cfgStore, f.aliases, nil, nil, f.disp, nil).Planner.AllowedClasses()
 	violations = v1census.Check(f.router, rec, v1census.Options{
-		Allowed: allowed,
+		Prefixes: []string{"/v1", "/v2"},
+		Allowed:  allowed,
 		Prepare: func(r *http.Request) *http.Request {
 			r.RemoteAddr = "192.0.2.1:40000"
 			r.TLS = &tls.ConnectionState{}
@@ -217,9 +218,11 @@ func modelRouteCensus(t *testing.T, f *v1Fixture, rec *v1census.Recorder) (viola
 }
 
 // TestV1AdmissionCensusModelRoutes: the census over the /v1 routes W02-05
-// mounted on the production router (buildRouter) with a live model key —
-// GET /v1/models and /v1/models/* acquire nothing: no violation and no
-// target created on the router's own dispatcher. The negative control
+// mounted on the production router (buildRouter), and the /v2 routes of
+// W02-10, with a live model key — GET /v1/models and /v1/models/* acquire
+// nothing, nor do the inference routes on the census's "{}" body (refused
+// before any admission): no violation and no target created on the router's
+// own dispatcher. The negative control
 // replaces GET /v1/models by a route that acquires — through the recorder
 // and on the router's dispatcher — and must fail both checks.
 func TestV1AdmissionCensusModelRoutes(t *testing.T) {
