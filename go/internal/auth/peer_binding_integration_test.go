@@ -12,6 +12,7 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"sync"
 	"testing"
@@ -203,21 +204,27 @@ func TestPeerBindParallelFirstContact_Integration(t *testing.T) {
 		return out
 	}
 	t.Run("same instance", func(t *testing.T) {
-		peer, _ := e.consumer(t, "fw12-race-same", "ctx-peer")
-		created := 0
-		for i, r := range run(t, peer.ID, func(int) string { return pbInstanceB }) {
-			if r.Instance != pbInstanceB {
-				t.Errorf("gate (c): call %d answered %q, want %s — a parallel first request of the same peer must pass", i, r.Instance, pbInstanceB)
+		// Several rounds, each on a fresh consumer: the first round runs on
+		// a cold pool whose connects serialise the calls (S2 mutant m3 — the
+		// one-statement CTE — survived a single round five times out of
+		// five); the later rounds overlap for real.
+		for round := range 5 {
+			peer, _ := e.consumer(t, fmt.Sprintf("fw12-race-same-%d", round), "ctx-peer")
+			created := 0
+			for i, r := range run(t, peer.ID, func(int) string { return pbInstanceB }) {
+				if r.Instance != pbInstanceB {
+					t.Errorf("gate (c) round %d: call %d answered %q, want %s — a parallel first request of the same peer must pass", round, i, r.Instance, pbInstanceB)
+				}
+				if r.Created {
+					created++
+				}
 			}
-			if r.Created {
-				created++
+			if created != 1 {
+				t.Errorf("gate (c) round %d: %d calls created the binding, want exactly 1", round, created)
 			}
-		}
-		if created != 1 {
-			t.Errorf("gate (c): %d calls created the binding, want exactly 1", created)
-		}
-		if a := e.bindAudits(t, peer.ID); a != 1 {
-			t.Errorf("gate (c): %d audit rows, want 1", a)
+			if a := e.bindAudits(t, peer.ID); a != 1 {
+				t.Errorf("gate (c) round %d: %d audit rows, want 1", round, a)
+			}
 		}
 	})
 	t.Run("two instances", func(t *testing.T) {
