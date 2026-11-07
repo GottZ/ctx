@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"runtime"
 	"runtime/metrics"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,15 @@ import (
 // folgeSFrameMax is S1's sollwert: allocation per relayed frame byte.
 const folgeSFrameMax = 2.0
 
+// folgeSOverflowText is the relay overflow's message (relay.go
+// relayOverflowMessage) as the client reads it in the 503 envelope, and
+// folgeSOverflowRetries how often a case is run again when a stream was cut
+// by it (folgeSChildren).
+const (
+	folgeSOverflowText    = "The client read the stream slower than the model wrote it"
+	folgeSOverflowRetries = 2
+)
+
 // folgeSChildEnv names the case a child process runs (empty: the parent).
 const folgeSChildEnv = "CTX_FOLGE_S_CHILD"
 
@@ -54,12 +64,19 @@ type folgeSDiscard struct {
 	h    http.Header
 	n    atomic.Int64
 	code int
+	head []byte // the first bytes of the body (an error envelope)
 }
 
-func (d *folgeSDiscard) Header() http.Header         { return d.h }
-func (d *folgeSDiscard) Write(p []byte) (int, error) { d.n.Add(int64(len(p))); return len(p), nil }
-func (d *folgeSDiscard) WriteHeader(c int)           { d.code = c }
-func (d *folgeSDiscard) Flush()                      {}
+func (d *folgeSDiscard) Header() http.Header { return d.h }
+func (d *folgeSDiscard) Write(p []byte) (int, error) {
+	if room := 512 - len(d.head); room > 0 {
+		d.head = append(d.head, p[:min(room, len(p))]...)
+	}
+	d.n.Add(int64(len(p)))
+	return len(p), nil
+}
+func (d *folgeSDiscard) WriteHeader(c int) { d.code = c }
+func (d *folgeSDiscard) Flush()            {}
 
 // folgeSPayload is an SGLang content chunk of exactly size bytes.
 func folgeSPayload(size int) string {
@@ -229,10 +246,21 @@ func folgeSAnswer(size int) string {
 
 // folgeSNonStream runs one non-streamed request answered with answer.
 func folgeSNonStream(t *testing.T, answer string, sample bool) folgeSResult {
+	return folgeSNonStreamCL(t, answer, sample, false)
+}
+
+// folgeSNonStreamCL is folgeSNonStream with the engine's answer header:
+// contentLength sends Content-Length (what llama.cpp, vLLM and SGLang send
+// for a non-streamed answer), else the answer goes out chunked (httptest
+// with more than its buffer written: no length).
+func folgeSNonStreamCL(t *testing.T, answer string, sample, contentLength bool) folgeSResult {
 	u := &memEngine{}
 	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
+		if contentLength {
+			w.Header().Set("Content-Length", strconv.Itoa(len(answer)))
+		}
 		_, _ = io.WriteString(w, answer)
 	}))
 	t.Cleanup(u.srv.Close)
@@ -268,24 +296,67 @@ func folgeSNonStream(t *testing.T, answer string, sample bool) folgeSResult {
 	return r
 }
 
-// TestNonStreamWorkAtTheCap is S4's allocation half: a non-streamed answer
-// of 1 MiB and at max_response_bytes (4 MiB − 4 KiB) allocates at most
-// folgeSFrameMax × its bytes beyond a 300-byte answer. Median of three.
+// folgeSAnswerSlack is the named slack of S4: the allocation rounding of
+// the answer's two buffers (the read and the rewrite), each at most one
+// 8-KiB page above its length (embed.WireBodySlack's derivation) — the
+// plan's standard "upper bound plus a named slack" (LOOP §Queue 62).
+const folgeSAnswerSlack = 2 * (8 << 10)
+
+// folgeSChunkedSlack is S4's named slack for a chunked answer: the read
+// (llm readAnswer) doubles from 512 B to the answer, and every buffer from
+// 32 KiB on rounds up by at most one 8-KiB page — eight of them up to the
+// 4-MiB cap — plus the rewrite's buffer: nine pages.
+const folgeSChunkedSlack = 9 * (8 << 10)
+
+// TestNonStreamWorkAtTheCap is S4's allocation half, per the main context's
+// decision of 2026-11-08 (bau report RCD-c8-hardening-S2 §FOLGE-S; it
+// replaces the S1 cell "≤ 2.0 × with a chunked engine", which no read of an
+// answer of unknown length meets: the read doubles to the answer, ≈ 2 × L,
+// before the rewrite's 1 × L). A non-streamed answer of 1 MiB and at
+// max_response_bytes (4 MiB − 4 KiB), beyond a 300-byte answer, median of
+// three:
+//
+//   - S4, from an engine that sends Content-Length (the production case):
+//     at most 2 × its bytes + folgeSAnswerSlack (the read in one buffer of
+//     the answer's length, the rewrite in one more);
+//   - S4', chunked: at most 3 × its bytes + folgeSAnswerSlack, and the
+//     reservation the request held grows with what the read leaves behind
+//     — the growth's discarded buffers are booked (the ledger stays true):
+//     the size-dependent allocation is at most what the request held plus
+//     folgeSChunkedSlack (the pages' rounding, which no booking names).
 func TestNonStreamWorkAtTheCap(t *testing.T) {
 	folgeSSkip(t)
 	tiny := folgeSAnswer(300)
-	for _, size := range []int{1 << 20, memRespCap - 4096} {
-		big := folgeSAnswer(size)
-		var fs []float64
-		for range 3 {
-			rb := folgeSNonStream(t, big, false)
-			rt := folgeSNonStream(t, tiny, false)
-			fs = append(fs, (float64(rb.alloc)-float64(rt.alloc))/float64(len(big)-len(tiny)))
-		}
-		f := folgeSMedian(fs)
-		t.Logf("FOLGE-S S4: answer=%d B resp_cap=%d ⇒ %.2f × (runs %.2f)", len(big), memRespCap, f, fs)
-		if f > folgeSFrameMax {
-			t.Errorf("a non-streamed answer of %d B allocates %.2f × its bytes, want at most %.1f × (FOLGE-S S4)", len(big), f, folgeSFrameMax)
+	for _, cell := range []struct {
+		name          string
+		contentLength bool
+		copies        int
+		slack         int64
+	}{{"S4 content-length", true, 2, folgeSAnswerSlack}, {"S4' chunked", false, 3, folgeSChunkedSlack}} {
+		for _, size := range []int{1 << 20, memRespCap - 4096} {
+			big := folgeSAnswer(size)
+			var fs []float64
+			var deltas []int64
+			var held int64
+			for range 3 {
+				rb := folgeSNonStreamCL(t, big, false, cell.contentLength)
+				rt := folgeSNonStreamCL(t, tiny, false, cell.contentLength)
+				d := int64(rb.alloc) - int64(rt.alloc)
+				deltas = append(deltas, d)
+				fs = append(fs, float64(d)/float64(len(big)-len(tiny)))
+				held = max(held, rb.held)
+			}
+			f := folgeSMedian(fs)
+			slices.Sort(deltas)
+			d := deltas[len(deltas)/2]
+			bound := int64(cell.copies)*int64(len(big)-len(tiny)) + cell.slack
+			t.Logf("FOLGE-S %s: answer=%d B resp_cap=%d ⇒ %.3f × (runs %.3f), Δ %d B against %d B; held %d B", cell.name, len(big), memRespCap, f, fs, d, bound, held)
+			if d > bound {
+				t.Errorf("%s: a non-streamed answer of %d B allocates %d B beyond a small one (%.3f ×), want at most %d × its bytes + %d B (FOLGE-S S4)", cell.name, len(big), d, f, cell.copies, cell.slack)
+			}
+			if !cell.contentLength && d > held+cell.slack {
+				t.Errorf("%s: the answer of %d B allocates %d B beyond a small one, the request held %d B — the read's discarded buffers are not booked", cell.name, len(big), d, held)
+			}
 		}
 	}
 }
@@ -299,6 +370,7 @@ type folgeSVerdict struct {
 	HeapInMiB  float64 `json:"heap_inuse_growth_mib,omitempty"`
 	GCCycles   uint64  `json:"gc_cycles,omitempty"`
 	Codes      string  `json:"codes,omitempty"`
+	Overflow   int     `json:"relay_overflow,omitempty"`
 	GOMEMLIMIT string  `json:"gomemlimit"`
 	Over       bool    `json:"over"`
 }
@@ -311,16 +383,28 @@ func mibOf(v int64) float64 { return float64(v) / (1 << 20) }
 func folgeSChildren(t *testing.T, test string, cases []string) {
 	t.Helper()
 	for _, c := range cases {
-		cmd := exec.Command(os.Args[0], "-test.run=^"+test+"$", "-test.count=1", "-test.v")
-		cmd.Env = append(os.Environ(), folgeSChildEnv+"="+c, "GOMEMLIMIT=200MiB")
-		out, err := cmd.CombinedOutput()
-		var line string
-		for _, l := range strings.Split(string(out), "\n") {
-			if i := strings.Index(l, "FOLGES "); i >= 0 {
-				line = l[i:]
+		var out []byte
+		var err error
+		for attempt := 1; ; attempt++ {
+			cmd := exec.Command(os.Args[0], "-test.run=^"+test+"$", "-test.count=1", "-test.v")
+			cmd.Env = append(os.Environ(), folgeSChildEnv+"="+c, "GOMEMLIMIT=200MiB")
+			out, err = cmd.CombinedOutput()
+			var line string
+			for _, l := range strings.Split(string(out), "\n") {
+				if i := strings.Index(l, "FOLGES "); i >= 0 {
+					line = l[i:]
+				}
+			}
+			t.Logf("%s %s (attempt %d): %s", test, c, attempt, line)
+			// A stream the relay cut because the harness's client fell
+			// behind (A03-W10's overflow, a drain-timing outcome under host
+			// load, not a heap outcome) is run again, at most
+			// folgeSOverflowRetries times; the heap verdict holds in every
+			// attempt — a run over its bound fails at once.
+			if err == nil || !strings.Contains(line, `"relay_overflow":`) || strings.Contains(line, `"over":true`) || attempt > folgeSOverflowRetries {
+				break
 			}
 		}
-		t.Logf("%s %s: %s", test, c, line)
 		if err != nil {
 			tail := string(out)
 			if len(tail) > 1500 {
@@ -434,12 +518,14 @@ func TestStreamLiveHeapConcurrent(t *testing.T) {
 		}
 	}()
 	codes := make([]int, n)
+	heads := make([][]byte, n)
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			codes[i] = folgeSPost(rig, body).code
+			w := folgeSPost(rig, body)
+			codes[i], heads[i] = w.code, w.head
 		}()
 	}
 	wg.Wait()
@@ -454,12 +540,18 @@ func TestStreamLiveHeapConcurrent(t *testing.T) {
 	for _, c := range codes {
 		fmt.Fprintf(&cs, "%d ", c)
 	}
-	v := folgeSVerdict{Case: spec, GrowthMiB: mibOf(growth), BoundMiB: mibOf(bound), HeldMiB: mibOf(s), HeapInMiB: mibOf(int64(peakInuse.Load()) - int64(inuse0)), GCCycles: gc, Codes: strings.TrimSpace(cs.String()), GOMEMLIMIT: os.Getenv("GOMEMLIMIT"), Over: growth > bound}
+	overflow := 0
+	for i, c := range codes {
+		if c == http.StatusServiceUnavailable && bytes.Contains(heads[i], []byte(folgeSOverflowText)) {
+			overflow++
+		}
+	}
+	v := folgeSVerdict{Case: spec, GrowthMiB: mibOf(growth), BoundMiB: mibOf(bound), HeldMiB: mibOf(s), HeapInMiB: mibOf(int64(peakInuse.Load()) - int64(inuse0)), GCCycles: gc, Codes: strings.TrimSpace(cs.String()), Overflow: overflow, GOMEMLIMIT: os.Getenv("GOMEMLIMIT"), Over: growth > bound}
 	j, _ := json.Marshal(v)
 	fmt.Printf("FOLGES %s\n", j)
 	for i, c := range codes {
 		if c != http.StatusOK {
-			t.Errorf("stream %d answered %d", i, c)
+			t.Errorf("stream %d answered %d: %.200s", i, c, heads[i])
 		}
 	}
 	if growth > bound {
