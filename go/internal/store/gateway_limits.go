@@ -171,8 +171,27 @@ func UpsertGatewayLimit(ctx context.Context, pool *pgxpool.Pool, access ModelAcc
 			if err != nil {
 				return err
 			}
-			cid, tid := rowIDs(key.Kind, consumer, tenant)
-			out, err = scanGatewayLimit(tx.QueryRow(ctx, `
+			out, err = insertGatewayLimitTx(ctx, tx, key, consumer, tenant, v, stamp.ActorKeyID)
+			return err
+		})
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			// The subject vanished between the check and the insert (a
+			// prune outside the lock): the same not-found as before it.
+			return gatewaylimits.Row{}, ErrGatewayLimitSubject
+		}
+		return gatewaylimits.Row{}, err
+	}
+	return out, nil
+}
+
+// insertGatewayLimitTx upserts the row of key (subject consumer/tenant as
+// resolved by the caller) with v inside tx, updated_by = actorKeyID — the
+// write of UpsertGatewayLimit and of a consumer's starting limits at create
+// (FOLGE-Z Z3). The caller stamps the transaction and checks the subject.
+func insertGatewayLimitTx(ctx context.Context, tx pgx.Tx, key GatewayLimitKey, consumer, tenant string, v gatewaylimits.Values, actorKeyID string) (gatewaylimits.Row, error) {
+	cid, tid := rowIDs(key.Kind, consumer, tenant)
+	return scanGatewayLimit(tx.QueryRow(ctx, `
 				INSERT INTO context_gateway_limits AS l (subject_kind, consumer_id, tenant_id, tier, op,
 				    rpm, tpm, max_concurrency, daily_tokens, monthly_tokens, daily_requests, monthly_cost_usd,
 				    allow_external, allow_unmetered_external, updated_by, updated_by_principal)
@@ -185,20 +204,9 @@ func UpsertGatewayLimit(ctx context.Context, pool *pgxpool.Pool, access ModelAcc
 				    allow_external = EXCLUDED.allow_external, allow_unmetered_external = EXCLUDED.allow_unmetered_external,
 				    updated_by = EXCLUDED.updated_by, updated_by_principal = EXCLUDED.updated_by_principal, updated_at = now()
 				RETURNING `+gatewayLimitCols,
-				string(key.Kind), cid, tid, string(key.Tier), string(key.Op),
-				v.RPM, v.TPM, v.MaxConcurrency, v.DailyTokens, v.MonthlyTokens, v.DailyRequests, v.MonthlyCostUSD,
-				v.AllowExternal, v.AllowUnmeteredExternal, nullable(stamp.ActorKeyID)))
-			return err
-		})
-	if err != nil {
-		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
-			// The subject vanished between the check and the insert (a
-			// prune outside the lock): the same not-found as before it.
-			return gatewaylimits.Row{}, ErrGatewayLimitSubject
-		}
-		return gatewaylimits.Row{}, err
-	}
-	return out, nil
+		string(key.Kind), cid, tid, string(key.Tier), string(key.Op),
+		v.RPM, v.TPM, v.MaxConcurrency, v.DailyTokens, v.MonthlyTokens, v.DailyRequests, v.MonthlyCostUSD,
+		v.AllowExternal, v.AllowUnmeteredExternal, nullable(actorKeyID)))
 }
 
 // DeleteGatewayLimit deletes the row of key under the same access rule,

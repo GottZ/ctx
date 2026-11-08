@@ -122,6 +122,9 @@ type chatCall struct {
 	target   watchTarget // what the watcher and the check before the write re-check (the consumer the last re-auth read)
 	req      *chatRequest
 	required backends.Sensitivity
+	// image is the first image part of the request (FOLGE-Z), recorded by
+	// the parse; image.seen false: the request carries no image.
+	image    imagePart
 	limit    LimitReservation
 	limitEnd bool
 	// maxTokens is the effective max_tokens the request sends upstream
@@ -282,7 +285,9 @@ func (c *chatCall) serve() {
 	if !c.resolve(req.model, req.modelOverlong) {
 		return
 	}
-	if perr := req.parsePolicy(limitsOf(c.alias, c.s), c.cover); perr != nil {
+	limits := limitsOf(c.alias, c.s)
+	limits.image = &c.image
+	if perr := req.parsePolicy(limits, c.cover); perr != nil {
 		c.refuseParam(perr)
 		return
 	}
@@ -650,6 +655,9 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 		c.internal("chain build failed", "error", err)
 		return nil, false
 	}
+	if chain = c.visionChain(chain); chain == nil {
+		return nil, false
+	}
 	gated, err := c.d.gateChain(c.ctx, c.ca, llmlog.GatewayOpChat, chain)
 	var qe *backends.ErrQuotaExceeded
 	switch {
@@ -667,6 +675,41 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 		return nil, false
 	}
 	return gated, true
+}
+
+// visionChain narrows the chain of an image request on an alias whose vision
+// comes from the backends (FOLGE-Z, modelalias.VisionBackend) to the rows
+// that reported vision=true, in chain order — the alias-level answer is
+// "some row of the chain at the alias's floor can", the request's own chain
+// (the consumer's sensitivity, the export rule, cooldown order) decides
+// which rows may get the image (Fremd-Review 1 R1-1/R1-3). No such row: the
+// door's refusal (400 unsupported_value at the image part) — written here,
+// nil returned. A request without images, and an alias whose policy.vision
+// decides, keep the chain as built.
+func (c *chatCall) visionChain(chain []backends.Backend) []backends.Backend {
+	if !c.image.seen {
+		return chain
+	}
+	if _, src := modelalias.DoorVision(c.alias); src != modelalias.VisionBackend {
+		return chain
+	}
+	capable := c.d.RowVision
+	if capable == nil {
+		capable = c.d.Pool.RowImageCapable
+	}
+	out := make([]backends.Backend, 0, len(chain))
+	for i := range chain {
+		if capable(&chain[i]) {
+			out = append(out, chain[i])
+		}
+	}
+	if len(out) == 0 {
+		slog.Info("gateway: image request without an image-capable row in its chain", "alias", c.alias.Name,
+			"rows", len(chain), "request_id", c.w.Header().Get("X-Request-ID"))
+		c.refuseParam(unsupportedValue(c.image.param(), limitsOf(c.alias, c.s).visionRefusal))
+		return nil
+	}
+	return out
 }
 
 // untilNextHour is the Retry-After of a tenant quota refusal whose relief is

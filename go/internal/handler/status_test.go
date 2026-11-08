@@ -425,6 +425,8 @@ func TestStatusGoldenKeys(t *testing.T) {
 		// A03-W9: the wait view and the refusals of the external bulk class XB.
 		"external_bulk", "external_bulk_rejects",
 		"interactive", "background", "preempt", "buckets",
+		// FOLGE-Z Z1: the capability probe results of the rows behind the origin.
+		"capabilities",
 	})
 	var dbk []json.RawMessage
 	if err := json.Unmarshal(mustField(t, dts[0], "buckets"), &dbk); err != nil {

@@ -535,6 +535,7 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 	h.reloadAfterMutation(ctx, "backend-create")
 
 	v := backendView(b)
+	v["capabilities"] = h.backendPool.Capabilities(b.ID)
 	h.attachDisableProfiles(v, b.ID)
 	resp := map[string]any{"success": true, "backend": v}
 	if len(warnings) > 0 {
@@ -704,6 +705,7 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 	h.reloadAfterMutation(ctx, "backend-update")
 
 	v := backendView(&next)
+	v["capabilities"] = h.backendPool.Capabilities(next.ID)
 	h.attachDisableProfiles(v, next.ID)
 	resp := map[string]any{"success": true, "backend": v}
 	if len(warnings) > 0 {
@@ -760,6 +762,9 @@ func (h *ManageHandler) handleBackendList(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		v := backendView(&snap[i])
+		// The capability probe's answer for the row (FOLGE-Z Z1): vision
+		// true|false|null (unknown), probed_at, source.
+		v["capabilities"] = h.backendPool.Capabilities(snap[i].ID)
 		// api_key_ref names a sealed secret. /api/secrets lists a tenant-admin
 		// only its own scope's names, and the api_key_ref 422 answers unknown,
 		// foreign and wrong-host alike so _global names cannot be probed (§5.5);

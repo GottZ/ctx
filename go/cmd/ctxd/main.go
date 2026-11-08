@@ -801,7 +801,11 @@ func main() {
 	// W02-03: the /v1 model namespace, loaded before Run builds the listener
 	// that keeps it hot (same boot happens-before). W02-04: with the ceiling
 	// getter the reload clamps tenant aliases to gateway.tenant_alias_ceiling.*.
-	scheduler.SetModelAliasRegistry(bootModelAliases(ctx, pool, modelAliasCeilings(cfgStore)))
+	aliasRegistry := bootModelAliases(ctx, pool, modelAliasCeilings(cfgStore))
+	scheduler.SetModelAliasRegistry(aliasRegistry)
+	// FOLGE-Z: the capability probe (first round now, after the pool's boot
+	// load) and the alias registry's effective vision over its answers.
+	bootCapabilityProbe(ctx, backendPool, aliasRegistry, cfgStore)
 	// W06-15: the limits rows of the meter (migration 168), loaded before Run
 	// builds the listener that keeps them hot (same boot happens-before).
 	scheduler.SetGatewayLimitsRegistry(bootGatewayLimits(ctx, pool))

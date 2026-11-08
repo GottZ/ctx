@@ -40,6 +40,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GottZ/ctx/internal/gatewaylimits"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/modelkey"
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/google/uuid"
@@ -182,6 +184,20 @@ type ModelConsumerSpec struct {
 	AdmissionLane     string
 	AllowedCIDRs      []string
 	AllowPlaintext    bool
+	// Limits are the consumer's starting limits (FOLGE-Z Z3): each one is
+	// written as the new consumer's context_gateway_limits row of its tier
+	// and op in the create's transaction — the row exists before the key
+	// leaves. The caller validates them (gatewaylimits.ValidateValues,
+	// CheckNarrowing); the table's CHECKs are the last line.
+	Limits []ConsumerStartLimit
+}
+
+// ConsumerStartLimit is one starting limits row of a new consumer: the tier
+// of the caller who creates it, the op and the dimensions.
+type ConsumerStartLimit struct {
+	Tier   gatewaylimits.Tier
+	Op     keyquota.Op
+	Values gatewaylimits.Values
 }
 
 // ModelConsumerPatch is a partial update of a consumer's policy: a nil field
@@ -308,6 +324,13 @@ func CreateConsumerWithKey(ctx context.Context, pool *pgxpool.Pool, spec ModelCo
 				}
 				if c.Models, err = ConsumerGrantIDs(ctx, tx, c.ID); err != nil {
 					return err
+				}
+			}
+			for _, l := range spec.Limits {
+				if _, err := insertGatewayLimitTx(ctx, tx,
+					GatewayLimitKey{Kind: gatewaylimits.SubjectConsumer, ConsumerID: c.ID, Tier: l.Tier, Op: l.Op},
+					c.ID, "", l.Values, stamp.ActorKeyID); err != nil {
+					return fmt.Errorf("model_consumers: create: limits %s/%s: %w", l.Tier, l.Op, err)
 				}
 			}
 			k, err = insertModelKeyTx(ctx, tx, c.ID, key, keyExpiresAt, nil)

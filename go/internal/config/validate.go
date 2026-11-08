@@ -110,6 +110,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGatewayCostBudget(c)...)
 	// V54 (W06-18, RC-D C2): gateway.soft_ratio in [0, 1).
 	issues = append(issues, validateGatewaySoftRatio(c)...)
+	// V59 (FOLGE-Z Z1): pool.capability_probe_interval at least 1 s.
+	issues = append(issues, validatePoolCapabilityProbe(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1459,6 +1461,20 @@ func validateGatewayInflightSweep(c *Config) []Issue {
 	if d := c.Gateway.InflightSweepInterval; d >= 0 && d < gatewayInflightSweepFloor {
 		return []Issue{{Field: key, Severity: SeverityError,
 			Msg: fmt.Sprintf("%s (%v) must be >= %v (V49) — 0 has no period, and a shorter sweep would put one ctx_model_auth_live query after another on the database pool", key, d, gatewayInflightSweepFloor)}}
+	}
+	return nil
+}
+
+// validatePoolCapabilityProbe is V59 (FOLGE-Z Z1): the capability probe's
+// cadence pool.capability_probe_interval is at least one second. 0 would
+// start the next probe round without a pause — every pool row's engine
+// asked in a loop; a sub-second value only reaches a hand-built snapshot
+// (the seconds parser cannot produce one). Negative values stay with V17.
+func validatePoolCapabilityProbe(c *Config) []Issue {
+	const key = "pool.capability_probe_interval"
+	if d := c.Pool.CapabilityProbeInterval; d >= 0 && d < time.Second {
+		return []Issue{{Field: key, Severity: SeverityError,
+			Msg: fmt.Sprintf("%s (%v) must be >= 1s (V59) — 0 would start the next capability probe round without a pause", key, d)}}
 	}
 	return nil
 }
