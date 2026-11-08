@@ -138,19 +138,19 @@ type Sink interface {
 // monotone since the recorder was made.
 type Stats struct {
 	// Noted counts the events queued for the writer.
-	Noted int64
+	Noted int64 `json:"noted"`
 	// Deduped counts the repeats answered without a row: by the in-memory
 	// set at Note, or by the INSERT's NOT EXISTS.
-	Deduped int64
+	Deduped int64 `json:"deduped"`
 	// Written counts the rows inserted.
-	Written int64
+	Written int64 `json:"written"`
 	// Dropped counts the events a full queue refused (QueueCap).
-	Dropped int64
+	Dropped int64 `json:"dropped"`
 	// Failed counts the failed INSERTs (database error, insertTimeout) and
 	// the events DedupeKey cannot key (incomplete — a caller bug).
-	Failed int64
+	Failed int64 `json:"failed"`
 	// PeerBound counts the peer_bound notices (they write no row).
-	PeerBound int64
+	PeerBound int64 `json:"peer_bound"`
 }
 
 // queued is one event waiting for the writer with its key and the month

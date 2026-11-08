@@ -110,19 +110,19 @@ type ModelAuthConfig struct {
 // design/06's. SemaphoreWaits counts every acquire of the DB semaphore,
 // SemaphoreWaitTotal sums their waits.
 type ModelAuthStats struct {
-	Accepted           uint64
-	NoCredential       uint64 // stage 3: no Authorization: Bearer
-	FormFailures       uint64 // stage 4: not a well-formed model key
-	Locked             uint64 // stage 5: 429 of the failure lock
-	ProbeRejected      uint64 // stage 6: 503 auth_overloaded
-	Invalid            uint64 // stage 7: ctx_model_auth refused
-	SemaphoreTimeouts  uint64 // stage 7: 503, deadline in the semaphore
-	DBErrors           uint64 // stage 7: 503, pool or query
-	ClientGone         uint64 // stage 7: the request context ended first (client gone) — no overload signal
-	SemaphoreWaits     uint64
-	SemaphoreWaitTotal time.Duration
-	ProxyMisconfigured uint64 // stage 1
-	WiringConflicts    uint64 // stage 0
+	Accepted           uint64        `json:"accepted"`
+	NoCredential       uint64        `json:"no_credential"`      // stage 3: no Authorization: Bearer
+	FormFailures       uint64        `json:"form_failures"`      // stage 4: not a well-formed model key
+	Locked             uint64        `json:"locked"`             // stage 5: 429 of the failure lock
+	ProbeRejected      uint64        `json:"probe_rejected"`     // stage 6: 503 auth_overloaded
+	Invalid            uint64        `json:"invalid"`            // stage 7: ctx_model_auth refused
+	SemaphoreTimeouts  uint64        `json:"semaphore_timeouts"` // stage 7: 503, deadline in the semaphore
+	DBErrors           uint64        `json:"db_errors"`          // stage 7: 503, pool or query
+	ClientGone         uint64        `json:"client_gone"`        // stage 7: the request context ended first (client gone) — no overload signal
+	SemaphoreWaits     uint64        `json:"semaphore_waits"`
+	SemaphoreWaitTotal time.Duration `json:"semaphore_wait_total_ns"`
+	ProxyMisconfigured uint64        `json:"proxy_misconfigured"` // stage 1
+	WiringConflicts    uint64        `json:"wiring_conflicts"`    // stage 0
 
 	// The in-flight registry (W01-8): requests running now, the distinct
 	// model keys behind them and their expiry timers (≤ keys), requests
