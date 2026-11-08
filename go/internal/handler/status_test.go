@@ -268,6 +268,10 @@ func TestStatusGoldenKeys(t *testing.T) {
 			Hourly:          &foreignLoadHour{Hour: next, EngineRequests: 102, CtxRequests: 100},
 			ProbeError:      nil, ProbedAt: &next,
 		}},
+		// FOLGE-Y (FOLGE-UY-INDEX §3): the query-synthesis latency block is
+		// server-admin PRESENT (even with no sample); the tenant path never
+		// sets it (status_tenant_integration_test.go pins ABSENT there).
+		QuerySynthesize: &querySynthesizeStatus{Samples: 3, Since: next},
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -276,7 +280,7 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "status", b, []string{
 		"success", "as_of", "health", "backends", "advisories", "dream", "llm_24h", "llm_24h_complete", "profiles", "activity",
 		"dispatch", "dispatch_tenant", "db", "graph_cache", "recall", "embed_migration", "guard_review",
-		"guard_review_by_scope", "llmlog", "foreign_load",
+		"guard_review_by_scope", "llmlog", "foreign_load", "query_synthesize",
 	})
 
 	var top map[string]json.RawMessage
@@ -294,6 +298,10 @@ func TestStatusGoldenKeys(t *testing.T) {
 	// W06-1: the llmlog write-path section — two process-wide loss counters,
 	// nothing else (no pipeline names, no error text: those are log material).
 	assertKeys(t, "llmlog", top["llmlog"], []string{"insert_failures", "insert_dropped"})
+
+	// FOLGE-Y: the query-synthesis latency block — exactly the four names
+	// the bench contract reads (p95_ms only when samples >= 20).
+	assertKeys(t, "query_synthesize", top["query_synthesize"], []string{"p95_ms", "avg_ms", "samples", "since"})
 
 	// W06-8: one foreign_load row per marked origin. probe_error/held/running/
 	// active are null-capable but always present (null = not measured, never omitted),

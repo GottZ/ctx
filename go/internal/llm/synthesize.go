@@ -888,6 +888,14 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	// MW10: queue_wait_ms/class/abort plus the wait-free Duration from the
 	// row-defining attempt (§4.4a — same derivation as ChainCall.Do).
 	applyDispatchTelemetry(&entry, attempts, adm.Class)
+	// FOLGE-Y: the one Messpunkt of /api/status query_synthesize
+	// (synthesis_latency.go) — the row-defining attempt's wait-free wire
+	// duration, whenever one reached a backend (QueueWaitMs is set exactly
+	// then) — the rows with a wire time among those llm_24h averages for
+	// query-synthesize (a no_model-only walk logs duration 0, not timed here).
+	if entry.QueueWaitMs != nil {
+		querySynthesizeLatency.observe(entry.Duration, time.Now())
+	}
 	// E4/8b body slim for credentials-class rows (request AND response — the
 	// synthesized answer derives from the credentials blocks). settings.Devmode
 	// is THIS request's tenant (query.go resolves it via SnapshotForRequest, the

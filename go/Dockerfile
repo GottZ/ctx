@@ -22,7 +22,14 @@ COPY . .
 # Real assets ON TOP of the committed placeholder — must happen BEFORE go
 # build, go:embed resolves at compile time (web/web.go: //go:embed all:dist).
 COPY --from=frontend /web/dist ./web/dist
-RUN CGO_ENABLED=0 go build -o /ctx ./cmd/ctxd
+# The release stamp (FOLGE-X): GET /health version and the boot line
+# "starting HTTP server" name it (internal/provenance.BuildVersion). The
+# release build passes the tag:
+#   docker compose -p n8n build --build-arg CTX_VERSION=vX.Y.Z ctx
+# Without it the image says "dev". Declared right before the build so a new
+# value only re-runs this layer.
+ARG CTX_VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/GottZ/ctx/internal/provenance.version=${CTX_VERSION}" -o /ctx ./cmd/ctxd
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:d62067879de890a1def9da0e7766b7d20810a5e5555cef8506b752437d7a3e88
 COPY --from=build /ctx /ctx

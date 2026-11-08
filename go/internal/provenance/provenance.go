@@ -40,6 +40,12 @@ func BuildRev() string {
 	if !ok {
 		return ""
 	}
+	return vcsRev(info)
+}
+
+// vcsRev is the VCS stamp of info with the dirty flag appended ("" without
+// one) — BuildRev's value, and BuildVersion's fallback.
+func vcsRev(info *debug.BuildInfo) string {
 	rev, dirty := "", false
 	for _, s := range info.Settings {
 		switch s.Key {
