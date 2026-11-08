@@ -9,12 +9,22 @@
 
 import { apiFetch } from '../api'
 import type {
+  AliasChainPreviewRequest,
+  AliasRolePreviewRequest,
+  ChainPreviewAnswer,
   ConsumerCreateResult,
   ConsumerListResponse,
   ConsumerRevokeResult,
   ConsumerStatus,
   ConsumerUpdateResult,
+  ConsumerUpdateSpec,
+  ModelAliasCreateSpec,
   ModelAliasListResponse,
+  ModelAliasUpdateSpec,
+  ModelAliasWriteResult,
+  ModelKeyRotateResult,
+  ModelKeyRotateSpec,
+  RoleSuggestionAnswer,
 } from './types'
 
 /** The status vocabulary in the server's order (store.ConsumerStatuses, design/05 §3.2). */
@@ -157,4 +167,90 @@ export function listModelAliases(): Promise<ModelAliasListResponse> {
     method: 'POST',
     body: JSON.stringify({ action: 'model-alias-list' }),
   })
+}
+
+// --- RC-D C5 (W05-07 policy edit, W05-08 rotation, W05-13 alias catalog).
+// Every body is built from an EXPLICIT field list — never a spread — so a
+// field the server must not see (kind, tenant_id, expires_at on an update;
+// name / kind / scope / tenant_id on an alias update) cannot ride along even
+// when an object carries it.
+
+function manage<T>(action: string, data: Record<string, unknown>, id?: string): Promise<T> {
+  const body: Record<string, unknown> = { action }
+  if (id !== undefined) body.id = id
+  body.data = data
+  return apiFetch<T>('/api/manage', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/**
+ * Change a consumer's policy — model-consumer-update {data:{id, ...patch}}
+ * (W05-07). Sends exactly the fields present in `patch` out of the policy set
+ * (label, description, tenant_scope, all_models, models, prompt_sensitivity,
+ * admission_lane, allowed_cidrs); a refusal (400 field, 403 "admin key
+ * required" tier, 409 label, 429 quota) rejects as ApiError.
+ */
+export function updateConsumer(id: string, patch: ConsumerUpdateSpec): Promise<ConsumerUpdateResult> {
+  const data: Record<string, unknown> = { id }
+  if (patch.label !== undefined) data.label = patch.label
+  if (patch.description !== undefined) data.description = patch.description
+  if (patch.tenant_scope !== undefined) data.tenant_scope = patch.tenant_scope
+  if (patch.all_models !== undefined) data.all_models = patch.all_models
+  if (patch.models !== undefined) data.models = [...patch.models]
+  if (patch.prompt_sensitivity !== undefined) data.prompt_sensitivity = patch.prompt_sensitivity
+  if (patch.admission_lane !== undefined) data.admission_lane = patch.admission_lane
+  if (patch.allowed_cidrs !== undefined) data.allowed_cidrs = patch.allowed_cidrs === null ? null : [...patch.allowed_cidrs]
+  return manage<ConsumerUpdateResult>('model-consumer-update', data)
+}
+
+/**
+ * Rotate a consumer's key — model-key-rotate {data:{consumer_id, grace,
+ * expires_at?}} (W05-08). grace in seconds is ALWAYS on the wire, 0 included
+ * (leak: the predecessor is revoked at once). Returns the reveal-once answer
+ * with the new plaintext for the caller to show once and drop.
+ */
+export function rotateModelKey(spec: ModelKeyRotateSpec): Promise<ModelKeyRotateResult> {
+  const data: Record<string, unknown> = { consumer_id: spec.consumer_id, grace: spec.grace }
+  if (spec.expires_at) data.expires_at = spec.expires_at
+  return manage<ModelKeyRotateResult>('model-key-rotate', data)
+}
+
+/** Create a model alias — model-alias-create (W05-13). `enabled` is always on the wire. */
+export function createModelAlias(spec: ModelAliasCreateSpec): Promise<ModelAliasWriteResult> {
+  const data: Record<string, unknown> = { name: spec.name, kind: spec.kind, role: spec.role, enabled: spec.enabled }
+  if (spec.scope) data.scope = spec.scope
+  if (spec.tenant_id) data.tenant_id = spec.tenant_id
+  if (spec.sensitivity !== undefined) data.sensitivity = spec.sensitivity
+  if (spec.policy !== undefined) data.policy = spec.policy
+  if (spec.description !== undefined) data.description = spec.description
+  if (spec.confirm_sensitivity_downgrade === true) data.confirm_sensitivity_downgrade = true
+  return manage<ModelAliasWriteResult>('model-alias-create', data)
+}
+
+/**
+ * Update a model alias — model-alias-update {id, data:{...patch}} (W05-13):
+ * the id rides TOP-LEVEL (the handler reads req.ID; an id in data is 400);
+ * name / kind / scope / tenant_id never (immutable, 400 immutable_field).
+ */
+export function updateModelAlias(id: string, patch: ModelAliasUpdateSpec): Promise<ModelAliasWriteResult> {
+  const data: Record<string, unknown> = {}
+  if (patch.role !== undefined) data.role = patch.role
+  if (patch.sensitivity !== undefined) data.sensitivity = patch.sensitivity
+  if (patch.policy !== undefined) data.policy = patch.policy
+  if (patch.description !== undefined) data.description = patch.description
+  if (patch.enabled !== undefined) data.enabled = patch.enabled
+  if (patch.confirm_sensitivity_downgrade === true) data.confirm_sensitivity_downgrade = true
+  return manage<ModelAliasWriteResult>('model-alias-update', data, id)
+}
+
+/**
+ * Dry-run the /v1 chain of an alias NAME through one consumer —
+ * model-alias-preview {data:{alias, consumer_id}} (W05-04, C7; server-admin).
+ */
+export function previewAliasChain(req: AliasChainPreviewRequest): Promise<ChainPreviewAnswer> {
+  return manage<ChainPreviewAnswer>('model-alias-preview', { alias: req.alias, consumer_id: req.consumer_id })
+}
+
+/** The pool's primary model of a role — model-alias-preview {data:{role}} ("Suggest from pool"). */
+export function poolPrimaryModel(req: AliasRolePreviewRequest): Promise<RoleSuggestionAnswer> {
+  return manage<RoleSuggestionAnswer>('model-alias-preview', { role: req.role })
 }

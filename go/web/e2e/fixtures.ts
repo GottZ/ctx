@@ -707,6 +707,8 @@ interface MockConsumer {
   models?: string[]
   prompt_sensitivity?: string
   allowed_cidrs?: string[] | null
+  /** RC-D C5 (W05-11): absent = bulk (the column default). */
+  admission_lane?: string
 }
 
 // Server-clock-skew probe (design/05 §5 B-11): the server calls this key
@@ -718,7 +720,9 @@ const KEY_A9FQ: MockKey = { hint: 'ctxm_…a9Fq', status: 'active', created_at: 
 
 /** The hand-written consumer world: tenant A (acme) five rows, tenant B (globex) two. */
 const CONSUMERS: MockConsumer[] = [
-  { id: '0190000000007000800000000000c0a1', tenant: 'A', label: 'ci-chat', kind: 'app', status: 'active', created_at: '2026-06-20T09:00:00Z', last_used_at: '2026-06-29T11:58:00Z', keys: [KEY_A9FQ], keys_total: 1, description: 'CI pipeline chat completions' },
+  // RC-D C5 (W05-07): ci-chat carries a granted model (_global chat) and a CIDR
+  // allowlist, so the edit dialog has something to narrow and to widen.
+  { id: '0190000000007000800000000000c0a1', tenant: 'A', label: 'ci-chat', kind: 'app', status: 'active', created_at: '2026-06-20T09:00:00Z', last_used_at: '2026-06-29T11:58:00Z', keys: [KEY_A9FQ], keys_total: 1, description: 'CI pipeline chat completions', models: ['01900000-0000-7000-8000-00000000a001'], allowed_cidrs: ['10.0.0.0/8'] },
   {
     id: '0190000000007000800000000000c0a2', tenant: 'A', label: 'ctx-peer-b', kind: 'ctx-peer', status: 'rotating', created_at: '2026-06-18T09:00:00Z', last_used_at: '2026-06-29T11:59:00Z',
     keys: [
@@ -728,7 +732,9 @@ const CONSUMERS: MockConsumer[] = [
     keys_total: 2,
   },
   { id: '0190000000007000800000000000c0a3', tenant: 'A', label: SENTINEL.A, kind: 'app', status: 'expiring', created_at: '2026-06-15T09:00:00Z', last_used_at: null, keys: [{ hint: 'ctxm_…Xk4d', status: 'expiring', created_at: '2026-06-15T09:00:00Z', expires_at: '2026-07-05T09:00:00Z', last_used_at: null }], keys_total: 1 },
-  { id: '0190000000007000800000000000c0a4', tenant: 'A', label: 'nightly-embed', kind: 'app', status: 'no_key', created_at: '2026-06-10T09:00:00Z', last_used_at: '2026-06-01T03:00:00Z', keys: [], keys_total: 1 },
+  // RC-D C5 (W05-13): nightly-embed takes public prompts, so the chain preview
+  // through it keeps the external row (ci-chat at credentials drops it).
+  { id: '0190000000007000800000000000c0a4', tenant: 'A', label: 'nightly-embed', kind: 'app', status: 'no_key', created_at: '2026-06-10T09:00:00Z', last_used_at: '2026-06-01T03:00:00Z', keys: [], keys_total: 1, prompt_sensitivity: 'public' },
   { id: '0190000000007000800000000000c0a5', tenant: 'A', label: 'legacy-app', kind: 'app', status: 'inactive', created_at: '2026-05-01T09:00:00Z', last_used_at: null, keys: [], keys_total: 1 },
   { id: '0190000000007000800000000000c0b1', tenant: 'B', label: 'globex-app', kind: 'app', status: 'active', created_at: '2026-06-22T09:00:00Z', last_used_at: null, keys: [{ hint: 'ctxm_…Gb1x', status: 'active', created_at: '2026-06-22T09:00:00Z', expires_at: null, last_used_at: null }], keys_total: 1 },
   { id: '0190000000007000800000000000c0b2', tenant: 'B', label: SENTINEL.B, kind: 'app', status: 'active', created_at: '2026-06-12T09:00:00Z', last_used_at: null, keys: [{ hint: 'ctxm_…Sb2y', status: 'active', created_at: '2026-06-12T09:00:00Z', expires_at: '2027-06-12T09:00:00Z', last_used_at: null }], keys_total: 1 },
@@ -781,7 +787,7 @@ function consumerView(c: MockConsumer, serverAdmin: boolean): Record<string, unk
     models: c.models ?? [],
     prompt_sensitivity: c.prompt_sensitivity ?? 'credentials',
     fair_weight: 1,
-    admission_lane: 'bulk',
+    admission_lane: c.admission_lane ?? 'bulk',
     allowed_cidrs: c.allowed_cidrs ?? null,
     allow_plaintext: false,
     active: c.status !== 'inactive',
@@ -920,6 +926,12 @@ interface MockAlias {
   name: string
   kind: 'chat' | 'embedding' | 'rerank'
   enabled: boolean
+  // RC-D C5 (W05-13): the catalog columns; absent = the W05-06 defaults
+  // (role = kind, sensitivity public, no description, empty policy)
+  role?: string
+  sensitivity?: string
+  description?: string
+  policy?: Record<string, unknown>
 }
 
 /**
@@ -937,6 +949,13 @@ export const MODEL_ALIASES: readonly MockAlias[] = [
   { id: '01900000-0000-7000-8000-00000000b002', scope: 'home', name: 'draft', kind: 'chat', enabled: false },
   { id: '01900000-0000-7000-8000-00000000c001', scope: 'shared', name: 'embed', kind: 'embedding', enabled: true },
   { id: '01900000-0000-7000-8000-00000000d001', scope: 'globex:home', name: 'chat', kind: 'chat', enabled: true },
+  // RC-D C5 (W05-13) — the catalog's tenant-leak sentinels: DISABLED home
+  // aliases without a _global namesake, so no offer of the W05-06 picker moves.
+  { id: '01900000-0000-7000-8000-00000000b0a1', scope: 'home', name: SENTINEL.A, kind: 'chat', enabled: false, sensitivity: 'credentials' },
+  { id: '01900000-0000-7000-8000-00000000d0b1', scope: 'globex:home', name: SENTINEL.B, kind: 'chat', enabled: false, sensitivity: 'credentials' },
+  // RC-D C5 (W05-13) — a _global floor above public for the shadow-floor gate
+  // (V-02-c); disabled, so it is offered nowhere.
+  { id: '01900000-0000-7000-8000-00000000a005', scope: '_global', name: 'vault', kind: 'chat', enabled: false, sensitivity: 'personal' },
 ]
 
 /** modelalias.Offers over MODEL_ALIASES (registry.go: own names + unshadowed _global names, winner by presence, enabled only). */
@@ -956,10 +975,10 @@ function aliasView(a: MockAlias, writable: boolean): Record<string, unknown> {
     scope: a.scope,
     name: a.name,
     kind: a.kind,
-    role: a.kind,
-    sensitivity: 'public',
-    policy: {},
-    description: '',
+    role: a.role ?? a.kind,
+    sensitivity: a.sensitivity ?? 'public',
+    policy: a.policy ?? {},
+    description: a.description ?? '',
     enabled: a.enabled,
     created_at: '2026-06-01T08:00:00Z',
     updated_at: '2026-06-01T08:00:00Z',
@@ -978,13 +997,67 @@ const CIDR_RE = /^(\d{1,3}(\.\d{1,3}){3}\/\d{1,2}|[0-9a-f:]+\/\d{1,3})$/i
 
 type MockAnswer = { status: number; json: Record<string, unknown> }
 
+// RC-D C5 (W05-07/W05-08/W05-13) — the further handler semantics the forms
+// meet, read from model_consumers.go (update field set + field tiers,
+// model-key-rotate) and model_alias_manage.go (alias writes):
+/** The fields handleModelConsumerUpdate decodes besides `id` (kind / tenant_id / expires_at do not exist). */
+const UPDATE_FIELDS = new Set([
+  'label', 'description', 'tenant_scope', 'all_models', 'models', 'prompt_sensitivity', 'fair_weight',
+  'admission_lane', 'allowed_cidrs', 'allow_plaintext', 'active',
+])
+/** Strictest first — "lower" = a higher index. */
+const SENS_RANK: Record<string, number> = { credentials: 0, personal: 1, internal: 2, public: 3 }
+/** store.MaxRotationGrace (7 d) in seconds. */
+const MAX_ROTATION_GRACE_S = 604_800
+/** The plaintext model-key-rotate returns — the SECOND reveal-once path (W05-08, B-6). */
+export const ROTATE_MARKER = 'ctxm_TESTKEY_rotated_once_do_not_persist'
+/** The alias data fields model_alias_manage.go decodes (DisallowUnknownFields). */
+const ALIAS_FIELDS = new Set(['name', 'kind', 'scope', 'tenant_id', 'role', 'sensitivity', 'policy', 'description', 'enabled', 'confirm_sensitivity_downgrade'])
+const ALIAS_IMMUTABLE = ['name', 'kind', 'scope', 'tenant_id']
+const ALIAS_KINDS = ['chat', 'embedding', 'rerank']
+/** Pool.PrimaryModel per role of the mock pool (model-alias-preview {role}, C7 contract; '' = none). */
+export const POOL_PRIMARY: Readonly<Record<string, string>> = { chat: 'qwen38-27b', embed: 'qwen3-embedding-8b', rerank: '' }
+/**
+ * The mock pool the chain preview walks (C7 oai.PreviewRow shape): one LAN row
+ * with full trust, one external row that serves only prompts at or below
+ * `personal` (trust no-credentials) — so the sensitivity decides whether the
+ * external row is in the chain or in `excluded`.
+ */
+const PREVIEW_POOL = [
+  { row: { backend: 'spark-chat', locality: 'lan', provider_class: 'generic', billing: 'free', trust: 'full-trust', priority: 100 }, maxRank: 0 },
+  { row: { backend: 'openrouter', locality: 'external', provider_class: 'openrouter', billing: 'metered', trust: 'no-credentials', priority: 10 }, maxRank: 1 },
+]
+const PREVIEW_OP: Record<string, string> = { chat: 'chat', embedding: 'embed', rerank: 'rerank' }
+
+/** cidrsNarrow mirror: every prefix of `next` lies inside some prefix of `stored` (IPv4 only — the mock world). */
+function mockCidrsNarrow(stored: string[] | null, next: string[] | null): boolean {
+  if (next === null) return stored === null
+  if (stored === null) return true
+  const parse = (c: string): [number, number] | null => {
+    const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/.exec(c)
+    if (!m) return null
+    return [((+m[1] << 24) | (+m[2] << 16) | (+m[3] << 8) | +m[4]) >>> 0, +m[5]]
+  }
+  const inside = (inner: string, outer: string): boolean => {
+    const a = parse(inner)
+    const b = parse(outer)
+    if (!a || !b || a[1] < b[1]) return false
+    const mask = b[1] === 0 ? 0 : (0xffffffff << (32 - b[1])) >>> 0
+    return ((a[0] & mask) >>> 0) === ((b[0] & mask) >>> 0)
+  }
+  return next.every((n) => stored.some((o) => inside(n, o)))
+}
+
 /** Per-session state of the W05-06 mutation mock: a mutable copy of CONSUMERS with fixed key ids. */
 class GatewayWorld {
   consumers: MockConsumer[]
+  /** RC-D C5 (W05-13): the alias catalog of this session — alias writes change it. */
+  aliasRows: MockAlias[]
   #seq = 0
 
   constructor() {
     this.consumers = CONSUMERS.map((c) => ({ ...c, keys: c.keys.map((k, n) => ({ ...k, id: mockKeyId(c, n) })) }))
+    this.aliasRows = MODEL_ALIASES.map((a) => ({ ...a }))
   }
 
   #visible(role: Role, tkey: TenantKey): MockConsumer[] {
@@ -1133,11 +1206,52 @@ class GatewayWorld {
   update(role: Role, tkey: TenantKey, caps: Record<string, unknown> | undefined, data: Record<string, unknown> | undefined): MockAnswer {
     if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
     const d = data ?? {}
-    for (const k of Object.keys(d)) if (k !== 'id' && k !== 'active') return { status: 400, json: { success: false, error: `unknown field "${k}" (expiry changes need model-key-rotate)` } }
+    for (const k of Object.keys(d)) if (k !== 'id' && !UPDATE_FIELDS.has(k)) return { status: 400, json: { success: false, error: `unknown field "${k}" (expiry changes need model-key-rotate)` } }
     const id = typeof d.id === 'string' ? d.id : ''
     if (id === '') return { status: 400, json: { success: false, error: 'id is required' } }
     const c = this.#visible(role, tkey).find((x) => x.id === id)
     if (!c) return { status: 404, json: { success: false, error: 'model consumer not found' } }
+    // RC-D C5 (W05-07/W05-11): the policy fields with the handler's field tiers
+    // — server-admin only: lower the sensitivity, raise the lane bulk → urgent;
+    // granting (tenant-admin only with self-service, never on a ctx-peer):
+    // widen models / all_models / set or change tenant_scope / widen the CIDR
+    // allowlist (null over a list, prefixes outside the stored list).
+    const policyKeys = Object.keys(d).filter((k) => k !== 'id' && k !== 'active')
+    if (policyKeys.length > 0) {
+      const serverAdmin = role === 'server-admin'
+      const pol = (caps?.model_api ?? {}) as { enabled?: boolean; self_service?: boolean }
+      const mayGrant = serverAdmin || (c.kind !== 'ctx-peer' && pol.enabled === true && pol.self_service === true)
+      const forbid: MockAnswer = { status: 403, json: { success: false, error: 'admin key required' } }
+      if (d.admission_lane !== undefined && d.admission_lane !== 'urgent' && d.admission_lane !== 'bulk') {
+        return { status: 400, json: { success: false, error: 'admission_lane must be urgent or bulk' } }
+      }
+      if (d.prompt_sensitivity !== undefined && !SENSITIVITY_VOCAB.includes(d.prompt_sensitivity as string)) {
+        return { status: 400, json: { success: false, error: 'prompt_sensitivity must be one of credentials, personal, internal, public' } }
+      }
+      if (d.allowed_cidrs !== undefined && d.allowed_cidrs !== null) {
+        if (!Array.isArray(d.allowed_cidrs) || d.allowed_cidrs.length === 0) return { status: 400, json: { success: false, error: 'allowed_cidrs must not be empty; null means any source' } }
+        for (const x of d.allowed_cidrs) if (typeof x !== 'string' || !CIDR_RE.test(x)) return { status: 400, json: { success: false, error: `allowed_cidrs: "${String(x)}" is not a CIDR prefix` } }
+      }
+      const curSens = c.prompt_sensitivity ?? 'credentials'
+      const lowersSens = typeof d.prompt_sensitivity === 'string' && SENS_RANK[d.prompt_sensitivity] > SENS_RANK[curSens]
+      const curLane = c.admission_lane ?? 'bulk'
+      const raisesLane = d.admission_lane === 'urgent' && curLane === 'bulk'
+      if (!serverAdmin && (lowersSens || raisesLane)) return forbid
+      const curModels = c.models ?? []
+      const widensModels = Array.isArray(d.models) && (d.models as string[]).some((m) => !curModels.includes(String(m).toLowerCase()))
+      const widensAll = d.all_models === true && c.all_models !== true
+      const changesScope = typeof d.tenant_scope === 'string' && d.tenant_scope !== (c.tenant_scope ?? null)
+      const widensCidrs = 'allowed_cidrs' in d && !mockCidrsNarrow(c.allowed_cidrs ?? null, (d.allowed_cidrs as string[] | null) ?? null)
+      if (!mayGrant && (widensModels || widensAll || changesScope || widensCidrs)) return forbid
+      if (typeof d.label === 'string') c.label = d.label.trim()
+      if (typeof d.description === 'string') c.description = d.description
+      if ('tenant_scope' in d) c.tenant_scope = (d.tenant_scope as string | null) ?? null
+      if (typeof d.all_models === 'boolean') c.all_models = d.all_models
+      if (Array.isArray(d.models)) c.models = (d.models as string[]).map((m) => m.toLowerCase()).sort()
+      if (typeof d.prompt_sensitivity === 'string') c.prompt_sensitivity = d.prompt_sensitivity
+      if (typeof d.admission_lane === 'string') c.admission_lane = d.admission_lane
+      if ('allowed_cidrs' in d) c.allowed_cidrs = (d.allowed_cidrs as string[] | null) ?? null
+    }
     if (d.active === true && c.status === 'inactive') {
       const policy = (caps?.model_api ?? {}) as { enabled?: boolean; self_service?: boolean }
       // reactivating is granting: tenant-admin only with self-service, never on a peer
@@ -1152,13 +1266,193 @@ class GatewayWorld {
     return { status: 200, json: { success: true, consumer: consumerView(c, role === 'server-admin') } }
   }
 
+  /**
+   * RC-D C5 (W05-08) — model-key-rotate {consumer_id, grace (s), expires_at?}:
+   * granting (tenant-admin only with self-service, never on a ctx-peer); grace
+   * 0 revokes the predecessor at once, > 0 keeps it live (superseded) until
+   * the window ends; answers the new key's view + its plaintext ONCE.
+   */
+  rotate(role: Role, tkey: TenantKey, caps: Record<string, unknown> | undefined, data: Record<string, unknown> | undefined): MockAnswer {
+    const forbid: MockAnswer = { status: 403, json: { success: false, error: 'admin key required' } }
+    if (role === 'member') return forbid
+    const d = data ?? {}
+    for (const k of Object.keys(d)) if (k !== 'consumer_id' && k !== 'grace' && k !== 'expires_at') return { status: 400, json: { success: false, error: `invalid data: json: unknown field "${k}"` } }
+    const id = typeof d.consumer_id === 'string' ? d.consumer_id : ''
+    if (id === '') return { status: 400, json: { success: false, error: 'consumer_id is required' } }
+    const grace = d.grace === undefined ? 86_400 : d.grace
+    if (typeof grace !== 'number' || !Number.isInteger(grace) || grace < 0 || grace > MAX_ROTATION_GRACE_S) {
+      return { status: 400, json: { success: false, error: `grace must lie between 0 and ${MAX_ROTATION_GRACE_S} seconds` } }
+    }
+    const c = this.#visible(role, tkey).find((x) => x.id === id)
+    if (!c) return { status: 404, json: { success: false, error: 'model consumer not found' } }
+    const pol = (caps?.model_api ?? {}) as { enabled?: boolean; self_service?: boolean }
+    if (role !== 'server-admin' && (c.kind === 'ctx-peer' || !(pol.enabled === true && pol.self_service === true))) return forbid
+    if (c.status === 'inactive') return { status: 409, json: { success: false, error: 'model consumer is not active' } }
+    this.#seq++
+    const created = new Date(MOCK_NOW_MS + this.#seq * 1000).toISOString().replace('.000Z', 'Z')
+    if (grace === 0) c.keys = []
+    else c.keys = c.keys.map((k) => ({ ...k, expires_at: new Date(Math.min(MOCK_NOW_MS + grace * 1000, k.expires_at ? Date.parse(k.expires_at) : Infinity)).toISOString() }))
+    const key: MockKey = { id: `${c.id}k${c.keys_total}`, hint: `ctxm_…${ROTATE_MARKER.slice(-4)}`, status: 'active', created_at: created, expires_at: new Date(MOCK_NOW_MS + 31_536_000_000).toISOString(), last_used_at: null }
+    c.keys = [key, ...c.keys]
+    c.keys_total++
+    this.#restatus(c)
+    const view = (consumerView(c, role === 'server-admin').keys as Record<string, unknown>[]).find((k) => k.id === key.id)
+    return { status: 200, json: { success: true, key: view ?? {}, api_key: ROTATE_MARKER } }
+  }
+
+  #aliasScopeFor(role: Role, tkey: TenantKey, scope: unknown): string | null {
+    const home = TENANTS[tkey].home
+    if (role === 'server-admin') return typeof scope === 'string' && scope !== '' ? scope : '_global'
+    if (scope === undefined || scope === '' || scope === home) return home
+    return null
+  }
+
+  /** RC-D C5 (W05-13) — model-alias-create with the handler's checks (MA:323-635). */
+  aliasCreate(role: Role, tkey: TenantKey, data: Record<string, unknown> | undefined): MockAnswer {
+    if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
+    const d = data ?? {}
+    for (const k of Object.keys(d)) if (!ALIAS_FIELDS.has(k)) return { status: 400, json: { success: false, error: `invalid data: unknown field "${k}"` } }
+    const fields: { field: string; message: string }[] = []
+    for (const k of ['role', 'sensitivity', 'description', 'enabled']) if (k in d && d[k] === null) fields.push({ field: k, message: 'null is no value — omit the key instead' })
+    if (typeof d.name !== 'string' || d.name === '') fields.push({ field: 'name', message: 'required' })
+    if (typeof d.kind !== 'string' || !ALIAS_KINDS.includes(d.kind)) fields.push({ field: 'kind', message: 'must be chat, embedding or rerank' })
+    if (typeof d.role !== 'string' || d.role === '') fields.push({ field: 'role', message: 'required' })
+    if (typeof d.enabled !== 'boolean') fields.push({ field: 'enabled', message: 'required — send true or false; a new alias is never live by default' })
+    const sens = (d.sensitivity as string | undefined) ?? 'credentials'
+    if (!(sens in SENS_RANK)) fields.push({ field: 'sensitivity', message: 'must be public, internal, personal or credentials' })
+    if (fields.length > 0) return { status: 422, json: { success: false, error: 'validation failed', fields } }
+    if (role !== 'server-admin' && typeof d.tenant_id === 'string') return { status: 403, json: { success: false, error: 'tenant_id is server-admin only' } }
+    const scope = this.#aliasScopeFor(role, tkey, d.scope)
+    if (scope === null) return { status: 404, json: { success: false, error: 'model alias not found' } }
+    const name = d.name as string
+    if (scope !== '_global') {
+      const floor = this.aliasRows.find((a) => a.scope === '_global' && a.name === name)
+      const fs = floor?.sensitivity ?? 'public'
+      if (floor && SENS_RANK[sens] > SENS_RANK[fs]) {
+        return { status: 422, json: { success: false, error: 'validation failed', fields: [{ field: 'sensitivity', message: `${sens} is below ${fs}, the sensitivity of the _global alias "${name}" this alias shadows — a shadow may redirect, never lower the floor` }] } }
+      }
+    }
+    const warnings: string[] = []
+    if (SENS_RANK[sens] > SENS_RANK.credentials) {
+      if (role !== 'server-admin') return { status: 403, json: { success: false, error: 'admin key required' } }
+      if (d.confirm_sensitivity_downgrade !== true) return { status: 422, json: { success: false, error: `validation: sensitivity: lowering credentials → ${sens} … repeat with "confirm_sensitivity_downgrade": true` } }
+      warnings.push(`sensitivity lowered credentials → ${sens} (confirmed)`)
+    }
+    if (this.aliasRows.some((a) => a.scope === scope && a.name === name)) {
+      return { status: 409, json: { success: false, error: 'a model alias of that name already exists in the scope', code: 'constraint' } }
+    }
+    this.#seq++
+    const a: MockAlias = {
+      id: `01900000-0000-7000-8000-0000000e${String(this.#seq).padStart(4, '0')}`,
+      scope,
+      name,
+      kind: d.kind as MockAlias['kind'],
+      enabled: d.enabled as boolean,
+      role: d.role as string,
+      sensitivity: sens,
+      description: typeof d.description === 'string' ? d.description : '',
+      policy: (d.policy as Record<string, unknown> | undefined) ?? {},
+    }
+    this.aliasRows.push(a)
+    return { status: 200, json: { success: true, model_alias: aliasView(a, true), ...(warnings.length > 0 ? { warnings } : {}) } }
+  }
+
+  /** RC-D C5 (W05-13) — model-alias-update {id top-level, data}: immutables 400, _global 404 below server-admin. */
+  aliasUpdate(role: Role, tkey: TenantKey, id: string | undefined, data: Record<string, unknown> | undefined): MockAnswer {
+    if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
+    const d = data ?? {}
+    if (typeof id !== 'string' || id === '') return { status: 400, json: { success: false, error: 'id required' } }
+    for (const f of ALIAS_IMMUTABLE) {
+      if (f in d) return { status: 400, json: { success: false, error: `${f} is immutable — renaming or re-scoping an alias is a new alias: create it and disable this one`, param: f, code: 'immutable_field' } }
+    }
+    for (const k of Object.keys(d)) if (!ALIAS_FIELDS.has(k)) return { status: 400, json: { success: false, error: `invalid data: unknown field "${k}"` } }
+    const home = TENANTS[tkey].home
+    const a = this.aliasRows.find((x) => x.id === id && (role === 'server-admin' || x.scope === home))
+    if (!a) return { status: 404, json: { success: false, error: 'model alias not found' } }
+    const changes = ['role', 'sensitivity', 'policy', 'description', 'enabled'].filter((k) => k in d)
+    if (changes.length === 0) return { status: 400, json: { success: false, error: 'nothing to update' } }
+    const cur = a.sensitivity ?? 'public'
+    const next = (d.sensitivity as string | undefined) ?? cur
+    // shadow floor (V-02-c) on the update path too — the handler checks it
+    // before the downgrade confirm (MA:546-579, 675-678 / 774-777)
+    if (a.scope !== '_global') {
+      const floor = this.aliasRows.find((x) => x.scope === '_global' && x.name === a.name)
+      const fs = floor?.sensitivity ?? 'public'
+      if (floor && SENS_RANK[next] > SENS_RANK[fs]) {
+        return { status: 422, json: { success: false, error: 'validation failed', fields: [{ field: 'sensitivity', message: `${next} is below ${fs}, the sensitivity of the _global alias "${a.name}" this alias shadows — a shadow may redirect, never lower the floor` }] } }
+      }
+    }
+    const warnings: string[] = []
+    if (SENS_RANK[next] > SENS_RANK[cur]) {
+      if (role !== 'server-admin') return { status: 403, json: { success: false, error: 'admin key required' } }
+      if (d.confirm_sensitivity_downgrade !== true) return { status: 422, json: { success: false, error: `validation: sensitivity: lowering ${cur} → ${next} … repeat with "confirm_sensitivity_downgrade": true` } }
+      warnings.push(`sensitivity lowered ${cur} → ${next} (confirmed)`)
+    }
+    if (typeof d.role === 'string') a.role = d.role
+    if (typeof d.sensitivity === 'string') a.sensitivity = d.sensitivity
+    if (typeof d.description === 'string') a.description = d.description
+    if (typeof d.enabled === 'boolean') a.enabled = d.enabled
+    if (d.policy !== undefined) a.policy = d.policy as Record<string, unknown>
+    return { status: 200, json: { success: true, model_alias: aliasView(a, true), ...(warnings.length > 0 ? { warnings } : {}) } }
+  }
+
+  /**
+   * RC-D C5 — model-alias-preview with the C7 contract (RCD-c7-cli-preview-S1
+   * §Vertrag): server-admin only (403); exactly one mode, unknown fields 400;
+   * role mode {role} ⇒ {role, primary_model} ('' = none); chain mode
+   * {alias: <name>, consumer_id} — consumer_id required (400), unknown
+   * consumer ⇒ 200 {success:false,"consumer not found"} (no oracle); the alias
+   * resolves by NAME in the consumer's scope (a tenant alias shadows the
+   * _global one, ctx-peer ⇒ _global only); required sensitivity = the stricter
+   * of alias and consumer; chain / excluded / notes never null.
+   */
+  aliasPreview(role: Role, data: Record<string, unknown> | undefined): MockAnswer {
+    if (role !== 'server-admin') return { status: 403, json: { success: false, error: 'admin key required' } }
+    const d = data ?? {}
+    for (const k of Object.keys(d)) if (k !== 'alias' && k !== 'consumer_id' && k !== 'role') return { status: 400, json: { success: false, error: `invalid data: unknown field "${k}"` } }
+    const roleMode = typeof d.role === 'string'
+    const chainMode = typeof d.alias === 'string'
+    if (roleMode === chainMode) return { status: 400, json: { success: false, error: 'exactly one of alias or role is required' } }
+    if (roleMode) {
+      if (!(d.role === 'chat' || d.role === 'embed' || d.role === 'rerank')) return { status: 400, json: { success: false, error: 'role must be chat, embed or rerank' } }
+      return { status: 200, json: { success: true, role: d.role, primary_model: POOL_PRIMARY[d.role as string] ?? '' } }
+    }
+    if (typeof d.consumer_id !== 'string' || d.consumer_id === '') return { status: 400, json: { success: false, error: 'consumer_id is required for a chain preview' } }
+    const c = this.consumers.find((x) => x.id === d.consumer_id)
+    if (!c) return { status: 200, json: { success: false, error: 'consumer not found' } }
+    const name = d.alias as string
+    const scope = c.kind === 'ctx-peer' ? null : (c.tenant_scope ?? null)
+    const a = (scope !== null ? this.aliasRows.find((x) => x.scope === scope && x.name === name) : undefined) ?? this.aliasRows.find((x) => x.scope === '_global' && x.name === name)
+    const base = { success: true, consumer_id: c.id, scope: scope ?? '', chain: [] as unknown[], excluded: [] as unknown[] }
+    if (!a || !a.enabled) {
+      return { status: 200, json: { ...base, alias: null, op: '', required_sensitivity: '', lane: '', notes: ['alias_not_resolved'] } }
+    }
+    const req = Math.min(SENS_RANK[a.sensitivity ?? 'public'] ?? 0, SENS_RANK[c.prompt_sensitivity ?? 'credentials'] ?? 0)
+    const reqName = Object.keys(SENS_RANK).find((k) => SENS_RANK[k] === req) ?? 'credentials'
+    const chain = PREVIEW_POOL.filter((p) => req >= p.maxRank).map((p) => p.row)
+    const excluded = PREVIEW_POOL.filter((p) => req < p.maxRank).map((p) => ({ backend: p.row.backend, stage: 'pool', reason: `trust ${p.row.trust} < required ${reqName}` }))
+    return {
+      status: 200,
+      json: {
+        ...base,
+        alias: { id: a.id, name: a.name, kind: a.kind, role: a.role ?? a.kind, scope: a.scope, sensitivity: a.sensitivity ?? 'public' },
+        op: PREVIEW_OP[a.kind] ?? '',
+        required_sensitivity: reqName,
+        lane: c.admission_lane ?? 'bulk',
+        chain,
+        excluded,
+        notes: chain.length === 0 ? ['no_eligible_backend', 'body_scan_may_raise'] : ['body_scan_may_raise'],
+      },
+    }
+  }
+
   aliases(role: Role, tkey: TenantKey): MockAnswer {
     if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
     const home = TENANTS[tkey].home
     const rows =
       role === 'server-admin'
-        ? MODEL_ALIASES
-        : MODEL_ALIASES.filter((a) => a.scope === '_global' || (home !== '' && !home.startsWith('_') && a.scope === home))
+        ? this.aliasRows
+        : this.aliasRows.filter((a) => a.scope === '_global' || (home !== '' && !home.startsWith('_') && a.scope === home))
     const sorted = [...rows].sort((a, b) => (a.scope + '\u0000' + a.name < b.scope + '\u0000' + b.name ? -1 : 1))
     return {
       status: 200,
@@ -1497,6 +1791,11 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
         else if (action === 'model-consumer-update') r = gateway.update(opts.role, tkey, opts.capabilities, data)
         else if (action === 'model-key-revoke') r = gateway.revoke(opts.role, tkey, data, cancelled)
         else if (action === 'model-alias-list') r = gateway.aliases(opts.role, tkey)
+        // RC-D C5: rotation (W05-08), alias writes + preview (W05-13)
+        else if (action === 'model-key-rotate') r = gateway.rotate(opts.role, tkey, opts.capabilities, data)
+        else if (action === 'model-alias-create') r = gateway.aliasCreate(opts.role, tkey, data)
+        else if (action === 'model-alias-update') r = gateway.aliasUpdate(opts.role, tkey, id, data)
+        else if (action === 'model-alias-preview') r = gateway.aliasPreview(opts.role, data)
         else if (action === 'scope-list') r = scopeListForTenant(opts.role, id)
         if (r !== null) return route.fulfill({ status: r.status, json: r.json })
       }

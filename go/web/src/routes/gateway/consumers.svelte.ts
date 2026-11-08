@@ -39,6 +39,8 @@ import {
   listConsumers,
   reactivateConsumer,
   revokeModelKey,
+  rotateModelKey,
+  updateConsumer,
   type ConsumerCreateSpec,
   type ConsumerListParams,
 } from '../../lib/api/modelapi'
@@ -48,7 +50,10 @@ import type {
   ConsumerRevokeResult,
   ConsumerStatus,
   ConsumerUpdateResult,
+  ConsumerUpdateSpec,
   ConsumerView,
+  ModelKeyRotateResult,
+  ModelKeyRotateSpec,
   Tenant,
 } from '../../lib/api/types'
 import type { ResourceStatus } from '../../lib/resource.svelte'
@@ -84,6 +89,10 @@ interface ConsumersApi {
   del: typeof deleteConsumer
   reactivate: typeof reactivateConsumer
   revoke: typeof revokeModelKey
+  /** RC-D C5 W05-07: model-consumer-update with a policy patch. */
+  update: typeof updateConsumer
+  /** RC-D C5 W05-08: model-key-rotate. */
+  rotate: typeof rotateModelKey
 }
 
 const DEFAULT_API: ConsumersApi = {
@@ -93,6 +102,8 @@ const DEFAULT_API: ConsumersApi = {
   del: deleteConsumer,
   reactivate: reactivateConsumer,
   revoke: revokeModelKey,
+  update: updateConsumer,
+  rotate: rotateModelKey,
 }
 
 /** The list filter: a non-empty status set, a label prefix ('' = none), a tenant (server-admin; null = all). */
@@ -321,6 +332,27 @@ export class ConsumersModel {
   /** Revoke one key by its KEY id (model-key-revoke); returns cancelled_inflight for the toast. */
   async revokeKey(keyId: string): Promise<ConsumerRevokeResult> {
     return this.#mutate(keyId, () => this.#api.revoke(keyId))
+  }
+
+  /**
+   * Change a consumer's policy (model-consumer-update, RC-D C5 W05-07) with
+   * the patch policy.buildUpdatePatch built — busyId / actionError + rethrow
+   * like every row mutation (the edit dialog stays open with a 403 / 400 /
+   * 409 / 429), page 1 reloads on success.
+   */
+  async update(id: string, patch: ConsumerUpdateSpec): Promise<ConsumerUpdateResult> {
+    return this.#mutate(id, () => this.#api.update(id, patch))
+  }
+
+  /**
+   * Rotate a consumer's key (model-key-rotate, RC-D C5 W05-08). Returns the
+   * reveal-once answer — WITH the new plaintext — for the caller to show once
+   * and drop; the model keeps nothing of it (B-6, the second reveal-once
+   * path: #mutate holds the answer only on its stack). Refusals: busyId /
+   * actionError + rethrow; page 1 reloads on success.
+   */
+  async rotate(spec: ModelKeyRotateSpec): Promise<ModelKeyRotateResult> {
+    return this.#mutate(spec.consumer_id, () => this.#api.rotate(spec))
   }
 
   async #mutate<T>(id: string, run: () => Promise<T>): Promise<T> {

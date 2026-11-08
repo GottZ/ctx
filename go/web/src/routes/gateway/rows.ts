@@ -33,3 +33,13 @@ export function canReactivate(c: ConsumerView, caps: { serverAdmin: boolean; min
   if (c.active) return false
   return caps.serverAdmin || (c.kind !== 'ctx-peer' && caps.mintModelKeys)
 }
+
+/**
+ * Does the row carry an "Edit policy" control (RC-D C5 W05-07)? A server-admin
+ * on every row; below server-admin never on a ctx-peer (peers are managed by
+ * the server-admin, V-01-b mirror). Lives here so the list chunk does not pull
+ * policy.ts / mint.ts (re-exported from policy.ts).
+ */
+export function canEditPolicy(c: ConsumerView, caps: { serverAdmin: boolean }): boolean {
+  return caps.serverAdmin || c.kind !== 'ctx-peer'
+}
