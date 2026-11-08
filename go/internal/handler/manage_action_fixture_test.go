@@ -160,9 +160,10 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"update", "", tierOpen, "handleUpdate"},
 }
 
-// fixtureActionNames is the deduplicated enumeration (101 names: the 89 of the
-// pre-table tree plus the four model alias actions of W02-04 and the eight model
-// consumer actions of W01-5; three
+// fixtureActionNames is the deduplicated enumeration (105 names: the 89 of the
+// pre-table tree plus the four model alias actions of W02-04, the eight model
+// consumer actions of W01-5, the three gateway limits actions of W06-15 and
+// model-alias-preview of W05-04; three
 // actions carry two rows for their two data shapes).
 func fixtureActionNames() map[string]struct{} {
 	names := make(map[string]struct{}, len(manageActionFixture))
@@ -172,14 +173,14 @@ func fixtureActionNames() map[string]struct{} {
 	return names
 }
 
-// TestManageActionFixture_Shape guards the fixture itself: 101 distinct actions
-// in 104 rows, alphabetically ordered so a merge conflict is a real conflict.
+// TestManageActionFixture_Shape guards the fixture itself: 105 distinct actions
+// in 108 rows, alphabetically ordered so a merge conflict is a real conflict.
 func TestManageActionFixture_Shape(t *testing.T) {
-	if got := len(manageActionFixture); got != 104 {
-		t.Fatalf("fixture rows = %d, want 104 (101 actions, three of them twice)", got)
+	if got := len(manageActionFixture); got != 108 {
+		t.Fatalf("fixture rows = %d, want 108 (105 actions, three of them twice)", got)
 	}
-	if got := len(fixtureActionNames()); got != 101 {
-		t.Fatalf("fixture actions = %d, want 101", got)
+	if got := len(fixtureActionNames()); got != 105 {
+		t.Fatalf("fixture actions = %d, want 105", got)
 	}
 	for i := 1; i < len(manageActionFixture); i++ {
 		if manageActionFixture[i-1].action > manageActionFixture[i].action {

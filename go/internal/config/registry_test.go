@@ -206,6 +206,8 @@ func TestRegistryStrictSet(t *testing.T) {
 		// strict all the same: it is a cut-off, not a cadence.
 		"gateway.stream_relay_buffer_bytes": true,
 		"gateway.stream_min_drain_rate":     true,
+		"gateway.scan_max_request_bytes":    true,
+		"gateway.soft_ratio":                true,
 		"gateway.stream_min_drain_window":   true,
 		// W01-8 (design/01 §4.2): the in-flight sweep period is the clock of
 		// the revocation backstop — the longest a revoked key whose

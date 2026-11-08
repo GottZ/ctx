@@ -321,8 +321,9 @@ T="T07 SCHEMA_INTEGRITY"
 # unverändert; 164 fügt context_model_consumer_grants hinzu → 64 Tabellen,
 # Spalten unverändert; 165 und 166 fügen keine Tabelle hinzu → 64 Tabellen,
 # Spalten unverändert; 167 fügt context_llm_rejections_hourly hinzu → 65
+# Tabellen, Spalten unverändert; 168 fügt context_gateway_limits hinzu → 66
 # Tabellen, Spalten unverändert).
-T07_EXPECT_TABLES=65
+T07_EXPECT_TABLES=66
 T07_EXPECT_COLUMNS=42
 
 t07_count_fallback() {
@@ -333,7 +334,7 @@ t07_count_fallback() {
   if [[ "$tc" == "$T07_EXPECT_TABLES" ]] && [[ "$col" == "$T07_EXPECT_COLUMNS" ]]; then
     pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
   else
-    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 167), got tables=$tc columns=$col"
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 168), got tables=$tc columns=$col"
   fi
 }
 

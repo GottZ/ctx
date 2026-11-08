@@ -262,9 +262,9 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// Audit read surface (W06-7, design/06 §4.10): context_settings_audit for
 	// the served entity types, tenant-filtered in SQL, foreign actors redacted.
 	auditH := handler.NewAuditHandler(pool, cfgStore)
-	// W06-16: GET /api/usage + /api/usage/consumers; the limits tiers of
-	// W06-15 (cluster C1) join in S3 — until then defaults/effective only.
-	usageH := handler.NewUsageHandler(pool, nil, nil)
+	// W06-16: GET /api/usage + /api/usage/consumers; the limits tiers are the
+	// rows of W06-15 over the limits registry (RC-D S3 adapter C1→C2).
+	usageH := handler.NewUsageHandler(pool, nil, limitsTiers{reg: scheduler.GatewayLimitsRegistry()})
 	// SSE live updates (F4-W7/G34): GET /api/events broadcasts from the SAME
 	// collector — one diff per tick fans out to all connections. ctx is the
 	// server lifecycle (cancelled on shutdown) so streams end before

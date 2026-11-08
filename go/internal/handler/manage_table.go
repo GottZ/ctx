@@ -1,5 +1,5 @@
 // Dispatch table of POST /api/manage — the SINGLE source of routing and admin
-// tier for all 101 manage actions (T03-11, design/03 §4.11). It replaces a
+// tier for all 105 manage actions (T03-11, design/03 §4.11). It replaces a
 // three-level construct: an 18-arm switch in HandleManage, fifteen
 // dispatch*Action fan-out methods, and a 211-line parallel tier classifier.
 // In that construct every action existed two to four times (routing arm,
@@ -135,7 +135,7 @@ func gamingModeTier(req manageRequest) adminTier {
 	return tierOpen
 }
 
-// manageActions is the dispatch table: 101 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5), alphabetical, one row each.
+// manageActions is the dispatch table: 105 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04), alphabetical, one row each.
 //
 // The tiers are the pre-table behaviour, action for action — this wave routes
 // differently, it does not re-cut permissions.

@@ -20,8 +20,8 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
-	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/gatewaylimits"
+	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/llmusage"
@@ -261,7 +261,7 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 func (g *modelGateway) group(ingress *fedhop.Ingress, maxDepth func() int, routes []modelRoute) modelGroupDeps {
 	return modelGroupDeps{
 		access: g.access, gate: oai.EnabledGate(g.settings), door: g.door, ingress: ingress, maxDepth: maxDepth,
-		binder: g.binder, requirePeerHop: g.requirePeerHop,
+		binder: g.binder, requirePeerHop: g.requirePeerHop, events: g.peerNoter(),
 		inner: []func(http.Handler) http.Handler{
 			handler.MaxBodySizeStrictWith(func() int64 { return g.settings().MaxRequestBytes }, oai.RefuseRequestTooLarge),
 			oai.InflightBudget(&g.budget, g.settings),
@@ -310,6 +310,53 @@ func withUsageEvents(d oai.Deps, sink usageevents.Sink) oai.Deps {
 		d.Limiter = l
 	}
 	return d
+}
+
+// peerBoundNoter is the federation.EventNoter of the PeerIngress over the
+// usage-event recorder (RC-D S3 adapter C3→C2, RC-D-INDEX §4): a fresh peer
+// binding is one peer_bound event of the consumer (W06-18). The recorder
+// counts and logs it without dedup; it never blocks the request.
+type peerBoundNoter struct{ sink usageevents.Sink }
+
+func (n peerBoundNoter) Note(_ context.Context, kind, consumerID string) {
+	n.sink.Note(usageevents.Event{Kind: usageevents.Kind(kind), ConsumerID: consumerID})
+}
+
+// peerNoter is the group's EventNoter: nil without a recorder (a gateway
+// without usage events notes nothing — a nil interface, not a nil sink).
+func (g *modelGateway) peerNoter() federation.EventNoter {
+	if g.events == nil {
+		return nil
+	}
+	return peerBoundNoter{sink: g.events}
+}
+
+// limitsTiers is handler.UsageLimitTiers over the limits registry (RC-D S3
+// adapter C1→C2): the stored server and tenant rows of each consumer × op
+// from the registry's current snapshot (gatewaylimits.Snapshot.ConsumerTiers);
+// a nil registry answers no rows. Field for field — the names are the columns.
+type limitsTiers struct{ reg *gatewaylimits.Registry }
+
+func (l limitsTiers) ConsumerTiers(_ context.Context, ids []string) (map[string]map[keyquota.Op]handler.UsageTierPair, error) {
+	src := l.reg.Snapshot().ConsumerTiers(ids)
+	out := make(map[string]map[keyquota.Op]handler.UsageTierPair, len(src))
+	for c, ops := range src {
+		m := make(map[keyquota.Op]handler.UsageTierPair, len(ops))
+		for op, p := range ops {
+			m[op] = handler.UsageTierPair{Server: usageTier(p.Server), Tenant: usageTier(p.Tenant)}
+		}
+		out[c] = m
+	}
+	return out, nil
+}
+
+// usageTier is one tier's values in the usage handler's shape (nil = no row).
+func usageTier(v *gatewaylimits.Values) *handler.UsageLimitTier {
+	if v == nil {
+		return nil
+	}
+	return &handler.UsageLimitTier{RPM: v.RPM, TPM: v.TPM, DailyTokens: v.DailyTokens, MonthlyTokens: v.MonthlyTokens,
+		DailyRequests: v.DailyRequests, MaxConcurrency: v.MaxConcurrency, MonthlyCostUSD: v.MonthlyCostUSD, AllowExternal: v.AllowExternal}
 }
 
 // usageMeterView is the meter's view for GET /api/usage/consumers
@@ -622,7 +669,7 @@ type meterLimiter struct {
 // design/06 §4.3) — consumer row, tenant row, instance row, settings.
 func meterLimits(s oai.MeterSettings, snap *gatewaylimits.Snapshot, ca *auth.ConsumerAuth, opName string) (keyquota.Subject, keyquota.Limits, gatewaylimits.Effective) {
 	op, _ := keyquota.ParseOp(opName) // an unknown op stays "" and is refused as invalid
-	var consumer, tenant string // a nil consumer stays empty and is refused as invalid
+	var consumer, tenant string       // a nil consumer stays empty and is refused as invalid
 	if ca != nil {
 		consumer, tenant = ca.ConsumerID, ca.TenantID
 	}

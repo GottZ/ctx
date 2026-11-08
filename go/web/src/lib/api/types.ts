@@ -629,6 +629,8 @@ export interface LLMLogEntry {
   queue_wait_ms: number | null
   dispatch_class: string | null
   dispatch_abort: string | null
+  // C2 W06-17: the model consumer of a /v1 row (GET /api/llmlog?consumer_id=); null on internal rows.
+  consumer_id: string | null
 }
 
 // Source: go/internal/handler/llmlog.go (HandleLLMLog).
@@ -1723,7 +1725,8 @@ export interface PreviewAlias {
  * lane '' when the chain ends before the planner. notes e.g.
  * alias_not_resolved, alias_not_granted, no_eligible_backend,
  * tenant_quota_exhausted, lane_not_offered, chain_not_offered,
- * body_scan_may_raise, peer_hop_not_modeled.
+ * body_scan_may_raise, peer_hop_not_modeled, consumer_inactive, tenant_inactive,
+ * tenant_scope_not_owned (the door refuses the consumer's keys; C7 S2).
  */
 export interface ChainPreviewAnswer {
   success: true
