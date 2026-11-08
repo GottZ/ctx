@@ -1224,7 +1224,7 @@ export const contracts: PageContract[] = [
       await limits.getByRole('spinbutton', { name: 'chat max_concurrency' }).fill('5')
       await expect(limits.locator('[data-field-error="chat.max_concurrency"]')).toHaveText('at most 4 (server limit)')
       await limits.getByRole('button', { name: 'Save chat limits' }).click()
-      await expect(limits.locator('[data-field-error="chat.max_concurrency"]'), 'gate W05-12: Fehler mit Feldnamen am Feld').toHaveText('limit widens: max_concurrency')
+      await expect(limits.locator('[data-field-error="chat.max_concurrency"]'), 'gate W05-12: Fehler mit Feldnamen am Feld').toHaveText('limit widens: max_concurrency — 5 is above 4, the limit of the levels above')
       const set = session.calls.filter((c) => c.action === 'gateway-limits-set').at(-1)
       expect(set, 'the write reached the server (it decides)').toBeDefined()
       expect(JSON.stringify(set?.body ?? {}), 'gate W05-12: no tier on the wire').not.toMatch(/"tier"/)

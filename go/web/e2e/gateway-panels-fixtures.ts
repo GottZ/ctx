@@ -30,9 +30,11 @@ import type { Role, TenantKey } from './fixtures'
 import { SENTINEL } from './fixtures'
 
 /** The detail consumer of tenant A — a rotated app consumer (three keys). */
-export const PANEL_CONSUMER_A = '0190000000007000800000000000c0a6'
+// S3 drift fix: dashed UUIDs — GET /api/usage?consumer= and /api/llmlog?consumer_id=
+// answer 400 for anything else (handler/usage.go usageUUID, llmlog.go uuidRe).
+export const PANEL_CONSUMER_A = '01900000-0000-7000-8000-00000000c0a6'
 /** Tenant B's own detail consumer (label = SENTINEL.B — the leak probe's positive control). */
-export const PANEL_CONSUMER_B = '0190000000007000800000000000c0b3'
+export const PANEL_CONSUMER_B = '01900000-0000-7000-8000-00000000c0b3'
 /** The tenant ids of the fixture world (fixtures.ts TENANTS). */
 export const PANEL_TENANT_ID: Record<TenantKey, string> = {
   A: '550e8400-e29b-41d4-a716-446655440aaa',
@@ -191,7 +193,8 @@ function point(bucket: string, over: Record<string, unknown> = {}): Record<strin
     ttft_p50_ms: null,
     ttft_p95_ms: null,
     cost_usd: null,
-    rejected: [{ reason: 'rate', detail: 'rate_requests', n: 3, wait_ms_avg: 0 }],
+    // a rate refusal never waits ⇒ wait_n 0 ⇒ wait_ms_avg null (llmusage/usage.go scanRefusals)
+    rejected: [{ reason: 'rate', detail: 'rate_requests', n: 3, wait_ms_avg: null }],
     ...over,
   }
 }
@@ -221,7 +224,7 @@ function usage(search: URLSearchParams): Record<string, unknown> {
                   calls: null,
                   rejected: [
                     { reason: 'auth', detail: 'invalid_key', n: 7, wait_ms_avg: null },
-                    { reason: 'rate', detail: 'rate_tokens', n: 2, wait_ms_avg: 0 },
+                    { reason: 'rate', detail: 'rate_tokens', n: 2, wait_ms_avg: null },
                   ],
                 }),
               ],
@@ -277,7 +280,11 @@ export class PanelWorld {
     const server = this.#row(consumer, op, 'server')
     const base = LIMIT_SETTINGS[op] ?? limitValues()
     const out: Record<string, unknown> = {}
-    for (const f of LIMIT_FIELDS) out[f] = (server?.[f] as unknown) ?? base[f] ?? null
+    for (const f of LIMIT_DIMS) out[f] = (server?.[f] as unknown) ?? base[f] ?? null
+    // gatewaylimits.Snapshot.Ceiling fills the integer dimensions and the cost only:
+    // the two permissions are null in every ceiling (S3 drift fix)
+    out.allow_external = null
+    out.allow_unmetered_external = null
     return out
   }
 
@@ -290,11 +297,19 @@ export class PanelWorld {
       const t = (tenant?.[d] as number | null | undefined) ?? null
       effective[d] = c === null ? t : t === null ? c : Math.min(c, t)
     }
-    effective.allow_external = ceiling.allow_external === true && tenant?.allow_external !== false
+    const server = this.#row(consumer, op, 'server')
+    const extBase = (server?.allow_external as boolean | null | undefined) ?? (LIMIT_SETTINGS[op]?.allow_external as boolean | null | undefined) ?? false
+    effective.allow_external = extBase === true && tenant?.allow_external !== false
     effective.allow_unmetered_external = false
     effective.tenant_envelope = { daily_tokens: 10_000_000, monthly_tokens: null, daily_requests: null, monthly_cost_usd: 5 }
     if (role === 'server-admin') effective.instance_envelope = { daily_tokens: 20_000_000, monthly_tokens: null, daily_requests: null, monthly_cost_usd: 10 }
-    return { server: this.#row(consumer, op, 'server'), tenant, ceiling, effective }
+    // GatewayLimitsOp.sources (C1: always present next to effective) — the level per dimension
+    const sources: Record<string, string> = {}
+    for (const f of LIMIT_FIELDS) {
+      const t = tenant?.[f]
+      sources[f] = t !== null && t !== undefined ? 'consumer_tenant' : server?.[f] !== null && server?.[f] !== undefined ? 'consumer_server' : 'settings'
+    }
+    return { server, tenant, ceiling, effective, sources }
   }
 
   /** The /api/manage panel actions; null = not a panel action. */
@@ -345,26 +360,34 @@ export class PanelWorld {
       for (const d of LIMIT_DIMS) {
         const v = row[d]
         const c = ceiling[d] as number | null
-        if (typeof v === 'number' && c !== null && v > c) return { status: 400, json: { success: false, error: `limit widens: ${d}`, param: d } }
+        if (typeof v === 'number' && c !== null && v > c)
+          return { status: 400, json: { success: false, error: `limit widens: ${d} — ${v} is above ${c}, the limit of the levels above`, param: d } }
       }
-      if (row.allow_external === true) return { status: 400, json: { success: false, error: 'limit widens: allow_external', param: 'allow_external' } }
-      if (row.allow_unmetered_external !== null) return { status: 400, json: { success: false, error: 'limit widens: allow_unmetered_external', param: 'allow_unmetered_external' } }
+      if (row.allow_external === true)
+        return { status: 400, json: { success: false, error: 'limit widens: allow_external — a tenant-tier row can only withdraw the permission (false)', param: 'allow_external' } }
+      if (row.allow_unmetered_external !== null)
+        return { status: 400, json: { success: false, error: 'limit widens: allow_unmetered_external — only a server-admin sets the unmetered permission', param: 'allow_unmetered_external' } }
     }
     this.#rows.set(key, row)
-    return { status: 200, json: { success: true, limits: { ...row, subject_kind: 'consumer', op, tier } } }
+    return { status: 200, json: { success: true, limits: { subject_kind: 'consumer', consumer_id: id, tier, op, ...row } } }
   }
 }
+
+/** handler/usage.go usageUUID = llmlog.go uuidRe: the dashed form, any case. */
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 /** GET /api/llmlog?consumer_id= and GET /api/usage; null = not a panel route. */
 export function panelGet(path: string, search: URLSearchParams, role: Role, tenant: TenantKey): MockAnswer | null {
   if (path === '/api/llmlog' && search.has('consumer_id')) {
     const id = search.get('consumer_id') ?? ''
+    if (id !== '' && !UUID_RE.test(id)) return { status: 400, json: { success: false, error: 'invalid consumer_id' } }
     // the server's tenant filter: a foreign consumer answers an EMPTY list (no oracle)
     return { status: 200, json: { success: true, entries: visible(id, role, tenant) === null ? [] : calls(id) } }
   }
   if (path === '/api/usage') {
     if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
     const id = search.get('consumer') ?? ''
+    if (id !== '' && !UUID_RE.test(id)) return { status: 400, json: { success: false, error: 'invalid consumer' } }
     if (id !== '' && visible(id, role, tenant) === null) return { status: 200, json: { ...usage(new URLSearchParams()), series: [] } }
     return { status: 200, json: usage(search) }
   }
@@ -386,8 +409,11 @@ export function gatewayStatusSections(role: Role, seed: PanelSeed | undefined): 
         consumers_used_1h: 3,
         consumers_expiring: 2,
         instance_envelope: { chat: { used: 1200, limit: 600_000 } },
-        auth: { invalid_key: 5 },
-        events: { first_use: 1 },
+        // ModelAuthStats / usageevents.Stats have NO json tags: the wire keys are the
+        // Go field names (status_gateway.go stampGateway; S3 drift fix — subset)
+        auth: { Accepted: 40, NoCredential: 1, FormFailures: 0, Locked: 0, Invalid: 5, SemaphoreWaitTotal: 0, Inflight: 0 },
+        events: { Noted: 3, Deduped: 1, Written: 2, Dropped: 0, Failed: 0, PeerBound: 0 },
+        generated_at: '2026-06-29T11:59:30Z',
       },
       usage_split_24h: [{ target: 'http://spark:30000', source: 'external', class: 'external', calls: 40, gpu_ms: 90_000 }],
       federation: {
@@ -430,9 +456,11 @@ export function gatewayStatusSections(role: Role, seed: PanelSeed | undefined): 
       consumers: 2,
       reservations_open: null,
       rejections_5m: null,
-      top_consumers_1h: null,
+      // stampGateway always sends an array (Ring.Top: make(…, 0, n)) — never null (S3 drift fix)
+      top_consumers_1h: [],
       consumers_used_1h: 1,
       consumers_expiring: 1,
+      generated_at: '2026-06-29T11:59:30Z',
     },
     dispatch: null,
     dispatch_tenant: {

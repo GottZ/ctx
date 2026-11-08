@@ -110,13 +110,13 @@ describe('tenantInputError (UX mirror of the server check)', () => {
 
 describe('limitFieldErrors (W05-12: a 400 with the field name lands at the field)', () => {
   it('maps the param of a 400 onto "<op>.<param>"', () => {
-    const err = new ApiError(400, 'bad_request', 'limit widens: max_concurrency', null, {
+    const err = new ApiError(400, 'bad_request', 'limit widens: max_concurrency — 5 is above 4, the limit of the levels above', null, {
       success: false,
-      error: 'limit widens: max_concurrency',
+      error: 'limit widens: max_concurrency — 5 is above 4, the limit of the levels above',
       param: 'max_concurrency',
     })
     expect(limitFieldErrors(err, 'chat'), 'gate W05-12: Fehler mit Feldnamen am Feld').toEqual({
-      'chat.max_concurrency': 'limit widens: max_concurrency',
+      'chat.max_concurrency': 'limit widens: max_concurrency — 5 is above 4, the limit of the levels above',
     })
   })
   it('any other refusal maps to no field', () => {

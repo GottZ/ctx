@@ -1401,8 +1401,9 @@ class GatewayWorld {
    * RC-D C5 — model-alias-preview with the C7 contract (RCD-c7-cli-preview-S1
    * §Vertrag): server-admin only (403); exactly one mode, unknown fields 400;
    * role mode {role} ⇒ {role, primary_model} ('' = none); chain mode
-   * {alias: <name>, consumer_id} — consumer_id required (400), unknown
-   * consumer ⇒ 200 {success:false,"consumer not found"} (no oracle); the alias
+   * {alias: <name>, consumer_id} — both required (400), unknown consumer ⇒
+   * the No-Oracle 404 {success:false,"model consumer not found"}
+   * (writeConsumerStoreError; S3 drift fix — was a 200); the alias
    * resolves by NAME in the consumer's scope (a tenant alias shadows the
    * _global one, ctx-peer ⇒ _global only); required sensitivity = the stricter
    * of alias and consumer; chain / excluded / notes never null.
@@ -1410,21 +1411,23 @@ class GatewayWorld {
   aliasPreview(role: Role, data: Record<string, unknown> | undefined): MockAnswer {
     if (role !== 'server-admin') return { status: 403, json: { success: false, error: 'admin key required' } }
     const d = data ?? {}
-    for (const k of Object.keys(d)) if (k !== 'alias' && k !== 'consumer_id' && k !== 'role') return { status: 400, json: { success: false, error: `invalid data: unknown field "${k}"` } }
-    const roleMode = typeof d.role === 'string'
-    const chainMode = typeof d.alias === 'string'
-    if (roleMode === chainMode) return { status: 400, json: { success: false, error: 'exactly one of alias or role is required' } }
+    for (const k of Object.keys(d)) if (k !== 'alias' && k !== 'consumer_id' && k !== 'role') return { status: 400, json: { success: false, error: `invalid data: json: unknown field "${k}"` } }
+    // handleModelAliasPreview: role alone, or alias AND consumer_id — anything else one 400
+    const str = (v: unknown) => (typeof v === 'string' ? v : '')
+    const roleMode = str(d.role) !== '' && str(d.alias) === '' && str(d.consumer_id) === ''
+    const chainMode = str(d.role) === '' && str(d.alias) !== '' && str(d.consumer_id) !== ''
+    if (!roleMode && !chainMode) return { status: 400, json: { success: false, error: 'model-alias-preview takes either alias and consumer_id or role' } }
     if (roleMode) {
-      if (!(d.role === 'chat' || d.role === 'embed' || d.role === 'rerank')) return { status: 400, json: { success: false, error: 'role must be chat, embed or rerank' } }
+      if (!(d.role === 'chat' || d.role === 'embed' || d.role === 'rerank')) return { status: 400, json: { success: false, error: 'role must be one of chat, embed, rerank' } }
       return { status: 200, json: { success: true, role: d.role, primary_model: POOL_PRIMARY[d.role as string] ?? '' } }
     }
-    if (typeof d.consumer_id !== 'string' || d.consumer_id === '') return { status: 400, json: { success: false, error: 'consumer_id is required for a chain preview' } }
     const c = this.consumers.find((x) => x.id === d.consumer_id)
-    if (!c) return { status: 200, json: { success: false, error: 'consumer not found' } }
+    if (!c) return { status: 404, json: { success: false, error: 'model consumer not found' } }
     const name = d.alias as string
     const scope = c.kind === 'ctx-peer' ? null : (c.tenant_scope ?? null)
     const a = (scope !== null ? this.aliasRows.find((x) => x.scope === scope && x.name === name) : undefined) ?? this.aliasRows.find((x) => x.scope === '_global' && x.name === name)
-    const base = { success: true, consumer_id: c.id, scope: scope ?? '', chain: [] as unknown[], excluded: [] as unknown[] }
+    // oai.PreviewChain: scope = scopeName(aliasScope(ca)) — "_global" for a NULL tenant_scope and for a ctx-peer, never "" (S3 drift fix)
+    const base = { success: true, consumer_id: c.id, scope: scope ?? '_global', chain: [] as unknown[], excluded: [] as unknown[] }
     if (!a || !a.enabled) {
       return { status: 200, json: { ...base, alias: null, op: '', required_sensitivity: '', lane: '', notes: ['alias_not_resolved'] } }
     }
@@ -1442,7 +1445,8 @@ class GatewayWorld {
         lane: c.admission_lane ?? 'bulk',
         chain,
         excluded,
-        notes: chain.length === 0 ? ['no_eligible_backend', 'body_scan_may_raise'] : ['body_scan_may_raise'],
+        // Go order: body_scan_may_raise is appended before the build steps (preview.go:179 before :258/:289)
+        notes: chain.length === 0 ? ['body_scan_may_raise', 'no_eligible_backend'] : ['body_scan_may_raise'],
       },
     }
   }

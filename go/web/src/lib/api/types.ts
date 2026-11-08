@@ -1734,6 +1734,7 @@ export interface ChainPreviewAnswer {
   alias: PreviewAlias | null
   op: '' | 'chat' | 'embed' | 'rerank'
   required_sensitivity: string
+  /** The consumer's alias scope: its tenant_scope, '_global' for none and for a ctx-peer — never '' (preview.go scopeName). */
   scope: string
   lane: string
   chain: PreviewRow[]
@@ -1987,6 +1988,11 @@ export type LimitSource =
 export interface LimitsOpView {
   server: LimitValues | null
   tenant: LimitValues | null
+  /**
+   * Present for consumer and tenant subjects (Snapshot.Ceiling), absent for
+   * instance / tenant_envelope. Only the integer dimensions and the cost are
+   * filled — allow_external / allow_unmetered_external are always null here.
+   */
   ceiling?: LimitValues
   effective?: LimitEffective
   sources?: Partial<Record<keyof LimitValues, LimitSource>>
@@ -2011,12 +2017,13 @@ export interface GatewayLimitsGetResponse {
  * the caller-tier row of one op; the body is flat — subject + op + every
  * dimension, null = unset — and carries NO tier). The panel re-reads the view
  * per gateway-limits-get afterwards. A tenant-admin value over the ceiling
- * answers 400 {error:"limit widens: <field>", param:<field>}; an invalid value
+ * answers 400 {error:"limit widens: <field> — <why>", param:<field>} (writeGLFieldError); an invalid value
  * 400 {error:"invalid data: …", param}.
  */
 export interface GatewayLimitsSetResponse {
   success: true
-  limits: LimitValues & { subject_kind: LimitSubjectKind; op: GatewayOp; tier: LimitTier }
+  /** GatewayLimitsRow: the ids are omitempty — consumer_id for a consumer row, tenant_id for a tenant / envelope row. */
+  limits: LimitValues & { subject_kind: LimitSubjectKind; consumer_id?: string; tenant_id?: string; op: GatewayOp; tier: LimitTier }
 }
 
 /** gateway-limits-delete answer: whether the caller-tier row of the op existed. */
@@ -2053,17 +2060,27 @@ export interface GatewayEnvelopeUse {
 export interface GatewayStatus {
   enabled: boolean
   consumers: number
-  /** null until the meter feeds it (C2: null ≠ 0) — rendered "not recorded". */
+  /**
+   * null until the meter feeds it (C2: null ≠ 0) — rendered "not recorded".
+   * S3: stampGateway does not assign it yet, so today it is always null.
+   */
   reservations_open: number | null
-  /** null until the in-memory ledger feeds it (C2) — "not recorded"; {} = no refusals. */
+  /** null until the in-memory ledger feeds it (C2) — "not recorded"; {} = no refusals. Always null today (S3). */
   rejections_5m: Record<string, number> | null
-  /** A Go nil slice serialises as null — treated as an empty list. */
+  /** stampGateway always sends an array ([] without traffic); null is tolerated as an empty list. */
   top_consumers_1h: GatewayTopConsumer[] | null
   consumers_used_1h: number
   consumers_expiring: number
+  /** Server-admin only; not assigned by stampGateway yet (S3) — absent today. */
   instance_envelope?: Record<string, GatewayEnvelopeUse>
+  /**
+   * Server-admin only. handler.ModelAuthStats carries NO json tags: the keys
+   * are the Go field names (Accepted, Invalid, …, SemaphoreWaitTotal in ns).
+   */
   auth?: Record<string, number>
+  /** Server-admin only. usageevents.Stats, untagged as well: Noted, Deduped, Written, Dropped, Failed, PeerBound. */
   events?: Record<string, number>
+  /** The generation's timestamp — present on both paths whenever `gateway` is. */
   generated_at?: string
 }
 

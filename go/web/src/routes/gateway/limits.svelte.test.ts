@@ -68,16 +68,16 @@ describe('LimitsModel (W05-12)', () => {
   })
 
   it('a field refusal puts the message at the field and rethrows (never a silent success)', async () => {
-    const refusal = new ApiError(400, 'bad_request', 'limit widens: max_concurrency', null, {
+    const refusal = new ApiError(400, 'bad_request', 'limit widens: max_concurrency — 5 is above 4, the limit of the levels above', null, {
       success: false,
-      error: 'limit widens: max_concurrency',
+      error: 'limit widens: max_concurrency — 5 is above 4, the limit of the levels above',
       param: 'max_concurrency',
     })
     const m = new LimitsModel({ get: vi.fn().mockResolvedValue(getAnswer()), set: vi.fn().mockRejectedValue(refusal) })
     await m.load('c1')
     const err = await m.save('chat', { max_concurrency: 9 }).catch((e: unknown) => e)
     expect(m.fieldErrors, 'gate W05-12: Fehler mit Feldnamen erscheint am Feld').toEqual({
-      'chat.max_concurrency': 'limit widens: max_concurrency',
+      'chat.max_concurrency': 'limit widens: max_concurrency — 5 is above 4, the limit of the levels above',
     })
     expect(err, 'the refusal is rethrown').toBe(refusal)
     expect(tenantOf(m, 'chat'), 'the view keeps the server state').toBeNull()

@@ -1,6 +1,6 @@
 // Limits panel form rules (RC-D C6, wave W05-12, design/05 §4.5 row
 // "Limits", §7 gate; wire = C1 gateway-limits-get|set|delete). Pure and
-// DOM-free. The SERVER is the authority (400 "limit widens: <field>" with
+// DOM-free. The SERVER is the authority (400 "limit widens: <field> — <why>" with
 // param above the ceiling); these rules are the UX mirror so a tenant-admin
 // is never offered what the server refuses:
 //

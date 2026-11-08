@@ -170,12 +170,12 @@ describe('W05-12 gateway-limits-* (wire)', () => {
   })
 
   it('a 400 keeps its param on the ApiError details (the panel shows it at the field)', async () => {
-    stubFetch(jsonResponse(400, { success: false, error: 'limit widens: max_concurrency', param: 'max_concurrency' }))
+    stubFetch(jsonResponse(400, { success: false, error: 'limit widens: max_concurrency — 5 is above 4, the limit of the levels above', param: 'max_concurrency' }))
     const err = (await setGatewayLimits(CID, 'chat', { max_concurrency: 9 }).catch((e: unknown) => e)) as ApiError
     expect(err, 'gate W05-12: the refusal is an ApiError').toBeInstanceOf(ApiError)
     expect(err.status, 'gate W05-12: the 400 of the server, not a client error').toBe(400)
     expect(err.details?.param).toBe('max_concurrency')
-    expect(err.message).toBe('limit widens: max_concurrency')
+    expect(err.message).toBe('limit widens: max_concurrency — 5 is above 4, the limit of the levels above')
   })
 
   it('deleteGatewayLimits POSTs gateway-limits-delete {subject_kind, consumer_id, op}', async () => {
