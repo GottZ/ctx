@@ -22,6 +22,7 @@ func ingressContext(t *testing.T, ca *auth.ConsumerAuth) context.Context {
 	mw := PeerIngress(PeerIngressConfig{
 		Consumer: func(context.Context) *auth.ConsumerAuth { return ca },
 		Logger:   slog.New(slog.DiscardHandler),
+		Binder:   acceptBinder{}, // F-W12: the PeerIngress needs a binder (RC-D S3 adapter C7 ← C3)
 	})
 	mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = r.Context() })).
 		ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", http.NoBody))
