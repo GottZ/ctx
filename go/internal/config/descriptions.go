@@ -295,6 +295,8 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	"gateway.rerank_tpm_default":  "Rerank tokens per minute per model consumer (meter L0); at least 1",
 	"gateway.tpm_reserve_default": "Completion tokens a chat request reserves when the client names no max_tokens (capped by the effective max_tokens); at least 1",
 	"gateway.xu_reserve_ratio":    "Share of each meter bucket the urgent lane keeps from the bulk lane of the same consumer; range [0, 1)",
+	// W06-18: the soft threshold of the day and month budgets (design/06 §4.11).
+	"gateway.soft_ratio": "Share of a day or month budget (consumer, tenant envelope, instance envelope) at which an admitted /v1 request carries x-ctx-quota-warning and the first one per consumer, operation, dimension and window writes a soft_limit audit event; 0 = off; range [0, 1)",
 	// W06-11: the meter's L1 (design/06 §4.2, §4.11).
 	"gateway.consumer_concurrency_default": "Requests per model consumer and operation that may be open at once, queued or running (meter L1); one more is 429 concurrency_limit_exceeded with Retry-After 1 s; the bulk lane holds at most max(1, floor(C·(1 − xu_reserve_ratio))) of them; at least 1, at most dispatch.external_queue_per_consumer",
 	// W06-13: the meter's day and month budgets and envelopes (design/06 §4.2, §4.3, §4.11).

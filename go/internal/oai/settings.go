@@ -90,6 +90,9 @@ type MeterSettings struct {
 	// the bound V48 sets on Concurrency, applied per limits row too (wave
 	// W06-15, W06-11 handover).
 	ConcurrencyCap int64
+	// SoftRatio is the warning share of the day and month budgets
+	// (gateway.soft_ratio, W06-18; [0, 1), 0 = off) — keyquota.Limits.SoftRatio.
+	SoftRatio float64
 }
 
 // OpLimits are one op's requests and tokens per minute and its tokens per

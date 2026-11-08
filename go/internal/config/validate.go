@@ -108,6 +108,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGatewayBudgets(c)...)
 	// V51 (W06-14): gateway.consumer_monthly_cost_usd_default > 0, finite.
 	issues = append(issues, validateGatewayCostBudget(c)...)
+	// V54 (W06-18, RC-D C2): gateway.soft_ratio in [0, 1).
+	issues = append(issues, validateGatewaySoftRatio(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1391,6 +1393,20 @@ func validateGatewayCostBudget(c *Config) []Issue {
 	}
 	return []Issue{{Field: "gateway.consumer_monthly_cost_usd_default", Severity: SeverityError,
 		Msg: fmt.Sprintf("gateway.consumer_monthly_cost_usd_default (%v) must be a finite amount > 0 — there is no 0 sentinel; to keep consumers off billable rows leave gateway.consumer_allow_external_default false", v)}}
+}
+
+// validateGatewaySoftRatio is V54 (wave W06-18, design/06 §4.11):
+// gateway.soft_ratio is a share in [0, 1). 0 switches the warning off; 1 and
+// above would warn only at or past the hard limit, where the request is
+// already refused (429 insufficient_quota) — a value that never warns is 0,
+// not 1. NaN is refused (!(v >= 0) catches it).
+func validateGatewaySoftRatio(c *Config) []Issue {
+	v := c.Gateway.SoftRatio
+	if !(v >= 0) || v >= 1 {
+		return []Issue{{Field: "gateway.soft_ratio", Severity: SeverityError,
+			Msg: fmt.Sprintf("gateway.soft_ratio (%v) must be in [0, 1) — 0 switches the quota warning off", v)}}
+	}
+	return nil
 }
 
 // validateGatewayConcurrency is V48 (wave W06-11, design/06 §4.2, §4.11):

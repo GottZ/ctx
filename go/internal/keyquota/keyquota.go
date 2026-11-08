@@ -116,6 +116,11 @@ type Limits struct {
 	// instance's over all consumers (gateway.instance_envelope_factor × the
 	// consumer's). A zero dimension is unbounded.
 	Consumer, Tenant, Instance Budget
+	// SoftRatio is the warning share of every bounded day and month
+	// dimension (gateway.soft_ratio, [0, 1), V54; wave W06-18): an admission
+	// that brings a dimension's used + reserved share to at least SoftRatio
+	// lists it in Decision.Warnings. 0 = off.
+	SoftRatio float64
 }
 
 // Budget is one level's calendar-UTC budgets of an op (design/06 §4.2 rows
@@ -275,6 +280,15 @@ type Decision struct {
 	// Headers is the state of the op's buckets right after an admission,
 	// as the request's lane sees it (zero for a refusal).
 	Headers RateHeaders
+	// Warnings are the day and month dimensions at or over Limits.SoftRatio
+	// after this admission (W06-18, usage_view.go); nil for a refusal and
+	// while SoftRatio is 0.
+	Warnings []Warning
+	// Exceeded is the budget dimension a Reason.Quota() refusal names (its
+	// level, dimension — daily_tokens, monthly_tokens or daily_requests —,
+	// used, lane limit and window start), the hard_limit event's key
+	// (W06-18); nil for every other answer.
+	Exceeded *Warning
 }
 
 // RateHeaders are the x-ratelimit-* values of one admission (design/06
@@ -684,10 +698,12 @@ func (m *Meter) Admit(s Subject, l Limits, e Estimate) (*Reservation, Decision) 
 		LimitRequests: req.cap, RemainingRequests: req.remaining(st.req, now), ResetRequests: time.Duration(backlog(st.req, now)),
 		LimitTokens: tok.cap, RemainingTokens: tok.remaining(st.tok, now), ResetTokens: time.Duration(backlog(st.tok, now)),
 	}
-	r := &Reservation{m: m, key: key, lane: s.Lane, tpm: l.TPM, charged: tok.cost(n), held: n, shadow: now, headers: h, budget: held}
+	warnings := softWarnings(levels, s.Lane, l, wall)
+	r := &Reservation{m: m, key: key, lane: s.Lane, tpm: l.TPM, charged: tok.cost(n), held: n, shadow: now, headers: h, budget: held,
+		warning: WarningHeader(warnings)}
 	r.promptEst, r.maxCompletion = e.promptTokens(s.Op), int64(max(e.MaxCompletion, 0))
 	st.add(r)
-	return r, Decision{Allowed: true, Retryable: true, Headers: h}
+	return r, Decision{Allowed: true, Retryable: true, Headers: h, Warnings: warnings}
 }
 
 // budgetLevelOf is one level of a request's budgets: its counters (rolled
@@ -754,6 +770,17 @@ func quotaRefused(s Subject, lv budgetLevelOf, dim Reason, l Limits, wall time.T
 		what, unit, limit = "Daily request", "requests per UTC day", lv.b.DailyRequests
 	}
 	d := Decision{Reason: dim, RetryAfter: untilReset(wall, dim)}
+	// The exceeded dimension for the hard_limit event (W06-18): the level,
+	// the dimension, its lane limit and the window it belongs to.
+	day, month := windowStarts(wall)
+	start, used := day, satAdd(lv.u.dayTokens, lv.u.reserved)
+	switch dim {
+	case ReasonMonthlyTokens:
+		start, used = month, satAdd(lv.u.monthTokens, lv.u.reserved)
+	case ReasonDailyRequests:
+		used = lv.u.dayRequests
+	}
+	d.Exceeded = &Warning{Level: levelName(lv.level), Dimension: dim, Used: used, Limit: laneLimit(limit, s.Lane, l.XUReserve), WindowStart: start}
 	switch lv.level {
 	case levelTenant:
 		d.Reason = ReasonTenantEnvelope
@@ -822,6 +849,9 @@ type Reservation struct {
 	seq     uint64
 	slot    int
 	headers RateHeaders
+	// warning is the x-ctx-quota-warning value of the admission ("" = none,
+	// W06-18): it rides with the x-ratelimit-* headers in Headers().
+	warning string
 	// budget are the counters of the request's three budget levels: each
 	// holds held tokens of it in reserved until the reservation ends.
 	budget [3]*usage
@@ -1007,7 +1037,17 @@ func (r *Reservation) Reject(reason string, waited time.Duration) {
 
 // Headers are the x-ratelimit-* headers of the admission (design/06 §4.4):
 // the route writes them on its successful answer before the first byte.
-func (r *Reservation) Headers() http.Header { return r.headers.Header() }
+//
+// When the admission brought a budget dimension to the soft threshold
+// (Limits.SoftRatio, W06-18) the set carries QuotaWarningHeader too: it
+// travels exactly where x-ratelimit-* travels — the successful answer only.
+func (r *Reservation) Headers() http.Header {
+	h := r.headers.Header()
+	if r.warning != "" {
+		h.Set(QuotaWarningHeader, r.warning)
+	}
+	return h
+}
 
 // Held is the tokens the admission charged: the op's estimate, at most the
 // capacity of the lane's token bucket (B-06-28) — what Keep books. It is

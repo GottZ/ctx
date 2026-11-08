@@ -241,6 +241,14 @@ type statusResponse struct {
 	// it): the running requests of a shared GPU are a live activity oracle
 	// over every tenant's load (dispatcher.go TargetSnapshot exposure rule).
 	ForeignLoad *[]foreignLoadRow `json:"foreign_load,omitempty"`
+	// Gateway, UsageSplit24h and Federation are the model API's sections
+	// (W06-16, status_gateway.go): gateway on both paths (tenant path: own
+	// consumers only), the other two server-admin only. Per caller like
+	// GuardReviewByScope: HandleStatus stamps them from the gateway
+	// generation, never assemble() (the SSE frame does not carry them).
+	Gateway       *gatewayStatus       `json:"gateway,omitempty"`
+	UsageSplit24h *[]llmusage.SplitRow `json:"usage_split_24h,omitempty"`
+	Federation    *federationStatus    `json:"federation,omitempty"`
 	// GuardReview is the needs_review pipeline's push signal (guard W2): the
 	// flagged-block counts + the oldest flagged stamp, so an unworked review
 	// queue is VISIBLE instead of discoverable-on-pull only (guard-stats).
@@ -675,6 +683,10 @@ type cheapSnapshot struct {
 // partial index over the dream-queue columns or maintained counters once the
 // queue_stats_interval runs surface in pg_stat_statements.
 type StatusCollector struct {
+	// gateway is the model API's status feed and its 30-second generation
+	// (W06-16, status_gateway.go); nil feed = no gateway sections.
+	gateway gatewayStatusState
+
 	pool        *pgxpool.Pool
 	backendPool *backends.Pool
 	dreams      dreamModeSource
@@ -1719,12 +1731,15 @@ func (h *StatusHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		// Snapshot() reads shared per-tick caches, and a per-caller field must
 		// never be written into one.
 		resp.GuardReviewByScope = h.collector.guardReviewByScopeNow(r.Context(), readScopes)
+		h.collector.stampGateway(r.Context(), &resp, true, "")
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	scope := ""
+	scope, tenant := "", ""
 	if ar != nil {
-		scope = ar.HomeScope
+		scope, tenant = ar.HomeScope, ar.TenantID
 	}
-	writeJSON(w, http.StatusOK, h.collector.SnapshotForTenant(r.Context(), scope, readScopes))
+	resp := h.collector.SnapshotForTenant(r.Context(), scope, readScopes)
+	h.collector.stampGateway(r.Context(), &resp, false, tenant)
+	writeJSON(w, http.StatusOK, resp)
 }

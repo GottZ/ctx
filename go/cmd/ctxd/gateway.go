@@ -29,6 +29,7 @@ import (
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/usageevents"
 )
 
 // gatewaySettingsGetter is the settings source of the OpenAI-compatible
@@ -138,7 +139,18 @@ type modelGateway struct {
 	// getter, shared by /v1 and /v2.
 	binder         federation.PeerBinder
 	requirePeerHop func() bool
+	// events records the consumers' usage events (W06-18: first_use from
+	// the access log, soft_limit/hard_limit from the meter adapter); ring
+	// counts top_consumers_1h for the status (W06-16).
+	events *usageevents.Recorder
+	ring   *handler.ConsumerRing
 }
+
+// usageEventsFlushTimeout bounds the final flush of the usage events at
+// shutdown; it runs inside the gateway's stop step (gatewayStopTimeout) and
+// is shorter, so the step's own bound holds. Hardcoded like
+// meterSeedTimeout: it bounds the process's own write, not a policy.
+const usageEventsFlushTimeout = 4 * time.Second
 
 // meterSeedRead reads what the consumers used in the UTC day and month of
 // now (llmusage.SeedConsumers).
@@ -218,8 +230,12 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 	}
 	seedMeterOnce(context.Background(), meter, read)
 	ledger := keyquota.NewLedger(time.Now)
-	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get, Ledger: ledger})
+	events := usageevents.NewRecorder(pool, nil)
+	ring := handler.NewConsumerRing(nil)
+	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get, Ledger: ledger, Events: events, Ring: ring})
 	return &modelGateway{
+		events:   events,
+		ring:     ring,
 		meter:    meter,
 		seedRead: read,
 		ledger:   ledger,
@@ -270,7 +286,65 @@ func (g *modelGateway) run(ctx context.Context) {
 	if g.seedRead != nil {
 		wg.Go(func() { seedMeter(ctx, g.meter, g.seedRead, keyquota.WarmingRetryAfter) })
 	}
+	if g.events != nil {
+		// The usage events queued by the drained requests land with the
+		// other final flushes (W06-18).
+		wg.Go(func() {
+			<-ctx.Done()
+			fctx, cancel := context.WithTimeout(context.Background(), usageEventsFlushTimeout)
+			defer cancel()
+			if err := g.events.Flush(fctx); err != nil {
+				slog.Warn("gateway: usage events not flushed at shutdown", "error", err, "stats", g.events.Stats())
+			}
+		})
+	}
 	wg.Wait()
+}
+
+// withUsageEvents hands the meter adapter of d the usage-event sink
+// (W06-18). A separate step instead of a gatewayDeps parameter: the
+// signature stays as it is for the other clusters of RC-D.
+func withUsageEvents(d oai.Deps, sink usageevents.Sink) oai.Deps {
+	if l, ok := d.Limiter.(meterLimiter); ok {
+		l.events = sink
+		d.Limiter = l
+	}
+	return d
+}
+
+// usageMeterView is the meter's view for GET /api/usage/consumers
+// (handler.UsageMeter): the limits the meter would apply to the consumer's
+// op now (meterLimits over the limits rows of W06-15, RC-D S3) and its
+// snapshot under them. A nil limits registry resolves to the settings floor.
+type usageMeterView struct {
+	meter    *keyquota.Meter
+	settings func() oai.Settings
+	limits   *gatewaylimits.Registry
+}
+
+func (v usageMeterView) View(consumerID, tenantID string, op keyquota.Op) (keyquota.Snapshot, keyquota.Limits, bool) {
+	sub, lim, _ := meterLimits(v.settings().Meter, v.limits.Snapshot(), &auth.ConsumerAuth{ConsumerID: consumerID, TenantID: tenantID}, string(op))
+	snap, ok := v.meter.Snapshot(sub, lim)
+	return snap, lim, ok
+}
+
+// statusFeed is the status collector's gateway feed (W06-16): the enabled
+// flag, the door's counters, the ring, the event counters, the federation
+// counters and usage_split_24h over pool.
+func (g *modelGateway) statusFeed(pool *pgxpool.Pool) *handler.GatewayFeed {
+	return &handler.GatewayFeed{
+		Enabled:    func() bool { return g.settings().Enabled },
+		DoorStats:  g.door.Stats,
+		Ring:       g.ring,
+		Events:     g.events.Stats,
+		FedHop:     fedhop.CounterSnapshot,
+		Federation: federation.CounterSnapshot,
+		Split: func(now time.Time) ([]llmusage.SplitRow, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), meterSeedTimeout)
+			defer cancel()
+			return llmusage.ReadSplit24h(ctx, pool, now)
+		},
+	}
 }
 
 // startModelGateway runs g's loops on a context of their own and returns the
@@ -533,6 +607,12 @@ type meterLimiter struct {
 	// on and a running request keeps the limits it was admitted under. nil
 	// = no rows, the settings floor for every consumer.
 	limits *gatewaylimits.Registry
+	// events receives the usage events of the meter's answers (W06-18,
+	// RC-D cluster C2): one soft_limit note per Decision.Warnings entry of
+	// an admission, one hard_limit note per budget refusal
+	// (Reason.Quota()); the usageevents.Recorder dedupes per consumer × op
+	// × dimension × level × window. nil = no events.
+	events usageevents.Sink
 }
 
 // meterLimits are the meter limits of op for ca from one settings snapshot s
@@ -549,7 +629,7 @@ func meterLimits(s oai.MeterSettings, snap *gatewaylimits.Snapshot, ca *auth.Con
 	eff := snap.Resolve(consumer, tenant, op, meterDefaults(s, op))
 	return keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op},
 		keyquota.Limits{RPM: eff.RPM, TPM: eff.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: eff.Concurrency,
-			Consumer: eff.Consumer, Tenant: eff.Tenant, Instance: eff.Instance},
+			Consumer: eff.Consumer, Tenant: eff.Tenant, Instance: eff.Instance, SoftRatio: s.SoftRatio},
 		eff
 }
 
@@ -601,6 +681,7 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 	// request's record, which this adapter holds and the leaf does not.
 	reason, detail := d.LedgerReason()
 	oai.NoteRejection(ctx, reason, detail)
+	l.noteUsage(sub, d)
 	switch {
 	case d.Allowed:
 		return meterReservation{Reservation: res, rec: oai.AccessRecordFrom(ctx)}, nil
@@ -620,6 +701,26 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 	// rate_requests, rate_tokens and warming: 429 rate_limit_exceeded with
 	// the exact Retry-After (design/06 §4.4).
 	return nil, &oai.LimitRefusal{Code: oai.CodeRateLimitExceeded, Message: d.Message, RetryAfter: d.RetryAfter, ShouldRetry: d.Retryable}
+}
+
+// noteUsage hands the meter's answer to the usage events (W06-18): every
+// warning of an admission is a soft_limit, the exceeded dimension of a
+// budget refusal a hard_limit. The sink dedupes per consumer × op ×
+// dimension × level × window and never blocks.
+func (l meterLimiter) noteUsage(sub keyquota.Subject, d keyquota.Decision) {
+	if l.events == nil {
+		return
+	}
+	note := func(kind usageevents.Kind, w keyquota.Warning) {
+		l.events.Note(usageevents.Event{Kind: kind, ConsumerID: sub.ConsumerID, TenantID: sub.TenantID, Op: string(sub.Op),
+			Dimension: string(w.Dimension), Level: string(w.Level), WindowStart: w.WindowStart, Used: w.Used, Limit: w.Limit})
+	}
+	for _, w := range d.Warnings {
+		note(usageevents.KindSoftLimit, w)
+	}
+	if d.Exceeded != nil && d.Reason.Quota() {
+		note(usageevents.KindHardLimit, *d.Exceeded)
+	}
 }
 
 // meterReservation is a meter reservation as the route holds it: the usage

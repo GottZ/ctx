@@ -119,12 +119,10 @@ internal/evalscore/diversity.go	rankedAlphaDCG	# Nur Aufrufer AlphaNDCG:113, das
 internal/evalscore/diversity.go	serveFacets	# Nur über rankedAlphaDCG:173/idealAlphaDCG:207 unter AlphaNDCG — kein eigener Testaufrufer
 internal/events/distill_block.go	distillShardOrdinal	# Prod nutzt die Basis-Form distillShardOrdinalFrom (:1742, W-L1 #6); den Wrapper nur 5 Tests
 internal/events/scheduler.go	Scheduler.backgroundTenantScopes	# Live-Pipeline liest backgroundTenantsFn direkt; Projektion nur für tenant_iteration_integration_test.go
-internal/federation/ingress.go	CounterSnapshot	# wartet: W06-16 (Status-Sektion federation: federation_peer_without_path; Runbook-Grundlage für require_peer_hop, F-W12)
 internal/fedhop/grammar.go	ReasonFrom	# wartet: F-W10 (StatusError.CtxReason auf B; SetReason in den Fehler-Writern auf A, 02/03)
 internal/fedhop/merge.go	ClassVocabulary	# Vokabular-Pin: einziger Leser ist internal/dispatch/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb); A03-W3/A03-W9 ergänzen dort
 internal/fedhop/merge.go	SensitivityVocabulary	# Vokabular-Pin: einziger Leser ist internal/backends/fedhop_vocab_test.go (fedhop ist Leaf, der Pin liegt außerhalb)
 internal/fedhop/observe.go	WithObserver	# wartet: F-W11 (zwei Router, zwei Pools im Test)
-internal/fedhop/stamp.go	CounterSnapshot	# wartet: W06-16 (Status-Sektion federation: federation_stamp_without_identity, federation_header_ignored)
 internal/fedhop/stamp.go	SetPeerMaxWait	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Settings federation.peer_max_wait_* im Reload
 internal/fedhop/stamp.go	WireTimeout	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Sites client.go/stream.go/rerank.go
 internal/fedhop/stamp.go	WithCall	# wartet: F-W6 (Tier F für ctx-Zeilen: Call-Meta, Request-ID, Warte-Budget, WireTimeout) — Admission.Acquire, ChainCall.Do
@@ -137,8 +135,6 @@ internal/graphcache/validate.go	checkOrdering	# Nur export_test.go:72 (CheckOrde
 internal/graphcache/validate.go	checkRangeOrder	# Einziger Aufrufer ist checkOrdering (validate.go:103/108), das selbst nur über export_test.go:72 lebt
 internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_gate_test.go:156 u. a.); Prod gated über enforceManageActionTier
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
-internal/handler/model_auth.go	ModelDoor.Stats	# wartet: design/06 Status-Exposition der Tür-Zähler (K-06-7, Übergabe W01-6); bis W01-8 nur per Reflexion erreichbar (die Tür lag als any im Request-Kontext für ReauthConsumer)
-internal/handler/model_inflight.go	InflightRegistry.stats	# wartet: design/06 Status-Exposition (K-06-7); einziger Aufrufer ModelDoor.Stats (W01-8)
 internal/handler/v1census/v1census.go	Assert	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	Check	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
 internal/handler/v1census/v1census.go	NewRecorder	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door
@@ -190,7 +186,6 @@ internal/schemacontract/recheck.go	CheckRunCountForTest	# Test-only-Accessor auf
 internal/store/api_keys.go	CreateApiKey	# E02-3 A: Fixture-Fassade über insertApiKeyTx; 73 Aufrufe in 44 Testdateien, Prod mintet über den Tx-Kern
 internal/store/graph.go	EgoGraph	# Cache-lose Fassade über EgoGraphCached (Prod-Pfad); 59 Aufrufe in 12 Integrationstests als SQL-Orakel
 internal/store/graph.go	takeHop	# Legacy-Fassade über takeHopMerged (Prod: graph.go:336); graph_test.go:105 ff. pinnt die alte Trunkierung
-internal/store/model_keys.go	TenantConsumerIDs	# wartet: W06-16 — Konsumenten-Teil der Tenant-Usage-Sicht (consumer_id = ANY($ids), Muster TenantAPIKeyIDs)
 internal/store/project_sync.go	SetProjectSyncCursor	# Prod schreibt nur MergeProjectSyncCursor (forge/sync.go:355/436/498); Set nur project_sync_it:117
 internal/store/resolve_sources.go	ResolveSources	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt
 internal/store/resolve_sources.go	SourceSet.Facts	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt

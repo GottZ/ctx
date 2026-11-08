@@ -56,66 +56,29 @@ type llmlogEntry struct {
 	QueueWaitMs      *int         `json:"queue_wait_ms"`
 	DispatchClass    *string      `json:"dispatch_class"`
 	DispatchAbort    *string      `json:"dispatch_abort"`
+	// ConsumerID is the model consumer of a /v1 row (W06-17) — always on the
+	// wire, null for knowledge-key and background rows.
+	ConsumerID *string `json:"consumer_id"`
 }
 
 // HandleLLMLog serves the admin telemetry table. Admin-gated (RequireAdmin):
 // hostnames via backend, and the error detail is a privacy surface even capped.
+// ?consumer_id=<uuid> narrows the list to one model consumer (W06-17); the SQL
+// text is chosen by role in llmlogListQuery.
 func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
-	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: admin-only telemetry cap (llmlog.max_limit) is a server-global policy, not tenant-scoped.
-	maxLimit := cfg.LLMLog.MaxLimit
-	if maxLimit <= 0 {
-		maxLimit = 200
+	f, ok := h.llmlogFilter(w, r)
+	if !ok {
+		return
 	}
-	limit := maxLimit
-	if q := r.URL.Query().Get("limit"); q != "" {
-		if n, err := strconv.Atoi(q); err == nil && n > 0 && n < limit {
-			limit = n
-		}
+	sql, args, err := llmlogListQuery(f)
+	if err != nil {
+		slog.Error("llmlog: list query", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "internal error",
+		})
+		return
 	}
-	pipeline := r.URL.Query().Get("pipeline")
-	errorsOnly := r.URL.Query().Get("errors_only") == "true"
-
-	// Per-tenant scoping (T37b, 04-W5 §4.6): a server-admin sees every row; a
-	// tenant-admin (the RequireAdminOrTenantAdmin gate guarantees one or the
-	// other) sees ONLY rows attributed to its own tenant's keys. The keys are
-	// resolved to a literal uuid[] FIRST (§6.4 — `api_key_id = ANY($keys)` rides
-	// the apikey index, where `IN (subquery)` would hash-join past it). keyFilter
-	// stays nil for a server-admin (no predicate); a non-nil (even empty) slice
-	// gates: a tenant with zero keys gets an empty filter → zero rows (fail-
-	// closed, never an unfiltered view). Background rows (api_key_id NULL) drop
-	// out of any tenant view by construction and only a server-admin sees them.
-	ar := AuthResultFromContext(r.Context())
-	var keyFilter []string
-	if ar == nil || !ar.IsServerAdmin() {
-		tenant := ""
-		if ar != nil {
-			tenant = ar.TenantID
-		}
-		keys, kerr := store.TenantAPIKeyIDs(r.Context(), h.pool, tenant)
-		if kerr != nil {
-			slog.Error("llmlog: tenant key resolve failed", "error", kerr, "request_id", RequestIDFromContext(r.Context()))
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"success": false, "error": "internal error",
-			})
-			return
-		}
-		keyFilter = keys // non-nil ([]string{} when the tenant has no keys → zero rows)
-	}
-
-	// Explicit SELECT list — NEVER request_system/request_user/response_content.
-	// id::text guarantees a string scan; backend = backend_name with host
-	// fallback (design 04 §3.2). created_at DESC rides the hypertable path.
-	rows, err := h.pool.Query(r.Context(), `
-		SELECT id::text, created_at, pipeline, model,
-		       COALESCE(backend_name, host) AS backend,
-		       duration_ms, error, prompt_tokens, completion_tokens, cost_usd,
-		       queue_wait_ms, dispatch_class, dispatch_abort
-		FROM context_llm_log
-		WHERE ($1 = '' OR pipeline = $1)
-		  AND (NOT $2 OR error IS NOT NULL)
-		  AND ($4::uuid[] IS NULL OR api_key_id = ANY($4))
-		ORDER BY created_at DESC
-		LIMIT $3`, pipeline, errorsOnly, limit, keyFilter)
+	rows, err := h.pool.Query(r.Context(), sql, args...)
 	if err != nil {
 		slog.Error("llmlog: query failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -131,7 +94,7 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 		var rawErr *string
 		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.Pipeline, &e.Model, &e.Backend,
 			&e.DurationMs, &rawErr, &e.PromptTokens, &e.CompletionTokens, &e.CostUSD,
-			&e.QueueWaitMs, &e.DispatchClass, &e.DispatchAbort); err != nil {
+			&e.QueueWaitMs, &e.DispatchClass, &e.DispatchAbort, &e.ConsumerID); err != nil {
 			slog.Error("llmlog: scan failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"success": false, "error": "internal error",
@@ -150,6 +113,72 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "entries": entries})
+}
+
+// llmlogFilter resolves the request into the role-resolved list filter, or
+// answers the request itself (400/500) and returns false.
+//
+// Per-tenant scoping (T37b, 04-W5 §4.6; W06-17): a server-admin sees every
+// row; a tenant-admin (the RequireAdminOrTenantAdmin gate guarantees one or
+// the other) sees ONLY rows attributed to its own tenant's knowledge keys or
+// its own model consumers. Both are resolved to literal id lists FIRST (§6.4 —
+// a per-id probe rides the attribution index, where IN (subquery) would
+// hash-join past it). A non-nil (even empty) list gates: a tenant with zero
+// keys and zero consumers gets zero rows (fail-closed, never an unfiltered
+// view). Background rows (both attributions NULL) drop out of any tenant view
+// by construction and only a server-admin sees them.
+func (h *LLMLogHandler) llmlogFilter(w http.ResponseWriter, r *http.Request) (llmlogListFilter, bool) {
+	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: admin-only telemetry cap (llmlog.max_limit) is a server-global policy, not tenant-scoped.
+	maxLimit := cfg.LLMLog.MaxLimit
+	if maxLimit <= 0 {
+		maxLimit = 200
+	}
+	f := llmlogListFilter{
+		Limit:        maxLimit,
+		PipelineName: r.URL.Query().Get("pipeline"),
+		ErrorsOnly:   r.URL.Query().Get("errors_only") == "true",
+	}
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 && n < f.Limit {
+			f.Limit = n
+		}
+	}
+	// A syntactically invalid consumer_id is a 400 for every role — it is a
+	// malformed request, not a probe of existence (a well-formed foreign or
+	// unknown id answers an empty list, see llmlogTenantQuery). Lower-cased so
+	// the tenant intersection compares with the uuid::text form of the store.
+	if c := r.URL.Query().Get("consumer_id"); c != "" {
+		if !uuidRe.MatchString(c) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": "invalid consumer_id",
+			})
+			return f, false
+		}
+		f.Consumer = strings.ToLower(c)
+	}
+
+	ar := AuthResultFromContext(r.Context())
+	if ar != nil && ar.IsServerAdmin() {
+		f.ServerAdmin = true
+		return f, true
+	}
+	tenant := ""
+	if ar != nil {
+		tenant = ar.TenantID
+	}
+	keys, err := store.TenantAPIKeyIDs(r.Context(), h.pool, tenant)
+	if err == nil {
+		f.KeyIDs = keys // non-nil ([]string{} when the tenant has no keys)
+		f.ConsumerIDs, err = store.TenantConsumerIDs(r.Context(), h.pool, tenant)
+	}
+	if err != nil {
+		slog.Error("llmlog: tenant attribution resolve failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "internal error",
+		})
+		return f, false
+	}
+	return f, true
 }
 
 // Body-state vocabulary for the gated detail fetch (D1b). The LIST stays
@@ -218,9 +247,17 @@ func (h *LLMLogHandler) HandleLLMLogDetail(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Same per-tenant gate as the list (T37b): server-admin → no key predicate;
-	// anyone else → api_key_id = ANY(its keys). A tenant with zero keys resolves
-	// to an empty slice → the WHERE never matches → uniform 404 (fail-closed).
+	// Per-tenant gate (T37b): server-admin → no key predicate; anyone else →
+	// api_key_id = ANY(its keys). A tenant with zero keys resolves to an empty
+	// slice → the WHERE never matches → uniform 404 (fail-closed).
+	//
+	// Consumer rows stay behind this gate on purpose (W06-17, design/06 §4.8):
+	// the list shows a tenant-admin its consumers' rows, the detail does NOT —
+	// a row with consumer_id set has api_key_id NULL (migration 158's CHECK
+	// num_nonnulls(api_key_id, consumer_id) <= 1), so api_key_id = ANY(keys)
+	// never matches it and a non-server-admin gets the same uniform 404 as for
+	// an unknown id; no body of a /v1 call is linked to a tenant view
+	// (pinned by TestLLMLogConsumerDetailUniform404).
 	ar := AuthResultFromContext(r.Context())
 	var keyFilter []string
 	if ar == nil || !ar.IsServerAdmin() {

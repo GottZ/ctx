@@ -12,7 +12,8 @@ import (
 
 // AuditVia names the channel a write reached context_api_keys or
 // context_tenant_quota through — metadata.via of the audit row the migration-160
-// triggers write (audit_actor_meta, design/06 §3.3, B-06-14). The set is closed:
+// triggers write (audit_actor_meta, design/06 §3.3, B-06-14) — or, for
+// AuditViaGateway, the channel of the rows the gateway writes from Go. The set is closed:
 // a writer stamps one of the constants below; an unstamped write reads 'api'
 // when an actor was stamped and 'sql' when none was, so a psql edit stays
 // recognisable and the legitimate boot, provisioning and offboarding paths
@@ -33,10 +34,16 @@ const (
 	// ViaSQL: no stamp at all — what the trigger records for a psql edit. No
 	// writer sets it; it names the absence of one.
 	ViaSQL AuditVia = "sql"
+	// AuditViaGateway: the consumer_usage rows of the model API's usage
+	// events (W06-18, design/06 §4.10). Not a trigger stamp: the
+	// usageevents recorder writes the rows itself and sets metadata.via to
+	// usageevents.Via, the same literal (that package is a leaf over pgxdb
+	// and does not import store).
+	AuditViaGateway AuditVia = "gateway"
 )
 
 // auditVias is the closed set, pinned by TestAuditViaPin.
-var auditVias = [...]AuditVia{ViaAPI, ViaBootstrap, ViaProvision, ViaOffboarding, ViaMigration, ViaSQL}
+var auditVias = [...]AuditVia{ViaAPI, ViaBootstrap, ViaProvision, ViaOffboarding, ViaMigration, ViaSQL, AuditViaGateway}
 
 // valid reports whether v is one of the pinned channels.
 func (v AuditVia) valid() bool {
