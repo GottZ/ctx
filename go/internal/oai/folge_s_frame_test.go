@@ -385,7 +385,7 @@ func folgeSChildren(t *testing.T, test string, cases []string) {
 	for _, c := range cases {
 		var out []byte
 		var err error
-		for attempt := 1; ; attempt++ {
+		for try := 1; ; try++ {
 			cmd := exec.Command(os.Args[0], "-test.run=^"+test+"$", "-test.count=1", "-test.v")
 			cmd.Env = append(os.Environ(), folgeSChildEnv+"="+c, "GOMEMLIMIT=200MiB")
 			out, err = cmd.CombinedOutput()
@@ -395,13 +395,13 @@ func folgeSChildren(t *testing.T, test string, cases []string) {
 					line = l[i:]
 				}
 			}
-			t.Logf("%s %s (attempt %d): %s", test, c, attempt, line)
+			t.Logf("%s %s (try %d): %s", test, c, try, line)
 			// A stream the relay cut because the harness's client fell
 			// behind (A03-W10's overflow, a drain-timing outcome under host
 			// load, not a heap outcome) is run again, at most
 			// folgeSOverflowRetries times; the heap verdict holds in every
 			// attempt — a run over its bound fails at once.
-			if err == nil || !strings.Contains(line, `"relay_overflow":`) || strings.Contains(line, `"over":true`) || attempt > folgeSOverflowRetries {
+			if err == nil || !strings.Contains(line, `"relay_overflow":`) || strings.Contains(line, `"over":true`) || try > folgeSOverflowRetries {
 				break
 			}
 		}
