@@ -31,6 +31,7 @@
   // grace period now" — a danger confirm, then model-key-revoke with THAT
   // key's id; the successor stays valid.
   import { untrack } from 'svelte'
+  import { tenantFilterFromSearch } from './bridge'
   import { session } from '../../lib/auth.svelte'
   import { CONSUMER_STATUSES, DEFAULT_CONSUMER_STATUSES } from '../../lib/api/modelapi'
   import type { ConsumerView, KeyView } from '../../lib/api/types'
@@ -55,7 +56,13 @@
   // model state, which must not become a dependency of this effect.
   $effect(() => {
     if (!session.caps.viewModelApi) return
-    untrack(() => model.start())
+    untrack(() => {
+      // W05-20 bridge: /gateway?tenant=<id> (from /admin/tenants/:id) opens
+      // the list filtered to that tenant — server-admin only (bridge.ts).
+      const bridged = tenantFilterFromSearch(location.search, session.caps.viewTenants)
+      if (bridged !== null) model.filter = { ...model.filter, tenantId: bridged }
+      model.start()
+    })
     return () => model.dispose()
   })
 

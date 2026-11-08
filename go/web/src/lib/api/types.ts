@@ -1744,3 +1744,356 @@ export interface RoleSuggestionAnswer {
   role: 'chat' | 'embed' | 'rerank'
   primary_model: string
 }
+
+// RC-D C6 =====================================================================
+// Model API panels (RC-D cluster C6 = waves W05-09 consumer detail, W05-10
+// usage panel, W05-12 limits panel, W05-17 status tile, W05-20 server-admin
+// bridge; design/05 §4.6 + §7, design/06 §4.3/§4.8). This block is the SPA
+// side of contracts whose Go side lands in other RC-D clusters — since S2 the
+// shapes of THOSE clusters (Go wins, rc-d-s2-common.md §1):
+//   - model-consumer-get: on root (W05-02, internal/handler/model_consumers_read.go).
+//   - GET /api/llmlog?consumer_id=: C2 W06-17 (llmlogEntry + consumer_id).
+//   - GET /api/usage and the /api/status sections gateway / usage_split_24h /
+//     federation: C2 W06-16 (internal/llmusage/usage.go, handler/status_gateway.go).
+//   - gateway-limits-get|set|delete: C1 W06-15 (handler/gateway_limits_manage.go).
+//
+// One rule for every number below: null is "not recorded" (or, in an
+// effective limit, "unbounded") and is RENDERED as such — never coerced to 0
+// (design/06 "null ≠ 0", the W05-10 gate).
+// =============================================================================
+
+/** The three gateway operations a limit, a usage series or a refusal belongs to (keyquota.Op). */
+export type GatewayOp = 'chat' | 'embed' | 'rerank'
+
+// --- W05-09: consumer detail (model-consumer-get, model_consumers_read.go) ---
+
+/**
+ * One row of a consumer's audit trail (consumerAuditRowJSON = the
+ * GET /api/audit row + its entity type). The trail mixes the consumer's own
+ * rows (policy changes), its keys' rows (create/rotate/revoke) and its limits
+ * rows (gateway_limits); `entity_key` is the consumer id or the key id.
+ * Values arrive redacted by the server (redactKeyState / redactActor) — the
+ * SPA shows field NAMES, never the raw values of a key row (design/05 §3.2).
+ */
+export interface ConsumerAuditRow {
+  entity_type: string
+  id: string
+  entity_key: string
+  scope: string
+  action: string
+  old_value: unknown
+  new_value: unknown
+  api_key_id: string | null
+  actor_label: string | null
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+/**
+ * model-consumer-get answer (handleModelConsumerGet): the consumer with its
+ * key CHAIN (newest first, ≤ gateway.consumer_chain_max; keys_truncated when
+ * cut) and the newest audit rows of the consumer and its keys. An unknown,
+ * foreign or key id answers 404 {success:false,"model consumer not found"}
+ * byte-equal (No-Oracle, model_consumers.go:304-305) — raised as ApiError,
+ * never this shape.
+ */
+export interface ConsumerGetResponse {
+  success: true
+  consumer: ConsumerView
+  keys_truncated: boolean
+  audit: ConsumerAuditRow[]
+}
+
+/**
+ * One row of GET /api/llmlog?consumer_id= (C2 W06-17): the llmlog list entry
+ * plus its consumer (null for knowledge-key and background rows). Metadata
+ * only — the list is body-free by invariant. `error.detail` is the capped raw
+ * text (llmlog.go errDetailCap); the panels never render it below
+ * server-admin, only `error.class` (design/05 §4.3: a provider body can
+ * carry prompt fragments). Below server-admin the detail route answers a
+ * uniform 404 for every consumer row, so the SPA offers no detail link there.
+ */
+export interface ConsumerCallEntry extends LLMLogEntry {
+  consumer_id: string | null
+}
+
+/** GET /api/llmlog?consumer_id= answer. */
+export interface ConsumerCallsResponse {
+  success: true
+  entries: ConsumerCallEntry[]
+}
+
+// --- W05-10: usage panel (GET /api/usage, C2 W06-16 llmusage.Result) ---
+
+/** The panel's windows (design/05 §4.6): 24h + 7d by the hour, 30d + 90d by the day — all within to − from ≤ 92 d. */
+export type UsageWindow = '24h' | '7d' | '30d' | '90d'
+export type UsageBucket = 'hour' | 'day'
+export type UsageGroup = 'consumer' | 'alias' | 'pipeline' | 'source' | 'backend' | 'class' | 'instance'
+
+/** The refusal-ledger reasons (keyquota/ledger.go RejectRate…RejectFederation; migration 167 CHECK). */
+export type RejectReason = 'rate' | 'quota' | 'concurrency' | 'capacity' | 'model' | 'auth' | 'federation'
+
+/**
+ * One ledger reason of a bucket (llmusage.Refusal): n refusals, the mean wait
+ * of those that waited (null when none waited); target and dispatch_class are
+ * server-admin only and ABSENT (never "") otherwise. A reason may appear
+ * several times with different details. For a consumer series the server
+ * never sends `auth` (V-06-b: a 401 has no consumer) — and the SPA drops it
+ * should it ever arrive.
+ */
+export interface UsageRefusal {
+  reason: string
+  detail?: string
+  n: number
+  wait_ms_avg: number | null
+  target?: string
+  dispatch_class?: string
+}
+
+/**
+ * One bucket of one series (llmusage.Point). Every counter is nullable:
+ * null = not recorded (the bucket lies before the rollup's coverage, or is
+ * still running ⇒ complete:false), 0 = recorded, nothing happened.
+ * Percentiles come from the latency histograms (null without — then the
+ * response says hist:false and avg_ms carries the latency, marked as a mean).
+ * `rejected` null = before the refusal ledger existed; [] = no refusals.
+ */
+export interface UsagePoint {
+  bucket_start: string
+  complete: boolean
+  calls: number | null
+  errors: number | null
+  estimated_calls: number | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  gpu_ms: number | null
+  avg_ms: number | null
+  p50_ms: number | null
+  p95_ms: number | null
+  queue_p50_ms: number | null
+  queue_p95_ms: number | null
+  ttft_p50_ms: number | null
+  ttft_p95_ms: number | null
+  cost_usd: number | null
+  rejected: UsageRefusal[] | null
+}
+
+/** One series: a group key (the consumer id for group=consumer) and its buckets in time order. */
+export interface UsageSeries {
+  key: string
+  points: UsagePoint[]
+}
+
+/**
+ * GET /api/usage?from&to&bucket&group&consumer answer (llmusage.Result).
+ * `complete` = every point of every series is complete; `hist` = the
+ * percentiles come from histograms (V-06-c) — false ⇒ the panel shows the
+ * marked mean instead of an empty column. A foreign or unknown consumer
+ * answers 200 with no series (no oracle).
+ */
+export interface UsageResponse {
+  success: true
+  from: string
+  to: string
+  bucket: UsageBucket
+  group: UsageGroup
+  complete: boolean
+  hist: boolean
+  series: UsageSeries[]
+}
+
+// --- W05-12: limits panel (gateway-limits-get|set|delete, C1 W06-15) ---
+
+/** The subject a limits row belongs to (migration 168 ck_gl_subject_kind). The panel edits `consumer`. */
+export type LimitSubjectKind = 'consumer' | 'tenant' | 'instance' | 'tenant_envelope'
+
+/** The numeric limit dimensions of context_gateway_limits (migration 168), in display order. */
+export type LimitDimension =
+  | 'rpm'
+  | 'tpm'
+  | 'max_concurrency'
+  | 'daily_tokens'
+  | 'monthly_tokens'
+  | 'daily_requests'
+  | 'monthly_cost_usd'
+
+/** The tier a limits row belongs to — derived from the CALLER server-side, never sent in a body. */
+export type LimitTier = 'server' | 'tenant'
+
+/**
+ * One limits row's values (gatewaylimits.Values; JSON names = column names).
+ * null = "this row says nothing" (inherits). Stored values are > 0 (CHECK) —
+ * there is no 0 sentinel anywhere.
+ */
+export interface LimitValues {
+  rpm: number | null
+  tpm: number | null
+  max_concurrency: number | null
+  daily_tokens: number | null
+  monthly_tokens: number | null
+  daily_requests: number | null
+  monthly_cost_usd: number | null
+  allow_external: boolean | null
+  allow_unmetered_external: boolean | null
+}
+
+/** A budget envelope's dimensions (GatewayLimitsBudget); null = unbounded. */
+export interface LimitBudget {
+  daily_tokens: number | null
+  monthly_tokens: number | null
+  daily_requests: number | null
+  monthly_cost_usd: number | null
+}
+
+/**
+ * The resolved limits of the subject (GatewayLimitsEffective): rates and
+ * concurrency are never unbounded; a budget dimension null = unbounded (only
+ * when its settings floor is 0). instance_envelope is server-admin only.
+ */
+export interface LimitEffective {
+  rpm: number
+  tpm: number
+  max_concurrency: number
+  daily_tokens: number | null
+  monthly_tokens: number | null
+  daily_requests: number | null
+  monthly_cost_usd: number | null
+  allow_external: boolean
+  allow_unmetered_external: boolean
+  tenant_envelope?: LimitBudget
+  instance_envelope?: LimitBudget
+}
+
+/** The level that set an effective dimension (gatewaylimits.Source). */
+export type LimitSource =
+  | 'consumer_server'
+  | 'consumer_tenant'
+  | 'tenant_server'
+  | 'tenant_tenant'
+  | 'tenant_envelope'
+  | 'instance'
+  | 'settings'
+
+/**
+ * gateway-limits-get, one op (GatewayLimitsOp): the subject's stored server
+ * and tenant rows (null = no row), the CEILING a tenant-tier write must stay
+ * at or under (a null dimension = unbounded; never "unlimited" for a missing
+ * server row — that is the setting's value), the effective values and the
+ * source of each effective dimension.
+ */
+export interface LimitsOpView {
+  server: LimitValues | null
+  tenant: LimitValues | null
+  ceiling?: LimitValues
+  effective?: LimitEffective
+  sources?: Partial<Record<keyof LimitValues, LimitSource>>
+}
+
+/** gateway-limits-get `limits` (GatewayLimitsView): one entry per op (all three without `op`). */
+export interface GatewayLimitsView {
+  subject_kind: LimitSubjectKind
+  consumer_id?: string
+  tenant_id?: string
+  ops: Partial<Record<GatewayOp, LimitsOpView>>
+}
+
+/** gateway-limits-get answer. A foreign or unknown consumer answers the No-Oracle 404 (ApiError). */
+export interface GatewayLimitsGetResponse {
+  success: true
+  limits: GatewayLimitsView
+}
+
+/**
+ * gateway-limits-set answer: the stored row (a write is a FULL replacement of
+ * the caller-tier row of one op; the body is flat — subject + op + every
+ * dimension, null = unset — and carries NO tier). The panel re-reads the view
+ * per gateway-limits-get afterwards. A tenant-admin value over the ceiling
+ * answers 400 {error:"limit widens: <field>", param:<field>}; an invalid value
+ * 400 {error:"invalid data: …", param}.
+ */
+export interface GatewayLimitsSetResponse {
+  success: true
+  limits: LimitValues & { subject_kind: LimitSubjectKind; op: GatewayOp; tier: LimitTier }
+}
+
+/** gateway-limits-delete answer: whether the caller-tier row of the op existed. */
+export interface GatewayLimitsDeleteResponse {
+  success: true
+  deleted: boolean
+}
+
+// --- W05-17: status tile "Model API" (/api/status, C2 W06-16) ---
+
+/** One consumer of the 1-h top list (in-memory ring, V-06-d). */
+export interface GatewayTopConsumer {
+  consumer_id: string
+  requests: number
+  tokens: number
+}
+
+/** One op of the instance envelope: used and limit tokens of the UTC day (server-admin only). */
+export interface GatewayEnvelopeUse {
+  used: number
+  limit: number
+}
+
+/**
+ * /api/status `gateway` (handler/status_gateway.go gatewayStatus). PRESENT
+ * on both paths while gateway.enabled is on and a feed is wired; ABSENT
+ * otherwise — the tile is then off. The tenant-admin path carries only the
+ * tenant's own consumers' figures and never instance_envelope, auth or
+ * events. The internal/external partition per target is not repeated here:
+ * the server-admin tile reads it from `dispatch.targets` (A03-W3), the
+ * tenant tile reads the coarse depth class from `dispatch_tenant.targets`
+ * (never a number, V-03-b).
+ */
+export interface GatewayStatus {
+  enabled: boolean
+  consumers: number
+  /** null until the meter feeds it (C2: null ≠ 0) — rendered "not recorded". */
+  reservations_open: number | null
+  /** null until the in-memory ledger feeds it (C2) — "not recorded"; {} = no refusals. */
+  rejections_5m: Record<string, number> | null
+  /** A Go nil slice serialises as null — treated as an empty list. */
+  top_consumers_1h: GatewayTopConsumer[] | null
+  consumers_used_1h: number
+  consumers_expiring: number
+  instance_envelope?: Record<string, GatewayEnvelopeUse>
+  auth?: Record<string, number>
+  events?: Record<string, number>
+  generated_at?: string
+}
+
+/** /api/status `usage_split_24h`, one target × source × class (llmusage.SplitRow). Server-admin only. */
+export interface UsageSplit24hRow {
+  target: string
+  source: string
+  class: string
+  calls: number
+  gpu_ms: number
+}
+
+/** /api/status `federation` — the federation counters (server-admin only). */
+export interface FederationStatus {
+  // the ledger-fed counters are null until their source exists (C2 *int64)
+  loop_rejects: number | null
+  depth_rejects: number | null
+  header_invalid: number | null
+  header_ignored: number
+  peer_without_path: number
+  peer_mismatch: number | null
+  embed_space_rejects: number | null
+  busy: number | null
+  stamp_without_identity: number
+  peer_bound: number
+}
+
+// Declaration merge into StatusResponse (kept inside this block; the S3
+// integrator may fold it into the interface above). Absent = a server before
+// RC-D, the gateway switched off or no feed — the Model API tile stays off.
+export interface StatusResponse {
+  gateway?: GatewayStatus | null
+  usage_split_24h?: UsageSplit24hRow[] | null
+  federation?: FederationStatus | null
+}
+// RC-D C6 end ==================================================================

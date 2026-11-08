@@ -115,6 +115,10 @@ export const areaRoutes = {
   // the /gateway prefix-guard (caps.viewModelApi); its own lazy chunk.
   // areaMode('/gateway/models') is unmapped → 'reading'.
   '/gateway/models': () => import('./gateway/ModelsPage.svelte'),
+  // Consumer detail (RC-D C6, wave W05-09; design/05 §4.6): inherits the
+  // /gateway prefix guard (viewModelApi). Head, policy, key chain, usage
+  // panel (W05-10), limits (W05-12), last calls, audit trail.
+  '/gateway/consumers/:id': () => import('./gateway/ConsumerDetail.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 

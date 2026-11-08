@@ -60,7 +60,7 @@
 
 <tr data-consumer-row data-testid="consumer-row" class:off={!c.active}>
   <td class="label">
-    <span class="label-text" data-testid="consumer-label">{c.label}</span>
+    <a class="label-text" data-testid="consumer-label" href="/gateway/consumers/{c.id}">{c.label}</a>
     {#if c.description}<span class="desc">{c.description}</span>{/if}
   </td>
   <td><span class="badge" class:peer={c.kind === 'ctx-peer'}>{c.kind}</span></td>
