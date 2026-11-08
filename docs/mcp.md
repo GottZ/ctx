@@ -185,8 +185,8 @@ Save or replace a knowledge block. Upserts on (category, title, scope).
 Runs the same gate chain as `POST /api/store` (scope, size, rate limit, credential
 detection, type validation). **Answer:**
 `Stored: <title> (id: <uuid>, category: <category>)`, or
-`No change needed — identical content already exists (id: <uuid>)` when the content is
-unchanged. Staged for `confirm_writes` keys.
+`No change needed — identical content already exists (id: <uuid>)` when the write would
+change nothing. Staged for `confirm_writes` keys.
 
 ### update
 

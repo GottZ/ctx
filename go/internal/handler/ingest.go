@@ -261,19 +261,46 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 // processChunk handles a single chunk: hash check, upsert/insert, embed, temporal enrichment.
 // classifySet is the request's block-type snapshot, resolved once in HandleIngest.
 func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk IngestChunk, index int, scope, apiKeyID string, classifySet *blocktype.Set) IngestResult {
-	// 1. Hash NOOP check — skip if identical content exists.
-	existingID, err := store.HashNOOPCheck(ctx, h.pool, chunk.Content, scope, chunk.Category, chunk.Title)
-	if err != nil {
-		slog.Error("ingest: hash noop check error",
-			"error", err, "index", index, "request_id", reqID)
+	// 1. Identical-content check for both write modes. Block mode predicts
+	// UpsertBlock's (category, title, scope) conflict and metadata merge.
+	// Chunk mode writes by (source_id, chunk_index), but the same content
+	// identity check prevents a no-op rewrite and a cross-source collision on
+	// uq_context_category_title_scope, which has no lifecycle filter.
+	// IdenticalContentMatch merges metadata while InsertChunk replaces it, so
+	// request metadata that is a subset of the row's metadata can answer
+	// skipped although InsertChunk would remove the unnamed keys.
+	match, matchErr := store.IdenticalContentMatch(ctx, h.pool, chunk.Content, scope, chunk.Category, chunk.Title,
+		chunk.Tags, chunk.Metadata, store.SensitivityWrite{}, "")
+	if matchErr != nil {
+		slog.Error("ingest: identical content match error",
+			"error", matchErr, "index", index, "request_id", reqID)
 		return IngestResult{Index: index, Status: "failed", Error: "hash check failed"}
 	}
-	if existingID != "" {
-		return IngestResult{Index: index, ID: existingID, Status: "skipped"}
+	if match.Unchanged() {
+		return IngestResult{Index: index, ID: match.ID, Status: "skipped"}
+	}
+	if chunk.SourceID != "" && match.ID != "" {
+		// InsertChunk can only write its own (source_id, chunk_index) slot.
+		// A matching row outside that slot holds the content identity, so the
+		// insert would hit uq_context_category_title_scope instead of landing.
+		var sameSlot bool
+		if err := h.pool.QueryRow(ctx,
+			`SELECT EXISTS (
+			   SELECT 1 FROM context_blocks
+			    WHERE id = $1 AND source_id::text = $2 AND chunk_index = $3
+			 )`, match.ID, chunk.SourceID, chunk.ChunkIndex).Scan(&sameSlot); err != nil {
+			slog.Error("ingest: chunk slot check error",
+				"error", err, "index", index, "request_id", reqID)
+			return IngestResult{Index: index, Status: "failed", Error: "hash check failed"}
+		}
+		if !sameSlot {
+			return IngestResult{Index: index, ID: match.ID, Status: "skipped"}
+		}
 	}
 
 	// 2. Upsert or InsertChunk depending on whether SourceID is set.
 	var block *store.Block
+	var err error
 	var action string
 
 	if chunk.SourceID != "" {
@@ -315,7 +342,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		}
 		// UpsertBlock uses ON CONFLICT DO UPDATE, so both insert and update return a block.
 		// We cannot distinguish insert vs update at this level, so we use "updated" as
-		// the default since HashNOOPCheck already catches identical content (= true skip).
+		// the default since IdenticalContentMatch already catches a true no-op.
 		action = "updated"
 
 		// Auto-classify type_name from title and metadata with the request's
