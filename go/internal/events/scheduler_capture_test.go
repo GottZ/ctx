@@ -110,6 +110,9 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		// the gateway in these tests.
 		Gateway:    config.Defaults().Gateway,
 		Federation: config.Defaults().Federation, // F-W8: V43 range
+		// FOLGE-Z: pool.capability_probe_interval carries a fatal floor (V59);
+		// only that key — the pool's sensitivity keys stay at their zero form.
+		Pool: config.PoolConfig{CapabilityProbeInterval: config.Defaults().Pool.CapabilityProbeInterval},
 		// A03-W6: dispatch.external_retry_after_steps is fatal when empty
 		// (V46) — the registry default steps, every other dispatch field
 		// stays at its zero value as before.

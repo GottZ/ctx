@@ -509,6 +509,13 @@ func (st *buckets) l1(lane Lane, l Limits) (limit int64, bulkBound, ok bool) {
 	return 0, false, true
 }
 
+// BulkConcurrency is the concurrency a bulk-lane request of these limits
+// gets: the bulk share bulkSlots(Concurrency, XUReserve) that l1 admits
+// against — exported so the admin surface (model-consumer-create/-get
+// effective_limits, FOLGE-Z) shows the meter's own number instead of
+// recomputing it.
+func (l Limits) BulkConcurrency() int64 { return bulkSlots(l.Concurrency, l.XUReserve) }
+
 // bulkSlots is the bulk lane's share of C: ⌊C·(1 − r)⌋, at least one slot —
 // a bulk request is never refused for good; at C = 1 (or r = 0, or no r at
 // all, like newDim) there is no urgent reserve, the named bound of design/06

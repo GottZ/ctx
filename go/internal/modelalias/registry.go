@@ -55,6 +55,12 @@ type Alias struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	Invalid     error
+	// EffectiveVision and VisionSource are the alias's vision as resolved
+	// at load (EffectiveVision over the registry's VisionView, FOLGE-Z Z2).
+	// A zero VisionSource (an alias built outside Reload) reads as
+	// VisionNone; policy.vision, when set, always decides (DoorVision).
+	EffectiveVision bool
+	VisionSource    VisionSource
 }
 
 func (a *Alias) offerable() bool { return a.Enabled && a.Invalid == nil }
@@ -198,6 +204,9 @@ type Registry struct {
 	// reads it once and clamps tenant aliases to its Tenant part. nil = no
 	// clamp (tests that do not exercise it); cmd/ctxd always sets it.
 	ceilings func() Ceilings
+	// vision is the pool view the reload resolves each alias's effective
+	// vision against (SetVisionView, FOLGE-Z Z2); nil = no row capable.
+	vision VisionView
 
 	// Trigger's single flight: running while a drain goroutine reloads,
 	// pending when a Trigger arrived during that reload.
@@ -304,6 +313,9 @@ func (r *Registry) Reload(ctx context.Context) error {
 	}
 	for i := range loaded {
 		a := &loaded[i]
+		// Resolved for every row, invalid ones included (never offered, but
+		// the field is defined); policy first, then the pool's answer.
+		a.EffectiveVision, a.VisionSource = EffectiveVision(a.Policy, a.Role, a.Sensitivity, a.Scope, r.vision)
 		if a.Invalid != nil {
 			invalid++
 			r.logger().Warn("modelalias: alias is not offered — its row failed validation",

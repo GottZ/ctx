@@ -51,6 +51,11 @@ type Deps struct {
 
 	// Settings is the gateway settings getter: one snapshot per request.
 	Settings func() Settings
+	// RowVision reports whether a chain row reported vision=true to the
+	// capability probe (FOLGE-Z): an image request on an alias whose vision
+	// comes from the backends walks only such rows. nil ⇒
+	// Pool.RowImageCapable.
+	RowVision func(*backends.Backend) bool
 	// Pool is the backend pool: the chain (Pool.Chain), the health report
 	// of every attempt (llm.PoolReporter) and the identity strings the
 	// upstream-text sanitizer replaces (Pool.Snapshot).

@@ -195,16 +195,48 @@ func modelAliasWritable(ar *auth.AuthResult, scope string) bool {
 	return ar.IsServerAdmin() || (validTenantAliasScope(scope) && scope == ar.HomeScope)
 }
 
-func modelAliasView(a store.ModelAlias) map[string]any {
+func modelAliasView(a store.ModelAlias, view modelalias.VisionView) map[string]any {
 	policy := a.Policy
 	if len(policy) == 0 {
 		policy = json.RawMessage(`{}`)
 	}
+	vision, source := aliasEffectiveVision(a, policy, view)
 	return map[string]any{
 		"id": a.ID, "scope": a.Scope, "name": a.Name, "kind": a.Kind, "role": a.Role,
 		"sensitivity": a.Sensitivity, "policy": policy, "description": a.Description,
 		"enabled": a.Enabled, "created_at": a.CreatedAt, "updated_at": a.UpdatedAt,
+		"effective_vision": vision, "vision_source": source,
 	}
+}
+
+// aliasEffectiveVision is the alias's vision as the door applies it (FOLGE-Z
+// Z2, modelalias.EffectiveVision) over the live pool view: policy.vision
+// when set, else whether a row of the alias's chain reported vision=true. A
+// policy that does not parse (the alias is never offered) reads false/none.
+func aliasEffectiveVision(a store.ModelAlias, policy json.RawMessage, view modelalias.VisionView) (bool, modelalias.VisionSource) {
+	p, err := modelalias.ParsePolicy(modelalias.Kind(a.Kind), policy)
+	if err != nil {
+		return false, modelalias.VisionNone
+	}
+	return modelalias.EffectiveVision(p, a.Role, backends.Sensitivity(a.Sensitivity), a.Scope, view)
+}
+
+// visionView is the pool as the effective-vision view, under the /v1 export
+// rule (gateway.exportable_roles, as cmd/ctxd gives the registry); nil
+// without a pool (an untyped nil — a typed nil *Pool inside the interface
+// would panic).
+func (h *ManageHandler) visionView() modelalias.VisionView {
+	if h.backendPool == nil {
+		return nil
+	}
+	return backends.ChainVisionView{Pool: h.backendPool, ExportableRoles: func() []string {
+		if h.cfg != nil {
+			if c := h.cfg.Snapshot(); c != nil { //nolint:forbidigo // MT 06 BLIND: gateway.exportable_roles is global-only, the server admin's export list for every tenant alias.
+				return c.Gateway.ExportableRoles
+			}
+		}
+		return nil
+	}}
 }
 
 // modelAliasCeilingsWired returns the current ceilings, or answers 503.
@@ -626,8 +658,8 @@ func writeModelAliasStoreErr(ctx context.Context, w http.ResponseWriter, op stri
 	}
 }
 
-func writeModelAliasOK(w http.ResponseWriter, a store.ModelAlias, warnings []string) {
-	resp := map[string]any{"success": true, "model_alias": modelAliasView(a)}
+func writeModelAliasOK(w http.ResponseWriter, view modelalias.VisionView, a store.ModelAlias, warnings []string) {
+	resp := map[string]any{"success": true, "model_alias": modelAliasView(a, view)}
 	if len(warnings) > 0 {
 		resp["warnings"] = warnings
 	}
@@ -693,7 +725,7 @@ func (h *ManageHandler) handleModelAliasCreate(w http.ResponseWriter, r *http.Re
 		return
 	}
 	h.afterModelAliasWrite(ctx)
-	writeModelAliasOK(w, out, warnings)
+	writeModelAliasOK(w, h.visionView(), out, warnings)
 }
 
 func (h *ManageHandler) handleModelAliasUpdate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
@@ -733,7 +765,7 @@ func (h *ManageHandler) handleModelAliasUpdate(w http.ResponseWriter, r *http.Re
 		return
 	}
 	h.afterModelAliasWrite(ctx)
-	writeModelAliasOK(w, out, warnings)
+	writeModelAliasOK(w, h.visionView(), out, warnings)
 }
 
 // modelAliasPatchHasField: the update names at least one mutable field.
@@ -820,7 +852,7 @@ func (h *ManageHandler) handleModelAliasDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	h.afterModelAliasWrite(ctx)
-	writeModelAliasOK(w, out, nil)
+	writeModelAliasOK(w, h.visionView(), out, nil)
 }
 
 func (h *ManageHandler) handleModelAliasList(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult) {
@@ -830,8 +862,9 @@ func (h *ManageHandler) handleModelAliasList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	items := make([]map[string]any, 0, len(rows))
+	view := h.visionView()
 	for _, a := range rows {
-		v := modelAliasView(a)
+		v := modelAliasView(a, view)
 		v["writable"] = modelAliasWritable(ar, a.Scope)
 		items = append(items, v)
 	}

@@ -1272,6 +1272,15 @@ type PoolConfig struct {
 	// bounded cost per staged write. Settings-only and tenant-overridable like
 	// its PoolConfig siblings.
 	BlobStageMaxBytes int `key:"pool.blob_stage_max_bytes" env:"-" default:"1048576" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
+	// CapabilityProbeInterval is the cadence of the backend capability probe
+	// (FOLGE-Z Z1, backends.Pool.RunCapabilityProbe): every interval each
+	// enabled pool row's engine is asked what it can do (today: vision —
+	// SGLang /get_model_info, llama.cpp /props, the OpenRouter model list),
+	// besides one round at boot and one after every pool reload. The
+	// interval is read per wait (hot). Global-only: the pool is one
+	// process-wide good. V59 refuses 0 (the next round would start without a
+	// pause); V17 refuses a negative value.
+	CapabilityProbeInterval time.Duration `key:"pool.capability_probe_interval" env:"CTX_POOL_CAPABILITY_PROBE_INTERVAL" default:"600" mut:"hot" tenancy:"global-only"`
 	// BlobScanMaxBytes caps how much of a DECODED blob payload the credentials
 	// detector reads on the shared blob write core (W02-9/BP-8). The block path
 	// needs no such key — a block is capped at 50 KB, so its scan is free; a

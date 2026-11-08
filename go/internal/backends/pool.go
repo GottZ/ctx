@@ -112,13 +112,24 @@ type Pool struct {
 
 	healthM sync.Mutex
 	health  map[string]*healthState // key = Backend.ID
+
+	// Capability probe state (FOLGE-Z Z1, capability.go): the last result
+	// per row (key = Backend.ID; survives a reload of an unchanged row like
+	// health does), the change hooks, the reload kick of RunCapabilityProbe
+	// and the per-row probe bound (CapabilityProbeTimeout; tests shorten it).
+	capM       sync.Mutex
+	caps       map[string]capEntry
+	capHooks   []func()
+	capKick    chan struct{}
+	capTimeout time.Duration
 }
 
 // NewPool creates an empty pool bound to its row source and secret resolver.
 // Call Reload to publish the first snapshot. secrets may be nil (keyless
 // stub, P1–P4): api_key_refs then resolve to empty keys with a warning.
 func NewPool(q pgxdb.Querier, secrets SecretResolver) *Pool {
-	p := &Pool{q: q, secrets: secrets, health: make(map[string]*healthState)}
+	p := &Pool{q: q, secrets: secrets, health: make(map[string]*healthState),
+		caps: make(map[string]capEntry), capKick: make(chan struct{}, 1), capTimeout: CapabilityProbeTimeout}
 	p.snap.Store(&snapshot{})
 	return p
 }
@@ -207,6 +218,7 @@ func (p *Pool) Reload(ctx context.Context) error {
 	})
 	slog.Info("backends: snapshot reloaded", "version", v,
 		"backends", len(loaded), "profiles", len(profiles))
+	p.afterReload(loaded)
 	return nil
 }
 

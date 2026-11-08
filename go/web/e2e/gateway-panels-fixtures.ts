@@ -261,6 +261,176 @@ const LIMIT_FIELDS = [...LIMIT_DIMS, 'allow_external', 'allow_unmetered_external
 /** dispatch.external_queue_per_consumer — the V48 cap of max_concurrency (C1 A9). */
 const CONCURRENCY_CAP = 8
 
+// FOLGE-Z (briefings/FOLGE-Z-INDEX.md §3) — the tenant / instance subjects of
+// gateway-limits-get (handler gateway_limits_manage.go: tenant-admin reads its
+// OWN tenant, instance is server-admin only ⇒ 403, an unknown or foreign tenant
+// the 404 "tenant not found") and the start limits of model-consumer-create
+// (§3 `limits` in, `effective_limits` out). Tenant B carries a tenant_server
+// row (chat rpm 10) so the create dialog's prefill provably follows the CHOSEN
+// tenant, not the instance.
+
+/**
+ * Stored tenant rows: tenant id → op → tier → values. Tenant B: a tenant_server
+ * row (chat rpm 10 — a consumer_server value REPLACES it) and a tenant_tenant row
+ * (embed rpm 60 — it NARROWS every value below it, gatewaylimits.go levels.effective).
+ */
+const TENANT_LIMIT_ROWS: Record<string, Record<string, Partial<Record<'server' | 'tenant', Record<string, unknown>>>>> = {
+  [PANEL_TENANT_ID.B]: { chat: { server: limitValues({ rpm: 10 }) }, embed: { tenant: limitValues({ rpm: 60 }) } },
+}
+
+const TENANT_NOT_FOUND: MockAnswer = { status: 404, json: { success: false, error: 'tenant not found' } }
+const LIMIT_OPS = ['chat', 'embed', 'rerank']
+
+/**
+ * gatewaylimits.go levels.effective for a consumer WITHOUT rows of its own:
+ * server bound = consumer_server ?? tenant_server ?? settings (pick, first
+ * wins), then the tenant_tenant row narrows (tighter). `cs` is a consumer
+ * server-tier row (a server-admin's start limits). Permissions: settings
+ * (allow_external) / the fixed default (allow_unmetered_external, source
+ * "default"); rows of this world carry none.
+ */
+function resolveLevels(
+  tenantId: string | null,
+  op: string,
+  cs?: Record<string, unknown>,
+  ct?: Record<string, unknown>,
+): { values: Record<string, unknown>; sources: Record<string, string> } {
+  const base = LIMIT_SETTINGS[op] ?? limitValues()
+  const rows = tenantId === null ? undefined : TENANT_LIMIT_ROWS[tenantId]?.[op]
+  const values: Record<string, unknown> = {}
+  const sources: Record<string, string> = {}
+  for (const d of LIMIT_DIMS) {
+    let v: number | null = (base[d] as number | null) ?? null
+    let src = 'settings'
+    const pickOf = (row: Record<string, unknown> | undefined, s: string): boolean => {
+      const x = row?.[d]
+      if (typeof x === 'number') {
+        v = x
+        src = s
+        return true
+      }
+      return false
+    }
+    if (!pickOf(cs, 'consumer_server')) pickOf(rows?.server, 'tenant_server')
+    for (const [row, s] of [[rows?.tenant, 'tenant_tenant'], [ct, 'consumer_tenant']] as const) {
+      const x = row?.[d]
+      if (typeof x === 'number' && (v === null || x < v)) {
+        v = x
+        src = s
+      }
+    }
+    values[d] = v
+    sources[d] = src
+  }
+  values.allow_external = (cs?.allow_external as boolean | undefined) ?? base.allow_external === true
+  sources.allow_external = typeof cs?.allow_external === 'boolean' ? 'consumer_server' : 'settings'
+  if (ct?.allow_external === false) {
+    values.allow_external = false
+    sources.allow_external = 'consumer_tenant'
+  }
+  values.allow_unmetered_external = (cs?.allow_unmetered_external as boolean | undefined) ?? false
+  sources.allow_unmetered_external = typeof cs?.allow_unmetered_external === 'boolean' ? 'consumer_server' : 'default'
+  return { values, sources }
+}
+
+/** The effective values + sources a new consumer of a tenant (null = the instance) inherits. */
+function tenantEffective(tenantId: string | null, op: string): { values: Record<string, unknown>; sources: Record<string, string> } {
+  return resolveLevels(tenantId, op)
+}
+
+/** gateway-limits-get for subject_kind tenant | instance (read only — the panel world writes consumer rows). */
+function subjectLimitsGet(data: Record<string, unknown>, role: Role, tenant: TenantKey): MockAnswer {
+  const kind = data.subject_kind
+  if (kind === 'instance') {
+    if (role !== 'server-admin') return { status: 403, json: { success: false, error: 'admin key required' } }
+    if (data.tenant_id !== undefined || data.consumer_id !== undefined)
+      return { status: 400, json: { success: false, error: 'invalid data: the instance row names no consumer_id or tenant_id', param: 'subject_kind' } }
+  } else if (kind === 'tenant') {
+    const id = data.tenant_id
+    if (typeof id !== 'string' || id === '' || data.consumer_id !== undefined)
+      return { status: 400, json: { success: false, error: 'invalid data: a tenant row names tenant_id and no consumer_id', param: 'tenant_id' } }
+    const known = Object.values(PANEL_TENANT_ID).includes(id)
+    if (!known || (role !== 'server-admin' && id !== PANEL_TENANT_ID[tenant])) return TENANT_NOT_FOUND
+  } else {
+    return { status: 400, json: { success: false, error: 'invalid data: subject_kind must be consumer, tenant, instance or tenant_envelope', param: 'subject_kind' } }
+  }
+  const tenantId = kind === 'tenant' ? (data.tenant_id as string) : null
+  const ops: Record<string, unknown> = {}
+  for (const op of LIMIT_OPS) {
+    const e = tenantEffective(tenantId, op)
+    const rows = tenantId === null ? undefined : TENANT_LIMIT_ROWS[tenantId]?.[op]
+    const effective: Record<string, unknown> = { ...e.values }
+    if (tenantId !== null) effective.tenant_envelope = { daily_tokens: 10_000_000, monthly_tokens: null, daily_requests: null, monthly_cost_usd: 5 }
+    if (role === 'server-admin') effective.instance_envelope = { daily_tokens: 20_000_000, monthly_tokens: null, daily_requests: null, monthly_cost_usd: 10 }
+    const view: Record<string, unknown> = {
+      server: rows?.server ?? null,
+      tenant: rows?.tenant ?? null,
+      effective,
+      sources: e.sources,
+    }
+    if (tenantId !== null) {
+      const ceiling: Record<string, unknown> = {}
+      for (const d of LIMIT_DIMS) ceiling[d] = e.values[d] ?? null
+      ceiling.allow_external = null
+      ceiling.allow_unmetered_external = null
+      view.ceiling = ceiling
+    }
+    ops[op] = view
+  }
+  const limits: Record<string, unknown> = { subject_kind: kind, ops }
+  if (tenantId !== null) limits.tenant_id = tenantId
+  return { status: 200, json: { success: true, limits } }
+}
+
+/**
+ * model-consumer-create `limits` (§3 `L`, the rules of gateway-limits-set at the
+ * CALLER's tier) ⇒ the new consumer's `effective_limits` (§3 `E` per op), or the
+ * 400 refusal. The consumer inherits its tenant's effective values; a given
+ * dimension lands as consumer_server (server-admin, free) or consumer_tenant
+ * (tenant-admin, at or under the inherited value — "limit widens" otherwise).
+ */
+export function mockStartLimits(tenantId: string, role: Role, limits: unknown): { error: MockAnswer } | { effective: Record<string, unknown> } {
+  // C-GO writeCreateLimitError: the gateway-limits-set wording, param = the field's path in the create payload
+  const bad = (error: string, param: string): { error: MockAnswer } => ({ error: { status: 400, json: { success: false, error, param } } })
+  const given: Record<string, Record<string, unknown>> = {}
+  if (limits !== undefined && limits !== null) {
+    if (typeof limits !== 'object' || Array.isArray(limits)) return bad('invalid data: limits must be an object of ops', 'limits')
+    for (const [op, l] of Object.entries(limits as Record<string, unknown>)) {
+      if (!LIMIT_OPS.includes(op)) return bad('invalid data: op must be chat, embed or rerank', 'op')
+      if (l === null || typeof l !== 'object' || Array.isArray(l)) return bad(`invalid data: limits.${op} must be an object`, 'limits')
+      for (const k of Object.keys(l)) if (!LIMIT_FIELDS.includes(k)) return bad(`invalid data: unknown field "${k}"`, `limits.${op}.${k}`)
+      given[op] = l as Record<string, unknown>
+    }
+  }
+  const serverAdmin = role === 'server-admin'
+  const effective: Record<string, unknown> = {}
+  for (const op of LIMIT_OPS) {
+    const inherited = tenantEffective(tenantId, op)
+    const l = given[op] ?? {}
+    const row: Record<string, unknown> = {}
+    for (const d of LIMIT_DIMS) {
+      const v = l[d]
+      if (v === undefined) continue
+      if (typeof v !== 'number' || !(v > 0) || !Number.isFinite(v)) return bad(`invalid data: ${d} must be > 0`, `limits.${op}.${d}`)
+      if (d === 'max_concurrency' && v > CONCURRENCY_CAP) return bad('invalid data: max_concurrency over the cap', `limits.${op}.max_concurrency`)
+      // a tenant-admin narrows under the ceiling = what the new consumer inherits
+      const c = inherited.values[d] as number | null
+      if (!serverAdmin && c !== null && v > c) return bad(`limit widens: ${d} — ${v} is above ${c}, the limit of the levels above`, `limits.${op}.${d}`)
+      row[d] = v
+    }
+    for (const f of ['allow_external', 'allow_unmetered_external']) {
+      const v = l[f]
+      if (v === undefined) continue
+      if (typeof v !== 'boolean') return bad(`invalid data: ${f} must be a boolean`, `limits.${op}.${f}`)
+      if (!serverAdmin && (f === 'allow_unmetered_external' || v === true)) return bad(`limit widens: ${f} — a tenant-tier row can only withdraw the permission (false)`, `limits.${op}.${f}`)
+      row[f] = v
+    }
+    const e = serverAdmin ? resolveLevels(tenantId, op, row) : resolveLevels(tenantId, op, undefined, row)
+    effective[op] = { ...e.values, sources: e.sources }
+  }
+  return { effective }
+}
+
 /** The stateful panel world of one session (limits rows survive a write). */
 export class PanelWorld {
   /** "<consumer>|<op>|<tier>" → stored row (absent = no row) */
@@ -320,6 +490,10 @@ export class PanelWorld {
     }
     if (action !== 'gateway-limits-get' && action !== 'gateway-limits-set' && action !== 'gateway-limits-delete') return null
     if (role === 'member') return { status: 403, json: { success: false, error: 'admin key required' } }
+    // FOLGE-Z: the tenant / instance subjects of the create dialog's prefill (read only)
+    if (action === 'gateway-limits-get' && (data?.subject_kind === 'tenant' || data?.subject_kind === 'instance')) {
+      return subjectLimitsGet(data, role, tenant)
+    }
     if (data?.subject_kind !== 'consumer') {
       // instance / tenant_envelope are server-admin only; this world serves consumer subjects
       return role === 'server-admin'
