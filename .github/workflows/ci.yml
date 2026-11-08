@@ -1076,6 +1076,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The release stamp (FOLGE-X, go/Dockerfile ARG CTX_VERSION): the
+          # image's GET /health version and boot line name the commit it was
+          # built from instead of "dev"; the tag worktree build passes the
+          # release tag the same way.
+          build-args: |
+            CTX_VERSION=git-${{ github.sha }}
           # Supply-Chain (Sweep 2026-09-19): das publizierte Image trug zwar die
           # BuildKit-Provenance im Default-Modus, aber KEINE SBOM
           # (`imagetools inspect --format '{{json .SBOM}}'` → {}). sbom: true hängt
