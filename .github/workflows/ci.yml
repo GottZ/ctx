@@ -512,7 +512,11 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 13
+    # 20 (was 13) and -timeout=12m (was 8m) since RC-D S3 (2026-11-08): the
+    # oai package alone ran 343–801 s under -race on a loaded host (C7's
+    # measurement at load 54); the per-binary bound is a wall-clock cap, not
+    # a quality gate — a hang still fails, only later.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -543,7 +547,7 @@ jobs:
             -short \
             -race \
             -count=1 \
-            -timeout=8m \
+            -timeout=12m \
             ./...
 
       - name: Upload coverage
@@ -553,6 +557,78 @@ jobs:
           name: coverage-unit
           path: go/coverage.out
           retention-days: 7
+
+  # ─── Stage 2a: Conformance of the model API (W06-19, required) ───────────────
+  # The Go contract of the OpenAI-compatible API (design/06 §4.14 stage 1):
+  # every route of /v1 and /v2 has a contract in go/conformance/oai/
+  # contract.json, every answer form validates against its pinned, vendored
+  # schema, every code of the vocabulary reaches the official Go SDK as a
+  # valid ErrorResponse with its x-should-retry. Its own job (not a shard) so
+  # the required check names the contract; a pull request that sends an
+  # answer without the envelope, or mounts a route without a contract, fails
+  # here. The tests also run inside Unit Tests; this job is the named gate.
+  conformance:
+    name: Conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go/go.sum
+
+      - name: Go contract of the model API
+        working-directory: go
+        # The pattern runs every Test(Contract|Conformance)* and every test
+        # go/conformance/oai/contract.json pins a form with (TestContractCIJobs).
+        run: go test -count=1 -run '^Test(Contract|Conformance|EmbeddingsInputRefusals|RerankEnvelopePins|PlannerNilRefusesNoEligible|LimiterNilRefusesServiceUnavailable)' ./internal/oai/ ./cmd/ctxd/
+
+  # ─── Nightly: SDK smoke of the model API (W06-19 stage 2, not required) ─────
+  # The official OpenAI (and Cohere) Python SDK against the in-process
+  # harness (build tag pyconformance: the /v1 handlers over fake engines),
+  # and the self-test of the live tools test.sh T25 and the release checklist
+  # use (go/conformance/oai/live: smoke.py, measure.py against fake stacks).
+  # Schedule and dispatch only — a nightly job is never a required check.
+  gateway-sdk-smoke:
+    name: Gateway SDK Smoke (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go/go.sum
+
+      - name: Install uv (pinned)
+        run: |
+          pipx install uv==0.13.5
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: uv present (the harness SKIPs without it — here that is a failure)
+        run: uv --version
+
+      - name: Python SDK half of the conformance harness
+        working-directory: go
+        run: go test -tags=pyconformance -count=1 -v -run '^TestConformancePython' ./internal/oai/
+
+      - name: Self-test of the live tools (smoke.py, measure.py, test.sh T25)
+        working-directory: go
+        run: uv run --no-project --with openai==3.42.1 --with pytest==9.2.0 pytest -p no:cacheprovider -q conformance/oai/live/selftest_live.py
 
   # ─── Stage 2b: Cross-compile gate ────────────────────────────────────────────
   # Issue #40 (bug 4): the release matrix builds only cmd/ctx, whose import

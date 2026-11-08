@@ -68,6 +68,9 @@ type ChainSpec struct {
 	// Federation filters the chain by the request's hop state with the
 	// effective requirement (Federation.Filter).
 	Federation func(chain []backends.Backend, required backends.Sensitivity) ([]backends.Backend, error)
+	// trace, when set, records the rows each step removes (the chain dry
+	// run, W05-04); nil on every request path.
+	trace *chainTrace
 }
 
 // BuildChain is the chain build of one /v1 request (design/02 §4.4.3 steps
@@ -107,20 +110,25 @@ func BuildChain(s ChainSpec) ([]backends.Backend, error) {
 			chain[i].NumCtx = 0
 		}
 	}
+	s.trace.reasons(PreviewStageWire, excluded)
 	if len(chain) == 0 {
 		return nil, noEligible(&backends.ErrNoEligibleBackend{Excluded: excluded}, role, s.Required)
 	}
+	before := chain
 	chain, err = s.Federation(chain, s.Required)
+	s.trace.diff(PreviewStageFederation, before, chain, err)
 	if err != nil {
 		return nil, noEligible(err, role, s.Required)
 	}
 	if tenantAlias(s.Alias) && !slices.Contains(s.ExportableRoles, role) {
+		mark := len(excluded)
 		chain = keepRows(chain, &excluded, func(b *backends.Backend) string {
 			if b.Scope == "" || b.Scope == backends.GlobalScope {
 				return "gateway: operator row of a role the server admin did not export to tenant aliases"
 			}
 			return ""
 		})
+		s.trace.reasons(PreviewStageExport, excluded[mark:])
 	}
 	if len(chain) == 0 {
 		return nil, noEligible(&backends.ErrNoEligibleBackend{Excluded: excluded}, role, s.Required)

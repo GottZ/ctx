@@ -16,6 +16,7 @@
   import { StatusStore } from './status-store.svelte'
   import BackendsTile from './BackendsTile.svelte'
   import DispatchTile from './DispatchTile.svelte'
+  import GatewayTile from './GatewayTile.svelte'
   import DreamTile from './DreamTile.svelte'
   import LlmlogTable from './LlmlogTable.svelte'
 
@@ -83,6 +84,26 @@
   $effect(() => {
     if (session.admin) return
     void publicHealth.load()
+  })
+
+  // RC-D C6 W05-17: a tenant-admin with the Model API switched on sees the
+  // Model API tile under the read-only banner. It rides the pull path the
+  // server opened for tenant-admins (/api/status, T37b — the per-tenant view;
+  // the SSE push stays server-admin only), polled every 30 s and only while
+  // the tab is visible. The rest of the dashboard stays
+  // server-admin (unchanged).
+  // 30 s = the age of C2's gateway status generation (gatewayGenTTL) and of the
+  // tenant rollup (tenantRollupTTL): a faster poll would only re-read the same
+  // generation (review I2). A UX cadence tied to the server's, not policy.
+  const TENANT_GATEWAY_POLL_MS = 30_000
+  const tenantGateway = $derived(!session.admin && session.caps.tier === 'tenant-admin' && session.caps.viewModelApi)
+  $effect(() => {
+    if (!tenantGateway) return
+    void status.reload()
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') void status.reload()
+    }, TENANT_GATEWAY_POLL_MS)
+    return () => clearInterval(timer)
   })
 
   // --- Profile quick-toggles (§4.6) ------------------------------------------
@@ -215,6 +236,9 @@
     {:else}
       <p class="state" aria-busy="true">loading health…</p>
     {/if}
+    {#if tenantGateway && status.data}
+      <GatewayTile status={status.data} />
+    {/if}
   {:else if (status.status === 'loading' && status.data === null) || status.status === 'idle'}
     <!-- Nur der ERSTE Load zeigt den Loading-Zweig. Ein Hintergrund-Reload
          (Poll-Fallback alle 5 s bzw. nach jedem SSE-Reconnect-Versuch) behält
@@ -298,6 +322,7 @@
     <DreamTile dream={s.dream} onApplied={(r) => status.applyDream(r)} />
     <BackendsTile backends={s.backends} />
     <DispatchTile dispatch={s.dispatch} dispatchTenant={s.dispatch_tenant} />
+    <GatewayTile status={s} />
     <LlmlogTable complete={s.llm_24h_complete} live={llmcalls.rows} refetch={llmcalls.refetchToken} />
   {/if}
 </section>

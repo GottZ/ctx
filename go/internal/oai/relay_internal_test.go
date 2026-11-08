@@ -77,13 +77,23 @@ func TestRelayRingOrderAcrossWraps(t *testing.T) {
 	}
 }
 
-// TestRelayRingRefusesOnlyWhatDoesNotFit: with the writer parked, the ring
-// takes chunks until the next one does not fit — never earlier (the bytes
-// queued plus the refused record exceed the ring) — and a record of exactly
-// the ring's size fits it empty.
+// TestRelayRingRefusesOnlyWhatDoesNotFit: with the writer parked after its
+// first write (before it a full ring waits, TestRelayOverflowWaitsForTheFirstWrite),
+// the ring takes chunks until the next one does not fit — never earlier (the
+// bytes queued plus the refused record exceed the ring) — and a record of
+// exactly the ring's size fits it empty.
 func TestRelayRingRefusesOnlyWhatDoesNotFit(t *testing.T) {
 	gate := make(chan struct{})
-	write := func([]byte) error { <-gate; return nil }
+	first := make(chan struct{})
+	write := func([]byte) error {
+		select {
+		case <-first:
+			<-gate // parked from the second write on
+		default:
+			close(first) // the first write goes through
+		}
+		return nil
+	}
 	stop := make(chan struct{})
 	const size = 1000
 	rl := newStreamRelay(time.Time{}, make([]byte, size), write, stop, nil, drainMeter{}, nil)
@@ -285,17 +295,27 @@ func TestRelayRingWrappedBoundary(t *testing.T) {
 // oversize chunk while the first still waits is an overflow.
 func TestRelayOversizeChunkKeepsItsPlace(t *testing.T) {
 	gate := make(chan struct{})
+	first := make(chan struct{})
 	var got [][]byte
 	var mu sync.Mutex
 	write := func(p []byte) error {
-		<-gate
+		select {
+		case <-first:
+			<-gate // parked from the second write on
+		default:
+			close(first) // the first write arms the overflow (RC-D S3, TestRelayOverflowWaitsForTheFirstWrite)
+		}
 		mu.Lock()
 		got = append(got, bytes.Clone(p))
 		mu.Unlock()
 		return nil
 	}
 	rl := newStreamRelay(time.Time{}, make([]byte, 64), write, make(chan struct{}), nil, drainMeter{}, nil)
-	small1, big, small2 := relayChunk(1, 20), relayChunk(2, 200), relayChunk(3, 20)
+	small0, small1, big, small2 := relayChunk(0, 20), relayChunk(1, 20), relayChunk(2, 200), relayChunk(3, 20)
+	if err := rl.put(small0); err != nil {
+		t.Fatal(err)
+	}
+	<-first // written; the writer parks from here on
 	for _, x := range [][]byte{small1, big, small2} {
 		if err := rl.put(x); err != nil {
 			t.Fatalf("put %d B: %v", len(x), err)
@@ -306,7 +326,7 @@ func TestRelayOversizeChunkKeepsItsPlace(t *testing.T) {
 	}
 	close(gate)
 	rl.wait()
-	want := [][]byte{small1, big, small2}
+	want := [][]byte{small0, small1, big, small2}
 	if len(got) != len(want) {
 		t.Fatalf("writer got %d chunks, want %d", len(got), len(want))
 	}

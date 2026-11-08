@@ -666,5 +666,34 @@ test.describe('gateway mint (W05-06)', () => {
       await expect(confirm.getByRole('textbox')).toBeVisible()
       await scan('revoke confirm (armed)')
     })
+
+    // RC-D S3: the refusal surfaces were unscanned (the contract runner scans the
+    // default state only) — axe measured --danger on --danger-dim in light at
+    // 4.3:1 (create refusal) and 3.96:1 (page load error) before the fix.
+    test(`gateway mint a11y (${theme}): a create refusal carries no axe violation`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      await open(page, { theme, faults: [{ action: 'model-consumer-create', status: 403, error: 'admin key required' }] })
+      const scan = async (what: string) => {
+        await page.waitForTimeout(400)
+        const res = await new AxeBuilder({ page }).withTags([...AXE_TAGS]).analyze()
+        expect(res.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`), what).toEqual([])
+      }
+      const dialog = await openCreate(page)
+      await dialog.getByLabel('label', { exact: true }).fill('refused')
+      await dialog.getByRole('button', { name: 'Create consumer' }).click()
+      await expect(dialog.getByRole('alert')).toContainText('admin key required')
+      await scan('create refusal')
+    })
+
+    test(`gateway mint a11y (${theme}): the page load error carries no axe violation`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      await page.clock.setFixedTime(FIXED_NOW)
+      await seedSession(page, { role: 'tenant-admin', theme, capabilities: modelApiCapabilities(true, true), faults: [{ action: 'model-consumer-list', status: 500 }] })
+      await gotoArea(page, '/gateway')
+      await expect(page.locator('main.content .error p')).toBeVisible()
+      await page.waitForTimeout(400)
+      const res = await new AxeBuilder({ page }).withTags([...AXE_TAGS]).analyze()
+      expect(res.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`), 'page load error').toEqual([])
+    })
   }
 })

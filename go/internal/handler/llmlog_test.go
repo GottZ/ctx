@@ -95,6 +95,8 @@ func TestLLMLogGoldenKeys(t *testing.T) {
 		"duration_ms", "error", "prompt_tokens", "completion_tokens", "cost_usd",
 		// MW12/091 dispatch telemetry — pure Lease measurands, never body columns.
 		"queue_wait_ms", "dispatch_class", "dispatch_abort",
+		// W06-17 (RC-D): the model consumer of a /v1 row, null otherwise.
+		"consumer_id",
 	})
 
 	var entryMap map[string]json.RawMessage

@@ -95,6 +95,23 @@ Three deliberate exceptions, unchanged:
 
 Tenant semantics are documented in [multi-tenancy](multi-tenancy.md).
 
+## Model API: consumers & aliases
+
+Consumers are the external programs that call the OpenAI-compatible `/v1` API with a `ctxm_` key; a consumer belongs to one tenant. Model aliases are the model names a consumer may be granted. All commands wrap the existing `model-consumer-*`, `model-key-*` and `model-alias-list` manage actions.
+
+| Command | Description |
+|---------|-------------|
+| `ctx models consumers list [--status S,…] [--q TEXT] [--tenant ID] [--limit N] [--cursor C]` | List consumers with their keys' status (**tenant-admin key**). `--status` takes `active`, `expiring`, `rotating`, `no_key`, `inactive` or `all`; keyset-paginated: pass `next_cursor` back with `--cursor`. `--tenant` (another tenant than your key's own) needs a server-admin key. Keys are listed by hint only, never by plaintext |
+| `ctx models consumers create --label L` | Create an `app` consumer and mint its first key (**self-service**, when the server allows it). Policy flags: `--description`, `--tenant` (server-admin), `--tenant-scope` (a scope of the consumer's own tenant), `--model <alias-id>` (repeatable) or `--all-models`, `--sensitivity credentials\|personal\|internal\|public`, `--lane urgent\|bulk`, `--fair-weight 1..100`, `--cidr` (repeatable), `--allow-plaintext`, `--expires <RFC3339>`. Only the flags you set are sent; the server's tier rules decide which a tenant-admin may set |
+| `ctx models consumers rotate <consumer-id> [--grace D] [--expires T]` | Mint a successor key (**self-service**). `--grace` is a Go duration (`24h`, `0s`) sent as whole seconds (a fraction of a second is refused, never rounded): `0s` revokes the predecessor at once (the leak case); absent = the server's `gateway.key_rotation_grace` |
+| `ctx models consumers revoke <key-id>` | Revoke one key now and end its running requests (**tenant-admin key**). Prints `cancelled_inflight` — the requests ended in that ctx process, `unknown` when the server cannot count |
+| `ctx models consumers deactivate <consumer-id>` | Soft delete (**tenant-admin key**): the consumer stays listed as `inactive`, all its keys are revoked, its running requests end; prints `cancelled_inflight` like `revoke` |
+| `ctx models aliases list` | The model aliases your key can read, with `writable` (**tenant-admin key**) |
+
+**The key plaintext is shown exactly once.** `create` and `rotate` print the minted `ctxm_` key once on stdout — never on stderr, never in an error message — and it cannot be retrieved later (rotate mints a new one). The key is taken out of the answer before anything else is judged: even when the answer is otherwise broken (no `success` field, `success:false`, a missing or invalid consumer/key object) the minted key is printed once, then the command exits 1 with an error that names the defect and never quotes the answer.
+
+On a TTY the output is a table (lists; a further page is announced as `more: --cursor C`), a key-value block followed by the `api_key:` line and the save warning (`create`, `rotate`), or `cancelled_inflight: N` (`revoke`, `deactivate`); labels and other tenant-supplied text pass the same terminal-escape allowlist as issue titles. Piped, or with `--json`, it is JSON: `{consumers, next_cursor}`, `{model_aliases, count}`, `{consumer, api_key}`, `{key, api_key}`, `{cancelled_inflight}` (`null` = unknown). Both forms are a projection over the documented fields — a list never passes the raw server body through. A missing `--label` and invalid flag values (`--lane`, `--sensitivity`, `--fair-weight`, a negative or fractional `--grace`, a non-RFC3339 `--expires`, `--limit` ≤ 0, an unknown `--status`) fail before any request is sent. A `success:false` envelope (403, 404, 400, …) exits 1 with the server's reason.
+
 ## Projects
 
 A project binds one repo corpus to exactly one tenant scope (Model C): the scope is the isolation boundary, so a scope belongs to one tenant and each project's issues live only in its own scope.

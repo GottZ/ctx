@@ -57,7 +57,9 @@ func leanRerankEngine(t testing.TB) *httptest.Server {
 				quotes++
 			}
 		}
-		n := max((quotes-10)/2, 0)
+		// The frame's quotes: model, query, documents and (FOLGE-R)
+		// return_documents — twelve; two per document beside them.
+		n := max((quotes-12)/2, 0)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"usage":{"prompt_tokens":%d},"results":[`, 2*n)
 		for i := range n {
@@ -90,7 +92,7 @@ func rerankMemMount(r *chatRig, h http.Handler, held *heldSum) chi.Router {
 			})
 		})
 		g.Use(oai.Recover)
-		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Logger: slog.New(slog.DiscardHandler)}))
+		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Binder: acceptPeerBinder{}, Logger: slog.New(slog.DiscardHandler)}))
 		g.Use(handler.MaxBodySizeStrictWith(func() int64 { return r.settings.Load().MaxRequestBytes }, oai.RefuseRequestTooLarge))
 		g.Use(oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Use(func(next http.Handler) http.Handler {
@@ -144,10 +146,10 @@ func liveSampler(busy *atomic.Int64) (stop func() (peak uint64, seen int64)) {
 // (rrpub: the scan booked; one block) at 4 MiB — the live heap peak over the
 // baseline stays within the reservations the requests held (Σ, read at each
 // request's end) plus rerankGroundLoad per request. At the cap a request to
-// rrpub books more than the budget of 256 MiB (the scan's 23 × the body and
-// the wire's 29/4 × the body on top of the request share): it is 503
-// server_overloaded before its allocations — the named limit of the
-// budget floor (bau report W02-10, stop finding S-V39), pinned as such.
+// rrpub is served within the budget of 256 MiB (216 MiB held: the scan's
+// 23 × the body, the request share and the wire's body once and its echo
+// room once); until FOLGE-R the wire's 29/4 × the body on top made it 503
+// server_overloaded — the named limit of W02-10's stop finding S-V39.
 // Without -short only (eight-MiB bodies, a collection every 2 ms); never
 // under the race detector, which changes what allocates.
 func TestRerankHeapGate(t *testing.T) {
@@ -164,7 +166,7 @@ func TestRerankHeapGate(t *testing.T) {
 		Roles: []string{"rerank"}, Trust: backends.TrustFull, Locality: "local", Scope: backends.GlobalScope, Enabled: true,
 		Priority: 10, Timeouts: map[string]int{"rerank": 60},
 	}
-	t.Run("rrpub at the cap: the named limit", func(t *testing.T) {
+	t.Run("rrpub at the cap: served within the budget", func(t *testing.T) {
 		rig := newRerankRig(t, []backends.Backend{row}, 200, 1, withoutCensus)
 		rig.setSettings(func(s *oai.Settings) { s.InflightBudget = 256 << 20 })
 		var held heldSum
@@ -174,9 +176,9 @@ func TestRerankHeapGate(t *testing.T) {
 		w := httptest.NewRecorder()
 		rig.router.ServeHTTP(w, req)
 		sum, _ := held.sum()
-		t.Logf("W0210 heap rrpub at the cap: body %d B, %d %.120s, held at the refusal %d KiB", len(body), w.Code, w.Body.String(), sum>>10)
-		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), oai.CodeServerOverloaded) {
-			t.Fatalf("%d %s — want the named limit, 503 server_overloaded", w.Code, w.Body.String())
+		t.Logf("W0210 heap rrpub at the cap: body %d B, %d %.120s, held %d KiB", len(body), w.Code, w.Body.String(), sum>>10)
+		if w.Code != http.StatusOK || sum > 256<<20 {
+			t.Fatalf("%d %.200s, held %d KiB — want it served within the budget of 256 MiB (FOLGE-R: the wire books its body once, not 29/4 ×)", w.Code, w.Body.String(), sum>>10)
 		}
 	})
 	for _, alias := range []string{"rrwide", "rrpub"} {

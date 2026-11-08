@@ -181,6 +181,9 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// (Trigger after each committed write) and the same ceiling getter the
 	// registry clamps with.
 	manageH.SetModelAliases(scheduler.ModelAliasRegistry(), modelAliasCeilings(cfgStore))
+	// gateway-limits-* (W06-15): the registry the meter adapter reads and the
+	// listener keeps hot, and the settings floor per op.
+	manageH.SetGatewayLimits(scheduler.GatewayLimitsRegistry(), gatewayLimitDefaults(cfgStore))
 	// Forge PULL sync engine (Achse-02 I-F). Fail-closed gates: the tenant gate
 	// is store.TenantStatusForScope (found=false ⇒ skip + disable, S13); the
 	// issue-policy gate refuses a run unless the registry resolves an `issue`
@@ -259,6 +262,9 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// Audit read surface (W06-7, design/06 §4.10): context_settings_audit for
 	// the served entity types, tenant-filtered in SQL, foreign actors redacted.
 	auditH := handler.NewAuditHandler(pool, cfgStore)
+	// W06-16: GET /api/usage + /api/usage/consumers; the limits tiers are the
+	// rows of W06-15 over the limits registry (RC-D S3 adapter C1→C2).
+	usageH := handler.NewUsageHandler(pool, nil, limitsTiers{reg: scheduler.GatewayLimitsRegistry()})
 	// SSE live updates (F4-W7/G34): GET /api/events broadcasts from the SAME
 	// collector — one diff per tick fans out to all connections. ctx is the
 	// server lifecycle (cancelled on shutdown) so streams end before
@@ -414,6 +420,12 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 			// metadata.tenant_id is its own tenant, with server-admin and
 			// foreign actors masked; a server-admin reads everything.
 			r.Get("/api/audit", auditH.HandleAudit)
+			// Usage of the model API (W06-16, K18): a tenant-admin reads
+			// its own consumers only (membership per request, a foreign id
+			// answers like a consumer without traffic); the meter's live
+			// part is wired below, once the gateway exists.
+			r.Get("/api/usage", usageH.HandleUsage)
+			r.Get("/api/usage/consumers", usageH.HandleUsageConsumers)
 		})
 		// Web-chat (F6-C4/G37): POST /api/chat/stream runs one turn and streams
 		// SSE — wrapped in WithScheduler so the turn raises the interactive-demand
@@ -495,7 +507,17 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// (cancelled_inflight), the NOTIFY listener (migration 165) feeds it.
 	manageH.SetInflight(gateway.door.Inflight())
 	scheduler.SetModelAccessSink(gateway.door.Inflight())
-	deps := gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter)
+	deps := gatewayDeps(ctx, pool, cfgStore, scheduler.ModelAliasRegistry(), backendPool, quota, dispatcher, gateway.meter,
+		scheduler.GatewayLimitsRegistry())
+	// W06-18: the meter adapter notes soft_limit/hard_limit; W06-16: the
+	// consumers list reads the meter's view, the status the gateway feed.
+	deps = withUsageEvents(deps, gateway.events)
+	usageH.SetMeter(usageMeterView{meter: gateway.meter, settings: gateway.settings, limits: scheduler.GatewayLimitsRegistry()})
+	statusCollector.SetGatewayFeed(gateway.statusFeed(pool))
+	// W05-04: model-alias-preview runs the dry run over the SAME
+	// dependencies the /v1 routes are built from, and suggests from the
+	// same pool.
+	manageH.SetChainPreview(deps.PreviewChain, backendPool.PrimaryModel)
 	v1, v2 := v1Routes(deps), v2Routes(deps)
 	if wrapRoutes != nil {
 		v1, v2 = wrapRoutes(v1), wrapRoutes(v2)

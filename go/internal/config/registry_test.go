@@ -206,6 +206,8 @@ func TestRegistryStrictSet(t *testing.T) {
 		// strict all the same: it is a cut-off, not a cadence.
 		"gateway.stream_relay_buffer_bytes": true,
 		"gateway.stream_min_drain_rate":     true,
+		"gateway.scan_max_request_bytes":    true,
+		"gateway.soft_ratio":                true,
 		"gateway.stream_min_drain_window":   true,
 		// W01-8 (design/01 §4.2): the in-flight sweep period is the clock of
 		// the revocation backstop — the longest a revoked key whose
@@ -384,6 +386,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
 		"tenant.allow_cross_tenant_block_grant": true, // MT T43 (07-W6): operator-set per-tenant cross-tenant block-grant opt-in (global-only)
 		"federation.max_depth":                  true, // F-W8: federation topology is settings-only (design/04 §3.1), like every federation.* key
+		"federation.require_peer_hop":           true, // F-W12: the pathless-peer switch, settings-only like every federation.* key (design/04 §3.1)
 		"tenant.devmode":                        true, // C6-C: developer-transparency umbrella; settings-only ON PURPOSE — an env would let the privacy default fall without an audit row
 	}
 	seen := map[string]string{}

@@ -46,7 +46,7 @@ type seen struct {
 func ingressServe(t *testing.T, logs *bytes.Buffer, ca *auth.ConsumerAuth, hdr map[string]string) (*httptest.ResponseRecorder, seen) {
 	t.Helper()
 	var s seen
-	mw := PeerIngress(PeerIngressConfig{Consumer: consumerFrom, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+	mw := PeerIngress(PeerIngressConfig{Consumer: consumerFrom, Binder: acceptBinder{}, Logger: slog.New(slog.NewTextHandler(logs, nil))})
 	h := mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		s = seen{ran: true, in: fedhop.InboundFrom(r.Context()), pol: PolicyFrom(r.Context())}
 	}))
@@ -207,7 +207,7 @@ func TestPeerIngressUnreadableHeaderWithoutGuard(t *testing.T) {
 // the PeerIngress shortens no request context — whatever Ctx-Max-Wait-Ms
 // says, the handler's context has no deadline of its making.
 func TestPeerIngressNoDeadline(t *testing.T) {
-	mw := PeerIngress(PeerIngressConfig{Consumer: consumerFrom})
+	mw := PeerIngress(PeerIngressConfig{Consumer: consumerFrom, Binder: acceptBinder{}})
 	var deadline bool
 	h := mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { _, deadline = r.Context().Deadline() }))
 	hop, path := foreign(t)
@@ -233,10 +233,23 @@ func TestPeerIngressRefusesNilConsumerFunc(t *testing.T) {
 	PeerIngress(PeerIngressConfig{})
 }
 
-// TestWarnOnceIsBounded: the set behind "one WARN per consumer" is bounded —
-// the oldest consumer falls out and would warn again, memory stays flat.
+// TestPeerIngressRefusesNilBinder (F-W12): without a peer binder the stage
+// could not decide step 7 — a wiring bug, panics at construction.
+func TestPeerIngressRefusesNilBinder(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("PeerIngress without Binder did not panic")
+		}
+	}()
+	PeerIngress(PeerIngressConfig{Consumer: consumerFrom})
+}
+
+// TestWarnOnceIsBounded: the set behind "at most one WARN per consumer and
+// minute" is bounded — the oldest consumer falls out and would warn again,
+// memory stays flat (a frozen clock: no window passes).
 func TestWarnOnceIsBounded(t *testing.T) {
-	w := newWarnOnce(3)
+	at := time.Unix(1_800_000_000, 0)
+	w := newWarnOnce(3, time.Minute, func() time.Time { return at })
 	for _, id := range []string{"a", "b", "c"} {
 		if !w.first(id) {
 			t.Fatalf("%s: first sighting not reported", id)
@@ -253,5 +266,28 @@ func TestWarnOnceIsBounded(t *testing.T) {
 	}
 	if !w.first("c") {
 		t.Error("the least recently seen consumer (c) was not evicted")
+	}
+}
+
+// TestWarnOnceRewarnsAfterWindow (F-W12): a consumer that stays pathless is
+// warned again once the window passed — at most one line per consumer and
+// minute, not one per process lifetime — and never twice inside it.
+func TestWarnOnceRewarnsAfterWindow(t *testing.T) {
+	at := time.Unix(1_800_000_000, 0)
+	w := newWarnOnce(8, time.Minute, func() time.Time { return at })
+	if !w.first("p") {
+		t.Fatal("first sighting not reported")
+	}
+	at = at.Add(59 * time.Second)
+	if w.first("p") {
+		t.Fatal("warned again 59 s after the last WARN, want at most one per minute")
+	}
+	at = at.Add(time.Second)
+	if !w.first("p") {
+		t.Fatal("not warned again a minute after the last WARN")
+	}
+	at = at.Add(30 * time.Second)
+	if w.first("p") {
+		t.Fatal("warned again 30 s after the second WARN")
 	}
 }

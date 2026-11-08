@@ -21,11 +21,18 @@ func (d Deps) gateChain(ctx context.Context, ca *auth.ConsumerAuth, op string, c
 	if err != nil {
 		return nil, err
 	}
+	return backends.WithoutBillable(gated, d.egressPolicy(ctx, ca, op)), nil
+}
+
+// egressPolicy is the consumer's egress policy for op — the zero policy
+// (free rows only, E-06-14) without a source. The chain dry run (W05-04)
+// reads it through here too, between the two halves of gateChain.
+func (d Deps) egressPolicy(ctx context.Context, ca *auth.ConsumerAuth, op string) backends.EgressPolicy {
 	var p backends.EgressPolicy
 	if d.Egress != nil {
 		p = d.Egress.Egress(ctx, ca, op)
 	}
-	return backends.WithoutBillable(gated, p), nil
+	return p
 }
 
 // tenantQuotaRetryAfter is the Retry-After of a tenant quota refusal

@@ -47,6 +47,11 @@ const (
 	DetailWarming         = "warming"            // capacity: the meter is not seeded yet (429)
 	DetailServerBusy      = "server_busy"        // capacity: L2 refused (cap ladder, queue full)
 	DetailWaitExpired     = "wait_expired"       // capacity: L2's wait budget ran out
+	// The peer refusals of the PeerIngress (wave F-W12, design/04 §4.6
+	// steps 6/7): a peer key used by another instance, a pathless peer
+	// under federation.require_peer_hop.
+	DetailPeerMismatch = "peer_mismatch" // federation: the key is bound to another instance (403)
+	DetailHopRequired  = "hop_required"  // federation: a peer request without Ctx-Path (400)
 	// The budget refusals of the meter (W06-13): the detail is the meter's
 	// Reason — the consumer's own dimension or the envelope that bound.
 	DetailDailyTokens      = string(ReasonDailyTokens)      // quota: the consumer's tokens per UTC day (429)
@@ -85,6 +90,7 @@ var (
 		DetailRateTokens: true, DetailWarming: true, DetailServerBusy: true, DetailWaitExpired: true,
 		DetailDailyTokens: true, DetailMonthlyTokens: true, DetailDailyRequests: true,
 		DetailTenantEnvelope: true, DetailInstanceEnvelope: true,
+		DetailPeerMismatch: true, DetailHopRequired: true,
 	}
 )
 

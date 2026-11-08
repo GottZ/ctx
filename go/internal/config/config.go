@@ -2527,12 +2527,24 @@ type GatewayConfig struct {
 	// the handler runs. 8 MiB ≈ a 262k-token prompt without JSON escaping.
 	MaxRequestBytes int `key:"gateway.max_request_bytes" env:"CTX_GATEWAY_MAX_REQUEST_BYTES" default:"8388608" mut:"hot" parse:"strict" tenancy:"global-only"`
 	// InflightBudget is the process-wide sum of all running gateway
-	// reservations — request share (3 × body) plus response share (§4.2.1);
-	// past it a request is refused at once with 503 server_overloaded
-	// (B9: the container limit is 1 GiB, an OOM kill takes every pipeline).
-	// Must hold at least one request at the cap (V39: >= 3 ×
-	// max_request_bytes), or such a request could never be admitted.
-	InflightBudget int `key:"gateway.inflight_budget" env:"CTX_GATEWAY_INFLIGHT_BUDGET" default:"268435456" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// reservations — request share (3 × body) plus what each route books
+	// past it (§4.2.1, the routes' ledgers); past it a request is refused
+	// at once with 503 server_overloaded (B9: an OOM kill takes every
+	// pipeline — the container limit and GOMEMLIMIT sit above it). Must
+	// hold one request at every cap of every route and class (V39), or
+	// such a request could never be admitted. 512 MiB (RC-D C8, bau report
+	// RCD-c8-hardening-S1 §Budget): 256 MiB held 31 non-streamed or 63
+	// streamed small requests at once, 512 MiB holds 63 / 127.
+	InflightBudget int `key:"gateway.inflight_budget" env:"CTX_GATEWAY_INFLIGHT_BUDGET" default:"536870912" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ScanMaxRequestBytes is the largest body the sensitivity scan reads
+	// (RC-D C8): a request to an alias below credentials whose body is
+	// longer gets 413 request_too_large before the scan — no scan booking
+	// (23 × the body + 128 KiB + its nesting state), no scan, no meter
+	// admission, no wire call. An alias at credentials is not scanned and
+	// takes bodies up to max_request_bytes. Above max_request_bytes it has
+	// no effect (the body cap refuses first): the effective scan cap is the
+	// smaller of the two (oai.EffectiveScanCap), V58 only refuses 0.
+	ScanMaxRequestBytes int `key:"gateway.scan_max_request_bytes" env:"CTX_GATEWAY_SCAN_MAX_REQUEST_BYTES" default:"2097152" mut:"hot" parse:"strict" tenancy:"global-only"`
 	// MaxResponseBytes caps the read of one non-streamed upstream body; the
 	// response reserve of a non-stream call is twice this. At most
 	// httpx.MaxResponseBytes (V39), the transport-wide cap it narrows.
@@ -2741,6 +2753,14 @@ type GatewayConfig struct {
 	// only matters with the permission above. V51: > 0, finite — no 0
 	// sentinel (B-06-20).
 	ConsumerMonthlyCostUSDDefault float64 `key:"gateway.consumer_monthly_cost_usd_default" env:"CTX_GATEWAY_CONSUMER_MONTHLY_COST_USD_DEFAULT" default:"1.0" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// SoftRatio is the warning share of the day and month budgets (wave
+	// W06-18, design/06 §4.11): an admitted /v1 request that brings a bounded
+	// budget dimension of its consumer, tenant envelope or instance envelope
+	// to at least this share of its limit carries the response header
+	// x-ctx-quota-warning, and the first such request of a consumer, op,
+	// dimension and window writes one soft_limit event (consumer_usage in
+	// the audit trail). 0 = off. Range [0, 1) (V54).
+	SoftRatio float64 `key:"gateway.soft_ratio" env:"CTX_GATEWAY_SOFT_RATIO" default:"0.8" mut:"hot" parse:"strict" tenancy:"global-only"`
 
 	// Consumers is the administration of model consumers and their keys
 	// (/api/manage model-consumer-* and model-key-*, wave W01-5).
@@ -2763,6 +2783,15 @@ type FederationConfig struct {
 	// value could never be reached because ParseInbound refuses a longer
 	// chain with 400 first.
 	MaxDepth int `key:"federation.max_depth" env:"-" default:"3" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// RequirePeerHop decides a ctx-peer request without Ctx-Path at the
+	// PeerIngress (design/04 §3.1, §4.6 step 6; wave F-W12): true ⇒ 400
+	// federation_hop_required with Ctx-Reason: hop_required; false
+	// (default) ⇒ served without hints, counted
+	// (federation_peer_without_path) and warned once per consumer — the
+	// version mix of design/04 §7.1. Runbook: switch on only after the
+	// counter stayed 0 over the observation window (§7.2 no. 5). No
+	// validation rule (a bool has no invalid value; V56 stays reserved).
+	RequirePeerHop bool `key:"federation.require_peer_hop" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
 }
 
 // GatewayConsumersConfig is the policy of the consumer and model-key
@@ -2983,6 +3012,7 @@ func (c *Config) GatewaySettings() oai.Settings {
 		Enabled:                  g.Enabled,
 		MaxRequestBytes:          int64(g.MaxRequestBytes),
 		InflightBudget:           int64(g.InflightBudget),
+		ScanMaxRequestBytes:      int64(g.ScanMaxRequestBytes),
 		MaxResponseBytes:         int64(g.MaxResponseBytes),
 		MaxStreamFrameBytes:      int64(g.MaxStreamFrameBytes),
 		EmbeddingMaxFloats:       int64(g.EmbeddingMaxFloats),
@@ -3013,6 +3043,8 @@ func (c *Config) GatewaySettings() oai.Settings {
 			InstanceEnvelopeFactor: g.InstanceEnvelopeFactor,
 			AllowExternal:          g.ConsumerAllowExternalDefault,
 			MonthlyCostUSD:         g.ConsumerMonthlyCostUSDDefault,
+			ConcurrencyCap:         int64(c.Dispatch.ExternalQueuePerConsumer),
+			SoftRatio:              g.SoftRatio,
 		},
 		Auth: oai.AuthSettings{
 			FailureLimit:          g.AuthFailureLimit,

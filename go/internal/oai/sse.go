@@ -230,10 +230,12 @@ func (s *streamWriter) tickLocked() (err error) {
 	return err
 }
 
-// frame writes one data frame (committing first in phase B). A failed write
-// ends the run (D4) and comes back as errClientGone for the relay.
-func (s *streamWriter) frame(chunk []byte) error {
-	gone, err := s.frameLocked(chunk)
+// frameLine writes one data frame (committing first in phase B): line is
+// the frame's whole SSE line — "data: ", the chunk, the blank line — as the
+// rewrite wrote it (rewriteChunkInto, FOLGE-S), written as it is. A failed
+// write ends the run (D4) and comes back as errClientGone for the relay.
+func (s *streamWriter) frameLine(line []byte) error {
+	gone, err := s.frameLocked(line)
 	if err != nil {
 		s.broken(err)
 		return errClientGone
@@ -244,13 +246,13 @@ func (s *streamWriter) frame(chunk []byte) error {
 	return nil
 }
 
-// frameLocked is frame's section under mu, released by defer: a panic of a
+// frameLocked is frameLine's section under mu, released by defer: a panic of a
 // writer of the chain (Write, Flush, WriteHeader) or of the header source
 // runs on — on the relay's writer goroutine since A03-W10, which raises it
 // again on the handler's (relay.go) — to the route's close() — which takes
 // mu — and to oai.Recover (F4-2). gone: an earlier write had failed, or the
 // route owns the outcome (frozen: no frame after freeze, Fremd-Review 1 F2).
-func (s *streamWriter) frameLocked(chunk []byte) (gone bool, err error) {
+func (s *streamWriter) frameLocked(line []byte) (gone bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil || s.frozen {
@@ -262,8 +264,6 @@ func (s *streamWriter) frameLocked(chunk []byte) (gone bool, err error) {
 			return false, err
 		}
 	}
-	line := make([]byte, 0, len(chunk)+8)
-	line = append(append(append(line, "data: "...), chunk...), "\n\n"...)
 	if err = s.writeLocked(line); err != nil {
 		return false, err
 	}

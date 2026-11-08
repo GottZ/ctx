@@ -28,13 +28,10 @@ package rerank
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"math"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -53,45 +50,6 @@ var httpClients = httpx.NewClients()
 // fail-open safety net (a genuinely stuck/oversized request degrades to the
 // pre-rerank order) — set well above the worst-case full-window time.
 const Timeout = 180 * time.Second
-
-// rerankRequest is the cohere/llama.cpp request body. Sending "documents"
-// (not "texts") + "query" selects the Jina/cohere response path, whose score
-// field is "relevance_score". top_n is omitted so the server returns one
-// result per document (still score-sorted — see Score's re-alignment).
-type rerankRequest struct {
-	Model     string   `json:"model"`
-	Query     string   `json:"query"`
-	Documents []string `json:"documents"`
-}
-
-type rerankResult struct {
-	Index int `json:"index"`
-	// RelevanceScore is a pointer so an absent field is distinguishable
-	// from a legitimate 0.0: sibling rerank dialects name this field
-	// "score" (mixedbread, some gateways), and silently scoring every
-	// document 0 would neutralize the reranker while telemetry reports a
-	// successful call. Absent ⇒ error ⇒ caller fails open.
-	RelevanceScore *float64 `json:"relevance_score"`
-}
-
-type rerankResponse struct {
-	Results []rerankResult `json:"results"`
-	// Voyage AI returns results under "data" instead of "results"
-	// (OpenAPI RerankingObject schema). Kept raw and decoded lazily:
-	// "data" is also the generic OpenAI-style list container, so a
-	// backend serving valid "results" alongside a non-array "data"
-	// field must not fail the whole decode over a field we ignore.
-	Data json.RawMessage `json:"data"`
-	// Usage is llama.cpp's Jina-style token accounting on the rerank
-	// response. prompt_tokens covers ALL query+document pairs of the request
-	// — the MW22/C1 charge dimension of the sidecar call. Absent field ⇒ 0 ⇒
-	// the call site charges nothing (uncharged, never an estimate).
-	// Voyage reports total_tokens instead of prompt_tokens.
-	Usage struct {
-		PromptTokens int `json:"prompt_tokens"`
-		TotalTokens  int `json:"total_tokens"`
-	} `json:"usage"`
-}
 
 // Score domains — the caller passes the backend's configured domain
 // (backends.Backend.ScoreDomain()); the strings are duplicated here so
@@ -125,9 +83,9 @@ func Score(ctx context.Context, b backends.Backend, model, query string, docs []
 		return nil, 0, nil
 	}
 
-	body, err := json.Marshal(rerankRequest{Model: model, Query: query, Documents: docs})
+	body, err := wireBody(model, query, docs)
 	if err != nil {
-		return nil, 0, fmt.Errorf("rerank: marshal: %w", err)
+		return nil, 0, fmt.Errorf("rerank: body: %w", err)
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, Timeout)
@@ -159,117 +117,17 @@ func Score(ctx context.Context, b backends.Backend, model, query string, docs []
 		return nil, 0, fmt.Errorf("rerank: %w", httpx.NewStatusError(resp, errBody))
 	}
 
-	// Buffer the body (rerank responses are a few KB — MAX_DOCS entries of
-	// ~100 bytes; 1 MiB is a generous ceiling) so an unrecognized dialect
-	// can echo a snippet of what the server actually sent. The original
-	// Voyage incident hid behind a generic "count mismatch" for six
-	// production calls because the response was decoded blind.
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Buffer the answer (so an unrecognized dialect can echo a snippet of
+	// what the server actually sent — the original Voyage incident hid
+	// behind a generic "count mismatch" for six production calls because
+	// the response was decoded blind), at most answerReadCap bytes: the
+	// body's length (room for a document echo), a share per document and a
+	// frame — what the gateway's route books for the read (FOLGE-R).
+	raw, err := readAnswer(resp.Body, resp.ContentLength, len(docs), len(body))
 	if err != nil {
 		return nil, 0, fmt.Errorf("rerank: read body: %w", err)
 	}
-	var result rerankResponse
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, 0, fmt.Errorf("rerank: decode: %w", err)
-	}
-
-	entries, isProbability, err := resolveEntries(&result, raw, scoreDomain)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Re-align strictly by result.Index into input order. The server sorts
-	// results by score descending (and may resize to top_n), so array position
-	// is meaningless — only Index maps a score back to its document. Validate
-	// the indices cover [0,len) exactly once: any gap, dup, or out-of-range
-	// entry means we cannot trust the mapping, so error → caller fails open.
-	scores := make([]float64, len(docs))
-	seen := make([]bool, len(docs))
-	got := 0
-	for _, r := range entries {
-		if r.Index < 0 || r.Index >= len(docs) {
-			return nil, 0, fmt.Errorf("rerank: result index %d out of range [0,%d)", r.Index, len(docs))
-		}
-		if seen[r.Index] {
-			return nil, 0, fmt.Errorf("rerank: duplicate result index %d", r.Index)
-		}
-		seen[r.Index] = true
-		if r.RelevanceScore == nil {
-			return nil, 0, fmt.Errorf("rerank: result index %d missing relevance_score (unknown score field name?)", r.Index)
-		}
-		score := *r.RelevanceScore
-		if isProbability {
-			// A calibrated [0,1] relevance would be sigmoided a second
-			// time by the caller (rrf treats every score as a logit),
-			// compressing the signal into [0.5,0.73] and letting RRF
-			// outvote the reranker at blend_weight < 1. Map the
-			// probability to its logit here so the downstream sigmoid
-			// reconstructs it exactly. A score outside [0,1] breaks the
-			// probability-domain contract — error → caller fails open.
-			if score < 0 || score > 1 {
-				return nil, 0, fmt.Errorf("rerank: score %g at index %d outside [0,1] (probability score domain)", score, r.Index)
-			}
-			score = probabilityToLogit(score)
-		}
-		scores[r.Index] = score
-		got++
-	}
-	if got != len(docs) {
-		return nil, 0, fmt.Errorf("rerank: result count mismatch: got %d scores for %d documents", got, len(docs))
-	}
-
-	// Voyage reports total_tokens; llama.cpp reports prompt_tokens.
-	promptTokens := result.Usage.PromptTokens
-	if promptTokens <= 0 && result.Usage.TotalTokens > 0 {
-		promptTokens = result.Usage.TotalTokens
-		// This flips the MW22 meter semantics for total_tokens-only
-		// backends from "uncharged" to a real measured charge — make
-		// the switch findable in the log, once per process (rerank
-		// runs per query; per-call INFO would be noise).
-		totalTokensFallbackOnce.Do(func() {
-			slog.Info("rerank: backend reports usage.total_tokens only; charging it as prompt tokens (previously uncharged)")
-		})
-	}
-
-	return scores, promptTokens, nil
-}
-
-var totalTokensFallbackOnce sync.Once
-
-// resolveEntries picks the wire container and the score interpretation.
-//
-// Voyage AI returns results under "data" (OpenAPI RerankingObject), while
-// cohere/llama.cpp uses "results". Prefer "results"; fall back to "data"
-// when "results" is absent. The container name is coupled to the score
-// domain: "data" backends (Voyage) report calibrated [0,1] relevance,
-// "results" backends (cohere/llama.cpp) report raw logits. DomainAuto
-// keeps that coupling; the explicit domains override it for
-// dialect-mixing backends.
-func resolveEntries(result *rerankResponse, raw []byte, scoreDomain string) ([]rerankResult, bool, error) {
-	entries := result.Results
-	fromData := false
-	if len(entries) == 0 && len(result.Data) > 0 {
-		if err := json.Unmarshal(result.Data, &entries); err != nil {
-			return nil, false, fmt.Errorf("rerank: decode data: %w; body: %.256s", err, raw)
-		}
-		fromData = true
-	}
-	if len(entries) == 0 {
-		// Neither container decoded any entries: an unknown backend
-		// dialect, a gateway error object behind HTTP 200, or a renamed
-		// results field. Name the schema break and echo a body snippet —
-		// "count mismatch" would misdiagnose this as a counting problem
-		// (the exact failure mode that masked the Voyage incident).
-		return nil, false, fmt.Errorf("rerank: response contains neither \"results\" nor \"data\" entries (unknown backend dialect?); body: %.256s", raw)
-	}
-	isProbability := fromData
-	switch scoreDomain {
-	case DomainLogit:
-		isProbability = false
-	case DomainProbability:
-		isProbability = true
-	}
-	return entries, isProbability, nil
+	return decodeAnswer(raw, len(docs), scoreDomain)
 }
 
 // probabilityToLogit maps a calibrated probability to its logit,

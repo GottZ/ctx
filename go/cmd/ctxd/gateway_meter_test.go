@@ -70,10 +70,10 @@ func TestGatewayDepsWiresTheMeter(t *testing.T) {
 		t.Fatalf("model gateway meter %v (seeded %v, seed read %v), want one closed meter with its seed read after a failed seed",
 			gw.meter, gw.meter != nil && gw.meter.Seeded(), gw.seedRead != nil)
 	}
-	if d := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter); d.Limiter == nil {
+	if d := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter, nil); d.Limiter == nil {
 		t.Error("gatewayDeps with the process meter: Limiter nil, want the meter")
 	}
-	if d := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, nil); d.Limiter != nil {
+	if d := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, nil, nil); d.Limiter != nil {
 		t.Errorf("gatewayDeps without a meter: Limiter %T, want nil (no typed nil behind the interface)", d.Limiter)
 	}
 }
@@ -90,7 +90,7 @@ func urgentConsumer(id string) *auth.ConsumerAuth {
 func TestMeterLimiterMapsTheContract(t *testing.T) {
 	cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_RPM_DEFAULT": "4", "CTX_GATEWAY_CHAT_TPM_DEFAULT": "60000"})
 	gw := meterTestGateway(t, cfgStore)
-	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
 	ctx := context.Background()
 	est := func(tier string) oai.Estimate {
 		return oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 100, ClientMaxTokens: true, PromptRunes: 9, ServiceTier: tier}
@@ -149,7 +149,7 @@ func TestMeterLimiterMapsTheContract(t *testing.T) {
 func TestMeterLimiterFailsClosed(t *testing.T) {
 	cfgStore := meterTestStore(t, map[string]string{})
 	gw := meterTestGateway(t, cfgStore)
-	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
 	ctx := context.Background()
 	for name, tc := range map[string]struct {
 		ca *auth.ConsumerAuth
@@ -180,7 +180,7 @@ func TestMeterLimiterFailsClosed(t *testing.T) {
 func TestMeterLimiterChargesTheClientMaximum(t *testing.T) {
 	cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_TPM_DEFAULT": "60000"})
 	gw := meterTestGateway(t, cfgStore)
-	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
 	res, ref := l.Admit(context.Background(), urgentConsumer("max"), modelalias.Alias{},
 		oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 5000, ClientMaxTokens: true, PromptRunes: 9})
 	if ref != nil {

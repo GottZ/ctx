@@ -75,12 +75,12 @@ func TestModelGroupDoor_Integration(t *testing.T) {
 	ingress := &fedhop.Ingress{}
 	depth := func() int { return 3 }
 	mount := func(r chi.Router, probe http.Handler) {
-		mountModelGroup(r, "/v1", modelGroupDeps{access: access, gate: gate, door: door, ingress: ingress, maxDepth: depth, routes: []modelRoute{
+		mountModelGroup(r, "/v1", modelGroupDeps{access: access, gate: gate, door: door, ingress: ingress, maxDepth: depth, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop, routes: []modelRoute{
 			{http.MethodGet, "/models", probe},
 			{http.MethodGet, "/models/{model}", probe},
 			{http.MethodPost, "/chat/completions", probe},
 		}})
-		mountModelGroup(r, "/v2", modelGroupDeps{access: access, gate: gate, door: door, ingress: ingress, maxDepth: depth, routes: []modelRoute{
+		mountModelGroup(r, "/v2", modelGroupDeps{access: access, gate: gate, door: door, ingress: ingress, maxDepth: depth, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop, routes: []modelRoute{
 			{http.MethodPost, "/rerank", probe},
 		}})
 	}
@@ -93,17 +93,20 @@ func TestModelGroupDoor_Integration(t *testing.T) {
 // ingress registration or depth getter is a wiring bug and panics at mount
 // time instead of serving an open (or unlogged) group (F-W8: the LoopGuard is
 // fixed in the group, so its two inputs are as mandatory as the door; W06-9:
-// so is the access log).
+// so is the access log; F-W12: so are the PeerIngress's peer binder and the
+// federation.require_peer_hop getter).
 func TestModelGroupRefusesMissingDeps(t *testing.T) {
 	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: func() oai.Settings { return oai.Settings{} }})
 	pass := func(h http.Handler) http.Handler { return h }
 	depth := func() int { return 3 }
 	for name, deps := range map[string]modelGroupDeps{
-		"no gate":       {access: access, door: &handler.ModelDoor{}, ingress: &fedhop.Ingress{}, maxDepth: depth},
-		"no door":       {access: access, gate: pass, ingress: &fedhop.Ingress{}, maxDepth: depth},
-		"no access log": {gate: pass, door: &handler.ModelDoor{}, ingress: &fedhop.Ingress{}, maxDepth: depth},
-		"no ingress":    {access: access, gate: pass, door: &handler.ModelDoor{}, maxDepth: depth},
-		"no max depth":  {access: access, gate: pass, door: &handler.ModelDoor{}, ingress: &fedhop.Ingress{}},
+		"no gate":             {access: access, door: &handler.ModelDoor{}, ingress: &fedhop.Ingress{}, maxDepth: depth, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop},
+		"no door":             {access: access, gate: pass, ingress: &fedhop.Ingress{}, maxDepth: depth, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop},
+		"no access log":       {gate: pass, door: &handler.ModelDoor{}, ingress: &fedhop.Ingress{}, maxDepth: depth, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop},
+		"no ingress":          {access: access, gate: pass, door: &handler.ModelDoor{}, maxDepth: depth, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop},
+		"no max depth":        {access: access, gate: pass, door: &handler.ModelDoor{}, ingress: &fedhop.Ingress{}, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop},
+		"no peer binder":      {access: access, gate: pass, door: &handler.ModelDoor{}, ingress: &fedhop.Ingress{}, maxDepth: depth, requirePeerHop: noPeerHop},
+		"no require_peer_hop": {access: access, gate: pass, door: &handler.ModelDoor{}, ingress: &fedhop.Ingress{}, maxDepth: depth, binder: acceptPeerBinder{}},
 	} {
 		func() {
 			defer func() {
@@ -162,7 +165,7 @@ func TestModelGroupLoopGuardOrder(t *testing.T) {
 	probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	for prefix, pattern := range map[string]string{"/v1": "/chat/completions", "/v2": "/rerank"} {
 		mountModelGroup(r, prefix, modelGroupDeps{
-			access: testAccessLog(), gate: oai.EnabledGate(get), door: door, ingress: ingress, maxDepth: func() int { return 3 },
+			access: testAccessLog(), gate: oai.EnabledGate(get), door: door, ingress: ingress, maxDepth: func() int { return 3 }, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop,
 			inner:  []func(http.Handler) http.Handler{handler.MaxBodySizeStrictWith(func() int64 { return bodyCap }, oai.RefuseRequestTooLarge)},
 			routes: []modelRoute{{http.MethodPost, pattern, probe}},
 		})

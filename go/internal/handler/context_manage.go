@@ -15,6 +15,8 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/gatewaylimits"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
@@ -80,12 +82,23 @@ type ManageHandler struct {
 	// (server.go); a nil getter ⇒ the writing actions answer 503.
 	modelAliases  *modelalias.Registry
 	aliasCeilings func() modelalias.Ceilings
+	// gatewayLimits / gatewayLimitDefaults feed the gateway-limits-*
+	// actions (W06-15): the registry reloads after every committed write,
+	// the getter yields the settings floor per op. Wired via
+	// SetGatewayLimits (server.go); nil ⇒ the actions answer 503.
+	gatewayLimits        *gatewaylimits.Registry
+	gatewayLimitDefaults func(op keyquota.Op) gatewaylimits.Defaults
 	// inflight is the model-key door's in-flight registry (W01-8):
 	// model-key-revoke and model-consumer-delete end the running requests
 	// of what they revoked through it, right after the commit, and answer
 	// how many (cancelled_inflight). Wired via SetInflight (server.go); nil
 	// ⇒ cancelled_inflight is null (unknown, never a 0 — V-01-e).
 	inflight *InflightRegistry
+	// chainPreview / rolePrimary feed model-alias-preview (W05-04): the
+	// /v1 chain dry run and the pool's primary model of a role. Wired via
+	// SetChainPreview (cmd/ctxd); nil ⇒ the action answers 503.
+	chainPreview ChainPreviewer
+	rolePrimary  RolePrimaryModel
 }
 
 // SetInflight wires the model-key door's in-flight registry (W01-8).

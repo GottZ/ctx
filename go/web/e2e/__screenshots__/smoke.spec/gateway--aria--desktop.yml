@@ -75,25 +75,32 @@
             - columnheader "created"
             - columnheader "actions"
         - rowgroup:
-          - row /ci-chat CI pipeline chat completions app active ctxm_…a9Fq active expires \d+\/\d+\/\d+ Revoke key ctxm_…a9Fq \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Deactivate ci-chat/:
-            - cell "ci-chat CI pipeline chat completions"
+          - row /ci-chat CI pipeline chat completions app active ctxm_…a9Fq active expires \d+\/\d+\/\d+ Revoke key ctxm_…a9Fq Rotate key of ci-chat \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Edit policy of ci-chat Deactivate ci-chat/:
+            - cell "ci-chat CI pipeline chat completions":
+              - link "ci-chat":
+                - /url: /gateway/consumers/0190000000007000800000000000c0a1
+              - text: ""
             - cell "app"
             - cell "active"
-            - cell /ctxm_…a9Fq active expires \d+\/\d+\/\d+ Revoke key ctxm_…a9Fq/:
+            - cell /ctxm_…a9Fq active expires \d+\/\d+\/\d+ Revoke key ctxm_…a9Fq Rotate key of ci-chat/:
               - list:
                 - listitem:
                   - code: ctxm_…a9Fq
                   - text: /active expires \d+\/\d+\/\d+/
                   - button "Revoke key ctxm_…a9Fq"
+              - button "Rotate key of ci-chat"
             - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
             - cell /\d+\/\d+\/\d+/
-            - cell "Deactivate ci-chat":
+            - cell "Edit policy of ci-chat Deactivate ci-chat":
+              - button "Edit policy of ci-chat"
               - button "Deactivate ci-chat"
-          - row /ctx-peer-b ctx-peer rotating ctxm_…Qe7z active expires \d+\/\d+\/\d+ Revoke key ctxm_…Qe7z ctxm_…mP2c superseded expires \d+\/\d+\/\d+ Revoke key ctxm_…mP2c \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Deactivate ctx-peer-b/:
-            - cell "ctx-peer-b"
+          - row /ctx-peer-b ctx-peer rotating ctxm_…Qe7z active expires \d+\/\d+\/\d+ Revoke key ctxm_…Qe7z ctxm_…mP2c superseded expires \d+\/\d+\/\d+ Revoke key ctxm_…mP2c End grace period of key ctxm_…mP2c \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Deactivate ctx-peer-b/:
+            - cell "ctx-peer-b":
+              - link "ctx-peer-b":
+                - /url: /gateway/consumers/0190000000007000800000000000c0a2
             - cell "ctx-peer"
             - cell "rotating"
-            - cell /ctxm_…Qe7z active expires \d+\/\d+\/\d+ Revoke key ctxm_…Qe7z ctxm_…mP2c superseded expires \d+\/\d+\/\d+ Revoke key ctxm_…mP2c/:
+            - cell /ctxm_…Qe7z active expires \d+\/\d+\/\d+ Revoke key ctxm_…Qe7z ctxm_…mP2c superseded expires \d+\/\d+\/\d+ Revoke key ctxm_…mP2c End grace period of key ctxm_…mP2c/:
               - list:
                 - listitem:
                   - code: ctxm_…Qe7z
@@ -103,30 +110,40 @@
                   - code: ctxm_…mP2c
                   - text: /superseded expires \d+\/\d+\/\d+/
                   - button "Revoke key ctxm_…mP2c"
+                  - button "End grace period of key ctxm_…mP2c"
             - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
             - cell /\d+\/\d+\/\d+/
             - cell "Deactivate ctx-peer-b":
               - button "Deactivate ctx-peer-b"
-          - row /A-SENTINEL-1f9c62d84b7e app expiring ctxm_…Xk4d expiring expires \d+\/\d+\/\d+ Revoke key ctxm_…Xk4d never \d+\/\d+\/\d+ Deactivate A-SENTINEL-1f9c62d84b7e/:
-            - cell "A-SENTINEL-1f9c62d84b7e"
+          - row /A-SENTINEL-1f9c62d84b7e app expiring ctxm_…Xk4d expiring expires \d+\/\d+\/\d+ Revoke key ctxm_…Xk4d Rotate key of A-SENTINEL-1f9c62d84b7e never \d+\/\d+\/\d+ Edit policy of A-SENTINEL-1f9c62d84b7e Deactivate A-SENTINEL-1f9c62d84b7e/:
+            - cell "A-SENTINEL-1f9c62d84b7e":
+              - link "A-SENTINEL-1f9c62d84b7e":
+                - /url: /gateway/consumers/0190000000007000800000000000c0a3
             - cell "app"
             - cell "expiring"
-            - cell /ctxm_…Xk4d expiring expires \d+\/\d+\/\d+ Revoke key ctxm_…Xk4d/:
+            - cell /ctxm_…Xk4d expiring expires \d+\/\d+\/\d+ Revoke key ctxm_…Xk4d Rotate key of A-SENTINEL-1f9c62d84b7e/:
               - list:
                 - listitem:
                   - code: ctxm_…Xk4d
                   - text: /expiring expires \d+\/\d+\/\d+/
                   - button "Revoke key ctxm_…Xk4d"
+              - button "Rotate key of A-SENTINEL-1f9c62d84b7e"
             - cell "never"
             - cell /\d+\/\d+\/\d+/
-            - cell "Deactivate A-SENTINEL-1f9c62d84b7e":
+            - cell "Edit policy of A-SENTINEL-1f9c62d84b7e Deactivate A-SENTINEL-1f9c62d84b7e":
+              - button "Edit policy of A-SENTINEL-1f9c62d84b7e"
               - button "Deactivate A-SENTINEL-1f9c62d84b7e"
-          - row /nightly-embed app no key no live key \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Deactivate nightly-embed/:
-            - cell "nightly-embed"
+          - row /nightly-embed app no key no live key Rotate key of nightly-embed \d+\/\d+\/\d+, \d+:\d+ AM ±1 min \d+\/\d+\/\d+ Edit policy of nightly-embed Deactivate nightly-embed/:
+            - cell "nightly-embed":
+              - link "nightly-embed":
+                - /url: /gateway/consumers/0190000000007000800000000000c0a4
             - cell "app"
             - cell "no key"
-            - cell "no live key"
+            - cell "no live key Rotate key of nightly-embed":
+              - text: ""
+              - button "Rotate key of nightly-embed"
             - cell /\d+\/\d+\/\d+, \d+:\d+ AM ±1 min/
             - cell /\d+\/\d+\/\d+/
-            - cell "Deactivate nightly-embed":
+            - cell "Edit policy of nightly-embed Deactivate nightly-embed":
+              - button "Edit policy of nightly-embed"
               - button "Deactivate nightly-embed"

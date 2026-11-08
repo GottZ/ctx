@@ -111,7 +111,7 @@ func newV1MeterRig(t *testing.T, env map[string]string, wrap func([]modelRoute) 
 		t.Fatal(err)
 	}
 	// The quota accountant is a second instance built like buildRouter's.
-	deps := gatewayDeps(sctx, pool, cfgStore, sched.ModelAliasRegistry(), bp, backends.NewQuotaAccountant(pool, 30*time.Second), disp, gw.meter)
+	deps := gatewayDeps(sctx, pool, cfgStore, sched.ModelAliasRegistry(), bp, backends.NewQuotaAccountant(pool, 30*time.Second), disp, gw.meter, nil)
 	return &v1MeterRig{router: router, gw: gw, deps: deps, engine: e, seed: seed, pool: pool, disp: disp, ident: ident, key: key.Plaintext()}
 }
 

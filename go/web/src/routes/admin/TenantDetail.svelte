@@ -19,6 +19,7 @@
   import QuotaForm from './QuotaForm.svelte'
   import TenantProvision from './TenantProvision.svelte'
   import TenantGrantsPanel from './TenantGrantsPanel.svelte'
+  import ModelApiCard from './ModelApiCard.svelte'
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
   import { TenantsModel } from './tenants.svelte'
 
@@ -240,6 +241,7 @@
     </section>
 
     <TenantGrantsPanel {tenantId} tenantSlug={tenant.slug} />
+    <ModelApiCard {tenantId} />
   {/if}
 </section>
 

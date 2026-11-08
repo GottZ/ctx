@@ -35,10 +35,13 @@ import (
 // Bounds (gateway.stream_relay_buffer_bytes, stream_min_drain_rate,
 // stream_min_drain_window — A-E2 no. 2): the buffer is one allocation of the
 // setting's size per stream, booked in the request's ledger before it is
-// made (startRelay); a chunk that does not fit is an overflow: the run ends
-// (errRelayOverflow — the upstream is aborted, the lease settles), the
-// writer drops what is queued and the route ends the stream with an error
-// frame. The writer cuts a client that drains slower than the rate over the
+// made (startRelay); a chunk that does not fit is an overflow once the
+// writer has written a first record — before that write nothing measures the
+// client (under load the writer may not have run before the engine's second
+// frame arrived: 2–4 of 32 streams, RC-D S3), so the reader waits for it,
+// bounded by that write's deadline — : the run ends (errRelayOverflow — the
+// upstream is aborted, the lease settles), the writer drops what is queued
+// and the route ends the stream with an error frame. The writer cuts a client that drains slower than the rate over the
 // window while chunks wait for it (drainMeter → the stream writer's write
 // deadline), which complements client_write_window, the bound of a single
 // write.
@@ -84,10 +87,19 @@ func (p *relayPanic) Unwrap() error {
 //
 // A chunk larger than the whole ring (a rewrite grew it: json.Marshal escapes
 // <, > and & six-fold, Fremd-Review 1 F1) is no sign of a slow client: it
-// waits by reference in the one oversize slot, in its place in the order,
-// and the writer takes it when the records before it are written. A second
-// oversize chunk while one still waits is an overflow — then the client is
-// behind by at least that chunk.
+// waits in the one oversize slot, in its place in the order, and the writer
+// takes it when the records before it are written. A second oversize chunk
+// while one still waits is an overflow — then the client is behind by at
+// least that chunk.
+//
+// put copies every chunk (FOLGE-S): the caller's chunk is the attempt's line
+// buffer, which the next rewrite overwrites (rewriteChunkInto). A record goes
+// into the ring; an oversize chunk into one of two buffers of the relay's
+// own (bigs) — one may wait while the writer writes the other — each grown
+// by doubling to the largest oversize chunk, and every buffer booked in full
+// in the request's ledger before it is made, the one it replaces staying
+// booked as the garbage it is (book; a refusal is ErrBudgetExhausted, the
+// attempt ends like a refused upstream body).
 type streamRelay struct {
 	write  func([]byte) error // the stream writer's frame
 	stop   <-chan struct{}    // the run's end: the writer drops what is queued
@@ -107,18 +119,29 @@ type streamRelay struct {
 	done    chan struct{} // closed when the writer ended
 	pan     *relayPanic
 
-	// big is the oversize chunk waiting by reference (nil: none), bigAt its
-	// place: the number of records put before it; puts and takes count every
-	// record put and taken, handBig marks the one in the writer's hand.
-	big         []byte
-	bigAt       uint64
-	puts, takes uint64
-	handBig     bool
+	// big is the oversize chunk waiting (nil: none) — a copy in bigs[bigIdx]
+	// — and bigAt its place: the number of records put before it; puts and
+	// takes count every record put and taken, handBig marks the one in the
+	// writer's hand, handIdx its buffer.
+	big             []byte
+	bigAt           uint64
+	puts, takes     uint64
+	handBig         bool
+	bigs            [2][]byte
+	bigIdx, handIdx int
+	book            func(int64) bool // books an oversize buffer before it is made (nil: none)
 
 	// until is the attempt's deadline (bound; zero: none): no write ends
 	// after it, the drain included — a stream lasts at most its attempt's
 	// timeout, as before the relay (Fremd-Review 1 F3 (a)).
 	until time.Time
+
+	// wrote is set (mu held) and first closed once the writer wrote its
+	// first record: a put that does not fit before it waits for first or
+	// done instead of overflowing (RC-D S3 decision (a) for
+	// TestStreamLiveHeapConcurrent n=32).
+	wrote bool
+	first chan struct{}
 }
 
 // newStreamRelay starts the writer of a relay over ring (made by the caller
@@ -128,45 +151,109 @@ type streamRelay struct {
 // first without the cap until its next record).
 func newStreamRelay(until time.Time, ring []byte, write func([]byte) error, stop <-chan struct{}, broken func(error), d drainMeter, capAt func(time.Time)) *streamRelay {
 	rl := &streamRelay{write: write, stop: stop, broken: broken, drain: d, capAt: capAt, ring: ring, until: until,
-		more: make(chan struct{}, 1), done: make(chan struct{})}
+		more: make(chan struct{}, 1), done: make(chan struct{}), first: make(chan struct{})}
 	go rl.run()
 	return rl
 }
 
-// put queues one chunk (the reader). It never waits for the client: nil when
-// the chunk is queued, errRelayOverflow when it does not fit, the writer's
-// error once the writer failed (the client is gone). An oversize chunk is
-// kept by reference until it is written: the caller must not reuse it
-// (rewriteChunk returns a fresh slice per chunk).
+// put queues a copy of one chunk (the reader). It never waits for the
+// client once the writer has written: nil when the chunk is queued,
+// errRelayOverflow when it does not fit, ErrBudgetExhausted when the ledger
+// refuses the buffer of an oversize chunk, the writer's error once the writer
+// failed (the client is gone). Before the writer's first write a chunk that
+// does not fit waits for that write (or the run's end) and is queued then —
+// there is no client slowness to measure before the first write, and under
+// load the writer may simply not have run yet. The caller may reuse chunk at
+// once.
 func (rl *streamRelay) put(chunk []byte) error {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	ended := false
+	for {
+		wait, err := rl.putLocked(chunk)
+		if !wait {
+			return err
+		}
+		if ended {
+			return errRelayOverflow // the run ended without a write and without a cause: never, but no spin
+		}
+		rl.mu.Unlock()
+		select {
+		case <-rl.first:
+		case <-rl.done:
+			ended = true
+		}
+		rl.mu.Lock()
+	}
+}
+
+// overflowLocked is the answer to a chunk that does not fit (mu held): the
+// overflow once the writer wrote, else wait = true (put waits for the first
+// write and retries).
+func (rl *streamRelay) overflowLocked() (wait bool, err error) {
+	if !rl.wrote {
+		return true, nil
+	}
+	return false, errRelayOverflow
+}
+
+// putLocked is put's one attempt (mu held): wait = true when the chunk does
+// not fit before the writer's first write.
+func (rl *streamRelay) putLocked(chunk []byte) (wait bool, err error) {
 	if rl.err != nil {
-		return rl.err
+		return false, rl.err
 	}
 	if rl.closed {
-		return errRelayClosed
+		return false, errRelayClosed
 	}
 	need := RelayRecordHeader + len(chunk)
 	if need > len(rl.ring) {
 		if rl.big != nil {
-			return errRelayOverflow
+			return rl.overflowLocked()
 		}
-		rl.big, rl.bigAt = chunk, rl.puts
+		slot := 0
+		if rl.handBig && rl.handIdx == 0 {
+			slot = 1 // the writer writes from bigs[0]
+		}
+		buf := rl.bigs[slot]
+		if cap(buf) < len(chunk) {
+			// Doubling, booked gross: the buffer it replaces stays on the
+			// heap until the next collection, so every buffer made is booked
+			// in full (Fremd-Review F2: a growth booked net left k growing
+			// chunks 220 × their booking in allocations).
+			c := max(len(chunk), 2*cap(buf))
+			if rl.book != nil && !rl.book(int64(c)) {
+				return false, ErrBudgetExhausted
+			}
+			buf = make([]byte, 0, c)
+		}
+		rl.bigs[slot] = append(buf[:0], chunk...)
+		rl.big, rl.bigAt, rl.bigIdx = rl.bigs[slot], rl.puts, slot
 		rl.puts++
 		rl.signal()
-		return nil
+		return false, nil
 	}
 	at, ok := rl.placeLocked(need)
 	if !ok {
-		return errRelayOverflow
+		return rl.overflowLocked()
 	}
 	rl.puts++
 	binary.LittleEndian.PutUint32(rl.ring[at:], uint32(len(chunk))) //nolint:gosec // G115: a chunk fits the ring, whose size is an int setting far below 4 GiB (V38/V39)
 	copy(rl.ring[at+RelayRecordHeader:], chunk)
 	rl.n++
 	rl.signal()
-	return nil
+	return false, nil
+}
+
+// firstWritten marks the writer's first successful write (once): the puts
+// that waited for it go on.
+func (rl *streamRelay) firstWritten() {
+	rl.mu.Lock()
+	if !rl.wrote {
+		rl.wrote = true
+		close(rl.first)
+	}
+	rl.mu.Unlock()
 }
 
 // placeLocked finds room for need contiguous bytes and claims it (w moves).
@@ -309,6 +396,7 @@ func (rl *streamRelay) run() {
 			rl.fail(err)
 			return
 		}
+		rl.firstWritten()
 	}
 }
 
@@ -325,7 +413,7 @@ func (rl *streamRelay) next() ([]byte, bool) {
 			return nil, false
 		case rl.big != nil && rl.takes == rl.bigAt:
 			rec := rl.big
-			rl.big, rl.handBig = nil, true
+			rl.big, rl.handBig, rl.handIdx = nil, true, rl.bigIdx
 			rl.mu.Unlock()
 			select {
 			case <-rl.stop:
@@ -465,8 +553,9 @@ func (c *chatCall) startRelay(until time.Time) error {
 	if !c.cover(size) {
 		return ErrBudgetExhausted
 	}
-	c.relay = newStreamRelay(until, make([]byte, size), c.sse.frame, c.ctx.Done(), c.cancel,
+	c.relay = newStreamRelay(until, make([]byte, size), c.sse.frameLine, c.ctx.Done(), c.cancel,
 		drainMeter{rate: c.s.StreamMinDrainRate, window: c.s.StreamMinDrainWindow}, c.sse.capWrites)
+	c.relay.book = c.cover // the reader's goroutine, as every booking of the request
 	return nil
 }
 

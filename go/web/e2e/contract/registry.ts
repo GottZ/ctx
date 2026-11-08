@@ -18,6 +18,7 @@
 import { expect } from '@playwright/test'
 import type { PageContract } from './contract'
 import { KEY, REVEAL_MARKER, SENTINEL, modelApiCapabilities, sseRoute, type RecordedCall, type SseFrame } from '../fixtures'
+import { PANEL_CALL_ID, PANEL_CONSUMER_A } from '../gateway-panels-fixtures'
 
 /**
  * Mobile opt-out for the five PV4-Erstbelegung areas: their mobile BASELINES
@@ -988,7 +989,9 @@ export const contracts: PageContract[] = [
     mode: 'reading',
     capabilities: modelApiCapabilities(true, true),
     tenantScoped: true,
-    adminCalls: ['model-consumer-list', 'tenant-list'],
+    // RC-D C5: + the policy edit (W05-07) and the rotation (W05-08) — calls a
+    // member session must never fire (generated deny test).
+    adminCalls: ['model-consumer-list', 'tenant-list', 'model-consumer-update', 'model-key-rotate'],
     states: [
       { name: 'default', seed: {} },
       // W05-06: the create dialog (template row, scope select, offer picker,
@@ -1066,8 +1069,13 @@ export const contracts: PageContract[] = [
       await expect(rows).toHaveCount(5)
       await expect(rows.filter({ hasText: 'flow-app' })).toContainText('ctxm_…sist')
       expect(await page.evaluate((m) => document.documentElement.outerHTML.includes(m), REVEAL_MARKER)).toBe(false)
-      // no rotation, no edit in this wave (W05-07/W05-08)
-      await expect(content.getByRole('button', { name: /rotate|edit/i })).toHaveCount(0)
+      // RC-D W05-07/W05-08: the own app row carries "Edit policy" and "Rotate key"
+      // (tenant-admin with self-service); the ctx-peer row carries neither — peers
+      // are managed by the server-admin (design/05 §4.5, V-01-b mirror).
+      await expect(ci.getByRole('button', { name: 'Edit policy of ci-chat' }), 'W05-07: own app row has an edit control').toHaveCount(1)
+      await expect(ci.getByRole('button', { name: 'Rotate key of ci-chat' }), 'W05-08: own app row has a rotate control').toHaveCount(1)
+      const peerRow = rows.filter({ hasText: 'ctx-peer-b' })
+      await expect(peerRow.getByRole('button', { name: /edit|rotate/i }), 'W05-07: a ctx-peer row carries no edit / rotate control below server-admin').toHaveCount(0)
       // W05-06 — revoke ci-chat's key behind the typed 4-character gate; toast from the server
       await ci.getByRole('button', { name: 'Revoke key ctxm_…a9Fq' }).click()
       const confirm = page.getByRole('dialog', { name: 'Revoke key' })
@@ -1089,6 +1097,137 @@ export const contracts: PageContract[] = [
       await expect(rows).toHaveCount(1)
       await expect(rows.first()).toContainText('ci-chat')
       expect(consumerListBodies(session.calls).at(-1)?.q).toBe('ci')
+    },
+  },
+  {
+    // Alias catalog /gateway/models (design/05 §3.3/§4.6, wave W05-13 — RC-D
+    // C5). Inherits the /gateway prefix guard (viewModelApi), so the contract
+    // carries the same gateway-on world. A tenant-admin reads the _global
+    // catalog + its home scope and writes only the home scope: `_global` rows
+    // carry no write control (inv05 D8 precedent defect). The leak probe reads
+    // tenant B's home sentinel alias (disabled, so no offer changes) and must
+    // never see tenant A's. Detailed gates: e2e/gateway-models.spec.ts.
+    route: '/gateway/models',
+    name: 'gateway-models',
+    role: 'tenant-admin',
+    mode: 'reading',
+    capabilities: modelApiCapabilities(true, true),
+    tenantScoped: true,
+    adminCalls: ['model-alias-list', 'model-alias-create', 'model-alias-update', 'model-alias-preview'],
+    states: [
+      { name: 'default', seed: {} },
+      // every scope, write controls on every row, "Suggest from pool" + preview
+      { name: 'server-admin', seed: { role: 'server-admin' } },
+      // the catalog read fails: error band with Retry
+      { name: 'error', seed: { faults: [{ action: 'model-alias-list', status: 500 }] } },
+    ],
+    scale: {
+      exempt:
+        'Alias-Katalog ist eine Betreiber-Liste (Dutzende Aliase je Scope, Admin-Takt, design/05 §6 Zeile Katalog-Reload) — kein nutzergetriebener 10k-Pfad.',
+    },
+    flowDoc:
+      'Tenant-Admin öffnet „Model catalog“ unter /gateway/models: die _global-Aliase stehen ohne Schreib-Controls in der Liste, die Aliase des Heimat-Scopes tragen „Edit“; „+ New alias“ öffnet den Editor mit explizitem enabled-Schalter, niedrigere Sensitivitäten sind gesperrt; im Bearbeiten sind name und kind schreibgeschützt (W05-13).',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(page.getByRole('heading', { name: 'Model catalog', exact: true }), 'W05-13: the catalog page mounts').toBeVisible()
+      const rows = content.locator('tr[data-alias-row]')
+      await expect(rows.filter({ hasText: SENTINEL.A }), 'W05-13: the home-scope alias is listed').toHaveCount(1)
+      const globalChat = rows.filter({ has: page.locator('[data-alias-scope="_global"]') }).filter({ hasText: 'chat' }).first()
+      await expect(globalChat, 'W05-13: the _global chat alias is listed').toBeVisible()
+      await expect(globalChat.getByRole('button'), 'W05-13 gate: a _global row carries no write control for a tenant-admin').toHaveCount(0)
+      const homeChat = rows.filter({ has: page.locator('[data-alias-scope="home"]') }).filter({ hasText: 'chat' }).first()
+      await expect(homeChat.getByRole('button', { name: 'Edit alias chat' }), 'W05-13: a home-scope row is editable').toHaveCount(1)
+      await content.getByRole('button', { name: '+ New alias' }).click()
+      const editor = page.getByRole('dialog', { name: 'New model alias' })
+      await expect(editor.getByRole('checkbox', { name: 'enabled' }), 'W05-13: enabled is an explicit control').toBeVisible()
+      await expect(editor.getByRole('group', { name: 'sensitivity' }).getByRole('radio', { name: 'public' }), 'W05-13: a tenant-admin cannot lower below credentials').toBeDisabled()
+      await editor.getByRole('button', { name: 'Cancel' }).click()
+      await homeChat.getByRole('button', { name: 'Edit alias chat' }).click()
+      const edit = page.getByRole('dialog', { name: 'Edit model alias' })
+      await expect(edit.getByLabel('name', { exact: true }), 'W05-13 gate: name is read-only on edit').toBeDisabled()
+      await expect(edit.getByLabel('kind', { exact: true }), 'W05-13 gate: kind is read-only on edit').toBeDisabled()
+      expect(session.calls.some((c) => c.action === 'model-alias-preview'), 'a tenant-admin never fires the server-admin preview').toBe(false)
+    },
+  },
+  {
+    // Consumer detail (RC-D C6, waves W05-09 + W05-10 + W05-12; design/05
+    // §4.6): head, key chain (rotated_from), last calls (body-free, no
+    // llmlog detail below server-admin), audit trail as a chain, usage panel
+    // (null/complete:false = "not recorded", hist:false = marked means, no
+    // auth count per consumer, a11y table) and limits card (tenant tier:
+    // max = server(d), no "unlimited", 422 at the field). The page inherits
+    // the /gateway guard, so the generated deny proves the tier gate with the
+    // gateway on (member ⇒ /home, none of the panel calls fires). The tenant
+    // leak probe needs a per-tenant path — it is e2e/gateway-panels.spec.ts
+    // ("leak: B on A's consumer"), hence tenantScoped stays off here.
+    route: '/gateway/consumers/:id',
+    name: 'gateway-consumer',
+    role: 'tenant-admin',
+    mode: 'reading',
+    path: `/gateway/consumers/${PANEL_CONSUMER_A}`,
+    capabilities: modelApiCapabilities(true, true),
+    adminCalls: ['model-consumer-get', 'gateway-limits-get', 'gateway-limits-set', 'gateway-limits-delete', '/api/usage', '/api/llmlog'],
+    states: [
+      { name: 'default', seed: {} },
+      // server-admin: call detail control present, server tier of the limits form
+      { name: 'server-admin', seed: { role: 'server-admin' } },
+      // the consumer read fails: error band with Retry (calls/usage/limits do not render)
+      { name: 'error', seed: { faults: [{ action: 'model-consumer-get', status: 500 }] } },
+    ],
+    scale: {
+      exempt:
+        'Server-capped detail: key chain ≤ gateway.consumer_chain_max (50, keys_truncated), audit ≤ 20 rows, one page of calls, ≤ 92-d usage window — no unbounded list on this page; the 10k list dimension is the /gateway contract.',
+    },
+    flowDoc:
+      'Tenant-Admin öffnet einen Konsumenten: Kopf mit Label und Server-Status, Key-Kette neueste zuerst mit „rotated from" je Glied, letzte Calls ohne Body und ohne Link auf /api/llmlog/{id}, Audit-Spur mit der Rotation als Kante „neu ← alt"; das Nutzungs-Panel zeigt nicht erfasste Buckets als „not recorded" (nie 0), ohne Histogramme den Ø-Wert markiert und keine Auth-Ablehnungen je Konsument, daneben die Tabelle für Screenreader; die Limits-Karte bietet je Feld höchstens die Server-Decke an, keinen „unbegrenzt"-Schalter, und ein Wert darüber kommt als 400 mit Feldnamen an genau diesem Feld zurück (W05-09/W05-10/W05-12).',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(content.getByRole('heading', { level: 1, name: 'rotated-app' }), 'gate W05-09: the consumer renders').toBeVisible()
+      // W05-09 — key chain newest first, each link names its predecessor
+      const links = content.locator('ol[aria-label="key chain"] > li[data-key-link]')
+      await expect(links.locator('[data-key-hint]')).toHaveText(['ctxm_…CCC3', 'ctxm_…BBB2', 'ctxm_…AAA1'])
+      await expect(links.locator('[data-rotated-from]')).toHaveText(['ctxm_…BBB2', 'ctxm_…AAA1', ''])
+      // W05-09 — positive control: the seeded call is a row; no detail link for a tenant-admin
+      const calls = content.locator('table[aria-label="last calls"] tr[data-call-row]')
+      await expect(calls.filter({ has: page.locator(`[data-call-id="${PANEL_CALL_ID}"]`) })).toHaveCount(1)
+      await expect(content.locator('a[href*="/api/llmlog"]'), 'gate W05-09: kein Link auf /api/llmlog/{id}').toHaveCount(0)
+      await expect(content.getByRole('button', { name: /^Open call/ }), 'gate W05-09: no detail control').toHaveCount(0)
+      // the error shows its class (Go llmlogError.class) — never the capped raw detail
+      await expect(calls.nth(1)).toContainText('http_502')
+      await expect(content, 'gate W05-09: no provider detail in the page').not.toContainText('PROMPT-FRAGMENT-DO-NOT-RENDER')
+      // W05-09 — audit trail shows the rotation as one chain edge
+      const audit = content.locator('ol[aria-label="audit trail"] > li[data-audit-entry]')
+      await expect(audit).toHaveCount(4)
+      await expect(audit.first(), 'gate W05-09: Rotation als Kette').toContainText('ctxm_…CCC3 ← ctxm_…BBB2')
+      // W05-10 — usage panel: not recorded instead of 0, marked means, no auth count, a11y table
+      const usage = content.locator('section[aria-label="usage"]')
+      const table = usage.getByRole('table', { name: 'usage table' })
+      await expect(table.locator('tbody tr'), 'gate W05-10: a11y table, one row per bucket').toHaveCount(3)
+      await expect(table.locator('tbody tr').nth(1).locator('[data-col="calls"]'), 'gate W05-10: complete:false ⇒ not recorded').toHaveText('not recorded')
+      await expect(table.locator('tbody tr').nth(2).locator('[data-col="calls"]'), 'gate W05-10: null ⇒ not recorded').toHaveText('not recorded')
+      await expect(table.locator('tbody tr').first().locator('[data-col="latency"]'), 'gate W05-10: hist:false ⇒ Ø').toHaveText('Ø 820ms')
+      await expect(usage.locator('[data-reject-reason="auth"]'), 'gate W05-10: rejected.auth je Konsument nie als Zahl').toHaveCount(0)
+      // review L1: the chart draws the two unrecorded buckets as gaps (never a zero bar), the total is partial
+      await expect(usage.locator('[data-bar-gap]'), 'gate W05-10: Lücke statt 0-Balken').toHaveCount(2)
+      await expect(usage.locator('[data-bar]')).toHaveCount(1)
+      await expect(usage.locator('[data-total="calls"]'), 'gate W05-10: partial total, never 0').toHaveText('≥ 12')
+      expect(session.calls.some((c) => c.path === '/api/usage'), 'the panel reads /api/usage').toBe(true)
+      // W05-12 — limits: tenant tier, max = server(d), no unlimited, 422 at the field
+      const limits = content.locator('section[aria-label="limits"]')
+      await expect(limits.getByRole('spinbutton', { name: 'chat rpm' }), 'gate W05-12: Eingabe-Maximum = server(d)').toHaveAttribute('max', '30')
+      await expect(limits.getByRole('spinbutton', { name: 'chat max_concurrency' })).toHaveAttribute('max', '4')
+      await expect(limits.getByRole('checkbox', { name: /unlimited/i }), 'gate W05-12: kein „unbegrenzt"-Schalter').toHaveCount(0)
+      // review L1/L2: the tenant tier can only deny external backends; an unbounded effective budget reads "no limit"
+      await expect(limits.getByLabel('chat external backends').locator('option'), 'tenant tier narrows only').toHaveText(['inherit', 'deny'])
+      await expect(limits.locator(`[id="lim-${PANEL_CONSUMER_A}-chat.monthly_tokens-eff"]`)).toContainText('effective no limit')
+      // over the ceiling: the client hint first, then the server's 400 {param} at the same field
+      await limits.getByRole('spinbutton', { name: 'chat max_concurrency' }).fill('5')
+      await expect(limits.locator('[data-field-error="chat.max_concurrency"]')).toHaveText('at most 4 (server limit)')
+      await limits.getByRole('button', { name: 'Save chat limits' }).click()
+      await expect(limits.locator('[data-field-error="chat.max_concurrency"]'), 'gate W05-12: Fehler mit Feldnamen am Feld').toHaveText('limit widens: max_concurrency — 5 is above 4, the limit of the levels above')
+      const set = session.calls.filter((c) => c.action === 'gateway-limits-set').at(-1)
+      expect(set, 'the write reached the server (it decides)').toBeDefined()
+      expect(JSON.stringify(set?.body ?? {}), 'gate W05-12: no tier on the wire').not.toMatch(/"tier"/)
     },
   },
   {

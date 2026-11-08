@@ -340,7 +340,10 @@ func TestModelConsumerPeerBindingHidden(t *testing.T) {
 			auditBody, ar := auditOK(t, ah, reader.ar, "?entity=model_consumer&id="+peer.id)
 			binds := 0
 			for _, r := range ar.Rows {
-				if r.Action == "update" {
+				// W06-18 (RC-D C2): /api/audit labels the TOFU binding row
+				// "peer_bound" for a server-admin (masterplan gate W06-18);
+				// the consumer's own trail keeps the trigger's "update".
+				if r.Action == "update" || r.Action == "peer_bound" {
 					binds++
 				}
 			}

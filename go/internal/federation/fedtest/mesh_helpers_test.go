@@ -254,7 +254,7 @@ func (m *Mesh) Instance(name string) *Instance {
 		consumers: map[string]*auth.ConsumerAuth{},
 	}
 	guard := handler.LoopGuard(handler.LoopGuardConfig{MaxDepth: func() int { return m.opt.MaxDepth }, Envelope: handler.LoopGuardOpenAI})
-	peer := federation.PeerIngress(federation.PeerIngressConfig{Consumer: consumerFrom})
+	peer := federation.PeerIngress(federation.PeerIngressConfig{Consumer: consumerFrom, Binder: meshBinder{}})
 	stack := fedhop.IdentityMiddleware(i.Identity)(i.door(guard(peer(http.HandlerFunc(i.serve)))))
 	i.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		i.hits.Add(1)
@@ -543,4 +543,13 @@ func (m *Mesh) Send(to *Instance, token string, hdr map[string]string) int {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	return resp.StatusCode
+}
+
+// meshBinder is the PeerIngress binder of the mesh (F-W12): every first
+// contact binds the sender — the mesh's subject is the chain, not the
+// binding.
+type meshBinder struct{}
+
+func (meshBinder) BindPeer(_ context.Context, _, instanceID string) (auth.PeerBinding, error) {
+	return auth.PeerBinding{Instance: instanceID, Created: true}, nil
 }

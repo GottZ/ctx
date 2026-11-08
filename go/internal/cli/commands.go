@@ -58,6 +58,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(blocksCmd(getClient))
 	root.AddCommand(blockGrantCmd(getClient))
 	root.AddCommand(tenantCmd(getClient))
+	root.AddCommand(modelsCmd(getClient))
 	root.AddCommand(projectCmd(getClient))
 	root.AddCommand(kanbanCmd(getClient))
 	root.AddCommand(apiCmd(getClient))

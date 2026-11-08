@@ -153,7 +153,7 @@ const (
 type inventoryEntry struct {
 	args     []string
 	contract envelopeContract
-	oldExit  int    // 0 or 1; -1 = not applicable (contractSkip)
+	oldExit  int    // 0 or 1; -1 = not applicable (contractSkip, or a command added after T03-13)
 	reason   string // required for contractSkip
 	stdout   failStdout
 }
@@ -283,6 +283,14 @@ func envelopeInventory() map[string]inventoryEntry {
 		// api kept its exit codes and GAINED the printed body on failure — the
 		// behaviour docs/cli.md has always described for this command.
 		"api": echo(1, "api", "GET", "/api/project"),
+
+		// ── W05-19: new commands (no pre-T03-13 exit code) ─────────────────
+		"models consumers list":       e1(-1, "models", "consumers", "list"),
+		"models consumers create":     e1(-1, "models", "consumers", "create", "--label", "x"),
+		"models consumers rotate":     e1(-1, "models", "consumers", "rotate", fixtureProject),
+		"models consumers revoke":     e1(-1, "models", "consumers", "revoke", fixtureProject),
+		"models consumers deactivate": e1(-1, "models", "consumers", "deactivate", fixtureProject),
+		"models aliases list":         e1(-1, "models", "aliases", "list"),
 
 		// ── outside the contract: exit 0 stays exit 0 ──────────────────────
 		"health":  e0("health"), // GET /health, no /api envelope at all

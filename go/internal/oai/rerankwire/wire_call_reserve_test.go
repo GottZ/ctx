@@ -140,7 +140,18 @@ type wireRawUpstream struct {
 	cur   atomic.Pointer[wirePayload]
 	mu    sync.Mutex
 	conns []net.Conn
+	// free holds the connections' read buffers between connections: a call
+	// that refuses its answer unread closes its connection (FOLGE-R: an
+	// answer past the read cap), and the next call's new connection must not
+	// allocate a buffer in this process — the responder's share would land
+	// in the client's TotalAlloc. Filled before any measurement.
+	free []*bufio.Reader
 }
+
+// wireRawBuffers is how many read buffers the raw responder holds before a
+// measurement: more than the connections a run keeps open at once (one per
+// call, the one before still closing).
+const wireRawBuffers = 4
 
 func newWireRawUpstream(t *testing.T) *wireRawUpstream {
 	t.Helper()
@@ -149,6 +160,9 @@ func newWireRawUpstream(t *testing.T) *wireRawUpstream {
 		t.Fatalf("raw upstream listen: %v", err)
 	}
 	u := &wireRawUpstream{ln: ln, url: "http://" + ln.Addr().String()}
+	for range wireRawBuffers {
+		u.free = append(u.free, bufio.NewReaderSize(nil, 64<<10))
+	}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -178,7 +192,21 @@ var wireContentLength = []byte("content-length")
 // connection's own buffer, body discarded in place, prebuilt answer written.
 func (u *wireRawUpstream) serve(c net.Conn) {
 	defer func() { _ = c.Close() }()
-	br := bufio.NewReaderSize(c, 64<<10)
+	u.mu.Lock()
+	var br *bufio.Reader
+	if k := len(u.free); k > 0 {
+		br, u.free = u.free[k-1], u.free[:k-1]
+		br.Reset(c)
+	} else {
+		br = bufio.NewReaderSize(c, 64<<10)
+	}
+	u.mu.Unlock()
+	defer func() {
+		br.Reset(nil)
+		u.mu.Lock()
+		u.free = append(u.free, br)
+		u.mu.Unlock()
+	}()
 	for {
 		cl, ok := wireReadHead(br)
 		if !ok {
@@ -501,9 +529,10 @@ func wireMeasure(t *testing.T) {
 // control characters that json.Marshal writes six times as long — the body
 // what the call allocates on the client side (Score against an upstream that allocates
 // next to nothing, pools cold, the largest of three) is at most what the
-// route books for it (rerankWireCall, the retry's share left out: no call
-// here is retried) and, at the largest form, more than 85 % of it — the term
-// is neither short nor loose.
+// route books for it (rerankWireCall, the retry's share and the answer's
+// room for an echo left out: no call here is retried, no answer here
+// echoes — TestFolgeRAnswerReadIsBooked books the echo) and, at the largest
+// form, more than 85 % of it — the term is neither short nor loose.
 func TestRerankWireCallReserveIsTheMeasuredOne(t *testing.T) {
 	h := newWireHarness(t)
 	type cell struct {
@@ -536,7 +565,11 @@ func TestRerankWireCallReserveIsTheMeasuredOne(t *testing.T) {
 			}
 			most = max(most, b)
 		}
-		booked := wireCallBooking(len(c.body), cl.n) // the retry's share left out: no call here is retried
+		// The body the route books: the wire's own length (rerank.RequestBodyLen,
+		// FOLGE-R — c.body is json.Marshal's, which the wire no longer sends).
+		// The retry's share and the answer's room for an echo left out: no call
+		// here is retried, no answer here echoes.
+		booked := wireCallBooking(rerank.RequestBodyLen("M", h.query, c.docs), cl.n)
 		ratio := float64(most) / float64(booked)
 		best = max(best, ratio)
 		t.Logf("W0210 wire pin: %-14s B=%d allocated=%d booked=%d (%.3f)", cl.name, len(c.body), most, booked, ratio)
@@ -550,13 +583,14 @@ func TestRerankWireCallReserveIsTheMeasuredOne(t *testing.T) {
 }
 
 // wireCallBooking is the route's term for one call of a body of body bytes
-// over docs documents without the retry's share (rerankWireCall in
-// internal/oai/rerank_wire.go, from its exported constants): the body's
-// build, the transport's copy, the documents' answer and the call.
+// over docs documents without the retry's share and without the answer's
+// room for an echo (rerankWireCall in internal/oai/rerank_wire.go, from its
+// exported constants): the body's build and its size class, the
+// transport's copy, the documents' answer and the call.
 func wireCallBooking(body, docs int) int64 {
 	b := int64(body)
-	return (oai.RerankWireBodyNum*b+oai.RerankWireBodyDen-1)/oai.RerankWireBodyDen + min(b, oai.RerankWireCopyReserve) +
-		int64(docs)*oai.RerankWireDocReserve + oai.RerankWireCallReserve
+	return (oai.RerankWireBodyNum*b+oai.RerankWireBodyDen-1)/oai.RerankWireBodyDen + oai.RerankWireBodySlack +
+		min(b, oai.RerankWireCopyReserve) + int64(docs)*oai.RerankWireDocReserve + oai.RerankWireCallReserve
 }
 
 func TestRerankWireMeasure(t *testing.T) {

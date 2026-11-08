@@ -19,6 +19,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/usageevents"
 )
 
 // AuditHandler serves GET /api/audit — the read surface of
@@ -85,6 +86,9 @@ type auditRowJSON struct {
 // than limit rows); a foreign or unknown id reads as rows: [] (B-06-3),
 // and so does the server-admin-only entity instance — the group's convention
 // is a reduced view, not a role-specific error (HandleStatus, HandleLLMLog).
+// A server-admin reads a model_consumer row of the TOFU peer binding with the
+// action "peer_bound" instead of the trigger's "update" (auditPeerBoundLabel,
+// W06-18); a tenant-admin never gets that row (auditInvisibleUpdate).
 func (h *AuditHandler) HandleAudit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	entity := q.Get("entity")
@@ -168,7 +172,9 @@ func (h *AuditHandler) HandleAudit(w http.ResponseWriter, r *http.Request) {
 			// limit rows while older rows exist (documented in docs/api.md).
 			continue
 		}
-		out = append(out, jr)
+		// The label goes on after the visibility decision: a relabelled
+		// binding must never leave auditInvisibleUpdate's "update" class.
+		out = append(out, auditPeerBoundLabel(entity, jr, readerIsServerAdmin))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "entity": entity, "rows": out})
 }
@@ -306,6 +312,40 @@ func auditInvisibleUpdate(entity string, row auditRowJSON, readerIsServerAdmin b
 		return false
 	}
 	return auditJSONEqual(row.OldValue, row.NewValue)
+}
+
+// auditPeerBoundLabel relabels, for a server-admin reader only, the
+// model_consumer "update" row of the federation's TOFU binding (cluster C3,
+// F-W12) as usageevents.KindPeerBound: old_value.peer_instance_id null or
+// absent, new_value.peer_instance_id set. The migration-161 trigger writes the
+// binding as a plain update in the binding's own statement and the
+// usageevents peer_bound hook adds no second row (design/06 §4.10), so the
+// label is the read side's. Pure. Any other reader, entity, action or state
+// returns row unchanged — for a tenant-admin the binding is a hidden-field
+// change and the row is not served at all (auditInvisibleUpdate).
+func auditPeerBoundLabel(entity string, row auditRowJSON, readerIsServerAdmin bool) auditRowJSON {
+	if !readerIsServerAdmin || entity != "model_consumer" || row.Action != "update" {
+		return row
+	}
+	if auditStatePeerID(row.OldValue) != "" || auditStatePeerID(row.NewValue) == "" {
+		return row
+	}
+	out := row
+	out.Action = string(usageevents.KindPeerBound)
+	return out
+}
+
+// auditStatePeerID reads peer_instance_id from a model_consumer state; ""
+// when the state is absent, not an object, or the field is absent, null or
+// not a string.
+func auditStatePeerID(state json.RawMessage) string {
+	var m struct {
+		PeerInstanceID *string `json:"peer_instance_id"`
+	}
+	if len(state) == 0 || json.Unmarshal(state, &m) != nil || m.PeerInstanceID == nil {
+		return ""
+	}
+	return *m.PeerInstanceID
 }
 
 // auditJSONEqual compares two JSON documents as values; two absent (null)

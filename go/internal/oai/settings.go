@@ -17,6 +17,12 @@ type Settings struct {
 	MaxStreamFrameBytes int64
 	EmbeddingMaxFloats  int64
 
+	// ScanMaxRequestBytes (gateway.scan_max_request_bytes, RC-D C8) is the
+	// largest body the sensitivity scan reads; a longer body to an alias
+	// below credentials is 413 before the scan (overScanCap). 0 (a
+	// snapshot without the key) is the body cap — EffectiveScanCap.
+	ScanMaxRequestBytes int64
+
 	StreamCommitGrace time.Duration
 	KeepaliveInterval time.Duration
 	ClientWriteWindow time.Duration
@@ -86,6 +92,13 @@ type MeterSettings struct {
 	// design/06 §4.3; > 0).
 	AllowExternal  bool
 	MonthlyCostUSD float64
+	// ConcurrencyCap is dispatch.external_queue_per_consumer (0 = no cap):
+	// the bound V48 sets on Concurrency, applied per limits row too (wave
+	// W06-15, W06-11 handover).
+	ConcurrencyCap int64
+	// SoftRatio is the warning share of the day and month budgets
+	// (gateway.soft_ratio, W06-18; [0, 1), 0 = off) — keyquota.Limits.SoftRatio.
+	SoftRatio float64
 }
 
 // OpLimits are one op's requests and tokens per minute and its tokens per

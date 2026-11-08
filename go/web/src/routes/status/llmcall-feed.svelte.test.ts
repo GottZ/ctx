@@ -25,7 +25,7 @@ function row(id: string, createdAt = '2026-07-28T10:00:00Z'): LLMLogEntry {
     cost_usd: null,
     queue_wait_ms: null,
     dispatch_class: null,
-    dispatch_abort: null,
+    dispatch_abort: null, consumer_id: null,
   }
 }
 

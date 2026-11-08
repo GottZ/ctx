@@ -351,6 +351,9 @@ func (c *embedCall) serve() {
 		return
 	}
 	required := c.sensitivity()
+	if overScanCap(c.rec, c.w, required, body, c.s) {
+		return
+	}
 	if !c.coverScan(required, body, depth) {
 		refuseOverloaded(c.rec, c.w)
 		return
@@ -649,7 +652,7 @@ func (c *embedCall) admitLimiter() bool {
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
 		return llmlog.GatewayRow{Pipeline: embedPipeline, ConsumerID: c.ca.ConsumerID,
-			Gateway: llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID}}
+			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID})}
 	}, string(c.required))
 	return true
 }
@@ -1539,10 +1542,10 @@ func (c *embedCall) record(plan Plan, served *backends.Backend, attempts []llm.C
 	c.d.Record(llmlog.GatewayRow{
 		Pipeline:   embedPipeline,
 		ConsumerID: c.ca.ConsumerID,
-		Gateway: llmlog.Gateway{
+		Gateway: withFederation(c.r.Context(), llmlog.Gateway{
 			Alias: c.alias.Name, Hop: c.rec.Hop, Usage: usage, ClientReqID: clientRequestID(c.r),
 			Finish: out.finish, ModelKeyID: c.ca.ModelKeyID,
-		},
+		}),
 		Telemetry:   tel,
 		Attempts:    attempts,
 		Err:         out.redacted,

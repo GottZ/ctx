@@ -446,7 +446,7 @@ func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
-	raw, err := io.ReadAll(httpx.CapBody(resp.Body, maxResp))
+	raw, err := readAnswer(resp, maxResp, growthBookingFrom(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("llm: read response: %w", err)
 	}
@@ -470,6 +470,56 @@ func ChatRaw(ctx context.Context, b backends.Backend, body []byte, timeout time.
 		out.ProviderRequestID = meta.ID
 	}
 	return out, nil
+}
+
+// readAnswer reads a non-streamed answer of at most maxResp bytes, as
+// io.ReadAll over httpx.CapBody did, into one buffer (FOLGE-S S4): an answer
+// with a Content-Length within the cap is one allocation of exactly its
+// length, any other grows by doubling from 512 bytes up to the cap. A full buffer is grown only when a small probe read finds more:
+// an answer that ends exactly at the buffer's end costs no doubled buffer.
+// book (nil: none) is told the capacity of every buffer a growth discards,
+// before the larger one is made (WithGrowthBooking); its error ends the
+// read.
+func readAnswer(resp *http.Response, maxResp int64, book func(int) error) ([]byte, error) {
+	r := httpx.CapBody(resp.Body, maxResp)
+	size := int64(512)
+	if cl := resp.ContentLength; cl >= 0 && cl <= maxResp {
+		size = cl // the end is seen by the probe read, not by a byte more: cl + 1 cost a page at a power of two
+	}
+	buf := make([]byte, 0, size)
+	var probe []byte
+	for {
+		var n int
+		var err error
+		if len(buf) < cap(buf) {
+			n, err = r.Read(buf[len(buf):cap(buf)])
+			buf = buf[:len(buf)+n]
+		} else {
+			if probe == nil {
+				probe = make([]byte, 512)
+			}
+			if n, err = r.Read(probe); n > 0 {
+				c := min(max(2*int64(cap(buf)), int64(len(buf)+n)), maxResp+1)
+				if c < int64(len(buf)+n) { // the cap reader delivers at most maxResp bytes: unreachable
+					return buf, fmt.Errorf("%w (%d bytes)", httpx.ErrResponseTooLarge, maxResp)
+				}
+				if book != nil {
+					if berr := book(cap(buf)); berr != nil {
+						return buf, berr
+					}
+				}
+				grown := make([]byte, len(buf), c)
+				copy(grown, buf)
+				buf = append(grown, probe[:n]...)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return buf, nil
+			}
+			return buf, err
+		}
+	}
 }
 
 // RawStreamResult is the outcome of one relayed upstream stream. ChatRawStream
@@ -497,6 +547,10 @@ type RawStreamResult struct {
 // with finish_reason "error". maxFrame caps one line and one data frame
 // (≤ the harness cap 4 MiB; ≤ 0 means that cap), the whole stream keeps the
 // harness's 64 MiB. Client choice and headers as ChatRaw, plus Accept.
+//
+// The payload onFrame gets is valid only during the call (FOLGE-S): it is a
+// slice of the relay's line buffer, which the next line overwrites — a
+// caller copies what it keeps beyond the callback.
 func ChatRawStream(ctx context.Context, b backends.Backend, body []byte, timeout time.Duration, maxFrame int64,
 	onFrame func(payload []byte) error) (*RawStreamResult, error) {
 	if err := passthroughRow(&b, timeout); err != nil {
@@ -530,7 +584,8 @@ func ChatRawStream(ctx context.Context, b backends.Backend, body []byte, timeout
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("llm: %w", httpx.NewStatusError(resp, errBody))
 	}
-	rl := &sseRelay{onFrame: onFrame, data: sseFrame{limit: frameCap}}
+	rl := &sseRelay{onFrame: onFrame, grow: growthBookingFrom(ctx), data: sseFrame{limit: frameCap}}
+	rl.data.grow = rl.grow
 	err = rl.run(resp.Body, frameCap)
 	res := rl.result()
 	if b.ProviderClass != backends.ProviderOpenRouter {
@@ -539,35 +594,79 @@ func ChatRawStream(ctx context.Context, b backends.Backend, body []byte, timeout
 	return res, err
 }
 
-// sseRelay is ChatRawStream's frame loop over the harness's SSE building
-// blocks (readSSELineMax, sseFrame, streamChunk): the same line grammar and
-// lenient end as parseSSEStream, but frames go out raw instead of as events.
-type sseRelay struct {
-	onFrame func([]byte) error
-	data    sseFrame
-	frames  int
-	finish  string
-	done    bool
-	usage   *usageBody
-	timings *timingsBody
-	id      string
-	model   string
+// growthBookingKey carries the relay's growth booking in a context.
+type growthBookingKey struct{}
+
+// WithGrowthBooking returns ctx carrying a booking for the growth of the
+// wire sites' buffers (FOLGE-S (d)), as httptrace carries its hooks — the
+// wire signatures stay as R-02-2 pins them: before ChatRawStream's line,
+// spare or frame buffer, or ChatRaw's answer buffer, is replaced by a
+// larger one, book is told the old buffer's capacity — it is garbage until
+// the next collection, and the caller's ledger holds it. Both start small
+// and grow by doubling, so a stream of token frames and an answer with a
+// Content-Length book nothing, a stream with frames near the cap or an
+// answer without a length up to about one cap or the answer's size. An
+// error of book ends the read with it; the gateway's book returns an
+// admission outcome (oai.InflightBudget).
+func WithGrowthBooking(ctx context.Context, book func(n int) error) context.Context {
+	return context.WithValue(ctx, growthBookingKey{}, book)
 }
+
+// growthBookingFrom is ctx's growth booking (nil: none — nothing is booked).
+func growthBookingFrom(ctx context.Context) func(int) error {
+	book, _ := ctx.Value(growthBookingKey{}).(func(int) error)
+	return book
+}
+
+// sseRelay is ChatRawStream's frame loop over the harness's SSE building
+// blocks (the line reader, sseFrame, the chunk decode): the same line grammar
+// and lenient end as parseSSEStream, but frames go out raw instead of as
+// events. FOLGE-S: the loop reads every line into one buffer (line) that is
+// reused for the whole stream — the second buffer (spare) takes the lines
+// read while a frame of one line still holds the first (sseFrame.holds) —
+// a frame of one line goes to onFrame as a slice of that buffer, and a
+// chunk's text is never decoded (decodeChunkMeta): what one relayed frame
+// costs the reader is its bytes, read once.
+type sseRelay struct {
+	onFrame     func([]byte) error
+	grow        func(int) error // the context's WithGrowthBooking (nil: none)
+	data        sseFrame
+	line, spare []byte
+	frames      int
+	finish      string
+	done        bool
+	usage       *usageBody
+	timings     *timingsBody
+	id          string
+	model       string
+}
+
+// dataPrefix is the field name of an SSE data line.
+var dataPrefix = []byte("data:")
 
 func (rl *sseRelay) run(r io.Reader, frameCap int) error {
 	br := bufio.NewReader(httpx.CapBody(r, maxStreamBytes))
 	for !rl.done {
-		line, readErr := readSSELineMax(br, frameCap)
+		buf := &rl.line
+		if rl.data.holds() {
+			buf = &rl.spare
+		}
+		line, readErr := readSSELineInto(br, *buf, frameCap, rl.grow)
+		*buf = line
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("llm: read stream: %w", readErr)
 		}
-		line = strings.TrimRight(line, "\r\n")
+		line = bytes.TrimRight(line, "\r\n")
 		var err error
 		switch {
-		case line == "":
+		case len(line) == 0:
 			err = rl.dispatch()
-		case strings.HasPrefix(line, "data:"):
-			err = rl.data.add(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		case bytes.HasPrefix(line, dataPrefix):
+			v := line[len(dataPrefix):]
+			if len(v) > 0 && v[0] == ' ' {
+				v = v[1:]
+			}
+			err = rl.data.addBytes(v)
 		}
 		if err != nil {
 			return err
@@ -586,28 +685,26 @@ func (rl *sseRelay) run(r io.Reader, frameCap int) error {
 }
 
 func (rl *sseRelay) dispatch() error {
-	payload, ok := rl.data.take()
+	payload, ok := rl.data.takeBytes()
 	if !ok {
 		return nil
 	}
-	if strings.TrimSpace(payload) == doneSentinel {
+	if string(bytes.TrimSpace(payload)) == doneSentinel {
 		rl.done = true
 		return nil
 	}
-	var chunk streamChunk
-	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+	chunk, err := decodeChunkMeta(payload)
+	if err != nil {
 		return fmt.Errorf("llm: malformed stream chunk: %w", err)
 	}
 	if chunk.Error != nil {
 		return chunk.Error.toStreamError()
 	}
-	if len(chunk.Choices) > 0 {
-		switch fr := chunk.Choices[0].FinishReason; {
-		case fr == "error":
-			return &StreamError{Message: "stream finished with finish_reason \"error\""}
-		case fr != "" && rl.finish == "":
-			rl.finish = fr
-		}
+	switch fr := chunk.FinishReason; {
+	case fr == "error":
+		return &StreamError{Message: "stream finished with finish_reason \"error\""}
+	case fr != "" && rl.finish == "":
+		rl.finish = fr
 	}
 	if chunk.ID != "" {
 		rl.id = chunk.ID
@@ -622,7 +719,7 @@ func (rl *sseRelay) dispatch() error {
 		rl.timings = chunk.Timings
 	}
 	rl.frames++
-	if err := rl.onFrame([]byte(payload)); err != nil {
+	if err := rl.onFrame(payload); err != nil {
 		return fmt.Errorf("llm: stream frame callback: %w", err)
 	}
 	return nil

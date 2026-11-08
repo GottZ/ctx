@@ -152,7 +152,7 @@ func censusMount(r *chatRig, path string, h http.Handler) http.Handler {
 			})
 		})
 		g.Use(oai.Recover)
-		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Logger: slog.New(slog.DiscardHandler)}))
+		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Binder: acceptPeerBinder{}, Logger: slog.New(slog.DiscardHandler)}))
 		g.Use(handler.MaxBodySizeStrictWith(func() int64 { return r.settings.Load().MaxRequestBytes }, oai.RefuseRequestTooLarge))
 		g.Use(oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Method(http.MethodPost, path, h)
@@ -252,6 +252,19 @@ func censusCases() []censusCase {
 			prep: func(_ *testing.T, _ censusRoute, r *chatRig, _ censusEngine) {
 				r.setSettings(func(s *oai.Settings) { s.MaxRequestBytes = 16 })
 			},
+			status: http.StatusRequestEntityTooLarge, code: oai.CodeRequestTooLarge,
+			reason: keyquota.RejectCapacity, detail: keyquota.DetailRequestTooLarge},
+		// RC-D C8: the scan cap (gateway.scan_max_request_bytes) refuses a
+		// body to an alias below credentials past it, in the route, before
+		// the scan — a route declaration, not the stage's.
+		{name: "scan cap 413 (alias below credentials)",
+			prep: func(t *testing.T, rt censusRoute, r *chatRig, _ censusEngine) {
+				if rt.op == llmlog.GatewayOpEmbed {
+					r.reg.reload(t, embedScanAliases())
+				}
+				r.setSettings(func(s *oai.Settings) { s.ScanMaxRequestBytes = 16 })
+			},
+			body:   func(rt censusRoute) string { return rt.body(censusScanAliases[rt.op]) },
 			status: http.StatusRequestEntityTooLarge, code: oai.CodeRequestTooLarge,
 			reason: keyquota.RejectCapacity, detail: keyquota.DetailRequestTooLarge},
 		{name: "in-flight budget stage 503",
@@ -410,6 +423,10 @@ func censusCases() []censusCase {
 		{name: "200 served", status: http.StatusOK},
 	}
 }
+
+// censusScanAliases is each route's alias below credentials (the embeddings
+// route's after the scan-cap case reloads embedScanAliases).
+var censusScanAliases = map[string]string{llmlog.GatewayOpChat: "pub", llmlog.GatewayOpEmbed: "embpub", llmlog.GatewayOpRerank: "rrpub"}
 
 // runCensus runs every case against rt.
 func runCensus(t *testing.T, rt censusRoute) {

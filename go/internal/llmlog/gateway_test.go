@@ -114,6 +114,7 @@ func fullGateway() Gateway {
 		ClientReqID:  "req_01:abc-9.Z",
 		Finish:       FinishStop,
 		ModelKeyID:   gwTestModelKey,
+		PeerInstance: "0195a6f0-0000-7000-8000-0000000000e2",
 	}
 }
 
@@ -135,7 +136,7 @@ func TestStampGatewayShape(t *testing.T) {
 	}
 	gw := gwObject(t, e)
 	keys := slices.Sorted(maps.Keys(gw))
-	want := []string{"alias", "claimed_chain", "client_req_id", "finish", "hop", "model_key_id", "op", "peer_pipeline", "stream", "ttft_ms", "usage", "v"}
+	want := []string{"alias", "claimed_chain", "client_req_id", "finish", "hop", "model_key_id", "op", "peer_instance", "peer_pipeline", "stream", "ttft_ms", "usage", "v"}
 	if !slices.Equal(keys, want) {
 		t.Fatalf("metadata.gw keys %q, want %q", keys, want)
 	}
@@ -143,6 +144,7 @@ func TestStampGatewayShape(t *testing.T) {
 		"v": 1.0, "op": "chat", "alias": "team-chat", "stream": true, "hop": 2.0,
 		"peer_pipeline": "dream-eval", "usage": "estimated", "ttft_ms": 212.0,
 		"client_req_id": "req_01:abc-9.Z", "finish": "stop", "model_key_id": gwTestModelKey,
+		"peer_instance": "0195a6f0-0000-7000-8000-0000000000e2",
 	} {
 		if gw[k] != v {
 			t.Errorf("metadata.gw.%s = %#v, want %#v", k, gw[k], v)

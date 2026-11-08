@@ -12,6 +12,14 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 )
 
+// rerankRequest is Score's wire body as a server decodes it (the production
+// struct of the same name went with FOLGE-R's byte writer, wire_body.go).
+type rerankRequest struct {
+	Model     string   `json:"model"`
+	Query     string   `json:"query"`
+	Documents []string `json:"documents"`
+}
+
 // rerankServer spins up a fake cohere-style /v1/rerank endpoint. The handler
 // receives the decoded request and returns (status, jsonBody).
 func rerankServer(t *testing.T, handler func(req rerankRequest) (int, any)) *httptest.Server {

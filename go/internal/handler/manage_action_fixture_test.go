@@ -88,6 +88,11 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"forge-token-set", "", tierTenantAdmin, "handleForgeTokenSet"},
 	{"gaming-mode", `{}`, tierOpen, "handleGamingMode"},
 	{"gaming-mode", `{"mode":"on"}`, tierServerAdmin, "handleGamingMode"},
+	// gateway-limits-* (W06-15, design/06 §4.3): tenant-admin tier with the
+	// field tiers in the handler.
+	{"gateway-limits-delete", "", tierTenantAdmin, "handleGatewayLimitsDelete"},
+	{"gateway-limits-get", "", tierTenantAdmin, "handleGatewayLimitsGet"},
+	{"gateway-limits-set", "", tierTenantAdmin, "handleGatewayLimitsSet"},
 	{"get", "", tierOpen, "handleGet"},
 	{"guard-list", "", tierOpen, "handleGuardList"},
 	{"guard-resolve", "", tierOpen, "handleGuardResolve"},
@@ -110,6 +115,7 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"model-alias-create", "", tierTenantAdmin, "handleModelAliasCreate"},
 	{"model-alias-delete", "", tierTenantAdmin, "handleModelAliasDelete"},
 	{"model-alias-list", "", tierTenantAdmin, "handleModelAliasList"},
+	{"model-alias-preview", "", tierServerAdmin, "handleModelAliasPreview"},
 	{"model-alias-update", "", tierTenantAdmin, "handleModelAliasUpdate"},
 	// W01-5: the model consumer administration — NEW surface, not pre-table
 	// (design/01 §4.6). Granting a credential is tierSelfService, reading and
@@ -154,9 +160,10 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"update", "", tierOpen, "handleUpdate"},
 }
 
-// fixtureActionNames is the deduplicated enumeration (101 names: the 89 of the
-// pre-table tree plus the four model alias actions of W02-04 and the eight model
-// consumer actions of W01-5; three
+// fixtureActionNames is the deduplicated enumeration (105 names: the 89 of the
+// pre-table tree plus the four model alias actions of W02-04, the eight model
+// consumer actions of W01-5, the three gateway limits actions of W06-15 and
+// model-alias-preview of W05-04; three
 // actions carry two rows for their two data shapes).
 func fixtureActionNames() map[string]struct{} {
 	names := make(map[string]struct{}, len(manageActionFixture))
@@ -166,14 +173,14 @@ func fixtureActionNames() map[string]struct{} {
 	return names
 }
 
-// TestManageActionFixture_Shape guards the fixture itself: 101 distinct actions
-// in 104 rows, alphabetically ordered so a merge conflict is a real conflict.
+// TestManageActionFixture_Shape guards the fixture itself: 105 distinct actions
+// in 108 rows, alphabetically ordered so a merge conflict is a real conflict.
 func TestManageActionFixture_Shape(t *testing.T) {
-	if got := len(manageActionFixture); got != 104 {
-		t.Fatalf("fixture rows = %d, want 104 (101 actions, three of them twice)", got)
+	if got := len(manageActionFixture); got != 108 {
+		t.Fatalf("fixture rows = %d, want 108 (105 actions, three of them twice)", got)
 	}
-	if got := len(fixtureActionNames()); got != 101 {
-		t.Fatalf("fixture actions = %d, want 101", got)
+	if got := len(fixtureActionNames()); got != 105 {
+		t.Fatalf("fixture actions = %d, want 105", got)
 	}
 	for i := 1; i < len(manageActionFixture); i++ {
 		if manageActionFixture[i-1].action > manageActionFixture[i].action {

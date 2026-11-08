@@ -24,7 +24,7 @@ func TestModelGroupRegistersItsRoutersIngress(t *testing.T) {
 	}
 	mountModelGroup(chi.NewRouter(), "/v1", modelGroupDeps{
 		access: testAccessLog(), gate: func(h http.Handler) http.Handler { return h }, door: &handler.ModelDoor{},
-		ingress: mine, maxDepth: func() int { return 3 },
+		ingress: mine, maxDepth: func() int { return 3 }, binder: acceptPeerBinder{}, requirePeerHop: noPeerHop,
 	})
 	if !mine.Registered() {
 		t.Error("mountModelGroup did not register the router's ingress (LoopGuard and PeerIngress, F-W9)")

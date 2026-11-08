@@ -66,7 +66,7 @@ func embedMemMount(r *chatRig, h http.Handler, held *heldSum) chi.Router {
 			})
 		})
 		g.Use(oai.Recover)
-		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Logger: slog.New(slog.DiscardHandler)}))
+		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Binder: acceptPeerBinder{}, Logger: slog.New(slog.DiscardHandler)}))
 		g.Use(handler.MaxBodySizeStrictWith(func() int64 { return r.settings.Load().MaxRequestBytes }, oai.RefuseRequestTooLarge))
 		g.Use(oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Use(func(next http.Handler) http.Handler {

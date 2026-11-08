@@ -460,10 +460,11 @@ services:
       CTX_DISTILL_RETENTION_DAYS: ${CTX_DISTILL_RETENTION_DAYS:-}
       CTX_DISTILL_SEEN_RETENTION_DAYS: ${CTX_DISTILL_SEEN_RETENTION_DAYS:-}
 
-      # ── gateway.* (58) ──
+      # ── gateway.* (60) ──
       CTX_GATEWAY_ENABLED: ${CTX_GATEWAY_ENABLED:-}
       CTX_GATEWAY_MAX_REQUEST_BYTES: ${CTX_GATEWAY_MAX_REQUEST_BYTES:-}
       CTX_GATEWAY_INFLIGHT_BUDGET: ${CTX_GATEWAY_INFLIGHT_BUDGET:-}
+      CTX_GATEWAY_SCAN_MAX_REQUEST_BYTES: ${CTX_GATEWAY_SCAN_MAX_REQUEST_BYTES:-}
       CTX_GATEWAY_MAX_RESPONSE_BYTES: ${CTX_GATEWAY_MAX_RESPONSE_BYTES:-}
       CTX_GATEWAY_MAX_STREAM_FRAME_BYTES: ${CTX_GATEWAY_MAX_STREAM_FRAME_BYTES:-}
       CTX_GATEWAY_EMBEDDING_MAX_FLOATS: ${CTX_GATEWAY_EMBEDDING_MAX_FLOATS:-}
@@ -511,6 +512,7 @@ services:
       CTX_GATEWAY_INSTANCE_ENVELOPE_FACTOR: ${CTX_GATEWAY_INSTANCE_ENVELOPE_FACTOR:-}
       CTX_GATEWAY_CONSUMER_ALLOW_EXTERNAL_DEFAULT: ${CTX_GATEWAY_CONSUMER_ALLOW_EXTERNAL_DEFAULT:-}
       CTX_GATEWAY_CONSUMER_MONTHLY_COST_USD_DEFAULT: ${CTX_GATEWAY_CONSUMER_MONTHLY_COST_USD_DEFAULT:-}
+      CTX_GATEWAY_SOFT_RATIO: ${CTX_GATEWAY_SOFT_RATIO:-}
       CTX_GATEWAY_TENANT_SELF_SERVICE: ${CTX_GATEWAY_TENANT_SELF_SERVICE:-}
       CTX_GATEWAY_KEY_MAX_LIFETIME_APP: ${CTX_GATEWAY_KEY_MAX_LIFETIME_APP:-}
       CTX_GATEWAY_KEY_MAX_LIFETIME_PEER: ${CTX_GATEWAY_KEY_MAX_LIFETIME_PEER:-}
@@ -598,7 +600,10 @@ services:
           # Headroom für engine=ctx-Erstlauf + centroid_build. Stufe 1 (512M) war
           # die Freigabe vom 05.08. gegen die 256M-OOM-Flanke (R7). S12-korrigierte
           # Staffel: >=3G K1 / >=8G K2 + Elternlast am 10M-Ziel (design/04 §6.3).
-          memory: 1G
+          # RC-D C8 (2026-11-08): gateway.inflight_budget default 512 MiB (floor
+          # 257 MiB with the scan cap) — the limit holds the budget plus the
+          # process. GOMEMLIMIT follows after the S4 base-load measurement.
+          memory: 1536M
         reservations:
           memory: 32M
     logging:

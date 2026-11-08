@@ -47,7 +47,7 @@ accounts, the admin bypass excepted (see below); the second ruleset
    approved by another owner — the maintainer's work like anyone else's.
    Every review conversation is resolved before the merge.
 3. **Required status checks** (exact context names): `Lint`, `Unit Tests`,
-   `Unit Tests (windows, tagged packages)`, `Build`, `Web`,
+   `Unit Tests (windows, tagged packages)`, `Conformance`, `Build`, `Web`,
    `Cross-compile (darwin/arm64)`, `Cross-compile (windows/amd64)`,
    `Integration Tests (handler|store|guard|rest|heavy|distill)` and
    `PR title` — the `ci.yml` jobs that run on every pull request. Label-gated

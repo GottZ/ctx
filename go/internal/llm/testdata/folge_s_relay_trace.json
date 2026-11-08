@@ -1,0 +1,186 @@
+[
+ {
+  "name": "plain",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}",
+   "{\"id\":\"I2\",\"model\":\"M2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}"
+  ],
+  "count": 2,
+  "prompt": 3,
+  "completion": 4,
+  "finish": "stop",
+  "model": "M2",
+  "id": "I2"
+ },
+ {
+  "name": "crlf",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}",
+   "{\"id\":\"I2\",\"model\":\"M2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}"
+  ],
+  "count": 2,
+  "prompt": 3,
+  "completion": 4,
+  "finish": "stop",
+  "model": "M2",
+  "id": "I2"
+ },
+ {
+  "name": "no space",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}",
+   "{\"id\":\"I2\",\"model\":\"M2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}"
+  ],
+  "count": 2,
+  "prompt": 3,
+  "completion": 4,
+  "finish": "stop",
+  "model": "M2",
+  "id": "I2"
+ },
+ {
+  "name": "comments and events",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"b\"},\"finish_reason\":null}]}",
+   "{\"id\":\"I2\",\"model\":\"M2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}"
+  ],
+  "count": 2,
+  "prompt": 3,
+  "completion": 4,
+  "finish": "stop",
+  "model": "M2",
+  "id": "I2"
+ },
+ {
+  "name": "multi-line data",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\n\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}"
+  ],
+  "count": 1,
+  "prompt": 0,
+  "completion": 0,
+  "finish": "stop",
+  "model": "M",
+  "id": "I"
+ },
+ {
+  "name": "unterminated final frame",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}",
+   "{\"id\":\"I2\",\"model\":\"M2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}"
+  ],
+  "count": 2,
+  "prompt": 3,
+  "completion": 4,
+  "finish": "stop",
+  "model": "M2",
+  "id": "I2"
+ },
+ {
+  "name": "timings only",
+  "frames": [
+   "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"t\"},\"finish_reason\":\"stop\"}],\"timings\":{\"prompt_n\":9,\"predicted_n\":2}}"
+  ],
+  "count": 1,
+  "prompt": 9,
+  "completion": 2,
+  "finish": "stop",
+  "model": "",
+  "id": ""
+ },
+ {
+  "name": "error object",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}"
+  ],
+  "count": 1,
+  "prompt": 0,
+  "completion": 0,
+  "finish": "",
+  "model": "M",
+  "id": "I",
+  "err": "llm: stream error event: upstream died (code 502)"
+ },
+ {
+  "name": "finish error",
+  "frames": [],
+  "count": 0,
+  "prompt": 0,
+  "completion": 0,
+  "finish": "",
+  "model": "",
+  "id": "",
+  "err": "llm: stream error event: stream finished with finish_reason \"error\""
+ },
+ {
+  "name": "no end",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}"
+  ],
+  "count": 1,
+  "prompt": 0,
+  "completion": 0,
+  "finish": "",
+  "model": "M",
+  "id": "I",
+  "err": "llm: stream ended unexpectedly (no [DONE], no finish_reason)"
+ },
+ {
+  "name": "malformed",
+  "frames": [],
+  "count": 0,
+  "prompt": 0,
+  "completion": 0,
+  "finish": "",
+  "model": "",
+  "id": "",
+  "err": "llm: malformed stream chunk: unexpected end of JSON input"
+ },
+ {
+  "name": "empty data lines",
+  "frames": [],
+  "count": 0,
+  "prompt": 0,
+  "completion": 0,
+  "finish": "",
+  "model": "",
+  "id": "",
+  "err": "llm: malformed stream chunk: unexpected end of JSON input"
+ },
+ {
+  "name": "done with spaces",
+  "frames": [
+   "{\"id\":\"I2\",\"model\":\"M2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}"
+  ],
+  "count": 1,
+  "prompt": 3,
+  "completion": 4,
+  "finish": "stop",
+  "model": "M2",
+  "id": "I2"
+ },
+ {
+  "name": "over the cap",
+  "frames": [],
+  "count": 0,
+  "prompt": 0,
+  "completion": 0,
+  "finish": "",
+  "model": "",
+  "id": "",
+  "err": "llm: read stream: backend response exceeds the size limit: SSE line over 256 bytes"
+ },
+ {
+  "name": "unicode",
+  "frames": [
+   "{\"id\":\"I\",\"model\":\"M\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\u00e4 ä 😀 <&>\"},\"finish_reason\":null}]}",
+   "{\"id\":\"I2\",\"model\":\"M2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}"
+  ],
+  "count": 2,
+  "prompt": 3,
+  "completion": 4,
+  "finish": "stop",
+  "model": "M2",
+  "id": "I2"
+ }
+]

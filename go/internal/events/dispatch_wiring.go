@@ -96,6 +96,10 @@ func DispatchBackendRows(bs []backends.Backend) []dispatch.BackendRow {
 			// instance or an external locality admits on its own — the
 			// external opt-in there is limits.external_offer.
 			SelfAdmitting: b.ProviderClass == backends.ProviderCtx || b.Locality == backends.LocalityExternal,
+			// FOLGE-C: a disabled row routes nothing and takes no part in the
+			// policy (DerivePolicy skips it) — before, one disabled row without
+			// slots switched Enforcing off for the instance.
+			Disabled: !b.Enabled,
 		})
 	}
 	return rows

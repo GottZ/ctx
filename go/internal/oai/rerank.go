@@ -62,8 +62,8 @@ import (
 // (rerankResultBytes per document and the encoder buffer), the sensitivity
 // scan below credentials (scanBooking), the wire calls of every block of an
 // attempt before its first one (rerankUpstreamBooking, rerank_wire.go: the
-// measured allocation of rerank.Score per body byte and per call, the
-// transport's copy and the call's retry) — their certain part before the
+// body in one allocation of its length, the transport's copy, the answer's
+// bounded read, the decode, the call and its retry) — their certain part before the
 // acquire (reserveUpstreamTexts) — and the log row's text (bodyLogSize). A
 // booking the budget cannot hold is 503 server_overloaded before the
 // allocation — nothing booked, nothing allocated, no wire; the log row goes
@@ -287,6 +287,9 @@ func (c *rerankCall) serve() {
 		return
 	}
 	required := c.sensitivity()
+	if overScanCap(c.rec, c.w, required, body, c.s) {
+		return
+	}
 	if !c.coverScan(required, body, depth) {
 		c.overloaded()
 		return
@@ -487,7 +490,7 @@ func (c *rerankCall) admitLimiter() bool {
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
 		return llmlog.GatewayRow{Pipeline: rerankPipeline, ConsumerID: c.ca.ConsumerID,
-			Gateway: llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID}}
+			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID})}
 	}, string(c.required))
 	return true
 }
@@ -1122,10 +1125,10 @@ func (c *rerankCall) record(plan Plan, served *backends.Backend, attempts []llm.
 	c.d.Record(llmlog.GatewayRow{
 		Pipeline:   rerankPipeline,
 		ConsumerID: c.ca.ConsumerID,
-		Gateway: llmlog.Gateway{
+		Gateway: withFederation(c.r.Context(), llmlog.Gateway{
 			Alias: c.alias.Name, Hop: c.rec.Hop, Usage: usage, ClientReqID: clientRequestID(c.r),
 			Finish: out.finish, ModelKeyID: c.ca.ModelKeyID,
-		},
+		}),
 		Telemetry:   tel,
 		Attempts:    attempts,
 		Err:         out.redacted,
