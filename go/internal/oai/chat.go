@@ -655,9 +655,6 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 		c.internal("chain build failed", "error", err)
 		return nil, false
 	}
-	if chain = c.visionChain(chain); chain == nil {
-		return nil, false
-	}
 	gated, err := c.d.gateChain(c.ctx, c.ca, llmlog.GatewayOpChat, chain)
 	var qe *backends.ErrQuotaExceeded
 	switch {
@@ -674,12 +671,18 @@ func (c *chatCall) chain() ([]backends.Backend, bool) {
 		c.refuse(CodeNoEligibleBackend, noEligibleMessage, false)
 		return nil, false
 	}
+	// The image filter judges the rows the request may reach — after the
+	// tenant quota and egress gate (PR #178 review): an image-capable row
+	// the gate drops is no image-capable row of this request's chain.
+	if gated = c.visionChain(gated); gated == nil {
+		return nil, false
+	}
 	return gated, true
 }
 
-// visionChain narrows the chain of an image request on an alias whose vision
-// comes from the backends (FOLGE-Z, modelalias.VisionBackend) to the rows
-// that reported vision=true, in chain order — the alias-level answer is
+// visionChain narrows the gated chain of an image request on an alias whose
+// vision comes from the backends (FOLGE-Z, modelalias.VisionBackend) to the
+// rows that reported vision=true, in chain order — the alias-level answer is
 // "some row of the chain at the alias's floor can", the request's own chain
 // (the consumer's sensitivity, the export rule, cooldown order) decides
 // which rows may get the image (Fremd-Review 1 R1-1/R1-3). No such row: the
