@@ -9,6 +9,7 @@ package oai
 // first write the overflow is immediate, as before.
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -84,9 +85,11 @@ func TestRelayOverflowWaitsForTheFirstWrite(t *testing.T) {
 		close(stop)
 	})
 	t.Run("the run's stop releases the waiting put", func(t *testing.T) {
-		gate := make(chan struct{})
-		write := func([]byte) error { <-gate; return nil }
+		// The writer's first write is cut by the stop (in production: by its
+		// write deadline) and returns an error — no first write happened, the
+		// run ends, and the waiting put gets the run's cause, not nil.
 		stop := make(chan struct{})
+		write := func([]byte) error { <-stop; return context.Canceled }
 		rl := newStreamRelay(time.Time{}, make([]byte, 100), write, stop, nil, drainMeter{}, nil)
 		if err := rl.put(relayChunk(0, 92)); err != nil {
 			t.Fatal(err)
@@ -95,7 +98,6 @@ func TestRelayOverflowWaitsForTheFirstWrite(t *testing.T) {
 		go func() { second <- rl.put(relayChunk(1, 92)) }()
 		time.Sleep(50 * time.Millisecond)
 		close(stop) // the upstream was aborted: the writer stops before its first write
-		close(gate)
 		select {
 		case err := <-second:
 			if err == nil {
