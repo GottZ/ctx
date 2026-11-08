@@ -585,7 +585,7 @@ func baseCheckPart(at string, raw json.RawMessage, l policyLimits) *paramError {
 		}
 	case "image_url":
 		if !l.vision {
-			return unsupportedValue(at+".image_url.url", "this model does not accept images")
+			return unsupportedValue(at+".image_url.url", l.visionRefusal)
 		}
 		allowed["image_url"] = true
 		if perr := baseCheckImageURL(at+".image_url", p["image_url"], l.visionMaxBytes); perr != nil {

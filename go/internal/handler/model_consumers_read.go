@@ -360,6 +360,8 @@ func (h *ManageHandler) handleModelConsumerGet(w http.ResponseWriter, r *http.Re
 		"consumer":       newConsumerView(c, chain, ar, now, pol.expiryWarn),
 		"keys_truncated": truncated,
 		"audit":          trail,
+		// FOLGE-Z Z3: the limits the meter applies, per op, with sources.
+		"effective_limits": h.consumerEffectiveLimits(c.ID, c.TenantID, nil, ar.IsServerAdmin()),
 	})
 }
 

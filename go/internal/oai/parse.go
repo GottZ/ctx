@@ -520,7 +520,24 @@ type policyLimits struct {
 	logitBiasMaxEntries, stopMaxEntries                  int
 	vision                                               bool
 	visionMaxBytes                                       int
+	// visionRefusal is the detail of an image part's refusal: the cause
+	// named (FOLGE-Z §3) — the policy, or the chain of the alias.
+	visionRefusal string
+	// image, when set, records the first accepted image part (its message
+	// and part index) — the request's chain is then narrowed to the rows
+	// that reported vision (FOLGE-Z, chatCall.visionChain). nil: not
+	// recorded (the parse tests, the oracle).
+	image *imagePart
 }
+
+// imagePart is the position of the first image part of a request.
+type imagePart struct {
+	i, j int
+	seen bool
+}
+
+// param is the part's url path, the param of a refusal.
+func (p *imagePart) param() string { return partPath(p.i, p.j) + ".image_url.url" }
 
 func optOr(o modelalias.Opt[int], def int) int {
 	if o.Set {
@@ -538,8 +555,16 @@ func limitsOf(a modelalias.Alias, s Settings) policyLimits {
 		responseFormatMaxBytes: optOr(p.ResponseFormatMaxBytes, modelalias.DefaultResponseFormatMaxBytes),
 		logitBiasMaxEntries:    optOr(p.LogitBiasMaxEntries, modelalias.DefaultLogitBiasMaxEntries),
 		stopMaxEntries:         optOr(p.StopMaxEntries, modelalias.DefaultStopMaxEntries),
-		vision:                 p.Vision.Set && p.Vision.V,
 		visionMaxBytes:         optOr(p.VisionMaxBytes, modelalias.DefaultVisionMaxBytes),
+	}
+	// FOLGE-Z Z2: policy.vision decides when set; unset, the chain's probe
+	// answer resolved at the registry's load (modelalias.DoorVision).
+	var src modelalias.VisionSource
+	l.vision, src = modelalias.DoorVision(a)
+	if src == modelalias.VisionPolicy {
+		l.visionRefusal = "this model does not accept images (policy.vision=false)"
+	} else {
+		l.visionRefusal = "this model does not accept images (no image-capable backend in the chain of alias " + a.Name + ")"
 	}
 	if s.MaxRequestBytes > 0 && int64(l.visionMaxBytes) > s.MaxRequestBytes {
 		l.visionMaxBytes = int(s.MaxRequestBytes)
@@ -1149,10 +1174,13 @@ func checkPart(i, j int, raw []byte, l policyLimits) *paramError {
 		}
 	case "image_url":
 		if !l.vision {
-			return unsupportedValue(partPath(i, j)+".image_url.url", "this model does not accept images")
+			return unsupportedValue(partPath(i, j)+".image_url.url", l.visionRefusal)
 		}
 		if perr := checkImageURL(i, j, vals[partImage], l.visionMaxBytes); perr != nil {
 			return perr
+		}
+		if l.image != nil && !l.image.seen {
+			*l.image = imagePart{i: i, j: j, seen: true}
 		}
 		if vals[partText] != nil {
 			other, refused = "text", true

@@ -52,6 +52,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/gatewaylimits"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -502,6 +503,18 @@ type consumerCreateRequest struct {
 	AllowedCIDRs      []string   `json:"allowed_cidrs"`
 	AllowPlaintext    bool       `json:"allow_plaintext"`
 	ExpiresAt         *time.Time `json:"expires_at"`
+	// Limits are the consumer's starting limits per op (FOLGE-Z Z3): each
+	// op's dimensions are written as the consumer's row of the CALLER's tier
+	// in the create's transaction — validated like gateway-limits-set.
+	Limits *consumerCreateLimits `json:"limits"`
+}
+
+// consumerCreateLimits is the limits object of model-consumer-create: one
+// optional value set per op (an unknown op is an unknown field, 400).
+type consumerCreateLimits struct {
+	Chat   *gatewaylimits.Values `json:"chat"`
+	Embed  *gatewaylimits.Values `json:"embed"`
+	Rerank *gatewaylimits.Values `json:"rerank"`
 }
 
 // validate checks the payload's shape (no tier, no database).
@@ -604,13 +617,18 @@ func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http
 		writeConsumerStoreError(w, r, err, "model-consumer-create")
 		return
 	}
+	// Starting limits (FOLGE-Z Z3): validated before anything is written.
+	limits, ok := h.consumerStartLimits(w, ar, tenant, d.Limits)
+	if !ok {
+		return
+	}
 	now := time.Now()
 	expiry, err := pol.keyExpiry(d.Kind, d.ExpiresAt, now)
 	if err != nil {
 		writeConsumerError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	spec := store.ModelConsumerSpec{
+	spec := store.ModelConsumerSpec{Limits: limits,
 		TenantID: tenant, Label: d.Label, Description: d.Description, Kind: d.Kind,
 		TenantScope: d.TenantScope, AllModels: d.AllModels, Models: d.Models, AllowPlaintext: d.AllowPlaintext,
 	}
@@ -631,10 +649,16 @@ func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http
 		writeConsumerStoreError(w, r, err, "model-consumer-create")
 		return
 	}
+	if len(limits) > 0 {
+		h.reloadGL(r) // the next request meters under the new rows
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
 		"consumer": h.freshConsumerView(r, ar, pol, c, []store.ModelKeyInfo{k}),
 		"api_key":  key.Plaintext(), // shown once (reveal-once, K-05-3)
+		// What the meter applies, per op, each dimension with its source —
+		// no hidden default (FOLGE-Z Z3).
+		"effective_limits": h.consumerEffectiveLimits(c.ID, c.TenantID, startLimitRows(c.ID, limits), ar.IsServerAdmin()),
 	})
 }
 

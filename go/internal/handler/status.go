@@ -607,9 +607,12 @@ type cheapSnapshot struct {
 	// the numbers are these" from "could not measure, these are the last ones we
 	// could" — a distinction the section-level degradations (a nil section, an
 	// empty aggregate) each swallow on their own.
-	degraded       bool
-	health         healthResponse
-	backends       []backends.BackendStatus
+	degraded bool
+	health   healthResponse
+	backends []backends.BackendStatus
+	// targetCaps are the capability probe results per dispatch origin
+	// (FOLGE-Z Z1), captured with the dispatch snapshot below.
+	targetCaps     map[string][]dispatchTargetCapability
 	dreamMode      string
 	dreamThrottleS int
 	lastCycleAt    *time.Time
@@ -1163,6 +1166,9 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 		snap.dispatch = c.dispatch.Snapshot()
 		snap.dispatchOK = true
 		snap.dispatchEnforcing = c.dispatch.Enforcing()
+		if c.backendPool != nil {
+			snap.targetCaps = dispatchTargetCapabilitiesOf(c.backendPool)
+		}
 	}
 	if src, ok := c.dreams.(armRunSource); ok {
 		g, d, o := src.LastArmRuns()
@@ -1517,6 +1523,7 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 	if cheap.dispatchOK {
 		disp = buildDispatchAdmin(cheap.dispatch, cheap.dispatchEnforcing,
 			cheap.lastGuardAt, cheap.lastDigestAt, cheap.lastOverviewAt, l)
+		withTargetCapabilities(disp, cheap.targetCaps)
 	}
 	// profiles is PRESENT on the server-admin path (pointer, even when empty);
 	// the per-tenant SnapshotForTenant never calls assemble, so it leaves the

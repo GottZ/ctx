@@ -87,6 +87,9 @@ type dispatchTarget struct {
 	Background          dispatchWait            `json:"background"`
 	Preempt             dispatchPreempt         `json:"preempt"`
 	Buckets             []dispatchBucket        `json:"buckets"`
+	// Capabilities are the probe results of the pool rows behind this
+	// origin (FOLGE-Z Z1, status_capabilities.go).
+	Capabilities []dispatchTargetCapability `json:"capabilities"`
 }
 
 // dispatchExternalRejects counts the refusals of one external class on one
