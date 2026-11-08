@@ -192,7 +192,7 @@ func (e *reauthEnv) routes() http.Handler {
 		})
 		g.Use(oai.Recover, e.door.Handler,
 			handler.LoopGuard(handler.LoopGuardConfig{MaxDepth: func() int { return 3 }, Envelope: handler.LoopGuardOpenAI}),
-			federation.PeerIngress(federation.PeerIngressConfig{Consumer: handler.ConsumerAuthFromContext, Logger: slog.New(slog.DiscardHandler)}),
+			federation.PeerIngress(federation.PeerIngressConfig{Consumer: handler.ConsumerAuthFromContext, Binder: acceptPeerBinder{}, Logger: slog.New(slog.DiscardHandler)}),
 			oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Method(http.MethodPost, "/chat/completions", oai.ChatCompletions(r.deps))
 	})

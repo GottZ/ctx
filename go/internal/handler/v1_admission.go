@@ -16,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llm"
@@ -205,11 +206,26 @@ func peerHintUrgent(in fedhop.Inbound) bool {
 	return fedhop.MergeClass(urgent, in.Class) == urgent
 }
 
+// RequestLane is the lane of the request in ctx: ResolveLane over the
+// request's inbound federation state, whose Ctx-Class counts only when
+// federation.PeerHint confirms it — a ctx-peer the PeerIngress proved
+// against its binding (F-W12, design/04 §4.9). An unproved peer (a stage
+// injected past the PeerIngress, a router without it) keeps its ceiling
+// rule without the hint: bulk. The planner and the meter both take the
+// lane from here, so the slot and the bucket can never disagree.
+func RequestLane(ctx context.Context, ca *auth.ConsumerAuth, serviceTier string) string {
+	in := fedhop.InboundFrom(ctx)
+	if _, ok := federation.PeerHint(ctx); !ok {
+		in.Class = ""
+	}
+	return ResolveLane(ca, in, serviceTier)
+}
+
 // Plan implements oai.AdmissionPlanner: lane, chain filter, acquirer — the
 // acquirer binds the lane's class (urgent ⇒ XU, bulk ⇒ XB). A lane without
 // a class and an empty filtered chain are refusals before any acquire.
 func (a *V1Admission) Plan(ctx context.Context, ca *auth.ConsumerAuth, in oai.AdmissionInput) (oai.Plan, error) {
-	lane := ResolveLane(ca, fedhop.InboundFrom(ctx), in.ServiceTier)
+	lane := RequestLane(ctx, ca, in.ServiceTier)
 	class, ok := laneClass(lane)
 	if !ok {
 		return oai.Plan{Lane: lane}, ErrLaneNotOffered

@@ -248,7 +248,7 @@ func (r *chatRig) mountEmbed(h http.Handler) chi.Router {
 			})
 		})
 		g.Use(oai.Recover)
-		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Logger: slog.New(slog.DiscardHandler)}))
+		g.Use(federation.PeerIngress(federation.PeerIngressConfig{Consumer: r.deps.Consumer, Binder: acceptPeerBinder{}, Logger: slog.New(slog.DiscardHandler)}))
 		g.Use(oai.InflightBudget(&r.budget, func() oai.Settings { return *r.settings.Load() }))
 		g.Method(http.MethodPost, "/embeddings", h)
 	})

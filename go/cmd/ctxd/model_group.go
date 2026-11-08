@@ -44,6 +44,14 @@ type modelGroupDeps struct {
 	// the PeerIngress behind it (F-W9): both are fixed in the group between
 	// the door and inner (K14), so no mount can leave them out.
 	maxDepth func() int
+	// binder writes the PeerIngress's trust-on-first-use peer binding
+	// (F-W12: auth.PeerBindings over the pool), requirePeerHop is the
+	// federation.require_peer_hop getter (federationRequirePeerHopGetter),
+	// events the peer_bound hook of the usage events (W06-18; nil until the
+	// integrator wires the adapter — the stage then notes nothing).
+	binder         federation.PeerBinder
+	requirePeerHop func() bool
+	events         federation.EventNoter
 	// inner are the stages after the door, the LoopGuard and the
 	// PeerIngress, in order (body cap, in-flight budget; design/02 §4.2,
 	// W02-05ff.).
@@ -82,14 +90,19 @@ type modelRoute struct {
 //     the root's SPA fallback (chi hands a sub-router without its own
 //     handler the parent's).
 //
-// A missing access log, gate, door, ingress or depth getter is a wiring bug and
-// panics at mount time.
+// A missing access log, gate, door, ingress, depth getter, peer binder or
+// require_peer_hop getter is a wiring bug and panics at mount time.
 func mountModelGroup(r chi.Router, prefix string, deps modelGroupDeps) {
-	if deps.access == nil || deps.gate == nil || deps.door == nil || deps.ingress == nil || deps.maxDepth == nil {
-		panic("mountModelGroup " + prefix + ": the access log, the gate, the model-key door, the ingress registration and the federation.max_depth getter are required")
+	if deps.access == nil || deps.gate == nil || deps.door == nil || deps.ingress == nil || deps.maxDepth == nil ||
+		deps.binder == nil || deps.requirePeerHop == nil {
+		panic("mountModelGroup " + prefix + ": the access log, the gate, the model-key door, the ingress registration, the federation.max_depth getter, " +
+			"the peer binder and the federation.require_peer_hop getter are required")
 	}
 	loopGuard := handler.LoopGuard(handler.LoopGuardConfig{MaxDepth: deps.maxDepth, Envelope: handler.LoopGuardOpenAI})
-	peerIngress := federation.PeerIngress(federation.PeerIngressConfig{Consumer: handler.ConsumerAuthFromContext})
+	peerIngress := federation.PeerIngress(federation.PeerIngressConfig{
+		Consumer: handler.ConsumerAuthFromContext,
+		Binder:   deps.binder, RequirePeerHop: deps.requirePeerHop, Events: deps.events,
+	})
 	r.Route(prefix, func(g chi.Router) {
 		g.Use(deps.access.Handler, oai.Recover, deps.gate, deps.door.Handler, loopGuard, peerIngress)
 		g.Use(deps.inner...)

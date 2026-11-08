@@ -538,6 +538,8 @@ Every authenticated route under `/api` and `/mcp` — and `/v1`, `/v2` once moun
 | `508` | `federation_loop` | `loop` | the chain repeats an entry, carries one of this instance's hop tokens (then also `Ctx-Loop-Token`) or its instance id |
 | `508` | `federation_depth` | `depth` | the chain already holds `federation.max_depth` entries |
 | `503` | `internal_error` | — | a router without instance identity received a readable chain (test routers only) |
+| `403` | `peer_instance_mismatch` | `peer_mismatch` | `/v1`, `/v2` only: a `ctx-peer` key arrives from another instance than the one it is bound to (last `Ctx-Path` entry ≠ binding) — a misconfigured or copied peer key; the path is a caller-written header, so this detects, it does not authenticate ([security](security.md#peer-binding)) |
+| `400` | `federation_hop_required` | `hop_required` | `/v1`, `/v2` only, with `federation.require_peer_hop` on: a `ctx-peer` request without `Ctx-Path` |
 
 On `/api` and `/mcp` the body is the house envelope (`{"success":false,"error":…,"code":…}`), on `/v1` and `/v2` the OpenAI envelope below with the same status and code (`508` has type `server_error`). The text never names the chain, a token, an instance id, the depth or the limit.
 

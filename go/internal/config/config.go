@@ -2763,6 +2763,15 @@ type FederationConfig struct {
 	// value could never be reached because ParseInbound refuses a longer
 	// chain with 400 first.
 	MaxDepth int `key:"federation.max_depth" env:"-" default:"3" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// RequirePeerHop decides a ctx-peer request without Ctx-Path at the
+	// PeerIngress (design/04 §3.1, §4.6 step 6; wave F-W12): true ⇒ 400
+	// federation_hop_required with Ctx-Reason: hop_required; false
+	// (default) ⇒ served without hints, counted
+	// (federation_peer_without_path) and warned once per consumer — the
+	// version mix of design/04 §7.1. Runbook: switch on only after the
+	// counter stayed 0 over the observation window (§7.2 no. 5). No
+	// validation rule (a bool has no invalid value; V56 stays reserved).
+	RequirePeerHop bool `key:"federation.require_peer_hop" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
 }
 
 // GatewayConsumersConfig is the policy of the consumer and model-key

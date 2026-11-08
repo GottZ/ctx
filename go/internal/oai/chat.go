@@ -709,7 +709,7 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
 		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID,
-			Gateway: llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil}}
+			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil})}
 	}, string(c.required))
 	return true
 }
@@ -1270,10 +1270,10 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 	c.d.Record(llmlog.GatewayRow{
 		Pipeline:   chatPipeline,
 		ConsumerID: c.ca.ConsumerID,
-		Gateway: llmlog.Gateway{
+		Gateway: withFederation(c.r.Context(), llmlog.Gateway{
 			Alias: c.alias.Name, Hop: c.rec.Hop, Usage: st.usageKind, ClientReqID: clientRequestID(c.r),
 			Finish: out.finish, ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil, TTFTMs: ttft,
-		},
+		}),
 		Telemetry:   tel,
 		Attempts:    attempts,
 		Err:         out.redacted,

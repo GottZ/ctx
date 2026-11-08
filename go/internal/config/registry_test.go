@@ -384,6 +384,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"tenant.allow_shared_secrets":           true, // MT3-W5: operator-set per-tenant opt-in flag (global-only)
 		"tenant.allow_cross_tenant_block_grant": true, // MT T43 (07-W6): operator-set per-tenant cross-tenant block-grant opt-in (global-only)
 		"federation.max_depth":                  true, // F-W8: federation topology is settings-only (design/04 §3.1), like every federation.* key
+		"federation.require_peer_hop":           true, // F-W12: the pathless-peer switch, settings-only like every federation.* key (design/04 §3.1)
 		"tenant.devmode":                        true, // C6-C: developer-transparency umbrella; settings-only ON PURPOSE — an env would let the privacy default fall without an audit row
 	}
 	seen := map[string]string{}
