@@ -279,7 +279,9 @@
   }
   .error p {
     margin: 0;
-    color: var(--danger);
+    /* --text, not --danger (as ModelsPage / GatewayPage): light-theme --danger
+       on --danger-dim misses AA (RC-D S3 axe probe on /gateway: 3.96:1) */
+    color: var(--text);
   }
   .request-id {
     font-family: var(--font-mono);

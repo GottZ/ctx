@@ -461,7 +461,10 @@
   }
   .error p {
     margin: 0;
-    color: var(--danger);
+    /* --text, not --danger: light-theme --danger on --danger-dim over the
+       canvas measured 3.96:1 by axe (RC-D S3 probe; < 4.5 AA) — the box's
+       border and tint carry the tone */
+    color: var(--text);
   }
   .request-id {
     font-family: var(--font-mono);

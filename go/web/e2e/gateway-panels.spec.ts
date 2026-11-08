@@ -17,7 +17,9 @@
 //     list to that tenant (tenant_id on the wire, only its rows); a
 //     tenant-admin's ?tenant= is ignored
 
+import { AxeBuilder } from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
+import { AXE_TAGS } from './contract/axe'
 import { SENTINEL, gotoArea, modelApiCapabilities, seedSession, type SeededSession } from './fixtures'
 import { PANEL_CALL_ID, PANEL_CONSUMER_A, PANEL_CONSUMER_B, PANEL_TENANT_ID } from './gateway-panels-fixtures'
 
@@ -130,6 +132,30 @@ test.describe('status tile "Model API" (W05-17)', () => {
     const panelCalls = session.calls.filter((c) => c.path === '/api/usage' || c.action === 'model-consumer-list')
     expect(panelCalls, 'gate W05-17: the tile rides the status poll (no own request)').toEqual([])
   })
+
+  // review I2 (C6 S2) pinned in S3: the tenant poll runs every 30 s (the age of
+  // C2's gateway generation) and ONLY while the tab is visible.
+  test('gateway-panels: the tenant tile polls /api/status every 30 s, never while the tab is hidden', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-06-29T12:00:00Z') })
+    const session = await seedSession(page, { role: 'tenant-admin', theme: 'dark', capabilities: CAPS, panels: { gatewayStatus: 'on' } })
+    await gotoArea(page, '/status')
+    await expect(page.locator('section[aria-label="model api"]')).toBeVisible()
+    const polls = () => session.calls.filter((c) => c.path === '/api/status').length
+    const setVisibility = (v: 'visible' | 'hidden') =>
+      page.evaluate((state) => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state }), v)
+    const n0 = polls()
+    await page.clock.runFor(29_000)
+    expect(polls(), 'no poll before 30 s').toBe(n0)
+    await page.clock.runFor(1_000)
+    await expect.poll(polls, 'visible: one poll at 30 s').toBe(n0 + 1)
+    await setVisibility('hidden')
+    await page.clock.runFor(120_000)
+    await page.waitForTimeout(300)
+    expect(polls(), 'hidden: four ticks, no poll').toBe(n0 + 1)
+    await setVisibility('visible')
+    await page.clock.runFor(30_000)
+    await expect.poll(polls, 'visible again: the next tick polls').toBe(n0 + 2)
+  })
 })
 
 test.describe('server-admin bridge (W05-20)', () => {
@@ -161,4 +187,21 @@ test.describe('server-admin bridge (W05-20)', () => {
     await expect(page.locator('main.content tr[data-consumer-row]').first()).toBeVisible()
     expect(listBodies(session)[0]?.tenant_id, 'never sent below server-admin').toBeUndefined()
   })
+})
+
+// RC-D S3: the contract runner scans the default state only — the detail's load
+// error (--danger text on the --danger-dim tint) measured 3.96:1 in light on
+// /gateway before the fix; this pins the detail's own error surface.
+test.describe('consumer detail a11y (RC-D S3)', () => {
+  for (const theme of ['dark', 'light'] as const) {
+    test(`gateway-panels a11y (${theme}): the detail load error carries no axe violation`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      await seedSession(page, { role: 'tenant-admin', theme, capabilities: CAPS, faults: [{ action: 'model-consumer-get', status: 500 }] })
+      await openDetail(page, PANEL_CONSUMER_A)
+      await expect(page.locator('main.content .error p').first()).toBeVisible()
+      await page.waitForTimeout(400)
+      const res = await new AxeBuilder({ page }).withTags([...AXE_TAGS]).analyze()
+      expect(res.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`), 'detail load error').toEqual([])
+    })
+  }
 })
