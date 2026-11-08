@@ -512,7 +512,11 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 13
+    # 20 (was 13) and -timeout=12m (was 8m) since RC-D S3 (2026-11-08): the
+    # oai package alone ran 343–801 s under -race on a loaded host (C7's
+    # measurement at load 54); the per-binary bound is a wall-clock cap, not
+    # a quality gate — a hang still fails, only later.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -543,7 +547,7 @@ jobs:
             -short \
             -race \
             -count=1 \
-            -timeout=8m \
+            -timeout=12m \
             ./...
 
       - name: Upload coverage
