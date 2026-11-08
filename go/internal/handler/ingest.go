@@ -279,6 +279,24 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 	if match.Unchanged() {
 		return IngestResult{Index: index, ID: match.ID, Status: "skipped"}
 	}
+	if chunk.SourceID != "" && match.ID != "" {
+		// InsertChunk can only write its own (source_id, chunk_index) slot.
+		// A matching row outside that slot holds the content identity, so the
+		// insert would hit uq_context_category_title_scope instead of landing.
+		var sameSlot bool
+		if err := h.pool.QueryRow(ctx,
+			`SELECT EXISTS (
+			   SELECT 1 FROM context_blocks
+			    WHERE id = $1 AND source_id::text = $2 AND chunk_index = $3
+			 )`, match.ID, chunk.SourceID, chunk.ChunkIndex).Scan(&sameSlot); err != nil {
+			slog.Error("ingest: chunk slot check error",
+				"error", err, "index", index, "request_id", reqID)
+			return IngestResult{Index: index, Status: "failed", Error: "hash check failed"}
+		}
+		if !sameSlot {
+			return IngestResult{Index: index, ID: match.ID, Status: "skipped"}
+		}
+	}
 
 	// 2. Upsert or InsertChunk depending on whether SourceID is set.
 	var block *store.Block

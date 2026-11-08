@@ -324,4 +324,72 @@ func TestIngestIdenticalContentChunkMode(t *testing.T) {
 			t.Errorf("live rows after second-source ingest = %d, want 1", rows)
 		}
 	})
+
+	t.Run("second_source_different_tags_and_metadata_skips", func(t *testing.T) {
+		firstSource := seedSource(t, pool, "/i139/chunk-first-source-changed.md", "private")
+		secondSource := seedSource(t, pool, "/i139/chunk-second-source-changed.md", "private")
+		const (
+			title   = "i139 chunk second source changed fields"
+			content = "i139 identical chunk content with different source fields"
+		)
+		seed := postIdenticalChunk(t, h, keyCtx, firstSource, title, content,
+			[]string{"chunk-first"}, map[string]any{"run": "first", "surface": "chunk-first"})
+		if seed["status"] != "inserted" {
+			t.Fatalf("seed result = %v, want inserted", seed)
+		}
+		seededID, _ := seed["id"].(string)
+		seeded := readIdenticalChunkState(t, pool, seededID)
+
+		again := postIdenticalChunk(t, h, keyCtx, secondSource, title, content,
+			[]string{"chunk-second"}, map[string]any{"run": "second", "surface": "chunk-second"})
+		if again["status"] != "skipped" || again["id"] != seededID {
+			t.Errorf("second-source changed-fields ingest = %v, want skipped id %s, not failed", again, seededID)
+		}
+		if got := readIdenticalChunkState(t, pool, seededID); !reflect.DeepEqual(got, seeded) {
+			t.Errorf("second-source changed-fields ingest changed the first row:\nseeded: %+v\n     got: %+v", seeded, got)
+		}
+		var rows int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM context_blocks
+			  WHERE category = 'test' AND title = $1 AND scope = 'private' AND NOT is_archived`, title,
+		).Scan(&rows); err != nil {
+			t.Fatalf("count second-source changed-fields chunks: %v", err)
+		}
+		if rows != 1 {
+			t.Errorf("live rows after second-source changed-fields ingest = %d, want 1", rows)
+		}
+	})
+
+	t.Run("block_mode_row_different_tags_skips", func(t *testing.T) {
+		sourceID := seedSource(t, pool, "/i139/chunk-onto-block.md", "private")
+		const (
+			title   = "i139 chunk onto block-mode row"
+			content = "i139 identical content already held by a block-mode row"
+		)
+		status, resp := postIngest(t, h, keyCtx, map[string]any{"source": "i139-block", "chunks": []map[string]any{{
+			"category": "test",
+			"title":    title,
+			"content":  content,
+			"tags":     []string{"block-seed"},
+			"metadata": map[string]any{"run": "seed", "surface": "block-seed"},
+		}}})
+		if status != http.StatusOK {
+			t.Fatalf("seed status = %d, want 200 (body %v)", status, resp)
+		}
+		seed := firstResult(t, resp)
+		if seed["status"] != "updated" {
+			t.Fatalf("block-mode seed result = %v, want updated", seed)
+		}
+		seededID, _ := seed["id"].(string)
+		seeded := readIdenticalContentState(t, pool, title)
+
+		again := postIdenticalChunk(t, h, keyCtx, sourceID, title, content,
+			[]string{"chunk-different"}, map[string]any{"run": "seed", "surface": "block-seed"})
+		if again["status"] != "skipped" || again["id"] != seededID {
+			t.Errorf("chunk onto block-mode row = %v, want skipped id %s, not failed", again, seededID)
+		}
+		if got := readIdenticalContentState(t, pool, title); !reflect.DeepEqual(got, seeded) {
+			t.Errorf("chunk onto block-mode row changed the block:\nseeded: %+v\n     got: %+v", seeded, got)
+		}
+	})
 }

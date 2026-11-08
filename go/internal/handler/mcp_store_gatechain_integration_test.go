@@ -563,7 +563,7 @@ func TestMCPStoreGateChain(t *testing.T) {
 
 		// One payload per arm, differing in CONTENT: the MCP arms run their
 		// scoped hash-NOOP check BEFORE the chain (mcp.go: resolveWriteScope +
-		// HashNOOPCheck ahead of the gate call), so a byte-identical payload
+		// IdenticalContentMatch ahead of the gate call), so a byte-identical payload
 		// behind an arm that already stored it would answer "identical content
 		// already exists" without ever reaching a gate — and the probe would
 		// measure the NOOP instead of the wiring. The title is what the probe
