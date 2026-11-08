@@ -203,7 +203,7 @@ func modelRouteCensus(t *testing.T, f *v1Fixture, rec *v1census.Recorder) (viola
 	}
 	// The planner's own class source (RC-C-INDEX §4: no second class list;
 	// A03-W9 adds XB there): the planner the router itself builds.
-	allowed := gatewayDeps(context.Background(), f.pool, f.cfgStore, f.aliases, nil, nil, f.disp, nil).Planner.AllowedClasses()
+	allowed := gatewayDeps(context.Background(), f.pool, f.cfgStore, f.aliases, nil, nil, f.disp, nil, nil).Planner.AllowedClasses()
 	violations = v1census.Check(f.router, rec, v1census.Options{
 		Prefixes: []string{"/v1", "/v2"},
 		Allowed:  allowed,
@@ -322,7 +322,7 @@ func TestV1AdmissionCensusChatRoute(t *testing.T) {
 	backendPool.SeedSnapshotForTest([]backends.Backend{eng.row("census", 1)})
 	f.disp.UpdatePolicy(dispatch.Policy{Targets: map[string]dispatch.TargetPolicy{eng.srv.URL: {Slots: 4, InternalReserved: 1}}})
 	rec := v1census.NewRecorder(f.disp)
-	d := gatewayDeps(life, f.pool, f.cfgStore, f.aliases, backendPool, backends.NewQuotaAccountant(f.pool, 30*time.Second), f.disp, f.gateway.meter)
+	d := gatewayDeps(life, f.pool, f.cfgStore, f.aliases, backendPool, backends.NewQuotaAccountant(f.pool, 30*time.Second), f.disp, f.gateway.meter, nil)
 	d.Planner = handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: rec, Settings: d.Settings})
 	h := oai.ChatCompletions(d)
 	chat.Store(&h)

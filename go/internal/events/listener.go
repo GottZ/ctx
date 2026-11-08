@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/embedcache"
+	"github.com/GottZ/ctx/internal/gatewaylimits"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/util"
@@ -153,6 +154,10 @@ type SettingsWriteHandler struct {
 	// on context_model_aliases NOTIFYs and on every backlog. nil (tests,
 	// pre-wire) leaves the alias entity branch inert.
 	modelAliases *modelalias.Registry
+	// gatewayLimits is the limits registry of the model API's meter (W06-15,
+	// migration 168), reloaded on context_gateway_limits NOTIFYs and on every
+	// backlog. nil (tests, pre-wire) leaves the limits entity branch inert.
+	gatewayLimits *gatewaylimits.Registry
 }
 
 // NewSettingsWriteHandler creates the hot-reload notification handler.
@@ -329,10 +334,10 @@ func (h *SettingsWriteHandler) HandleNotification(ctx context.Context, notificat
 	// and a full table read per alias write would hold all of them — a burst
 	// of N writes is coalesced into at most two reads (Registry.Trigger). A
 	// failed reload keeps the previous snapshot and is logged by the registry.
-	if p.Entity == "context_model_aliases" {
-		if h.modelAliases != nil {
-			h.modelAliases.Trigger(ctx)
-		}
+	// Gateway-limits entity branch (W06-15, migration 168): the 168 notify
+	// trigger rides this channel with entity=context_gateway_limits — the
+	// same rule (registryEntity).
+	if h.registryEntity(ctx, p.Entity) {
 		return nil
 	}
 	// Disable-profile entity branch (Web-UX U01-W1, design/01 §4.1/N9): the 092
@@ -507,6 +512,8 @@ func (h *SettingsWriteHandler) HandleBacklog(ctx context.Context, channel string
 	if h.modelAliases != nil {
 		h.modelAliases.Trigger(ctx)
 	}
+	// W06-15: a limits write during the disconnect window likewise.
+	h.reloadGatewayLimits(ctx)
 	return nil
 }
 
@@ -545,6 +552,7 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 	// The model-alias registry comes from the owning scheduler as well
 	// (SetModelAliasRegistry, boot happens-before Run; nil = inert).
 	settingsHandler.modelAliases = scheduler.modelAliases
+	settingsHandler.gatewayLimits = scheduler.gatewayLimits
 	listener.Handle(channelSettingsWrite, settingsHandler)
 	// W01-8: revocations of model keys reach the model-key door's in-flight
 	// registry, which ends the running /v1 requests of a dead key; the
@@ -560,4 +568,33 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 	}
 
 	return listener
+}
+
+// reloadGatewayLimits schedules a reload of the limits registry (the
+// context_gateway_limits entity branch and every backlog). Asynchronous like
+// the alias registry: the NOTIFY loop serves every channel and never waits
+// for a table read (Registry.Trigger coalesces a burst). nil (tests,
+// pre-wire) is inert.
+func (h *SettingsWriteHandler) reloadGatewayLimits(ctx context.Context) {
+	if h.gatewayLimits != nil {
+		h.gatewayLimits.Trigger(ctx)
+	}
+}
+
+// registryEntity triggers the in-memory registry an entity's table feeds —
+// the model aliases (W02-03) and the gateway limits (W06-15) — and reports
+// whether the entity was one of them (the notification is then handled:
+// no settings reload, no tenant invalidation).
+func (h *SettingsWriteHandler) registryEntity(ctx context.Context, entity string) bool {
+	switch entity {
+	case "context_model_aliases":
+		if h.modelAliases != nil {
+			h.modelAliases.Trigger(ctx)
+		}
+	case "context_gateway_limits":
+		h.reloadGatewayLimits(ctx)
+	default:
+		return false
+	}
+	return true
 }

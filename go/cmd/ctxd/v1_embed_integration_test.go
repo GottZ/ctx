@@ -144,7 +144,7 @@ func newV1EmbedFixture(t *testing.T, eng *v1EmbedEngine) *v1EmbedFixture {
 		out := append([]modelRoute(nil), routes...)
 		for i, r := range out {
 			if r.method == http.MethodPost && r.pattern == "/embeddings" {
-				d := gatewayDeps(sctx, f.pool, cfgStore, aliases, backendPool, quota, disp, nil)
+				d := gatewayDeps(sctx, f.pool, cfgStore, aliases, backendPool, quota, disp, nil, nil)
 				d.Limiter = limiter
 				out[i].handler = oai.Embeddings(d)
 			}

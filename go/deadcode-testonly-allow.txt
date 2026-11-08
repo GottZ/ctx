@@ -218,3 +218,4 @@ internal/testdb/setup.go	newDatabase	# testdb: integration-getaggtes Container-/
 internal/testdb/setup.go	prepareDatabase	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
 migrations/fold.go	IsFolded	# Prod iteriert Folded() (store/migrations.go:268, check.go:164); IsFolded nur in fold_test.go:84/87
 migrations/fold.go	Section	# Nur Tests lesen Migrations-SQL über Section (fold_test.go:34 + 33 Integrationstests); Runner nutzt FS
+internal/gatewaylimits/gatewaylimits.go	FieldError.Error	# W06-15: FieldError erfüllt error für Tests und %v-Logs; die Handler schreiben Field/Code/Msg einzeln (400 + param)

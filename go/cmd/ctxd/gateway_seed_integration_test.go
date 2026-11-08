@@ -71,7 +71,7 @@ func TestGatewayBootSeedRestoresTheBudget(t *testing.T) {
 	if !gw.meter.Seeded() {
 		t.Fatal("the restarted gateway's meter is not seeded")
 	}
-	l := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+	l := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
 	est := oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 1, ClientMaxTokens: true, PromptRunes: 9}
 	_, ref := l.Admit(ctx, urgentConsumerOf(consumer, store.DefaultTenantID), modelalias.Alias{}, est)
 	if ref == nil || ref.Code != oai.CodeInsufficientQuota || ref.ShouldRetry {
@@ -107,7 +107,7 @@ func TestGatewayRestartDuringOpenReservations(t *testing.T) {
 			}
 			cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_DAILY_TOKENS_DEFAULT": "1000000", "CTX_GATEWAY_CONSUMER_CONCURRENCY_DEFAULT": "8"})
 			gw := newModelGateway(pool, cfgStore)
-			l := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+			l := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
 			ca := urgentConsumerOf(consumer, store.DefaultTenantID)
 			est := oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 4000, ClientMaxTokens: true, PromptRunes: 900}
 			row := func(u dispatch.Usage, usage string) llmlog.GatewayRow {
@@ -149,7 +149,7 @@ func TestGatewayRestartDuringOpenReservations(t *testing.T) {
 				t.Fatal(err)
 			}
 			gw2 := newModelGateway(pool, cfgStore) // the restart
-			l2 := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw2.meter).Limiter
+			l2 := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw2.meter, nil).Limiter
 			_, ref = l2.Admit(ctx, ca, modelalias.Alias{}, oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 1, ClientMaxTokens: true})
 			if exhausted := ref != nil && ref.Code == oai.CodeInsufficientQuota; exhausted != force {
 				t.Fatalf("after the restart with a budget of the %d tokens used before: refusal %+v — want exhausted=%v", usedBefore, ref, force)
@@ -177,7 +177,7 @@ func TestShutdownSequenceSettlesOpenReservations(t *testing.T) {
 			}
 			cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_DAILY_TOKENS_DEFAULT": "1000000", "CTX_GATEWAY_CONSUMER_CONCURRENCY_DEFAULT": "8"})
 			gw := newModelGateway(pool, cfgStore)
-			l := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw.meter).Limiter
+			l := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
 			ca := urgentConsumerOf(consumer, store.DefaultTenantID)
 			est := oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 4000, ClientMaxTokens: true, PromptRunes: 900}
 			var used int64
@@ -206,7 +206,7 @@ func TestShutdownSequenceSettlesOpenReservations(t *testing.T) {
 				t.Fatal(err)
 			}
 			gw2 := newModelGateway(pool, cfgStore)
-			l2 := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw2.meter).Limiter
+			l2 := gatewayDeps(ctx, pool, cfgStore, nil, nil, nil, nil, gw2.meter, nil).Limiter
 			_, ref := l2.Admit(ctx, ca, modelalias.Alias{}, oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 1, ClientMaxTokens: true})
 			if exhausted := ref != nil && ref.Code == oai.CodeInsufficientQuota; exhausted != withStep {
 				t.Fatalf("after the teardown, budget = the %d tokens the open requests used: refusal %+v — want exhausted=%v", used, ref, withStep)

@@ -86,6 +86,10 @@ type MeterSettings struct {
 	// design/06 §4.3; > 0).
 	AllowExternal  bool
 	MonthlyCostUSD float64
+	// ConcurrencyCap is dispatch.external_queue_per_consumer (0 = no cap):
+	// the bound V48 sets on Concurrency, applied per limits row too (wave
+	// W06-15, W06-11 handover).
+	ConcurrencyCap int64
 }
 
 // OpLimits are one op's requests and tokens per minute and its tokens per

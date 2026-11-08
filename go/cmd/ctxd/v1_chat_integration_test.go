@@ -224,7 +224,7 @@ func newV1ChatFixture(t *testing.T, rows []backends.Backend) *v1ChatFixture {
 		out := append([]modelRoute(nil), routes...)
 		for i, r := range out {
 			if r.method == http.MethodPost && r.pattern == "/chat/completions" {
-				d := gatewayDeps(sctx, f.pool, cfgStore, aliases, backendPool, quota, disp, nil)
+				d := gatewayDeps(sctx, f.pool, cfgStore, aliases, backendPool, quota, disp, nil, nil)
 				d.Limiter = f.limiter
 				out[i].handler = oai.ChatCompletions(d)
 			}

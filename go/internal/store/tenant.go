@@ -666,6 +666,13 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 			tenantID); err != nil {
 			return fmt.Errorf("model grants: %w", err)
 		}
+		// W06-15: the limits rows of the tenant and its consumers, here in
+		// the stamped transaction and before the consumers — a CASCADE
+		// would write their audit rows without the tenant (consumer gone)
+		// or without via (tenant row, step 8, outside this transaction).
+		if err := pruneGatewayLimits(ctx, tx, tenantID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM context_model_keys WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
 			tenantID); err != nil {

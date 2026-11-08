@@ -15,6 +15,8 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/gatewaylimits"
+	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/sealbox"
 	"github.com/GottZ/ctx/internal/store"
@@ -80,6 +82,12 @@ type ManageHandler struct {
 	// (server.go); a nil getter ⇒ the writing actions answer 503.
 	modelAliases  *modelalias.Registry
 	aliasCeilings func() modelalias.Ceilings
+	// gatewayLimits / gatewayLimitDefaults feed the gateway-limits-*
+	// actions (W06-15): the registry reloads after every committed write,
+	// the getter yields the settings floor per op. Wired via
+	// SetGatewayLimits (server.go); nil ⇒ the actions answer 503.
+	gatewayLimits        *gatewaylimits.Registry
+	gatewayLimitDefaults func(op keyquota.Op) gatewaylimits.Defaults
 	// inflight is the model-key door's in-flight registry (W01-8):
 	// model-key-revoke and model-consumer-delete end the running requests
 	// of what they revoked through it, right after the commit, and answer

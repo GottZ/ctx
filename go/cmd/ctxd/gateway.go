@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/gatewaylimits"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/llmusage"
@@ -297,7 +298,8 @@ func startModelGateway(g *modelGateway) func() {
 // meter leaves the limiter nil, and the chat route then answers 503
 // service_unavailable (L11: never served without it).
 func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config.Store, aliases *modelalias.Registry,
-	backendPool *backends.Pool, quota *backends.QuotaAccountant, dispatcher *dispatch.Dispatcher, meter *keyquota.Meter) oai.Deps {
+	backendPool *backends.Pool, quota *backends.QuotaAccountant, dispatcher *dispatch.Dispatcher, meter *keyquota.Meter,
+	limits *gatewaylimits.Registry) oai.Deps {
 	settings := gatewaySettingsGetter(cfgStore)
 	d := oai.Deps{
 		Consumer:      handler.ConsumerAuthFromContext,
@@ -329,8 +331,8 @@ func gatewayDeps(lifecycle context.Context, pool *pgxpool.Pool, cfgStore *config
 		d.Planner = handler.NewV1Admission(handler.V1AdmissionConfig{Dispatch: dispatcher, Settings: settings})
 	}
 	if meter != nil {
-		d.Limiter = meterLimiter{meter: meter, settings: settings}
-		d.Egress = meterLimiter{meter: meter, settings: settings}
+		d.Limiter = meterLimiter{meter: meter, settings: settings, limits: limits}
+		d.Egress = meterLimiter{meter: meter, settings: settings, limits: limits}
 	}
 	return d
 }
@@ -508,15 +510,35 @@ func (g *modelGateway) flushRejections() {
 type meterLimiter struct {
 	meter    *keyquota.Meter
 	settings func() oai.Settings
+	// limits are the rows of context_gateway_limits (wave W06-15): read once
+	// per call, so a row written or reloaded applies from the next request
+	// on and a running request keeps the limits it was admitted under. nil
+	// = no rows, the settings floor for every consumer.
+	limits *gatewaylimits.Registry
 }
 
-// meterLimits are the meter limits of op for ca from one settings snapshot s: the
-// subject (lane only for an admission) and the minute, L1, budget and
-// envelope limits. Until the limits rows of W06-15 the registry defaults
-// hold for every consumer and the envelopes are the factors × them
-// (design/06 §4.3; W06-13 budgets, W06-14 cost).
-func meterLimits(s oai.MeterSettings, ca *auth.ConsumerAuth, opName string) (keyquota.Subject, keyquota.Limits, oai.OpLimits) {
+// meterLimits are the meter limits of op for ca from one settings snapshot s
+// and one limits snapshot snap: the subject (lane only for an admission) and
+// the minute, L1, budget and envelope limits as the limits rows resolve them
+// over the settings floor (wave W06-15, gatewaylimits.Snapshot.Resolve;
+// design/06 §4.3) — consumer row, tenant row, instance row, settings.
+func meterLimits(s oai.MeterSettings, snap *gatewaylimits.Snapshot, ca *auth.ConsumerAuth, opName string) (keyquota.Subject, keyquota.Limits, gatewaylimits.Effective) {
 	op, _ := keyquota.ParseOp(opName) // an unknown op stays "" and is refused as invalid
+	var consumer, tenant string // a nil consumer stays empty and is refused as invalid
+	if ca != nil {
+		consumer, tenant = ca.ConsumerID, ca.TenantID
+	}
+	eff := snap.Resolve(consumer, tenant, op, meterDefaults(s, op))
+	return keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op},
+		keyquota.Limits{RPM: eff.RPM, TPM: eff.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: eff.Concurrency,
+			Consumer: eff.Consumer, Tenant: eff.Tenant, Instance: eff.Instance},
+		eff
+}
+
+// meterDefaults is the settings floor of op from one settings snapshot s
+// (the gateway.* keys of W06-10 … W06-14 and the V48 cap). An unknown op
+// has no floor: its zero limits are refused as invalid by the meter.
+func meterDefaults(s oai.MeterSettings, op keyquota.Op) gatewaylimits.Defaults {
 	var lim oai.OpLimits
 	switch op {
 	case keyquota.OpChat:
@@ -526,34 +548,30 @@ func meterLimits(s oai.MeterSettings, ca *auth.ConsumerAuth, opName string) (key
 	case keyquota.OpRerank:
 		lim = s.Rerank
 	}
-	var consumer, tenant string // a nil consumer stays empty and is refused as invalid
-	if ca != nil {
-		consumer, tenant = ca.ConsumerID, ca.TenantID
-	}
-	own := keyquota.Budget{DailyTokens: lim.DailyTokens, MonthlyTokens: s.MonthlyTokens, DailyRequests: s.DailyRequests, MonthlyCostUSD: s.MonthlyCostUSD}
-	return keyquota.Subject{ConsumerID: consumer, TenantID: tenant, Op: op},
-		keyquota.Limits{RPM: lim.RPM, TPM: lim.TPM, CompletionReserve: s.TPMReserve, XUReserve: s.XUReserveRatio, Concurrency: s.Concurrency,
-			Consumer: own, Tenant: own.Scale(s.TenantEnvelopeFactor), Instance: own.Scale(s.InstanceEnvelopeFactor)},
-		lim
+	return gatewaylimits.Defaults{RPM: lim.RPM, TPM: lim.TPM, Concurrency: s.Concurrency, DailyTokens: lim.DailyTokens,
+		MonthlyTokens: s.MonthlyTokens, DailyRequests: s.DailyRequests, MonthlyCostUSD: s.MonthlyCostUSD,
+		AllowExternal: s.AllowExternal, TenantEnvelopeFactor: s.TenantEnvelopeFactor, InstanceEnvelopeFactor: s.InstanceEnvelopeFactor,
+		ConcurrencyCap: s.ConcurrencyCap}
 }
 
 // Egress is the consumer's egress policy for op (W06-14, oai.EgressSource):
-// the permission from gateway.consumer_allow_external_default (hot), no
-// unmetered permission (no source before W06-15), whether the consumer's or
+// the permissions as the limits rows resolve them over
+// gateway.consumer_allow_external_default (hot; allow_external,
+// allow_unmetered_external — W06-15), whether the consumer's or
 // its tenant envelope's monthly cost budget is used up, and — for every op
 // but chat, whose route is the only one that adds the provider-reported cost
 // to the meter — that the cost is untracked, so a cost-reporting row counts
 // as unmetered there (Fremd-Review 1 L-6).
 func (l meterLimiter) Egress(_ context.Context, ca *auth.ConsumerAuth, op string) backends.EgressPolicy {
 	s := l.settings().Meter
-	sub, lim, _ := meterLimits(s, ca, op)
-	return backends.EgressPolicy{AllowExternal: s.AllowExternal, CostExhausted: l.meter.CostExhausted(sub, lim),
-		CostUntracked: sub.Op != keyquota.OpChat}
+	sub, lim, eff := meterLimits(s, l.limits.Snapshot(), ca, op)
+	return backends.EgressPolicy{AllowExternal: eff.AllowExternal, AllowUnmetered: eff.AllowUnmetered,
+		CostExhausted: l.meter.CostExhausted(sub, lim), CostUntracked: sub.Op != keyquota.OpChat}
 }
 
 func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modelalias.Alias, est oai.Estimate) (oai.LimitReservation, *oai.LimitRefusal) {
 	s := l.settings().Meter
-	sub, limits, lim := meterLimits(s, ca, est.Op)
+	sub, limits, lim := meterLimits(s, l.limits.Snapshot(), ca, est.Op)
 	if handler.ResolveLane(ca, fedhop.InboundFrom(ctx), est.ServiceTier) != handler.LaneUrgent {
 		sub.Lane = keyquota.LaneBulk
 	}
@@ -574,7 +592,7 @@ func (l meterLimiter) Admit(ctx context.Context, ca *auth.ConsumerAuth, _ modela
 		return nil, &oai.LimitRefusal{Code: oai.CodeInsufficientQuota, Message: d.Message, RetryAfter: d.RetryAfter, ShouldRetry: false}
 	case d.Reason == keyquota.ReasonInvalid:
 		slog.Error("gateway: the meter refused an invalid subject (wiring defect)", "op", est.Op,
-			"consumer", sub.ConsumerID != "", "tenant", sub.TenantID != "", "rpm", lim.RPM, "tpm", lim.TPM, "concurrency", s.Concurrency)
+			"consumer", sub.ConsumerID != "", "tenant", sub.TenantID != "", "rpm", lim.RPM, "tpm", lim.TPM, "concurrency", lim.Concurrency)
 		return nil, &oai.LimitRefusal{Code: oai.CodeInternalError, Message: d.Message, ShouldRetry: false}
 	case d.Reason == keyquota.ReasonConcurrency:
 		// L1 (W06-11): 429 concurrency_limit_exceeded, Retry-After 1 s, the

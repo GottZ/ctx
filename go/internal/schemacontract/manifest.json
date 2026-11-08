@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 167,
-    "migration_count": 55,
+    "migration_max": 168,
+    "migration_count": 56,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -17,10 +17,10 @@
       "min_version": "1.0"
     },
     "timescaledb": {
-      "min_version": "2.30.1"
+      "min_version": "2.31.0"
     },
     "vector": {
-      "min_version": "0.8.6"
+      "min_version": "0.8.7"
     }
   },
   "tables": {
@@ -1593,6 +1593,125 @@
           "type": "character varying",
           "not_null": false,
           "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
+    "context_gateway_limits": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "subject_kind",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "consumer_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "tenant_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "tier",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "op",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "rpm",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "tpm",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "max_concurrency",
+          "type": "smallint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "daily_tokens",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "monthly_tokens",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "daily_requests",
+          "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "monthly_cost_usd",
+          "type": "numeric(14,8)",
+          "not_null": false,
+          "storage": "m"
+        },
+        {
+          "name": "allow_external",
+          "type": "boolean",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "allow_unmetered_external",
+          "type": "boolean",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "updated_by",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "updated_by_principal",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
         }
       ],
       "row_security": false
@@ -4975,6 +5094,9 @@
     "context_external_identities_pkey": {
       "def_hash": "936972b554cecd1cf896ebf5d431f8c9d253b8a883a60edb8c1ab55011b54bfa"
     },
+    "context_gateway_limits_pkey": {
+      "def_hash": "03560b22b5722025dc86b884f2d11091a55316a657d6eb8dc7a28017b7a6137e"
+    },
     "context_guard_state_pkey": {
       "def_hash": "4f029a2e2fbfd3d351585f6bd8577bf4738e452a548a0640005e82f9516ce488"
     },
@@ -5324,6 +5446,12 @@
     "idx_external_identities_principal": {
       "def_hash": "38010d6b84a4c18c2bb294974a3612326e8e3d9f908e4b6cdde085a633f2d766"
     },
+    "idx_gateway_limits_consumer": {
+      "def_hash": "c052eab7762c23dfd62c5bc8ced0d0861251fdd9be2dfdbb46712b233ab7c8d7"
+    },
+    "idx_gateway_limits_tenant": {
+      "def_hash": "b17939c68cdc7c55eb9e627d5677bf490c5f9e20a93bf68a881c970f26289e2c"
+    },
     "idx_gcc_scope_topic": {
       "def_hash": "044110517bc617dd1215a2b3a3ff5c4c0eaadb93ec87edad5800b515e9813ab2"
     },
@@ -5633,6 +5761,9 @@
     "uq_disable_profiles_scope_name": {
       "def_hash": "4b9cd6b34bb3bd4afa96eb95b3c99f8c4c70c9c8d72d5425aa3b93f2280562ab"
     },
+    "uq_gateway_limits": {
+      "def_hash": "a9c041b9088428d1495598d4eaf4598e71a5cd1f611751c1079c2185fa6fde29"
+    },
     "uq_gcn_scope_topic": {
       "def_hash": "e6466728e8c301ef0dff8c51af1bc72abf168cf33cc4202b211823aebe81700a"
     },
@@ -5704,6 +5835,9 @@
     "audit_disable_profiles_write()": {
       "src_hash": "7433f104d3dc77eca0ec9fd753f3bf8206dcf9b659205b2b5c0f7f4d07eac90b"
     },
+    "audit_gateway_limits_write()": {
+      "src_hash": "ea4594d7a03e2a390abad999c3987e0bb3dc6f93e5c91ea822466dc85660040c"
+    },
     "audit_graph_category_hues_write()": {
       "src_hash": "642caf7533f79abd18190506b1b490998a597e776f8f90b952c5a0347e1ee4ba"
     },
@@ -5727,6 +5861,9 @@
     },
     "audit_state_api_key(k context_api_keys)": {
       "src_hash": "b864dab1db4ba08570476b70f13d2b396caab4afd119fd49f9c0c7e7001c6981"
+    },
+    "audit_state_gateway_limit(l context_gateway_limits)": {
+      "src_hash": "86cdba908391601ddab93ccfc6e1cef1e390df95ec627a8ba36bdffa3056de8d"
     },
     "audit_state_instance(i context_instance)": {
       "src_hash": "ac4e02c386330ef11e2f111af58fa50b78586e39f5ac4645c2253847330a2cb4"
@@ -5879,6 +6016,12 @@
     },
     "context_dream_links.trg_dream_link_write": {
       "def_hash": "29d8b95cf9b3a96a121ecf242dd43b85f642a332e7e93529daaad1193965cbbc"
+    },
+    "context_gateway_limits.trg_gateway_limits_audit": {
+      "def_hash": "d6512dc95f3a6a03787a7aab2a103a8d5fad756dcd1ca54431e88276ba15b21e"
+    },
+    "context_gateway_limits.trg_gateway_limits_notify": {
+      "def_hash": "4f09d8b97696767f5bd5accaba2d9c1b9d4b248a4be87cc0f55441c8d7c13f79"
     },
     "context_graph_category_hues.trg_graph_category_hues_audit": {
       "def_hash": "3b8fa57135a109cf1dd6e6677ae6e845e1302320227d2e67ff3c8093e86097c9"
