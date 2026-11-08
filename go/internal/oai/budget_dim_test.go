@@ -35,7 +35,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -738,14 +737,6 @@ func dimProcStatus() (hwm, rss int64) {
 		}
 	}
 	return hwm, rss
-}
-
-func dimRusageCPU() float64 {
-	var ru syscall.Rusage
-	if syscall.Getrusage(syscall.RUSAGE_SELF, &ru) != nil {
-		return -1
-	}
-	return float64(ru.Utime.Nano()+ru.Stime.Nano()) / 1e9
 }
 
 func dimPct(v []float64, p float64) float64 {
