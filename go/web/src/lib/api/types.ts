@@ -2201,11 +2201,23 @@ export interface ModelAliasView {
   vision_source?: VisionSource
 }
 
-/** One backend row's probed capabilities (§3; vision null = unknown, probed_at null = never probed). */
+/** One backend row's probed capabilities (§3; vision null = unknown, probed_at null = never probed; reason only on unknown). */
 export interface BackendCapabilities {
   vision: boolean | null
   probed_at: string | null
   source: string
+  reason?: string
+}
+
+/** One pool row behind a dispatch target with its probe result (status_capabilities.go, FOLGE-Z Z1). */
+export interface DispatchTargetCapability {
+  backend: string
+  capabilities: BackendCapabilities
+}
+
+/** Merge: dispatch.targets[] carries the probe results of its rows (absent = a server before FOLGE-Z). */
+export interface DispatchTarget {
+  capabilities?: DispatchTargetCapability[]
 }
 
 /** Merge: backend-list rows (§3; absent = a server before FOLGE-Z). */
