@@ -17,6 +17,7 @@ import {
   deleteGatewayLimits,
   getConsumer,
   getGatewayLimits,
+  getSubjectLimits,
   getUsage,
   listConsumerCalls,
   setGatewayLimits,
@@ -185,5 +186,21 @@ describe('W05-12 gateway-limits-* (wire)', () => {
       action: 'gateway-limits-delete',
       data: { subject_kind: 'consumer', consumer_id: CID, op: 'embed' },
     })
+  })
+})
+
+// FOLGE-Z Z4-source: the create dialog's prefill reads a tenant or the
+// instance — body per subject kind exactly as C1 parseGLSubject accepts it.
+describe('FOLGE-Z getSubjectLimits (wire)', () => {
+  it('Z4-source: tenant ⇒ {subject_kind: tenant, tenant_id}; instance ⇒ {subject_kind: instance} and nothing else', async () => {
+    const mock = stubFetch(
+      jsonResponse(200, { success: true, limits: { subject_kind: 'tenant', ops: {} } }),
+      jsonResponse(200, { success: true, limits: { subject_kind: 'instance', ops: {} } }),
+    )
+    await getSubjectLimits({ subject_kind: 'tenant', tenant_id: 't-b' })
+    expect(sentBody(mock)).toEqual({ action: 'gateway-limits-get', data: { subject_kind: 'tenant', tenant_id: 't-b' } })
+    await getSubjectLimits({ subject_kind: 'instance', tenant_id: 't-x' } as unknown as { subject_kind: 'instance' })
+    const second = JSON.parse(String((mock.mock.calls[1]?.[1] as RequestInit).body)) as Record<string, unknown>
+    expect(second, 'an instance read names no tenant_id (C1 ⇒ 400 otherwise)').toEqual({ action: 'gateway-limits-get', data: { subject_kind: 'instance' } })
   })
 })

@@ -23,6 +23,7 @@
   import Table from '../../../lib/ui/Table.svelte'
   import type { PoolModel } from './pool.svelte'
   import BackendDialog from './BackendDialog.svelte'
+  import { backendVisionBadge } from '../../gateway/vision'
 
   let {
     pool,
@@ -233,6 +234,7 @@
       </tr>
     {/snippet}
     {#each rows as b (b.id)}
+      {@const vb = backendVisionBadge(b)}
       <tbody data-id={b.id} animate:flip={{ duration: 150 }}>
         <tr
           class:off={!b.enabled}
@@ -250,7 +252,11 @@
               </span>
             {/if}
           </td>
-          <td><span class="badge">{b.trust}</span></td>
+          <td>
+            <span class="badge">{b.trust}</span>
+            <!-- FOLGE-Z Z5: probed image capability (capabilities.vision; probed_at as title) -->
+            <span class="badge vision" class:on={vb.tone === 'on'} title={vb.title} data-backend-vision>{vb.text}</span>
+          </td>
           <td class="roles">{b.roles.join(', ') || '—'}</td>
           <td class="num">
             <div class="prio">
@@ -567,6 +573,16 @@
   .updown button[aria-busy='true'] {
     opacity: 0.4;
     cursor: progress;
+  }
+  .badge.vision {
+    text-transform: none;
+    margin-left: var(--space-1);
+    border-style: dashed;
+    white-space: nowrap;
+  }
+  .badge.vision.on {
+    color: var(--text);
+    border-style: solid;
   }
   .badge {
     font-family: var(--font-mono);

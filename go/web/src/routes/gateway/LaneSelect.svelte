@@ -17,8 +17,10 @@
     serverAdmin: boolean
     peer: boolean
     disabled?: boolean
+    /** FOLGE-Z Z4: a visible reason under the options (the create dialog: why a tenant-admin starts on bulk). */
+    note?: string | null
   }
-  let { value = $bindable(), current, serverAdmin, peer, disabled = false }: Props = $props()
+  let { value = $bindable(), current, serverAdmin, peer, disabled = false, note = null }: Props = $props()
 
   const options = $derived(laneOptions(serverAdmin, current, peer))
 </script>
@@ -33,6 +35,7 @@
     </label>
   {/each}
   <p class="hint">urgent is admitted ahead of ctx's own background work; bulk queues behind it.</p>
+  {#if note}<p class="hint" data-testid="lane-hint">{note}</p>{/if}
 </fieldset>
 
 <style>

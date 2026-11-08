@@ -991,7 +991,8 @@ export const contracts: PageContract[] = [
     tenantScoped: true,
     // RC-D C5: + the policy edit (W05-07) and the rotation (W05-08) — calls a
     // member session must never fire (generated deny test).
-    adminCalls: ['model-consumer-list', 'tenant-list', 'model-consumer-update', 'model-key-rotate'],
+    // FOLGE-Z Z4: + the start-limits prefill of the create dialog
+    adminCalls: ['model-consumer-list', 'tenant-list', 'model-consumer-update', 'model-key-rotate', 'gateway-limits-get'],
     states: [
       { name: 'default', seed: {} },
       // W05-06: the create dialog (template row, scope select, offer picker,
@@ -1040,7 +1041,7 @@ export const contracts: PageContract[] = [
       },
     },
     flowDoc:
-      'Tenant-Admin öffnet „Model API": die Konsumenten-Liste lädt mit dem Default-Statusfilter (die vier Status eines aktiven Konsumenten), Status-Badges und Key-Hints kommen vom Server; „+ New consumer" mit Vorlage „App · Chat" legt einen Konsumenten an, der Klartext steht genau einmal im Reveal und ist nach „I\'ve stored it — done" aus dem DOM, die Liste zeigt nur den Hint; der Key von ci-chat wird erst nach Tippen seiner 4 Hint-Zeichen widerrufen, der Toast meldet laufende Streams laut Server (W05-06); „inactive" zuschalten erweitert die Liste, die Label-Präfix-Suche engt sie ein.',
+      'Tenant-Admin öffnet „Model API": die Konsumenten-Liste lädt mit dem Default-Statusfilter (die vier Status eines aktiven Konsumenten), Status-Badges und Key-Hints kommen vom Server; „+ New consumer" mit Vorlage „App · Chat" zeigt Lane (bulk + Grund) und die vorbelegten Startlimits (FOLGE-Z Z4) und legt einen Konsumenten an, der Klartext steht genau einmal im Reveal neben effektiven Limits und Lane aus der Antwort und ist nach „I\'ve stored it — done" aus dem DOM, die Liste zeigt nur den Hint; der Key von ci-chat wird erst nach Tippen seiner 4 Hint-Zeichen widerrufen, der Toast meldet laufende Streams laut Server (W05-06); „inactive" zuschalten erweitert die Liste, die Label-Präfix-Suche engt sie ein.',
     primaryFlow: async (page, session) => {
       const content = page.locator('main.content')
       await expect(page.getByRole('heading', { name: 'Model API', exact: true })).toBeVisible()
@@ -1061,9 +1062,18 @@ export const contracts: PageContract[] = [
       const dialog = page.getByRole('dialog', { name: /New model consumer|Consumer created/ })
       await expect(dialog.locator('[data-testid="models-ready"]')).toBeAttached()
       await dialog.getByRole('button', { name: 'App · Chat' }).click()
+      // FOLGE-Z Z4: no silent value — the lane is visible (tenant-admin: bulk +
+      // the reason) and the start limits carry the tenant's effective values
+      // (the template asks 8 / 120; a tenant-admin is clamped to 2 / 30, said aloud)
+      await expect(dialog.getByRole('group', { name: 'admission lane' }).getByRole('radio', { name: 'bulk' }), 'FOLGE-Z Z4: the lane is shown').toBeChecked()
+      await expect(dialog.locator('[data-testid="lane-hint"]')).toContainText('urgent is server-admin only')
+      await expect(dialog.getByRole('group', { name: 'start limits' }).getByLabel('chat concurrency', { exact: true }), 'FOLGE-Z Z4: start limits prefilled').toHaveValue('2')
       await dialog.getByLabel('label', { exact: true }).fill('flow-app')
       await dialog.getByRole('button', { name: 'Create consumer' }).click()
       await expect(dialog.getByRole('textbox', { name: 'new api key — plaintext, shown once' })).toHaveValue(REVEAL_MARKER)
+      // FOLGE-Z Z4: the reveal shows what the consumer starts with — from the answer
+      await expect(dialog.locator('[data-testid="reveal-lane"]'), 'FOLGE-Z Z4: lane of the answer').toContainText('bulk')
+      await expect(dialog.locator('[data-reveal="chat.max_concurrency"]'), 'FOLGE-Z Z4: effective limits of the answer').toHaveText('2')
       await dialog.getByRole('button', { name: "I've stored it — done" }).click()
       await expect(dialog).toHaveCount(0)
       await expect(rows).toHaveCount(5)
@@ -1126,7 +1136,7 @@ export const contracts: PageContract[] = [
         'Alias-Katalog ist eine Betreiber-Liste (Dutzende Aliase je Scope, Admin-Takt, design/05 §6 Zeile Katalog-Reload) — kein nutzergetriebener 10k-Pfad.',
     },
     flowDoc:
-      'Tenant-Admin öffnet „Model catalog“ unter /gateway/models: die _global-Aliase stehen ohne Schreib-Controls in der Liste, die Aliase des Heimat-Scopes tragen „Edit“; „+ New alias“ öffnet den Editor mit explizitem enabled-Schalter, niedrigere Sensitivitäten sind gesperrt; im Bearbeiten sind name und kind schreibgeschützt (W05-13).',
+      'Tenant-Admin öffnet „Model catalog“ unter /gateway/models: die _global-Aliase stehen ohne Schreib-Controls in der Liste und zeigen, ob sie Bilder annehmen und warum („images: on (backend)“, FOLGE-Z Z5), die Aliase des Heimat-Scopes tragen „Edit“; „+ New alias“ öffnet den Editor mit explizitem enabled-Schalter, niedrigere Sensitivitäten sind gesperrt; im Bearbeiten sind name und kind schreibgeschützt (W05-13).',
     primaryFlow: async (page, session) => {
       const content = page.locator('main.content')
       await expect(page.getByRole('heading', { name: 'Model catalog', exact: true }), 'W05-13: the catalog page mounts').toBeVisible()
@@ -1135,6 +1145,8 @@ export const contracts: PageContract[] = [
       const globalChat = rows.filter({ has: page.locator('[data-alias-scope="_global"]') }).filter({ hasText: 'chat' }).first()
       await expect(globalChat, 'W05-13: the _global chat alias is listed').toBeVisible()
       await expect(globalChat.getByRole('button'), 'W05-13 gate: a _global row carries no write control for a tenant-admin').toHaveCount(0)
+      // FOLGE-Z Z5: the effective vision and its source, no extra step
+      await expect(globalChat.locator('[data-alias-vision]'), 'FOLGE-Z Z5: the catalog says whether images are accepted').toHaveText('images: on (backend)')
       const homeChat = rows.filter({ has: page.locator('[data-alias-scope="home"]') }).filter({ hasText: 'chat' }).first()
       await expect(homeChat.getByRole('button', { name: 'Edit alias chat' }), 'W05-13: a home-scope row is editable').toHaveCount(1)
       await content.getByRole('button', { name: '+ New alias' }).click()
