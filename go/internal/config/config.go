@@ -2527,12 +2527,24 @@ type GatewayConfig struct {
 	// the handler runs. 8 MiB ≈ a 262k-token prompt without JSON escaping.
 	MaxRequestBytes int `key:"gateway.max_request_bytes" env:"CTX_GATEWAY_MAX_REQUEST_BYTES" default:"8388608" mut:"hot" parse:"strict" tenancy:"global-only"`
 	// InflightBudget is the process-wide sum of all running gateway
-	// reservations — request share (3 × body) plus response share (§4.2.1);
-	// past it a request is refused at once with 503 server_overloaded
-	// (B9: the container limit is 1 GiB, an OOM kill takes every pipeline).
-	// Must hold at least one request at the cap (V39: >= 3 ×
-	// max_request_bytes), or such a request could never be admitted.
-	InflightBudget int `key:"gateway.inflight_budget" env:"CTX_GATEWAY_INFLIGHT_BUDGET" default:"268435456" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// reservations — request share (3 × body) plus what each route books
+	// past it (§4.2.1, the routes' ledgers); past it a request is refused
+	// at once with 503 server_overloaded (B9: an OOM kill takes every
+	// pipeline — the container limit and GOMEMLIMIT sit above it). Must
+	// hold one request at every cap of every route and class (V39), or
+	// such a request could never be admitted. 512 MiB (RC-D C8, bau report
+	// RCD-c8-hardening-S1 §Budget): 256 MiB held 31 non-streamed or 63
+	// streamed small requests at once, 512 MiB holds 63 / 127.
+	InflightBudget int `key:"gateway.inflight_budget" env:"CTX_GATEWAY_INFLIGHT_BUDGET" default:"536870912" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ScanMaxRequestBytes is the largest body the sensitivity scan reads
+	// (RC-D C8): a request to an alias below credentials whose body is
+	// longer gets 413 request_too_large before the scan — no scan booking
+	// (23 × the body + 128 KiB + its nesting state), no scan, no meter
+	// admission, no wire call. An alias at credentials is not scanned and
+	// takes bodies up to max_request_bytes. Above max_request_bytes it has
+	// no effect (the body cap refuses first): the effective scan cap is the
+	// smaller of the two (oai.EffectiveScanCap), V58 only refuses 0.
+	ScanMaxRequestBytes int `key:"gateway.scan_max_request_bytes" env:"CTX_GATEWAY_SCAN_MAX_REQUEST_BYTES" default:"2097152" mut:"hot" parse:"strict" tenancy:"global-only"`
 	// MaxResponseBytes caps the read of one non-streamed upstream body; the
 	// response reserve of a non-stream call is twice this. At most
 	// httpx.MaxResponseBytes (V39), the transport-wide cap it narrows.
@@ -3000,6 +3012,7 @@ func (c *Config) GatewaySettings() oai.Settings {
 		Enabled:                  g.Enabled,
 		MaxRequestBytes:          int64(g.MaxRequestBytes),
 		InflightBudget:           int64(g.InflightBudget),
+		ScanMaxRequestBytes:      int64(g.ScanMaxRequestBytes),
 		MaxResponseBytes:         int64(g.MaxResponseBytes),
 		MaxStreamFrameBytes:      int64(g.MaxStreamFrameBytes),
 		EmbeddingMaxFloats:       int64(g.EmbeddingMaxFloats),

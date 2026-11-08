@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+
+	"github.com/GottZ/ctx/internal/llm"
 )
 
 // requestReserveFactor is the request share of the in-flight budget per body
@@ -266,7 +268,20 @@ func InflightBudget(b *Budget, get func() Settings) func(http.Handler) http.Hand
 			case cl < 0 && r.Body != nil && r.Body != http.NoBody:
 				r.Body = &budgetedBody{ReadCloser: r.Body, res: res}
 			}
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), reservationKey{}, res)))
+			ctx := context.WithValue(r.Context(), reservationKey{}, res)
+			// The wire sites' buffer growth (FOLGE-S (d)): a buffer the
+			// stream relay or the answer read replaces by a larger one is
+			// garbage until the next collection — booked here before the
+			// replacement is made; a refusal is an admission outcome
+			// (ErrBudgetExhausted: 503 server_overloaded before a stream's
+			// commit, its error frame after it), never a backend fault.
+			ctx = llm.WithGrowthBooking(ctx, func(n int) error {
+				if !res.Grow(int64(n)) {
+					return &llm.AdmissionError{Err: ErrBudgetExhausted}
+				}
+				return nil
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

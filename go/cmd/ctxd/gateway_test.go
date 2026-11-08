@@ -17,8 +17,8 @@ import (
 func TestGatewaySettingsGetterIsHot(t *testing.T) {
 	store := config.NewStore(config.Defaults())
 	get := gatewaySettingsGetter(store)
-	if s := get(); s.Enabled || s.MaxRequestBytes != 8<<20 || s.InflightBudget != 256<<20 {
-		t.Fatalf("defaults: %+v, want enabled=false, 8 MiB request cap, 256 MiB budget", s)
+	if s := get(); s.Enabled || s.MaxRequestBytes != 8<<20 || s.InflightBudget != 512<<20 || s.ScanMaxRequestBytes != 2<<20 {
+		t.Fatalf("defaults: %+v, want enabled=false, 8 MiB request cap, 512 MiB budget (RC-D C8), 2 MiB scan cap", s)
 	}
 	next := config.Defaults()
 	next.Server.DBPass = "test-password" // V11: Replace validates the whole generation

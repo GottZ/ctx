@@ -271,7 +271,9 @@ func TestRerankMaxTokensPerDoc(t *testing.T) {
 			t.Errorf("echo %q, want the document as sent", res.Document.Text)
 		}
 	}
-	if want := []string{"documents", "model", "query"}; !slices.Equal(calls[0].keys, want) {
+	// return_documents is the wire's own false (FOLGE-R F-1: no echo over a
+	// hop), not the client's member — the client sent none here.
+	if want := []string{"documents", "model", "query", "return_documents"}; !slices.Equal(calls[0].keys, want) {
 		t.Errorf("upstream keys %v, want %v (nothing of the client's request but the texts)", calls[0].keys, want)
 	}
 	// A count whose 9/5 budget overflows an int cuts nothing: 2 049 638 230

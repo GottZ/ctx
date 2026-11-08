@@ -300,6 +300,9 @@ func (c *chatCall) serve() {
 		return
 	}
 	required := c.sensitivity()
+	if overScanCap(c.rec, c.w, required, body, c.s) {
+		return
+	}
 	if !c.coverScan(required, body, depth) {
 		refuseOverloaded(c.rec, c.w)
 		return
@@ -1056,7 +1059,10 @@ func (c *chatCall) endMeter(st *walkState) {
 type chatOutcome struct {
 	finish   string
 	redacted *llmlog.RedactedErr
-	response string
+	// response is the client body as written — the rewrite's buffer, never
+	// touched after the write (FOLGE-S S4: no copy of the answer for the
+	// row; the row takes its bodyLogTextMax prefix).
+	response []byte
 }
 
 // outcome answers the walk: the watcher's verdict and a gone client first,
@@ -1205,10 +1211,17 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 	}
 	c.w.Header().Set("Content-Type", "application/json")
 	c.w.WriteHeader(http.StatusOK)
-	if _, err := c.w.Write(append(body, '\n')); err != nil {
+	// The body is the rewrite walk's output (rewrite.go rewriteChat, FOLGE-S):
+	// the upstream's values after the walk's syntax check, every string
+	// written with encoding/json's HTML escape — byte for byte what
+	// json.Marshal wrote before (TestRewriteChatEscapeParity over every
+	// escape class, TestRewriteChatIsTheBase, FuzzRewriteChatIsTheBase) —,
+	// served as application/json. The buffer has room for the newline: the
+	// append does not copy the answer.
+	if _, err := c.w.Write(append(body, '\n')); err != nil { //nolint:gosec // G705: the body carries json.Marshal's HTML escape, written by the rewrite walk gosec's taint check does not know as a sanitizer (pinned byte-equal, see above)
 		slog.Warn("gateway: failed to write the answer", "error", err, "request_id", c.w.Header().Get("X-Request-ID"))
 	}
-	return chatOutcome{finish: finishOf(st.result.FinishReason), response: string(body)}
+	return chatOutcome{finish: finishOf(st.result.FinishReason), response: body}
 }
 
 // finishOf maps an upstream finish_reason into the row vocabulary.
@@ -1259,12 +1272,17 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 			ttft = &ms
 		}
 	}
-	request := ""
+	request, response := "", ""
 	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
 		// The row's text of the array is sized, then booked, then written
 		// (hardening 6): under an exhausted budget the row goes without it.
 		if n := bodyLogSize(c.req.messages); c.cover(int64(n)) {
 			request = bodyLogText(c.req.messages, n)
+		}
+		// The answer's text likewise, its prefix the row stores (FOLGE-S S4:
+		// not a copy of the whole answer).
+		if n := min(len(out.response), bodyLogTextMax); c.cover(int64(n)) {
+			response = string(out.response[:n])
 		}
 	}
 	c.d.Record(llmlog.GatewayRow{
@@ -1278,7 +1296,7 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		Attempts:    attempts,
 		Err:         out.redacted,
 		Request:     request,
-		Response:    out.response,
+		Response:    response,
 		BodyLogging: c.s.BodyLogging,
 	})
 }

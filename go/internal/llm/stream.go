@@ -553,30 +553,58 @@ func readSSELineMax(br *bufio.Reader, limit int) (string, error) {
 // lines on every line was quadratic in their number), an empty data: line
 // weighs its newline, and the buffered frame never holds more than
 // maxSSEFrameBytes, however its lines are cut.
+//
+// Two ways in (FOLGE-S): the chat harness adds strings (add, take), the
+// gateway relay adds slices of its line buffer (addBytes, takeBytes) — a
+// frame of one line stays that slice (one, no copy) until it is taken or a
+// second line arrives; only then are the lines joined into buf, which is
+// reused frame after frame and grows like a line buffer (growLine).
 type sseFrame struct {
-	buf   strings.Builder
+	buf   []byte
+	one   []byte // the frame's only line, held by reference (addBytes)
+	held  bool   // one is the frame: the caller's line buffer is lent to it
 	lines int
 	// limit is the frame cap; 0 = maxSSEFrameBytes (every chat-harness
 	// parser). The gateway relay sets its own (ChatRawStream's maxFrame).
 	limit int
+	// grow books the buffer a growth of buf discards (the relay's growth
+	// booking; nil: none).
+	grow func(int) error
 }
 
-func (f *sseFrame) add(v string) error {
-	limit := f.limit
+// room checks that a line of n bytes fits the frame and returns the bytes
+// of the separator in front of it.
+func (f *sseFrame) room(n int) (sep int, limit int, err error) {
+	limit = f.limit
 	if limit <= 0 {
 		limit = maxSSEFrameBytes
 	}
-	sep := 0
 	if f.lines > 0 {
 		sep = 1
 	}
-	if f.buf.Len()+sep+len(v) > limit {
-		return fmt.Errorf("llm: %w: SSE frame over %d bytes", httpx.ErrResponseTooLarge, limit)
+	size := len(f.buf)
+	if f.held {
+		size = len(f.one)
 	}
+	if size+sep+n > limit {
+		return 0, 0, fmt.Errorf("llm: %w: SSE frame over %d bytes", httpx.ErrResponseTooLarge, limit)
+	}
+	return sep, limit, nil
+}
+
+func (f *sseFrame) add(v string) error {
+	sep, limit, err := f.room(len(v))
+	if err != nil {
+		return err
+	}
+	if f.lines == 0 {
+		f.buf = f.buf[:0]
+	}
+	f.buf, _ = growLine(f.buf, sep+len(v), limit, nil)
 	if sep > 0 {
-		f.buf.WriteByte('\n')
+		f.buf = append(f.buf, '\n')
 	}
-	f.buf.WriteString(v)
+	f.buf = append(f.buf, v...)
 	f.lines++
 	return nil
 }
@@ -588,9 +616,58 @@ func (f *sseFrame) take() (payload string, ok bool) {
 	if f.lines == 0 {
 		return "", false
 	}
-	payload = f.buf.String()
-	f.buf.Reset()
+	payload = string(f.buf)
+	f.buf = f.buf[:0]
 	f.lines = 0
+	return payload, true
+}
+
+// addBytes adds the data line v, a slice of the caller's line buffer. The
+// first line of a frame is kept by reference: until the frame is taken or
+// a second line joins it, the caller reads its next line into another
+// buffer (holds). A second line joins the first into buf (both are intact
+// then: the first in the lent buffer, the second in the other).
+func (f *sseFrame) addBytes(v []byte) error {
+	sep, limit, err := f.room(len(v))
+	if err != nil {
+		return err
+	}
+	switch {
+	case f.lines == 0:
+		f.one, f.held = v, true
+	case f.held:
+		if f.buf, err = growLine(f.buf[:0], len(f.one)+1+len(v), limit, f.grow); err != nil {
+			return err
+		}
+		f.buf = append(append(append(f.buf, f.one...), '\n'), v...)
+		f.one, f.held = nil, false
+	default:
+		if f.buf, err = growLine(f.buf, sep+len(v), limit, f.grow); err != nil {
+			return err
+		}
+		f.buf = append(append(f.buf, '\n'), v...)
+	}
+	f.lines++
+	return nil
+}
+
+// holds reports whether the frame holds a line of the caller's buffer by
+// reference: the next line must be read into another one.
+func (f *sseFrame) holds() bool { return f.held }
+
+// takeBytes returns the frame's payload and empties it, as take. The
+// payload is a slice of the caller's line buffer (a frame of one line) or of
+// the frame's own buffer: valid until the caller's next read or the next
+// addBytes.
+func (f *sseFrame) takeBytes() (payload []byte, ok bool) {
+	if f.lines == 0 {
+		return nil, false
+	}
+	payload = f.buf
+	if f.held {
+		payload = f.one
+	}
+	f.buf, f.one, f.held, f.lines = f.buf[:0], nil, false, 0
 	return payload, true
 }
 
