@@ -21,6 +21,9 @@ package oai_test
 // allocated per parse, the reservation covering the second copy — are the
 // pins of chat_parse_alloc_test.go. TestChatParseHeapGateSustained is the
 // closed-loop case (CTX_FOLGEP_DUR seconds), run under GOMEMLIMIT=200MiB.
+// The bound without the answer share (n = 1) admits one reserve, for the
+// form scanned twice and measured when it decides: its first scan call's
+// garbage (memNoAnswerReserve, FOLGE-U).
 
 import (
 	"bytes"
@@ -113,11 +116,15 @@ func (u *memEngine) row(name string, prio int) backends.Backend {
 
 // heldSum collects the reservation every request held at the end of its
 // handler, and counts the requests that reached it without a declared
-// length — the ones readRequestBody reads in chunks (hardening 5, B-3).
+// length — the ones readRequestBody reads in chunks (hardening 5, B-3) —
+// and the requests the route scanned: its Federation.Scan called with a
+// requirement below credentials, where federation.ScanRaise scans (FOLGE-U,
+// memNoAnswerReserve).
 type heldSum struct {
 	mu         sync.Mutex
 	vals       []int64
 	undeclared atomic.Int64
+	scanned    atomic.Int64
 }
 
 func (h *heldSum) add(v int64) {
@@ -212,6 +219,10 @@ type memShape struct {
 	model    string
 	chunked  bool // sent without Content-Length
 	failover int  // rows that answer 404 before the serving one
+	// scanTwice: the route scans the body twice in a row (the forms of
+	// scanTwiceForms at the public alias) — the one shape whose scan
+	// allocates beyond its booking (memNoAnswerReserve, FOLGE-U)
+	scanTwice bool
 }
 
 // memForm builds form name at lim bytes: the thirteen forms of the probe
@@ -345,6 +356,7 @@ func memForm(t testing.TB, name string, lim int) memShape {
 		pre := `{"model":"` + model + `","messages":[{"role":"user","content":"x"},{"role":"assistant","content":null,"tool_calls":[{"`
 		suf := `":` + val + `}]}]}`
 		s.body = []byte(pre + strings.Repeat("apikey:x ", (lim-len(pre)-len(suf))/9) + suf)
+		s.scanTwice = model == "pub"
 	// Hardening 5, B-1: a model name of the whole body — plain, invalid
 	// UTF-8 (the decode made each byte a U+FFFD of 3 bytes), escaped.
 	// Hardening 6: message text of invalid bytes between ASCII ones — with
@@ -430,8 +442,57 @@ func newMemRig(t *testing.T, shape memShape, n int, held *heldSum) (*chatRig, *m
 	// the capped entry, written asynchronously), not into the harness's
 	// row list, which would keep every logged body for the test's life.
 	rig.deps.Record = func(row llmlog.GatewayRow) { _ = llmlog.GatewayEntry(row) }
+	// The route's own decision whether it scans (FOLGE-U): counted where it
+	// calls the scan, not derived from the alias.
+	scan := rig.deps.Federation.Scan
+	rig.deps.Federation.Scan = func(required backends.Sensitivity, body []byte) backends.Sensitivity {
+		if required.Rank() < backends.SensCredentials.Rank() {
+			held.scanned.Add(1)
+		}
+		return scan(required, body)
+	}
 	rig.router = memMount(rig, oai.ChatCompletions(rig.deps), held)
 	return rig, up
+}
+
+// memNoAnswerReserve is the reserve of the bound without the answer share
+// for the form scanned twice (FOLGE-U): the dead garbage of the first scan
+// call, for each scanned request. The route books one scan call
+// (oai.ScanBooking at oai.JSONDepth, coverScan); the form scanned twice (one
+// key of the whole body with a scalar value: the key, then the probe
+// "key: value", scanTwiceForms) allocates about two and books one, since
+// the first call's garbage is dead before the second begins and the
+// collector marks one call's heap (TestScanTwiceHoldsOneScanAtOnce pins
+// that hold; the heap gate cannot tell a hold from garbage). The gate
+// measures HeapInuse with its garbage, and far below the process memory
+// limit (a request of 256 KiB lifts the heap from 4 to 12 MiB under
+// GOMEMLIMIT=200MiB) the pacer lets that garbage stand while the second
+// call runs. The two forms at 256 KiB, n = 1, grew 4.9–8.0 MiB against
+// 6.6 MiB without the answer share, over it in 44 of 83 runs (bau report
+// FOLGE-UY-heap §Befund); under a limit that binds (16MiB) 3.4–4.4 MiB in
+// 8 of 8: garbage, not a hold. Not a first use either: the first request
+// of the process allocates 0.1 MiB more than the next ones, before and
+// after RC-D C2 alike. The scan of every other form of the gate allocates
+// less than its booking (measured at 20 100 bytes … 1 MiB, bau report
+// §Review): no garbage beyond it, no reserve.
+//
+// The reserve is the smaller of two measured amounts: what the scan of
+// this body allocates beyond its booking (scanAlloc, pattern pools cold —
+// no garbage can stand that was never allocated), and the hold of one scan
+// call, a constant (scanHeldPerByteMax × body + oai.ScanReserveBase: what
+// the first call holds when it returns). A regression that holds or
+// allocates more raises the first amount, not the second, so the reserve
+// does not grow with the code under test. 3.6 MiB at 256 KiB (the first
+// amount 4.3), 0.6 MiB at 65 600 bytes (the first amount; the second 1.0);
+// the excess it covers stayed at most 1.8 MiB at 256 KiB and 0.5 MiB at
+// 65 600 bytes in every run measured.
+func memNoAnswerReserve(scanned int64, shape memShape) int64 {
+	if scanned <= 0 || !shape.scanTwice {
+		return 0
+	}
+	alloc, _ := scanAlloc(backends.SensPublic, shape.body)
+	unbooked := max(0, alloc-oai.ScanBooking(shape.body, oai.JSONDepth(shape.body)))
+	return scanned * min(unbooked, scanHeldPerByteMax*int64(len(shape.body))+oai.ScanReserveBase)
 }
 
 func TestChatParseHeapGate(t *testing.T) {
@@ -539,30 +600,105 @@ func TestChatParseHeapGate(t *testing.T) {
 	// share alone, not by bytes meant for the answer — and, for requests that
 	// all run at once (n ≤ 10), the budget's own peak. The harness load is
 	// counted per wire attempt here (a failover row is one more fake engine
-	// call: f7d's two 404 rows add 0.1 MiB).
+	// call: f7d's two 404 rows add 0.1 MiB). Without the answer share, the
+	// form scanned twice adds its first scan call's garbage
+	// (memNoAnswerReserve).
 	served := int64(cnt["200/"])
 	attempts := int64(n) * int64(1+shape.failover)
 	boundNoAnswer := sum - served*2*memRespCap + attempts*heapGateBaseLoad
+	// FOLGE-U: the form scanned twice, its first call's garbage — measured
+	// only where it decides (a scan of 8 MiB costs seconds), "-" elsewhere.
+	var scanReserve int64
+	reserve := "-"
+	if n == 1 && growth > boundNoAnswer && held.scanned.Load() > 0 && shape.scanTwice {
+		scanReserve = memNoAnswerReserve(held.scanned.Load(), shape)
+		reserve = fmt.Sprintf("%.1f", float64(scanReserve)/(1<<20))
+	}
 	boundPeak := budgetPeak.Load() + attempts*heapGateBaseLoad
 	mib := func(v int64) float64 { return float64(v) / (1 << 20) }
 	verdict := "ok"
 	switch {
 	case growth > bound:
 		verdict = "OVER"
-	case n == 1 && growth > boundNoAnswer:
+	case n == 1 && growth > boundNoAnswer+scanReserve:
 		verdict = "OVER_NOANSWER"
 	case n > 1 && n <= 10 && growth > boundPeak:
 		verdict = "OVER_PEAK"
 	}
 	fmt.Printf("FOLGEP form=%s n=%d gomemlimit=%q bodylog=%q body=%d answers=[%s] growth_MiB=%.1f held_sum_MiB=%.1f handled=%d bound_MiB=%.1f "+
 		"bound_noanswer_MiB=%.1f bound_peak_MiB=%.1f base_MiB=%.1f budget_peak_MiB=%.1f numgc=%d dur=%v up_hits=%d up_max_body=%d up_total=%d "+
-		"answer_max_B=%d verdict=%s\n",
+		"answer_max_B=%d scanned=%d scan_reserve_MiB=%s verdict=%s\n",
 		form, n, os.Getenv("GOMEMLIMIT"), os.Getenv("CTX_FOLGEP_BODYLOG"), len(body), strings.TrimSpace(sb.String()), mib(growth), mib(sum), handled, mib(bound),
 		mib(boundNoAnswer), mib(boundPeak), mib(int64(base)), mib(budgetPeak.Load()), ms.NumGC-gc0, dur.Round(time.Millisecond),
-		up.hits.Load(), up.max.Load(), up.total.Load(), answerMax.Load(), verdict)
+		up.hits.Load(), up.max.Load(), up.total.Load(), answerMax.Load(), held.scanned.Load(), reserve, verdict)
 	if verdict != "ok" {
-		t.Errorf("form %s, n=%d: heap growth %.1f MiB > reserved %.1f MiB + %d × base load %.0f KiB = %.1f MiB (without the answer share %.1f, the budget's peak %.1f): %s",
-			form, n, mib(growth), mib(sum), n, float64(heapGateBaseLoad)/1024, mib(bound), mib(boundNoAnswer), mib(boundPeak), verdict)
+		t.Errorf("form %s, n=%d: heap growth %.1f MiB > reserved %.1f MiB + %d × base load %.0f KiB = %.1f MiB (without the answer share %.1f plus the scan reserve %s, the budget's peak %.1f): %s",
+			form, n, mib(growth), mib(sum), n, float64(heapGateBaseLoad)/1024, mib(bound), mib(boundNoAnswer), reserve, mib(boundPeak), verdict)
+	}
+}
+
+// TestHeapGateNoAnswerReserve pins the reserve of the heap gate's bound
+// without the answer share (FOLGE-U, memNoAnswerReserve): the gate counts
+// the route's scan where it runs — below credentials, not at credentials —;
+// the forms scanned twice are marked as such, no other; their reserve is
+// more than nothing and at most the hold of one scan call; a form scanned
+// once has none, even marked (its booking covers the scan, also when it
+// is nested deep: the depth is booked), and neither has a request the
+// route did not scan.
+func TestHeapGateNoAnswerReserve(t *testing.T) {
+	const size = 256 << 10
+	for _, c := range []struct {
+		form string
+		want int64
+	}{{"f0_tiny", 0}, {"f0_tiny_pub", 1}} {
+		shape := memForm(t, c.form, size)
+		var held heldSum
+		rig, _ := newMemRig(t, shape, 1, &held)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(shape.body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		rig.router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || held.scanned.Load() != c.want {
+			t.Errorf("form %s: answer %d, the route scanned below credentials %d times, want 200 and %d", c.form, w.Code, held.scanned.Load(), c.want)
+		}
+	}
+	cases := []struct {
+		form  string
+		twice bool // marked: the route scans it twice
+		once  bool // a body the scan reads once (no reserve even when marked)
+	}{
+		{"f14a_scan_hugekey_num_pub", true, false}, {"f14b_scan_hugekey_str_pub", true, false},
+		{"f14a_scan_hugekey_num", false, false}, {"f14b_scan_hugekey_str", false, false}, // credentials: not scanned
+		{"f13_scan_assign_pub", false, true}, {"f6c_depth_tools_params_pub", false, true},
+	}
+	for _, c := range cases {
+		if got := memForm(t, c.form, size).scanTwice; got != c.twice {
+			t.Errorf("form %s: marked scanned twice %v, want %v", c.form, got, c.twice)
+		}
+	}
+	skipUnderRace(t, "the scan's allocation")
+	for _, c := range cases {
+		shape := memForm(t, c.form, size)
+		if got := memNoAnswerReserve(0, shape); got != 0 {
+			t.Errorf("form %s: reserve %d bytes for a request the route did not scan, want 0", c.form, got)
+		}
+		got := memNoAnswerReserve(1, shape)
+		hold := scanHeldPerByteMax*int64(len(shape.body)) + oai.ScanReserveBase
+		t.Logf("FOLGEU reserve: %s %d B: %d bytes (%.2f per body byte), hold of one call %d", c.form, len(shape.body), got, float64(got)/float64(len(shape.body)), hold)
+		switch {
+		case c.twice && (got <= 0 || got > hold):
+			t.Errorf("form %s (scanned twice): reserve %d bytes, want more than 0 and at most the hold of one scan call (%d)", c.form, got, hold)
+		case !c.twice && got != 0:
+			t.Errorf("form %s (not marked): reserve %d bytes, want 0", c.form, got)
+		}
+		flip := shape
+		flip.scanTwice = !shape.scanTwice
+		switch got := memNoAnswerReserve(1, flip); {
+		case c.twice && got != 0:
+			t.Errorf("form %s unmarked: reserve %d bytes, want 0", c.form, got)
+		case c.once && got != 0:
+			t.Errorf("form %s (scanned once) marked: reserve %d bytes, want 0 (its booking covers the scan)", c.form, got)
+		}
 	}
 }
 

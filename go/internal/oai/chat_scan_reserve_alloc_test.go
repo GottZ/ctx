@@ -228,16 +228,6 @@ func TestScanTwiceHoldsOneScanAtOnce(t *testing.T) {
 	}
 }
 
-// scanHeldPerByteMax bounds what a scan of the body holds at once per body
-// byte: the hold of one scan call plus a margin, not the factor (which binds
-// the call's allocation with its garbage). Measured (bau report FOLGE-P
-// §Härtung 2, §Härtung 3; Delta-Review 3 §3): one scan 9.5–11.6, the form
-// scanned twice 8.9–12.6 (200 runs; two modes, the upper one a cycle that
-// catches the scanner's result slice while append copies it); both calls'
-// matches alive at once 16.0 or 19.4 (the same two modes). 14 lies between:
-// 1.4 above the largest hold measured, 2.0 under the mutant's lower mode.
-const scanHeldPerByteMax = 14
-
 // scanHeldAtOnce is the largest live heap the collector marks while
 // ScanRaise runs over body, above the live heap before it (the largest of
 // three runs): the collector runs at GOGC=1, and a finalizer re-armed at

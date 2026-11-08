@@ -44,10 +44,18 @@ failed, 2 on usage:
     budget.
 ``retry-after --base-url URL --key-env NAME --model M --requests N [--concurrency C]``
     N non-streamed chats (C at a time):
-    ``{"requests", "status": {…}, "share_429", "retry_after": [...],
-    "max_allowed", "violations": [...], "ok"}`` — ok = every 429 carries a
-    whole-second Retry-After in [1, ceil(30 × (1 + --jitter))] (45 s at the
-    default jitter 0.5) and an x-should-retry header.
+    ``{"requests", "status": {…}, "ctx_429", "proxy_429", "proxy_servers":
+    {…}, "share_429", "retry_after": [...], "max_allowed", "violations":
+    [...], "ok"}`` — ok = at least one 429 of ctx itself and every one
+    carries a whole-second Retry-After in [1, ceil(30 × (1 + --jitter))]
+    (45 s at the default jitter 0.5) and an x-should-retry header. A 429
+    of a reverse proxy in front of ctx (its own page: neither a JSON body
+    nor x-should-retry — openresty's limit_req answers HTML) counts as
+    ``proxy_429``, outside ``violations``, ``share_429`` (the ctx share)
+    and ``retry_after``; ``status`` counts every answer. The Server header
+    tells nothing apart: behind the proxy ctx's own answers carry the
+    proxy's Server too. A run whose 429 are all the proxy's never reached
+    the door's limit — exit 1 with an ``error``, not a pass.
 """
 
 import argparse
@@ -274,6 +282,26 @@ def heap(base_url: str, keys: list[str], model: str, streams: int, mem_file: str
 
 # ── retry-after ─────────────────────────────────────────────────────────────
 
+def _from_ctx(should_retry, raw: bytes) -> bool:
+    """Whether a 429 is ctx's own answer, not a reverse proxy's in front of it.
+
+    ctx answers every /v1 refusal with a JSON body (the OpenAI error envelope)
+    and x-should-retry; a proxy's limit (openresty limit_req, S4 2026-11-08:
+    166 of 200 under a burst) answers its own HTML page with neither. Either
+    sign of ctx counts as ctx — a JSON 429 without the envelope or a non-JSON
+    429 with x-should-retry is ctx's and is judged, never hidden as the
+    proxy's. The Server header is no sign: behind the proxy it names the
+    proxy on ctx's answers too (live 2026-11-08: the door's 401 and
+    /api/status both say openresty)."""
+    if should_retry is not None:
+        return True
+    try:
+        json.loads(raw)
+    except ValueError:
+        return False
+    return True
+
+
 def retry_after(base_url: str, key: str, model: str, requests: int, concurrency: int,
                 jitter: float = RETRY_AFTER_JITTER) -> tuple[bool, dict]:
     max_allowed = math.ceil(RETRY_AFTER_STEP_MAX * (1 + jitter))
@@ -281,17 +309,23 @@ def retry_after(base_url: str, key: str, model: str, requests: int, concurrency:
     url = base_url.rstrip("/") + "/v1/chat/completions"
 
     def one(_):
-        st, hdr, _raw = http("POST", url, body, {"Authorization": f"Bearer {key}"})
-        return st, hdr.get("Retry-After"), hdr.get("x-should-retry")
+        st, hdr, raw = http("POST", url, body, {"Authorization": f"Bearer {key}"})
+        return st, hdr.get("Retry-After"), hdr.get("x-should-retry"), hdr.get("Server"), raw
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         got = list(pool.map(one, range(requests)))
     status: dict[str, int] = {}
+    servers: dict[str, int] = {}
     values, violations = [], []
-    for st, ra, sr in got:
+    ctx_429 = 0
+    for st, ra, sr, server, raw in got:
         status[str(st)] = status.get(str(st), 0) + 1
         if st != 429:
             continue
+        if not _from_ctx(sr, raw):
+            servers[server or ""] = servers.get(server or "", 0) + 1
+            continue
+        ctx_429 += 1
         if sr not in ("true", "false"):
             violations.append(f"429 without x-should-retry ({sr!r})")
         try:
@@ -302,10 +336,17 @@ def retry_after(base_url: str, key: str, model: str, requests: int, concurrency:
         values.append(n)
         if not RETRY_AFTER_MIN <= n <= max_allowed:
             violations.append(f"429 with Retry-After {n} outside [{RETRY_AFTER_MIN}, {max_allowed}]")
-    n429 = status.get("429", 0)
-    ok = not violations
-    return ok, {"requests": requests, "status": status, "share_429": n429 / requests if requests else 0.0,
-                "retry_after": sorted(set(values)), "max_allowed": max_allowed, "violations": violations[:10], "ok": ok}
+    proxy_429 = sum(servers.values())
+    ok = ctx_429 > 0 and not violations
+    res = {"requests": requests, "status": status, "ctx_429": ctx_429, "proxy_429": proxy_429, "proxy_servers": servers,
+           "share_429": ctx_429 / requests if requests else 0.0, "retry_after": sorted(set(values)),
+           "max_allowed": max_allowed, "violations": violations[:10], "ok": ok}
+    if ctx_429 == 0:
+        # Nothing of ctx's to judge: the flood never reached the door's limit
+        # (or the proxy's limit stood in front of it) — not established, no pass.
+        res["error"] = (f"no ctx 429 under the flood ({proxy_429} from a proxy in front of ctx) — "
+                        "the door's limit was not reached; raise --requests/--concurrency or lower the consumer's limits")
+    return ok, res
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

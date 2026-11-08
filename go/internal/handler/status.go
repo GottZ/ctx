@@ -241,6 +241,14 @@ type statusResponse struct {
 	// it): the running requests of a shared GPU are a live activity oracle
 	// over every tenant's load (dispatcher.go TargetSnapshot exposure rule).
 	ForeignLoad *[]foreignLoadRow `json:"foreign_load,omitempty"`
+	// QuerySynthesize is the server-admin-only query-synthesis latency block
+	// (FOLGE-Y, status_query_synthesize.go): {p95_ms, avg_ms, samples, since}
+	// from llm's in-memory ring of the last 512 synthesis durations. Pointer +
+	// omitempty, the LLMLog convention: PRESENT on the server-admin path
+	// whenever the source is wired (always in production), with samples 0
+	// too; ABSENT on the per-tenant path (SnapshotForTenant never sets it —
+	// one window over every tenant's syntheses is a server-global figure).
+	QuerySynthesize *querySynthesizeStatus `json:"query_synthesize,omitempty"`
 	// Gateway, UsageSplit24h and Federation are the model API's sections
 	// (W06-16, status_gateway.go): gateway on both paths (tenant path: own
 	// consumers only), the other two server-admin only. Per caller like
@@ -771,6 +779,12 @@ type StatusCollector struct {
 	// literal in a test) omits the section.
 	llmlogStats func() llmlogWriteStatus
 
+	// querySynthesize reads the query-synthesis latency ring (FOLGE-Y) —
+	// process memory, no I/O, read per call like llmlogStats. Defaults to
+	// readQuerySynthesizeStatus; nil (a collector literal in a test) omits
+	// the section.
+	querySynthesize func() querySynthesizeStatus
+
 	// foreignLoad is the W06-8 foreign-load detector (foreign_load.go): its
 	// own ticker (RunForeignLoad, W06-8b) kicks the async single-flight
 	// rounds, assemble reads its last published rows (process memory, like
@@ -801,6 +815,7 @@ func NewStatusCollector(pool *pgxpool.Pool, backendPool *backends.Pool, dreams d
 		channelProbeRun: runChannelProbe,
 		guardGenBuild:   buildGuardReviewGeneration,
 		llmlogStats:     readLLMLogWriteStatus,
+		querySynthesize: readQuerySynthesizeStatus,
 		foreignLoad:     newForeignLoadDetector(pool, dispatchSrc),
 	}
 }
@@ -1556,6 +1571,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		v := c.llmlogStats()
 		lw = &v
 	}
+	var qsyn *querySynthesizeStatus
+	if c.querySynthesize != nil {
+		v := c.querySynthesize()
+		qsyn = &v
+	}
 	return statusResponse{
 		Success:        true,
 		AsOf:           cheap.asOf,
@@ -1606,6 +1626,11 @@ func (c *StatusCollector) assemble(cheap *cheapSnapshot, qs *dream.QueueStats, d
 		// SnapshotForTenant never calls assemble, so its field stays nil →
 		// absent.
 		ForeignLoad: c.foreignLoad.section(),
+		// query_synthesize is server-admin-only and PRESENT whenever the ring
+		// source is wired, at samples 0 too (pointer). The per-tenant
+		// SnapshotForTenant never calls assemble, so its field stays nil →
+		// absent (one window over every tenant's syntheses).
+		QuerySynthesize: qsyn,
 	}
 }
 

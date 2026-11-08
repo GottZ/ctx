@@ -165,6 +165,14 @@ func TestStatusPerTenantView(t *testing.T) {
 		if admin := col.Snapshot(ctx); admin.LLMLog == nil {
 			t.Error("server-admin /api/status lacks the llmlog section")
 		}
+		// FOLGE-Y: the query-synthesis latency ring holds every tenant's
+		// syntheses in one window — server-admin-only, same pin pair.
+		if snap.QuerySynthesize != nil || strings.Contains(string(b), `"query_synthesize"`) {
+			t.Errorf("tenant /api/status carries the query_synthesize section (server-global leak): %s", b)
+		}
+		if admin := col.Snapshot(ctx); admin.QuerySynthesize == nil {
+			t.Error("server-admin /api/status lacks the query_synthesize section")
+		}
 	})
 
 	t.Run("dispatch_exposure_matrix", func(t *testing.T) {

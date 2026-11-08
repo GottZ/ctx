@@ -127,13 +127,15 @@ type ModelAuthStats struct {
 	// The in-flight registry (W01-8): requests running now, the distinct
 	// model keys behind them and their expiry timers (≤ keys), requests
 	// ended because their key stopped authenticating, liveness statements
-	// (ctx_model_auth_live) run and failed.
-	Inflight            int
-	InflightKeys        int
-	InflightTimers      int
-	InflightCancelled   uint64
-	InflightSweeps      uint64
-	InflightSweepErrors uint64
+	// (ctx_model_auth_live) run and failed. snake_case like every key of
+	// the gateway part of /api/status (FOLGE-V: without tags they went out
+	// as the Go names; TestStatusGatewayKeysSnakeCase pins the form).
+	Inflight            int    `json:"inflight"`
+	InflightKeys        int    `json:"inflight_keys"`
+	InflightTimers      int    `json:"inflight_timers"`
+	InflightCancelled   uint64 `json:"inflight_cancelled"`
+	InflightSweeps      uint64 `json:"inflight_sweeps"`
+	InflightSweepErrors uint64 `json:"inflight_sweep_errors"`
 }
 
 type modelAuthCounters struct {
