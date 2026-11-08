@@ -129,7 +129,8 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// serve them from two generations — the rule context_search.go states for
 	// its own surface, now held here too.
 	snap := h.cfg.SnapshotForRequest(ctx)
-	res, rej := runStageWriteGates(ctx, h.pool, h.classifySet(ctx), authResult, req,
+	classifySet := h.classifySet(ctx)
+	res, rej := runStageWriteGates(ctx, h.pool, classifySet, authResult, req,
 		snap.Pool.DefaultBlockSensitivity, snap.Query.RateLimitWrite, reqID)
 	if rej != nil {
 		h.reject(w, ctx, authResult, req, rej)
@@ -208,7 +209,8 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// Welle 44 / WF T4: Auto-classify type_name from the registry
 	// snapshot (rules are data now; type_source='manual' blocks are never
 	// re-classified). No-op when no rule matches (default type stays).
-	if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, h.classifySet(ctx), block.ID, block.Title, block.Metadata); err != nil {
+	// The post-upsert classification reuses this request's set: one rule generation per request.
+	if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("store: auto-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 	}
 
