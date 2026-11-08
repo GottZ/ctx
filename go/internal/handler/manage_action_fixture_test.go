@@ -115,6 +115,7 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"model-alias-create", "", tierTenantAdmin, "handleModelAliasCreate"},
 	{"model-alias-delete", "", tierTenantAdmin, "handleModelAliasDelete"},
 	{"model-alias-list", "", tierTenantAdmin, "handleModelAliasList"},
+	{"model-alias-preview", "", tierServerAdmin, "handleModelAliasPreview"},
 	{"model-alias-update", "", tierTenantAdmin, "handleModelAliasUpdate"},
 	// W01-5: the model consumer administration — NEW surface, not pre-table
 	// (design/01 §4.6). Granting a credential is tierSelfService, reading and

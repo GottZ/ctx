@@ -72,10 +72,12 @@ var (
 	// (laneClass) — 503 model_unavailable, fail-closed, before any acquire.
 	// Unreachable since A03-W9 (ResolveLane yields urgent or bulk, both
 	// bound); it stays the fail-closed default of a lane outside the table.
-	ErrLaneNotOffered = errors.New("handler: the admission lane of the request is not offered")
+	// The value is oai's (W05-04): the chain dry run tells the refusals
+	// apart without importing this package.
+	ErrLaneNotOffered = oai.ErrLaneNotOffered
 	// ErrChainNotOffered refuses a request none of whose chain rows offers
 	// the external class — 503 model_unavailable before any acquire.
-	ErrChainNotOffered = errors.New("handler: no chain row offers the external class")
+	ErrChainNotOffered = oai.ErrChainNotOffered
 	// ErrAcquireOrder is a door of the request acquirer used out of order —
 	// a second First (a second wait point), Next or Continue before a lease
 	// of the request, Continue on another row than the attempt's or past

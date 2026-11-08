@@ -94,6 +94,11 @@ type ManageHandler struct {
 	// how many (cancelled_inflight). Wired via SetInflight (server.go); nil
 	// ⇒ cancelled_inflight is null (unknown, never a 0 — V-01-e).
 	inflight *InflightRegistry
+	// chainPreview / rolePrimary feed model-alias-preview (W05-04): the
+	// /v1 chain dry run and the pool's primary model of a role. Wired via
+	// SetChainPreview (cmd/ctxd); nil ⇒ the action answers 503.
+	chainPreview ChainPreviewer
+	rolePrimary  RolePrimaryModel
 }
 
 // SetInflight wires the model-key door's in-flight registry (W01-8).

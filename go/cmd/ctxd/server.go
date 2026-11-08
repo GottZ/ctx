@@ -514,6 +514,10 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	deps = withUsageEvents(deps, gateway.events)
 	usageH.SetMeter(usageMeterView{meter: gateway.meter, settings: gateway.settings, limits: scheduler.GatewayLimitsRegistry()})
 	statusCollector.SetGatewayFeed(gateway.statusFeed(pool))
+	// W05-04: model-alias-preview runs the dry run over the SAME
+	// dependencies the /v1 routes are built from, and suggests from the
+	// same pool.
+	manageH.SetChainPreview(deps.PreviewChain, backendPool.PrimaryModel)
 	v1, v2 := v1Routes(deps), v2Routes(deps)
 	if wrapRoutes != nil {
 		v1, v2 = wrapRoutes(v1), wrapRoutes(v2)
