@@ -642,3 +642,55 @@ func TestKickRoundProbesOnlyRowsWithoutAnswer(t *testing.T) {
 		t.Errorf("R1-6: the new row was not probed")
 	}
 }
+
+// TestCadenceRoundSurvivesFrequentReloads (PR #178 CodeRabbit 1): reload
+// kicks closer together than pool.capability_probe_interval must not push
+// the full round out — a model swap behind the same base_url (vision true ⇒
+// false, fingerprint unchanged, so a kick round skips the row) is seen
+// within one interval.
+func TestCadenceRoundSurvivesFrequentReloads(t *testing.T) {
+	e := newEngine(t, map[string]engineRoute{"/get_model_info": {200, sglangModelInfoVision}})
+	p := capPool(t, capRow("spark", e.srv.URL, ProtocolOpenAI, ProviderLlamaCpp, "m"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.RunCapabilityProbe(ctx, func() time.Duration { return 150 * time.Millisecond })
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for visionOf(p.Capabilities("spark")) != "true" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if visionOf(p.Capabilities("spark")) != "true" {
+		t.Fatal("precondition: the boot round did not read vision=true")
+	}
+	e.set("/get_model_info", engineRoute{200, sglangModelInfoText})
+	stopKicks := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(30 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stopKicks:
+				return
+			case <-tick.C:
+				select {
+				case p.capKick <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	deadline = time.Now().Add(2 * time.Second)
+	for visionOf(p.Capabilities("spark")) != "false" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stopKicks)
+	got := visionOf(p.Capabilities("spark"))
+	cancel()
+	<-done
+	if got != "false" {
+		t.Errorf("CR-1: under reload kicks every 30 ms (interval 150 ms) the model swap stayed vision=%s after 2 s, want false — the cadence round never ran", got)
+	}
+}

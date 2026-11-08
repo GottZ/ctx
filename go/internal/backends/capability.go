@@ -377,29 +377,38 @@ func visionString(v *bool) string {
 	return "false"
 }
 
-// RunCapabilityProbe is the probe's own cadence: one round at start (boot,
-// after the first Reload), one after every Reload, and one every interval()
-// (pool.capability_probe_interval, read per wait — hot). Blocks until ctx
-// ends; the round in flight is cancelled with it.
+// RunCapabilityProbe is the probe's own cadence: one full round at start
+// (boot, after the first Reload), one full round every interval()
+// (pool.capability_probe_interval, read per wait — hot) measured from the
+// last full round, and in between one round per Reload kick over the rows
+// without an answer. A kick never moves the full round's deadline (PR #178
+// review): with reloads more frequent than the interval the full round
+// still runs, so an answer that changed behind an unchanged fingerprint (a
+// model swapped behind the same base_url) is seen within one interval.
+// Blocks until ctx ends; the round in flight is cancelled with it.
 func (p *Pool) RunCapabilityProbe(ctx context.Context, interval func() time.Duration) {
 	slog.Info("backends: capability probe started")
-	onlyMissing := false
+	full := true
+	var lastFull time.Time
 	for {
-		p.probeRound(ctx, onlyMissing)
+		if full {
+			lastFull = time.Now()
+		}
+		p.probeRound(ctx, !full)
 		iv := interval()
 		if iv <= 0 {
 			iv = 600 * time.Second // V59 refuses it; a hand-built snapshot must not spin
 		}
-		t := time.NewTimer(iv)
+		t := time.NewTimer(max(time.Until(lastFull.Add(iv)), 0))
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			return
 		case <-p.capKick:
 			t.Stop()
-			onlyMissing = true
+			full = !time.Now().Before(lastFull.Add(iv))
 		case <-t.C:
-			onlyMissing = false
+			full = true
 		}
 	}
 }

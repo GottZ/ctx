@@ -179,3 +179,36 @@ func TestDoorVisionRoutesImagesToCapableRows(t *testing.T) {
 		}
 	})
 }
+
+// TestDoorVisionAfterTheEgressGate (PR #178 CodeRabbit 2): the image filter
+// judges the rows the request may actually reach — after the tenant quota
+// and egress gate. A local text row plus an external vision row the
+// consumer's egress policy drops is "no image-capable backend", the door's
+// 400 with the cause, not 503 no_eligible_backend.
+func TestDoorVisionAfterTheEgressGate(t *testing.T) {
+	const param = "messages[0].content[1].image_url.url"
+	local, ext := newUpstream(t, answerSGLang), newUpstream(t, answerOpenRouter)
+	rows := []backends.Backend{local.row("local-text", backends.TrustFull, 20), externalRow(ext, "ext-vision", backends.ProviderOpenRouter, 10)}
+	rig := newChatRig(t, rows, 4, 1, withEgress(backends.EgressPolicy{}),
+		withDeps(func(d *oai.Deps) { d.RowVision = func(b *backends.Backend) bool { return b.Name == "ext-vision" } }))
+	rig.reg.reg.SetVisionView(doorView(true))
+	rig.reg.reload(t, visionDoorAliases())
+	l0, e0 := local.hits.Load(), ext.hits.Load()
+	a := rig.post(t, imageBody("chat"))
+	if a.status != http.StatusBadRequest {
+		t.Fatalf("CR-2: answered %d %s, want 400 unsupported_value (the only image-capable row is egress-denied)", a.status, a.body)
+	}
+	if code, p, _ := a.envelope(t); code != oai.CodeUnsupportedValue || p != param {
+		t.Errorf("CR-2: code %q param %q, want %q %q", code, p, oai.CodeUnsupportedValue, param)
+	}
+	if got, want := errorMessage(t, a), "Unsupported value for "+param+": this model does not accept images (no image-capable backend in the chain of alias chat)."; got != want {
+		t.Errorf("CR-2: message %q, want %q", got, want)
+	}
+	if local.hits.Load() != l0 || ext.hits.Load() != e0 {
+		t.Errorf("CR-2: an upstream was contacted for a refused image request")
+	}
+	// A text request on the same chain is served by the local row.
+	if a := rig.post(t, chatBody("chat")); a.status != http.StatusOK {
+		t.Errorf("CR-2: text request answered %d %s, want 200 from the local row", a.status, a.body)
+	}
+}
