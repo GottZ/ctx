@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/provenance"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -78,6 +79,14 @@ type healthResponse struct {
 	// poller must not get for free). The full Report — mode, mode_source,
 	// per-object drifts — is admin-only behind GET /api/contract.
 	SchemaContract string `json:"schema_contract"`
+	// Version names the build that answers (FOLGE-X, LOOP Queue 72):
+	// provenance.BuildVersion — the release stamp the image build sets
+	// (build-arg CTX_VERSION), the same value the boot line "starting HTTP
+	// server" logs; "dev" for an unstamped build, never empty here. Set in
+	// HealthStatus, so /health and the status frame's health block keep one
+	// shape (G33); omitempty only for the tenant view's deliberately zero
+	// health block. Name-free like the rest: a version string, no host.
+	Version string `json:"version,omitempty"`
 }
 
 // HealthStatus computes the service-class health aggregate from ONE pool
@@ -117,6 +126,7 @@ func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backe
 		Status:            aggregateHealthStatus(services, blocktypeRegistry),
 		Services:          services,
 		BlocktypeRegistry: blocktypeRegistry,
+		Version:           provenance.BuildVersion(),
 	}
 }
 

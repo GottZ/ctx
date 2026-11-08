@@ -19,12 +19,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/provenance"
 )
 
 // swapStore is a minimal ConfigStore whose generation can be swapped without
@@ -136,6 +138,7 @@ func assertHealthBody(t *testing.T, body []byte, needles []string) {
 		Services          map[string]string `json:"services"`
 		BlocktypeRegistry string            `json:"blocktype_registry"`
 		SchemaContract    string            `json:"schema_contract"`
+		Version           string            `json:"version"`
 	}
 	if err := dec.Decode(&resp); err != nil {
 		t.Fatalf("health body has unknown fields or bad shape: %v\nbody: %s", err, body)
@@ -162,6 +165,12 @@ func assertHealthBody(t *testing.T, body []byte, needles []string) {
 	default:
 		t.Errorf("schema_contract %q outside the fixed vocabulary", resp.SchemaContract)
 	}
+	// FOLGE-X (LOOP Queue 72): version names the build — a release tag, a
+	// module version, a VCS revision or "dev" (provenance.BuildVersion),
+	// never empty and never free text a config string could reach.
+	if !healthVersionForm.MatchString(resp.Version) {
+		t.Errorf("FOLGE-X gate (health version): version %q is empty or outside the build-version form", resp.Version)
+	}
 	roles := map[string]bool{"database": true, "embed": true, "chat": true, "dream": true}
 	for k, v := range resp.Services {
 		if !roles[k] {
@@ -177,6 +186,43 @@ func assertHealthBody(t *testing.T, body []byte, needles []string) {
 		if strings.Contains(raw, n) {
 			t.Errorf("health body leaks config string %q:\n%s", n, raw)
 		}
+	}
+}
+
+// healthVersionForm is the vocabulary of /health version: a semantic version
+// with an optional v, pre-release and build part (a release tag, a Go
+// pseudo-version), a VCS revision with an optional -dirty, or "dev".
+var healthVersionForm = regexp.MustCompile(`^(v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?|[0-9a-f]{7,64}(-dirty)?|dev)$`)
+
+// TestHealthCarriesBuildVersion is the FOLGE-X pin: GET /health names the
+// build it runs — the same value as provenance.BuildVersion (the release
+// stamp the Docker build-arg CTX_VERSION sets, the source the boot line
+// "starting HTTP server" logs) — on a healthy and on an unhealthy answer.
+func TestHealthCarriesBuildVersion(t *testing.T) {
+	st := &swapStore{}
+	st.p.Store(healthTestConfig())
+	rec := httptest.NewRecorder()
+	NewHealthHandler(brokenPool(t), st, healthTestPool(closedPortHost(t), closedPortHost(t), closedPortHost(t)), nil).
+		Health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var resp struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v — %s", err, rec.Body.Bytes())
+	}
+	if resp.Version == "" || resp.Version != provenance.BuildVersion() {
+		t.Errorf("FOLGE-X gate (health version): /health version %q, want the build version %q (never empty) — body %s",
+			resp.Version, provenance.BuildVersion(), rec.Body.Bytes())
+	}
+}
+
+// TestHealthStatusCarriesBuildVersion (Fremd-Review F3): the version is set
+// in the shared HealthStatus, not only in the public handler — the health
+// block of /api/status (StatusCollector.buildCheap) and the SSE frame carry
+// the same value, one shape for both (G33).
+func TestHealthStatusCarriesBuildVersion(t *testing.T) {
+	if got := HealthStatus(context.Background(), brokenPool(t), nil, false, "ok").Version; got == "" || got != provenance.BuildVersion() {
+		t.Errorf("FOLGE-X gate (shared shape): HealthStatus(...).Version = %q, want %q — the status health block would lack what /health shows", got, provenance.BuildVersion())
 	}
 }
 

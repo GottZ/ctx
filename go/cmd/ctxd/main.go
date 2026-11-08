@@ -23,6 +23,7 @@ import (
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/handler"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/provenance"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/toolboot"
@@ -846,7 +847,7 @@ func main() {
 	// Start HTTP server in background
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("starting HTTP server", "addr", listenAddr)
+		slog.Info("starting HTTP server", "addr", listenAddr, "version", provenance.BuildVersion())
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
