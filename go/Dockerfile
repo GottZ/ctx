@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 go build -o /ctx ./cmd/ctxd
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:d62067879de890a1def9da0e7766b7d20810a5e5555cef8506b752437d7a3e88
 COPY --from=build /ctx /ctx
-ENV GOMEMLIMIT=200MiB
+ENV GOMEMLIMIT=768MiB
 ENV GOGC=100
 # Der Registry-Default ist 127.0.0.1:8080 (#49 Punkt 4: ein nacktes ctxd auf
 # einem Host lauscht nicht auf allen Interfaces). Im Container ist 127.0.0.1

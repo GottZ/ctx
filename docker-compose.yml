@@ -602,7 +602,9 @@ services:
           # Staffel: >=3G K1 / >=8G K2 + Elternlast am 10M-Ziel (design/04 §6.3).
           # RC-D C8 (2026-11-08): gateway.inflight_budget default 512 MiB (floor
           # 257 MiB with the scan cap) — the limit holds the budget plus the
-          # process. GOMEMLIMIT follows after the S4 base-load measurement.
+          # process. GOMEMLIMIT=768MiB (go/Dockerfile) after the S4 base-load
+          # measurement of 2026-11-08: idle 21–32 MiB, far under the 170 MiB the
+          # C8 rule allows for that limit (reserve = base × 1.5 beside the budget).
           memory: 1536M
         reservations:
           memory: 32M
