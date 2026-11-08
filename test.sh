@@ -623,6 +623,37 @@ else
   fi
 fi
 
+# T25 OPENAI_GATEWAY (W02-15) — the OpenAI-compatible API against the running
+# stack through the official Python SDK: go/conformance/oai/live/smoke.py t25
+# creates a test consumer (all_models), checks /v1/models, chat with and
+# without streaming, embeddings, rerank, the 401 without a key and the error
+# envelope, and deletes the consumer. Without gateway.enabled (the default)
+# the script exits 77 and T25 is a SKIP with that reason — never a PASS.
+# Models come from /v1/models by kind unless T25_CHAT_MODEL /
+# T25_EMBED_MODEL / T25_RERANK_MODEL name them. Needs uv (the SDK is pinned
+# like the conformance harness: openai==3.42.1).
+T="T25 OPENAI_GATEWAY"
+if [[ -z "${CTX_ADMIN_KEY:-}" ]]; then
+  fail "$T" "CTX_ADMIN_KEY not set in .env (host-only admin key)"
+elif ! command -v uv >/dev/null 2>&1; then
+  skip "$T" "uv not on PATH — the SDK smoke cannot run here"
+else
+  t25_models=()
+  [[ -n "${T25_CHAT_MODEL:-}" ]] && t25_models+=(--chat-model "$T25_CHAT_MODEL")
+  [[ -n "${T25_EMBED_MODEL:-}" ]] && t25_models+=(--embed-model "$T25_EMBED_MODEL")
+  [[ -n "${T25_RERANK_MODEL:-}" ]] && t25_models+=(--rerank-model "$T25_RERANK_MODEL")
+  t25_out=$(CTX_ADMIN_KEY="$CTX_ADMIN_KEY" uv run --no-project --quiet --with openai==3.42.1 \
+    python3 "$SCRIPT_DIR/go/conformance/oai/live/smoke.py" t25 --base-url "$WEBHOOK" \
+    --admin-key-env CTX_ADMIN_KEY "${t25_models[@]}" 2>&1)
+  t25_rc=$?
+  t25_last=$(printf '%s\n' "$t25_out" | awk 'NF' | tail -n 1)
+  case $t25_rc in
+    0) pass "$T (${t25_last#PASS: })" ;;
+    77) skip "$T" "${t25_last#SKIP: }" ;;
+    *) fail "$T" "rc=$t25_rc ${t25_last:-no output}" ;;
+  esac
+fi
+
 # =====================================================================
 # PART 2: Retrieval Tests (Ollama required)
 # =====================================================================

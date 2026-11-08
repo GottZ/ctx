@@ -21,7 +21,7 @@ ctx gives your LLM a persistent, searchable memory. Store knowledge blocks, quer
 
 Every block carries anchors from both its content (dates mentioned in text) AND its `created_at` timestamp, so a note about "Meeting am Dienstag" is findable by the day it discusses and the day it was written. **Dream Mode** runs as a continuous background loop — autonomously discovering relationships between blocks, marking outdated information, and promoting high-quality content. Your knowledge base grows, self-organizes, and stays current.
 
-It speaks **MCP, a CLI, and a plain HTTP API**, ships an embedded web UI, and isolates multiple tenants down to the individual block.
+It speaks **MCP, a CLI, and a plain HTTP API**, ships an embedded web UI, and isolates multiple tenants down to the individual block. Optionally it passes its models on as an **OpenAI-compatible API** (`/v1`) to other programs and other ctx instances, with keys, quotas and its own traffic first ([enabling it](docs/operations.md#upgrading-to-5330-enabling-the-openai-compatible-api)).
 
 ## Features
 
