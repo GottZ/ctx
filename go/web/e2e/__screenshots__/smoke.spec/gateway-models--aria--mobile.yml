@@ -25,18 +25,18 @@
               - columnheader "status"
               - columnheader "actions"
           - rowgroup:
-            - row "_global chat chat chat public enabled read-only":
+            - 'row "_global chat chat images: on (backend) chat public enabled read-only"':
               - cell "_global"
               - cell "chat"
-              - cell "chat"
+              - 'cell "chat images: on (backend)"'
               - cell "chat"
               - cell "public"
               - cell "enabled"
               - cell "read-only"
-            - row "_global draft chat chat public enabled read-only":
+            - 'row "_global draft chat images: on (backend) chat public enabled read-only"':
               - cell "_global"
               - cell "draft"
-              - cell "chat"
+              - 'cell "chat images: on (backend)"'
               - cell "chat"
               - cell "public"
               - cell "enabled"
@@ -49,46 +49,46 @@
               - cell "public"
               - cell "enabled"
               - cell "read-only"
-            - row "_global legacy chat chat public disabled read-only":
+            - 'row "_global legacy chat images: off (no image-capable backend) chat-legacy public disabled read-only"':
               - cell "_global"
               - cell "legacy"
-              - cell "chat"
-              - cell "chat"
+              - 'cell "chat images: off (no image-capable backend)"'
+              - cell "chat-legacy"
               - cell "public"
               - cell "disabled"
               - cell "read-only"
-            - row "_global vault chat chat personal disabled read-only":
+            - 'row "_global vault chat images: off (policy) chat personal disabled read-only"':
               - cell "_global"
               - cell "vault"
-              - cell "chat"
+              - 'cell "chat images: off (policy)"'
               - cell "chat"
               - cell "personal"
               - cell "disabled"
               - cell "read-only"
-            - row "home chat chat chat public enabled Edit alias chat Disable alias chat":
+            - 'row "home chat chat images: on (backend) chat public enabled Edit alias chat Disable alias chat"':
               - cell "home"
               - cell "chat"
-              - cell "chat"
+              - 'cell "chat images: on (backend)"'
               - cell "chat"
               - cell "public"
               - cell "enabled"
               - cell "Edit alias chat Disable alias chat":
                 - button "Edit alias chat"
                 - button "Disable alias chat"
-            - row "home A-SENTINEL-1f9c62d84b7e chat chat credentials disabled Edit alias A-SENTINEL-1f9c62d84b7e Enable alias A-SENTINEL-1f9c62d84b7e":
+            - 'row "home A-SENTINEL-1f9c62d84b7e chat images: on (backend) chat credentials disabled Edit alias A-SENTINEL-1f9c62d84b7e Enable alias A-SENTINEL-1f9c62d84b7e"':
               - cell "home"
               - cell "A-SENTINEL-1f9c62d84b7e"
-              - cell "chat"
+              - 'cell "chat images: on (backend)"'
               - cell "chat"
               - cell "credentials"
               - cell "disabled"
               - cell "Edit alias A-SENTINEL-1f9c62d84b7e Enable alias A-SENTINEL-1f9c62d84b7e":
                 - button "Edit alias A-SENTINEL-1f9c62d84b7e"
                 - button "Enable alias A-SENTINEL-1f9c62d84b7e"
-            - row "home draft chat chat public disabled Edit alias draft Enable alias draft":
+            - 'row "home draft chat images: on (policy) chat public disabled Edit alias draft Enable alias draft"':
               - cell "home"
               - cell "draft"
-              - cell "chat"
+              - 'cell "chat images: on (policy)"'
               - cell "chat"
               - cell "public"
               - cell "disabled"
