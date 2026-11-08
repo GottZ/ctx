@@ -40,7 +40,13 @@ class Fake:
     bad-chat | retry-ok | retry-bad | slow-prefill | cut | heap |
     no-ratelimit | reasoning | reasoning-stream | no-www-auth |
     rerank-ascending | create-no-key | proxy-ok | proxy-wrong | no-rerank |
-    prefill-refused | retry-max.
+    prefill-refused | retry-max | retry-proxy | retry-proxy-only |
+    retry-json-house | retry-html-door.
+
+    In every retry-* mode each answer carries ``Server: openresty``: behind
+    the reverse proxy ctx's own answers say so too (FOLGE-W, live probe
+    2026-11-08: ``/api/status`` 200 and the door's 401 both), so the header
+    never tells a proxy 429 from a ctx 429.
 
     In mode heap every stream takes ~0.6 s and the fake writes its own
     "container memory" to ``mem_file``: 100 MB + 20 MB per open stream, so
@@ -67,6 +73,9 @@ class Fake:
 
             def log_message(self, *a):
                 pass
+
+            def version_string(self):
+                return "openresty" if fake.mode.startswith("retry-") else super().version_string()
 
             def _send(self, status, body, headers=None, ctype="application/json"):
                 raw = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -158,6 +167,20 @@ class Fake:
             return h._send(*unauth)
         if self.mode == "door-first":
             return h._send(*nf)
+        if self.mode in RETRY_MIX:
+            if bearer != f"Bearer {KEY}":
+                return h._send(*unauth)
+            kind = RETRY_MIX[self.mode][n % len(RETRY_MIX[self.mode])]
+            if kind == "proxy":
+                return h._send(429, PROXY_429_HTML, ctype="text/html")
+            if kind == "ctx":
+                return h._send(429, _envelope("rate_limit_exceeded", "rate_limit_error"),
+                               {"x-should-retry": "true", "Retry-After": "5"})
+            if kind == "house":
+                return h._send(429, {"success": False, "error": "rate limited"}, {"Retry-After": "5"})
+            if kind == "html-door":
+                return h._send(429, b"Too Many Requests", {"x-should-retry": "true", "Retry-After": "60"}, ctype="text/plain")
+            return h._send(200, _chat())
         if self.mode in ("retry-ok", "retry-bad", "retry-max"):
             if bearer != f"Bearer {KEY}":
                 return h._send(*unauth)
@@ -207,6 +230,25 @@ class Fake:
                                               else round(0.1 + 0.1 * i, 3)} for i in range(len(docs))],
                                  "usage": {"prompt_tokens": 3, "total_tokens": 3}})
         return h._send(*nf)
+
+
+# FOLGE-W: openresty's own 429 page (limit_req of the reverse proxy in front
+# of ctx, S4 2026-11-08 04:08Z: 166 of 200) — HTML, no envelope, no
+# x-should-retry, no Retry-After.
+PROXY_429_HTML = (b"<html>\r\n<head><title>429 Too Many Requests</title></head>\r\n<body>\r\n"
+                  b"<center><h1>429 Too Many Requests</h1></center>\r\n<hr><center>openresty</center>\r\n"
+                  b"</body>\r\n</html>\r\n")
+
+# The answer per request number n (n % len) of the FOLGE-W retry modes:
+# proxy = PROXY_429_HTML, ctx = the door's 429 (envelope, Retry-After 5,
+# x-should-retry), house = a JSON 429 without envelope and x-should-retry,
+# html-door = a non-JSON 429 WITH x-should-retry and Retry-After 60, ok = 200.
+RETRY_MIX = {
+    "retry-proxy": ("proxy", "ctx", "ok"),
+    "retry-proxy-only": ("proxy", "ok"),
+    "retry-json-house": ("house", "ok"),
+    "retry-html-door": ("html-door", "ok"),
+}
 
 
 def _chat():
@@ -560,3 +602,47 @@ def test_measure_retry_after_allows_the_jitter(fake):
                          "--model", "chat", "--requests", "10")
     got = json.loads(last) if last.startswith("{") else {}
     assert rc == 0 and got.get("ok") is True and got.get("max_allowed") == 45, f"Retry-After 45: {rc} {last!r}\n{out}"
+
+
+def _retry(fake, requests):
+    rc, last, out = _run(MEASURE, "retry-after", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY",
+                         "--model", "chat", "--requests", str(requests), "--concurrency", "4")
+    return rc, (json.loads(last) if last.startswith("{") else {}), last, out
+
+
+@pytest.mark.parametrize("fake", ["retry-proxy"], indirect=True)
+def test_measure_retry_after_separates_proxy_429(fake):
+    """FOLGE-W: a 429 of the reverse proxy in front of ctx (openresty's HTML
+    page: no JSON body, no x-should-retry, no Retry-After) counts as
+    proxy_429, never as a ctx violation; ok, share_429 and retry_after judge
+    ctx's own 429 only (30 requests: 10 proxy, 10 ctx, 10 × 200). Every
+    answer says Server: openresty, as behind the live proxy."""
+    rc, got, last, out = _retry(fake, 30)
+    assert rc == 0 and got.get("ok") is True and got.get("violations") == [], f"proxy 429 judged as ctx: {rc} {last!r}\n{out}"
+    assert (got.get("proxy_429"), got.get("ctx_429")) == (10, 10), f"proxy/ctx split: {got}"
+    assert got.get("status", {}).get("429") == 20, f"status keeps every 429: {got}"
+    assert got.get("share_429") == pytest.approx(10 / 30), f"share_429 is the ctx share: {got}"
+    assert got.get("retry_after") == [5] and got.get("proxy_servers") == {"openresty": 10}, f"evidence: {got}"
+
+
+@pytest.mark.parametrize("fake", ["retry-proxy-only"], indirect=True)
+def test_measure_retry_after_proxy_only_is_no_pass(fake):
+    """FOLGE-W: when every 429 is the proxy's, the flood never reached the
+    door's limit — the measurement is not established (exit 1, ok false,
+    an error that says so), never a vacuous pass; and no ctx violation is
+    invented from the proxy's answers."""
+    rc, got, last, out = _retry(fake, 20)
+    assert rc == 1 and got.get("ok") is False, f"proxy-only run passed: {rc} {last!r}\n{out}"
+    assert (got.get("proxy_429"), got.get("ctx_429"), got.get("violations")) == (10, 0, []), f"proxy-only split: {got}"
+    assert "no ctx 429" in (got.get("error") or ""), f"proxy-only run must say why: {got}"
+
+
+@pytest.mark.parametrize("fake", ["retry-json-house", "retry-html-door"], indirect=True)
+def test_measure_retry_after_ctx_shaped_429_is_judged(fake):
+    """FOLGE-W fail-closed: a 429 with a JSON body (here ctx's house error
+    shape, no envelope, no x-should-retry) or with ctx's x-should-retry
+    header (here on a text body, Retry-After 60) is ctx's own answer —
+    counted in ctx_429 and judged (both violate), never hidden as proxy_429."""
+    rc, got, last, out = _retry(fake, 20)
+    assert rc == 1 and got.get("ok") is False and got.get("violations"), f"{fake.mode}: {rc} {last!r}\n{out}"
+    assert (got.get("ctx_429"), got.get("proxy_429")) == (10, 0), f"{fake.mode} hidden as proxy: {got}"
