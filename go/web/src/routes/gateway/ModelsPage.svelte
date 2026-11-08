@@ -27,6 +27,7 @@
   import Table from '../../lib/ui/Table.svelte'
   import { AliasesModel } from './aliases.svelte'
   import { rowControls } from './catalog'
+  import { aliasVisionBadge } from './vision'
 
   const model = new AliasesModel()
 
@@ -167,13 +168,18 @@
           {#each rows as a (a.id)}
             {@const ctl = rowControls(a, serverAdmin)}
             {@const busy = model.busyId === a.id}
+            {@const vision = aliasVisionBadge(a)}
             <tr data-alias-row class:off={!a.enabled}>
               <td><span class="scope" data-alias-scope={a.scope}>{a.scope}</span></td>
               <td>
                 <span class="name" data-alias-name>{a.name}</span>
                 {#if a.description}<span class="desc">{a.description}</span>{/if}
               </td>
-              <td><span class="chip">{a.kind}</span></td>
+              <td>
+                <span class="chip">{a.kind}</span>
+                <!-- FOLGE-Z Z5: whether the alias accepts images, and why (effective_vision + vision_source) -->
+                {#if vision}<span class="vision-chip" class:on={vision.tone === 'on'} title={vision.title} data-alias-vision>{vision.text}</span>{/if}
+              </td>
               <td class="mono">{a.role}</td>
               <td class="mono">{a.sensitivity}</td>
               <td><span class="state-chip" class:on={a.enabled} data-alias-enabled>{a.enabled ? 'enabled' : 'disabled'}</span></td>
@@ -429,6 +435,21 @@
     border-radius: var(--radius);
     padding: 0 var(--space-1);
     white-space: nowrap;
+  }
+  .vision-chip {
+    display: inline-block;
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    font-size: var(--label-size);
+    color: var(--text-dim);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    padding: 0 var(--space-1);
+    white-space: nowrap;
+  }
+  .vision-chip.on {
+    color: var(--text);
+    border-style: solid;
   }
   .state-chip.on {
     color: var(--ok);

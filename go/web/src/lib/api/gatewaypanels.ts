@@ -113,6 +113,22 @@ export function getUsage(params: UsageParams, now: () => number = Date.now): Pro
   return apiFetch<UsageResponse>(`/api/usage?${q.toString()}`)
 }
 
+/**
+ * FOLGE-Z Z4: gateway-limits-get of a tenant or of the instance — the effective
+ * values a NEW consumer of that tenant inherits (the create dialog's prefill).
+ * The body is built per subject kind: a tenant row names tenant_id and no
+ * consumer_id, the instance row neither (C1 parseGLSubject ⇒ 400 otherwise);
+ * the instance is server-admin only (403 below).
+ */
+export function getSubjectLimits(subject: { subject_kind: 'tenant'; tenant_id: string } | { subject_kind: 'instance' }): Promise<GatewayLimitsGetResponse> {
+  const data: Record<string, unknown> =
+    subject.subject_kind === 'tenant' ? { subject_kind: 'tenant', tenant_id: subject.tenant_id } : { subject_kind: 'instance' }
+  return apiFetch<GatewayLimitsGetResponse>('/api/manage', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'gateway-limits-get', data }),
+  })
+}
+
 /** gateway-limits-get — the consumer's limits per op (server, tenant, ceiling, effective, sources). */
 export function getGatewayLimits(consumerId: string): Promise<GatewayLimitsGetResponse> {
   return apiFetch<GatewayLimitsGetResponse>('/api/manage', {

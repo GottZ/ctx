@@ -2117,3 +2117,99 @@ export interface StatusResponse {
   federation?: FederationStatus | null
 }
 // RC-D C6 end ==================================================================
+
+// FOLGE-Z ======================================================================
+// No silent values when a model consumer is created (Z4) and vision without an
+// extra step (Z5) — the SPA side of the C-GO contract in
+// briefings/FOLGE-Z-INDEX.md §3 (C-GO extends field names, never renames).
+// Until the S3 integration the Go side is mocked in e2e/fixtures.ts and
+// e2e/gateway-panels-fixtures.ts exactly by §3. Every field the server adds
+// here is OPTIONAL on the read side: a server before FOLGE-Z omits it, and the
+// SPA then says "not reported" — it never invents a number or a capability.
+// The three interface merges below follow the RC-D C6 precedent
+// (StatusResponse); the S3 integrator may fold them into their interfaces.
+// =============================================================================
+
+/**
+ * One op's start limits in the model-consumer-create request (§3 `L`): the
+ * dimensions of gateway-limits-set, each > 0 or omitted (no 0 sentinel, no
+ * null). The row lands at the CALLER's tier (server-admin ⇒ consumer_server,
+ * tenant-admin ⇒ consumer_tenant, which can only narrow) — the tier is never
+ * sent.
+ */
+export interface ConsumerStartLimits {
+  rpm?: number
+  tpm?: number
+  max_concurrency?: number
+  daily_tokens?: number
+  monthly_tokens?: number
+  daily_requests?: number
+  monthly_cost_usd?: number
+  allow_external?: boolean
+  allow_unmetered_external?: boolean
+}
+
+/** model-consumer-create `limits` (§3): only the ops the caller sets. */
+export type ConsumerCreateLimits = Partial<Record<GatewayOp, ConsumerStartLimits>>
+
+/** The level that set an effective dimension of a consumer (§3 `E.sources`). */
+export type EffectiveLimitSource =
+  | 'settings'
+  | 'instance'
+  | 'tenant_server'
+  | 'tenant_tenant'
+  | 'consumer_server'
+  | 'consumer_tenant'
+  | 'default'
+
+/**
+ * One op's effective limits in the model-consumer-create / -get answer (§3
+ * `E`): rates and concurrency are numbers, a budget dimension null = unbounded,
+ * `sources` names the level per dimension.
+ */
+export interface EffectiveOpLimits {
+  rpm: number
+  tpm: number
+  max_concurrency: number
+  daily_tokens: number | null
+  monthly_tokens: number | null
+  daily_requests: number | null
+  monthly_cost_usd: number | null
+  allow_external: boolean
+  allow_unmetered_external: boolean
+  sources: Partial<Record<keyof LimitValues, EffectiveLimitSource>>
+}
+
+/** §3 `effective_limits`: one entry per op. */
+export type EffectiveLimits = Record<GatewayOp, EffectiveOpLimits>
+
+/**
+ * Merge: the create answer carries the effective limits (absent = a server
+ * before FOLGE-Z; null = the server could not resolve them, e.g. the limits
+ * registry is not wired) — both read "not reported".
+ */
+export interface ConsumerCreateResult {
+  effective_limits?: EffectiveLimits | null
+}
+
+/** Where an alias's effective vision comes from (§3): its policy, the backend probe, or nothing image-capable. */
+export type VisionSource = 'policy' | 'backend' | 'none'
+
+/** Merge: model-alias-list / -get rows (§3; absent = a server before FOLGE-Z). */
+export interface ModelAliasView {
+  effective_vision?: boolean
+  vision_source?: VisionSource
+}
+
+/** One backend row's probed capabilities (§3; vision null = unknown, probed_at null = never probed). */
+export interface BackendCapabilities {
+  vision: boolean | null
+  probed_at: string | null
+  source: string
+}
+
+/** Merge: backend-list rows (§3; absent = a server before FOLGE-Z). */
+export interface BackendView {
+  capabilities?: BackendCapabilities
+}
+// FOLGE-Z end ==================================================================

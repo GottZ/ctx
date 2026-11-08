@@ -10,6 +10,7 @@
   // `policy.<key>`. The bindable `policy` is replaced, never mutated.
   import type { ModelAliasKind } from '../../lib/api/types'
   import { policyFields } from './catalog'
+  import { policyDefaultLabel } from './vision'
 
   interface Props {
     kind: ModelAliasKind
@@ -83,7 +84,8 @@
             aria-describedby={err ? `${id}-err` : undefined}
             onchange={(e) => put(f.key, boolOf(e.currentTarget.value))}
           >
-            <option value="">default</option>
+            <!-- FOLGE-Z Z5: unset vision follows the backend probe (Z2) — say so -->
+            <option value="">{policyDefaultLabel(f.key)}</option>
             <option value="true">on</option>
             <option value="false">off</option>
           </select>

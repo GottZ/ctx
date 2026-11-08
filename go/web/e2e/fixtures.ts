@@ -10,7 +10,7 @@
 import type { Page, Route } from '@playwright/test'
 import { workflowMock } from './issue-fixtures'
 import { ISSUES_BASE } from '../src/lib/api/issues'
-import { PanelWorld, gatewayStatusSections, panelGet, type PanelSeed } from './gateway-panels-fixtures'
+import { PanelWorld, gatewayStatusSections, mockStartLimits, panelGet, type PanelSeed } from './gateway-panels-fixtures'
 
 export type Role = 'server-admin' | 'tenant-admin' | 'member'
 
@@ -945,9 +945,12 @@ export const MODEL_ALIASES: readonly MockAlias[] = [
   { id: '01900000-0000-7000-8000-00000000a001', scope: '_global', name: 'chat', kind: 'chat', enabled: true },
   { id: '01900000-0000-7000-8000-00000000a002', scope: '_global', name: 'embed', kind: 'embedding', enabled: true },
   { id: '01900000-0000-7000-8000-00000000a003', scope: '_global', name: 'draft', kind: 'chat', enabled: true },
-  { id: '01900000-0000-7000-8000-00000000a004', scope: '_global', name: 'legacy', kind: 'chat', enabled: false },
+  // FOLGE-Z Z5: `legacy` names a role no backend of the mock pool serves with
+  // images ⇒ effective_vision false, vision_source none
+  { id: '01900000-0000-7000-8000-00000000a004', scope: '_global', name: 'legacy', kind: 'chat', enabled: false, role: 'chat-legacy' },
   { id: '01900000-0000-7000-8000-00000000b001', scope: 'home', name: 'chat', kind: 'chat', enabled: true },
-  { id: '01900000-0000-7000-8000-00000000b002', scope: 'home', name: 'draft', kind: 'chat', enabled: false },
+  // FOLGE-Z Z5: policy.vision=true ⇒ images on (policy)
+  { id: '01900000-0000-7000-8000-00000000b002', scope: 'home', name: 'draft', kind: 'chat', enabled: false, policy: { vision: true } },
   { id: '01900000-0000-7000-8000-00000000c001', scope: 'shared', name: 'embed', kind: 'embedding', enabled: true },
   { id: '01900000-0000-7000-8000-00000000d001', scope: 'globex:home', name: 'chat', kind: 'chat', enabled: true },
   // RC-D C5 (W05-13) — the catalog's tenant-leak sentinels: DISABLED home
@@ -956,7 +959,8 @@ export const MODEL_ALIASES: readonly MockAlias[] = [
   { id: '01900000-0000-7000-8000-00000000d0b1', scope: 'globex:home', name: SENTINEL.B, kind: 'chat', enabled: false, sensitivity: 'credentials' },
   // RC-D C5 (W05-13) — a _global floor above public for the shadow-floor gate
   // (V-02-c); disabled, so it is offered nowhere.
-  { id: '01900000-0000-7000-8000-00000000a005', scope: '_global', name: 'vault', kind: 'chat', enabled: false, sensitivity: 'personal' },
+  // FOLGE-Z Z5: policy.vision=false ⇒ images off (policy), the hard refusal
+  { id: '01900000-0000-7000-8000-00000000a005', scope: '_global', name: 'vault', kind: 'chat', enabled: false, sensitivity: 'personal', policy: { vision: false } },
 ]
 
 /** modelalias.Offers over MODEL_ALIASES (registry.go: own names + unshadowed _global names, winner by presence, enabled only). */
@@ -970,8 +974,23 @@ function mockOffers(scope: string): MockAlias[] {
   return out.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))
 }
 
-function aliasView(a: MockAlias, writable: boolean): Record<string, unknown> {
+/**
+ * FOLGE-Z Z2/Z5 (§3): the roles whose mock-pool rows report capabilities.vision
+ * = true — spark-chat (sglang has_image_understanding). Every other role has no
+ * image-capable enabled row in the chain.
+ */
+const MOCK_VISION_ROLES = new Set(['chat'])
+
+/** §3 effective_vision + vision_source: policy.vision set ⇒ it decides; unset ⇒ the backend probe of the alias role. */
+function mockVision(a: MockAlias): { effective_vision: boolean; vision_source: 'policy' | 'backend' | 'none' } {
+  const p = a.policy?.vision
+  if (typeof p === 'boolean') return { effective_vision: p, vision_source: 'policy' }
+  return MOCK_VISION_ROLES.has(a.role ?? a.kind) ? { effective_vision: true, vision_source: 'backend' } : { effective_vision: false, vision_source: 'none' }
+}
+
+function aliasView(a: MockAlias, writable: boolean, legacy = false): Record<string, unknown> {
   return {
+    ...(legacy ? {} : mockVision(a)),
     id: a.id,
     scope: a.scope,
     name: a.name,
@@ -991,6 +1010,8 @@ function aliasView(a: MockAlias, writable: boolean): Record<string, unknown> {
 const CREATE_FIELDS = new Set([
   'label', 'description', 'tenant_id', 'tenant_scope', 'kind', 'all_models', 'models', 'prompt_sensitivity',
   'fair_weight', 'admission_lane', 'allowed_cidrs', 'allow_plaintext', 'expires_at',
+  // FOLGE-Z §3: the start limits per op
+  'limits',
 ])
 const SENSITIVITY_VOCAB = ['credentials', 'personal', 'internal', 'public']
 const UUID_RE = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i
@@ -1056,9 +1077,13 @@ class GatewayWorld {
   aliasRows: MockAlias[]
   #seq = 0
 
-  constructor() {
+  /** FOLGE-Z: a server before FOLGE-Z — no effective_limits, no effective_vision / vision_source. */
+  readonly legacy: boolean
+
+  constructor(legacy = false) {
     this.consumers = CONSUMERS.map((c) => ({ ...c, keys: c.keys.map((k, n) => ({ ...k, id: mockKeyId(c, n) })) }))
     this.aliasRows = MODEL_ALIASES.map((a) => ({ ...a }))
+    this.legacy = legacy
   }
 
   #visible(role: Role, tkey: TenantKey): MockConsumer[] {
@@ -1113,8 +1138,9 @@ class GatewayWorld {
       for (const c of d.allowed_cidrs) if (typeof c !== 'string' || !CIDR_RE.test(c)) return bad(`allowed_cidrs: "${String(c)}" is not a CIDR prefix`)
       cidrs = d.allowed_cidrs as string[]
     }
-    // field tiers: server-admin only even with self-service
-    if (!serverAdmin && (d.kind === 'ctx-peer' || sensitivity !== 'credentials')) return forbid()
+    if (d.admission_lane !== undefined && d.admission_lane !== 'urgent' && d.admission_lane !== 'bulk') return bad('admission_lane must be urgent or bulk')
+    // field tiers: server-admin only even with self-service (grant(): urgent raises)
+    if (!serverAdmin && (d.kind === 'ctx-peer' || sensitivity !== 'credentials' || d.admission_lane === 'urgent')) return forbid()
     // tenant binding
     let tenant: TenantKey = tkey
     if (typeof d.tenant_id === 'string' && d.tenant_id !== '') {
@@ -1154,6 +1180,11 @@ class GatewayWorld {
       if (max > 0 && at > MOCK_NOW_MS + max * 1000) return bad(`expires_at lies beyond gateway.key_max_lifetime_app (${max} s from now)`)
       expires = new Date(at).toISOString()
     }
+    // FOLGE-Z §3: the start limits at the caller's tier, atomic with the create (a refusal creates
+    // nothing); judged before the store insert — so before the label conflict (C-GO order)
+    if (this.legacy && d.limits !== undefined) return bad('invalid data: json: unknown field "limits"')
+    const start = mockStartLimits(TENANTS[tenant].id, role, d.limits)
+    if ('error' in start) return start.error as MockAnswer
     if (this.consumers.some((c) => c.tenant === tenant && c.label === label)) {
       return { status: 409, json: { success: false, error: 'a model consumer with this label already exists in the tenant' } }
     }
@@ -1177,9 +1208,12 @@ class GatewayWorld {
       prompt_sensitivity: sensitivity,
       allowed_cidrs: cidrs,
     }
+    c.admission_lane = typeof d.admission_lane === 'string' ? d.admission_lane : 'bulk'
     this.#restatus(c)
     this.consumers.unshift(c)
-    return { status: 200, json: { success: true, consumer: consumerView(c, serverAdmin), api_key: REVEAL_MARKER } }
+    const answer: Record<string, unknown> = { success: true, consumer: consumerView(c, serverAdmin), api_key: REVEAL_MARKER }
+    if (!this.legacy) answer.effective_limits = start.effective
+    return { status: 200, json: answer }
   }
 
   deactivate(role: Role, tkey: TenantKey, data: Record<string, unknown> | undefined, cancelled: number | null): MockAnswer {
@@ -1461,7 +1495,7 @@ class GatewayWorld {
     const sorted = [...rows].sort((a, b) => (a.scope + '\u0000' + a.name < b.scope + '\u0000' + b.name ? -1 : 1))
     return {
       status: 200,
-      json: { success: true, model_aliases: sorted.map((a) => aliasView(a, role === 'server-admin' || a.scope === home)), count: sorted.length },
+      json: { success: true, model_aliases: sorted.map((a) => aliasView(a, role === 'server-admin' || a.scope === home, this.legacy)), count: sorted.length },
     }
   }
 }
@@ -1509,6 +1543,12 @@ export interface SeedOptions {
   cancelledInflight?: number | null
   /** RC-D C6 panel world switches (gateway-panels-fixtures.ts) — /api/status gateway sections. */
   panels?: PanelSeed
+  /**
+   * FOLGE-Z: answer like a server before FOLGE-Z — model-consumer-create
+   * without effective_limits (and refusing `limits` as an unknown field),
+   * model-alias-list without effective_vision / vision_source.
+   */
+  gatewayLegacy?: boolean
 }
 
 /** One recorded /api/** request (mock-call recorder, design 06 §4.1 deny dimension). */
@@ -1602,7 +1642,7 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
   // suspend→suspended→activate e2e only proves anything if the read paths move.
   const tenantStatus: Record<string, string> = {}
   // W05-06: the stateful model consumer world of this session.
-  const gateway = new GatewayWorld()
+  const gateway = new GatewayWorld(opts.gatewayLegacy === true)
   const panels = new PanelWorld()
   const cancelled = opts.cancelledInflight === undefined ? null : opts.cancelledInflight
 

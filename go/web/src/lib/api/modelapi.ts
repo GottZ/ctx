@@ -10,6 +10,7 @@
 import { apiFetch } from '../api'
 import type {
   AliasChainPreviewRequest,
+  ConsumerCreateLimits,
   AliasRolePreviewRequest,
   ChainPreviewAnswer,
   ConsumerCreateResult,
@@ -18,6 +19,7 @@ import type {
   ConsumerStatus,
   ConsumerUpdateResult,
   ConsumerUpdateSpec,
+  ExternalLane,
   ModelAliasCreateSpec,
   ModelAliasListResponse,
   ModelAliasUpdateSpec,
@@ -94,6 +96,14 @@ export interface ConsumerCreateSpec {
   expires_at?: string
   /** Relative expiry in whole days — turned into expires_at below; never on the wire. */
   expires_in_days?: number
+  /**
+   * FOLGE-Z Z4: the lane the dialog shows — always sent by the dialog, so the
+   * server's column default (bulk) never applies silently. urgent is
+   * server-admin only (403 below).
+   */
+  admission_lane?: ExternalLane
+  /** FOLGE-Z Z4 (§3 `limits`): only the start limits the caller changed; absent = inherits. */
+  limits?: ConsumerCreateLimits
 }
 
 const DAY_MS = 86_400_000
@@ -123,10 +133,45 @@ export function createConsumer(spec: ConsumerCreateSpec, now: () => number = Dat
   if (spec.allowed_cidrs !== undefined && spec.allowed_cidrs.length > 0) data.allowed_cidrs = [...spec.allowed_cidrs]
   if (spec.expires_at) data.expires_at = spec.expires_at
   else if (spec.expires_in_days !== undefined) data.expires_at = new Date(now() + spec.expires_in_days * DAY_MS).toISOString()
+  // FOLGE-Z Z4: the shown lane (closed vocabulary only) and the start limits
+  if (spec.admission_lane === 'urgent' || spec.admission_lane === 'bulk') data.admission_lane = spec.admission_lane
+  const limits = startLimitsWire(spec.limits)
+  if (limits !== null) data.limits = limits
   return apiFetch<ConsumerCreateResult>('/api/manage', {
     method: 'POST',
     body: JSON.stringify({ action: 'model-consumer-create', data }),
   })
+}
+
+// FOLGE-Z §3 `L`: the numeric dimensions (> 0) and the two permissions (bool).
+const START_LIMIT_OPS = ['chat', 'embed', 'rerank'] as const
+const START_LIMIT_NUMS = ['rpm', 'tpm', 'max_concurrency', 'daily_tokens', 'monthly_tokens', 'daily_requests', 'monthly_cost_usd'] as const
+const START_LIMIT_BOOLS = ['allow_external', 'allow_unmetered_external'] as const
+
+/**
+ * The `limits` object of model-consumer-create from an explicit field list:
+ * only the three ops, only §3 `L` dimensions, numbers finite and > 0 (no 0
+ * sentinel; Infinity would turn into JSON null), permissions as booleans; an
+ * op without a value is left out. null = nothing to send.
+ */
+function startLimitsWire(limits: ConsumerCreateLimits | undefined): Record<string, Record<string, number | boolean>> | null {
+  if (limits === undefined || limits === null || typeof limits !== 'object') return null
+  const out: Record<string, Record<string, number | boolean>> = {}
+  for (const op of START_LIMIT_OPS) {
+    const l = limits[op]
+    if (l === undefined || l === null || typeof l !== 'object') continue
+    const row: Record<string, number | boolean> = {}
+    for (const f of START_LIMIT_NUMS) {
+      const v = l[f]
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) row[f] = v
+    }
+    for (const f of START_LIMIT_BOOLS) {
+      const v = l[f]
+      if (typeof v === 'boolean') row[f] = v
+    }
+    if (Object.keys(row).length > 0) out[op] = row
+  }
+  return Object.keys(out).length > 0 ? out : null
 }
 
 /**

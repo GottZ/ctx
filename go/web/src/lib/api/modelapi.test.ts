@@ -190,3 +190,39 @@ describe('picker reads', () => {
     expect(JSON.parse(String((mock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ action: 'scope-list' })
   })
 })
+
+// FOLGE-Z Z4-request (briefings/FOLGE-Z-INDEX.md §3): the create body carries
+// the visible lane and the changed start limits — from an explicit field list,
+// never a spread, so nothing outside §3 `L` reaches the wire.
+describe('FOLGE-Z createConsumer: lane and start limits on the wire', () => {
+  it('Z4-request gate: admission_lane and limits ride in data exactly as §3 names them', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, consumer: { id: 'c1' }, api_key: 'ctxm_x' }))
+    await createConsumer({ label: 'x', admission_lane: 'urgent', limits: { chat: { max_concurrency: 8, rpm: 120 }, embed: { daily_tokens: 9_000_000 } } })
+    expect(sentBody(mock), 'Z4-request: lane + limits on the wire').toEqual({
+      action: 'model-consumer-create',
+      data: { label: 'x', admission_lane: 'urgent', limits: { chat: { max_concurrency: 8, rpm: 120 }, embed: { daily_tokens: 9_000_000 } } },
+    })
+  })
+
+  it('Z4-request gate: only §3 dimensions, only values the server accepts; empty ops and a foreign lane stay off the wire', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, consumer: { id: 'c1' }, api_key: 'ctxm_x' }))
+    const spec = {
+      label: 'x',
+      admission_lane: 'interactive',
+      limits: {
+        chat: { rpm: 0, tpm: Number.POSITIVE_INFINITY, max_concurrency: 4, tier: 'server', allow_external: false },
+        embed: {},
+        bogus: { rpm: 5 },
+        rerank: { daily_tokens: -1 },
+      },
+    } as unknown as ConsumerCreateSpec
+    await createConsumer(spec)
+    expect(sentBody(mock)).toEqual({ action: 'model-consumer-create', data: { label: 'x', limits: { chat: { max_concurrency: 4, allow_external: false } } } })
+  })
+
+  it('Z4-request: no limits at all ⇒ no limits key', async () => {
+    const mock = stubFetch(jsonResponse(200, { success: true, consumer: { id: 'c1' }, api_key: 'ctxm_x' }))
+    await createConsumer({ label: 'x', admission_lane: 'bulk', limits: {} })
+    expect(sentBody(mock)).toEqual({ action: 'model-consumer-create', data: { label: 'x', admission_lane: 'bulk' } })
+  })
+})
