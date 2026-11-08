@@ -19,11 +19,20 @@ import (
 
 func TestRelayOversizeChunksKeepTheirBytes(t *testing.T) {
 	inWrite, release := make(chan struct{}, 4), make(chan struct{})
+	first := make(chan struct{})
 	var got [][]byte
 	var mu sync.Mutex
 	write := func(p []byte) error {
-		inWrite <- struct{}{}
-		<-release
+		select {
+		case <-first:
+			inWrite <- struct{}{}
+			<-release
+		default:
+			// The first write (a ring chunk) goes through: it arms the
+			// overflow — before it a chunk that does not fit waits (RC-D S3,
+			// TestRelayOverflowWaitsForTheFirstWrite).
+			close(first)
+		}
 		mu.Lock()
 		got = append(got, bytes.Clone(p))
 		mu.Unlock()
@@ -33,13 +42,18 @@ func TestRelayOversizeChunksKeepTheirBytes(t *testing.T) {
 	rl := newStreamRelay(time.Time{}, make([]byte, 64), write, make(chan struct{}), nil, drainMeter{}, nil)
 	rl.book = func(n int64) bool { booked += n; return true }
 	buf := make([]byte, 0, 512)
-	want := [][]byte{relayChunk(1, 200), relayChunk(2, 300), relayChunk(3, 250)}
+	want := [][]byte{relayChunk(0, 20), relayChunk(1, 200), relayChunk(2, 300), relayChunk(3, 250)}
 	buf = append(buf[:0], want[0]...)
 	if err := rl.put(buf); err != nil {
 		t.Fatal(err)
 	}
+	<-first // the ring chunk is written
+	buf = append(buf[:0], want[1]...)
+	if err := rl.put(buf); err != nil {
+		t.Fatal(err)
+	}
 	<-inWrite // the writer holds the first oversize chunk
-	for _, c := range want[1:] {
+	for _, c := range want[2:] {
 		buf = append(buf[:0], c...)
 		err := rl.put(buf)
 		if err != nil && !errors.Is(err, errRelayOverflow) {
@@ -47,7 +61,7 @@ func TestRelayOversizeChunksKeepTheirBytes(t *testing.T) {
 		}
 		if err != nil {
 			// the second waits, the third finds the slot taken: overflow, as before FOLGE-S
-			want = want[:2]
+			want = want[:3]
 			break
 		}
 	}
