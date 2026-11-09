@@ -711,6 +711,13 @@ def sniff_secret(path: Path) -> bool:
     return True if head is None else _has_key_marker(head)
 
 
+def sniff_bytes(head: bytes) -> bool:
+    """``sniff_secret`` for content already in memory (a git blob read through ``cat-file``, W093): True when the
+    first ``SNIFF_BYTES`` of ``head`` carry a private-key marker. Only that window counts, the same one the file
+    sniff reads, so a blob and the identical file get the same verdict. ``head`` is any bytes-like object."""
+    return _has_key_marker(bytes(memoryview(head)[:SNIFF_BYTES]))
+
+
 def suspected_secret(path: Path, redact: Callable[[str], str]) -> bool:
     """True when the first 8 KiB, read as text, change under ``redact`` (``redact_sensitive_text(force=True)``):
     a token-looking value is present (DESIGN §8.7). Binary content (NUL byte) is not text and returns False;
@@ -740,6 +747,7 @@ def check_source_file(
     explicit: bool,
     item_root: Path | None = None,
     cache: SourceCheckCache | None = None,
+    follow_link: bool | None = None,
 ) -> Verdict:
     """May this source file or directory be transferred? (DESIGN §10.1–§10.3)
 
@@ -750,11 +758,17 @@ def check_source_file(
     ``export_roots`` entry), the size limit (``explicit`` lifts it), and the content sniff of every regular file
     (hard-linked files included, SEC 5.3). ``include_secret`` lifts the denylist and the sniff for those paths.
 
+    ``follow_link`` decouples "resolve a symlink" from "lift the size limit" (W074): ``None`` keeps the coupling
+    (a link is followed exactly when ``explicit``), ``True`` follows a link without lifting the size limit,
+    ``False`` refuses a link (``symlink``) even for an ``explicit`` path. Every other check is unchanged; a
+    followed link still has its link path and its realpath checked against the denylist and the location rule.
+
     Callers: a file inside a workspace item passes that item's root as ``item_root``; the primary workspace root
     itself is checked with ``item_root=<itself>`` (it may lie outside ``$HOME``, DESIGN §8.2); extras pass no
     ``item_root`` and use ``check_extra``. Directories get every check except size and sniff. A scan over many
     paths passes one ``SourceCheckCache`` as ``cache`` (created per scan, see there); the verdicts are the same.
     """
+    follow = explicit if follow_link is None else bool(follow_link)
     raw = os.fspath(path)
     try:
         reject_windows_device_prefix(raw)
@@ -778,7 +792,7 @@ def check_source_file(
     if _protected((lexical, real), cfg, memo, None):
         return Verdict(False, "hermes")
     if stat.S_ISLNK(lst.st_mode):
-        if not explicit:
+        if not follow:
             return Verdict(False, "symlink")
         try:
             st = os.stat(p)
@@ -803,7 +817,7 @@ def check_source_file(
         return _OK
     if st.st_size > cfg.max_file_bytes and not explicit:
         return Verdict(False, "size")
-    head = _head(p, follow=explicit)
+    head = _head(p, follow=follow)
     if head is None:
         return Verdict(False, "unreadable")
     if not lifted and _has_key_marker(head):
@@ -818,11 +832,13 @@ def check_extra(
     explicit: bool,
     redact: Callable[[str], str],
     cache: SourceCheckCache | None = None,
+    follow_link: bool | None = None,
 ) -> Verdict:
     """``check_source_file`` for an extra path outside the workspace, plus the suspected-secret rule: a regular
     file whose first 8 KiB change under ``redact`` is allowed only as a proposal (``reason="suspected_secret"``,
-    DESIGN §8.7, SEC 5.1). ``include_secret`` on the path skips that rule. ``cache`` as in ``check_source_file``."""
-    verdict = check_source_file(path, cfg, explicit=explicit, cache=cache)
+    DESIGN §8.7, SEC 5.1). ``include_secret`` on the path skips that rule. ``cache`` and ``follow_link`` as in
+    ``check_source_file``."""
+    verdict = check_source_file(path, cfg, explicit=explicit, cache=cache, follow_link=follow_link)
     if not verdict.allowed:
         return verdict
     lexical, real = _candidates(Path(path))
@@ -982,9 +998,11 @@ def check_tree_entry(entry: dict) -> Verdict:
     return _OK
 
 
+# Deprecated (W096, contract K-4): no caller since cluster E encodes pathspecs with ``gitops.encode_pathspec``.
+# Kept because K0 changes only additively; new code must not use it.
 def exclude_pathspecs(paths: Iterable[str]) -> tuple[str, ...]:
-    """git pathspecs ``:(exclude,literal)<p>`` for repo-relative paths (sorted, unique). Paths with NUL, CR or LF
-    raise ``PolicyDenied``."""
+    """Deprecated — use ``gitops.encode_pathspec``. git pathspecs ``:(exclude,literal)<p>`` for repo-relative paths
+    (sorted, unique). Paths with NUL, CR or LF raise ``PolicyDenied``."""
     out = set()
     for p in paths:
         if not isinstance(p, str) or not p or any(ch in p for ch in "\x00\r\n"):

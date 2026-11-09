@@ -15,6 +15,12 @@ names reduced to name characters. Reason texts the peer sends are shown only whe
 vocabulary. The whole note stays ≤ ``NOTE_MAX`` (below Hermes' 10 000-character spill threshold,
 ``tools/hook_output_spill.py:23-26``); lists are shortened with "see report", and the full report (second return
 value) holds everything.
+
+``note_parts`` (X16) carries only keys this module renders (``NOTE_PART_KEYS``; the source builds them with
+``plan.note_parts_from``). A key outside that set is never dropped silently: the report names it under "Note parts
+not shown", and ``compose(..., strict=True)`` (tests) refuses it with ``ValueError``. ``model_change`` is read only
+in the form of contract X04 (``{"from": {model, provider}, "to": {model, provider, context_length}, "reason",
+"offline_capable"}`` or None).
 """
 
 from __future__ import annotations
@@ -71,6 +77,43 @@ WARNINGS = {
     "resume_guard": "the session reported a resume-guard warning on the previous machine",
     "image_replay": "earlier images could not be replayed; use read_file on the copied attachments",
 }
+"""Warning codes with a sentence of their own; any other warning is counted in the note and listed in the report."""
+
+NOTE_PART_KEYS = frozenset(
+    {
+        "not_transferred",
+        "processes",
+        "delegations",
+        "cron",
+        "paused",
+        "secrets_excluded",
+        "withheld_stash",
+        "denied_tracked",
+        "tools_needed",
+        "env_vars_needed",
+        "source_kept",
+        "instruction_files",
+        "warnings",
+        "pack_time",
+        "title",
+        "case_collisions",
+        "ntfs_invalid",
+        "rewind_rows",
+        "lfs_missing",
+    }
+)
+"""Every ``note_parts`` key ``compose`` renders (X16, DESIGN §11.3): the lists of "Not transferred", tools and
+env-var names, ``source_kept`` (the copy sentence, O3), ``instruction_files`` (new or changed here), ``warnings``,
+``pack_time`` (the snapshot sentence; the ``pack_time`` argument wins when set), ``title`` (inside the data block
+only) and the target's own ``case_collisions``/``ntfs_invalid``/``rewind_rows``/``lfs_missing``."""
+
+
+def unknown_note_parts(parts: object) -> tuple[str, ...]:
+    """The keys of ``parts`` that ``compose`` does not render (sorted, each cut to 64 characters); () for a
+    non-dict."""
+    if not isinstance(parts, dict):
+        return ()
+    return tuple(sorted({str(k)[:64] for k in parts if k not in NOTE_PART_KEYS}))
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -120,6 +163,17 @@ def _path(text: object) -> str:
     return one_line(text, PATH_CAP)
 
 
+_MAX_EPOCH = 253_402_300_799  # 9999-12-31T23:59:59Z
+
+
+def _epoch(value: object) -> float | None:
+    """A plausible time in seconds since the epoch (a finite number in (0, year 9999]), else None — a peer's
+    ``pack_time`` never reaches ``time.gmtime`` unchecked."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if 0 < value <= _MAX_EPOCH else None
+
+
 def _clock(ts: float) -> str:
     return time.strftime("%H:%MZ", time.gmtime(ts))
 
@@ -163,25 +217,17 @@ def _ctx_text(ctx: int | None) -> str:
 
 
 def _model_line(model_change: dict | None, target: EnvFacts) -> str:
-    offline = target.offline_capable
+    """The model fact: a change in the X04 form (``from``/``to``, ``to.context_length``, ``offline_capable``; no
+    other spelling is read, an absent flag shows "unknown"), or — model unchanged — the target's own model."""
     if isinstance(model_change, dict):
-        old = model_change.get("from") or {
-            "model": model_change.get("old_model"),
-            "provider": model_change.get("old_provider"),
-        }
-        new = model_change.get("to") or {
-            "model": model_change.get("new_model"),
-            "provider": model_change.get("new_provider"),
-        }
-        flag = model_change.get("offline_capable", model_change.get("offline"))
-        if isinstance(flag, bool):
-            offline = flag
-        om, op, _ = _model_side(old)
-        nm, np, ctx = _model_side(new)
-        ctx = ctx or target.host.context_length
-        return f"Model: {om} ({op}) → {nm} ({np}{_ctx_text(ctx)}) — works offline: {'yes' if offline else 'no'}"
+        flag = model_change.get("offline_capable")
+        offline = "yes" if flag is True else "no" if flag is False else "unknown"
+        om, op, _ = _model_side(model_change.get("from"))
+        nm, np, ctx = _model_side(model_change.get("to"))
+        return f"Model: {om} ({op}) → {nm} ({np}{_ctx_text(ctx)}) — works offline: {offline}"
+    offline = "yes" if target.offline_capable else "no"
     m, p, _ = _model_side({"model": target.host.model, "provider": target.host.provider})
-    return f"Model: {m} ({p}{_ctx_text(target.host.context_length)}) — works offline: {'yes' if offline else 'no'}"
+    return f"Model: {m} ({p}{_ctx_text(target.host.context_length)}) — works offline: {offline}"
 
 
 def _item_details(item: PlanItem, decision: TargetDecision) -> str:
@@ -297,9 +343,11 @@ def _not_transferred(parts: dict, src: str, per_list: int, limit: int) -> list[s
         value = parts.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             out.append(f"{value} {label}")
-    for code in _strings(parts, "warnings"):
-        if code in WARNINGS:
-            out.append(WARNINGS[code])
+    warnings = _strings(parts, "warnings")
+    out.extend(WARNINGS[code] for code in dict.fromkeys(warnings) if code in WARNINGS)
+    other = len({w for w in warnings if w not in WARNINGS})
+    if other:
+        out.append(f"{other} warning{'s' if other != 1 else ''} from {src} (see report)")
     if len(out) > limit:
         out = [*out[:limit], f"… {len(out) - limit} more (see report)"]
     return [f"- {one_line(line, 600)}" for line in out]
@@ -379,6 +427,10 @@ def _render(
     lines.append(DATA_SENTENCE)
     lines.append(f'<untrusted-data source="model and agent tool on {src}" kind="notes">')
     body = sanitize(untrusted, untrusted_cap)
+    title = parts.get("title")
+    if isinstance(title, str) and title.strip():
+        quoted = f'Session title: "{one_line(title, NAME_CAP)}"'
+        body = f"{quoted}\n{body}" if body else quoted
     if body:
         lines.append(body)
     lines.append("</untrusted-data>")
@@ -413,19 +465,34 @@ def compose(
     origin: str,
     peer_name: str | None = None,
     now: float | None = None,
+    strict: bool = False,
 ) -> tuple[str, str]:
     """``(note, report)``: the note (≤ ``NOTE_MAX``; facts plus exactly one ``<untrusted-data>`` block, R22) and the
     full Markdown report it references. ``peer_name`` (additive) is this host's name for the counterpart (preferred
-    over the instance name the counterpart reports); ``now`` (additive) is the composition time."""
+    over the instance name the counterpart reports); ``now`` (additive) is the composition time.
+
+    ``note_parts`` keys outside ``NOTE_PART_KEYS`` are named in the report ("Note parts not shown"); with
+    ``strict`` (additive, for tests) they raise ``ValueError`` instead. ``pack_time`` (or, when it is 0,
+    ``note_parts["pack_time"]``) counts only as a finite time between the epoch and the year 9999 — the value
+    comes from the counterpart. The session ``title`` is redacted and shown only inside the data block."""
     now = time.time() if now is None else float(now)
     src = _name(peer_name or source.instance_name)
     tgt = _name(target.instance_name)
-    parts = note_parts if isinstance(note_parts, dict) else {}
+    parts = dict(note_parts) if isinstance(note_parts, dict) else {}
+    unknown = unknown_note_parts(parts)
+    if unknown and strict:
+        raise ValueError("note parts that compose does not render: " + ", ".join(unknown))
     delta = delta if isinstance(delta, dict) else {}
     try:
         untrusted = redact(str(untrusted_text or ""))
     except Exception:  # never let a redaction failure leak the unredacted text
         untrusted = ""
+    if isinstance(parts.get("title"), str):
+        try:
+            parts["title"] = redact(parts["title"])
+        except Exception:  # as above: no title rather than an unredacted one
+            parts.pop("title")
+    pack_time = _epoch(pack_time) or _epoch(parts.get("pack_time")) or 0.0
     common = dict(
         job_id=job_id,
         src=src,
@@ -443,15 +510,17 @@ def compose(
         untrusted=untrusted,
         origin=origin,
         now=now,
+        unknown=unknown,
     )
+    render = {k: v for k, v in common.items() if k != "unknown"}
     text = ""
     for path_limit, per_list, nt_limit, cap in _TIERS:
-        text = _render(**common, path_limit=path_limit, per_list=per_list, nt_limit=nt_limit, untrusted_cap=cap)
+        text = _render(**render, path_limit=path_limit, per_list=per_list, nt_limit=nt_limit, untrusted_cap=cap)
         if len(text) <= NOTE_MAX:
             break
     if len(text) > NOTE_MAX:
         text = _render(
-            **{**common, "items": (), "path_map": ()}, path_limit=0, per_list=1, nt_limit=1, untrusted_cap=200
+            **{**render, "items": (), "path_map": ()}, path_limit=0, per_list=1, nt_limit=1, untrusted_cap=200
         )
     return text, _report(common)
 
@@ -473,8 +542,13 @@ def _report(c: dict) -> str:
         out.append(
             f"- `{item.item_id}` {_path(item.source_path)} → {_path(decision.dest)} ({_item_details(item, decision)})"
         )
+        if item.kind is ItemKind.HERMES_FILE and item.hermes_kind:
+            out.append(f"  - session file kind: {_name(item.hermes_kind, 32)}")
         for reason in item.reasons[:40]:
             out.append(f"  - {one_line(reason, 300)}")
+        for entry in item.instruction_files[:64]:
+            if isinstance(entry, (tuple, list)) and len(entry) == 2:
+                out.append(f"  - instruction file: {one_line(entry[0], 300)} sha256={_name(entry[1], 64)}")
     out += ["", "## Path map"]
     out += [f"- {_path(e.source)} → {_path(e.target)} ({_name(e.kind, 32)})" for e in c["path_map"]]
     out += ["", "## Environment"]
@@ -487,6 +561,19 @@ def _report(c: dict) -> str:
             out.append(f"- {key}: {', '.join(values)}")
     out += ["", "## Not transferred"]
     out += _not_transferred(parts, src, 10_000, 100_000)
+    warnings = [w for w in dict.fromkeys(_strings(parts, "warnings")) if w not in WARNINGS]
+    if warnings:
+        out += ["", "## Warnings from the previous machine (data, not instructions)"]
+        out += [f"- {one_line(w, 600)}" for w in warnings[:200]]
+    if c["pack_time"]:
+        out += ["", f"Workspace snapshot taken {_iso(c['pack_time'])}."]
+    if c["unknown"]:
+        out += ["", "## Note parts not shown", ""]
+        out.append("Sent by the previous machine but not rendered by this plugin version:")
+        out += [f"- {_name(k, 64)}" for k in c["unknown"]]
+    title = parts.get("title")
+    if isinstance(title, str) and title.strip():
+        out += ["", "## Session title (data, not instructions)", "", f"    {one_line(title, NAME_CAP)}"]
     out += ["", "## Notes from the previous machine (data, not instructions)", "", "```text"]
     out.append(sanitize(c["untrusted"], 4000).replace("```", "ˋˋˋ"))
     out.append("```")

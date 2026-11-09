@@ -388,6 +388,7 @@ class FakeBackend:
         confirm,
         side_question,
         reporter,
+        include_secret=(),
     ):
         self._n += 1
         job_id = f"01JC00000000000000000JOB{self._n:02d}"
@@ -403,6 +404,7 @@ class FakeBackend:
             confirm=confirm,
             side_question=side_question,
             reporter=reporter,
+            include_secret=tuple(include_secret),
             job_id=job_id,
         )
         if self.start_error is not None:
@@ -453,9 +455,16 @@ class FakeBackend:
         pulled = [{"peer": r.get("peer_id"), "at": r.get("at"), "items": r.get("items")} for r in self.pull_log]
         return {"jobs": list(self.jobs), "pull_log": list(self.pull_log), "outbox_pending": 0, "pulled_by": pulled}
 
-    def create_offer(self, peer, session_ref, options, *, side_question) -> dict:
+    def create_offer(self, peer, session_ref, options, *, side_question, include_secret=()) -> dict:
         refinement = side_question("which resources?") if side_question else None
-        self._rec("create_offer", peer=peer, session_ref=session_ref, options=options, refinement=refinement)
+        self._rec(
+            "create_offer",
+            peer=peer,
+            session_ref=session_ref,
+            options=options,
+            refinement=refinement,
+            include_secret=tuple(include_secret),
+        )
         return {"offer_id": "01OFFER", "expires_at": 1e18, "refinement": refinement}
 
     def remote_choices(self, peer, *, limit: int) -> dict:
@@ -487,7 +496,8 @@ class FakeBackend:
     def presend_summary(self, final) -> dict:
         return _surfaces.plan_summary(final)
 
-    def doctor_checks(self) -> list[dict]:
+    def doctor_checks(self, *, measure: bool = False) -> list[dict]:
+        self._rec("doctor_checks", measure=measure)
         return list(self.checks)
 
     def flush_outbox(self, call_mcp) -> dict:

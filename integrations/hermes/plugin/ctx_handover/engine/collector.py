@@ -4,7 +4,8 @@ No model takes part: the same transcript, session row, filesystem and policy alw
 candidate list.
 
 1. **Primary workspace**: the ``cwd`` of the tip row. Inside a git work tree its toplevel is the item root
-   (``GIT_REPO``; a shallow clone becomes a ``FILE_TREE`` with a warning), otherwise the directory itself
+   (``GIT_REPO``; a shallow or partial clone becomes a ``FILE_TREE`` with a reason, W107 — such repositories cannot
+   be bundled with full history), otherwise the directory itself
    (``FILE_TREE``). A primary root that is ``$HOME``, an ancestor of it or a filesystem root is still reported
    (the plan refuses it as a workspace) but never "covers" evidence — otherwise every file under the home would
    silently ride along.
@@ -20,7 +21,9 @@ candidate list.
    outside ``$HOME``/``export_roots`` and kernel pseudo-filesystems are dropped. Whether a candidate may leave the
    machine is decided by the plan through the policy (``plan.build_plan``), which also names refused ones.
 4. **Session files** (spillover, hook outputs, native inputs) come from ``hermes_files.discover`` (cluster B) as
-   ``HERMES_FILE`` candidates with the reason ``"<kind>: <rel>"``.
+   ``HERMES_FILE`` candidates with the reason ``"<kind>: <rel>"``. A referenced file the discovery refuses
+   (missing, a symlink, special, too large, a Hermes credential store) is a ``HERMES_FILE`` candidate with the single
+   reason ``"rejected: <why>"`` (W040): the plan names it under "not transferred" and never makes it an item.
 
 Size estimates and inclusion defaults are the plan's job (``plan.build_plan``).
 """
@@ -57,6 +60,10 @@ CWD_REL_PREFIX = "cwd: "
 """Reason prefix with the session cwd relative to the primary root (``plan`` reads it into ``rel_cwd``)."""
 
 SHALLOW_REASON = "shallow clone: packed as a file tree"
+PARTIAL_REASON = "partial clone: packed as a file tree"
+REJECTED_PREFIX = "rejected: "
+"""Reason prefix of a session file the discovery refused (``"rejected: <why>"``, ``why`` one of
+``hermes_files.discover``'s reasons); read back with ``rejected_reason``."""
 
 MAX_EVIDENCE_PATHS = 20_000
 """Distinct evidence paths kept per session; later mentions beyond it are ignored (reads/writes still count)."""
@@ -427,6 +434,26 @@ class _Classifier:
         except Exception:  # unknown ⇒ treat as a full clone; the pack step re-checks with git itself
             return False
 
+    def partial(self, root: str) -> bool:
+        """A partial clone (promisor remote, W107). ``is_partial`` is optional on a probe (``gitops.GitProbe`` has
+        it, the K0 protocol does not yet); without it the repository counts as complete — the pack step re-checks
+        and refuses a partial clone itself."""
+        fn = getattr(self.git, "is_partial", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn(root))
+        except Exception:  # unknown ⇒ complete, as above
+            return False
+
+    def flat_reason(self, root: str) -> str | None:
+        """Why the repository at ``root`` travels as a file tree (shallow or partial clone), or None."""
+        if self.shallow(root):
+            return SHALLOW_REASON
+        if self.partial(root):
+            return PARTIAL_REASON
+        return None
+
 
 def collect(
     rows: Iterable[dict],
@@ -444,7 +471,8 @@ def collect(
     ``rows`` are the capsule-equivalent message rows of all segments in storage order (as
     ``export_session_lineage(include_inactive=True)`` returns them; an iterator is materialised once because the
     session-file discovery reads the rows too). ``session_row`` is the tip's ``sessions`` row. ``discover`` is
-    ``hermes_files.discover`` (cluster B; resolved lazily when None); ``fs`` replaces ``os.lstat``/``realpath``
+    ``hermes_files.discover`` (cluster B; resolved lazily when None) and is called with ``rejected=<list>``: refused
+    session files become ``"rejected: <why>"`` candidates (W040). ``fs`` replaces ``os.lstat``/``realpath``
     (tests of other source platforms). Additive keywords over INTERFACES §4.2: ``discover``, ``fs``.
     """
     rows = rows if isinstance(rows, Sequence) else list(rows)
@@ -469,9 +497,10 @@ def collect(
         head = [CWD_REASON]
         if top is not None:
             root = top
-            kind = ItemKind.FILE_TREE if cls.shallow(root) else ItemKind.GIT_REPO
-            if kind is ItemKind.FILE_TREE:
-                head.append(SHALLOW_REASON)
+            flat = cls.flat_reason(root)
+            kind = ItemKind.FILE_TREE if flat else ItemKind.GIT_REPO
+            if flat:
+                head.append(flat)
         else:
             root, kind = real_cwd, ItemKind.FILE_TREE
         rel = flav.rel(real_cwd, root) if flav.under(real_cwd, root) else ""
@@ -523,9 +552,9 @@ def collect(
                 owner = top
                 repo_roots.append(top)
                 if top not in items:
-                    kind = ItemKind.FILE_TREE if cls.shallow(top) else ItemKind.GIT_REPO
-                    head = [SHALLOW_REASON] if kind is ItemKind.FILE_TREE else []
-                    items[top] = _Item(kind, top, Origin.TRANSCRIPT, ev.weight, head=head)
+                    flat = cls.flat_reason(top)
+                    kind = ItemKind.FILE_TREE if flat else ItemKind.GIT_REPO
+                    items[top] = _Item(kind, top, Origin.TRANSCRIPT, ev.weight, head=[flat] if flat else [])
         if owner is not None:
             items[owner].note(flav.rel(real, owner), ev.weight, ev.tools)
             continue
@@ -549,7 +578,8 @@ def collect(
 
         discover = discover_files
     seen = {c.path for c in out}
-    for f in discover(rows, lineage, hermes, cfg):
+    rejected: list[tuple[str, str]] = []
+    for f in discover(rows, lineage, hermes, cfg, rejected=rejected):
         source_path = getattr(f, "source_path", None)
         kind = getattr(f, "kind", None)
         if not isinstance(source_path, str) or not isinstance(kind, str) or source_path in seen:
@@ -557,7 +587,26 @@ def collect(
         seen.add(source_path)
         rel = getattr(f, "rel", "") or ""
         out.append(Candidate(ItemKind.HERMES_FILE, source_path, Weight.READ, (f"{kind}: {rel}",), Origin.TRANSCRIPT))
+    for entry in rejected[:MAX_EVIDENCE_PATHS]:
+        if not (isinstance(entry, tuple) and len(entry) == 2):
+            continue
+        source_path, why = entry
+        if not isinstance(source_path, str) or not source_path or source_path in seen:
+            continue
+        seen.add(source_path)
+        why = why if isinstance(why, str) and why.isidentifier() else "hermes"
+        out.append(
+            Candidate(ItemKind.HERMES_FILE, source_path, Weight.READ, (f"{REJECTED_PREFIX}{why}",), Origin.TRANSCRIPT)
+        )
     return sorted(out, key=sort_key)
+
+
+def rejected_reason(reasons: Sequence[str]) -> str | None:
+    """Why the session-file discovery refused a candidate (``"rejected: <why>"``), or None for an accepted one."""
+    for reason in reasons:
+        if isinstance(reason, str) and reason.startswith(REJECTED_PREFIX):
+            return reason[len(REJECTED_PREFIX) :] or "hermes"
+    return None
 
 
 def hermes_kind(candidate_or_reasons: Candidate | Sequence[str]) -> str | None:

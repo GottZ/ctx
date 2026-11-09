@@ -6,13 +6,15 @@ Other clusters use these to drive planning without a real host:
 ``plan_item(...)`` / ``resource_plan(...)``  plan documents with sensible defaults
 ``final_plan(plan, decisions)``             a ``FinalPlan`` whose ``plan_id`` is computed by ``plan.plan_id``
 ``decision(item, dest)``                    a ``TargetDecision``
-``model_change(...)``                       ``FinalPlan.model_change`` in the form the target delivers
+``model_change(...)``                       ``FinalPlan.model_change`` in the one form of contract X04
 ``Busy``                                    a ``contracts.BusyReportLike``
 ``StaticGitProbe``                          ``contracts.GitProbe`` from a fixed ``{work tree root: shallow}`` map
+                                            (``partial=`` names partial clones, ``is_partial`` as E's probe)
 ``CeilingGitProbe``                         ``contracts.GitProbe`` over real ``git rev-parse`` with a ceiling dir,
                                             so a probe below the test's tmp dir never finds an enclosing repo;
                                             read-only, no identity, no config writes
-``HermesFileStub`` / ``static_discover``    stand-ins for ``hermes_files.HermesFile``/``discover`` (cluster B)
+``HermesFileStub`` / ``static_discover``    stand-ins for ``hermes_files.HermesFile``/``discover`` (cluster B),
+                                            including its ``rejected=`` list
 ``ScriptedModel``                           a side question or ``llm`` callable with scripted replies; records
                                             every prompt/input it saw
 ``InjectedModel``                           an ``llm`` that obeys instructions planted in the transcript (``ADD:``
@@ -171,18 +173,17 @@ def model_change(
     to_model: str = "gpt-x",
     to_provider: str = "openrouter",
     context_length: int | None = 131072,
-    changed: bool = True,
-    offline_capable: bool | None = False,
-    reason: str = "provider_not_configured_here",
+    offline_capable: bool = False,
+    reason: str = "provider_unusable",
 ) -> dict:
-    """``FinalPlan.model_change`` exactly as the target delivers it: ``{"from": {"model", "provider"}, "to":
-    {"model", "provider", "context_length"}, "changed": bool, "offline_capable": bool | None, "reason": str}``."""
+    """``FinalPlan.model_change`` in the one form of contract X04 (producer: ``session_import.map_model`` plus
+    ``session_import.offline_capable``): ``{"from": {"model", "provider"}, "to": {"model", "provider",
+    "context_length"}, "reason": str, "offline_capable": bool}``. A model that stays is ``None``, not a dict."""
     return {
         "from": {"model": from_model, "provider": from_provider},
         "to": {"model": to_model, "provider": to_provider, "context_length": context_length},
-        "changed": changed,
-        "offline_capable": offline_capable,
         "reason": reason,
+        "offline_capable": offline_capable,
     }
 
 
@@ -199,8 +200,9 @@ class Busy:
 class StaticGitProbe:
     """``contracts.GitProbe`` from a fixed map ``{work tree root: shallow}`` (no git needed)."""
 
-    def __init__(self, roots: dict[str, bool] | None = None) -> None:
+    def __init__(self, roots: dict[str, bool] | None = None, *, partial: Iterable[str] = ()) -> None:
         self.roots = {os.path.normpath(k): bool(v) for k, v in (roots or {}).items()}
+        self.partial = {os.path.normpath(p) for p in partial}
         self.calls: list[tuple[str, str]] = []
 
     def toplevel(self, path: str) -> str | None:
@@ -220,6 +222,10 @@ class StaticGitProbe:
     def is_shallow(self, path: str) -> bool:
         top = self.toplevel(path)
         return bool(top is not None and self.roots[top])
+
+    def is_partial(self, path: str) -> bool:
+        top = self.toplevel(path)
+        return top is not None and top in self.partial
 
 
 class CeilingGitProbe:
@@ -296,13 +302,18 @@ class HermesFileStub:
     session_id: str | None = None
 
 
-def static_discover(files: Iterable[HermesFileStub]) -> Callable:
-    """A ``discover(rows, lineage_ids, hermes, cfg)`` stand-in returning ``files``; records its inputs."""
+def static_discover(files: Iterable[HermesFileStub], rejected: Iterable[tuple[str, str]] = ()) -> Callable:
+    """A ``discover(rows, lineage_ids, hermes, cfg, *, rejected=None)`` stand-in returning ``files`` and appending
+    ``rejected`` (``(source_path, reason)``) to the caller's list, like ``hermes_files.discover``; records its
+    inputs."""
     files = list(files)
+    refused = list(rejected)
     seen: list[dict] = []
 
-    def discover(rows, lineage_ids, hermes, cfg):
+    def discover(rows, lineage_ids, hermes, cfg, *, rejected=None):
         seen.append({"rows": list(rows), "lineage_ids": list(lineage_ids), "hermes": hermes, "cfg": cfg})
+        if rejected is not None:
+            rejected.extend(refused)
         return list(files)
 
     discover.seen = seen  # type: ignore[attr-defined]

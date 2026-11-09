@@ -16,7 +16,8 @@ Ledger access goes only through the ``ledger.Ledger`` methods of INTERFACES §4.
 ``prepare``/``retire``/``release``/``reclaim`` runs inside ``ledger.tx()`` (``BEGIN IMMEDIATE``) and re-checks
 the source state there, so a retire and a reclaim of the same job serialise across processes [SK M4]. This needs
 ``tx()`` to be re-entrant per thread (ledger methods called by the thread that holds ``tx()`` join that
-transaction) — a contract point for cluster A. Sub-steps are journaled as ``step:<p1…p7|r1…r5>`` backups.
+transaction) — a contract point for cluster A. Sub-steps are journaled as ``step:<p1…p7|r1…r5>`` backups;
+``step:undone`` records that a release/reclaim restored a prepared session (that job never prepares again).
 """
 
 from __future__ import annotations
@@ -364,6 +365,27 @@ def refresh(db, info: SessionInfo, holder: str, *, ttl_s: int) -> bool:
     return turn and comp
 
 
+def suspend(db, ledger, info: SessionInfo | None, holder: str | None, job_id: str) -> None:
+    """Idle participant (DESIGN §7.3): a source whose remote conductor went quiet gives up both leases and
+    waits as ``suspended``; the caller keeps its export/pack caches. Only before prepare: in ``locking``/
+    ``locked`` nothing but the leases was taken (no veto rows, no marks), so nothing else is undone and the
+    session is usable at once. ``acquire`` of the same job locks again (the ledger re-locks ``suspended``).
+
+    A no-op on ``suspended``; from ``preparing`` on ⇒ ``InvalidState`` (only release/reclaim undo the primary
+    lock). Leases and state change under the ledger lock, so a prepare racing it stops on ``suspended``.
+    """
+    entry = _entry(ledger, job_id)
+    holder = holder or entry.get("holder")
+    tip = str(entry.get("tip_id") or (info.tip_id if info is not None else ""))
+    with _tx(ledger):
+        state = _state(ledger, job_id)
+        if state == SourceState.SUSPENDED.value:
+            return
+        _require(state, (SourceState.LOCKING.value, SourceState.LOCKED.value), "suspend", job_id)
+        _release_leases(db, tip, holder)
+        ledger.source_set(job_id, SourceState.SUSPENDED)
+
+
 # ---------------------------------------------------------------------------------------------------------
 # Prepare (primary lock) and its inverse
 # ---------------------------------------------------------------------------------------------------------
@@ -413,6 +435,14 @@ def prepare(db, ledger, info: SessionInfo, job_id: str, peer_name: str, now: dat
     if _state(ledger, job_id) == SourceState.PREPARED.value and set(PREPARE_STEPS) <= _done(ledger, job_id):
         return
     done = _done(ledger, job_id)
+    if "undone" in done:
+        # the journaled p-steps and backups belong to the restored attempt; replaying them would skip every mark
+        raise InvalidState(
+            "this handover was released or reclaimed; start a new one",
+            state=_state(ledger, job_id),
+            job_id=job_id,
+            reason="undone",
+        )
     max_len = int(getattr(db, "MAX_TITLE_LENGTH", 100) or 100)
 
     if "p1" not in done:
@@ -665,12 +695,34 @@ def veto_texts(entry: Mapping) -> str:
     )
 
 
+def veto_entry(row: Mapping) -> dict:
+    """A ledger row (``veto_rows`` or ``source_state``) as the veto entry the hooks answer with: ``job_id`` set,
+    ``ack`` parsed, ``message`` = ``veto_texts`` of it. The one place a veto text is derived from ledger data:
+    ``VetoIndex`` builds its entries here and reclaim looks for exactly these texts (X08)."""
+    entry = {k: v for k, v in row.items() if k != "message"}
+    entry["job_id"] = entry.get("job_id") or entry.get("job")
+    entry["ack"] = _ack_dict(entry.get("ack")) or None
+    entry["message"] = veto_texts(entry)
+    return entry
+
+
 def _all_texts(entry: Mapping) -> set[str]:
-    base = {k: v for k, v in entry.items() if k != "message"}
+    base = {k: v for k, v in veto_entry(entry).items() if k != "message"}
     return {
         veto_texts({**base, "state": s})
         for s in (SourceState.PREPARED.value, SourceState.RETIRED.value, SourceState.EXPORTED.value)
     }
+
+
+def _job_texts(ledger, job_id: str, entry: Mapping) -> set[str]:
+    """Every veto text a hook may have shown for ``job_id``: built by ``veto_entry`` from the job's
+    ``veto_rows`` — the rows ``VetoIndex`` answers from — in each vetoing state, plus the same from its source
+    row. The texts name the job, so no other turn qualifies."""
+    texts = _all_texts(entry)
+    for row in ledger.veto_rows():
+        if str(row.get("job_id") or row.get("job") or "") == job_id:
+            texts |= _all_texts(row)
+    return texts
 
 
 def _withheld(row: Mapping) -> str | None:
@@ -730,7 +782,7 @@ def _copy_key(row: Mapping) -> object:
 
 
 def _rewind_placeholders(
-    db, entry: Mapping, warnings: list[str], sleep: Callable[[float], None]
+    db, entry: Mapping, texts: set[str], warnings: list[str], sleep: Callable[[float], None]
 ) -> tuple[int, list[str], int]:
     """Clean up the vetoed attempts of this job (DESIGN §7.7). Returns (rows rewound, typed texts, kept).
 
@@ -740,9 +792,8 @@ def _rewind_placeholders(
     refuses every write on a segment closed by compression (``hermes_state_messages.py:268-269``), a rewind never
     touches archived rows, and a veto reply carried right behind the compaction summary can only go together with
     the summary. Their typed texts are still returned (in transcript order, one per message across copies) and
-    ``kept`` counts them; nothing is ever written to an ancestor segment.
+    ``kept`` counts them; nothing is ever written to an ancestor segment. ``texts`` = ``_job_texts``.
     """
-    texts = _all_texts(entry)
     origin = str(entry.get("tip_id"))
     tip = db.resolve_resume_session_id(str(entry.get("root_id"))) or origin
     lineage = list(db.get_compression_lineage(tip)) or [tip]
@@ -812,6 +863,7 @@ _RELEASABLE = (
     SourceState.PREPARING.value,
     SourceState.PREPARED.value,
     SourceState.RELEASING.value,
+    SourceState.SUSPENDED.value,
 )
 
 
@@ -829,7 +881,8 @@ def _undo(
     sleep: Callable[[float], None],
 ) -> dict:
     """Shared body of release and reclaim: leases → placeholder rewind (veto still active) → ``middle`` →
-    restored marks → ``final``. Each ledger step is a CAS under the ledger lock."""
+    restored marks → veto rows removed (inverse of p1, ``ledger.veto_remove``) with ``final``. Each ledger step
+    is a CAS under the ledger lock."""
     warnings: list[str] = []
     tip = str(entry.get("tip_id"))
     lineage = list(entry.get("lineage_ids") or [tip])
@@ -838,8 +891,11 @@ def _undo(
         _require(_state(ledger, job_id), (*from_states, middle.value), action, job_id)
         _release_leases(db, tip, holder)
     rewound, withheld, kept = 0, [], 0
-    if _done(ledger, job_id) & {"p1"}:
-        rewound, withheld, kept = _rewind_placeholders(db, _entry(ledger, job_id), warnings, sleep)
+    vetoed = "p1" in _done(ledger, job_id)
+    if vetoed:
+        current = _entry(ledger, job_id)
+        texts = _job_texts(ledger, job_id, current)
+        rewound, withheld, kept = _rewind_placeholders(db, current, texts, warnings, sleep)
     with _tx(ledger):
         state = _state(ledger, job_id)
         _require(state, (*from_states, middle.value), action, job_id)
@@ -850,7 +906,10 @@ def _undo(
         _restore_marks(db, ledger, job_id, tip, lineage, warnings)
     with _tx(ledger):
         _require(_state(ledger, job_id), (middle.value, final.value), action, job_id)
+        ledger.veto_remove(job_id)
         ledger.source_set(job_id, final)
+        if vetoed:
+            _mark(ledger, job_id, "undone")
     return {
         "state": final.value,
         "job_id": job_id,
@@ -865,7 +924,8 @@ def release(
     db, ledger, info: SessionInfo, holder: str | None, job_id: str, *, sleep: Callable[[float], None] = time.sleep
 ) -> None:
     """Abort path before the commit: undo the primary lock (inverse of p6…p2, placeholder rewind) and free the
-    leases; ``released`` afterwards. A no-op on ``released``/``reclaimed``."""
+    leases; ``released`` afterwards (also from ``suspended``: a cancelled idle job). A no-op on
+    ``released``/``reclaimed``."""
     del info
     entry = _entry(ledger, job_id)
     if entry.get("state") in (SourceState.RELEASED.value, SourceState.RECLAIMED.value):
@@ -910,7 +970,8 @@ def reclaim(db, ledger, session_id: str, *, force: bool, sleep: Callable[[float]
     elif state in (SourceState.LOCKING.value, SourceState.LOCKED.value, SourceState.PREPARING.value):
         if not force:
             return refused(f"Handover in progress; use /handover cancel {job_id}.")
-        ledger.set_cancel(job_id)
+        with contextlib.suppress(NotFound):  # pull: the conductor is the peer; it sees ``released`` on contact
+            ledger.set_cancel(job_id)
         release(db, ledger, None, None, job_id, sleep=sleep)  # type: ignore[arg-type]
         return {
             "state": SourceState.RELEASED.value,
@@ -1044,9 +1105,7 @@ class VetoIndex:
             entry = dict(row)
             if str(entry.get("state")) not in VETO_STATES:
                 continue
-            entry.setdefault("job_id", entry.get("job"))
-            entry["ack"] = _ack_dict(entry.get("ack")) or None
-            entry["message"] = veto_texts(entry)
+            entry = veto_entry(entry)
             by_id[str(entry.get("session_id"))] = entry
         arrival_map = {
             str(a.get("session_id")): dict(a)

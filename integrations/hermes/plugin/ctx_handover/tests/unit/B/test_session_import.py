@@ -306,9 +306,10 @@ def test_map_model_unusable_falls_back_to_default():
     fields, change = session_import.map_model(row, "auto", None, cfg, lambda n, c: False)
     assert fields["model"] == "target-model" and fields["model_config"] is None
     assert change == {
-        "old": {"model": "claude-x", "provider": "anthropic"},
-        "new": {"model": "target-model", "provider": "target-provider"},
+        "from": {"model": "claude-x", "provider": "anthropic"},
+        "to": {"model": "target-model", "provider": "target-provider", "context_length": None},
         "reason": "provider_unusable",
+        "offline_capable": False,
     }
     unknown, change2 = session_import.map_model(
         {"model": "m", "model_config": {"provider": "nowhere"}}, "auto", None, cfg, lambda n, c: True

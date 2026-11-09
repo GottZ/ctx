@@ -15,7 +15,11 @@ State is plain attributes a test may change:
 ``llm``               the callable ``plugin_llm`` returns (None = unavailable)
 ``feature_overrides`` fields forced into ``features()``
 ``facts_overrides``   fields forced into ``host_facts()``
+``mcp_grant_refusal`` ``None``, or the ``details.reason`` ``grant_mcp_server`` refuses with (``managed`` …)
 ``calls``             ``(name, args)`` of every call, in order
+
+``grant_mcp_server`` writes into ``config["plugins"]["entries"]["ctx_handover"]["mcp_allowlist"]``, so a later
+``load_config`` sees the grant as the real one does.
 
 Paths come from the isolated test home: ``hermes_home`` = ``HERMES_HOME`` = ``hermes_root`` (one profile),
 the document cache ``<hermes_home>/cache/documents``, the plugin data dir ``<hermes_home>/plugin-data/ctx_handover``.
@@ -34,7 +38,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ctx_handover.engine import hostcompat
-from ctx_handover.engine.errors import EnvNotWritable
+from ctx_handover.engine.errors import BadRequest, CapabilityMissing, EnvNotWritable
 from ctx_handover.engine.hostcompat import HostFeatures
 from ctx_handover.engine.model import HermesPaths, HostFacts
 
@@ -67,6 +71,7 @@ class FakeHost:
         self.llm: Callable[[str, list, dict, int], dict | None] | None = None
         self.feature_overrides: dict = {}
         self.facts_overrides: dict = {}
+        self.mcp_grant_refusal: str | None = None
         self.calls: list[tuple[str, tuple]] = []
         self._real = {name: getattr(hostcompat, name) for name in public_functions()}
 
@@ -137,6 +142,24 @@ class FakeHost:
     def load_config(self) -> dict:
         self._record("load_config")
         return copy.deepcopy(self.config)
+
+    def grant_mcp_server(self, server: str) -> None:
+        self._record("grant_mcp_server", server)
+        if not isinstance(server, str) or not hostcompat.MCP_SERVER_RE.fullmatch(server):
+            raise BadRequest("invalid MCP server name", field="server")
+        entry = self.config.setdefault("plugins", {}).setdefault("entries", {}).setdefault(hostcompat.PLUGIN_ID, {})
+        listed = entry.get("mcp_allowlist")
+        listed = [str(item) for item in listed] if isinstance(listed, list) else []
+        if server in listed:
+            return
+        if self.mcp_grant_refusal is not None:
+            raise CapabilityMissing(
+                "the MCP allowlist was not written (fake)",
+                capability="mcp_allowlist",
+                reason=self.mcp_grant_refusal,
+                command=f"hermes config set plugins.entries.{hostcompat.PLUGIN_ID}.mcp_allowlist '[\"{server}\"]'",
+            )
+        entry["mcp_allowlist"] = [*listed, server]
 
     def read_secret(self, name: str) -> str | None:
         self._record("read_secret", name)

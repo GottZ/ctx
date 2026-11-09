@@ -325,7 +325,8 @@ def test_options_from_settings_and_flags():
     o = surfaces.options_from(parsed, settings)
     assert isinstance(o, Options)
     assert o.dest == "~/x" and o.maps == (("/a", "/b"),)
-    assert o.hints.include == ("i",) and o.hints.include_secret == ("s",) and o.hints.exclude == ("e",)
+    assert o.hints.include == ("i",) and o.hints.include_secret == () and o.hints.exclude == ("e",)
+    assert surfaces.include_secret_from(parsed) == ("s",)  # X07: a parameter of its own, never inside Options
     assert o.hints.no_workspace is True and o.hints.dest_overrides == (("/a", "/b"),)
     assert o.model == "m" and o.wait is True and o.yes is True and o.continue_prompt == "go"
     assert o.max_total_bytes == 3 * 1024**3

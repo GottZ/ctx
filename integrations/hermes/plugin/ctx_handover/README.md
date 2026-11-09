@@ -70,7 +70,8 @@ back here; the copy on the other gateway stays active.
    one-time code (10 minutes, single use) and the server's key fingerprint, which the laptop checks itself — it
    never carries a dashboard credential. For a plain-HTTP address that only your VPN reaches (e.g. Tailscale) add
    `--allow-insecure`.
-5. `/handover doctor` on both sides checks the setup and says what to fix.
+5. `/handover doctor` on both sides checks the setup and says what to fix. `/handover doctor --measure` also finds
+   the request-body limit of a proxy in front of each paired gateway (test uploads, see Disclosure).
 
 ## Use
 
@@ -91,8 +92,8 @@ session is larger than its context window, items outside the project are include
 from an unverified source. The choices are *yes*, *yes without the proposed items*, *show the plan and stop*,
 *cancel*; `--yes` skips the question. Files that look like secrets are never sent by a blanket yes (neither
 `--yes` nor the *yes* choice takes them along); name each one with `--include-secret <path>`. An unanswered
-question (no reply within 90 s) continues without the proposed items when those are the only reason and cancels
-otherwise — nothing is locked in either case.
+question (no reply within Hermes' question timeout `agent.clarify_timeout`, 90 s by default) continues without the
+proposed items when those are the only reason and cancels otherwise — nothing is locked in either case.
 
 The final message names the session on the other side, its folder, the model and whether it works offline, and
 what to do next. On the receiving side `/handover status <job>` shows the note the agent gets with your first
@@ -136,8 +137,10 @@ The full list with all limits and timeouts is the `config_schema` in `plugin.yam
 
 **Network:** HTTPS to the gateways you pair, only during pairing, `doctor`, status and handovers you start or
 claim (plain HTTP only on loopback or for a peer you mark `--allow-insecure`); a Basic-login peer gets a password
-login on its dashboard; `/handover setup` reads this gateway's own `/api/auth/providers` once. No third-party
-services, no telemetry, no update checks.
+login on its dashboard; `/handover setup` reads this gateway's own `/api/auth/providers` once. `doctor` sends one
+signed hello per paired gateway; only `doctor --measure` (local CLI, TUI or Desktop) uploads zero-filled test
+bodies of 1, 2, 4 and 8 MiB — up to 15 MiB per paired gateway — and remembers the largest size that passed. No
+third-party services, no telemetry, no update checks.
 
 **Inbound:** once a peer is paired or a pairing code is pending, Ed25519-signed routes under
 `/api/plugins/ctx_handover/v1/` behind the dashboard sign-in. A peer with the pull right can list and take this

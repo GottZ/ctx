@@ -211,6 +211,11 @@ class LedgerStub:
                 [(sid, root_id, job_id) for sid in session_ids],
             )
 
+    def veto_remove(self, job_id: str) -> None:
+        self.calls.append("veto_remove")
+        with self.tx() as c:
+            c.execute("DELETE FROM veto_ids WHERE job_id=?", (job_id,))
+
     def veto_rows(self) -> list[dict]:
         rows = self._read(
             "SELECT v.session_id, v.root_id, v.job_id AS job, s.state, s.peer, s.title, s.at, s.prepared_at, s.ack,"
@@ -369,8 +374,10 @@ class MemoryBlockStore:
     def tamper(self, object_id: str, mutate) -> None:
         """Replace the object's content with ``mutate(bytes)`` and re-address it under the SAME object id.
 
-        Simulates a peer that ships a manipulated object whose manifest still claims the old id; the
-        block and content hashes are recomputed so only the session-level hashes can notice.
+        Simulates a peer that ships a manipulated object whose manifest still claims the old id; the block and
+        content hashes are recomputed, so only the manifest check of the reader (``jsonutil.
+        check_object_manifest``, contract K-1) can notice. For a manipulation that is consistent down to the
+        object ids (only the session hashes can see it) use :meth:`forge_capsule`.
         """
         from ctx_handover.engine.jsonutil import sha256_hex
 
@@ -380,3 +387,20 @@ class MemoryBlockStore:
         bid = sha256_hex(new)
         self.blocks[bid] = new
         self.objects[object_id] = ObjectManifest(sha256_hex(new), len(new), m.block_size, (bid,), m.media, object_id)
+
+    def forge_capsule(self, capsule_id: str, page_id: str, mutate) -> str:
+        """A capsule whose page ``page_id`` is replaced by ``mutate(page bytes)`` stored as a NEW, correctly
+        addressed object; the capsule document (``hashes`` unchanged) is stored again and its new id returned.
+
+        Simulates a peer that ships a manipulated transcript with consistent objects: every block, manifest and
+        object id holds, so only the session hashes (H_all/H_rows) can notice.
+        """
+        from ctx_handover.engine.jsonutil import loads_bounded
+        from ctx_handover.engine.session_hash import put_json, put_object, read_object
+
+        size = 64 * 1024**2
+        page = put_object(self, mutate(read_object(self, page_id, max_bytes=size))).object_id
+        doc = loads_bounded(read_object(self, capsule_id, max_bytes=size), max_bytes=size)
+        for segment in doc["segments"]:
+            segment["pages"] = [page if p == page_id else p for p in segment["pages"]]
+        return put_json(self, doc).object_id

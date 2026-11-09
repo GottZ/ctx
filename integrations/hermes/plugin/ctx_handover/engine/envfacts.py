@@ -484,6 +484,13 @@ def probe(
     if git_info and git_info.version:
         match = re.search(r"(\d+\.\d+(?:\.\d+)?)", git_info.version)
         git_version = match.group(1) if match else None
+    python_version = ""
+    for name in ("python3", "python"):  # DESIGN §11.1 python_toolchain (W075): from the same scratch-run probe
+        info = tools.get(name)
+        match = re.search(r"(\d+\.\d+(?:\.\d+)?)", info.version) if info and info.version else None
+        if match:
+            python_version = match.group(1)
+            break
     return EnvFacts(
         instance_name=_one_line(instance_name, 64),
         os_family=family,
@@ -507,6 +514,7 @@ def probe(
         git_version=git_version,
         git_lfs=s.which("git-lfs") is not None,
         capabilities=frozenset(capabilities),
+        python_version=python_version,
     )
 
 

@@ -26,8 +26,9 @@ import json
 import math
 from collections.abc import Iterable, Mapping
 
+from . import jsonutil
 from .errors import BadRequest, BlockCorrupt, NotFound, PayloadTooLarge
-from .jsonutil import canonical_bytes, doc_id, loads_bounded, sha256_hex
+from .jsonutil import canonical_bytes, loads_bounded, sha256_hex
 from .model import ObjectManifest
 
 ALL_ALGO = "ctxh-all-v1"
@@ -247,11 +248,9 @@ def h_model(conversation: Iterable[Mapping]) -> str:
 # ``session_export`` and ``session_import`` are both layer L4 and may not import each other (INTERFACES §2);
 # the few helpers both need to write and read content-addressed JSON objects through the ``BlockSink`` /
 # ``BlockSource`` protocols live here, one layer below. ``session_export.read_capsule``/``iter_capsule_rows``
-# are the public names (INTERFACES §4.1) and delegate to these.
+# are the public names (INTERFACES §4.1) and delegate to these. Object ids, block size and the manifest check
+# are K0's one rule (``jsonutil.object_manifest``/``object_id``/``check_object_manifest``, contract K-1).
 # ---------------------------------------------------------------------------------------------------------
-
-OBJECT_BLOCK_SIZE = 512 * 1024
-"""Block size of objects written through the bare ``BlockSink`` protocol (DESIGN §4.6)."""
 
 MEDIA_JSON = "application/json"
 MAX_SEGMENTS = 500
@@ -262,41 +261,29 @@ MAX_OBJECT_BYTES = 64 * 1024**2
 """Largest JSON object (page, capsule, delta) a receiver parses (SEC 2.5)."""
 
 
-def object_manifest_doc(sha256: str, size: int, block_size: int, blocks: Iterable[str], media: str) -> dict:
-    """The canonical manifest document whose sha256 is the object id (DESIGN §5.2)."""
-    return {
-        "kind": "ctxh.object",
-        "v": 1,
-        "sha256": sha256,
-        "size": int(size),
-        "block_size": int(block_size),
-        "blocks": list(blocks),
-        "media": media,
-    }
+def _manifest_doc(m: ObjectManifest) -> dict:
+    return jsonutil.object_manifest_doc(m.sha256, m.size, m.block_size, m.blocks, m.media)
 
 
 def put_object(store, data: bytes, media: str = MEDIA_JSON):
     """Store ``data`` as one object in ``store`` and return its ``ObjectManifest``.
 
     A store with ``put_bytes`` (cluster C's ``BlockStore``) builds the manifest itself; any other ``BlockSink``
-    gets the blocks through ``write_blocks`` and the manifest through ``put_manifests``, with the object id of
-    DESIGN §5.2.
+    gets the blocks through ``write_blocks`` and the manifest through ``put_manifests``. Both follow K0's rule
+    (``jsonutil.object_manifest``: 524 288-byte blocks, an empty object has none; ``jsonutil.object_id``), so
+    the same bytes have the same id in every store.
     """
     put_bytes = getattr(store, "put_bytes", None)
     if callable(put_bytes):
         return put_bytes(data, media)
-    blocks: list[tuple[str, bytes]] = []
-    for start in range(0, max(len(data), 1), OBJECT_BLOCK_SIZE):
-        raw = data[start : start + OBJECT_BLOCK_SIZE]
-        blocks.append((sha256_hex(raw), raw))
-    ids = [bid for bid, _ in blocks]
+    doc, blocks = jsonutil.object_manifest(data, media)
     accepted, rejected = store.write_blocks(blocks)
     if rejected:
         raise BlockCorrupt("block store refused session blocks", rejected=[list(r) for r in rejected][:8])
     del accepted
-    digest = sha256_hex(data)
-    oid = doc_id(object_manifest_doc(digest, len(data), OBJECT_BLOCK_SIZE, ids, media))
-    manifest = ObjectManifest(digest, len(data), OBJECT_BLOCK_SIZE, tuple(ids), media, oid)
+    manifest = ObjectManifest(
+        doc["sha256"], doc["size"], doc["block_size"], tuple(doc["blocks"]), media, jsonutil.object_id(doc)
+    )
     store.put_manifests([manifest])
     return manifest
 
@@ -315,15 +302,31 @@ def object_manifest(store, object_id: str):
 
 
 def read_object(store, object_id: str, *, max_bytes: int):
-    """Bytes of ``object_id``; the manifest's size is checked against ``max_bytes`` before any block is read.
+    """Bytes of ``object_id``. Before any block is read the manifest must be the one ``object_id`` names
+    (``jsonutil.check_object_manifest``: v1 shape, block size 524 288, recomputed id = ``object_id``, else
+    ``BadRequest``/``BlockCorrupt``) and its size within ``max_bytes`` (``PayloadTooLarge``).
 
-    Every block is verified against its id and the content against the manifest's sha256 (I8).
+    A store with ``read_object_bytes`` (cluster C's ``BlockStore``, W061) reads and verifies the blocks itself;
+    otherwise every block is checked against its id here. Either way the content must match the manifest's
+    size and sha256 (I8).
     """
     manifest = object_manifest(store, object_id)
+    jsonutil.check_object_manifest(_manifest_doc(manifest), object_id)
     if manifest.size > max_bytes:
         raise PayloadTooLarge(
             "session object exceeds the receiver limit", object_id=object_id, size=manifest.size, limit=max_bytes
         )
+    read_object_bytes = getattr(store, "read_object_bytes", None)
+    if callable(read_object_bytes):
+        data = read_object_bytes(object_id, max_bytes=max_bytes)
+    else:
+        data = _read_blocks(store, manifest)
+    if len(data) != manifest.size or sha256_hex(data) != manifest.sha256:
+        raise BlockCorrupt("session object does not match its manifest", object_id=object_id)
+    return data
+
+
+def _read_blocks(store, manifest: ObjectManifest) -> bytes:
     wanted = list(dict.fromkeys(manifest.blocks))
     got: dict[str, bytes] = {}
     for block_id, raw in store.read_blocks(wanted):
@@ -335,10 +338,7 @@ def read_object(store, object_id: str, *, max_bytes: int):
     missing = [b for b in wanted if b not in got]
     if missing:
         raise BlockCorrupt("session blocks missing", missing=missing[:8], count=len(missing))
-    data = b"".join(got[b] for b in manifest.blocks)
-    if len(data) != manifest.size or sha256_hex(data) != manifest.sha256:
-        raise BlockCorrupt("session object does not match its manifest", object_id=object_id)
-    return data
+    return b"".join(got[b] for b in manifest.blocks)
 
 
 def read_json(store, object_id: str, *, max_bytes: int) -> object:

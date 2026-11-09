@@ -8,8 +8,6 @@ problem as a sentence that says what to type instead. Every error text names the
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import math
 import re
 import shlex
@@ -109,6 +107,15 @@ _HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 
+BOOL_WORDS: dict[str, bool] = {
+    **dict.fromkeys(("true", "yes", "on", "1"), True),
+    **dict.fromkeys(("false", "no", "off", "0", ""), False),
+}
+"""Words a boolean setting may hold as text (or 0/1) — the words ``hermes config set`` turns into booleans
+(``hermes_cli/config.py`` ``_SCALAR_WORDS``) and the same table as ``jobs.plugin_settings``; a quoted ``"off"`` in
+``config.yaml`` means off, not the default."""
+
+
 def _coerce(key: str, spec: dict, value: Any) -> Any:
     typ = spec["type"]
     default = spec.get("default")
@@ -126,6 +133,8 @@ def _coerce(key: str, spec: dict, value: Any) -> Any:
         ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
         return float(value) if ok else default
     if typ == "bool":
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            value = BOOL_WORDS.get(str(value).strip().lower(), value)
         return value if isinstance(value, bool) else default
     if typ == "list":
         if not isinstance(value, list):
@@ -226,6 +235,7 @@ _OPTIONS: dict[str, tuple[str, str]] = {
     "--all": ("all", "flag"),
     "--json": ("json", "flag"),
     "--session": ("session", "value"),
+    "--measure": ("measure", "flag"),
 }
 _PLAN = {
     "--include",
@@ -251,7 +261,7 @@ _VERB_OPTIONS: dict[str, set[str]] = {
     "cancel": set(),
     "resume": set(),
     "setup": set(),
-    "doctor": set(),
+    "doctor": {"--measure"},
     "identity": set(),
     "gc": {"--job", "--all"},
     "logs": set(),
@@ -292,7 +302,8 @@ USAGE: dict[str, str] = {
     "cancel": "/handover cancel [<job>]",
     "resume": "/handover resume [<job>]",
     "setup": "/handover setup",
-    "doctor": "/handover doctor",
+    "doctor": "/handover doctor [--measure]   (--measure sends test bodies of 1, 2, 4 and 8 MiB to each paired "
+    "gateway)",
     "identity": "/handover identity [show | rotate]",
     "gc": "/handover gc [--job <id> | --all]",
     "logs": "/handover logs <job>",
@@ -457,6 +468,7 @@ def _verb_args(verb: str, args: dict, errors: list[str]) -> None:
         "allow_insecure",
         "all",
         "json",
+        "measure",
     ):
         args.setdefault(key, False)
     for key in ("include", "include_secret", "exclude", "maps"):
@@ -524,14 +536,21 @@ def help_text(topic: str | None = None) -> str:
     )
 
 
+def include_secret_from(parsed: Parsed) -> tuple[str, ...]:
+    """The ``--include-secret`` paths typed in this command (X07, R18, R24). They travel only as the explicit
+    ``include_secret`` parameter of ``start_job``/``create_offer`` — never inside ``Options`` (whose hints go to the
+    other side) — and only the local surfaces call this."""
+    return tuple(str(p) for p in parsed.args.get("include_secret") or ())
+
+
 def options_from(parsed: Parsed, settings: dict) -> Options:
-    """Settings (§14.4) plus the flags of one command, resolved once at job creation."""
+    """Settings (§14.4) plus the flags of one command, resolved once at job creation. ``--include-secret`` is not
+    part of the result (``hints.include_secret`` stays empty, X07): ``include_secret_from`` reads it."""
     a = parsed.args
     s = {**settings_from_config({}), **(settings or {})}
     maps = tuple((str(x), str(y)) for x, y in a.get("maps") or ())
     hints = PlanHints(
         include=tuple(a.get("include") or ()),
-        include_secret=tuple(a.get("include_secret") or ()),
         exclude=tuple(a.get("exclude") or ()),
         dest_overrides=maps,
         no_workspace=bool(a.get("no_workspace")),
@@ -638,20 +657,17 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
 
 
 def fingerprint_of(pubkey_b64: str) -> str:
-    """16 hex characters of sha256 over the raw public key (the paste string's ``fp``): cluster C's
-    ``crypto.fingerprint_of`` (W120); a key that is not canonical base64url (a display of a damaged row) is hashed
-    as given, so listing peers never fails."""
+    """A peer key's fingerprint as people see it — only cluster C's ``crypto.fingerprint_of`` (W120, X24; the paste
+    string's ``fp``). A key that is not canonical base64url (a damaged row) reads ``invalid key`` and a runtime
+    without ``cryptography`` ``unavailable``, so listing peers never fails."""
     try:
         from .crypto import fingerprint_of as canonical
-
-        return canonical(pubkey_b64)
-    except (ImportError, ValueError, TypeError):
-        pass
+    except ImportError:
+        return "unavailable"
     try:
-        raw = base64.urlsafe_b64decode(pubkey_b64 + "=" * (-len(pubkey_b64) % 4))
+        return canonical(pubkey_b64)
     except (ValueError, TypeError):
-        raw = str(pubkey_b64).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()[:16]
+        return "invalid key"
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -729,27 +745,27 @@ def _enum_text(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
-def model_text(model_change: Any) -> str | None:
-    """The target model of a ``FinalPlan.model_change`` (``{"to": {"model", "provider"}, …}``) as text."""
+def model_text(model_change: Any, side: str = "to") -> str | None:
+    """One side (``to``/``from``) of a ``FinalPlan.model_change`` as ``model (provider)`` — contract X04:
+    ``None`` or ``{"from": {"model", "provider"}, "to": {"model", "provider", "context_length"}, "reason",
+    "offline_capable"}``; any other form reads as unknown."""
     if not isinstance(model_change, Mapping):
         return None
-    to = model_change.get("to")
-    if isinstance(to, Mapping):
-        name = to.get("model") or to.get("name")
-        provider = to.get("provider")
-        if name and provider:
-            return f"{name} ({provider})"
-        return str(name or provider) if (name or provider) else None
-    return str(to) if to else None
+    end = model_change.get(side)
+    if not isinstance(end, Mapping):
+        return None
+    name, provider = end.get("model"), end.get("provider")
+    if name and provider:
+        return f"{name} ({provider})"
+    return str(name or provider) if (name or provider) else None
 
 
 def _offline(model_change: Any) -> bool | None:
+    """``offline_capable`` of a contract-form ``model_change`` (X04), else unknown."""
     if not isinstance(model_change, Mapping):
         return None
-    for key in ("offline_capable", "offline"):
-        if isinstance(model_change.get(key), bool):
-            return model_change[key]
-    return None
+    value = model_change.get("offline_capable")
+    return value if isinstance(value, bool) else None
 
 
 def _instruction_lines(entries: Sequence[Any]) -> list[str]:

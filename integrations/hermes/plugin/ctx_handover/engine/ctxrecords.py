@@ -61,10 +61,20 @@ def allowed(config: dict, server: str) -> bool:
     return isinstance(allow, list) and server in allow
 
 
+def persist_off(settings: Mapping[str, Any] | None) -> bool:
+    """``ctx_persist`` says off — also as the raw YAML value: an unquoted ``off``/``no``/``false`` in
+    ``config.yaml`` arrives as ``False`` (YAML 1.1), a quoted one as text."""
+    value = (settings or {}).get("ctx_persist", "auto")
+    if isinstance(value, bool):
+        return value is False
+    return str(value).strip().lower() in {"off", "no", "false"}
+
+
 def server_for(config: dict, settings: Mapping[str, Any]) -> str | None:
-    """The ctx server records go to, or None: ctx_checkpoint detected and ``ctx_persist`` not ``off``. Callers that
-    finish a job side enqueue only when this is not None (the outbox then waits for consent and connectivity)."""
-    if str((settings or {}).get("ctx_persist", "auto")) == "off":
+    """The ctx server records go to, or None: ctx_checkpoint detected and ``ctx_persist`` not off (``persist_off``;
+    callers may pass the raw settings mapping). Callers that finish a job side enqueue only when this is not None
+    (the outbox then waits for consent and connectivity)."""
+    if persist_off(settings):
         return None
     return detect(config)
 
@@ -86,6 +96,16 @@ def _iso(ts: object) -> str:
         return ""
 
 
+def _model_end(end: object) -> str:
+    """``model (provider)`` of one side of a contract-form ``model_change`` (X04); anything else is unknown."""
+    if not isinstance(end, Mapping):
+        return "unknown"
+    name, provider = end.get("model"), end.get("provider")
+    if name and provider:
+        return f"{name} ({provider})"
+    return str(name or provider or "unknown")
+
+
 def _cap_utf8(text: str, limit: int) -> str:
     raw = text.encode("utf-8")
     if len(raw) <= limit:
@@ -99,7 +119,9 @@ def build_record(kind: str, data: Mapping[str, Any], *, redact: Callable[[str], 
 
     ``data`` keys (dict or attributes): ``job_id``, ``source_root``, ``target_root``, ``source_session``,
     ``target_session``, ``peer`` (the other side's name), ``local_name`` (this side's name), ``title``, ``at``
-    (epoch seconds), ``path_map`` (``PathMapEntry`` or dicts), ``model_change`` (dict), ``plugin_version``.
+    (epoch seconds), ``path_map`` (``PathMapEntry`` or dicts), ``model_change`` (``None`` or contract X04's
+    ``{"from": {"model", "provider"}, "to": {"model", "provider", "context_length"}, "reason",
+    "offline_capable"}``), ``plugin_version``.
     Raises ``ValueError`` for an unknown kind; the redactor's exceptions propagate (``enqueue`` drops the record).
     """
     direction = KINDS.get(kind)
@@ -137,11 +159,12 @@ def build_record(kind: str, data: Mapping[str, Any], *, redact: Callable[[str], 
             lines.append(f"  - … {len(path_map) - _PATH_LINES} more")
     change = _get(data, "model_change")
     if isinstance(change, Mapping) and change:
-        before = " ".join(
-            str(x) for x in (change.get("from"), f"({change.get('from_provider')})") if x and x != "(None)"
-        )
-        after = " ".join(str(x) for x in (change.get("to"), f"({change.get('to_provider')})") if x and x != "(None)")
-        lines.append(f"- Model: {before or 'unknown'} → {after or 'unknown'}")
+        line = f"- Model: {_model_end(change.get('from'))} → {_model_end(change.get('to'))}"
+        if change.get("reason"):
+            line += f" ({change['reason']})"
+        if isinstance(change.get("offline_capable"), bool):
+            line += f"; works offline: {'yes' if change['offline_capable'] else 'no'}"
+        lines.append(line)
     content = _cap_utf8(redact("\n".join(lines)), RECORD_MAX_BYTES - 256)
     metadata = {
         "job_id": job_id,

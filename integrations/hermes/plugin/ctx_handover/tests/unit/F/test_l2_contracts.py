@@ -189,11 +189,12 @@ def test_confirmation_question_from_conductor_info():
 
 
 def test_start_job_passes_local_include_secret(fake_host):
-    """X07: ``EngineBackend.start_job`` hands the flags typed on this (local) surface to ``plan_sync`` as
-    ``include_secret`` — cluster A builds ``PolicyConfig.include_secret`` only from that parameter.
+    """X07: ``EngineBackend.start_job`` hands the flags typed on this (local) surface to ``plan_sync`` as the
+    explicit ``include_secret`` parameter — cluster A builds ``PolicyConfig.include_secret`` only from that
+    parameter — and never takes it from ``Options.hints`` (which travel to the other side; R18).
 
-    Red proof: mutant = the ``include_secret=…`` keyword removed from ``start_job`` →
-    ``assert () == ('/srv/app/.env',)``.
+    Red proof: mutant = ``start_job`` passes ``tuple(options.hints.include_secret)`` (the checkpoint ``c32a862d``)
+    → ``AssertionError: assert (() == ('/srv/app/.env',)``.
     """
     seen: dict = {}
 
@@ -204,11 +205,7 @@ def test_start_job_passes_local_include_secret(fake_host):
 
     eb = EngineBackend(FakeCtx(host=fake_host), Plugin(FakeCtx(host=fake_host)))
     eb._parts.update({"runner": Runner(), "runtime": types.SimpleNamespace()})
-    options = Options(hints=PlanHints(include_secret=("/srv/app/.env",)))
-    eb.start_job(
-        Mode.PUSH,
-        make_peer("server"),
-        options,
+    kwargs = dict(
         session_ref=SessionRef(id=SID),
         calling_session=SID,
         session_key=None,
@@ -217,9 +214,14 @@ def test_start_job_passes_local_include_secret(fake_host):
         side_question=None,
         reporter=None,
     )
+    eb.start_job(Mode.PUSH, make_peer("server"), Options(), include_secret=("/srv/app/.env",), **kwargs)
     assert seen["include_secret"] == ("/srv/app/.env",) and seen["bundle_path"] is None
+    smuggled = Options(hints=PlanHints(include_secret=("/home/u/.ssh/id_ed25519",)))
+    eb.start_job(Mode.PUSH, make_peer("server"), smuggled, **kwargs)
+    assert seen["include_secret"] == ()  # hints are never read for it
     parsed = surfaces.parse("to server --include-secret /srv/app/.env --include-secret ~/.ssh/config")
-    assert surfaces.options_from(parsed, {}).hints.include_secret == ("/srv/app/.env", "~/.ssh/config")
+    assert surfaces.include_secret_from(parsed) == ("/srv/app/.env", "~/.ssh/config")
+    assert surfaces.options_from(parsed, {}).hints.include_secret == ()
 
 
 # ---------------------------------------------------------------------------------------------------------

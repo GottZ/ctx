@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ctx_handover.engine import session_export, session_import
-from ctx_handover.engine.errors import VerifyFailed
+from ctx_handover.engine.errors import BlockCorrupt, VerifyFailed
 from ctx_handover.tests.fakes.sessiondb import large_segment
 from ctx_handover.tests.unit.B.conftest import (
     assert_lineage_equal,
@@ -85,8 +85,9 @@ def test_import_hidden_until_unhide(make_session, session_db, target_db, store, 
 
 
 def test_import_verify_failed_discards(make_session, session_db, target_db, store, source_paths, target_cwd):
-    """★ A page manipulated in transit (re-addressed under its old object id, so only the session hashes can see
-    it) ⇒ ``VerifyFailed`` and nothing of the import remains [I8].
+    """★ A page manipulated in transit with consistent objects (new page object, capsule re-stored with the
+    source's hashes, so every block, manifest and object id holds and only the session hashes can see it)
+    ⇒ ``VerifyFailed`` and nothing of the import remains [I8].
 
     Mutant: skip the H_all/H_rows comparison after the import.
     """
@@ -94,13 +95,33 @@ def test_import_verify_failed_discards(make_session, session_db, target_db, stor
     _info, cap = export(session_db, store, tip, source_paths)
     capsule = session_export.read_capsule(store, cap.capsule_id, max_json_bytes=64 * 1024**2)
     page = capsule["segments"][-1]["pages"][0]
-    store.tamper(page, lambda data: data.replace(b"user ", b"usr! ", 1))
+    forged = store.forge_capsule(cap.capsule_id, page, lambda data: data.replace(b"user ", b"usr! ", 1))
+    assert forged != cap.capsule_id
     p = plan(target_db, capsule, target_cwd)
     before = {r["id"] for r in target_db.list_sessions_rich(limit=100, include_hidden=True, include_children=True)}
     with pytest.raises(VerifyFailed):
-        session_import.import_hidden(target_db, store, cap.capsule_id, p)
+        session_import.import_hidden(target_db, store, forged, p)
     after = {r["id"] for r in target_db.list_sessions_rich(limit=100, include_hidden=True, include_children=True)}
     assert after == before
+    assert all(target_db.get_session(s.new_id) is None for s in p.segments)
+
+
+def test_import_refuses_object_readdressed_under_old_id(
+    make_session, session_db, target_db, store, source_paths, target_cwd
+):
+    """A page whose manifest was swapped under its old object id is refused by the object reader before a block
+    is read (``BlockCorrupt``, contract K-1: the id is checked against the manifest on every read path), and
+    nothing of the import remains."""
+    tip = rich_lineage(make_session)
+    _info, cap = export(session_db, store, tip, source_paths)
+    capsule = session_export.read_capsule(store, cap.capsule_id, max_json_bytes=64 * 1024**2)
+    page = capsule["segments"][-1]["pages"][0]
+    store.tamper(page, lambda data: data.replace(b"user ", b"usr! ", 1))
+    p = plan(target_db, capsule, target_cwd)
+    store.reads.clear()
+    with pytest.raises(BlockCorrupt):
+        session_import.import_hidden(target_db, store, cap.capsule_id, p)
+    assert not set(store.reads) & set(store.objects[page].blocks)
     assert all(target_db.get_session(s.new_id) is None for s in p.segments)
 
 

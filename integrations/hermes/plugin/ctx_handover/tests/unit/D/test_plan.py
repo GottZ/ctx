@@ -27,7 +27,7 @@ from ctx_handover.engine.model import (
     RefineReport,
     Weight,
 )
-from ctx_handover.tests.fakes.planning_fake import Busy, decision, fake_redact, final_plan
+from ctx_handover.tests.fakes.planning_fake import Busy, decision, fake_redact, final_plan, model_change
 from ctx_handover.tests.unit.D.conftest import write
 
 
@@ -493,15 +493,14 @@ def test_confirmation_reasons(lay):
     assert plan.confirmation_reasons(conflicted, Options(), False) == [plan.CONFIRM_CONFLICT]
     big = final_plan(replace(base.plan, items=(replace(w0, size_estimate=600 * 1024**2),)))
     assert plan.confirmation_reasons(big, Options(), False) == [plan.CONFIRM_LARGE]
-    secret = plan.confirmation_reasons(base, Options(hints=PlanHints(include_secret=("/home/u/.env",))), False)
+    secret_cfg = lay.cfg(include_secret=frozenset({str(lay.home / ".env")}))
+    secret = plan.confirmation_reasons(base, Options(), False, cfg=secret_cfg)
     assert secret == [plan.CONFIRM_SECRET]
-    offline = final_plan(
-        base.plan, model_change={"to": {"model": "gpt-x", "provider": "openrouter"}, "offline_capable": False}
-    )
+    offline = final_plan(base.plan, model_change=model_change(offline_capable=False))
     assert plan.confirmation_reasons(offline, Options(), True) == [plan.CONFIRM_MODEL]
     window = final_plan(
         replace(base.plan, approx_tokens=900_000),
-        model_change={"to": {"model": "q", "provider": "llamacpp", "context_length": 65536}, "offline_capable": True},
+        model_change=model_change(to_model="q", to_provider="llamacpp", context_length=65536, offline_capable=True),
     )
     assert plan.confirmation_reasons(window, Options(), False) == [plan.CONFIRM_MODEL]
     outside = with_items(plan.user_item("x0", str(lay.notes / "todo.md"), ItemKind.EXTRA_FILE))

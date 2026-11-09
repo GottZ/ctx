@@ -52,6 +52,7 @@ from .errors import (
     GateRejected,
     HandoverError,
     InDoubt,
+    InvalidState,
     ListenerMissing,
     NotFound,
     error_class,
@@ -166,6 +167,7 @@ class Backend(Protocol):
         confirm: Callable[[dict], str] | None,
         side_question: Callable[[str], str | None] | None,
         reporter: Any,
+        include_secret: tuple[str, ...] = (),
     ) -> tuple[str, FinalPlan | None]: ...
     def continue_async(self, job_id: str) -> None: ...
     def run_foreground(self, job_id: str) -> int: ...
@@ -179,6 +181,7 @@ class Backend(Protocol):
         options: Options,
         *,
         side_question: Callable[[str], str | None] | None,
+        include_secret: tuple[str, ...] = (),
     ) -> dict: ...
     def remote_choices(self, peer: Peer, *, limit: int) -> dict: ...
     def reclaim(self, session_id: str, *, force: bool) -> dict: ...
@@ -188,7 +191,7 @@ class Backend(Protocol):
     def session_source(self, session_id: str) -> str | None: ...
     def suggestion_put(self, session_id: str, data: dict) -> None: ...
     def presend_summary(self, final: FinalPlan) -> dict: ...
-    def doctor_checks(self) -> list[dict]: ...
+    def doctor_checks(self, *, measure: bool = False) -> list[dict]: ...
     def flush_outbox(self, call_mcp: Callable[..., dict] | None) -> dict: ...
     def grant_ctx(self, server: str) -> None: ...
     def set_setting(self, key: str, value: Any) -> None: ...
@@ -626,6 +629,8 @@ class Plugin:
                 confirm=confirm,
                 side_question=side_question,
                 reporter=reporter,
+                # typed here, on a local surface (every data-moving verb is in LOCAL_ONLY_VERBS, R24): X07
+                include_secret=surfaces.include_secret_from(parsed),
             )
         holder["job_id"] = job_id
         call.data["job_id"] = job_id
@@ -760,7 +765,11 @@ class Plugin:
                 )
             options = surfaces.options_from(parsed, self.backend.settings())
             offer = self.backend.create_offer(
-                peer, SessionRef(id=sid), options, side_question=self.side_question_for(sid)
+                peer,
+                SessionRef(id=sid),
+                options,
+                side_question=self.side_question_for(sid),
+                include_secret=surfaces.include_secret_from(parsed),
             )
             call.data["offer"] = offer
             call.say(surfaces.render_offer(offer, peer.name, self.backend.local_name(), now=time.time()))
@@ -1079,15 +1088,12 @@ class Plugin:
     def _verb_gc(self, parsed: surfaces.Parsed, call: Call) -> None:
         result = self.backend.gc(job_id=parsed.args.get("job"), all_jobs=bool(parsed.args.get("all")))
         call.data["gc"] = result
-        call.say(
-            f"Freed {surfaces.human_bytes(result.get('freed_bytes', 0))}"
-            + (
-                f"; removed everything of {result.get('jobs', 0)} jobs"
-                if parsed.args.get("job") or parsed.args.get("all")
-                else ""
-            )
-            + "."
-        )
+        text = f"Freed {surfaces.human_bytes(result.get('freed_bytes', 0))}"
+        if parsed.args.get("job") or parsed.args.get("all"):
+            text += f"; removed everything of {result.get('jobs', 0)} jobs"
+        if result.get("skipped"):
+            text += f"; {result['skipped']} unfinished jobs kept (/handover status lists them)"
+        call.say(text + ".")
 
     def _verb_logs(self, parsed: surfaces.Parsed, call: Call) -> None:
         job = str(parsed.args["job"])
@@ -1122,8 +1128,7 @@ class Plugin:
                 ],
             )
             if choice in {"auto", "on", "off"} and choice != current:
-                backend.set_setting("inbound", choice)
-                lines.append(f"inbound: {choice}")
+                lines.append(_set_or_explain(backend, "inbound", choice))
         lines.append(
             f"Received workspaces go to {settings.get('workspace_root')} (setting workspace_root; "
             f"writes only under {', '.join(settings.get('allow_roots') or [])})."
@@ -1138,11 +1143,18 @@ class Plugin:
                 [{"value": "yes", "label": "Yes, record handovers in ctx"}, {"value": "no", "label": "No"}],
             )
             if answer == "yes":
-                backend.grant_ctx(server)
-                backend.set_setting("ctx_persist", "auto")
-                lines.append(f"ctx: handovers are recorded through MCP server {server}.")
+                try:  # the operator's grant, written with Hermes' config writer (W108, K-5)
+                    backend.grant_ctx(server)
+                    lines.append(f"ctx: handovers are recorded through MCP server {server}.")
+                except CapabilityMissing as err:
+                    command = (err.details or {}).get("command")
+                    lines.append(
+                        f"ctx: the MCP allowlist was not written ({(err.details or {}).get('reason') or err.message})."
+                        + (f" Run: {command}" if command else "")
+                    )
+                lines.append(_set_or_explain(backend, "ctx_persist", "auto"))
             elif answer == "no":
-                backend.set_setting("ctx_persist", "off")
+                lines.append(_set_or_explain(backend, "ctx_persist", "off"))
                 lines.append("ctx: off.")
         else:
             lines.append(
@@ -1154,9 +1166,14 @@ class Plugin:
         call.say("\n".join(lines))
 
     def _verb_doctor(self, parsed: surfaces.Parsed, call: Call) -> None:
+        measure = bool(parsed.args.get("measure"))
+        if measure and not call.local:  # up to 15 MiB of test bodies per paired gateway: an operator's choice
+            call.say(REFUSAL)
+            call.exit_code = EXIT_USAGE
+            return
         checks = local_checks(self.ctx, self.backend)
         try:
-            checks += self.backend.doctor_checks()
+            checks += self.backend.doctor_checks(measure=measure)
         except HandoverError as err:
             checks.append({"name": "engine", "ok": False, "detail": surfaces.render_error(err, None)})
         call.data["checks"] = checks
@@ -1283,15 +1300,9 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
                 else "on: a paired device with --continue may start one turn here (approvals apply)",
             }
         )
-    server = ctxrecords.detect(config)
-    if server is not None and settings.get("ctx_persist") != "off":
-        entry = (
-            (((config.get("plugins") or {}).get("entries") or {}).get("ctx_handover") or {})
-            if isinstance(config.get("plugins"), Mapping)
-            else {}
-        )
-        allow = entry.get("mcp_allowlist") if isinstance(entry, Mapping) else None
-        granted = isinstance(allow, list) and server in allow
+    server = ctxrecords.server_for(config, settings)
+    if server is not None:
+        granted = ctxrecords.allowed(config, server)
         checks.append(
             {
                 "name": "ctx records",
@@ -1301,6 +1312,15 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
             }
         )
     return checks
+
+
+def _set_or_explain(backend: Backend, key: str, value: str) -> str:
+    """Write one setting through ``ctx.set_config``; when this host cannot, name the command that does."""
+    try:
+        backend.set_setting(key, value)
+    except CapabilityMissing:
+        return f"{key}: not saved from here; run: hermes config set plugins.entries.ctx_handover.settings.{key} {value}"
+    return f"{key}: {value}"
 
 
 def _gate_warnings() -> Callable[..., list[str]] | None:
@@ -1315,13 +1335,23 @@ def _gate_warnings() -> Callable[..., list[str]] | None:
 
 SKEW_WARN_S = 60
 """Clock difference to a peer above which ``doctor`` warns (signed requests fail beyond 300 s, ``server.SKEW_S``)."""
+MEASURE_SIZES = (1, 2, 4, 8)
+"""MiB per test body of ``doctor --measure`` (cluster C ``WireClient.probe_gate(measure_limit=True)``)."""
+MEASURE_TEXT = f"{sum(MEASURE_SIZES)} MiB of test data per paired gateway"
+BODY_LIMIT_KEY = "doctor.body_limit."
+"""Ledger ``meta`` key prefix (+ peer id) of the last ``doctor --measure`` result: ``{"bytes", "at"}``."""
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def peer_check(peer: Peer, probe: Mapping, clock_skew: float | None = None) -> dict:
     """One ``doctor`` line per dialled peer from cluster C's ``WireClient.probe_gate`` report (W066, X24):
     ``gate`` (``ok``/``rejected``/``unreachable``), ``plugin``, ``signed``, ``error`` and ``body_limit`` — which
-    layer answered (dashboard 401 vs plugin vs 404 vs network, DESIGN §14.1 doctor), the measured proxy body
-    limit and the clock skew."""
+    layer answered (dashboard 401 vs plugin vs 404 vs network, DESIGN §14.1 doctor), the proxy body limit and the
+    clock skew. ``body_limit`` is present only after ``doctor --measure``; otherwise ``body_limit_last``
+    (``{"bytes", "at"}`` of the last measurement, or None) is shown with its date."""
     name = f"peer {peer.name}"
     gate = probe.get("gate")
     error = str(probe.get("error") or "")
@@ -1366,17 +1396,27 @@ def peer_check(peer: Peer, probe: Mapping, clock_skew: float | None = None) -> d
     ok: bool | None = True
     remedies: list[str] = []
     limit = probe.get("body_limit")
-    if isinstance(limit, int) and not isinstance(limit, bool):
+    measured = ""
+    last = probe.get("body_limit_last")
+    if not _is_count(limit) and isinstance(last, Mapping) and _is_count(last.get("bytes")):
+        limit = last["bytes"]
+        measured = f" (measured {surfaces.when(last.get('at'))}; doctor --measure measures again)"
+    if _is_count(limit):
         if limit >= 8 * surfaces.MiB:
-            parts.append("request bodies of 8 MiB pass")
+            parts.append("request bodies of 8 MiB pass" + measured)
         else:
             ok = None
             parts.append(
-                f"a proxy limits request bodies to {surfaces.human_bytes(limit)}"
-                if limit
-                else "a proxy limits request bodies below 1 MiB"
+                (
+                    f"a proxy limits request bodies to {surfaces.human_bytes(limit)}"
+                    if limit
+                    else "a proxy limits request bodies below 1 MiB"
+                )
+                + measured
             )
             remedies.append("raise the body limit of the proxy in front of it to 8 MiB (transfers stay smaller)")
+    elif "body_limit_last" in probe:
+        parts.append(f"request body limit not measured yet (doctor --measure sends up to {MEASURE_TEXT})")
     if clock_skew is not None and abs(float(clock_skew)) > SKEW_WARN_S:
         ok = None
         parts.append(f"clock differs by {float(clock_skew):+.0f} s (signatures fail beyond 300 s)")
@@ -1501,6 +1541,39 @@ def cli_handler(ctx: Any) -> Callable[[argparse.Namespace], int]:
 # ---------------------------------------------------------------------------------------------------------
 
 
+_GC_DIRS = ("blocks", "manifests", "staging", "reports", "logs")
+
+
+def _gc_usage(data: Path) -> int:
+    """Bytes of the files under the data-folder parts ``gc`` cleans (no symlink is followed)."""
+    total = 0
+    stack = [data / name for name in _GC_DIRS]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+def _last_body_limit(ledger: Any, peer: Peer) -> dict | None:
+    """``{"bytes", "at"}`` of the last ``doctor --measure`` for this peer, or None."""
+    try:
+        raw = ledger.meta_get(BODY_LIMIT_KEY + peer.peer_id)
+        value = json.loads(raw) if raw else None
+    except (HandoverError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) and _is_count(value.get("bytes")) else None
+
+
 class _VetoAdapter:
     """``HookRuntime`` over ``lock.VetoIndex`` (in-memory lookups) and the ledger's note calls, which run on one
     lazily started writer thread so ``pre_llm_call`` never waits for SQLite (DESIGN §7.6, §11.4)."""
@@ -1555,10 +1628,11 @@ class EngineBackend:
     """``Backend`` over the engine and Hermes. Every engine module is imported lazily inside a method, so
     ``register()`` and the unit tests never load them; ``hostcompat.<fn>`` is reached as a module attribute.
 
-    The profile runtime is cluster A's: ``jobs.ensure_started(ctx)`` returns the profile (``ledger``, ``store``,
-    ``veto``, ``identity``) and ``jobs.runner_for(ctx, reporter_factory)`` its one ``JobRunner``; this class builds
-    no second ledger, block store or veto index. Revoke and reclaim go through ``jobs.revoke_peer`` /
-    ``jobs.reclaim`` (W067, W047).
+    The profile runtime is cluster A's (X19): ``jobs.ensure_started(ctx)`` returns the one ``Runtime`` of this
+    profile and process (``ledger``, ``veto``, ``store``, ``runner``, janitor); the hooks and every verb use only
+    that object — this class builds no ``Ledger``, ``VetoIndex``, ``BlockStore`` or ``JobRunner`` of its own.
+    ``jobs.runner_for(ctx, reporter_factory)`` only hands the surfaces' reporter factory to that runner. Revoke,
+    reclaim and gc go through ``jobs.revoke_peer`` / ``jobs.reclaim`` / ``jobs.gc_job`` (W067, W047, SEC 6.3).
     """
 
     def __init__(self, ctx: Any, plugin: Plugin) -> None:
@@ -1581,8 +1655,8 @@ class EngineBackend:
         def build() -> Any:
             from . import jobs
 
-            # The runner first: ensure_started's janitor would otherwise create the profile's runner without a
-            # reporter factory, and progress of every later job would go nowhere (runner_for keeps the first).
+            # The factory first: ensure_started's janitor may create the profile's runner, and a runner without
+            # the surfaces' reporter factory would send the progress of every later job nowhere.
             jobs.runner_for(self._ctx, self._plugin.broker.factory)
             return jobs.ensure_started(self._ctx)
 
@@ -1592,25 +1666,21 @@ class EngineBackend:
         return self._started().ledger
 
     def _runner(self) -> Any:
-        def build() -> Any:
-            from . import jobs
-
-            self._started()
-            return jobs.runner_for(self._ctx, self._plugin.broker.factory)  # one runner + janitor per profile
-
-        return self._part("runner", build)
+        return self._part("runner", lambda: self._started().runner)  # the runtime's one runner (X19)
 
     def _store(self) -> Any:
         return self._started().store
 
     def _spawner(self) -> Spawner:
+        """A reader of continuation results for ``status`` (any process). It never starts a turn: the one spawner
+        that does is the target's, built by ``jobs.make_local_apis`` with ``allow_remote_continue`` (X21)."""
+
         def build() -> Spawner:
             profile = hostcompat.host_facts().profile
             return Spawner(
                 log_dir=self._data_dir() / "logs",
                 profile=None if profile == "default" else profile,
-                approvals_off=lambda: hostcompat.approvals_off(hostcompat.load_config()),
-                allow_remote=lambda: bool(self.settings().get("allow_remote_continue")),
+                approvals_off=lambda: True,  # read-only: every spawn through this instance is refused
             )
 
         return self._part("spawner", build)
@@ -1717,9 +1787,10 @@ class EngineBackend:
             rotate=True,
         )
         # the profile caches its identity for the runner and the pull client; the old key must not sign again
-        with rt.lock:
-            rt.identity = ident
-            rt.identity_error = None
+        with getattr(rt, "lock", None) or contextlib.nullcontext():
+            if hasattr(rt, "identity"):
+                rt.identity = ident
+                rt.identity_error = None
         return {"instance_id": ident.instance_id, "fingerprint": ident.fingerprint()}
 
     def start_job(
@@ -1735,6 +1806,7 @@ class EngineBackend:
         confirm: Callable[[dict], str] | None,
         side_question: Callable[[str], str | None] | None,
         reporter: Any,
+        include_secret: tuple[str, ...] = (),
     ) -> tuple[str, FinalPlan | None]:
         self._flush_quietly()
         job_id, final = self._runner().plan_sync(
@@ -1747,8 +1819,8 @@ class EngineBackend:
             ctx=self._ctx,
             confirm=confirm,
             bundle_path=Path(bundle_path) if bundle_path is not None else None,
-            # only flags typed here: this surface is local (R24); a peer's include_secret never gets here (X07)
-            include_secret=tuple(options.hints.include_secret),
+            # only what was typed on this local surface (R24); never read from Options.hints (X07, R18)
+            include_secret=tuple(str(p) for p in include_secret),
             side_question=side_question,
         )
         if final is None and options.dry_run:
@@ -1808,9 +1880,17 @@ class EngineBackend:
         options: Options,
         *,
         side_question: Callable[[str], str | None] | None,
+        include_secret: tuple[str, ...] = (),
     ) -> dict:
         return dict(
-            self._runner().create_offer(peer, session_ref, ctx=self._ctx, options=options, side_question=side_question)
+            self._runner().create_offer(
+                peer,
+                session_ref,
+                ctx=self._ctx,
+                options=options,
+                side_question=side_question,
+                include_secret=tuple(str(p) for p in include_secret),  # X07, as in start_job
+            )
         )
 
     def remote_choices(self, peer: Peer, *, limit: int) -> dict:
@@ -1829,41 +1909,43 @@ class EngineBackend:
         return dict(jobs.reclaim(session_id, force=force) or {})  # tells the target ``source_reclaimed`` (W047)
 
     def gc(self, *, job_id: str | None, all_jobs: bool) -> dict:
-        import shutil
-
+        """``/handover gc`` (SEC 6.3, BO §6 #21): per job cluster A's one implementation ``jobs.gc_job`` (its blocks
+        and manifests through ``BlockStore.release_job``, staging with quarantine, report, continuation log, then
+        journal and rows), then one cache pass ``BlockStore.gc`` (``--all``: everything not needed by a live job).
+        ``--job`` of an unfinished job raises ``InvalidState``; ``--all`` keeps unfinished jobs (``skipped``). An
+        id that is not a ULID never reaches a path. ``freed_bytes`` = bytes on disk before minus after."""
+        from . import jobs
+        from .ids import ULID_RE
         from .model import Role
 
-        ledger = self._ledger()
-        store = self._store()
+        rt = self._started()
         data = self._data_dir()
-        jobs: list[str] = []
+        before = _gc_usage(data)
         if job_id:
-            jobs = [job_id]
-        elif all_jobs:
-            seen = {str(j.get("job_id")) for role in Role for j in ledger.jobs(role=role, active=False, limit=100000)}
-            jobs = sorted(j for j in seen if j)
-        for jid in jobs:
-            if not jid.isalnum():
+            if not ULID_RE.match(str(job_id)):
+                raise BadRequest(f"{job_id!r} is not a job id (/handover status lists them).", field="job")
+            ids = [str(job_id)]
+        elif all_jobs:  # every job; gc_job alone decides what is finished
+            seen = {str(j.get("job_id")) for role in Role for j in rt.ledger.jobs(role=role, limit=1_000_000)}
+            ids = sorted(j for j in seen if ULID_RE.match(j))
+        else:
+            ids = []
+        done = skipped = 0
+        for jid in ids:
+            try:
+                jobs.gc_job(rt.ledger, jid, data_dir=data, store=rt.store)
+            except InvalidState:
+                if job_id:
+                    raise
+                skipped += 1
                 continue
-            ledger.purge_job(jid)
-            store.release_job(jid, keep=False)
-            for sub in ("staging", "quarantine"):
-                target = data / sub / jid
-                if target.is_dir() and not target.is_symlink():
-                    shutil.rmtree(target, ignore_errors=True)
-            for path in (
-                data / "reports" / f"{jid}.md",
-                data / "logs" / f"continue-{jid}.log",
-                data / "logs" / f"continue-{jid}.json",
-            ):
-                with contextlib.suppress(FileNotFoundError):
-                    path.unlink()
+            done += 1
         s = self.settings()
-        freed = store.gc(
+        rt.store.gc(
             keep_days=0 if all_jobs else int(s["block_cache_days"]),
             max_bytes=0 if all_jobs else int(float(s["block_cache_gb"]) * surfaces.GiB),
         )
-        return {"freed_bytes": int(freed or 0), "jobs": len(jobs)}
+        return {"freed_bytes": max(0, before - _gc_usage(data)), "jobs": done, "skipped": skipped}
 
     def logs(self, job_id: str) -> list[dict]:
         from .model import Role
@@ -1896,7 +1978,10 @@ class EngineBackend:
     def presend_summary(self, final: FinalPlan) -> dict:
         return surfaces.plan_summary(final)  # cluster D's presend_summary/summarize, keyed for rendering (W125)
 
-    def doctor_checks(self) -> list[dict]:
+    def doctor_checks(self, *, measure: bool = False) -> list[dict]:
+        """Engine checks of ``doctor``: git, data folder, identity, inbound, one probe per dialled peer. The proxy
+        body limit is measured (test bodies of ``MEASURE_SIZES`` MiB) only with ``measure``; its result is kept in the
+        ledger and shown with its date by later runs."""
         checks: list[dict] = []
         try:
             from . import gitops
@@ -1961,8 +2046,20 @@ class EngineBackend:
             for peer in (p for p in ledger.peers() if p.direction == "dial"):
                 try:
                     client = self._client(peer)
-                    probe = client.probe_gate(measure_limit=True)
-                    checks.append(peer_check(peer, probe, getattr(client, "clock_skew", None)))
+                    try:
+                        probe = dict(client.probe_gate(measure_limit=measure))
+                        skew = getattr(client, "clock_skew", None)
+                    finally:
+                        with contextlib.suppress(Exception):
+                            client.close()
+                    if measure and _is_count(probe.get("body_limit")):
+                        ledger.meta_set(
+                            BODY_LIMIT_KEY + peer.peer_id,
+                            json.dumps({"bytes": int(probe["body_limit"]), "at": time.time()}),
+                        )
+                    elif not measure:
+                        probe["body_limit_last"] = _last_body_limit(ledger, peer)
+                    checks.append(peer_check(peer, probe, skew))
                 except HandoverError as err:
                     checks.append(
                         {"name": f"peer {peer.name}", "ok": False, "detail": surfaces.render_error(err, peer.name)}
@@ -1993,12 +2090,15 @@ class EngineBackend:
         return {**result, "stored": stored, "pending": ctxrecords.pending(ledger)}
 
     def grant_ctx(self, server: str) -> None:
+        """The operator's ctx consent as an ``mcp_allowlist`` entry through ``hostcompat.grant_mcp_server`` (W108,
+        K-5); ``CapabilityMissing`` with ``details.command`` when this host cannot write it."""
         grant = getattr(hostcompat, "grant_mcp_server", None)
         if not callable(grant):
             raise CapabilityMissing(
-                "This build cannot write the MCP allowlist itself. Run: hermes config set "
-                f"plugins.entries.ctx_handover.mcp_allowlist '[\"{server}\"]'",
+                "This build cannot write the MCP allowlist itself.",
                 capability="write mcp_allowlist",
+                reason="unavailable",
+                command=f"hermes config set plugins.entries.ctx_handover.mcp_allowlist '[\"{server}\"]'",
                 local=True,
             )
         grant(server)

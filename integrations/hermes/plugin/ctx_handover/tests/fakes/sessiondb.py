@@ -20,6 +20,12 @@ Row kinds the builder produces (DESIGN §6.8, §6.9):
 Timestamps come from the injected clock (strictly increasing, never moving the clock itself); session
 ids use the core's minting function with the clock's time. Message content is unique per builder, so the
 core's replay/display dedupe never folds two builder rows by accident.
+
+Session-wide templates (contract K-6): ``large_segment`` on a builder with ``templates`` (the ``make_session``
+fixture passes the session's ``tests.conftest.SegmentTemplates``) builds each shape once per test session into a
+template ``state.db`` — through exactly the core paths above, by a :meth:`SessionBuilder.twin` of the builder —
+and the template store copies that database into the test's empty one. This module stays free of SQL; the copy
+lives with the store. Ineligible calls build directly.
 """
 
 from __future__ import annotations
@@ -105,14 +111,41 @@ class SessionBuilder:
     #: ``agent/conversation_compression.py:1686-1689``; no pid namespace token ⇒ TTL-only reclaim).
     HOLDER_AGENT = "ctxh-test-builder"
 
-    def __init__(self, db: Any, *, clock: Callable[[], float] | None = None, tick: float = 0.001) -> None:
+    def __init__(
+        self,
+        db: Any,
+        *,
+        clock: Callable[[], float] | None = None,
+        tick: float = 0.001,
+        templates: Any = None,
+    ) -> None:
         if tick <= 0:
             raise ValueError("tick must be positive")
         self.db = db
         self.clock = clock
         self.tick = float(tick)
+        self.templates = templates
         self._last_ts: float | None = None
         self._seq = 0
+
+    # ── builder state (templates, contract K-6) ───────────────────────────────────────────────────
+
+    def counters(self) -> tuple[float | None, int]:
+        """``(last stamp, sequence)`` — everything a build changes on the builder besides the database."""
+        return self._last_ts, self._seq
+
+    def adopt_counters(self, last_ts: float | None, seq: int) -> None:
+        """Continue from ``counters()`` of another builder (after its rows were copied into this database)."""
+        self._last_ts, self._seq = last_ts, int(seq)
+
+    def twin(self, db: Any) -> SessionBuilder:
+        """A builder over ``db`` that produces exactly what this one would now: a clock frozen at this clock's
+        time (the builder never moves its clock), the same tick and counters, no templates."""
+        from ctx_handover.tests.fakes import FakeClock
+
+        twin = SessionBuilder(db, clock=FakeClock(self.now()), tick=self.tick)
+        twin.adopt_counters(*self.counters())
+        return twin
 
     # ── time, ids, content ────────────────────────────────────────────────────────────────────────
 
@@ -638,16 +671,37 @@ def large_segment(
     So ``archived = Σ appended + (generations - 1)`` summaries; all archived rows precede the live rows in
     storage order (the B′ precondition, DESIGN §6.8). ``archived == 0`` appends ``live`` plain rows without
     any compaction (e.g. the 12 000-small-rows case). ``create_kw`` goes to :meth:`SessionBuilder.create`.
+
+    With ``builder.templates`` set, an eligible call copies a session-wide template of the same shape instead of
+    building (``tests.conftest.SegmentTemplates``); the database and the builder end in the state a direct build
+    leaves.
     """
     if live < 1 or archived < 0 or generations < 1:
         raise ValueError("need live >= 1, archived >= 0, generations >= 1")
+    if archived and archived - (generations - 1) < generations:
+        raise ValueError(f"archived={archived} is too small for {generations} generations")
+    shape = {"live": live, "archived": archived, "size": size, "generations": generations}
+
+    def build(target: SessionBuilder) -> str:
+        return _build_large_segment(target, create_kw=create_kw, **shape)
+
+    templates = builder.templates
+    if templates is not None:
+        sid = templates.copy_into(builder, ("large_segment", *shape.values()), create_kw, build)
+        if sid is not None:
+            return sid
+    return build(builder)
+
+
+def _build_large_segment(
+    builder: SessionBuilder, *, live: int, archived: int, size: int, generations: int, create_kw: Mapping[str, Any]
+) -> str:
+    """The direct build of ``large_segment`` (every row through the core's write paths)."""
     sid = builder.create(**create_kw)
     if archived == 0:
         builder.append(sid, builder.plain_messages(live, size=size, label="live"))
         return sid
     appended = archived - (generations - 1)
-    if appended < generations:
-        raise ValueError(f"archived={archived} is too small for {generations} generations")
     for n in _split(appended, generations):
         builder.append(sid, builder.plain_messages(n, size=size, label="archived"))
         builder.compact_in_place(sid, keep_last=0, observe=False)

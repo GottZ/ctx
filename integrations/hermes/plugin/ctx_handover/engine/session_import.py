@@ -175,8 +175,13 @@ def map_model(
     ``override`` (a local ``--model``) wins; ``policy == "target_default"`` takes the main model; ``auto`` keeps
     the peer's model name when its provider is this host's main provider or a configured ``providers.<name>``
     entry and ``provider_usable`` says this host can serve it — the route is then this host's own (nothing for
-    the main provider, ``gateway_runtime = {"provider": name}`` for a named entry). Returns the fields and a
-    change record (``None`` when model and provider stay the same).
+    the main provider, ``gateway_runtime = {"provider": name}`` for a named entry).
+
+    Returns the fields and ``model_change`` in its one form (contract X04): ``None`` when model and provider
+    stay the same, else ``{"from": {"model", "provider"}, "to": {"model", "provider", "context_length"},
+    "reason": str, "offline_capable": bool}`` — ``offline_capable`` from :func:`offline_capable` on the
+    resulting route, ``context_length`` from :func:`context_length`. ``reason``: ``override`` |
+    ``target_default`` | ``provider_unusable``.
     """
     src_model, src_provider = source_route(row)
     main_model, main_provider = _target_main(target_config)
@@ -218,11 +223,43 @@ def map_model(
     change = None
     if (new_model, new_provider) != (src_model, src_provider):
         change = {
-            "old": {"model": src_model, "provider": src_provider},
-            "new": {"model": new_model, "provider": new_provider},
+            "from": {"model": src_model, "provider": src_provider},
+            "to": {
+                "model": new_model,
+                "provider": new_provider,
+                "context_length": context_length(fields["model_config"], new_model, target_config),
+            },
             "reason": reason,
+            "offline_capable": offline_capable(fields["model_config"], target_config),
         }
     return fields, change
+
+
+def _positive_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def context_length(model_config: dict | None, model: str | None, target_config: dict) -> int | None:
+    """The context length THIS host configures for ``model`` on the route ``model_config`` names (DESIGN §6.7
+    step 4): for a named provider entry (``gateway_runtime.provider``) its ``models.<model>.context_length``,
+    else the entry's ``context_length``; on the main route ``model.context_length`` when ``model`` is the main
+    model. ``None`` when nothing is configured — the core then resolves it from its model catalog.
+    """
+    cfg = model_config if isinstance(model_config, Mapping) else {}
+    runtime = cfg.get("gateway_runtime") if isinstance(cfg.get("gateway_runtime"), Mapping) else {}
+    named = target_config.get("providers") if isinstance(target_config, Mapping) else None
+    entry = named.get(runtime.get("provider")) if isinstance(named, Mapping) and runtime.get("provider") else None
+    if isinstance(entry, Mapping):
+        models = entry.get("models")
+        per_model = models.get(model) if isinstance(models, Mapping) and model else None
+        if isinstance(per_model, Mapping) and _positive_int(per_model.get("context_length")):
+            return _positive_int(per_model.get("context_length"))
+        return _positive_int(entry.get("context_length"))
+    main_model, _main_provider = _target_main(target_config)
+    section = target_config.get("model") if isinstance(target_config, Mapping) else None
+    if model and model == main_model and isinstance(section, Mapping):
+        return _positive_int(section.get("context_length"))
+    return None
 
 
 def _is_local_url(url: object) -> bool:
@@ -243,11 +280,13 @@ def _is_local_url(url: object) -> bool:
     return ip.is_loopback or ip.is_private or ip.is_link_local
 
 
-def offline_capable(model_config: dict, target_config: dict) -> bool:
+def offline_capable(model_config: dict | None, target_config: dict) -> bool:
     """Does the resulting route stay on this host or its LAN? (DESIGN §6.7 step 4; BX P7)
 
     The provider is the row's own route (``gateway_runtime.provider``) or this host's main provider; local
-    means a local provider kind or a loopback/RFC 1918 ``base_url`` in THIS host's configuration.
+    means a local provider kind or a loopback/RFC 1918 ``base_url`` in THIS host's configuration. The one
+    offline rule (contract X04): ``map_model`` fills ``model_change.offline_capable`` and the target's
+    ``CommitAck.offline_capable`` from it, with the tip segment's ``model_config`` of the import plan.
     """
     cfg = model_config if isinstance(model_config, Mapping) else {}
     runtime = cfg.get("gateway_runtime") if isinstance(cfg.get("gateway_runtime"), Mapping) else {}

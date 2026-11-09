@@ -8,6 +8,7 @@ the signatures written there, and check that the glue calls them as the contract
 from __future__ import annotations
 
 import inspect
+import os
 import sys
 import threading
 import time
@@ -67,6 +68,12 @@ class StubLedger(FakeOutboxLedger):
     def pairing_pending(self, now: float) -> bool:
         return False
 
+    def meta_get(self, key: str):
+        return getattr(self, "meta", {}).get(key)
+
+    def meta_set(self, key: str, value: str, conn=None) -> None:
+        self.__dict__.setdefault("meta", {})[key] = value
+
 
 class StubStore:
     def __init__(self) -> None:
@@ -108,7 +115,7 @@ class StubRunner:
     def status(self, job_id):
         return {"job": {"job_id": job_id, "state": "done"}} if job_id else {"jobs": []}
 
-    def create_offer(self, peer, session_ref, *, ctx, options=None, side_question=None):
+    def create_offer(self, peer, session_ref, *, ctx, options=None, side_question=None, include_secret=()):
         self.calls.append(("create_offer", locals()))
         return {"offer_id": "01OFFER", "expires_at": 1.0}
 
@@ -133,34 +140,128 @@ def backend(fake_host, tmp_path):
     return eb
 
 
-def test_gc_purges_job_artifacts(backend, fake_host):
-    """BO §6 #21, SEC 6.3: ``gc --job`` deletes that job's journal (ledger), blocks, staging, quarantine, report and
-    continuation log immediately; other jobs keep theirs; ``--all`` purges every job and empties the cache;
-    a job id that is not a plain ULID is never used as a path."""
-    data = fake_host.plugin_data
-    for job in (JOB, OTHER):
-        for rel in (
-            f"staging/{job}/git/x",
-            f"quarantine/{job}/objects/y",
-            f"reports/{job}.md",
-            f"logs/continue-{job}.log",
-            f"logs/continue-{job}.json",
-        ):
-            path = data / rel
+def test_gc_purges_job_artifacts(fake_host):
+    """★ BO §6 #21, SEC 6.3, R28: ``gc --job`` removes everything of a finished job — its blocks and object
+    manifests, staging with quarantine, report, continuation log, journal and job rows — through cluster
+    A's one implementation ``jobs.gc_job`` against the real profile runtime (``Ledger``, ``BlockStore``); another
+    job keeps all of its own. An unfinished job is refused with ``--job`` and kept by ``--all``; an id that is not a
+    ULID never reaches a path.
+
+    Red proof: mutant = ``EngineBackend.gc`` with layer 1's own steps (``purge_job`` before ``release_job``,
+    ``rmtree`` of staging) instead of ``jobs.gc_job`` → the job's object references are gone before the block store
+    looks them up: ``AssertionError: blocks of the finished job are still cached``.
+    """
+    from ctx_handover.engine import jobs
+    from ctx_handover.engine.errors import BadRequest, InvalidState
+    from ctx_handover.engine.ids import ulid
+    from ctx_handover.engine.model import Role
+
+    jobs._reset_for_tests()
+    prof = None
+    try:
+        plugin = Plugin(FakeCtx(host=fake_host))
+        backend = plugin.backend
+        rt = backend._started()
+        prof = rt
+        ledger, store = rt.ledger, rt.store
+        data = fake_host.plugin_data
+        # stored long before any job of this host began: older than the manifest grace (R28) and than the
+        # in-flight protection of cluster C (blocks touched since the oldest unfinished job began stay)
+        old = time.time() - 7200
+        made: dict[str, dict] = {}
+        for name, final in (("a", "done"), ("b", "done"), ("open", None)):
+            jid = ulid()
+            ledger.create_job(jid, Role.CONDUCTOR, Mode.PUSH, None, {"name": name})
+            epoch = ledger.claim_owner(jid, Role.CONDUCTOR, "test-owner", 60.0)
+            ledger.event(jid, Role.CONDUCTOR, "info", {"step": "pack"}, epoch=epoch)
+            if final:
+                ledger.transition(jid, Role.CONDUCTOR, "*", final, {"why": "test"}, epoch=epoch)
+                ledger.release_owner(jid, Role.CONDUCTOR, "test-owner", epoch)
+            m = store.put_bytes(os.urandom(1_200_000), "application/octet-stream")  # three distinct blocks
+            assert len(set(m.blocks)) == 3
+            ledger.job_object(jid, m.object_id)
+            for path in (store.manifest_path(m.object_id), *(store.block_path(b) for b in m.blocks)):
+                os.utime(path, (old, old))
+            paths = [
+                data / "staging" / jid / "git" / "pack",
+                data / "staging" / jid / "quarantine" / "w0" / "objects" / "x",
+                data / "reports" / f"{jid}.md",
+                data / "logs" / f"continue-{jid}.log",
+            ]
+            for path in paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x", encoding="utf-8")
+            made[name] = {"job": jid, "object": m.object_id, "blocks": list(m.blocks), "paths": paths}
+
+        def gone(name: str) -> None:
+            entry = made[name]
+            assert not any(store.has(b) for b in entry["blocks"]), "blocks of the finished job are still cached"
+            assert not store.manifest_path(entry["object"]).exists(), "manifest of the finished job is still there"
+            assert (
+                ledger.job(entry["job"], Role.CONDUCTOR) is None and ledger.events(entry["job"], Role.CONDUCTOR) == []
+            )
+            assert not (data / "staging" / entry["job"]).exists()
+            for path in entry["paths"]:
+                assert not path.exists(), path
+
+        def kept(name: str) -> None:
+            entry = made[name]
+            assert all(store.has(b) for b in entry["blocks"])  # cached within block_cache_days/_gb
+            if name == "open":  # a finished job's manifests may go with any cache pass (R28); a live job's never
+                assert store.manifest_path(entry["object"]).exists()
+            assert ledger.job(entry["job"], Role.CONDUCTOR) is not None
+            assert ledger.events(entry["job"], Role.CONDUCTOR)
+            assert all(path.exists() for path in entry["paths"]), name
+
+        result = backend.gc(job_id=made["a"]["job"], all_jobs=False)
+        gone("a")
+        kept("b")
+        kept("open")
+        assert result["jobs"] == 1 and result["freed_bytes"] >= 1_200_000
+        with pytest.raises(InvalidState):
+            backend.gc(job_id=made["open"]["job"], all_jobs=False)
+        kept("open")
+        with pytest.raises(BadRequest):
+            backend.gc(job_id="../" + made["b"]["job"], all_jobs=False)
+        kept("b")
+        result = backend.gc(job_id=None, all_jobs=True)
+        gone("b")
+        kept("open")
+        assert result["jobs"] == 1 and result["skipped"] == 1
+    finally:
+        if prof is not None and getattr(prof, "veto", None) is not None:
+            prof.veto.stop()
+        jobs._reset_for_tests()
+
+
+def test_gc_removes_the_continuation_files(fake_host):
+    """SEC 6.3: ``gc --job`` removes both files of the job's continuation that ``continuation.job_files`` names
+    (log and sidecar), through ``jobs.gc_job`` — the sidecar keeps pid and start time, which ``status`` would
+    otherwise report for a purged job."""
+    from ctx_handover.engine import jobs
+    from ctx_handover.engine.continuation import job_files
+    from ctx_handover.engine.ids import ulid
+    from ctx_handover.engine.model import Role
+
+    jobs._reset_for_tests()
+    rt = None
+    try:
+        backend = Plugin(FakeCtx(host=fake_host)).backend
+        rt = backend._started()
+        jid = ulid()
+        rt.ledger.create_job(jid, Role.TARGET, Mode.PUSH, None, {})
+        epoch = rt.ledger.claim_owner(jid, Role.TARGET, "test-owner", 60.0)
+        rt.ledger.transition(jid, Role.TARGET, "*", "committed", {}, epoch=epoch)
+        files = job_files(fake_host.plugin_data / "logs", jid)
+        for path in files:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("x", encoding="utf-8")
-    result = backend.gc(job_id=JOB, all_jobs=False)
-    assert result == {"freed_bytes": 7 * 1024**2, "jobs": 1}
-    assert backend.ledger_stub.purged == [JOB]
-    assert backend.store_stub.released == [(JOB, False)]
-    for rel in (f"staging/{JOB}", f"quarantine/{JOB}", f"reports/{JOB}.md", f"logs/continue-{JOB}.log"):
-        assert not (data / rel).exists(), rel
-    assert (data / f"staging/{OTHER}/git/x").exists() and (data / f"reports/{OTHER}.md").exists()
-    assert backend.store_stub.gc_calls[-1] == {"keep_days": 3, "max_bytes": 5 * 1024**3}
-    backend.gc(job_id=None, all_jobs=True)
-    assert backend.ledger_stub.purged == [JOB, JOB, OTHER]
-    assert not (data / f"staging/{OTHER}").exists()
-    assert backend.store_stub.gc_calls[-1] == {"keep_days": 0, "max_bytes": 0}
+        backend.gc(job_id=jid, all_jobs=False)
+        assert [p.name for p in files if p.exists()] == []
+    finally:
+        if rt is not None and getattr(rt, "veto", None) is not None:
+            rt.veto.stop()
+        jobs._reset_for_tests()
 
 
 def test_flush_outbox_needs_operator_consent(backend, fake_host):
@@ -180,16 +281,31 @@ def test_flush_outbox_needs_operator_consent(backend, fake_host):
     assert backend.flush_outbox(server.call_mcp) == {}
 
 
-def test_spawner_wiring_reads_live_settings(backend, fake_host):
-    """R10/R22: the continuation spawner of this gateway refuses remote requests unless ``allow_remote_continue``
-    and refuses everything while approvals are off — both read at spawn time."""
+def test_backend_spawner_only_reads_results(backend, fake_host):
+    """X21/R10/R22: the surfaces' ``Spawner`` only reads continuation results for ``status``; it never starts a
+    turn, whatever the settings say (the starting spawner is the target's, ``jobs.make_local_apis``)."""
+    import json as _json
+
+    from ctx_handover.engine.continuation import job_files
+    from ctx_handover.engine.errors import ContinueRefused
+
+    fake_host.config = {"plugins": {"entries": {"ctx_handover": {"settings": {"allow_remote_continue": True}}}}}
     spawner = backend._spawner()
-    assert spawner._allow_remote() is False and spawner._approvals_off() is False
-    fake_host.config = {
-        "approvals": {"mode": False},
-        "plugins": {"entries": {"ctx_handover": {"settings": {"allow_remote_continue": True}}}},
+    with pytest.raises(ContinueRefused):
+        spawner.spawn("20261109_141003_a1b2c3", "go", JOB, requested_by=None)
+    with pytest.raises(ContinueRefused):
+        spawner.spawn("20261109_141003_a1b2c3", "go", JOB, requested_by="laptop")
+    log, meta = job_files(fake_host.plugin_data / "logs", JOB)
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text(_json.dumps({"pid": 4242, "exit_code": 0, "started_at": 1.0}), encoding="utf-8")
+    assert spawner.result(JOB) == {
+        "started": True,
+        "pid": 4242,
+        "log": str(log),
+        "running": False,
+        "exit_code": 0,
+        "started_at": 1.0,
     }
-    assert spawner._allow_remote() is True and spawner._approvals_off() is True
     assert spawner.hermes_argv()[1:] == []  # default profile ⇒ no -p
 
 
@@ -225,9 +341,10 @@ def test_start_job_passes_contract_kwargs(backend):
     )
     call = runner.calls[-1][1]
     assert call["bundle_path"] == Path("/b/x.ctxh.tar") and call["side_question"] is len
-    backend.create_offer(peer, SessionRef(id="s"), Options(yes=True), side_question=None)
+    backend.create_offer(peer, SessionRef(id="s"), Options(yes=True), side_question=None, include_secret=("/a/.env",))
     offer = runner.calls[-1][1]
     assert offer["options"].yes is True and offer["ctx"] is backend._ctx
+    assert offer["include_secret"] == ("/a/.env",)  # X07: the explicit parameter, as for plan_sync
 
 
 def test_logs_redacted_and_session_state(backend):
@@ -352,6 +469,9 @@ def test_contract_signatures_used_by_the_glue():
     real = inspect.signature(jobs.JobRunner.plan_sync).parameters
     for name in ("session_ref", "calling_session", "session_key", "ctx", "confirm", "bundle_path", "include_secret"):
         assert name in real and name in inspect.signature(StubRunner.plan_sync).parameters
+    real_offer = inspect.signature(jobs.JobRunner.create_offer).parameters
+    for name in ("ctx", "options", "side_question", "include_secret"):  # contract X07 / W110
+        assert name in real_offer, name
     assert commands.LOCAL_ONLY_VERBS
 
 
@@ -393,7 +513,7 @@ def test_doctor_checks_wiring(backend, monkeypatch, fake_host):
     assert checks["data folder"]["ok"] is True
     assert checks["identity"]["ok"] is True and "0123456789abcdef" in checks["identity"]["detail"]
     assert "1 paired device(s) may dial in" in checks["inbound"]["detail"]
-    assert probes == [True]  # the proxy body limit is measured (DESIGN §14.1 doctor)
+    assert probes == [False]  # the body-limit measurement runs only with doctor --measure
     assert checks["peer server"]["ok"] is False and "refused the stored credential" in checks["peer server"]["detail"]
     assert "rejected the access credential" in checks["peer server"]["remedy"]
     assert "peer laptop" not in checks

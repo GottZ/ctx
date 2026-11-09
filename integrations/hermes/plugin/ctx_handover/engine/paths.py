@@ -80,7 +80,20 @@ def _has_control(text: str) -> bool:
     return any(unicodedata.category(ch) in {"Cc", "Cs"} for ch in text)
 
 
-def check_rel(rel: str, rules: PlatformRules) -> str:
+def _posix_name_char(ch: str) -> bool:
+    """A character ``allow_control`` admits on a POSIX target: a C0 control except NUL, DEL, or a
+    ``surrogateescape`` byte (U+DC80–U+DCFF, a non-UTF-8 byte of a file name)."""
+    code = ord(ch)
+    return 0 < code < 0x20 or code == 0x7F or 0xDC80 <= code <= 0xDCFF
+
+
+def _has_forbidden_control(text: str, allow_control: bool) -> bool:
+    if not allow_control:
+        return _has_control(text)
+    return any(unicodedata.category(ch) in {"Cc", "Cs"} and not _posix_name_char(ch) for ch in text)
+
+
+def check_rel(rel: str, rules: PlatformRules, *, allow_control: bool = False) -> str:
     """Validate a relative path from a manifest, plan or ref (DESIGN §10.5); return it or raise ``PolicyDenied``.
 
     Every target: non-empty, ``/``-separated, not absolute, no ``.``/``..``/empty components, no NUL or control
@@ -89,13 +102,20 @@ def check_rel(rel: str, rules: PlatformRules) -> str:
     Windows targets additionally: none of ``<>:"|?*\\``, no reserved device names (any extension), no trailing
     dot or space, ≤ 260 characters unless ``long_paths``. The accepted path is returned unchanged — every
     non-canonical spelling is rejected rather than rewritten.
+
+    ``allow_control`` (W095) is for names git or a file tree reproduces byte for byte on a POSIX target: C0
+    control characters except NUL, DEL and ``surrogateescape`` bytes (``os.fsdecode`` of non-UTF-8 names) are then
+    legal, and lengths count those bytes as one byte each. NUL, C1 controls (U+0080–U+009F) and every other
+    surrogate stay refused, and the flag has no effect on a Windows target (NTFS forbids control characters).
     """
     if not isinstance(rel, str) or rel == "":
         raise _deny(rel, "empty")
-    if _has_control(rel):
+    allow_control = bool(allow_control) and not rules.windows
+    if _has_forbidden_control(rel, allow_control):
         raise _deny(rel, "control_character")
+    errors = "surrogateescape" if allow_control else "strict"
     try:
-        encoded = rel.encode("utf-8")
+        encoded = rel.encode("utf-8", errors)
     except UnicodeEncodeError:
         raise _deny(rel, "encoding") from None
     if rel.startswith("/") or _WINDOWS_ABS_RE.match(rel) or rel.startswith("\\"):
@@ -105,7 +125,7 @@ def check_rel(rel: str, rules: PlatformRules) -> str:
     for part in rel.split("/"):
         if part in {"", ".", ".."}:
             raise _deny(rel, "dot_or_empty_component")
-        if len(part.encode("utf-8")) > MAX_COMPONENT_BYTES:
+        if len(part.encode("utf-8", errors)) > MAX_COMPONENT_BYTES:
             raise _deny(rel, "component_too_long")
         if _is_dotgit(part):
             raise _deny(rel, "dotgit")

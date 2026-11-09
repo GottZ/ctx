@@ -20,6 +20,10 @@ hints for the same reason.
 Suspected secrets (R25): an extra file the policy suspects (or could not check, no redactor) carries the exact reason
 element ``SUSPECTED_SECRET``; ``apply_choice(final, "yes")`` never confirms it and ``restrict_to_releasable`` never
 lets a counterpart confirm it. Only a local ``include_secret`` (``yes`` already in the plan) releases it.
+
+Plan items carry their facts in fields, not in reason texts (contract K-3): ``PlanItem.hermes_kind`` (session file
+kind), ``PlanItem.instruction_files`` (``(rel, sha256)`` of the instruction files inside the item) and
+``ResourcePlan.warnings`` (the busy probe's warnings). Reason texts are for people.
 """
 
 from __future__ import annotations
@@ -28,19 +32,21 @@ import fnmatch
 import hashlib
 import os
 import re
+import shutil
 import stat
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import collector, refine
+from . import collector, note, refine
 from .contracts import BusyReportLike
-from .errors import PolicyDenied
+from .errors import InsufficientStorage, PolicyDenied
 from .ignore import IgnoreMatcher
 from .jsonutil import doc_id, to_wire
 from .model import (
     Candidate,
     DestMode,
+    EnvFacts,
     FinalPlan,
     GitInfo,
     Include,
@@ -95,7 +101,14 @@ CHOICES = ("yes", "no_proposed")
 SUSPECTED_SECRET = "suspected_secret"  # noqa: S105 - reason marker, not a secret
 """Exact ``PlanItem.reasons`` element of an item the policy suspects to hold a secret, or could not check (R25,
 X05). ``apply_choice(final, "yes")`` turns such a proposal into ``no``."""
+UNVERIFIED = "unverified"
+"""Origin marker of a handover from a source this side cannot verify — an unsigned bundle, one signed by an unknown
+or revoked key, or the remote source of a pull (DESIGN §8.7 reason (g), SEC 4.3; a continuation refuses such an
+origin with this reason, R22). Surfaces import it with the reason codes (X03)."""
+REASON_CODES: tuple[str, ...] = tuple(CONFIRM_LETTERS)
+"""Every confirmation reason code, in letter order (a)–(g) (X03)."""
 MAX_REFUSED_IDS = 256
+MAX_WARNINGS = 32
 
 WHY_OUTSIDE_HOME = "outside home"
 WHY_SECRET = "secret"  # noqa: S105 - reason text, not a secret
@@ -117,8 +130,6 @@ _WHY_BY_REASON = {
     "suspected_secret": "suspected secret",
 }
 
-INSTRUCTION_PREFIX = "instruction file: "
-"""Reason entry of a plan item that carries an instruction file: ``"instruction file: <rel> sha256=<hex>"``."""
 
 CHAIN_NAMES = (".hermes.md", "HERMES.md", "AGENTS.override.md", "AGENTS.md", "agents.md")
 """Instruction files Hermes reads in every directory from the git root down to the cwd
@@ -130,6 +141,7 @@ CWD_NAMES = ("CLAUDE.md", "claude.md", ".cursorrules")
 MAX_INSTRUCTION_BYTES = 1024 * 1024
 MAX_REASONS = 32
 MAX_NOTES = 1500
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOOL_RE = re.compile(refine.TOOL_PATTERN)
 _ENV_RE = re.compile(refine.ENV_PATTERN)
 _RANK = {Weight.MENTION: 0, Weight.READ: 1, Weight.WRITE: 2}
@@ -156,9 +168,10 @@ class _Draft:
     rel_cwd: str | None = None
     size: int = 0
     item_id: str = ""
-    instructions: list[str] = field(default_factory=list)
+    instructions: list[tuple[str, str]] = field(default_factory=list)
     candidate: int | None = None
     denied: bool = False
+    hermes_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -316,7 +329,11 @@ class _Builder:
                 d.include = Include.PROPOSED
 
     def _evaluate_hermes(self, d: _Draft) -> None:
-        kind = collector.hermes_kind(d.reasons)
+        rejected = collector.rejected_reason(d.reasons)
+        if rejected is not None:  # refused by the session-file discovery (W040): named, never an item
+            self.deny(d, _WHY_BY_REASON.get(rejected, "hermes"))
+            return
+        kind = d.hermes_kind
         p = Path(d.path)
         try:
             st = os.lstat(p)
@@ -510,20 +527,21 @@ def _sha256_file(path: Path) -> str | None:
         return None
 
 
-def _scan_instructions(root: str, rel_cwd: str | None) -> list[str]:
-    """Instruction files Hermes would load for a cwd inside ``root`` (chain root → cwd, cwd-only names)."""
+def _scan_instructions(root: str, rel_cwd: str | None) -> list[tuple[str, str]]:
+    """``(rel, sha256)`` of the instruction files Hermes would load for a cwd inside ``root`` (chain root → cwd,
+    cwd-only names)."""
     base = Path(root)
     chain = [""]
     if rel_cwd:
         parts = [p for p in rel_cwd.split("/") if p and p not in {".", ".."}]
         for i in range(1, len(parts) + 1):
             chain.append("/".join(parts[:i]))
-    found: list[str] = []
+    found: list[tuple[str, str]] = []
 
     def add(rel: str) -> None:
         digest = _sha256_file(base / rel)
         if digest is not None:
-            found.append(f"{INSTRUCTION_PREFIX}{rel} sha256={digest}")
+            found.append((rel, digest))
 
     for directory in chain:
         for name in CHAIN_NAMES:
@@ -580,11 +598,13 @@ def _to_item(d: _Draft, suggest_dest: Callable[[str], str | None] | None) -> Pla
         role=d.role,
         origin=d.origin,
         include=d.include,
-        reasons=tuple(reasons + d.instructions),
+        reasons=tuple(reasons),
         size_estimate=int(d.size),
         git=d.git,
         suggested_dest=suggested,
         rel_cwd=d.rel_cwd,
+        hermes_kind=d.hermes_kind if d.kind is ItemKind.HERMES_FILE else None,
+        instruction_files=tuple(d.instructions),
     )
 
 
@@ -610,7 +630,27 @@ def _draft_from_candidate(idx: int, c: Candidate, options: Options) -> _Draft:
         reasons=reasons,
         rel_cwd=collector.rel_cwd(c.reasons) if role is ItemRole.PRIMARY else None,
         candidate=idx,
+        hermes_kind=collector.hermes_kind(c.reasons) if c.kind is ItemKind.HERMES_FILE else None,
     )
+
+
+def _warning_list(values: Iterable[object], redact: Callable[[str], str] | None = None) -> tuple[str, ...]:
+    """The busy probe's warnings for ``ResourcePlan.warnings`` (K-3, W072): one line each, redacted when a redactor
+    is given (they travel to the counterpart), de-duplicated, at most ``MAX_WARNINGS``."""
+    out: list[str] = []
+    for value in values or ():
+        if not isinstance(value, str):
+            continue
+        text = value
+        if redact is not None:
+            try:
+                text = redact(text)
+            except Exception:  # an unredactable warning is reduced to its prefix
+                text = text.split("(", 1)[0]
+        text = _clean(text, 300)
+        if text and text not in out:
+            out.append(text)
+    return tuple(out[:MAX_WARNINGS])
 
 
 def _names(values: Iterable[object], pattern: re.Pattern[str], cap: int = 32) -> list[str]:
@@ -734,6 +774,7 @@ def build_plan(
         env_vars_needed=tuple(_names(envs, _ENV_RE)),
         notes_for_target="\n".join(notes)[:MAX_NOTES],
         approx_tokens=int(approx_tokens),
+        warnings=_warning_list(getattr(busy, "warnings", ()), redact),
     )
 
 
@@ -760,7 +801,7 @@ def replan(
         PlanHints(),
         cfg,
         git_info or (lambda _root: None),
-        _Busy(plan.processes, plan.delegations, plan.cron),
+        _Busy(plan.processes, plan.delegations, plan.cron, plan.warnings),
         (),
         options,
         plan.approx_tokens,
@@ -786,6 +827,8 @@ def replan(
                 reasons=[*item.reasons, "found after planning"],
                 git=item.git,
                 size=item.size_estimate,
+                instructions=list(item.instruction_files),
+                hermes_kind=item.hermes_kind,
             )
         )
     _assign_ids(extra, taken)
@@ -1081,51 +1124,124 @@ def summarize(final: FinalPlan) -> dict:
     }
 
 
-def presend_summary(final: FinalPlan, *, withheld_stash: Sequence[str] = ()) -> dict:
-    """The summary every first progress message carries (DESIGN §8.7, SEC 5.8): items, total size, number of
-    excluded secrets, ``denied_tracked``, withheld stash entries (known after packing; additive keyword) and the
-    items outside the primary workspace."""
+PRESEND_KEYS = (
+    "items_count",
+    "total_bytes",
+    "excluded_secrets",
+    "denied_tracked",
+    "withheld_stash",
+    "outside_workspace",
+    "instruction_files",
+    "model",
+    "offline",
+)
+"""The keys of ``presend_summary`` the surfaces read (W125); ``item_list``, ``items`` and
+``extras_outside_workspace`` come on top."""
+
+
+def presend_summary(
+    final: FinalPlan, *, withheld_stash: Sequence[str] = (), instructions: Sequence[dict] | None = None
+) -> dict:
+    """The summary every first progress message carries (DESIGN §8.7, SEC 5.8, W125), keyed as the surfaces read
+    it (``PRESEND_KEYS``):
+
+    * ``items_count`` and ``total_bytes`` of the included items; ``item_list`` names each of them;
+    * ``excluded_secrets``: how many secrets stay behind (refusals for a secret, an ignored peer ``include_secret``);
+    * ``denied_tracked``: tracked files on the secrets list inside included repositories;
+    * ``withheld_stash``: stash entries the pack step withheld (known after packing; additive keyword);
+    * ``outside_workspace``: included items outside the primary workspace;
+    * ``instruction_files``: ``instructions`` when given (the target's ``instruction_files`` result, with
+      ``status``), else the instruction files of the included items as ``{"item_id", "rel", "sha256"}``;
+    * ``model`` (``model_text``) and ``offline`` (``offline_capable``) of the target model — both None when the
+      model stays (X04).
+
+    ``items`` and ``extras_outside_workspace`` are the layer-1 names of ``items_count`` and ``outside_workspace``,
+    kept with the same values for readers that have not moved yet."""
     included = _included(final)
+    outside = _outside_workspace(final)
+    if instructions is None:
+        listed = [
+            {"item_id": i.item_id, "rel": rel, "sha256": sha} for i in included for rel, sha in i.instruction_files
+        ]
+    else:
+        listed = [dict(e) for e in instructions if isinstance(e, dict)]
     return {
-        "items": len(included),
-        "item_list": [
-            {"item_id": i.item_id, "kind": i.kind.value, "path": i.source_path, "size": i.size_estimate}
-            for i in included
-        ],
+        "items_count": len(included),
         "total_bytes": sum(i.size_estimate for i in included),
         "excluded_secrets": sum(1 for n in final.plan.not_transferred if _is_secret_why(n.why)),
         "denied_tracked": _denied_tracked(final),
         "withheld_stash": [str(s) for s in withheld_stash],
-        "extras_outside_workspace": _outside_workspace(final),
+        "outside_workspace": outside,
+        "instruction_files": listed,
+        "model": model_text(final.model_change),
+        "offline": _model_offline(final.model_change),
+        "item_list": [
+            {"item_id": i.item_id, "kind": i.kind.value, "path": i.source_path, "size": i.size_estimate}
+            for i in included
+        ],
+        "items": len(included),
+        "extras_outside_workspace": list(outside),
     }
 
 
-def _model_offline(model_change: dict | None) -> bool | None:
+def _model_to(model_change: dict | None) -> dict | None:
+    """The ``to`` side of a ``model_change`` in the one form of contract X04, or None."""
     if not isinstance(model_change, dict):
         return None
-    for key in ("offline_capable", "offline"):
-        if isinstance(model_change.get(key), bool):
-            return model_change[key]
-    return None
+    to = model_change.get("to")
+    return to if isinstance(to, dict) else None
+
+
+def model_text(model_change: dict | None) -> str | None:
+    """``"<model> (<provider>)"`` of the target model of a ``model_change`` (X04 form); None when the model stays.
+
+    Reads only ``model_change["to"]["model"|"provider"]``."""
+    to = _model_to(model_change)
+    if to is None:
+        return None
+    name = _clean(to.get("model"), 128) if isinstance(to.get("model"), str) else ""
+    provider = _clean(to.get("provider"), 64) if isinstance(to.get("provider"), str) else ""
+    if name and provider:
+        return f"{name} ({provider})"
+    return name or provider or None
+
+
+def _model_offline(model_change: dict | None) -> bool | None:
+    """``model_change["offline_capable"]`` (X04: the one offline flag, computed by the target with
+    ``session_import.offline_capable``); None when the model stays or the flag is not a boolean."""
+    if not isinstance(model_change, dict):
+        return None
+    flag = model_change.get("offline_capable")
+    return flag if isinstance(flag, bool) else None
 
 
 def _model_context(model_change: dict | None) -> int | None:
-    if not isinstance(model_change, dict):
-        return None
-    to = model_change.get("to") if isinstance(model_change.get("to"), dict) else {}
-    for value in (to.get("context_length"), model_change.get("context_length")):
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return value
+    """``model_change["to"]["context_length"]`` when it is a positive integer (X04), else None."""
+    to = _model_to(model_change)
+    value = to.get("context_length") if to is not None else None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
     return None
 
 
 def confirmation_reasons(
-    final: FinalPlan, options: Options, source_offline: bool, *, instructions: Sequence[dict] = ()
+    final: FinalPlan,
+    options: Options,
+    source_offline: bool,
+    *,
+    instructions: Sequence[dict] = (),
+    cfg: PolicyConfig | None = None,
 ) -> list[str]:
     """Why the user must confirm before anything is locked (DESIGN §14.1 (a)–(g)), in that order.
 
     ``source_offline``: the source's model route was local. ``instructions`` (additive): the result of
-    ``instruction_files`` when they arrive from an unverified bundle or a remote source (reason g)."""
+    ``instruction_files`` when they arrive from an unverified bundle or a remote source (reason g).
+
+    Reason (d) comes only from ``cfg.include_secret`` (X07): ``cfg`` (additive) is the source's own
+    ``PolicyConfig`` — the conductor passes it when the source is local (push, export); its ``include_secret`` holds
+    exactly the paths given by a local ``--include-secret``. ``options.hints.include_secret`` is never read: hints may
+    come from the counterpart and never release a secret (R18). Reason (e) reads ``final.model_change`` only in the
+    form of contract X04."""
     reasons = []
     if any(i.include is Include.PROPOSED for i in final.plan.items):
         reasons.append(CONFIRM_PROPOSED)
@@ -1133,11 +1249,15 @@ def confirmation_reasons(
         reasons.append(CONFIRM_CONFLICT)
     if sum(i.size_estimate for i in _included(final)) > options.confirm_above_bytes:
         reasons.append(CONFIRM_LARGE)
-    if options.hints.include_secret:
+    if cfg is not None and cfg.include_secret:
         reasons.append(CONFIRM_SECRET)
+    changed = isinstance(final.model_change, dict)
     offline = _model_offline(final.model_change)
     context = _model_context(final.model_change)
-    if (source_offline and offline is False) or (context is not None and final.plan.approx_tokens > context):
+    # a changed model without a boolean offline flag counts as not offline-capable: (e) asks rather than stays silent
+    if (source_offline and changed and offline is not True) or (
+        context is not None and final.plan.approx_tokens > context
+    ):
         reasons.append(CONFIRM_MODEL)
     if _outside_workspace(final) or _denied_tracked(final):
         reasons.append(CONFIRM_OUTSIDE)
@@ -1149,10 +1269,10 @@ def confirmation_reasons(
 def instruction_files(items: Sequence[PlanItem], dest_lookup: Callable[[str], str | None]) -> list[dict]:
     """Transferred instruction files that are new or different at the destination (SEC 4.3).
 
-    Reads the ``instruction file:`` reasons the source recorded (relative path + sha256) for every included item;
+    Reads ``PlanItem.instruction_files`` (``(rel, sha256)`` the source recorded, K-3) of every included item;
     ``dest_lookup(item_id)`` names the item's destination directory readable on this host (None ⇒ unknown, listed
     as ``new``). An identical file at the destination is not listed. Relative paths from a peer are checked with
-    ``paths.check_rel`` before they are joined."""
+    ``paths.check_rel`` before they are joined; an entry with a malformed path or digest is skipped."""
     out: list[dict] = []
     for item in items:
         if item.include is not Include.YES:
@@ -1161,11 +1281,11 @@ def instruction_files(items: Sequence[PlanItem], dest_lookup: Callable[[str], st
             dest = dest_lookup(item.item_id)
         except Exception:
             dest = None
-        for reason in item.reasons:
-            if not isinstance(reason, str) or not reason.startswith(INSTRUCTION_PREFIX):
+        for entry in item.instruction_files:
+            if not (isinstance(entry, (tuple, list)) and len(entry) == 2):
                 continue
-            rel, sep, digest = reason[len(INSTRUCTION_PREFIX) :].rpartition(" sha256=")
-            if not sep:
+            rel, digest = entry
+            if not (isinstance(rel, str) and isinstance(digest, str) and _SHA256_RE.fullmatch(digest)):
                 continue
             try:
                 check_rel(rel, _POSIX_RULES)
@@ -1189,12 +1309,27 @@ def note_parts_from(
     source_kept: bool = False,
     paused: Sequence[str] = (),
     instruction: Sequence[dict] = (),
+    pack_time: float | None = None,
+    warnings: Sequence[str] = (),
+    title: str | None = None,
     extra: dict | None = None,
 ) -> dict:
-    """The ``note_parts`` document the source sends with ``prepare`` (consumed by ``note.compose``): lists only,
-    no free text (the model/agent notes travel as the separate untrusted text)."""
+    """The ``note_parts`` document the source sends with ``prepare`` (consumed by ``note.compose``; X16).
+
+    Lists and flags only — the model and agent notes travel as the separate untrusted text. Every key is one
+    ``note.compose`` renders (``note.NOTE_PART_KEYS``): ``source_kept`` says the session stays active on the source
+    (an export with ``--keep`` or the import of such a copy; O3, W070); ``warnings`` are the plan's warnings
+    (``ResourcePlan.warnings``) followed by ``warnings``; ``pack_time`` (seconds since the epoch) and ``title``
+    (the session title, shown only inside the note's data block) appear when given.
+
+    ``extra`` adds or extends keys of the same set: a list extends the list already there (without duplicates),
+    any other value fills a key that is missing or empty. A key ``note.compose`` does not render raises
+    ``ValueError`` — a fact nobody shows must not travel as if it did (no silent swallowing)."""
     resource = plan.plan if isinstance(plan, FinalPlan) else plan
     final = plan if isinstance(plan, FinalPlan) else FinalPlan("", plan, (), 0, {}, None)
+    unknown = note.unknown_note_parts(extra or {})
+    if unknown:
+        raise ValueError("note parts that note.compose does not render: " + ", ".join(unknown))
     parts: dict = {
         "not_transferred": [{"path": n.path, "why": n.why} for n in resource.not_transferred],
         "processes": [dict(p) for p in resource.processes],
@@ -1208,10 +1343,68 @@ def note_parts_from(
         "env_vars_needed": list(resource.env_vars_needed),
         "source_kept": bool(source_kept),
         "instruction_files": [dict(i) for i in instruction],
+        "warnings": list(dict.fromkeys([*resource.warnings, *(str(w) for w in warnings)]))[:MAX_WARNINGS],
     }
-    if extra:
-        parts.update({k: v for k, v in extra.items() if k not in parts})
+    if isinstance(pack_time, (int, float)) and not isinstance(pack_time, bool) and pack_time > 0:
+        parts["pack_time"] = float(pack_time)
+    if isinstance(title, str) and title.strip():
+        parts["title"] = title[:512]
+    for key, value in (extra or {}).items():
+        have = parts.get(key)
+        if isinstance(have, list) and isinstance(value, (list, tuple)):
+            parts[key] = have + [v for v in value if v not in have]
+        elif not have:
+            parts[key] = value
     return parts
+
+
+def bundle_negotiate(
+    plan: ResourcePlan,
+    facts: EnvFacts | None = None,
+    *,
+    out_dir: str | os.PathLike | None = None,
+    disk_usage: Callable[[str], object] = shutil.disk_usage,
+) -> FinalPlan:
+    """The negotiation of an export bundle (``bundle.BundleTarget(negotiate=…)``, W062, X23).
+
+    A bundle decides no destination — the importing target does in prepare without changing the plan id (X02) — so
+    every item that is not ``no`` gets a ``fresh`` decision with reason ``bundle``, its ``suggested_dest`` (or
+    ``""``) and its size as ``need_bytes``. Proposals get one too: after a ``yes`` (``apply_choice``) a confirmed
+    proposal must find its decision; a dropped one becomes ``skip`` there. ``need_bytes`` is the sum. With
+    ``out_dir`` (the bundle's directory) the free space of its nearest existing ancestor is recorded and a shortfall
+    raises ``InsufficientStorage`` before anything is written; nothing is created. ``facts`` (the bundle's declared
+    target facts) complete the ``(plan, facts)`` signature the bundle target calls and decide nothing;
+    ``model_change`` is None (the importer maps the model, R11). The result carries its ``plan_id``."""
+    decisions = tuple(
+        TargetDecision(
+            item_id=i.item_id,
+            dest=i.suggested_dest or "",
+            mode=DestMode.FRESH,
+            reason="bundle",
+            need_bytes=max(0, int(i.size_estimate)),
+        )
+        for i in plan.items
+        if i.include is not Include.NO
+    )
+    need = sum(d.need_bytes for d in decisions)
+    free: dict[str, int] = {}
+    if out_dir is not None:
+        where = os.path.abspath(os.fspath(out_dir))
+        probe = where
+        while not os.path.isdir(probe) and os.path.dirname(probe) != probe:
+            probe = os.path.dirname(probe)
+        available = int(disk_usage(probe).free)
+        free[where] = available
+        if need > available:
+            raise InsufficientStorage(
+                f"The bundle needs {need / 1024**3:.1f} GiB free in {where}, has {available / 1024**3:.1f} GiB. "
+                "Nothing was written.",
+                need_bytes=need,
+                free_bytes=available,
+                path=where,
+            )
+    final = FinalPlan(plan_id="", plan=plan, decisions=decisions, need_bytes=need, free_bytes=free, model_change=None)
+    return with_plan_id(final)
 
 
 def decision_index(decisions: Sequence[TargetDecision]) -> dict[str, TargetDecision]:

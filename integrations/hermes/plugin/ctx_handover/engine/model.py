@@ -6,13 +6,28 @@ Every value that crosses a module or process boundary is one of these frozen dat
 ignored, missing keys take the defaults, wrong types raise ``BadRequest`` with the field path).
 
 Additive rule (INTERFACES §6): fields are only ever added, and only with a default, so an older peer's
-document still decodes.
+document still decodes. A field added after the v1 wire form is declared with ``added_field(default)``: the codec
+leaves it out of the wire form while it holds its default, so every document that does not use it — and every id
+hashed over such a document (plan ids, object ids) — keeps the bytes it had before the field existed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum, auto
+from types import MappingProxyType
+from typing import Any
+
+WIRE_OMIT_DEFAULT = "ctxh.wire_omit_default"
+"""Field-metadata key read by ``jsonutil``: the field is omitted from the wire form while it equals its default."""
+
+
+def added_field(default: Any) -> Any:
+    """A dataclass field added after the v1 wire form (contract K-3): ``default`` is its value when absent, and
+    the codec omits it from ``to_wire``/``canonical_bytes`` while it equals ``default``. ``default`` must be
+    immutable (``None``, ``""``, ``()``, a number, …)."""
+    return field(default=default, metadata=MappingProxyType({WIRE_OMIT_DEFAULT: True}))
+
 
 # ---------------------------------------------------------------------------------------------------------
 # Enums (values are the lower-case member names; they are wire values and never change)
@@ -422,6 +437,8 @@ class EnvFacts:
     git_version: str | None
     git_lfs: bool
     capabilities: frozenset[str] = frozenset()
+    python_version: str = added_field("")
+    """``python3 --version`` of this side (DESIGN §11.1 ``python_toolchain``; diagnostics only, W075)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -501,6 +518,11 @@ class PlanItem:
     git: GitInfo | None = None
     suggested_dest: str | None = None
     rel_cwd: str | None = None
+    hermes_kind: str | None = added_field(None)
+    """Kind of a ``hermes_file`` item, one of ``policy.HERMES_FILE_KINDS`` (DESIGN §6.11, W003); the target places
+    the file by kind and basename only (hardening #7). None for every other item."""
+    instruction_files: tuple[tuple[str, str], ...] = added_field(())
+    """``(rel, sha256)`` of the agent instruction files inside the item (DESIGN §8.7, SEC 4.3, W073)."""
 
 
 @dataclass(frozen=True)
@@ -537,6 +559,8 @@ class ResourcePlan:
     env_vars_needed: tuple[str, ...]
     notes_for_target: str
     approx_tokens: int
+    warnings: tuple[str, ...] = added_field(())
+    """Warning codes of the source side while planning (busy probe, resume guard; W072)."""
 
 
 @dataclass(frozen=True)

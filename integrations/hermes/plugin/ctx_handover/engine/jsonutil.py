@@ -3,13 +3,20 @@
 Canonical JSON (DESIGN §5.3): UTF-8, sorted keys, ``,``/``:`` separators, no NaN/Infinity. Document and
 object ids are the sha256 of these bytes (``doc_id``).
 
+Object manifests (DESIGN §4.6, §5.2; contract K-1): ``object_manifest`` splits bytes into blocks and builds the
+``ctxh.object`` document, ``object_id`` is the sha256 of that document's canonical bytes, and
+``check_object_manifest`` is the one reader-side check (block size exactly ``OBJECT_BLOCK_SIZE``, block count from
+the size, id recomputed). Every module that writes or reads objects delegates here.
+
 ``loads_bounded`` rejects oversized input and nesting deeper than ``max_depth`` *before* ``json.loads`` runs,
 and refuses duplicate keys and non-finite numbers.
 
 Codec: ``to_wire`` turns a dataclass into plain JSON data (enums → value, tuples → lists, frozensets → sorted
 lists, nested dataclasses → dicts); ``from_wire(cls, data)`` rebuilds it from the type hints: unknown keys are
 ignored, missing keys take the field default, wrong types raise ``BadRequest`` with ``details["field"]`` set to
-the field path (``plan.items[2].kind``).
+the field path (``plan.items[2].kind``). A field declared with ``model.added_field`` (added after the v1 wire form,
+contract K-3) is left out of ``to_wire``/``canonical_bytes`` while it equals its default, so documents and ids that
+never set it keep their bytes.
 """
 
 from __future__ import annotations
@@ -23,10 +30,11 @@ import math
 import re
 import types
 import typing
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import PurePath
 
-from .errors import BadRequest
+from .errors import BadRequest, BlockCorrupt
+from .model import WIRE_OMIT_DEFAULT
 
 DEFAULT_MAX_DEPTH = 64
 
@@ -47,7 +55,13 @@ def _encode(obj: object) -> object:
             raise ValueError("non-finite float is not JSON")
         return obj
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return {f.name: _encode(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+        out = {}
+        for f in dataclasses.fields(obj):
+            value = getattr(obj, f.name)
+            if f.metadata.get(WIRE_OMIT_DEFAULT) and value == f.default:
+                continue  # added field at its default: the v1 bytes stay (contract K-3)
+            out[f.name] = _encode(value)
+        return out
     if isinstance(obj, Mapping):
         out = {}
         for key, value in obj.items():
@@ -82,6 +96,111 @@ def sha256_hex(data: bytes) -> str:
 def doc_id(obj: object) -> str:
     """Id of a document or manifest: sha256 of its canonical bytes (DESIGN §4.6, §5.3)."""
     return sha256_hex(canonical_bytes(obj))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Object manifests (DESIGN §4.6, §5.2) — the one rule for object ids (contract K-1)
+# ---------------------------------------------------------------------------------------------------------
+
+OBJECT_BLOCK_SIZE = 524_288
+"""Block size of every object (DESIGN §4.6): writers always use it and readers accept no other value."""
+OBJECT_MAX_BYTES = 30 * 1024**3
+"""Objects above ≈ 30 GiB are refused (DESIGN §4.6); ``max_total_gb`` caps far below."""
+OBJECT_MEDIA_MAX = 200
+"""Longest accepted ``media`` string of a manifest."""
+OBJECT_KIND = "ctxh.object"
+
+_MANIFEST_KEYS = frozenset({"kind", "v", "sha256", "size", "block_size", "blocks", "media"})
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def object_manifest_doc(sha256: str, size: int, block_size: int, blocks: Iterable[str], media: str) -> dict:
+    """The canonical ``ctxh.object`` manifest document (DESIGN §5.2); ``object_id`` is not part of it.
+
+    Streaming writers that hash their blocks themselves build their document here, so the document shape exists
+    once. ``object_id(object_manifest_doc(...))`` is the object id.
+    """
+    return {
+        "kind": OBJECT_KIND,
+        "v": 1,
+        "sha256": sha256,
+        "size": int(size),
+        "block_size": int(block_size),
+        "blocks": list(blocks),
+        "media": media,
+    }
+
+
+def object_manifest(
+    data: bytes, media: str, block_size: int = OBJECT_BLOCK_SIZE
+) -> tuple[dict, list[tuple[str, bytes]]]:
+    """Split ``data`` into blocks and return ``(manifest document, [(block_id, raw), …])`` (DESIGN §4.6, §5.2).
+
+    Blocks are consecutive slices of ``block_size`` bytes, the last one shorter; ``block_id = sha256(raw)``. An
+    empty object has no blocks (``size`` 0, ``blocks`` ``[]``). ``block_size`` is part of the signature only:
+    readers accept nothing but ``OBJECT_BLOCK_SIZE`` (``check_object_manifest``), so any other value raises
+    ``ValueError`` instead of producing a manifest nobody can read.
+    """
+    if isinstance(block_size, bool) or block_size != OBJECT_BLOCK_SIZE:
+        raise ValueError(f"objects are written with block size {OBJECT_BLOCK_SIZE}, not {block_size!r}")
+    if not isinstance(media, str):
+        raise TypeError("media must be a str")
+    view = memoryview(data).cast("B")
+    blocks: list[tuple[str, bytes]] = []
+    for start in range(0, len(view), block_size):
+        raw = bytes(view[start : start + block_size])
+        blocks.append((sha256_hex(raw), raw))
+    doc = object_manifest_doc(
+        hashlib.sha256(view).hexdigest(), len(view), block_size, [bid for bid, _ in blocks], media
+    )
+    return doc, blocks
+
+
+def object_id(manifest_doc: dict) -> str:
+    """Object id of a manifest document: ``sha256_hex(canonical_bytes(manifest_doc))`` (DESIGN §4.6)."""
+    return sha256_hex(canonical_bytes(manifest_doc))
+
+
+def check_object_manifest(doc: object, object_id: str) -> None:
+    """Reader-side check of a ``ctxh.object`` manifest document against the id it was asked for by.
+
+    Raises ``BadRequest`` (``details.field``) when ``object_id`` is not 64 lower-case hex or the document is not a
+    v1 manifest: exactly the keys of ``object_manifest_doc``, ``sha256`` 64 hex, ``block_size`` exactly
+    ``OBJECT_BLOCK_SIZE``, ``0 <= size <= OBJECT_MAX_BYTES``, ``ceil(size / block_size)`` block ids of 64 hex,
+    ``media`` a string of at most ``OBJECT_MEDIA_MAX`` characters. Raises ``BlockCorrupt`` (a hash mismatch,
+    DESIGN §4.4) when the recomputed ``object_id`` differs from ``object_id``. Returns None when the manifest
+    holds; block contents and the content hash are checked by whoever reads the blocks.
+    """
+    if not isinstance(object_id, str) or not _HEX64.fullmatch(object_id):
+        raise BadRequest("malformed object id", field="object_id")
+    if not isinstance(doc, dict) or set(doc) != _MANIFEST_KEYS:
+        raise BadRequest("not a ctxh.object manifest", field="manifest")
+    if doc["kind"] != OBJECT_KIND:
+        raise BadRequest("not a ctxh.object manifest", field="manifest.kind")
+    version = doc["v"]
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        raise BadRequest("unsupported manifest version", field="manifest.v")
+    sha = doc["sha256"]
+    if not isinstance(sha, str) or not _HEX64.fullmatch(sha):
+        raise BadRequest("malformed content hash", field="manifest.sha256")
+    block_size = doc["block_size"]
+    if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size != OBJECT_BLOCK_SIZE:
+        raise BadRequest("unsupported block size", field="manifest.block_size", block_size=str(block_size)[:32])
+    size = doc["size"]
+    if not isinstance(size, int) or isinstance(size, bool) or not 0 <= size <= OBJECT_MAX_BYTES:
+        raise BadRequest("object size out of range", field="manifest.size")
+    blocks = doc["blocks"]
+    expected = -(-size // OBJECT_BLOCK_SIZE)
+    if not isinstance(blocks, (list, tuple)) or len(blocks) != expected:
+        raise BadRequest("block count does not match the size", field="manifest.blocks", expected=expected)
+    for i, block_id in enumerate(blocks):
+        if not isinstance(block_id, str) or not _HEX64.fullmatch(block_id):
+            raise BadRequest("malformed block id", field=f"manifest.blocks[{i}]")
+    media = doc["media"]
+    if not isinstance(media, str) or len(media) > OBJECT_MEDIA_MAX:
+        raise BadRequest("invalid media type", field="manifest.media")
+    if sha256_hex(canonical_bytes(doc)) != object_id:
+        raise BlockCorrupt("object manifest does not match its id", object=object_id)
 
 
 # ---------------------------------------------------------------------------------------------------------

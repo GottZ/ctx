@@ -218,14 +218,15 @@ def test_restrict_remote_yes_on_suspected_proposal_refused(lay):
 
 
 def test_confirmation_reads_target_model_change_form(lay):
-    """Reason (e) and the note read ``FinalPlan.model_change`` in the form the target delivers:
-    ``{"from": {model, provider}, "to": {model, provider, context_length}, "changed", "offline_capable", "reason"}``.
+    """Reason (e) and the note read ``FinalPlan.model_change`` only in the form of contract X04:
+    ``{"from": {model, provider}, "to": {model, provider, context_length}, "reason", "offline_capable"}``; a model
+    that stays is ``None``.
 
     Mutant: ``plan._model_context`` reads only a top-level ``context_length``."""
     w0 = _own(lay).items[0]
     base = replace(_own(lay), items=(w0,), approx_tokens=1000)
     cloud = final_plan(base, model_change=model_change(offline_capable=False))
-    assert set(cloud.model_change) == {"from", "to", "changed", "offline_capable", "reason"}
+    assert set(cloud.model_change) == {"from", "to", "reason", "offline_capable"}
     assert plan.confirmation_reasons(cloud, Options(), True) == [plan.CONFIRM_MODEL]
     assert plan.confirmation_reasons(cloud, Options(), False) == []
     window = final_plan(
@@ -234,8 +235,8 @@ def test_confirmation_reads_target_model_change_form(lay):
     assert plan.confirmation_reasons(window, Options(), True) == [plan.CONFIRM_MODEL]
     fits = final_plan(base, model_change=model_change(offline_capable=True, context_length=131072))
     assert plan.confirmation_reasons(fits, Options(), True) == []
-    kept = final_plan(base, model_change=model_change(changed=False, offline_capable=None, context_length=None))
-    assert plan.confirmation_reasons(kept, Options(), False) == []
+    kept = final_plan(base, model_change=None)
+    assert plan.confirmation_reasons(kept, Options(), True) == []
     assert plan.summarize(window)["model_change"] == window.model_change
 
     text, _report = _compose(
@@ -250,6 +251,6 @@ def test_confirmation_reads_target_model_change_form(lay):
     )
     assert "Model: gpt-x (openrouter) → qwen3 (llamacpp, 64k context) — works offline: no" in text
     unknown, _ = _compose(
-        model_change=model_change(to_model="qwen3", to_provider="llamacpp", context_length=None, offline_capable=None)
+        model_change=model_change(to_model="qwen3", to_provider="llamacpp", context_length=None, offline_capable=True)
     )
-    assert "→ qwen3 (llamacpp, 64k context) — works offline: yes" in unknown
+    assert "→ qwen3 (llamacpp) — works offline: yes" in unknown

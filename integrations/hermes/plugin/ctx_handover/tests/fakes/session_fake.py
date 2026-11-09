@@ -125,6 +125,7 @@ class FakeSession:
             prepare=self.prepare,
             retire=self.retire,
             release=self.release,
+            suspend=self.suspend,
             reclaim=self.reclaim,
             mark_exported=self.mark_exported,
             veto_texts=self.veto_texts,
@@ -323,14 +324,25 @@ class FakeSession:
         self._enter("clear_side_state", new_tip=new_tip)
 
     def map_model(self, row, policy, override, target_config, provider_usable):
+        """Keeps the row's model unless ``override`` names another; the change record has the one form of
+        contract X04 (``None`` when the model stays)."""
         self._enter("map_model", policy=policy)
-        return {
-            "model": override or row.get("model"),
+        model = override or row.get("model")
+        fields = {
+            "model": model,
             "model_config": None,
             "billing_provider": None,
             "billing_base_url": None,
             "billing_mode": None,
-        }, None
+        }
+        if model == row.get("model"):
+            return fields, None
+        return fields, {
+            "from": {"model": row.get("model"), "provider": None},
+            "to": {"model": model, "provider": None, "context_length": None},
+            "reason": "override",
+            "offline_capable": False,
+        }
 
     def offline_capable(self, model_config, target_config):
         self._enter("offline_capable")
@@ -404,6 +416,17 @@ class FakeSession:
         if s is not None:
             s.update(hidden=False, archived=False, ended=None, title=s.pop("saved_title", s["title"]))
         self.leases.pop(info.root_id, None)
+
+    def suspend(self, db, ledger, info, holder, job_id):
+        """Idle participant: leases given up before prepare (``lock.suspend``); a no-op on ``suspended``."""
+        self._enter("suspend", job_id=job_id)
+        h = self.handovers.get(job_id)
+        if h is None:
+            raise NotFound("no source handover for this job", job_id=job_id)
+        if h["state"] == SourceState.SUSPENDED.value:
+            return
+        self._set(job_id, ("locking", "locked"), SourceState.SUSPENDED.value)
+        self.leases.pop(h["root_id"], None)
 
     def reclaim(self, db, ledger, session_id, *, force):
         self._enter("reclaim", session_id=session_id, force=force)

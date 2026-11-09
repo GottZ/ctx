@@ -25,7 +25,12 @@ def _data(**over) -> dict:
         "title": "My Work",
         "at": 1_762_696_983.0,
         "path_map": [PathMapEntry(source="/srv/app", target="/home/u/hermes-handover/app", kind="workspace")],
-        "model_change": {"from": "gpt-x", "from_provider": "openrouter", "to": "qwen3", "to_provider": "llamacpp"},
+        "model_change": {  # contract X04, the form B's map_model produces and A puts into the FinalPlan
+            "from": {"model": "gpt-x", "provider": "openrouter"},
+            "to": {"model": "qwen3", "provider": "llamacpp", "context_length": 32768},
+            "reason": "provider_not_configured_here",
+            "offline_capable": True,
+        },
         "plugin_version": "0.1.0",
     }
     data.update(over)
@@ -86,8 +91,7 @@ def test_ctxrecords_record_shape_and_checkpoint_head(tmp_path):
         ROOT_A,
         ROOT_B,
         "/srv/app → /home/u/hermes-handover/app",
-        "gpt-x",
-        "qwen3",
+        "- Model: gpt-x (openrouter) → qwen3 (llamacpp) (provider_not_configured_here); works offline: yes",
         "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000",
     ):
         assert needle in content, needle

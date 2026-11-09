@@ -19,13 +19,15 @@ from __future__ import annotations
 
 import contextvars
 import importlib.metadata
+import json
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from .errors import CapabilityMissing, EnvNotWritable, HandoverError
+from .errors import BadRequest, CapabilityMissing, EnvNotWritable, HandoverError
 from .model import HermesPaths, HostFacts
 
 PLUGIN_ID = "ctx_handover"
@@ -246,6 +248,71 @@ def load_config() -> dict:
         raise _missing("hermes_cli.config.load_config") from exc
     config = _load()
     return config if isinstance(config, dict) else {}
+
+
+MCP_SERVER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+"""Names ``grant_mcp_server`` accepts (an ``mcp_servers`` key; no wildcard, no path, no whitespace)."""
+
+
+def _mcp_allowlist_of(config: object) -> list[str]:
+    """``plugins.entries.ctx_handover.mcp_allowlist`` as the core reads it (``hermes_cli/plugins_context.py:365-373``:
+    a list, anything else counts as empty)."""
+    node: object = config
+    for key in ("plugins", "entries", PLUGIN_ID, "mcp_allowlist"):
+        if not isinstance(node, dict) or key not in node:
+            return []
+        node = node[key]
+    return [str(item) for item in node] if isinstance(node, list) else []
+
+
+def grant_mcp_server(server: str) -> None:
+    """Add ``server`` to ``plugins.entries.ctx_handover.mcp_allowlist`` — the operator grant ``ctx.call_mcp`` checks
+    (``hermes_cli/plugins_context.py:322-328``) — and prove the write by reading the merged config back (W108,
+    DESIGN §13 "written with the public config writer").
+
+    Call it only from an operator command after the operator agreed (``/handover setup`` on the local surface or
+    the CLI, R24); the grant is the operator's, the plugin only writes it down. Writer:
+    ``hermes_cli.config.save_config(partial, preserve_keys=…, merge_existing=True)`` — module ``hermes_cli.config``
+    is public in ``plugin_api.json``, and the core's own ``save_plugin_setting`` ends in the same call
+    (``hermes_cli/plugins_state.py:90``; same signature at the floor v0.22.6). Idempotent: a listed server is not
+    written again; other entries of the list and the rest of ``config.yaml`` stay.
+
+    ``BadRequest`` when ``server`` does not match ``MCP_SERVER_RE``. ``CapabilityMissing`` (``details.reason``
+    ``unavailable`` | ``managed`` | ``write_failed`` | ``not_written``, ``details.command`` = the ``hermes config
+    set`` line the operator can run instead) when the writer is missing, the install is package-managed, the
+    write raises, or the read-back does not list the server (an administrator-managed key is stripped on save).
+    """
+    if not isinstance(server, str) or not MCP_SERVER_RE.fullmatch(server):
+        raise BadRequest("invalid MCP server name", field="server")
+    key = f"plugins.entries.{PLUGIN_ID}.mcp_allowlist"
+
+    def refused(reason: str, message: str, **details) -> CapabilityMissing:
+        try:
+            listed = _mcp_allowlist_of(load_config())
+        except Exception:
+            listed = []
+        wanted = listed if server in listed else [*listed, server]
+        command = f"hermes config set {key} '{json.dumps(wanted)}'"
+        return CapabilityMissing(message, capability="mcp_allowlist", reason=reason, command=command, **details)
+
+    try:
+        from hermes_cli.config import is_managed, save_config
+    except ImportError as exc:
+        raise refused("unavailable", "Hermes hermes_cli.config.save_config is not available") from exc
+    current = _mcp_allowlist_of(load_config())
+    if server in current:
+        return
+    if is_managed():
+        raise refused("managed", "this Hermes installation is package-managed; the MCP allowlist was not written")
+    partial = {"plugins": {"entries": {PLUGIN_ID: {"mcp_allowlist": [*current, server]}}}}
+    try:
+        save_config(partial, preserve_keys={("plugins", "entries", PLUGIN_ID, "mcp_allowlist")}, merge_existing=True)
+    except Exception as exc:
+        raise refused(
+            "write_failed", f"the MCP allowlist could not be written: {type(exc).__name__}", error=str(exc)[:300]
+        ) from exc
+    if server not in _mcp_allowlist_of(load_config()):
+        raise refused("not_written", f"{key} does not list {server!r} after the write (managed key or refused save)")
 
 
 def read_secret(name: str) -> str | None:

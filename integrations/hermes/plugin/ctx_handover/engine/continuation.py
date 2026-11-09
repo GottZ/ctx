@@ -70,6 +70,13 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
+def job_files(log_dir: Path, job_id: str) -> tuple[Path, Path]:
+    """The two files a job's continuation leaves in ``log_dir``: the child's log and the sidecar with pid, start
+    and exit code (``continue-<job>.log``, ``continue-<job>.json``). The one place that names them — ``gc`` removes
+    exactly these (SEC 6.3)."""
+    return Path(log_dir) / f"continue-{job_id}.log", Path(log_dir) / f"continue-{job_id}.json"
+
+
 def _clean_prompt(prompt: str | None) -> str:
     text = DEFAULT_PROMPT if prompt is None or not str(prompt).strip() else str(prompt)
     text = _CONTROL_RE.sub("", text.replace("\r\n", "\n"))
@@ -142,7 +149,7 @@ class Spawner:
 
     # -- paths ----------------------------------------------------------------------------------------
     def _paths(self, job_id: str) -> tuple[Path, Path]:
-        return self._log_dir / f"continue-{job_id}.log", self._log_dir / f"continue-{job_id}.json"
+        return job_files(self._log_dir, job_id)
 
     def _ensure_log_dir(self) -> None:
         self._log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -195,7 +202,7 @@ class Spawner:
                 "The handover came from an unverified source, so no turn is started automatically.",
                 reason="unverified",
             )
-        if requested_by and not self._allow_remote():
+        if requested_by and self._allow_remote() is not True:  # only a real boolean True opens it (no "false" text)
             raise ContinueRefused(
                 "This gateway does not allow a paired device to start a turn (allow_remote_continue is off).",
                 reason="not_allowed",
