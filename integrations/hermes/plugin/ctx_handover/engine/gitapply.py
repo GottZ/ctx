@@ -35,6 +35,7 @@ import stat
 import sys
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,8 @@ from .errors import (
 )
 from .gitops import (
     FSCK_ERROR_IDS,
+    LFS_MAX_POINTER,
+    LFS_MIN_POINTER,
     RECEIVED,
     Git,
     GitCommandError,
@@ -64,6 +67,7 @@ from .gitops import (
     in_progress_op,
     is_sha,
     iter_object,
+    lfs_pointer_blobs,
     open_partial,
     read_json_object,
     undo_failed,
@@ -613,10 +617,20 @@ def path_issues(paths: Sequence[str], rules: PlatformRules) -> list[tuple[str, s
     return issues
 
 
-def _tree_budget(git: Git, qdir: Path, tree: str, *, max_entries: int, max_bytes: int | None, what: str) -> int:
+def _tree_budget(
+    git: Git,
+    qdir: Path,
+    tree: str,
+    *,
+    max_entries: int,
+    max_bytes: int | None,
+    what: str,
+    pointers: Counter[str] | None = None,
+) -> int:
     """Blob bytes of ``tree`` in the quarantine, refused as soon as the listing passes ``max_entries`` entries
     or ``max_bytes`` bytes — git stops there instead of listing everything a few KiB of pack can describe
-    (SEC 2.5; M23 for the index tree, receiver side of M24)."""
+    (SEC 2.5; M23 for the index tree, receiver side of M24). ``pointers`` (given): counts the entries per blob of a
+    size an LFS pointer can have (``_lfs_bytes``, R3-M3)."""
     total = entries = 0
     records = git.iter_z(
         [*_bare(qdir), "ls-tree", "-r", "-l", "-z", "--full-tree", "--end-of-options", tree], cwd=None, spec=RECEIVED
@@ -635,9 +649,12 @@ def _tree_budget(git: Git, qdir: Path, tree: str, *, max_entries: int, max_bytes
                 )
             meta = rec.partition(b"\t")[0].split()
             if len(meta) == 4 and meta[1] == b"blob" and meta[3].isdigit():
-                total += int(meta[3])
+                size = int(meta[3])
+                total += size
                 if max_bytes is not None and total > max_bytes:
                     raise PayloadTooLarge(f"the {what} is larger than allowed", bytes=total, max_bytes=max_bytes)
+                if pointers is not None and LFS_MIN_POINTER <= size <= LFS_MAX_POINTER:
+                    pointers[meta[2].decode("ascii")] += 1
     finally:
         records.close()
     return total
@@ -648,14 +665,92 @@ RoomCheck = Callable[[int, Path, int, str], None]
 transaction (``materialize``, H11); raises ``PayloadTooLarge`` | ``InsufficientStorage``."""
 
 
+def _lfs_sizes(store: BlockSource, lfs_manifest: str) -> dict[str, int]:
+    """``{oid: size}`` of the valid entries of an item's LFS manifest (the ones ``place_lfs`` would place)."""
+    doc = read_json_object(store, lfs_manifest)
+    if not isinstance(doc, dict) or doc.get("kind") != "ctxh.tree" or not isinstance(doc.get("entries"), list):
+        raise BadRequest("invalid LFS manifest", field="lfs_objects")
+    sizes: dict[str, int] = {}
+    for entry in doc["entries"]:
+        oid = entry.get("path") if isinstance(entry, dict) else None
+        size = entry.get("size") if isinstance(entry, dict) else None
+        obj = entry.get("object") if isinstance(entry, dict) else None
+        if isinstance(oid, str) and _OID_RE.fullmatch(oid) and isinstance(size, int) and size >= 0 and is_sha(obj):
+            sizes[oid] = max(size, sizes.get(oid, 0))
+    return sizes
+
+
+def _lfs_bytes(
+    git: Git,
+    qdir: Path,
+    item: _Item,
+    store: BlockSource,
+    pointers: Counter[str],
+    local_objects: Path | None,
+) -> int:
+    """What the item's LFS content writes beyond its pointer blobs (R3-M3), counted before anything of it is written:
+    every shipped object ``place_lfs`` places (sizes from the pack item's LFS manifest; one the destination's
+    ``local_objects`` already holds is not placed again) and — only when git-lfs exists here, i.e. when the plugin's
+    ``git lfs checkout`` writes them — the object once per pointer file of the received work tree whose object is
+    shipped or already lies in ``local_objects``. Many pointers to one object thus count as many copies (as H11).
+    Pointers to objects nobody holds stay pointers and count as their blob only."""
+    if item.lfs is None:
+        return 0
+    sizes = _lfs_sizes(store, item.lfs)
+
+    def local_size(oid: str) -> int | None:
+        if local_objects is None:
+            return None
+        try:
+            st = os.stat(local_objects / oid[:2] / oid[2:4] / oid)
+        except (OSError, ValueError):
+            return None
+        return st.st_size if stat.S_ISREG(st.st_mode) else None
+
+    total = sum(size for oid, size in sizes.items() if local_size(oid) is None)
+    if pointers and shutil.which("git-lfs"):
+        for blob, (oid, _declared) in lfs_pointer_blobs(git, _bare(qdir), None, RECEIVED, pointers).items():
+            size = sizes.get(oid)
+            if size is None:
+                size = local_size(oid)
+            if size is not None:
+                total += size * pointers[blob]
+    return total
+
+
 def _precheck(
-    git: Git, qdir: Path, item: _Item, dest_for_disk: Path, cfg: PolicyConfig, room: RoomCheck | None = None
+    git: Git,
+    qdir: Path,
+    item: _Item,
+    dest_for_disk: Path,
+    cfg: PolicyConfig,
+    room: RoomCheck | None = None,
+    *,
+    store: BlockSource | None = None,
+    local_lfs: Path | None = None,
 ) -> None:
+    """Size, entry and free-space checks of a received work tree before anything of it is written: its blob bytes
+    plus its LFS content (``_lfs_bytes``, R3-M3 — needs ``store``; ``local_lfs`` is the destination's own LFS object
+    store in update/return mode) against ``max_total_bytes``, × 1.1 against the free space, then the job's ``room``."""
+    pointers: Counter[str] | None = Counter() if item.lfs is not None and store is not None else None
     total = _tree_budget(
-        git, qdir, item.worktree_tree, max_entries=cfg.max_files, max_bytes=cfg.max_total_bytes, what="work tree"
+        git,
+        qdir,
+        item.worktree_tree,
+        max_entries=cfg.max_files,
+        max_bytes=cfg.max_total_bytes,
+        what="work tree",
+        pointers=pointers,
     )
     if item.index_tree != item.worktree_tree:  # I becomes the index file: its entries are capped like W's (M23)
         _tree_budget(git, qdir, item.index_tree, max_entries=cfg.max_files, max_bytes=None, what="index")
+    if pointers is not None:
+        assert store is not None  # noqa: S101 - pointers are counted only with a store
+        total += _lfs_bytes(git, qdir, item, store, pointers, local_lfs)
+        if total > cfg.max_total_bytes:
+            raise PayloadTooLarge(
+                "the work tree with its LFS content is larger than allowed", bytes=total, max_bytes=cfg.max_total_bytes
+            )
     probe = dest_for_disk
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -900,7 +995,7 @@ def prepare_fresh(
         git.run(["init", "-q", "--template=", f"--object-format={item.fmt}", str(partial)], cwd=None, spec=RECEIVED)
         q = Path(qdir) if qdir is not None else partial / ".git" / "ctxh-quarantine"
         quarantine_and_verify(git, store, item_pack, q, alternates=alternates, cancelled=cancelled)
-        _precheck(git, q, item, partial, cfg, room)
+        _precheck(git, q, item, partial, cfg, room, store=store)
         paths = _paths_of(git, q, item.worktree_tree)
         issues = path_issues(paths, rules)
         found = collisions(paths, rules) if rules.case_insensitive else []
@@ -1041,8 +1136,13 @@ def _common_checks(
     cfg: PolicyConfig,
     rules: PlatformRules | None,
     room: RoomCheck | None = None,
+    *,
+    store: BlockSource | None = None,
+    common: Path | None = None,
 ) -> tuple[list[str], list[tuple[str, str]]]:
-    _precheck(git, q, item, dest, cfg, room)
+    _precheck(
+        git, q, item, dest, cfg, room, store=store, local_lfs=common / "lfs" / "objects" if common is not None else None
+    )
     rules = rules or cfg.platform_rules()
     paths = _paths_of(git, q, item.worktree_tree)
     issues = path_issues(paths, rules)
@@ -1122,7 +1222,7 @@ def prepare_update(
         target_branch = item.head_ref
         if target_branch is not None and target_branch in skipped:
             raise ConflictError("the HEAD branch diverged at the destination", kind="diverged", ref=target_branch)
-        _, found = _common_checks(git, q, item, dest, cfg, rules, room)
+        _, found = _common_checks(git, q, item, dest, cfg, rules, room, store=store, common=common)
         ci = (rules or cfg.platform_rules()).case_insensitive
         added = _added(git, q, h0, item.worktree_tree)
         _refuse_obstructions(git, dest, h0, added, case_insensitive=ci)
@@ -1226,7 +1326,7 @@ def prepare_return(
         planned, skipped, old = _plan_refs(
             git, q, item, current, head_ref=head_ref, head_old_allowed=out_state.head or None
         )
-        _, found = _common_checks(git, q, item, dest, cfg, rules, room)
+        _, found = _common_checks(git, q, item, dest, cfg, rules, room, store=store, common=common)
         ci = (rules or cfg.platform_rules()).case_insensitive
         alt = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(_out_objects(Path(tmp)))}
         added = _added(git, q, out_state.worktree_tree, item.worktree_tree, env=alt)
@@ -1366,9 +1466,25 @@ def _post_state(
     return (now.index_tree, now.worktree_tree) == (item.index_tree, item.worktree_tree)
 
 
+def _added_on_disk(repo: Path, added: Sequence[str]) -> bool:
+    """Does any path the forward step adds hold a file, link or other non-directory? PREPARE proved them free
+    (``obstructions``, B2), so one that holds something was written since — whatever ignore rule hides it."""
+    root = os.fsencode(repo)
+    for rel in added:
+        try:
+            if not stat.S_ISDIR(os.lstat(os.path.join(root, os.fsencode(rel))).st_mode):
+                return True
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    return False
+
+
 def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path, filters: Sequence[str] = ()) -> bool:
     """True when nothing of ``commit`` has touched the repository yet (the preconditions PREPARE recorded).
-    ``filters`` as in ``_post_state``."""
+    ``filters`` as in ``_post_state``. Besides refs and HEAD: no added path holds anything (``_added_on_disk``), the
+    stash is as deep as at PREPARE, and update mode counts untracked files without the user's global ignore file —
+    that file belongs to the precondition (R2-M4), here a received file it hides must not read as "untouched"
+    (R3-M1)."""
     current = _current_refs(git, repo)
     if any(current.get(name) != old for name, old in state.old_refs.items()):
         return False
@@ -1377,8 +1493,10 @@ def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path, filters: S
     h_now, ref_now = head_info(git, repo)
     if ref_now != state.head_ref_before:
         return False
+    if _added_on_disk(repo, state.added_paths) or _stash_depth(git, repo) != state.stash_before:
+        return False
     if state.mode is DestMode.UPDATE:
-        clean, _ = GitProbe(git, profile="received").status_clean(str(repo))
+        clean, _ = GitProbe(git, profile="received").status_clean(str(repo), user_excludes=False)
         return clean and h_now == state.h0
     assert state.out_state is not None  # noqa: S101 - return states carry it
     now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, tmp, filter_names=filters)

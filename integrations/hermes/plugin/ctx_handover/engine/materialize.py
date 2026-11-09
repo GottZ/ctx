@@ -1260,10 +1260,12 @@ class PackedItem:
     warnings: tuple[str, ...] = ()
 
 
-_LEFT_BEHIND = frozenset({"secret", "symlink"})
+_LEFT_BEHIND = frozenset({"secret", "hermes", "symlink"})
 """Reasons a tree entry goes into the pack item's ``excluded`` list — the one the conductor reports as left behind
-(report, note, status): secrets, and links the policy keeps out of the tree with the links through them (L3-F27).
-Everything else the scan leaves out (ignored, special, unreadable …) is listed as ``skipped``."""
+(report, note, status): secrets (also a linked file the bounded identity walk could not verify, R3-M2), Hermes'
+own files and hard links to its credential stores (R3-L2), and links the policy keeps out of the tree with the links
+through them (L3-F27). Everything else the scan leaves out (ignored, special, unreadable …) is listed as
+``skipped``."""
 
 
 def _listed(entries: Sequence[NotTransferred], what: str, warnings: list[str]) -> list[dict]:
@@ -1308,9 +1310,9 @@ def pack_plan_item(
       ``basis_candidates`` (the target's ``git_have``), item from ``gitpack.pack_item``: ``lfs_objects``,
       ``case_collisions``, ``ntfs_invalid``; ``state`` = the outgoing git state (R4).
     * ``file_tree`` and ``extra_dir`` — ``filetree.scan`` (ignore rules incl. ``extra_ignore``, the policy) and
-      ``pack_tree``; one ``file_tree`` item with ``manifest``, ``entries``, ``bytes``, ``excluded`` (secrets, links
-      left out: ``_LEFT_BEHIND``), ``skipped``, ``case_collisions``, ``ntfs_invalid``; ``state`` =
-      ``{"tree": fingerprint}``.
+      ``pack_tree``; one ``file_tree`` item with ``manifest``, ``entries``, ``bytes``, ``excluded`` (secrets,
+      Hermes files, links left out: ``_LEFT_BEHIND``), ``skipped``, ``case_collisions``, ``ntfs_invalid``;
+      ``state`` = ``{"tree": fingerprint}``.
     * ``extra_file`` — the policy again (``check_source_file``, explicit, no link following), then
       ``filetree.pack_file`` (modes ``100644``/``100755``).
     * ``hermes_file`` — kind from ``PlanItem.hermes_kind``, the session-file checks of planning again (known kind,

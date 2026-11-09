@@ -27,7 +27,9 @@ on case-insensitive filesystems, case-folded. No check reads a file before the n
 file with more than one link is compared by identity ``(st_dev, st_ino)`` with the credential files the policy knows
 (``$HOME``'s secrets stores and denied names, the Hermes credential stores; L9): a hard link to one is refused like a
 symlink to it. The walk that learns those identities runs once per scan, only when a linked file shows up, and stops
-after ``LINKED_SCAN_MAX`` entries; other accounts' homes are not walked.
+after ``LINKED_SCAN_MAX`` entries; when it stopped before it had looked at everything, a linked file it does not know
+is refused as well (``secret``, or ``hermes`` while a Hermes place was left unread; R3-M2). Other accounts' homes are
+not walked.
 
 ``PolicyConfig`` describes the host where the checks run: ``case_insensitive`` is its filesystem's behaviour,
 ``target_os`` the OS whose naming rules apply to paths written here.
@@ -41,6 +43,7 @@ import os
 import re
 import stat
 import unicodedata
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath
@@ -813,9 +816,10 @@ _REAL_MEMO_MAX = 65536
 _RESOLVE_BY_PARENT = os.name == "posix"
 
 LINKED_SCAN_MAX = 4096
-"""Directory entries looked at per scan to learn the identities of the known credential files (hard links, L9). The
-small credential stores come first, browser profiles last; a credential file beyond the bound is not compared (the
-README names this limit)."""
+"""Directory entries (and fixed places) looked at per scan to learn the identities of the known credential files (hard
+links, L9). The credential files at fixed places come first, the directories breadth first — every place's top level
+before anything deeper — and browser profiles last. A walk the bound stopped is incomplete: a linked file it does not
+know is refused (R3-M2; the README names this limit)."""
 _LINKED_DEPTH = 8
 _BROWSER_DENY_DIRS = (
     ".mozilla",
@@ -824,19 +828,32 @@ _BROWSER_DENY_DIRS = (
     "Library/Cookies",
     "Library/Application Support/Google/Chrome",
 )
-"""``SOURCE_DENY_DIRS`` entries that hold browser profiles (many files): walked after every other credential place."""
+"""``SOURCE_DENY_DIRS`` entries that hold browser profiles (many files): queued after every other credential place."""
+
+
+class _Listing(NamedTuple):
+    """One directory the identity walk still has to list: ``reason`` of its credential place, ``depth`` how many
+    levels below it are still walked, ``names`` True when only files with a denied name count (the top of the home,
+    ``~/.config``)."""
+
+    path: Path
+    reason: str
+    depth: int
+    names: bool = False
 
 
 class _IdentityWalk:
     """Collects ``(st_dev, st_ino) → reason`` of the regular files with more than one link at the credential places a
     policy knows (``_credential_identities``); bounded by ``LINKED_SCAN_MAX`` entries. Only files with
-    ``st_nlink > 1`` can be the other name of a hard link, so only those are kept."""
+    ``st_nlink > 1`` can be the other name of a hard link, so only those are kept. ``unread`` holds the reasons of the
+    places the bound kept it from reading in full (R3-M2): empty means the walk saw everything."""
 
-    __slots__ = ("budget", "found")
+    __slots__ = ("budget", "found", "unread")
 
     def __init__(self) -> None:
         self.budget = LINKED_SCAN_MAX
         self.found: dict[tuple[int, int], str] = {}
+        self.unread: set[str] = set()
 
     def note(self, st: os.stat_result, reason: str) -> None:
         if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
@@ -844,22 +861,27 @@ class _IdentityWalk:
             if self.found.get(key) != "hermes":
                 self.found[key] = reason
 
-    def place(self, path: Path, reason: str, *, defer: list[tuple[Path, str]] | None = None) -> None:
-        """A credential place: a file is noted, a directory walked (or kept in ``defer`` for later). A link at the
-        place is followed: its target is the credential."""
+    def spend(self, reason: str) -> bool:
+        """One entry of the bound; False — and ``reason`` remembered as not read in full — once it is used up."""
         if self.budget <= 0:
+            self.unread.add(reason)
+            return False
+        self.budget -= 1
+        return True
+
+    def place(self, path: Path, reason: str, queue: deque[_Listing]) -> None:
+        """A credential place: a file is noted, a directory queued for the walk. A link at the place is followed: its
+        target is the credential."""
+        if not self.spend(reason):
             return
         try:
             st = os.stat(path)
         except (OSError, ValueError):
             return
-        self.budget -= 1
-        if not stat.S_ISDIR(st.st_mode):
-            self.note(st, reason)
-        elif defer is not None:
-            defer.append((path, reason))
+        if stat.S_ISDIR(st.st_mode):
+            queue.append(_Listing(path, reason, _LINKED_DEPTH))
         else:
-            self.walk(path, reason)
+            self.note(st, reason)
 
     def entries(self, directory: Path) -> list[os.DirEntry]:
         try:
@@ -868,78 +890,90 @@ class _IdentityWalk:
         except (OSError, ValueError):
             return []
 
-    def walk(self, top: Path, reason: str) -> None:
-        stack = [(top, 0)]
-        while stack and self.budget > 0:
-            directory, depth = stack.pop()
-            for entry in self.entries(directory):
-                if self.budget <= 0:
-                    return
-                self.budget -= 1
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        if depth < _LINKED_DEPTH:
-                            stack.append((Path(entry.path), depth + 1))
-                        continue
-                    self.note(entry.stat(follow_symlinks=True), reason)
-                except OSError:
-                    continue
-
-    def named(self, directory: Path, depth: int) -> None:
-        """Files with a denied name (``SOURCE_DENY_NAMES``) directly in ``directory`` and, with ``depth`` 1, one folder
-        below it."""
-        for entry in self.entries(directory):
-            if self.budget <= 0:
+    def run(self, queue: deque[_Listing]) -> None:
+        """Breadth first over the queued directories: what a listing finds below itself goes to the end of the queue,
+        so the top level of every place is read before anything deeper. Stops when the bound is used up; the reasons
+        of what was left (the rest of the listing, every queued directory, a directory deeper than ``_LINKED_DEPTH``
+        below a store) go to ``unread``."""
+        while queue:
+            job = queue.popleft()
+            if not self._list(job, queue):
+                self.unread.update(left.reason for left in queue)
                 return
-            self.budget -= 1
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    if depth > 0:
-                        self.named(Path(entry.path), depth - 1)
-                elif _name_denied(entry.name):
-                    self.note(entry.stat(follow_symlinks=True), "secret")
-            except OSError:
-                continue
+
+    def _list(self, job: _Listing, queue: deque[_Listing]) -> bool:
+        """List ``job`` (lazily: a large directory is not read past the bound); False when the bound stopped it."""
+        if self.budget <= 0:
+            self.unread.add(job.reason)
+            return False
+        try:
+            with os.scandir(job.path) as it:
+                for entry in it:
+                    if not self.spend(job.reason):
+                        return False
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if job.depth > 0:
+                                queue.append(_Listing(Path(entry.path), job.reason, job.depth - 1, job.names))
+                            elif not job.names:  # deeper than _LINKED_DEPTH below a store: not read either
+                                self.unread.add(job.reason)
+                        elif not job.names or _name_denied(entry.name):
+                            self.note(entry.stat(follow_symlinks=True), job.reason)
+                    except OSError:
+                        continue
+        except (OSError, ValueError):
+            pass
+        return True
 
 
-def _credential_identities(cfg: PolicyConfig, resolve: Callable[[str], str]) -> dict[tuple[int, int], str]:
-    """``(st_dev, st_ino) → "secret" | "hermes"`` of the credential files this policy knows that have more than one
-    link (L9, SEC 5.3): in ``$HOME`` the ``SOURCE_DENY_DIRS`` stores and the files with a denied name at the top level
-    and one folder below ``~/.config`` (``secret``); the ``HERMES_CREDENTIAL_PATHS`` of the active Hermes home, the
-    Hermes root and every profile below it (``hermes``). Order: small stores, names, Hermes files, Hermes directories,
-    browser profiles — so the bound (``LINKED_SCAN_MAX``) cuts the large places first. Other accounts' homes are not
-    looked at (a named limit)."""
+class _Identities(NamedTuple):
+    """What ``_credential_identities`` learnt: ``found`` maps ``(st_dev, st_ino)`` to ``"secret" | "hermes"``;
+    ``unknown`` is the verdict for a linked file not in ``found`` — None when the walk saw every place, ``"secret"``
+    when the bound stopped it after every Hermes place was read in full, ``"hermes"`` while one was not (it may be a
+    Hermes credential: never released, R19)."""
+
+    found: dict[tuple[int, int], str]
+    unknown: str | None
+
+
+def _credential_identities(cfg: PolicyConfig, resolve: Callable[[str], str]) -> _Identities:
+    """The identities of the credential files this policy knows that have more than one link (L9, SEC 5.3): the
+    ``HERMES_CREDENTIAL_PATHS`` of the active Hermes home, the Hermes root and every profile below it (``hermes``);
+    in ``$HOME`` the files with a denied name at the top level and one folder below ``~/.config`` and the
+    ``SOURCE_DENY_DIRS`` stores (``secret``). Order (R3-M2): the fixed places first (Hermes' credential paths, the
+    stores' own entries, the names at the top of the home and of ``~/.config``), then the directories breadth first,
+    Hermes' before the home's, browser profiles queued last — so the files a credential lives in are read before the
+    caches that fill a store, and the bound (``LINKED_SCAN_MAX``) cuts the deep and large places. Other accounts'
+    homes are not looked at (a named limit)."""
     w = _IdentityWalk()
-    homes = list(dict.fromkeys(Path(resolve(str(h))) for h in (cfg.home,)))
-    for home in homes:
-        for spec in SOURCE_DENY_DIRS:
-            if spec not in _BROWSER_DENY_DIRS:
-                w.place(home.joinpath(*spec.split("/")), "secret")
-    for home in homes:
-        w.named(home, 0)
-        w.named(home / ".config", 1)
+    home = Path(resolve(str(cfg.home)))
     bases: dict[Path, None] = {}
     for base in (cfg.hermes_home, cfg.hermes_root):
         bases[Path(resolve(str(base)))] = None
     for profile in w.entries(Path(resolve(str(cfg.hermes_root))) / "profiles"):
-        if w.budget <= 0:
+        if not w.spend("hermes"):
             break
-        w.budget -= 1
         try:
             if profile.is_dir(follow_symlinks=True):
                 bases[Path(resolve(profile.path))] = None
         except OSError:
             continue
-    deferred: list[tuple[Path, str]] = []
+    queue: deque[_Listing] = deque()
     for base in bases:
         for spec in HERMES_CREDENTIAL_PATHS:
-            w.place(base.joinpath(*spec.split("/")), "hermes", defer=deferred)
-    for directory, reason in deferred:
-        w.walk(directory, reason)
-    for home in homes:
-        for spec in _BROWSER_DENY_DIRS:
-            w.place(home.joinpath(*spec.split("/")), "secret")
-    return w.found
+            w.place(base.joinpath(*spec.split("/")), "hermes", queue)
+    stores: deque[_Listing] = deque()
+    for spec in SOURCE_DENY_DIRS:
+        if spec not in _BROWSER_DENY_DIRS:
+            w.place(home.joinpath(*spec.split("/")), "secret", stores)
+    queue.appendleft(_Listing(home / ".config", "secret", 1, names=True))
+    queue.appendleft(_Listing(home, "secret", 0, names=True))
+    queue.extend(stores)
+    for spec in _BROWSER_DENY_DIRS:
+        w.place(home.joinpath(*spec.split("/")), "secret", queue)
+    w.run(queue)
+    unknown = "hermes" if "hermes" in w.unread else ("secret" if w.unread else None)
+    return _Identities(w.found, unknown)
 
 
 class SourceCheckCache:
@@ -972,7 +1006,7 @@ class SourceCheckCache:
         self._clear()
 
     def _clear(self) -> None:
-        self._linked: dict[tuple[int, int], str] | None = None
+        self._linked: _Identities | None = None
         self._protected: tuple[tuple[str, ...], ...] | None = None
         self._credential: tuple[tuple[str, ...], ...] | None = None
         self._locations: tuple[tuple[str, ...] | None, ...] | None = None
@@ -1050,11 +1084,16 @@ class SourceCheckCache:
 
     def _linked_reason(self, st: os.stat_result) -> str | None:
         """``"secret"``/``"hermes"`` when the regular file ``st`` is another name of a known credential file (hard link,
-        L9), else None. The identities are collected on the first linked file of the scan (``_credential_identities``);
-        a file with one name never gets here."""
+        L9) — or may be one: the bounded walk did not see everything (``_Identities.unknown``, R3-M2) — else None;
+        ``"hermes"`` wins (a known home credential may also be linked from a Hermes place left unread). The identities
+        are collected on the first linked file of the scan (``_credential_identities``); a file with one name never
+        gets here."""
         if self._linked is None:
             self._linked = _credential_identities(self._cfg, self._resolve)
-        return self._linked.get((st.st_dev, st.st_ino))
+        known = self._linked.found.get((st.st_dev, st.st_ino))
+        if "hermes" in (known, self._linked.unknown):
+            return "hermes"
+        return known or self._linked.unknown
 
     def _item_root_key(self, item_root: Path) -> tuple[str, ...] | None:
         text = os.fspath(item_root)
@@ -1251,7 +1290,9 @@ def check_source_file(
     link by the walker), special files, the name/directory denylist on the given path and its realpath, the
     location (``item_root`` given: the realpath must stay inside it; otherwise under ``$HOME`` or an
     ``export_roots`` entry), a hard link (``st_nlink > 1``) to a known credential file — judged like a symlink to it
-    (``secret``, or ``hermes`` for a Hermes credential store; ``_credential_identities``, L9, SEC 5.3) — the size
+    (``secret``, or ``hermes`` for a Hermes credential store; ``_credential_identities``, L9, SEC 5.3), and any linked
+    file when the bounded walk could not look at every credential place (``secret``, ``hermes`` while a Hermes place
+    was left unread; R3-M2) — the size
     limit (``explicit`` lifts it), and the content sniff of every regular file (hard-linked files included).
     ``include_secret`` lifts the denylist, the hard-link rule for ``secret`` and the sniff for those paths.
 

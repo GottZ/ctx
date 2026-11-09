@@ -175,16 +175,18 @@ def test_l9_scan_cache_gives_the_same_verdicts(lay):
 
 def test_l9_identity_walk_is_bounded(lay, monkeypatch):
     """The walk over the credential places stops after ``policy.LINKED_SCAN_MAX`` directory entries: a huge browser
-    profile never makes a scan slow. The small credential stores come first, so ``.aws`` is still known."""
+    profile never makes a scan slow. The small credential stores come first, so ``.aws`` is still known. (r4-ke,
+    R3-M2: beyond the bound the walk is incomplete and refuses — ``secret`` — instead of allowing; the bound is set
+    above the fixed places, which are looked at first.)"""
     creds = _write(lay.home / ".aws" / "credentials", AWS)
     big = lay.home / ".mozilla" / "firefox" / "x.default"
-    for i in range(50):
+    for i in range(400):
         _write(big / f"f{i:03d}.sqlite", "x")
     late = _write(big / "zzz-logins.json", "{}")
-    monkeypatch.setattr(policy, "LINKED_SCAN_MAX", 20)
+    monkeypatch.setattr(policy, "LINKED_SCAN_MAX", 300)
     assert lay.check(_link(creds, lay.project / "a.txt")) == SECRET
-    # beyond the bound: not known (the named limit), never an error
-    assert lay.check(_link(late, lay.project / "b.json")) == OK
+    # beyond the bound: not known, refused (fail-closed), never an error
+    assert lay.check(_link(late, lay.project / "b.json")) == SECRET
 
 
 def test_l9_check_extra_refuses_a_linked_credential(lay):

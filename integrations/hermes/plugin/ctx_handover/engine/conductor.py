@@ -608,14 +608,17 @@ class Conductor:
         return self.run()
 
     def resolve_in_doubt(self) -> str:
-        """Poll the target until the commit outcome is terminal; returns ``"committed"`` or ``"aborted"``."""
+        """Poll the target until the commit outcome is terminal; returns the state the job is in then: ``"committed"``,
+        ``"aborting"`` (the target aborted; ``run`` gives the source back — ``"aborted"`` only once both confirmed,
+        V37) or ``"in_doubt"`` (stall timeout, parked for the janitor)."""
         self._load()
         if self._state not in (S.IN_DOUBT, S.COMMITTING):
             return str(self._state)
         if self._state is S.COMMITTING:
             self._go(S.IN_DOUBT)
-        self._in_doubt()
-        return "committed" if self._state is S.COMMITTED else "aborted"
+        with contextlib.suppress(_Park):
+            self._in_doubt()
+        return str(self._state)
 
     @property
     def state(self) -> S:
@@ -1794,7 +1797,10 @@ class Conductor:
             # L3-F11: the source does not know the job — it never opened it (it refused at FACTS, e.g.
             # ``rate_limited``), so it holds nothing for it, which is what a release confirms. Only the refusal of
             # the release request counts; a lost operation while polling it stays an error. The job's error stays
-            # the cause, not "not found".
+            # the cause, not "not found". A job that asked the source to lock was opened there: "not found" then
+            # says nothing about its session (a new pairing of the device, a lost ledger) — no confirmation (V37).
+            if locked:
+                raise
             self._done("source.release", source="not_found")
             raw = {"state": "released"}
         except HandoverError as err:

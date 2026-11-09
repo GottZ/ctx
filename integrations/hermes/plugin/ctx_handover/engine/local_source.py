@@ -73,6 +73,7 @@ from .model import (
     Limits,
     MapRow,
     Mode,
+    OpState,
     OpStatus,
     PackInfo,
     ParticipantStatus,
@@ -98,6 +99,12 @@ SOURCE_STAGING_DIRS = ("git", "recheck")
 holding the changed and untracked work tree as loose objects, plus the pack cache) and the work-tree re-check scratch
 (``_git_states``, ``_worktrees_unchanged``). The target's staging of a job (quarantine, workspace steps) has other
 names and is never touched by the source (review H4)."""
+
+_GIVEN_BACK = frozenset({"released", "reclaimed"})
+"""Source states after a release: the session is usable here again (what a finished release reports)."""
+
+_LEASES_GIVEN_UP = frozenset({"released", "reclaimed", "suspended", "releasing", "reclaiming"})
+"""Source states without the session's leases: ``heartbeat`` names them as ``LeaseLost(state=…)``."""
 
 _SOURCE_DONE = frozenset({"released", "reclaimed", "retired", "exported"})
 """Source states after the hold: the pack work directory is no longer needed (a resumed job re-packs when its cached
@@ -495,8 +502,20 @@ class LocalSource:
         return self._start(job, "plan", digest, fn)
 
     def lock(self, job: JobContext, session_ref: SessionRef, plan_revision: tuple) -> SessionInfo:
-        """Busy probe, leases, revision check (DESIGN §7.2). Idempotent per job (re-acquires a lost lease)."""
+        """Busy probe, leases, revision check (DESIGN §7.2). Idempotent per job (re-acquires a lost lease).
+
+        A source job that ended before it ever locked (``released`` with no ``source_handovers`` row: the sweep ended
+        a pull nobody asked about for ``staging_ttl``, a cancel, a revocation) stays ended: its conductor aborts and
+        starts again (review R3-H1). The re-lock of a hold the janitor released (``/handover resume``) is unaffected."""
         p = self.ports
+        row = self.ledger.job(job.job_id, Role.SOURCE)
+        if row is not None and row["state"] in TERMINAL[Role.SOURCE] and self.ledger.source_state(job.job_id) is None:
+            raise InvalidState(
+                f"the source side of this handover already ended ({row['state']}) before it locked the session; "
+                "start the handover again",
+                reason="state",
+                state=row["state"],
+            )
         self._epoch(job)
         db = self.db_factory()
         info = self._describe(db, job, session_ref)
@@ -529,9 +548,10 @@ class LocalSource:
         ctx = self._ctx(job.job_id)
         src = self.ledger.source_state(job.job_id)
         if src is None or src["state"] not in ("locking", "locked", "preparing", "prepared", "retiring"):
-            if src is not None and src["state"] in ("released", "reclaimed", "suspended"):
+            if src is not None and src["state"] in _LEASES_GIVEN_UP:
                 # the state travels in the details: route #9 answers it as ``{state}`` (``source_reclaimed`` for a
-                # reclaim, contract V17) instead of an anonymous lost lease
+                # reclaim, contract V17) instead of an anonymous lost lease; a release or reclaim under way has given
+                # the leases up as well (``participant._LOST_SOURCE``: the same states as the route)
                 raise LeaseLost(f"the source is {src['state']}", state=src["state"])
             return
         self._beat_owner(job)
@@ -711,7 +731,10 @@ class LocalSource:
         def fn(report) -> dict:
             return to_wire(self._prepare(job, prepared))
 
-        return self._start(job, "prepare", _digest(prepared, capsule_id, pack_id, revision), fn, exclusive=True)
+        # one prepare per hold, like the release (review B1, R3-H1 sweep): an "ok" of an earlier hold — whose primary
+        # lock a release undid — never answers the current one (a re-export of an unchanged session has the same ids)
+        hold = self._release_hold(job.job_id)
+        return self._start(job, "prepare", _digest(prepared, capsule_id, pack_id, revision, hold), fn, exclusive=True)
 
     def _prepare(self, job: JobContext, prepared: PreparedInfo) -> PrepareResult:
         p = self.ports
@@ -798,7 +821,8 @@ class LocalSource:
             discard_source_staging(self.data_dir, job.job_id)  # the hold is over (review H4)
             return {"state": self.ledger.source_state(job.job_id)["state"]}
 
-        return self._start(job, "retire", _digest(ack), fn, restart_failed=True, exclusive=True)
+        st = self._start(job, "retire", _digest(ack), fn, restart_failed=True, exclusive=True)
+        return self._fresh(job, "retire", st)
 
     def start_release(self, job: JobContext, reason: str) -> OpStatus:
         def fn(report) -> dict:
@@ -810,7 +834,13 @@ class LocalSource:
                     self.ledger.transition(
                         job.job_id, Role.SOURCE, "*", "released", {"reason": reason}, epoch=self._epoch(job)
                     )
-                return {"state": "released"}
+                # "released" of nothing only while nothing is held: a lock that inserted its handover row meanwhile
+                # (the R3-H1 race) is a hold — the job row follows it again and the answer names its state
+                src = self.ledger.source_state(job.job_id)
+                if src is None:
+                    return {"state": "released"}
+                self._sync_state(job)
+                return {"state": src["state"]}
             if src["state"] in ("retired", "exported"):
                 raise InvalidState(f"the source is {src['state']}", reason="state", state=src["state"])
             report = None
@@ -828,10 +858,27 @@ class LocalSource:
             return out
 
         self._ensure_job(job)
-        # one release per hold of the source (review B1): a release that finished for an earlier hold — the janitor's
-        # for a stale row before ``/handover resume`` locked the job again — says nothing about the current one
-        hold = self.ledger.source_generation(job.job_id)
-        return self._start(job, "release", _digest("release", hold), fn, restart_failed=True, exclusive=True)
+        # one release per hold of the source (review B1, R3-H1): a release that finished for an earlier hold — the
+        # janitor's for a stale row before ``/handover resume`` locked the job again, the sweep's for a pull source
+        # that had not locked yet — says nothing about the current one
+        st = self._start(
+            job, "release", _digest("release", self._release_hold(job.job_id)), fn, restart_failed=True, exclusive=True
+        )
+        src = self.ledger.source_state(job.job_id)
+        if st.state is OpState.DONE and src is not None and src["state"] not in _GIVEN_BACK:
+            # "released" only while the ledger agrees (contract V37): a stored release next to a hold that is active
+            # now belongs to another hold — release this one, keyed by the row's last change
+            again = _digest("release", "active", src["state"], src["updated_at"])
+            st = self._start(job, "release", again, fn, restart_failed=True, exclusive=True)
+        return st
+
+    def _release_hold(self, job_id: str) -> object:
+        """The hold a release belongs to: ``"none"`` while the job never locked the session (no ``source_handovers``
+        row), else the hold count (``source_generation``: 0, +1 per re-lock of a ``released`` row). A lock that
+        inserts the row after a release of "none" (review R3-H1) starts hold 0, which that release never answered."""
+        if self.ledger.source_state(job_id) is None:
+            return "none"
+        return self.ledger.source_generation(job_id)
 
     def _record(self, kind: str, job: JobContext, ack: CommitAck) -> None:
         """The departure record for ctx (DESIGN §13) — only when ctx_checkpoint is the memory provider and
@@ -865,7 +912,26 @@ class LocalSource:
             pass
 
     def op_status(self, job: JobContext, op_id: str) -> OpStatus:
-        return self.ops.status(job.job_id, op_id)
+        st = self.ops.status(job.job_id, op_id)
+        row = self.ledger.op_by_id(op_id) if st.state is OpState.DONE else None
+        return self._fresh(job, str(row["op"]), st) if row is not None else st
+
+    def _fresh(self, job: JobContext, op: str, st: OpStatus) -> OpStatus:
+        """A finished ``retire`` or ``release`` stands only while the ledger agrees (contract V37, review R3-H1): the
+        stored "retired" of a source the user reclaimed since, or the stored "released" of a source that holds the
+        session again, is answered as the refusal the operation would give now (``InvalidState`` naming the state;
+        ``retryable`` for a release, whose next start releases the current hold)."""
+        if st.state is not OpState.DONE or op not in ("retire", "release"):
+            return st
+        src = self.ledger.source_state(job.job_id)
+        state = src["state"] if src is not None else None
+        if op == "retire" and state in _GIVEN_BACK:
+            err = InvalidState(f"the source is {state}", reason="state", state=state)
+        elif op == "release" and state is not None and state not in _GIVEN_BACK:
+            err = InvalidState(f"the source is {state} again", reason="superseded", state=state, retryable=True)
+        else:
+            return st
+        return OpStatus(op_id=st.op_id, state=OpState.FAILED, result=None, error=err.to_wire()["error"], progress=None)
 
     def status(self, job: JobContext) -> ParticipantStatus:
         row = self.ledger.job(job.job_id, Role.SOURCE)
@@ -874,7 +940,8 @@ class LocalSource:
         src = self.ledger.source_state(job.job_id)
         ops = {}
         for r in self.ledger.ops_for_job(job.job_id):
-            ops[r["op"]] = self.ops.status(job.job_id, r["op_id"])
+            # route #8 is how a remote conductor polls an operation (``RemoteSource.op_status``): the same check
+            ops[r["op"]] = self._fresh(job, str(r["op"]), self.ops.status(job.job_id, r["op_id"]))
         notes = ("source_reclaimed",) if src and src["state"] == "reclaimed" else ()
         return ParticipantStatus(
             state=src["state"] if src else row["state"],

@@ -171,7 +171,7 @@ config_schema:
     type: bool
     default: false
     label: Let a paired device start one continuation turn here
-    description: "Only with --continue from a signed device. Not when approvals are off on this gateway, as far as the process that starts the turn can tell (a gateway given HERMES_YOLO_MODE only in its environment is not seen by a separate hermes serve or a terminal: leave this off there; README, Limits); commands that need approval are refused."
+    description: "Only with --continue from a signed device. Not when approvals are off on this gateway, as far as the process that starts the turn can tell, and not when that process cannot identify the gateway (a separate container or PID namespace, as in Hermes' docker-compose: then nothing starts). A gateway given HERMES_YOLO_MODE only in its environment is not seen by a separate hermes serve or a terminal: leave this off there (README, Limits). Commands that need approval are refused."
   allow_agent_start:
     type: bool
     default: false

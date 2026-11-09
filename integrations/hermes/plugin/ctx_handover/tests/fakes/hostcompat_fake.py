@@ -220,6 +220,10 @@ class FakeHost:
         self._record("approval_check")
         return self._real["approval_check"](config)
 
+    def unchecked_text(self, why: str) -> str:
+        self._record("unchecked_text", why)
+        return self._real["unchecked_text"](why)
+
     def hermes_version(self) -> str:
         self._record("hermes_version")
         return "0.0.0"

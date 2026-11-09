@@ -6,7 +6,10 @@ command that needs approval is refused instantly). This module never weakens tha
 
 * the child environment drops every auto-approve and safety-bypass variable (``SCRUBBED_ENV``), the plugin-host
   marker and the parent's bound session variables; ``--yolo``/``--accept-hooks`` are never passed;
-* nothing starts when this gateway runs with approvals switched off (``approvals_off()``) — there is no override;
+* nothing starts when this gateway runs with approvals switched off (``approvals_off()``) — there is no override —
+  nor when the process cannot identify the gateway that runs the turn (``approvals_off()`` raises ``ContinueRefused``
+  with reason ``approvals_unchecked``; the refusal carries the session id and profile, from which the final message
+  builds the command to run there by hand);
 * nothing starts for an unverified origin (unsigned bundle, unknown peer), and a request from a paired device only
   with this gateway's ``allow_remote_continue`` (default off; the ``allow_remote`` callable);
 * a peer's prompt is capped at ``PROMPT_MAX`` characters and prefixed with ``[continuation requested by <peer>]``.
@@ -91,8 +94,10 @@ def _clean_peer(name: str) -> str:
 class Spawner:
     """Starts and reports the detached continuation child of one job (see module docstring).
 
-    ``approvals_off`` is evaluated at spawn time (the gateway's live configuration). The keyword-only
-    parameters after it exist for tests and platform shims; production callers pass the first three.
+    ``approvals_off`` is evaluated at spawn time (the gateway's live configuration); it returns True to refuse
+    or raises ``ContinueRefused`` itself (``hostcompat.approvals_off``: a gateway this process cannot identify, review
+    R3-H2). The keyword-only parameters after it exist for tests and platform shims; production callers pass the
+    first three.
     """
 
     def __init__(
@@ -191,9 +196,10 @@ class Spawner:
 
         ``requested_by`` names the paired device that asked (push ``--continue``); such a request runs only when
         this gateway's ``allow_remote_continue`` (the ``allow_remote`` callable) is on. Raises ``ContinueRefused``
-        (``details.reason`` = ``unverified`` | ``not_allowed`` | ``approvals_off``) when the turn must not run
-        unattended here, ``CapabilityMissing`` without a ``hermes`` executable, ``HandoverError`` for invalid ids
-        or a failed start.
+        (``details.reason`` = ``unverified`` | ``not_allowed`` | ``approvals_off`` | ``approvals_unchecked``; the last
+        two carry ``session_id`` and ``profile`` — what a person needs to start the turn by hand, ``surfaces``
+        builds the command from them) when the turn must not run unattended here,
+        ``CapabilityMissing`` without a ``hermes`` executable, ``HandoverError`` for invalid ids or a failed start.
         """
         if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
             raise HandoverError("invalid session id for the continuation", field="session_id")
@@ -209,10 +215,16 @@ class Spawner:
                 "This gateway does not allow a paired device to start a turn (allow_remote_continue is off).",
                 reason="not_allowed",
             )
-        if self._approvals_off():
+        way_out = {"session_id": session_id, "profile": self._profile or None}
+        try:
+            off = self._approvals_off()
+        except ContinueRefused as exc:  # not checkable from here (review R3-H2): refused, with the way out
+            raise ContinueRefused(exc.message, details={**exc.details, **way_out}) from None
+        if off:
             raise ContinueRefused(
                 "Approvals are switched off on this gateway, so no turn is started without a person present.",
                 reason="approvals_off",
+                **way_out,
             )
         text = _clean_prompt(prompt)
         if requested_by:
