@@ -1144,8 +1144,20 @@ class Plugin:
             call.exit_code = _EXIT_BY_CODE.get(code, EXIT_FAILED)
         if result.get("target_notified") is True:
             call.say("The other gateway was told that this session is active here again.")
-        for warning in result.get("warnings") or ():
+        warnings = [str(w) for w in result.get("warnings") or ()]
+        for warning in warnings:
             call.say(f"warning: {warning}")
+        if (
+            ok
+            and result.get("target_notified") is not True
+            and any("copies are now independent" in w for w in warnings)
+        ):
+            # R35 (L3-F18): after a finished handover the other copy stays active; when it pulled the session or
+            # could not be reached it is never told, and the user has to know that.
+            call.say(
+                "That copy is not told about this reclaim (it pulled this session, or it could not be reached); "
+                "it stays active there until someone ends it."
+            )
 
     def _job_for(self, parsed: surfaces.Parsed, call: Call) -> str:
         job = parsed.args.get("job")
