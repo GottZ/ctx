@@ -23,6 +23,7 @@ import importlib
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import sqlite3
@@ -63,6 +64,16 @@ SKIP_REASON = (
     "layer-3 lab test (BUILD-ORDER §5): set CTXH_E2E=1 once the lab is handed over (CTXH_LAB, default "
     "/compose/n8n/.gotmp/handover/lab)"
 )
+
+OUTSIDE_ROOT = Path(os.environ.get("CTXH_E2E_OUTSIDE") or "/root/.cache/ctx-handover-e2e")
+"""Parent of the per-test folders of ``Lab.outside`` (override: ``CTXH_E2E_OUTSIDE``) for sources that must lie
+outside every git work tree. Every folder under ``lab/`` is part of the work tree ``/compose/n8n`` (ignored there), so a
+file a transcript mentions next to the session's folder tests the enclosing-repository rule (L3-F26, R36b) instead of
+what the scenario checks. ``/root/.cache`` lies in no git work tree on the lab host — the project's rule for test
+TMPDIRs outside every repository uses the same place — and ``Lab.outside`` checks that again at every use."""
+
+_NO_TEMP = (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"))  # noqa: S108 - refused as OUTSIDE_ROOT, never written
+"""World-writable temp locations ``Lab.outside`` refuses (house rule: no experimental data under ``/tmp``)."""
 
 _KEEP = ("role", "content", "tool_calls", "tool_call_id", "tool_name", "reasoning", "_compressed_summary")
 
@@ -347,6 +358,25 @@ class Lab:
                 f"$ labctl.py {' '.join(args)}\nrc={res.returncode}\n{res.stdout}\n{res.stderr}",
             )
         return res
+
+    def labctl_bg(self, *args: str, log: Path, extra_env: Mapping[str, str] | None = None) -> subprocess.Popen:
+        """``labctl.py <args>`` in the background with the environment of :meth:`labctl`, output appended to ``log``,
+        in a process group of its own; the caller waits for it and ends it with :func:`kill_tree` in ``finally``. A
+        component it starts runs in a session of its own (``labctl.spawn``) and is no member of that group."""
+        env = _child_env(os.environ)
+        for key in ("GW_TOKEN", "SERVE_TOKEN", "SERVE_ISOLATED"):
+            env.pop(key, None)
+        env.update(extra_env or {})
+        with open(log, "ab") as fh:  # the child holds its own descriptor; the parent's closes here
+            return subprocess.Popen(  # noqa: S603 - fixed interpreter and the lab's own labctl.py, no shell
+                [self.py, str(BIN / "labctl.py"), *args],
+                env=env,
+                cwd=str(LAB),
+                stdin=subprocess.DEVNULL,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
 
     def pid(self, component: str) -> int | None:
         return self.ctl.read_pid(component)
@@ -770,6 +800,36 @@ class Lab:
             path.write_text(old, encoding="utf-8")
 
     # -- workspaces ----------------------------------------------------------------------------------------
+    @contextlib.contextmanager
+    def outside(self, ev: Evidence | None = None) -> Iterator[Path]:
+        """A fresh folder ``<OUTSIDE_ROOT>/<run id>-<uid>`` (mode 0700) outside every git work tree; afterwards it is
+        removed with everything in it, and ``OUTSIDE_ROOT`` too when that is empty then.
+
+        Refused with ``LabError`` before anything is created: a relative ``CTXH_E2E_OUTSIDE``, one at or below
+        ``/tmp``, ``/var/tmp`` or ``/dev/shm``, and one at or below a folder holding ``.git`` (``git_work_tree_of``)."""
+        base = OUTSIDE_ROOT.expanduser()
+        if not base.is_absolute():
+            raise LabError(f"scaffold: CTXH_E2E_OUTSIDE must be an absolute path, not {base}")
+        base = Path(os.path.realpath(base))
+        temp = set(_NO_TEMP) | {Path(os.path.realpath(t)) for t in _NO_TEMP}
+        if any(base == t or base.is_relative_to(t) for t in temp):
+            raise LabError(f"scaffold: {base} is a temp location (no experimental data there); set CTXH_E2E_OUTSIDE")
+        tree = git_work_tree_of(base)
+        if tree is not None:
+            raise LabError(f"scaffold: {base} lies in the git work tree {tree}; set CTXH_E2E_OUTSIDE outside of it")
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root = base / f"{self.run_id}-{uid(6)}"
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
+        try:
+            yield root
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                base.rmdir()
+            if ev is not None:
+                ev.write("outside-root.json", {"root": str(root), "removed": not root.exists(), "base": str(base)})
+
     @staticmethod
     def repo(path: Path) -> Any:
         from ctx_handover.tests.fakes.repo_builder import RepoBuilder
@@ -883,21 +943,47 @@ class Lab:
         )
         return [str(r["name"]) for r in live]
 
+    def _dial_entry(self, inst: str, name: str) -> bool:
+        return bool(self.ledger_rows(inst, "SELECT 1 FROM peers WHERE name = ? AND direction = 'dial'", (name,)))
+
+    def remove_server_entry(self, ev: Evidence | None = None) -> None:
+        """B ``peers remove server`` before a test pairs B with A a second time.
+
+        Since integrator round 3 (``feat/ctx-handover`` ``ee82897c``, L3-F25) the dialer keeps one pairing per gateway
+        profile and refuses a second one — under another name or through another address of the same gateway — before
+        any request ("this device is already paired with that gateway as server … run /handover peers remove server
+        first"). The removal also blanks the settings form's slot ``CTX_HANDOVER_PEER_TOKEN`` when it held the value
+        copied for ``server`` alone (review R2-L1); a test that pairs through that slot sets it again. A's inbound row
+        ``laptop`` needs no ``peers revoke``: the next pairing of B's key revokes it on A (review M13). Afterwards
+        ``restore_pairing`` gives the stand its pairing back. Scaffold check: B keeps no dial entry ``server``."""
+        if not self._dial_entry("b", SERVER):
+            return
+        res = self.handover("b", "peers", "remove", SERVER, timeout=120)
+        if ev is not None:
+            ev.cli("remove-server", res)
+        if res.rc != 0 or self._dial_entry("b", SERVER):
+            raise LabError(f"scaffold: B's dial entry {SERVER} was not removed: {res.brief()}")
+
     def restore_pairing(self, ev: Evidence | None = None) -> None:
         """Give the stand its pairing A←B back (B's dial entry ``server`` = A's inbound ``laptop``) after a test paired
         B with A a second time.
 
-        At a second pairing A revokes its older inbound row of B's key (``engine/ledger.py`` ``redeem_pair_code``,
-        review M13: one key, one live row) and identifies B's requests by that row's peer id, so B's ``server`` is
-        refused (``unauthorized``) from then on. Re-pairs as ``conftest`` does: B ``peers remove server``, A's revoked
-        ``laptop`` renamed out of the way (``peers rename``), ``laptop``/``server`` by paste string. Checked: A has
-        exactly one live inbound row with the peer id of B's ``server``, named ``laptop``. Nothing happens when that
-        already holds."""
+        Such a test removes ``server`` first (``remove_server_entry``, L3-F25), and its pairing revokes A's ``laptop``
+        (``engine/ledger.py`` ``redeem_pair_code``, review M13: one key, one live row). Re-pairs as ``conftest`` does:
+        B's ``server`` removed if it is still there (``peers remove``), B's slot ``CTX_HANDOVER_PEER_TOKEN`` set to
+        A's fixed token again (a removal blanks it, review R2-L1), A's ``laptop`` renamed out of the way
+        (``peers rename``, when it exists), ``laptop``/``server`` by paste string. Checked: A has exactly one live
+        inbound row with the peer id of B's ``server``, named ``laptop``. Nothing happens when that already holds."""
         if self._server_inbound_on_a() == [LAPTOP]:
             return
-        steps = [("restore-remove-server", self.handover("b", "peers", "remove", SERVER, timeout=120))]
-        old = f"{LAPTOP}-old{uid(4)}"
-        steps.append(("restore-rename-laptop", self.handover("a", "peers", "rename", LAPTOP, old, timeout=120)))
+        steps = []
+        if self._dial_entry("b", SERVER):
+            steps.append(("restore-remove-server", self.handover("b", "peers", "remove", SERVER, timeout=120)))
+        self.env_set("b", "CTX_HANDOVER_PEER_TOKEN", TOKENS["a"])
+        old = None
+        if self.ledger_rows("a", "SELECT 1 FROM peers WHERE name = ?", (LAPTOP,)):
+            old = f"{LAPTOP}-old{uid(4)}"
+            steps.append(("restore-rename-laptop", self.handover("a", "peers", "rename", LAPTOP, old, timeout=120)))
         made, redeemed = self.pair("a", "b", hint=LAPTOP, name=SERVER)
         steps += [("restore-pair-code", made), ("restore-pair-redeem", redeemed)]
         live = self._server_inbound_on_a()
@@ -927,6 +1013,16 @@ def port_free(port: int) -> bool:
         except OSError:
             return False
     return True
+
+
+def git_work_tree_of(path: Path) -> Path | None:
+    """The nearest folder at or above ``path`` holding a ``.git`` entry (a work tree, a repository or the gitfile of a
+    linked worktree), else None."""
+    path = Path(path)
+    for folder in (path, *path.parents):
+        if (folder / ".git").exists():
+            return folder
+    return None
 
 
 def tree_digests(root: Path) -> dict[str, str]:

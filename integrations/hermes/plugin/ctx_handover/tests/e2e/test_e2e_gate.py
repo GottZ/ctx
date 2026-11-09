@@ -4,6 +4,10 @@ Every test restores what it changed: B's ``.env``/``config.yaml`` byte-exact (``
 ``listen_url``, ``serve-a`` with its fixed token (E22 runs it with the Basic login provider in between), ``gw-a`` with
 its fixed token (E18 runs it with a token of its own in between), and the stand's pairing A←B (``_drop_peers``).
 
+E18 and E22 pair B with A a second time. Since integrator round 3 (``ee82897c``, L3-F25) the dialer refuses a second
+pairing with the same gateway profile before any request, so both remove the stand's entry ``server`` on B first
+(``Lab.remove_server_entry``); A's inbound ``laptop`` is revoked by the second pairing itself (review M13).
+
 Since the review fix H1 a pairing copies the dashboard credential into variables of that peer alone
 (``CTX_HANDOVER_PEER_TOKEN_<peer id>``, ``…_PASSWORD_<peer id>``; README "Pair"), and the shared slot of the settings
 form only feeds the next pairing; a credential value stored for one origin is never sent to another. A wrong
@@ -41,10 +45,10 @@ def _peer_id(lab, inst: str, name: str) -> str:
 
 def _drop_peers(lab, ev, *, dial: str, inbound: str) -> None:
     """Remove the extra pairing of a test (B: ``peers remove``; A: ``peers revoke``), so later ``doctor`` runs see only
-    the stand's peers, and give the stand its pairing A←B back when the extra one ended it.
+    the stand's peers, and give the stand its pairing A←B back.
 
-    A second pairing of B's key ends the stand's entry ``server`` (review M13); ``Lab.restore_pairing`` pairs the stand
-    again."""
+    The test removed ``server`` before its second pairing (``Lab.remove_server_entry``, L3-F25) and that pairing
+    revoked A's ``laptop`` (review M13); ``Lab.restore_pairing`` pairs the stand again."""
     ev.cli(f"remove-{dial}", lab.handover("b", "peers", "remove", dial, timeout=120))
     ev.cli(f"revoke-{inbound}", lab.handover("a", "peers", "revoke", inbound, timeout=120))
     lab.restore_pairing(ev)
@@ -74,13 +78,15 @@ def test_e18_listener_is_the_gateway_listener(lab, ev):
     ``hermes serve``, and a pull through it succeeds; the source participant runs in the gateway process.
 
     ``gw-a`` runs with a token of its own (``GW18_TOKEN``; ``serve-a`` keeps ``lab-tok-a``), entered in B's settings
-    form before the pairing: a credential stored for ``server`` is never sent to the gateway listener's origin (H1)."""
+    form before the pairing: a credential stored for ``server`` is never sent to the gateway listener's origin (H1).
+    The listener is the same gateway profile as ``server``, so B removes ``server`` first (L3-F25, module docstring)."""
     try:
         lab.tokens["a"] = GW18_TOKEN
         lab.restart("gw-a")
         desc = lab.ctl.identify("a") or {}
         url = str(desc.get("api_origin") or "").rstrip("/")
         assert url.startswith("http://127.0.0.1:"), desc
+        lab.remove_server_entry(ev)
         with lab.preserved("a"):
             lab.setting("a", "listen_url", url)
             lab.env_set("b", "CTX_HANDOVER_PEER_TOKEN", GW18_TOKEN)
@@ -123,9 +129,14 @@ def test_e22_basic_login_gate(lab, ev):
     password, secret and a non-loopback public URL so the gate engages on a loopback bind); B pairs with gate
     ``basic_login`` (user name in the settings, password in ``.env``) and a pull succeeds; with a wrong password
     the pull ends ``gate_rejected`` (the wrong password in ``serverbasic``'s own variable
-    ``CTX_HANDOVER_PEER_PASSWORD_<peer id>``, and in the form's ``CTX_HANDOVER_PEER_PASSWORD``)."""
+    ``CTX_HANDOVER_PEER_PASSWORD_<peer id>``, and in the form's ``CTX_HANDOVER_PEER_PASSWORD``).
+
+    ``serverbasic`` is the same gateway profile as ``server``, so B removes ``server`` first (L3-F25, module docstring)
+    — before ``preserved("b")`` takes its copy of B's ``.env``, so the restore does not bring back the removed entry's
+    credential variables."""
     password = f"e22-{_lab.uid(16)}"
     try:
+        lab.remove_server_entry(ev)
         with lab.preserved("b"):
             lab.stop("serve-a")
             env = lab.ctl.env_for(

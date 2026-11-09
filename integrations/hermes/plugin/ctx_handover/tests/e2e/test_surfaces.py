@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def lab(lab):
     """The shared stand of ``tests/e2e/conftest.py`` in the shape these tests use (``ctl``, ``GW``, ``token``,
-    ``ws``, ``handover``, ``restore_pairing``)."""
+    ``ws``, ``handover``, ``env_set``, ``remove_server_entry``, ``restore_pairing``)."""
     labctl, token = lab.ctl, lab.tokens["a"]
     for inst in ("a", "b"):
         if labctl.identify(inst) is None:
@@ -45,7 +45,12 @@ def lab(lab):
     if f"CTX_HANDOVER_PEER_TOKEN={token}" not in env_b:
         pytest.fail("lab/b/.env needs CTX_HANDOVER_PEER_TOKEN equal to the token of serve-a (BUILD-ORDER §5 step 1)")
     shape = {"ctl": labctl, "GW": lab.GW, "token": token, "ws": lab.ws}
-    shape.update(handover=lab.handover, restore_pairing=lab.restore_pairing)
+    shape.update(
+        handover=lab.handover,
+        env_set=lab.env_set,
+        remove_server_entry=lab.remove_server_entry,
+        restore_pairing=lab.restore_pairing,
+    )
     return type("Lab", (), shape)
 
 
@@ -113,10 +118,12 @@ def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab, ev):
     """R7, R17, BX P2: the address is set through the settings writer (``plugins.manage settings``), pairing is one
     pasted line, and that line never contains the dashboard token.
 
-    The second pairing of B's key with A supersedes the stand's entry ``server`` (review M13: one key, one live row on
-    A), so ``doctor`` on B may report exactly that entry as ``[FAIL] peer server: … pair again``; any other ``[FAIL]``
-    fails the test. Afterwards ``server-f``/``laptop-f`` are removed and the stand is paired again
-    (``Lab.restore_pairing``)."""
+    B is paired with A as ``server`` already, and since integrator round 3 (``ee82897c``, L3-F25) the dialer refuses a
+    second pairing with the same gateway profile before any request. So B removes ``server`` first
+    (``Lab.remove_server_entry``) and its form slot ``CTX_HANDOVER_PEER_TOKEN`` gets A's token again (the removal
+    blanks a slot that held the value copied for ``server`` alone, review R2-L1); the new pairing revokes A's
+    ``laptop`` (review M13). ``doctor`` on B then shows no ``[FAIL]`` line at all — no dead entry is left behind.
+    Afterwards ``server-f``/``laptop-f`` are removed and the stand is paired again (``Lab.restore_pairing``)."""
     gw = lab.GW("a")
     try:
         reply = gw.rpc(
@@ -126,12 +133,14 @@ def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab, ev):
     finally:
         gw.close()
     sid_a = _session(lab, "a")
-    out_a, _ = _slash(lab, "a", sid_a, "/handover pair --name laptop-f")
-    match = PAIR_RE.search(out_a)
-    assert match, out_a
-    assert lab.token not in out_a
     sid_b = _session(lab, "b")
     try:
+        lab.remove_server_entry(ev)
+        lab.env_set("b", "CTX_HANDOVER_PEER_TOKEN", lab.token)
+        out_a, _ = _slash(lab, "a", sid_a, "/handover pair --name laptop-f")
+        match = PAIR_RE.search(out_a)
+        assert match, out_a
+        assert lab.token not in out_a
         out_b, _ = _slash(lab, "b", sid_b, f"/handover pair {match.group(1)} --name server-f")
         assert "Paired with server-f" in out_b, out_b
         peers_a, _ = _slash(lab, "a", sid_a, "/handover peers")
@@ -145,7 +154,7 @@ def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab, ev):
     ev.write("doctor-b.txt", doctor)
     fails = [ln for ln in doctor.splitlines() if ln.startswith("[FAIL]")]
     assert "[ok] peer server-f" in doctor, doctor
-    assert all(ln.startswith("[FAIL] peer server:") and "pair again" in ln for ln in fails), fails
+    assert not fails, fails
     assert "[warn] stored dashboard token" in doctor  # R17: the stored token opens A's whole dashboard
 
 

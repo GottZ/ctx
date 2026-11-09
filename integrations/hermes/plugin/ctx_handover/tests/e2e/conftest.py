@@ -27,6 +27,10 @@ Teardown: ``labctl.py stop`` and ``labctl.py status`` — the run fails in teard
 of each test the fake-model requests of the test (compact form, no full bodies) and the new part of every lab
 process log are written there.
 
+``outside`` (per test): a fresh folder outside every git work tree (``_lab.Lab.outside``: ``CTXH_E2E_OUTSIDE``, default
+``/root/.cache/ctx-handover-e2e/<run id>-<uid>``, mode 0700), removed in teardown — for sources whose mentioned files
+must not lie in the work tree ``/compose/n8n`` around ``lab/`` (L3-F26).
+
 ``e2e_timeout`` marker: hard upper bound per test (SIGALRM in the main thread raises ``E2ETimeout``; the test's own
 ``finally`` blocks still run). Default 900 s.
 """
@@ -154,6 +158,13 @@ def lab():
         left = stand.lab_tagged()
         if left or "lab-tagged processes: 0" not in status:
             pytest.fail(f"lab processes left after the run: {left}\n{status}", pytrace=False)
+
+
+@pytest.fixture
+def outside(lab, ev):
+    """A folder outside every git work tree for this test, removed afterwards (module docstring, ``Lab.outside``)."""
+    with lab.outside(ev) as root:
+        yield root
 
 
 EXPECTED_HEAD = os.environ.get("CTXH_E2E_EXPECT_HEAD", "abcbd8a7")

@@ -3,6 +3,12 @@
 Repositories are built only with ``RepoBuilder`` (technical identity per git call). Secret values are unique
 markers, so a byte search over B's handover folder, plugin data and session files proves they did not arrive.
 
+E8's sources live in the ``outside`` fixture (``_lab.Lab.outside``: ``CTXH_E2E_OUTSIDE``, default
+``/root/.cache/ctx-handover-e2e/<run id>-<uid>``), outside every git work tree: every folder under ``lab/`` is part of
+the work tree ``/compose/n8n`` and ignored there, so a mentioned file next to the session's repository would test the
+enclosing-repository rule (L3-F26, R36b) instead of the secrets denylist (Nachlauf ``edd53876``: the candidate was
+``/compose/n8n``, not the key, and E8 could not turn green in the lab).
+
 Runtime estimate: 3–5 min (E8 two handovers incl. a gateway turn with a terminal tool call, E9 one pull).
 """
 
@@ -52,15 +58,22 @@ def _stash_names(path: Path) -> dict[str, list[str]]:
 
 
 @pytest.mark.e2e_timeout(900)
-def test_e08_secrets_denylist(lab, ev):
+def test_e08_secrets_denylist(lab, ev, outside):
     """E8 (R23, R25, SEC 5.x): an untracked ``.env``, a staged ``.env.local``, a stashed ``.env`` (``stash -u``), an
     ``id_ed25519`` outside the workspace that the transcript mentions, and a private key inside ``notes.txt`` are
     absent on B after a pull with ``--yes``, and each is listed (job status and note); ``.env.example`` arrives.
     The ``--include-secret`` half is ``test_e08_include_secret_transfers_exactly_one_file``.
 
-    Deviation: the key lives in ``lab/ws-e2e/a/keys`` and that folder is A's
-    ``export_roots`` for the pull: in this lab ``$HOME`` (``lab/a/home``) lies inside HERMES_HOME, where nothing is
-    ever an extra, and mentions outside ``$HOME``/``export_roots`` are dropped by the collector (DESIGN §8.2)."""
+    Location: the repository ``e08proj`` and the key's folder ``keys`` are siblings in ``outside`` (module docstring),
+    so no repository encloses the key and the key is a single extra candidate (DESIGN §8.2 step 3).
+
+    Policy configuration: A's ``export_roots`` = the key's folder, as before. The primary workspace may lie anywhere
+    (DESIGN §8.2, ``policy.check_source_file``), but a mentioned file outside it is a candidate only under ``$HOME``
+    or an ``export_roots`` entry; elsewhere the collector drops a mention without a word and "listed" could not hold.
+    The plugin's ``$HOME`` is Hermes' subprocess home — ``/root`` on this host (``Lab.profile_home``), ``lab/a/home``
+    under ``terminal.home_mode: profile``, maybe neither for another ``CTXH_E2E_OUTSIDE`` — so the export root makes the
+    key a candidate in every case, and the secrets denylist alone keeps it back (R23). An export root adds a location,
+    never a denylist exception (R18, ``check_source_file``: the name check comes before the location check)."""
     tag = _lab.uid(8)
     secrets = {
         "env": f"API_TOKEN=E08-ENV-{tag}",
@@ -69,11 +82,11 @@ def test_e08_secrets_denylist(lab, ev):
         "notes": f"-----BEGIN OPENSSH PRIVATE KEY-----\nE08-NOTES-{tag}\n-----END OPENSSH PRIVATE KEY-----\n",
         "key": f"-----BEGIN OPENSSH PRIVATE KEY-----\nE08-KEY-{tag}\n-----END OPENSSH PRIVATE KEY-----\n",
     }
-    key_path = lab.ws("a") / "keys" / "id_ed25519"
+    key_path = outside / "keys" / "id_ed25519"
     key_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.write_text(secrets["key"], encoding="utf-8")
     key_path.chmod(0o600)
-    cwd = lab.ws("a") / "e08proj"
+    cwd = outside / "e08proj"
     rb = lab.make_repo(cwd, dirty=False, ignored=False)
     rb.write(".env", secrets["env_stash"] + "\n")
     rb.write("stashed-note.txt", "stashed together with .env\n")
@@ -131,9 +144,10 @@ def test_e08_secrets_denylist(lab, ev):
 
 
 @pytest.mark.e2e_timeout(600)
-def test_e08_include_secret_transfers_exactly_one_file(lab, ev):
+def test_e08_include_secret_transfers_exactly_one_file(lab, ev, outside):
     """E8, second half (R25, X07): a push from A with ``--include-secret <repo>/.env --yes`` transfers exactly that one
-    secret file; the private key in ``notes.txt`` stays behind.
+    secret file; the private key in ``notes.txt`` stays behind. The repository lives in ``outside`` like the first
+    half's (module docstring): a source repository of its own, not nested in another work tree.
 
     Deviation: the confirmation is given with ``--yes`` (the CLI's confirmation); answering the ``ask_choice`` dialog
     would need a Desktop client."""
@@ -142,7 +156,7 @@ def test_e08_include_secret_transfers_exactly_one_file(lab, ev):
         "env": f"API_TOKEN=E08-ENV-{tag}",
         "notes": f"-----BEGIN OPENSSH PRIVATE KEY-----\nE08-NOTES-{tag}\n-----END OPENSSH PRIVATE KEY-----\n",
     }
-    cwd2 = lab.ws("a") / "e08bproj"
+    cwd2 = outside / "e08bproj"
     rb2 = lab.make_repo(cwd2, dirty=False, ignored=False)
     rb2.write(".env", secrets["env"] + "\n")
     rb2.write("notes.txt", secrets["notes"])
