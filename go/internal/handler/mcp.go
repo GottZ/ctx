@@ -44,7 +44,15 @@ type MCPConfig struct {
 // NewMCPHandler creates a Streamable HTTP handler for the MCP protocol.
 // Auth is handled by wrapping this handler with the existing Auth middleware,
 // extracting X-Context-Key (or Authorization: Bearer) from the request.
+//
+// The SDK handler is wrapped in the /mcp keepalive (mcp_keepalive.go), which
+// only the query tool arms: every other request passes through unchanged.
 func NewMCPHandler(cfg MCPConfig) http.Handler {
+	return withMCPKeepalive(newMCPSDKHandler(cfg))
+}
+
+// newMCPSDKHandler is the bare MCP SDK handler, without the keepalive.
+func newMCPSDKHandler(cfg MCPConfig) http.Handler {
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "ctx",
@@ -451,6 +459,12 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 		if input.Question == "" {
 			return errResult("question is required"), nil, nil
 		}
+		// From here on the call can run for minutes (backfill, embedding,
+		// rerank, synthesis) while the SDK holds the whole answer back. Keep
+		// the /mcp response alive until this handler returns; stop runs
+		// before the SDK writes its body (mcp_keepalive.go).
+		stopKeepalive := armMCPKeepalive(ctx)
+		defer stopKeepalive()
 		limit := input.Limit
 		if limit <= 0 {
 			limit = 5
