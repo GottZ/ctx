@@ -437,6 +437,22 @@ def _ignore_locally(repo: Path, rel: str, content: str) -> None:
     (repo / rel).write_text(content, encoding="utf-8")
 
 
+def _release_extra(lab, folder: Path) -> None:
+    """A's ``export_roots`` = ``[folder]``, so the ``--include`` of ``folder`` is planned: a local extra must lie under
+    the plugin's home or an ``export_roots`` entry (``engine/policy.py``, verdict ``outside_home``), and the plugin's
+    home in this lab is the account's home ``/root`` (``_lab.Lab.profile_home``), never ``lab/ws-e2e``. Call inside
+    ``lab.preserved("a")``; A's handover CLI reads its configuration on each call."""
+    lab.setting("a", "export_roots", json.dumps([str(folder)]))
+
+
+def _require_planned(status: dict, folder: Path) -> None:
+    """Scaffold: the ``--include`` folder was planned — an exclusion "outside home" means the lab did not release it
+    (``LabError``, not a product verdict)."""
+    for ex in status.get("job", {}).get("exclusions") or []:
+        if isinstance(ex, dict) and str(ex.get("path")) == str(folder) and ex.get("why") == "outside home":
+            raise _lab.LabError(f"scaffold: the --include folder {folder} was left out 'outside home' (export_roots)")
+
+
 def _lexically_inside(link: str, target: str) -> bool:
     """The lexical rule of DESIGN §10.3 (``engine/policy.py`` ``_link_target_inside``): a relative target that,
     joined to the link's folder and normalised without resolving any link, stays below the tree's root."""
@@ -976,10 +992,11 @@ ESCAPE_CHAIN = "escape-chain"
 def test_rv_h9_symlink_chain_does_not_lead_out_of_the_received_tree(lab, ev):
     """Review H9 (g5 H2): symlink chains in a file tree point out of its root.
 
-    A's session (own repository) is pushed to B with ``--include <dir>``: a plain directory (an ``extra_dir`` item,
-    sent as a file tree) holding ``data.txt``, ``a/b/c/u -> ../../..`` (the tree's root), ``escape-link ->
-    a/b/c/u/../../../..`` (lexically ``.``, really four levels above the root) and ``escape-chain ->
-    escape-link/escape-probe.txt``. All three pass the lexical check (scaffold, checked before the push).
+    A's session (own repository) is pushed to B with ``--include <dir>`` (released through A's ``export_roots``,
+    ``_release_extra``): a plain directory (an ``extra_dir`` item, sent as a file tree) holding ``data.txt``,
+    ``a/b/c/u -> ../../..`` (the tree's root), ``escape-link -> a/b/c/u/../../../..`` (lexically ``.``, really four
+    levels above the root) and ``escape-chain -> escape-link/escape-probe.txt``. All three pass the lexical check
+    (scaffold, checked before the push).
 
     Soll — REVIEW H9 Vorschlag ("Ein Link-Ziel darf keine Komponente durchlaufen, die im Manifest selbst ein Symlink
     ist. Nach dem Anlegen ``realpath`` gegen die Partial-Wurzel prüfen, sonst entfernen und als ``symlink``
@@ -1012,10 +1029,15 @@ def test_rv_h9_symlink_chain_does_not_lead_out_of_the_received_tree(lab, ev):
     ev.write("source-tree.json", {"tree": str(tree), "lexical": lexical, "links": source_links})
     if not all(lexical.values()) or all(x["inside"] for x in source_links):
         raise _lab.LabError(f"scaffold: the chain is not lexically inside and really outside: {lexical}")
-    res = lab.handover("a", "to", _lab.LAPTOP_GW, "--session", src.sid, "--include", str(tree), "--yes", timeout=600)
+    with lab.preserved("a"):
+        _release_extra(lab, tree)
+        res = lab.handover(
+            "a", "to", _lab.LAPTOP_GW, "--session", src.sid, "--include", str(tree), "--yes", timeout=600
+        )
     ev.cli("push", res)
     status = lab.job_status("a", res.job_id) if res.job_id else {"job": {}}
     ev.write("status-a.json", status)
+    _require_planned(status, tree)
     on_b = lab.handover("b", "status", res.job_id, timeout=180) if res.job_id else None
     if on_b is not None:
         ev.cli("status-b", on_b)
@@ -1038,8 +1060,9 @@ def test_rv_h11_target_refuses_a_tree_over_its_byte_limit_before_writing(lab, ev
     written.
 
     B's ``max_total_gb`` is 0.02 (≈ 21.5 MB; ``serve-b`` restarted). A's session (own small repository) is pushed to B
-    with ``--include <dir>``: 48 files of the same 1 MiB (48 MiB on disk, one block on the wire). A watcher sums, every
-    0.2 s, the bytes held under B's handover root in files of that tree (partial directories included).
+    with ``--include <dir>`` (released through A's ``export_roots``, ``_release_extra``): 48 files of the same 1 MiB
+    (48 MiB on disk, one block on the wire). A watcher sums, every 0.2 s, the bytes held under B's handover root in
+    files of that tree (partial directories included).
 
     Soll — REVIEW H11 Vorschlag ("Vor dem ersten Schreiben die Summe der Datei-``size`` gegen ``max_total_bytes`` und
     den freien Platz (×1,1) prüfen, wie ``_precheck`` es für git tut"), R28 ("ein Peer kann nie mehr ablegen, als der
@@ -1070,7 +1093,8 @@ def test_rv_h11_target_refuses_a_tree_over_its_byte_limit_before_writing(lab, ev
     if files * MiB <= 2 * limit:
         raise _lab.LabError("scaffold: the tree is not clearly over the limit")
     watch = None
-    with lab.preserved("b", restart=("serve-b",)):
+    with lab.preserved("b", restart=("serve-b",)), lab.preserved("a"):
+        _release_extra(lab, tree)
         lab.setting("b", "max_total_gb", str(limit_gb))
         lab.restart("serve-b")
         watch = _ByteWatch(lab.handover_root("b"), needle)
@@ -1083,6 +1107,7 @@ def test_rv_h11_target_refuses_a_tree_over_its_byte_limit_before_writing(lab, ev
         ev.cli("push", res)
         status = lab.job_status("a", res.job_id) if res.job_id else {"job": {}}
         ev.write("status-a.json", status)
+    _require_planned(status, tree)
     left = watch.measure()
     marks = lab.marks("a", src.sid)
     job = status["job"]

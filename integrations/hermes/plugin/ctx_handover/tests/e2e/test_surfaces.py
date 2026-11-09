@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def lab(lab):
     """The shared stand of ``tests/e2e/conftest.py`` in the shape these tests use (``ctl``, ``GW``, ``token``,
-    ``ws``)."""
+    ``ws``, ``handover``, ``restore_pairing``)."""
     labctl, token = lab.ctl, lab.tokens["a"]
     for inst in ("a", "b"):
         if labctl.identify(inst) is None:
@@ -44,7 +44,9 @@ def lab(lab):
     env_b = (labctl.home("b") / ".env").read_text(encoding="utf-8") if (labctl.home("b") / ".env").exists() else ""
     if f"CTX_HANDOVER_PEER_TOKEN={token}" not in env_b:
         pytest.fail("lab/b/.env needs CTX_HANDOVER_PEER_TOKEN equal to the token of serve-a (BUILD-ORDER §5 step 1)")
-    return type("Lab", (), {"ctl": labctl, "GW": lab.GW, "token": token, "ws": lab.ws})
+    shape = {"ctl": labctl, "GW": lab.GW, "token": token, "ws": lab.ws}
+    shape.update(handover=lab.handover, restore_pairing=lab.restore_pairing)
+    return type("Lab", (), shape)
 
 
 def _hermes(lab, inst: str, *args: str, timeout: float = 120) -> Any:
@@ -107,9 +109,14 @@ def test_e2e_settings_form_carries_the_schema(lab):
     assert lab.token not in blob
 
 
-def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab):
+def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab, ev):
     """R7, R17, BX P2: the address is set through the settings writer (``plugins.manage settings``), pairing is one
-    pasted line, and that line never contains the dashboard token."""
+    pasted line, and that line never contains the dashboard token.
+
+    The second pairing of B's key with A supersedes the stand's entry ``server`` (review M13: one key, one live row on
+    A), so ``doctor`` on B may report exactly that entry as ``[FAIL] peer server: … pair again``; any other ``[FAIL]``
+    fails the test. Afterwards ``server-f``/``laptop-f`` are removed and the stand is paired again
+    (``Lab.restore_pairing``)."""
     gw = lab.GW("a")
     try:
         reply = gw.rpc(
@@ -124,13 +131,21 @@ def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab):
     assert match, out_a
     assert lab.token not in out_a
     sid_b = _session(lab, "b")
-    out_b, _ = _slash(lab, "b", sid_b, f"/handover pair {match.group(1)} --name server-f")
-    assert "Paired with server-f" in out_b, out_b
-    peers_a, _ = _slash(lab, "a", sid_a, "/handover peers")
-    peers_b, _ = _slash(lab, "b", sid_b, "/handover peers")
-    assert "laptop-f · inbound" in peers_a and "server-f · dial" in peers_b
-    doctor, _ = _slash(lab, "b", sid_b, "/handover doctor")
-    assert "[ok] peer server-f" in doctor and "[FAIL]" not in doctor, doctor
+    try:
+        out_b, _ = _slash(lab, "b", sid_b, f"/handover pair {match.group(1)} --name server-f")
+        assert "Paired with server-f" in out_b, out_b
+        peers_a, _ = _slash(lab, "a", sid_a, "/handover peers")
+        peers_b, _ = _slash(lab, "b", sid_b, "/handover peers")
+        assert "laptop-f · inbound" in peers_a and "server-f · dial" in peers_b
+        doctor, _ = _slash(lab, "b", sid_b, "/handover doctor")
+    finally:
+        ev.cli("remove-server-f", lab.handover("b", "peers", "remove", "server-f", timeout=120))
+        ev.cli("revoke-laptop-f", lab.handover("a", "peers", "revoke", "laptop-f", timeout=120))
+        lab.restore_pairing(ev)
+    ev.write("doctor-b.txt", doctor)
+    fails = [ln for ln in doctor.splitlines() if ln.startswith("[FAIL]")]
+    assert "[ok] peer server-f" in doctor, doctor
+    assert all(ln.startswith("[FAIL] peer server:") and "pair again" in ln for ln in fails), fails
     assert "[warn] stored dashboard token" in doctor  # R17: the stored token opens A's whole dashboard
 
 

@@ -412,8 +412,9 @@ def test_acc1_bundle_export_keep_leaves_the_source_active(lab, ev):
 
 @pytest.mark.e2e_timeout(1200)
 def test_acc2_default_workspace_root_and_return_from_it(lab, ev):
-    """With B's ``workspace_root``/``allow_roots`` at their schema default (``~/hermes-handover``; in this lab HOME =
-    ``lab/b/home`` lies inside HERMES_HOME = ``lab/b``, as in the official Docker image) a pull lands under
+    """With B's ``workspace_root``/``allow_roots`` at their schema default (``~/hermes-handover``; with B's
+    ``terminal.home_mode: profile`` ``~`` = ``lab/b/home`` lies inside HERMES_HOME = ``lab/b``, as in the official
+    Docker image — ``_lab.Lab.profile_home``) a pull lands under
     ``<HERMES_HOME>/handover-workspaces/``; after work there, B sends the session back from that folder to A; the
     folder next to it stays a Hermes path, as target root and as source.
 
@@ -435,6 +436,7 @@ def test_acc2_default_workspace_root_and_return_from_it(lab, ev):
     repo_a = _lab.repo_state(src.repo)
     other = lab.make_source("a", f"acc2other{lab.run_id}", turns=("neighbour root",))
     with lab.preserved("b"):
+        lab.profile_home("b")  # ~ inside HERMES_HOME, never the host's real home (Lab.profile_home)
         _default_roots(lab, "b")
         ev.write("config-b-default.yaml", lab.config_path("b").read_text(encoding="utf-8"))
         # (1) receive with the default root

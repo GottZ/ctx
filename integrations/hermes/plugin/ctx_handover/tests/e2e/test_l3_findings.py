@@ -106,7 +106,8 @@ def _listed(reply: dict) -> list[str]:
 @pytest.mark.parametrize("variant", ["repo", "session_only"])
 def test_l3_f01_default_workspace_root_lands_in_handover_workspaces(lab, ev, variant):
     """L3-F01: B's ``workspace_root``/``allow_roots`` at the schema default ``~/hermes-handover``, which lies inside
-    HERMES_HOME in this lab (HOME = ``lab/b/home``; the official Docker image: HOME = HERMES_HOME = ``/opt/data``).
+    HERMES_HOME in this lab once B runs with ``terminal.home_mode: profile`` (``~`` = ``lab/b/home``, see
+    ``_lab.Lab.profile_home``; the official Docker image: HOME = HERMES_HOME = ``/opt/data``).
     ``repo``: the session's repository is a workspace item. ``session_only``: the cwd lies in A's Hermes home and
     ``--no-workspace`` hands the session over without it, so only the commit step creates the cwd under the default
     root — the case of the finding (c2:cwd).
@@ -127,6 +128,7 @@ def test_l3_f01_default_workspace_root_lands_in_handover_workspaces(lab, ev, var
             db.set_session_title(sid, f"f01only {lab.run_id}")
         extra, repo_a = ("--no-workspace",), None
     with lab.preserved("b"):
+        lab.profile_home("b")  # ~ inside HERMES_HOME, never the host's real home (Lab.profile_home)
         lab.setting("b", "workspace_root", DEFAULT_ROOT)
         lab.setting("b", "allow_roots", json.dumps([DEFAULT_ROOT]))
         _jid, sid_b = _pull(lab, ev, sid, "take-default-root", *extra)

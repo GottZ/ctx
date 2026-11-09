@@ -436,6 +436,18 @@ class Lab:
     def setting(self, inst: str, key: str, value: str) -> None:
         self.config_set(inst, f"plugins.entries.ctx_handover.settings.{key}", value)
 
+    def profile_home(self, inst: str) -> None:
+        """``terminal.home_mode: profile`` for ``inst``, so ``~`` of its Hermes processes is ``<HERMES_HOME>/home``.
+
+        The plugin expands ``~`` as Hermes' own tools do (``engine/hostcompat.py`` ``effective_home`` →
+        upstream ``hermes_constants.get_subprocess_home``, since the L3-F20 fix): on a host (no container), a launch
+        ``HOME`` equal to the profile home ``<HERMES_HOME>/home`` — the lab's ``HOME`` — is repaired to the account's
+        home from the password database (``/root`` on this host); containers and ``home_mode: profile`` keep
+        ``<HERMES_HOME>/home``. A test that needs ``~`` inside HERMES_HOME (the official image, R29) sets this inside
+        ``preserved(inst)``; without it the schema default ``~/hermes-handover`` is the host's real
+        ``/root/hermes-handover`` (Nachlauf ``edd53876``: written there by ``test_l3_f01_*``)."""
+        self.config_set(inst, "terminal.home_mode", "profile")
+
     def env_set(self, inst: str, key: str, value: str | None) -> None:
         """Set (or with ``None`` remove) ``key`` in the home's ``.env`` — what the Desktop settings form writes."""
         path = self.env_path(inst)
@@ -859,6 +871,42 @@ class Lab:
         if redeemed.rc != 0:
             raise LabError(f"pairing on {dialer} failed: {redeemed.brief()}")
         return made, redeemed
+
+    def _server_inbound_on_a(self) -> list[str]:
+        rows = self.ledger_rows("b", "SELECT peer_id FROM peers WHERE name = ?", (SERVER,))
+        if not rows:
+            return []
+        live = self.ledger_rows(
+            "a",
+            "SELECT name FROM peers WHERE peer_id = ? AND direction = 'inbound' AND revoked_at IS NULL",
+            (str(rows[0]["peer_id"]),),
+        )
+        return [str(r["name"]) for r in live]
+
+    def restore_pairing(self, ev: Evidence | None = None) -> None:
+        """Give the stand its pairing A←B back (B's dial entry ``server`` = A's inbound ``laptop``) after a test paired
+        B with A a second time.
+
+        At a second pairing A revokes its older inbound row of B's key (``engine/ledger.py`` ``redeem_pair_code``,
+        review M13: one key, one live row) and identifies B's requests by that row's peer id, so B's ``server`` is
+        refused (``unauthorized``) from then on. Re-pairs as ``conftest`` does: B ``peers remove server``, A's revoked
+        ``laptop`` renamed out of the way (``peers rename``), ``laptop``/``server`` by paste string. Checked: A has
+        exactly one live inbound row with the peer id of B's ``server``, named ``laptop``. Nothing happens when that
+        already holds."""
+        if self._server_inbound_on_a() == [LAPTOP]:
+            return
+        steps = [("restore-remove-server", self.handover("b", "peers", "remove", SERVER, timeout=120))]
+        old = f"{LAPTOP}-old{uid(4)}"
+        steps.append(("restore-rename-laptop", self.handover("a", "peers", "rename", LAPTOP, old, timeout=120)))
+        made, redeemed = self.pair("a", "b", hint=LAPTOP, name=SERVER)
+        steps += [("restore-pair-code", made), ("restore-pair-redeem", redeemed)]
+        live = self._server_inbound_on_a()
+        if ev is not None:
+            for name, res in steps:
+                ev.cli(name, res)
+            ev.write("restore-pairing.json", {"live_inbound_of_server": live, "renamed": old})
+        if live != [LAPTOP]:
+            raise LabError(f"scaffold: the stand's pairing A<-B was not restored: {live}")
 
 
 # ---------------------------------------------------------------------------------------------------------
