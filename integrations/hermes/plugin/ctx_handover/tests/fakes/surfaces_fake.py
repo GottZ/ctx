@@ -292,6 +292,9 @@ class FakeBackend:
         self.confirm_reasons: list[str] = []
         self.confirm_answers: list[str] = []
         self.confirm_even_with_yes = False
+        # info["yes_exempt"] as the conductor passes it (conductor._confirm, gp-a); None = D's table over the reasons
+        self.yes_exempt: list[str] | None = None
+        self.summary_extra: dict = {}  # keys merged into D's presend_summary (e.g. workspace_excluded, R30)
         self.instruction_files: list[dict] = []
         self.pull_log: list[dict] = []
         self.start_error: BaseException | None = None
@@ -309,6 +312,8 @@ class FakeBackend:
         self.granted: list[str] = []
         self.foreground_code = 0
         self.outbox: dict = {}
+        self.reclaim_result: dict = {"state": "reclaimed", "warnings": ["the copy on laptop stays active"]}
+        self.presend_by_job: dict[str, dict] = {}  # the conductor's journaled presend document per job (R32)
         self._n = 0
 
     def _rec(self, _call: str, **kw) -> None:
@@ -414,7 +419,10 @@ class FakeBackend:
             answer = confirm(
                 {
                     "reasons": list(self.confirm_reasons),
-                    "summary": _plan.presend_summary(self.final),
+                    "yes_exempt": (
+                        list(self.yes_exempt) if self.yes_exempt is not None else _plan.yes_exempt(self.confirm_reasons)
+                    ),
+                    "summary": {**_plan.presend_summary(self.final), **self.summary_extra},
                     "final_plan": self.final,
                     "suspected_secrets": [
                         i.source_path
@@ -455,6 +463,12 @@ class FakeBackend:
         pulled = [{"peer": r.get("peer_id"), "at": r.get("at"), "items": r.get("items")} for r in self.pull_log]
         return {"jobs": list(self.jobs), "pull_log": list(self.pull_log), "outbox_pending": 0, "pulled_by": pulled}
 
+    def job_ids(self) -> list[str]:
+        """Every job id known here (``statuses`` and ``jobs``, plus the ids ``start_job`` handed out)."""
+        ids = [*self.statuses, *(str(j.get("job_id")) for j in self.jobs if j.get("job_id"))]
+        ids += [kw["job_id"] for name, kw in self.calls if name == "start_job"]
+        return list(dict.fromkeys(ids))
+
     def create_offer(self, peer, session_ref, options, *, side_question, include_secret=()) -> dict:
         refinement = side_question("which resources?") if side_question else None
         self._rec(
@@ -473,7 +487,7 @@ class FakeBackend:
 
     def reclaim(self, session_id: str, *, force: bool) -> dict:
         self._rec("reclaim", session_id=session_id, force=force)
-        return {"state": "reclaimed", "warnings": ["the copy on laptop stays active"]}
+        return dict(self.reclaim_result)
 
     def gc(self, *, job_id, all_jobs: bool) -> dict:
         self._rec("gc", job_id=job_id, all_jobs=all_jobs)
@@ -493,8 +507,13 @@ class FakeBackend:
     def suggestion_put(self, session_id: str, data: dict) -> None:
         self.suggestions.append((session_id, data))
 
-    def presend_summary(self, final) -> dict:
-        return _surfaces.plan_summary(final)
+    def presend_summary(self, final, *, job_id=None) -> dict:
+        self._rec("presend_summary", job_id=job_id)
+        if job_id in self.presend_by_job:
+            return _surfaces.plan_summary(final, self.presend_by_job[job_id])
+        if not self.summary_extra:
+            return _surfaces.plan_summary(final)
+        return _surfaces.plan_summary(final, {**_plan.presend_summary(final), **self.summary_extra})
 
     def doctor_checks(self, *, measure: bool = False) -> list[dict]:
         self._rec("doctor_checks", measure=measure)

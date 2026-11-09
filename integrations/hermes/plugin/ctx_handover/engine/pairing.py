@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .crypto import Identity, b64d, b64e, consteq, fingerprint_of, length_prefixed, pair_proof, random_b64
-from .errors import BadRequest, BadResponseSignature, PairInvalid
+from .errors import BadRequest, BadResponseSignature, ConflictError, HandoverError, PairInvalid
 from .ids import CROCKFORD_ALPHABET, ULID_RE, ulid
 from .jsonutil import canonical_bytes, loads_bounded, sha256_hex
 from .model import GateAuth, Hello, Peer, Right
@@ -332,15 +332,33 @@ def redeem_dialer(
     """Dialer side (DESIGN §12.3 steps 3–6): unsigned ``hello`` + fingerprint check, redeem with proof, verify
     ``server_proof``, pin the listener key, store the ``dial`` peer, then one signed ``hello``.
 
-    ``client_factory(peer)`` returns an object with ``hello(signed=…) -> Hello`` and ``redeem(body) -> dict``
-    (``wire.WireClient``). Gate failures surface as ``GateRejected`` from the client.
+    Pairing is two-sided or nothing (L3-F05): the name for the listener is settled before the code is redeemed —
+    an explicit ``name`` that is taken here ⇒ ``ConflictError`` with the code unused; without one the listener's
+    paste-string name or, when taken, the next free one (``_free_name``, as the listener does). When the peer still
+    cannot be stored after the redeem (another process of this profile took the name meanwhile), the redeem is
+    taken back on the listener (``_withdraw``) and the error says whether that worked (``listener_entry``).
+
+    ``client_factory(peer)`` returns an object with ``hello(signed=…) -> Hello``, ``redeem(body) -> dict`` and
+    ``call(method, route, body) -> dict`` (``wire.WireClient``). Gate failures surface as ``GateRejected`` from
+    the client.
     """
     match = _CODE_RE.fullmatch(pair["code"])
     if not match:
         raise BadRequest("invalid pairing code", field="pair.code")
     secret = match.group(2)
+    wanted = clean_name(name or pair["name"], "listener")
+    if not name:
+        wanted = _free_name(ledger, wanted)
+    elif _name_taken(ledger, wanted):
+        raise ConflictError(
+            f"a peer named {wanted!r} already exists on this device; the pairing code was not used. Pair again with "
+            f"--name <another name>, or rename the existing entry first (/handover peers rename {wanted} <new>).",
+            field="name",
+            name=wanted,
+            code_used=False,
+        )
     provisional = Peer(
-        name=clean_name(name or pair["name"], "listener"),
+        name=wanted,
         peer_id="",
         direction="dial",
         url=pair["url"],
@@ -405,9 +423,48 @@ def redeem_dialer(
         created_at=now,
         last_seen_at=now,
     )
-    ledger.upsert_peer(peer)
+    try:
+        ledger.upsert_peer(peer)
+    except Exception as exc:
+        withdrawn = _withdraw(client_factory, peer)
+        text = _not_stored_text(str(pair["name"]), withdrawn)
+        if not isinstance(exc, HandoverError):
+            raise HandoverError(text, listener_entry="withdrawn" if withdrawn else "kept") from exc
+        exc.message = f"{exc.message}; {text}"
+        exc.details["listener_entry"] = "withdrawn" if withdrawn else "kept"
+        raise
     client_factory(peer).hello(signed=True)
     return peer
+
+
+def _name_taken(ledger: Ledger, name: str) -> bool:
+    """Whether a peer row — revoked ones included, they keep their name — already uses ``name`` here."""
+    return any(p.name == name for p in ledger.peers(include_revoked=True))
+
+
+def _withdraw(client_factory: Callable[[Peer], object], peer: Peer) -> bool:
+    """Take back a redeem this dialer could not store: a signed ``POST /v1/pair/revoke`` as the new inbound peer
+    (route #3, DESIGN §12.5) — the listener marks its entry revoked, so nothing stays paired on one side only. True
+    only when the listener confirms ``{"revoked": true}``; any failure means its entry is still there."""
+    try:
+        answer = client_factory(peer).call("POST", "pair/revoke", {})
+    except Exception:
+        return False
+    return isinstance(answer, dict) and answer.get("revoked") is True
+
+
+def _not_stored_text(listener: str, withdrawn: bool) -> str:
+    if withdrawn:
+        return (
+            f"this device did not store the pairing with {listener}, and {listener} has withdrawn it, so nothing is "
+            f"paired. Run /handover pair on {listener} for a new code and pair again (with another --name if the name "
+            "is taken)."
+        )
+    return (
+        f"this device did not store the pairing with {listener}, and {listener} could not be told: it still lists "
+        f"this device as paired. Revoke this device there (/handover peers revoke <its name for this device> on "
+        f"{listener}), then pair again with a new code."
+    )
 
 
 def _hostname() -> str:

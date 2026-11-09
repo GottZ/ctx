@@ -439,6 +439,11 @@ class EnvFacts:
     capabilities: frozenset[str] = frozenset()
     python_version: str = added_field("")
     """``python3 --version`` of this side (DESIGN §11.1 ``python_toolchain``; diagnostics only, W075)."""
+    workspace_root_ok: bool | None = added_field(None)
+    """R29: this side checked its ``workspace_root`` when it probed its facts. True = usable, False = unusable
+    (``workspace_root_problem`` says why), None = not checked (facts not built by ``envfacts.probe``)."""
+    workspace_root_problem: str = added_field("")
+    """Empty when ``workspace_root_ok`` is True; else one of ``envfacts.ROOT_PROBLEMS`` (D)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -561,6 +566,10 @@ class ResourcePlan:
     approx_tokens: int
     warnings: tuple[str, ...] = added_field(())
     """Warning codes of the source side while planning (busy probe, resume guard; W072)."""
+    context_tokens: int = added_field(0)
+    """Estimated tokens of the session's active context — the tip segment's live rows, what the target's model loads
+    on the first turn (``plan.active_context_tokens``; R32, L3-F17). 0 = not estimated (a source before this field):
+    the window check then measures the session by ``approx_tokens``, the lineage total."""
 
 
 @dataclass(frozen=True)

@@ -108,7 +108,7 @@ def test_ledger_schema_create_and_reopen(tmp_path, clock):
         "ctx_outbox",
     }
     assert expected <= tables
-    lg.create_job("J1", Role.CONDUCTOR, Mode.PUSH, None, {"a": 1})
+    lg.create_job("01JZJ100000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {"a": 1})
     lg.close()
     for p in [path, *(path.with_name(path.name + s) for s in ("-wal", "-shm"))]:
         if p.exists():
@@ -118,7 +118,7 @@ def test_ledger_schema_create_and_reopen(tmp_path, clock):
     lg2 = Ledger(path, clock=clock)
     assert lg2.instance_id() == iid
     assert lg2.schema_version == ledger_mod.SCHEMA_VERSION
-    assert lg2.job("J1", Role.CONDUCTOR)["state"] == "created"
+    assert lg2.job("01JZJ100000000000000000000", Role.CONDUCTOR)["state"] == "created"
     assert not lg2.readonly
     lg2.close()
 
@@ -136,7 +136,7 @@ def test_ledger_newer_schema_refuses_write(tmp_path, clock):
     assert lg.schema_version == 99
     assert lg.jobs() == []
     with pytest.raises(InvalidState) as exc:
-        lg.create_job("J", Role.CONDUCTOR, Mode.PUSH, None, {})
+        lg.create_job("01JZJ000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {})
     assert exc.value.details["reason"] == "newer_schema"
     lg.close()
 
@@ -147,133 +147,140 @@ def test_ledger_newer_schema_refuses_write(tmp_path, clock):
 
 
 def test_ledger_job_create_idempotent_and_conflict(led):
-    led.create_job("J1", Role.TARGET, Mode.PUSH, "P1", {"x": 1})
-    led.create_job("J1", Role.TARGET, Mode.PUSH, "P1", {"x": 1})
+    led.create_job("01JZJ100000000000000000000", Role.TARGET, Mode.PUSH, "P1", {"x": 1})
+    led.create_job("01JZJ100000000000000000000", Role.TARGET, Mode.PUSH, "P1", {"x": 1})
     with pytest.raises(JobConflict):
-        led.create_job("J1", Role.TARGET, Mode.PUSH, "P1", {"x": 2})
+        led.create_job("01JZJ100000000000000000000", Role.TARGET, Mode.PUSH, "P1", {"x": 2})
     with pytest.raises(JobConflict):
-        led.create_job("J1", Role.TARGET, Mode.PUSH, "P2", {"x": 1})
-    row = led.job("J1", Role.TARGET)
+        led.create_job("01JZJ100000000000000000000", Role.TARGET, Mode.PUSH, "P2", {"x": 1})
+    row = led.job("01JZJ100000000000000000000", Role.TARGET)
     assert row["state"] == "open" and row["params"] == {"x": 1} and row["peer_id"] == "P1"
-    assert led.job("J1", Role.SOURCE) is None
+    assert led.job("01JZJ100000000000000000000", Role.SOURCE) is None
 
 
 def test_ledger_transition_cas_state_and_epoch(led):
     """★ Wrong state or stale epoch ⇒ no change, no event [SK M5].
 
     Mutant: transition() without the owner-epoch comparison (CAS on state only)."""
-    led.create_job("J", Role.CONDUCTOR, Mode.PUSH, None, {})
-    epoch = led.claim_owner("J", Role.CONDUCTOR, "o1", 60)
+    led.create_job("01JZJ000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {})
+    epoch = led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "o1", 60)
     assert epoch == 1
-    before = len(led.events("J", Role.CONDUCTOR))
+    before = len(led.events("01JZJ000000000000000000000", Role.CONDUCTOR))
 
     with pytest.raises(InvalidState) as wrong_state:
-        led.transition("J", Role.CONDUCTOR, "hello", "facts", {"x": 1}, epoch=epoch)
+        led.transition("01JZJ000000000000000000000", Role.CONDUCTOR, "hello", "facts", {"x": 1}, epoch=epoch)
     assert not isinstance(wrong_state.value, Fenced)
     assert wrong_state.value.details["state"] == "created"
-    assert led.job("J", Role.CONDUCTOR)["state"] == "created"
-    assert len(led.events("J", Role.CONDUCTOR)) == before
+    assert led.job("01JZJ000000000000000000000", Role.CONDUCTOR)["state"] == "created"
+    assert len(led.events("01JZJ000000000000000000000", Role.CONDUCTOR)) == before
 
     with pytest.raises(Fenced) as stale:
-        led.transition("J", Role.CONDUCTOR, "created", "hello", {}, epoch=epoch + 1)
+        led.transition("01JZJ000000000000000000000", Role.CONDUCTOR, "created", "hello", {}, epoch=epoch + 1)
     assert stale.value.details["reason"] == "stale_epoch"
-    assert led.job("J", Role.CONDUCTOR)["state"] == "created"
-    assert len(led.events("J", Role.CONDUCTOR)) == before
+    assert led.job("01JZJ000000000000000000000", Role.CONDUCTOR)["state"] == "created"
+    assert len(led.events("01JZJ000000000000000000000", Role.CONDUCTOR)) == before
 
-    led.transition("J", Role.CONDUCTOR, ("created", "hello"), "hello", {"note": "ok"}, epoch=epoch)
-    assert led.job("J", Role.CONDUCTOR)["state"] == "hello"
-    last = led.events("J", Role.CONDUCTOR)[-1]
+    led.transition(
+        "01JZJ000000000000000000000", Role.CONDUCTOR, ("created", "hello"), "hello", {"note": "ok"}, epoch=epoch
+    )
+    assert led.job("01JZJ000000000000000000000", Role.CONDUCTOR)["state"] == "hello"
+    last = led.events("01JZJ000000000000000000000", Role.CONDUCTOR)[-1]
     assert last["kind"] == "transition" and last["state"] == "hello" and last["data"]["note"] == "ok"
     assert last["epoch"] == epoch
 
 
 def test_ledger_event_cas_on_epoch(led):
-    led.create_job("J", Role.TARGET, Mode.PUSH, "P", {})
-    e = led.claim_owner("J", Role.TARGET, "o1", 60)
-    led.event("J", Role.TARGET, "intent", {"step": "c1:w0", "direction": "forward"}, epoch=e)
-    ev = led.events("J", Role.TARGET)[-1]
+    led.create_job("01JZJ000000000000000000000", Role.TARGET, Mode.PUSH, "P", {})
+    e = led.claim_owner("01JZJ000000000000000000000", Role.TARGET, "o1", 60)
+    led.event("01JZJ000000000000000000000", Role.TARGET, "intent", {"step": "c1:w0", "direction": "forward"}, epoch=e)
+    ev = led.events("01JZJ000000000000000000000", Role.TARGET)[-1]
     assert (ev["kind"], ev["step"], ev["direction"]) == ("intent", "c1:w0", "forward")
-    n = len(led.events("J", Role.TARGET))
+    n = len(led.events("01JZJ000000000000000000000", Role.TARGET))
     with pytest.raises(Fenced):
-        led.event("J", Role.TARGET, "done", {"step": "c1:w0"}, epoch=e - 1)
-    assert len(led.events("J", Role.TARGET)) == n
+        led.event("01JZJ000000000000000000000", Role.TARGET, "done", {"step": "c1:w0"}, epoch=e - 1)
+    assert len(led.events("01JZJ000000000000000000000", Role.TARGET)) == n
 
 
 def test_ledger_claim_owner_live_stale_and_heartbeat(led, clock):
-    led.create_job("J", Role.CONDUCTOR, Mode.PULL, "P", {})
-    assert led.claim_owner("J", Role.CONDUCTOR, "A", 60) == 1
-    assert led.claim_owner("J", Role.CONDUCTOR, "A", 60) == 1  # same owner: same epoch
-    assert led.claim_owner("J", Role.CONDUCTOR, "B", 60) is None  # live owner
+    led.create_job("01JZJ000000000000000000000", Role.CONDUCTOR, Mode.PULL, "P", {})
+    assert led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "A", 60) == 1
+    assert led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "A", 60) == 1  # same owner: same epoch
+    assert led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "B", 60) is None  # live owner
     clock.advance(30)
-    assert led.heartbeat("J", Role.CONDUCTOR, "A", 1)
+    assert led.heartbeat("01JZJ000000000000000000000", Role.CONDUCTOR, "A", 1)
     clock.advance(59)
-    assert led.claim_owner("J", Role.CONDUCTOR, "B", 60) is None
+    assert led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "B", 60) is None
     clock.advance(2)
-    assert [j["job_id"] for j in led.stale_jobs(60)] == ["J"]
-    assert led.claim_owner("J", Role.CONDUCTOR, "B", 60) == 2
-    assert not led.heartbeat("J", Role.CONDUCTOR, "A", 1)
+    assert [j["job_id"] for j in led.stale_jobs(60)] == ["01JZJ000000000000000000000"]
+    assert led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "B", 60) == 2
+    assert not led.heartbeat("01JZJ000000000000000000000", Role.CONDUCTOR, "A", 1)
     assert led.stale_jobs(60) == []
-    led.release_owner("J", Role.CONDUCTOR, "B", 2)
-    assert led.job("J", Role.CONDUCTOR)["owner"] is None
-    assert led.claim_owner("J", Role.CONDUCTOR, "C", 60) == 3
+    led.release_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "B", 2)
+    assert led.job("01JZJ000000000000000000000", Role.CONDUCTOR)["owner"] is None
+    assert led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "C", 60) == 3
 
 
 def test_participant_epoch_monotonic(led):
-    led.create_job("J", Role.SOURCE, Mode.PULL, "P", {})
-    assert led.peer_epoch("J", Role.SOURCE, 3) == 3
-    assert led.peer_epoch("J", Role.SOURCE, 3) == 3
-    assert led.peer_epoch("J", Role.SOURCE, 5) == 5
+    led.create_job("01JZJ000000000000000000000", Role.SOURCE, Mode.PULL, "P", {})
+    assert led.peer_epoch("01JZJ000000000000000000000", Role.SOURCE, 3) == 3
+    assert led.peer_epoch("01JZJ000000000000000000000", Role.SOURCE, 3) == 3
+    assert led.peer_epoch("01JZJ000000000000000000000", Role.SOURCE, 5) == 5
     with pytest.raises(InvalidState) as exc:
-        led.peer_epoch("J", Role.SOURCE, 4)
+        led.peer_epoch("01JZJ000000000000000000000", Role.SOURCE, 4)
     assert exc.value.details["reason"] == "stale_epoch"
 
 
 def test_ledger_cancel_versus_commit_intent(led):
     """Cancel is accepted until ``intent: commit`` is journaled; the two are serialised (DESIGN §3.8)."""
-    led.create_job("J", Role.CONDUCTOR, Mode.PUSH, None, {})
-    e = led.claim_owner("J", Role.CONDUCTOR, "A", 60)
-    led.set_cancel("J")
-    assert led.cancel_requested("J")
-    assert led.intent_commit("J", e) is False
+    led.create_job("01JZJ000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {})
+    e = led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "A", 60)
+    led.set_cancel("01JZJ000000000000000000000")
+    assert led.cancel_requested("01JZJ000000000000000000000")
+    assert led.intent_commit("01JZJ000000000000000000000", e) is False
 
-    led.create_job("K", Role.CONDUCTOR, Mode.PUSH, None, {})
-    e2 = led.claim_owner("K", Role.CONDUCTOR, "A", 60)
-    assert led.intent_commit("K", e2) is True
+    led.create_job("01JZK000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {})
+    e2 = led.claim_owner("01JZK000000000000000000000", Role.CONDUCTOR, "A", 60)
+    assert led.intent_commit("01JZK000000000000000000000", e2) is True
     with pytest.raises(InvalidState) as exc:
-        led.set_cancel("K")
+        led.set_cancel("01JZK000000000000000000000")
     assert exc.value.details["reason"] == "committing"
-    assert not led.cancel_requested("K")
+    assert not led.cancel_requested("01JZK000000000000000000000")
 
 
 def test_ledger_restarts_and_result(led):
-    led.create_job("J", Role.CONDUCTOR, Mode.PUSH, None, {})
-    e = led.claim_owner("J", Role.CONDUCTOR, "A", 60)
-    led.job_update("J", Role.CONDUCTOR, epoch=e, restarts=2, last_error={"code": "x"}, result={"ok": True})
-    row = led.job("J", Role.CONDUCTOR)
+    led.create_job("01JZJ000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {})
+    e = led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "A", 60)
+    led.job_update(
+        "01JZJ000000000000000000000", Role.CONDUCTOR, epoch=e, restarts=2, last_error={"code": "x"}, result={"ok": True}
+    )
+    row = led.job("01JZJ000000000000000000000", Role.CONDUCTOR)
     assert row["restarts"] == 2 and row["last_error"] == {"code": "x"} and row["result"] == {"ok": True}
     with pytest.raises(Fenced):
-        led.job_update("J", Role.CONDUCTOR, epoch=e + 7, restarts=3)
+        led.job_update("01JZJ000000000000000000000", Role.CONDUCTOR, epoch=e + 7, restarts=3)
 
 
 def test_ledger_compact_terminal_and_purge_job(led, clock):
-    led.create_job("J", Role.CONDUCTOR, Mode.PUSH, None, {})
-    e = led.claim_owner("J", Role.CONDUCTOR, "A", 60)
+    led.create_job("01JZJ000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {})
+    e = led.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "A", 60)
     for i in range(5):
-        led.event("J", Role.CONDUCTOR, "info", {"i": i}, epoch=e)
-    led.transition("J", Role.CONDUCTOR, "*", "done", {}, epoch=e)
-    led.op_put("J", "plan", "d", "op1", OpState.DONE, result={})
-    led.job_object("J", "obj1")
+        led.event("01JZJ000000000000000000000", Role.CONDUCTOR, "info", {"i": i}, epoch=e)
+    led.transition("01JZJ000000000000000000000", Role.CONDUCTOR, "*", "done", {}, epoch=e)
+    led.op_put("01JZJ000000000000000000000", "plan", "d", "op1", OpState.DONE, result={})
+    led.job_object("01JZJ000000000000000000000", "obj1")
     clock.advance(31 * 86400)
     assert led.compact_terminal(30 * 86400) >= 5
-    evs = led.events("J", Role.CONDUCTOR)
+    evs = led.events("01JZJ000000000000000000000", Role.CONDUCTOR)
     assert len(evs) == 1 and evs[0]["state"] == "done"
     assert led.op_by_id("op1") is None  # ops of terminal jobs go after 7 days
 
-    led.create_job("K", Role.CONDUCTOR, Mode.PUSH, None, {})
+    led.create_job("01JZK000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {})
     with pytest.raises(InvalidState):
-        led.purge_job("K")
-    led.purge_job("J")
-    assert led.job("J", Role.CONDUCTOR) is None and led.events("J", Role.CONDUCTOR) == []
+        led.purge_job("01JZK000000000000000000000")
+    led.purge_job("01JZJ000000000000000000000")
+    assert (
+        led.job("01JZJ000000000000000000000", Role.CONDUCTOR) is None
+        and led.events("01JZJ000000000000000000000", Role.CONDUCTOR) == []
+    )
     assert "obj1" not in led.live_objects()
 
 
@@ -283,14 +290,14 @@ def test_ledger_compact_terminal_and_purge_job(led, clock):
 
 
 def test_ledger_ops_roundtrip(led):
-    led.op_put("J", "export", "dg", "op-1", OpState.RUNNING, progress={"step": "x"})
-    row = led.op_get("J", "export", "dg")
+    led.op_put("01JZJ000000000000000000000", "export", "dg", "op-1", OpState.RUNNING, progress={"step": "x"})
+    row = led.op_get("01JZJ000000000000000000000", "export", "dg")
     assert row["op_id"] == "op-1" and row["state"] == "running" and row["progress"] == {"step": "x"}
-    led.op_put("J", "export", "dg", "op-1", OpState.DONE, result={"capsule_id": "c"})
+    led.op_put("01JZJ000000000000000000000", "export", "dg", "op-1", OpState.DONE, result={"capsule_id": "c"})
     row = led.op_by_id("op-1")
     assert row["state"] == "done" and row["result"] == {"capsule_id": "c"} and row["progress"] is None
-    assert led.op_get("J", "export", "other") is None
-    assert [r["op_id"] for r in led.ops_for_job("J")] == ["op-1"]
+    assert led.op_get("01JZJ000000000000000000000", "export", "other") is None
+    assert [r["op_id"] for r in led.ops_for_job("01JZJ000000000000000000000")] == ["op-1"]
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -303,35 +310,39 @@ def test_ledger_one_active_handover_per_root(led):
 
     Mutant: ``source_lock`` without its conflict check and without the partial unique index
     ``one_active_handover``."""
-    led.source_lock("J1", _info(), "h1", "laptop")
-    led.source_lock("J1", _info(), "h1b", "laptop")  # same job: idempotent re-lock
-    assert led.source_state("J1")["holder"] == "h1b"
+    led.source_lock("01JZJ100000000000000000000", _info(), "h1", "laptop")
+    led.source_lock("01JZJ100000000000000000000", _info(), "h1b", "laptop")  # same job: idempotent re-lock
+    assert led.source_state("01JZJ100000000000000000000")["holder"] == "h1b"
     with pytest.raises(AlreadyHandingOver) as exc:
-        led.source_lock("J2", _info(tip="t2", lineage=("r1", "t2")), "h2", "server")
-    assert exc.value.details["job"] == "J1"
-    assert led.source_state("J2") is None
-    led.source_set("J1", "released")
-    led.source_lock("J2", _info(tip="t2", lineage=("r1", "t2")), "h2", "server")
-    assert led.source_state("J2")["state"] == "locking"
+        led.source_lock("01JZJ200000000000000000000", _info(tip="t2", lineage=("r1", "t2")), "h2", "server")
+    assert exc.value.details["job"] == "01JZJ100000000000000000000"
+    assert led.source_state("01JZJ200000000000000000000") is None
+    led.source_set("01JZJ100000000000000000000", "released")
+    led.source_lock("01JZJ200000000000000000000", _info(tip="t2", lineage=("r1", "t2")), "h2", "server")
+    assert led.source_state("01JZJ200000000000000000000")["state"] == "locking"
     with pytest.raises(AlreadyHandingOver):
-        led.source_set("J1", "locking")
+        led.source_set("01JZJ100000000000000000000", "locking")
 
 
 def test_ledger_source_rows_veto_backups(led):
-    led.source_lock("J1", _info(), "h1", "laptop")
-    led.source_set("J1", "prepared", prepared_at=5.0, title="T (handed over)")
-    led.veto_add("J1", ["r1", "t1"], "r1")
-    led.backup_put("J1", "goal:t1", '{"status": "active"}')
-    led.backup_put("J1", "title:t1", None)
+    led.source_lock("01JZJ100000000000000000000", _info(), "h1", "laptop")
+    led.source_set("01JZJ100000000000000000000", "prepared", prepared_at=5.0, title="T (handed over)")
+    led.veto_add("01JZJ100000000000000000000", ["r1", "t1"], "r1")
+    led.backup_put("01JZJ100000000000000000000", "goal:t1", '{"status": "active"}')
+    led.backup_put("01JZJ100000000000000000000", "title:t1", None)
     rows = {r["session_id"]: r for r in led.veto_rows()}
-    assert set(rows) == {"r1", "t1"} and rows["t1"]["state"] == "prepared" and rows["t1"]["job"] == "J1"
+    assert (
+        set(rows) == {"r1", "t1"}
+        and rows["t1"]["state"] == "prepared"
+        and rows["t1"]["job"] == "01JZJ100000000000000000000"
+    )
     assert rows["t1"]["peer"] == "laptop" and rows["t1"]["root_id"] == "r1"
-    assert led.source_by_session("t1")["job_id"] == "J1"
+    assert led.source_by_session("t1")["job_id"] == "01JZJ100000000000000000000"
     assert led.source_by_session("nope") is None
-    assert dict(led.backups("J1")) == {"goal:t1": '{"status": "active"}', "title:t1": None}
-    led.source_set("J1", "retiring", ack={"session_id": "S"})
-    assert led.source_state("J1")["ack"] == {"session_id": "S"}
-    led.veto_remove("J1")
+    assert dict(led.backups("01JZJ100000000000000000000")) == {"goal:t1": '{"status": "active"}', "title:t1": None}
+    led.source_set("01JZJ100000000000000000000", "retiring", ack={"session_id": "S"})
+    assert led.source_state("01JZJ100000000000000000000")["ack"] == {"session_id": "S"}
+    led.veto_remove("01JZJ100000000000000000000")
     assert led.veto_rows() == []
 
 
@@ -413,31 +424,31 @@ def test_ledger_revoke_cascades(led, clock):
     led.offer_put("O1", "I1", "s1", None, None, now + 3600)
     led.offer_put("O2", "I2", "s2", None, None, now + 3600)
     for jid, role, state in (
-        ("T-prep", Role.TARGET, "preparing"),
-        ("T-commit", Role.TARGET, "committing"),
-        ("T-done", Role.TARGET, "committed"),
+        ("01JZT0PREP0000000000000000", Role.TARGET, "preparing"),
+        ("01JZT0C0MMYT00000000000000", Role.TARGET, "committing"),
+        ("01JZT0D0NE0000000000000000", Role.TARGET, "committed"),
     ):
         led.create_job(jid, role, Mode.PUSH, "I1", {})
         led.transition(jid, role, "*", state, {}, epoch=0)
-    led.create_job("S-locked", Role.SOURCE, Mode.PULL, "I1", {})
-    led.source_lock("S-locked", _info(root="ra", tip="ta", lineage=("ra", "ta")), "h", "laptop")
-    led.source_set("S-locked", "locked")
-    led.create_job("S-prep", Role.SOURCE, Mode.PULL, "I1", {})
-    led.source_lock("S-prep", _info(root="rb", tip="tb", lineage=("rb", "tb")), "h", "laptop")
-    led.source_set("S-prep", "prepared")
-    led.create_job("S-other", Role.SOURCE, Mode.PULL, "I2", {})
+    led.create_job("01JZS0Y0CKED00000000000000", Role.SOURCE, Mode.PULL, "I1", {})
+    led.source_lock("01JZS0Y0CKED00000000000000", _info(root="ra", tip="ta", lineage=("ra", "ta")), "h", "laptop")
+    led.source_set("01JZS0Y0CKED00000000000000", "locked")
+    led.create_job("01JZS0PREP0000000000000000", Role.SOURCE, Mode.PULL, "I1", {})
+    led.source_lock("01JZS0PREP0000000000000000", _info(root="rb", tip="tb", lineage=("rb", "tb")), "h", "laptop")
+    led.source_set("01JZS0PREP0000000000000000", "prepared")
+    led.create_job("01JZS00THER000000000000000", Role.SOURCE, Mode.PULL, "I2", {})
 
     ids = led.revoke_peer("laptop")
-    assert sorted(ids) == ["S-locked", "T-prep"]
+    assert sorted(ids) == ["01JZS0Y0CKED00000000000000", "01JZT0PREP0000000000000000"]
     assert led.peer("I1").revoked_at is not None
     assert led.inbound_peer("I1") is None
     assert led.offers_for("I1", now) == [] and [o["offer_id"] for o in led.offers_for("I2", now)] == ["O2"]
-    assert led.job("T-prep", Role.TARGET)["state"] == "aborting"
-    assert led.job("S-locked", Role.SOURCE)["state"] == "aborting"
-    assert led.job("T-commit", Role.TARGET)["state"] == "committing"
-    assert led.job("T-done", Role.TARGET)["state"] == "committed"
-    assert led.source_state("S-prep")["state"] == "prepared"
-    assert led.job("S-other", Role.SOURCE)["state"] == "open"
+    assert led.job("01JZT0PREP0000000000000000", Role.TARGET)["state"] == "aborting"
+    assert led.job("01JZS0Y0CKED00000000000000", Role.SOURCE)["state"] == "aborting"
+    assert led.job("01JZT0C0MMYT00000000000000", Role.TARGET)["state"] == "committing"
+    assert led.job("01JZT0D0NE0000000000000000", Role.TARGET)["state"] == "committed"
+    assert led.source_state("01JZS0PREP0000000000000000")["state"] == "prepared"
+    assert led.job("01JZS00THER000000000000000", Role.SOURCE)["state"] == "open"
     with pytest.raises(NotFound):
         led.revoke_peer("nobody")
 
@@ -454,16 +465,18 @@ def test_ledger_offers_per_peer(led, clock):
     assert led.offers_for("I2", now) == []
     with pytest.raises(NotFound):
         led.offer_claim("O1", "I2", "J9")
-    got = led.offer_claim("O1", "I1", "J1")
+    got = led.offer_claim("O1", "I1", "01JZJ100000000000000000000")
     assert got["session_id"] == "s1" and got["refinement"] == {"notes": "x"}
-    assert led.offer_claim("O1", "I1", "J1")["claimed_job"] == "J1"  # idempotent
+    assert (
+        led.offer_claim("O1", "I1", "01JZJ100000000000000000000")["claimed_job"] == "01JZJ100000000000000000000"
+    )  # idempotent
     with pytest.raises(NotFound):
-        led.offer_claim("O1", "I1", "J2")
+        led.offer_claim("O1", "I1", "01JZJ200000000000000000000")
     assert led.offers_for("I1", now) == []
     led.offer_put("O2", "I1", "s2", None, None, now + 10)
     clock.advance(11)
     with pytest.raises(NotFound):
-        led.offer_claim("O2", "I1", "J3")
+        led.offer_claim("O2", "I1", "01JZJ300000000000000000000")
 
 
 def test_ledger_suggestions_outbox_pull_log(led, clock):
@@ -484,13 +497,13 @@ def test_ledger_suggestions_outbox_pull_log(led, clock):
     clock.advance(86400)
     assert led.outbox_due(clock()) == []
 
-    led.pull_log_put("J", "I1", ["w0", "x1"])
+    led.pull_log_put("01JZJ000000000000000000000", "I1", ["w0", "x1"])
     assert led.pull_log(5)[0]["items"] == ["w0", "x1"]
 
 
 def test_ledger_workspace_map(led):
-    led.map_put(MapRow("/home/u/app", "I1", "/srv/app", "in", "rid", None, "J1"))
-    led.map_put(MapRow("/srv/app", "I1", "/home/u/app", "out", "rid", {"head": "h"}, "J2"))
+    led.map_put(MapRow("/home/u/app", "I1", "/srv/app", "in", "rid", None, "01JZJ100000000000000000000"))
+    led.map_put(MapRow("/srv/app", "I1", "/home/u/app", "out", "rid", {"head": "h"}, "01JZJ200000000000000000000"))
     assert led.map_lookup("I1", "/srv/app").local_path == "/home/u/app"
     assert led.map_out("/srv/app", "I1").state == {"head": "h"}
     assert led.map_out("/home/u/app", "I1") is None
@@ -504,8 +517,8 @@ def test_ledger_objects_blocks_gc(led, clock):
     clock.advance(10)
     led.block_put("b2", 100)
     led.block_put("b3", 100)
-    led.create_job("J", Role.TARGET, Mode.PUSH, "P", {})
-    led.job_object("J", "o1")
+    led.create_job("01JZJ000000000000000000000", Role.TARGET, Mode.PUSH, "P", {})
+    led.job_object("01JZJ000000000000000000000", "o1")
     assert led.live_objects() == {"o1"}
     assert led.gc_candidates(clock() - 5, 10_000) == ["b1"]
     assert led.gc_candidates(0, 150) == ["b1", "b2"]
@@ -521,7 +534,7 @@ def test_ledger_arrivals_and_bundle_imports(led):
     led.arrival_put(
         session_ids=["n1", "n2"],
         root_id="n1",
-        job_id="J",
+        job_id="01JZJ000000000000000000000",
         peer="server",
         note="NOTE",
         report_path="/r.md",
@@ -535,9 +548,9 @@ def test_ledger_arrivals_and_bundle_imports(led):
     led.note_delivered("n2")
     assert led.arrival_for("n2")["note_state"] == "delivered"
     assert {r["session_id"] for r in led.arrival_rows()} == {"n1", "n2"}
-    led.arrival_source_reclaimed("J")
+    led.arrival_source_reclaimed("01JZJ000000000000000000000")
     assert led.arrival_for("n1")["source_reclaimed_at"] is not None
-    led.arrival_delete("J")
+    led.arrival_delete("01JZJ000000000000000000000")
     assert led.arrival_for("n1") is None
 
     assert led.bundle_import_seen("B1") is None
@@ -560,7 +573,7 @@ def test_ledger_data_version_changes_on_foreign_commit(tmp_path, clock):
 def test_ledger_threads_get_own_connections(led):
     import threading
 
-    led.create_job("J", Role.CONDUCTOR, Mode.PUSH, None, {})
+    led.create_job("01JZJ000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {})
     errors = []
 
     def worker(i):

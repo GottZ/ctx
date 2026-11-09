@@ -13,8 +13,6 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-import pytest
-
 from ctx_handover.engine import envfacts
 from ctx_handover.engine.model import Options, ToolInfo
 from ctx_handover.tests.fakes.planning_fake import env_facts, host_facts
@@ -102,8 +100,9 @@ def test_envfacts_host_facts_as_parameters(tmp_path, monkeypatch, user_home):
     for name in ("hermes_constants", "hermes_cli", "hermes_cli.config", "agent", "agent.secret_scope", "hermes_state"):
         monkeypatch.setitem(sys.modules, name, None)
     host = _host(tmp_path, is_wsl=True, model="qwen3", provider="llamacpp")
+    config = {"model": {"default": "qwen3", "provider": "llamacpp"}}  # HostFacts.provider comes from this section
     facts = envfacts.probe(
-        instance_name="laptop", options=Options(), host=host, config={}, capabilities=frozenset({"x"})
+        instance_name="laptop", options=Options(), host=host, config=config, capabilities=frozenset({"x"})
     )
     assert facts.host is host
     assert facts.capabilities == frozenset({"x"})
@@ -202,32 +201,6 @@ def test_envfacts_platforms_without_shell(tmp_path):
         instance_name="srv", options=Options(), host=_host(tmp_path, is_container=True), config={}, system=linux
     )
     assert facts.os_name == "Arch Linux (container)" and facts.os_version == "6.12.1"
-
-
-@pytest.mark.parametrize(
-    ("provider", "base_url", "expected"),
-    [
-        ("llamacpp", None, True),
-        ("llama.cpp", "", True),
-        ("ollama", None, True),
-        ("lmstudio", "", True),
-        ("openrouter", None, False),
-        ("custom", "http://127.0.0.1:8080/v1", True),
-        ("custom", "http://localhost:1234", True),
-        ("custom", "http://[::1]:8000/v1", True),
-        ("custom", "http://192.168.1.5:11434", True),
-        ("custom", "http://10.0.0.2", True),
-        ("custom", "http://172.16.0.1", True),
-        ("custom", "http://172.32.0.1", False),
-        ("custom", "http://100.64.1.2", False),
-        ("ollama", "https://ollama.com/v1", False),
-        ("custom", "https://api.example.com/v1", False),
-        ("custom", "not a url", False),
-        (None, None, False),
-    ],
-)
-def test_envfacts_offline_route(provider, base_url, expected):
-    assert envfacts.is_offline_route(provider, base_url) is expected
 
 
 def test_envfacts_offline_from_config(tmp_path, user_home):

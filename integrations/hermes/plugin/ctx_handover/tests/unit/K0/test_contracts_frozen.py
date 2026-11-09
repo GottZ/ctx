@@ -12,10 +12,11 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import re
+from collections.abc import Mapping
 
 import pytest
 
-from ctx_handover.engine import contracts, errors, hostcompat, ids, ignore, jsonutil, model, paths, policy
+from ctx_handover.engine import contracts, errors, hostcompat, ids, ignore, jsonutil, model, paths, policy, settings
 
 FUNCTIONS = {
     paths: {
@@ -32,6 +33,8 @@ FUNCTIONS = {
         "route_path": ["route"],
         "msys_to_windows": ["path"],
         "strip_url_userinfo": ["url"],
+        "default_workspace_root": ["home", "hermes_home"],
+        "expand_handover_root": ["spec", "home", "hermes_home"],
     },
     policy: {
         "is_denied_name": ["rel_or_path", "case_insensitive"],
@@ -44,6 +47,7 @@ FUNCTIONS = {
         "exclude_pathspecs": ["paths"],
         "check_extra": ["path", "cfg", "explicit", "redact"],
         "sniff_bytes": ["head"],
+        "reserved_workspace_roots": ["cfg"],
     },
     jsonutil: {
         "canonical_bytes": ["obj"],
@@ -85,12 +89,23 @@ FUNCTIONS = {
         "approvals_off": ["config"],
         "grant_mcp_server": ["server"],
     },
+    settings: {
+        "raw_settings": ["config"],
+        "normalize": ["raw"],
+        "from_config": ["config"],
+        "problems": ["raw"],
+        "coerce": ["key", "value"],
+        "flag": ["value", "default"],
+        "positive_int": ["value", "default"],
+    },
 }
 
 ADDED_PARAMETERS = {
     (policy, "check_source_file"): {"item_root": None, "cache": None, "follow_link": None},
     (policy, "check_extra"): {"cache": None, "follow_link": None},
     (paths, "check_rel"): {"allow_control": False},
+    (paths, "default_workspace_root"): {"hermes_root": None, "case_insensitive": False},
+    (paths, "expand_handover_root"): {"hermes_root": None, "case_insensitive": False},
 }
 """Keyword-only parameters added after a frozen prefix, with their defaults (contract K-4)."""
 
@@ -111,6 +126,7 @@ METHODS = {
     (errors.HandoverError, "__init__"): ["self", "message", "details", "retryable"],
     (errors.HandoverError, "to_wire"): ["self"],
     (errors.HandoverError, "from_wire"): ["status", "body"],
+    (contracts.GitProbe, "is_partial"): ["self", "path"],
 }
 
 DATACLASS_FIELDS = {
@@ -280,10 +296,11 @@ DATACLASS_FIELDS = {
 
 ADDED_FIELDS = {
     model.PlanItem: {"hermes_kind": None, "instruction_files": ()},
-    model.ResourcePlan: {"warnings": ()},
-    model.EnvFacts: {"python_version": ""},
+    model.ResourcePlan: {"warnings": (), "context_tokens": 0},
+    model.EnvFacts: {"python_version": "", "workspace_root_ok": None, "workspace_root_problem": ""},
 }
-"""Fields added by contract K-3, with their defaults; declared with ``model.added_field``."""
+"""Fields added by contract K-3 (and later additively: ``ResourcePlan.context_tokens``, R32), with their defaults;
+declared with ``model.added_field``."""
 
 CONSTANTS = {
     policy: ["SOURCE_DENY_NAMES", "SOURCE_DENY_DIRS", "TARGET_DENY", "HERMES_CREDENTIAL_PATHS"],
@@ -332,6 +349,11 @@ def test_constants_present():
     assert jsonutil.OBJECT_BLOCK_SIZE == 524_288 and jsonutil.OBJECT_MAX_BYTES == 30 * 1024**3
     assert isinstance(model.WIRE_OMIT_DEFAULT, str) and model.WIRE_OMIT_DEFAULT
     assert hostcompat.PLUGIN_ID == "ctx_handover" and isinstance(hostcompat.MCP_SERVER_RE, re.Pattern)
+    assert settings.PLUGIN_ID == hostcompat.PLUGIN_ID
+    for name in ("SCHEMA", "DEFAULTS", "SECRET_ENVS", "BOOL_WORDS"):
+        assert isinstance(getattr(settings, name), Mapping) and getattr(settings, name), name
+    assert isinstance(settings.POSITIVE_KEYS, frozenset)
+    assert settings.POSITIVE_KEYS.issubset(settings.DEFAULTS)
 
 
 def _extra_parameters_without_default(fn, frozen: list[str]) -> list[str]:
@@ -380,7 +402,9 @@ def test_added_fields_follow_the_frozen_ones_with_their_default(cls):
         assert fields[name].metadata.get(model.WIRE_OMIT_DEFAULT) is True
 
 
-@pytest.mark.parametrize("module", [model, errors, contracts, jsonutil, ids, paths, ignore, policy, hostcompat])
+@pytest.mark.parametrize(
+    "module", [model, errors, contracts, jsonutil, ids, paths, ignore, settings, policy, hostcompat]
+)
 def test_every_public_callable_has_a_docstring(module):
     missing = []
     for name, obj in vars(module).items():

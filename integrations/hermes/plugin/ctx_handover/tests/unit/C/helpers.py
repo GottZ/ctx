@@ -312,6 +312,11 @@ class FakeRegistry:
         self.contexts.append(ctx)
         return ctx
 
+    def bind(self, auth, job_id: str, role):
+        """``(api, job context)`` of one request, like ``ParticipantRegistry.bind`` (the server's one call, V17)."""
+        self.calls.append(("bind", job_id))
+        return self.get(auth, job_id, role), self.context(auth, job_id, role)
+
     def _find(self, auth, job_id: str):
         for role in (self.e.model.Role.SOURCE, self.e.model.Role.TARGET):
             if (self._peer_id(auth), job_id, role) in self.jobs:

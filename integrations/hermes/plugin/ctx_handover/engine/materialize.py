@@ -18,6 +18,13 @@ file is recognised by the ``(st_dev, st_ino)`` PREPARE recorded, a git update/re
 in. A forward step that ran completely is only finished, a partial one is undone and run again, and an inverse
 touches only what this job put there.
 
+PREPARE is repeatable the same way (L3-F08: a target restarted in TARGET_PREPARING prepares the job again): the
+partial directory of a fresh item and the staged file of an extra file are recorded in ``staging/ws-steps/`` before
+they exist (with the parent directories PREPARE creates for them) and with their ``(st_dev, st_ino)`` right after;
+a tree update records its destination. A later PREPARE of the job drops what an earlier one left and prepares
+again; what the records do not name is never touched (``ConflictError(kind=partial_exists)``). ``discard`` drops
+the recorded leftovers also when no snapshot names them (the abort of a job whose PREPARE was cut short).
+
 ``map_state_of`` is the one producer of ``MapRow.state`` (contract X09); ``pack_plan_item`` the one entry the
 source's orchestration packs a plan item through (contract X12).
 """
@@ -48,7 +55,9 @@ from .gitops import (
     iter_object,
     name_report,
     object_manifest,
+    partial_exists,
     sha256_file,
+    undo_failed,
     worktree_state,
 )
 from .ignore import IgnoreMatcher
@@ -324,6 +333,14 @@ def _same(path: Path | None, ident: tuple[int, int] | None) -> bool:
     return ident is not None and path is not None and _ident(path) == tuple(ident)
 
 
+def _drop_path(path: Path) -> None:
+    """Remove a partial directory (its whole tree, no symlink followed) or a staged file of this job."""
+    if stat.S_ISDIR(os.lstat(path).st_mode):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
+
 def _fsync_dir(path: Path) -> None:
     with contextlib.suppress(OSError):
         fd = os.open(path, os.O_RDONLY)
@@ -357,13 +374,31 @@ class _StepLog:
         os.replace(tmp, path)
         _fsync_dir(self.root)
 
-    def get(self, name: str) -> dict | None:
+    def _read(self, path: Path) -> dict | None:
+        """The record at ``path``; None only when it does not exist. A record that exists but cannot be read is no
+        "step never began" (a git step would rerun without its resume check): ``ConflictError`` with
+        ``needs_attention``."""
         try:
-            with open(self._path(name), "rb") as fh:
+            with open(path, "rb") as fh:
                 data = json.loads(fh.read(1024 * 1024))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return None
-        return data if isinstance(data, dict) and data.get("name") == name else None
+        except (OSError, ValueError) as exc:
+            raise ConflictError(
+                f"unreadable workspace step record {path}: {exc}",
+                kind="step_record",
+                needs_attention=True,
+                path=str(path),
+            ) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("name"), str):
+            raise ConflictError(
+                f"malformed workspace step record {path}", kind="step_record", needs_attention=True, path=str(path)
+            )
+        return data
+
+    def get(self, name: str) -> dict | None:
+        data = self._read(self._path(name))
+        return data if data is not None and data["name"] == name else None
 
     def drop(self, name: str) -> None:
         with contextlib.suppress(FileNotFoundError):
@@ -374,17 +409,13 @@ class _StepLog:
         out = []
         try:
             entries = sorted(os.listdir(self.root))
-        except OSError:
+        except FileNotFoundError:  # no record yet; an unreadable directory is no "no records"
             return out
         for entry in entries:
             if not entry.endswith(".json"):
                 continue
-            try:
-                with open(self.root / entry, "rb") as fh:
-                    data = json.loads(fh.read(1024 * 1024))
-            except (OSError, ValueError):
-                continue
-            if isinstance(data, dict) and str(data.get("name", "")).startswith(prefix):
+            data = self._read(self.root / entry)
+            if data is not None and data["name"].startswith(prefix):
                 out.append(data)
         return sorted(out, key=lambda d: d["name"])
 
@@ -468,8 +499,8 @@ class WorkspaceTxn:
         self, item_id: str, dest: Path, fb: Path, pack_item: dict, *, alternates: Path | None = None
     ) -> _Prepared:
         cfg = self._require_cfg()
-        created = self._ensure_parent(dest)
         partial = self._partial_for(dest, item_id)
+        created = self._claim(partial, dest, item_id, "dir")
         try:
             state = gitapply.prepare_fresh(
                 self.git,
@@ -483,16 +514,17 @@ class WorkspaceTxn:
                 fallback=fb,
                 qdir=self.staging / "quarantine" / item_id,
                 alternates=alternates,
+                claimed=True,
             )
         except BaseException:
-            self._remove_dirs(created)
+            self._unclaim(partial, created)
             raise
         return _Prepared(item_id, "git", state.mode, dest, pack_item, state, created, ident=_ident(state.partial))
 
     def _prepare_tree_fresh(self, item_id: str, dest: Path, fb: Path, pack_item: dict) -> _Prepared:
         cfg = self._require_cfg()
-        created = self._ensure_parent(dest)
         partial = self._partial_for(dest, item_id)
+        created = self._claim(partial, dest, item_id, "dir")
         try:
             state = filetree.prepare_fresh(
                 self.store,
@@ -503,9 +535,10 @@ class WorkspaceTxn:
                 dest=dest,
                 max_files=cfg.max_files,
                 fallback=fb,
+                claimed=True,
             )
         except BaseException:
-            self._remove_dirs(created)
+            self._unclaim(partial, created)
             raise
         self.skipped.extend(state.skipped)
         return _Prepared(item_id, "tree", DestMode.FRESH, dest, pack_item, state, created, ident=_ident(state.partial))
@@ -515,6 +548,92 @@ class WorkspaceTxn:
         for d in sorted(dirs, key=lambda p: -len(p.parts)):
             with contextlib.suppress(OSError):
                 d.rmdir()
+
+    # -- what PREPARE creates outside the staging (L3-F08) ------------------------------------------------
+
+    @staticmethod
+    def _record_name(path: Path) -> str:
+        return "partial:" + enc_path(str(path))
+
+    @staticmethod
+    def _own_leftover(path: Path, rec: Mapping) -> bool:
+        """Is what lies at ``path`` the thing this job's record names? Its recorded identity — or, when the process
+        died between the record and the identity: an empty directory (``kind`` dir; nothing is written into a partial
+        before its identity is recorded) or a regular file (``kind`` file, created ``O_EXCL`` after the record)."""
+        if rec.get("ino") is not None:
+            return _same(path, (rec.get("dev"), rec.get("ino")))
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        if rec.get("kind") == "dir":
+            return stat.S_ISDIR(st.st_mode) and not os.listdir(path)
+        return rec.get("kind") == "file" and stat.S_ISREG(st.st_mode)
+
+    def _claim(self, path: Path, dest: Path, item_id: str, kind: str) -> list[Path]:
+        """Before PREPARE creates ``path`` beside ``dest`` (``kind`` dir: the partial directory, created here 0700;
+        file: the staged extra file, created by the caller): what an earlier PREPARE of this job left there is
+        dropped (its process died — a target restarted in TARGET_PREPARING, L3-F08); anything the records do not
+        name raises ``partial_exists`` untouched. The record (path, the parents of ``dest`` this job creates) is
+        durable before anything is created; the identity follows (``_identify``). Returns the parent directories
+        this job created for ``dest`` — in this run or the earlier one — that exist."""
+        name = self._record_name(path)
+        rec = self._steps.get(name) or {}
+        if os.path.lexists(path):
+            if not rec or not self._own_leftover(path, rec):
+                raise partial_exists(path, dest)
+            _drop_path(path)
+            self.journal("info", f"prepare:{item_id}", {"dropped": str(path)})
+        missing = []
+        cur = dest.parent
+        while not cur.exists():
+            missing.append(cur)
+            cur = cur.parent
+        missing.reverse()
+        earlier = [Path(dec_path(x)) for x in rec.get("parents") or () if os.path.isdir(dec_path(x))]
+        parents = earlier + [d for d in missing if d not in earlier]
+        record = {"kind": kind, "path": enc_path(str(path)), "parents": [enc_path(str(d)) for d in parents]}
+        self._steps.put(name, record)
+        for d in missing:
+            os.mkdir(d, 0o777)
+        if kind == "dir":
+            try:
+                os.mkdir(path, 0o700)
+            except FileExistsError:  # appeared since the check above: not ours
+                self._steps.drop(name)
+                self._remove_dirs(missing)
+                raise partial_exists(path, dest) from None
+            self._identify(path)
+        return parents
+
+    def _identify(self, path: Path) -> None:
+        name = self._record_name(path)
+        st = os.lstat(path)
+        self._steps.put(name, {**(self._steps.get(name) or {}), "dev": st.st_dev, "ino": st.st_ino})
+
+    def _unclaim(self, path: Path, parents: Sequence[Path]) -> None:
+        """A PREPARE that failed after ``_claim``: its record goes once the path is gone; the parents it made go."""
+        if not os.path.lexists(path):
+            self._steps.drop(self._record_name(path))
+        self._remove_dirs(parents)
+
+    def _drop_recorded(self) -> None:
+        """``discard`` of what the records name and no prepared item covers: partials and staged extra files of
+        this job (by identity), the parents made for them, the staged files of tree updates (``filetree.drop_staged``
+        with this job's tag)."""
+        covered = {p.dest for p in self.items if p.kind == "tree" and p.mode in (DestMode.UPDATE, DestMode.RETURN)}
+        for rec in self._steps.items("staged:"):
+            dest = Path(dec_path(rec["dest"]))
+            if dest not in covered:
+                with contextlib.suppress(OSError):
+                    filetree.drop_staged(dest, str(rec.get("tag") or self.job6))
+        for rec in self._steps.items("partial:"):
+            path = Path(dec_path(rec["path"]))
+            if os.path.lexists(path) and self._own_leftover(path, rec):
+                with contextlib.suppress(OSError):
+                    _drop_path(path)
+            if not os.path.lexists(path):
+                self._remove_dirs([Path(dec_path(x)) for x in rec.get("parents") or ()])
 
     # -- prepare ------------------------------------------------------------------------------------------
 
@@ -602,6 +721,8 @@ class WorkspaceTxn:
             try:
                 if fp is None:
                     raise ConflictError("no recorded fingerprint for the destination", kind="foreign")
+                staged = "staged:" + enc_path(str(dest))
+                self._steps.put(staged, {"dest": enc_path(str(dest)), "tag": self.job6, "item": item.item_id})
                 state = filetree.prepare_update(
                     self.store,
                     pack_item["manifest"],
@@ -616,6 +737,7 @@ class WorkspaceTxn:
                 self.skipped.extend(state.skipped)
                 return _Prepared(item.item_id, "tree", decision.mode, dest, pack_item, state)
             except ConflictError as exc:
+                self._steps.drop("staged:" + enc_path(str(dest)))  # prepare_update removed what it staged
                 fb = Path(fallback_dest(str(dest), self.now()))
                 self.warnings.append(f"{dest}: {exc.message}; materialised fresh at {fb}")
                 self._check_fresh(fb)
@@ -634,10 +756,8 @@ class WorkspaceTxn:
             if stat.S_ISREG(st.st_mode) and sha256_file(dest) == content_sha:
                 return _Prepared(item.item_id, "extra", DestMode.SKIP, dest, pack_item, None)
             raise ConflictError("a different file exists at the destination", kind="exists_file", path=str(dest))
-        created = self._ensure_parent(dest)
         temp = dest.parent / f".{dest.name}.ctxh-{self.job6}"
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temp)
+        created = self._claim(temp, dest, item.item_id, "file")
         entry = {
             "path": dest.name,
             "type": "file",
@@ -649,8 +769,9 @@ class WorkspaceTxn:
         try:
             filetree._write_file(self.store, entry, temp, self.cancelled)
         except BaseException:
-            self._remove_dirs(created)
+            self._unclaim(temp, created)
             raise
+        self._identify(temp)
         return _Prepared(item.item_id, "extra", DestMode.FRESH, dest, pack_item, temp, created, ident=_ident(temp))
 
     # -- commit -------------------------------------------------------------------------------------------
@@ -704,10 +825,21 @@ class WorkspaceTxn:
 
         return run
 
+    def _ours_by_content(self, p: _Prepared, path: Path) -> bool:
+        """A snapshot of format 1 carries no file identity: a file at ``path`` counts as this step's only when it is
+        a regular file holding the packed content (never just because something exists there)."""
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        return sha256_file(path) == object_manifest(self.store, p.pack_item.get("object")).sha256
+
     def _extra_forward(self, p: _Prepared) -> Path:
         temp: Path = p.state
         if not os.path.lexists(temp):
-            if _same(p.dest, p.ident) or (p.ident is None and os.path.lexists(p.dest)):
+            if _same(p.dest, p.ident) or (p.ident is None and self._ours_by_content(p, p.dest)):
                 return p.dest  # linked and the temp name removed by a process that died
             raise ConflictError("the prepared file is gone", kind="partial_missing", path=str(temp))
         try:
@@ -742,7 +874,7 @@ class WorkspaceTxn:
                 filetree.rollback(replace(p.state, dest=final))
             else:
                 temp: Path = p.state
-                ours = _same(final, p.ident) if p.ident is not None else True
+                ours = _same(final, p.ident) if p.ident is not None else self._ours_by_content(p, final)
                 if ours and os.path.lexists(final):
                     if not os.path.lexists(temp):
                         os.link(final, temp)
@@ -764,16 +896,19 @@ class WorkspaceTxn:
         written file are recorded under ``staging/ws-steps/``; a resumed forward step counts a target holding that
         identity as placed by this job, and the inverse removes exactly those targets (and the directories it
         created), also when the snapshot that names them was never journaled. A failing forward step undoes itself
-        before the error propagates."""
+        before the error propagates; an undo that fails too raises ``gitops.undo_failed`` (``needs_attention``)."""
         cfg = self._require_cfg()
 
         def forward() -> None:
             try:
                 for pack_item, target in files:
                     self._place_one(cfg, pack_item, Path(target))
-            except Exception:
-                with contextlib.suppress(Exception):
+            except Exception as exc:
+                try:
                     inverse()
+                except Exception as undo:  # placed files stay in the session area: report it, never as untouched
+                    where = files[0][1] if files else self.staging
+                    raise undo_failed(exc, undo, path=Path(where).parent) from exc
                 raise
             self.journal("done", "c3", {"placed": [str(p) for p in self._hermes_placed]})
 
@@ -933,7 +1068,8 @@ class WorkspaceTxn:
     # -- discard and results ------------------------------------------------------------------------------
 
     def discard(self) -> None:
-        """Drop everything prepared and not committed (partials, staged files, quarantines, created parents)."""
+        """Drop everything prepared and not committed (partials, staged files, quarantines, created parents) — also
+        what a PREPARE that was cut short left without a snapshot naming it (``_drop_recorded``)."""
         for p in reversed(self.items):
             if p.committed:
                 continue
@@ -945,6 +1081,7 @@ class WorkspaceTxn:
                 with contextlib.suppress(OSError):
                     os.unlink(p.state)
             self._remove_dirs(p.created_parents)
+        self._drop_recorded()
         for sub in ("quarantine", "git-tmp", "tree-backup", STEP_DIR):
             shutil.rmtree(self.staging / sub, ignore_errors=True)
         self.journal("done", "discard", {})
@@ -1067,7 +1204,12 @@ def pack_plan_item(
     if item.kind in (ItemKind.FILE_TREE, ItemKind.EXTRA_DIR):
         root = Path(item.source_path)
         entries, left = filetree.scan(root, IgnoreMatcher.for_tree(root, tuple(extra_ignore)), cfg, cancelled)
-        manifest = filetree.pack_tree(entries, root, store, cancelled)
+        dropped: list[NotTransferred] = []
+        manifest = filetree.pack_tree(entries, root, store, cancelled, dropped=dropped)
+        if dropped:  # gone or changed since the scan: reported, not counted
+            gone = {n.path for n in dropped}
+            entries = [e for e in entries if not (e.type == "file" and e.path in gone)]
+            left = [*left, *dropped]
         pairs, invalid, warnings = name_report(os.fsdecode(filetree.entry_rel_bytes(e)) for e in entries)
         excluded = tuple(n for n in left if n.why == "secret")
         skipped = tuple(n for n in left if n.why != "secret")

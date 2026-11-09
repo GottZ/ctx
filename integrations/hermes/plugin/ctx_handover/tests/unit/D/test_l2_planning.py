@@ -33,6 +33,7 @@ from ctx_handover.tests.fakes.planning_fake import (
     Busy,
     CeilingGitProbe,
     StaticGitProbe,
+    env_facts,
     fake_redact,
     final_plan,
     host_facts,
@@ -56,8 +57,10 @@ TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def test_reason_codes_and_markers_are_public():
-    """X03: the reason codes (a)–(g) with their letters and the item/origin markers are constants of ``plan``; the
-    surfaces have a text for every code (they import the codes, they keep no table of their own)."""
+    """X03: the reason codes (a)–(g), since G′ (h) ``workspace_excluded`` (R30), since G‴ (i) ``context_over`` (R32),
+    with their letters and the
+    item/origin markers are constants of ``plan``; the surfaces have a text for every code (they import the codes,
+    they keep no table of their own)."""
     assert plan.REASON_CODES == (
         "proposed",
         "conflict",
@@ -66,8 +69,10 @@ def test_reason_codes_and_markers_are_public():
         "model",
         "outside_workspace",
         "instruction_files",
+        "workspace_excluded",
+        "context_over",
     )
-    assert [plan.CONFIRM_LETTERS[code] for code in plan.REASON_CODES] == list("abcdefg")
+    assert [plan.CONFIRM_LETTERS[code] for code in plan.REASON_CODES] == list("abcdefghi")
     assert (plan.SUSPECTED_SECRET, plan.UNVERIFIED) == ("suspected_secret", "unverified")
     assert set(surfaces.REASON_TEXT) == set(plan.REASON_CODES)
     assert surfaces.SUSPECTED_SECRET is plan.SUSPECTED_SECRET
@@ -129,7 +134,8 @@ def test_model_change_read_only_in_contract_form(lay):
 
     current = model_change(to_model="qwen3", to_provider="llamacpp", context_length=65536, offline_capable=True)
     assert plan.model_text(current) == "qwen3 (llamacpp)"
-    assert plan.confirmation_reasons(replace(final, model_change=current), Options(), True) == [plan.CONFIRM_MODEL]
+    # G‴ (R32): the window is reason (i) ``context_over`` now, no longer part of (e)
+    assert plan.confirmation_reasons(replace(final, model_change=current), Options(), True) == [plan.CONFIRM_CONTEXT]
     fits = final_plan(replace(_own(lay), items=(w0,), approx_tokens=1000), model_change=current)
     assert plan.confirmation_reasons(fits, Options(), True) == []
 
@@ -145,8 +151,8 @@ def test_model_change_from_session_import_drives_reason_e(lay):
     w0 = _own(lay).items[0]
     small = replace(_own(lay), items=(w0,), approx_tokens=1000)
     assert plan.confirmation_reasons(final_plan(small, model_change=change), Options(), True) == [plan.CONFIRM_MODEL]
-    big = replace(small, approx_tokens=200_000)
-    assert plan.confirmation_reasons(final_plan(big, model_change=change), Options(), False) == [plan.CONFIRM_MODEL]
+    big = replace(small, approx_tokens=200_000)  # G‴ (R32): larger than the window ⇒ (i), not (e)
+    assert plan.confirmation_reasons(final_plan(big, model_change=change), Options(), False) == [plan.CONFIRM_CONTEXT]
     text, _report = _compose(model_change=change)
     assert "Model: qwen3:32b (ollama) → gpt-x (openrouter, 128k context) — works offline: no" in text
 
@@ -182,12 +188,23 @@ SAMPLE_PARTS = {
     "ntfs_invalid": ["aux.txt"],
     "rewind_rows": 3,
     "lfs_missing": 2,
+    "bundle_import": True,
+    "context_tokens": 900_000,
 }
 
 
 def _bare(parts: dict, *, strict: bool = True) -> tuple[str, str]:
-    """A note with nothing but ``parts`` (no items, no delta, no free text, pack time 0)."""
+    """A note with nothing but ``parts`` (no items, no delta, no free text, pack time 0). The source runs the
+    target's main model, so the model stays and the target's window applies (G‴, R32 ``context_tokens``)."""
     return _compose(
+        source=env_facts(  # noqa: S604 - EnvFacts.shell is a shell name, nothing runs
+            "server",
+            os_name="Debian GNU/Linux 13",
+            os_version="6.8",
+            arch="x86_64",
+            shell="bash",
+            host={"model": "qwen3", "provider": "llamacpp"},
+        ),
         items=[],
         path_map=(),
         delta={},
@@ -294,6 +311,8 @@ def test_presend_summary_has_the_keys_the_surfaces_read(lay):
         "instruction_files",
         "model",
         "offline",
+        "workspace_excluded",
+        "context_over",
     }
     assert set(plan.PRESEND_KEYS) <= set(summary)
     included = [i for i in rp.items if i.include is Include.YES]

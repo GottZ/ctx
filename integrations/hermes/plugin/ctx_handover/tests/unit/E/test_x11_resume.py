@@ -197,8 +197,8 @@ class Scenario:
             spill,
         )
 
-    def run(self, crash: dict | None = None, *, fail_last: bool = False) -> int:
-        spec = dict(self.spec, crash=crash, fail_last=fail_last)
+    def run(self, crash: dict | None = None, *, fail_last: bool = False, abort: bool = False) -> int:
+        spec = dict(self.spec, crash=crash, fail_last=fail_last, abort=abort)
         path = self.tmp / "spec.json"
         path.write_text(json.dumps(spec))
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p), PYTHONDONTWRITEBYTECODE="1")
@@ -305,3 +305,49 @@ def test_x11_rollback_across_processes_restores_target(scenario, case):
     inverses = [e["step"] for e in scenario.events() if e["kind"] == "done" and e.get("direction") == "rollback"]
     assert len(inverses) == len(set(inverses))
     assert not (scenario.tmp / "staging" / materialize.STEP_DIR).exists()
+
+
+def test_orphaned_index_lock_after_a_crash_inside_git_ends_needs_attention(scenario):
+    """★ README limit (contract §3) — the process dies inside the git update's work-tree change and the killed git
+    leaves ``.git/index.lock``. The next process must not take that repository for untouched: the commit ends
+    ``needs_attention`` for that step with a message naming the lock (not "rolled back"); the lock stays (it may
+    belong to a live git); HEAD and refs are as before; every work-tree file is as before or as received and the
+    received objects are in the repository (nothing lost); the staging is kept."""
+    assert scenario.run(FORWARD_CRASHES["git_update_after_read_tree"]) == 17
+    lock = scenario.tgt.root / ".git" / "index.lock"
+    lock.write_bytes(b"DIRC killed mid-write")
+    assert scenario.run() == 0
+    last = scenario.events()[-1]
+    assert last["outcome"] == "needs_attention", last
+    att = [e for e in scenario.events() if e["kind"] == "needs_attention"]
+    assert [e["step"] for e in att] == ["c1:w1"]
+    msg = att[0]["error"]["message"]
+    assert "index.lock" in msg and str(scenario.tgt.root) in msg and "no git process" in msg
+    assert lock.read_bytes() == b"DIRC killed mid-write"
+    before = scenario.before
+    assert (scenario.tgt.head(), scenario.tgt.refs()) == (before[0], before[1])
+    now, received = scenario.tgt.worktree_digest(), scenario.s2.worktree_digest()
+    assert all(v in (before[4].get(k), received.get(k)) for k, v in now.items())
+    assert all(k in now or k not in received for k in before[4])
+    scenario.tgt.run("cat-file", "-e", scenario.spec["items"][1]["pack"]["worktree_tree"])
+    assert (scenario.tmp / "staging" / materialize.STEP_DIR).is_dir()
+
+
+def test_orphaned_index_lock_in_the_git_inverse_ends_needs_attention(scenario):
+    """The rollback is cut inside the git update's inverse and the killed git leaves ``index.lock``; the next
+    process books that inverse ``needs_attention`` (message naming the lock and what to do), still undoes every
+    other step, and leaves the lock alone."""
+    # calls: PREPARE of w0, forward of w1, forward of w2, inverse of w2, then the inverse of w1
+    crash = {"at": "call", "target": "gitapply._update_refs", "nth": 5, "when": "before"}
+    assert scenario.run(crash, fail_last=True) == 17
+    lock = scenario.tgt.root / ".git" / "index.lock"
+    lock.write_bytes(b"orphan")
+    assert scenario.run(fail_last=True) == 0
+    assert scenario.events()[-1]["outcome"] == "needs_attention"
+    att = [e for e in scenario.events() if e["kind"] == "needs_attention"]
+    assert [e["step"] for e in att] == ["c1:w1"]
+    assert "index.lock" in att[0]["error"]["message"] and "no git process" in att[0]["error"]["message"]
+    assert lock.read_bytes() == b"orphan"
+    now = scenario.observe()
+    assert now[6:13] == scenario.before[6:13] and now[14] == scenario.before[14]
+    assert not (scenario.root / "fresh").exists()

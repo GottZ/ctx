@@ -7,7 +7,9 @@ conductor (push, export) or through the registry by a remote one (pull, offer cl
 * ``facts`` — this host's facts, with the tool names the session's transcript uses (``tools_seen``, W084).
 * ``start_plan`` — collector over the lineage rows of ``export_session_lineage(include_inactive=True)`` (W076) +
   refinement with the rows and ``redact`` (W077) + agent suggestions; ``build_plan`` with ``remote_driven`` (a
-  remote conductor's hints never add, R18) — **no lock** [BX M9]; the busy probe is read-only.
+  remote conductor's hints never add, R18) and the estimate of the session's active context
+  (``plan.active_context_tokens`` of the tip's live rows → ``ResourcePlan.context_tokens``, R32) — **no lock**
+  [BX M9]; the busy probe is read-only.
 * ``lock`` — busy probe, turn lease + compression lock (``lock.acquire``; a route call blocks at most
   ``LOCK_WAIT_S`` seconds, W060), then ``describe`` again under the held lease and the revision compared with the
   plan's (§7.2 step 6, W037).
@@ -39,6 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import CAPABILITIES_V1, PROTOCOL, WIRE_MAJOR, WIRE_MINOR
+from . import settings as settings_mod
 from .contracts import JobContext
 from .errors import (
     Cancelled,
@@ -66,6 +69,7 @@ from .model import (
     ItemKind,
     Limits,
     MapRow,
+    Mode,
     OpStatus,
     PackInfo,
     ParticipantStatus,
@@ -117,11 +121,9 @@ def default_source_ports() -> SimpleNamespace:
 
 
 def _settings_of(config: dict) -> dict:
-    try:
-        value = config["plugins"]["entries"]["ctx_handover"]["settings"]
-    except (KeyError, TypeError):
-        return {}
-    return dict(value) if isinstance(value, dict) else {}
+    """The plugin settings of ``config`` through K0's one normalizer (contract V22): every schema key, YAML words and
+    ``None`` read by the same rules as everywhere else."""
+    return settings_mod.from_config(config)
 
 
 def _digest(*parts: object) -> str:
@@ -252,6 +254,29 @@ class LocalSource:
                 return from_wire(SessionRef, raw)
         return None
 
+    def _describe(self, db, job: JobContext, ref: SessionRef) -> SessionInfo:
+        """``session_export.describe`` of the job's session; a claimed offer (``take --offer``, L3-F12) resolves
+        through ``_offer_session`` (B's offer branch, ``reports/L2/g3-b-api.md``)."""
+        if not ref.offer_id:
+            return self.ports.session_export.describe(db, ref, calling_session=self.calling_session)
+        return self.ports.session_export.describe(
+            db, ref, calling_session=self.calling_session, offer_session=self._offer_session(job)
+        )
+
+    def _offer_session(self, job: JobContext) -> Callable[[str], str | None]:
+        """The session an offer names — for the peer it was made for only, claimed for this job (route #6 rules:
+        idempotent for the same job; another peer's, an expired or an otherwise claimed offer is ``not_found``). The
+        claim happens because that peer asked for the offer (``take --offer``), never on its own (O6)."""
+        peer_id = job.peer.peer_id if job.peer is not None else None
+
+        def lookup(offer_id: str) -> str | None:
+            if peer_id is None:
+                raise NotFound(f"offer {offer_id} not found")
+            claimed = self.ledger.offer_claim(str(offer_id), peer_id, job.job_id)
+            return str(claimed.get("session_id") or "") or None
+
+        return lookup
+
     def _tools_seen(self, job: JobContext) -> set[str]:
         """Tool names the transcript runs (``envfacts.tools_seen_from_rows``, W084); empty when the session is
         unknown here (the facts then carry no transcript tools)."""
@@ -260,7 +285,7 @@ class LocalSource:
             return set()
         db = self.db_factory()
         try:
-            info = self.ports.session_export.describe(db, ref, calling_session=self.calling_session)
+            info = self._describe(db, job, ref)
         except HandoverError:
             return set()
         return set(self.ports.envfacts.tools_seen_from_rows(self._rows(db, info)))
@@ -324,6 +349,7 @@ class LocalSource:
             config=self.config,
             tools_seen=sorted(self._tools_seen(job)),
             capabilities=self.hello().capabilities,
+            cfg=self.policy,  # the facts' write-root check with this host's policy (gp-d-api §1c)
         )
 
     def _stored_refinement(self, ref: SessionRef) -> Refinement | None:
@@ -353,7 +379,7 @@ class LocalSource:
         def fn(report) -> dict:
             p = self.ports
             db = self.db_factory()
-            info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
+            info = self._describe(db, job, session_ref)
             rows = self._rows(db, info)
             session_row = db.get_session(info.tip_id) or {}
             cfg = self._cfg(job)
@@ -391,6 +417,7 @@ class LocalSource:
                 redact=self.redact,
                 remote_driven=self.remote_driven,
                 suggest_dest=self._suggest_dest(job),
+                context_tokens=p.plan.active_context_tokens(rows, info.tip_id),
             )
             self._remember(job, plan=plan, planned_info=info)
             return to_wire(plan)
@@ -403,7 +430,7 @@ class LocalSource:
         p = self.ports
         self._epoch(job)
         db = self.db_factory()
-        info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
+        info = self._describe(db, job, session_ref)
         busy = p.lock.probe_busy(db, self.state_db, info, Path(self.hermes.home), self.session_key)
         if busy.busy and not job.options.force:
             raise SessionBusy(
@@ -423,7 +450,7 @@ class LocalSource:
                 "A turn is still running in this session; waiting continues.", reason="turn", waited_s=wait_s
             ) from exc
         # DESIGN §7.2 step 6: the revision under the held lease decides (a turn may have ended in between)
-        info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
+        info = self._describe(db, job, session_ref)
         info = dataclasses.replace(info, revision_changed=tuple(info.revision) != tuple(plan_revision))
         self._remember(job, info=info, holder=holder, busy_warnings=list(busy.warnings))
         self._sync_state(job)
@@ -434,7 +461,9 @@ class LocalSource:
         src = self.ledger.source_state(job.job_id)
         if src is None or src["state"] not in ("locking", "locked", "preparing", "prepared", "retiring"):
             if src is not None and src["state"] in ("released", "reclaimed", "suspended"):
-                raise LeaseLost(f"the source is {src['state']}")
+                # the state travels in the details: route #9 answers it as ``{state}`` (``source_reclaimed`` for a
+                # reclaim, contract V17) instead of an anonymous lost lease
+                raise LeaseLost(f"the source is {src['state']}", state=src["state"])
             return
         info = from_wire(SessionInfo, ctx["info"])
         ttl, _refresh = self.ports.lock.lease_timing(job.options)
@@ -486,12 +515,17 @@ class LocalSource:
         self.ledger.job_objects_add(job.job_id, ids)
 
     def _worktrees_unchanged(self, job: JobContext, final: FinalPlan, states: dict) -> bool:
-        """DESIGN §9.3 step 8: ``gitpack.recheck`` with the recorded exclusions for every packed git item."""
+        """DESIGN §9.3 step 8: ``gitpack.recheck`` with the recorded exclusions for every packed git item. A packed
+        git item without a recorded state counts as changed (re-pack), never as unchanged: only an explicit equal
+        re-check lets the primary lock follow."""
         tmp = private_dir(self.data_dir / "staging" / job.job_id / "recheck")
+        skipped = {d.item_id for d in final.decisions if d.mode is DestMode.SKIP}
         for item in final.plan.items:
-            recorded = states.get(item.item_id)
-            if item.include is not Include.YES or item.kind is not ItemKind.GIT_REPO or not isinstance(recorded, dict):
+            if item.include is not Include.YES or item.kind is not ItemKind.GIT_REPO or item.item_id in skipped:
                 continue
+            recorded = states.get(item.item_id)
+            if not isinstance(recorded, dict):
+                return False
             same, _current = self.ports.gitpack.recheck(self.git, item.source_path, from_wire(GitState, recorded), tmp)
             if not same:
                 return False
@@ -630,11 +664,14 @@ class LocalSource:
         if outcome is PrepareOutcome.STALE_SESSION:
             return PrepareResult(outcome=PrepareOutcome.STALE_SESSION, detail="session changed")
         final = from_wire(FinalPlan, ctx["final_plan"]) if ctx.get("final_plan") else None
-        if final is not None and not self._worktrees_unchanged(job, final, ctx.get("pack_states") or {}):
+        # no pack recorded here (another process lost it) is not "unchanged": the conductor packs again
+        if final is None or not self._worktrees_unchanged(job, final, ctx.get("pack_states") or {}):
             return PrepareResult(outcome=PrepareOutcome.STALE_WORKTREE, detail="work tree changed since packing")
         if (prepared.h_all, prepared.h_rows) != (exported.h_all, exported.h_rows):
             raise VerifyFailed("the target's import does not match the source transcript", which="h_all")
-        peer = self.peer_name or (job.peer.name if job.peer is not None else "")
+        # an export has no receiving peer yet (``--for`` only picks the facts): "" makes the title say "exported to
+        # bundle" instead of "handed over to <peer>" (N55)
+        peer = "" if job.mode is Mode.EXPORT else self.peer_name or (job.peer.name if job.peer is not None else "")
         p.lock.prepare(db, self.ledger, info, job.job_id, peer, datetime.fromtimestamp(self._clock()))
         self._sync_state(job)
         return PrepareResult(outcome=PrepareOutcome.OK)

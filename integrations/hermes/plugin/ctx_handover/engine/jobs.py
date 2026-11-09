@@ -37,7 +37,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import hostcompat
-from .conductor import Conductor, PollPolicy
+from . import settings as settings_mod
+from .conductor import Conductor, PollPolicy, error_from, unexpected
 from .contracts import JobContext, Reporter, SourceAPI, TargetAPI
 from .errors import (
     BadRequest,
@@ -54,11 +55,12 @@ from .errors import (
 )
 from .ids import short, ulid
 from .jsonutil import from_wire, to_wire
-from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, Ledger, private_dir, process_owner
+from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, TERMINAL, Ledger, private_dir, process_owner
 from .local_source import LocalSource
 from .local_target import LocalTarget
 from .model import (
     ConductorState,
+    EnvFacts,
     FinalPlan,
     Mode,
     Options,
@@ -82,6 +84,7 @@ GC_META_KEY = "janitor_gc_at"
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_BUSY, EXIT_AUTH, EXIT_PENDING = 0, 1, 2, 3, 4, 5
 _STOP = frozenset({"done", "aborted", "suspended"})
+_PARTICIPANT_ROLES = (Role.TARGET, Role.SOURCE)
 _UNLOCKED = tuple(
     str(s)
     for s in (
@@ -93,6 +96,14 @@ _UNLOCKED = tuple(
     )
 )
 """Conductor states before LOCKING: nothing is locked anywhere yet."""
+_ACKED = frozenset({"committed", "retiring", "retired", "continuing", "done"})
+"""Conductor states after the commit point: the target's ack is journaled (``ctx.ack``) from COMMITTED on."""
+_PARTICIPANT_OK = frozenset({"committed", "retired", "exported"})
+"""Participant end states of a handover that went through (target committed, source retired or exported)."""
+RECLAIM_SETTLE_S = 15.0
+"""How long ``reclaim`` waits for this process's runner of an export to settle it (V39)."""
+CANCEL_SETTLE_S = 15.0
+"""How long ``cancel`` of a SUSPENDED job waits for its abort before it answers (L3-F07)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -100,100 +111,48 @@ _UNLOCKED = tuple(
 # ---------------------------------------------------------------------------------------------------------
 
 
-_FLAGS = ("allow_remote_continue", "allow_agent_start", "refine_auto_include", "include_hermes_files")
-"""Boolean settings; a quoted word (``"off"``, ``"false"``) must not read as True."""
-_WORDS = {
-    "inbound": ("on", "off"),
-    "refine": (None, "off"),
-    "extra_paths": (None, "off"),
-    "ctx_persist": (None, "off"),
-    "accept_offers": (None, "off"),
-    "model_mapping": (None, None),
-}
-"""Word settings a bare YAML ``on``/``off`` turns into a boolean: ``(word for True, word for False)``; ``None`` drops
-the value (its default applies)."""
-_TRUE_WORDS = frozenset({"true", "on", "yes", "1"})
-_FALSE_WORDS = frozenset({"false", "off", "no", "0", ""})
-
-
 def plugin_settings(config: dict) -> dict:
-    """``plugins.entries.ctx_handover.settings`` of a loaded config (empty when absent), normalised: a bare YAML
-    ``off``/``on`` arrives as a boolean and is turned back into its word (``refine: off`` stays off), boolean
-    settings given as words are booleans, unknown words fall back to the default."""
-    try:
-        value = config["plugins"]["entries"][PLUGIN_ID]["settings"]
-    except (KeyError, TypeError):
-        return {}
-    if not isinstance(value, dict):
-        return {}
-    out = dict(value)
-    for key, (on_word, off_word) in _WORDS.items():
-        if isinstance(out.get(key), bool):
-            word = on_word if out[key] else off_word
-            if word is None:
-                del out[key]
-            else:
-                out[key] = word
-    for key in _FLAGS:
-        if key in out and not isinstance(out[key], bool):
-            text = str(out[key]).strip().lower()
-            if text in _TRUE_WORDS:
-                out[key] = True
-            elif text in _FALSE_WORDS or out[key] is None:
-                out[key] = False
-            else:
-                del out[key]
-    return out
+    """``plugins.entries.ctx_handover.settings`` of a loaded config through the one normaliser (contract V22,
+    ``settings.normalize``): every schema key, YAML ``on``/``off`` words per type, ``None`` and any rejected value
+    (wrong type, outside the choices, negative, not finite) are the schema default."""
+    return settings_mod.normalize(settings_mod.raw_settings(config))
 
 
-def _num(settings: dict, key: str, default: float) -> float:
-    value = settings.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return default
-    return value
-
-
-def _count(settings: dict, key: str, default: int) -> int:
-    """A positive integer setting (job caps); anything else is the default."""
-    value = _num(settings, key, default)
-    return int(value) if value >= 1 else default
+_MIB, _GIB = 1024**2, 1024**3
 
 
 def local_options(settings: dict) -> Options:
-    """The local defaults of a job from the plugin settings (the participant side's own limits, §14.4)."""
-    base = Options()
-    roots = settings.get("allow_roots")
-    export_roots = settings.get("export_roots")
-    mib, gib = 1024**2, 1024**3
+    """The local defaults of a job from the plugin settings (the participant side's own limits, §14.4). The input
+    goes through ``settings.normalize`` again (idempotent), so a raw mapping cannot bring an unchecked value into
+    ``Options``; an empty ``allow_roots`` stays empty (fail-closed, the surfaces show the same)."""
+    s = settings_mod.normalize(settings)
     return Options(
-        workspace_root=str(settings.get("workspace_root") or base.workspace_root),
-        allow_roots=tuple(str(r) for r in roots) if isinstance(roots, list) and roots else base.allow_roots,
-        export_roots=tuple(str(r) for r in export_roots) if isinstance(export_roots, list) else (),
-        max_session_bytes=int(_num(settings, "max_session_mb", 512) * mib),
-        max_file_bytes=int(_num(settings, "max_file_mb", 100) * mib),
-        max_extra_dir_bytes=int(_num(settings, "max_extra_dir_mb", 256) * mib),
-        max_hermes_file_bytes=int(_num(settings, "max_hermes_file_mb", 64) * mib),
-        max_files=int(_num(settings, "max_files", base.max_files)),
-        max_untracked_files=int(_num(settings, "max_untracked_files", base.max_untracked_files)),
-        max_total_bytes=int(_num(settings, "max_total_gb", 10) * gib),
-        confirm_above_bytes=int(_num(settings, "confirm_above_mb", 500) * mib),
-        staging_ttl_s=int(_num(settings, "staging_ttl_hours", 24) * 3600),
-        lease_ttl_s=int(_num(settings, "lease_ttl_s", base.lease_ttl_s)),
-        participant_idle_timeout_s=int(_num(settings, "participant_idle_timeout_min", 15) * 60),
-        stall_timeout_s=int(_num(settings, "stall_timeout_min", 30) * 60),
-        wait_timeout_s=int(_num(settings, "wait_timeout_min", 30) * 60),
-        refine=str(settings.get("refine") or base.refine),
-        refine_timeout_s=int(_num(settings, "refine_timeout_s", base.refine_timeout_s)),
-        refine_history_chars=int(_num(settings, "refine_history_chars", base.refine_history_chars)),
-        refine_side_question_max_tokens=int(
-            _num(settings, "refine_side_question_max_tokens", base.refine_side_question_max_tokens)
-        ),
-        refine_auto_include=bool(settings.get("refine_auto_include", False)),
-        extra_paths=str(settings.get("extra_paths") or base.extra_paths),
-        include_hermes_files=bool(settings.get("include_hermes_files", True)),
-        model_mapping=str(settings.get("model_mapping") or base.model_mapping),
-        extra_ignore=tuple(str(x) for x in settings.get("extra_ignore") or ()),
-        tool_probe=tuple(str(x) for x in settings.get("tool_probe") or ()),
+        workspace_root=str(s["workspace_root"]),
+        allow_roots=tuple(s["allow_roots"]),
+        export_roots=tuple(s["export_roots"]),
+        max_session_bytes=int(s["max_session_mb"] * _MIB),
+        max_file_bytes=int(s["max_file_mb"] * _MIB),
+        max_extra_dir_bytes=int(s["max_extra_dir_mb"] * _MIB),
+        max_hermes_file_bytes=int(s["max_hermes_file_mb"] * _MIB),
+        max_files=int(s["max_files"]),
+        max_untracked_files=int(s["max_untracked_files"]),
+        max_total_bytes=int(s["max_total_gb"] * _GIB),
+        confirm_above_bytes=int(s["confirm_above_mb"] * _MIB),
+        staging_ttl_s=int(s["staging_ttl_hours"] * 3600),
+        lease_ttl_s=int(s["lease_ttl_s"]),
+        participant_idle_timeout_s=int(s["participant_idle_timeout_min"] * 60),
+        stall_timeout_s=int(s["stall_timeout_min"] * 60),
+        wait_timeout_s=int(s["wait_timeout_min"] * 60),
+        refine=str(s["refine"]),
+        refine_timeout_s=int(s["refine_timeout_s"]),
+        refine_history_chars=int(s["refine_history_chars"]),
+        refine_side_question_max_tokens=int(s["refine_side_question_max_tokens"]),
+        refine_auto_include=s["refine_auto_include"] is True,
+        extra_paths=str(s["extra_paths"]),
+        include_hermes_files=s["include_hermes_files"] is True,
+        model_mapping=str(s["model_mapping"]),
+        extra_ignore=tuple(s["extra_ignore"]),
+        tool_probe=tuple(s["tool_probe"]),
     )
 
 
@@ -290,8 +249,8 @@ def _store(prof: Runtime):
             prof.store = blocks.BlockStore(  # root = plugin data dir (DESIGN §5.1); cache limits of §14.4
                 prof.data_dir,
                 prof.ledger,
-                cache_days=float(_num(settings, "block_cache_days", 3)),
-                cache_bytes=int(_num(settings, "block_cache_gb", 5) * 1024**3),
+                cache_days=float(settings["block_cache_days"]),
+                cache_bytes=int(settings["block_cache_gb"] * _GIB),
             )
         return prof.store
 
@@ -385,17 +344,27 @@ def _llm(ctx) -> Callable | None:
         complete = getattr(ctx.llm, "complete_structured", None)
         if callable(complete):
 
-            def call(instructions: str, input_blocks: list, schema: dict, timeout_s: int):
-                return complete(
+            def call(instructions: str, input_blocks: list, schema: dict, timeout_s: int) -> dict | None:
+                result = complete(
                     instructions=instructions,
                     input=input_blocks,
                     json_schema=schema,
-                    timeout=timeout_s,
+                    timeout=float(timeout_s),
                     purpose="ctx_handover.refine",
                 )
+                return structured_answer(result)
 
             return call
     return hostcompat.plugin_llm()
+
+
+def structured_answer(result: object) -> dict | None:
+    """The JSON object of a ``complete_structured`` answer (R34, L3-F09): ``ctx.llm`` returns
+    ``PluginLlmStructuredResult`` whose ``parsed`` holds it (set only when the reply was JSON) — the same unpacking
+    as ``hostcompat.plugin_llm``. Without a JSON object there is no answer; the result object itself is never passed
+    on as if it were the refinement."""
+    parsed = getattr(result, "parsed", None)
+    return parsed if isinstance(parsed, dict) else None
 
 
 def make_local_apis(
@@ -522,7 +491,7 @@ def apis_for(
             Path(bundle_path),
             identity,
             as_dir=options.as_dir,
-            declared_facts=None,
+            declared_facts=known_facts(ledger, peer),  # export --for <peer> (V28); None: generic importer facts
             ledger=ledger,
             retire=not options.keep_source,  # --keep exports a copy and leaves the source active (O3)
             exporter_name=getattr(local_source, "instance_name", "") or "",
@@ -548,6 +517,21 @@ def apis_for(
             local_target,
         )
     raise BadRequest(f"mode {mode} has no conductor", field="mode")
+
+
+def known_facts(ledger: Ledger, peer: Peer | None) -> EnvFacts | None:
+    """The target facts last received from ``peer`` (``Ledger.peer_facts_get``, contract V28): ``export --for
+    <peer>`` negotiates with them (DESIGN §5.4). ``None`` without a peer, without stored facts or when they no
+    longer parse (written by another plugin version) — the bundle then assumes an unknown importer."""
+    if peer is None:
+        return None
+    raw = ledger.peer_facts_get(peer.peer_id)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return from_wire(EnvFacts, raw)
+    except (HandoverError, TypeError, ValueError):
+        return None
 
 
 def _bundle_negotiation(bundle_path: Path, options: Options) -> Callable | None:
@@ -590,12 +574,15 @@ def listener_server():
 def server_settings(config: dict) -> dict:
     """The listener's settings: the plugin settings plus what the server reports in ``hello`` (W055)."""
     host = hostcompat.host_facts()
-    settings = dict(plugin_settings(config))
-    settings.setdefault("inbound", "auto")
-    settings.setdefault("name", host.profile if host.profile not in ("", "default") else _hostname())
-    settings.setdefault("max_request_mb", 8)
-    settings["max_jobs_per_peer"] = _count(settings, "max_jobs_per_peer", MAX_JOBS_PER_PEER)
-    settings["max_jobs_total"] = _count(settings, "max_jobs_total", MAX_JOBS)
+    raw = settings_mod.raw_settings(config)
+    # the listener's own knobs outside the schema (``name``, ``operator_api``, rate limits …) pass as given — the
+    # server normalises them itself; every schema key comes from the one normaliser
+    settings = {k: v for k, v in raw.items() if k not in settings_mod.SCHEMA}
+    settings.update(plugin_settings(config))
+    if not isinstance(settings.get("name"), str) or not settings["name"].strip():
+        settings["name"] = host.profile if host.profile not in ("", "default") else _hostname()
+    settings["max_jobs_per_peer"] = settings_mod.positive_int(raw.get("max_jobs_per_peer"), MAX_JOBS_PER_PEER)
+    settings["max_jobs_total"] = settings_mod.positive_int(raw.get("max_jobs_total"), MAX_JOBS)
     settings["hosted"] = bool(hostcompat.features().host_isolated)
     settings["plugin_version"] = host.plugin_version
     settings["hermes_version"] = host.hermes_version
@@ -618,13 +605,13 @@ def _registry(prof: _Profile) -> ParticipantRegistry:
                 )
                 return source if role is Role.SOURCE else target
 
-            settings = plugin_settings(hostcompat.load_config())
+            raw = settings_mod.raw_settings(hostcompat.load_config())
             prof.registry = ParticipantRegistry(  # the one owner of the job caps (X18)
                 prof.ledger,
                 factory,
                 local_options=lambda: local_options(plugin_settings(hostcompat.load_config())),
-                max_jobs_per_peer=_count(settings, "max_jobs_per_peer", MAX_JOBS_PER_PEER),
-                max_jobs=_count(settings, "max_jobs_total", MAX_JOBS),
+                max_jobs_per_peer=settings_mod.positive_int(raw.get("max_jobs_per_peer"), MAX_JOBS_PER_PEER),
+                max_jobs=settings_mod.positive_int(raw.get("max_jobs_total"), MAX_JOBS),
             )
         return prof.registry
 
@@ -714,6 +701,13 @@ def _plan_lists(plan_doc: dict) -> dict:
     exclusions = [
         {"path": n.get("path"), "why": n.get("why")} for n in plan.get("not_transferred") or () if isinstance(n, dict)
     ]
+    for i in items:  # tracked files on the secrets list: their working-tree changes stay behind (R23)
+        git = i.get("git") if isinstance(i, dict) else None
+        denied = git.get("denied_tracked") if isinstance(git, dict) else None
+        for path in denied if isinstance(denied, list) else ():
+            entry = {"path": _joined(i.get("source_path"), path), "why": "denied_tracked"}
+            if entry not in exclusions:
+                exclusions.append(entry)
     return {
         "exclusions": exclusions,
         "excluded_secrets": secrets,
@@ -721,6 +715,31 @@ def _plan_lists(plan_doc: dict) -> dict:
         "conflicts": conflicts,
         "instruction_files": instructions,
     }
+
+
+def _joined(root: object, path: object) -> str:
+    """A path of a work tree made absolute under its item's source path (absolute paths stay)."""
+    text = str(path)
+    if isinstance(root, str) and root and not text.startswith(("/", "\\")):
+        return f"{root.rstrip('/')}/{text}"
+    return text
+
+
+def _left_behind(lists: dict, result: dict) -> None:
+    """Merge the conductor's ``result["left_behind"]`` (pack exclusions and dropped suspected secrets, contract V34:
+    ``{"path", "why", "item_id"}``) into the status lists: every entry into ``exclusions``, secrets into
+    ``excluded_secrets``, whole stash entries (``why == "stash_secret"``) into ``withheld_stash`` — each path once."""
+    for entry in result.get("left_behind") or ():
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            continue
+        path, why = entry["path"], str(entry.get("why") or "excluded")
+        item = {"path": path, "why": why}
+        if item not in lists["exclusions"]:
+            lists["exclusions"].append(item)
+        if why in ("secret", "suspected_secret") and path not in lists["excluded_secrets"]:
+            lists["excluded_secrets"].append(path)
+        if why == "stash_secret" and path not in lists["withheld_stash"]:
+            lists["withheld_stash"].append(path)
 
 
 def _next_action(row: dict, outcome: str) -> str | None:
@@ -766,6 +785,9 @@ class JobRunner:
         self._owners: dict[str, tuple[str, int]] = {}
         self._ctxs: dict[str, object] = {}
         self._sides: dict[str, Callable[[str], str | None]] = {}
+        # V24: the participant pair of a job, built once and kept from ``plan_sync`` until its run in this process
+        # ends — ``plan_sync`` and ``run_foreground``/``continue_async`` drive the same instances.
+        self._pairs: dict[str, tuple[SourceAPI, TargetAPI]] = {}
 
     def bind_reporter_factory(self, reporter_factory: Callable[[str], Reporter]) -> bool:
         """Give a runner that was created without one (by the janitor, a route, the CLI) the surfaces' reporter
@@ -806,9 +828,23 @@ class JobRunner:
         )
         if mode is Mode.IMPORT and tgt_api is target:
             # X21: an import is verified only by the bundle signature of a stored, non-revoked key (BundleSource)
-            target.peer_verified = bool(getattr(src_api, "verified", False))
+            target.peer_verified = getattr(src_api, "verified", False) is True
+            exporter = self._exporter(src_api) if target.peer_verified else None
+            if exporter is not None:  # V13: the verified exporter is the job's peer (return trip, workspace map)
+                target.source_peer_id, target.peer_name = exporter.peer_id, exporter.name
             self._record_origin(row["job_id"], src_api)
         return src_api, tgt_api
+
+    def _exporter(self, bundle_source) -> Peer | None:
+        """The paired peer whose stored, non-revoked key signed an imported bundle (V13), or None — an unsigned
+        bundle, one signed by this profile's own key (``"trusted key"``) or a signer that is no peer here."""
+        signer = getattr(bundle_source, "signer", None)
+        if not isinstance(signer, str) or not signer or signer == "trusted key":
+            return None
+        peer = self.ledger.peer(signer)
+        if peer is None or peer.name != signer or peer.revoked_at is not None or not peer.pubkey:
+            return None
+        return peer
 
     def _record_origin(self, job_id: str, bundle_source) -> None:
         """Journal where an imported bundle comes from (SEC 4.6: status shows the origin)."""
@@ -817,7 +853,8 @@ class JobRunner:
         if mine is None:
             return
         signer = getattr(bundle_source, "signer", None)
-        origin = f"verified bundle ({signer})" if getattr(bundle_source, "verified", False) else "unverified bundle"
+        verified = getattr(bundle_source, "verified", False) is True
+        origin = f"verified bundle ({signer})" if verified else "unverified bundle"
         with contextlib.suppress(HandoverError):
             self.ledger.event(job_id, Role.CONDUCTOR, "origin", {"origin": origin}, epoch=mine[1])
 
@@ -891,7 +928,7 @@ class JobRunner:
             cancelled=lambda: self.ledger.cancel_requested(job_id),
             created_at=float(row["created_at"]),
         )
-        source, target = self._apis_factory(row)
+        source, target = self._participants(row)
         return Conductor(
             self.ledger,
             job,
@@ -906,6 +943,19 @@ class JobRunner:
             poll=self._poll,
             keepalive=self._keepalive,
         )
+
+    def _participants(self, row: dict) -> tuple[SourceAPI, TargetAPI]:
+        """One participant pair per job and process run (V24): the pair ``plan_sync`` composed is the pair the run
+        continues with; it is dropped when that run ends (a later ``resume`` composes afresh and re-checks the
+        peer)."""
+        job_id = row["job_id"]
+        with self._lock:
+            pair = self._pairs.get(job_id)
+        if pair is None:
+            pair = self._apis_factory(row)
+            with self._lock:
+                pair = self._pairs.setdefault(job_id, pair)
+        return pair
 
     # -- verbs ----------------------------------------------------------------------------------------------------
     def plan_sync(
@@ -929,7 +979,14 @@ class JobRunner:
         if self._before_job is not None:
             self._before_job()
         if mode is Mode.EXPORT and bundle_path is None:
-            bundle_path = default_bundle_path(self._session_title(session_ref, calling_session), options)
+            hermes = hostcompat.hermes_paths()
+            bundle_path = default_bundle_path(
+                self._session_title(session_ref, calling_session),
+                options,
+                home=Path.home(),
+                hermes_home=Path(hermes.home),
+                hermes_root=hostcompat.hermes_root(),
+            )
         job_id = ulid()
         params = {
             "mode": str(mode),
@@ -952,6 +1009,11 @@ class JobRunner:
             self._abort_unbuilt(job_id, exc)
             self._forget(job_id)
             raise
+        except Exception as exc:  # composition failed outside the error model: the job ends, nothing is locked
+            err = unexpected(exc)
+            self._abort_unbuilt(job_id, err)
+            self._forget(job_id)
+            raise err from exc
         try:
             final = conductor.run_until_negotiated()
         except Cancelled:
@@ -968,23 +1030,34 @@ class JobRunner:
         with self._lock:
             self._ctxs.pop(job_id, None)
             self._sides.pop(job_id, None)
+            self._pairs.pop(job_id, None)
 
     def _run(self, job_id: str, how: str) -> None:
+        """One run of a job in this thread. The conductor turns every failure of a step into the job's state;
+        what escapes it (the composition of the participants, the ledger itself) is logged, and a job that locked
+        nothing yet ends ``aborted`` — a failure never leaves the thread with the job held by this runner."""
         try:
             try:
                 conductor = self._conductor(job_id)
             except HandoverError as exc:
                 self._abort_unbuilt(job_id, exc)
                 return
+            except Exception as exc:
+                log.warning("ctx_handover job %s: participants not composed", short(job_id), exc_info=True)
+                self._abort_unbuilt(job_id, unexpected(exc))
+                return
             getattr(conductor, how)()
         except HandoverError:
             pass
+        except Exception:
+            log.warning("ctx_handover job %s: unexpected failure", short(job_id), exc_info=True)
         finally:
             self._release(job_id)
             with self._lock:
                 self._threads.pop(job_id, None)
                 self._ctxs.pop(job_id, None)
                 self._sides.pop(job_id, None)
+                self._pairs.pop(job_id, None)
 
     def _spawn(self, job_id: str, how: str) -> threading.Thread:
         with self._lock:
@@ -1023,15 +1096,50 @@ class JobRunner:
             thread.join(timeout)
 
     def cancel(self, job_id: str) -> str:
+        """Request cancellation; the answer says it was requested only when the ledger holds the request (a job
+        that already ended keeps no request — ``set_cancel`` returns without writing). A SUSPENDED job has no runner
+        that would see the request (L3-F07): the cancel drives its abort itself (``_abort_suspended``)."""
         try:
             self.ledger.set_cancel(job_id)
         except InvalidState as exc:
             return exc.message
-        return f"Cancel requested for job {short(job_id)}."
+        if self.ledger.cancel_requested(job_id) is True:
+            row = self.ledger.job(job_id, Role.CONDUCTOR)
+            if row is not None and row["state"] == str(ConductorState.SUSPENDED):
+                return self._abort_suspended(job_id)
+            return f"Cancel requested for job {short(job_id)}."
+        row = self.ledger.job(job_id, Role.CONDUCTOR)
+        state = row["state"] if row is not None else "gone"
+        return f"Job {short(job_id)} is already {state}; nothing to cancel."
+
+    def _abort_suspended(self, job_id: str) -> str:
+        """``/handover cancel`` of a SUSPENDED job (L3-F07): the abort runs now — ``target.abort``, then
+        ``source.release`` (V37 order) ⇒ ABORTED, which frees the source and the target's participant slot. The answer
+        waits at most ``CANCEL_SETTLE_S``; a target that cannot be reached keeps the job ``aborting`` (the session's
+        turn lease runs out on its own, DESIGN §7.3) and the janitor finishes it on the next start."""
+        thread = self._spawn(job_id, "recover")
+        thread.join(CANCEL_SETTLE_S)
+        row = self.ledger.job(job_id, Role.CONDUCTOR) or {}
+        state, sid = row.get("state"), short(job_id)
+        if state == str(ConductorState.ABORTED):
+            return f"Handover {sid} cancelled; the session is yours again."
+        if state == str(ConductorState.ABORTING):
+            err = row.get("last_error") or {}
+            why = f" ({err.get('message')})" if isinstance(err, dict) and err.get("message") else ""
+            return (
+                f"Cancelling handover {sid}: the other side has not confirmed yet{why}. It finishes on the next "
+                f"contact; /handover status {sid} shows it."
+            )
+        return f"Cancel requested for job {sid}."
 
     def status(self, job_id: str | None) -> dict:
         """Machine-readable status for the surfaces (cluster F renders it, X20): ``{"jobs": [...], …}`` without a
-        job, ``{"job": {...}}`` with one (journal tail in ``job.events``)."""
+        job, ``{"job": {...}}`` with one (journal tail in ``job.events``).
+
+        Jobs another gateway conducts are known here too (contract V43, L3-F04): the arrival of a push (role
+        ``target``) and the source of a pull (role ``source``) — listed after this host's conductor jobs and found by
+        ``status <job>``. A participant row of a job this host conducts itself (export, import, the local side of a
+        push or pull) is part of that conductor job and not listed twice."""
         if job_id is None:
             recent = self.ledger.jobs(role=Role.CONDUCTOR, limit=5)
             active = self.ledger.jobs(role=Role.CONDUCTOR, active=True, limit=20)
@@ -1040,20 +1148,99 @@ class JobRunner:
                 if r["job_id"] not in seen:
                     seen.add(r["job_id"])
                     jobs.append(self._summary(r))
+            jobs += [self._participant_summary(r) for r in self._participant_rows()]
             return {
                 "jobs": jobs,
                 "pull_log": self.ledger.pull_log(5),
                 "outbox_pending": len(self.ledger.outbox_due(self.ledger.now() + 10**9, limit=1000)),
             }
         row = self.ledger.job(job_id, Role.CONDUCTOR)
-        if row is None:
-            raise NotFound(f"job {short(job_id)} not found")
-        out = self._summary(row)
+        if row is not None:
+            role, out = Role.CONDUCTOR, self._summary(row)
+        else:
+            row = next((r for r in (self.ledger.job(job_id, ro) for ro in _PARTICIPANT_ROLES) if r is not None), None)
+            if row is None:
+                raise NotFound(f"job {short(job_id)} not found")
+            role, out = Role(row["role"]), self._participant_summary(row)
         out["events"] = [
             {"kind": e["kind"], "state": e["state"], "step": e["step"], "at": e["ts"]}
-            for e in self.ledger.events(job_id, Role.CONDUCTOR)[-20:]
+            for e in self.ledger.events(job_id, role)[-20:]
         ]
         return {"job": out}
+
+    def _participant_rows(self) -> list[dict]:
+        """Active and recent participant rows of jobs another gateway conducts (one per job id and role)."""
+        out, seen = [], set()
+        for role in _PARTICIPANT_ROLES:
+            for r in [*self.ledger.jobs(role=role, active=True, limit=20), *self.ledger.jobs(role=role, limit=5)]:
+                key = (r["job_id"], r["role"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                if (r.get("params") or {}).get("local") is True:
+                    continue  # this host's own participant rows (its conductor jobs, an offer's planning row)
+                if self.ledger.job(r["job_id"], Role.CONDUCTOR) is None:
+                    out.append(r)
+        return out
+
+    def _participant_summary(self, row: dict) -> dict:
+        """The X20 summary of a participant job (V43): role, state, peer; on a target the ack and the note the agent
+        gets with the first message there (DESIGN §11.4); on a source the state of its handover. ``calling_session``
+        is this host's session of the job (the arrived one, or the source session)."""
+        role, job_id = Role(row["role"]), row["job_id"]
+        params = row.get("params") or {}
+        peer = self.ledger.peer(row["peer_id"]) if row["peer_id"] else None
+        state, ack, note, origin, session, title = row["state"], None, None, None, None, None
+        if role is Role.TARGET:
+            ack = _journal_ctx(self.ledger, job_id, role).get("ack")
+            ack = ack if isinstance(ack, dict) else None
+            arrival = self.ledger.arrival_for(str(ack.get("session_id") or "")) if ack else None
+            if arrival is None:
+                arrival = next((a for a in self.ledger.arrival_rows() if a.get("job_id") == job_id), None)
+            if arrival is not None:
+                note, session = arrival.get("note"), arrival.get("session_id")
+                origin = f"verified peer ({peer.name})" if _peer_verified(peer) else "peer"
+            session = session or (ack or {}).get("session_id")
+            title = (ack or {}).get("title")
+        else:
+            src = self.ledger.source_state(job_id)
+            if src is not None:
+                state, session, title = str(src["state"]), src.get("tip_id"), src.get("title")
+                ack = src.get("ack") if isinstance(src.get("ack"), dict) else None
+        terminal = state in TERMINAL[role]
+        return {
+            "job_id": job_id,
+            "short": short(job_id),
+            "mode": row["mode"],
+            "role": str(role),
+            "state": state,
+            "active": not terminal,
+            "outcome": state if terminal else "running",
+            "peer_id": row["peer_id"],
+            "peer": peer.name if peer else None,
+            "calling_session": session,
+            "session_ref": params.get("session_ref"),
+            "progress": {"step": state},
+            "restarts": row["restarts"],
+            "last_error": row["last_error"],
+            "error": row["last_error"],
+            "next_action": None,
+            "ack": ack,
+            "title": title,
+            "target_session": _target_session(ack, session if role is Role.TARGET else None),
+            "note": note,
+            "origin": origin,
+            "exclusions": [],
+            "excluded_secrets": [],
+            "withheld_stash": [],
+            "conflicts": [],
+            "instruction_files": [],
+            "continuation": None,
+            "withheld": [],
+            "source_kept": False,
+            "warnings": [],
+            "exit_code": EXIT_OK if state in _PARTICIPANT_OK else (EXIT_FAILED if terminal else EXIT_PENDING),
+        }
 
     def _summary(self, row: dict) -> dict:
         result = row.get("result") or {}
@@ -1061,6 +1248,10 @@ class JobRunner:
         state = row["state"]
         outcome = result.get("outcome") or ("running" if state not in _STOP else state)
         ack = result.get("ack") if isinstance(result.get("ack"), dict) else None
+        if ack is None and state in _ACKED:
+            # COMMITTED … DONE before the result is written: the ack is journaled since COMMITTED (V42, L3-F03)
+            journaled = _journal_ctx(self.ledger, row["job_id"], Role.CONDUCTOR).get("ack")
+            ack = journaled if isinstance(journaled, dict) else None
         plan = result.get("plan") if isinstance(result.get("plan"), dict) else None
         peer = self.ledger.peer(row["peer_id"]) if row["peer_id"] else None
         out = {
@@ -1082,6 +1273,7 @@ class JobRunner:
             "next_action": _next_action(row, outcome),
             "ack": ack,
             "title": (ack or {}).get("title"),
+            "target_session": _target_session(ack, None),
             "note": None,
             "origin": None,
             "exclusions": [],
@@ -1090,6 +1282,8 @@ class JobRunner:
             "conflicts": [],
             "instruction_files": [],
             "continuation": result.get("continue"),
+            "withheld": [p for p in result.get("withheld") or () if isinstance(p, str)],
+            "source_kept": result.get("source_kept") is True,
             "warnings": result.get("warnings") or [],
             "exit_code": exit_code(row),
         }
@@ -1098,6 +1292,7 @@ class JobRunner:
             out["bundle"] = {"path": str(path), "size": _size_of(path)}
         if plan is not None:
             out.update(_plan_lists(plan))
+        _left_behind(out, result)
         if ack is not None:
             arrival = self.ledger.arrival_for(str(ack.get("session_id") or ""))
             if arrival is not None:
@@ -1175,7 +1370,13 @@ class JobRunner:
                         notes=plan.notes_for_target,
                     )
                 )
-        sid = session_ref.id or ""
+        planned = _journal_ctx(self.ledger, offer_id, Role.SOURCE).get("planned_info")
+        # the session the plan resolved (its tip): an offer from the calling session has no id in ``session_ref``
+        sid = str(planned.get("tip_id") or "") if isinstance(planned, dict) else ""
+        sid = sid or str(session_ref.id or "")
+        self._close_offer_row(offer_id)
+        if not sid:
+            raise error_from(st.error) if st.error else BadRequest("no session given", field="session_ref")
         expires = self._clock() + OFFER_TTL_S
         self.ledger.offer_put(offer_id, peer.peer_id, sid, note, refinement, expires)
         return {
@@ -1185,6 +1386,21 @@ class JobRunner:
             "expires_at": expires,
             "has_refinement": refinement is not None,
         }
+
+    def _close_offer_row(self, offer_id: str) -> None:
+        """The source row the offer's planning opened (``LocalSource._ensure_job``) is no job: it ends ``released``
+        at once, so it neither counts against the peer's job caps nor shows up in ``status`` as a running source
+        (L3-F07: an open offer held one of the two slots of its peer). The offer itself lives in ``offers``."""
+        with contextlib.suppress(HandoverError):
+            row = self.ledger.job(offer_id, Role.SOURCE)
+            if row is None or row["state"] in TERMINAL[Role.SOURCE]:
+                return
+            owner = process_owner()
+            epoch = self.ledger.claim_owner(offer_id, Role.SOURCE, owner, STALE_OWNER_S)
+            if epoch is None:
+                return
+            self.ledger.transition(offer_id, Role.SOURCE, "*", "released", {"reason": "offer"}, epoch=epoch)
+            self.ledger.release_owner(offer_id, Role.SOURCE, owner, epoch)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1218,7 +1434,7 @@ def janitor(
     for row in stale:
         role = Role(row["role"])
         if role is Role.CONDUCTOR:
-            if runner is None or row["state"] in ("suspended",):
+            if runner is None or (row["state"] == "suspended" and not ledger.cancel_requested(row["job_id"])):
                 continue
             seen.add(row["job_id"])
             done["conductor"].append((row["job_id"], row["state"]))
@@ -1232,7 +1448,10 @@ def janitor(
         for row in ledger.jobs(role=Role.CONDUCTOR, active=True, limit=1000):
             if row["job_id"] in seen or row["owner"] is not None:
                 continue
-            if row["state"] in (
+            cancelled_suspended = row["state"] == str(ConductorState.SUSPENDED) and ledger.cancel_requested(
+                row["job_id"]
+            )  # a cancel whose abort did not finish (its process ended): abort it now (L3-F07)
+            if cancelled_suspended or row["state"] in (
                 str(ConductorState.COMMITTED),
                 str(ConductorState.RETIRING),
                 str(ConductorState.IN_DOUBT),
@@ -1286,6 +1505,27 @@ def gc_job(ledger: Ledger, job_id: str, *, data_dir: Path, store=None) -> None:
     ledger.purge_job(job_id)
 
 
+def _target_session(ack: dict | None, arrived: str | None) -> dict | None:
+    """L17 (A part): the session the handover created on the target — ``{"id", "title"}`` from the target's ack
+    (``arrived``: the session id this host's arrival row names, a target without its journaled ack yet); None before
+    the commit. Surfaces name it in the final message and say how to open it (F)."""
+    sid = (ack or {}).get("session_id") or arrived
+    if not isinstance(sid, str) or not sid:
+        return None
+    title = (ack or {}).get("title")
+    return {"id": sid, "title": title if isinstance(title, str) else None}
+
+
+def _journal_ctx(ledger: Ledger, job_id: str, role: Role) -> dict:
+    """The journaled context of one side of a job (every ``ctx`` dict of its events, in order)."""
+    out: dict = {}
+    for e in ledger.events(job_id, role):
+        data = e["data"] or {}
+        if isinstance(data.get("ctx"), dict):
+            out.update(data["ctx"])
+    return out
+
+
 def _continuation_files(log_dir: Path, job_id: str) -> tuple[Path, ...]:
     """The files a job's continuation leaves (log and sidecar) as ``continuation.job_files`` names them — the one
     place that knows the names; the log alone with an older ``continuation`` module."""
@@ -1302,14 +1542,12 @@ def _flush(ctx) -> Callable[[Ledger], object] | None:
         return None
     config = hostcompat.load_config()
     settings = plugin_settings(config)
-    if settings.get("ctx_persist") == "off":
-        return None
     from . import ctxrecords
 
-    server = ctxrecords.detect(config)
+    server = ctxrecords.server_for(config, settings)  # one rule for ``ctx_persist`` and detection (X22)
     if server is None:
         return None
-    category = str(settings.get("ctx_category") or "handover")
+    category = str(settings["ctx_category"])
     return lambda ledger: ctxrecords.flush(ledger, ctx.call_mcp, server, category, ledger.now())
 
 
@@ -1373,36 +1611,151 @@ def reclaim(session_id: str, *, force: bool) -> dict:
         with contextlib.suppress(Exception):
             db.close()
     job_id = out.get("job_id")
+    _reclaim_outcome(prof, out)
+    row = prof.ledger.job(str(job_id), Role.CONDUCTOR) if job_id else None
+    if row is not None and row["mode"] == str(Mode.EXPORT):
+        if out.get("state") in ("reclaimed", "released"):
+            _settle_export(prof, row, out)
+        return out
     if job_id and out.get("state") == "reclaimed":
         out["target_notified"] = _notify_reclaimed(prof, str(job_id))
     return out
 
 
+def _settle_export(prof: _Profile, row: dict, out: dict) -> None:
+    """``reclaim`` of an exported session (V39, R1/D8): an export that has not ended is settled now — the conductor
+    sees the reclaimed source and aborts a bundle that was never committed (its ``.partial`` is removed) — by this
+    process's runner thread of the job if one runs, else by a recovery here (a live owner in another process does
+    it on its next poll). The warnings speak of the bundle: an export has no target "on another machine"."""
+    job_id = row["job_id"]
+    if row["state"] not in _STOP:
+        runner = runner_for(None)
+        with runner._lock:
+            thread = runner._threads.get(job_id)
+        if thread is not None and thread.is_alive():
+            thread.join(RECLAIM_SETTLE_S)
+        else:
+            with contextlib.suppress(HandoverError):
+                runner.recover(job_id, background=False)
+        row = prof.ledger.job(job_id, Role.CONDUCTOR) or row
+    path = (row.get("params") or {}).get("bundle_path")
+    shown = path or "the bundle"
+    warnings = [w for w in out.get("warnings") or () if not str(w).startswith(("the copy on ", "the target on "))]
+    if row["state"] == "aborted":
+        warnings.append(f"the unfinished bundle {shown} was removed; nothing was exported")
+    elif row["state"] == "done":
+        if path and Path(path).exists():
+            warnings.append(
+                f"the bundle {path} stays a valid copy; importing it elsewhere makes a second, independent copy"
+            )
+    else:
+        warnings.append(
+            f"the export (job {short(job_id)}) has not ended yet ({row['state']}); /handover status "
+            f"{short(job_id)} shows what becomes of {shown}"
+        )
+    out["warnings"] = warnings
+
+
+_RECLAIM_REFUSALS = {
+    "prepared": "committing",
+    "retiring": "committing",
+    "locking": "in_progress",
+    "locked": "in_progress",
+    "preparing": "in_progress",
+}
+
+
+def _reclaim_outcome(prof: _Profile, out: dict) -> None:
+    """L3-F14 (A part): ``ok`` is True only when the session is active here again (``reclaimed``/``released``); a
+    refusal or "nothing to reclaim" carries ``ok: False`` and ``error`` (``code``, ``message``, ``details.reason``:
+    ``committing`` — prepared/retiring without ``--force`` —, ``in_progress`` — use cancel —, or
+    ``nothing_to_reclaim``) so the CLI's ``--json`` and exit code can show it."""
+    out["ok"] = out.get("state") in ("reclaimed", "released")
+    if out["ok"]:
+        return
+    job_id = out.get("job_id")
+    src = None
+    with contextlib.suppress(HandoverError):
+        src = prof.ledger.source_state(str(job_id)) if job_id else None
+    state = str(src["state"]) if src else None
+    reason = _RECLAIM_REFUSALS.get(state or "", "nothing_to_reclaim")
+    code = "invalid_state" if reason != "nothing_to_reclaim" else "not_found"
+    out["error"] = {
+        "code": code,
+        "message": str(out.get("message") or "Nothing to reclaim."),
+        "details": {"reason": reason, "state": state, "job": short(str(job_id)) if job_id else None},
+    }
+
+
+NOTIFY_TIMEOUT_S = 5.0
+"""Read timeout of the ``source_reclaimed`` notice (one attempt, L3-F16)."""
+NOTIFY_WAIT_S = 5.0
+"""How long ``reclaim`` waits for that notice before it answers; the notice is best effort (DESIGN §7.7)."""
+
+
 def _notify_reclaimed(prof: _Profile, job_id: str) -> bool:
+    """Tell the target of a job this host dialed that the source took the session back (route #8, best effort,
+    DESIGN §7.7). Bounded (L3-F16): one attempt with a short read timeout in a background thread, ``reclaim`` waits
+    at most ``NOTIFY_WAIT_S`` — a target that does not answer (stopped, in doubt) never holds the reclaim; True only
+    when the target accepted the notice in time."""
     row = prof.ledger.job(job_id, Role.CONDUCTOR)
     peer = prof.ledger.peer(row["peer_id"]) if row and row["peer_id"] else None
     identity = _identity(prof)
     if row is None or peer is None or peer.direction != "dial" or identity is None:
         return False
-    try:
-        from . import wire
+    from . import wire
 
-        client = wire.WireClient(peer, identity, read_secret=hostcompat.read_secret)
-        epoch = int(row["owner_epoch"])
-        client.call("POST", f"jobs/{job_id}/status", {"epoch": epoch, "note": "source_reclaimed"}, epoch=epoch)
-    except HandoverError:
-        return False
-    return True
+    epoch = int(row["owner_epoch"])
+    delivered = threading.Event()
+
+    def send() -> None:
+        try:
+            client = wire.WireClient(
+                peer, identity, read_secret=hostcompat.read_secret, timeout=NOTIFY_TIMEOUT_S, max_attempts=1
+            )
+            try:
+                body = {"epoch": epoch, "note": "source_reclaimed"}
+                client.call("POST", f"jobs/{job_id}/status", body, epoch=epoch)
+            finally:
+                with contextlib.suppress(Exception):
+                    client.close()
+        except HandoverError:
+            return
+        except Exception:  # a notice must never break the reclaim that already happened
+            log.warning("ctx_handover source_reclaimed notice failed", exc_info=True)
+            return
+        delivered.set()
+
+    ctx = contextvars.copy_context()  # the profile scope (secrets, HERMES_HOME) travels with the thread (V33)
+    thread = threading.Thread(target=ctx.run, args=(send,), name=f"ctxh-reclaimed-{short(job_id)}", daemon=True)
+    thread.start()
+    thread.join(NOTIFY_WAIT_S)
+    return delivered.is_set()
 
 
-def default_bundle_path(title: str | None, options: Options, now: float | None = None) -> Path:
-    """``<workspace_root>/<title-slug>-<YYYYmmdd-HHMMSS>.ctxh.tar`` (DESIGN §5.4, W127); a directory with ``--dir``."""
+def default_bundle_path(
+    title: str | None,
+    options: Options,
+    now: float | None = None,
+    *,
+    home: Path | None = None,
+    hermes_home: Path | None = None,
+    hermes_root: Path | None = None,
+) -> Path:
+    """``<workspace_root>/<title-slug>-<YYYYmmdd-HHMMSS>.ctxh.tar`` (DESIGN §5.4, W127); a directory with ``--dir``.
+    With ``home`` and ``hermes_home`` the root resolves like the target's (``paths.expand_handover_root``, R29): the
+    default ``~/hermes-handover`` inside the Hermes home is ``<HERMES_HOME>/handover-workspaces``."""
     import re
     from datetime import datetime
+
+    from .paths import expand_handover_root
 
     slug = re.sub(r"[^A-Za-z0-9]+", "-", str(title or "session")).strip("-").lower()[:48] or "session"
     stamp = datetime.fromtimestamp(now if now is not None else time.time()).strftime("%Y%m%d-%H%M%S")
     root = Path(os.path.expanduser(options.workspace_root))
+    if home is not None and hermes_home is not None:
+        with contextlib.suppress(HandoverError):
+            root = expand_handover_root(options.workspace_root, home, hermes_home, hermes_root=hermes_root)
     return root / (f"{slug}-{stamp}" + ("" if options.as_dir else ".ctxh.tar"))
 
 

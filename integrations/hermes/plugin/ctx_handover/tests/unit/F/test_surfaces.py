@@ -447,7 +447,8 @@ def test_final_message_fields():
         "/home/u/app",
         "model qwen3",
         "works offline: yes",
-        "Open it from the session list and send a message",
+        # G‴ (L17): the exact way to open the stored session replaces "Open it from the session list"
+        "Open it with `hermes --resume 20261109_141003_a1b2c3`",
     ):
         assert needle in pull, needle
     online = surfaces.render_final(Mode.PULL, _ack(offline_capable=False, model="gpt-x"), "done", "server", None)

@@ -120,7 +120,11 @@ def test_janitor_never_releases_prepared_source(tmp_path, clock):
             calls.append(("retire", job.job_id))
 
     reg = ParticipantRegistry(led, lambda role, peer: Api(), clock=clock)
-    for job_id, state, root in (("SP", "prepared", "r1"), ("SL", "locked", "r2"), ("SR", "retiring", "r3")):
+    for job_id, state, root in (
+        ("01JZSP00000000000000000000", "prepared", "r1"),
+        ("01JZSY00000000000000000000", "locked", "r2"),
+        ("01JZSR00000000000000000000", "retiring", "r3"),
+    ):
         led.create_job(job_id, Role.SOURCE, Mode.PULL, "P1", {"role": "source"})
         info = SessionInfo("t" + root, root, (root, "t" + root), None, None, None, None, None, None, 1, (1,))
         led.source_lock(job_id, info, "h", "laptop")
@@ -144,9 +148,17 @@ def test_janitor_never_releases_prepared_source(tmp_path, clock):
     clock.advance(61)
     did = jobs.janitor(led, None, reg, flush_outbox=None)
     outcome = {j: what for j, _role, what in did["participant"]}
-    assert outcome == {"SP": "kept", "SL": "released", "SR": "retire_continued"}
-    assert ("release", "SP") not in calls and ("release", "SL") in calls and ("retire", "SR") in calls
-    assert led.source_state("SP")["state"] == "prepared"
+    assert outcome == {
+        "01JZSP00000000000000000000": "kept",
+        "01JZSY00000000000000000000": "release_started",  # the stand-in reports no finished release operation
+        "01JZSR00000000000000000000": "retire_continued",
+    }
+    assert (
+        ("release", "01JZSP00000000000000000000") not in calls
+        and ("release", "01JZSY00000000000000000000") in calls
+        and ("retire", "01JZSR00000000000000000000") in calls
+    )
+    assert led.source_state("01JZSP00000000000000000000")["state"] == "prepared"
     led.close()
 
 
@@ -426,5 +438,10 @@ def test_local_options_from_settings():
     assert o.allow_roots == ("~/w",) and o.export_roots == ("~/share",)
     assert o.max_session_bytes == 1024**2 and o.staging_ttl_s == 7200 and o.participant_idle_timeout_s == 60
     assert o.refine == "off" and o.max_total_bytes == 10 * 1024**3  # a bool is no number
-    assert jobs.plugin_settings({"plugins": {"entries": {"ctx_handover": {"settings": {"a": 1}}}}}) == {"a": 1}
-    assert jobs.plugin_settings({}) == {}
+    # contract V22: the one normaliser — every schema key with its default, unknown keys dropped
+    from ctx_handover.engine import settings
+
+    assert jobs.plugin_settings({"plugins": {"entries": {"ctx_handover": {"settings": {"a": 1}}}}}) == dict(
+        settings.DEFAULTS
+    )
+    assert jobs.plugin_settings({}) == dict(settings.DEFAULTS)

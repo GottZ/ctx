@@ -499,8 +499,12 @@ class _Txn:
                 _log.warning("discarding imported session %s failed: %s", sid, exc)
 
 
-def _import_a(db, payload: list[dict], plan: ImportPlan) -> list[dict]:
-    """``import_sessions`` with the title loop: an ``IntegrityError`` on a title retitles that segment (≤ 8)."""
+def _import_a(db, payload: list[dict], plan: ImportPlan) -> tuple[list[dict], set[str]]:
+    """``import_sessions`` with the title loop: an ``IntegrityError`` on a title retitles that segment (≤ 8).
+
+    Returns the payload written and the ids the core actually imported. Success is only ``ok is True`` with every
+    payload id in ``imported_ids``: the core answers ``ok`` for a payload whose ids already exist and skips them
+    (``hermes_state_portability.py:822-838``) — such an id is somebody else's session, never ours."""
     for _attempt in range(TITLE_RETRIES + 2):
         try:
             result = db.import_sessions(payload)
@@ -509,8 +513,20 @@ def _import_a(db, payload: list[dict], plan: ImportPlan) -> list[dict]:
                 raise ImportFailed("import_sessions failed", error=str(exc)[:300]) from exc
             payload = _retitle(db, payload, plan)
             continue
-        if result.get("ok"):
-            return payload
+        if not isinstance(result, Mapping):
+            raise ImportFailed("import_sessions gave no result")
+        if result.get("ok") is True:
+            listed = result.get("imported_ids")
+            if isinstance(listed, list):
+                imported = {i for i in listed if isinstance(i, str)}
+            else:  # a core without the id list: not skipped and present now (all were free just before)
+                skipped = {i for i in (result.get("skipped_ids") or ()) if isinstance(i, str)}
+                imported = {
+                    str(seg.get("id"))
+                    for seg in payload
+                    if str(seg.get("id")) not in skipped and db.get_session(str(seg.get("id"))) is not None
+                }
+            return payload, imported
         errors = [str(e) for e in (result.get("errors") or [])]
         if any("was deleted here" in e for e in errors):
             raise _TombstoneHit(errors)
@@ -519,7 +535,7 @@ def _import_a(db, payload: list[dict], plan: ImportPlan) -> list[dict]:
 
 
 class _TombstoneHit(Exception):
-    pass
+    """A planned id is not free any more (a tombstone, or a session created here after planning): re-mint."""
 
 
 def _retitle(db, payload: list[dict], plan: ImportPlan) -> list[dict]:
@@ -672,6 +688,13 @@ def import_hidden(
     raise ImportFailed("import did not complete")
 
 
+def _require_free(db, ids: Sequence[str]) -> None:
+    """Every planned id is still free right before it is written (a session may have taken it since planning)."""
+    taken = [i for i in ids if _id_taken(db, i)]
+    if taken:
+        raise _TombstoneHit([f"planned session {i} already exists here" for i in taken])
+
+
 def _import_once(
     db, store, capsule: dict, plan: ImportPlan, txn: _Txn, cancelled, local_hermes_version
 ) -> PreparedInfo:
@@ -689,8 +712,11 @@ def _import_once(
         if not batch:
             return
         ids = [s["id"] for s in batch]
-        txn.created.extend(ids)
-        written = _import_a(db, batch, plan)
+        _require_free(db, ids)
+        written, imported = _import_a(db, batch, plan)
+        txn.created.extend(i for i in ids if i in imported)  # only what this import wrote is ever discarded
+        if imported != set(ids):
+            raise _TombstoneHit([f"planned session {i} already exists here" for i in ids if i not in imported])
         for s in written:
             titles[s["id"]] = s.get("title")
         batch, batch_rows, batch_bytes = [], 0, 0
@@ -726,6 +752,7 @@ def _import_once(
                 batch_bytes += size
         if path == PATH_B:
             flush()
+            _require_free(db, [seg.new_id])  # ``create_session`` is an upsert: never write into a foreign row
             txn.created.append(seg.new_id)
             title, rewind = _import_b_prime(db, store, segment, seg, plan, cancelled)
             titles[seg.new_id] = title

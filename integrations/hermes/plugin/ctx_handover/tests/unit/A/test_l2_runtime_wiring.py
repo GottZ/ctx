@@ -121,7 +121,7 @@ def test_settings_yaml_words_and_flags(runtime_env, fake_ctx):
     s = jobs.plugin_settings({"plugins": {"entries": {"ctx_handover": {"settings": raw}}}})
     assert s["refine"] == "off" and s["extra_paths"] == "off" and s["ctx_persist"] == "off" and s["inbound"] == "off"
     assert s["allow_remote_continue"] is False and s["include_hermes_files"] is False
-    assert s["refine_auto_include"] is True and "allow_agent_start" not in s
+    assert s["refine_auto_include"] is True and s["allow_agent_start"] is False  # V22: unknown word = default
     o = jobs.local_options(s)
     assert o.refine == "off" and o.extra_paths == "off" and o.include_hermes_files is False
     assert o.model_mapping == "auto"

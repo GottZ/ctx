@@ -181,7 +181,8 @@ def _scan_tracked(git: Git, root: Path, cfg: PolicyConfig, out: _Scan, cancelled
             if head is None:
                 continue
             args = [*args, head]
-        proc = git.run(args, cwd=root, spec=spec, check=False, cancelled=cancelled)
+        # must succeed: a failed (killed) listing would read as "nothing changed" and skip the content sniff
+        proc = git.run(args, cwd=root, spec=spec, cancelled=cancelled)
         changed.update(r for r in proc.stdout.split(b"\x00") if r)
     for rec in sorted(changed):
         if rec in denied:
@@ -228,12 +229,17 @@ def _blob_head(git: Git, root: Path, oid: str, n: int = _SNIFF_BYTES) -> bytes:
         input_lines=[],
     )
     assert proc.stdout is not None  # noqa: S101 - PIPE requested
+    data, whole = b"", False
     try:
         data = proc.stdout.read(n)
+        whole = len(data) < n  # end of output before n bytes: the whole blob, if cat-file succeeded
     finally:
-        proc.kill()
+        if not whole:
+            proc.kill()  # the head is all the sniff needs (or the read failed)
         proc.stdout.close()
-        proc.wait()
+        rc = proc.wait()
+    if whole and rc != 0:  # a failed cat-file is no empty, harmless blob
+        raise GitCommandError(f"git cat-file failed (rc {rc}) for blob {oid}", subcommand="cat-file", rc=rc)
     return data
 
 
@@ -309,11 +315,10 @@ def filter_stash(
 
 
 def _stash_entries(git: Git, root: Path) -> list[dict]:
-    proc = git.run(
+    proc = git.run(  # rc 0 also without any stash; a failure must not read as "no stash"
         ["stash", "list", "-z", "--format=%H %gs"],
         cwd=root,
         spec=GitEnvSpec(profile="source", ceiling=root.parent),
-        check=False,
     )
     out = []
     for rec in proc.stdout.decode("utf-8", errors="replace").split("\x00"):
@@ -349,6 +354,12 @@ def _config_sections(git: Git, root: Path, pattern: str) -> list[tuple[str, str]
         spec=GitEnvSpec(profile="source", ceiling=root.parent),
         check=False,
     )
+    if proc.returncode not in (0, 1):  # 1 = no match; anything else is a failed read, not "none"
+        raise GitCommandError(
+            f"git config failed (rc {proc.returncode}): {proc.stderr[-300:].decode('utf-8', 'replace')}",
+            subcommand="config",
+            rc=proc.returncode,
+        )
     out = []
     for rec in proc.stdout.split(b"\x00"):
         if rec:
@@ -550,10 +561,23 @@ def _load_cache(workdir: Path, key: str, store: BlockSink) -> dict | None:
         return None
     if not isinstance(data, dict) or data.get("key") != key:
         return None
-    blocks = data.get("blocks") or []
-    if blocks and store.missing(blocks):
+    if not all(k in data for k in _CACHE_KEYS):
+        return None
+    # a hit needs the blocks of every object it names, known and present (an unknown list is not "nothing")
+    needed: list[str] = []
+    for obj, listed in (("pack_object", "blocks"), ("lfs_manifest", "lfs_blocks")):
+        if data.get(obj) is None:
+            continue
+        blocks = data.get(listed)
+        if not isinstance(blocks, list) or not blocks:
+            return None
+        needed += blocks
+    if needed and store.missing(needed):
         return None
     return data
+
+
+_CACHE_KEYS = ("index_commit", "worktree_commit", "pack_object", "lfs_manifest", "lfs_files", "lfs_warnings")
 
 
 def _save_cache(workdir: Path, key: str, data: dict) -> None:
@@ -673,6 +697,7 @@ def pack_repo(
                 "lfs_files": [[o, str(p)] for o, p in lfs_files],
                 "lfs_warnings": lfs_warn,
                 "blocks": _pack_blocks(store, pack_object),
+                "lfs_blocks": _pack_blocks(store, lfs_manifest),
             },
         )
         reused = False

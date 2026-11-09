@@ -53,9 +53,9 @@ CLOSING_STEPS = frozenset({"done", "aborted", "suspended"})
 final text replaces the notice for good. A cancel by the user ends ``aborted`` with ``last_error.code ==
 "cancelled"``."""
 
-PARKING_STEPS = frozenset({"in_doubt", "retiring"})
-"""States the runner may park in (the janitor resumes them) or pass through on the way to ``done``: the final text
-is shown, but later progress may still replace it."""
+PARKING_STEPS = frozenset({"in_doubt", "retiring", "aborting"})
+"""States the runner may park in (``conductor.run``: "parked for the janitor") or pass through on the way to
+``done``/``aborted``: the final text is shown, but later progress may still replace it (V31)."""
 
 TERMINAL_STEPS = CLOSING_STEPS | PARKING_STEPS
 """``Progress.step`` values that may be the last a runner reports (W111); they render the final text, unthrottled."""

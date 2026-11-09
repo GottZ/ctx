@@ -1,7 +1,7 @@
 """Session files under HERMES_HOME (layer L3, stdlib only; DESIGN §6.11, §10.6, INTERFACES §4.1).
 
-Three kinds of files belong to a session without living in its workspace; their kind strings are K0's
-``policy.HERMES_FILE_KINDS``:
+Four kinds of files belong to a session without living in its workspace; their kind strings are K0's
+``policy.HERMES_FILE_KINDS`` (``SESSION_FILE_KINDS`` here, kept equal by a test):
 
 * ``spillover`` — large tool results, ``<home>/cache/spillover/<name>``, named in the transcript by the marker
   ``Full output saved to: <path>`` (``tools/tool_result_storage.py:411``);
@@ -10,7 +10,12 @@ Three kinds of files belong to a session without living in its workspace; their 
   directories;
 * ``native_inputs`` — retained images, ``<document cache>/native-inputs/<sha256>/<name>``, marker
   ``[Image attached at: <path>]`` (``agent/image_replay.py:34``); replay only accepts a file whose sha256 equals
-  its directory name (``agent/image_replay.py:75-90``).
+  its directory name (``agent/image_replay.py:75-90``);
+* ``terminal_output`` — the full output of a terminal command whose result kept only a head/tail window,
+  ``<home>/cache/terminal-output/<name>``, named in the tool result's JSON as ``"full_output_path": "<path>"``
+  (``tools/environments/base_output.py:172-205``, ``tools/terminal_tool_result.py:169-193``; L3-F10).
+
+A kind K0 does not list yet is still referenced but refused by ``discover`` (reason ``hermes``) and never placed.
 
 The source side discovers references (``references``) and files (``discover``, with the plan's policy). The
 target side places a received file from its **kind and checked basename only** (``target_path``): a peer's
@@ -20,6 +25,7 @@ the bytes actually received.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -32,11 +38,19 @@ from .model import HermesPaths
 from .paths import check_rel, rules_for
 from .policy import HERMES_FILE_KINDS, PolicyConfig, is_hermes_protected
 
-SPILLOVER, HOOK_OUTPUTS, NATIVE_INPUTS = HERMES_FILE_KINDS
+SPILLOVER = "spillover"
+HOOK_OUTPUTS = "hook_outputs"
+NATIVE_INPUTS = "native_inputs"
+TERMINAL_OUTPUT = "terminal_output"
+SESSION_FILE_KINDS: tuple[str, ...] = (SPILLOVER, HOOK_OUTPUTS, NATIVE_INPUTS, TERMINAL_OUTPUT)
+"""Every kind this module discovers and places (K0's ``HERMES_FILE_KINDS`` gates discovery and placement)."""
 
 SPILL_RE: re.Pattern = re.compile(r"^Full output saved to: (.+)$", re.MULTILINE)
 HOOK_RE: re.Pattern = re.compile(r"full content saved to (.+)\]$", re.MULTILINE)
 IMAGE_RE: re.Pattern = re.compile(r"^\[Image attached at: (.+)\]$", re.MULTILINE)
+TERMINAL_RE: re.Pattern = re.compile(r'"full_output_path"\s*:\s*"((?:[^"\\\x00-\x1f]|\\.)*)"')
+"""The terminal tool's spill handle in its JSON result (a JSON string literal, decoded before use)."""
+_TERMINAL_KEY = '"full_output_path"'
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TEXT_FIELDS = ("content", "api_content")
@@ -63,6 +77,8 @@ def area_root(kind: str, hermes: HermesPaths) -> Path:
         return Path(hermes.home) / "hook_outputs"
     if kind == NATIVE_INPUTS:
         return Path(hermes.document_cache) / "native-inputs"
+    if kind == TERMINAL_OUTPUT:
+        return Path(hermes.home) / "cache" / "terminal-output"
     raise PolicyDenied(f"unknown session file kind {kind!r}", reason="hermes")
 
 
@@ -93,7 +109,7 @@ def _rel_in_area(path: str, kind: str, hermes: HermesPaths) -> str | None:
     except ValueError:
         return None
     parts = rel.parts
-    if kind == SPILLOVER and len(parts) != 1:
+    if kind in (SPILLOVER, TERMINAL_OUTPUT) and len(parts) != 1:
         return None
     if kind in (HOOK_OUTPUTS, NATIVE_INPUTS) and len(parts) != 2:
         return None
@@ -105,6 +121,19 @@ def _rel_in_area(path: str, kind: str, hermes: HermesPaths) -> str | None:
     except PolicyDenied:
         return None
     return rel_text
+
+
+def _terminal_paths(text: str) -> Iterable[str]:
+    """The ``full_output_path`` values of a terminal tool result (JSON string literals, escapes decoded)."""
+    if _TERMINAL_KEY not in text:
+        return
+    for match in TERMINAL_RE.finditer(text):
+        try:
+            value = json.loads(f'"{match.group(1)}"')
+        except ValueError:
+            continue
+        if isinstance(value, str):
+            yield value
 
 
 def references(rows: Iterable[Mapping], lineage_ids: Sequence[str], hermes: HermesPaths) -> list[dict]:
@@ -131,6 +160,8 @@ def references(rows: Iterable[Mapping], lineage_ids: Sequence[str], hermes: Herm
                         continue
                     for match in pattern.finditer(text):
                         add(kind, match.group(1))
+                for path in _terminal_paths(text):
+                    add(TERMINAL_OUTPUT, path)
     hook_root = area_root(HOOK_OUTPUTS, hermes)
     for sid in lineage_ids:
         directory = hook_root / str(sid)
@@ -175,8 +206,10 @@ def discover(
                 reason = "special"
             elif st.st_size > cfg.max_hermes_file_bytes:
                 reason = "size"
-            elif _resolves_outside_area(path, ref["kind"], hermes) or is_hermes_protected(
-                Path(path), cfg, session_file_kind=ref["kind"]
+            elif (
+                ref["kind"] not in HERMES_FILE_KINDS  # K0 does not list the kind (yet): never carried
+                or _resolves_outside_area(path, ref["kind"], hermes)
+                or is_hermes_protected(Path(path), cfg, session_file_kind=ref["kind"])
             ):
                 reason = "hermes"
         if reason is not None:
@@ -219,14 +252,15 @@ def _session_segment(session_id: str) -> str:
 def target_path(kind: str, basename: str, content_sha256: str, target: HermesPaths, new_session_id: str) -> Path:
     """Where a received session file goes on this host — from ``kind`` and the checked ``basename`` only.
 
-    ``spillover`` → ``<home>/cache/spillover/<name>``; ``hook_outputs`` → ``<home>/hook_outputs/<new session id>/
+    ``spillover`` → ``<home>/cache/spillover/<name>``; ``terminal_output`` → ``<home>/cache/terminal-output/<name>``;
+    ``hook_outputs`` → ``<home>/hook_outputs/<new session id>/
     <name>``; ``native_inputs`` → ``<document cache>/native-inputs/<sha256 of the received bytes>/<name>``.
     """
     if kind not in HERMES_FILE_KINDS:
         raise PolicyDenied(f"unknown session file kind {kind!r}", reason="hermes")
     name = checked_basename(basename)
     root = area_root(kind, target)
-    if kind == SPILLOVER:
+    if kind in (SPILLOVER, TERMINAL_OUTPUT):
         return root / name
     if kind == HOOK_OUTPUTS:
         return root / _session_segment(new_session_id) / name

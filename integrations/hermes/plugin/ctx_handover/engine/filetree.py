@@ -33,7 +33,17 @@ from pathlib import Path
 
 from .contracts import BlockSink, BlockSource
 from .errors import BadRequest, BlockCorrupt, ConflictError, PayloadTooLarge, PolicyDenied
-from .gitops import dec_path, enc_path, object_manifest, put_stream, read_json_object, sha256_file, write_object_to
+from .gitops import (
+    dec_path,
+    enc_path,
+    object_manifest,
+    open_partial,
+    put_stream,
+    read_json_object,
+    sha256_file,
+    undo_failed,
+    write_object_to,
+)
 from .ignore import IgnoreMatcher
 from .model import DestMode, NotTransferred, ObjectManifest
 from .paths import PlatformRules, check_rel, fold_key
@@ -284,11 +294,22 @@ class _ManifestReader:
 
 
 def pack_tree(
-    entries: Sequence[TreeEntry], root: Path, store: BlockSink, cancelled: Callable[[], bool] = _never
+    entries: Sequence[TreeEntry],
+    root: Path,
+    store: BlockSink,
+    cancelled: Callable[[], bool] = _never,
+    *,
+    dropped: list[NotTransferred] | None = None,
 ) -> str:
-    """Stream every file of ``entries`` (read with ``O_NOFOLLOW``; a file that turned into something else is
-    skipped) into ``store`` and return the object id of the tree manifest."""
+    """Stream every file of ``entries`` (read with ``O_NOFOLLOW``) into ``store`` and return the object id of the
+    tree manifest. A file that is gone (``missing``), cannot be opened (``unreadable``) or turned into something
+    else (``special``) since the scan is left out of the manifest and appended to ``dropped`` (when given) — the
+    caller reports it and does not count it."""
     root = Path(root)
+
+    def drop(e: TreeEntry, why: str) -> None:
+        if dropped is not None:
+            dropped.append(NotTransferred(e.path, why))
 
     def docs() -> Iterator[dict]:
         for e in entries:
@@ -298,11 +319,16 @@ def pack_tree(
             path = _join(root, entry_rel_bytes(e))
             try:
                 fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            except FileNotFoundError:
+                drop(e, "missing")
+                continue
             except OSError:
+                drop(e, "unreadable")
                 continue
             with os.fdopen(fd, "rb") as fh:
                 st = os.fstat(fh.fileno())
                 if not stat.S_ISREG(st.st_mode):
+                    drop(e, "special")
                     continue
                 m = put_stream(store, fh, media=FILE_MEDIA, cancelled=cancelled)
             yield _entry_doc(TreeEntry(e.path, "file", e.mode, m.size, st.st_mtime_ns, m.object_id, None, e.raw))
@@ -422,14 +448,16 @@ def prepare_fresh(
     dest: Path | None = None,
     max_files: int = 200_000,
     fallback: Path | None = None,
+    claimed: bool = False,
 ) -> TreeApplyState:
-    """Fresh mode PREPARE: build the tree in ``partial`` (created 0700; must not exist). Unsafe, colliding or
-    unknown-type entries are skipped and reported in ``skipped``."""
+    """Fresh mode PREPARE: build the tree in ``partial`` (created 0700; must not exist — ``claimed``: created empty
+    and recorded by the caller). Something already at the path is never used or removed:
+    ``ConflictError(kind=partial_exists)`` (L3-F08). Unsafe, colliding or unknown-type entries are skipped and
+    reported in ``skipped``."""
     entries = load_manifest(store, manifest_id, max_files=max_files)
     checked, skipped = _check_entries(entries, rules)
     partial = Path(partial)
-    os.mkdir(partial, 0o700)
-    os.chmod(partial, 0o700)
+    open_partial(partial, claimed=claimed, dest=dest)
     fp: dict[str, list] = {}
     dirs: list[_Checked] = []
     try:
@@ -504,12 +532,29 @@ def _walk_files(root: Path) -> Iterator[tuple[bytes, os.stat_result]]:
                     yield rel, st
 
 
-def matches_fingerprint(root: Path, recorded: dict[str, list]) -> tuple[bool, str]:
-    """Does the directory still hold exactly what the plugin wrote (hash only on stat mismatch)?"""
+def is_own_staged(rel: bytes, tag: str) -> bool:
+    """``.<name>.ctxh-<tag>`` (``_staged_name``): a file the tree update of the job with this tag stages beside its
+    destination."""
+    name = os.path.basename(rel)
+    suffix = b".ctxh-" + tag.encode("ascii")
+    return name.startswith(b".") and name.endswith(suffix) and len(name) > len(suffix) + 1
+
+
+def matches_fingerprint(
+    root: Path, recorded: dict[str, list], *, own_tag: str | None = None, own: list[bytes] | None = None
+) -> tuple[bool, str]:
+    """Does the directory still hold exactly what the plugin wrote (hash only on stat mismatch)? With ``own_tag``,
+    an unrecorded regular file or symlink this job's tree update staged (``is_own_staged``) is no change: it is
+    listed in ``own``."""
     seen: set[str] = set()
     for rel, st in _walk_files(root):
         key = fp_key(rel)
         rec = recorded.get(key)
+        own_kind = stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)
+        if rec is None and own_tag is not None and own_kind and is_own_staged(rel, own_tag):
+            if own is not None:
+                own.append(rel)
+            continue
         if rec is None:
             return False, f"new file {key}"
         seen.add(key)
@@ -548,10 +593,14 @@ def prepare_update(
     """Update mode PREPARE (DESIGN §9.6): allowed only when ``dest`` still equals ``fingerprint`` (the plugin's
     last write there, or the out-state recorded at retire for the return trip); any foreign change ⇒
     ``ConflictError(kind=foreign)``. Changed and new files are staged beside their destination
-    (``.<name>.ctxh-<tag>``); replaced and removed files get backup slots under ``staging``."""
+    (``.<name>.ctxh-<tag>``); replaced and removed files get backup slots under ``staging``.
+
+    Repeatable (L3-F08 class): files staged by an earlier PREPARE with the same ``tag`` whose process died are no
+    foreign change — they are staged again or removed (``tag`` is the job's)."""
     dest = Path(dest)
     recorded = dict((fingerprint or {}).get("files") or {})
-    same, why = matches_fingerprint(dest, recorded)
+    leftover: list[bytes] = []
+    same, why = matches_fingerprint(dest, recorded, own_tag=tag, own=leftover)
     if not same:
         raise ConflictError("the destination changed since the plugin wrote it", kind="foreign", detail=why)
     entries = load_manifest(store, manifest_id, max_files=max_files)
@@ -621,6 +670,11 @@ def prepare_update(
             with contextlib.suppress(OSError):
                 d.rmdir()
         raise
+    restaged = {temp for temp, _ in staged}
+    for rel in leftover:  # staged by an earlier run of this job and not staged again
+        if _join(dest, rel) not in restaged:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(_join(dest, rel))
     return TreeApplyState(
         dest=dest,
         mode=DestMode.UPDATE,
@@ -675,7 +729,8 @@ def commit(state: TreeApplyState) -> dict:
 
     Update mode is repeatable (contract X11): a backup slot that exists already holds its file (moved by an earlier
     run of this step), a staged file that is gone was swapped in already — a process that resumes after a crash
-    only does what is missing. An exception in the middle undoes the step (``rollback``) before it propagates.
+    only does what is missing. An exception in the middle undoes the step (``rollback``) before it propagates; an
+    undo that fails too raises ``gitops.undo_failed`` (``details.needs_attention``).
     Fresh mode is one rename; resuming it is the caller's (directory identity)."""
     if state.mode is DestMode.FRESH:
         assert state.partial is not None  # noqa: S101 - fresh states carry their partial
@@ -714,9 +769,11 @@ def commit(state: TreeApplyState) -> dict:
         for temp, final in state.staged:
             if os.path.lexists(temp):
                 os.replace(temp, final)
-    except Exception:
-        with contextlib.suppress(Exception):
+    except Exception as exc:
+        try:
             _undo_update(state)
+        except Exception as undo:  # the destination is half-swapped: report it, never as untouched
+            raise undo_failed(exc, undo, path=state.dest) from exc
         raise
     return {"dest": str(state.dest), "fingerprint": state.fingerprint}
 
@@ -743,6 +800,21 @@ def _undo_update(state: TreeApplyState) -> None:
     for final, backup in state.backups:
         if os.path.lexists(backup):
             _move(backup, final)
+
+
+def drop_staged(dest: Path, tag: str) -> list[Path]:
+    """Remove the files a tree update with this ``tag`` staged under ``dest`` (``is_own_staged``; regular files and
+    symlinks only) — the abort of a job whose PREPARE died before a snapshot named them. Returns what it removed."""
+    dest = Path(dest)
+    removed: list[Path] = []
+    if not dest.is_dir() or dest.is_symlink():
+        return removed
+    for rel, st in _walk_files(dest):
+        if (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)) and is_own_staged(rel, tag):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(_join(dest, rel))
+                removed.append(_join(dest, rel))
+    return removed
 
 
 def discard(state: TreeApplyState) -> None:

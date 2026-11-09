@@ -60,6 +60,9 @@ RETRY_AFTER_CAP = 300
 BACKOFF_MIN, BACKOFF_MAX = 0.5, 60.0
 SLOW_S, FAST_S = 20.0, 5.0
 MAX_JSON_RESPONSE = 16 * MIB
+PROBE_SIZES_MIB = (1, 2, 4, 8)
+"""Request body sizes in MiB ``probe_gate(measure_limit=True)`` sends (``doctor --measure``, contract V27); the
+largest is the body limit a proxy in front of the peer should allow."""
 MAX_IDS = 4096
 
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
@@ -527,8 +530,6 @@ class WireClient:
 
     def put_blocks(self, job_id: str, epoch: int, frames: Iterable[bytes]) -> tuple[int, list]:
         """``PUT /v1/jobs/{id}/blocks`` in batches of at most ``request_bytes`` (frames are never split)."""
-        import json
-
         stored = 0
         rejected: list[tuple[str, str]] = []
         pending: deque[bytes] = deque()
@@ -566,9 +567,22 @@ class WireClient:
                 self._adaptive.too_large(size)
                 pending.extendleft(reversed(batch))
                 continue
-            data = json.loads(resp.content)
-            stored += int(data.get("stored", 0))
-            rejected.extend((str(r.get("id")), str(r.get("reason"))) for r in data.get("rejected", []))
+            data = self._json(resp)
+            count, refused = data.get("stored"), data.get("rejected")
+            # a count and a list of ``{id, reason}`` or the answer is malformed — never "stored, nothing rejected"
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count < 0
+                or not isinstance(refused, list)
+                or not all(
+                    isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("reason"), str)
+                    for r in refused
+                )
+            ):
+                raise BadResponseSignature(f"malformed block upload answer from {self.peer.name}")
+            stored += count
+            rejected.extend((r["id"], r["reason"]) for r in refused)
 
     def get_blocks(self, job_id: str, epoch: int, ids: Sequence[str]) -> Iterator[tuple[str, bytes]]:
         """``POST /v1/jobs/{id}/blocks/get`` until every id arrived; each frame is hash-verified."""
@@ -606,8 +620,8 @@ class WireClient:
     # -- diagnostics -------------------------------------------------------------------------------------------
     def probe_gate(self, *, measure_limit: bool = False) -> dict:
         """``doctor``: which layer answers (gate, plugin, proxy) and, with ``measure_limit``, the largest request
-        body (1, 2, 4, 8 MiB) that reaches the plugin — measured with signed requests to an unknown job, which the
-        plugin reads completely and answers ``not_found``.
+        body (``PROBE_SIZES_MIB``) that reaches the plugin — measured with signed requests to an unknown job, which
+        the plugin reads completely and answers ``not_found``.
 
         Keys: ``gate`` (``ok``/``rejected``/``unreachable``), ``plugin``, ``signed``, ``error`` (an error code),
         ``body_limit`` (bytes, with ``measure_limit``) and the summary ``ok`` (True, None = works with a warning,
@@ -630,7 +644,7 @@ class WireClient:
         report.update(gate="ok", plugin=True, signed=self._hello is not None)
         if measure_limit and self._hello is not None:
             passed = 0
-            for size in (1 * MIB, 2 * MIB, 4 * MIB, 8 * MIB):
+            for size in (int(mib) * MIB for mib in PROBE_SIZES_MIB):
                 try:
                     self._send(
                         "PUT",
@@ -643,8 +657,8 @@ class WireClient:
                     )
                 except PayloadTooLarge:
                     break
-                except (GateRejected, PeerUnreachable, BadResponseSignature):
-                    break
+                except (GateRejected, PeerUnreachable, BadResponseSignature, ListenerMissing, RateLimited):
+                    break  # no answer of the plugin (unsigned 404/429 included): the size did not pass (yet)
                 except HandoverError:
                     pass  # the plugin read the body and refused the job: the size passed every proxy
                 passed = size
@@ -669,15 +683,15 @@ class WireClient:
             remedy = f"pair again with {name} if its key changed (/handover pair)"
         else:
             ok, detail, remedy = True, "dashboard gate passed, ctx_handover answered with a valid signature", None
-            limit = report.get("body_limit")
-            if isinstance(limit, int) and limit < 8 * MIB:
+            limit, wanted = report.get("body_limit"), max(PROBE_SIZES_MIB)
+            if isinstance(limit, int) and limit < wanted * MIB:
                 ok = None
                 detail += (
                     f"; a proxy limits request bodies to {limit // MIB} MiB"
                     if limit
                     else "; a proxy limits request bodies below 1 MiB"
                 )
-                remedy = "raise the body limit of the proxy in front of it to 8 MiB (transfers stay smaller)"
+                remedy = f"raise the body limit of the proxy in front of it to {wanted} MiB (transfers stay smaller)"
         report.update(ok=ok, detail=detail, remedy=remedy)
         return report
 

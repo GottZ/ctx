@@ -18,7 +18,7 @@ from collections.abc import Iterable, Iterator, Sequence
 
 from .blocks import encode_frame, verify_manifest
 from .contracts import JobContext
-from .errors import BadRequest, LeaseLost, NotFound
+from .errors import BadRequest, BadResponseSignature, HandoverError, InvalidState, LeaseLost, NotFound
 from .jsonutil import from_wire, to_wire
 from .model import (
     CapsuleInfo,
@@ -43,6 +43,7 @@ from .model import (
 MAX_OBJECT_IDS = 64
 MAX_IDS = 4096
 LOST_STATES = frozenset({"suspended", "released", "releasing", "reclaimed", "reclaiming", "aborted"})
+ABORTED_STATES = frozenset({"aborted", "expired"})
 
 _LOCAL_ONLY = ("export_roots", "allow_roots", "workspace_root", "trust_unsigned", "dest", "maps")
 
@@ -60,6 +61,18 @@ def remote_options(options: Options) -> dict:
 
 def _op(data: dict) -> OpStatus:
     return from_wire(OpStatus, data)
+
+
+def _lost_state(exc: HandoverError) -> str | None:
+    """The source state a refused keepalive names when the source gave up its leases (route #9): a
+    ``source_reclaimed`` code, or a non-retryable refusal whose ``details.state`` is a lost state (not a stale
+    epoch of this conductor); None for every other error."""
+    if exc.code == "source_reclaimed" or exc.details.get("peer_code") == "source_reclaimed":
+        return "reclaimed"
+    state = exc.details.get("state")
+    if not exc.retryable and exc.details.get("reason") != "stale_epoch" and state in LOST_STATES:
+        return str(state)
+    return None
 
 
 class _Remote:
@@ -140,8 +153,17 @@ class RemoteSource(_Remote):
         return from_wire(SessionInfo, self._call(job, "source/lock", body))
 
     def heartbeat(self, job: JobContext) -> None:
+        """Route #9; a source that gave up its leases ⇒ ``LeaseLost`` naming its state (``reclaimed`` …), whether the
+        listener answers ``{state}`` (DESIGN §4.7) or refuses with that state (contract V17)."""
         self._open(job, Role.SOURCE)
-        state = self._call(job, "heartbeat", {"conductor_state": ""}).get("state")
+        try:
+            state = self._call(job, "heartbeat", {"conductor_state": ""}).get("state")
+        except HandoverError as exc:
+            state = _lost_state(exc)
+            if state is None:
+                raise
+        if not isinstance(state, str) or not state:  # no state named is no keepalive (Gp-common, success sweep)
+            raise BadResponseSignature("keepalive answer without the source state", route="heartbeat")
         if state in LOST_STATES:
             raise LeaseLost(f"the source gave up its leases (state {state})", state=state)
 
@@ -193,10 +215,21 @@ class RemoteTarget(_Remote):
 
     def continue_session(self, job: JobContext, prompt: str) -> ContinueResult:
         data = self._call(job, "target/continue", {"prompt": str(prompt)[:2000]})
-        return ContinueResult(started=bool(data.get("started")), pid=data.get("pid"), log=data.get("log"))
+        # started only on JSON ``true`` (``bool("false")`` is True; success sweep)
+        return ContinueResult(started=data.get("started") is True, pid=data.get("pid"), log=data.get("log"))
 
     def abort(self, job: JobContext, reason: str) -> None:
-        self._call(job, "target/abort", {"reason": str(reason)[:200]})
+        """Route #32. Returns only when the peer reports the target ``aborted``/``expired`` — the conductor reads a
+        return as "the target aborted" and releases the source (success sweep). Any other state is a refusal that
+        names it (a committing/committed target ⇒ the conductor goes in doubt, V37)."""
+        state = self._call(job, "target/abort", {"reason": str(reason)[:200]}).get("state")
+        if state in ABORTED_STATES:
+            return
+        raise InvalidState(
+            f"the target did not confirm the abort (state {state!r})",
+            reason="state",
+            state=state if isinstance(state, str) else None,
+        )
 
     def blocks(self) -> RemoteBlocks:
         return self._blocks()
@@ -260,10 +293,15 @@ class RemoteBlocks:
         return stored
 
     def missing(self, ids: Sequence[str]) -> list[str]:
+        """The ids the peer does not have. An answer without a list of id strings is malformed — never "it has them
+        all" (the transfer would end with nothing sent; success sweep)."""
         out: list[str] = []
         ids = list(ids)
         for start in range(0, len(ids), MAX_IDS):
-            out.extend(self._call("blocks/need", {"ids": ids[start : start + MAX_IDS]}).get("missing", []))
+            got = self._call("blocks/need", {"ids": ids[start : start + MAX_IDS]}).get("missing")
+            if not isinstance(got, list) or not all(isinstance(i, str) for i in got):
+                raise BadResponseSignature("blocks/need answer without the list of missing ids", route="blocks/need")
+            out.extend(got)
         return out
 
     def write_blocks(self, frames: Iterable[tuple[str, bytes]]) -> tuple[int, list[tuple[str, str]]]:

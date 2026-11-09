@@ -41,14 +41,16 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import contextvars
 import dataclasses
+import logging
 import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
-from . import WIRE_MAJOR
+from . import WIRE_MAJOR, envfacts
 from .contracts import BlockSink, BlockSource, JobContext, Reporter, SourceAPI, TargetAPI
 from .errors import (
     BadRequest,
@@ -62,6 +64,7 @@ from .errors import (
     NotFound,
     PayloadTooLarge,
     PeerUnreachable,
+    PolicyDenied,
     RateLimited,
     RestartLimit,
     SessionBusy,
@@ -79,7 +82,7 @@ from .jsonutil import (
     sha256_hex,
     to_wire,
 )
-from .ledger import Fenced, Ledger, process_owner
+from .ledger import STALE_OWNER_S, Fenced, Ledger, process_owner
 from .local_source import LocalSource
 from .model import (
     CapsuleInfo,
@@ -91,6 +94,7 @@ from .model import (
     FinalPlan,
     Hello,
     Include,
+    ItemKind,
     Mode,
     ObjectManifest,
     OpState,
@@ -107,9 +111,10 @@ from .model import (
     SessionRef,
 )
 from .ops import object_closure, read_object
-from .plan import CONFIRM_PROPOSED, SUSPECTED_SECRET
+from .plan import CONFIRM_PROPOSED, SUSPECTED_SECRET, yes_exempt
 
 S = ConductorState
+log = logging.getLogger("ctx_handover.conductor")
 MiB = 1024 * 1024
 
 STOP_STATES = frozenset({S.DONE, S.ABORTED, S.SUSPENDED})
@@ -130,6 +135,20 @@ PREPARE_PHASE = frozenset({S.SOURCE_PREPARING, S.DELTA_APPLYING, S.TARGET_RESETT
 CANCELLABLE = PLANNING_STATES | SUSPENDABLE | PREPARE_PHASE
 LEASE_STATES = (SUSPENDABLE - {S.LOCKING}) | PREPARE_PHASE | {S.COMMITTING, S.IN_DOUBT, S.COMMITTED, S.RETIRING}
 FORWARD_STATES = frozenset({S.COMMITTING, S.IN_DOUBT, S.COMMITTED, S.RETIRING, S.RETIRED, S.CONTINUING})
+
+RETIRE_CONFIRMED = frozenset({"retired", "imported"})
+"""Source states that confirm a retirement explicitly (contract V37): ``retired`` (DESIGN §7.5 r5) and ``imported``
+(a bundle source, which holds no active session). Only these let a job go RETIRED and then DONE."""
+SOURCE_GIVEN_BACK = frozenset({"released", "reclaimed"})
+"""Source states that say explicitly that the session is active on the source again: ``source.retire`` refused with
+one of them ends the job DONE with the warning that the copies are independent (DESIGN §3.7); a release confirms
+with one of them."""
+TARGET_PRE_COMMIT = frozenset(
+    {"open", "context_staged", "negotiated", "data_staged", "preparing", "prepared", "delta_applying", "resetting"}
+)
+"""Target states before ``committing`` (DESIGN §3.3): the target has not entered its commit."""
+BUSY_ELSEWHERE = "busy_elsewhere"
+"""``InvalidState.details.reason`` of a participant whose job row another process owns (``_epoch``)."""
 
 REQUIRED_CAPS = ("session.v1", "blocks.v1")
 ANSWERS = frozenset({"yes", "no_proposed", "show_plan", "cancel"})
@@ -155,17 +174,49 @@ class PollPolicy:
     max_doc_bytes: int = 64 * MiB
     request_bytes: int = 4 * MiB
     keepalive_s: float = 5.0
+    busy_wait_s: float = STALE_OWNER_S + 15.0
+    """How long a participant row held by another process is waited for: a restarted participant's dead
+    predecessor holds it until its owner is stale (DESIGN §3.1, 60 s), then the row can be adopted (V38)."""
+    busy_retry_s: float = 5.0
 
 
 class _Park(Exception):
     """Stop the runner and leave the job in its state for the janitor (retire/abort retries exhausted)."""
 
 
+def unexpected(exc: BaseException) -> HandoverError:
+    """A failure outside the error model as a non-retryable ``internal`` error (type and a short text, no
+    traceback): repeating the same step does not help a full disk or a bug."""
+    text = f"{type(exc).__name__}: {exc}"
+    return HandoverError(text[:300], retryable=False, exception=type(exc).__name__)
+
+
+def is_busy_elsewhere(err: BaseException) -> bool:
+    """A participant refused because another process owns its job row — after a restart of the participant's
+    process that is its dead predecessor until the stale window passes (contract V38). Recognised by
+    ``details.reason``, which crosses the wire unchanged (a peer's ``retryable`` flag may not)."""
+    return isinstance(err, InvalidState) and (err.details or {}).get("reason") == BUSY_ELSEWHERE
+
+
 def is_transient(err: BaseException) -> bool:
-    """Transport-level failures worth repeating the same idempotent step for."""
-    if isinstance(err, (PeerUnreachable, RateLimited, BlockCorrupt)):
+    """Transport-level failures worth repeating the same idempotent step for, and a participant row another process
+    holds (V38). An integrity failure (``BlockCorrupt``) is not: it gets exactly one refetch (V23,
+    ``Conductor._on_error``)."""
+    if isinstance(err, (PeerUnreachable, RateLimited)) or is_busy_elsewhere(err):
         return True
     return type(err) is HandoverError and bool(err.retryable)
+
+
+def source_state_of(value: object) -> str | None:
+    """The source state a retire/release answer names: ``{"state": …}`` of the operation's result, or
+    ``details.state`` of a refusal; None when it names none."""
+    if isinstance(value, HandoverError):
+        state = (value.details or {}).get("state")
+    elif isinstance(value, dict):
+        state = value.get("state")
+    else:
+        state = None
+    return state if isinstance(state, str) and state else None
 
 
 def error_from(err: dict | None) -> HandoverError:
@@ -339,7 +390,11 @@ def move_object(
                     while len(outstanding) >= inflight:
                         settle(outstanding.popleft())
                     nbytes = sum(len(raw) for _, raw in frames)
-                    outstanding.append((pool.submit(dst.write_blocks, frames), [b for b, _ in frames], nbytes, clock()))
+                    # the writer runs in a copy of the caller's context (profile scope, secrets; contract V33) — a
+                    # fresh copy per batch: one context cannot be entered by two threads at once
+                    run = contextvars.copy_context().run
+                    fut = pool.submit(run, dst.write_blocks, frames)
+                    outstanding.append((fut, [b for b, _ in frames], nbytes, clock()))
                 while outstanding:
                     settle(outstanding.popleft())
             except BaseException:
@@ -408,6 +463,10 @@ class Conductor:
         self._attempts = 0
         self._fenced = False
         self._lease_lost = False
+        self._busy_since: float | None = None
+        self._in_doubt_since: float | None = None
+        """First IN_DOUBT entry of this run: ``stall_timeout_s`` counts from here, commit retries do not restart it
+        (contract V39, L3-F06); a new run (janitor, resume, adoption) starts a new resolution round."""
         self._beat_lock = threading.Lock()
         now = self._clock()
         self._last_owner_hb = now
@@ -469,6 +528,9 @@ class Conductor:
                 raise
             except HandoverError as err:
                 self._fail(err)
+            except Exception as exc:  # the surface's confirmation failed: nothing is locked yet, end the job
+                log.warning("ctx_handover job %s: confirmation failed", self.job.job_id, exc_info=True)
+                self._fail(unexpected(exc))
         if self._state is S.ABORTING:
             self._drain_abort()
         raise self._last_error_exc()
@@ -501,9 +563,14 @@ class Conductor:
         return self.run()
 
     def recover(self) -> CommitAck | None:
-        """Janitor action for a job whose owner died (DESIGN §3.6), then continue where that leads."""
+        """Janitor action for a job whose owner died (DESIGN §3.6), then continue where that leads. A job the user
+        cancelled is aborted instead of parked: a SUSPENDED one (nobody drives it — ``/handover cancel`` only sets
+        the flag, L3-F07) and one whose runner died before the commit point (DESIGN §3.8)."""
         self._load()
         st = self._state
+        if st is S.SUSPENDED and self.ledger.cancel_requested(self.job.job_id):
+            self._fail(Cancelled("cancelled by the user"))
+            return self.run()
         if st in STOP_STATES:
             return self._ack()
         if st is S.IN_DOUBT:
@@ -518,9 +585,10 @@ class Conductor:
                 epoch=self.job.epoch,
                 last_error={"code": "internal", "message": "the process running this handover stopped"},
             )
+        elif st in SUSPENDABLE and self.ledger.cancel_requested(self.job.job_id):
+            self._fail(Cancelled("cancelled by the user"))
         elif st in SUSPENDABLE:
             self._go(S.SUSPENDED, recovered=True)
-            self._finish_result()
             return None
         elif st in PREPARE_PHASE:
             self._go(S.ABORTING, abort_reason="owner_died")
@@ -563,7 +631,11 @@ class Conductor:
         return from_wire(cls, value)
 
     def _go(self, to: S, **ctx: object) -> None:
+        """Journal the transition and report it. A stop state (DONE, ABORTED, SUSPENDED) carries the job's result in
+        the same ledger transaction: whoever hears the step — the gateway's final text reads the status at that
+        moment — finds the target's ack, the warnings and the lists already recorded (contract V42, L3-F03)."""
         enc = {k: _encode(v) for k, v in ctx.items()}
+        result = self._result_doc(to, {**self._ctx, **enc}, {}) if to in STOP_STATES else None
         self.ledger.transition(
             self.job.job_id,
             Role.CONDUCTOR,
@@ -571,10 +643,12 @@ class Conductor:
             str(to),
             {"ctx": enc} if enc else {},
             epoch=self.job.epoch,
+            result=result,
         )
         self._ctx.update(enc)
         self._state = to
         self._attempts = 0
+        self._busy_since = None
         self._report(Progress(step=str(to)))
 
     def _note(self, **ctx: object) -> None:
@@ -627,8 +701,10 @@ class Conductor:
         row = self.ledger.job(self.job.job_id, Role.CONDUCTOR)
         return error_from((row or {}).get("last_error"))
 
-    def _finish_result(self, **extra: object) -> None:
-        st = self._state
+    def _result_doc(self, st: S, ctx: dict, extra: dict) -> dict:
+        """The job's ``result`` for state ``st`` from the journaled context ``ctx`` (``outcome`` from ``extra`` for
+        a parked, non-stop state)."""
+        extra = dict(extra)
         if st is S.DONE:
             outcome = "done"
         elif st is S.ABORTED:
@@ -638,17 +714,26 @@ class Conductor:
         else:
             outcome = str(extra.pop("outcome", st))
         result = {"outcome": outcome, "mode": str(self.job.mode)}
-        for key in ("ack", "final_plan", "continue", "warnings", "ended_by"):
-            if self._ctx.get(key) is not None:
-                result["plan" if key == "final_plan" else key] = self._ctx[key]
+        keys = ("ack", "final_plan", "continue", "warnings", "ended_by", "left_behind", "source_kept", "withheld")
+        for key in keys:
+            if ctx.get(key) is not None:
+                result["plan" if key == "final_plan" else key] = ctx[key]
         result.update({k: _encode(v) for k, v in extra.items()})
+        return result
+
+    def _finish_result(self, **extra: object) -> None:
+        """Record the result of a parked job (IN_DOUBT, RETIRING); stop states write theirs with the transition."""
+        result = self._result_doc(self._state, self._ctx, extra)
         self.ledger.job_update(self.job.job_id, Role.CONDUCTOR, epoch=self.job.epoch, result=result)
 
     # ======================================================================================================
     # driving loop, errors, liveness
     # ======================================================================================================
     def _step(self) -> bool:
-        """Run the handler of the current state once; returns False when the runner must stop."""
+        """Run the handler of the current state once; returns False when the runner must stop. A failure outside the
+        error model (``OSError`` of a full disk, a bug in a port) is a non-retryable ``internal`` error of this step
+        (``unexpected``) and takes the same path as any other: before the commit point ABORTING, while committing
+        IN_DOUBT, after it the job parks — it never leaves the runner's thread with the job left as it was."""
         self._check_fenced()
         handler = self._handlers[self._state]
         try:
@@ -658,11 +743,32 @@ class Conductor:
         except _Park:
             return False
         except HandoverError as err:
-            return self._on_error(err)
+            return self._handle(err)
+        except Exception as exc:
+            log.warning("ctx_handover job %s: unexpected failure in %s", self.job.job_id, self._state, exc_info=True)
+            return self._handle(unexpected(exc))
+        self._busy_since = None
         return True
+
+    def _handle(self, err: HandoverError) -> bool:
+        try:
+            return self._on_error(err)
+        except Fenced:
+            raise
+        except HandoverError as during:  # the pause itself failed (e.g. the lease was lost while waiting)
+            return self._on_error(during)
 
     def _on_error(self, err: HandoverError) -> bool:
         st = self._state
+        if is_busy_elsewhere(err) and self._wait_busy():
+            return True
+        if isinstance(err, BlockCorrupt):
+            if self._refetch(err):
+                return True
+            if st in CANCELLABLE:  # before the commit point an integrity failure ends the job, source free (V23)
+                self._attempts = 0
+                self._fail(err)
+                return True
         if is_transient(err) and self._attempts < self.poll.retry_attempts:
             self._attempts += 1
             self._backoff(self._attempts)
@@ -673,12 +779,13 @@ class Conductor:
             return False  # parked: the janitor retries the abort
         if st in (S.COMMITTING,):
             self._record_error(err)
-            self._go(S.IN_DOUBT)
+            # a commit the target refused for good (not transient) is remembered: IN_DOUBT then aborts as soon as
+            # the target says it never entered its commit (V24, ``_in_doubt``)
+            self._go(S.IN_DOUBT, commit_failed=not is_transient(err))
             return True
         if st in (S.RETIRED, S.CONTINUING):
             self._warn(f"continuation: {err}")
             self._go(S.DONE)
-            self._finish_result()
             return True
         if st in FORWARD_STATES:
             self._record_error(err)
@@ -686,10 +793,33 @@ class Conductor:
         if st in SUSPENDABLE and is_transient(err):
             self._record_error(err)
             self._go(S.SUSPENDED)
-            self._finish_result()
             return True
         self._fail(err)
         return True
+
+    def _wait_busy(self) -> bool:
+        """Contract V38: a participant row another process holds — normally the dead predecessor of a restarted
+        participant process — can be adopted once its owner is stale (DESIGN §3.1). Wait for that window
+        (``PollPolicy.busy_wait_s`` from the first refusal in this state) and repeat the step; False once it has
+        passed (the refusal then counts like any other transient failure)."""
+        now = self._clock()
+        if self._busy_since is None:
+            self._busy_since = now
+        if now - self._busy_since >= self.poll.busy_wait_s:
+            return False
+        self._sleep(self.poll.busy_retry_s)
+        return True
+
+    def _refetch(self, err: BlockCorrupt) -> bool:
+        """Contract V23: an object or block that does not match its id is fetched once more; a second mismatch of the
+        same one is an integrity failure, not a transport hiccup. The counts are journaled (``corrupt``), so an
+        adopting process does not grant another refetch."""
+        d = err.details or {}
+        key = str(d.get("object") or d.get("object_id") or d.get("block_id") or d.get("block") or self._state)
+        seen = {str(k): int(v) for k, v in dict(self._ctx.get("corrupt") or {}).items()}
+        seen[key] = seen.get(key, 0) + 1
+        self._note(corrupt=seen)
+        return seen[key] < 2
 
     def _fail(self, err: HandoverError) -> None:
         """Before the commit point: record the error and go ABORTING (DESIGN §3.2, I2)."""
@@ -815,7 +945,7 @@ class Conductor:
             if cancellable:
                 self._check_cancel()
             st = api.op_status(self.job, st.op_id)
-        if st.state is OpState.FAILED:
+        if st.state is not OpState.DONE:  # only an operation that says ``done`` succeeded
             raise error_from(st.error)
         return dict(st.result or {})
 
@@ -885,7 +1015,39 @@ class Conductor:
         self._check_cancel()
         sf = self.source.facts(self.job)
         tf = self.target.facts(self.job, sf)
+        if self.job.mode is Mode.PUSH and self.job.peer is not None:
+            self._remember_peer_facts(tf)
+        self._check_workspace_root(tf)
         self._go(S.PLANNING, source_facts=sf, target_facts=tf)
+
+    def _check_workspace_root(self, facts: EnvFacts) -> None:
+        """R29 (contract V40, L3-F01): the receiving host checked its write root when it probed its facts; an
+        unusable one (``workspace_root_ok is False``) ends the job here — before the lock and before any transfer —
+        with a message naming the setting ``workspace_root``. ``None`` (not checked: an older peer, a stand-in) does
+        not stop it; neither does an export, whose facts describe an importer not known yet (it checks its own root
+        when it imports)."""
+        if self.job.mode is Mode.EXPORT or getattr(facts, "workspace_root_ok", None) is not False:
+            return
+        problem = str(getattr(facts, "workspace_root_problem", "") or "check_failed")
+        message = envfacts.workspace_root_message(facts) or (
+            f"the workspace root {facts.workspace_root} on {facts.instance_name} cannot be used ({problem}); "
+            "set workspace_root in the ctx_handover settings there"
+        )
+        raise PolicyDenied(
+            message,
+            reason="workspace_root",
+            setting="workspace_root",
+            problem=problem,
+            path=facts.workspace_root,
+            side="target",
+            host=facts.instance_name,
+        )
+
+    def _remember_peer_facts(self, facts: EnvFacts) -> None:
+        """Contract V28: the target facts a paired peer sent last are kept per peer (``export --for <peer>``
+        negotiates with them, DESIGN §5.4). Best effort: a failed write never stops the handover."""
+        with contextlib.suppress(HandoverError, TypeError, ValueError, OSError):
+            self.ledger.peer_facts_set(self.job.peer.peer_id, to_wire(facts))
 
     def _planning_step(self) -> None:
         self._check_cancel()
@@ -901,8 +1063,67 @@ class Conductor:
                 raise VerifyFailed("the target changed the bundle's plan", which="plan")
             self._go(S.NEGOTIATED, plan=bundle.plan, final_plan=final, bundle_plan_id=bundle.plan_id, confirmed=False)
             return
+        users: list[str] = []
+        if self.job.mode is Mode.PULL:
+            plan, users = self._with_user_items(plan)
         final = self.target.negotiate(self.job, plan)
-        self._go(S.NEGOTIATED, plan=plan, final_plan=final, confirmed=False)
+        self._go(S.NEGOTIATED, plan=plan, final_plan=final, confirmed=False, user_items=users)
+
+    def _with_user_items(self, plan: ResourcePlan) -> tuple[ResourcePlan, list[str]]:
+        """Contract V29 / R18: a pull's local ``--include`` asks the remote source for more — as conductor items
+        (``plan.user_item``, ids ``u<n>``) that the source releases only under its ``export_roots``
+        (``restrict_to_releasable``); what it refuses is withheld, not the whole plan (``_start_pack``). A path the
+        source's own plan already holds is not added again. A trailing separator marks a directory."""
+        have = {i.source_path for i in plan.items}
+        ids = {i.item_id for i in plan.items}
+        added = []
+        n = 0
+        for raw in self.job.options.hints.include:
+            path = str(raw)
+            bare = path.rstrip("/\\") or path
+            if not bare or bare in have:
+                continue
+            while f"u{n}" in ids:
+                n += 1
+            kind = ItemKind.EXTRA_DIR if path.endswith(("/", "\\")) else ItemKind.EXTRA_FILE
+            item = self._planner().user_item(f"u{n}", bare, kind)
+            ids.add(item.item_id)
+            have.add(bare)
+            added.append(item)
+        if not added:
+            return plan, []
+        return replace(plan, items=(*plan.items, *added)), [i.item_id for i in added]
+
+    def _start_pack(self, final: FinalPlan) -> tuple[OpStatus, FinalPlan]:
+        """``source.start_pack`` with the release rule of V29: a ``policy_denied`` that names only conductor items
+        (``details.items`` ⊆ ``user_items``) withholds them — they leave the plan, the target negotiates the rest
+        again (it holds exactly the plan the source packs, X02/X06) and the pack starts once more. Any other
+        refusal ends the job as before."""
+        while True:
+            try:
+                return self.source.start_pack(self.job, final), final
+            except PolicyDenied as err:
+                final = self._withhold(final, err)
+
+    def _withhold(self, final: FinalPlan, err: PolicyDenied) -> FinalPlan:
+        users = {str(u) for u in self._ctx.get("user_items") or ()}
+        refused = [str(i) for i in (err.details or {}).get("items") or ()]
+        if not refused or (err.details or {}).get("items_total") or not set(refused) <= users:
+            raise err
+        gone = set(refused)
+        paths = [i.source_path for i in final.plan.items if i.item_id in gone]
+        items = tuple(i for i in final.plan.items if i.item_id not in gone)
+        decisions = tuple(d for d in final.decisions if d.item_id not in gone)
+        reduced = replace(final.plan, items=items)
+        again = self.target.negotiate(self.job, reduced)
+        if to_wire(again.plan) != to_wire(reduced) or {d.item_id for d in again.decisions} - {
+            d.item_id for d in decisions
+        }:
+            raise VerifyFailed("the target changed the plan the source releases", which="plan")
+        withheld = [*[str(p) for p in self._ctx.get("withheld") or ()], *paths]
+        self._info("withheld_by_source", items=refused, reason=(err.details or {}).get("reason"))
+        self._note(final_plan=again, withheld=withheld, user_items=sorted(users - gone))
+        return again
 
     def _bundle_final(self) -> FinalPlan:
         """The FinalPlan an import bundle carries, read through ``VerifiedBlocks`` (size-capped, id-checked) from the
@@ -922,11 +1143,16 @@ class Conductor:
     def _confirm(self, *, interactive: bool) -> FinalPlan:
         """Confirmation after NEGOTIATED (DESIGN §14.1): ``yes`` / ``no_proposed`` / ``show_plan`` / ``cancel``;
         ``None`` (timeout or no interactive surface) continues without proposed items only when proposals are
-        the sole reason, otherwise the job ends with nothing locked [BX L5]."""
+        the sole reason, otherwise the job ends with nothing locked [BX L5]. ``--yes`` answers every reason except
+        those ``plan.yes_exempt`` names (R30: the session's working directory is left out; R32: the session is larger
+        than the target model's window) — for them the user is asked even with ``--yes``, and without an answer the
+        job ends before the lock. D compares the session with the window from the facts of both sides
+        (``target_facts``, ``source_facts``), which the reasons and the question's summary get."""
         final = self._get("final_plan", FinalPlan)
         if self._ctx.get("confirmed"):
             return final
         sf = self._get("source_facts", EnvFacts)
+        tf = self._get("target_facts", EnvFacts)
         planner = self._planner()
         instructions = self._instruction_files(final)
         offline = bool(sf and sf.offline_capable)
@@ -934,19 +1160,29 @@ class Conductor:
         # PolicyConfig; a remote or bundle source releases no secret on this side's word
         cfg = self.source.policy if isinstance(self.source, LocalSource) else None
         reasons = list(
-            planner.confirmation_reasons(final, self.job.options, offline, instructions=instructions, cfg=cfg)
+            planner.confirmation_reasons(
+                final,
+                self.job.options,
+                offline,
+                instructions=instructions,
+                cfg=cfg,
+                target_facts=tf,
+                source_facts=sf,
+            )
         )
         importing = self.job.mode is Mode.IMPORT
         if importing:  # the pack holds what the export confirmed; nothing is left to choose here (X02)
             reasons = [r for r in reasons if r != CONFIRM_PROPOSED]
         choice: str | None = "yes"
-        if reasons and not self.job.options.yes:
+        exempt = yes_exempt(reasons)
+        if reasons and (not self.job.options.yes or exempt):
             choice = None
             if interactive and self.confirm is not None:
-                summary = planner.presend_summary(final, instructions=instructions)
+                summary = planner.presend_summary(final, instructions=instructions, target_facts=tf, source_facts=sf)
                 choice = self.confirm(
                     {
                         "reasons": reasons,
+                        "yes_exempt": exempt,
                         "summary": summary,
                         "final_plan": final,
                         "suspected_secrets": suspected_secrets(final),
@@ -999,10 +1235,16 @@ class Conductor:
 
     def _negotiated(self) -> None:
         """After the confirmation: the pre-send summary (DESIGN §8.7, SEC 5.8) is journaled as the structured
-        ``plan.presend_summary`` document (ctx ``presend``); the surfaces render it — no text line from here."""
+        ``plan.presend_summary`` document (ctx ``presend``, with the facts of both sides so it names a session larger
+        than the target model's window, R32); the surfaces render it — no text line from here."""
         self._check_cancel()
         final = self._confirm(interactive=False)
-        presend = self._planner().presend_summary(final, instructions=self._ctx.get("instructions") or ())
+        presend = self._planner().presend_summary(
+            final,
+            instructions=self._ctx.get("instructions") or (),
+            target_facts=self._get("target_facts", EnvFacts),
+            source_facts=self._get("source_facts", EnvFacts),
+        )
         self._go(S.LOCKING, presend=dict(presend))
 
     def _locking(self) -> None:
@@ -1048,6 +1290,9 @@ class Conductor:
         job_off = replace(self.job, options=replace(self.job.options, refine="off"))
         tf = self._get("target_facts", EnvFacts)
         plan = from_wire(ResourcePlan, self._await(self.source, self.source.start_plan(job_off, tf, self._session_ref)))
+        users: list[str] = []
+        if self.job.mode is Mode.PULL:
+            plan, users = self._with_user_items(plan)
         negotiated = self.target.negotiate(self.job, plan)
         excluded = sorted(
             i.item_id
@@ -1057,7 +1302,7 @@ class Conductor:
         choice = self._ctx.get("choice") if self._ctx.get("choice") in ("yes", "no_proposed") else "no_proposed"
         final = self._settle(negotiated, choice, frozenset(excluded))
         self._info("replanned", excluded_proposed=excluded, revision=list(plan.revision))
-        self._note(plan=plan, final_plan=final, replanned=True)
+        self._note(plan=plan, final_plan=final, replanned=True, user_items=users)
 
     def _drop_items(self, final: FinalPlan, ids: set[str]) -> FinalPlan:
         items = tuple(replace(i, include=Include.NO) if i.item_id in ids else i for i in final.plan.items)
@@ -1077,7 +1322,7 @@ class Conductor:
         pack = None
         if self._ctx.get("pack") is None:
             self._intent("source.pack")
-            pack = self.source.start_pack(self.job, final)
+            pack, final = self._start_pack(final)
         delay = self.poll.op_first_s
         while export.state is OpState.RUNNING:
             self._sleep(delay)
@@ -1086,7 +1331,7 @@ class Conductor:
             export = self.source.op_status(self.job, export.op_id)
             if pack is not None and pack.state is OpState.RUNNING:
                 pack = self.source.op_status(self.job, pack.op_id)
-        if export.state is OpState.FAILED:
+        if export.state is not OpState.DONE:
             err = error_from(export.error)
             if isinstance(err, StaleSession):
                 self._restart("export_revision_moved")
@@ -1113,11 +1358,47 @@ class Conductor:
         pack = self._get("pack", PackInfo)
         if pack is None:
             self._intent("source.pack")
-            pack = from_wire(PackInfo, self._await(self.source, self.source.start_pack(self.job, final)))
+            started, final = self._start_pack(final)
+            pack = from_wire(PackInfo, self._await(self.source, started))
             self._done("source.pack")
             self._note(pack=pack, pack_moved=False, pack_time=self._clock())
         self._side_effect("move.pack", lambda: self._move(pack.pack_id))
-        self._go(S.DATA_STAGED, pack_moved=True, pack_time=self._ctx.get("pack_time") or self._clock())
+        self._go(
+            S.DATA_STAGED,
+            pack_moved=True,
+            pack_time=self._ctx.get("pack_time") or self._clock(),
+            left_behind=self._left_behind(pack.pack_id, final),
+        )
+
+    def _left_behind(self, pack_id: str, final: FinalPlan) -> list[dict]:
+        """What stays behind although the plan includes its item (contracts V34, V09; R23): every pack item's
+        ``excluded`` entries — secrets, stash entries withheld as a whole (``why == "stash_secret"``) and what the
+        source's policy refused — plus the suspected secrets a blanket *yes* dropped (R25), each ``{"path", "why",
+        "item_id"}``. The pack document is read through ``VerifiedBlocks`` (id-checked, size-capped); a path inside a
+        work tree is named below the item's directory name (``proj/.env`` — short enough that every name fits the
+        note's lines), stash entries keep E's text."""
+        raw = read_object(VerifiedBlocks(self._side_blocks(self.source)), pack_id, max_bytes=self.poll.max_doc_bytes)
+        doc = loads_bounded(raw, max_bytes=self.poll.max_doc_bytes)
+        roots = {i.item_id: i.source_path for i in final.plan.items}
+        out: list[dict] = []
+        for item in (doc.get("items") if isinstance(doc, dict) else None) or ():
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("item_id") or "")
+            for entry in item.get("excluded") or ():
+                if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                    continue
+                why = str(entry.get("why") or "excluded")
+                path = entry["path"]
+                root = (roots.get(item_id) or "").rstrip("/\\")
+                name = root.replace("\\", "/").rsplit("/", 1)[-1]
+                if why != "stash_secret" and name and not path.startswith(("/", "\\")):
+                    path = f"{name}/{path}"
+                out.append({"path": path, "why": why, "item_id": item_id})
+        for item in final.plan.items:
+            if item.include is Include.NO and SUSPECTED_SECRET in item.reasons:
+                out.append({"path": item.source_path, "why": "suspected_secret", "item_id": item.item_id})
+        return out
 
     def _data_staged(self) -> None:
         self._go(S.TARGET_PREPARING)
@@ -1130,16 +1411,37 @@ class Conductor:
         warnings) are not sent; the plan's free text travels in the FinalPlan the target holds."""
         final = self._get("final_plan", FinalPlan)
         info = self._get("info", SessionInfo)
-        kept = self.job.mode is Mode.IMPORT and bool(self.source.is_copy)
+        kept = (self.job.mode is Mode.IMPORT and bool(self.source.is_copy)) or self._keeps_source()
+        left = [e for e in self._ctx.get("left_behind") or () if isinstance(e, dict)]
+        stash = [str(e.get("path")) for e in left if e.get("why") == "stash_secret"]
+        secrets = [str(e.get("path")) for e in left if e.get("why") in ("secret", "suspected_secret")]
+        other = [
+            {"path": str(e.get("path")), "why": str(e.get("why"))}
+            for e in left
+            if e.get("why") not in ("stash_secret", "secret", "suspected_secret")
+        ]
+        other += [{"path": str(p), "why": "withheld by source policy"} for p in self._ctx.get("withheld") or ()]
+        extra: dict = {}
+        if secrets:
+            extra["secrets_excluded"] = secrets
+        if other:
+            extra["not_transferred"] = other
         return dict(
             self._planner().note_parts_from(
                 final,
+                withheld_stash=stash,
                 source_kept=kept,
                 instruction=self._ctx.get("instructions") or (),
                 pack_time=self._ctx.get("pack_time"),
                 title=info.title if info is not None else None,
+                extra=extra or None,
             )
         )
+
+    def _keeps_source(self) -> bool:
+        """``export --keep`` (O3, contract V36): the bundle is a copy — the source gets no primary lock and is not
+        retired; it is released after the bundle is written."""
+        return self.job.mode is Mode.EXPORT and bool(getattr(self.job.options, "keep_source", False))
 
     def _target_preparing(self) -> None:
         self._check_cancel()
@@ -1173,6 +1475,10 @@ class Conductor:
 
     def _source_preparing(self) -> None:
         self._check_cancel()
+        if self._keeps_source():  # a copy: no primary lock (V36); the leases keep turns out until the release
+            self._info("source_kept")
+            self._go(S.SOURCE_PREPARED, source_kept=True)
+            return
         prepared = self._get("prepared", PreparedInfo)
         raw = self._side_effect(
             "source.prepare", lambda: self._await(self.source, self.source.start_prepare(self.job, prepared))
@@ -1190,9 +1496,11 @@ class Conductor:
         elif res.outcome is PrepareOutcome.STALE_SESSION:
             self._restart("stale_session")
             self._go(S.TARGET_RESETTING)
-        else:
+        elif res.outcome is PrepareOutcome.STALE_WORKTREE:
             self._restart("stale_worktree")
             self._go(S.PACKING, pack=None, pack_moved=False)
+        else:  # pragma: no cover - PrepareOutcome has no other member; never read an unknown answer as success
+            raise BadRequest(f"unknown prepare outcome {res.outcome!r}", field="outcome")
 
     def _delta_applying(self) -> None:
         self._check_cancel()
@@ -1223,9 +1531,19 @@ class Conductor:
         self._go(S.COMMITTED, ack=ack)
 
     def _in_doubt(self) -> None:
-        """Only terminal target states end IN_DOUBT; ``committing`` keeps the source locked [SK H5]."""
+        """Only terminal target states end IN_DOUBT; ``committing`` keeps the source locked [SK H5].
+
+        ``stall_timeout_s`` bounds the wait from the first IN_DOUBT entry of this run — a commit restarted from here
+        and refused again re-enters without restarting the clock (contract V39). An export (the target is a bundle
+        on this host, nothing is active anywhere before its commit) is aborted once the user took the session back
+        (``reclaim``): a bundle is never written behind that reclaim (R1/D8); its local status is polled at most
+        every ``op_max_s``."""
         delay = self.poll.in_doubt_first_s
-        started = self._clock()
+        if self._in_doubt_since is None:
+            self._in_doubt_since = self._clock()
+        started = self._in_doubt_since
+        bundle = self.job.mode is Mode.EXPORT
+        max_delay = min(self.poll.in_doubt_max_s, self.poll.op_max_s) if bundle else self.poll.in_doubt_max_s
         while True:
             if self._clock() - started > float(self.job.options.stall_timeout_s):
                 self._record_error(
@@ -1252,6 +1570,18 @@ class Conductor:
                     self._info("in_doubt_resolved", target_state=st.state)
                     self._go(S.ABORTING, abort_reason=f"target_{st.state}")
                     return
+                if st.state in TARGET_PRE_COMMIT and self._ctx.get("commit_failed"):
+                    # V24: the target never entered its commit and refused it for good — starting it again cannot
+                    # succeed. ABORTING asks the target to abort first, which it refuses once it commits.
+                    self._info("in_doubt_resolved", target_state=st.state, commit_failed=True)
+                    self._go(S.ABORTING, abort_reason="commit_failed")
+                    return
+                if bundle and st.state in TARGET_PRE_COMMIT and self._source_given_back():
+                    # V39: the user reclaimed the session of an export that never committed — abort it (the
+                    # bundle's ``abort`` removes the ``.partial``; the release confirms ``reclaimed``)
+                    self._info("in_doubt_resolved", target_state=st.state, source="reclaimed")
+                    self._go(S.ABORTING, abort_reason="source_reclaimed")
+                    return
                 if st.state == "prepared":
                     # the commit never started there (lost request): start it again (idempotent), bounded
                     tries = int(self._ctx.get("commit_retries") or 0) + 1
@@ -1263,45 +1593,103 @@ class Conductor:
             except HandoverError:
                 pass
             self._sleep(delay)
-            delay = min(self.poll.in_doubt_max_s, delay * 2)
+            delay = min(max_delay, delay * 2)
+
+    def _source_given_back(self) -> bool:
+        """The source reports explicitly that its session is active again (``released``/``reclaimed``); any error or
+        other state is not that."""
+        try:
+            return self.source.status(self.job).state in SOURCE_GIVEN_BACK
+        except Fenced:
+            raise
+        except HandoverError:
+            return False
 
     def _committed(self) -> None:
         self._go(S.RETIRING)
 
     def _retiring(self) -> None:
+        """After the commit point only forward (DESIGN §3.4 point 4, §7.5). RETIRED — and so DONE — only on an
+        explicit confirmation (contract V37): the retire operation reports a state in ``RETIRE_CONFIRMED``. A
+        refusal naming ``released``/``reclaimed`` (the session is active on the source again, DESIGN §3.7) ends
+        with the warning that the copies are independent. Everything else — a row another process holds (waited
+        out for the stale window), an error, no state or another state — parks the job RETIRING for the janitor;
+        the source keeps its primary lock meanwhile (fail-closed). ``export --keep`` releases the source instead."""
+        if self._keeps_source():
+            raw = self._source_step("source.release", lambda: self.source.start_release(self.job, "kept"))
+            if source_state_of(raw) not in SOURCE_GIVEN_BACK:
+                self._park_retire(self._unconfirmed("released", raw))
+            self._go(S.RETIRED, retire=raw, source_kept=True)
+            return
         ack = self._get("ack", CommitAck)
+        try:
+            raw = self._source_step("source.retire", lambda: self.source.start_retire(self.job, ack))
+        except Fenced:
+            raise
+        except InvalidState as err:
+            state = source_state_of(err)
+            if state not in SOURCE_GIVEN_BACK or err.details.get("reason") == "stale_epoch":
+                self._park_retire(err)
+            self._warn(f"the source was not retired ({state}); the copies are independent now")
+            self._go(S.RETIRED, retire={"state": state})
+            return
+        state = source_state_of(raw)
+        if state in RETIRE_CONFIRMED:
+            self._go(S.RETIRED, retire=raw)
+            return
+        if state in SOURCE_GIVEN_BACK:
+            self._warn(f"the source was not retired ({state}); the copies are independent now")
+            self._go(S.RETIRED, retire=raw)
+            return
+        self._park_retire(self._unconfirmed("retired", raw))
+
+    def _source_step(self, step: str, start: Callable[[], OpStatus]) -> dict:
+        """One source operation after the commit point (retire, or the release of a kept source), journaled and
+        retried: a row another process holds is waited out for the stale window (V38), transient failures are
+        repeated ``retire_attempts`` times; then — or on any other failure — the job parks (``_park_retire``).
+        Raises ``Fenced`` and refusals (``InvalidState``) for the caller to judge."""
         attempt = 0
         while True:
             try:
-                raw = self._side_effect(
-                    "source.retire",
-                    lambda: self._await(self.source, self.source.start_retire(self.job, ack), cancellable=False),
-                )
-                break
+                return self._side_effect(step, lambda: self._await(self.source, start(), cancellable=False))
             except Fenced:
                 raise
             except InvalidState as err:
-                self._warn(
-                    f"the source was not retired ({err.details.get('state', 'unknown')}); the copies are "
-                    "independent now"
-                )
-                raw = {"state": err.details.get("state")}
-                break
+                if not is_busy_elsewhere(err):
+                    raise
+                if self._wait_busy():
+                    continue
+                attempt += 1
+                if attempt >= self.poll.retire_attempts:
+                    self._park_retire(err)
+                self._backoff(attempt)
             except HandoverError as err:
                 attempt += 1
                 if attempt >= self.poll.retire_attempts or not is_transient(err):
-                    self._record_error(err)
-                    self._finish_result(outcome="active_source_pending")
-                    raise _Park() from err
+                    self._park_retire(err)
                 self._backoff(attempt)
-        self._go(S.RETIRED, retire=raw)
+
+    def _unconfirmed(self, expected: str, raw: object) -> InvalidState:
+        state = source_state_of(raw)
+        return InvalidState(
+            f"the source did not confirm that it is {expected} (it reports {state or 'no state'})",
+            reason="not_confirmed",
+            state=state,
+            expected=expected,
+        )
+
+    def _park_retire(self, err: HandoverError) -> None:
+        """Leave the job RETIRING for the janitor (DESIGN §3.6 row COMMITTED/RETIRING): never DONE without the
+        source's confirmation (V37)."""
+        self._record_error(err)
+        self._finish_result(outcome="active_source_pending")
+        raise _Park() from err
 
     def _retired(self) -> None:
         if self.continue_prompt:
             self._go(S.CONTINUING)
         else:
             self._go(S.DONE)
-            self._finish_result()
 
     def _continuing(self) -> None:
         if self._ctx.get("continue") is None:
@@ -1315,9 +1703,13 @@ class Conductor:
                 error = {"code": err.code, "message": err.message, "details": dict(err.details)}
                 self._note(**{"continue": to_wire(ContinueResult(started=False)) | {"error": error}})
         self._go(S.DONE)
-        self._finish_result()
 
     def _aborting(self) -> None:
+        """``target.abort``, then ``source.release`` (DESIGN §3.2). ABORTED only when both confirm explicitly: the
+        target returned (or does not know the job) and the release reports ``released``/``reclaimed``. A target
+        that is committing or committed sends the job back to IN_DOUBT; every other refusal (a row another process
+        holds, a stale epoch, …) is raised — retried, then parked for the janitor — and never a reason to release
+        the source behind the target's back (V37)."""
         reason = str(self._ctx.get("abort_reason") or "aborted")
         try:
             self._side_effect("target.abort", lambda: self.target.abort(self.job, reason))
@@ -1326,13 +1718,22 @@ class Conductor:
                 self._info("abort_refused_by_target", target_state=err.details.get("state"))
                 self._go(S.IN_DOUBT)
                 return
-            if err.details.get("reason") == "stale_epoch":
-                raise
+            raise
         except NotFound:
             pass
-        self._side_effect(
-            "source.release",
-            lambda: self._await(self.source, self.source.start_release(self.job, reason), cancellable=False),
-        )
+        self._intent("source.release")
+        try:
+            started = self.source.start_release(self.job, reason)
+        except NotFound:
+            # L3-F11: the source does not know the job — it never opened it (it refused at FACTS, e.g.
+            # ``rate_limited``), so it holds nothing for it, which is what a release confirms. Only the refusal of
+            # the release request counts; a lost operation while polling it stays an error. The job's error stays
+            # the cause, not "not found".
+            self._done("source.release", source="not_found")
+            raw: object = {"state": "released"}
+        else:
+            raw = self._await(self.source, started, cancellable=False)
+            self._done("source.release")
+        if source_state_of(raw) not in SOURCE_GIVEN_BACK:
+            raise self._unconfirmed("released", raw)
         self._go(S.ABORTED)
-        self._finish_result()

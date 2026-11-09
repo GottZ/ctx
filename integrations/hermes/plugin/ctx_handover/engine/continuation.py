@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import CapabilityMissing, ContinueRefused, HandoverError
+from .ids import is_ulid
 from .model import ContinueResult
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,6 @@ DEFAULT_PROMPT = "Continue where we left off."
 PEER_NAME_MAX = 64
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_JOB_ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _PEER_RE = re.compile(r"[^A-Za-z0-9_.@ -]")
 _TRAILER_RE = re.compile(r"\[ctx_handover\] continuation exited with code (-?\d+)")
@@ -195,7 +195,7 @@ class Spawner:
         """
         if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
             raise HandoverError("invalid session id for the continuation", field="session_id")
-        if not isinstance(job_id, str) or not _JOB_ID_RE.fullmatch(job_id):
+        if not is_ulid(job_id):  # job ids are ULIDs everywhere (contract K-2, ``ids.ULID_RE``)
             raise HandoverError("invalid job id for the continuation", field="job_id")
         if not verified:
             raise ContinueRefused(
@@ -295,7 +295,7 @@ class Spawner:
 
         ``running`` is None when it cannot be told (Windows, or a pid this process may not signal).
         """
-        if not isinstance(job_id, str) or not _JOB_ID_RE.fullmatch(job_id):
+        if not is_ulid(job_id):
             return {"started": False}
         log_path, meta_path = self._paths(job_id)
         meta = self._read_json(meta_path)
@@ -349,7 +349,7 @@ def inject_after_adoption(ctx, session_key: str, prompt: str) -> bool:
     if not callable(inject):
         return False
     try:
-        return bool(inject(prompt, "user", session_key=session_key))
+        return inject(prompt, "user", session_key=session_key) is True  # only the declared True counts
     except Exception:
         logger.debug("inject_message for %s failed", session_key, exc_info=True)
         return False

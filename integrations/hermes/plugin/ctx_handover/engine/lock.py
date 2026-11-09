@@ -392,8 +392,10 @@ def suspend(db, ledger, info: SessionInfo | None, holder: str | None, job_id: st
 
 
 def _retitle(title: str, peer: str, now: datetime | float | None, max_len: int, suffix: str = "") -> str:
+    """``<title> (handed over to <peer> <time>)``; without a peer (an export) ``<title> (exported to bundle <time>)``.
+    Always built from the backed-up original title, so it never grows over a way there and back (R14)."""
     when = (now if isinstance(now, datetime) else datetime.fromtimestamp(_now_ts(now))).strftime("%Y-%m-%d %H:%M")
-    tail = f" (handed over to {peer} {when}{suffix})"
+    tail = f" (handed over to {peer} {when}{suffix})" if peer else f" (exported to bundle {when}{suffix})"
     keep = max(1, max_len - len(tail))
     base = title if len(title) <= keep else title[: keep - 1].rstrip() + "…"
     return (base + tail)[:max_len]

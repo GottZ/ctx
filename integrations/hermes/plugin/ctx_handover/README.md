@@ -27,6 +27,8 @@ session-relay (fresh session on the same gateway).
 - **Not moved:** running processes, subagents/delegations and cron jobs. The note on the other side names them,
   with the command to pause a cron job that is still attached to the old session.
 - Two copies that both went on are never merged.
+- After a pull, the target learns of a reclaim on the source only while the job runs; after it finished,
+  `/handover status` on the target does not show it.
 - No Desktop UI of its own yet: everything runs through `/handover …` in any Hermes chat (CLI, TUI, Desktop) and
   `hermes handover …` in a terminal.
 - Workspaces of remote terminal backends (docker, ssh, modal …) are not sources; the plugin moves files of the
@@ -34,11 +36,36 @@ session-relay (fresh session on the same gateway).
 - Images attached before the handover replay only when their absolute path is identical on the other machine.
 - `git` 2.38 or newer is needed on both sides for repositories (`/handover doctor` checks it).
 - Hermes 0.22.6 or newer. Tested on Linux; the macOS and Windows code paths exist but have no end-to-end runs yet.
-- A message typed into the paused source while a long transfer runs waits at most 30 minutes for the session and
-  is then not processed.
-- Under `plugins.isolation: host` there is no `hermes handover` CLI (use the slash form), no progress notice
-  (`/handover status` shows progress), and Hermes buffers request bodies before this plugin's size limit applies —
-  prefer `in_process` or a proxy body limit on a receiving gateway.
+- A message typed into the paused source while a long transfer runs is not answered there: its turn waits at most
+  30 minutes for the session (then Hermes reports it as not processed) and otherwise meets the lock. When the chat
+  stored the message on submit (TUI and Desktop do), it travels along as the session's last message, and the note
+  on the other side says it is waiting there.
+- Under `plugins.isolation: host` a gateway cannot receive or provide handovers over HTTP: its ctx_handover
+  routes need `in_process` (the default). Such a gateway still hands sessions over by dialing a paired gateway
+  (`take`, `to`) and with bundles (`export`, `import`); `/handover doctor` says so (FAIL when paired devices dial
+  it). It also has no `hermes handover` CLI (use the slash form) and no progress notice (`/handover status` shows
+  progress), and Hermes buffers request bodies before this plugin's size limit applies.
+- **Sessions from older Hermes builds.** Messages written before Hermes stamped message and tool-call identities
+  get stable identities derived from the original rows during the transfer; the source session is not modified.
+  If Hermes backfills those identities on the source while a handover is running, the target refuses the late
+  changes (`verify_failed`) and the handover starts over from a fresh export when you start it again: the failed run
+  ends before anything is committed and leaves the source session usable and unlocked — nothing is accepted
+  silently.
+- **Messages typed into a handed-over session.** While ctx_handover is loaded, every message sent in the
+  handed-over session is withheld (no model call) and answered with a notice where the session continues.
+  `/handover reclaim` removes these attempts from the end of the conversation and lists their text. Attempts that
+  a context compaction moved into an earlier part of the session stay in its history, because Hermes allows no
+  changes there; reclaim still lists their text and says how many remain.
+- **Display after an undone message.** If a message that a compaction carried forward was later undone on the
+  source, the target's chat display shows the earlier copy of that message again. What the model sees is
+  identical on both sides; undone messages themselves are not transferred.
+- **Pulling from a machine that goes quiet.** When a pull stops talking to the source for
+  `participant_idle_timeout_min` (15 minutes by default), the source releases its locks and the session there is
+  usable again; `/handover resume` locks it again and continues.
+- **A git command that died mid-way.** A git process killed in the middle of a command in a destination
+  repository (power loss, killed process) can leave `.git/index.lock` behind. The plugin never removes it (it may
+  belong to another git process): the step that resumes the handover refuses that repository and the handover
+  ends marked `needs_attention`. Remove the lock once no git process runs there, then hand over again.
 
 ## What the lock on the source guarantees
 
@@ -69,7 +96,8 @@ back here; the copy on the other gateway stays active.
    `ctxh-pair:` and run `/handover pair ctxh-pair:…` in a chat on the laptop. The line carries the address, a
    one-time code (10 minutes, single use) and the server's key fingerprint, which the laptop checks itself — it
    never carries a dashboard credential. For a plain-HTTP address that only your VPN reaches (e.g. Tailscale) add
-   `--allow-insecure`.
+   `--allow-insecure`. The laptop names the server as the line does, or takes the next free name (`server-2`) when
+   that one is taken there; with `--name` you choose it, and a taken name is refused before the code is used.
 5. `/handover doctor` on both sides checks the setup and says what to fix. `/handover doctor --measure` also finds
    the request-body limit of a proxy in front of each paired gateway (test uploads, see Disclosure).
 
@@ -82,29 +110,43 @@ back here; the copy on the other gateway stays active.
 | Back to the server after landing | the laptop session | `/handover to server` — repositories return into their original folders when nothing changed there meanwhile |
 | Before closing time, let the agent keep working | the session | `/handover to server --continue "run the tests and fix what fails"` (needs `allow_remote_continue` on the server) |
 | A turn is still running | the session | add `--wait` to hand over as soon as it finishes |
-| No connection | source / target | `/handover export` writes one `.ctxh.tar`; `/handover import <file>` on the other machine |
-| Take it back here | the source session | `/handover reclaim` (`--force` while a handover is being committed) |
+| No connection | source / target | `/handover export` writes one `.ctxh.tar`; `/handover import <file>` on the other machine (`export --keep` leaves this session active and marks the bundle as a copy; status and the final message say so) |
+| Take it back here | the source session | `/handover reclaim` (`--force` while a handover is being committed); in a terminal `hermes handover reclaim --session <id>` (or `reclaim <id>`) |
 
 Before anything is locked the plugin shows what would move. It asks for a confirmation when items are only
 proposed, a destination has local changes (a fresh folder is used), the handover is larger than
-`confirm_above_mb`, a secret is included with `--include-secret`, the model there does not work offline or the
-session is larger than its context window, items outside the project are included, or instruction files arrive
-from an unverified source. The choices are *yes*, *yes without the proposed items*, *show the plan and stop*,
-*cancel*; `--yes` skips the question. Files that look like secrets are never sent by a blanket yes (neither
-`--yes` nor the *yes* choice takes them along); name each one with `--include-secret <path>`. An unanswered
-question (no reply within Hermes' question timeout `agent.clarify_timeout`, 90 s by default) continues without the
-proposed items when those are the only reason and cancels otherwise — nothing is locked in either case.
+`confirm_above_mb`, a secret is included with `--include-secret`, the model there does not work offline (this
+session's model did), items outside the project are included, instruction files arrive from an unverified source,
+the session's working folder is left out by the policy (for example because it lies inside the Hermes home; the
+summary names the folder, and the project does not come along), or the session is larger than the context window
+of the model there (the summary and the note name both sizes; the other side compacts the conversation on its first
+turn). The choices are *yes*, *yes without the proposed items*, *show the plan and stop*, *cancel*; `--yes` skips
+the question. `--yes` does not confirm a left-out working folder: a person answers that question (without an answer
+nothing is locked), or `--no-workspace` hands the session over without its folder on purpose. Nor does it confirm a
+session larger than the context window there: a person answers, or `/compress` in the session first makes it
+fit. Files that look like secrets are never sent by a blanket yes (neither `--yes` nor the *yes* choice takes them
+along); name each one with `--include-secret <path>`. An unanswered question (no reply within Hermes' question timeout
+`agent.clarify_timeout`, 90 s by default) continues without the proposed items when those are the only reason and
+cancels otherwise — nothing is locked in either case.
 
-The final message names the session on the other side, its folder, the model and whether it works offline, and
-what to do next. On the receiving side `/handover status <job>` shows the note the agent gets with your first
-message there; the note is not shown in the transcript view.
+The final message names the session on the other side (title and session id), its folder, the model and whether it
+works offline, and what to do next. A received session is stored, not open: it is listed in the Desktop sidebar and in
+`hermes sessions list`, and `hermes --resume <session-id>` opens it (a gateway's list of open sessions, such as the
+TUI switcher, shows it only after it was opened once). After a pull the final message also lists paths you asked for
+with `--include` that the other side does not release (withheld by source policy — a pull's own hints only narrow what
+the source offers). On the receiving side `/handover status <job>` shows the note the agent gets with your first
+message there; the note is not shown in the transcript view. `/handover status` also shows the jobs another gateway
+runs with this one — a push that arrived here, a pull that took a session from here — listed with this gateway's role
+(`target, from <peer>` or `source, to <peer>`) and, for an arrival, the session it became here.
 
 All commands: `/handover to | take | export | import | status | peers | pair | reclaim | cancel | resume | setup |
 doctor | identity | gc | logs | help` — `/handover help <command>` shows the options. `hermes handover <same>` runs
-them in a terminal (`--json` for scripts, `--session <id>` names the session; exit codes 0 ok, 1 failed, 2 usage,
-3 busy/conflict, 4 auth/gate, 5 in-doubt/suspended). Administrative and data-moving commands (`pair`, `setup`,
-`peers`, `identity`, `take`, `to`, `export`, `import`, `reclaim`, `resume`, `gc`, `cancel`) answer only in the
-local CLI, TUI or Desktop; on messaging platforms they are refused.
+them in a terminal (`--json` for scripts, `--session <id>` names the session; exit codes 0 ok, 1 failed, 2 usage, 3
+busy/conflict, 4 auth/gate, 5 in-doubt/suspended; a refusal carries `ok: false` and `error.code` in `--json` — a
+`reclaim` refused while a handover is being committed exits 3). `status`, `cancel`, `resume`, `logs` and `gc --job`
+take the six-character job id the messages print (or any other unique start or end of the id). Administrative and
+data-moving commands (`pair`, `setup`, `peers`, `identity`, `take`, `to`, `export`, `import`, `reclaim`, `resume`,
+`gc`, `cancel`) answer only in the local CLI, TUI or Desktop; on messaging platforms they are refused.
 
 The agent has a `handover` tool: it can show the plan, name resources the file scan cannot see (paths, tools and
 the names — never values — of environment variables; anything outside the project is only proposed) and ask for a
@@ -121,7 +163,7 @@ working default; the most relevant:
 | `inbound` | `auto` | accept handovers only while a device is paired or a pairing code is pending; `on`, `off` |
 | `listen_url` | `""` | address put into pairing strings (else `webapp.public_url` / `dashboard.public_url`) |
 | `peer_gate`, `peer_token`, `peer_username`, `peer_password`, `peer_extra_headers` | `session_token` | how this device signs in to the other gateway's dashboard |
-| `workspace_root`, `allow_roots` | `~/hermes-handover` | where received workspaces and bundles go; writes land only under `allow_roots` |
+| `workspace_root`, `allow_roots` | `~/hermes-handover` | where received workspaces and bundles go; writes land only under `allow_roots`. When the home folder lies inside the Hermes home (the official Docker image), the default is `<HERMES_HOME>/handover-workspaces`, the one folder of the Hermes home a handover may write to; `/handover setup` shows the folder in use |
 | `export_roots` | `[]` | extra paths a device with the pull right may request beyond this machine's own plan |
 | `max_total_gb`, `max_file_mb`, `max_session_mb`, `confirm_above_mb` | 10, 100, 512, 500 | size limits and the confirmation threshold |
 | `refine` | `auto` | ask a model once per handover which resources the work needs (`side_question`, `llm`, `off`) |
@@ -131,7 +173,9 @@ working default; the most relevant:
 | `allow_agent_start` | `false` | let the agent start a handover it was asked for |
 | `ctx_persist`, `ctx_category` | `auto`, `handover` | ctx records (only with ctx_checkpoint and your consent) |
 
-The full list with all limits and timeouts is the `config_schema` in `plugin.yaml`.
+The full list with all limits and timeouts is the `config_schema` in `plugin.yaml`. A value of the wrong type or
+outside its choices counts as that key's default (a bare YAML `off` means `off`); `/handover doctor` names each
+such value.
 
 ## Disclosure
 
@@ -150,16 +194,20 @@ copies here, and — only if you enable `allow_remote_continue` — start one co
 **Reads:** the handed-over session through Hermes' session store, plus read-only SQL on `session_admissions` and
 `async_delegations` to detect pending work; the session's working directory including uncommitted git state;
 files under your home that the transcript references (asked before inclusion unless `extra_paths: auto`);
-`cache/spillover`, `hook_outputs`, `native-inputs` files of that session; `processes.json` and `cron/jobs.json`
-(named in the note, never moved); the file mode of the profile `.env` (`doctor`).
+`cache/spillover`, `hook_outputs`, `native-inputs` and `cache/terminal-output` files of that session;
+`processes.json` and `cron/jobs.json` (named in the note, never moved); the file mode of the profile `.env`
+(`doctor`); on Linux the boot id and the own PID-namespace link under `/proc` (owner stamps for the turn lease and
+for handover jobs, so a dead process on this host is recognised at once).
 
 **Writes:** on the target — a new session, workspace copies under `allow_roots` (default: `~/hermes-handover`),
 never over uncommitted local work except an unchanged copy this plugin handed away earlier, and the session's
 cache files under HERMES_HOME; on the source — ends, archives, hides and renames the handed-over session, pauses
 its goal/heartbeat/loop and blocks new turns on it (each blocked message leaves a placeholder that `/handover
 reclaim` rewinds; reclaim restores everything else too); `.env` gets `CTX_HANDOVER_IDENTITY_KEY` (and the peer
-token/password you enter in the plugin settings form); `config.yaml` gets `plugins.entries.ctx_handover.*`,
-including an MCP allowlist entry only if you accept ctx recording; the plugin data folder
+token/password you enter in the plugin settings form); `config.yaml` gets `plugins.entries.ctx_handover.*`, and
+only if you accept ctx recording in `/handover setup` does that command add the ctx MCP server to
+`plugins.entries.ctx_handover.mcp_allowlist` (through Hermes' own config writer, merged with what is there; on a
+package-managed install it prints the `hermes config set` command instead); the plugin data folder
 `<HERMES_HOME>/plugin-data/ctx_handover/` holds the ledger, staging, the block cache, reports and logs.
 
 **Commands:** `git` without a shell, with hooks, credential helpers, fsmonitor, submodule recursion and LFS smudge
@@ -170,7 +218,9 @@ approvals are off there.
 
 **Background work:** a worker thread per handover, a lease refresher, a ledger refresher for the turn veto, a
 janitor that resumes or cleans up interrupted handovers, and one writer thread for note delivery state; staging and
-a block cache in the plugin data folder (default up to 5 GiB, 3 days; `/handover gc`).
+a block cache in the plugin data folder (default up to 5 GiB, 3 days; `/handover gc`). While a handover runs, the
+cache can grow beyond `block_cache_gb` by the blocks stored during at most the last 24 h, because the GC spares
+everything a running handover may still need; the first GC after the handover ends brings it back under the limit.
 
 **Stored secrets:** an Ed25519 private key in `.env`; paired peers' public keys and short-lived pairing codes
 (≤ 10 min by default, at most 60) in the plugin data folder (0700/0600). Bundles contain the raw transcript and
@@ -179,7 +229,8 @@ workspace unencrypted (0600).
 **Model use (on by default, `refine: off` disables it):** once per handover the plugin asks for resources the file
 scan missed — as a side question to the session's own model (with the `llm.side_question` grant; this sends the
 whole session context once, so it is skipped above 200 000 tokens) or as up to 60,000 characters of redacted
-recent transcript to your main model. Inference costs are yours.
+recent transcript to your main model. Inference costs are yours. `refine: off` stops these calls; an offer made
+in a gateway (`/handover to <peer>`) keeps the answer it already got and passes it on.
 
 **ctx (optional):** with ctx_checkpoint as memory provider and your consent in `/handover setup`, one redacted
 record per side of each handover through Hermes' MCP dispatch; a side finished without ctx (e.g. offline) is
@@ -207,13 +258,22 @@ of each candidate file. The block cache keeps copies up to 3 days / 5 GiB (`/han
 With `allow_remote_continue` or `allow_agent_start`, a turn runs without a person present (single-query approval
 policy; refused when approvals are off). Under `plugins.isolation: host` the core buffers request bodies before
 the plugin's size limit applies. The plugin never updates itself and never writes into Hermes plugin, skill,
-memory or config directories other than its own settings entry. Administrative commands run only in the local
-CLI, TUI or Desktop.
+memory or config directories other than its own entry `plugins.entries.ctx_handover`. Administrative commands
+run only in the local CLI, TUI or Desktop.
 
 **Not moved:** running processes, subagents, cron jobs. **Limits:** gateways reachable only through Desktop's SSH,
 OAuth/Nous or Hermes-Cloud connections need the bundle path in this version; images attached before the handover
 replay only when the absolute path is identical; disabling the plugin lifts the turn veto on handed-over sessions
 (they stay ended, archived, hidden and renamed).
+
+## Troubleshooting
+
+- **`hermes handover` or `/handover` is unknown on a Hermes installed from a source checkout.** Such an
+  installation reads its own version with `git tag --merged HEAD` under a 3-second limit; on a busy machine the
+  limit runs out, Hermes falls back to an older base version, and this plugin (it needs 0.22.6 or newer) is skipped
+  in that process — the log says `Plugin 'ctx_handover' skipped: requires hermes >=0.22.6`, and
+  `hermes plugins enable ctx_handover` can be refused the same way. Run the command again, or restart the gateway,
+  once the machine is less busy. Packaged installations (Docker, Nix) carry a version stamp and are not affected.
 
 ## Tests
 

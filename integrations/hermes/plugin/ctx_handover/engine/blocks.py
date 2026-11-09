@@ -22,7 +22,9 @@ Objects in flight: a job stores an object's blocks and manifest first and regist
 later (a pack registers its whole closure at the end), so between the two the object is not "live". Every write
 path therefore touches what it relies on — ``put`` and ``missing`` refresh the mtime of a stored block, the
 manifest store refreshes the manifest — and GC never collects a block or manifest touched since the oldest
-non-terminal job on this host began (``_protect_since``; GC cannot tell which job touched which block). Blocks
+running job on this host began (``_protect_since``; GC cannot tell which job touched which block). A
+``suspended`` job is not running (it may wait days for ``/handover resume``): it keeps the objects it registered,
+nothing else (contract V25). Blocks
 are deleted by renaming them aside first and reading the mtime from the renamed file, so a touch either happened
 before the rename (the block goes back) or finds the block gone (the writer stores it again or reports it
 missing). The object id rule itself — manifest document, id, reader checks — is ``jsonutil``'s (contract K-1).
@@ -107,6 +109,8 @@ a block touched this shortly before a job began still counts as touched by it.""
 MAX_IN_FLIGHT_S = 86_400.0
 """Protection of objects in flight reaches back at most this far: a job stuck for longer (suspended, crashed)
 does not switch off the cache cap for good; its unregistered objects are rebuilt when it resumes."""
+PARKED_STATES = frozenset({"suspended"})
+"""Job states that give no time protection (``_protect_since``): a parked job keeps only its registered objects."""
 _JOB_SCAN = 100_000
 _TOMB_PREFIX = "gc."
 
@@ -581,16 +585,19 @@ class BlockStore:
 
     def _protect_since(self) -> float:
         """Blocks and manifests touched at or after this time are never collected: they may belong to an object a
-        running job stored or re-used but has not registered yet. Every non-terminal job on this host counts (GC
-        cannot tell which job touched which block): the oldest one's start minus ``GC_SLACK_S``, but no earlier
-        than ``MAX_IN_FLIGHT_S`` ago (also when the job list is incomplete); ``inf`` when no job runs. File times
-        are wall-clock times, so this is too."""
+        running job stored or re-used but has not registered yet. Every running job on this host counts (GC
+        cannot tell which job touched which block) — a non-terminal one that is not parked (``PARKED_STATES``,
+        contract V25): the oldest one's start minus ``GC_SLACK_S``, but no earlier than ``MAX_IN_FLIGHT_S`` ago
+        (also when the job list is incomplete); ``inf`` when no job runs. File times are wall-clock times, so this
+        is too."""
         floor = time.time() - MAX_IN_FLIGHT_S
         rows = self._ledger.jobs(active=True, limit=_JOB_SCAN)
         if len(rows) >= _JOB_SCAN:
             return floor
         starts = []
         for row in rows:
+            if row.get("state") in PARKED_STATES:
+                continue
             at = row.get("created_at")
             if isinstance(at, bool) or not isinstance(at, (int, float)):
                 return floor

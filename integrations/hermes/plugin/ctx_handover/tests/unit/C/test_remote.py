@@ -10,7 +10,7 @@ import pytest
 from ctx_handover.engine import contracts, hostcompat, pairing
 from ctx_handover.engine.blocks import BLOCK_SIZE, BlockStore, object_id_of
 from ctx_handover.engine.contracts import JobContext
-from ctx_handover.engine.errors import BadRequest, BlockCorrupt, LeaseLost, NotFound
+from ctx_handover.engine.errors import BadRequest, BlockCorrupt, InvalidState, LeaseLost, NotFound
 from ctx_handover.engine.ids import ulid
 from ctx_handover.engine.model import (
     CapsuleInfo,
@@ -141,7 +141,11 @@ def test_remote_target_cycle(setup):
     started = target.continue_session(job, "carry on")
     assert started.started and started.pid == 4242
     assert target.status(job).state == "open"
-    target.abort(job, "user")
+    # the stand-in target (``helpers.FakeParticipant``) still reports "open" after its abort: no confirmed abort
+    # (round G′ success sweep; ``test_l2gp_success_sweep.py`` covers the confirming answer)
+    with pytest.raises(InvalidState) as refused:
+        target.abort(job, "user")
+    assert refused.value.details["state"] == "open"
     # blocks through the target's sink
     sink = target.blocks()
     store = MemoryBlockStore()

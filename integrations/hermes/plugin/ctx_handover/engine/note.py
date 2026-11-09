@@ -21,6 +21,9 @@ value) holds everything.
 not shown", and ``compose(..., strict=True)`` (tests) refuses it with ``ValueError``. ``model_change`` is read only
 in the form of contract X04 (``{"from": {model, provider}, "to": {model, provider, context_length}, "reason",
 "offline_capable"}`` or None).
+
+A conversation larger than the context window of the model here (R32, L3-F17) gets the line ``CONTEXT_LINE``: the
+size is the source's estimate (note part ``context_tokens``), the window this host's own (``context_window``).
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ INTRO = (
 _MARKER_RE = re.compile(r"<\s*/?\s*(?:ctx-handover-note|untrusted-data)", re.IGNORECASE)
 _BLANK_RUNS = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
 _NAME_KEEP = re.compile(r"[^A-Za-z0-9._-]")
+_BRANCH_KEEP = re.compile(r"[^A-Za-z0-9._/-]")
 _TOOL_RE = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
 _ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 
@@ -64,6 +68,7 @@ KNOWN_WHY = frozenset(
         "home directory is not transferred as a workspace (use --include for the files you need)",
         "home directory is not transferred as a whole",
         "contains the workspace",
+        "withheld by source policy",
     }
 )
 """Reason texts the note shows verbatim (the plan's vocabulary); anything else is shown as "not transferred"."""
@@ -100,12 +105,23 @@ NOTE_PART_KEYS = frozenset(
         "ntfs_invalid",
         "rewind_rows",
         "lfs_missing",
+        "bundle_import",
+        "context_tokens",
     }
 )
 """Every ``note_parts`` key ``compose`` renders (X16, DESIGN §11.3): the lists of "Not transferred", tools and
 env-var names, ``source_kept`` (the copy sentence, O3), ``instruction_files`` (new or changed here), ``warnings``,
 ``pack_time`` (the snapshot sentence; the ``pack_time`` argument wins when set), ``title`` (inside the data block
-only) and the target's own ``case_collisions``/``ntfs_invalid``/``rewind_rows``/``lfs_missing``."""
+only), the target's own ``case_collisions``/``ntfs_invalid``/``rewind_rows``/``lfs_missing`` and ``bundle_import``
+(True on a bundle import: the sentence of DESIGN §5.4 that the bundle may have been imported elsewhere too) and
+``context_tokens`` (the session's active context in tokens: ``CONTEXT_LINE`` when it exceeds the window here)."""
+CONTEXT_LINE = (
+    "Context: this conversation (about {tokens:,} tokens) is larger than the context window of {model} here "
+    "({window:,} tokens); Hermes compacts it on the first turn."
+)
+MAX_CONTEXT_TOKENS = 10**12
+"""Upper bound of a plausible ``context_tokens`` from the peer; anything else is ignored."""
+BUNDLE_IMPORT_SENTENCE = "This handover came from a bundle file; this bundle may have been imported elsewhere too."
 
 
 def unknown_note_parts(parts: object) -> tuple[str, ...]:
@@ -114,6 +130,23 @@ def unknown_note_parts(parts: object) -> tuple[str, ...]:
     if not isinstance(parts, dict):
         return ()
     return tuple(sorted({str(k)[:64] for k in parts if k not in NOTE_PART_KEYS}))
+
+
+def case_collision_texts(pairs: object) -> list[str]:
+    """``note_parts["case_collisions"]`` from E's ``[kept, colliding]`` pairs (``GitApplyState.case_collisions``,
+    the pack documents' ``case_collisions``; contract V09): one ``"<kept> ↔ <colliding>"`` per pair, in order,
+    without repeats; an entry that is not a pair of non-empty strings is skipped. The note lists these strings on
+    its line "case collisions here" (``compose`` reads strings only)."""
+    out: list[str] = []
+    for pair in pairs if isinstance(pairs, (list, tuple)) else ():
+        if (
+            isinstance(pair, (list, tuple))
+            and len(pair) == 2
+            and all(isinstance(p, str) and p for p in pair)
+            and (text := f"{pair[0]} ↔ {pair[1]}") not in out
+        ):
+            out.append(text)
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -153,6 +186,14 @@ def _attr(text: object, cap: int = 64) -> str:
 
 def _name(text: object, cap: int = 64) -> str:
     return _NAME_KEEP.sub("", str(text or ""))[:cap] or "unknown"
+
+
+def _branch(ref: object, cap: int = 64) -> str:
+    """A branch for a fact line: the short name (``gitops.head_info`` reports the full symbolic ref,
+    ``refs/heads/main`` ⇒ ``main``), restricted like ``_name`` but keeping ``/`` (``feature/x``)."""
+    text = str(ref or "")
+    text = text[len("refs/heads/") :] if text.startswith("refs/heads/") else text
+    return _BRANCH_KEEP.sub("", text).strip("/")[:cap] or "unknown"
 
 
 def _cmd(text: object, cap: int = NAME_CAP) -> str:
@@ -216,6 +257,52 @@ def _ctx_text(ctx: int | None) -> str:
     return f", {ctx // 1024}k context" if ctx else ""
 
 
+def _window(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def context_window(
+    model_change: dict | None, *, target: EnvFacts | None = None, source: EnvFacts | None = None
+) -> int | None:
+    """The context window (tokens) of the model the session uses on the target, or None when unknown (R32).
+
+    A model change (X04 dict) reads only ``to.context_length``. A model that stays (``None``) runs on the target's
+    main model only when the source's main model and provider are the same — ``session_import.context_length`` reads
+    ``model.context_length`` only for the main model — or when the source facts are absent; then the window is
+    ``target.host.context_length``. Any other value (another spelling, a kept model under another name or provider,
+    0, a boolean) is unknown."""
+    if isinstance(model_change, dict):
+        to = model_change.get("to")
+        return _window(to.get("context_length")) if isinstance(to, dict) else None
+    if model_change is not None or target is None:
+        return None
+    host = getattr(target, "host", None)
+    window = _window(getattr(host, "context_length", None))
+    if window is None:
+        return None
+    if source is not None:
+        mine = (getattr(host, "model", None), getattr(host, "provider", None))
+        theirs = (getattr(source.host, "model", None), getattr(source.host, "provider", None))
+        if mine != theirs:
+            return None
+    return window
+
+
+def _context_line(parts: dict, model_change: dict | None, target: EnvFacts, source: EnvFacts) -> str | None:
+    """``CONTEXT_LINE`` when the peer's ``context_tokens`` (a plain positive integer) exceed the window here."""
+    tokens = parts.get("context_tokens")
+    if not (isinstance(tokens, int) and not isinstance(tokens, bool) and 0 < tokens <= MAX_CONTEXT_TOKENS):
+        return None
+    window = context_window(model_change, target=target, source=source)
+    if window is None or tokens <= window:
+        return None
+    if isinstance(model_change, dict):
+        model, _p, _c = _model_side(model_change.get("to"))
+    else:
+        model = one_line(target.host.model or "the model", NAME_CAP)
+    return CONTEXT_LINE.format(tokens=tokens, model=model, window=window)
+
+
 def _model_line(model_change: dict | None, target: EnvFacts) -> str:
     """The model fact: a change in the X04 form (``from``/``to``, ``to.context_length``, ``offline_capable``; no
     other spelling is read, an absent flag shows "unknown"), or — model unchanged — the target's own model."""
@@ -242,7 +329,7 @@ def _item_details(item: PlanItem, decision: TargetDecision) -> str:
     git = item.git
     if item.kind is ItemKind.GIT_REPO and git is not None:
         if git.branch or git.head:
-            branch = _name(git.branch, 64) if git.branch else "detached"
+            branch = _branch(git.branch) if git.branch else "detached"
             head = _name(git.head, 64)[:7] if git.head else ""
             parts.append(f"branch {branch} @ {head}" if head else f"branch {branch}")
         if git.dirty:
@@ -350,7 +437,9 @@ def _not_transferred(parts: dict, src: str, per_list: int, limit: int) -> list[s
         out.append(f"{other} warning{'s' if other != 1 else ''} from {src} (see report)")
     if len(out) > limit:
         out = [*out[:limit], f"… {len(out) - limit} more (see report)"]
-    return [f"- {one_line(line, 600)}" for line in out]
+    # every entry is capped on its own (``_path``, ``_cmd``, ``_name``, ``NAME_CAP``), never the joined line: the last
+    # name of a list stays visible; ``_TIERS`` keep the whole note under ``NOTE_MAX``
+    return [f"- {one_line(line, NOTE_MAX)}" for line in out]
 
 
 def _render(
@@ -379,6 +468,9 @@ def _render(
     lines = [f'<ctx-handover-note job="{_attr(job_id)}" from="{src}" at="{_iso(now)}">', INTRO, ""]
     lines.append(f"Moved from: {src} ({_os(source)}) → this machine: {tgt} ({_os(target)})")
     lines.append(_model_line(model_change, target))
+    context = _context_line(parts, model_change, target, source)
+    if context:
+        lines.append(context)
     if origin:
         lines.append(f"Origin: {one_line(origin, NAME_CAP)}")
     paths = _path_lines(items, path_map, path_limit)
@@ -411,6 +503,8 @@ def _render(
     if nt:
         lines.append("Not transferred:")
         lines.extend(nt)
+    if parts.get("bundle_import") is True:
+        lines.append(BUNDLE_IMPORT_SENTENCE)
     if parts.get("source_kept") is True:
         lines.append(f"The session stays active on {src} (this is a copy); changes made there are not merged here.")
     if delta_message:
@@ -535,6 +629,11 @@ def _report(c: dict) -> str:
         f"- At: {_iso(c['now'])}",
         f"- {_model_line(c['model_change'], c['target'])}",
         f"- Origin: {one_line(c['origin'], NAME_CAP)}",
+    ]
+    context = _context_line(c["parts"], c["model_change"], c["target"], c["source"])
+    if context:
+        out.insert(-1, f"- {context}")
+    out += [
         "",
         "## Items",
     ]

@@ -27,11 +27,20 @@ from collections.abc import Callable, Sequence
 from dataclasses import fields, replace
 
 from .contracts import JobContext, SourceAPI, TargetAPI
-from .errors import BadRequest, Forbidden, HandoverError, InvalidState, JobConflict, NotFound, RateLimited
+from .errors import (
+    BadRequest,
+    Forbidden,
+    HandoverError,
+    InvalidState,
+    JobConflict,
+    LeaseLost,
+    NotFound,
+    RateLimited,
+)
 from .ids import ULID_RE
 from .jsonutil import from_wire
 from .ledger import JOURNAL_KEEP_S, TERMINAL, Ledger, process_owner
-from .model import AuthContext, Mode, Options, ParticipantStatus, Peer, Progress, Right, Role, SessionRef
+from .model import AuthContext, Mode, OpState, Options, ParticipantStatus, Peer, Progress, Right, Role, SessionRef
 
 MAX_JOBS_PER_PEER = 2
 MAX_JOBS = 4
@@ -45,6 +54,8 @@ _REMOTE_HINTS = ("exclude", "dest_overrides", "no_workspace")
 """Hints a remote conductor may give: they narrow the plan or name destinations (R18, R19); never additions."""
 
 _RELEASABLE_SOURCE = frozenset({"locking", "locked", "preparing", "suspended"})
+_LOST_SOURCE = frozenset({"suspended", "releasing", "released", "reclaiming", "reclaimed"})
+"""Source states without the session's leases: route #9 names them (``remote.LOST_STATES``)."""
 _TARGET_TTL_EXEMPT = frozenset({"committing", "committed", "aborted", "expired"})
 
 
@@ -225,7 +236,14 @@ class ParticipantRegistry:
         return {"job_id": job_id, "state": row["state"], "epoch": epoch}
 
     def _check_caps(self, peer_id: str) -> None:
-        active = [j for j in self.ledger.jobs(active=True, limit=10_000) if j["role"] != str(Role.CONDUCTOR)]
+        """The caps count the jobs remote conductors opened here (route #7). The participant rows of this host's own
+        conductor jobs and the planning row of an offer (``params.local``) are no such job (L3-F07: an open offer
+        and a pending export used up the slots of the peer)."""
+        active = [
+            j
+            for j in self.ledger.jobs(active=True, limit=10_000)
+            if j["role"] != str(Role.CONDUCTOR) and (j.get("params") or {}).get("local") is not True
+        ]
         if sum(1 for j in active if j["peer_id"] == peer_id) >= self._max_per_peer:
             raise RateLimited("too many concurrent handovers for this device", reason="concurrent_jobs")
         if len(active) >= self._max_jobs:
@@ -292,14 +310,35 @@ class ParticipantRegistry:
                 self.ledger.touch_job(job_id, role)
 
     def heartbeat(self, auth: AuthContext, job_id: str, body: dict) -> dict:
-        """Route #9: keep a source's leases alive while the conductor works (DESIGN §7.3)."""
+        """Route #9: keep a source's leases alive while the conductor works (DESIGN §7.3). The answer is
+        ``{state}`` of the participant (DESIGN §4.7): for a source its handover state, so a source that gave up its
+        leases (``reclaimed``, ``released``, ``suspended`` …) names that state and the dialer's ``RemoteSource``
+        raises ``LeaseLost(state=…)`` (contract V17) instead of seeing an anonymous error."""
         role = self._find(auth, job_id)
         auth = replace(auth, epoch=body.get("epoch", auth.epoch))
         api, job = self.bind(auth, job_id, role)
         if role is Role.SOURCE:
-            api.heartbeat(job)
+            lost = self._lost_source_state(job_id)
+            if lost is not None:
+                return {"state": lost}
+            try:
+                api.heartbeat(job)
+            except LeaseLost:
+                lost = self._lost_source_state(job_id)
+                if lost is None:
+                    raise
+                return {"state": lost}
+            src = self.ledger.source_state(job_id)
+            if src is not None:
+                return {"state": src["state"]}
         row = self.ledger.job(job_id, role)
         return {"state": row["state"]}
+
+    def _lost_source_state(self, job_id: str) -> str | None:
+        """The state of a source that no longer holds its leases (``_LOST_SOURCE``), else None."""
+        src = self.ledger.source_state(job_id)
+        state = src.get("state") if src is not None else None
+        return str(state) if state in _LOST_SOURCE else None
 
     def cancel(self, auth: AuthContext, job_id: str, body: dict) -> dict:
         """Route #10: only the conductor's peer, current epoch; a prepared source or committing target refuse."""
@@ -384,8 +423,9 @@ class ParticipantRegistry:
             src = self.ledger.source_state(row["job_id"])
             state = src["state"] if src else row["state"]
             if state in ("locking", "locked", "preparing", "releasing"):
-                api.start_release(job, "owner_died")
-                return "released"
+                st = api.start_release(job, "owner_died")
+                # the release runs as an operation: "released" only when it finished, else it is under way
+                return "released" if getattr(st, "state", None) is OpState.DONE else "release_started"
             if state == "retiring" and src and src.get("ack"):
                 from .model import CommitAck
 

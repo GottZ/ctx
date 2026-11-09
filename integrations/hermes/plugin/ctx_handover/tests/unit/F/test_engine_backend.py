@@ -15,9 +15,11 @@ import time
 import types
 from pathlib import Path
 
+import httpx
 import pytest
 
 from ctx_handover.engine import commands
+from ctx_handover.engine import wire as real_wire
 from ctx_handover.engine.commands import EngineBackend, HookSet, Plugin, SideQuestionTokens
 from ctx_handover.engine.model import GateAuth, GateMode, Mode, Options, Right, SessionRef
 from ctx_handover.tests.fakes.hostcompat_fake import FakeCtx
@@ -356,6 +358,23 @@ def test_logs_redacted_and_session_state(backend):
     }
 
 
+def c_report(peer, report: dict) -> dict:
+    """``report`` with cluster C's summary (``ok``, ``detail``, ``remedy``) added exactly as the real
+    ``WireClient.probe_gate`` adds it (``wire.WireClient._summary``) — what the stub clients of these tests return."""
+    client = real_wire.WireClient(
+        peer,
+        None,
+        read_secret=lambda name: "",
+        transport=httpx.MockTransport(lambda request: httpx.Response(500)),
+        max_attempts=1,
+        sleep=lambda s: None,
+    )
+    try:
+        return client._summary(dict(report))
+    finally:
+        client.close()
+
+
 def _stub_module(monkeypatch, name: str, **attrs) -> types.ModuleType:
     module = types.ModuleType(f"ctx_handover.engine.{name}")
     for key, value in attrs.items():
@@ -430,7 +449,7 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
 
     def redeem_dialer(client_factory, identity, pair, *, name, gate, allow_insecure, ledger):
         redeemed.append(dict(name=name, gate=gate, allow_insecure=allow_insecure, client=client_factory))
-        return make_peer(name)
+        return make_peer(name or pair["name"])  # C names the listener when F passes no name (V44)
 
     _stub_module(monkeypatch, "crypto", Identity=Identity)
     _stub_module(
@@ -454,6 +473,7 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
     gate = GateAuth(mode=GateMode.SESSION_TOKEN)
     peer = backend.redeem_pair("ctxh-pair:ZZZ", name=None, gate=gate, allow_insecure=True)
     assert peer.name == "srv" and redeemed[0]["gate"] is gate and redeemed[0]["allow_insecure"] is True
+    assert redeemed[0]["name"] == ""  # no --name: the choice (paste-string name or the next free one) is C's
     assert redeemed[0]["client"](make_peer("srv")) == ("client", "srv")
 
 
@@ -504,9 +524,9 @@ def test_doctor_checks_wiring(backend, monkeypatch, fake_host):
 
         def probe_gate(self, *, measure_limit: bool = False):
             probes.append(measure_limit)
-            return {"gate": "rejected", "plugin": False, "signed": False, "error": "gate_rejected"}
+            return c_report(self.peer, {"gate": "rejected", "plugin": False, "signed": False, "error": "gate_rejected"})
 
-    _stub_module(monkeypatch, "wire", WireClient=Client)
+    _stub_module(monkeypatch, "wire", WireClient=Client, PROBE_SIZES_MIB=real_wire.PROBE_SIZES_MIB)
     fake_host.plugin_dir()
     checks = {c["name"]: c for c in backend.doctor_checks()}
     assert checks["git"]["ok"] is None and "patched line" in checks["git"]["detail"]
@@ -515,5 +535,5 @@ def test_doctor_checks_wiring(backend, monkeypatch, fake_host):
     assert "1 paired device(s) may dial in" in checks["inbound"]["detail"]
     assert probes == [False]  # the body-limit measurement runs only with doctor --measure
     assert checks["peer server"]["ok"] is False and "refused the stored credential" in checks["peer server"]["detail"]
-    assert "rejected the access credential" in checks["peer server"]["remedy"]
+    assert "store the current dashboard credential of server" in checks["peer server"]["remedy"]  # C's remedy (V27)
     assert "peer laptop" not in checks

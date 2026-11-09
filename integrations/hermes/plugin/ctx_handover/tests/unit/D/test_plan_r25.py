@@ -232,7 +232,7 @@ def test_confirmation_reads_target_model_change_form(lay):
     window = final_plan(
         replace(base, approx_tokens=200_000), model_change=model_change(offline_capable=True, context_length=131072)
     )
-    assert plan.confirmation_reasons(window, Options(), True) == [plan.CONFIRM_MODEL]
+    assert plan.confirmation_reasons(window, Options(), True) == [plan.CONFIRM_CONTEXT]  # G‴ R32: (i), not (e)
     fits = final_plan(base, model_change=model_change(offline_capable=True, context_length=131072))
     assert plan.confirmation_reasons(fits, Options(), True) == []
     kept = final_plan(base, model_change=None)

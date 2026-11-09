@@ -303,16 +303,34 @@ def test_error_from_wire_never_trusts_client_only_or_unknown_codes(code):
     assert back.retryable is False
 
 
-def test_error_from_wire_caps_peer_text_and_ignores_peer_retryable_for_known_codes():
+def test_error_from_wire_caps_peer_text_and_keeps_peer_retryable_for_known_codes():
+    """The class comes from the code only; the envelope's boolean ``retryable`` survives (contract V38), a missing
+    or non-boolean flag leaves the class's own."""
     huge = {"k": "v" * 5000}
     back = HandoverError.from_wire(
         422, {"error": {"code": "verify_failed", "message": "m" * 5000, "retryable": True, "details": huge}}
     )
-    assert type(back) is errors.VerifyFailed and back.retryable is False
+    assert type(back) is errors.VerifyFailed and back.retryable is True
     assert len(back.message) == errors.PEER_TEXT_CAP and back.details == {"truncated": True}
+    assert errors.VerifyFailed.retryable is False, "the class flag itself is untouched"
+    for flag in (None, "true", 1):
+        env = {"error": {"code": "verify_failed", "message": "m", "retryable": flag}}
+        assert HandoverError.from_wire(422, env).retryable is False, flag
     bare = HandoverError.from_wire(502, {"detail": "Bad Gateway"})
     assert bare.code == "internal" and bare.retryable is True and bare.details["status"] == 502
     assert HandoverError.from_wire(404, "not json").retryable is False
+
+
+def test_error_from_wire_keeps_retryable_of_a_restarted_participant():
+    """★ V38: a participant that lost its operations to a restart answers ``invalid_state`` with
+    ``retryable: true``; the dialer's rebuilt error is still ``InvalidState`` and stays retryable through
+    ``to_peer``/``from_wire``, and a retryable class sent as not retryable stays not retryable."""
+    sent = errors.InvalidState("another process is working on this job", reason="busy_elsewhere", retryable=True)
+    back = HandoverError.from_wire(409, sent.to_peer(lambda text: text))
+    assert type(back) is errors.InvalidState and back.retryable is True
+    assert back.details == {"reason": "busy_elsewhere"} and "peer_code" not in back.details
+    final = errors.BlockCorrupt("bad block", retryable=False).to_peer(lambda text: text)
+    assert HandoverError.from_wire(422, final).retryable is False
 
 
 def test_error_to_peer_redacts_caps_and_hides_client_only_codes():

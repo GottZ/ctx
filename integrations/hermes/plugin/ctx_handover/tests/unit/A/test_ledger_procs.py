@@ -96,17 +96,19 @@ def test_old_owner_fenced_after_adoption(tmp_path):
     Mutant: ``transition`` compares the state only (no owner-epoch CAS)."""
     path = tmp_path / "ledger.sqlite3"
     lg = Ledger(path)
-    lg.create_job("J", Role.CONDUCTOR, Mode.PUSH, None, {"p": 1})
+    lg.create_job("01JZJ000000000000000000000", Role.CONDUCTOR, Mode.PUSH, None, {"p": 1})
     ready, go = CTX.Event(), CTX.Event()
     out = CTX.Queue()
-    proc = CTX.Process(target=procs_helpers.stalled_owner, args=(str(path), "J", ready, go, out), name="A")
+    proc = CTX.Process(
+        target=procs_helpers.stalled_owner, args=(str(path), "01JZJ000000000000000000000", ready, go, out), name="A"
+    )
     proc.start()
     assert ready.wait(timeout=60)
 
-    assert lg.claim_owner("J", Role.CONDUCTOR, "proc-B", 60) is None  # A is alive
-    new_epoch = lg.claim_owner("J", Role.CONDUCTOR, "proc-B", 0.0)  # A counts as stalled
+    assert lg.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "proc-B", 60) is None  # A is alive
+    new_epoch = lg.claim_owner("01JZJ000000000000000000000", Role.CONDUCTOR, "proc-B", 0.0)  # A counts as stalled
     assert new_epoch == 2
-    seq_at_adoption = lg.events("J", Role.CONDUCTOR)[-1]["seq"]
+    seq_at_adoption = lg.events("01JZJ000000000000000000000", Role.CONDUCTOR)[-1]["seq"]
     go.set()
     report = out.get(timeout=60)
     proc.join(timeout=60)
@@ -117,9 +119,9 @@ def test_old_owner_fenced_after_adoption(tmp_path):
     assert report["transition"] == "fenced"
     assert report["event"] == "fenced"
     assert report["intent_commit"] == "fenced"
-    row = lg.job("J", Role.CONDUCTOR)
+    row = lg.job("01JZJ000000000000000000000", Role.CONDUCTOR)
     assert row["state"] == "hello" and row["owner"] == "proc-B" and row["owner_epoch"] == 2
-    after = [e for e in lg.events("J", Role.CONDUCTOR) if e["seq"] > seq_at_adoption]
+    after = [e for e in lg.events("01JZJ000000000000000000000", Role.CONDUCTOR) if e["seq"] > seq_at_adoption]
     assert after == []
     lg.close()
 

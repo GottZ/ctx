@@ -258,12 +258,15 @@ def test_filetree_corrupt_block_never_lands(user_home, cfg, store, handover_root
     assert not partial.exists()
 
 
-def test_filetree_scan_skips_socket(user_home, cfg):
+def test_filetree_scan_skips_socket(user_home, cfg, monkeypatch):
     root = user_home / "tree"
     root.mkdir()
+    # AF_UNIX addresses are limited to ~108 bytes: bind by a short relative name from inside the tree, so a long
+    # ``--basetemp`` does not matter (the scan itself uses the absolute root)
+    monkeypatch.chdir(root)
     sock = socket.socket(socket.AF_UNIX)
     try:
-        sock.bind(str(root / "s.sock"))
+        sock.bind("s.sock")
         _, left = filetree.scan(root, IgnoreMatcher.for_tree(root, ()), cfg)
     finally:
         sock.close()

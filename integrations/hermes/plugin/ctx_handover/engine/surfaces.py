@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import plan as planning
-from .errors import HandoverError
+from . import settings as settings_rules
+from .errors import BadRequest, HandoverError
 from .model import (
     CommitAck,
     ContinueResult,
@@ -43,140 +44,20 @@ PAIR_PREFIX = "ctxh-pair:"
 PAIR_TTL_MAX_S = 3600
 
 # ---------------------------------------------------------------------------------------------------------
-# Settings (DESIGN §14.4; plugin.yaml config_schema mirrors this table, a unit test keeps both identical)
+# Settings (DESIGN §14.4) — one normaliser for every reader: K0's ``engine/settings.py`` (contract V22)
 # ---------------------------------------------------------------------------------------------------------
 
-
-def _s(typ: str, default: Any = None, choices: Sequence[str] = (), env: str | None = None) -> dict:
-    spec: dict[str, Any] = {"type": typ}
-    if typ == "secret":
-        spec["env"] = env
-    else:
-        spec["default"] = default
-    if choices:
-        spec["choices"] = tuple(choices)
-    return spec
-
-
-SETTINGS_SCHEMA: dict[str, dict] = {
-    "inbound": _s("str", "auto", ("auto", "on", "off")),
-    "listen_url": _s("str", ""),
-    "peer_gate": _s("str", "session_token", ("session_token", "bearer", "basic_login")),
-    "peer_token": _s("secret", env="CTX_HANDOVER_PEER_TOKEN"),
-    "peer_username": _s("str", ""),
-    "peer_password": _s("secret", env="CTX_HANDOVER_PEER_PASSWORD"),
-    "peer_extra_headers": _s("dict", {}),
-    "workspace_root": _s("str", "~/hermes-handover"),
-    "allow_roots": _s("list", ["~/hermes-handover"]),
-    "export_roots": _s("list", []),
-    "max_session_mb": _s("int", 512),
-    "max_file_mb": _s("int", 100),
-    "max_extra_dir_mb": _s("int", 256),
-    "max_hermes_file_mb": _s("int", 64),
-    "max_files": _s("int", 200000),
-    "max_untracked_files": _s("int", 200000),
-    "max_total_gb": _s("float", 10),
-    "confirm_above_mb": _s("int", 500),
-    "max_request_mb": _s("int", 8),
-    "block_cache_gb": _s("float", 5),
-    "block_cache_days": _s("int", 3),
-    "staging_ttl_hours": _s("int", 24),
-    "lease_ttl_s": _s("int", 120),
-    "participant_idle_timeout_min": _s("int", 15),
-    "stall_timeout_min": _s("int", 30),
-    "wait_timeout_min": _s("int", 30),
-    "refine": _s("str", "auto", ("auto", "side_question", "llm", "off")),
-    "refine_timeout_s": _s("int", 45),
-    "refine_history_chars": _s("int", 60000),
-    "refine_side_question_max_tokens": _s("int", 200000),
-    "refine_auto_include": _s("bool", False),
-    "extra_paths": _s("str", "ask", ("ask", "auto", "off")),
-    "include_hermes_files": _s("bool", True),
-    "model_mapping": _s("str", "auto", ("auto", "target_default")),
-    "allow_remote_continue": _s("bool", False),
-    "allow_agent_start": _s("bool", False),
-    "accept_offers": _s("str", "ask", ("ask", "off")),
-    "extra_ignore": _s("list", []),
-    "tool_probe": _s("list", []),
-    "ctx_persist": _s("str", "auto", ("auto", "off")),
-    "ctx_category": _s("str", "handover"),
-}
-
-SECRET_ENVS = {k: v["env"] for k, v in SETTINGS_SCHEMA.items() if v["type"] == "secret"}
-_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
-_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
-
-
-BOOL_WORDS: dict[str, bool] = {
-    **dict.fromkeys(("true", "yes", "on", "1"), True),
-    **dict.fromkeys(("false", "no", "off", "0", ""), False),
-}
-"""Words a boolean setting may hold as text (or 0/1) — the words ``hermes config set`` turns into booleans
-(``hermes_cli/config.py`` ``_SCALAR_WORDS``) and the same table as ``jobs.plugin_settings``; a quoted ``"off"`` in
-``config.yaml`` means off, not the default."""
-
-
-def _coerce(key: str, spec: dict, value: Any) -> Any:
-    typ = spec["type"]
-    default = spec.get("default")
-    if typ == "str":
-        if isinstance(value, bool) and spec.get("choices"):  # YAML 1.1 turns `on`/`off` into booleans
-            value = "on" if value else "off"
-        if not isinstance(value, str):
-            return default
-        if spec.get("choices") and value not in spec["choices"]:
-            return default
-        return value
-    if typ == "int":
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else default
-    if typ == "float":
-        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
-        return float(value) if ok else default
-    if typ == "bool":
-        if isinstance(value, (str, int)) and not isinstance(value, bool):
-            value = BOOL_WORDS.get(str(value).strip().lower(), value)
-        return value if isinstance(value, bool) else default
-    if typ == "list":
-        if not isinstance(value, list):
-            return list(default)
-        return [v for v in value if isinstance(v, str) and v.strip()]
-    if typ == "dict":
-        if not isinstance(value, Mapping):
-            return dict(default)
-        return {
-            k: v
-            for k, v in value.items()
-            if isinstance(k, str) and isinstance(v, str) and _HEADER_RE.fullmatch(k) and _ENV_RE.fullmatch(v)
-        }
-    return default
+SETTINGS_SCHEMA: Mapping[str, Mapping[str, Any]] = settings_rules.SCHEMA
+"""The settings table (type, default or ``env``, choices) — K0's mirror of ``plugin.yaml`` ``config_schema``."""
+SECRET_ENVS: Mapping[str, str] = settings_rules.SECRET_ENVS
+"""Secret settings → the ``.env`` variable that holds their value (never ``config.yaml``)."""
 
 
 def settings_from_config(config: Mapping | None) -> dict:
-    """``plugins.entries.ctx_handover.settings`` merged over the defaults; a value of the wrong type or outside
-    its choices falls back to the default (Hermes only warns at load, so the plugin must not trust it). Secret
-    keys are not part of the result: their values live in ``.env`` under ``SECRET_ENVS``."""
-    raw: Any = {}
-    if isinstance(config, Mapping):
-        entry = (
-            ((config.get("plugins") or {}).get("entries") or {}).get("ctx_handover")
-            if isinstance(config.get("plugins"), Mapping)
-            and isinstance((config.get("plugins") or {}).get("entries"), Mapping)
-            else None
-        )
-        if isinstance(entry, Mapping) and isinstance(entry.get("settings"), Mapping):
-            raw = entry["settings"]
-    out: dict[str, Any] = {}
-    for key, spec in SETTINGS_SCHEMA.items():
-        if spec["type"] == "secret":
-            continue
-        default = spec.get("default")
-        if key in raw:
-            out[key] = _coerce(key, spec, raw[key])
-        else:
-            out[key] = (
-                list(default) if isinstance(default, list) else dict(default) if isinstance(default, dict) else default
-            )
-    return out
+    """``plugins.entries.ctx_handover.settings`` normalised by K0's ``settings.from_config`` (V22): every key, a
+    value of the wrong type, outside its choices or ``None`` read as the schema default; secret keys are not part of
+    the result (their values live in ``.env`` under ``SECRET_ENVS``). F keeps no reading rule of its own."""
+    return settings_rules.from_config(config)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -257,7 +138,7 @@ _VERB_OPTIONS: dict[str, set[str]] = {
     "status": set(),
     "peers": set(),
     "pair": {"--name", "--rights", "--ttl", "--gate", "--allow-insecure"},
-    "reclaim": {"--force"},
+    "reclaim": {"--force", "--session"},
     "cancel": set(),
     "resume": set(),
     "setup": set(),
@@ -298,7 +179,7 @@ USAGE: dict[str, str] = {
     "pair": "/handover pair [--name N] [--rights push,pull] [--ttl 10m]   (on the gateway that receives)\n"
     "/handover pair <ctxh-pair:…> [--name N] [--gate session_token|bearer|basic_login] [--allow-insecure]"
     "   (on the device that dials)",
-    "reclaim": "/handover reclaim [<session-id>] [--force]",
+    "reclaim": "/handover reclaim [<session-id> | --session ID] [--force]",
     "cancel": "/handover cancel [<job>]",
     "resume": "/handover resume [<job>]",
     "setup": "/handover setup",
@@ -485,7 +366,11 @@ def _verb_args(verb: str, args: dict, errors: list[str]) -> None:
     elif verb in {"status", "cancel", "resume", "logs"}:
         args["job"] = first
     elif verb == "reclaim":
-        args["session"] = first
+        # the session as a positional or as --session (the form every other CLI verb takes, L3-F06); one id only
+        named = args.get("session")
+        if first is not None and named is not None and first != named:
+            errors.append(f"Name the session once: {first!r} and --session {named!r} differ. Usage: {USAGE['reclaim']}")
+        args["session"] = first if first is not None else named
     elif verb == "gc":
         args.setdefault("job", None)
         if args.get("job") and args.get("all"):
@@ -639,6 +524,42 @@ def short_job(job_id: object) -> str:
     return text[-6:] if text else "?"
 
 
+MIN_JOB_TOKEN = 4
+"""Fewest characters of a job id that ``match_job`` resolves (the printed short form has 6)."""
+FULL_JOB_LEN = 26
+_JOB_TOKEN = re.compile(r"\A[0-9A-Za-z]+\Z")
+
+
+def match_job(token: object, job_ids: Sequence[object], *, listed: bool = True) -> str:
+    """The job a typed id names (L3-F15): the printed short form (``short_job``, the id's last six characters) or
+    any other unique end or start of a job id resolves to the full id of ``job_ids`` (this gateway's jobs, every
+    role), case-insensitively; an exact id wins. Several matches ⇒ ``BadRequest`` naming them (``listed=False``
+    — a caller on a messaging platform — names only their count). Anything else is returned unchanged — a full
+    id, a token shorter than ``MIN_JOB_TOKEN``, or one no job ends or starts with — so the engine answers "not
+    found" for it exactly as before."""
+    text = str(token or "").strip()
+    known = [str(j) for j in job_ids or () if j]
+    upper = text.upper()
+    exact = [j for j in known if j.upper() == upper]
+    if exact:
+        return exact[0]
+    if len(text) < MIN_JOB_TOKEN or len(text) >= FULL_JOB_LEN or not _JOB_TOKEN.match(text):
+        return text
+    found = list(dict.fromkeys(j for j in known if j.upper().endswith(upper) or j.upper().startswith(upper)))
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        return text
+    if not listed:
+        raise BadRequest(
+            f"{text} matches {len(found)} handovers; give more characters of the job id (/handover status lists "
+            "yours).",
+            field="job",
+        )
+    names = ", ".join(found[:5]) + (f" and {len(found) - 5} more" if len(found) > 5 else "")
+    raise BadRequest(f"{text} matches several handovers: {names}. Give more characters or the full id.", field="job")
+
+
 def when(ts: object) -> str:
     try:
         return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")  # type: ignore[arg-type]
@@ -684,14 +605,30 @@ CONFIRM_CHOICES: list[dict] = [
 REASONS: dict[str, str] = {letter: code for code, letter in planning.CONFIRM_LETTERS.items()}
 """Confirmation reasons (a)–(g) of DESIGN §14.1: letter → cluster D's reason code (``plan.CONFIRM_*``, X03)."""
 
+CONFIRM_WORKSPACE_EXCLUDED: str = planning.CONFIRM_WORKSPACE_EXCLUDED
+"""Reason (h) of cluster D (``reports/L2/gp-d-api.md`` §2a, R30): the policy left the session's working folder out
+(for example it lies inside the Hermes home), so its project does not come along."""
+
+CONFIRM_CONTEXT: str = planning.CONFIRM_CONTEXT
+"""Reason (i) of cluster D (``reports/L2/g3-df-api.md`` §1, R32): the session is larger than the context window of
+the model on the target, so the target compacts it on its first turn."""
+
+YES_EXEMPT: frozenset[str] = planning.YES_EXEMPT
+"""Reasons a blanket yes (``--yes``) never confirms: D's ``plan.YES_EXEMPT`` (R30, R32; suspected secrets, R25, are
+an item marker and handled apart)."""
+
 REASON_TEXT = {
     planning.CONFIRM_PROPOSED: "some items are only proposed (found by the model, the agent or outside the project)",
     planning.CONFIRM_CONFLICT: "a destination has local changes, so a fresh folder is used",
     planning.CONFIRM_LARGE: "the handover is larger than confirm_above_mb",
     planning.CONFIRM_SECRET: "--include-secret sends a file from the secrets list",
-    planning.CONFIRM_MODEL: "the model there does not work offline, or the session is larger than its context window",
+    planning.CONFIRM_MODEL: "the model there does not work offline (this session's model did)",
     planning.CONFIRM_OUTSIDE: "items outside the project folder (or tracked secret files) are included",
     planning.CONFIRM_INSTRUCTIONS: "instruction files (AGENTS.md, .hermes.md …) arrive from an unverified source",
+    CONFIRM_WORKSPACE_EXCLUDED: "the session's working folder stays here because the policy leaves it out, so its "
+    "project does not come along (--yes does not confirm this; --no-workspace does)",
+    CONFIRM_CONTEXT: "the session is larger than the context window of the model there, so it is compacted on its "
+    "first turn there (/compress here first keeps that in your hands; --yes does not confirm this)",
 }
 
 SUSPECTED_SECRET: str = planning.SUSPECTED_SECRET
@@ -715,6 +652,93 @@ def reason_names(reasons: Sequence[str]) -> list[str]:
         if name not in out:
             out.append(name)
     return out
+
+
+def yes_exempt(reasons: Sequence[str]) -> list[str]:
+    """The reasons (letters or codes) a blanket ``--yes`` does not confirm: D's ``plan.yes_exempt`` over the codes
+    (R30), in order."""
+    return planning.yes_exempt(reason_names(reasons))
+
+
+UNNAMED_EXEMPT = "unnamed_exempt"
+"""Stands in for an ``info["yes_exempt"]`` value of an unknown form: the conductor marked something ``--yes`` does
+not confirm, and the surface cannot tell what — so it asks (fail-closed)."""
+
+
+def yes_exempt_of(info: Mapping | None, reasons: Sequence[str]) -> list[str]:
+    """What ``--yes`` does not confirm in one confirmation: the conductor's ``info["yes_exempt"]`` (codes it calls the
+    callback for despite ``--yes``, ``conductor._confirm``) together with D's table over ``reasons`` — the
+    conductor's list wins where the two differ. Only an absent key, ``None`` or an empty list/tuple/set name nothing;
+    a bare string or a letter names one reason; any other value counts as ``UNNAMED_EXEMPT`` (ask, never "yes")."""
+    raw = info.get("yes_exempt") if isinstance(info, Mapping) else None
+    if raw is None:
+        named: list[str] = []
+    elif isinstance(raw, str):
+        named = [raw]
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        named = [str(r) for r in raw]
+    else:
+        named = [UNNAMED_EXEMPT]
+    out = yes_exempt(reasons)
+    for name in reason_names(named):
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+_WORKSPACE_WHY = {
+    "hermes": "it lies inside the Hermes home, which is never sent",
+    "home": "it is the home folder itself",
+    "secret": "it is on the secrets list",
+    "too_large": "it is larger than the size limits allow",
+    "missing": "it does not exist",
+    "unreadable": "it cannot be read",
+}
+"""Sentences for the ``reason`` codes of ``plan.workspace_excluded`` (gp-d-api §2b); any other code (``other``)
+shows D's ``why`` text."""
+
+
+def _workspace_excluded(value: Any) -> dict | None:
+    """D's ``presend_summary["workspace_excluded"]`` when it has its form — a mapping with a non-empty string
+    ``path`` (plus ``reason`` and ``why``) — else None: the surface invents no folder."""
+    if not isinstance(value, Mapping):
+        return None
+    path = value.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    return {"path": path, "reason": str(value.get("reason") or ""), "why": str(value.get("why") or "")}
+
+
+def _workspace_why(entry: Mapping) -> str:
+    return _WORKSPACE_WHY.get(str(entry.get("reason") or "")) or str(entry.get("why") or "") or "left out by the policy"
+
+
+def workspace_excluded_text(entry: Mapping) -> str:
+    """``the working folder <path> stays here (<why>)`` for an excluded working folder (R30, L3-F02)."""
+    return f"the working folder {entry.get('path')} stays here ({_workspace_why(entry)})"
+
+
+def context_over_entry(value: Any) -> dict | None:
+    """D's ``presend_summary["context_over"]`` (R32) when it has its form — positive integer ``tokens`` and
+    ``context_length`` with ``tokens > context_length`` (``model`` optional) — else None: the surface invents no
+    window."""
+    if not isinstance(value, Mapping):
+        return None
+    tokens, window = value.get("tokens"), value.get("context_length")
+    if not (_count(tokens) and _count(window) and tokens > window):
+        return None
+    model = value.get("model")
+    return {"tokens": tokens, "context_length": window, "model": model if isinstance(model, str) and model else None}
+
+
+def context_over_text(entry: Mapping) -> str:
+    """``the session (about <n> tokens) is larger than the context window of <model> there (<w> tokens); it is
+    compacted on its first turn there`` (R32, L3-F17)."""
+    model = entry.get("model") or "the model"
+    return (
+        f"the session (about {entry.get('tokens'):,} tokens) is larger than the context window of {model} there "
+        f"({entry.get('context_length'):,} tokens); it is compacted on its first turn there"
+    )
 
 
 def suspected_secrets(info: Mapping | None) -> list[str]:
@@ -745,44 +769,35 @@ def _enum_text(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
-def model_text(model_change: Any, side: str = "to") -> str | None:
-    """One side (``to``/``from``) of a ``FinalPlan.model_change`` as ``model (provider)`` — contract X04:
-    ``None`` or ``{"from": {"model", "provider"}, "to": {"model", "provider", "context_length"}, "reason",
-    "offline_capable"}``; any other form reads as unknown."""
-    if not isinstance(model_change, Mapping):
-        return None
-    end = model_change.get(side)
-    if not isinstance(end, Mapping):
-        return None
-    name, provider = end.get("model"), end.get("provider")
-    if name and provider:
-        return f"{name} ({provider})"
-    return str(name or provider) if (name or provider) else None
-
-
-def _offline(model_change: Any) -> bool | None:
-    """``offline_capable`` of a contract-form ``model_change`` (X04), else unknown."""
-    if not isinstance(model_change, Mapping):
-        return None
-    value = model_change.get("offline_capable")
-    return value if isinstance(value, bool) else None
-
-
 def _instruction_lines(entries: Sequence[Any]) -> list[str]:
     out = []
     for e in entries or ():
         if isinstance(e, Mapping):
-            out.append(f"{e.get('rel') or e.get('path') or '?'} ({e.get('status') or 'new'})")
+            # "new"/"changed" is D's statement (plan.instruction_files); a missing status is not "new"
+            out.append(f"{e.get('rel') or e.get('path') or '?'} ({e.get('status') or 'status unknown'})")
         else:
             out.append(str(e))
     return out
 
 
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _texts(values: Any) -> list[str]:
+    return [str(v) for v in values] if isinstance(values, (list, tuple)) else []
+
+
 def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_files: Sequence[Any] = ()) -> dict:
-    """What ``confirm_question``, ``render_plan`` and ``render_presend`` show (W125): the totals and lists of
-    cluster D's ``plan.presend_summary`` (``presend`` when the conductor passed it, else computed from ``final``)
-    and the per-item rows, proposals, conflicts and need of D's ``plan.summarize``; F adds nothing of its own
-    except the model text and the suspected-secret list (R25)."""
+    """What ``confirm_question``, ``render_plan`` and ``render_presend`` show (W125, V10): the W125 keys of cluster
+    D's ``plan.presend_summary`` (``plan.PRESEND_KEYS``) exactly as the conductor handed them over (``presend``;
+    computed from ``final`` only when there is none) — ``items_count``, ``total_bytes``, ``excluded_secrets``,
+    ``denied_tracked``, ``withheld_stash``, ``outside_workspace``, ``instruction_files``, ``model``, ``offline`` —
+    plus the per-item rows, proposals, conflicts and need of D's ``plan.summarize`` when ``final`` is known, and
+    ``workspace_excluded`` (the working folder the policy left out, R30; None unless it has D's form) and
+    ``context_over`` (the session is larger than the target model's window, R32; same rule). F adds
+    nothing of its own except the suspected-secret list (R25). ``instruction_files`` (the target's result, with
+    ``status``) replaces the summary's list when given."""
     pre: dict = dict(presend) if isinstance(presend, Mapping) else {}
     full: dict = {}
     if final is not None:
@@ -790,8 +805,7 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
             pre = planning.presend_summary(final)
         full = planning.summarize(final)
     item_list = list(pre.get("item_list") or ())
-    count = pre.get("items")
-    change = full.get("model_change") if full else None
+    offline = pre.get("offline")
     rows = [
         {
             "item_id": r.get("item_id"),
@@ -806,33 +820,40 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
         for r in full.get("items") or ()
     ]
     return {
-        "items_count": int(count) if isinstance(count, int) else len(item_list),
-        "total_bytes": int(pre.get("total_bytes") or 0),
-        "excluded_secrets": int(pre.get("excluded_secrets") or 0),
-        "denied_tracked": [str(p) for p in pre.get("denied_tracked") or ()],
-        "withheld_stash": [str(p) for p in pre.get("withheld_stash") or ()],
-        "outside_workspace": [str(p) for p in pre.get("extras_outside_workspace") or ()],
+        "items_count": _count(pre.get("items_count")),
+        "total_bytes": _count(pre.get("total_bytes")),
+        "excluded_secrets": _count(pre.get("excluded_secrets")),
+        "denied_tracked": _texts(pre.get("denied_tracked")),
+        "withheld_stash": _texts(pre.get("withheld_stash")),
+        "outside_workspace": _texts(pre.get("outside_workspace")),
+        "workspace_excluded": _workspace_excluded(pre.get("workspace_excluded")),
+        "context_over": context_over_entry(pre.get("context_over")),
         "item_list": item_list,
         "proposed": int(full.get("proposed") or 0),
         "conflicts": int(full.get("conflicts") or 0),
         "need_bytes": int(full.get("need_bytes") or 0),
-        "model": model_text(change),
-        "offline": _offline(change),
+        "model": str(pre["model"]) if pre.get("model") else None,
+        "offline": offline if isinstance(offline, bool) else None,
         "items": rows,
         "not_transferred": [f"{n.get('path')} ({n.get('why')})" for n in full.get("not_transferred") or ()],
         "suspected_secrets": suspected_secrets({"final_plan": final}),
-        "instruction_files": _instruction_lines(instruction_files),
+        "instruction_files": _instruction_lines(instruction_files or pre.get("instruction_files") or ()),
     }
 
 
 def confirm_question(summary: Mapping, peer: str | None) -> str:
     """``Hand over to <peer>: <n> items, <size>, <k> proposed, <c> conflicts, model <m> (offline: yes/no).
-    Continue?``"""
+    [The working folder <path> stays here (<why>).] [The session (about <n> tokens) is larger than …] Continue?``"""
+    excluded = _workspace_excluded(summary.get("workspace_excluded"))
+    folder = f"The {workspace_excluded_text(excluded).removeprefix('the ')}. " if excluded else ""
+    over = context_over_entry(summary.get("context_over"))
+    if over:
+        folder += f"The {context_over_text(over).removeprefix('the ')}. "
     return (
         f"Hand over to {peer or 'the bundle'}: {summary.get('items_count', 0)} items, "
         f"{human_bytes(summary.get('total_bytes', 0))}, {summary.get('proposed', 0)} proposed, "
         f"{summary.get('conflicts', 0)} conflicts, model {summary.get('model') or 'unchanged'} "
-        f"(offline: {_yn(summary.get('offline'))}). Continue?"
+        f"(offline: {_yn(summary.get('offline'))}). {folder}Continue?"
     )
 
 
@@ -857,6 +878,15 @@ def render_plan(summary: dict) -> str:
     ]
     if s.get("need_bytes"):
         lines.append(f"Space needed on the receiving side: {human_bytes(s['need_bytes'])}.")
+    excluded = _workspace_excluded(s.get("workspace_excluded"))
+    if excluded:
+        lines.append(
+            f"Working folder left out: {excluded['path']} ({_workspace_why(excluded)}); the session continues there "
+            "without its project."
+        )
+    over = context_over_entry(s.get("context_over"))
+    if over:
+        lines.append(f"Context: {context_over_text(over)} (/compress here first to keep that in your hands).")
     for row in s.get("items") or ():
         dest = f" → {row.get('dest')}" if row.get("dest") else ""
         conflict = f" (conflict: {row['conflict']})" if row.get("conflict") else ""
@@ -882,7 +912,7 @@ def render_plan(summary: dict) -> str:
 
 def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
     """First progress message (SEC 5.8): what leaves, how much, what stays behind — cluster D's
-    ``presend_summary`` numbers through ``plan_summary`` (W125)."""
+    ``presend_summary`` numbers through ``plan_summary`` (W125), and the working folder the policy left out (R30)."""
     s = summary or {}
     arrow = "←" if str(mode) in {"pull", "import"} else "→"
     secrets = s.get("excluded_secrets") or 0
@@ -898,6 +928,12 @@ def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
         extras.append(f"{len(s['withheld_stash'])} stash entries withheld")
     if s.get("outside_workspace"):
         extras.append(f"{len(s['outside_workspace'])} items outside the project")
+    excluded = _workspace_excluded(s.get("workspace_excluded"))
+    if excluded:
+        extras.append(workspace_excluded_text(excluded))
+    over = context_over_entry(s.get("context_over"))
+    if over:
+        extras.append(context_over_text(over))
     return head + ("; " + "; ".join(extras) if extras else "") + "."
 
 
@@ -926,28 +962,51 @@ def render_peers(peers: Sequence[Peer], *, fingerprint: Callable[[str], str] = f
     return "\n".join(lines)
 
 
+_PARTICIPANT_SIDE = {"target": "from", "source": "to"}
+"""Role of this gateway in a job another gateway conducts (``JobRunner.status``, contract V43) → the word before the
+other side: a push that arrives here (``target``), a pull that takes a session from here (``source``)."""
+
+
 def _job_line(job: Mapping) -> list[str]:
     prog = job.get("progress") or {}
     step = prog.get("step") if isinstance(prog, Mapping) else None
-    head = (
-        f"{short_job(job.get('job_id'))} · {job.get('mode', '?')} · {job.get('peer') or 'bundle'} · "
-        f"{job.get('state', '?')}"
-    )
+    role = job.get("role")
+    side = _PARTICIPANT_SIDE.get(role) if isinstance(role, str) else None
+    if side is not None:  # another gateway conducts this job; this gateway is its source or its target
+        where = f"{role}, {side} {job.get('peer') or 'another gateway'}"
+    else:
+        where = str(job.get("peer") or "bundle")
+    head = f"{short_job(job.get('job_id'))} · {job.get('mode', '?')} · {where} · {job.get('state', '?')}"
     if step and step != job.get("state"):
         head += f" · {step}"
     if isinstance(prog, Mapping) and prog.get("bytes_total"):
         head += f" · {human_bytes(prog.get('bytes_done', 0))}/{human_bytes(prog['bytes_total'])}"
     lines = [head]
+    session = job.get("calling_session")
+    if side is not None and isinstance(session, str) and session:
+        title = job.get("title")
+        named = f" ({title})" if isinstance(title, str) and title else ""
+        lines.append(f"    session here: {session}{named}")
+    arrived = _target_session(job.get("target_session"), None) if side is None else None
+    if arrived is not None and str(job.get("mode")) in {"pull", "import", "push", "offer"}:
+        # L17: the session this job created on the target — here after a pull/import, on the peer after a push
+        where_session = "here" if str(job.get("mode")) in {"pull", "import"} else f"on {job.get('peer') or 'the peer'}"
+        named = f" ({arrived['title']})" if arrived.get("title") else ""
+        lines.append(
+            f"    session {where_session}: {arrived['id']}{named} (open it with `hermes --resume {arrived['id']}`)"
+        )
     for w in job.get("warnings") or ():
         lines.append(f"    warning: {w}")
     err = job.get("last_error")
     if isinstance(err, Mapping) and err:
         lines.append(f"    last error: {err.get('code', '?')}: {err.get('message', '')}")
+    if job.get("source_kept") is True:  # export --keep (O3): the session was not locked or retired
+        lines.append("    copy (--keep): this session stays active here; the bundle is a copy")
     if job.get("next_action"):
         lines.append(f"    next: {job['next_action']}")
     cont = job.get("continuation")
-    if isinstance(cont, Mapping) and cont.get("started"):
-        if cont.get("running"):
+    if isinstance(cont, Mapping) and cont.get("started") is True:
+        if cont.get("running") is True:
             state = "running"
         elif cont.get("exit_code") is not None:
             state = f"exit code {cont.get('exit_code')}"
@@ -1021,6 +1080,25 @@ def _d(err: HandoverError, key: str, default: Any = None) -> Any:
     return (err.details or {}).get(key, default)
 
 
+def _workspace_root_text(err: HandoverError, peer: str) -> str:
+    """R29 (contract V40): the receiving gateway's write root cannot be used, found while the facts were exchanged —
+    before anything was locked or sent. D's sentence (``envfacts.workspace_root_message``) when the error carries
+    one; the setting and the folder are named in any case."""
+    host = str(_d(err, "host") or "") or peer
+    path = str(_d(err, "path") or "")
+    setting = str(_d(err, "setting") or "workspace_root")
+    message = " ".join(str(err.message or "").split()).rstrip(".")
+    if message and (not path or path in message) and setting in message:
+        text = message
+    else:
+        why = message or str(_d(err, "problem") or "") or "check_failed"
+        text = (
+            f"the workspace root {path or '?'} on {host} cannot be used ({why}); set {setting} (and allow_roots) in "
+            f"the ctx_handover settings on {host}"
+        )
+    return f"{text[:1].upper()}{text[1:]}. Nothing was locked or sent."
+
+
 def render_error(err: HandoverError, peer: str | None) -> str:
     """The remedy text for an error code; unknown codes fall back to the error's own message."""
     p = peer or str(_d(err, "peer", "") or "") or "the other gateway"
@@ -1039,7 +1117,8 @@ def render_error(err: HandoverError, peer: str | None) -> str:
     if code == "listener_missing":
         return (
             f"{p} has no ctx_handover routes. If you just installed or enabled it there, restart `hermes serve` "
-            f"and the gateway on {p}."
+            f"and the gateway on {p}. Under plugins.isolation: host a gateway cannot receive or provide handovers "
+            f"over HTTP (R33): set plugins.isolation: in_process on {p}, or use a bundle (/handover export)."
         )
     if code == "https_required":
         return (
@@ -1076,16 +1155,29 @@ def render_error(err: HandoverError, peer: str | None) -> str:
         return f"A proxy in front of {p} limits request bodies below one block (≈ 513 KiB). Raise its body limit."
     if code == "insufficient_storage":
         side = _d(err, "side") or p
+        if not _d(err, "need_bytes"):  # a write failed on a full disk; how much more it needs is not known
+            return (
+                f"{side} ran out of space in {_d(err, 'path', '?')} ({human_bytes(_d(err, 'free_bytes', 0))} free). "
+                "Nothing was transferred."
+            )
         return (
             f"{side} needs {human_bytes(_d(err, 'need_bytes', 0))} free in {_d(err, 'path', '?')}, has "
             f"{human_bytes(_d(err, 'free_bytes', 0))}. Nothing was transferred."
         )
+    if code == "policy_denied" and _d(err, "reason") == "workspace_root":
+        return _workspace_root_text(err, p)
     if code == "policy_denied":
         items = [str(i) for i in (_d(err, "items") or ())][:3]
         count = _d(err, "count") or len(items) or 1
         return (
             f"{count} items are not allowed on {p}: {', '.join(items) or err.message}. Adjust allow_roots there or "
             "use --dest."
+        )
+    if code == "conflict" and _d(err, "kind") == "partial_exists":
+        where = str(_d(err, "path") or "") or "a folder"
+        return (
+            f"{where} is in the way on the receiving gateway and was not left there by this handover; nothing there "
+            "was changed. Move or remove it there, then hand over again."
         )
     if code == "restart_limit":
         return "The session kept changing during the handover (3 restarts). Pause work on it and try again."
@@ -1173,6 +1265,7 @@ def _note_block(note: str | None, origin: str | None, lists: dict[str, Sequence[
         lines.append(f"Origin: {origin}.")
     titles = {
         "excluded_secrets": "Secrets left out:",
+        "withheld": "Withheld by source policy (the other side does not release them):",
         "withheld_stash": "Stash entries withheld:",
         "conflicts": "Conflicts (a fresh folder was used):",
         "instruction_files": "Instruction files new or changed here:",
@@ -1187,13 +1280,38 @@ def _note_block(note: str | None, origin: str | None, lists: dict[str, Sequence[
 
 
 def render_job_details(job: Mapping) -> str:
-    """For ``/handover status <job>`` on the receiving side (SEC 4.6): origin, excluded secrets, withheld stash
-    entries, conflicts, instruction files, warnings and the full note text."""
+    """For ``/handover status <job>`` on the receiving side (SEC 4.6): origin, excluded secrets, paths the source
+    withheld by its policy (``withheld``, V29), withheld stash entries, conflicts, instruction files, warnings and
+    the full note text."""
     lists = {
         key: job.get(key) or ()
-        for key in ("excluded_secrets", "withheld_stash", "conflicts", "instruction_files", "warnings")
+        for key in ("excluded_secrets", "withheld", "withheld_stash", "conflicts", "instruction_files", "warnings")
     }
     return "\n".join(_note_block(job.get("note"), job.get("origin"), lists))
+
+
+def _target_session(entry: Mapping | None, ack: CommitAck | None) -> dict | None:
+    """``{"id", "title"}`` of the session the handover created on the target: the job's ``target_session`` (A, L17)
+    when its id is a non-empty string, else the ack's ``session_id``/``title``; None when neither names one."""
+    if isinstance(entry, Mapping) and isinstance(entry.get("id"), str) and entry["id"]:
+        title = entry.get("title")
+        return {"id": entry["id"], "title": title if isinstance(title, str) and title else None}
+    if ack is not None and isinstance(ack.session_id, str) and ack.session_id:
+        return {"id": ack.session_id, "title": ack.title or None}
+    return None
+
+
+def open_text(session_id: str, title: str | None = None) -> str:
+    """How to open a received session (L17; upstream read by g3-b): it is stored, not open — the Desktop sidebar and
+    ``hermes sessions list`` show it, ``hermes --resume <id>`` opens it; a gateway's list of open sessions (TUI
+    switcher, ``session.list`` without ``scope: stored``) shows it only after it was opened once."""
+    named = f'"{title}" ({session_id})' if title else session_id
+    return (
+        f"The session {named} is stored but not open yet: it is listed in the Desktop sidebar and in "
+        f"`hermes sessions list`. Open it with `hermes --resume {session_id}` (or pick it in the Desktop sidebar) "
+        "and send a message; the first turn gets a note about what changed. A gateway's list of open sessions "
+        "shows it only after it was opened once."
+    )
 
 
 def render_final(
@@ -1211,22 +1329,39 @@ def render_final(
     conflicts: Sequence[str] = (),
     instruction_files: Sequence[str] = (),
     warnings: Sequence[str] = (),
+    withheld: Sequence[str] = (),
     continue_error: HandoverError | None = None,
     bundle_path: str | None = None,
     bundle_bytes: int | None = None,
     keep: bool = False,
     remote_gateway: bool = False,
+    job: str | None = None,
+    target_session: Mapping | None = None,
 ) -> str:
     """Success text naming target session, folder, model, offline capability and the next step (R14, BX P6).
 
     ``state`` is the conductor's final state; for a pull, anything before ``retired``/``done`` means the remote
-    source is released on the next contact (SK L8).
+    source is released on the next contact (SK L8). ``withheld`` are the paths a pull asked for (``--include``) that
+    the source does not release (V29, R18: local hints only narrow); the message lists them. Without ``ack`` (the
+    target's acknowledgement is not recorded yet) the text names no session, model or offline capability — it points
+    to ``/handover status <job>`` instead (L3-F03: never "session ?, model default").
+
+    ``target_session`` (additive, L17) is the job's ``{"id", "title"}`` of the session the handover created on the
+    target (cluster A, ``JobRunner.status``); with it (or the ack) the text names title and id and says exactly how to
+    open that session (``open_text``) — a received session is stored, not open, until someone opens it.
     """
     mode = Mode(mode)
     peer_name = peer or "the other gateway"
-    t = (ack.title if ack is not None and ack.title else None) or title or "this session"
+    arrived = _target_session(target_session, ack)
+    t = (
+        (ack.title if ack is not None and ack.title else None)
+        or (arrived or {}).get("title")
+        or title
+        or "this session"
+    )
     lists = {
         "excluded_secrets": excluded_secrets,
+        "withheld": withheld,
         "withheld_stash": withheld_stash,
         "conflicts": conflicts,
         "instruction_files": instruction_files,
@@ -1245,33 +1380,46 @@ def render_final(
             lines.append("Copy the file to the other machine and run /handover import <file> there.")
         lines += _note_block(None, None, {"excluded_secrets": excluded_secrets, "warnings": warnings})
         return "\n".join(lines)
-    sid = ack.session_id if ack is not None else "?"
-    cwd = _ack_cwd(ack)
-    model = ack.model if ack is not None else None
-    where = ", ".join(x for x in (f"session {sid}", cwd, f"model {model or 'default'}") if x)
-    offline = f"works offline: {_yn(ack.offline_capable if ack is not None else None)}"
+    if ack is not None:
+        where = ", ".join(
+            x for x in (f"session {ack.session_id}", _ack_cwd(ack), f"model {ack.model or 'default'}") if x
+        )
+        details = f"{where}; works offline: {_yn(ack.offline_capable)}"
+    else:
+        details = "the session details are not recorded yet" + (
+            f"; /handover status {short_job(job)} shows them" if job else ""
+        )
     if mode in (Mode.PUSH, Mode.OFFER):
         lines = [
-            f'Handed over to {peer_name}: "{t}" continues there ({where}; {offline}). This session is now '
+            f'Handed over to {peer_name}: "{t}" continues there ({details}). This session is now '
             "read-only here; /handover reclaim takes it back."
         ]
         if continue_result is not None and continue_result.started:
             lines.append(f"The agent is continuing on {peer_name}.")
-        elif continue_error is not None:
-            lines.append(render_error(continue_error, peer))
+        else:
+            if continue_error is not None:
+                lines.append(render_error(continue_error, peer))
+            if arrived is not None:
+                lines.append(f"On {peer_name}: {open_text(arrived['id'], t)}")
         lines += _note_block(None, None, {"excluded_secrets": excluded_secrets, "warnings": lists["warnings"]})
         return "\n".join(lines)
     # pull, import: the session is here now
     retired = str(state).lower() in {"retired", "continuing", "done"}
     if mode is Mode.PULL and not retired:
-        lines = [f'"{t}" is active here ({where}; {offline}); {peer_name} will be released on the next contact.']
+        lines = [f'"{t}" is active here ({details}); {peer_name} will be released on the next contact.']
     else:
-        lines = [f'"{t}" is here now ({where}; {offline}).']
+        lines = [f'"{t}" is here now ({details}).']
     if continue_result is not None and continue_result.started:
         lines.append("The agent is continuing in that session now.")
     else:
         if continue_error is not None:
             lines.append(render_error(continue_error, None))
-        lines.append("Open it from the session list and send a message; the first turn gets a note about what changed.")
+        if arrived is not None:
+            lines.append(open_text(arrived["id"], t))
+        else:
+            lines.append(
+                "Open it from the Desktop sidebar or `hermes sessions list` and send a message; the first turn gets "
+                "a note about what changed."
+            )
     lines += _note_block(note, origin, lists)
     return "\n".join(lines)

@@ -81,6 +81,7 @@ from .model import (
     TargetDecision,
 )
 from .ops import OpRunner, error_dict
+from .paths import expand_handover_root
 from .policy import HERMES_FILE_KINDS, PolicyConfig, check_target_dest
 
 MAX_DOC_BYTES = 64 * 1024 * 1024
@@ -341,6 +342,7 @@ class LocalTarget:
             config=self.config,
             tools_seen=seen,
             capabilities=self.hello().capabilities,
+            cfg=self.policy,  # R29: the write-root check runs with this host's own policy (gp-d-api §1c)
         )
         self._remember(job, source_facts=source_facts, target_facts=tf)
         return tf
@@ -367,8 +369,12 @@ class LocalTarget:
         p = self.ports
 
         def generic(d: str) -> str:
-            return p.pathmap.fallback_dest(
-                d, now=now, workspace_root=job.options.workspace_root, allow_roots=job.options.allow_roots
+            return p.pathmap.fallback_dest(  # cfg: this host's home, Hermes home and denylist (V35, R29)
+                d,
+                now=now,
+                workspace_root=job.options.workspace_root,
+                allow_roots=job.options.allow_roots,
+                cfg=self.policy,
             )
 
         if item.kind not in (ItemKind.EXTRA_FILE, ItemKind.EXTRA_DIR) or sf is None or tf is None:
@@ -517,9 +523,29 @@ class LocalTarget:
         def cwd_for(source_cwd: str | None) -> str:
             if primary is not None and primary.item_id in dests and source_cwd:
                 return self.ports.pathmap.map_cwd(source_cwd, primary, dests[primary.item_id])
-            return os.path.expanduser(workspace_root)
+            return self._workspace_root(workspace_root)
 
         return cwd_for
+
+    def _workspace_root(self, spec: str) -> str:
+        """The configured ``workspace_root`` as this host writes it — the rule the policy's ``allow_roots`` and the
+        facts use (``paths.expand_handover_root``, R29): the default ``~/hermes-handover`` inside the Hermes home
+        is ``<HERMES_HOME>/handover-workspaces``. Without a policy (stand-ins) the plain expansion."""
+        cfg = self.policy
+        if cfg is None:
+            return os.path.expanduser(spec)
+        try:
+            return str(
+                expand_handover_root(
+                    spec,
+                    cfg.home,
+                    cfg.hermes_home,
+                    hermes_root=cfg.hermes_root,
+                    case_insensitive=cfg.case_insensitive,
+                )
+            )
+        except HandoverError:  # a form ``expand_root`` refuses (``~user``): the commit's cwd check reports it
+            return os.path.expanduser(spec)
 
     def _import_plan(self, job: JobContext, capsule_doc: dict, final: FinalPlan):
         return self.ports.session_import.plan_import(
@@ -609,6 +635,7 @@ class LocalTarget:
         pack_doc = self._read_doc(req.pack.pack_id)
         if pack_doc.get("kind") != "ctxh.pack" or pack_doc.get("final_plan_id") != req.final_plan_id:
             raise VerifyFailed("the pack does not belong to the confirmed final plan", which="final_plan_id")
+        self._remember(job, case_pairs=self._case_pairs(pack_doc), paused=self._paused(capsule_doc))
         items = {i.item_id: i for i in final.plan.items}
         decisions = {d.item_id: d for d in final.decisions}
         peer_id = self._peer_key()
@@ -709,6 +736,18 @@ class LocalTarget:
         self._go(job, "preparing", "prepared", prepared=prepared)
         return prepared
 
+    def _case_pairs(self, pack_doc: dict) -> list[list[str]]:
+        """Contract V09: on a case-insensitive file system here (``PolicyConfig.case_insensitive``) the pack items'
+        name pairs that differ only in case (E's ``[kept, colliding]`` pairs) collide; the note names both."""
+        if not self.policy.case_insensitive:
+            return []
+        pairs: list[list[str]] = []
+        for item in pack_doc.get("items") or ():
+            for pair in (item.get("case_collisions") if isinstance(item, dict) else None) or ():
+                if isinstance(pair, (list, tuple)) and len(pair) == 2 and list(pair) not in pairs:
+                    pairs.append([str(pair[0]), str(pair[1])])
+        return pairs
+
     def _hermes_placement(self, pack_items: list, items: dict, tip_id: str) -> tuple[list[dict], list[str]]:
         """Target paths of the received session files from kind + basename only (contract X17, hardening #7): the
         kind is the plan item's ``hermes_kind`` (the pack item's must agree), the name the basename of ``rel``.
@@ -734,6 +773,19 @@ class LocalTarget:
             placed.append({"pack_item": {**pack_item, "hermes_kind": kind}, "target": str(dest)})
         return placed, skipped
 
+    def _paused(self, capsule_doc: dict) -> list[str]:
+        """The drivers (goal, heartbeat, loop) the commit writes for the arrived session — always paused (R22,
+        ``session_import.side_state_values``, step c4): the note says so (N05). Empty when the port has no such
+        function (stand-ins)."""
+        values = getattr(self.ports.session_import, "side_state_values", None)
+        if not callable(values):
+            return []
+        try:
+            written = values(capsule_doc)
+        except (HandoverError, TypeError, ValueError):
+            return []
+        return [k for k in ("goal", "heartbeat", "loop") if k in written]
+
     def _compose_note(
         self, job, req: PrepareRequest, final: FinalPlan, prepared: PreparedInfo, path_map, *, delta_message: bool
     ) -> tuple[str, str]:
@@ -748,9 +800,25 @@ class LocalTarget:
         report_path = reports / f"{job.job_id}.md"
         kind = "bundle" if job.mode is Mode.IMPORT else "peer"
         origin = f"{'verified' if self.peer_verified else 'unverified'} {kind}"
+        if job.mode is Mode.IMPORT and not self.source_peer_id:
+            # V13: no paired peer is bound to this import, so nothing that arrived can find its way back
+            origin += "; no return path to the origin"
         note_parts = dict(req.note_parts or {})
+        if job.mode is Mode.IMPORT:
+            # DESIGN §5.4 (re-import guard): every bundle import note says so — ``note`` renders the sentence
+            # (``note.BUNDLE_IMPORT_SENTENCE``), the origin line names only the origin
+            note_parts["bundle_import"] = True
         dests = {d.item_id: d.dest for d in final.decisions}
         note_parts["instruction_files"] = list(p.plan.instruction_files(final.plan.items, dests.get))
+        pairs = ctx.get("case_pairs") or []
+        if pairs:
+            texts = list(note_parts.get("case_collisions") or [])
+            texts += [t for t in p.note.case_collision_texts(pairs) if t not in texts]
+            note_parts["case_collisions"] = texts
+        paused = [str(k) for k in note_parts.get("paused") or ()]
+        paused += [str(k) for k in ctx.get("paused") or () if str(k) not in paused]
+        if paused:
+            note_parts["paused"] = paused
         model_change = ctx.get("model_change", final.model_change)
         note_text, report_md = p.note.compose(
             job_id=job.job_id,
@@ -947,6 +1015,7 @@ class LocalTarget:
         direction, done_fwd, done_inv, results = self._journal_state(job.job_id)
         failure: dict | None = None
         if direction == "forward":
+            name: str | None = None
             try:
                 for n, (name, fwd, _inv) in enumerate(steps):
                     if name in done_fwd:
@@ -961,6 +1030,16 @@ class LocalTarget:
                 raise
             except Exception as exc:
                 failure = error_dict(exc)
+                if (getattr(exc, "details", None) or {}).get("needs_attention") is True:
+                    # the step could not undo its own partial change (E: orphaned ``index.lock``, failed undo, lost
+                    # step record): booked like a failing inverse — the rollback then keeps the staging (DESIGN §3.4)
+                    self.ledger.event(
+                        job.job_id,
+                        Role.TARGET,
+                        "needs_attention",
+                        {"step": name, "error": failure, "direction": "forward"},
+                        epoch=self._epoch(job),
+                    )
                 self.ledger.event(
                     job.job_id,
                     Role.TARGET,
@@ -983,7 +1062,13 @@ class LocalTarget:
 
     def _rollback(self, job, steps, done_fwd, done_inv, results, failure) -> dict:
         inverse = {name: inv for name, _f, inv in steps}
-        attention = []
+        # steps journaled ``needs_attention`` before (a forward step that could not undo itself, or an inverse that
+        # failed in a process that died later) keep the staging too — a resumed rollback does not forget them
+        attention = [
+            {"step": (e["data"] or {}).get("step"), "error": (e["data"] or {}).get("error")}
+            for e in self.ledger.events(job.job_id, Role.TARGET)
+            if e["kind"] == "needs_attention"
+        ]
         for name in reversed(done_fwd):
             if name in done_inv or name not in inverse:
                 continue

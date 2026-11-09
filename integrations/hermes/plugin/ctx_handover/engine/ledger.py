@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -121,18 +122,55 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS ctx_outbox(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,"
     " payload TEXT NOT NULL, created_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,"
     " next_try_at REAL NOT NULL, done_at REAL)",
+    "CREATE TABLE IF NOT EXISTS peer_facts(peer_id TEXT PRIMARY KEY, facts TEXT NOT NULL, at REAL NOT NULL)",
 )
 
 _PROCESS: dict[str, object] = {}
+_OWNER_RE = re.compile(r"^(\d+):[0-9a-f]+@([0-9a-f-]{8,64})\.(\d+)(?:/.*)?$")
+"""``<pid>:<nonce>@<boot id>.<pid-namespace inode>`` (plus a runner suffix ``/<hex>``): a stamped owner string."""
+
+
+def _ns_stamp() -> str | None:
+    """``<boot id>.<pid-namespace inode>`` of this process on Linux, else None (no stamp: wait for staleness)."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        match = re.search(r"\[(\d+)\]", os.readlink("/proc/self/ns/pid"))
+    except (OSError, ValueError):
+        return None
+    if match is None or not re.fullmatch(r"[0-9a-f-]{8,64}", boot):
+        return None
+    return f"{boot}.{match.group(1)}"
 
 
 def process_owner() -> str:
-    """``<pid>:<process start nonce>`` — the owner string of this process (regenerated after a fork)."""
+    """``<pid>:<process start nonce>`` — the owner string of this process (regenerated after a fork); on Linux
+    stamped ``@<boot id>.<pid-namespace inode>`` like the lease holder (DESIGN §7.2 step 2), so a row of a process
+    that died on this host and namespace can be taken over at once (``owner_dead``)."""
     pid = os.getpid()
     if _PROCESS.get("pid") != pid:
         _PROCESS["pid"] = pid
-        _PROCESS["owner"] = f"{pid}:{secrets.token_hex(4)}"
+        stamp = _ns_stamp()
+        _PROCESS["owner"] = f"{pid}:{secrets.token_hex(4)}" + (f"@{stamp}" if stamp else "")
     return str(_PROCESS["owner"])
+
+
+def owner_dead(owner: str | None) -> bool:
+    """True only for an owner stamped with this host's boot id and this PID namespace whose process is gone
+    (``kill(pid, 0)`` ⇒ no such process). Anything else — unstamped, another host or namespace, a live or foreign
+    process (``EPERM``), this very process — is not known to be dead: the stale window applies (DESIGN §3.1)."""
+    match = _OWNER_RE.match(owner or "")
+    if match is None or match.group(2) + "." + match.group(3) != _ns_stamp():
+        return False
+    pid = int(match.group(1))
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def private_dir(path: Path) -> Path:
@@ -462,12 +500,44 @@ class Ledger:
             return [h[0] for h in hits]
 
     def remove_peer(self, name_or_id: str) -> bool:
-        """Dialer side: delete a dial peer's entry and pinned key (DESIGN §12.5)."""
+        """Dialer side: delete a dial peer's entry, pinned key and last known facts (DESIGN §12.5)."""
         with self._w() as c:
-            cur = c.execute(
-                "DELETE FROM peers WHERE (peer_id=? OR name=?) AND direction='dial'", (name_or_id, name_or_id)
+            row = c.execute(
+                "SELECT peer_id FROM peers WHERE (peer_id=? OR name=?) AND direction='dial' ORDER BY peer_id=? DESC",
+                (name_or_id,) * 3,
+            ).fetchone()
+            if row is None:
+                return False
+            c.execute("DELETE FROM peers WHERE peer_id=?", (row[0],))
+            c.execute("DELETE FROM peer_facts WHERE peer_id=?", (row[0],))
+            return True
+
+    def peer_facts_set(self, peer_id: str, facts_wire: dict) -> None:
+        """Keep the target facts last received from ``peer_id`` (its ``hello``/``facts`` answer, wire form of
+        ``EnvFacts``; contract V28): ``export --for <peer>`` negotiates with them (DESIGN §5.4). The newest answer
+        replaces the older one."""
+        if not isinstance(peer_id, str) or not peer_id:
+            raise TypeError("peer_facts_set needs a peer id")
+        if not isinstance(facts_wire, dict):
+            raise TypeError("peer_facts_set needs the wire form of the facts (a dict)")
+        with self._w() as c:
+            c.execute(
+                "INSERT INTO peer_facts(peer_id, facts, at) VALUES(?,?,?) ON CONFLICT(peer_id) DO UPDATE SET"
+                " facts=excluded.facts, at=excluded.at",
+                (peer_id, _dumps(facts_wire), self.now()),
             )
-            return cur.rowcount > 0
+
+    def peer_facts_get(self, peer_id: str) -> dict | None:
+        """The facts ``peer_facts_set`` kept for ``peer_id`` (a fresh dict), or None when none were received or the
+        stored text is not a JSON object."""
+        row = self._q1("SELECT facts FROM peer_facts WHERE peer_id=?", (peer_id,))
+        if row is None:
+            return None
+        try:
+            value = _loads(row[0])
+        except ValueError:
+            return None
+        return value if isinstance(value, dict) else None
 
     def rename_peer(self, old: str, new: str) -> bool:
         with self._w() as c:
@@ -610,8 +680,9 @@ class Ledger:
         return out
 
     def claim_owner(self, job_id: str, role: Role, owner: str, stale_after_s: float) -> int | None:
-        """Take ownership: free or stale (heartbeat older than ``stale_after_s``) ⇒ new epoch; the same owner ⇒
-        its current epoch; a live other owner ⇒ None (DESIGN §3.1)."""
+        """Take ownership: free, stale (heartbeat older than ``stale_after_s``) or held by a process known dead
+        (``owner_dead``: same host and PID namespace, pid gone) ⇒ new epoch; the same owner ⇒ its current epoch; a
+        live other owner ⇒ None (DESIGN §3.1)."""
         with self._w() as c:
             row = c.execute(
                 "SELECT owner, owner_epoch, owner_heartbeat_at FROM jobs WHERE job_id=? AND role=?",
@@ -624,7 +695,8 @@ class Ledger:
                 c.execute("UPDATE jobs SET owner_heartbeat_at=? WHERE job_id=? AND role=?", (now, job_id, str(role)))
                 return int(row["owner_epoch"])
             hb = row["owner_heartbeat_at"]
-            if row["owner"] is not None and hb is not None and hb >= now - float(stale_after_s):
+            fresh = hb is not None and hb >= now - float(stale_after_s)
+            if row["owner"] is not None and fresh and not owner_dead(row["owner"]):
                 return None
             epoch = int(row["owner_epoch"]) + 1
             c.execute(
@@ -697,12 +769,21 @@ class Ledger:
         )
 
     def transition(
-        self, job_id: str, role: Role, expect: str | Sequence[str], to: str, event: dict, *, epoch: int
+        self,
+        job_id: str,
+        role: Role,
+        expect: str | Sequence[str],
+        to: str,
+        event: dict,
+        *,
+        epoch: int,
+        result: dict | None = None,
     ) -> None:
         """CAS on state **and** owner epoch, then append the transition event (one transaction).
 
         ``expect`` is a state, a sequence of states, or ``"*"``. Stale epoch ⇒ ``Fenced``; wrong state ⇒
-        ``InvalidState(reason="state", state=<actual>)``; in both cases nothing is written."""
+        ``InvalidState(reason="state", state=<actual>)``; in both cases nothing is written. ``result`` (additive) is
+        written in the same transaction: a reader that sees the new state sees its result too (contract V42)."""
         allowed = _expect_set(expect)
         with self._w() as c:
             row = self._check_epoch(c, job_id, role, epoch)
@@ -713,10 +794,16 @@ class Ledger:
                     state=row["state"],
                     expected=sorted(allowed),
                 )
-            c.execute(
-                "UPDATE jobs SET state=?, updated_at=? WHERE job_id=? AND role=?",
-                (str(to), self.now(), job_id, str(role)),
-            )
+            if result is None:
+                c.execute(
+                    "UPDATE jobs SET state=?, updated_at=? WHERE job_id=? AND role=?",
+                    (str(to), self.now(), job_id, str(role)),
+                )
+            else:
+                c.execute(
+                    "UPDATE jobs SET state=?, result=?, updated_at=? WHERE job_id=? AND role=?",
+                    (str(to), _dumps(result), self.now(), job_id, str(role)),
+                )
             self._append(c, job_id, role, epoch, "transition", dict(event), state=str(to))
 
     def event(self, job_id: str, role: Role, kind: str, data: dict, *, epoch: int) -> None:
@@ -734,7 +821,9 @@ class Ledger:
         return out
 
     def job_update(self, job_id: str, role: Role, *, epoch: int | None = None, **fields: object) -> None:
-        """Update ``restarts``, ``last_error``, ``result`` (CAS on epoch when given)."""
+        """Update ``restarts``, ``last_error``, ``result`` (CAS on epoch when given). A job row that does not exist
+        is ``NotFound`` — with or without an epoch: an error or result is never reported as recorded when nothing
+        was written."""
         allowed = {"restarts", "last_error", "result"}
         unknown = set(fields) - allowed
         if unknown:
@@ -746,7 +835,12 @@ class Ledger:
             for key, value in fields.items():
                 sets.append(f"{key}=?")
                 values.append(value if key == "restarts" else (None if value is None else _dumps(value)))
-            c.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=? AND role=?", (*values, job_id, str(role)))  # noqa: S608
+            cur = c.execute(
+                f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=? AND role=?",  # noqa: S608 - fixed column names
+                (*values, job_id, str(role)),
+            )
+            if cur.rowcount != 1:
+                raise NotFound(f"job {job_id} ({role}) not found")
 
     def touch_job(self, job_id: str, role: Role) -> None:
         """Record activity (participant request) without a transition: ``updated_at = now``."""

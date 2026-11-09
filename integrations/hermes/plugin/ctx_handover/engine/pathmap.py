@@ -25,6 +25,7 @@ every rule again (``recorded`` for ``return-mapping``, ``local_choice`` for ``us
 from __future__ import annotations
 
 import ntpath
+import os
 import posixpath
 import re
 import unicodedata
@@ -35,7 +36,7 @@ from pathlib import Path
 from .errors import PolicyDenied
 from .ids import short
 from .model import EnvFacts, ItemKind, ItemRole, MapRow, Options, PlanItem
-from .paths import check_rel, home_relative, reject_windows_device_prefix, rules_for
+from .paths import check_rel, expand_handover_root, expand_root, home_relative, reject_windows_device_prefix, rules_for
 from .policy import PolicyConfig, check_target_dest
 
 USER = "user"
@@ -278,22 +279,79 @@ def choose_all(
     return result
 
 
-def fallback_dest(dest: str, *, now: datetime, workspace_root: str, allow_roots: Sequence[str]) -> str:
-    """Where an item goes when its first choice conflicts (DESIGN §9.7): ``<dest>-handover-<YYYYmmdd-HHMMSS>`` when
-    the parent lies under ``allow_roots``, else the same name under ``workspace_root``."""
+def _expanded_root(spec: object, home: str, mod, hermes_home: str | None = None, hermes_root: str | None = None):
+    """A configured root (``~``, ``~/x``, absolute, or relative = under ``home``; ``paths.expand_root``) as an
+    absolute, normalised path of the destination's OS; None for a form ``expand_root`` refuses (``~user``, device
+    prefixes, empty). With ``hermes_home`` the schema default ``~/hermes-handover`` resolves through
+    ``paths.expand_handover_root`` (R29: ``<HERMES_HOME>/handover-workspaces`` when it lies in the Hermes home)."""
+    text = spec.strip() if isinstance(spec, str) else ""
+    if not text:
+        return None
+    try:
+        reject_windows_device_prefix(text)
+        if hermes_home and (mod is ntpath) == (os.name == "nt"):
+            # every spelling of the default (``~/hermes-handover``, ``<home>/hermes-handover``) as the policy reads it
+            root = expand_handover_root(text, Path(home), Path(hermes_home), hermes_root=hermes_root or None)
+            return mod.normpath(str(root))
+        if _spelled_windows(text) if mod is ntpath else text.startswith("/"):
+            return mod.normpath(text)
+        return mod.normpath(str(expand_root(text, Path(home))))
+    except PolicyDenied:
+        return None
+
+
+def resolve_root(spec: object, *, home: str, hermes_home: str | None, hermes_root: str | None = None) -> str | None:
+    """The one resolver of a configured ``workspace_root``/``allow_roots`` entry in D (``envfacts.probe``,
+    ``fallback_dest``): an absolute, normalised path of this host, the schema default ``~/hermes-handover``
+    through ``paths.expand_handover_root`` (R29), or None for a form that cannot be expanded (empty, ``~user``,
+    device prefix, a relative ``home``)."""
+    mod = ntpath if _spelled_windows(str(home or "")) else posixpath
+    if not isinstance(home, str) or not home or (mod is posixpath and not home.startswith("/")):
+        return None
+    return _expanded_root(spec, home, mod, hermes_home, hermes_root)
+
+
+def fallback_dest(
+    dest: str,
+    *,
+    now: datetime,
+    workspace_root: str,
+    allow_roots: Sequence[str],
+    home: str | None = None,
+    cfg: PolicyConfig | None = None,
+    hermes_home: str | None = None,
+) -> str:
+    """Where an item goes when its first choice conflicts (DESIGN §9.7, contract V35): ``<dest>-handover-
+    <YYYYmmdd-HHMMSS>`` when the parent lies under ``allow_roots`` (and, with ``cfg``, that sibling passes
+    ``check_target_dest``), else the same name under ``workspace_root``.
+
+    ``workspace_root`` and ``allow_roots`` may be the configured forms (``Options`` defaults are
+    ``~/hermes-handover``); they are expanded against ``home`` — default ``cfg.home``, else this process's home,
+    the home of the target's policy (``jobs._policy``) — so the result is always an absolute path that
+    ``check_target_dest`` can accept (R19). The schema default resolves as ``envfacts`` reports it (``resolve_root``,
+    R29): with ``hermes_home`` (additive; default ``cfg.hermes_home``) it is ``<HERMES_HOME>/handover-workspaces``
+    when ``~/hermes-handover`` lies in the Hermes home or root (``cfg.hermes_root``)."""
     mod = ntpath if _spelled_windows(dest) else posixpath
-    ci = mod is ntpath
+    ci = mod is ntpath or bool(cfg is not None and cfg.case_insensitive)
+    base = str(home if home is not None else cfg.home if cfg is not None else Path.home())
+    hh = hermes_home if hermes_home is not None else str(cfg.hermes_home) if cfg is not None else None
+    hr = str(cfg.hermes_root) if cfg is not None else None
     stamp = now.strftime("%Y%m%d-%H%M%S")
-    norm = mod.normpath(dest)
+    norm = _expanded_root(dest, base, mod) or mod.normpath(dest)
     parent = mod.dirname(norm)
+    roots = [r for r in (_expanded_root(r, base, mod, hh, hr) for r in allow_roots) if r]
 
     def parts(p: str) -> list[str]:
         out = [c for c in mod.normpath(p).replace("\\", "/").split("/") if c]
         return [c.casefold() for c in out] if ci else out
 
-    if any(parts(parent)[: len(parts(r))] == parts(r) for r in allow_roots if r):
-        return f"{norm}-handover-{stamp}"
-    return mod.join(mod.normpath(workspace_root), f"{mod.basename(norm) or 'workspace'}-handover-{stamp}")
+    sibling = f"{norm}-handover-{stamp}"
+    if any(parts(parent)[: len(parts(r))] == parts(r) for r in roots) and (
+        cfg is None or check_target_dest(Path(sibling), cfg, recorded=False, local_choice=False).allowed
+    ):
+        return sibling
+    root = _expanded_root(workspace_root, base, mod, hh, hr) or (roots[0] if roots else parent)
+    return mod.join(root, f"{mod.basename(norm) or 'workspace'}-handover-{stamp}")
 
 
 def map_cwd(source_cwd: str, item: PlanItem, dest: str) -> str:

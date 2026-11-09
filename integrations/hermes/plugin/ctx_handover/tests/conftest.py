@@ -14,6 +14,12 @@ Hermes itself comes from ``sys.path`` (``PYTHONPATH=<hermes-agent checkout>:…`
 path is hard-wired. Fixtures that need Hermes fail with a clear message when it is not importable
 instead of skipping, so a missing upstream never turns a gate green.
 
+``--basetemp`` is locked for the run (contract V32): pytest empties a given base temp directory when a run first
+needs it, so a second run on the same directory would delete the files of a run still in progress. The lock is an
+``flock`` on ``.<name>.pytest-lock`` next to the directory (the directory itself is removed and recreated); a
+second run stops at configuration with a usage error naming the base temp directory. The lock ends with the run
+(also when the process dies); the small lock file stays.
+
 Fixtures
 --------
 ``user_home``     the isolated ``$HOME`` (Path)
@@ -44,6 +50,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - not POSIX: no lock, the suites run on Linux
+    fcntl = None  # type: ignore[assignment]
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
@@ -271,6 +282,42 @@ def _restore(template: Path, target: Path) -> None:
     finally:
         dst.close()
         image.close()
+
+
+_BASETEMP_LOCK = pytest.StashKey[int]()
+
+
+def basetemp_lock_path(basetemp: str | os.PathLike) -> Path:
+    """The lock file of a ``--basetemp``: ``.<name>.pytest-lock`` beside the resolved directory."""
+    real = Path(os.path.realpath(os.fspath(basetemp)))
+    return real.parent / f".{real.name}.pytest-lock"
+
+
+def pytest_configure(config):
+    """Lock ``--basetemp`` against a second concurrent run (contract V32); xdist workers share the controller's."""
+    given = config.getoption("basetemp", None)
+    if not given or fcntl is None or hasattr(config, "workerinput"):
+        return
+    lock = basetemp_lock_path(given)
+    if not lock.parent.is_dir():
+        return  # pytest itself refuses a base temp directory without a parent
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise pytest.UsageError(
+            f"--basetemp {given} is in use by another pytest run (lock {lock}); pytest would empty it under that "
+            "run. Wait for it to finish or pass another --basetemp."
+        ) from None
+    config.stash[_BASETEMP_LOCK] = fd
+
+
+def pytest_unconfigure(config):
+    fd = config.stash.get(_BASETEMP_LOCK, None)
+    if fd is not None:
+        del config.stash[_BASETEMP_LOCK]
+        os.close(fd)
 
 
 def pytest_addoption(parser):

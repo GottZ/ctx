@@ -92,6 +92,11 @@ class GitProbe(Protocol):
         """True for a shallow repository."""
         ...
 
+    def is_partial(self, path: str) -> bool:
+        """True for a partial clone (a promisor remote) containing ``path``: like a shallow clone it lacks objects,
+        so it travels as a file tree (W107, contract V30)."""
+        ...
+
 
 @runtime_checkable
 class BusyReportLike(Protocol):

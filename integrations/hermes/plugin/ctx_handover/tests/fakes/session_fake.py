@@ -28,6 +28,7 @@ from typing import Any
 
 from ctx_handover.engine.errors import (
     AlreadyHandingOver,
+    BadRequest,
     InvalidState,
     NotFound,
     SessionBusy,
@@ -180,8 +181,18 @@ class FakeSession:
         return ((sid,), len(rows), len(rows), 0)
 
     # -- session_export -------------------------------------------------------------------------------------
-    def describe(self, db, ref, *, calling_session):
+    def describe(self, db, ref, *, calling_session, offer_session=None):
+        """``session_export.describe``'s precedence: id › offer (``offer_session`` lookup, F12) › the rest."""
         self._enter("describe", ref=ref, calling_session=calling_session)
+        if not ref.id and ref.offer_id:
+            if offer_session is None:
+                raise BadRequest(f"offer {ref.offer_id} cannot be resolved here", field="session_ref.offer_id")
+            sid = offer_session(ref.offer_id)
+            if not sid:
+                raise NotFound(f"offer {ref.offer_id} not found", offer_id=ref.offer_id)
+            ref = replace(ref, id=sid)
+        elif ref.id and ref.offer_id and offer_session is not None and offer_session(ref.offer_id) != ref.id:
+            raise BadRequest("the offer names another session", field="session_ref.offer_id")
         sid = ref.id or calling_session
         if ref.latest and not sid:
             sid = next(reversed(self.sessions), None)

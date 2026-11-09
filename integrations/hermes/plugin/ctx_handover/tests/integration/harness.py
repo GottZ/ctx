@@ -377,11 +377,19 @@ def session_marks(db, sid: str) -> dict:
 
 
 def arrived_session(home: Home, job_id: str):
-    """The target session id of a committed job as the target's ledger recorded it."""
-    for row in home.ledger().arrival_rows():
-        if row["job_id"] == job_id:
-            return row["root_id"], row["session_id"]
-    return None, None
+    """``(root_id, tip_id)`` of the lineage a committed job brought to ``home``, as the target's ledger recorded it:
+    one arrival row per lineage segment, each naming the root (commit step c5). The tip is the segment no other
+    segment of the job continues (``parent_session_id`` in ``home``'s SessionDB) — the session the commit ack names
+    (N52; the first row is the root of a multi-segment lineage). ``(None, None)`` without an arrival of the job."""
+    rows = [r for r in home.ledger().arrival_rows() if r["job_id"] == job_id]
+    if not rows:
+        return None, None
+    db = home.db()
+    ids = [r["session_id"] for r in rows]
+    continued = {(db.get_session(sid) or {}).get("parent_session_id") for sid in ids}
+    tips = [r for r in rows if r["session_id"] not in continued]
+    assert len(tips) == 1, f"job {job_id}: no single tip among its arrival rows {ids}"
+    return tips[0]["root_id"], tips[0]["session_id"]
 
 
 # ---------------------------------------------------------------------------------------------------------
