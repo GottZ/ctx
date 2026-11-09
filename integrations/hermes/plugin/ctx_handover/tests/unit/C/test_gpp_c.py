@@ -164,6 +164,24 @@ def test_generic_bundle_facts_claim_no_checked_workspace_root(tmp_path, ok, prob
     assert facts.instance_name == "bundle"
 
 
+def test_generic_bundle_facts_claim_no_context_window(tmp_path):
+    """★ (g4 §8, R32): the facts a bundle declares for its unknown importer claim no context window — the
+    exporter's own ``host.context_length`` says nothing about the importer's model, and copying it made an export
+    without ``--for`` ask (and end ``cancel`` under ``--yes`` without a terminal) against the exporter's window. The
+    importer checks the window against its real facts when it imports.
+
+    Red (before the fix): ``assert 3000 is None`` — ``_generic_facts`` copied ``host`` unchanged.
+    """
+    exp = Exporter(tmp_path)
+    target = BundleTarget(tmp_path / "x.ctxh.tar", exp.identity, as_dir=False, declared_facts=None, ledger=exp.ledger)
+    job = _job()
+    target.open_job(job)
+    base = sample_facts(M, "server")
+    src = replace(base, host=replace(base.host, context_length=3000))
+    facts = target.facts(job, src)
+    assert facts.host.context_length is None, facts.host
+
+
 # ---------------------------------------------------------------------------------------------------------
 # 5b. OSError while the bundle is written
 # ---------------------------------------------------------------------------------------------------------

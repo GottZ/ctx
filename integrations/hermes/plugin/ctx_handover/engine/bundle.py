@@ -272,7 +272,8 @@ class _DirSink:
 def _generic_facts(src: EnvFacts) -> EnvFacts:
     """Declared facts of an unknown importer: fresh directories, no git basis (DESIGN §5.4), no checked workspace
     root (R29: ``workspace_root_ok`` None — the exporter's own check says nothing about the importer's root; the
-    importer checks its root when it imports)."""
+    importer checks its root when it imports) and no context window (R32: ``host.context_length`` None — the importer
+    compares the session with its own model's window when it imports)."""
     defaults = Options()
     return replace(
         src,
@@ -292,6 +293,7 @@ def _generic_facts(src: EnvFacts) -> EnvFacts:
         capabilities=frozenset(),
         workspace_root_ok=None,
         workspace_root_problem="",
+        host=replace(src.host, context_length=None),
     )
 
 
