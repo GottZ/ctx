@@ -12,8 +12,9 @@ end in ``test_l3_acceptance.py`` instead of here (not duplicated):
 
 The pull case of R35 (L3-F13) is E15 (``test_e2e_flows.py::test_e15_reclaim``); here only the unreachable target.
 
-Runtime estimate: 15–20 min (F11/R33 restarts gw-a and serve-a twice, F14 waits for a 25-s model delay, the others
-run one or two handovers each).
+Runtime estimate: 15–20 min (F11/R33 restarts gw-a and serve-a twice, R33 waits 30 s more when the pull is refused,
+F14 waits for a 25-s model delay, the others run one or two handovers each). The review findings of
+``review-code/REVIEW.md`` §2 are ``test_l3_review.py``.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ import json
 import re
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -436,23 +439,89 @@ def test_l3_f11_abort_ends_when_the_source_never_opened_the_job(lab, ev):
     assert marks["ended"] is False, marks
 
 
+class _HomeLogs:
+    """New part of a home's Hermes logs since construction (``<HERMES_HOME>/logs/agent.log`` and ``errors.log``; the
+    plugin's ``ctx_handover listener unavailable`` / ``identity not usable`` lines land there, g5.md §0)."""
+
+    NAMES = ("agent.log", "errors.log")
+    KEEP = 400_000
+
+    def __init__(self, lab, inst: str) -> None:
+        self.dir = lab.home(inst) / "logs"
+        self.offsets = {name: self._size(name) for name in self.NAMES}
+
+    def _size(self, name: str) -> int:
+        path = self.dir / name
+        return path.stat().st_size if path.exists() else 0
+
+    def save(self, ev, tag: str) -> None:
+        for name in self.NAMES:
+            path = self.dir / name
+            if not path.exists():
+                ev.write(f"{tag}-{name}.txt", f"{path} does not exist")
+                continue
+            size = path.stat().st_size
+            start = self.offsets[name] if size >= self.offsets[name] else 0  # rotated: from the start
+            with open(path, "rb") as fh:
+                fh.seek(max(start, size - self.KEEP))
+                ev.write(f"{tag}-{name}", fh.read())
+
+
+def _hello(base: str, token: str, *, timeout: float = 30.0) -> dict:
+    """Unsigned ``GET <base>/api/plugins/ctx_handover/v1/hello`` with the dashboard token — the first request of a
+    dialer (``engine/wire.py`` ``hello(signed=False)``): status, elapsed time, head of the body."""
+    request = urllib.request.Request(  # noqa: S310 - fixed http://127.0.0.1 lab URL
+        f"{base}/api/plugins/ctx_handover/v1/hello", headers={"X-Hermes-Session-Token": token}
+    )
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310 - loopback lab URL
+            status, body = resp.status, resp.read(4096)
+    except urllib.error.HTTPError as exc:
+        status, body = exc.code, exc.read(4096)
+    except OSError as exc:
+        status, body = None, repr(exc).encode()
+    return {"status": status, "elapsed_s": round(time.monotonic() - t0, 2), "body": body.decode("utf-8", "replace")}
+
+
+_VERIFIED = re.compile(r"(?<!not )\bverified\b", re.I)
+
+
 @needs_lab
 @pytest.mark.e2e_timeout(1200)
 def test_l3_r33_host_isolation_doctor_matches_what_works(lab, ev):
-    """L15 / R33: A (the gateway a paired laptop dials) runs under ``plugins.isolation: host`` (``gw-a`` and
+    """L15 / R33a (L3-F21): A (the gateway a paired laptop dials) runs under ``plugins.isolation: host`` (``gw-a`` and
     ``serve-a`` restarted); ``/handover doctor`` in A's gateway, then a pull from B through A's ``listen_url``
     (``serve-a``).
 
-    Soll: R33 — under host isolation ``doctor`` names the isolation in a ``plugin isolation`` line, and what it says
-    holds on the stack: when the pull is refused, the line is a FAIL naming ``in_process`` and the paired device that
-    cannot reach it (``laptop``), and the refusal names the cause (``listener_missing``: "has no ctx_handover routes …
-    plugins.isolation", README §Limits); when the pull works, ``doctor`` must not report that this gateway "cannot
-    receive or provide handovers over HTTP" (a FAIL that keeps a working setup from being used). Either way A's
-    session is consistent with the outcome (locked after a done pull, untouched after a refusal; R1).
-    The dialer side under host isolation is E14.
+    Soll, each assertion from R33a ("Unter ``plugins.isolation: host`` sind die Plugin-Routen über ``hermes serve``
+    erreichbar …; nicht erreichbar ist der Gateway-Listener. ``doctor`` meldet je Weg „verifiziert“ oder „nicht
+    verifiziert“ statt FAIL"):
+
+    * doctor, whatever the pull does: a ``plugin isolation`` line that is not ``[FAIL]``, does not claim this gateway
+      "cannot receive or provide handovers over HTTP" (the R33 wording R33a corrects), names the ``hermes serve`` way
+      in a sentence that calls it verified and the gateway listener in a sentence that calls it not verified (the
+      detail before the remedy ``→``);
+    * pull ``done``: A's session is locked afterwards (R1);
+    * pull refused (the one open case of R33a, "unsigniertes 404 kurz nach serve-Start … mit Wiederholung im Labor zu
+      klären"; g5.md §8 point 2): only ``listener_missing`` plus its text is checked — "has no ctx_handover routes",
+      without the R33 claim that a host-isolated gateway cannot receive or provide handovers over HTTP — and A's
+      session is untouched (R1, D8); ``a/logs/agent.log`` and ``errors.log`` are saved, and an unsigned ``hello`` on
+      ``serve-a`` 30 s later must answer 200 with a hello document (the routes are reachable through ``hermes serve``,
+      R33a — a second 404 means the refusal is not a cold-start effect but sticks, e.g. a remembered identity error,
+      g5.md §0 cause (c)).
+
+    Expected red on ``2f5fd1d5`` (read, not run): ``engine/commands.py:1434-1478`` — ``HOST_ISOLATION_DETAIL`` says
+    "this gateway cannot receive or provide handovers over HTTP", and ``_host_isolation_check`` returns ``ok: False``
+    (``[FAIL]``) because ``laptop`` is a paired inbound peer; ``engine/surfaces.py`` ``listener_missing`` repeats the
+    R33 claim. The doctor assertions come first, so both outcomes of the pull are red there. The wording checked here
+    is R33a's; ``feat/ctx-handover`` ``11ead29b`` ("Verified end to end under host: … through `hermes serve` … Not
+    verified under host: this gateway's own listener …") meets it. The dialer side under host isolation is E14.
 
     A's ``config.yaml`` is restored and ``gw-a``/``serve-a`` restarted through ``labctl.py``."""
     src = lab.make_source("a", f"r33proj{lab.run_id}", turns=("host isolated listener",))
+    logs = _HomeLogs(lab, "a")
+    hello2: dict | None = None
     with lab.preserved("a", restart=("gw-a", "serve-a")):
         lab.config_set("a", "plugins.isolation", "host")
         lab.restart("gw-a", "serve-a")
@@ -463,19 +532,32 @@ def test_l3_r33_host_isolation_doctor_matches_what_works(lab, ev):
         final = lab.wait_job("b", res.job_id, _lab.STOP_STATES, timeout=120, poll=0.5) if res.job_id else None
         ev.write("job-b.json", {"final": final, "row": lab.job_row("b", res.job_id) if res.job_id else None})
         marks = lab.marks("a", src.sid)
+        refused = not (res.rc == 0 and final == "done")
+        if refused:
+            logs.save(ev, "refusal")
+            time.sleep(30)
+            hello2 = _hello(_lab.SERVE_URL["a"], lab.tokens["a"])
+            ev.write("hello-after-30s.json", hello2)
+            logs.save(ev, "after-second-hello")
     line = next((ln for ln in doctor.splitlines() if "plugin isolation" in ln), "")
+    detail = line.split(" → ", 1)[0]
+    sentences = [x.strip() for x in re.split(r"(?<=[.;])\s+", detail) if x.strip()]
+    ev.write("doctor-line.json", {"line": line, "sentences": sentences, "refused": refused, "hello2": hello2})
     assert line, doctor[-3000:]
-    if res.rc == 0 and final == "done":
+    assert not line.startswith("[FAIL]"), line
+    assert "cannot receive or provide handovers over HTTP" not in line, line
+    assert any(_VERIFIED.search(x) and "hermes serve" in x for x in sentences), sentences
+    assert any("not verified" in x.lower() and "listener" in x.lower() for x in sentences), sentences
+    if not refused:
         assert marks["ended"] is True, marks
-        assert not line.startswith("[FAIL]") and "cannot receive or provide handovers over HTTP" not in line, (
-            "doctor says this gateway cannot receive or provide handovers over HTTP, but a pull from B through "
-            f"{_lab.SERVE_URL['a']} succeeded under plugins.isolation: host — {line}"
-        )
         return
-    assert line.startswith("[FAIL]") and "in_process" in line and _lab.LAPTOP in line, line
-    assert "has no ctx_handover routes" in res.text and "plugins.isolation" in res.text, res.text[-1500:]
     assert res.error_code == "listener_missing", res.brief()
+    assert "has no ctx_handover routes" in res.text, res.text[-1500:]
+    assert "cannot receive or provide handovers over HTTP" not in res.text, res.text[-1500:]
     assert marks["ended"] is False, marks
+    assert hello2 is not None and hello2["status"] == 200 and "listener_pubkey" in hello2["body"], (
+        f"serve-a still refuses the ctx_handover routes 30 s after the refused pull: {hello2}"
+    )
 
 
 # ---------------------------------------------------------------------------------------------------------
