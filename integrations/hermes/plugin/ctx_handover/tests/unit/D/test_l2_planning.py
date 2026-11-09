@@ -56,8 +56,9 @@ TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def test_reason_codes_and_markers_are_public():
-    """X03: the reason codes (a)–(g) with their letters and the item/origin markers are constants of ``plan``; the
-    surfaces have a text for every code (they import the codes, they keep no table of their own)."""
+    """X03: the reason codes (a)–(g), since G′ (h) ``workspace_excluded`` (R30), with their letters and the
+    item/origin markers are constants of ``plan``; the surfaces have a text for every code (they import the codes,
+    they keep no table of their own)."""
     assert plan.REASON_CODES == (
         "proposed",
         "conflict",
@@ -66,8 +67,9 @@ def test_reason_codes_and_markers_are_public():
         "model",
         "outside_workspace",
         "instruction_files",
+        "workspace_excluded",
     )
-    assert [plan.CONFIRM_LETTERS[code] for code in plan.REASON_CODES] == list("abcdefg")
+    assert [plan.CONFIRM_LETTERS[code] for code in plan.REASON_CODES] == list("abcdefgh")
     assert (plan.SUSPECTED_SECRET, plan.UNVERIFIED) == ("suspected_secret", "unverified")
     assert set(surfaces.REASON_TEXT) == set(plan.REASON_CODES)
     assert surfaces.SUSPECTED_SECRET is plan.SUSPECTED_SECRET
@@ -182,6 +184,7 @@ SAMPLE_PARTS = {
     "ntfs_invalid": ["aux.txt"],
     "rewind_rows": 3,
     "lfs_missing": 2,
+    "bundle_import": True,
 }
 
 
@@ -294,6 +297,7 @@ def test_presend_summary_has_the_keys_the_surfaces_read(lay):
         "instruction_files",
         "model",
         "offline",
+        "workspace_excluded",
     }
     assert set(plan.PRESEND_KEYS) <= set(summary)
     included = [i for i in rp.items if i.include is Include.YES]

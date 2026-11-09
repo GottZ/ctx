@@ -44,7 +44,7 @@ from .errors import BadRequest
 from .jsonutil import loads_bounded
 from .model import Candidate, HermesPaths, ItemKind, Origin, Weight
 from .paths import msys_to_windows
-from .policy import HERMES_FILE_KINDS, PolicyConfig, is_denied_name
+from .policy import HERMES_FILE_KINDS, PolicyConfig, is_denied_name, reserved_workspace_roots
 
 RANK: dict[Weight, int] = {Weight.MENTION: 0, Weight.READ: 1, Weight.WRITE: 2}
 """Order of evidence weights (DESIGN §8.2)."""
@@ -384,6 +384,16 @@ class _Classifier:
             for q in (flav.norm(str(p)), self._real(str(p))):
                 if q not in self.protected:
                     self.protected.append(q)
+        # R29/V46: the directory the plugin reserves in the Hermes home is a source like any workspace; it lifts only
+        # the Hermes home and root (never the plugin data dir or the document cache), and only in the lexical form
+        # and below the resolved Hermes home — never through the realpath of the reserved directory itself
+        self.reserved = [flav.norm(str(r)) for r in reserved_workspace_roots(cfg)]
+        self.liftable = {
+            q
+            for p in (cfg.hermes_home, cfg.hermes_root, hermes.home)
+            if p is not None and str(p) != ""
+            for q in (flav.norm(str(p)), self._real(str(p)))
+        }
         self._toplevel: dict[str, str | None] = {}
 
     def _real(self, path: str) -> str:
@@ -407,7 +417,10 @@ class _Classifier:
         return self.flav.is_root(path) or self.flav.under(self.home, path)
 
     def hermes_owned(self, path: str) -> bool:
-        return any(self.flav.under(path, p) for p in self.protected)
+        """Inside the Hermes root, home, plugin data or document cache — except the reserved workspace directory
+        (``<HERMES_HOME>/handover-workspaces``, R29/V46), which only lifts the Hermes home and root."""
+        reserved = any(self.flav.under(path, r) for r in self.reserved)
+        return any(self.flav.under(path, p) for p in self.protected if not (reserved and p in self.liftable))
 
     def pseudo_fs(self, path: str) -> bool:
         return not self.flav.windows and any(path == p or path.startswith(p + "/") for p in _PSEUDO_FS)
@@ -435,14 +448,10 @@ class _Classifier:
             return False
 
     def partial(self, root: str) -> bool:
-        """A partial clone (promisor remote, W107). ``is_partial`` is optional on a probe (``gitops.GitProbe`` has
-        it, the K0 protocol does not yet); without it the repository counts as complete — the pack step re-checks
-        and refuses a partial clone itself."""
-        fn = getattr(self.git, "is_partial", None)
-        if not callable(fn):
-            return False
+        """A partial clone (promisor remote, W107; ``contracts.GitProbe.is_partial``, V30). A failing probe counts
+        as complete — the pack step re-checks and refuses a partial clone itself."""
         try:
-            return bool(fn(root))
+            return bool(self.git.is_partial(root))
         except Exception:  # unknown ⇒ complete, as above
             return False
 

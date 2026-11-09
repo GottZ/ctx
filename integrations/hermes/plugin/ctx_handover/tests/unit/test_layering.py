@@ -44,11 +44,11 @@ LAYERS: dict[str, int] = {
             "refine",
             "note",
             "pathmap",
-            "envfacts",
         ),
         4,
     ),
-    **dict.fromkeys(("materialize", "plan", "wire"), 5),
+    # envfacts sits above session_import (G′, V08): it calls the one offline rule instead of mirroring it
+    **dict.fromkeys(("materialize", "plan", "wire", "envfacts"), 5),
     **dict.fromkeys(("local_source", "local_target", "bundle", "remote", "pairing"), 6),
     **dict.fromkeys(("participant", "conductor"), 7),
     "server": 8,

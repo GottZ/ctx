@@ -581,6 +581,7 @@ def test_confirmation_reasons(lay):
         plan.CONFIRM_MODEL: "e",
         plan.CONFIRM_OUTSIDE: "f",
         plan.CONFIRM_INSTRUCTIONS: "g",
+        plan.CONFIRM_WORKSPACE_EXCLUDED: "h",
     }
 
 

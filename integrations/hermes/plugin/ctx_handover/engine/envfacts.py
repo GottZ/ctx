@@ -1,4 +1,4 @@
-"""Environment facts of one side and their delta (layer L4, stdlib only; DESIGN §11.1, §11.2, BX M11, BX P7).
+"""Environment facts of one side and their delta (layer L5, stdlib only; DESIGN §11.1, §11.2, BX M11, BX P7, R29).
 
 Deterministic and without a shell on every platform: values come from ``platform``, ``socket``, ``getpass``,
 ``locale``, ``shutil.which``, ``shutil.disk_usage`` and ``os.stat``; tool versions from ``<tool> --version`` run as
@@ -20,13 +20,19 @@ configured model) arrive as ``HostFacts`` from ``hostcompat.host_facts`` — thi
 All platform calls go through ``SystemOps`` (``default_system()``), the one seam tests use to run the macOS and
 Windows branches on any host. The case-sensitivity probe is read-only: it stats a swapped-case spelling of an
 existing path component instead of creating files.
+
+The write root (R29): ``workspace_root`` and ``allow_roots`` are reported as this host resolves them
+(``pathmap.resolve_root``: the schema default ``~/hermes-handover`` is ``<HERMES_HOME>/handover-workspaces`` when it
+lies in the Hermes home), and the probe checks the root against this host's policy and filesystem
+(``check_workspace_root``): ``EnvFacts.workspace_root_ok``/``workspace_root_problem`` travel with the facts, so the
+conductor stops before anything is transferred when the target cannot write there (``workspace_root_message``).
+The offline capability of the main route is ``session_import.offline_capable`` itself (contract X04, V08).
 """
 
 from __future__ import annotations
 
 import concurrent.futures
 import getpass
-import ipaddress
 import locale
 import os
 import platform
@@ -34,19 +40,21 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import tempfile
 import time
 import unicodedata
-import urllib.parse
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from . import session_import
 from .errors import BadRequest
 from .jsonutil import loads_bounded
 from .model import EnvFacts, HostFacts, Options, ToolInfo
-from .paths import expand_root
+from .pathmap import resolve_root
+from .policy import PolicyConfig, check_target_dest
 
 PROBE_TIMEOUT_S = 3.0
 PROBE_WORKERS = 16
@@ -68,9 +76,6 @@ VERSION_ARGS: dict[str, tuple[str, ...]] = {
     "helm": ("version", "--short"),
 }
 """Tools whose version flag is not ``--version``."""
-
-LOCAL_PROVIDERS = frozenset({"llamacpp", "llama.cpp", "llama-cpp", "ollama", "lmstudio"})
-"""Providers that run on this machine (DESIGN §6.7 step 4); the set of ``session_import.LOCAL_PROVIDERS``."""
 
 SHELL_WORDS = frozenset(
     {
@@ -208,6 +213,8 @@ class SystemOps:
     stat: Callable[[str], os.stat_result]
     locale: Callable[[], str]
     timezone: Callable[[], str]
+    access: Callable[[str, int], bool] = os.access
+    """``os.access`` (additive): may this process write into a directory (``check_workspace_root``, R29)."""
 
 
 def default_system() -> SystemOps:
@@ -230,6 +237,7 @@ def default_system() -> SystemOps:
         stat=os.stat,
         locale=_locale,
         timezone=_timezone,
+        access=os.access,
     )
 
 
@@ -352,46 +360,107 @@ def case_insensitive_at(path: str, sys_ops: SystemOps, *, default: bool) -> bool
     return default
 
 
-def _local_url(url: object) -> bool:
-    if not isinstance(url, str) or not url:
-        return False
-    try:
-        host = urllib.parse.urlsplit(url).hostname
-    except ValueError:
-        return False
-    if not host:
-        return False
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return ip.is_loopback or ip.is_private or ip.is_link_local
-
-
 def _offline_capable(config: dict) -> bool:
-    """``EnvFacts.offline_capable``: does this host's main model route stay on this host or its LAN? The one
-    offline rule (contracts X04, V08) is B's ``session_import.offline_capable``; this is its value for the main route
-    (``offline_capable({}, config)``). ``envfacts`` and ``session_import`` share layer L4 (no import between them),
-    so the rule is mirrored here statement by statement — ``test_envfacts_offline_rule_is_session_imports`` pins
-    both to the same answer on every case — and becomes a call once ``envfacts`` sits above ``session_import``.
+    """``EnvFacts.offline_capable``: does this host's main model route stay on this host or its LAN? The one offline
+    rule (contract X04, V08): ``session_import.offline_capable({}, config)`` — ``envfacts`` sits above
+    ``session_import`` (layer L5), so there is no second rule here."""
+    return session_import.offline_capable({}, config if isinstance(config, Mapping) else {})
 
-    The provider is ``model.provider``; a local provider kind is offline; a named ``providers.<name>`` entry decides
-    by its ``base_url``/``api_base``, else ``model.base_url``: ``localhost``, ``*.localhost``, loopback, private
-    and link-local addresses are local; anything else, or no provider, is not."""
-    model = config.get("model") if isinstance(config, Mapping) else None
-    provider = model.get("provider") if isinstance(model, Mapping) else None
-    provider = provider.strip() if isinstance(provider, str) and provider.strip() else None
-    if provider is None:
-        return False
-    if provider.lower() in LOCAL_PROVIDERS:
-        return True
-    named = config.get("providers")
-    entry = named.get(provider) if isinstance(named, Mapping) else None
-    if isinstance(entry, Mapping):
-        return _local_url(entry.get("base_url") or entry.get("api_base"))
-    return _local_url(model.get("base_url"))
+
+# ---------------------------------------------------------------------------------------------------------
+# Write root (R29)
+# ---------------------------------------------------------------------------------------------------------
+
+ROOT_PROBLEMS: tuple[str, ...] = (
+    "invalid",
+    "denied",
+    "not_allowed_root",
+    "not_directory",
+    "not_writable",
+    "check_failed",
+)
+"""``EnvFacts.workspace_root_problem`` codes (R29): the root cannot be expanded (``invalid``), lies on the target
+denylist — e.g. inside the Hermes home (``denied``) — or outside ``allow_roots`` (``not_allowed_root``), is or lies
+below something that is not a directory (``not_directory``), cannot be written (``not_writable``), or the check
+itself failed (``check_failed``; fail-closed)."""
+
+_PROBLEM_TEXT = {
+    "invalid": "is not a usable path",
+    "denied": "may not be written (it lies in a protected location such as the Hermes home)",
+    "not_allowed_root": "is not inside allow_roots",
+    "not_directory": "is not a directory",
+    "not_writable": "cannot be written",
+    "check_failed": "could not be checked",
+}
+
+
+def check_workspace_root(root: str | None, cfg: PolicyConfig, *, system: SystemOps | None = None) -> str:
+    """``""`` when this host can use ``root`` as its write root, else one code of ``ROOT_PROBLEMS`` (R29). Checks
+    ``policy.check_target_dest`` (denylist and ``allow_roots``), then the filesystem: an existing root must be a
+    writable directory; a missing one needs a writable directory as its nearest existing ancestor (the commit
+    creates it, R11). Never raises: anything unexpected is ``check_failed``."""
+    try:
+        if not isinstance(root, str) or not root or not os.path.isabs(root):
+            return "invalid"
+        verdict = check_target_dest(Path(root), cfg, recorded=False, local_choice=False)
+        if not verdict.allowed:
+            return "not_allowed_root" if verdict.reason == "not_allowed_root" else "denied"
+        s = system or default_system()
+        current = os.path.normpath(root)
+        for _ in range(256):
+            try:
+                st = s.stat(current)
+            except FileNotFoundError:
+                parent = os.path.dirname(current)
+                if parent == current:
+                    return "not_directory"
+                current = parent
+                continue
+            except NotADirectoryError:
+                return "not_directory"
+            except PermissionError:
+                return "not_writable"
+            if not stat.S_ISDIR(st.st_mode):
+                return "not_directory"
+            return "" if s.access(current, os.W_OK | os.X_OK) is True else "not_writable"
+        return "check_failed"
+    except Exception:  # fail-closed: an unchecked root is never reported usable
+        return "check_failed"
+
+
+def workspace_root_message(facts: EnvFacts) -> str | None:
+    """One line for the user when ``facts.workspace_root_ok`` is False (R29): the host, the root, the problem and the
+    setting to change (``workspace_root``); None otherwise (usable, or not checked)."""
+    if getattr(facts, "workspace_root_ok", None) is not False:
+        return None
+    problem = getattr(facts, "workspace_root_problem", "") or "check_failed"
+    text = _PROBLEM_TEXT.get(problem, _PROBLEM_TEXT["check_failed"])
+    host = _one_line(facts.instance_name, 64) or "the other side"
+    root = _one_line(facts.workspace_root, 512) or "?"
+    return (
+        f"the workspace root {root} on {host} {text}; set workspace_root (and allow_roots) in the ctx_handover "
+        f"settings there"
+    )
+
+
+def _own_policy(options: Options, host: HostFacts, home: str, family: str, root: str | None, roots) -> PolicyConfig:
+    """This host's policy when the caller passed none: built from the options with the resolved roots (the Hermes
+    root is not known here, the Hermes home stands in for it)."""
+    hermes = Path(host.hermes_home)
+    resolved = replace(
+        options,
+        workspace_root=root or options.workspace_root,
+        allow_roots=tuple(r for r in roots if r),
+    )
+    return PolicyConfig.from_options(
+        resolved,
+        home=Path(home),
+        hermes_home=hermes,
+        hermes_root=hermes,
+        plugin_dir=hermes / "plugin-data" / "ctx_handover",
+        case_insensitive=family in {"darwin", "windows"},
+        target_os=family,
+    )
 
 
 def _tool_names(names: Iterable[object]) -> list[str]:
@@ -417,11 +486,13 @@ def probe(
     capabilities: frozenset[str] = frozenset(),
     system: SystemOps | None = None,
     scratch_dir: str | os.PathLike | None = None,
+    cfg: PolicyConfig | None = None,
 ) -> EnvFacts:
     """Deterministic facts of this host (DESIGN §11.1). ``tools_seen`` are names to look up (the source's transcript
     tools, or on the target the names the source reported) — never executed. ``system`` (additive) replaces the
     platform calls; ``scratch_dir`` (additive) is where the probe's scratch root is made instead of the system temp
-    directory (R26, see the module docstring)."""
+    directory (R26, see the module docstring). ``cfg`` (additive) is this host's own policy for the write-root check
+    (R29; ``workspace_root_ok``/``workspace_root_problem``) — without it the probe builds one from ``options``."""
     s = system or default_system()
     family = _family(s.system())
     home = s.home()
@@ -466,18 +537,30 @@ def probe(
             shutil.rmtree(scratch, ignore_errors=True)
     seen = {n: s.which(n) for n in _tool_names(tools_seen)[:MAX_TOOLS_SEEN]}
 
-    base = Path(home)
-    workspace_root = str(expand_root(options.workspace_root, base))
-    allow_roots = tuple(str(expand_root(r, base)) for r in options.allow_roots)
+    hermes_root = str(cfg.hermes_root) if cfg is not None else None
+
+    def resolve(spec: str) -> str | None:
+        return resolve_root(spec, home=home, hermes_home=host.hermes_home, hermes_root=hermes_root)
+
+    resolved_root = resolve(options.workspace_root)
+    resolved_roots = [resolve(r) for r in options.allow_roots]
+    workspace_root = resolved_root or ""
+    allow_roots = tuple(r for r in resolved_roots if r)
     plugin_dir = str(Path(host.hermes_home) / "plugin-data" / "ctx_handover")
+    try:
+        policy = cfg or _own_policy(options, host, home, family, resolved_root, resolved_roots)
+        problem = check_workspace_root(resolved_root, policy, system=s)
+    except Exception:  # fail-closed (R29): a root this probe could not check is not usable
+        problem = "check_failed"
     disk: dict[str, int] = {}
-    for p in dict.fromkeys((workspace_root, *allow_roots, plugin_dir)):
+    for p in dict.fromkeys(p for p in (workspace_root, *allow_roots, plugin_dir) if p):
         existing = _nearest_existing(p, s)
         free = s.disk_free(existing) if existing else None
         if free is not None:
             disk[p] = free
     default_ci = family in {"darwin", "windows"}
-    case = {p: case_insensitive_at(p, s, default=default_ci) for p in dict.fromkeys((workspace_root, *allow_roots))}
+    roots = [p for p in (workspace_root, *allow_roots) if p]
+    case = {p: case_insensitive_at(p, s, default=default_ci) for p in dict.fromkeys(roots)}
     git_info = tools.get("git")
     git_version = None
     if git_info and git_info.version:
@@ -514,6 +597,8 @@ def probe(
         git_lfs=s.which("git-lfs") is not None,
         capabilities=frozenset(capabilities),
         python_version=python_version,
+        workspace_root_ok=problem == "",
+        workspace_root_problem=problem,
     )
 
 

@@ -65,6 +65,7 @@ KNOWN_WHY = frozenset(
         "home directory is not transferred as a workspace (use --include for the files you need)",
         "home directory is not transferred as a whole",
         "contains the workspace",
+        "withheld by source policy",
     }
 )
 """Reason texts the note shows verbatim (the plan's vocabulary); anything else is shown as "not transferred"."""
@@ -101,12 +102,15 @@ NOTE_PART_KEYS = frozenset(
         "ntfs_invalid",
         "rewind_rows",
         "lfs_missing",
+        "bundle_import",
     }
 )
 """Every ``note_parts`` key ``compose`` renders (X16, DESIGN §11.3): the lists of "Not transferred", tools and
 env-var names, ``source_kept`` (the copy sentence, O3), ``instruction_files`` (new or changed here), ``warnings``,
 ``pack_time`` (the snapshot sentence; the ``pack_time`` argument wins when set), ``title`` (inside the data block
-only) and the target's own ``case_collisions``/``ntfs_invalid``/``rewind_rows``/``lfs_missing``."""
+only), the target's own ``case_collisions``/``ntfs_invalid``/``rewind_rows``/``lfs_missing`` and ``bundle_import``
+(True on a bundle import: the sentence of DESIGN §5.4 that the bundle may have been imported elsewhere too)."""
+BUNDLE_IMPORT_SENTENCE = "This handover came from a bundle file; this bundle may have been imported elsewhere too."
 
 
 def unknown_note_parts(parts: object) -> tuple[str, ...]:
@@ -376,7 +380,9 @@ def _not_transferred(parts: dict, src: str, per_list: int, limit: int) -> list[s
         out.append(f"{other} warning{'s' if other != 1 else ''} from {src} (see report)")
     if len(out) > limit:
         out = [*out[:limit], f"… {len(out) - limit} more (see report)"]
-    return [f"- {one_line(line, 600)}" for line in out]
+    # every entry is capped on its own (``_path``, ``_cmd``, ``_name``, ``NAME_CAP``), never the joined line: the last
+    # name of a list stays visible; ``_TIERS`` keep the whole note under ``NOTE_MAX``
+    return [f"- {one_line(line, NOTE_MAX)}" for line in out]
 
 
 def _render(
@@ -437,6 +443,8 @@ def _render(
     if nt:
         lines.append("Not transferred:")
         lines.extend(nt)
+    if parts.get("bundle_import") is True:
+        lines.append(BUNDLE_IMPORT_SENTENCE)
     if parts.get("source_kept") is True:
         lines.append(f"The session stays active on {src} (this is a copy); changes made there are not merged here.")
     if delta_message:

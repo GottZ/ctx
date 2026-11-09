@@ -17,6 +17,11 @@ plan plus paths under the operator's ``export_roots``; the counterpart can narro
 ``include_secret`` is ignored (with a warning). ``build_plan(remote_driven=True)`` ignores the counterpart's include
 hints for the same reason.
 
+Excluded working directory (R30): when the policy leaves the session's working directory behind (the primary item
+is ``no`` and named in ``not_transferred`` — e.g. it lies in the Hermes home), ``presend_summary`` says so
+(``workspace_excluded``) and ``confirmation_reasons`` raises ``workspace_excluded`` (letter h), which a blanket yes
+never confirms (``YES_EXEMPT``/``yes_exempt``); the user's own ``--no-workspace`` is the explicit answer.
+
 Suspected secrets (R25): an extra file the policy suspects (or could not check, no redactor) carries the exact reason
 element ``SUSPECTED_SECRET``; ``apply_choice(final, "yes")`` never confirms it and ``restrict_to_releasable`` never
 lets a counterpart confirm it. Only a local ``include_secret`` (``yes`` already in the plan) releases it.
@@ -84,6 +89,7 @@ CONFIRM_SECRET = "include_secret"  # noqa: S105 - reason code, not a secret
 CONFIRM_MODEL = "model"
 CONFIRM_OUTSIDE = "outside_workspace"
 CONFIRM_INSTRUCTIONS = "instruction_files"
+CONFIRM_WORKSPACE_EXCLUDED = "workspace_excluded"
 CONFIRM_LETTERS: dict[str, str] = {
     CONFIRM_PROPOSED: "a",
     CONFIRM_CONFLICT: "b",
@@ -92,9 +98,13 @@ CONFIRM_LETTERS: dict[str, str] = {
     CONFIRM_MODEL: "e",
     CONFIRM_OUTSIDE: "f",
     CONFIRM_INSTRUCTIONS: "g",
+    CONFIRM_WORKSPACE_EXCLUDED: "h",
 }
-"""Confirmation reasons of DESIGN §14.1 and their letters. ``None`` (no answer) cancels the job for every reason
-except ``proposed`` alone, which only excludes the proposals (BX L5)."""
+"""Confirmation reasons of DESIGN §14.1 (a)–(g) plus (h) ``workspace_excluded`` (R30) and their letters. ``None``
+(no answer) cancels the job for every reason except ``proposed`` alone, which only excludes the proposals (BX L5)."""
+YES_EXEMPT: frozenset[str] = frozenset({CONFIRM_WORKSPACE_EXCLUDED})
+"""Reasons a blanket yes (``--yes``, ``Options.yes``) never confirms (R30, like suspected secrets under R25): the
+conductor asks for them even with ``--yes``; without an answer the job ends with nothing locked."""
 
 CHOICES = ("yes", "no_proposed")
 
@@ -106,7 +116,7 @@ UNVERIFIED = "unverified"
 or revoked key, or the remote source of a pull (DESIGN §8.7 reason (g), SEC 4.3; a continuation refuses such an
 origin with this reason, R22). Surfaces import it with the reason codes (X03)."""
 REASON_CODES: tuple[str, ...] = tuple(CONFIRM_LETTERS)
-"""Every confirmation reason code, in letter order (a)–(g) (X03)."""
+"""Every confirmation reason code, in letter order (a)–(h) (X03)."""
 MAX_REFUSED_IDS = 256
 MAX_WARNINGS = 32
 
@@ -1071,6 +1081,36 @@ def _is_secret_why(why: str) -> bool:
     return why in {WHY_SECRET, WHY_PEER_SECRET} or why.endswith(f"({WHY_SECRET})")
 
 
+_EXCLUDED_REASON = {
+    "hermes": "hermes",
+    WHY_HOME_WORKSPACE: "home",
+    WHY_SECRET: "secret",
+    WHY_TOO_LARGE: "too_large",
+    "missing": "missing",
+    "unreadable": "unreadable",
+}
+
+
+def workspace_excluded(final_or_plan: FinalPlan | ResourcePlan) -> dict | None:
+    """The session's working directory the plan leaves behind (R30), or None: ``{"path", "reason", "why"}`` when the
+    primary item (role ``primary``, origin ``cwd``) is ``no`` and named in ``not_transferred`` — a planning refusal,
+    not the user's ``--no-workspace``. ``reason`` is a code (``hermes``, ``home``, ``secret``, ``too_large``,
+    ``missing``, ``unreadable``, ``other``), ``why`` the plan's text."""
+    rp = final_or_plan.plan if isinstance(final_or_plan, FinalPlan) else final_or_plan
+    primary = next((i for i in rp.items if i.role is ItemRole.PRIMARY and i.origin is Origin.CWD), None)
+    if primary is None or primary.include is not Include.NO:
+        return None
+    entry = next((n for n in rp.not_transferred if n.path == primary.source_path), None)
+    if entry is None:
+        return None
+    return {"path": primary.source_path, "reason": _EXCLUDED_REASON.get(entry.why, "other"), "why": entry.why}
+
+
+def yes_exempt(reasons: Iterable[str]) -> list[str]:
+    """The reasons among ``reasons`` that a blanket yes does not confirm (``YES_EXEMPT``, R30), in their order."""
+    return [r for r in reasons if r in YES_EXEMPT]
+
+
 def _outside_workspace(final: FinalPlan) -> list[str]:
     return [i.source_path for i in _included(final) if i.role in {ItemRole.SECONDARY, ItemRole.EXTRA}]
 
@@ -1133,8 +1173,9 @@ PRESEND_KEYS = (
     "instruction_files",
     "model",
     "offline",
+    "workspace_excluded",
 )
-"""The keys of ``presend_summary`` the surfaces read (W125); ``item_list``, ``items`` and
+"""The keys of ``presend_summary`` the surfaces read (W125, R30 ``workspace_excluded``); ``item_list``, ``items`` and
 ``extras_outside_workspace`` come on top."""
 
 
@@ -1152,7 +1193,9 @@ def presend_summary(
     * ``instruction_files``: ``instructions`` when given (the target's ``instruction_files`` result, with
       ``status``), else the instruction files of the included items as ``{"item_id", "rel", "sha256"}``;
     * ``model`` (``model_text``) and ``offline`` (``offline_capable``) of the target model — both None when the
-      model stays (X04).
+      model stays (X04);
+    * ``workspace_excluded``: the session's working directory the policy leaves behind (``workspace_excluded``,
+      R30) as ``{"path", "reason", "why"}``, else None.
 
     ``items`` and ``extras_outside_workspace`` are the layer-1 names of ``items_count`` and ``outside_workspace``,
     kept with the same values for readers that have not moved yet."""
@@ -1174,6 +1217,7 @@ def presend_summary(
         "instruction_files": listed,
         "model": model_text(final.model_change),
         "offline": _model_offline(final.model_change),
+        "workspace_excluded": workspace_excluded(final),
         "item_list": [
             {"item_id": i.item_id, "kind": i.kind.value, "path": i.source_path, "size": i.size_estimate}
             for i in included
@@ -1240,7 +1284,9 @@ def confirmation_reasons(
     ``PolicyConfig`` — the conductor passes it when the source is local (push, export); its ``include_secret`` holds
     exactly the paths given by a local ``--include-secret``. ``options.hints.include_secret`` is never read: hints may
     come from the counterpart and never release a secret (R18). Reason (e) reads ``final.model_change`` only in the
-    form of contract X04."""
+    form of contract X04. Reason (h) ``workspace_excluded`` (R30): the policy leaves the session's working directory
+    behind (``workspace_excluded``) and the user did not say ``--no-workspace`` (``options.hints.no_workspace``); a
+    blanket yes never confirms it (``YES_EXEMPT``)."""
     reasons = []
     if any(i.include is Include.PROPOSED for i in final.plan.items):
         reasons.append(CONFIRM_PROPOSED)
@@ -1262,6 +1308,8 @@ def confirmation_reasons(
         reasons.append(CONFIRM_OUTSIDE)
     if instructions:
         reasons.append(CONFIRM_INSTRUCTIONS)
+    if workspace_excluded(final) is not None and options.hints.no_workspace is not True:
+        reasons.append(CONFIRM_WORKSPACE_EXCLUDED)
     return reasons
 
 

@@ -275,6 +275,23 @@ class CeilingGitProbe:
     def is_shallow(self, path: str) -> bool:
         return self._rev_parse(path, "--is-shallow-repository") == "true"
 
+    def is_partial(self, path: str) -> bool:
+        """A promisor remote in the repository's config (``gitops.GitProbe.is_partial``, V30), read with
+        ``git config --get-regexp`` (read-only)."""
+        d = path if os.path.isdir(path) else os.path.dirname(path)
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["git", "-C", d, "config", "--get-regexp", r"^remote\..*\.promisor$"],  # noqa: S607 - test helper
+                capture_output=True,
+                text=True,
+                env=self._env(),
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return proc.returncode == 0 and any(line.split()[-1:] == ["true"] for line in proc.stdout.splitlines())
+
 
 def git_init(path: Path) -> Path:
     """``git init`` without commits (no identity needed). Returns ``path``."""
