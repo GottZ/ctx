@@ -5,6 +5,15 @@ target denylist and allow-roots first (R19), then fresh / update / return / conf
 Local uncommitted changes are never overwritten (I5): a dirty repository, a foreign directory, a file, a changed
 tree or anything an extra would write into without a local choice goes to a fresh directory instead.
 
+Every fallback the transaction builds itself — a conflict PREPARE finds in update or return mode, a fresh
+destination taken at c1 — comes from ``WorkspaceTxn._fallback`` = ``pathmap.fallback_dest`` with the target's
+policy, the rule ``LocalTarget`` applies at negotiation (DESIGN §9.7, V35): the sibling ``<dest>-handover-<stamp>``
+only under ``allow_roots``, else ``<workspace_root>/<basename>-handover-<stamp>`` (R29: the schema default is
+``<HERMES_HOME>/handover-workspaces`` when it lies in the Hermes home). A destination outside ``allow_roots`` — a
+return-trip origin, a recorded or typed path — never gets a fallback beside it (L3-F23): a conflict in PREPARE goes
+under ``workspace_root``; at c1, where only a rename beside the destination is possible, a taken destination of
+that kind ends the step (``dest_appeared``) instead.
+
 ``WorkspaceTxn`` runs one target job's workspace part: ``prepare_item`` (heavy, invisible: partial directories,
 quarantined git objects, staged files), then ``commit_steps`` hands the conductor's commit op the c1 steps as
 ``(name, forward, inverse)`` in plan order, ``place_hermes_files`` the c3 pair; ``discard`` drops whatever was
@@ -40,9 +49,10 @@ import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
-from . import filetree, gitapply, gitpack
+from . import filetree, gitapply, gitpack, pathmap
 from .contracts import BlockSink
 from .errors import BadRequest, ConflictError, PolicyDenied
 from .gitops import (
@@ -72,7 +82,7 @@ from .model import (
     PlanItem,
     TargetDecision,
 )
-from .paths import PlatformRules
+from .paths import DEFAULT_WORKSPACE_SPEC, PlatformRules
 from .policy import HERMES_FILE_KINDS, PolicyConfig, check_source_file, check_target_dest, is_hermes_protected
 
 SNAPSHOT_VERSION = 2
@@ -100,7 +110,9 @@ class Assessment:
 
 
 def fallback_dest(dest: str, now: float | None = None) -> str:
-    """``<dest>-handover-<YYYYmmdd-HHMMSS>`` (DESIGN §9.7)."""
+    """The bare sibling name ``<dest>-handover-<YYYYmmdd-HHMMSS>`` without any root or policy check — kept for callers
+    that hand ``assess`` a fallback of their own (tests). The transaction never uses it: its fallbacks come from
+    ``WorkspaceTxn._fallback`` (``pathmap.fallback_dest``, L3-F23)."""
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now if now is not None else time.time()))
     return f"{str(dest).rstrip('/')}-handover-{stamp}"
 
@@ -422,7 +434,9 @@ class _StepLog:
 
 class WorkspaceTxn:
     """One target job's workspace work (see module docstring). ``cfg``/``rules`` (additions with defaults) are
-    the target's policy and path rules; ``now`` the clock for fallback names."""
+    the target's policy and path rules; ``now`` the clock for fallback names; ``workspace_root`` (additive) the
+    job's configured ``Options.workspace_root`` — the root of every fallback outside ``allow_roots`` (``_fallback``);
+    None = the schema default ``~/hermes-handover`` (R29-resolved)."""
 
     def __init__(
         self,
@@ -436,8 +450,10 @@ class WorkspaceTxn:
         rules: PlatformRules | None = None,
         now: Callable[[], float] = time.time,
         cancelled: Callable[[], bool] = _never,
+        workspace_root: str | None = None,
     ):
         self.job_id = job_id
+        self.workspace_root = workspace_root
         self.job6 = job_id[-6:].lower()
         self.staging = Path(staging)
         self.git = git
@@ -479,14 +495,40 @@ class WorkspaceTxn:
             created.append(d)
         return created
 
-    def _fresh_target(self, decision: TargetDecision) -> tuple[Path, Path]:
+    def _fallback(self, dest: Path, *, later: float = 0.0) -> Path:
+        """Where an item goes when ``dest`` cannot take it — the one rule of every fallback this transaction builds
+        (L3-F23): ``pathmap.fallback_dest`` with this host's policy (home, Hermes home and root, denylist), the rule
+        ``LocalTarget`` uses at negotiation (DESIGN §9.7, V35, R19, R29). ``<dest>-handover-<stamp>`` while that
+        sibling lies under ``allow_roots`` and passes the target check, else ``<workspace_root>/<basename>-handover-
+        <stamp>``; ``later`` seconds move the stamp (the fallback of a fallback)."""
+        cfg = self._require_cfg()
+        return Path(
+            pathmap.fallback_dest(
+                str(dest),
+                now=datetime.fromtimestamp(self.now() + later),
+                workspace_root=self.workspace_root or DEFAULT_WORKSPACE_SPEC,
+                allow_roots=tuple(str(r) for r in cfg.allow_roots),
+                cfg=cfg,
+            )
+        )
+
+    def _c1_fallback(self, dest: Path, *, later: float = 0.0) -> Path | None:
+        """The fallback of a fresh item whose destination is taken when c1 renames (``gitapply.commit_fresh``,
+        ``filetree.commit``): ``_fallback(dest)`` when it lies in ``dest``'s directory — the partial sits there, so
+        only that rename needs no new parent and stays on one file system. Beyond it (a destination outside
+        ``allow_roots``: ``_fallback`` answers under ``workspace_root``) None — the step then ends with
+        ``dest_appeared`` and nothing is written beside a destination the policy accepts only as recorded or typed."""
+        fb = self._fallback(dest, later=later)
+        return fb if fb.parent == dest.parent else None
+
+    def _fresh_target(self, decision: TargetDecision) -> tuple[Path, Path | None]:
         cfg = self._require_cfg()
         dest = Path(decision.conflict.fallback_dest if decision.conflict else decision.dest)
         recorded = decision.reason in {"return-mapping", "user"} and decision.conflict is None
         verdict = check_target_dest(dest, cfg, recorded=recorded, local_choice=recorded)
         if not verdict.allowed:
             raise PolicyDenied(f"destination not allowed ({verdict.reason})", reason="target_denied", path=str(dest))
-        return dest, Path(fallback_dest(str(dest), self.now()))
+        return dest, self._c1_fallback(dest)
 
     def _check_fresh(self, dest: Path) -> None:
         verdict = check_target_dest(dest, self._require_cfg(), recorded=False, local_choice=False)
@@ -496,7 +538,7 @@ class WorkspaceTxn:
             )
 
     def _prepare_git_fresh(
-        self, item_id: str, dest: Path, fb: Path, pack_item: dict, *, alternates: Path | None = None
+        self, item_id: str, dest: Path, fb: Path | None, pack_item: dict, *, alternates: Path | None = None
     ) -> _Prepared:
         cfg = self._require_cfg()
         partial = self._partial_for(dest, item_id)
@@ -521,7 +563,7 @@ class WorkspaceTxn:
             raise
         return _Prepared(item_id, "git", state.mode, dest, pack_item, state, created, ident=_ident(state.partial))
 
-    def _prepare_tree_fresh(self, item_id: str, dest: Path, fb: Path, pack_item: dict) -> _Prepared:
+    def _prepare_tree_fresh(self, item_id: str, dest: Path, fb: Path | None, pack_item: dict) -> _Prepared:
         cfg = self._require_cfg()
         partial = self._partial_for(dest, item_id)
         created = self._claim(partial, dest, item_id, "dir")
@@ -701,7 +743,7 @@ class WorkspaceTxn:
                     )
                 return _Prepared(item.item_id, "git", state.mode, dest, pack_item, state)
             except ConflictError as exc:
-                fb = Path(fallback_dest(str(dest), self.now()))
+                fb = self._fallback(dest)
                 self.warnings.append(f"{dest}: {exc.message}; materialised fresh at {fb}")
                 self.journal("info", f"prepare:{item.item_id}", {"fallback": str(fb), "why": exc.details.get("kind")})
                 self._check_fresh(fb)
@@ -709,7 +751,7 @@ class WorkspaceTxn:
                 with contextlib.suppress(Exception):
                     alt = git_dirs(self.git, dest)[1] / "objects"
                 return self._prepare_git_fresh(
-                    item.item_id, fb, Path(fallback_dest(str(fb), self.now() + 1)), pack_item, alternates=alt
+                    item.item_id, fb, self._c1_fallback(fb, later=1), pack_item, alternates=alt
                 )
         dest, fb = self._fresh_target(decision)
         return self._prepare_git_fresh(item.item_id, dest, fb, pack_item)
@@ -740,12 +782,11 @@ class WorkspaceTxn:
                 return _Prepared(item.item_id, "tree", decision.mode, dest, pack_item, state)
             except ConflictError as exc:
                 self._steps.drop("staged:" + enc_path(str(dest)))  # prepare_update removed what it staged
-                fb = Path(fallback_dest(str(dest), self.now()))
+                fb = self._fallback(dest)
                 self.warnings.append(f"{dest}: {exc.message}; materialised fresh at {fb}")
+                self.journal("info", f"prepare:{item.item_id}", {"fallback": str(fb), "why": exc.details.get("kind")})
                 self._check_fresh(fb)
-                return self._prepare_tree_fresh(
-                    item.item_id, fb, Path(fallback_dest(str(fb), self.now() + 1)), pack_item
-                )
+                return self._prepare_tree_fresh(item.item_id, fb, self._c1_fallback(fb, later=1), pack_item)
         dest, fb = self._fresh_target(decision)
         return self._prepare_tree_fresh(item.item_id, dest, fb, pack_item)
 
@@ -1039,12 +1080,24 @@ class WorkspaceTxn:
         rules: PlatformRules | None = None,
         now: Callable[[], float] = time.time,
         cancelled: Callable[[], bool] = _never,
+        workspace_root: str | None = None,
     ) -> WorkspaceTxn:
         """A transaction rebuilt from ``snapshot()`` in another process (same staging directory): its steps continue
         in the journaled direction and run only what is missing (module docstring). Reads formats 1 and 2."""
         if not isinstance(snapshot, dict) or snapshot.get("v") not in (1, SNAPSHOT_VERSION):
             raise BadRequest("unknown workspace snapshot format", field="snapshot.v")
-        txn = cls(snapshot["job_id"], staging, git, store, journal, cfg=cfg, rules=rules, now=now, cancelled=cancelled)
+        txn = cls(
+            snapshot["job_id"],
+            staging,
+            git,
+            store,
+            journal,
+            cfg=cfg,
+            rules=rules,
+            now=now,
+            cancelled=cancelled,
+            workspace_root=workspace_root,
+        )
         for d in snapshot.get("items") or ():
             kind = d["kind"]
             if kind == "git":
