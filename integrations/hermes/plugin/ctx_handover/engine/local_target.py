@@ -1,0 +1,964 @@
+"""The in-process target participant (layer L6, stdlib only; INTERFACES §4.5, DESIGN §3.3–§3.4, §6, §8.6, §9, §11).
+
+``LocalTarget`` implements ``TargetAPI`` on the machine where the session shall continue — called by a local
+conductor (pull, import) or through the registry by a remote one (push). Its core is the two-phase commit:
+
+* ``negotiate`` decides destinations and **checks the disk before anything is transferred** (``free < need ×
+  1.1`` ⇒ ``insufficient_storage``) [SK M3, BX M3].
+* ``start_prepare`` does the heavy, failure-prone work invisibly: workspace items into partial directories /
+  namespaced refs (``materialize.WorkspaceTxn``), the session imported **hidden**, hashes verified, the note
+  composed. The ``prepared`` vote is the target's prepare point.
+* ``start_commit`` is an asynchronous operation of journaled sub-steps, each with an inverse (DESIGN §3.4):
+  c1 workspace items → c2 session cwd → c3 HERMES_HOME files → c4 side state → c5 arrival row → c6 **unhide** →
+  c7 ``committed`` (point of no return). A failing forward step switches the journal to ``rollback`` and undoes
+  the done steps in reverse; the operation ends ``aborted``. A crash continues in the journaled direction
+  (``recover``); a rollback step that fails is recorded as ``needs_attention`` and the session stays hidden.
+  ``committing`` cannot be aborted from outside [SK H5].
+
+Working data is journaled on the job's ``target`` row. The B/D/E/F functions are reached through ``ports``
+(default: the real modules, imported lazily) so this class runs against stand-ins in layer 1.
+
+Contract with cluster E (requested in the A report): ``materialize.WorkspaceTxn`` records its prepared item
+states through the ``journal`` callback and can be rebuilt from those entries with
+``WorkspaceTxn.restore(job_id, staging, git, store, journal, entries)`` — the commit continues in another
+process after a crash.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import os
+import shutil
+import time
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+from . import CAPABILITIES_V1, PROTOCOL, WIRE_MAJOR, WIRE_MINOR
+from .contracts import JobContext
+from .errors import (
+    ContinueRefused,
+    HandoverError,
+    ImportFailed,
+    InsufficientStorage,
+    InvalidState,
+    NotFound,
+    PayloadTooLarge,
+    VerifyFailed,
+)
+from .jsonutil import canonical_bytes, from_wire, loads_bounded, sha256_hex, to_wire
+from .ledger import STALE_OWNER_S, Fenced, Ledger, private_dir, process_owner
+from .model import (
+    CapsuleInfo,
+    CommitAck,
+    ContinueResult,
+    DeltaInfo,
+    DestMode,
+    EnvFacts,
+    FinalPlan,
+    Hello,
+    HermesPaths,
+    HostFacts,
+    Include,
+    ItemKind,
+    ItemRole,
+    Limits,
+    MapRow,
+    Mode,
+    OpStatus,
+    ParticipantStatus,
+    PathMapEntry,
+    PlanItem,
+    PreparedInfo,
+    PrepareRequest,
+    Progress,
+    ResourcePlan,
+    Role,
+    TargetDecision,
+)
+from .ops import OpRunner, error_dict
+from .policy import PolicyConfig, check_target_dest
+
+MAX_DOC_BYTES = 64 * 1024 * 1024
+DISK_MARGIN = 1.1
+STATE_DB_FACTOR = 3.5
+"""A capsule needs its blocks plus ≈ 3.5 × its size in ``state.db`` (DESIGN §8.6, [RB §B8])."""
+
+_HERMES_KINDS = ("spillover", "hook_outputs", "native_inputs")
+
+
+def default_target_ports() -> SimpleNamespace:
+    """The real B/D/E/F modules (layer 2 wiring); imported lazily so the module loads without them."""
+    from . import (
+        ctxrecords,
+        envfacts,
+        gitops,
+        hermes_files,
+        materialize,
+        note,
+        pathmap,
+        plan,
+        session_export,
+        session_import,
+    )
+
+    return SimpleNamespace(
+        ctxrecords=ctxrecords,
+        envfacts=envfacts,
+        gitops=gitops,
+        hermes_files=hermes_files,
+        materialize=materialize,
+        note=note,
+        pathmap=pathmap,
+        plan=plan,
+        session_export=session_export,
+        session_import=session_import,
+    )
+
+
+def _digest(*parts: object) -> str:
+    return sha256_hex(canonical_bytes([p if not dataclasses.is_dataclass(p) else to_wire(p) for p in parts]))
+
+
+def _existing_ancestor(path: Path) -> Path:
+    p = path
+    while not p.exists():
+        if p.parent == p:
+            break
+        p = p.parent
+    return p
+
+
+class LocalTarget:
+    """``TargetAPI`` over this machine's session store and write roots (see module docstring)."""
+
+    def __init__(
+        self,
+        *,
+        ledger: Ledger,
+        store,
+        db_factory: Callable,
+        hermes: HermesPaths,
+        host: HostFacts,
+        config: dict,
+        ops: OpRunner,
+        git,
+        provider_usable: Callable[[str, dict], bool],
+        continuation,
+        redact: Callable[[str], str],
+        source_peer_id: str | None,
+        peer_verified: bool,
+        policy: PolicyConfig,
+        ports: SimpleNamespace | None = None,
+        clock: Callable[[], float] | None = None,
+        data_dir: Path | None = None,
+        disk_usage: Callable = shutil.disk_usage,
+        instance_name: str = "",
+        settings: dict | None = None,
+        peer_name: str | None = None,
+    ) -> None:
+        self.ledger = ledger
+        self.store = store
+        self.db_factory = db_factory
+        self.hermes = hermes
+        self.host = host
+        self.config = config
+        self.ops = ops
+        self.git = git
+        self.provider_usable = provider_usable
+        self.continuation = continuation
+        self.redact = redact
+        self.source_peer_id = source_peer_id
+        self.peer_verified = peer_verified
+        self.policy = policy
+        self._ports = ports
+        self._clock = clock or time.time
+        self.data_dir = Path(data_dir) if data_dir else Path(hermes.home) / "plugin-data" / "ctx_handover"
+        self.disk_usage = disk_usage
+        self.instance_name = instance_name or host.profile
+        self.settings = dict(settings or {})
+        self.peer_name = peer_name
+
+    # -- plumbing ------------------------------------------------------------------------------------------------
+    @property
+    def ports(self) -> SimpleNamespace:
+        if self._ports is None:
+            self._ports = default_target_ports()
+        return self._ports
+
+    def _ensure_job(self, job: JobContext) -> None:
+        if self.ledger.job(job.job_id, Role.TARGET) is None:
+            peer_id = job.peer.peer_id if job.peer is not None else None
+            self.ledger.create_job(job.job_id, Role.TARGET, job.mode, peer_id, {"role": "target", "local": True})
+
+    def _epoch(self, job: JobContext) -> int:
+        self._ensure_job(job)
+        epoch = self.ledger.claim_owner(job.job_id, Role.TARGET, process_owner(), STALE_OWNER_S)
+        if epoch is None:
+            raise InvalidState("another process is working on this job", reason="busy_elsewhere", retryable=True)
+        return epoch
+
+    def _row(self, job: JobContext) -> dict:
+        row = self.ledger.job(job.job_id, Role.TARGET)
+        if row is None:
+            raise NotFound(f"job {job.job_id} not found")
+        return row
+
+    def _ctx(self, job_id: str) -> dict:
+        out: dict = {}
+        for ev in self.ledger.events(job_id, Role.TARGET):
+            data = ev["data"] or {}
+            if isinstance(data.get("ctx"), dict):
+                out.update(data["ctx"])
+        return out
+
+    def _remember(self, job: JobContext, **values: object) -> None:
+        enc = {k: (to_wire(v) if dataclasses.is_dataclass(v) else v) for k, v in values.items()}
+        self.ledger.event(job.job_id, Role.TARGET, "ctx", {"ctx": enc}, epoch=self._epoch(job))
+
+    def _go(self, job: JobContext, expect, to: str, **ctx: object) -> None:
+        enc = {k: (to_wire(v) if dataclasses.is_dataclass(v) else v) for k, v in ctx.items()}
+        self.ledger.transition(job.job_id, Role.TARGET, expect, to, {"ctx": enc} if enc else {}, epoch=self._epoch(job))
+
+    def _start(self, job: JobContext, op: str, digest: str, fn, *, restart_failed: bool = False) -> OpStatus:
+        self._epoch(job)
+        return self.ops.start(job.job_id, op, _digest(op, digest), fn, restart_failed=restart_failed)
+
+    def _staging(self, job_id: str) -> Path:
+        return private_dir(self.data_dir / "staging" / job_id)
+
+    def _read_doc(self, object_id: str) -> dict:
+        with self.store.open_object(object_id) as fh:
+            data = fh.read(MAX_DOC_BYTES + 1)
+        doc = loads_bounded(data, max_bytes=MAX_DOC_BYTES)
+        if not isinstance(doc, dict):
+            raise VerifyFailed("document is not an object", object_id=object_id)
+        return doc
+
+    def _remote_driven(self, job: JobContext) -> bool:
+        return job.mode is Mode.PUSH and self.source_peer_id is not None
+
+    # -- TargetAPI -----------------------------------------------------------------------------------------------
+    def hello(self) -> Hello:
+        return Hello(
+            protocol=PROTOCOL,
+            majors=(WIRE_MAJOR,),
+            minor=WIRE_MINOR,
+            instance_id=self.ledger.instance_id(),
+            listener_pubkey="",
+            plugin_version=self.host.plugin_version,
+            hermes_version=self.host.hermes_version,
+            name=self.instance_name,
+            capabilities=frozenset(CAPABILITIES_V1 - {"operator.v1"}),
+            limits=Limits(),
+        )
+
+    def open_job(self, job: JobContext) -> None:
+        self._ensure_job(job)
+
+    def facts(self, job: JobContext, source_facts: EnvFacts) -> EnvFacts:
+        self._ensure_job(job)
+        tf = self.ports.envfacts.probe(
+            instance_name=self.instance_name,
+            options=job.options,
+            host=self.host,
+            config=self.config,
+            capabilities=self.hello().capabilities,
+        )
+        self._remember(job, source_facts=source_facts, target_facts=tf)
+        return tf
+
+    def _facts(self, job: JobContext) -> tuple[EnvFacts | None, EnvFacts | None]:
+        ctx = self._ctx(job.job_id)
+        sf = from_wire(EnvFacts, ctx["source_facts"]) if ctx.get("source_facts") else None
+        tf = from_wire(EnvFacts, ctx["target_facts"]) if ctx.get("target_facts") else None
+        return sf, tf
+
+    def negotiate(self, job: JobContext, plan: ResourcePlan) -> FinalPlan:
+        """Destinations, modes, conflicts and the disk check — before any byte moves (DESIGN §8.6)."""
+        p = self.ports
+        self._ensure_job(job)
+        sf, tf = self._facts(job)
+        if tf is None:
+            tf = self.facts(job, sf) if sf is not None else None
+        peer_id = self.source_peer_id or "local"
+        tmp = private_dir(self._staging(job.job_id) / "assess")
+        now = datetime.fromtimestamp(self._clock())
+        decisions: list[TargetDecision] = []
+        for item in plan.items:
+            if item.include is Include.NO:
+                continue
+            dest, reason = p.pathmap.choose_dest(
+                item, source_facts=sf, target_facts=tf, lookup=self.ledger.map_lookup, options=job.options
+            )
+            out_row = self.ledger.map_out(dest, peer_id)
+            a = p.materialize.assess(
+                item,
+                dest,
+                git=self.git,
+                probe=p.gitops.GitProbe(self.git),
+                out_row=out_row,
+                tree_fingerprint=(out_row.state or {}).get("tree") if out_row and out_row.state else None,
+                target_facts=tf,
+                fallback=lambda d: p.pathmap.fallback_dest(
+                    d, now=now, workspace_root=job.options.workspace_root, allow_roots=job.options.allow_roots
+                ),
+                tmp=tmp,
+                cfg=self.policy,
+                recorded=out_row is not None or reason == "return-mapping",
+                local_choice=reason == "user" and not self._remote_driven(job),
+            )
+            final_dest = a.conflict.fallback_dest if a.conflict is not None else dest
+            decisions.append(
+                TargetDecision(
+                    item_id=item.item_id,
+                    dest=final_dest,
+                    mode=a.mode,
+                    reason=reason,
+                    conflict=a.conflict,
+                    git_have=tuple(a.git_have),
+                    need_bytes=int(a.need_bytes),
+                    warnings=tuple(a.warnings),
+                )
+            )
+        need, free, short = self._disk_check(decisions, plan)
+        if short is not None:
+            path, need_b, free_b = short
+            raise InsufficientStorage(
+                f"{self.instance_name} needs {need_b / 1024**3:.1f} GiB free in {path}, has "
+                f"{free_b / 1024**3:.1f} GiB. Nothing was transferred.",
+                need_bytes=need_b,
+                free_bytes=free_b,
+                path=path,
+            )
+        final = FinalPlan(
+            plan_id="",
+            plan=plan,
+            decisions=tuple(decisions),
+            need_bytes=need,
+            free_bytes=free,
+            model_change=self._model_change(sf),
+        )
+        doc = to_wire(final)
+        doc.pop("plan_id", None)
+        final = dataclasses.replace(final, plan_id=p.plan.plan_id(doc))
+        self._remember(job, final_plan=final)
+        row = self._row(job)
+        if row["state"] in ("open", "negotiated"):
+            self._go(job, ("open", "negotiated"), "negotiated")
+        return final
+
+    def _disk_check(self, decisions, plan: ResourcePlan) -> tuple[int, dict[str, int], tuple | None]:
+        """Need per filesystem: items at their destination, the capsule (blocks + state.db) in the data dir."""
+        by_dev: dict[int, dict] = {}
+
+        def add(path: Path, need: int) -> None:
+            anchor = _existing_ancestor(path)
+            dev = os.stat(anchor).st_dev
+            slot = by_dev.setdefault(dev, {"path": str(anchor), "need": 0})
+            slot["need"] += max(0, int(need))
+
+        for d in decisions:
+            if d.mode is not DestMode.SKIP:
+                add(Path(os.path.expanduser(d.dest)), d.need_bytes)
+        capsule_bytes = int(plan.approx_tokens) * 4
+        add(self.data_dir, int(capsule_bytes * (1 + STATE_DB_FACTOR)))
+        free: dict[str, int] = {}
+        short = None
+        total = 0
+        for slot in by_dev.values():
+            avail = int(self.disk_usage(slot["path"]).free)
+            free[slot["path"]] = avail
+            total += slot["need"]
+            if short is None and avail < slot["need"] * DISK_MARGIN:
+                short = (slot["path"], int(slot["need"] * DISK_MARGIN), avail)
+        return total, free, short
+
+    def _model_change(self, sf: EnvFacts | None) -> dict | None:
+        if sf is None or not sf.host.provider:
+            return None
+        if self.provider_usable(sf.host.provider, self.config):
+            return None
+        return {
+            "from": {"model": sf.host.model, "provider": sf.host.provider},
+            "to": {"model": self.host.model, "provider": self.host.provider},
+            "reason": "provider_not_configured_here",
+        }
+
+    def _final(self, job: JobContext) -> FinalPlan:
+        raw = self._ctx(job.job_id).get("final_plan")
+        if raw is None:
+            raise InvalidState("negotiate first", reason="no_plan")
+        return from_wire(FinalPlan, raw)
+
+    def _cwd_for(self, final: FinalPlan, workspace_root: str) -> Callable[[str | None], str]:
+        """Session cwd on this side: the source cwd mapped into the primary item's destination, else the
+        handover root (R11: always derived from the session row, never from ``ctx.session_cwd()``)."""
+        primary: PlanItem | None = next((i for i in final.plan.items if i.role is ItemRole.PRIMARY), None)
+        dests = {d.item_id: d.dest for d in final.decisions}
+
+        def cwd_for(source_cwd: str | None) -> str:
+            if primary is not None and primary.item_id in dests and source_cwd:
+                return self.ports.pathmap.map_cwd(source_cwd, primary, dests[primary.item_id])
+            return os.path.expanduser(workspace_root)
+
+        return cwd_for
+
+    def _import_plan(self, job: JobContext, capsule_doc: dict, final: FinalPlan):
+        return self.ports.session_import.plan_import(
+            self.db_factory(),
+            capsule_doc,
+            cwd_for=self._cwd_for(final, job.options.workspace_root),
+            model_policy=job.options.model_mapping,
+            model_override=job.options.model,
+            target_config=self.config,
+            provider_usable=self.provider_usable,
+            max_session_bytes=job.options.max_session_bytes,
+        )
+
+    def start_stage_context(self, job: JobContext, capsule: CapsuleInfo) -> OpStatus:
+        def fn(report) -> dict:
+            if capsule.size > job.options.max_session_bytes:
+                raise PayloadTooLarge(
+                    "the session is larger than max_session_mb here",
+                    size=capsule.size,
+                    limit=job.options.max_session_bytes,
+                )
+            doc = self.ports.session_export.read_capsule(self.store, capsule.capsule_id, max_json_bytes=MAX_DOC_BYTES)
+            plan = self._import_plan(job, doc, self._final(job))
+            path = "B'" if any(getattr(s, "path", "A") != "A" for s in plan.segments) else "A"
+            self.ledger.job_object(job.job_id, capsule.capsule_id)
+            row = self._row(job)
+            if row["state"] in ("open", "negotiated", "context_staged", "resetting", "data_staged"):
+                self._go(job, row["state"], "context_staged", capsule=capsule)
+            else:
+                self._remember(job, capsule=capsule)
+            return {"segments": capsule.segments, "rows": capsule.rows, "bytes": capsule.size, "import_path": path}
+
+        return self._start(job, "stage_context", capsule.capsule_id, fn)
+
+    def _journal_fn(self, job: JobContext) -> Callable[[str, str, dict], None]:
+        def journal(kind: str, step: str, data: dict) -> None:
+            self.ledger.event(
+                job.job_id, Role.TARGET, "ws", {"ws_kind": kind, "step": step, "data": data}, epoch=self._epoch(job)
+            )
+
+        return journal
+
+    def _txn(self, job: JobContext, *, restore: bool):
+        ws = self.ports.materialize.WorkspaceTxn
+        staging = self._staging(job.job_id)
+        journal = self._journal_fn(job)
+        if restore:
+            entries: list[dict] = []
+            for e in self.ledger.events(job.job_id, Role.TARGET):
+                if e["kind"] == "ws_reset":
+                    entries = []  # a re-pack discarded everything prepared before
+                elif e["kind"] == "ws":
+                    entries.append(e["data"])
+            return ws.restore(job.job_id, staging, self.git, self.store, journal, entries)
+        return ws(job.job_id, staging, self.git, self.store, journal)
+
+    def start_prepare(self, job: JobContext, req: PrepareRequest) -> OpStatus:
+        def fn(report) -> dict:
+            return to_wire(self._prepare(job, req, report))
+
+        return self._start(job, "prepare", _digest(req.capsule.capsule_id, req.pack.pack_id, req.final_plan_id), fn)
+
+    def _prepare(self, job: JobContext, req: PrepareRequest, report) -> PreparedInfo:
+        p = self.ports
+        row = self._row(job)
+        if row["state"] in ("committing", "committed", "aborting", "aborted", "expired"):
+            raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+        ctx = self._ctx(job.job_id)
+        self._go(job, row["state"], "preparing")
+        final = self._final(job)
+        db = self.db_factory()
+        capsule_doc = p.session_export.read_capsule(self.store, req.capsule.capsule_id, max_json_bytes=MAX_DOC_BYTES)
+        pack_doc = self._read_doc(req.pack.pack_id)
+        if pack_doc.get("kind") != "ctxh.pack" or pack_doc.get("final_plan_id") != req.final_plan_id:
+            raise VerifyFailed("the pack does not belong to the confirmed final plan", which="final_plan_id")
+        items = {i.item_id: i for i in final.plan.items}
+        decisions = {d.item_id: d for d in final.decisions}
+        peer_id = self.source_peer_id or "local"
+        # workspace: prepare items not yet prepared (a re-pack prepares again from scratch)
+        prior_pack = ctx.get("prepared_pack")
+        if prior_pack is not None and prior_pack != req.pack.pack_id:
+            self._txn(job, restore=True).discard()
+            self.ledger.event(job.job_id, Role.TARGET, "ws_reset", {"pack": prior_pack}, epoch=self._epoch(job))
+        hermes_files = []
+        if prior_pack != req.pack.pack_id:
+            txn = self._txn(job, restore=False)
+            for pack_item in pack_doc.get("items") or []:
+                item = items.get(pack_item.get("item_id"))
+                decision = decisions.get(pack_item.get("item_id"))
+                if item is None or decision is None:
+                    raise VerifyFailed("pack item not in the final plan", item=pack_item.get("item_id"))
+                if decision.mode is DestMode.SKIP or (
+                    not pack_item.get("object") and item.kind in (ItemKind.EXTRA_FILE, ItemKind.HERMES_FILE)
+                ):
+                    continue
+                if item.kind is ItemKind.HERMES_FILE:
+                    hermes_files.append(pack_item)
+                    continue
+                txn.prepare_item(item, decision, pack_item, out_row=self.ledger.map_out(decision.dest, peer_id))
+            dests = [list(d) for d in txn.dests()]
+        else:
+            dests = ctx.get("dests") or []
+            hermes_files = ctx.get("hermes_files") or []
+        # session: reuse a hidden import of the same capsule, otherwise import hidden now
+        prepared_raw = ctx.get("prepared")
+        if prepared_raw is not None and ctx.get("prepared_capsule") == req.capsule.capsule_id:
+            prepared = from_wire(PreparedInfo, prepared_raw)
+        else:
+            import_plan = self._import_plan(job, capsule_doc, final)
+            prepared = p.session_import.import_hidden(
+                db, self.store, req.capsule.capsule_id, import_plan, cancelled=job.cancelled
+            )
+            if (prepared.h_all, prepared.h_rows, prepared.h_model) != (
+                req.capsule.h_all,
+                req.capsule.h_rows,
+                req.capsule.h_model,
+            ):
+                p.session_import.discard(db, prepared)
+                raise VerifyFailed("The imported transcript did not match. Nothing was activated.", which="hashes")
+            self._remember(job, new_ids=[s.new_id for s in import_plan.segments], cwd=import_plan.cwd)
+        prepared = dataclasses.replace(prepared, dests=tuple((a, b, DestMode(c)) for a, b, c in dests))
+        path_map = [
+            PathMapEntry(
+                source=items[i].source_path,
+                target=dest,
+                kind="workspace" if items[i].role in (ItemRole.PRIMARY, ItemRole.SECONDARY) else "extra",
+            )
+            for i, dest, _m in dests
+            if i in items
+        ]
+        path_map.append(
+            PathMapEntry(source=req.source_facts.host.hermes_home, target=self.hermes.home, kind="hermes_home")
+        )
+        note_text, report_path = self._compose_note(job, req, final, prepared, path_map, delta_message=False)
+        self._remember(
+            job,
+            prepared_pack=req.pack.pack_id,
+            hermes_files=hermes_files,
+            dests=dests,
+            path_map=[to_wire(e) for e in path_map],
+            note=note_text,
+            report_path=report_path,
+            note_request=to_wire(req),
+            prepared_capsule=req.capsule.capsule_id,
+        )
+        self._go(job, "preparing", "prepared", prepared=prepared)
+        return prepared
+
+    def _compose_note(
+        self, job, req: PrepareRequest, final: FinalPlan, prepared: PreparedInfo, path_map, *, delta_message: bool
+    ) -> tuple[str, str]:
+        p = self.ports
+        sf, tf = req.source_facts, self._facts(job)[1]
+        items = [(i, d) for i in final.plan.items for d in final.decisions if d.item_id == i.item_id]
+        reports = private_dir(self.data_dir / "reports")
+        report_path = reports / f"{job.job_id}.md"
+        origin = "verified peer" if self.peer_verified else "unverified bundle"
+        note_text, report_md = p.note.compose(
+            job_id=job.job_id,
+            source=sf,
+            target=tf,
+            delta=p.envfacts.delta(sf, tf),
+            path_map=path_map,
+            items=items,
+            note_parts=req.note_parts,
+            model_change=final.model_change,
+            pack_time=req.note_parts.get("pack_time") or 0,
+            delta_message=delta_message,
+            report_path=str(report_path),
+            redact=self.redact,
+            untrusted_text=final.plan.notes_for_target,
+            origin=origin,
+        )
+        fd = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(report_md)
+        return note_text, str(report_path)
+
+    def start_apply_delta(self, job: JobContext, delta: DeltaInfo) -> OpStatus:
+        def fn(report) -> dict:
+            row = self._row(job)
+            if row["state"] != "prepared":
+                raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+            ctx = self._ctx(job.job_id)
+            prepared = from_wire(PreparedInfo, ctx["prepared"])
+            self._go(job, "prepared", "delta_applying")
+            try:
+                new = self.ports.session_import.apply_delta(self.db_factory(), self.store, delta, prepared)
+            except HandoverError:
+                self._go(job, "delta_applying", "prepared")
+                raise
+            new = dataclasses.replace(new, dests=prepared.dests)
+            req = from_wire(PrepareRequest, ctx["note_request"])
+            path_map = [from_wire(PathMapEntry, e) for e in ctx.get("path_map") or []]
+            note_text, report_path = self._compose_note(job, req, self._final(job), new, path_map, delta_message=True)
+            self.ledger.job_object(job.job_id, delta.delta_id)
+            self._go(job, "delta_applying", "prepared", prepared=new, note=note_text, report_path=report_path)
+            return to_wire(new)
+
+        return self._start(job, "apply_delta", delta.delta_id, fn)
+
+    def start_reset_session(self, job: JobContext) -> OpStatus:
+        def fn(report) -> dict:
+            row = self._row(job)
+            if row["state"] in ("committing", "committed", "aborted", "expired"):
+                raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+            ctx = self._ctx(job.job_id)
+            self._go(job, row["state"], "resetting")
+            if ctx.get("prepared") is not None:
+                self.ports.session_import.discard(self.db_factory(), from_wire(PreparedInfo, ctx["prepared"]))
+            self._go(job, "resetting", "context_staged", prepared=None, prepared_capsule=None)
+            return {}
+
+        ctx = self._ctx(job.job_id)
+        return self._start(job, "reset_session", str(ctx.get("prepared_capsule")), fn)
+
+    # -- commit (DESIGN §3.4) --------------------------------------------------------------------------------------
+    def start_commit(self, job: JobContext) -> OpStatus:
+        row = self._row(job)
+        if row["state"] == "prepared":
+            self._go(job, "prepared", "committing")
+        elif row["state"] not in ("committing", "committed"):
+            raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+        return self._start(job, "commit", "commit", lambda report: self._commit_body(job, report))
+
+    def recover(self, job: JobContext) -> OpStatus | None:
+        """Janitor: a ``committing`` target whose process died continues its commit op in the journaled direction
+        (DESIGN §3.6); ``preparing`` with a dead op is reported interrupted so the conductor restarts it."""
+        row = self._row(job)
+        if row["state"] != "committing":
+            return None
+        op = self.ledger.op_get(job.job_id, "commit", _digest("commit", "commit"))
+        if op is not None:
+            self.ops.status(job.job_id, op["op_id"])  # marks a dead running op interrupted
+        return self._start(job, "commit", "commit", lambda report: self._commit_body(job, report), restart_failed=True)
+
+    def _cwd_step(self, cwd: str | None):
+        def forward() -> dict:
+            created: list[str] = []
+            if not cwd:
+                return {"created": created}
+            target = Path(cwd)
+            if target.exists():
+                return {"created": created}
+            verdict = check_target_dest(target, self.policy, recorded=False, local_choice=False)
+            if not verdict.allowed:
+                return {"created": created, "denied": verdict.reason}
+            missing = []
+            p = target
+            while not p.exists():
+                missing.append(p)
+                p = p.parent
+            for d in reversed(missing):
+                d.mkdir(mode=0o700)
+                created.append(str(d))
+            return {"created": created}
+
+        def inverse(data: dict | None) -> None:
+            for d in reversed((data or {}).get("created") or []):
+                try:
+                    Path(d).rmdir()
+                except OSError:
+                    pass
+
+        return forward, inverse
+
+    def _steps(self, job: JobContext) -> list[tuple[str, Callable[[], dict | None], Callable[[dict | None], None]]]:
+        p = self.ports
+        ctx = self._ctx(job.job_id)
+        prepared = from_wire(PreparedInfo, ctx["prepared"])
+        db = self.db_factory()
+        txn = self._txn(job, restore=True)
+        steps: list = []
+        for name, fwd, inv in txn.commit_steps():
+            steps.append((f"c1:{name}", (lambda f=fwd: f() or None), (lambda d, i=inv: i())))
+        fwd2, inv2 = self._cwd_step(ctx.get("cwd"))
+        steps.append(("c2:cwd", fwd2, inv2))
+        files = []
+        for pack_item in ctx.get("hermes_files") or []:
+            kind = pack_item.get("hermes_kind") or next(
+                (k for k in _HERMES_KINDS if k.split("_")[0] in str(pack_item.get("rel", ""))), "spillover"
+            )
+            (m,) = self.store.manifests([pack_item["object"]])
+            dest = p.hermes_files.target_path(
+                kind, Path(str(pack_item.get("rel", "file"))).name, m.sha256, self.hermes, prepared.tip_id
+            )
+            files.append((pack_item, Path(dest)))
+        f3, i3 = txn.place_hermes_files(files)
+        steps.append(("c3:hermes_files", (lambda: f3() or None), (lambda d: i3())))
+        capsule = from_wire(CapsuleInfo, ctx["capsule"]) if ctx.get("capsule") else None
+
+        def side_fwd() -> None:
+            if capsule is not None:
+                doc = p.session_export.read_capsule(self.store, capsule.capsule_id, max_json_bytes=MAX_DOC_BYTES)
+                p.session_import.write_side_state(db, doc, prepared.tip_id)
+
+        steps.append(("c4:side_state", side_fwd, lambda d: p.session_import.clear_side_state(db, prepared.tip_id)))
+        continue_prompt = None
+        steps.append(
+            (
+                "c5:arrival",
+                lambda: self.ledger.arrival_put(
+                    session_ids=list(ctx.get("new_ids") or [prepared.tip_id]),
+                    root_id=prepared.root_id,
+                    job_id=job.job_id,
+                    peer=self.peer_name or (job.peer.name if job.peer else None),
+                    note=str(ctx.get("note") or ""),
+                    report_path=str(ctx.get("report_path") or ""),
+                    path_map=[from_wire(PathMapEntry, e) for e in ctx.get("path_map") or []],
+                    continue_prompt=continue_prompt,
+                ),
+                lambda d: self.ledger.arrival_delete(job.job_id),
+            )
+        )
+        steps.append(
+            ("c6:unhide", lambda: p.session_import.unhide(db, prepared), lambda d: p.session_import.hide(db, prepared))
+        )
+        return steps
+
+    def _journal_state(self, job_id: str) -> tuple[str, list[str], set[str], dict]:
+        direction, done_fwd, done_inv, results = "forward", [], set(), {}
+        for ev in self.ledger.events(job_id, Role.TARGET):
+            data = ev["data"] or {}
+            if ev["kind"] == "direction":
+                direction = data.get("direction", direction)
+            elif ev["kind"] == "done" and str(data.get("step", "")).startswith("c"):
+                if data.get("direction") == "rollback":
+                    done_inv.add(data["step"])
+                elif data["step"] not in done_fwd:
+                    done_fwd.append(data["step"])
+                    results[data["step"]] = data.get("result")
+        return direction, done_fwd, done_inv, results
+
+    def _step_event(self, job: JobContext, kind: str, step: str, direction: str, result: dict | None = None) -> None:
+        data = {"step": step, "direction": direction}
+        if result is not None:
+            data["result"] = result
+        self.ledger.event(job.job_id, Role.TARGET, kind, data, epoch=self._epoch(job))
+
+    def _commit_body(self, job: JobContext, report) -> dict:
+        row = self._row(job)
+        ctx = self._ctx(job.job_id)
+        if row["state"] == "committed" and ctx.get("ack"):
+            return dict(ctx["ack"])
+        if row["state"] != "committing":
+            raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+        steps = self._steps(job)
+        direction, done_fwd, done_inv, results = self._journal_state(job.job_id)
+        failure: dict | None = None
+        if direction == "forward":
+            try:
+                for n, (name, fwd, _inv) in enumerate(steps):
+                    if name in done_fwd:
+                        continue
+                    self._step_event(job, "intent", name, "forward")
+                    result = fwd()
+                    self._step_event(job, "done", name, "forward", result)
+                    done_fwd.append(name)
+                    results[name] = result
+                    report(Progress(step="commit", items_done=n + 1, items_total=len(steps) + 1, message=name))
+            except Fenced:
+                raise
+            except Exception as exc:
+                failure = error_dict(exc)
+                self.ledger.event(
+                    job.job_id,
+                    Role.TARGET,
+                    "direction",
+                    {"direction": "rollback", "cause": failure},
+                    epoch=self._epoch(job),
+                )
+            else:
+                return self._finalize(job)
+        else:
+            failure = next(
+                (
+                    e["data"].get("cause")
+                    for e in reversed(self.ledger.events(job.job_id, Role.TARGET))
+                    if e["kind"] == "direction"
+                ),
+                None,
+            )
+        return self._rollback(job, steps, done_fwd, done_inv, results, failure)
+
+    def _rollback(self, job, steps, done_fwd, done_inv, results, failure) -> dict:
+        inverse = {name: inv for name, _f, inv in steps}
+        attention = []
+        for name in reversed(done_fwd):
+            if name in done_inv or name not in inverse:
+                continue
+            self._step_event(job, "intent", name, "rollback")
+            try:
+                inverse[name](results.get(name))
+            except Fenced:
+                raise
+            except Exception as exc:
+                attention.append({"step": name, "error": error_dict(exc)})
+                self.ledger.event(
+                    job.job_id,
+                    Role.TARGET,
+                    "needs_attention",
+                    {"step": name, "error": error_dict(exc)},
+                    epoch=self._epoch(job),
+                )
+            self._step_event(job, "done", name, "rollback")
+        if not attention:
+            self._cleanup(job, discard_session=True)
+        last_error = dict(failure or {"code": "import_failed", "message": "commit failed"})
+        if attention:
+            last_error["needs_attention"] = attention
+        self.ledger.job_update(job.job_id, Role.TARGET, last_error=last_error)
+        self._go(job, "committing", "aborted", rolled_back=True)
+        err = ImportFailed(
+            str(last_error.get("message") or "commit failed; rolled back"),
+            cause=last_error.get("code"),
+            needs_attention=attention,
+        )
+        raise err
+
+    def _finalize(self, job: JobContext) -> dict:
+        """c7: the ``committed`` row, workspace-map ``in`` rows and the ``CommitAck`` (point of no return)."""
+        ctx = self._ctx(job.job_id)
+        prepared = from_wire(PreparedInfo, ctx["prepared"])
+        final = self._final(job)
+        items = {i.item_id: i for i in final.plan.items}
+        sf, tf = self._facts(job)
+        peer_id = self.source_peer_id or "local"
+        model = self.host.model
+        if final.model_change is None and sf is not None:
+            model = sf.host.model
+        ack = CommitAck(
+            session_id=prepared.tip_id,
+            root_id=prepared.root_id,
+            title=prepared.title,
+            dests=prepared.dests,
+            path_map=tuple(from_wire(PathMapEntry, e) for e in ctx.get("path_map") or []),
+            model=model,
+            offline_capable=bool(tf.offline_capable) if tf is not None else False,
+            warnings=tuple(prepared.warnings),
+            committed_at=self._clock(),
+        )
+        self._go(job, "committing", "committed", ack=ack)
+        for item_id, dest, _mode in prepared.dests:
+            item = items.get(item_id)
+            if item is None:
+                continue
+            self.ledger.map_put(
+                MapRow(
+                    local_path=dest,
+                    peer_id=peer_id,
+                    remote_path=item.source_path,
+                    direction="in",
+                    repo_identity=item.git.root_commits[0] if item.git and item.git.root_commits else None,
+                    state=None,
+                    last_job_id=job.job_id,
+                )
+            )
+        try:
+            self.ports.ctxrecords.enqueue(
+                self.ledger,
+                "arrival",
+                {"job_id": job.job_id, "mode": str(job.mode), "peer": self.peer_name, "ack": to_wire(ack)},
+                redact=self.redact,
+            )
+        except HandoverError:
+            pass
+        self._cleanup(job, discard_session=False)
+        return to_wire(ack)
+
+    def _cleanup(self, job: JobContext, *, discard_session: bool) -> None:
+        ctx = self._ctx(job.job_id)
+        if discard_session and ctx.get("prepared") is not None:
+            try:
+                self.ports.session_import.discard(self.db_factory(), from_wire(PreparedInfo, ctx["prepared"]))
+            except HandoverError:
+                pass
+        try:
+            if discard_session:
+                self._txn(job, restore=True).discard()
+        except HandoverError:
+            pass
+        staging = self.data_dir / "staging" / job.job_id
+        shutil.rmtree(staging, ignore_errors=True)
+        release = getattr(self.store, "release_job", None)
+        if callable(release):
+            try:
+                release(job.job_id, keep=not discard_session)
+            except HandoverError:
+                pass
+
+    # -- continuation, abort, status -------------------------------------------------------------------------------
+    def continue_session(self, job: JobContext, prompt: str) -> ContinueResult:
+        """Start the continuation after the handover (DESIGN §11.5): remote requests need
+        ``allow_remote_continue`` here and a signed, non-revoked peer; approvals-off refusals come from the
+        ``Spawner`` (R22)."""
+        row = self._row(job)
+        ctx = self._ctx(job.job_id)
+        if row["state"] != "committed" or not ctx.get("ack"):
+            raise InvalidState("continue after the commit only", reason="state", state=row["state"])
+        if ctx.get("continue") is not None:
+            return from_wire(ContinueResult, ctx["continue"])
+        remote = self._remote_driven(job)
+        if remote and not bool(self.settings.get("allow_remote_continue", False)):
+            raise ContinueRefused(
+                "Handed over, but this gateway does not allow remote continuation (allow_remote_continue).",
+                reason="allow_remote_continue",
+            )
+        if not self.peer_verified:
+            raise ContinueRefused("Unverified handovers never start a continuation.", reason="unverified")
+        ack = from_wire(CommitAck, ctx["ack"])
+        requested_by = (self.peer_name or (job.peer.name if job.peer else None)) if remote else None
+        res = self.continuation.spawn(ack.session_id, str(prompt)[:2000], job.job_id, requested_by=requested_by)
+        self._remember(job, **{"continue": res})
+        return res
+
+    def abort(self, job: JobContext, reason: str) -> None:
+        """Abort and discard staged state (idempotent); ``committing``/``committed`` refuse [SK H5]."""
+        row = self.ledger.job(job.job_id, Role.TARGET)
+        if row is None:
+            return
+        state = row["state"]
+        if state in ("committing", "committed"):
+            raise InvalidState(f"the target is {state}", reason="state", state=state)
+        if state in ("aborted", "expired"):
+            return
+        final_state = "expired" if reason == "expired" else "aborted"
+        if state != "aborting":
+            self._go(job, state, "aborting", abort_reason=reason)
+        self._cleanup(job, discard_session=True)
+        self._go(job, "aborting", final_state)
+
+    def op_status(self, job: JobContext, op_id: str) -> OpStatus:
+        return self.ops.status(job.job_id, op_id)
+
+    def status(self, job: JobContext) -> ParticipantStatus:
+        row = self._row(job)
+        ops = {r["op"]: self.ops.status(job.job_id, r["op_id"]) for r in self.ledger.ops_for_job(job.job_id)}
+        commit = ops.get("commit")
+        if row["state"] == "committing" and commit is not None and commit.state.value == "failed":
+            self.recover(job)  # a commit stuck half-way continues in its journaled direction (DESIGN §3.6)
+            row = self._row(job)
+            ops = {r["op"]: self.ops.status(job.job_id, r["op_id"]) for r in self.ledger.ops_for_job(job.job_id)}
+        notes = ()
+        ctx = self._ctx(job.job_id)
+        if ctx.get("continue"):
+            notes = ("continued",)
+        return ParticipantStatus(
+            state=row["state"],
+            step="",
+            epoch=int(row["max_peer_epoch"]),
+            progress=None,
+            ops=ops,
+            last_error=row["last_error"],
+            notes=notes,
+        )
+
+    def blocks(self):
+        return self.store
