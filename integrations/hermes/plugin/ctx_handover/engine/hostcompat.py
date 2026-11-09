@@ -166,6 +166,45 @@ def hermes_paths() -> HermesPaths:
     return HermesPaths(home=str(home), document_cache=str(cache))
 
 
+HOME_MODE_ENV = "TERMINAL_HOME_MODE"
+"""Hermes' home mode of tool subprocesses (``terminal.home_mode``, bridged into this variable by the gateway and the
+chat CLI, ``gateway/run.py:1988-2030``); read by ``hermes_constants.get_subprocess_home``."""
+
+
+def _configured_home_mode() -> dict[str, str]:
+    """``{HOME_MODE_ENV: mode}`` from the profile's ``terminal.home_mode`` when the process environment does not set
+    it (a process that never bridged its config: a CLI subcommand, the dashboard), else ``{}``. Only a non-empty
+    string counts; an unreadable config leaves Hermes' own default."""
+    if os.environ.get(HOME_MODE_ENV, "").strip():
+        return {}
+    try:
+        terminal = load_config().get("terminal")
+    except Exception:  # no config here: Hermes' default mode applies, as in Hermes itself
+        return {}
+    mode = terminal.get("home_mode") if isinstance(terminal, dict) else None
+    return {HOME_MODE_ENV: mode.strip()} if isinstance(mode, str) and mode.strip() else {}
+
+
+def effective_home() -> Path:
+    """The home ``~`` means for the active profile — from the source Hermes' own file tools expand it with
+    (``tools/file_tools_paths.py:_expand_tilde``): ``hermes_constants.get_subprocess_home()``, else the process home.
+
+    Not ``Path.home()``: Hermes applies its subprocess HOME contract (a launch ``HOME`` that is the profile home
+    ``<HERMES_HOME>/home`` is repaired to the real home on a host; ``terminal.home_mode: profile`` and containers use
+    the profile home) to every child it starts, the plugin host of ``plugins.isolation: host`` included
+    (``hermes_cli/plugin_host.py:127-136`` → ``served_profile_child_env``), but not to its own process — so the
+    process home of an in-process plugin and of the plugin host differ (L3-F20). This answer is the same in both
+    modes and in every process of the profile (R12): ``terminal.home_mode`` comes from the profile config when the
+    process did not bridge it into ``TERMINAL_HOME_MODE``; a set variable wins (in the gateway and the chat CLI it
+    holds the bridged config value)."""
+    try:
+        from hermes_constants import get_subprocess_home
+    except ImportError as exc:
+        raise _missing("hermes_constants.get_subprocess_home") from exc
+    home = get_subprocess_home(_configured_home_mode())
+    return Path(home) if isinstance(home, str) and home else Path.home()
+
+
 def _model_section(config: dict) -> tuple[str | None, str | None, int | None]:
     model = config.get("model") if isinstance(config, dict) else None
     if isinstance(model, dict):
@@ -455,10 +494,32 @@ def _approval_mode(value: object) -> str:
     return "manual"
 
 
+YOLO_ENV = "HERMES_YOLO_MODE"
+"""Hermes' process-wide approval bypass: ``--yolo`` writes it into the environment before any import
+(``hermes_cli/main.py:2762-2768``), ``tools/approval.py:48`` freezes it at import and skips every approval with it
+(``:539-545``). The plugin host of ``plugins.isolation: host`` inherits it (``served_profile_child_env``)."""
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+"""``utils.TRUTHY_STRINGS`` (``utils.is_truthy_value`` is not in ``plugin_api.json``); a K0 test keeps it equal."""
+
+
+def _yolo_process() -> bool:
+    """``HERMES_YOLO_MODE`` of this process, read as Hermes reads it (``utils.is_truthy_value``: stripped,
+    case-insensitive, one of ``_TRUTHY``)."""
+    value = os.environ.get(YOLO_ENV)
+    return isinstance(value, str) and value.strip().lower() in _TRUTHY
+
+
 def approvals_off(config: dict) -> bool:
-    """True when this host runs tools without asking: ``approvals.mode`` is off (YAML ``off`` arrives as False) or
-    ``approvals.single_query_mode`` approves (``approve``/``off``/``allow``/``yes``), mirroring
-    ``tools/approval_context.py:266-364``. The continuation never starts then (R22)."""
+    """True when this host runs tools without asking: the gateway process runs with ``--yolo`` /
+    ``HERMES_YOLO_MODE`` (review H2: the continued turn runs in the gateway, ``hermes_cli/gateway_agent.py:1-6``, so
+    the variable bypasses its approvals whatever the child's environment says), ``approvals.mode`` is off (YAML
+    ``off`` arrives as False) or ``approvals.single_query_mode`` approves (``approve``/``off``/``allow``/``yes``),
+    mirroring ``tools/approval_context.py:266-364`` and ``tools/approval.py:539-545``. The continuation never starts
+    then (R22). Only the process this runs in is seen: a route served by a separate ``hermes serve``/dashboard
+    process cannot read the environment of the gateway that runs the turn."""
+    if _yolo_process():
+        return True
     approvals = config.get("approvals") if isinstance(config, dict) else None
     if not isinstance(approvals, dict):
         return False
