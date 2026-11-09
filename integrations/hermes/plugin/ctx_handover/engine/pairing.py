@@ -162,6 +162,32 @@ def store_credentials(store: SecretStore, gate: GateAuth, peer_id: str) -> GateA
     return fresh
 
 
+def own_secret_names(gate: GateAuth | None, peer_id: str) -> list[str]:
+    """The variables ``gate`` sends that are this peer's own copies (``store_credentials``: ``PEER_*_PREFIX`` + its
+    id), in ``gate_secrets`` order. A shared slot — the settings form's ``CTX_HANDOVER_PEER_TOKEN``, named by entries
+    paired before per-peer copies — is never one; a gate-less entry or one without a ULID id has none."""
+    if gate is None or not ULID_RE.match(str(peer_id)):
+        return []
+    own = {env for _what, env in gate_secrets(peer_gate(gate, peer_id))}
+    return [env for _what, env in gate_secrets(gate) if env in own]
+
+
+def forget_credentials(store: SecretStore, names: list[str]) -> list[str]:
+    """Blank each of ``names`` the way the pairing wrote it (rv-final, ``peers remove``): ``store.writable``,
+    ``store.save(name, "")``, then the read-back ``store.read_fresh`` (R16). Returns the names that are not proven
+    blank — the write lock refused, the write raised, or the read-back still shows a value."""
+    left: list[str] = []
+    for name in names:
+        try:
+            store.writable(name)
+            store.save(name, "")
+            if store.read_fresh(name):
+                left.append(name)
+        except Exception:
+            left.append(name)
+    return left
+
+
 def _origin(url: object) -> tuple[str, str, int] | None:
     """``(scheme, host, port)`` of a peer URL, or None when it has none."""
     try:

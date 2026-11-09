@@ -54,7 +54,7 @@ def test_check_rel_rejects_traversal(rel, rules):
     """★ Traversal, absolute, control characters, over-long and every ``.git`` spelling (incl. the HFS-ignorable
     U+200C on macOS rules, SEC 2.1) are rejected on every target.
 
-    Red proof: mutant = ``_is_dotgit`` without ``strip_hfs_ignorable`` (``name = component``) →
+    Red proof: mutant = ``is_dotgit`` without ``strip_hfs_ignorable`` (``name = component``) →
     ``Failed: DID NOT RAISE`` for ``.g\\u200cit/config``.
     """
     with pytest.raises(PolicyDenied):

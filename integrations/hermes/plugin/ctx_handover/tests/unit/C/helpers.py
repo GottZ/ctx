@@ -163,6 +163,10 @@ class FakeParticipant:
     def blocks(self):
         return self.r.store
 
+    def blocks_for(self, job):
+        """The job's sink (R28); this double has no quota — ``test_server.QuotaTarget`` brings the real one."""
+        return self.blocks()
+
     def facts(self, job, *rest):
         self._rec("facts", job, *rest)
         return sample_facts(self.r.e.model, f"{self.role}-host")

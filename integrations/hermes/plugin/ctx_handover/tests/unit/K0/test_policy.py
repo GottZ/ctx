@@ -465,7 +465,7 @@ def test_target_dest_denylist_under_home(rel, lay):
     config locations, every dot entry directly under ``$HOME``, ``$HOME`` itself and ancestors of denied places
     [R19, SEC 2.2] — also for recorded and locally typed destinations.
 
-    Red proof: mutant = delete the dot-entry block (``if rel and rel[0].startswith(".")``) in ``_target_denied`` →
+    Red proof: mutant = delete the dot-entry block (``if rel and rel[0].startswith(".")``) in ``_home_denied`` →
     ``assert Verdict(allowed=True, reason=None) == Verdict(allowed=False, reason='target_denied')`` for
     ``.hidden``.
     """

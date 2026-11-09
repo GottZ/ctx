@@ -50,6 +50,7 @@ from .errors import (
     BadRequest,
     CapabilityMissing,
     ConflictError,
+    EnvNotWritable,
     Forbidden,
     HandoverError,
     InDoubt,
@@ -2083,7 +2084,28 @@ class EngineBackend:
         return list(jobs.revoke_peer(name))  # ledger cascade + abort of the peer's participant jobs (W067)
 
     def remove_peer(self, name: str) -> bool:
-        return bool(self._ledger().remove_peer(name))
+        """Dialer side: drop a dial peer's entry (``Ledger.remove_peer``) after blanking the ``.env`` variables the
+        pairing wrote for that peer alone (rv-final; ``pairing.own_secret_names``) through the same path — Hermes'
+        writer, then the read-back (R16). A variable not proven blank keeps the entry: ``EnvNotWritable`` names it
+        (a secret no entry names would otherwise stay in ``.env`` for good). Shared slots are never touched."""
+        from . import pairing
+
+        ledger = self._ledger()
+        dial = [p for p in ledger.peers(include_revoked=True) if p.direction == "dial"]
+        peer = next((p for p in dial if p.peer_id == name), None) or next((p for p in dial if p.name == name), None)
+        if peer is None:
+            return False
+        left = pairing.forget_credentials(self._secret_store(), pairing.own_secret_names(peer.gate, peer.peer_id))
+        if left:
+            raise EnvNotWritable(
+                f"{peer.name} was not removed: its credential in this profile's .env could not be blanked "
+                f"({', '.join(left)}; the .env is managed or the write was refused). Delete that line from the .env, "
+                f"then run /handover peers remove {peer.name} again.",
+                variable=left[0],
+                variables=left,
+                peer=peer.name,
+            )
+        return bool(ledger.remove_peer(peer.peer_id))
 
     def rename_peer(self, old: str, new: str) -> bool:
         return bool(self._ledger().rename_peer(old, new))
@@ -2120,12 +2142,19 @@ class EngineBackend:
             ledger=self._ledger(),
             # H1 (rv-c): the profile .env through Hermes' own readers and writer — the pairing compares credential
             # values with the other peers' and copies the form's credential into this peer's own variables
-            secret_store=pairing.SecretStore(
-                read=hostcompat.read_secret,
-                save=hostcompat.save_env,
-                read_fresh=hostcompat.read_env_fresh,
-                writable=hostcompat.env_writable,
-            ),
+            secret_store=self._secret_store(),
+        )
+
+    @staticmethod
+    def _secret_store():
+        """The profile ``.env`` as pairing and ``remove_peer`` use it (``pairing.SecretStore``, H1)."""
+        from . import pairing
+
+        return pairing.SecretStore(
+            read=hostcompat.read_secret,
+            save=hostcompat.save_env,
+            read_fresh=hostcompat.read_env_fresh,
+            writable=hostcompat.env_writable,
         )
 
     def identity(self, *, create: bool) -> dict | None:
@@ -2499,7 +2528,7 @@ class EngineBackend:
             result["error"] = f"recording in {server} is not allowed yet; run /handover setup (or set ctx_persist: off)"
         elif callable(call_mcp) and not wait:
             # the profile's one background flusher (``Runtime.flush_in_background``, thread ``ctxh-outbox``, one at a
-            # time): two flushers would store the same due rows twice (M29)
+            # time, M29); each row is claimed in the ledger before it is sent, so no other flush sends it again
             self._started().flush_in_background(
                 lambda led: ctxrecords.flush(led, call_mcp, server, category, time.time())
             )

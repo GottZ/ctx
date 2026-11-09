@@ -57,6 +57,7 @@ from .blocks import BLOCK_SIZE, MEDIA_BLOCKS, ZSTD_AVAILABLE, decode_frames, enc
 from .crypto import H_RESP_SIG, META_PUBKEY, Identity, request_string, response_string, verify
 from .errors import (
     BadRequest,
+    CapabilityMissing,
     Forbidden,
     HandoverError,
     JobConflict,
@@ -952,9 +953,12 @@ class Server:
 
     @staticmethod
     def _sink(api, job):
-        """The job's quota-enforcing sink when the target offers one (R28), else its store."""
+        """The job's quota-enforcing sink (R28, ``blocks_for``). A target without one gets no unbounded fallback to its
+        plain store (review M5): the request is refused (``capability_missing``) and nothing is stored."""
         blocks_for = getattr(api, "blocks_for", None)
-        return blocks_for(job) if callable(blocks_for) else api.blocks()
+        if not callable(blocks_for):
+            raise CapabilityMissing("the target offers no quota-bound block store", capability="blocks_for")
+        return blocks_for(job)
 
     def _h_blocks_need(self, auth, params, body, req) -> dict:
         api, _job = self._tgt(auth, params)

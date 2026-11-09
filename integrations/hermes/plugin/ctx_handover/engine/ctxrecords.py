@@ -6,7 +6,9 @@ ctx is never in the critical path. A process that finishes a job side (source re
 ``ctx_outbox``. A process that holds a plugin ``ctx`` (gateway, CLI) calls ``flush`` on first use, before each
 job and on ``/handover status`` — on a thread of its own, never in the caller's way — and keeps to a total budget
 (``FLUSH_BUDGET_S``) wherever it runs; rows that fail stay in the outbox with the ledger's backoff, rows the budget
-did not reach stay due. Neither function raises: a failure is logged (once per row at warning level) and shown by
+did not reach stay due. Each row is claimed in the ledger before its first MCP call (``ledger.outbox_claim``), so
+flushes running at once — the janitor's and ``ctxh-outbox``, or two processes of the profile — never send one row
+twice. Neither function raises: a failure is logged (once per row at warning level) and shown by
 ``/handover status``.
 
 ctx is reached only through Hermes' MCP dispatch (``ctx.call_mcp``), which needs the operator's
@@ -39,6 +41,10 @@ starts once less than ``MIN_CALL_S`` is left, and each call's timeout is what is
 flush before each job keeps to it too."""
 MIN_CALL_S = 1.0
 """Hermes clamps an MCP timeout to at least one second (``PluginContext.call_mcp``)."""
+CLAIM_S = 120.0
+"""How long a flush holds a row it is sending (``ledger.outbox_claim``; far beyond one row's calls, which the budget
+bounds): no other flusher sends it meanwhile. The claimer ends the claim itself (delivered, backed off, or handed
+back untried); one that dies leaves the row due again after this."""
 HEAD_TITLE = "Compaction checkpoint head {root}"
 """ctx_checkpoint's stable head title per root session (its README "Recall of a checkpoint")."""
 
@@ -248,9 +254,11 @@ def flush(
 
     A failed row is reported back with ``ok=False`` (the ledger backs it off); the first failure of a row is
     logged at warning level, repeats at debug level. A row the budget does not reach (or whose ``store`` it does not
-    reach) stays due without a backoff (M29).
+    reach) stays due without a backoff (M29). Each row is claimed before its first call (``ledger.outbox_claim``);
+    a row another flusher holds, or one without an id, is not sent.
     """
     deadline = clock() + max(0.0, float(budget_s))
+    until = float(now) + CLAIM_S
 
     def left(cap: float) -> float | None:
         remaining = deadline - clock()
@@ -266,6 +274,8 @@ def flush(
         row_id = row.get("id") if isinstance(row, Mapping) else None
         if left(SEARCH_TIMEOUT_S) is None:
             break  # the budget is spent: this row and the rest stay due, untried
+        if row_id is None or not _claim(ledger, row_id, now, until):
+            continue  # another flusher (thread or process) sends it, or it could never be marked done
         try:
             payload = dict(row["payload"])
             metadata = dict(payload.get("metadata") or {})
@@ -274,7 +284,8 @@ def flush(
             head = _checkpoint_head(call_mcp, server, root, left(SEARCH_TIMEOUT_S) or MIN_CALL_S) if root else None
             store_timeout = left(CALL_TIMEOUT_S)
             if store_timeout is None:
-                break  # no time left for the store: the row stays due, untried
+                _release(ledger, row_id, until, row.get("next_try_at", now))
+                break  # no time left for the store: the row is handed back due, untried
             if head:
                 metadata["checkpoint_head"] = head
                 content = _cap_utf8(content + f"\n- Checkpoint head: {head}", RECORD_MAX_BYTES)
@@ -299,8 +310,6 @@ def flush(
             log = logger.warning if not attempts else logger.debug
             log("ctx_handover: ctx record %s not stored (%s); it stays queued", row_id, type(exc).__name__)
             ok = False
-        if row_id is None:
-            continue
         try:
             ledger.outbox_done(row_id, ok, now)
         except Exception:
@@ -308,6 +317,23 @@ def flush(
             continue
         stored += 1 if ok else 0
     return stored
+
+
+def _claim(ledger, row_id, now: float, until: float) -> bool:
+    """``ledger.outbox_claim`` — True only when this flush holds the row now; any failure is no claim."""
+    try:
+        return ledger.outbox_claim(row_id, now, until) is True
+    except Exception:
+        logger.debug("ctx_handover: outbox row %s not claimed", row_id, exc_info=True)
+        return False
+
+
+def _release(ledger, row_id, until: float, due_at) -> None:
+    """Hand an untried claimed row back (``ledger.outbox_release``); if that fails the claim lapses at ``until``."""
+    try:
+        ledger.outbox_release(row_id, until, float(due_at))
+    except Exception:
+        logger.debug("ctx_handover: outbox row %s not handed back", row_id, exc_info=True)
 
 
 def pending(ledger) -> int:

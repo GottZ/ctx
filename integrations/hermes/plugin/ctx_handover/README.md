@@ -255,7 +255,9 @@ goal/heartbeat/loop and blocks new turns on it (each blocked message leaves a pl
 rewinds; reclaim restores everything else too); `.env` gets `CTX_HANDOVER_IDENTITY_KEY`, the peer token/password you
 enter in the plugin settings form and, at each pairing, a copy of that credential and of the proxy header values for
 that peer alone (`CTX_HANDOVER_PEER_TOKEN_<peer id>`, `CTX_HANDOVER_PEER_PASSWORD_<peer id>`,
-`CTX_HANDOVER_PEER_HEADER<n>_<peer id>`, through Hermes' own `.env` writer and read back); `config.yaml` gets
+`CTX_HANDOVER_PEER_HEADER<n>_<peer id>`, through Hermes' own `.env` writer and read back; `/handover peers remove`
+blanks that peer's variables the same way before it drops the entry — a value still there afterwards keeps the entry
+and the reply names the variable; the settings form's own fields stay as they are); `config.yaml` gets
 `plugins.entries.ctx_handover.*`, and only if you accept ctx recording in `/handover setup` does that command add the
 ctx MCP server to `plugins.entries.ctx_handover.mcp_allowlist` (through Hermes' own config writer, merged with what is
 there; on a package-managed install it prints the `hermes config set` command instead); the plugin data folder

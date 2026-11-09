@@ -1407,6 +1407,9 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
             "again with every device."
         )
     if code == "env_not_writable":
+        variable = str(_d(err, "variable", "") or "")
+        if variable and variable != "CTX_HANDOVER_IDENTITY_KEY" and err.message:
+            return err.message  # a peer credential (pairing copy, peers remove): the text names variable and step
         return (
             "The .env of this profile is managed and not writable, so ctx_handover cannot store its key. Ask the "
             "administrator to allow CTX_HANDOVER_IDENTITY_KEY, then run the command again."

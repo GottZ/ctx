@@ -59,6 +59,24 @@ class FakeOutboxLedger:
             ).fetchall()
         return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
 
+    def outbox_claim(self, row_id: int, now: float, until: float) -> bool:
+        """``Ledger.outbox_claim``: one sender per due row (the UPDATE is the claim)."""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE ctx_outbox SET next_try_at = ? WHERE id = ? AND done_at IS NULL AND next_try_at <= ?",
+                (until, row_id, now),
+            )
+            return cur.rowcount == 1
+
+    def outbox_release(self, row_id: int, until: float, due_at: float) -> bool:
+        """``Ledger.outbox_release``: hand back an untried claim."""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE ctx_outbox SET next_try_at = ? WHERE id = ? AND done_at IS NULL AND next_try_at = ?",
+                (due_at, row_id, until),
+            )
+            return cur.rowcount == 1
+
     def outbox_done(self, row_id: int, ok: bool, now: float) -> None:
         with self._lock, self._connect() as conn:
             if ok:

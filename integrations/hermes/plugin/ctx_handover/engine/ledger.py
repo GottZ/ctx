@@ -1596,6 +1596,29 @@ class Ledger:
             out.append(d)
         return out
 
+    def outbox_claim(self, row_id: int, now: float, until: float) -> bool:
+        """Claim a due outbox row for one sender before its first MCP call (rv-final, M29 follow-up): ``next_try_at``
+        moves to ``until`` only while the row is still due at ``now`` and not done — one write transaction, so of
+        two flushers (threads or processes of the profile) exactly one gets True. The claimer ends the claim with
+        ``outbox_done`` (delivered or backed off) or ``outbox_release`` (untried); a claimer that dies leaves the row
+        due again at ``until``."""
+        with self._w() as c:
+            cur = c.execute(
+                "UPDATE ctx_outbox SET next_try_at=? WHERE id=? AND done_at IS NULL AND next_try_at<=?",
+                (float(until), int(row_id), float(now)),
+            )
+            return cur.rowcount == 1
+
+    def outbox_release(self, row_id: int, until: float, due_at: float) -> bool:
+        """Hand a claimed row back untried: ``next_try_at`` returns to ``due_at`` — only while the row still holds
+        the claim ``until`` and is not done. True when it did."""
+        with self._w() as c:
+            cur = c.execute(
+                "UPDATE ctx_outbox SET next_try_at=? WHERE id=? AND done_at IS NULL AND next_try_at=?",
+                (float(due_at), int(row_id), float(until)),
+            )
+            return cur.rowcount == 1
+
     def outbox_done(self, row_id: int, ok: bool, now: float) -> None:
         with self._w() as c:
             if ok:
