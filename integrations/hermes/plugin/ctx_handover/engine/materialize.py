@@ -536,6 +536,7 @@ class WorkspaceTxn:
                 max_files=cfg.max_files,
                 fallback=fb,
                 claimed=True,
+                max_bytes=cfg.max_total_bytes,
             )
         except BaseException:
             self._unclaim(partial, created)
@@ -733,6 +734,7 @@ class WorkspaceTxn:
                     self.cancelled,
                     tag=self.job6,
                     max_files=cfg.max_files,
+                    max_bytes=cfg.max_total_bytes,
                 )
                 self.skipped.extend(state.skipped)
                 return _Prepared(item.item_id, "tree", decision.mode, dest, pack_item, state)
@@ -756,13 +758,17 @@ class WorkspaceTxn:
             if stat.S_ISREG(st.st_mode) and sha256_file(dest) == content_sha:
                 return _Prepared(item.item_id, "extra", DestMode.SKIP, dest, pack_item, None)
             raise ConflictError("a different file exists at the destination", kind="exists_file", path=str(dest))
+        size = pack_item.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise BadRequest("extra file size must be a whole non-negative number", field="size")
+        filetree.check_room(size, dest.parent, max_bytes=self._require_cfg().max_total_bytes, what="file")  # H11
         temp = dest.parent / f".{dest.name}.ctxh-{self.job6}"
         created = self._claim(temp, dest, item.item_id, "file")
         entry = {
             "path": dest.name,
             "type": "file",
             "mode": pack_item.get("mode", "100644"),
-            "size": int(pack_item.get("size", 0)),
+            "size": size,
             "mtime_ns": int(pack_item.get("mtime_ns", 0)),
             "object": obj,
         }
