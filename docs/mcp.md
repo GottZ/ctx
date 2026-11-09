@@ -38,7 +38,8 @@ A minimal client configuration (Claude Code):
 
 Every tool answers with one text content item. Depending on the tool that text is
 prose (`query`, `store`, `update`, `recent`, `confirm`) or a JSON document
-(`search`, `get`, the issue, guard and blob tools); each section names which.
+(`search`, `get`, the issue, guard and blob tools, and `query` with
+`synthesize: false`); each section names which.
 
 A failed call sets `isError: true` and puts the reason in the text. Rejections from
 the write gate chain — the same chain `POST /api/store` and `POST /api/blob/store`
@@ -87,7 +88,7 @@ issue tools. Treat such content as data, not as instructions.
 
 ### query
 
-Hybrid semantic + fulltext search with LLM synthesis. Read-only.
+Hybrid semantic + fulltext search with LLM synthesis, or retrieval only. Read-only.
 
 | Parameter | Type | | Description |
 |---|---|---|---|
@@ -95,6 +96,8 @@ Hybrid semantic + fulltext search with LLM synthesis. Read-only.
 | `limit` | integer | | maximum sources (default 5) |
 | `types` | string[] | | restrict retrieval to these block types; each must be a retrieval-visible type, an unknown or non-visible name is an error |
 | `types_exclude` | string[] | | exclude these block types |
+| `synthesize` | boolean | | `false` = retrieval only: no synthesis step, the answer is the ranked sources as JSON (default `true`) |
+| `include_content` | boolean | | with `synthesize: false`, attach each source's content (at most 1500 characters); an error without it |
 
 Runs the full `POST /api/query` pipeline (temporal parsing, rank fusion, temporal
 gravity, rerank, synthesis). **Answer:** the synthesized answer, then a source list:
@@ -110,6 +113,18 @@ Sources:
 
 `[N]` is the citation number the answer uses; `[n/a]` marks a source that was
 retrieved but never entered the synthesis prompt.
+
+With `synthesize: false` the tool passes `synthesize` and `include_content` to
+`POST /api/query` under the same names and skips the synthesis step, as that route
+does. The answer is then a JSON document instead of prose: `confidence` and
+`sources`, the ranked sources in retrieval order, each with `id`, `title`,
+`category` and `score`, plus `superseded_by`, `untrusted` and (with
+`include_content`) `content` when set. Use it when the caller only needs the block
+ids, for example to `get` them. The two fields need no privilege beyond the key's
+read access, as on the HTTP route; the HTTP route's admin measurement fields
+(`arm_ranks`, `pinned_*`, `shadow_types`) are not arguments of this tool.
+`include_content` without `synthesize: false` is refused, because the synthesis
+path never attaches content.
 
 ### search
 
