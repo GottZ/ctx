@@ -1,17 +1,16 @@
 """Layer 3 (lab) — the surfaces of ctx_handover on two real gateways (owner: cluster F; BUILD-ORDER §5,
 TESTPLAN §4; R7, R12, R14, R24, BX P1/P2/P6).
 
-Not part of the unit run. Preconditions (BUILD-ORDER §5 steps 1–2), checked by the ``lab`` fixture:
+Not part of the unit run. The stand comes from ``tests/e2e/conftest.py::lab`` (session fixture, BUILD-ORDER §5
+steps 1–2): ``ctx_handover`` copied into and enabled in ``lab/a`` and ``lab/b``, ``llm gw-a gw-b serve-a serve-b``
+running with fixed dashboard tokens (``serve-a`` on 127.0.0.1:47111), ``lab/b/.env`` holding
+``CTX_HANDOVER_PEER_TOKEN`` = serve-a's token — the value the Desktop settings form would store for the secret field
+*Dashboard token of the other gateway* — and both directions already paired (on B the dial peer ``server``).
 
-* ``lab/a`` and ``lab/b`` have ``plugins/ctx_handover`` installed and enabled;
-* ``SERVE_TOKEN=<t> labctl.py start llm gw-a gw-b serve-a serve-b`` runs (``serve-a`` on 127.0.0.1:47111 with the
-  fixed dashboard token ``<t>``);
-* ``lab/b/.env`` holds ``CTX_HANDOVER_PEER_TOKEN=<t>`` — the value the Desktop settings form would store for the
-  secret field *Dashboard token of the other gateway* (``SERVE_TOKEN`` in this test's environment must equal it).
-
-Run with ``CTXH_E2E=1`` (otherwise the module is skipped), ``--basetemp=…/lab/pytest-e2e``, then ``labctl.py stop``
-and ``labctl.py status`` (0 lab processes). R24 on a messaging adapter has no lab platform; it is covered by
-``tests/unit/F/test_commands.py::test_admin_verbs_refused_on_messaging_platform``.
+Run with ``CTXH_E2E=1`` (otherwise the module is skipped), ``--basetemp=…/lab/pytest-e2e``; the fixture stops the
+lab afterwards and checks ``labctl.py status`` (0 lab processes). R24 on a messaging adapter has no lab platform;
+it is covered by ``tests/unit/F/test_commands.py::test_admin_verbs_refused_on_messaging_platform``.
+Runtime estimate: 2–3 min.
 """
 
 from __future__ import annotations
@@ -19,14 +18,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-LAB = Path(os.environ.get("CTXH_LAB", "/compose/n8n/.gotmp/handover/lab"))
 SERVE_A = "http://127.0.0.1:47111"
 PAIR_RE = re.compile(r"(ctxh-pair:[A-Za-z0-9_=-]+)")
 
@@ -36,23 +32,18 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def lab():
-    bin_dir = LAB / "bin"
-    if str(bin_dir) not in sys.path:
-        sys.path.insert(0, str(bin_dir))
-    import labctl  # type: ignore[import-not-found]
-    from gw import GW  # type: ignore[import-not-found]
-
+def lab(lab):
+    """The shared stand of ``tests/e2e/conftest.py`` in the shape these tests use (``ctl``, ``GW``, ``token``)."""
+    labctl, token = lab.ctl, lab.tokens["a"]
     for inst in ("a", "b"):
         if labctl.identify(inst) is None:
             pytest.fail(f"gateway {inst} is not running: labctl.py start llm gw-a gw-b serve-a serve-b")
         if not (labctl.home(inst) / "plugins" / "ctx_handover" / "plugin.yaml").is_file():
             pytest.fail(f"ctx_handover is not installed in lab/{inst}/plugins (BUILD-ORDER §5 step 1)")
-    token = os.environ.get("SERVE_TOKEN", "")
     env_b = (labctl.home("b") / ".env").read_text(encoding="utf-8") if (labctl.home("b") / ".env").exists() else ""
-    if not token or f"CTX_HANDOVER_PEER_TOKEN={token}" not in env_b:
-        pytest.fail("lab/b/.env needs CTX_HANDOVER_PEER_TOKEN equal to SERVE_TOKEN of serve-a (BUILD-ORDER §5 step 1)")
-    return type("Lab", (), {"ctl": labctl, "GW": GW, "token": token})
+    if f"CTX_HANDOVER_PEER_TOKEN={token}" not in env_b:
+        pytest.fail("lab/b/.env needs CTX_HANDOVER_PEER_TOKEN equal to the token of serve-a (BUILD-ORDER §5 step 1)")
+    return type("Lab", (), {"ctl": labctl, "GW": lab.GW, "token": token})
 
 
 def _hermes(lab, inst: str, *args: str, timeout: float = 120) -> Any:
@@ -127,18 +118,18 @@ def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab):
     finally:
         gw.close()
     sid_a = _session(lab, "a")
-    out_a, _ = _slash(lab, "a", sid_a, "/handover pair --name laptop")
+    out_a, _ = _slash(lab, "a", sid_a, "/handover pair --name laptop-f")
     match = PAIR_RE.search(out_a)
     assert match, out_a
     assert lab.token not in out_a
     sid_b = _session(lab, "b")
-    out_b, _ = _slash(lab, "b", sid_b, f"/handover pair {match.group(1)} --name server")
-    assert "Paired with server" in out_b, out_b
+    out_b, _ = _slash(lab, "b", sid_b, f"/handover pair {match.group(1)} --name server-f")
+    assert "Paired with server-f" in out_b, out_b
     peers_a, _ = _slash(lab, "a", sid_a, "/handover peers")
     peers_b, _ = _slash(lab, "b", sid_b, "/handover peers")
-    assert "laptop · inbound" in peers_a and "server · dial" in peers_b
+    assert "laptop-f · inbound" in peers_a and "server-f · dial" in peers_b
     doctor, _ = _slash(lab, "b", sid_b, "/handover doctor")
-    assert "[ok] peer server" in doctor and "[FAIL]" not in doctor, doctor
+    assert "[ok] peer server-f" in doctor and "[FAIL]" not in doctor, doctor
     assert "[warn] stored dashboard token" in doctor  # R17: the stored token opens A's whole dashboard
 
 
