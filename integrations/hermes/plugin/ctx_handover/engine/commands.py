@@ -37,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -565,9 +565,12 @@ class Plugin:
             )
             suspected = surfaces.suspected_secrets(info)
             summary["suspected_secrets"] = suspected
+            # R30: what --yes does not confirm — the conductor's info["yes_exempt"] (it calls back despite --yes for
+            # exactly these, gp-a) together with D's table; a code only the conductor names is a reason here too
+            exempt = surfaces.yes_exempt_of(info, reasons)
+            reasons += [r for r in exempt if r != surfaces.UNNAMED_EXEMPT and r not in reasons]
             state.summary = summary
             state.reasons = reasons
-            exempt = surfaces.yes_exempt(reasons)
             if options.yes and not exempt:  # R25: a blanket yes never takes suspected secrets along
                 state.answer = "no_proposed" if suspected else "yes"
                 return state.answer
@@ -589,7 +592,8 @@ class Plugin:
                     answer = None
             if answer not in {c["value"] for c in surfaces.CONFIRM_CHOICES}:
                 state.timed_out = True
-                answer = surfaces.choice_on_timeout(reasons)
+                # what --yes was refused for is not answered by silence either (R30): nothing is locked
+                answer = "cancel" if state.yes_refused else surfaces.choice_on_timeout(reasons)
             state.answer = answer
             return answer
 
@@ -652,7 +656,7 @@ class Plugin:
                 if summary is not None:
                     call.say(surfaces.render_plan(summary))
                 if state.yes_refused:
-                    call.say(_yes_refused_text(summary))
+                    call.say(_yes_refused_text(summary, state.yes_refused))
                 call.say("No answer to the confirmation, so the handover was cancelled. Nothing was locked.")
                 call.exit_code = EXIT_FAILED
             else:
@@ -1380,8 +1384,14 @@ def _root_shown(spec: object) -> str:
         return text
 
 
-def _yes_refused_text(summary: Mapping | None) -> str:
-    """Why ``--yes`` did not go ahead (R30): it does not confirm that the working folder stays here."""
+def _yes_refused_text(summary: Mapping | None, refused: Sequence[str] = ()) -> str:
+    """Why ``--yes`` did not go ahead (R30): it does not confirm that the working folder stays here — or another
+    reason the conductor marked ``yes_exempt`` (named by its text)."""
+    others = [r for r in refused if r != surfaces.CONFIRM_WORKSPACE_EXCLUDED]
+    if others and surfaces.CONFIRM_WORKSPACE_EXCLUDED not in refused:
+        why = "; ".join(surfaces.REASON_TEXT.get(r, r) for r in others if r != surfaces.UNNAMED_EXEMPT)
+        detail = f" ({why})" if why else ""
+        return f"--yes does not confirm this handover{detail}. Answer the question in an interactive session."
     excluded = (summary or {}).get("workspace_excluded")
     what = (
         surfaces.workspace_excluded_text(excluded)

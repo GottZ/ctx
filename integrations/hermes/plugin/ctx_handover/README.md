@@ -105,7 +105,7 @@ back here; the copy on the other gateway stays active.
 | Before closing time, let the agent keep working | the session | `/handover to server --continue "run the tests and fix what fails"` (needs `allow_remote_continue` on the server) |
 | A turn is still running | the session | add `--wait` to hand over as soon as it finishes |
 | No connection | source / target | `/handover export` writes one `.ctxh.tar`; `/handover import <file>` on the other machine (`export --keep` leaves this session active and marks the bundle as a copy; status and the final message say so) |
-| Take it back here | the source session | `/handover reclaim` (`--force` while a handover is being committed) |
+| Take it back here | the source session | `/handover reclaim` (`--force` while a handover is being committed); in a terminal `hermes handover reclaim --session <id>` (or `reclaim <id>`) |
 
 Before anything is locked the plugin shows what would move. It asks for a confirmation when items are only
 proposed, a destination has local changes (a fresh folder is used), the handover is larger than
@@ -125,7 +125,9 @@ The final message names the session on the other side, its folder, the model and
 what to do next; after a pull it also lists paths you asked for with `--include` that the other side does not
 release (withheld by source policy — a pull's own hints only narrow what the source offers). On the receiving side
 `/handover status <job>` shows the note the agent gets with your first message there; the note is not shown in
-the transcript view.
+the transcript view. `/handover status` also shows the jobs another gateway runs with this one — a push that
+arrived here, a pull that took a session from here — listed with this gateway's role (`target, from <peer>` or
+`source, to <peer>`) and, for an arrival, the session it became here.
 
 All commands: `/handover to | take | export | import | status | peers | pair | reclaim | cancel | resume | setup |
 doctor | identity | gc | logs | help` — `/handover help <command>` shows the options. `hermes handover <same>` runs

@@ -258,9 +258,10 @@ SYSTEM_DENY: tuple[tuple[str, ...], ...] = (
 """Absolute system paths that are never releasable (component globs below ``/``; DESIGN §10.1, SEC 5.4).
 ``/private/etc`` is where ``/etc`` resolves on macOS."""
 
-HERMES_FILE_KINDS: tuple[str, ...] = ("spillover", "hook_outputs", "native_inputs")
+HERMES_FILE_KINDS: tuple[str, ...] = ("spillover", "hook_outputs", "native_inputs", "terminal_output")
 """Session-file kinds (DESIGN §6.11) and the only Hermes-home areas the plugin may read from or place into:
-``<home>/cache/spillover``, ``<home>/hook_outputs``, ``<document cache>/native-inputs``."""
+``<home>/cache/spillover``, ``<home>/hook_outputs``, ``<document cache>/native-inputs``,
+``<home>/cache/terminal-output`` (the terminal tool's full-output spill files, L3-F10)."""
 
 _SNIFF_MARKERS: tuple[tuple[bytes, bytes], ...] = (
     (b"-----BEGIN ", rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
@@ -659,6 +660,8 @@ def _session_area(kind: str, cfg: PolicyConfig) -> Path | None:
     if kind == "native_inputs":
         cache = cfg.document_cache if cfg.document_cache is not None else cfg.hermes_home / "cache" / "documents"
         return cache / "native-inputs"
+    if kind == "terminal_output":
+        return cfg.hermes_home / "cache" / "terminal-output"
     return None
 
 

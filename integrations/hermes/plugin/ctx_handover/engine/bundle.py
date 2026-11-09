@@ -29,6 +29,8 @@ same profile needs ``again`` (SK L5).
 
 from __future__ import annotations
 
+import errno
+import functools
 import hashlib
 import io
 import os
@@ -115,8 +117,40 @@ _MANIFEST_RE = re.compile(r"manifests/([0-9a-f]{2})/([0-9a-f]{62})\.json")
 _FIXED = {"CTXH-BUNDLE": 64, "manifest.json": None, "manifest.sig": MAX_SIG_BYTES}
 
 
+_NO_SPACE = frozenset(e for e in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if e is not None)
+
+
 def _bad(message: str, **details) -> BadRequest:
     return BadRequest(f"bundle rejected: {message}", field="bundle", **details)
+
+
+def write_error(exc: OSError, out: Path, need: int = 0) -> HandoverError:
+    """An ``OSError`` of this host's file system while it writes the bundle ``out`` (its staging or the commit) as a
+    ``HandoverError`` the conductor handles — it never leaves the conductor's thread (gp-a §8). Repeating the same
+    write does not help, so neither is repeatable: a full disk or quota is ``insufficient_storage`` for the bundle's
+    folder (free space measured now), anything else (no permission, I/O error) an ``internal`` error naming the
+    bundle and the reason. The export then ends and frees its source."""
+    folder = Path(out).parent
+    if exc.errno in _NO_SPACE:
+        try:
+            free = shutil.disk_usage(folder).free
+        except OSError:
+            free = 0
+        return InsufficientStorage(
+            f"not enough space to write the bundle {out}",
+            need_bytes=max(0, int(need)),
+            free_bytes=int(free),
+            path=str(folder),
+            side="This machine",
+            errno=exc.errno,
+        )
+    reason = exc.strerror or type(exc).__name__
+    return HandoverError(
+        f"the bundle {out} could not be written ({reason})",
+        retryable=False,
+        path=str(exc.filename or out),
+        errno=exc.errno,
+    )
 
 
 def _block_name(block_id: str) -> str:
@@ -135,9 +169,10 @@ def _manifest_name(object_id: str) -> str:
 class _DirSink:
     """``BlockSink``/``BlockSource`` over a staging directory in the bundle layout (no ledger)."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, on_error: Callable[[OSError], HandoverError] | None = None) -> None:
         self.root = Path(root)
         self._tmp = self.root / ".tmp"
+        self._on_error = on_error or (lambda exc: write_error(exc, self.root))
 
     def _bpath(self, block_id: str) -> Path:
         if not re.fullmatch(r"[0-9a-f]{64}", str(block_id)):
@@ -161,7 +196,10 @@ class _DirSink:
                 continue
             path = self._bpath(block_id)
             if not path.is_file():
-                write_private(path, bytes(raw), self._tmp)
+                try:
+                    write_private(path, bytes(raw), self._tmp)
+                except OSError as exc:  # a full disk is the export's end, not a crash of the conductor's thread
+                    raise self._on_error(exc) from exc
             accepted += 1
         return accepted, rejected
 
@@ -171,7 +209,10 @@ class _DirSink:
             m = verify_manifest(m)
             path = self.root / _manifest_name(m.object_id)
             if not path.is_file():
-                write_private(path, canonical_bytes(manifest_doc(m)), self._tmp)
+                try:
+                    write_private(path, canonical_bytes(manifest_doc(m)), self._tmp)
+                except OSError as exc:
+                    raise self._on_error(exc) from exc
                 new += 1
         return new
 
@@ -229,7 +270,9 @@ class _DirSink:
 
 
 def _generic_facts(src: EnvFacts) -> EnvFacts:
-    """Declared facts of an unknown importer: fresh directories, no git basis (DESIGN §5.4)."""
+    """Declared facts of an unknown importer: fresh directories, no git basis (DESIGN §5.4), no checked workspace
+    root (R29: ``workspace_root_ok`` None — the exporter's own check says nothing about the importer's root; the
+    importer checks its root when it imports)."""
     defaults = Options()
     return replace(
         src,
@@ -247,7 +290,23 @@ def _generic_facts(src: EnvFacts) -> EnvFacts:
         tools_seen={},
         offline_capable=False,
         capabilities=frozenset(),
+        workspace_root_ok=None,
+        workspace_root_problem="",
     )
+
+
+def _host_io(method):
+    """``TargetAPI`` methods of ``BundleTarget`` touch this host's file system: an ``OSError`` there is raised as the
+    ``HandoverError`` of ``write_error`` (the conductor handles only those; gp-a §8)."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except OSError as exc:
+            raise self._write_error(exc) from exc
+
+    return wrapper
 
 
 def _done(op_id: str, result: dict) -> OpStatus:
@@ -295,7 +354,7 @@ class BundleTarget:
         self._hermes_version = hermes_version
         self._clock = clock
         self._partial = self.out.parent / f"{self.out.name}.partial"
-        self._sink = _DirSink(self._partial)
+        self._sink = _DirSink(self._partial, on_error=self._write_error)
         self._job_id: str | None = None
         self._created_at = 0.0
         self._facts: EnvFacts | None = None
@@ -324,6 +383,7 @@ class BundleTarget:
             capabilities=BUNDLE_CAPS,
         )
 
+    @_host_io
     def open_job(self, job: JobContext) -> None:
         """Open the staging. A repeated ``open_job`` of the same job keeps its progress; the staging of another
         export to the same path is refused while that job runs and cleared when it ended (or never recorded one)."""
@@ -355,6 +415,7 @@ class BundleTarget:
                 )
             self._save()
 
+    @_host_io
     def facts(self, job: JobContext, source_facts: EnvFacts) -> EnvFacts:
         with self._lock:
             self._sync(job)
@@ -362,6 +423,7 @@ class BundleTarget:
             self._save()
             return self._facts
 
+    @_host_io
     def negotiate(self, job: JobContext, plan: ResourcePlan) -> FinalPlan:
         with self._lock:
             self._sync(job)
@@ -403,11 +465,25 @@ class BundleTarget:
                 )
         return replace(final, plan_id=planning.plan_id(planning.final_doc(final)))
 
+    def _write_error(self, exc: OSError) -> HandoverError:
+        """``write_error`` for this export: the bundle path, and the confirmed plan's size as the space it needs."""
+        need = self._final.need_bytes if self._final is not None else 0
+        return write_error(exc, self.out, need)
+
     def _record(self, op: OpStatus) -> OpStatus:
+        """Keep ``op`` and write the progress into the staging. When that write fails (full disk, I/O error) a step
+        that succeeded is reported FAILED with the write error — its progress is not on disk, so no other instance
+        could continue from it (V24); a failed step stays failed, recorded in memory only."""
         self._ops[op.op_id] = op
-        self._save()
+        try:
+            self._save()
+        except OSError as exc:
+            if op.state is OpState.DONE:
+                op = _failed(op.op_id, self._write_error(exc))
+                self._ops[op.op_id] = op
         return op
 
+    @_host_io
     def start_stage_context(self, job: JobContext, capsule: CapsuleInfo) -> OpStatus:
         with self._lock:
             self._sync(job)
@@ -445,6 +521,7 @@ class BundleTarget:
             source_revision=hashes.revision,
         )
 
+    @_host_io
     def start_prepare(self, job: JobContext, req: PrepareRequest) -> OpStatus:
         with self._lock:
             self._sync(job)
@@ -456,6 +533,7 @@ class BundleTarget:
             self._state = "prepared"
             return self._record(_done(op_id, to_wire(self._prepared())))
 
+    @_host_io
     def start_apply_delta(self, job: JobContext, delta: DeltaInfo) -> OpStatus:
         with self._lock:
             self._sync(job)
@@ -465,6 +543,7 @@ class BundleTarget:
             self._delta = delta
             return self._record(_done(op_id, to_wire(self._prepared())))
 
+    @_host_io
     def start_reset_session(self, job: JobContext) -> OpStatus:
         with self._lock:
             self._sync(job)
@@ -472,6 +551,7 @@ class BundleTarget:
             self._state = "open"
             return self._record(_done(f"bundle-reset-{job.job_id}", {}))
 
+    @_host_io
     def start_commit(self, job: JobContext) -> OpStatus:
         with self._lock:
             self._sync(job)
@@ -481,6 +561,8 @@ class BundleTarget:
                     self._commit()
                 except HandoverError as exc:
                     return self._record(_failed(op_id, exc))
+                except OSError as exc:  # full disk, no permission: the commit fails for good, the job ends (gp-a §8)
+                    return self._record(_failed(op_id, self._write_error(exc)))
             op = _done(op_id, to_wire(self._ack))
             self._ops[op_id] = op  # the staging (and its state file) is gone: the bundle at ``out`` is the record
             return op
@@ -488,6 +570,7 @@ class BundleTarget:
     def continue_session(self, job: JobContext, prompt: str) -> ContinueResult:
         return ContinueResult(started=False, via="bundle")
 
+    @_host_io
     def abort(self, job: JobContext, reason: str) -> None:
         with self._lock:
             self._sync(job)
@@ -500,6 +583,7 @@ class BundleTarget:
             self._state = "aborted"
             self._seen = None
 
+    @_host_io
     def op_status(self, job: JobContext, op_id: str) -> OpStatus:
         with self._lock:
             self._sync(job)
@@ -508,6 +592,7 @@ class BundleTarget:
             except KeyError:
                 raise NotFound("operation not known", op_id=op_id) from None
 
+    @_host_io
     def status(self, job: JobContext) -> ParticipantStatus:
         with self._lock:
             self._sync(job)

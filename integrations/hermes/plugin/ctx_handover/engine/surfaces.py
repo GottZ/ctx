@@ -138,7 +138,7 @@ _VERB_OPTIONS: dict[str, set[str]] = {
     "status": set(),
     "peers": set(),
     "pair": {"--name", "--rights", "--ttl", "--gate", "--allow-insecure"},
-    "reclaim": {"--force"},
+    "reclaim": {"--force", "--session"},
     "cancel": set(),
     "resume": set(),
     "setup": set(),
@@ -179,7 +179,7 @@ USAGE: dict[str, str] = {
     "pair": "/handover pair [--name N] [--rights push,pull] [--ttl 10m]   (on the gateway that receives)\n"
     "/handover pair <ctxh-pair:…> [--name N] [--gate session_token|bearer|basic_login] [--allow-insecure]"
     "   (on the device that dials)",
-    "reclaim": "/handover reclaim [<session-id>] [--force]",
+    "reclaim": "/handover reclaim [<session-id> | --session ID] [--force]",
     "cancel": "/handover cancel [<job>]",
     "resume": "/handover resume [<job>]",
     "setup": "/handover setup",
@@ -366,7 +366,11 @@ def _verb_args(verb: str, args: dict, errors: list[str]) -> None:
     elif verb in {"status", "cancel", "resume", "logs"}:
         args["job"] = first
     elif verb == "reclaim":
-        args["session"] = first
+        # the session as a positional or as --session (the form every other CLI verb takes, L3-F06); one id only
+        named = args.get("session")
+        if first is not None and named is not None and first != named:
+            errors.append(f"Name the session once: {first!r} and --session {named!r} differ. Usage: {USAGE['reclaim']}")
+        args["session"] = first if first is not None else named
     elif verb == "gc":
         args.setdefault("job", None)
         if args.get("job") and args.get("all"):
@@ -614,6 +618,32 @@ def yes_exempt(reasons: Sequence[str]) -> list[str]:
     return planning.yes_exempt(reason_names(reasons))
 
 
+UNNAMED_EXEMPT = "unnamed_exempt"
+"""Stands in for an ``info["yes_exempt"]`` value of an unknown form: the conductor marked something ``--yes`` does
+not confirm, and the surface cannot tell what — so it asks (fail-closed)."""
+
+
+def yes_exempt_of(info: Mapping | None, reasons: Sequence[str]) -> list[str]:
+    """What ``--yes`` does not confirm in one confirmation: the conductor's ``info["yes_exempt"]`` (codes it calls the
+    callback for despite ``--yes``, ``conductor._confirm``) together with D's table over ``reasons`` — the
+    conductor's list wins where the two differ. Only an absent key, ``None`` or an empty list/tuple/set name nothing;
+    a bare string or a letter names one reason; any other value counts as ``UNNAMED_EXEMPT`` (ask, never "yes")."""
+    raw = info.get("yes_exempt") if isinstance(info, Mapping) else None
+    if raw is None:
+        named: list[str] = []
+    elif isinstance(raw, str):
+        named = [raw]
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        named = [str(r) for r in raw]
+    else:
+        named = [UNNAMED_EXEMPT]
+    out = yes_exempt(reasons)
+    for name in reason_names(named):
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 _WORKSPACE_WHY = {
     "hermes": "it lies inside the Hermes home, which is never sent",
     "home": "it is the home folder itself",
@@ -856,18 +886,31 @@ def render_peers(peers: Sequence[Peer], *, fingerprint: Callable[[str], str] = f
     return "\n".join(lines)
 
 
+_PARTICIPANT_SIDE = {"target": "from", "source": "to"}
+"""Role of this gateway in a job another gateway conducts (``JobRunner.status``, contract V43) → the word before the
+other side: a push that arrives here (``target``), a pull that takes a session from here (``source``)."""
+
+
 def _job_line(job: Mapping) -> list[str]:
     prog = job.get("progress") or {}
     step = prog.get("step") if isinstance(prog, Mapping) else None
-    head = (
-        f"{short_job(job.get('job_id'))} · {job.get('mode', '?')} · {job.get('peer') or 'bundle'} · "
-        f"{job.get('state', '?')}"
-    )
+    role = job.get("role")
+    side = _PARTICIPANT_SIDE.get(role) if isinstance(role, str) else None
+    if side is not None:  # another gateway conducts this job; this gateway is its source or its target
+        where = f"{role}, {side} {job.get('peer') or 'another gateway'}"
+    else:
+        where = str(job.get("peer") or "bundle")
+    head = f"{short_job(job.get('job_id'))} · {job.get('mode', '?')} · {where} · {job.get('state', '?')}"
     if step and step != job.get("state"):
         head += f" · {step}"
     if isinstance(prog, Mapping) and prog.get("bytes_total"):
         head += f" · {human_bytes(prog.get('bytes_done', 0))}/{human_bytes(prog['bytes_total'])}"
     lines = [head]
+    session = job.get("calling_session")
+    if side is not None and isinstance(session, str) and session:
+        title = job.get("title")
+        named = f" ({title})" if isinstance(title, str) and title else ""
+        lines.append(f"    session here: {session}{named}")
     for w in job.get("warnings") or ():
         lines.append(f"    warning: {w}")
     err = job.get("last_error")
@@ -953,6 +996,25 @@ def _d(err: HandoverError, key: str, default: Any = None) -> Any:
     return (err.details or {}).get(key, default)
 
 
+def _workspace_root_text(err: HandoverError, peer: str) -> str:
+    """R29 (contract V40): the receiving gateway's write root cannot be used, found while the facts were exchanged —
+    before anything was locked or sent. D's sentence (``envfacts.workspace_root_message``) when the error carries
+    one; the setting and the folder are named in any case."""
+    host = str(_d(err, "host") or "") or peer
+    path = str(_d(err, "path") or "")
+    setting = str(_d(err, "setting") or "workspace_root")
+    message = " ".join(str(err.message or "").split()).rstrip(".")
+    if message and (not path or path in message) and setting in message:
+        text = message
+    else:
+        why = message or str(_d(err, "problem") or "") or "check_failed"
+        text = (
+            f"the workspace root {path or '?'} on {host} cannot be used ({why}); set {setting} (and allow_roots) in "
+            f"the ctx_handover settings on {host}"
+        )
+    return f"{text[:1].upper()}{text[1:]}. Nothing was locked or sent."
+
+
 def render_error(err: HandoverError, peer: str | None) -> str:
     """The remedy text for an error code; unknown codes fall back to the error's own message."""
     p = peer or str(_d(err, "peer", "") or "") or "the other gateway"
@@ -1008,10 +1070,17 @@ def render_error(err: HandoverError, peer: str | None) -> str:
         return f"A proxy in front of {p} limits request bodies below one block (≈ 513 KiB). Raise its body limit."
     if code == "insufficient_storage":
         side = _d(err, "side") or p
+        if not _d(err, "need_bytes"):  # a write failed on a full disk; how much more it needs is not known
+            return (
+                f"{side} ran out of space in {_d(err, 'path', '?')} ({human_bytes(_d(err, 'free_bytes', 0))} free). "
+                "Nothing was transferred."
+            )
         return (
             f"{side} needs {human_bytes(_d(err, 'need_bytes', 0))} free in {_d(err, 'path', '?')}, has "
             f"{human_bytes(_d(err, 'free_bytes', 0))}. Nothing was transferred."
         )
+    if code == "policy_denied" and _d(err, "reason") == "workspace_root":
+        return _workspace_root_text(err, p)
     if code == "policy_denied":
         items = [str(i) for i in (_d(err, "items") or ())][:3]
         count = _d(err, "count") or len(items) or 1

@@ -292,6 +292,8 @@ class FakeBackend:
         self.confirm_reasons: list[str] = []
         self.confirm_answers: list[str] = []
         self.confirm_even_with_yes = False
+        # info["yes_exempt"] as the conductor passes it (conductor._confirm, gp-a); None = D's table over the reasons
+        self.yes_exempt: list[str] | None = None
         self.summary_extra: dict = {}  # keys merged into D's presend_summary (e.g. workspace_excluded, R30)
         self.instruction_files: list[dict] = []
         self.pull_log: list[dict] = []
@@ -415,6 +417,9 @@ class FakeBackend:
             answer = confirm(
                 {
                     "reasons": list(self.confirm_reasons),
+                    "yes_exempt": (
+                        list(self.yes_exempt) if self.yes_exempt is not None else _plan.yes_exempt(self.confirm_reasons)
+                    ),
                     "summary": {**_plan.presend_summary(self.final), **self.summary_extra},
                     "final_plan": self.final,
                     "suspected_secrets": [
