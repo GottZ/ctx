@@ -45,12 +45,9 @@ from ctx_handover.tests.unit.A.standins import WorkspaceTxn as StandInTxn
 Usage = namedtuple("Usage", "total used free")
 
 
-class WorkspaceTxn(StandInTxn):
-    """The stand-in transaction with E's step names ``c1:<item_id>`` (contract X11, W021: the target uses E's
-    names as they are)."""
-
-    def commit_steps(self):
-        return [(f"c1:{name}", fwd, inv) for name, fwd, inv in super().commit_steps()]
+WorkspaceTxn = StandInTxn
+"""The stand-in transaction names its steps like E (``c1:<item_id>``; contract X11, W021: the target uses E's names
+as they are)."""
 
 
 def layer2_ports():
@@ -133,7 +130,7 @@ class Env:
         self.verified = verified
         self.target = self.make_target()
         self.job = JobContext(
-            job_id="01JOBTARGET0000000000000000"[:26],
+            job_id="01HZX3T4RG0000000000000000",
             mode=mode,
             peer=None,
             options=self.options,

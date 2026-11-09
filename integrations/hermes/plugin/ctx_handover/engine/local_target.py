@@ -609,6 +609,7 @@ class LocalTarget:
         pack_doc = self._read_doc(req.pack.pack_id)
         if pack_doc.get("kind") != "ctxh.pack" or pack_doc.get("final_plan_id") != req.final_plan_id:
             raise VerifyFailed("the pack does not belong to the confirmed final plan", which="final_plan_id")
+        self._remember(job, case_pairs=self._case_pairs(pack_doc))
         items = {i.item_id: i for i in final.plan.items}
         decisions = {d.item_id: d for d in final.decisions}
         peer_id = self._peer_key()
@@ -709,6 +710,18 @@ class LocalTarget:
         self._go(job, "preparing", "prepared", prepared=prepared)
         return prepared
 
+    def _case_pairs(self, pack_doc: dict) -> list[list[str]]:
+        """Contract V09: on a case-insensitive file system here (``PolicyConfig.case_insensitive``) the pack items'
+        name pairs that differ only in case (E's ``[kept, colliding]`` pairs) collide; the note names both."""
+        if not self.policy.case_insensitive:
+            return []
+        pairs: list[list[str]] = []
+        for item in pack_doc.get("items") or ():
+            for pair in (item.get("case_collisions") if isinstance(item, dict) else None) or ():
+                if isinstance(pair, (list, tuple)) and len(pair) == 2 and list(pair) not in pairs:
+                    pairs.append([str(pair[0]), str(pair[1])])
+        return pairs
+
     def _hermes_placement(self, pack_items: list, items: dict, tip_id: str) -> tuple[list[dict], list[str]]:
         """Target paths of the received session files from kind + basename only (contract X17, hardening #7): the
         kind is the plan item's ``hermes_kind`` (the pack item's must agree), the name the basename of ``rel``.
@@ -748,9 +761,19 @@ class LocalTarget:
         report_path = reports / f"{job.job_id}.md"
         kind = "bundle" if job.mode is Mode.IMPORT else "peer"
         origin = f"{'verified' if self.peer_verified else 'unverified'} {kind}"
+        if job.mode is Mode.IMPORT and not self.source_peer_id:
+            # V13: no paired peer is bound to this import, so nothing that arrived can find its way back
+            origin += "; no return path to the origin"
+        if job.mode is Mode.IMPORT:  # DESIGN §5.4 (re-import guard): every bundle import note says so
+            origin += "; this bundle may have been imported elsewhere too"
         note_parts = dict(req.note_parts or {})
         dests = {d.item_id: d.dest for d in final.decisions}
         note_parts["instruction_files"] = list(p.plan.instruction_files(final.plan.items, dests.get))
+        pairs = ctx.get("case_pairs") or []
+        if pairs:
+            texts = list(note_parts.get("case_collisions") or [])
+            texts += [t for t in p.note.case_collision_texts(pairs) if t not in texts]
+            note_parts["case_collisions"] = texts
         model_change = ctx.get("model_change", final.model_change)
         note_text, report_md = p.note.compose(
             job_id=job.job_id,

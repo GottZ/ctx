@@ -121,6 +121,7 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS ctx_outbox(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,"
     " payload TEXT NOT NULL, created_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,"
     " next_try_at REAL NOT NULL, done_at REAL)",
+    "CREATE TABLE IF NOT EXISTS peer_facts(peer_id TEXT PRIMARY KEY, facts TEXT NOT NULL, at REAL NOT NULL)",
 )
 
 _PROCESS: dict[str, object] = {}
@@ -462,12 +463,44 @@ class Ledger:
             return [h[0] for h in hits]
 
     def remove_peer(self, name_or_id: str) -> bool:
-        """Dialer side: delete a dial peer's entry and pinned key (DESIGN §12.5)."""
+        """Dialer side: delete a dial peer's entry, pinned key and last known facts (DESIGN §12.5)."""
         with self._w() as c:
-            cur = c.execute(
-                "DELETE FROM peers WHERE (peer_id=? OR name=?) AND direction='dial'", (name_or_id, name_or_id)
+            row = c.execute(
+                "SELECT peer_id FROM peers WHERE (peer_id=? OR name=?) AND direction='dial' ORDER BY peer_id=? DESC",
+                (name_or_id,) * 3,
+            ).fetchone()
+            if row is None:
+                return False
+            c.execute("DELETE FROM peers WHERE peer_id=?", (row[0],))
+            c.execute("DELETE FROM peer_facts WHERE peer_id=?", (row[0],))
+            return True
+
+    def peer_facts_set(self, peer_id: str, facts_wire: dict) -> None:
+        """Keep the target facts last received from ``peer_id`` (its ``hello``/``facts`` answer, wire form of
+        ``EnvFacts``; contract V28): ``export --for <peer>`` negotiates with them (DESIGN §5.4). The newest answer
+        replaces the older one."""
+        if not isinstance(peer_id, str) or not peer_id:
+            raise TypeError("peer_facts_set needs a peer id")
+        if not isinstance(facts_wire, dict):
+            raise TypeError("peer_facts_set needs the wire form of the facts (a dict)")
+        with self._w() as c:
+            c.execute(
+                "INSERT INTO peer_facts(peer_id, facts, at) VALUES(?,?,?) ON CONFLICT(peer_id) DO UPDATE SET"
+                " facts=excluded.facts, at=excluded.at",
+                (peer_id, _dumps(facts_wire), self.now()),
             )
-            return cur.rowcount > 0
+
+    def peer_facts_get(self, peer_id: str) -> dict | None:
+        """The facts ``peer_facts_set`` kept for ``peer_id`` (a fresh dict), or None when none were received or the
+        stored text is not a JSON object."""
+        row = self._q1("SELECT facts FROM peer_facts WHERE peer_id=?", (peer_id,))
+        if row is None:
+            return None
+        try:
+            value = _loads(row[0])
+        except ValueError:
+            return None
+        return value if isinstance(value, dict) else None
 
     def rename_peer(self, old: str, new: str) -> bool:
         with self._w() as c:
@@ -734,7 +767,9 @@ class Ledger:
         return out
 
     def job_update(self, job_id: str, role: Role, *, epoch: int | None = None, **fields: object) -> None:
-        """Update ``restarts``, ``last_error``, ``result`` (CAS on epoch when given)."""
+        """Update ``restarts``, ``last_error``, ``result`` (CAS on epoch when given). A job row that does not exist
+        is ``NotFound`` — with or without an epoch: an error or result is never reported as recorded when nothing
+        was written."""
         allowed = {"restarts", "last_error", "result"}
         unknown = set(fields) - allowed
         if unknown:
@@ -746,7 +781,12 @@ class Ledger:
             for key, value in fields.items():
                 sets.append(f"{key}=?")
                 values.append(value if key == "restarts" else (None if value is None else _dumps(value)))
-            c.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=? AND role=?", (*values, job_id, str(role)))  # noqa: S608
+            cur = c.execute(
+                f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=? AND role=?",  # noqa: S608 - fixed column names
+                (*values, job_id, str(role)),
+            )
+            if cur.rowcount != 1:
+                raise NotFound(f"job {job_id} ({role}) not found")
 
     def touch_job(self, job_id: str, role: Role) -> None:
         """Record activity (participant request) without a transition: ``updated_at = now``."""

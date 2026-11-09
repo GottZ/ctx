@@ -195,9 +195,10 @@ def test_l2_verified_blocks_check_every_manifest(clock):
 
 
 def test_l2_conductor_aborts_on_a_forged_manifest(tmp_path, clock):
-    """K-1: a source that answers a document id with a manifest that does not hash to it makes the move fail before
-    the commit point (``block_corrupt``; retried as a transport fault, then the job is suspended): nothing is
-    active at the target, the source never got the primary lock."""
+    """K-1 with V23: a source that answers a document id with a manifest that does not hash to it makes the move fail
+    before the commit point (``block_corrupt``): one refetch, then the job ends ABORTED — not suspended, a forged
+    object does not get better by waiting. Nothing is active at the target, the source never got the primary lock
+    and is released."""
     h = Harness(tmp_path, clock)
     real = h.world.source.blocks_store.manifests
 
@@ -209,9 +210,10 @@ def test_l2_conductor_aborts_on_a_forged_manifest(tmp_path, clock):
     c = h.conductor()
     c.run_until_negotiated()
     c.run()
-    assert h.state() == "suspended"
+    assert h.state() == "aborted"
     assert h.ledger.job(h.job_id, Role.CONDUCTOR)["last_error"]["code"] == "block_corrupt"
     assert not h.world.target.active and not h.world.source.primary_lock and h.world.violations == []
+    assert h.world.source.state == "released" and not h.world.source.leases
     assert "start_prepare" not in h.calls("target")
 
 

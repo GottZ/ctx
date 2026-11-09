@@ -56,9 +56,9 @@ def test_veto_rows_give_the_texts_reclaim_looks_for(led, state, fields):
 
     Mutant: ``veto_rows`` without ``prepared_at``/``ack`` (the layer-1 column set) → the retired text says "an
     unknown time" without the title, the exported one has no date: not in the reclaim set."""
-    led.source_lock("J1", _info(), "holder", "server")
-    led.source_set("J1", state, **fields)
-    led.veto_add("J1", ["r1", "t1"], "r1")
+    led.source_lock("01JZJ100000000000000000000", _info(), "holder", "server")
+    led.source_set("01JZJ100000000000000000000", state, **fields)
+    led.veto_add("01JZJ100000000000000000000", ["r1", "t1"], "r1")
     index = lock.VetoIndex(led.path, ledger_factory=lambda _path: led)
     assert index.refresh_now(force=True)
     shown = index.lookup("t1")["message"]
@@ -78,15 +78,17 @@ def test_veto_rows_give_the_texts_reclaim_looks_for(led, state, fields):
         "bundle_path",
         "updated_at",
     }
-    assert row["job_id"] == row["job"] == "J1" and row["root_id"] == "r1" and row["state"] == state
+    assert (
+        row["job_id"] == row["job"] == "01JZJ100000000000000000000" and row["root_id"] == "r1" and row["state"] == state
+    )
     if state == "retired":
         assert "There" in shown and "unknown time" not in shown
 
 
 def test_map_lookup_binds_direction(led):
     """X10: ``map_lookup(peer, path, direction)`` returns only rows of that direction (pathmap's lookup)."""
-    led.map_put(MapRow("/home/u/app", "P1", "/srv/app", "out", None, None, "J1"))
-    led.map_put(MapRow("/home/u/app-in", "P1", "/srv/app", "in", None, None, "J2"))
+    led.map_put(MapRow("/home/u/app", "P1", "/srv/app", "out", None, None, "01JZJ100000000000000000000"))
+    led.map_put(MapRow("/home/u/app-in", "P1", "/srv/app", "in", None, None, "01JZJ200000000000000000000"))
     assert led.map_lookup("P1", "/srv/app", "out").local_path == "/home/u/app"
     assert led.map_lookup("P1", "/srv/app", "in").local_path == "/home/u/app-in"
     assert led.map_lookup("P1", "/srv/app").local_path == "/home/u/app"  # out before in
@@ -98,14 +100,14 @@ def test_job_objects_is_the_jobs_own_scope(led):
     the server; another job's object is not in it.
 
     Mutant: ``job_objects`` without ``WHERE job_id=?`` → J2's object is in J1's scope."""
-    for jid in ("J1", "J2"):
+    for jid in ("01JZJ100000000000000000000", "01JZJ200000000000000000000"):
         led.create_job(jid, Role.SOURCE, Mode.PULL, None, {})
-    led.job_object("J1", "a" * 64)
-    led.job_objects_add("J1", ["b" * 64, "a" * 64])
-    led.job_object("J2", "c" * 64)
-    assert led.job_objects("J1") == {"a" * 64, "b" * 64}
-    assert led.job_objects("J2") == {"c" * 64}
-    assert led.job_objects("J3") == set()
+    led.job_object("01JZJ100000000000000000000", "a" * 64)
+    led.job_objects_add("01JZJ100000000000000000000", ["b" * 64, "a" * 64])
+    led.job_object("01JZJ200000000000000000000", "c" * 64)
+    assert led.job_objects("01JZJ100000000000000000000") == {"a" * 64, "b" * 64}
+    assert led.job_objects("01JZJ200000000000000000000") == {"c" * 64}
+    assert led.job_objects("01JZJ300000000000000000000") == set()
 
 
 def test_object_delete_joins_the_open_transaction(led):
@@ -127,17 +129,17 @@ def test_object_delete_joins_the_open_transaction(led):
 def test_quota_charge_never_exceeds_the_confirmed_plan(led):
     """R28 (ledger part): without a quota row nothing is charged; raising keeps what was charged; concurrent
     charges from several threads (own connections) never pass the quota."""
-    assert led.quota_charge("J", Role.TARGET, 10) == (False, 0, -1)
-    led.quota_set("J", Role.TARGET, 1000)
-    assert led.quota_charge("J", Role.TARGET, 600) == (True, 600, 1000)
-    led.quota_set("J", Role.TARGET, 500)  # never lowers
-    assert led.quota_get("J", Role.TARGET) == (1000, 600)
+    assert led.quota_charge("01JZJ000000000000000000000", Role.TARGET, 10) == (False, 0, -1)
+    led.quota_set("01JZJ000000000000000000000", Role.TARGET, 1000)
+    assert led.quota_charge("01JZJ000000000000000000000", Role.TARGET, 600) == (True, 600, 1000)
+    led.quota_set("01JZJ000000000000000000000", Role.TARGET, 500)  # never lowers
+    assert led.quota_get("01JZJ000000000000000000000", Role.TARGET) == (1000, 600)
     results: list[bool] = []
     barrier = threading.Barrier(8)
 
     def charge():
         barrier.wait(10)
-        results.append(led.quota_charge("J", Role.TARGET, 100)[0])
+        results.append(led.quota_charge("01JZJ000000000000000000000", Role.TARGET, 100)[0])
 
     threads = [threading.Thread(target=charge) for _ in range(8)]
     for t in threads:
@@ -145,7 +147,7 @@ def test_quota_charge_never_exceeds_the_confirmed_plan(led):
     for t in threads:
         t.join(30)
     assert results.count(True) == 4 and results.count(False) == 4
-    assert led.quota_get("J", Role.TARGET) == (1000, 1000)
+    assert led.quota_get("01JZJ000000000000000000000", Role.TARGET) == (1000, 1000)
 
 
 def test_claim_interval_once_per_interval_across_connections(tmp_path, clock):

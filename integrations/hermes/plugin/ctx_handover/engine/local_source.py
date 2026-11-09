@@ -434,7 +434,9 @@ class LocalSource:
         src = self.ledger.source_state(job.job_id)
         if src is None or src["state"] not in ("locking", "locked", "preparing", "prepared", "retiring"):
             if src is not None and src["state"] in ("released", "reclaimed", "suspended"):
-                raise LeaseLost(f"the source is {src['state']}")
+                # the state travels in the details: route #9 answers it as ``{state}`` (``source_reclaimed`` for a
+                # reclaim, contract V17) instead of an anonymous lost lease
+                raise LeaseLost(f"the source is {src['state']}", state=src["state"])
             return
         info = from_wire(SessionInfo, ctx["info"])
         ttl, _refresh = self.ports.lock.lease_timing(job.options)
@@ -486,12 +488,17 @@ class LocalSource:
         self.ledger.job_objects_add(job.job_id, ids)
 
     def _worktrees_unchanged(self, job: JobContext, final: FinalPlan, states: dict) -> bool:
-        """DESIGN §9.3 step 8: ``gitpack.recheck`` with the recorded exclusions for every packed git item."""
+        """DESIGN §9.3 step 8: ``gitpack.recheck`` with the recorded exclusions for every packed git item. A packed
+        git item without a recorded state counts as changed (re-pack), never as unchanged: only an explicit equal
+        re-check lets the primary lock follow."""
         tmp = private_dir(self.data_dir / "staging" / job.job_id / "recheck")
+        skipped = {d.item_id for d in final.decisions if d.mode is DestMode.SKIP}
         for item in final.plan.items:
-            recorded = states.get(item.item_id)
-            if item.include is not Include.YES or item.kind is not ItemKind.GIT_REPO or not isinstance(recorded, dict):
+            if item.include is not Include.YES or item.kind is not ItemKind.GIT_REPO or item.item_id in skipped:
                 continue
+            recorded = states.get(item.item_id)
+            if not isinstance(recorded, dict):
+                return False
             same, _current = self.ports.gitpack.recheck(self.git, item.source_path, from_wire(GitState, recorded), tmp)
             if not same:
                 return False
@@ -630,7 +637,8 @@ class LocalSource:
         if outcome is PrepareOutcome.STALE_SESSION:
             return PrepareResult(outcome=PrepareOutcome.STALE_SESSION, detail="session changed")
         final = from_wire(FinalPlan, ctx["final_plan"]) if ctx.get("final_plan") else None
-        if final is not None and not self._worktrees_unchanged(job, final, ctx.get("pack_states") or {}):
+        # no pack recorded here (another process lost it) is not "unchanged": the conductor packs again
+        if final is None or not self._worktrees_unchanged(job, final, ctx.get("pack_states") or {}):
             return PrepareResult(outcome=PrepareOutcome.STALE_WORKTREE, detail="work tree changed since packing")
         if (prepared.h_all, prepared.h_rows) != (exported.h_all, exported.h_rows):
             raise VerifyFailed("the target's import does not match the source transcript", which="h_all")

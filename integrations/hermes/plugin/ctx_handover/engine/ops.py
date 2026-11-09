@@ -184,7 +184,9 @@ class OpRunner:
                         break
                     continue  # another process created the row first: use that one
                 st = self._status_of(row)
-                restart = st.state is OpState.FAILED and (restart_failed or bool((st.error or {}).get("retryable")))
+                # only an explicit ``retryable: true`` restarts (a string "false" from a peer is no permission)
+                retryable = (st.error or {}).get("retryable") is True
+                restart = st.state is OpState.FAILED and (restart_failed or retryable)
                 if not restart:
                     return st
                 op_id = row["op_id"]
@@ -318,6 +320,11 @@ class OpRunner:
             self._ledger.op_put(job_id, op, digest, op_id, OpState.FAILED, error=error_dict(exc))
             return
         except BaseException:  # process death (or its simulation): leave the row "running"
+            return
+        if result is not None and not isinstance(result, dict):
+            # an operation's result is a mapping (``OpFn``); anything else is no confirmed outcome
+            error = error_dict(TypeError(f"operation {op} returned {type(result).__name__}, not a result mapping"))
+            self._ledger.op_put(job_id, op, digest, op_id, OpState.FAILED, error=error)
             return
         self._ledger.op_put(job_id, op, digest, op_id, OpState.DONE, result=dict(result or {}))
 

@@ -18,6 +18,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
+from ctx_handover.engine import note as real_note
+from ctx_handover.engine import plan as planning
+from ctx_handover.engine import session_import as real_session_import
 from ctx_handover.engine.errors import NotFound, PolicyDenied
 from ctx_handover.engine.jsonutil import canonical_bytes, doc_id, object_id, object_manifest, sha256_hex, to_wire
 from ctx_handover.engine.model import (
@@ -197,9 +200,14 @@ def read_capsule(store, capsule_id, *, max_json_bytes):
 
 @dataclass(frozen=True)
 class _Seg:
+    """The fields of B's ``SegmentPlan`` the target reads (the tip's ``model``/``model_config`` feed the real
+    ``offline_capable``)."""
+
     old_id: str
     new_id: str
     path: str = "A"
+    model: str | None = None
+    model_config: dict | None = None
 
 
 def plan_import(
@@ -338,6 +346,12 @@ class LockStandIn:
 
 
 class PlanStandIn:
+    """D's planning port: plan building and the source restriction are stand-ins; the pure functions the target
+    reads (``final_doc``, ``instruction_files``) are D's own (no second implementation)."""
+
+    final_doc = staticmethod(planning.final_doc)
+    instruction_files = staticmethod(planning.instruction_files)
+
     def __init__(self, items) -> None:
         self.items = tuple(items)
         self.build_calls: list[dict] = []
@@ -482,6 +496,13 @@ def worktree_state(git, root, exclude_pathspecs, tmp):
     raise AssertionError("no git items in these tests")
 
 
+def recheck(git, root, recorded, tmp):
+    """``gitpack.recheck`` (DESIGN §9.3 step 8) over the stand-in ``worktree_state``: ``(equal, current)``."""
+    current = worktree_state(git, root, recorded.exclude_pathspecs, tmp)
+    keys = ("head", "index_tree", "worktree_tree")
+    return tuple(getattr(current, k) for k in keys) == tuple(getattr(recorded, k) for k in keys), current
+
+
 class Assessment(SimpleNamespace):
     pass
 
@@ -546,7 +567,7 @@ class WorkspaceTxn:
                 if Path(st["dest"]).exists():
                     os.rename(st["dest"], st["partial"])
 
-            steps.append((item_id, fwd, inv))
+            steps.append((f"c1:{item_id}", fwd, inv))  # E's step names (X11, W021)
         return steps
 
     def place_hermes_files(self, files):
@@ -630,7 +651,7 @@ def source_ports(items, lock=None, plan=None, pack=None):
         ctxrecords=SimpleNamespace(enqueue=enqueue, server_for=server_for),
         envfacts=SimpleNamespace(probe=probe, delta=delta, tools_seen_from_rows=tools_seen_from_rows),
         gitops=SimpleNamespace(GitProbe=GitProbe, worktree_state=worktree_state),
-        gitpack=None,
+        gitpack=SimpleNamespace(recheck=recheck),
         lock=lock or LockStandIn(),
         materialize=pack or PackStandIn(),
         plan=plan,
@@ -648,13 +669,15 @@ def target_ports(txn_cls=WorkspaceTxn):
         gitops=SimpleNamespace(GitProbe=GitProbe),
         hermes_files=SimpleNamespace(target_path=target_path),
         materialize=SimpleNamespace(assess=assess, WorkspaceTxn=txn_cls),
-        note=SimpleNamespace(compose=compose),
+        note=SimpleNamespace(compose=compose, case_collision_texts=real_note.case_collision_texts),
         pathmap=SimpleNamespace(
             choose_dest=choose_dest, choose_all=choose_all, fallback_dest=fallback_dest, map_cwd=map_cwd
         ),
         plan=PlanStandIn(()),
         session_export=SimpleNamespace(read_capsule=read_capsule),
         session_import=SimpleNamespace(
+            map_model=real_session_import.map_model,
+            offline_capable=real_session_import.offline_capable,
             plan_import=plan_import,
             import_hidden=import_hidden,
             apply_delta=apply_delta,
@@ -677,7 +700,7 @@ def tree_pack(store, item_id, files: dict[str, bytes], final_plan_id: str) -> st
     doc = {
         "kind": "ctxh.pack",
         "v": 1,
-        "job_id": "J",
+        "job_id": "01JZJ000000000000000000000",
         "final_plan_id": final_plan_id,
         "items": [{"item_id": item_id, "kind": "file_tree", "manifest": tree.object_id}],
     }

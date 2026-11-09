@@ -69,7 +69,7 @@ def led(tmp_path, clock):
 
 @pytest.mark.parametrize(
     "bad",
-    ["J1", "01JOB", ulid().lower(), ulid() + "0", "8" + ulid()[1:], "01HZZZZZZZZZZZZZZZZZZZZZZI", 12345, None],
+    ["J1", "01JOB", ulid().lower(), ulid() + "0", "8" + ulid()[1:], "01HZZZZZZZZZZZZZZZZZZZZZZ" + "I", 12345, None],
 )
 def test_l2_registry_job_ids_are_ulids(led, clock, bad):
     """X25/K-2: job ids from a peer are canonical ULIDs (``ids.ULID_RE``) at ``POST /jobs`` and at an offer claim;

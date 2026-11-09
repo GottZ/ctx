@@ -230,28 +230,36 @@ def _source_job(led, job_id, peer_id, state, root):
 def test_participant_idle_timeout_releases_lease(env, clock):
     """No request for ``participant_idle_timeout`` ⇒ the source gives up its leases (``suspended``, §7.3)."""
     led, reg, log = env
-    _source_job(led, "S1", "P1", "locked", "r1")
-    _source_job(led, "S2", "P1", "locked", "r2")
-    _source_job(led, "S3", "P1", "prepared", "r3")
+    _source_job(led, "01JZS100000000000000000000", "P1", "locked", "r1")
+    _source_job(led, "01JZS200000000000000000000", "P1", "locked", "r2")
+    _source_job(led, "01JZS300000000000000000000", "P1", "prepared", "r3")
     clock.advance(10 * 60)
-    reg.touch("S2")
+    reg.touch("01JZS200000000000000000000")
     clock.advance(5 * 60 + 1)
     reg.sweep(clock())
-    assert ("suspend", "S1") in log
-    assert ("suspend", "S2") not in log
-    assert ("suspend", "S3") not in log  # a prepared source never lets go on its own (fail-closed)
+    assert ("suspend", "01JZS100000000000000000000") in log
+    assert ("suspend", "01JZS200000000000000000000") not in log
+    assert (
+        "suspend",
+        "01JZS300000000000000000000",
+    ) not in log  # a prepared source never lets go on its own (fail-closed)
 
 
 def test_participant_staging_ttl_expiry(env, clock):
     """A target job that did not commit within ``staging_ttl`` aborts itself and cleans up (§3.5, T12)."""
     led, reg, log = env
-    for jid, state in (("T1", "prepared"), ("T2", "committing"), ("T3", "committed"), ("T4", "data_staged")):
+    for jid, state in (
+        ("01JZT100000000000000000000", "prepared"),
+        ("01JZT200000000000000000000", "committing"),
+        ("01JZT300000000000000000000", "committed"),
+        ("01JZT400000000000000000000", "data_staged"),
+    ):
         led.create_job(jid, Role.TARGET, Mode.PUSH, "P1", {"role": "target"})
         led.transition(jid, Role.TARGET, "*", state, {}, epoch=0)
     clock.advance(86_400 + 1)
     reg.sweep(clock())
     aborted = sorted(x[1] for x in log if x[0] == "abort")
-    assert aborted == ["T1", "T4"]
+    assert aborted == ["01JZT100000000000000000000", "01JZT400000000000000000000"]
     assert all(x[2] == "expired" for x in log if x[0] == "abort")
 
 
@@ -260,15 +268,15 @@ def test_registry_abort_jobs_after_revoke(env):
     (in-doubt rule, DESIGN §12.5)."""
     led, reg, log = env
     led.upsert_peer(_peer("P1"))
-    led.create_job("T1", Role.TARGET, Mode.PUSH, "P1", {"role": "target"})
-    led.transition("T1", Role.TARGET, "*", "prepared", {}, epoch=0)
-    _source_job(led, "S1", "P1", "locked", "r1")
-    _source_job(led, "S2", "P1", "prepared", "r2")
+    led.create_job("01JZT100000000000000000000", Role.TARGET, Mode.PUSH, "P1", {"role": "target"})
+    led.transition("01JZT100000000000000000000", Role.TARGET, "*", "prepared", {}, epoch=0)
+    _source_job(led, "01JZS100000000000000000000", "P1", "locked", "r1")
+    _source_job(led, "01JZS200000000000000000000", "P1", "prepared", "r2")
     ids = led.revoke_peer("P1")
     reg.abort_jobs(ids, "peer_revoked")
-    assert ("abort", "T1", "peer_revoked") in log
-    assert ("release", "S1", "peer_revoked") in log
-    assert not any(x[1] == "S2" for x in log if x[0] in ("abort", "release"))
+    assert ("abort", "01JZT100000000000000000000", "peer_revoked") in log
+    assert ("release", "01JZS100000000000000000000", "peer_revoked") in log
+    assert not any(x[1] == "01JZS200000000000000000000" for x in log if x[0] in ("abort", "release"))
 
 
 def test_registry_heartbeat_cancel_status(env):

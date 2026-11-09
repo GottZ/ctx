@@ -37,6 +37,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import hostcompat
+from . import settings as settings_mod
 from .conductor import Conductor, PollPolicy
 from .contracts import JobContext, Reporter, SourceAPI, TargetAPI
 from .errors import (
@@ -59,6 +60,7 @@ from .local_source import LocalSource
 from .local_target import LocalTarget
 from .model import (
     ConductorState,
+    EnvFacts,
     FinalPlan,
     Mode,
     Options,
@@ -100,100 +102,48 @@ _UNLOCKED = tuple(
 # ---------------------------------------------------------------------------------------------------------
 
 
-_FLAGS = ("allow_remote_continue", "allow_agent_start", "refine_auto_include", "include_hermes_files")
-"""Boolean settings; a quoted word (``"off"``, ``"false"``) must not read as True."""
-_WORDS = {
-    "inbound": ("on", "off"),
-    "refine": (None, "off"),
-    "extra_paths": (None, "off"),
-    "ctx_persist": (None, "off"),
-    "accept_offers": (None, "off"),
-    "model_mapping": (None, None),
-}
-"""Word settings a bare YAML ``on``/``off`` turns into a boolean: ``(word for True, word for False)``; ``None`` drops
-the value (its default applies)."""
-_TRUE_WORDS = frozenset({"true", "on", "yes", "1"})
-_FALSE_WORDS = frozenset({"false", "off", "no", "0", ""})
-
-
 def plugin_settings(config: dict) -> dict:
-    """``plugins.entries.ctx_handover.settings`` of a loaded config (empty when absent), normalised: a bare YAML
-    ``off``/``on`` arrives as a boolean and is turned back into its word (``refine: off`` stays off), boolean
-    settings given as words are booleans, unknown words fall back to the default."""
-    try:
-        value = config["plugins"]["entries"][PLUGIN_ID]["settings"]
-    except (KeyError, TypeError):
-        return {}
-    if not isinstance(value, dict):
-        return {}
-    out = dict(value)
-    for key, (on_word, off_word) in _WORDS.items():
-        if isinstance(out.get(key), bool):
-            word = on_word if out[key] else off_word
-            if word is None:
-                del out[key]
-            else:
-                out[key] = word
-    for key in _FLAGS:
-        if key in out and not isinstance(out[key], bool):
-            text = str(out[key]).strip().lower()
-            if text in _TRUE_WORDS:
-                out[key] = True
-            elif text in _FALSE_WORDS or out[key] is None:
-                out[key] = False
-            else:
-                del out[key]
-    return out
+    """``plugins.entries.ctx_handover.settings`` of a loaded config through the one normaliser (contract V22,
+    ``settings.normalize``): every schema key, YAML ``on``/``off`` words per type, ``None`` and any rejected value
+    (wrong type, outside the choices, negative, not finite) are the schema default."""
+    return settings_mod.normalize(settings_mod.raw_settings(config))
 
 
-def _num(settings: dict, key: str, default: float) -> float:
-    value = settings.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return default
-    return value
-
-
-def _count(settings: dict, key: str, default: int) -> int:
-    """A positive integer setting (job caps); anything else is the default."""
-    value = _num(settings, key, default)
-    return int(value) if value >= 1 else default
+_MIB, _GIB = 1024**2, 1024**3
 
 
 def local_options(settings: dict) -> Options:
-    """The local defaults of a job from the plugin settings (the participant side's own limits, §14.4)."""
-    base = Options()
-    roots = settings.get("allow_roots")
-    export_roots = settings.get("export_roots")
-    mib, gib = 1024**2, 1024**3
+    """The local defaults of a job from the plugin settings (the participant side's own limits, §14.4). The input
+    goes through ``settings.normalize`` again (idempotent), so a raw mapping cannot bring an unchecked value into
+    ``Options``; an empty ``allow_roots`` stays empty (fail-closed, the surfaces show the same)."""
+    s = settings_mod.normalize(settings)
     return Options(
-        workspace_root=str(settings.get("workspace_root") or base.workspace_root),
-        allow_roots=tuple(str(r) for r in roots) if isinstance(roots, list) and roots else base.allow_roots,
-        export_roots=tuple(str(r) for r in export_roots) if isinstance(export_roots, list) else (),
-        max_session_bytes=int(_num(settings, "max_session_mb", 512) * mib),
-        max_file_bytes=int(_num(settings, "max_file_mb", 100) * mib),
-        max_extra_dir_bytes=int(_num(settings, "max_extra_dir_mb", 256) * mib),
-        max_hermes_file_bytes=int(_num(settings, "max_hermes_file_mb", 64) * mib),
-        max_files=int(_num(settings, "max_files", base.max_files)),
-        max_untracked_files=int(_num(settings, "max_untracked_files", base.max_untracked_files)),
-        max_total_bytes=int(_num(settings, "max_total_gb", 10) * gib),
-        confirm_above_bytes=int(_num(settings, "confirm_above_mb", 500) * mib),
-        staging_ttl_s=int(_num(settings, "staging_ttl_hours", 24) * 3600),
-        lease_ttl_s=int(_num(settings, "lease_ttl_s", base.lease_ttl_s)),
-        participant_idle_timeout_s=int(_num(settings, "participant_idle_timeout_min", 15) * 60),
-        stall_timeout_s=int(_num(settings, "stall_timeout_min", 30) * 60),
-        wait_timeout_s=int(_num(settings, "wait_timeout_min", 30) * 60),
-        refine=str(settings.get("refine") or base.refine),
-        refine_timeout_s=int(_num(settings, "refine_timeout_s", base.refine_timeout_s)),
-        refine_history_chars=int(_num(settings, "refine_history_chars", base.refine_history_chars)),
-        refine_side_question_max_tokens=int(
-            _num(settings, "refine_side_question_max_tokens", base.refine_side_question_max_tokens)
-        ),
-        refine_auto_include=bool(settings.get("refine_auto_include", False)),
-        extra_paths=str(settings.get("extra_paths") or base.extra_paths),
-        include_hermes_files=bool(settings.get("include_hermes_files", True)),
-        model_mapping=str(settings.get("model_mapping") or base.model_mapping),
-        extra_ignore=tuple(str(x) for x in settings.get("extra_ignore") or ()),
-        tool_probe=tuple(str(x) for x in settings.get("tool_probe") or ()),
+        workspace_root=str(s["workspace_root"]),
+        allow_roots=tuple(s["allow_roots"]),
+        export_roots=tuple(s["export_roots"]),
+        max_session_bytes=int(s["max_session_mb"] * _MIB),
+        max_file_bytes=int(s["max_file_mb"] * _MIB),
+        max_extra_dir_bytes=int(s["max_extra_dir_mb"] * _MIB),
+        max_hermes_file_bytes=int(s["max_hermes_file_mb"] * _MIB),
+        max_files=int(s["max_files"]),
+        max_untracked_files=int(s["max_untracked_files"]),
+        max_total_bytes=int(s["max_total_gb"] * _GIB),
+        confirm_above_bytes=int(s["confirm_above_mb"] * _MIB),
+        staging_ttl_s=int(s["staging_ttl_hours"] * 3600),
+        lease_ttl_s=int(s["lease_ttl_s"]),
+        participant_idle_timeout_s=int(s["participant_idle_timeout_min"] * 60),
+        stall_timeout_s=int(s["stall_timeout_min"] * 60),
+        wait_timeout_s=int(s["wait_timeout_min"] * 60),
+        refine=str(s["refine"]),
+        refine_timeout_s=int(s["refine_timeout_s"]),
+        refine_history_chars=int(s["refine_history_chars"]),
+        refine_side_question_max_tokens=int(s["refine_side_question_max_tokens"]),
+        refine_auto_include=s["refine_auto_include"] is True,
+        extra_paths=str(s["extra_paths"]),
+        include_hermes_files=s["include_hermes_files"] is True,
+        model_mapping=str(s["model_mapping"]),
+        extra_ignore=tuple(s["extra_ignore"]),
+        tool_probe=tuple(s["tool_probe"]),
     )
 
 
@@ -290,8 +240,8 @@ def _store(prof: Runtime):
             prof.store = blocks.BlockStore(  # root = plugin data dir (DESIGN §5.1); cache limits of §14.4
                 prof.data_dir,
                 prof.ledger,
-                cache_days=float(_num(settings, "block_cache_days", 3)),
-                cache_bytes=int(_num(settings, "block_cache_gb", 5) * 1024**3),
+                cache_days=float(settings["block_cache_days"]),
+                cache_bytes=int(settings["block_cache_gb"] * _GIB),
             )
         return prof.store
 
@@ -522,7 +472,7 @@ def apis_for(
             Path(bundle_path),
             identity,
             as_dir=options.as_dir,
-            declared_facts=None,
+            declared_facts=known_facts(ledger, peer),  # export --for <peer> (V28); None: generic importer facts
             ledger=ledger,
             retire=not options.keep_source,  # --keep exports a copy and leaves the source active (O3)
             exporter_name=getattr(local_source, "instance_name", "") or "",
@@ -548,6 +498,21 @@ def apis_for(
             local_target,
         )
     raise BadRequest(f"mode {mode} has no conductor", field="mode")
+
+
+def known_facts(ledger: Ledger, peer: Peer | None) -> EnvFacts | None:
+    """The target facts last received from ``peer`` (``Ledger.peer_facts_get``, contract V28): ``export --for
+    <peer>`` negotiates with them (DESIGN §5.4). ``None`` without a peer, without stored facts or when they no
+    longer parse (written by another plugin version) — the bundle then assumes an unknown importer."""
+    if peer is None:
+        return None
+    raw = ledger.peer_facts_get(peer.peer_id)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return from_wire(EnvFacts, raw)
+    except (HandoverError, TypeError, ValueError):
+        return None
 
 
 def _bundle_negotiation(bundle_path: Path, options: Options) -> Callable | None:
@@ -590,12 +555,15 @@ def listener_server():
 def server_settings(config: dict) -> dict:
     """The listener's settings: the plugin settings plus what the server reports in ``hello`` (W055)."""
     host = hostcompat.host_facts()
-    settings = dict(plugin_settings(config))
-    settings.setdefault("inbound", "auto")
-    settings.setdefault("name", host.profile if host.profile not in ("", "default") else _hostname())
-    settings.setdefault("max_request_mb", 8)
-    settings["max_jobs_per_peer"] = _count(settings, "max_jobs_per_peer", MAX_JOBS_PER_PEER)
-    settings["max_jobs_total"] = _count(settings, "max_jobs_total", MAX_JOBS)
+    raw = settings_mod.raw_settings(config)
+    # the listener's own knobs outside the schema (``name``, ``operator_api``, rate limits …) pass as given — the
+    # server normalises them itself; every schema key comes from the one normaliser
+    settings = {k: v for k, v in raw.items() if k not in settings_mod.SCHEMA}
+    settings.update(plugin_settings(config))
+    if not isinstance(settings.get("name"), str) or not settings["name"].strip():
+        settings["name"] = host.profile if host.profile not in ("", "default") else _hostname()
+    settings["max_jobs_per_peer"] = settings_mod.positive_int(raw.get("max_jobs_per_peer"), MAX_JOBS_PER_PEER)
+    settings["max_jobs_total"] = settings_mod.positive_int(raw.get("max_jobs_total"), MAX_JOBS)
     settings["hosted"] = bool(hostcompat.features().host_isolated)
     settings["plugin_version"] = host.plugin_version
     settings["hermes_version"] = host.hermes_version
@@ -618,13 +586,13 @@ def _registry(prof: _Profile) -> ParticipantRegistry:
                 )
                 return source if role is Role.SOURCE else target
 
-            settings = plugin_settings(hostcompat.load_config())
+            raw = settings_mod.raw_settings(hostcompat.load_config())
             prof.registry = ParticipantRegistry(  # the one owner of the job caps (X18)
                 prof.ledger,
                 factory,
                 local_options=lambda: local_options(plugin_settings(hostcompat.load_config())),
-                max_jobs_per_peer=_count(settings, "max_jobs_per_peer", MAX_JOBS_PER_PEER),
-                max_jobs=_count(settings, "max_jobs_total", MAX_JOBS),
+                max_jobs_per_peer=settings_mod.positive_int(raw.get("max_jobs_per_peer"), MAX_JOBS_PER_PEER),
+                max_jobs=settings_mod.positive_int(raw.get("max_jobs_total"), MAX_JOBS),
             )
         return prof.registry
 
@@ -714,6 +682,13 @@ def _plan_lists(plan_doc: dict) -> dict:
     exclusions = [
         {"path": n.get("path"), "why": n.get("why")} for n in plan.get("not_transferred") or () if isinstance(n, dict)
     ]
+    for i in items:  # tracked files on the secrets list: their working-tree changes stay behind (R23)
+        git = i.get("git") if isinstance(i, dict) else None
+        denied = git.get("denied_tracked") if isinstance(git, dict) else None
+        for path in denied if isinstance(denied, list) else ():
+            entry = {"path": _joined(i.get("source_path"), path), "why": "denied_tracked"}
+            if entry not in exclusions:
+                exclusions.append(entry)
     return {
         "exclusions": exclusions,
         "excluded_secrets": secrets,
@@ -721,6 +696,31 @@ def _plan_lists(plan_doc: dict) -> dict:
         "conflicts": conflicts,
         "instruction_files": instructions,
     }
+
+
+def _joined(root: object, path: object) -> str:
+    """A path of a work tree made absolute under its item's source path (absolute paths stay)."""
+    text = str(path)
+    if isinstance(root, str) and root and not text.startswith(("/", "\\")):
+        return f"{root.rstrip('/')}/{text}"
+    return text
+
+
+def _left_behind(lists: dict, result: dict) -> None:
+    """Merge the conductor's ``result["left_behind"]`` (pack exclusions and dropped suspected secrets, contract V34:
+    ``{"path", "why", "item_id"}``) into the status lists: every entry into ``exclusions``, secrets into
+    ``excluded_secrets``, whole stash entries (``why == "stash_secret"``) into ``withheld_stash`` — each path once."""
+    for entry in result.get("left_behind") or ():
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            continue
+        path, why = entry["path"], str(entry.get("why") or "excluded")
+        item = {"path": path, "why": why}
+        if item not in lists["exclusions"]:
+            lists["exclusions"].append(item)
+        if why in ("secret", "suspected_secret") and path not in lists["excluded_secrets"]:
+            lists["excluded_secrets"].append(path)
+        if why == "stash_secret" and path not in lists["withheld_stash"]:
+            lists["withheld_stash"].append(path)
 
 
 def _next_action(row: dict, outcome: str) -> str | None:
@@ -766,6 +766,9 @@ class JobRunner:
         self._owners: dict[str, tuple[str, int]] = {}
         self._ctxs: dict[str, object] = {}
         self._sides: dict[str, Callable[[str], str | None]] = {}
+        # V24: the participant pair of a job, built once and kept from ``plan_sync`` until its run in this process
+        # ends — ``plan_sync`` and ``run_foreground``/``continue_async`` drive the same instances.
+        self._pairs: dict[str, tuple[SourceAPI, TargetAPI]] = {}
 
     def bind_reporter_factory(self, reporter_factory: Callable[[str], Reporter]) -> bool:
         """Give a runner that was created without one (by the janitor, a route, the CLI) the surfaces' reporter
@@ -806,9 +809,23 @@ class JobRunner:
         )
         if mode is Mode.IMPORT and tgt_api is target:
             # X21: an import is verified only by the bundle signature of a stored, non-revoked key (BundleSource)
-            target.peer_verified = bool(getattr(src_api, "verified", False))
+            target.peer_verified = getattr(src_api, "verified", False) is True
+            exporter = self._exporter(src_api) if target.peer_verified else None
+            if exporter is not None:  # V13: the verified exporter is the job's peer (return trip, workspace map)
+                target.source_peer_id, target.peer_name = exporter.peer_id, exporter.name
             self._record_origin(row["job_id"], src_api)
         return src_api, tgt_api
+
+    def _exporter(self, bundle_source) -> Peer | None:
+        """The paired peer whose stored, non-revoked key signed an imported bundle (V13), or None — an unsigned
+        bundle, one signed by this profile's own key (``"trusted key"``) or a signer that is no peer here."""
+        signer = getattr(bundle_source, "signer", None)
+        if not isinstance(signer, str) or not signer or signer == "trusted key":
+            return None
+        peer = self.ledger.peer(signer)
+        if peer is None or peer.name != signer or peer.revoked_at is not None or not peer.pubkey:
+            return None
+        return peer
 
     def _record_origin(self, job_id: str, bundle_source) -> None:
         """Journal where an imported bundle comes from (SEC 4.6: status shows the origin)."""
@@ -817,7 +834,8 @@ class JobRunner:
         if mine is None:
             return
         signer = getattr(bundle_source, "signer", None)
-        origin = f"verified bundle ({signer})" if getattr(bundle_source, "verified", False) else "unverified bundle"
+        verified = getattr(bundle_source, "verified", False) is True
+        origin = f"verified bundle ({signer})" if verified else "unverified bundle"
         with contextlib.suppress(HandoverError):
             self.ledger.event(job_id, Role.CONDUCTOR, "origin", {"origin": origin}, epoch=mine[1])
 
@@ -891,7 +909,7 @@ class JobRunner:
             cancelled=lambda: self.ledger.cancel_requested(job_id),
             created_at=float(row["created_at"]),
         )
-        source, target = self._apis_factory(row)
+        source, target = self._participants(row)
         return Conductor(
             self.ledger,
             job,
@@ -906,6 +924,19 @@ class JobRunner:
             poll=self._poll,
             keepalive=self._keepalive,
         )
+
+    def _participants(self, row: dict) -> tuple[SourceAPI, TargetAPI]:
+        """One participant pair per job and process run (V24): the pair ``plan_sync`` composed is the pair the run
+        continues with; it is dropped when that run ends (a later ``resume`` composes afresh and re-checks the
+        peer)."""
+        job_id = row["job_id"]
+        with self._lock:
+            pair = self._pairs.get(job_id)
+        if pair is None:
+            pair = self._apis_factory(row)
+            with self._lock:
+                pair = self._pairs.setdefault(job_id, pair)
+        return pair
 
     # -- verbs ----------------------------------------------------------------------------------------------------
     def plan_sync(
@@ -968,6 +999,7 @@ class JobRunner:
         with self._lock:
             self._ctxs.pop(job_id, None)
             self._sides.pop(job_id, None)
+            self._pairs.pop(job_id, None)
 
     def _run(self, job_id: str, how: str) -> None:
         try:
@@ -985,6 +1017,7 @@ class JobRunner:
                 self._threads.pop(job_id, None)
                 self._ctxs.pop(job_id, None)
                 self._sides.pop(job_id, None)
+                self._pairs.pop(job_id, None)
 
     def _spawn(self, job_id: str, how: str) -> threading.Thread:
         with self._lock:
@@ -1023,11 +1056,17 @@ class JobRunner:
             thread.join(timeout)
 
     def cancel(self, job_id: str) -> str:
+        """Request cancellation; the answer says it was requested only when the ledger holds the request (a job
+        that already ended keeps no request — ``set_cancel`` returns without writing)."""
         try:
             self.ledger.set_cancel(job_id)
         except InvalidState as exc:
             return exc.message
-        return f"Cancel requested for job {short(job_id)}."
+        if self.ledger.cancel_requested(job_id) is True:
+            return f"Cancel requested for job {short(job_id)}."
+        row = self.ledger.job(job_id, Role.CONDUCTOR)
+        state = row["state"] if row is not None else "gone"
+        return f"Job {short(job_id)} is already {state}; nothing to cancel."
 
     def status(self, job_id: str | None) -> dict:
         """Machine-readable status for the surfaces (cluster F renders it, X20): ``{"jobs": [...], …}`` without a
@@ -1090,6 +1129,8 @@ class JobRunner:
             "conflicts": [],
             "instruction_files": [],
             "continuation": result.get("continue"),
+            "withheld": [p for p in result.get("withheld") or () if isinstance(p, str)],
+            "source_kept": result.get("source_kept") is True,
             "warnings": result.get("warnings") or [],
             "exit_code": exit_code(row),
         }
@@ -1098,6 +1139,7 @@ class JobRunner:
             out["bundle"] = {"path": str(path), "size": _size_of(path)}
         if plan is not None:
             out.update(_plan_lists(plan))
+        _left_behind(out, result)
         if ack is not None:
             arrival = self.ledger.arrival_for(str(ack.get("session_id") or ""))
             if arrival is not None:
@@ -1302,14 +1344,12 @@ def _flush(ctx) -> Callable[[Ledger], object] | None:
         return None
     config = hostcompat.load_config()
     settings = plugin_settings(config)
-    if settings.get("ctx_persist") == "off":
-        return None
     from . import ctxrecords
 
-    server = ctxrecords.detect(config)
+    server = ctxrecords.server_for(config, settings)  # one rule for ``ctx_persist`` and detection (X22)
     if server is None:
         return None
-    category = str(settings.get("ctx_category") or "handover")
+    category = str(settings["ctx_category"])
     return lambda ledger: ctxrecords.flush(ledger, ctx.call_mcp, server, category, ledger.now())
 
 
