@@ -7,7 +7,9 @@ conductor (push, export) or through the registry by a remote one (pull, offer cl
 * ``facts`` — this host's facts, with the tool names the session's transcript uses (``tools_seen``, W084).
 * ``start_plan`` — collector over the lineage rows of ``export_session_lineage(include_inactive=True)`` (W076) +
   refinement with the rows and ``redact`` (W077) + agent suggestions; ``build_plan`` with ``remote_driven`` (a
-  remote conductor's hints never add, R18) — **no lock** [BX M9]; the busy probe is read-only.
+  remote conductor's hints never add, R18) and the estimate of the session's active context
+  (``plan.active_context_tokens`` of the tip's live rows → ``ResourcePlan.context_tokens``, R32) — **no lock**
+  [BX M9]; the busy probe is read-only.
 * ``lock`` — busy probe, turn lease + compression lock (``lock.acquire``; a route call blocks at most
   ``LOCK_WAIT_S`` seconds, W060), then ``describe`` again under the held lease and the revision compared with the
   plan's (§7.2 step 6, W037).
@@ -415,6 +417,7 @@ class LocalSource:
                 redact=self.redact,
                 remote_driven=self.remote_driven,
                 suggest_dest=self._suggest_dest(job),
+                context_tokens=p.plan.active_context_tokens(rows, info.tip_id),
             )
             self._remember(job, plan=plan, planned_info=info)
             return to_wire(plan)

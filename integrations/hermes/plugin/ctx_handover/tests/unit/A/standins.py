@@ -351,6 +351,7 @@ class PlanStandIn:
 
     final_doc = staticmethod(planning.final_doc)
     instruction_files = staticmethod(planning.instruction_files)
+    active_context_tokens = staticmethod(planning.active_context_tokens)
 
     def __init__(self, items) -> None:
         self.items = tuple(items)
@@ -374,8 +375,16 @@ class PlanStandIn:
         redact=None,
         remote_driven=False,
         suggest_dest=None,
+        context_tokens=None,
     ):
-        self.build_calls.append({"suggestions": list(suggestions), "hints": hints, "remote_driven": remote_driven})
+        self.build_calls.append(
+            {
+                "suggestions": list(suggestions),
+                "hints": hints,
+                "remote_driven": remote_driven,
+                "context_tokens": context_tokens,
+            }
+        )
         return ResourcePlan(
             job_id=job_id,
             revision=tuple(revision),

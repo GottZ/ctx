@@ -296,10 +296,11 @@ DATACLASS_FIELDS = {
 
 ADDED_FIELDS = {
     model.PlanItem: {"hermes_kind": None, "instruction_files": ()},
-    model.ResourcePlan: {"warnings": ()},
+    model.ResourcePlan: {"warnings": (), "context_tokens": 0},
     model.EnvFacts: {"python_version": "", "workspace_root_ok": None, "workspace_root_problem": ""},
 }
-"""Fields added by contract K-3, with their defaults; declared with ``model.added_field``."""
+"""Fields added by contract K-3 (and later additively: ``ResourcePlan.context_tokens``, R32), with their defaults;
+declared with ``model.added_field``."""
 
 CONSTANTS = {
     policy: ["SOURCE_DENY_NAMES", "SOURCE_DENY_DIRS", "TARGET_DENY", "HERMES_CREDENTIAL_PATHS"],

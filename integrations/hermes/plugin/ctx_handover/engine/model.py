@@ -566,6 +566,10 @@ class ResourcePlan:
     approx_tokens: int
     warnings: tuple[str, ...] = added_field(())
     """Warning codes of the source side while planning (busy probe, resume guard; W072)."""
+    context_tokens: int = added_field(0)
+    """Estimated tokens of the session's active context — the tip segment's live rows, what the target's model loads
+    on the first turn (``plan.active_context_tokens``; R32, L3-F17). 0 = not estimated (a source before this field):
+    the window check then measures the session by ``approx_tokens``, the lineage total."""
 
 
 @dataclass(frozen=True)

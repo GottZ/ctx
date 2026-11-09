@@ -1104,13 +1104,15 @@ class FakePlanning:
 
     Every function is the real one of ``engine.plan`` except ``confirmation_reasons``: the World's items are
     ``extra`` items outside the workspace, so D's rule (f) would ask in every test; the fault matrix exercises the
-    state machine, so only (a) ``proposed``, (b) ``conflict`` and (g) ``instruction_files`` are raised here."""
+    state machine, so only (a) ``proposed``, (b) ``conflict``, (g) ``instruction_files`` and — through D's own
+    ``context_over`` with the conductor's ``target_facts``/``source_facts`` — (i) ``context_over`` are raised here
+    (the World's plan fits its windows unless a test shrinks one)."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
 
     def confirmation_reasons(
-        self, final: FinalPlan, options, source_offline: bool, *, instructions: Sequence[dict] = (), cfg=None
+        self, final: FinalPlan, options, source_offline: bool, *, instructions: Sequence[dict] = (), cfg=None, **kw
     ) -> list[str]:
         self.calls.append("confirmation_reasons")
         reasons = []
@@ -1120,6 +1122,9 @@ class FakePlanning:
             reasons.append(planning.CONFIRM_CONFLICT)
         if instructions:
             reasons.append(planning.CONFIRM_INSTRUCTIONS)
+        facts = {k: kw.get(k) for k in ("target_facts", "source_facts")}
+        if planning.context_over(final, **facts) is not None:
+            reasons.append(planning.CONFIRM_CONTEXT)
         return reasons
 
     def apply_choice(self, final: FinalPlan, choice: str) -> FinalPlan:

@@ -1144,12 +1144,15 @@ class Conductor:
         """Confirmation after NEGOTIATED (DESIGN §14.1): ``yes`` / ``no_proposed`` / ``show_plan`` / ``cancel``;
         ``None`` (timeout or no interactive surface) continues without proposed items only when proposals are
         the sole reason, otherwise the job ends with nothing locked [BX L5]. ``--yes`` answers every reason except
-        those ``plan.yes_exempt`` names (R30: the session's working directory is left out) — for them the user is
-        asked even with ``--yes``, and without an answer the job ends before the lock."""
+        those ``plan.yes_exempt`` names (R30: the session's working directory is left out; R32: the session is larger
+        than the target model's window) — for them the user is asked even with ``--yes``, and without an answer the
+        job ends before the lock. D compares the session with the window from the facts of both sides
+        (``target_facts``, ``source_facts``), which the reasons and the question's summary get."""
         final = self._get("final_plan", FinalPlan)
         if self._ctx.get("confirmed"):
             return final
         sf = self._get("source_facts", EnvFacts)
+        tf = self._get("target_facts", EnvFacts)
         planner = self._planner()
         instructions = self._instruction_files(final)
         offline = bool(sf and sf.offline_capable)
@@ -1157,7 +1160,15 @@ class Conductor:
         # PolicyConfig; a remote or bundle source releases no secret on this side's word
         cfg = self.source.policy if isinstance(self.source, LocalSource) else None
         reasons = list(
-            planner.confirmation_reasons(final, self.job.options, offline, instructions=instructions, cfg=cfg)
+            planner.confirmation_reasons(
+                final,
+                self.job.options,
+                offline,
+                instructions=instructions,
+                cfg=cfg,
+                target_facts=tf,
+                source_facts=sf,
+            )
         )
         importing = self.job.mode is Mode.IMPORT
         if importing:  # the pack holds what the export confirmed; nothing is left to choose here (X02)
@@ -1167,7 +1178,7 @@ class Conductor:
         if reasons and (not self.job.options.yes or exempt):
             choice = None
             if interactive and self.confirm is not None:
-                summary = planner.presend_summary(final, instructions=instructions)
+                summary = planner.presend_summary(final, instructions=instructions, target_facts=tf, source_facts=sf)
                 choice = self.confirm(
                     {
                         "reasons": reasons,
@@ -1224,10 +1235,16 @@ class Conductor:
 
     def _negotiated(self) -> None:
         """After the confirmation: the pre-send summary (DESIGN §8.7, SEC 5.8) is journaled as the structured
-        ``plan.presend_summary`` document (ctx ``presend``); the surfaces render it — no text line from here."""
+        ``plan.presend_summary`` document (ctx ``presend``, with the facts of both sides so it names a session larger
+        than the target model's window, R32); the surfaces render it — no text line from here."""
         self._check_cancel()
         final = self._confirm(interactive=False)
-        presend = self._planner().presend_summary(final, instructions=self._ctx.get("instructions") or ())
+        presend = self._planner().presend_summary(
+            final,
+            instructions=self._ctx.get("instructions") or (),
+            target_facts=self._get("target_facts", EnvFacts),
+            source_facts=self._get("source_facts", EnvFacts),
+        )
         self._go(S.LOCKING, presend=dict(presend))
 
     def _locking(self) -> None:
