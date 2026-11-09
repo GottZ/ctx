@@ -1,0 +1,9 @@
+name: ctx_handover
+version: 0.1.0
+description: "Works without ctx. Moves a live Hermes session and the working files it needs to another Hermes gateway you own (pull, push or an offline bundle) and continues it there: transcript byte-exact and hash-verified, git repos with branches, stash and uncommitted work, a note about what changed. Not the core /handoff, not hermes-handoff, not session-relay."
+kind: standalone
+requires_hermes: ">=0.22.6"
+manifest_version: 2
+author: GottZ
+license: MPL-2.0
+homepage: https://github.com/GottZ/ctx
