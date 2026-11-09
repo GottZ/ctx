@@ -47,7 +47,7 @@ def _assert_handed_over(src_home, src_sid, dst_home, job_id, dst_dest: Path, rep
 
 
 def test_int_http_push_loopback(online):
-    server, laptop, listener, peer = online
+    server, laptop, _listener, peer = online
     repo = dirty_repo(laptop.home / "proj")
     digest = tree_digest(repo.root)
     head = repo.head()
@@ -64,7 +64,7 @@ def test_int_http_push_loopback(online):
 
 
 def test_int_http_pull_loopback(online):
-    server, laptop, listener, peer = online
+    server, laptop, _listener, peer = online
     repo = dirty_repo(server.home / "proj")
     digest = tree_digest(repo.root)
     sid = session_in(server, repo.root, "Pull me")

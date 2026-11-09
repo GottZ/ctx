@@ -7,7 +7,7 @@ from ctx_handover.tests.integration.conftest import builder
 
 
 def test_int_smoke_push_session_only(online):
-    server, laptop, listener, peer = online
+    _server, laptop, _listener, peer = online
     b = builder(laptop)
     sid = b.create(title="Smoke", cwd=str(laptop.home))
     b.user(sid, "hello")
