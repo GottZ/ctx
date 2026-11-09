@@ -89,3 +89,31 @@ def hung_op_owner(path: str, lock_dir: str, job_id: str, marker: str, started, r
     out.put(st.op_id)
     runner.wait(job_id, st.op_id, timeout=60)
     lg.close()
+
+
+def late_worker_owner(path: str, lock_dir: str, job_id: str, marker: str, entered, release, out) -> None:
+    """Starts an exclusive op whose worker hangs *before* it reaches the job lock (the process is alive, its
+    heartbeat never comes) until ``release`` is set; reports ``("op", op_id)`` at once and ``("done", state)`` once
+    the worker thread has ended. The op function only appends ``H-start`` to ``marker``."""
+    from ctx_handover.engine.ledger import Ledger
+    from ctx_handover.engine.ops import OpRunner
+
+    def hang_before_lock(fn, *args, **kwargs):
+        entered.set()
+        release.wait(60)
+        return fn(*args, **kwargs)
+
+    lg = Ledger(Path(path))
+    runner = OpRunner(lg, hang_before_lock, heartbeat_s=3600, stale_s=0.2, lock_dir=Path(lock_dir))
+
+    def fn(report):
+        with open(marker, "a", encoding="utf-8") as fh:
+            fh.write("H-start\n")
+        return {"by": "H"}
+
+    st = runner.start(job_id, "commit", "d", fn, exclusive=True)
+    out.put(("op", st.op_id))
+    runner.join_all(90)
+    row = lg.op_by_id(st.op_id)
+    lg.close()
+    out.put(("done", None if row is None else row["state"]))

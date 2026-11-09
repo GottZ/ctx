@@ -327,6 +327,22 @@ class Ledger:
         with self._w() as c:
             c.execute(sql, (key, value))
 
+    def claim_interval(self, key: str, now: float, interval_s: float) -> bool:
+        """Claim a periodic task for all processes of this profile: True (and ``meta[key] = now``) when the last
+        claim is older than ``interval_s``, absent, unreadable or in the future (clock moved back); False when
+        another process (or an earlier call) claimed it within the interval. One ``BEGIN IMMEDIATE`` transaction,
+        so two processes never both get True for the same interval."""
+        with self._w() as c:
+            row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            try:
+                last = float(row[0]) if row is not None else None
+            except ValueError:
+                last = None
+            if last is not None and last <= float(now) < last + float(interval_s):
+                return False
+            self.meta_set(key, repr(float(now)), conn=c)
+            return True
+
     def instance_id(self) -> str:
         """This profile's ``instance_id`` (ULID), created on first use."""
         value = self.meta_get("instance_id")
@@ -873,6 +889,54 @@ class Ledger:
                 ),
             )
 
+    def op_insert(self, job_id: str, op: str, digest: str, op_id: str) -> bool:
+        """Create the ``running`` row of a new operation; False (nothing written) when another process created the
+        row for ``(job_id, op, digest)`` first — the caller then works with that row (never two op ids)."""
+        with self._w() as c:
+            cur = c.execute(
+                "INSERT INTO ops(job_id, op, digest, op_id, state, result, error, progress, updated_at)"
+                " VALUES(?,?,?,?,?,NULL,NULL,NULL,?) ON CONFLICT(job_id, op, digest) DO NOTHING",
+                (job_id, op, digest, op_id, str(OpState.RUNNING), self.now()),
+            )
+            return cur.rowcount == 1
+
+    def op_cas(
+        self,
+        op_id: str,
+        expect: OpState | str,
+        state: OpState,
+        *,
+        error: dict | None = None,
+        keep_progress: bool = False,
+    ) -> bool:
+        """Compare-and-set the state of an operation: only when it is still ``expect``. Used for a restart
+        (``failed`` → ``running``: exactly one restarter wins, a result written meanwhile is never overwritten) and
+        for marking an orphan interrupted (``running`` → ``failed``). Clears ``result``; ``progress`` is cleared
+        unless ``keep_progress``."""
+        with self._w() as c:
+            progress = "progress" if keep_progress else "NULL"
+            cur = c.execute(
+                f"UPDATE ops SET state=?, result=NULL, error=?, progress={progress}, updated_at=?"  # noqa: S608
+                " WHERE op_id=? AND state=?",
+                (str(state), None if error is None else _dumps(error), self.now(), op_id, str(expect)),
+            )
+            return cur.rowcount == 1
+
+    def op_claim(self, op_id: str) -> bool:
+        """The worker's last check before it runs an operation's function: True (and ``updated_at`` refreshed)
+        only while the row is still ``running``. False when the operation was finished, failed or marked
+        interrupted meanwhile (a late worker of a hung process must not run the steps again, DESIGN §3.1)."""
+        with self._w() as c:
+            cur = c.execute("UPDATE ops SET updated_at=? WHERE op_id=? AND state='running'", (self.now(), op_id))
+            return cur.rowcount == 1
+
+    def op_expire(self, op_id: str) -> None:
+        """Make a ``running`` row stale at once (``updated_at = 0``) without changing its state: a worker that could
+        not take the job lock hands the row to the next status check, which marks it interrupted only once nobody
+        holds the lock (``ops`` rule 3); a holder's heartbeat or result overrides it."""
+        with self._w() as c:
+            c.execute("UPDATE ops SET updated_at=0 WHERE op_id=? AND state='running'", (op_id,))
+
     def op_progress(self, op_id: str, progress: dict | None) -> None:
         """Record progress of a running op and refresh its ``updated_at`` (liveness)."""
         with self._w() as c:
@@ -1006,14 +1070,20 @@ class Ledger:
             c.execute("DELETE FROM veto_ids WHERE job_id=?", (job_id,))
 
     def veto_rows(self) -> list[dict]:
-        """``session_id, root_id, state, peer, title, at, job`` for every veto row (VetoIndex filters by state)."""
-        return [
-            dict(r)
-            for r in self._q(
-                "SELECT v.session_id, v.root_id, s.state, s.peer, s.title, s.updated_at AS at, s.job_id AS job"
-                " FROM veto_ids v JOIN source_handovers s ON s.job_id = v.job_id ORDER BY v.session_id"
-            )
-        ]
+        """Every veto row joined with its handover (VetoIndex filters by state; X08, W034): ``session_id,
+        root_id, job_id`` (and the older name ``job``), ``state, peer, title, at, prepared_at, ack`` (decoded like
+        ``source_state``), ``bundle_path, updated_at`` — the same values ``source_by_session`` returns, so the
+        veto text a hook shows equals the text ``reclaim`` looks for."""
+        out = []
+        for r in self._q(
+            "SELECT v.session_id, v.root_id, s.job_id, s.job_id AS job, s.state, s.peer, s.title, s.at,"
+            " s.prepared_at, s.ack, s.bundle_path, s.updated_at"
+            " FROM veto_ids v JOIN source_handovers s ON s.job_id = v.job_id ORDER BY v.session_id"
+        ):
+            d = dict(r)
+            d["ack"] = _loads(d["ack"])
+            out.append(d)
+        return out
 
     def backup_put(self, job_id: str, key: str, value: str | None) -> None:
         with self._w() as c:
@@ -1131,8 +1201,12 @@ class Ledger:
                 ),
             )
 
-    def map_lookup(self, peer_id: str, remote_path: str) -> MapRow | None:
-        """Most recent row that maps ``remote_path`` on ``peer_id`` to a local path (``out`` before ``in``)."""
+    def map_lookup(self, peer_id: str, remote_path: str, direction: str | None = None) -> MapRow | None:
+        """Most recent row that maps ``remote_path`` on ``peer_id`` to a local path (``out`` before ``in``); with
+        ``direction`` only rows of that direction (X10: the target binds the source peer,
+        ``lookup = lambda path, direction: ledger.map_lookup(peer_id, path, direction)``)."""
+        if direction is not None:
+            return self.map_find(peer_id, remote_path, direction)
         row = self._q1(
             "SELECT * FROM workspace_map WHERE peer_id=? AND remote_path=? ORDER BY direction='out' DESC, at DESC",
             (peer_id, remote_path),
@@ -1190,6 +1264,13 @@ class Ledger:
             object_id=row["object_id"],
         )
 
+    def object_delete(self, ids: Sequence[str]) -> None:
+        """Forget the ``objects`` index rows of collected objects (R28 manifest GC, ``BlockStore.collect_manifests``).
+        Runs inside an open ``tx()`` of the calling thread when there is one (the GC removes the manifest files and
+        the rows in one write transaction); ``job_objects`` references are left to ``purge_job``."""
+        with self._w() as c:
+            c.executemany("DELETE FROM objects WHERE object_id=?", [(i,) for i in ids])
+
     def block_put(self, block_id: str, size: int) -> None:
         with self._w() as c:
             c.execute(
@@ -1220,9 +1301,9 @@ class Ledger:
                 "INSERT OR IGNORE INTO job_objects(job_id, object_id) VALUES(?,?)", [(job_id, o) for o in object_ids]
             )
 
-    def job_objects(self, job_id: str) -> list[str]:
-        """Object ids referenced by a job (what a pull peer may read of it, R18)."""
-        return [r[0] for r in self._q("SELECT object_id FROM job_objects WHERE job_id=? ORDER BY object_id", (job_id,))]
+    def job_objects(self, job_id: str) -> set[str]:
+        """Object ids referenced by a job (X13: what a pull peer may read of it, R18; what ``release_job`` frees)."""
+        return {r[0] for r in self._q("SELECT object_id FROM job_objects WHERE job_id=?", (job_id,))}
 
     def live_objects(self) -> set[str]:
         """Objects referenced by a job that is not terminal in some role on this host."""

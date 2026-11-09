@@ -94,6 +94,11 @@ class DirBlockStore:
     def dump_manifests(self, path: Path) -> None:
         path.write_text(json.dumps({k: v.__dict__ for k, v in self._manifests.items()}, default=list))
 
+    def load_manifests(self, path: Path) -> None:
+        """Read manifests written by ``dump_manifests`` (a second process opening the same store)."""
+        for oid, d in json.loads(Path(path).read_text()).items():
+            self._manifests[oid] = ObjectManifest(**{**d, "blocks": tuple(d["blocks"])})
+
 
 @dataclass
 class FakeGitProbe:
@@ -159,14 +164,47 @@ class FakeWorkspaceTxn:
 
     ``fail`` maps a step name (``prepare:<item_id>``, ``c1:<item_id>``, ``c1-inverse:<item_id>``, ``c3``,
     ``c3-inverse``) to an exception instance raised when that step runs. ``log`` records every step in order.
+    ``snapshot()``/``restore()`` carry the prepared items and the log (contract X11 shape, no files);
+    ``map_states()`` returns ``{item_id: {"tree": {"v": 1, "files": {}}}}`` per item.
     """
 
-    def __init__(self, job_id: str = "job", *, fail: dict[str, BaseException] | None = None):
+    def __init__(
+        self,
+        job_id: str = "job",
+        staging=None,
+        git=None,
+        store=None,
+        journal=None,
+        *,
+        fail: dict[str, BaseException] | None = None,
+        cfg=None,
+        rules=None,
+        now=None,
+        cancelled=None,
+    ):
         self.job_id = job_id
         self.fail = dict(fail or {})
         self.log: list[str] = []
         self._items: list[tuple[str, str, DestMode]] = []
         self.discarded = False
+
+    def snapshot(self) -> dict:
+        return {
+            "v": 2,
+            "job_id": self.job_id,
+            "items": [[i, d, m.value] for i, d, m in self._items],
+            "log": list(self.log),
+        }
+
+    @classmethod
+    def restore(cls, snapshot: dict, staging=None, git=None, store=None, journal=None, **kw) -> FakeWorkspaceTxn:
+        fake = cls(snapshot.get("job_id", "job"), fail=kw.get("fail"))
+        fake._items = [(i, d, DestMode(m)) for i, d, m in snapshot.get("items") or ()]
+        fake.log = list(snapshot.get("log") or ())
+        return fake
+
+    def map_states(self) -> dict[str, dict]:
+        return {item_id: {"tree": {"v": 1, "files": {}}} for item_id, _, _ in self._items}
 
     def _step(self, name: str) -> None:
         self.log.append(name)

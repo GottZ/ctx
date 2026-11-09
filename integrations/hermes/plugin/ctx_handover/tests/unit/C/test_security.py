@@ -12,7 +12,7 @@ from ctx_handover.engine.model import Peer, Right
 from ctx_handover.engine.server import Request
 from ctx_handover.tests.unit.C.conftest import new_identity
 from ctx_handover.tests.unit.C.ledger_stub import make_ledger
-from ctx_handover.tests.unit.C.test_server import ALL, Dialer, Listener, body_of
+from ctx_handover.tests.unit.C.test_server import ALL, NEEDS_REAL_LEDGER, Dialer, Listener, body_of
 
 
 def test_sec_revoked_peer_rejected_immediately(tmp_path):
@@ -130,9 +130,11 @@ def test_sec_signature_bound_to_listener_id(tmp_path):
     assert b.handle(for_b.req("GET", "hello")).status == 200
 
 
+@NEEDS_REAL_LEDGER
 def test_sec_concurrent_job_cap(tmp_path):
-    """T12: at most 2 open participant jobs per peer and 4 per listener; re-opening a known job is not new."""
-    lst = Listener(tmp_path)
+    """T12: at most 2 open participant jobs per peer and 4 per listener; re-opening a known job is not new. The
+    caps are the participant registry's (contract X18), so the listener runs with cluster A's registry here."""
+    lst = Listener(tmp_path, real_registry=True)
     peers = [lst.pair(tmp_path, f"p{i}", rights={Right.PUSH, Right.PULL}) for i in range(3)]
 
     def open_job(d, job=None):

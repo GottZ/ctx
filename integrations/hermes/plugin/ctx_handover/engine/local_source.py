@@ -4,12 +4,19 @@
 conductor (push, export) or through the registry by a remote one (pull, offer claim). It composes the session
 (B), planning (D) and workspace (E) subsystems in the order of DESIGN §3.2/§7:
 
-* ``start_plan`` — collector + optional refinement + agent suggestions, **no lock** [BX M9]; the busy probe is
-  read-only.
-* ``lock`` — busy probe, turn lease + compression lock (``lock.acquire``), revision compared with the plan's.
-* ``start_export`` / ``start_pack`` — capsule with revision bracket; pack of the confirmed final plan. A
-  remote-driven source (``remote_driven``) restricts the remote final plan to what it releases itself
-  (``plan.restrict_to_releasable``, R18) and logs "pulled by <peer>" (SEC 5.8).
+* ``facts`` — this host's facts, with the tool names the session's transcript uses (``tools_seen``, W084).
+* ``start_plan`` — collector over the lineage rows of ``export_session_lineage(include_inactive=True)`` (W076) +
+  refinement with the rows and ``redact`` (W077) + agent suggestions; ``build_plan`` with ``remote_driven`` (a
+  remote conductor's hints never add, R18) — **no lock** [BX M9]; the busy probe is read-only.
+* ``lock`` — busy probe, turn lease + compression lock (``lock.acquire``; a route call blocks at most
+  ``LOCK_WAIT_S`` seconds, W060), then ``describe`` again under the held lease and the revision compared with the
+  plan's (§7.2 step 6, W037).
+* ``start_export`` / ``start_pack`` — capsule with revision bracket; pack of the confirmed final plan, every item
+  built by cluster E's one entry ``materialize.pack_plan_item`` (contract X12, X17). A remote-driven source
+  (``remote_driven``) restricts the remote final plan to what it releases itself (``plan.restrict_to_releasable``
+  with the remote hints and ``redact``, R18) and logs "pulled by <peer>" (SEC 5.8). Every object of the capsule,
+  pack and delta closures is registered with the job (``job_objects``): what a pull peer may read is exactly that
+  (contract X13).
 * ``start_prepare`` — revision and work-tree re-check (``delta`` / ``stale_session`` / ``stale_worktree``), then the
   primary lock while the leases are held (``lock.prepare``, p1–p7).
 * ``start_retire`` — only after the target's ACK; ``lock.retire`` releases the leases only after the ledger, the
@@ -18,7 +25,7 @@ conductor (push, export) or through the registry by a remote one (pull, offer cl
 
 Its own working data (session info, holder, plan, capsule, pack states) is journaled on the job's ``source``
 row, so another process can continue (janitor, DESIGN §3.6). The B/D/E functions are reached through
-``ports`` (default: the real modules, imported lazily) so this class runs against stand-ins in layer 1.
+``ports`` (default: the real modules, imported lazily; unit tests may pass stand-ins with the same signatures).
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,8 +48,8 @@ from .errors import (
     NotFound,
     SessionBusy,
     VerifyFailed,
+    WaitTimeout,
 )
-from .ignore import IgnoreMatcher
 from .jsonutil import canonical_bytes, from_wire, sha256_hex, to_wire
 from .ledger import STALE_OWNER_S, Ledger, private_dir, process_owner
 from .model import (
@@ -73,9 +80,11 @@ from .model import (
     SessionRef,
 )
 from .ops import OpRunner, object_closure
-from .policy import PolicyConfig, check_source_file
+from .policy import PolicyConfig
 
-_ROW_PAGE = 2000
+LOCK_WAIT_S = 20
+"""Longest a ``lock`` call waits for a running turn's lease (route ``source/lock`` stays below the request timeout,
+I7, W060); with ``--wait`` the conductor repeats it until its own deadline."""
 
 
 def default_source_ports() -> SimpleNamespace:
@@ -84,11 +93,10 @@ def default_source_ports() -> SimpleNamespace:
         collector,
         ctxrecords,
         envfacts,
-        filetree,
         gitops,
         gitpack,
-        hermes_files,
         lock,
+        materialize,
         plan,
         refine,
         session_export,
@@ -98,11 +106,10 @@ def default_source_ports() -> SimpleNamespace:
         collector=collector,
         ctxrecords=ctxrecords,
         envfacts=envfacts,
-        filetree=filetree,
         gitops=gitops,
         gitpack=gitpack,
-        hermes_files=hermes_files,
         lock=lock,
+        materialize=materialize,
         plan=plan,
         refine=refine,
         session_export=session_export,
@@ -228,20 +235,35 @@ class LocalSource:
     def _cfg(self, job: JobContext) -> PolicyConfig:
         return self.policy
 
-    def _rows(self, db, info: SessionInfo) -> Iterator[dict]:
-        """Every stored row of the lineage in storage order, paged (bounded memory per page)."""
-        for sid in info.lineage_ids:
-            after = None
-            while True:
-                page = db.get_messages(
-                    sid, include_inactive=True, include_compacted=True, limit=_ROW_PAGE, after_id=after
-                )
-                if not page:
-                    break
-                yield from page
-                after = page[-1].get("id")
-                if len(page) < _ROW_PAGE or after is None:
-                    break
+    @staticmethod
+    def _rows(db, info: SessionInfo) -> list[dict]:
+        """Every stored row of the lineage in storage order with its flags — the form the collector, the refinement
+        and the tool-name scan are built for (``export_session_lineage(tip, include_inactive=True)``, W076)."""
+        doc = db.export_session_lineage(info.tip_id, include_inactive=True) or {}
+        return [r for r in doc.get("messages") or () if isinstance(r, dict)]
+
+    def _session_ref(self, job: JobContext) -> SessionRef | None:
+        """The session a job is about: the participant row's ``session_ref`` (remote conductor, route #7) or, for a
+        local conductor in this process, the conductor row's (same ledger, same job id)."""
+        for role in (Role.SOURCE, Role.CONDUCTOR):
+            row = self.ledger.job(job.job_id, role)
+            raw = ((row or {}).get("params") or {}).get("session_ref")
+            if isinstance(raw, dict) and (raw.get("id") or raw.get("latest") or raw.get("offer_id")):
+                return from_wire(SessionRef, raw)
+        return None
+
+    def _tools_seen(self, job: JobContext) -> set[str]:
+        """Tool names the transcript runs (``envfacts.tools_seen_from_rows``, W084); empty when the session is
+        unknown here (the facts then carry no transcript tools)."""
+        ref = self._session_ref(job)
+        if ref is None:
+            return set()
+        db = self.db_factory()
+        try:
+            info = self.ports.session_export.describe(db, ref, calling_session=self.calling_session)
+        except HandoverError:
+            return set()
+        return set(self.ports.envfacts.tools_seen_from_rows(self._rows(db, info)))
 
     # -- SourceAPI -----------------------------------------------------------------------------------------------
     def hello(self) -> Hello:
@@ -300,6 +322,7 @@ class LocalSource:
             options=job.options,
             host=self.host,
             config=self.config,
+            tools_seen=sorted(self._tools_seen(job)),
             capabilities=self.hello().capabilities,
         )
 
@@ -331,7 +354,7 @@ class LocalSource:
             p = self.ports
             db = self.db_factory()
             info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
-            rows = list(self._rows(db, info))
+            rows = self._rows(db, info)
             session_row = db.get_session(info.tip_id) or {}
             cfg = self._cfg(job)
             probe = p.gitops.GitProbe(self.git)
@@ -388,7 +411,17 @@ class LocalSource:
                 reasons=list(busy.reasons),
             )
         ttl, _refresh = p.lock.lease_timing(job.options)
-        holder = p.lock.acquire(db, self.ledger, info, job.job_id, ttl_s=ttl, wait_s=0, cancelled=job.cancelled)
+        # without --wait a running turn answers at once (§7.2 step 3); with it this call waits at most LOCK_WAIT_S
+        # and the conductor repeats until its deadline (W060)
+        wait_s = min(LOCK_WAIT_S, max(0, int(job.options.wait_timeout_s))) if job.options.wait else 0
+        try:
+            holder = p.lock.acquire(
+                db, self.ledger, info, job.job_id, ttl_s=ttl, wait_s=wait_s, cancelled=job.cancelled
+            )
+        except WaitTimeout as exc:
+            raise SessionBusy(
+                "A turn is still running in this session; waiting continues.", reason="turn", waited_s=wait_s
+            ) from exc
         # DESIGN §7.2 step 6: the revision under the held lease decides (a turn may have ended in between)
         info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
         info = dataclasses.replace(info, revision_changed=tuple(info.revision) != tuple(plan_revision))
@@ -415,12 +448,7 @@ class LocalSource:
         if src is None or src["state"] not in ("locking", "locked"):
             return
         info = self._info(job)
-        suspend = getattr(self.ports.lock, "suspend", None)
-        if callable(suspend):
-            suspend(self.db_factory(), self.ledger, info, src.get("holder"), job.job_id)
-        else:  # lock.release frees both leases (nothing prepared yet); the row is marked resumable
-            self.ports.lock.release(self.db_factory(), self.ledger, info, src.get("holder"), job.job_id)
-            self.ledger.source_set(job.job_id, "suspended")
+        self.ports.lock.suspend(self.db_factory(), self.ledger, info, src.get("holder"), job.job_id)
         self._sync_state(job)
 
     def start_export(self, job: JobContext) -> OpStatus:
@@ -507,68 +535,42 @@ class LocalSource:
         return self._start(job, "pack", _digest(plan_id, states), fn, exclusive=True)
 
     def _pack(self, job: JobContext, final: FinalPlan, report) -> dict:
-        """Build the pack document of DESIGN §9.1 with cluster E's packers (git: ``gitpack.pack_repo`` +
-        ``pack_item``; trees: ``filetree.scan``/``pack_tree``/``fingerprint``; single files: ``filetree.pack_file``)."""
+        """Build the pack document of DESIGN §9.1. Every item comes from cluster E's one entry
+        ``materialize.pack_plan_item`` (contract X12: git with LFS, trees and extra directories as ``file_tree``,
+        single files with the policy re-checked, ``hermes_file`` with ``PlanItem.hermes_kind``, X17); its ``state``
+        (``materialize.map_state_of`` form) is what the ``out`` row records for the return trip (X09, R4)."""
         p = self.ports
         cfg = self._cfg(job)
         decisions = {d.item_id: d for d in final.decisions}
         workdir = self.data_dir / "staging" / job.job_id / "git"
+        todo = [
+            item
+            for item in final.plan.items
+            if item.include is Include.YES
+            and not (item.item_id in decisions and decisions[item.item_id].mode is DestMode.SKIP)
+        ]
         items, states = [], {}
-        for item in final.plan.items:
-            if item.include is not Include.YES:
-                continue
+        for item in todo:
             if job.cancelled():
                 raise Cancelled("cancelled")
             decision = decisions.get(item.item_id)
-            if decision is not None and decision.mode is DestMode.SKIP:
-                continue
-            if item.kind is ItemKind.GIT_REPO:
-                wd = private_dir(workdir / item.item_id)
-                res = p.gitpack.pack_repo(
-                    self.git,
-                    item.source_path,
-                    wd,
-                    basis_candidates=tuple(decision.git_have) if decision else (),
-                    cfg=cfg,
-                    store=self.store,
-                    created_at=self._clock(),
-                    force=job.options.force,
-                    cancelled=job.cancelled,
-                )
-                states[item.item_id] = to_wire(res.state)  # flat GitState: what E reads on the return trip (R4)
-                items.append(p.gitpack.pack_item(item.item_id, res))
-            elif item.kind in (ItemKind.FILE_TREE, ItemKind.EXTRA_DIR):
-                root = Path(item.source_path)
-                matcher = IgnoreMatcher.for_tree(root, job.options.extra_ignore)
-                entries, skipped = p.filetree.scan(root, matcher, cfg, job.cancelled)
-                manifest = p.filetree.pack_tree(entries, root, self.store, job.cancelled)
-                states[item.item_id] = p.filetree.fingerprint(root, entries)
-                items.append(
-                    {
-                        "item_id": item.item_id,
-                        "kind": "file_tree",
-                        "manifest": manifest,
-                        "entries": len(entries),
-                        "bytes": sum(int(getattr(e, "size", 0) or 0) for e in entries),
-                        "skipped": [to_wire(x) for x in skipped],
-                    }
-                )
-            else:  # EXTRA_FILE, HERMES_FILE
-                path = Path(item.source_path)
-                verdict = check_source_file(path, cfg, explicit=item.include is Include.YES)
-                if not verdict.allowed:
-                    items.append(
-                        {"item_id": item.item_id, "kind": "extra_file", "object": None, "skipped": verdict.reason}
-                    )
-                    continue
-                entry = {"item_id": item.item_id, **p.filetree.pack_file(path, self.store, job.cancelled)}
-                if item.kind is ItemKind.HERMES_FILE:
-                    entry["kind"] = "hermes_file"
-                    entry["hermes_kind"] = p.collector.hermes_kind(item.reasons)
-                    home = str(self.hermes.home)
-                    entry["rel"] = os.path.relpath(path, home) if str(path).startswith(home) else path.name
-                items.append(entry)
-            report(Progress(step="packing", items_done=len(items), items_total=len(final.plan.items)))
+            packed = p.materialize.pack_plan_item(
+                item,
+                git=self.git,
+                store=self.store,
+                cfg=cfg,
+                workdir=workdir / item.item_id,
+                created_at=self._clock(),
+                basis_candidates=tuple(decision.git_have) if decision else (),
+                force=job.options.force,
+                extra_ignore=tuple(job.options.extra_ignore),
+                hermes_home=self.hermes.home,
+                cancelled=job.cancelled,
+            )
+            items.append(dict(packed.doc))
+            if packed.state is not None:
+                states[item.item_id] = packed.state
+            report(Progress(step="packing", items_done=len(items), items_total=len(todo)))
         doc = {"kind": "ctxh.pack", "v": 1, "job_id": job.job_id, "final_plan_id": final.plan_id, "items": items}
         m = self.store.put_bytes(canonical_bytes(doc), "application/json")
         self._register_closure(job, m.object_id)

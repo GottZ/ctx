@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import os
 import time
 from dataclasses import replace
 
+import pytest
+
 from ctx_handover.engine import jsonutil
 from ctx_handover.engine.blocks import BLOCK_SIZE, MEDIA_BLOCKS, BlockStore, decode_frames, encode_frame
-from ctx_handover.engine.crypto import H_RESP_SIG, random_b64, response_string, sign_request, verify
-from ctx_handover.engine.errors import HandoverError, InvalidState
+from ctx_handover.engine.crypto import H_RESP_SIG, Identity, random_b64, response_string, sign_request, verify
+from ctx_handover.engine.errors import HandoverError, IdentityLost, InvalidState
 from ctx_handover.engine.ids import ulid
 from ctx_handover.engine.model import (
     AuthScheme,
@@ -20,6 +24,7 @@ from ctx_handover.engine.model import (
     Peer,
     Right,
     Role,
+    SessionInfo,
 )
 from ctx_handover.engine.server import (
     ROUTES,
@@ -40,16 +45,65 @@ def run(coro):
     return asyncio.run(coro)
 
 
+NEEDS_REAL_LEDGER = pytest.mark.skipif(
+    os.environ.get("CTXH_C_LEDGER") == "stub", reason="the participant registry needs cluster A's ledger"
+)
+
+
 class Listener:
-    def __init__(self, tmp_path, *, settings=None, operator=False, identity=True, redact=None) -> None:
+    """``Server`` over the C ledger with the participant double (``FakeRegistry``) — or, with ``real_registry``,
+    cluster A's ``ParticipantRegistry`` serving the double's participants. ``wrap_ledger`` wraps the ledger the
+    server and its block store see; ``load_identity`` is the server's identity loader (``True``: this listener's
+    in-memory ``.env``)."""
+
+    def __init__(
+        self,
+        tmp_path,
+        *,
+        settings=None,
+        operator=False,
+        identity=True,
+        redact=None,
+        real_registry=False,
+        wrap_ledger=None,
+        load_identity=None,
+    ) -> None:
         self.ledger = make_ledger(tmp_path / "listener" / "ledger.sqlite3")
-        self.identity = new_identity(self.ledger) if identity else None
-        self.registry = FakeRegistry(self.ledger)
+        self.env: dict[str, str] = {}
+        self.identity = new_identity(self.ledger, self.env) if identity else None
+        seen = wrap_ledger(self.ledger) if wrap_ledger is not None else self.ledger
+        self.seen_ledger = seen
+        self.registry = FakeRegistry(seen)
+        registry = self.registry
+        if real_registry:
+            from ctx_handover.engine.participant import ParticipantRegistry
+
+            fake = self.registry
+            registry = ParticipantRegistry(seen, lambda role, peer: fake.source if role is Role.SOURCE else fake.target)
+        self.participants = registry
         self.settings = {"name": "server", **(settings or {})}
         auths = [OperatorSessionAuth(enabled=operator)]
         if self.identity is not None:
-            auths.append(PeerSignatureAuth(self.ledger, self.identity))
-        self.server = Server(self.ledger, self.identity, self.registry, self.settings, auths, redact=redact)
+            auths.append(PeerSignatureAuth(seen, self.identity))
+        if load_identity is True:
+            env = self.env
+
+            def load_identity():
+                return Identity.load(self.ledger, read_secret=env.get, read_env_fresh=env.get)
+
+        self.server = Server(
+            seen, self.identity, registry, self.settings, auths, redact=redact, load_identity=load_identity
+        )
+
+    def rotate(self) -> Identity:
+        """``identity rotate`` as another process of the profile does it (new key in the ``.env`` and the ledger)."""
+        return Identity.create(
+            self.ledger,
+            env_writable=lambda name: None,
+            save_env=self.env.__setitem__,
+            read_env_fresh=self.env.get,
+            rotate=True,
+        )
 
     def pair(self, tmp_path, name="laptop", rights=ALL, direction="inbound") -> Dialer:
         led = make_ledger(tmp_path / f"d-{name}" / "ledger.sqlite3")
@@ -686,3 +740,171 @@ def test_pair_redeem_route_and_failure_cap(tmp_path):
     assert codes == ["pair_invalid", "pair_invalid", "pair_invalid", "rate_limited"]
     form = Request("POST", "pair/redeem", {"content-type": "application/x-www-form-urlencoded"}, b"a=b", None)
     assert lst.handle(form).status == 400
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Layer 2: identity rotation, receiver registration, registry ownership (X18)
+# ---------------------------------------------------------------------------------------------------------
+
+
+def _signed_with(pubkey: str, req: Request, resp) -> bool:
+    sig = resp.headers.get(H_RESP_SIG)
+    msg = response_string(resp.status, req.headers.get("x-ctxh-nonce", ""), hashlib.sha256(resp.body).hexdigest())
+    return bool(sig) and verify(pubkey, msg, sig)
+
+
+def test_server_follows_identity_rotation(tmp_path):
+    """Befund L2-F: after ``identity rotate`` in another process of the profile the running listener answers the
+    next request with the new key — ``hello`` names it, the response verifies with it and no longer with the old
+    one. A rotated key this process cannot load closes the listener (plain 404) instead of signing with the
+    retired key."""
+    lst = Listener(tmp_path, load_identity=True)
+    d = lst.pair(tmp_path)
+    old = lst.identity.public_b64()
+    req = d.req("GET", "hello")
+    assert _signed_with(old, req, lst.handle(req))
+    new = lst.rotate().public_b64()
+    assert new != old
+    req = d.req("GET", "hello")
+    resp = lst.handle(req)
+    assert resp.status == 200 and body_of(resp)["listener_pubkey"] == new
+    assert _signed_with(new, req, resp) and not _signed_with(old, req, resp)
+    assert body_of(lst.handle(unsigned_hello()))["listener_pubkey"] == new
+
+    def lost():
+        raise IdentityLost("gone", reason="missing")
+
+    closed = Listener(tmp_path / "closed", load_identity=lost)
+    cd = closed.pair(tmp_path / "closed")
+    assert closed.handle(cd.req("GET", "hello")).status == 200
+    closed.rotate()
+    for req in (cd.req("GET", "hello"), unsigned_hello()):
+        resp = closed.handle(req)
+        assert (resp.status, resp.body) == (404, b'{"detail":"Plugin not found"}')
+        assert H_RESP_SIG not in resp.headers
+
+
+class _TxSpy:
+    """Ledger wrapper recording in which outermost ``tx()`` each object write happens (None = outside)."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.depth = 0
+        self.serial = 0
+        self.log: list[tuple[str, int | None]] = []
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name not in {"object_put", "job_object", "job_objects_add"}:
+            return attr
+
+        def recorded(*args, **kwargs):
+            self.log.append((name, self.serial if self.depth else None))
+            return attr(*args, **kwargs)
+
+        return recorded
+
+    @contextlib.contextmanager
+    def tx(self):
+        if not self.depth:
+            self.serial += 1
+        self.depth += 1
+        try:
+            with self._inner.tx() as conn:
+                yield conn
+        finally:
+            self.depth -= 1
+
+
+def test_objects_put_stores_and_registers_in_one_transaction(tmp_path):
+    """★ Befund d (receiver): route #23 stores the received manifests and registers them with the job in one
+    ledger transaction, so a block GC never sees a received object that belongs to no job.
+
+    Red proof: mutant = ``_h_objects_put`` without ``with self._ledger.tx():`` → ``job_object`` runs outside the
+    transaction that stored the manifest (recorded ``None``).
+    """
+    lst = Listener(tmp_path, wrap_ledger=_TxSpy)
+    spy = lst.seen_ledger
+    lst.registry.store = BlockStore(tmp_path / "listener" / "data", spy)
+    d = lst.pair(tmp_path)
+    job = _open(lst, d)
+    src = MemoryBlockStore()
+    ms = [src.put_bytes(_noise(700 + i, i), "application/json") for i in range(3)]
+    spy.log.clear()
+    body = {"epoch": 1, "manifests": [jsonutil.to_wire(m) for m in ms]}
+    assert body_of(lst.handle(d.req("POST", f"jobs/{job}/objects/put", body, epoch=1))) == {"stored": 3}
+    puts = [s for name, s in spy.log if name == "object_put"]
+    regs = [s for name, s in spy.log if name in {"job_object", "job_objects_add"}]
+    assert len(puts) == 3 and regs
+    assert len(set(puts + regs)) == 1 and None not in puts + regs
+    assert set(lst.ledger.job_objects(job)) == {m.object_id for m in ms}
+
+
+@NEEDS_REAL_LEDGER
+def test_registry_owns_job_caps_and_routes(tmp_path):
+    """★ X18 (W010/W011): the server keeps no job logic. The caps of route #7 (2 per peer, 4 per listener, with the
+    registry's ``concurrent_jobs`` reason; a re-open is not a new job) and routes #8–#10 are the participant
+    registry's — including its rule that a prepared source refuses ``cancel``.
+
+    Red proofs: mutant = ``_h_job_cancel`` releases the source itself (``api.start_release`` via ``_participant``)
+    → the prepared source answers 200 instead of 409; mutant = the layer-1 cap in ``_h_jobs_open`` (own
+    ``RateLimited`` before ``registry.open``) → the refused job's error carries no ``reason``.
+    """
+    lst = Listener(tmp_path, real_registry=True)
+    peers = [lst.pair(tmp_path, f"p{i}") for i in range(3)]
+
+    def open_job(d, job=None, role="target", mode="push"):
+        job = job or ulid()
+        body = {"job_id": job, "epoch": 1, "role": role, "mode": mode, "conductor": {}, "options": {}}
+        return job, lst.handle(d.req("POST", "jobs", body))
+
+    src, r1 = open_job(peers[0], role="source", mode="pull")
+    tgt, r2 = open_job(peers[0])
+    _, r3 = open_job(peers[0])
+    assert (r1.status, r2.status, r3.status) == (200, 200, 429)
+    err = body_of(r3)["error"]
+    assert err["code"] == "rate_limited" and err["details"]["reason"] == "concurrent_jobs"
+    assert open_job(peers[0], tgt)[1].status == 200  # idempotent re-open
+    assert open_job(peers[1])[1].status == 200 and open_job(peers[1])[1].status == 200
+    assert body_of(open_job(peers[2])[1])["error"]["details"]["reason"] == "concurrent_jobs"  # 4 on the listener
+    d = peers[0]
+    resp = lst.handle(d.req("POST", f"jobs/{tgt}/status", {"epoch": 1}, epoch=1))
+    assert resp.status == 200 and body_of(resp)["state"] == "open"
+    resp = lst.handle(d.req("POST", f"jobs/{src}/heartbeat", {"epoch": 1, "conductor_state": "x"}, epoch=1))
+    assert body_of(resp) == {"state": "open"}
+    assert [c[0] for c in lst.registry.source.calls].count("heartbeat") == 1
+    assert lst.handle(peers[1].req("POST", f"jobs/{src}/status", {"epoch": 1}, epoch=1)).status == 404  # other peer
+    info = SessionInfo(
+        tip_id="t",
+        root_id="r",
+        lineage_ids=("r", "t"),
+        title="T",
+        model=None,
+        provider=None,
+        cwd=None,
+        git_repo_root=None,
+        git_branch=None,
+        active_messages=1,
+        revision=(1, 1),
+    )
+    lst.ledger.source_lock(src, info, "test:1", d.peer_id)
+    lst.ledger.source_set(src, "prepared")
+    resp = lst.handle(d.req("POST", f"jobs/{src}/cancel", {"epoch": 1, "reason": "user"}, epoch=1))
+    assert resp.status == 409 and body_of(resp)["error"]["details"]["state"] == "prepared"
+    assert "start_release" not in [c[0] for c in lst.registry.source.calls]
+    resp = lst.handle(d.req("POST", f"jobs/{tgt}/cancel", {"epoch": 1, "reason": "user"}, epoch=1))
+    assert resp.status == 200
+    assert [c[1][1] for c in lst.registry.target.calls if c[0] == "abort"] == ["cancelled: user"]
+
+
+def test_server_flags_as_loaded_from_yaml(tmp_path):
+    """YAML-bool sweep: ``operator_api`` and ``hosted`` are booleans whether YAML parsed them (``yes``/``off`` →
+    True/False) or a loader handed over the quoted word — a quoted ``"false"``/``"no"``/``"off"`` never reads as
+    True (``bool("false")`` would). Mutant: ``bool(...)`` instead of ``_flag`` → ``hosted: "no"`` reports True."""
+    for value, expected in ((True, True), ("yes", True), ("On", True), (False, False), ("no", False), ("false", False)):
+        lst = Listener(tmp_path / f"f-{value}", operator=True, settings={"operator_api": value, "hosted": value})
+        d = lst.pair(tmp_path / f"f-{value}")
+        data = body_of(lst.handle(d.req("GET", "hello")))
+        assert data["limits"]["hosted"] is expected, value
+        assert ("operator.v1" in data["capabilities"]) is expected, value
+        assert lst.server.operator_enabled() is expected, value

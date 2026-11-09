@@ -1,9 +1,10 @@
-"""Stand-ins for the cluster B/C/D/E/F functions ``LocalSource``/``LocalTarget`` call (layer 1 only).
+"""Stand-ins for the cluster B/C/D/E/F functions ``LocalSource``/``LocalTarget`` call in the orchestration tests.
 
-They follow the signatures of INTERFACES §4.1–§4.6 and run on real substrates where it matters for the
-orchestration: the real ``SessionDB`` (hidden flag, revision, messages), the real file system (partial
-directories renamed into place) and a real ``Ledger``. In layer 2 the real modules replace them through the
-``ports`` parameter's default.
+They follow the signatures the real modules have now (contract.md: ``materialize.pack_plan_item`` X12,
+``envfacts.tools_seen_from_rows`` W084, ``lock.acquire(wait_s=…)`` W060, K-1 object ids) and run on real substrates
+where it matters for the orchestration: the real ``SessionDB`` (hidden flag, revision, messages), the real file
+system (partial directories renamed into place) and a real ``Ledger``. Production uses the real modules (the
+``ports`` default); the tests against them are ``test_l2_source_*.py`` and ``tests/integration``.
 """
 
 from __future__ import annotations
@@ -18,13 +19,14 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 from ctx_handover.engine.errors import NotFound, PolicyDenied
-from ctx_handover.engine.jsonutil import canonical_bytes, doc_id, sha256_hex, to_wire
+from ctx_handover.engine.jsonutil import canonical_bytes, doc_id, object_id, object_manifest, sha256_hex, to_wire
 from ctx_handover.engine.model import (
     CapsuleInfo,
     ContinueResult,
     DeltaInfo,
     DestMode,
     Include,
+    ItemKind,
     ObjectManifest,
     PreparedInfo,
     PrepareOutcome,
@@ -40,25 +42,26 @@ from ctx_handover.tests.fakes.apis_fake import make_facts
 
 
 class MemStore:
-    """In-memory BlockStore (BlockSource + BlockSink + object helpers of ``blocks.BlockStore``)."""
+    """In-memory BlockStore (BlockSource + BlockSink + object helpers of ``blocks.BlockStore``); objects follow the
+    one id rule (contract K-1, ``jsonutil.object_manifest``)."""
 
-    def __init__(self, block_size: int = 4096) -> None:
-        self.block_size = block_size
+    def __init__(self) -> None:
         self.objects: dict[str, ObjectManifest] = {}
         self.data: dict[str, bytes] = {}
         self.released: list[tuple[str, bool]] = []
 
     def put_bytes(self, data: bytes, media: str) -> ObjectManifest:
-        ids = []
-        for off in range(0, max(len(data), 1), self.block_size):
-            raw = data[off : off + self.block_size]
-            bid = sha256_hex(raw)
+        doc, blocks = object_manifest(data, media)
+        for bid, raw in blocks:
             self.data[bid] = raw
-            ids.append(bid)
         m = ObjectManifest(
-            sha256=sha256_hex(data), size=len(data), block_size=self.block_size, blocks=tuple(ids), media=media
+            sha256=doc["sha256"],
+            size=doc["size"],
+            block_size=doc["block_size"],
+            blocks=tuple(doc["blocks"]),
+            media=media,
+            object_id=object_id(doc),
         )
-        m = replace(m, object_id=doc_id({k: v for k, v in to_wire(m).items() if k != "object_id"}))
         self.objects[m.object_id] = m
         return m
 
@@ -393,14 +396,52 @@ def collect(rows, session_row, hermes, cfg, git, *, source_os):
     return []
 
 
-def hermes_kind(reasons):
-    return next((r for r in reasons if r in ("spillover", "hook_outputs", "native_inputs")), None)
+@dataclass(frozen=True)
+class PackedItem:
+    """``materialize.PackedItem`` (contract X12)."""
+
+    doc: dict
+    state: dict | None
+    excluded: tuple = ()
+    skipped: tuple = ()
+    warnings: tuple = ()
 
 
-def pack_file(path, store, cancelled=lambda: False):
-    with open(path, "rb") as fh:
-        m = store.put_bytes(fh.read(), "application/octet-stream")
-    return {"kind": "extra_file", "object": m.object_id, "size": m.size, "mode": "100644", "mtime_ns": 0}
+class PackStandIn:
+    """``materialize.pack_plan_item`` for single files (the policy is re-checked at packing, like E's entry);
+    records every call's keyword arguments."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def pack_plan_item(
+        self,
+        item,
+        *,
+        git,
+        store,
+        cfg,
+        workdir,
+        created_at,
+        basis_candidates=(),
+        force=False,
+        extra_ignore=(),
+        hermes_home=None,
+        cancelled=lambda: False,
+    ):
+        from ctx_handover.engine.policy import check_source_file
+
+        self.calls.append({"item_id": item.item_id, "workdir": workdir, "hermes_home": hermes_home, "force": force})
+        kind = "hermes_file" if item.kind is ItemKind.HERMES_FILE else "extra_file"
+        verdict = check_source_file(Path(item.source_path), cfg, explicit=True, follow_link=False)
+        if not verdict.allowed:
+            return PackedItem({"item_id": item.item_id, "kind": kind, "object": None, "skipped": verdict.reason}, None)
+        with open(item.source_path, "rb") as fh:
+            m = store.put_bytes(fh.read(), "application/octet-stream")
+        doc = {"item_id": item.item_id, "kind": kind, "object": m.object_id, "size": m.size, "mode": "100644"}
+        if kind == "hermes_file":
+            doc.update(hermes_kind=item.hermes_kind, rel=Path(item.source_path).name)
+        return PackedItem(doc, None)
 
 
 def refine(candidates, target, *, approx_tokens, options, side_question, llm, stored, rows=None, redact=None):
@@ -408,7 +449,12 @@ def refine(candidates, target, *, approx_tokens, options, side_question, llm, st
 
 
 def probe(*, instance_name, options, host, config, tools_seen=(), capabilities=frozenset()):
-    return make_facts(instance_name or "x")
+    facts = make_facts(instance_name or "x")
+    return replace(facts, tools_seen={name: None for name in tools_seen})
+
+
+def tools_seen_from_rows(rows):
+    return {str(r.get("content")).split()[1] for r in rows if str(r.get("content") or "").startswith("$ ")}
 
 
 def delta(source, target):
@@ -536,8 +582,10 @@ def choose_dest(item, *, source_facts, target_facts, lookup, options):
 
 
 def choose_all(items, *, source_facts, target_facts, lookup, options, local_choice=True, job_id="", cfg=None):
-    return [choose_dest(i, source_facts=source_facts, target_facts=target_facts, lookup=lookup, options=options)
-            for i in items]
+    return [
+        choose_dest(i, source_facts=source_facts, target_facts=target_facts, lookup=lookup, options=options)
+        for i in items
+    ]
 
 
 def fallback_dest(dest, *, now, workspace_root, allow_roots):
@@ -575,17 +623,16 @@ class Spawner:
         return ContinueResult(started=True, pid=4321, log="/log")
 
 
-def source_ports(items, lock=None, plan=None):
+def source_ports(items, lock=None, plan=None, pack=None):
     plan = plan or PlanStandIn(items)
     return SimpleNamespace(
-        collector=SimpleNamespace(collect=collect, hermes_kind=hermes_kind),
+        collector=SimpleNamespace(collect=collect),
         ctxrecords=SimpleNamespace(enqueue=enqueue, server_for=server_for),
-        envfacts=SimpleNamespace(probe=probe, delta=delta),
-        filetree=SimpleNamespace(pack_file=pack_file),
+        envfacts=SimpleNamespace(probe=probe, delta=delta, tools_seen_from_rows=tools_seen_from_rows),
         gitops=SimpleNamespace(GitProbe=GitProbe, worktree_state=worktree_state),
         gitpack=None,
-        hermes_files=None,
         lock=lock or LockStandIn(),
+        materialize=pack or PackStandIn(),
         plan=plan,
         refine=SimpleNamespace(refine=refine),
         session_export=SimpleNamespace(

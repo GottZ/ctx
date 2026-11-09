@@ -22,6 +22,11 @@ unnoticed". A user reclaim (``world.source.reclaim(force=True)``) is the noticed
 
 The session is a list of row strings; ``h_all`` is the sha256 of the rows, so a target that imported anything
 else than what the source held at its prepare point fails verification (``VerifyFailed``).
+
+Objects follow the one id rule (contract K-1, ``jsonutil.object_manifest``: blocks of 524 288 bytes) unless a test
+builds a ``FakeBlocks`` with a smaller block size for the block mover alone. Plan ids follow the one rule of DESIGN
+§8.6 (``plan.plan_id`` over the FinalPlan document without ``plan_id``); ``FakePlanning`` delegates every planning
+function to the real ``plan`` module except ``confirmation_reasons`` (see there).
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 
 from ctx_handover.engine import CAPABILITIES_V1, PROTOCOL
+from ctx_handover.engine import plan as planning
 from ctx_handover.engine.errors import (
     HandoverError,
     InsufficientStorage,
@@ -46,7 +52,15 @@ from ctx_handover.engine.errors import (
     SessionBusy,
     VerifyFailed,
 )
-from ctx_handover.engine.jsonutil import canonical_bytes, from_wire, sha256_hex, to_wire
+from ctx_handover.engine.jsonutil import (
+    OBJECT_BLOCK_SIZE,
+    canonical_bytes,
+    from_wire,
+    object_id,
+    object_manifest,
+    sha256_hex,
+    to_wire,
+)
 from ctx_handover.engine.model import (
     CapsuleInfo,
     CommitAck,
@@ -229,7 +243,21 @@ class FakeBlocks:
         self._lock = threading.Lock()
 
     def put_object(self, data: bytes, media: str = "application/json") -> ObjectManifest:
-        ids = []
+        if self.block_size == OBJECT_BLOCK_SIZE:  # the one id rule (contract K-1)
+            doc, blocks = object_manifest(data, media)
+            for bid, raw in blocks:
+                self.data[bid] = raw
+            m = ObjectManifest(
+                sha256=doc["sha256"],
+                size=doc["size"],
+                block_size=doc["block_size"],
+                blocks=tuple(doc["blocks"]),
+                media=media,
+                object_id=object_id(doc),
+            )
+            self.objects[m.object_id] = m
+            return m
+        ids = []  # a smaller block size exercises the block mover only (``move_object`` does not check ids)
         for off in range(0, max(len(data), 1), self.block_size):
             raw = data[off : off + self.block_size]
             bid = _sha(raw)
@@ -745,14 +773,15 @@ class FakeTarget(_Participant):
             need = sum(d.need_bytes for d in decisions)
             if self.free < need * 1.1:
                 raise InsufficientStorage("not enough space", need_bytes=need, free_bytes=self.free, path="/")
-            doc = {"plan": to_wire(plan), "decisions": [to_wire(d) for d in decisions]}
-            final = FinalPlan(
-                plan_id=sha256_hex(canonical_bytes(doc)),
-                plan=plan,
-                decisions=decisions,
-                need_bytes=need,
-                free_bytes={"/": self.free},
-                model_change=None,
+            final = planning.with_plan_id(
+                FinalPlan(
+                    plan_id="",
+                    plan=plan,
+                    decisions=decisions,
+                    need_bytes=need,
+                    free_bytes={"/": self.free},
+                    model_change=None,
+                )
             )
             self.final = final
             if self.state in (None, "open"):
@@ -973,7 +1002,7 @@ class FakeTarget(_Participant):
 class World:
     """Both participants, their faults and the invariant monitor (see module docstring)."""
 
-    def __init__(self, clock, *, block_size: int = 64, max_request_bytes: int = 8 * 1024**2) -> None:
+    def __init__(self, clock, *, block_size: int = OBJECT_BLOCK_SIZE, max_request_bytes: int = 8 * 1024**2) -> None:
         self.clock = clock
         self.block_size = block_size
         self.max_request_bytes = max_request_bytes
@@ -1071,42 +1100,47 @@ def decode(cls, data: dict):
 
 
 class FakePlanning:
-    """Stand-in for the three ``plan`` functions the conductor calls (cluster D, INTERFACES §4.2).
+    """The ``plan`` functions the conductor calls (cluster D, INTERFACES §4.2), recorded in ``calls``.
 
-    Reason codes: ``proposed`` (§14.1 a), ``conflict`` (b); ``apply_choice("no_proposed")`` turns proposed items
-    into ``no`` and drops their decisions."""
+    Every function is the real one of ``engine.plan`` except ``confirmation_reasons``: the World's items are
+    ``extra`` items outside the workspace, so D's rule (f) would ask in every test; the fault matrix exercises the
+    state machine, so only (a) ``proposed``, (b) ``conflict`` and (g) ``instruction_files`` are raised here."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def confirmation_reasons(self, final: FinalPlan, options, source_offline: bool) -> list[str]:
+    def confirmation_reasons(
+        self, final: FinalPlan, options, source_offline: bool, *, instructions: Sequence[dict] = (), cfg=None
+    ) -> list[str]:
         self.calls.append("confirmation_reasons")
         reasons = []
         if any(i.include is Include.PROPOSED for i in final.plan.items):
-            reasons.append("proposed")
+            reasons.append(planning.CONFIRM_PROPOSED)
         if any(d.conflict is not None for d in final.decisions):
-            reasons.append("conflict")
+            reasons.append(planning.CONFIRM_CONFLICT)
+        if instructions:
+            reasons.append(planning.CONFIRM_INSTRUCTIONS)
         return reasons
 
     def apply_choice(self, final: FinalPlan, choice: str) -> FinalPlan:
         self.calls.append("apply_choice:" + choice)
-        if choice != "no_proposed":
-            return final
-        items = tuple(replace(i, include=Include.NO) if i.include is Include.PROPOSED else i for i in final.plan.items)
-        keep = {i.item_id for i in items if i.include is Include.YES}
-        decisions = tuple(d for d in final.decisions if d.item_id in keep)
-        plan = replace(final.plan, items=items)
-        doc = {"plan": to_wire(plan), "decisions": [to_wire(d) for d in decisions]}
-        return replace(final, plan=plan, decisions=decisions, plan_id=sha256_hex(canonical_bytes(doc)))
+        return planning.apply_choice(final, choice)
 
     def plan_id(self, final_plan_doc: dict) -> str:
         self.calls.append("plan_id")
-        return sha256_hex(canonical_bytes({"plan": final_plan_doc["plan"], "decisions": final_plan_doc["decisions"]}))
+        return planning.plan_id(final_plan_doc)
 
-    def presend_summary(self, final: FinalPlan) -> dict:
+    def presend_summary(self, final: FinalPlan, **kw) -> dict:
         self.calls.append("presend_summary")
-        items = [i for i in final.plan.items if i.include is Include.YES]
-        return {"items": len(items), "bytes": sum(i.size_estimate for i in items), "secrets_excluded": 0}
+        return planning.presend_summary(final, **kw)
+
+    def instruction_files(self, items, dest_lookup) -> list[dict]:
+        self.calls.append("instruction_files")
+        return planning.instruction_files(items, dest_lookup)
+
+    def note_parts_from(self, final, **kw) -> dict:
+        self.calls.append("note_parts_from")
+        return planning.note_parts_from(final, **kw)
 
 
 @dataclass

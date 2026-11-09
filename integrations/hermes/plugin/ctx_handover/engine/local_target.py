@@ -16,12 +16,16 @@ conductor (pull, import) or through the registry by a remote one (push). Its cor
   ``committing`` cannot be aborted from outside [SK H5].
 
 Working data is journaled on the job's ``target`` row. The B/D/E/F functions are reached through ``ports``
-(default: the real modules, imported lazily) so this class runs against stand-ins in layer 1.
+(default: the real modules, imported lazily; unit tests may pass stand-ins).
 
-Contract with cluster E (requested in the A report): ``materialize.WorkspaceTxn`` records its prepared item
-states through the ``journal`` callback and can be rebuilt from those entries with
-``WorkspaceTxn.restore(job_id, staging, git, store, journal, entries)`` — the commit continues in another
-process after a crash.
+Workspace transaction (contract X11): ``materialize.WorkspaceTxn(…, cfg=, rules=)``; its ``snapshot()`` is journaled
+after PREPARE and as the result of every c1/c3 step (forward and inverse). Any process rebuilds the transaction
+with ``WorkspaceTxn.restore(snapshot, …)`` and continues the commit in the journaled direction — steps already
+journaled ``done`` never run again. Step names come from E (``c1:<item_id>``) unchanged (W021).
+
+Import (contract X02): the target negotiates destinations for the bundle's plan (its decisions, its own id); the
+conductor recomputes the bundle FinalPlan's id and sends it as ``PrepareRequest.final_plan_id``; ``prepare``
+accepts a pack only when it belongs to that id.
 """
 
 from __future__ import annotations
@@ -38,7 +42,6 @@ from types import SimpleNamespace
 from . import CAPABILITIES_V1, PROTOCOL, WIRE_MAJOR, WIRE_MINOR
 from .contracts import JobContext
 from .errors import (
-    ContinueRefused,
     HandoverError,
     ImportFailed,
     InsufficientStorage,
@@ -78,7 +81,7 @@ from .model import (
     TargetDecision,
 )
 from .ops import OpRunner, error_dict
-from .policy import PolicyConfig, check_target_dest
+from .policy import HERMES_FILE_KINDS, PolicyConfig, check_target_dest
 
 MAX_DOC_BYTES = 64 * 1024 * 1024
 DISK_MARGIN = 1.1
@@ -87,7 +90,6 @@ QUOTA_MARGIN = 1.1
 STATE_DB_FACTOR = 3.5
 """A capsule needs its blocks plus ≈ 3.5 × its size in ``state.db`` (DESIGN §8.6, [RB §B8])."""
 
-_HERMES_KINDS = ("spillover", "hook_outputs", "native_inputs")
 CAPSULE_BYTES_PER_TOKEN = 16
 """Capsule bytes per token of the plan's estimate: ≈ 4 characters per token, × 4 for row metadata, tool calls,
 ``api_content`` sidecars and JSON framing (DESIGN §6.2 example: 980 k tokens ⇒ 12.8 MB capsule)."""
@@ -182,6 +184,10 @@ class QuotaSink:
 
     def read_blocks(self, ids):
         return self._store.read_blocks(ids)
+
+
+def _no_row(_remote_path: str, _direction: str) -> None:
+    return None
 
 
 def _existing_ancestor(path: Path) -> Path:
@@ -325,12 +331,15 @@ class LocalTarget:
         self._ensure_job(job)
 
     def facts(self, job: JobContext, source_facts: EnvFacts) -> EnvFacts:
+        """This host's facts; the tool names the source saw in its transcript are looked up here too (W084)."""
         self._ensure_job(job)
+        seen = sorted((source_facts.tools_seen or {}) if source_facts is not None else ())
         tf = self.ports.envfacts.probe(
             instance_name=self.instance_name,
             options=job.options,
             host=self.host,
             config=self.config,
+            tools_seen=seen,
             capabilities=self.hello().capabilities,
         )
         self._remember(job, source_facts=source_facts, target_facts=tf)
@@ -342,6 +351,40 @@ class LocalTarget:
         tf = from_wire(EnvFacts, ctx["target_facts"]) if ctx.get("target_facts") else None
         return sf, tf
 
+    def _peer_key(self) -> str:
+        """The workspace-map peer of this job's source: the paired peer, else ``local`` (bundle, own host)."""
+        return self.source_peer_id or "local"
+
+    def _lookup(self) -> Callable[[str, str], MapRow | None]:
+        """``pathmap``'s map lookup bound to the job's source peer (contract X10): ``out`` = a path this host handed
+        to that peer earlier (return trip), ``in`` = a path received from it before."""
+        peer_id = self._peer_key()
+        return lambda remote_path, direction: self.ledger.map_find(peer_id, remote_path, direction)
+
+    def _fallback_for(self, job: JobContext, item: PlanItem, sf: EnvFacts | None, tf: EnvFacts | None, now):
+        """``assess``'s fallback for one item: extras go to ``<workspace_root>/_handover/<job6>/<home-relative>``
+        (W102, the extras rule of ``pathmap``), everything else to ``pathmap.fallback_dest``."""
+        p = self.ports
+
+        def generic(d: str) -> str:
+            return p.pathmap.fallback_dest(
+                d, now=now, workspace_root=job.options.workspace_root, allow_roots=job.options.allow_roots
+            )
+
+        if item.kind not in (ItemKind.EXTRA_FILE, ItemKind.EXTRA_DIR) or sf is None or tf is None:
+            return generic
+        extra, _reason = p.pathmap.choose_dest(
+            item,
+            source_facts=sf,
+            target_facts=tf,
+            lookup=_no_row,
+            options=job.options,
+            local_choice=False,
+            job_id=job.job_id,
+            cfg=self.policy,
+        )
+        return lambda d: generic(extra) if os.path.lexists(os.path.expanduser(extra)) else extra
+
     def negotiate(self, job: JobContext, plan: ResourcePlan) -> FinalPlan:
         """Destinations, modes, conflicts and the disk check — before any byte moves (DESIGN §8.6)."""
         p = self.ports
@@ -349,7 +392,7 @@ class LocalTarget:
         sf, tf = self._facts(job)
         if tf is None:
             tf = self.facts(job, sf) if sf is not None else None
-        peer_id = self.source_peer_id or "local"
+        peer_id = self._peer_key()
         tmp = private_dir(self._staging(job.job_id) / "assess")
         now = datetime.fromtimestamp(self._clock())
         decisions: list[TargetDecision] = []
@@ -359,7 +402,7 @@ class LocalTarget:
             items,
             source_facts=sf,
             target_facts=tf,
-            lookup=lambda remote_path, direction: self.ledger.map_find(peer_id, remote_path, direction),
+            lookup=self._lookup(),
             options=job.options,
             local_choice=local_choice,
             job_id=job.job_id,
@@ -377,9 +420,7 @@ class LocalTarget:
                 out_row=out_row,
                 tree_fingerprint=in_row.state if in_row is not None and isinstance(in_row.state, dict) else None,
                 target_facts=tf,
-                fallback=lambda d: p.pathmap.fallback_dest(
-                    d, now=now, workspace_root=job.options.workspace_root, allow_roots=job.options.allow_roots
-                ),
+                fallback=self._fallback_for(job, item, sf, tf, now),
                 tmp=tmp,
                 cfg=self.policy,
                 recorded=out_row is not None or in_row is not None or reason == "return-mapping",
@@ -414,11 +455,9 @@ class LocalTarget:
             decisions=tuple(decisions),
             need_bytes=need,
             free_bytes=free,
-            model_change=self._model_change(sf),
+            model_change=self._model_change(job, sf),
         )
-        doc = to_wire(final)
-        doc.pop("plan_id", None)
-        final = dataclasses.replace(final, plan_id=p.plan.plan_id(doc))
+        final = dataclasses.replace(final, plan_id=p.plan.plan_id(p.plan.final_doc(final)))
         self._remember(job, final_plan=final)
         self.ledger.quota_set(job.job_id, Role.TARGET, int(need * QUOTA_MARGIN))
         row = self._row(job)
@@ -452,16 +491,16 @@ class LocalTarget:
                 short = (slot["path"], int(slot["need"] * DISK_MARGIN), avail)
         return total, free, short
 
-    def _model_change(self, sf: EnvFacts | None) -> dict | None:
-        if sf is None or not sf.host.provider:
+    def _model_change(self, job: JobContext, sf: EnvFacts | None) -> dict | None:
+        """``model_change`` of the FinalPlan exactly as B's ``map_model`` reports it (contract X04), for the model
+        and provider the source reported; the import re-maps the tip row itself (``plan_import``)."""
+        if sf is None:
             return None
-        if self.provider_usable(sf.host.provider, self.config):
-            return None
-        return {
-            "from": {"model": sf.host.model, "provider": sf.host.provider},
-            "to": {"model": self.host.model, "provider": self.host.provider},
-            "reason": "provider_not_configured_here",
-        }
+        row = {"model": sf.host.model, "model_config": {"provider": sf.host.provider} if sf.host.provider else None}
+        _fields, change = self.ports.session_import.map_model(
+            row, job.options.model_mapping, job.options.model, self.config, self.provider_usable
+        )
+        return change
 
     def _final(self, job: JobContext) -> FinalPlan:
         raw = self._ctx(job.job_id).get("final_plan")
@@ -543,7 +582,7 @@ class LocalTarget:
         ws = self.ports.materialize.WorkspaceTxn
         staging = self._staging(job.job_id)
         journal = self._journal_fn(job)
-        kw = {"cfg": self.policy, "cancelled": job.cancelled}
+        kw = {"cfg": self.policy, "rules": self.policy.platform_rules(), "now": self._clock, "cancelled": job.cancelled}
         snap = self._latest_snapshot(job.job_id) if restore else None
         if snap is not None:
             return ws.restore(snap, staging, self.git, self.store, journal, **kw)
@@ -572,7 +611,7 @@ class LocalTarget:
             raise VerifyFailed("the pack does not belong to the confirmed final plan", which="final_plan_id")
         items = {i.item_id: i for i in final.plan.items}
         decisions = {d.item_id: d for d in final.decisions}
-        peer_id = self.source_peer_id or "local"
+        peer_id = self._peer_key()
         # workspace: prepare items not yet prepared (a re-pack prepares again from scratch)
         prior_pack = ctx.get("prepared_pack")
         if prior_pack is not None and prior_pack != req.pack.pack_id:
@@ -622,8 +661,26 @@ class LocalTarget:
             ):
                 p.session_import.discard(db, prepared)
                 raise VerifyFailed("The imported transcript did not match. Nothing was activated.", which="hashes")
-            self._remember(job, new_ids=[s.new_id for s in import_plan.segments], cwd=import_plan.cwd)
-        prepared = dataclasses.replace(prepared, dests=tuple((a, b, DestMode(c)) for a, b, c in dests))
+            tip = import_plan.segments[-1] if import_plan.segments else None
+            session = capsule_doc.get("session") if isinstance(capsule_doc.get("session"), dict) else {}
+            self._remember(
+                job,
+                new_ids=[s.new_id for s in import_plan.segments],
+                cwd=import_plan.cwd,
+                model_change=import_plan.model_change,
+                tip_model=tip.model if tip is not None else None,
+                tip_model_config=(tip.model_config if tip is not None else None) or {},
+                source_session={
+                    "root_id": str(session.get("root_id") or ""),
+                    "tip_id": str(session.get("tip_id") or ""),
+                },
+            )
+        placed, skipped = self._hermes_placement(hermes_files, items, prepared.tip_id)
+        prepared = dataclasses.replace(
+            prepared,
+            dests=tuple((a, b, DestMode(c)) for a, b, c in dests),
+            warnings=tuple(dict.fromkeys((*prepared.warnings, *skipped))),
+        )
         path_map = [
             PathMapEntry(
                 source=items[i].source_path,
@@ -641,6 +698,7 @@ class LocalTarget:
             job,
             prepared_pack=req.pack.pack_id,
             hermes_files=hermes_files,
+            hermes_place=placed,
             dests=dests,
             path_map=[to_wire(e) for e in path_map],
             note=note_text,
@@ -651,25 +709,49 @@ class LocalTarget:
         self._go(job, "preparing", "prepared", prepared=prepared)
         return prepared
 
+    def _hermes_placement(self, pack_items: list, items: dict, tip_id: str) -> tuple[list[dict], list[str]]:
+        """Target paths of the received session files from kind + basename only (contract X17, hardening #7): the
+        kind is the plan item's ``hermes_kind`` (the pack item's must agree), the name the basename of ``rel``.
+        A file of unknown or contradicting kind, or with a name the policy refuses, is not placed — never guessed
+        — and named in the warnings."""
+        placed: list[dict] = []
+        skipped: list[str] = []
+        for pack_item in pack_items:
+            item = items.get(pack_item.get("item_id"))
+            plan_kind = item.hermes_kind if item is not None else None
+            pack_kind = pack_item.get("hermes_kind")
+            kind = plan_kind or pack_kind
+            name = str(pack_item.get("rel") or "").replace("\\", "/").rsplit("/", 1)[-1]
+            if kind not in HERMES_FILE_KINDS or (plan_kind and pack_kind and plan_kind != pack_kind):
+                skipped.append(f"session file {name or '?'} not placed: unknown kind")
+                continue
+            try:
+                (m,) = self.store.manifests([pack_item["object"]])
+                dest = self.ports.hermes_files.target_path(kind, name, m.sha256, self.hermes, tip_id)
+            except (HandoverError, KeyError, ValueError):
+                skipped.append(f"session file {name or '?'} not placed: refused name or missing object")
+                continue
+            placed.append({"pack_item": {**pack_item, "hermes_kind": kind}, "target": str(dest)})
+        return placed, skipped
+
     def _compose_note(
         self, job, req: PrepareRequest, final: FinalPlan, prepared: PreparedInfo, path_map, *, delta_message: bool
     ) -> tuple[str, str]:
+        """The handover note and report (W082): ``note_parts`` of the conductor, the instruction files listed by THIS
+        host (``plan.instruction_files``: new or different at the destination, read here — a counterpart's list is
+        never taken over, SEC 4.3), the model change the import actually made (B ``plan_import``)."""
         p = self.ports
+        ctx = self._ctx(job.job_id)
         sf, tf = req.source_facts, self._facts(job)[1]
         items = [(i, d) for i in final.plan.items for d in final.decisions if d.item_id == i.item_id]
         reports = private_dir(self.data_dir / "reports")
         report_path = reports / f"{job.job_id}.md"
-        origin = "verified peer" if self.peer_verified else "unverified bundle"
-        if job.mode in (Mode.PULL, Mode.IMPORT) and self.source_peer_id is None and not self.peer_verified:
-            origin = "unverified bundle" if job.mode is Mode.IMPORT else "local"
+        kind = "bundle" if job.mode is Mode.IMPORT else "peer"
+        origin = f"{'verified' if self.peer_verified else 'unverified'} {kind}"
         note_parts = dict(req.note_parts or {})
-        listing = getattr(p.plan, "instruction_files", None)
-        if callable(listing) and not note_parts.get("instruction_files"):
-            dests = {d.item_id: d.dest for d in final.decisions}
-            try:  # new or changed here, read on this host (SEC 4.3)
-                note_parts["instruction_files"] = list(listing(final.plan.items, lambda iid: dests.get(iid)))
-            except HandoverError:
-                pass
+        dests = {d.item_id: d.dest for d in final.decisions}
+        note_parts["instruction_files"] = list(p.plan.instruction_files(final.plan.items, dests.get))
+        model_change = ctx.get("model_change", final.model_change)
         note_text, report_md = p.note.compose(
             job_id=job.job_id,
             source=sf,
@@ -678,7 +760,7 @@ class LocalTarget:
             path_map=path_map,
             items=items,
             note_parts=note_parts,
-            model_change=final.model_change,
+            model_change=model_change,
             pack_time=note_parts.get("pack_time") or 0,
             delta_message=delta_message,
             report_path=str(report_path),
@@ -797,20 +879,11 @@ class LocalTarget:
 
             return run
 
-        for name, fwd, inv in txn.commit_steps():
-            steps.append((name if name.startswith("c1:") else f"c1:{name}", snap_after(fwd), snap_after(inv)))
+        for name, fwd, inv in txn.commit_steps():  # E names them ``c1:<item_id>`` (W021: used as they are)
+            steps.append((name, snap_after(fwd), snap_after(inv)))
         fwd2, inv2 = self._cwd_step(ctx.get("cwd"))
         steps.append(("c2:cwd", fwd2, inv2))
-        files = []
-        for pack_item in ctx.get("hermes_files") or []:
-            kind = pack_item.get("hermes_kind") or next(
-                (k for k in _HERMES_KINDS if k.split("_")[0] in str(pack_item.get("rel", ""))), "spillover"
-            )
-            (m,) = self.store.manifests([pack_item["object"]])
-            dest = p.hermes_files.target_path(
-                kind, Path(str(pack_item.get("rel", "file"))).name, m.sha256, self.hermes, prepared.tip_id
-            )
-            files.append((pack_item, Path(dest)))
+        files = [(e["pack_item"], Path(e["target"])) for e in ctx.get("hermes_place") or []]  # placed in prepare
         f3, i3 = txn.place_hermes_files(files)
         steps.append(("c3:hermes_files", snap_after(f3), snap_after(i3)))
         capsule = from_wire(CapsuleInfo, ctx["capsule"]) if ctx.get("capsule") else None
@@ -945,31 +1018,19 @@ class LocalTarget:
         raise err
 
     def _finalize(self, job: JobContext) -> dict:
-        """c7: the ``committed`` row, workspace-map ``in`` rows and the ``CommitAck`` (point of no return)."""
+        """c7: workspace-map ``in`` rows, the ``committed`` row with the ``CommitAck`` (point of no return), the ctx
+        record. The map rows are written first (idempotent upserts), so a crash right after ``committed`` loses
+        none; ``model``/``offline_capable`` describe the route the import wrote (B ``plan_import``,
+        ``offline_capable``, contract X04)."""
         ctx = self._ctx(job.job_id)
         prepared = from_wire(PreparedInfo, ctx["prepared"])
         final = self._final(job)
         items = {i.item_id: i for i in final.plan.items}
-        sf, tf = self._facts(job)
-        peer_id = self.source_peer_id or "local"
-        model = self.host.model
-        if final.model_change is None and sf is not None:
-            model = sf.host.model
-        ack = CommitAck(
-            session_id=prepared.tip_id,
-            root_id=prepared.root_id,
-            title=prepared.title,
-            dests=prepared.dests,
-            path_map=tuple(from_wire(PathMapEntry, e) for e in ctx.get("path_map") or []),
-            model=model,
-            offline_capable=bool(tf.offline_capable) if tf is not None else False,
-            warnings=tuple(prepared.warnings),
-            committed_at=self._clock(),
-        )
-        self._go(job, "committing", "committed", ack=ack)
+        sf, _tf = self._facts(job)
+        peer_id = self._peer_key()
         try:
             txn = self._txn(job, restore=True)
-            states = txn.map_states() if callable(getattr(txn, "map_states", None)) else {}
+            states = txn.map_states()
             dests = [(i, d, m) for i, d, m in txn.dests()] or list(prepared.dests)
         except HandoverError:
             states, dests = {}, list(prepared.dests)
@@ -988,31 +1049,43 @@ class LocalTarget:
                     last_job_id=job.job_id,
                 )
             )
-        try:
-            rec = self.ports.ctxrecords
-            if rec.server_for(self.config, self.settings) is not None:
-                capsule_raw = ctx.get("capsule") or {}
-                rec.enqueue(
-                    self.ledger,
-                    "arrival",
-                    {
-                        "job_id": job.job_id,
-                        "source_root": (sf.instance_name if sf else ""),
-                        "target_root": ack.root_id,
-                        "source_session": capsule_raw.get("capsule_id", ""),
-                        "target_session": ack.session_id,
-                        "peer": self.peer_name or (job.peer.name if job.peer else None),
-                        "local_name": self.instance_name,
-                        "title": ack.title,
-                        "at": ack.committed_at,
-                        "path_map": [to_wire(e) for e in ack.path_map],
-                        "model_change": final.model_change,
-                        "plugin_version": self.host.plugin_version,
-                    },
-                    redact=self.redact,
-                )
-        except HandoverError:
-            pass
+        model_change = ctx.get("model_change", final.model_change)
+        ack = CommitAck(
+            session_id=prepared.tip_id,
+            root_id=prepared.root_id,
+            title=prepared.title,
+            dests=tuple((i, d, DestMode(m)) for i, d, m in dests),
+            path_map=tuple(from_wire(PathMapEntry, e) for e in ctx.get("path_map") or []),
+            model=ctx.get("tip_model"),
+            offline_capable=bool(
+                self.ports.session_import.offline_capable(dict(ctx.get("tip_model_config") or {}), self.config)
+            ),
+            warnings=tuple(prepared.warnings),
+            committed_at=self._clock(),
+        )
+        self._go(job, "committing", "committed", ack=ack)
+        rec = self.ports.ctxrecords
+        if rec.server_for(self.config, self.settings) is not None:  # ctx records only with ctx_checkpoint (X22)
+            source = ctx.get("source_session") or {}
+            rec.enqueue(
+                self.ledger,
+                "arrival",
+                {
+                    "job_id": job.job_id,
+                    "source_root": source.get("root_id", ""),
+                    "target_root": ack.root_id,
+                    "source_session": source.get("tip_id", ""),
+                    "target_session": ack.session_id,
+                    "peer": self.peer_name or (job.peer.name if job.peer else None) or (sf and sf.instance_name),
+                    "local_name": self.instance_name,
+                    "title": ack.title,
+                    "at": ack.committed_at,
+                    "path_map": [to_wire(e) for e in ack.path_map],
+                    "model_change": model_change,
+                    "plugin_version": self.host.plugin_version,
+                },
+                redact=self.redact,
+            )
         self._cleanup(job, discard_session=False)
         return to_wire(ack)
 
@@ -1039,35 +1112,37 @@ class LocalTarget:
 
     # -- continuation, abort, status -------------------------------------------------------------------------------
     def continue_session(self, job: JobContext, prompt: str) -> ContinueResult:
-        """Start the continuation after the handover (DESIGN §11.5): remote requests need
-        ``allow_remote_continue`` here and a signed, non-revoked peer; approvals-off refusals come from the
-        ``Spawner`` (R22)."""
+        """Start the continuation after the handover (DESIGN §11.5, contract X21). The ``Spawner`` alone decides
+        whether a turn may start (``verified`` = signature-checked peer or bundle; a remote request needs
+        ``allow_remote_continue``; approvals off ⇒ refused, R22); the child runs in the cwd of the arrived session
+        row (R11)."""
         row = self._row(job)
         ctx = self._ctx(job.job_id)
         if row["state"] != "committed" or not ctx.get("ack"):
             raise InvalidState("continue after the commit only", reason="state", state=row["state"])
         if ctx.get("continue") is not None:
             return from_wire(ContinueResult, ctx["continue"])
-        remote = self._remote_driven(job)
-        if remote and not bool(self.settings.get("allow_remote_continue", False)):
-            raise ContinueRefused(
-                "Handed over, but this gateway does not allow remote continuation (allow_remote_continue).",
-                reason="allow_remote_continue",
-            )
-        if not self.peer_verified:
-            raise ContinueRefused("Unverified handovers never start a continuation.", reason="unverified")
         ack = from_wire(CommitAck, ctx["ack"])
-        requested_by = (self.peer_name or (job.peer.name if job.peer else None)) if remote else None
+        requested_by = (self.peer_name or (job.peer.name if job.peer else None)) if self._remote_driven(job) else None
         res = self.continuation.spawn(
             ack.session_id,
             str(prompt)[:2000],
             job.job_id,
             requested_by=requested_by,
             verified=self.peer_verified,
-            cwd=self._ctx(job.job_id).get("cwd"),
+            cwd=self._session_cwd(ack.session_id, ctx.get("cwd")),
         )
         self._remember(job, **{"continue": res})
         return res
+
+    def _session_cwd(self, session_id: str, fallback: str | None) -> str | None:
+        """The ``cwd`` of the arrived session's row (R11: from the row, never from ``ctx.session_cwd()``)."""
+        try:
+            row = self.db_factory().get_session(session_id) or {}
+        except Exception:  # a row that cannot be read leaves the cwd the import wrote into it
+            row = {}
+        cwd = row.get("cwd") if isinstance(row, dict) else None
+        return cwd if isinstance(cwd, str) and cwd else fallback
 
     def abort(self, job: JobContext, reason: str) -> None:
         """Abort and discard staged state (idempotent); ``committing``/``committed`` refuse [SK H5]."""

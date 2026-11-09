@@ -249,7 +249,9 @@ class FakeParticipant:
 
 
 class FakeRegistry:
-    """``ParticipantRegistry`` double: jobs keyed by (peer, job, role), role↔right binding, epoch fencing."""
+    """``ParticipantRegistry`` double: jobs keyed by (peer, job, role), role↔right binding, epoch fencing, and
+    routes #8–#10 the way the registry serves them (contract X18). No job caps — those are the real registry's
+    (``test_server.test_registry_owns_job_caps_and_routes``)."""
 
     def __init__(self, ledger, *, eng=None, store=None) -> None:
         from ctx_handover.tests.fakes.blocks_fake import MemoryBlockStore
@@ -264,6 +266,7 @@ class FakeRegistry:
         self.touched: list[str] = []
         self.raise_on: dict[str, BaseException] = {}
         self.contexts: list = []
+        self.calls: list[tuple[str, str]] = []
 
     def _peer_id(self, auth) -> str | None:
         return auth.peer.peer_id if auth.peer is not None else None
@@ -294,7 +297,7 @@ class FakeRegistry:
         self._job(auth, job_id, role)
         return self.source if role == self.e.model.Role.SOURCE else self.target
 
-    def job_context(self, auth, job_id: str, role):
+    def context(self, auth, job_id: str, role):
         job = self._job(auth, job_id, role)
         ctx = self.e.contracts.JobContext(
             job_id=job_id,
@@ -308,6 +311,37 @@ class FakeRegistry:
         )
         self.contexts.append(ctx)
         return ctx
+
+    def _find(self, auth, job_id: str):
+        for role in (self.e.model.Role.SOURCE, self.e.model.Role.TARGET):
+            if (self._peer_id(auth), job_id, role) in self.jobs:
+                return role
+        raise self.e.errors.NotFound("job not found")
+
+    def status(self, auth, job_id: str, body: dict):
+        self.calls.append(("status", job_id))
+        role = self._find(auth, job_id)
+        api = self.get(auth, job_id, role)
+        return api.status(self.context(auth, job_id, role))
+
+    def heartbeat(self, auth, job_id: str, body: dict) -> dict:
+        self.calls.append(("heartbeat", job_id))
+        role = self._find(auth, job_id)
+        api, job = self.get(auth, job_id, role), self.context(auth, job_id, role)
+        if role == self.e.model.Role.SOURCE:
+            api.heartbeat(job)
+        return {"state": api.status(job).state}
+
+    def cancel(self, auth, job_id: str, body: dict) -> dict:
+        self.calls.append(("cancel", job_id))
+        role = self._find(auth, job_id)
+        api, job = self.get(auth, job_id, role), self.context(auth, job_id, role)
+        reason = "cancelled: " + str(body.get("reason") or "conductor")[:200]
+        if role == self.e.model.Role.SOURCE:
+            api.start_release(job, reason)
+        else:
+            api.abort(job, reason)
+        return {"state": api.status(job).state}
 
     def list_sessions(self, auth, body: dict) -> dict:
         return {"sessions": [{"id": "s1", "title": "x"}], "limit": body.get("limit")}

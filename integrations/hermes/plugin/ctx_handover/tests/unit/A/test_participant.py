@@ -20,6 +20,15 @@ from ctx_handover.engine.model import (
 from ctx_handover.engine.participant import ParticipantRegistry, participant_options
 
 
+def _job_id(tag: str) -> str:
+    """A ULID-shaped job id for a short test tag (job ids are ULIDs everywhere, contract K-2)."""
+    return ("0" + tag).ljust(26, "0")
+
+
+J_J1, J_JS, J_JT, J_J9 = _job_id("J1"), _job_id("JS"), _job_id("JT"), _job_id("J9")
+J_A1, J_A2, J_A3, J_B1, J_B2, J_C1 = (_job_id(t) for t in ("A1", "A2", "A3", "B1", "B2", "C1"))
+
+
 class RecordingAPI:
     def __init__(self, role, peer, log):
         self.role, self.peer, self.log = role, peer, log
@@ -73,7 +82,7 @@ def env(tmp_path, clock):
     led.close()
 
 
-def _open(reg, auth, job_id="J1", role="target", mode="push", epoch=1, **extra):
+def _open(reg, auth, job_id=J_J1, role="target", mode="push", epoch=1, **extra):
     body = {
         "job_id": job_id,
         "epoch": epoch,
@@ -94,16 +103,16 @@ def test_job_role_requires_matching_right(env):
     push_only = _peer("P1", (Right.PUSH,))
     pull_only = _peer("P2", (Right.PULL,))
     with pytest.raises(Forbidden):
-        _open(reg, _auth(push_only), job_id="JS", role="source", mode="pull")
+        _open(reg, _auth(push_only), job_id=J_JS, role="source", mode="pull")
     with pytest.raises(Forbidden):
-        _open(reg, _auth(pull_only), job_id="JT", role="target", mode="push")
-    assert led.job("JS", Role.SOURCE) is None and led.job("JT", Role.TARGET) is None
-    assert _open(reg, _auth(push_only), job_id="JT")["state"] == "open"
-    assert _open(reg, _auth(pull_only), job_id="JS", role="source", mode="pull")["job_id"] == "JS"
+        _open(reg, _auth(pull_only), job_id=J_JT, role="target", mode="push")
+    assert led.job(J_JS, Role.SOURCE) is None and led.job(J_JT, Role.TARGET) is None
+    assert _open(reg, _auth(push_only), job_id=J_JT)["state"] == "open"
+    assert _open(reg, _auth(pull_only), job_id=J_JS, role="source", mode="pull")["job_id"] == J_JS
     with pytest.raises(NotFound):
-        reg.get(_auth(push_only), "JT", Role.SOURCE)  # a target job is no source job
+        reg.get(_auth(push_only), J_JT, Role.SOURCE)  # a target job is no source job
     with pytest.raises(Forbidden):
-        reg.get(_auth(push_only, rights=()), "JT", Role.TARGET)  # right removed since
+        reg.get(_auth(push_only, rights=()), J_JT, Role.TARGET)  # right removed since
 
 
 def test_participant_job_bound_to_peer(env):
@@ -113,14 +122,14 @@ def test_participant_job_bound_to_peer(env):
     led, reg, _log = env
     p1, p2 = _peer("P1"), _peer("P2")
     _open(reg, _auth(p1))
-    assert reg.get(_auth(p1), "J1", Role.TARGET).peer.peer_id == "P1"
+    assert reg.get(_auth(p1), J_J1, Role.TARGET).peer.peer_id == "P1"
     with pytest.raises(NotFound):
-        reg.get(_auth(p2), "J1", Role.TARGET)
+        reg.get(_auth(p2), J_J1, Role.TARGET)
     with pytest.raises(NotFound):
-        reg.context(_auth(p2), "J1", Role.TARGET)
+        reg.context(_auth(p2), J_J1, Role.TARGET)
     with pytest.raises(JobConflict):
         _open(reg, _auth(p2))
-    assert led.job("J1", Role.TARGET)["peer_id"] == "P1"
+    assert led.job(J_J1, Role.TARGET)["peer_id"] == "P1"
 
 
 def test_participant_rejects_stale_epoch(env):
@@ -130,11 +139,11 @@ def test_participant_rejects_stale_epoch(env):
     _led, reg, _log = env
     p = _peer("P1")
     _open(reg, _auth(p, epoch=2), epoch=2)
-    reg.get(_auth(p, epoch=3), "J1", Role.TARGET)
+    reg.get(_auth(p, epoch=3), J_J1, Role.TARGET)
     with pytest.raises(InvalidState) as exc:
-        reg.get(_auth(p, epoch=2), "J1", Role.TARGET)
+        reg.get(_auth(p, epoch=2), J_J1, Role.TARGET)
     assert exc.value.details["reason"] == "stale_epoch"
-    assert reg.context(_auth(p, epoch=3), "J1", Role.TARGET).epoch == 3
+    assert reg.context(_auth(p, epoch=3), J_J1, Role.TARGET).epoch == 3
 
 
 def test_participant_open_idempotent_and_conductor_epoch(env):
@@ -143,7 +152,7 @@ def test_participant_open_idempotent_and_conductor_epoch(env):
     a = _open(reg, _auth(p))
     b = _open(reg, _auth(p))
     assert a == b
-    assert [x for x in log if x[0] == "open_job"] == [("open_job", Role.TARGET, "J1", 1)] * 2
+    assert [x for x in log if x[0] == "open_job"] == [("open_job", Role.TARGET, J_J1, 1)] * 2
     with pytest.raises(JobConflict):
         _open(reg, _auth(p), options={"dest": "/elsewhere"})
 
@@ -164,7 +173,7 @@ def test_participant_options_remote_cannot_widen():
     }
     o = participant_options(local, remote)
     assert o.export_roots == () and o.allow_roots == ("~/hermes-handover",)
-    assert o.hints.include_secret == () and o.hints.include == ("/etc",) and o.hints.exclude == ("*.log",)
+    assert o.hints.include_secret == () and o.hints.include == () and o.hints.exclude == ("*.log",)
     assert o.wait is True and o.wait_timeout_s == 600 and o.max_total_bytes == local.max_total_bytes
     assert o.dest == "~/x" and len(o.continue_prompt) == 2000 and o.refine == "auto"
     assert participant_options(local, {"refine": "off"}).refine == "off"
@@ -173,14 +182,14 @@ def test_participant_options_remote_cannot_widen():
 def test_participant_concurrent_job_caps(env):
     _led, reg, _log = env
     p1, p2, p3 = _peer("P1"), _peer("P2"), _peer("P3")
-    _open(reg, _auth(p1), job_id="A1")
-    _open(reg, _auth(p1), job_id="A2")
+    _open(reg, _auth(p1), job_id=J_A1)
+    _open(reg, _auth(p1), job_id=J_A2)
     with pytest.raises(RateLimited):
-        _open(reg, _auth(p1), job_id="A3")
-    _open(reg, _auth(p2), job_id="B1")
-    _open(reg, _auth(p2), job_id="B2")
+        _open(reg, _auth(p1), job_id=J_A3)
+    _open(reg, _auth(p2), job_id=J_B1)
+    _open(reg, _auth(p2), job_id=J_B2)
     with pytest.raises(RateLimited):
-        _open(reg, _auth(p3), job_id="C1")
+        _open(reg, _auth(p3), job_id=J_C1)
 
 
 def test_offer_claim_only_by_target_peer(env, clock):
@@ -193,10 +202,10 @@ def test_offer_claim_only_by_target_peer(env, clock):
     assert [o["offer_id"] for o in reg.offers(_auth(p1))["offers"]] == ["O1"]
     assert reg.offers(_auth(p2))["offers"] == []
     with pytest.raises(NotFound):
-        reg.claim(_auth(p2), "O1", "J9")
+        reg.claim(_auth(p2), "O1", J_J9)
     with pytest.raises(Forbidden):
-        reg.claim(_auth(_peer("P1", (Right.PUSH,))), "O1", "J1")
-    got = reg.claim(_auth(p1), "O1", "J1")
+        reg.claim(_auth(_peer("P1", (Right.PUSH,))), "O1", J_J1)
+    got = reg.claim(_auth(p1), "O1", J_J1)
     assert got["session_ref"]["id"] == "sess-1" and got["refinement"] == {"notes": "r"}
     assert reg.offers(_auth(p1))["offers"] == []
 
@@ -265,22 +274,22 @@ def test_registry_abort_jobs_after_revoke(env):
 def test_registry_heartbeat_cancel_status(env):
     led, reg, log = env
     p = _peer("P1")
-    _open(reg, _auth(p), job_id="JS", role="source", mode="pull")
-    out = reg.heartbeat(_auth(p), "JS", {"epoch": 1, "conductor_state": "packing"})
-    assert ("heartbeat", "JS") in log and out["state"] == "open"
-    _open(reg, _auth(p), job_id="JT", role="target", mode="push")
-    reg.cancel(_auth(p), "JT", {"epoch": 1, "reason": "user"})
-    assert ("abort", "JT", "cancelled: user") in log
+    _open(reg, _auth(p), job_id=J_JS, role="source", mode="pull")
+    out = reg.heartbeat(_auth(p), J_JS, {"epoch": 1, "conductor_state": "packing"})
+    assert ("heartbeat", J_JS) in log and out["state"] == "open"
+    _open(reg, _auth(p), job_id=J_JT, role="target", mode="push")
+    reg.cancel(_auth(p), J_JT, {"epoch": 1, "reason": "user"})
+    assert ("abort", J_JT, "cancelled: user") in log
     led.arrival_put(
         session_ids=["n1"],
         root_id="n1",
-        job_id="JT",
+        job_id=J_JT,
         peer="p1",
         note="N",
         report_path="",
         path_map=[],
         continue_prompt=None,
     )
-    st = reg.status(_auth(p), "JT", {"epoch": 1, "note": "source_reclaimed"})
+    st = reg.status(_auth(p), J_JT, {"epoch": 1, "note": "source_reclaimed"})
     assert st.state == "open"
     assert led.arrival_for("n1")["source_reclaimed_at"] is not None

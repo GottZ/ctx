@@ -8,9 +8,11 @@ import threading
 import time
 from collections import namedtuple
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from ctx_handover.engine import continuation, plan, session_import
 from ctx_handover.engine.contracts import JobContext
 from ctx_handover.engine.errors import ContinueRefused, InsufficientStorage, InvalidState
 from ctx_handover.engine.ledger import Ledger
@@ -37,9 +39,59 @@ from ctx_handover.engine.ops import OpRunner
 from ctx_handover.engine.policy import PolicyConfig
 from ctx_handover.tests.fakes.apis_fake import RecordingReporter, SimulatedCrash, make_facts
 from ctx_handover.tests.unit.A import standins
-from ctx_handover.tests.unit.A.standins import MemStore, Spawner, WorkspaceTxn, target_ports, tree_pack
+from ctx_handover.tests.unit.A.standins import MemStore, Spawner, target_ports, tree_pack
+from ctx_handover.tests.unit.A.standins import WorkspaceTxn as StandInTxn
 
 Usage = namedtuple("Usage", "total used free")
+
+
+class WorkspaceTxn(StandInTxn):
+    """The stand-in transaction with E's step names ``c1:<item_id>`` (contract X11, W021: the target uses E's
+    names as they are)."""
+
+    def commit_steps(self):
+        return [(f"c1:{name}", fwd, inv) for name, fwd, inv in super().commit_steps()]
+
+
+def layer2_ports():
+    """The stand-in ports with the B/D functions the target calls by contract (X02, X04) taken from the real
+    modules; the stand-in ``plan_import`` gets the ``model``/``model_config`` fields of a real ``SegmentPlan``."""
+    ports = target_ports(txn_cls=WorkspaceTxn)
+    stand_in_import = ports.session_import.plan_import
+
+    def plan_import(*args, **kwargs):
+        res = stand_in_import(*args, **kwargs)
+        res.segments = tuple(
+            session_import.SegmentPlan(s.old_id, s.new_id, None, i == len(res.segments) - 1, "T", s.path)
+            for i, s in enumerate(res.segments)
+        )
+        return res
+
+    ports.session_import.plan_import = plan_import
+    ports.session_import.map_model = session_import.map_model
+    ports.session_import.offline_capable = session_import.offline_capable
+    ports.plan = SimpleNamespace(
+        plan_id=plan.plan_id, final_doc=plan.final_doc, instruction_files=plan.instruction_files
+    )
+    return ports
+
+
+class FakeProc:
+    pid = 4321
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class Launches:
+    """``popen`` of the real ``continuation.Spawner``: records argv and cwd, starts nothing."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list, str | None]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), kwargs.get("cwd")))
+        return FakeProc()
 
 
 class Env:
@@ -113,7 +165,7 @@ class Env:
             source_peer_id="PEER1",
             peer_verified=self.verified,
             policy=self.policy,
-            ports=target_ports(),
+            ports=layer2_ports(),
             clock=self.clock,
             data_dir=self.data,
             disk_usage=lambda path: Usage(10**13, 0, self.free),
@@ -392,18 +444,39 @@ def test_target_abort_refused_while_committing(env):
 
 
 def test_continue_rules(tmp_path, clock, session_db, make_session, user_home, hermes_home, fake_host):
-    """Remote continuation needs ``allow_remote_continue`` and a verified peer (R10, R22)."""
+    """Remote continuation (contract X21): the real ``Spawner`` decides — off without ``allow_remote_continue``,
+    refused for an unverified peer — and the child runs in the cwd of the arrived session row (R10, R11, R22)."""
     e = Env(tmp_path, clock, session_db, make_session, user_home, hermes_home, mode=Mode.PUSH)
+    allow = {"on": False}
+    launches = Launches()
+    e.target.continuation = continuation.Spawner(
+        log_dir=tmp_path / "logs",
+        profile=None,
+        approvals_off=lambda: False,
+        allow_remote=lambda: allow["on"],
+        which=lambda name: "/opt/hermes/bin/hermes",
+        popen=launches,
+        environ={},
+    )
     prepared = e.prepared()
     assert e.wait(e.target.start_commit(e.job)).state is OpState.DONE
     with pytest.raises(ContinueRefused) as exc:
         e.target.continue_session(e.job, "go on")
-    assert exc.value.details["reason"] == "allow_remote_continue"
-    e.target.settings["allow_remote_continue"] = True
+    assert exc.value.details["reason"] == "not_allowed"
+    allow["on"] = True
+    e.target.peer_verified = False
+    with pytest.raises(ContinueRefused) as exc:
+        e.target.continue_session(e.job, "go on")
+    assert exc.value.details["reason"] == "unverified"
+    e.target.peer_verified = True
     res = e.target.continue_session(e.job, "go on")
-    assert res.started and e.spawner.spawned == [(prepared.tip_id, "go on", e.job.job_id, "server")]
+    row_cwd = e.db.get_session(prepared.tip_id)["cwd"]
+    assert res.started and len(launches.calls) == 1
+    argv, cwd = launches.calls[0]
+    assert argv[-3:-1] == ["--resume", prepared.tip_id] and "requested by server" in argv[-1]
+    assert cwd == row_cwd
     assert e.target.continue_session(e.job, "again").pid == res.pid  # recorded once
-    assert len(e.spawner.spawned) == 1
+    assert len(launches.calls) == 1
     e.ledger.close()
 
 

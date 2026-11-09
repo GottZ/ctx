@@ -9,8 +9,10 @@ This is the only place where the engine is wired to Hermes (through ``hostcompat
 * ``listener_server`` — the dashboard routes' ``server.Server`` with its ``ParticipantRegistry``.
 
 Everything is lazy and per profile: nothing runs at import or in ``register()`` (R12, BX L2). The first real use
-in a process (``ensure_started``) opens the ledger, starts the veto index and runs the janitor once; the janitor
-runs again before every new job and on ``status``.
+in a process (``ensure_started``) returns the profile's one ``Runtime`` (X19): one ``Ledger``, one ``VetoIndex``
+(sharing that ledger), one ``BlockStore``, one ``JobRunner``; it runs the janitor once. The janitor runs again
+before every new job and on ``status``; its block-store GC (DESIGN §5.1, R28) at most every ``GC_INTERVAL_S``
+across all processes of the profile.
 
 ``JobRunner`` owns conductor jobs of this process: ``plan_sync`` runs CREATED … NEGOTIATED in the caller (the
 slash handler can ask the user), ``continue_async`` hands the job to a worker thread that runs in a copy of the
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import logging
 import os
 import secrets
@@ -66,16 +69,30 @@ from .model import (
     SessionRef,
 )
 from .ops import OpRunner
-from .participant import ParticipantRegistry
+from .participant import MAX_JOBS, MAX_JOBS_PER_PEER, ParticipantRegistry
 from .policy import PolicyConfig
 
 PLUGIN_ID = "ctx_handover"
 log = logging.getLogger("ctx_handover.jobs")
 OFFER_TTL_S = 2 * 3600
 MAINTENANCE_S = 10.0
+GC_INTERVAL_S = 3600.0
+"""The janitor's block-store GC runs at most this often per profile (claimed in the ledger across processes)."""
+GC_META_KEY = "janitor_gc_at"
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_BUSY, EXIT_AUTH, EXIT_PENDING = 0, 1, 2, 3, 4, 5
 _STOP = frozenset({"done", "aborted", "suspended"})
+_UNLOCKED = tuple(
+    str(s)
+    for s in (
+        ConductorState.CREATED,
+        ConductorState.HELLO,
+        ConductorState.FACTS,
+        ConductorState.PLANNING,
+        ConductorState.NEGOTIATED,
+    )
+)
+"""Conductor states before LOCKING: nothing is locked anywhere yet."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -83,13 +100,50 @@ _STOP = frozenset({"done", "aborted", "suspended"})
 # ---------------------------------------------------------------------------------------------------------
 
 
+_FLAGS = ("allow_remote_continue", "allow_agent_start", "refine_auto_include", "include_hermes_files")
+"""Boolean settings; a quoted word (``"off"``, ``"false"``) must not read as True."""
+_WORDS = {
+    "inbound": ("on", "off"),
+    "refine": (None, "off"),
+    "extra_paths": (None, "off"),
+    "ctx_persist": (None, "off"),
+    "accept_offers": (None, "off"),
+    "model_mapping": (None, None),
+}
+"""Word settings a bare YAML ``on``/``off`` turns into a boolean: ``(word for True, word for False)``; ``None`` drops
+the value (its default applies)."""
+_TRUE_WORDS = frozenset({"true", "on", "yes", "1"})
+_FALSE_WORDS = frozenset({"false", "off", "no", "0", ""})
+
+
 def plugin_settings(config: dict) -> dict:
-    """``plugins.entries.ctx_handover.settings`` of a loaded config (empty when absent)."""
+    """``plugins.entries.ctx_handover.settings`` of a loaded config (empty when absent), normalised: a bare YAML
+    ``off``/``on`` arrives as a boolean and is turned back into its word (``refine: off`` stays off), boolean
+    settings given as words are booleans, unknown words fall back to the default."""
     try:
         value = config["plugins"]["entries"][PLUGIN_ID]["settings"]
     except (KeyError, TypeError):
         return {}
-    return dict(value) if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    out = dict(value)
+    for key, (on_word, off_word) in _WORDS.items():
+        if isinstance(out.get(key), bool):
+            word = on_word if out[key] else off_word
+            if word is None:
+                del out[key]
+            else:
+                out[key] = word
+    for key in _FLAGS:
+        if key in out and not isinstance(out[key], bool):
+            text = str(out[key]).strip().lower()
+            if text in _TRUE_WORDS:
+                out[key] = True
+            elif text in _FALSE_WORDS or out[key] is None:
+                out[key] = False
+            else:
+                del out[key]
+    return out
 
 
 def _num(settings: dict, key: str, default: float) -> float:
@@ -97,6 +151,12 @@ def _num(settings: dict, key: str, default: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
     return value
+
+
+def _count(settings: dict, key: str, default: int) -> int:
+    """A positive integer setting (job caps); anything else is the default."""
+    value = _num(settings, key, default)
+    return int(value) if value >= 1 else default
 
 
 def local_options(settings: dict) -> Options:
@@ -142,8 +202,17 @@ def local_options(settings: dict) -> Options:
 # ---------------------------------------------------------------------------------------------------------
 
 
-@dataclass
-class _Profile:
+@dataclass(eq=False)
+class Runtime:
+    """The engine runtime of one profile in one process (X19, W109): exactly one ``ledger``, ``veto``
+    (``lock.VetoIndex`` over that same ledger), ``store`` (``blocks.BlockStore``) and ``runner`` (``JobRunner``) —
+    the surfaces, hooks, routes and the CLI use these and build none of their own. ``janitor()`` runs DESIGN §3.6 for
+    this profile. Created lazily by ``ensure_started``/``runner_for``/``listener_server``, never by ``register()``.
+
+    ``identity`` is cached; it is reloaded when the ledger's identity fingerprint changes (``/handover pair`` or
+    ``identity rotate`` in another process of the profile). ``ctx`` is the latest plugin context that reached
+    the runtime (for the ctx-records outbox)."""
+
     data_dir: Path
     ledger: Ledger
     ops: OpRunner
@@ -151,20 +220,40 @@ class _Profile:
     git: object | None = None
     identity: object | None = None
     identity_error: str | None = None
+    identity_fp: str | None = None
     veto: object | None = None
     registry: ParticipantRegistry | None = None
     runner: JobRunner | None = None
+    server: object | None = None
+    server_identity: object | None = None
+    ctx: object | None = None
     janitor_ran: bool = False
     maintenance: threading.Thread | None = None
+    stopping: threading.Event = field(default_factory=threading.Event)
     db_factories: dict = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
+    def janitor(self, *, background: bool = True) -> dict:
+        """DESIGN §3.6 for this profile (expired codes, journal compaction, stale jobs, outbox) plus the block-store
+        GC of DESIGN §5.1/R28 (blocks and manifests of finished and aborted jobs), the latter at most every
+        ``GC_INTERVAL_S``. Never raises for what it cleans up."""
+        return janitor(
+            self.ledger,
+            self.runner,
+            _registry(self),
+            flush_outbox=_flush(self.ctx),
+            background=background,
+            store=_store(self),
+        )
 
-_PROFILES: dict[str, _Profile] = {}
+
+_Profile = Runtime  # older name inside this module
+
+_PROFILES: dict[str, Runtime] = {}
 _PROFILES_LOCK = threading.Lock()
 
 
-def _profile() -> _Profile:
+def _profile() -> Runtime:
     data_dir = private_dir(hostcompat.plugin_dir())
     key = str(data_dir)
     with _PROFILES_LOCK:
@@ -172,26 +261,38 @@ def _profile() -> _Profile:
         if prof is None:
             ledger = Ledger(data_dir / "ledger.sqlite3")
             ops = OpRunner(ledger, hostcompat.run_in_context, lock_dir=data_dir / "locks")
-            prof = _Profile(data_dir=data_dir, ledger=ledger, ops=ops)
+            prof = Runtime(data_dir=data_dir, ledger=ledger, ops=ops)
             _PROFILES[key] = prof
         return prof
 
 
 def _reset_for_tests() -> None:
-    """Drop the per-process caches (tests only)."""
+    """Drop the per-process caches and stop their threads (tests only)."""
     with _PROFILES_LOCK:
         for prof in _PROFILES.values():
+            prof.stopping.set()
+            if prof.veto is not None:
+                with contextlib.suppress(Exception):
+                    prof.veto.stop(timeout=5.0)
+            if prof.runner is not None:
+                prof.runner.join(5.0)
             prof.ops.stop()
             prof.ledger.close()
         _PROFILES.clear()
 
 
-def _store(prof: _Profile):
+def _store(prof: Runtime):
     with prof.lock:
         if prof.store is None:
             from . import blocks
 
-            prof.store = blocks.BlockStore(prof.data_dir, prof.ledger)  # root = plugin data dir (DESIGN §5.1)
+            settings = plugin_settings(hostcompat.load_config())
+            prof.store = blocks.BlockStore(  # root = plugin data dir (DESIGN §5.1); cache limits of §14.4
+                prof.data_dir,
+                prof.ledger,
+                cache_days=float(_num(settings, "block_cache_days", 3)),
+                cache_bytes=int(_num(settings, "block_cache_gb", 5) * 1024**3),
+            )
         return prof.store
 
 
@@ -224,12 +325,17 @@ def _db_factory(prof: _Profile, state_db: Path) -> Callable:
         return factory
 
 
-def _identity(prof: _Profile):
-    """Load (never create) this profile's identity (R16); ``None`` when there is none yet or it is broken."""
-    with prof.lock:
-        if prof.identity is None and prof.identity_error is None:
-            from . import crypto
+def _identity(prof: Runtime):
+    """Load (never create) this profile's identity (R16); ``None`` when there is none yet or it is broken
+    (``IdentityLost`` is logged once and remembered in ``identity_error``, W056). A changed fingerprint in the
+    ledger (paired or rotated by another process of the profile) drops the cached identity and its error."""
+    from . import crypto
 
+    fp = prof.ledger.meta_get(crypto.META_FP)
+    with prof.lock:
+        if fp != prof.identity_fp:
+            prof.identity, prof.identity_error, prof.identity_fp = None, None, fp
+        if prof.identity is None and prof.identity_error is None:
             try:
                 prof.identity = crypto.Identity.load(
                     prof.ledger, read_secret=hostcompat.read_secret, read_env_fresh=hostcompat.read_env_fresh
@@ -238,6 +344,12 @@ def _identity(prof: _Profile):
                 prof.identity_error = exc.code
                 log.warning("ctx_handover identity not usable: %s (run /handover doctor)", exc.code)
         return prof.identity
+
+
+def _peer_verified(peer: Peer | None) -> bool:
+    """X21: a peer whose messages are signature-checked — paired, not revoked, with a stored public key (the
+    listener verifies its requests, ``wire`` its responses). ``None`` (no peer: a bundle, a local job) is not."""
+    return peer is not None and peer.revoked_at is None and bool(peer.pubkey)
 
 
 def _policy(opts: Options, prof: _Profile, hermes, *, include_secret=()) -> PolicyConfig:
@@ -340,7 +452,7 @@ def make_local_apis(
         log_dir=private_dir(prof.data_dir / "logs"),
         profile=host.profile if host.profile not in ("", "default") else None,
         approvals_off=lambda: hostcompat.approvals_off(hostcompat.load_config()),
-        allow_remote=lambda: bool(plugin_settings(hostcompat.load_config()).get("allow_remote_continue")),
+        allow_remote=lambda: plugin_settings(hostcompat.load_config()).get("allow_remote_continue") is True,
     )
     target = LocalTarget(
         ledger=prof.ledger,
@@ -355,7 +467,7 @@ def make_local_apis(
         continuation=spawner,
         redact=hostcompat.redact,
         source_peer_id=peer.peer_id if peer is not None else None,
-        peer_verified=peer is not None,
+        peer_verified=_peer_verified(peer),  # X21; an import sets it from the bundle signature (JobRunner)
         policy=policy,
         ports=target_ports,
         data_dir=prof.data_dir,
@@ -414,6 +526,7 @@ def apis_for(
             ledger=ledger,
             retire=not options.keep_source,  # --keep exports a copy and leaves the source active (O3)
             exporter_name=getattr(local_source, "instance_name", "") or "",
+            negotiate=_bundle_negotiation(Path(bundle_path), options),
             plugin_version=getattr(host, "plugin_version", "") or "",
             hermes_version=getattr(host, "hermes_version", "") or "",
         )
@@ -437,6 +550,19 @@ def apis_for(
     raise BadRequest(f"mode {mode} has no conductor", field="mode")
 
 
+def _bundle_negotiation(bundle_path: Path, options: Options) -> Callable | None:
+    """The planning cluster's export negotiation (W062, X23): ``plan.bundle_negotiate`` bound to the bundle's
+    directory (free-space check before anything is written); ``None`` without it (``BundleTarget`` then decides
+    fresh directories itself)."""
+    from . import plan as planning
+
+    negotiate = getattr(planning, "bundle_negotiate", None)
+    if not callable(negotiate):
+        return None
+    out_dir = bundle_path if options.as_dir else bundle_path.parent
+    return functools.partial(negotiate, out_dir=out_dir)
+
+
 def listener_server():
     """The ``server.Server`` behind ``dashboard/plugin_api.py`` (cached per profile; starts the maintenance
     sweep of remote-driven participants). Without an identity nothing is paired: ``None`` — every route then
@@ -444,20 +570,19 @@ def listener_server():
     in another process of this profile takes effect without a restart."""
     prof = _profile()
     with prof.lock:
-        if getattr(prof, "server", None) is not None:
-            return prof.server  # type: ignore[attr-defined]
-        from . import server
-
         identity = _identity(prof)
         if identity is None:
+            prof.server, prof.server_identity = None, None
             return None
+        if prof.server is not None and prof.server_identity is identity:
+            return prof.server
+        from . import server
+
         registry = _registry(prof)
         settings = server_settings(hostcompat.load_config())
-        auths = [server.OperatorSessionAuth(enabled=False)]
-        if identity is not None:
-            auths.append(server.PeerSignatureAuth(prof.ledger, identity))
+        auths = [server.OperatorSessionAuth(enabled=False), server.PeerSignatureAuth(prof.ledger, identity)]
         srv = server.Server(prof.ledger, identity, registry, settings, auths, redact=hostcompat.redact)
-        prof.server = srv  # type: ignore[attr-defined]
+        prof.server, prof.server_identity = srv, identity  # rebuilt when another process rotates the identity
     _start_maintenance(prof)
     return srv
 
@@ -469,6 +594,8 @@ def server_settings(config: dict) -> dict:
     settings.setdefault("inbound", "auto")
     settings.setdefault("name", host.profile if host.profile not in ("", "default") else _hostname())
     settings.setdefault("max_request_mb", 8)
+    settings["max_jobs_per_peer"] = _count(settings, "max_jobs_per_peer", MAX_JOBS_PER_PEER)
+    settings["max_jobs_total"] = _count(settings, "max_jobs_total", MAX_JOBS)
     settings["hosted"] = bool(hostcompat.features().host_isolated)
     settings["plugin_version"] = host.plugin_version
     settings["hermes_version"] = host.hermes_version
@@ -491,10 +618,13 @@ def _registry(prof: _Profile) -> ParticipantRegistry:
                 )
                 return source if role is Role.SOURCE else target
 
-            prof.registry = ParticipantRegistry(
+            settings = plugin_settings(hostcompat.load_config())
+            prof.registry = ParticipantRegistry(  # the one owner of the job caps (X18)
                 prof.ledger,
                 factory,
                 local_options=lambda: local_options(plugin_settings(hostcompat.load_config())),
+                max_jobs_per_peer=_count(settings, "max_jobs_per_peer", MAX_JOBS_PER_PEER),
+                max_jobs=_count(settings, "max_jobs_total", MAX_JOBS),
             )
         return prof.registry
 
@@ -507,8 +637,7 @@ def _start_maintenance(prof: _Profile) -> None:
         ctx = contextvars.copy_context()
 
         def loop() -> None:
-            while True:
-                time.sleep(MAINTENANCE_S)
+            while not prof.stopping.wait(MAINTENANCE_S):
                 with contextlib.suppress(Exception):
                     registry.sweep(prof.ledger.now())
 
@@ -582,7 +711,11 @@ def _plan_lists(plan_doc: dict) -> dict:
             if str(r).startswith("instruction file:")
         }
     )
+    exclusions = [
+        {"path": n.get("path"), "why": n.get("why")} for n in plan.get("not_transferred") or () if isinstance(n, dict)
+    ]
     return {
+        "exclusions": exclusions,
         "excluded_secrets": secrets,
         "withheld_stash": stash,
         "conflicts": conflicts,
@@ -620,6 +753,7 @@ class JobRunner:
     ) -> None:
         self.ledger = ledger
         self._reporter_factory = reporter_factory or (lambda job_id: _NullReporter())
+        self._has_reporter_factory = reporter_factory is not None
         self._apis_factory = apis_factory or self._default_apis
         self._planning = planning
         self._clock = clock or time.time
@@ -632,6 +766,16 @@ class JobRunner:
         self._owners: dict[str, tuple[str, int]] = {}
         self._ctxs: dict[str, object] = {}
         self._sides: dict[str, Callable[[str], str | None]] = {}
+
+    def bind_reporter_factory(self, reporter_factory: Callable[[str], Reporter]) -> bool:
+        """Give a runner that was created without one (by the janitor, a route, the CLI) the surfaces' reporter
+        factory; the first real factory stays (one broker per process). True when this call bound it."""
+        with self._lock:
+            if self._has_reporter_factory:
+                return False
+            self._reporter_factory = reporter_factory
+            self._has_reporter_factory = True
+            return True
 
     # -- wiring -------------------------------------------------------------------------------------------------
     def _default_apis(self, row: dict) -> tuple[SourceAPI, TargetAPI]:
@@ -650,7 +794,7 @@ class JobRunner:
         )
         prof = _profile()
         bundle = params.get("bundle_path")
-        return apis_for(
+        src_api, tgt_api = apis_for(
             mode,
             peer,
             local_source=source,
@@ -660,6 +804,22 @@ class JobRunner:
             options=options,
             ledger=self.ledger,
         )
+        if mode is Mode.IMPORT and tgt_api is target:
+            # X21: an import is verified only by the bundle signature of a stored, non-revoked key (BundleSource)
+            target.peer_verified = bool(getattr(src_api, "verified", False))
+            self._record_origin(row["job_id"], src_api)
+        return src_api, tgt_api
+
+    def _record_origin(self, job_id: str, bundle_source) -> None:
+        """Journal where an imported bundle comes from (SEC 4.6: status shows the origin)."""
+        with self._lock:
+            mine = self._owners.get(job_id)
+        if mine is None:
+            return
+        signer = getattr(bundle_source, "signer", None)
+        origin = f"verified bundle ({signer})" if getattr(bundle_source, "verified", False) else "unverified bundle"
+        with contextlib.suppress(HandoverError):
+            self.ledger.event(job_id, Role.CONDUCTOR, "origin", {"origin": origin}, epoch=mine[1])
 
     def _claim(self, job_id: str) -> tuple[str, int]:
         with self._lock:
@@ -693,6 +853,25 @@ class JobRunner:
         if mine is not None:
             with contextlib.suppress(HandoverError):
                 self.ledger.release_owner(job_id, Role.CONDUCTOR, mine[0], mine[1])
+
+    def _abort_unbuilt(self, job_id: str, exc: HandoverError) -> None:
+        """The participants of a job could not be composed (bundle refused, peer removed, no identity): a job that
+        locked nothing yet ends ``aborted`` with the error instead of staying active forever (the janitor would
+        retry it on every run); a later state is left for ``resume``/``reclaim``."""
+        with self._lock:
+            mine = self._owners.get(job_id)
+        if mine is None:
+            return
+        with contextlib.suppress(HandoverError):
+            self.ledger.transition(
+                job_id,
+                Role.CONDUCTOR,
+                _UNLOCKED,
+                str(ConductorState.ABORTED),
+                {"step": "compose", "reason": exc.code},
+                epoch=mine[1],
+            )
+            self.ledger.job_update(job_id, Role.CONDUCTOR, epoch=mine[1], last_error=exc.to_wire()["error"])
 
     def _conductor(self, job_id: str, *, confirm=None) -> Conductor:
         row = self.ledger.job(job_id, Role.CONDUCTOR)
@@ -767,20 +946,36 @@ class JobRunner:
             self._ctxs[job_id] = ctx
         if side_question is not None:
             self._sides[job_id] = side_question
-        conductor = self._conductor(job_id, confirm=confirm)
+        try:
+            conductor = self._conductor(job_id, confirm=confirm)
+        except HandoverError as exc:
+            self._abort_unbuilt(job_id, exc)
+            self._forget(job_id)
+            raise
         try:
             final = conductor.run_until_negotiated()
         except Cancelled:
-            self._release(job_id)
+            self._forget(job_id)
             return job_id, None
         except HandoverError:
-            self._release(job_id)
+            self._forget(job_id)
             raise
         return job_id, final
 
+    def _forget(self, job_id: str) -> None:
+        """Release the job and drop what this process kept for it (context, side question)."""
+        self._release(job_id)
+        with self._lock:
+            self._ctxs.pop(job_id, None)
+            self._sides.pop(job_id, None)
+
     def _run(self, job_id: str, how: str) -> None:
         try:
-            conductor = self._conductor(job_id)
+            try:
+                conductor = self._conductor(job_id)
+            except HandoverError as exc:
+                self._abort_unbuilt(job_id, exc)
+                return
             getattr(conductor, how)()
         except HandoverError:
             pass
@@ -872,6 +1067,7 @@ class JobRunner:
             "job_id": row["job_id"],
             "short": short(row["job_id"]),
             "mode": row["mode"],
+            "role": str(Role.CONDUCTOR),
             "state": state,
             "active": state not in ("done", "aborted"),
             "outcome": outcome,
@@ -882,9 +1078,17 @@ class JobRunner:
             "progress": {"step": state},
             "restarts": row["restarts"],
             "last_error": row["last_error"],
+            "error": row["last_error"],
             "next_action": _next_action(row, outcome),
             "ack": ack,
             "title": (ack or {}).get("title"),
+            "note": None,
+            "origin": None,
+            "exclusions": [],
+            "excluded_secrets": [],
+            "withheld_stash": [],
+            "conflicts": [],
+            "instruction_files": [],
             "continuation": result.get("continue"),
             "warnings": result.get("warnings") or [],
             "exit_code": exit_code(row),
@@ -898,8 +1102,18 @@ class JobRunner:
             arrival = self.ledger.arrival_for(str(ack.get("session_id") or ""))
             if arrival is not None:
                 out["note"] = arrival.get("note")
-                out["origin"] = "verified peer" if row["mode"] == str(Mode.PULL) else "local"
+                out["origin"] = self._origin(row)
         return out
+
+    def _origin(self, row: dict) -> str | None:
+        """Where a session that arrived here comes from (SEC 4.6): a pull from a paired peer (its responses are
+        signed), or the bundle an import read (journaled by ``_record_origin``)."""
+        if row["mode"] == str(Mode.PULL):
+            return "verified peer"
+        if row["mode"] == str(Mode.IMPORT):
+            found = [e for e in self.ledger.events(row["job_id"], Role.CONDUCTOR) if e["kind"] == "origin"]
+            return str((found[-1]["data"] or {}).get("origin")) if found else "bundle"
+        return None
 
     def create_offer(
         self,
@@ -911,15 +1125,22 @@ class JobRunner:
         note: str | None = None,
         options: Options | None = None,
         side_question: Callable[[str], str | None] | None = None,
+        include_secret: tuple[str, ...] = (),
     ) -> dict:
         """``/handover to <dial-only peer>`` on the source: store an offer with a refinement computed by the
         session's own model now (DESIGN §2.2 ``offer``, §8.3); the peer claims it with ``/handover take``. Offers
-        are never auto-claimed (O6)."""
+        are never auto-claimed (O6). ``include_secret`` is the local ``--include-secret`` (X07, R18)."""
         if peer.direction != "inbound" or peer.revoked_at is not None:
             raise BadRequest("offers are for paired devices that connect to this gateway", field="peer")
         source = (
             local_source
-            or make_local_apis(ctx, calling_session=session_ref.id, session_key=None, side_question=side_question)[0]
+            or make_local_apis(
+                ctx,
+                calling_session=session_ref.id,
+                session_key=None,
+                side_question=side_question,
+                include_secret=tuple(include_secret),
+            )[0]
         )
         offer_id = ulid()
         job = JobContext(
@@ -978,11 +1199,15 @@ def janitor(
     *,
     flush_outbox: Callable[[Ledger], object] | None,
     background: bool = True,
+    store=None,
+    gc_interval_s: float = GC_INTERVAL_S,
 ) -> dict:
     """DESIGN §3.6: expired pairing codes, journal compaction, then every job whose owner went stale; COMMITTED/
-    RETIRING conductor jobs are retried on every run ("the source is released on the next contact"). Returns what
-    it did (for ``status``/``doctor``)."""
-    done: dict = {"codes": 0, "compacted": 0, "conductor": [], "participant": []}
+    RETIRING conductor jobs are retried on every run ("the source is released on the next contact"). With a
+    ``store`` the block-store GC of DESIGN §5.1 runs too (blocks beyond ``block_cache_days``/``block_cache_gb`` and
+    the manifests of objects no non-terminal job references, R28) — at most every ``gc_interval_s`` for all
+    processes of the profile (``Ledger.claim_interval``). Returns what it did (for ``status``/``doctor``)."""
+    done: dict = {"codes": 0, "compacted": 0, "conductor": [], "participant": [], "gc": None}
     now = ledger.now()
     with contextlib.suppress(HandoverError):
         done["codes"] = ledger.purge_expired_codes(now)
@@ -1015,15 +1240,30 @@ def janitor(
             ):
                 done["conductor"].append((row["job_id"], row["state"]))
                 runner.recover(row["job_id"], background=background)
+    if store is not None:
+        done["gc"] = _gc_store(ledger, store, gc_interval_s)
     if flush_outbox is not None:
         with contextlib.suppress(Exception):
             flush_outbox(ledger)
     return done
 
 
+def _gc_store(ledger: Ledger, store, interval_s: float) -> int | str | None:
+    """The janitor's GC step: freed block count, ``None`` when another run within ``interval_s`` did it, or
+    ``"error:<type>"`` (logged; the janitor never fails a job start over its cleanup)."""
+    try:
+        if not ledger.claim_interval(GC_META_KEY, ledger.now(), interval_s):
+            return None
+        return int(store.gc(keep_days=float(store.cache_days), max_bytes=int(store.cache_bytes)))
+    except Exception as exc:  # cleanup must not break the job that triggered the janitor
+        log.warning("ctx_handover block-store GC failed: %s", type(exc).__name__, exc_info=True)
+        return f"error:{type(exc).__name__}"
+
+
 def gc_job(ledger: Ledger, job_id: str, *, data_dir: Path, store=None) -> None:
-    """``/handover gc --job``: blocks, staging (incl. quarantine), report, logs and journal of a finished job
-    (SEC 6.3)."""
+    """``/handover gc --job``: blocks, staging (incl. quarantine), report, continuation files and journal of a
+    finished job (SEC 6.3). The block store releases first — it finds the job's objects through ``job_objects``,
+    which ``purge_job`` removes."""
     for role in (Role.CONDUCTOR, Role.SOURCE, Role.TARGET):
         row = ledger.job(job_id, role)
         if row is not None and row["state"] not in (
@@ -1040,10 +1280,21 @@ def gc_job(ledger: Ledger, job_id: str, *, data_dir: Path, store=None) -> None:
     if store is not None and callable(getattr(store, "release_job", None)):
         store.release_job(job_id, keep=False)
     shutil.rmtree(Path(data_dir) / "staging" / job_id, ignore_errors=True)
-    for path in (Path(data_dir) / "reports" / f"{job_id}.md", Path(data_dir) / "logs" / f"continue-{job_id}.log"):
+    for path in (Path(data_dir) / "reports" / f"{job_id}.md", *_continuation_files(Path(data_dir) / "logs", job_id)):
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
     ledger.purge_job(job_id)
+
+
+def _continuation_files(log_dir: Path, job_id: str) -> tuple[Path, ...]:
+    """The files a job's continuation leaves (log and sidecar) as ``continuation.job_files`` names them — the one
+    place that knows the names; the log alone with an older ``continuation`` module."""
+    from . import continuation
+
+    names = getattr(continuation, "job_files", None)
+    if callable(names):
+        return tuple(names(log_dir, job_id))
+    return (log_dir / f"continue-{job_id}.log",)
 
 
 def _flush(ctx) -> Callable[[Ledger], object] | None:
@@ -1063,35 +1314,40 @@ def _flush(ctx) -> Callable[[Ledger], object] | None:
 
 
 def runner_for(ctx=None, reporter_factory: Callable[[str], Reporter] | None = None) -> JobRunner:
-    """The profile's ``JobRunner`` (created on first use)."""
+    """The profile's one ``JobRunner`` (created on first use; X19). A ``reporter_factory`` is bound when the runner
+    has none yet — a runner created first by the janitor, a route or the CLI does not keep the surfaces' progress
+    from arriving. The janitor runs before every job of this runner (``Runtime.janitor``)."""
     prof = _profile()
     with prof.lock:
+        if ctx is not None:
+            prof.ctx = ctx
         if prof.runner is None:
-            prof.runner = JobRunner(
-                prof.ledger,
-                reporter_factory,
-                before_job=lambda: janitor(prof.ledger, prof.runner, _registry(prof), flush_outbox=_flush(ctx)),
-            )
+            prof.runner = JobRunner(prof.ledger, reporter_factory, before_job=prof.janitor)
+        elif reporter_factory is not None:
+            prof.runner.bind_reporter_factory(reporter_factory)
         return prof.runner
 
 
-def ensure_started(ctx=None) -> _Profile:
-    """First real use in a process (slash, CLI, route, tool, hook): ledger, veto index, janitor once; loads but
-    never creates the identity (R16). Never called from ``register()`` (BX L2). Returns the profile runtime
-    (``ledger``, ``store``, ``veto``, ``identity``) for the surfaces (cluster F)."""
+def ensure_started(ctx=None, reporter_factory: Callable[[str], Reporter] | None = None) -> Runtime:
+    """First real use in a process (slash, CLI, route, tool, hook): returns the profile's one ``Runtime`` (X19,
+    W109) with ``ledger``, ``veto`` (started, over the same ledger), ``store``, ``runner`` and ``janitor()``; runs the
+    janitor once per process. Loads but never creates the identity (R16). Never called from ``register()``
+    (BX L2)."""
     prof = _profile()
+    runner_for(ctx, reporter_factory)
     with prof.lock:
         first = not prof.janitor_ran
         prof.janitor_ran = True
         if prof.veto is None:
             from . import lock
 
-            prof.veto = lock.VetoIndex(prof.ledger.path)
+            # the index reads this runtime's ledger: no second Ledger object in the process (X19)
+            prof.veto = lock.VetoIndex(prof.ledger.path, ledger_factory=lambda _path: prof.ledger)
             prof.veto.start()
     _identity(prof)
     _store(prof)
     if first:
-        janitor(prof.ledger, runner_for(ctx), _registry(prof), flush_outbox=_flush(ctx))
+        prof.janitor()
     return prof
 
 
@@ -1152,6 +1408,7 @@ def default_bundle_path(title: str | None, options: Options, now: float | None =
 
 __all__ = [
     "JobRunner",
+    "Runtime",
     "apis_for",
     "ensure_started",
     "exit_code",

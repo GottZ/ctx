@@ -349,7 +349,7 @@ class LedgerStub:
         return out
 
     def jobs(self, *, role=None, active: bool | None = None, limit: int = 20) -> list[dict]:
-        sql = "SELECT job_id, role, mode, peer_id, state FROM jobs"
+        sql = "SELECT job_id, role, mode, peer_id, state, created_at FROM jobs"
         cond, args = [], []
         if role is not None:
             cond.append("role=?")
@@ -362,7 +362,7 @@ class LedgerStub:
             sql += " WHERE " + " AND ".join(cond)
         with self._conn() as conn:
             rows = conn.execute(sql + " ORDER BY created_at DESC LIMIT ?", (*args, limit)).fetchall()
-        return [dict(zip(("job_id", "role", "mode", "peer_id", "state"), r, strict=True)) for r in rows]
+        return [dict(zip(("job_id", "role", "mode", "peer_id", "state", "created_at"), r, strict=True)) for r in rows]
 
     def set_cancel(self, job_id: str) -> None:
         with self.tx() as conn:

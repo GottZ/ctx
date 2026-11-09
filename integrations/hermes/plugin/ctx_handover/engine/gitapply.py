@@ -567,20 +567,15 @@ def lfs_checkout(git: Git, repo: Path) -> list[str]:
 # ---------------------------------------------------------------------------------------------------------
 
 
-def _sanitised(raw: str, rules: PlatformRules) -> str:
-    if rules.windows:
-        return raw
-    return "".join("_" if (ord(c) < 0x20 or ord(c) == 0x7F or 0xDC80 <= ord(c) <= 0xDCFF) else c for c in raw)
-
-
 def path_issues(paths: Sequence[str], rules: PlatformRules) -> list[tuple[str, str]]:
     """``(path, reason)`` for every received path that violates ``paths.check_rel`` on this target. On POSIX
-    targets control characters and non-UTF-8 bytes are legal file names that git reproduces, so they are masked
-    before the check; every other rule (``.git`` spellings, traversal, length, Windows names) applies."""
+    targets control characters and non-UTF-8 bytes are legal file names that git reproduces
+    (``check_rel(..., allow_control=True)``, W095); every other rule (``.git`` spellings, traversal, length,
+    Windows names) applies."""
     issues = []
     for p in paths:
         try:
-            check_rel(_sanitised(p, rules), rules)
+            check_rel(p, rules, allow_control=True)
         except PolicyDenied as exc:
             issues.append((p, str(exc.details.get("reason", "unsafe"))))
     return issues
@@ -1031,15 +1026,74 @@ def _apply_refs(git: Git, repo: Path, state: GitApplyState) -> None:
     _update_refs(git, repo, cmds)
 
 
-def commit(git: Git, state: GitApplyState, item_pack: dict) -> Path:
+def _post_state(git: Git, state: GitApplyState, item: _Item, repo: Path, tmp: Path) -> bool:
+    """True when the repository already shows the whole effect of ``commit`` (refs, HEAD, index tree and
+    work-tree tree as planned): a forward step that finished in a process which died before its result was
+    journaled. Stash and LFS checkout are idempotent and are repeated by the caller."""
+    current = _current_refs(git, repo)
+    if any(current.get(name) != new for name, new in state.planned_refs.items()):
+        return False
+    h_now, ref_now = head_info(git, repo)
+    want_ref = item.head_ref if item.head_ref is not None else (None if item.head_commit else state.head_ref_before)
+    if ref_now != want_ref or (item.head_commit is not None and h_now != item.head_commit):
+        return False
+    excl = state.out_state.exclude_pathspecs if state.out_state is not None else ()
+    now = worktree_state(git, str(repo), excl, tmp)
+    return (now.index_tree, now.worktree_tree) == (item.index_tree, item.worktree_tree)
+
+
+def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path) -> bool:
+    """True when nothing of ``commit`` has touched the repository yet (the preconditions PREPARE recorded)."""
+    current = _current_refs(git, repo)
+    if any(current.get(name) != old for name, old in state.old_refs.items()):
+        return False
+    if any(name in current for name in state.planned_refs if name not in state.old_refs):
+        return False
+    h_now, ref_now = head_info(git, repo)
+    if ref_now != state.head_ref_before:
+        return False
+    if state.mode is DestMode.UPDATE:
+        clean, _ = GitProbe(git, profile="received").status_clean(str(repo))
+        return clean and h_now == state.h0
+    assert state.out_state is not None  # noqa: S101 - return states carry it
+    now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, tmp)
+    return not _state_diff(now, state.out_state)
+
+
+def commit(
+    git: Git,
+    state: GitApplyState,
+    item_pack: dict,
+    *,
+    mark: Callable[[], None] | None = None,
+    resume: bool = False,
+    tmp: Path | None = None,
+) -> Path:
     """Forward c1 step of one git item (DESIGN §3.4, §9.5); preconditions are re-checked first. Returns the final
     path (``fallback`` when a fresh destination appeared). Raises ``ConflictError`` when the destination changed
-    since PREPARE (the caller rolls back the done steps)."""
+    since PREPARE (the caller rolls back the done steps).
+
+    Update/return mode is atomic towards its caller: ``mark`` (if given) runs right before the first change to
+    the repository — the caller records durably that this step began — and an exception after it undoes the
+    partial change (``rollback(partial=True)``, only when the repository no longer shows its prepared state — a
+    refused first ``read-tree`` changed nothing and must not be "undone") before it propagates. ``resume=True``
+    (the step began in a process that died; contract X11): a repository that already shows the full effect only
+    gets the idempotent tail (stash, LFS checkout); one that shows part of it is rolled back to its prepared state
+    first; then the step runs normally. ``tmp``: scratch directory for those state checks (default: the state's
+    own ``tmp``). Fresh mode is one rename (``commit_fresh``); its resumption is the caller's (directory
+    identity)."""
     if state.mode in (DestMode.FRESH, DestMode.NO_CHECKOUT):
         return commit_fresh(state)
     item = parse_item(item_pack)
     repo = state.dest
     _open_existing(git, repo)
+    scratch = Path(tmp or state.tmp or (Path(state.qdir).parent if state.qdir is not None else repo.parent))
+    if resume:
+        if _post_state(git, state, item, repo, scratch / "resume"):
+            _tail(git, repo, item)
+            return repo
+        if not _pre_state(git, state, repo, scratch / "resume"):
+            rollback(git, state, item_pack, partial=True)
     h_now, ref_now = head_info(git, repo)
     if state.mode is DestMode.UPDATE:
         clean, why = GitProbe(git, profile="received").status_clean(str(repo))
@@ -1062,40 +1116,58 @@ def commit(git: Git, state: GitApplyState, item_pack: dict) -> Path:
     filters = attribute_filter_names(git, _bare_of(git, repo), item.worktree_tree)
     spec = _wt_spec(repo, filters=filters)
     alt = _alt_env(state)
-    if state.mode is DestMode.UPDATE:
-        git.run(
-            ["read-tree", "-u", "-m", "--end-of-options", state.h0, item.worktree_tree],
-            cwd=repo,
-            spec=spec,
-            env_extra=alt,
-        )
-    else:
-        assert state.out_state is not None  # noqa: S101
-        git.run(["read-tree", "--end-of-options", state.out_state.worktree_tree], cwd=repo, spec=spec, env_extra=alt)
+    if mark is not None:
+        mark()
+    try:
+        if state.mode is DestMode.UPDATE:
+            git.run(
+                ["read-tree", "-u", "-m", "--end-of-options", state.h0, item.worktree_tree],
+                cwd=repo,
+                spec=spec,
+                env_extra=alt,
+            )
+        else:
+            assert state.out_state is not None  # noqa: S101
+            git.run(
+                ["read-tree", "--end-of-options", state.out_state.worktree_tree], cwd=repo, spec=spec, env_extra=alt
+            )
+            git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
+            git.run(
+                ["read-tree", "-u", "-m", "--end-of-options", state.out_state.worktree_tree, item.worktree_tree],
+                cwd=repo,
+                spec=spec,
+                env_extra=alt,
+            )
+        git.run(["read-tree", "--end-of-options", item.index_tree], cwd=repo, spec=spec, env_extra=alt)
         git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
-        git.run(
-            ["read-tree", "-u", "-m", "--end-of-options", state.out_state.worktree_tree, item.worktree_tree],
-            cwd=repo,
-            spec=spec,
-            env_extra=alt,
-        )
-    git.run(["read-tree", "--end-of-options", item.index_tree], cwd=repo, spec=spec, env_extra=alt)
-    git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
-    _apply_refs(git, repo, state)
-    _move_head(git, repo, item, state.head_ref_before)
+        _apply_refs(git, repo, state)
+        _move_head(git, repo, item, state.head_ref_before)
+        _tail(git, repo, item)
+    except Exception:
+        with contextlib.suppress(Exception):
+            if not _pre_state(git, state, repo, scratch / "resume"):
+                rollback(git, state, item_pack, partial=True)
+        raise
+    return repo
+
+
+def _tail(git: Git, repo: Path, item: _Item) -> None:
+    """The idempotent end of the update/return forward step: missing stash entries, LFS checkout."""
     _store_stash(git, repo, item.stash, skip=_stash_commits(git, repo))
     if item.lfs:
         lfs_checkout(git, repo)
-    return repo
 
 
 def _bare_of(git: Git, repo: Path) -> Path:
     return git_dirs(git, repo)[1]
 
 
-def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None) -> None:
-    """Inverse of ``commit`` (DESIGN §3.4 c1 inverse); idempotent and safe after a partial forward step. For fresh
-    mode ``state.dest`` must be the path ``commit`` returned."""
+def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, partial: bool = False) -> None:
+    """Inverse of ``commit`` (DESIGN §3.4 c1 inverse); idempotent. For fresh mode ``state.dest`` must be the path
+    ``commit`` returned. ``partial=True``: the forward step may have stopped anywhere (an exception or a crash in
+    its middle); return mode then resets the work tree to the out-state from an index that holds every path of
+    the received tree (``read-tree -u --reset``) instead of the two-way merge, which refuses half-updated files.
+    Update mode always resets (``read-tree -u --reset H0``) and removes the paths the forward step added."""
     if state.mode in (DestMode.FRESH, DestMode.NO_CHECKOUT):
         if state.partial is not None and not state.partial.exists() and state.dest.is_dir():
             os.rename(state.dest, state.partial)
@@ -1105,7 +1177,16 @@ def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None) -> N
     spec = _wt_spec(repo)
     alt = _alt_env(state)
     item = parse_item(item_pack) if item_pack is not None else None
-    if state.mode is DestMode.UPDATE:
+    if state.mode is DestMode.RETURN and partial and item is not None:
+        out = state.out_state
+        assert out is not None  # noqa: S101 - return states carry it
+        git.run(["read-tree", "--end-of-options", item.worktree_tree], cwd=repo, spec=spec, env_extra=alt)
+        git.run(
+            ["read-tree", "-u", "--reset", "--end-of-options", out.worktree_tree], cwd=repo, spec=spec, env_extra=alt
+        )
+        git.run(["read-tree", "--end-of-options", out.index_tree], cwd=repo, spec=spec, env_extra=alt)
+        git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
+    elif state.mode is DestMode.UPDATE:
         git.run(["read-tree", "-u", "--reset", "--end-of-options", state.h0], cwd=repo, spec=spec, env_extra=alt)
         for rel in state.added_paths:
             path = Path(os.fsdecode(os.path.join(os.fsencode(repo), os.fsencode(rel))))

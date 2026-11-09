@@ -11,6 +11,9 @@ The ``ParticipantRegistry`` sits between the HTTP server (cluster C) and the loc
 * Offers are listed and claimed only by their own peer.
 * A remote conductor's options can only narrow: security settings (roots, limits, secrets) stay local
   (``participant_options``; R18, R19).
+* Job ids are ULIDs (``ids.ULID_RE``, contract K-2). The registry alone owns the job caps per peer and per
+  gateway (constructor values; the composition root fills them from ``max_jobs_per_peer``/``max_jobs_total``) and
+  the routes #8–#10 (``status``/``heartbeat``/``cancel``); the server only delegates (contract X18).
 
 ``sweep`` runs periodically in the listener process: it heartbeats the participant jobs this process owns,
 gives up the leases of a source whose conductor went quiet for ``participant_idle_timeout`` (``suspended``,
@@ -19,13 +22,13 @@ DESIGN §7.3), expires target staging after ``staging_ttl`` (§3.5) and continue
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import fields, replace
 
 from .contracts import JobContext, SourceAPI, TargetAPI
 from .errors import BadRequest, Forbidden, HandoverError, InvalidState, JobConflict, NotFound, RateLimited
+from .ids import ULID_RE
 from .jsonutil import from_wire
 from .ledger import JOURNAL_KEEP_S, TERMINAL, Ledger, process_owner
 from .model import AuthContext, Mode, Options, ParticipantStatus, Peer, Progress, Right, Role, SessionRef
@@ -34,10 +37,12 @@ MAX_JOBS_PER_PEER = 2
 MAX_JOBS = 4
 MAX_SESSIONS_LIST = 200
 CONTINUE_PROMPT_MAX = 2000
-_JOB_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
 
 _REMOTE_FIELDS = ("dest", "maps", "model", "force", "wait", "continue_prompt", "yes", "dry_run")
 """Options a remote conductor may set for its job; everything else comes from the local settings."""
+
+_REMOTE_HINTS = ("exclude", "dest_overrides", "no_workspace")
+"""Hints a remote conductor may give: they narrow the plan or name destinations (R18, R19); never additions."""
 
 _RELEASABLE_SOURCE = frozenset({"locking", "locked", "preparing", "suspended"})
 _TARGET_TTL_EXEMPT = frozenset({"committing", "committed", "aborted", "expired"})
@@ -46,9 +51,12 @@ _TARGET_TTL_EXEMPT = frozenset({"committing", "committed", "aborted", "expired"}
 def participant_options(local: Options, remote: dict | None) -> Options:
     """The job options a participant uses: its own settings, narrowed by what the remote conductor asked for.
 
-    A remote side never widens roots, limits or secret releases: ``export_roots``/``allow_roots``/sizes stay
-    local, ``hints.include_secret`` is dropped (R18), ``wait_timeout_s`` is capped at the local value, ``refine``
-    can only be switched off, the continuation prompt is capped at 2000 characters (DESIGN §11.5)."""
+    A remote side never widens roots, limits or releases: ``export_roots``/``allow_roots``/sizes stay local; of
+    the hints only the narrowing ones (``exclude``, ``no_workspace``) and the destination overrides (checked
+    against ``allow_roots`` on the target, R19) are taken — ``include_secret`` and ``include`` never come from a
+    peer (R18, contract X07: a remote addition is a FinalPlan item the source releases under ``export_roots``,
+    ``plan.restrict_to_releasable``). ``wait_timeout_s`` is capped at the local value, ``refine`` can only be
+    switched off, the continuation prompt is capped at 2000 characters (DESIGN §11.5)."""
     remote = dict(remote or {})
     names = {f.name for f in fields(Options)}
     picked: dict = {}
@@ -56,12 +64,12 @@ def participant_options(local: Options, remote: dict | None) -> Options:
         if key in remote and key in names:
             picked[key] = remote[key]
     hints_in = remote.get("hints") if isinstance(remote.get("hints"), dict) else {}
-    hints = {k: v for k, v in hints_in.items() if k in ("include", "exclude", "dest_overrides", "no_workspace")}
+    hints = {k: v for k, v in hints_in.items() if k in _REMOTE_HINTS}
     decoded = from_wire(Options, {**picked, "hints": hints})
     out = replace(
         local,
         **{k: getattr(decoded, k) for k in picked},
-        hints=replace(decoded.hints, include_secret=()),
+        hints=replace(decoded.hints, include=(), include_secret=()),
     )
     if isinstance(remote.get("wait_timeout_s"), int) and not isinstance(remote.get("wait_timeout_s"), bool):
         out = replace(out, wait_timeout_s=max(0, min(local.wait_timeout_s, int(remote["wait_timeout_s"]))))
@@ -184,8 +192,8 @@ class ParticipantRegistry:
     def open(self, auth: AuthContext, body: dict) -> dict:
         """``POST /jobs`` (route #7): create or re-open the participant job (idempotent per params)."""
         peer = self._peer(auth)
-        job_id = str(body.get("job_id") or "")
-        if not _JOB_ID.match(job_id):
+        job_id = body.get("job_id")
+        if not isinstance(job_id, str) or not ULID_RE.match(job_id):  # job ids are ULIDs everywhere (contract K-2)
             raise BadRequest("invalid job id", field="job_id")
         try:
             role = Role(str(body.get("role")))
@@ -269,7 +277,7 @@ class ParticipantRegistry:
         """Route #6: claim an offer of the calling peer for ``job_id`` (never auto-claimed, O6)."""
         peer = self._peer(auth)
         self._require(auth, Right.PULL)
-        if not _JOB_ID.match(str(job_id or "")):
+        if not isinstance(job_id, str) or not ULID_RE.match(job_id):
             raise BadRequest("invalid job id", field="job_id")
         row = self.ledger.offer_claim(str(offer_id), peer.peer_id, str(job_id))
         out: dict = {"session_ref": {"id": row["session_id"], "latest": False, "offer_id": row["offer_id"]}}

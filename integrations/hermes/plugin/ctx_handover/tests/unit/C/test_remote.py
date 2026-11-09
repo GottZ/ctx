@@ -10,7 +10,7 @@ import pytest
 from ctx_handover.engine import contracts, hostcompat, pairing
 from ctx_handover.engine.blocks import BLOCK_SIZE, BlockStore, object_id_of
 from ctx_handover.engine.contracts import JobContext
-from ctx_handover.engine.errors import BadRequest, LeaseLost, NotFound
+from ctx_handover.engine.errors import BadRequest, BlockCorrupt, LeaseLost, NotFound
 from ctx_handover.engine.ids import ulid
 from ctx_handover.engine.model import (
     CapsuleInfo,
@@ -244,8 +244,8 @@ def test_remote_blocks_verifies_manifests():
 
     good = RemoteBlocks(Wire(m), ulid(), 1)
     assert good.manifests([m.object_id]) == [m]
-    forged = replace(m, sha256="0" * 64)  # keeps the old object id
-    with pytest.raises(BadRequest):
+    forged = replace(m, sha256="0" * 64)  # keeps the old object id: a hash mismatch (K-1)
+    with pytest.raises(BlockCorrupt):
         RemoteBlocks(Wire(forged), ulid(), 1).manifests([m.object_id])
     other = replace(forged, object_id=object_id_of(forged))  # consistent, but not what was asked for
     with pytest.raises(BadRequest):

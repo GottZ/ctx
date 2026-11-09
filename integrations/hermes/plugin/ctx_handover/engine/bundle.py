@@ -59,7 +59,8 @@ from .errors import (
     NotFound,
     Unauthorized,
 )
-from .jsonutil import canonical_bytes, from_wire, loads_bounded, to_wire
+from .ids import ULID_RE
+from .jsonutil import canonical_bytes, from_wire, loads_bounded, object_manifest, to_wire
 from .model import (
     CapsuleInfo,
     CommitAck,
@@ -101,7 +102,6 @@ _HEX2 = re.compile(r"[0-9a-f]{2}")
 _BLOCK_RE = re.compile(r"blocks/([0-9a-f]{2})/([0-9a-f]{62})")
 _MANIFEST_RE = re.compile(r"manifests/([0-9a-f]{2})/([0-9a-f]{62})\.json")
 _FIXED = {"CTXH-BUNDLE": 64, "manifest.json": None, "manifest.sig": MAX_SIG_BYTES}
-_ULID_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
 
 
 def _bad(message: str, **details) -> BadRequest:
@@ -165,20 +165,18 @@ class _DirSink:
         return new
 
     def put_bytes(self, data: bytes, media: str) -> ObjectManifest:
-        ids = []
-        for start in range(0, len(data), BLOCK_SIZE):
-            chunk = data[start : start + BLOCK_SIZE]
-            block_id = hashlib.sha256(chunk).hexdigest()
-            self.write_blocks([(block_id, chunk)])
-            ids.append(block_id)
-        m = ObjectManifest(
-            sha256=hashlib.sha256(data).hexdigest(),
-            size=len(data),
-            block_size=BLOCK_SIZE,
-            blocks=tuple(ids),
-            media=media,
+        """An in-memory object, split by K-1's ``jsonutil.object_manifest`` (the same ids as the block store)."""
+        doc, parts = object_manifest(data, media)
+        self.write_blocks(parts)
+        m = verify_manifest(
+            ObjectManifest(
+                sha256=doc["sha256"],
+                size=doc["size"],
+                block_size=doc["block_size"],
+                blocks=tuple(doc["blocks"]),
+                media=doc["media"],
+            )
         )
-        m = verify_manifest(m)
         self.put_manifests([m])
         return m
 
@@ -697,7 +695,7 @@ def _validate(reader: _Reader) -> tuple[dict, bytes, bytes, dict[str, ObjectMani
     if not isinstance(manifest, dict) or manifest.get("kind") != "ctxh.bundle" or manifest.get("v") != 1:
         raise _bad("unsupported bundle manifest")
     job_id = manifest.get("job_id")
-    if not isinstance(job_id, str) or not _ULID_RE.fullmatch(job_id):
+    if not isinstance(job_id, str) or not ULID_RE.match(job_id):
         raise _bad("invalid job id")
     exporter = manifest.get("exporter")
     if not isinstance(exporter, dict):
@@ -724,7 +722,7 @@ def _validate(reader: _Reader) -> tuple[dict, bytes, bytes, dict[str, ObjectMani
         doc = loads_bounded(reader.read(_manifest_name(oid), MAX_MANIFEST_JSON), max_bytes=MAX_MANIFEST_JSON)
         try:
             m = manifest_from_doc(doc, oid)
-        except BadRequest as exc:
+        except (BadRequest, BlockCorrupt) as exc:
             raise _bad(f"object manifest {oid[:12]} invalid: {exc.message}") from None
         if entry.get("size") != m.size or entry.get("blocks") != len(m.blocks):
             raise _bad("object entry does not match its manifest", object_id=oid)

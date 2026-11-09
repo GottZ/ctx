@@ -6,6 +6,8 @@ file ``go`` exists (poll 0.5 ms) so the children hit the critical section togeth
 ``identity <ledger> <go>``      ``Identity.create`` through the real Hermes ``.env`` functions of ``hostcompat``
                                  (``HERMES_HOME`` comes from the environment) → ``{"pubkey": …}``
 ``redeem <ledger> <go> <body>`` ``pairing.redeem_listener`` with the JSON body file → ``{"ok": …, "code": …}``
+``rotate <ledger> -``           ``identity rotate`` as the CLI runs it: ``Identity.create(…, rotate=True)`` through
+                                 the real ``hostcompat`` of ``HERMES_HOME``, no barrier → ``{"pubkey": …}``
 """
 
 from __future__ import annotations
@@ -33,6 +35,16 @@ def main(argv: list[str]) -> int:
 
     mode, ledger_path, go = argv[0], Path(argv[1]), argv[2]
     ledger = make_ledger(ledger_path)
+    if mode == "rotate":
+        ident = Identity.create(
+            ledger,
+            env_writable=hostcompat.env_writable,
+            save_env=hostcompat.save_env,
+            read_env_fresh=hostcompat.read_env_fresh,
+            rotate=True,
+        )
+        print(json.dumps({"pubkey": ident.public_b64()}), flush=True)
+        return 0
     if mode == "identity":
         _barrier(go)
         ident = Identity.create(

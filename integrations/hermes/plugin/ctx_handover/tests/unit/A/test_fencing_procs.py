@@ -2,7 +2,8 @@
 the file system (heartbeats stop, process alive) must never be overtaken by a second run of the same steps.
 
 The ledger's owner epoch fences journal writes only; the ``JobLock`` (``flock``) is what the kernel releases
-only when the holder's process dies. Two real processes, no mocks.
+only when the holder's process dies. Two real processes, no mocks. The gaps between the ledger row and the lock
+(a worker that hangs before it takes the lock, concurrent restarts) are covered in ``test_l2_runtime_fencing.py``.
 """
 
 from __future__ import annotations
@@ -33,7 +34,8 @@ def test_hung_holder_is_not_overtaken_then_dead_holder_is(tmp_path):
     """★ Hung (alive) holder: its op stays ``running`` although the heartbeat is stale, and a second start does
     not run the steps again; after the holder dies, the op is ``interrupted`` and the restart runs.
 
-    Mutant: ``OpRunner._held`` always answers False (no file-system fencing, only the stale heartbeat)."""
+    Mutant: ``OpRunner._interrupt`` marks the row without taking the job lock (no file-system fencing, only the
+    stale heartbeat) → the hung holder's op reads ``failed`` and the second start runs ``M-start``."""
     path = tmp_path / "ledger.sqlite3"
     locks = tmp_path / "locks"
     marker = tmp_path / "marker.txt"

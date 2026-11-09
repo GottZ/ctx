@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import os
 import stat
 import struct
+import subprocess
+import sys
 import time
 import zlib
 from dataclasses import replace
 
 import pytest
 
-from ctx_handover.engine import blocks
+from ctx_handover.engine import blocks, jsonutil
 from ctx_handover.engine.blocks import (
     BLOCK_SIZE,
     ENC_IDENTITY,
@@ -26,8 +29,10 @@ from ctx_handover.engine.blocks import (
     encode_frame,
     encode_frames,
 )
-from ctx_handover.engine.errors import BadRequest, Cancelled, NotFound, VerifyFailed
-from ctx_handover.engine.model import Mode, Role
+from ctx_handover.engine.errors import BadRequest, BlockCorrupt, Cancelled, NotFound, VerifyFailed
+from ctx_handover.engine.ids import ulid
+from ctx_handover.engine.model import Mode, ObjectManifest, Role
+from ctx_handover.tests.fakes.blocks_fake import MemoryBlockStore
 from ctx_handover.tests.unit.C.conftest import end_job
 
 ALL_CAPS = frozenset({"enc.zlib", "enc.zstd"})
@@ -44,6 +49,14 @@ def _noise(n: int, seed: int = 1) -> bytes:
         out += hashlib.sha256(f"{seed}:{counter}".encode()).digest()
         counter += 1
     return bytes(out[:n])
+
+
+def _age(store: BlockStore, *ms: ObjectManifest, seconds: float = 3600) -> None:
+    """Make objects look stored ``seconds`` ago (block files and manifest file), like a cache from earlier jobs."""
+    then = time.time() - seconds
+    for m in ms:
+        for path in (store.manifest_path(m.object_id), *(store.block_path(b) for b in m.blocks)):
+            os.utime(path, (then, then))
 
 
 def _frame(block_id: str, enc: int, payload: bytes, *, magic: bytes = FRAME_MAGIC, length: int | None = None) -> bytes:
@@ -157,7 +170,7 @@ def test_object_manifest_assembly_sha256(store):
 def test_put_manifests_recomputes_object_id(store):
     m = store.put_bytes(_noise(10), "application/octet-stream")
     forged = replace(m, object_id="f" * 64)
-    with pytest.raises(BadRequest):
+    with pytest.raises(BlockCorrupt):  # K-1: an id that does not match its manifest is a hash mismatch
         store.put_manifests([forged])
     too_few = replace(m, size=BLOCK_SIZE + 1, object_id="")
     with pytest.raises(BadRequest):
@@ -166,6 +179,31 @@ def test_put_manifests_recomputes_object_id(store):
     with pytest.raises(BadRequest):
         store.put_manifests([replace(odd_block, object_id=blocks.object_id_of(odd_block))])
     assert store.put_manifests([m]) == 0  # already known
+
+
+@pytest.mark.parametrize("size", [0, 1, BLOCK_SIZE, BLOCK_SIZE + 1, 2 * BLOCK_SIZE + 3])
+def test_object_ids_follow_the_k1_rule(store, size):
+    """X01/K-1: ``put_bytes``, ``put_stream`` and the in-memory fake give the object id of
+    ``jsonutil.object_manifest`` — one rule, an empty object has no blocks."""
+    data = _noise(size, seed=size)
+    doc, parts = jsonutil.object_manifest(data, "application/octet-stream")
+    want = jsonutil.object_id(doc)
+    streamed = store.put_stream(io.BytesIO(data), media="application/octet-stream", cancelled=lambda: False)
+    for m in (store.put_bytes(data, "application/octet-stream"), streamed):
+        assert m.object_id == want and list(m.blocks) == [b for b, _ in parts]
+        assert blocks.manifest_doc(m) == doc
+    assert MemoryBlockStore().put_bytes(data, "application/octet-stream").object_id == want
+
+
+def test_stored_manifest_with_foreign_block_size_is_refused(store):
+    """K-1: readers accept only ``block_size == 524288``; a manifest file with another value (and a matching id)
+    is refused on read."""
+    doc = jsonutil.object_manifest_doc(_sha(b"x"), 1, 1024, [_sha(b"x")], "application/octet-stream")
+    oid = jsonutil.object_id(doc)
+    path = store.manifest_path(oid)
+    blocks.write_private(path, jsonutil.canonical_bytes(doc), store.root / "blocks" / "tmp")
+    with pytest.raises(BadRequest):
+        store.manifest(oid)
 
 
 def test_write_blocks_rejects_per_frame(store):
@@ -259,6 +297,7 @@ def test_frames_bad_magic_and_length():
 def test_block_gc_respects_live_jobs(store, ledger):
     live = store.put_bytes(_noise(BLOCK_SIZE + 5, seed=3), "application/octet-stream")
     dead = store.put_bytes(_noise(100, seed=4), "application/octet-stream")
+    _age(store, dead)  # cached before the live job began (newer blocks are kept while it runs)
     ledger.create_job("01JOBLIVE00000000000000000", Role.TARGET, Mode.PUSH, None, {})
     ledger.job_object("01JOBLIVE00000000000000000", live.object_id)
     freed = store.gc(keep_days=0, max_bytes=0)
@@ -294,7 +333,9 @@ def _manifest_kept(store, ledger, m) -> bool:
 def test_manifest_gc_collects_finished_and_aborted_jobs(plugin_data, ledger, monkeypatch):
     """★ R28: ``release_job(keep=False)`` and ``gc`` remove the manifest files and ``objects`` rows of objects that
     no non-terminal job references (committed and aborted jobs, unreferenced objects); objects of a live job — also
-    one shared with a finished job — keep both, and so does a manifest (re-)stored within the grace window.
+    one shared with a finished job — keep both, and so does a manifest (re-)stored within the grace window. The
+    finished jobs' objects were stored before the live job began (``_age``): what is touched while a job runs
+    stays until it ends (``test_gc_keeps_objects_in_flight_of_a_running_job``).
 
     Red proof: mutant = ``release_job`` and ``gc`` without ``self.collect_manifests(…)`` → the aborted job's
     manifest file is still there after ``release_job(keep=False)``.
@@ -310,6 +351,7 @@ def test_manifest_gc_collects_finished_and_aborted_jobs(plugin_data, ledger, mon
     m_live = store.put_bytes(_noise(800, seed=13), "application/json")
     m_shared = store.put_bytes(_noise(900, seed=14), "application/json")
     m_orphan = store.put_bytes(_noise(1000, seed=15), "application/json")
+    _age(store, m_done, m_aborted, m_shared, m_orphan)
     for job, m in ((done, m_done), (done, m_shared), (aborted, m_aborted), (live, m_live), (live, m_shared)):
         ledger.job_object(job, m.object_id)
     end_job(ledger, done, Role.TARGET, "committed")
@@ -354,3 +396,113 @@ def test_manifest_gc_grace_covers_store_before_job_object(plugin_data, ledger):
     assert store.collect_manifests() == 1
     assert _manifest_gone(store, ledger, old)
     assert _manifest_kept(store, ledger, fresh)
+
+
+def test_gc_keeps_objects_in_flight_of_a_running_job(plugin_data, ledger):
+    """★ Befund d: an object a running job stored but has not registered with itself yet keeps its blocks and
+    manifest over the cache cap — through ``gc`` and through ``release_job(keep=False)`` of a finished job whose
+    cached blocks it re-uses — whether the job wrote new blocks (``put_bytes``), stored an identical object again,
+    or found old blocks present through ``missing`` and stored only the rest and the manifest (the sink protocol
+    ``gitops.put_stream`` uses). Untouched cache still goes, and once no job runs the same GC frees everything.
+
+    Red proofs: mutant = ``_protect_since`` returns ``math.inf`` (no protection) → the in-flight objects lose
+    their blocks (reading ``new`` raises ``NotFound``); mutant = ``missing`` without ``_touch`` (ledger LRU only)
+    → the manifest-only object loses its re-used block.
+    """
+    store = BlockStore(plugin_data, ledger, cache_bytes=0, cache_days=3)
+    data_a = _noise(2 * BLOCK_SIZE + 11, seed=41)
+    data_b = _noise(BLOCK_SIZE + 12, seed=42)
+    finished = ulid()
+    ledger.create_job(finished, Role.TARGET, Mode.PUSH, None, {})
+    old_a = store.put_bytes(data_a, "application/octet-stream")
+    old_b = store.put_bytes(data_b, "application/octet-stream")
+    for m in (old_a, old_b):
+        ledger.job_object(finished, m.object_id)
+    end_job(ledger, finished, Role.TARGET, "committed")
+    _age(store, old_a, old_b)  # the cache of an earlier handover
+
+    running = ulid()
+    ledger.create_job(running, Role.TARGET, Mode.PUSH, None, {})
+    data_new = _noise(BLOCK_SIZE + 13, seed=43)
+    new = store.put_bytes(data_new, "application/octet-stream")
+    again = store.put_bytes(data_a, "application/octet-stream")
+    assert again == old_a
+    tail = _noise(100, seed=44)
+    parts = [(old_b.blocks[0], data_b[:BLOCK_SIZE]), (_sha(tail), tail)]
+    need = store.missing([b for b, _ in parts])
+    assert need == [_sha(tail)]
+    store.write_blocks([(b, raw) for b, raw in parts if b in need])
+    data_mixed = data_b[:BLOCK_SIZE] + tail
+    mixed = blocks.verify_manifest(
+        ObjectManifest(
+            sha256=_sha(data_mixed),
+            size=len(data_mixed),
+            block_size=BLOCK_SIZE,
+            blocks=tuple(b for b, _ in parts),
+            media="application/octet-stream",
+        )
+    )
+    store.put_manifests([mixed])
+
+    store.gc(keep_days=3, max_bytes=0)  # every block not live is beyond the cap
+    store.release_job(finished, keep=False)
+    for m, data in ((new, data_new), (again, data_a), (mixed, data_mixed)):
+        with store.open_object(m.object_id) as fh:
+            assert fh.read() == data
+    assert not store.has(old_b.blocks[1])  # the cache nobody touched went
+    assert not store.manifest_path(old_b.object_id).exists()
+
+    for m in (new, again, mixed):
+        ledger.job_object(running, m.object_id)
+    end_job(ledger, running, Role.TARGET, "aborted")
+    store.gc(keep_days=3, max_bytes=0)
+    assert not [b for m in (new, again, mixed) for b in m.blocks if store.has(b)]
+
+
+def test_gc_spares_a_block_stored_again_while_aside(store, ledger, monkeypatch):
+    """A writer that comes while GC has a block renamed aside finds it missing and stores it again; GC then deletes
+    only its own renamed copy, and the block keeps its ledger row (it is cached again)."""
+    raw = _noise(300, seed=51)
+    block_id = store.put(raw)
+    os.utime(store.block_path(block_id), (time.time() - 3600,) * 2)
+    real = store._protect_since
+
+    def writer_comes() -> float:
+        assert not store.has(block_id)  # aside
+        assert store.missing([block_id]) == [block_id]
+        assert store.write_blocks([(block_id, raw)]) == (1, [])
+        return real()
+
+    monkeypatch.setattr(store, "_protect_since", writer_comes)
+    assert store.gc(keep_days=0, max_bytes=0) == 0
+    assert store.get(block_id) == raw
+    assert block_id in ledger.gc_candidates(math.inf, 0)
+    assert not [p for p in (store.root / "blocks" / "tmp").iterdir() if p.name.startswith("gc.")]
+
+
+def test_gc_puts_back_blocks_a_dead_gc_left_aside(store, ledger):
+    """A GC that died between renaming a block aside and deciding on it does not lose the block: the next GC puts
+    it back (restoring an unneeded block only keeps it cached)."""
+    raw = _noise(400, seed=52)
+    block_id = store.put(raw)
+    done = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True, check=True
+    )
+    tomb = store.root / "blocks" / "tmp" / f"gc.{block_id}.{int(done.stdout)}.1.1"
+    os.rename(store.block_path(block_id), tomb)
+    store.gc(keep_days=3, max_bytes=1 << 40)
+    assert store.get(block_id) == raw and not tomb.exists()
+
+
+def test_gc_protection_reaches_back_at_most_a_day(store, monkeypatch):
+    """A job stuck for days (suspended, crashed) does not switch off the cache cap for good: the protection of
+    objects in flight starts at the oldest running job, but no earlier than ``MAX_IN_FLIGHT_S`` ago."""
+    now = time.time()
+    monkeypatch.setattr(store._ledger, "jobs", lambda **kw: [{"created_at": now - 600}])
+    assert store._protect_since() == pytest.approx(now - 600 - blocks.GC_SLACK_S, abs=1)
+    monkeypatch.setattr(store._ledger, "jobs", lambda **kw: [{"created_at": now - 3 * 86_400}, {"created_at": now}])
+    assert store._protect_since() == pytest.approx(now - blocks.MAX_IN_FLIGHT_S, abs=5)
+    monkeypatch.setattr(store._ledger, "jobs", lambda **kw: [])
+    assert store._protect_since() == math.inf
+    monkeypatch.setattr(store._ledger, "jobs", lambda **kw: [{"created_at": None}])  # unknown start: keep a day
+    assert store._protect_since() == pytest.approx(now - blocks.MAX_IN_FLIGHT_S, abs=5)

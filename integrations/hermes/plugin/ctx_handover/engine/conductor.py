@@ -25,8 +25,16 @@ Transcript rows appended during the handover come back from the source's prepare
 ``delta`` (applied to the hidden import, re-verified); any other change restarts the export
 (``TARGET_RESETTING``) and a changed work tree re-packs, both bounded by the restart counter (≤ 3) [R3, SK H2].
 
-Planning helpers of cluster D (confirmation reasons, choices, pre-send summary, plan id) are reached through a
-``planning`` port (default: the real ``plan`` module, imported lazily) so this module runs against fakes.
+Planning helpers of cluster D (confirmation reasons, choices, pre-send summary, plan id, instruction files, note
+parts) are reached through a ``planning`` port (default: the real ``plan`` module, imported lazily); a fake must
+offer the same functions. The confirmed FinalPlan is what the whole job uses: ``plan.apply_choice`` runs on every
+``yes``/``no_proposed`` (R25), and when that changed the plan the target negotiates it again, so the target holds
+exactly the plan the source packs (contract X02, X06). An import takes the bundle's FinalPlan over instead of
+negotiating a new one (X02).
+
+Every object the conductor reads from a source goes through ``VerifiedBlocks``: each manifest is checked against
+the id it was asked for (contract K-1, ``jsonutil.check_object_manifest``) before a document is parsed or a block
+is moved.
 """
 
 from __future__ import annotations
@@ -58,12 +66,21 @@ from .errors import (
     RestartLimit,
     SessionBusy,
     StaleSession,
+    VerifyFailed,
     VersionUnsupported,
     WaitTimeout,
     error_class,
 )
-from .jsonutil import from_wire, sha256_hex, to_wire
+from .jsonutil import (
+    check_object_manifest,
+    from_wire,
+    loads_bounded,
+    object_manifest_doc,
+    sha256_hex,
+    to_wire,
+)
 from .ledger import Fenced, Ledger, process_owner
+from .local_source import LocalSource
 from .model import (
     CapsuleInfo,
     CommitAck,
@@ -89,7 +106,8 @@ from .model import (
     SessionInfo,
     SessionRef,
 )
-from .ops import object_closure
+from .ops import object_closure, read_object
+from .plan import CONFIRM_PROPOSED, SUSPECTED_SECRET
 
 S = ConductorState
 MiB = 1024 * 1024
@@ -114,6 +132,8 @@ LEASE_STATES = (SUSPENDABLE - {S.LOCKING}) | PREPARE_PHASE | {S.COMMITTING, S.IN
 FORWARD_STATES = frozenset({S.COMMITTING, S.IN_DOUBT, S.COMMITTED, S.RETIRING, S.RETIRED, S.CONTINUING})
 
 REQUIRED_CAPS = ("session.v1", "blocks.v1")
+ANSWERS = frozenset({"yes", "no_proposed", "show_plan", "cancel"})
+"""The answers ``confirm(info)`` may give (DESIGN §14.1, W112); anything else ends the job like ``cancel``."""
 
 
 @dataclass(frozen=True)
@@ -168,6 +188,32 @@ def _encode(value: object) -> object:
 # ---------------------------------------------------------------------------------------------------------
 # object closure and block mover (DESIGN §4.6)
 # ---------------------------------------------------------------------------------------------------------
+
+
+class VerifiedBlocks:
+    """A ``BlockSource`` view that checks every manifest against the id it was asked for (contract K-1).
+
+    Exactly one manifest per requested id, in request order; each must be a v1 ``ctxh.object`` manifest with block
+    size 524 288 whose recomputed ``object_id`` equals the requested id (``jsonutil.check_object_manifest``:
+    ``BadRequest`` for a malformed manifest, ``BlockCorrupt`` for an id mismatch). Blocks are passed through; the
+    readers verify each block's sha256 and the content hash."""
+
+    def __init__(self, src: BlockSource) -> None:
+        self._src = src
+
+    def manifests(self, object_ids: Sequence[str]) -> list[ObjectManifest]:
+        ids = list(object_ids)
+        got = list(self._src.manifests(ids))
+        if len(got) != len(ids):
+            raise BlockCorrupt("the source returned another number of manifests", asked=len(ids), got=len(got))
+        out: list[ObjectManifest] = []
+        for oid, m in zip(ids, got, strict=True):
+            check_object_manifest(object_manifest_doc(m.sha256, m.size, m.block_size, m.blocks, m.media), oid)
+            out.append(m if m.object_id == oid else replace(m, object_id=oid))
+        return out
+
+    def read_blocks(self, ids: Sequence[str]):
+        return self._src.read_blocks(ids)
 
 
 def _block_sizes(m: ObjectManifest) -> list[tuple[str, int]]:
@@ -315,9 +361,6 @@ def move_object(
 # ---------------------------------------------------------------------------------------------------------
 
 
-SUSPECTED_SECRET = "suspected_secret"  # noqa: S105 - plan item marker, not a secret
-
-
 def suspected_secrets(final: FinalPlan) -> list[str]:
     """Source paths of proposals the policy flagged as suspected secrets (``plan.SUSPECTED_SECRET`` in reasons)."""
     return [i.source_path for i in final.plan.items if i.include is Include.PROPOSED and SUSPECTED_SECRET in i.reasons]
@@ -437,6 +480,9 @@ class Conductor:
             while self._state not in STOP_STATES:
                 if not self._step():
                     break
+        if self._state not in STOP_STATES:
+            # parked for the janitor (in_doubt, retiring, aborting): the last report names that state (W111)
+            self._report(Progress(step=str(self._state)))
         return self._ack()
 
     def resume(self) -> CommitAck | None:
@@ -784,7 +830,7 @@ class Conductor:
         return bool(h.limits.hosted), min(self.poll.request_bytes, peer_max), peer_max
 
     def _move(self, root_id: str, *, src_side: str = "source") -> None:
-        src = self._side_blocks(self.source)
+        src = VerifiedBlocks(self._side_blocks(self.source))
         dst = self._side_blocks(self.target)
         cache: dict[str, bytes] = {}
         ids = object_closure(src, root_id, max_doc_bytes=self.poll.max_doc_bytes, cache=cache)
@@ -846,8 +892,32 @@ class Conductor:
         tf = self._get("target_facts", EnvFacts)
         st = self.source.start_plan(self.job, tf, self._session_ref)
         plan = from_wire(ResourcePlan, self._await(self.source, st))
+        if self.job.mode is Mode.IMPORT:
+            # contract X02: no new plan — the bundle's FinalPlan (id checked against the bundle manifest) is the
+            # plan of record; the target only decides where things go here (its decisions never change that id)
+            bundle = self._bundle_final()
+            final = self.target.negotiate(self.job, bundle.plan)
+            if to_wire(final.plan) != to_wire(bundle.plan):
+                raise VerifyFailed("the target changed the bundle's plan", which="plan")
+            self._go(S.NEGOTIATED, plan=bundle.plan, final_plan=final, bundle_plan_id=bundle.plan_id, confirmed=False)
+            return
         final = self.target.negotiate(self.job, plan)
         self._go(S.NEGOTIATED, plan=plan, final_plan=final, confirmed=False)
+
+    def _bundle_final(self) -> FinalPlan:
+        """The FinalPlan an import bundle carries, read through ``VerifiedBlocks`` (size-capped, id-checked) from the
+        bundle source (``BundleSource.manifest``/``blocks()``), its ``plan_id`` recomputed by the one rule (DESIGN
+        §8.6) and compared with the bundle manifest's ``plan_id``."""
+        manifest = self.source.manifest
+        blocks = VerifiedBlocks(self.source.blocks())
+        raw = read_object(blocks, str(manifest["final_plan_id"]), max_bytes=self.poll.max_doc_bytes)
+        final = from_wire(FinalPlan, loads_bounded(raw, max_bytes=self.poll.max_doc_bytes))
+        doc = to_wire(final)
+        doc.pop("plan_id", None)
+        computed = self._planner().plan_id(doc)
+        if computed != final.plan_id or computed != manifest.get("plan_id"):
+            raise VerifyFailed("the bundle's final plan does not match its manifest", which="final_plan_id")
+        return final
 
     def _confirm(self, *, interactive: bool) -> FinalPlan:
         """Confirmation after NEGOTIATED (DESIGN §14.1): ``yes`` / ``no_proposed`` / ``show_plan`` / ``cancel``;
@@ -860,15 +930,20 @@ class Conductor:
         planner = self._planner()
         instructions = self._instruction_files(final)
         offline = bool(sf and sf.offline_capable)
-        if instructions:
-            reasons = list(planner.confirmation_reasons(final, self.job.options, offline, instructions=instructions))
-        else:
-            reasons = list(planner.confirmation_reasons(final, self.job.options, offline))
+        # reason (d) only from the local source's own policy (X07): a local --include-secret is in its
+        # PolicyConfig; a remote or bundle source releases no secret on this side's word
+        cfg = self.source.policy if isinstance(self.source, LocalSource) else None
+        reasons = list(
+            planner.confirmation_reasons(final, self.job.options, offline, instructions=instructions, cfg=cfg)
+        )
+        importing = self.job.mode is Mode.IMPORT
+        if importing:  # the pack holds what the export confirmed; nothing is left to choose here (X02)
+            reasons = [r for r in reasons if r != CONFIRM_PROPOSED]
         choice: str | None = "yes"
         if reasons and not self.job.options.yes:
             choice = None
             if interactive and self.confirm is not None:
-                summary = planner.presend_summary(final)
+                summary = planner.presend_summary(final, instructions=instructions)
                 choice = self.confirm(
                     {
                         "reasons": reasons,
@@ -879,7 +954,9 @@ class Conductor:
                     }
                 )
             if choice is None:
-                choice = "no_proposed" if set(reasons) <= {"proposed"} else "cancel"
+                choice = "no_proposed" if set(reasons) <= {CONFIRM_PROPOSED} else "cancel"
+            elif choice not in ANSWERS:
+                choice = "cancel"  # an answer outside yes/no_proposed/show_plan/cancel never goes ahead (W112)
         if self.job.options.dry_run and choice not in ("show_plan", "cancel"):
             choice = "dry_run"  # the plan is shown, nothing is locked (W113)
         if choice in ("show_plan", "cancel", "dry_run"):
@@ -889,40 +966,44 @@ class Conductor:
             self._fail(err)
             self._drain_abort()
             raise err
-        if choice in ("yes", "no_proposed") and any(i.include is Include.PROPOSED for i in final.plan.items):
-            # "yes" takes proposals along except suspected secrets (R25, plan.apply_choice); "no_proposed" drops them
-            final = planner.apply_choice(final, choice)
-        self._note(final_plan=final, confirmed=True, choice=choice, reasons=reasons)
+        if not importing:
+            # always (X06): "yes" takes proposals along except suspected secrets (R25), "no_proposed" drops them
+            final = self._settle(final, choice)
+        self._note(final_plan=final, confirmed=True, choice=choice, reasons=reasons, instructions=instructions)
         return final
+
+    def _settle(self, negotiated: FinalPlan, choice: str, drop: frozenset[str] = frozenset()) -> FinalPlan:
+        """The confirmed FinalPlan: ``drop`` items excluded, ``plan.apply_choice(choice)`` applied — and when that
+        changed the plan, the target negotiates the confirmed plan again so it holds exactly the plan the source
+        packs (a bundle stores it, X02; the staging quota covers only what was confirmed, R28)."""
+        final = self._drop_items(negotiated, set(drop)) if drop else negotiated
+        final = self._planner().apply_choice(final, choice)
+        if final.plan_id == negotiated.plan_id:
+            return final
+        again = self.target.negotiate(self.job, final.plan)
+        if to_wire(again.plan) != to_wire(final.plan):
+            raise VerifyFailed("the target changed the confirmed plan", which="plan")
+        return again
 
     def _instruction_files(self, final: FinalPlan) -> list[dict]:
         """Instruction files new or different here that arrive from an unverified source — a pull from a remote
         source or an unverified bundle (DESIGN §8.7, SEC 4.3, reason g). Read on the target, i.e. here."""
         mode = self.job.mode
-        if mode is Mode.PULL or (mode is Mode.IMPORT and not bool(getattr(self.source, "verified", False))):
-            fn = getattr(self._planner(), "instruction_files", None)
-            if callable(fn):
-                dests = {d.item_id: d.dest for d in final.decisions}
-                try:
-                    return list(fn(final.plan.items, lambda item_id: dests.get(item_id)))
-                except HandoverError:
-                    return []
+        if mode is Mode.PULL or (mode is Mode.IMPORT and not self.source.verified):
+            dests = {d.item_id: d.dest for d in final.decisions}
+            try:
+                return list(self._planner().instruction_files(final.plan.items, lambda item_id: dests.get(item_id)))
+            except HandoverError:
+                return []
         return []
 
     def _negotiated(self) -> None:
+        """After the confirmation: the pre-send summary (DESIGN §8.7, SEC 5.8) is journaled as the structured
+        ``plan.presend_summary`` document (ctx ``presend``); the surfaces render it — no text line from here."""
         self._check_cancel()
         final = self._confirm(interactive=False)
-        try:
-            summary = self._planner().presend_summary(final)
-        except HandoverError:
-            raise
-        except Exception:
-            summary = {}
-        with contextlib.suppress(Exception):
-            self.job.reporter.info(
-                "Handover summary: " + ", ".join(f"{k}={v}" for k, v in sorted(dict(summary).items()))
-            )
-        self._go(S.LOCKING)
+        presend = self._planner().presend_summary(final, instructions=self._ctx.get("instructions") or ())
+        self._go(S.LOCKING, presend=dict(presend))
 
     def _locking(self) -> None:
         self._check_cancel()
@@ -961,22 +1042,20 @@ class Conductor:
     def _replan(self) -> None:
         """Revision moved between plan and lock: deterministic re-plan (refine off) and re-negotiation; new
         proposals are excluded in this non-interactive part (DESIGN §3.2 LOCKED)."""
-        old = self._get("final_plan", FinalPlan)
-        old_ids = {i.item_id for i in old.plan.items}
-        old_proposed = {i.item_id for i in old.plan.items if i.include is Include.PROPOSED}
+        old = self._get("plan", ResourcePlan)  # the plan the user confirmed proposals of (before the choice)
+        old_ids = {i.item_id for i in old.items}
+        old_proposed = {i.item_id for i in old.items if i.include is Include.PROPOSED}
         job_off = replace(self.job, options=replace(self.job.options, refine="off"))
         tf = self._get("target_facts", EnvFacts)
         plan = from_wire(ResourcePlan, self._await(self.source, self.source.start_plan(job_off, tf, self._session_ref)))
-        final = self.target.negotiate(self.job, plan)
+        negotiated = self.target.negotiate(self.job, plan)
         excluded = sorted(
             i.item_id
-            for i in final.plan.items
+            for i in negotiated.plan.items
             if i.include is Include.PROPOSED and (i.item_id not in old_ids or i.item_id not in old_proposed)
         )
-        if self._ctx.get("choice") == "no_proposed":
-            excluded = sorted({*excluded, *(i.item_id for i in final.plan.items if i.include is Include.PROPOSED)})
-        if excluded:
-            final = self._drop_items(final, set(excluded))
+        choice = self._ctx.get("choice") if self._ctx.get("choice") in ("yes", "no_proposed") else "no_proposed"
+        final = self._settle(negotiated, choice, frozenset(excluded))
         self._info("replanned", excluded_proposed=excluded, revision=list(plan.revision))
         self._note(plan=plan, final_plan=final, replanned=True)
 
@@ -1044,30 +1123,23 @@ class Conductor:
         self._go(S.TARGET_PREPARING)
 
     def _note_parts(self) -> dict:
+        """``PrepareRequest.note_parts`` (contract X16): exactly ``plan.note_parts_from`` — lists and flags only, every
+        key one ``note.compose`` renders: ``source_kept`` when an imported bundle is a copy (O3), the instruction
+        files of the confirmation, ``pack_time`` ("Workspace snapshot taken …", DESIGN §11.3) and the session title
+        (also the bundle's title). Conductor facts the note does not render (mode, deltas, restarts, free-text
+        warnings) are not sent; the plan's free text travels in the FinalPlan the target holds."""
         final = self._get("final_plan", FinalPlan)
-        base = self._conductor_note_parts(final)
-        fn = getattr(self._planner(), "note_parts_from", None)
-        if callable(fn) and final is not None:
-            kept = (
-                bool(getattr(self.source, "is_copy", False))
-                if self.job.mode is Mode.IMPORT
-                else bool(self.job.options.keep_source and self.job.mode is Mode.EXPORT)
+        info = self._get("info", SessionInfo)
+        kept = self.job.mode is Mode.IMPORT and bool(self.source.is_copy)
+        return dict(
+            self._planner().note_parts_from(
+                final,
+                source_kept=kept,
+                instruction=self._ctx.get("instructions") or (),
+                pack_time=self._ctx.get("pack_time"),
+                title=info.title if info is not None else None,
             )
-            try:
-                return dict(fn(final, source_kept=kept, extra=base))
-            except HandoverError:
-                return base
-        return base
-
-    def _conductor_note_parts(self, final: FinalPlan | None) -> dict:
-        return {
-            "mode": str(self.job.mode),
-            "pack_time": self._ctx.get("pack_time"),
-            "deltas": int(self._ctx.get("deltas") or 0),
-            "restarts": int((self.ledger.job(self.job.job_id, Role.CONDUCTOR) or {}).get("restarts") or 0),
-            "warnings": list(self._ctx.get("warnings") or []),
-            "notes_for_target": final.plan.notes_for_target if final else "",
-        }
+        )
 
     def _target_preparing(self) -> None:
         self._check_cancel()
@@ -1075,7 +1147,7 @@ class Conductor:
         req = PrepareRequest(
             capsule=self._get("capsule", CapsuleInfo),
             pack=self._get("pack", PackInfo),
-            final_plan_id=final.plan_id,
+            final_plan_id=self._ctx.get("bundle_plan_id") or final.plan_id,
             source_facts=self._get("source_facts", EnvFacts),
             note_parts=self._note_parts(),
             continue_requested=bool(self.continue_prompt),

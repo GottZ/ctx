@@ -20,6 +20,7 @@ from ctx_handover.engine.errors import (
     HttpsRequired,
     ListenerMissing,
     NotFound,
+    PairInvalid,
     PayloadTooLarge,
     PeerUnreachable,
     RateLimited,
@@ -423,8 +424,43 @@ def test_probe_gate_reports_layers(tmp_path, spawn_listener, token, host):
     report = d.client(peer).probe_gate(measure_limit=True)
     assert report["gate"] == "ok" and report["plugin"] is True and report["signed"] is True
     assert 2 * 1024**2 <= report["body_limit"] < 4 * 1024**2
+    # W121: the summary next to the layer keys — works, with a warning about the proxy limit
+    assert report["ok"] is None and "proxy limits request bodies to 2 MiB" in report["detail"]
+    assert "8 MiB" in report["remedy"]
+    full = d.client(peer).probe_gate()
+    assert (full["ok"], full["remedy"]) == (True, None) and "valid signature" in full["detail"]
     host.secrets["CTX_HANDOVER_PEER_TOKEN"] = "wrong"
-    assert d.client(peer).probe_gate()["gate"] == "rejected"
+    rejected = d.client(peer).probe_gate()
+    assert rejected["gate"] == "rejected" and rejected["ok"] is False
+    assert "refused the stored credential (session_token)" in rejected["detail"] and rejected["remedy"]
+    lst.stop()
+    gone = d.client(peer, max_attempts=1).probe_gate()
+    assert (gone["gate"], gone["ok"]) == ("unreachable", False) and "did not answer" in gone["detail"]
+
+
+def test_wire_pairing_refusal_is_read_not_taken_for_the_gate(tmp_path, spawn_listener, token):
+    """A listener's signed refusal of the redeem (a code already used) reaches the dialer as ``pair_invalid``:
+    the dialer pins the fingerprint-checked key of the unsigned ``hello`` for the redeem. Without it the signed
+    401 was read like an unsigned one — "the dashboard rejected the access credential" (``gate_rejected``)."""
+    lst = spawn_listener(gate_token=token)
+    code = pairing.create_code(lst.ledger, rights=ALL, name_hint="laptop", ttl_s=600)
+    text = pairing.pair_string(code, url=lst.base_url, fingerprint=lst.identity.fingerprint(), name="s", profile=None)
+    first, second = Dialer(tmp_path, "first"), Dialer(tmp_path, "second")
+
+    def redeem(d: Dialer) -> Peer:
+        return pairing.redeem_dialer(
+            d.client,
+            d.identity,
+            pairing.parse_pair_string(text),
+            name="server",
+            gate=GateAuth(mode=GateMode.SESSION_TOKEN),
+            allow_insecure=False,
+            ledger=d.ledger,
+        )
+
+    assert redeem(first).pubkey == lst.identity.public_b64()
+    with pytest.raises(PairInvalid):
+        redeem(second)
 
 
 def test_doctor_warns_deployment_token_and_readable_env():

@@ -18,13 +18,13 @@ import re
 import secrets
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .crypto import Identity, b64d, b64e, consteq, fingerprint_of, length_prefixed, pair_proof, random_b64
 from .errors import BadRequest, BadResponseSignature, PairInvalid
-from .ids import CROCKFORD_ALPHABET, ulid
+from .ids import CROCKFORD_ALPHABET, ULID_RE, ulid
 from .jsonutil import canonical_bytes, loads_bounded, sha256_hex
 from .model import GateAuth, Hello, Peer, Right
 
@@ -42,7 +42,6 @@ RESP_TAG = "ctxh-pair-resp-v1"
 
 _CODE_RE = re.compile(r"CTXH-([0-9A-HJKMNP-TV-Z]{6})-([0-9A-HJKMNP-TV-Z]{16})")
 _CODE_ID_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{6}")
-_ULID_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
 _FP_RE = re.compile(r"[0-9a-f]{16}")
 _B64_43 = re.compile(r"[A-Za-z0-9_-]{43}")
 _B64_22 = re.compile(r"[A-Za-z0-9_-]{22}")
@@ -231,7 +230,7 @@ def _check_redeem_body(body: object) -> dict:
         ("code_id", body["code_id"], _CODE_ID_RE),
         ("client_nonce", body["client_nonce"], _B64_22),
         ("proof", body["proof"], _B64_43),
-        ("dialer.instance_id", dialer["instance_id"], _ULID_RE),
+        ("dialer.instance_id", dialer["instance_id"], ULID_RE),
         ("dialer.pubkey", dialer["pubkey"], _B64_43),
     )
     for field, value, pattern in checks:
@@ -371,13 +370,15 @@ def redeem_dialer(
         self_name=self_name if self_name is not None else _hostname(),
         plugin_version=PLUGIN_VERSION,
     )
-    resp = client.redeem(body)
+    # The listener key is known now (fingerprint-checked): its signed answer to the redeem — success or a refusal
+    # such as ``pair_invalid`` — is verified and read, never taken for an unsigned gate or proxy signal.
+    resp = client_factory(replace(provisional, pubkey=hello.listener_pubkey)).redeem(body)
     try:
         peer_id = resp["peer_id"]
         listener = resp["listener"]
         rights = frozenset(Right(r) for r in resp["rights"])
         server_proof = resp["server_proof"]
-        if not isinstance(peer_id, str) or not _ULID_RE.fullmatch(peer_id) or not rights:
+        if not isinstance(peer_id, str) or not ULID_RE.match(peer_id) or not rights:
             raise ValueError
     except (KeyError, TypeError, ValueError):
         raise BadResponseSignature("malformed pairing response") from None

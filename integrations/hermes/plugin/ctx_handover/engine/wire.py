@@ -607,22 +607,26 @@ class WireClient:
     def probe_gate(self, *, measure_limit: bool = False) -> dict:
         """``doctor``: which layer answers (gate, plugin, proxy) and, with ``measure_limit``, the largest request
         body (1, 2, 4, 8 MiB) that reaches the plugin — measured with signed requests to an unknown job, which the
-        plugin reads completely and answers ``not_found``."""
+        plugin reads completely and answers ``not_found``.
+
+        Keys: ``gate`` (``ok``/``rejected``/``unreachable``), ``plugin``, ``signed``, ``error`` (an error code),
+        ``body_limit`` (bytes, with ``measure_limit``) and the summary ``ok`` (True, None = works with a warning,
+        False), ``detail`` and ``remedy`` (None when nothing is to do) — W121."""
         report: dict = {"gate": "unknown", "plugin": False, "signed": False}
         try:
             self.hello(signed=bool(self.peer.pubkey and self.peer.peer_id))
         except GateRejected as exc:
             report.update(gate="rejected", error=exc.code)
-            return report
+            return self._summary(report)
         except ListenerMissing as exc:
             report.update(gate="ok", error=exc.code)
-            return report
+            return self._summary(report)
         except PeerUnreachable as exc:
             report.update(gate="unreachable", error=exc.code)
-            return report
+            return self._summary(report)
         except HandoverError as exc:
             report.update(gate="ok", plugin=True, error=exc.code)
-            return report
+            return self._summary(report)
         report.update(gate="ok", plugin=True, signed=self._hello is not None)
         if measure_limit and self._hello is not None:
             passed = 0
@@ -645,6 +649,36 @@ class WireClient:
                     pass  # the plugin read the body and refused the job: the size passed every proxy
                 passed = size
             report["body_limit"] = passed
+        return self._summary(report)
+
+    def _summary(self, report: dict) -> dict:
+        """``ok``/``detail``/``remedy`` of a ``probe_gate`` report (the layer that answered decides)."""
+        name, mode = self.peer.name, (str(self.peer.gate.mode) if self.peer.gate is not None else "none")
+        error = report.get("error") or ""
+        if report["gate"] == "unreachable":
+            ok, detail = False, f"{self.peer.url or name} did not answer ({error})"
+            remedy = f"check the address, TLS and the network or VPN, and that the dashboard of {name} runs"
+        elif report["gate"] == "rejected":
+            ok, detail = False, f"the dashboard gate of {name} refused the stored credential ({mode})"
+            remedy = f"store the current dashboard credential of {name} for this peer (gate mode {mode})"
+        elif not report["plugin"]:
+            ok, detail = False, f"the dashboard of {name} answered, ctx_handover did not ({error})"
+            remedy = f"install and enable ctx_handover on {name}; its inbound must be open (pair again)"
+        elif error or not report["signed"]:
+            ok, detail = False, f"ctx_handover on {name} answered without a valid signed hello ({error or 'unsigned'})"
+            remedy = f"pair again with {name} if its key changed (/handover pair)"
+        else:
+            ok, detail, remedy = True, "dashboard gate passed, ctx_handover answered with a valid signature", None
+            limit = report.get("body_limit")
+            if isinstance(limit, int) and limit < 8 * MIB:
+                ok = None
+                detail += (
+                    f"; a proxy limits request bodies to {limit // MIB} MiB"
+                    if limit
+                    else "; a proxy limits request bodies below 1 MiB"
+                )
+                remedy = "raise the body limit of the proxy in front of it to 8 MiB (transfers stay smaller)"
+        report.update(ok=ok, detail=detail, remedy=remedy)
         return report
 
 

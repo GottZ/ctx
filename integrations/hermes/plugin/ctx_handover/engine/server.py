@@ -13,19 +13,26 @@ the signed path, SEC 1.4) and the body as an async chunk stream. Processing orde
    (cut as soon as it is exceeded) → body hash → signature → nonce;
 5. per-peer rate limit, handler, signed response (``X-Ctxh-Resp-Sig``).
 
-Handlers delegate to the participant registry (cluster A, ``participant.ParticipantRegistry``); the server
-itself owns no job state. It calls: ``open``, ``get``, ``job_context`` (requested from A), ``list_sessions``,
-``offers``, ``claim``, ``touch``, ``abort_jobs``. Ledger methods used: ``peers``, ``pairing_pending``,
-``inbound_peer``, ``nonce_seen``, ``touch_peer``, ``revoke_peer``, ``job``, ``jobs``, ``job_object``,
-``job_objects`` (requested from A), ``set_cancel`` and the pairing methods through ``pairing``.
+Handlers delegate to the participant registry (cluster A, ``participant.ParticipantRegistry``), which owns every
+job rule — binding to the peer, role ↔ right, epoch fencing, the concurrent-job caps and routes #8–#10 (contract
+X18); the server itself owns no job state and no job logic. It calls: ``open``, ``get``, ``context``,
+``status``, ``heartbeat``, ``cancel``, ``list_sessions``, ``offers``, ``claim``, ``abort_jobs``. Ledger methods
+used: ``meta_get`` (identity rotation), ``peers``, ``pairing_pending``, ``inbound_peer``, ``nonce_seen``,
+``touch_peer``, ``revoke_peer``, ``tx``, ``job_object``, ``job_objects`` and the pairing methods through
+``pairing``. Pulled objects are exactly ``ledger.job_objects(job_id)`` and their blocks (R18, contract X13).
+
+The identity is re-read when another process of the profile rotated it (``identity rotate`` writes a new
+``identity_pubkey``): the next request signs with the new key, or — when it cannot be loaded — the listener
+answers like a missing plugin; it never signs with a retired key.
 
 ``settings`` keys (all optional): ``inbound`` (auto|on|off), ``name``, ``max_request_mb`` (8),
 ``max_json_bytes`` (4 MiB), ``operator_api`` (False), ``hosted`` (False), ``capabilities`` (restricting
 iterable), ``plugin_version``, ``hermes_version``, ``rate_per_s`` (20), ``rate_burst`` (60),
-``max_jobs_per_peer`` (2), ``max_jobs_total`` (4), ``pair_failures_per_hour`` (30). The composition root passes
-the plugin settings as loaded from ``config.yaml`` plus ``hosted``/``plugin_version``/``hermes_version``, so values
-are normalised here: a bare YAML ``off``/``on`` arrives as a boolean and means ``off``/``on``, an unknown
-``inbound`` value keeps inbound closed, and a missing, non-numeric or non-positive number falls back to its default.
+``pair_failures_per_hour`` (30). The composition root passes the plugin settings as loaded from ``config.yaml``
+plus ``hosted``/``plugin_version``/``hermes_version``, so values are normalised here: a bare YAML ``off``/``on``
+arrives as a boolean and means ``off``/``on``, an unknown ``inbound`` value keeps inbound closed, a YAML boolean
+word for ``operator_api``/``hosted`` counts like the boolean, and a missing, non-numeric or non-positive number
+falls back to its default.
 """
 
 from __future__ import annotations
@@ -45,7 +52,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from . import CAPABILITIES_V1, PROTOCOL, WIRE_MAJOR, WIRE_MINOR
 from .blocks import BLOCK_SIZE, MEDIA_BLOCKS, ZSTD_AVAILABLE, decode_frames, encode_frame, verify_manifest
-from .crypto import H_RESP_SIG, Identity, request_string, response_string, verify
+from .crypto import H_RESP_SIG, META_PUBKEY, Identity, request_string, response_string, verify
 from .errors import (
     BadRequest,
     Forbidden,
@@ -55,6 +62,7 @@ from .errors import (
     RateLimited,
     Unauthorized,
 )
+from .ids import ULID_RE
 from .jsonutil import from_wire, loads_bounded, to_wire
 from .model import (
     AuthContext,
@@ -97,10 +105,9 @@ SERVER_MARK = "X-Ctxh-Server"
 _TIME_RE = re.compile(r"[0-9]{1,12}")
 _NONCE_RE = re.compile(r"[A-Za-z0-9_-]{22}")
 _SIG_RE = re.compile(r"[A-Za-z0-9_-]{86}")
-_ULID_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 _EPOCH_RE = re.compile(r"[0-9]{1,18}")
-_PARAM_RE = {"id": _ULID_RE, "offer_id": _ULID_RE}
+_PARAM_RE = {"id": ULID_RE, "offer_id": ULID_RE}
 
 PUSH, PULL = Right.PUSH, Right.PULL
 ROUTES: dict[tuple[str, str], tuple[str, Right | None]] = {
@@ -219,13 +226,17 @@ class PeerSignatureAuth:
         self._ttl = nonce_ttl_s
         self._clock = clock
 
+    def use_identity(self, identity: Identity) -> None:
+        """The listener's identity after a rotation (``Server`` calls it)."""
+        self._identity = identity
+
     def claims(self, headers: Mapping[str, str]) -> bool:
         return any(h in headers for h in ("x-ctxh-sig", "x-ctxh-peer"))
 
     def precheck(self, req: Request) -> AuthContext:
         h = req.headers
         fields = {
-            "x-ctxh-peer": _ULID_RE,
+            "x-ctxh-peer": ULID_RE,
             "x-ctxh-time": _TIME_RE,
             "x-ctxh-nonce": _NONCE_RE,
             "x-ctxh-body-sha256": _SHA_RE,
@@ -412,6 +423,19 @@ def _text(value: object) -> str:
     return "" if value is None else str(value)
 
 
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+
+
+def _flag(value: object) -> bool:
+    """A boolean setting: YAML booleans as they are, and the YAML 1.1 words (``yes``/``on``/``true``/``1``) when a
+    loader or the CLI hands them over as text; everything else — ``off``, ``no``, ``"false"``, None — is False."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUE_WORDS
+    return False
+
+
 def inbound_mode(value: object) -> str:
     """``inbound`` as ``auto``|``on``|``off`` (DESIGN §12.4). ``hermes_yaml`` reads a bare ``off``/``on`` as
     False/True; any other unknown value keeps inbound closed (``off``)."""
@@ -436,9 +460,12 @@ class Server:
         *,
         redact: Callable[[str], str] | None = None,
         clock: Callable[[], float] = time.time,
+        load_identity: Callable[[], Identity | None] | None = None,
     ) -> None:
         self._ledger = ledger
         self._identity = identity
+        self._load_identity = load_identity or self._load_profile_identity
+        self._identity_lock = threading.Lock()
         self._registry = registry
         self._settings = dict(settings or {})
         self._auths = list(authenticators)
@@ -466,7 +493,7 @@ class Server:
         return max(self.max_request_bytes, self.max_json_bytes)
 
     def operator_enabled(self) -> bool:
-        return bool(self._settings.get("operator_api")) and any(
+        return _flag(self._settings.get("operator_api")) and any(
             a.scheme == AuthScheme.OPERATOR_SESSION and getattr(a, "enabled", False) for a in self._auths
         )
 
@@ -541,9 +568,47 @@ class Server:
                 nonce,
             )
 
+    # -- identity ---------------------------------------------------------------------------------------------
+    def _load_profile_identity(self) -> Identity | None:
+        """Default loader: the profile's identity through ``hostcompat`` (``get_secret`` + a fresh ``.env`` read,
+        DESIGN §12.2) — the composition root may pass its own (``load_identity``)."""
+        from . import hostcompat
+
+        return Identity.load(self._ledger, read_secret=hostcompat.read_secret, read_env_fresh=hostcompat.read_env_fresh)
+
+    def current_identity(self) -> Identity | None:
+        """The identity this listener signs with, re-read when the ledger names another public key (``identity
+        rotate`` in another process of the profile). A key that cannot be loaded, or does not match the ledger,
+        gives None: the listener then answers like a missing plugin instead of signing with a retired key."""
+        expected = self._ledger.meta_get(META_PUBKEY)
+        current = self._identity
+        if (current.public_b64() if current is not None else None) == (expected or None):
+            return current
+        with self._identity_lock:
+            current = self._identity
+            if (current.public_b64() if current is not None else None) == (expected or None):
+                return current
+            fresh: Identity | None = None
+            if expected:
+                try:
+                    fresh = self._load_identity()
+                except Exception as exc:  # any failure to load keeps the listener closed, never on the old key
+                    code = exc.code if isinstance(exc, HandoverError) else type(exc).__name__
+                    log.warning("ctx_handover listener: identity not usable after a change (%s)", code)
+                if fresh is not None and fresh.public_b64() != expected:
+                    fresh = None
+            if fresh is not None:
+                for auth in self._auths:
+                    use = getattr(auth, "use_identity", None)
+                    if callable(use):
+                        use(fresh)
+                log.info("ctx_handover listener: identity changed to %s", fresh.fingerprint())
+            self._identity = fresh
+            return fresh
+
     # -- plumbing ---------------------------------------------------------------------------------------------
     def _inbound_active(self) -> bool:
-        if self._identity is None:
+        if self.current_identity() is None:
             return False
         if self.inbound == "off":
             return False
@@ -598,7 +663,7 @@ class Server:
             "block_size": BLOCK_SIZE,
             "max_ids_per_request": MAX_IDS,
             "max_json_bytes": self.max_json_bytes,
-            "hosted": bool(self._settings.get("hosted", False)),
+            "hosted": _flag(self._settings.get("hosted", False)),
         }
 
     # -- unsigned routes --------------------------------------------------------------------------------------
@@ -682,56 +747,23 @@ class Server:
 
     def _h_offer_claim(self, auth, params, body, req) -> dict:
         job_id = body.get("job_id")
-        if not isinstance(job_id, str) or not _ULID_RE.fullmatch(job_id):
+        if not isinstance(job_id, str) or not ULID_RE.match(job_id):
             raise BadRequest("job_id must be a ULID", field="job_id")
         return self._registry.claim(auth, params["offer_id"], job_id)
 
     def _h_jobs_open(self, auth, params, body, req) -> dict:
+        """Route #7: the wire format is checked here; role ↔ right, the job caps (``max_jobs_per_peer``,
+        ``max_jobs_total``) and idempotent re-opens are the registry's (contract X18)."""
         job_id = body.get("job_id")
-        if not isinstance(job_id, str) or not _ULID_RE.fullmatch(job_id):
+        if not isinstance(job_id, str) or not ULID_RE.match(job_id):
             raise BadRequest("job_id must be a ULID", field="job_id")
-        try:
-            role = Role(body.get("role"))
-        except ValueError:
-            raise BadRequest("role must be source or target", field="role") from None
-        if role == Role.CONDUCTOR:
-            raise BadRequest("role must be source or target", field="role")
-        needed = PULL if role == Role.SOURCE else PUSH
-        if needed not in auth.rights:
-            raise Forbidden("forbidden")
-        if not isinstance(body.get("epoch"), int):
-            raise BadRequest("epoch required", field="epoch")
-        self._check_job_caps(auth, job_id, role)
         return self._registry.open(auth, body)
 
-    def _check_job_caps(self, auth: AuthContext, job_id: str, role: Role) -> None:
-        if self._ledger.job(job_id, role) is not None:
-            return  # idempotent re-open is not a new job
-        rows = [
-            r
-            for r in (
-                *self._ledger.jobs(role=Role.SOURCE, active=True, limit=1000),
-                *self._ledger.jobs(role=Role.TARGET, active=True, limit=1000),
-            )
-        ]
-        per_peer = int(_positive(self._settings.get("max_jobs_per_peer"), 2))
-        total = int(_positive(self._settings.get("max_jobs_total"), 4))
-        mine = [r for r in rows if auth.peer is not None and r.get("peer_id") == auth.peer.peer_id]
-        if len(mine) >= per_peer or len(rows) >= total:
-            raise RateLimited("too many concurrent jobs on this listener", retry_after=60)
-
     # job plumbing
-    def _job_role(self, auth: AuthContext, job_id: str) -> Role:
-        peer_id = auth.peer.peer_id if auth.peer is not None else None
-        for role in (Role.SOURCE, Role.TARGET):
-            row = self._ledger.job(job_id, role)
-            if row is not None and (peer_id is None or row.get("peer_id") == peer_id):
-                return role
-        raise NotFound("job not found")
-
     def _participant(self, auth: AuthContext, job_id: str, role: Role) -> tuple[object, JobContext]:
+        """The job's participant API and ``JobContext`` from the registry (binding, right, epoch: contract X18)."""
         api = self._registry.get(auth, job_id, role)
-        job = self._registry.job_context(auth, job_id, role)
+        job = self._registry.context(auth, job_id, role)
         return api, job
 
     @staticmethod
@@ -750,32 +782,16 @@ class Server:
         return to_wire(status)
 
     def _h_job_status(self, auth, params, body, req) -> dict:
-        role = self._job_role(auth, params["id"])
-        api, job = self._participant(auth, params["id"], role)
-        self._registry.touch(params["id"])
-        return to_wire(api.status(job))
+        """Route #8 — the registry's (contract X18)."""
+        return to_wire(self._registry.status(auth, params["id"], body))
 
     def _h_job_heartbeat(self, auth, params, body, req) -> dict:
-        role = self._job_role(auth, params["id"])
-        api, job = self._participant(auth, params["id"], role)
-        self._registry.touch(params["id"])
-        if role == Role.SOURCE:
-            api.heartbeat(job)
-        status = api.status(job)
-        return {"state": status.state}
+        """Route #9 — the registry's (contract X18)."""
+        return self._registry.heartbeat(auth, params["id"], body)
 
     def _h_job_cancel(self, auth, params, body, req) -> dict:
-        cancel = getattr(self._registry, "cancel", None)
-        if callable(cancel):  # the registry applies the participant rules (prepared source / committing target refuse)
-            return cancel(auth, params["id"], body)
-        role = self._job_role(auth, params["id"])
-        api, job = self._participant(auth, params["id"], role)
-        reason = str(body.get("reason", "cancelled"))[:200]
-        if role == Role.SOURCE:
-            api.start_release(job, reason)
-        else:
-            api.abort(job, reason)
-        return {"state": api.status(job).state}
+        """Route #10 — the registry's: a prepared source or a committing target refuse (contract X18)."""
+        return self._registry.cancel(auth, params["id"], body)
 
     # source routes
     def _src(self, auth, params):
@@ -909,14 +925,17 @@ class Server:
         return to_wire(api.negotiate(job, self._decode(ResourcePlan, body, "plan")))
 
     def _h_objects_put(self, auth, params, body, req) -> dict:
-        api, _job = self._tgt(auth, params)
+        """Route #23: the manifests are stored and registered with the job in one ledger transaction, so block GC
+        never sees a received object that belongs to no job (Befund d)."""
+        api, job = self._tgt(auth, params)
         raw = body.get("manifests")
         if not isinstance(raw, list) or len(raw) > MAX_OBJECT_IDS:
             raise BadRequest(f"manifests must hold at most {MAX_OBJECT_IDS} entries", field="manifests")
         ms = [verify_manifest(from_wire(ObjectManifest, m)) for m in raw]
-        stored = self._sink(api, _job).put_manifests(ms)
-        for m in ms:
-            self._ledger.job_object(params["id"], m.object_id)
+        with self._ledger.tx():
+            stored = self._sink(api, job).put_manifests(ms)
+            for m in ms:
+                self._ledger.job_object(params["id"], m.object_id)
         return {"stored": stored}
 
     @staticmethod

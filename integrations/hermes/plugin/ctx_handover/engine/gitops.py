@@ -39,9 +39,11 @@ from typing import IO
 
 from .contracts import BlockSink, BlockSource
 from .errors import BlockCorrupt, Cancelled, CapabilityMissing, ConflictError, HandoverError, NotFound, PolicyDenied
-from .jsonutil import doc_id, loads_bounded
+from .jsonutil import OBJECT_BLOCK_SIZE, check_object_manifest, loads_bounded, object_manifest_doc
+from .jsonutil import object_id as _object_id
+from .jsonutil import object_manifest as _split_object
 from .model import GitInfo, GitState, ObjectManifest
-from .paths import strip_url_userinfo
+from .paths import PlatformRules, check_rel, collisions, strip_url_userinfo
 from .policy import PolicyConfig, is_denied_name
 
 MIN_GIT = (2, 38)
@@ -145,8 +147,8 @@ SET_ENV: dict[str, str] = {
 
 STATE_MESSAGES = {"index": b"ctx_handover index state\n", "worktree": b"ctx_handover work-tree state\n"}
 
-BLOCK_SIZE = 524_288
-"""Block size of every object the workspace cluster writes (DESIGN §4.6)."""
+BLOCK_SIZE = OBJECT_BLOCK_SIZE
+"""Block size of every object (DESIGN §4.6; contract K-1: ``jsonutil.OBJECT_BLOCK_SIZE``, readers accept no other)."""
 OBJECT_JSON_CAP = 64 * 1024**2
 """Receiver cap for object JSON (tree manifests; DESIGN §10.2)."""
 
@@ -820,7 +822,10 @@ def compute_state(
             p.unlink()
     src_index = index_path(git, root)
     if src_index.is_file():
-        shutil.copyfile(src_index, idx1)
+        # copy2 keeps the index file's mtime: git decides "racily clean" entries (mtime not older than the index
+        # file, compared in whole seconds) by it. A copy with a fresh mtime makes a same-second, same-size edit
+        # after ``git add`` look unmodified, and the work-tree tree silently keeps the staged content.
+        shutil.copy2(src_index, idx1)
     extra = {
         "GIT_OBJECT_DIRECTORY": str(objdir),
         "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(common / "objects"),
@@ -865,7 +870,7 @@ def compute_state(
         ["write-tree"], cwd=root, spec=spec, env_extra={**extra, "GIT_INDEX_FILE": str(idx1)}, cancelled=cancelled
     )
     if idx1.is_file():
-        shutil.copyfile(idx1, idx2)
+        shutil.copy2(idx1, idx2)
     nested = nested_repositories(git, root, cancelled=cancelled)
     ps_w = _write_pathspec_file(
         scratch / "add.ps",
@@ -950,15 +955,26 @@ def worktree_state(git: Git, root: str, exclude_pathspecs: Sequence[str], tmp: P
 
 
 class GitProbe:
-    """Read-only git questions for collector, assessment and update-mode checks (INTERFACES §4.3)."""
+    """Read-only git questions for collector, assessment and update-mode checks (INTERFACES §4.3).
 
-    def __init__(self, git: Git, *, profile: str = "source"):
+    Discovery questions (``toplevel``, ``common_dir``, ``is_shallow``, ``is_partial``) take any path inside a
+    work tree and climb to its repository as git does — up to, never into, ``ceiling`` (``GIT_CEILING_DIRECTORIES``;
+    W088: tests below a basetemp that itself lies in a checkout). Questions about a known work-tree root
+    (``status_clean``, ``root_commits``, ``ref_tips``, ``info`` …) never leave that root (ceiling = its parent),
+    so a root that is no repository is never answered by an enclosing one.
+    """
+
+    def __init__(self, git: Git, *, profile: str = "source", ceiling: str | os.PathLike | None = None):
         """``profile``: ``source`` for questions about the user's own repository on the source (collector);
-        ``received`` for every question about a destination on the target (its local filter drivers emptied)."""
+        ``received`` for every question about a destination on the target (its local filter drivers emptied).
+        ``ceiling``: an absolute directory repository discovery never enters (None: no limit)."""
         if profile not in {"source", "received"}:
             raise ValueError(f"unknown git profile {profile!r}")
+        if ceiling is not None and not os.path.isabs(os.fspath(ceiling)):
+            raise ValueError("the ceiling must be an absolute directory")
         self.git = git
         self.profile = profile
+        self.ceiling = Path(ceiling) if ceiling is not None else None
 
     def _spec(self, path: Path) -> GitEnvSpec:
         p = Path(path)
@@ -966,32 +982,44 @@ class GitProbe:
             return GitEnvSpec(profile="received", ceiling=p.parent, filters_from=p)
         return _ceiling(p)
 
+    def _discovery_spec(self) -> GitEnvSpec:
+        return GitEnvSpec(profile=self.profile, ceiling=self.ceiling)
+
     def _run(self, path: str, args: list[str], **kw) -> subprocess.CompletedProcess:
         return self.git.run(args, cwd=Path(path), spec=self._spec(Path(path)), check=False, **kw)
 
-    def toplevel(self, path: str) -> str | None:
+    def _discover(self, path: str, args: list[str]) -> subprocess.CompletedProcess | None:
         p = Path(path)
         if not p.is_dir():
             return None
-        proc = self._run(path, ["rev-parse", "--show-toplevel"])
+        return self.git.run(args, cwd=p, spec=self._discovery_spec(), check=False)
+
+    def toplevel(self, path: str) -> str | None:
+        """Work-tree root containing the directory ``path``, or None (also for a bare/git dir and a file)."""
+        proc = self._discover(path, ["rev-parse", "--show-toplevel"])
+        if proc is None:
+            return None
         out = proc.stdout.decode("utf-8", errors="surrogateescape").strip()
         return out if proc.returncode == 0 and out else None
 
     def common_dir(self, path: str) -> str | None:
-        if not Path(path).is_dir():
+        """Absolute common git dir of the repository containing the directory ``path``, or None."""
+        proc = self._discover(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        if proc is None:
             return None
-        proc = self._run(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
         out = proc.stdout.decode("utf-8", errors="surrogateescape").strip()
         return out if proc.returncode == 0 and out else None
 
     def is_shallow(self, path: str) -> bool:
-        proc = self._run(path, ["rev-parse", "--is-shallow-repository"])
-        return proc.returncode == 0 and proc.stdout.strip() == b"true"
+        """True when the repository containing ``path`` is shallow."""
+        proc = self._discover(path, ["rev-parse", "--is-shallow-repository"])
+        return proc is not None and proc.returncode == 0 and proc.stdout.strip() == b"true"
 
     def is_partial(self, path: str) -> bool:
-        """True for a partial clone (a promisor remote)."""
-        proc = self._run(path, ["config", "--get-regexp", r"^remote\..*\.promisor$"])
-        return proc.returncode == 0 and b"true" in proc.stdout
+        """True for a partial clone (a promisor remote) containing ``path`` — like a shallow clone it lacks objects,
+        so it travels as a file tree (W107; ``gitpack.pack_repo`` refuses both)."""
+        proc = self._discover(path, ["config", "--get-regexp", r"^remote\..*\.promisor$"])
+        return proc is not None and proc.returncode == 0 and b"true" in proc.stdout
 
     def in_progress(self, root: str) -> str | None:
         try:
@@ -1166,21 +1194,13 @@ def _attributes_mention_lfs(root: Path) -> bool:
 
 
 def manifest_doc(m: ObjectManifest) -> dict:
-    """The ``ctxh.object`` document of DESIGN §5.2 (without ``object_id``)."""
-    return {
-        "kind": "ctxh.object",
-        "v": 1,
-        "sha256": m.sha256,
-        "size": m.size,
-        "block_size": m.block_size,
-        "blocks": list(m.blocks),
-        "media": m.media,
-    }
+    """The ``ctxh.object`` document of DESIGN §5.2 (without ``object_id``) — ``jsonutil.object_manifest_doc``."""
+    return object_manifest_doc(m.sha256, m.size, m.block_size, m.blocks, m.media)
 
 
 def object_id_of(m: ObjectManifest) -> str:
-    """``object_id = sha256(canonical manifest bytes)`` (DESIGN §4.6)."""
-    return doc_id(manifest_doc(m))
+    """``object_id = sha256(canonical manifest bytes)`` (DESIGN §4.6) — ``jsonutil.object_id`` (contract K-1)."""
+    return _object_id(manifest_doc(m))
 
 
 def _flush(store: BlockSink, frames: list[tuple[str, bytes]]) -> None:
@@ -1234,41 +1254,48 @@ def put_stream(
         if len(raw) < BLOCK_SIZE and not pending:
             break
     _flush(store, frames)
+    doc = object_manifest_doc(content.hexdigest(), size, BLOCK_SIZE, ids, media)
     manifest = ObjectManifest(
-        sha256=content.hexdigest(), size=size, block_size=BLOCK_SIZE, blocks=tuple(ids), media=media
+        sha256=doc["sha256"],
+        size=size,
+        block_size=BLOCK_SIZE,
+        blocks=tuple(ids),
+        media=media,
+        object_id=_object_id(doc),
     )
-    manifest = ObjectManifest(**{**manifest.__dict__, "object_id": object_id_of(manifest)})
     store.put_manifests([manifest])
     return manifest
 
 
 def put_bytes(store: BlockSink, data: bytes, media: str) -> ObjectManifest:
-    """``put_stream`` for an in-memory document (manifests, small files)."""
-    view = memoryview(data)
-    pos = 0
-
-    def read(n: int) -> bytes:
-        nonlocal pos
-        chunk = bytes(view[pos : pos + n])
-        pos += len(chunk)
-        return chunk
-
-    return put_stream(store, read, media=media)
+    """An in-memory document (manifests, small files) as an object: blocks and manifest from
+    ``jsonutil.object_manifest`` (contract K-1), written in batches like ``put_stream``."""
+    doc, frames = _split_object(data, media)
+    for start in range(0, len(frames), 16):
+        _flush(store, frames[start : start + 16])
+    manifest = ObjectManifest(
+        sha256=doc["sha256"],
+        size=doc["size"],
+        block_size=doc["block_size"],
+        blocks=tuple(doc["blocks"]),
+        media=media,
+        object_id=_object_id(doc),
+    )
+    store.put_manifests([manifest])
+    return manifest
 
 
 def object_manifest(source: BlockSource, object_id: str) -> ObjectManifest:
-    """The verified manifest of ``object_id`` (its recomputed id must match)."""
+    """The verified manifest of ``object_id``: ``jsonutil.check_object_manifest`` (contract K-1) — block size
+    exactly ``BLOCK_SIZE``, block count from the size, the recomputed id equal to ``object_id``. Raises
+    ``BadRequest`` for a malformed id or manifest, ``BlockCorrupt`` for an id mismatch, ``NotFound`` for an
+    unknown object."""
     require_sha(object_id, "object")
     found = source.manifests([object_id])
     if len(found) != 1:
         raise NotFound("object manifest missing", object=object_id)
     m = found[0]
-    if object_id_of(m) != object_id:
-        raise BlockCorrupt("object manifest does not match its id", object=object_id)
-    if m.block_size <= 0 or m.block_size > 4 * 1024 * 1024 or m.size < 0:
-        raise BlockCorrupt("object manifest out of range", object=object_id)
-    if len(m.blocks) != (m.size + m.block_size - 1) // m.block_size:
-        raise BlockCorrupt("object manifest block count does not match its size", object=object_id)
+    check_object_manifest(manifest_doc(m), object_id)
     return m
 
 
@@ -1365,3 +1392,43 @@ def dec_path(text: str) -> str:
     if text.startswith("b64:"):
         return os.fsdecode(base64.b64decode(text[4:], validate=True))
     return text
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Name facts of a packed tree (pack document ``case_collisions`` / ``ntfs_invalid``, DESIGN §9.1, §9.4)
+# ---------------------------------------------------------------------------------------------------------
+
+NAME_REPORT_CAP = 1000
+"""Most entries per name list in a pack-document item; the rest is counted in a warning."""
+_CASE_FOLDING = PlatformRules(windows=False, case_insensitive=True)
+_NTFS = PlatformRules(windows=True, case_insensitive=True, long_paths=True)
+
+
+def name_report(rels: Iterable[str], *, cap: int = NAME_REPORT_CAP) -> tuple[list[list[str]], list[str], list[str]]:
+    """Target-independent name facts of a work tree for its pack-document item: ``(case_collisions,
+    ntfs_invalid, warnings)``.
+
+    ``case_collisions`` are ``[kept, colliding]`` pairs equal under case folding + NFC (``paths.collisions``): they
+    collide on every case-insensitive target. ``ntfs_invalid`` lists the paths a Windows target cannot check out
+    (``paths.check_rel`` with the Windows rules: reserved names, ``<>:"|?*\\``, trailing dot or space, control
+    characters, non-UTF-8 bytes; paths over 260 characters are not listed — ``core.longpaths`` covers them).
+    ``rels`` are ``/``-separated names as ``os.fsdecode`` gives them; the lists hold JSON-safe forms (``enc_path``),
+    at most ``cap`` entries each, and a warning counts what was cut. The target decides with its own rules
+    (DESIGN §9.4); these lists inform the plan and the note before any byte moves."""
+    names = list(rels)
+    pairs = collisions(names, _CASE_FOLDING)
+    invalid: list[str] = []
+    n_invalid = 0
+    for rel in names:
+        try:
+            check_rel(rel, _NTFS)
+        except PolicyDenied:
+            n_invalid += 1
+            if len(invalid) < cap:
+                invalid.append(enc_path(rel))
+    warnings: list[str] = []
+    if len(pairs) > cap:
+        warnings.append(f"{len(pairs) - cap} more case-colliding paths not listed")
+    if n_invalid > cap:
+        warnings.append(f"{n_invalid - cap} more paths invalid on Windows not listed")
+    return [[enc_path(a), enc_path(b)] for a, b in pairs[:cap]], invalid, warnings

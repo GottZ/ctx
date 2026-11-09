@@ -41,6 +41,7 @@ from .gitops import (
     head_info,
     in_progress_op,
     is_sha,
+    name_report,
     object_format,
     put_bytes,
     put_stream,
@@ -49,7 +50,7 @@ from .gitops import (
 from .jsonutil import canonical_bytes
 from .model import GitState, NotTransferred
 from .paths import strip_url_userinfo
-from .policy import PolicyConfig, SourceCheckCache, check_source_file, is_denied_name, sniff_secret
+from .policy import PolicyConfig, SourceCheckCache, check_source_file, is_denied_name, sniff_bytes, sniff_secret
 
 PACK_MEDIA = "application/x-git-pack"
 TREE_MEDIA = "application/json"
@@ -66,7 +67,8 @@ def _never() -> bool:
 @dataclass(frozen=True)
 class GitPackResult:
     """Everything the pack document needs for one git item (DESIGN §9.1). ``lfs_manifest`` (tree manifest object
-    of the shipped LFS objects) and ``warnings`` are additions over INTERFACES §4.3."""
+    of the shipped LFS objects), ``warnings``, ``case_collisions`` and ``ntfs_invalid`` (``gitops.name_report`` over
+    the work-tree tree W, JSON-safe) are additions over INTERFACES §4.3."""
 
     state: GitState
     index_commit: str
@@ -85,6 +87,8 @@ class GitPackResult:
     lfs_manifest: str | None = None
     warnings: tuple[str, ...] = ()
     reused: bool = False
+    case_collisions: tuple[tuple[str, str], ...] = ()
+    ntfs_invalid: tuple[str, ...] = ()
 
 
 @dataclass
@@ -233,20 +237,9 @@ def _blob_head(git: Git, root: Path, oid: str, n: int = _SNIFF_BYTES) -> bytes:
     return data
 
 
-def _blob_is_secret(git: Git, root: Path, oid: str, scratch: Path) -> bool:
-    head = _blob_head(git, root, oid)
-    scratch.mkdir(parents=True, exist_ok=True)
-    probe = scratch / "sniff.bin"
-    fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        os.write(fd, head)
-    finally:
-        os.close(fd)
-    try:
-        return sniff_secret(probe)
-    finally:
-        with contextlib.suppress(OSError):
-            probe.unlink()
+def _blob_is_secret(git: Git, root: Path, oid: str) -> bool:
+    """The policy's content sniff on the head of a blob, in memory (``policy.sniff_bytes``, W093)."""
+    return sniff_bytes(_blob_head(git, root, oid))
 
 
 def _changed_entries(git: Git, root: Path, base: str, tree: str) -> list[tuple[str, bytes]]:
@@ -272,10 +265,10 @@ def filter_stash(
 ) -> tuple[list[dict], list[NotTransferred]]:
     """R23: keep a stash entry only when none of its work-tree, index and untracked (``stash -u``) commits adds or
     changes a path with a denied name or a key-sniffing blob relative to its base; such an entry is withheld as a
-    whole and listed, unless the path was released locally with ``--include-secret``."""
+    whole and listed, unless the path was released locally with ``--include-secret``. Blobs are sniffed in memory
+    (``policy.sniff_bytes``); ``scratch`` is accepted for compatibility and no longer written to."""
     r = Path(root)
     spec = GitEnvSpec(profile="source", ceiling=r.parent)
-    work = scratch or (r / ".git")
     kept: list[dict] = []
     withheld: list[NotTransferred] = []
     empty = _empty_tree(git, r)
@@ -303,7 +296,7 @@ def filter_stash(
                 if is_denied_name(os.fsdecode(path), case_insensitive=cfg.case_insensitive):
                     bad = display_path(path)
                     break
-                if scratch is not None and _blob_is_secret(git, r, oid, work):
+                if _blob_is_secret(git, r, oid):
                     bad = display_path(path)
                     break
             if bad:
@@ -684,6 +677,10 @@ def pack_repo(
         )
         reused = False
     head_doc = {"ref": sw.branch, "commit": sw.head}
+    case_pairs, ntfs_invalid, name_warnings = name_report(
+        GitProbe(git, profile="received").ls_tree_paths(str(repo), state.worktree_tree)
+    )
+    warnings += name_warnings
     return GitPackResult(
         state=state,
         index_commit=index_commit,
@@ -702,11 +699,14 @@ def pack_repo(
         lfs_manifest=lfs_manifest,
         warnings=tuple(warnings),
         reused=reused,
+        case_collisions=tuple((a, b) for a, b in case_pairs),
+        ntfs_invalid=tuple(ntfs_invalid),
     )
 
 
 def pack_item(item_id: str, result: GitPackResult) -> dict:
-    """The ``git_repo`` item of the pack document (DESIGN §9.1)."""
+    """The ``git_repo`` item of the pack document (DESIGN §9.1), incl. ``lfs_objects``, ``case_collisions`` and
+    ``ntfs_invalid``. Orchestration packs through ``materialize.pack_plan_item``, which calls this."""
     return {
         "item_id": item_id,
         "kind": "git_repo",
@@ -726,8 +726,8 @@ def pack_item(item_id: str, result: GitPackResult) -> dict:
         "skipped": [{"path": n.path, "why": n.why} for n in result.skipped],
         "exclude_pathspecs": list(result.state.exclude_pathspecs),
         "lfs_objects": result.lfs_manifest,
-        "case_collisions": [],
-        "ntfs_invalid": [],
+        "case_collisions": [list(pair) for pair in result.case_collisions],
+        "ntfs_invalid": list(result.ntfs_invalid),
     }
 
 

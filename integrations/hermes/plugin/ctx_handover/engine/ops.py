@@ -17,6 +17,20 @@ Restart rules (I9, DESIGN §3.6):
   ``details.reason = "interrupted"`` (retryable) and a new start runs it again. Operation functions are
   therefore written to resume from their own journal (target commit, source retire/release).
 
+Fencing of file-system steps (DESIGN §3.1; a hung but alive process must never be overtaken). The ledger's owner
+epoch fences journal writes only; operations that change the file system run ``exclusive`` under the job's
+``JobLock`` (``flock``), which the kernel drops only when the holder's process dies. Four rules close the gaps
+between the ledger row and the lock:
+
+1. An orphan is marked ``interrupted`` only while the marker holds the job's lock (``_interrupt``), so a row is
+   never failed under a worker that holds it.
+2. A restart is a compare-and-set ``failed`` → ``running`` and a new row is created insert-once, so exactly one
+   starter wins and a result written meanwhile is never overwritten.
+3. A worker that cannot take the lock does not run and leaves the row's state alone (the holder writes the
+   outcome); it only makes the row stale, so it is marked interrupted as soon as nobody holds the lock.
+4. A worker that took the lock runs only if the row is still ``running`` (``Ledger.op_claim``) — the late thread of a
+   process that hung before it took the lock finds the work done (or interrupted) and does nothing.
+
 A worker runs in a copy of the caller's ``contextvars`` context (DESIGN §2.1 consequence 6). A
 ``BaseException`` that is not an ``Exception`` (interpreter shutdown, a simulated crash in tests) is not
 recorded: the row stays ``running`` as if the process had died.
@@ -30,6 +44,7 @@ import contextvars
 import os
 import re
 import threading
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -53,6 +68,17 @@ except ImportError:
     msvcrt = None  # type: ignore[assignment]
 
 OpFn = Callable[[Callable[[Progress], None]], dict]
+
+LOCK_ATTEMPTS = 20
+LOCK_RETRY_S = 0.025
+"""A worker retries the job lock briefly: an ``_interrupt`` probe of another process holds it for an instant."""
+
+_INTERRUPTED = {
+    "code": "internal",
+    "message": "operation interrupted (process restart); start it again",
+    "retryable": True,
+    "details": {"reason": "interrupted"},
+}
 
 
 class JobLock:
@@ -150,19 +176,27 @@ class OpRunner:
         made of idempotent, journaled sub-steps that must eventually finish (source retire/release).
         ``exclusive`` runs ``fn`` under the job's ``JobLock`` (operations that change the file system)."""
         with self._lock:
-            row = self._ledger.op_get(job_id, op, digest)
-            if row is not None:
+            for _ in range(8):
+                row = self._ledger.op_get(job_id, op, digest)
+                if row is None:
+                    op_id = ulid()
+                    if self._ledger.op_insert(job_id, op, digest, op_id):
+                        break
+                    continue  # another process created the row first: use that one
                 st = self._status_of(row)
                 restart = st.state is OpState.FAILED and (restart_failed or bool((st.error or {}).get("retryable")))
                 if not restart:
                     return st
                 op_id = row["op_id"]
+                if self._ledger.op_cas(op_id, OpState.FAILED, OpState.RUNNING):
+                    break
+                # another starter restarted it, or its worker finished meanwhile: look again
             else:
-                op_id = ulid()
-            self._ledger.op_put(job_id, op, digest, op_id, OpState.RUNNING)
-            if self._inline:
-                pass
-            else:
+                row = self._ledger.op_get(job_id, op, digest)
+                if row is None:
+                    raise NotFound(f"operation {op} of job {job_id} vanished")
+                return self._status_of(row)
+            if not self._inline:
                 ctx = contextvars.copy_context()
                 thread = threading.Thread(
                     target=ctx.run,
@@ -203,37 +237,36 @@ class OpRunner:
 
     # -- internals ---------------------------------------------------------------------------------------------
     def _status_of(self, row: dict) -> OpStatus:
-        state = OpState(row["state"])
-        error = row["error"]
         stale = row["updated_at"] < self._ledger.now() - self._stale_s
-        if stale and state is OpState.RUNNING and not self._is_live(row["op_id"]) and self._held(row["job_id"]):
-            stale = False  # the heartbeat is late but the holder's process is alive (hung): not orphaned
-        if state is OpState.RUNNING and not self._is_live(row["op_id"]) and stale:
-            state = OpState.FAILED
-            error = {
-                "code": "internal",
-                "message": "operation interrupted (process restart); start it again",
-                "retryable": True,
-                "details": {"reason": "interrupted"},
-            }
-            self._ledger.op_put(
-                row["job_id"],
-                row["op"],
-                row["digest"],
-                row["op_id"],
-                OpState.FAILED,
-                error=error,
-                progress=row["progress"],
-            )
+        if row["state"] == str(OpState.RUNNING) and stale and not self._is_live(row["op_id"]):
+            if self._interrupt(row):
+                progress = from_wire(Progress, row["progress"]) if isinstance(row["progress"], dict) else None
+                return OpStatus(
+                    op_id=row["op_id"], state=OpState.FAILED, result=None, error=dict(_INTERRUPTED), progress=progress
+                )
+            # the heartbeat is late, but a live holder (hung) has the job's lock — or the row moved on meanwhile
+            row = self._ledger.op_by_id(row["op_id"]) or row
         progress = from_wire(Progress, row["progress"]) if isinstance(row["progress"], dict) else None
-        return OpStatus(op_id=row["op_id"], state=state, result=row["result"], error=error, progress=progress)
+        return OpStatus(
+            op_id=row["op_id"], state=OpState(row["state"]), result=row["result"], error=row["error"], progress=progress
+        )
+
+    def _interrupt(self, row: dict) -> bool:
+        """Mark a stale ``running`` row ``interrupted`` — under the job's lock (rule 1): when another process holds
+        it, the holder is alive and the row stays ``running``. True when this call marked it."""
+        lock = self.job_lock(row["job_id"])
+        if lock is not None and not lock.acquire():
+            return False
+        try:
+            return self._ledger.op_cas(
+                row["op_id"], OpState.RUNNING, OpState.FAILED, error=dict(_INTERRUPTED), keep_progress=True
+            )
+        finally:
+            if lock is not None:
+                lock.release()
 
     def job_lock(self, job_id: str) -> JobLock | None:
         return None if self._lock_dir is None else JobLock(self._lock_dir / f"{job_id}.lock")
-
-    def _held(self, job_id: str) -> bool:
-        lock = self.job_lock(job_id)
-        return lock is not None and lock.held_elsewhere()
 
     def _is_live(self, op_id: str) -> bool:
         thread = self._live.get(op_id)
@@ -241,22 +274,32 @@ class OpRunner:
 
     def _body(self, job_id: str, op: str, digest: str, op_id: str, fn: OpFn, exclusive: bool = False) -> None:
         lock = self.job_lock(job_id) if exclusive else None
-        if lock is not None and not lock.acquire():
-            error = {
-                "code": "internal",
-                "message": "another process still works on this job; try again",
-                "retryable": True,
-                "details": {"reason": "busy_elsewhere"},
-            }
-            self._ledger.op_put(job_id, op, digest, op_id, OpState.FAILED, error=error)
+        try:
+            if lock is not None and not self._acquire(lock):
+                # rule 3: the holder (another, possibly hung process) writes its outcome; never run twice. The row
+                # keeps its state and turns stale now, so the next status check marks it interrupted as soon as
+                # nobody holds the lock (a holder of another op of this job) instead of after ``stale_s``.
+                self._ledger.op_expire(op_id)
+                return
+            try:
+                if not self._ledger.op_claim(op_id):
+                    return  # rule 4: finished, failed or marked interrupted while this worker waited
+                self._run_body(job_id, op, digest, op_id, fn)
+            finally:
+                if lock is not None:
+                    lock.release()
+        finally:
             with self._lock:
                 self._live.pop(op_id, None)
-            return
-        try:
-            self._run_body(job_id, op, digest, op_id, fn)
-        finally:
-            if lock is not None:
-                lock.release()
+
+    @staticmethod
+    def _acquire(lock: JobLock) -> bool:
+        for attempt in range(LOCK_ATTEMPTS):
+            if lock.acquire():
+                return True
+            if attempt + 1 < LOCK_ATTEMPTS:
+                time.sleep(LOCK_RETRY_S)
+        return False
 
     def _run_body(self, job_id: str, op: str, digest: str, op_id: str, fn: OpFn) -> None:
         last = [0.0]
@@ -270,17 +313,13 @@ class OpRunner:
                 self._ledger.op_progress(op_id, to_wire(p))
 
         try:
-            try:
-                result = fn(report)
-            except Exception as exc:
-                self._ledger.op_put(job_id, op, digest, op_id, OpState.FAILED, error=error_dict(exc))
-                return
-            except BaseException:  # process death (or its simulation): leave the row "running"
-                return
-            self._ledger.op_put(job_id, op, digest, op_id, OpState.DONE, result=dict(result or {}))
-        finally:
-            with self._lock:
-                self._live.pop(op_id, None)
+            result = fn(report)
+        except Exception as exc:
+            self._ledger.op_put(job_id, op, digest, op_id, OpState.FAILED, error=error_dict(exc))
+            return
+        except BaseException:  # process death (or its simulation): leave the row "running"
+            return
+        self._ledger.op_put(job_id, op, digest, op_id, OpState.DONE, result=dict(result or {}))
 
     def _ensure_heartbeat(self) -> None:
         if self._beat is not None and self._beat.is_alive():

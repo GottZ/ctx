@@ -16,7 +16,16 @@ and records which jobs use which objects; GC frees blocks no non-terminal job ne
 removes the manifest files and ``objects`` rows of objects no non-terminal job references any more — those of
 finished and aborted jobs and unreferenced ones (R28). Storing a manifest and collecting it run under the
 ledger's write transaction (``Ledger.tx``), and a manifest stored or re-stored within ``MANIFEST_GRACE_S`` is
-never collected: that covers the step between storing an object and registering it with its job.
+never collected.
+
+Objects in flight: a job stores an object's blocks and manifest first and registers the object with itself
+later (a pack registers its whole closure at the end), so between the two the object is not "live". Every write
+path therefore touches what it relies on — ``put`` and ``missing`` refresh the mtime of a stored block, the
+manifest store refreshes the manifest — and GC never collects a block or manifest touched since the oldest
+non-terminal job on this host began (``_protect_since``; GC cannot tell which job touched which block). Blocks
+are deleted by renaming them aside first and reading the mtime from the renamed file, so a touch either happened
+before the rename (the block goes back) or finds the block gone (the writer stores it again or reports it
+missing). The object id rule itself — manifest document, id, reader checks — is ``jsonutil``'s (contract K-1).
 
 Wire frame ``application/vnd.ctxh.blocks+v1``: ``"CXB1" | block_id (32 raw) | enc (1) | payload_len (u32 BE) |
 payload``. The receiver checks magic and length, decodes with an output cap of one block (a decompression bomb
@@ -29,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import os
 import re
 import struct
@@ -40,8 +50,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import jsonutil
 from .errors import BadRequest, BlockCorrupt, Cancelled, NotFound, VerifyFailed
-from .jsonutil import canonical_bytes, loads_bounded, sha256_hex
+from .jsonutil import canonical_bytes, loads_bounded
 from .model import ObjectManifest
 
 if TYPE_CHECKING:  # same layer (L2): type only
@@ -71,7 +82,7 @@ __all__ = [
     "verify_manifest",
 ]
 
-BLOCK_SIZE = 524_288
+BLOCK_SIZE = jsonutil.OBJECT_BLOCK_SIZE
 FRAME_MAGIC = b"CXB1"
 FRAME_HEADER = 41  # magic 4 + id 32 + enc 1 + length 4
 ENC_IDENTITY, ENC_ZLIB, ENC_ZSTD = 0, 1, 2
@@ -79,7 +90,7 @@ FRAME_SLACK = 1024
 """A frame payload may exceed the block size by this much (compression framing of incompressible data)."""
 
 MEDIA_BLOCKS = "application/vnd.ctxh.blocks+v1"
-MAX_OBJECT_BYTES = 30 * 1024**3
+MAX_OBJECT_BYTES = jsonutil.OBJECT_MAX_BYTES
 """Objects above ≈ 30 GiB are refused (DESIGN §4.6); ``max_total_gb`` caps far below."""
 MAX_MANIFEST_JSON = 64 * 1024**2
 """Object JSON and manifest documents ≤ 64 MiB (DESIGN §10.2, T7)."""
@@ -88,6 +99,16 @@ MANIFEST_GRACE_S = 600.0
 """A manifest stored or re-stored this recently is never collected (``put_manifests`` → ``ledger.job_object``)."""
 GC_BATCH = 4096
 """Manifests checked and removed per ledger write transaction (one ``live_objects`` query each)."""
+FREE_BATCH = 1024
+"""Blocks renamed aside per batch before the running jobs are read once for the batch (``_free``)."""
+GC_SLACK_S = 2.0
+"""File times can trail the wall clock (coarse kernel clock; 1–2 s timestamp granularity on some file systems):
+a block touched this shortly before a job began still counts as touched by it."""
+MAX_IN_FLIGHT_S = 86_400.0
+"""Protection of objects in flight reaches back at most this far: a job stuck for longer (suspended, crashed)
+does not switch off the cache cap for good; its unregistered objects are rebuilt when it resumes."""
+_JOB_SCAN = 100_000
+_TOMB_PREFIX = "gc."
 
 ZSTD_AVAILABLE = _zstd is not None
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -109,64 +130,48 @@ def _check_id(block_id: object, field: str = "block_id") -> str:
 
 
 def manifest_doc(m: ObjectManifest) -> dict:
-    """The canonical manifest document of DESIGN §5.2 (``object_id`` is not part of it)."""
-    return {
-        "kind": "ctxh.object",
-        "v": 1,
-        "sha256": m.sha256,
-        "size": m.size,
-        "block_size": m.block_size,
-        "blocks": list(m.blocks),
-        "media": m.media,
-    }
+    """The canonical manifest document of DESIGN §5.2 (``object_id`` is not part of it): K-1's
+    ``jsonutil.object_manifest_doc``."""
+    return jsonutil.object_manifest_doc(m.sha256, m.size, m.block_size, m.blocks, m.media)
 
 
 def object_id_of(m: ObjectManifest) -> str:
-    """``sha256(canonical manifest bytes)``."""
-    return sha256_hex(canonical_bytes(manifest_doc(m)))
+    """``sha256(canonical manifest bytes)`` — K-1's ``jsonutil.object_id``."""
+    return jsonutil.object_id(manifest_doc(m))
 
 
 def verify_manifest(m: ObjectManifest) -> ObjectManifest:
     """Validate a manifest received from anywhere and return it with its recomputed ``object_id``.
 
-    Raises ``BadRequest`` for a wrong block size, malformed ids, an impossible block count, an object above
-    ``MAX_OBJECT_BYTES`` or an ``object_id`` that differs from the recomputed one.
+    The checks are K-1's ``jsonutil.check_object_manifest``: ``BadRequest`` for a block size other than
+    ``BLOCK_SIZE``, malformed ids, an impossible block count, an object above ``MAX_OBJECT_BYTES`` or an invalid
+    media type; ``BlockCorrupt`` when a given ``object_id`` differs from the recomputed one.
     """
     if not isinstance(m, ObjectManifest):
         raise BadRequest("not an object manifest", field="manifest")
-    _check_id(m.sha256, "manifest.sha256")
-    if m.block_size != BLOCK_SIZE:
-        raise BadRequest("unsupported block size", field="manifest.block_size", block_size=m.block_size)
-    if not isinstance(m.size, int) or m.size < 0 or m.size > MAX_OBJECT_BYTES:
-        raise BadRequest("object size out of range", field="manifest.size")
-    expected = -(-m.size // BLOCK_SIZE)
-    if len(m.blocks) != expected:
-        raise BadRequest("block count does not match size", field="manifest.blocks", expected=expected)
-    for i, block_id in enumerate(m.blocks):
-        _check_id(block_id, f"manifest.blocks[{i}]")
-    if not isinstance(m.media, str) or len(m.media) > 200:
-        raise BadRequest("invalid media type", field="manifest.media")
-    oid = object_id_of(m)
-    if m.object_id and m.object_id != oid:
-        raise BadRequest("object id does not match the manifest", field="manifest.object_id")
+    for name in ("size", "block_size"):
+        value = getattr(m, name)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise BadRequest("manifest field must be an integer", field=f"manifest.{name}")
+    if not isinstance(m.blocks, (tuple, list)):
+        raise BadRequest("manifest without blocks", field="manifest.blocks")
+    doc = manifest_doc(m)
+    oid = m.object_id or jsonutil.object_id(doc)
+    jsonutil.check_object_manifest(doc, oid)
     return m if m.object_id == oid else replace(m, object_id=oid)
 
 
 def manifest_from_doc(doc: object, object_id: str) -> ObjectManifest:
-    if not isinstance(doc, dict) or doc.get("kind") != "ctxh.object" or doc.get("v") != 1:
-        raise BadRequest("not a ctxh.object manifest", field="manifest")
-    blocks_list = doc.get("blocks")
-    if not isinstance(blocks_list, list):
-        raise BadRequest("manifest without blocks", field="manifest.blocks")
-    m = ObjectManifest(
-        sha256=doc.get("sha256"),
-        size=doc.get("size"),
-        block_size=doc.get("block_size"),
-        blocks=tuple(blocks_list),
-        media=doc.get("media"),
+    """A stored or received manifest document, checked against the id it was asked for by (K-1)."""
+    jsonutil.check_object_manifest(doc, object_id)
+    return ObjectManifest(
+        sha256=doc["sha256"],
+        size=doc["size"],
+        block_size=doc["block_size"],
+        blocks=tuple(doc["blocks"]),
+        media=doc["media"],
         object_id=object_id,
     )
-    return verify_manifest(m)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -375,8 +380,9 @@ class BlockStore:
 
     ``root`` is the plugin data directory; ``ledger`` is ``ledger.Ledger`` (cluster A). Methods used:
     ``tx`` (re-entrant within a thread), ``block_put``, ``block_touch``, ``object_put``, ``object_delete``,
-    ``job_objects``, ``live_objects``, ``gc_candidates``, ``blocks_delete``. ``cache_days``/``cache_bytes`` are
-    ``block_cache_days``/``block_cache_gb`` (§14.4).
+    ``job_objects``, ``live_objects``, ``gc_candidates``, ``blocks_delete``, ``jobs(active=True)`` (``created_at``
+    of the running jobs, ``_protect_since``). ``cache_days``/``cache_bytes`` are ``block_cache_days``/
+    ``block_cache_gb`` (§14.4).
     """
 
     def __init__(
@@ -421,22 +427,33 @@ class BlockStore:
             raise BlockCorrupt("stored block does not match its id", block_id=block_id)
         return raw
 
+    @staticmethod
+    def _touch(path: Path) -> bool:
+        """Refresh a stored file's mtime — someone relies on it again, so GC keeps it while that job runs
+        (module docstring); False when the file is gone."""
+        try:
+            os.utime(path)
+        except FileNotFoundError:
+            return False
+        return True
+
     def put(self, raw: bytes) -> str:
         """Store one block (≤ ``BLOCK_SIZE``) and return its id; an existing block only gets touched."""
         if len(raw) > BLOCK_SIZE:
             raise BadRequest("block larger than the block size", field="block", size=len(raw))
         block_id = hashlib.sha256(raw).hexdigest()
         path = self.block_path(block_id)
-        if not path.is_file():
+        if not self._touch(path):
             write_private(path, bytes(raw), self._tmp)
         self._ledger.block_put(block_id, len(raw))
         return block_id
 
     def missing(self, ids: Sequence[str]) -> list[str]:
-        """The ids not stored here, in request order; stored ones are touched (LRU)."""
+        """The ids not stored here, in request order; stored ones are touched (file mtime and LRU), because the
+        caller now relies on them."""
         out, present = [], []
         for block_id in ids:
-            (present if self.has(block_id) else out).append(block_id)
+            (present if self._touch(self.block_path(block_id)) else out).append(block_id)
         if present:
             self._ledger.block_touch(present)
         return out
@@ -500,14 +517,20 @@ class BlockStore:
             ids.append(self.put(chunk))
             if len(chunk) < BLOCK_SIZE:
                 break
-        m = ObjectManifest(sha256=content.hexdigest(), size=size, block_size=BLOCK_SIZE, blocks=tuple(ids), media=media)
-        m = replace(m, object_id=object_id_of(m))
+        m = verify_manifest(
+            ObjectManifest(sha256=content.hexdigest(), size=size, block_size=BLOCK_SIZE, blocks=tuple(ids), media=media)
+        )
         self._store_manifest(m)
         return m
 
     def put_bytes(self, data: bytes, media: str) -> ObjectManifest:
-        """``put_stream`` over an in-memory buffer."""
-        return self.put_stream(io.BytesIO(data), media=media, cancelled=lambda: False)
+        """An in-memory object, split by K-1's ``jsonutil.object_manifest`` (same ids as ``put_stream``)."""
+        doc, parts = jsonutil.object_manifest(data, media)
+        for _block_id, raw in parts:
+            self.put(raw)
+        m = manifest_from_doc(doc, jsonutil.object_id(doc))
+        self._store_manifest(m)
+        return m
 
     def manifest(self, object_id: str) -> ObjectManifest:
         path = self.manifest_path(object_id)
@@ -556,17 +579,101 @@ class BlockStore:
                 continue
         return out
 
-    def _free(self, ids: Iterable[str]) -> int:
-        freed = []
-        for block_id in ids:
+    def _protect_since(self) -> float:
+        """Blocks and manifests touched at or after this time are never collected: they may belong to an object a
+        running job stored or re-used but has not registered yet. Every non-terminal job on this host counts (GC
+        cannot tell which job touched which block): the oldest one's start minus ``GC_SLACK_S``, but no earlier
+        than ``MAX_IN_FLIGHT_S`` ago (also when the job list is incomplete); ``inf`` when no job runs. File times
+        are wall-clock times, so this is too."""
+        floor = time.time() - MAX_IN_FLIGHT_S
+        rows = self._ledger.jobs(active=True, limit=_JOB_SCAN)
+        if len(rows) >= _JOB_SCAN:
+            return floor
+        starts = []
+        for row in rows:
+            at = row.get("created_at")
+            if isinstance(at, bool) or not isinstance(at, (int, float)):
+                return floor
+            starts.append(float(at))
+        return max(min(starts) - GC_SLACK_S, floor) if starts else math.inf
+
+    def _tomb(self, block_id: str) -> Path:
+        return self._tmp / f"{_TOMB_PREFIX}{block_id}.{os.getpid()}.{threading.get_ident()}.{time.monotonic_ns()}"
+
+    def _restore_tombs(self) -> None:
+        """Put back blocks a GC of a dead process had renamed aside but not decided on (a crash between the
+        rename and the decision must not lose a block a job relies on; restoring an unneeded one only keeps it
+        cached)."""
+        try:
+            names = os.listdir(self._tmp)
+        except FileNotFoundError:
+            return
+        for name in names:
+            parts = name.split(".")
+            if not name.startswith(_TOMB_PREFIX) or len(parts) != 5 or not _HEX64.fullmatch(parts[1]):
+                continue
+            if not parts[2].isdigit() or _pid_alive(int(parts[2])):
+                continue
+            tomb = self._tmp / name
             try:
-                self.block_path(block_id).unlink()
+                os.replace(tomb, self.block_path(parts[1]))
             except FileNotFoundError:
-                pass
-            freed.append(block_id)
-        if freed:
-            self._ledger.blocks_delete(freed)
-        return len(freed)
+                continue
+
+    def _free(self, ids: Iterable[str]) -> int:
+        """Delete the blocks GC chose, except those a running job touched (``_protect_since``); returns how many
+        went.
+
+        Each block is renamed aside and its mtime read from the renamed file: a job that touched it before the
+        rename is seen (the block goes back), a job touching it afterwards finds it gone and stores it again or
+        reports it missing. The running jobs are read after the renames of each batch, so a job that began while
+        GC ran counts too (it touches nothing before its job row exists). A block stored again while it was aside
+        keeps its ledger row.
+        """
+        self._restore_tombs()
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return 0
+        mkdir_private(self._tmp)
+        freed = 0
+        for start in range(0, len(ids), FREE_BATCH):
+            aside: list[tuple[str, Path, Path | None]] = []
+            try:
+                for block_id in ids[start : start + FREE_BATCH]:
+                    path, tomb = self.block_path(block_id), self._tomb(block_id)
+                    try:
+                        os.rename(path, tomb)
+                    except FileNotFoundError:
+                        aside.append((block_id, path, None))
+                        continue
+                    aside.append((block_id, path, tomb))
+                protect = self._protect_since()
+            except BaseException:
+                for _block_id, path, tomb in aside:
+                    if tomb is not None:
+                        os.replace(tomb, path)
+                raise
+            gone = []
+            for block_id, path, tomb in aside:
+                if tomb is not None:
+                    try:
+                        touched = os.stat(tomb).st_mtime >= protect
+                    except FileNotFoundError:
+                        touched = False
+                    if touched:
+                        os.replace(tomb, path)
+                        continue
+                    try:
+                        os.unlink(tomb)
+                    except FileNotFoundError:
+                        pass
+                    if path.exists():  # stored again by a writer that found it aside
+                        continue
+                gone.append(block_id)
+            if gone:
+                self._ledger.blocks_delete(gone)
+            freed += len(gone)
+        return freed
 
     def _manifest_ids(self) -> Iterator[list[str]]:
         """Object ids of the stored manifests, one ``manifests/<2 hex>/`` directory at a time (foreign names are
@@ -586,10 +693,13 @@ class BlockStore:
 
     def _drop_manifests(self, object_ids: Sequence[str], cutoff: float) -> int:
         """One write transaction: remove the manifest files and ``objects`` rows of the given objects that no
-        non-terminal job references and that were not (re-)stored after ``cutoff``."""
+        non-terminal job references and that were not (re-)stored after ``cutoff`` nor since a running job began
+        (``_protect_since``; read inside the transaction, which also serialises job creation and manifest
+        stores)."""
         gone: list[str] = []
         with self._ledger.tx():
             live = self._ledger.live_objects()
+            cutoff = min(cutoff, self._protect_since())
             for oid in object_ids:
                 if oid in live:
                     continue
@@ -620,7 +730,7 @@ class BlockStore:
     def gc(self, *, keep_days: float, max_bytes: int) -> int:
         """Free blocks no non-terminal job needs that are older than ``keep_days`` or beyond ``max_bytes`` (LRU),
         then collect the manifests of objects no non-terminal job references (R28); returns the number of freed
-        blocks."""
+        blocks. Blocks and manifests touched since a running job began stay (module docstring)."""
         live = self._blocks_of(self._ledger.live_objects())
         older_than = self._clock() - keep_days * 86_400
         candidates = [b for b in self._ledger.gc_candidates(older_than, int(max_bytes)) if b not in live]
@@ -630,9 +740,9 @@ class BlockStore:
 
     def release_job(self, job_id: str, *, keep: bool) -> None:
         """At a job's end: ``keep`` ⇒ its blocks stay cached within the cap (LRU beyond it is freed); otherwise
-        every block of its objects that no live job needs is freed now (DESIGN §4.6, SK M3). Either way the
-        manifests of objects no live job references go (R28); blocks first, because they are found through the
-        manifests."""
+        every block of its objects that no live job needs is freed now (DESIGN §4.6, SK M3) — except blocks a
+        running job touched since it began, which go with a later GC. Either way the manifests of objects no
+        live job references go (R28); blocks first, because they are found through the manifests."""
         if keep:
             self.gc(keep_days=self.cache_days, max_bytes=self.cache_bytes)
             return
@@ -641,6 +751,23 @@ class BlockStore:
         mine = self._blocks_of(objects)
         self._free(sorted(mine - live))
         self.collect_manifests(objects)
+
+
+def _pid_alive(pid: int) -> bool:
+    """True unless ``pid`` certainly does not exist (a permission error means it does). On Windows signal 0 is
+    ``CTRL_C_EVENT``, so there every pid counts as alive: a crashed GC's renamed blocks stay in ``blocks/tmp``
+    (named ``gc.<block id>.…``) instead of being put back."""
+    if os.name == "nt":
+        return True
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _read_full(fileobj, n: int) -> bytes:

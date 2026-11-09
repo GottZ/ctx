@@ -121,7 +121,8 @@ def fp_key(rel: bytes) -> str:
 
 def safe_rel(rel: bytes, rules: PlatformRules) -> str:
     """Validate a received relative name with ``paths.check_rel``; on POSIX targets control characters and
-    non-UTF-8 bytes are masked first (legal names there). Returns the name as a ``str`` (surrogateescape)."""
+    non-UTF-8 bytes are legal names there (``allow_control``, W095). Returns the name as a ``str``
+    (surrogateescape)."""
     if b"\x00" in rel:
         raise PolicyDenied("NUL in a received name", reason="control_character")
     text = os.fsdecode(rel)
@@ -130,10 +131,7 @@ def safe_rel(rel: bytes, rules: PlatformRules) -> str:
             rel.decode("utf-8")
         except UnicodeDecodeError:
             raise PolicyDenied("name is not representable on Windows", reason="encoding") from None
-        check_rel(text, rules)
-        return text
-    masked = "".join("_" if (ord(c) < 0x20 or ord(c) == 0x7F or 0xDC80 <= ord(c) <= 0xDCFF) else c for c in text)
-    check_rel(masked, rules)
+    check_rel(text, rules, allow_control=True)
     return text
 
 
@@ -652,22 +650,33 @@ def _key_bytes(key: str) -> bytes:
 
 
 def _move(src: Path, dst: Path) -> None:
+    """``os.replace`` across filesystems too. The copy goes to ``<dst>.part`` and is renamed into place before
+    ``src`` is removed, so ``dst`` existing always means a complete copy (crash resumption, contract X11)."""
     try:
         os.replace(src, dst)
     except OSError as exc:
         if exc.errno != errno.EXDEV:
             raise
+        part = Path(str(dst) + ".part")
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(part)
         if os.path.islink(src):
-            os.symlink(os.readlink(src), dst)
+            os.symlink(os.readlink(src), part)
         else:
-            shutil.copy2(src, dst)
+            shutil.copy2(src, part, follow_symlinks=False)
+        os.replace(part, dst)
         os.unlink(src)
 
 
 def commit(state: TreeApplyState) -> dict:
     """Forward c1 step: fresh ⇒ permissions from the umask and ``rename(partial, dest)`` (``fallback`` when the
     destination appeared meanwhile); update ⇒ re-check ``(size, mtime_ns, inode)`` of every file about to be
-    replaced or removed, move it to its backup, swap the staged file in. Returns ``{"dest", "fingerprint"}``."""
+    replaced or removed, move it to its backup, swap the staged file in. Returns ``{"dest", "fingerprint"}``.
+
+    Update mode is repeatable (contract X11): a backup slot that exists already holds its file (moved by an earlier
+    run of this step), a staged file that is gone was swapped in already — a process that resumes after a crash
+    only does what is missing. An exception in the middle undoes the step (``rollback``) before it propagates.
+    Fresh mode is one rename; resuming it is the caller's (directory identity)."""
     if state.mode is DestMode.FRESH:
         assert state.partial is not None  # noqa: S101 - fresh states carry their partial
         os.chmod(state.partial, 0o777 & ~_umask())
@@ -682,14 +691,33 @@ def commit(state: TreeApplyState) -> dict:
             final = state.fallback
         return {"dest": str(final), "fingerprint": state.fingerprint}
     expected = {p: (size, mtime, ino) for p, size, mtime, ino in state.expect}
-    for final, _ in state.backups:
-        st = os.lstat(final)
+    pending = [(final, backup) for final, backup in state.backups if not os.path.lexists(backup)]
+    for final, _ in pending:
+        try:
+            st = os.lstat(final)
+        except FileNotFoundError:
+            raise ConflictError(
+                "a destination file vanished since prepare", kind="foreign", path=str(final)[:300]
+            ) from None
         if (st.st_size, st.st_mtime_ns, st.st_ino) != expected.get(final):
             raise ConflictError("a destination file changed since prepare", kind="foreign", path=str(final)[:300])
-    for final, backup in state.backups:
-        _move(final, backup)
-    for temp, final in state.staged:
-        os.replace(temp, final)
+    backed = dict(state.backups)
+    try:
+        for final, backup in pending:
+            _move(final, backup)
+        for final in state.removed:  # a cross-device move that stopped after the copy left the original
+            backup = backed.get(final)
+            if backup is not None and os.path.lexists(backup) and os.path.lexists(final):
+                st = os.lstat(final)
+                if (st.st_size, st.st_mtime_ns, st.st_ino) == expected.get(final):
+                    os.unlink(final)
+        for temp, final in state.staged:
+            if os.path.lexists(temp):
+                os.replace(temp, final)
+    except Exception:
+        with contextlib.suppress(Exception):
+            _undo_update(state)
+        raise
     return {"dest": str(state.dest), "fingerprint": state.fingerprint}
 
 
@@ -701,16 +729,20 @@ def rollback(state: TreeApplyState) -> None:
             os.rename(state.dest, state.partial)
             os.chmod(state.partial, 0o700)
         return
+    _undo_update(state)
+    discard(state)
+
+
+def _undo_update(state: TreeApplyState) -> None:
+    """Put an update-mode destination back as PREPARE found it, from wherever the forward step stopped:
+    swapped-in new files go, every backup returns. The staged files stay (``discard`` drops them)."""
     backed = {final: backup for final, backup in state.backups}
     for temp, final in state.staged:
-        if not os.path.lexists(temp) and os.path.lexists(final) and final in backed:
-            continue
         if not os.path.lexists(temp) and os.path.lexists(final) and final not in backed:
             os.unlink(final)
     for final, backup in state.backups:
         if os.path.lexists(backup):
             _move(backup, final)
-    discard(state)
 
 
 def discard(state: TreeApplyState) -> None:
