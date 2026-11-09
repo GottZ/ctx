@@ -1392,12 +1392,14 @@ class GitProbe:
             return None
         return in_progress_op(gitdir)
 
-    def status_clean(self, root: str) -> tuple[bool, str]:
+    def status_clean(self, root: str, *, user_excludes: bool = True) -> tuple[bool, str]:
         """``(clean, why)``: no change in index or work tree including untracked files, no in-progress
         operation, no ``index.lock`` (DESIGN §9.5 update preconditions). Untracked files count as in the user's own
         ``git status``: the repository's ignore rules and, in the received profile too, the user's global ignore
         file (``user_excludes_file``, R2-M4) hide them. That buys no protection away: whatever lies where an update
-        or return writes is refused by ``gitapply.obstructions`` whatever ignores it (B2)."""
+        or return writes is refused by ``gitapply.obstructions`` whatever ignores it (B2). ``user_excludes=False``
+        leaves the global ignore file out (only the repository's rules hide a file): ``gitapply._pre_state`` asks
+        whether the forward step wrote something, not whether the user sees a change (R3-M1)."""
         gitdir, _ = git_dirs(self.git, Path(root))
         op = in_progress_op(gitdir)
         if op:
@@ -1405,7 +1407,7 @@ class GitProbe:
         if (gitdir / "index.lock").exists():
             return False, "index.lock present"
         spec = self._spec(Path(root))
-        if spec.profile == "received":
+        if spec.profile == "received" and user_excludes:
             spec = replace(spec, user_excludes=True)
         proc = self.git.run(
             ["status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=none"],
@@ -1731,6 +1733,55 @@ def iter_object(
 def read_object(source: BlockSource, object_id: str, *, max_size: int = OBJECT_JSON_CAP) -> bytes:
     """A whole (small) object, bounded by ``max_size`` before any block is read."""
     return b"".join(iter_object(source, object_id, max_size=max_size))
+
+
+LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
+LFS_MIN_POINTER = 60
+LFS_MAX_POINTER = 1024
+"""Size range of a blob that may be a Git LFS pointer (DESIGN §9.4); only such blobs are read to find out."""
+
+
+def parse_lfs_pointer(data: bytes) -> tuple[str, int] | None:
+    """``(oid, size)`` of a Git LFS pointer text, None for anything else."""
+    if not data.startswith(LFS_POINTER_PREFIX) or len(data) > LFS_MAX_POINTER:
+        return None
+    oid = size = None
+    for line in data.split(b"\n")[1:]:
+        if line.startswith(b"oid sha256:"):
+            oid = line[len(b"oid sha256:") :].decode("ascii", errors="replace")
+        elif line.startswith(b"size "):
+            with contextlib.suppress(ValueError):
+                size = int(line[5:])
+    if oid and len(oid) == 64 and all(c in "0123456789abcdef" for c in oid) and size is not None and size >= 0:
+        return oid, size
+    return None
+
+
+def lfs_pointer_blobs(
+    git: Git, gitdir_args: Sequence[str], cwd: Path | None, spec: GitEnvSpec, blobs: Iterable[str]
+) -> dict[str, tuple[str, int]]:
+    """``{blob: (oid, size)}`` of those ``blobs`` that are Git LFS pointers, read through ``cat-file --batch`` in
+    chunks of 512 (callers pass blobs of pointer size only); a missing blob is no pointer."""
+    found: dict[str, tuple[str, int]] = {}
+    shas = list(dict.fromkeys(blobs))
+    for start in range(0, len(shas), 512):
+        chunk = shas[start : start + 512]
+        data = git.run(
+            [*gitdir_args, "cat-file", "--batch"], cwd=cwd, spec=spec, input=("\n".join(chunk) + "\n").encode()
+        ).stdout
+        pos = 0
+        while pos < len(data):
+            nl = data.index(b"\n", pos)
+            header = data[pos:nl].split()
+            pos = nl + 1
+            if len(header) == 3 and header[2].isdigit():
+                size = int(header[2])
+                body = data[pos : pos + size]
+                pos += size + 1
+                parsed = parse_lfs_pointer(body)
+                if parsed:
+                    found[header[0].decode("ascii", errors="replace")] = parsed
+    return found
 
 
 def read_json_object(source: BlockSource, object_id: str, *, max_size: int = OBJECT_JSON_CAP) -> object:

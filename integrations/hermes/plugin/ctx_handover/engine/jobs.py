@@ -1651,6 +1651,11 @@ def gc_job(ledger: Ledger, job_id: str, *, data_dir: Path, store=None) -> None:
             "expired",
         ):
             raise InvalidState(f"job {short(job_id)} is still {row['state']}", reason="active", state=row["state"])
+    src = ledger.source_state(job_id)
+    if src is not None and src["state"] not in ("released", "reclaimed", "retired", "exported"):
+        # the job's rows say "over" only while its hold agrees (R3-H1 sweep): a source handover that still holds the
+        # session (a lock whose job row an earlier release had ended) is no finished job
+        raise InvalidState(f"job {short(job_id)} is still {src['state']}", reason="active", state=src["state"])
     if store is not None and callable(getattr(store, "release_job", None)):
         store.release_job(job_id, keep=False)
     shutil.rmtree(Path(data_dir) / "staging" / job_id, ignore_errors=True)

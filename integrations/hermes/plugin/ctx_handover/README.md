@@ -59,10 +59,32 @@ session-relay (fresh session on the same gateway).
   `--yolo`/`HERMES_YOLO_MODE` — as far as the process that starts it can tell. The turn runs in the gateway. Inside
   it (`/handover` in its chats, routes on its own listener, its plugin host) the plugin sees all of that. A separate
   `hermes serve` or `hermes dashboard` serving the routes, and `hermes handover take|import --continue` in a
-  terminal, read the config and see the gateway's command line (its `--yolo`) but not its environment: a gateway
-  given `HERMES_YOLO_MODE` only in its environment (a service unit, a container) is not seen there, and the
-  continuation is not refused — leave `allow_remote_continue` off on such a gateway. `/handover doctor` says per
-  process what it could check ("not checked" where it could not).
+  terminal, read the config and identify the gateway through Hermes' own records; where they can identify the
+  gateway they see the gateway's command line (its `--yolo`) but not its environment: a gateway given
+  `HERMES_YOLO_MODE` only in its environment (for instance in a service unit) is not seen there, and the
+  continuation is not refused — it starts, and the process that starts it logs a warning that approvals were not
+  checked; leave `allow_remote_continue` off on such a gateway. Where they cannot identify the gateway — it runs in
+  another container or PID namespace (Hermes' own `docker-compose.yml` runs gateway and dashboard as separate
+  containers), or Hermes' gateway status cannot be read — no continuation starts (a `--yolo` in that gateway's own
+  runtime record still counts as approvals off): the final message says why and names the command that starts the
+  turn there by hand, `hermes chat --resume <id>` (or open the session there and send a message). `/handover
+  doctor` says per process what it could check ("not checked" where it could not, and whether a continuation
+  started there is refused).
+- **Secret names are matched broadly, on purpose.** The secrets list counts wherever a name lies, also inside a
+  project: a folder named like a secret file (`credentials`, for instance a Go package of that name) and every
+  credential folder name (`.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.azure` and the others of
+  `policy.SOURCE_DENY_DIRS`) with everything below it. In a workspace without git such a folder stays here as a
+  whole, and you learn it from the final message ("Secrets left out") and the note, not from the summary before the
+  handover. In a git workspace a folder named like a secret file travels like any other, and the tracked files below
+  a credential folder name are listed before the handover ("Tracked files on the secrets list", see **Unredacted**).
+  To send such a folder anyway, name it with `--include-secret <path>` — below a credential folder name each file as
+  well.
+- **A pairing code is all a pairing needs.** Redeeming a code does not prove that the device holds the private key of
+  the public key it registers: whoever has a valid, unused pairing code can pair a public key that is not theirs
+  (public keys are no secret — every bundle names its exporter's). That pairing gets no access, because every later
+  request must be signed with the private key of that key; but it replaces the earlier pairing of that key here: that
+  device is unpaired here (it pairs again) and its open handovers here are aborted. Treat a pairing code like a
+  password until it is used or expires (10 minutes by default).
 - **Sessions from older Hermes builds.** Messages written before Hermes stamped message and tool-call identities
   get stable identities derived from the original rows during the transfer; the source session is not modified.
   If Hermes backfills those identities on the source while a handover is running, the target refuses the late
@@ -104,7 +126,9 @@ one back into the session list as `Bot Chat (before handover)`. (5) While the pl
 that lineage is refused, also after a compaction rotation; each refused message leaves a placeholder that
 `/handover reclaim` rewinds. The first message after Hermes starts waits up to 5 seconds for the plugin's ledger;
 if the ledger cannot be opened (Hermes logs a warning), the plugin tries again with growing pauses of at most a
-minute, and turns in between are not refused — marks (1)–(4) still hold.
+minute, and turns in between are not refused — marks (1)–(4) still hold. If the ledger cannot be read when a Hermes
+process starts (another process holds its lock for more than 5 s), turns in that process are not checked against the
+source lock until a read succeeds (the plugin keeps trying); the plugin logs the start and the end of that window.
 
 What is **not** guaranteed: someone who opens the archived session from the archive view while the plugin is
 disabled can continue it; the two copies are then independent (no merge). `/handover reclaim` takes a session
@@ -155,7 +179,9 @@ when the conversation names them. A file the conversation names in a folder git 
 item of its own outside the project, never the repository around it; a file git ignores only by its name, in a folder
 it does not ignore (`*.log` in `src/`), still points the plan to that repository, which does not carry the file.
 Git LFS files travel as their objects and are checked out on the other side with `git lfs checkout`, never from a
-network; without git-lfs there they stay pointers and the final message says so.
+network; without git-lfs there they stay pointers and the final message says so. The size limit (`max_total_gb`, per
+handover) and the free-space check at the destination count that content before anything is written: each shipped
+object once and, when git-lfs is installed there, once more for every file that points to it.
 
 Before anything is locked the plugin shows what would move: the workspace and its size, every item outside the project
 with its size (the 10 largest, then how many more), the repositories inside the workspace that stay here (each
@@ -272,9 +298,10 @@ identities — not the contents — of the entries in the credential places of t
 and the own PID-namespace link under `/proc` (owner stamps for the turn lease and for handover jobs, so a dead
 process on this host is recognised at once) and `/proc/self/status` (the process umask for the modes of received
 files); before a
-continuation starts and in `doctor`, the identity of this profile's running gateway through Hermes' own
-`gateway.status` (`gateway.pid`, `gateway_state.json`, the gateway's command line and start time) — to see a `--yolo`
-on its command line, never its environment.
+continuation starts and in `doctor`, the identity of the gateway that runs this profile's turns through Hermes' own
+`gateway.status` (`gateway.pid` and `gateway_state.json` of this profile and of the Hermes root, where one gateway may
+serve every profile; the gateway's command line and start time) — to see a `--yolo` on its command line, never its
+environment.
 
 **Writes:** on the target — a new session, workspace copies under `allow_roots` (default: `~/hermes-handover`) or,
 outside it, in a repository returning to the folder this machine handed it away from, a `--dest`/`--map` typed here,
@@ -301,7 +328,8 @@ disabled for received data; `<tool> --version` for a fixed list of 30 developer 
 directory (`ctxh-probe-*`, removed afterwards); with `--continue`,
 one detached `hermes chat --resume <id>` single-query run on the target (Hermes' single-query approval policy
 applies, default deny), started with auto-approve variables removed from its environment and never when
-approvals are off there as far as the starting process can tell (see Limits).
+approvals are off there as far as the starting process can tell (see Limits), nor when that process cannot identify
+the gateway that runs the turn.
 
 **Background work:** daemon threads, by name — a worker per handover (`ctxh-job-<job>`) with parallel block
 transfers (`ctxh-move`) and a lease and owner refresher during long steps (`ctxh-keepalive`); for operations another
@@ -381,10 +409,15 @@ of each candidate file. A hard link to a credential file the plugin knows (in yo
 `~/.ssh`, `~/.aws` and the browser profiles, a file with a secret name at the top of your home or in `~/.config` or one
 folder below it, Hermes' credential stores) is left out as that file would be: `--include-secret` on its path releases
 one of your home, nothing releases Hermes'. A hard link to a credential file elsewhere (another account's home, any
-other place, or beyond the first 4096 entries the check reads, e.g. deep in a large browser profile) is caught only by
-the name and content checks. The block cache keeps copies up to 3 days / 5 GiB (`/handover gc --all`).
+other place) is caught only by the name and content checks. The check reads at most 4096 entries of the credential
+places per scan: first the fixed files (Hermes' credential stores, the names at the top of your home and of
+`~/.config`), then the folders level by level, browser profiles last. When it cannot read them all (a large
+`~/.kube/cache` or browser profile), every file with more than one link it could not compare is left out as well — as
+a secret (`--include-secret` on its path releases it) once all of Hermes' places were read, otherwise like Hermes' own
+files (nothing releases it). The block cache keeps copies up to 3 days / 5 GiB (`/handover gc --all`).
 With `allow_remote_continue` or `allow_agent_start`, a turn runs without a person present (single-query approval
-policy; refused when approvals are off as far as the starting process can tell). Under `plugins.isolation: host` the core buffers request bodies before
+policy; refused when approvals are off as far as the starting process can tell), and refused when that process
+cannot identify the gateway that runs it. Under `plugins.isolation: host` the core buffers request bodies before
 the plugin's size limit applies. The plugin never updates itself and never writes into Hermes plugin, skill,
 memory or config directories other than its own entry `plugins.entries.ctx_handover`. Administrative commands
 run only in the local CLI, TUI or Desktop.

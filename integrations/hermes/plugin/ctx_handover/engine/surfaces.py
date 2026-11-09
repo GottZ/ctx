@@ -1330,6 +1330,40 @@ def _workspace_root_text(err: HandoverError, peer: str) -> str:
     return f"{text[:1].upper()}{text[1:]}. Nothing was locked or sent."
 
 
+_MANUAL_SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+_MANUAL_PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")  # Hermes' profile names (hermes_cli/main.py)
+
+
+def manual_command(session_id: object, profile: object = None) -> str:
+    """``hermes [-p <profile>] chat --resume <id>``: how a person starts a turn by hand where none started
+    automatically (review R3-H2). Built only from a well-formed session id and profile name — the details of a peer's
+    refusal are its data, never text this message repeats as a command (R22); anything else is a placeholder."""
+    sid = session_id if isinstance(session_id, str) and _MANUAL_SESSION_RE.fullmatch(session_id) else "<session id>"
+    argv = ["hermes"]
+    if isinstance(profile, str) and _MANUAL_PROFILE_RE.fullmatch(profile):
+        argv += ["-p", profile]
+    return " ".join([*argv, "chat", "--resume", sid])
+
+
+def _unchecked_text(err: HandoverError, p: str, here: bool) -> str:
+    """``continue_refused`` / ``approvals_unchecked`` (review R3-H2): the process that would start the turn cannot
+    identify the gateway that runs it, so nothing started — the reason and the command to start it by hand there."""
+    cmd = manual_command(_d(err, "session_id"), _d(err, "profile"))
+    where, there = ("here", "") if here else (f"on {p}", " there")
+    if _d(err, "why") == "gateway_unknown":
+        reason = f"Hermes' gateway status could not be read{there}, so approvals could not be checked"
+    else:
+        reason = (
+            f"the process{there} that would start it cannot identify the gateway that runs the turn (another container "
+            "or PID namespace — Hermes' docker-compose runs gateway and dashboard apart — or another user), so it "
+            "cannot see whether approvals are switched off"
+        )
+    return (
+        f"Handed over, but no turn started {where}: {reason}. Start it{there} yourself with `{cmd}`, or open the "
+        f"session{there} and send a message."
+    )
+
+
 def render_error(err: HandoverError, peer: str | None, *, here: bool = False) -> str:
     """The remedy text for an error code; unknown codes fall back to the error's own message. ``here``: the error
     happened on this gateway (a continuation after a pull or an import, review L18), so no other gateway is named."""
@@ -1434,6 +1468,8 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
             f"{p} is not reachable ({reason}). The job is suspended; the session here is usable again {free}; "
             f"/handover resume {short_job(_d(err, 'job'))} continues."
         )
+    if code == "continue_refused" and _d(err, "reason") == "approvals_unchecked":
+        return _unchecked_text(err, p, here)
     if code == "continue_refused" and here:
         if _d(err, "reason") == "source_given_back":
             return (

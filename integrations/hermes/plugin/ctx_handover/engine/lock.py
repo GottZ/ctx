@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
+import logging
 import os
 import queue
 import re
@@ -41,6 +42,8 @@ from .errors import Cancelled, InvalidState, NotFound, SessionBusy, WaitTimeout
 from .ids import short
 from .jsonutil import to_wire
 from .model import CommitAck, MapRow, Options, SessionInfo, SourceState
+
+log = logging.getLogger("ctx_handover.lock")
 
 PLUGIN_TAG = "ctx_handover"
 
@@ -945,6 +948,9 @@ _RELEASABLE = (
     SourceState.RELEASING.value,
     SourceState.SUSPENDED.value,
 )
+_BEFORE_PREPARED = tuple(s for s in _RELEASABLE if s != SourceState.PREPARED.value)
+"""What ``reclaim --force`` of a handover in progress releases: a source that became ``prepared`` meanwhile is refused
+(its target may be committing — that reclaim is the ``prepared`` branch, with its warning)."""
 
 
 def _undo(
@@ -1001,11 +1007,18 @@ def _undo(
 
 
 def release(
-    db, ledger, info: SessionInfo, holder: str | None, job_id: str, *, sleep: Callable[[float], None] = time.sleep
+    db,
+    ledger,
+    info: SessionInfo,
+    holder: str | None,
+    job_id: str,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    from_states: Sequence[str] = _RELEASABLE,
 ) -> None:
     """Abort path before the commit: undo the primary lock (inverse of p6…p2, placeholder rewind) and free the
     leases; ``released`` afterwards (also from ``suspended``: a cancelled idle job). A no-op on
-    ``released``/``reclaimed``."""
+    ``released``/``reclaimed``. ``from_states`` narrows the states it releases (``InvalidState`` otherwise)."""
     del info
     entry = _entry(ledger, job_id)
     if entry.get("state") in (SourceState.RELEASED.value, SourceState.RECLAIMED.value):
@@ -1016,7 +1029,7 @@ def release(
         job_id,
         entry,
         holder,
-        from_states=_RELEASABLE,
+        from_states=tuple(from_states),
         middle=SourceState.RELEASING,
         final=SourceState.RELEASED,
         action="release",
@@ -1052,7 +1065,9 @@ def reclaim(db, ledger, session_id: str, *, force: bool, sleep: Callable[[float]
             return refused(f"Handover in progress; use /handover cancel {job_id}.")
         with contextlib.suppress(NotFound):  # pull: the conductor is the peer; it sees ``released`` on contact
             ledger.set_cancel(job_id)
-        release(db, ledger, None, None, job_id, sleep=sleep)  # type: ignore[arg-type]
+        # "cancelled" only for the state read here (R3-H1 sweep): a source that reached ``prepared`` meanwhile is
+        # refused, never released without the warning that its target may already be active
+        release(db, ledger, None, None, job_id, sleep=sleep, from_states=_BEFORE_PREPARED)  # type: ignore[arg-type]
         return {
             "state": SourceState.RELEASED.value,
             "job_id": job_id,
@@ -1131,18 +1146,30 @@ class VetoIndex:
         self._last_version: int | None = None
         self.last_error: str | None = None
         self.refreshed_at: float | None = None
+        self._unread_logged = False
 
     # -- lifecycle ---------------------------------------------------------------------------------------
     def start(self) -> None:
         """Start the refresher thread (idempotent). The first call reads the ledger once on the calling thread before
         it returns, and a concurrent call waits for that read (review R2-H1): the first turn of a fresh process never
-        meets an index that has not read the ledger yet. A failed first read stays in ``last_error``; the thread
-        retries it every ``poll_s``."""
+        meets an index that has not read the ledger yet. A failed first read stays in ``last_error`` and is logged
+        (review R3-L1), as is the read that ends it; the thread retries it every ``poll_s``."""
         with self._start_lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             if self.refreshed_at is None:
                 self.refresh_now(force=True)
+            if self.refreshed_at is None:
+                # review R3-L1: until the first read succeeds the index knows no handed-over session. The veto is the
+                # fallback layer (DECISIONS R1): the session marks of a handover (ended, archived, hidden) hold
+                # without it, as when the plugin is not loaded; the thread retries every ``poll_s``.
+                self._unread_logged = True
+                log.warning(
+                    "ctx_handover: the handover ledger could not be read yet (%s); until it is, messages typed into "
+                    "a handed-over session are not withheld (retrying every %.0f s)",
+                    self.last_error,
+                    self.poll_s,
+                )
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="ctx_handover-veto", daemon=True)
             self._thread.start()
@@ -1207,6 +1234,9 @@ class VetoIndex:
         self._last_version = version
         self.last_error = None
         self.refreshed_at = self._clock()
+        if self._unread_logged:
+            self._unread_logged = False
+            log.warning("ctx_handover: the handover ledger is read now; handed-over sessions are withheld again")
         return True
 
     def _flush(self, ledger) -> bool:

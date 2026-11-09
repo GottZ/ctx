@@ -1793,7 +1793,8 @@ def confirmation_reasons(
     ``to.context_length`` is known). Reason (j) ``workspace_differs`` (R36/R36a, ``workspace_differs``): the workspace
     holds more than the session's working folder (the repository around it) and that folder holds no file the
     repository tracks, or the source could not tell. Reason (k) ``repos_left`` (H15, R30 form): a repository inside a
-    transferred git workspace stays here (``repos_left``). Reason (c) also comes for an included git item whose
+    transferred git workspace stays here (``repos_left``) — inside an included git item, or a proposed one that
+    ``--yes`` takes along (R3-L3). Reason (c) also comes for an included git item whose
     history could not be measured (``SIZE_UNKNOWN``, H13). A blanket yes never confirms (h), (i), (j) or (k)
     (``YES_EXEMPT``)."""
     reasons = []
@@ -1822,9 +1823,27 @@ def confirmation_reasons(
         reasons.append(CONFIRM_CONTEXT)
     if workspace_differs(final):
         reasons.append(CONFIRM_WORKSPACE_DIFFERS)
-    if repos_left(final):
+    if _repos_left_travelling(final, options):
         reasons.append(CONFIRM_REPOS_LEFT)
     return reasons
+
+
+def _repos_left_travelling(final: FinalPlan, options: Options) -> list[dict]:
+    """Reason (k) asks only for a repository whose git item goes along (review R3-L3): an included item, or a
+    proposed one that ``--yes`` takes along. Inside a merely proposed item the repositories are named in the summary
+    (``repos_left``) under the question about proposals (a); without an answer ("without proposals") nothing of them
+    travels, so they do not stop the handover."""
+    left = repos_left(final)
+    if not left:
+        return []
+    takes_proposals = options.yes is True
+    roots = [
+        i.source_path
+        for i in final.plan.items
+        if i.kind is ItemKind.GIT_REPO
+        and (i.include is Include.YES or (i.include is Include.PROPOSED and takes_proposals))
+    ]
+    return [e for e in left if any(_inside_text(e["path"], r) for r in roots)]
 
 
 def instruction_files(items: Sequence[PlanItem], dest_lookup: Callable[[str], str | None]) -> list[dict]:

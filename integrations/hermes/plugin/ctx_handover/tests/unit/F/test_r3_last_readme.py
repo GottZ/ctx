@@ -255,10 +255,11 @@ def test_unredacted_names_the_hard_link_check(k0_lay):  # noqa: F811
         "below it, Hermes' credential stores) is left out as that file would be: `--include-secret` on its path "
         "releases one of your home, nothing releases Hermes'." in unredacted
     )
+    # r4-f (R3-M2, r4-ke): beyond the bound a linked file is no longer allowed — the sentence moved to
+    # ``test_r4_f_readme.py::test_unredacted_names_the_bound_of_the_hard_link_check``
     assert (
-        "A hard link to a credential file elsewhere (another account's home, any other place, or beyond the first "
-        f"{policy.LINKED_SCAN_MAX} entries the check reads, e.g. deep in a large browser profile) is caught only by "
-        "the name and content checks." in unredacted
+        "A hard link to a credential file elsewhere (another account's home, any other place) is caught only by the "
+        "name and content checks." in unredacted
     )
     assert {".ssh", ".aws", ".mozilla"} <= set(policy.SOURCE_DENY_DIRS)
     walk = inspect.getsource(policy._credential_identities)

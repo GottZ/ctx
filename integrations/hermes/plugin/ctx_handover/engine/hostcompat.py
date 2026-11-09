@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextvars
 import importlib.metadata
 import json
+import logging
 import os
 import re
 import sys
@@ -28,8 +29,10 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from .errors import BadRequest, CapabilityMissing, EnvNotWritable, HandoverError
+from .errors import BadRequest, CapabilityMissing, ContinueRefused, EnvNotWritable, HandoverError
 from .model import HermesPaths, HostFacts
+
+log = logging.getLogger("ctx_handover.hostcompat")
 
 PLUGIN_ID = "ctx_handover"
 
@@ -533,6 +536,11 @@ APPROVAL_WHY = {
 }
 """``ApprovalCheck.why`` → ``ApprovalCheck.off`` (review H2, R22, R33a)."""
 
+UNIDENTIFIED_WHY = frozenset({"gateway_unverified", "gateway_unknown"})
+"""``ApprovalCheck.why`` values where this process cannot identify the gateway that runs the turn (another container,
+PID namespace or user, or Hermes' gateway status unreadable): no continuation starts from here (review R3-H2,
+fail-closed) — ``approvals_off`` raises ``ContinueRefused`` with reason ``approvals_unchecked``."""
+
 
 @dataclass(frozen=True)
 class ApprovalCheck:
@@ -548,9 +556,11 @@ class ApprovalCheck:
     ``hermes chat`` starts one from its own, cleaned environment), ``gateway_elsewhere`` (a gateway runs in another
     process without ``--yolo`` on its command line — whether its environment holds ``HERMES_YOLO_MODE`` is not
     visible here), ``gateway_unverified`` (a fresh runtime record names a running gateway this process cannot
-    identify — another PID namespace, another user), ``gateway_unknown`` (Hermes' gateway status could not be read).
+    identify — another container or PID namespace, another user — and its recorded command line has no ``--yolo``),
+    ``gateway_unknown`` (Hermes' gateway status could not be read); the last two are ``UNIDENTIFIED_WHY``.
     ``pid`` is the gateway's process id where one was identified; ``flag`` whether ``--yolo`` is on the gateway's
-    recorded command line (other processes of the profile see that, not the environment)."""
+    recorded command line (other processes of the profile see that, not the environment) — for an unidentified
+    gateway the command line of its fresh record counts (``gateway_flag`` with ``pid`` None, review R3-H2)."""
 
     off: bool | None
     why: str
@@ -568,12 +578,16 @@ def _yolo_flag(argv: object) -> bool:
 def _gateway_view() -> tuple[str, int | None, bool]:
     """``(relation, pid, flag)`` of the gateway that runs this profile's turns, through Hermes' own identity check
     (``gateway.status.live_gateway_pid_for_home``: pid file and runtime record, start-time guard, live command line;
-    it never writes) for this profile's home, then the Hermes root (one host gateway may serve every profile).
+    it never writes) for this profile's home, then the Hermes root (one host gateway may serve every profile) — the
+    ``gateway.pid`` and ``gateway_state.json`` of both are read (README, Reads).
 
     ``relation``: ``self`` (this process is that gateway, or the plugin host it started — its environment is this
     process's), ``elsewhere``, ``none`` (no record, or a stopped or stale one), ``unverified`` (a fresh record of a
-    running gateway whose process cannot be identified here), ``unknown`` (``gateway.status`` failed). ``flag``:
-    ``--yolo`` on the recorded command line of an identified gateway."""
+    running gateway whose process cannot be identified here: another container or PID namespace, another user — the
+    first home with one decides, so a profile's own gateway in another container is never hidden behind an
+    identified root gateway), ``unknown`` (``gateway.status`` failed). ``flag``: ``--yolo`` on the recorded command
+    line of the gateway — of an identified one when the record is its own, of an unverified one from its fresh record
+    (review R3-H2: that gateway's own ``argv`` is the one sign of it this process has)."""
     try:
         from gateway.status import live_gateway_pid_for_home, read_runtime_status, runtime_status_is_stale
     except ImportError:
@@ -583,7 +597,6 @@ def _gateway_view() -> tuple[str, int | None, bool]:
         for home in (Path(hermes_paths().home), hermes_root()):
             if all(os.path.realpath(home) != os.path.realpath(h) for h in homes):
                 homes.append(home)
-        fresh_record = False
         for home in homes:
             pid = live_gateway_pid_for_home(home)
             record = read_runtime_status(home / "gateway_state.json")
@@ -596,8 +609,8 @@ def _gateway_view() -> tuple[str, int | None, bool]:
                 and record.get("gateway_state") not in (None, "stopped", "startup_failed")
                 and not runtime_status_is_stale(record)
             ):
-                fresh_record = True
-        return ("unverified" if fresh_record else "none"), None, False
+                return "unverified", None, _yolo_flag(record.get("argv"))
+        return "none", None, False
     except Exception:
         return "unknown", None, False
 
@@ -611,8 +624,10 @@ def approval_check(config: dict) -> ApprovalCheck:
     gateway that runs the turn: ``hermes chat --resume … -q`` is a gateway client (``hermes_cli/gateway_agent.py:1-6``,
     ``hermes_cli/main.py`` ``_chat_runs_at_gateway``), so that gateway's ``--yolo`` bypasses approvals whatever the
     child's environment says. Another process — a separate ``hermes serve``/``hermes dashboard`` serving the routes,
-    or ``hermes handover take|import --continue`` in a terminal — sees the gateway's recorded command line (its
-    ``--yolo``) but not its environment."""
+    or ``hermes handover take|import --continue`` in a terminal — sees the recorded command line (its ``--yolo``) of a
+    gateway it can identify, but not its environment; a gateway it cannot identify (another container or PID
+    namespace: Hermes' ``docker-compose.yml`` runs gateway and dashboard apart) is ``gateway_unverified`` — unless
+    its fresh record's command line carries ``--yolo`` (``gateway_flag``, ``pid`` None)."""
     approvals = config.get("approvals") if isinstance(config, dict) else None
     if isinstance(approvals, dict):
         if _approval_mode(approvals.get("mode", "manual")) == "off":
@@ -631,11 +646,46 @@ def approval_check(config: dict) -> ApprovalCheck:
         return ApprovalCheck(True, "gateway_flag", pid, True) if flag else ApprovalCheck(None, "gateway_elsewhere", pid)
     if relation == "none":
         return ApprovalCheck(False, "no_gateway")
-    return ApprovalCheck(None, "gateway_unverified" if relation == "unverified" else "gateway_unknown")
+    if relation == "unverified":
+        return ApprovalCheck(True, "gateway_flag", None, True) if flag else ApprovalCheck(None, "gateway_unverified")
+    return ApprovalCheck(None, "gateway_unknown")
+
+
+def unchecked_text(why: str) -> str:
+    """Why a continuation from this process is refused although approvals were not found off
+    (``UNIDENTIFIED_WHY``; the ``ContinueRefused`` message and the ``doctor`` reason, review R3-H2)."""
+    if why == "gateway_unverified":
+        return (
+            "a gateway of this profile runs, but this process cannot identify it (another container or PID namespace, "
+            "or another user), so it cannot see whether approvals are switched off there"
+        )
+    return "Hermes' gateway status could not be read here, so this process cannot tell whether approvals apply"
 
 
 def approvals_off(config: dict) -> bool:
-    """True when this host runs tools without asking, as far as this process can tell (``approval_check``): the
-    continuation never starts then (R22). Not checkable (``off`` None) is not "off": R33a — the README names the
-    limit and ``doctor`` says "not checked"."""
-    return approval_check(config).off is True
+    """The spawner's gate (``continuation.Spawner``; R22, R33a, review R3-H2, R3-L4), from ``approval_check``:
+
+    * True — approvals are off as far as this process can tell (the continuation is refused, ``approvals_off``);
+    * raises ``ContinueRefused`` (``details.reason`` ``approvals_unchecked``, ``details.why`` from
+      ``UNIDENTIFIED_WHY``) — this process cannot identify the gateway that runs the turn, so nothing starts
+      (fail-closed);
+    * False — the turn may start. Where the gateway is another, identified process (``gateway_elsewhere``) its
+      environment is not visible (R33a, named in the README and by ``doctor``): the start is logged as a warning
+      that names that gateway, so a continuation never starts unchecked in silence."""
+    check = approval_check(config)
+    if check.off is True:
+        return True
+    if check.why in UNIDENTIFIED_WHY:
+        raise ContinueRefused(
+            f"No turn is started without a person present: {unchecked_text(check.why)}.",
+            reason="approvals_unchecked",
+            why=check.why,
+        )
+    if check.off is None:
+        log.warning(
+            "ctx_handover: starting a continuation from this process with approvals not checked: the gateway of this "
+            "profile (pid %s) is another process, and whether it runs with HERMES_YOLO_MODE in its environment is "
+            "not visible here; leave allow_remote_continue off on a gateway given HERMES_YOLO_MODE",
+            check.pid,
+        )
+    return False

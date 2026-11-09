@@ -29,6 +29,8 @@ from pathlib import Path
 from .contracts import BlockSink
 from .errors import CapabilityMissing, ConflictError, PolicyDenied
 from .gitops import (
+    LFS_MAX_POINTER,
+    LFS_MIN_POINTER,
     RECEIVED,
     Git,
     GitCommandError,
@@ -41,6 +43,7 @@ from .gitops import (
     head_info,
     in_progress_op,
     is_sha,
+    lfs_pointer_blobs,
     name_report,
     object_format,
     put_bytes,
@@ -54,8 +57,6 @@ from .policy import PolicyConfig, SourceCheckCache, check_source_file, is_denied
 
 PACK_MEDIA = "application/x-git-pack"
 TREE_MEDIA = "application/json"
-LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
-_LFS_MAX_POINTER = 1024
 _SNIFF_BYTES = 8 * 1024
 _CACHE_FILE = "pack-cache.json"
 
@@ -390,48 +391,22 @@ def _remotes(git: Git, root: Path) -> tuple[tuple[dict, ...], dict]:
 # ---------------------------------------------------------------------------------------------------------
 
 
-def _parse_pointer(data: bytes) -> tuple[str, int] | None:
-    if not data.startswith(LFS_POINTER_PREFIX) or len(data) > _LFS_MAX_POINTER:
-        return None
-    oid = size = None
-    for line in data.split(b"\n")[1:]:
-        if line.startswith(b"oid sha256:"):
-            oid = line[len(b"oid sha256:") :].decode("ascii", errors="replace")
-        elif line.startswith(b"size "):
-            with contextlib.suppress(ValueError):
-                size = int(line[5:])
-    if oid and len(oid) == 64 and all(c in "0123456789abcdef" for c in oid) and size is not None and size >= 0:
-        return oid, size
-    return None
-
-
 def lfs_pointers(git: Git, gitdir_args: list[str], cwd: Path | None, spec: GitEnvSpec, trees: Sequence[str]) -> dict:
     """``{oid: size}`` of every LFS pointer blob in ``trees`` (small blobs only are read)."""
     small: dict[str, None] = {}
     for tree in trees:
         for rec in git.iter_z([*gitdir_args, "ls-tree", "-r", "-l", "-z", "--full-tree", tree], cwd=cwd, spec=spec):
             meta = rec.partition(b"\t")[0].split()
-            if len(meta) == 4 and meta[1] == b"blob" and meta[3].isdigit() and 60 <= int(meta[3]) <= _LFS_MAX_POINTER:
+            if (
+                len(meta) == 4
+                and meta[1] == b"blob"
+                and meta[3].isdigit()
+                and LFS_MIN_POINTER <= int(meta[3]) <= LFS_MAX_POINTER
+            ):
                 small[meta[2].decode("ascii")] = None
     found: dict[str, int] = {}
-    oids = list(small)
-    for start in range(0, len(oids), 512):
-        chunk = oids[start : start + 512]
-        data = git.run(
-            [*gitdir_args, "cat-file", "--batch"], cwd=cwd, spec=spec, input=("\n".join(chunk) + "\n").encode()
-        ).stdout
-        pos = 0
-        while pos < len(data):
-            nl = data.index(b"\n", pos)
-            header = data[pos:nl].split()
-            pos = nl + 1
-            if len(header) == 3 and header[2].isdigit():
-                size = int(header[2])
-                body = data[pos : pos + size]
-                pos += size + 1
-                parsed = _parse_pointer(body)
-                if parsed:
-                    found[parsed[0]] = parsed[1]
+    for oid, size in lfs_pointer_blobs(git, gitdir_args, cwd, spec, small).values():
+        found[oid] = size
     return found
 
 

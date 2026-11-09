@@ -50,6 +50,7 @@ from .errors import (
     BadRequest,
     CapabilityMissing,
     ConflictError,
+    ContinueRefused,
     EnvNotWritable,
     Forbidden,
     HandoverError,
@@ -873,8 +874,6 @@ class Plugin:
             cont_result = ContinueResult(started=True, pid=cont.get("pid"), log=cont.get("log"))
         cont_error = None
         if isinstance(cont, Mapping) and cont.get("error"):
-            from .errors import ContinueRefused
-
             cont_error = ContinueRefused(
                 str(cont["error"].get("message", "")), details=dict(cont["error"].get("details") or {})
             )
@@ -1675,19 +1674,18 @@ def _set_or_explain(backend: Backend, key: str, value: str) -> str:
 
 _ELSEWHERE = (
     "a continuation started by a separate `hermes serve`/`hermes dashboard` or by `hermes handover take|import "
-    "--continue` in a terminal sees only a --yolo on the gateway's command line, not HERMES_YOLO_MODE in its "
-    "environment"
+    "--continue` in a terminal sees only a --yolo on the command line of a gateway it can identify, not "
+    "HERMES_YOLO_MODE in its environment"
 )
 
 
 def _continue_check(config: dict) -> tuple[bool | None, str]:
-    """The ``doctor`` line for ``allow_remote_continue`` (review H2, R2-M5; R22, R33a): "approvals apply" only where
-    this process checked it (``hostcompat.approval_check``); "not checked" with the limit where the gateway that runs
-    the turn is another process whose environment is not visible here. ``approvals_off`` is what the spawner decides."""
-    try:
-        off = hostcompat.approvals_off(config)
-    except Exception:
-        return None, "on; not checked whether approvals apply here (the approval setting could not be read)"
+    """The ``doctor`` line for ``allow_remote_continue`` (review H2, R2-M5, R3-H2; R22, R33a): "approvals apply" only
+    where this process checked it (``hostcompat.approval_check``); "not checked" with the limit where the gateway that
+    runs the turn is another, identified process whose environment is not visible here; "not checked … refused" where
+    this process cannot identify that gateway (``hostcompat.UNIDENTIFIED_WHY``: no continuation starts from here).
+    ``approvals_off`` is what the spawner decides; it is asked only where the check is definite, so its warning for an
+    unchecked start (R3-L4) never comes from ``doctor``."""
     try:
         check = hostcompat.approval_check(config)
     except Exception:
@@ -1695,6 +1693,26 @@ def _continue_check(config: dict) -> tuple[bool | None, str]:
     why = getattr(check, "why", "")
     pid = getattr(check, "pid", None)
     gw = f"the gateway of this profile (pid {pid})" if pid else "the gateway of this profile"
+    if why in hostcompat.UNIDENTIFIED_WHY:
+        return None, (
+            f"on; not checked whether approvals apply here: {hostcompat.unchecked_text(why)} — so a continuation "
+            "started from this process is refused; start the turn there by hand (`hermes chat --resume <id>`, or open "
+            "the session and send a message)"
+        )
+    if why == "gateway_elsewhere":
+        return None, (
+            f"on; not checked whether approvals apply for a continuation started here: {gw} is another process; "
+            f"whether it runs with HERMES_YOLO_MODE is not visible here — {_ELSEWHERE}; leave allow_remote_continue "
+            "off on a gateway given HERMES_YOLO_MODE"
+        )
+    try:
+        off = hostcompat.approvals_off(config)
+    except ContinueRefused:
+        return None, (
+            "on; not checked whether approvals apply here, so a continuation started from this process is refused"
+        )
+    except Exception:
+        return None, "on; not checked whether approvals apply here (the approval setting could not be read)"
     if off is True:
         if why == "config_single_query":
             return None, (
@@ -1730,16 +1748,7 @@ def _continue_check(config: dict) -> tuple[bool | None, str]:
             "on: a paired device with --continue may start one turn here (approvals apply; checked in this gateway's "
             "process)"
         )
-    if why == "gateway_elsewhere":
-        reason = f"{gw} is another process; whether it runs with HERMES_YOLO_MODE is not visible here"
-    elif why == "gateway_unverified":
-        reason = "a gateway of this profile runs, but this process cannot identify it (another PID namespace or user)"
-    else:
-        reason = "the gateway of this profile could not be checked"
-    return None, (
-        f"on; not checked whether approvals apply for a continuation started here: {reason} — {_ELSEWHERE}; leave "
-        "allow_remote_continue off on a gateway given HERMES_YOLO_MODE"
-    )
+    return None, "on; not checked whether approvals apply for a continuation started here"
 
 
 def _includes(options: Options, parsed: surfaces.Parsed) -> tuple[str, ...]:
