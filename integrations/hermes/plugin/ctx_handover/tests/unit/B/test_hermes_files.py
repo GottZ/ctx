@@ -12,6 +12,7 @@ from ctx_handover.engine import hermes_files as hf
 from ctx_handover.engine.errors import PolicyDenied
 from ctx_handover.engine.model import HermesPaths, Options
 from ctx_handover.engine.policy import HERMES_FILE_KINDS, PolicyConfig, check_target_dest
+from ctx_handover.tests.unit.B.support import spill_terminal_output
 
 
 def _cfg(user_home: Path, hermes_home: Path, **kw) -> PolicyConfig:
@@ -28,8 +29,9 @@ def _cfg(user_home: Path, hermes_home: Path, **kw) -> PolicyConfig:
 
 
 @pytest.fixture
-def produced(make_session, hermes_home, user_home):
-    """A session whose transcript names three session files written by the core's own writers."""
+def produced(make_session, hermes_home, user_home, monkeypatch):
+    """A session whose transcript names one session file of every kind, each written by the core's own writer
+    (``terminal_output``: the terminal tool's full-output spill, L3-F10)."""
     from gateway.session_ingress_media import capture_native_media
     from tools.hook_output_spill import spill_if_oversized
     from tools.tool_result_storage import maybe_persist_tool_result
@@ -48,6 +50,9 @@ def produced(make_session, hermes_home, user_home):
     b.assistant(sid, "", tool_calls=[call])
     b.tool(sid, "call_spill", spilled, name="read_file")
     b.assistant(sid, hooked)
+    terminal = spill_terminal_output(monkeypatch, f"produced-{sid}")
+    b.assistant(sid, "", tool_calls=[b.tool_call("terminal", {"command": "python3"}, call_id="call_term")])
+    b.tool(sid, "call_term", terminal, name="terminal")
     rows = b.db.get_messages(sid, include_inactive=True)
     return {"sid": sid, "rows": rows, "native": ref}
 
@@ -56,12 +61,13 @@ def test_hermes_files_discover_markers(produced, hermes_home, user_home):
     paths = HermesPaths(home=str(hermes_home), document_cache=str(hermes_home / "cache" / "documents"))
     refs = hf.references(produced["rows"], [produced["sid"]], paths)
     kinds = sorted(r["kind"] for r in refs)
-    assert kinds == sorted(HERMES_FILE_KINDS)
+    assert kinds == sorted(hf.SESSION_FILE_KINDS)
     by_kind = {r["kind"]: r for r in refs}
     assert by_kind["spillover"]["rel"] == Path(by_kind["spillover"]["source_path"]).name
     assert by_kind["hook_outputs"]["rel"].startswith(produced["sid"] + "/")
     assert by_kind["hook_outputs"]["session_id"] == produced["sid"]
     assert by_kind["native_inputs"]["rel"] == f"{produced['native']['sha256']}/photo.png"
+    assert by_kind["terminal_output"]["rel"] == Path(by_kind["terminal_output"]["source_path"]).name
     found = hf.discover(produced["rows"], [produced["sid"]], paths, _cfg(user_home, hermes_home))
     assert sorted(f.kind for f in found) == sorted(HERMES_FILE_KINDS)
     assert all(f.size > 0 for f in found)

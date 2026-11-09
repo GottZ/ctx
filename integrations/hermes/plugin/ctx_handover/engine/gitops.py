@@ -196,6 +196,39 @@ def undo_failed(cause: BaseException, undo: BaseException, *, path: str | os.Pat
     )
 
 
+def partial_exists(path: str | os.PathLike, dest: str | os.PathLike | None = None) -> ConflictError:
+    """The refusal of a fresh PREPARE whose partial path (``<dest parent>/.ctxh-<job6>``, a staged extra file) is
+    taken by something this handover did not leave there (L3-F08): it is neither written into nor removed.
+    ``ConflictError(kind=partial_exists, path[, dest])`` — not retryable, the message says what to do."""
+    where = f" (this handover prepares {os.fspath(dest)} under that name)" if dest is not None else ""
+    return ConflictError(
+        f"{os.fspath(path)} is in the way{where} and was not left there by this handover; the plugin neither writes "
+        "into it nor removes it: move or remove it, then hand over again",
+        kind="partial_exists",
+        path=os.fspath(path),
+        **({"dest": os.fspath(dest)} if dest is not None else {}),
+    )
+
+
+def open_partial(partial: str | os.PathLike, *, claimed: bool = False, dest: str | os.PathLike | None = None) -> Path:
+    """The partial directory of a fresh PREPARE, empty and 0700 (DESIGN §9.5 step 1, SEC 6.1): created here, or —
+    ``claimed`` — created and recorded by the caller (``materialize`` recognises its own partial after a crash by
+    that record). Anything already at the path, or a claimed path that is no empty real directory, raises
+    ``partial_exists``; nothing there is touched."""
+    p = Path(partial)
+    if not claimed:
+        try:
+            os.mkdir(p, 0o700)
+        except FileExistsError:
+            raise partial_exists(p, dest) from None
+    else:
+        st = os.lstat(p)
+        if not stat.S_ISDIR(st.st_mode) or os.listdir(p):
+            raise partial_exists(p, dest)
+    os.chmod(p, 0o700)
+    return p
+
+
 def is_sha(value: object) -> bool:
     """True for a lower-case 40 (SHA-1) or 64 (SHA-256) hex object id."""
     return isinstance(value, str) and _SHA_RE.fullmatch(value) is not None

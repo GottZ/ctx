@@ -28,6 +28,7 @@ import errno
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -61,6 +62,7 @@ from .gitops import (
     in_progress_op,
     is_sha,
     iter_object,
+    open_partial,
     read_json_object,
     undo_failed,
     validate_ref,
@@ -428,14 +430,21 @@ def transfer_pack(qdir: Path, dest_gitdir: Path) -> None:
         final = dst / name
         if final.exists():
             continue
-        tmp = dst / f".tmp-ctxh-{os.getpid()}-{name}"
+        # unique per attempt: a restarted process may carry the pid of the one that died (containers) and must not
+        # trip over its temp file, nor take over one a live writer still fills
+        tmp = dst / f".tmp-ctxh-{os.getpid()}-{secrets.token_hex(4)}-{name}"
         with open(src / name, "rb") as fin:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o444)
-            with os.fdopen(fd, "wb") as fout:
-                shutil.copyfileobj(fin, fout, 1024 * 1024)
-                fout.flush()
-                os.fsync(fout.fileno())
-        os.rename(tmp, final)
+            try:
+                with os.fdopen(fd, "wb") as fout:
+                    shutil.copyfileobj(fin, fout, 1024 * 1024)
+                    fout.flush()
+                    os.fsync(fout.fileno())
+                os.rename(tmp, final)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
     _fsync_dir(dst)
 
 
@@ -626,22 +635,24 @@ def prepare_fresh(
     fallback: Path | None = None,
     qdir: Path | None = None,
     alternates: Path | None = None,
+    claimed: bool = False,
 ) -> GitApplyState:
     """Fresh mode PREPARE (DESIGN §9.5): ``partial`` (must not exist; its parent must) is created 0700, gets a new
     repository, the verified objects, refs from the pack document, remote config, HEAD, the checkout
     (W → work tree, I → index) and the stash. NTFS-invalid or otherwise unsafe paths ⇒ ``NO_CHECKOUT`` (objects
     and refs only). ``dest`` is where ``commit`` renames the partial to; ``fallback`` where it goes when ``dest``
     appeared meanwhile. ``alternates`` (late fallback from update/return mode, whose pack is thin against that
-    repository): its objects complete the new repository, which is repacked self-contained before PREPARE ends."""
+    repository): its objects complete the new repository, which is repacked self-contained before PREPARE ends.
+    ``claimed``: the caller created ``partial`` (empty, recorded — ``materialize``). Something already at the path
+    is never used or removed: ``ConflictError(kind=partial_exists)`` (L3-F08). A failure removes the partial."""
     git.ensure_supported()
     item = parse_item(item_pack)
     partial = Path(partial)
     if dest is None:
         raise ValueError("prepare_fresh needs dest")
-    os.mkdir(partial, 0o700)
+    open_partial(partial, claimed=claimed, dest=dest)
     warnings: list[str] = []
     try:
-        os.chmod(partial, 0o700)
         git.run(["init", "-q", "--template=", f"--object-format={item.fmt}", str(partial)], cwd=None, spec=RECEIVED)
         q = Path(qdir) if qdir is not None else partial / ".git" / "ctxh-quarantine"
         quarantine_and_verify(git, store, item_pack, q, alternates=alternates, cancelled=cancelled)

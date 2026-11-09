@@ -91,22 +91,56 @@ def _latest_session_id(db) -> str:
     return str(rows[0]["id"])
 
 
-def describe(db, ref: SessionRef, *, calling_session: str | None) -> SessionInfo:
-    """Resolve ``ref`` (explicit id › ``latest`` › the calling session) to its tip and compression lineage.
+def _offered_session(ref: SessionRef, offer_session: Callable[[str], str | None] | None) -> str:
+    """The session an offer names (F12): ``offer_session`` is the ledger lookup of the composition root (cluster A
+    may claim the offer for the job inside it; its errors pass through)."""
+    offer_id = str(ref.offer_id)
+    if offer_session is None:
+        raise BadRequest(f"offer {offer_id} cannot be resolved here", field="session_ref.offer_id")
+    sid = offer_session(offer_id)
+    if not isinstance(sid, str) or not sid:
+        raise NotFound(f"offer {offer_id} not found", offer_id=offer_id)
+    return sid
+
+
+def _tip_of(db, sid: str) -> str:
+    if db.get_session(sid) is None:
+        raise NotFound("session not found", session_id=sid)
+    return db.resolve_resume_session_id(sid) or sid
+
+
+def describe(
+    db,
+    ref: SessionRef,
+    *,
+    calling_session: str | None,
+    offer_session: Callable[[str], str | None] | None = None,
+) -> SessionInfo:
+    """Resolve ``ref`` (explicit id › offer › ``latest`` › the calling session) to its tip and compression lineage.
+
+    ``offer_session(offer_id) -> session id | None`` resolves ``ref.offer_id`` (F12, ``take --offer``). With both an
+    id and an offer (route #6 answers ``{id, offer_id}``) and a lookup, both must name the same tip, so an offer's
+    stored refinement never rides on a session the offer did not name.
 
     ``cwd``/``git_*`` come from the session row of the tip, never from ``ctx.session_cwd()`` [LAB L2, R11].
     """
     if ref.id:
         sid = ref.id
+        if (
+            ref.offer_id
+            and offer_session is not None
+            and _tip_of(db, _offered_session(ref, offer_session)) != _tip_of(db, sid)
+        ):
+            raise BadRequest("the offer names another session", field="session_ref.offer_id")
+    elif ref.offer_id:
+        sid = _offered_session(ref, offer_session)
     elif ref.latest:
         sid = _latest_session_id(db)
     elif calling_session:
         sid = calling_session
     else:
         raise BadRequest("no session given", field="session_ref")
-    if db.get_session(sid) is None:
-        raise NotFound("session not found", session_id=sid)
-    tip = db.resolve_resume_session_id(sid) or sid
+    tip = _tip_of(db, sid)
     lineage = tuple(db.get_compression_lineage(tip)) or (tip,)
     row = db.get_session(tip)
     if row is None:

@@ -37,6 +37,7 @@ from .gitops import (
     dec_path,
     enc_path,
     object_manifest,
+    open_partial,
     put_stream,
     read_json_object,
     sha256_file,
@@ -447,14 +448,16 @@ def prepare_fresh(
     dest: Path | None = None,
     max_files: int = 200_000,
     fallback: Path | None = None,
+    claimed: bool = False,
 ) -> TreeApplyState:
-    """Fresh mode PREPARE: build the tree in ``partial`` (created 0700; must not exist). Unsafe, colliding or
-    unknown-type entries are skipped and reported in ``skipped``."""
+    """Fresh mode PREPARE: build the tree in ``partial`` (created 0700; must not exist — ``claimed``: created empty
+    and recorded by the caller). Something already at the path is never used or removed:
+    ``ConflictError(kind=partial_exists)`` (L3-F08). Unsafe, colliding or unknown-type entries are skipped and
+    reported in ``skipped``."""
     entries = load_manifest(store, manifest_id, max_files=max_files)
     checked, skipped = _check_entries(entries, rules)
     partial = Path(partial)
-    os.mkdir(partial, 0o700)
-    os.chmod(partial, 0o700)
+    open_partial(partial, claimed=claimed, dest=dest)
     fp: dict[str, list] = {}
     dirs: list[_Checked] = []
     try:
@@ -529,12 +532,29 @@ def _walk_files(root: Path) -> Iterator[tuple[bytes, os.stat_result]]:
                     yield rel, st
 
 
-def matches_fingerprint(root: Path, recorded: dict[str, list]) -> tuple[bool, str]:
-    """Does the directory still hold exactly what the plugin wrote (hash only on stat mismatch)?"""
+def is_own_staged(rel: bytes, tag: str) -> bool:
+    """``.<name>.ctxh-<tag>`` (``_staged_name``): a file the tree update of the job with this tag stages beside its
+    destination."""
+    name = os.path.basename(rel)
+    suffix = b".ctxh-" + tag.encode("ascii")
+    return name.startswith(b".") and name.endswith(suffix) and len(name) > len(suffix) + 1
+
+
+def matches_fingerprint(
+    root: Path, recorded: dict[str, list], *, own_tag: str | None = None, own: list[bytes] | None = None
+) -> tuple[bool, str]:
+    """Does the directory still hold exactly what the plugin wrote (hash only on stat mismatch)? With ``own_tag``,
+    an unrecorded regular file or symlink this job's tree update staged (``is_own_staged``) is no change: it is
+    listed in ``own``."""
     seen: set[str] = set()
     for rel, st in _walk_files(root):
         key = fp_key(rel)
         rec = recorded.get(key)
+        own_kind = stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)
+        if rec is None and own_tag is not None and own_kind and is_own_staged(rel, own_tag):
+            if own is not None:
+                own.append(rel)
+            continue
         if rec is None:
             return False, f"new file {key}"
         seen.add(key)
@@ -573,10 +593,14 @@ def prepare_update(
     """Update mode PREPARE (DESIGN §9.6): allowed only when ``dest`` still equals ``fingerprint`` (the plugin's
     last write there, or the out-state recorded at retire for the return trip); any foreign change ⇒
     ``ConflictError(kind=foreign)``. Changed and new files are staged beside their destination
-    (``.<name>.ctxh-<tag>``); replaced and removed files get backup slots under ``staging``."""
+    (``.<name>.ctxh-<tag>``); replaced and removed files get backup slots under ``staging``.
+
+    Repeatable (L3-F08 class): files staged by an earlier PREPARE with the same ``tag`` whose process died are no
+    foreign change — they are staged again or removed (``tag`` is the job's)."""
     dest = Path(dest)
     recorded = dict((fingerprint or {}).get("files") or {})
-    same, why = matches_fingerprint(dest, recorded)
+    leftover: list[bytes] = []
+    same, why = matches_fingerprint(dest, recorded, own_tag=tag, own=leftover)
     if not same:
         raise ConflictError("the destination changed since the plugin wrote it", kind="foreign", detail=why)
     entries = load_manifest(store, manifest_id, max_files=max_files)
@@ -646,6 +670,11 @@ def prepare_update(
             with contextlib.suppress(OSError):
                 d.rmdir()
         raise
+    restaged = {temp for temp, _ in staged}
+    for rel in leftover:  # staged by an earlier run of this job and not staged again
+        if _join(dest, rel) not in restaged:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(_join(dest, rel))
     return TreeApplyState(
         dest=dest,
         mode=DestMode.UPDATE,
@@ -771,6 +800,21 @@ def _undo_update(state: TreeApplyState) -> None:
     for final, backup in state.backups:
         if os.path.lexists(backup):
             _move(backup, final)
+
+
+def drop_staged(dest: Path, tag: str) -> list[Path]:
+    """Remove the files a tree update with this ``tag`` staged under ``dest`` (``is_own_staged``; regular files and
+    symlinks only) — the abort of a job whose PREPARE died before a snapshot named them. Returns what it removed."""
+    dest = Path(dest)
+    removed: list[Path] = []
+    if not dest.is_dir() or dest.is_symlink():
+        return removed
+    for rel, st in _walk_files(dest):
+        if (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)) and is_own_staged(rel, tag):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(_join(dest, rel))
+                removed.append(_join(dest, rel))
+    return removed
 
 
 def discard(state: TreeApplyState) -> None:

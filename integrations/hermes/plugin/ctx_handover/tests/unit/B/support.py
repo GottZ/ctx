@@ -404,3 +404,22 @@ class MemoryBlockStore:
         for segment in doc["segments"]:
             segment["pages"] = [page if p == page_id else p for p in segment["pages"]]
         return put_json(self, doc).object_id
+
+
+def spill_terminal_output(monkeypatch, task: str) -> str:
+    """Run one long command through the core's terminal tool with a 2 000-byte capture window (as upstream's
+    ``tests/tools/test_terminal_truncation_spill.py``) and return its JSON result, whose ``full_output_path`` names
+    the spill file under ``<HERMES_HOME>/cache/terminal-output`` (L3-F10). The tool's environment is cleaned up."""
+    import tools.tool_output_limits as lim
+    from hermes_constants import hermes_home_key
+    from tools.terminal_tool import terminal_tool
+    from tools.terminal_tool_lifecycle import cleanup_vm
+
+    monkeypatch.setattr(
+        lim, "_cached_limits", {hermes_home_key(): {"max_bytes": 2000, "max_lines": 2000, "max_line_length": 2000}}
+    )
+    try:
+        command = "print('head_marker'); [print('row', i, 'x' * 80) for i in range(200)]; print('tail_marker')"
+        return terminal_tool(f'python3 -c "{command}"', task_id=task)
+    finally:
+        cleanup_vm(task)

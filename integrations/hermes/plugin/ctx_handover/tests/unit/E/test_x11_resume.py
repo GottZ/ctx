@@ -197,8 +197,8 @@ class Scenario:
             spill,
         )
 
-    def run(self, crash: dict | None = None, *, fail_last: bool = False) -> int:
-        spec = dict(self.spec, crash=crash, fail_last=fail_last)
+    def run(self, crash: dict | None = None, *, fail_last: bool = False, abort: bool = False) -> int:
+        spec = dict(self.spec, crash=crash, fail_last=fail_last, abort=abort)
         path = self.tmp / "spec.json"
         path.write_text(json.dumps(spec))
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p), PYTHONDONTWRITEBYTECODE="1")

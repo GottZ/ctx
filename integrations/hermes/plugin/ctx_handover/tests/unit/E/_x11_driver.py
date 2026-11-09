@@ -11,7 +11,11 @@ Faults (``spec["crash"]``) end the process with ``os._exit`` — no ``finally``,
 ``{"at": "journal", "kind", "step"}`` when the transaction journals that event (inside a step, after its effect),
 ``{"at": "intent", "step"}`` right after the commit op journaled the intent of a step (between steps),
 ``{"at": "call", "target": "<module>.<attr>[.<attr>]", "nth", "when": "before"|"after"}`` around the nth call of
-a plugin function (inside a step). ``spec["fail_last"]`` adds a last step that raises (the commit then rolls back).
+a plugin function (inside a step); with ``"argv": [...]`` only calls whose list argument starts with those words
+count (``gitops.Git.run`` of one git subcommand). ``spec["fail_last"]`` adds a last step that raises (the commit then
+rolls back). ``spec["abort"]`` plays the target abort instead of the commit (DESIGN §3.2, §3.6: a job whose PREPARE
+was cut short is aborted, not resumed): the transaction from the newest snapshot — or a new one when PREPARE never
+journaled one — is discarded.
 
 ``needs_attention`` (DESIGN §3.4): an inverse that raises, and a forward step whose error carries
 ``details.needs_attention`` (it could not undo its own partial change, e.g. an orphaned ``index.lock``), are journaled
@@ -62,7 +66,17 @@ def _arm_call(crash: dict) -> None:
     original = getattr(owner, attrs[-1])
     calls = {"n": 0}
 
+    words = crash.get("argv")
+
+    def counts(args: tuple) -> bool:
+        if words is None:
+            return True
+        argv = next((a for a in args if isinstance(a, list)), None)
+        return argv is not None and argv[: len(words)] == words
+
     def wrapped(*args, **kwargs):
+        if not counts(args):
+            return original(*args, **kwargs)
         calls["n"] += 1
         if calls["n"] == crash["nth"] and crash.get("when", "before") == "before":
             _crash()
@@ -99,6 +113,14 @@ def main(spec_path: str) -> int:
             snap = ev["snapshot"]
         elif ev["kind"] == "done" and isinstance(ev.get("result"), dict) and "ws" in ev["result"]:
             snap = ev["result"]["ws"]
+    if spec.get("abort"):
+        if snap is None:
+            txn = materialize.WorkspaceTxn(spec["job_id"], staging, git, store, ws_journal, **kw)
+        else:
+            txn = materialize.WorkspaceTxn.restore(snap, staging, git, store, ws_journal, **kw)
+        txn.discard()
+        _append(journal, {"kind": "finished", "outcome": "aborted"})
+        return 0
     if snap is None:
         txn = materialize.WorkspaceTxn(spec["job_id"], staging, git, store, ws_journal, **kw)
         for entry in spec["items"]:
