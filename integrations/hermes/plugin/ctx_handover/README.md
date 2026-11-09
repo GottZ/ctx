@@ -28,7 +28,9 @@ session-relay (fresh session on the same gateway).
   with the command to pause a cron job that is still attached to the old session.
 - Two copies that both went on are never merged.
 - After a pull, the target learns of a reclaim on the source only while the job runs; after it finished,
-  `/handover status` on the target does not show it.
+  `/handover status` on the target does not show it. A `reclaim` after a finished handover makes two independent
+  copies: a reachable target of a push is told; after a pull, or when the target cannot be reached, the copy there
+  stays active and is not told — the `reclaim` output says so.
 - No Desktop UI of its own yet: everything runs through `/handover …` in any Hermes chat (CLI, TUI, Desktop) and
   `hermes handover …` in a terminal.
 - Workspaces of remote terminal backends (docker, ssh, modal …) are not sources; the plugin moves files of the
