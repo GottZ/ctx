@@ -7,3 +7,196 @@ manifest_version: 2
 author: GottZ
 license: MPL-2.0
 homepage: https://github.com/GottZ/ctx
+provides_tools: [handover]
+provides_hooks: [pre_llm_call, pre_tool_call, post_llm_call, post_compaction]
+# Optional consent: with it the plugin may ask the session's own model one side question per handover
+# (which resources the continued work needs). Everything works without it.
+capabilities: [llm.side_question]
+# Plugin settings (plugins.entries.ctx_handover.settings.<key>). Hermes Desktop renders this as the form under
+# Settings -> Plugins -> ctx_handover. The table and the defaults are DESIGN §14.4; engine/surfaces.py
+# SETTINGS_SCHEMA mirrors it and a unit test keeps both identical.
+config_schema:
+  inbound:
+    type: str
+    choices: [auto, "on", "off"]
+    default: auto
+    label: Accept handovers from paired devices
+    description: "auto = only while a device is paired or a pairing code is pending; on = always; off = never (the routes answer like an uninstalled plugin)."
+  listen_url:
+    type: str
+    default: ""
+    label: Address other devices use to reach this gateway
+    description: "Base URL put into pairing strings, e.g. https://server.example.net. Empty = webapp.public_url or dashboard.public_url."
+  peer_gate:
+    type: str
+    choices: [session_token, bearer, basic_login]
+    default: session_token
+    label: How to pass the other gateway's dashboard sign-in
+    description: "session_token = the dashboard token of the other gateway (HERMES_DASHBOARD_SESSION_TOKEN there); bearer = the same token as Authorization header; basic_login = user name and password of a Basic-login dashboard (hermes serve)."
+  peer_token:
+    type: secret
+    env: CTX_HANDOVER_PEER_TOKEN
+    label: Dashboard token of the other gateway
+    description: "Used for session_token and bearer. It opens that gateway's whole dashboard, not only this plugin; prefer a reverse proxy that passes only /api/plugins/ctx_handover/."
+  peer_username:
+    type: str
+    default: ""
+    label: Dashboard user name (basic_login)
+  peer_password:
+    type: secret
+    env: CTX_HANDOVER_PEER_PASSWORD
+    label: Dashboard password (basic_login)
+    description: "Opens that gateway's whole dashboard, not only this plugin."
+  peer_extra_headers:
+    type: dict
+    default: {}
+    label: Extra request headers for a proxy
+    description: "{header name: name of an .env variable holding its value}, e.g. {CF-Access-Client-Secret: CF_ACCESS_SECRET}."
+  workspace_root:
+    type: str
+    default: "~/hermes-handover"
+    label: Folder for received workspaces and bundles
+  allow_roots:
+    type: list
+    default: ["~/hermes-handover"]
+    label: Folders a handover may write into
+    description: "Received workspaces land only here (or at a path this machine recorded itself). Hermes, credential, shell-startup, autostart, git and ssh configuration locations are refused even inside these folders."
+  export_roots:
+    type: list
+    default: []
+    label: Extra folders a paired device may pull
+    description: "Paths a device with the pull right may add beyond what this machine planned itself. Empty = nothing beyond the plan."
+  max_session_mb:
+    type: int
+    default: 512
+    label: Largest session accepted (MiB)
+  max_file_mb:
+    type: int
+    default: 100
+    label: Largest single file sent (MiB)
+  max_extra_dir_mb:
+    type: int
+    default: 256
+    label: Largest extra folder outside the project (MiB)
+  max_hermes_file_mb:
+    type: int
+    default: 64
+    label: Largest Hermes session file (MiB)
+  max_files:
+    type: int
+    default: 200000
+    label: Most files per folder tree
+  max_untracked_files:
+    type: int
+    default: 200000
+    label: Most untracked files per git repository
+  max_total_gb:
+    type: float
+    default: 10
+    label: Largest handover in total (GiB)
+  confirm_above_mb:
+    type: int
+    default: 500
+    label: Ask before handing over more than (MiB)
+  max_request_mb:
+    type: int
+    default: 8
+    label: Largest request this gateway accepts (MiB)
+  block_cache_gb:
+    type: float
+    default: 5
+    label: Transfer cache size (GiB)
+  block_cache_days:
+    type: int
+    default: 3
+    label: Days the transfer cache keeps data
+  staging_ttl_hours:
+    type: int
+    default: 24
+    label: Hours an unfinished incoming handover is kept
+  lease_ttl_s:
+    type: int
+    default: 120
+    label: Session pause lease (seconds)
+  participant_idle_timeout_min:
+    type: int
+    default: 15
+    label: Release a paused session after this many idle minutes
+  stall_timeout_min:
+    type: int
+    default: 30
+    label: Suspend a stalled handover after (minutes)
+  wait_timeout_min:
+    type: int
+    default: 30
+    label: Longest wait for a running turn with --wait (minutes)
+  refine:
+    type: str
+    choices: [auto, side_question, llm, "off"]
+    default: auto
+    label: Ask a model which resources the work needs
+    description: "auto = side question to the session's own model when granted, else your main model with up to 60,000 characters of redacted transcript; off = file scan only. Inference costs are yours."
+  refine_timeout_s:
+    type: int
+    default: 45
+    label: Model question timeout (seconds)
+  refine_history_chars:
+    type: int
+    default: 60000
+    label: Transcript characters sent with the model question
+  refine_side_question_max_tokens:
+    type: int
+    default: 200000
+    label: Skip the side question above this session size (tokens)
+  refine_auto_include:
+    type: bool
+    default: false
+    label: Include model suggestions without asking
+  extra_paths:
+    type: str
+    choices: [ask, auto, "off"]
+    default: ask
+    label: Files outside the project that the conversation used
+  include_hermes_files:
+    type: bool
+    default: true
+    label: Send the session's tool outputs and attachments
+  model_mapping:
+    type: str
+    choices: [auto, target_default]
+    default: auto
+    label: Model on the receiving machine
+    description: "auto = keep the session's model when this machine can serve it, else its default; target_default = always this machine's default."
+  allow_remote_continue:
+    type: bool
+    default: false
+    label: Let a paired device start one continuation turn here
+    description: "Only with --continue from a signed device. Never when approvals are off on this gateway; commands that need approval are refused."
+  allow_agent_start:
+    type: bool
+    default: false
+    label: Let the agent start a handover it was asked for
+  accept_offers:
+    type: str
+    choices: [ask, "off"]
+    default: ask
+    label: Offers from other devices
+    description: "Offers are never claimed automatically."
+  extra_ignore:
+    type: list
+    default: []
+    label: Extra ignore patterns for folder trees
+  tool_probe:
+    type: list
+    default: []
+    label: Extra tools to report in the environment comparison
+  ctx_persist:
+    type: str
+    choices: [auto, "off"]
+    default: auto
+    label: Record handovers in ctx
+    description: "Only when ctx_checkpoint is the memory provider and you allowed it in /handover setup."
+  ctx_category:
+    type: str
+    default: handover
+    label: ctx category for handover records
