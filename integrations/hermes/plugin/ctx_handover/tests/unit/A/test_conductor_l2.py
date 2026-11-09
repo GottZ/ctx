@@ -16,7 +16,7 @@ from ctx_handover.engine import jobs, note
 from ctx_handover.engine import plan as planning
 from ctx_handover.engine.conductor import VerifiedBlocks
 from ctx_handover.engine.errors import BadRequest, BlockCorrupt, Cancelled, HandoverError, InvalidState, VerifyFailed
-from ctx_handover.engine.model import Include, Mode, Options, Role, SessionRef
+from ctx_handover.engine.model import EnvFacts, Include, Mode, Options, Role, SessionRef
 from ctx_handover.engine.progress import TERMINAL_STEPS
 from ctx_handover.tests.conftest import require_upstream
 from ctx_handover.tests.fakes import FakeClock
@@ -95,7 +95,8 @@ def test_l2_conductor_presend_summary_is_structured_not_a_text_line(tmp_path, cl
     final = c.run_until_negotiated()
     c.run()
     h.world.assert_outcome("done")
-    assert _ctx(h)["presend"] == to_wire_dict(planning.presend_summary(final))
+    facts = {"target_facts": c._get("target_facts", EnvFacts), "source_facts": c._get("source_facts", EnvFacts)}
+    assert _ctx(h)["presend"] == to_wire_dict(planning.presend_summary(final, **facts))
     assert not [t for t in h.reporter.infos if "summary" in t.lower() or "=" in t]
 
 

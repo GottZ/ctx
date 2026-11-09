@@ -486,6 +486,7 @@ class FakeSource(_Participant):
         self.pack_worktree = None
         self.events: list[str] = []
         self.retire_ack: CommitAck | None = None
+        self.holds = 0  # re-locks of a released source: one release operation per hold, like the production (B1)
         self.items = [make_item("w0", "/srv/app"), make_item("x1", "/srv/notes.txt")]
         self.blocks_store = FakeBlocks(world, "source_blocks", world.block_size)
         self.list_calls = 0
@@ -569,6 +570,8 @@ class FakeSource(_Participant):
                 raise InvalidState(f"source is {self.state}", reason="state", state=self.state)
             if self.busy:
                 raise SessionBusy("A turn is running in this session.")
+            if self.state == "released":
+                self.holds += 1
             self.state, self.job_id, self.leases, self.lease_lost = "locked", job.job_id, True, False
             self.events.append("lock")
             return self._info(plan_revision)
@@ -703,7 +706,7 @@ class FakeSource(_Participant):
             self.state = "released"
             return {"state": "released"}
 
-        return self._call("start_release", job, lambda: self._start("release", "release", complete))  # type: ignore[return-value]
+        return self._call("start_release", job, lambda: self._start("release", f"release:{self.holds}", complete))  # type: ignore[return-value]
 
     def status(self, job) -> ParticipantStatus:
         def run() -> ParticipantStatus:

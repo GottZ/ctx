@@ -30,6 +30,7 @@ accepts a pack only when it belongs to that id.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import shutil
@@ -50,8 +51,9 @@ from .errors import (
     PayloadTooLarge,
     VerifyFailed,
 )
+from .ids import ULID_RE
 from .jsonutil import canonical_bytes, from_wire, loads_bounded, sha256_hex, to_wire
-from .ledger import STALE_OWNER_S, Fenced, Ledger, private_dir, process_owner
+from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, TERMINAL, Fenced, Ledger, private_dir, process_owner
 from .model import (
     CapsuleInfo,
     CommitAck,
@@ -95,6 +97,35 @@ CAPSULE_BYTES_PER_TOKEN = 16
 """Capsule bytes per token of the plan's estimate: ≈ 4 characters per token, × 4 for row metadata, tool calls,
 ``api_content`` sidecars and JSON framing (DESIGN §6.2 example: 980 k tokens ⇒ 12.8 MB capsule)."""
 CAPSULE_FIXED_BYTES = 1024 * 1024
+
+
+def purge_reports(ledger: Ledger, data_dir: Path, *, keep_s: float = JOURNAL_KEEP_S) -> int:
+    """Janitor (BUILD-ORDER §6 Nr. 21 "reports … 30 days", review H4): note reports (``reports/<job>.md``, written by
+    ``_compose_note``: paths, file names, the model's text) older than ``keep_s`` whose job has no active row on this
+    host. Age is the file's modification time (written at prepare, rewritten with a delta) against the ledger's
+    clock; only files named like a report (``<ULID>.md``, never a link) are considered. Returns how many went."""
+    cutoff = ledger.now() - float(keep_s)
+    try:
+        entries = list(os.scandir(Path(data_dir) / "reports"))
+    except OSError:
+        return 0
+    removed = 0
+    for entry in entries:
+        job_id = entry.name[:-3] if entry.name.endswith(".md") else ""
+        if not ULID_RE.match(job_id) or not entry.is_file(follow_symlinks=False):
+            continue
+        try:
+            if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        rows = [(role, ledger.job(job_id, role)) for role in Role]
+        if any(row is not None and row["state"] not in TERMINAL[role] for role, row in rows):
+            continue
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(entry.path)
+            removed += 1
+    return removed
 
 
 def capsule_estimate(approx_tokens: int) -> int:
@@ -662,16 +693,23 @@ class LocalTarget:
                 row = self.ledger.map_out(decision.dest, peer_id) or self.ledger.map_in(decision.dest, peer_id)
                 txn.prepare_item(item, decision, pack_item, out_row=row)
             dests = [list(d) for d in txn.dests()]
-            self._remember(job, ws_snapshot=txn.snapshot())
+            # what the workspace fell back to (a conflict ⇒ fresh directory, no git-lfs …) is told at the end
+            ws_warnings = [str(w) for w in getattr(txn, "warnings", ()) or ()]
+            self._remember(job, ws_snapshot=txn.snapshot(), ws_warnings=ws_warnings)
         else:
             dests = ctx.get("dests") or []
             hermes_files = ctx.get("hermes_files") or []
+            ws_warnings = [str(w) for w in ctx.get("ws_warnings") or ()]
         # session: reuse a hidden import of the same capsule, otherwise import hidden now
         prepared_raw = ctx.get("prepared")
         if prepared_raw is not None and ctx.get("prepared_capsule") == req.capsule.capsule_id:
             prepared = from_wire(PreparedInfo, prepared_raw)
         else:
             import_plan = self._import_plan(job, capsule_doc, final)
+            # every write of the import commits on its own: the ids it is going to create — those free now — are
+            # journaled first, so an abort after a process died inside the import removes what was written (M8)
+            planned = [s.new_id for s in import_plan.segments if db.get_session(s.new_id) is None]
+            self._remember(job, planned_ids=planned)
             prepared = p.session_import.import_hidden(
                 db,
                 self.store,
@@ -681,11 +719,9 @@ class LocalTarget:
                 local_hermes_version=self.host.hermes_version,
                 max_session_bytes=job.options.max_session_bytes,
             )
-            if (prepared.h_all, prepared.h_rows, prepared.h_model) != (
-                req.capsule.h_all,
-                req.capsule.h_rows,
-                req.capsule.h_model,
-            ):
+            # ``h_model`` is the import's to judge (``session_import``: a gate for equal Hermes versions, a warning for
+            # different ones — loaders repair the alternation differently); here the transcript decides (review M7)
+            if (prepared.h_all, prepared.h_rows) != (req.capsule.h_all, req.capsule.h_rows):
                 p.session_import.discard(db, prepared)
                 raise VerifyFailed("The imported transcript did not match. Nothing was activated.", which="hashes")
             tip = import_plan.segments[-1] if import_plan.segments else None
@@ -706,7 +742,7 @@ class LocalTarget:
         prepared = dataclasses.replace(
             prepared,
             dests=tuple((a, b, DestMode(c)) for a, b, c in dests),
-            warnings=tuple(dict.fromkeys((*prepared.warnings, *skipped))),
+            warnings=tuple(dict.fromkeys((*prepared.warnings, *ws_warnings, *skipped))),
         )
         path_map = [
             PathMapEntry(
@@ -1181,6 +1217,8 @@ class LocalTarget:
                 self.ports.session_import.discard(self.db_factory(), from_wire(PreparedInfo, ctx["prepared"]))
             except HandoverError:
                 pass
+        if discard_session:
+            self._discard_planned(ctx)
         try:
             if discard_session:
                 self._txn(job, restore=True).discard()
@@ -1194,6 +1232,22 @@ class LocalTarget:
                 release(job.job_id, keep=not discard_session)
             except HandoverError:
                 pass
+
+    def _discard_planned(self, ctx: dict) -> None:
+        """Remove the sessions an interrupted import wrote (review M8): the ids journaled as free before the import
+        (``planned_ids``), tip first. Each is discarded through the import's own ``discard``."""
+        planned = [str(i) for i in ctx.get("planned_ids") or () if isinstance(i, str) and i]
+        if not planned:
+            return
+        db = self.db_factory()
+        for sid in reversed(planned):
+            try:
+                if db.get_session(sid) is None:
+                    continue
+                gone = PreparedInfo(sid, sid, None, "", "", "", "", (), (), ())
+                self.ports.session_import.discard(db, gone)
+            except Exception:  # noqa: S112 - the clean-up tries every planned id
+                continue
 
     # -- continuation, abort, status -------------------------------------------------------------------------------
     def continue_session(self, job: JobContext, prompt: str) -> ContinueResult:

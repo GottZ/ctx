@@ -100,10 +100,13 @@ def test_llm_answer_in_the_upstream_result_form_is_taken():
 
 
 def test_llm_reply_that_was_no_json_is_no_answer():
-    """``parsed`` is None when the reply was not JSON (upstream sets ``content_type="text"``): no answer — the result
-    object is never passed on as the refinement."""
+    """``parsed`` is None when the reply was not JSON (upstream sets ``content_type="text"``): without a JSON object
+    in the text there is no answer — the result object is never passed on as the refinement. (A JSON object inside
+    prose is the answer since review L13, ``test_rv_a_l13_json_inside_prose_is_the_answer``.)"""
     ctx = FakeCtx()
-    ctx.llm_result = dataclasses.replace(_structured_result(REPLY), parsed=None, content_type="text")
+    ctx.llm_result = dataclasses.replace(
+        _structured_result(REPLY), parsed=None, content_type="text", text="I could not decide what else is needed."
+    )
     assert jobs._llm(ctx)("i", [], refine.REFINE_SCHEMA, 5) is None
 
 
@@ -427,9 +430,10 @@ def test_abort_ends_when_the_source_never_opened_the_job(tmp_path, clock):
 
 def test_a_lost_release_operation_is_no_release(tmp_path, clock):
     """Only the refusal of the release request means "never opened": a release operation the source forgets while
-    it is polled (``not_found`` from its status) is no confirmation — the job stays ``aborting`` (V37)."""
+    it is polled (``not_found`` from its status) is no confirmation — the job stays ``aborting`` (V37). The source
+    was locked (``source.lock`` journaled): a never-locked source holds nothing, review M2."""
     h = Harness(tmp_path, clock, mode=Mode.PULL)
-    h.world.inject("target", "negotiate", "error", error=HandoverError("no", retryable=False))
+    h.world.inject("target", "start_prepare", "error", error=HandoverError("no", retryable=False))
     src = h.world.source
     real_release, real_status, ids = src.start_release, src.op_status, []
 
@@ -444,8 +448,10 @@ def test_a_lost_release_operation_is_no_release(tmp_path, clock):
         return real_status(job, op_id)
 
     src.start_release, src.op_status = release, op_status
-    with pytest.raises(HandoverError):
-        h.conductor().run_until_negotiated()
+    c = h.conductor()
+    c.run_until_negotiated()
+    c.run()
+    assert "source.lock" in [e["data"].get("step") for e in h.events("intent")]
     assert h.state() == "aborting", h.states()
 
 
