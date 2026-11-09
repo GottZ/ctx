@@ -532,6 +532,10 @@ class PlanItem:
     """Bytes of the session's working folder when the item's root is not that folder (``rel_cwd`` set: the repository
     around it; R36, L3-F19). The source measures them, so the summary before sending names the workspace against the
     folder also on the conductor of a pull, which has only this plan. None otherwise, or from a source before R36."""
+    cwd_tracked: bool | None = added_field(None)
+    """Whether that working folder holds files the repository tracks (R36a; set with ``rel_cwd``): True = a tracked
+    folder of the user's own repository (the repository is the workspace without a question), False = none (typically
+    somebody else's checkout: confirmation reason ``workspace_differs``), None = unknown (asked as well)."""
 
 
 @dataclass(frozen=True)

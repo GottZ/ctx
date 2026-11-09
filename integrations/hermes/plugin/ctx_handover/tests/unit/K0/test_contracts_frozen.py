@@ -128,6 +128,7 @@ METHODS = {
     (errors.HandoverError, "from_wire"): ["status", "body"],
     (contracts.GitProbe, "is_partial"): ["self", "path"],
     (contracts.GitProbe, "is_ignored"): ["self", "path"],
+    (contracts.GitProbe, "has_tracked_files"): ["self", "path"],
 }
 
 DATACLASS_FIELDS = {

@@ -25,8 +25,10 @@ never confirms (``YES_EXEMPT``/``yes_exempt``); the user's own ``--no-workspace`
 Workspace against the working folder (R36, L3-F19): the session's workspace is the primary item — the repository
 around its working folder, or the folder itself when git ignores it there (the collector decides). ``presend_summary``
 always names it (``workspace``: path and size against the folder and the folder's size, which the source measures into
-``PlanItem.cwd_bytes``); when the workspace holds more than the folder (``rel_cwd`` set), ``confirmation_reasons``
-raises ``workspace_differs`` (letter j, in ``YES_EXEMPT``).
+``PlanItem.cwd_bytes``); when the workspace holds more than the folder (``rel_cwd`` set) and the folder holds no file
+the repository tracks (``PlanItem.cwd_tracked`` not True: typically somebody else's checkout, or unknown),
+``confirmation_reasons`` raises ``workspace_differs`` (letter j, in ``YES_EXEMPT``). A tracked subfolder of the user's
+own repository (``repo/src``) is the normal case and goes without a question (R36a).
 
 Session larger than the target's context window (R32, L3-F17): ``context_over`` compares the estimated size of the
 session's active context (``ResourcePlan.context_tokens`` when the source estimated it with
@@ -121,7 +123,8 @@ CONFIRM_LETTERS: dict[str, str] = {
 }
 """Confirmation reasons of DESIGN §14.1 (a)–(g) plus (h) ``workspace_excluded`` (R30), (i) ``context_over``
 (R32: the session is larger than the target model's context window; before G‴ part of (e)) and (j)
-``workspace_differs`` (R36: the workspace holds more than the session's working folder) and their letters.
+``workspace_differs`` (R36/R36a: the workspace holds more than the session's working folder, which holds no tracked
+file of it) and their letters.
 ``None`` (no answer) cancels the job for every reason except ``proposed`` alone, which only excludes the proposals
 (BX L5)."""
 YES_EXEMPT: frozenset[str] = frozenset({CONFIRM_WORKSPACE_EXCLUDED, CONFIRM_CONTEXT, CONFIRM_WORKSPACE_DIFFERS})
@@ -207,6 +210,7 @@ class _Draft:
     denied: bool = False
     hermes_kind: str | None = None
     cwd_bytes: int | None = None
+    cwd_tracked: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -654,6 +658,7 @@ def _to_item(d: _Draft, suggest_dest: Callable[[str], str | None] | None) -> Pla
         hermes_kind=d.hermes_kind if d.kind is ItemKind.HERMES_FILE else None,
         instruction_files=tuple(d.instructions),
         cwd_bytes=d.cwd_bytes if d.role is ItemRole.PRIMARY and d.rel_cwd else None,
+        cwd_tracked=d.cwd_tracked if d.role is ItemRole.PRIMARY and d.rel_cwd else None,
     )
 
 
@@ -678,6 +683,7 @@ def _draft_from_candidate(idx: int, c: Candidate, options: Options) -> _Draft:
         weight=c.weight,
         reasons=reasons,
         rel_cwd=collector.rel_cwd(c.reasons) if role is ItemRole.PRIMARY else None,
+        cwd_tracked=collector.cwd_tracked(c.reasons) if role is ItemRole.PRIMARY else None,
         candidate=idx,
         hermes_kind=collector.hermes_kind(c.reasons) if c.kind is ItemKind.HERMES_FILE else None,
     )
@@ -1162,6 +1168,22 @@ def _join_rel(root: str, rel: str) -> str:
     return root.rstrip("/\\") + sep + rel.replace("/", sep)
 
 
+def _primary_item(final_or_plan: FinalPlan | ResourcePlan) -> PlanItem | None:
+    rp = final_or_plan.plan if isinstance(final_or_plan, FinalPlan) else final_or_plan
+    return next((i for i in rp.items if i.role is ItemRole.PRIMARY and i.origin is Origin.CWD), None)
+
+
+def workspace_differs(final_or_plan: FinalPlan | ResourcePlan) -> bool:
+    """Reason (j) (R36/R36a): the workspace travels and holds more than the session's working folder, and that folder
+    holds no file the repository tracks — ``PlanItem.cwd_tracked`` False or unknown (None: a source before R36a, or git
+    could not tell). Only an explicit True (a tracked folder of the user's own repository) spares the question."""
+    ws = workspace(final_or_plan)
+    if ws is None or not ws["differs"]:
+        return False
+    primary = _primary_item(final_or_plan)
+    return primary is None or primary.cwd_tracked is not True
+
+
 def workspace(final_or_plan: FinalPlan | ResourcePlan) -> dict | None:
     """The session's workspace against its working folder (R36, L3-F19), or None when there is no working-folder item
     or it does not travel (include ``no``: R30's ``workspace_excluded``, ``--no-workspace``).
@@ -1171,8 +1193,7 @@ def workspace(final_or_plan: FinalPlan | ResourcePlan) -> dict | None:
     ``rel_cwd``); ``cwd_bytes`` the folder's size — ``bytes`` when the folder is the root, else what the source
     measured (``PlanItem.cwd_bytes``; None from a source before R36); ``differs`` is True when the workspace holds more
     than the folder (the repository around it, ``rel_cwd`` set)."""
-    rp = final_or_plan.plan if isinstance(final_or_plan, FinalPlan) else final_or_plan
-    primary = next((i for i in rp.items if i.role is ItemRole.PRIMARY and i.origin is Origin.CWD), None)
+    primary = _primary_item(final_or_plan)
     if primary is None or primary.include is Include.NO:
         return None
     rel = primary.rel_cwd if isinstance(primary.rel_cwd, str) else ""
@@ -1445,9 +1466,9 @@ def confirmation_reasons(
     and the user did not say ``--no-workspace`` (``options.hints.no_workspace``). Reason (i) ``context_over`` (R32):
     the session's active context is larger than the target model's window (``context_over``; ``target_facts`` and
     ``source_facts`` are additive — the conductor's facts after FACTS; without them only a model change's
-    ``to.context_length`` is known). Reason (j) ``workspace_differs`` (R36): the workspace holds more than the session's
-    working folder (``workspace(final)["differs"]``: the repository around it). A blanket yes never confirms (h), (i)
-    or (j) (``YES_EXEMPT``)."""
+    ``to.context_length`` is known). Reason (j) ``workspace_differs`` (R36/R36a, ``workspace_differs``): the workspace
+    holds more than the session's working folder (the repository around it) and that folder holds no file the
+    repository tracks, or the source could not tell. A blanket yes never confirms (h), (i) or (j) (``YES_EXEMPT``)."""
     reasons = []
     if any(i.include is Include.PROPOSED for i in final.plan.items):
         reasons.append(CONFIRM_PROPOSED)
@@ -1470,8 +1491,7 @@ def confirmation_reasons(
         reasons.append(CONFIRM_WORKSPACE_EXCLUDED)
     if context_over(final, target_facts=target_facts, source_facts=source_facts) is not None:
         reasons.append(CONFIRM_CONTEXT)
-    ws = workspace(final)
-    if ws is not None and ws["differs"]:
+    if workspace_differs(final):
         reasons.append(CONFIRM_WORKSPACE_DIFFERS)
     return reasons
 

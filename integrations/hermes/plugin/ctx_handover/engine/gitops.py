@@ -1021,11 +1021,11 @@ def worktree_state(git: Git, root: str, exclude_pathspecs: Sequence[str], tmp: P
 class GitProbe:
     """Read-only git questions for collector, assessment and update-mode checks (INTERFACES §4.3).
 
-    Discovery questions (``toplevel``, ``common_dir``, ``is_shallow``, ``is_partial``, ``is_ignored``) take any path
-    inside a work tree and climb to its repository as git does — up to, never into, ``ceiling``
-    (``GIT_CEILING_DIRECTORIES``; W088: tests below a basetemp that itself lies in a checkout). Questions about a
-    known work-tree root (``status_clean``, ``root_commits``, ``ref_tips``, ``info`` …) never leave that root
-    (ceiling = its parent), so a root that is no repository is never answered by an enclosing one.
+    Discovery questions (``toplevel``, ``common_dir``, ``is_shallow``, ``is_partial``, ``is_ignored``,
+    ``has_tracked_files``) take any path inside a work tree and climb to its repository as git does — up to, never
+    into, ``ceiling`` (``GIT_CEILING_DIRECTORIES``; W088: tests below a basetemp that itself lies in a checkout).
+    Questions about a known work-tree root (``status_clean``, ``root_commits``, ``ref_tips``, ``info`` …) never leave
+    that root (ceiling = its parent), so a root that is no repository is never answered by an enclosing one.
     """
 
     def __init__(self, git: Git, *, profile: str = "source", ceiling: str | os.PathLike | None = None):
@@ -1103,6 +1103,26 @@ class GitProbe:
         directory itself instead of growing it to a repository the directory may not be part of."""
         proc = self._discover(path, ["check-ignore", "-q", "--end-of-options", "."])
         return proc is None or proc.returncode != 1
+
+    def has_tracked_files(self, path: str) -> bool | None:
+        """Whether the index of the work tree around the directory ``path`` holds a file below it (R36a): True at the
+        first record of ``git ls-files -z --cached --end-of-options .`` run in ``path`` (streamed through
+        ``Git.iter_z``; the rest of the listing is not read, git is stopped), False when git lists nothing and exits
+        0. None when git cannot answer — no directory, outside every work tree, a git that refused or died — so the
+        plan treats the folder as unknown and asks."""
+        p = Path(path)
+        if not p.is_dir():
+            return None
+        records = self.git.iter_z(
+            ["ls-files", "-z", "--cached", "--end-of-options", "."], cwd=p, spec=self._discovery_spec()
+        )
+        try:
+            first = next(records, None)
+        except (GitCommandError, OSError):
+            return None
+        finally:
+            records.close()
+        return first is not None
 
     def in_progress(self, root: str) -> str | None:
         try:

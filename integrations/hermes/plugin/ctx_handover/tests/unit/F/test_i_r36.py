@@ -37,11 +37,12 @@ def _presend(**extra) -> dict:
     return {**planning.presend_summary(sample_final_plan()), **extra}
 
 
-def _plan_from_a_subfolder():
+def _plan_from_a_subfolder(tracked: bool | None = None):
     """The sample plan as D plans a session started in ``/srv/app/services/api`` (a folder of the repository git does
-    not ignore): the primary is the repository, ``rel_cwd`` the folder, ``cwd_bytes`` its size."""
+    not ignore): the primary is the repository, ``rel_cwd`` the folder, ``cwd_bytes`` its size, ``cwd_tracked``
+    whether the folder holds tracked files (R36a; None = unknown)."""
     final = sample_final_plan()
-    primary = replace(final.plan.items[0], rel_cwd="services/api", cwd_bytes=40 * 1024)
+    primary = replace(final.plan.items[0], rel_cwd="services/api", cwd_bytes=40 * 1024, cwd_tracked=tracked)
     return replace(final, plan=replace(final.plan, items=(primary, *final.plan.items[1:])))
 
 
@@ -127,6 +128,22 @@ def test_d_reasons_of_a_plan_from_a_subfolder_reach_the_question():
     }
     reasons = planning.confirmation_reasons(final, Options(yes=True), True)
     assert surfaces.yes_exempt(reasons) == ["workspace_differs"], reasons
+
+
+@pytest.mark.parametrize(("tracked", "asked"), [(True, False), (False, True), (None, True)])
+def test_r36a_a_tracked_subfolder_is_named_but_not_asked_about(tracked, asked):
+    """★ R36a over D's real functions: a session folder that holds tracked files of the repository around it is still
+    named in the summary (workspace against folder, both sizes), but D raises no (j) for it, so ``--yes`` goes
+    through; an untracked folder or an unknown answer is asked about.
+
+    Red on ``08cfe0f0``: ``TypeError`` — ``PlanItem`` had no ``cwd_tracked``."""
+    final = _plan_from_a_subfolder(tracked)
+    summary = surfaces.plan_summary(final)
+    assert summary["workspace"]["differs"] is True
+    presend = surfaces.render_presend(summary, "server", Mode.PUSH)
+    assert "workspace /srv/app (3.0 MiB), more than the session's folder /srv/app/services/api (40.0 KiB)" in presend
+    reasons = planning.confirmation_reasons(final, Options(yes=True), True)
+    assert (surfaces.yes_exempt(reasons) == ["workspace_differs"]) is asked, reasons
 
 
 def _confirm(options: Options, info: dict, asker) -> tuple[str, _ConfirmState]:

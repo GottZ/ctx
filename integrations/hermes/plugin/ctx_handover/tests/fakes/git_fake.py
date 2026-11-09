@@ -109,6 +109,8 @@ class FakeGitProbe:
     shallow: set[str] = field(default_factory=set)
     partial: set[str] = field(default_factory=set)
     ignored: set[str] = field(default_factory=set)
+    tracked: set[str] = field(default_factory=set)
+    untracked: set[str] = field(default_factory=set)
     infos: dict[str, GitInfo] = field(default_factory=dict)
     clean: dict[str, tuple[bool, str]] = field(default_factory=dict)
     roots: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -143,6 +145,18 @@ class FakeGitProbe:
         never for a sibling with a common prefix; everything else is not ignored."""
         self._rec("is_ignored", path)
         return any(path == d or path.startswith(d.rstrip("/") + "/") for d in self.ignored)
+
+    def has_tracked_files(self, path: str) -> bool | None:
+        """Like ``gitops.GitProbe.has_tracked_files`` (R36a): True for a scripted ``tracked`` directory and any path
+        below it, False for a scripted ``untracked`` one, None (unknown) for everything else."""
+        self._rec("has_tracked_files", path)
+
+        def below(roots: set[str]) -> bool:
+            return any(path == d or path.startswith(d.rstrip("/") + "/") for d in roots)
+
+        if below(self.tracked):
+            return True
+        return False if below(self.untracked) else None
 
     def info(self, root: str, cfg) -> GitInfo:
         self._rec("info", root)

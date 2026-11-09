@@ -103,6 +103,12 @@ class GitProbe(Protocol):
         repository as the workspace only when the session's cwd is not ignored there (R36, L3-F19)."""
         ...
 
+    def has_tracked_files(self, path: str) -> bool | None:
+        """Whether the index of the work tree around the directory ``path`` holds a file below it (R36a): True, False,
+        or None when git cannot answer. A session folder with tracked files is part of the user's own repository, so
+        that repository is the workspace without a question."""
+        ...
+
 
 @runtime_checkable
 class BusyReportLike(Protocol):

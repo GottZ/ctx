@@ -258,28 +258,30 @@ def test_r36_an_unclear_ignore_answer_keeps_the_workspace_to_the_cwd(transcript,
 
 
 # ---------------------------------------------------------------------------------------------------------
-# (b) the summary before sending names the workspace against the cwd; (j) is not confirmed by --yes
+# (b) the summary before sending names the workspace against the cwd; (j) only for a cwd without tracked files (R36a)
 # ---------------------------------------------------------------------------------------------------------
 
 
-def test_r36_summary_names_a_workspace_that_differs_from_the_cwd_and_yes_does_not_confirm_it(transcript, lay):
-    """★ R36: the cwd is a folder git does not ignore (``src``), so the workspace is the whole repository. The summary
-    before sending names the repository and its size against the cwd and the cwd's size (measured on the source and
-    carried in the plan item, ``PlanItem.cwd_bytes`` — the conductor of a pull has only the wire plan); the
-    confirmation reasons hold ``workspace_differs`` (letter j), which ``--yes`` does not confirm (``YES_EXEMPT``).
-    ``--no-workspace`` (the folder does not travel) names no workspace and raises no (j).
+def test_r36a_a_tracked_subfolder_of_the_own_repository_goes_without_a_question(transcript, lay):
+    """★ R36a: the cwd is a folder of the repository that holds tracked files (``src``, the normal case of working in
+    one's own project) — the workspace is the whole repository without a question, also under ``--yes``. The summary
+    before sending still names the repository and its size against the cwd and the cwd's size (measured on the source
+    and carried in the plan item with ``PlanItem.cwd_tracked`` — the conductor of a pull has only the wire plan).
+    ``--no-workspace`` (the folder does not travel) names no workspace.
 
-    Red on ``ae0749a5``: ``KeyError: 'workspace'`` — the summary named neither the workspace nor the cwd, and
-    ``--yes`` confirmed every reason of such a plan.
+    Red on ``08cfe0f0``: reason (j) ``workspace_differs`` was raised for every subfolder —
+    ``assert 'workspace_differs' not in ['workspace_differs']``.
 
-    Mutants: ``workspace`` reports ``differs`` False; ``confirmation_reasons`` omits (j); ``YES_EXEMPT`` without
-    ``workspace_differs``; ``build_plan`` does not measure ``cwd_bytes``."""
+    Mutants: the collector never asks ``has_tracked_files``; ``confirmation_reasons`` ignores ``cwd_tracked``;
+    ``_to_item`` drops ``cwd_tracked``; ``build_plan`` does not measure ``cwd_bytes``."""
     f = _foreign(lay)
     rp = _plan(_collect(transcript(os.path.join(f.root, "src")), lay), lay)
     primary = _primary(rp.items)
     assert (primary.kind, primary.source_path, primary.rel_cwd) == (ItemKind.GIT_REPO, f.root, "src")
-    assert primary.cwd_bytes == f.src_bytes
     final = final_plan(rp)
+    reasons = plan.confirmation_reasons(final, Options(yes=True), False)
+    assert plan.CONFIRM_WORKSPACE_DIFFERS not in reasons, reasons
+    assert (primary.cwd_bytes, primary.cwd_tracked) == (f.src_bytes, True)
     expected = {
         "path": f.root,
         "bytes": primary.size_estimate,
@@ -289,18 +291,80 @@ def test_r36_summary_names_a_workspace_that_differs_from_the_cwd_and_yes_does_no
     }
     assert plan.presend_summary(final)["workspace"] == expected
     assert "workspace" in plan.PRESEND_KEYS
-    reasons = plan.confirmation_reasons(final, Options(yes=True), False)
-    assert plan.CONFIRM_WORKSPACE_DIFFERS in reasons, reasons
-    assert plan.CONFIRM_WORKSPACE_DIFFERS in plan.yes_exempt(reasons)
-    assert plan.CONFIRM_LETTERS[plan.CONFIRM_WORKSPACE_DIFFERS] == "j"
-    assert plan.REASON_CODES[-1] == plan.CONFIRM_WORKSPACE_DIFFERS
-    assert plan.CONFIRM_WORKSPACE_DIFFERS in plan.YES_EXEMPT
 
     # what the conductor of a pull sees: the plan after the wire
     received = from_wire(FinalPlan, to_wire(final))
     assert plan.presend_summary(received)["workspace"] == expected
+    assert plan.CONFIRM_WORKSPACE_DIFFERS not in plan.confirmation_reasons(received, Options(yes=True), False)
 
     cands = _collect(transcript(os.path.join(f.root, "src")), lay)
     bare = final_plan(_plan(cands, lay, hints=PlanHints(no_workspace=True)))
     assert plan.presend_summary(bare)["workspace"] is None
     assert plan.CONFIRM_WORKSPACE_DIFFERS not in plan.confirmation_reasons(bare, Options(yes=True), False)
+
+
+def test_r36a_an_untracked_subfolder_of_a_repository_needs_an_answer(transcript, lay):
+    """★ R36/R36a: the cwd is a folder git neither ignores nor tracks (``drafts`` with new files only — typically a
+    folder of somebody else's checkout): the workspace is the whole repository, the summary names it against the cwd,
+    and reason (j) ``workspace_differs`` is raised — ``--yes`` does not confirm it (``YES_EXEMPT``), also after the
+    wire (the conductor of a pull).
+
+    Red on ``08cfe0f0``: ``AttributeError: 'PlanItem' object has no attribute 'cwd_tracked'``.
+
+    Mutants: ``YES_EXEMPT`` without (j); ``workspace`` reports ``differs`` False; ``has_tracked_files`` answers True
+    for an empty listing."""
+    f = _foreign(lay)
+    drafts = [write(Path(f.root) / "drafts" / "idea.md", "not added yet\n"), write(Path(f.root) / "drafts" / "b.txt")]
+    rp = _plan(_collect(transcript(os.path.join(f.root, "drafts")), lay), lay)
+    primary = _primary(rp.items)
+    assert (primary.kind, primary.source_path, primary.rel_cwd) == (ItemKind.GIT_REPO, f.root, "drafts")
+    assert (primary.cwd_bytes, primary.cwd_tracked) == (sum(d.stat().st_size for d in drafts), False)
+    final = final_plan(rp)
+    assert plan.presend_summary(final)["workspace"]["differs"] is True
+    for doc in (final, from_wire(FinalPlan, to_wire(final))):
+        reasons = plan.confirmation_reasons(doc, Options(yes=True), False)
+        assert plan.CONFIRM_WORKSPACE_DIFFERS in reasons, reasons
+        assert plan.yes_exempt(reasons) == [plan.CONFIRM_WORKSPACE_DIFFERS]
+    assert plan.CONFIRM_LETTERS[plan.CONFIRM_WORKSPACE_DIFFERS] == "j"
+    assert plan.REASON_CODES[-1] == plan.CONFIRM_WORKSPACE_DIFFERS
+    assert plan.CONFIRM_WORKSPACE_DIFFERS in plan.YES_EXEMPT
+
+
+class _NoTrackAnswer(StaticGitProbe):
+    """A probe that cannot say whether the cwd holds tracked files (raises, or answers with a non-bool)."""
+
+    def __init__(self, roots, answer):
+        super().__init__(roots)
+        self.answer = answer
+
+    def has_tracked_files(self, path: str) -> bool | None:
+        self.calls.append(("has_tracked_files", path))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
+
+
+def test_r36a_an_unknown_tracked_answer_asks(transcript, lay):
+    """★ R36a, fail closed: when the source cannot tell whether the cwd holds tracked files (the probe raises or
+    answers ``None``/a non-bool), ``cwd_tracked`` is None and reason (j) is raised — unknown means ask. Only an
+    explicit ``True`` spares the question. The probe is asked only for a cwd below the repository's root.
+
+    Red on ``08cfe0f0``: ``AttributeError: … 'cwd_tracked'`` (no such fact).
+
+    Mutant: ``_Classifier.tracked`` returns ``bool(answer)``; ``confirmation_reasons`` raises (j) only for
+    ``cwd_tracked is False``."""
+    repo = lay.home / "repo"
+    write(repo / "sub" / "f.txt")
+    roots = {os.path.realpath(repo): False}
+    for answer, tracked in ((OSError("git failed"), None), (None, None), ("yes", None), (1, None), (True, True)):
+        probe = _NoTrackAnswer(roots, answer)
+        rp = _plan(_collect(transcript(repo / "sub"), lay, git=probe), lay)
+        primary = _primary(rp.items)
+        assert (primary.rel_cwd, primary.cwd_tracked) == ("sub", tracked), answer
+        asked = plan.CONFIRM_WORKSPACE_DIFFERS in plan.confirmation_reasons(final_plan(rp), Options(yes=True), False)
+        assert asked is (tracked is not True), answer
+        assert ("has_tracked_files", os.path.realpath(repo / "sub")) in probe.calls
+    top = _NoTrackAnswer(roots, OSError("never asked"))
+    rp = _plan(_collect(transcript(repo), lay, git=top), lay)
+    assert _primary(rp.items).cwd_tracked is None
+    assert not [c for c in top.calls if c[0] == "has_tracked_files"], top.calls

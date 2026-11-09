@@ -39,7 +39,7 @@ def test_plan_item_cwd_bytes_is_an_added_field():
     by_name = {f.name: f for f in dataclasses.fields(PlanItem)}
     f = by_name["cwd_bytes"]
     assert f.default is None and f.metadata.get(WIRE_OMIT_DEFAULT) is True
-    assert [x.name for x in dataclasses.fields(PlanItem)][-1] == "cwd_bytes"
+    assert "cwd_bytes" in [x.name for x in dataclasses.fields(PlanItem)][-2:]
 
 
 def test_cwd_bytes_keeps_old_ids_and_round_trips():
@@ -86,5 +86,48 @@ def test_git_probe_protocol_declares_is_ignored():
     assert sig.return_annotation in (bool, "bool")
     for impl in (gitops.GitProbe, StaticGitProbe, CeilingGitProbe, FakeGitProbe):
         assert list(inspect.signature(impl.is_ignored).parameters) == ["self", "path"], impl
+    assert isinstance(StaticGitProbe(), contracts.GitProbe)
+    assert isinstance(FakeGitProbe(), contracts.GitProbe)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# R36a: PlanItem.cwd_tracked and GitProbe.has_tracked_files
+# ---------------------------------------------------------------------------------------------------------
+
+
+def test_plan_item_cwd_tracked_is_an_added_field_after_cwd_bytes():
+    """★ R36a: ``cwd_tracked: bool | None`` (None = unknown) sits after ``cwd_bytes`` with the omit marker; a plan
+    without it keeps the id from before K-3; set, it round-trips and is type-checked.
+
+    Red on ``08cfe0f0``: no field ``cwd_tracked``."""
+    names = [x.name for x in dataclasses.fields(PlanItem)]
+    assert names[-2:] == ["cwd_bytes", "cwd_tracked"]
+    f = {x.name: x for x in dataclasses.fields(PlanItem)}["cwd_tracked"]
+    assert f.default is None and f.metadata.get(WIRE_OMIT_DEFAULT) is True
+    final = sample_final_plan()
+    assert dplan.plan_id(dplan.final_doc(final)) == PLAN_ID_BEFORE_K3
+    items = list(final.plan.items)
+    items[0] = replace(items[0], cwd_bytes=10, cwd_tracked=True)
+    marked = replace(final, plan=replace(final.plan, items=tuple(items)))
+    wire = jsonutil.to_wire(marked)
+    assert wire["plan"]["items"][0]["cwd_tracked"] is True
+    assert jsonutil.from_wire(FinalPlan, wire) == marked
+    wire["plan"]["items"][0]["cwd_tracked"] = "yes"
+    with pytest.raises(BadRequest) as exc:
+        jsonutil.from_wire(FinalPlan, wire)
+    assert exc.value.details["field"] == "plan.items[0].cwd_tracked"
+
+
+def test_git_probe_protocol_declares_has_tracked_files():
+    """★ R36a: ``has_tracked_files(self, path: str) -> bool | None`` is a member of ``contracts.GitProbe``; E's probe
+    and the fakes implement it with the same parameters.
+
+    Red on ``08cfe0f0``: ``'has_tracked_files' not in`` the protocol members."""
+    assert "has_tracked_files" in _members(contracts.GitProbe)
+    sig = inspect.signature(contracts.GitProbe.has_tracked_files)
+    assert list(sig.parameters) == ["self", "path"]
+    assert sig.return_annotation in (bool | None, "bool | None")
+    for impl in (gitops.GitProbe, StaticGitProbe, CeilingGitProbe, FakeGitProbe):
+        assert list(inspect.signature(impl.has_tracked_files).parameters) == ["self", "path"], impl
     assert isinstance(StaticGitProbe(), contracts.GitProbe)
     assert isinstance(FakeGitProbe(), contracts.GitProbe)

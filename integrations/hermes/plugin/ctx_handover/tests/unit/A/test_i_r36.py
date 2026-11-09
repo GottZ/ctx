@@ -27,10 +27,13 @@ class _WithWorkspaceReason(FakePlanning):
         return reasons
 
 
-def _harness(tmp_path, clock, *, rel_cwd: str | None) -> Harness:
+def _harness(tmp_path, clock, *, rel_cwd: str | None, tracked: bool | None = None) -> Harness:
     h = Harness(tmp_path, clock, options=Options(yes=True))
     h.planning = _WithWorkspaceReason()
-    h.world.source.items[0] = replace(make_item("w0", "/srv/app"), rel_cwd=rel_cwd, cwd_bytes=40 if rel_cwd else None)
+    item = make_item("w0", "/srv/app")
+    h.world.source.items[0] = replace(
+        item, rel_cwd=rel_cwd, cwd_bytes=40 if rel_cwd else None, cwd_tracked=tracked if rel_cwd else None
+    )
     return h
 
 
@@ -46,8 +49,9 @@ def _conductor_ctx(h: Harness) -> dict:
 WORKSPACE = {"path": "/srv/app", "bytes": 100, "cwd": "/srv/app/services/api", "cwd_bytes": 40, "differs": True}
 
 
+@pytest.mark.parametrize("tracked", [False, None], ids=["untracked", "unknown"])
 @pytest.mark.parametrize("answer", [None, "yes"])
-def test_yes_does_not_confirm_a_workspace_that_differs_from_the_cwd(tmp_path, clock, answer):
+def test_yes_does_not_confirm_a_workspace_that_differs_from_the_cwd(tmp_path, clock, answer, tracked):
     """★ R36 over the conductor: the session's folder is ``services/api`` of the workspace ``/srv/app``. With ``--yes``
     the user is asked anyway (``yes_exempt`` = ``workspace_differs``) and the question's summary names both folders;
     without an answer the job ends ABORTED before the lock; an explicit ``yes`` goes ahead and the journaled pre-send
@@ -56,8 +60,11 @@ def test_yes_does_not_confirm_a_workspace_that_differs_from_the_cwd(tmp_path, cl
     Red on ``ae0749a5``: ``AttributeError: module 'ctx_handover.engine.plan' has no attribute
     'CONFIRM_WORKSPACE_DIFFERS'`` (no reason (j); ``--yes`` went through without a question).
 
+    R36a: only for a session folder without tracked files of the repository (``cwd_tracked`` False) or when the source
+    could not tell (None).
+
     Mutant (A): ``_confirm`` asks only when ``not options.yes`` (drops the ``yes_exempt`` clause)."""
-    h = _harness(tmp_path, clock, rel_cwd="services/api")
+    h = _harness(tmp_path, clock, rel_cwd="services/api", tracked=tracked)
     asked: list[dict] = []
 
     def confirm(info):
@@ -97,3 +104,18 @@ def test_a_workspace_that_is_the_cwd_goes_with_yes(tmp_path, clock):
         "cwd_bytes": 100,
         "differs": False,
     }
+
+
+def test_r36a_a_tracked_subfolder_goes_with_yes_and_no_person(tmp_path, clock):
+    """★ R36a over the conductor: the session folder ``services/api`` holds tracked files of the repository
+    (``cwd_tracked`` True) — with ``--yes`` and no person to ask (``confirm=None``) the job goes through to DONE; the
+    journaled pre-send summary still names the workspace against the folder.
+
+    Red on ``08cfe0f0``: ``TypeError`` (no ``cwd_tracked``); with the field but without the R36a rule the job ends
+    ABORTED (``Cancelled``: (j) asked, nobody answered)."""
+    h = _harness(tmp_path, clock, rel_cwd="services/api", tracked=True)
+    c = h.conductor(confirm=None)
+    c.run_until_negotiated()
+    c.run()
+    assert h.state() == "done", h.states()
+    assert _conductor_ctx(h)["presend"]["workspace"] == WORKSPACE

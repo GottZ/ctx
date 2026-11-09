@@ -11,7 +11,9 @@ candidate list.
    silently ride along. A ``cwd`` that git ignores in the work tree around it (``GitProbe.is_ignored``: a scratch or
    build folder of somebody's checkout) is no part of that repository: the ``cwd`` itself is the item root
    (``FILE_TREE``, reason ``IGNORED_REASON``), and evidence in that repository never brings it back as a secondary
-   item (R36, L3-F19).
+   item (R36, L3-F19). For a ``cwd`` below the root it does belong to, the primary records whether the ``cwd`` holds
+   tracked files (``GitProbe.has_tracked_files``; reasons ``CWD_TRACKED_REASON``/``CWD_UNTRACKED_REASON``, read back
+   with ``cwd_tracked``): the plan asks about the larger workspace only when it does not (R36a).
 2. **Evidence** from the transcript, walked in storage order with a running directory (start: ``cwd``; a terminal
    result's ``cwd`` field moves it, ``tools/terminal_tool_result.py:247-263``): ``write_file``/``patch`` arguments
    and results (``resolved_path``, ``files_modified``) weigh *write*; ``read_file``/``search_files`` arguments weigh
@@ -65,6 +67,10 @@ CWD_REL_PREFIX = "cwd: "
 SHALLOW_REASON = "shallow clone: packed as a file tree"
 IGNORED_REASON = "ignored in the git repository around it: packed as a file tree"
 """Reason of a primary whose ``cwd`` git ignores in the enclosing work tree (R36, L3-F19): the ``cwd`` alone travels."""
+CWD_TRACKED_REASON = "cwd holds tracked files"
+CWD_UNTRACKED_REASON = "cwd holds no tracked file"
+"""Reasons of a primary whose root is the repository around the ``cwd`` (R36a): the ``cwd`` holds files the repository
+tracks, or none. Neither when git could not tell (unknown)."""
 PARTIAL_REASON = "partial clone: packed as a file tree"
 REJECTED_PREFIX = "rejected: "
 """Reason prefix of a session file the discovery refused (``"rejected: <why>"``, ``why`` one of
@@ -455,6 +461,15 @@ class _Classifier:
         except Exception:  # an unclear answer: fail closed (the directory alone travels)
             return True
 
+    def tracked(self, directory: str) -> bool | None:
+        """Whether ``directory`` holds files the work tree around it tracks (R36a): the probe's ``True``/``False``;
+        an exception or any other answer is unknown (None) — the plan then asks."""
+        try:
+            answer = self.git.has_tracked_files(directory)
+        except Exception:  # an unclear answer: unknown, so the plan asks
+            return None
+        return answer if isinstance(answer, bool) else None
+
     def shallow(self, root: str) -> bool:
         try:
             return bool(self.git.is_shallow(root))
@@ -533,6 +548,9 @@ def collect(
         rel = flav.rel(real_cwd, root) if flav.under(real_cwd, root) else ""
         if rel:
             head.append(CWD_REL_PREFIX + rel)
+            tracked = cls.tracked(real_cwd)
+            if tracked is not None:
+                head.append(CWD_TRACKED_REASON if tracked else CWD_UNTRACKED_REASON)
         primary = _Item(kind, root, Origin.CWD, Weight.MENTION, head=head)
         items[root] = primary
         if not cls.home_like(root):
@@ -645,6 +663,17 @@ def hermes_kind(candidate_or_reasons: Candidate | Sequence[str]) -> str | None:
         kind, sep, _rel = str(reason).partition(": ")
         if sep and kind in HERMES_FILE_KINDS:
             return kind
+    return None
+
+
+def cwd_tracked(reasons: Sequence[str]) -> bool | None:
+    """Whether the session cwd holds files the repository around it tracks, from the primary's reasons (R36a): True,
+    False, or None when the collector could not tell or the cwd is the root."""
+    for reason in reasons:
+        if reason == CWD_TRACKED_REASON:
+            return True
+        if reason == CWD_UNTRACKED_REASON:
+            return False
     return None
 
 
