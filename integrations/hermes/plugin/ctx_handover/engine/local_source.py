@@ -32,8 +32,10 @@ row, so another process can continue (janitor, DESIGN §3.6). The B/D/E function
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
+import shutil
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -53,8 +55,9 @@ from .errors import (
     VerifyFailed,
     WaitTimeout,
 )
+from .ids import ULID_RE
 from .jsonutil import canonical_bytes, from_wire, sha256_hex, to_wire
-from .ledger import STALE_OWNER_S, Ledger, private_dir, process_owner
+from .ledger import STALE_OWNER_S, TERMINAL, Ledger, private_dir, process_owner
 from .model import (
     CapsuleInfo,
     CommitAck,
@@ -83,12 +86,78 @@ from .model import (
     SessionInfo,
     SessionRef,
 )
-from .ops import OpRunner, object_closure
+from .ops import JobLock, OpRunner, object_closure
 from .policy import PolicyConfig
 
 LOCK_WAIT_S = 20
 """Longest a ``lock`` call waits for a running turn's lease (route ``source/lock`` stays below the request timeout,
 I7, W060); with ``--wait`` the conductor repeats it until its own deadline."""
+
+SOURCE_STAGING_DIRS = ("git", "recheck")
+"""The source's own directories under ``staging/<job>``: the pack work directory (``_pack``: a temporary repository
+holding the changed and untracked work tree as loose objects, plus the pack cache) and the work-tree re-check scratch
+(``_git_states``, ``_worktrees_unchanged``). The target's staging of a job (quarantine, workspace steps) has other
+names and is never touched by the source (review H4)."""
+
+_SOURCE_DONE = frozenset({"released", "reclaimed", "retired", "exported"})
+"""Source states after the hold: the pack work directory is no longer needed (a resumed job re-packs when its cached
+pack operation is gone, ``gitpack`` rebuilds the work directory)."""
+
+
+def discard_source_staging(data_dir: Path, job_id: str) -> bool:
+    """Remove the source's directories of ``job_id`` (``SOURCE_STAGING_DIRS``), then ``staging/<job>`` itself when
+    nothing else is left in it. A link is never followed. True when a directory was removed."""
+    staging = Path(data_dir) / "staging" / job_id
+    removed = False
+    for name in SOURCE_STAGING_DIRS:
+        path = staging / name
+        if path.is_symlink() or not path.is_dir():
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed = removed or not path.exists()
+    with contextlib.suppress(OSError):
+        staging.rmdir()  # only when empty: a target staging of the same id stays
+    return removed
+
+
+def _source_finished(ledger: Ledger, job_id: str) -> bool:
+    """The job's source hold is over here — given back or handed over (``_SOURCE_DONE``), a source row that is
+    terminal without a handover row, or no row of the job at all (``gc`` removed them)."""
+    src = ledger.source_state(job_id)
+    if src is not None:
+        return src["state"] in _SOURCE_DONE
+    row = ledger.job(job_id, Role.SOURCE)
+    if row is not None:
+        return row["state"] in TERMINAL[Role.SOURCE]
+    return all(ledger.job(job_id, role) is None for role in Role)
+
+
+def purge_source_staging(ledger: Ledger, data_dir: Path, *, lock_dir: Path | None = None) -> int:
+    """Janitor (BUILD-ORDER §6 Nr. 21, review H4): the source directories a finished hold left behind — a reclaim
+    (``lock.reclaim``), a process that died between its release/retire and the clean-up, a job whose rows ``gc``
+    removed. With ``lock_dir`` (the ``OpRunner``'s) the job's ``JobLock`` is taken first: while an operation of the
+    job holds it (the pack of a resumed job) its directories stay. Returns the number of jobs cleaned."""
+    root = Path(data_dir) / "staging"
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError:
+        return 0
+    cleaned = 0
+    for entry in entries:
+        if not ULID_RE.match(entry.name) or not entry.is_dir(follow_symlinks=False):
+            continue
+        if not any((Path(entry.path) / name).is_dir() for name in SOURCE_STAGING_DIRS):
+            continue
+        lock = JobLock(Path(lock_dir) / f"{entry.name}.lock") if lock_dir is not None else None
+        if lock is not None and not lock.acquire():
+            continue
+        try:
+            if _source_finished(ledger, entry.name) and discard_source_staging(data_dir, entry.name):
+                cleaned += 1
+        finally:
+            if lock is not None:
+                lock.release()
+    return cleaned
 
 
 def default_source_ports() -> SimpleNamespace:
@@ -465,11 +534,24 @@ class LocalSource:
                 # reclaim, contract V17) instead of an anonymous lost lease
                 raise LeaseLost(f"the source is {src['state']}", state=src["state"])
             return
+        self._beat_owner(job)
         info = from_wire(SessionInfo, ctx["info"])
         ttl, _refresh = self.ports.lock.lease_timing(job.options)
         refreshed = self.ports.lock.refresh(self.db_factory(), info, ctx.get("holder"), ttl_s=ttl)
         if not refreshed and src["state"] in ("locking", "locked", "preparing"):
             raise LeaseLost("the session's turn lease was lost")
+
+    def _beat_owner(self, job: JobContext) -> None:
+        """Keep this process's claim on the job's source row fresh while the leases are refreshed (review H6).
+
+        The row's owner heartbeat otherwise moves only with ``_epoch`` (a step of the source); between pack and
+        prepare — a large work tree on the target — that is longer than ``STALE_OWNER_S``, and the janitor of any
+        process of the profile released the source of the running job. Only this process's own claim is renewed
+        (``Ledger.heartbeat`` compares owner and epoch); a row another process owns is never taken over here."""
+        row = self.ledger.job(job.job_id, Role.SOURCE)
+        me = process_owner()
+        if row is not None and row["owner"] == me:
+            self.ledger.heartbeat(job.job_id, Role.SOURCE, me, int(row["owner_epoch"]))
 
     def suspend(self, job: JobContext) -> None:
         """Idle remote conductor (DESIGN §7.3): give up the leases, keep the export/pack caches."""
@@ -713,6 +795,7 @@ class LocalSource:
             )
             self._sync_state(job)
             self._record("departure", job, ack)
+            discard_source_staging(self.data_dir, job.job_id)  # the hold is over (review H4)
             return {"state": self.ledger.source_state(job.job_id)["state"]}
 
         return self._start(job, "retire", _digest(ack), fn, restart_failed=True, exclusive=True)
@@ -730,14 +813,25 @@ class LocalSource:
                 return {"state": "released"}
             if src["state"] in ("retired", "exported"):
                 raise InvalidState(f"the source is {src['state']}", reason="state", state=src["state"])
+            report = None
             if src["state"] not in ("released", "reclaimed"):
                 info = self._info(job)
-                self.ports.lock.release(self.db_factory(), self.ledger, info, src.get("holder"), job.job_id)
+                report = self.ports.lock.release(self.db_factory(), self.ledger, info, src.get("holder"), job.job_id)
             self._sync_state(job)
-            return {"state": self.ledger.source_state(job.job_id)["state"]}
+            discard_source_staging(self.data_dir, job.job_id)  # the hold is over (review H4)
+            out: dict = {"state": self.ledger.source_state(job.job_id)["state"]}
+            # what the undo could not restore (placeholder rows, a mark) travels with the release (rv-b): named in the
+            # job's final message instead of only in a log
+            warnings = report.get("warnings") if isinstance(report, dict) else None
+            if isinstance(warnings, list) and warnings:
+                out["warnings"] = [str(w)[:300] for w in warnings[:20]]
+            return out
 
         self._ensure_job(job)
-        return self._start(job, "release", "release", fn, restart_failed=True, exclusive=True)
+        # one release per hold of the source (review B1): a release that finished for an earlier hold — the janitor's
+        # for a stale row before ``/handover resume`` locked the job again — says nothing about the current one
+        hold = self.ledger.source_generation(job.job_id)
+        return self._start(job, "release", _digest("release", hold), fn, restart_failed=True, exclusive=True)
 
     def _record(self, kind: str, job: JobContext, ack: CommitAck) -> None:
         """The departure record for ctx (DESIGN §13) — only when ctx_checkpoint is the memory provider and

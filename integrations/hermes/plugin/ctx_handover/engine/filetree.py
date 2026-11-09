@@ -10,7 +10,9 @@ Target: ``prepare_fresh`` builds the tree inside a 0700 partial directory — di
 last and only when relative and inside the tree; ``commit`` renames the partial onto the destination.
 ``prepare_update`` is allowed only when the destination still equals the plugin's last fingerprint; changed
 files are staged beside their destination and swapped in at commit after a ``(size, mtime_ns, inode)``
-re-check, with backups for the inverse.
+re-check, with backups for the inverse; a path that was free at PREPARE is only ever filled, never replaced
+(H10). Both modes check the declared bytes against the target's cap and the free space before the first write
+(H11).
 
 Names: a manifest entry carries ``path`` (UTF-8) and, for a name that is not valid UTF-8, ``raw`` (base64 of the
 bytes; ``path`` is then only a display form). POSIX targets accept control characters and non-UTF-8 bytes in
@@ -32,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contracts import BlockSink, BlockSource
-from .errors import BadRequest, BlockCorrupt, ConflictError, PayloadTooLarge, PolicyDenied
+from .errors import BadRequest, BlockCorrupt, ConflictError, InsufficientStorage, PayloadTooLarge, PolicyDenied
 from .gitops import (
     dec_path,
     enc_path,
@@ -53,6 +55,8 @@ TREE_KIND = "ctxh.tree"
 TREE_MEDIA = "application/json"
 FILE_MEDIA = "application/octet-stream"
 FP_VERSION = 1
+DEFAULT_MAX_BYTES = 10 * 1024**3  # ``Options.max_total_bytes``; callers pass the target's own cap
+_DISK_MARGIN = 1.1
 
 
 def _never() -> bool:
@@ -88,6 +92,7 @@ class TreeApplyState:
     expect: tuple[tuple[Path, int, int, int], ...] = ()
     created_dirs: tuple[Path, ...] = ()
     fallback: Path | None = None
+    staged_meta: tuple[tuple[int, int, int, str], ...] = ()
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -373,11 +378,34 @@ def load_manifest(store: BlockSource, manifest_id: str, *, max_files: int) -> li
     return entries
 
 
+def check_room(nbytes: int, where: Path, *, max_bytes: int, write_bytes: int | None = None, what: str) -> None:
+    """Before the first byte is written (H11, R28): ``nbytes`` (the declared size of what arrives) must not exceed
+    ``max_bytes`` (the target's own cap), and ``write_bytes`` (default ``nbytes``: what is written now) × 1.1 must
+    fit into the free space of the file system holding ``where`` (its nearest existing ancestor). One stored block
+    can stand for any number of identical files, so the stored size bounds nothing."""
+    if nbytes > max_bytes:
+        raise PayloadTooLarge(f"the {what} is larger than allowed", bytes=nbytes, max_bytes=max_bytes)
+    need = int((nbytes if write_bytes is None else write_bytes) * _DISK_MARGIN)
+    probe = Path(where)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free = shutil.disk_usage(probe).free
+    if need > free:
+        raise InsufficientStorage(
+            f"not enough free space for the {what}", need_bytes=need, free_bytes=free, path=str(probe)
+        )
+
+
 @dataclass
 class _Checked:
     rel: bytes
     entry: dict
     key: str
+
+
+def _file_bytes(checked: Sequence[_Checked]) -> int:
+    # sizes are whole and non-negative (policy.check_tree_entry)
+    return sum(int(c.entry["size"]) for c in checked if c.entry["type"] == "file")
 
 
 def _check_entries(entries: Sequence[dict], rules: PlatformRules) -> tuple[list[_Checked], list[NotTransferred]]:
@@ -449,11 +477,13 @@ def prepare_fresh(
     max_files: int = 200_000,
     fallback: Path | None = None,
     claimed: bool = False,
+    max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> TreeApplyState:
     """Fresh mode PREPARE: build the tree in ``partial`` (created 0700; must not exist — ``claimed``: created empty
     and recorded by the caller). Something already at the path is never used or removed:
     ``ConflictError(kind=partial_exists)`` (L3-F08). Unsafe, colliding or unknown-type entries are skipped and
-    reported in ``skipped``."""
+    reported in ``skipped``. The declared bytes of the files are checked against ``max_bytes`` and the free space
+    first (``check_room``: ``PayloadTooLarge`` | ``InsufficientStorage``, H11)."""
     entries = load_manifest(store, manifest_id, max_files=max_files)
     checked, skipped = _check_entries(entries, rules)
     partial = Path(partial)
@@ -461,6 +491,7 @@ def prepare_fresh(
     fp: dict[str, list] = {}
     dirs: list[_Checked] = []
     try:
+        check_room(_file_bytes(checked), partial.parent, max_bytes=max_bytes, what="file tree")
         for c in sorted((c for c in checked if c.entry["type"] == "dir"), key=lambda c: c.rel.count(b"/")):
             path = _join(partial, c.rel)
             _parents_real(partial, c.rel)
@@ -589,6 +620,7 @@ def prepare_update(
     *,
     tag: str = "000000",
     max_files: int = 200_000,
+    max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> TreeApplyState:
     """Update mode PREPARE (DESIGN §9.6): allowed only when ``dest`` still equals ``fingerprint`` (the plugin's
     last write there, or the out-state recorded at retire for the return trip); any foreign change ⇒
@@ -596,7 +628,8 @@ def prepare_update(
     (``.<name>.ctxh-<tag>``); replaced and removed files get backup slots under ``staging``.
 
     Repeatable (L3-F08 class): files staged by an earlier PREPARE with the same ``tag`` whose process died are no
-    foreign change — they are staged again or removed (``tag`` is the job's)."""
+    foreign change — they are staged again or removed (``tag`` is the job's). The tree's declared bytes are checked
+    against ``max_bytes`` and the files to stage against the free space before anything is written (H11)."""
     dest = Path(dest)
     recorded = dict((fingerprint or {}).get("files") or {})
     leftover: list[bytes] = []
@@ -605,14 +638,30 @@ def prepare_update(
         raise ConflictError("the destination changed since the plugin wrote it", kind="foreign", detail=why)
     entries = load_manifest(store, manifest_id, max_files=max_files)
     checked, skipped = _check_entries(entries, rules)
+    new_fp: dict[str, list] = {}
+    todo: list[_Checked] = []
+    for c in (c for c in checked if c.entry["type"] in ("file", "symlink")):  # read-only: what must be staged
+        final = _join(dest, c.rel)
+        _parents_real(dest, c.rel)
+        rec = recorded.get(c.key)
+        if c.entry["type"] == "file":
+            m: ObjectManifest = object_manifest(store, c.entry["object"])
+            if rec and rec[0] == "file" and rec[3] == m.sha256 and _perm_of(final) == _perm(c.entry):
+                new_fp[c.key] = rec
+                continue
+        elif rec and rec[0] == "symlink" and rec[3] == c.entry.get("target"):
+            new_fp[c.key] = rec
+            continue
+        todo.append(c)
+    check_room(_file_bytes(checked), dest, max_bytes=max_bytes, write_bytes=_file_bytes(todo), what="file tree")
     staging = Path(staging)
     staging.mkdir(parents=True, exist_ok=True, mode=0o700)
     staged: list[tuple[Path, Path]] = []
+    staged_meta: list[tuple[int, int, int, str]] = []
     backups: list[tuple[Path, Path]] = []
     removed: list[Path] = []
     expect: list[tuple[Path, int, int, int]] = []
     created: list[Path] = []
-    new_fp: dict[str, list] = {}
     wanted = {c.key for c in checked if c.entry["type"] != "dir"}
     try:
         for c in sorted((c for c in checked if c.entry["type"] == "dir"), key=lambda c: c.rel.count(b"/")):
@@ -624,18 +673,9 @@ def prepare_update(
             elif not stat.S_ISDIR(os.lstat(path).st_mode):
                 raise ConflictError("a directory of the tree is a file at the destination", kind="foreign")
         n = 0
-        for c in (c for c in checked if c.entry["type"] in ("file", "symlink")):
+        for c in todo:
             final = _join(dest, c.rel)
             _parents_real(dest, c.rel)
-            rec = recorded.get(c.key)
-            if c.entry["type"] == "file":
-                m: ObjectManifest = object_manifest(store, c.entry["object"])
-                if rec and rec[0] == "file" and rec[3] == m.sha256 and _perm_of(final) == _perm(c.entry):
-                    new_fp[c.key] = rec
-                    continue
-            elif rec and rec[0] == "symlink" and rec[3] == c.entry.get("target"):
-                new_fp[c.key] = rec
-                continue
             if not final.parent.exists():
                 final.parent.mkdir(parents=True, exist_ok=True)
                 created.append(final.parent)
@@ -644,10 +684,13 @@ def prepare_update(
                 os.unlink(temp)
             if c.entry["type"] == "file":
                 size, digest = _write_file(store, c.entry, temp, cancelled)
-                new_fp[c.key] = _fp_file(size, os.lstat(temp).st_mtime_ns, digest)
+                st_t = os.lstat(temp)
+                new_fp[c.key] = _fp_file(size, st_t.st_mtime_ns, digest)
+                staged_meta.append((st_t.st_ino, size, st_t.st_mtime_ns, digest))
             else:
                 os.symlink(c.entry["target"], temp)
                 new_fp[c.key] = ["symlink", 0, 0, c.entry["target"]]
+                staged_meta.append((os.lstat(temp).st_ino, 0, 0, c.entry["target"]))
             staged.append((temp, final))
             if os.path.lexists(final):
                 st = os.lstat(final)
@@ -686,6 +729,7 @@ def prepare_update(
         fingerprint={"v": FP_VERSION, "files": new_fp},
         expect=tuple(expect),
         created_dirs=tuple(created),
+        staged_meta=tuple(staged_meta),
     )
 
 
@@ -722,6 +766,65 @@ def _move(src: Path, dst: Path) -> None:
         os.unlink(src)
 
 
+_NO_HARDLINK = frozenset(
+    e for e in (errno.EPERM, errno.EMLINK, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", None), errno.ENOSYS) if e
+)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        sa, sb = os.lstat(a), os.lstat(b)
+    except OSError:
+        return False
+    return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+
+
+def _appeared(final: Path) -> ConflictError:
+    return ConflictError("a file appeared at the destination since prepare", kind="foreign", path=str(final)[:300])
+
+
+def _swap_in(temp: Path, final: Path) -> None:
+    """Put the staged ``temp`` at ``final`` only while nothing is there (H10): a hard link (fails on an existing
+    name), then the staged name goes; a file system without hard links gets an exclusive placeholder that the
+    staged file replaces. Something at ``final`` ⇒ ``ConflictError(kind=foreign)`` — unless it is the staged file
+    itself, linked by a run of this step that died before removing the staged name (contract X11)."""
+    try:
+        os.link(temp, final, follow_symlinks=False)
+    except FileExistsError:
+        if not _same_file(temp, final):
+            raise _appeared(final) from None
+    except (NotImplementedError, OSError) as exc:
+        if isinstance(exc, OSError) and exc.errno not in _NO_HARDLINK:
+            raise
+        try:
+            fd = os.open(final, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            raise _appeared(final) from None
+        os.close(fd)
+        os.replace(temp, final)
+        return
+    os.unlink(temp)
+
+
+def _ours(final: Path, meta: tuple[int, int, int, str] | None) -> bool:
+    """Does ``final`` still hold the file this step swapped in (same inode; for a file also its content)? A state
+    without ``staged_meta`` (older snapshot) cannot tell and answers True."""
+    if meta is None:
+        return True
+    ino, size, mtime_ns, digest = meta
+    try:
+        st = os.lstat(final)
+    except OSError:
+        return False
+    if st.st_ino != ino:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    return (st.st_size, st.st_mtime_ns) == (size, mtime_ns) or (st.st_size == size and sha256_file(final) == digest)
+
+
 def commit(state: TreeApplyState) -> dict:
     """Forward c1 step: fresh ⇒ permissions from the umask and ``rename(partial, dest)`` (``fallback`` when the
     destination appeared meanwhile); update ⇒ re-check ``(size, mtime_ns, inode)`` of every file about to be
@@ -729,9 +832,13 @@ def commit(state: TreeApplyState) -> dict:
 
     Update mode is repeatable (contract X11): a backup slot that exists already holds its file (moved by an earlier
     run of this step), a staged file that is gone was swapped in already — a process that resumes after a crash
-    only does what is missing. An exception in the middle undoes the step (``rollback``) before it propagates; an
-    undo that fails too raises ``gitops.undo_failed`` (``details.needs_attention``).
-    Fresh mode is one rename; resuming it is the caller's (directory identity)."""
+    only does what is missing. A path that was free at PREPARE is filled only while it is still free
+    (``_swap_in``): something that appeared there meanwhile ⇒ ``ConflictError(kind=foreign)`` (H10). An exception
+    in the middle undoes the step (``rollback``) before it propagates; an undo that fails too raises
+    ``gitops.undo_failed`` (``details.needs_attention``).
+    Fresh mode is one rename (``fallback`` when the destination appeared; both taken ⇒
+    ``ConflictError(kind=dest_appeared)`` with the partial 0700 again, L16); resuming it is the caller's (directory
+    identity)."""
     if state.mode is DestMode.FRESH:
         assert state.partial is not None  # noqa: S101 - fresh states carry their partial
         os.chmod(state.partial, 0o777 & ~_umask())
@@ -742,7 +849,13 @@ def commit(state: TreeApplyState) -> dict:
             if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR, errno.EISDIR) or state.fallback is None:
                 os.chmod(state.partial, 0o700)
                 raise ConflictError("the destination appeared during commit", kind="dest_appeared") from exc
-            os.rename(state.partial, state.fallback)
+            try:
+                os.rename(state.partial, state.fallback)
+            except OSError as exc2:
+                os.chmod(state.partial, 0o700)
+                raise ConflictError(
+                    "the fallback destination exists too", kind="dest_appeared", path=str(state.fallback)[:300]
+                ) from exc2
             final = state.fallback
         return {"dest": str(final), "fingerprint": state.fingerprint}
     expected = {p: (size, mtime, ino) for p, size, mtime, ino in state.expect}
@@ -757,6 +870,9 @@ def commit(state: TreeApplyState) -> dict:
         if (st.st_size, st.st_mtime_ns, st.st_ino) != expected.get(final):
             raise ConflictError("a destination file changed since prepare", kind="foreign", path=str(final)[:300])
     backed = dict(state.backups)
+    for temp, final in state.staged:  # free at PREPARE: still free (or the staged file itself), before any change
+        if final not in backed and os.path.lexists(temp) and os.path.lexists(final) and not _same_file(temp, final):
+            raise _appeared(final)
     try:
         for final, backup in pending:
             _move(final, backup)
@@ -767,8 +883,12 @@ def commit(state: TreeApplyState) -> dict:
                 if (st.st_size, st.st_mtime_ns, st.st_ino) == expected.get(final):
                     os.unlink(final)
         for temp, final in state.staged:
-            if os.path.lexists(temp):
+            if not os.path.lexists(temp):
+                continue
+            if final in backed:  # its file was moved to the backup by this step just now
                 os.replace(temp, final)
+            else:  # free at PREPARE: filled only while still free (H10)
+                _swap_in(temp, final)
     except Exception as exc:
         try:
             _undo_update(state)
@@ -792,10 +912,20 @@ def rollback(state: TreeApplyState) -> None:
 
 def _undo_update(state: TreeApplyState) -> None:
     """Put an update-mode destination back as PREPARE found it, from wherever the forward step stopped:
-    swapped-in new files go, every backup returns. The staged files stay (``discard`` drops them)."""
+    swapped-in new files go — only while they are the file this step put there (inode and content, ``_ours``; a
+    file replaced or edited since stays, H10) — and every backup returns. The staged files stay (``discard`` drops
+    them)."""
     backed = {final: backup for final, backup in state.backups}
-    for temp, final in state.staged:
-        if not os.path.lexists(temp) and os.path.lexists(final) and final not in backed:
+    metas: list[tuple[int, int, int, str] | None] = list(state.staged_meta)
+    if len(metas) != len(state.staged):
+        metas = [None] * len(state.staged)
+    for (temp, final), meta in zip(state.staged, metas, strict=True):
+        if final in backed or not os.path.lexists(final):
+            continue
+        if os.path.lexists(temp):
+            if _same_file(temp, final):  # linked in, the staged name not yet removed (X11)
+                os.unlink(final)
+        elif _ours(final, meta):
             os.unlink(final)
     for final, backup in state.backups:
         if os.path.lexists(backup):
@@ -904,6 +1034,7 @@ def state_to_dict(s: TreeApplyState) -> dict:
         "expect": [[_ps(p), size, mtime, ino] for p, size, mtime, ino in s.expect],
         "created_dirs": [_ps(p) for p in s.created_dirs],
         "fallback": _ps(s.fallback),
+        "staged_meta": [list(m) for m in s.staged_meta],
     }
 
 
@@ -921,4 +1052,5 @@ def state_from_dict(d: dict) -> TreeApplyState:
         expect=tuple((_pl(p), int(a), int(b), int(c)) for p, a, b, c in d.get("expect") or ()),  # type: ignore[misc]
         created_dirs=tuple(_pl(p) for p in d.get("created_dirs") or ()),  # type: ignore[misc]
         fallback=_pl(d.get("fallback")),
+        staged_meta=tuple((int(a), int(b), int(c), str(t)) for a, b, c, t in d.get("staged_meta") or ()),
     )

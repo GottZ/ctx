@@ -219,7 +219,7 @@ def test_continue_spawn_argv_and_profile(tmp_path):
     assert stat.S_IMODE(log.parent.stat().st_mode) == 0o700
 
     default = Spawner(log_dir=tmp_path / "l2", profile="default", approvals_off=lambda: False, which=lambda _n: "/h")
-    assert default.hermes_argv() == ["/h"]
+    assert default.hermes_argv() == ["/h", "-p", "default"]  # review M28: never the sticky active_profile
     assert Spawner(
         log_dir=tmp_path / "l3", profile=None, approvals_off=lambda: False, which=lambda _n: "/h"
     ).hermes_argv() == ["/h"]

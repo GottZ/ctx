@@ -16,8 +16,9 @@ The ``ParticipantRegistry`` sits between the HTTP server (cluster C) and the loc
   the routes #8–#10 (``status``/``heartbeat``/``cancel``); the server only delegates (contract X18).
 
 ``sweep`` runs periodically in the listener process: it heartbeats the participant jobs this process owns,
-gives up the leases of a source whose conductor went quiet for ``participant_idle_timeout`` (``suspended``,
-DESIGN §7.3), expires target staging after ``staging_ttl`` (§3.5) and continues aborts left by a revocation.
+gives up the leases of a source whose remote conductor went quiet for ``participant_idle_timeout`` (``suspended``,
+DESIGN §7.3; never the source of this host's own push/export), expires target staging after ``staging_ttl`` (§3.5)
+and continues aborts left by a revocation.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ from .errors import (
 )
 from .ids import ULID_RE
 from .jsonutil import from_wire
-from .ledger import JOURNAL_KEEP_S, TERMINAL, Ledger, process_owner
+from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, TERMINAL, Ledger, process_owner
 from .model import AuthContext, Mode, OpState, Options, ParticipantStatus, Peer, Progress, Right, Role, SessionRef
 
 MAX_JOBS_PER_PEER = 2
@@ -216,6 +217,13 @@ class ParticipantRegistry:
         existing = self.ledger.job(job_id, role)
         if existing is not None and existing["peer_id"] != peer.peer_id:
             raise JobConflict("job id not available")
+        # one job id, one peer — across roles (review M17): the objects a job may serve (``job_objects``) are keyed by
+        # the id alone, so a source job opened under the id of another peer's push (or of this host's own
+        # conductor job) would release that job's objects to the caller
+        for other in Role:
+            row = self.ledger.job(job_id, other) if other is not role else None
+            if row is not None and (other is Role.CONDUCTOR or row["peer_id"] != peer.peer_id):
+                raise JobConflict("job id not available")
         if existing is None:
             self._check_caps(peer.peer_id)
         params = {
@@ -383,9 +391,13 @@ class ParticipantRegistry:
                     self.ledger.heartbeat(row["job_id"], role, me, row["owner_epoch"])
                 if role is Role.SOURCE:
                     src = self.ledger.source_state(row["job_id"])
+                    # idle means a *remote* conductor went quiet (DESIGN §7.3); the source row of this host's own
+                    # push/export (``params.local``) moves only with transitions, and its conductor keeps it alive
+                    # itself — the janitor handles that conductor's death (review H7)
                     if (
                         src is not None
                         and src["state"] in ("locking", "locked")
+                        and (row.get("params") or {}).get("local") is not True
                         and row["updated_at"] < now - float(opts.participant_idle_timeout_s)
                     ):
                         api, job = self._internal_job(row)
@@ -413,11 +425,22 @@ class ParticipantRegistry:
     def recover(self, row: dict) -> str:
         """Janitor action for a participant job whose owning process died (DESIGN §3.6); returns what was done.
 
-        source ``locked``/``preparing`` ⇒ release (undo the journaled prepare steps) · ``prepared`` ⇒ nothing
-        (fail-closed until the conductor or the user resolves it) · ``retiring``/``releasing``/``reclaiming`` ⇒
-        continue in their direction · target ``committing`` ⇒ continue the commit op · other target states are
-        handled by the conductor (interrupted ops are restarted) and by ``sweep`` (staging TTL)."""
+        source ``locked``/``preparing``/``releasing`` ⇒ release (undo the journaled prepare steps) · ``prepared`` ⇒
+        nothing (fail-closed until the conductor or the user resolves it) · ``retiring`` ⇒ continue the retire ·
+        ``reclaiming`` ⇒ kept: a repeated ``/handover reclaim`` finishes it (``lock.reclaim`` accepts the state;
+        review L4) · target ``committing`` ⇒ continue the commit op · other target states are handled by the
+        conductor (interrupted ops are restarted) and by ``sweep`` (staging TTL).
+
+        The source row of this host's own conductor job (``params.local``: push, export) is kept while that
+        conductor's row is alive (``Ledger.owner_alive``): the conductor decides about its source — a stale source
+        row alone (no step for ``STALE_OWNER_S`` between pack and prepare) is no dead job (review H6)."""
         role = Role(row["role"])
+        if (
+            role is Role.SOURCE
+            and (row.get("params") or {}).get("local") is True
+            and self.ledger.owner_alive(row["job_id"], Role.CONDUCTOR, STALE_OWNER_S)
+        ):
+            return "kept"
         api, job = self._internal_job(row)
         if role is Role.SOURCE:
             src = self.ledger.source_state(row["job_id"])

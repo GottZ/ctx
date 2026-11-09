@@ -48,6 +48,7 @@ FUNCTIONS = {
         "check_extra": ["path", "cfg", "explicit", "redact"],
         "sniff_bytes": ["head"],
         "reserved_workspace_roots": ["cfg"],
+        "homes_of": ["path", "cfg", "windows"],
     },
     jsonutil: {
         "canonical_bytes": ["obj"],
@@ -127,6 +128,8 @@ METHODS = {
     (errors.HandoverError, "to_wire"): ["self"],
     (errors.HandoverError, "from_wire"): ["status", "body"],
     (contracts.GitProbe, "is_partial"): ["self", "path"],
+    (contracts.GitProbe, "is_ignored"): ["self", "path"],
+    (contracts.GitProbe, "has_tracked_files"): ["self", "path"],
 }
 
 DATACLASS_FIELDS = {

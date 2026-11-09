@@ -9,10 +9,20 @@ with its URL, the code, the fingerprint of its public key, its name and profile 
 must hit exactly one row), so two processes of one profile can never redeem one code twice.
 
 Codes, secrets and proofs are never logged (SEC 6.2).
+
+**Gate credentials (H1, D6a).** A credential is only ever sent to the address it was stored for. Before anything
+leaves, ``credential_owner`` refuses a gate whose secret variable — or, with a ``SecretStore``, whose value — a
+stored peer at another origin uses. The first ``hello`` goes out without any gate header; only when something in
+front of the plugin refuses it does the credential follow (``wire.WireClient._first_hello``), and the answer must
+be signed by the key of the paste string's fingerprint. A successful pairing copies the credential into variables
+of this peer alone (``CTX_HANDOVER_PEER_TOKEN_<peer id>``, ``…_PASSWORD_<peer id>``, ``…_HEADER<n>_<peer id>``;
+``store_credentials``), so the settings form's one credential slot can take the next peer's credential without
+changing what earlier peers send.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import secrets
@@ -23,10 +33,20 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .crypto import Identity, b64d, b64e, consteq, fingerprint_of, length_prefixed, pair_proof, random_b64
-from .errors import BadRequest, BadResponseSignature, ConflictError, HandoverError, PairInvalid
+from .errors import (
+    BadRequest,
+    BadResponseSignature,
+    ConflictError,
+    EnvNotWritable,
+    GateRejected,
+    HandoverError,
+    PairInvalid,
+    PeerUnreachable,
+    RateLimited,
+)
 from .ids import CROCKFORD_ALPHABET, ULID_RE, ulid
 from .jsonutil import canonical_bytes, loads_bounded, sha256_hex
-from .model import GateAuth, Hello, Peer, Right
+from .model import GateAuth, GateMode, Hello, Peer, Right
 
 if TYPE_CHECKING:
     from .ledger import Ledger
@@ -63,6 +83,155 @@ class PairCode:
     @property
     def code(self) -> str:
         return f"CTXH-{self.code_id}-{self.secret}"
+
+
+@dataclass(frozen=True)
+class SecretStore:
+    """The profile ``.env`` as the dialer's pairing uses it for gate credentials (H1, D6a; catalog rule 11):
+    ``read`` = ``hostcompat.read_secret`` (``get_secret``), ``save`` = ``hostcompat.save_env`` (the public Hermes
+    writer), ``read_fresh`` = ``hostcompat.read_env_fresh`` (read-back right after the write, R16),
+    ``writable`` = ``hostcompat.env_writable``."""
+
+    read: Callable[[str], str | None]
+    save: Callable[[str, str], None]
+    read_fresh: Callable[[str], str | None]
+    writable: Callable[[str], None]
+
+
+PEER_TOKEN_PREFIX = "CTX_HANDOVER_PEER_TOKEN_"  # noqa: S105 - env variable name, not a secret
+PEER_PASSWORD_PREFIX = "CTX_HANDOVER_PEER_PASSWORD_"  # noqa: S105 - env variable name, not a secret
+PEER_HEADER_PREFIX = "CTX_HANDOVER_PEER_HEADER"
+"""Per-peer ``.env`` variables a pairing writes: ``<prefix><peer id>`` (headers: ``<prefix><n>_<peer id>``)."""
+
+
+def gate_secrets(gate: GateAuth | None) -> list[tuple[str, str]]:
+    """``(what, env name)`` of every secret variable ``gate`` sends: the dashboard token (session token, bearer) or
+    the Basic password, then one entry per extra proxy header — in this order, always."""
+    if gate is None:
+        return []
+    out: list[tuple[str, str]] = []
+    if gate.mode in (GateMode.SESSION_TOKEN, GateMode.BEARER):
+        out.append(("dashboard token", gate.token_env))
+    elif gate.mode == GateMode.BASIC_LOGIN:
+        out.append(("dashboard password", gate.password_env))
+    out.extend((f"value of header {name}", env) for name, env in gate.extra_headers)
+    return out
+
+
+def peer_gate(gate: GateAuth, peer_id: str) -> GateAuth:
+    """``gate`` with each secret variable it sends renamed to this peer's own (``PEER_*_PREFIX`` + ``peer_id``)."""
+    if not ULID_RE.match(str(peer_id)):
+        raise BadRequest("invalid peer id", field="peer_id")
+    return replace(
+        gate,
+        token_env=PEER_TOKEN_PREFIX + peer_id
+        if gate.mode in (GateMode.SESSION_TOKEN, GateMode.BEARER)
+        else gate.token_env,
+        password_env=PEER_PASSWORD_PREFIX + peer_id if gate.mode == GateMode.BASIC_LOGIN else gate.password_env,
+        extra_headers=tuple(
+            (name, f"{PEER_HEADER_PREFIX}{i}_{peer_id}") for i, (name, _env) in enumerate(gate.extra_headers, 1)
+        ),
+    )
+
+
+def store_credentials(store: SecretStore, gate: GateAuth, peer_id: str) -> GateAuth:
+    """Copy every secret ``gate`` sends into this peer's own variables (``peer_gate``) and return that gate.
+
+    Each value is read with ``store.read``, written with ``store.save`` and read back with ``store.read_fresh``
+    (R16); a refused or differing write raises ``EnvNotWritable`` and blanks the variables already written."""
+    fresh = peer_gate(gate, peer_id)
+    written: list[str] = []
+    try:
+        for (what, old), (_what, new) in zip(gate_secrets(gate), gate_secrets(fresh), strict=True):
+            value = store.read(old)
+            if not value:
+                raise GateRejected(f"the {what} ({old}) is not set in this profile", variable=old)
+            store.writable(new)
+            store.save(new, value)
+            written.append(new)
+            if store.read_fresh(new) != value:
+                raise EnvNotWritable(
+                    f"{new} could not be stored in this profile's .env (the write was refused or overridden)",
+                    variable=new,
+                )
+    except Exception:
+        for name in written:
+            with contextlib.suppress(Exception):
+                store.save(name, "")
+        raise
+    return fresh
+
+
+def own_secret_names(gate: GateAuth | None, peer_id: str) -> list[str]:
+    """The variables ``gate`` sends that are this peer's own copies (``store_credentials``: ``PEER_*_PREFIX`` + its
+    id), in ``gate_secrets`` order. A shared slot — the settings form's ``CTX_HANDOVER_PEER_TOKEN``, named by entries
+    paired before per-peer copies — is never one; a gate-less entry or one without a ULID id has none."""
+    if gate is None or not ULID_RE.match(str(peer_id)):
+        return []
+    own = {env for _what, env in gate_secrets(peer_gate(gate, peer_id))}
+    return [env for _what, env in gate_secrets(gate) if env in own]
+
+
+def forget_credentials(store: SecretStore, names: list[str]) -> list[str]:
+    """Blank each of ``names`` the way the pairing wrote it (rv-final, ``peers remove``): ``store.writable``,
+    ``store.save(name, "")``, then the read-back ``store.read_fresh`` (R16). Returns the names that are not proven
+    blank — the write lock refused, the write raised, or the read-back still shows a value."""
+    left: list[str] = []
+    for name in names:
+        try:
+            store.writable(name)
+            store.save(name, "")
+            if store.read_fresh(name):
+                left.append(name)
+        except Exception:
+            left.append(name)
+    return left
+
+
+def _origin(url: object) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` of a peer URL, or None when it has none."""
+    try:
+        parts = urlsplit(str(url or ""))
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            return None
+        return parts.scheme, parts.hostname.lower(), parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return None
+
+
+def credential_owner(
+    ledger: Ledger, gate: GateAuth | None, url: str, read_secret: Callable[[str], str | None] | None = None
+) -> tuple[Peer, str, str] | None:
+    """``(peer, what, env name)`` when a stored dial peer at another origin sends one of ``gate``'s secrets: the
+    same variable, or — with ``read_secret`` — the same value under another name (H1). A credential only ever goes
+    to the address it was stored for; peers at one origin (scheme, host, port — other profiles or path prefixes of
+    one dashboard) may share it. Revoked entries count: the credential still belongs to that address."""
+    mine = gate_secrets(gate)
+    if not mine:
+        return None
+    here = _origin(url)
+    values = {}
+    if read_secret is not None:
+        values = {env: v for _what, env in mine if (v := read_secret(env))}
+    for other in ledger.peers(include_revoked=True):
+        if other.direction != "dial" or other.gate is None:
+            continue
+        there = _origin(other.url)
+        if here is not None and there == here:
+            continue
+        theirs = [env for _what, env in gate_secrets(other.gate)]
+        for what, env in mine:
+            if env in theirs:
+                return other, what, env
+        if values:
+            for env in theirs:
+                value = read_secret(env) if read_secret is not None else None
+                if not value:
+                    continue
+                for what, mine_env in mine:
+                    if mine_env in values and consteq(values[mine_env], value):
+                        return other, what, mine_env
+    return None
 
 
 def _random_crockford(n: int) -> str:
@@ -328,9 +497,17 @@ def redeem_dialer(
     ledger: Ledger,
     self_name: str | None = None,
     clock: Callable[[], float] = time.time,
+    secret_store: SecretStore | None = None,
 ) -> Peer:
     """Dialer side (DESIGN §12.3 steps 3–6): unsigned ``hello`` + fingerprint check, redeem with proof, verify
     ``server_proof``, pin the listener key, store the ``dial`` peer, then one signed ``hello``.
+
+    Gate credentials (H1): ``credential_owner`` refuses — before anything is sent — a gate whose secret a stored
+    peer at another address uses (``ConflictError``, ``details.code_used=False``); with ``secret_store`` the values
+    are compared too and a successful pairing stores the credential in this peer's own variables
+    (``store_credentials``). The unsigned ``hello`` of the not yet pinned listener carries a gate header only when
+    something in front of the plugin refuses it without one (``wire.WireClient._first_hello``). A listener that
+    answers with a peer id this device already uses is refused (its entry would replace that peer's).
 
     Pairing is two-sided or nothing (L3-F05): the name for the listener is settled before the code is redeemed —
     an explicit ``name`` that is taken here ⇒ ``ConflictError`` with the code unused; without one the listener's
@@ -355,6 +532,18 @@ def redeem_dialer(
             f"--name <another name>, or rename the existing entry first (/handover peers rename {wanted} <new>).",
             field="name",
             name=wanted,
+            code_used=False,
+        )
+    owner = credential_owner(ledger, gate, pair["url"], secret_store.read if secret_store is not None else None)
+    if owner is not None:
+        other, what, env = owner
+        raise ConflictError(
+            f"the {what} in {env} is the one stored for {other.name} ({other.url}); a credential only ever goes to the "
+            f"address it was stored for, so nothing was sent to {pair['url']} and the pairing code was not used. Enter "
+            f"the {what} of {pair['url']} in Settings → Plugins → ctx_handover, then paste the pairing string again.",
+            field="gate",
+            peer=other.name,
+            variable=env,
             code_used=False,
         )
     provisional = Peer(
@@ -390,7 +579,16 @@ def redeem_dialer(
     )
     # The listener key is known now (fingerprint-checked): its signed answer to the redeem — success or a refusal
     # such as ``pair_invalid`` — is verified and read, never taken for an unsigned gate or proxy signal.
-    resp = client_factory(replace(provisional, pubkey=hello.listener_pubkey)).redeem(body)
+    try:
+        resp = client_factory(replace(provisional, pubkey=hello.listener_pubkey)).redeem(body)
+    except (PeerUnreachable, RateLimited) as exc:
+        exc.message = (
+            f"{exc.message}; the answer to the pairing was lost, so {pair['name']} may have paired this device "
+            f"anyway. If /handover peers on {pair['name']} lists this device, revoke it there; then create a new code "
+            "there and pair again."
+        )
+        exc.details["listener_entry"] = "unknown"
+        raise
     try:
         peer_id = resp["peer_id"]
         listener = resp["listener"]
@@ -424,9 +622,18 @@ def redeem_dialer(
         last_seen_at=now,
     )
     try:
+        if any(p.peer_id == peer_id for p in ledger.peers(include_revoked=True)):
+            # ``upsert_peer`` keys on the peer id: the entry of another peer would be replaced by this listener
+            raise BadResponseSignature(f"{pair['name']} answered with a peer id this device already uses; not paired")
+        if secret_store is not None:
+            peer = replace(peer, gate=store_credentials(secret_store, gate, peer_id))
         ledger.upsert_peer(peer)
     except Exception as exc:
         withdrawn = _withdraw(client_factory, peer)
+        if secret_store is not None and peer.gate is not gate:  # copied, but the entry was not stored: blank them
+            for _what, env in gate_secrets(peer.gate):
+                with contextlib.suppress(Exception):
+                    secret_store.save(env, "")
         text = _not_stored_text(str(pair["name"]), withdrawn)
         if not isinstance(exc, HandoverError):
             raise HandoverError(text, listener_entry="withdrawn" if withdrawn else "kept") from exc

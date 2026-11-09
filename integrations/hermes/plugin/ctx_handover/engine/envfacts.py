@@ -15,7 +15,10 @@ toolchain — the XDG base directories, ``TMPDIR`` (``TEMP``/``TMP``, ``USERPROF
 ``$HOME``) point into it, and it is removed when the last child has ended. Without a usable scratch root no tool is
 executed. A tool that needs its real home to answer (a rustup or asdf shim) fails there and is reported with an
 unknown version — a non-zero exit never yields a version. Hermes facts (WSL/container, profile, versions,
-configured model) arrive as ``HostFacts`` from ``hostcompat.host_facts`` — this module imports no Hermes code.
+configured model) arrive as ``HostFacts`` from ``hostcompat.host_facts`` — this module imports no Hermes code. The
+home comes with the caller's policy (``cfg.home``): the process home is not Hermes' home of the profile — Hermes
+rewrites ``HOME`` for the plugin host of ``plugins.isolation: host`` but not for its own process (L3-F20) — so the
+composition root resolves it once (``hostcompat.effective_home``) and every side of the plugin uses that one.
 
 All platform calls go through ``SystemOps`` (``default_system()``), the one seam tests use to run the macOS and
 Windows branches on any host. The case-sensitivity probe is read-only: it stats a swapped-case spelling of an
@@ -492,10 +495,13 @@ def probe(
     tools, or on the target the names the source reported) — never executed. ``system`` (additive) replaces the
     platform calls; ``scratch_dir`` (additive) is where the probe's scratch root is made instead of the system temp
     directory (R26, see the module docstring). ``cfg`` (additive) is this host's own policy for the write-root check
-    (R29; ``workspace_root_ok``/``workspace_root_problem``) — without it the probe builds one from ``options``."""
+    (R29; ``workspace_root_ok``/``workspace_root_problem``) — without it the probe builds one from ``options``. With
+    ``cfg`` the reported ``home`` and the resolved roots use ``cfg.home``, the home the policy, the path map and the
+    collector work with (the composition root takes it from ``hostcompat.effective_home``, L3-F20); without it the
+    process home (``system.home``)."""
     s = system or default_system()
     family = _family(s.system())
-    home = s.home()
+    home = str(cfg.home) if cfg is not None else s.home()  # one home for facts, path map and policy (L3-F20)
     windows = family == "windows"
     if windows:
         ver = s.win32_ver()

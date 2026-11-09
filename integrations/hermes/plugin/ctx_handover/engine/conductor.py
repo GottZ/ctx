@@ -111,7 +111,7 @@ from .model import (
     SessionRef,
 )
 from .ops import object_closure, read_object
-from .plan import CONFIRM_PROPOSED, SUSPECTED_SECRET, yes_exempt
+from .plan import CONFIRM_PROPOSED, CONFIRM_REPOS_LEFT, CONFIRM_WORKSPACE_DIFFERS, SUSPECTED_SECRET, yes_exempt
 
 S = ConductorState
 log = logging.getLogger("ctx_handover.conductor")
@@ -153,6 +153,14 @@ BUSY_ELSEWHERE = "busy_elsewhere"
 REQUIRED_CAPS = ("session.v1", "blocks.v1")
 ANSWERS = frozenset({"yes", "no_proposed", "show_plan", "cancel"})
 """The answers ``confirm(info)`` may give (DESIGN §14.1, W112); anything else ends the job like ``cancel``."""
+IMPORT_CONFIRMED = frozenset({CONFIRM_PROPOSED, CONFIRM_WORKSPACE_DIFFERS, CONFIRM_REPOS_LEFT})
+"""Reasons a bundle import does not ask again (integrator decision on R36a): the export settled them and the bundle
+holds the result — the proposed items it packed (X02), the workspace it sent (reason (j): ``--yes`` never answers it
+at the export, so this plugin writes such a bundle only after a person answered; the files are in the bundle either way
+and leave no other machine at the import) and the repositories it left behind (reason (k) ``repos_left``, rv-d: also
+exempt from ``--yes``, answered at the export; nothing at the import changes what the bundle holds). Every other reason
+— an unverified bundle's instruction files, a session over the target window, … — is asked at the import as
+anywhere."""
 
 
 @dataclass(frozen=True)
@@ -514,25 +522,28 @@ class Conductor:
 
         Returns the confirmed ``FinalPlan``. When the user chooses ``show_plan``/``cancel`` (or a timeout with a
         reason other than proposed items) the job ends ABORTED with nothing locked and ``Cancelled`` is raised;
-        any other failure aborts the job and is raised as well."""
+        any other failure aborts the job and is raised as well. The owner heartbeat runs throughout (review M3): a
+        confirmation the user reads for longer than the stale window (the gateway's clarify timeout is 90 s, the
+        CLI has none) must not let a janitor of another process adopt and abort the job."""
         self._load()
-        while self._state in PLANNING_STATES - {S.NEGOTIATED}:
-            if not self._step():
-                break
-        if self._state is S.NEGOTIATED:
-            try:
-                return self._confirm(interactive=True)
-            except Cancelled:
-                raise
-            except Fenced:
-                raise
-            except HandoverError as err:
-                self._fail(err)
-            except Exception as exc:  # the surface's confirmation failed: nothing is locked yet, end the job
-                log.warning("ctx_handover job %s: confirmation failed", self.job.job_id, exc_info=True)
-                self._fail(unexpected(exc))
-        if self._state is S.ABORTING:
-            self._drain_abort()
+        with self._keepalive_thread():
+            while self._state in PLANNING_STATES - {S.NEGOTIATED}:
+                if not self._step():
+                    break
+            if self._state is S.NEGOTIATED:
+                try:
+                    return self._confirm(interactive=True)
+                except Cancelled:
+                    raise
+                except Fenced:
+                    raise
+                except HandoverError as err:
+                    self._fail(err)
+                except Exception as exc:  # the surface's confirmation failed: nothing is locked yet, end the job
+                    log.warning("ctx_handover job %s: confirmation failed", self.job.job_id, exc_info=True)
+                    self._fail(unexpected(exc))
+            if self._state is S.ABORTING:
+                self._drain_abort()
         raise self._last_error_exc()
 
     def run(self) -> CommitAck | None:
@@ -663,6 +674,13 @@ class Conductor:
             "info",
             {"event": event, **{k: _encode(v) for k, v in data.items()}},
             epoch=self.job.epoch,
+        )
+
+    def _intended(self, step: str) -> bool:
+        """True when the journal holds an ``intent`` for ``step`` (the call may have reached the other side)."""
+        return any(
+            e["kind"] == "intent" and (e["data"] or {}).get("step") == step
+            for e in self.ledger.events(self.job.job_id, Role.CONDUCTOR)
         )
 
     def _intent(self, step: str) -> None:
@@ -1171,8 +1189,8 @@ class Conductor:
             )
         )
         importing = self.job.mode is Mode.IMPORT
-        if importing:  # the pack holds what the export confirmed; nothing is left to choose here (X02)
-            reasons = [r for r in reasons if r != CONFIRM_PROPOSED]
+        if importing:  # the pack holds what the export confirmed; nothing is left to choose here (X02, R36a)
+            reasons = [r for r in reasons if r not in IMPORT_CONFIRMED]
         choice: str | None = "yes"
         exempt = yes_exempt(reasons)
         if reasons and (not self.job.options.yes or exempt):
@@ -1285,8 +1303,10 @@ class Conductor:
         """Revision moved between plan and lock: deterministic re-plan (refine off) and re-negotiation; new
         proposals are excluded in this non-interactive part (DESIGN §3.2 LOCKED)."""
         old = self._get("plan", ResourcePlan)  # the plan the user confirmed proposals of (before the choice)
-        old_ids = {i.item_id for i in old.items}
-        old_proposed = {i.item_id for i in old.items if i.include is Include.PROPOSED}
+        old_final = self._get("final_plan", FinalPlan)
+        # matched by what an item is, not by its id: ``plan`` numbers extras by position, so a file mentioned after
+        # the confirmation can take the id of the proposal the user said yes to (review M18)
+        old_proposed = {(i.kind, i.source_path) for i in old.items if i.include is Include.PROPOSED}
         job_off = replace(self.job, options=replace(self.job.options, refine="off"))
         tf = self._get("target_facts", EnvFacts)
         plan = from_wire(ResourcePlan, self._await(self.source, self.source.start_plan(job_off, tf, self._session_ref)))
@@ -1297,12 +1317,17 @@ class Conductor:
         excluded = sorted(
             i.item_id
             for i in negotiated.plan.items
-            if i.include is Include.PROPOSED and (i.item_id not in old_ids or i.item_id not in old_proposed)
+            if i.include is Include.PROPOSED and (i.kind, i.source_path) not in old_proposed
         )
         choice = self._ctx.get("choice") if self._ctx.get("choice") in ("yes", "no_proposed") else "no_proposed"
         final = self._settle(negotiated, choice, frozenset(excluded))
         self._info("replanned", excluded_proposed=excluded, revision=list(plan.revision))
-        self._note(plan=plan, final_plan=final, replanned=True, user_items=users)
+        repack: dict = {}
+        if old_final is None or final.plan_id != old_final.plan_id:
+            # a pack belongs to one final plan: the old plan's pack (a job resumed after the session moved) is no
+            # pack of this one — pack anew (review M1)
+            repack = {"pack": None, "pack_moved": False, "left_behind": None}
+        self._note(plan=plan, final_plan=final, replanned=True, user_items=users, **repack)
 
     def _drop_items(self, final: FinalPlan, ids: set[str]) -> FinalPlan:
         items = tuple(replace(i, include=Include.NO) if i.item_id in ids else i for i in final.plan.items)
@@ -1686,10 +1711,21 @@ class Conductor:
         raise _Park() from err
 
     def _retired(self) -> None:
-        if self.continue_prompt:
-            self._go(S.CONTINUING)
-        else:
+        """CONTINUING only when the source confirmed its retirement (``RETIRE_CONFIRMED``): a source that took the
+        session back during the retire (``released``/``reclaimed``) is active again, and an unattended turn on the
+        target would make two working copies (R10, review M27). The job ends DONE and says why nothing started."""
+        if not self.continue_prompt:
             self._go(S.DONE)
+            return
+        state = source_state_of(self._ctx.get("retire"))
+        if state in RETIRE_CONFIRMED:
+            self._go(S.CONTINUING)
+            return
+        message = f"the source took the session back ({state or 'not retired'}), so no turn starts on the target"
+        self._warn(f"continuation not started: {message}")
+        error = {"code": "continue_refused", "message": message, "details": {"reason": "source_given_back"}}
+        self._note(**{"continue": to_wire(ContinueResult(started=False)) | {"error": error}})
+        self._go(S.DONE)
 
     def _continuing(self) -> None:
         if self._ctx.get("continue") is None:
@@ -1709,31 +1745,67 @@ class Conductor:
         target returned (or does not know the job) and the release reports ``released``/``reclaimed``. A target
         that is committing or committed sends the job back to IN_DOUBT; every other refusal (a row another process
         holds, a stale epoch, …) is raised — retried, then parked for the janitor — and never a reason to release
-        the source behind the target's back (V37)."""
+        the source behind the target's back (V37).
+
+        A side the job never reached holds nothing for it (review M2, L3-F11 at the root): without a journaled
+        ``target.open_job`` intent the target never saw the job, without ``source.lock`` the source was never
+        locked. Their abort/release is still tried once (it tidies a local participant row), but its failure — an
+        unreachable peer, a gateway without the routes — is no reason to keep the job ``aborting`` for ever."""
         reason = str(self._ctx.get("abort_reason") or "aborted")
+        target_seen = self._intended("target.open_job")
         try:
             self._side_effect("target.abort", lambda: self.target.abort(self.job, reason))
+        except Fenced:
+            raise
         except InvalidState as err:
             if err.details.get("state") in ("committing", "committed"):
                 self._info("abort_refused_by_target", target_state=err.details.get("state"))
                 self._go(S.IN_DOUBT)
                 return
-            raise
+            if target_seen:
+                raise
+            self._done("target.abort", target="never_opened", error=err.code)
         except NotFound:
             pass
+        except HandoverError as err:
+            if target_seen:
+                raise
+            self._done("target.abort", target="never_opened", error=err.code)
+        locked = self._intended("source.lock")
         self._intent("source.release")
+        raw: object
         try:
             started = self.source.start_release(self.job, reason)
+        except Fenced:
+            raise
         except NotFound:
             # L3-F11: the source does not know the job — it never opened it (it refused at FACTS, e.g.
             # ``rate_limited``), so it holds nothing for it, which is what a release confirms. Only the refusal of
             # the release request counts; a lost operation while polling it stays an error. The job's error stays
             # the cause, not "not found".
             self._done("source.release", source="not_found")
-            raw: object = {"state": "released"}
+            raw = {"state": "released"}
+        except HandoverError as err:
+            if locked:
+                raise
+            self._done("source.release", source="never_locked", error=err.code)
+            raw = {"state": "released"}
         else:
-            raw = self._await(self.source, started, cancellable=False)
-            self._done("source.release")
+            try:
+                raw = self._await(self.source, started, cancellable=False)
+            except Fenced:
+                raise
+            except HandoverError as err:
+                if locked:
+                    raise
+                self._done("source.release", source="never_locked", error=err.code)
+                raw = {"state": "released"}
+            else:
+                self._done("source.release")
         if source_state_of(raw) not in SOURCE_GIVEN_BACK:
-            raise self._unconfirmed("released", raw)
+            if locked:
+                raise self._unconfirmed("released", raw)
+            self._info("release_unconfirmed_never_locked", state=source_state_of(raw))
+        for warning in (raw.get("warnings") if isinstance(raw, dict) else None) or ():
+            self._warn(f"source: {str(warning)[:300]}")
         self._go(S.ABORTED)

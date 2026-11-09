@@ -192,6 +192,23 @@ def private_dir(path: Path) -> Path:
     return path
 
 
+_WAL_INCOMPATIBLE = ("locking protocol", "not authorized", "disk i/o error")
+"""Errors of ``PRAGMA journal_mode=WAL`` that mean "this file system cannot do WAL" (Hermes' own markers,
+``hermes_state_wal._WAL_INCOMPAT_MARKERS``): network file systems, some FUSE mounts, ZFS under bursts."""
+
+
+def _journal_wal_or_delete(conn: sqlite3.Connection, *, db_label: str = "") -> None:
+    """WAL where the file system supports it, else ``DELETE`` (review M11) — the rule of Hermes' ``plugin_db``. Any
+    other error (a locked database) is raised: it is no property of the file system."""
+    del db_label
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        if not any(marker in str(exc).lower() for marker in _WAL_INCOMPATIBLE):
+            raise
+        conn.execute("PRAGMA journal_mode=DELETE")
+
+
 class Fenced(InvalidState):
     """The caller's owner epoch is no longer current: another process adopted the job (DESIGN §3.1).
 
@@ -225,9 +242,19 @@ def _expect_set(expect: str | Sequence[str]) -> frozenset[str] | None:
 class Ledger:
     """Process-shared durable state (see module docstring)."""
 
-    def __init__(self, path: Path, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        clock: Callable[[], float] = time.time,
+        journal: Callable[..., None] | None = None,
+    ) -> None:
+        """``journal`` (additive, review M11): Hermes' journal-mode setter (``apply_wal_with_fallback(conn,
+        db_label=…)``, reached through ``hostcompat``); without it the ledger applies the same fallback rule itself
+        (``_journal_wal_or_delete``)."""
         self.path = Path(path)
         self._clock = clock
+        self._journal = journal
         self._local = threading.local()
         self._all: list[sqlite3.Connection] = []
         self._all_lock = threading.Lock()
@@ -325,7 +352,8 @@ class Ledger:
 
     def _init_schema(self) -> None:
         conn = self._conn()
-        conn.execute("PRAGMA journal_mode=WAL")
+        label = f"plugin-data/ctx_handover/{self.path.name}"
+        (self._journal or _journal_wal_or_delete)(conn, db_label=label)
         with self.tx() as c:
             c.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             row = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
@@ -467,16 +495,32 @@ class Ledger:
     def revoke_peer(self, name_or_id: str) -> list[str]:
         """Listener side, one transaction (DESIGN §12.5): mark revoked, delete its offers, set its abortable
         participant jobs to ``aborting`` and return their ids. Sources in ``prepared``/``retiring`` and targets in
-        ``committing``/``committed`` keep their state (in-doubt rule, §3.4)."""
+        ``committing``/``committed`` keep their state (in-doubt rule, §3.4).
+
+        A revocation takes the key, not one row (review M13): every inbound row with the same public key (a second
+        pairing of the same device) is revoked with it."""
         with self._w() as c:
-            row = c.execute("SELECT peer_id FROM peers WHERE peer_id=? OR name=?", (name_or_id, name_or_id)).fetchone()
+            row = c.execute(
+                "SELECT peer_id, pubkey FROM peers WHERE peer_id=? OR name=?", (name_or_id, name_or_id)
+            ).fetchone()
             if row is None:
                 raise NotFound(f"no peer {name_or_id!r}")
-            peer_id = row[0]
-            now = self.now()
+            same_key = [
+                r[0]
+                for r in c.execute(
+                    "SELECT peer_id FROM peers WHERE pubkey=? AND direction='inbound' AND peer_id<>?",
+                    (row["pubkey"], row["peer_id"]),
+                ).fetchall()
+            ]
+            return self._revoke_rows(c, [row["peer_id"], *same_key])
+
+    def _revoke_rows(self, c: sqlite3.Connection, peer_ids: Sequence[str]) -> list[str]:
+        """The revocation cascade of ``revoke_peer`` for ``peer_ids`` inside the caller's transaction."""
+        now = self.now()
+        hits: list[tuple[str, str, int]] = []
+        for peer_id in peer_ids:
             c.execute("UPDATE peers SET revoked_at=? WHERE peer_id=? AND revoked_at IS NULL", (now, peer_id))
             c.execute("DELETE FROM offers WHERE peer_id=?", (peer_id,))
-            hits: list[tuple[str, str, int]] = []
             jobs = c.execute(
                 "SELECT job_id, role, state, owner_epoch FROM jobs WHERE peer_id=? AND role<>'conductor'", (peer_id,)
             ).fetchall()
@@ -492,12 +536,10 @@ class Ledger:
                     if src is not None and src[0] not in _REVOKE_SOURCE_STATES:
                         continue
                 hits.append((job["job_id"], role, int(job["owner_epoch"])))
-            for job_id, role, epoch in hits:
-                c.execute(
-                    "UPDATE jobs SET state='aborting', updated_at=? WHERE job_id=? AND role=?", (now, job_id, role)
-                )
-                self._append(c, job_id, Role(role), epoch, "transition", {"reason": "peer_revoked"}, state="aborting")
-            return [h[0] for h in hits]
+        for job_id, role, epoch in hits:
+            c.execute("UPDATE jobs SET state='aborting', updated_at=? WHERE job_id=? AND role=?", (now, job_id, role))
+            self._append(c, job_id, Role(role), epoch, "transition", {"reason": "peer_revoked"}, state="aborting")
+        return [h[0] for h in hits]
 
     def remove_peer(self, name_or_id: str) -> bool:
         """Dialer side: delete a dial peer's entry, pinned key and last known facts (DESIGN §12.5)."""
@@ -571,7 +613,9 @@ class Ledger:
         """Burn the code and insert the inbound peer atomically (DESIGN §12.3 step 5, SEC 1.3).
 
         The DELETE must hit exactly one row; a second process redeeming the same code gets ``False``. A name
-        that is already taken gets a numeric suffix."""
+        that is already taken gets a numeric suffix. Older live inbound rows with the same public key are revoked in
+        the same transaction (review M13: one key, one live row — revoking the new row then also ends the key);
+        their open jobs go ``aborting`` and the listener's sweep finishes them."""
         with self._w() as c:
             cur = c.execute(
                 "DELETE FROM pair_codes WHERE code_id=? AND failures<5 AND expires_at>?", (code_id, float(now))
@@ -579,6 +623,16 @@ class Ledger:
             if cur.rowcount != 1:
                 return False
             redeemed = True
+            older = [
+                r[0]
+                for r in c.execute(
+                    "SELECT peer_id FROM peers WHERE pubkey=? AND direction='inbound' AND revoked_at IS NULL"
+                    " AND peer_id<>?",
+                    (peer.pubkey, peer.peer_id),
+                ).fetchall()
+            ]
+            if older:
+                self._revoke_rows(c, older)
             name, n = peer.name, 1
             while c.execute("SELECT 1 FROM peers WHERE name=?", (name,)).fetchone():
                 n += 1
@@ -705,6 +759,17 @@ class Ledger:
             )
             self._append(c, job_id, role, epoch, "owner", {"owner": owner, "previous": row["owner"]})
             return epoch
+
+    def owner_alive(self, job_id: str, role: Role, stale_after_s: float) -> bool:
+        """True when a non-terminal row has an owner that is neither stale (heartbeat within ``stale_after_s``) nor
+        known dead (``owner_dead``) — the owner ``claim_owner`` would refuse to replace."""
+        row = self._q1(
+            "SELECT owner, owner_heartbeat_at, state FROM jobs WHERE job_id=? AND role=?", (job_id, str(role))
+        )
+        if row is None or row["owner"] is None or row["state"] in TERMINAL[role]:
+            return False
+        hb = row["owner_heartbeat_at"]
+        return hb is not None and hb >= self.now() - float(stale_after_s) and not owner_dead(row["owner"])
 
     def release_owner(self, job_id: str, role: Role, owner: str, epoch: int) -> None:
         """Give ownership up (the epoch stays; the next claim increments it)."""
@@ -1069,7 +1134,10 @@ class Ledger:
         """Record the lock of a lineage for ``job_id`` (state ``locking``); one active handover per root.
 
         Re-locking the same job (``locking``/``locked``/``suspended``/``released`` — a resumed job whose leases the
-        janitor released) is idempotent and records the new holder."""
+        janitor released) is idempotent and records the new holder. Re-locking a ``released`` row starts a new hold
+        of the source: a ``relock`` event on the job's source journal, in the same transaction, counts it
+        (``source_generation``), so an operation that belongs to one hold (the release) is never answered from an
+        earlier one (review B1)."""
         now = self.now()
         with self._w() as c:
             other = self._conflicting(c, info.root_id, job_id)
@@ -1085,6 +1153,11 @@ class Ledger:
                     " WHERE job_id=?",
                     (holder, info.tip_id, _dumps(list(info.lineage_ids)), peer, now, job_id),
                 )
+                if row[0] == "released":
+                    job = c.execute(
+                        "SELECT owner_epoch FROM jobs WHERE job_id=? AND role=?", (job_id, str(Role.SOURCE))
+                    ).fetchone()
+                    self._append(c, job_id, Role.SOURCE, int(job[0]) if job else 0, "relock", {"holder": holder})
                 return
             try:
                 c.execute(
@@ -1111,6 +1184,16 @@ class Ledger:
     def source_state(self, job_id: str) -> dict | None:
         row = self._q1("SELECT * FROM source_handovers WHERE job_id=?", (job_id,))
         return None if row is None else self._source(row)
+
+    def source_generation(self, job_id: str) -> int:
+        """The hold of the job's source: 0 for the first lock, +1 for every re-lock of a ``released`` source
+        (``source_lock``). Journal compaction (``compact_terminal``) reaches a terminal job's events only after its
+        operations are gone (``OPS_KEEP_S`` < ``JOURNAL_KEEP_S``), so a smaller count never meets a cached
+        operation of a later hold."""
+        row = self._q1(
+            "SELECT COUNT(*) FROM job_events WHERE job_id=? AND role=? AND kind='relock'", (job_id, str(Role.SOURCE))
+        )
+        return int(row[0]) if row else 0
 
     def source_set(self, job_id: str, state: SourceState | str, **fields: object) -> None:
         """Set the source state and any of ``holder, peer, title, prepared_at, ack, bundle_path, tip_id,
@@ -1513,6 +1596,29 @@ class Ledger:
             out.append(d)
         return out
 
+    def outbox_claim(self, row_id: int, now: float, until: float) -> bool:
+        """Claim a due outbox row for one sender before its first MCP call (rv-final, M29 follow-up): ``next_try_at``
+        moves to ``until`` only while the row is still due at ``now`` and not done — one write transaction, so of
+        two flushers (threads or processes of the profile) exactly one gets True. The claimer ends the claim with
+        ``outbox_done`` (delivered or backed off) or ``outbox_release`` (untried); a claimer that dies leaves the row
+        due again at ``until``."""
+        with self._w() as c:
+            cur = c.execute(
+                "UPDATE ctx_outbox SET next_try_at=? WHERE id=? AND done_at IS NULL AND next_try_at<=?",
+                (float(until), int(row_id), float(now)),
+            )
+            return cur.rowcount == 1
+
+    def outbox_release(self, row_id: int, until: float, due_at: float) -> bool:
+        """Hand a claimed row back untried: ``next_try_at`` returns to ``due_at`` — only while the row still holds
+        the claim ``until`` and is not done. True when it did."""
+        with self._w() as c:
+            cur = c.execute(
+                "UPDATE ctx_outbox SET next_try_at=? WHERE id=? AND done_at IS NULL AND next_try_at=?",
+                (float(due_at), int(row_id), float(until)),
+            )
+            return cur.rowcount == 1
+
     def outbox_done(self, row_id: int, ok: bool, now: float) -> None:
         with self._w() as c:
             if ok:
@@ -1528,11 +1634,13 @@ class Ledger:
 
     # -- staging quota per job (R28, DESIGN §4.7: need_bytes from negotiation + 10 %) -------------------------
     def quota_set(self, job_id: str, role: Role, quota_bytes: int) -> None:
-        """Set (or raise) the receiver-side staging quota of a job; already charged bytes are kept."""
+        """Set the receiver-side staging quota of a job to the plan negotiated last (review M5): ``max(used,
+        quota_bytes)`` — a smaller re-negotiated plan lowers it (a rejected larger proposal stays no allowance),
+        already charged bytes are kept and never make the row inconsistent."""
         with self._w() as c:
             c.execute(
                 "INSERT INTO job_quota(job_id, role, quota, used) VALUES(?,?,?,0) ON CONFLICT(job_id, role)"
-                " DO UPDATE SET quota=MAX(job_quota.quota, excluded.quota)",
+                " DO UPDATE SET quota=MAX(job_quota.used, excluded.quota)",
                 (job_id, str(role), max(0, int(quota_bytes))),
             )
 
@@ -1572,6 +1680,44 @@ class Ledger:
             d["items"] = _loads(d["items"])
             out.append(d)
         return out
+
+    def purge_retention(self, keep_s: float = JOURNAL_KEEP_S) -> dict[str, int]:
+        """Janitor (BUILD-ORDER §6 Nr. 21, review H4): the rows that otherwise grow without bound.
+
+        ``suggestions`` past their TTL (``suggestions`` never returns them again); ``offers`` expired more than
+        ``keep_s`` ago (the model's refinement text) unless the job that claimed one is still active here;
+        ``ctx_outbox`` rows delivered more than ``keep_s`` ago; the ``backups`` (titles, goal texts, step marks) of a
+        source given back (``released``/``reclaimed``) more than ``keep_s`` ago whose job is over on this host. The
+        backups of a ``retired``/``exported`` source stay — ``reclaim`` restores from them. Returns the deleted rows
+        per table."""
+        now = self.now()
+        cutoff = now - float(keep_s)
+        out = {"suggestions": 0, "offers": 0, "outbox": 0, "backups": 0}
+        with self._w() as c:
+            out["suggestions"] = c.execute("DELETE FROM suggestions WHERE at<?", (now - SUGGESTION_TTL_S,)).rowcount
+            for r in c.execute("SELECT offer_id, claimed_job FROM offers WHERE expires_at<?", (cutoff,)).fetchall():
+                if r["claimed_job"] is None or not self._job_active(c, r["claimed_job"]):
+                    out["offers"] += c.execute("DELETE FROM offers WHERE offer_id=?", (r["offer_id"],)).rowcount
+            out["outbox"] = c.execute(
+                "DELETE FROM ctx_outbox WHERE done_at IS NOT NULL AND done_at<?", (cutoff,)
+            ).rowcount
+            given_back = c.execute(
+                "SELECT DISTINCT b.job_id FROM backups b JOIN source_handovers s ON s.job_id = b.job_id"
+                " WHERE s.state IN ('released','reclaimed') AND s.updated_at<?",
+                (cutoff,),
+            ).fetchall()
+            for r in given_back:
+                if not self._job_active(c, r[0]):
+                    out["backups"] += c.execute("DELETE FROM backups WHERE job_id=?", (r[0],)).rowcount
+        return out
+
+    @staticmethod
+    def _job_active(c: sqlite3.Connection, job_id: str) -> bool:
+        """True when some role of ``job_id`` is not terminal on this host (a suspended conductor may resume)."""
+        return any(
+            r["state"] not in TERMINAL[Role(r["role"])]
+            for r in c.execute("SELECT role, state FROM jobs WHERE job_id=?", (job_id,)).fetchall()
+        )
 
     def purge_job(self, job_id: str) -> None:
         """``gc --job``: journal, ops, object references and the job rows of a terminal job (SEC 6.3)."""

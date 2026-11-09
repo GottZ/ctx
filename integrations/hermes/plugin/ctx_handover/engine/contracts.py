@@ -97,6 +97,18 @@ class GitProbe(Protocol):
         so it travels as a file tree (W107, contract V30)."""
         ...
 
+    def is_ignored(self, path: str) -> bool:
+        """True unless git confirms that the directory ``path`` is not ignored in the work tree around it
+        (``git check-ignore``; a directory holding a tracked file is not ignored). The collector takes an enclosing
+        repository as the workspace only when the session's cwd is not ignored there (R36, L3-F19)."""
+        ...
+
+    def has_tracked_files(self, path: str) -> bool | None:
+        """Whether the index of the work tree around the directory ``path`` holds a file below it (R36a): True, False,
+        or None when git cannot answer. A session folder with tracked files is part of the user's own repository, so
+        that repository is the workspace without a question."""
+        ...
+
 
 @runtime_checkable
 class BusyReportLike(Protocol):

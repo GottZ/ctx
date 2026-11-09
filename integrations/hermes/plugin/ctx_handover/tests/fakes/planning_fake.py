@@ -9,7 +9,9 @@ Other clusters use these to drive planning without a real host:
 ``model_change(...)``                       ``FinalPlan.model_change`` in the one form of contract X04
 ``Busy``                                    a ``contracts.BusyReportLike``
 ``StaticGitProbe``                          ``contracts.GitProbe`` from a fixed ``{work tree root: shallow}`` map
-                                            (``partial=`` names partial clones, ``is_partial`` as E's probe)
+                                            (``partial=`` names partial clones, ``is_partial`` as E's probe;
+                                            ``ignored=`` names ignored directories, ``is_ignored``;
+                                            ``tracked=``/``untracked=`` for ``has_tracked_files``, else None)
 ``CeilingGitProbe``                         ``contracts.GitProbe`` over real ``git rev-parse`` with a ceiling dir,
                                             so a probe below the test's tmp dir never finds an enclosing repo;
                                             read-only, no identity, no config writes
@@ -200,10 +202,26 @@ class Busy:
 class StaticGitProbe:
     """``contracts.GitProbe`` from a fixed map ``{work tree root: shallow}`` (no git needed)."""
 
-    def __init__(self, roots: dict[str, bool] | None = None, *, partial: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        roots: dict[str, bool] | None = None,
+        *,
+        partial: Iterable[str] = (),
+        ignored: Iterable[str] = (),
+        tracked: Iterable[str] = (),
+        untracked: Iterable[str] = (),
+    ) -> None:
         self.roots = {os.path.normpath(k): bool(v) for k, v in (roots or {}).items()}
         self.partial = {os.path.normpath(p) for p in partial}
+        self.ignored = {os.path.normpath(p) for p in ignored}
+        self.tracked = {os.path.normpath(p) for p in tracked}
+        self.untracked = {os.path.normpath(p) for p in untracked}
         self.calls: list[tuple[str, str]] = []
+
+    @staticmethod
+    def _below(path: str, dirs: set[str]) -> bool:
+        p = os.path.normpath(path)
+        return any(p == d or p.startswith(d.rstrip("/\\") + os.sep) for d in dirs)
 
     def toplevel(self, path: str) -> str | None:
         self.calls.append(("toplevel", path))
@@ -226,6 +244,20 @@ class StaticGitProbe:
     def is_partial(self, path: str) -> bool:
         top = self.toplevel(path)
         return top is not None and top in self.partial
+
+    def is_ignored(self, path: str) -> bool:
+        """``ignored=`` names ignored directories (R36): True for them and any path below; everything else is not
+        ignored."""
+        self.calls.append(("is_ignored", path))
+        return self._below(path, self.ignored)
+
+    def has_tracked_files(self, path: str) -> bool | None:
+        """``tracked=``/``untracked=`` name directories that hold tracked files / none (R36a): True/False for them and
+        any path below; None (unknown) for everything else."""
+        self.calls.append(("has_tracked_files", path))
+        if self._below(path, self.tracked):
+            return True
+        return False if self._below(path, self.untracked) else None
 
 
 class CeilingGitProbe:
@@ -274,6 +306,42 @@ class CeilingGitProbe:
 
     def is_shallow(self, path: str) -> bool:
         return self._rev_parse(path, "--is-shallow-repository") == "true"
+
+    def is_ignored(self, path: str) -> bool:
+        """``git check-ignore -q --end-of-options .`` in ``path`` (``gitops.GitProbe.is_ignored``, R36): only exit 1
+        reads as not ignored."""
+        if not os.path.isdir(path):
+            return True
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["git", "-C", path, "check-ignore", "-q", "--end-of-options", "."],  # noqa: S607 - test helper
+                capture_output=True,
+                env=self._env(),
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        return proc.returncode != 1
+
+    def has_tracked_files(self, path: str) -> bool | None:
+        """``git ls-files -z --cached --end-of-options .`` in ``path`` (``gitops.GitProbe.has_tracked_files``, R36a):
+        True for any listed entry, False for none, None when git fails."""
+        if not os.path.isdir(path):
+            return None
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["git", "-C", path, "ls-files", "-z", "--cached", "--end-of-options", "."],  # noqa: S607 - test helper
+                capture_output=True,
+                env=self._env(),
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        return bool(proc.stdout)
 
     def is_partial(self, path: str) -> bool:
         """A promisor remote in the repository's config (``gitops.GitProbe.is_partial``, V30), read with

@@ -22,6 +22,14 @@ is ``no`` and named in ``not_transferred`` — e.g. it lies in the Hermes home),
 (``workspace_excluded``) and ``confirmation_reasons`` raises ``workspace_excluded`` (letter h), which a blanket yes
 never confirms (``YES_EXEMPT``/``yes_exempt``); the user's own ``--no-workspace`` is the explicit answer.
 
+Workspace against the working folder (R36, L3-F19): the session's workspace is the primary item — the repository
+around its working folder, or the folder itself when git ignores it there (the collector decides). ``presend_summary``
+always names it (``workspace``: path and size against the folder and the folder's size, which the source measures into
+``PlanItem.cwd_bytes``); when the workspace holds more than the folder (``rel_cwd`` set) and the folder holds no file
+the repository tracks (``PlanItem.cwd_tracked`` not True: typically somebody else's checkout, or unknown),
+``confirmation_reasons`` raises ``workspace_differs`` (letter j, in ``YES_EXEMPT``). A tracked subfolder of the user's
+own repository (``repo/src``) is the normal case and goes without a question (R36a).
+
 Session larger than the target's context window (R32, L3-F17): ``context_over`` compares the estimated size of the
 session's active context (``ResourcePlan.context_tokens`` when the source estimated it with
 ``active_context_tokens``, else the lineage total ``approx_tokens`` as an upper bound) with the target model's window
@@ -33,6 +41,15 @@ stays). Larger ⇒ ``presend_summary`` says so (``context_over``), ``confirmatio
 Suspected secrets (R25): an extra file the policy suspects (or could not check, no redactor) carries the exact reason
 element ``SUSPECTED_SECRET``; ``apply_choice(final, "yes")`` never confirms it and ``restrict_to_releasable`` never
 lets a counterpart confirm it. Only a local ``include_secret`` (``yes`` already in the plan) releases it.
+
+Left behind, named (review rv-d): a file tree beyond ``max_files`` or its byte cap is left out at planning and named
+with the limit (H12; the pack would refuse it after the lock); a git item's size counts the object store a fresh pack
+reads — behind a gitfile and through alternates (``git_object_bytes``, H13) — and an unmeasurable one carries
+``SIZE_UNKNOWN`` (reason (c)); repositories inside a transferred git workspace (initialised submodules, clones in the
+work tree) are named and raise reason (k) ``repos_left`` (H15, R30 form); a transcript folder around a repository of
+the plan is no extra (M36); another account's home and Hermes home are no source (M35, ``collector.HomeRule``).
+``presend_summary`` names the paths outside the workspace (``outside_items``, M37), the repositories left behind
+(``repos_left``) and an unknown context window on the target (``context_unknown``, M12).
 
 Plan items carry their facts in fields, not in reason texts (contract K-3): ``PlanItem.hermes_kind`` (session file
 kind), ``PlanItem.instruction_files`` (``(rel, sha256)`` of the instruction files inside the item) and
@@ -100,6 +117,8 @@ CONFIRM_OUTSIDE = "outside_workspace"
 CONFIRM_INSTRUCTIONS = "instruction_files"
 CONFIRM_WORKSPACE_EXCLUDED = "workspace_excluded"
 CONFIRM_CONTEXT = "context_over"
+CONFIRM_WORKSPACE_DIFFERS = "workspace_differs"
+CONFIRM_REPOS_LEFT = "repos_left"
 CONFIRM_LETTERS: dict[str, str] = {
     CONFIRM_PROPOSED: "a",
     CONFIRM_CONFLICT: "b",
@@ -110,13 +129,21 @@ CONFIRM_LETTERS: dict[str, str] = {
     CONFIRM_INSTRUCTIONS: "g",
     CONFIRM_WORKSPACE_EXCLUDED: "h",
     CONFIRM_CONTEXT: "i",
+    CONFIRM_WORKSPACE_DIFFERS: "j",
+    CONFIRM_REPOS_LEFT: "k",
 }
-"""Confirmation reasons of DESIGN §14.1 (a)–(g) plus (h) ``workspace_excluded`` (R30) and (i) ``context_over``
-(R32: the session is larger than the target model's context window; before G‴ part of (e)) and their letters.
+"""Confirmation reasons of DESIGN §14.1 (a)–(g) plus (h) ``workspace_excluded`` (R30), (i) ``context_over``
+(R32: the session is larger than the target model's context window; before G‴ part of (e)) and (j)
+``workspace_differs`` (R36/R36a: the workspace holds more than the session's working folder, which holds no tracked
+file of it) and (k) ``repos_left`` (H15, in R30's form: a repository inside a transferred git workspace — an initialised
+submodule or a clone in the work tree — stays here with its files and changes) and their letters.
 ``None`` (no answer) cancels the job for every reason except ``proposed`` alone, which only excludes the proposals
 (BX L5)."""
-YES_EXEMPT: frozenset[str] = frozenset({CONFIRM_WORKSPACE_EXCLUDED, CONFIRM_CONTEXT})
-"""Reasons a blanket yes (``--yes``, ``Options.yes``) never confirms (R30, R32, like suspected secrets under R25):
+YES_EXEMPT: frozenset[str] = frozenset(
+    {CONFIRM_WORKSPACE_EXCLUDED, CONFIRM_CONTEXT, CONFIRM_WORKSPACE_DIFFERS, CONFIRM_REPOS_LEFT}
+)
+"""Reasons a blanket yes (``--yes``, ``Options.yes``) never confirms (R30, R32, R36, H15 in R30's form, like suspected
+secrets under R25):
 the conductor asks for them even with ``--yes``; without an answer the job ends with nothing locked."""
 
 CHOICES = ("yes", "no_proposed")
@@ -129,7 +156,7 @@ UNVERIFIED = "unverified"
 or revoked key, or the remote source of a pull (DESIGN §8.7 reason (g), SEC 4.3; a continuation refuses such an
 origin with this reason, R22). Surfaces import it with the reason codes (X03)."""
 REASON_CODES: tuple[str, ...] = tuple(CONFIRM_LETTERS)
-"""Every confirmation reason code, in letter order (a)–(i) (X03)."""
+"""Every confirmation reason code, in letter order (a)–(k) (X03)."""
 MAX_REFUSED_IDS = 256
 MAX_WARNINGS = 32
 
@@ -141,6 +168,23 @@ WHY_HOME = "home directory is not transferred as a whole"
 WHY_CONTAINS_WORKSPACE = "contains the workspace"
 WHY_DENIED_SUGGESTION = "suggested but denied by policy"
 WHY_PEER_SECRET = "include_secret from peer ignored"  # noqa: S105 - reason text, not a secret
+WHY_NOT_DIRECTORY = "not a directory"
+"""Why the session's cwd stays here when it exists but is no directory (a file; H14). A link whose target is gone is
+``missing``."""
+WHY_SUBMODULE = "submodule: its files and changes stay here (the repository records only its commit)"
+WHY_NESTED_REPO = "repository inside the workspace: its files stay here"
+"""Why a repository inside a transferred git workspace stays here (H15): an initialised submodule (a gitlink of the
+workspace's index) or a clone in its work tree. ``repos_left`` lists both."""
+SIZE_UNKNOWN = "size unknown: the git history could not be measured"
+"""Exact reason element of a git item whose object store could not be found (H13): its size counts its untracked
+files only; reason (c) ``large`` asks."""
+PRESEND_PATHS_MAX = 10
+"""Paths ``presend_summary`` lists per list (``outside_items``, ``repos_left``); the rest is counted (``*_more``)."""
+MAX_INNER_REPOS = 256
+"""Submodules named per git item (``WHY_SUBMODULE``)."""
+MAX_OBJECT_ENTRIES = 2_000_000
+"""Entries of a git object store counted for its size (loose objects, packs, alternates); beyond it the size is a lower
+bound and says so."""
 NON_CANONICAL_PATH = "non_canonical_path"
 """``PolicyDenied`` reason of a remote addition whose path is not its realpath (a link on the way; V29)."""
 _WHY_BY_REASON = {
@@ -197,6 +241,9 @@ class _Draft:
     candidate: int | None = None
     denied: bool = False
     hermes_kind: str | None = None
+    cwd_bytes: int | None = None
+    cwd_tracked: bool | None = None
+    inner: bool = False
 
 
 @dataclass(frozen=True)
@@ -226,6 +273,9 @@ def _why(verdict: Verdict) -> str:
     return _WHY_BY_REASON.get(str(verdict.reason), str(verdict.reason))
 
 
+_SUSPECTED_LABELS = frozenset({"suspected secret: proposed only", "not checked for tokens: proposed only"})
+
+
 def _clean(text: object, cap: int = 120) -> str:
     out = "".join(ch if ch.isprintable() else " " for ch in str(text or ""))
     return " ".join(out.split())[:cap]
@@ -245,6 +295,8 @@ class _Builder:
         self.by_path: dict[str, _Draft] = {}
         self.not_transferred: list[NotTransferred] = []
         self.home = _real(str(cfg.home))
+        own = [str(p) for p in (cfg.hermes_home, cfg.hermes_root) if p is not None and str(p) != ""]
+        self.homes = collector.HomeRule.for_host(str(cfg.home), cfg, own_hermes=own, real=_real)
 
     # -- bookkeeping -------------------------------------------------------------------------------------
     def refuse(self, path: str, why: str) -> None:
@@ -281,8 +333,8 @@ class _Builder:
         )
 
     def home_like(self, path: str) -> bool:
-        real = _real(path)
-        return real == os.path.dirname(real) or _under(self.home, real, self.ci)
+        """A filesystem root, a home (own or any account's, M35) or an ancestor of one (``collector.HomeRule``)."""
+        return self.homes(_real(path))
 
     def default_include(self, weight: Weight) -> Include:
         mode = self.options.extra_paths
@@ -314,25 +366,73 @@ class _Builder:
         verdict = check_extra(p, self.cfg, explicit=explicit, redact=self.redact)
         return verdict, verdict.reason == "suspected_secret"
 
+    def released(self, *spellings: str) -> bool:
+        """One of ``spellings`` was named with a local ``--include-secret`` (``cfg.include_secret``, X07)."""
+        return bool({_norm(p) for p in spellings if p} & set(self.cfg.include_secret))
+
     def deny(self, d: _Draft, why: str) -> None:
         """Policy refusal: the draft leaves the plan (only the primary stays, as ``no``) and is named."""
         d.include = Include.NO
         d.denied = True
         self.refuse(d.path, why)
 
-    def over_limit(self, d: _Draft) -> None:
-        """Size refusal: the item stays visible as ``no`` (``--include`` lifts the limit) and is named."""
+    def over_limit(self, d: _Draft, limit: str | None = None) -> None:
+        """Size refusal: the item stays visible as ``no`` and is named (``limit`` says which limit; ``--include`` lifts
+        the file limit, ``--max-total-gb`` the byte cap of a tree)."""
         d.include = Include.NO
-        d.reasons.append(f"over the size limit ({WHY_TOO_LARGE})")
+        d.reasons.append(
+            f"over the size limit ({WHY_TOO_LARGE}): {limit}" if limit else f"over the size limit ({WHY_TOO_LARGE})"
+        )
         self.refuse(d.path, WHY_TOO_LARGE)
+
+    def report_inner_repos(self) -> None:
+        """H15 (R30 form): every repository inside a transferred git item stays here — each initialised submodule of
+        the item (a gitlink of ``GitInfo.submodules`` whose folder holds a ``.git`` entry) and each repository the
+        collector found the session working in (``inner`` drafts) — named as ``WHY_SUBMODULE`` or
+        ``WHY_NESTED_REPO``. A repository inside an item that does not travel is not named on its own."""
+        repos = [d for d in self.drafts if d.kind is ItemKind.GIT_REPO and not d.denied and d.include is not Include.NO]
+        subs: dict[str, set[str]] = {}
+        for r in repos:
+            found: set[str] = set()
+            for rel in (r.git.submodules if r.git is not None else ())[:MAX_INNER_REPOS]:
+                parts = [p for p in str(rel).split("/") if p and p not in {".", ".."}]
+                if not parts:
+                    continue
+                path = os.path.join(r.path, *parts)
+                if os.path.lexists(os.path.join(path, ".git")):
+                    found.add(path)
+            subs[r.path] = found
+            for path in sorted(found):
+                self.refuse(path, WHY_SUBMODULE)
+        for d in self.drafts:
+            if not d.inner:
+                continue
+            owner = next((r for r in repos if r.path != d.path and _under(d.path, r.path, self.ci)), None)
+            if owner is not None:
+                self.refuse(d.path, WHY_SUBMODULE if d.path in subs.get(owner.path, ()) else WHY_NESTED_REPO)
 
     def evaluate(self, d: _Draft) -> None:
         """Apply the policy to one draft; a refusal sets ``no`` and names it."""
         if d.kind is ItemKind.HERMES_FILE:
             self._evaluate_hermes(d)
             return
+        if d.role is ItemRole.PRIMARY and collector.CWD_NOT_DIR_REASON in d.reasons:
+            # H14: the cwd exists but is no directory — named, so R30 (h) asks
+            self.deny(d, "missing" if not os.path.exists(d.path) else WHY_NOT_DIRECTORY)
+            return
         if d.role is ItemRole.PRIMARY and self.home_like(d.path):
             self.deny(d, WHY_HOME_WORKSPACE)
+            return
+        if d.role is not ItemRole.PRIMARY and collector.INNER_REPO_REASON in d.reasons:
+            # H15: never an item; named by ``report_inner_repos`` once the workspace's submodules are known
+            d.include = Include.NO
+            d.denied = d.inner = True
+            return
+        if self.homes.in_foreign_hermes(_real(d.path)) or self.homes.in_foreign_hermes(_norm(d.path)):
+            self.deny(d, "hermes")  # M35: another account's Hermes home is never a source
+            return
+        if d.kind is ItemKind.EXTRA_DIR and d.origin is Origin.TRANSCRIPT and self.contains_tree(d.path):
+            self.deny(d, WHY_CONTAINS_WORKSPACE)  # M36: a folder around a repository of the plan is no extra
             return
         if d.kind in {ItemKind.GIT_REPO, ItemKind.FILE_TREE}:
             item_root = Path(d.path) if d.role is ItemRole.PRIMARY else None
@@ -389,6 +489,11 @@ class _Builder:
         if existing is not None:
             existing.reasons.append(f"{label}: {_clean(reason)}" if reason else label)
             if origin is Origin.USER and not existing.denied:
+                if existing.suspected and not self.released(given, real):
+                    return None  # L10/R25: --include names it, only --include-secret releases a suspected secret
+                if existing.suspected:
+                    existing.suspected = False
+                    existing.reasons = [r for r in existing.reasons if r not in _SUSPECTED_LABELS]
                 existing.include = Include.YES
             return None
         owner = self.covering(real)
@@ -410,7 +515,9 @@ class _Builder:
             return None
         is_dir = os.path.isdir(real)
         auto = origin is Origin.MODEL and self.options.refine_auto_include and not suspected
-        include = Include.YES if origin is Origin.USER or auto else Include.PROPOSED
+        # L10/R25: a user's --include confirms the path, but a suspected secret stays a proposal ("yes" never takes
+        # it); only --include-secret (``cfg.include_secret``, which skips the suspicion) releases it
+        include = Include.YES if (origin is Origin.USER and not suspected) or auto else Include.PROPOSED
         reasons = [f"{label}: {_clean(reason)}" if reason else label]
         if suspected:
             reasons.append(
@@ -472,8 +579,12 @@ class _Builder:
             except Exception as exc:  # the pack step re-reads the repository with git itself
                 d.reasons.append(f"git info unavailable ({type(exc).__name__})")
                 d.git = None
-            objects, _complete = _tree_size(Path(d.path) / ".git" / "objects", None, self.cfg.max_total_bytes, 200_000)
-            d.size = objects + (d.git.untracked_bytes if d.git else 0)
+            objects, complete = git_object_bytes(Path(d.path))
+            d.size = (objects or 0) + (d.git.untracked_bytes if d.git else 0)
+            if objects is None and (d.git is None or d.git.head is not None):
+                d.reasons.append(SIZE_UNKNOWN)  # H13: never a silent 0 for a repository with history
+            elif not complete:
+                d.reasons.append(f"git history at least {_size_text(objects or 0)} (not counted to the end)")
             if d.git is not None:
                 if d.git.untracked_count > self.cfg.max_untracked_files:
                     d.reasons.append(
@@ -490,10 +601,18 @@ class _Builder:
                 matcher = IgnoreMatcher.for_tree(Path(d.path), self.options.extra_ignore)
             except Exception:
                 matcher = None
-            size, complete = _tree_size(Path(d.path), matcher, cap, self.cfg.max_files)
+            size, over = _tree_count(Path(d.path), matcher, cap, self.cfg.max_files)
             d.size = size
-            if not complete and d.kind is ItemKind.EXTRA_DIR:
-                self.over_limit(d)
+            if over is not None:
+                # H12: a tree beyond max_files or the byte cap is left out and named here — never packed after the lock
+                # (``filetree.scan`` refuses more than max_files) and never sized with a capped count
+                setting = "max_extra_dir_mb" if cap != self.cfg.max_total_bytes else "max_total_gb"
+                limit = (
+                    f"more than {self.cfg.max_files} entries (max_files)"
+                    if over == "entries"
+                    else f"more than {_size_text(cap)} ({setting})"
+                )
+                self.over_limit(d, limit)
         elif d.kind is ItemKind.EXTRA_FILE:
             try:
                 d.size = os.lstat(d.path).st_size
@@ -501,11 +620,33 @@ class _Builder:
                 d.size = 0
         if d.kind in {ItemKind.GIT_REPO, ItemKind.FILE_TREE} and d.include is not Include.NO:
             d.instructions = _scan_instructions(d.path, d.rel_cwd)
+        if d.role is ItemRole.PRIMARY and d.rel_cwd:
+            d.cwd_bytes = self.folder_size(Path(d.path) / d.rel_cwd)
+
+    def folder_size(self, folder: Path) -> int:
+        """Bytes of the regular files below ``folder`` as a file tree would count them (ignore rules found below it,
+        ``extra_ignore``, built-ins; capped like a workspace) — the session's working folder inside a larger
+        workspace (R36: ``PlanItem.cwd_bytes``)."""
+        try:
+            matcher = IgnoreMatcher.for_tree(folder, self.options.extra_ignore)
+        except Exception:  # unreadable ignore rules: count everything
+            matcher = None
+        size, _over = _tree_count(folder, matcher, self.cfg.max_total_bytes, self.cfg.max_files)
+        return size
 
 
-def _tree_size(root: Path, matcher: IgnoreMatcher | None, cap_bytes: int, max_entries: int) -> tuple[int, bool]:
-    """Bytes of regular files below ``root`` (sorted walk, links not followed, ignored entries skipped);
-    ``complete`` is False when ``cap_bytes`` or ``max_entries`` was exceeded."""
+def _size_text(n: int) -> str:
+    if n >= 1024**3:
+        return f"{n / 1024**3:.1f} GiB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.1f} MiB"
+    return f"{n} bytes"
+
+
+def _tree_count(root: Path, matcher: IgnoreMatcher | None, cap_bytes: int, max_entries: int) -> tuple[int, str | None]:
+    """``(bytes, over)``: bytes of the regular files below ``root`` (sorted walk, links not followed, ignored entries
+    skipped) and which limit stopped the count — ``"entries"`` (more than ``max_entries``), ``"bytes"`` (more than
+    ``cap_bytes``) or None (complete: the bytes are the size)."""
     total, entries = 0, 0
     stack = [("", root)]
     while stack:
@@ -526,7 +667,7 @@ def _tree_size(root: Path, matcher: IgnoreMatcher | None, cap_bytes: int, max_en
                 continue
             entries += 1
             if entries > max_entries:
-                return total, False
+                return total, "entries"
             if is_dir:
                 stack.append((child_rel, Path(entry.path)))
             elif is_file:
@@ -535,8 +676,100 @@ def _tree_size(root: Path, matcher: IgnoreMatcher | None, cap_bytes: int, max_en
                 except OSError:
                     continue
                 if total > cap_bytes:
-                    return total, False
-    return total, True
+                    return total, "bytes"
+    return total, None
+
+
+def _git_text(path: Path, cap: int = 4096) -> str | None:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(cap).decode("utf-8", errors="surrogateescape").strip()
+    except OSError:
+        return None
+
+
+def _alternate_line(line: str, base: Path) -> Path | None:
+    """One ``objects/info/alternates`` line: a path absolute or relative to the objects folder; C-quoted when it starts
+    with ``"`` (``git`` writes it so for unusual names); comments and blanks are no path."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith('"') and line.endswith('"') and len(line) >= 2:
+        try:
+            line = line[1:-1].encode("latin-1", errors="surrogateescape").decode("unicode_escape")
+        except (UnicodeError, ValueError):
+            return None
+    path = Path(line)
+    return Path(os.path.normpath(path if path.is_absolute() else base / path))
+
+
+def git_object_dirs(root: Path) -> list[Path] | None:
+    """The object folders a fresh pack of the work tree at ``root`` reads (H13): the repository's common git dir's
+    ``objects`` — ``.git`` a folder, or a gitfile (``gitdir: …``: linked worktree, submodule, ``--separate-git-dir``)
+    whose git dir names its common dir in ``commondir`` — plus its alternates (``objects/info/alternates``, followed
+    five levels deep as git does, each folder once). None when no object folder can be found."""
+    dot = Path(root) / ".git"
+    try:
+        st = os.stat(dot)
+    except OSError:
+        return None
+    if stat.S_ISDIR(st.st_mode):
+        gitdir = dot
+    elif stat.S_ISREG(st.st_mode):
+        text = _git_text(dot) or ""
+        first = text.splitlines()[0] if text else ""
+        if not first.startswith("gitdir:"):
+            return None
+        target = Path(first[len("gitdir:") :].strip())
+        gitdir = target if target.is_absolute() else Path(root) / target
+    else:
+        return None
+    common = gitdir
+    pointer = _git_text(gitdir / "commondir")
+    if pointer:
+        target = Path(pointer.splitlines()[0].strip())
+        common = target if target.is_absolute() else gitdir / target
+    first_objects = Path(os.path.normpath(common / "objects"))
+    if not first_objects.is_dir():
+        return None
+    out: list[Path] = []
+    seen: set[str] = set()
+    level = [first_objects]
+    for _depth in range(6):
+        following: list[Path] = []
+        for objects in level:
+            key = _real(str(objects))
+            if key in seen or not objects.is_dir():
+                continue
+            seen.add(key)
+            out.append(objects)
+            for line in (_git_text(objects / "info" / "alternates", 64 * 1024) or "").splitlines()[:64]:
+                alt = _alternate_line(line, objects)
+                if alt is not None:
+                    following.append(alt)
+        level = following
+        if not level:
+            break
+    return out
+
+
+def git_object_bytes(root: Path) -> tuple[int | None, bool]:
+    """``(bytes, complete)`` of the git objects a fresh pack of the work tree at ``root`` draws on (``git_object_dirs``:
+    loose objects and packs of the common dir and its alternates; DESIGN §8.2 step 6 names ``git count-objects -v``,
+    which counts the same files). ``(None, False)`` when the object store cannot be found (H13: unknown, never 0);
+    ``complete`` is False when more than ``MAX_OBJECT_ENTRIES`` entries were seen (the bytes are a lower bound)."""
+    dirs = git_object_dirs(root)
+    if dirs is None:
+        return None, False
+    total, complete = 0, True
+    budget = MAX_OBJECT_ENTRIES
+    for objects in dirs:
+        size, over = _tree_count(objects, None, 1 << 62, budget)
+        total += size
+        if over is not None:
+            complete = False
+            break
+    return total, complete
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -630,6 +863,8 @@ def _to_item(d: _Draft, suggest_dest: Callable[[str], str | None] | None) -> Pla
         rel_cwd=d.rel_cwd,
         hermes_kind=d.hermes_kind if d.kind is ItemKind.HERMES_FILE else None,
         instruction_files=tuple(d.instructions),
+        cwd_bytes=d.cwd_bytes if d.role is ItemRole.PRIMARY and d.rel_cwd else None,
+        cwd_tracked=d.cwd_tracked if d.role is ItemRole.PRIMARY and d.rel_cwd else None,
     )
 
 
@@ -654,6 +889,7 @@ def _draft_from_candidate(idx: int, c: Candidate, options: Options) -> _Draft:
         weight=c.weight,
         reasons=reasons,
         rel_cwd=collector.rel_cwd(c.reasons) if role is ItemRole.PRIMARY else None,
+        cwd_tracked=collector.cwd_tracked(c.reasons) if role is ItemRole.PRIMARY else None,
         candidate=idx,
         hermes_kind=collector.hermes_kind(c.reasons) if c.kind is ItemKind.HERMES_FILE else None,
     )
@@ -788,6 +1024,7 @@ def build_plan(
 
     for d in b.drafts:
         b.finish(d)
+    b.report_inner_repos()
     kept = [d for d in b.drafts if not d.denied or d.role is ItemRole.PRIMARY]
     _assign_ids(kept)
     items = tuple(_to_item(d, suggest_dest) for d in kept)
@@ -1132,13 +1369,104 @@ def workspace_excluded(final_or_plan: FinalPlan | ResourcePlan) -> dict | None:
     return {"path": primary.source_path, "reason": _EXCLUDED_REASON.get(entry.why, "other"), "why": entry.why}
 
 
+def _join_rel(root: str, rel: str) -> str:
+    """``root`` joined with the ``/``-separated ``rel`` in the separator of ``root`` (a Windows source keeps ``\\``)."""
+    sep = "\\" if re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", root) else "/"
+    return root.rstrip("/\\") + sep + rel.replace("/", sep)
+
+
+def _primary_item(final_or_plan: FinalPlan | ResourcePlan) -> PlanItem | None:
+    rp = final_or_plan.plan if isinstance(final_or_plan, FinalPlan) else final_or_plan
+    return next((i for i in rp.items if i.role is ItemRole.PRIMARY and i.origin is Origin.CWD), None)
+
+
+def workspace_differs(final_or_plan: FinalPlan | ResourcePlan) -> bool:
+    """Reason (j) (R36/R36a): the workspace travels and holds more than the session's working folder, and that folder
+    holds no file the repository tracks — ``PlanItem.cwd_tracked`` False or unknown (None: a source before R36a, or git
+    could not tell). Only an explicit True (a tracked folder of the user's own repository) spares the question."""
+    ws = workspace(final_or_plan)
+    if ws is None or not ws["differs"]:
+        return False
+    primary = _primary_item(final_or_plan)
+    return primary is None or primary.cwd_tracked is not True
+
+
+def workspace(final_or_plan: FinalPlan | ResourcePlan) -> dict | None:
+    """The session's workspace against its working folder (R36, L3-F19), or None when there is no working-folder item
+    or it does not travel (include ``no``: R30's ``workspace_excluded``, ``--no-workspace``).
+
+    ``{"path", "bytes", "cwd", "cwd_bytes", "differs"}`` of the primary item (role ``primary``, origin ``cwd``):
+    ``path``/``bytes`` are its root and size estimate; ``cwd`` is the session's folder (the root joined with
+    ``rel_cwd``); ``cwd_bytes`` the folder's size — ``bytes`` when the folder is the root, else what the source
+    measured (``PlanItem.cwd_bytes``; None from a source before R36); ``differs`` is True when the workspace holds more
+    than the folder (the repository around it, ``rel_cwd`` set)."""
+    primary = _primary_item(final_or_plan)
+    if primary is None or primary.include is Include.NO:
+        return None
+    rel = primary.rel_cwd if isinstance(primary.rel_cwd, str) else ""
+    measured = primary.cwd_bytes
+    if not (isinstance(measured, int) and not isinstance(measured, bool) and measured >= 0):
+        measured = None
+    return {
+        "path": primary.source_path,
+        "bytes": int(primary.size_estimate),
+        "cwd": _join_rel(primary.source_path, rel) if rel else primary.source_path,
+        "cwd_bytes": measured if rel else int(primary.size_estimate),
+        "differs": bool(rel),
+    }
+
+
 def yes_exempt(reasons: Iterable[str]) -> list[str]:
-    """The reasons among ``reasons`` that a blanket yes does not confirm (``YES_EXEMPT``, R30), in their order."""
+    """The reasons among ``reasons`` that a blanket yes does not confirm (``YES_EXEMPT``, R30, R32, R36), in their
+    order."""
     return [r for r in reasons if r in YES_EXEMPT]
 
 
 def _outside_workspace(final: FinalPlan) -> list[str]:
     return [i.source_path for i in _included(final) if i.role in {ItemRole.SECONDARY, ItemRole.EXTRA}]
+
+
+def outside_items(final: FinalPlan, limit: int = PRESEND_PATHS_MAX) -> tuple[list[dict], int]:
+    """M37: the included items outside the primary workspace (secondary repositories, extra files and folders) the
+    summary before sending names with path and size — ``({"item_id", "kind", "role", "path", "size"}, …)`` largest
+    first (then by path), at most ``limit`` — and how many more there are."""
+    rows = [
+        {
+            "item_id": i.item_id,
+            "kind": i.kind.value,
+            "role": i.role.value,
+            "path": i.source_path,
+            "size": i.size_estimate,
+        }
+        for i in _included(final)
+        if i.role in {ItemRole.SECONDARY, ItemRole.EXTRA}
+    ]
+    rows.sort(key=lambda r: (-int(r["size"]), r["path"]))
+    return rows[: max(0, limit)], max(0, len(rows) - max(0, limit))
+
+
+def _path_parts(path: str) -> list[str]:
+    return [p for p in path.replace("\\", "/").split("/") if p]
+
+
+def _inside_text(path: str, root: str) -> bool:
+    """``path`` lies strictly below ``root`` (plain text, either separator: the plan may come from another OS)."""
+    p, r = _path_parts(path), _path_parts(root)
+    return len(p) > len(r) and p[: len(r)] == r
+
+
+def repos_left(final_or_plan: FinalPlan | ResourcePlan) -> list[dict]:
+    """H15: the repositories inside a git item that travels (not ``no``) which stay here — ``{"path", "kind"}`` with
+    ``kind`` ``submodule`` (``WHY_SUBMODULE``) or ``nested`` (``WHY_NESTED_REPO``), in path order."""
+    rp = final_or_plan.plan if isinstance(final_or_plan, FinalPlan) else final_or_plan
+    roots = [i.source_path for i in rp.items if i.kind is ItemKind.GIT_REPO and i.include is not Include.NO]
+    kinds = {WHY_SUBMODULE: "submodule", WHY_NESTED_REPO: "nested"}
+    out = [
+        {"path": n.path, "kind": kinds[n.why]}
+        for n in rp.not_transferred
+        if n.why in kinds and any(_inside_text(n.path, r) for r in roots)
+    ]
+    return sorted(out, key=lambda e: e["path"])
 
 
 def _denied_tracked(final: FinalPlan) -> list[str]:
@@ -1201,9 +1529,16 @@ PRESEND_KEYS = (
     "offline",
     "workspace_excluded",
     "context_over",
+    "workspace",
+    "outside_items",
+    "outside_more",
+    "repos_left",
+    "repos_left_more",
+    "context_unknown",
 )
-"""The keys of ``presend_summary`` the surfaces read (W125, R30 ``workspace_excluded``, R32 ``context_over``);
-``item_list``, ``items`` and ``extras_outside_workspace`` come on top."""
+"""The keys of ``presend_summary`` the surfaces read (W125, R30 ``workspace_excluded``, R32 ``context_over``, R36
+``workspace``, M37 ``outside_items``/``outside_more``, H15 ``repos_left``/``repos_left_more``, M12
+``context_unknown``); ``item_list``, ``items`` and ``extras_outside_workspace`` come on top."""
 
 
 def presend_summary(
@@ -1230,12 +1565,23 @@ def presend_summary(
       R30) as ``{"path", "reason", "why"}``, else None;
     * ``context_over``: ``{"tokens", "context_length", "model"}`` when the session is larger than the target model's
       window (``context_over``, R32; ``target_facts``/``source_facts`` additive as in ``confirmation_reasons``), else
-      None.
+      None;
+    * ``workspace``: the session's workspace against its working folder (``workspace``, R36) as ``{"path", "bytes",
+      "cwd", "cwd_bytes", "differs"}``, None when the folder does not travel;
+    * ``outside_items``/``outside_more`` (M37): the included items outside the workspace with path and size
+      (``outside_items``: at most ``PRESEND_PATHS_MAX``, largest first) and how many more;
+    * ``repos_left``/``repos_left_more`` (H15): repositories inside a transferred git workspace that stay here
+      (``repos_left``: ``{"path", "kind"}``, at most ``PRESEND_PATHS_MAX``) and how many more;
+    * ``context_unknown`` (M12): ``{"tokens", "model"}`` when the facts at hand name a target model whose context
+      window is unknown (no ``context_length`` there), so R32 cannot be checked; None when the window is known or
+      no target is known yet.
 
     ``items`` and ``extras_outside_workspace`` are the layer-1 names of ``items_count`` and ``outside_workspace``,
     kept with the same values for readers that have not moved yet."""
     included = _included(final)
     outside = _outside_workspace(final)
+    shown, more = outside_items(final)
+    left = repos_left(final)
     if instructions is None:
         listed = [
             {"item_id": i.item_id, "rel": rel, "sha256": sha} for i in included for rel, sha in i.instruction_files
@@ -1254,6 +1600,12 @@ def presend_summary(
         "offline": _model_offline(final.model_change),
         "workspace_excluded": workspace_excluded(final),
         "context_over": context_over(final, target_facts=target_facts, source_facts=source_facts),
+        "workspace": workspace(final),
+        "outside_items": shown,
+        "outside_more": more,
+        "repos_left": left[:PRESEND_PATHS_MAX],
+        "repos_left_more": max(0, len(left) - PRESEND_PATHS_MAX),
+        "context_unknown": context_unknown(final, target_facts=target_facts, source_facts=source_facts),
         "item_list": [
             {"item_id": i.item_id, "kind": i.kind.value, "path": i.source_path, "size": i.size_estimate}
             for i in included
@@ -1359,6 +1711,26 @@ def context_over(
     return {"tokens": tokens, "context_length": window, "model": _clean(name, 128) if isinstance(name, str) else None}
 
 
+def context_unknown(
+    final: FinalPlan, *, target_facts: EnvFacts | None = None, source_facts: EnvFacts | None = None
+) -> dict | None:
+    """M12 (named limit): ``{"tokens", "model"}`` when a target model is known — a model change (X04) or the target's
+    facts — but its context window is not (``target_window`` None: no ``model.context_length`` in the target's
+    ``config.yaml``, or a kept model under another name), so R32's check cannot run and nothing is asked; None when the
+    window is known, the session is empty, or no target is known yet (no facts, no model change)."""
+    if not isinstance(final.model_change, dict) and target_facts is None:
+        return None
+    if target_window(final.model_change, target_facts=target_facts, source_facts=source_facts) is not None:
+        return None
+    tokens = context_tokens_of(final)
+    if tokens <= 0:
+        return None
+    to = _model_to(final.model_change)
+    host = getattr(target_facts, "host", None)
+    name = to.get("model") if to is not None else getattr(host, "model", None)
+    return {"tokens": tokens, "model": _clean(name, 128) if isinstance(name, str) and name else None}
+
+
 def confirmation_reasons(
     final: FinalPlan,
     options: Options,
@@ -1383,13 +1755,20 @@ def confirmation_reasons(
     and the user did not say ``--no-workspace`` (``options.hints.no_workspace``). Reason (i) ``context_over`` (R32):
     the session's active context is larger than the target model's window (``context_over``; ``target_facts`` and
     ``source_facts`` are additive — the conductor's facts after FACTS; without them only a model change's
-    ``to.context_length`` is known). A blanket yes never confirms (h) or (i) (``YES_EXEMPT``)."""
+    ``to.context_length`` is known). Reason (j) ``workspace_differs`` (R36/R36a, ``workspace_differs``): the workspace
+    holds more than the session's working folder (the repository around it) and that folder holds no file the
+    repository tracks, or the source could not tell. Reason (k) ``repos_left`` (H15, R30 form): a repository inside a
+    transferred git workspace stays here (``repos_left``). Reason (c) also comes for an included git item whose
+    history could not be measured (``SIZE_UNKNOWN``, H13). A blanket yes never confirms (h), (i), (j) or (k)
+    (``YES_EXEMPT``)."""
     reasons = []
     if any(i.include is Include.PROPOSED for i in final.plan.items):
         reasons.append(CONFIRM_PROPOSED)
     if any(d.conflict is not None for d in final.decisions):
         reasons.append(CONFIRM_CONFLICT)
-    if sum(i.size_estimate for i in _included(final)) > options.confirm_above_bytes:
+    included = _included(final)
+    unknown_size = any(SIZE_UNKNOWN in i.reasons for i in included)  # H13: an unmeasured history may be large
+    if sum(i.size_estimate for i in included) > options.confirm_above_bytes or unknown_size:
         reasons.append(CONFIRM_LARGE)
     if cfg is not None and cfg.include_secret:
         reasons.append(CONFIRM_SECRET)
@@ -1406,6 +1785,10 @@ def confirmation_reasons(
         reasons.append(CONFIRM_WORKSPACE_EXCLUDED)
     if context_over(final, target_facts=target_facts, source_facts=source_facts) is not None:
         reasons.append(CONFIRM_CONTEXT)
+    if workspace_differs(final):
+        reasons.append(CONFIRM_WORKSPACE_DIFFERS)
+    if repos_left(final):
+        reasons.append(CONFIRM_REPOS_LEFT)
     return reasons
 
 

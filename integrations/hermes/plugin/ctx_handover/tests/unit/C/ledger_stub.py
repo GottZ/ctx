@@ -458,7 +458,7 @@ class LedgerStub:
         with self.tx() as conn:
             conn.execute(
                 "INSERT INTO job_quota(job_id, role, quota, used) VALUES(?,?,?,0) ON CONFLICT(job_id, role)"
-                " DO UPDATE SET quota=MAX(job_quota.quota, excluded.quota)",
+                " DO UPDATE SET quota=MAX(job_quota.used, excluded.quota)",
                 (job_id, str(role), max(0, int(quota_bytes))),
             )
 

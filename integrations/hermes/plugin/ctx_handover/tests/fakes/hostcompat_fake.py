@@ -21,8 +21,9 @@ State is plain attributes a test may change:
 ``grant_mcp_server`` writes into ``config["plugins"]["entries"]["ctx_handover"]["mcp_allowlist"]``, so a later
 ``load_config`` sees the grant as the real one does.
 
-Paths come from the isolated test home: ``hermes_home`` = ``HERMES_HOME`` = ``hermes_root`` (one profile),
-the document cache ``<hermes_home>/cache/documents``, the plugin data dir ``<hermes_home>/plugin-data/ctx_handover``.
+Paths come from the isolated test home: ``effective_home()`` = ``user_home`` = ``HOME``, ``hermes_home`` =
+``HERMES_HOME`` = ``hermes_root`` (one profile), the document cache ``<hermes_home>/cache/documents``, the plugin
+data dir ``<hermes_home>/plugin-data/ctx_handover``.
 ``session_db()`` opens a real ``hermes_state.SessionDB`` at ``<hermes_home>/state.db`` when Hermes is importable.
 ``redact`` uses the core's ``redact_sensitive_text(force=True)`` when importable, else a small offline stand-in.
 """
@@ -107,6 +108,11 @@ class FakeHost:
     def state_db_path(self) -> Path:
         self._record("state_db_path")
         return self.hermes_home / "state.db"
+
+    def effective_home(self) -> Path:
+        """The isolated test ``HOME`` (``user_home``): the home ``~`` means for the profile (L3-F20)."""
+        self._record("effective_home")
+        return self.user_home
 
     def hermes_paths(self) -> HermesPaths:
         self._record("hermes_paths")

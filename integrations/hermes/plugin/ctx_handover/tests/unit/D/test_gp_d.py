@@ -287,7 +287,7 @@ def test_gp_cwd_in_hermes_home_is_named_and_needs_an_answer(lay):
     reasons = plan.confirmation_reasons(final, Options(), False)
     assert reasons == [plan.CONFIRM_WORKSPACE_EXCLUDED] == ["workspace_excluded"]
     assert plan.CONFIRM_LETTERS["workspace_excluded"] == "h"
-    assert plan.REASON_CODES[-2] == "workspace_excluded"  # G‴: (i) context_over follows (R32)
+    assert plan.REASON_CODES[7] == "workspace_excluded"  # G‴: (i) context_over follows (R32), (j) R36
     assert plan.yes_exempt(reasons) == ["workspace_excluded"]
     assert plan.yes_exempt(["proposed", "large", "model", "include_secret"]) == []
     confirmed = plan.apply_choice(final, "yes")  # the excluded workspace never becomes "yes"
@@ -351,7 +351,9 @@ def test_gp_reserved_directory_is_a_source(lay):
     paths = {c.path: c for c in cands}
     assert paths[os.path.realpath(proj)].origin is Origin.CWD
     assert os.path.realpath(notes) in paths
-    assert os.path.realpath(other) not in paths and os.path.realpath(cache) not in paths
+    for left in (other, cache):  # rv-d M20: named as left behind (``rejected: hermes``), never a source
+        found = paths.get(os.path.realpath(left))
+        assert found is None or collector.rejected_reason(found.reasons) == "hermes", found
     final = _build(lay.cfg(), proj)
     assert final.plan.items[0].include is Include.YES
     assert plan.presend_summary(final)["workspace_excluded"] is None

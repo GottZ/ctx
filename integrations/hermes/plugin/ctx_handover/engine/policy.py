@@ -11,11 +11,16 @@ lifts the Hermes root, Hermes credential stores or system paths (R19).
 Target side (I5, R19): a write lands only under ``allow_roots`` (or at a path this host recorded itself or the
 local user typed) and never on the target denylist: the Hermes root and every profile, the plugin data dir,
 credential directories, shell/login startup files, autostart locations, ``~/.local/bin``, ``~/bin``, git/ssh/
-package configuration, every dot entry directly under ``$HOME`` that is not opened by an allow-root — and never
-at ``$HOME`` itself or any ancestor of a denied location (a tree written there would land its entries inside
-one). The one exception for the Hermes home (R29) is the directory the plugin reserves there,
-``<HERMES_HOME>/handover-workspaces`` (``paths.HERMES_WORKSPACES_DIR``) and everything below it — the default
-write root when ``~/hermes-handover`` lies in the Hermes home (``paths.default_workspace_root``).
+package configuration (on Windows targets also the PowerShell profile folders and ``WindowsApps``), every dot entry
+directly under a home that is not opened by an allow-root — and never at a home itself or any ancestor of a denied
+location (a tree written there would land its entries inside one). The home rules hold for **every** home on the
+host, not only the process's ``$HOME``: the homes of the password database, ``/home/<x>``,
+``/Users/<x>``, ``/var/home/<x>``, ``/root``. System configuration, autostart and program places (``/etc``,
+``/usr``, ``/var/spool``, ``/Library`` …; Windows ``Windows``, ``Program Files``, ``ProgramData``) are denied
+as a whole. All of it applies however wide ``allow_roots`` is. The one exception for the Hermes home (R29) is the
+directory the plugin reserves there, ``<HERMES_HOME>/handover-workspaces`` (``paths.HERMES_WORKSPACES_DIR``) and
+everything below it — the default write root when ``~/hermes-handover`` lies in the Hermes home
+(``paths.default_workspace_root``).
 
 Every check looks at the path as given **and** at its ``realpath``; components are compared NFC-normalised and,
 on case-insensitive filesystems, case-folded. No check reads a file before the never-releasable rules passed.
@@ -27,6 +32,7 @@ on case-insensitive filesystems, case-folded. No check reads a file before the n
 from __future__ import annotations
 
 import fnmatch
+import functools
 import os
 import re
 import stat
@@ -43,6 +49,7 @@ from .paths import (
     PlatformRules,
     expand_handover_root,
     expand_root,
+    is_dotgit,
     reject_windows_device_prefix,
     rules_for,
     under_any,
@@ -178,7 +185,65 @@ TARGET_DENY: tuple[str, ...] = (
     ".pip",
     ".config/pip",
 )
-"""Home-relative target denylist (DESIGN §10.4, R19); applies even inside ``allow_roots``."""
+"""Home-relative target denylist (DESIGN §10.4, R19); applies even inside ``allow_roots``, under every home of the
+host (``_homes_of``), to the location itself, everything below it and every ancestor up to the home."""
+
+TARGET_DENY_WINDOWS: tuple[str, ...] = (
+    "Documents/PowerShell",
+    "Documents/WindowsPowerShell",
+    "OneDrive*/Documents/PowerShell",
+    "OneDrive*/Documents/WindowsPowerShell",
+    "AppData/Local/Microsoft/WindowsApps",
+)
+"""Home-relative target denylist of Windows targets in addition to ``TARGET_DENY`` (R19): the profile
+folders of PowerShell 7 and Windows PowerShell 5.1 (run at every PowerShell start), in ``Documents`` and in its
+OneDrive known-folder place (``OneDrive`` or ``OneDrive - <organisation>``), and the per-user folder Windows puts on
+``PATH``. Components may be ``fnmatch`` globs; compared case-insensitively. A localised OneDrive documents folder
+(e.g. ``OneDrive/Dokumente``) is not covered: a glob on that level would deny every direct subfolder of OneDrive
+as a destination (ancestor rule)."""
+
+TARGET_SYSTEM_DENY: tuple[str, ...] = (
+    "etc",
+    "private/etc",
+    "usr",
+    "bin",
+    "sbin",
+    "lib",
+    "lib32",
+    "lib64",
+    "libx32",
+    "boot",
+    "dev",
+    "proc",
+    "sys",
+    "run",
+    "var/run",
+    "var/spool",
+    "var/cron",
+    "var/at",
+    "private/var/at",
+    "Library",
+    "System",
+    "opt/homebrew",
+    "opt/local",
+)
+"""Absolute target denylist of POSIX hosts (component sequences below ``/``; R19 "autostart locations"):
+system configuration (``/etc`` with cron, systemd, ``profile.d``, ``init.d``, XDG autostart, ``ld.so.preload`` …),
+programs and ``PATH`` directories, crontab spools, kernel and runtime trees, macOS ``/Library`` (``LaunchAgents``,
+``LaunchDaemons``) and ``/System``, Homebrew and MacPorts prefixes. The location, everything below it and every
+ancestor are denied, however wide ``allow_roots`` is."""
+
+TARGET_SYSTEM_DENY_WINDOWS: tuple[str, ...] = ("Windows", "Program Files", "Program Files (x86)", "ProgramData")
+"""Absolute target denylist of Windows hosts (components after the drive): the system, program folders
+and ``ProgramData`` (all-users Startup folder, machine-wide tool directories on ``PATH``). The POSIX list does not
+apply there (``C:\\dev`` and ``C:\\bin`` are common workspace roots)."""
+
+HOME_PARENTS: tuple[str, ...] = ("home", "Users", "var/home")
+"""Directories whose children are user homes (Linux, macOS and Windows ``C:\\Users``, Fedora Atomic): a path below
+``<parent>/<x>`` is judged against the home ``<parent>/<x>`` too, and the parent itself is never a destination."""
+
+FIXED_HOMES: tuple[str, ...] = ("root", "var/root", "private/var/root")
+"""Homes of the superuser on Linux and macOS (POSIX hosts only)."""
 
 HERMES_CREDENTIAL_PATHS: tuple[str, ...] = (
     ".anthropic_oauth.json",
@@ -496,6 +561,121 @@ def _system_denied_parts(parts: tuple[str, ...]) -> bool:
         ):
             return True
     return False
+
+
+def _comp_match(actual: str, pattern: str) -> bool:
+    """One folded component against one folded spec component (``fnmatch`` glob when it has ``*?[``)."""
+    if "*" in pattern or "?" in pattern or "[" in pattern:
+        return fnmatch.fnmatchcase(actual, pattern)
+    return actual == pattern
+
+
+def _seq_hits(rel: tuple[str, ...], seqs: Iterable[tuple[str, ...]]) -> bool:
+    """``rel`` is one of ``seqs``, lies below one or is an ancestor of one (the empty ``rel`` is an ancestor of
+    all)."""
+    for seq in seqs:
+        n = min(len(rel), len(seq))
+        if all(_comp_match(rel[i], seq[i]) for i in range(n)):
+            return True
+    return False
+
+
+_TARGET_DENY_SEQS = {ci: tuple(_seq(spec, ci) for spec in TARGET_DENY) for ci in (False, True)}
+_TARGET_DENY_WINDOWS_SEQS = tuple(_seq(spec, True) for spec in TARGET_DENY_WINDOWS)
+_SYSTEM_TARGET_SEQS = {ci: tuple(_seq(spec, ci) for spec in TARGET_SYSTEM_DENY) for ci in (False, True)}
+_SYSTEM_TARGET_WINDOWS_SEQS = tuple(_seq(spec, True) for spec in TARGET_SYSTEM_DENY_WINDOWS)
+_HOME_PARENT_SEQS = tuple(_seq(spec, True) for spec in HOME_PARENTS)
+_ACCOUNT_HOMES_MAX = 65536
+
+
+@functools.lru_cache(maxsize=1)
+def _account_homes() -> tuple[Path, ...]:
+    """Home directories of this host's accounts from the password database (POSIX ``pwd``), as given and resolved,
+    read once per process; empty where there is none (Windows) or it cannot be read. ``/`` and non-absolute entries
+    are skipped — a home of ``/`` would make every path home-relative. Accounts added later in the process's life are
+    still covered when their home lies in a ``HOME_PARENTS`` directory."""
+    try:
+        import pwd
+    except ImportError:
+        return ()
+    try:
+        entries = pwd.getpwall()
+    except (OSError, KeyError):
+        return ()
+    homes: dict[Path, None] = {}
+    for entry in entries[:_ACCOUNT_HOMES_MAX]:
+        text = getattr(entry, "pw_dir", None)
+        if not isinstance(text, str) or not text.startswith("/") or text.startswith("//"):
+            continue
+        for spelling in (os.path.normpath(text), os.path.realpath(text)):
+            if len(PurePath(spelling).parts) >= 2:
+                homes[Path(spelling)] = None
+    return tuple(homes)
+
+
+def _homes_of(path: Path, cfg: PolicyConfig, windows: bool) -> tuple[Path, ...]:
+    """The homes ``path`` is judged against: the process's ``$HOME`` (as given and resolved), every account home
+    (``_account_homes``), the superuser homes (POSIX) and ``<parent>/<x>`` when ``path`` lies below a
+    ``HOME_PARENTS`` directory (in the path's own spelling)."""
+    homes = [Path(cfg.home), Path(os.path.realpath(cfg.home))]
+    if not windows:
+        homes.extend(_account_homes())
+        homes.extend(Path("/", *fixed.split("/")) for fixed in FIXED_HOMES)
+    pure = PurePath(path)
+    folded = _parts_abs(path, True)
+    for parent in _HOME_PARENT_SEQS:
+        k = len(parent)
+        if len(folded) > k and folded[:k] == parent:
+            homes.append(Path(pure.parts[0], *pure.parts[1 : k + 2]))
+    return tuple(dict.fromkeys(homes))
+
+
+def homes_of(path: Path, cfg: PolicyConfig, *, windows: bool) -> tuple[Path, ...]:
+    """The homes ``path`` is judged against (``_homes_of``; additive, rv-d M35): the process's ``$HOME`` (as given and
+    resolved), every account home of the password database, the superuser homes (POSIX, ``windows`` False) and
+    ``<parent>/<x>`` when ``path`` lies below a ``HOME_PARENTS`` directory (in the path's own spelling). The target
+    denylist and the source's home rule (``collector.HomeRule``: no home and no ancestor of one is a workspace or an
+    extra) read the same list."""
+    return _homes_of(Path(path), cfg, bool(windows))
+
+
+def _home_denied(path: Path, home: Path, cfg: PolicyConfig, windows: bool) -> bool:
+    """The home rules of the target denylist for one home: the home itself and its ancestors, ``TARGET_DENY`` (plus
+    ``TARGET_DENY_WINDOWS`` on a Windows target) and every dot entry directly under the home that no allow-root
+    opens."""
+    ci = cfg.case_insensitive
+    if _inside(home, path, ci):
+        return True
+    if not _inside(path, home, ci):
+        return False
+    depth = len(PurePath(home).parts) - 1
+    rel = _parts_abs(path, ci)[depth:]
+    if _seq_hits(rel, _TARGET_DENY_SEQS[ci]):
+        return True
+    if windows and _seq_hits(_parts_abs(path, True)[depth:], _TARGET_DENY_WINDOWS_SEQS):
+        return True
+    if rel and rel[0].startswith("."):
+        for root in cfg.allow_roots:
+            for r in {Path(root), Path(os.path.realpath(root))}:
+                if not _inside(r, home, ci):
+                    continue
+                root_rel = _parts_abs(r, ci)[depth:]
+                if root_rel and root_rel[0] == rel[0] and _inside(path, r, ci):
+                    return False
+        return True
+    return False
+
+
+def _system_target_denied(path: Path, windows: bool, case_insensitive: bool) -> bool:
+    """``TARGET_SYSTEM_DENY`` (``TARGET_SYSTEM_DENY_WINDOWS`` on Windows) on the components after the anchor, plus
+    the ``HOME_PARENTS`` directories and their ancestors."""
+    if windows:
+        if _seq_hits(_parts_abs(path, True), _SYSTEM_TARGET_WINDOWS_SEQS):
+            return True
+    elif _seq_hits(_parts_abs(path, case_insensitive), _SYSTEM_TARGET_SEQS[bool(case_insensitive)]):
+        return True
+    folded = _parts_abs(path, True)
+    return any(len(folded) <= len(parent) and folded == parent[: len(folded)] for parent in _HOME_PARENT_SEQS)
 
 
 def _candidates(path: Path) -> tuple[Path, Path]:
@@ -918,30 +1098,10 @@ def _target_denied(path: Path, cfg: PolicyConfig) -> bool:
             return True
         if _inside(path, base, ci) and not (reserved and base in liftable):
             return True
-    homes = {Path(cfg.home), Path(os.path.realpath(cfg.home))}
-    for home in homes:
-        if _inside(home, path, ci):
-            return True
-        if not _inside(path, home, ci):
-            continue
-        rel = _parts_abs(path, ci)[len(PurePath(home).parts) - 1 :]
-        for spec in TARGET_DENY:
-            deny = _seq(spec, ci)
-            n = min(len(rel), len(deny))
-            if rel[:n] == deny[:n]:
-                return True
-        if rel and rel[0].startswith("."):
-            opened = False
-            for root in cfg.allow_roots:
-                for r in {Path(root), Path(os.path.realpath(root))}:
-                    if not _inside(r, home, ci):
-                        continue
-                    root_rel = _parts_abs(r, ci)[len(PurePath(home).parts) - 1 :]
-                    if root_rel and root_rel[0] == rel[0] and _inside(path, r, ci):
-                        opened = True
-            if not opened:
-                return True
-    return False
+    windows = cfg.platform_rules().windows
+    if _system_target_denied(path, windows, ci):
+        return True
+    return any(_home_denied(path, home, cfg, windows) for home in _homes_of(path, cfg, windows))
 
 
 def check_target_dest(
@@ -950,7 +1110,8 @@ def check_target_dest(
     """May the plugin write at ``path`` on this host? (DESIGN §10.4, R19)
 
     The target denylist is checked on the path as given and on its realpath (the existing prefix resolved) and
-    applies always. Then the destination must lie under ``allow_roots`` (realpath against the roots' realpaths),
+    applies always — under every home of the host and at the system places (module docstring). Then the destination
+    must lie under ``allow_roots`` (realpath against the roots' realpaths),
     unless it is a path this host recorded itself (``recorded``, return trip) or the local user typed
     (``local_choice``). ``hermes_file_kind`` (one of ``HERMES_FILE_KINDS``) is the plugin's own placement of a
     session file: allowed only inside that kind's area of this host's Hermes home, never into a credential store.
@@ -1003,22 +1164,30 @@ def _parse_mode(mode: object) -> int | None:
 
 
 def _link_target_inside(link_path: str, target: str) -> bool:
+    """A received link target is relative and stays inside the tree however its components resolve (DESIGN
+    §10.3). ``..`` may only lead the target: the directories of a received tree are real directories
+    (``filetree`` refuses a link as a parent), so leading ``..`` climb exactly as counted from the link's directory,
+    and the names after them only descend — through a link of the same tree at worst, whose own target obeys this
+    rule. A ``..`` behind a name would resolve against what that name really is (``u/..`` with ``u -> ../..``).
+    Refused as well: a component of only dots and spaces other than ``.``/``..`` (Windows drops trailing dots and
+    spaces) and a ``.git`` component in any spelling (``paths.is_dotgit``)."""
     if not target or "\x00" in target or any(unicodedata.category(c) == "Cc" for c in target):
         return False
     if target.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", target):
         return False
     stack = [c for c in link_path.replace("\\", "/").split("/")[:-1] if c not in {"", "."}]
+    descended = False
     for comp in target.replace("\\", "/").split("/"):
         if comp in {"", "."}:
             continue
         if comp == "..":
-            if not stack:
+            if descended or not stack:
                 return False
             stack.pop()
             continue
-        folded = unicodedata.normalize("NFC", comp).casefold().rstrip(". ")
-        if folded in {".git", "git~1"}:
+        if not comp.strip(". ") or is_dotgit(comp):
             return False
+        descended = True
         stack.append(comp)
     return True
 
@@ -1027,9 +1196,9 @@ def check_tree_entry(entry: dict) -> Verdict:
     """Validate one tree-manifest entry from a peer (DESIGN §10.3, SEC 2.3): ``type`` ∈ file|dir|symlink, mode
     permission bits 0644 or 0755 (symlinks: 0644/0755/0777 or none), no setuid/setgid/sticky, type bits (when
     present, e.g. ``100644``) matching the type, a whole non-negative ``size`` (required for a file, optional for a
-    directory or symlink), and a symlink target that is relative, stays inside the tree
-    and does not point into a ``.git`` directory. The entry's own ``path`` is checked separately with
-    ``paths.check_rel``."""
+    directory or symlink), and a symlink target that is relative, stays inside the tree however its components
+    resolve (``..`` only as leading components) and does not point into a ``.git`` directory in any
+    spelling. The entry's own ``path`` is checked separately with ``paths.check_rel``."""
     if not isinstance(entry, dict):
         return Verdict(False, "special")
     kind = entry.get("type")

@@ -24,11 +24,12 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import json
 import logging
 import os
+import platform
 import secrets
 import shutil
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -56,8 +57,8 @@ from .errors import (
 from .ids import short, ulid
 from .jsonutil import from_wire, to_wire
 from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, TERMINAL, Ledger, private_dir, process_owner
-from .local_source import LocalSource
-from .local_target import LocalTarget
+from .local_source import LocalSource, purge_source_staging
+from .local_target import LocalTarget, purge_reports
 from .model import (
     ConductorState,
     EnvFacts,
@@ -188,6 +189,7 @@ class Runtime:
     ctx: object | None = None
     janitor_ran: bool = False
     maintenance: threading.Thread | None = None
+    outbox_thread: threading.Thread | None = None
     stopping: threading.Event = field(default_factory=threading.Event)
     db_factories: dict = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -203,7 +205,43 @@ class Runtime:
             flush_outbox=_flush(self.ctx),
             background=background,
             store=_store(self),
+            data_dir=self.data_dir,
         )
+
+    def before_job(self) -> dict:
+        """``before_job`` of every job (review M29): the janitor without the ctx outbox flush, which runs in a daemon
+        thread ``ctxh-outbox`` (one at a time) — ``call_mcp`` waits up to 10 s per row, and ctx is never on the job's
+        critical path (D12, DESIGN §13)."""
+        done = janitor(
+            self.ledger,
+            self.runner,
+            _registry(self),
+            flush_outbox=None,
+            background=True,
+            store=_store(self),
+            data_dir=self.data_dir,
+        )
+        flush = _flush(self.ctx)
+        if flush is not None:
+            self.flush_in_background(flush)
+        return done
+
+    def flush_in_background(self, flush: Callable[[Ledger], object]) -> None:
+        """Start the outbox flush in ``ctxh-outbox`` unless one is still running (it continues the same rows)."""
+        with self.lock:
+            if self.outbox_thread is not None and self.outbox_thread.is_alive():
+                return
+            ledger = self.ledger
+
+            def run() -> None:
+                try:
+                    flush(ledger)
+                except Exception:  # best effort: the rows stay due for the next flush
+                    log.warning("ctx_handover outbox flush failed", exc_info=True)
+
+            ctx = contextvars.copy_context()
+            self.outbox_thread = threading.Thread(target=ctx.run, args=(run,), name="ctxh-outbox", daemon=True)
+            self.outbox_thread.start()
 
 
 _Profile = Runtime  # older name inside this module
@@ -260,7 +298,7 @@ def _git(prof: _Profile):
         if prof.git is None:
             from . import gitops
 
-            prof.git = gitops.Git()
+            prof.git = gitops.Git(home=hostcompat.effective_home())  # W5: same ~/.gitconfig as the terminal
         return prof.git
 
 
@@ -311,15 +349,27 @@ def _peer_verified(peer: Peer | None) -> bool:
     return peer is not None and peer.revoked_at is None and bool(peer.pubkey)
 
 
+_TARGET_OS = {"windows": "windows", "darwin": "macos"}
+
+
+def _os_family() -> str:
+    """This host's OS family by the rule its facts report (``envfacts._family`` over ``platform.system()``): MSYS,
+    Cygwin and MinGW are Windows — ``os.name`` is ``posix`` there, so the Windows naming rules and denylist of this
+    host's own policy did not apply (rv-k0)."""
+    from .envfacts import _family
+
+    return _family(platform.system())
+
+
 def _policy(opts: Options, prof: _Profile, hermes, *, include_secret=()) -> PolicyConfig:
     return PolicyConfig.from_options(
         opts,
-        home=Path.home(),
+        home=hostcompat.effective_home(),
         hermes_home=Path(hermes.home),
         hermes_root=hostcompat.hermes_root(),
         plugin_dir=prof.data_dir,
-        case_insensitive=sys.platform in ("darwin", "win32"),
-        target_os="windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else "linux"),
+        case_insensitive=_os_family() in ("windows", "darwin"),
+        target_os=_TARGET_OS.get(_os_family(), "linux"),
         include_secret=include_secret,
         document_cache=Path(hermes.document_cache),
     )
@@ -364,7 +414,36 @@ def structured_answer(result: object) -> dict | None:
     as ``hostcompat.plugin_llm``. Without a JSON object there is no answer; the result object itself is never passed
     on as if it were the refinement."""
     parsed = getattr(result, "parsed", None)
-    return parsed if isinstance(parsed, dict) else None
+    if isinstance(parsed, dict):
+        return parsed
+    return _first_json_object(getattr(result, "text", None))
+
+
+_JSON_SCAN_CHARS = 1024 * 1024
+_JSON_SCAN_STARTS = 64
+
+
+def _first_json_object(text: object) -> dict | None:
+    """The first JSON object inside a model's prose or code fence (review L13: ``parsed`` stays empty when the reply
+    is not pure JSON, and the refinement was dropped). Bounded: the first ``_JSON_SCAN_CHARS`` characters, at most
+    ``_JSON_SCAN_STARTS`` opening braces tried. The schema is checked by the caller (``refine``) as for ``parsed``."""
+    if not isinstance(text, str):
+        return None
+    text = text[:_JSON_SCAN_CHARS]
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    for _ in range(_JSON_SCAN_STARTS):
+        if start < 0:
+            return None
+        try:
+            value, _end = decoder.raw_decode(text, start)
+        except ValueError:
+            start = text.find("{", start + 1)
+            continue
+        if isinstance(value, dict):
+            return value
+        start = text.find("{", start + 1)
+    return None
 
 
 def make_local_apis(
@@ -419,7 +498,7 @@ def make_local_apis(
 
     spawner = continuation.Spawner(
         log_dir=private_dir(prof.data_dir / "logs"),
-        profile=host.profile if host.profile not in ("", "default") else None,
+        profile=host.profile or "default",  # by name, also ``default``: no sticky ``active_profile`` (review M28)
         approvals_off=lambda: hostcompat.approvals_off(hostcompat.load_config()),
         allow_remote=lambda: plugin_settings(hostcompat.load_config()).get("allow_remote_continue") is True,
     )
@@ -565,7 +644,16 @@ def listener_server():
         registry = _registry(prof)
         settings = server_settings(hostcompat.load_config())
         auths = [server.OperatorSessionAuth(enabled=False), server.PeerSignatureAuth(prof.ledger, identity)]
-        srv = server.Server(prof.ledger, identity, registry, settings, auths, redact=hostcompat.redact)
+        srv = server.Server(
+            prof.ledger,
+            identity,
+            registry,
+            settings,
+            auths,
+            redact=hostcompat.redact,
+            # read on every request: ``inbound`` changed in the settings takes effect without a restart (M15)
+            inbound_setting=lambda: plugin_settings(hostcompat.load_config()).get("inbound"),
+        )
         prof.server, prof.server_identity = srv, identity  # rebuilt when another process rotates the identity
     _start_maintenance(prof)
     return srv
@@ -635,6 +723,19 @@ def _start_maintenance(prof: _Profile) -> None:
 # ---------------------------------------------------------------------------------------------------------
 # the job runner
 # ---------------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CancelAnswer:
+    """What ``/handover cancel`` did (L3-F22). ``requested`` is True only when a cancel was recorded or carried out;
+    otherwise ``reason`` says why not — ``finished`` (the job is done or aborted) or ``committing`` (the conductor
+    journaled ``intent: commit``, DESIGN §3.8) — and the surfaces answer with a refusal. ``state`` is the conductor's
+    state when it answered; ``text`` names it."""
+
+    requested: bool
+    state: str
+    text: str
+    reason: str | None = None
 
 
 class _NullReporter:
@@ -983,7 +1084,7 @@ class JobRunner:
             bundle_path = default_bundle_path(
                 self._session_title(session_ref, calling_session),
                 options,
-                home=Path.home(),
+                home=hostcompat.effective_home(),
                 hermes_home=Path(hermes.home),
                 hermes_root=hostcompat.hermes_root(),
             )
@@ -1096,21 +1197,48 @@ class JobRunner:
             thread.join(timeout)
 
     def cancel(self, job_id: str) -> str:
-        """Request cancellation; the answer says it was requested only when the ledger holds the request (a job
-        that already ended keeps no request — ``set_cancel`` returns without writing). A SUSPENDED job has no runner
-        that would see the request (L3-F07): the cancel drives its abort itself (``_abort_suspended``)."""
-        try:
-            self.ledger.set_cancel(job_id)
-        except InvalidState as exc:
-            return exc.message
-        if self.ledger.cancel_requested(job_id) is True:
-            row = self.ledger.job(job_id, Role.CONDUCTOR)
-            if row is not None and row["state"] == str(ConductorState.SUSPENDED):
-                return self._abort_suspended(job_id)
-            return f"Cancel requested for job {short(job_id)}."
+        """The text of ``cancel_answer`` (for callers that only show it)."""
+        return self.cancel_answer(job_id).text
+
+    def cancel_answer(self, job_id: str) -> CancelAnswer:
+        """Request cancellation. The job's state is read first (L3-F22): a finished job (done, aborted) is named as
+        such — ``ledger.set_cancel`` would call every job with a journaled ``intent: commit`` "committing", and every
+        finished job journaled it; a job past its commit point is refused with its state; only a request the ledger
+        holds is ``requested``. A SUSPENDED job has no runner that would see the request (L3-F07): the cancel drives
+        its abort itself (``_abort_suspended``). An unknown job raises ``NotFound``."""
+        sid = short(job_id)
         row = self.ledger.job(job_id, Role.CONDUCTOR)
-        state = row["state"] if row is not None else "gone"
-        return f"Job {short(job_id)} is already {state}; nothing to cancel."
+        refused = False
+        if row is None or row["state"] not in TERMINAL[Role.CONDUCTOR]:
+            try:
+                self.ledger.set_cancel(job_id)  # NotFound for an unknown job
+            except InvalidState:
+                refused = True
+            row = self.ledger.job(job_id, Role.CONDUCTOR)
+        state = str(row["state"]) if row is not None else "gone"
+        if state in TERMINAL[Role.CONDUCTOR] or row is None:
+            text = f"Handover {sid} is already {state}; nothing to cancel."
+            if state == str(ConductorState.DONE):
+                text = (
+                    f"Too late to cancel: handover {sid} is already done; nothing was cancelled. /handover reclaim on "
+                    "the source takes the session back."
+                )
+            return CancelAnswer(False, state, text, "finished")
+        if refused:
+            return CancelAnswer(
+                False,
+                state,
+                f"Too late to cancel handover {sid}: it is past its commit point ({state}). Use /handover reclaim on "
+                "the source to take the session back.",
+                "committing",
+            )
+        if self.ledger.cancel_requested(job_id) is not True:  # set_cancel wrote nothing: no request is claimed
+            return CancelAnswer(False, state, f"Handover {sid} is {state}; nothing was cancelled.", "not_recorded")
+        if state == str(ConductorState.SUSPENDED):
+            text = self._abort_suspended(job_id)
+            after = self.ledger.job(job_id, Role.CONDUCTOR) or {}
+            return CancelAnswer(True, str(after.get("state") or state), text)
+        return CancelAnswer(True, state, f"Cancel requested for job {sid}.")
 
     def _abort_suspended(self, job_id: str) -> str:
         """``/handover cancel`` of a SUSPENDED job (L3-F07): the abort runs now — ``target.abort``, then
@@ -1417,18 +1545,23 @@ def janitor(
     background: bool = True,
     store=None,
     gc_interval_s: float = GC_INTERVAL_S,
+    data_dir: Path | None = None,
 ) -> dict:
     """DESIGN §3.6: expired pairing codes, journal compaction, then every job whose owner went stale; COMMITTED/
     RETIRING conductor jobs are retried on every run ("the source is released on the next contact"). With a
     ``store`` the block-store GC of DESIGN §5.1 runs too (blocks beyond ``block_cache_days``/``block_cache_gb`` and
     the manifests of objects no non-terminal job references, R28) — at most every ``gc_interval_s`` for all
-    processes of the profile (``Ledger.claim_interval``). Returns what it did (for ``status``/``doctor``)."""
+    processes of the profile (``Ledger.claim_interval``). Retention (BUILD-ORDER §6 Nr. 21, review H4): the ledger
+    rows that otherwise grow without bound (``Ledger.purge_retention``) and, with ``data_dir``, the source staging a
+    finished hold left behind (``local_source.purge_source_staging``) and note reports older than 30 days
+    (``local_target.purge_reports``). Returns what it did (for ``status``/``doctor``)."""
     done: dict = {"codes": 0, "compacted": 0, "conductor": [], "participant": [], "gc": None}
     now = ledger.now()
     with contextlib.suppress(HandoverError):
         done["codes"] = ledger.purge_expired_codes(now)
     with contextlib.suppress(HandoverError):
         done["compacted"] = ledger.compact_terminal(JOURNAL_KEEP_S)
+    done.update(_retention(ledger, data_dir))
     stale = ledger.stale_jobs(STALE_OWNER_S)
     seen = set()
     for row in stale:
@@ -1465,6 +1598,25 @@ def janitor(
         with contextlib.suppress(Exception):
             flush_outbox(ledger)
     return done
+
+
+def _retention(ledger: Ledger, data_dir: Path | None) -> dict:
+    """The janitor's retention step (review H4); a failure is logged and named, never raised (like ``_gc_store``)."""
+    out: dict = {"retention": None, "staging": None, "reports": None}
+    steps = [("retention", lambda: ledger.purge_retention(JOURNAL_KEEP_S))]
+    if data_dir is not None:
+        root = Path(data_dir)
+        steps += [
+            ("staging", lambda: purge_source_staging(ledger, root, lock_dir=root / "locks")),
+            ("reports", lambda: purge_reports(ledger, root, keep_s=JOURNAL_KEEP_S)),
+        ]
+    for key, step in steps:
+        try:
+            out[key] = step()
+        except Exception as exc:  # cleanup must not break the job that triggered the janitor
+            log.warning("ctx_handover retention step %s failed: %s", key, type(exc).__name__, exc_info=True)
+            out[key] = f"error:{type(exc).__name__}"
+    return out
 
 
 def _gc_store(ledger: Ledger, store, interval_s: float) -> int | str | None:
@@ -1548,7 +1700,15 @@ def _flush(ctx) -> Callable[[Ledger], object] | None:
     if server is None:
         return None
     category = str(settings["ctx_category"])
-    return lambda ledger: ctxrecords.flush(ledger, ctx.call_mcp, server, category, ledger.now())
+
+    def flush(ledger: Ledger) -> object:
+        # the operator's grant (``mcp_allowlist``) is read at flush time, like ``/handover setup`` writes it: without
+        # it ``call_mcp`` refuses, and every refusal would count as a failed attempt with backoff (review L21)
+        if not ctxrecords.allowed(hostcompat.load_config(), server):
+            return 0
+        return ctxrecords.flush(ledger, ctx.call_mcp, server, category, ledger.now())
+
+    return flush
 
 
 def runner_for(ctx=None, reporter_factory: Callable[[str], Reporter] | None = None) -> JobRunner:
@@ -1560,17 +1720,21 @@ def runner_for(ctx=None, reporter_factory: Callable[[str], Reporter] | None = No
         if ctx is not None:
             prof.ctx = ctx
         if prof.runner is None:
-            prof.runner = JobRunner(prof.ledger, reporter_factory, before_job=prof.janitor)
+            prof.runner = JobRunner(prof.ledger, reporter_factory, before_job=prof.before_job)
         elif reporter_factory is not None:
             prof.runner.bind_reporter_factory(reporter_factory)
         return prof.runner
 
 
-def ensure_started(ctx=None, reporter_factory: Callable[[str], Reporter] | None = None) -> Runtime:
+def ensure_started(
+    ctx=None, reporter_factory: Callable[[str], Reporter] | None = None, *, janitor_background: bool = False
+) -> Runtime:
     """First real use in a process (slash, CLI, route, tool, hook): returns the profile's one ``Runtime`` (X19,
     W109) with ``ledger``, ``veto`` (started, over the same ledger), ``store``, ``runner`` and ``janitor()``; runs the
     janitor once per process. Loads but never creates the identity (R16). Never called from ``register()``
-    (BX L2)."""
+    (BX L2). ``janitor_background`` (additive, review M6): that one janitor run — recovery, retention, GC, outbox
+    flush — goes to a daemon thread ``ctxh-janitor`` once veto, identity and store stand, so the first hook of a
+    process does not wait for it."""
     prof = _profile()
     runner_for(ctx, reporter_factory)
     with prof.lock:
@@ -1584,9 +1748,20 @@ def ensure_started(ctx=None, reporter_factory: Callable[[str], Reporter] | None 
             prof.veto.start()
     _identity(prof)
     _store(prof)
-    if first:
+    if first and janitor_background:
+        ctx_copy = contextvars.copy_context()
+        threading.Thread(target=ctx_copy.run, args=(_janitor_quietly, prof), name="ctxh-janitor", daemon=True).start()
+    elif first:
         prof.janitor()
     return prof
+
+
+def _janitor_quietly(prof: Runtime) -> None:
+    """The background janitor of ``ensure_started``: logged, never raised (nothing waits for it)."""
+    try:
+        prof.janitor()
+    except Exception:
+        log.warning("ctx_handover janitor failed", exc_info=True)
 
 
 def revoke_peer(name_or_id: str) -> list[str]:

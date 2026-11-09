@@ -447,8 +447,10 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
             "profile": None,
         }
 
-    def redeem_dialer(client_factory, identity, pair, *, name, gate, allow_insecure, ledger):
-        redeemed.append(dict(name=name, gate=gate, allow_insecure=allow_insecure, client=client_factory))
+    def redeem_dialer(client_factory, identity, pair, *, name, gate, allow_insecure, ledger, secret_store=None):
+        redeemed.append(
+            dict(name=name, gate=gate, allow_insecure=allow_insecure, client=client_factory, store=secret_store)
+        )
         return make_peer(name or pair["name"])  # C names the listener when F passes no name (V44)
 
     _stub_module(monkeypatch, "crypto", Identity=Identity)
@@ -459,6 +461,7 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
         pair_string=pair_string,
         parse_pair_string=parse_pair_string,
         redeem_dialer=redeem_dialer,
+        SecretStore=types.SimpleNamespace,  # H1 (rv-c): the profile .env handed to the pairing
     )
     _stub_module(monkeypatch, "wire", WireClient=lambda peer, ident, *, read_secret: ("client", peer.name))
     fake_host.secrets["CTX_HANDOVER_PEER_TOKEN"] = "dashboard-secret"
@@ -475,6 +478,13 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
     assert peer.name == "srv" and redeemed[0]["gate"] is gate and redeemed[0]["allow_insecure"] is True
     assert redeemed[0]["name"] == ""  # no --name: the choice (paste-string name or the next free one) is C's
     assert redeemed[0]["client"](make_peer("srv")) == ("client", "srv")
+    store = redeemed[0]["store"]  # H1: Hermes' own .env readers and writer, never a file of the plugin's
+    assert (store.read, store.save, store.read_fresh, store.writable) == (
+        hostcompat.read_secret,
+        hostcompat.save_env,
+        hostcompat.read_env_fresh,
+        hostcompat.env_writable,
+    )
 
 
 def test_contract_signatures_used_by_the_glue():

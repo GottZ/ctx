@@ -127,12 +127,15 @@ def test_object_delete_joins_the_open_transaction(led):
 
 
 def test_quota_charge_never_exceeds_the_confirmed_plan(led):
-    """R28 (ledger part): without a quota row nothing is charged; raising keeps what was charged; concurrent
-    charges from several threads (own connections) never pass the quota."""
+    """R28 (ledger part): without a quota row nothing is charged; a re-negotiation sets the quota to the last plan
+    but never below what was charged (review M5); concurrent charges from several threads (own connections) never
+    pass the quota."""
     assert led.quota_charge("01JZJ000000000000000000000", Role.TARGET, 10) == (False, 0, -1)
     led.quota_set("01JZJ000000000000000000000", Role.TARGET, 1000)
     assert led.quota_charge("01JZJ000000000000000000000", Role.TARGET, 600) == (True, 600, 1000)
-    led.quota_set("01JZJ000000000000000000000", Role.TARGET, 500)  # never lowers
+    led.quota_set("01JZJ000000000000000000000", Role.TARGET, 500)  # smaller plan: lowered, but not below ``used``
+    assert led.quota_get("01JZJ000000000000000000000", Role.TARGET) == (600, 600)
+    led.quota_set("01JZJ000000000000000000000", Role.TARGET, 1000)
     assert led.quota_get("01JZJ000000000000000000000", Role.TARGET) == (1000, 600)
     results: list[bool] = []
     barrier = threading.Barrier(8)

@@ -3,22 +3,34 @@
 No model takes part: the same transcript, session row, filesystem and policy always yield the same sorted
 candidate list.
 
-1. **Primary workspace**: the ``cwd`` of the tip row. Inside a git work tree its toplevel is the item root
-   (``GIT_REPO``; a shallow or partial clone becomes a ``FILE_TREE`` with a reason, W107 — such repositories cannot
-   be bundled with full history), otherwise the directory itself
-   (``FILE_TREE``). A primary root that is ``$HOME``, an ancestor of it or a filesystem root is still reported
-   (the plan refuses it as a workspace) but never "covers" evidence — otherwise every file under the home would
-   silently ride along.
+1. **Primary workspace**: the ``cwd`` of the tip row, judged by its realpath (Desktop and TUI store it lexically, often
+   through a link; H14). A ``cwd`` that exists but is no directory once links are followed (a link whose target is
+   gone, a file) is a primary placeholder with ``CWD_NOT_DIR_REASON``: the plan leaves it out and names it, so R30
+   asks. Inside a git work tree its toplevel is the item root (``GIT_REPO``; a shallow or partial clone becomes a
+   ``FILE_TREE`` with a reason, W107 — such repositories cannot be bundled with full history), otherwise the
+   directory itself (``FILE_TREE``). A primary root that is home-like (``HomeRule``: a filesystem root, the own
+   ``$HOME`` or any account's home the policy knows, an ancestor of one, a home parent such as ``/home``; M35) is
+   still reported (the plan refuses it as a workspace) but never "covers" evidence — otherwise every file under the
+   home would silently ride along. A ``cwd`` that git ignores in the work tree around it (``GitProbe.is_ignored``: a
+   scratch or build folder of somebody's checkout) is no part of that repository: the ``cwd`` itself is the item root
+   (``FILE_TREE``, reason ``IGNORED_REASON``), and evidence in that repository never brings it back as a secondary
+   item (R36, L3-F19). For a ``cwd`` below the root it does belong to, the primary records whether the ``cwd`` holds
+   tracked files (``GitProbe.has_tracked_files``; reasons ``CWD_TRACKED_REASON``/``CWD_UNTRACKED_REASON``, read back
+   with ``cwd_tracked``): the plan asks about the larger workspace only when it does not (R36a).
 2. **Evidence** from the transcript, walked in storage order with a running directory (start: ``cwd``; a terminal
    result's ``cwd`` field moves it, ``tools/terminal_tool_result.py:247-263``): ``write_file``/``patch`` arguments
    and results (``resolved_path``, ``files_modified``) weigh *write*; ``read_file``/``search_files`` arguments weigh
    *read*; path-like tokens of terminal commands weigh *mention*. Windows sources: MSYS forms (``/c/…``,
    ``/cygdrive/c/…``, ``/mnt/c/…``) become ``C:\\…`` before any filesystem call (BX M13).
 3. **Classification after realpath** (SEC 5.3): a missing path is dropped; the realpath decides — inside the
-   primary root ⇒ covered (recorded as a reason on the primary); inside another work tree ⇒ a secondary
-   ``GIT_REPO``; otherwise an ``EXTRA_FILE``/``EXTRA_DIR`` candidate. Paths in the Hermes home, the plugin data
-   directory or the document cache are never extras (session files come from ``hermes_files.discover``); mentions
-   outside ``$HOME``/``export_roots`` and kernel pseudo-filesystems are dropped. Whether a candidate may leave the
+   primary root ⇒ covered (recorded as a reason on the primary) — unless it lies in a repository of its own below a
+   git workspace (an initialised submodule, a clone in the work tree: ``inner_repo``), whose files never travel with
+   it: a ``GIT_REPO`` candidate with ``INNER_REPO_REASON`` the plan names and never makes an item (H15); inside
+   another work tree ⇒ a secondary ``GIT_REPO``; otherwise an ``EXTRA_FILE``/``EXTRA_DIR`` candidate. Paths in the
+   Hermes home, the plugin data directory, the document cache or another account's Hermes home are never extras
+   (session files come from ``hermes_files.discover``); a file there that the discovery neither delivers nor refuses
+   is a ``"rejected: hermes"`` candidate, so the plan names it (M20). Mentions outside ``$HOME``/``export_roots`` and
+   kernel pseudo-filesystems are dropped. Whether a candidate may leave the
    machine is decided by the plan through the policy (``plan.build_plan``), which also names refused ones.
 4. **Session files** (spillover, hook outputs, native inputs) come from ``hermes_files.discover`` (cluster B) as
    ``HERMES_FILE`` candidates with the reason ``"<kind>: <rel>"``. A referenced file the discovery refuses
@@ -38,13 +50,15 @@ import stat
 import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from . import policy as _policy
 from .contracts import GitProbe
 from .errors import BadRequest
 from .jsonutil import loads_bounded
 from .model import Candidate, HermesPaths, ItemKind, Origin, Weight
 from .paths import msys_to_windows
-from .policy import HERMES_FILE_KINDS, PolicyConfig, is_denied_name, reserved_workspace_roots
+from .policy import HERMES_FILE_KINDS, HOME_PARENTS, PolicyConfig, is_denied_name, reserved_workspace_roots
 
 RANK: dict[Weight, int] = {Weight.MENTION: 0, Weight.READ: 1, Weight.WRITE: 2}
 """Order of evidence weights (DESIGN §8.2)."""
@@ -60,7 +74,20 @@ CWD_REL_PREFIX = "cwd: "
 """Reason prefix with the session cwd relative to the primary root (``plan`` reads it into ``rel_cwd``)."""
 
 SHALLOW_REASON = "shallow clone: packed as a file tree"
+IGNORED_REASON = "ignored in the git repository around it: packed as a file tree"
+"""Reason of a primary whose ``cwd`` git ignores in the enclosing work tree (R36, L3-F19): the ``cwd`` alone travels."""
+CWD_TRACKED_REASON = "cwd holds tracked files"
+CWD_UNTRACKED_REASON = "cwd holds no tracked file"
+"""Reasons of a primary whose root is the repository around the ``cwd`` (R36a): the ``cwd`` holds files the repository
+tracks, or none. Neither when git could not tell (unknown)."""
 PARTIAL_REASON = "partial clone: packed as a file tree"
+CWD_NOT_DIR_REASON = "cwd is no directory here"
+"""Reason of the primary placeholder for a ``cwd`` that exists (``lstat``) but is no directory once links are followed —
+a link whose target is gone, a regular file (H14): the plan leaves it out and names it, so R30's question comes."""
+INNER_REPO_REASON = "a repository of its own inside the workspace"
+"""Reason of a candidate for a repository below a primary git workspace — an initialised submodule or a clone inside the
+work tree (a ``.git`` entry of its own, H15). Its files never travel with the workspace (git records a submodule as
+its commit, a clone not at all); the plan names it and never makes it an item."""
 REJECTED_PREFIX = "rejected: "
 """Reason prefix of a session file the discovery refused (``"rejected: <why>"``, ``why`` one of
 ``hermes_files.discover``'s reasons); read back with ``rejected_reason``."""
@@ -158,6 +185,102 @@ class _Flavour:
 
     def is_root(self, path: str) -> bool:
         return len(self.parts(path)) <= (1 if self.windows else 0)
+
+
+def host_flavour(case_insensitive: bool = False) -> _Flavour:
+    """The path flavour of this host (the plan works on this host's paths)."""
+    return _Flavour("windows" if os.name == "nt" else "linux", case_insensitive)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Homes (M35): one rule for the collector and the plan
+# ---------------------------------------------------------------------------------------------------------
+
+
+class HomeRule:
+    """Homes are never a workspace and never an extra (DESIGN §8.2): a path is *home-like* when it is a filesystem root,
+    a home or an ancestor of one, or a ``policy.HOME_PARENTS`` folder (``/home``, ``/Users``, ``/var/home``) or an
+    ancestor of one. The homes are the policy's (``policy.homes_of``, the target denylist's list: ``$HOME``, every
+    account home, the superuser homes, ``<parent>/<x>`` below a home parent; M35: another account's home or ``/home``
+    as cwd is no workspace either) — on a source whose paths are not this host's (a Windows source exercised on a POSIX
+    host, and the reverse) only the own ``$HOME``. ``<home>/.hermes`` of each of these homes is a Hermes home other
+    than the active one and never a source (``in_foreign_hermes``), unless it holds or lies in the active Hermes home
+    or root (``own_hermes``; those stay with the policy, R29). One rule for the collector and the plan (L31)."""
+
+    def __init__(
+        self,
+        flav: _Flavour,
+        home: str,
+        cfg: PolicyConfig | None = None,
+        *,
+        own_hermes: Iterable[str] = (),
+        real: Callable[[str], str] | None = None,
+    ) -> None:
+        self.flav = flav
+        self.cfg = cfg if flav.windows == (os.name == "nt") else None
+        own_homes = [flav.norm(home)] + ([real(home)] if real is not None else [])
+        self._own_home = [flav.parts(h) for h in dict.fromkeys(own_homes)]
+        own: list[tuple[str, ...]] = []
+        for p in own_hermes:
+            if isinstance(p, str) and p:
+                own.append(flav.parts(flav.norm(p)))
+                if real is not None:
+                    own.append(flav.parts(real(p)))
+        self._own_hermes = own
+        depth = max(len([c for c in spec.split("/") if c]) for spec in HOME_PARENTS)
+        self._key_depth = depth + (2 if flav.windows else 1)
+        self._parents = [tuple(c.casefold() for c in spec.split("/") if c) for spec in HOME_PARENTS]
+        self._memo: dict[tuple[str, ...], tuple[list[tuple[str, ...]], list[tuple[str, ...]]]] = {}
+
+    @classmethod
+    def for_host(
+        cls, home: str, cfg: PolicyConfig, *, own_hermes: Iterable[str] = (), real: Callable[[str], str] | None = None
+    ) -> HomeRule:
+        """The rule for this host's paths (the plan)."""
+        return cls(host_flavour(cfg.case_insensitive), home, cfg, own_hermes=own_hermes, real=real)
+
+    def _homes(self, path: str, pp: tuple[str, ...]) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+        """(homes, foreign Hermes homes) as parts for ``path``; the policy's list depends only on the first components
+        of a path (the ``HOME_PARENTS`` home), so it is asked once per such prefix."""
+        key = pp[: self._key_depth]
+        found = self._memo.get(key)
+        if found is not None:
+            return found
+        homes = list(self._own_home)
+        if self.cfg is not None:
+            try:
+                listed = _policy.homes_of(Path(path), self.cfg, windows=self.flav.windows)
+            except (OSError, ValueError):  # an unreadable home list: the own home still counts
+                listed = ()
+            homes += [self.flav.parts(self.flav.norm(str(h))) for h in listed]
+        homes = list(dict.fromkeys(homes))
+        foreign = [(*h, ".hermes") for h in homes]
+        foreign = [
+            f for f in foreign if not any(f[: len(o)] == o or o[: len(f)] == f for o in self._own_hermes)
+        ]  # an account's ``.hermes`` that holds, or lies in, the active Hermes home or root is the policy's (R29)
+        if len(self._memo) < MAX_GIT_PROBES:
+            self._memo[key] = (homes, foreign)
+        return homes, foreign
+
+    def __call__(self, path: str) -> bool:
+        """``path`` is a filesystem root, a home or an ancestor of one, or a home parent or an ancestor of one."""
+        if self.flav.is_root(path):
+            return True
+        pp = self.flav.parts(path)
+        n = len(pp)
+        homes, _foreign = self._homes(path, pp)
+        if any(len(hp) >= n and hp[:n] == pp for hp in homes):
+            return True
+        if self.cfg is None:
+            return False
+        after = tuple(c.casefold() for c in (pp[1:] if self.flav.windows else pp))
+        return any(len(after) <= len(par) and par[: len(after)] == after for par in self._parents)
+
+    def in_foreign_hermes(self, path: str) -> bool:
+        """``path`` lies in ``<home>/.hermes`` of a home that is not the active Hermes home or root."""
+        pp = self.flav.parts(path)
+        _homes, foreign = self._homes(path, pp)
+        return any(len(pp) >= len(f) and pp[: len(f)] == f for f in foreign)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -395,6 +518,10 @@ class _Classifier:
             for q in (flav.norm(str(p)), self._real(str(p)))
         }
         self._toplevel: dict[str, str | None] = {}
+        self._dotgit: dict[str, bool] = {}
+        # M35: every home the policy knows counts (``HomeRule``)
+        own = [p for p in (cfg.hermes_home, cfg.hermes_root, hermes.home) if p is not None and str(p) != ""]
+        self.homes = HomeRule(flav, str(cfg.home), cfg, own_hermes=[str(p) for p in own], real=self._real)
 
     def _real(self, path: str) -> str:
         try:
@@ -413,14 +540,41 @@ class _Classifier:
         return st is not None and stat.S_ISDIR(st.st_mode)
 
     def home_like(self, path: str) -> bool:
-        """``$HOME``, an ancestor of it, or a filesystem root — never a workspace, never an extra."""
-        return self.flav.is_root(path) or self.flav.under(self.home, path)
+        """A home (the own ``$HOME`` or any account's, M35), an ancestor of one, or a filesystem root — never a
+        workspace, never an extra (``HomeRule``)."""
+        return self.homes(path)
 
     def hermes_owned(self, path: str) -> bool:
         """Inside the Hermes root, home, plugin data or document cache — except the reserved workspace directory
-        (``<HERMES_HOME>/handover-workspaces``, R29/V46), which only lifts the Hermes home and root."""
+        (``<HERMES_HOME>/handover-workspaces``, R29/V46), which only lifts the Hermes home and root — or inside another
+        account's Hermes home (``HomeRule.in_foreign_hermes``, M35)."""
         reserved = any(self.flav.under(path, r) for r in self.reserved)
-        return any(self.flav.under(path, p) for p in self.protected if not (reserved and p in self.liftable))
+        if any(self.flav.under(path, p) for p in self.protected if not (reserved and p in self.liftable)):
+            return True
+        return self.homes.in_foreign_hermes(path)
+
+    def has_git(self, directory: str) -> bool:
+        """``directory`` holds a ``.git`` entry (directory or gitfile) of its own; cached per directory."""
+        found = self._dotgit.get(directory)
+        if found is None:
+            found = self.lstat(self.flav.join(directory, ".git")) is not None
+            if len(self._dotgit) < MAX_EVIDENCE_PATHS:
+                self._dotgit[directory] = found
+        return found
+
+    def inner_repo(self, path: str, root: str) -> str | None:
+        """The outermost folder strictly below the work-tree root ``root`` on the way to ``path`` (``path`` itself
+        when it is a folder) that is a repository of its own — an initialised submodule or a clone in the work tree
+        (H15) — or None. Its files are no part of ``root``'s repository."""
+        comps = [c for c in self.flav.rel(path, root).split("/") if c]
+        if not self.is_dir(path):
+            comps = comps[:-1]
+        current = root
+        for comp in comps:
+            current = self.flav.join(current, comp)
+            if self.has_git(current):
+                return current
+        return None
 
     def pseudo_fs(self, path: str) -> bool:
         return not self.flav.windows and any(path == p or path.startswith(p + "/") for p in _PSEUDO_FS)
@@ -440,6 +594,24 @@ class _Classifier:
         result = self._real(top) if isinstance(top, str) and top else None
         self._toplevel[directory] = result
         return result
+
+    def ignored(self, directory: str) -> bool:
+        """``directory`` is ignored in the work tree around it (R36). Only an explicit ``False`` of the probe reads as
+        not ignored; an exception or any other answer counts as ignored — the workspace then stays the directory and
+        never grows to a repository it may not be part of."""
+        try:
+            return self.git.is_ignored(directory) is not False
+        except Exception:  # an unclear answer: fail closed (the directory alone travels)
+            return True
+
+    def tracked(self, directory: str) -> bool | None:
+        """Whether ``directory`` holds files the work tree around it tracks (R36a): the probe's ``True``/``False``;
+        an exception or any other answer is unknown (None) — the plan then asks."""
+        try:
+            answer = self.git.has_tracked_files(directory)
+        except Exception:  # an unclear answer: unknown, so the plan asks
+            return None
+        return answer if isinstance(answer, bool) else None
 
     def shallow(self, root: str) -> bool:
         try:
@@ -492,18 +664,28 @@ def collect(
 
     primary: _Item | None = None
     covering: str | None = None
+    enclosing: str | None = None  # R36: the repository around a cwd it ignores (never an item)
     cwd_raw = session_row.get("cwd") if isinstance(session_row, dict) else None
     cwd: str | None = None
     if isinstance(cwd_raw, str) and cwd_raw.strip():
         cwd_text = msys_to_windows(cwd_raw.strip()) if flav.windows and cwd_raw.startswith("/") else cwd_raw.strip()
         if flav.isabs(cwd_text):
             cwd = flav.norm(cwd_text)
-    if cwd is not None and cls.is_dir(cwd):
-        real_cwd = cls._real(cwd)
+    real_cwd = cls._real(cwd) if cwd is not None else None
+    if cwd is not None and real_cwd is not None and not cls.is_dir(real_cwd) and cls.lstat(cwd) is not None:
+        # H14: the cwd exists but is no directory once links are followed (a link whose target is gone, a file) —
+        # a placeholder the plan leaves out and names, so R30 asks instead of planning without a workspace
+        primary = _Item(ItemKind.FILE_TREE, cwd, Origin.CWD, Weight.MENTION, head=[CWD_REASON, CWD_NOT_DIR_REASON])
+        items[cwd] = primary
+    elif cwd is not None and real_cwd is not None and cls.is_dir(real_cwd):
+        # H14: the cwd is judged by its realpath — Desktop/TUI store it lexically, often through a link
         top = cls.toplevel(real_cwd) if not cls.home_like(real_cwd) else None
         if top is not None and cls.home_like(top):
             top = None
         head = [CWD_REASON]
+        if top is not None and flav.parts(top) != flav.parts(real_cwd) and cls.ignored(real_cwd):
+            enclosing, top = top, None
+            head.append(IGNORED_REASON)
         if top is not None:
             root = top
             flat = cls.flat_reason(root)
@@ -515,6 +697,9 @@ def collect(
         rel = flav.rel(real_cwd, root) if flav.under(real_cwd, root) else ""
         if rel:
             head.append(CWD_REL_PREFIX + rel)
+            tracked = cls.tracked(real_cwd)
+            if tracked is not None:
+                head.append(CWD_TRACKED_REASON if tracked else CWD_UNTRACKED_REASON)
         primary = _Item(kind, root, Origin.CWD, Weight.MENTION, head=head)
         items[root] = primary
         if not cls.home_like(root):
@@ -524,12 +709,18 @@ def collect(
     lineage = _walk(rows, walk)
 
     repo_roots: list[str] = []
+    hermes_left: list[str] = []  # M20: Hermes-home evidence; named unless the session-file discovery delivers it
+    git_primary = primary is not None and primary.kind is ItemKind.GIT_REPO
     for path in sorted(walk.found):
         ev = walk.found[path]
         if cls.lstat(path) is None:
             continue
         real = cls._real(path)
-        if cls.pseudo_fs(real) or cls.home_like(real) or cls.hermes_owned(real):
+        if cls.pseudo_fs(real) or cls.home_like(real):
+            continue
+        if cls.hermes_owned(real):
+            if not cls.is_dir(real) and len(hermes_left) < MAX_EVIDENCE_PATHS:
+                hermes_left.append(real)
             continue
         if (
             real != path
@@ -549,6 +740,15 @@ def collect(
             continue  # an ancestor of the workspace: copying it would duplicate the workspace
         if covering is not None and flav.under(real, covering):
             rel = flav.rel(real, covering)
+            inner = cls.inner_repo(real, covering) if rel and git_primary else None
+            if inner is not None:  # H15: a submodule or a clone in the work tree — not covered by the workspace
+                item = items.get(inner)
+                if item is None:
+                    item = items[inner] = _Item(
+                        ItemKind.GIT_REPO, inner, Origin.TRANSCRIPT, ev.weight, head=[INNER_REPO_REASON]
+                    )
+                item.note(flav.rel(real, inner), ev.weight, ev.tools)
+                continue
             if rel:
                 primary.note(rel, ev.weight, ev.tools)
             continue
@@ -557,6 +757,8 @@ def collect(
         if owner is None and exportable:
             probe_dir = real if cls.is_dir(real) else flav.parent(real)
             top = cls.toplevel(probe_dir)
+            if top is not None and enclosing is not None and covering is not None and flav.under(covering, top):
+                top = None  # R36: a repository around a cwd it ignores never comes back; its files are single extras
             if top is not None and not cls.home_like(top) and not (covering and flav.under(top, covering)):
                 owner = top
                 repo_roots.append(top)
@@ -607,6 +809,16 @@ def collect(
         out.append(
             Candidate(ItemKind.HERMES_FILE, source_path, Weight.READ, (f"{REJECTED_PREFIX}{why}",), Origin.TRANSCRIPT)
         )
+    # M20 (D part): a file in a Hermes home the transcript names but the discovery neither delivered nor refused is
+    # named as left behind (``rejected: hermes``) instead of vanishing (R30 class: no silent omission)
+    seen_real = seen | {cls._real(p) for p in seen}
+    for source_path in hermes_left:
+        if source_path in seen_real:
+            continue
+        seen_real.add(source_path)
+        out.append(
+            Candidate(ItemKind.HERMES_FILE, source_path, Weight.READ, (f"{REJECTED_PREFIX}hermes",), Origin.TRANSCRIPT)
+        )
     return sorted(out, key=sort_key)
 
 
@@ -625,6 +837,17 @@ def hermes_kind(candidate_or_reasons: Candidate | Sequence[str]) -> str | None:
         kind, sep, _rel = str(reason).partition(": ")
         if sep and kind in HERMES_FILE_KINDS:
             return kind
+    return None
+
+
+def cwd_tracked(reasons: Sequence[str]) -> bool | None:
+    """Whether the session cwd holds files the repository around it tracks, from the primary's reasons (R36a): True,
+    False, or None when the collector could not tell or the cwd is the root."""
+    for reason in reasons:
+        if reason == CWD_TRACKED_REASON:
+            return True
+        if reason == CWD_UNTRACKED_REASON:
+            return False
     return None
 
 

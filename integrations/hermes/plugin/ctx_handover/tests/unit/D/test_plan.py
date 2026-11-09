@@ -583,6 +583,8 @@ def test_confirmation_reasons(lay):
         plan.CONFIRM_INSTRUCTIONS: "g",
         plan.CONFIRM_WORKSPACE_EXCLUDED: "h",
         plan.CONFIRM_CONTEXT: "i",
+        plan.CONFIRM_WORKSPACE_DIFFERS: "j",
+        plan.CONFIRM_REPOS_LEFT: "k",
     }
 
 

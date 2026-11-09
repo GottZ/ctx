@@ -24,6 +24,7 @@ recorded out-state, dirty work included; R4). Every forward step has an inverse 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import errno
 import hashlib
 import os
@@ -33,7 +34,8 @@ import shutil
 import stat
 import sys
 import time
-from collections.abc import Callable, Sequence
+import unicodedata
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -102,6 +104,7 @@ class GitApplyState:
     warnings: tuple[str, ...] = ()
     case_collisions: tuple[tuple[str, str], ...] = ()
     tmp: Path | None = None
+    case_insensitive: bool = False
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -564,13 +567,23 @@ def place_lfs(git: Git, repo: Path, store, lfs_manifest: str | None, *, checkout
     return warnings
 
 
+_NO_LFS = "git-lfs is not installed here: LFS files stay pointers (install git-lfs, then git lfs checkout)"
+
+
 def lfs_checkout(git: Git, repo: Path) -> list[str]:
     """``git lfs checkout`` (local only, received profile) when ``git-lfs`` exists; else a warning that the
-    pointers stay. Update/return mode run it in commit step c1, after the work tree moved."""
+    pointers stay. It runs after the plugin's own checkout, which writes every file from its blob (the pointer
+    text): fresh mode at the end of PREPARE (still in the 0700 partial, H8), update/return mode in commit step c1
+    after the work tree moved."""
     if shutil.which("git-lfs"):
         proc = git.run(["lfs", "checkout"], cwd=Path(repo), spec=_wt_spec(Path(repo)), check=False)
         return [] if proc.returncode == 0 else ["git lfs checkout failed; run it in the repository"]
-    return ["git-lfs is not installed here: LFS files stay pointers (install git-lfs, then git lfs checkout)"]
+    return [_NO_LFS]
+
+
+def _lfs_tool_warnings(item: _Item) -> list[str]:
+    """Update/return PREPARE: the c1 tail cannot report, so a missing git-lfs is named here (H8)."""
+    return [_NO_LFS] if item.lfs and not shutil.which("git-lfs") else []
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -583,6 +596,10 @@ def path_issues(paths: Sequence[str], rules: PlatformRules) -> list[tuple[str, s
     targets control characters and non-UTF-8 bytes are legal file names that git reproduces
     (``check_rel(..., allow_control=True)``, W095); every other rule (``.git`` spellings, traversal, length,
     Windows names) applies."""
+    if rules.windows and not rules.long_paths:
+        # git runs with core.longpaths=true on a Windows host (gitops, DESIGN §9.2/§9.4, M25): over-long paths
+        # check out; the rest of the Windows rules still apply
+        rules = dataclasses.replace(rules, long_paths=True)
     issues = []
     for p in paths:
         try:
@@ -592,14 +609,42 @@ def path_issues(paths: Sequence[str], rules: PlatformRules) -> list[tuple[str, s
     return issues
 
 
+def _tree_budget(git: Git, qdir: Path, tree: str, *, max_entries: int, max_bytes: int | None, what: str) -> int:
+    """Blob bytes of ``tree`` in the quarantine, refused as soon as the listing passes ``max_entries`` entries
+    or ``max_bytes`` bytes — git stops there instead of listing everything a few KiB of pack can describe
+    (SEC 2.5; M23 for the index tree, receiver side of M24)."""
+    total = entries = 0
+    records = git.iter_z(
+        [*_bare(qdir), "ls-tree", "-r", "-l", "-z", "--full-tree", "--end-of-options", tree], cwd=None, spec=RECEIVED
+    )
+    try:
+        for rec in records:
+            if not rec:
+                continue
+            entries += 1
+            if entries > max_entries:
+                raise PayloadTooLarge(
+                    f"the {what} has more entries than allowed",
+                    entries=entries,
+                    max_files=max_entries,
+                    field="max_files",
+                )
+            meta = rec.partition(b"\t")[0].split()
+            if len(meta) == 4 and meta[1] == b"blob" and meta[3].isdigit():
+                total += int(meta[3])
+                if max_bytes is not None and total > max_bytes:
+                    raise PayloadTooLarge(f"the {what} is larger than allowed", bytes=total, max_bytes=max_bytes)
+    finally:
+        records.close()
+    return total
+
+
 def _precheck(git: Git, qdir: Path, item: _Item, dest_for_disk: Path, cfg: PolicyConfig) -> None:
-    total, entries = GitProbe(git, profile="received").ls_tree_sizes(str(qdir), item.worktree_tree)
-    if entries > cfg.max_files:
-        raise PayloadTooLarge(
-            "the work tree has more entries than allowed", entries=entries, max_files=cfg.max_files, field="max_files"
-        )
-    if total > cfg.max_total_bytes:
-        raise PayloadTooLarge("the work tree is larger than allowed", bytes=total, max_bytes=cfg.max_total_bytes)
+    total = _tree_budget(
+        git, qdir, item.worktree_tree, max_entries=cfg.max_files, max_bytes=cfg.max_total_bytes, what="work tree"
+    )
+    if item.index_tree != item.worktree_tree:  # I becomes the index file: its entries are capped like W's (M23)
+        _tree_budget(git, qdir, item.index_tree, max_entries=cfg.max_files, max_bytes=None, what="index")
     probe = dest_for_disk
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -615,6 +660,163 @@ def _precheck(git: Git, qdir: Path, item: _Item, dest_for_disk: Path, cfg: Polic
 
 def _paths_of(git: Git, qdir: Path, tree: str) -> list[str]:
     return GitProbe(git, profile="received").ls_tree_paths(str(qdir), tree)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# What lies in the way of an in-place update (B2)
+# ---------------------------------------------------------------------------------------------------------
+
+
+def _in_base(git: Git, repo: Path, base: str, rel: bytes, env: dict | None) -> bool:
+    """Does ``base`` (a commit or tree the destination provably holds) contain ``rel``?"""
+    proc = git.run(
+        ["cat-file", "-e", "--end-of-options", base.encode("ascii") + b":" + rel],
+        cwd=repo,
+        spec=_wt_spec(repo),
+        env_extra=env,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def _base_below(git: Git, repo: Path, base: str, rel: bytes, env: dict | None) -> set[bytes]:
+    """Paths (relative to ``rel``) that ``base`` holds below the directory ``rel``; empty when it holds none."""
+    proc = git.run(
+        ["ls-tree", "-r", "-z", "--name-only", "--end-of-options", base.encode("ascii") + b":" + rel],
+        cwd=repo,
+        spec=_wt_spec(repo),
+        env_extra=env,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return set()
+    return {p for p in proc.stdout.split(b"\x00") if p}
+
+
+def _fold(name: bytes) -> str:
+    # the comparison key of paths.fold_key on a case-insensitive target
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", os.fsdecode(name)).casefold())
+
+
+def _disk_rel(root: bytes, rel: bytes, case_insensitive: bool) -> bytes:
+    """``rel`` as the file system spells it: on a case-insensitive one the stored names of its components (a
+    case-only rename of a tracked file is no obstruction); ``rel`` itself elsewhere."""
+    if not case_insensitive:
+        return rel
+    out: list[bytes] = []
+    for part in rel.split(b"/"):
+        parent = os.path.join(root, *out) if out else root
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            names = []
+        want = _fold(part)
+        out.append(next((n for n in names if _fold(n) == want), part))
+    return b"/".join(out)
+
+
+def _entries_below(path: bytes) -> Iterator[bytes]:
+    """Relative names of everything below the directory ``path`` that is not a directory (links not followed);
+    an unreadable directory is yielded itself (it cannot be shown to hold nothing)."""
+    stack = [b""]
+    while stack:
+        rel = stack.pop()
+        try:
+            with os.scandir(os.path.join(path, rel) if rel else path) as it:
+                children = [(c.name, c.is_dir(follow_symlinks=False)) for c in it]
+        except OSError:
+            yield rel or b"."
+            continue
+        for name, is_dir in children:
+            child = os.path.join(rel, name) if rel else name
+            if is_dir:
+                stack.append(child)
+            else:
+                yield child
+
+
+def obstructions(
+    git: Git,
+    repo: Path,
+    base: str,
+    added: Sequence[str],
+    *,
+    case_insensitive: bool = False,
+    env: dict | None = None,
+    limit: int = 5,
+) -> list[str]:
+    """Paths at the destination that the forward step would overwrite or delete although ``base`` does not hold
+    them (B2) — up to ``limit``. ``base`` is what the destination provably holds (H0 in update mode, the out-state
+    work tree on the return trip), ``added`` the paths the received work tree has and ``base`` lacks. git's
+    two-way ``read-tree -u -m`` treats ignored entries as expendable (git ≥ 2.35) and the clean-status check never
+    lists them, so each added path is checked on disk: something at the path itself, a non-directory at one of its
+    parent directories, or anything inside a directory the path replaces that ``base`` does not hold."""
+    root = os.fsencode(repo)
+    prefixes: dict[bytes, str] = {}
+    found: list[str] = []
+
+    def note(rel: bytes) -> None:
+        shown = os.fsdecode(rel)
+        if shown not in found:
+            found.append(shown)
+
+    def prefix_kind(pre: bytes) -> str:
+        try:
+            st = os.lstat(os.path.join(root, pre))
+        except (FileNotFoundError, NotADirectoryError):
+            return "absent"
+        if stat.S_ISDIR(st.st_mode):
+            return "dir"
+        return "replaced" if _in_base(git, repo, base, _disk_rel(root, pre, case_insensitive), env) else "blocked"
+
+    for rel in added:
+        if len(found) >= limit:
+            break
+        rb = os.fsencode(rel)
+        parts = rb.split(b"/")
+        stopped = False
+        for i in range(1, len(parts)):
+            pre = b"/".join(parts[:i])
+            kind = prefixes.get(pre)
+            if kind is None:
+                kind = prefixes[pre] = prefix_kind(pre)
+            if kind == "dir":
+                continue
+            if kind == "blocked":
+                note(pre)
+            stopped = True
+            break
+        if stopped:
+            continue
+        try:
+            st = os.lstat(os.path.join(root, rb))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        disk = _disk_rel(root, rb, case_insensitive)
+        if stat.S_ISDIR(st.st_mode):
+            known = _base_below(git, repo, base, disk, env)
+            for sub in _entries_below(os.path.join(root, disk)):
+                if sub not in known:
+                    note(disk + b"/" + sub)
+                    break
+        elif not (disk != rb and _in_base(git, repo, base, disk, env)):
+            note(rb)
+    return found[:limit]
+
+
+def _refuse_obstructions(
+    git: Git, repo: Path, base: str, added: Sequence[str], *, case_insensitive: bool, env: dict | None = None
+) -> None:
+    found = obstructions(git, repo, base, added, case_insensitive=case_insensitive, env=env)
+    if found:
+        shown = ", ".join(repr(p[:200]) for p in found)
+        raise ConflictError(
+            f"files git does not track at the destination lie where the handover writes ({shown}); they are never "
+            "overwritten",
+            kind="dirty",
+            paths=found,
+            path=str(repo),
+        )
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -677,7 +879,7 @@ def prepare_fresh(
                 spec=_wt_spec(partial, identity=True),
             )
         warnings += write_remote_config(git, partial, item.remotes, item.upstreams)
-        warnings += place_lfs(git, partial, store, item.lfs) if item.lfs else []
+        warnings += place_lfs(git, partial, store, item.lfs, checkout=False) if item.lfs else []
         mode = DestMode.FRESH
         if issues:
             mode = DestMode.NO_CHECKOUT
@@ -685,6 +887,8 @@ def prepare_fresh(
             warnings.append(f"not checked out: {len(issues)} path(s) are invalid on this system: {shown}")
         else:
             _checkout(git, partial, item, filters, cancelled)
+            if item.lfs:  # after checkout-index, which writes every file as its blob (the pointer text) (H8)
+                warnings += lfs_checkout(git, partial)
             if found:
                 shown = ", ".join(f"{a!r}/{b!r}" for a, b in found[:5])
                 warnings.append(f"case-colliding paths on this filesystem (git shows one as modified): {shown}")
@@ -806,7 +1010,7 @@ def _common_checks(
     return attribute_filter_names(git, q, item.worktree_tree), found
 
 
-def _added(git: Git, q: Path, base: str, tree: str) -> tuple[str, ...]:
+def _added(git: Git, q: Path, base: str, tree: str, *, env: dict | None = None) -> tuple[str, ...]:
     proc = git.run(
         [
             *_bare(q),
@@ -822,6 +1026,7 @@ def _added(git: Git, q: Path, base: str, tree: str) -> tuple[str, ...]:
         ],
         cwd=None,
         spec=RECEIVED,
+        env_extra=env,
     )
     return tuple(os.fsdecode(p) for p in proc.stdout.split(b"\x00") if p)
 
@@ -840,7 +1045,8 @@ def prepare_update(
     """Update mode PREPARE (DESIGN §9.5): the destination must be a clean repository (status empty incl.
     untracked, no in-progress operation, no ``index.lock``) whose HEAD is an ancestor of the source HEAD; only
     objects are transferred now. Raises ``ConflictError`` (``dirty`` | ``diverged`` | ``case_collision`` |
-    ``unsafe_paths`` | ``not_ours``) — the caller then materialises fresh at the fallback."""
+    ``unsafe_paths`` | ``not_ours``) — the caller then materialises fresh at the fallback. ``dirty`` also when an
+    ignored file or directory lies where the update writes (``obstructions``, B2)."""
     git.ensure_supported()
     item = parse_item(item_pack)
     dest = Path(dest)
@@ -868,12 +1074,15 @@ def prepare_update(
         if target_branch is not None and target_branch in skipped:
             raise ConflictError("the HEAD branch diverged at the destination", kind="diverged", ref=target_branch)
         _, found = _common_checks(git, q, item, dest, cfg, rules)
-        lfs_warnings = place_lfs(git, dest, store, item.lfs, checkout=False) if item.lfs else []
+        ci = (rules or cfg.platform_rules()).case_insensitive
         added = _added(git, q, h0, item.worktree_tree)
+        _refuse_obstructions(git, dest, h0, added, case_insensitive=ci)
+        lfs_warnings = place_lfs(git, dest, store, item.lfs, checkout=False) if item.lfs else []
         transfer_pack(q, common)
     finally:
         shutil.rmtree(q, ignore_errors=True)
     warnings = [f"ref {name} diverged at the destination and was not moved" for name in skipped] + lfs_warnings
+    warnings += _lfs_tool_warnings(item)
     return GitApplyState(
         dest=dest,
         mode=DestMode.UPDATE,
@@ -888,6 +1097,7 @@ def prepare_update(
         stash_before=_stash_depth(git, dest),
         warnings=tuple(warnings),
         case_collisions=tuple(found),
+        case_insensitive=ci,
     )
 
 
@@ -930,7 +1140,8 @@ def prepare_return(
 ) -> GitApplyState:
     """Return mode PREPARE (R4, DESIGN §9.5): the destination's current ``(HEAD, index tree, work-tree tree)``,
     recomputed with the **recorded** exclusions, must equal ``out_state`` — "unchanged since the handover", dirty
-    work included, not "clean". Otherwise ``ConflictError(kind=changed_since_handover)`` names what changed."""
+    work included, not "clean". Otherwise ``ConflictError(kind=changed_since_handover)`` names what changed;
+    ``ConflictError(kind=dirty)`` when an ignored file or directory lies where the return writes (B2)."""
     git.ensure_supported()
     item = parse_item(item_pack)
     dest = Path(dest)
@@ -963,18 +1174,23 @@ def prepare_return(
             git, q, item, current, head_ref=head_ref, head_old_allowed=out_state.head or None
         )
         _, found = _common_checks(git, q, item, dest, cfg, rules)
+        ci = (rules or cfg.platform_rules()).case_insensitive
+        alt = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(_out_objects(Path(tmp)))}
+        added = _added(git, q, out_state.worktree_tree, item.worktree_tree, env=alt)
+        _refuse_obstructions(git, dest, out_state.worktree_tree, added, case_insensitive=ci, env=alt)
         lfs_warnings = place_lfs(git, dest, store, item.lfs, checkout=False) if item.lfs else []
         transfer_pack(q, common)
     finally:
         shutil.rmtree(q, ignore_errors=True)
     warnings = [f"ref {name} diverged at the destination and was not moved" for name in skipped] + lfs_warnings
+    warnings += _lfs_tool_warnings(item)
     return GitApplyState(
         dest=dest,
         mode=DestMode.RETURN,
         partial=None,
         h0=out_state.head or None,
         old_refs=old,
-        added_paths=(),
+        added_paths=added,
         out_state=out_state,
         head_ref_before=head_ref,
         planned_refs=planned,
@@ -983,6 +1199,7 @@ def prepare_return(
         warnings=tuple(warnings),
         case_collisions=tuple(found),
         tmp=Path(tmp),
+        case_insensitive=ci,
     )
 
 
@@ -1057,10 +1274,31 @@ def _apply_refs(git: Git, repo: Path, state: GitApplyState) -> None:
     _update_refs(git, repo, cmds)
 
 
-def _post_state(git: Git, state: GitApplyState, item: _Item, repo: Path, tmp: Path) -> bool:
+def _peer_filters(git: Git, state: GitApplyState, item: _Item, repo: Path) -> tuple[str, ...]:
+    """Filter drivers the received trees (W, I) name in a ``.gitattributes`` and the destination's own trees
+    (H0; the out-state W and I) do not (M22). A state check over a destination that may hold received files
+    empties them: a received ``.gitattributes`` never picks a driver of the user the repository did not use."""
+    bare = _bare_of(git, repo)
+    alt = _alt_env(state)
+    theirs = {
+        n for t in {item.worktree_tree, item.index_tree} for n in attribute_filter_names(git, bare, t, env_extra=alt)
+    }
+    if state.mode is DestMode.UPDATE:
+        base = [state.h0]
+    else:
+        assert state.out_state is not None  # noqa: S101 - return states carry it
+        base = [state.out_state.worktree_tree, state.out_state.index_tree]
+    ours = {n for t in base if t for n in attribute_filter_names(git, bare, t, env_extra=alt)}
+    return tuple(sorted(theirs - ours))
+
+
+def _post_state(
+    git: Git, state: GitApplyState, item: _Item, repo: Path, tmp: Path, filters: Sequence[str] = ()
+) -> bool:
     """True when the repository already shows the whole effect of ``commit`` (refs, HEAD, index tree and
     work-tree tree as planned): a forward step that finished in a process which died before its result was
-    journaled. Stash and LFS checkout are idempotent and are repeated by the caller."""
+    journaled. Stash and LFS checkout are idempotent and are repeated by the caller. ``filters``: the drivers
+    the received tree introduced (``_peer_filters``), emptied for the state check (M22)."""
     current = _current_refs(git, repo)
     if any(current.get(name) != new for name, new in state.planned_refs.items()):
         return False
@@ -1069,12 +1307,13 @@ def _post_state(git: Git, state: GitApplyState, item: _Item, repo: Path, tmp: Pa
     if ref_now != want_ref or (item.head_commit is not None and h_now != item.head_commit):
         return False
     excl = state.out_state.exclude_pathspecs if state.out_state is not None else ()
-    now = worktree_state(git, str(repo), excl, tmp)
+    now = worktree_state(git, str(repo), excl, tmp, filter_names=filters)
     return (now.index_tree, now.worktree_tree) == (item.index_tree, item.worktree_tree)
 
 
-def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path) -> bool:
-    """True when nothing of ``commit`` has touched the repository yet (the preconditions PREPARE recorded)."""
+def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path, filters: Sequence[str] = ()) -> bool:
+    """True when nothing of ``commit`` has touched the repository yet (the preconditions PREPARE recorded).
+    ``filters`` as in ``_post_state``."""
     current = _current_refs(git, repo)
     if any(current.get(name) != old for name, old in state.old_refs.items()):
         return False
@@ -1087,7 +1326,7 @@ def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path) -> bool:
         clean, _ = GitProbe(git, profile="received").status_clean(str(repo))
         return clean and h_now == state.h0
     assert state.out_state is not None  # noqa: S101 - return states carry it
-    now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, tmp)
+    now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, tmp, filter_names=filters)
     return not _state_diff(now, state.out_state)
 
 
@@ -1121,11 +1360,12 @@ def commit(
         refuse_orphaned_lock(git, repo)
     _open_existing(git, repo)
     scratch = Path(tmp or state.tmp or (Path(state.qdir).parent if state.qdir is not None else repo.parent))
+    peer = _peer_filters(git, state, item, repo)
     if resume:
-        if _post_state(git, state, item, repo, scratch / "resume"):
+        if _post_state(git, state, item, repo, scratch / "resume", peer):
             _tail(git, repo, item)
             return repo
-        if not _pre_state(git, state, repo, scratch / "resume"):
+        if not _pre_state(git, state, repo, scratch / "resume", peer):
             rollback(git, state, item_pack, partial=True)
     h_now, ref_now = head_info(git, repo)
     if state.mode is DestMode.UPDATE:
@@ -1134,7 +1374,7 @@ def commit(
             raise ConflictError("the destination changed since prepare", kind="dirty", detail=why, path=str(repo))
     else:
         assert state.out_state is not None and state.tmp is not None  # noqa: S101 - return states carry both
-        now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, state.tmp)
+        now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, state.tmp, filter_names=peer)
         diff = _state_diff(now, state.out_state)
         if diff or ref_now != state.head_ref_before:
             raise ConflictError(
@@ -1146,9 +1386,12 @@ def commit(
     for name, old in state.old_refs.items():
         if current.get(name) != old:
             raise ConflictError("a ref moved since prepare", kind="dirty", ref=name)
+    alt = _alt_env(state)
+    base = state.h0 if state.mode is DestMode.UPDATE else state.out_state.worktree_tree  # type: ignore[union-attr]
+    assert base is not None  # noqa: S101 - update states carry H0, return states their out-state
+    _refuse_obstructions(git, repo, base, state.added_paths, case_insensitive=state.case_insensitive, env=alt)
     filters = attribute_filter_names(git, _bare_of(git, repo), item.worktree_tree)
     spec = _wt_spec(repo, filters=filters)
-    alt = _alt_env(state)
     if mark is not None:
         mark()
     try:
@@ -1180,7 +1423,7 @@ def commit(
         # undo the partial change; an undo that fails (an orphaned index.lock of the killed git, …) is reported as
         # such — the caller must not take the repository for untouched
         try:
-            if not _pre_state(git, state, repo, scratch / "resume"):
+            if not _pre_state(git, state, repo, scratch / "resume", peer):
                 rollback(git, state, item_pack, partial=True)
         except Exception as undo:
             raise undo_failed(exc, undo, path=repo) from exc
@@ -1199,12 +1442,36 @@ def _bare_of(git: Git, repo: Path) -> Path:
     return git_dirs(git, repo)[1]
 
 
+def _keep_changed(git: Git, repo: Path, added: Sequence[str], spec: GitEnvSpec, alt: dict | None) -> set[bytes]:
+    """With the index at the received work tree (refreshed by the caller): the added paths that hold something
+    other than what the forward step wrote — changed after c1, or never written by it with something else there
+    now. They leave the index, so the reset or merge that follows does not touch them: the inverse deletes only
+    what it wrote (B2). Returns them (raw names)."""
+    if not added:
+        return set()
+    proc = git.run(["diff-files", "-z", "--name-only"], cwd=repo, spec=spec, env_extra=alt)
+    changed = {p for p in proc.stdout.split(b"\x00") if p}
+    root = os.fsencode(repo)
+    keep = [p for p in (os.fsencode(r) for r in added) if p in changed and os.path.lexists(os.path.join(root, p))]
+    if keep:
+        git.run(
+            ["update-index", "-z", "--force-remove", "--stdin"],
+            cwd=repo,
+            spec=spec,
+            env_extra=alt,
+            input=b"".join(p + b"\x00" for p in keep),
+        )
+    return set(keep)
+
+
 def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, partial: bool = False) -> None:
     """Inverse of ``commit`` (DESIGN §3.4 c1 inverse); idempotent. For fresh mode ``state.dest`` must be the path
     ``commit`` returned. ``partial=True``: the forward step may have stopped anywhere (an exception or a crash in
     its middle); return mode then resets the work tree to the out-state from an index that holds every path of
     the received tree (``read-tree -u --reset``) instead of the two-way merge, which refuses half-updated files.
-    Update mode always resets (``read-tree -u --reset H0``) and removes the paths the forward step added."""
+    Update mode always resets (``read-tree -u --reset H0``) and removes the paths the forward step added. With
+    ``item_pack``, an added path that holds something other than the received content stays where it is, as an
+    untracked file (``_keep_changed``, B2)."""
     if state.mode in (DestMode.FRESH, DestMode.NO_CHECKOUT):
         if state.partial is not None and not state.partial.exists() and state.dest.is_dir():
             os.rename(state.dest, state.partial)
@@ -1219,14 +1486,23 @@ def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, p
         out = state.out_state
         assert out is not None  # noqa: S101 - return states carry it
         git.run(["read-tree", "--end-of-options", item.worktree_tree], cwd=repo, spec=spec, env_extra=alt)
+        git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
+        _keep_changed(git, repo, state.added_paths, spec, alt)
         git.run(
             ["read-tree", "-u", "--reset", "--end-of-options", out.worktree_tree], cwd=repo, spec=spec, env_extra=alt
         )
         git.run(["read-tree", "--end-of-options", out.index_tree], cwd=repo, spec=spec, env_extra=alt)
         git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
     elif state.mode is DestMode.UPDATE:
+        kept: set[bytes] = set()
+        if item is not None and state.added_paths:
+            git.run(["read-tree", "--end-of-options", item.worktree_tree], cwd=repo, spec=spec, env_extra=alt)
+            git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
+            kept = _keep_changed(git, repo, state.added_paths, spec, alt)
         git.run(["read-tree", "-u", "--reset", "--end-of-options", state.h0], cwd=repo, spec=spec, env_extra=alt)
         for rel in state.added_paths:
+            if os.fsencode(rel) in kept:
+                continue
             path = Path(os.fsdecode(os.path.join(os.fsencode(repo), os.fsencode(rel))))
             with contextlib.suppress(FileNotFoundError, IsADirectoryError, NotADirectoryError):
                 if not stat.S_ISDIR(os.lstat(path).st_mode):
@@ -1239,6 +1515,10 @@ def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, p
         if w_in is not None:
             git.run(["read-tree", "--end-of-options", w_in], cwd=repo, spec=spec, env_extra=alt)
             git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
+            if _keep_changed(git, repo, state.added_paths, spec, alt):
+                # the two-way merge would refuse a kept file as "untracked, would be removed": merge from the index
+                # as it now is (the received tree without the kept paths), which leaves them alone
+                w_in = git.out(["write-tree"], cwd=repo, spec=spec, env_extra=alt)
             git.run(
                 ["read-tree", "-u", "-m", "--end-of-options", w_in, out.worktree_tree],
                 cwd=repo,
@@ -1294,6 +1574,7 @@ __all__ = [
     "commit",
     "commit_fresh",
     "discard",
+    "obstructions",
     "parse_item",
     "path_issues",
     "place_lfs",
@@ -1347,6 +1628,7 @@ def state_to_dict(s: GitApplyState) -> dict:
         "warnings": list(s.warnings),
         "case_collisions": [list(p) for p in s.case_collisions],
         "tmp": _p(s.tmp),
+        "case_insensitive": s.case_insensitive,
     }
 
 
@@ -1374,4 +1656,5 @@ def state_from_dict(d: dict) -> GitApplyState:
         warnings=tuple(d.get("warnings") or ()),
         case_collisions=tuple(tuple(p) for p in d.get("case_collisions") or ()),
         tmp=_P(d.get("tmp")),
+        case_insensitive=d.get("case_insensitive") is True,
     )

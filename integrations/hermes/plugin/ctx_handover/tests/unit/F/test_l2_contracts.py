@@ -143,8 +143,9 @@ def test_summary_renders_cluster_d_presend():
     assert {r["source_path"] for r in view["items"]} == {"/srv/app", "/home/u/notes0.md", "/home/u/extra0.txt"}
     later = surfaces.plan_summary(final, {**pre, "withheld_stash": ["stash@{0}"]})
     assert later["withheld_stash"] == ["stash@{0}"]
-    assert surfaces.render_presend(view, "server", Mode.PUSH) == (
-        "Handover → server: 2 items, 3.0 MiB; 2 secrets left out; 1 items outside the project."
+    assert surfaces.render_presend(view, "server", Mode.PUSH) == (  # M37: paths and sizes; M12: unknown window
+        "Handover → server: 2 items, 3.0 MiB; workspace /srv/app (3.0 MiB); 2 secrets left out; 1 items outside "
+        "the project: /home/u/extra0.txt (2.0 KiB); context window of qwen3 there unknown."
     )
     text = surfaces.render_plan(view)
     assert "Plan: 2 items, 3.0 MiB, 1 proposed, 0 conflicts; model qwen3 (local) (offline: yes)." in text
@@ -161,7 +162,10 @@ def test_engine_presend_summary_renders(fake_host):
     eb = EngineBackend(FakeCtx(host=fake_host), Plugin(FakeCtx(host=fake_host)))
     final = sample_final_plan(secrets=1)
     text = surfaces.render_presend(eb.presend_summary(final), "server", Mode.PUSH)
-    assert text == "Handover → server: 1 items, 3.0 MiB; 1 secrets left out."
+    assert text == (  # M12: the sample's target model has no context_length
+        "Handover → server: 1 items, 3.0 MiB; workspace /srv/app (3.0 MiB); 1 secrets left out; context window of "
+        "qwen3 there unknown."
+    )
     assert "Plan: 1 items" in surfaces.render_plan(eb.presend_summary(final))
 
 
