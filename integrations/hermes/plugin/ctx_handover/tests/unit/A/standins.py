@@ -462,7 +462,7 @@ def refine(candidates, target, *, approx_tokens, options, side_question, llm, st
     return stored, RefineReport(used="stored" if stored else "off")
 
 
-def probe(*, instance_name, options, host, config, tools_seen=(), capabilities=frozenset()):
+def probe(*, instance_name, options, host, config, tools_seen=(), capabilities=frozenset(), **kw):
     facts = make_facts(instance_name or "x")
     return replace(facts, tools_seen={name: None for name in tools_seen})
 
@@ -609,7 +609,7 @@ def choose_all(items, *, source_facts, target_facts, lookup, options, local_choi
     ]
 
 
-def fallback_dest(dest, *, now, workspace_root, allow_roots):
+def fallback_dest(dest, *, now, workspace_root, allow_roots, **kw):
     return dest + "-handover-1"
 
 
@@ -686,6 +686,7 @@ def target_ports(txn_cls=WorkspaceTxn):
             discard=discard,
             write_side_state=write_side_state,
             clear_side_state=clear_side_state,
+            side_state_values=real_session_import.side_state_values,
         ),
     )
 

@@ -49,7 +49,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
-from . import WIRE_MAJOR
+from . import WIRE_MAJOR, envfacts
 from .contracts import BlockSink, BlockSource, JobContext, Reporter, SourceAPI, TargetAPI
 from .errors import (
     BadRequest,
@@ -110,7 +110,7 @@ from .model import (
     SessionRef,
 )
 from .ops import object_closure, read_object
-from .plan import CONFIRM_PROPOSED, SUSPECTED_SECRET
+from .plan import CONFIRM_PROPOSED, SUSPECTED_SECRET, yes_exempt
 
 S = ConductorState
 MiB = 1024 * 1024
@@ -455,6 +455,9 @@ class Conductor:
         self._fenced = False
         self._lease_lost = False
         self._busy_since: float | None = None
+        self._in_doubt_since: float | None = None
+        """First IN_DOUBT entry of this run: ``stall_timeout_s`` counts from here, commit retries do not restart it
+        (contract V39, L3-F06); a new run (janitor, resume, adoption) starts a new resolution round."""
         self._beat_lock = threading.Lock()
         now = self._clock()
         self._last_owner_hb = now
@@ -567,7 +570,6 @@ class Conductor:
             )
         elif st in SUSPENDABLE:
             self._go(S.SUSPENDED, recovered=True)
-            self._finish_result()
             return None
         elif st in PREPARE_PHASE:
             self._go(S.ABORTING, abort_reason="owner_died")
@@ -610,7 +612,11 @@ class Conductor:
         return from_wire(cls, value)
 
     def _go(self, to: S, **ctx: object) -> None:
+        """Journal the transition and report it. A stop state (DONE, ABORTED, SUSPENDED) carries the job's result in
+        the same ledger transaction: whoever hears the step — the gateway's final text reads the status at that
+        moment — finds the target's ack, the warnings and the lists already recorded (contract V42, L3-F03)."""
         enc = {k: _encode(v) for k, v in ctx.items()}
+        result = self._result_doc(to, {**self._ctx, **enc}, {}) if to in STOP_STATES else None
         self.ledger.transition(
             self.job.job_id,
             Role.CONDUCTOR,
@@ -618,6 +624,7 @@ class Conductor:
             str(to),
             {"ctx": enc} if enc else {},
             epoch=self.job.epoch,
+            result=result,
         )
         self._ctx.update(enc)
         self._state = to
@@ -675,8 +682,10 @@ class Conductor:
         row = self.ledger.job(self.job.job_id, Role.CONDUCTOR)
         return error_from((row or {}).get("last_error"))
 
-    def _finish_result(self, **extra: object) -> None:
-        st = self._state
+    def _result_doc(self, st: S, ctx: dict, extra: dict) -> dict:
+        """The job's ``result`` for state ``st`` from the journaled context ``ctx`` (``outcome`` from ``extra`` for
+        a parked, non-stop state)."""
+        extra = dict(extra)
         if st is S.DONE:
             outcome = "done"
         elif st is S.ABORTED:
@@ -688,9 +697,14 @@ class Conductor:
         result = {"outcome": outcome, "mode": str(self.job.mode)}
         keys = ("ack", "final_plan", "continue", "warnings", "ended_by", "left_behind", "source_kept", "withheld")
         for key in keys:
-            if self._ctx.get(key) is not None:
-                result["plan" if key == "final_plan" else key] = self._ctx[key]
+            if ctx.get(key) is not None:
+                result["plan" if key == "final_plan" else key] = ctx[key]
         result.update({k: _encode(v) for k, v in extra.items()})
+        return result
+
+    def _finish_result(self, **extra: object) -> None:
+        """Record the result of a parked job (IN_DOUBT, RETIRING); stop states write theirs with the transition."""
+        result = self._result_doc(self._state, self._ctx, extra)
         self.ledger.job_update(self.job.job_id, Role.CONDUCTOR, epoch=self.job.epoch, result=result)
 
     # ======================================================================================================
@@ -744,7 +758,6 @@ class Conductor:
         if st in (S.RETIRED, S.CONTINUING):
             self._warn(f"continuation: {err}")
             self._go(S.DONE)
-            self._finish_result()
             return True
         if st in FORWARD_STATES:
             self._record_error(err)
@@ -752,7 +765,6 @@ class Conductor:
         if st in SUSPENDABLE and is_transient(err):
             self._record_error(err)
             self._go(S.SUSPENDED)
-            self._finish_result()
             return True
         self._fail(err)
         return True
@@ -977,7 +989,31 @@ class Conductor:
         tf = self.target.facts(self.job, sf)
         if self.job.mode is Mode.PUSH and self.job.peer is not None:
             self._remember_peer_facts(tf)
+        self._check_workspace_root(tf)
         self._go(S.PLANNING, source_facts=sf, target_facts=tf)
+
+    def _check_workspace_root(self, facts: EnvFacts) -> None:
+        """R29 (contract V40, L3-F01): the receiving host checked its write root when it probed its facts; an
+        unusable one (``workspace_root_ok is False``) ends the job here — before the lock and before any transfer —
+        with a message naming the setting ``workspace_root``. ``None`` (not checked: an older peer, a stand-in) does
+        not stop it; neither does an export, whose facts describe an importer not known yet (it checks its own root
+        when it imports)."""
+        if self.job.mode is Mode.EXPORT or getattr(facts, "workspace_root_ok", None) is not False:
+            return
+        problem = str(getattr(facts, "workspace_root_problem", "") or "check_failed")
+        message = envfacts.workspace_root_message(facts) or (
+            f"the workspace root {facts.workspace_root} on {facts.instance_name} cannot be used ({problem}); "
+            "set workspace_root in the ctx_handover settings there"
+        )
+        raise PolicyDenied(
+            message,
+            reason="workspace_root",
+            setting="workspace_root",
+            problem=problem,
+            path=facts.workspace_root,
+            side="target",
+            host=facts.instance_name,
+        )
 
     def _remember_peer_facts(self, facts: EnvFacts) -> None:
         """Contract V28: the target facts a paired peer sent last are kept per peer (``export --for <peer>``
@@ -1079,7 +1115,9 @@ class Conductor:
     def _confirm(self, *, interactive: bool) -> FinalPlan:
         """Confirmation after NEGOTIATED (DESIGN §14.1): ``yes`` / ``no_proposed`` / ``show_plan`` / ``cancel``;
         ``None`` (timeout or no interactive surface) continues without proposed items only when proposals are
-        the sole reason, otherwise the job ends with nothing locked [BX L5]."""
+        the sole reason, otherwise the job ends with nothing locked [BX L5]. ``--yes`` answers every reason except
+        those ``plan.yes_exempt`` names (R30: the session's working directory is left out) — for them the user is
+        asked even with ``--yes``, and without an answer the job ends before the lock."""
         final = self._get("final_plan", FinalPlan)
         if self._ctx.get("confirmed"):
             return final
@@ -1097,13 +1135,15 @@ class Conductor:
         if importing:  # the pack holds what the export confirmed; nothing is left to choose here (X02)
             reasons = [r for r in reasons if r != CONFIRM_PROPOSED]
         choice: str | None = "yes"
-        if reasons and not self.job.options.yes:
+        exempt = yes_exempt(reasons)
+        if reasons and (not self.job.options.yes or exempt):
             choice = None
             if interactive and self.confirm is not None:
                 summary = planner.presend_summary(final, instructions=instructions)
                 choice = self.confirm(
                     {
                         "reasons": reasons,
+                        "yes_exempt": exempt,
                         "summary": summary,
                         "final_plan": final,
                         "suspected_secrets": suspected_secrets(final),
@@ -1446,9 +1486,19 @@ class Conductor:
         self._go(S.COMMITTED, ack=ack)
 
     def _in_doubt(self) -> None:
-        """Only terminal target states end IN_DOUBT; ``committing`` keeps the source locked [SK H5]."""
+        """Only terminal target states end IN_DOUBT; ``committing`` keeps the source locked [SK H5].
+
+        ``stall_timeout_s`` bounds the wait from the first IN_DOUBT entry of this run — a commit restarted from here
+        and refused again re-enters without restarting the clock (contract V39). An export (the target is a bundle
+        on this host, nothing is active anywhere before its commit) is aborted once the user took the session back
+        (``reclaim``): a bundle is never written behind that reclaim (R1/D8); its local status is polled at most
+        every ``op_max_s``."""
         delay = self.poll.in_doubt_first_s
-        started = self._clock()
+        if self._in_doubt_since is None:
+            self._in_doubt_since = self._clock()
+        started = self._in_doubt_since
+        bundle = self.job.mode is Mode.EXPORT
+        max_delay = min(self.poll.in_doubt_max_s, self.poll.op_max_s) if bundle else self.poll.in_doubt_max_s
         while True:
             if self._clock() - started > float(self.job.options.stall_timeout_s):
                 self._record_error(
@@ -1481,6 +1531,12 @@ class Conductor:
                     self._info("in_doubt_resolved", target_state=st.state, commit_failed=True)
                     self._go(S.ABORTING, abort_reason="commit_failed")
                     return
+                if bundle and st.state in TARGET_PRE_COMMIT and self._source_given_back():
+                    # V39: the user reclaimed the session of an export that never committed — abort it (the
+                    # bundle's ``abort`` removes the ``.partial``; the release confirms ``reclaimed``)
+                    self._info("in_doubt_resolved", target_state=st.state, source="reclaimed")
+                    self._go(S.ABORTING, abort_reason="source_reclaimed")
+                    return
                 if st.state == "prepared":
                     # the commit never started there (lost request): start it again (idempotent), bounded
                     tries = int(self._ctx.get("commit_retries") or 0) + 1
@@ -1492,7 +1548,17 @@ class Conductor:
             except HandoverError:
                 pass
             self._sleep(delay)
-            delay = min(self.poll.in_doubt_max_s, delay * 2)
+            delay = min(max_delay, delay * 2)
+
+    def _source_given_back(self) -> bool:
+        """The source reports explicitly that its session is active again (``released``/``reclaimed``); any error or
+        other state is not that."""
+        try:
+            return self.source.status(self.job).state in SOURCE_GIVEN_BACK
+        except Fenced:
+            raise
+        except HandoverError:
+            return False
 
     def _committed(self) -> None:
         self._go(S.RETIRING)
@@ -1579,7 +1645,6 @@ class Conductor:
             self._go(S.CONTINUING)
         else:
             self._go(S.DONE)
-            self._finish_result()
 
     def _continuing(self) -> None:
         if self._ctx.get("continue") is None:
@@ -1593,7 +1658,6 @@ class Conductor:
                 error = {"code": err.code, "message": err.message, "details": dict(err.details)}
                 self._note(**{"continue": to_wire(ContinueResult(started=False)) | {"error": error}})
         self._go(S.DONE)
-        self._finish_result()
 
     def _aborting(self) -> None:
         """``target.abort``, then ``source.release`` (DESIGN §3.2). ABORTED only when both confirm explicitly: the
@@ -1619,4 +1683,3 @@ class Conductor:
         if source_state_of(raw) not in SOURCE_GIVEN_BACK:
             raise self._unconfirmed("released", raw)
         self._go(S.ABORTED)
-        self._finish_result()

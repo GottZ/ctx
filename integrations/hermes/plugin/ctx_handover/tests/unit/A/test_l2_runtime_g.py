@@ -367,10 +367,10 @@ def runtime_env(fake_host):
 
 
 def test_listener_settings_take_schema_keys_normalised_and_keep_their_own_knobs(runtime_env):
-    """★ V22: ``server_settings`` = the one normaliser for every schema key (an unknown ``inbound`` word is the
-    default ``auto``) plus the listener's own knobs outside the schema as given (``name``, ``operator_api``, rate
-    limits — the server checks them); job caps outside the schema are positive integers or the default. An empty
-    ``allow_roots`` stays empty in ``Options`` (fail-closed, as the surfaces show it).
+    """★ V22: ``server_settings`` = the one normaliser for every schema key (an unknown ``inbound`` word is ``off``,
+    fail-closed — integrator decision, gp-k0) plus the listener's own knobs outside the schema as given (``name``,
+    ``operator_api``, rate limits — the server checks them); job caps outside the schema are positive integers or the
+    default. An empty ``allow_roots`` stays empty in ``Options`` (fail-closed, as the surfaces show it).
 
     Mutant: ``server_settings`` builds only from ``plugin_settings`` → ``operator_api`` and ``name`` vanish."""
     runtime_env.config.setdefault("plugins", {}).setdefault("entries", {})["ctx_handover"] = {
@@ -385,7 +385,7 @@ def test_listener_settings_take_schema_keys_normalised_and_keep_their_own_knobs(
         }
     }
     s = jobs.server_settings(runtime_env.config)
-    assert s["inbound"] == "auto" and s["max_request_mb"] == 8
+    assert s["inbound"] == "off" and s["max_request_mb"] == 8
     assert (s["name"], s["operator_api"], s["rate_per_s"]) == ("gw-b", True, 5)
     assert (s["max_jobs_per_peer"], s["max_jobs_total"]) == (2, 7)
     assert jobs.local_options({"allow_roots": []}).allow_roots == ()

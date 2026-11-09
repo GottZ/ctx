@@ -55,7 +55,7 @@ from .errors import (
 )
 from .ids import short, ulid
 from .jsonutil import from_wire, to_wire
-from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, Ledger, private_dir, process_owner
+from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, TERMINAL, Ledger, private_dir, process_owner
 from .local_source import LocalSource
 from .local_target import LocalTarget
 from .model import (
@@ -84,6 +84,7 @@ GC_META_KEY = "janitor_gc_at"
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_BUSY, EXIT_AUTH, EXIT_PENDING = 0, 1, 2, 3, 4, 5
 _STOP = frozenset({"done", "aborted", "suspended"})
+_PARTICIPANT_ROLES = (Role.TARGET, Role.SOURCE)
 _UNLOCKED = tuple(
     str(s)
     for s in (
@@ -95,6 +96,12 @@ _UNLOCKED = tuple(
     )
 )
 """Conductor states before LOCKING: nothing is locked anywhere yet."""
+_ACKED = frozenset({"committed", "retiring", "retired", "continuing", "done"})
+"""Conductor states after the commit point: the target's ack is journaled (``ctx.ack``) from COMMITTED on."""
+_PARTICIPANT_OK = frozenset({"committed", "retired", "exported"})
+"""Participant end states of a handover that went through (target committed, source retired or exported)."""
+RECLAIM_SETTLE_S = 15.0
+"""How long ``reclaim`` waits for this process's runner of an export to settle it (V39)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -960,7 +967,14 @@ class JobRunner:
         if self._before_job is not None:
             self._before_job()
         if mode is Mode.EXPORT and bundle_path is None:
-            bundle_path = default_bundle_path(self._session_title(session_ref, calling_session), options)
+            hermes = hostcompat.hermes_paths()
+            bundle_path = default_bundle_path(
+                self._session_title(session_ref, calling_session),
+                options,
+                home=Path.home(),
+                hermes_home=Path(hermes.home),
+                hermes_root=hostcompat.hermes_root(),
+            )
         job_id = ulid()
         params = {
             "mode": str(mode),
@@ -1070,7 +1084,12 @@ class JobRunner:
 
     def status(self, job_id: str | None) -> dict:
         """Machine-readable status for the surfaces (cluster F renders it, X20): ``{"jobs": [...], …}`` without a
-        job, ``{"job": {...}}`` with one (journal tail in ``job.events``)."""
+        job, ``{"job": {...}}`` with one (journal tail in ``job.events``).
+
+        Jobs another gateway conducts are known here too (contract V43, L3-F04): the arrival of a push (role
+        ``target``) and the source of a pull (role ``source``) — listed after this host's conductor jobs and found by
+        ``status <job>``. A participant row of a job this host conducts itself (export, import, the local side of a
+        push or pull) is part of that conductor job and not listed twice."""
         if job_id is None:
             recent = self.ledger.jobs(role=Role.CONDUCTOR, limit=5)
             active = self.ledger.jobs(role=Role.CONDUCTOR, active=True, limit=20)
@@ -1079,20 +1098,96 @@ class JobRunner:
                 if r["job_id"] not in seen:
                     seen.add(r["job_id"])
                     jobs.append(self._summary(r))
+            jobs += [self._participant_summary(r) for r in self._participant_rows()]
             return {
                 "jobs": jobs,
                 "pull_log": self.ledger.pull_log(5),
                 "outbox_pending": len(self.ledger.outbox_due(self.ledger.now() + 10**9, limit=1000)),
             }
         row = self.ledger.job(job_id, Role.CONDUCTOR)
-        if row is None:
-            raise NotFound(f"job {short(job_id)} not found")
-        out = self._summary(row)
+        if row is not None:
+            role, out = Role.CONDUCTOR, self._summary(row)
+        else:
+            row = next((r for r in (self.ledger.job(job_id, ro) for ro in _PARTICIPANT_ROLES) if r is not None), None)
+            if row is None:
+                raise NotFound(f"job {short(job_id)} not found")
+            role, out = Role(row["role"]), self._participant_summary(row)
         out["events"] = [
             {"kind": e["kind"], "state": e["state"], "step": e["step"], "at": e["ts"]}
-            for e in self.ledger.events(job_id, Role.CONDUCTOR)[-20:]
+            for e in self.ledger.events(job_id, role)[-20:]
         ]
         return {"job": out}
+
+    def _participant_rows(self) -> list[dict]:
+        """Active and recent participant rows of jobs another gateway conducts (one per job id and role)."""
+        out, seen = [], set()
+        for role in _PARTICIPANT_ROLES:
+            for r in [*self.ledger.jobs(role=role, active=True, limit=20), *self.ledger.jobs(role=role, limit=5)]:
+                key = (r["job_id"], r["role"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                if self.ledger.job(r["job_id"], Role.CONDUCTOR) is None:
+                    out.append(r)
+        return out
+
+    def _participant_summary(self, row: dict) -> dict:
+        """The X20 summary of a participant job (V43): role, state, peer; on a target the ack and the note the agent
+        gets with the first message there (DESIGN §11.4); on a source the state of its handover. ``calling_session``
+        is this host's session of the job (the arrived one, or the source session)."""
+        role, job_id = Role(row["role"]), row["job_id"]
+        params = row.get("params") or {}
+        peer = self.ledger.peer(row["peer_id"]) if row["peer_id"] else None
+        state, ack, note, origin, session, title = row["state"], None, None, None, None, None
+        if role is Role.TARGET:
+            ack = _journal_ctx(self.ledger, job_id, role).get("ack")
+            ack = ack if isinstance(ack, dict) else None
+            arrival = self.ledger.arrival_for(str(ack.get("session_id") or "")) if ack else None
+            if arrival is None:
+                arrival = next((a for a in self.ledger.arrival_rows() if a.get("job_id") == job_id), None)
+            if arrival is not None:
+                note, session = arrival.get("note"), arrival.get("session_id")
+                origin = f"verified peer ({peer.name})" if _peer_verified(peer) else "peer"
+            session = session or (ack or {}).get("session_id")
+            title = (ack or {}).get("title")
+        else:
+            src = self.ledger.source_state(job_id)
+            if src is not None:
+                state, session, title = str(src["state"]), src.get("tip_id"), src.get("title")
+                ack = src.get("ack") if isinstance(src.get("ack"), dict) else None
+        terminal = state in TERMINAL[role]
+        return {
+            "job_id": job_id,
+            "short": short(job_id),
+            "mode": row["mode"],
+            "role": str(role),
+            "state": state,
+            "active": not terminal,
+            "outcome": state if terminal else "running",
+            "peer_id": row["peer_id"],
+            "peer": peer.name if peer else None,
+            "calling_session": session,
+            "session_ref": params.get("session_ref"),
+            "progress": {"step": state},
+            "restarts": row["restarts"],
+            "last_error": row["last_error"],
+            "error": row["last_error"],
+            "next_action": None,
+            "ack": ack,
+            "title": title,
+            "note": note,
+            "origin": origin,
+            "exclusions": [],
+            "excluded_secrets": [],
+            "withheld_stash": [],
+            "conflicts": [],
+            "instruction_files": [],
+            "continuation": None,
+            "withheld": [],
+            "source_kept": False,
+            "warnings": [],
+            "exit_code": EXIT_OK if state in _PARTICIPANT_OK else (EXIT_FAILED if terminal else EXIT_PENDING),
+        }
 
     def _summary(self, row: dict) -> dict:
         result = row.get("result") or {}
@@ -1100,6 +1195,10 @@ class JobRunner:
         state = row["state"]
         outcome = result.get("outcome") or ("running" if state not in _STOP else state)
         ack = result.get("ack") if isinstance(result.get("ack"), dict) else None
+        if ack is None and state in _ACKED:
+            # COMMITTED … DONE before the result is written: the ack is journaled since COMMITTED (V42, L3-F03)
+            journaled = _journal_ctx(self.ledger, row["job_id"], Role.CONDUCTOR).get("ack")
+            ack = journaled if isinstance(journaled, dict) else None
         plan = result.get("plan") if isinstance(result.get("plan"), dict) else None
         peer = self.ledger.peer(row["peer_id"]) if row["peer_id"] else None
         out = {
@@ -1328,6 +1427,16 @@ def gc_job(ledger: Ledger, job_id: str, *, data_dir: Path, store=None) -> None:
     ledger.purge_job(job_id)
 
 
+def _journal_ctx(ledger: Ledger, job_id: str, role: Role) -> dict:
+    """The journaled context of one side of a job (every ``ctx`` dict of its events, in order)."""
+    out: dict = {}
+    for e in ledger.events(job_id, role):
+        data = e["data"] or {}
+        if isinstance(data.get("ctx"), dict):
+            out.update(data["ctx"])
+    return out
+
+
 def _continuation_files(log_dir: Path, job_id: str) -> tuple[Path, ...]:
     """The files a job's continuation leaves (log and sidecar) as ``continuation.job_files`` names them — the one
     place that knows the names; the log alone with an older ``continuation`` module."""
@@ -1413,9 +1522,48 @@ def reclaim(session_id: str, *, force: bool) -> dict:
         with contextlib.suppress(Exception):
             db.close()
     job_id = out.get("job_id")
+    row = prof.ledger.job(str(job_id), Role.CONDUCTOR) if job_id else None
+    if row is not None and row["mode"] == str(Mode.EXPORT):
+        if out.get("state") in ("reclaimed", "released"):
+            _settle_export(prof, row, out)
+        return out
     if job_id and out.get("state") == "reclaimed":
         out["target_notified"] = _notify_reclaimed(prof, str(job_id))
     return out
+
+
+def _settle_export(prof: _Profile, row: dict, out: dict) -> None:
+    """``reclaim`` of an exported session (V39, R1/D8): an export that has not ended is settled now — the conductor
+    sees the reclaimed source and aborts a bundle that was never committed (its ``.partial`` is removed) — by this
+    process's runner thread of the job if one runs, else by a recovery here (a live owner in another process does
+    it on its next poll). The warnings speak of the bundle: an export has no target "on another machine"."""
+    job_id = row["job_id"]
+    if row["state"] not in _STOP:
+        runner = runner_for(None)
+        with runner._lock:
+            thread = runner._threads.get(job_id)
+        if thread is not None and thread.is_alive():
+            thread.join(RECLAIM_SETTLE_S)
+        else:
+            with contextlib.suppress(HandoverError):
+                runner.recover(job_id, background=False)
+        row = prof.ledger.job(job_id, Role.CONDUCTOR) or row
+    path = (row.get("params") or {}).get("bundle_path")
+    shown = path or "the bundle"
+    warnings = [w for w in out.get("warnings") or () if not str(w).startswith(("the copy on ", "the target on "))]
+    if row["state"] == "aborted":
+        warnings.append(f"the unfinished bundle {shown} was removed; nothing was exported")
+    elif row["state"] == "done":
+        if path and Path(path).exists():
+            warnings.append(
+                f"the bundle {path} stays a valid copy; importing it elsewhere makes a second, independent copy"
+            )
+    else:
+        warnings.append(
+            f"the export (job {short(job_id)}) has not ended yet ({row['state']}); /handover status "
+            f"{short(job_id)} shows what becomes of {shown}"
+        )
+    out["warnings"] = warnings
 
 
 def _notify_reclaimed(prof: _Profile, job_id: str) -> bool:
@@ -1435,14 +1583,29 @@ def _notify_reclaimed(prof: _Profile, job_id: str) -> bool:
     return True
 
 
-def default_bundle_path(title: str | None, options: Options, now: float | None = None) -> Path:
-    """``<workspace_root>/<title-slug>-<YYYYmmdd-HHMMSS>.ctxh.tar`` (DESIGN §5.4, W127); a directory with ``--dir``."""
+def default_bundle_path(
+    title: str | None,
+    options: Options,
+    now: float | None = None,
+    *,
+    home: Path | None = None,
+    hermes_home: Path | None = None,
+    hermes_root: Path | None = None,
+) -> Path:
+    """``<workspace_root>/<title-slug>-<YYYYmmdd-HHMMSS>.ctxh.tar`` (DESIGN §5.4, W127); a directory with ``--dir``.
+    With ``home`` and ``hermes_home`` the root resolves like the target's (``paths.expand_handover_root``, R29): the
+    default ``~/hermes-handover`` inside the Hermes home is ``<HERMES_HOME>/handover-workspaces``."""
     import re
     from datetime import datetime
+
+    from .paths import expand_handover_root
 
     slug = re.sub(r"[^A-Za-z0-9]+", "-", str(title or "session")).strip("-").lower()[:48] or "session"
     stamp = datetime.fromtimestamp(now if now is not None else time.time()).strftime("%Y%m%d-%H%M%S")
     root = Path(os.path.expanduser(options.workspace_root))
+    if home is not None and hermes_home is not None:
+        with contextlib.suppress(HandoverError):
+            root = expand_handover_root(options.workspace_root, home, hermes_home, hermes_root=hermes_root)
     return root / (f"{slug}-{stamp}" + ("" if options.as_dir else ".ctxh.tar"))
 
 

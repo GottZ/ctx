@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -125,15 +126,51 @@ _SCHEMA = (
 )
 
 _PROCESS: dict[str, object] = {}
+_OWNER_RE = re.compile(r"^(\d+):[0-9a-f]+@([0-9a-f-]{8,64})\.(\d+)(?:/.*)?$")
+"""``<pid>:<nonce>@<boot id>.<pid-namespace inode>`` (plus a runner suffix ``/<hex>``): a stamped owner string."""
+
+
+def _ns_stamp() -> str | None:
+    """``<boot id>.<pid-namespace inode>`` of this process on Linux, else None (no stamp: wait for staleness)."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        match = re.search(r"\[(\d+)\]", os.readlink("/proc/self/ns/pid"))
+    except (OSError, ValueError):
+        return None
+    if match is None or not re.fullmatch(r"[0-9a-f-]{8,64}", boot):
+        return None
+    return f"{boot}.{match.group(1)}"
 
 
 def process_owner() -> str:
-    """``<pid>:<process start nonce>`` — the owner string of this process (regenerated after a fork)."""
+    """``<pid>:<process start nonce>`` — the owner string of this process (regenerated after a fork); on Linux
+    stamped ``@<boot id>.<pid-namespace inode>`` like the lease holder (DESIGN §7.2 step 2), so a row of a process
+    that died on this host and namespace can be taken over at once (``owner_dead``)."""
     pid = os.getpid()
     if _PROCESS.get("pid") != pid:
         _PROCESS["pid"] = pid
-        _PROCESS["owner"] = f"{pid}:{secrets.token_hex(4)}"
+        stamp = _ns_stamp()
+        _PROCESS["owner"] = f"{pid}:{secrets.token_hex(4)}" + (f"@{stamp}" if stamp else "")
     return str(_PROCESS["owner"])
+
+
+def owner_dead(owner: str | None) -> bool:
+    """True only for an owner stamped with this host's boot id and this PID namespace whose process is gone
+    (``kill(pid, 0)`` ⇒ no such process). Anything else — unstamped, another host or namespace, a live or foreign
+    process (``EPERM``), this very process — is not known to be dead: the stale window applies (DESIGN §3.1)."""
+    match = _OWNER_RE.match(owner or "")
+    if match is None or match.group(2) + "." + match.group(3) != _ns_stamp():
+        return False
+    pid = int(match.group(1))
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def private_dir(path: Path) -> Path:
@@ -643,8 +680,9 @@ class Ledger:
         return out
 
     def claim_owner(self, job_id: str, role: Role, owner: str, stale_after_s: float) -> int | None:
-        """Take ownership: free or stale (heartbeat older than ``stale_after_s``) ⇒ new epoch; the same owner ⇒
-        its current epoch; a live other owner ⇒ None (DESIGN §3.1)."""
+        """Take ownership: free, stale (heartbeat older than ``stale_after_s``) or held by a process known dead
+        (``owner_dead``: same host and PID namespace, pid gone) ⇒ new epoch; the same owner ⇒ its current epoch; a
+        live other owner ⇒ None (DESIGN §3.1)."""
         with self._w() as c:
             row = c.execute(
                 "SELECT owner, owner_epoch, owner_heartbeat_at FROM jobs WHERE job_id=? AND role=?",
@@ -657,7 +695,8 @@ class Ledger:
                 c.execute("UPDATE jobs SET owner_heartbeat_at=? WHERE job_id=? AND role=?", (now, job_id, str(role)))
                 return int(row["owner_epoch"])
             hb = row["owner_heartbeat_at"]
-            if row["owner"] is not None and hb is not None and hb >= now - float(stale_after_s):
+            fresh = hb is not None and hb >= now - float(stale_after_s)
+            if row["owner"] is not None and fresh and not owner_dead(row["owner"]):
                 return None
             epoch = int(row["owner_epoch"]) + 1
             c.execute(
@@ -730,12 +769,21 @@ class Ledger:
         )
 
     def transition(
-        self, job_id: str, role: Role, expect: str | Sequence[str], to: str, event: dict, *, epoch: int
+        self,
+        job_id: str,
+        role: Role,
+        expect: str | Sequence[str],
+        to: str,
+        event: dict,
+        *,
+        epoch: int,
+        result: dict | None = None,
     ) -> None:
         """CAS on state **and** owner epoch, then append the transition event (one transaction).
 
         ``expect`` is a state, a sequence of states, or ``"*"``. Stale epoch ⇒ ``Fenced``; wrong state ⇒
-        ``InvalidState(reason="state", state=<actual>)``; in both cases nothing is written."""
+        ``InvalidState(reason="state", state=<actual>)``; in both cases nothing is written. ``result`` (additive) is
+        written in the same transaction: a reader that sees the new state sees its result too (contract V42)."""
         allowed = _expect_set(expect)
         with self._w() as c:
             row = self._check_epoch(c, job_id, role, epoch)
@@ -746,10 +794,16 @@ class Ledger:
                     state=row["state"],
                     expected=sorted(allowed),
                 )
-            c.execute(
-                "UPDATE jobs SET state=?, updated_at=? WHERE job_id=? AND role=?",
-                (str(to), self.now(), job_id, str(role)),
-            )
+            if result is None:
+                c.execute(
+                    "UPDATE jobs SET state=?, updated_at=? WHERE job_id=? AND role=?",
+                    (str(to), self.now(), job_id, str(role)),
+                )
+            else:
+                c.execute(
+                    "UPDATE jobs SET state=?, result=?, updated_at=? WHERE job_id=? AND role=?",
+                    (str(to), _dumps(result), self.now(), job_id, str(role)),
+                )
             self._append(c, job_id, role, epoch, "transition", dict(event), state=str(to))
 
     def event(self, job_id: str, role: Role, kind: str, data: dict, *, epoch: int) -> None:

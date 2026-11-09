@@ -39,6 +39,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import CAPABILITIES_V1, PROTOCOL, WIRE_MAJOR, WIRE_MINOR
+from . import settings as settings_mod
 from .contracts import JobContext
 from .errors import (
     Cancelled,
@@ -66,6 +67,7 @@ from .model import (
     ItemKind,
     Limits,
     MapRow,
+    Mode,
     OpStatus,
     PackInfo,
     ParticipantStatus,
@@ -117,11 +119,9 @@ def default_source_ports() -> SimpleNamespace:
 
 
 def _settings_of(config: dict) -> dict:
-    try:
-        value = config["plugins"]["entries"]["ctx_handover"]["settings"]
-    except (KeyError, TypeError):
-        return {}
-    return dict(value) if isinstance(value, dict) else {}
+    """The plugin settings of ``config`` through K0's one normalizer (contract V22): every schema key, YAML words and
+    ``None`` read by the same rules as everywhere else."""
+    return settings_mod.from_config(config)
 
 
 def _digest(*parts: object) -> str:
@@ -324,6 +324,7 @@ class LocalSource:
             config=self.config,
             tools_seen=sorted(self._tools_seen(job)),
             capabilities=self.hello().capabilities,
+            cfg=self.policy,  # the facts' write-root check with this host's policy (gp-d-api §1c)
         )
 
     def _stored_refinement(self, ref: SessionRef) -> Refinement | None:
@@ -642,7 +643,9 @@ class LocalSource:
             return PrepareResult(outcome=PrepareOutcome.STALE_WORKTREE, detail="work tree changed since packing")
         if (prepared.h_all, prepared.h_rows) != (exported.h_all, exported.h_rows):
             raise VerifyFailed("the target's import does not match the source transcript", which="h_all")
-        peer = self.peer_name or (job.peer.name if job.peer is not None else "")
+        # an export has no receiving peer yet (``--for`` only picks the facts): "" makes the title say "exported to
+        # bundle" instead of "handed over to <peer>" (N55)
+        peer = "" if job.mode is Mode.EXPORT else self.peer_name or (job.peer.name if job.peer is not None else "")
         p.lock.prepare(db, self.ledger, info, job.job_id, peer, datetime.fromtimestamp(self._clock()))
         self._sync_state(job)
         return PrepareResult(outcome=PrepareOutcome.OK)
