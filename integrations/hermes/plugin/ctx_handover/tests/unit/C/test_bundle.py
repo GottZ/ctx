@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import json
 import os
 import stat
 import tarfile
 import time
+from dataclasses import replace
 
 import pytest
 
-from ctx_handover.engine import bundle, contracts
+from ctx_handover.engine import bundle, contracts, plan
 from ctx_handover.engine.blocks import BLOCK_SIZE
 from ctx_handover.engine.bundle import BundleSource, BundleTarget, read_manifest
 from ctx_handover.engine.contracts import JobContext
@@ -23,6 +25,7 @@ from ctx_handover.engine.model import (
     CapsuleInfo,
     CommitAck,
     EnvFacts,
+    FinalPlan,
     Include,
     ItemKind,
     ItemRole,
@@ -410,6 +413,83 @@ def test_bundle_copy_flag_and_refused_continue(tmp_path):
     assert manifest["retire"] is False
     src = BundleSource(out, trusted_pubkeys={exp.identity.public_b64()}, trust_unsigned=False, ledger=exp.ledger)
     assert src.is_copy is True
+
+
+def _ack(session_id: str = "s1") -> CommitAck:
+    return CommitAck(
+        session_id=session_id,
+        root_id="r",
+        title=None,
+        dests=(),
+        path_map=(),
+        model=None,
+        offline_capable=True,
+        warnings=(),
+        committed_at=1.0,
+    )
+
+
+def test_bundle_plan_id_follows_the_planning_rule(tmp_path):
+    """★ X02: ``BundleTarget.negotiate`` sets ``plan_id = plan.plan_id(plan.final_doc(final))`` (DESIGN §8.6) — for
+    its own fresh-directory decision and for an injected negotiation that returns a stale id; the bundle manifest
+    and the stored FinalPlan document carry the same id.
+
+    Red proof: mutant = the layer-1 rule ``doc_id(to_wire(final))`` over the document with ``plan_id=""`` → the id
+    differs from ``plan.plan_id(plan.final_doc(final))``.
+    """
+    exp = Exporter(tmp_path)
+    out, _job, _capsule, _pack, final = make_bundle(tmp_path, exp)
+    rule = plan.plan_id(plan.final_doc(final))
+    assert final.plan_id == rule
+    trusted = {exp.identity.public_b64()}
+    manifest, _verified = read_manifest(out, trusted_pubkeys=trusted)
+    assert manifest["plan_id"] == rule
+    src = BundleSource(out, trusted_pubkeys=trusted, trust_unsigned=False, ledger=exp.ledger)
+    stored = from_wire(FinalPlan, json.loads(src.blocks().object_bytes(manifest["final_plan_id"])))
+    src.close()
+    assert stored.plan_id == rule == plan.plan_id(plan.final_doc(stored))
+    injected = BundleTarget(
+        tmp_path / "injected.ctxh.tar",
+        exp.identity,
+        as_dir=False,
+        declared_facts=None,
+        ledger=exp.ledger,
+        negotiate=lambda p, f: replace(final, plan_id="stale"),
+    )
+    job = job_ctx()
+    injected.open_job(job)
+    injected.facts(job, sample_facts(M, "server"))
+    assert injected.negotiate(job, final.plan).plan_id == rule
+    injected.abort(job, "test")
+
+
+def test_bundle_retire_and_again_parameters(tmp_path):
+    """X23 / W058 / W059: the composition root passes ``BundleTarget(…, retire=not options.keep_source)`` and
+    ``BundleSource(…, trusted_pubkeys=…, trust_unsigned=…, again=options.again)``. The keyword parameters exist with
+    the defaults of O3 and SK L5 and act: ``retire`` decides ``manifest.retire`` and ``is_copy``; ``again`` admits a
+    second import of a bundle this profile imported before."""
+    target_params = inspect.signature(BundleTarget).parameters
+    source_params = inspect.signature(BundleSource).parameters
+    assert target_params["retire"].kind is inspect.Parameter.KEYWORD_ONLY and target_params["retire"].default is True
+    assert source_params["again"].kind is inspect.Parameter.KEYWORD_ONLY and source_params["again"].default is False
+    for name in ("trusted_pubkeys", "trust_unsigned", "ledger"):
+        assert source_params[name].kind is inspect.Parameter.KEYWORD_ONLY
+    exp = Exporter(tmp_path)
+    trusted = {exp.identity.public_b64()}
+    for retire in (True, False):
+        out, *_ = make_bundle(tmp_path, exp, retire=retire, name=f"retire-{retire}")
+        manifest, verified = read_manifest(out, trusted_pubkeys=trusted)
+        assert manifest["retire"] is retire and verified
+        importer = make_ledger(tmp_path / f"importer-{retire}" / "ledger.sqlite3")
+        first = BundleSource(out, trusted_pubkeys=trusted, trust_unsigned=False, ledger=importer)
+        assert first.is_copy is (not retire)
+        first.start_retire(job_ctx(), _ack("s1"))
+        first.close()
+        with pytest.raises(ConflictError):
+            BundleSource(out, trusted_pubkeys=trusted, trust_unsigned=False, ledger=importer, again=False)
+        again = BundleSource(out, trusted_pubkeys=trusted, trust_unsigned=False, ledger=importer, again=True)
+        assert again.reimport_of == "s1" and again.is_copy is (not retire)
+        again.close()
 
 
 def test_sec_manifest_size_cap(tmp_path, monkeypatch):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -98,6 +99,7 @@ class StubRunner:
         ctx=None,
         confirm=None,
         bundle_path=None,
+        include_secret=(),
         side_question=None,
     ):
         self.calls.append(("plan_sync", locals()))
@@ -123,7 +125,10 @@ def backend(fake_host, tmp_path):
         arrival=lambda sid: None,
         on_compaction=lambda a, b: None,
     )
-    eb._parts.update({"runtime": types.SimpleNamespace(ledger=ledger, store=store, veto=veto), "runner": StubRunner()})
+    runtime = types.SimpleNamespace(
+        ledger=ledger, store=store, veto=veto, identity=None, identity_error=None, lock=threading.RLock()
+    )
+    eb._parts.update({"runtime": runtime, "runner": StubRunner()})
     eb.ledger_stub, eb.store_stub = ledger, store  # type: ignore[attr-defined]
     return eb
 
@@ -336,11 +341,17 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
 
 
 def test_contract_signatures_used_by_the_glue():
-    """The keyword names the glue passes exist in the INTERFACES §4 signatures it targets (checked against the
-    stand-ins above, which copy those signatures)."""
-    params = inspect.signature(StubRunner.plan_sync).parameters
-    for name in ("session_ref", "calling_session", "session_key", "ctx", "confirm"):
-        assert name in params
+    """The keyword names the glue passes exist in cluster A's real ``JobRunner`` signatures, and the stand-in above
+    copies them (so the other tests of this file exercise the real contract)."""
+    from ctx_handover.engine import jobs
+
+    for method in ("plan_sync", "create_offer"):
+        real = inspect.signature(getattr(jobs.JobRunner, method)).parameters
+        stub = inspect.signature(getattr(StubRunner, method)).parameters
+        assert set(stub) <= set(real), (method, set(stub) - set(real))
+    real = inspect.signature(jobs.JobRunner.plan_sync).parameters
+    for name in ("session_ref", "calling_session", "session_key", "ctx", "confirm", "bundle_path", "include_secret"):
+        assert name in real and name in inspect.signature(StubRunner.plan_sync).parameters
     assert commands.LOCAL_ONLY_VERBS
 
 
@@ -361,16 +372,19 @@ def test_doctor_checks_wiring(backend, monkeypatch, fake_host):
 
     _stub_module(monkeypatch, "crypto", Identity=Identity)
 
+    probes = []
+
     class Client:
+        """``wire.WireClient`` with cluster C's ``probe_gate`` report form (wire.py ``probe_gate``)."""
+
+        clock_skew = 0.0
+
         def __init__(self, peer, ident, *, read_secret):
             self.peer = peer
 
-        def probe_gate(self):
-            return {
-                "ok": False,
-                "detail": "dashboard answered 401 without a plugin signature",
-                "remedy": "check peer_token",
-            }
+        def probe_gate(self, *, measure_limit: bool = False):
+            probes.append(measure_limit)
+            return {"gate": "rejected", "plugin": False, "signed": False, "error": "gate_rejected"}
 
     _stub_module(monkeypatch, "wire", WireClient=Client)
     fake_host.plugin_dir()
@@ -379,5 +393,7 @@ def test_doctor_checks_wiring(backend, monkeypatch, fake_host):
     assert checks["data folder"]["ok"] is True
     assert checks["identity"]["ok"] is True and "0123456789abcdef" in checks["identity"]["detail"]
     assert "1 paired device(s) may dial in" in checks["inbound"]["detail"]
-    assert checks["peer server"]["ok"] is False and checks["peer server"]["remedy"] == "check peer_token"
+    assert probes == [True]  # the proxy body limit is measured (DESIGN §14.1 doctor)
+    assert checks["peer server"]["ok"] is False and "refused the stored credential" in checks["peer server"]["detail"]
+    assert "rejected the access credential" in checks["peer server"]["remedy"]
     assert "peer laptop" not in checks

@@ -161,7 +161,10 @@ def handler(ctx, provider: Callable[[], Any] | None = None) -> Callable[..., str
             if action == "status":
                 state = backend.session_state(session_id)
                 jobs = [
-                    {k: j.get(k) for k in ("job_id", "mode", "state", "peer", "step")}
+                    {
+                        **{k: j.get(k) for k in ("job_id", "mode", "state", "peer", "next_action")},
+                        "step": (j.get("progress") or {}).get("step") if isinstance(j.get("progress"), dict) else None,
+                    }
                     for j in (backend.job_status(None).get("jobs") or ())
                     if j.get("calling_session") == session_id
                 ]

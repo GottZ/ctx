@@ -183,6 +183,43 @@ def test_wire_unsigned_401_is_gate_rejected(tmp_path, spawn_listener, token, hos
         d.client(peer).hello(signed=True)
 
 
+def test_gate_rejected_names_mode_and_peer(tmp_path, spawn_listener, token, host):
+    """★ W122: wherever ``WireClient`` raises ``GateRejected`` — unsigned 401 of the gate, refused Basic login,
+    missing gate secret, no gate at all — ``details`` carry the peer's gate mode and name (the remedy text of the
+    surfaces depends on ``mode``).
+
+    Red proof: mutant = ``_send`` without the ``except GateRejected`` tagging → ``details`` has no ``mode``.
+    """
+    host.secrets["CTX_HANDOVER_PEER_PASSWORD"] = "pw"
+    lst = spawn_listener(gate_token=token, basic={"user": "u", "password": "pw"})
+    d = Dialer(tmp_path)
+    peer = d.pair(lst, name="gw-b")
+
+    def rejected(gate, **secrets):
+        saved = dict(host.secrets)
+        host.secrets.update(secrets)
+        try:
+            with pytest.raises(GateRejected) as info:
+                d.client(Peer(**{**peer.__dict__, "gate": gate}), max_attempts=1).hello(signed=True)
+        finally:
+            host.secrets.clear()
+            host.secrets.update(saved)
+        return info.value.details
+
+    cases = [
+        (GateAuth(mode=GateMode.SESSION_TOKEN), {"CTX_HANDOVER_PEER_TOKEN": "wrong"}, "session_token"),
+        (GateAuth(mode=GateMode.BEARER), {"CTX_HANDOVER_PEER_TOKEN": "wrong"}, "bearer"),
+        (GateAuth(mode=GateMode.BEARER, token_env="UNSET_TOKEN"), {}, "bearer"),
+        (GateAuth(mode=GateMode.BASIC_LOGIN, username="u"), {"CTX_HANDOVER_PEER_PASSWORD": "nope"}, "basic_login"),
+        (None, {}, "none"),
+    ]
+    for gate, secrets, mode in cases:
+        details = rejected(gate, **secrets)
+        assert details.get("mode") == mode, (gate, details)
+        assert details.get("peer") == "gw-b", (gate, details)
+    assert "variable" in rejected(GateAuth(mode=GateMode.BEARER, token_env="UNSET_TOKEN"))
+
+
 def test_wire_404_is_listener_missing(tmp_path, spawn_listener, token):
     lst = spawn_listener(gate_token=token)
     d = Dialer(tmp_path)

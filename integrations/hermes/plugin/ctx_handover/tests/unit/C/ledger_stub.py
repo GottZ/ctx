@@ -409,6 +409,13 @@ class LedgerStub:
         with self.tx() as conn:
             conn.execute("INSERT OR IGNORE INTO job_objects(job_id, object_id) VALUES(?,?)", (job_id, object_id))
 
+    def job_objects_add(self, job_id: str, object_ids: Sequence[str]) -> None:
+        """Mirrors ``engine/ledger.py``: many references in one transaction."""
+        with self.tx() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO job_objects(job_id, object_id) VALUES(?,?)", [(job_id, o) for o in object_ids]
+            )
+
     def job_objects(self, job_id: str) -> set[str]:
         """Requested from cluster A (C report): object ids registered for ``job_id``."""
         with self._conn() as conn:

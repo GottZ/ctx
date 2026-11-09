@@ -939,7 +939,8 @@ def _job_line(job: Mapping) -> list[str]:
             state = "started"
         lines.append(f"    continuation: pid {cont.get('pid')} ({state}), log {cont.get('log')}")
     elif isinstance(cont, Mapping) and isinstance(cont.get("error"), Mapping):
-        lines.append(f"    continuation not started: {cont['error'].get('code', '?')}: {cont['error'].get('message', '')}")
+        cerr = cont["error"]
+        lines.append(f"    continuation not started: {cerr.get('code', '?')}: {cerr.get('message', '')}")
     return lines
 
 

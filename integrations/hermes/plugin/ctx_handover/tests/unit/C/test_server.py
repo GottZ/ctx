@@ -9,15 +9,17 @@ import time
 from dataclasses import replace
 
 from ctx_handover.engine import jsonutil
-from ctx_handover.engine.blocks import BLOCK_SIZE, MEDIA_BLOCKS, decode_frames, encode_frame
+from ctx_handover.engine.blocks import BLOCK_SIZE, MEDIA_BLOCKS, BlockStore, decode_frames, encode_frame
 from ctx_handover.engine.crypto import H_RESP_SIG, random_b64, response_string, sign_request, verify
 from ctx_handover.engine.errors import HandoverError, InvalidState
 from ctx_handover.engine.ids import ulid
 from ctx_handover.engine.model import (
     AuthScheme,
     CapsuleInfo,
+    Hello,
     Peer,
     Right,
+    Role,
 )
 from ctx_handover.engine.server import (
     ROUTES,
@@ -26,8 +28,9 @@ from ctx_handover.engine.server import (
     Request,
     Server,
 )
+from ctx_handover.tests.fakes.blocks_fake import MemoryBlockStore
 from ctx_handover.tests.unit.C.conftest import new_identity
-from ctx_handover.tests.unit.C.helpers import FakeRegistry, sample_facts
+from ctx_handover.tests.unit.C.helpers import FakeParticipant, FakeRegistry, sample_facts
 from ctx_handover.tests.unit.C.ledger_stub import make_ledger
 
 ALL = frozenset({Right.PUSH, Right.PULL})
@@ -151,6 +154,20 @@ def test_server_inbound_auto_off_hides_hello(tmp_path):
     assert on.handle(unsigned_hello()).status == 200
 
 
+def test_server_inbound_setting_as_loaded_from_yaml(tmp_path):
+    """``hermes_yaml`` reads ``inbound: off`` as False and ``inbound: on`` as True (YAML 1.1); False and unknown
+    values close inbound even with a paired peer, True opens it, None is the default ``auto`` (DESIGN §12.4).
+
+    Red proofs: mutant = ``inbound_mode`` maps unknown values to ``auto`` (the layer-1 reading) → the paired listener
+    with ``inbound: "closed"`` answers ``hello`` 200; mutant = without the boolean branch (False/True read as the
+    strings ``"false"``/``"true"``) → ``inbound: True`` answers 404.
+    """
+    for value, status in ((False, 404), ("Off", 404), ("closed", 404), (True, 200), (None, 200), ("ON", 200)):
+        lst = Listener(tmp_path / f"in-{value}", settings={"inbound": value})
+        lst.pair(tmp_path / f"in-{value}")
+        assert lst.handle(unsigned_hello()).status == status, value
+
+
 def test_identity_create_only_in_operator_verbs(tmp_path, host):
     """★ Route paths never create a key: without identity every route is a plain 404 and nothing is written
     (R16, SEC 1.1).
@@ -187,6 +204,47 @@ def test_signed_hello_full_and_response_signed(tmp_path):
     assert {"session.v1", "blocks.v1", "enc.zlib"} <= set(data["capabilities"])
     assert data["instance_id"] == lst.identity.instance_id
     assert abs(data["server_time"] - time.time()) < 5
+
+
+def test_server_settings_as_the_composition_root_passes_them(tmp_path):
+    """W055: ``jobs.server_settings`` hands over the plugin settings as loaded plus ``hosted``, ``plugin_version``
+    and ``hermes_version``; the signed ``hello`` reports ``limits.hosted`` and ``name`` from them, the dialer's
+    ``Hello`` parses both, and unrelated or empty plugin keys do not disturb the listener."""
+    settings = {
+        "inbound": "auto",
+        "name": "gw-b",
+        "max_request_mb": 2,
+        "hosted": True,
+        "plugin_version": "0.1.0",
+        "hermes_version": "0.22.6",
+        "listen_url": "https://b.example",
+        "peer_gate": "session_token",
+        "allow_roots": ["~/hermes-handover"],
+        "max_total_gb": 10,
+        "refine": "auto",
+        "extra_ignore": [],
+        "max_json_bytes": None,
+        "capabilities": "not-a-list",
+    }
+    lst = Listener(tmp_path, settings=settings)
+    d = lst.pair(tmp_path)
+    req = d.req("GET", "hello")
+    resp = lst.handle(req)
+    assert resp.status == 200 and signed_by(lst, req, resp)
+    data = body_of(resp)
+    assert data["limits"]["hosted"] is True
+    assert data["name"] == "gw-b"
+    assert (data["plugin_version"], data["hermes_version"]) == ("0.1.0", "0.22.6")
+    assert data["limits"]["max_request_bytes"] == 2 * 1024**2
+    assert data["limits"]["max_json_bytes"] == 2 * 1024**2  # default 4 MiB, capped by the request size
+    assert {"session.v1", "blocks.v1"} <= set(data["capabilities"])
+    hello = jsonutil.from_wire(Hello, data)
+    assert hello.limits.hosted is True and hello.name == "gw-b"
+    plain = Listener(tmp_path / "plain", settings={"name": None, "max_request_mb": "x"})
+    pd = plain.pair(tmp_path / "plain")
+    data = body_of(plain.handle(pd.req("GET", "hello")))
+    assert data["limits"]["hosted"] is False and data["name"] == ""
+    assert data["limits"]["max_request_bytes"] == 8 * 1024**2
 
 
 def test_server_auth_order_and_generic_errors(tmp_path):
@@ -516,6 +574,79 @@ def test_server_push_blocks_and_pull_scope(tmp_path):
     assert [g[0] for g in got] == list(m.blocks) and all(g[2] is None for g in got)
     resp = lst.handle(d.req("POST", f"jobs/{src}/blocks/get", {"epoch": 1, "ids": list(other.blocks)}, epoch=1))
     assert resp.status == 404
+
+
+class QuotaTarget(FakeParticipant):
+    """Target double whose ``blocks_for(job)`` is cluster A's quota sink over the listener's real block store."""
+
+    def blocks_for(self, job):
+        from ctx_handover.engine.local_target import QuotaSink
+
+        return QuotaSink(self.r.store, self.r.ledger, job.job_id)
+
+
+def _noise(n: int, seed: int) -> bytes:
+    out = bytearray()
+    i = 0
+    while len(out) < n:
+        out += hashlib.sha256(f"{seed}:{i}".encode()).digest()
+        i += 1
+    return bytes(out[:n])
+
+
+def test_server_job_quota_on_put_routes(tmp_path):
+    """★ R28: ``objects/put`` (#23) and ``PUT blocks`` (#25) store through the job's sink (``blocks_for``): without
+    a confirmed plan nothing is stored, and a peer that sends more than the job's quota gets 507
+    ``insufficient_storage`` and no byte of that request lands in the store.
+
+    Red proofs: mutant = ``_h_put_blocks`` writes through ``api.blocks()`` instead of ``self._sink(api, _job)`` →
+    the block request without a confirmed plan is stored (200 instead of 409); mutant = ``_h_objects_put`` through
+    ``api.blocks()`` → the manifest is stored without a quota row (200 instead of 409).
+    """
+    lst = Listener(tmp_path)
+    d = lst.pair(tmp_path)
+    store = BlockStore(tmp_path / "listener" / "data", lst.ledger)
+    lst.registry.store = store
+    lst.registry.target = QuotaTarget(lst.registry, "target")
+    src = MemoryBlockStore()
+    m = src.put_bytes(_noise(2 * BLOCK_SIZE + 1000, 1), "application/octet-stream")
+    b0, b1, b2 = m.blocks
+    job = _open(lst, d)
+
+    def frames(*ids):
+        return b"".join(encode_frame(b, src.get(b), peer_caps=frozenset({"enc.zlib"})) for b in ids)
+
+    def put_blocks(*ids):
+        return lst.handle(d.req("PUT", f"jobs/{job}/blocks", raw=frames(*ids), ctype=MEDIA_BLOCKS, epoch=1))
+
+    def put_manifest(manifest):
+        body = {"epoch": 1, "manifests": [jsonutil.to_wire(manifest)]}
+        return lst.handle(d.req("POST", f"jobs/{job}/objects/put", body, epoch=1))
+
+    # no confirmed plan for the job yet: nothing is stored
+    resp = put_manifest(m)
+    assert resp.status == 409 and body_of(resp)["error"]["details"]["reason"] == "no_quota"
+    assert not store.manifest_path(m.object_id).exists()
+    resp = put_blocks(b2)
+    assert resp.status == 409 and store.missing([b2]) == [b2]
+    # quota = this manifest + blocks 0 and 2
+    manifest_cost = 256 + 70 * len(m.blocks)
+    lst.ledger.quota_set(job, Role.TARGET, manifest_cost + BLOCK_SIZE + 1000)
+    assert body_of(put_manifest(m)) == {"stored": 1}
+    resp = put_blocks(b0, b1, b2)
+    assert resp.status == 507, resp.body
+    err = body_of(resp)["error"]
+    assert err["code"] == "insufficient_storage" and err["details"]["reason"] == "job_quota"
+    assert store.missing([b0, b1, b2]) == [b0, b1, b2]
+    assert body_of(put_blocks(b0, b2)) == {"stored": 2, "rejected": []}
+    resp = put_blocks(b1)
+    assert resp.status == 507 and store.missing([b1]) == [b1]
+    other = src.put_bytes(_noise(500, 2), "application/json")
+    resp = put_manifest(other)
+    assert resp.status == 507 and not store.manifest_path(other.object_id).exists()
+    assert lst.ledger.quota_get(job, Role.TARGET) == (manifest_cost + BLOCK_SIZE + 1000,) * 2
+    resp = lst.handle(d.req("POST", f"jobs/{job}/blocks/need", {"epoch": 1, "ids": list(m.blocks)}, epoch=1))
+    assert body_of(resp) == {"missing": [b1]}
 
 
 def test_server_blocks_get_pages_by_size(tmp_path):

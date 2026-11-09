@@ -46,10 +46,13 @@ from . import ctxrecords, hostcompat, surfaces
 from .continuation import Spawner
 from .errors import (
     BadRequest,
+    CapabilityMissing,
     ConflictError,
     Forbidden,
+    GateRejected,
     HandoverError,
     InDoubt,
+    ListenerMissing,
     NotFound,
     error_class,
 )
@@ -450,9 +453,7 @@ class Plugin:
                         reporter=reporter,
                     )
                 if final is not None:
-                    reporter.start(
-                        surfaces.render_presend(self.backend.presend_summary(final), peer.name, Mode.PUSH)
-                    )
+                    reporter.start(surfaces.render_presend(self.backend.presend_summary(final), peer.name, Mode.PUSH))
                     self.backend.continue_async(job_id)
             except HandoverError as err:
                 reporter.finish(surfaces.render_error(err, peer.name))
@@ -1225,6 +1226,7 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
     settings = backend.settings()
     config = backend.config()
     peer_names = ", ".join(p.name for p in backend.peers() if p.direction == "dial") or "the other gateway"
+    warnings_of = _gate_warnings()
     for key, env in surfaces.SECRET_ENVS.items():
         try:
             stored = bool(hostcompat.read_secret(env))
@@ -1232,12 +1234,14 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
             stored = False
         if stored:
             what = "dashboard token" if key == "peer_token" else "dashboard password"
+            gate = GateAuth(mode=GateMode.SESSION_TOKEN if key == "peer_token" else GateMode.BASIC_LOGIN)
+            lines = warnings_of(gate, env_mode=None) if warnings_of is not None else []
             checks.append(
                 {
                     "name": f"stored {what}",
                     "ok": None,
-                    "detail": f"{env} opens the whole dashboard of {peer_names} (configuration, secrets, "
-                    "terminal), not only this plugin; a stolen .env gives full access there",
+                    "detail": f"{env} (for {peer_names}): "
+                    + ("; ".join(lines) or "it opens the whole dashboard there, not only ctx_handover"),
                     "remedy": "put a reverse proxy in front of the other gateway that passes only "
                     "/api/plugins/ctx_handover/ and checks its own header (peer_extra_headers)",
                 }
@@ -1245,13 +1249,17 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
     try:
         env_path = Path(hostcompat.hermes_paths().home) / ".env"
         mode = stat.S_IMODE(env_path.stat().st_mode)
-        if mode & 0o077:
+        if warnings_of is not None:
+            lines = warnings_of(None, env_mode=mode)
+        else:
+            lines = [f"group- or world-readable (mode {mode:o})"] if mode & 0o077 else []
+        if lines:
             checks.append(
                 {
                     "name": "profile .env permissions",
                     "ok": None,
-                    "detail": f"{env_path} is readable by other users (mode {mode:o}); it holds this device's "
-                    "handover key and any stored dashboard token",
+                    "detail": f"{env_path}: {'; '.join(lines)} — it holds this device's handover key and any stored "
+                    "dashboard token",
                     "remedy": f"chmod 600 {env_path}",
                 }
             )
@@ -1293,6 +1301,87 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
             }
         )
     return checks
+
+
+def _gate_warnings() -> Callable[..., list[str]] | None:
+    """Cluster C's ``wire.gate_warnings`` (W066); None when the runtime cannot import ``wire`` (no ``httpx`` — the
+    import check of ``doctor`` fails then)."""
+    try:
+        from .wire import gate_warnings
+    except ImportError:
+        return None
+    return gate_warnings
+
+
+SKEW_WARN_S = 60
+"""Clock difference to a peer above which ``doctor`` warns (signed requests fail beyond 300 s, ``server.SKEW_S``)."""
+
+
+def peer_check(peer: Peer, probe: Mapping, clock_skew: float | None = None) -> dict:
+    """One ``doctor`` line per dialled peer from cluster C's ``WireClient.probe_gate`` report (W066, X24):
+    ``gate`` (``ok``/``rejected``/``unreachable``), ``plugin``, ``signed``, ``error`` and ``body_limit`` — which
+    layer answered (dashboard 401 vs plugin vs 404 vs network, DESIGN §14.1 doctor), the measured proxy body
+    limit and the clock skew."""
+    name = f"peer {peer.name}"
+    gate = probe.get("gate")
+    error = str(probe.get("error") or "")
+    if gate == "unreachable":
+        return {
+            "name": name,
+            "ok": False,
+            "detail": f"{peer.url or peer.name} did not answer ({error or 'peer_unreachable'})",
+            "remedy": f"check the address, TLS and the network or VPN, and that the dashboard of {peer.name} runs",
+        }
+    if gate == "rejected":
+        mode = peer.gate.mode.value if peer.gate is not None else "session_token"
+        return {
+            "name": name,
+            "ok": False,
+            "detail": f"the dashboard gate of {peer.name} refused the stored credential ({mode}, {error})",
+            "remedy": surfaces.render_error(GateRejected("refused", mode=mode), peer.name),
+        }
+    if gate != "ok":
+        return {
+            "name": name,
+            "ok": False,
+            "detail": f"no usable answer from {peer.name} ({error or gate or 'unknown'})",
+            "remedy": "check the address (listen_url on the other gateway) and run /handover doctor again",
+        }
+    if not probe.get("plugin"):
+        return {
+            "name": name,
+            "ok": False,
+            "detail": f"the dashboard of {peer.name} answered, ctx_handover did not ({error or 'listener_missing'})",
+            "remedy": surfaces.render_error(ListenerMissing("missing"), peer.name),
+        }
+    if error or not probe.get("signed"):
+        klass = error_class(error) if error else None
+        return {
+            "name": name,
+            "ok": False,
+            "detail": f"ctx_handover on {peer.name} answered, but without a valid signed hello ({error or 'unsigned'})",
+            "remedy": surfaces.render_error((klass or HandoverError)(error or "unsigned hello"), peer.name),
+        }
+    parts = ["dashboard gate passed, ctx_handover answered with a valid signature"]
+    ok: bool | None = True
+    remedies: list[str] = []
+    limit = probe.get("body_limit")
+    if isinstance(limit, int) and not isinstance(limit, bool):
+        if limit >= 8 * surfaces.MiB:
+            parts.append("request bodies of 8 MiB pass")
+        else:
+            ok = None
+            parts.append(
+                f"a proxy limits request bodies to {surfaces.human_bytes(limit)}"
+                if limit
+                else "a proxy limits request bodies below 1 MiB"
+            )
+            remedies.append("raise the body limit of the proxy in front of it to 8 MiB (transfers stay smaller)")
+    if clock_skew is not None and abs(float(clock_skew)) > SKEW_WARN_S:
+        ok = None
+        parts.append(f"clock differs by {float(clock_skew):+.0f} s (signatures fail beyond 300 s)")
+        remedies.append("synchronise the clocks (NTP) on both machines")
+    return {"name": name, "ok": ok, "detail": "; ".join(parts), "remedy": "; ".join(remedies) or None}
 
 
 def _gate_advice(url: str | None) -> list[str]:

@@ -104,7 +104,8 @@ class PostMessageReporter:
     ``on_done`` renders the final text when the runner reports a terminal step; without it the last progress
     line stays. Nothing is posted before ``start`` (the planning part runs inside the handler, which answers
     itself). After a closing step (``CLOSING_STEPS``) the notice is final; after a parking step it stays open,
-    because the runner may continue to ``done`` from there. The handle is created by ``start`` in the handler thread (the conversation is bound there).
+    because the runner may continue to ``done`` from there. The handle is created by ``start`` in the handler
+    thread (the conversation is bound there).
     """
 
     def __init__(

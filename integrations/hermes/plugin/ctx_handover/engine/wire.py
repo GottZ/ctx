@@ -323,7 +323,36 @@ class WireClient:
         epoch: int | None,
         accept_unsigned_ok: bool,
     ) -> httpx.Response:
-        """One logical request with retries; returns a verified 2xx response or raises."""
+        """One logical request with retries; returns a verified 2xx response or raises. Every ``GateRejected``
+        (gate secret missing, Basic login refused, unsigned 401) carries ``details.mode`` — this peer's gate mode,
+        ``none`` without a gate — and ``details.peer`` — the peer's name — for the remedy text (W122)."""
+        try:
+            return self._exchange(
+                method,
+                route,
+                body,
+                content_type=content_type,
+                signed=signed,
+                epoch=epoch,
+                accept_unsigned_ok=accept_unsigned_ok,
+            )
+        except GateRejected as exc:
+            gate = self.peer.gate
+            exc.details.setdefault("mode", str(gate.mode) if gate is not None else "none")
+            exc.details.setdefault("peer", self.peer.name)
+            raise
+
+    def _exchange(
+        self,
+        method: str,
+        route: str,
+        body: bytes,
+        *,
+        content_type: str | None,
+        signed: bool,
+        epoch: int | None,
+        accept_unsigned_ok: bool,
+    ) -> httpx.Response:
         last: HandoverError | None = None
         relogged = False
         attempt = 0

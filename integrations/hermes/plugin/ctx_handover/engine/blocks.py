@@ -86,8 +86,8 @@ MAX_MANIFEST_JSON = 64 * 1024**2
 
 MANIFEST_GRACE_S = 600.0
 """A manifest stored or re-stored this recently is never collected (``put_manifests`` → ``ledger.job_object``)."""
-GC_BATCH = 1024
-"""Manifests checked and removed per ledger write transaction."""
+GC_BATCH = 4096
+"""Manifests checked and removed per ledger write transaction (one ``live_objects`` query each)."""
 
 ZSTD_AVAILABLE = _zstd is not None
 _HEX64 = re.compile(r"[0-9a-f]{64}")

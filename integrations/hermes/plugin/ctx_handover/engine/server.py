@@ -448,9 +448,8 @@ class Server:
         self.name = _text(s.get("name"))
         raw_inbound = s.get("inbound")
         self.inbound = inbound_mode(raw_inbound)
-        if not isinstance(raw_inbound, bool) and raw_inbound is not None:
-            if str(raw_inbound).strip().lower() not in {"auto", "on", "off"}:
-                log.warning("ctx_handover: unknown inbound setting %r; inbound stays closed", str(raw_inbound)[:40])
+        if isinstance(raw_inbound, str) and raw_inbound.strip().lower() not in {"auto", "on", "off"}:
+            log.warning("ctx_handover: unknown inbound setting %r; inbound stays closed", raw_inbound[:40])
         self.max_request_bytes = int(_positive(s.get("max_request_mb"), 8) * MIB)
         self.max_json_bytes = min(int(_positive(s.get("max_json_bytes"), DEFAULT_MAX_JSON)), self.max_request_bytes)
         self._rate = _Buckets(_positive(s.get("rate_per_s"), 20), _positive(s.get("rate_burst"), 60), clock)

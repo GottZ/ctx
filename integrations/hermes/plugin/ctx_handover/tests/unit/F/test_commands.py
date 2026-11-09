@@ -149,7 +149,8 @@ def test_slash_handler_returns_after_negotiation():
         (["f"], None, "cancel", False),
         (["g"], None, "cancel", False),
         (["a", "b"], None, "cancel", False),
-        (["unverified"], None, "cancel", False),
+        (["include_secret"], None, "cancel", False),
+        (["not_a_reason_code"], None, "cancel", False),
         (["b"], "yes", "yes", True),
         (["a"], "no_proposed", "no_proposed", True),
         (["c"], "show_plan", "show_plan", False),
@@ -162,8 +163,12 @@ def test_slash_confirmation_choices(reasons, answer, expected, started):
     unanswered question (``ask_choice`` → None after 90 s) continues without proposed items only when (a) is the
     sole reason and cancels with the plan printed for (b)–(g); nothing is locked when it ends there.
 
-    Red proof: mutant = ``choice_on_timeout`` returns ``"yes"`` (continue on None) → 11 of 15 cases red, first
+    Red proof: mutant = ``choice_on_timeout`` returns ``"yes"`` (continue on None) → 12 of 16 cases red, first
     ``AssertionError: assert ['yes'] == ['no_proposed']`` (reasons ['a']); for ['b'] ``['yes'] == ['cancel']``.
+    Reasons are cluster D's codes or letters (X03); unknown codes fail closed. The info has the conductor's form
+    (D's presend summary in ``summary``); mutant = that dict used as the rendering summary (layer 1, W125) →
+    ``assert False`` on ``'Hand over to server: 0 items, 3.0 MiB, 0 proposed, 0 conflicts, model unchanged …'
+    .startswith('Hand over to server: 1 items, 3.0 MiB, 0 proposed, 0 conflicts, model qwen3')``.
     """
     plugin, backend, ctx = _plugin()
     backend.confirm_reasons = reasons
@@ -335,8 +340,14 @@ def test_setup_asks_and_writes_settings():
 
 
 def test_doctor_warns_deployment_token_and_readable_env(fake_host, hermes_home):
-    """R17, SEC 1.1: a stored dashboard token or password (it opens the peer's whole dashboard) and a group- or
-    world-readable profile ``.env`` are reported as warnings with the remedy."""
+    """R17, SEC 1.1, W066: a stored dashboard token or password (it opens the peer's whole dashboard) and a group-
+    or world-readable profile ``.env`` are reported as warnings with the remedy, worded by cluster C's
+    ``wire.gate_warnings``.
+
+    Red proof: mutant = ``_gate_warnings`` returns None (F's own fallback text) →
+    ``assert '[warn] stored dashboard token: CTX_HANDOVER_PEER_TOKEN (for server): the stored dashboard token opens
+    the whole dashboard of this peer' in '…'``.
+    """
     env = hermes_home / ".env"
     env.write_text("CTX_HANDOVER_IDENTITY_KEY=x\n", encoding="utf-8")
     env.chmod(0o644)
@@ -344,9 +355,13 @@ def test_doctor_warns_deployment_token_and_readable_env(fake_host, hermes_home):
     fake_host.secrets["CTX_HANDOVER_PEER_PASSWORD"] = "pw"
     plugin, _backend, _ = _plugin()
     out = _slash(plugin, "doctor")
-    assert "[warn] stored dashboard token: CTX_HANDOVER_PEER_TOKEN opens the whole dashboard" in out
-    assert "[warn] stored dashboard password" in out
-    assert "[warn] profile .env permissions" in out and "chmod 600" in out
+    assert (
+        "[warn] stored dashboard token: CTX_HANDOVER_PEER_TOKEN (for server): the stored dashboard token opens the "
+        "whole dashboard of this peer" in out
+    )
+    assert "[warn] stored dashboard password: CTX_HANDOVER_PEER_PASSWORD (for server): a dashboard password" in out
+    assert "[warn] profile .env permissions" in out and "group- or world-readable (mode 644)" in out
+    assert "chmod 600" in out
     env.chmod(0o600)
     fake_host.secrets.clear()
     out = _slash(plugin, "doctor")

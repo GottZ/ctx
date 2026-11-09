@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import PROTOCOL, WIRE_MAJOR, WIRE_MINOR
+from . import plan as planning
 from .blocks import (
     BLOCK_SIZE,
     MAX_MANIFEST_JSON,
@@ -58,7 +59,7 @@ from .errors import (
     NotFound,
     Unauthorized,
 )
-from .jsonutil import canonical_bytes, doc_id, from_wire, loads_bounded, to_wire
+from .jsonutil import canonical_bytes, from_wire, loads_bounded, to_wire
 from .model import (
     CapsuleInfo,
     CommitAck,
@@ -251,9 +252,11 @@ def _failed(op_id: str, exc: HandoverError) -> OpStatus:
 class BundleTarget:
     """``TargetAPI`` that writes an offline bundle (export, DESIGN §5.4).
 
-    ``negotiate`` (``(plan, facts) -> FinalPlan``) lets the composition root use the planning cluster's decisions
-    and ``plan.plan_id``; without it every included item becomes a fresh-directory decision and ``plan_id`` is the
-    ``jsonutil.doc_id`` of the final plan with an empty id. ``retire`` False marks the bundle as a copy (``--keep``).
+    ``negotiate`` (``(plan, facts) -> FinalPlan``) lets the composition root use the planning cluster's decisions;
+    without it every included item becomes a fresh-directory decision. Either way ``plan_id`` follows the one rule
+    of DESIGN §8.6: ``plan.plan_id(plan.final_doc(final))`` (the FinalPlan document without ``plan_id``), so the
+    pack's ``final_plan_id`` and the bundle's FinalPlan agree. ``retire`` False marks the bundle as a copy
+    (``--keep``, O3): the manifest says ``"retire": false`` and ``BundleSource.is_copy`` is True on import.
     """
 
     def __init__(
@@ -348,11 +351,11 @@ class BundleTarget:
                 free_bytes={str(self.out.parent): free},
                 model_change=None,
             )
-            final = replace(final, plan_id=doc_id(to_wire(final)))
             if need > free:
                 raise InsufficientStorage(
                     "not enough space for the bundle", need_bytes=need, free_bytes=free, path=str(self.out.parent)
                 )
+        final = replace(final, plan_id=planning.plan_id(planning.final_doc(final)))
         self._final = final
         return final
 

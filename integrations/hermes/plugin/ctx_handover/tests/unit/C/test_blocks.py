@@ -291,7 +291,7 @@ def _manifest_kept(store, ledger, m) -> bool:
     return store.manifest_path(m.object_id).is_file() and ledger.object_get(m.object_id) is not None
 
 
-def test_manifest_gc_collects_finished_and_aborted_jobs(plugin_data, ledger):
+def test_manifest_gc_collects_finished_and_aborted_jobs(plugin_data, ledger, monkeypatch):
     """★ R28: ``release_job(keep=False)`` and ``gc`` remove the manifest files and ``objects`` rows of objects that
     no non-terminal job references (committed and aborted jobs, unreferenced objects); objects of a live job — also
     one shared with a finished job — keep both, and so does a manifest (re-)stored within the grace window.
@@ -299,6 +299,7 @@ def test_manifest_gc_collects_finished_and_aborted_jobs(plugin_data, ledger):
     Red proof: mutant = ``release_job`` and ``gc`` without ``self.collect_manifests(…)`` → the aborted job's
     manifest file is still there after ``release_job(keep=False)``.
     """
+    monkeypatch.setattr(blocks, "GC_BATCH", 2)  # several write transactions per walk
     later = time.time() + 2 * blocks.MANIFEST_GRACE_S
     store = BlockStore(plugin_data, ledger, clock=lambda: later)
     done, aborted, live = "01JOBDONE00000000000000000", "01JOBABRT00000000000000000", "01JOBLIVE00000000000000000"

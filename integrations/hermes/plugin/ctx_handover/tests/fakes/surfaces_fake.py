@@ -115,6 +115,7 @@ class FakeCtxServer:
 # commands.Backend / HookRuntime / continuation stand-ins
 # ---------------------------------------------------------------------------------------------------------
 
+from ctx_handover.engine import plan as _plan  # noqa: E402
 from ctx_handover.engine import surfaces as _surfaces  # noqa: E402
 from ctx_handover.engine.errors import HandoverError  # noqa: E402
 from ctx_handover.engine.model import (  # noqa: E402
@@ -124,6 +125,7 @@ from ctx_handover.engine.model import (  # noqa: E402
     Include,
     ItemKind,
     ItemRole,
+    NotTransferred,
     Origin,
     Peer,
     PlanItem,
@@ -135,10 +137,17 @@ from ctx_handover.engine.model import (  # noqa: E402
 
 
 def sample_final_plan(
-    job_id: str = "01JC0000000000000000000ABC", *, proposed: int = 0, suspected: int = 0
+    job_id: str = "01JC0000000000000000000ABC",
+    *,
+    proposed: int = 0,
+    suspected: int = 0,
+    secrets: int = 0,
+    extras: int = 0,
 ) -> FinalPlan:
-    """A small FinalPlan: one primary git repo (included) plus ``proposed`` proposed extras and ``suspected``
-    proposed extras the policy flagged as suspected secrets."""
+    """A small FinalPlan: one primary git repo (included) plus ``proposed`` proposed extras, ``suspected``
+    proposed extras the policy flagged as suspected secrets (cluster D's exact marker ``plan.SUSPECTED_SECRET``),
+    ``secrets`` secret files left behind and ``extras`` included files outside the workspace. ``model_change`` has
+    the form ``LocalTarget`` writes (``from``/``to`` dicts) plus the offline flag."""
     items = [
         PlanItem(
             item_id="w0",
@@ -173,15 +182,30 @@ def sample_final_plan(
                 role=ItemRole.EXTRA,
                 origin=Origin.TRANSCRIPT,
                 include=Include.PROPOSED,
-                reasons=("suspected_secret",),
+                reasons=("transcript", _plan.SUSPECTED_SECRET),
                 size_estimate=64,
+            )
+        )
+    for i in range(extras):
+        items.append(
+            PlanItem(
+                item_id=f"e{i}",
+                kind=ItemKind.EXTRA_FILE,
+                source_path=f"/home/u/extra{i}.txt",
+                role=ItemRole.EXTRA,
+                origin=Origin.USER,
+                include=Include.YES,
+                reasons=("user",),
+                size_estimate=2048,
             )
         )
     plan = ResourcePlan(
         job_id=job_id,
         revision=(1,),
         items=tuple(items),
-        not_transferred=(),
+        not_transferred=tuple(
+            NotTransferred(path=f"/srv/app/.env{i or ''}", why=_plan.WHY_SECRET) for i in range(secrets)
+        ),
         processes=(),
         delegations=(),
         cron=(),
@@ -200,7 +224,12 @@ def sample_final_plan(
         decisions=decisions,
         need_bytes=10 * 1024**2,
         free_bytes={"/home/u": 10 * 1024**3},
-        model_change={"to": "qwen3", "offline_capable": True},
+        model_change={
+            "from": {"model": "gpt-x", "provider": "cloud"},
+            "to": {"model": "qwen3", "provider": "local"},
+            "reason": "provider_not_configured_here",
+            "offline_capable": True,
+        },
     )
 
 
@@ -263,6 +292,8 @@ class FakeBackend:
         self.confirm_reasons: list[str] = []
         self.confirm_answers: list[str] = []
         self.confirm_even_with_yes = False
+        self.instruction_files: list[dict] = []
+        self.pull_log: list[dict] = []
         self.start_error: BaseException | None = None
         self.final = sample_final_plan()
         self.started: list[str] = []
@@ -377,7 +408,20 @@ class FakeBackend:
         if self.start_error is not None:
             raise self.start_error
         if self.confirm_reasons and (not options.yes or self.confirm_even_with_yes):
-            answer = confirm({"reasons": list(self.confirm_reasons), "final_plan": self.final})
+            # the info the conductor passes (conductor._confirm): D's reason codes or letters, D's presend summary
+            answer = confirm(
+                {
+                    "reasons": list(self.confirm_reasons),
+                    "summary": _plan.presend_summary(self.final),
+                    "final_plan": self.final,
+                    "suspected_secrets": [
+                        i.source_path
+                        for i in self.final.plan.items
+                        if i.include is Include.PROPOSED and _plan.SUSPECTED_SECRET in i.reasons
+                    ],
+                    "instruction_files": list(self.instruction_files),
+                }
+            )
             self.confirm_answers.append(answer)
             if answer in {"show_plan", "cancel"}:
                 return job_id, None
@@ -406,7 +450,8 @@ class FakeBackend:
             if job_id not in self.statuses:
                 raise HandoverError(f"unknown job {job_id}")
             return {"job": self.statuses[job_id]}
-        return {"jobs": list(self.jobs)}
+        pulled = [{"peer": r.get("peer_id"), "at": r.get("at"), "items": r.get("items")} for r in self.pull_log]
+        return {"jobs": list(self.jobs), "pull_log": list(self.pull_log), "outbox_pending": 0, "pulled_by": pulled}
 
     def create_offer(self, peer, session_ref, options, *, side_question) -> dict:
         refinement = side_question("which resources?") if side_question else None
