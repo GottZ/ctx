@@ -614,12 +614,17 @@ CONFIRM_CONTEXT: str = planning.CONFIRM_CONTEXT
 the model on the target, so the target compacts it on its first turn."""
 
 CONFIRM_WORKSPACE_DIFFERS: str = planning.CONFIRM_WORKSPACE_DIFFERS
-"""Reason (j) of cluster D (R36, L3-F19): the workspace holds more than the session's working folder — the repository
-around it — and travels as a whole."""
+"""Reason (j) of cluster D (R36/R36a, L3-F19): the workspace is the repository around the session's working folder,
+and that folder holds none of its tracked files (typically somebody else's checkout); a tracked subfolder of the own
+repository (``repo/src``) asks nothing."""
+
+CONFIRM_REPOS_LEFT: str = planning.CONFIRM_REPOS_LEFT
+"""Reason (k) of cluster D (H15 in R30's form): a repository inside the transferred workspace — an initialised
+submodule or another clone in its work tree — stays here with its files and changes."""
 
 YES_EXEMPT: frozenset[str] = planning.YES_EXEMPT
-"""Reasons a blanket yes (``--yes``) never confirms: D's ``plan.YES_EXEMPT`` (R30, R32, R36; suspected secrets, R25,
-are an item marker and handled apart)."""
+"""Reasons a blanket yes (``--yes``) never confirms: D's ``plan.YES_EXEMPT`` (R30, R32, R36, H15; suspected secrets,
+R25, are an item marker and handled apart)."""
 
 REASON_TEXT = {
     planning.CONFIRM_PROPOSED: "some items are only proposed (found by the model, the agent or outside the project)",
@@ -633,8 +638,10 @@ REASON_TEXT = {
     "project does not come along (--yes does not confirm this; --no-workspace does)",
     CONFIRM_CONTEXT: "the session is larger than the context window of the model there, so it is compacted on its "
     "first turn there (/compress here first keeps that in your hands; --yes does not confirm this)",
-    CONFIRM_WORKSPACE_DIFFERS: "the workspace is the whole repository around the session's working folder, not only "
-    "that folder (--yes does not confirm this)",
+    CONFIRM_WORKSPACE_DIFFERS: "the workspace is the whole repository around the session's working folder, which "
+    "holds none of its tracked files (typically somebody else's checkout; --yes does not confirm this)",
+    CONFIRM_REPOS_LEFT: "a repository inside the workspace (an initialised submodule or another clone) stays here with "
+    "its files and changes (--yes does not confirm this)",
 }
 
 SUSPECTED_SECRET: str = planning.SUSPECTED_SECRET
@@ -778,6 +785,65 @@ def context_over_text(entry: Mapping) -> str:
     )
 
 
+def outside_entries(value: Any) -> list[dict]:
+    """D's ``presend_summary["outside_items"]`` (M37) as ``{"path", "size"}`` entries: only mappings with a non-empty
+    string ``path``; ``size`` keeps a non-negative integer, else None (shown as "size unknown")."""
+    out: list[dict] = []
+    for e in value if isinstance(value, (list, tuple)) else ():
+        if isinstance(e, Mapping) and isinstance(e.get("path"), str) and e["path"]:
+            size = e.get("size")
+            valid = isinstance(size, int) and not isinstance(size, bool) and size >= 0
+            out.append({"path": e["path"], "size": size if valid else None})
+    return out
+
+
+def repos_left_entries(value: Any) -> list[dict]:
+    """D's ``presend_summary["repos_left"]`` (H15) as ``{"path", "kind"}`` entries (``kind`` ``submodule`` or
+    ``nested``; another value reads as ``nested``); entries without a string path are dropped."""
+    out: list[dict] = []
+    for e in value if isinstance(value, (list, tuple)) else ():
+        if isinstance(e, Mapping) and isinstance(e.get("path"), str) and e["path"]:
+            out.append({"path": e["path"], "kind": "submodule" if e.get("kind") == "submodule" else "nested"})
+    return out
+
+
+def context_unknown_entry(value: Any) -> dict | None:
+    """D's ``presend_summary["context_unknown"]`` (M12) when it has its form — a positive integer ``tokens``
+    (``model`` optional) — else None."""
+    if not isinstance(value, Mapping) or not (_count(value.get("tokens")) and value.get("tokens")):
+        return None
+    model = value.get("model")
+    return {"tokens": value["tokens"], "model": model if isinstance(model, str) and model else None}
+
+
+def _sized(entry: Mapping) -> str:
+    size = entry.get("size")
+    return f"{entry.get('path')} ({human_bytes(size) if isinstance(size, int) else 'size unknown'})"
+
+
+def _more(text: str, more: int) -> str:
+    return f"{text} and {more} more" if more else text
+
+
+def outside_text(entries: Sequence[Mapping], more: int) -> str:
+    """``<n> items outside the project: <path> (<size>), … [and N more]`` (M37; the count stays, V10)."""
+    return _more(f"{len(entries) + more} items outside the project: " + ", ".join(_sized(e) for e in entries), more)
+
+
+def _repo_name(entry: Mapping) -> str:
+    return f"{'submodule' if entry.get('kind') == 'submodule' else 'repository'} {entry.get('path')}"
+
+
+def repos_left_text(entries: Sequence[Mapping], more: int) -> str:
+    """``stays here: submodule <path>, repository <path> [and N more] (their files do not travel)`` (H15)."""
+    return _more("stays here: " + ", ".join(_repo_name(e) for e in entries), more) + " (their files do not travel)"
+
+
+def context_unknown_text(entry: Mapping) -> str:
+    """``context window of <model> there unknown`` (M12; without a model name ``of the model there``)."""
+    return f"context window of {entry.get('model') or 'the model'} there unknown"
+
+
 def suspected_secrets(info: Mapping | None) -> list[str]:
     """Proposals the policy flagged as suspected secrets (R25): plan items with ``include == proposed`` whose
     ``reasons`` contain the exact element ``SUSPECTED_SECRET`` (X05, W126), plus the conductor's
@@ -833,7 +899,8 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
     plus the per-item rows, proposals, conflicts and need of D's ``plan.summarize`` when ``final`` is known, and
     ``workspace_excluded`` (the working folder the policy left out, R30; None unless it has D's form),
     ``context_over`` (the session is larger than the target model's window, R32; same rule) and ``workspace`` (the
-    workspace against the session's working folder, R36; ``workspace_entry``). F adds
+    workspace against the session's working folder, R36; ``workspace_entry``), ``outside_items``/``outside_more``
+    (M37), ``repos_left``/``repos_left_more`` (H15) and ``context_unknown`` (M12), each only in D's form. F adds
     nothing of its own except the suspected-secret list (R25). ``instruction_files`` (the target's result, with
     ``status``) replaces the summary's list when given."""
     pre: dict = dict(presend) if isinstance(presend, Mapping) else {}
@@ -867,6 +934,11 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
         "workspace_excluded": _workspace_excluded(pre.get("workspace_excluded")),
         "context_over": context_over_entry(pre.get("context_over")),
         "workspace": workspace_entry(pre.get("workspace")),
+        "outside_items": outside_entries(pre.get("outside_items")),
+        "outside_more": _count(pre.get("outside_more")),
+        "repos_left": repos_left_entries(pre.get("repos_left")),
+        "repos_left_more": _count(pre.get("repos_left_more")),
+        "context_unknown": context_unknown_entry(pre.get("context_unknown")),
         "item_list": item_list,
         "proposed": int(full.get("proposed") or 0),
         "conflicts": int(full.get("conflicts") or 0),
@@ -883,7 +955,8 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
 def confirm_question(summary: Mapping, peer: str | None) -> str:
     """``Hand over to <peer>: <n> items, <size>, <k> proposed, <c> conflicts, model <m> (offline: yes/no).
     [The workspace is <path> (<size>)[, more than the session's folder <cwd> (<size>)].] [The working folder <path>
-    stays here (<why>).] [The session (about <n> tokens) is larger than …] Continue?``"""
+    stays here (<why>).] [The session (about <n> tokens) is larger than …] [Outside the project: <path> (<size>), …]
+    [Stays here: submodule <path>, … — …] [The context window of <model> there is unknown, …] Continue?`` (M37)"""
     ws = workspace_entry(summary.get("workspace"))
     folder = f"The workspace is {workspace_text(ws).removeprefix('workspace ')}. " if ws else ""
     excluded = _workspace_excluded(summary.get("workspace_excluded"))
@@ -892,6 +965,21 @@ def confirm_question(summary: Mapping, peer: str | None) -> str:
     over = context_over_entry(summary.get("context_over"))
     if over:
         folder += f"The {context_over_text(over).removeprefix('the ')}. "
+    outside = outside_entries(summary.get("outside_items"))
+    if outside:
+        listed = _more(", ".join(_sized(e) for e in outside), _count(summary.get("outside_more")))
+        folder += f"Outside the project: {listed}. "
+    left = repos_left_entries(summary.get("repos_left"))
+    if left:
+        stays = _more(", ".join(_repo_name(e) for e in left), _count(summary.get("repos_left_more")))
+        folder += (
+            f"Stays here: {stays} — their files and changes do not travel (a submodule only as the commit the "
+            "project records). "
+        )
+    unknown = context_unknown_entry(summary.get("context_unknown"))
+    if unknown:
+        window = context_unknown_text(unknown).removesuffix(" unknown")
+        folder += f"The {window} is unknown, so a session larger than it is not asked about. "
     return (
         f"Hand over to {peer or 'the bundle'}: {summary.get('items_count', 0)} items, "
         f"{human_bytes(summary.get('total_bytes', 0))}, {summary.get('proposed', 0)} proposed, "
@@ -933,6 +1021,12 @@ def render_plan(summary: dict) -> str:
     over = context_over_entry(s.get("context_over"))
     if over:
         lines.append(f"Context: {context_over_text(over)} (/compress here first to keep that in your hands).")
+    unknown = context_unknown_entry(s.get("context_unknown"))
+    if unknown:
+        lines.append(
+            f"Context: the {context_unknown_text(unknown).removesuffix(' unknown')} is unknown (no context_length "
+            "in its config.yaml), so the size of the session is not checked against it."
+        )
     for row in s.get("items") or ():
         dest = f" → {row.get('dest')}" if row.get("dest") else ""
         conflict = f" (conflict: {row['conflict']})" if row.get("conflict") else ""
@@ -946,7 +1040,20 @@ def render_plan(summary: dict) -> str:
         "Tracked files on the secrets list (they travel with the git history):", s.get("denied_tracked") or ()
     )
     lines += _bullets("Stash entries withheld:", s.get("withheld_stash") or ())
-    lines += _bullets("Outside the project folder:", s.get("outside_workspace") or ())
+    outside = outside_entries(s.get("outside_items"))
+    if outside:
+        lines += _bullets("Outside the project:", [_sized(e) for e in outside], limit=len(outside))
+        if _count(s.get("outside_more")):
+            lines.append(f"  - … and {s['outside_more']} more")
+    else:
+        lines += _bullets("Outside the project folder:", s.get("outside_workspace") or ())
+    left = repos_left_entries(s.get("repos_left"))
+    if left:
+        lines += _bullets(
+            "Stays here (their files and changes do not travel):", [_repo_name(e) for e in left], limit=len(left)
+        )
+        if _count(s.get("repos_left_more")):
+            lines.append(f"  - … and {s['repos_left_more']} more")
     lines += _bullets(
         "Proposed files that look like secrets (they stay here unless named with --include-secret <path>):",
         s.get("suspected_secrets") or (),
@@ -958,8 +1065,9 @@ def render_plan(summary: dict) -> str:
 
 def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
     """First progress message (SEC 5.8): what leaves, how much, what stays behind — cluster D's
-    ``presend_summary`` numbers through ``plan_summary`` (W125), the workspace against the session's folder (R36) and
-    the working folder the policy left out (R30)."""
+    ``presend_summary`` numbers through ``plan_summary`` (W125), the workspace against the session's folder (R36),
+    the items outside the project with path and size (M37), repositories that stay here (H15), the working folder the
+    policy left out (R30) and an unknown context window there (M12)."""
     s = summary or {}
     arrow = "←" if str(mode) in {"pull", "import"} else "→"
     secrets = s.get("excluded_secrets") or 0
@@ -975,14 +1083,23 @@ def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
         extras.append(f"{len(s['denied_tracked'])} tracked secret files in git history")
     if s.get("withheld_stash"):
         extras.append(f"{len(s['withheld_stash'])} stash entries withheld")
-    if s.get("outside_workspace"):
-        extras.append(f"{len(s['outside_workspace'])} items outside the project")
+    outside = outside_entries(s.get("outside_items"))
+    if outside:
+        extras.append(outside_text(outside, _count(s.get("outside_more"))))
+    elif s.get("outside_workspace"):
+        extras.append(f"{len(s['outside_workspace'])} items outside the project")  # a summary without D's paths
+    left = repos_left_entries(s.get("repos_left"))
+    if left:
+        extras.append(repos_left_text(left, _count(s.get("repos_left_more"))))
     excluded = _workspace_excluded(s.get("workspace_excluded"))
     if excluded:
         extras.append(workspace_excluded_text(excluded))
     over = context_over_entry(s.get("context_over"))
     if over:
         extras.append(context_over_text(over))
+    unknown = context_unknown_entry(s.get("context_unknown"))
+    if unknown:
+        extras.append(context_unknown_text(unknown))
     return head + ("; " + "; ".join(extras) if extras else "") + "."
 
 
@@ -1148,8 +1265,9 @@ def _workspace_root_text(err: HandoverError, peer: str) -> str:
     return f"{text[:1].upper()}{text[1:]}. Nothing was locked or sent."
 
 
-def render_error(err: HandoverError, peer: str | None) -> str:
-    """The remedy text for an error code; unknown codes fall back to the error's own message."""
+def render_error(err: HandoverError, peer: str | None, *, here: bool = False) -> str:
+    """The remedy text for an error code; unknown codes fall back to the error's own message. ``here``: the error
+    happened on this gateway (a continuation after a pull or an import, review L18), so no other gateway is named."""
     p = peer or str(_d(err, "peer", "") or "") or "the other gateway"
     code = getattr(err, "code", "internal")
     if code == "gate_rejected":
@@ -1250,6 +1368,21 @@ def render_error(err: HandoverError, peer: str | None) -> str:
         return (
             f"{p} is not reachable ({reason}). The job is suspended; the session here is usable again {free}; "
             f"/handover resume {short_job(_d(err, 'job'))} continues."
+        )
+    if code == "continue_refused" and here:
+        if _d(err, "reason") == "approvals_off":
+            return (
+                "Handed over, but approvals are switched off here, so no turn starts without a person. Open the "
+                "session and send a message."
+            )
+        if _d(err, "reason") == "unverified":
+            return (
+                "Handed over, but its source is not verified here (an unsigned bundle, a key this gateway does not "
+                "know, or a pulled session), so no turn starts automatically. Open the session and send a message."
+            )
+        return (
+            "Handed over, but continuation is not allowed here (allow_remote_continue). Open the session and send a "
+            "message."
         )
     if code == "continue_refused":
         if _d(err, "reason") == "approvals_off":
@@ -1470,7 +1603,7 @@ def render_final(
         lines.append("The agent is continuing in that session now.")
     else:
         if continue_error is not None:
-            lines.append(render_error(continue_error, None))
+            lines.append(render_error(continue_error, None, here=True))  # the session is here (L18)
         if arrived is not None:
             lines.append(open_text(arrived["id"], t))
         else:

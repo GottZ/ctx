@@ -15,8 +15,9 @@ Rules this module enforces:
   ``ctx.session_cwd()``.
 * **BX L5** — an unanswered confirmation continues without proposed items when proposed items are the only
   reason, and cancels with nothing locked otherwise.
-* **§7.6** — the veto hooks never raise and do no I/O after the first call of a process (the first call opens
-  the ledger once through ``Backend.hook_runtime``).
+* **§7.6** — the veto hooks never raise and do no I/O once the runtime is in place; the first call of a process
+  starts ``Backend.hook_runtime`` on a thread of its own and waits for it at most ``HOOK_BUILD_WAIT_S``, and a failed
+  build is retried after a growing pause (review M6).
 """
 
 from __future__ import annotations
@@ -82,6 +83,14 @@ REFUSAL = "This command only runs in the Hermes CLI, TUI or Desktop on this mach
 SIDE_QUESTION_TTL_S = 60.0
 NOTE_MAX_OFFERS = 3
 SIDE_QUESTION_CAPABILITY = "llm.side_question"
+HOOK_BUILD_WAIT_S = 5.0
+"""How long the hook calls of one build attempt wait for the profile runtime, together (M6): the runtime is built
+on a thread of its own, so the janitor, the GC and the ctx flush of a process's first use never hold a turn longer.
+A turn that comes before the runtime is in place is not refused (the source lock's marks (1)–(4) still hold)."""
+HOOK_RETRY_MIN_S = 1.0
+HOOK_RETRY_MAX_S = 60.0
+"""Pause before the hooks build the runtime again after a failed build (doubling from ``HOOK_RETRY_MIN_S`` up to
+``HOOK_RETRY_MAX_S``; M6): a failure never switches the turn veto off for the life of the process."""
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_BUSY, EXIT_AUTH, EXIT_DOUBT = 0, 1, 2, 3, 4, 5
 FINISHED_STATES = frozenset({"committed", "retiring", "retired", "continuing", "done"})
@@ -196,10 +205,18 @@ class Backend(Protocol):
     def logs(self, job_id: str) -> list[dict]: ...
     def session_state(self, session_id: str) -> dict: ...
     def session_source(self, session_id: str) -> str | None: ...
+    def session_cwd(self, session_id: str) -> str | None:
+        """The working folder of the session row (R11), or None (W4: base of a relative bundle path in a chat)."""
+        ...
+
     def suggestion_put(self, session_id: str, data: dict) -> None: ...
     def presend_summary(self, final: FinalPlan, *, job_id: str | None = None) -> dict: ...
     def doctor_checks(self, *, measure: bool = False) -> list[dict]: ...
-    def flush_outbox(self, call_mcp: Callable[..., dict] | None) -> dict: ...
+    def flush_outbox(self, call_mcp: Callable[..., dict] | None, *, wait: bool = True) -> dict:
+        """The ctx outbox state (``server``, ``pending``, ``error``, ``stored``); with ``wait=False`` the flush runs on
+        a thread of its own and the answer does not wait for ctx (M29)."""
+        ...
+
     def grant_ctx(self, server: str) -> None: ...
     def set_setting(self, key: str, value: Any) -> None: ...
     def hook_runtime(self) -> HookRuntime | None: ...
@@ -234,13 +251,20 @@ class SideQuestionTokens:
 
 
 class HookSet:
-    """The four hook callbacks. They never raise; after the first call they only touch memory."""
+    """The four hook callbacks. They never raise and never build the runtime on the caller's thread: the first call
+    of a process starts the build on a thread of its own and waits for it at most ``HOOK_BUILD_WAIT_S``; a failed build
+    is retried after ``HOOK_RETRY_MIN_S`` … ``HOOK_RETRY_MAX_S`` (M6). Once the runtime is in place they only touch
+    memory."""
 
     def __init__(self, runtime_factory: Callable[[], HookRuntime | None], tokens: SideQuestionTokens) -> None:
         self._factory = runtime_factory
         self._tokens = tokens
         self._runtime: HookRuntime | None = None
-        self._loaded = False
+        self._build_lock = threading.Lock()
+        self._built: threading.Event | None = None  # set when the running build attempt has ended
+        self._deadline = 0.0  # until when hook calls wait for the running build attempt
+        self._retry_at = 0.0  # no new build attempt before this (monotonic)
+        self._failures = 0
         self._lock = threading.Lock()
         self._offers: dict[str, int] = {}
         self._offered_turn: dict[str, str] = {}
@@ -255,17 +279,49 @@ class HookSet:
         }
 
     def _rt(self) -> HookRuntime | None:
-        if self._loaded:
-            return self._runtime
-        with self._lock:
-            if not self._loaded:
-                try:
-                    self._runtime = self._factory()
-                except Exception:
-                    logger.warning("ctx_handover: hook runtime unavailable; the source lock still holds", exc_info=True)
-                    self._runtime = None
-                self._loaded = True
+        runtime = self._runtime
+        if runtime is not None:
+            return runtime
+        with self._build_lock:
+            if self._runtime is not None:
+                return self._runtime
+            now = time.monotonic()
+            built = self._built
+            if built is None:
+                if now < self._retry_at:
+                    return None  # a failed build waits for its pause: no I/O on this turn
+                built = self._built = threading.Event()
+                self._deadline = now + float(HOOK_BUILD_WAIT_S)
+                thread = threading.Thread(
+                    target=contextvars.copy_context().run,
+                    args=(self._build, built),
+                    name="ctxh-hook-runtime",
+                    daemon=True,
+                )
+                thread.start()
+            wait = max(0.0, self._deadline - now)
+        built.wait(wait)
         return self._runtime
+
+    def _build(self, built: threading.Event) -> None:
+        """One build attempt (on its own thread): the runtime, or the pause before the next attempt."""
+        runtime: HookRuntime | None = None
+        try:
+            runtime = self._factory()
+        except Exception:
+            logger.warning("ctx_handover: hook runtime unavailable; the source lock still holds", exc_info=True)
+        with self._build_lock:
+            if runtime is not None:
+                self._runtime, self._failures = runtime, 0
+            else:
+                self._failures += 1
+                pause = min(float(HOOK_RETRY_MAX_S), float(HOOK_RETRY_MIN_S) * 2 ** min(self._failures - 1, 16))
+                self._retry_at = time.monotonic() + pause
+                logger.warning(
+                    "ctx_handover: turns are not vetoed until the hook runtime is built; next attempt in %.0f s", pause
+                )
+            self._built = None
+        built.set()
 
     def _veto(self, rt: HookRuntime, session_id: str, parent: str | None) -> dict | None:
         entry = rt.lookup(session_id, parent or None)
@@ -976,14 +1032,44 @@ class Plugin:
             peer,
             parsed,
             session_ref=SessionRef(id=sid),
-            bundle_path=os.path.expanduser(path) if path else None,
+            bundle_path=self._typed_path(str(path), call, sid) if path else None,
         )
 
     def _verb_import(self, parsed: surfaces.Parsed, call: Call) -> None:
-        bundle = os.path.expanduser(str(parsed.args["bundle"]))
+        sid = parsed.args.get("session") or call.session_id
+        bundle = self._typed_path(str(parsed.args["bundle"]), call, str(sid) if sid else None)
         if not os.path.exists(bundle):
             raise NotFound(f"No bundle at {bundle}. Give the path of the .ctxh.tar file (or the bundle folder).")
         self._start(call, Mode.IMPORT, None, parsed, session_ref=SessionRef(), bundle_path=bundle)
+
+    def _typed_path(self, raw: str, call: Call, session_id: str | None) -> str:
+        """A bundle path as the person typed it, made absolute without the process's own folder or ``HOME`` (W4,
+        L3-F20): under ``plugins.isolation: host`` the plugin host runs in HERMES_HOME with a profile ``HOME``, and a
+        gateway runs wherever it was started. ``~`` is the home Hermes' own file tools use
+        (``hostcompat.effective_home``); a relative path is the terminal's working folder in ``hermes handover`` and
+        the calling session's working folder (its row, R11) in a chat — refused when that is unknown."""
+        text = raw.strip()
+        if text == "~" or text.startswith(("~/", "~\\")):
+            try:
+                home = str(hostcompat.effective_home())
+            except HandoverError:
+                home = os.path.expanduser("~")
+            return os.path.normpath(home + text[1:])
+        if text.startswith("~"):
+            text = os.path.expanduser(text)  # ~user: that account's home
+        if os.path.isabs(text):
+            return os.path.normpath(text)
+        if call.cli:
+            return os.path.abspath(text)  # the terminal's working folder: the CLI runs where it was typed
+        base = None
+        if session_id:
+            with contextlib.suppress(Exception):
+                base = self.backend.session_cwd(session_id)
+        if isinstance(base, str) and os.path.isabs(base) and os.path.isdir(base):
+            return os.path.normpath(os.path.join(base, text))
+        raise BadRequest(
+            f"Give the bundle as an absolute path or ~/…: this chat has no working folder to start {text} from."
+        )
 
     def _own_jobs(self, status: dict, call: Call) -> dict:
         if call.local:
@@ -993,7 +1079,7 @@ class Plugin:
 
     def _verb_status(self, parsed: surfaces.Parsed, call: Call) -> None:
         backend = self.backend
-        flush = backend.flush_outbox(getattr(self.ctx, "call_mcp", None))
+        flush = backend.flush_outbox(getattr(self.ctx, "call_mcp", None), wait=False)  # ctx never holds status (M29)
         job = self._resolve_job(parsed.args.get("job"), call) or None
         status = dict(backend.job_status(job))
         if job and not call.local:
@@ -1163,11 +1249,15 @@ class Plugin:
             call.say(f"warning: {warning}")
         if (
             ok
+            and result.get("state") == "reclaimed"
             and result.get("target_notified") is not True
-            and any("copies are now independent" in w for w in warnings)
+            and result.get("export") is not True
         ):
-            # R35 (L3-F18): after a finished handover the other copy stays active; when it pulled the session or
-            # could not be reached it is never told, and the user has to know that.
+            # R35 (L3-F18): after a handover that reached the other side the copy there stays active; when it pulled
+            # the session or could not be reached it is never told, and the user has to know that. The sentence hangs
+            # on the structured result — B's ``state``, A's ``target_notified`` (True only for a delivered notice) and
+            # ``export`` (``EngineBackend.reclaim``: an export's other copy is the bundle, which its own warning names)
+            # — never on a warning's wording (review M30). Unknown counts as "not told".
             call.say(
                 "That copy is not told about this reclaim (it pulled this session, or it could not be reached); "
                 "it stays active there until someone ends it."
@@ -1906,13 +1996,18 @@ class EngineBackend:
                 self._parts[name] = build()
             return self._parts[name]
 
-    def _started(self) -> Any:
+    def _started(self, *, janitor_background: bool = False) -> Any:
+        """The profile runtime (X19). ``janitor_background`` (the hooks, review M6): when this call starts it, the
+        process's first janitor run goes to a thread of its own instead of the caller's."""
+
         def build() -> Any:
             from . import jobs
 
             # The factory first: ensure_started's janitor may create the profile's runner, and a runner without
             # the surfaces' reporter factory would send the progress of every later job nowhere.
             jobs.runner_for(self._ctx, self._plugin.broker.factory)
+            if janitor_background:
+                return jobs.ensure_started(self._ctx, janitor_background=True)
             return jobs.ensure_started(self._ctx)
 
         return self._part("runtime", build)
@@ -2023,6 +2118,14 @@ class EngineBackend:
             gate=gate,
             allow_insecure=allow_insecure,
             ledger=self._ledger(),
+            # H1 (rv-c): the profile .env through Hermes' own readers and writer — the pairing compares credential
+            # values with the other peers' and copies the form's credential into this peer's own variables
+            secret_store=pairing.SecretStore(
+                read=hostcompat.read_secret,
+                save=hostcompat.save_env,
+                read_fresh=hostcompat.read_env_fresh,
+                writable=hostcompat.env_writable,
+            ),
         )
 
     def identity(self, *, create: bool) -> dict | None:
@@ -2060,7 +2163,7 @@ class EngineBackend:
         reporter: Any,
         include_secret: tuple[str, ...] = (),
     ) -> tuple[str, FinalPlan | None]:
-        self._flush_quietly()
+        # no ctx flush here (M29): the runner's ``before_job`` starts it in the profile's one ``ctxh-outbox`` thread
         job_id, final = self._runner().plan_sync(
             mode,
             peer,
@@ -2163,14 +2266,26 @@ class EngineBackend:
         from . import jobs
 
         self._started()
-        return dict(jobs.reclaim(session_id, force=force) or {})  # tells the target ``source_reclaimed`` (W047)
+        out = dict(jobs.reclaim(session_id, force=force) or {})  # tells the target ``source_reclaimed`` (W047)
+        job_id = out.get("job_id")
+        if job_id:
+            # ``export``: whether the reclaimed handover was an export (its other copy is the bundle) — from this
+            # gateway's conductor row; a pull's source has none (review M30)
+            with contextlib.suppress(Exception):
+                from .model import Role
+
+                row = self._ledger().job(str(job_id), Role.CONDUCTOR)
+                out["export"] = isinstance(row, Mapping) and str(row.get("mode")) == str(Mode.EXPORT)
+        return out
 
     def gc(self, *, job_id: str | None, all_jobs: bool) -> dict:
         """``/handover gc`` (SEC 6.3, BO §6 #21): per job cluster A's one implementation ``jobs.gc_job`` (its blocks
         and manifests through ``BlockStore.release_job``, staging with quarantine, report, continuation log, then
         journal and rows), then one cache pass ``BlockStore.gc`` (``--all``: everything not needed by a live job).
         ``--job`` of an unfinished job raises ``InvalidState``; ``--all`` keeps unfinished jobs (``skipped``). An
-        id that is not a ULID never reaches a path. ``freed_bytes`` = bytes on disk before minus after."""
+        id that is not a ULID never reaches a path. Without ``--job`` the source staging of finished holds goes too
+        (``local_source.purge_source_staging``; ``staging`` = jobs cleaned). ``freed_bytes`` = bytes on disk before
+        minus after."""
         from . import jobs
         from .ids import ULID_RE
         from .model import Role
@@ -2203,12 +2318,19 @@ class EngineBackend:
                 skipped += 1
                 continue
             done += 1
+        staging = 0
+        if not job_id:
+            # DESIGN §14 "staging GC now" (rv-a, H4): the source staging every finished hold left behind — the
+            # janitor's step, under each job's lock; a hold that is not over keeps its directories
+            from .local_source import purge_source_staging
+
+            staging = int(purge_source_staging(rt.ledger, data, lock_dir=data / "locks") or 0)
         s = self.settings()
         rt.store.gc(
             keep_days=0 if all_jobs else int(s["block_cache_days"]),
             max_bytes=0 if all_jobs else int(float(s["block_cache_gb"]) * surfaces.GiB),
         )
-        return {"freed_bytes": max(0, before - _gc_usage(data)), "jobs": done, "skipped": skipped}
+        return {"freed_bytes": max(0, before - _gc_usage(data)), "jobs": done, "skipped": skipped, "staging": staging}
 
     def logs(self, job_id: str) -> list[dict]:
         from .model import Role
@@ -2234,6 +2356,16 @@ class EngineBackend:
             with contextlib.suppress(Exception):
                 db.close()
         return str(row.get("source")) if isinstance(row, Mapping) and row.get("source") else None
+
+    def session_cwd(self, session_id: str) -> str | None:
+        db = hostcompat.session_db()
+        try:
+            row = db.get_session(session_id)
+        finally:
+            with contextlib.suppress(Exception):
+                db.close()
+        cwd = row.get("cwd") if isinstance(row, Mapping) else None
+        return cwd if isinstance(cwd, str) and cwd else None
 
     def suggestion_put(self, session_id: str, data: dict) -> None:
         self._ledger().suggestion_put(session_id, data)
@@ -2353,11 +2485,7 @@ class EngineBackend:
             checks.append({"name": "ledger", "ok": False, "detail": surfaces.render_error(err, None)})
         return checks
 
-    def _flush_quietly(self) -> None:
-        with contextlib.suppress(Exception):
-            self.flush_outbox(getattr(self._ctx, "call_mcp", None))
-
-    def flush_outbox(self, call_mcp: Callable[..., dict] | None) -> dict:
+    def flush_outbox(self, call_mcp: Callable[..., dict] | None, *, wait: bool = True) -> dict:
         settings = self.settings()
         config = self.config()
         server = ctxrecords.server_for(config, settings)
@@ -2366,12 +2494,18 @@ class EngineBackend:
         ledger = self._ledger()
         stored = 0
         result: dict[str, Any] = {"server": server}
+        category = str(settings.get("ctx_category") or "handover")
         if not ctxrecords.allowed(config, server):
             result["error"] = f"recording in {server} is not allowed yet; run /handover setup (or set ctx_persist: off)"
-        elif callable(call_mcp):
-            stored = ctxrecords.flush(
-                ledger, call_mcp, server, str(settings.get("ctx_category") or "handover"), time.time()
+        elif callable(call_mcp) and not wait:
+            # the profile's one background flusher (``Runtime.flush_in_background``, thread ``ctxh-outbox``, one at a
+            # time): two flushers would store the same due rows twice (M29)
+            self._started().flush_in_background(
+                lambda led: ctxrecords.flush(led, call_mcp, server, category, time.time())
             )
+            result["flushing"] = True
+        elif callable(call_mcp):
+            stored = ctxrecords.flush(ledger, call_mcp, server, category, time.time())
         return {**result, "stored": stored, "pending": ctxrecords.pending(ledger)}
 
     def grant_ctx(self, server: str) -> None:
@@ -2397,5 +2531,7 @@ class EngineBackend:
     def hook_runtime(self) -> HookRuntime | None:
         from . import lock
 
-        rt = self._started()  # the profile's one VetoIndex (started by ensure_started); never a second one
+        # the profile's one VetoIndex (started by ensure_started); never a second one. The janitor of a process's
+        # first use runs on its own thread, so the hook's build is the ledger and the index only (M6)
+        rt = self._started(janitor_background=True)
         return _VetoAdapter(rt.veto, rt.ledger, lock.veto_texts)

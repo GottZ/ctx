@@ -304,6 +304,7 @@ class FakeBackend:
         self.jobs: list[dict] = []
         self.session_states: dict[str, dict] = {}
         self.sources: dict[str, str] = {}
+        self.session_cwds: dict[str, str] = {}  # session id → working folder of its row (W4)
         self.suggestions: list[tuple[str, dict]] = []
         self.hook = FakeHookRuntime()
         self.checks: list[dict] = []
@@ -504,6 +505,9 @@ class FakeBackend:
     def session_source(self, session_id: str) -> str | None:
         return self.sources.get(session_id)
 
+    def session_cwd(self, session_id: str) -> str | None:
+        return self.session_cwds.get(session_id)
+
     def suggestion_put(self, session_id: str, data: dict) -> None:
         self.suggestions.append((session_id, data))
 
@@ -519,8 +523,8 @@ class FakeBackend:
         self._rec("doctor_checks", measure=measure)
         return list(self.checks)
 
-    def flush_outbox(self, call_mcp) -> dict:
-        self._rec("flush_outbox", call_mcp=call_mcp)
+    def flush_outbox(self, call_mcp, *, wait: bool = True) -> dict:
+        self._rec("flush_outbox", call_mcp=call_mcp, wait=wait)
         return dict(self.outbox)
 
     def grant_ctx(self, server: str) -> None:

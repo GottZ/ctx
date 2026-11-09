@@ -1,6 +1,6 @@
 name: ctx_handover
 version: 0.1.0
-description: "Works without ctx. Moves a live Hermes session and the working files it needs to another Hermes gateway you own (pull, push or an offline bundle) and continues it there: transcript byte-exact and hash-verified, git repos with branches, stash and uncommitted work, a note about what changed. Not the core /handoff, not hermes-handoff, not session-relay."
+description: "Works without ctx. Moves a live Hermes session and the working files it needs to another Hermes gateway you own (pull, push or an offline bundle) and continues it there: transcript row by row and hash-verified, git repos with branches, stash and uncommitted work, a note about what changed. Not the core /handoff, not hermes-handoff, not session-relay."
 kind: standalone
 requires_hermes: ">=0.22.6"
 manifest_version: 2
@@ -37,7 +37,7 @@ config_schema:
     type: secret
     env: CTX_HANDOVER_PEER_TOKEN
     label: Dashboard token of the other gateway
-    description: "Used for session_token and bearer. It opens that gateway's whole dashboard, not only this plugin; prefer a reverse proxy that passes only /api/plugins/ctx_handover/."
+    description: "Used for session_token and bearer by the next pairing, which copies it into CTX_HANDOVER_PEER_TOKEN_<peer id> for that gateway alone; it is sent only to the address it was stored for. It opens that gateway's whole dashboard, not only this plugin; prefer a reverse proxy that passes only /api/plugins/ctx_handover/."
   peer_username:
     type: str
     default: ""
@@ -46,12 +46,12 @@ config_schema:
     type: secret
     env: CTX_HANDOVER_PEER_PASSWORD
     label: Dashboard password (basic_login)
-    description: "Opens that gateway's whole dashboard, not only this plugin."
+    description: "Used by the next pairing, which copies it into CTX_HANDOVER_PEER_PASSWORD_<peer id> for that gateway alone; sent only to the address it was stored for. Opens that gateway's whole dashboard, not only this plugin."
   peer_extra_headers:
     type: dict
     default: {}
     label: Extra request headers for a proxy
-    description: "{header name: name of an .env variable holding its value}, e.g. {CF-Access-Client-Secret: CF_ACCESS_SECRET}."
+    description: "{header name: name of an .env variable holding its value}, e.g. {CF-Access-Client-Secret: CF_ACCESS_SECRET}. Pairing copies each value into CTX_HANDOVER_PEER_HEADER<n>_<peer id> for that gateway alone."
   workspace_root:
     type: str
     default: "~/hermes-handover"
@@ -60,7 +60,7 @@ config_schema:
     type: list
     default: ["~/hermes-handover"]
     label: Folders a handover may write into
-    description: "Received workspaces land only here (or at a path this machine recorded itself). Hermes, credential, shell-startup, autostart, git and ssh configuration locations are refused even inside these folders."
+    description: "Received workspaces land only here, or in the folder a repository came from when it returns (recorded by this machine), or at a --dest/--map typed here. Hermes, credential, shell-startup, autostart, git and ssh configuration locations of every home, and system folders, are refused even inside these folders."
   export_roots:
     type: list
     default: []

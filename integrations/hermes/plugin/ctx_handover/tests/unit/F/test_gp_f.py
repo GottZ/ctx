@@ -650,6 +650,8 @@ def dialing_backend(fake_host, tmp_path, monkeypatch):
         return real(peer, ident, read_secret=lambda n: "gate-token", transport=listener.transport, max_attempts=1)
 
     monkeypatch.setattr(wire, "WireClient", client)
+    # H1 (rv-c): the pairing copies the form's credential into the peer's own variable, so the form slot holds one
+    fake_host.secrets["CTX_HANDOVER_PEER_TOKEN"] = "gate-token"
     return backend, runtime, listener
 
 

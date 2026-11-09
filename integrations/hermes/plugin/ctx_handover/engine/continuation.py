@@ -123,7 +123,9 @@ class Spawner:
 
     # -- argv and environment -------------------------------------------------------------------------
     def hermes_argv(self) -> list[str]:
-        """``[hermes]`` or ``[hermes, "-p", profile]`` for a non-default profile (DESIGN §11.5, §15.4)."""
+        """``[hermes, "-p", profile]`` for every named profile, ``default`` included (DESIGN §11.5, §15.4; review M28:
+        without ``-p`` Hermes follows the sticky ``active_profile`` of its root, which may name another profile than
+        the one whose approval check passed); ``[hermes]`` only when the profile is unknown (``None``)."""
         exe = self._which("hermes")
         if not exe:
             argv0 = self._argv0 if self._argv0 is not None else (sys.argv[0] if sys.argv else "")
@@ -134,7 +136,7 @@ class Spawner:
                 "The hermes command was not found on PATH, so the continuation cannot start.", capability="hermes_cli"
             )
         argv = [str(exe)]
-        if self._profile and self._profile != "default":
+        if self._profile:
             argv += ["-p", str(self._profile)]
         return argv
 
@@ -293,7 +295,9 @@ class Spawner:
     def result(self, job_id: str) -> dict:
         """``{started, pid, log, running, exit_code, started_at}`` of the job's child, readable from any process.
 
-        ``running`` is None when it cannot be told (Windows, or a pid this process may not signal).
+        ``running`` is None when it cannot be told (Windows, or a pid this process may not signal). ``exit_code`` is
+        the reaper's sidecar value; the trailer line in the log — which the child could print itself — counts only for
+        a child that is gone (review L20).
         """
         if not is_ulid(job_id):
             return {"started": False}
@@ -302,8 +306,6 @@ class Spawner:
         if not meta or not meta.get("pid"):
             return {"started": False}
         exit_code = meta.get("exit_code")
-        if exit_code is None:
-            exit_code = self._trailer_code(log_path)
         pid = int(meta["pid"])
         running: bool | None
         if exit_code is not None:
@@ -318,6 +320,8 @@ class Spawner:
                 running = False
             except PermissionError:
                 running = None
+        if exit_code is None and running is False:
+            exit_code = self._trailer_code(log_path)  # the reaping process ended before it recorded the code
         return {
             "started": True,
             "pid": pid,

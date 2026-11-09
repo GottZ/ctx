@@ -4,8 +4,10 @@ BRIEF D12, BX M1).
 ctx is never in the critical path. A process that finishes a job side (source retire, target commit — also
 ``hermes serve`` and an offline laptop) calls ``enqueue``: the redacted record goes into the ledger table
 ``ctx_outbox``. A process that holds a plugin ``ctx`` (gateway, CLI) calls ``flush`` on first use, before each
-job and on ``/handover status``; rows that fail stay in the outbox with the ledger's backoff. Neither function
-raises: a failure is logged (once per row at warning level) and shown by ``/handover status``.
+job and on ``/handover status`` — on a thread of its own, never in the caller's way — and keeps to a total budget
+(``FLUSH_BUDGET_S``) wherever it runs; rows that fail stay in the outbox with the ledger's backoff, rows the budget
+did not reach stay due. Neither function raises: a failure is logged (once per row at warning level) and shown by
+``/handover status``.
 
 ctx is reached only through Hermes' MCP dispatch (``ctx.call_mcp``), which needs the operator's
 ``plugins.entries.ctx_handover.mcp_allowlist`` entry; ``/handover setup`` asks for it.
@@ -16,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -30,6 +33,12 @@ KINDS = {"departure": "out", "arrival": "in"}
 RECORD_MAX_BYTES = 8 * 1024
 CALL_TIMEOUT_S = 10.0
 SEARCH_TIMEOUT_S = 10.0
+FLUSH_BUDGET_S = 2.0
+"""Total time one ``flush`` may spend on MCP calls (M29; DESIGN §13 "ctx is never in the critical path"): no call
+starts once less than ``MIN_CALL_S`` is left, and each call's timeout is what is left of the budget. The janitor's
+flush before each job keeps to it too."""
+MIN_CALL_S = 1.0
+"""Hermes clamps an MCP timeout to at least one second (``PluginContext.call_mcp``)."""
 HEAD_TITLE = "Compaction checkpoint head {root}"
 """ctx_checkpoint's stable head title per root session (its README "Recall of a checkpoint")."""
 
@@ -209,12 +218,12 @@ def _rows_of(result: Any) -> list[dict]:
     return [r for r in result if isinstance(r, Mapping)] if isinstance(result, list) else []
 
 
-def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str) -> str | None:
+def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, timeout: float) -> str | None:
     if not root:
         return None
     title = HEAD_TITLE.format(root=root)
     try:
-        envelope = call_mcp(server, "search", {"query": title, "limit": 5}, SEARCH_TIMEOUT_S)
+        envelope = call_mcp(server, "search", {"query": title, "limit": 5}, timeout)
     except Exception:
         return None
     if not isinstance(envelope, Mapping) or envelope.get("ok") is not True:
@@ -225,12 +234,28 @@ def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str) -> s
     return None
 
 
-def flush(ledger, call_mcp: Callable[[str, str, dict, float], dict], server: str, category: str, now: float) -> int:
-    """Store every due outbox row in ctx; returns how many were stored. Never raises.
+def flush(
+    ledger,
+    call_mcp: Callable[[str, str, dict, float], dict],
+    server: str,
+    category: str,
+    now: float,
+    *,
+    budget_s: float = FLUSH_BUDGET_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
+    """Store due outbox rows in ctx within ``budget_s`` seconds; returns how many were stored. Never raises.
 
     A failed row is reported back with ``ok=False`` (the ledger backs it off); the first failure of a row is
-    logged at warning level, repeats at debug level.
+    logged at warning level, repeats at debug level. A row the budget does not reach (or whose ``store`` it does not
+    reach) stays due without a backoff (M29).
     """
+    deadline = clock() + max(0.0, float(budget_s))
+
+    def left(cap: float) -> float | None:
+        remaining = deadline - clock()
+        return min(cap, remaining) if remaining >= MIN_CALL_S else None
+
     try:
         rows = ledger.outbox_due(now, 20)
     except Exception:
@@ -239,11 +264,17 @@ def flush(ledger, call_mcp: Callable[[str, str, dict, float], dict], server: str
     stored = 0
     for row in rows:
         row_id = row.get("id") if isinstance(row, Mapping) else None
+        if left(SEARCH_TIMEOUT_S) is None:
+            break  # the budget is spent: this row and the rest stay due, untried
         try:
             payload = dict(row["payload"])
             metadata = dict(payload.get("metadata") or {})
             content = str(payload.get("content") or "")
-            head = _checkpoint_head(call_mcp, server, str(payload.get("source_root") or ""))
+            root = str(payload.get("source_root") or "")
+            head = _checkpoint_head(call_mcp, server, root, left(SEARCH_TIMEOUT_S) or MIN_CALL_S) if root else None
+            store_timeout = left(CALL_TIMEOUT_S)
+            if store_timeout is None:
+                break  # no time left for the store: the row stays due, untried
             if head:
                 metadata["checkpoint_head"] = head
                 content = _cap_utf8(content + f"\n- Checkpoint head: {head}", RECORD_MAX_BYTES)
@@ -258,7 +289,7 @@ def flush(ledger, call_mcp: Callable[[str, str, dict, float], dict], server: str
                     "metadata": metadata,
                     "sensitivity": "internal",
                 },
-                CALL_TIMEOUT_S,
+                store_timeout,
             )
             ok = isinstance(envelope, Mapping) and envelope.get("ok") is True and not envelope.get("error")
             if not ok:

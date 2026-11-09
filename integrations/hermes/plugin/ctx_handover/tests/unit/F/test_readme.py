@@ -20,7 +20,8 @@ SEC_7_5 = [
     "`push` lets it create sessions and workspace copies under `allow_roots`",
     "never in Hermes, credential, shell-startup, autostart, git or ssh configuration locations",
     # 3 — unredacted transcript and side files, unencrypted bundles
-    "transcripts, spillover and hook-output files go to the peer as they are",
+    # (review L22: every session file kind, terminal output and attached images included — test_rv_f_readme)
+    "transcripts, spillover, hook-output and terminal-output files and attached images go to the peer as they are",
     "Bundles contain the raw transcript and workspace unencrypted",
     # 4 — committed history incl. tracked secret files
     "committed history travels with a repository, including tracked secret files",
