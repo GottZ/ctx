@@ -416,9 +416,10 @@ const untrustedMarker = "[untrusted]"
 // so the answer cannot be citing them: they keep the response order behind the
 // cited ones and are marked instead of numbered.
 //
-// A response in which NO source carries an ordinal is a retrieval-only answer
-// (or a server from before V-W1). That list keeps position numbering and is
-// byte-identical to what this tool emitted before V-W1b.
+// A response in which NO source carries an ordinal comes from a server from
+// before V-W1 (a retrieval-only answer never reaches this function: the handler
+// renders it with renderMCPRetrievalOnly). That list keeps position numbering
+// and is byte-identical to what this tool emitted before V-W1b.
 func renderMCPQuerySources(sb *strings.Builder, sources []mcpQuerySource) {
 	if len(sources) == 0 {
 		return
